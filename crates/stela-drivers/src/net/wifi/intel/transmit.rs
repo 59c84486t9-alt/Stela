@@ -10,6 +10,8 @@ use super::{
     firmware::{Family, Firmware},
 };
 use alloc::vec::Vec;
+pub mod queue;
+pub mod response;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -287,7 +289,7 @@ mod tests {
         LegacyRate::Ofdm48,
         LegacyRate::Ofdm54,
     ];
-    fn firmware(rows: &[[u8; 4]]) -> Vec<u8> {
+    pub(super) fn firmware(rows: &[[u8; 4]]) -> Vec<u8> {
         let mut b = alloc::vec![0;88];
         b[4..8].copy_from_slice(&0x0a4c5749u32.to_le_bytes());
         if !rows.is_empty() {
@@ -297,7 +299,7 @@ mod tests {
         }
         b
     }
-    fn rows(family: Family) -> [[u8; 4]; 4] {
+    pub(super) fn rows(family: Family) -> [[u8; 4]; 4] {
         [
             [0x1c, 1, if family == Family::Ax200 { 9 } else { 10 }, 7],
             [0xf7, 5, 99, 3],

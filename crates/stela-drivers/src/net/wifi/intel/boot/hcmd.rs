@@ -245,6 +245,11 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
     /// Source supplies fresh exclusive pages under this epoch's retained real
     /// domain/coherency qualification. Only this polling owner can submit or
     /// reset, and the relevant firmware command's actual API was selected.
+    /// Caller establishes command-specific prerequisites and retains every
+    /// indirect DMA allocation/firmware object through its actual device
+    /// completion or stopped/drained teardown. This raw transport supplies no
+    /// station, queue, key or indirect-resource authority. A raw HCMD response
+    /// alone never ends ownership of a persistent indirect DMA allocation.
     pub unsafe fn submit_command(
         &mut self,
         id: Id,
