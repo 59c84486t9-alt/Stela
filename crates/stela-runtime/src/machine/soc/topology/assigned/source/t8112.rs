@@ -156,6 +156,9 @@ impl<'a> BspSource<'a> {
             &|address, bytes| io.translate_range(address, bytes),
         )?;
         super::super::super::super::power_resources::validate_power_graph(&graph)?;
+        // The canonical resolver also requires any original acc-harvesting
+        // property to be exactly one u32 equal to the declared setting zero.
+        // The retained dependency check above binds the prepared value to it.
         let associations = graph.processor_associations(
             profile.chip,
             &root,
@@ -327,6 +330,9 @@ mod tests {
         values.iter().flat_map(|v| v.to_le_bytes()).collect()
     }
     fn authored(prepared: bool) -> Vec<u8> {
+        authored_config(prepared, None)
+    }
+    fn authored_config(prepared: bool, harvesting: Option<&[u8]>) -> Vec<u8> {
         let mut cpus = Vec::new();
         let mut records = Vec::new();
         for pe in 0..8u32 {
@@ -383,18 +389,19 @@ mod tests {
         let mut perf = vec![0; 56];
         perf[2..4].copy_from_slice(&[1, 2]);
         perf[30..32].copy_from_slice(&[1, 5]);
-        let pmgr = encode(
-            vec![
-                ("name", b"pmgr\0".to_vec()),
-                ("compatible", b"pmgr1,t8112\0".to_vec()),
-                ("AAPL,phandle", words(&[0x74])),
-                ("reg", wide(&[0x3b700000, 0xcc000])),
-                ("ps-regs", groups),
-                ("perf-domains", perf),
-                ("devices", records.into_iter().flatten().collect()),
-            ],
-            &[],
-        );
+        let mut properties = vec![
+            ("name", b"pmgr\0".to_vec()),
+            ("compatible", b"pmgr1,t8112\0".to_vec()),
+            ("AAPL,phandle", words(&[0x74])),
+            ("reg", wide(&[0x3b700000, 0xcc000])),
+            ("ps-regs", groups),
+            ("perf-domains", perf),
+            ("devices", records.into_iter().flatten().collect()),
+        ];
+        if let Some(value) = harvesting {
+            properties.push(("acc-harvesting", value.to_vec()));
+        }
+        let pmgr = encode(properties, &[]);
         let aic = encode(
             vec![
                 ("name", b"aic\0".to_vec()),
@@ -548,6 +555,25 @@ mod tests {
         let mut wrong = identity(&original, 0x24);
         wrong.original_tree_sha256 = [0; 32];
         assert!(BspSource::t8112(&original, &prepared, wrong, 0x100, 0).is_err());
+    }
+
+    #[test]
+    fn equal_provider_settings_must_be_an_exact_u32_zero_even_with_declared_normal_mode() {
+        let zero = 0u32.to_le_bytes();
+        let original = authored_config(false, Some(&zero));
+        let prepared = authored_config(true, Some(&zero));
+        assert!(
+            BspSource::t8112(&original, &prepared, identity(&original, 0x24), 0x100, 0).is_ok()
+        );
+        for value in [1u32.to_le_bytes().to_vec(), vec![], vec![0], vec![0; 8]] {
+            let original = authored_config(false, Some(&value));
+            let prepared = authored_config(true, Some(&value));
+            assert!(
+                BspSource::t8112(&original, &prepared, identity(&original, 0x24), 0x100, 0)
+                    .is_err(),
+                "provider bytes {value:?}"
+            );
+        }
     }
     #[test]
     #[ignore = "requires unchanged original26A434 T8112 ADTs in STELA_TEST_CPU_DT_DIR"]
