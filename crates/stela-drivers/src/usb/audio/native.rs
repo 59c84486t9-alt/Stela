@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Native xHCI adapter. Each direction reserves a private ring arena. Old ring addresses are never recycled; exhaustion is explicit. PCM
-//! payload allocations can be reused after terminal completion/cancellation.
+//! Native xHCI adapter. Each direction reserves a monotonic private ring arena.
+//! Controller retains and reactivates the same owned rings only after acknowledged
+//! stop/dequeue/drop and event retirement. The class never resets its allocator.
 use super::{AudioDevice, Binding, Completion, Control, PacketStatus, Transport};
 use crate::{
     audio::Direction,
@@ -63,6 +64,11 @@ impl Control for Native {
 }
 impl Transport for Native {
     type Ticket = IsoTransfer;
+    fn preflight(&mut self, endpoints: &[Endpoint]) -> Result<(), BlockError> {
+        self.shared
+            .borrow_mut()
+            .preflight_endpoints(self.slot, endpoints)
+    }
     fn configure(&mut self, owner: Direction, endpoints: &[Endpoint]) -> Result<(), BlockError> {
         let shared = self.shared.clone();
         let slot = self.slot;
@@ -72,11 +78,12 @@ impl Transport for Native {
                 "USB audio endpoint owner already configured",
             ));
         }
-        // Record before command publication, including uncertain command failures.
+        // Keep one exclusive controller borrow from the authoritative recheck
+        // through publication. A refusal cannot stage a foreign cleanup owner.
+        let mut controller = shared.borrow_mut();
+        controller.preflight_endpoints(slot, endpoints)?;
         arena.endpoints.extend_from_slice(endpoints);
-        shared
-            .borrow_mut()
-            .configure(slot, endpoints, None, &mut arena.allocator)
+        controller.configure(slot, endpoints, None, &mut arena.allocator)
     }
     fn deconfigure(&mut self, owner: Direction, endpoints: &[Endpoint]) -> Result<(), BlockError> {
         let shared = self.shared.clone();
@@ -145,5 +152,48 @@ impl UsbAudio {
             super::Error::Transport(e) => e,
             _ => BlockError::Unsupported("USB audio allocation failed"),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usb::xhci;
+    #[test]
+    fn native_recheck_never_records_or_retires_foreign_pending_dma() {
+        for halted in [false, true] {
+            let mut memory = alloc::vec![0u64;256*1024];
+            let base = memory.as_mut_ptr() as u64;
+            // SAFETY: backing RAM is exclusive and outlives every model/owner.
+            let mut dma = unsafe { RegionAllocator::new(base..base + memory.len() as u64 * 8) };
+            let foreign = dma.allocate(512, 512).unwrap();
+            let shared = xhci::tests::controller_with_unresolved_td(
+                &mut dma,
+                foreign.physical(),
+                512,
+                5,
+                halted,
+            );
+            let mut native = Native {
+                shared: shared.clone(),
+                slot: 1,
+                playback: Arena::new(&mut dma).unwrap(),
+                capture: Arena::new(&mut dma).unwrap(),
+            };
+            let ep = Endpoint {
+                address: 0x82,
+                attributes: 1,
+                max_packet: 192,
+                interval: 4,
+                companion: None,
+            };
+            let before = memory.clone();
+            assert!(native.configure(Direction::Playback, &[ep]).is_err());
+            assert!(native.playback.endpoints.is_empty());
+            // Cleanup of an unstaged candidate is inert; the pre-existing TD
+            // cannot be cancelled, poisoned or dropped by the audio owner.
+            native.deconfigure(Direction::Playback, &[ep]).unwrap();
+            assert_eq!(memory, before);
+        }
     }
 }

@@ -180,6 +180,13 @@ pub struct Format {
     pub fill_max: bool,
 }
 impl Format {
+    pub(super) fn endpoints(&self) -> Vec<Endpoint> {
+        let mut endpoints = vec![self.data];
+        if let Sync::Explicit(feedback) = self.sync {
+            endpoints.push(feedback);
+        }
+        endpoints
+    }
     pub fn frame_bytes(&self) -> usize {
         usize::from(self.channels) * usize::from(self.subslot)
     }
@@ -654,6 +661,29 @@ impl Binding {
                 .any(|b| a.interface == b.interface && a.alternate == b.alternate)
             {
                 return Err(Error::Descriptor("duplicate audio alternate"));
+            }
+        }
+        // Other class owners cannot coordinate future alternate changes with
+        // this audio owner. Do not claim any of their descriptor-advertised DCIs.
+        // In-function AS alternates may reuse endpoints; actual simultaneous
+        // playback/capture plans are checked again at start.
+        for format in &formats {
+            let endpoints = format.endpoints();
+            if all
+                .iter()
+                .filter(|i| i.number != format.interface)
+                .any(|i| {
+                    let owned_stream = scope.contains(&u16::from(i.number))
+                        && (i.class, i.subclass, i.protocol) == (CLASS, STREAMING_SUBCLASS, UAC2);
+                    !owned_stream
+                        && i.endpoints
+                            .iter()
+                            .any(|ep| endpoints.iter().any(|ours| ours.dci() == ep.dci()))
+                })
+            {
+                return Err(Error::Descriptor(
+                    "audio alternate aliases a foreign interface endpoint",
+                ));
             }
         }
         Ok(Self {

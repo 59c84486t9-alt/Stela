@@ -98,6 +98,7 @@ struct Model {
     pending: BTreeMap<u64, (Endpoint, u64, usize)>,
     next: u64,
     output: Vec<u8>,
+    submitted: Vec<(u8, usize)>,
     alternates: Vec<(u8, u8)>,
     cancel_fail: bool,
     packet_fault: Option<PacketStatus>,
@@ -170,6 +171,12 @@ impl Control for Model {
 }
 impl Transport for Model {
     type Ticket = u64;
+    fn preflight(&mut self, eps: &[Endpoint]) -> Result<(), BlockError> {
+        if eps.iter().any(|e| self.active.contains(&e.address)) {
+            return Err(BlockError::Unsupported("foreign endpoint owner"));
+        }
+        Ok(())
+    }
     fn configure(&mut self, _: Direction, eps: &[Endpoint]) -> Result<(), BlockError> {
         for e in eps {
             assert!(!self.active.contains(&e.address));
@@ -191,6 +198,7 @@ impl Transport for Model {
         assert!(self.active.contains(&e.address));
         assert!(n <= 3072);
         assert_eq!(p & 4095, 0);
+        self.submitted.push((e.address, n));
         self.next += 1;
         self.pending.insert(self.next, (*e, p, n));
         Ok(self.next)
@@ -497,5 +505,111 @@ fn missing_capture_or_synchronous_output_completions_fail_and_cancel() {
             Err(Error::Packet("USB audio playback made no progress"))
         );
         assert!(a.transport.pending.is_empty());
+    });
+}
+
+#[test]
+fn foreign_endpoint_refusal_never_stages_cleanup_or_changes_alternate() {
+    run(|a| {
+        a.transport.active.push(1);
+        let before = a.transport.alternates.clone();
+        assert_eq!(
+            a.start_playback(0, 48000, &[0; 192], true),
+            Err(Error::Transport(BlockError::Unsupported(
+                "foreign endpoint owner"
+            )))
+        );
+        assert_eq!(a.transport.active, vec![1]);
+        assert_eq!(a.transport.alternates, before);
+        assert!(a.playback.is_none());
+        assert!(a.output.endpoint.is_none());
+    });
+}
+#[test]
+fn explicit_feedback_cannot_alias_active_capture_in_either_start_order() {
+    run(|a| {
+        let mut fb = a.binding.formats[1].data;
+        fb.attributes = 0x11;
+        fb.max_packet = 4;
+        a.binding.formats[0].sync = Sync::Explicit(fb);
+        a.start_capture(1, 48000).unwrap();
+        assert_eq!(
+            a.start_playback(0, 48000, &[0; 192], true),
+            Err(Error::Busy)
+        );
+        assert!(a.capture.is_some());
+        a.stop_capture().unwrap();
+        a.start_playback(0, 48000, &[0; 192], true).unwrap();
+        assert_eq!(a.start_capture(1, 48000), Err(Error::Busy));
+        assert!(a.playback.is_some());
+        a.stop_playback().unwrap();
+    });
+}
+#[test]
+fn descriptor_audio_alternate_cannot_claim_foreign_class_dci() {
+    let mut c = configuration();
+    c[4] = 4;
+    c.extend_from_slice(&[9, 4, 3, 0, 1, 3, 1, 1, 0, 7, 5, 1, 3, 8, 0, 1]);
+    let n = c.len() as u16;
+    c[2..4].copy_from_slice(&n.to_le_bytes());
+    let all = interfaces(&c);
+    assert_eq!(
+        Binding::parse(&all[0], &all, &c, 3),
+        Err(Error::Descriptor(
+            "audio alternate aliases a foreign interface endpoint"
+        ))
+    );
+}
+
+#[test]
+fn max_packets_only_refuses_short_finite_tail_until_producer_completes_packet() {
+    run(|a| {
+        a.binding.formats[0].fill_max = true;
+        assert_eq!(
+            a.start_playback(0, 48000, &[1; 24], true),
+            Err(Error::Format)
+        );
+        assert!(a.transport.active.is_empty());
+        assert!(a.transport.alternates.is_empty());
+        let pcm = vec![1; 6168];
+        a.start_playback(0, 48000, &pcm, false).unwrap();
+        assert_eq!(a.finish_playback(), Err(Error::Format));
+        assert!(!a.playback.as_ref().unwrap().finite);
+        a.write_playback(&[2; 168]).unwrap();
+        a.finish_playback().unwrap();
+        for _ in 0..3 {
+            a.poll().unwrap();
+        }
+        assert!(a.progress().playback_drained);
+        let mut expected = pcm;
+        expected.extend_from_slice(&[2; 168]);
+        assert_eq!(a.transport.output, expected);
+        assert_eq!(a.transport.output.len() % 192, 0);
+    });
+}
+
+#[test]
+fn fractional_low_rate_preserves_zero_length_service_intervals() {
+    run(|a| {
+        a.binding.formats[0].service_microframes = 1;
+        a.binding.formats[0].data.interval = 1;
+        let mut range = vec![1, 0];
+        range.extend_from_slice(&4000u32.to_le_bytes());
+        range.extend_from_slice(&4000u32.to_le_bytes());
+        range.extend_from_slice(&0u32.to_le_bytes());
+        a.transport
+            .overrides
+            .insert(setup(0xa1, 2, 0x100, 0xa00, 2), vec![1, 0]);
+        a.transport
+            .overrides
+            .insert(setup(0xa1, 2, 0x100, 0xa00, 14), range);
+        let pcm = [1, 2, 3, 4, 5, 6, 7, 8];
+        a.start_playback(0, 4000, &pcm, true).unwrap();
+        assert_eq!(a.transport.submitted, vec![(1, 0), (1, 4), (1, 0), (1, 4)]);
+        assert_eq!(a.progress().queued_playback, 4);
+        a.poll().unwrap();
+        assert!(a.progress().playback_drained);
+        assert_eq!(a.progress().playback_frames, 2);
+        assert_eq!(a.transport.output, pcm);
     });
 }

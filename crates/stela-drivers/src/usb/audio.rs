@@ -72,6 +72,9 @@ pub struct Completion {
 /// before returning success. Implementations retain all DMA on any uncertainty.
 pub trait Transport: Control {
     type Ticket;
+    /// Observe that every proposed DCI is unowned, before SET_INTERFACE or any
+    /// cleanup plan is staged. Callers serialize this observation with mutation.
+    fn preflight(&mut self, endpoints: &[Endpoint]) -> Result<(), BlockError>;
     fn configure(&mut self, owner: Direction, endpoints: &[Endpoint]) -> Result<(), BlockError>;
     fn deconfigure(&mut self, owner: Direction, endpoints: &[Endpoint]) -> Result<(), BlockError>;
     fn submit(

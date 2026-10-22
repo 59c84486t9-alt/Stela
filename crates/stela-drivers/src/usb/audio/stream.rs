@@ -191,8 +191,13 @@ impl<T: Transport> AudioDevice<T> {
             return Err(Error::Format);
         }
         let packetizer = Packetizer::new(&format, rate)?;
+        if finite && format.fill_max && !pcm.len().is_multiple_of(format.max_bytes) {
+            return Err(Error::Format);
+        }
+        let endpoints = format.endpoints();
         if self.capture.as_ref().is_some_and(|c| {
-            c.format.interface == format.interface || c.format.data.dci() == format.data.dci()
+            c.format.interface == format.interface
+                || endpoints.iter().any(|ep| ep.dci() == c.format.data.dci())
         }) {
             return Err(Error::Busy);
         }
@@ -207,6 +212,29 @@ impl<T: Transport> AudioDevice<T> {
         {
             return Err(Error::Busy);
         }
+        if let Sync::Implicit {
+            interface,
+            alternate,
+            ..
+        } = format.sync
+        {
+            let source = self
+                .binding
+                .formats
+                .iter()
+                .find(|f| {
+                    f.interface == interface
+                        && f.alternate == alternate
+                        && f.direction == Direction::Capture
+                })
+                .ok_or(Error::Descriptor(
+                    "implicit feedback source format is missing",
+                ))?;
+            if endpoints.iter().any(|ep| ep.dci() == source.data.dci()) {
+                return Err(Error::Busy);
+            }
+        }
+        self.transport.preflight(&endpoints)?;
         let clock = self.clock(&format, rate)?;
         let result = (|| {
             if let Sync::Implicit {
@@ -228,10 +256,6 @@ impl<T: Transport> AudioDevice<T> {
                         "implicit feedback source format is missing",
                     ))?;
                 self.start_capture_inner(capture_index, rate, false, true)?;
-            }
-            let mut endpoints = vec![format.data];
-            if let Sync::Explicit(endpoint) = format.sync {
-                endpoints.push(endpoint);
             }
             self.output.endpoint = Some(format.data);
             if let Sync::Explicit(endpoint) = format.sync {
@@ -280,7 +304,11 @@ impl<T: Transport> AudioDevice<T> {
     }
     pub fn finish_playback(&mut self) -> Result<(), Error> {
         self.ready()?;
-        self.playback.as_mut().ok_or(Error::NotRunning)?.finite = true;
+        let p = self.playback.as_mut().ok_or(Error::NotRunning)?;
+        if p.format.fill_max && !self.output_pcm.len().is_multiple_of(p.format.max_bytes) {
+            return Err(Error::Format);
+        }
+        p.finite = true;
         Ok(())
     }
     pub fn start_capture(&mut self, index: usize, rate: u32) -> Result<(), Error> {
@@ -320,10 +348,15 @@ impl<T: Transport> AudioDevice<T> {
             return Ok(());
         }
         if self.playback.as_ref().is_some_and(|p| {
-            p.format.interface == format.interface || p.format.data.dci() == format.data.dci()
+            p.format.interface == format.interface
+                || p.format
+                    .endpoints()
+                    .iter()
+                    .any(|ep| ep.dci() == format.data.dci())
         }) {
             return Err(Error::Busy);
         }
+        self.transport.preflight(&[format.data])?;
         let clock = self.clock(&format, rate)?;
         self.input.endpoint = Some(format.data);
         self.capture = Some(Capture {
@@ -453,13 +486,11 @@ impl<T: Transport> AudioDevice<T> {
             } else {
                 bytes
             };
-            if bytes == 0 {
-                if p.finite {
-                    break;
-                } else {
-                    continue;
-                }
+            if bytes == 0 && p.finite && self.output_pcm.is_empty() {
+                break;
             }
+            // A fractional zero-frame interval still consumes USB service time.
+            // Submit its actual ZLP TD rather than compressing sample cadence.
             for b in &mut packet.buffer.bytes_mut()[..bytes] {
                 *b = self.output_pcm.pop_front().unwrap();
             }
@@ -556,9 +587,7 @@ impl<T: Transport> AudioDevice<T> {
                 packet.ticket = None;
                 self.output.order.pop_front();
                 self.progress.playback_frames += (bytes / p.format.frame_bytes()) as u64;
-                if bytes > 0 {
-                    p.last_progress = self.transport.now_us();
-                }
+                p.last_progress = self.transport.now_us();
             }
             if matches!(p.format.sync, Sync::Explicit(_) | Sync::Implicit { .. })
                 && self.transport.now_us().saturating_sub(p.last_feedback) > FEEDBACK_TIMEOUT_US
