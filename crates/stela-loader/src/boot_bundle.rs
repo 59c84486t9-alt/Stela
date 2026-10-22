@@ -85,7 +85,9 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// template overlays, keep its dies' CPUs and size its lock maps by it.
 /// Revision 21: publish `/arm-io` `die-count` on every SoC whose iBoot
 /// writes it, with that iBoot's value.
-pub const REVISION: u32 = 21;
+/// Revision 22: truncate oversized syscfg fill-in values to the recipe's
+/// requested length, as iBoot does, while zero-padding shorter values.
+pub const REVISION: u32 = 22;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -745,11 +747,8 @@ fn alternative_value(
         };
         let mut value = value.clone();
         if let Some(size) = size {
-            ensure!(
-                value.len() <= size,
-                "syscfg {key} is {} bytes; {recipe} allows {size}",
-                value.len()
-            );
+            // iBoot's syscfg resolver copies min(source bytes, recipe size)
+            // and zero-fills the remainder (26A434 J473 0xd6a10..0xd6a54).
             value.resize(size, 0);
         }
         return Ok(Some(value));
@@ -2378,6 +2377,24 @@ mod tests {
         // No keybag provider is modelled: the source yields nothing.
         assert_eq!(value("syscfg-mismatch/ARXN")?, None);
         assert_eq!(value("syscfg/ARXN")?, Some(vec![9; 2]));
+        Ok(())
+    }
+
+    #[test]
+    fn syscfg_recipe_lengths_truncate_pad_and_preserve_the_source() -> Result<()> {
+        let options = Options {
+            syscfg: BTreeMap::from([("Test".to_owned(), vec![1, 2, 3, 4])]),
+            ..Options::default()
+        };
+        let value = |recipe: &str| alternative_value(recipe, recipe, &options);
+        assert_eq!(value("syscfg/Test")?, Some(vec![1, 2, 3, 4]));
+        assert_eq!(value("syscfg/Test/0x2")?, Some(vec![1, 2]));
+        assert_eq!(value("syscfg/Test/4")?, Some(vec![1, 2, 3, 4]));
+        assert_eq!(value("syscfg/Test/0x6")?, Some(vec![1, 2, 3, 4, 0, 0]));
+        assert_eq!(value("syscfg/Test/0")?, Some(vec![]));
+        assert_eq!(value("syscfg/None/0x2")?, None);
+        assert!(value("syscfg/Test/no-size").is_err());
+        assert_eq!(options.syscfg["Test"], [1, 2, 3, 4]);
         Ok(())
     }
 
