@@ -16,7 +16,7 @@
 //!
 //! ECM moves one frame per bulk transfer: each received frame is one bulk
 //! IN transfer ended by a short packet (3.3.1); each sent frame is one bulk
-//! OUT transfer. NCM moves transfer blocks ([`ntb`]): while the data
+//! OUT transfer. NCM moves transfer blocks (`ntb`): while the data
 //! interface is still at alternate setting 0, attach reads the function's
 //! NTB parameters (GetNtbParameters), selects CRC-off and NTB16 when those
 //! controls are supported, and caps its IN blocks at

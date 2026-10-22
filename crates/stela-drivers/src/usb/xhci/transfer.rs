@@ -254,7 +254,7 @@ impl Controller {
     }
 
     /// The completion of the TD at `trb` once it has one: the bytes moved,
-    /// or the failure. A STALL leaves the endpoint halted for [`clear`].
+    /// or the failure. A STALL leaves the endpoint halted for [`Self::clear`].
     pub fn completed(
         &mut self,
         slot: u8,

@@ -2,7 +2,7 @@
 //! peripheral's inputs.
 //!
 //! Every HID interface runs the report protocol, read through its report
-//! descriptor ([`report`]), and may carry a keyboard report, a pointer
+//! descriptor (`report`), and may carry a keyboard report, a pointer
 //! report or both, told apart by report ID. A boot keyboard (subclass 1,
 //! protocol 1) whose descriptor describes no keyboard runs the boot
 //! protocol, read as the boot report (Appendix B.1): a device that keeps
