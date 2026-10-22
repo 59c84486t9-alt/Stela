@@ -12,6 +12,42 @@ pub fn require_sources() {
     );
 }
 
+/// Stela's Linux environment for unchanged Linux sources: Kbuild's definition
+/// and forced includes, and system include directories so upstream code keeps
+/// Linux's warning profile rather than Stela's. `compat/overlay.yaml` puts each
+/// shadow in place of the upstream header it replaces, however a source names
+/// it. `generated` holds headers Linux's build generates, `drivers` the
+/// upstream driver directories, and `compat/` comes last for the asm/ and
+/// generated/ headers that Linux's arch tree and build supply.
+#[cfg(any(feature = "intel-port", feature = "amd-port"))]
+pub fn linux_environment(build: &mut cc::Build, generated: &std::path::Path, drivers: &[&str]) {
+    let gpu = "src/gpu";
+    let linux = format!("{gpu}/common/linux/include");
+    build
+        .flag("-ivfsoverlay")
+        .flag(format!("{gpu}/compat/overlay.yaml"))
+        .define("__KERNEL__", None)
+        .flag("-include")
+        .flag(format!("{linux}/linux/kconfig.h"))
+        .flag("-include")
+        .flag(format!("{linux}/linux/compiler_types.h"))
+        .flag("-isystem")
+        .flag(generated);
+    let directories = drivers.iter().map(|driver| format!("{gpu}/{driver}"));
+    for directory in directories.chain([
+        linux.clone(),
+        format!("{linux}/uapi"),
+        format!("{gpu}/compat"),
+    ]) {
+        build.flag("-isystem").flag(directory);
+    }
+    // The overlay hides shadows from dependency tracking, so the whole
+    // environment and the upstream trees it builds from are inputs.
+    for path in [format!("{gpu}/compat"), linux] {
+        println!("cargo:rerun-if-changed={path}");
+    }
+}
+
 pub fn configure() -> cc::Build {
     require_sources();
     assert_eq!(

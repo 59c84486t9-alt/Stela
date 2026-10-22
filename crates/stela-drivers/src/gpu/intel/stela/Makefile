@@ -7,19 +7,20 @@ CC := clang
 HOST_CC := clang
 AR ?= llvm-ar
 
-# Unchanged Linux sources build in Stela's Linux environment, with Kbuild's
-# definition and forced includes, from system directories so upstream code
-# keeps Linux's warning profile rather than Stela's. compat/overlay.yaml puts
-# each shadow in place of the upstream header it replaces, however a source
-# names it. compat/ itself comes last and only adds the asm/ and generated/
-# headers that Linux's arch tree and build supply.
+# Unchanged Linux sources build in Stela's shared Linux environment, with
+# Kbuild's definition and forced includes, from system directories so upstream
+# code keeps Linux's warning profile rather than Stela's. ../../compat's
+# overlay.yaml puts each shadow in place of the upstream header it replaces,
+# however a source names it. compat/ itself comes last and only adds the asm/
+# and generated/ headers that Linux's arch tree and build supply.
 LINUX := $(abspath $(SOURCE)/../../common/linux/include)
+COMPAT := $(abspath $(SOURCE)/../../compat)
 GENERATED := $(BUILD)/generated-include
-LINUX_INCLUDES := -ivfsoverlay $(SOURCE)/compat/overlay.yaml -D__KERNEL__ \
+LINUX_INCLUDES := -ivfsoverlay $(COMPAT)/overlay.yaml -D__KERNEL__ \
                   -include $(LINUX)/linux/kconfig.h -include $(LINUX)/linux/compiler_types.h \
                   -isystem $(GENERATED) -isystem $(SOURCE)/../xe -isystem $(SOURCE)/../i915 \
-                  -isystem $(LINUX) -isystem $(LINUX)/uapi -isystem $(SOURCE)/compat
-COMPAT_HEADERS := $(SOURCE)/compat/overlay.yaml $(shell find $(SOURCE)/compat -name '*.h')
+                  -isystem $(LINUX) -isystem $(LINUX)/uapi -isystem $(COMPAT)
+COMPAT_HEADERS := $(COMPAT)/overlay.yaml $(shell find $(COMPAT) -name '*.h')
 CFLAGS := --target=$(TARGET) $(LINUX_INCLUDES) -std=gnu11 -O2 \
           -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only \
           -Wall -Wextra -Werror -Wconversion -Wsign-conversion

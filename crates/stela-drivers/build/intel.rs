@@ -5,34 +5,12 @@ pub fn configure(build: &mut cc::Build) {
     use std::{env, path::PathBuf};
 
     let source = "src/gpu/intel";
-    let linux = "src/gpu/common/linux/include";
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
-    // Unchanged Linux sources build in Stela's Linux environment, with Kbuild's
-    // definition and forced includes, from system directories so upstream code
-    // keeps Linux's warning profile rather than Stela's. compat/overlay.yaml
-    // puts each shadow in place of the upstream header it replaces, however a
-    // source names it. compat/ itself comes last and only adds the asm/ and
-    // generated/ headers that Linux's arch tree and build supply.
-    let overlay = format!("{source}/stela/compat/overlay.yaml");
-    build
-        .flag("-ivfsoverlay")
-        .flag(&overlay)
-        .define("__KERNEL__", None)
-        .flag("-include")
-        .flag(format!("{linux}/linux/kconfig.h"))
-        .flag("-include")
-        .flag(format!("{linux}/linux/compiler_types.h"))
-        .flag("-isystem")
-        .flag(output.join("intel-generated"));
-    for directory in [
-        format!("{source}/xe"),
-        format!("{source}/i915"),
-        linux.into(),
-        format!("{linux}/uapi"),
-        format!("{source}/stela/compat"),
-    ] {
-        build.flag("-isystem").flag(directory);
-    }
+    super::native::linux_environment(
+        build,
+        &output.join("intel-generated"),
+        &["intel/xe", "intel/i915"],
+    );
     build
         .file(format!("{source}/stela/pt_walk.c"))
         .file(format!("{source}/stela/commands.c"))
@@ -44,9 +22,7 @@ pub fn configure(build: &mut cc::Build) {
         .file(format!("{source}/stela/ggtt_probe.c"))
         .file(format!("{source}/stela/pat.c"))
         .file(format!("{source}/stela/i915_commands.c"));
-    // The overlay hides shadows from dependency tracking, so the whole Linux
-    // environment and the upstream trees it builds from are inputs.
-    for path in ["stela", "xe", "i915/gt", "../common/linux/include"] {
+    for path in ["stela", "xe", "i915/gt"] {
         println!("cargo:rerun-if-changed={source}/{path}");
     }
     println!("cargo:rerun-if-env-changed=STELA_GPU_PYTHON");

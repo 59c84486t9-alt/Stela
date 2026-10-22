@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef STELA_INTEL_UNSUPPORTED_H
-#define STELA_INTEL_UNSUPPORTED_H
+#ifndef STELA_UNSUPPORTED_H
+#define STELA_UNSUPPORTED_H
 
 /* Define a service that an unchanged Linux source references but Stela does
  * not provide yet. Reaching it stops at a trap instead of continuing with an
