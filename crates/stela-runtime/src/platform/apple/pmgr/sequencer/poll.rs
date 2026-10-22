@@ -5,7 +5,7 @@
 //! timeout scale, other condition, hardware trigger or end retirement is
 //! inferred. A nonmatching actual read retains the packet PC. Read effects can
 //! be partial too: an uncertain route result quarantines all future claims.
-use super::{Error, InFlight, PacketCursor, Sram};
+use super::{Error, FlightKind, InFlight, PacketCursor, Sram};
 use crate::platform::apple::bus::Width;
 use alloc::rc::Rc;
 
@@ -99,7 +99,7 @@ impl PacketCursor {
         self.in_flight = Some(InFlight {
             ticket,
             dispatched: false,
-            read: true,
+            kind: FlightKind::Poll,
         });
         Ok(ReadClaim {
             owner: self.owner.clone(),
@@ -112,10 +112,9 @@ impl PacketCursor {
             return Err(Error::UncertainEffects);
         }
         if Rc::ptr_eq(&self.owner, &claim.owner)
-            && self
-                .in_flight
-                .as_ref()
-                .is_some_and(|flight| flight.read && flight.ticket == claim.ticket)
+            && self.in_flight.as_ref().is_some_and(|flight| {
+                flight.kind == FlightKind::Poll && flight.ticket == claim.ticket
+            })
         {
             Ok(())
         } else {

@@ -5,7 +5,7 @@
 //! There is no supplied arbitrary PC, completion setter or end-retirement API.
 use super::{Controller, Error};
 use crate::platform::apple::pmgr::sequencer::{
-    self, AddressFormat, PacketCursor, PhysicalWrite, RouteOutcome, WriteClaim, delay, poll,
+    self, AddressFormat, PacketCursor, PhysicalWrite, RouteOutcome, WriteClaim, copy, delay, poll,
 };
 use alloc::{rc::Rc, vec};
 use core::cell::RefCell;
@@ -229,5 +229,57 @@ impl Effects {
         outcome: poll::Outcome<E>,
     ) -> Result<bool, poll::FinishError<E>> {
         self.cursor.borrow_mut().finish_read(claim, outcome)
+    }
+    pub fn pending_copy(&self) -> Option<copy::Snapshot> {
+        self.cursor.borrow().pending_copy()
+    }
+    pub fn last_copy(&self) -> Option<copy::Completed> {
+        self.cursor.borrow().last_copy()
+    }
+    pub fn begin_copy_read(&mut self) -> Result<copy::ReadClaim, sequencer::Error> {
+        self.refresh_pause()?;
+        self.cursor.borrow_mut().begin_copy_read()
+    }
+    pub fn dispatch_copy_read(
+        &mut self,
+        claim: &copy::ReadClaim,
+    ) -> Result<copy::PhysicalRead, sequencer::Error> {
+        self.refresh_pause()?;
+        self.cursor.borrow_mut().dispatch_copy_read(claim)
+    }
+    pub fn cancel_copy_read(&mut self, claim: &copy::ReadClaim) -> Result<(), sequencer::Error> {
+        self.cursor.borrow_mut().cancel_copy_read(claim)
+    }
+    pub fn finish_copy_read<E>(
+        &mut self,
+        claim: &copy::ReadClaim,
+        outcome: copy::ReadOutcome<E>,
+    ) -> Result<(), copy::ReadFinishError<E>> {
+        self.cursor.borrow_mut().finish_copy_read(claim, outcome)
+    }
+    pub fn begin_copy_write(&mut self) -> Result<copy::WriteClaim, sequencer::Error> {
+        self.refresh_pause()?;
+        self.cursor.borrow_mut().begin_copy_write()
+    }
+    pub fn dispatch_copy_write(
+        &mut self,
+        claim: &copy::WriteClaim,
+    ) -> Result<copy::PhysicalWrite, sequencer::Error> {
+        self.refresh_pause()?;
+        self.cursor.borrow_mut().dispatch_copy_write(claim)
+    }
+    pub fn cancel_copy_write(&mut self, claim: &copy::WriteClaim) -> Result<(), sequencer::Error> {
+        self.cursor.borrow_mut().cancel_copy_write(claim)
+    }
+    pub fn finish_copy_write<E>(
+        &mut self,
+        claim: &copy::WriteClaim,
+        outcome: RouteOutcome<E>,
+    ) -> Result<(), sequencer::FinishError<E>> {
+        self.cursor.borrow_mut().finish_copy_write(claim, outcome)
+    }
+    pub(super) fn advance_copy_join(&mut self) -> Result<copy::Completed, sequencer::Error> {
+        self.refresh_pause()?;
+        self.cursor.borrow_mut().advance_copy_join()
     }
 }

@@ -114,6 +114,10 @@ pub struct Active {
     pub uncertain_read: Option<sequencer::poll::PhysicalRead>,
     pub pending_poll: Option<sequencer::poll::Poll>,
     pub pending_delay: Option<u32>,
+    pub pending_copy: Option<sequencer::copy::Snapshot>,
+    pub last_copy: Option<sequencer::copy::Completed>,
+    pub uncertain_copy_read: Option<sequencer::copy::PhysicalRead>,
+    pub uncertain_copy_write: Option<sequencer::copy::Transfer>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Progress {
@@ -311,6 +315,10 @@ impl State {
                     uncertain_read: cursor.uncertain_read(),
                     pending_poll: cursor.pending_poll(),
                     pending_delay: cursor.pending_delay(),
+                    pending_copy: cursor.pending_copy(),
+                    last_copy: cursor.last_copy(),
+                    uncertain_copy_read: cursor.uncertain_copy_read(),
+                    uncertain_copy_write: cursor.uncertain_copy_write(),
                 }
             }),
         }
@@ -403,6 +411,16 @@ impl Engine {
             .map_err(NativeError::Cursor)?;
         let kind = self.effects.packet_kind();
         match kind {
+            Ok(PacketKind::CopyJoin) => {
+                self.effects
+                    .advance_copy_join()
+                    .map_err(NativeError::Cursor)?;
+                match self.effects.packet_kind() {
+                    Ok(packet) => Ok(Progress::Packet(packet)),
+                    Err(sequencer::Error::UnqualifiedRetirement) => self.retire(now),
+                    Err(error) => Err(NativeError::Cursor(error)),
+                }
+            }
             Ok(PacketKind::Delay) => {
                 let progress = self.effects.advance_delay(now)?;
                 if !progress.complete {
@@ -470,7 +488,7 @@ mod tests {
         interrupt::InterruptLatch,
         pmgr::{
             install::{Action, NativeImage, Outcome, t6000},
-            sequencer::{FinishError, poll},
+            sequencer::{FinishError, copy, poll},
         },
         power::t6000::{Instance, Observation, clock},
     };
@@ -504,6 +522,13 @@ mod tests {
         ]
     }
     fn fixture(replace: Option<Vec<u32>>, activate: bool) -> (Controller, Bus, DeviceId) {
+        fixture_with_data(replace, activate, None)
+    }
+    fn fixture_with_data(
+        replace: Option<Vec<u32>>,
+        activate: bool,
+        data: Option<(u64, &[u8])>,
+    ) -> (Controller, Bus, DeviceId) {
         let instance = Instance {
             complexes: 1,
             cio_ports: 15,
@@ -591,6 +616,15 @@ mod tests {
                 format: AddressFormat::HighWord,
             })
             .collect();
+        if let Some((address, bytes)) = data {
+            // Actual explicit initialization, before the shared native image is
+            // frozen for execution. No uninitialized source bytes are supplied.
+            owner
+                .native_memory()
+                .unwrap()
+                .write_checked(address, bytes)
+                .unwrap();
+        }
         owner.bind_cio_engine(programs).unwrap();
         let input = clock::Register::ALL
             .into_iter()
@@ -711,6 +745,116 @@ mod tests {
             assert_ne!(next.serial, done.serial);
             assert!(pins.take_aic_inputs().is_empty());
         }
+    }
+
+    #[test]
+    fn actual_canonical_source_copy_retains_bytes_across_pause_and_destination_refusal() {
+        const SOURCE: u64 = t6000::SRAM_BASE + 0x60000;
+        const DESTINATION: u64 = 0x1301000000;
+        let bytes: Vec<u8> = (0..128).map(|n| (n ^ 0x59) as u8).collect();
+        let words = vec![
+            (127 << 6) | 8,
+            ((SOURCE >> 36) as u32 & 63) | (((DESTINATION >> 36) as u32 & 63) << 16),
+            (SOURCE >> 4) as u32 & 0xfffffff8,
+            (DESTINATION >> 4) as u32 & 0xfffffff8,
+            0xfffffff8, // source's complete pending-copy join
+            0x28e09a01,
+            0,
+            0xd,
+            1 << 16, // actual controller action
+            0,
+        ];
+        let (owner, mut bus, requests) =
+            fixture_with_data(Some(words), true, Some((SOURCE, &bytes)));
+        let mut pins = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut pins);
+        bus.write(CIO_ADDRESS, Width::Word, 1, &mut access).unwrap();
+        let mut engine = owner.cio_engine().unwrap();
+        assert_eq!(engine.advance(0), Ok(Progress::Packet(PacketKind::Copy)));
+        let read = engine.begin_copy_read().unwrap();
+        let physical = engine.dispatch_copy_read(&read).unwrap();
+        assert_eq!(
+            physical,
+            copy::PhysicalRead {
+                address: SOURCE,
+                bytes: 128
+            }
+        );
+        let mut actual = vec![0; physical.bytes as usize];
+        owner
+            .native_memory()
+            .unwrap()
+            .read_checked(physical.address, &mut actual)
+            .unwrap();
+        engine
+            .finish_copy_read::<()>(&read, copy::ReadOutcome::Read(actual))
+            .unwrap();
+        assert_eq!(engine.committed_reads(), 1);
+        let write = engine.begin_copy_write().unwrap();
+        assert_eq!(engine.dispatch_copy_write(&write).unwrap().bytes(), bytes);
+        // Positive checked destination preflight: no target was touched.
+        assert_eq!(
+            engine.finish_copy_write(
+                &write,
+                RouteOutcome::NoEffect("destination reservation unavailable")
+            ),
+            Err(FinishError::NoEffect("destination reservation unavailable"))
+        );
+        drop(engine);
+        let snapshot = owner
+            .native_observations()
+            .unwrap()
+            .cio_engine
+            .unwrap()
+            .active
+            .unwrap();
+        assert_eq!(snapshot.pending_copy.unwrap().phase, copy::Phase::Write);
+        assert_eq!(snapshot.committed_reads, 1);
+        let mut engine = owner.cio_engine().unwrap();
+        let write = engine.begin_copy_write().unwrap();
+        let view = bus
+            .device_mut::<super::super::super::View>(requests)
+            .unwrap();
+        let paused = LifecycleState {
+            quiesced: true,
+            ..LIVE
+        };
+        view.check_lifecycle(paused).unwrap();
+        view.set_lifecycle(paused, &mut access);
+        assert_eq!(
+            engine.dispatch_copy_write(&write),
+            Err(sequencer::Error::Suspended)
+        );
+        bus.device_mut::<super::super::super::View>(requests)
+            .unwrap()
+            .set_lifecycle(LIVE, &mut access);
+        let actual = engine.dispatch_copy_write(&write).unwrap();
+        assert_eq!(actual.address, DESTINATION);
+        // A real declared destination reservation, distinct from the canonical
+        // immutable native code/source SRAM. Commit follows its actual store.
+        let mut destination = vec![0; 128];
+        destination.copy_from_slice(actual.bytes());
+        engine
+            .finish_copy_write::<()>(&write, RouteOutcome::Committed)
+            .unwrap();
+        assert_eq!(destination, bytes);
+        assert_eq!(engine.committed_reads(), 1);
+        assert_eq!(engine.committed_writes(), 1);
+        assert_eq!(engine.pending_copy().unwrap().phase, copy::Phase::Join);
+        assert!(owner.cio_completions().unwrap().is_empty());
+        assert_eq!(bus.read(CIO_ADDRESS, Width::Word, &mut access), Ok(0x10001));
+        assert_eq!(engine.advance(0), Ok(Progress::Packet(PacketKind::Write)));
+        assert!(engine.pending_copy().is_none());
+        assert_eq!(
+            engine.last_copy().unwrap().transfer.destination,
+            DESTINATION
+        );
+        route_write(&mut engine, &mut bus, &mut access);
+        let Progress::Retired(done) = engine.advance(0).unwrap() else {
+            panic!("actual end");
+        };
+        assert_eq!((done.committed_reads, done.committed_writes), (1, 2));
+        assert_eq!(bus.read(CIO_ADDRESS, Width::Word, &mut access), Ok(0));
     }
 
     #[test]

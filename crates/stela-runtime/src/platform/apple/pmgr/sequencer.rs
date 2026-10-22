@@ -14,6 +14,7 @@
 use crate::platform::apple::bus::Width;
 use alloc::{rc::Rc, vec::Vec};
 
+pub mod copy;
 pub mod delay;
 pub mod poll;
 
@@ -42,6 +43,8 @@ pub enum PacketKind {
     Write,
     Poll,
     Delay,
+    Copy,
+    CopyJoin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +78,13 @@ pub enum Error {
     DelayEncoding,
     RegressedCycles,
     UnqualifiedClockPhase,
+    ExpectedCopyRead,
+    ExpectedCopyWrite,
+    ExpectedCopyJoin,
+    CopyEncoding,
+    CopyAlignment,
+    CopyOverlap,
+    UnqualifiedCopyJoin(u32),
 }
 
 /// One physical store, without a claim that its target accepts that access.
@@ -118,10 +128,17 @@ pub enum FinishError<E> {
     Uncertain(E),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlightKind {
+    Write,
+    Poll,
+    CopyRead,
+    CopyWrite,
+}
 struct InFlight {
     ticket: u64,
     dispatched: bool,
-    read: bool,
+    kind: FlightKind,
 }
 
 struct Sram {
@@ -151,9 +168,13 @@ pub struct PacketCursor {
     packet: Option<Packet>,
     poll: Option<poll::Packet>,
     delay: Option<delay::Packet>,
+    copy: Option<copy::Packet>,
+    last_copy: Option<copy::Completed>,
     in_flight: Option<InFlight>,
     uncertain: Option<PhysicalWrite>,
     uncertain_read: Option<poll::PhysicalRead>,
+    uncertain_copy_read: Option<copy::PhysicalRead>,
+    uncertain_copy_write: Option<copy::Transfer>,
     ticket: u64,
     committed_writes: u64,
     committed_reads: u64,
@@ -214,6 +235,10 @@ impl PacketCursor {
             Ok(PacketKind::Poll)
         } else if header & 0x3f == 4 {
             Ok(PacketKind::Delay)
+        } else if header & 0x3f == 8 {
+            Ok(PacketKind::Copy)
+        } else if header & 0x3f == 0x38 {
+            Ok(PacketKind::CopyJoin)
         } else {
             Err(Error::UnqualifiedInstruction(header))
         }
@@ -251,6 +276,7 @@ impl PacketCursor {
         if self.packet.is_some()
             || self.poll.is_some()
             || self.delay.is_some()
+            || self.copy.is_some()
             || self.pc != counted_words as usize
             || sram.words.len() != self.pc + 1
             || sram.words[self.pc] != 0
@@ -309,7 +335,7 @@ impl PacketCursor {
         self.in_flight = Some(InFlight {
             ticket,
             dispatched: false,
-            read: false,
+            kind: FlightKind::Write,
         });
         let packet = self.packet.as_ref().expect("validated write packet");
         Ok(WriteClaim {
@@ -324,10 +350,9 @@ impl PacketCursor {
             return Err(Error::UncertainEffects);
         }
         if Rc::ptr_eq(&claim.owner, &self.owner)
-            && self
-                .in_flight
-                .as_ref()
-                .is_some_and(|state| state.ticket == claim.ticket && !state.read)
+            && self.in_flight.as_ref().is_some_and(|state| {
+                state.ticket == claim.ticket && state.kind == FlightKind::Write
+            })
         {
             Ok(())
         } else {
@@ -336,7 +361,10 @@ impl PacketCursor {
     }
 
     fn quarantined(&self) -> bool {
-        self.uncertain.is_some() || self.uncertain_read.is_some()
+        self.uncertain.is_some()
+            || self.uncertain_read.is_some()
+            || self.uncertain_copy_read.is_some()
+            || self.uncertain_copy_write.is_some()
     }
 
     /// Mark exclusive ownership as dispatched immediately before calling the
