@@ -3,7 +3,10 @@
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Initial source MAC/WTBL/basic-rate effects, with the explicit raw-802.11
 //! global translation profile. These observations grant no station or policy.
-use super::{BarIo, Control, Error, Observation};
+use super::{
+    BarIo, Control, Error, MT_CONN_ON_LPCTL, MT_WFDMA0_TX_RING0_EXT_CTRL, Observation, rx_ring,
+    tx_ring,
+};
 use crate::net::wifi::mediatek::identity::Chip;
 
 #[derive(Debug)]
@@ -42,8 +45,8 @@ impl<I: BarIo> Control<I> {
             } else {
                 self.driver_owned = false;
                 for attempt in 0..10 {
-                    self.registers.write32(0x7c060010, 1)?;
-                    match self.poll(0x7c060010, 4, 4, 50_000) {
+                    self.registers.write32(MT_CONN_ON_LPCTL, 1)?;
+                    match self.poll(MT_CONN_ON_LPCTL, 4, 4, 50_000) {
                         Ok(_) => break,
                         Err(Error::Timeout { .. }) if attempt < 9 => {}
                         Err(e) => return Err(e),
@@ -211,7 +214,10 @@ impl<I: BarIo> Control<I> {
     }
     pub(in crate::net::wifi::mediatek) fn initial_tx_ext(&mut self) -> Result<(), Error> {
         self.guard(true)?;
-        let r = self.registers.write32(0xd4600, 4).map_err(Error::from);
+        let r = self
+            .registers
+            .write32(MT_WFDMA0_TX_RING0_EXT_CTRL, 4)
+            .map_err(Error::from);
         self.finish(r)
     }
     /// Reject stale dormant queue counts before enabling this exact ordinary
@@ -225,7 +231,7 @@ impl<I: BarIo> Control<I> {
                 if qid == 0 || qid == 16 || qid == if c3 { 15 } else { 17 } {
                     continue;
                 }
-                let address = 0xd4304 + qid * 16;
+                let address = tx_ring(qid) + 4;
                 let actual = self.read_control(address)?;
                 if actual != 0 {
                     return Err(Error::Readback {
@@ -240,7 +246,7 @@ impl<I: BarIo> Control<I> {
                 if qid == 0 || qid == 2 || (!c3 && qid == 4) {
                     continue;
                 }
-                let address = 0xd4504 + qid * 16;
+                let address = rx_ring(qid) + 4;
                 let actual = self.read_control(address)?;
                 if actual != 0 {
                     return Err(Error::Readback {

@@ -3,6 +3,7 @@
 //! Actual source BB/MAC/RF channel sequence. No calibrated radio/TX admission.
 use super::channel_power::{self, Geometry, Plan, Programmed, Width};
 use super::{Attempt, Error, Io, Path, PhyInitialized, Report, rf};
+use crate::net::wifi::realtek::registers::*;
 
 /// Actual source channel stores and IGI latch completed. This retains the same
 /// physical PHY state; it is not readback/calibration/OS-policy authority.
@@ -135,35 +136,35 @@ pub(super) fn set<I: Io>(
     bb(a, g, index)?;
     mac(a, g, index)?;
     let rf18 = rf_channel(a, report, g)?;
-    let igi = (a.io.read32(0x1d70)? & 127) as u8;
+    let igi = (a.io.read32(REG_RXIGI)? & 127) as u8;
     for (mask, value) in [
         (0x7f, igi.wrapping_sub(2)),
         (0x7f00, igi.wrapping_sub(2)),
         (0x7f, igi),
         (0x7f00, igi),
     ] {
-        a.modify32(0x1d70, mask, u32::from(value))?;
+        a.modify32(REG_RXIGI, mask, u32::from(value))?;
     }
     Ok((igi, rf18))
 }
 fn bb<I: Io>(a: &mut Attempt<'_, I>, g: Geometry, index: u8) -> Result<(), Error> {
     let ch = center(g);
     if ch <= 14 {
-        a.modify32(0x1a14, 0x300, 0)?;
-        a.modify32(0x1a9c, 1 << 20, 1)?;
-        a.modify32(0x454, 1 << 7, 0)?;
-        a.modify32(0x1a80, 1 << 18, 0)?;
-        a.modify32(0x1c80, 0x3f000000, 0xf)?;
+        a.modify32(REG_BGCTRL, 0x300, 0)?;
+        a.modify32(REG_TXF4, 1 << 20, 1)?;
+        a.modify32(REG_CCK_CHECK, 1 << 7, 0)?;
+        a.modify32(REG_CCKTXONLY, 1 << 18, 0)?;
+        a.modify32(REG_CCAMSK, 0x3f000000, 0xf)?;
         let (cck, ofdm) = if g.width() == Width::Mhz20 {
             (5, 6)
         } else {
             (4, 0)
         };
         for (reg, mask, value) in [
-            (0x18ac, 0xf000, cck),
-            (0x41ac, 0xf000, cck),
-            (0x18ac, 0x1f0, ofdm),
-            (0x41ac, 0x1f0, ofdm),
+            (REG_RXAGCCTL0, 0xf000, cck),
+            (REG_RXAGCCTL, 0xf000, cck),
+            (REG_RXAGCCTL0, 0x1f0, ofdm),
+            (REG_RXAGCCTL, 0x1f0, ofdm),
         ] {
             a.modify32(reg, mask, value)?;
         }
@@ -186,28 +187,28 @@ fn bb<I: Io>(a: &mut Attempt<'_, I>, g: Geometry, index: u8) -> Result<(), Error
             ]
         };
         for ((reg, mask), value) in [
-            (0x1a20, 0xffff0000),
-            (0x1a24, u32::MAX),
-            (0x1a28, 0xffff),
-            (0x1a98, 0xffff0000),
-            (0x1a9c, 0xffff),
-            (0x1aa0, u32::MAX),
-            (0x1aac, u32::MAX),
-            (0x1ab0, u32::MAX),
+            (REG_TXF0, 0xffff0000),
+            (REG_TXF1, u32::MAX),
+            (REG_TXF2, 0xffff),
+            (REG_TXF3, 0xffff0000),
+            (REG_TXF4, 0xffff),
+            (REG_TXF5, u32::MAX),
+            (REG_TXF6, u32::MAX),
+            (REG_TXF7, u32::MAX),
         ]
         .into_iter()
         .zip(values)
         {
             a.modify32(reg, mask, value)?;
         }
-        a.modify32(0x808, 0x70, if ch == 13 { 3 } else { 1 })?;
+        a.modify32(REG_TXDFIR0, 0x70, if ch == 13 { 3 } else { 1 })?;
     } else {
-        a.modify32(0x1a80, 1 << 18, 1)?;
-        a.modify32(0x454, 1 << 7, 1)?;
-        a.modify32(0x1a14, 0x300, 3)?;
-        a.modify32(0x1a9c, 1 << 20, 0)?;
-        a.modify32(0x1c80, 0x3f000000, 0x22)?;
-        a.modify32(0x808, 0x70, 3)?;
+        a.modify32(REG_CCKTXONLY, 1 << 18, 1)?;
+        a.modify32(REG_CCK_CHECK, 1 << 7, 1)?;
+        a.modify32(REG_BGCTRL, 0x300, 3)?;
+        a.modify32(REG_TXF4, 1 << 20, 0)?;
+        a.modify32(REG_CCAMSK, 0x3f000000, 0x22)?;
+        a.modify32(REG_TXDFIR0, 0x70, 3)?;
         let agc = if ch <= 64 {
             1
         } else if ch <= 144 {
@@ -227,43 +228,43 @@ fn bb<I: Io>(a: &mut Attempt<'_, I>, g: Geometry, index: u8) -> Result<(), Error
             173..=177 => 0x411,
             _ => unreachable!("validated geometry"),
         };
-        a.modify32(0xc30, 0xfff, sco)?;
+        a.modify32(REG_SCOTRK, 0xfff, sco)?;
     }
     match g.width() {
         Width::Mhz20 => {
             for (reg, mask, value) in [
-                (0x810, 0x3ff0, 0x19b),
-                (0x9b0, 0xf, 0),
-                (0x9b0, 0xffc0, 0),
-                (0x9b4, 0x700, 7),
-                (0x9b4, 0x700000, 6),
-                (0x1abc, 1 << 30, 0),
-                (0x88c, 0xf000, 1),
-                (0xcbc, 1 << 21, 0),
+                (REG_DFIRBW, 0x3ff0, 0x19b),
+                (REG_TXBWCTL, 0xf, 0),
+                (REG_TXBWCTL, 0xffc0, 0),
+                (REG_TXCLK, 0x700, 7),
+                (REG_TXCLK, 0x700000, 6),
+                (REG_CCK_SOURCE, 1 << 30, 0),
+                (REG_SBD, 0xf000, 1),
+                (REG_PT_CHSMO, 1 << 21, 0),
             ] {
                 a.modify32(reg, mask, value)?;
             }
         }
         Width::Mhz40 => {
-            a.modify32(0x1a00, 1 << 4, u32::from(index == 1))?;
+            a.modify32(REG_CCKSB, 1 << 4, u32::from(index == 1))?;
             for (reg, mask, value) in [
-                (0x9b0, 0xf, 5),
-                (0x9b0, 0xc0, 0),
-                (0x9b0, 0xff00, u32::from(index | (index << 4))),
-                (0x1abc, 1 << 30, 1),
-                (0x88c, 0xf000, 1),
-                (0xcbc, 1 << 21, 1),
+                (REG_TXBWCTL, 0xf, 5),
+                (REG_TXBWCTL, 0xc0, 0),
+                (REG_TXBWCTL, 0xff00, u32::from(index | (index << 4))),
+                (REG_CCK_SOURCE, 1 << 30, 1),
+                (REG_SBD, 0xf000, 1),
+                (REG_PT_CHSMO, 1 << 21, 1),
             ] {
                 a.modify32(reg, mask, value)?;
             }
         }
         Width::Mhz80 => {
             for (reg, mask, value) in [
-                (0x9b0, 0xf, 10),
-                (0x9b0, 0xc0, 0),
-                (0x9b0, 0xff00, u32::from(index | (index << 4))),
-                (0x88c, 0xf000, 6),
-                (0xcbc, 1 << 21, 1),
+                (REG_TXBWCTL, 0xf, 10),
+                (REG_TXBWCTL, 0xc0, 0),
+                (REG_TXBWCTL, 0xff00, u32::from(index | (index << 4))),
+                (REG_SBD, 0xf000, 6),
+                (REG_PT_CHSMO, 1 << 21, 1),
             ] {
                 a.modify32(reg, mask, value)?;
             }
@@ -277,23 +278,26 @@ fn mac<I: Io>(a: &mut Attempt<'_, I>, g: Geometry, index: u8) -> Result<(), Erro
     } else {
         0
     };
-    a.io.write8(0x483, index | (sub40 << 4))?;
-    let old = a.io.read32(0x668)?;
+    a.io.write8(REG_DATA_SC, index | (sub40 << 4))?;
+    let old = a.io.read32(REG_WMAC_TRXPTCL_CTL)?;
     let mode = match g.width() {
         Width::Mhz20 => 0,
         Width::Mhz40 => 1 << 7,
         Width::Mhz80 => 1 << 8,
     };
-    a.io.write32(0x668, (old & !0x180) | mode)?;
-    a.modify32(0x24, 0x300000, 0)?;
-    a.io.write8(0x55c, 80)?;
-    a.io.write8(0x638, 80)?;
-    let old = a.io.read8(0x454)?;
-    a.io.write8(0x454, (old & !0x80) | if center(g) > 14 { 0x80 } else { 0 })?;
+    a.io.write32(REG_WMAC_TRXPTCL_CTL, (old & !0x180) | mode)?;
+    a.modify32(REG_AFE_CTRL1, 0x300000, 0)?;
+    a.io.write8(REG_USTIME_TSF, 80)?;
+    a.io.write8(REG_USTIME_EDCA, 80)?;
+    let old = a.io.read8(REG_CCK_CHECK)?;
+    a.io.write8(
+        REG_CCK_CHECK,
+        (old & !0x80) | if center(g) > 14 { 0x80 } else { 0 },
+    )?;
     Ok(())
 }
 fn rstb<I: Io>(a: &mut Attempt<'_, I>, on: bool) -> Result<(), Error> {
-    a.modify32(0x1c90, 1 << 8, u32::from(on))?;
+    a.modify32(REG_RSTB, 1 << 8, u32::from(on))?;
     if on {
         for reg in [0x1830, 0x4130] {
             a.modify32(reg, 1 << 29, 1)?;

@@ -2,7 +2,13 @@
 // Copyright (C) 2023 MediaTek Inc.
 //! Polling WFDMA enablement from mt792x_dma.c. Installation of every queue,
 //! its exact descriptor format and actual coherent DMA ownership precede this.
-use super::{BUSY, BarIo, Control, DISABLE, Error, GLO};
+use super::{
+    BUSY, BarIo, Control, DISABLE, Error, MT_MCU2HOST_SW_INT_ENA, MT_PCIE_MAC_INT_ENABLE,
+    MT_UWFDMA0_GLO_CFG_EXT1, MT_WFDMA_DUMMY_CR, MT_WFDMA_NEED_REINIT, MT_WFDMA0_GLO_CFG,
+    MT_WFDMA0_HOST_INT_ENA, MT_WFDMA0_INT_RX_PRI, MT_WFDMA0_INT_TX_PRI, MT_WFDMA0_PRI_DLY_INT_CFG0,
+    MT_WFDMA0_RST_DRX_PTR, MT_WFDMA0_RST_DTX_PTR, MT_WFDMA0_RX_RING0_EXT_CTRL,
+    MT_WFDMA0_TX_RING0_EXT_CTRL,
+};
 use crate::net::wifi::mediatek::identity::Chip;
 
 const CONFIG: u32 = (1 << 6)
@@ -15,7 +21,11 @@ const CONFIG: u32 = (1 << 6)
     | (1 << 15)
     | (1 << 21);
 const ENABLE: u32 = 1 | (1 << 2);
-const IRQ_MASKS: [u32; 3] = [0xd4204, 0x10188, 0xd41f4];
+const IRQ_MASKS: [u32; 3] = [
+    MT_WFDMA0_HOST_INT_ENA,
+    MT_PCIE_MAC_INT_ENABLE,
+    MT_MCU2HOST_SW_INT_ENA,
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DmaEnabled {
@@ -55,7 +65,7 @@ impl<I: BarIo> Control<I> {
         if self.registers.chip() == Chip::Mt7925 {
             for (queue, base) in [(0, 0x0000), (1, 0x0040), (2, 0x0080), (3, 0x00c0)] {
                 self.registers
-                    .write32(0xd4680 + 4 * queue, base << 16 | 4)?;
+                    .write32(MT_WFDMA0_RX_RING0_EXT_CTRL + 4 * queue, base << 16 | 4)?;
             }
             for (queue, base, depth) in [
                 (0, 0x0100, 0x10),
@@ -66,12 +76,12 @@ impl<I: BarIo> Control<I> {
                 (16, 0x0540, 4),
             ] {
                 self.registers
-                    .write32(0xd4600 + 4 * queue, base << 16 | depth)?;
+                    .write32(MT_WFDMA0_TX_RING0_EXT_CTRL + 4 * queue, base << 16 | depth)?;
             }
         } else {
             for (queue, base) in [(0, 0), (2, 0x40), (3, 0x80), (4, 0xc0), (5, 0x100)] {
                 self.registers
-                    .write32(0xd4680 + 4 * queue, base << 16 | 4)?;
+                    .write32(MT_WFDMA0_RX_RING0_EXT_CTRL + 4 * queue, base << 16 | 4)?;
             }
             for (queue, base) in [
                 (0, 0x140),
@@ -85,7 +95,7 @@ impl<I: BarIo> Control<I> {
                 (17, 0x380),
             ] {
                 self.registers
-                    .write32(0xd4600 + 4 * queue, base << 16 | 4)?;
+                    .write32(MT_WFDMA0_TX_RING0_EXT_CTRL + 4 * queue, base << 16 | 4)?;
             }
         }
         Ok(())
@@ -116,10 +126,10 @@ impl<I: BarIo> Control<I> {
         self.dma_stopped = false;
         let result = (|| {
             self.mask_interrupts()?;
-            let old = self.read_control(GLO)?;
+            let old = self.read_control(MT_WFDMA0_GLO_CFG)?;
             if old & (DISABLE | BUSY) != 0 {
                 return Err(Error::Readback {
-                    address: GLO,
+                    address: MT_WFDMA0_GLO_CFG,
                     mask: DISABLE | BUSY,
                     expected: 0,
                     actual: old,
@@ -131,26 +141,26 @@ impl<I: BarIo> Control<I> {
                 return Err(Error::UnsupportedDmaMode(old));
             }
             self.prefetch()?;
-            self.registers.write32(0xd420c, u32::MAX)?;
+            self.registers.write32(MT_WFDMA0_RST_DTX_PTR, u32::MAX)?;
             if self.registers.chip() == Chip::Mt7925 {
-                self.registers.write32(0xd4280, u32::MAX)?;
+                self.registers.write32(MT_WFDMA0_RST_DRX_PTR, u32::MAX)?;
             }
-            self.registers.write32(0xd42f0, 0)?;
-            self.modify(GLO, 0, CONFIG)?;
-            self.modify(GLO, 0, ENABLE)?;
+            self.registers.write32(MT_WFDMA0_PRI_DLY_INT_CFG0, 0)?;
+            self.modify(MT_WFDMA0_GLO_CFG, 0, CONFIG)?;
+            self.modify(MT_WFDMA0_GLO_CFG, 0, ENABLE)?;
             if self.registers.chip() == Chip::Mt7925 {
-                self.modify(0x7c0242b4, 1 << 28, 1 << 28)?;
-                self.modify(0xd4298, 0, 0x0f00)?;
-                self.modify(0xd429c, 0, 0x7f00)?;
+                self.modify(MT_UWFDMA0_GLO_CFG_EXT1, 1 << 28, 1 << 28)?;
+                self.modify(MT_WFDMA0_INT_RX_PRI, 0, 0x0f00)?;
+                self.modify(MT_WFDMA0_INT_TX_PRI, 0, 0x7f00)?;
             }
-            self.modify(0x54000120, 0, 1 << 1)?;
+            self.modify(MT_WFDMA_DUMMY_CR, 0, MT_WFDMA_NEED_REINIT)?;
             // Linux enables IRQs here. Stela's serialized polling path keeps
             // the actual sources masked and verifies them after final writes.
             self.verify_masks()?;
-            let actual = self.read_control(GLO)?;
+            let actual = self.read_control(MT_WFDMA0_GLO_CFG)?;
             if actual & (CONFIG | ENABLE) != CONFIG | ENABLE {
                 return Err(Error::Readback {
-                    address: GLO,
+                    address: MT_WFDMA0_GLO_CFG,
                     mask: CONFIG | ENABLE,
                     expected: CONFIG | ENABLE,
                     actual,

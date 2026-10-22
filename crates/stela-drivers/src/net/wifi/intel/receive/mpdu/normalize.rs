@@ -8,7 +8,10 @@
 //! CPU-owned RX normalization following rxmq.c. Hardware crypto observations
 //! remain unauthenticated: no copied status can manufacture an installed key,
 //! association, software replay check or authenticated shared MPDU.
-use super::{Band as RawBand, Metadata, Observation, ReplayOrTtak, Status};
+use super::{
+    Band as RawBand, Metadata, Observation, ReplayOrTtak, SEC_CCM, SEC_EXT_ENC, SEC_GCM, SEC_NONE,
+    SEC_TKIP, SEC_UNKNOWN, SEC_WEP, Status,
+};
 use crate::net::wifi::{
     Band, RadioStatus, RawRate, Timestamp,
     frame::{self, Header, Mpdu},
@@ -54,18 +57,18 @@ impl Crypto {
         rada: bool,
     ) -> Result<Self, Error> {
         let cipher = status.cipher_code();
-        if ampdu && cipher == 7 && !monitor {
+        if ampdu && cipher == SEC_UNKNOWN && !monitor {
             return Err(Error::CryptoRejected);
         }
-        if management && !protected && cipher != 0 {
+        if management && !protected && cipher != SEC_NONE {
             return Err(Error::ManagementProtection);
         }
         let mut result = Self::default();
-        if !protected || cipher == 0 {
+        if !protected || cipher == SEC_NONE {
             return Ok(result);
         }
         match cipher {
-            2 | 5 => {
+            SEC_CCM | SEC_GCM => {
                 if !status.mic_ok_bit() {
                     return Err(Error::CryptoRejected);
                 }
@@ -73,8 +76,8 @@ impl Crypto {
                 result.mic_stripped = true;
                 result.iv_bytes = 8;
             }
-            1 | 3 => {
-                if cipher == 3 {
+            SEC_WEP | SEC_TKIP => {
+                if cipher == SEC_TKIP {
                     if status.replay_or_ttak() == ReplayOrTtak::TtakOk(false) {
                         return Ok(result);
                     }
@@ -85,13 +88,13 @@ impl Crypto {
                     return Err(Error::CryptoRejected);
                 }
                 result.decrypted = true;
-                if cipher == 1 {
+                if cipher == SEC_WEP {
                     result.iv_bytes = 4;
                 }
                 result.icv_stripped = rada;
                 result.tkip_mic_stripped = rada;
             }
-            4 => {
+            SEC_EXT_ENC => {
                 if !status.mic_ok_bit() {
                     return Err(Error::CryptoRejected);
                 }
@@ -206,7 +209,7 @@ pub(crate) fn normalize(
     {
         return Err(Error::Aggregation);
     }
-    if management && (header.protected() || metadata.status.cipher_code() != 0) {
+    if management && (header.protected() || metadata.status.cipher_code() != SEC_NONE) {
         return Err(Error::ManagementProtection);
     }
     if header.protected() && !header.data_present() {
@@ -214,7 +217,7 @@ pub(crate) fn normalize(
             "protected non-data frame",
         )));
     }
-    if header.protected() && !matches!(metadata.status.cipher_code(), 2 | 5) {
+    if header.protected() && !matches!(metadata.status.cipher_code(), SEC_CCM | SEC_GCM) {
         return Err(Error::UnsupportedCipher(metadata.status.cipher_code()));
     }
     let crypto = Crypto::observe(

@@ -4,7 +4,7 @@
 //! Retained ordinary PCIe bootstrap, including every source selectable queue.
 //! Actual protocol facts never publish an associated Link or qualify policy.
 use super::{
-    control::{self, Control, bootstrap::MacInitialized},
+    control::{self, Control, bootstrap::MacInitialized, rx_ring, tx_ring},
     firmware::{Prepared, auxiliary::Auxiliary, clc::Inputs as ClcInputs},
     identity::{Chip, Identity},
     mailbox::{
@@ -299,7 +299,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         s.data_tx = Some(
             unsafe {
                 DataRing::install(
-                    queue(0xd4300)?,
+                    queue(tx_ring(0))?,
                     source,
                     domain.clone(),
                     2048,
@@ -312,7 +312,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         s.wm = Some(
             unsafe {
                 TxRing::install(
-                    queue(if c3 { 0xd43f0 } else { 0xd4410 })?,
+                    queue(tx_ring(if c3 { 15 } else { 17 }))?,
                     source,
                     domain.clone(),
                     256,
@@ -321,13 +321,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
             .map_err(Error::Ring)?,
         );
         s.fwdl = Some(
-            unsafe { TxRing::install(queue(0xd4400)?, source, domain.clone(), 128) }
+            unsafe { TxRing::install(queue(tx_ring(16))?, source, domain.clone(), 128) }
                 .map_err(Error::Ring)?,
         );
         s.event = Some(
             unsafe {
                 RxRing::install(
-                    queue(0xd4500)?,
+                    queue(rx_ring(0))?,
                     source,
                     domain.clone(),
                     if c3 { 512 } else { 8 },
@@ -337,12 +337,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         );
         if !c3 {
             s.runtime = Some(
-                unsafe { RxRing::install(queue(0xd4540)?, source, domain.clone(), 512) }
+                unsafe { RxRing::install(queue(rx_ring(4))?, source, domain.clone(), 512) }
                     .map_err(Error::Ring)?,
             );
         }
         s.data_rx = Some(
-            unsafe { RxRing::install(queue(0xd4520)?, source, domain, 1536) }
+            unsafe { RxRing::install(queue(rx_ring(2))?, source, domain, 1536) }
                 .map_err(Error::Ring)?,
         );
         unsafe { s.control.start_dma_polling() }.map_err(Error::Control)?;

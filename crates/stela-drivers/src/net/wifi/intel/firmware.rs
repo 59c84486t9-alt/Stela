@@ -11,8 +11,8 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::ops::Range;
 
-const HEADER_BYTES: usize = 88;
-const TLV_HEADER_BYTES: usize = 8;
+pub(super) const HEADER_BYTES: usize = 88;
+pub(super) const TLV_HEADER_BYTES: usize = 8;
 const MAGIC: u32 = 0x0a4c_5749;
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TLVS: usize = 4096;

@@ -8,14 +8,39 @@ pub mod bootstrap;
 mod cold_start;
 pub mod dma;
 
-const LPCTL: u32 = 0x7c060010;
-const MISC: u32 = 0x7c0600f0;
-const GLO: u32 = 0xd4208;
-const EXT0: u32 = 0xd42b0;
-const SW_CONTROL: u32 = 0x7c026004;
-const RESET: u32 = 0xd4100;
+// Register names from mt76 `mt792x_regs.h` and `mt7921/regs.h`.
+const MT_PCIE_MAC_INT_ENABLE: u32 = 0x10188;
+const MT_WFDMA0_RST: u32 = 0xd4100;
+const MT_MCU2HOST_SW_INT_ENA: u32 = 0xd41f4;
+const MT_WFDMA0_HOST_INT_ENA: u32 = 0xd4204;
+const MT_WFDMA0_GLO_CFG: u32 = 0xd4208;
+const MT_WFDMA0_RST_DTX_PTR: u32 = 0xd420c;
+const MT_WFDMA0_RST_DRX_PTR: u32 = 0xd4280;
+const MT_WFDMA0_INT_RX_PRI: u32 = 0xd4298;
+const MT_WFDMA0_INT_TX_PRI: u32 = 0xd429c;
+const MT_WFDMA0_GLO_CFG_EXT0: u32 = 0xd42b0;
+const MT_WFDMA0_PRI_DLY_INT_CFG0: u32 = 0xd42f0;
+const MT_TX_RING_BASE: u32 = 0xd4300;
+const MT_RX_RING_BASE: u32 = 0xd4500;
+const MT_WFDMA0_TX_RING0_EXT_CTRL: u32 = 0xd4600;
+const MT_WFDMA0_RX_RING0_EXT_CTRL: u32 = 0xd4680;
+const MT_WFDMA_DUMMY_CR: u32 = 0x54000120;
+const MT_WFDMA_NEED_REINIT: u32 = 1 << 1;
+const MT_UWFDMA0_GLO_CFG_EXT1: u32 = 0x7c0242b4;
+const MT_DMASHDL_SW_CONTROL: u32 = 0x7c026004;
+const MT_CONN_ON_LPCTL: u32 = 0x7c060010;
+const MT_CONN_ON_MISC: u32 = 0x7c0600f0;
 const DISABLE: u32 = 1 | (1 << 2) | (1 << 15) | (1 << 28) | (1 << 27) | (1 << 21);
 const BUSY: u32 = (1 << 1) | (1 << 3);
+
+/// The registers of WFDMA0 TX ring `n`: base, size, CPU and DMA index.
+pub(in crate::net::wifi::mediatek) const fn tx_ring(n: u32) -> u32 {
+    MT_TX_RING_BASE + 16 * n
+}
+/// The registers of WFDMA0 RX ring `n`: base, size, CPU and DMA index.
+pub(in crate::net::wifi::mediatek) const fn rx_ring(n: u32) -> u32 {
+    MT_RX_RING_BASE + 16 * n
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -175,7 +200,7 @@ impl<I: BarIo> Control<I> {
             self.clock.delay(1000);
         }
     }
-    /// The common MT792xe LPCTL request retries at most ten 50ms polls. ASPM
+    /// The common MT792xe MT_CONN_ON_LPCTL request retries at most ten 50ms polls. ASPM
     /// requires a minimum 2ms wake delay before each actual status read.
     pub fn driver_own(&mut self, aspm_supported: bool) -> Result<DriverOwned, Error> {
         self.guard(false)?;
@@ -183,11 +208,11 @@ impl<I: BarIo> Control<I> {
         self.dma_stopped = false;
         let result = (|| {
             for attempts in 1..=10 {
-                self.registers.write32(LPCTL, 1 << 1)?;
+                self.registers.write32(MT_CONN_ON_LPCTL, 1 << 1)?;
                 if aspm_supported {
                     self.clock.delay(2000);
                 }
-                match self.poll(LPCTL, 1 << 2, 0, 50_000) {
+                match self.poll(MT_CONN_ON_LPCTL, 1 << 2, 0, 50_000) {
                     Ok(status) => return Ok(DriverOwned { attempts, status }),
                     Err(Error::Timeout { .. }) if attempts < 10 => {}
                     Err(error) => return Err(error),
@@ -206,25 +231,25 @@ impl<I: BarIo> Control<I> {
         self.guard(true)?;
         self.dma_stopped = false;
         let result = (|| {
-            self.modify(GLO, DISABLE, 0)?;
-            let status = self.poll(GLO, BUSY, 0, 100_000)?;
+            self.modify(MT_WFDMA0_GLO_CFG, DISABLE, 0)?;
+            let status = self.poll(MT_WFDMA0_GLO_CFG, BUSY, 0, 100_000)?;
             if status.value & DISABLE != 0 {
                 return Err(Error::Readback {
-                    address: GLO,
+                    address: MT_WFDMA0_GLO_CFG,
                     mask: DISABLE,
                     expected: 0,
                     actual: status.value,
                 });
             }
-            self.modify(EXT0, 1 << 6, 0)?;
-            self.modify(SW_CONTROL, 0, 1 << 28)?;
+            self.modify(MT_WFDMA0_GLO_CFG_EXT0, 1 << 6, 0)?;
+            self.modify(MT_DMASHDL_SW_CONTROL, 0, 1 << 28)?;
             if force {
-                self.modify(RESET, (1 << 4) | (1 << 5), 0)?;
-                self.modify(RESET, 0, (1 << 4) | (1 << 5))?;
+                self.modify(MT_WFDMA0_RST, (1 << 4) | (1 << 5), 0)?;
+                self.modify(MT_WFDMA0_RST, 0, (1 << 4) | (1 << 5))?;
             }
             // Push every final posted control write before returning. Idle
             // remains an observation, not a universal transaction-drain fence.
-            self.read_control(RESET)?;
+            self.read_control(MT_WFDMA0_RST)?;
             Ok(DmaStopped {
                 status,
                 reset_applied: force,
@@ -239,7 +264,7 @@ impl<I: BarIo> Control<I> {
     /// through an unready MCU. This does not itself restart the MCU.
     pub fn poll_firmware_power_on(&mut self) -> Result<Observation, Error> {
         self.guard(true)?;
-        let result = self.poll(MISC, 7, 1, 1_000_000);
+        let result = self.poll(MT_CONN_ON_MISC, 7, 1, 1_000_000);
         self.finish(result)
     }
     /// Observe N9-ready bits after the caller's actual download/start exchange.
@@ -247,7 +272,7 @@ impl<I: BarIo> Control<I> {
     /// loaded, a new command epoch, calibration, regulatory setup or association.
     pub fn poll_n9_ready(&mut self) -> Result<Observation, Error> {
         self.guard(true)?;
-        let result = self.poll(MISC, 3, 3, 1_500_000);
+        let result = self.poll(MT_CONN_ON_MISC, 3, 3, 1_500_000);
         self.finish(result)
     }
 }
@@ -275,10 +300,10 @@ mod tests {
                 registers: BTreeMap::from([
                     (0xe0010, 4),
                     (0xe00f0, 1),
-                    (GLO, 0x5a228055),
-                    (EXT0, 0xa5a50040),
+                    (MT_WFDMA0_GLO_CFG, 0x5a228055),
+                    (MT_WFDMA0_GLO_CFG_EXT0, 0xa5a50040),
                     (0xd6004, 0xaabb0000),
-                    (RESET, 0xc0ff00ff),
+                    (MT_WFDMA0_RST, 0xc0ff00ff),
                 ]),
                 operations: Vec::new(),
                 own_at_attempt: Some(1),
@@ -297,7 +322,7 @@ mod tests {
             if offset == 0xe0010 && self.own_at_attempt.is_some_and(|n| self.attempts >= n) {
                 *self.registers.get_mut(&offset).unwrap() &= !4;
             }
-            if offset == GLO
+            if offset == MT_WFDMA0_GLO_CFG
                 && self.stopping
                 && let Some(left) = self.busy_reads.as_mut()
             {
@@ -326,7 +351,7 @@ mod tests {
                 self.attempts += 1;
             } else {
                 self.registers.insert(offset, value);
-                if offset == GLO && value & DISABLE == 0 {
+                if offset == MT_WFDMA0_GLO_CFG && value & DISABLE == 0 {
                     self.stopping = true;
                 }
             }
@@ -351,7 +376,7 @@ mod tests {
         for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
             for force in [false, true] {
                 let mut m = Model::default();
-                m.registers.insert(GLO, 0x5a228055 | BUSY);
+                m.registers.insert(MT_WFDMA0_GLO_CFG, 0x5a228055 | BUSY);
                 m.busy_reads = Some(2);
                 let mut c = setup(chip, m);
                 assert_eq!(c.stop_dma(force), Err(Error::NotDriverOwned));
@@ -366,23 +391,23 @@ mod tests {
                 let idle = io
                     .operations
                     .iter()
-                    .position(|&(k, a, v)| k == 0 && a == GLO && v & BUSY == 0)
+                    .position(|&(k, a, v)| k == 0 && a == MT_WFDMA0_GLO_CFG && v & BUSY == 0)
                     .unwrap();
                 let scheduler = io
                     .operations
                     .iter()
-                    .position(|&(k, a, _)| k == 1 && a == EXT0)
+                    .position(|&(k, a, _)| k == 1 && a == MT_WFDMA0_GLO_CFG_EXT0)
                     .unwrap();
                 assert!(idle < scheduler);
-                assert_eq!(io.registers[&EXT0] & (1 << 6), 0);
+                assert_eq!(io.registers[&MT_WFDMA0_GLO_CFG_EXT0] & (1 << 6), 0);
                 assert_ne!(io.registers[&0xd6004] & (1 << 28), 0);
                 let resets = io
                     .operations
                     .iter()
-                    .filter(|v| v.0 == 1 && v.1 == RESET)
+                    .filter(|v| v.0 == 1 && v.1 == MT_WFDMA0_RST)
                     .count();
                 assert_eq!(resets, if force { 2 } else { 0 });
-                assert_eq!(io.registers[&RESET], 0xc0ff00ff);
+                assert_eq!(io.registers[&MT_WFDMA0_RST], 0xc0ff00ff);
             }
         }
     }
@@ -403,7 +428,7 @@ mod tests {
                 assert!(matches!(
                     result,
                     Err(Error::Timeout {
-                        address: LPCTL,
+                        address: MT_CONN_ON_LPCTL,
                         mask: 4,
                         expected: 0,
                         ..
@@ -423,13 +448,13 @@ mod tests {
             busy_reads: None,
             ..Model::default()
         };
-        m.registers.insert(GLO, 0x5a228055 | BUSY);
+        m.registers.insert(MT_WFDMA0_GLO_CFG, 0x5a228055 | BUSY);
         let mut c = setup(Chip::Mt7925, m);
         c.driver_own(false).unwrap();
         assert!(matches!(
             c.stop_dma(true),
             Err(Error::Timeout {
-                address: GLO,
+                address: MT_WFDMA0_GLO_CFG,
                 mask: BUSY,
                 ..
             })
@@ -439,7 +464,8 @@ mod tests {
                 .test_io()
                 .operations
                 .iter()
-                .any(|&(k, a, _)| k == 1 && matches!(a, EXT0 | RESET | 0xd6004))
+                .any(|&(k, a, _)| k == 1
+                    && matches!(a, MT_WFDMA0_GLO_CFG_EXT0 | MT_WFDMA0_RST | 0xd6004))
         );
         assert!(c.is_poisoned());
     }
@@ -480,12 +506,17 @@ mod tests {
             if state == 3 {
                 assert_eq!(ready.unwrap().value, 3);
             } else if state == u32::MAX {
-                assert_eq!(ready, Err(Error::Unavailable { address: MISC }));
+                assert_eq!(
+                    ready,
+                    Err(Error::Unavailable {
+                        address: MT_CONN_ON_MISC
+                    })
+                );
             } else {
                 assert!(matches!(
                     ready,
                     Err(Error::Timeout {
-                        address: MISC,
+                        address: MT_CONN_ON_MISC,
                         expected: 3,
                         ..
                     })
@@ -513,7 +544,9 @@ mod tests {
         let mut c = setup(Chip::Mt7921, m);
         assert_eq!(
             c.driver_own(false),
-            Err(Error::Unavailable { address: LPCTL })
+            Err(Error::Unavailable {
+                address: MT_CONN_ON_LPCTL
+            })
         );
         // SAFETY: exclusive model register file, rejected before any access.
         let registers = unsafe { Registers::new(Chip::Mt7921, Model::default()) };
@@ -573,7 +606,7 @@ mod tests {
                 let mut actual = core::mem::take(&mut c.registers.test_io().operations);
                 // Stela additionally flushes the final posted write; this is
                 // tested explicitly instead of hidden in donor equivalence.
-                assert_eq!(actual.pop(), Some((0, RESET, 0xc0ff00ff)));
+                assert_eq!(actual.pop(), Some((0, MT_WFDMA0_RST, 0xc0ff00ff)));
                 assert_eq!(actual, expected);
             }
         }
@@ -622,7 +655,11 @@ mod tests {
     }
     #[test]
     fn unsupported_dma_mode_and_ignored_control_stores_never_qualify_start() {
-        for (address, initial) in [(GLO, 1 << 26), (GLO, 1), (0xd4204, 1)] {
+        for (address, initial) in [
+            (MT_WFDMA0_GLO_CFG, 1 << 26),
+            (MT_WFDMA0_GLO_CFG, 1),
+            (0xd4204, 1),
+        ] {
             let mut c = setup(Chip::Mt7925, Model::default());
             c.driver_own(false).unwrap();
             c.stop_dma(true).unwrap();
@@ -637,7 +674,7 @@ mod tests {
                 .test_io()
                 .registers
                 .insert(address, old | initial);
-            if address != GLO {
+            if address != MT_WFDMA0_GLO_CFG {
                 c.registers.test_io().ignore_write = Some(address);
             }
             assert!(matches!(
@@ -650,13 +687,13 @@ mod tests {
                     .test_io()
                     .operations
                     .iter()
-                    .any(|&(kind, a, v)| kind == 1 && a == GLO && v & 5 == 5)
+                    .any(|&(kind, a, v)| kind == 1 && a == MT_WFDMA0_GLO_CFG && v & 5 == 5)
             );
         }
         let mut c = setup(
             Chip::Mt7921,
             Model {
-                ignore_write: Some(GLO),
+                ignore_write: Some(MT_WFDMA0_GLO_CFG),
                 ..Model::default()
             },
         );
@@ -664,7 +701,7 @@ mod tests {
         assert!(matches!(
             c.stop_dma(true),
             Err(Error::Readback {
-                address: GLO,
+                address: MT_WFDMA0_GLO_CFG,
                 expected: 0,
                 ..
             })
@@ -673,10 +710,13 @@ mod tests {
         let mut c = setup(Chip::Mt7921, Model::default());
         c.driver_own(false).unwrap();
         c.stop_dma(true).unwrap();
-        c.registers.test_io().ignore_write = Some(GLO);
+        c.registers.test_io().ignore_write = Some(MT_WFDMA0_GLO_CFG);
         assert!(matches!(
             unsafe { c.start_dma_polling() },
-            Err(Error::Readback { address: GLO, .. })
+            Err(Error::Readback {
+                address: MT_WFDMA0_GLO_CFG,
+                ..
+            })
         ));
         assert!(c.is_poisoned());
     }
@@ -758,7 +798,7 @@ mod tests {
                     (0, 0xd41f4, 0)
                 ]
             );
-            assert_eq!(actual[6], (0, GLO, 0x5a228055 & !DISABLE));
+            assert_eq!(actual[6], (0, MT_WFDMA0_GLO_CFG, 0x5a228055 & !DISABLE));
             assert_eq!(&actual[7..actual.len() - 4], expected);
             assert_eq!(
                 &actual[actual.len() - 4..],
@@ -766,7 +806,7 @@ mod tests {
                     (0, 0xd4204, 0),
                     (0, 0x10188, 0),
                     (0, 0xd41f4, 0),
-                    (0, GLO, receipt.global_config)
+                    (0, MT_WFDMA0_GLO_CFG, receipt.global_config)
                 ]
             );
         }

@@ -17,6 +17,23 @@ pub enum Error {
     DescriptorLength { minimum: usize, actual: usize },
     MpduLength { declared: usize, available: usize },
 }
+// `IWL_RX_MPDU_STATUS_*` bits and the `IWL_RX_MPDU_STATUS_SEC_*` values of
+// `Status::cipher_code`, from iwlwifi `fw/api/rx.h`.
+const STATUS_SRC_STA_FOUND: u32 = 1 << 2;
+const STATUS_KEY_VALID: u32 = 1 << 3;
+const STATUS_ICV_OK: u32 = 1 << 5;
+const STATUS_MIC_OK: u32 = 1 << 6;
+const STATUS_REPLAY_ERROR: u32 = 1 << 7;
+const STATUS_DECRYPTED: u32 = 1 << 11;
+const STATUS_DUPLICATE: u32 = 1 << 22;
+pub const SEC_NONE: u8 = 0;
+pub const SEC_WEP: u8 = 1;
+pub const SEC_CCM: u8 = 2;
+pub const SEC_TKIP: u8 = 3;
+pub const SEC_EXT_ENC: u8 = 4;
+pub const SEC_GCM: u8 = 5;
+pub const SEC_UNKNOWN: u8 = 7;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Status {
     raw: u32,
@@ -30,33 +47,33 @@ impl Status {
         self.raw & 3 != 3
     }
     pub fn key_valid_bit(self) -> bool {
-        self.raw & (1 << 3) != 0
+        self.raw & STATUS_KEY_VALID != 0
     }
     pub fn icv_ok_bit(self) -> bool {
-        self.raw & (1 << 5) != 0
+        self.raw & STATUS_ICV_OK != 0
     }
     pub fn mic_ok_bit(self) -> bool {
-        self.raw & (1 << 6) != 0
+        self.raw & STATUS_MIC_OK != 0
     }
     pub fn decrypted_bit(self) -> bool {
-        self.raw & (1 << 11) != 0
+        self.raw & STATUS_DECRYPTED != 0
     }
     pub fn duplicate_bit(self) -> bool {
-        self.raw & (1 << 22) != 0
+        self.raw & STATUS_DUPLICATE != 0
     }
     pub fn cipher_code(self) -> u8 {
         ((self.raw >> 8) & 7) as u8
     }
     pub fn station_id(self) -> Option<u8> {
-        (self.raw & (1 << 2) != 0).then_some(((self.raw >> 24) & 31) as u8)
+        (self.raw & STATUS_SRC_STA_FOUND != 0).then_some(((self.raw >> 24) & 31) as u8)
     }
     /// These remain bit observations. A false replay-error bit is never a
     /// software PN check or proof of a current installed key.
     pub fn replay_or_ttak(self) -> ReplayOrTtak {
         if self.deprecate_ttak {
-            ReplayOrTtak::ReplayError(self.raw & 0x80 != 0)
+            ReplayOrTtak::ReplayError(self.raw & STATUS_REPLAY_ERROR != 0)
         } else {
-            ReplayOrTtak::TtakOk(self.raw & 0x80 != 0)
+            ReplayOrTtak::TtakOk(self.raw & STATUS_REPLAY_ERROR != 0)
         }
     }
 }

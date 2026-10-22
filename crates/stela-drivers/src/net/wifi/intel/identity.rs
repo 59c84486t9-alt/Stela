@@ -119,7 +119,12 @@ impl Request {
                 revision: &self.revision,
                 board: None,
             },
-            minimum_bytes: if self.name.ends_with(".ucode") { 96 } else { 8 },
+            // An image holds its header and one TLV; a PNVM holds one TLV.
+            minimum_bytes: if self.name.ends_with(".ucode") {
+                firmware::HEADER_BYTES + firmware::TLV_HEADER_BYTES
+            } else {
+                firmware::TLV_HEADER_BYTES
+            },
         }
     }
 }
