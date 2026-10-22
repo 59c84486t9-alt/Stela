@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// Association state adapted from Linux net/mac80211/mlme.c, as in station.rs:
+// Copyright 2003-2008 Jouni Malinen; 2004 Instant802 Networks, Inc.;
+// 2005 Devicescape Software, Inc.; 2006-2007 Jiri Benc; 2007 Michael Wu;
+// 2013-2014 Intel Mobile Communications GmbH;
+// 2015-2017 Intel Deutschland GmbH; 2018-2026 Intel Corporation.
 //! Retained current-association configuration, built only from actual MLME input.
 //! This is not OS authentication, native completion or regulatory authority.
 use super::{

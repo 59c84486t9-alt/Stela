@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 //! Context-bound admission for actual source-enabled station radio work.
 //!
 //! This permission does not authenticate a peer, open the controlled port,
