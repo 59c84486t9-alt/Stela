@@ -40,6 +40,21 @@ impl LocalIrq {
 pub struct LocalNotifications(Ptd);
 
 impl LocalNotifications {
+    /// Admit exactly one native recipient before any publication. Aliases keep
+    /// this admission for the bank's whole retained lifetime, including after an
+    /// abandoned recipient. Dropping a native owner is not a qualified reset.
+    pub(crate) fn claim_pmp_recipient(&self) -> Result<(), &'static str> {
+        let mut state = self.0.0.borrow_mut();
+        if state.pmp_recipient_admitted {
+            return Err("PTD actual bank already admitted its native PMP recipient");
+        }
+        if state.serial != 0 {
+            return Err("native PMP recipient must precede actual PTD publication admission");
+        }
+        state.pmp_recipient_admitted = true;
+        Ok(())
+    }
+
     /// Check actual backing identity, including after cloning an alias. Equal
     /// numeric ranges on a different object do not satisfy this check.
     pub fn owns(&self, bank: &Ptd) -> bool {

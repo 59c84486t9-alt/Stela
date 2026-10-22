@@ -23,7 +23,7 @@
 //! Every other class panics the AP ("Unknown message"), so the PMP must
 //! not send one. Everything else is driven by the PMP: ApplePMPv2::start
 //! (0x2bd9a38) sends nothing and waits for nothing on the endpoint. This
-//! PMP has no firmware services that need AP memory or registry entries,
+//! minimal endpoint has no firmware services that need AP memory or registry entries,
 //! so it sends no requests: the AP then has no dashboard window, and
 //! `writeDashboard` (0x2bcedc8) answers its callers with an error rather
 //! than a write that goes nowhere. It answers the ping. The AP's registry
@@ -36,8 +36,14 @@
 //! `_set_rpmGated`/`_get_rpmGated` 0x2bd8ce4/0x2bd8e20). The machine has no
 //! fan whose speed could be measured, so the endpoint is not provided and
 //! ApplePMPThermal does not start.
+//!
+//! [`native`] separately retains T6000 startup/exit resources and the actual
+//! local PTD recipient. This ping endpoint supplies none of that backend's
+//! memory, callback, power or readiness authority.
 use super::rtkit::Endpoint;
 use alloc::vec::Vec;
+
+pub mod native;
 
 pub const ENDPOINT: u8 = 0x20;
 
