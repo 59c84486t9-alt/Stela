@@ -82,6 +82,7 @@ use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use stela_drivers::{block::BlockDevice, input::Input, net::Mac};
 
 mod canonical_reads;
+mod canonical_writes;
 mod display_resources;
 pub mod memory_resources;
 mod service;
@@ -2904,53 +2905,26 @@ impl Devices for AppleDevices {
         value: u64,
         now: u64,
     ) -> Result<(), DeviceError> {
-        self.publish_rtc_time(now)?;
-        self.settle_lifecycle(cpu, now);
-        let width = width(bytes)?;
-        // Validate the NOR CS edge before the GPIO word changes. This keeps
-        // an incomplete-command refusal atomic across the two devices.
-        for wire in self
-            .selects
-            .iter()
-            .filter(|w| w.physical == physical && width == Width::Word)
-        {
-            let high = Gpio::driven_level(value as u32)
-                .ok_or_else(|| DeviceError::Refused("SPI CS must remain a GPIO output".into()))?;
-            self.bus
-                .device::<Spi>(wire.spi)
-                .expect("SPI wire")
-                .check_cs(high)
-                .map_err(|e| DeviceError::Refused(e.into()))?;
+        use super::engine::ConsumedWrite;
+        match self.consume_scalar_write(cpu, physical, bytes, value, now, None)? {
+            ConsumedWrite::Complete { settlement } => settlement,
+            ConsumedWrite::Prefix { error, .. } | ConsumedWrite::Unknown { error } => Err(error),
         }
-        if width == Width::Word {
-            self.check_power_request(physical, value)?;
-        }
-        let mut access = Access::new(cpu, now, &mut self.latch);
-        self.bus
-            .write(physical, width, value, &mut access)
-            .map_err(|error| {
-                if let Some((_, reason)) = self
-                    .power_refusals
-                    .iter()
-                    .find(|(address, _)| *address == physical)
-                {
-                    DeviceError::Refused(format!(
-                        "PMGR domain {physical:#x}: {reason}; {:?}",
-                        describe(error)
-                    ))
-                } else {
-                    describe(error)
-                }
-            })?;
-        for wire in self.selects.iter().filter(|w| w.physical == physical) {
-            self.bus
-                .device_mut::<Spi>(wire.spi)
-                .expect("SPI wire")
-                .set_cs(value & 1 != 0)
-                .map_err(|e| DeviceError::Refused(e.into()))?;
-        }
-        let reset = reset_reason(&access);
-        self.settle(cpu, now, reset)
+    }
+
+    fn write_canonical(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+        owners: &mut dyn super::engine::CanonicalDeviceWrite,
+    ) -> Result<super::engine::ConsumedWrite, DeviceError> {
+        use super::engine::CanonicalDeviceMemory;
+        let mut memory = owners.memory()?;
+        memory.fence_cpu_memory();
+        self.consume_scalar_write(cpu, physical, bytes, value, now, Some(&mut memory))
     }
 
     fn system_register(

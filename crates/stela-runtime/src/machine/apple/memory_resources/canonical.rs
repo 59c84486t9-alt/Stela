@@ -71,7 +71,7 @@ impl Prepared {
         if !self.requires_ram_read(offset, width) {
             return Err("canonical RAM read is not an original DCS drain word");
         }
-        self.router.target(offset)?;
+        let (aperture, within) = self.router.target(offset)?;
         let ram = self
             .ram
             .as_ref()
@@ -94,7 +94,32 @@ impl Prepared {
         // completed device copyout and fenced the actual CPU owners before
         // obtaining this same mapping/native/all-writer exclusion. No frontend
         // transaction remains in flight, and none can enter while borrowed.
-        Ok(0)
+        self.router.controller.drain_control(aperture as u8, within).map(u64::from)
+    }
+
+    /// Consume the original low-byte clear under the exact same live owner as
+    /// the drain read. The high bits belong to the initialized control image;
+    /// memory quiescence is never used to invent their value.
+    ///
+    /// # Safety
+    /// The complete closed synchronous producer contract of read_ram_drain
+    /// holds for this entire operation. The caller retains all actual native
+    /// workers and excludes external/queued writers through consumption.
+    pub unsafe fn write_ram_drain(
+        &self,
+        offset: u64,
+        width: Width,
+        value: u64,
+        now: u64,
+        memory: &CanonicalRamService<'_>,
+    ) -> Result<(), &'static str> {
+        // SAFETY: caller retains exactly the same closed producer set/guard.
+        let expected = unsafe { self.read_ram_drain(offset, width, memory) }?;
+        if value != expected {
+            return Err("DCS flush must preserve high16 and clear both low bytes");
+        }
+        let (aperture, within) = self.router.target(offset)?;
+        self.router.controller.record_ram_drain(aperture as u8, within, value as u32, now)
     }
 }
 
@@ -176,6 +201,44 @@ mod tests {
             .unwrap();
         let memory = ram.try_service().unwrap().unwrap();
         assert!(read(&owner, mcc::DCS_BASE + 0xa40, Width::Word, &memory).is_err());
+    }
+
+    #[test]
+    fn consuming_drain_write_requires_its_real_owner_and_preserves_later_refusals() {
+        let ram = ram();
+        let mut owner = super::super::tests::prepared()
+            .with_registered_ram(Arc::clone(&ram)).unwrap();
+        let foreign = self::ram();
+        let other = foreign.try_service().unwrap().unwrap();
+        let offset = mcc::DCS_BASE + mcc::DCS_DRAIN;
+        // SAFETY: this fixture has no other producers, frames or DMA. Each
+        // call retains its exact actual all-writer borrow through completion.
+        unsafe {
+            assert!(owner.write_ram_drain(offset, Width::Word, 0, 9, &other).is_err());
+        }
+        drop(other);
+        let memory = ram.try_service().unwrap().unwrap();
+        unsafe {
+            assert!(owner.write_ram_drain(offset, Width::Double, 0, 9, &memory).is_err());
+            assert!(owner.write_ram_drain(offset, Width::Word, 1, 9, &memory).is_err());
+            assert!(owner.write_ram_drain(offset, Width::Word, 0x10000, 9, &memory).is_err());
+            owner.write_ram_drain(offset, Width::Word, 0, 9, &memory).unwrap();
+        }
+        let requests = owner.controller().requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].kind, mcc::RequestKind::Drain { channel: 0 });
+        assert_eq!(read(&owner, offset, Width::Word, &memory), Ok(0));
+        drop(memory);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 10, &mut latch);
+        assert!(owner.write(offset, Width::Word, 0, &mut access).is_err());
+        assert!(owner.read(offset, Width::Word, &mut access).is_err());
+        owner.write(mcc::DCS_BASE + 0x13cc, Width::Word, 0xffff0000, &mut access).unwrap();
+        let memory = ram.try_service().unwrap().unwrap();
+        unsafe {
+            assert!(owner.write_ram_drain(offset, Width::Word, 0, 11, &memory).is_err());
+        }
+        assert_eq!(owner.controller().requests().len(), 2);
     }
 
     #[test]

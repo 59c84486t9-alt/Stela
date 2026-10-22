@@ -9,6 +9,7 @@ use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
 
 pub mod policy;
+mod drain;
 mod status;
 use policy::CacheResource;
 
@@ -78,6 +79,10 @@ pub enum RequestKind {
         channel: u8,
     },
     DramConfiguration {
+        channel: u8,
+    },
+    /// Consuming source queue flush under the actual synchronous RAM owner.
+    Drain {
         channel: u8,
     },
     Persistence {
@@ -236,11 +241,11 @@ impl Controller {
                     aperture,
                     offset,
                     value,
-                    // No memory-traffic backend was admitted by allocating
-                    // controller inputs. Its drain word is not a zero queue
-                    // observation, even before the first guest request.
+                    // This software resource owns its initially zero opaque
+                    // high control bits. Only a live canonical RAM service may
+                    // supply the low queue field or consume its clear write.
                     known: if matches!(role(offset)?, Role::Drain) {
-                        0
+                        0xffff_0000
                     } else {
                         u32::MAX.into()
                     },
