@@ -17,6 +17,7 @@ use alloc::{rc::Rc, vec::Vec};
 pub mod copy;
 pub mod delay;
 pub mod poll;
+mod stride;
 
 const SRAM_ALIGNMENT: u64 = 32;
 const MAX_PHYSICAL: u64 = 1 << 42;
@@ -85,6 +86,8 @@ pub enum Error {
     CopyAlignment,
     CopyOverlap,
     UnqualifiedCopyJoin(u32),
+    StrideEncoding,
+    UnqualifiedStrideWidth,
 }
 
 /// One physical store, without a claim that its target accepts that access.
@@ -229,7 +232,7 @@ impl PacketCursor {
         if header == 0 {
             return Err(Error::UnqualifiedRetirement);
         }
-        if header & 1 != 0 {
+        if header & 1 != 0 || header & 0x1f == 6 {
             Ok(PacketKind::Write)
         } else if header & 0x1f == 2 {
             Ok(PacketKind::Poll)
@@ -437,6 +440,9 @@ impl PacketCursor {
 }
 
 fn decode(sram: &Sram, pc: usize) -> Result<Packet, Error> {
+    if sram.words.get(pc).is_some_and(|header| header & 0x1f == 6) {
+        return stride::decode(sram, pc);
+    }
     let mut cursor = pc;
     let mut next = || {
         let value = *sram.words.get(cursor).ok_or(Error::TruncatedPacket)?;

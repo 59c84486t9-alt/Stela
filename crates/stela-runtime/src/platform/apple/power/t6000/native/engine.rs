@@ -858,6 +858,56 @@ mod tests {
     }
 
     #[test]
+    fn stride_packet_retires_each_actual_controller_write_before_cio_end() {
+        // Two stores to the same CPM word must remain two ordered effects.
+        // This is a declared test program, not an original SRAM observation.
+        let words = vec![
+            6 | (1 << 6) | (((CPM >> 34) as u32) << 24),
+            (CPM >> 2) as u32,
+            0,
+            0,
+            0x28e09a01,
+            0,
+            0xd,
+            1 << 16,
+            0,
+        ];
+        let (owner, mut bus, _) = fixture(Some(words), true);
+        let mut pins = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut pins);
+        bus.write(CIO_ADDRESS, Width::Word, 1, &mut access).unwrap();
+        let mut engine = owner.cio_engine().unwrap();
+        let start = engine.packet_pc();
+        for index in 0..2 {
+            assert_eq!(engine.advance(0), Ok(Progress::Packet(PacketKind::Write)));
+            route_write(&mut engine, &mut bus, &mut access);
+            assert_eq!(engine.committed_writes(), index + 1);
+            assert_eq!(bus.read(CPM, Width::Word, &mut access), Ok(0));
+            assert_eq!(bus.read(CIO_ADDRESS, Width::Word, &mut access), Ok(0x10001));
+            if index == 0 {
+                assert_eq!(engine.packet_pc(), start);
+            }
+        }
+        assert_eq!(
+            owner
+                .requests()
+                .iter()
+                .filter(|request| matches!(
+                    request.kind,
+                    RequestKind::AutomaticGating { enabled: false, .. }
+                ))
+                .count(),
+            2
+        );
+        route_write(&mut engine, &mut bus, &mut access);
+        let Progress::Retired(done) = engine.advance(0).unwrap() else {
+            panic!("actual end");
+        };
+        assert_eq!(done.committed_writes, 3);
+        assert_eq!(bus.read(CIO_ADDRESS, Width::Word, &mut access), Ok(0));
+    }
+
+    #[test]
     fn partial_external_effect_and_dropped_handle_cannot_ack_or_duplicate_the_store() {
         let (owner, mut bus, _) = fixture(None, true);
         let mut pins = InterruptLatch::new();
