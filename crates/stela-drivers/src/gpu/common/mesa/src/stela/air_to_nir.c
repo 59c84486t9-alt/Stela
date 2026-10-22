@@ -805,6 +805,10 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
       nir_def *def;
       unsigned slot = 0;
       if (io->semantic == STELA_AIR_STAGE_BUFFER) {
+         /* Full stage metadata/layout validation has already completed. An
+          * actually unused declaration needs no resource binding or SSA value;
+          * a dead instruction using the parameter still counts as a real use. */
+         if (!io->used && !LLVMGetFirstUse(param)) continue;
          if (t->options->bind_ssbo) {
             if (!t->options->bind_ssbo(&io->buffer, &slot, t->options->binding_data) ||
                 slot >= t->options->ssbo_count || slots[slot])

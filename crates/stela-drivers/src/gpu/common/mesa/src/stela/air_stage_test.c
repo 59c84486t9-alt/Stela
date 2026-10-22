@@ -432,6 +432,107 @@ arithmetic_and_lane_semantics(void)
    puts("Stage FP32 fastdivision rounding/FTZ/zero and uint2/3/4conversion boundaries; both conditional PHI paths, masked/escaping poison passed");
 }
 
+struct strict_stage_bindings { unsigned count, expected_count, indices[2]; };
+static bool strict_stage_bind(const struct stela_air_buffer *buffer,unsigned *slot,void *data)
+{
+   struct strict_stage_bindings *b=data;
+   CHECK(buffer->address_space==2 && buffer->access==STELA_AIR_READ);
+   CHECK(b->count<b->expected_count && buffer->index==b->indices[b->count]);
+   *slot=b->count++;return true;
+}
+static nir_def *never_stage_bind(nir_builder *builder,const struct stela_air_buffer *buffer,void *data)
+{
+   (void)builder;(void)buffer;
+   struct strict_stage_bindings *b=data;b->count++;
+   CHECK(!"unused stage declaration invoked resource callback");return NULL;
+}
+static char *unused_buffer_fixture(bool fragment,bool all_unused,bool dead_use)
+{
+   char *a,*b;
+   if(fragment) {
+      a=change(fixture,"<4 x float> %color) { ret <4 x float> %color }",
+         all_unused?"<4 x float> %color, ptr addrspace(2) %fs_buffer, ptr addrspace(2) %fs_unused) { ret <4 x float> %color }":
+         "<4 x float> %color, ptr addrspace(2) %fs_buffer, ptr addrspace(2) %fs_unused) { %loaded = load <4 x float>, ptr addrspace(2) %fs_buffer, align 16\n ret <4 x float> %loaded }");
+      b=change(a,"!13 = !{!14,!15}","!13 = !{!14,!15,!16,!17}");free(a);a=b;
+   } else {
+      a=change(fixture,"ptr addrspace(2) %buffer) {","ptr addrspace(2) %buffer, ptr addrspace(2) %unused) {");
+      b=change(a,"!4 = !{!5,!6}","!4 = !{!5,!6,!8}");free(a);a=b;
+      if(all_unused) {
+         b=change(a," %p = getelementptr %Input, ptr addrspace(2) %buffer, i64 %index, i32 0\n %position = load <4 x float>, ptr addrspace(2) %p, align 16",
+            " %position = fadd <4 x float> zeroinitializer, zeroinitializer");free(a);a=b;
+      }
+      if(dead_use) {
+         b=change(a," %index = zext i32 %id to i64",
+            " %dead = getelementptr <4 x float>, ptr addrspace(2) %unused, i64 0\n %index = zext i32 %id to i64");free(a);a=b;
+      }
+   }
+   const char *extra=fragment?
+      "\n!16 = !{i32 2,!\"air.buffer\",!\"air.location_index\",i32 4,i32 1,!\"air.read\",!\"air.address_space\",i32 2,!\"air.arg_type_size\",i32 16,!\"air.arg_type_align_size\",i32 16,!\"air.arg_type_name\",!\"float4\",!\"air.arg_name\",!\"fs_buffer\"}\n"
+      "!17 = !{i32 3,!\"air.buffer\",!\"air.location_index\",i32 9,i32 1,!\"air.read\",!\"air.address_space\",i32 2,!\"air.arg_type_size\",i32 16,!\"air.arg_type_align_size\",i32 16,!\"air.arg_type_name\",!\"float4\",!\"air.arg_name\",!\"unused\"}\n":
+      "\n!8 = !{i32 2,!\"air.buffer\",!\"air.location_index\",i32 7,i32 1,!\"air.read\",!\"air.address_space\",i32 2,!\"air.arg_type_size\",i32 16,!\"air.arg_type_align_size\",i32 16,!\"air.arg_type_name\",!\"float4\",!\"air.arg_name\",!\"unused\"}\n";
+   b=malloc(strlen(a)+strlen(extra)+1);CHECK(b);strcpy(b,a);strcat(b,extra);free(a);return b;
+}
+static void unused_stage_buffer_semantics(void)
+{
+   const uint32_t position[4]={bits(.125f),bits(-.5f),bits(.75f),bits(1.f)};
+   const uint32_t color[4]={bits(1.f),bits(.5f),bits(.25f),0},zero[4]={0};
+   for(unsigned mode=0;mode<5;mode++) {
+      bool fragment=mode==1||mode==3,all_unused=mode==2||mode==3,dead_use=mode==4;
+      char *text=unused_buffer_fixture(fragment,all_unused,dead_use);
+      LLVMMemoryBufferRef raw=bitcode(text);struct snapshot vs,fs;struct stela_air_error error;
+      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw),"test_vertex",STELA_AIR_VERTEX,capture,&vs,&error));
+      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw),"test_fragment",STELA_AIR_FRAGMENT,capture,&fs,&error));
+      struct snapshot *selected=fragment?&fs:&vs;
+      CHECK(selected->entry.input_count==(fragment?4u:3u));
+      unsigned buffer_at=fragment?2:1,unused_at=fragment?3:2;
+      CHECK(selected->inputs[buffer_at].used==!all_unused && selected->inputs[unused_at].used==dead_use);
+      struct stela_air_varying_slot map[16];unsigned count=0;
+      CHECK(stela_air_link_stage_io(&vs.entry,&fs.entry,16,map,16,&count,&error));
+      struct strict_stage_bindings bindings={.expected_count=all_unused?0u:dead_use?2u:1u,
+         .indices={fragment?4u:0u,7u}};
+      struct stela_air_stage_options o=options(fragment?STELA_AIR_FRAGMENT:STELA_AIR_VERTEX,map,count,NULL);
+      o.resources.binding_data=&bindings;o.resources.bind_ssbo=all_unused?NULL:strict_stage_bind;
+      o.resources.ssbo_count=bindings.expected_count;
+      o.resources.bind_buffer=all_unused?never_stage_bind:NULL;
+      nir_shader *nir=translate(raw,fragment?"test_fragment":"test_vertex",&o);
+      CHECK(bindings.count==bindings.expected_count && nir->info.num_ssbos==bindings.expected_count);
+      if(all_unused) {
+         nir_foreach_function_impl(impl,nir) nir_foreach_block(block,impl) nir_foreach_instr(instr,block) {
+            CHECK(instr->type!=nir_instr_type_undef);
+            if(instr->type==nir_instr_type_intrinsic) {
+               nir_intrinsic_op op=nir_instr_as_intrinsic(instr)->intrinsic;
+               CHECK(op!=nir_intrinsic_get_ssbo_size && op!=nir_intrinsic_load_ssbo && op!=nir_intrinsic_store_ssbo);
+            }
+         }
+         o.resources.bind_buffer=NULL;
+         nir_shader *unbound=translate(raw,fragment?"test_fragment":"test_vertex",&o);
+         CHECK(!unbound->info.num_ssbos && bindings.count==0);ralloc_free(unbound);
+      }
+      if(!fragment && !dead_use) {
+         const struct {const char *old,*replacement;enum stela_air_error_kind kind;} bad[]={
+            {"i32 7,i32 1,!\"air.read\"","i32 7,i32 1,!\"air.write\"",STELA_AIR_ARGUMENT},
+            {"ptr addrspace(2) %unused","ptr addrspace(1) %unused",STELA_AIR_ARGUMENT},
+            {"!\"float4\",!\"air.arg_name\",!\"unused\"","!\"unknown\",!\"air.arg_name\",!\"unused\"",STELA_AIR_ARGUMENT},
+            {"v128:128","v128:256",STELA_AIR_TYPE},
+         };
+         for(unsigned k=0;k<sizeof(bad)/sizeof(bad[0]);k++) {
+            char *invalid=change(text,bad[k].old,bad[k].replacement);bindings.count=0;
+            refusal(invalid,"test_vertex",STELA_AIR_VERTEX,&o,bad[k].kind);
+            CHECK(bindings.count==0);free(invalid);
+         }
+      }
+      LLVMDisposeMemoryBuffer(raw);memset(text,0,strlen(text));free(text);
+      memset(&vs,0,sizeof(vs));memset(&fs,0,sizeof(fs));memset(map,0,sizeof(map));
+      /* Returned NIR may outlive input/borrowed reflection/map. Only test clones
+       * receive constant resource contents through the original NIR passes. */
+      if(fragment && all_unused) specialize(nir,0,color,16,0,0,true);
+      else specialize(nir,0,position,16,0,0,false);
+      outputs(nir,fragment?NULL:all_unused?zero:position,fragment?all_unused?color:position:color);
+      ralloc_free(nir);
+   }
+   puts("Stage used/unused VS+FS: exact resource counts, zero callbacks/SSBO/undef for unused, dead LLVM uses retained, malformed-unused refusal and returned-NIR lifetimes");
+}
+
 static LLVMMemoryBufferRef file(const char *path)
 {
    FILE *f=fopen(path,"rb");CHECK(f && !fseek(f,0,SEEK_END));long n=ftell(f);
@@ -446,6 +547,7 @@ int main(int argc,char **argv)
    glsl_type_singleton_init_or_ref();
    LLVMMemoryBufferRef b=bitcode(fixture);run(b,"test_vertex","test_fragment",false);
    link_and_option_failures(b,"test_vertex","test_fragment");LLVMDisposeMemoryBuffer(b);
+   unused_stage_buffer_semantics();
    primitive_layout_semantics();
    arithmetic_and_lane_semantics();
    if(argc==5 && !strcmp(argv[1],"--input") && !strcmp(argv[3],"--texture")) {
