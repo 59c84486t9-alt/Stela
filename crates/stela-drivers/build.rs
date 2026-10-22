@@ -19,86 +19,47 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     #[cfg(feature = "amd-port")]
     {
-        let mut build = native::configure();
-        build
-            .file("src/gpu/amd/stela/vm_cpu.c")
-            .file("src/gpu/amd/stela/native_bar.c")
-            .file("src/gpu/amd/stela/discovery_binary.c")
-            .file("src/gpu/amd/stela/discovery_file.c")
-            .file("src/gpu/amd/stela/discovery_tmr.c")
-            .file("src/gpu/amd/stela/vram_mm.c")
-            .include("src/gpu/common/linux/include")
-            .std("c11");
-        // Preserve the original IP walk's signed counter semantics locally.
-        native::configure()
-            .file("src/gpu/amd/stela/discovery_ip.c")
-            .file("src/gpu/amd/stela/discovery_info.c")
-            .include("src/gpu/common/linux/include")
-            .flag("-fwrapv")
-            .std("c11")
-            .compile("stela-amd-ip");
-        // Only the original PCI table's shorthand initializers and ARRAY_SIZE
-        // comparison need these warning exceptions; other native TUs keep them.
-        native::configure()
+        // amdgpu's probe admission and IP discovery, from the unchanged
+        // amdgpu_drv.c and amdgpu_discovery.c, and Stela's BAR policy, all in
+        // Stela's Linux environment.
+        let linux = || {
+            let mut build = native::configure();
+            native::linux_environment(
+                &mut build,
+                None,
+                &[
+                    "amd/include/asic_reg",
+                    "amd/include",
+                    "amd/amdgpu",
+                    "amd/pm/inc",
+                    "amd/ras/ras_mgr",
+                    "amd/amdxcp",
+                ],
+            );
+            build
+        };
+        linux()
             .file("src/gpu/amd/stela/pci_match.c")
-            .include("src/gpu/common/linux/include")
-            .flag("-Wno-missing-field-initializers")
-            .flag("-Wno-sign-compare")
-            .std("c11")
-            .compile("stela-amd-pci");
-        // Build the pure C ABI/original-value test helper separately. Only the
-        // cfg(test) Rust link attribute selects it; production links the port.
-        let mut model = native::configure();
-        model
-            .file("src/gpu/amd/tests/vm_ram_test.c")
-            .std("c11")
+            .file("src/gpu/amd/stela/ip_discovery.c")
+            .file("src/gpu/amd/stela/native_bar.c")
+            .compile("stela-amd-port");
+        // Fixtures for the integration test, which links them itself.
+        linux()
+            .file("src/gpu/amd/tests/fixtures.c")
             .cargo_metadata(false)
-            .compile("stela-amd-vm-test");
-        // The donor model uses hosted assertions/stdio; production policy is
-        // freestanding and builds above for both the host and UEFI targets.
-        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("uefi") {
-            let mut bars = native::configure();
-            bars.file("src/gpu/amd/tests/native_bar_test.c")
-                .include("src/gpu/common/linux/include")
-                .define("STELA_AMD_BAR_TEST_LIBRARY", None)
-                .flag("-Wno-unused-function")
-                .std("c11")
-                .cargo_metadata(false)
-                .compile("stela-amd-bar-test");
-        }
+            .compile("stela-amd-test-fixtures");
         for path in [
             "src/gpu/amd/stela",
-            "src/gpu/amd/amdgpu/amdgpu_vm_cpu_entries.h",
-            "src/gpu/amd/amdgpu/amdgpu_gmc_pte.h",
-            "src/gpu/amd/amdgpu/amdgpu_mm_access_core.h",
-            "src/gpu/amd/amdgpu/amdgpu_discovery_tmr_core.h",
-            "src/gpu/amd/amdgpu/amdgpu_discovery_tmr_limits.h",
-            "src/gpu/amd/amdgpu/amdgpu_discovery_ip_core.h",
-            "src/gpu/amd/amdgpu/amdgpu_discovery_info_core.h",
-            "src/gpu/amd/amdgpu/amdgpu_gfx_config.h",
-            "src/gpu/amd/amdgpu/amdgpu_discovery_file_core.h",
-            "src/gpu/amd/amdgpu/amdgpu_ip_types.h",
-            "src/gpu/amd/amdgpu/amdgpu_ip_instance_limits.h",
-            "src/gpu/amd/amdgpu/amdgpu_virt_bootstrap_core.h",
-            "src/gpu/amd/amdgpu/amdgpu_pci_match_core.h",
-            "src/gpu/amd/amdgpu/amdgpu_apu_flags_core.h",
-            "src/gpu/amd/amdgpu/amdgpu_discovery_source_core.h",
-            "src/gpu/amd/include/amd_chip_flags.h",
-            "src/gpu/amd/include/amd_harvest_masks.h",
-            "src/gpu/amd/include/asic_reg/bif/bif_4_1_d.h",
-            "src/gpu/amd/tests/vm_ram_test.c",
-            "src/gpu/amd/tests/native_bar_test.c",
-            "src/gpu/common/linux/include/drm/amd_asic_type.h",
-            "src/gpu/amd/include/discovery.h",
-            "src/gpu/amd/include/soc15_hw_ip.h",
-            "src/gpu/amd/amdgpu/amdgpu_ip_limits.h",
-            "src/gpu/common/linux/include/uapi/linux/stddef.h",
-            "src/gpu/common/linux/include/linux/device-id/pci.h",
-            "src/gpu/common/linux/include/linux/pci_ids.h",
+            "src/gpu/amd/amdgpu",
+            "src/gpu/amd/include",
+            "src/gpu/amd/pm/inc",
+            "src/gpu/amd/ras/ras_mgr",
+            "src/gpu/amd/amdxcp",
+            "src/gpu/amd/tests/fixtures.c",
+            "src/gpu/amd/tests/fixtures.h",
         ] {
             println!("cargo:rerun-if-changed={path}");
         }
-        build.compile("stela-amd-port");
     }
     #[cfg(feature = "amd-commands")]
     amd::build();

@@ -23,7 +23,14 @@ static void drm_printf(struct drm_printer *p, const char *f, ...)
 	stela_drm_printk(drm, STELA_DRM_NOTICE, format, ##__VA_ARGS__)
 #define drm_info(drm, format, ...) \
 	stela_drm_printk(drm, STELA_DRM_INFO, format, ##__VA_ARGS__)
+#define drm_err_once(drm, format, ...) \
+	stela_drm_printk(drm, STELA_DRM_ERR, format, ##__VA_ARGS__)
 #define drm_dbg(drm, format, ...) \
 	stela_drm_printk(drm, STELA_DRM_DBG, format, ##__VA_ARGS__)
 #define drm_WARN_ON(drm, condition) WARN_ON(condition)
+/* Linux's legacy messages name no device. */
+#define DRM_ERROR(format, ...) \
+	stela_drm_printk(NULL, STELA_DRM_ERR, format, ##__VA_ARGS__)
+#define DRM_DEBUG(format, ...) \
+	stela_drm_printk(NULL, STELA_DRM_DBG, format, ##__VA_ARGS__)
 #endif

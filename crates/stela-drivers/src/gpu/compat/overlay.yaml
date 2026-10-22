@@ -7,12 +7,58 @@ version: 0
 root-relative: overlay-dir
 overlay-relative: true
 roots:
+  - {type: file, name: ../amd/include/kgd_pp_interface.h, external-contents: amd/kgd_pp_interface.h} # sha256:1a9f13c25a0973e2e076edae8d1bd7fa4aa6e6a541a5fbec509a8b19c54ef333
+  - {type: file, name: ../amd/amdgpu/amdgpu.h, external-contents: amdgpu/amdgpu.h} # sha256:85a97ef20f12bd17a822284f7c50c4da6518aab2145a02852a3aa3834933c183
+  - {type: file, name: ../amd/amdgpu/amdgpu_amdkfd.h, external-contents: amdgpu/amdgpu_amdkfd.h} # sha256:fccbae149ce8e4a225546a4c29286c371fe877f0abcc956f6d8962bf43c41269
+  - {type: file, name: ../amd/amdgpu/amdgpu_ctx.h, external-contents: amdgpu/amdgpu_ctx.h} # sha256:322c10d9fbed16c073dd5239e3cba7c87a51d8a9f2172072cc7f035f6079d33f
+  - {type: file, name: ../amd/amdgpu/amdgpu_debugfs.h, external-contents: amdgpu/amdgpu_debugfs.h} # sha256:bb336696f19bdb79b260645bccbc867c9478435916cda5d4f347846130569952
+  - {type: file, name: ../amd/amdgpu/amdgpu_dma_buf.h, external-contents: amdgpu/amdgpu_dma_buf.h} # sha256:0cc6ebf1bf46f09d7c71458051564d49a426ce169b0d2657f6a44034f9b92648
+  - {type: file, name: ../amd/amdgpu/amdgpu_eviction_fence.h, external-contents: amdgpu/amdgpu_eviction_fence.h} # sha256:89b0682aef18157414415efcd46bb9cc0bbb56dfeef6e944a47da2992d053aa7
+  - {type: file, name: ../amd/amdgpu/amdgpu_fdinfo.h, external-contents: amdgpu/amdgpu_fdinfo.h} # sha256:5e3fecf96241ef5f2dec05c8c944f63a5b47f90fe650b530eab9723709139259
+  - {type: file, name: ../amd/amdgpu/amdgpu_gem.h, external-contents: amdgpu/amdgpu_gem.h} # sha256:51fefa183fcd0624e8ad997c493e6973133c1ec396c3250f98d722e1f8f6998f
+  - {type: file, name: ../amd/amdgpu/amdgpu_gfx.h, external-contents: amdgpu/amdgpu_gfx.h} # sha256:a84d2c4c0663b9cd45099433b00dba10510747d180f08012efd9c7d6988a63b5
+  - {type: file, name: ../amd/amdgpu/amdgpu_gmc.h, external-contents: amdgpu/amdgpu_gmc.h} # sha256:6c1ead590e2c49fd80c1e6b17cd80bee0d926c80dce94e22c638d34ff95532af
+  - {type: file, name: ../amd/amdgpu/amdgpu_irq.h, external-contents: amdgpu/amdgpu_irq.h} # sha256:72aa3eadfe439463982331d5ccf011339d80c91a2556212474e12dfdb04fdc0b
+  - {type: file, name: ../amd/amdgpu/amdgpu_isp.h, external-contents: amdgpu/amdgpu_isp.h} # sha256:b2fd391e285b54f820ede094208b8a5aa2f0678ca3b0f617e5f32d51ad12140e
+  - {type: file, name: ../amd/amdgpu/amdgpu_lockdep.h, external-contents: amdgpu/amdgpu_lockdep.h} # sha256:99df6099626efd27fcdc9ed826b57ad8c90ceb6f43bd96caabaeb5654177d85f
+  - {type: file, name: ../amd/amdgpu/amdgpu_mode.h, external-contents: amdgpu/amdgpu_mode.h} # sha256:d3f0b50ee7d093e666bc6c59a6eddc9f11d99e2467ad884f17a8d47ed1e344c5
+  - {type: file, name: ../amd/amdgpu/amdgpu_psp.h, external-contents: amdgpu/amdgpu_psp.h} # sha256:9bd9b9409869064d913c0f69dc655c637772d8dc4b18eb023f2be32eed90186f
+  - {type: file, name: ../amd/amdgpu/amdgpu_ras.h, external-contents: amdgpu/amdgpu_ras.h} # sha256:caed74a3a21df0137d7e7a60661cdac0422c6eb20e60f32451fb0ba871c7b054
+  - {type: file, name: ../amd/amdgpu/amdgpu_ras_eeprom.h, external-contents: amdgpu/amdgpu_ras_eeprom.h} # sha256:c5403faceaae6f01a4b22b09e46e7f3c8754c2bc790c0f59c154546d98acc002
+  - {type: file, name: ../amd/amdgpu/amdgpu_reset.h, external-contents: amdgpu/amdgpu_reset.h} # sha256:5959341d0fa60f1e37e9b61c510029251bf101f336c0e03c84d016ea6ce8bd7e
+  - {type: file, name: ../amd/amdgpu/amdgpu_ring.h, external-contents: amdgpu/amdgpu_ring.h} # sha256:c1a769c1aebfea37b90d1108f4e801e37ff4f9dcb0e47d9d6f9bf90d15aa3ed0
+  - {type: file, name: ../amd/amdgpu/amdgpu_sched.h, external-contents: amdgpu/amdgpu_sched.h} # sha256:647dd427a65e2abbbaf60f6e8e7002fd8da1d67c2186153a5c26bf0f0a64771e
+  - {type: file, name: ../amd/amdgpu/amdgpu_sdma.h, external-contents: amdgpu/amdgpu_sdma.h} # sha256:0d90a2e8288b5e17d0bed60d87aeb4581d483feafe7a9cde31d1bb4331a8329d
+  - {type: file, name: ../amd/amdgpu/amdgpu_sync.h, external-contents: amdgpu/amdgpu_sync.h} # sha256:0854e802504a6637d252b063ca11b139f10676320f3fb5efc70481374931098f
+  - {type: file, name: ../amd/amdgpu/amdgpu_ucode.h, external-contents: amdgpu/amdgpu_ucode.h} # sha256:222b508dfd40897ead5aecd207ab54c015c311c50e96246a962c1eb29c63b1e0
+  - {type: file, name: ../amd/amdgpu/amdgpu_umsch_mm.h, external-contents: amdgpu/amdgpu_umsch_mm.h} # sha256:cb4e82f1f30be4e8536f78375942b498647a651de6cce75d48facc032567a19b
+  - {type: file, name: ../amd/amdgpu/amdgpu_userq.h, external-contents: amdgpu/amdgpu_userq.h} # sha256:258176f644a3e2b40ce2b780ca9085cb0e48a2f1c5e68894dc2e4fbaea89cce0
+  - {type: file, name: ../amd/amdgpu/amdgpu_userq_fence.h, external-contents: amdgpu/amdgpu_userq_fence.h} # sha256:9c1a05c12675312297bf4168ab8c4f430a9a271f9d0b90527afda41caa882061
+  - {type: file, name: ../amd/amdgpu/amdgpu_vcn.h, external-contents: amdgpu/amdgpu_vcn.h} # sha256:d2ea1f3a54dbc9db92502a2b9bc7a87cdeba13b3aa24976276eaafa8d60f3aa4
+  - {type: file, name: ../amd/amdgpu/amdgpu_virt.h, external-contents: amdgpu/amdgpu_virt.h} # sha256:ffbd3e2e24011bc610e67fbb814279dfd6869c8dca5349a98748e136b40f1e1f
+  - {type: file, name: ../amd/amdgpu/amdgpu_vkms.h, external-contents: amdgpu/amdgpu_vkms.h} # sha256:dd5ea1d4177ce2f4c34d359118b60d6b5910c0db4bee28d330cd95810f003189
+  - {type: file, name: ../amd/amdgpu/amdgpu_vm.h, external-contents: amdgpu/amdgpu_vm.h} # sha256:77e800c81b2efb28d279aba03385b0c06289999e8f71afcedf1ee9ace160b2dd
+  - {type: file, name: ../amd/amdgpu/amdgpu_vpe.h, external-contents: amdgpu/amdgpu_vpe.h} # sha256:7b4975f64c08e192f8a43a84bb20a6306640628993b5a6b7b2e4c80a15aa163a
+  - {type: file, name: ../amd/amdgpu/amdgpu_xcp.h, external-contents: amdgpu/amdgpu_xcp.h} # sha256:e26b4de28493dfe30af65fe167c3bd3e2dc7d21e948fff40d93509f527e96fc8
+  - {type: file, name: ../amd/amdgpu/amdgpu_xgmi.h, external-contents: amdgpu/amdgpu_xgmi.h} # sha256:28dba14846cb0470ce12a90545c24e557b7c7e38a8e071677134d93005d418e3
+  - {type: file, name: ../amd/amdxcp/amdgpu_xcp_drv.h, external-contents: amdxcp/amdgpu_xcp_drv.h} # sha256:44579c180599a36eee768e2df8065c1588eec1b6999127896d9e5aa0721f5ce7
   - {type: file, name: ../common/linux/include/drm/drm_color_mgmt.h, external-contents: drm/drm_color_mgmt.h} # sha256:0e6c671b93d4df93ac488c6f01786441852a115c38b81e814eecd2148bda6fca
+  - {type: file, name: ../common/linux/include/drm/drm_connector.h, external-contents: drm/drm_connector.h} # sha256:15b0ac8ffc57ad180ed4e18d1d18c0af49e5cd61ef18843ee3896077fbb2bdcc
+  - {type: file, name: ../common/linux/include/drm/drm_crtc.h, external-contents: drm/drm_crtc.h} # sha256:7718da9b9f818d8e45b998e2b98652c299794782d8933173d15bf9b40ce925ac
   - {type: file, name: ../common/linux/include/drm/drm_device.h, external-contents: drm/drm_device.h} # sha256:e1e5cef551ef6d051856baabf77d241d10899e1c9b85d4f992b554791ebcb50c
   - {type: file, name: ../common/linux/include/drm/drm_drv.h, external-contents: drm/drm_drv.h} # sha256:66242b7bb8c93671e3b23791daac0d521d8cccac37370b7dd046748798bde47e
+  - {type: file, name: ../common/linux/include/drm/drm_file.h, external-contents: drm/drm_file.h} # sha256:c180ffe1e58385ff50962ac7f00dd714798044ad78c399042dbc01e98b5abf68
+  - {type: file, name: ../common/linux/include/drm/drm_fourcc.h, external-contents: drm/drm_fourcc.h} # sha256:96caef825e036aeb4736fec6614b39ea5d4d7fa0e8eb81f7d10fc8e40be5338c
+  - {type: file, name: ../common/linux/include/drm/drm_gem.h, external-contents: drm/drm_gem.h} # sha256:c25c036d5a7514c265926e66dc994d9df6b669c7a1c109d0d56fe4e456abfee3
   - {type: file, name: ../common/linux/include/drm/drm_managed.h, external-contents: drm/drm_managed.h} # sha256:18c8af7e58168c5e5cb9d3a66ff75975219c8d9895e6946eb38f3951779d3707
+  - {type: file, name: ../common/linux/include/drm/drm_mode_config.h, external-contents: drm/drm_mode_config.h} # sha256:fada32bed522d55563e5e26e6c7b04bdfacc23645dff48ea3e5745e832ba8ae0
+  - {type: file, name: ../common/linux/include/drm/drm_modeset_lock.h, external-contents: drm/drm_modeset_lock.h} # sha256:c41c21cd102a3a5a42ffa2be8599308fdb962bc7fc5ea15fbda7cbc1e2958244
   - {type: file, name: ../common/linux/include/drm/drm_print.h, external-contents: drm/drm_print.h} # sha256:00c6b2883e81ed9a986b7226861cef2922473e5e3cb48b0b2c551269d11dcb95
+  - {type: file, name: ../common/linux/include/drm/drm_probe_helper.h, external-contents: drm/drm_probe_helper.h} # sha256:bcafa5e1b9751c3518348f8deee0de9532f7d70f8eb88233583bbfd7784a842f
   - {type: file, name: ../common/linux/include/drm/drm_util.h, external-contents: drm/drm_util.h} # sha256:263cc418eee6cbbd34a4cfe36f6d9a18933704b22024fd627ff921a195f72ff4
+  - {type: file, name: ../common/linux/include/drm/drm_vblank.h, external-contents: drm/drm_vblank.h} # sha256:5cae1b75be204babe8d6b867e567ce54f0e86cf06b6c9ba7508b2bce64df4978
+  - {type: file, name: ../common/linux/include/drm/gpu_scheduler.h, external-contents: drm/gpu_scheduler.h} # sha256:33eb47a80a323e10bad6079aff835997da1f5d3415dfd627cef6fd79c741f016
+  - {type: file, name: ../common/linux/include/drm/clients/drm_client_setup.h, external-contents: drm/clients/drm_client_setup.h} # sha256:43105064511faa076c0b3a217e886d8babb8ce45c73c198f7f498d579fcf99c8
   - {type: file, name: ../intel/i915/i915_drv.h, external-contents: i915/i915_drv.h} # sha256:9474f2666449dc78bb97c4b22a7e14279c3182b49c90d4a73df5a9b4c6b71620
   - {type: file, name: ../intel/i915/i915_gem.h, external-contents: i915/i915_gem.h} # sha256:97c63eba5158c4a41cc51ff68117d7beebfb1cc09d3dbcab7a223917fa791159
   - {type: file, name: ../intel/i915/i915_request.h, external-contents: i915/i915_request.h} # sha256:628ac4266f3f43ec878af2a2b00ca749aad37224980dc9c494555c27073a68d9
@@ -29,29 +75,48 @@ roots:
   - {type: file, name: ../common/linux/include/linux/build_bug.h, external-contents: linux/build_bug.h} # sha256:b07d5766598af42aa57e398e9ceb89ee8f73da6efac2b81192426ebf43f46ec9
   - {type: file, name: ../common/linux/include/linux/compiler.h, external-contents: linux/compiler.h} # sha256:7eeaa0a6fcc1839428b69ffb78b87d9580a5d2b2c81f0ee6b0797054b2ca72b7
   - {type: file, name: ../common/linux/include/linux/compiler_types.h, external-contents: linux/compiler_types.h} # sha256:879a8d3fe36bcf8b7b4a6de88c17f8297599d9aea5cd9d9336bb87dd4902e535
+  - {type: file, name: ../common/linux/include/linux/console.h, external-contents: linux/console.h} # sha256:6b84c2ec9b7e8cd08c5e742fef9cee5296010fce5a566fba519eb443330ad5a3
+  - {type: file, name: ../common/linux/include/linux/debugfs.h, external-contents: linux/debugfs.h} # sha256:5120e2079d8246f135ecc7ea4c5c7e3c2232bd0d416e760a731c52585c56ae09
   - {type: file, name: ../common/linux/include/linux/delay.h, external-contents: linux/delay.h} # sha256:015b3a25e89b522d1131820109f09f8ddef5b42f35b8d2e20a0ed4259f8bf916
+  - {type: file, name: ../common/linux/include/linux/dev_printk.h, external-contents: linux/dev_printk.h} # sha256:ba476a7261040b824eedb7d55a97c3f65be10870deb73baf8700c4310c56c769
+  - {type: file, name: ../common/linux/include/linux/device.h, external-contents: linux/device.h} # sha256:0b969470fc9791cf21e4fb232d1bc8558a1bf8e56119ff5df427b07ca43891b1
+  - {type: file, name: ../common/linux/include/linux/dynamic_debug.h, external-contents: linux/dynamic_debug.h} # sha256:f382fca91a0033d2d6a5d90e30d59bd6336d7f15a29e33ba3291cfdaec28f108
   - {type: file, name: ../common/linux/include/linux/fault-inject.h, external-contents: linux/fault-inject.h} # sha256:4597a6dec909b5f6868dbdc4ed53c9d44910bec13599fbfdd625142dde2f8c75
   - {type: file, name: ../common/linux/include/linux/firmware.h, external-contents: linux/firmware.h} # sha256:987b248daad80ac79231d4f3aefc607e3c345440b04531a895ef05ac0cb35fa8
+  - {type: file, name: ../common/linux/include/linux/fs.h, external-contents: linux/fs.h} # sha256:e4bf4fea744e2b336dc219837f7d3266f0bd09a6fa62e60a5b78f2a810579631
+  - {type: file, name: ../common/linux/include/linux/io.h, external-contents: linux/io.h} # sha256:f29a80797eefafbac9a9a63365d1fe1df01b78be1e23ef908f27425dda93dae5
   - {type: file, name: ../common/linux/include/linux/iosys-map.h, external-contents: linux/iosys-map.h} # sha256:d2a7b810a8b0853878972dae1f2dcd1b35e936426847d504effe0911c90adf9f
+  - {type: file, name: ../common/linux/include/linux/kobject.h, external-contents: linux/kobject.h} # sha256:738ac20fc427b8af3d5ee65c0920f64ecf3e023293edc622f8344e33400e9ee7
   - {type: file, name: ../common/linux/include/linux/kref.h, external-contents: linux/kref.h} # sha256:3fa8f3c2fb88e43c2c1d2c2cde1a4cace78d1e586d0f53563d51dc43e2499c50
   - {type: file, name: ../common/linux/include/linux/limits.h, external-contents: linux/limits.h} # sha256:0ed7dfdba324e0ce1fc732cd580338a2535727cc6a2103af9fbe027601092e33
   - {type: file, name: ../common/linux/include/linux/log2.h, external-contents: linux/log2.h} # sha256:e0b06d79199b142aed20ed052677f52a6f7e3dc58eeea421ecd677faa83acc0b
   - {type: file, name: ../common/linux/include/linux/math.h, external-contents: linux/math.h} # sha256:e0437f2850ef21b25d7f574830d2213cfc97441883624577d7bf1fd7e61adcf1
   - {type: file, name: ../common/linux/include/linux/minmax.h, external-contents: linux/minmax.h} # sha256:1bf125042d9ef0c1892a99d1db8daf85171dd21e2afbe7f99f60a2df97488aa9
   - {type: file, name: ../common/linux/include/linux/mm.h, external-contents: linux/mm.h} # sha256:9afc342cd0c0135f8a05d030265404a4f80be211166ea748ebdc2a994d73a342
+  - {type: file, name: ../common/linux/include/linux/mmu_notifier.h, external-contents: linux/mmu_notifier.h} # sha256:22a54dbb00bf07558bbc7ed144bc43d4f620a38d97de423d4afe3c5c0ae5b4bd
   - {type: file, name: ../common/linux/include/linux/module.h, external-contents: linux/module.h} # sha256:5fc2b60606c87968c5f4c2b1a5a690834206879f40a74d2ac12b59256e3a3ab3
   - {type: file, name: ../common/linux/include/linux/mutex.h, external-contents: linux/mutex.h} # sha256:b1258cbbaa568dca5c876518669166f70fad6294bc956c860b3ead5d0efc384f
   - {type: file, name: ../common/linux/include/linux/pagewalk.h, external-contents: linux/pagewalk.h} # sha256:ea7d507f5db2f0ca4d48036091d5b9c1144d3b09e4232fc3d817c3b29ee8110f
+  - {type: file, name: ../common/linux/include/linux/panic.h, external-contents: linux/panic.h} # sha256:f9f64576a0aab7ad06c003ba4fffe4729def421a532a50ee36a813c90d37c6a8
   - {type: file, name: ../common/linux/include/linux/pci.h, external-contents: linux/pci.h} # sha256:cac298a06cf955ce7bc9f9c1a415345481387e20dfeda153bfca5850659b589d
+  - {type: file, name: ../common/linux/include/linux/platform_device.h, external-contents: linux/platform_device.h} # sha256:666168ef89ed5bc165ec3bba61038c705792daf1fff8502450bf55317c090dee
+  - {type: file, name: ../common/linux/include/linux/pm.h, external-contents: linux/pm.h} # sha256:a510acd381ebd1675bd9d95f1b697c18c71bd033fb30d043bc5a87ece16df3c3
   - {type: file, name: ../common/linux/include/linux/pm_runtime.h, external-contents: linux/pm_runtime.h} # sha256:1c1383101d72ce3028df6d9ad3640c2020a041f5c1820b1698d1657b648b04f6
+  - {type: file, name: ../common/linux/include/linux/printk.h, external-contents: linux/printk.h} # sha256:f5d76bab63860835928b27bc2beb15205d7906aba731e280c494cd7281d7292a
   - {type: file, name: ../common/linux/include/linux/rcupdate.h, external-contents: linux/rcupdate.h} # sha256:d2d7cf066082a4e44a0bb5317a8791bdffc797638c2c6daffd48fbdfff43afe9
   - {type: file, name: ../common/linux/include/linux/slab.h, external-contents: linux/slab.h} # sha256:93c9c62dcbf49a339104c4eb14aff4dd13ffafafb10bdddd66c304eaacad7e50
   - {type: file, name: ../common/linux/include/linux/spinlock.h, external-contents: linux/spinlock.h} # sha256:66efd3c65e5d83b93748c6adfb09f20103398e7a8649b1a303f3ac502cc5f93b
   - {type: file, name: ../common/linux/include/linux/sprintf.h, external-contents: linux/sprintf.h} # sha256:72a0226d5631211916ccce67a50033e53f0bba043ca39823d4f346179ecff9df
   - {type: file, name: ../common/linux/include/linux/stddef.h, external-contents: linux/stddef.h} # sha256:be64ec13fdb2d724c1830ebcd04854612ccab9593e2d829011c8352f73a378b2
   - {type: file, name: ../common/linux/include/linux/string.h, external-contents: linux/string.h} # sha256:4dbc380b35f81d4e3992abae48fbb23b4f392fd28f633d0d96114be166d5dfd5
+  - {type: file, name: ../common/linux/include/linux/suspend.h, external-contents: linux/suspend.h} # sha256:e1c9f7487235cc525f9232b2e026328c70b56e02c8d056fb3453834a12a8d71b
+  - {type: file, name: ../common/linux/include/linux/sysfs.h, external-contents: linux/sysfs.h} # sha256:a4d774ac686de74d5be9ac9469065e1571c215878fb921c6c08cb28fb5f988af
   - {type: file, name: ../common/linux/include/linux/types.h, external-contents: linux/types.h} # sha256:b12aab0f1569ba0dd6843839aa15515a414c171d3fedd583c9aa835a81b4561b
+  - {type: file, name: ../common/linux/include/linux/vga_switcheroo.h, external-contents: linux/vga_switcheroo.h} # sha256:51f6d3b8df055e7c2afdba1a4c264a9f66cd25f770f56c5a9ce9eccaf86a4400
+  - {type: file, name: ../common/linux/include/linux/xarray.h, external-contents: linux/xarray.h} # sha256:be3707d0f78bbf6ddf64ac16885f0ed4c6ccd083cc3d8197e92f3a9ad2c03dd4
   - {type: file, name: ../common/linux/include/linux/device/driver.h, external-contents: linux/device/driver.h} # sha256:cc49bafcca73cbddd8c6d3fd4066186ac6ad8519752cca412df171a35bd1f76e
+  - {type: file, name: ../amd/pm/inc/amdgpu_dpm.h, external-contents: pm/amdgpu_dpm.h} # sha256:d92a7fd32aa7a929c4802e370fc6064aa1c145aa4e8ff94962f3299e5ce590f0
+  - {type: file, name: ../amd/ras/ras_mgr/amdgpu_ras_mgr.h, external-contents: ras/ras_mgr/amdgpu_ras_mgr.h} # sha256:0cb26c5c22fae195187e8dd59630ee2880e4bf604af28a04429a2d5f2f42d2a2
   - {type: file, name: ../intel/xe/xe_assert.h, external-contents: xe/xe_assert.h} # sha256:10cd759ab558ae11449b4a42e55bf9594334c0ed7f9f804dfb359569f0ecf5d8
   - {type: file, name: ../intel/xe/xe_bo.h, external-contents: xe/xe_bo.h} # sha256:c8efbf1ba222730038a007a6eeeff9df1cae6276cd0d0029edb946fa233b60a7
   - {type: file, name: ../intel/xe/xe_device.h, external-contents: xe/xe_device.h} # sha256:858cc634609733be5d9fb1d17453ae2268d01c80ff1c004f0b9250c5c41e5340

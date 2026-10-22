@@ -17,10 +17,15 @@ pub fn require_sources() {
 /// Linux's warning profile rather than Stela's. `compat/overlay.yaml` puts each
 /// shadow in place of the upstream header it replaces, however a source names
 /// it. `generated` holds headers Linux's build generates, `drivers` the
-/// upstream driver directories, and `compat/` comes last for the asm/ and
-/// generated/ headers that Linux's arch tree and build supply.
+/// upstream driver directories. `compat/` follows Linux's include trees for the
+/// asm/ and generated/ headers that Linux's arch tree and build supply, then
+/// the x86 uapi headers.
 #[cfg(any(feature = "intel-port", feature = "amd-port"))]
-pub fn linux_environment(build: &mut cc::Build, generated: &std::path::Path, drivers: &[&str]) {
+pub fn linux_environment(
+    build: &mut cc::Build,
+    generated: Option<&std::path::Path>,
+    drivers: &[&str],
+) {
     let gpu = "src/gpu";
     let linux = format!("{gpu}/common/linux/include");
     build
@@ -30,14 +35,16 @@ pub fn linux_environment(build: &mut cc::Build, generated: &std::path::Path, dri
         .flag("-include")
         .flag(format!("{linux}/linux/kconfig.h"))
         .flag("-include")
-        .flag(format!("{linux}/linux/compiler_types.h"))
-        .flag("-isystem")
-        .flag(generated);
+        .flag(format!("{linux}/linux/compiler_types.h"));
+    if let Some(generated) = generated {
+        build.flag("-isystem").flag(generated);
+    }
     let directories = drivers.iter().map(|driver| format!("{gpu}/{driver}"));
     for directory in directories.chain([
         linux.clone(),
         format!("{linux}/uapi"),
         format!("{gpu}/compat"),
+        format!("{gpu}/common/linux/arch/x86/include/uapi"),
     ]) {
         build.flag("-isystem").flag(directory);
     }

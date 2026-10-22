@@ -8,7 +8,7 @@ pub fn configure(build: &mut cc::Build) {
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
     super::native::linux_environment(
         build,
-        &output.join("intel-generated"),
+        Some(&output.join("intel-generated")),
         &["intel/xe", "intel/i915"],
     );
     build

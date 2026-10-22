@@ -1,4 +1,4 @@
-//! Owned system-RAM storage for the retained AMD CPU page-table writer.
+//! Owned system-RAM storage for amdgpu's CPU page-table writer.
 //!
 //! This module does not create a BO, GPU VM/root binding or GPU address space.
 //! The canonical platform allocator and attached DMA domain supply all storage.
@@ -7,7 +7,7 @@ use crate::bus::dma::{
     memory::{CacheAttribute, CpuMapping, MemoryError, PageSource},
 };
 use alloc::sync::Arc;
-use core::{ffi::c_void, marker::PhantomData, ptr};
+use core::{ffi::c_void, marker::PhantomData};
 
 /// AMDGPU_GPU_PAGE_SIZE in the retained amdgpu headers, independently of the
 /// native CPU page size. These are ordinary system-memory leaf PTE updates.
@@ -18,8 +18,7 @@ pub enum StorageError {
     Memory(MemoryError),
     Dma(DmaError),
     InvalidRange,
-    NativeMappingUnavailable,
-    NativeContract { status: i32 },
+    MappingUnavailable,
 }
 
 /// An error after CPU stores may leave a modified, unpublished table. The real
@@ -136,7 +135,7 @@ impl RamPageTable {
         self.dma.address().map_err(StorageError::Dma)
     }
 
-    /// Write bounded leaf PTEs using the original CPU loop, then perform the
+    /// Write bounded leaf PTEs with amdgpu's CPU loop, then perform the
     /// canonical DMA domain's actual CPU-to-device visibility operation.
     /// Success reports CPU entries written; it does not publish a GPU mapping.
     /// A DMA visibility error reports the written count and retains ownership.
@@ -187,47 +186,26 @@ impl RamPageTable {
         let address = source_base
             .checked_add(update.source_offset as u64)
             .ok_or_else(|| fail(StorageError::InvalidRange))?;
-        let native = NativeUpdate {
-            table_bytes: self.bytes() as u64,
-            table_offset: update.table_offset as u64,
-            address,
-            flags: update.flags,
-            count: update.count,
-            increment: GPU_PAGE_BYTES as u32,
-            pages_addr: ptr::null(),
-            num_pages: 0,
-            cpu_page_shift: 0,
-            override_pte: update.override_pte,
-        };
-        let mut context = EntryContext {
-            cpu: &self.cpu,
-            gmc,
-        };
-        let ops = NativeOps {
-            map_table,
-            override_flags,
-            set_pte_pde,
-        };
-        let mut written = 0;
-        // SAFETY: the CPU mapping and source lease remain live; Rust preflight
-        // plus C bounds checks cover all destinations. The caller supplies the
-        // real exclusive initialized GMC and hardware lifecycle obligations.
-        let status = unsafe {
-            stela_amd_vm_cpu_write(
-                &native,
-                &ops,
-                ptr::from_mut(&mut context).cast(),
-                &mut written,
-            )
-        };
-        if status != 0 || written != update.count {
-            let error = match status {
-                1 => StorageError::InvalidRange,
-                2 => StorageError::NativeMappingUnavailable,
-                _ => StorageError::NativeContract { status },
-            };
-            return Err(UpdateError { error, written });
+        if update.count == 0 {
+            return Ok(0);
         }
+        let table = self
+            .cpu
+            .address(update.table_offset, table_bytes)
+            .map_err(|_| fail(StorageError::MappingUnavailable))?;
+        // amdgpu_vm_cpu_update for a contiguous source, which has no pages_addr.
+        let mut flags = update.flags;
+        if update.override_pte {
+            // SAFETY: the initialized GMC callback's contract covers these arguments.
+            unsafe { (gmc.override_flags)(gmc.context, address, &mut flags) };
+        }
+        for index in 0..update.count {
+            let entry = address + u64::from(index) * GPU_PAGE_BYTES as u64;
+            // SAFETY: the mapping covers count entries from the checked offset;
+            // the initialized GMC callback owns the architecture-correct store.
+            unsafe { (gmc.set_pte_pde)(gmc.context, table.as_ptr().cast(), index, entry, flags) };
+        }
+        let written = update.count;
         if written != 0 {
             self.dma
                 .sync_for_device(update.table_offset..update.table_offset + table_bytes)
@@ -253,83 +231,6 @@ impl RamPageTable {
     }
 }
 
-#[repr(C)]
-struct NativeUpdate {
-    table_bytes: u64,
-    table_offset: u64,
-    address: u64,
-    flags: u64,
-    count: u32,
-    increment: u32,
-    pages_addr: *const u64,
-    num_pages: u64,
-    cpu_page_shift: u32,
-    override_pte: bool,
-}
-
-#[repr(C)]
-struct NativeOps {
-    map_table: unsafe extern "C" fn(*mut c_void, u64, u64) -> *mut c_void,
-    override_flags: unsafe extern "C" fn(*mut c_void, u64, *mut u64),
-    set_pte_pde: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, u64, u64),
-}
-
-const _: () = {
-    assert!(size_of::<NativeUpdate>() == 64);
-    assert!(core::mem::offset_of!(NativeUpdate, count) == 32);
-    assert!(core::mem::offset_of!(NativeUpdate, pages_addr) == 40);
-    assert!(core::mem::offset_of!(NativeUpdate, override_pte) == 60);
-    assert!(size_of::<NativeOps>() == 3 * size_of::<usize>());
-};
-
-struct EntryContext<'a, 'gmc> {
-    cpu: &'a CpuMapping,
-    gmc: &'a mut GmcCpuCallbacks<'gmc>,
-}
-
-unsafe extern "C" fn map_table(context: *mut c_void, offset: u64, bytes: u64) -> *mut c_void {
-    // SAFETY: context is this call's live, synchronous EntryContext.
-    let context = unsafe { &*context.cast::<EntryContext<'_, '_>>() };
-    let (Ok(offset), Ok(bytes)) = (usize::try_from(offset), usize::try_from(bytes)) else {
-        return ptr::null_mut();
-    };
-    context
-        .cpu
-        .address(offset, bytes)
-        .map_or(ptr::null_mut(), |p| p.as_ptr().cast())
-}
-
-unsafe extern "C" fn override_flags(context: *mut c_void, address: u64, flags: *mut u64) {
-    // SAFETY: exclusive context is live for this synchronous C callback; the
-    // initialized GMC contract covers its retained owner and flag pointer.
-    let context = unsafe { &mut *context.cast::<EntryContext<'_, '_>>() };
-    // SAFETY: the initialized GMC callback's contract covers these arguments.
-    unsafe { (context.gmc.override_flags)(context.gmc.context, address, flags) }
-}
-
-unsafe extern "C" fn set_pte_pde(
-    context: *mut c_void,
-    mapping: *mut c_void,
-    index: u32,
-    address: u64,
-    flags: u64,
-) {
-    // SAFETY: C preflight bounded this mapped destination and index. The actual
-    // initialized GMC callback owns the architecture-correct synchronous store.
-    let context = unsafe { &mut *context.cast::<EntryContext<'_, '_>>() };
-    // SAFETY: the initialized GMC callback's contract covers these arguments.
-    unsafe { (context.gmc.set_pte_pde)(context.gmc.context, mapping, index, address, flags) }
-}
-
-unsafe extern "C" {
-    fn stela_amd_vm_cpu_write(
-        update: *const NativeUpdate,
-        ops: *const NativeOps,
-        context: *mut c_void,
-        written: *mut u32,
-    ) -> i32;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,7 +246,7 @@ mod tests {
     use core::{
         alloc::Layout,
         ops::Range,
-        ptr::NonNull,
+        ptr::{self, NonNull},
         sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     };
 
@@ -513,17 +414,14 @@ mod tests {
         // SAFETY: retained C preflight bounds the actual mapped model storage.
         let gmc = unsafe { &mut *context.cast::<ModelGmc>() };
         gmc.writes += 1;
-        let value = unsafe { stela_amd_test_gmc_pte_value(address, 0x0000_ffff_ffff_f000, flags) };
+        // amdgpu_gmc_set_pte_pde's encoding.
+        let value = (address & 0x0000_ffff_ffff_f000) | flags;
         unsafe {
             mapping
                 .cast::<u64>()
                 .add(index as usize)
                 .write_volatile(value)
         };
-    }
-    #[link(name = "stela-amd-vm-test", kind = "static")]
-    unsafe extern "C" {
-        fn stela_amd_test_gmc_pte_value(address: u64, mask: u64, flags: u64) -> u64;
     }
 
     fn table(source: &ModelSource, domain: Arc<ModelDomain>, bytes: usize) -> RamPageTable {

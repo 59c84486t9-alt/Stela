@@ -41,7 +41,7 @@ stela_amd_native_bar_layout(uint32_t asic_type, uint64_t doorbell_bar_bytes,
       if (!count || bytes > INT_MAX || bytes > doorbell_bar_bytes)
          return STELA_AMD_BAR_UNREPRESENTABLE;
       result.kernel_doorbell_bytes = bytes;
-      result.kernel_doorbells = bytes / 4;
+      result.kernel_doorbells = (uint32_t)(bytes / 4);
    }
    *layout = result;
    return STELA_AMD_BAR_OK;

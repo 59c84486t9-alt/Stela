@@ -1,50 +1,46 @@
-//! Original AMDGPU PCI matching and phase-specific discovery source selection.
-//! This binds identity/policy to an actual borrowed PCI function; it neither
-//! reserves resources nor establishes initialization, topology or GPU readiness.
+//! amdgpu's PCI probe admission, run by the unchanged amdgpu_drv.c. This binds
+//! the result to an actual borrowed PCI function; it neither reserves resources
+//! nor initializes, enables or claims the device.
 use crate::bus::pci::{Address, ConfigSpace, Function};
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::c_int;
 
-/// Actual native build/user/platform policy corresponding to the original probe.
-/// These are configuration inputs, not hardware readiness/capability booleans.
-#[derive(Clone, Copy, Debug)]
+/// amdgpu's module parameters that decide matching and discovery, with Linux's
+/// defaults. As in Linux they are global: each call sets them for every device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Policy {
-    pub si_built: bool,
-    pub cik_built: bool,
-    pub radeon_built: bool,
-    pub si_support: i32,
-    pub cik_support: i32,
-    pub experimental: i32,
+    pub exp_hw_support: i32,
     pub discovery: i32,
-    pub force_asic: i32,
-    pub memory_encrypted: bool,
-    pub firmware_drivers_only: bool,
-    pub modeset: i32,
+    pub force_asic_type: i32,
 }
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            exp_hw_support: 0,
+            discovery: -1,
+            force_asic_type: -1,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Absent,
     UnsupportedHeader,
     IdentityChanged,
+    /// The negative status amdgpu's probe returns.
     Native(c_int),
     InvalidNativeResult,
 }
+
+/// How Linux brings up the matched ASIC's IP blocks: from the fixed VI or SOC15
+/// tables, or from the IP discovery binary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IpPath {
-    SiStatic,
-    CikStatic,
     ViStatic,
-    /// Original per-ASIC versions/bases; optional discovery is inventory only.
     SocStatic,
-    /// Original discovery consumer is required; source selection is independent.
     Dynamic,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Source {
-    NotUsed,
-    Hardware,
-    /// Exact original preferred source; no fallback to hardware on failure.
-    Firmware(&'static CStr),
-}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ConfigIdentity {
@@ -57,33 +53,22 @@ struct ConfigIdentity {
 }
 #[repr(C)]
 struct NativePolicy {
-    si_built: u32,
-    cik_built: u32,
-    radeon_built: u32,
-    si_support: i32,
-    cik_support: i32,
-    experimental: i32,
+    exp_hw_support: i32,
     discovery: i32,
-    force_asic: i32,
-    memory_encrypted: u32,
-    firmware_drivers_only: u32,
-    modeset: i32,
+    force_asic_type: i32,
 }
 #[repr(C)]
 #[derive(Default)]
 struct NativeMatch {
     row: u32,
-    original_flags: u32,
+    flags: u32,
     asic_type: u32,
-    initial_apu_flags: u32,
+    apu_flags: u32,
     ip_path: u32,
-    discovery_source: u32,
-    filename: *const c_char,
 }
 const _: () = assert!(size_of::<ConfigIdentity>() == 24);
-const _: () = assert!(size_of::<NativePolicy>() == 44);
-const _: () = assert!(size_of::<NativeMatch>() == 32);
-const _: () = assert!(core::mem::offset_of!(NativeMatch, filename) == 24);
+const _: () = assert!(size_of::<NativePolicy>() == 12);
+const _: () = assert!(size_of::<NativeMatch>() == 20);
 unsafe extern "C" {
     fn stela_amd_pci_match(
         identity: &ConfigIdentity,
@@ -92,50 +77,43 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-/// Private original result. Only actual config matching may construct this.
-/// Kept with the real borrowed resource/reset owner by matched attachment.
+/// The probe's result for one function, retained with its BAR owner by
+/// matched attachment.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Admission {
     config: ConfigIdentity,
     row: u32,
-    original_flags: u32,
+    flags: u32,
     asic_type: u32,
-    initial_apu_flags: u32,
+    apu_flags: u32,
     path: IpPath,
-    source: Source,
-    discovery_option: i32,
 }
 impl Admission {
     pub(super) fn flags(self) -> u32 {
-        self.original_flags
+        self.flags
     }
     pub(super) fn asic(self) -> u32 {
         self.asic_type
     }
+    pub(super) fn apu_flags(self) -> u32 {
+        self.apu_flags
+    }
     pub(super) fn path(self) -> IpPath {
         self.path
     }
-    pub(super) fn source(self) -> Source {
-        self.source
+    pub(super) fn device(self) -> u16 {
+        self.config.device as u16
     }
-    pub(super) fn discovery_option(self) -> i32 {
-        self.discovery_option
+    pub(super) fn revision(self) -> u8 {
+        self.config.revision as u8
     }
-    pub(super) fn firmware_hardware(self) -> (u16, u16) {
-        (self.config.vendor as u16, self.config.device as u16)
-    }
-    pub(super) fn firmware_revision(self) -> (u8, u16, u16) {
-        (
-            self.config.revision as u8,
-            self.config.subvendor as u16,
-            self.config.subdevice as u16,
-        )
+    pub(super) fn subsystem_ids(self) -> (u16, u16) {
+        (self.config.subvendor as u16, self.config.subdevice as u16)
     }
 }
 
-/// The original normal-table match and policy result for this exact function.
-/// Borrowing prevents mutation/rebinding of its Function while this is retained.
-/// Actual platform/resource exclusion remains an unsafe native-owner duty.
+/// The admission of this exact function. Borrowing prevents mutation or
+/// rebinding of its Function while this is retained.
 pub struct MatchedFunction<'function, C> {
     function: &'function Function<C>,
     admission: Admission,
@@ -145,33 +123,29 @@ impl<C: ConfigSpace> MatchedFunction<'_, C> {
         self.function.address
     }
     pub fn revision(&self) -> u8 {
-        self.admission.config.revision as u8
+        self.admission.revision()
     }
     pub fn subsystem_ids(&self) -> (u16, u16) {
-        (
-            self.admission.config.subvendor as u16,
-            self.admission.config.subdevice as u16,
-        )
+        self.admission.subsystem_ids()
     }
+    /// The pciidlist row that matched.
     pub fn matched_row(&self) -> u32 {
         self.admission.row
     }
-    pub fn original_flags(&self) -> u32 {
-        self.admission.original_flags
+    /// The row's driver data: ASIC type and AMD_* flags.
+    pub fn flags(&self) -> u32 {
+        self.admission.flags
     }
     pub fn asic_type(&self) -> u32 {
         self.admission.asic_type
     }
-    /// Only flags established at original initial-APU stage. Modern wildcard
-    /// matches may be APUs; final classification follows genuine IP discovery.
-    pub fn initial_apu_flags(&self) -> u32 {
-        self.admission.initial_apu_flags
+    /// The APU flags Linux sets before IP discovery; a dynamic-path APU is
+    /// classified by discovery.
+    pub fn apu_flags(&self) -> u32 {
+        self.admission.apu_flags
     }
     pub fn ip_path(&self) -> IpPath {
         self.admission.path
-    }
-    pub fn source(&self) -> Source {
-        self.admission.source
     }
     pub(super) fn function(&self) -> &Function<C> {
         self.function
@@ -181,19 +155,16 @@ impl<C: ConfigSpace> MatchedFunction<'_, C> {
     }
 }
 
-/// Read actual config and apply original normal-table probe/source decisions.
-/// No config writes, allocation, hardware activation or firmware acquisition.
-/// Linux dynamic IDs/driver_override and forced-ASIC debug paths do not produce
-/// this result. Preferred files and static implementations remain explicit.
+/// Read the function's configuration identity and run amdgpu's probe
+/// admission on it. Reads configuration space only; Linux's dynamic IDs and
+/// driver_override do not apply. A forced ASIC type is refused, since it
+/// overrides the probe rather than following it.
 ///
 /// # Safety
-/// `function` is this native owner's genuine, accessible PCI function in the
-/// retained device/reset epoch, with native config/reset/removal exclusion.
-/// `policy` is the actual native build/user/platform policy at this probe stage;
-/// memory-encryption/firmware-driver arbitration cannot be guessed to admit a
-/// device. Existing native resources/firmware/PCI enable ownership is separate.
-/// Keep the real owner/epoch stable through all returned dependent objects.
-/// This API cannot turn a model ConfigSpace into actual hardware evidence.
+/// `function` is this native owner's actual, accessible PCI function, with
+/// configuration, reset and removal excluded. Keep that owner and epoch stable
+/// while the result and its dependents are used. No other thread may run this
+/// concurrently, since `policy` sets amdgpu's global module parameters.
 pub unsafe fn identify<C: ConfigSpace>(
     function: &mut Function<C>,
     policy: Policy,
@@ -226,40 +197,21 @@ pub unsafe fn identify<C: ConfigSpace>(
         return Err(Error::IdentityChanged);
     }
     let native_policy = NativePolicy {
-        si_built: u32::from(policy.si_built),
-        cik_built: u32::from(policy.cik_built),
-        radeon_built: u32::from(policy.radeon_built),
-        si_support: policy.si_support,
-        cik_support: policy.cik_support,
-        experimental: policy.experimental,
+        exp_hw_support: policy.exp_hw_support,
         discovery: policy.discovery,
-        force_asic: policy.force_asic,
-        memory_encrypted: u32::from(policy.memory_encrypted),
-        firmware_drivers_only: u32::from(policy.firmware_drivers_only),
-        modeset: policy.modeset,
+        force_asic_type: policy.force_asic_type,
     };
     let mut matched = NativeMatch::default();
-    // SAFETY: exact independently asserted scalar ABI; no borrowed input retained.
+    // SAFETY: scalar inputs and output with asserted layouts; C retains none,
+    // and the caller excludes concurrent use of the module parameters.
     let status = unsafe { stela_amd_pci_match(&observed, &native_policy, &mut matched) };
     if status != 0 {
         return Err(Error::Native(status));
     }
     let path = match matched.ip_path {
-        0 => IpPath::SiStatic,
-        1 => IpPath::CikStatic,
-        2 => IpPath::ViStatic,
-        3 => IpPath::SocStatic,
-        4 => IpPath::Dynamic,
-        _ => return Err(Error::InvalidNativeResult),
-    };
-    let source = match matched.discovery_source {
-        0 if matched.filename.is_null() => Source::NotUsed,
-        1 if matched.filename.is_null() => Source::Hardware,
-        2 if !matched.filename.is_null() => {
-            // SAFETY: successful original C selector returns only its immutable
-            // static nul-terminated filename literal, linked for process lifetime.
-            Source::Firmware(unsafe { CStr::from_ptr(matched.filename) })
-        }
+        0 => IpPath::ViStatic,
+        1 => IpPath::SocStatic,
+        2 => IpPath::Dynamic,
         _ => return Err(Error::InvalidNativeResult),
     };
     Ok(MatchedFunction {
@@ -267,12 +219,10 @@ pub unsafe fn identify<C: ConfigSpace>(
         admission: Admission {
             config: observed,
             row: matched.row,
-            original_flags: matched.original_flags,
+            flags: matched.flags,
             asic_type: matched.asic_type,
-            initial_apu_flags: matched.initial_apu_flags,
+            apu_flags: matched.apu_flags,
             path,
-            source,
-            discovery_option: policy.discovery,
         },
     })
 }

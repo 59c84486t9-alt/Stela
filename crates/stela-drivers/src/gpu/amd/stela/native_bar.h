@@ -29,17 +29,12 @@
 #ifndef STELA_AMD_NATIVE_BAR_H
 #define STELA_AMD_NATIVE_BAR_H
 
-#ifdef __KERNEL__
-#include <linux/types.h>
-#else
-#include <stdint.h>
-#endif
 #include <drm/amd_asic_type.h>
+#include <linux/types.h>
 
-/* Pure policies shared with original amdgpu_device/doorbell consumers.
- * Callers retain original ASIC classification and actual doorbell assignment.
- * Native entry preflights arithmetic before using the original expressions.
- */
+/* From amdgpu_device_init's register BAR choice, and amdgpu_doorbell_init's
+ * and amdgpu_doorbell_create_kernel_doorbells' kernel doorbell sizing. The
+ * native entries preflight the arithmetic before using these expressions. */
 static inline unsigned
 amdgpu_native_register_bar(enum amd_asic_type asic_type)
 {
@@ -81,7 +76,6 @@ amdgpu_native_kernel_doorbell_bytes(uint32_t count, uint64_t page_bytes)
    return size;
 }
 
-#ifndef __KERNEL__
 enum stela_amd_bar_status {
    STELA_AMD_BAR_OK,
    STELA_AMD_BAR_INVALID,
@@ -106,5 +100,4 @@ enum stela_amd_bar_status
 stela_amd_native_bar_layout(uint32_t asic_type, uint64_t doorbell_bar_bytes,
                             uint32_t max_assignment, uint64_t page_bytes,
                             struct stela_amd_bar_layout *layout);
-#endif
 #endif

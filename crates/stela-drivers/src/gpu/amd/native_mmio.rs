@@ -3,7 +3,7 @@
 //! No register access, doorbell write, firmware load or hardware activation is
 //! performed here. Original AMDGPU register routing and device lifecycle remain
 //! mandatory; this module only retains their real, bounded CPU windows.
-use super::pci::{Admission, IpPath, MatchedFunction, Source};
+use super::pci::{Admission, IpPath, MatchedFunction};
 use crate::bus::{
     mmio::owned::{
         Authority, CacheAttribute, Error as MmioError, Mapping, MappingView, PAGE_BYTES,
@@ -18,8 +18,6 @@ pub enum Error {
     InvalidOwner,
     AdmissionRequired,
     StaticInitializationRequired,
-    FirmwareSourceRequired,
-    PreferredFileRequired,
     InvalidRange,
     Policy(c_int),
     Mapping(MmioError),
@@ -194,41 +192,14 @@ fn validate_doorbells(
 }
 
 impl<'a> AttachedBars<'a> {
-    pub(super) fn source_file(&self) -> Result<FileSource<'_>, Error> {
-        if !self.active {
-            return Err(Error::Retired);
-        }
-        let admission = self.admission.ok_or(Error::AdmissionRequired)?;
-        let Source::Firmware(filename) = admission.source() else {
-            return Err(Error::PreferredFileRequired);
-        };
-        if !matches!(admission.path(), IpPath::Dynamic | IpPath::SocStatic) {
-            return Err(Error::StaticInitializationRequired);
-        }
-        Ok(FileSource {
-            window: self.registers()?,
-            identity: self.identity,
-            admission,
-            filename,
-        })
-    }
-
-    pub(super) fn dynamic_hardware(&self) -> Result<DynamicHardware<'_>, Error> {
-        if !self.active {
-            return Err(Error::Retired);
-        }
+    /// The register window and admission of an attachment whose matched ASIC
+    /// Linux brings up from IP discovery.
+    pub(super) fn dynamic(&self) -> Result<(RegisterWindow<'a>, Admission), Error> {
         let admission = self.admission.ok_or(Error::AdmissionRequired)?;
         if admission.path() != IpPath::Dynamic {
             return Err(Error::StaticInitializationRequired);
         }
-        if admission.source() != Source::Hardware {
-            return Err(Error::FirmwareSourceRequired);
-        }
-        Ok(DynamicHardware {
-            admission,
-            window: self.registers()?,
-            identity: self.identity,
-        })
+        Ok((self.registers()?, admission))
     }
 
     /// Attach from the actual original normal PCI match. The private result is
@@ -263,12 +234,10 @@ impl<'a> AttachedBars<'a> {
         Ok(bars)
     }
 
-    /// Original initialization/source plan of an actual matched attachment.
-    /// None means the older manual unsafe attachment has no such admission.
-    /// A dynamic hardware plan still requires genuine acquisition/validation.
-    pub fn original_plan(&self) -> Option<(IpPath, Source)> {
-        self.admission
-            .map(|admission| (admission.path(), admission.source()))
+    /// How Linux brings up a matched attachment's IP blocks. None means the
+    /// manual attachment has no admission.
+    pub fn ip_path(&self) -> Option<IpPath> {
+        self.admission.map(Admission::path)
     }
 
     /// Attach unpublished CPU windows for an actual original AMDGPU PCI match.
@@ -466,29 +435,6 @@ impl<'a> AttachedBars<'a> {
     }
 }
 
-/// Private proof of original dynamic/hardware selection on this exact live
-/// mapping owner. No Clone or public constructor; public selection metadata and
-/// arbitrary snapshots cannot create it. The canonical lease/borrow pins epoch.
-pub(super) struct DynamicHardware<'owner> {
-    admission: Admission,
-    window: RegisterWindow<'owner>,
-    identity: Identity,
-}
-impl<'owner> DynamicHardware<'owner> {
-    pub(super) fn pci_device_revision(&self) -> (u16, u8) {
-        (
-            self.admission.firmware_hardware().1,
-            self.admission.firmware_revision().0,
-        )
-    }
-    pub(super) fn window(&self) -> &RegisterWindow<'owner> {
-        &self.window
-    }
-    pub(super) fn identity(&self) -> Identity {
-        self.identity
-    }
-}
-
 /// Bounded register mapping only. Original RREG/WREG dispatch still owns
 /// direct versus indirect PCIe/KIQ/RLCG/XCC routing and power/reset rules.
 pub struct RegisterWindow<'a> {
@@ -558,37 +504,5 @@ impl DoorbellWindow<'_> {
     /// two DWORD doorbell writes. Both DWORDs and alignment are checked.
     pub fn qword(&self, index: u32) -> Result<NonNull<u64>, Error> {
         self.address(index, 8).map(NonNull::cast)
-    }
-}
-
-// Only actual selected Firmware admission on this same active owner can mint it.
-// A path tuple, copied Identity, bare Image or manual attachment cannot do so.
-pub(super) struct FileSource<'owner> {
-    window: RegisterWindow<'owner>,
-    identity: Identity,
-    admission: Admission,
-    filename: &'static core::ffi::CStr,
-}
-impl<'owner> FileSource<'owner> {
-    pub(super) fn window(&self) -> &RegisterWindow<'owner> {
-        &self.window
-    }
-    pub(super) fn identity(&self) -> Identity {
-        self.identity
-    }
-    pub(super) fn filename(&self) -> &'static core::ffi::CStr {
-        self.filename
-    }
-    pub(super) fn path(&self) -> IpPath {
-        self.admission.path()
-    }
-    pub(super) fn discovery_option(&self) -> i32 {
-        self.admission.discovery_option()
-    }
-    pub(super) fn hardware_ids(&self) -> (u16, u16) {
-        self.admission.firmware_hardware()
-    }
-    pub(super) fn revision_ids(&self) -> (u8, u16, u16) {
-        self.admission.firmware_revision()
     }
 }

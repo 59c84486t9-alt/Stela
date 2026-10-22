@@ -4,9 +4,8 @@
 //! as completed by a production adapter.
 extern crate alloc;
 mod pci_tests;
-mod vram_tests;
 use stela_drivers::{
-    Clock, bus,
+    Clock, bus, firmware,
     gpu::amd::{discovery, native_mmio, pci},
 };
 
@@ -29,14 +28,30 @@ use std::{
     },
 };
 
-#[link(name = "stela-amd-bar-test", kind = "static")]
+#[link(name = "stela-amd-test-fixtures", kind = "static")]
 unsafe extern "C" {
-    fn stela_amd_test_original_asic(which: u32) -> u32;
+    fn stela_amd_test_asic(which: u32) -> u32;
+    fn stela_amd_test_discovery(binary: *mut u8, capacity: usize) -> usize;
 }
+/// CHIP_TAHITI, CHIP_BONAIRE, CHIP_VEGA10 and CHIP_IP_DISCOVERY, by index.
 fn asic(which: u32) -> u32 {
-    // SAFETY: the C fixture returns an original header enum, no hardware call.
-    unsafe { stela_amd_test_original_asic(which) }
+    // SAFETY: a pure lookup of Linux's enum values.
+    unsafe { stela_amd_test_asic(which) }
 }
+/// The fixture IP discovery binary that fixtures.h describes.
+fn discovery_binary() -> Vec<u8> {
+    let mut binary = vec![0; 4096];
+    // SAFETY: a writable buffer of the stated capacity.
+    let bytes = unsafe { stela_amd_test_discovery(binary.as_mut_ptr(), binary.len()) };
+    assert_ne!(bytes, 0);
+    binary.truncate(bytes);
+    binary
+}
+
+/// Expires every wait at once.
+const CLOCK: Clock = Clock {
+    ticks_per_microsecond: 0,
+};
 
 struct Config;
 impl ConfigSpace for Config {
@@ -226,7 +241,6 @@ fn canonical_amd_attachment() {
     .unwrap();
     pci_tests::original_match(&authority, &model);
     let pci = function();
-    vram_tests::original_read(&authority, &pci);
 
     // SI: original BAR2 and no manufactured doorbell allocation.
     // SAFETY: model function/enum/resources belong to this one isolated owner.
@@ -241,18 +255,14 @@ fn canonical_amd_attachment() {
         )
     }
     .unwrap();
-    assert!(matches!(
-        unsafe {
-            discovery::acquire_dynamic_ip(
-                &si,
-                &Clock {
-                    ticks_per_microsecond: 0,
-                },
-            )
-        },
-        Err(discovery::Error::Window(Error::AdmissionRequired))
-    ));
-    assert_eq!(si.original_plan(), None);
+    // SAFETY: the model has no device; discovery is refused before access.
+    let refused =
+        unsafe { discovery::discover(&si, &CLOCK, &firmware::HandoffProvider::new(None)) };
+    assert_eq!(
+        refused.err(),
+        Some(discovery::Error::Window(Error::AdmissionRequired))
+    );
+    assert_eq!(si.ip_path(), None);
     assert_eq!(si.identity().address, pci.address);
     assert_eq!(si.identity().device, pci.device);
     assert_eq!(si.identity().asic_type, asic(0));

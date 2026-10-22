@@ -11,15 +11,17 @@ AR ?= llvm-ar
 # Kbuild's definition and forced includes, from system directories so upstream
 # code keeps Linux's warning profile rather than Stela's. ../../compat's
 # overlay.yaml puts each shadow in place of the upstream header it replaces,
-# however a source names it. compat/ itself comes last and only adds the asm/
-# and generated/ headers that Linux's arch tree and build supply.
+# however a source names it. compat/ itself follows Linux's include trees and
+# only adds the asm/ and generated/ headers that Linux's arch tree and build
+# supply, then the x86 uapi headers.
 LINUX := $(abspath $(SOURCE)/../../common/linux/include)
 COMPAT := $(abspath $(SOURCE)/../../compat)
 GENERATED := $(BUILD)/generated-include
 LINUX_INCLUDES := -ivfsoverlay $(COMPAT)/overlay.yaml -D__KERNEL__ \
                   -include $(LINUX)/linux/kconfig.h -include $(LINUX)/linux/compiler_types.h \
                   -isystem $(GENERATED) -isystem $(SOURCE)/../xe -isystem $(SOURCE)/../i915 \
-                  -isystem $(LINUX) -isystem $(LINUX)/uapi -isystem $(COMPAT)
+                  -isystem $(LINUX) -isystem $(LINUX)/uapi -isystem $(COMPAT) \
+                  -isystem $(LINUX)/../arch/x86/include/uapi
 COMPAT_HEADERS := $(COMPAT)/overlay.yaml $(shell find $(COMPAT) -name '*.h')
 CFLAGS := --target=$(TARGET) $(LINUX_INCLUDES) -std=gnu11 -O2 \
           -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only \

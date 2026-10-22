@@ -7,4 +7,6 @@
 #define U32_MAX UINT32_MAX
 #define U64_MAX UINT64_MAX
 #define S32_MAX INT32_MAX
+/* Copyright Linux kernel contributors; from vdso/limits.h. */
+#define UINT_MAX	(~0U)
 #endif

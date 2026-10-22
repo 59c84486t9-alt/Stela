@@ -10,4 +10,7 @@ typedef struct {
 struct mutex {
 	int stela_owner;
 };
+#define __MUTEX_INITIALIZER(lockname) { .stela_owner = 0 }
+static void mutex_lock(struct mutex *lock);
+static void mutex_unlock(struct mutex *lock);
 #endif

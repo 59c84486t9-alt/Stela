@@ -13,5 +13,3 @@ pub mod native_mmio;
 pub mod pci;
 #[cfg(feature = "amd-port")]
 pub mod vm;
-#[cfg(feature = "amd-port")]
-pub mod vram;

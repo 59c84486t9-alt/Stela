@@ -5,4 +5,6 @@
  * caller's condition proves no concurrent update.
  */
 #define rcu_dereference_protected(p, c) (p)
+/* Stela runs no RCU callbacks; a source that waits for them declares it. */
+static void rcu_barrier(void);
 #endif
