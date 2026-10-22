@@ -24,6 +24,7 @@ pub enum Error {
     Txp(txp::Error),
     Free(tx_free::Error),
     InvalidFrame,
+    PublicationRefused,
     Full,
     WrongEpoch,
     EpochExhausted,
@@ -218,6 +219,22 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
         bytes: &[u8],
         context: C,
     ) -> Result<Receipt, Error> {
+        self.submit_if(source, config, bytes, context, || true)
+    }
+    /// Recheck a time-sensitive native admission after all payload/TXWI
+    /// allocation, mapping and visibility work, immediately before the first
+    /// hardware-reachable descriptor address/context publication. Refusal has
+    /// published nothing and does not consume a token or poison this ring.
+    /// The real owner must still serialize policy/key/radio revocation through
+    /// publication; this callback does not manufacture an atomic hardware gate.
+    pub(in crate::net::wifi::mediatek) fn submit_if(
+        &mut self,
+        source: &dyn PageSource,
+        config: txwi::Config,
+        bytes: &[u8],
+        context: C,
+        admit: impl FnOnce() -> bool,
+    ) -> Result<Receipt, Error> {
         self.live()?;
         if config.chip != self.chip
             || config.frame.bytes != bytes.len()
@@ -282,6 +299,9 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
         drop(txp);
         drop(spans);
         let address = txwi.address()?;
+        if !admit() {
+            return Err(Error::PublicationRefused);
+        }
         self.tokens[token] = Some(Packet {
             txwi,
             payload,
@@ -740,6 +760,50 @@ mod tests {
         unsafe { model.rx_ring.release_after_quiesce() }.unwrap();
         assert!(model.memory.lock().unwrap().mappings.is_empty());
         contexts
+    }
+    #[test]
+    fn refused_final_admission_changes_no_descriptor_token_or_context_owner() {
+        let (mut ring, mut model) = setup(Chip::Mt7925, 8);
+        let before = model.memory.lock().unwrap().mappings.len();
+        let descriptor = ring.descriptors.read32(0).unwrap();
+        let bytes = vec![0x5a; 100];
+        let calls = AtomicUsize::new(0);
+        let result = ring.submit_if(
+            &Source,
+            config(Chip::Mt7925, bytes.len()),
+            &bytes,
+            Context(model.drops.clone(), 1),
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                // Both actual payload and TXWI are mapped before the gate.
+                assert_eq!(model.memory.lock().unwrap().mappings.len(), before + 2);
+                false
+            },
+        );
+        assert_eq!(result, Err(Error::PublicationRefused));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(model.memory.lock().unwrap().mappings.len(), before);
+        assert_eq!(ring.descriptors.read32(0).unwrap(), descriptor);
+        assert_eq!(ring.descriptors.read32(4).unwrap(), DONE);
+        assert_eq!(model.tx.lock().unwrap().head, 0);
+        assert_eq!(ring.pending_descriptors(), 0);
+        assert_eq!(ring.outstanding_tokens(), 0);
+        assert_eq!(model.drops.load(Ordering::Relaxed), 1);
+        assert!(!ring.is_poisoned());
+        let receipt = ring
+            .submit(
+                &Source,
+                config(Chip::Mt7925, bytes.len()),
+                &bytes,
+                Context(model.drops.clone(), 2),
+            )
+            .unwrap();
+        assert_eq!(
+            (receipt.serial, receipt.token, receipt.descriptor),
+            (1, 0, 0)
+        );
+        drop(quiesce(&mut ring, &mut model));
+        assert_eq!(model.drops.load(Ordering::Relaxed), 2);
     }
     #[test]
     fn actual_requester_reads_txwi_then_late_payload_until_both_completions_through_wrap_and_reuse()

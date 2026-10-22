@@ -67,14 +67,32 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             association: epoch,
             key,
         };
-        let result = s
-            .controller
-            .state_mut()
+        let grant = if management {
+            Some(s.roc_deadline.ok_or(Error::GrantTimeout)?)
+        } else {
+            None
+        };
+        let controller = s.controller.state_mut();
+        let clock = controller.control.clock;
+        let result = controller
             .data_tx
             .as_mut()
             .unwrap()
-            .submit(source, config, bytes, context)
-            .map_err(Error::Ring);
+            .submit_if(source, config, bytes, context, || {
+                grant.is_none_or(|deadline| clock.now_us() < deadline)
+            })
+            .map_err(|e| {
+                if e == data::Error::PublicationRefused {
+                    Error::GrantTimeout
+                } else {
+                    Error::Ring(e)
+                }
+            });
+        if matches!(result, Err(Error::GrantTimeout)) {
+            // The actual peer and grant were already programmed. Retain the
+            // complete owner even though this packet was never published.
+            s.phase = Phase::Quarantined;
+        }
         if s.controller.state().data_tx.as_ref().unwrap().is_poisoned() {
             s.phase = Phase::Quarantined;
         }

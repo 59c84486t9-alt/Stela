@@ -556,3 +556,43 @@ fn partial_actual_receive_chain_blocks_peer_generation_retirement() {
     drop(driver);
     assert_eq!(model.drops.load(Ordering::Relaxed), 1);
 }
+
+#[test]
+fn actual_roc_expiring_during_native_packet_preparation_never_publishes() {
+    use crate::bus::dma::memory::{CacheAttribute, MemoryError, PageSource, PinnedPages};
+    struct DelayedSource(AtomicUsize);
+    impl PageSource for DelayedSource {
+        fn allocate(
+            &self,
+            bytes: usize,
+            alignment: usize,
+            attribute: CacheAttribute,
+        ) -> Result<PinnedPages, MemoryError> {
+            if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                // The actual source grant is1000ms. Delay only the first real
+                // post-grant payload allocation; firmware/ROC processing and
+                // mailbox allocations use their original source unchanged.
+                std::thread::sleep(std::time::Duration::from_millis(1100));
+            }
+            Source.allocate(bytes, alignment, attribute)
+        }
+    }
+    let (mut driver, model) = setup();
+    let before = model.memory.lock().unwrap().mappings.len();
+    let source = DelayedSource(AtomicUsize::new(0));
+    assert!(matches!(
+        driver.join(join(), profile(), 0, &source, &mut Policy(true)),
+        Err(ClientError::GrantTimeout)
+    ));
+    assert_eq!(source.0.load(Ordering::Relaxed), 2);
+    assert_eq!(model.queues[&0xd4300].lock().unwrap().head, 0);
+    assert_eq!(model.memory.lock().unwrap().mappings.len(), before);
+    assert_eq!(driver.phase(), ClientPhase::Quarantined);
+    // This never-published packet may unmap, but the real programmed peer,
+    // actual grant and all controller/IRQ resources remain retained.
+    assert!(model.response.lock().unwrap().peers.contains_key(&1));
+    assert_eq!(model.response.lock().unwrap().roc_channel, Some(36));
+    drop(driver);
+    assert_eq!(model.drops.load(Ordering::Relaxed), 0);
+    assert!(!model.memory.lock().unwrap().mappings.is_empty());
+}
