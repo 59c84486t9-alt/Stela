@@ -231,3 +231,72 @@ pub(super) fn verify(build: &Path, evidence: &Path, inputs: &[Value]) -> Result<
         "binary":tools::binding(&binary)?,"output":tools::binding(&output)?,"nvidia":nvidia,"intel":intel,"amd":amd}),
     )
 }
+
+/// Runs the owned NVIDIA render compiler's authored fixtures, normally and
+/// with every allocation in its translation unit denied in turn. With the
+/// Apple triangle, its NAK outputs must equal the direct oracle's
+/// `nv-render-artifacts` byte for byte.
+pub(super) fn verify_nv_owned(build: &Path, evidence: &Path, inputs: &[Value]) -> Result<Value> {
+    let artifacts = evidence.join("nv-render-owned-artifacts");
+    let mut runs = Vec::new();
+    for variant in ["", "_alloc"] {
+        let binary = build.join(format!("src/stela/stela_nv_air_render_owned{variant}"));
+        let stage = format!("nv-air-render-owned{variant}");
+        let mut command = Command::new(&binary);
+        if !inputs.is_empty() && variant.is_empty() {
+            std::fs::create_dir(&artifacts)?;
+            command
+                .arg("--input")
+                .arg(
+                    inputs[0]["snapshot"]["path"]
+                        .as_str()
+                        .context("triangle snapshot")?,
+                )
+                .args([
+                    "--vertex",
+                    "vertexShader",
+                    "--fragment",
+                    "fragmentShader",
+                    "--output",
+                ])
+                .arg(&artifacts);
+        }
+        run(&mut command, evidence, &stage)?;
+        let log = evidence.join(format!("{stage}.log"));
+        let last = std::fs::read_to_string(&log)?
+            .lines()
+            .last()
+            .map(str::to_owned);
+        ensure!(
+            last.as_deref()
+                .is_some_and(|line| line.starts_with("owned_outputs=")
+                    || line == "No external stage input requested; authored fixtures only"),
+            "incomplete owned NVIDIA render fixture {stage}"
+        );
+        runs.push(json!({"binary":tools::binding(&binary)?,"output":tools::binding(&log)?,"summary":last}));
+    }
+    let mut compared = 0;
+    if !inputs.is_empty() {
+        let oracle = evidence.join("nv-render-artifacts");
+        for entry in std::fs::read_dir(&artifacts)? {
+            let path = entry?.path();
+            let name = path
+                .file_name()
+                .context("owned NVIDIA render artifact name")?;
+            ensure!(
+                std::fs::read(&path)? == std::fs::read(oracle.join(name))?,
+                "owned NVIDIA render artifact {} differs from the NAK oracle",
+                path.display()
+            );
+            compared += 1;
+        }
+        ensure!(
+            compared > 0,
+            "owned NVIDIA render compiler wrote no artifacts"
+        );
+    }
+    Ok(
+        json!({"scope":"Owned NVIDIA VS/FS compilation, upload image and argument table packing; no GPU allocation, upload or execution",
+        "runs":runs,"oracle_equal_artifacts":compared}),
+    )
+}

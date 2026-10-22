@@ -420,6 +420,9 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             "nvidia/stela/hosted/air_compile.h",
             "nvidia/stela/tests/air_compile.c",
             "nvidia/stela/tests/air_render.c",
+            "nvidia/stela/hosted/render_compile.c",
+            "nvidia/stela/hosted/render_compile.h",
+            "nvidia/stela/tests/air_render_owned.c",
             "intel/stela/hosted/air_compile.c",
             "intel/stela/hosted/air_compile.h",
             "intel/stela/hosted/air_validate_elk.c",
@@ -743,6 +746,8 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             "src/stela/stela_metal_assembly_test",
             "src/stela/stela_amd_air_compile_test",
             "src/stela/stela_nv_air_compile_test",
+            "src/stela/stela_nv_air_render_owned",
+            "src/stela/stela_nv_air_render_owned_alloc",
             "src/stela/stela_intel_air_compile_test",
         ]);
     }
@@ -766,6 +771,10 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         .transpose()?;
     let nv_air_owned = metal_input.as_ref().map(|_| library::verify_owned(&build, &evidence, "nv", "nak", 310,
         "owned NAK compiler/table/QMD/lifetime/failure fixtures passed; no hardware execution")).transpose()?;
+    let nv_render_owned = metal_input
+        .as_ref()
+        .map(|_| render::verify_nv_owned(&build, &evidence, &render_snapshots))
+        .transpose()?;
     let metal_assembly = metal_input
         .as_ref()
         .map(|input| library::verify(&build, &evidence, input, &gpu))
@@ -1051,6 +1060,7 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         "metal_library_assembly": metal_assembly,
         "amd_owned_air_compilation": amd_air_owned,
         "nvidia_owned_air_compilation": nv_air_owned,
+        "nvidia_owned_render_compilation": nv_render_owned,
         "intel_owned_air_compilation": intel_air_owned,
         "intel_gen7_shared_admission": intel_gen7_shared,
         "metal_threadgroup_values": metal_threadgroup_values,

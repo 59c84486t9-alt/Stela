@@ -1,0 +1,311 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 05:23:51 -0400
+Subject: [PATCH] nouveau: share NVK's shader layout and constant lowering for
+ Stela's render compiler
+
+---
+ src/nouveau/compiler/nak_nir_lower_constant.h | 34 +++++++
+ src/nouveau/compiler/nak_shader_layout.h      | 93 +++++++++++++++++++
+ .../vulkan/nvk_nir_lower_descriptors.c        | 15 +--
+ src/nouveau/vulkan/nvk_physical_device.h      |  3 +-
+ src/nouveau/vulkan/nvk_shader.c               | 53 +----------
+ src/nouveau/vulkan/nvk_shader.h               |  5 +-
+ 6 files changed, 137 insertions(+), 66 deletions(-)
+ create mode 100644 src/nouveau/compiler/nak_nir_lower_constant.h
+ create mode 100644 src/nouveau/compiler/nak_shader_layout.h
+
+diff --git a/src/nouveau/compiler/nak_nir_lower_constant.h b/src/nouveau/compiler/nak_nir_lower_constant.h
+new file mode 100644
+index 0000000..0d45c77
+--- /dev/null
++++ b/src/nouveau/compiler/nak_nir_lower_constant.h
+@@ -0,0 +1,34 @@
++/*
++ * Copyright © 2022 Collabora Ltd. and Red Hat Inc.
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef NAK_NIR_LOWER_CONSTANT_H
++#define NAK_NIR_LOWER_CONSTANT_H 1
++
++#include "nir_builder.h"
++
++/* Lowers load_constant to an ldc_nv from the cbuf the caller bound the
++ * shader's constant data to.
++ */
++static inline bool
++nak_nir_lower_load_constant(nir_builder *b, nir_intrinsic_instr *load,
++                            uint32_t cbuf_idx)
++{
++   assert(load->intrinsic == nir_intrinsic_load_constant);
++
++   uint32_t base = nir_intrinsic_base(load);
++
++   b->cursor = nir_before_instr(&load->instr);
++
++   nir_def *offset = nir_iadd_imm(b, load->src[0].ssa, base);
++   nir_def *data = nir_ldc_nv(b, load->def.num_components, load->def.bit_size,
++                              nir_imm_int(b, cbuf_idx), offset,
++                              .align_mul = nir_intrinsic_align_mul(load),
++                              .align_offset = nir_intrinsic_align_offset(load));
++
++   nir_def_rewrite_uses(&load->def, data);
++
++   return true;
++}
++
++#endif
+diff --git a/src/nouveau/compiler/nak_shader_layout.h b/src/nouveau/compiler/nak_shader_layout.h
+new file mode 100644
+index 0000000..5aaa63f
+--- /dev/null
++++ b/src/nouveau/compiler/nak_shader_layout.h
+@@ -0,0 +1,93 @@
++/*
++ * Copyright © 2022 Collabora Ltd. and Red Hat Inc.
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef NAK_SHADER_LAYOUT_H
++#define NAK_SHADER_LAYOUT_H 1
++
++#include "nak.h"
++#include "util/u_math.h"
++#include "nv_device_info.h"
++#include "cla097.h"
++#include "clc597.h"
++
++#define GF100_SHADER_HEADER_SIZE (20 * 4)
++#define TU102_SHADER_HEADER_SIZE (32 * 4)
++#define NVC0_MAX_SHADER_HEADER_SIZE TU102_SHADER_HEADER_SIZE
++
++/* NVK's shader upload layout, shared with drivers outside Vulkan. Sizes are
++ * not overflow-checked; callers bound code_size for untrusted input.
++ */
++static inline uint32_t
++nak_min_cbuf_alignment(const struct nv_device_info *info)
++{
++   return info->cls_eng3d >= TURING_A ? 64 : 256;
++}
++
++static inline uint32_t
++nak_shader_get_hdr_size(const struct nv_device_info *info,
++                        const struct nak_shader_info *shader_info)
++{
++   if (shader_info->stage == MESA_SHADER_COMPUTE)
++      return 0;
++
++   return info->cls_eng3d >= TURING_A ? TU102_SHADER_HEADER_SIZE
++                                      : GF100_SHADER_HEADER_SIZE;
++}
++
++static inline uint32_t
++nak_shader_get_shader_alignment(const struct nv_device_info *info)
++{
++   /* Fermi   needs 0x40 alignment
++    * Kepler+ needs the first instruction to be 0x80 aligned, so we waste 0x30 bytes
++    */
++   return info->cls_eng3d >= KEPLER_A ? 0x80 : 0x40;
++}
++
++static inline uint32_t
++nak_shader_get_shader_size(const struct nv_device_info *info,
++                           const struct nak_shader_info *shader_info,
++                           uint32_t code_size, uint32_t *out_hdr_offset,
++                           uint32_t *out_code_offset, uint32_t *out_gs_hdr_offset)
++{
++   const uint32_t hdr_size = nak_shader_get_hdr_size(info, shader_info);
++   const uint32_t alignment = nak_shader_get_shader_alignment(info);
++
++   uint32_t total_size = 0;
++   if (info->cls_eng3d >= KEPLER_A &&
++       info->cls_eng3d < TURING_A &&
++       hdr_size > 0) {
++      /* The instructions are what has to be aligned so we need to start at a
++       * small offset (0x30 B) into the upload area.
++       */
++      total_size = alignment - hdr_size;
++   }
++
++   if (out_hdr_offset)
++      *out_hdr_offset = total_size;
++
++   total_size += hdr_size;
++
++   if (out_code_offset) {
++      *out_code_offset = total_size;
++      assert(*out_code_offset % alignment == 0);
++   }
++
++   total_size += code_size;
++
++   const bool has_mesh_gs_sph = shader_info->stage == MESA_SHADER_MESH &&
++                                shader_info->mesh.has_gs_sph;
++
++   if (out_gs_hdr_offset)
++      *out_gs_hdr_offset = 0;
++   if (has_mesh_gs_sph) {
++      total_size = align(total_size, nak_min_cbuf_alignment(info));
++      if (out_gs_hdr_offset)
++         *out_gs_hdr_offset = total_size;
++      total_size += hdr_size;
++   }
++
++   return total_size;
++}
++
++#endif
+diff --git a/src/nouveau/vulkan/nvk_nir_lower_descriptors.c b/src/nouveau/vulkan/nvk_nir_lower_descriptors.c
+index 9361402..5c30985 100644
+--- a/src/nouveau/vulkan/nvk_nir_lower_descriptors.c
++++ b/src/nouveau/vulkan/nvk_nir_lower_descriptors.c
+@@ -6,6 +6,7 @@
+ #include "nvk_descriptor_set_layout.h"
+ #include "nvk_descriptor_types.h"
+ #include "nvk_shader.h"
++#include "nak_nir_lower_constant.h"
+ 
+ #include "vk_pipeline.h"
+ 
+@@ -547,19 +548,7 @@ lower_load_constant(nir_builder *b, nir_intrinsic_instr *load,
+    int cbuf_idx = get_mapped_cbuf_idx(&cbuf_key, ctx);
+    assert(cbuf_idx >= 0);
+ 
+-   uint32_t base = nir_intrinsic_base(load);
+-
+-   b->cursor = nir_before_instr(&load->instr);
+-
+-   nir_def *offset = nir_iadd_imm(b, load->src[0].ssa, base);
+-   nir_def *data = nir_ldc_nv(b, load->def.num_components, load->def.bit_size,
+-                              nir_imm_int(b, cbuf_idx), offset,
+-                              .align_mul = nir_intrinsic_align_mul(load),
+-                              .align_offset = nir_intrinsic_align_offset(load));
+-
+-   nir_def_rewrite_uses(&load->def, data);
+-
+-   return true;
++   return nak_nir_lower_load_constant(b, load, (uint32_t)cbuf_idx);
+ }
+ 
+ static nir_def *
+diff --git a/src/nouveau/vulkan/nvk_physical_device.h b/src/nouveau/vulkan/nvk_physical_device.h
+index 06d4cc3..8ae661f 100644
+--- a/src/nouveau/vulkan/nvk_physical_device.h
++++ b/src/nouveau/vulkan/nvk_physical_device.h
+@@ -9,6 +9,7 @@
+ 
+ #include "nvk_debug.h"
+ #include "nv_device_info.h"
++#include "nak_shader_layout.h"
+ 
+ #include "vk_physical_device.h"
+ #include "vk_sync.h"
+@@ -61,7 +62,7 @@ struct nvk_physical_device {
+ static inline uint32_t
+ nvk_min_cbuf_alignment(const struct nv_device_info *info)
+ {
+-   return info->cls_eng3d >= 0xC597 /* TURING_A */ ? 64 : 256;
++   return nak_min_cbuf_alignment(info);
+ }
+ 
+ VK_DEFINE_HANDLE_CASTS(nvk_physical_device,
+diff --git a/src/nouveau/vulkan/nvk_shader.c b/src/nouveau/vulkan/nvk_shader.c
+index 6f649f8..a412cbc 100644
+--- a/src/nouveau/vulkan/nvk_shader.c
++++ b/src/nouveau/vulkan/nvk_shader.c
+@@ -598,23 +598,15 @@ nvk_compile_nir(struct nvk_device *dev, nir_shader *nir,
+ static uint32_t
+ nvk_shader_get_hdr_size(struct nvk_device *dev, struct nvk_shader *shader)
+ {
+-   if (shader->info.stage == MESA_SHADER_COMPUTE)
+-      return 0;
+-
+    const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+-   return pdev->info.cls_eng3d >= TURING_A ? TU102_SHADER_HEADER_SIZE
+-                                           : GF100_SHADER_HEADER_SIZE;
++   return nak_shader_get_hdr_size(&pdev->info, &shader->info);
+ }
+ 
+ static uint32_t
+ nvk_shader_get_shader_alignment(struct nvk_device *dev)
+ {
+    const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+-
+-   /* Fermi   needs 0x40 alignment
+-    * Kepler+ needs the first instruction to be 0x80 aligned, so we waste 0x30 bytes
+-    */
+-   return pdev->info.cls_eng3d >= KEPLER_A ? 0x80 : 0x40;
++   return nak_shader_get_shader_alignment(&pdev->info);
+ }
+ 
+ static uint32_t
+@@ -623,44 +615,9 @@ nvk_shader_get_shader_size(struct nvk_device *dev, struct nvk_shader *shader,
+                            uint32_t *out_gs_hdr_offset)
+ {
+    const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+-   const uint32_t hdr_size = nvk_shader_get_hdr_size(dev, shader);
+-   const uint32_t alignment = nvk_shader_get_shader_alignment(dev);
+-
+-   uint32_t total_size = 0;
+-   if (pdev->info.cls_eng3d >= KEPLER_A &&
+-       pdev->info.cls_eng3d < TURING_A &&
+-       hdr_size > 0) {
+-      /* The instructions are what has to be aligned so we need to start at a
+-       * small offset (0x30 B) into the upload area.
+-       */
+-      total_size = alignment - hdr_size;
+-   }
+-
+-   if (out_hdr_offset)
+-      *out_hdr_offset = total_size;
+-
+-   total_size += hdr_size;
+-
+-   if (out_code_offset) {
+-      *out_code_offset = total_size;
+-      assert(*out_code_offset % alignment == 0);
+-   }
+-
+-   total_size += shader->code_size;
+-
+-   const bool has_mesh_gs_sph = shader->info.stage == MESA_SHADER_MESH &&
+-                                shader->info.mesh.has_gs_sph;
+-
+-   if (out_gs_hdr_offset)
+-      *out_gs_hdr_offset = 0;
+-   if (has_mesh_gs_sph) {
+-      total_size = align(total_size, nvk_min_cbuf_alignment(&pdev->info));
+-      if (out_gs_hdr_offset)
+-         *out_gs_hdr_offset = total_size;
+-      total_size += hdr_size;
+-   }
+-
+-   return total_size;
++   return nak_shader_get_shader_size(&pdev->info, &shader->info,
++                                     shader->code_size, out_hdr_offset,
++                                     out_code_offset, out_gs_hdr_offset);
+ }
+ 
+ static VkResult
+diff --git a/src/nouveau/vulkan/nvk_shader.h b/src/nouveau/vulkan/nvk_shader.h
+index e50c36b..56c8cad 100644
+--- a/src/nouveau/vulkan/nvk_shader.h
++++ b/src/nouveau/vulkan/nvk_shader.h
+@@ -11,6 +11,7 @@
+ #include "vk_pipeline_cache.h"
+ 
+ #include "nak.h"
++#include "nak_shader_layout.h"
+ #include "nir_defines.h"
+ 
+ #include "vk_shader.h"
+@@ -26,10 +27,6 @@ struct vk_pipeline_layout;
+ struct vk_pipeline_robustness_state;
+ struct vk_shader_module;
+ 
+-#define GF100_SHADER_HEADER_SIZE (20 * 4)
+-#define TU102_SHADER_HEADER_SIZE (32 * 4)
+-#define NVC0_MAX_SHADER_HEADER_SIZE TU102_SHADER_HEADER_SIZE
+-
+ #define NVK_SHADER_STAGE_VTGM_BITS \
+    (VK_SHADER_STAGE_VERTEX_BIT | \
+     VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | \

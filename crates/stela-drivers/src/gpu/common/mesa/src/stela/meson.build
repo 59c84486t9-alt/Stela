@@ -352,6 +352,23 @@ if with_stela_nvidia
       build_rpath : fs.parent(stela_air_llvm),
     )
     test('stela_nv_air_owned', stela_nv_air_compile_test, suite : 'stela')
+    # The test includes render_compile.c itself so it can feed synthetic NIR to
+    # the private upload-image path; the second variant denies its allocations.
+    foreach variant : [['', []], ['_alloc', ['-DSTELA_NV_RENDER_ALLOC_TEST']]]
+      stela_nv_render_test = executable(
+        'stela_nv_air_render_owned' + variant[0],
+        '../../../../nvidia/stela/tests/air_render_owned.c',
+        include_directories : [inc_include, inc_src,
+                               include_directories('../nouveau/headers', '../nouveau/headers/nvidia/classes')],
+        dependencies : [idep_stela_air, idep_nak, idep_nir_headers, idep_mesautil,
+                        dependency('appleframeworks', modules : ['CoreFoundation'])],
+        link_with : [stela_metal_assembly, stela_apple_source, _libnak_rs],
+        link_args : [stela_metal_input, '-lresolv', '-liconv'],
+        c_args : ['-Werror'] + variant[1],
+        build_rpath : fs.parent(stela_air_llvm),
+      )
+      test('stela_nv_air_render_owned' + variant[0], stela_nv_render_test, suite : 'stela')
+    endforeach
   endif
   stela_nak_probe = executable(
     'stela_nak_probe',
