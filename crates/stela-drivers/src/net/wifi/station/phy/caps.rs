@@ -210,15 +210,38 @@ pub struct EhtMcs {
     pub bw320: Option<[u8; 3]>,
 }
 
+/// Exact zero-filled Linux `ieee80211_eht_mcs_nss_supp` union observation.
+/// Its first four bytes are the 20-only STA overlay; its three consecutive
+/// three-byte blocks are the firmware's BW80/160/320 overlays. These are raw
+/// peer capabilities, not local directional intersections or TX authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EhtMcsUnion {
+    bytes: [u8; 9],
+    wire_len: u8,
+}
+impl EhtMcsUnion {
+    pub fn bytes(&self) -> &[u8; 9] {
+        &self.bytes
+    }
+    pub fn wire_len(&self) -> usize {
+        usize::from(self.wire_len)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Eht {
     pub mac: [u8; 2],
     pub phy: [u8; 9],
     pub mcs: EhtMcs,
     pub ppe: Ppe,
+    source_mcs_union: EhtMcsUnion,
 }
 
 impl Eht {
+    pub fn source_mcs_union(&self) -> &EhtMcsUnion {
+        &self.source_mcs_union
+    }
+
     pub(super) fn parse(bytes: &[u8], he: &He, role: Role) -> Result<Self, Error> {
         let fixed = bytes.get(..11).ok_or(Error::Truncated)?;
         let mac = fixed[..2].try_into().unwrap();
@@ -259,6 +282,13 @@ impl Eht {
                 offset += 4;
             }
         }
+        // Match the complete Linux EHT-to-station helper: copy the actual
+        // contiguous wire maps into a zeroed union, not typed sparse offsets.
+        let mut source_mcs_union = EhtMcsUnion {
+            bytes: [0; 9],
+            wire_len: (offset - 11) as u8,
+        };
+        source_mcs_union.bytes[..offset - 11].copy_from_slice(&bytes[11..offset]);
         let ppe_len = if phy[5] & 8 != 0 {
             let data = bytes.get(offset..offset + 2).ok_or(Error::Truncated)?;
             let header = le16(data);
@@ -277,7 +307,13 @@ impl Eht {
         if bytes.len() != offset + ppe_len {
             return Err(Error::Unsupported("trailing EHT capability fields"));
         }
-        Ok(Self { mac, phy, mcs, ppe })
+        Ok(Self {
+            mac,
+            phy,
+            mcs,
+            ppe,
+            source_mcs_union,
+        })
     }
 }
 

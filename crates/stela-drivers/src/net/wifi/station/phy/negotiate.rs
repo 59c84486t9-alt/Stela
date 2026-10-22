@@ -1,6 +1,6 @@
 use super::{
-    AccessCategory, Band, Capabilities, Eht, Error, He, Ht, LegacyRates, McsMaps, Mode, Role, Vht,
-    Width,
+    AccessCategory, Band, Capabilities, Eht, EhtMcsUnion, Error, He, Ht, LegacyRates, McsMaps,
+    Mode, Role, Vht, Width,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,11 +149,27 @@ impl NegotiatedHe {
     }
 }
 
-/// Four actual MCS ranges:0..7,8..9,10..11,12..13. Each octet retains
-/// peer RX/local TX in low nibble and peer TX/local RX in high nibble.
+/// Directional common EHT bounds, expanded to four MCS groups
+/// (0..7, 8..9, 10..11, 12..13) even for the three-group wide layout.
+/// Low nibble is peer RX/local TX; high nibble is peer TX/local RX.
+/// These must never be serialized as the Linux peer capability union.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommonEhtMcs {
+    pub bw20: Option<[u8; 4]>,
+    /// Both peers actually advertise a non-20-only map for <=80MHz.
+    pub bw80: Option<[u8; 4]>,
+    pub bw160: Option<[u8; 4]>,
+    pub bw320: Option<[u8; 4]>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NegotiatedEht {
+    /// Common directional bounds for the explicitly selected width only.
     pub ranges: [u8; 4],
+    pub common: CommonEhtMcs,
+    /// Exact source peer union; intentionally not intersected or synthesized
+    /// from `ranges`. Actual local limits remain required for rate execution.
+    pub peer_source_mcs_union: EhtMcsUnion,
 }
 
 fn eht_ranges(cap: &Eht, width: Width) -> Option<[u8; 4]> {
@@ -173,14 +189,28 @@ fn eht_ranges(cap: &Eht, width: Width) -> Option<[u8; 4]> {
 }
 impl NegotiatedEht {
     fn between(local: &Eht, peer: &Eht, width: Width) -> Result<Self, Error> {
-        let own = eht_ranges(local, width).ok_or(Error::Incompatible("local EHT width maps"))?;
-        let peer = eht_ranges(peer, width).ok_or(Error::Incompatible("peer EHT width maps"))?;
-        let ranges = core::array::from_fn(|i| {
-            let rx = (own[i] >> 4).min(peer[i] & 15);
-            let tx = (own[i] & 15).min(peer[i] >> 4);
-            rx | tx << 4
-        });
-        Ok(Self { ranges })
+        let common_at = |width| {
+            eht_ranges(local, width)
+                .zip(eht_ranges(peer, width))
+                .map(|(own, peer)| {
+                    core::array::from_fn(|i| {
+                        let rx = (own[i] >> 4).min(peer[i] & 15);
+                        let tx = (own[i] & 15).min(peer[i] >> 4);
+                        rx | tx << 4
+                    })
+                })
+        };
+        let ranges = common_at(width).ok_or(Error::Incompatible("common EHT width maps"))?;
+        Ok(Self {
+            ranges,
+            common: CommonEhtMcs {
+                bw20: common_at(Width::Mhz20),
+                bw80: common_at(Width::Mhz80),
+                bw160: common_at(Width::Mhz160),
+                bw320: common_at(Width::Mhz320),
+            },
+            peer_source_mcs_union: peer.source_mcs_union().clone(),
+        })
     }
 }
 

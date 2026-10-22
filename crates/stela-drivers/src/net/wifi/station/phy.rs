@@ -12,9 +12,10 @@ use crate::net::wifi::Band;
 
 mod caps;
 mod negotiate;
-pub use caps::{Eht, EhtMcs, He, Ht, McsMaps, Ppe, Vht};
+pub use caps::{Eht, EhtMcs, EhtMcsUnion, He, Ht, McsMaps, Ppe, Vht};
 pub use negotiate::{
-    Negotiated, NegotiatedEht, NegotiatedHe, NegotiatedHt, NegotiatedVht, NegotiatedWmm,
+    CommonEhtMcs, Negotiated, NegotiatedEht, NegotiatedHe, NegotiatedHt, NegotiatedVht,
+    NegotiatedWmm,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]

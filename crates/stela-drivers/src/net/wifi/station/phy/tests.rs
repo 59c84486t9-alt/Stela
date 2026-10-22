@@ -458,3 +458,92 @@ fn unchanged_linux_directional_mcs_and_sizing_helpers_match_complete_oracle() {
         "b65d15db624c62db45cb60b3c2d1b426a1cbb7e496e0af8d76b1a6c88c37e26c"
     );
 }
+
+#[test]
+fn full_eht_maps_keep_each_width_direction_and_source_union_distinct() {
+    let (mut local, mut peer) = pair(Band::Ghz6, 12, true);
+    let own = [0x12, 0x34, 0x56, 0x23, 0x45, 0x67, 0x34, 0x56, 0x78];
+    let ap = [0x87, 0x65, 0x43, 0x76, 0x54, 0x32, 0x65, 0x43, 0x21];
+    for (cap, raw, role) in [
+        (&mut local, own, Role::Station),
+        (&mut peer, ap, Role::AccessPoint),
+    ] {
+        let mut bytes = eht(12, role, true);
+        bytes[11..20].copy_from_slice(&raw);
+        cap.eht = Some(Eht::parse(&bytes, cap.he().unwrap(), role).unwrap());
+    }
+    let n = Negotiated::between(&local, &peer, Mode::Eht, Width::Mhz160).unwrap();
+    let map = n.eht.unwrap();
+    assert_eq!(map.peer_source_mcs_union.bytes(), &ap);
+    assert_eq!(map.peer_source_mcs_union.wire_len(), 9);
+    assert_eq!(map.common.bw20, Some([0x21, 0x21, 0x43, 0x43]));
+    assert_eq!(map.common.bw80, map.common.bw20);
+    assert_eq!(map.common.bw160, Some([0x32, 0x32, 0x54, 0x32]));
+    assert_eq!(map.common.bw320, Some([0x43, 0x43, 0x43, 0x21]));
+    assert_eq!(map.ranges, map.common.bw160.unwrap());
+    assert_ne!(&map.ranges[..3], &map.peer_source_mcs_union.bytes()[..3]);
+}
+
+#[test]
+fn twenty_only_sta_four_groups_do_not_shift_the_ap_three_group_source_overlay() {
+    let (mut local, mut peer) = pair(Band::Ghz5, 0, false);
+    let mut own = eht(0, Role::Station, false);
+    own[11..].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+    local.eht = Some(Eht::parse(&own, local.he().unwrap(), Role::Station).unwrap());
+    let mut ap = eht(0, Role::AccessPoint, false);
+    ap[11..].copy_from_slice(&[0x87, 0x65, 0x43]);
+    peer.eht = Some(Eht::parse(&ap, peer.he().unwrap(), Role::AccessPoint).unwrap());
+    let n = Negotiated::between(&local, &peer, Mode::Eht, Width::Mhz20).unwrap();
+    let map = n.eht.unwrap();
+    assert_eq!(map.ranges, [0x21, 0x43, 0x65, 0x43]);
+    assert_eq!(map.common.bw20, Some(map.ranges));
+    assert_eq!(map.common.bw80, None);
+    assert_eq!(map.common.bw160, None);
+    assert_eq!(map.common.bw320, None);
+    assert_eq!(
+        local.eht().unwrap().source_mcs_union().bytes(),
+        &[0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0]
+    );
+    assert_eq!(local.eht().unwrap().source_mcs_union().wire_len(), 4);
+    assert_eq!(
+        map.peer_source_mcs_union.bytes(),
+        &[0x87, 0x65, 0x43, 0, 0, 0, 0, 0, 0]
+    );
+    assert_eq!(map.peer_source_mcs_union.wire_len(), 3);
+}
+
+#[test]
+fn complete_unchanged_linux_eht_station_union_oracle() {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    let mut cases = 0;
+    for phy0 in 0..=255 {
+        for wide320 in [false, true] {
+            for role in [Role::Station, Role::AccessPoint] {
+                let he = He::parse(&he(phy0)).unwrap();
+                let mut bytes = eht(phy0, role, wide320);
+                for (i, octet) in bytes[11..].iter_mut().enumerate() {
+                    *octet = 0x11 * (1 + i as u8 % 8);
+                }
+                for available in [false, true] {
+                    for extra in [-1_i32, 0, 1] {
+                        cases += 1;
+                        if !available || extra < 0 {
+                            hash.update([0; 10]);
+                        } else {
+                            let parsed = Eht::parse(&bytes, &he, role).unwrap();
+                            hash.update([1]);
+                            hash.update(parsed.source_mcs_union().bytes());
+                            assert_eq!(parsed.source_mcs_union().wire_len(), bytes.len() - 11);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 6144);
+    assert_eq!(
+        format!("{:x}", hash.finalize()),
+        "f1aa36b6d5c91454e1be078fdf8a7557367687f48448b669742387785110f5aa"
+    );
+}
