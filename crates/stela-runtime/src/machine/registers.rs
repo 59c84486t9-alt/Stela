@@ -208,7 +208,9 @@ pub struct Changes {
 /// the mode per thread at context switch, 3 for a thread its
 /// `siq_realtime_thread_mode` selects unless the CPU runs its idle thread
 /// (kernelcache.release.mac14g 0xfffffe000bd7c388..0xfffffe000bd7c3d0).
-pub const SIQ_CFG_MODE: u64 = 0b11;
+/// Only modes 0/2/3 with zero upper bits are qualified; `impdef::Registers`
+/// rejects other writes before accounting, storage or steering changes.
+pub const SIQ_CFG_MODE: u64 = impdef::SIQ_CFG_MODE;
 pub const SIQ_CFG_NO_IRQ: u64 = 0b11;
 
 /// Why an access cannot complete on this machine (not a guest exception).
@@ -1511,16 +1513,114 @@ mod tests {
     /// AIC's IRQs: mode 3 refuses, XNU's 0 and 2 accept.
     #[test]
     fn siq_cfg_steers_the_aics_irqs() {
-        let mut cpu = Cpu::new(0, Pstate::reset(2));
-        for (value, refuses) in [(3, true), (2, false), (0x7, true), (0, false)] {
-            cpu.state.x[5] = value;
-            assert!(matches!(
-                cpu.apple_access(msr(5, impdef::SIQ_CFG_EL1), 0),
+        for chip in super::super::Chip::ALL {
+            if !impdef::consumed(impdef::SIQ_CFG_EL1, chip) {
+                continue;
+            }
+            for el in [1, 2] {
+                let mut cpu = Cpu::of(chip, 0, Pstate::reset(el));
+                for (value, refuses) in [(3, true), (2, false), (0, false), (3, true)] {
+                    cpu.state.x[5] = value;
+                    assert_eq!(
+                        cpu.apple_access(msr(5, impdef::SIQ_CFG_EL1), 0),
+                        Outcome::Written(Changes {
+                            irq_steering: Some(refuses),
+                            ..Changes::default()
+                        })
+                    );
+                    assert_eq!(
+                        cpu.apple_access(mrs(0, impdef::SIQ_CFG_EL1), 0),
+                        Outcome::Read(value)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn siq_cfg_refusals_preserve_held_state_counts_and_irq_effects() {
+        let encoding = impdef::SIQ_CFG_EL1;
+        let refused = Outcome::Refused(Refusal::UnsupportedSetting(
+            "SIQ_CFG_EL1 mode 1 or nonzero upper bits lack source-qualified effects",
+        ));
+        for chip in super::super::Chip::ALL {
+            if !impdef::consumed(encoding, chip) {
+                continue;
+            }
+            for el in [1, 2] {
+                let mut cpu = Cpu::of(chip, 0, Pstate::reset(el));
+                cpu.state.x[5] = 1;
+                let before = cpu.state.clone();
+                assert_eq!(cpu.apple_access(msr(5, encoding), 0), refused);
+                assert_eq!(cpu.apple.impdef.used().count(), 0);
+                assert_eq!(cpu.state, before);
+                cpu.state.x[5] = 3;
+                assert_eq!(
+                    cpu.apple_access(msr(5, encoding), 0),
+                    Outcome::Written(Changes {
+                        irq_steering: Some(true),
+                        ..Changes::default()
+                    })
+                );
+                // Test each upper bit with every otherwise-qualified mode.
+                // Refused writes produce no Changes, including no steering.
+                for value in [1, u64::MAX]
+                    .into_iter()
+                    .chain((2..64).flat_map(|bit| [0, 2, 3].map(|mode| 1 << bit | mode)))
+                {
+                    cpu.state.x[5] = value;
+                    let before = cpu.state.clone();
+                    let reads = cpu.apple.impdef.reads.clone();
+                    let writes = cpu.apple.impdef.writes.clone();
+                    assert_eq!(cpu.apple_access(msr(5, encoding), 0), refused);
+                    assert_eq!(cpu.state, before);
+                    assert_eq!(cpu.apple.impdef.reads, reads);
+                    assert_eq!(cpu.apple.impdef.writes, writes);
+                    assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Read(3));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn siq_cfg_privilege_checks_precede_validation_and_xzr_clears() {
+        let encoding = impdef::SIQ_CFG_EL1;
+        for chip in super::super::Chip::ALL {
+            if !impdef::consumed(encoding, chip) {
+                continue;
+            }
+            let mut cpu = Cpu::of(chip, 0, Pstate::reset(1));
+            cpu.registers.set(Register::HCR_EL2, 0, 1 << HCR_TIDCP);
+            cpu.state.x[5] = u64::MAX;
+            let before = cpu.state.clone();
+            for access in [mrs(0, encoding), msr(5, encoding), msr(31, encoding)] {
+                assert_eq!(cpu.apple_access(access, 0), Outcome::Trapped(Some(2)));
+            }
+            assert_eq!(cpu.state, before);
+            assert_eq!(cpu.apple.impdef.used().count(), 0);
+            cpu.pstate.el = 0;
+            for host in [false, true] {
+                cpu.registers.set(
+                    Register::HCR_EL2,
+                    0,
+                    (1 << HCR_TIDCP) | if host { 1 << HCR_TGE } else { 0 },
+                );
+                for access in [mrs(0, encoding), msr(5, encoding), msr(31, encoding)] {
+                    assert_eq!(cpu.apple_access(access, 0), Outcome::Undefined);
+                }
+            }
+            assert_eq!(cpu.state, before);
+            assert_eq!(cpu.apple.impdef.used().count(), 0);
+            cpu.pstate.el = 2;
+            assert_eq!(
+                cpu.apple_access(msr(31, encoding), 0),
                 Outcome::Written(Changes {
-                    irq_steering: Some(steering),
-                    ..
-                }) if steering == refuses
-            ));
+                    irq_steering: Some(false),
+                    ..Changes::default()
+                })
+            );
+            assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Read(0));
+            assert_eq!(cpu.state, before);
         }
     }
 

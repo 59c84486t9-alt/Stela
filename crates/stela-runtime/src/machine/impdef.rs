@@ -561,11 +561,17 @@ const ACC_OVRD_EVIDENCE: &str = "m1n1 cpu_regs.h names it; XNU xnu-12377.121.6 \
     ARM64_REG_ACC_OVRD_*) before a deep-sleep power-down, which acts only when the cluster \
     powers down, and core power-down stops (CYC_OVRD)";
 
+/// The established SIQ_CFG_EL1 mode field. Only 0, 2 and 3 have qualified
+/// effects; mode 1 and every upper bit refuse before register mutation.
+pub const SIQ_CFG_MODE: u64 = 0b11;
+
 const SIQ_CFG: &str = "m1n1 cpu_regs.h names it SIQ_CFG_EL1, and Asahi's documentation says \
     the AICv2 sends a core that writes 3 to it no IRQs (FIQs are unaffected); 26A434 XNU sets bits \
     0-1 to a per-thread mode with read-modify-write at context switch (0xfffffe000bd7c388) and \
-    before a power-down, and clears it elsewhere (0xfffffe000bd70b74). The value is held, and \
-    mode 3 keeps an AICv2 or AICv3 from sending the PE IRQs (machine::registers SIQ_CFG_NO_IRQ)";
+    before a power-down, and clears it elsewhere (0xfffffe000bd70b74). Modes 0/2 admit IRQs \
+    and mode 3 keeps an AICv2 or AICv3 from sending the PE IRQs. Only these modes with zero \
+    upper bits are held; mode 1 and upper-bit effects lack qualification and refuse before \
+    mutation (docs/research/cpu-topology.md, AICv2/v3 target and SIQ qualification)";
 
 const XNU_THREAD_KEYS: &str = "26A434 XNU's context switch writes it with the thread's \
     APIBKey value plus 4 or 5, after APIBKey and APDBKey (0xfffffe000bb9bd38), and reads it \
@@ -1030,7 +1036,7 @@ pub const TABLE: &[Entry] = &[
     .permitting(objc::CONTROL),
     entry(ACC_CFG, "ACC_CFG", Class::Tuning, ACC_CFG_EVIDENCE),
     entry(ACC_OVRD, "ACC_OVRD", Class::Tuning, ACC_OVRD_EVIDENCE),
-    entry(SIQ_CFG_EL1, "SIQ_CFG_EL1", Class::Tuning, SIQ_CFG),
+    entry(SIQ_CFG_EL1, "SIQ_CFG_EL1", Class::Control, SIQ_CFG).permitting(SIQ_CFG_MODE),
     entry(
         THREAD_KEY_0,
         "S3_4_C15_C13_6 (unnamed)",
@@ -1849,6 +1855,9 @@ impl Registers {
 
     /// A write, or why it cannot complete.
     pub fn write(&mut self, entry: &Entry, value: u64) -> Result<(), &'static str> {
+        if entry.encoding == SIQ_CFG_EL1 && !matches!(value, 0 | 2 | 3) {
+            return Err("SIQ_CFG_EL1 mode 1 or nonzero upper bits lack source-qualified effects");
+        }
         match entry.class {
             Class::Unsupported => return Err(entry.evidence),
             Class::Record => {
@@ -2021,6 +2030,35 @@ mod tests {
             first.write(control, saved).unwrap();
             assert_eq!(first.read(control), Ok(saved));
             assert_eq!(second.read(address), Ok(0x1234));
+        }
+    }
+
+    #[test]
+    fn siq_cfg_owner_rejects_unqualified_fields_before_mutation() {
+        for chip in Chip::ALL {
+            let Some(entry) = super::lookup(SIQ_CFG_EL1, chip) else {
+                continue;
+            };
+            assert_eq!(entry.class, Class::Control);
+            assert_eq!(entry.permitted, SIQ_CFG_MODE);
+            assert_eq!(entry.scope, Scope::Pe);
+            let mut registers = Registers::default();
+            for mode in [0, 2, 3] {
+                registers.write(entry, mode).unwrap();
+                assert_eq!(registers.read(entry), Ok(mode));
+            }
+            let values = registers.values.clone();
+            let reads = registers.reads.clone();
+            let writes = registers.writes.clone();
+            for value in [1, u64::MAX].into_iter().chain((2..64).map(|bit| 1 << bit)) {
+                assert_eq!(
+                    registers.write(entry, value),
+                    Err("SIQ_CFG_EL1 mode 1 or nonzero upper bits lack source-qualified effects")
+                );
+                assert_eq!(registers.values, values);
+                assert_eq!(registers.reads, reads);
+                assert_eq!(registers.writes, writes);
+            }
         }
     }
 
