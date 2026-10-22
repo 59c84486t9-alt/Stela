@@ -500,7 +500,13 @@ static void original_tests(void)
     struct stela_metal_assembly *library = fixture(air); LLVMDisposeMemoryBuffer(air);
     targets(library, STELA_AIR_FP_IEEE_DEFAULT, "original-integer", false);
     struct nv_device_info device = model(89, ADA_COMPUTE_A); struct nak_compiler *nak = compiler(&device);
-    struct stela_nv_air_options opts=options(); struct stela_nv_air_compilation *owner=compile(&device,nak,library,0,&opts,STELA_NV_AIR_OK);
+    struct stela_nv_air_options opts=options();
+    CHECK(!nak->nir_options.cb_data);
+    unsigned before_callback_refusal=allocations;
+    nak->nir_options.cb_data=&device;
+    CHECK(!compile(&device,nak,library,0,&opts,STELA_NV_AIR_UNSUPPORTED)&&allocations==before_callback_refusal);
+    nak->nir_options.cb_data=NULL;
+    struct stela_nv_air_compilation *owner=compile(&device,nak,library,0,&opts,STELA_NV_AIR_OK);
     pack_failures(owner,&device);
     const struct stela_nv_air_provenance *p=stela_nv_air_provenance(owner);
     const struct stela_metal_library_manifest *m=stela_metal_assembly_manifest(library);

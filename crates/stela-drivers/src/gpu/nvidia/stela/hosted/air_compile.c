@@ -190,6 +190,9 @@ enum stela_nv_air_status stela_nv_air_compile_specialized(const struct nv_device
         return report(error, STELA_NV_AIR_UNSUPPORTED, "Unsupported cbuf/diagnostic/FP policy");
     if (!device_valid(device) || compiler->sm != device->sm || compiler->warps_per_sm != device->max_warps_per_mp)
         return report(error, STELA_NV_AIR_DEVICE, "Actual matching initialized NAK/device facts required");
+    const nir_shader_compiler_options *actual_options = nak_nir_options(compiler);
+    if (!actual_options || actual_options->cb_data)
+        return report(error, STELA_NV_AIR_UNSUPPORTED, "Borrowed NIR option callback data cannot outlive its compiler");
     uint64_t threads = 1;
     for (unsigned axis = 0; axis < 3; axis++) {
         unsigned count = options->workgroup_size[axis];
@@ -221,7 +224,7 @@ enum stela_nv_air_status stela_nv_air_compile_specialized(const struct nv_device
     owner->provenance.options = *options; owner->provenance.threadgroup = threadgroup; owner->provenance.device = *device;
     owner->provenance.base_layout = compiler->const_offsets_base;
     owner->provenance.graphics_layout = compiler->const_offsets_turing_graphics;
-    owner->nir_options = *nak_nir_options(compiler);
+    owner->nir_options = *actual_options;
     enum stela_nv_air_status status = copy_provenance(owner, manifest, record, selected, error);
     if (!status) status = prepare_bindings(owner, error);
     if (status) { stela_nv_air_destroy(&owner); return status; }
