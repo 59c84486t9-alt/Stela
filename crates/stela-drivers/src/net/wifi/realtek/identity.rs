@@ -139,7 +139,7 @@ impl From<ParseError> for StageError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::firmware::{Catalog, Provenance, Resource};
     use sha2::{Digest, Sha256};
@@ -153,6 +153,9 @@ mod tests {
             class: [2, 0x80, 0],
             sys_cfg1: u32::from(cut) << 12,
         }
+    }
+    pub(crate) fn profile() -> Profile {
+        Profile::select(observed(0xc822, 0)).unwrap()
     }
     #[test]
     fn exact_pci_cut_and_raw_identity_are_not_replaced_by_a_marketing_name() {

@@ -5,14 +5,14 @@
 //! deferred work, packet completion, firmware ACK or DMA-stop acknowledgement.
 use super::{
     identity::Chip,
-    legacy::{self, Io},
+    io::{self, Io},
 };
 const MASK0: u32 = 0x44fd;
 const MASK1: u32 = 1 << 9;
 const MASK3: u32 = 1 << 16;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    Hardware(legacy::Error),
+    Hardware(io::Error),
     WrongChip,
     IdentityChanged,
     Removed,
@@ -20,8 +20,8 @@ pub enum Error {
     InvalidState,
     Quarantined,
 }
-impl From<legacy::Error> for Error {
-    fn from(e: legacy::Error) -> Self {
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
         Self::Hardware(e)
     }
 }
@@ -244,10 +244,10 @@ mod tests {
             }
             m
         }
-        fn access(&mut self, r: u32, value: Option<u32>) -> Result<u32, legacy::Error> {
+        fn access(&mut self, r: u32, value: Option<u32>) -> Result<u32, io::Error> {
             self.calls += 1;
             if self.fail == Some(self.calls) {
-                return Err(legacy::Error::Register);
+                return Err(io::Error::Register);
             }
             let p = r as usize;
             let old = u32::from_le_bytes(self.bytes[p..p + 4].try_into().unwrap());
@@ -289,31 +289,31 @@ mod tests {
             })
             .unwrap()
         }
-        fn read8(&mut self, _: u32) -> Result<u8, legacy::Error> {
+        fn read8(&mut self, _: u32) -> Result<u8, io::Error> {
             panic!("32-bit interrupt registers only");
         }
-        fn read16(&mut self, _: u32) -> Result<u16, legacy::Error> {
+        fn read16(&mut self, _: u32) -> Result<u16, io::Error> {
             panic!("32-bit interrupt registers only");
         }
-        fn read32(&mut self, r: u32) -> Result<u32, legacy::Error> {
+        fn read32(&mut self, r: u32) -> Result<u32, io::Error> {
             self.0.lock().unwrap().access(r, None)
         }
-        fn write8(&mut self, _: u32, _: u8) -> Result<(), legacy::Error> {
+        fn write8(&mut self, _: u32, _: u8) -> Result<(), io::Error> {
             panic!("32-bit interrupt registers only");
         }
-        fn write16(&mut self, _: u32, _: u16) -> Result<(), legacy::Error> {
+        fn write16(&mut self, _: u32, _: u16) -> Result<(), io::Error> {
             panic!("32-bit interrupt registers only");
         }
-        fn write32(&mut self, r: u32, v: u32) -> Result<(), legacy::Error> {
+        fn write32(&mut self, r: u32, v: u32) -> Result<(), io::Error> {
             self.0.lock().unwrap().access(r, Some(v)).map(|_| ())
         }
         fn delay_us(&mut self, _: u64) {
             panic!("no IRQ delay");
         }
-        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), legacy::Error> {
+        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), io::Error> {
             panic!("no IRQ submission");
         }
-        unsafe fn beacon_consumed(&mut self) -> Result<(), legacy::Error> {
+        unsafe fn beacon_consumed(&mut self) -> Result<(), io::Error> {
             panic!("no IRQ completion");
         }
         fn quarantine(&mut self) {

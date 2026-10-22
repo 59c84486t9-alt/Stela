@@ -5,13 +5,13 @@
 use super::{
     beacon::{self, Beacon},
     identity::Chip,
-    legacy::{self, Io, NativeIo},
+    io::{self, Io, NativeIo},
     receive, transmit,
 };
 use core::sync::atomic::{Ordering, fence};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    Hardware(legacy::Error),
+    Hardware(io::Error),
     Beacon(beacon::Error),
     Receive(receive::Error),
     Transmit(transmit::Error),
@@ -19,8 +19,8 @@ pub enum Error {
     Removed,
     Readback,
 }
-impl From<legacy::Error> for Error {
-    fn from(e: legacy::Error) -> Self {
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
         Self::Hardware(e)
     }
 }
@@ -146,24 +146,12 @@ mod tests {
     extern crate std;
     use super::super::{
         beacon::tests::{Domain, Model, Source},
-        identity::{Observed, Profile},
+        identity::{Profile, tests::profile},
     };
     use super::*;
     use alloc::{sync::Arc, vec::Vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
     use std::sync::Mutex;
-    fn profile() -> Profile {
-        Profile::select(Observed {
-            vendor: 0x10ec,
-            device: 0xc822,
-            subsystem_vendor: 0x17aa,
-            subsystem_device: 0x1234,
-            pci_revision: 1,
-            class: [2, 0x80, 0],
-            sys_cfg1: 0,
-        })
-        .unwrap()
-    }
     struct Bar {
         words: UnsafeCell<[u32; 0x1800 / 4]>,
     }
@@ -190,9 +178,9 @@ mod tests {
             }
         }
     }
-    type Native = NativeIo<Beacon<beacon::MmioRegisters>>;
-    type Rx = receive::Ring<receive::MmioRegisters>;
-    type Tx = transmit::Rings<transmit::MmioRegisters>;
+    type Native = NativeIo<Beacon<io::Bar>>;
+    type Rx = receive::Ring<io::Bar>;
+    type Tx = transmit::Rings<io::Bar>;
     // Native owners intentionally use Arc<dyn Any> without a Send promise.
     // This serialized CPU-affine fixture must not invent Sync for UnsafeCell.
     #[allow(clippy::arc_with_non_send_sync)]
@@ -207,21 +195,20 @@ mod tests {
         // No physical bus or calibrated clock proof is claimed/exercised.
         let (io, rx, tx) = unsafe {
             let b = Beacon::install(
-                beacon::MmioRegisters::new(bar.pointer(), 0x1800, bar.clone()).unwrap(),
+                io::Bar::new(bar.pointer(), 0x1800, profile(), bar.clone()).unwrap(),
                 &Source,
                 domain.clone(),
                 beacon::FirmwareBand::Ghz2,
             )
             .unwrap();
             let rx = Rx::install(
-                receive::MmioRegisters::new(bar.pointer(), 0x1800, bar.clone()).unwrap(),
+                io::Bar::new(bar.pointer(), 0x1800, profile(), bar.clone()).unwrap(),
                 &Source,
                 domain.clone(),
             )
             .unwrap();
             let tx = Tx::install(
-                transmit::MmioRegisters::new(bar.pointer(), 0x1800, profile(), bar.clone())
-                    .unwrap(),
+                io::Bar::new(bar.pointer(), 0x1800, profile(), bar.clone()).unwrap(),
                 &Source,
                 domain,
             )
@@ -347,15 +334,10 @@ mod tests {
                 corrupt: None,
             }
         }
-        fn access(
-            &mut self,
-            reg: u32,
-            width: usize,
-            value: Option<u32>,
-        ) -> Result<u32, legacy::Error> {
+        fn access(&mut self, reg: u32, width: usize, value: Option<u32>) -> Result<u32, io::Error> {
             self.calls += 1;
             if self.fail == Some(self.calls) {
-                return Err(legacy::Error::Register);
+                return Err(io::Error::Register);
             }
             let range = reg as usize..reg as usize + width;
             if let Some(value) = value {
@@ -383,31 +365,31 @@ mod tests {
         fn profile(&self) -> Profile {
             profile()
         }
-        fn read8(&mut self, r: u32) -> Result<u8, legacy::Error> {
+        fn read8(&mut self, r: u32) -> Result<u8, io::Error> {
             self.access(r, 1, None).map(|v| v as u8)
         }
-        fn read16(&mut self, r: u32) -> Result<u16, legacy::Error> {
+        fn read16(&mut self, r: u32) -> Result<u16, io::Error> {
             self.access(r, 2, None).map(|v| v as u16)
         }
-        fn read32(&mut self, r: u32) -> Result<u32, legacy::Error> {
+        fn read32(&mut self, r: u32) -> Result<u32, io::Error> {
             self.access(r, 4, None)
         }
-        fn write8(&mut self, r: u32, v: u8) -> Result<(), legacy::Error> {
+        fn write8(&mut self, r: u32, v: u8) -> Result<(), io::Error> {
             self.access(r, 1, Some(v.into())).map(|_| ())
         }
-        fn write16(&mut self, r: u32, v: u16) -> Result<(), legacy::Error> {
+        fn write16(&mut self, r: u32, v: u16) -> Result<(), io::Error> {
             self.access(r, 2, Some(v.into())).map(|_| ())
         }
-        fn write32(&mut self, r: u32, v: u32) -> Result<(), legacy::Error> {
+        fn write32(&mut self, r: u32, v: u32) -> Result<(), io::Error> {
             self.access(r, 4, Some(v)).map(|_| ())
         }
         fn delay_us(&mut self, _: u64) {
             panic!("no clock poll in HCI reset");
         }
-        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), legacy::Error> {
+        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), io::Error> {
             panic!("no submission in HCI reset");
         }
-        unsafe fn beacon_consumed(&mut self) -> Result<(), legacy::Error> {
+        unsafe fn beacon_consumed(&mut self) -> Result<(), io::Error> {
             panic!("no completion in HCI reset");
         }
         fn quarantine(&mut self) {

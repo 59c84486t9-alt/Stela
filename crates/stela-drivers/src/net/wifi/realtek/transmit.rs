@@ -6,19 +6,14 @@ use super::{
     beacon::{self, Allocation},
     fifo::Geometry,
     identity::{Chip, Profile},
+    io::Bar,
 };
-use crate::bus::{
-    dma::{
-        mapping::{Direction, DmaDomain},
-        memory::PageSource,
-    },
-    mmio::Mmio,
+use crate::bus::dma::{
+    mapping::{Direction, DmaDomain},
+    memory::PageSource,
 };
 use alloc::{sync::Arc, vec::Vec};
-use core::{
-    ptr::NonNull,
-    sync::atomic::{Ordering, fence},
-};
+use core::sync::atomic::{Ordering, fence};
 
 const H2C_COUNT: usize = 128;
 const DESCRIPTOR: usize = 16;
@@ -69,7 +64,7 @@ impl Queue {
     pub fn count(self) -> u16 {
         if self == Self::BestEffort { 256 } else { 128 }
     }
-    fn registers(self) -> (usize, usize, usize) {
+    fn registers(self) -> (u32, u32, u32) {
         match self {
             Self::Background => (0x330, 0x38a, 0x3ac),
             Self::BestEffort => (0x328, 0x388, 0x3a8),
@@ -93,51 +88,23 @@ pub unsafe trait Registers {
     fn configure(&mut self, queue: Queue, address: u32) -> Result<(), Error>;
     fn publish_h2c(&mut self, producer: u16) -> Result<(), Error>;
 }
-pub struct MmioRegisters {
-    mmio: Mmio,
-    profile: Profile,
-    _owner: Arc<dyn core::any::Any>,
-}
-impl MmioRegisters {
-    /// # Safety
-    /// Exact profile's exclusive requester with UC BAR2 mapped at least 0x1330
-    /// bytes, retained by the actual owner; domain binds this same requester.
-    pub unsafe fn new(
-        window: NonNull<u8>,
-        bytes: usize,
-        profile: Profile,
-        owner: Arc<dyn core::any::Any>,
-    ) -> Result<Self, Error> {
-        if bytes < 0x1330 || window.as_ptr().addr() & 3 != 0 {
-            return Err(Error::Register);
-        }
-        if profile.chip() != Chip::Rtl8822C {
-            return Err(Error::UnsupportedChip);
-        }
-        Ok(Self {
-            mmio: unsafe { Mmio::new(window.as_ptr() as u64) },
-            profile,
-            _owner: owner,
-        })
-    }
-}
-// SAFETY: unsafe constructor binds real retained requester/profile/UC BAR.
-unsafe impl Registers for MmioRegisters {
+// SAFETY: `Bar::new` binds the exclusive BAR of the profile's requester.
+unsafe impl Registers for Bar {
     fn profile(&self) -> Profile {
-        self.profile
+        Bar::profile(self)
     }
     fn verify_identity(&mut self) -> Result<(), Error> {
-        let value = self.mmio.read32(0xf0);
+        let value = self.read32(0xf0);
         if value == u32::MAX {
             return Err(Error::Removed);
         }
-        if value != self.profile.observed().sys_cfg1 {
+        if value != self.profile().observed().sys_cfg1 {
             return Err(Error::IdentityChanged);
         }
         Ok(())
     }
     fn firmware_ready(&mut self) -> Result<(), Error> {
-        let value = self.mmio.read16(0x80);
+        let value = self.read16(0x80);
         if value == u16::MAX {
             return Err(Error::Removed);
         }
@@ -147,7 +114,7 @@ unsafe impl Registers for MmioRegisters {
         Ok(())
     }
     fn indices(&mut self, q: Queue) -> Result<(u16, u16), Error> {
-        let value = self.mmio.read32(q.registers().2);
+        let value = self.read32(q.registers().2);
         if value == u32::MAX {
             return Err(Error::Removed);
         }
@@ -155,15 +122,15 @@ unsafe impl Registers for MmioRegisters {
     }
     fn configure(&mut self, q: Queue, address: u32) -> Result<(), Error> {
         let (base, count, _) = q.registers();
-        self.mmio.write16(count, q.count());
-        self.mmio.write32(base, address);
-        if self.mmio.read16(count) & 0xfff != q.count() || self.mmio.read32(base) != address {
+        self.write16(count, q.count());
+        self.write32(base, address);
+        if self.read16(count) & 0xfff != q.count() || self.read32(base) != address {
             return Err(Error::Register);
         }
         Ok(())
     }
     fn publish_h2c(&mut self, producer: u16) -> Result<(), Error> {
-        self.mmio.write16(0x132c, producer);
+        self.write16(0x132c, producer);
         Ok(())
     }
 }
@@ -568,22 +535,10 @@ mod tests {
     extern crate std;
     use super::super::{
         beacon::tests::{Domain, Model, Source},
-        identity::Observed,
+        identity::tests::profile,
     };
     use super::*;
     use std::sync::Mutex;
-    fn profile() -> Profile {
-        Profile::select(Observed {
-            vendor: 0x10ec,
-            device: 0xc822,
-            subsystem_vendor: 0x17aa,
-            subsystem_device: 0x1234,
-            pci_revision: 1,
-            class: [2, 0x80, 0],
-            sys_cfg1: 0,
-        })
-        .unwrap()
-    }
     #[derive(Default)]
     struct Device {
         bases: [u32; 7],

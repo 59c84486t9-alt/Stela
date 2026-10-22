@@ -4,7 +4,7 @@
 //! Raw OTP/regulatory/calibration fields do not attest calibrated radio policy.
 use super::{
     identity::{Chip, Profile},
-    legacy::{self, Io},
+    io::{self, Io},
 };
 const PHYSICAL: usize = 512;
 const PROTECTED: usize = 124;
@@ -13,7 +13,7 @@ const USABLE: usize = PHYSICAL - PROTECTED;
 const POLLS: usize = 1_000_000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    Hardware(legacy::Error),
+    Hardware(io::Error),
     WrongChip,
     IdentityChanged,
     Removed,
@@ -26,8 +26,8 @@ pub enum Error {
     UnsupportedRfe(u8),
     InvalidMac,
 }
-impl From<legacy::Error> for Error {
-    fn from(e: legacy::Error) -> Self {
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
         Self::Hardware(e)
     }
 }
@@ -276,22 +276,10 @@ pub fn logical_map(physical: &[u8; PHYSICAL]) -> Result<[u8; LOGICAL], Error> {
 #[cfg(test)]
 mod tests {
     extern crate std;
-    use super::super::identity::Observed;
     use super::*;
+    use crate::net::wifi::realtek::identity::tests::profile;
     use alloc::{sync::Arc, vec::Vec};
     use std::sync::Mutex;
-    fn profile() -> Profile {
-        Profile::select(Observed {
-            vendor: 0x10ec,
-            device: 0xc822,
-            subsystem_vendor: 0x17aa,
-            subsystem_device: 0x1234,
-            pci_revision: 1,
-            class: [2, 0x80, 0],
-            sys_cfg1: 0,
-        })
-        .unwrap()
-    }
     struct Model {
         physical: [u8; PHYSICAL],
         control: u32,
@@ -339,10 +327,10 @@ mod tests {
                 quarantined: false,
             }
         }
-        fn event(&mut self, kind: u32, r: u32, n: u32, v: u32) -> Result<(), legacy::Error> {
+        fn event(&mut self, kind: u32, r: u32, n: u32, v: u32) -> Result<(), io::Error> {
             self.calls += 1;
             if self.fail == Some(self.calls) {
-                return Err(legacy::Error::Register);
+                return Err(io::Error::Register);
             }
             if self.record {
                 self.events.push([kind, r, n, v]);
@@ -357,28 +345,28 @@ mod tests {
         fn profile(&self) -> Profile {
             profile()
         }
-        fn read8(&mut self, r: u32) -> Result<u8, legacy::Error> {
+        fn read8(&mut self, r: u32) -> Result<u8, io::Error> {
             assert_eq!(r, 0x29);
             let mut m = self.0.lock().unwrap();
             let v = m.ldo;
             m.event(0, r, 1, v.into())?;
             Ok(v)
         }
-        fn read16(&mut self, r: u32) -> Result<u16, legacy::Error> {
+        fn read16(&mut self, r: u32) -> Result<u16, io::Error> {
             assert_eq!(r, 0x80);
             let mut m = self.0.lock().unwrap();
             m.calls += 1;
             if m.fail == Some(m.calls) {
-                return Err(legacy::Error::Register);
+                return Err(io::Error::Register);
             }
             Ok(m.ready)
         }
-        fn read32(&mut self, r: u32) -> Result<u32, legacy::Error> {
+        fn read32(&mut self, r: u32) -> Result<u32, io::Error> {
             let mut m = self.0.lock().unwrap();
             if r == 0xf0 {
                 m.calls += 1;
                 if m.fail == Some(m.calls) {
-                    return Err(legacy::Error::Register);
+                    return Err(io::Error::Register);
                 }
                 m.identities += 1;
                 if m.change_identity_at == Some(m.identities) {
@@ -410,17 +398,17 @@ mod tests {
             m.event(0, r, 4, value)?;
             Ok(value)
         }
-        fn write8(&mut self, r: u32, v: u8) -> Result<(), legacy::Error> {
+        fn write8(&mut self, r: u32, v: u8) -> Result<(), io::Error> {
             assert_eq!(r, 0x29);
             let mut m = self.0.lock().unwrap();
             m.event(1, r, 1, v.into())?;
             m.ldo = v;
             Ok(())
         }
-        fn write16(&mut self, _: u32, _: u16) -> Result<(), legacy::Error> {
+        fn write16(&mut self, _: u32, _: u16) -> Result<(), io::Error> {
             panic!("no OTP16 stores");
         }
-        fn write32(&mut self, r: u32, v: u32) -> Result<(), legacy::Error> {
+        fn write32(&mut self, r: u32, v: u32) -> Result<(), io::Error> {
             let mut m = self.0.lock().unwrap();
             m.event(1, r, 4, v)?;
             match r {
@@ -445,10 +433,10 @@ mod tests {
                 m.events.push([2, 0, 0, 1]);
             }
         }
-        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), legacy::Error> {
+        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), io::Error> {
             panic!("no efuse beacon");
         }
-        unsafe fn beacon_consumed(&mut self) -> Result<(), legacy::Error> {
+        unsafe fn beacon_consumed(&mut self) -> Result<(), io::Error> {
             panic!("no efuse completion");
         }
         fn quarantine(&mut self) {

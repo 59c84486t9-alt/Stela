@@ -16,14 +16,14 @@ use super::{
     efuse::Board,
     features::Report,
     identity::{Chip, Profile},
-    legacy::{self, Io},
+    io::{self, Io},
     rf::{self, Path},
 };
 pub use dac::{DacCalibrated, FactoryBytes, FactoryInitialized, PhyInitialized, ThermalTracking};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    Hardware(legacy::Error),
+    Hardware(io::Error),
     Efuse(super::efuse::Error),
     BoardPower(board_power::Error),
     Fifo(super::fifo::Error),
@@ -47,8 +47,8 @@ pub enum Error {
     DacReadyTimeout { register: u32 },
     DacAmbiguousReady { register: u32 },
 }
-impl From<legacy::Error> for Error {
-    fn from(e: legacy::Error) -> Self {
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
         Self::Hardware(e)
     }
 }
@@ -785,10 +785,10 @@ mod tests {
             self.set(0x80, 4, 0xc078);
             self.pending = false;
         }
-        fn op(&mut self) -> Result<(), legacy::Error> {
+        fn op(&mut self) -> Result<(), io::Error> {
             self.calls += 1;
             if self.fail == Some(self.calls) {
-                return Err(legacy::Error::Register);
+                return Err(io::Error::Register);
             }
             if let Some((at, r, w, v)) = self.mutate
                 && at == self.calls
@@ -814,21 +814,21 @@ mod tests {
         fn profile(&self) -> Profile {
             self.model.lock().unwrap().profile
         }
-        fn read8(&mut self, r: u32) -> Result<u8, legacy::Error> {
+        fn read8(&mut self, r: u32) -> Result<u8, io::Error> {
             let mut m = self.model.lock().unwrap();
             m.op()?;
             let v = m.get(r, 1);
             m.event(0, r, 1, v);
             Ok(v as u8)
         }
-        fn read16(&mut self, r: u32) -> Result<u16, legacy::Error> {
+        fn read16(&mut self, r: u32) -> Result<u16, io::Error> {
             let mut m = self.model.lock().unwrap();
             m.op()?;
             let v = m.get(r, 2);
             m.event(0, r, 2, v);
             Ok(v as u16)
         }
-        fn read32(&mut self, r: u32) -> Result<u32, legacy::Error> {
+        fn read32(&mut self, r: u32) -> Result<u32, io::Error> {
             if self.panic_register == Some(r) {
                 panic!("modeled register unwind");
             }
@@ -849,21 +849,21 @@ mod tests {
             m.event(0, r, 4, v);
             Ok(v)
         }
-        fn write8(&mut self, r: u32, v: u8) -> Result<(), legacy::Error> {
+        fn write8(&mut self, r: u32, v: u8) -> Result<(), io::Error> {
             let mut m = self.model.lock().unwrap();
             m.op()?;
             m.event(1, r, 1, v.into());
             m.set(r, 1, v.into());
             Ok(())
         }
-        fn write16(&mut self, r: u32, value: u16) -> Result<(), legacy::Error> {
+        fn write16(&mut self, r: u32, value: u16) -> Result<(), io::Error> {
             let mut m = self.model.lock().unwrap();
             m.op()?;
             m.event(1, r, 2, value.into());
             m.set(r, 2, value.into());
             Ok(())
         }
-        fn write32(&mut self, r: u32, v: u32) -> Result<(), legacy::Error> {
+        fn write32(&mut self, r: u32, v: u32) -> Result<(), io::Error> {
             let mut m = self.model.lock().unwrap();
             m.op()?;
             m.event(1, r, 4, v);
@@ -888,10 +888,10 @@ mod tests {
             }
             self.model.lock().unwrap().event(2, 0, 0, us as u32);
         }
-        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), legacy::Error> {
+        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), io::Error> {
             panic!("no PHY DMA publication")
         }
-        unsafe fn beacon_consumed(&mut self) -> Result<(), legacy::Error> {
+        unsafe fn beacon_consumed(&mut self) -> Result<(), io::Error> {
             panic!("no PHY DMA completion")
         }
         fn quarantine(&mut self) {

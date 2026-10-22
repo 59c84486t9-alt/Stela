@@ -6,7 +6,7 @@
 use super::{
     features::Report,
     identity::{Chip, Profile},
-    legacy::{self, Io},
+    io::{self, Io},
     transmit,
 };
 use crate::bus::dma::memory::PageSource;
@@ -27,7 +27,7 @@ const INFORM_RFK_STATUS: u32 = 0x6d;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    Hardware(legacy::Error),
+    Hardware(io::Error),
     Packet(transmit::Error),
     WrongProfile,
     UnsupportedLayout,
@@ -39,8 +39,8 @@ pub enum Error {
     StaleIqk,
     Clock,
 }
-impl From<legacy::Error> for Error {
-    fn from(e: legacy::Error) -> Self {
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
         Self::Hardware(e)
     }
 }
@@ -178,7 +178,7 @@ impl<I: Io> Control<I> {
             return Err(Error::WrongProfile);
         }
         if self.io()?.read16(MCU_FW_CTRL)? & 0xcfff != 0xc078 {
-            return Err(legacy::Error::FirmwareNotReady { debug: 0 }.into());
+            return Err(io::Error::FirmwareNotReady { debug: 0 }.into());
         }
         Ok(())
     }
@@ -211,7 +211,7 @@ impl<I: Io> Control<I> {
         register: u32,
         timeout: u64,
         delay: u64,
-        mut sample: impl FnMut(&mut I) -> Result<bool, legacy::Error>,
+        mut sample: impl FnMut(&mut I) -> Result<bool, io::Error>,
     ) -> Result<(), Error> {
         let start = self.now()?;
         let end = start.checked_add(timeout).ok_or(Error::Clock)?;
@@ -445,7 +445,7 @@ pub(super) mod tests {
             v[..width].copy_from_slice(&self.bytes[r as usize..r as usize + width]);
             u32::from_le_bytes(v)
         }
-        fn operation(&mut self) -> Result<(), legacy::Error> {
+        fn operation(&mut self) -> Result<(), io::Error> {
             self.calls += 1;
             if let Some((at, register, width, value)) = self.mutate_at
                 && self.calls == at
@@ -456,7 +456,7 @@ pub(super) mod tests {
                 panic!("modeled control unwind");
             }
             if self.fail == Some(self.calls) {
-                return Err(legacy::Error::Register);
+                return Err(io::Error::Register);
             }
             Ok(())
         }
@@ -516,7 +516,7 @@ pub(super) mod tests {
         fn profile(&self) -> Profile {
             self.model.lock().unwrap_or_else(|e| e.into_inner()).profile
         }
-        fn read8(&mut self, r: u32) -> Result<u8, legacy::Error> {
+        fn read8(&mut self, r: u32) -> Result<u8, io::Error> {
             let mut m = self.model.lock().unwrap_or_else(|e| e.into_inner());
             m.operation()?;
             let v = match r {
@@ -554,14 +554,14 @@ pub(super) mod tests {
             m.events.push([0, r, 1, u32::from(v)]);
             Ok(v)
         }
-        fn read16(&mut self, r: u32) -> Result<u16, legacy::Error> {
+        fn read16(&mut self, r: u32) -> Result<u16, io::Error> {
             let mut m = self.model.lock().unwrap_or_else(|e| e.into_inner());
             m.operation()?;
             let v = m.get(r, 2);
             m.events.push([0, r, 2, v]);
             Ok(v as u16)
         }
-        fn read32(&mut self, r: u32) -> Result<u32, legacy::Error> {
+        fn read32(&mut self, r: u32) -> Result<u32, io::Error> {
             let mut m = self.model.lock().unwrap_or_else(|e| e.into_inner());
             m.operation()?;
             let v = if r == 0xa8 {
@@ -578,21 +578,21 @@ pub(super) mod tests {
             m.events.push([0, r, 4, v]);
             Ok(v)
         }
-        fn write8(&mut self, r: u32, v: u8) -> Result<(), legacy::Error> {
+        fn write8(&mut self, r: u32, v: u8) -> Result<(), io::Error> {
             let mut m = self.model.lock().unwrap_or_else(|e| e.into_inner());
             m.operation()?;
             m.set(r, 1, u32::from(v));
             m.events.push([1, r, 1, u32::from(v)]);
             Ok(())
         }
-        fn write16(&mut self, r: u32, v: u16) -> Result<(), legacy::Error> {
+        fn write16(&mut self, r: u32, v: u16) -> Result<(), io::Error> {
             let mut m = self.model.lock().unwrap_or_else(|e| e.into_inner());
             m.operation()?;
             m.set(r, 2, u32::from(v));
             m.events.push([1, r, 2, u32::from(v)]);
             Ok(())
         }
-        fn write32(&mut self, r: u32, v: u32) -> Result<(), legacy::Error> {
+        fn write32(&mut self, r: u32, v: u32) -> Result<(), io::Error> {
             let mut m = self.model.lock().unwrap_or_else(|e| e.into_inner());
             m.operation()?;
             m.set(r, 4, v);
@@ -610,11 +610,11 @@ pub(super) mod tests {
             }
             m.events.push([2, 0, 0, us as u32]);
         }
-        fn now_us(&mut self) -> Result<u64, legacy::Error> {
+        fn now_us(&mut self) -> Result<u64, io::Error> {
             let mut m = self.model.lock().unwrap_or_else(|e| e.into_inner());
             m.operation()?;
             if !m.clock_available {
-                return Err(legacy::Error::InvalidClock);
+                return Err(io::Error::InvalidClock);
             }
             Ok(if m.regress {
                 m.now.saturating_sub(1)
@@ -622,10 +622,10 @@ pub(super) mod tests {
                 m.now
             })
         }
-        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), legacy::Error> {
+        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), io::Error> {
             panic!("not a download")
         }
-        unsafe fn beacon_consumed(&mut self) -> Result<(), legacy::Error> {
+        unsafe fn beacon_consumed(&mut self) -> Result<(), io::Error> {
             panic!("not a DMA completion")
         }
         fn quarantine(&mut self) {
@@ -841,7 +841,7 @@ pub(super) mod tests {
         m.lock().unwrap().clock_available = false;
         assert!(matches!(
             unsafe { Control::new(io, &report) },
-            Err(Error::Hardware(legacy::Error::InvalidClock))
+            Err(Error::Hardware(io::Error::InvalidClock))
         ));
         assert!(m.lock().unwrap().quarantine >= 1);
         let (mut c, m, _, _) = fixture();

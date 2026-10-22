@@ -3,19 +3,13 @@
 //! RTL8822C single beacon TXBD for firmware reserved pages. Pinned rtw88
 //! pci.c/tx.c are hardware references; allocations and IOVAs are native Stela.
 //! Submission is not a DMA completion, radio transmission or firmware ALIVE.
-use super::legacy;
-use crate::bus::{
-    dma::{
-        mapping::{Direction, DmaDomain, DmaError, DmaMapping},
-        memory::{CacheAttribute, CpuMapping, MemoryError, PageSource},
-    },
-    mmio::Mmio,
+use super::io::{self, Bar};
+use crate::bus::dma::{
+    mapping::{Direction, DmaDomain, DmaError, DmaMapping},
+    memory::{CacheAttribute, CpuMapping, MemoryError, PageSource},
 };
 use alloc::sync::Arc;
-use core::{
-    ptr::NonNull,
-    sync::atomic::{Ordering, fence},
-};
+use core::sync::atomic::{Ordering, fence};
 
 const PACKET_DESCRIPTOR: usize = 48;
 const BUFFER_DESCRIPTOR: usize = 16;
@@ -64,46 +58,22 @@ pub unsafe trait Registers {
     fn kick(&mut self) -> Result<(), Error>;
 }
 
-pub struct MmioRegisters {
-    mmio: Mmio,
-    _owner: Arc<dyn core::any::Any>,
-}
-impl MmioRegisters {
-    /// # Safety
-    /// Actual exclusive RTL8822C UC BAR, mapped for at least 0x384 bytes, on
-    /// the requester attached to the queue's DMA domain. `owner` retains that
-    /// real claim and BAR mapping, not an unrelated token. The download
-    /// controller may use disjoint registers under the same serialized owner.
-    pub unsafe fn new(
-        window: NonNull<u8>,
-        bytes: usize,
-        owner: Arc<dyn core::any::Any>,
-    ) -> Result<Self, Error> {
-        if bytes < 0x384 || window.as_ptr().addr() & 3 != 0 {
-            return Err(Error::Register);
-        }
-        Ok(Self {
-            mmio: unsafe { Mmio::new(window.as_ptr() as u64) },
-            _owner: owner,
-        })
-    }
-}
-// SAFETY: constructor binds actual owned requester registers; only exact
-// source beacon base and work registers are accessed, without completion claims.
-unsafe impl Registers for MmioRegisters {
+// SAFETY: `Bar::new` binds the exclusive requester BAR; only the beacon
+// base and work registers are accessed, without completion claims.
+unsafe impl Registers for Bar {
     fn configure(&mut self, iova: u32) -> Result<(), Error> {
-        self.mmio.write32(0x308, iova);
-        if self.mmio.read32(0x308) != iova {
+        self.write32(0x308, iova);
+        if self.read32(0x308) != iova {
             return Err(Error::Register);
         }
         Ok(())
     }
     fn kick(&mut self) -> Result<(), Error> {
-        let work = self.mmio.read8(0x383);
+        let work = self.read8(0x383);
         if work == u8::MAX {
             return Err(Error::Register);
         }
-        self.mmio.write8(0x383, work | 16);
+        self.write8(0x383, work | 16);
         Ok(())
     }
 }
@@ -355,20 +325,20 @@ impl<R: Registers> Beacon<R> {
 // SAFETY: install binds real owned DMA pages/domain/registers; pending slot
 // cannot be overwritten before source's actual new BCN_VALID proof. No Drop
 // unmap exists for published buffers, and uncertain io ownership is retained.
-unsafe impl<R: Registers> legacy::BeaconQueue for Beacon<R> {
-    fn submit(&mut self, data: &[u8]) -> Result<(), legacy::Error> {
-        self.enqueue(data).map_err(|_| legacy::Error::Queue)
+unsafe impl<R: Registers> io::BeaconQueue for Beacon<R> {
+    fn submit(&mut self, data: &[u8]) -> Result<(), io::Error> {
+        self.enqueue(data).map_err(|_| io::Error::Queue)
     }
-    unsafe fn consumed(&mut self) -> Result<(), legacy::Error> {
+    unsafe fn consumed(&mut self) -> Result<(), io::Error> {
         if self.poisoned || !self.pending {
-            return Err(legacy::Error::Queue);
+            return Err(io::Error::Queue);
         }
         self.poisoned = true;
         // SAFETY: caller supplies source's fresh BCN_VALID consumption proof;
         // no device access to this TXBD remains until the next explicit kick.
         if let Err(error) = unsafe { self.descriptor.dma.sync_for_cpu(0..BUFFER_DESCRIPTOR) } {
             self.last_error = Some(Error::Dma(error));
-            return Err(legacy::Error::Queue);
+            return Err(io::Error::Queue);
         }
         fence(Ordering::Acquire);
         self.pending = false;
@@ -391,6 +361,7 @@ impl<R: Registers> Drop for Beacon<R> {
 
 #[cfg(test)]
 pub(super) mod tests {
+    use core::ptr::NonNull;
     extern crate std;
     use super::*;
     use crate::bus::dma::{
@@ -404,7 +375,7 @@ pub(super) mod tests {
         vec::Vec,
     };
     use core::{alloc::Layout, ops::Range};
-    use legacy::BeaconQueue;
+    use io::BeaconQueue;
     use std::sync::Mutex;
 
     struct Pages {
@@ -654,10 +625,10 @@ pub(super) mod tests {
     // SAFETY: same synchronous model proof as this module's queue fixture;
     // forwarding retains the actual native slot's ownership checks/lifetimes.
     unsafe impl BeaconQueue for Harness {
-        fn submit(&mut self, data: &[u8]) -> Result<(), legacy::Error> {
+        fn submit(&mut self, data: &[u8]) -> Result<(), io::Error> {
             self.queue.submit(data)
         }
-        unsafe fn consumed(&mut self) -> Result<(), legacy::Error> {
+        unsafe fn consumed(&mut self) -> Result<(), io::Error> {
             unsafe { self.queue.consumed() }
         }
         fn quarantine(&mut self) {
@@ -684,7 +655,7 @@ pub(super) mod tests {
         unsafe { queue.consumed() }.unwrap();
         assert_eq!(m.lock().unwrap().cpu_syncs, 1);
         assert!(!queue.pending());
-        assert_eq!(unsafe { queue.consumed() }, Err(legacy::Error::Queue));
+        assert_eq!(unsafe { queue.consumed() }, Err(io::Error::Queue));
         queue.enqueue(&[0xff; 8]).unwrap();
         assert_eq!(m.lock().unwrap().packets.len(), 2);
         // SAFETY: model has no asynchronous DMA, all reads and workers ended.
@@ -766,7 +737,7 @@ pub(super) mod tests {
         m.lock().unwrap().fail_cpu_sync = true;
         // SAFETY: synchronous modeled device finished its payload read and
         // descriptor writeback; visibility operation itself still fails.
-        assert_eq!(unsafe { queue.consumed() }, Err(legacy::Error::Queue));
+        assert_eq!(unsafe { queue.consumed() }, Err(io::Error::Queue));
         assert!(queue.pending());
         assert!(queue.quarantined());
         assert_eq!(

@@ -5,7 +5,7 @@
 //! Queue configuration is not a firmware command ACK, HCI start or radio ready.
 use super::{
     identity::{Chip, Profile},
-    legacy::{Error as HardwareError, Io},
+    io::{Error as HardwareError, Io},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -217,7 +217,7 @@ fn h2c<I: Io>(io: &mut I, g: Geometry) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     extern crate std;
-    use super::super::{identity::Observed, legacy};
+    use super::super::{identity::Observed, io};
     use super::*;
     use alloc::vec::Vec;
     struct Model {
@@ -268,11 +268,11 @@ mod tests {
         fn set(&mut self, r: u32, n: usize, v: u32) {
             self.registers[r as usize..r as usize + n].copy_from_slice(&v.to_le_bytes()[..n]);
         }
-        fn operation(&mut self) -> Result<(), legacy::Error> {
+        fn operation(&mut self) -> Result<(), io::Error> {
             let index = self.operations;
             self.operations += 1;
             if self.fail_at == Some(index) || self.quarantines != 0 {
-                Err(legacy::Error::Register)
+                Err(io::Error::Register)
             } else {
                 Ok(())
             }
@@ -282,7 +282,7 @@ mod tests {
                 self.trace.extend_from_slice(&w.to_le_bytes());
             }
         }
-        fn read(&mut self, r: u32, n: usize) -> Result<u32, legacy::Error> {
+        fn read(&mut self, r: u32, n: usize) -> Result<u32, io::Error> {
             self.operation()?;
             let value = if self.removed_register == Some(r) {
                 if n == 4 {
@@ -296,7 +296,7 @@ mod tests {
             self.record(n as u32, r, value);
             Ok(value)
         }
-        fn write(&mut self, r: u32, n: usize, v: u32) -> Result<(), legacy::Error> {
+        fn write(&mut self, r: u32, n: usize, v: u32) -> Result<(), io::Error> {
             self.operation()?;
             self.record(4 + n as u32, r, v);
             self.set(
@@ -317,31 +317,31 @@ mod tests {
         fn profile(&self) -> Profile {
             self.profile
         }
-        fn read8(&mut self, r: u32) -> Result<u8, legacy::Error> {
+        fn read8(&mut self, r: u32) -> Result<u8, io::Error> {
             self.read(r, 1).map(|v| v as u8)
         }
-        fn read16(&mut self, r: u32) -> Result<u16, legacy::Error> {
+        fn read16(&mut self, r: u32) -> Result<u16, io::Error> {
             self.read(r, 2).map(|v| v as u16)
         }
-        fn read32(&mut self, r: u32) -> Result<u32, legacy::Error> {
+        fn read32(&mut self, r: u32) -> Result<u32, io::Error> {
             self.read(r, 4)
         }
-        fn write8(&mut self, r: u32, v: u8) -> Result<(), legacy::Error> {
+        fn write8(&mut self, r: u32, v: u8) -> Result<(), io::Error> {
             self.write(r, 1, v.into())
         }
-        fn write16(&mut self, r: u32, v: u16) -> Result<(), legacy::Error> {
+        fn write16(&mut self, r: u32, v: u16) -> Result<(), io::Error> {
             self.write(r, 2, v.into())
         }
-        fn write32(&mut self, r: u32, v: u32) -> Result<(), legacy::Error> {
+        fn write32(&mut self, r: u32, v: u32) -> Result<(), io::Error> {
             self.write(r, 4, v)
         }
         fn delay_us(&mut self, us: u64) {
             self.record(9, 0, us as u32);
         }
-        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), legacy::Error> {
+        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), io::Error> {
             panic!("FIFO cannot submit DMA")
         }
-        unsafe fn beacon_consumed(&mut self) -> Result<(), legacy::Error> {
+        unsafe fn beacon_consumed(&mut self) -> Result<(), io::Error> {
             panic!("FIFO cannot ACK DMA")
         }
         fn quarantine(&mut self) {
@@ -405,7 +405,7 @@ mod tests {
                         write: 0x3e101,
                         read: 0x3e100
                     },
-                    _ => Error::Hardware(legacy::Error::Register),
+                    _ => Error::Hardware(io::Error::Register),
                 }
             );
             assert_eq!(m.quarantines, 1);

@@ -6,7 +6,7 @@
 use super::{
     features::Report,
     identity::{Chip, Profile},
-    legacy::{self, Io},
+    io::{self, Io},
 };
 
 const RF_MASK: u32 = 0xfffff;
@@ -28,7 +28,7 @@ impl Path {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    Hardware(legacy::Error),
+    Hardware(io::Error),
     WrongProfile,
     InvalidState,
     UnsupportedPath,
@@ -40,8 +40,8 @@ pub enum Error {
     Removed,
     AmbiguousObservation { register: u32, raw: u32 },
 }
-impl From<legacy::Error> for Error {
-    fn from(error: legacy::Error) -> Self {
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Self {
         Self::Hardware(error)
     }
 }
@@ -260,10 +260,10 @@ mod tests {
             self.bytes[r as usize..r as usize + width]
                 .copy_from_slice(&value.to_le_bytes()[..width]);
         }
-        fn operation(&mut self) -> Result<(), legacy::Error> {
+        fn operation(&mut self) -> Result<(), io::Error> {
             self.calls += 1;
             if self.fail == Some(self.calls) {
-                return Err(legacy::Error::Register);
+                return Err(io::Error::Register);
             }
             if let Some((at, r, w, v)) = self.mutate_at
                 && at == self.calls
@@ -285,17 +285,17 @@ mod tests {
         fn profile(&self) -> Profile {
             self.0.lock().unwrap().profile
         }
-        fn read8(&mut self, r: u32) -> Result<u8, legacy::Error> {
+        fn read8(&mut self, r: u32) -> Result<u8, io::Error> {
             let mut m = self.0.lock().unwrap();
             m.operation()?;
             Ok(m.get(r, 1) as u8)
         }
-        fn read16(&mut self, r: u32) -> Result<u16, legacy::Error> {
+        fn read16(&mut self, r: u32) -> Result<u16, io::Error> {
             let mut m = self.0.lock().unwrap();
             m.operation()?;
             Ok(m.get(r, 2) as u16)
         }
-        fn read32(&mut self, r: u32) -> Result<u32, legacy::Error> {
+        fn read32(&mut self, r: u32) -> Result<u32, io::Error> {
             let mut m = self.0.lock().unwrap();
             m.operation()?;
             let v = m.get(r, 4);
@@ -304,16 +304,16 @@ mod tests {
             }
             Ok(v)
         }
-        fn write8(&mut self, r: u32, v: u8) -> Result<(), legacy::Error> {
+        fn write8(&mut self, r: u32, v: u8) -> Result<(), io::Error> {
             let mut m = self.0.lock().unwrap();
             m.operation()?;
             m.set(r, 1, v.into());
             Ok(())
         }
-        fn write16(&mut self, _: u32, _: u16) -> Result<(), legacy::Error> {
+        fn write16(&mut self, _: u32, _: u16) -> Result<(), io::Error> {
             panic!("no RF 16-bit store")
         }
-        fn write32(&mut self, r: u32, v: u32) -> Result<(), legacy::Error> {
+        fn write32(&mut self, r: u32, v: u32) -> Result<(), io::Error> {
             let mut m = self.0.lock().unwrap();
             m.operation()?;
             m.event(1, r, 4, v);
@@ -330,10 +330,10 @@ mod tests {
         fn delay_us(&mut self, us: u64) {
             self.0.lock().unwrap().event(2, 0, 0, us as u32)
         }
-        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), legacy::Error> {
+        fn submit_beacon(&mut self, _: &[u8]) -> Result<(), io::Error> {
             panic!("no RF beacon")
         }
-        unsafe fn beacon_consumed(&mut self) -> Result<(), legacy::Error> {
+        unsafe fn beacon_consumed(&mut self) -> Result<(), io::Error> {
             panic!("no RF beacon completion")
         }
         fn quarantine(&mut self) {
@@ -494,11 +494,11 @@ mod tests {
         struct NoSubmission(Arc<AtomicBool>);
         // SAFETY: register-only test fixture never submits DMA; all beacon
         // calls fail/panic, and quarantine observably retains actual owner.
-        unsafe impl legacy::BeaconQueue for NoSubmission {
-            fn submit(&mut self, _: &[u8]) -> Result<(), legacy::Error> {
+        unsafe impl io::BeaconQueue for NoSubmission {
+            fn submit(&mut self, _: &[u8]) -> Result<(), io::Error> {
                 panic!("RF cannot submit DMA")
             }
-            unsafe fn consumed(&mut self) -> Result<(), legacy::Error> {
+            unsafe fn consumed(&mut self) -> Result<(), io::Error> {
                 panic!("RF cannot complete DMA")
             }
             fn quarantine(&mut self) {
@@ -520,7 +520,7 @@ mod tests {
         // SAFETY: aligned retained register fixture, no physical requester or
         // operational DMA claim. NativeIo executes actual volatile operations.
         let mut io = unsafe {
-            legacy::NativeIo::new(
+            io::NativeIo::new(
                 bar.pointer(),
                 0x5000,
                 NoSubmission(quarantined.clone()),

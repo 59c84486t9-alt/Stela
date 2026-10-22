@@ -5,7 +5,7 @@
 //! decoding creates diagnostics, never firmware/PHY/ownership evidence.
 use super::{
     identity::{Chip, Profile},
-    legacy::{Error, Io},
+    io::{Error, Io},
 };
 
 const MAILBOX: u32 = 0x1a0;

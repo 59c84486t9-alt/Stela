@@ -5,6 +5,7 @@
 //! Pinned rtw88/rtw89 are hardware references, not a Linux kernel interface.
 //! Staging does not grant PCI/DMA ownership or establish a working radio.
 pub mod beacon;
+pub mod download;
 pub mod efuse;
 pub mod features;
 pub mod fifo;
@@ -13,7 +14,7 @@ pub mod firmware_control;
 pub mod hci;
 pub mod identity;
 pub mod interrupt;
-pub mod legacy;
+pub mod io;
 pub mod phy_tables;
 pub mod power;
 pub mod receive;

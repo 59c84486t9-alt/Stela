@@ -3,19 +3,16 @@
 //! RTL8822C native PCIe RX buffer ring and borrowed raw descriptor facts.
 //! Hardware producer/tag/visibility establishes DMA ownership only. Raw
 //! decryption flags are not integrity, key, replay, MLME or radio-ready proof.
-use super::beacon::{self, Allocation};
-use crate::bus::{
-    dma::{
-        mapping::{Direction, DmaDomain},
-        memory::PageSource,
-    },
-    mmio::Mmio,
+use super::{
+    beacon::{self, Allocation},
+    io::Bar,
+};
+use crate::bus::dma::{
+    mapping::{Direction, DmaDomain},
+    memory::PageSource,
 };
 use alloc::{sync::Arc, vec::Vec};
-use core::{
-    ptr::NonNull,
-    sync::atomic::{Ordering, fence},
-};
+use core::sync::atomic::{Ordering, fence};
 
 const COUNT: usize = 512;
 const BUFFER: usize = 11454 + 24;
@@ -146,48 +143,25 @@ pub unsafe trait Registers {
     fn indices(&mut self) -> Result<(u16, u16), Error>;
     fn publish(&mut self, consumer: u16) -> Result<(), Error>;
 }
-pub struct MmioRegisters {
-    mmio: Mmio,
-    _owner: Arc<dyn core::any::Any>,
-}
-impl MmioRegisters {
-    /// # Safety
-    /// Real exclusive uncached BAR2 of the selected RTL8822C PCI requester,
-    /// mapped for at least 0x3b8 bytes. Owner retains that exact claim and BAR
-    /// reservation; DMA domain must bind this requester. No competing worker.
-    pub unsafe fn new(
-        window: NonNull<u8>,
-        bytes: usize,
-        owner: Arc<dyn core::any::Any>,
-    ) -> Result<Self, Error> {
-        if bytes < 0x3b8 || window.as_ptr().addr() & 3 != 0 {
-            return Err(Error::Register);
-        }
-        Ok(Self {
-            mmio: unsafe { Mmio::new(window.as_ptr() as u64) },
-            _owner: owner,
-        })
-    }
-}
-// SAFETY: construction binds real retained UC requester register window.
-unsafe impl Registers for MmioRegisters {
+// SAFETY: `Bar::new` binds the exclusive requester BAR.
+unsafe impl Registers for Bar {
     fn configure(&mut self, iova: u32, count: u16) -> Result<(), Error> {
-        self.mmio.write16(0x382, count);
-        self.mmio.write32(0x338, iova);
-        if self.mmio.read16(0x382) & 0xfff != count || self.mmio.read32(0x338) != iova {
+        self.write16(0x382, count);
+        self.write32(0x338, iova);
+        if self.read16(0x382) & 0xfff != count || self.read32(0x338) != iova {
             return Err(Error::Register);
         }
         Ok(())
     }
     fn indices(&mut self) -> Result<(u16, u16), Error> {
-        let value = self.mmio.read32(0x3b4);
+        let value = self.read32(0x3b4);
         if value == u32::MAX {
             return Err(Error::Removed);
         }
         Ok(((value & 0xfff) as u16, ((value >> 16) & 0xfff) as u16))
     }
     fn publish(&mut self, consumer: u16) -> Result<(), Error> {
-        self.mmio.write16(0x3b4, consumer);
+        self.write16(0x3b4, consumer);
         Ok(())
     }
 }
