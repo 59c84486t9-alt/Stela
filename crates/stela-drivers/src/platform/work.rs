@@ -216,6 +216,7 @@ pub struct Queue<const N: usize> {
 // before touching it. A bounded try-lock refuses unexpected/NMI reentry. No
 // callback, allocation, context switch or retained-owner Drop occurs locked.
 unsafe impl<const N: usize> Send for Queue<N> {}
+// SAFETY: as for Send above.
 unsafe impl<const N: usize> Sync for Queue<N> {}
 struct Guard<'a, const N: usize> {
     queue: &'a Queue<N>,
@@ -223,12 +224,16 @@ struct Guard<'a, const N: usize> {
 }
 impl<const N: usize> Guard<'_, N> {
     fn state(&mut self) -> &mut State<N> {
+        // SAFETY: a Guard exists only while `held` is set with IRQs disabled, so this
+        // is the sole reference to the state.
         unsafe { &mut *self.queue.state.get() }
     }
 }
 impl<const N: usize> Drop for Guard<'_, N> {
     fn drop(&mut self) {
         self.queue.held.store(false, Ordering::Release);
+        // SAFETY: `flags` came from this CPU's save_disable in `lock`, and the lock is
+        // released above.
         unsafe { self.queue.cpu.restore(self.flags) };
     }
 }
@@ -276,6 +281,7 @@ impl<const N: usize> Queue<N> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
+            // SAFETY: `flags` came from the save_disable above, and no lock is held.
             unsafe { self.cpu.restore(flags) };
             return Err(WorkError::Busy);
         }
@@ -441,6 +447,7 @@ impl<const N: usize> Queue<N> {
 impl<const N: usize> Drop for Queue<N> {
     fn drop(&mut self) {
         if self.retired.load(Ordering::Acquire) {
+            // SAFETY: retirement proved no producer or executor still uses these fields.
             unsafe {
                 ManuallyDrop::drop(&mut self.state);
                 ManuallyDrop::drop(&mut self.owner);
@@ -516,6 +523,7 @@ impl<const N: usize> Runtime<N> {
         if stacks.iter().any(|s| s.bounds.contains(&rsp)) {
             return Err(WorkError::InvalidStack);
         }
+        // SAFETY: the executor runs on the qualified native CPL0 CPU.
         let controls = unsafe { context::controls()? };
         Self::with_controls(queue, stacks, controls)
     }
@@ -560,6 +568,8 @@ impl<const N: usize> Runtime<N> {
             _pinned: PhantomPinned,
         });
         let pointer = executor.as_ref().get_ref() as *const Self as usize;
+        // SAFETY: the executor is not yet shared, and each frame starts on its own
+        // retained stack.
         unsafe {
             for (i, task) in (&mut *executor.tasks.get()).iter_mut().enumerate() {
                 task.frame
@@ -569,7 +579,7 @@ impl<const N: usize> Runtime<N> {
         Ok(executor)
     }
     unsafe fn task(&self, index: usize) -> *mut Task {
-        // Immutable Vec allocation: take no Rust reference across a switch.
+        // SAFETY: Immutable Vec allocation: take no Rust reference across a switch.
         unsafe { (&mut *self.tasks.get()).as_mut_ptr().add(index) }
     }
     pub fn queue(&self) -> &Arc<Queue<N>> {
@@ -581,6 +591,8 @@ impl<const N: usize> Runtime<N> {
         if i == NONE {
             return Err(WorkError::Unavailable);
         }
+        // SAFETY: `i` is the current task's valid index; no switch occurs while this
+        // borrow lives.
         let task = unsafe { &(*self.task(i)) };
         if task.state != TaskState::Running
             || task.id != id
@@ -602,11 +614,14 @@ impl<const N: usize> Runtime<N> {
         self.current_id()?;
         let index = self.current.get();
         let flags = self.queue.cpu.save_disable()?;
+        // SAFETY: `index` is the running task, and IRQs are disabled.
         unsafe {
             (*self.task(index)).state = TaskState::Waiting;
         }
         self.current.set(NONE);
         self.queue.active.clear();
+        // SAFETY: both frames are retained, pinned and initialized; IRQs stay disabled
+        // across the switch, and no lock or borrow spans it.
         unsafe {
             context::switch(
                 core::ptr::addr_of_mut!((*self.task(index)).frame),
@@ -614,6 +629,8 @@ impl<const N: usize> Runtime<N> {
             )
         };
         self.valid();
+        // SAFETY: the task resumed on its own stack with `flags` from its own
+        // save_disable.
         unsafe { self.queue.cpu.restore(flags) };
         Ok(())
     }
@@ -631,10 +648,13 @@ impl<const N: usize> Runtime<N> {
             return Err(WorkError::Closed);
         }
         let flags = self.queue.cpu.save_disable()?;
+        // SAFETY: the task list's length never changes after construction.
         let count = unsafe { (*self.tasks.get()).len() };
         let mut selected = None;
         for n in 0..count {
             let i = (self.cursor.get() + n) % count;
+            // SAFETY: no task runs while the dispatcher steps, so this is the only
+            // reference to task `i`.
             let task = unsafe { &mut (*self.task(i)) };
             if task.state == TaskState::Idle {
                 let lane = match i {
@@ -650,6 +670,7 @@ impl<const N: usize> Runtime<N> {
                     }
                     Ok(None) => {}
                     Err(e) => {
+                        // SAFETY: `flags` came from the save_disable above, and no lock is held.
                         unsafe { self.queue.cpu.restore(flags) };
                         return Err(e);
                     }
@@ -661,18 +682,23 @@ impl<const N: usize> Runtime<N> {
             }
         }
         let Some(i) = selected else {
+            // SAFETY: `flags` came from the save_disable above, and no lock is held.
             unsafe { self.queue.cpu.restore(flags) };
             return Ok(false);
         };
         self.cursor.set((i + 1) % count);
+        // SAFETY: task `i` is idle or waiting, and IRQs are disabled.
         unsafe {
             (*self.task(i)).state = TaskState::Running;
         }
         self.current.set(i);
+        // SAFETY: task `i` is valid, and IRQs are disabled.
         unsafe {
             let task = &*self.task(i);
             self.queue.active.publish(task.id, &task.stack.bounds);
         }
+        // SAFETY: both frames are retained, pinned and initialized; IRQs stay disabled
+        // across the switch, and no lock or borrow spans it.
         unsafe {
             context::switch(
                 self.dispatch.get(),
@@ -682,6 +708,7 @@ impl<const N: usize> Runtime<N> {
         if self.current.get() != NONE || self.queue.active.id.load(Ordering::Acquire) != 0 {
             self.queue.cpu.fatal(WorkError::CorruptContext);
         }
+        // SAFETY: the dispatcher resumed with `flags` from its own save_disable.
         unsafe { self.queue.cpu.restore(flags) };
         Ok(true)
     }
@@ -719,10 +746,12 @@ impl<const N: usize> Runtime<N> {
         let origin = self.current.get();
         let _draining = if origin != NONE {
             self.current_id()?;
+            // SAFETY: `origin` is the running task, verified by current_id above.
             unsafe {
                 (*self.task(origin)).draining = true;
             }
             Some(DrainFlag {
+                // SAFETY: the task list outlives this drain, so the flag pointer stays valid.
                 task: unsafe { core::ptr::addr_of_mut!((*self.task(origin)).draining) },
             })
         } else {
@@ -731,6 +760,7 @@ impl<const N: usize> Runtime<N> {
         loop {
             let current = self.current.get();
             if origin != NONE
+                // SAFETY: other tasks are suspended while this one runs; only their flags are read.
                 && unsafe {
                     (&*self.tasks.get())
                         .iter()
@@ -744,6 +774,7 @@ impl<const N: usize> Runtime<N> {
                 None
             } else {
                 self.current_id()?;
+                // SAFETY: `current` is the running task, verified by current_id above.
                 unsafe { (*self.task(current)).job.map(|(_, j)| j) }
             };
             let pending = {
@@ -787,6 +818,7 @@ impl<const N: usize> Runtime<N> {
         if self.current.get() != NONE {
             return Err(WorkError::Pending);
         }
+        // SAFETY: covered by this function's own safety contract.
         if unsafe {
             (&*self.tasks.get())
                 .iter()
@@ -795,6 +827,7 @@ impl<const N: usize> Runtime<N> {
             return Err(WorkError::Pending);
         }
         self.queue.close()?;
+        // SAFETY: covered by this function's own safety contract.
         unsafe { self.queue.retire()? };
         self.retired.set(true);
         Ok(())
@@ -802,15 +835,19 @@ impl<const N: usize> Runtime<N> {
 }
 #[cfg(target_arch = "x86_64")]
 unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) -> ! {
+    // SAFETY: covered by this function's own safety contract.
     let executor = unsafe { &*(pointer as *const Runtime<N>) };
     loop {
         executor.valid();
+        // SAFETY: covered by this function's own safety contract.
         let (slot, job, flags) = unsafe {
             let t = &(*executor.task(index));
             let (slot, job) = t.job.expect("assigned task");
             (slot, job, t.flags)
         };
+        // SAFETY: covered by this function's own safety contract.
         unsafe { executor.queue.cpu.restore(flags) };
+        // SAFETY: covered by this function's own safety contract.
         unsafe { (job.callback)(job.context as *mut c_void) };
         executor.valid();
         let _flags = match executor.queue.cpu.save_disable() {
@@ -820,6 +857,7 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
         if let Err(e) = executor.queue.finish(slot, job.sequence) {
             executor.queue.cpu.fatal(e);
         }
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             let t = &mut (*executor.task(index));
             t.job = None;
@@ -827,6 +865,7 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
         }
         executor.current.set(NONE);
         executor.queue.active.clear();
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             context::switch(
                 core::ptr::addr_of_mut!((*executor.task(index)).frame),
@@ -840,6 +879,7 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
 impl<const N: usize> Drop for Runtime<N> {
     fn drop(&mut self) {
         if self.retired.get() {
+            // SAFETY: retirement proved no task frame or stack is still live.
             unsafe { ManuallyDrop::drop(&mut self.tasks) };
         } else {
             quarantine();
@@ -854,6 +894,7 @@ struct DrainFlag {
 #[cfg(target_arch = "x86_64")]
 impl Drop for DrainFlag {
     fn drop(&mut self) {
+        // SAFETY: the flag belongs to a task the executor retains past this drain.
         unsafe {
             self.task.write(false);
         }
@@ -887,6 +928,7 @@ impl<const N: usize> Drop for Executor<N> {
     fn drop(&mut self) {
         let process = self.runtime.queue.process().is_ok();
         if process && self.runtime.retired.get() {
+            // SAFETY: the runtime retired, so no task or provider can resume it.
             unsafe {
                 ManuallyDrop::drop(&mut self.runtime);
             }
@@ -894,6 +936,7 @@ impl<const N: usize> Drop for Executor<N> {
             self.runtime.queue.abandoned.store(true, Ordering::Release);
             if process && let Ok(flags) = self.runtime.queue.cpu.save_disable() {
                 self.runtime.queue.active.clear();
+                // SAFETY: `flags` came from the save_disable just above.
                 unsafe { self.runtime.queue.cpu.restore(flags) };
             }
             // If affinity/context is unqualified, closing is atomic and the

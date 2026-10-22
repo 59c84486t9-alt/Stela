@@ -242,6 +242,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         };
         let prepared =
             Self::prepare_submission(s, plan.plaintext_mpdu(), key, false, plan.control_port())?;
+        // SAFETY: covered by this function's own safety contract.
         let outcome = unsafe {
             authority.publish_association(
                 admission,

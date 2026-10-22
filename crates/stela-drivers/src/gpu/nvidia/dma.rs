@@ -131,6 +131,7 @@ unsafe extern "C" fn stela_nvidia_dma_map(
         Err(error) => {
             // This cannot occur for the retained unmodified lease. Dropping
             // it still quarantines actual pins rather than assuming teardown.
+            // SAFETY: the private metadata storage never escaped.
             unsafe { memory::free(storage.as_ptr()) };
             return dma_error(error);
         }
@@ -185,6 +186,7 @@ unsafe extern "C" fn stela_nvidia_dma_unmap(
     // SAFETY: validation completed and the caller transfers unique ownership
     // after real quiescence. The metadata is now uninitialized and private.
     let mut token = unsafe { (*private).cast::<Token>().read() };
+    // SAFETY: `private` is the caller's valid handle slot, read just above.
     let storage = unsafe { private.replace(ptr::null_mut()) };
     // Match real dma_unmap's CPU visibility before releasing translations.
     // SAFETY: the caller establishes actual exclusive CPU ownership/completion.

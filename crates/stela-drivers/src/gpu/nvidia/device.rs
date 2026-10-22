@@ -183,6 +183,7 @@ unsafe extern "C" fn checked_read<C: ConfigSpace + 'static>(
     // width/range and accesses the actual ConfigSpace with that exact width.
     let config = unsafe { (&**this.config.get() as *const C).cast_mut().cast() };
     let mut result = 0;
+    // SAFETY: `config` is this callback's live, exclusive target.
     let status = unsafe { super::read::<C>(config, offset, width, &mut result) };
     if this.callback_context().is_err() {
         return 0;
@@ -208,6 +209,7 @@ unsafe extern "C" fn checked_write<C: ConfigSpace + 'static>(
     // SAFETY: exclusive target access through the disjoint UnsafeCell; existing
     // write preserves actual width and performs no read/modify/write substitute.
     let config = unsafe { (&mut **this.config.get() as *mut C).cast() };
+    // SAFETY: `config` is this callback's live, exclusive target.
     let status = unsafe { super::write::<C>(config, offset, width, value) };
     if this.callback_context().is_err() {
         return 0;
@@ -439,13 +441,16 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
         // SAFETY: exclusive prepared device, no C pointer escaped. Context and
         // the existing services' actual live counters govern final release.
         let this = unsafe { bundle.as_mut().get_unchecked_mut() };
+        // SAFETY: `this` is exclusive, and the bound handle never moves out of its cell.
         let handle = unsafe {
             Pin::new_unchecked((&mut *this.pci.get()).as_mut().expect("bound handle")).as_raw()
         };
+        // SAFETY: both pointers belong to this live prepared device.
         let status = unsafe { stela_nvidia_prepared_device_retirable(this.state.raw(), handle) };
         if status != 0 {
             return Err(Error::Native(status));
         }
+        // SAFETY: `this` is exclusive, and the bound services never move out of their cell.
         unsafe {
             Pin::new_unchecked((&mut *this.services.get()).as_mut().expect("bound service"))
                 .unbind()

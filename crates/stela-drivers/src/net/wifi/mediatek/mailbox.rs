@@ -329,6 +329,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
         if identity.chip == super::identity::Chip::Mt7925 && runtime_rx.is_some() {
             return Err(Cause::FirmwareTarget);
         }
+        // SAFETY: covered by this function's own safety contract.
         let mut mailbox = unsafe { Self::from_rings(identity, wm, fwdl, rx, clock) }?;
         mailbox.runtime_rx = runtime_rx;
         Ok(mailbox)
@@ -759,12 +760,14 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
     pub unsafe fn release_after_quiesce(&mut self) -> Result<(), ring::Error> {
         self.poisoned = true;
         self.download_binding = None;
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             self.wm.release_after_quiesce()?;
             self.fwdl.release_after_quiesce()?;
             self.rx.release_after_quiesce()?
         };
         if let Some(runtime) = self.runtime_rx.as_mut() {
+            // SAFETY: covered by this function's own safety contract.
             unsafe { runtime.release_after_quiesce()? };
         }
         Ok(())

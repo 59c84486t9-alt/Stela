@@ -77,6 +77,7 @@ unsafe fn free_with(pointer: *mut c_void, release: impl FnOnce(*mut u8, Layout))
     // SAFETY: the C/RM caller returns this allocator's live payload exactly
     // once, without modifying its prefix; all payload users have stopped.
     let base = unsafe { pointer.cast::<u8>().sub(size_of::<Header>()) };
+    // SAFETY: `base` is this allocation's header, written when it was allocated.
     let header = unsafe { base.cast::<Header>().read() };
     release(base, header.layout);
 }

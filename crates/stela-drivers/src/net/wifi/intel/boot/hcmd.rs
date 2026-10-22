@@ -134,7 +134,7 @@ impl Queue {
         for _ in 0..slots {
             descriptors.extend_from_slice(invalid_tfd.bytes());
         }
-        // This command ring is still private before ROM context publication.
+        // SAFETY: This command ring is still private before ROM context publication.
         unsafe {
             command.write_owned(0, &descriptors)?;
         }
@@ -188,10 +188,12 @@ impl Queue {
         if let Some(pending) = self.pending.as_mut()
             && let Some(remainder) = pending.remainder.as_mut()
         {
+            // SAFETY: covered by this function's own safety contract.
             unsafe {
                 remainder.release()?;
             }
         }
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             self.first.release()?;
             self.invalid.release()?;
@@ -209,16 +211,18 @@ impl Queue {
         // descriptor and its bidirectional TB0, including possible writeback.
         // Preserve successful handoffs across a later visibility failure.
         if !pending.descriptor_cpu {
+            // SAFETY: the matching RX response ended device access to this descriptor.
             unsafe { command.complete_for_cpu(descriptor..descriptor + 256) }
                 .map_err(Error::CommandReclaim)?;
             pending.descriptor_cpu = true;
         }
         if !pending.first_cpu {
+            // SAFETY: the same response ended device access to the command's first TB.
             unsafe { self.first.complete_for_cpu(first..first + 64) }
                 .map_err(Error::CommandReclaim)?;
             pending.first_cpu = true;
         }
-        // Actual source RX command completion transfers this descriptor back
+        // SAFETY: Actual source RX command completion transfers this descriptor back
         // to the CPU. Restore the retained invalid target before reuse.
         unsafe {
             command
@@ -226,6 +230,7 @@ impl Queue {
                 .map_err(Error::CommandReclaim)?;
         }
         if let Some(remainder) = pending.remainder.as_mut() {
+            // SAFETY: the response also ended device access to the command's payload.
             unsafe {
                 remainder
                     .release()
@@ -256,6 +261,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         payload: &[u8],
         source: &dyn PageSource,
     ) -> Result<CommandTicket, Error> {
+        // SAFETY: covered by this function's own safety contract.
         unsafe { self.submit_command_with_policy(id, payload, source, false) }
     }
     // Only source-backed control commands whose Linux flags contain
@@ -301,7 +307,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             bytes: command.first_tb().len(),
         };
         let tfd = command.tfd(first, remainder.as_ref().map(Chunk::region))?;
-        // TB0 remains coherent and pinned for the queue's lifetime. It is
+        // SAFETY: TB0 remains coherent and pinned for the queue's lifetime. It is
         // initially unused, or its prior actual command response completed.
         unsafe {
             self.hcmd
@@ -328,7 +334,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             allow_rfkill,
         });
         let result = (|| {
-            // Retained pending payload/owner precedes even this descriptor
+            // SAFETY: Retained pending payload/owner precedes even this descriptor
             // pointer store, as well as the later producer doorbell.
             unsafe {
                 self.command

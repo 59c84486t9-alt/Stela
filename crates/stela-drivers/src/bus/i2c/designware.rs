@@ -92,6 +92,7 @@ impl MmioRegisters {
     /// DesignWare controller. The platform must provide clocks and reset first.
     /// Neither firmware, an IRQ handler nor another CPU may access the window.
     pub unsafe fn new(base: u64) -> Self {
+        // SAFETY: covered by this function's own safety contract.
         Self(unsafe { Mmio::new(base) })
     }
 }

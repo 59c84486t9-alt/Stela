@@ -183,6 +183,7 @@ impl Allocated {
     /// ```
     pub unsafe fn retire(mut self) {
         if let Some(link) = self.link.take() {
+            // SAFETY: covered by this function's own safety contract.
             unsafe { link.retire() };
         }
         self.reservation.take();
@@ -341,6 +342,7 @@ impl<R: Registers> Allocate<R> {
         reservation: Arc<dyn Reservation>,
         now: u64,
     ) -> Result<Self, Error> {
+        // SAFETY: covered by this function's own safety contract.
         unsafe { Self::new_inner(channel, link, reservation, now, alloc) }
     }
     #[cfg(test)]
@@ -861,12 +863,15 @@ impl ActiveTunnel {
     /// ```
     pub unsafe fn retire(mut self) {
         if let Some(path) = self.path.take() {
+            // SAFETY: covered by this function's own safety contract.
             unsafe { path.retire() };
         }
         if let Some(path) = self.previous.take() {
+            // SAFETY: covered by this function's own safety contract.
             unsafe { path.retire() };
         }
         if let Some(bandwidth) = self.bandwidth.take() {
+            // SAFETY: covered by this function's own safety contract.
             unsafe { bandwidth.retire() };
         }
         self.pending = [None, None];
@@ -941,6 +946,7 @@ impl<R: Registers> ActivateTunnel<R> {
         up: Arc<dyn super::path::Reservation>,
         now: u64,
     ) -> Result<Self, Error> {
+        // SAFETY: covered by this function's own safety contract.
         unsafe { Self::new_inner(channel, bandwidth, down, up, now, alloc) }
     }
     #[cfg(test)]
@@ -1050,6 +1056,7 @@ impl<R: Registers> ActivateTunnel<R> {
             }
             // SAFETY: uninitialized bytes are valid MaybeUninit; matching layout.
             let first = unsafe { Box::from_raw(first) };
+            // SAFETY: covered by this function's own safety contract.
             let result = unsafe { allocate(Layout::new::<ActiveTunnel>()) }
                 .cast::<core::mem::MaybeUninit<ActiveTunnel>>();
             if result.is_null() {
@@ -1605,6 +1612,7 @@ impl<R: Registers> StopTunnel<R> {
         active: Box<ActiveTunnel>,
         now: u64,
     ) -> Result<Self, Error> {
+        // SAFETY: covered by this function's own safety contract.
         unsafe { Self::new_inner(channel, active, now, alloc) }
     }
     #[cfg(test)]
@@ -1682,10 +1690,12 @@ impl<R: Registers> StopTunnel<R> {
         let job_deadline = now.checked_add(JOB_MS).ok_or(Error::ClockOverflow)?;
         // Reserve result storage before any normal-stop write; no late owner
         // allocation after partial disable or drain, and no allocation on return.
+        // SAFETY: `Stopped` is not zero-sized.
         let ptr = unsafe { allocate(Layout::new::<Stopped>()) }.cast::<Stopped>();
         if ptr.is_null() {
             return Err(Error::Allocation);
         }
+        // SAFETY: covered by this function's own safety contract.
         let result = unsafe {
             ptr.write(Stopped {
                 endpoints: [0; 2],

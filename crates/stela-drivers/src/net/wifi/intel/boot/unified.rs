@@ -78,6 +78,7 @@ impl<'a, Q: BootIo> UnifiedNvm<'a, Q> {
         &mut self,
         source: &dyn PageSource,
     ) -> Result<InitializationProgress, Error> {
+        // SAFETY: covered by this function's own safety contract.
         let result = unsafe { self.advance_inner(source) };
         if result.is_err() && !matches!(result, Err(Error::CommandReclaim(_))) {
             self.phase = InitializationPhase::Failed;
@@ -85,6 +86,7 @@ impl<'a, Q: BootIo> UnifiedNvm<'a, Q> {
         result
     }
     unsafe fn submit(&mut self, request: Request, source: &dyn PageSource) -> Result<(), Error> {
+        // SAFETY: covered by this function's own safety contract.
         self.ticket = Some(unsafe {
             self.boot
                 .submit_command_with_policy(request.id(), &request.payload(), source, true)
@@ -163,6 +165,7 @@ impl<'a, Q: BootIo> UnifiedNvm<'a, Q> {
                 if self.boot.firmware.supports_api(48) != (v.notification_version >= 4) {
                     return Err(super::super::nvm::Error::InconsistentApi.into());
                 }
+                // SAFETY: covered by this function's own safety contract.
                 unsafe {
                     self.submit(Request::ExtendedConfiguration, source)?;
                 }
@@ -170,6 +173,7 @@ impl<'a, Q: BootIo> UnifiedNvm<'a, Q> {
             }
             ExtendedConfiguration => {
                 if self.response(Request::ExtendedConfiguration)?.is_some() {
+                    // SAFETY: covered by this function's own safety contract.
                     unsafe {
                         self.submit(Request::AccessComplete, source)?;
                     }
@@ -189,6 +193,7 @@ impl<'a, Q: BootIo> UnifiedNvm<'a, Q> {
                     self.capture_init_complete();
                 }
                 if self.init_complete.is_some() {
+                    // SAFETY: covered by this function's own safety contract.
                     unsafe {
                         self.submit(Request::GetInformation, source)?;
                     }

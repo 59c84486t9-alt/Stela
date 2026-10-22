@@ -276,6 +276,7 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
                 chunk.len(),
                 Direction::ToDevice,
             )?;
+            // SAFETY: `pointer` bounds the fresh unpublished allocation to `chunk.len()`.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     chunk.as_ptr(),
@@ -298,6 +299,7 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
             .map(|(p, chunk)| txp::Span::new(&p.dma, 0, chunk.len()))
             .collect::<Result<Vec<_>, _>>()?;
         let txp = txp::Encoded::new(token as u16, &spans)?;
+        // SAFETY: `pointer` bounds both 32-byte halves of the fresh unpublished TXWI.
         unsafe {
             core::ptr::copy_nonoverlapping(txd.as_ptr(), txwi.pointer(0, 32)?, 32);
             core::ptr::copy_nonoverlapping(txp.bytes().as_ptr(), txwi.pointer(32, 32)?, 32);
@@ -524,14 +526,17 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
         self.poisoned = true;
         for packet in self.tokens.iter_mut().flatten() {
             for data in &mut packet.payload {
+                // SAFETY: covered by this function's own safety contract.
                 unsafe {
                     data.release()?;
                 }
             }
+            // SAFETY: covered by this function's own safety contract.
             unsafe {
                 packet.txwi.release()?;
             }
         }
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             self.descriptors.release()?;
         }

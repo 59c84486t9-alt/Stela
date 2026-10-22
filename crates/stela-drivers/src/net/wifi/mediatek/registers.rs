@@ -87,11 +87,13 @@ impl MmioBar {
 // by the Arc; each complete volatile access checks its aligned BAR bounds.
 unsafe impl BarIo for MmioBar {
     fn read32(&mut self, offset: u32) -> Result<u32, Error> {
+        // SAFETY: `pointer` checked the aligned access lies inside the owned BAR.
         Ok(u32::from_le(unsafe {
             self.pointer(offset)?.read_volatile()
         }))
     }
     fn write32(&mut self, offset: u32, value: u32) -> Result<(), Error> {
+        // SAFETY: `pointer` checked the aligned access lies inside the owned BAR.
         unsafe { self.pointer(offset)?.write_volatile(value.to_le()) };
         Ok(())
     }

@@ -71,6 +71,7 @@ impl<Q: BootIo> ColdRadio<'_, Q> {
     /// Source returns fresh exclusive native pages for the retained actual
     /// requester/domain under its coherent publication/ownership contract.
     pub unsafe fn advance(&mut self, source: &dyn PageSource) -> Result<ColdRadioPhase, Error> {
+        // SAFETY: covered by this function's own safety contract.
         let result = unsafe { self.advance_inner(source) };
         if result.is_err() && !matches!(result, Err(Error::CommandReclaim(_))) {
             self.phase = ColdRadioPhase::Failed;
@@ -119,6 +120,7 @@ impl<Q: BootIo> ColdRadio<'_, Q> {
             return Ok(self.phase);
         }
         let command = &plan.commands()[self.next];
+        // SAFETY: covered by this function's own safety contract.
         self.ticket = Some(unsafe {
             self.initialized
                 .boot

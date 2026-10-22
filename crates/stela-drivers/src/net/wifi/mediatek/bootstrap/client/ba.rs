@@ -74,6 +74,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     }
                     let ticket = *ticket;
                     s.ba_actions.pop_front();
+                    // SAFETY: this queued start was never published, so nothing used it.
                     let next = unsafe {
                         s.station
                             .complete_rx_block_ack(ticket, Completion::RejectedAndIdle)
@@ -161,6 +162,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::WrongPhase);
         }
         if matches!(s.ba_actions.front(), Some(BaAction::Tx(_))) {
+            // SAFETY: covered by this function's own safety contract.
             return unsafe { Self::progress_tx_ba(s, authority, admission, source, now) };
         }
         if matches!(
@@ -206,6 +208,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 let controller = &mut s.controller;
                 let replies = &mut s.replies;
                 let mut started = false;
+                // SAFETY: covered by this function's own safety contract.
                 let outcome = unsafe {
                     authority.publish_association(
                         admission,
@@ -228,6 +231,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 });
                 match outcome.map_err(Error::Regulatory).and_then(|v| v) {
                     Ok(()) => {
+                        // SAFETY: covered by this function's own safety contract.
                         let action = unsafe {
                             s.station
                                 .complete_rx_block_ack(ticket, Completion::Accepted)
@@ -237,6 +241,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         Ok(())
                     }
                     Err(error) => {
+                        // SAFETY: covered by this function's own safety contract.
                         let _ = unsafe {
                             s.station
                                 .complete_rx_block_ack(ticket, Completion::Uncertain)
@@ -262,6 +267,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 }
                 let prepared = Self::prepare_submission(s, bytes, None, true, true)?;
                 let mut started = false;
+                // SAFETY: covered by this function's own safety contract.
                 let result = unsafe {
                     authority.publish_association(
                         admission,
@@ -317,6 +323,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             // native owner, and uncertainty terminally quarantines Client.
             // There is no hardware/callback/session queue to disable here.
             s.ba_actions.pop_front();
+            // SAFETY: the start was never published, so there are no users to retire.
             let action = unsafe {
                 s.station
                     .complete_rx_block_ack(ticket, Completion::Accepted)
@@ -341,6 +348,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         )
         .map_err(Error::Codec)?;
         if let Err(error) = Self::command(s, Command::StationRecord, &body) {
+            // SAFETY: an uncertain publication retains every owner, as the contract requires.
             let _ = unsafe {
                 s.station
                     .complete_rx_block_ack(ticket, Completion::Uncertain)
@@ -359,6 +367,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         });
         s.receive_ba[index] = None;
         s.ba_actions.pop_front();
+        // SAFETY: firmware acknowledged the stop and this TID's queued RX was discarded.
         let action = unsafe {
             s.station
                 .complete_rx_block_ack(ticket, Completion::Accepted)

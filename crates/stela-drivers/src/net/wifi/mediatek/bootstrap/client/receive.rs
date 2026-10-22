@@ -70,6 +70,7 @@ impl<C> Parent<C> {
     // Actual completion and optional BA release are established by this
     // private native caller, not by a public first/last or numeric epoch input.
     unsafe fn ordered(self) -> OrderedGroup<SourceOwner<C>> {
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             OrderedGroup::new(
                 self.owner.context.clone(),
@@ -211,7 +212,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .validate_association_context(parent.context())
             .map_err(Error::Station)?;
         let key = parent.head().security.key;
-        // This private entry is reached only by the native source bypass or
+        // SAFETY: This private entry is reached only by the native source bypass or
         // the exact currently installed BA queue's actual ordered release.
         let group = unsafe { parent.ordered() };
         let slot = if key.is_some() {

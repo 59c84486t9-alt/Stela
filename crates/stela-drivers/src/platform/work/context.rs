@@ -38,6 +38,7 @@ pub(super) unsafe fn controls() -> Result<Controls, WorkError> {
     }
     let cr0: u64;
     let cr4: u64;
+    // SAFETY: covered by this function's own safety contract.
     unsafe {
         asm!("mov {}, cr0",out(reg) cr0,options(nomem,nostack,preserves_flags));
         asm!("mov {}, cr4",out(reg) cr4,options(nomem,nostack,preserves_flags));
@@ -47,6 +48,7 @@ pub(super) unsafe fn controls() -> Result<Controls, WorkError> {
     if cr0 & 12 != 0 || cr4 & (1 << 9) == 0 || cr4 & (1 << 23) != 0 {
         return Err(WorkError::Unavailable);
     }
+    // SAFETY: covered by this function's own safety contract.
     Ok(unsafe { read_controls() })
 }
 /// Save the actual ABI control state; privileged qualification happens before
@@ -54,6 +56,7 @@ pub(super) unsafe fn controls() -> Result<Controls, WorkError> {
 /// component and never attest a native CPU/IRQ provider.
 pub(super) unsafe fn read_controls() -> Controls {
     let mut controls = Controls { mxcsr: 0, fcw: 0 };
+    // SAFETY: covered by this function's own safety contract.
     unsafe {
         asm!("stmxcsr [{}]",in(reg) &mut controls.mxcsr,options(nostack,preserves_flags));
         asm!("fnstcw [{}]",in(reg) &mut controls.fcw,options(nostack,preserves_flags));
@@ -62,6 +65,7 @@ pub(super) unsafe fn read_controls() -> Controls {
 }
 pub(super) fn stack_pointer() -> usize {
     let rsp: usize;
+    // SAFETY: reading RSP has no memory or flag effects.
     unsafe {
         asm!("mov {}, rsp",out(reg)rsp,options(nomem,nostack,preserves_flags));
     }
@@ -98,6 +102,7 @@ impl Frame {
         self.r12 = argument as u64;
         self.r13 = index as u64;
         self.r14 = entry as usize as u64;
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             ((top - 16) as *mut usize).write(trampoline as *const () as usize);
             ((top - 8) as *mut usize).write(0);

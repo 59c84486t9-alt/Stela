@@ -162,6 +162,7 @@ unsafe extern "C" fn stela_nvidia_put_firmware(token: *const c_void) {
     let token = token.cast_mut().cast::<Token<'_>>();
     // SAFETY: the raw ownership contract retains token and pinned service.
     let value = unsafe { &*token };
+    // SAFETY: the token keeps its pinned owner service alive.
     let owner = unsafe { &*value.owner };
     debug_assert!(owner.firmware_tokens.get() > 0);
     // Read the image borrow before release; no image copy or ownership escape.

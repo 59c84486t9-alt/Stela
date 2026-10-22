@@ -303,6 +303,7 @@ unsafe extern "C" fn override_flags(context: *mut c_void, address: u64, flags: *
     // SAFETY: exclusive context is live for this synchronous C callback; the
     // initialized GMC contract covers its retained owner and flag pointer.
     let context = unsafe { &mut *context.cast::<EntryContext<'_, '_>>() };
+    // SAFETY: the initialized GMC callback's contract covers these arguments.
     unsafe { (context.gmc.override_flags)(context.gmc.context, address, flags) }
 }
 
@@ -316,6 +317,7 @@ unsafe extern "C" fn set_pte_pde(
     // SAFETY: C preflight bounded this mapped destination and index. The actual
     // initialized GMC callback owns the architecture-correct synchronous store.
     let context = unsafe { &mut *context.cast::<EntryContext<'_, '_>>() };
+    // SAFETY: the initialized GMC callback's contract covers these arguments.
     unsafe { (context.gmc.set_pte_pde)(context.gmc.context, mapping, index, address, flags) }
 }
 

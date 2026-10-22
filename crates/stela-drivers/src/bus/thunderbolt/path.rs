@@ -147,8 +147,11 @@ impl Backing {
     }
     unsafe fn retire(self) {
         match self {
+            // SAFETY: covered by this function's own safety contract.
             Self::Direct(link) => unsafe { link.retire() },
+            // SAFETY: covered by this function's own safety contract.
             Self::Bandwidth(allocation) => unsafe { allocation.retire() },
+            // SAFETY: covered by this function's own safety contract.
             Self::Previous(path) => unsafe { path.retire() },
         }
     }

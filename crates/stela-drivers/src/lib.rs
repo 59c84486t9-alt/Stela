@@ -25,6 +25,7 @@
 //! USB4/Thunderbolt and I²C/SMBus in [`bus`], Type-C in [`usb::typec`] and
 //! [`platform`] (ACPICA and work contexts) are not attached by `probe` yet.
 #![no_std]
+#![cfg_attr(not(test), warn(clippy::undocumented_unsafe_blocks))]
 #[macro_use]
 extern crate alloc;
 

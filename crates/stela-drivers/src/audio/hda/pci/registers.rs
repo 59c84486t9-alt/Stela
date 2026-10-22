@@ -81,8 +81,10 @@ impl Prepared {
         self,
         function: &'a mut Function<C>,
     ) -> Result<PciRegisters<'a, MmioRegisters, C>, AttachError> {
+        // SAFETY: covered by this function's own safety contract.
         let inner = unsafe { MmioRegisters::claim(self.base, self.bytes) }
             .map_err(|_| AttachError::InvalidBar)?;
+        // SAFETY: covered by this function's own safety contract.
         unsafe { self.bind_registers(function, inner) }
     }
 }

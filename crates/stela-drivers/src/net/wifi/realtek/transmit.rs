@@ -440,6 +440,7 @@ impl<R: Registers> Rings<R> {
             let a = self.pending[index]
                 .as_mut()
                 .ok_or(Error::CompletionBeyondPending)?;
+            // SAFETY: the consumer advance above ended device reads of this payload.
             unsafe {
                 a.release()?;
             }
@@ -459,6 +460,7 @@ impl<R: Registers> Rings<R> {
         self.poisoned = true;
         let mut addresses = [0; 7];
         for (i, a) in self.rings.iter().enumerate() {
+            // SAFETY: covered by this function's own safety contract.
             unsafe { a.dma.sync_for_cpu(0..a.dma.bytes()) }.map_err(beacon::Error::from)?;
             for offset in (0..a.dma.bytes()).step_by(4096) {
                 a.write(offset, &[0; 4096][..(a.dma.bytes() - offset).min(4096)])?;
@@ -492,11 +494,13 @@ impl<R: Registers> Rings<R> {
     pub unsafe fn release_after_stop(&mut self) -> Result<(), Error> {
         self.poisoned = true;
         for a in &mut self.rings {
+            // SAFETY: covered by this function's own safety contract.
             unsafe {
                 a.release()?;
             }
         }
         for a in self.pending.iter_mut().flatten() {
+            // SAFETY: covered by this function's own safety contract.
             unsafe {
                 a.release()?;
             }

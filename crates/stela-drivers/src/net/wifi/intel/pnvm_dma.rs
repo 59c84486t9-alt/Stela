@@ -139,11 +139,13 @@ impl MappedTable {
             return Err(Error::State);
         }
         for chunk in &mut self.payloads {
+            // SAFETY: covered by this function's own safety contract.
             unsafe {
                 chunk.release().map_err(dma::Error::Dma)?;
             }
         }
         if let Some(descriptors) = self.descriptors.as_mut() {
+            // SAFETY: covered by this function's own safety contract.
             unsafe {
                 descriptors.release().map_err(dma::Error::Dma)?;
             }

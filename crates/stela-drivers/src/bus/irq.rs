@@ -260,7 +260,9 @@ impl<P: Platform> Pending<'_, P> {
         self.published = true;
         // SAFETY: this consumes the unique unpublished owners exactly once.
         Slot {
+            // SAFETY: taken exactly once; `published` stops Drop from dropping it again.
             source: core::cell::UnsafeCell::new(unsafe { ManuallyDrop::take(&mut self.source) }),
+            // SAFETY: taken exactly once; `published` stops Drop from dropping it again.
             handler: unsafe { ManuallyDrop::take(&mut self.handler) },
             state: AtomicU8::new(ARMING),
             inflight: AtomicUsize::new(0),
@@ -399,7 +401,7 @@ impl<P: Platform> Registry<P> {
             self.quarantine(slot);
             return Err(error.into());
         }
-        // The slot is already fully retained; a delivery during unmask sees
+        // SAFETY: The slot is already fully retained; a delivery during unmask sees
         // the real handler. No new submission precedes source configuration.
         unsafe { slot.as_ref() }
             .state

@@ -347,6 +347,7 @@ impl Session {
             // The core/provider are stopped; includes callbacks retained after
             // unload or failed Notify removal. Failed quiescence leaks them safely.
             for context in self.notifications.get_mut().drain(..) {
+                // SAFETY: the core is stopped, so no callback can still use the context.
                 unsafe {
                     drop(Box::from_raw(context));
                 }
@@ -385,6 +386,7 @@ impl NamespaceGuard<'_> {
 }
 impl Drop for NamespaceGuard<'_> {
     fn drop(&mut self) {
+        // SAFETY: this guard entered the namespace lease that it now leaves.
         unsafe {
             stela_acpi_guard_leave(self.raw);
         }
@@ -486,6 +488,7 @@ impl<'a> Handle<'a> {
         impl Drop for Free {
             fn drop(&mut self) {
                 if !self.0.is_null() {
+                    // SAFETY: ACPICA allocated this result buffer for the caller to free once.
                     unsafe { acpi_os_free(self.0) };
                 }
             }
@@ -547,6 +550,7 @@ impl<'a> Handle<'a> {
         impl Drop for Free {
             fn drop(&mut self) {
                 if !self.0.is_null() {
+                    // SAFETY: ACPICA allocated this result buffer for the caller to free once.
                     unsafe { acpi_os_free(self.0) };
                 }
             }
@@ -608,6 +612,7 @@ impl<'a> Handle<'a> {
         let status =
             unsafe { acpi_install_notify_handler(self.raw, 2, notify_trampoline, context.cast()) };
         if status != 0 {
+            // SAFETY: installation failed, so this is the only reference to the box.
             unsafe {
                 drop(Box::from_raw(context));
             }
@@ -615,6 +620,7 @@ impl<'a> Handle<'a> {
         }
         self.session.notifications.borrow_mut().push(context);
         if let Err(error) = guard.check() {
+            // SAFETY: the context was just registered with this session, which keeps it.
             unsafe { &*context }.enabled.store(false, Ordering::Release);
             return Err(error);
         }
@@ -637,6 +643,7 @@ impl<'a> Handle<'a> {
         context: *mut c_void,
     ) -> Result<(), Error> {
         let guard = self.session.guard()?;
+        // SAFETY: covered by this function's own safety contract.
         checked(unsafe {
             acpi_install_address_space_handler(self.raw, space, handler, setup, context)
         })?;
@@ -647,7 +654,9 @@ impl<'a> Handle<'a> {
     /// provider must synchronize external region callbacks before freeing context.
     pub unsafe fn remove_region(self, space: u32, handler: Region) -> Result<(), Error> {
         let guard = self.session.guard()?;
+        // SAFETY: covered by this function's own safety contract.
         checked(unsafe { acpi_remove_address_space_handler(self.raw, space, handler) })?;
+        // SAFETY: called from process context with no namespace lock held by this thread.
         unsafe { acpi_os_wait_events_complete() };
         guard.check()
     }
@@ -661,6 +670,7 @@ unsafe extern "C" fn notify_trampoline(_: *mut c_void, value: u32, context: *mut
     let context = unsafe { &*context.cast::<NotifyContext>() };
     // UNLOAD invalidates clients before deletion; context storage is still owned
     // through quiescence/core termination even when the node itself is gone.
+    // SAFETY: ACPICA calls this trampoline only inside the live core.
     if context.enabled.load(Ordering::Acquire) && unsafe { stela_acpi_namespace_valid() != 0 } {
         (context.callback)(value);
     }
@@ -680,7 +690,9 @@ impl Notification<'_> {
         let result = (|| {
             let guard = self.handle.session.guard()?;
             // Only a live namespace lease may pass this node into ACPICA.
+            // SAFETY: the namespace guard keeps this node live.
             checked(unsafe { acpi_remove_notify_handler(self.handle.raw, 2, notify_trampoline) })?;
+            // SAFETY: called from process context with no namespace lock held by this thread.
             unsafe {
                 acpi_os_wait_events_complete();
             }
@@ -691,6 +703,7 @@ impl Notification<'_> {
         } else {
             // Keep callback storage in Session until successful global teardown;
             // neither stale removal nor an error may free a still registered box.
+            // SAFETY: the session keeps every registered context until global teardown.
             unsafe { &*context }.enabled.store(false, Ordering::Release);
         }
         result
@@ -724,6 +737,7 @@ unsafe fn read_value<'a>(
     }
     range(object as usize, size_of::<RawObject>(), start, end)?;
     // ACPICA packs the external buffer; unaligned reads avoid platform assumptions.
+    // SAFETY: `range` checked the object lies in the result buffer.
     let raw = unsafe { object.read_unaligned() };
     match raw.kind {
         0 => Ok(Value::Uninitialized),
@@ -734,6 +748,7 @@ unsafe fn read_value<'a>(
                 Vec::new()
             } else {
                 range(raw.payload as usize, n, start, end)?;
+                // SAFETY: `range` checked these bytes lie in the result buffer.
                 unsafe { core::slice::from_raw_parts(raw.payload as *const u8, n) }.to_vec()
             };
             Ok(if raw.kind == 2 {
@@ -757,6 +772,7 @@ unsafe fn read_value<'a>(
             }
             let mut values = Vec::with_capacity(count);
             for n in 0..count {
+                // SAFETY: `range` checked the whole element array lies in the result buffer.
                 values.push(unsafe {
                     read_value(
                         (raw.payload as *const RawObject).add(n),

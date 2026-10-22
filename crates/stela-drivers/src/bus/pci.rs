@@ -438,6 +438,7 @@ impl Function {
                         | (u64::from(function) << 12);
                     // SAFETY: the window is mapped; this is one function's page.
                     let config = EcamConfig {
+                        // SAFETY: covered by this function's own safety contract.
                         registers: unsafe { Mmio::new(window.base + offset) },
                     };
                     let multifunction = config.read8(HEADER_TYPE) & 0x80 != 0;

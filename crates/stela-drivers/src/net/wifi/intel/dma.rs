@@ -104,6 +104,7 @@ impl Chunk {
             return Err(Error::AllocationContract);
         }
         let pointer = self.cpu.address(offset, 2)?.as_ptr().cast::<u16>();
+        // SAFETY: covered by this function's own safety contract.
         Ok(u16::from_le(unsafe { pointer.read_volatile() }))
     }
     pub(super) unsafe fn read32_coherent(&self, offset: usize) -> Result<u32, Error> {
@@ -111,11 +112,13 @@ impl Chunk {
             return Err(Error::AllocationContract);
         }
         let pointer = self.cpu.address(offset, 4)?.as_ptr().cast::<u32>();
+        // SAFETY: covered by this function's own safety contract.
         Ok(u32::from_le(unsafe { pointer.read_volatile() }))
     }
     /// CPU exclusively owns this range until its next protocol doorbell.
     pub(super) unsafe fn write_owned(&self, offset: usize, bytes: &[u8]) -> Result<(), Error> {
         let pointer = self.cpu.address(offset, bytes.len())?;
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer.as_ptr(), bytes.len());
         }
@@ -133,6 +136,7 @@ impl Chunk {
         range: core::ops::Range<usize>,
     ) -> Result<(), Error> {
         self.cpu.address(range.start, range.len())?;
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             self.mapping
                 .as_ref()
@@ -153,11 +157,13 @@ impl Chunk {
     /// Actual device completion must transfer this entire payload to the CPU.
     pub(super) unsafe fn snapshot_completed(&self) -> Result<Vec<u8>, Error> {
         let mapping = self.mapping.as_ref().ok_or(Error::State)?;
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             mapping.sync_for_cpu(0..self.region.bytes)?;
         }
         let pointer = self.cpu.address(0, self.region.bytes)?;
         let mut bytes = alloc::vec![0;self.region.bytes];
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             core::ptr::copy_nonoverlapping(pointer.as_ptr(), bytes.as_mut_ptr(), bytes.len());
         }

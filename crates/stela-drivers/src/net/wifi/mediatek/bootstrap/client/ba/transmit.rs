@@ -134,6 +134,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .station
                     .next_qos_sequence(session.context(), session.tid())
                     .map_err(Error::Station)?;
+                // SAFETY: covered by this function's own safety contract.
                 let action = unsafe {
                     s.station.complete_tx_block_ack_prepare(
                         ticket,
@@ -157,6 +158,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .map_err(Error::BlockAck)?;
                 let mut prepared = Self::prepare_submission(s, bytes, None, true, true)?;
                 prepared.1.tx_ba = Some(session.clone());
+                // SAFETY: covered by this function's own safety contract.
                 let result = unsafe {
                     authority.publish_association(
                         admission,
@@ -169,6 +171,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 match result {
                     Ok(_) => {
                         s.ba_actions.pop_front();
+                        // SAFETY: covered by this function's own safety contract.
                         let action = unsafe {
                             s.station.complete_tx_block_ack_transmit(
                                 ticket,
@@ -181,6 +184,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     }
                     Err(error) => {
                         if s.controller.state().data_tx.as_ref().unwrap().is_poisoned() {
+                            // SAFETY: covered by this function's own safety contract.
                             let _ = unsafe {
                                 s.station.complete_tx_block_ack_transmit(
                                     ticket,
@@ -220,6 +224,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 )
                 .map_err(Error::Codec)?;
                 let mut started = false;
+                // SAFETY: covered by this function's own safety contract.
                 let result = unsafe {
                     authority.publish_association(
                         admission,
@@ -240,6 +245,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 match result {
                     Ok(()) => {
                         s.ba_actions.pop_front();
+                        // SAFETY: covered by this function's own safety contract.
                         let action = unsafe {
                             s.station
                                 .complete_tx_block_ack_program(ticket, Completion::Accepted)
@@ -249,6 +255,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     }
                     Err(error) => {
                         if started {
+                            // SAFETY: covered by this function's own safety contract.
                             let _ = unsafe {
                                 s.station
                                     .complete_tx_block_ack_program(ticket, Completion::Uncertain)
@@ -296,6 +303,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         )
         .map_err(Error::Codec)?;
         if let Err(error) = Self::command(s, Command::StationRecord, &body) {
+            // SAFETY: an uncertain publication retains every owner, as the contract requires.
             let _ = unsafe {
                 s.station
                     .complete_tx_block_ack_program(ticket, Completion::Uncertain)
@@ -303,6 +311,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(error);
         }
         s.ba_actions.pop_front();
+        // SAFETY: firmware acknowledged the disable and no TX for this TID is pending.
         let action = unsafe {
             s.station
                 .complete_tx_block_ack_program(ticket, Completion::Accepted)

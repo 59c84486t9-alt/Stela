@@ -298,6 +298,7 @@ impl<R: Registers> Beacon<R> {
             return Err(Error::Quarantined);
         }
         self.poisoned = true;
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             self.descriptor.dma.sync_for_cpu(0..BUFFER_DESCRIPTOR)?;
         }

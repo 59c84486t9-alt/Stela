@@ -94,6 +94,7 @@ impl NativeBootIo {
             return Err(Error::Access(power::AccessError::Mapping));
         }
         Ok(Self {
+            // SAFETY: covered by this function's own safety contract.
             registers: unsafe { Mmio::new(window.as_ptr().cast::<u8>() as u64) },
             clock,
             _owner: owner,
@@ -358,6 +359,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         entries: u16,
         product_reset_policy: ProductResetPolicy,
     ) -> Result<Self, Error> {
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             Self::start_inner(
                 power,
@@ -425,6 +427,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             crate::bus::dma::mapping::DmaError::IommuUnavailable,
         )))?;
         let plan = firmware.self_load_plan()?;
+        // SAFETY: covered by this function's own safety contract.
         let images = unsafe { MappedFirmware::prepare(&plan, source, Some(domain.clone()))? };
         let allocate = |bytes: usize, direction| {
             Chunk::allocate(source, domain.clone(), &alloc::vec![0;bytes], direction)
@@ -437,6 +440,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         let used = allocate(usize::from(entries) * used_stride, Direction::Bidirectional)?;
         let status = allocate(status_bytes, Direction::Bidirectional)?;
         let command = allocate(command_entries * 256, Direction::Bidirectional)?;
+        // SAFETY: covered by this function's own safety contract.
         let hcmd = unsafe { hcmd::Queue::prepare(&command, &profile, source, domain.clone())? };
         let mut buffers = Vec::new();
         for _ in 0..entries - 1 {
@@ -742,6 +746,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         } else {
             u16::MAX
         };
+        // SAFETY: the status page is pinned, coherent and device-written; this reads a
+        // complete aligned u16 without claiming CPU ownership.
         let closed = unsafe { self.status.read16_coherent(0)? } & mask & (self.entries - 1);
         fence(Ordering::Acquire);
         let count = closed.wrapping_sub(self.read) & (self.entries - 1);
@@ -755,6 +761,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         let mut descriptor = [0; 32];
         for offset in (0..stride).step_by(4) {
             descriptor[offset..offset + 4].copy_from_slice(
+                // SAFETY: the used ring is pinned and coherent, and `closed` says the device
+                // finished writing this entry.
                 &unsafe {
                     self.used
                         .read32_coherent(usize::from(self.read) * stride + offset)?
@@ -885,6 +893,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
                 if chunks.is_empty() {
                     continue;
                 }
+                // SAFETY: covered by this function's own safety contract.
                 let table = unsafe {
                     MappedTable::prepare(
                         chunks,
@@ -917,7 +926,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
                     let mut field = [0; 16];
                     field[..8].copy_from_slice(&config.address.to_le_bytes());
                     field[8..12].copy_from_slice(&config.bytes.to_le_bytes());
-                    // These PNVM/reduced fields are host-owned until this
+                    // SAFETY: These PNVM/reduced fields are host-owned until this
                     // protocol's doorbell; other scratch ranges remain live.
                     unsafe {
                         memory.scratch.write_owned(offset, &field)?;

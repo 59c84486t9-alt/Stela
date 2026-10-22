@@ -156,6 +156,8 @@ impl<Q: QueueIo> RxRing<Q> {
         // to the CPU. Reposting happens only after all bytes have been copied.
         unsafe { slot.data.dma.sync_for_cpu(0..BUFFER_BYTES)? };
         let mut bytes = vec![0u8; length];
+        // SAFETY: the buffer is CPU-owned after the sync above, and `pointer` bounds
+        // the copy to `length` bytes.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 slot.data.pointer(0, length)?,
@@ -189,9 +191,11 @@ impl<Q: QueueIo> RxRing<Q> {
     pub unsafe fn release_after_quiesce(&mut self) -> Result<(), Error> {
         self.poisoned = true;
         for slot in &mut self.slots {
+            // SAFETY: covered by this function's own safety contract.
             unsafe { slot.data.release()? };
             slot.posted = false;
         }
+        // SAFETY: covered by this function's own safety contract.
         unsafe { self.descriptors.release()? };
         self.released = true;
         Ok(())

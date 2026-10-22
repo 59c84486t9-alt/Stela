@@ -82,11 +82,13 @@ pub unsafe fn setup<B: beacon::Registers, R: receive::Registers, T: transmit::Re
     if actual != profile.observed().sys_cfg1 {
         return Err(Error::IdentityChanged);
     }
-    // Actual independent stop owns descriptor CPU visibility. Each component
+    // SAFETY: Actual independent stop owns descriptor CPU visibility. Each component
     // becomes poisoned before its own mutation; uncertainty retains its I/O
     // owner and pins even if another component's preparation later fails.
     let beacon = unsafe { a.io.beacon_queue()?.begin_hci_rebind()? };
+    // SAFETY: covered by this function's own safety contract.
     let receive = unsafe { rx.begin_hci_rebind()? };
+    // SAFETY: covered by this function's own safety contract.
     let transmit = unsafe { tx.begin_hci_rebind()? };
     fence(Ordering::Release);
     rebind(a.io, beacon, receive, transmit)?;

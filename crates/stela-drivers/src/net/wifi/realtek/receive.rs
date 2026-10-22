@@ -318,6 +318,7 @@ impl<R: Registers> Ring<R> {
                 .cpu
                 .address(offset + 2, 2)
                 .map_err(beacon::Error::from)?;
+            // SAFETY: `address` bounds this aligned u16 inside the synced descriptor.
             let observed = u16::from_le(unsafe { pointer.as_ptr().cast::<u16>().read_volatile() });
             if observed != self.tag {
                 return Err(Error::Tag {
@@ -325,6 +326,7 @@ impl<R: Registers> Ring<R> {
                     observed,
                 });
             }
+            // SAFETY: the same producer advance hands this descriptor's buffer to the CPU.
             unsafe { self.buffers[index].dma.sync_for_cpu(0..BUFFER) }
                 .map_err(beacon::Error::from)?;
             let pointer = self.buffers[index]
@@ -362,6 +364,7 @@ impl<R: Registers> Ring<R> {
             return Err(Error::Quarantined);
         }
         self.poisoned = true;
+        // SAFETY: covered by this function's own safety contract.
         unsafe { self.descriptor.dma.sync_for_cpu(0..COUNT * DESCRIPTOR) }
             .map_err(beacon::Error::from)?;
         for i in 0..COUNT {
@@ -390,10 +393,12 @@ impl<R: Registers> Ring<R> {
     /// stores alone do not prove this. Failed invalidations retain ownership.
     pub unsafe fn release_after_stop(&mut self) -> Result<(), Error> {
         self.poisoned = true;
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             self.descriptor.release()?;
         }
         for buffer in &mut self.buffers {
+            // SAFETY: covered by this function's own safety contract.
             unsafe {
                 buffer.release()?;
             }

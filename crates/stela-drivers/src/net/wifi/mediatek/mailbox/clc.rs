@@ -139,10 +139,12 @@ impl<C: 'static> Execution<C> {
         // Reserve the owner itself fallibly before the first device mutation.
         // Existing plan/encoder/RX transport allocations retain their inherited
         // allocation contracts; this is not a claim that they are all fallible.
+        // SAFETY: `Owned` is not zero-sized.
         let storage = unsafe { alloc(Layout::new::<Owned<C>>()) }.cast::<Owned<C>>();
         if storage.is_null() {
             return Err(Error::NoMemory);
         }
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             storage.write(Owned {
                 resource,

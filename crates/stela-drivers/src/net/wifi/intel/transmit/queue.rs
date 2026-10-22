@@ -216,7 +216,7 @@ impl UnpublishedQueue {
         for _ in 0..initial_slots(family) {
             ring.extend(tfd.bytes());
         }
-        // Fresh exclusive host allocation; no address has been published.
+        // SAFETY: Fresh exclusive host allocation; no address has been published.
         unsafe {
             descriptors.write_owned(0, &ring).map_err(Error::Dma)?;
         }

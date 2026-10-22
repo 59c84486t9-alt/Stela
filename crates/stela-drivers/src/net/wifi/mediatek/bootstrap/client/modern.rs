@@ -38,6 +38,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         material: &[u8],
         seed: ReplaySeed,
     ) -> Result<KeyIdentity, Error> {
+        // SAFETY: covered by this function's own safety contract.
         unsafe { self.modern_key(authority, admission, pairwise, index, material, seed) }
     }
 
@@ -87,6 +88,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let current_profile = &mut s.profile;
         let controller = &mut s.controller;
         let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             authority.publish_association(
                 admission,
@@ -211,6 +213,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             let transport_facts = &mut s.transport_facts;
             let format = &mut s.format_generation;
             let m = s.modern.as_mut().unwrap();
+            // SAFETY: covered by this function's own safety contract.
             unsafe {
                 authority.publish_association(
                     admission,

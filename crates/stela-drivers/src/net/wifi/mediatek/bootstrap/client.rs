@@ -405,9 +405,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             ),
         ] {
             if let Some(key) = owner {
+                // SAFETY: the key is idle between associations and keeps its retained slot.
                 unsafe { key.rebind(key_context, scope) }.map_err(Error::Key)?;
             } else {
                 *owner = Some(
+                    // SAFETY: the slot is this association's WCID on the client's own mailbox.
                     unsafe { HardwareKey::claim(m, slot, key_context, scope, resource.clone()) }
                         .map_err(Error::Key)?,
                 );
@@ -646,6 +648,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             if kind == Some(6) {
                 let q = s.controller.state_mut().data_tx.as_mut().unwrap();
                 let epoch = q.epoch();
+                // SAFETY: this TX-free event came from the current data ring's own RX path.
                 unsafe { q.apply_tx_free(epoch, &f.bytes) }.map_err(Error::Ring)?;
                 continue;
             }
@@ -860,6 +863,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             (&mut s.gtk, &mut s.gtk_removed),
         ] {
             if let Some(r) = receipt.take() {
+                // SAFETY: covered by this function's own safety contract.
                 unsafe { key.as_mut().unwrap().retire_after_drain(r) }.map_err(Error::Key)?;
             }
         }
@@ -911,7 +915,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.phase != Phase::ControllerDrain {
             return Err(Error::WrongPhase);
         }
+        // SAFETY: covered by this function's own safety contract.
         unsafe { s.controller.retire_after_quiesce() }.map_err(Error::Bootstrap)?;
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             s.interface
                 .retire_after_drain(s.interface_removed.take().ok_or(Error::WrongPhase)?)

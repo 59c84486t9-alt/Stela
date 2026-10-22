@@ -369,6 +369,7 @@ impl Prepared {
         if self.identity.reset_policy != ResetPolicy::Generic {
             return Err(super::super::Error::InvalidConfiguration);
         }
+        // SAFETY: covered by this function's own safety contract.
         unsafe { MmioRegisters::claim(self.base, self.bytes) }
     }
 }
@@ -642,6 +643,7 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
             .preflight_clock(&mut registers)
             .map_err(AttachError::MmioPreflight)?;
     }
+    // SAFETY: covered by this function's own safety contract.
     let prepared = unsafe {
         prepare_inner(
             function,
@@ -652,6 +654,7 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
             true,
         )
     }?;
+    // SAFETY: covered by this function's own safety contract.
     unsafe { prepared.bind_registers(function, registers) }
 }
 
@@ -679,6 +682,7 @@ pub unsafe fn prepare<C: ConfigSpace>(
     timer: &impl Timer,
     ownership: Ownership,
 ) -> Result<Prepared, AttachError> {
+    // SAFETY: covered by this function's own safety contract.
     unsafe { prepare_with_board(function, bar0, timer, ownership, BoardIdentity::Unknown) }
 }
 
@@ -696,6 +700,7 @@ pub unsafe fn prepare_with_board<C: ConfigSpace>(
     ownership: Ownership,
     board: BoardIdentity<'_>,
 ) -> Result<Prepared, AttachError> {
+    // SAFETY: covered by this function's own safety contract.
     unsafe { prepare_inner(function, bar0, timer, ownership, board, false) }
 }
 

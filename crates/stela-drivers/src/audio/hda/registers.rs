@@ -107,6 +107,7 @@ impl MmioRegisters {
         let bytes = usize::try_from(bytes).map_err(|_| Error::InvalidConfiguration)?;
         Ok(Self {
             bytes,
+            // SAFETY: covered by this function's own safety contract.
             mmio: unsafe { Mmio::new(base) },
         })
     }

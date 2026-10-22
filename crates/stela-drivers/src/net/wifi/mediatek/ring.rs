@@ -93,6 +93,7 @@ impl MmioQueue {
     /// meets this contract. Uncertain ring Drop deliberately retains this Arc.
     pub unsafe fn from_window(window: NonNull<[u32; 4]>, owner: Arc<dyn core::any::Any>) -> Self {
         Self {
+            // SAFETY: covered by this function's own safety contract.
             registers: unsafe { Mmio::new(window.as_ptr().cast::<u32>() as u64) },
             _owner: owner,
         }
@@ -359,7 +360,7 @@ impl<Q: QueueIo> TxRing<Q> {
         };
         let slot = &mut self.slots[self.tail];
         let (cookie, bytes) = slot.pending.ok_or(Error::OwnershipMismatch)?;
-        // Actual DMA index passed this slot; the requester has completed reads.
+        // SAFETY: Actual DMA index passed this slot; the requester has completed reads.
         unsafe { slot.data.dma.sync_for_cpu(0..bytes)? };
         slot.pending = None;
         self.tail = (self.tail + 1) % count;

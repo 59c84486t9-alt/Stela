@@ -93,7 +93,7 @@ impl<Q: BootIo> RomBoot<'_, Q> {
                     waiting = true;
                     break;
                 }
-                // The exact descriptor's prior actual buffer completion
+                // SAFETY: The exact descriptor's prior actual buffer completion
                 // proves its device access ended. Other slots stay live.
                 unsafe {
                     self.free
@@ -103,7 +103,7 @@ impl<Q: BootIo> RomBoot<'_, Q> {
                 owner.completed = false;
             }
             let buffer = &self.buffers[index];
-            // Actual completed_buffer already transferred this payload to
+            // SAFETY: Actual completed_buffer already transferred this payload to
             // the CPU and copied it. Return it to DMA before its next pointer.
             unsafe {
                 buffer.allocation.ready_for_device()?;
@@ -118,6 +118,8 @@ impl<Q: BootIo> RomBoot<'_, Q> {
                 FreeDescriptor::Ax200(b) => b.as_slice(),
                 FreeDescriptor::Ax210(b) => b.as_slice(),
             };
+            // SAFETY: the slot's previous buffer completed above, so the device no longer
+            // reads this free-ring entry.
             unsafe {
                 self.free.write_owned(slot * stride, bytes)?;
             }

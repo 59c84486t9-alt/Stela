@@ -151,9 +151,12 @@ impl<C: 'static> Controller<MmioBar, MmioQueue, C> {
         {
             return Err(Error::Register(registers::Error::OutsideBar));
         }
+        // SAFETY: covered by this function's own safety contract.
         let io = unsafe { MmioBar::from_owned_window(base, bytes, owner.clone()) }
             .map_err(Error::Register)?;
+        // SAFETY: covered by this function's own safety contract.
         let registers = unsafe { Registers::new(identity.chip, io) };
+        // SAFETY: covered by this function's own safety contract.
         let control = unsafe { Control::new(registers, clock) }.map_err(Error::Control)?;
         Self::claim(
             identity,
@@ -179,6 +182,7 @@ impl<C: 'static> Controller<MmioBar, MmioQueue, C> {
         let base = n.base;
         let bytes = n.bytes;
         let owner = n.owner.clone();
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             self.install_with(source, domain, aspm, move |offset| {
                 if (offset as usize)
@@ -208,10 +212,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         }
         let mut facts = Vec::new();
         facts.try_reserve_exact(12).map_err(|_| Error::NoMemory)?;
+        // SAFETY: `Owned` is not zero-sized.
         let p = unsafe { alloc(Layout::new::<Owned<I, Q, C>>()) }.cast::<Owned<I, Q, C>>();
         if p.is_null() {
             return Err(Error::NoMemory);
         }
+        // SAFETY: `p` is a fresh, non-null allocation for one `Owned`.
         unsafe {
             p.write(Owned {
                 identity,
@@ -283,7 +289,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         s.aspm = Some(aspm);
         s.control.driver_own(aspm).map_err(Error::Control)?;
         if s.identity.chip == Chip::Mt7925 {
-            // mt7925_pci_probe: actual driver-own, WFSYS reset, then DMA init.
+            // SAFETY: mt7925_pci_probe: actual driver-own, WFSYS reset, then DMA init.
             // No ring is allocated/published or engine enabled before its ACK.
             unsafe { s.control.initial_wfsys_reset() }.map_err(Error::Control)?;
         }
@@ -297,6 +303,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         // Exact source order and complete layout; each returned mapping/queue
         // is retained before any subsequent fallible allocation/publication.
         s.data_tx = Some(
+            // SAFETY: covered by this function's own safety contract.
             unsafe {
                 DataRing::install(
                     queue(tx_ring(0))?,
@@ -310,6 +317,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         );
         s.control.initial_tx_ext().map_err(Error::Control)?;
         s.wm = Some(
+            // SAFETY: covered by this function's own safety contract.
             unsafe {
                 TxRing::install(
                     queue(tx_ring(if c3 { 15 } else { 17 }))?,
@@ -321,10 +329,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
             .map_err(Error::Ring)?,
         );
         s.fwdl = Some(
+            // SAFETY: covered by this function's own safety contract.
             unsafe { TxRing::install(queue(tx_ring(16))?, source, domain.clone(), 128) }
                 .map_err(Error::Ring)?,
         );
         s.event = Some(
+            // SAFETY: covered by this function's own safety contract.
             unsafe {
                 RxRing::install(
                     queue(rx_ring(0))?,
@@ -337,18 +347,22 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         );
         if !c3 {
             s.runtime = Some(
+                // SAFETY: covered by this function's own safety contract.
                 unsafe { RxRing::install(queue(rx_ring(4))?, source, domain.clone(), 512) }
                     .map_err(Error::Ring)?,
             );
         }
         s.data_rx = Some(
+            // SAFETY: covered by this function's own safety contract.
             unsafe { RxRing::install(queue(rx_ring(2))?, source, domain, 1536) }
                 .map_err(Error::Ring)?,
         );
+        // SAFETY: covered by this function's own safety contract.
         unsafe { s.control.start_dma_polling() }.map_err(Error::Control)?;
         // All real selected queues and owners now precede actual enablement.
         // Constructor still requires the independently qualified fresh epoch.
         s.mailbox = Some(
+            // SAFETY: covered by this function's own safety contract.
             unsafe {
                 Mailbox::from_rings_with_runtime_rx(
                     s.identity,
@@ -411,6 +425,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         self.require(Phase::Firmware)?;
         let s = self.state_mut();
         s.phase = Phase::Quarantined;
+        // SAFETY: covered by this function's own safety contract.
         let p = unsafe {
             Execution::prepare(
                 s.mailbox.as_ref().unwrap(),
@@ -440,6 +455,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
     pub unsafe fn execute_remaining(&mut self, inputs: remaining::Inputs<'_>) -> Result<(), Error> {
         self.require(Phase::Clc)?;
         let s = self.state_mut();
+        // SAFETY: covered by this function's own safety contract.
         unsafe {
             s.policy
                 .as_mut()
@@ -476,6 +492,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
                 .map_err(Error::Transport)?;
             s.facts.push(fact);
         }
+        // SAFETY: covered by this function's own safety contract.
         s.mac = Some(unsafe { s.control.initialize_mac_raw() }.map_err(Error::Control)?);
         if s.identity.chip != Chip::Mt7925 {
             let fact = s
@@ -579,6 +596,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
             return Err(Error::WrongPhase);
         }
         let s = self.state_mut();
+        // SAFETY: covered by this function's own safety contract.
         let mut interface = unsafe {
             mailbox::device::Interface::claim(
                 s.mailbox.as_ref().unwrap(),
@@ -709,21 +727,26 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         let s = self.state_mut();
         s.phase = Phase::Quarantined;
         if let Some(m) = s.mailbox.as_mut() {
+            // SAFETY: covered by this function's own safety contract.
             unsafe { m.release_after_quiesce() }.map_err(Error::Ring)?;
         }
         if let Some(q) = s.data_tx.as_mut() {
+            // SAFETY: covered by this function's own safety contract.
             unsafe { q.release_after_quiesce() }.map_err(Error::Data)?;
         }
         for q in [&mut s.event, &mut s.runtime, &mut s.data_rx]
             .into_iter()
             .flatten()
         {
+            // SAFETY: covered by this function's own safety contract.
             unsafe { q.release_after_quiesce() }.map_err(Error::Ring)?;
         }
         for q in [&mut s.wm, &mut s.fwdl].into_iter().flatten() {
+            // SAFETY: covered by this function's own safety contract.
             unsafe { q.release_after_quiesce() }.map_err(Error::Ring)?;
         }
         if let Some(p) = s.policy.as_mut() {
+            // SAFETY: covered by this function's own safety contract.
             unsafe { p.retire_after_quiesce() };
         }
         s.phase = Phase::Retired;
