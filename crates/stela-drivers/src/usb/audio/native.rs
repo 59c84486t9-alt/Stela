@@ -174,6 +174,7 @@ mod tests {
                 5,
                 halted,
             );
+            shared.borrow_mut().qualify_iso_test_model(0x1022, 0x15b6);
             let mut native = Native {
                 shared: shared.clone(),
                 slot: 1,
@@ -187,12 +188,21 @@ mod tests {
                 interval: 4,
                 companion: None,
             };
+            let refused = BlockError::Unsupported("xHCI endpoint cancellation failed");
+            assert_eq!(
+                shared.borrow_mut().preflight_endpoints(1, &[ep]),
+                Err(refused.clone())
+            );
             let before = memory.clone();
             assert!(native.configure(Direction::Playback, &[ep]).is_err());
             assert!(native.playback.endpoints.is_empty());
             // Cleanup of an unstaged candidate is inert; the pre-existing TD
             // cannot be cancelled, poisoned or dropped by the audio owner.
             native.deconfigure(Direction::Playback, &[ep]).unwrap();
+            assert_eq!(
+                shared.borrow_mut().preflight_endpoints(1, &[ep]),
+                Err(refused)
+            );
             assert_eq!(memory, before);
         }
     }
