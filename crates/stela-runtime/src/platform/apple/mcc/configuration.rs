@@ -109,7 +109,7 @@ mod tests {
             }
         }
         let mut pins = InterruptLatch::new();
-        let mut access = Access::new(17, 0, &mut pins);
+        let mut access = Access::new(3, 17, &mut pins);
         let mut saved = Vec::new();
         for channel in 0..16 {
             let address = BASE
