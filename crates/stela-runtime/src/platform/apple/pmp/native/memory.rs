@@ -285,6 +285,15 @@ impl<B: Backend> Client<B> {
     pub fn backend(&self) -> &B {
         &self.backend
     }
+    pub(super) fn owns(&self, owner: &Rc<()>) -> bool {
+        Rc::ptr_eq(&self.claim.owner, owner)
+    }
+    pub(super) fn fresh(&self) -> bool {
+        self.serial == 0
+    }
+    pub(super) fn mapping(&mut self, allocation: &Allocation) -> Result<&mut B::Mapping, Error> {
+        self.usable(allocation, 0, 0)
+    }
     fn usable(
         &mut self,
         allocation: &Allocation,

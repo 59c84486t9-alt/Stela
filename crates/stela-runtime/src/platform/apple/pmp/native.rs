@@ -11,6 +11,7 @@ use core::cell::Cell;
 
 pub mod memory;
 pub mod publication;
+pub mod registry;
 mod transport;
 pub use publication::Target as PublicationTarget;
 
@@ -213,6 +214,7 @@ pub struct Owner<B> {
     publisher_epoch: Option<Rc<Cell<bool>>>,
     service_alive: Rc<Cell<bool>>,
     memory_claimed: bool,
+    registry_claimed: bool,
 }
 impl<B: Resources> Owner<B> {
     /// `selected_ids` is the original pm-ptd-ranges array, not range ordinals or
@@ -273,6 +275,7 @@ impl<B: Resources> Owner<B> {
             publisher_epoch: None,
             service_alive: Rc::new(Cell::new(true)),
             memory_claimed: false,
+            registry_claimed: false,
         })
     }
     /// The original class1 callback/mutex slot belongs to this actual native
@@ -284,6 +287,20 @@ impl<B: Resources> Owner<B> {
         }
         self.memory_claimed = true;
         Ok(memory::Claim::new(
+            self.identity.clone(),
+            self.service_alive.clone(),
+        ))
+    }
+    /// Native class3 waiter and class4 unsolicited callback share this retained
+    /// registry owner, but are distinct original endpoint callback slots.
+    pub fn claim_registry_services(&mut self) -> Result<registry::Claim, Error> {
+        if self.registry_claimed {
+            return Err(Error::Contract(
+                "PMP registry class slots are already admitted",
+            ));
+        }
+        self.registry_claimed = true;
+        Ok(registry::Claim::new(
             self.identity.clone(),
             self.service_alive.clone(),
         ))
@@ -905,6 +922,8 @@ mod tests {
         let mut owner = Owner::initialized(local.clone(), IDS, backend).unwrap();
         let memory = owner.claim_memory_services().unwrap();
         assert!(owner.claim_memory_services().is_err());
+        let registry = owner.claim_registry_services().unwrap();
+        assert!(owner.claim_registry_services().is_err());
         let mut latch = InterruptLatch::new();
         owner.begin_startup().unwrap();
         step(&mut owner, &mut latch, 1).unwrap();
@@ -924,6 +943,7 @@ mod tests {
         step(&mut owner, &mut latch, 3).unwrap();
         assert_eq!(owner.phase(), Phase::Dormant);
         assert!(memory.check().is_ok());
+        assert!(registry.check().is_ok());
         assert_eq!(local.bank().requests().len(), requests);
         assert_eq!(local.bank().requests(), prefix);
         assert!(
@@ -952,6 +972,7 @@ mod tests {
         assert!(memory.check().is_ok());
         drop(owner);
         assert!(memory.check().is_err());
+        assert!(registry.check().is_err());
         drop(memory);
         assert!(Owner::initialized(local, IDS, Backend::new()).is_err());
     }
@@ -976,6 +997,8 @@ mod tests {
         let mut first = Owner::initialized(local.clone(), IDS, Backend::new()).unwrap();
         drop(first.claim_memory_services().unwrap());
         assert!(first.claim_memory_services().is_err());
+        drop(first.claim_registry_services().unwrap());
+        assert!(first.claim_registry_services().is_err());
         assert!(Owner::initialized(local.clone(), IDS, Backend::new()).is_err());
         let mut second = Owner::initialized(self::local(), IDS, Backend::new()).unwrap();
         let mut latch = InterruptLatch::new();
