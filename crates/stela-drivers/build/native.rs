@@ -143,6 +143,7 @@ const X86_UAPI: &str = "src/gpu/common/linux/arch/x86/include/uapi";
 impl Linux {
     pub fn new() -> Self {
         require_sources();
+        additions(Path::new(COMPAT));
         let wrappers = out_dir().join("linux-asm");
         // As Kbuild does, each mandatory asm header that the arch does not
         // provide wraps asm-generic's. Stela's arch headers are compat's.
@@ -188,12 +189,11 @@ impl Linux {
 
     /// Kbuild's definitions, flags and forced includes, and system include
     /// directories so upstream code keeps Linux's warning profile rather than
-    /// Stela's. `compat/overlay.yaml` puts each shadow in place of the
-    /// upstream header it replaces, however a source names it. `generated`
-    /// holds headers a driver's build generates and `drivers` its upstream
-    /// directories. Stela's arch headers in `compat/asm` and the generated
-    /// wrappers stand for Linux's arch tree ahead of its `include` tree, and
-    /// the x86 uapi headers and their wrappers ahead of `include/uapi`.
+    /// Stela's. `generated` holds headers a driver's build generates and
+    /// `drivers` its upstream directories. Stela's arch headers in
+    /// `compat/asm` and the generated wrappers stand for Linux's arch tree
+    /// ahead of its `include` tree, and the x86 uapi headers and their
+    /// wrappers ahead of `include/uapi`.
     pub fn apply(
         &self,
         build: &mut cc::Build,
@@ -204,11 +204,7 @@ impl Linux {
         // As Kbuild builds, no headers outside Linux's trees: neither the
         // host's C library nor the compiler's own. Stela's C code gets the C
         // headers it uses from `compat`, over Linux's types.
-        build
-            .flag("-nostdinc")
-            .flag("-ivfsoverlay")
-            .flag(format!("{COMPAT}/overlay.yaml"))
-            .define("__KERNEL__", None);
+        build.flag("-nostdinc").define("__KERNEL__", None);
         for flag in [
             "-fms-extensions",
             "-fno-strict-aliasing",
@@ -235,8 +231,8 @@ impl Linux {
             .iter()
             .map(|driver| PathBuf::from(format!("{GPU}/{driver}")))
             .collect::<Vec<_>>();
-        // The overlay hides shadows from dependency tracking, so every source
-        // tree the environment builds from is an input.
+        // Cargo sees no included header, so every source tree the
+        // environment builds from is an input.
         for directory in drivers.iter().map(|path| path.as_path()).chain([
             Path::new(COMPAT),
             Path::new(INCLUDE),
@@ -258,6 +254,29 @@ impl Linux {
             ])
         {
             build.flag("-isystem").flag(directory);
+        }
+    }
+}
+
+/// Every header in `compat` adds to Linux's: none stands in for one of
+/// `include/` by sharing its path, so upstream code always compiles against
+/// Linux's own headers. Its `asm/` is Stela's arch, which stands in for x86's.
+fn additions(directory: &Path) {
+    for entry in fs::read_dir(directory).expect("read the kernel-API directory") {
+        let path = entry.expect("readable directory entry").path();
+        let header = path.strip_prefix(COMPAT).expect("a kernel-API path");
+        if path.is_dir() {
+            if header != Path::new("asm") {
+                additions(&path);
+            }
+            continue;
+        }
+        for tree in [INCLUDE, &format!("{INCLUDE}/uapi")] {
+            assert!(
+                !Path::new(tree).join(header).exists(),
+                "{COMPAT}/{} would replace Linux's in {tree}",
+                header.display()
+            );
         }
     }
 }

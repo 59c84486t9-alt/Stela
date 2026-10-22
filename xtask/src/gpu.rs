@@ -8,7 +8,6 @@ pub mod fetch;
 mod macos;
 mod mesa;
 mod nvidia;
-pub mod shadows;
 mod support;
 
 /// An explicit input-owner qualification, never a physical GPU capability.
@@ -47,13 +46,6 @@ pub enum Command {
     },
     /// Write each upstream checkout's commits back to its patch series.
     Export,
-    /// Check that every Linux-environment shadow is mapped onto the upstream
-    /// header it replaces and that none of those headers changed unreviewed.
-    Shadows {
-        /// Record the current upstream headers as reviewed.
-        #[arg(long)]
-        update: bool,
-    },
     /// Build the IOKit kernel helper and separate user-space Metal library
     /// objects for arm64e, arm64 and x86-64. No driver is installed or loaded.
     Macos,
@@ -112,7 +104,6 @@ pub fn run(command: Command) -> Result<()> {
     match command {
         Command::Fetch { force } => fetch::fetch(force),
         Command::Export => fetch::export(),
-        Command::Shadows { update } => shadows::check(update),
         Command::Macos => macos::build(),
         Command::Compilers {
             jobs,
