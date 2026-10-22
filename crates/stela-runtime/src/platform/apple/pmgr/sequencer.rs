@@ -14,6 +14,7 @@
 use crate::platform::apple::bus::Width;
 use alloc::{rc::Rc, vec::Vec};
 
+pub mod delay;
 pub mod poll;
 
 const SRAM_ALIGNMENT: u64 = 32;
@@ -33,6 +34,14 @@ const WIDE_PADDING: u32 = 0xdead_beef;
 pub enum AddressFormat {
     HighWord,
     Compact,
+}
+
+/// Non-mutating dispatch classification, not packet or trigger admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketKind {
+    Write,
+    Poll,
+    Delay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +70,10 @@ pub enum Error {
     UnqualifiedPollCondition(u8),
     UnqualifiedPollTimeout(u16),
     CounterExhausted,
+    ExpectedDelay,
+    DelayEncoding,
+    RegressedCycles,
+    UnqualifiedClockPhase,
 }
 
 /// One physical store, without a claim that its target accepts that access.
@@ -136,6 +149,7 @@ pub struct PacketCursor {
     pc: usize,
     packet: Option<Packet>,
     poll: Option<poll::Packet>,
+    delay: Option<delay::Packet>,
     in_flight: Option<InFlight>,
     uncertain: Option<PhysicalWrite>,
     uncertain_read: Option<poll::PhysicalRead>,
@@ -187,6 +201,22 @@ impl PacketCursor {
             .as_ref()
             .map(|sram| sram.base + self.pc as u64 * 4)
     }
+    pub fn packet_kind(&self) -> Result<PacketKind, Error> {
+        let sram = self.sram.as_ref().ok_or(Error::UnknownSram)?;
+        let header = *sram.words.get(self.pc).ok_or(Error::TruncatedPacket)?;
+        if header == 0 {
+            return Err(Error::UnqualifiedRetirement);
+        }
+        if header & 1 != 0 {
+            Ok(PacketKind::Write)
+        } else if header & 0x1f == 2 {
+            Ok(PacketKind::Poll)
+        } else if header & 0x3f == 4 {
+            Ok(PacketKind::Delay)
+        } else {
+            Err(Error::UnqualifiedInstruction(header))
+        }
+    }
 
     pub fn committed_writes(&self) -> u64 {
         self.committed_writes
@@ -216,6 +246,9 @@ impl PacketCursor {
         }
         if self.suspended {
             return Err(Error::Suspended);
+        }
+        if self.delay.is_some() {
+            return Err(Error::ExpectedWrite);
         }
         if self.poll.is_some() {
             return Err(Error::ExpectedWrite);

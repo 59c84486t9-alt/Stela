@@ -79,6 +79,9 @@ impl PacketCursor {
         if self.suspended {
             return Err(Error::Suspended);
         }
+        if self.delay.is_some() {
+            return Err(Error::ExpectedRead);
+        }
         if self.packet.is_some() {
             return Err(Error::ExpectedRead);
         }

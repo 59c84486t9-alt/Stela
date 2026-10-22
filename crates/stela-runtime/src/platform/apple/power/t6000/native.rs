@@ -50,6 +50,9 @@ pub enum Error {
     Paused,
     EffectsOwned,
     Cursor(crate::platform::apple::pmgr::sequencer::Error),
+    Clock(super::clock::Error),
+    ClockUnbound,
+    ClockBound,
 }
 impl Error {
     fn reason(self) -> &'static str {
@@ -76,6 +79,9 @@ impl Error {
             }
             Self::EffectsOwned => "T6000 native packet effects already have an exclusive owner",
             Self::Cursor(_) => "T6000 native packet input is unqualified",
+            Self::Clock(error) => error.reason(),
+            Self::ClockUnbound => "T6000 native packet clock inputs/phase are not bound",
+            Self::ClockBound => "T6000 native packet clock already has an exclusive owner",
         }
     }
 }
@@ -200,6 +206,7 @@ pub(super) struct State {
     initialization: Option<SramInitialization>,
     activation_inputs: Vec<ActivationInput>,
     packet_effects_owned: bool,
+    pub(super) clock: Option<super::clock::phase::Clock>,
 }
 impl State {
     pub(super) fn new(handoff: Handoff) -> Result<Self, Error> {
@@ -223,6 +230,7 @@ impl State {
             initialization: None,
             activation_inputs: Vec::new(),
             packet_effects_owned: false,
+            clock: None,
         };
         match handoff {
             Handoff::Unknown => {}
@@ -552,6 +560,16 @@ impl View {
 }
 impl Lifecycle for View {
     fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        if let Some(clock) = self
+            .controller
+            .0
+            .borrow()
+            .native
+            .as_ref()
+            .and_then(|native| native.clock.as_ref())
+        {
+            clock.cycles().map_err(super::clock::Error::reason)?;
+        }
         if proposed.reset || (!proposed.powered && !proposed.retention) {
             return Err(
                 "T6000 native reset/nonretained loss and pending-work cancellation are unqualified",
@@ -559,9 +577,12 @@ impl Lifecycle for View {
         }
         Ok(())
     }
-    fn set_lifecycle(&mut self, proposed: LifecycleState, _: &mut Access<'_>) {
+    fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
         assert!(self.check_lifecycle(proposed).is_ok());
-        self.controller.0.borrow_mut().lifecycle = proposed;
+        self.controller
+            .0
+            .borrow_mut()
+            .change_lifecycle(proposed, access.now);
     }
 }
 impl MmioDevice for View {
@@ -1038,5 +1059,247 @@ mod tests {
         drop(effects);
         assert_eq!(memory.write_checked(entry.pc, &[0; 4]), Err(Error::Pending));
         assert!(sink.take_aic_inputs().is_empty());
+    }
+
+    #[test]
+    fn actual_sram_delay_uses_shared_native_clock_with_distinct_quiesce_and_supply_pauses() {
+        use crate::platform::apple::{
+            pmgr::sequencer::{self, AddressFormat, RouteOutcome, delay::Progress},
+            power::t6000::clock,
+        };
+        for pause in 0..3 {
+            let owner = owner(Handoff::StelaEmpty {
+                sram: SramInitialization::Unknown,
+            });
+            let (mut bus, controls, _) = mount(&owner);
+            let mut pins = InterruptLatch::new();
+            let mut access = Access::new(0, 0, &mut pins);
+            // Source-format supplied test program: actual GPCE request, wait
+            // three native cycles, then end. No request or end ACK follows.
+            let words = [0x28e09801, 0, 0, 15, 4 | (3 << 6), 0];
+            let bytes: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+            let mut supplied = images();
+            let image = supplied
+                .iter_mut()
+                .find(|image| image.sequence == 12)
+                .unwrap();
+            image.counted_words = words.len() as u32 - 1;
+            image.bytes = bytes.clone();
+            let mut install = t6000::programs(0x20, Some(0), supplied).unwrap();
+            while let Some(claim) = install.begin().unwrap() {
+                let outcome = match install.dispatch(&claim).unwrap() {
+                    Action::Read { address, width } => {
+                        Outcome::<MmioError>::Read(bus.read(address, width, &mut access).unwrap())
+                    }
+                    Action::Write(write) => {
+                        bus.write(write.address, write.width, write.value, &mut access)
+                            .unwrap();
+                        Outcome::Written
+                    }
+                    Action::DmbSy => panic!("publication has no barrier"),
+                };
+                install.finish(&claim, outcome).unwrap();
+            }
+            let mut effects = owner
+                .native_packet_effects(2, 0, bytes.len(), AddressFormat::HighWord)
+                .unwrap();
+            assert_eq!(effects.advance_delay(0), Err(Error::ClockUnbound));
+            assert_eq!(effects.packet_kind(), Ok(sequencer::PacketKind::Write));
+            let clock = clock::Image::new(clock::Input::DeclaredStela(
+                clock::Register::ALL
+                    .into_iter()
+                    .map(|register| clock::Observation {
+                        register,
+                        value: match register {
+                            clock::Register::Pll0Control => (1 << 31) | (1 << 27),
+                            clock::Register::Selection => 1 << 31,
+                            _ => 0,
+                        },
+                        known: u32::MAX,
+                    })
+                    .collect(),
+            ))
+            .unwrap();
+            assert_eq!(
+                owner.bind_native_clock(clock.clone(), clock::Phase::Unknown),
+                Err(Error::Clock(clock::Error::UnknownPhase))
+            );
+            owner
+                .bind_native_clock(
+                    clock.clone(),
+                    clock::Phase::DeclaredStela {
+                        at: 0,
+                        cycles: 0,
+                        fraction: 0,
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                owner.bind_native_clock(
+                    clock,
+                    clock::Phase::DeclaredStela {
+                        at: 0,
+                        cycles: 0,
+                        fraction: 0
+                    }
+                ),
+                Err(Error::ClockBound)
+            );
+            let claim = effects.begin_write().unwrap();
+            let write = effects.dispatch_write(&claim).unwrap();
+            bus.write(write.address, write.width, write.value, &mut access)
+                .unwrap();
+            effects
+                .finish_write::<()>(&claim, RouteOutcome::Committed)
+                .unwrap();
+            assert_eq!(owner.requests().len(), 1);
+            assert_eq!(effects.packet_kind(), Ok(sequencer::PacketKind::Delay));
+            assert_eq!(
+                effects.advance_delay(0),
+                Ok(Progress {
+                    remaining: 3,
+                    complete: false
+                })
+            );
+            assert_eq!(
+                effects.advance_delay(732),
+                Ok(Progress {
+                    remaining: 3,
+                    complete: false
+                })
+            );
+            assert_eq!(effects.delay_deadline(), Ok(Some(2198)));
+            assert_eq!(owner.native_clock_observations().unwrap().frequency, 32768);
+            let mut paused = LIVE;
+            match pause {
+                0 => paused.clocked = false,
+                1 => paused.powered = false,
+                _ => paused.quiesced = true,
+            };
+            access.now = 732;
+            bus.device_mut::<View>(controls)
+                .unwrap()
+                .set_lifecycle(paused, &mut access);
+            assert_eq!(
+                effects.advance_delay(1732),
+                Err(Error::Cursor(sequencer::Error::Suspended))
+            );
+            assert_eq!(effects.delay_deadline(), Ok(None));
+            let clock = owner.native_clock_observations().unwrap();
+            assert_eq!(clock.cycles, if pause == 2 { 2 } else { 0 });
+            access.now = 1732;
+            bus.device_mut::<View>(controls)
+                .unwrap()
+                .set_lifecycle(LIVE, &mut access);
+            let resume = effects.advance_delay(1732).unwrap();
+            assert_eq!(resume.remaining, if pause == 2 { 1 } else { 3 });
+            let finish = if pause == 2 { 2198 } else { 3198 };
+            assert_eq!(effects.delay_deadline(), Ok(Some(finish)));
+            assert_eq!(
+                effects.advance_delay(finish - 1),
+                Ok(Progress {
+                    remaining: 1,
+                    complete: false
+                })
+            );
+            assert_eq!(
+                effects.advance_delay(finish),
+                Ok(Progress {
+                    remaining: 0,
+                    complete: true
+                })
+            );
+            assert_eq!(
+                effects.advance_delay(finish),
+                Err(Error::Cursor(sequencer::Error::UnqualifiedRetirement))
+            );
+            assert_eq!(owner.requests().len(), 1);
+            assert_eq!(effects.committed_writes(), 1);
+            assert_eq!(
+                effects.packet_kind(),
+                Err(sequencer::Error::UnqualifiedRetirement)
+            );
+            assert!(owner.native_observations().unwrap().packet_effects_owned);
+            assert!(
+                bus.device_mut::<View>(controls)
+                    .unwrap()
+                    .check_lifecycle(LifecycleState {
+                        reset: true,
+                        ..LIVE
+                    })
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn clock_adoption_cannot_backdate_over_prior_rail_edges_or_erase_time_faults() {
+        use crate::platform::apple::power::t6000::clock;
+        let owner = owner(Handoff::StelaEmpty {
+            sram: SramInitialization::Unknown,
+        });
+        let mut view = owner.native_controls().unwrap();
+        let mut pins = InterruptLatch::new();
+        view.set_lifecycle(
+            LifecycleState {
+                clocked: false,
+                ..LIVE
+            },
+            &mut Access::new(0, 100, &mut pins),
+        );
+        let image = clock::Image::new(clock::Input::DeclaredStela(
+            clock::Register::ALL
+                .into_iter()
+                .map(|register| clock::Observation {
+                    register,
+                    value: 0,
+                    known: u32::MAX,
+                })
+                .collect(),
+        ))
+        .unwrap();
+        assert_eq!(
+            owner.bind_native_clock(
+                image.clone(),
+                clock::Phase::DeclaredStela {
+                    at: 0,
+                    cycles: 0,
+                    fraction: 0
+                }
+            ),
+            Err(Error::Clock(clock::Error::PhaseHistory))
+        );
+        owner
+            .bind_native_clock(
+                image.clone(),
+                clock::Phase::DeclaredStela {
+                    at: 100,
+                    cycles: 0,
+                    fraction: 0,
+                },
+            )
+            .unwrap();
+        view.set_lifecycle(LIVE, &mut Access::new(0, 99, &mut pins));
+        let observed = owner.native_clock_observations().unwrap();
+        assert_eq!(observed.fault, Some(clock::Error::Regressed));
+        assert_eq!((observed.at, observed.cycles), (100, 0));
+        assert!(
+            view.check_lifecycle(LifecycleState {
+                quiesced: true,
+                ..LIVE
+            })
+            .is_err()
+        );
+        assert_eq!(
+            owner.bind_native_clock(
+                image,
+                clock::Phase::DeclaredStela {
+                    at: 100,
+                    cycles: 0,
+                    fraction: 0
+                }
+            ),
+            Err(Error::ClockBound)
+        );
     }
 }

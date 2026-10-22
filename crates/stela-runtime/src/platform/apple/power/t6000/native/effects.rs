@@ -5,7 +5,7 @@
 //! There is no supplied arbitrary PC, completion setter or end-retirement API.
 use super::{Controller, Error};
 use crate::platform::apple::pmgr::sequencer::{
-    self, AddressFormat, PacketCursor, PhysicalWrite, RouteOutcome, WriteClaim, poll,
+    self, AddressFormat, PacketCursor, PhysicalWrite, RouteOutcome, WriteClaim, delay, poll,
 };
 use alloc::vec;
 
@@ -14,6 +14,47 @@ pub struct Effects {
     cursor: PacketCursor,
 }
 impl Controller {
+    /// Bind complete actual clock inputs and a separately qualified phase to
+    /// this same retained controller. No later call can substitute that clock.
+    pub fn bind_native_clock(
+        &self,
+        image: crate::platform::apple::power::t6000::clock::Image,
+        phase: crate::platform::apple::power::t6000::clock::Phase,
+    ) -> Result<(), Error> {
+        let mut state = self.0.borrow_mut();
+        use crate::platform::apple::power::t6000::clock::{Error as ClockError, Phase};
+        let at = match phase {
+            Phase::Unknown => None,
+            Phase::Captured { at, .. } | Phase::DeclaredStela { at, .. } => Some(at),
+        };
+        if at
+            .zip(state.clock_edge_at)
+            .is_some_and(|(at, edge)| at < edge)
+        {
+            return Err(Error::Clock(ClockError::PhaseHistory));
+        }
+        let native = state.native.as_mut().ok_or(Error::Unmounted)?;
+        if native.clock.is_some() {
+            return Err(Error::ClockBound);
+        }
+        let clock = crate::platform::apple::power::t6000::clock::phase::Clock::new(image, phase)
+            .map_err(Error::Clock)?;
+        native.clock = Some(clock);
+        Ok(())
+    }
+    pub fn native_clock_observations(
+        &self,
+    ) -> Result<crate::platform::apple::power::t6000::clock::Snapshot, Error> {
+        self.0
+            .borrow()
+            .native
+            .as_ref()
+            .ok_or(Error::Unmounted)?
+            .clock
+            .as_ref()
+            .map(|clock| clock.snapshot())
+            .ok_or(Error::ClockUnbound)
+    }
     /// Claim packet-effect ownership at an actual published group/slot, using
     /// its checked pointer and a supplied, qualified emitted image extent and
     /// address format. No request is selected/acknowledged by this operation.
@@ -57,12 +98,24 @@ impl Controller {
     }
 }
 impl Effects {
-    fn refresh_pause(&mut self) {
-        self.cursor
-            .set_suspended(self.controller.0.borrow().paused());
+    fn refresh_pause(&mut self) -> Result<(), sequencer::Error> {
+        let state = self.controller.0.borrow();
+        if state
+            .native
+            .as_ref()
+            .and_then(|native| native.clock.as_ref())
+            .is_some_and(|clock| clock.cycles().is_err())
+        {
+            return Err(sequencer::Error::UnqualifiedClockPhase);
+        }
+        self.cursor.set_suspended(state.paused());
+        Ok(())
     }
     pub fn packet_pc(&self) -> Option<u64> {
         self.cursor.packet_pc()
+    }
+    pub fn packet_kind(&self) -> Result<sequencer::PacketKind, sequencer::Error> {
+        self.cursor.packet_kind()
     }
     pub fn committed_writes(&self) -> u64 {
         self.cursor.committed_writes()
@@ -76,6 +129,54 @@ impl Effects {
     pub fn last_poll_value(&self) -> Option<u64> {
         self.cursor.last_poll_value()
     }
+    pub fn pending_delay(&self) -> Option<u32> {
+        self.cursor.pending_delay()
+    }
+    /// Earliest actual system-counter sample for the current delay. Unknown
+    /// clocks return an error; a stopped clock or suspended service has no
+    /// runnable deadline. This does not advance time or execute the packet.
+    pub fn delay_deadline(&self) -> Result<Option<u64>, Error> {
+        let state = self.controller.0.borrow();
+        if state.paused() {
+            return Ok(None);
+        }
+        let clock = state
+            .native
+            .as_ref()
+            .ok_or(Error::Unmounted)?
+            .clock
+            .as_ref()
+            .ok_or(Error::ClockUnbound)?;
+        let Some(remaining) = self
+            .cursor
+            .remaining_delay_at(clock.cycles().map_err(Error::Clock)?)
+            .map_err(Error::Cursor)?
+        else {
+            return Ok(None);
+        };
+        clock.deadline(remaining).map_err(Error::Clock)
+    }
+    /// Join actual 24MHz system time to the separately supplied native clock
+    /// frequency/phase. Rail/clock pauses are settled at their real lifecycle
+    /// edges. Quiesce blocks instruction service but does not turn that clock
+    /// off. A completed wait advances only this packet, never native retirement.
+    pub fn advance_delay(&mut self, now: u64) -> Result<delay::Progress, Error> {
+        let mut state = self.controller.0.borrow_mut();
+        let running = state.clock_running();
+        let paused = state.paused();
+        let cycles = state
+            .native
+            .as_mut()
+            .ok_or(Error::Unmounted)?
+            .clock
+            .as_mut()
+            .ok_or(Error::ClockUnbound)?
+            .observe(now, running)
+            .map_err(Error::Clock)?;
+        drop(state);
+        self.cursor.set_suspended(paused);
+        self.cursor.advance_delay(cycles).map_err(Error::Cursor)
+    }
     pub fn uncertain_write(&self) -> Option<PhysicalWrite> {
         self.cursor.uncertain_write()
     }
@@ -83,14 +184,14 @@ impl Effects {
         self.cursor.uncertain_read()
     }
     pub fn begin_write(&mut self) -> Result<WriteClaim, sequencer::Error> {
-        self.refresh_pause();
+        self.refresh_pause()?;
         self.cursor.begin_write()
     }
     pub fn dispatch_write(
         &mut self,
         claim: &WriteClaim,
     ) -> Result<PhysicalWrite, sequencer::Error> {
-        self.refresh_pause();
+        self.refresh_pause()?;
         self.cursor.dispatch_write(claim)
     }
     pub fn cancel_write(&mut self, claim: &WriteClaim) -> Result<(), sequencer::Error> {
@@ -104,14 +205,14 @@ impl Effects {
         self.cursor.finish_write(claim, outcome)
     }
     pub fn begin_read(&mut self) -> Result<poll::ReadClaim, sequencer::Error> {
-        self.refresh_pause();
+        self.refresh_pause()?;
         self.cursor.begin_read()
     }
     pub fn dispatch_read(
         &mut self,
         claim: &poll::ReadClaim,
     ) -> Result<poll::PhysicalRead, sequencer::Error> {
-        self.refresh_pause();
+        self.refresh_pause()?;
         self.cursor.dispatch_read(claim)
     }
     pub fn cancel_read(&mut self, claim: &poll::ReadClaim) -> Result<(), sequencer::Error> {

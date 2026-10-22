@@ -18,6 +18,7 @@ use super::super::bus::{
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
 
+pub mod clock;
 pub mod identity;
 pub mod native;
 
@@ -128,6 +129,7 @@ struct State {
     captured_pending: Vec<Observation>,
     serial: u64,
     native: Option<native::State>,
+    clock_edge_at: Option<u64>,
 }
 impl State {
     fn accessible(&self) -> Result<(), &'static str> {
@@ -141,6 +143,25 @@ impl State {
     }
     fn paused(&self) -> bool {
         !self.lifecycle.powered || !self.lifecycle.clocked || self.lifecycle.quiesced
+    }
+    fn clock_running(&self) -> bool {
+        self.lifecycle.powered && self.lifecycle.clocked && !self.lifecycle.reset
+    }
+    fn change_lifecycle(&mut self, proposed: LifecycleState, now: u64) {
+        let running = self.clock_running();
+        if let Some(clock) = self
+            .native
+            .as_mut()
+            .and_then(|native| native.clock.as_mut())
+        {
+            // Real system time is monotonic. If a caller violates that boundary,
+            // the retained clock quarantines itself; never silently rebase it.
+            let _ = clock.observe(now, running);
+        }
+        if running != (proposed.powered && proposed.clocked && !proposed.reset) {
+            self.clock_edge_at = Some(self.clock_edge_at.map_or(now, |prior| prior.max(now)));
+        }
+        self.lifecycle = proposed;
     }
 }
 
@@ -181,6 +202,7 @@ impl Controller {
             captured_pending: Vec::new(),
             serial: 0,
             native: None,
+            clock_edge_at: None,
         };
         for observation in observations {
             let Some(instance) = state.geometry.get(usize::from(observation.instance)) else {
@@ -301,6 +323,16 @@ impl View {
 }
 impl Lifecycle for View {
     fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        if let Some(clock) = self
+            .controller
+            .0
+            .borrow()
+            .native
+            .as_ref()
+            .and_then(|native| native.clock.as_ref())
+        {
+            clock.cycles().map_err(clock::Error::reason)?;
+        }
         if proposed.reset || (!proposed.powered && !proposed.retention) {
             return Err(
                 "T6000 power physical reset/nonretained loss and native cancellation are unqualified",
@@ -308,9 +340,12 @@ impl Lifecycle for View {
         }
         Ok(())
     }
-    fn set_lifecycle(&mut self, proposed: LifecycleState, _: &mut Access<'_>) {
+    fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
         assert!(self.check_lifecycle(proposed).is_ok());
-        self.controller.0.borrow_mut().lifecycle = proposed;
+        self.controller
+            .0
+            .borrow_mut()
+            .change_lifecycle(proposed, access.now);
     }
 }
 impl MmioDevice for View {
