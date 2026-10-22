@@ -15,8 +15,10 @@
 //! vendor must report successful hardware key installation only after its real
 //! firmware acknowledgement, and verified integrity only from the applicable
 //! negotiated RX status. Unknown evidence is refused. No hardware replay flag
-//! bypasses the software check. Reordering, fragmentation, shared-PN A-MSDUs and
-//! protected management frames are explicitly unsupported by this first path.
+//! bypasses the software check. The separate complete-owned post-order group
+//! gate authenticates all constituents before one parent replay update. This
+//! does not implement grouping, BA/reordering, fragmentation, deaggregation or
+//! protected management frames; those boundaries remain explicit.
 
 use super::{Aggregation, frame::Mpdu};
 use crate::net::Mac;
@@ -24,6 +26,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
 
+pub mod aggregate;
 pub mod tx;
 pub use tx::{HostTxNonce, NonceOwner, TransmitSeed};
 
@@ -625,6 +628,19 @@ impl KeySlot {
     /// Validate one non-aggregated, non-fragmented protected data MPDU and
     /// consume its PN only after framing, key and integrity checks succeed.
     pub fn authorize<'a>(&mut self, mpdu: &'a Mpdu) -> Result<AuthenticatedData<'a>, Error> {
+        let checked = self.checked_mpdu(mpdu, false, None)?;
+        self.commit_receive(mpdu.header().tid.map_or(16, usize::from), checked.pn)?;
+        Ok(checked)
+    }
+
+    // Only the complete-owned group gate may permit aggregate framing or
+    // supply an actual authenticated parent's PN for an absent member group1.
+    fn checked_mpdu<'a>(
+        &self,
+        mpdu: &'a Mpdu,
+        aggregate: bool,
+        parent_pn: Option<PacketNumber>,
+    ) -> Result<AuthenticatedData<'a>, Error> {
         let key = self.installed().ok_or(Error::NoInstalledKey)?;
         let header = mpdu.header();
         if !header.protected() {
@@ -636,17 +652,13 @@ impl KeySlot {
         if header.fragmented() {
             return Err(Error::Unsupported("fragment replay/assembly"));
         }
-        if header.amsdu || mpdu.aggregation != Aggregation::default() {
+        if !aggregate && (header.amsdu || mpdu.aggregation != Aggregation::default()) {
             return Err(Error::Unsupported("aggregate replay/reordering"));
         }
         let status = mpdu.security;
-        if mpdu.monitor_only
-            || mpdu.fcs_error
-            || status.icv_error
-            || status.tkip_mic_error
+        if !valid_receive_observations(mpdu)
             || !status.decrypted
             || status.integrity != Integrity::Verified
-            || matches!(status.hardware_replay, HardwareReplay::Failed { .. })
         {
             return Err(Error::Integrity);
         }
@@ -655,7 +667,7 @@ impl KeySlot {
         }
         let mut start = header.length;
         let pn = if status.iv_stripped {
-            status.pn.ok_or(Error::MissingPacketNumber)?
+            status.pn.or(parent_pn).ok_or(Error::MissingPacketNumber)?
         } else {
             let (pn, index) =
                 PacketNumber::from_header(mpdu.bytes().get(start..).ok_or(Error::Truncated)?)?;
@@ -679,7 +691,15 @@ impl KeySlot {
             .checked_sub(mic)
             .filter(|end| *end >= start)
             .ok_or(Error::Truncated)?;
-        let queue = header.tid.map_or(16, usize::from);
+        Ok(AuthenticatedData {
+            mpdu,
+            start,
+            end,
+            key,
+            pn,
+        })
+    }
+    fn commit_receive(&mut self, queue: usize, pn: PacketNumber) -> Result<(), Error> {
         if pn.0 <= self.rx_pn[queue] {
             return Err(Error::Replay);
         }
@@ -689,14 +709,16 @@ impl KeySlot {
         {
             receive.floor[queue] = pn.0;
         }
-        Ok(AuthenticatedData {
-            mpdu,
-            start,
-            end,
-            key,
-            pn,
-        })
+        Ok(())
     }
+}
+
+fn valid_receive_observations(mpdu: &Mpdu) -> bool {
+    !mpdu.monitor_only
+        && !mpdu.fcs_error
+        && !mpdu.security.icv_error
+        && !mpdu.security.tkip_mic_error
+        && !matches!(mpdu.security.hardware_replay, HardwareReplay::Failed { .. })
 }
 
 /// Integrity-checked plaintext for this key/PN. Station/BSSID/port policy must

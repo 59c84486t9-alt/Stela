@@ -823,3 +823,5 @@ fn transmitted_bssid_retains_outer_bounds_and_refuses_profile_selection() {
 }
 
 mod regulatory;
+
+mod aggregate;

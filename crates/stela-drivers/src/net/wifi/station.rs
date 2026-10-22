@@ -21,6 +21,7 @@ use crate::net::Mac;
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+mod aggregate;
 mod context;
 pub use context::{AssociationContext, AssociationIntent};
 pub mod data;
