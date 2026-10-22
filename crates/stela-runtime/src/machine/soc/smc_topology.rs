@@ -129,6 +129,9 @@ mod tests {
     use super::super::*;
     use super::*;
 
+    /// The J473AP SMC subtree: its wrapper and watchdog banks, the nub's
+    /// shared-page region and the `pKW4` functions other nodes route
+    /// through `smc-pmu`.
     #[test]
     fn smc_placement_reads_its_banks_region_and_function_keys() {
         use crate::machine::adt::encode;

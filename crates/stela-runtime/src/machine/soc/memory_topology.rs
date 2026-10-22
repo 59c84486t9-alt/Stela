@@ -426,6 +426,8 @@ mod tests {
         assert!(amcc.layout.groups[2].is_some() && amcc.layout.groups[3].is_none());
     }
 
+    /// The J473AP's `/arm-io/mcc` and `/arm-io/pmp` registers behind its one
+    /// AMCC aperture.
     #[test]
     fn an_mcc_places_its_cache_channels_and_ptd_bank() {
         use crate::machine::adt::encode;

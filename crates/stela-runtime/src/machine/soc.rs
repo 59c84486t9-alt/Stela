@@ -2535,14 +2535,6 @@ mod tests {
         assert!(models(ASC, |key| (key == "role").then_some(b"SMC\0".as_slice())));
     }
 
-    /// The census `sgx` layouts: T8112's `reg[1]` inside `reg[0]`, the
-    /// T6000's 1 MiB `reg[0]` with the registers in `reg[1]`, and the
-    /// T6020's longer `reg[1]` that holds the G14X core masks.
-
-    /// The J473AP SMC subtree: its wrapper and watchdog banks, the nub's
-    /// shared-page region and the `pKW4` functions other nodes route
-    /// through `smc-pmu`.
-
     #[test]
     #[ignore = "requires original 26A434 J314s DT through STELA_TEST_SPMI_DT"]
     fn original_j314s_spmi_parent_qualifies_all_seven_independent_resource_owners() {
@@ -3852,9 +3844,6 @@ mod tests {
             None
         );
     }
-
-    /// The J473AP's `/arm-io/mcc` and `/arm-io/pmp` registers behind its one
-    /// AMCC aperture.
 
     /// `/arm-io` children shaped like J514cAP's: the always-on PTD
     /// (phandle 0x127, one cell per notification) and a CLPC (its

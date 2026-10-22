@@ -222,6 +222,9 @@ mod tests {
         assert!(placed_on(true, true, 0x8103).is_err());
     }
 
+    /// The census `sgx` layouts: T8112's `reg[1]` inside `reg[0]`, the
+    /// T6000's 1 MiB `reg[0]` with the registers in `reg[1]`, and the
+    /// T6020's longer `reg[1]` that holds the G14X core masks.
     #[test]
     fn sgx_banks_place_the_registers_at_their_offsets_from_reg0() {
         use agx::generation::{G13X, G14G, G14X};
