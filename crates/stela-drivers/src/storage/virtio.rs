@@ -20,6 +20,22 @@ const FEATURE_READ_ONLY: u64 = 1 << 5;
 const FEATURE_BLOCK_SIZE: u64 = 1 << 6;
 const FEATURE_FLUSH: u64 = 1 << 9;
 
+/// Configuration space: capacity in sectors, and the logical block size.
+const CONFIG_CAPACITY: usize = 0x00;
+const CONFIG_BLOCK_SIZE: usize = 0x14;
+
+/// `virtio_blk_req`: type, reserved, sector, then the device's status byte
+/// after the data (virtio 1.2 §5.2.6).
+const REQUEST_HEADER: u32 = 16;
+const REQUEST_TYPE: usize = 0;
+const REQUEST_RESERVED: usize = 4;
+const REQUEST_SECTOR: usize = 8;
+const REQUEST_STATUS: usize = 16;
+/// A status byte the device has not written yet.
+const STATUS_PENDING: u8 = 0xff;
+/// Linux `VIRTIO_BLK_ID_BYTES`.
+const ID_BYTES: usize = 20;
+
 const REQUEST_IN: u32 = 0;
 const REQUEST_OUT: u32 = 1;
 const REQUEST_FLUSH: u32 = 4;
@@ -46,6 +62,9 @@ pub struct VirtioBlk {
     sectors_per_block: u64,
     identity: Identity,
     clock: Clock,
+    /// A request timed out and the device may still own its buffers; none
+    /// is reused until a reset this driver does not perform.
+    fault: Option<BlockError>,
 }
 
 impl VirtioBlk {
@@ -64,7 +83,7 @@ impl VirtioBlk {
 
         let block_size = match accepted & FEATURE_BLOCK_SIZE {
             0 => SECTOR as u32,
-            _ => device.read32(0x14),
+            _ => device.read32(CONFIG_BLOCK_SIZE),
         };
         if block_size < SECTOR as u32
             || !block_size.is_power_of_two()
@@ -93,10 +112,11 @@ impl VirtioBlk {
                 read_only: accepted & FEATURE_READ_ONLY != 0,
             },
             clock: handoff.clock,
+            fault: None,
         };
-        driver.identity.blocks = driver.device.read64(0) / sectors_per_block;
-        driver.identity.serial = match driver.submit(REQUEST_GET_ID, 0, 20, true) {
-            Ok(()) => ascii(&driver.bounce.bytes()[..20]),
+        driver.identity.blocks = driver.device.read64(CONFIG_CAPACITY) / sectors_per_block;
+        driver.identity.serial = match driver.submit(REQUEST_GET_ID, 0, ID_BYTES, true) {
+            Ok(()) => ascii(&driver.bounce.bytes()[..ID_BYTES]),
             Err(BlockError::Device { .. }) => alloc::string::String::new(),
             Err(error) => return Err(error),
         };
@@ -112,19 +132,22 @@ impl VirtioBlk {
         bytes: usize,
         device_writes: bool,
     ) -> Result<(), BlockError> {
+        if let Some(fault) = &self.fault {
+            return Err(fault.clone());
+        }
         let request = self.request.physical();
-        self.request.write(0, kind);
-        self.request.write(4, 0u32);
-        self.request.write(8, sector);
-        self.request.write(16, 0xffu8);
-        let mut chain = [(request, 16u32, 0u16); 3];
+        self.request.write(REQUEST_TYPE, kind);
+        self.request.write(REQUEST_RESERVED, 0u32);
+        self.request.write(REQUEST_SECTOR, sector);
+        self.request.write(REQUEST_STATUS, STATUS_PENDING);
+        let mut chain = [(request, REQUEST_HEADER, 0u16); 3];
         let mut length = 1;
         if bytes > 0 {
             let flags = if device_writes { DESCRIPTOR_WRITE } else { 0 };
             chain[1] = (self.bounce.physical(), bytes as u32, flags);
             length = 2;
         }
-        chain[length] = (request + 16, 1, DESCRIPTOR_WRITE);
+        chain[length] = (request + u64::from(REQUEST_HEADER), 1, DESCRIPTOR_WRITE);
         for (index, (address, len, flags)) in chain[..=length].iter().enumerate() {
             let next = if index < length { DESCRIPTOR_NEXT } else { 0 };
             let base = 16 * index;
@@ -146,10 +169,19 @@ impl VirtioBlk {
             .clock
             .wait(TIMEOUT_US, || queue.read::<u16>(USED + 2) == expected)
         {
+            self.fault = Some(BlockError::Timeout);
             return Err(BlockError::Timeout);
         }
         fence(Ordering::SeqCst);
-        match self.request.read::<u8>(16) {
+        // The chain always starts at descriptor 0; any other head was never
+        // offered (Linux `virtqueue_get_buf` marks the queue broken).
+        let used = USED + 4 + 8 * usize::from(expected.wrapping_sub(1) % self.entries);
+        if self.queue.read::<u32>(used) != 0 {
+            let error = BlockError::Device { status: u32::MAX };
+            self.fault = Some(error.clone());
+            return Err(error);
+        }
+        match self.request.read::<u8>(REQUEST_STATUS) {
             0 => Ok(()),
             status => Err(BlockError::Device {
                 status: u32::from(status),

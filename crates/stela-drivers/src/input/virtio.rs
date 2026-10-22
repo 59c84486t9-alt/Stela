@@ -82,6 +82,8 @@ pub struct VirtioInput {
     /// The used ring index consumed so far, and the driver ring's index.
     used: u16,
     available: u16,
+    /// The device returned a buffer it was never given; it is not read again.
+    pub broken: bool,
     pub name: String,
     pub translator: Translator,
 }
@@ -143,6 +145,7 @@ impl VirtioInput {
             entries,
             used: 0,
             available: 0,
+            broken: false,
             name,
             translator: Translator::new(axes),
         };
@@ -174,14 +177,21 @@ impl VirtioInput {
     }
 
     /// The events the device has written since the last poll, each buffer
-    /// handed back to it.
+    /// handed back to it. A descriptor the driver never offered breaks the
+    /// queue, as Linux `virtqueue_get_buf` does.
     pub fn poll(&mut self) -> Vec<Event> {
         fence(Ordering::SeqCst);
         let produced: u16 = self.queue.read(USED + 2);
         let mut events = Vec::new();
-        while self.used != produced {
+        while !self.broken && self.used != produced {
             let slot = USED + 4 + 8 * usize::from(self.used % self.entries);
-            let id = self.queue.read::<u32>(slot) as u16 % self.entries;
+            let Some(id) = u16::try_from(self.queue.read::<u32>(slot))
+                .ok()
+                .filter(|id| *id < self.entries)
+            else {
+                self.broken = true;
+                break;
+            };
             let at = usize::from(id) * EVENT_BYTES;
             events.push(Event {
                 kind: self.events.read(at),

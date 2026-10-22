@@ -1,6 +1,9 @@
-//! Network adapters as raw Ethernet II links ([`Link`]): Intel I225/I226
-//! ([`igc`]) and virtio-net ([`virtio`]). USB Ethernet adapters are in
-//! [`usb::cdc`](crate::usb::cdc). The Intel 82574L is in [`e1000e`].
+//! Network adapters as raw Ethernet II links ([`Link`]): Intel 82574L and
+//! PCH (I217–I219) [`e1000e`], discrete Intel Gigabit [`igb`], I225/I226
+//! [`igc`], Realtek RTL8169/8168/8125/8126 [`realtek`] and [`virtio`]-net.
+//! USB Ethernet adapters are in [`usb::cdc`](crate::usb::cdc) and
+//! [`usb::ethernet`](crate::usb::ethernet). [`wifi`] holds the Wi-Fi
+//! libraries, which no adapter attaches through yet.
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 
@@ -14,6 +17,20 @@ pub mod wifi;
 /// The shortest frame without FCS; shorter frames are padded (IEEE 802.3).
 pub const MIN_FRAME: usize = 60;
 pub const MAX_FRAME: usize = 1514;
+/// Destination, source and EtherType.
+pub const HEADER: usize = 14;
+
+/// Refuse what no Ethernet link carries: a frame without its header or
+/// longer than the maximum.
+pub fn check_frame(frame: &[u8]) -> Result<(), LinkError> {
+    match frame.len() {
+        length if length < HEADER => Err(LinkError::Invalid("frame shorter than its header")),
+        length if length > MAX_FRAME => {
+            Err(LinkError::Invalid("frame exceeds the Ethernet maximum"))
+        }
+        _ => Ok(()),
+    }
+}
 
 /// An Ethernet MAC address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
