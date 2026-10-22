@@ -7,22 +7,14 @@ use super::{
     features::Report,
     identity::{Chip, Profile},
     io::{self, Io},
+    registers::*,
     transmit,
 };
 use crate::bus::dma::memory::PageSource;
 
-// Pinned rtw88 register/command definitions, with native access widths kept
-// at each use (ARFR4 and CIP are byte observations in the source handshake).
-const SYS_CFG1: u32 = 0xf0;
-const MCU_FW_CTRL: u32 = 0x80;
-const HMETFR: u32 = 0x1cc;
-const HMEBOX: u32 = 0x1d0;
-const HMEBOX_EXT: u32 = 0x1f0;
-const PMC_DBG_CTRL1: u32 = 0xa8;
+// Native access widths are kept at each use (REG_ARFR4 and CIP are byte
+// observations in the source handshake).
 const BT_IQK_BUSY: u32 = 0x600000;
-const ARFR4: u32 = 0x49c;
-const RPT_CIP: u32 = 0x2d9c;
-const IQKSTAT: u32 = 0x1b10;
 const INFORM_RFK_STATUS: u32 = 0x6d;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,7 +147,7 @@ impl<I: Io> Control<I> {
         c.verify()?;
         let now = c.io()?.now_us()?;
         c.clock_last = now;
-        let state = c.io()?.read8(HMETFR)?;
+        let state = c.io()?.read8(REG_HMETFR)?;
         if state & 15 != 0 {
             return Err(Error::InitialMailboxBusy(state));
         }
@@ -174,10 +166,10 @@ impl<I: Io> Control<I> {
     }
     fn verify(&mut self) -> Result<(), Error> {
         let expected = self.profile.observed().sys_cfg1;
-        if self.io()?.read32(SYS_CFG1)? != expected {
+        if self.io()?.read32(REG_SYS_CFG1)? != expected {
             return Err(Error::WrongProfile);
         }
-        if self.io()?.read16(MCU_FW_CTRL)? & 0xcfff != 0xc078 {
+        if self.io()?.read16(REG_MCUFW_CTRL)? & FW_READY_MASK != FW_READY {
             return Err(io::Error::FirmwareNotReady { debug: 0 }.into());
         }
         Ok(())
@@ -241,7 +233,7 @@ impl<I: Io> Control<I> {
         // iteration, with one final condition sample after budget expiry.
         let mut available = false;
         for index in 0..31 {
-            let state = self.io()?.read8(HMETFR)?;
+            let state = self.io()?.read8(REG_HMETFR)?;
             if state & (1 << mailbox) == 0 {
                 available = true;
                 break;
@@ -254,9 +246,10 @@ impl<I: Io> Control<I> {
             return Err(Error::MailboxTimeout { mailbox });
         }
         self.published = true;
-        self.io()?.write32(HMEBOX_EXT + u32::from(mailbox) * 4, 0)?;
+        self.io()?
+            .write32(REG_HMEBOX0_EX + u32::from(mailbox) * 4, 0)?;
         self.io()?.write32(
-            HMEBOX + u32::from(mailbox) * 4,
+            REG_HMEBOX0 + u32::from(mailbox) * 4,
             INFORM_RFK_STATUS | (u32::from(start) << 8),
         )?;
         self.next_box = (mailbox + 1) % 4;
@@ -282,15 +275,20 @@ impl<I: Io> Control<I> {
         self.poisoned = true;
         let result = (|| {
             self.verify()?;
-            if self.io()?.read8(ARFR4)? & 1 != 0 {
+            if self.io()?.read8(REG_ARFR4)? & 1 != 0 {
                 return Err(Error::StaleRfk);
             }
-            self.poll(PMC_DBG_CTRL1, 600000, 20, |io| {
-                Ok(io.read32(PMC_DBG_CTRL1)? & BT_IQK_BUSY == 0)
+            self.poll(REG_PMC_DBG_CTRL1, 600000, 20, |io| {
+                Ok(io.read32(REG_PMC_DBG_CTRL1)? & BT_IQK_BUSY == 0)
             })?;
             let publication = self.publish_rfk(true)?;
             self.rfk_active = true;
-            self.poll(ARFR4, 100000, 20, |io| Ok(io.read8(ARFR4)? & 1 == 1))?;
+            self.poll(
+                REG_ARFR4,
+                100000,
+                20,
+                |io| Ok(io.read8(REG_ARFR4)? & 1 == 1),
+            )?;
             self.verify()?;
             Ok(publication)
         })();
@@ -312,8 +310,13 @@ impl<I: Io> Control<I> {
         self.poisoned = true;
         let result = (|| {
             let publication = self.publish_rfk(false)?;
-            self.poll(ARFR4, 100000, 20, |io| Ok(io.read8(ARFR4)? & 1 == 1))?;
-            let status = self.io()?.read8(ARFR4)?;
+            self.poll(
+                REG_ARFR4,
+                100000,
+                20,
+                |io| Ok(io.read8(REG_ARFR4)? & 1 == 1),
+            )?;
+            let status = self.io()?.read8(REG_ARFR4)?;
             self.verify()?;
             self.rfk_active = false;
             Ok(RfkFinishObservation {
@@ -352,7 +355,7 @@ impl<I: Io> Control<I> {
         let mut packet = PacketAttempt { rings, done: false };
         let result = (|| {
             self.verify()?;
-            let baseline = self.io()?.read8(RPT_CIP)?;
+            let baseline = self.io()?.read8(REG_RPT_CIP)?;
             if baseline == 0xaa {
                 return Err(Error::StaleIqk);
             }
@@ -361,10 +364,12 @@ impl<I: Io> Control<I> {
             // status was sampled before this exact command publication.
             unsafe { packet.rings.initial_iqk_command(source) }?;
             self.published = true;
-            let poll = self.poll(RPT_CIP, 300000, 20000, |io| Ok(io.read8(RPT_CIP)? == 0xaa));
-            // Source clears IQKSTAT after the poll even for a pure timeout.
+            let poll = self.poll(REG_RPT_CIP, 300000, 20000, |io| {
+                Ok(io.read8(REG_RPT_CIP)? == 0xaa)
+            });
+            // Source clears REG_IQKSTAT after the poll even for a pure timeout.
             // Any error remains terminal; this is never rollback/stop proof.
-            self.io()?.write8(IQKSTAT, 0)?;
+            self.io()?.write8(REG_IQKSTAT, 0)?;
             poll?;
             self.verify()?;
             Ok(InitialIqkObservation {
@@ -497,8 +502,8 @@ pub(super) mod tests {
             trigger: Arc::new(AtomicBool::new(false)),
             dropped: 0,
         };
-        m.set(0xf0, 4, profile.observed().sys_cfg1);
-        m.set(0x80, 2, 0xc078);
+        m.set(REG_SYS_CFG1, 4, profile.observed().sys_cfg1);
+        m.set(REG_MCUFW_CTRL, 2, 0xc078);
         let state = Arc::new(Mutex::new(m));
         (
             Bus {
@@ -845,7 +850,7 @@ pub(super) mod tests {
         ));
         assert!(m.lock().unwrap().quarantine >= 1);
         let (mut c, m, _, _) = fixture();
-        m.lock().unwrap().set(0x49c, 1, 1);
+        m.lock().unwrap().set(REG_ARFR4, 1, 1);
         assert_eq!(unsafe { c.begin_rfk() }.unwrap_err(), Error::StaleRfk);
         assert!(!m.lock().unwrap().events.iter().any(|e| e[0] == 1));
         let (mut c, m, _, _) = fixture();

@@ -8,29 +8,13 @@ use super::{
     firmware::{ParseError, Rtw88},
     identity::{Chip, Staged},
     io::{Error, Io},
+    registers::*,
 };
 
-const MCU: u32 = 0x80;
-const DDMA_SOURCE: u32 = 0x1200;
-const DDMA_DEST: u32 = 0x1204;
-const DDMA_CTRL: u32 = 0x1208;
-const OWN: u32 = 1 << 31;
-const CHECKSUM_ENABLE: u32 = 1 << 29;
-const CHECKSUM_BAD: u32 = 1 << 27;
-const CHECKSUM_RESET: u32 = 1 << 25;
-const CHECKSUM_CONTINUE: u32 = 1 << 24;
 const TX_BUFFER_PAYLOAD: u32 = 0x1878_0000 + 48;
 const IMEM_BOUNDARY: u32 = 0x0020_0000;
-const FIFO_PAGE: u32 = 0x204;
-const BEACON_CTRL: u32 = 0x550;
-const TXQ_CTRL: u32 = 0x422;
-const CR_HIGH: u32 = 0x101;
+/// `BIT_BCN_VALID_V1` in the high half of `REG_FIFOPAGE_CTRL_2`.
 const BCN_VALID: u16 = 1 << 15;
-const LTE_CTRL: u32 = 0x1700;
-const LTE_WRITE: u32 = 0x1704;
-const LTE_READ: u32 = 0x1708;
-const FW_READY: u32 = 0xc078;
-const FW_READY_MASK: u32 = 0xcfff;
 const MAX_POLLS: usize = 1000;
 const CHUNK: usize = 4096;
 
@@ -49,7 +33,7 @@ impl From<Error> for StartError {
 pub enum State {
     Idle,
     Quarantined,
-    /// Actual MCU ready observed; HCI index reset and radio setup remain.
+    /// Actual REG_MCUFW_CTRL ready observed; HCI index reset and radio setup remain.
     FirmwareReady,
 }
 
@@ -79,7 +63,7 @@ impl<I: Io> Download<I> {
         self.state
     }
     /// Continue actual native HCI/radio initialization only after the exact
-    /// MCU ready status was observed. This grants no Ethernet/carrier state.
+    /// REG_MCUFW_CTRL ready status was observed. This grants no Ethernet/carrier state.
     pub fn after_firmware_ready(&mut self) -> Result<&mut I, Error> {
         if self.state != State::FirmwareReady || self.feature_requested {
             return Err(Error::InvalidState);
@@ -165,8 +149,8 @@ impl<I: Io> Download<I> {
             }
             Err(error) => {
                 // Donor failure cleanup is best effort, never a reset proof.
-                let _ = self.modify8(MCU, 1, 0);
-                let _ = self.modify8(3, 0, 4);
+                let _ = self.modify8(REG_MCUFW_CTRL, BIT_MCUFWDL_EN, 0);
+                let _ = self.modify8(REG_SYS_FUNC_EN + 1, 0, BIT_FEN_CPUEN);
                 self.io.quarantine();
                 Err(error.into())
             }
@@ -192,60 +176,65 @@ impl<I: Io> Download<I> {
     }
     fn cpu(&mut self, enabled: bool) -> Result<(), Error> {
         if enabled {
-            self.modify8(0x1d, 0, 1)?;
-            self.modify8(3, 0, 4)
+            self.modify8(REG_RSV_CTRL + 1, 0, BIT_WLMCU_IOIF)?;
+            self.modify8(REG_SYS_FUNC_EN + 1, 0, BIT_FEN_CPUEN)
         } else {
-            self.modify8(3, 4, 0)?;
-            self.modify8(0x1d, 1, 0)
+            self.modify8(REG_SYS_FUNC_EN + 1, BIT_FEN_CPUEN, 0)?;
+            self.modify8(REG_RSV_CTRL + 1, BIT_WLMCU_IOIF, 0)
         }
     }
     fn download(&mut self, image: &Rtw88<'_>) -> Result<(), Error> {
-        self.poll(LTE_CTRL, 1 << 29, 1 << 29)?;
-        self.io.write32(LTE_CTRL, 0x800f_0038)?;
-        let lte_backup = self.io.read32(LTE_READ)?;
+        self.poll(REG_WL2LTECOEX_INDIRECT_ACCESS_CTRL_V1, 1 << 29, 1 << 29)?;
+        self.io
+            .write32(REG_WL2LTECOEX_INDIRECT_ACCESS_CTRL_V1, 0x800f_0038)?;
+        let lte_backup = self
+            .io
+            .read32(REG_WL2LTECOEX_INDIRECT_ACCESS_READ_DATA_V1)?;
         self.cpu(false)?;
-        let pq = self.io.read8(0x10d)?;
-        self.io.write8(0x10d, 3 << 6)?;
-        let cr = self.io.read8(0x100)?;
-        self.io.write8(0x100, 5)?;
-        self.io.write32(0x1330, 1 << 31)?;
-        let pages = self.io.read16(0x230)?;
-        let rqpn = self.io.read32(0x22c)? | (1 << 31);
-        self.io.write16(0x230, 0x200)?;
-        self.io.write32(0x22c, rqpn)?;
-        let beacon = self.io.read8(BEACON_CTRL)?;
-        self.io.write8(BEACON_CTRL, (beacon & !8) | 16)?;
-        self.modify8(0x1082, 1, 0)?;
-        self.modify8(9, 64, 0)?;
-        self.modify8(0x1082, 0, 1)?;
-        self.modify8(9, 0, 64)?;
-        let control = (self.io.read16(MCU)? & 0x3800) | 1;
-        self.io.write16(MCU, control)?;
+        let pq = self.io.read8(REG_TXDMA_PQ_MAP + 1)?;
+        self.io.write8(REG_TXDMA_PQ_MAP + 1, 3 << 6)?;
+        let cr = self.io.read8(REG_CR)?;
+        self.io.write8(REG_CR, 5)?;
+        self.io.write32(REG_H2CQ_CSR, BIT_H2CQ_FULL)?;
+        let pages = self.io.read16(REG_FIFOPAGE_INFO_1)?;
+        let rqpn = self.io.read32(REG_RQPN_CTRL_2)? | BIT_LD_RQPN;
+        self.io.write16(REG_FIFOPAGE_INFO_1, 0x200)?;
+        self.io.write32(REG_RQPN_CTRL_2, rqpn)?;
+        let beacon = self.io.read8(REG_BCN_CTRL)?;
+        self.io.write8(REG_BCN_CTRL, (beacon & !8) | 16)?;
+        self.modify8(REG_CPU_DMEM_CON + 2, 1, 0)?;
+        self.modify8(REG_SYS_CLK_CTRL + 1, 64, 0)?;
+        self.modify8(REG_CPU_DMEM_CON + 2, 0, 1)?;
+        self.modify8(REG_SYS_CLK_CTRL + 1, 0, 64)?;
+        let control = (self.io.read16(REG_MCUFW_CTRL)? & 0x3800) | 1;
+        self.io.write16(REG_MCUFW_CTRL, control)?;
         for section in &image.sections {
             self.region(section.download_address, section.data)?;
         }
         // Exact donor six-register restore order and access widths. H2CQ_CSR
         // intentionally restores FULL, not an earlier register observation.
-        self.io.write8(0x10d, pq)?;
-        self.io.write8(0x100, cr)?;
-        self.io.write32(0x1330, 1 << 31)?;
-        self.io.write16(0x230, pages)?;
-        self.io.write32(0x22c, rqpn)?;
-        self.io.write8(BEACON_CTRL, beacon)?;
-        self.io.write32(0x210, 4)?;
-        let control = self.io.read16(MCU)?;
+        self.io.write8(REG_TXDMA_PQ_MAP + 1, pq)?;
+        self.io.write8(REG_CR, cr)?;
+        self.io.write32(REG_H2CQ_CSR, BIT_H2CQ_FULL)?;
+        self.io.write16(REG_FIFOPAGE_INFO_1, pages)?;
+        self.io.write32(REG_RQPN_CTRL_2, rqpn)?;
+        self.io.write8(REG_BCN_CTRL, beacon)?;
+        self.io.write32(REG_TXDMA_STATUS, 4)?;
+        let control = self.io.read16(REG_MCUFW_CTRL)?;
         if control & 0x50 != 0x50 {
             return Err(Error::DownloadChecksums);
         }
-        self.io.write16(MCU, (control | 0x4000) & !1)?;
+        self.io.write16(REG_MCUFW_CTRL, (control | 0x4000) & !1)?;
         self.cpu(true)?;
-        self.poll(LTE_CTRL, 1 << 29, 1 << 29)?;
-        self.io.write32(LTE_WRITE, lte_backup)?;
-        self.io.write32(LTE_CTRL, 0xc00f_0038)?;
-        match self.poll(MCU, FW_READY_MASK, FW_READY) {
+        self.poll(REG_WL2LTECOEX_INDIRECT_ACCESS_CTRL_V1, 1 << 29, 1 << 29)?;
+        self.io
+            .write32(REG_WL2LTECOEX_INDIRECT_ACCESS_WRITE_DATA_V1, lte_backup)?;
+        self.io
+            .write32(REG_WL2LTECOEX_INDIRECT_ACCESS_CTRL_V1, 0xc00f_0038)?;
+        match self.poll(REG_MCUFW_CTRL, FW_READY_MASK.into(), FW_READY.into()) {
             Ok(()) => Ok(()),
             Err(Error::Timeout { .. }) => {
-                let debug = self.io.read32(0x10fc)?;
+                let debug = self.io.read32(REG_FW_DBG7)?;
                 if debug & 0xffff_ff00 == 0xfaaa_aa00 {
                     Err(Error::InvalidFirmwareKey)
                 } else {
@@ -256,57 +245,64 @@ impl<I: Io> Download<I> {
         }
     }
     fn reserved_page(&mut self, data: &[u8]) -> Result<(), Error> {
-        let beacon = self.io.read8(BEACON_CTRL)?;
-        self.io.write16(FIFO_PAGE, BCN_VALID)?;
-        let cr = self.io.read8(CR_HIGH)?;
-        self.io.write8(CR_HIGH, cr | 1)?;
-        self.io.write8(BEACON_CTRL, (beacon & !8) | 16)?;
-        let txq = self.io.read8(TXQ_CTRL)?;
-        self.io.write8(TXQ_CTRL, txq & !64)?;
+        let beacon = self.io.read8(REG_BCN_CTRL)?;
+        self.io.write16(REG_FIFOPAGE_CTRL_2, BCN_VALID)?;
+        let cr = self.io.read8(REG_CR + 1)?;
+        self.io.write8(REG_CR + 1, cr | 1)?;
+        self.io.write8(REG_BCN_CTRL, (beacon & !8) | 16)?;
+        let txq = self.io.read8(REG_FWHW_TXQ_CTRL + 2)?;
+        self.io.write8(REG_FWHW_TXQ_CTRL + 2, txq & !64)?;
         let result = self.io.submit_beacon(data).and_then(|()| {
-            self.poll(FIFO_PAGE, u32::from(BCN_VALID), u32::from(BCN_VALID))?;
+            self.poll(
+                REG_FIFOPAGE_CTRL_2,
+                u32::from(BCN_VALID),
+                u32::from(BCN_VALID),
+            )?;
             // SAFETY: cleared actual BCN_VALID before this exact payload,
             // then observed its new hardware event under exclusive I/O.
             unsafe { self.io.beacon_consumed() }
         });
         // Restore even for queue/valid-bit failure. An error in restoration is
         // itself uncertain; outer start quarantines all remaining resources.
-        self.io.write16(FIFO_PAGE, self.boundary | BCN_VALID)?;
-        self.io.write8(BEACON_CTRL, beacon)?;
-        self.io.write8(TXQ_CTRL, txq)?;
-        self.io.write8(CR_HIGH, cr)?;
+        self.io
+            .write16(REG_FIFOPAGE_CTRL_2, self.boundary | BCN_VALID)?;
+        self.io.write8(REG_BCN_CTRL, beacon)?;
+        self.io.write8(REG_FWHW_TXQ_CTRL + 2, txq)?;
+        self.io.write8(REG_CR + 1, cr)?;
         result
     }
     fn region(&mut self, destination: u32, data: &[u8]) -> Result<(), Error> {
-        let control = self.io.read32(DDMA_CTRL)?;
-        self.io.write32(DDMA_CTRL, control | CHECKSUM_RESET)?;
+        let control = self.io.read32(REG_DDMA_CH0CTRL)?;
+        self.io
+            .write32(REG_DDMA_CH0CTRL, control | BIT_DDMACH0_RESET_CHKSUM_STS)?;
         for (index, chunk) in data.chunks(CHUNK).enumerate() {
             self.reserved_page(chunk)?;
-            self.poll(DDMA_CTRL, OWN, 0)?;
-            self.io.write32(DDMA_SOURCE, TX_BUFFER_PAYLOAD)?;
+            self.poll(REG_DDMA_CH0CTRL, BIT_DDMACH0_OWN, 0)?;
+            self.io.write32(REG_DDMA_CH0SA, TX_BUFFER_PAYLOAD)?;
             self.io
-                .write32(DDMA_DEST, destination + (index * CHUNK) as u32)?;
-            let mut control = OWN | CHECKSUM_ENABLE | chunk.len() as u32;
+                .write32(REG_DDMA_CH0DA, destination + (index * CHUNK) as u32)?;
+            let mut control = BIT_DDMACH0_OWN | BIT_DDMACH0_CHKSUM_EN | chunk.len() as u32;
             if index != 0 {
-                control |= CHECKSUM_CONTINUE;
+                control |= BIT_DDMACH0_CHKSUM_CONT;
             }
-            self.io.write32(DDMA_CTRL, control)?;
-            self.poll(DDMA_CTRL, OWN, 0)?;
+            self.io.write32(REG_DDMA_CH0CTRL, control)?;
+            self.poll(REG_DDMA_CH0CTRL, BIT_DDMACH0_OWN, 0)?;
         }
-        let firmware = self.io.read8(MCU)?;
-        let control = self.io.read32(DDMA_CTRL)?;
+        let firmware = self.io.read8(REG_MCUFW_CTRL)?;
+        let control = self.io.read32(REG_DDMA_CH0CTRL)?;
         // Donor classifies EMEM with IMEM, by address rather than header kind.
         let (download_ok, checksum_ok) = if destination < IMEM_BOUNDARY {
             (8, 16)
         } else {
             (32, 64)
         };
-        if control & CHECKSUM_BAD != 0 {
+        if control & BIT_DDMACH0_CHKSUM_STS != 0 {
             self.io
-                .write8(MCU, (firmware | download_ok) & !checksum_ok)?;
+                .write8(REG_MCUFW_CTRL, (firmware | download_ok) & !checksum_ok)?;
             return Err(Error::Checksum { destination });
         }
-        self.io.write8(MCU, firmware | download_ok | checksum_ok)
+        self.io
+            .write8(REG_MCUFW_CTRL, firmware | download_ok | checksum_ok)
     }
 }
 impl<I: Io> Drop for Download<I> {
@@ -366,11 +362,11 @@ mod tests {
                 ignore_feature_request: false,
                 ignore_feature_ack: false,
             };
-            m.set(0xf0, 4, m.profile.observed().sys_cfg1);
-            m.set(MCU, 2, 0x35a5);
-            m.set(DDMA_CTRL, 4, 0);
-            m.set(LTE_CTRL, 4, 1 << 29);
-            m.set(LTE_READ, 4, 0x1234_abcd);
+            m.set(REG_SYS_CFG1, 4, m.profile.observed().sys_cfg1);
+            m.set(REG_MCUFW_CTRL, 2, 0x35a5);
+            m.set(REG_DDMA_CH0CTRL, 4, 0);
+            m.set(REG_WL2LTECOEX_INDIRECT_ACCESS_CTRL_V1, 4, 1 << 29);
+            m.set(REG_WL2LTECOEX_INDIRECT_ACCESS_READ_DATA_V1, 4, 0x1234_abcd);
             m
         }
         fn get(&self, r: u32, width: usize) -> u32 {
@@ -416,27 +412,31 @@ mod tests {
                 return Ok(());
             }
             let mut stored = value;
-            if r == DDMA_CTRL && width == 4 {
+            if r == REG_DDMA_CH0CTRL && width == 4 {
                 if !self.stuck_ddma {
-                    stored &= !OWN;
+                    stored &= !BIT_DDMACH0_OWN;
                 }
-                if self.bad_checksum && value & OWN != 0 {
-                    stored |= CHECKSUM_BAD;
+                if self.bad_checksum && value & BIT_DDMACH0_OWN != 0 {
+                    stored |= BIT_DDMACH0_CHKSUM_STS;
                 }
             }
-            if r == FIFO_PAGE && width == 2 {
+            if r == REG_FIFOPAGE_CTRL_2 && width == 2 {
                 stored &= !u32::from(BCN_VALID);
             }
-            if r == LTE_CTRL && width == 4 {
+            if r == REG_WL2LTECOEX_INDIRECT_ACCESS_CTRL_V1 && width == 4 {
                 stored = 1 << 29;
             }
             self.set(r, width, stored);
-            if r == 3 && value & 4 != 0 && !self.no_ready && self.get(MCU, 2) & 0x4050 == 0x4050 {
-                self.set(MCU, 2, self.get(MCU, 2) | 0x8000);
-                if self.get(0x1a0, 1) == 0xfd
+            if r == 3
+                && value & 4 != 0
+                && !self.no_ready
+                && self.get(REG_MCUFW_CTRL, 2) & 0x4050 == 0x4050
+            {
+                self.set(REG_MCUFW_CTRL, 2, self.get(REG_MCUFW_CTRL, 2) | 0x8000);
+                if self.get(REG_C2HEVT, 1) == 0xfd
                     && let Some(reply) = self.feature_reply
                 {
-                    self.set(0x1a0, 1, 0x19);
+                    self.set(REG_C2HEVT, 1, 0x19);
                     self.registers[0x1a2..0x1af].copy_from_slice(&reply);
                 }
             }
@@ -482,8 +482,8 @@ mod tests {
             m.trace.extend_from_slice(data);
             m.submitted.push(data.to_vec());
             if !m.no_beacon {
-                let value = m.get(FIFO_PAGE, 2) | u32::from(BCN_VALID);
-                m.set(FIFO_PAGE, 2, value);
+                let value = m.get(REG_FIFOPAGE_CTRL_2, 2) | u32::from(BCN_VALID);
+                m.set(REG_FIFOPAGE_CTRL_2, 2, value);
             }
             Ok(())
         }
@@ -530,7 +530,7 @@ mod tests {
             0x91, 0x2f, 0x11, 0x3a, 0x52, 0x18, 0xef, 0xaa, 0xff, 1, 2, 3, 4,
         ];
         model.borrow_mut().feature_reply = Some(raw);
-        model.borrow_mut().set(0x1a0, 1, 0x19); // Stale prior-boot ID.
+        model.borrow_mut().set(REG_C2HEVT, 1, 0x19); // Stale prior-boot ID.
         download.start_with_hardware_features(&staged).unwrap();
         assert!(matches!(
             download.after_firmware_ready(),
@@ -543,7 +543,7 @@ mod tests {
             report.capabilities(),
             super::super::features::decode(profile().observed().sys_cfg1, &raw)
         );
-        assert_eq!(model.borrow().get(0x1a0, 1), 0);
+        assert_eq!(model.borrow().get(REG_C2HEVT, 1), 0);
         assert!(download.after_firmware_ready().is_ok());
         assert!(matches!(
             download.hardware_features(),
@@ -584,11 +584,11 @@ mod tests {
         }
         for mode in 0..8 {
             let (m, mut d) = setup();
-            m.borrow_mut().set(0x1a0, 1, 0x19);
+            m.borrow_mut().set(REG_C2HEVT, 1, 0x19);
             m.borrow_mut().feature_reply = Some([0; 13]);
             match mode {
                 0 => m.borrow_mut().ignore_feature_request = true,
-                1 => m.borrow_mut().set(0xf0, 4, u32::MAX),
+                1 => m.borrow_mut().set(REG_SYS_CFG1, 4, u32::MAX),
                 2 => m.borrow_mut().feature_reply = None,
                 _ => (),
             }
@@ -598,11 +598,11 @@ mod tests {
             } else {
                 d.start_with_hardware_features(&staged).unwrap();
                 match mode {
-                    3 => m.borrow_mut().set(0xf0, 4, 0x2000),
-                    4 => m.borrow_mut().set(MCU, 2, 0xffff),
-                    5 => m.borrow_mut().set(0x1a0, 1, 0xff),
+                    3 => m.borrow_mut().set(REG_SYS_CFG1, 4, 0x2000),
+                    4 => m.borrow_mut().set(REG_MCUFW_CTRL, 2, 0xffff),
+                    5 => m.borrow_mut().set(REG_C2HEVT, 1, 0xff),
                     6 => m.borrow_mut().ignore_feature_ack = true,
-                    7 => m.borrow_mut().set(MCU, 2, 0),
+                    7 => m.borrow_mut().set(REG_MCUFW_CTRL, 2, 0),
                     _ => (),
                 }
                 assert!(d.hardware_features().is_err(), "mode {mode}");
@@ -654,21 +654,24 @@ mod tests {
             (0x10d, 1),
             (0x100, 1),
             (0x230, 2),
-            (BEACON_CTRL, 1),
-            (CR_HIGH, 1),
-            (TXQ_CTRL, 1),
+            (REG_BCN_CTRL, 1),
+            (REG_CR + 1, 1),
+            (REG_FWHW_TXQ_CTRL + 2, 1),
         ] {
             assert_eq!(
                 &m.registers[r as usize..r as usize + width],
                 &before[r as usize..r as usize + width]
             );
         }
-        assert_eq!(m.get(0x1330, 4), 1 << 31);
+        assert_eq!(m.get(REG_H2CQ_CSR, 4), 1 << 31);
         assert_eq!(
-            m.get(0x22c, 4),
+            m.get(REG_RQPN_CTRL_2, 4),
             u32::from_le_bytes(before[0x22c..0x230].try_into().unwrap()) | 1 << 31
         );
-        assert_eq!(m.get(MCU, 2) & FW_READY_MASK, FW_READY);
+        assert_eq!(
+            m.get(REG_MCUFW_CTRL, 2) & u32::from(FW_READY_MASK),
+            u32::from(FW_READY)
+        );
         assert_eq!(m.quarantined, 0);
         drop(m);
         assert!(matches!(
@@ -711,11 +714,14 @@ mod tests {
                 2 => m.borrow_mut().bad_checksum = true,
                 3 | 4 => {
                     m.borrow_mut().no_ready = true;
-                    m.borrow_mut()
-                        .set(0x10fc, 4, if mode == 4 { 0xfaaa_aa00 } else { 0x1234 });
+                    m.borrow_mut().set(
+                        REG_FW_DBG7,
+                        4,
+                        if mode == 4 { 0xfaaa_aa00 } else { 0x1234 },
+                    );
                 }
-                5 => m.borrow_mut().all_ones = Some(LTE_CTRL),
-                _ => m.borrow_mut().all_ones = Some(DDMA_CTRL),
+                5 => m.borrow_mut().all_ones = Some(REG_WL2LTECOEX_INDIRECT_ACCESS_CTRL_V1),
+                _ => m.borrow_mut().all_ones = Some(REG_DDMA_CH0CTRL),
             }
             let Err(StartError::Hardware(error)) = d.start(&staged) else {
                 panic!("mode {mode}");
@@ -724,11 +730,11 @@ mod tests {
                 error,
                 match mode {
                     0 => Error::Timeout {
-                        register: DDMA_CTRL,
-                        mask: OWN
+                        register: REG_DDMA_CH0CTRL,
+                        mask: BIT_DDMACH0_OWN
                     },
                     1 => Error::Timeout {
-                        register: FIFO_PAGE,
+                        register: REG_FIFOPAGE_CTRL_2,
                         mask: BCN_VALID.into()
                     },
                     2 => Error::Checksum {
@@ -884,13 +890,13 @@ mod tests {
         assert_eq!(
             d.io.queue.mappings(),
             2,
-            "MCU ready cannot unmap active queue base"
+            "REG_MCUFW_CTRL ready cannot unmap active queue base"
         );
         let oracle =
             std::fs::read(std::env::var("STELA_REALTEK_WIFI_TRANSPORT_ORACLE").unwrap()).unwrap();
         assert_eq!(model.borrow().trace, oracle);
         // SAFETY: synchronous modeled device and submission workers stopped,
-        // independently of the MCU-ready state, before canonical unmaps.
+        // independently of the REG_MCUFW_CTRL-ready state, before canonical unmaps.
         unsafe {
             d.io.queue.stop();
         }

@@ -3,7 +3,10 @@
 //! RTL8822C single beacon TXBD for firmware reserved pages. Pinned rtw88
 //! pci.c/tx.c are hardware references; allocations and IOVAs are native Stela.
 //! Submission is not a DMA completion, radio transmission or firmware ALIVE.
-use super::io::{self, Bar};
+use super::{
+    io::{self, Bar},
+    registers::*,
+};
 use crate::bus::dma::{
     mapping::{Direction, DmaDomain, DmaError, DmaMapping},
     memory::{CacheAttribute, CpuMapping, MemoryError, PageSource},
@@ -62,18 +65,18 @@ pub unsafe trait Registers {
 // base and work registers are accessed, without completion claims.
 unsafe impl Registers for Bar {
     fn configure(&mut self, iova: u32) -> Result<(), Error> {
-        self.write32(0x308, iova);
-        if self.read32(0x308) != iova {
+        self.write32(RTK_PCI_TXBD_DESA_BCNQ, iova);
+        if self.read32(RTK_PCI_TXBD_DESA_BCNQ) != iova {
             return Err(Error::Register);
         }
         Ok(())
     }
     fn kick(&mut self) -> Result<(), Error> {
-        let work = self.read8(0x383);
+        let work = self.read8(RTK_PCI_TXBD_BCN_WORK);
         if work == u8::MAX {
             return Err(Error::Register);
         }
-        self.write8(0x383, work | 16);
+        self.write8(RTK_PCI_TXBD_BCN_WORK, work | BIT_PCI_BCNQ_FLAG);
         Ok(())
     }
 }

@@ -6,6 +6,7 @@
 use super::{
     identity::{Chip, Profile},
     io::{Error as HardwareError, Io},
+    registers::*,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,12 +127,12 @@ pub unsafe fn configure<I: Io>(io: &mut I) -> Result<Geometry, Error> {
         complete: false,
     };
     let result = (|| {
-        let identity = attempt.io.read32(0xf0)?;
+        let identity = attempt.io.read32(REG_SYS_CFG1)?;
         if identity != geometry.profile.observed().sys_cfg1 || identity == u32::MAX {
             return Err(Error::IdentityChanged);
         }
-        let control = attempt.io.read32(0x80)?;
-        if control == u32::MAX || control & 0xcfff != 0xc078 {
+        let control = attempt.io.read32(REG_MCUFW_CTRL)?;
+        if control == u32::MAX || control & u32::from(FW_READY_MASK) != u32::from(FW_READY) {
             return Err(Error::FirmwareNotReady);
         }
         map_queues(attempt.io)?;
@@ -150,34 +151,42 @@ fn modify8<I: Io>(io: &mut I, register: u32, clear: u8, set: u8) -> Result<(), E
 fn map_queues<I: Io>(io: &mut I) -> Result<(), Error> {
     // Source PCIe rqpn row: VO normal, VI normal, BE low, BK low,
     // MG extra, HI high. Mapping encoding: extra0/low1/normal2/high3.
-    io.write16(0x10c, 3 << 14 | 1 << 10 | 1 << 8 | 2 << 6 | 2 << 4)?;
-    io.write8(0x100, 0)?;
-    io.write8(0x100, 0xff)?;
-    io.write32(0x1330, 1 << 31)?;
+    io.write16(
+        REG_TXDMA_PQ_MAP,
+        3 << 14 | 1 << 10 | 1 << 8 | 2 << 6 | 2 << 4,
+    )?;
+    io.write8(REG_CR, 0)?;
+    io.write8(REG_CR, 0xff)?;
+    io.write32(REG_H2CQ_CSR, BIT_H2CQ_FULL)?;
     Ok(())
 }
 fn priority_queues<I: Io>(io: &mut I, g: Geometry) -> Result<(), Error> {
-    for register in [0x230, 0x234, 0x238, 0x23c] {
+    for register in [
+        REG_FIFOPAGE_INFO_1,
+        REG_FIFOPAGE_INFO_2,
+        REG_FIFOPAGE_INFO_3,
+        REG_FIFOPAGE_INFO_4,
+    ] {
         io.write16(register, 64)?;
     }
     // TX pages minus reserved pages, four priority allocations and one gap.
-    io.write16(0x240, g.pages - g.reserved - 4 * 64 - 1)?;
-    let rqpn = io.read32(0x22c)?;
-    io.write32(0x22c, rqpn | 1 << 31)?;
-    io.write16(0x204, g.boundary)?;
-    modify8(io, 0x422, 0, 16)?;
-    io.write16(0x424, g.boundary)?;
-    io.write16(0x206, g.boundary)?;
-    io.write16(0x456, g.boundary)?;
-    io.write32(0x11c, 24576 - 256 - 1)?;
-    modify8(io, 0x208, 0, 1)?;
+    io.write16(REG_FIFOPAGE_INFO_5, g.pages - g.reserved - 4 * 64 - 1)?;
+    let rqpn = io.read32(REG_RQPN_CTRL_2)?;
+    io.write32(REG_RQPN_CTRL_2, rqpn | BIT_LD_RQPN)?;
+    io.write16(REG_FIFOPAGE_CTRL_2, g.boundary)?;
+    modify8(io, REG_FWHW_TXQ_CTRL + 2, 0, 16)?;
+    io.write16(REG_BCNQ_BDNY_V1, g.boundary)?;
+    io.write16(REG_FIFOPAGE_CTRL_2 + 2, g.boundary)?;
+    io.write16(REG_BCNQ1_BDNY_V1, g.boundary)?;
+    io.write32(REG_RXFF_BNDY, 24576 - 256 - 1)?;
+    modify8(io, REG_AUTO_LLT_V1, 0, 1)?;
     for _ in 0..1000 {
-        let status = io.read32(0x208)?;
+        let status = io.read32(REG_AUTO_LLT_V1)?;
         if status == u32::MAX {
             return Err(HardwareError::Register.into());
         }
         if status & 1 == 0 {
-            io.write8(0x103, 0)?;
+            io.write8(REG_CR + 3, 0)?;
             return Ok(());
         }
         io.delay_us(10);
@@ -187,17 +196,17 @@ fn priority_queues<I: Io>(io: &mut I, g: Geometry) -> Result<(), Error> {
 fn h2c<I: Io>(io: &mut I, g: Geometry) -> Result<(), Error> {
     let address = u32::from(g.h2c_queue) << 7;
     let size = 8 << 7;
-    for register in [0x244, 0x24c] {
+    for register in [REG_H2C_HEAD, REG_H2C_READ_ADDR] {
         let value = io.read32(register)?;
         io.write32(register, (value & 0xfffc_0000) | address)?;
     }
-    let value = io.read32(0x248)?;
-    io.write32(0x248, (value & 0xfffc_0000) | (address + size))?;
-    modify8(io, 0x254, 3, 1)?;
-    modify8(io, 0x254, 4, 4)?;
-    modify8(io, 0x20d, 128, 128)?;
-    let write = io.read32(0x10d4)?;
-    let read = io.read32(0x10d0)?;
+    let value = io.read32(REG_H2C_TAIL)?;
+    io.write32(REG_H2C_TAIL, (value & 0xfffc_0000) | (address + size))?;
+    modify8(io, REG_H2C_INFO, 3, 1)?;
+    modify8(io, REG_H2C_INFO, 4, 4)?;
+    modify8(io, REG_TXDMA_OFFSET_CHK + 1, 128, 128)?;
+    let write = io.read32(REG_H2C_PKT_WRITEADDR)?;
+    let read = io.read32(REG_H2C_PKT_READADDR)?;
     if write == u32::MAX || read == u32::MAX {
         return Err(HardwareError::Register.into());
     }
@@ -254,10 +263,10 @@ mod tests {
                 removed_register: None,
                 quarantines: 0,
             };
-            m.set(0xf0, 4, 0x1000);
-            m.set(0x80, 4, 0xc078 | (u32::from(seed & 3) << 12));
-            m.set(0x10d0, 4, 0x3e100);
-            m.set(0x10d4, 4, 0x3e100);
+            m.set(REG_SYS_CFG1, 4, 0x1000);
+            m.set(REG_MCUFW_CTRL, 4, 0xc078 | (u32::from(seed & 3) << 12));
+            m.set(REG_H2C_PKT_READADDR, 4, 0x3e100);
+            m.set(REG_H2C_PKT_WRITEADDR, 4, 0x3e100);
             m
         }
         fn get(&self, r: u32, n: usize) -> u32 {
@@ -351,7 +360,7 @@ mod tests {
     #[test]
     fn source_sram_reservations_and_actual_empty_h2c_preserve_unrelated_bits() {
         let mut m = Model::new(0xa5);
-        let head_upper = m.get(0x244, 4) & 0xfffc_0000;
+        let head_upper = m.get(REG_H2C_HEAD, 4) & 0xfffc_0000;
         let g = unsafe { configure(&mut m) }.unwrap();
         assert_eq!(g.pages(), 2048);
         assert_eq!(g.reserved(), 110);
@@ -362,12 +371,12 @@ mod tests {
         assert_eq!(g.h2c_queue_page(), 0x7c2);
         assert_eq!(g.h2c_static_page(), 0x7ba);
         assert_eq!(g.h2c_extra_page(), 0x7a2);
-        assert_eq!(m.get(0x10c, 2), 0xc5a0);
-        assert_eq!(m.get(0x240, 2), 1681);
-        assert_eq!(m.get(0x11c, 4), 0x5eff);
-        assert_eq!(m.get(0x244, 4), head_upper | 0x3e100);
-        assert_eq!(m.get(0x248, 4) & 0x3ffff, 0x3e500);
-        assert_eq!(m.get(0x204, 2), 0x792);
+        assert_eq!(m.get(REG_TXDMA_PQ_MAP, 2), 0xc5a0);
+        assert_eq!(m.get(REG_FIFOPAGE_INFO_5, 2), 1681);
+        assert_eq!(m.get(REG_RXFF_BNDY, 4), 0x5eff);
+        assert_eq!(m.get(REG_H2C_HEAD, 4), head_upper | 0x3e100);
+        assert_eq!(m.get(REG_H2C_TAIL, 4) & 0x3ffff, 0x3e500);
+        assert_eq!(m.get(REG_FIFOPAGE_CTRL_2, 2), 0x792);
         assert_eq!(m.quarantines, 0);
     }
     #[test]
@@ -387,11 +396,11 @@ mod tests {
         for mode in 0..6 {
             let mut m = Model::new(11);
             match mode {
-                0 => m.set(0xf0, 4, 0),
-                1 => m.set(0x80, 4, 0),
+                0 => m.set(REG_SYS_CFG1, 4, 0),
+                1 => m.set(REG_MCUFW_CTRL, 4, 0),
                 2 => m.stuck_llt = true,
-                3 => m.set(0x10d4, 4, 0x3e101),
-                4 => m.set(0x10d0, 4, u32::MAX),
+                3 => m.set(REG_H2C_PKT_WRITEADDR, 4, 0x3e101),
+                4 => m.set(REG_H2C_PKT_READADDR, 4, u32::MAX),
                 _ => m.removed_register = Some(0x208),
             }
             let error = unsafe { configure(&mut m) }.unwrap_err();
@@ -419,8 +428,8 @@ mod tests {
         assert_eq!(m.operations, 0);
         assert_eq!(m.quarantines, 0);
         let mut m = Model::new(11);
-        m.set(0x10d4, 4, 0x3ffff);
-        m.set(0x10d0, 4, 0);
+        m.set(REG_H2C_PKT_WRITEADDR, 4, 0x3ffff);
+        m.set(REG_H2C_PKT_READADDR, 4, 0);
         assert_eq!(
             unsafe { configure(&mut m) },
             Err(Error::H2cMismatch {

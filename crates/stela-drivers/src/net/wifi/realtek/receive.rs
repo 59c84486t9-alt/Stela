@@ -6,6 +6,7 @@
 use super::{
     beacon::{self, Allocation},
     io::Bar,
+    registers::*,
 };
 use crate::bus::dma::{
     mapping::{Direction, DmaDomain},
@@ -146,22 +147,24 @@ pub unsafe trait Registers {
 // SAFETY: `Bar::new` binds the exclusive requester BAR.
 unsafe impl Registers for Bar {
     fn configure(&mut self, iova: u32, count: u16) -> Result<(), Error> {
-        self.write16(0x382, count);
-        self.write32(0x338, iova);
-        if self.read16(0x382) & 0xfff != count || self.read32(0x338) != iova {
+        self.write16(RTK_PCI_RXBD_NUM_MPDUQ, count);
+        self.write32(RTK_PCI_RXBD_DESA_MPDUQ, iova);
+        if self.read16(RTK_PCI_RXBD_NUM_MPDUQ) & 0xfff != count
+            || self.read32(RTK_PCI_RXBD_DESA_MPDUQ) != iova
+        {
             return Err(Error::Register);
         }
         Ok(())
     }
     fn indices(&mut self) -> Result<(u16, u16), Error> {
-        let value = self.read32(0x3b4);
+        let value = self.read32(RTK_PCI_RXBD_IDX_MPDUQ);
         if value == u32::MAX {
             return Err(Error::Removed);
         }
         Ok(((value & 0xfff) as u16, ((value >> 16) & 0xfff) as u16))
     }
     fn publish(&mut self, consumer: u16) -> Result<(), Error> {
-        self.write16(0x3b4, consumer);
+        self.write16(RTK_PCI_RXBD_IDX_MPDUQ, consumer);
         Ok(())
     }
 }

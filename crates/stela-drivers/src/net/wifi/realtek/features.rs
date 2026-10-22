@@ -6,9 +6,9 @@
 use super::{
     identity::{Chip, Profile},
     io::{Error, Io},
+    registers::*,
 };
 
-const MAILBOX: u32 = 0x1a0;
 const REQUEST: u8 = 0xfd;
 const REPORT: u8 = 0x19;
 const LENGTH: usize = 13;
@@ -93,7 +93,7 @@ fn identity<I: Io>(io: &mut I) -> Result<Profile, Error> {
     if profile.chip() != Chip::Rtl8822C {
         return Err(Error::WrongChip);
     }
-    if io.read32(0xf0)? != profile.observed().sys_cfg1 {
+    if io.read32(REG_SYS_CFG1)? != profile.observed().sys_cfg1 {
         return Err(Error::Register);
     }
     Ok(profile)
@@ -103,8 +103,8 @@ fn identity<I: Io>(io: &mut I) -> Result<Profile, Error> {
 /// image target/reparse validation and before the actual MCU reset/download.
 pub(super) fn request<I: Io>(io: &mut I) -> Result<(), Error> {
     identity(io)?;
-    io.write8(MAILBOX, REQUEST)?;
-    if io.read8(MAILBOX)? != REQUEST {
+    io.write8(REG_C2HEVT, REQUEST)?;
+    if io.read8(REG_C2HEVT)? != REQUEST {
         return Err(Error::Register);
     }
     Ok(())
@@ -115,19 +115,19 @@ pub(super) fn request<I: Io>(io: &mut I) -> Result<(), Error> {
 pub(super) fn read<I: Io>(io: &mut I) -> Result<Report, Error> {
     let profile = identity(io)?;
     ready(io)?;
-    let id = io.read8(MAILBOX)?;
+    let id = io.read8(REG_C2HEVT)?;
     if id != REPORT {
         return Err(Error::HardwareFeatureId { observed: id });
     }
     let mut raw = [0; LENGTH];
     for (i, byte) in raw.iter_mut().enumerate() {
-        *byte = io.read8(MAILBOX + 2 + i as u32)?;
+        *byte = io.read8(REG_C2HEVT + 2 + i as u32)?;
     }
     // Identity/ready must still belong to this boot before admitting the bytes.
     identity(io)?;
     ready(io)?;
-    io.write8(MAILBOX, 0)?;
-    if io.read8(MAILBOX)? != 0 {
+    io.write8(REG_C2HEVT, 0)?;
+    if io.read8(REG_C2HEVT)? != 0 {
         return Err(Error::Register);
     }
     Ok(Report {
@@ -138,8 +138,8 @@ pub(super) fn read<I: Io>(io: &mut I) -> Result<Report, Error> {
 }
 
 fn ready<I: Io>(io: &mut I) -> Result<(), Error> {
-    let observed = io.read16(0x80)?;
-    if observed & 0xcfff != 0xc078 {
+    let observed = io.read16(REG_MCUFW_CTRL)?;
+    if observed & FW_READY_MASK != FW_READY {
         return Err(Error::HardwareFeatureFirmwareNotReady { observed });
     }
     Ok(())
@@ -193,10 +193,10 @@ mod tests {
             self.profile
         }
         fn read8(&mut self, register: u32) -> Result<u8, Error> {
-            let value = if register == MAILBOX {
+            let value = if register == REG_C2HEVT {
                 self.id
             } else {
-                let index = (register - MAILBOX - 2) as usize;
+                let index = (register - REG_C2HEVT - 2) as usize;
                 self.raw_reads += 1;
                 self.raw[index]
             };
@@ -224,7 +224,7 @@ mod tests {
             )
         }
         fn write8(&mut self, register: u32, value: u8) -> Result<(), Error> {
-            assert_eq!(register, MAILBOX);
+            assert_eq!(register, REG_C2HEVT);
             self.id = value;
             self.event(true, register, value);
             Ok(())

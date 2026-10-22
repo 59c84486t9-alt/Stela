@@ -6,7 +6,9 @@ use super::{
     beacon::{self, Beacon},
     identity::Chip,
     io::{self, Io, NativeIo},
-    receive, transmit,
+    receive,
+    registers::*,
+    transmit,
 };
 use core::sync::atomic::{Ordering, fence};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,7 +75,7 @@ pub unsafe fn setup<B: beacon::Registers, R: receive::Registers, T: transmit::Re
         return Err(Error::IdentityChanged);
     }
     let mut a = Attempt { io, done: false };
-    let actual = a.io.read32(0xf0)?;
+    let actual = a.io.read32(REG_SYS_CFG1)?;
     if actual == u32::MAX {
         return Err(Error::Removed);
     }
@@ -115,29 +117,53 @@ fn base<I: Io>(io: &mut I, count: u32, n: u16, reg: u32, address: u32) -> Result
 /// Binding addresses are private observations of retained native allocations,
 /// never public fabricated IOVAs. This function's caller owns all live pins.
 fn rebind<I: Io>(io: &mut I, beacon: u32, receive: u32, tx: [u32; 7]) -> Result<(), Error> {
-    let value = io.read8(0x303)?;
+    let value = io.read8(RTK_PCI_CTRL + 3)?;
     if value == u8::MAX {
         return Err(Error::Removed);
     }
-    io.write8(0x303, value | 0xf7)?;
-    io.write32(0x308, beacon)?;
-    if io.read32(0x308)? != beacon {
+    io.write8(RTK_PCI_CTRL + 3, value | 0xf7)?;
+    io.write32(RTK_PCI_TXBD_DESA_BCNQ, beacon)?;
+    if io.read32(RTK_PCI_TXBD_DESA_BCNQ)? != beacon {
         return Err(Error::Readback);
     }
     // Actual pinned source order: H2C,BK,BE,VO,VI,management,high,RX.
-    base(io, 0x1328, 128, 0x1320, tx[6])?;
-    base(io, 0x38a, 128, 0x330, tx[0])?;
-    base(io, 0x388, 256, 0x328, tx[1])?;
-    base(io, 0x384, 128, 0x318, tx[3])?;
-    base(io, 0x386, 128, 0x320, tx[2])?;
-    base(io, 0x380, 128, 0x310, tx[4])?;
-    base(io, 0x38c, 128, 0x340, tx[5])?;
-    base(io, 0x382, 512, 0x338, receive)?;
-    io.write32(0x39c, u32::MAX)?;
-    let v = read32(io, 0x1330)?;
-    io.write32(0x1330, v | (1 << 16) | (1 << 8))?;
-    let v = read32(io, 0x300)?;
-    io.write32(0x300, v | (1 << 20) | (1 << 15))?;
+    base(
+        io,
+        RTK_PCI_TXBD_NUM_H2CQ,
+        128,
+        RTK_PCI_TXBD_DESA_H2CQ,
+        tx[6],
+    )?;
+    base(io, RTK_PCI_TXBD_NUM_BKQ, 128, RTK_PCI_TXBD_DESA_BKQ, tx[0])?;
+    base(io, RTK_PCI_TXBD_NUM_BEQ, 256, RTK_PCI_TXBD_DESA_BEQ, tx[1])?;
+    base(io, RTK_PCI_TXBD_NUM_VOQ, 128, RTK_PCI_TXBD_DESA_VOQ, tx[3])?;
+    base(io, RTK_PCI_TXBD_NUM_VIQ, 128, RTK_PCI_TXBD_DESA_VIQ, tx[2])?;
+    base(
+        io,
+        RTK_PCI_TXBD_NUM_MGMTQ,
+        128,
+        RTK_PCI_TXBD_DESA_MGMTQ,
+        tx[4],
+    )?;
+    base(
+        io,
+        RTK_PCI_TXBD_NUM_HI0Q,
+        128,
+        RTK_PCI_TXBD_DESA_HI0Q,
+        tx[5],
+    )?;
+    base(
+        io,
+        RTK_PCI_RXBD_NUM_MPDUQ,
+        512,
+        RTK_PCI_RXBD_DESA_MPDUQ,
+        receive,
+    )?;
+    io.write32(RTK_PCI_TXBD_RWPTR_CLR, u32::MAX)?;
+    let v = read32(io, REG_H2CQ_CSR)?;
+    io.write32(REG_H2CQ_CSR, v | (1 << 16) | (1 << 8))?;
+    let v = read32(io, RTK_PCI_CTRL)?;
+    io.write32(RTK_PCI_CTRL, v | (1 << 20) | (1 << 15))?;
     Ok(())
 }
 
@@ -159,20 +185,20 @@ mod tests {
         fn pointer(&self) -> NonNull<u8> {
             NonNull::new(self.words.get().cast()).unwrap()
         }
-        fn get(&self, reg: usize) -> u32 {
+        fn get(&self, reg: u32) -> u32 {
             unsafe {
                 self.pointer()
                     .as_ptr()
-                    .add(reg)
+                    .add(reg as usize)
                     .cast::<u32>()
                     .read_volatile()
             }
         }
-        fn set(&self, reg: usize, value: u32) {
+        fn set(&self, reg: u32, value: u32) {
             unsafe {
                 self.pointer()
                     .as_ptr()
-                    .add(reg)
+                    .add(reg as usize)
                     .cast::<u32>()
                     .write_volatile(value);
             }
@@ -276,7 +302,7 @@ mod tests {
                 rx.poll(0, |_| panic!()).unwrap();
             }
             if mode == 1 {
-                bar.set(0x80, 0xc078);
+                bar.set(REG_MCUFW_CTRL, 0xc078);
                 tx.general_info(
                     &Source,
                     super::super::fifo::Geometry::for_profile(profile()).unwrap(),

@@ -5,6 +5,7 @@
 use super::{
     identity::{Chip, Profile},
     io::{self, Io},
+    registers::*,
 };
 const PHYSICAL: usize = 512;
 const PROTECTED: usize = 124;
@@ -165,32 +166,32 @@ pub unsafe fn read<I: Io>(io: &mut I) -> Result<Physical, Error> {
     }
     let mut a = Attempt { io, done: false };
     verify(a.io, profile)?;
-    let ready = a.io.read16(0x80)?;
+    let ready = a.io.read16(REG_MCUFW_CTRL)?;
     if ready == u16::MAX {
         return Err(Error::Removed);
     }
-    if ready & 0xcfff != 0xc078 {
+    if ready & FW_READY_MASK != FW_READY {
         return Err(Error::FirmwareNotReady);
     }
-    let bank = a.io.read32(0x34)?;
-    a.io.write32(0x34, bank & !0x300)?;
-    let ldo = a.io.read8(0x29)?;
-    a.io.write8(0x29, ldo & !1)?;
-    let mut control = a.io.read32(0x30)?;
+    let bank = a.io.read32(REG_LDO_EFUSE_CTRL)?;
+    a.io.write32(REG_LDO_EFUSE_CTRL, bank & !0x300)?;
+    let ldo = a.io.read8(REG_ANAPARLDO_POW_MAC)?;
+    a.io.write8(REG_ANAPARLDO_POW_MAC, ldo & !BIT_LDOE25_PON)?;
+    let mut control = a.io.read32(REG_EFUSE_CTRL)?;
     let mut bytes = [0; PHYSICAL];
     for (address, byte) in bytes.iter_mut().enumerate() {
         control = (control & !0x3ffff) | ((address as u32) << 8);
-        a.io.write32(0x30, control & !(1 << 31))?;
+        a.io.write32(REG_EFUSE_CTRL, control & !BIT_EF_FLAG)?;
         let mut ready = false;
         for poll in 0..POLLS {
             a.io.delay_us(1);
-            control = a.io.read32(0x30)?;
+            control = a.io.read32(REG_EFUSE_CTRL)?;
             // Source decrements/tests the bound before accepting completion,
             // so even ready on the final millionth observation times out.
             if poll + 1 == POLLS {
                 break;
             }
-            if control & (1 << 31) != 0 {
+            if control & BIT_EF_FLAG != 0 {
                 ready = true;
                 break;
             }
@@ -220,7 +221,7 @@ pub unsafe fn read<I: Io>(io: &mut I) -> Result<Physical, Error> {
     Ok(Physical { profile, bytes })
 }
 fn verify<I: Io>(io: &mut I, profile: Profile) -> Result<(), Error> {
-    let actual = io.read32(0xf0)?;
+    let actual = io.read32(REG_SYS_CFG1)?;
     if actual == u32::MAX {
         return Err(Error::Removed);
     }

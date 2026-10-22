@@ -7,6 +7,7 @@ use super::{
     fifo::Geometry,
     identity::{Chip, Profile},
     io::Bar,
+    registers::*,
 };
 use crate::bus::dma::{
     mapping::{Direction, DmaDomain},
@@ -66,13 +67,41 @@ impl Queue {
     }
     fn registers(self) -> (u32, u32, u32) {
         match self {
-            Self::Background => (0x330, 0x38a, 0x3ac),
-            Self::BestEffort => (0x328, 0x388, 0x3a8),
-            Self::Video => (0x320, 0x386, 0x3a4),
-            Self::Voice => (0x318, 0x384, 0x3a0),
-            Self::Management => (0x310, 0x380, 0x3b0),
-            Self::High => (0x340, 0x38c, 0x3b8),
-            Self::H2c => (0x1320, 0x1328, 0x132c),
+            Self::Background => (
+                RTK_PCI_TXBD_DESA_BKQ,
+                RTK_PCI_TXBD_NUM_BKQ,
+                RTK_PCI_TXBD_IDX_BKQ,
+            ),
+            Self::BestEffort => (
+                RTK_PCI_TXBD_DESA_BEQ,
+                RTK_PCI_TXBD_NUM_BEQ,
+                RTK_PCI_TXBD_IDX_BEQ,
+            ),
+            Self::Video => (
+                RTK_PCI_TXBD_DESA_VIQ,
+                RTK_PCI_TXBD_NUM_VIQ,
+                RTK_PCI_TXBD_IDX_VIQ,
+            ),
+            Self::Voice => (
+                RTK_PCI_TXBD_DESA_VOQ,
+                RTK_PCI_TXBD_NUM_VOQ,
+                RTK_PCI_TXBD_IDX_VOQ,
+            ),
+            Self::Management => (
+                RTK_PCI_TXBD_DESA_MGMTQ,
+                RTK_PCI_TXBD_NUM_MGMTQ,
+                RTK_PCI_TXBD_IDX_MGMTQ,
+            ),
+            Self::High => (
+                RTK_PCI_TXBD_DESA_HI0Q,
+                RTK_PCI_TXBD_NUM_HI0Q,
+                RTK_PCI_TXBD_IDX_HI0Q,
+            ),
+            Self::H2c => (
+                RTK_PCI_TXBD_DESA_H2CQ,
+                RTK_PCI_TXBD_NUM_H2CQ,
+                RTK_PCI_TXBD_IDX_H2CQ,
+            ),
         }
     }
 }
@@ -94,7 +123,7 @@ unsafe impl Registers for Bar {
         Bar::profile(self)
     }
     fn verify_identity(&mut self) -> Result<(), Error> {
-        let value = self.read32(0xf0);
+        let value = self.read32(REG_SYS_CFG1);
         if value == u32::MAX {
             return Err(Error::Removed);
         }
@@ -104,11 +133,11 @@ unsafe impl Registers for Bar {
         Ok(())
     }
     fn firmware_ready(&mut self) -> Result<(), Error> {
-        let value = self.read16(0x80);
+        let value = self.read16(REG_MCUFW_CTRL);
         if value == u16::MAX {
             return Err(Error::Removed);
         }
-        if value & 0xcfff != 0xc078 {
+        if value & FW_READY_MASK != FW_READY {
             return Err(Error::FirmwareNotReady);
         }
         Ok(())
@@ -130,7 +159,7 @@ unsafe impl Registers for Bar {
         Ok(())
     }
     fn publish_h2c(&mut self, producer: u16) -> Result<(), Error> {
-        self.write16(0x132c, producer);
+        self.write16(RTK_PCI_TXBD_IDX_H2CQ, producer);
         Ok(())
     }
 }
@@ -681,7 +710,7 @@ mod tests {
         );
         assert_eq!(&d.packets[2][48..80], &iqk(2));
         drop(d);
-        assert_eq!(fw.lock().unwrap().get(0x1b10, 1), 0);
+        assert_eq!(fw.lock().unwrap().get(REG_IQKSTAT, 1), 0);
         assert_eq!(fw.lock().unwrap().now, 320000);
         assert_eq!(
             unsafe { control.initial_iqk(&mut rings, &Source) }.unwrap_err(),
@@ -709,7 +738,7 @@ mod tests {
             let mut rings = install_profile(&memory, &device, report.profile()).unwrap();
             fw.lock().unwrap().clear_log();
             match mode {
-                0 => fw.lock().unwrap().set(0x2d9c, 1, 0xaa),
+                0 => fw.lock().unwrap().set(REG_RPT_CIP, 1, 0xaa),
                 1 => fw.lock().unwrap().iqk_after = None,
                 2 => device.lock().unwrap().fail_publish = true,
                 _ => fw.lock().unwrap().panic_at = Some(6),
@@ -727,7 +756,7 @@ mod tests {
                     FwError::Timeout { register: 0x2d9c }
                 );
                 assert_eq!(rings.pending(), 1);
-                assert_eq!(fw.lock().unwrap().get(0x1b10, 1), 0);
+                assert_eq!(fw.lock().unwrap().get(REG_IQKSTAT, 1), 0);
             } else if mode == 2 {
                 assert_eq!(
                     result.unwrap().unwrap_err(),
@@ -800,8 +829,8 @@ mod tests {
                 let mut f = fw.lock().unwrap();
                 f.clear_log();
                 match mode {
-                    0 => f.set(0xf0, 4, report.profile().observed().sys_cfg1 ^ 1),
-                    1 => f.set(0x80, 2, 0),
+                    0 => f.set(REG_SYS_CFG1, 4, report.profile().observed().sys_cfg1 ^ 1),
+                    1 => f.set(REG_MCUFW_CTRL, 2, 0),
                     2 => f.regress = true,
                     3 => f.mutate_at = Some((8, 0xf0, 4, report.profile().observed().sys_cfg1 ^ 1)),
                     _ => f.mutate_at = Some((9, 0x80, 2, 0)),

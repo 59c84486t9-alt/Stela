@@ -5,6 +5,7 @@
 use super::{
     identity::Chip,
     io::{Error as HardwareError, Io},
+    registers::*,
 };
 mod tables;
 use tables::*;
@@ -96,7 +97,7 @@ pub unsafe fn on<I: Io>(io: &mut I) -> Result<(), Error> {
         complete: false,
     };
     let result = (|| {
-        let observed = attempt.io.read32(0xf0)?;
+        let observed = attempt.io.read32(REG_SYS_CFG1)?;
         if observed != profile.observed().sys_cfg1 || observed == u32::MAX {
             return Err(Error::IdentityChanged);
         }
@@ -125,33 +126,33 @@ fn modify32<I: Io>(io: &mut I, r: u32, clear: u32, set: u32) -> Result<(), Error
     Ok(())
 }
 fn pre_system<I: Io>(io: &mut I) -> Result<(), Error> {
-    io.write8(0x1c, 0)?;
-    modify32(io, 0x74, 0, 1 << 8)?;
-    modify32(io, 0x64, 0, 1 << 29 | 1 << 28)?;
-    modify32(io, 0x4c, 1 << 26 | 1 << 25, 0)?;
-    modify32(io, 0x40, 0, 1 << 2)?;
-    modify8(io, 2, 3, 0)?;
-    modify8(io, 0x1f, 7, 0)?;
-    modify32(io, 0xec, 7 << 24, 0)
+    io.write8(REG_RSV_CTRL, 0)?;
+    modify32(io, REG_HCI_OPT_CTRL, 0, 1 << 8)?;
+    modify32(io, REG_PAD_CTRL1, 0, 1 << 29 | 1 << 28)?;
+    modify32(io, REG_LED_CFG, 1 << 26 | 1 << 25, 0)?;
+    modify32(io, REG_GPIO_MUXCFG, 0, 1 << 2)?;
+    modify8(io, REG_SYS_FUNC_EN, 3, 0)?;
+    modify8(io, REG_RF_CTRL, 7, 0)?;
+    modify32(io, REG_WLRF1, 7 << 24, 0)
 }
 fn system<I: Io>(io: &mut I) -> Result<(), Error> {
-    modify32(io, 0x1080, 0, 1 << 16 | 1 << 8)?;
-    modify8(io, 3, 0, 0xd8)?;
-    let value = (io.read8(0x1103)? & 0xf0) | 0x0c;
-    io.write8(0x1103, value)?;
-    let control = io.read32(0x80)?;
+    modify32(io, REG_CPU_DMEM_CON, 0, 1 << 16 | 1 << 8)?;
+    modify8(io, REG_SYS_FUNC_EN + 1, 0, 0xd8)?;
+    let value = (io.read8(REG_CR_EXT + 3)? & 0xf0) | 0x0c;
+    io.write8(REG_CR_EXT + 3, value)?;
+    let control = io.read32(REG_MCUFW_CTRL)?;
     if control & (1 << 20) != 0 {
-        io.write32(0x80, control & !(1 << 20))?;
-        modify32(io, 0x40, 1 << 19, 0)?;
+        io.write32(REG_MCUFW_CTRL, control & !(1 << 20))?;
+        modify32(io, REG_GPIO_MUXCFG, 1 << 19, 0)?;
     }
     Ok(())
 }
 fn switch<I: Io>(io: &mut I, on: bool) -> Result<bool, Error> {
-    let rpwm = io.read8(0x3d9)?;
-    if io.read16(0x80)? == 0xc078 {
-        io.write8(0x3d9, (rpwm ^ 0x80) & 0x80)?;
+    let rpwm = io.read8(RPWM_PCIE)?;
+    if io.read16(REG_MCUFW_CTRL)? == FW_READY {
+        io.write8(RPWM_PCIE, (rpwm ^ BIT_RPWM_TOGGLE) & BIT_RPWM_TOGGLE)?;
     }
-    let current = io.read8(0x100)? != 0xea;
+    let current = io.read8(REG_CR)? != 0xea;
     if on == current {
         return Ok(false);
     }
@@ -257,11 +258,11 @@ mod tests {
                 toggled: false,
                 quarantines: 0,
             };
-            m.set(0xf0, 4, profile.observed().sys_cfg1);
+            m.set(REG_SYS_CFG1, 4, profile.observed().sys_cfg1);
             m.set(4, 1, 0);
             m.set(5, 1, 0);
             m.set(6, 1, 2);
-            m.set(0x100, 1, if already_on { 0 } else { 0xea });
+            m.set(REG_CR, 1, if already_on { 0 } else { 0xea });
             m.set(
                 0x80,
                 4,
@@ -306,11 +307,11 @@ mod tests {
             let mut stored = v;
             if r == 5 && n == 1 {
                 if v & 1 != 0 {
-                    self.set(0x100, 1, 0);
+                    self.set(REG_CR, 1, 0);
                     stored &= !1;
                 }
                 if v & 2 != 0 {
-                    self.set(0x100, 1, 0xea);
+                    self.set(REG_CR, 1, 0xea);
                     stored &= !2;
                 }
             }
@@ -366,11 +367,11 @@ mod tests {
                     let mut m = Model::new(cut, powered, flash);
                     // SAFETY: synchronous stopped virtual requester, no active queue.
                     unsafe { on(&mut m) }.unwrap();
-                    assert_eq!(m.get(0x100, 1), 0);
-                    assert_eq!(m.get(0x1080, 4) & 0x10100, 0x10100);
-                    assert_eq!(m.get(3, 1) & 0xd8, 0xd8);
-                    assert_eq!(m.get(0x1103, 1) & 15, 12);
-                    assert_eq!(m.get(0x80, 4) & (1 << 20), 0);
+                    assert_eq!(m.get(REG_CR, 1), 0);
+                    assert_eq!(m.get(REG_CPU_DMEM_CON, 4) & 0x10100, 0x10100);
+                    assert_eq!(m.get(REG_SYS_FUNC_EN + 1, 1) & 0xd8, 0xd8);
+                    assert_eq!(m.get(REG_CR_EXT + 3, 1) & 15, 12);
+                    assert_eq!(m.get(REG_MCUFW_CTRL, 4) & (1 << 20), 0);
                     assert_eq!(m.quarantines, 0);
                 }
             }
@@ -404,7 +405,7 @@ mod tests {
             }
         }
         let mut m = Model::new(1, false, false);
-        m.set(0xf0, 4, u32::MAX);
+        m.set(REG_SYS_CFG1, 4, u32::MAX);
         assert_eq!(unsafe { on(&mut m) }, Err(Error::IdentityChanged));
         assert_eq!(m.operations, 1);
         assert_eq!(m.quarantines, 1);

@@ -18,5 +18,6 @@ pub mod io;
 pub mod phy_tables;
 pub mod power;
 pub mod receive;
+pub mod registers;
 pub mod rf;
 pub mod transmit;

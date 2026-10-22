@@ -6,6 +6,7 @@
 use super::{
     identity::Chip,
     io::{self, Io},
+    registers::*,
 };
 const MASK0: u32 = 0x44fd;
 const MASK1: u32 = 1 << 9;
@@ -89,7 +90,7 @@ impl<I: Io> Controller<I> {
         if profile.chip() != Chip::Rtl8822C {
             return Err(Error::WrongChip);
         }
-        let value = c.read(0xf0)?;
+        let value = c.read(REG_SYS_CFG1)?;
         if value != profile.observed().sys_cfg1 {
             return Err(Error::IdentityChanged);
         }
@@ -114,7 +115,7 @@ impl<I: Io> Controller<I> {
         // Set terminal state before any uncertain write/readback. A caller
         // catching unwind cannot mistake partially disabled masks for success.
         self.state = State::Quarantined;
-        for r in [0xb0, 0xb8, 0x10b8] {
+        for r in [REG_HIMR0, REG_HIMR1, REG_HIMR3] {
             self.io()?.write32(r, 0)?;
             if self.read(r)? != 0 {
                 return Err(Error::Readback);
@@ -139,9 +140,13 @@ impl<I: Io> Controller<I> {
         }
         self.mask()?;
         self.state = State::Quarantined;
-        let raw = [self.read(0xb4)?, self.read(0xbc)?, self.read(0x10bc)?];
+        let raw = [
+            self.read(REG_HISR0)?,
+            self.read(REG_HISR1)?,
+            self.read(REG_HISR3)?,
+        ];
         let owned = [raw[0] & MASK0, raw[1] & MASK1, raw[2] & MASK3];
-        for (r, value) in [0xb4, 0xbc, 0x10bc].into_iter().zip(owned) {
+        for (r, value) in [REG_HISR0, REG_HISR1, REG_HISR3].into_iter().zip(owned) {
             self.io()?.write32(r, value)?;
         }
         self.state = State::Disabled;
@@ -166,7 +171,7 @@ impl<I: Io> Controller<I> {
         }
         self.state = State::Quarantined;
         let masks = [MASK0 & !u32::from(rx_pending), MASK1, MASK3];
-        for (r, value) in [0xb0, 0xb8, 0x10b8].into_iter().zip(masks) {
+        for (r, value) in [REG_HIMR0, REG_HIMR1, REG_HIMR3].into_iter().zip(masks) {
             self.io()?.write32(r, value)?;
             if self.read(r)? != value {
                 return Err(Error::Readback);

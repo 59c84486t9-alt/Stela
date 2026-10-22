@@ -7,6 +7,7 @@ use super::{
     features::Report,
     identity::{Chip, Profile},
     io::{self, Io},
+    registers::*,
 };
 
 const RF_MASK: u32 = 0xfffff;
@@ -84,21 +85,21 @@ impl<'a, I: Io> Registers<'a, I> {
         Ok(registers)
     }
     fn verify(&mut self) -> Result<(), Error> {
-        let identity = self.io.read32(0xf0)?;
+        let identity = self.io.read32(REG_SYS_CFG1)?;
         if identity == u32::MAX {
             return Err(Error::Removed);
         }
         if identity != self.profile.observed().sys_cfg1 {
             return Err(Error::IdentityChanged);
         }
-        if self.io.read16(0x80)? & 0xcfff != 0xc078 {
+        if self.io.read16(REG_MCUFW_CTRL)? & FW_READY_MASK != FW_READY {
             return Err(Error::FirmwareNotReady);
         }
         // Exact source domain-enable bits from rtw8822c_phy_set_param. Their
         // readback is only a prerequisite, never proof of calibrated RF state.
-        let bb = self.io.read8(2)?;
-        let rf = self.io.read8(0x1f)?;
-        let wlrf = self.io.read32(0xec)?;
+        let bb = self.io.read8(REG_SYS_FUNC_EN)?;
+        let rf = self.io.read8(REG_RF_CTRL)?;
+        let wlrf = self.io.read32(REG_WLRF1)?;
         if bb & 3 != 3 || rf & 7 != 7 || wlrf & 0x07000000 != 0x07000000 {
             return Err(Error::DomainOff);
         }
@@ -243,12 +244,12 @@ mod tests {
                 mutate_at: None,
                 quarantined: 0,
             };
-            m.set(0xf0, 4, profile.observed().sys_cfg1);
-            m.set(0x80, 2, 0xc078);
-            m.set(2, 1, 3);
-            m.set(0x1f, 1, 7);
-            m.set(0xec, 4, 0x07000000);
-            m.set(0x1a0, 1, 0x19);
+            m.set(REG_SYS_CFG1, 4, profile.observed().sys_cfg1);
+            m.set(REG_MCUFW_CTRL, 2, 0xc078);
+            m.set(REG_SYS_FUNC_EN, 1, 3);
+            m.set(REG_RF_CTRL, 1, 7);
+            m.set(REG_WLRF1, 4, 0x07000000);
+            m.set(REG_C2HEVT, 1, 0x19);
             m
         }
         fn get(&self, r: u32, width: usize) -> u32 {
@@ -418,9 +419,9 @@ mod tests {
         let (m, mut io, report) = setup(false);
         {
             let mut m = m.lock().unwrap();
-            m.set(2, 1, 255);
-            m.set(0x1f, 1, 255);
-            m.set(0xec, 4, u32::MAX);
+            m.set(REG_SYS_FUNC_EN, 1, 255);
+            m.set(REG_RF_CTRL, 1, 255);
+            m.set(REG_WLRF1, 4, u32::MAX);
         }
         drop(unsafe { Registers::new(&mut io, &report) }.unwrap());
         assert_eq!(m.lock().unwrap().quarantined, 0);
@@ -476,12 +477,12 @@ mod tests {
                 // access is a modeled device/CPU volatile access below.
                 unsafe { NonNull::new_unchecked((*self.0.get()).as_mut_ptr().cast()) }
             }
-            fn set(&self, r: usize, value: u32) {
+            fn set(&self, r: u32, value: u32) {
                 // SAFETY: exclusively serialized fixture device update.
                 unsafe {
                     self.pointer()
                         .as_ptr()
-                        .add(r)
+                        .add(r as usize)
                         .cast::<u32>()
                         .write_volatile(value)
                 }
@@ -511,12 +512,12 @@ mod tests {
         let weak = Arc::downgrade(&bar);
         let quarantined = Arc::new(AtomicBool::new(false));
         let profile = Model::new().profile;
-        bar.set(0xf0, profile.observed().sys_cfg1);
-        bar.set(0x80, 0xc078);
+        bar.set(REG_SYS_CFG1, profile.observed().sys_cfg1);
+        bar.set(REG_MCUFW_CTRL, 0xc078);
         bar.set(0, 3 << 16);
-        bar.set(0x1c, 7 << 24);
-        bar.set(0xec, 0x07000000);
-        bar.set(0x1a0, 0x19);
+        bar.set(REG_RSV_CTRL, 7 << 24);
+        bar.set(REG_WLRF1, 0x07000000);
+        bar.set(REG_C2HEVT, 0x19);
         // SAFETY: aligned retained register fixture, no physical requester or
         // operational DMA claim. NativeIo executes actual volatile operations.
         let mut io = unsafe {
@@ -533,7 +534,7 @@ mod tests {
         }
         .unwrap();
         let report = super::super::features::read(&mut io).unwrap();
-        bar.set(BASE[1] as usize + 0x18 * 4, 0xf1234567);
+        bar.set(BASE[1] + 0x18 * 4, 0xf1234567);
         {
             let mut rf = unsafe { Registers::new(&mut io, &report) }.unwrap();
             rf.write(Path::B, 0x18, 0x3f0, 0x2a).unwrap();
@@ -549,7 +550,7 @@ mod tests {
         );
         assert_eq!(bar.get(SIPI[1] as usize), 0xabcde);
         assert!(!quarantined.load(Ordering::SeqCst));
-        bar.set(BASE[1] as usize, u32::MAX);
+        bar.set(BASE[1], u32::MAX);
         {
             let mut rf = unsafe { Registers::new(&mut io, &report) }.unwrap();
             assert!(matches!(
