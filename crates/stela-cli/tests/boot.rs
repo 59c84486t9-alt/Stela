@@ -135,7 +135,10 @@ fn device_tree() -> Vec<u8> {
     );
     let cpu0 = node(
         &[
+            // Authored single-P diagnostic topology with complete schema-4 identity.
             property("name", b"cpu0\0", false),
+            property("cluster-type", b"P\0", false),
+            property("reg", &0u32.to_le_bytes(), false),
             property("state", b"waiting\0", false),
         ],
         &[],
