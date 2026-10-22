@@ -25,7 +25,7 @@ use crate::platform::apple::{
     asc::{self, Asc},
     atc_phy::{self, AtcPhy},
     bridge::Bridge,
-    bus::{Access, Bus, DeviceId, LifecycleState, MapError, MmioError, Width},
+    bus::{Access, Bus, DeviceId, LifecycleState, MapError, MmioDevice, MmioError, Width},
     cluster::{self, Cluster},
     core_counters::{self, CoreCounters},
     coresight::{self, PcSampler, SoftwareLock},
@@ -83,7 +83,9 @@ use stela_drivers::{block::BlockDevice, input::Input, net::Mac};
 
 mod display_resources;
 pub mod memory_resources;
+mod service;
 mod sleep;
+pub use service::{AicDelivery, ServiceBatch, ServiceInput};
 pub use sleep::PowerLog;
 
 pub use crate::platform::apple::{
@@ -121,6 +123,7 @@ pub struct AppleDevices {
     latch: InterruptLatch,
     aic: Option<Controller>,
     reset: Option<Reset>,
+    service: ServiceBatch,
     memory_controller: Option<DeviceId>,
     ipi: Option<FastIpi>,
     masters: Vec<Master>,
@@ -458,6 +461,7 @@ impl AppleDevices {
             latch: InterruptLatch::new(),
             aic: None,
             reset: None,
+            service: ServiceBatch::default(),
             memory_controller: None,
             ipi: None,
             masters: Vec::new(),
@@ -807,23 +811,31 @@ impl AppleDevices {
         range: Range,
         reset: Option<(usize, u64)>,
     ) -> Result<(), MapError> {
+        if let Some((cpu, _)) = reset
+            && let Some(existing) = self.reset_vectors.get(cpu).copied().flatten()
+        {
+            return Err(MapError::Overlap { existing });
+        }
         let mut model = Lockdown::new(name, control);
+        let mut bindings = vec![(
+            range
+                .physical
+                .checked_add(control)
+                .ok_or(MapError::Overflow)?,
+            lockdown::BYTES,
+            control,
+        )];
         if let Some((_, entry)) = reset {
             model = model.with_reset_vector(entry);
+            bindings.push((range.physical, lockdown::RVBAR_BYTES, 0));
         }
-        let device = self.bus.add(Box::new(model));
+        // Publish the reset-vector owner only after every actual bank fits.
+        let device = self.bus.install(Box::new(model), &bindings)?;
         if let Some((pe, _)) = reset {
             if self.reset_vectors.len() <= pe {
                 self.reset_vectors.resize(pe + 1, None);
             }
             self.reset_vectors[pe] = Some(device);
-        }
-        // The board checked that CONTROL and MASK lie inside the block.
-        self.bus
-            .map(device, range.physical + control, lockdown::BYTES, control)?;
-        if reset.is_some() {
-            self.bus
-                .map(device, range.physical, lockdown::RVBAR_BYTES, 0)?;
         }
         Ok(())
     }
@@ -837,9 +849,15 @@ impl AppleDevices {
         clusters: u8,
         mpidrs: &[u64],
     ) -> Result<(), String> {
-        let device = self.bus.add(Box::new(CpuStart::new(clusters)));
-        self.bus
-            .map(device, physical, cpustart::bytes(clusters), 0)
+        if self.cpu_start.is_some() {
+            return Err("CPU start owner is already bound".into());
+        }
+        let device = self
+            .bus
+            .install(
+                Box::new(CpuStart::new(clusters)),
+                &[(physical, cpustart::bytes(clusters), 0)],
+            )
             .map_err(|error| format!("CPU start placement: {error:?}"))?;
         self.cpu_start = Some(CpuStarter {
             device,
@@ -873,36 +891,6 @@ impl AppleDevices {
     fn locked_reset_vector(&self, cpu: usize) -> Option<u64> {
         let block = self.reset_vectors.get(cpu).copied().flatten()?;
         self.bus.device::<Lockdown>(block)?.reset_address()
-    }
-
-    /// Turn the cores the CPU start registers released into PE starts.
-    fn release_cores(&mut self) -> Result<(), DeviceError> {
-        let Some(starter) = &self.cpu_start else {
-            return Ok(());
-        };
-        let released = self
-            .bus
-            .device_mut::<CpuStart>(starter.device)
-            .expect("the CPU start id names its model")
-            .take();
-        for core in released {
-            let affinity = u64::from(core.cluster) << 8 | u64::from(core.core);
-            let cpu = starter
-                .mpidrs
-                .iter()
-                .position(|&mpidr| mpidr & 0xffff == affinity)
-                .ok_or_else(|| {
-                    DeviceError::Refused(format!(
-                        "CPU start of cluster {} core {}, which the board does not have",
-                        core.cluster, core.core
-                    ))
-                })?;
-            let address = self.locked_reset_vector(cpu).ok_or_else(|| {
-                DeviceError::Refused(format!("CPU start of PE {cpu}, which has no RVBAR"))
-            })?;
-            self.starts.push(Start { cpu, address });
-        }
-        Ok(())
     }
 
     /// The AMCC's lock registers at each aperture of `layout`, with the
@@ -2021,18 +2009,23 @@ impl AppleDevices {
     /// PA. Each starts active under the existing boot assumption; this is
     /// not a qualified transfer of the original firmware's control words.
     pub fn add_power_states(&mut self, blocks: &[Range], registers: &[u64]) -> Result<(), String> {
+        if self.pmgr.is_some() {
+            return Err("PMGR lifecycle owner is already bound".into());
+        }
         let states = registers.iter().map(|&address| PowerState {
             address,
             initial: ACTIVE,
         });
         let model = Pmgr::new(states).map_err(|error| format!("PMGR states: {error:?}"))?;
-        let device = self.bus.add(Box::new(model));
-        for block in blocks {
-            // The model's offsets are guest PAs.
-            self.bus
-                .map(device, block.physical, block.bytes, block.physical)
-                .map_err(|error| format!("PMGR placement: {error:?}"))?;
-        }
+        // The model's offsets are guest PAs. Publish all actual banks together.
+        let bindings: Vec<_> = blocks
+            .iter()
+            .map(|block| (block.physical, block.bytes, block.physical))
+            .collect();
+        let device = self
+            .bus
+            .install(Box::new(model), &bindings)
+            .map_err(|error| format!("PMGR placement: {error:?}"))?;
         self.pmgr = Some(device);
         Ok(())
     }
@@ -2551,12 +2544,14 @@ impl AppleDevices {
     /// says where its per-die arrays and event register are; an AICv1's are
     /// fixed.
     pub fn add_aic(&mut self, physical: u64, nr_irq: u16, layout: AicLayout) -> Result<(), String> {
-        let (device, span) = match layout {
+        if self.aic.is_some() {
+            return Err("AIC owner is already bound".into());
+        }
+        let (model, span, v1): (Box<dyn MmioDevice>, u64, bool) = match layout {
             AicLayout::V1 => {
                 let aic = Aic1::new(nr_irq, 1)
                     .map_err(|error| format!("AIC1 configuration: {error:?}"))?;
-                let device = self.bus.add(Box::new(aic));
-                (Controller::V1(device), Aic1::span())
+                (Box::new(aic), Aic1::span(), true)
             }
             AicLayout::V2 {
                 version,
@@ -2579,15 +2574,19 @@ impl AppleDevices {
                 let aic =
                     Aic2::new(config).map_err(|error| format!("AIC2 configuration: {error:?}"))?;
                 let span = aic.span();
-                let device = self.bus.add(Box::new(aic));
-                (Controller::V2(device), span)
+                (Box::new(aic), span, false)
             }
         };
-        self.aic = Some(device);
-        let (Controller::V1(id) | Controller::V2(id)) = device;
-        self.bus
-            .map(id, physical, span, 0)
+        let id = self
+            .bus
+            .install(model, &[(physical, span, 0)])
             .map_err(|error| format!("AIC placement: {error:?}"))?;
+        let device = if v1 {
+            Controller::V1(id)
+        } else {
+            Controller::V2(id)
+        };
+        self.aic = Some(device);
         if matches!(device, Controller::V2(_)) {
             self.register_power_device(physical, id, false)?;
         }
@@ -2614,6 +2613,8 @@ impl AppleDevices {
                     &mut access,
                 );
             master.phy_changed |= changed;
+            self.service
+                .retain_reset(&mut self.reset, reset_reason(&access));
         }
     }
 
@@ -2762,48 +2763,11 @@ impl AppleDevices {
                         phy.set_power(powered, link.retention);
                     }
                 }
+                self.service
+                    .retain_reset(&mut self.reset, reset_reason(&access));
             }
             self.settle_phys(cpu, now);
-        }
-    }
-
-    /// Forward queued device wires into the AIC and record a reset request;
-    /// `cpu` is the PE whose access or time step queued them.
-    fn settle(&mut self, cpu: CpuIndex, now: u64, reset: Option<Reset>) -> Result<(), DeviceError> {
-        if self.reset.is_none() {
-            self.reset = reset;
-        }
-        self.settle_lifecycle(cpu, now);
-        self.release_cores()?;
-        loop {
-            let inputs = self.latch.take_aic_inputs();
-            if inputs.is_empty() {
-                return Ok(());
-            }
-            let Some(aic) = self.aic else {
-                return Err(DeviceError::Refused(format!(
-                    "AIC input {:?} changed but no AIC model is mapped",
-                    inputs[0].0
-                )));
-            };
-            let mut access = Access::new(cpu, now, &mut self.latch);
-            for (input, level) in inputs {
-                let result = match aic {
-                    Controller::V1(id) => self
-                        .bus
-                        .device_mut::<Aic1>(id)
-                        .expect("the AIC id names an Aic1")
-                        .set_input(input, level, &mut access)
-                        .map_err(|error| format!("{error:?}")),
-                    Controller::V2(id) => self
-                        .bus
-                        .device_mut::<Aic2>(id)
-                        .expect("the AIC id names an Aic2")
-                        .set_input(input, level, &mut access)
-                        .map_err(|error| format!("{error:?}")),
-                };
-                result.map_err(|error| DeviceError::Refused(format!("AIC input: {error}")))?;
-            }
+            self.service.lifecycle.push(transition);
         }
     }
 }
@@ -2993,18 +2957,19 @@ impl Devices for AppleDevices {
             .as_mut()
             .and_then(|ipi| ipi.advance(now, &mut self.latch));
         let mut access = Access::new(0, now, &mut self.latch);
-        let device = match self.bus.advance(&mut access) {
-            Ok(deadline) => deadline,
-            Err(error) => {
-                if self.reset.is_none() {
-                    self.reset = Some(Reset {
-                        transition: Transition::Halt,
-                        reason: format!("device deadline advance refused: {error:?}"),
-                    });
-                }
-                return None;
+        let advanced = self.bus.advance(&mut access);
+        let reset = reset_reason(&access);
+        let device = advanced.as_ref().ok().copied().flatten();
+        let settled = self.settle(0, now, reset);
+        if let Err(error) = advanced.map_err(describe).and(settled) {
+            if self.reset.is_none() {
+                self.reset = Some(Reset {
+                    transition: Transition::Halt,
+                    reason: format!("device advance refused: {error:?}"),
+                });
             }
-        };
+            return None;
+        }
         self.watch_pmu();
         let usb = self
             .usb_masters
@@ -4357,7 +4322,14 @@ mod tests {
                 .power,
             POWER_GATED
         );
-        d.write(0, supply, 4, 15, 0).unwrap();
+        assert_eq!(d.pending_service().unwrap().lifecycle().len(), 1);
+        assert!(d.write(0, supply, 4, 15, 1).is_err());
+        assert_eq!(d.pending_service().unwrap().lifecycle().len(), 2);
+        // Supplying the missing actual owner can resume the retained edge;
+        // neither the earlier power-off nor the later power-on is replayed.
+        d.add_aic(0x7000_0000, 32, AicLayout::V1).unwrap();
+        d.settle(0, 2, None).unwrap();
+        assert!(d.pending_service().is_none());
         assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(0));
     }
 
