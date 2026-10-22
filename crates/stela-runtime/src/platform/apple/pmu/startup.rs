@@ -10,6 +10,9 @@ use super::{FirmwareStartup, firmware::FirmwareMemory};
 use alloc::{vec, vec::Vec};
 use core::ops::Range;
 use sha2::{Digest, Sha256};
+mod clock;
+mod integrity;
+pub use clock::PmicEpoch;
 
 const HEADER: usize = 0xc0;
 const HEADER_BYTES: usize = 0x34;
@@ -97,16 +100,32 @@ pub(super) struct Loader {
     metadata: Option<u16>,
     written: Vec<bool>,
     image: Option<Image>,
+    clock: Option<clock::Clock>,
 }
 impl Loader {
-    pub fn new(profile: FirmwareStartup, capacity: usize) -> Self {
-        Self {
+    pub fn new(
+        profile: FirmwareStartup,
+        capacity: usize,
+        epoch: Option<PmicEpoch>,
+    ) -> Result<Self, &'static str> {
+        Ok(Self {
             profile,
             phase: Phase::Created,
             metadata: None,
             written: vec![false; capacity],
             image: None,
-        }
+            clock: epoch.map(clock::Clock::new).transpose()?,
+        })
+    }
+
+    pub fn check_time(&self, now: u64) -> Result<(), &'static str> {
+        self.clock.as_ref().map_or(Ok(()), |clock| clock.check(now))
+    }
+    pub fn prepare_time(&mut self, now: u64) -> Result<Option<clock::Advance<'_>>, &'static str> {
+        self.clock
+            .as_mut()
+            .map(|clock| clock.prepare(now))
+            .transpose()
     }
 
     fn control(&self) -> u16 {
@@ -196,6 +215,7 @@ impl Loader {
         address: u16,
         data: &[u8],
         memory: &FirmwareMemory,
+        now: u64,
     ) -> Result<Write, &'static str> {
         let control = self.control();
         let (key, value, lock) = self.key();
@@ -234,9 +254,24 @@ impl Loader {
             return Ok(Write::Phase);
         }
         if address == control + 6 && data == [1] && self.phase == Phase::Locked {
+            let clock = self.clock.as_ref().ok_or("PMIC start requires its actual explicitly configured native execution/timer clock owner")?;
+            // Original Maverick image1 main 80e..818 configures timer3 with
+            // request100000. This validates a real representable native
+            // countdown deadline before any startup effect. It does not arm
+            // the timer or supply missing clock-selection/event semantics.
+            if self.profile == FirmwareStartup::Maverick {
+                clock.deadline(now, clock::Reload::from_request(100000).countdown_cycles())?;
+                let image = self.image.as_ref().expect("locked image");
+                integrity::verify(
+                    &memory.bytes()[..image.bytes],
+                    image.configuration,
+                    image.version,
+                    image.metadata,
+                )?;
+            }
             return Err(match self.profile {
                 FirmwareStartup::Maverick => {
-                    "PMIC start requires initialized native firmware authentication, event/timer and shared-service resource owners"
+                    "PMIC start requires initialized native event/timer, channel and shared-service resource owners"
                 }
                 FirmwareStartup::Monaco => {
                     "PMIC start requires initialized native firmware hardware-input/calibration, event/timer and shared-service resource owners"
@@ -664,6 +699,230 @@ mod tests {
                 .iter()
                 .all(|written| *written)
         );
+    }
+
+    fn epoch_pmu(epoch: PmicEpoch, rtc: bool) -> Pmu {
+        let profile = FirmwareStartup::Maverick;
+        Pmu::configured(
+            Configuration::new(vec![], rtc.then(maverick), u8::from(rtc))
+                .unwrap()
+                .with_firmware_sram(ports(profile), vec![0xa5; 0x3000])
+                .unwrap()
+                .with_unqualified_firmware_startup(profile)
+                .unwrap()
+                .with_native_firmware_loader()
+                .unwrap()
+                .with_native_pmic_epoch(epoch)
+                .unwrap(),
+            None,
+        )
+        .unwrap()
+    }
+    fn native_time(pmu: &Pmu) -> (u64, u64, u64) {
+        pmu.loader.as_ref().unwrap().clock.as_ref().unwrap().state()
+    }
+    #[test]
+    fn native_epoch_belongs_to_actual_pmic_and_checks_all_time_before_control_or_rtc_effects() {
+        let epoch = PmicEpoch {
+            counter: 0,
+            cycles: 7,
+            hz: 32768,
+        };
+        assert!(
+            Configuration::new(vec![], None, 0)
+                .unwrap()
+                .with_native_pmic_epoch(epoch)
+                .is_err()
+        );
+        let mut owner = epoch_pmu(epoch, false);
+        owner.write(0xc804, &[0], 1).unwrap();
+        assert_eq!(native_time(&owner), (1, 7, 32768));
+        let before = native_time(&owner);
+        assert!(owner.write(0xc804, &[0], 0).is_err());
+        assert!(owner.write(0xc804, &[0xff], 1000).is_err());
+        assert_eq!(native_time(&owner), before);
+        assert_eq!(owner.loader.as_ref().unwrap().phase, Phase::Stopped);
+        owner.check_time(1000).unwrap();
+        owner.advance(1000);
+        assert_eq!(native_time(&owner), (1000, 8, 8_768_000));
+        let mut overflow = epoch_pmu(
+            PmicEpoch {
+                counter: 0,
+                cycles: u64::MAX,
+                hz: crate::platform::apple::counter::FREQUENCY_HZ,
+            },
+            true,
+        );
+        assert!(overflow.write(0xc804, &[0], 1).is_err());
+        assert_eq!(overflow.loader.as_ref().unwrap().phase, Phase::Created);
+        assert_eq!(native_time(&overflow), (0, u64::MAX, 0));
+        let mut actual = [0xff; 6];
+        overflow.read(maverick().upcount, &mut actual, 0).unwrap();
+        assert_eq!(actual, [0; 6]); // failed native time did not publish RTC
+    }
+    #[test]
+    fn paused_master_still_advances_the_same_native_pmic_clock_without_firmware_completion() {
+        use crate::platform::apple::{
+            bus::{Access, Lifecycle, LifecycleState, MmioDevice},
+            interrupt::{AicInput, InterruptLatch},
+            spmi::{self, Spmi},
+        };
+        use alloc::{boxed::Box, rc::Rc};
+        use core::cell::RefCell;
+        struct Owned(Rc<RefCell<Pmu>>);
+        impl SpmiSlave for Owned {
+            fn read(&mut self, at: u16, bytes: &mut [u8], now: u64) -> Result<(), SlaveError> {
+                self.0.borrow_mut().read(at, bytes, now)
+            }
+            fn write(&mut self, at: u16, bytes: &[u8], now: u64) -> Result<(), SlaveError> {
+                self.0.borrow_mut().write(at, bytes, now)
+            }
+            fn check_time(&self, now: u64) -> Result<(), SlaveError> {
+                self.0.borrow().check_time(now)
+            }
+            fn advance(&mut self, now: u64) -> Option<u64> {
+                self.0.borrow_mut().advance(now)
+            }
+        }
+        let owner = Rc::new(RefCell::new(epoch_pmu(
+            PmicEpoch {
+                counter: 0,
+                cycles: 0,
+                hz: 1_000_000,
+            },
+            false,
+        )));
+        owner.borrow_mut().write(0xc804, &[0], 0).unwrap();
+        let mut master = Spmi::with_configuration(
+            AicInput::new(0, 228),
+            spmi::Configuration::new(spmi::Profile::Gen1, 192, [256, 256]).unwrap(),
+        );
+        master.attach(15, Box::new(Owned(owner.clone()))).unwrap();
+        let paused = LifecycleState {
+            powered: true,
+            clocked: false,
+            quiesced: true,
+            reset: false,
+            retention: true,
+        };
+        let mut irqs = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut irqs);
+        master.check_lifecycle(paused).unwrap();
+        master.set_lifecycle(paused, &mut access);
+        access.now = 25;
+        assert_eq!(master.advance(&mut access), Ok(None));
+        assert_eq!(native_time(&owner.borrow()), (25, 1, 1_000_000));
+        access.now = 24;
+        assert!(master.advance(&mut access).is_err());
+        assert_eq!(native_time(&owner.borrow()), (25, 1, 1_000_000));
+        assert_eq!(
+            owner.borrow().loader.as_ref().unwrap().phase,
+            Phase::Stopped
+        );
+        assert!(owner.borrow().loader.as_ref().unwrap().image.is_none());
+    }
+    #[test]
+    fn native_start_preflights_actual_current_time_and_deadline_without_admitting_missing_services()
+    {
+        for (epoch, now) in [
+            (
+                PmicEpoch {
+                    counter: 0,
+                    cycles: u64::MAX - 100,
+                    hz: 1,
+                },
+                0,
+            ),
+            (
+                PmicEpoch {
+                    counter: u64::MAX,
+                    cycles: 0,
+                    hz: 1,
+                },
+                u64::MAX,
+            ),
+        ] {
+            let profile = FirmwareStartup::Maverick;
+            let mut owner = epoch_pmu(epoch, false);
+            prefix(&mut owner, profile, 0x270, now);
+            upload(&mut owner, profile, &image(), now);
+            owner.write(0xc828, &[4], now).unwrap();
+            owner.write(0x7000, &[0], now).unwrap();
+            let before = native_time(&owner);
+            assert!(
+                matches!(owner.write(0xc806, &[1], now), Err(SlaveError::Unsupported(reason)) if reason.contains("deadline"))
+            );
+            assert_eq!(native_time(&owner), before);
+            assert_eq!(owner.loader.as_ref().unwrap().phase, Phase::Locked);
+        }
+        let profile = FirmwareStartup::Maverick;
+        let mut owner = epoch_pmu(
+            PmicEpoch {
+                counter: 0,
+                cycles: 0,
+                hz: 1_000_000,
+            },
+            false,
+        );
+        prefix(&mut owner, profile, 0x1df4, 0);
+        upload(&mut owner, profile, &integrity::test_image(), 0);
+        owner.write(0xc828, &[4], 0).unwrap();
+        owner.write(0x7000, &[0], 0).unwrap();
+        assert!(
+            matches!(owner.write(0xc806, &[1], 100), Err(SlaveError::Unsupported(reason)) if reason.contains("service resource owners"))
+        );
+        assert_eq!(native_time(&owner), (0, 0, 0));
+        assert_eq!(owner.loader.as_ref().unwrap().phase, Phase::Locked);
+    }
+
+    #[test]
+    fn source_tag_failure_refuses_before_clock_control_or_image_effects() {
+        let profile = FirmwareStartup::Maverick;
+        let mut owner = epoch_pmu(
+            PmicEpoch {
+                counter: 0,
+                cycles: 0,
+                hz: 1_000_000,
+            },
+            true,
+        );
+        let mut bytes = integrity::test_image();
+        bytes[0x2000] ^= 1;
+        prefix(&mut owner, profile, 0x1df4, 0);
+        upload(&mut owner, profile, &bytes, 0);
+        owner.write(0xc828, &[4], 0).unwrap();
+        owner.write(0x7000, &[0], 0).unwrap();
+        let digest = owner
+            .loader
+            .as_ref()
+            .unwrap()
+            .image
+            .as_ref()
+            .unwrap()
+            .digest;
+        assert!(
+            matches!(owner.write(0xc806, &[1], 100), Err(SlaveError::Unsupported(reason)) if reason.contains("integrity tag mismatch"))
+        );
+        assert_eq!(native_time(&owner), (0, 0, 0));
+        assert_eq!(owner.loader.as_ref().unwrap().phase, Phase::Locked);
+        assert_eq!(
+            owner
+                .loader
+                .as_ref()
+                .unwrap()
+                .image
+                .as_ref()
+                .unwrap()
+                .digest,
+            digest
+        );
+        assert_eq!(
+            &owner.firmware.as_ref().unwrap().bytes()[..bytes.len()],
+            &bytes
+        );
+        let mut rtc = [0xff; 6];
+        owner.read(maverick().upcount, &mut rtc, 0).unwrap();
+        assert_eq!(rtc, [0; 6]);
     }
 
     #[test]

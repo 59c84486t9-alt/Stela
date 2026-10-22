@@ -1,7 +1,9 @@
 //! Validated byte-resource ownership for the source-qualified RTC interface.
 use super::fault::FaultHistory;
 use super::firmware::FirmwareHistory;
-use super::{ALARM_BYTES, FirmwareSram, FirmwareStartup, OFFSET_BYTES, Rtc, UPCOUNT_BYTES, Window};
+use super::{
+    ALARM_BYTES, FirmwareSram, FirmwareStartup, OFFSET_BYTES, PmicEpoch, Rtc, UPCOUNT_BYTES, Window,
+};
 use alloc::vec::Vec;
 
 /// An explicit PMU register resource configuration, independent of its SID or SKU.
@@ -15,6 +17,7 @@ pub struct Configuration {
     pub(super) firmware: Option<FirmwareHistory>,
     pub(super) startup: Option<FirmwareStartup>,
     pub(super) native_loader: bool,
+    pub(super) execution_epoch: Option<PmicEpoch>,
 }
 
 impl Configuration {
@@ -108,6 +111,7 @@ impl Configuration {
             firmware: None,
             startup: None,
             native_loader: false,
+            execution_epoch: None,
         })
     }
     /// Configure the source's outside-scratch fault log with explicit cold or
@@ -174,6 +178,18 @@ impl Configuration {
             return Err("native PMIC loader requires unique startup routes and actual SRAM");
         }
         self.native_loader = true;
+        Ok(self)
+    }
+
+    /// Explicit oscillator for this actual native PMIC control/SRAM owner.
+    /// This is separate from the RTC, with no inherited rate, firmware/reset
+    /// observation, initialized-service or successful-execution implication.
+    pub fn with_native_pmic_epoch(mut self, epoch: PmicEpoch) -> Result<Self, &'static str> {
+        epoch.validate()?;
+        if !self.native_loader || self.execution_epoch.is_some() {
+            return Err("native PMIC execution epoch requires one actual native loader owner");
+        }
+        self.execution_epoch = Some(epoch);
         Ok(self)
     }
 

@@ -63,6 +63,7 @@ mod startup;
 pub use clock::{RtcClock, RtcEpoch};
 pub use config::Configuration;
 pub use firmware::{FirmwareSram, FirmwareStartup};
+pub use startup::PmicEpoch;
 
 use super::spmi::{SlaveError, SpmiSlave};
 #[cfg(test)]
@@ -202,9 +203,10 @@ impl Pmu {
             firmware,
             startup,
             native_loader,
+            execution_epoch,
         } = config;
-        let loader = native_loader.then(|| {
-            startup::Loader::new(
+        let loader = if native_loader {
+            Some(startup::Loader::new(
                 startup.expect("validated native loader profile"),
                 usize::from(
                     firmware
@@ -213,8 +215,11 @@ impl Pmu {
                         .ports
                         .bytes,
                 ),
-            )
-        });
+                execution_epoch,
+            )?)
+        } else {
+            None
+        };
         if let Some(rtc) = rtc {
             windows.push(Window {
                 base: rtc.clock_offset,
@@ -348,8 +353,18 @@ impl Pmu {
     /// Check the shared oscillator before publishing any command effects.
     fn publish_time(&mut self, now: u64) -> Result<(), SlaveError> {
         self.check_time(now)?;
+        let native = self
+            .loader
+            .as_mut()
+            .map(|loader| loader.prepare_time(now))
+            .transpose()
+            .map_err(SlaveError::Unsupported)?
+            .flatten();
         if self.rtc.is_some() {
             self.clock.publish(now).map_err(SlaveError::Unsupported)?;
+        }
+        if let Some(native) = native {
+            native.commit();
         }
         self.update(now);
         Ok(())
@@ -479,6 +494,7 @@ impl SpmiSlave for Pmu {
                     address,
                     data,
                     self.firmware.as_ref().expect("native loader SRAM"),
+                    now,
                 )
                 .map_err(SlaveError::Unsupported)?;
             self.publish_time(now)?;
@@ -601,10 +617,12 @@ impl SpmiSlave for Pmu {
             self.clock
                 .check(now)
                 .map(|_| ())
-                .map_err(SlaveError::Unsupported)
-        } else {
-            Ok(())
+                .map_err(SlaveError::Unsupported)?;
         }
+        self.loader
+            .as_ref()
+            .map_or(Ok(()), |loader| loader.check_time(now))
+            .map_err(SlaveError::Unsupported)
     }
     fn interrupt_level(&self) -> Option<bool> {
         self.rtc.map(|_| self.interrupt.asserted())
@@ -613,12 +631,8 @@ impl SpmiSlave for Pmu {
         self.armed || self.interrupt.asserted()
     }
     fn advance(&mut self, now: u64) -> Option<u64> {
-        if self.rtc.is_some() {
-            self.clock
-                .publish(now)
-                .expect("SPMI autonomous time preflight completed");
-        }
-        self.update(now);
+        self.publish_time(now)
+            .expect("SPMI autonomous time preflight completed");
         self.alarm_deadline()
     }
 }
