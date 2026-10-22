@@ -26,8 +26,9 @@
 //!   `ccsha256_di`); flags bit 0 skips it, and bit 1 announces an extended
 //!   header in a version-2 reply (`_ipc_msg_process_extended_header`
 //!   0x2d5df14);
-//! - an i32 result word (`_word` 0x2d5dba4), zero in a request; in a reply a
-//!   nonzero result fails the call;
+//! - a u32 **command variant** (`_word` 0x2d5dba4), not a result: startup
+//!   uses 0, create uses 4 and copy uses 1 in the AP builders below;
+//!   status is the mailbox parameter, sign-extended by the AP;
 //! - the command's fields: u64 (`_lword` 0x2d5dd70) and blobs (`_blob`
 //!   0x2d5dbfc: a u32 length, the bytes, zero padding to four).
 //!
@@ -35,22 +36,26 @@
 //!
 //! **Startup.** `init_sep_endpoint` 0x2d27eac sends GET_CAPABILITIES (0x4d,
 //! `__ipc_get_capabilities` 0x2d5c954) with u64 1 and an empty blob; the
-//! reply carries the result, a u64 and a blob. The u64 is the SEP's highest
+//! reply carries variant 0, a u64 and a blob. The u64 is the SEP's highest
 //! IPC header version: the kernel negotiates the lower of it and 2
 //! (0x2d27f9c..0x2d27fac, "negotiated to ipc header theirs:v%llu, ours:v%u")
 //! and falls back to version 1 on failure. It then sends SET_ENVIRONMENT
 //! (0x2a, `__ipc_set_env` 0x2d3b69c from `set_env` 0x2d2a80c) with u64 1 and
 //! a 1036-byte environment: u32 1, the u32 `/defaults` `cpx-encryption-mode`
 //! (0 when absent), u32 4 (6 when `set_env`'s Boolean is set), then zeros.
-//! Its reply carries the result alone.
+//! Its reply carries variant 0 alone.
 //!
 //! This SEP parses both header versions, so it reports version 2, and it
-//! records the environment, which nothing consumes yet. Every other command
-//! refuses: keybags, class, media and wrapped keys and authentication need
+//! records the environment, which nothing consumes yet. The command-specific
+//! keybag codecs validate the recovered AP layouts, then explicitly refuse
+//! their unresolved security semantics. Keybags, class, media and wrapped keys need
 //! the keystore lifecycle in docs/research/sep-requirements.md, and no
 //! success is invented for them. The failure answer is the status
-//! [`FAILURE`], which is Stela's value: sepOS's status codes are not
-//! recovered.
+//! [`FAILURE`], Stela's choice of generic failure: the AP sign-extends
+//! 0xff to -1, then maps it to IOReturn 0xe00002bc (0x2d3a324, table
+//! 0x725990). No sepOS-specific authorization error is invented.
+mod keybag;
+
 use super::{
     endpoint::Service,
     message::Frame,
@@ -71,7 +76,7 @@ pub const CAPACITIES: [u8; 4] = [2, 2, 2, 2];
 pub const REPLY: u8 = 0x80;
 const LENGTH_SHIFT: u32 = 16;
 const CALL_FLAGS: u32 = 0xffff;
-/// A refused request's status byte (Stela's value).
+/// Stela's refusal status: -1, mapped by the AP to generic IOReturn failure.
 pub const FAILURE: u8 = 0xff;
 
 pub const GET_CAPABILITIES: u8 = 0x4d;
@@ -84,7 +89,7 @@ const VERSION: usize = 20;
 const FLAGS: usize = 32;
 const HEADER_V1: usize = 72;
 const HEADER_V2: usize = 80;
-const RESULT_BYTES: usize = 4;
+const VARIANT_BYTES: usize = 4;
 /// The highest IPC header version this SEP parses.
 const HEADER_VERSION: u64 = 2;
 /// The u64 the kernel sends with both startup commands; its meaning is
@@ -148,13 +153,20 @@ impl KeyStore {
             ));
         }
         let command = frame.tag;
-        if !matches!(command, GET_CAPABILITIES | SET_ENVIRONMENT) {
+        if !matches!(command, GET_CAPABILITIES | SET_ENVIRONMENT) && !keybag::recognizes(command) {
             return Err(refuse("SEP keystore command is not implemented"));
         }
         let mut bytes = vec![0; (frame.data >> LENGTH_SHIFT) as usize];
         payload.input(&mut bytes).map_err(refuse)?;
         let message = Message::parse(&bytes).map_err(refuse)?;
         let mut fields = message.fields();
+        if keybag::recognizes(command) {
+            keybag::validate(command, message.variant(), &mut fields).map_err(refuse)?;
+            return Err(refuse(keybag::UNIMPLEMENTED));
+        }
+        if message.variant() != 0 {
+            return Err(refuse("SEP keystore startup command variant is not zero"));
+        }
         if fields.lword().map_err(refuse)? != STARTUP_ARGUMENT {
             return Err(refuse(
                 "SEP keystore startup command argument is not the kernel's",
@@ -221,10 +233,10 @@ fn digest(message: &[u8]) -> [u8; DIGEST_BYTES] {
         .unwrap()
 }
 
-/// A protected request whose header and zero result word are checked.
+/// A protected IPC message. Variant interpretation belongs to its command.
 struct Message<'a> {
     bytes: &'a [u8],
-    /// Where the result word starts: after the length and L header bytes.
+    /// Where the variant starts: after the length and L header bytes.
     body: usize,
 }
 
@@ -236,8 +248,8 @@ impl<'a> Message<'a> {
             _ => return Err("SEP keystore IPC header is neither 72-byte v1 nor 80-byte v2"),
         }
         let body = LENGTH_BYTES + header;
-        if bytes.len() < body + RESULT_BYTES {
-            return Err("SEP keystore IPC message ends inside its header or result");
+        if bytes.len() < body + VARIANT_BYTES {
+            return Err("SEP keystore IPC message ends inside its header or variant");
         }
         if u32_at(bytes, FLAGS)? != 0 {
             return Err("SEP keystore unprotected or extended IPC headers are not modeled");
@@ -245,24 +257,26 @@ impl<'a> Message<'a> {
         if digest(bytes) != bytes[DIGEST_START..DIGEST_START + DIGEST_BYTES] {
             return Err("SEP keystore IPC message digest does not match");
         }
-        if u32_at(bytes, body)? != 0 {
-            return Err("SEP keystore request carries a nonzero result word");
-        }
         Ok(Self { bytes, body })
+    }
+
+    fn variant(&self) -> u32 {
+        // parse checked that the complete variant word is present.
+        u32_at(self.bytes, self.body).unwrap()
     }
 
     fn fields(&self) -> Fields<'a> {
         Fields {
             bytes: self.bytes,
-            at: self.body + RESULT_BYTES,
+            at: self.body + VARIANT_BYTES,
         }
     }
 
-    /// The reply: this request's header, a zero result and `fields`, with
+    /// The reply: this request's header and variant, then `fields`, with
     /// the digest recomputed over the reply.
     fn reply(&self, fields: &[u8]) -> Vec<u8> {
         let mut reply = self.bytes[..self.body].to_vec();
-        reply.extend_from_slice(&0u32.to_le_bytes());
+        reply.extend_from_slice(&self.variant().to_le_bytes());
         reply.extend_from_slice(fields);
         let digest = digest(&reply);
         reply[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&digest);
@@ -270,7 +284,7 @@ impl<'a> Message<'a> {
     }
 }
 
-/// The command fields after the result word, read in order.
+/// The command fields after the variant, read in order.
 struct Fields<'a> {
     bytes: &'a [u8],
     at: usize,
@@ -285,6 +299,10 @@ impl<'a> Fields<'a> {
             .ok_or("SEP keystore IPC message ends inside a field")?;
         self.at += count;
         Ok(field)
+    }
+
+    fn word(&mut self) -> Result<u32, &'static str> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
 
     fn lword(&mut self) -> Result<u64, &'static str> {
@@ -329,7 +347,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A request as the kernel's codecs lay it out: header, zero result,
+    /// A startup request as the kernel codecs lay it out: header, variant 0,
     /// u64 argument and one blob, protected by the truncated digest.
     pub(crate) fn message(version: u32, flags: u32, argument: u64, blob: &[u8]) -> Vec<u8> {
         let header = if version == 1 { HEADER_V1 } else { HEADER_V2 };
@@ -397,7 +415,7 @@ pub(crate) mod tests {
             );
             assert_eq!(output.len(), length);
             // The kernel's decoder accepts it: same header, valid digest,
-            // zero result, the version as u64 and an empty blob.
+            // variant 0, the version as u64 and an empty blob.
             let parsed = Message::parse(&output).unwrap();
             assert_eq!(output[..DIGEST_START], request[..DIGEST_START]);
             assert_eq!(output[VERSION..parsed.body], request[VERSION..parsed.body]);
@@ -438,6 +456,82 @@ pub(crate) mod tests {
         .0
         .unwrap();
         assert_eq!(keystore.environment().unwrap().mode, 6);
+    }
+
+    #[test]
+    fn decoded_keybags_and_malformed_bodies_never_publish_success_or_change_environment() {
+        let mut keystore = KeyStore::default();
+        let env = message(2, 0, 1, &environment(3, 4));
+        ask(&mut keystore, frame(SET_ENVIRONMENT, 1, env.len()), env)
+            .0
+            .unwrap();
+        let before = keystore.environment();
+        for command in [
+            keybag::CREATE,
+            keybag::COPY,
+            keybag::LOAD,
+            keybag::UNLOAD,
+            keybag::UUID,
+        ] {
+            let (variant, body) = keybag::tests::body(command);
+            for version in [1, 2] {
+                let mut request = message(version, 0, 1, &[]);
+                let start = Message::parse(&request).unwrap().body;
+                request.truncate(start);
+                request.extend_from_slice(&variant.to_le_bytes());
+                request.extend_from_slice(&body);
+                let hash = digest(&request);
+                request[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&hash);
+                // A complete source-shaped request reaches the semantic
+                // refusal, including create/copy's nonzero variants.
+                let (result, output) = ask(
+                    &mut keystore,
+                    frame(command, 42, request.len()),
+                    request.clone(),
+                );
+                let refusal = result.unwrap_err();
+                assert_eq!(refusal.reason, keybag::UNIMPLEMENTED);
+                assert_eq!(
+                    refusal.answer.unwrap().frame,
+                    failure(frame(command, 42, request.len()))
+                );
+                assert!(output.is_empty());
+                assert_eq!(keystore.environment(), before);
+                // A valid message digest does not authorize a truncated
+                // body, a trailer or a different variant.
+                for change in 0..3 {
+                    let mut bad = request.clone();
+                    match change {
+                        0 => {
+                            bad.pop();
+                        }
+                        1 => bad.extend_from_slice(&[0; 4]),
+                        _ => bad[start..start + 4].copy_from_slice(&(variant + 1).to_le_bytes()),
+                    }
+                    let hash = digest(&bad);
+                    bad[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&hash);
+                    let (result, output) = ask(&mut keystore, frame(command, 42, bad.len()), bad);
+                    assert_ne!(result.unwrap_err().reason, keybag::UNIMPLEMENTED);
+                    assert!(output.is_empty());
+                    assert_eq!(keystore.environment(), before);
+                }
+            }
+        }
+        let mut request = message(2, 0, 1, &[]);
+        request[84..88].copy_from_slice(&1u32.to_le_bytes());
+        let hash = digest(&request);
+        request[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&hash);
+        let (result, output) = ask(
+            &mut keystore,
+            frame(GET_CAPABILITIES, 1, request.len()),
+            request,
+        );
+        assert_eq!(
+            result.unwrap_err().reason,
+            "SEP keystore startup command variant is not zero"
+        );
+        assert!(output.is_empty());
+        assert_eq!(keystore.environment(), before);
     }
 
     #[test]
