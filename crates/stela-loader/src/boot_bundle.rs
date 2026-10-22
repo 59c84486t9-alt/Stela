@@ -30,7 +30,7 @@ use crate::trust_cache;
 use alloc::collections::BTreeMap;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
-use stela_runtime::machine::{ctrr, soc};
+use stela_runtime::machine::{ctrr, identification, soc, tag_storage};
 use stela_runtime::sha256;
 
 /// The format `stela.efi` reads (`stela_runtime::boot_bundle`).
@@ -72,7 +72,9 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// Revision 15: on the M4 and later, place `CL4-dummypage` and state the
 /// core lock registers iBoot leaves (`core_locks`, which `stela.efi` reads
 /// when present).
-pub const REVISION: u32 = 15;
+/// Revision 16: on the chips with memory tagging, state TAG_OFFSET_EL2 in
+/// `core_locks`.
+pub const REVISION: u32 = 16;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -822,11 +824,9 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     };
     let carveouts = reservation.into_regions();
     // The M4 and later lock their CTRR-C/D and CTXR-A..D copies at handoff.
-    let core_locks_handed_off = inputs
-        .target
-        .chip_id
-        .and_then(soc::chip)
-        .is_some_and(|chip| ctrr::generation(chip) == ctrr::Generation::Ctrr3);
+    let chip = inputs.target.chip_id.and_then(soc::chip);
+    let core_locks_handed_off =
+        chip.is_some_and(|chip| ctrr::generation(chip) == ctrr::Generation::Ctrr3);
     if let (Some(chip_id), Some(base)) = (inputs.target.chip_id, inputs.dram_base()?) {
         ensure!(
             options.dram_base == base,
@@ -1260,6 +1260,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
                     Some(region.guest_pa..region.guest_pa + region.memory_bytes)
                 },
                 kernel_ctrr,
+                tag_offset(chip, options, dram_end, top_of_kernel_data)?,
             )
         })
         .transpose()?;
@@ -1459,6 +1460,33 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         unresolved,
     };
     Ok(Bundle { files, manifest })
+}
+
+/// TAG_OFFSET_EL2 as iBoot locks it on a chip with memory tagging, 0
+/// elsewhere: the tag storage at the top of the managed range
+/// (`stela_runtime::machine::tag_storage`), which must lie above every
+/// placed region.
+fn tag_offset(
+    chip: Option<stela_runtime::machine::Chip>,
+    options: &Options,
+    dram_end: u64,
+    top_of_kernel_data: u64,
+) -> Result<u64> {
+    if !chip.is_some_and(identification::memory_tagging) {
+        return Ok(0);
+    }
+    let value = tag_storage::hand_off(
+        options.phys_base,
+        dram_end - options.phys_base,
+        options.dram_size,
+    )
+    .context("the tag storage's base does not fit TAG_OFFSET_EL2")?;
+    ensure!(
+        tag_storage::base(value) >= top_of_kernel_data,
+        "the tag storage at {:#x} overlaps the regions ending at {top_of_kernel_data:#x}",
+        tag_storage::base(value)
+    );
+    Ok(value)
 }
 
 /// A global manifest must name the selected board.
@@ -2564,6 +2592,8 @@ mod tests {
         inputs.target.chip_id = Some(0x8132);
         let m4_options = options.placed_at(inputs.dram_base()?);
         let m4_bundle = prepare(&inputs, &m4_options)?;
+        inputs.target.chip_id = Some(0x8142);
+        let m5_bundle = prepare(&inputs, &m4_options)?;
         (inputs.target, inputs.device_tree.bytes) = m2;
         inputs.boot_manifest = m2_manifest;
         let m4_manifest = &m4_bundle.manifest;
@@ -2588,6 +2618,14 @@ mod tests {
         let consumed =
             stela_runtime::boot_bundle::Manifest::parse(&serde_json::to_vec(m4_manifest)?)?;
         assert_eq!(consumed.core_locks.as_ref(), Some(core_locks));
+        assert_eq!(core_locks.tag_offset, 0);
+        // An M5 bundle also locks TAG_OFFSET_EL2 at the top of the managed
+        // range, which ends at DRAM's end.
+        let dram_end = m4_options.dram_base + m4_options.dram_size;
+        assert_eq!(
+            m5_bundle.manifest.core_locks.unwrap().tag_offset,
+            tag_storage::LOCK | (dram_end - tag_storage::bytes(m4_options.dram_size))
+        );
 
         // A RAM disk image root: DiskImages gets the placed region from
         // /chosen, and boot-uuid names the volume.

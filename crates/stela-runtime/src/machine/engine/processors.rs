@@ -1632,6 +1632,7 @@ mod tests {
                 last: 0x100_0710_bfff,
             }],
             legacy_locked: true,
+            tag_offset: 0,
         };
         machine.hand_off_core_locks(handoff.clone());
         assert_eq!(

@@ -621,6 +621,10 @@ pub struct Handoff {
     /// and enabled.
     #[serde(default)]
     pub legacy_locked: bool,
+    /// TAG_OFFSET_EL2 as iBoot locks it (`machine::tag_storage`), 0 where
+    /// it leaves it unprogrammed, its reset value.
+    #[serde(default)]
+    pub tag_offset: u64,
 }
 
 #[cfg(test)]
@@ -755,6 +759,7 @@ mod tests {
                 last: 0x100_0945_3fff,
             }],
             legacy_locked: true,
+            tag_offset: 0,
         };
         let mut cluster = Cluster::handed_off(&handoff);
         let window = cluster.copies.windows[Region::CtxrB as usize];

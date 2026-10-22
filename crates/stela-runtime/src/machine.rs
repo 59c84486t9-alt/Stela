@@ -24,6 +24,7 @@ pub mod registers;
 pub mod soc;
 pub mod streaming;
 pub mod system;
+pub mod tag_storage;
 pub mod tags;
 pub mod timer;
 pub mod vgic;

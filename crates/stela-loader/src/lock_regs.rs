@@ -361,10 +361,11 @@ pub fn cl4_dummy_page() -> Vec<u8> {
 /// SPTM 26A434 derives (`0x...bebec..0x...bed5c` in the T8132 build), locked
 /// into the per-cluster copies, CTRR-D only when `kernel_ctrr`
 /// (`/chosen kernel-ctrr-to-be-enabled` is not a present 0), and CTRR-A/B's
-/// controls locked.
+/// controls locked, with `tag_offset` (`stela_runtime::machine::tag_storage`).
 pub fn core_handoff(
     region: impl Fn(&str) -> Option<Range<u64>>,
     kernel_ctrr: bool,
+    tag_offset: u64,
 ) -> Result<Handoff> {
     let either = |name: &'static str, fallback: &'static str| {
         if region(name).is_some() {
@@ -408,6 +409,7 @@ pub fn core_handoff(
             })
             .collect(),
         legacy_locked: true,
+        tag_offset,
     })
 }
 
@@ -624,7 +626,7 @@ mod tests {
                 .find(|(n, ..)| *n == name)
                 .map(|&(_, start, end)| start..end)
         };
-        let handoff = core_handoff(region, true).unwrap();
+        let handoff = core_handoff(region, true, 0).unwrap();
         let bounds = |wanted| {
             handoff
                 .locked
@@ -658,8 +660,8 @@ mod tests {
         );
         assert!(handoff.legacy_locked);
         // Kernel CTRR off leaves CTRR-D unlocked; a missing region refuses.
-        assert_eq!(core_handoff(region, false).unwrap().locked.len(), 5);
-        assert!(core_handoff(|name| region(name).filter(|_| name != "TXM-rx"), true).is_err());
+        assert_eq!(core_handoff(region, false, 0).unwrap().locked.len(), 5);
+        assert!(core_handoff(|name| region(name).filter(|_| name != "TXM-rx"), true, 0).is_err());
         let page = cl4_dummy_page();
         assert_eq!(page.len(), CL4_DUMMY_PAGE_BYTES);
         assert_eq!(page[..4], WFI.to_le_bytes());

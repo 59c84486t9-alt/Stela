@@ -571,6 +571,29 @@ impl Cpu {
         }
     }
 
+    /// TAG_OFFSET_EL2 (`machine::tag_storage`): the value iBoot locked, the
+    /// same on every PE. Software after the handoff only reads it; a write
+    /// changing a locked value refuses, and one to an unprogrammed register
+    /// (no handoff) is not modeled.
+    fn tag_offset_access(&self, read: bool, value: u64) -> Outcome {
+        let current = self.core_locks.tag_offset;
+        if self.pstate.el != 2 {
+            Outcome::Undefined
+        } else if read {
+            Outcome::Read(current)
+        } else if current & super::tag_storage::LOCK == 0 {
+            Outcome::Refused(Refusal::UnsupportedSetting(
+                "TAG_OFFSET_EL2 write without the boot firmware's locked value",
+            ))
+        } else if value == current {
+            Outcome::Written(Changes::default())
+        } else {
+            Outcome::Refused(Refusal::UnsupportedSetting(
+                "TAG_OFFSET_EL2 change after its lock",
+            ))
+        }
+    }
+
     /// MRS or MSR to an encoding without an architectural accessor: Apple's
     /// IMPLEMENTATION DEFINED space, or UNDEFINED. `physical` is the system
     /// counter, for the count alias. `Read` results are not yet written to
@@ -605,6 +628,9 @@ impl Cpu {
         }
         if let Some(register) = super::ctrr::decode(self.registers.chip(), encoding) {
             return self.ctrr_access(register, read, value);
+        }
+        if super::tag_storage::owns(self.registers.chip(), encoding) {
+            return self.tag_offset_access(read, value);
         }
         if Pmu::owns_on(self.registers.chip(), encoding) {
             let Some(pmu) = self.pmu.as_mut() else {
@@ -1492,6 +1518,7 @@ mod tests {
                 last: 0x100_0710_bfff,
             }],
             legacy_locked: true,
+            tag_offset: 0,
         };
         let mut cpu = Cpu::of(Chip::AppleM4, 0, Pstate::reset(2));
         cpu.ctrr.replace(ctrr::Cluster::handed_off(&handoff));
@@ -1553,14 +1580,49 @@ mod tests {
     }
 
     #[test]
+    fn tag_offset_reads_iboots_locked_value_at_el2() {
+        use super::super::{Chip, ctrr, identification, tag_storage::TAG_OFFSET_EL2};
+        const LOCKED: u64 = 0x8000_0101_e000_0000;
+        for chip in Chip::ALL {
+            let mut cpu = Cpu::of(chip, 0, Pstate::reset(2));
+            cpu.core_locks = alloc::rc::Rc::new(ctrr::Handoff {
+                tag_offset: LOCKED,
+                ..ctrr::Handoff::default()
+            });
+            let outcome = cpu.apple_access(mrs(0, TAG_OFFSET_EL2), 0);
+            if !identification::memory_tagging(chip) {
+                // The census rules the other chips' encoding.
+                assert_ne!(outcome, Outcome::Read(LOCKED), "{}", chip.name());
+                continue;
+            }
+            assert_eq!(outcome, Outcome::Read(LOCKED));
+            cpu.state.x[5] = LOCKED;
+            assert!(matches!(
+                cpu.apple_access(msr(5, TAG_OFFSET_EL2), 0),
+                Outcome::Written(_)
+            ));
+            cpu.state.x[5] = 0;
+            assert!(matches!(
+                cpu.apple_access(msr(5, TAG_OFFSET_EL2), 0),
+                Outcome::Refused(_)
+            ));
+            cpu.pstate.el = 1;
+            assert_eq!(
+                cpu.apple_access(mrs(0, TAG_OFFSET_EL2), 0),
+                Outcome::Undefined
+            );
+        }
+    }
+
+    #[test]
     fn every_crn11_encoding_the_m4_to_m6_sptms_and_kernels_access_reaches_ctrr() {
         use super::super::{Chip, ctrr};
         for chip in [Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
             for crm in 0..16 {
                 for op2 in 0..8 {
                     let encoding = Encoding::new(3, 0, 11, crm, op2);
-                    // CRm 9 up holds TAG_OFFSET_EL2 and the M6 kernel's
-                    // other registers.
+                    // CRm 9 up holds TAG_OFFSET_EL2 (`machine::tag_storage`)
+                    // and the M6 kernel's other registers.
                     if !impdef::consumed(encoding, chip) || crm >= 9 {
                         continue;
                     }
@@ -1576,7 +1638,6 @@ mod tests {
 
     /// The M3-and-later encodings whose owners are being written outside
     /// `machine::impdef`: the Apple generic timer (`machine::timer`), the
-    /// CRn 11 CRm 9 tag-offset registers, and the
     /// M5 kpc state S3_1_C15_C5_1, which `machine::pmu` owns on the M6 only
     /// (mac17g save 0xfffffe000be64104, restore 0xfffffe000beb56b0), and
     /// the M3 SPTMs' SPR_LOCKDOWN_EL1 (`S3_4_C15_C0_6`), which joins
@@ -1602,16 +1663,8 @@ mod tests {
             (4, 12, 6),
             (4, 14, 6),
         ];
-        let (op1, crn, crm, op2) = (
-            encoding.op1(),
-            encoding.crn(),
-            encoding.crm(),
-            encoding.op2(),
-        );
-        (crn == 15
-            && (TIMER.contains(&(op1, crm, op2))
-                || [KPC, SPR_LOCKDOWN_EL1].contains(&(op1, crm, op2))))
-            || (crn == 11 && op1 == 0 && crm == 9)
+        let key = (encoding.op1(), encoding.crm(), encoding.op2());
+        encoding.crn() == 15 && (TIMER.contains(&key) || [KPC, SPR_LOCKDOWN_EL1].contains(&key))
     }
 
     /// Every IMPLEMENTATION DEFINED encoding a chip's censused components
