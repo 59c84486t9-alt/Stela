@@ -311,7 +311,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    fn take_starts(&mut self) -> Step {
+    pub(super) fn take_starts(&mut self) -> Step {
         while let Some(start) = self.devices.take_start() {
             self.start(start)?;
         }
@@ -402,26 +402,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// interrupt woke consumes the event register (`Machine::wait`). A PE
     /// that woke from power-down leaves reset instead.
     pub(super) fn wake(&mut self) -> Step {
-        if self.waiting.is_some_and(|waiting| waiting.down)
-            && (self.native_publication.is_some() || self.cpu.has_canonical_memory())
-        {
-            return Err(self.unsupported(RequirementKind::Native(
-                "native CPU wake from reset requires its canonical RAM/event and physical worker rebind owner",
-            )));
-        }
-        let Some(Wait { kind, down, .. }) = self.waiting.take() else {
-            return Ok(());
-        };
-        if down {
+        if self.waiting.is_some_and(|waiting| waiting.down) {
             let pe = self.current;
             let Some(address) = self.devices.reset_vector(pe) else {
                 return Err(self.unsupported(RequirementKind::Native(
                     "a PE woke from CYC_OVRD's power-down mode, but the board holds no reset vector for it",
                 )));
             };
-            self.restart(pe, address);
-            return Ok(());
+            return self.restart(pe, address);
         }
+        let Some(Wait { kind, .. }) = self.waiting.take() else {
+            return Ok(());
+        };
         self.sync_monitor();
         if kind == WaitKind::Event && !self.interrupt_pending() {
             self.cpu.consume_event();
@@ -558,16 +550,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// its own identification (Arm `TakeReset`). A powered-down PE can be
     /// started like one held in reset.
     pub(super) fn start(&mut self, start: Start) -> Step {
-        if self.native_publication.is_some()
-            || self.cpu.has_canonical_memory()
-            || self.peers.iter().any(
-                |peer| matches!(peer, Peer::Parked(parked) if parked.cpu.has_canonical_memory()),
-            )
-        {
-            return Err(self.unsupported(RequirementKind::Native(
-                "native CPU start requires its canonical RAM/event and assigned physical worker rebind owner",
-            )));
-        }
         let held = match self.peers.get(start.cpu) {
             Some(Peer::Off) => true,
             Some(Peer::Running) => down(self.waiting),
@@ -583,8 +565,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 "a device started a PE that is neither held in reset nor powered down",
             )));
         }
-        self.restart(start.cpu, start.address);
-        Ok(())
+        self.restart(start.cpu, start.address)
     }
 
     /// The running PE's write of RMR_EL2.RR requested a Warm reset (Arm
@@ -602,11 +583,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// AMX unit) restarts as on its other resets (inference: no 26A434
     /// component requests a Warm reset). The cluster's shared registers stay.
     pub(super) fn warm_reset(&mut self) -> Step {
-        if self.native_publication.is_some() || self.cpu.has_canonical_memory() {
-            return Err(self.unsupported(RequirementKind::Native(
-                "canonical native PE reset requires its RAM/event retirement and reset-rebind owner",
-            )));
-        }
         let pe = self.current;
         let Some(address) = self.devices.reset_vector(pe) else {
             return Err(self.unsupported(RequirementKind::Native(
@@ -615,6 +591,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let mut cpu = Cpu::of(self.profile.chip, address, Pstate::reset(2));
         system::identify(&self.profile, pe, &mut cpu, &mut Vec::new());
+        if self.native_publication.is_some() || self.cpu.has_canonical_memory() {
+            self.prepare_native_reset(pe, &mut cpu).map_err(|_| {
+                self.unsupported(RequirementKind::Native(
+                    "native warm reset requires the actual held physical roster and canonical RAM",
+                ))
+            })?;
+            self.cpu.clear_exclusive().map_err(|_| {
+                self.unsupported(RequirementKind::Native("native warm reset monitor refused"))
+            })?;
+        }
         let old = core::mem::replace(&mut self.cpu, cpu);
         let cpu = &mut self.cpu;
         cpu.registers.keep_over_warm_reset(&old.registers);
@@ -633,11 +619,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// PE `pe` leaves reset at `address`.
-    fn restart(&mut self, pe: usize, address: u64) {
+    fn restart(&mut self, pe: usize, address: u64) -> Step {
         let mut cpu = Cpu::of(self.profile.chip, address, Pstate::reset(2));
         // Every PE has the registers of PE 0, the profile's missing ones
         // included.
         system::identify(&self.profile, pe, &mut cpu, &mut Vec::new());
+        if self.native_publication.is_some() || self.cpu.has_canonical_memory() {
+            self.prepare_native_reset(pe, &mut cpu).map_err(|_| {
+                self.unsupported(RequirementKind::Native(
+                    "native start/reset requires the actual held physical roster and canonical RAM",
+                ))
+            })?;
+            let clear = match &mut self.peers[pe] {
+                Peer::Running if pe == self.current => self.cpu.clear_exclusive(),
+                Peer::Parked(parked) => parked.cpu.clear_exclusive(),
+                Peer::Off => Ok(()),
+                _ => unreachable!("reset preflight checked exact PE owners"),
+            };
+            clear.map_err(|_| {
+                self.unsupported(RequirementKind::Native(
+                    "native reset monitor retirement refused",
+                ))
+            })?;
+        }
         // The PEs of a physical cluster (MPIDR_EL1 Aff1) share its CTRR
         // registers while one of them is powered; the memory controller's
         // lock binds every PE.
@@ -677,6 +681,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }));
         }
         self.devices.processor_power(pe, true);
+        Ok(())
     }
 }
 

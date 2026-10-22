@@ -52,16 +52,21 @@ impl EventRegister {
 /// The registry contains only weak publication handles, not another PE state
 /// bank. Registry locking never calls memory, counter or interrupt services.
 #[derive(Debug)]
-pub struct EventDomain {
-    identity: Arc<()>,
+struct EventRegistry {
     endpoints: Mutex<Vec<Weak<EventRegister>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EventDomain {
+    identity: Arc<EventRegistry>,
 }
 
 impl EventDomain {
     pub fn new() -> Self {
         Self {
-            identity: Arc::new(()),
-            endpoints: Mutex::new(Vec::new()),
+            identity: Arc::new(EventRegistry {
+                endpoints: Mutex::new(Vec::new()),
+            }),
         }
     }
 
@@ -77,7 +82,11 @@ impl EventDomain {
             monitor_bound: AtomicBool::new(false),
             live: AtomicBool::new(true),
         });
-        let mut endpoints = self.endpoints.lock().map_err(|_| DomainError::Poisoned)?;
+        let mut endpoints = self
+            .identity
+            .endpoints
+            .lock()
+            .map_err(|_| DomainError::Poisoned)?;
         endpoints.retain(|endpoint| endpoint.strong_count() != 0);
         endpoints.push(Arc::downgrade(&event));
         Ok(EventEndpoint {
@@ -90,7 +99,11 @@ impl EventDomain {
     /// Includes the sender when its endpoint is registered in this domain.
     /// Repeated sends coalesce. New registrations do not inherit past sends.
     pub fn signal_all(&self) -> Result<(), DomainError> {
-        let mut endpoints = self.endpoints.lock().map_err(|_| DomainError::Poisoned)?;
+        let mut endpoints = self
+            .identity
+            .endpoints
+            .lock()
+            .map_err(|_| DomainError::Poisoned)?;
         endpoints.retain(|endpoint| endpoint.upgrade().is_some_and(|event| event.signal_local()));
         Ok(())
     }
@@ -142,12 +155,21 @@ impl<'a> SendAttachment<'a> {
 /// can be published concurrently; local timeout mutations require `&mut self`.
 #[derive(Debug)]
 pub struct EventEndpoint {
-    domain: Arc<()>,
+    domain: Arc<EventRegistry>,
     event: Arc<EventRegister>,
     local_timeout: Option<u64>,
 }
 
 impl EventEndpoint {
+    /// Retain the same registry when an assigned PE leaves reset later. The
+    /// endpoint owns its domain; dropping the boot's original handle does not
+    /// create a second registry or lose the existing event recipients.
+    pub(crate) fn domain(&self) -> EventDomain {
+        EventDomain {
+            identity: Arc::clone(&self.domain),
+        }
+    }
+
     pub(crate) fn same_domain(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.domain, &other.domain)
     }
@@ -599,6 +621,24 @@ pub enum Error<E> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn endpoint_retains_one_registry_for_later_cpu_starts() {
+        let domain = super::EventDomain::new();
+        let first = domain.register(false, None).unwrap();
+        drop(domain);
+        let retained = first.domain();
+        let second = retained.register(false, None).unwrap();
+        assert!(first.same_domain(&second));
+        retained.signal_all().unwrap();
+        assert!(first.consume_if_set());
+        assert!(second.consume_if_set());
+        let cloned = retained.clone();
+        drop(retained);
+        cloned.signal_all().unwrap();
+        assert!(first.consume_if_set());
+        assert!(second.consume_if_set());
+    }
+
     use super::*;
     use std::sync::Barrier;
 
@@ -1142,7 +1182,7 @@ mod tests {
         let mut sender = domain.register(false, None).unwrap();
         let peer = domain.register(false, None).unwrap();
         let _ = std::panic::catch_unwind(|| {
-            let _registry = domain.endpoints.lock().unwrap();
+            let _registry = domain.identity.endpoints.lock().unwrap();
             panic!("poison fixture registry");
         });
         assert_eq!(

@@ -76,6 +76,18 @@ pub(super) fn warmup() -> (Vec<u8>, u64) {
     words.push(branch(entry + 4, entry));
     (bytes(words), entry)
 }
+/// The same real ARM control prologue, entered through checked M0 on every
+/// assigned PE. No direct/serial warmup or synthetic Device-ready store runs.
+pub(super) fn cold_startup(entry: u64) -> Vec<u8> {
+    let mut words = Vec::new();
+    control(&mut words, TTBR0_EL2, BASE);
+    control(&mut words, TCR_EL2, TCR);
+    control(&mut words, MAIR_EL2, 0xff);
+    control(&mut words, SCTLR_EL2, SCTLR);
+    words.push(ISB);
+    words.push(branch(CODE + words.len() as u64 * 4, entry));
+    bytes(words)
+}
 pub(super) fn atomic_body(entry: u64) -> Vec<u8> {
     let mut words = Vec::new();
     constant(&mut words, 0, DATA);

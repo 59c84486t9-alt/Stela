@@ -169,12 +169,14 @@ impl Processor {
     pub(crate) fn initialize(
         &self,
         owner: WorkerOwner,
+        ram: alloc::sync::Arc<stela_runtime::memory::RegisteredSystemRam>,
         sender: &Apic,
         tsc_hz: u64,
     ) -> Result<publication::InitialPublication, &'static str> {
         let command = Initial {
             owner,
             apic: self.apic_id() as u32,
+            ram,
         };
         self.send(command, sender, tsc_hz)
             .map_err(|_| "native initialization transport busy")?
@@ -266,6 +268,7 @@ impl<T: NativeFrame> NativePending<T> {
 struct Initial {
     owner: WorkerOwner,
     apic: u32,
+    ram: alloc::sync::Arc<stela_runtime::memory::RegisteredSystemRam>,
 }
 impl Command for Initial {
     type Output = Result<publication::InitialPublication, &'static str>;
@@ -277,6 +280,18 @@ impl Command for Initial {
         if owner.is_some() {
             return Err("native worker already initialized");
         }
+        // Qualify the same retained physical bytes in this actual AP's MMU and
+        // cache controls before its owner publishes any runtime admission.
+        for (_, physical, bytes) in self.ram.placements() {
+            let cpu = crate::layout::physical(physical);
+            // SAFETY: fixed pristine AP owner; the caller retains the canonical
+            // reservation and its complete closed all-writer contract.
+            unsafe { crate::native_memory::qualify_reserved_writeback(cpu, physical, bytes) }
+                .map_err(|_| "AP canonical RAM effective cache type refused")?;
+        }
+        // SAFETY: same retained canonical owner, no raw guest dispatch/DMA;
+        // this pristine physical Host remains pinned through all later loans.
+        unsafe { host.register_system_ram(self.ram) }?;
         host.bind_worker(self.owner.binding().worker, self.apic)?;
         let published = self
             .owner

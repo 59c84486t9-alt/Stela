@@ -147,6 +147,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 let cpu = match peer {
                     Peer::Running if pe == self.current => &self.cpu,
                     Peer::Parked(parked) => parked.cpu(),
+                    Peer::Off => return false,
                     _ => return true,
                 };
                 !cpu.has_canonical_memory()
@@ -160,10 +161,25 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         // Serial fair-share lag cannot represent concurrently executing cores.
         // This lane observes the qualified common host counter without drift.
         self.clock.follow_host();
+        let current = bindings
+            .iter()
+            .find(|binding| binding.pe == self.current)
+            .copied()
+            .ok_or_else(|| {
+                self.unsupported(RequirementKind::Native(
+                    "current PE has no assigned physical worker",
+                ))
+            })?;
+        self.native_source_pe(current)?;
+        self.take_starts()?;
         for binding in &bindings {
+            if matches!(self.peers[binding.pe], Peer::Off) {
+                continue;
+            }
             self.native_source_pe(*binding)?;
             let now = self.now();
             self.poll_devices(now)?;
+            self.take_starts()?;
             if let Some(reset) = self.devices.take_reset() {
                 return Err(Stop::Reset(reset));
             }

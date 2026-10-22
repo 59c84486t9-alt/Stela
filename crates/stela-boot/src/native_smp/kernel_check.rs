@@ -125,12 +125,11 @@ fn profile(cores: usize) -> Result<CpuProfile, &'static str> {
     })
 }
 fn ready<H: Host>(machine: &Machine<H, TestDevices>, entry: u64) -> bool {
-    machine.devices.ready.iter().all(|ready| *ready)
-        && machine.peer_states().iter().all(|state| match state {
-            PeerState::Running => machine.cpu.pc == entry,
-            PeerState::Parked { cpu, wfi: None } => cpu.pc == entry,
-            _ => false,
-        })
+    machine.peer_states().iter().all(|state| match state {
+        PeerState::Running => machine.cpu.pc == entry,
+        PeerState::Parked { cpu, wfi: None } => cpu.pc == entry,
+        _ => false,
+    })
 }
 fn states<H: Host>(machine: &Machine<H, TestDevices>) -> Result<Vec<GuestState>, &'static str> {
     machine
@@ -178,22 +177,43 @@ pub(crate) unsafe fn check(
             .collect(),
         ready: alloc::vec![false; cores],
     };
-    let transport = super::transport::FixedWorkers::new(executors, sender, handoff.tsc_hz);
+    let transport =
+        super::transport::FixedWorkers::new(executors, sender, handoff.tsc_hz, Arc::clone(&ram));
     let native_host = engine::ServiceHost::new(host_owner.host(), transport, Arc::clone(&ram));
     let mut machine = Machine::new(cpu, native_host, devices, profile(cores)?, ram.target());
     machine.set_strict(true);
     let (_, entry) = source::warmup();
+    let startup = source::cold_startup(entry);
+    // SAFETY: before the first guest instruction; every assigned physical
+    // executor is still stopped and shares this exact registered reservation.
+    unsafe { ram.publish_physical(source::CODE, &startup) }
+        .map_err(|_| "native cold startup publication refused")?;
+    machine
+        .install_shared_memory_for_active_processors(Arc::clone(&ram), &EventDomain::new())
+        .map_err(|_| "native cold BSP canonical owner refused")?;
+    let bindings: Vec<_> = (0..cores)
+        .map(|pe| WorkerBinding {
+            pe,
+            worker: WorkerId(pe),
+        })
+        .collect();
+    let owners = machine
+        .bind_assigned_native_workers(&bindings)
+        .map_err(|_| "native cold assigned physical roster refused")?;
+    machine.initialize_native_transport(owners);
     let started = crate::apic::rdtsc();
     while !ready(&machine, entry) {
-        let stop = machine.run(machine.statistics.blocks + 1);
-        if !matches!(stop, Stop::Budget) {
-            crate::output::arguments(format_args!("NATIVE SCHEDULER warmup {stop:?}\n"));
-            return Err("native scheduler original ARM prologue stopped");
+        // SAFETY: actual source-started Cpu loans and owner-local AP Hosts;
+        // no original guest, external publisher or raw guest execution exists.
+        if let Err(stop) = unsafe { machine.native_round() } {
+            crate::output::arguments(format_args!("NATIVE SCHEDULER cold startup {stop:?}\n"));
+            return Err("native scheduler checked cold control/CPU-start path stopped");
         }
         if crate::apic::rdtsc().wrapping_sub(started) >= handoff.tsc_hz * 10 {
-            return Err("native scheduler prologue/wake deadline");
+            return Err("native scheduler checked cold startup deadline");
         }
     }
+    let before = states(&machine)?;
     let source::KernelProgram {
         code: program,
         done,
@@ -217,21 +237,6 @@ pub(crate) unsafe fn check(
     let (alias, descriptor) = source::read_only_alias();
     unsafe { ram.publish_physical(alias, &descriptor.to_le_bytes()) }
         .map_err(|_| "native scheduler source alias publication refused")?;
-    let events = EventDomain::new();
-    machine
-        .install_shared_memory_for_processors(Arc::clone(&ram), &events)
-        .map_err(|_| "native scheduler canonical Cpu owners refused")?;
-    let before = states(&machine)?;
-    let bindings: Vec<_> = (0..cores)
-        .map(|pe| WorkerBinding {
-            pe,
-            worker: WorkerId(pe),
-        })
-        .collect();
-    let owners = machine
-        .bind_native_workers(&bindings)
-        .map_err(|_| "native scheduler fixed physical bindings refused")?;
-    machine.initialize_native_transport(owners);
     let mut rounds = 0;
     loop {
         // SAFETY: the real fixed BSP/AP owners, canonical RAM and source bytes
@@ -319,8 +324,9 @@ pub(crate) unsafe fn check(
         return Err("native scheduler ordinary translated store did not use canonical RAM");
     }
     crate::output::arguments(format_args!(
-        "CHECK native-shared-kernel PASS physical_cores={cores} actual_frames={cores} lse_updates={} full_GPR_SIMD_FP_state=preserved canonical_RAM=shared scheduler_rounds={rounds} source_ERET_STXP=failed source_WFE=completed source_timer_FIQ=delivered source_permission_abort=precise actual_Host_effects=receipted; original macOS SMP unqualified\n",
-        cores * source::INCREMENTS
+        "CHECK native-shared-kernel PASS physical_cores={cores} actual_frames={cores} lse_updates={} full_GPR_SIMD_FP_state=preserved canonical_RAM=shared cold_M0_to_M1=checked CPU_starts={} legacy_warmup=none scheduler_rounds={rounds} source_ERET_STXP=failed source_WFE=completed source_timer_FIQ=delivered source_permission_abort=precise actual_Host_effects=receipted; original macOS SMP unqualified\n",
+        cores * source::INCREMENTS,
+        cores - 1
     ));
     Ok(())
 }

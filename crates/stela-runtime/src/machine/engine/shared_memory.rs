@@ -3,6 +3,7 @@
 mod controls;
 mod exclusive;
 mod host;
+mod lifecycle;
 mod native_run;
 mod policy;
 mod scheduler;
@@ -48,6 +49,35 @@ impl SharedMemory {
     }
     pub fn processor(&self) -> usize {
         self.pe
+    }
+    pub(super) fn prepare_reset_peer(
+        &self,
+        cpu: &crate::machine::Cpu,
+        pe: usize,
+        name: &'static str,
+        missing: &[crate::machine::system::Register],
+    ) -> Result<Self, MemoryStatus> {
+        if cpu.canonical_memory.is_some() || cpu.monitor.is_some() {
+            return Err(MemoryStatus::Unsupported);
+        }
+        let controls = Controls::capture(cpu, name, missing)?;
+        let mut memory = self
+            .ram
+            .domain()
+            .thread(Policy::new(controls, Arc::clone(&self.ram)));
+        let event = self
+            .event
+            .domain()
+            .register(cpu.event, None)
+            .map_err(|_| MemoryStatus::Domain)?;
+        memory.bind_events(&event.producer())?;
+        Ok(Self {
+            memory,
+            ram: Arc::clone(&self.ram),
+            pe,
+            machine: Arc::clone(&self.machine),
+            event,
+        })
     }
     pub fn event_endpoint(&self) -> &crate::system::events::EventEndpoint {
         &self.event

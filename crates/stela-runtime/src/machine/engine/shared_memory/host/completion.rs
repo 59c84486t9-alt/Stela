@@ -137,14 +137,14 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             && bindings.iter().all(|binding| {
                 matches!(
                     self.peers.get(binding.pe),
-                    Some(Peer::Running | Peer::Parked(_))
+                    Some(Peer::Running | Peer::Parked(_) | Peer::Off)
                 )
             })
             && self.peers.iter().enumerate().all(|(pe, peer)| {
                 let cpu = match peer {
                     Peer::Running if pe == self.current => &self.cpu,
                     Peer::Parked(parked) => parked.cpu(),
-                    Peer::Off => return !bindings.iter().any(|binding| binding.pe == pe),
+                    Peer::Off => return true,
                     _ => return false,
                 };
                 if !bindings.iter().any(|binding| binding.pe == pe) {

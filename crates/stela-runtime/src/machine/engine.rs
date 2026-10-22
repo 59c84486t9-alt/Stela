@@ -5551,14 +5551,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let down = kind == WaitKind::Interrupt
             && self.cpu.wfi_mode() == registers::CYC_OVRD_WFI_POWER_DOWN;
         if down && self.cpu.has_canonical_memory() {
-            return Err(self.unsupported(RequirementKind::Native(
-                "canonical native PE power-down requires its RAM/event retirement and reset-rebind owner",
-            )));
+            self.require_native_lifecycle_hold().map_err(|_| {
+                self.unsupported(RequirementKind::Native(
+                    "native power-down requires the actual held physical roster",
+                ))
+            })?;
         }
         if down && timeout.is_some() {
             return Err(self.unsupported(RequirementKind::Native(
                 "WFIT with CYC_OVRD's power-down mode (a powered-down core has no local timeout)",
             )));
+        }
+        if down && self.cpu.has_canonical_memory() {
+            self.cpu.clear_exclusive().map_err(|_| {
+                self.unsupported(RequirementKind::Native("native power-down monitor refused"))
+            })?;
         }
         // The PE waits until the scheduler finds it woken
         // (`processors::Peer::ready`) and completes the instruction.

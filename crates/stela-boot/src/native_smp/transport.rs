@@ -2,7 +2,7 @@
 //! The BSP retains the Machine; each physical owner retains its own Host.
 use super::executor::Executors;
 use crate::apic::Apic;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use stela_runtime::machine::{
     Host,
     engine::{
@@ -13,20 +13,28 @@ use stela_runtime::machine::{
         },
     },
 };
+use stela_runtime::memory::RegisteredSystemRam;
 
 pub(crate) struct FixedWorkers<'a> {
     bsp: Option<WorkerOwner>,
     executors: &'a Executors,
     sender: &'a Apic,
     tsc_hz: u64,
+    ram: Arc<RegisteredSystemRam>,
 }
 impl<'a> FixedWorkers<'a> {
-    pub(crate) fn new(executors: &'a Executors, sender: &'a Apic, tsc_hz: u64) -> Self {
+    pub(crate) fn new(
+        executors: &'a Executors,
+        sender: &'a Apic,
+        tsc_hz: u64,
+        ram: Arc<RegisteredSystemRam>,
+    ) -> Self {
         Self {
             bsp: None,
             executors,
             sender,
             tsc_hz,
+            ram,
         }
     }
     fn processor(&self, binding: publication::WorkerBinding) -> &super::executor::Processor {
@@ -112,7 +120,7 @@ unsafe impl NativeTransport for FixedWorkers<'_> {
                 published
             } else {
                 self.processor(owner.binding())
-                    .initialize(owner, self.sender, self.tsc_hz)
+                    .initialize(owner, Arc::clone(&self.ram), self.sender, self.tsc_hz)
                     .unwrap_or_else(|_| fail("actual AP initialization refused"))
             };
             inventory

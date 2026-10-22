@@ -530,30 +530,27 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if bindings.len() != self.peers.len() || (!runnable_only && self.waiting.is_some()) {
             return Err(MemoryStatus::Unsupported);
         }
-        let services: Vec<_> = self
-            .peers
-            .iter()
-            .enumerate()
-            .map(|(pe, peer)| {
-                let cpu = match peer {
-                    super::super::processors::Peer::Running if pe == self.current => &self.cpu,
-                    super::super::processors::Peer::Parked(parked)
-                        if runnable_only || parked.native_ready() =>
-                    {
-                        parked.cpu()
-                    }
-                    _ => return Err(MemoryStatus::Unsupported),
-                };
-                let memory = cpu
-                    .canonical_memory
-                    .as_ref()
-                    .ok_or(MemoryStatus::Unsupported)?;
-                if memory.pe != pe || !Arc::ptr_eq(&memory.machine, &self.native_memory_identity) {
-                    return Err(MemoryStatus::Unsupported);
+        let mut services = Vec::new();
+        for (pe, peer) in self.peers.iter().enumerate() {
+            let cpu = match peer {
+                super::super::processors::Peer::Running if pe == self.current => &self.cpu,
+                super::super::processors::Peer::Parked(parked)
+                    if runnable_only || parked.native_ready() =>
+                {
+                    parked.cpu()
                 }
-                Ok(memory)
-            })
-            .collect::<Result<_, _>>()?;
+                super::super::processors::Peer::Off => continue,
+                _ => return Err(MemoryStatus::Unsupported),
+            };
+            let memory = cpu
+                .canonical_memory
+                .as_ref()
+                .ok_or(MemoryStatus::Unsupported)?;
+            if memory.pe != pe || !Arc::ptr_eq(&memory.machine, &self.native_memory_identity) {
+                return Err(MemoryStatus::Unsupported);
+            }
+            services.push(memory);
+        }
         let first = services.first().ok_or(MemoryStatus::Unsupported)?;
         if services.iter().any(|candidate| {
             !Arc::ptr_eq(&candidate.ram, &first.ram) || !candidate.event.same_domain(&first.event)
@@ -564,6 +561,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let mut current = Some(&mut self.cpu);
         let mut frames = Vec::with_capacity(self.peers.len());
         for (pe, peer) in self.peers.iter_mut().enumerate() {
+            if matches!(peer, super::super::processors::Peer::Off) {
+                continue;
+            }
             if runnable_only && self.processor_power.paused(pe) == Some(true) {
                 continue;
             }

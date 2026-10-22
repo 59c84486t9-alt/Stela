@@ -1,4 +1,4 @@
-//! Cold serial-first adapter over the boot's existing physical reservations.
+//! Cold fixed-physical-core adapter over the boot's existing physical reservations.
 //! Final Apple topology/device/DMA/reset admission belongs to the mount. This
 //! constructs the actual checked Machine; it never certifies legacy raw V1.
 use super::{executor::Executors, firmware::Capture, transport::FixedWorkers};
@@ -90,13 +90,14 @@ pub(crate) unsafe fn reserve(
     .map_err(|_| "canonical boot RAM registration refused")
 }
 
-/// Cold one-assigned-physical-core construction, before FIRST guest instruction.
+/// Cold assigned-physical-core construction, before FIRST guest instruction.
 /// The caller can borrow its actual registered owner for Prepared's MCC join.
 ///
 /// # Safety
 /// `reserve`'s closed producer contract holds. Loader::apple_device_tree::assigned
 /// already projected the original source PE/resource/AIC plan to this actual
-/// BSP: exactly one visible PE, never stock slots merely marked Off. All host
+/// core roster: exactly the assigned visible PEs, never unassigned stock slots
+/// merely marked Off. All host
 /// interfaces are synchronous through this Machine's Devices/Host; no external
 /// DMA/background producer or legacy raw V1 execution is admitted. The actual
 /// topology capture, executor, HostOwner and mappings remain pinned. Native IRQ,
@@ -113,14 +114,26 @@ pub(crate) unsafe fn prepare<'a, D: Devices>(
     devices: D,
     profile: CpuProfile,
 ) -> Result<CanonicalMachine<'a, D>, &'static str> {
-    if handoff.native_resources.cores != 1
-        || !executors.processors().is_empty()
-        || profile.processors.len() > 1
-        || capture.core_count == 0
+    let cores = handoff.native_resources.cores as usize;
+    if cores == 0
+        || cores > capture.core_count as usize
+        || executors.processors().len() + 1 != cores
+        || profile.processors.len().max(1) != cores
     {
-        return Err(
-            "canonical cold mount requires exactly one assigned physical BSP and visible PE",
-        );
+        return Err("canonical mount requires the same assigned physical and visible PE roster");
+    }
+    for slot in 1..cores {
+        let selected = capture.processors[capture.selected[slot] as usize];
+        let Some(processor) = executors
+            .processors()
+            .iter()
+            .find(|processor| processor.slot() == slot)
+        else {
+            return Err("assigned AP executor is absent");
+        };
+        if processor.apic_id() != selected.apic_id || !processor.observation().matches(selected) {
+            return Err("actual AP executor differs from its assigned physical binding");
+        }
     }
     let bsp = capture.processors[capture.selected[0] as usize];
     let apic =
@@ -129,18 +142,21 @@ pub(crate) unsafe fn prepare<'a, D: Devices>(
     // SAFETY: actual registered owner, pristine GS-local dispatch; every later
     // access goes through this same canonical RAM, never old raw V1 stores.
     unsafe { owner.register_system_ram(Arc::clone(&ram)) }?;
-    let transport = FixedWorkers::new(executors, sender, handoff.tsc_hz);
+    let transport = FixedWorkers::new(executors, sender, handoff.tsc_hz, Arc::clone(&ram));
     let host = ServiceHost::new(owner.host(), transport, Arc::clone(&ram));
     let mut machine = Machine::new(cpu, host, devices, profile, ram.target());
     machine
         .install_shared_memory_for_active_processors(ram, &EventDomain::new())
         .map_err(|_| "cold source controls/canonical CPU ownership refused before entry")?;
+    let bindings: Vec<_> = (0..cores)
+        .map(|pe| WorkerBinding {
+            pe,
+            worker: WorkerId(pe),
+        })
+        .collect();
     let owners = machine
-        .bind_active_native_workers(&[WorkerBinding {
-            pe: 0,
-            worker: WorkerId(0),
-        }])
-        .map_err(|_| "canonical actual BSP binding refused")?;
+        .bind_assigned_native_workers(&bindings)
+        .map_err(|_| "canonical assigned physical roster binding refused")?;
     machine.initialize_native_transport(owners);
     Ok(machine)
 }
