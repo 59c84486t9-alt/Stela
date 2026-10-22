@@ -160,7 +160,33 @@ fn check_range(node: &Node, name: &str, base: u64, size: u64) -> Result<()> {
     );
     Ok(())
 }
-fn shape(node: &Node) -> Result<()> {
+/// T8112's original normal-mode MPIDR/CPU association contract supplies these
+/// coordinates from raw reg (apple-socs.md, original J473 CPU power ownership).
+/// The original templates omit the three fields; never add them to the ADT.
+fn t8112_coordinates(node: &Node, soc: u32) -> Result<Option<[u32; 3]>> {
+    if soc != 0x8112 {
+        return Ok(None);
+    }
+    let reg = word(node, "reg")?;
+    ensure!(
+        reg & !0x103 == 0 && word(node, "cluster-id")? == reg >> 8,
+        "unqualified T8112 CPU affinity/cluster coordinates"
+    );
+    let coordinates = [0, reg >> 8, reg & 3];
+    for (field, expected) in ["die-id", "die-cluster-id", "cluster-core-id"]
+        .into_iter()
+        .zip(coordinates)
+    {
+        if node.property(field).is_some() {
+            ensure!(
+                word(node, field)? == expected,
+                "T8112 {field} differs from source affinity"
+            );
+        }
+    }
+    Ok(Some(coordinates))
+}
+fn shape(node: &Node, soc: u32) -> Result<()> {
     ensure!(
         node.children.is_empty(),
         "nested CPU topology needs a qualified schema"
@@ -202,14 +228,13 @@ fn shape(node: &Node) -> Result<()> {
         word(node, "AAPL,phandle")? != 0,
         "zero original CPU phandle"
     );
-    for field in [
-        "cluster-id",
-        "die-id",
-        "die-cluster-id",
-        "cluster-core-id",
-        "l2-cache-size",
-    ] {
+    for field in ["cluster-id", "l2-cache-size"] {
         word(node, field)?;
+    }
+    if t8112_coordinates(node, soc)?.is_none() {
+        for field in ["die-id", "die-cluster-id", "cluster-core-id"] {
+            word(node, field)?;
+        }
     }
     let kind = bytes(node, "cluster-type")?;
     ensure!(
@@ -278,7 +303,7 @@ impl<'p, 's> Projection<'p, 's> {
         // ALL original nodes, including those that will be removed, without
         // requiring fabricated resources for an unassigned hardware slot.
         for node in &cpus.children {
-            shape(node)?;
+            shape(node, plan.profile().soc)?;
             let reg = word(node, "reg")?;
             ensure!(
                 reg <= 0xffff && affinities.insert(reg),
@@ -334,13 +359,30 @@ impl<'p, 's> Projection<'p, 's> {
             for (key, expected) in [
                 ("reg", pe.reg),
                 ("cluster-id", cluster.resource.firmware_id),
-                ("die-id", cluster.resource.die),
-                ("die-cluster-id", cluster.resource.die_cluster),
-                ("cluster-core-id", pe.cluster_core),
                 ("l2-cache-size", cluster.cache.geometry.bytes),
             ] {
                 ensure!(
                     word(node, key)? == expected,
+                    "CPU {key} differs from plan slot {:?}",
+                    pe.slot
+                );
+            }
+            let implicit = t8112_coordinates(node, plan.profile().soc)?;
+            for (index, (key, expected)) in [
+                ("die-id", cluster.resource.die),
+                ("die-cluster-id", cluster.resource.die_cluster),
+                ("cluster-core-id", pe.cluster_core),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let actual = if node.property(key).is_some() {
+                    word(node, key)?
+                } else {
+                    implicit.context("CPU coordinate has no qualified source schema")?[index]
+                };
+                ensure!(
+                    actual == expected,
                     "CPU {key} differs from plan slot {:?}",
                     pe.slot
                 );
@@ -538,6 +580,7 @@ mod tests {
         }
     }
     struct Inventory {
+        soc: u32,
         capacities: Vec<Capacity>,
         kinds: Vec<CoreKind>,
         slots: Vec<PeSlot>,
@@ -555,7 +598,7 @@ mod tests {
             Resources {
                 profile: ResourceProfile {
                     chip: Chip::AppleM1,
-                    soc: 0x6000,
+                    soc: self.soc,
                     board: 8,
                     input_set_sha256: [1; 32],
                     adapted_set_sha256: None,
@@ -607,6 +650,7 @@ mod tests {
                 line: 64,
             };
             let mut inventory = Inventory {
+                soc: 0x6000,
                 capacities: [
                     CapacityKind::KernelCpus,
                     CapacityKind::KernelClusters,
@@ -1158,6 +1202,148 @@ mod tests {
             word(tree.node("/aic").unwrap(), "#main-cpus").unwrap(),
             plan.pes().len() as u32
         );
+    }
+
+    #[test]
+    fn t8112_projection_preserves_absent_coordinates_and_checks_affinity_derived_bindings() {
+        let mut f = Fixture::new();
+        f.inventory.soc = 0x8112;
+        for (index, cluster) in f.inventory.clusters.iter_mut().enumerate() {
+            cluster.firmware_id = index as u32;
+        }
+        for node in &mut f.tree.node_mut(CPUS).unwrap().children {
+            let reg = word(node, "reg").unwrap();
+            set_word(node, "cluster-id", reg >> 8);
+            for key in ["die-id", "die-cluster-id", "cluster-core-id"] {
+                node.remove_property(key);
+            }
+        }
+        let plan = f.plan();
+        let mut projected = f.tree.clone();
+        Projection::prepare(&plan, &projected, &f.source())
+            .unwrap()
+            .apply(&mut projected)
+            .unwrap();
+        for node in &projected.node(CPUS).unwrap().children {
+            for key in ["die-id", "die-cluster-id", "cluster-core-id"] {
+                assert!(node.property(key).is_none());
+            }
+        }
+        let mut wrong = f.tree.clone();
+        set_word(wrong.node_mut("/cpus/cpu2").unwrap(), "die-cluster-id", 0);
+        let mut source = f.source();
+        source.tree_sha256 = digest(&wrong);
+        assert!(Projection::prepare(&plan, &wrong, &source).is_err());
+        drop(plan);
+        f.inventory.soc = 0x6000;
+        assert!(Projection::prepare(&f.plan(), &f.tree, &f.source()).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires pinned original J473 ADT in STELA_TEST_CPU_DT_DIR"]
+    fn original_j473_first_p_projection_keeps_source_fields_and_absent_coordinates() {
+        use stela_runtime::machine::soc::assigned::{BspSource, SourceIdentity};
+        let file = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap())
+            .join("DeviceTree.j473ap.adt");
+        let original = std::fs::read(file).unwrap();
+        assert_eq!(
+            stela_runtime::sha256(&original),
+            "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
+        );
+        let mut tree = DeviceTree::parse(&original).unwrap();
+        tree.set_property("/chosen", "chip-id", 0x8112u32.to_le_bytes().to_vec())
+            .unwrap();
+        tree.set_property("/chosen", "board-id", 0x24u32.to_le_bytes().to_vec())
+            .unwrap();
+        tree.set_property("/cpus/cpu4", "state", RUNNING.to_vec())
+            .unwrap();
+        let prepared = tree.serialize();
+        let owner = BspSource::t8112(
+            &original,
+            &prepared,
+            SourceIdentity {
+                original_tree_sha256: Sha256::digest(&original).into(),
+                profile: ResourceProfile {
+                    chip: Chip::AppleM2,
+                    soc: 0x8112,
+                    board: 0x24,
+                    input_set_sha256: [1; 32],
+                    adapted_set_sha256: None,
+                },
+            },
+            0x100,
+            0,
+        )
+        .unwrap();
+        let roster = Roster {
+            revision: Cell::new(1),
+            cores: vec![AssignedCore {
+                worker: 1,
+                package: 0,
+                core: 0,
+                apic: 0,
+                started: true,
+            }],
+        };
+        let assignments = [Assignment {
+            worker: 1,
+            slot: owner.slot(),
+            boot: true,
+        }];
+        let plan = Plan::build(&roster, &owner, &assignments).unwrap();
+        let resources = owner.resources();
+        let pe = &plan.pes()[0];
+        let bindings = [NodeBinding {
+            slot: owner.slot(),
+            name: owner.name(),
+            midr: pe.identity.midr,
+            cache: pe.cache,
+            interrupt: pe.interrupt,
+            start: pe.start,
+            core_power: pe.core_power,
+            cluster_power: pe.cluster_power,
+        }];
+        let counts = [
+            CountField {
+                path: CPUS,
+                property: "max_cpus",
+                count: Count::Pes,
+            },
+            CountField {
+                path: CPUS,
+                property: "e-core-count",
+                count: Count::CoreType(b'E'),
+            },
+            CountField {
+                path: CPUS,
+                property: "p-core-count",
+                count: Count::CoreType(b'P'),
+            },
+            CountField {
+                path: "/arm-io/aic",
+                property: "#main-cpus",
+                count: Count::Pes,
+            },
+        ];
+        let source = SourceBindings {
+            source_set_sha256: resources.profile.input_set_sha256,
+            tree_sha256: Sha256::digest(&prepared).into(),
+            nodes: &bindings,
+            counts: &counts,
+            references: &[],
+        };
+        let receipt = Projection::prepare(&plan, &tree, &source)
+            .unwrap()
+            .apply(&mut tree)
+            .unwrap();
+        assert_eq!(receipt.boot_path, "/cpus/cpu4");
+        assert_eq!(tree.node(CPUS).unwrap().children.len(), 1);
+        let prior = DeviceTree::parse(&prepared).unwrap();
+        assert_eq!(tree.node("/cpus/cpu4"), prior.node("/cpus/cpu4"));
+        for key in ["die-id", "die-cluster-id", "cluster-core-id"] {
+            assert!(tree.property("/cpus/cpu4", key).is_none());
+        }
+        assert_eq!(owner.source(), original);
     }
     #[test]
     #[ignore = "requires immutable original 26A434 J314s DT via STELA_TEST_ASSIGNED_DT"]

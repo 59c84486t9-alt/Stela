@@ -10,6 +10,7 @@
 //! core/CPM prefixes and stores the normalized source DeviceID, independently
 //! of the function-enable_core bitmask consumed at2b5686c/2b2dcb0.
 //! These are source membership identities, never observations of PS readiness.
+mod t8112;
 use super::*;
 use crate::machine::{
     adt::Node,
@@ -45,6 +46,7 @@ pub struct BspSource<'a> {
     graph: PowerStates,
     core_address: u64,
     cluster_address: u64,
+    provenance: &'static str,
 }
 fn property<'a>(node: &Node<'a>, key: &str) -> Result<&'a [u8], String> {
     let props = node
@@ -446,6 +448,7 @@ impl<'a> BspSource<'a> {
             graph,
             core_address,
             cluster_address,
+            provenance: "T6000 mode1 first-complex/core source; no lifecycle or native execution admission",
         })
     }
     pub fn source(&self) -> &[u8] {
@@ -474,7 +477,7 @@ impl RetainedResources for BspSource<'_> {
         Resources {
             profile: self.profile,
             register_granule: 0x4000,
-            provenance: "T6000 mode1 first-complex/core source; no lifecycle or native execution admission",
+            provenance: self.provenance,
             capacities: &self.capacities,
             kinds: &self.kinds,
             slots: &self.slots,
