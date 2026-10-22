@@ -1,15 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 /* Offline MMIO model; never a production owner or physical activation. */
-#include <assert.h>
-#include <errno.h>
-#include <pthread.h>
-#include <stdio.h>
-#include <string.h>
-#include <time.h>
+#include <stela/test.h>
 #include "../activation.c"
 
 struct model {
-    pthread_mutex_t lock;
+    bool locked; /* The owner's exclusive context is held. */
     uint32_t graphics, media, ack, last_control;
     unsigned prepares, reads, writes, reports;
     bool wake_timeout, sleep_timeout, all_ones;
@@ -17,11 +12,7 @@ struct model {
 };
 static int check_context(void *data)
 {
-    struct model *m = data;
-    int status = pthread_mutex_trylock(&m->lock);
-    if (status == EBUSY) return 0;
-    if (!status) assert(pthread_mutex_unlock(&m->lock) == 0);
-    return -16;
+    return ((struct model *)data)->locked ? 0 : -16;
 }
 static int prepare(void *data, uint32_t platform, uint32_t revision, bool discrete)
 {
@@ -51,9 +42,8 @@ static void write_model(void *data, uint32_t offset, uint32_t value)
 }
 static int64_t now(void *data)
 {
-    (void)data; struct timespec t;
-    assert(clock_gettime(CLOCK_MONOTONIC, &t) == 0);
-    return t.tv_sec * INT64_C(1000000000) + t.tv_nsec;
+    (void)data;
+    return stela_test_now_ns();
 }
 static int64_t invalid_clock(void *data) { (void)data; return -1; }
 static void delay(void *data, uint32_t minimum, uint32_t maximum, bool atomic)
@@ -61,10 +51,7 @@ static void delay(void *data, uint32_t minimum, uint32_t maximum, bool atomic)
     assert(minimum <= maximum);
     int64_t end = now(data) + (int64_t)minimum * 1000;
     if (atomic) while (now(data) < end) __asm__ volatile("pause");
-    else {
-        struct timespec t = {minimum / 1000000, (long)(minimum % 1000000) * 1000};
-        while (nanosleep(&t, &t) && errno == EINTR) {}
-    }
+    else stela_test_sleep_us(minimum);
 }
 static void check(void *data, bool condition) { (void)data; assert(condition); }
 static void report(void *data, uint32_t mask, bool wake, int status, uint32_t value)
@@ -80,7 +67,7 @@ int main(void)
     r = (struct xe_reg){.masked = 1}; assert(r.raw == (1u << 22));
     r = (struct xe_reg){.mcr = 1}; assert(r.raw == (1u << 23));
     r = (struct xe_reg){.vf = 1}; assert(r.raw == (1u << 24));
-    struct model m = {.lock = PTHREAD_MUTEX_INITIALIZER,
+    struct model m = {
         .graphics = (1270 / 100u << 22) | (1270 % 100u << 14), .media = 1300 / 100u << 22};
     struct stela_intel_activation state, before; memset(&before, 0xa5, sizeof(before));
     /* The all-zero terminator is not a PCI device or a descriptor. */
@@ -90,7 +77,7 @@ int main(void)
     for (size_t i = 0; i + 1 < ARRAY_SIZE(pciidlist); ++i) {
         const struct pci_device_id *p = &pciidlist[i];
         const struct xe_device_desc *desc = (const void *)p->driver_data;
-        assert(pthread_mutex_lock(&m.lock) == 0);
+        m.locked = true;
         state = before;
         assert(stela_intel_activation_match(p->vendor, p->device, p->class, false, true) == 0);
         assert(stela_intel_activation_init(&state, sizeof(state), &io, &m,
@@ -103,14 +90,14 @@ int main(void)
         assert(stela_intel_activation_sleep(&state) == 0 && m.writes == writes);
         assert(stela_intel_activation_sleep(&state) == 0 && !state.facts.awake);
         assert(stela_intel_activation_sleep(&state) == -22);
-        assert(pthread_mutex_unlock(&m.lock) == 0); ++matches;
+        m.locked = false; ++matches;
     }
     const struct pci_device_id *p = &pciidlist[0];
     state = before;
     assert(stela_intel_activation_init(&state, sizeof(state), &io, &m,
         p->vendor, p->device, p->class, 0, UINT64_C(64) << 20, false, true) == -16);
     assert(!memcmp(&state, &before, sizeof(state)));
-    assert(pthread_mutex_lock(&m.lock) == 0);
+    m.locked = true;
     for (unsigned bad = 0; bad < 14; ++bad) {
         state = before; struct stela_intel_activation_io missing = io;
         if (bad == 0) missing.check_context = NULL;
@@ -182,7 +169,6 @@ int main(void)
         if (bad < 2) assert(now(&m) - start >= INT64_C(50000000));
         assert(state.poisoned && stela_intel_activation_wake(&state) == -5);
     }
-    assert(pthread_mutex_unlock(&m.lock) == 0 && pthread_mutex_destroy(&m.lock) == 0);
     printf("Intel activation model: %u original PCI rows, 18 atomic refusals, 2 pure unmatched/terminator refusals, unknown and fused-off media, real-clock ACK timeout/all-ones checks, %u runtime IP entries; no physical hardware activation\n", matches, runtime_ips);
     return 0;
 }

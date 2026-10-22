@@ -1,10 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* The unchanged xe_wopcm.c in Stela's environment over modelled registers
  * and firmware, never physical readback/upload. */
-#include <assert.h>
-#include <errno.h>
-#include <stdio.h>
-#include <string.h>
+#include <stela/test.h>
 #include "../wopcm.c"
 
 /* GuC WOPCM size and offset registers: write-once, locked by bit 0. */
@@ -34,33 +31,34 @@ static const struct stela_intel_activation_io io = {
     .read32 = read_io, .write32 = write_io, .invariant = invariant_io,
 };
 /* Linux's upload size is the CSS header plus the ucode, or zero when unavailable. */
-static struct xe_uc_fw firmware(enum xe_uc_fw_type type, u32 upload, bool available)
+static void firmware(struct xe_uc_fw *fw, u32 upload, bool available)
 {
-    if (!available || !upload) return (struct xe_uc_fw){.type = type, .__status = XE_UC_FIRMWARE_MISSING};
+    if (!available || !upload) {
+        fw->__status = XE_UC_FIRMWARE_MISSING;
+        fw->ucode_size = 0;
+        return;
+    }
     assert(upload >= sizeof(struct uc_css_header));
-    return (struct xe_uc_fw){.type = type, .__status = XE_UC_FIRMWARE_AVAILABLE,
-        .ucode_size = upload - (u32)sizeof(struct uc_css_header)};
+    fw->__status = XE_UC_FIRMWARE_AVAILABLE;
+    fw->ucode_size = upload - (u32)sizeof(struct uc_css_header);
 }
 /* Each run starts from the given register state. */
 static int run(struct model initial, struct xe_wopcm *out)
 {
     struct model state = initial, *m = &state;
     struct stela_intel_wopcm_result result = {0};
-    struct native_wopcm native = {
-        .xe.info = {.platform = m->platform, .is_dgfx = m->discrete},
-        .xe.tiles[0].xe = &native.xe,
-        .gt = {
-            .tile = &native.xe.tiles[0], .mmio = {.io = &io, .context = m},
-            .uc.guc.fw = firmware(XE_UC_FW_TYPE_GUC, m->guc_fw_size, true),
-            .uc.huc.fw = firmware(XE_UC_FW_TYPE_HUC, m->huc_fw_size, m->huc_available),
-        },
-        .result = &result,
-    };
-    active = &native;
-    int status = xe_wopcm_init(&native.gt.uc.wopcm);
-    active = NULL;
+    struct native_wopcm *local = calloc(1, sizeof(*local));
+    assert(local);
+    const struct stela_linux_owner owner = {.services = &services, .context = &local->dev};
+    stela_linux_enter(&owner);
+    prepare(local, &io, m, m->platform, m->discrete, 0, &result);
+    firmware(&local->gt.uc.guc.fw, m->guc_fw_size, true);
+    firmware(&local->gt.uc.huc.fw, m->huc_fw_size, m->huc_available);
+    int status = xe_wopcm_init(&local->gt.uc.wopcm);
+    stela_linux_exit();
     assert(result.writes == m->writes);
-    *out = native.gt.uc.wopcm;
+    *out = local->gt.uc.wopcm;
+    free(local);
     return status;
 }
 int main(void)

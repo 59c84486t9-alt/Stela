@@ -8,7 +8,7 @@ use crate::{
     firmware::{Provider, Requirement, Target},
 };
 use alloc::{
-    alloc::{alloc, alloc_zeroed, dealloc},
+    alloc::{alloc, dealloc},
     format,
     string::String,
 };
@@ -362,45 +362,5 @@ impl Drop for Discovery<'_> {
             stela_amd_discovery_fini(self.state.as_ptr());
             dealloc(self.state.as_ptr().cast(), self.layout);
         }
-    }
-}
-
-// Linux's kzalloc and kfree for the AMD adapters, on Stela's global heap.
-// kfree takes no size, so each allocation records its size ahead of the
-// object, at the alignment kmalloc guarantees.
-const KMALLOC_ALIGN: usize = 16;
-
-#[unsafe(no_mangle)]
-extern "C" fn stela_amd_kzalloc(bytes: usize) -> *mut c_void {
-    let Some(layout) = bytes
-        .checked_add(KMALLOC_ALIGN)
-        .and_then(|size| Layout::from_size_align(size, KMALLOC_ALIGN).ok())
-    else {
-        return ptr::null_mut();
-    };
-    // SAFETY: a nonzero layout.
-    let base = unsafe { alloc_zeroed(layout) };
-    if base.is_null() {
-        return ptr::null_mut();
-    }
-    // SAFETY: the allocation holds the size prefix and the object.
-    unsafe {
-        base.cast::<usize>().write(layout.size());
-        base.add(KMALLOC_ALIGN).cast()
-    }
-}
-
-/// # Safety
-/// `object` is null or a live stela_amd_kzalloc allocation, freed once.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn stela_amd_kfree(object: *const c_void) {
-    if object.is_null() {
-        return;
-    }
-    // SAFETY: the caller's contract; the prefix holds the allocation's size.
-    unsafe {
-        let base = object.cast::<u8>().sub(KMALLOC_ALIGN).cast_mut();
-        let size = base.cast::<usize>().read();
-        dealloc(base, Layout::from_size_align_unchecked(size, KMALLOC_ALIGN));
     }
 }

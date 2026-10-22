@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 /* Stela's BAR policy in Stela's Linux environment; CPU only. */
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
+#include <drm/amd_asic_type.h>
+#include <linux/string.h>
+#include <stela/test.h>
 #include "../native_bar.h"
 
 static struct stela_amd_bar_layout layout(uint32_t asic, uint64_t bar_bytes,

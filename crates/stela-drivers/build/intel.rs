@@ -1,7 +1,7 @@
 //! Stela's Xe and i915 port, its dispatch packers and their hosted tests.
 //! Linux's and Mesa's original generators supply the workaround table and the
 //! packet headers, run by a selected Python interpreter.
-use super::native::{self, Tests};
+use super::native::{self, Linux, Module, Tests};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -12,6 +12,19 @@ const SOURCE: &str = "src/gpu/intel";
 const GENXML: &str = "src/gpu/common/mesa/src/intel/genxml";
 const LEGACY: &str = "GPGPU_WALKER,MEDIA_STATE_FLUSH";
 const COMPUTE: &str = "COMPUTE_WALKER,COMPUTE_WALKER_BODY,INTERFACE_DESCRIPTOR_DATA,POSTSYNC_DATA,PREF_SLM_ALLOCATION_SIZE";
+
+const XE: Module = Module {
+    name: "xe",
+    file: "drivers/gpu/drm/xe/xe",
+};
+const I915: Module = Module {
+    name: "i915",
+    file: "drivers/gpu/drm/i915/i915",
+};
+/// The adapters over i915's sources; the others are over Xe's, except the
+/// packet encoders, which run Mesa's packers rather than Linux code.
+const I915_ADAPTERS: [&str; 1] = ["i915_commands.c"];
+const ENCODERS: [&str; 2] = ["dispatch.c", "compute_dispatch.c"];
 
 /// Packet generations: GFX_VERx10, Mesa's XML name, and the dispatch unit
 /// built over each one's selected packets.
@@ -36,48 +49,94 @@ const PACKERS: [(&str, &[u32]); 4] = [
     ("compute_dispatch", &[125, 200, 300, 350]),
 ];
 
-pub fn port(tests: &mut Tests) {
+/// Hosted tests of the adapters, which run in Stela's Linux environment, and
+/// of the encoders and packet adapters, which use the host's C library.
+const LINUX_TESTS: [&str; 9] = [
+    "activation",
+    "firmware",
+    "ggtt_probe",
+    "guc_reset",
+    "huc_firmware",
+    "pat",
+    "pt_walk",
+    "wopcm",
+    "wopcm_owned",
+];
+const HOST_TESTS: [&str; 5] = [
+    "commands",
+    "compute_dispatch",
+    "ct",
+    "dispatch",
+    "i915_commands",
+];
+
+/// The port's three builds: adapters in Stela's Linux environment as Xe's
+/// and i915's Kbuild build them, and the packet encoders over Mesa's packers.
+struct Builds {
+    xe: cc::Build,
+    i915: cc::Build,
+    encoders: cc::Build,
+}
+
+impl Builds {
+    fn new(linux: &Linux, base: &cc::Build, generated: &Path, dispatch: &Path) -> Self {
+        let stela = format!("{SOURCE}/stela");
+        let mut xe = base.clone();
+        linux.apply(&mut xe, Some(generated), &["intel/xe"], Some(&XE));
+        xe.include(&stela);
+        let mut i915 = base.clone();
+        linux.apply(&mut i915, None, &["intel/i915"], Some(&I915));
+        i915.define("I915", None).include(&stela);
+        let mut encoders = base.clone();
+        encoders
+            .include(dispatch)
+            .include(&stela)
+            .include("src/gpu/common/mesa/src")
+            .include(GENXML);
+        Self { xe, i915, encoders }
+    }
+}
+
+pub fn port(linux: &Linux, tests: &mut Tests) {
     let output = native::out_dir();
     let python = python();
     let generated = output.join("intel-generated");
     workarounds(&generated);
     let dispatch = output.join("intel-dispatch");
-    let mut sources = native::sources(&format!("{SOURCE}/stela"));
-    sources.extend(packets(&python, &dispatch));
-    let configure = |mut build: cc::Build| {
-        native::linux_environment(&mut build, Some(&generated), &["intel/xe", "intel/i915"]);
-        build
-            .include(&dispatch)
-            .include(format!("{SOURCE}/stela"))
-            .include("src/gpu/common/mesa/src")
-            .include(GENXML);
-        build
-    };
-    let port = configure(native::configure());
-    port.clone().files(&sources).compile("stela-intel-port");
+    let (mut encoders, adapters): (Vec<_>, Vec<_>) = native::sources(&format!("{SOURCE}/stela"))
+        .into_iter()
+        .partition(|path| named(path, &ENCODERS));
+    let (i915, xe): (Vec<_>, Vec<_>) = adapters
+        .into_iter()
+        .partition(|path| named(path, &I915_ADAPTERS));
+    encoders.extend(packets(&python, &dispatch));
+    let port = Builds::new(linux, &native::configure(), &generated, &dispatch);
+    native::check_declarations(&port.xe, &xe);
+    native::check_declarations(&port.i915, &i915);
+    port.xe.clone().files(&xe).compile("stela-intel-xe");
+    port.i915.clone().files(&i915).compile("stela-intel-i915");
+    port.encoders
+        .clone()
+        .files(&encoders)
+        .compile("stela-intel-encoders");
     let Some(base) = native::hosted() else {
         return;
     };
-    let hosted = configure(base.clone());
-    let adapters = native::archive(&hosted, "intel-adapters-hosted", &sources);
-    for name in [
-        "activation",
-        "commands",
-        "compute_dispatch",
-        "ct",
-        "dispatch",
-        "firmware",
-        "ggtt_probe",
-        "guc_reset",
-        "huc_firmware",
-        "i915_commands",
-        "pat",
-        "pt_walk",
-        "wopcm",
-        "wopcm_owned",
-    ] {
-        let source = format!("{SOURCE}/stela/tests/{name}.c");
-        tests.add(&hosted, &format!("intel_{name}"), &source, &[&adapters]);
+    let hosted = Builds::new(linux, &base, &generated, &dispatch);
+    let mut archives = vec![
+        native::archive(&hosted.xe, "intel-xe-hosted", &xe),
+        native::archive(&hosted.i915, "intel-i915-hosted", &i915),
+        native::archive(&hosted.encoders, "intel-encoders-hosted", &encoders),
+    ];
+    archives.extend(linux.hosted.iter().cloned());
+    let archives = archives.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let mut host = base.clone();
+    host.include(format!("{SOURCE}/stela"));
+    for (build, names) in [(&hosted.xe, &LINUX_TESTS[..]), (&host, &HOST_TESTS[..])] {
+        for name in names {
+            let source = format!("{SOURCE}/stela/tests/{name}.c");
+            tests.add(build, &format!("intel_{name}"), &source, &archives);
+        }
     }
     let genxml = output.join("intel-genxml");
     let mut generations = PACKERS
@@ -105,9 +164,14 @@ pub fn port(tests: &mut Tests) {
             let test = format!("intel_{name}_mesa_{generation}");
             let mut build = mesa.clone();
             build.define("GFX_VERx10", generation.to_string().as_str());
-            tests.add(&build, &test, &source, &[&adapters]);
+            tests.add(&build, &test, &source, &archives);
         }
     }
+}
+
+/// Whether `path` names one of `files`.
+fn named(path: &Path, files: &[&str]) -> bool {
+    files.iter().any(|file| path.ends_with(file))
 }
 
 fn python() -> PathBuf {

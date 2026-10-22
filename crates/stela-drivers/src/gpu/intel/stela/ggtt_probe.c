@@ -9,6 +9,12 @@
 #include "xe_bo.h"
 #include "xe_device_types.h"
 #include "xe_wopcm.h"
+#include <linux/string.h>
+#include <stela/linux.h>
+
+/* The device xe_wopcm_size reads. Only the running Linux owner uses it, so
+ * there is one. */
+static struct xe_device device;
 
 /* Graphics 12.50 and later have a fixed 8 MiB GSM for a 4 GiB GGTT. */
 static bool fixed_gsm(uint32_t graphics_verx100)
@@ -39,8 +45,12 @@ int stela_intel_gsm_geometry(uint32_t platform, uint32_t graphics_verx100, bool 
     /* The GSM follows the registers in BAR0. */
     uint64_t offset = SZ_8M;
     if (offset > actual_bar_bytes || gsm_size > actual_bar_bytes - offset) return -34;
-    struct xe_device xe = {.info = {.platform = (enum xe_platform)platform, .is_dgfx = discrete}};
-    uint64_t wopcm = xe_wopcm_size(&xe);
+    stela_linux_enter(&stela_linux_bare);
+    memset(&device, 0, sizeof(device));
+    device.info.platform = (enum xe_platform)platform;
+    device.info.is_dgfx = discrete;
+    uint64_t wopcm = xe_wopcm_size(&device);
+    stela_linux_exit();
     if ((gsm_size / 8) * (uint64_t)XE_PAGE_SIZE <= wopcm) return -34;
     /* The GGTT starts above WOPCM and ends where the GSM's PTEs or the GuC's
      * address limit does. */

@@ -9,9 +9,9 @@ use stela_runtime::sha256;
 
 /// Environments with a shadow overlay, relative to the GPU source tree.
 const ENVIRONMENTS: &[&str] = &["compat"];
-/// Headers Linux's arch tree and build supply rather than `include/`, and the
-/// adapters' trap helper.
-const ADDITIONS: &[&str] = &["asm/", "generated/", "unsupported.h"];
+/// Headers Linux's arch tree and build supply rather than `include/`, Stela's
+/// kernel-API binding and the adapters' trap helper.
+const ADDITIONS: &[&str] = &["asm/", "generated/", "stela/", "unsupported.h"];
 const ENTRY: &str = "  - {type: file, name: ";
 
 /// Verify every overlay; with `update`, record the current upstream headers

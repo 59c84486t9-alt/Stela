@@ -1,26 +1,18 @@
 /* SPDX-License-Identifier: MIT */
-/* Explicit pthread/RAM model of actual owned C entry; no native PCI/provider. */
-#include <assert.h>
-#include <errno.h>
-#include <pthread.h>
-#include <stdio.h>
-#include <string.h>
+/* Explicit RAM model of actual owned C entry; no native PCI/provider. */
+#include <stela/test.h>
 #include "../activation.c"
 #include "../firmware.h"
 #include "abi/uc_fw_abi.h"
 #include "xe_guc.h"
 struct model {
-    pthread_mutex_t lock;
+    bool locked; /* The owner's exclusive context is held. */
     u32 ack, offset, size;
     unsigned reads, writes, wopcm_reads, wopcm_writes, fail_at;
 };
 static int check(void *context)
 {
-    struct model *m = context;
-    int status = pthread_mutex_trylock(&m->lock);
-    if (status == EBUSY) return 0;
-    if (!status) assert(!pthread_mutex_unlock(&m->lock));
-    return -16;
+    return ((struct model *)context)->locked ? 0 : -16;
 }
 static int prepare_model(void *c, u32 p, u32 r, bool d)
 {
@@ -58,13 +50,13 @@ static void report_model(void *context, u32 domains, bool wake, int status, u32 
 static const struct stela_intel_activation_io io = {check, prepare_model, read_model, write_model, now, delay, invariant_model, report_model};
 static void initialize_id(struct model *m, struct stela_intel_activation *s, u32 device)
 {
-    assert(!pthread_mutex_init(&m->lock, NULL)); assert(!pthread_mutex_lock(&m->lock));
+    m->locked = true;
     assert(!stela_intel_activation_init(s, sizeof(*s), &io, m, 0x8086,
         device, 0x030000, 0, 16*1024*1024, false, true));
 }
 static void finish(struct model *m)
 {
-    assert(!pthread_mutex_unlock(&m->lock)); assert(!pthread_mutex_destroy(&m->lock));
+    m->locked = false;
 }
 int main(void)
 {
@@ -107,11 +99,11 @@ int main(void)
             assert(!out.writes && !m.wopcm_reads);
             assert(!stela_intel_activation_sleep(&s));
         } else if (mode == 5) {
-            assert(!pthread_mutex_unlock(&m.lock));
+            m.locked = false;
             reads = m.reads; writes = m.writes;
             assert(stela_intel_activation_wopcm(&s, bytes, sizeof(bytes), &out) == -16);
             assert(m.reads == reads && m.writes == writes);
-            assert(!pthread_mutex_lock(&m.lock));
+            m.locked = true;
             assert(!stela_intel_activation_sleep(&s));
         } else if (mode == 6) {
             unsigned ref = s.gts[0].pm.fw.domains[XE_FW_DOMAIN_ID_GT].ref;

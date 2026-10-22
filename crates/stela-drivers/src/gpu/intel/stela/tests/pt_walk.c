@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include "../pt_walk.h"
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
+#include <stela/test.h>
+#include <linux/string.h>
 
 #define ENTRIES 512U
 #define EVENT_LIMIT 2048U
@@ -224,6 +223,6 @@ int main(void)
     staging_and_shared_unbind();
     ranges_match_independent_page_partition();
     invalid_inputs_do_not_call_the_walker();
-    puts("Intel native Xe page walker: 5 suites / 1000 range partitions passed");
+    printf("Intel native Xe page walker: 5 suites / 1000 range partitions passed\n");
     return 0;
 }

@@ -6,8 +6,10 @@
 
 /* Native, kernel-owned page trees only. The caller owns every node/children
  * array and serializes edits. Callbacks preserve the validated geometry and
- * their borrowed data until completion; they may return errors. No allocation,
- * physical DMA mapping, PTE write, TLB invalidation or GPU completion is implied.
+ * their borrowed data until completion; they may return errors. They run as
+ * Linux code (see stela/linux.h), so they must not enter it again. No
+ * allocation, physical DMA mapping, PTE write, TLB invalidation or GPU
+ * completion is implied.
  *
  * The wrapper validates Intel's normal/compact page geometry, root bounds and
  * range before entering the unchanged Xe algorithm. Malformed input returns

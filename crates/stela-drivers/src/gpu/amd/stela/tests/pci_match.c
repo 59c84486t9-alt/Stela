@@ -1,14 +1,12 @@
 /* SPDX-License-Identifier: MIT */
 /* The unchanged amdgpu_drv.c's probe admission in Stela's environment; CPU
  * only. */
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
+#include <stela/test.h>
 #include "../pci_match.c"
 
 static const struct stela_amd_pci_policy defaults = {.discovery = -1, .force_asic_type = -1};
 
-static int admit(uint32_t device, uint32_t class_code, uint32_t revision,
+static int try_match(uint32_t device, uint32_t class_code, uint32_t revision,
                  const struct stela_amd_pci_policy *policy, struct stela_amd_pci_match *out)
 {
    const struct stela_amd_pci_identity identity = {
@@ -21,7 +19,7 @@ static struct stela_amd_pci_match admitted(uint32_t device, uint32_t class_code,
                                            uint32_t revision)
 {
    struct stela_amd_pci_match out;
-   assert(!admit(device, class_code, revision, &defaults, &out));
+   assert(!try_match(device, class_code, revision, &defaults, &out));
    return out;
 }
 static int refused(uint32_t device, uint32_t class_code, uint32_t revision,
@@ -30,7 +28,7 @@ static int refused(uint32_t device, uint32_t class_code, uint32_t revision,
    struct stela_amd_pci_match out, saved;
    memset(&out, 0xa5, sizeof(out));
    saved = out;
-   const int status = admit(device, class_code, revision, policy, &out);
+   const int status = try_match(device, class_code, revision, policy, &out);
    assert(status < 0 && !memcmp(&out, &saved, sizeof(out)));
    return status;
 }
@@ -80,7 +78,7 @@ int main(void)
 
    /* The policy sets amdgpu's module parameters, as in Linux. */
    const struct stela_amd_pci_policy file = {.discovery = 2, .force_asic_type = -1};
-   assert(!admit(0x731f, 0x030000, 0, &file, &out) && amdgpu_discovery == 2);
+   assert(!try_match(0x731f, 0x030000, 0, &file, &out) && amdgpu_discovery == 2);
    printf("AMD PCI admission: listed and class matches, IP paths, quirks and refusals\n");
    return 0;
 }

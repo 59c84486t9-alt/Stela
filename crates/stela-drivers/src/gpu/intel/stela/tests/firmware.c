@@ -1,18 +1,18 @@
 /* SPDX-License-Identifier: MIT */
 /* Offline parser/selector qualification; these bytes are not signed firmware. */
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
+#include <stela/test.h>
 #include "../firmware.c"
 
-/* Upstream selection through the production adapter's GT. */
-static struct xe_uc_fw *selected(struct native_fw *native, unsigned platform, unsigned gt,
-                                 unsigned type, uint32_t *diagnostics)
+/* Upstream selection on the production adapter's native GT. */
+static struct xe_uc_fw selected(unsigned platform, unsigned gt, unsigned type,
+                                uint32_t *diagnostics)
 {
-    struct xe_uc_fw *fw = prepare(native, platform, gt == XE_GT_TYPE_MEDIA,
-                                  (enum xe_uc_fw_type)type, diagnostics);
-    uc_fw_auto_select(&native->xe, fw);
-    return fw;
+    struct xe_uc_fw *fw = enter(platform, gt == XE_GT_TYPE_MEDIA, (enum xe_uc_fw_type)type,
+                                diagnostics);
+    uc_fw_auto_select(&native.dev.xe, fw);
+    const struct xe_uc_fw copy = *fw;
+    leave(0);
+    return copy;
 }
 static struct uc_css_header header(uint32_t release)
 {
@@ -31,19 +31,19 @@ int main(void)
     unsigned guc_entries = 0, huc_defaults = 0, parsers = 0, versions = 0;
     /* Every main-GT GuC that upstream selects is what the native query reports. */
     for (unsigned platform = 0; platform <= XE_NOVALAKE_P; ++platform) {
-        struct native_fw native = {0};
         uint32_t diagnostics = 0;
-        const struct xe_uc_fw *fw = selected(&native, platform, XE_GT_TYPE_MAIN, XE_UC_FW_TYPE_GUC, &diagnostics);
+        const struct xe_uc_fw fw =
+            selected(platform, XE_GT_TYPE_MAIN, XE_UC_FW_TYPE_GUC, &diagnostics);
         struct stela_intel_guc_selection output, before; memset(&before, 0xa5, sizeof(before)); output = before;
         int status = stela_intel_guc_select(platform, &output);
-        if (!fw->path) {
+        if (!fw.path) {
             assert(status == (platform ? -ENOENT : -EINVAL) && !memcmp(&output, &before, sizeof(output)));
             continue;
         }
-        assert(status == 0 && !strcmp((const char *)output.name, fw->path) &&
-               output.wanted[0] == fw->versions.wanted.major &&
-               output.wanted[1] == fw->versions.wanted.minor &&
-               output.wanted[2] == fw->versions.wanted.patch);
+        assert(status == 0 && !strcmp((const char *)output.name, fw.path) &&
+               output.wanted[0] == fw.versions.wanted.major &&
+               output.wanted[1] == fw.versions.wanted.minor &&
+               output.wanted[2] == fw.versions.wanted.patch);
         ++guc_entries;
     }
     assert(guc_entries == 11);
@@ -51,20 +51,19 @@ int main(void)
     const unsigned gfx[] = {1200, 1255, 1256, 3500};
     for (unsigned platform = 1; platform <= XE_NOVALAKE_P; ++platform)
         for (unsigned gt = XE_GT_TYPE_MAIN; gt <= XE_GT_TYPE_MEDIA; ++gt) {
-            struct native_fw native = {0};
             uint32_t diagnostics = 0;
-            const struct xe_uc_fw *fw = selected(&native, platform, gt, XE_UC_FW_TYPE_HUC, &diagnostics);
+            const struct xe_uc_fw fw = selected(platform, gt, XE_UC_FW_TYPE_HUC, &diagnostics);
             for (unsigned i = 0; i < ARRAY_SIZE(gfx); ++i) {
                 struct stela_intel_huc_default out;
                 assert(!stela_intel_huc_select_default(platform, gfx[i], gt == XE_GT_TYPE_MEDIA, &out));
                 bool huc_gt = gt == XE_GT_TYPE_MEDIA || gfx[i] <= 1255;
-                if (huc_gt && fw->path) {
+                if (huc_gt && fw.path) {
                     assert(out.disposition == STELA_INTEL_HUC_SELECTED);
-                    assert(!strcmp((const char *)out.name, fw->path));
-                    assert(out.wanted[0] == fw->versions.wanted.major &&
-                           out.wanted[1] == fw->versions.wanted.minor &&
-                           out.wanted[2] == fw->versions.wanted.patch &&
-                           out.full_version == fw->full_ver_required);
+                    assert(!strcmp((const char *)out.name, fw.path));
+                    assert(out.wanted[0] == fw.versions.wanted.major &&
+                           out.wanted[1] == fw.versions.wanted.minor &&
+                           out.wanted[2] == fw.versions.wanted.patch &&
+                           out.full_version == fw.full_ver_required);
                 } else {
                     struct stela_intel_huc_default absent = {.disposition = STELA_INTEL_HUC_ABSENT};
                     assert(!memcmp(&out, &absent, sizeof(out)));

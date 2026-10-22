@@ -1,20 +1,22 @@
 /* SPDX-License-Identifier: MIT */
-/* Stela's environment for the unchanged Linux amdgpu_discovery.c, which
- * follows. Discovery acquires and checks the IP discovery binary and decodes
- * it as the dynamic path of amdgpu_discovery_set_ip_blocks does; no IP block
- * is registered or initialized. */
+/* The unchanged Linux amdgpu_discovery.c, run on a device whose registers,
+ * clock and firmware belong to the native owner. Discovery acquires and
+ * checks the IP discovery binary and decodes it as the dynamic path of
+ * amdgpu_discovery_set_ip_blocks does; no IP block is registered or
+ * initialized. */
 #include "ip_discovery.h"
-#include "unsupported.h"
-#include "amdgpu.h"
-#include <linux/firmware.h>
+#include <stela/linux.h>
+#include "amdgpu_discovery.c"
+#include "nbif/nbif_6_1_offset.h"
+#include <unsupported.h>
 
+/* Every amdgpu_device Stela creates is a discovery's. */
 struct stela_amd_discovery {
    const struct stela_amd_discovery_io *io;
    void *context;
    uint64_t register_bytes;
-   /* The first operation Stela could not perform, which fails the call. */
+   /* The first operation Stela could not perform. */
    const char *unsupported;
-   struct firmware firmware;
    struct pci_dev pdev;
    struct amdgpu_device adev;
 };
@@ -26,56 +28,31 @@ static struct stela_amd_discovery *state_of(struct amdgpu_device *adev)
 {
    return container_of(adev, struct stela_amd_discovery, adev);
 }
-static void unsupported(struct amdgpu_device *adev, const char *operation)
+
+/* The owner's services for Linux code run on the discovery's behalf. The
+ * owner may sleep during discovery, so every delay sleeps whole milliseconds,
+ * never shorter than asked. */
+static void delay_us(void *context, u64 minimum, u64 maximum, bool atomic)
 {
-   struct stela_amd_discovery *state = state_of(adev);
+   struct stela_amd_discovery *state = context;
+   (void)maximum;
+   (void)atomic;
+   state->io->sleep_ms(state->context, (uint32_t)min_t(u64, DIV_ROUND_UP(minimum, 1000), U32_MAX));
+}
+static int firmware(void *context, const char *name, const u8 **data, size_t *size)
+{
+   struct stela_amd_discovery *state = context;
+   return state->io->firmware(state->context, name, data, size) ? -ENOENT : 0;
+}
+static void unsupported(void *context, const char *operation)
+{
+   struct stela_amd_discovery *state = context;
    if (!state->unsupported)
       state->unsupported = operation;
 }
-
-/* Discovery reports through these; its return values carry each failure. */
-static void _dev_printk(const char *level, const struct device *dev, const char *fmt, ...)
-{
-   (void)level; (void)dev; (void)fmt;
-}
-static void stela_drm_printk(const struct drm_device *drm, enum stela_drm_level level,
-                             const char *format, ...)
-{
-   (void)drm; (void)level; (void)format;
-}
-
-/* Discovery's sysfs tree, its dump and NPS queries are not reached: Stela
- * publishes no sysfs and reads no memory partitions from discovery. */
-STELA_UNSUPPORTED(void, drm_printf, struct drm_printer *, const char *, ...)
-STELA_UNSUPPORTED(int, kobject_set_name, struct kobject *, const char *, ...)
-STELA_UNSUPPORTED(void, kobject_init, struct kobject *, const struct kobj_type *)
-STELA_UNSUPPORTED(int, kobject_add, struct kobject *, struct kobject *, const char *, ...)
-STELA_UNSUPPORTED(int, kobject_init_and_add, struct kobject *, const struct kobj_type *,
-                  struct kobject *, const char *, ...)
-STELA_UNSUPPORTED(void, kobject_put, struct kobject *)
-STELA_UNSUPPORTED(int, kset_register, struct kset *)
-
-/* Linux's msleep names no device; discovery calls it where adev is in scope,
- * as RREG32 relies on, so the owner's clock serves the device it waits for. */
-static void stela_amd_msleep(struct amdgpu_device *adev, unsigned int msecs)
-{
-   struct stela_amd_discovery *state = state_of(adev);
-   state->io->sleep_ms(state->context, msecs);
-}
-#define msleep(msecs) stela_amd_msleep(adev, msecs)
-
-/* A discovery table in system memory belongs to an APU or a virtual function,
- * whose memory owners Stela does not have yet; discovery maps it with adev in
- * scope. */
-static void *stela_amd_memremap(struct amdgpu_device *adev)
-{
-   unsupported(adev, "system memory discovery table");
-   return NULL;
-}
-#define memremap(offset, size, flags) stela_amd_memremap(adev)
-
-#include "amdgpu_discovery.c"
-#include "nbif/nbif_6_1_offset.h"
+static const struct stela_linux_services services = {
+   .delay_us = delay_us, .firmware = firmware, .unsupported = unsupported,
+};
 
 /* Register access through the owner's BAR. Linux reaches registers beyond it
  * through the PCIe index/data pair, which Stela does not implement yet. */
@@ -83,95 +60,163 @@ static bool direct(struct amdgpu_device *adev, uint32_t reg)
 {
    if ((uint64_t)reg * 4 + 4 <= state_of(adev)->register_bytes)
       return true;
-   unsupported(adev, "indirect register access");
+   stela_linux_unsupported("indirect register access");
    return false;
 }
-static uint32_t amdgpu_device_rreg(struct amdgpu_device *adev, uint32_t reg, uint32_t acc_flags)
+uint32_t amdgpu_device_rreg(struct amdgpu_device *adev, uint32_t reg, uint32_t acc_flags)
 {
    struct stela_amd_discovery *state = state_of(adev);
    (void)acc_flags;
-   return direct(adev, reg) ? state->io->read32(state->context, reg) : UINT32_MAX;
+   return direct(adev, reg) ? state->io->read32(state->context, reg) : U32_MAX;
 }
-static void amdgpu_device_wreg(struct amdgpu_device *adev, uint32_t reg, uint32_t v,
-                               uint32_t acc_flags)
+void amdgpu_device_wreg(struct amdgpu_device *adev, uint32_t reg, uint32_t v, uint32_t acc_flags)
 {
    struct stela_amd_discovery *state = state_of(adev);
    (void)acc_flags;
    if (direct(adev, reg))
       state->io->write32(state->context, reg, v);
 }
-/* Linux's amdgpu_device_mm_access, which amdgpu_device_vram_access uses
- * before the VRAM aperture is mapped, as it is not during discovery. */
-static void amdgpu_device_vram_access(struct amdgpu_device *adev, loff_t pos, void *buf,
-                                      size_t size, bool write)
+
+/* VRAM through the MM register window, the one way to reach it before its
+ * aperture is mapped, as it is not during discovery. MM_INDEX selects bits
+ * 0-30 of a DWORD's address, with bit 31 set for memory, and MM_INDEX_HI the
+ * bits above them; MM_DATA then transfers that DWORD. */
+void amdgpu_device_vram_access(struct amdgpu_device *adev, loff_t pos, void *buf, size_t size,
+                               bool write)
 {
-   uint32_t hi = ~0u, *data = buf;
-   if (pos % 4 || size % 4) {
-      unsupported(adev, "unaligned VRAM access");
+   if (pos < 0 || !IS_ALIGNED(pos, 4) || !IS_ALIGNED(size, 4)) {
+      stela_linux_unsupported("unaligned VRAM access");
       return;
    }
-   for (uint64_t last = (uint64_t)pos + size, at = (uint64_t)pos; at < last; at += 4) {
-      uint32_t tmp = (uint32_t)(at >> 31);
-      WREG32(mmMM_INDEX, (uint32_t)at | 0x80000000);
-      if (tmp != hi) {
-         WREG32(mmMM_INDEX_HI, tmp);
-         hi = tmp;
-      }
+   const u64 first = (u64)pos;
+   u32 *words = buf;
+   for (size_t word = 0; word < size / 4; word++) {
+      const u64 address = first + word * 4;
+      WREG32(mmMM_INDEX, BIT(31) | (u32)(address & GENMASK_ULL(30, 0)));
+      if (!word || !(address & GENMASK_ULL(30, 0)))
+         WREG32(mmMM_INDEX_HI, (u32)(address >> 31));
       if (write)
-         WREG32(mmMM_DATA, *data++);
+         WREG32(mmMM_DATA, words[word]);
       else
-         *data++ = RREG32(mmMM_DATA);
+         words[word] = RREG32(mmMM_DATA);
    }
 }
 
-
-/* Linux's allocator is Stela's global heap; discovery allocates its binary. */
-void *stela_amd_kzalloc(size_t size);
-void stela_amd_kfree(const void *object);
-static void *kzalloc(size_t size, gfp_t flags)
-{
-   (void)flags;
-   return stela_amd_kzalloc(size);
-}
-static void kfree(const void *object)
-{
-   stela_amd_kfree(object);
-}
-
-/* The firmware Linux prefers for the binary, from the owner's provider. */
-static int firmware_request_nowarn(const struct firmware **fw, const char *name,
-                                   struct device *device)
-{
-   struct stela_amd_discovery *state = container_of(device, struct stela_amd_discovery, pdev.dev);
-   const uint8_t *data = NULL;
-   size_t size = 0;
-   if (state->io->firmware(state->context, name, &data, &size))
-      return -ENOENT;
-   state->firmware = (struct firmware){.size = size, .data = data};
-   *fw = &state->firmware;
-   return 0;
-}
-static void release_firmware(const struct firmware *fw)
-{
-   (void)fw;
-}
-
-/* Unreached: memremap maps nothing. */
-static void memunmap(void *addr)
-{
-   (void)addr;
-}
-/* After a failed acquisition Linux only logs the firmware's boot errors from
- * RAS registers; the returned status reports the failure itself. */
-static void amdgpu_ras_query_boot_status(struct amdgpu_device *adev, u32 num_instances)
+/* After a failed acquisition Linux logs the firmware's boot errors, which it
+ * reads through SMN, an indirect path Stela does not implement yet; the
+ * failure itself is discovery's status. */
+void amdgpu_ras_query_boot_status(struct amdgpu_device *adev, u32 num_instances)
 {
    (void)adev;
    (void)num_instances;
+   stela_linux_unsupported("indirect register access");
 }
+
+/* What amdgpu_discovery_set_ip_blocks registers and configures. Stela decodes
+ * discovery without registering IP blocks, so none of their code runs and
+ * their descriptors hold nothing. */
+STELA_UNSUPPORTED(int, amdgpu_device_ip_block_add, struct amdgpu_device *,
+                  const struct amdgpu_ip_block_version *)
+STELA_UNSUPPORTED(bool, amdgpu_device_has_dc_support, struct amdgpu_device *)
+STELA_UNSUPPORTED(int, aldebaran_reg_base_init, struct amdgpu_device *)
+STELA_UNSUPPORTED(int, aqua_vanjaram_init_soc_config, struct amdgpu_device *)
+STELA_UNSUPPORTED(int, arct_reg_base_init, struct amdgpu_device *)
+STELA_UNSUPPORTED(int, cyan_skillfish_reg_base_init, struct amdgpu_device *)
+STELA_UNSUPPORTED(int, soc_v1_0_init_soc_config, struct amdgpu_device *)
+STELA_UNSUPPORTED(int, vega10_reg_base_init, struct amdgpu_device *)
+STELA_UNSUPPORTED(int, vega20_reg_base_init, struct amdgpu_device *)
+#define IP_BLOCK(name) \
+   STELA_UNSUPPORTED_OBJECT(const struct amdgpu_ip_block_version, name##_ip_block)
+IP_BLOCK(amdgpu_vkms); IP_BLOCK(gfx_v10_0); IP_BLOCK(gfx_v11_0); IP_BLOCK(gfx_v12_0);
+IP_BLOCK(gfx_v12_1); IP_BLOCK(gfx_v9_0); IP_BLOCK(gfx_v9_4_3); IP_BLOCK(gmc_v10_0);
+IP_BLOCK(gmc_v11_0); IP_BLOCK(gmc_v12_0); IP_BLOCK(gmc_v9_0); IP_BLOCK(ih_v6_0);
+IP_BLOCK(ih_v6_1); IP_BLOCK(ih_v7_0); IP_BLOCK(jpeg_v2_0); IP_BLOCK(jpeg_v2_5);
+IP_BLOCK(jpeg_v2_6); IP_BLOCK(jpeg_v3_0); IP_BLOCK(jpeg_v4_0_3); IP_BLOCK(jpeg_v4_0_5);
+IP_BLOCK(jpeg_v4_0); IP_BLOCK(jpeg_v5_0_0); IP_BLOCK(jpeg_v5_0_1); IP_BLOCK(jpeg_v5_0_2);
+IP_BLOCK(jpeg_v5_3_0); IP_BLOCK(mes_v11_0); IP_BLOCK(mes_v12_0); IP_BLOCK(mes_v12_1);
+IP_BLOCK(navi10_ih); IP_BLOCK(nv_common); IP_BLOCK(pp_smu); IP_BLOCK(psp_v10_0);
+IP_BLOCK(psp_v11_0_8); IP_BLOCK(psp_v11_0); IP_BLOCK(psp_v12_0); IP_BLOCK(psp_v13_0_4);
+IP_BLOCK(psp_v13_0); IP_BLOCK(psp_v14_0); IP_BLOCK(psp_v15_0_8); IP_BLOCK(psp_v15_0);
+IP_BLOCK(psp_v3_1); IP_BLOCK(ras_v1_0); IP_BLOCK(sdma_v4_0); IP_BLOCK(sdma_v4_4_2);
+IP_BLOCK(sdma_v5_0); IP_BLOCK(sdma_v5_2); IP_BLOCK(sdma_v6_0); IP_BLOCK(sdma_v7_0);
+IP_BLOCK(sdma_v7_1); IP_BLOCK(smu_v11_0); IP_BLOCK(smu_v12_0); IP_BLOCK(smu_v13_0);
+IP_BLOCK(smu_v14_0); IP_BLOCK(smu_v15_0); IP_BLOCK(soc21_common); IP_BLOCK(soc24_common);
+IP_BLOCK(soc_v1_0_common); IP_BLOCK(umsch_mm_v4_0); IP_BLOCK(uvd_v7_0); IP_BLOCK(vce_v4_0);
+IP_BLOCK(vcn_v1_0); IP_BLOCK(vcn_v2_0); IP_BLOCK(vcn_v2_5); IP_BLOCK(vcn_v2_6);
+IP_BLOCK(vcn_v3_0); IP_BLOCK(vcn_v4_0_3); IP_BLOCK(vcn_v4_0_5); IP_BLOCK(vcn_v4_0);
+IP_BLOCK(vcn_v5_0_0); IP_BLOCK(vcn_v5_0_1); IP_BLOCK(vcn_v5_0_2); IP_BLOCK(vega10_common);
+IP_BLOCK(vega10_ih); IP_BLOCK(vega20_ih); IP_BLOCK(vpe_v2_0); IP_BLOCK(vpe_v6_1);
+#undef IP_BLOCK
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_df_funcs, df_v1_7_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_df_funcs, df_v3_6_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_df_funcs, df_v4_15_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_df_funcs, df_v4_3_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_df_funcs, df_v4_6_2_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_hdp_funcs, hdp_v4_0_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_hdp_funcs, hdp_v5_0_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_hdp_funcs, hdp_v5_2_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_hdp_funcs, hdp_v6_0_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_hdp_funcs, hdp_v7_0_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_lsdma_funcs, lsdma_v6_0_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_lsdma_funcs, lsdma_v7_0_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_lsdma_funcs, lsdma_v7_1_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_nbio_funcs, nbif_v6_3_1_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct nbio_hdp_flush_reg, nbif_v6_3_1_hdp_flush_reg);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_nbio_funcs, nbio_v2_3_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct nbio_hdp_flush_reg, nbio_v2_3_hdp_flush_reg);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_nbio_funcs, nbio_v4_3_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct nbio_hdp_flush_reg, nbio_v4_3_hdp_flush_reg);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_nbio_funcs, nbio_v4_3_sriov_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_nbio_funcs, nbio_v6_1_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct nbio_hdp_flush_reg, nbio_v6_1_hdp_flush_reg);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_nbio_funcs, nbio_v6_3_2_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_nbio_funcs, nbio_v7_0_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct nbio_hdp_flush_reg, nbio_v7_0_hdp_flush_reg);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_nbio_funcs, nbio_v7_11_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct nbio_hdp_flush_reg, nbio_v7_11_hdp_flush_reg);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_nbio_funcs, nbio_v7_2_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct nbio_hdp_flush_reg, nbio_v7_2_hdp_flush_reg);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_nbio_funcs, nbio_v7_4_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct nbio_hdp_flush_reg, nbio_v7_4_hdp_flush_reg);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_nbio_funcs, nbio_v7_7_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct nbio_hdp_flush_reg, nbio_v7_7_hdp_flush_reg);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_nbio_funcs, nbio_v7_9_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct nbio_hdp_flush_reg, nbio_v7_9_hdp_flush_reg);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_smuio_funcs, smuio_v11_0_6_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_smuio_funcs, smuio_v11_0_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_smuio_funcs, smuio_v13_0_3_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_smuio_funcs, smuio_v13_0_6_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_smuio_funcs, smuio_v13_0_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_smuio_funcs, smuio_v14_0_2_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_smuio_funcs, smuio_v15_0_0_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_smuio_funcs, smuio_v15_0_8_funcs);
+STELA_UNSUPPORTED_OBJECT(const struct amdgpu_smuio_funcs, smuio_v9_0_funcs);
 
 static bool usable(const struct stela_amd_discovery_io *io)
 {
    return io && io->read32 && io->write32 && io->sleep_ms && io->firmware;
+}
+
+static int discover(struct stela_amd_discovery *state)
+{
+   struct amdgpu_device *adev = &state->adev;
+   /* Linux's amdgpu_virt_init_detect_asic for the dynamic path's ASICs: a
+    * virtual function's discovery comes from its host, which Stela lacks. */
+   if (RREG32(mmRCC_IOV_FUNC_IDENTIFIER) & 1)
+      stela_linux_unsupported("SR-IOV virtual function");
+   int r = state->unsupported ? -EOPNOTSUPP : amdgpu_discovery_reg_base_init(adev);
+   if (!r) {
+      amdgpu_discovery_harvest_ip(adev);
+      amdgpu_discovery_get_gfx_info(adev);
+      amdgpu_discovery_get_mall_info(adev);
+      amdgpu_discovery_get_vcn_info(adev);
+   }
+   /* Every value read where Stela lacked a service is invented. */
+   if (!r && state->unsupported)
+      r = -EOPNOTSUPP;
+   if (r)
+      amdgpu_discovery_fini(adev);
+   return r;
 }
 
 int stela_amd_discovery_init(void *storage, size_t bytes,
@@ -199,22 +244,10 @@ int stela_amd_discovery_init(void *storage, size_t bytes,
    adev->flags = device->flags;
    adev->apu_flags = device->apu_flags;
 
-   /* Linux's amdgpu_virt_init_detect_asic for the dynamic path's ASICs: a
-    * virtual function's discovery comes from its host, which Stela lacks. */
-   if (RREG32(mmRCC_IOV_FUNC_IDENTIFIER) & 1)
-      unsupported(adev, "SR-IOV virtual function");
-   int r = state->unsupported ? -EOPNOTSUPP : amdgpu_discovery_reg_base_init(adev);
-   if (!r) {
-      amdgpu_discovery_harvest_ip(adev);
-      amdgpu_discovery_get_gfx_info(adev);
-      amdgpu_discovery_get_mall_info(adev);
-      amdgpu_discovery_get_vcn_info(adev);
-   }
-   /* Every value read where Stela lacked a service is invented. */
-   if (!r && state->unsupported)
-      r = -EOPNOTSUPP;
-   if (r)
-      amdgpu_discovery_fini(adev);
+   const struct stela_linux_owner owner = {.services = &services, .context = state};
+   stela_linux_enter(&owner);
+   int r = discover(state);
+   stela_linux_exit();
    return r;
 }
 
@@ -310,5 +343,7 @@ int stela_amd_discovery_registers(const struct stela_amd_discovery *state, uint3
 
 void stela_amd_discovery_fini(struct stela_amd_discovery *state)
 {
+   stela_linux_enter(&stela_linux_bare);
    amdgpu_discovery_fini(&state->adev);
+   stela_linux_exit();
 }

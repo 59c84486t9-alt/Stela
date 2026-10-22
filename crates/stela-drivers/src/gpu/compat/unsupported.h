@@ -2,18 +2,18 @@
 #ifndef STELA_UNSUPPORTED_H
 #define STELA_UNSUPPORTED_H
 
-/* Define a service that an unchanged Linux source references but Stela does
- * not provide yet. Reaching it stops at a trap instead of continuing with an
- * invented answer. The parameter list names types only.
- */
-#define STELA_UNSUPPORTED_DEFINE(qualifiers, ret, name, ...) \
+/* Define a function that Linux declares and compiled Linux code references
+ * but that Stela does not provide, because no Stela entry point reaches it.
+ * Reaching it anyway stops at a trap instead of continuing with an invented
+ * answer. The parameter list names types only; each use says why the function
+ * is unreached. */
+#define STELA_UNSUPPORTED(ret, name, ...) \
 	_Pragma("clang diagnostic push") \
 	_Pragma("clang diagnostic ignored \"-Wc23-extensions\"") \
-	qualifiers ret name(__VA_ARGS__) { __builtin_trap(); } \
+	ret name(__VA_ARGS__) { __builtin_trap(); } \
 	_Pragma("clang diagnostic pop")
-/* For the shadows' static service declarations. */
-#define STELA_UNSUPPORTED(ret, name, ...) STELA_UNSUPPORTED_DEFINE(static, ret, name, __VA_ARGS__)
-/* For services that Linux's own headers declare with external linkage. */
-#define STELA_UNSUPPORTED_EXTERN(ret, name, ...) STELA_UNSUPPORTED_DEFINE(, ret, name, __VA_ARGS__)
+
+/* Define an object that only unreached code uses. It holds no data. */
+#define STELA_UNSUPPORTED_OBJECT(type, name) type name = {0}
 
 #endif

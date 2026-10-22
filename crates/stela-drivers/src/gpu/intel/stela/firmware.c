@@ -1,20 +1,14 @@
 /* SPDX-License-Identifier: MIT */
-/* Stela's environment for the unchanged Linux xe_uc_fw.c, which follows. */
+/* The unchanged Linux xe_uc_fw.c and xe_huc.c, which select GuC and HuC
+ * images and parse their headers, on a native device without registers.
+ * Stela selects and parses images only: requests, BO placement, DMA upload,
+ * HuC authentication and VF bootstrap belong to other owners. */
 #include "firmware.h"
-#include "unsupported.h"
-#include <stdarg.h>
-#include <linux/array_size.h>
-#include <linux/firmware.h>
-#include <drm/drm_managed.h>
-#include "xe_bo.h"
-#include "xe_device.h"
-#include "xe_force_wake.h"
-#include "xe_gt_printk.h"
-#include "xe_gt_sriov_vf.h"
-#include "xe_map.h"
-#include "xe_mmio.h"
-#include "xe_uc_fw.h"
-#include "abi/uc_fw_abi.h"
+#include "device.h"
+#include <linux/string.h>
+#include <unsupported.h>
+#include "xe_uc_fw.c"
+#include "xe_huc.c"
 _Static_assert(sizeof(struct gsc_cpd_header_v2) == 20, "original CPD header ABI");
 _Static_assert(sizeof(struct gsc_cpd_entry) == 24, "original CPD entry ABI");
 _Static_assert(sizeof(struct gsc_manifest_header) == 128, "original manifest ABI");
@@ -22,104 +16,100 @@ _Static_assert(_Alignof(struct gsc_cpd_header_v2) == 1, "packed CPD marker acces
 _Static_assert(_Alignof(struct gsc_cpd_entry) == 1, "packed CPD entry access");
 _Static_assert(_Alignof(struct gsc_manifest_header) == 1, "packed manifest access");
 
-struct native_fw {
-    struct xe_device xe;
-    struct xe_gt gt;
-    uint32_t *diagnostics;
-};
-
-static void invariant(bool condition)
-{
-    if (!condition) __builtin_trap();
-}
-/* Diagnostics bits name xe_uc_fw.c's parse and version messages. Debug
- * messages carry no diagnosis; any other comes from a lifecycle Stela never
- * enters. */
-static void stela_drm_printk(const struct drm_device *drm, enum stela_drm_level level,
-    const char *format, ...)
-{
-    static const struct { const char *format; uint32_t diagnostic; } messages[] = {
-        {"%s firmware %s: unexpected header size: %zu != %zu\n", STELA_INTEL_GUC_HEADER_SIZE},
-        {"Unsupported GuC v%u.%u.%u! v70.29.2 or newer is required\n", STELA_INTEL_GUC_TOO_OLD},
-        {"%s firmware %s: unexpected version: %u.%u.%u != %u.%u.%u\n",
-         STELA_INTEL_GUC_VERSION_MISMATCH},
-        {"%s firmware (%u.%u.%u) is recommended, but only (%u.%u.%u) was found in %s\n",
-         STELA_INTEL_GUC_RECOMMENDED_NEWER},
-        {"Consider updating your linux-firmware pkg or downloading from %s\n",
-         STELA_INTEL_GUC_RECOMMENDED_NEWER},
-        {"invalid CPD header length %u!\n", STELA_INTEL_HUC_CPD_HEADER_LENGTH},
-        {"FW too small! %zu < %zu\n", STELA_INTEL_HUC_CPD_SHORT_IMAGE},
-        {"FW too small! %zu < %u\n", STELA_INTEL_HUC_CPD_SHORT_IMAGE},
-        {"Failed to find %s manifest!\n", STELA_INTEL_HUC_CPD_MISSING_MANIFEST},
-    };
-    struct native_fw *native =
-        container_of(container_of(drm, struct xe_device, drm), struct native_fw, xe);
-    if (level == STELA_DRM_DBG) return;
-    if (!strcmp(format, "%s firmware %s: invalid size: %zu < %zu\n")) {
-        va_list arguments;
-        va_start(arguments, format);
-        (void)va_arg(arguments, const char *);
-        (void)va_arg(arguments, const char *);
-        size_t actual = va_arg(arguments, size_t), needed = va_arg(arguments, size_t);
-        va_end(arguments);
-        /* The first size check is the header's; the second the whole image's. */
-        bool header = actual < sizeof(struct uc_css_header) && needed == sizeof(struct uc_css_header);
-        *native->diagnostics |= header ? STELA_INTEL_GUC_SHORT_HEADER : STELA_INTEL_GUC_SHORT_IMAGE;
-        return;
-    }
-    unsigned index = 0;
-    while (index < ARRAY_SIZE(messages) && strcmp(format, messages[index].format)) ++index;
-    invariant(index < ARRAY_SIZE(messages));
-    *native->diagnostics |= messages[index].diagnostic;
-}
-/* Stela selects and parses images only. Requests, BO placement, DMA upload,
- * HuC authentication, printers and VF bootstrap belong to other owners. */
-STELA_UNSUPPORTED(void, stela_linux_warn, const char *, int, const char *)
-STELA_UNSUPPORTED(int, firmware_request_nowarn, const struct firmware **, const char *,
-                  struct device *)
-STELA_UNSUPPORTED(void, release_firmware, const struct firmware *)
+/* Image requests, BO placement and upload, HuC authentication through the
+ * GSC and VF bootstrap follow parsing, in lifecycles Stela does not enter. */
+STELA_UNSUPPORTED(void, xe_device_assert_mem_access, struct xe_device *)
+STELA_UNSUPPORTED(u64, xe_ggtt_node_addr, const struct xe_ggtt_node *)
+STELA_UNSUPPORTED(bool, xe_gsc_check_and_update_pending, struct xe_device *, struct iosys_map *,
+                  u32, struct iosys_map *, u32)
+STELA_UNSUPPORTED(u32, xe_gsc_emit_header, struct xe_device *, struct iosys_map *, u32, u8, u64,
+                  u32)
+STELA_UNSUPPORTED(int, xe_gsc_pkt_submit_kernel, struct xe_gsc *, u64, u32, u64, u32)
+STELA_UNSUPPORTED(int, xe_gsc_read_out_header, struct xe_device *, struct iosys_map *, u32, u32,
+                  u32 *)
+STELA_UNSUPPORTED(void, xe_gt_sriov_vf_guc_versions, struct xe_gt *, struct xe_uc_fw_version *,
+                  struct xe_uc_fw_version *)
+STELA_UNSUPPORTED(int, xe_guc_auth_huc, struct xe_guc *, u32)
 STELA_UNSUPPORTED(struct xe_bo *, xe_managed_bo_create_from_data, struct xe_device *,
                   struct xe_tile *, const void *, size_t, u32)
-STELA_UNSUPPORTED(u32, xe_bo_ggtt_addr, struct xe_bo *)
 STELA_UNSUPPORTED(struct xe_bo *, xe_managed_bo_create_pin_map, struct xe_device *,
                   struct xe_tile *, size_t, u32)
 STELA_UNSUPPORTED(int, xe_managed_bo_reinit_in_vram, struct xe_device *, struct xe_tile *,
                   struct xe_bo **)
-STELA_UNSUPPORTED(int, drmm_add_action_or_reset, struct drm_device *, drmres_release_t, void *)
-STELA_UNSUPPORTED(void, xe_map_memcpy_from, struct xe_device *, void *, const struct iosys_map *,
-                  size_t, size_t)
-STELA_UNSUPPORTED(void, xe_gt_sriov_vf_guc_versions, struct xe_gt *, struct xe_uc_fw_version *,
-                  struct xe_uc_fw_version *)
-STELA_UNSUPPORTED(void, drm_printf, struct drm_printer *, const char *, ...)
-STELA_UNSUPPORTED(u32, xe_mmio_read32, struct xe_mmio *, struct xe_reg)
-STELA_UNSUPPORTED(void, xe_mmio_write32, struct xe_mmio *, struct xe_reg, u32)
-STELA_UNSUPPORTED(int, xe_mmio_wait32, struct xe_mmio *, struct xe_reg, u32, u32, u32, u32 *,
-                  bool)
-/* uc_fw_request takes a printer before it decides anything; only a VF
- * override prints through it, and drm_printf traps. */
-static struct drm_printer xe_gt_info_printer(struct xe_gt *gt)
+
+struct native_fw {
+    struct stela_xe dev;
+    struct xe_gt gt;
+    uint32_t *diagnostics;
+};
+
+static struct native_fw *native_of(void *context)
 {
-    (void)gt;
-    return (struct drm_printer){};
+    return container_of((struct stela_xe *)context, struct native_fw, dev);
 }
-
-#include "xe_uc_fw.c"
-#include "xe_huc.c"
-
-/* Fills a zeroed native. The firmware lives in the GT member upstream derives
- * its owner from. */
-static struct xe_uc_fw *prepare(struct native_fw *native, uint32_t platform, bool media_gt,
-                                enum xe_uc_fw_type type, uint32_t *diagnostics)
+/* Diagnostics bits name xe_uc_fw.c's parse and version messages. Debug
+ * messages carry no diagnosis; any other comes from a lifecycle Stela never
+ * enters. */
+static void log_event(void *context, int level, const char *message)
 {
-    native->xe.info.platform = (enum xe_platform)platform;
-    native->xe.tiles[0].xe = &native->xe;
-    native->gt.tile = &native->xe.tiles[0];
-    native->gt.info.type = media_gt ? XE_GT_TYPE_MEDIA : XE_GT_TYPE_MAIN;
-    native->diagnostics = diagnostics;
-    struct xe_uc_fw *fw = type == XE_UC_FW_TYPE_GUC ? &native->gt.uc.guc.fw :
-                          type == XE_UC_FW_TYPE_HUC ? &native->gt.uc.huc.fw : &native->gt.uc.gsc.fw;
+    static const struct { const char *text; uint32_t diagnostic; } messages[] = {
+        {"unexpected header size", STELA_INTEL_GUC_HEADER_SIZE},
+        {"or newer is required", STELA_INTEL_GUC_TOO_OLD},
+        {"unexpected version", STELA_INTEL_GUC_VERSION_MISMATCH},
+        {"is recommended, but only", STELA_INTEL_GUC_RECOMMENDED_NEWER},
+        {"Consider updating your linux-firmware", STELA_INTEL_GUC_RECOMMENDED_NEWER},
+        {"invalid CPD header length", STELA_INTEL_HUC_CPD_HEADER_LENGTH},
+        {"FW too small!", STELA_INTEL_HUC_CPD_SHORT_IMAGE},
+        {"manifest!", STELA_INTEL_HUC_CPD_MISSING_MANIFEST},
+    };
+    uint32_t *diagnostics = native_of(context)->diagnostics;
+    if (level == LOGLEVEL_DEBUG) return;
+    const char *needed = strstr(message, ": invalid size: ");
+    if (needed) {
+        /* "%zu < %zu": the header's check needs exactly a CSS header, the
+         * whole image's more. */
+        unsigned long long bytes = 0;
+        for (needed = strstr(needed, " < ") + 3; *needed >= '0' && *needed <= '9'; ++needed)
+            bytes = bytes * 10 + (unsigned)(*needed - '0');
+        *diagnostics |= bytes == sizeof(struct uc_css_header) ? STELA_INTEL_GUC_SHORT_HEADER :
+                                                               STELA_INTEL_GUC_SHORT_IMAGE;
+        return;
+    }
+    unsigned index = 0;
+    while (index < ARRAY_SIZE(messages) && !strstr(message, messages[index].text)) ++index;
+    if (index == ARRAY_SIZE(messages)) __builtin_trap();
+    *diagnostics |= messages[index].diagnostic;
+}
+static const struct stela_linux_services services = {
+    .log = log_event, .unsupported = stela_xe_unsupported,
+};
+
+/* The device a call runs xe_uc_fw.c on. Only the running Linux owner uses
+ * it, so there is one. */
+static struct native_fw native;
+
+/* Enters with a zeroed native of a GT of the given platform and role,
+ * returning its firmware of the given type. */
+static struct xe_uc_fw *enter(uint32_t platform, bool media_gt, enum xe_uc_fw_type type,
+                              uint32_t *diagnostics)
+{
+    static const struct stela_linux_owner owner = {.services = &services, .context = &native.dev};
+    stela_linux_enter(&owner);
+    memset(&native, 0, sizeof(native));
+    native.dev.xe.info.platform = (enum xe_platform)platform;
+    stela_xe_init(&native.dev, &native.gt, media_gt ? XE_GT_TYPE_MEDIA : XE_GT_TYPE_MAIN);
+    native.diagnostics = diagnostics;
+    struct xe_uc_fw *fw = type == XE_UC_FW_TYPE_GUC ? &native.gt.uc.guc.fw :
+                          type == XE_UC_FW_TYPE_HUC ? &native.gt.uc.huc.fw : &native.gt.uc.gsc.fw;
     fw->type = type;
     return fw;
+}
+/* Leaves, failing a call that reached an unsupported operation. */
+static int leave(int status)
+{
+    if (!status && native.dev.unsupported) status = -EOPNOTSUPP;
+    stela_linux_exit();
+    return status;
 }
 static int copy_selection(const struct xe_uc_fw *fw, uint8_t name[64],
                           uint32_t wanted[3], uint32_t *full_version)
@@ -136,52 +126,45 @@ static int copy_selection(const struct xe_uc_fw *fw, uint8_t name[64],
     *full_version = fw->full_ver_required;
     return 0;
 }
-static struct xe_uc_fw *select_guc(struct native_fw *native, uint32_t platform,
-                                   uint32_t *diagnostics)
+static bool valid_platform(uint32_t platform)
 {
-    if (!platform || platform > INT32_MAX) return NULL;
-    struct xe_uc_fw *fw = prepare(native, platform, false, XE_UC_FW_TYPE_GUC, diagnostics);
-    uc_fw_auto_select(&native->xe, fw);
-    return fw;
+    return platform && platform <= INT32_MAX;
 }
 int stela_intel_guc_select(uint32_t platform, struct stela_intel_guc_selection *out)
 {
-    if (!out) return -EINVAL;
-    struct native_fw native = {0};
+    if (!out || !valid_platform(platform)) return -EINVAL;
     uint32_t diagnostics = 0;
-    const struct xe_uc_fw *fw = select_guc(&native, platform, &diagnostics);
-    if (!fw) return -EINVAL;
-    if (!fw->path) return -ENOENT;
+    struct xe_uc_fw *fw = enter(platform, false, XE_UC_FW_TYPE_GUC, &diagnostics);
+    uc_fw_auto_select(&native.dev.xe, fw);
     struct stela_intel_guc_selection result = {0};
-    int status = copy_selection(fw, result.name, result.wanted, &result.full_version);
-    if (status) return status;
-    *out = result;
-    return 0;
+    int status = fw->path ? copy_selection(fw, result.name, result.wanted, &result.full_version) :
+                            -ENOENT;
+    status = leave(status);
+    if (!status) *out = result;
+    return status;
 }
 int stela_intel_huc_select_default(uint32_t platform, uint32_t graphics_verx100,
                                  bool media_gt, struct stela_intel_huc_default *out)
 {
-    if (!out || !platform || platform > INT32_MAX || !graphics_verx100) return -EINVAL;
-    struct native_fw native = {0};
+    if (!out || !valid_platform(platform) || !graphics_verx100) return -EINVAL;
     uint32_t diagnostics = 0;
-    struct xe_uc_fw *fw = prepare(&native, platform, media_gt, XE_UC_FW_TYPE_HUC, &diagnostics);
-    native.xe.info.graphics_verx100 = graphics_verx100;
+    struct xe_uc_fw *fw = enter(platform, media_gt, XE_UC_FW_TYPE_HUC, &diagnostics);
+    native.dev.xe.info.graphics_verx100 = graphics_verx100;
     /* Selection requests no image: in execlist mode xe_huc_init stops after
      * selecting, as Linux does without GuC submission. */
-    native.xe.info.force_execlist = true;
+    native.dev.xe.info.force_execlist = true;
+    struct stela_intel_huc_default result = {.disposition = STELA_INTEL_HUC_ABSENT};
     int status = xe_huc_init(&native.gt.uc.huc);
-    if (status) return status;
     /* NOT_SUPPORTED covers both a GT without HuC and a platform without a
      * default image; execlist mode leaves a selected image DISABLED. */
-    struct stela_intel_huc_default result = {.disposition = STELA_INTEL_HUC_ABSENT};
-    if (fw->status != XE_UC_FIRMWARE_NOT_SUPPORTED) {
-        invariant(fw->status == XE_UC_FIRMWARE_DISABLED && fw->path);
+    if (!status && fw->status != XE_UC_FIRMWARE_NOT_SUPPORTED) {
+        if (fw->status != XE_UC_FIRMWARE_DISABLED || !fw->path) __builtin_trap();
         result.disposition = STELA_INTEL_HUC_SELECTED;
         status = copy_selection(fw, result.name, result.wanted, &result.full_version);
-        if (status) return status;
     }
-    *out = result;
-    return 0;
+    status = leave(status);
+    if (!status) *out = result;
+    return status;
 }
 /* Original CSS type is packed; checked arithmetic precedes any narrowing in
  * the original algorithm. This does not impose hardware RSA/WOPCM policy. */
@@ -202,17 +185,14 @@ int stela_intel_guc_parse(uint32_t platform, const uint8_t *bytes, size_t size,
 {
     if (!diagnostics) return -EINVAL;
     *diagnostics = 0;
-    if (!out || !bytes || size > PTRDIFF_MAX) return -EINVAL;
-    struct native_fw native = {0};
-    struct xe_uc_fw *fw = select_guc(&native, platform, diagnostics);
-    if (!fw) return -EINVAL;
-    if (!fw->path) return -ENOENT;
-    int status = sizes_representable(bytes, size);
-    if (status) { *diagnostics = STELA_INTEL_GUC_UNREPRESENTABLE; return status; }
-    status = parse_headers(fw, &(const struct firmware){.size = size, .data = bytes});
+    if (!out || !bytes || size > PTRDIFF_MAX || !valid_platform(platform)) return -EINVAL;
+    struct xe_uc_fw *fw = enter(platform, false, XE_UC_FW_TYPE_GUC, diagnostics);
+    uc_fw_auto_select(&native.dev.xe, fw);
+    int status = fw->path ? sizes_representable(bytes, size) : -ENOENT;
+    if (status == -75) *diagnostics = STELA_INTEL_GUC_UNREPRESENTABLE;
+    if (!status) status = parse_headers(fw, &(const struct firmware){.size = size, .data = bytes});
     if (!status) status = xe_uc_fw_check_version_requirements(fw);
-    if (status) return status;
-    struct stela_intel_guc_metadata result = {
+    const struct stela_intel_guc_metadata result = {
         .release = {fw->versions.found[XE_UC_FW_VER_RELEASE].major,
                     fw->versions.found[XE_UC_FW_VER_RELEASE].minor,
                     fw->versions.found[XE_UC_FW_VER_RELEASE].patch},
@@ -224,8 +204,9 @@ int stela_intel_guc_parse(uint32_t platform, const uint8_t *bytes, size_t size,
         .private_bytes = fw->private_data_size, .build_type = fw->build_type,
         .diagnostics = *diagnostics,
     };
-    *out = result;
-    return 0;
+    status = leave(status);
+    if (!status) *out = result;
+    return status;
 }
 
 /* Upstream's int entry index must not overflow on a complete entry table, and
@@ -262,15 +243,13 @@ int stela_intel_huc_parse(uint32_t platform, uint32_t graphics_verx100, bool med
     /* Original HuC CPD/DMA parser explicitly does not support DG2's CSS-less
      * GSC loading path. No selection alias or invented CSS is permitted. */
     if (platform == XE_DG2) return -95;
-    struct native_fw native = {0};
-    struct xe_uc_fw *fw = prepare(&native, platform, media_gt, XE_UC_FW_TYPE_HUC, diagnostics);
-    uc_fw_auto_select(&native.xe, fw);
+    struct xe_uc_fw *fw = enter(platform, media_gt, XE_UC_FW_TYPE_HUC, diagnostics);
+    uc_fw_auto_select(&native.dev.xe, fw);
     status = huc_representable(bytes, size);
-    if (status) { *diagnostics = STELA_INTEL_GUC_UNREPRESENTABLE; return status; }
-    status = parse_headers(fw, &(const struct firmware){.size = size, .data = bytes});
+    if (status == -75) *diagnostics = STELA_INTEL_GUC_UNREPRESENTABLE;
+    if (!status) status = parse_headers(fw, &(const struct firmware){.size = size, .data = bytes});
     if (!status) status = xe_uc_fw_check_version_requirements(fw);
-    if (status) return status;
-    struct stela_intel_huc_metadata result = {
+    const struct stela_intel_huc_metadata result = {
         .release = {fw->versions.found[XE_UC_FW_VER_RELEASE].major,
                     fw->versions.found[XE_UC_FW_VER_RELEASE].minor,
                     fw->versions.found[XE_UC_FW_VER_RELEASE].patch},
@@ -280,6 +259,7 @@ int stela_intel_huc_parse(uint32_t platform, uint32_t graphics_verx100, bool med
         .format = fw->has_gsc_headers ? STELA_INTEL_HUC_CPD_CSS : STELA_INTEL_HUC_CSS,
         .diagnostics = *diagnostics,
     };
-    *out = result;
-    return 0;
+    status = leave(status);
+    if (!status) *out = result;
+    return status;
 }

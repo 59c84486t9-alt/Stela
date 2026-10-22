@@ -1,0 +1,57 @@
+/* SPDX-License-Identifier: MIT */
+#ifndef STELA_LINUX_H
+#define STELA_LINUX_H
+/* Stela's kernel-API binding. Linux code runs only between stela_linux_enter
+ * and stela_linux_exit, for one owner at a time: entering waits until no other
+ * owner runs Linux code, and Linux code never enters again. That is the
+ * uniprocessor, non-preemptible execution generated/autoconf.h configures.
+ *
+ * The owner supplies the services that depend on its device and platform.
+ * Linux names no device for most of them (msleep, ktime_get, printk), so they
+ * belong to whoever runs the code; device-scoped services, such as register
+ * access, are bound by the adapter that owns the device. A NULL log or warn
+ * discards those reports and a NULL firmware has no images; a service reached
+ * without its callback, or outside enter and exit, traps. */
+#include <linux/types.h>
+
+struct stela_linux_services {
+	/* Monotonic nanoseconds. */
+	s64 (*now_ns)(void *context);
+	/* Wait at least minimum and preferably at most maximum microseconds;
+	 * atomic waits must not sleep. */
+	void (*delay_us)(void *context, u64 minimum, u64 maximum, bool atomic);
+	/* A firmware image by Linux's name, valid until the owner exits, or a
+	 * negative errno. */
+	int (*firmware)(void *context, const char *name, const u8 **data, size_t *size);
+	/* One formatted kernel message at its printk level (LOGLEVEL_*). */
+	void (*log)(void *context, int level, const char *message);
+	/* A WARN that fired, with its condition text when Linux records one. */
+	void (*warn)(void *context, const char *file, int line, const char *condition);
+	/* An operation Stela does not provide yet, reached in graceful mode; the
+	 * caller then continues with that service's documented degraded result.
+	 * Strict owners stop here. Called for every occurrence. */
+	void (*unsupported)(void *context, const char *operation);
+};
+
+struct stela_linux_owner {
+	const struct stela_linux_services *services;
+	void *context;
+};
+
+/* An owner for Linux code that needs none of these services. */
+extern const struct stela_linux_owner stela_linux_bare;
+
+void stela_linux_enter(const struct stela_linux_owner *owner);
+void stela_linux_exit(void);
+/* The owner running Linux code; traps outside enter and exit. */
+const struct stela_linux_owner *stela_linux_owner(void);
+/* Report an operation Stela does not provide yet to the running owner. */
+void stela_linux_unsupported(const char *operation);
+
+/* Platform memory behind Linux's allocators: Stela's global heap in its
+ * images, libc in hosted test programs. Zeroed and aligned to align, a power
+ * of two no larger than PAGE_SIZE, or NULL when exhausted; freed with the
+ * same size and alignment. */
+void *stela_linux_heap_alloc(size_t size, size_t align);
+void stela_linux_heap_free(void *object, size_t size, size_t align);
+#endif

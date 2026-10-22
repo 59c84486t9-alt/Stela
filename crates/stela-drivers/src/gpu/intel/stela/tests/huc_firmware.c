@@ -1,9 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* The native HuC parser against upstream xe_uc_fw.c run directly on the same
  * images. Inputs are synthetic unsigned data. */
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
+#include <stela/test.h>
 #include "../firmware.c"
 
 #define CSS_OFFSET 384u
@@ -36,15 +34,14 @@ static void cpd(uint8_t bytes[IMAGE_BYTES])
 static void compare(unsigned platform, bool media_gt, const uint8_t *bytes, size_t size)
 {
     assert(size <= IMAGE_BYTES);
-    struct native_fw native = {0};
     uint32_t expected_diagnostics = 0, diagnostics;
-    struct xe_uc_fw *upstream = prepare(&native, platform, media_gt, XE_UC_FW_TYPE_HUC,
-                                        &expected_diagnostics);
-    uc_fw_auto_select(&native.xe, upstream);
+    struct xe_uc_fw *upstream = enter(platform, media_gt, XE_UC_FW_TYPE_HUC, &expected_diagnostics);
+    uc_fw_auto_select(&native.dev.xe, upstream);
     assert(upstream->path);
     int expected = parse_headers(upstream, &(const struct firmware){.size = size, .data = bytes});
     if (!expected) expected = xe_uc_fw_check_version_requirements(upstream);
     const struct xe_uc_fw fw = *upstream;
+    leave(0);
     struct stela_intel_huc_metadata output, before;
     memset(&before, 0xa5, sizeof(before)); output = before;
     int status = stela_intel_huc_parse(platform, 1200, media_gt, bytes, size, &output, &diagnostics);
@@ -56,7 +53,7 @@ static void compare(unsigned platform, bool media_gt, const uint8_t *bytes, size
         return;
     }
     if (status != expected || diagnostics != expected_diagnostics)
-        fprintf(stderr, "HuC case%u platform%u size%zu native%d/%x upstream%d/%x\n", cases, platform, size, status, diagnostics, expected, expected_diagnostics);
+        printf("HuC case%u platform%u size%zu native%d/%x upstream%d/%x\n", cases, platform, size, status, diagnostics, expected, expected_diagnostics);
     assert(status == expected && diagnostics == expected_diagnostics);
     if (status) assert(!memcmp(&before, &output, sizeof(output)));
     else {
@@ -80,11 +77,12 @@ int main(void)
     _Static_assert(sizeof("huc_fw") <= sizeof(((struct gsc_cpd_entry *)0)->name), "CSS literal");
     _Static_assert(sizeof("RBEP.man") <= sizeof(((struct gsc_cpd_entry *)0)->name), "GSC literal");
     for (unsigned platform = 1; platform <= XE_NOVALAKE_P; ++platform) {
-        struct native_fw native = {0};
         uint32_t diagnostics = 0;
-        struct xe_uc_fw *fw = prepare(&native, platform, false, XE_UC_FW_TYPE_HUC, &diagnostics);
-        uc_fw_auto_select(&native.xe, fw);
-        if (!fw->path) continue;
+        struct xe_uc_fw *fw = enter(platform, false, XE_UC_FW_TYPE_HUC, &diagnostics);
+        uc_fw_auto_select(&native.dev.xe, fw);
+        const char *path = fw->path;
+        leave(0);
+        if (!path) continue;
         css(bytes, MAKE_GUC_VER(1, 2, 3));
         compare(platform, false, bytes, 400); /* No GuC minimum version leakage. */
         cpd(bytes); compare(platform, true, bytes, IMAGE_BYTES);
@@ -141,9 +139,8 @@ int main(void)
         if (change == 4) { h->num_of_entries = 3; entry[2] = entry[0]; entry[2].offset = IMAGE_BYTES; }
         if (change == 5) entry[0].name[11] = 0xff;
         if (change == 6) entry[0].offset |= GSC_CPD_ENTRY_HUFFMAN_COMP;
-        struct native_fw native = {0};
         uint32_t diagnostics = 0;
-        struct xe_uc_fw *a = prepare(&native, XE_METEORLAKE, false, XE_UC_FW_TYPE_GSC, &diagnostics);
+        struct xe_uc_fw *a = enter(XE_METEORLAKE, false, XE_UC_FW_TYPE_GSC, &diagnostics);
         int status = parse_cpd_header(a, aligned, sizeof(aligned), "RBEP.man", NULL);
         uint32_t security = native.gt.uc.gsc.security_version;
         /* Only a missing manifest name fails; later entries, bytes after the
@@ -153,6 +150,7 @@ int main(void)
                diagnostics == (missing ? STELA_INTEL_HUC_CPD_MISSING_MANIFEST : 0u));
         if (!status) assert(a->versions.found[0].major == 9 && a->versions.found[0].minor == 8 &&
                              a->versions.found[0].patch == 7 && a->versions.found[0].build == 6 && security == 42);
+        leave(0);
         ++gsc_cases;
     }
     /* Invalid/absent/default role and malformed arithmetic preserve output. */

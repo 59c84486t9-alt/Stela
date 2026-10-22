@@ -1,13 +1,18 @@
 //! Stela's amdgpu port and its hosted tests.
-use super::native::{self, Tests};
+use super::native::{self, Linux, Module, Tests};
+
+const AMDGPU: Module = Module {
+    name: "amdgpu",
+    file: "drivers/gpu/drm/amd/amdgpu/amdgpu",
+};
 
 /// amdgpu's probe admission and IP discovery, from the unchanged
 /// `amdgpu_drv.c` and `amdgpu_discovery.c`, and Stela's BAR policy, all in
-/// Stela's Linux environment.
-pub fn port(tests: &mut Tests) {
+/// Stela's Linux environment with amdgpu's Kbuild include directories.
+pub fn port(linux: &Linux, tests: &mut Tests) {
     const FIXTURES: &str = "src/gpu/amd/stela/tests/fixtures.c";
     let configure = |mut build: cc::Build| {
-        native::linux_environment(
+        linux.apply(
             &mut build,
             None,
             &[
@@ -15,9 +20,17 @@ pub fn port(tests: &mut Tests) {
                 "amd/include",
                 "amd/amdgpu",
                 "amd/pm/inc",
+                "amd/acp/include",
+                "amd/display",
+                "amd/display/include",
+                "amd/display/modules/inc",
+                "amd/display/dc",
+                "amd/display/amdgpu_dm",
+                "amd/amdkfd",
+                "amd/ras/rascore",
                 "amd/ras/ras_mgr",
-                "amd/amdxcp",
             ],
+            Some(&AMDGPU),
         );
         build
     };
@@ -37,13 +50,10 @@ pub fn port(tests: &mut Tests) {
     let hosted = configure(hosted);
     let fixtures = native::archive(&hosted, "amd-fixtures-hosted", &[FIXTURES.into()]);
     let adapters = native::archive(&hosted, "amd-adapters-hosted", &adapters);
+    let mut archives = vec![adapters.as_path(), fixtures.as_path()];
+    archives.extend(linux.hosted.iter().map(|archive| archive.as_path()));
     for name in ["ip_discovery", "native_bar", "pci_match"] {
         let source = format!("src/gpu/amd/stela/tests/{name}.c");
-        tests.add(
-            &hosted,
-            &format!("amd_{name}"),
-            &source,
-            &[&adapters, &fixtures],
-        );
+        tests.add(&hosted, &format!("amd_{name}"), &source, &archives);
     }
 }

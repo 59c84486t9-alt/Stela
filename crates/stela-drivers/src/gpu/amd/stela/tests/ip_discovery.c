@@ -1,24 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 /* The unchanged amdgpu_discovery.c in Stela's environment, over modelled
  * registers, MM-index VRAM and firmware; CPU only. */
-#include <assert.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <stela/test.h>
 #include "amdgpu.h"
 #include "../ip_discovery.h"
 #include "fixtures.h"
-
-/* The adapters' heap; amdgpu_discovery itself comes from the linked
- * amdgpu_drv.c adapter. */
-void *stela_amd_kzalloc(size_t size)
-{
-   return calloc(1, size);
-}
-void stela_amd_kfree(const void *object)
-{
-   free((void *)object);
-}
 
 /* The registers discovery reads, in DWORDs, and a 512 KiB register BAR. */
 enum {
@@ -204,7 +190,7 @@ int main(void)
    apu->registers[DRIVER_SCRATCH_2] = 10 * 1024;
    apu->registers[DRIVER_SCRATCH_0] = 0x100000;
    fails(apu, REGISTERS * 4, &unsupported);
-   assert(!strcmp(unsupported, "system memory discovery table"));
+   assert(!strcmp(unsupported, "memremap"));
 
    /* Malformed calls change nothing. */
    const struct stela_amd_discovery_io io = {read32, write32, sleep_ms, NULL};

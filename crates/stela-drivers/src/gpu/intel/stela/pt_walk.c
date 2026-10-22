@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include "pt_walk.h"
+#include <stela/linux.h>
 
 #include "xe_pt_walk.c"
 
@@ -32,7 +33,9 @@ int stela_intel_pt_walk(struct xe_ptw *parent, unsigned int level,
         return INVALID_ARGUMENT;
     }
 
-    if (shared)
-        return xe_pt_walk_shared(parent, level, addr, end, walk);
-    return xe_pt_walk_range(parent, level, addr, end, walk);
+    stela_linux_enter(&stela_linux_bare);
+    int ret = shared ? xe_pt_walk_shared(parent, level, addr, end, walk) :
+                       xe_pt_walk_range(parent, level, addr, end, walk);
+    stela_linux_exit();
+    return ret;
 }

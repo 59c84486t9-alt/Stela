@@ -5,9 +5,9 @@
 #include "regs/xe_gtt_defs.h"
 #include "xe_device_types.h"
 #include "xe_wopcm.h"
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
+#include <stela/linux.h>
+#include <stela/test.h>
+#include <linux/string.h>
 int main(void)
 {
     const struct stela_intel_gsm_geometry sentinel = {1, 2, 3, 4};
@@ -29,7 +29,9 @@ int main(void)
                 if (!gsm) { assert(status == -12 && !memcmp(&out, &sentinel, sizeof(out))); continue; }
                 assert(!status && out.gsm_offset == 8 << 20 && out.gsm_bytes == gsm);
                 struct xe_device xe = {.info = {.platform = (enum xe_platform)p, .is_dgfx = d != 0}};
+                stela_linux_enter(&stela_linux_bare);
                 u64 start = xe_wopcm_size(&xe), size = (u64)gsm * 512 - start;
+                stela_linux_exit();
                 if (start + size > GUC_GGTT_TOP) size = GUC_GGTT_TOP - start;
                 assert(out.ggtt_start == start && out.ggtt_bytes == size);
                 assert(start == (p >= XE_LUNARLAKE ? 8u : d || p == XE_METEORLAKE ? 4u : 2u) * 1024 * 1024);

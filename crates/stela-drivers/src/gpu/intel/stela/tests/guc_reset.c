@@ -2,9 +2,8 @@
 /* GuC reset handshake over a modelled register file and clock; never a
  * physical reset. */
 #include "../guc_reset.h"
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
+#include <stela/test.h>
+#include <linux/string.h>
 #include <linux/errno.h>
 #include "regs/xe_gt_regs.h"
 #include "regs/xe_guc_regs.h"

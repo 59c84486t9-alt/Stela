@@ -24,15 +24,15 @@ fn main() {
     // baseline Cargo watches every vendored file even when no C port is used.
     println!("cargo:rerun-if-changed=build.rs");
     #[cfg(any(feature = "amd-port", feature = "intel-port"))]
-    let mut tests = native::Tests::default();
+    let (linux, mut tests) = (native::Linux::new(), native::Tests::default());
     #[cfg(feature = "amd-port")]
-    amd::port(&mut tests);
+    amd::port(&linux, &mut tests);
     #[cfg(feature = "amd-commands")]
     amd_commands::build();
     #[cfg(feature = "nvidia-port")]
     nvidia::port();
     #[cfg(feature = "intel-port")]
-    intel::port(&mut tests);
+    intel::port(&linux, &mut tests);
     #[cfg(any(feature = "amd-port", feature = "intel-port"))]
     tests.write();
 }

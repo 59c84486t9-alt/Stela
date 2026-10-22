@@ -1,80 +1,40 @@
 /* SPDX-License-Identifier: MIT */
+/* The unchanged Linux i915 batch-start emitters, writing into the borrowed
+ * command storage through a request whose ring is that storage. */
 #include "i915_commands.h"
-#include "unsupported.h"
-#include <linux/container_of.h>
-
+#include <linux/string.h>
+#include <stela/linux.h>
+#include <unsupported.h>
 #include "gt/gen2_engine_cs.c"
 #include "gt/gen6_engine_cs.c"
 #include "gt/gen8_engine_cs.c"
 
-/* One packet request: the ring is the borrowed command storage. */
-struct stela_request {
+/* The batch-start emitters use only the request's ring; interrupts and
+ * contexts belong to an engine Stela does not run. */
+STELA_UNSUPPORTED(void, gen5_gt_disable_irq, struct intel_gt *, u32)
+STELA_UNSUPPORTED(void, gen5_gt_enable_irq, struct intel_gt *, u32)
+STELA_UNSUPPORTED(void, gen6_gt_pm_mask_irq, struct intel_gt *, u32)
+STELA_UNSUPPORTED(void, gen6_gt_pm_unmask_irq, struct intel_gt *, u32)
+STELA_UNSUPPORTED(u32, lrc_indirect_bb, const struct intel_context *)
+
+/* Stela's ring is the unused rest of the command storage: a request claims
+ * dwords from it in order, as intel_ring.c's does from a ring buffer, and
+ * never wraps. */
+u32 *intel_ring_begin(struct i915_request *rq, unsigned int num_dwords)
+{
+    struct intel_ring *ring = rq->ring;
+    if (num_dwords > (ring->size - ring->emit) / sizeof(u32)) return ERR_PTR(-ENOSPC);
+    u32 *cs = (u32 *)ring->vaddr + ring->emit / sizeof(u32);
+    ring->emit += num_dwords * (u32)sizeof(u32);
+    return cs;
+}
+
+/* The request a packet is emitted for. Only the running Linux owner uses
+ * it, so there is one. */
+static struct {
     struct i915_request rq;
     struct intel_ring ring;
-    struct intel_engine_cs engine;
-    struct stela_intel_commands *commands;
-    unsigned int reserved;
-    bool no_preempt;
-};
-
-static struct stela_request *request(const struct i915_request *rq)
-{
-    return container_of(rq, struct stela_request, rq);
-}
-
-static u32 *intel_ring_begin(struct i915_request *rq, unsigned int num_dwords)
-{
-    struct stela_request *request_ = request(rq);
-    struct stela_intel_commands *commands = request_->commands;
-
-    if (num_dwords > commands->capacity - commands->used)
-        return ERR_PTR(-ENOSPC);
-    request_->reserved = num_dwords;
-    return commands->words + commands->used;
-}
-
-static void intel_ring_advance(struct i915_request *rq, u32 *cs)
-{
-    struct stela_request *request_ = request(rq);
-    struct stela_intel_commands *commands = request_->commands;
-
-    /* An emitter that wrote other than what it reserved is a broken source. */
-    if (cs != commands->words + commands->used + request_->reserved)
-        __builtin_trap();
-    commands->used += request_->reserved;
-}
-
-static bool i915_request_has_nopreempt(const struct i915_request *rq)
-{
-    return request(rq)->no_preempt;
-}
-
-/* The batch-start emitters use only the ring and request services above. */
-STELA_UNSUPPORTED(unsigned int, stela_i915_graphics_ver, const struct drm_i915_private *)
-STELA_UNSUPPORTED(unsigned int, stela_i915_graphics_ver_full, const struct drm_i915_private *)
-STELA_UNSUPPORTED(bool, stela_i915_is_dg2, const struct drm_i915_private *)
-STELA_UNSUPPORTED(bool, stela_i915_is_g4x, const struct drm_i915_private *)
-STELA_UNSUPPORTED(bool, stela_i915_is_kabylake, const struct drm_i915_private *)
-STELA_UNSUPPORTED(bool, stela_i915_has_flat_ccs, const struct drm_i915_private *)
-STELA_UNSUPPORTED(bool, stela_i915_has_3d_pipeline, const struct drm_i915_private *)
-STELA_UNSUPPORTED(bool, stela_i915_is_graphics_step, const struct drm_i915_private *, int, int)
-STELA_UNSUPPORTED(bool, stela_i915_gt_ip_range, const struct intel_gt *, unsigned int, unsigned int)
-STELA_UNSUPPORTED(bool, intel_uc_uses_guc_submission, struct intel_uc *)
-STELA_UNSUPPORTED(u32, intel_gt_scratch_offset, const struct intel_gt *, enum intel_gt_scratch_field)
-STELA_UNSUPPORTED(bool, intel_engine_has_semaphores, const struct intel_engine_cs *)
-STELA_UNSUPPORTED(bool, intel_engine_uses_wa_hold_switchout, struct intel_engine_cs *)
-STELA_UNSUPPORTED(u32, intel_uncore_read_fw, struct intel_uncore *, i915_reg_t)
-STELA_UNSUPPORTED(void, intel_uncore_write, struct intel_uncore *, i915_reg_t, u32)
-STELA_UNSUPPORTED(u32, intel_ring_offset, const struct i915_request *, void *)
-STELA_UNSUPPORTED(void, assert_ring_tail_valid, const struct intel_ring *, unsigned int)
-STELA_UNSUPPORTED(u32, i915_request_active_seqno, const struct i915_request *)
-STELA_UNSUPPORTED(struct intel_timeline *, i915_request_timeline, const struct i915_request *)
-STELA_UNSUPPORTED(u32, lrc_indirect_bb, const struct intel_context *)
-STELA_UNSUPPORTED(u32, i915_ggtt_offset, const struct i915_vma *)
-STELA_UNSUPPORTED_EXTERN(void, gen5_gt_enable_irq, struct intel_gt *, u32)
-STELA_UNSUPPORTED_EXTERN(void, gen5_gt_disable_irq, struct intel_gt *, u32)
-STELA_UNSUPPORTED_EXTERN(void, gen6_gt_pm_unmask_irq, struct intel_gt *, u32)
-STELA_UNSUPPORTED_EXTERN(void, gen6_gt_pm_mask_irq, struct intel_gt *, u32)
+} request;
 
 int stela_intel_i915_batch_start(struct stela_intel_commands *commands, uint32_t encoding,
                                 uint64_t address, bool secure, bool no_preempt)
@@ -106,8 +66,15 @@ int stela_intel_i915_batch_start(struct stela_intel_commands *commands, uint32_t
     if ((address & 7) || address >= (UINT64_C(1) << address_bits) ||
         (no_preempt && encoding != STELA_INTEL_I915_BATCH_GEN8))
         return -EINVAL;
-    struct stela_request request_ = {.commands = commands, .no_preempt = no_preempt};
-    request_.rq.engine = &request_.engine;
-    request_.rq.ring = &request_.ring;
-    return emit(&request_.rq, address, 0, secure ? I915_DISPATCH_SECURE : 0);
+    size_t free = commands->capacity - commands->used;
+    stela_linux_enter(&stela_linux_bare);
+    memset(&request, 0, sizeof(request));
+    request.ring.vaddr = commands->words + commands->used;
+    request.ring.size = (u32)min_t(size_t, free, U32_MAX / sizeof(u32)) * (u32)sizeof(u32);
+    request.rq.ring = &request.ring;
+    if (no_preempt) __set_bit(I915_FENCE_FLAG_NOPREEMPT, &request.rq.fence.flags);
+    int status = emit(&request.rq, address, 0, secure ? I915_DISPATCH_SECURE : 0);
+    if (!status) commands->used += request.ring.emit / sizeof(u32);
+    stela_linux_exit();
+    return status;
 }

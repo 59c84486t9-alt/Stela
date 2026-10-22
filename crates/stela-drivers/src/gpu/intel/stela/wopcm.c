@@ -1,58 +1,57 @@
 /* SPDX-License-Identifier: MIT */
-/* Stela's environment for the unchanged Linux xe_wopcm.c, which follows. */
+/* The unchanged Linux xe_wopcm.c, which partitions WOPCM for the GuC and
+ * locks its registers, on a native device over the activated GPU's
+ * registers. */
 #include "wopcm.h"
+#include "device.h"
 #include "firmware.h"
-#include <linux/array_size.h>
-#include <stdarg.h>
-#include "xe_device.h"
-#include "xe_force_wake.h"
-#include "xe_mmio.h"
-#include "xe_uc_fw.h"
-#include "regs/xe_guc_regs.h"
-_Static_assert(sizeof(struct xe_wopcm) == 12, "original WOPCM metadata ABI");
-_Static_assert(sizeof(struct guc_doorbell_info) == 64, "original packed doorbell ABI");
-_Static_assert(_Alignof(struct guc_doorbell_info) == 1, "original packed alignment");
+#include <linux/string.h>
+#include "xe_wopcm.c"
 
 struct native_wopcm {
-    struct xe_device xe;
+    struct stela_xe dev;
     struct xe_gt gt;
     struct stela_intel_wopcm_result *result;
 };
-/* Linux reports WARN_ON without naming a device. Attempts are serialized
- * so a warning names the active one; a concurrent attempt is refused. */
-static struct native_wopcm *active;
 
-static struct native_wopcm *native_of(struct xe_mmio *mmio)
+static struct native_wopcm *native_of(void *context)
 {
-    return container_of(container_of(mmio, struct xe_gt, mmio), struct native_wopcm, gt);
+    return container_of((struct stela_xe *)context, struct native_wopcm, dev);
 }
 static void invariant(struct native_wopcm *native, bool condition)
 {
-    native->gt.mmio.io->invariant(native->gt.mmio.context, condition);
+    native->dev.io->invariant(native->dev.context, condition);
 }
-static bool same_text(const char *a, const char *b)
+
+/* Exposure is counted before each write reaches the owner. */
+static void observe(struct stela_xe *dev, u32 addr, u32 value, bool write)
 {
-    while (*a && *a == *b) ++a, ++b;
-    return *a == *b;
+    struct stela_intel_wopcm_result *result = native_of(dev)->result;
+    if (write) ++result->writes;
+    else if (addr == DMA_GUC_WOPCM_OFFSET.addr) result->raw_offset = value;
+    else if (addr == GUC_WOPCM_SIZE.addr) result->raw_size = value;
 }
-static u32 xe_mmio_read32(struct xe_mmio *mmio, struct xe_reg reg)
+/* Diagnostics bits 0..9 are xe_wopcm.c's messages, in source order; Stela
+ * runs Linux code with drm.debug's driver category, so its debug messages
+ * arrive too. */
+static void log_event(void *context, int level, const char *message)
 {
-    struct native_wopcm *native = native_of(mmio);
-    invariant(native, !(reg.addr & 3) && reg.addr + 4 <= XE_REG_ADDR_MAX);
-    u32 value = mmio->io->read32(mmio->context, reg.addr);
-    if (reg.addr == DMA_GUC_WOPCM_OFFSET.addr) native->result->raw_offset = value;
-    if (reg.addr == GUC_WOPCM_SIZE.addr) native->result->raw_size = value;
-    return value;
+    static const char *const events[] = {
+        "WOPCM: invalid GuC region layout", "WOPCM: no space for GuC",
+        "WOPCM: no space for HuC", "Failed to init uC WOPCM registers!",
+        "DMA_GUC_WOPCM_OFFSET(", "GUC_WOPCM_SIZE(", "WOPCM: ",
+        "GuC WOPCM is already locked", "Calculated GuC WOPCM",
+        "Unsuccessful WOPCM partitioning",
+    };
+    struct native_wopcm *native = native_of(context);
+    unsigned event = 0;
+    (void)level;
+    while (event < ARRAY_SIZE(events) && !strstr(message, events[event])) ++event;
+    invariant(native, event < ARRAY_SIZE(events));
+    if (event < ARRAY_SIZE(events)) native->result->diagnostics |= UINT32_C(1) << event;
 }
-static void xe_mmio_write32(struct xe_mmio *mmio, struct xe_reg reg, u32 value)
-{
-    struct native_wopcm *native = native_of(mmio);
-    invariant(native, !(reg.addr & 3) && reg.addr + 4 <= XE_REG_ADDR_MAX);
-    ++native->result->writes; /* Exposure begins BEFORE real owner callback. */
-    mmio->io->write32(mmio->context, reg.addr, value);
-}
-/* Diagnostics bits16..24 are xe_wopcm.c's warnings, in source order. */
-static void stela_linux_warn(const char *file, int line, const char *condition)
+/* Diagnostics bits 16..24 are xe_wopcm.c's warnings, in source order. */
+static void warn_event(void *context, const char *file, int line, const char *condition)
 {
     static const char *const conditions[] = {
         "!(base & GUC_WOPCM_OFFSET_MASK)", "base & ~GUC_WOPCM_OFFSET_MASK",
@@ -60,49 +59,46 @@ static void stela_linux_warn(const char *file, int line, const char *condition)
         "guc_fw_size >= wopcm->size", "huc_fw_size >= wopcm->size",
         "ctx_rsvd + WOPCM_RESERVED_SIZE >= wopcm->size", "!wopcm->guc.base", "!wopcm->guc.size",
     };
-    struct native_wopcm *native = active;
+    struct native_wopcm *native = native_of(context);
     unsigned id = 0;
     (void)file; (void)line;
-    while (id < ARRAY_SIZE(conditions) && !same_text(condition, conditions[id])) ++id;
+    while (id < ARRAY_SIZE(conditions) && strcmp(condition, conditions[id])) ++id;
     invariant(native, id < ARRAY_SIZE(conditions));
     if (id < ARRAY_SIZE(conditions)) native->result->diagnostics |= UINT32_C(1) << (16 + id);
 }
-/* Diagnostics bits0..9 are xe_wopcm.c's messages, in source order. */
-static void stela_drm_printk(const struct drm_device *drm, enum stela_drm_level level,
-    const char *format, ...)
+static const struct stela_linux_services services = {
+    .log = log_event, .warn = warn_event, .unsupported = stela_xe_unsupported,
+};
+
+/* A native of the given platform, with a GuC image of ucode_bytes and no
+ * HuC, whose register accesses result records. Linux marks HuC
+ * NOT_SUPPORTED for a GT without one or a platform without a default
+ * image. */
+static void prepare(struct native_wopcm *native, const struct stela_intel_activation_io *io,
+                    void *context, enum xe_platform platform, bool discrete, u32 ucode_bytes,
+                    struct stela_intel_wopcm_result *result)
 {
-    static const char *const formats[] = {
-        "WOPCM: invalid GuC region layout: %uK + %uK > %uK\n",
-        "WOPCM: no space for %s: %uK < %uK\n",
-        "Failed to init uC WOPCM registers!\n",
-        "%s(%#x)=%#x\n",
-        "WOPCM: %uK\n",
-        "GuC WOPCM is already locked [%uK, %uK)\n",
-        "Calculated GuC WOPCM [%uK, %uK)\n",
-        "Unsuccessful WOPCM partitioning\n",
-    };
-    static const unsigned first_event[] = {0, 1, 3, 4, 6, 7, 8, 9};
-    struct native_wopcm *native =
-        container_of(container_of(drm, struct xe_device, drm), struct native_wopcm, xe);
-    unsigned index = 0;
-    (void)level;
-    while (index < ARRAY_SIZE(formats) && !same_text(format, formats[index])) ++index;
-    invariant(native, index < ARRAY_SIZE(formats));
-    if (index == ARRAY_SIZE(formats)) return;
-    unsigned event = first_event[index];
-    if (index == 1 || index == 3) {
-        va_list arguments;
-        va_start(arguments, format);
-        const char *name = va_arg(arguments, const char *);
-        va_end(arguments);
-        bool second = same_text(name, index == 1 ? "HuC" : "GUC_WOPCM_SIZE");
-        invariant(native, second || same_text(name, index == 1 ? "GuC" : "DMA_GUC_WOPCM_OFFSET"));
-        event += second;
-    }
-    native->result->diagnostics |= UINT32_C(1) << event;
+    memset(native, 0, sizeof(*native));
+    native->dev.xe.info.platform = platform;
+    native->dev.xe.info.is_dgfx = discrete;
+    native->dev.io = io;
+    native->dev.context = context;
+    native->dev.observe = observe;
+    stela_xe_init(&native->dev, &native->gt, XE_GT_TYPE_MAIN);
+    /* The activated GPU's GT domain, which its caller holds awake. */
+    native->gt.pm.fw.gt = &native->gt;
+    native->gt.pm.fw.awake_domains = XE_FW_GT;
+    native->gt.uc.guc.fw.type = XE_UC_FW_TYPE_GUC;
+    native->gt.uc.guc.fw.__status = XE_UC_FIRMWARE_AVAILABLE;
+    native->gt.uc.guc.fw.ucode_size = ucode_bytes;
+    native->gt.uc.huc.fw.type = XE_UC_FW_TYPE_HUC;
+    native->gt.uc.huc.fw.__status = XE_UC_FIRMWARE_NOT_SUPPORTED;
+    native->result = result;
 }
 
-#include "xe_wopcm.c"
+/* The device an attempt runs xe_wopcm_init on. Only the running Linux owner
+ * uses it, so there is one. */
+static struct native_wopcm native;
 
 int stela_intel_wopcm_prepare(const struct stela_intel_activation_io *io, void *context,
     uint32_t platform, uint32_t graphics_verx100, bool discrete,
@@ -124,29 +120,19 @@ int stela_intel_wopcm_prepare(const struct stela_intel_activation_io *io, void *
     }
     struct stela_intel_guc_metadata metadata;
     status = stela_intel_guc_parse(platform, guc_bytes, guc_size,
-                                      &metadata, &out->firmware_diagnostics);
+                                   &metadata, &out->firmware_diagnostics);
     if (status) return status;
     if (metadata.upload_bytes > UINT32_MAX - GUC_WOPCM_RESERVED - GUC_WOPCM_STACK_RESERVED)
         return -75;
-    struct native_wopcm native = {
-        .xe.info = {.platform = (enum xe_platform)platform, .is_dgfx = discrete},
-        .xe.tiles[0].xe = &native.xe,
-        .gt = {
-            .tile = &native.xe.tiles[0], .mmio = {.io = io, .context = context},
-            .uc.guc.fw = {.type = XE_UC_FW_TYPE_GUC, .__status = XE_UC_FIRMWARE_AVAILABLE,
-                          .ucode_size = metadata.ucode_bytes},
-            .uc.huc.fw = {.type = XE_UC_FW_TYPE_HUC, .__status = XE_UC_FIRMWARE_NOT_SUPPORTED},
-        },
-        .result = out,
-    };
-    struct native_wopcm *idle = NULL;
-    if (!__atomic_compare_exchange_n(&active, &idle, &native, false,
-                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
-        return -EBUSY;
+    const struct stela_linux_owner owner = {.services = &services, .context = &native.dev};
+    stela_linux_enter(&owner);
+    prepare(&native, io, context, (enum xe_platform)platform, discrete, metadata.ucode_bytes,
+            out);
     status = xe_wopcm_init(&native.gt.uc.wopcm);
-    __atomic_store_n(&active, NULL, __ATOMIC_RELEASE);
+    if (!status && native.dev.unsupported) status = -EOPNOTSUPP;
     out->total_bytes = native.gt.uc.wopcm.size;
     out->guc_base = native.gt.uc.wopcm.guc.base;
     out->guc_bytes = native.gt.uc.wopcm.guc.size;
+    stela_linux_exit();
     return status;
 }

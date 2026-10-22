@@ -1,49 +1,154 @@
-/* SPDX-License-Identifier: MIT */
-#ifndef STELA_LINUX_TYPES_H
-#define STELA_LINUX_TYPES_H
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-typedef uint8_t u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
-typedef uint64_t u64;
-typedef int8_t s8;
-typedef int16_t s16;
-typedef int32_t s32;
-typedef int64_t s64;
-typedef u16 __le16;
-typedef u32 __le32;
-typedef u64 __le64;
-typedef u16 __be16;
-typedef u32 __be32;
-typedef u64 __be64;
-typedef u8 __u8;
-typedef u16 __u16;
-typedef u32 __u32;
-typedef u64 __u64;
-typedef s8 __s8;
-typedef s16 __s16;
-typedef s32 __s32;
-typedef s64 __s64;
-/* Copyright Linux kernel contributors; from uapi/linux/types.h, without
- * sparse. */
-#define __bitwise
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef _LINUX_TYPES_H
+#define _LINUX_TYPES_H
+/* Linux's types.h, whose bool is <stdbool.h>'s so that Stela's interface
+ * headers can join Linux code. */
+#include <linux/stddef.h>
+#include <uapi/linux/types.h>
+
 /* Copyright Linux kernel contributors; from types.h. */
-typedef unsigned short ushort;
-typedef unsigned int uint;
-typedef unsigned long ulong;
-/* Linux x86-64 sizes and page offsets are 64-bit; UEFI's unsigned long is not. */
-typedef size_t __kernel_size_t;
-typedef u64 pgoff_t;
-_Static_assert(sizeof(pgoff_t) == 8, "GPU page offsets must not truncate");
-typedef s64 loff_t;
-typedef ptrdiff_t ssize_t;
-typedef unsigned short umode_t;
-typedef u64 phys_addr_t;
-typedef phys_addr_t resource_size_t;
+#define DECLARE_BITMAP(name,bits) \
+	unsigned long name[BITS_TO_LONGS(bits)]
+
+#ifdef __SIZEOF_INT128__
+typedef __s128 s128;
+typedef __u128 u128;
+#endif
+
+typedef u32 __kernel_dev_t;
+
+typedef __kernel_fd_set		fd_set;
+typedef __kernel_dev_t		dev_t;
+typedef __kernel_ulong_t	ino_t;
+typedef __kernel_mode_t		mode_t;
+typedef unsigned short		umode_t;
+typedef u32			nlink_t;
+typedef __kernel_off_t		off_t;
+typedef __kernel_pid_t		pid_t;
+typedef __kernel_daddr_t	daddr_t;
+typedef __kernel_key_t		key_t;
+typedef __kernel_suseconds_t	suseconds_t;
+typedef __kernel_timer_t	timer_t;
+typedef __kernel_clockid_t	clockid_t;
+typedef __kernel_mqd_t		mqd_t;
+
+typedef __kernel_uid32_t	uid_t;
+typedef __kernel_gid32_t	gid_t;
+typedef __kernel_uid16_t        uid16_t;
+typedef __kernel_gid16_t        gid16_t;
+
+#if defined(__GNUC__)
+typedef __kernel_loff_t		loff_t;
+typedef __kernel_uoff_t		uoff_t;
+#endif
+
+#ifndef _SIZE_T
+#define _SIZE_T
+typedef __kernel_size_t		size_t;
+#endif
+
+#ifndef _SSIZE_T
+#define _SSIZE_T
+typedef __kernel_ssize_t	ssize_t;
+#endif
+
+#ifndef _PTRDIFF_T
+#define _PTRDIFF_T
+typedef __kernel_ptrdiff_t	ptrdiff_t;
+#endif
+
+#ifndef _CLOCK_T
+#define _CLOCK_T
+typedef __kernel_clock_t	clock_t;
+#endif
+
+#ifndef _CADDR_T
+#define _CADDR_T
+typedef __kernel_caddr_t	caddr_t;
+#endif
+
+/* bsd */
+typedef unsigned char		u_char;
+typedef unsigned short		u_short;
+typedef unsigned int		u_int;
+typedef unsigned long		u_long;
+
+/* sysv */
+typedef unsigned char		unchar;
+typedef unsigned short		ushort;
+typedef unsigned int		uint;
+typedef unsigned long		ulong;
+typedef unsigned long long	ullong;
+
+typedef u8			u_int8_t;
+typedef u16			u_int16_t;
+typedef u32			u_int32_t;
+typedef u64			u_int64_t;
+
+/* These are the special 64-bit data types that are 8-byte aligned */
+#define aligned_u64		__aligned_u64
+#define aligned_s64		__aligned_s64
+#define aligned_be64		__aligned_be64
+#define aligned_le64		__aligned_le64
+
+/* Nanosecond scalar representation for kernel time values */
+typedef s64	ktime_t;
+
+typedef u64 sector_t;
+typedef u64 blkcnt_t;
+
+/* generic data direction definitions */
+#define READ			0
+#define WRITE			1
+
+/*
+ * The type of an index into the pagecache.
+ */
+#define pgoff_t unsigned long
+
+#ifdef CONFIG_ARCH_DMA_ADDR_T_64BIT
 typedef u64 dma_addr_t;
-/* Copyright Linux kernel contributors; from types.h. */
+#else
+typedef u32 dma_addr_t;
+#endif
+
+typedef unsigned int __bitwise gfp_t;
+typedef unsigned int __bitwise slab_flags_t;
+typedef unsigned int __bitwise fmode_t;
+
+#ifdef CONFIG_PHYS_ADDR_T_64BIT
+typedef u64 phys_addr_t;
+#else
+typedef u32 phys_addr_t;
+#endif
+
+struct phys_vec {
+	phys_addr_t	paddr;
+	size_t		len;
+};
+
+typedef phys_addr_t resource_size_t;
+
+typedef unsigned long irq_hw_number_t;
+
+typedef struct {
+	int __aligned(sizeof(int)) counter;
+} atomic_t;
+
+#define ATOMIC_INIT(i) { (i) }
+
+#ifdef CONFIG_64BIT
+typedef struct {
+	s64 counter;
+} atomic64_t;
+#endif
+
+typedef struct {
+	atomic_t refcnt;
+} rcuref_t;
+
+#define RCUREF_INIT(i)	{ .refcnt = ATOMIC_INIT(i - 1) }
+
 struct list_head {
 	struct list_head *next, *prev;
 };
@@ -54,5 +159,24 @@ struct hlist_head {
 
 struct hlist_node {
 	struct hlist_node *next, **pprev;
+};
+
+struct callback_head {
+	struct callback_head *next;
+	void (*func)(struct callback_head *head);
+} __attribute__((aligned(sizeof(void *))));
+#define rcu_head callback_head
+
+typedef void (*rcu_callback_t)(struct rcu_head *head);
+typedef void (*call_rcu_func_t)(struct rcu_head *head, rcu_callback_t func);
+
+typedef void (*swap_r_func_t)(void *a, void *b, int size, const void *priv);
+typedef void (*swap_func_t)(void *a, void *b, int size);
+
+typedef int (*cmp_r_func_t)(const void *a, const void *b, const void *priv);
+typedef int (*cmp_func_t)(const void *a, const void *b);
+
+struct rcuwait {
+	struct task_struct __rcu *task;
 };
 #endif
