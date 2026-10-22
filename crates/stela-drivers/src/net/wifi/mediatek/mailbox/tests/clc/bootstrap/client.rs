@@ -718,3 +718,43 @@ fn uncertain_actual_gtk_resume_never_authorizes_port_or_drops_real_peer_owner() 
     assert_eq!(model.drops.load(Ordering::Relaxed), 0);
     assert!(!model.memory.lock().unwrap().mappings.is_empty());
 }
+
+#[test]
+fn local_advertisement_uses_retained_real_report_image_eeprom_and_policy_inputs() {
+    let (driver, model) = setup();
+    let count = model.response.lock().unwrap().client_commands.len();
+    for band in [Band::Ghz2, Band::Ghz5] {
+        let a = driver.local_advertisement(band).unwrap();
+        assert_eq!(a.antenna_mask(), 3);
+        assert_eq!(a.source_country(), *b"US");
+        assert_eq!(a.capabilities().he().unwrap().mcs_80.rx_nss(), 2);
+        assert_eq!(a.validate_capabilities(a.capabilities()), Ok(()));
+        assert_eq!(a.he_source_maps()[0].rx, 0xfffa);
+        assert_eq!(a.he_source_maps()[1].tx, 0xfffa);
+        assert_eq!(a.he_source_maps()[2].rx, 0);
+        assert_eq!(a.he_source_maps()[2].tx, 0);
+        if band == Band::Ghz2 {
+            assert_eq!(a.capabilities().he().unwrap().mcs_160, None);
+        }
+        assert!(a.capabilities().eht().unwrap().mcs.bw320.is_none());
+        assert_eq!(a.capabilities().he().unwrap().phy[0] & 16, 0);
+    }
+    assert!(matches!(
+        driver.local_advertisement(Band::Ghz6),
+        Err(crate::net::wifi::mediatek::bootstrap::client::LocalError::UnsupportedBand)
+    ));
+    // A new unqueried model reply is not a current bound hardware observation.
+    model.response.lock().unwrap().capability_payload = Some(vec![0xff; 100]);
+    assert_eq!(
+        driver
+            .local_advertisement(Band::Ghz5)
+            .unwrap()
+            .antenna_mask(),
+        3
+    );
+    assert_eq!(model.response.lock().unwrap().client_commands.len(), count);
+    assert_eq!(model.queues[&0xd4300].lock().unwrap().head, 0);
+    assert_eq!(driver.phase(), ClientPhase::Idle);
+    drop(driver);
+    assert_eq!(model.drops.load(Ordering::Relaxed), 0);
+}

@@ -4,6 +4,7 @@
 //! raw-header format to the actual retained peer; generic WMWA facts never do.
 use super::{Controller, Phase as ControllerPhase};
 
+mod local;
 mod packet;
 mod radio;
 use crate::{
@@ -41,6 +42,7 @@ use crate::{
     },
 };
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
+pub use local::{Advertisement, LocalError, MloObservations};
 
 #[derive(Debug)]
 pub enum Error {

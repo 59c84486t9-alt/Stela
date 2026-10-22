@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Pinned full legacy-profile STA/BSS/scan request source helpers under sanitizers.
-Usage: mt7925_client_oracle.py MT76_DIRECTORY FRESH_OUTPUT_DIRECTORY
-Only the explicit non-MLO station legacy20 profile is modeled. Optional advanced
-capability handlers assert that the source's early-return conditions hold; they
-are not feature oracles. Actual complete mandatory helpers and caller order run.
+"""Pinned complete MT7925 source request/capability helpers under sanitizers.
+Usage: mt7925_client_oracle.py MT76_DIRECTORY FRESH_OUTPUT_DIRECTORY [--modern | --local KERNEL_HEADERS]
+Default models non-MLO station legacy20. --modern builds complete modern peer,
+BSS, EDCA, BA and puncture writers; the Rust runner supplies typed contexts over
+stdin and records modern-run.json with exact executed counts and hashes.
+--local executes full HT/VHT/HE/EHT/PPE issuers plus BE_CONTROL decisions,
+retaining source HE struct slots separately from transmitted capability maps.
 No firmware ACK, physical authority, encryption or radio execution is established.
 """
 from pathlib import Path
 import re,hashlib,json,subprocess,sys
-source,out=map(Path,sys.argv[1:]);out.mkdir(parents=True,exist_ok=False)
+source,out=map(Path,sys.argv[1:3]);modern=len(sys.argv)>3 and sys.argv[3]=="--modern";local=len(sys.argv)>3 and sys.argv[3]=="--local";out.mkdir(parents=True,exist_ok=False)
 hashes={'mt792x_mac.c':'472d899597f5da141a9fba4d9d38d202cd8ac13ba53677e2e527f0b4e1884a45','mt76_connac_mcu.c':'52472fd20bc0a1d744f3eee7a28b7205609e160c479a9da1ec5afa4528e389ec','mt76_connac_mcu.h':'2448b6c145f17397a717965eadf50c591934902f0b09684d37a8b0ae290b31ed','mt76_connac.h':'fef14ff63ab1a098b8fe90b5c2e28811cf7fcaf78a7bf5753818b05acf2414b0','mt7925/mcu.c':'cca76caa6429584b0b37f2772f5132e754a9e26b71660fb0e362ead4ee01dde6','mt7925/mcu.h':'35855f4cdc673a7562241afd618fdd73fc181d210127e3ca2f762f3199cbc772','mt7925/main.c':'93023cfa7f7bc57efcf64b2a4fe55d932a60c0128942ff911b2e0d792a0de588','mt7925/mt7925.h':'b6fec2103954269927b44b095944120dd22a5a0503fa8930e49a8ecc044844dc'}
 t={}
 for f,h in hashes.items():b=(source/f).read_bytes();assert hashlib.sha256(b).hexdigest()==h,f;t[f]=b.decode()
@@ -214,10 +216,20 @@ struct ieee80211_vif v={0};struct mt792x_sta sta={.vif=&v.drv_priv[0]};struct mt
 for(int i=0;i<22;i++)for(int unicast=0;unicast<2;unicast++){struct mt76_wcid*w=mt792x_rx_get_wcid(&d,i,unicast);u16 idx=w?w->idx:65535;output(&idx,2);}
 return 0;}
 '''
+if modern or local:
+ from mt7925_modern_fixture import extend
+ pre,parts,helpers,main=extend(pre,parts,helpers,main,function,layout)
+if local:
+ from mt7925_local_fixture import extend_local
+ pre,parts,helpers,main=extend_local(pre,parts,helpers,main,function,layout,t,hashes,source,Path(sys.argv[4]))
 # Definitions used by complete layouts precede them; model follows layouts only
 # where sizeof/layout names are needed by extracted functions.
 pre=pre.replace('typedef uint16_t __le16;','typedef uint16_t __le16;')
 unit=out/'client.c';unit.write_text(pre+'\n#define HT_MCS_MASK_NUM 10\n'+''.join(parts)+helpers+main)
 exe=out/'client';subprocess.run(['cc','-std=gnu11','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all',str(unit),'-o',str(exe)],check=True)
-b=subprocess.run([str(exe.resolve())],stdout=subprocess.PIPE,check=True).stdout;(out/'client.trace').write_bytes(b)
-(out/'manifest.json').write_text(json.dumps({'linux_commit':'a804c5742bff224d4cb4d25dd383554d598be32b','sources':hashes,'cases':128,'requests':1792,'trace_sha256':hashlib.sha256(b).hexdigest()},indent=2)+'\n');print(hashlib.sha256(b).hexdigest())
+b=b'' if modern else subprocess.run([str(exe.resolve())],stdout=subprocess.PIPE,check=True).stdout
+if not modern:(out/'client.trace').write_bytes(b)
+manifest={'linux_commit':'a804c5742bff224d4cb4d25dd383554d598be32b','sources':hashes,'profile':'local-capabilities' if local else 'modern-stdin' if modern else 'legacy20','cases':80 if local else None if modern else 128,'requests':None if modern or local else 1792,'trace_sha256':None if modern else hashlib.sha256(b).hexdigest()}
+if local:manifest.update(be_control_cases=180,full_local_he_struct_slots=3)
+if modern:manifest['execution_record']='modern-run.json (created by the Rust runner after actual stdin execution)'
+(out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');print(manifest['trace_sha256'])

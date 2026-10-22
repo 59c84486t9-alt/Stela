@@ -10,6 +10,8 @@ use crate::net::{
 };
 use alloc::vec::Vec;
 
+pub mod modern;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Context(super::device::Error),
@@ -19,6 +21,10 @@ pub enum Error {
     InvalidRates,
     InvalidTiming,
     UnsupportedCipher,
+    UnsupportedWidth,
+    InvalidNegotiation,
+    InvalidGeometry,
+    InvalidAggregation,
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -57,6 +63,20 @@ fn tlv(bytes: &mut Vec<u8>, tag: u16, len: usize) -> &mut [u8] {
     put16(bytes, start + 2, len as u16);
     &mut bytes[start..]
 }
+/// Store the number of TLVs that [`tlv`] appended after `start`.
+fn recount(bytes: &mut [u8], start: usize) {
+    let mut at = start;
+    let mut count = 0;
+    while at < bytes.len() {
+        let len = u16::from_le_bytes([bytes[at + 2], bytes[at + 3]]) as usize;
+        // Every TLV holds its own 4-byte header, so the walk always advances.
+        assert!(len >= 4, "MCU TLV shorter than its header");
+        at += len;
+        count += 1;
+    }
+    assert_eq!(at, bytes.len(), "MCU TLV overruns its command");
+    put16(bytes, 2, count);
+}
 impl Profile {
     /// Source mt792x_rx_get_wcid lookup for this retained single-peer namespace.
     /// This is only slot selection, never key/association or DMA authority.
@@ -78,6 +98,9 @@ impl Profile {
         }
     }
     pub fn validate(self) -> Result<(), Error> {
+        self.validate_inner(false)
+    }
+    fn validate_inner(self, modern: bool) -> Result<(), Error> {
         Requests::station(self.interface, true).map_err(Error::Context)?;
         if self.peer.is_multicast() || self.peer.0 == [0; 6] {
             return Err(Error::InvalidPeer);
@@ -88,7 +111,7 @@ impl Profile {
         let ch = u8::try_from(self.channel.number).map_err(|_| Error::InvalidChannel)?;
         super::bootstrap::validate_channel(self.channel.band, ch, self.channel.frequency_mhz)
             .map_err(|_| Error::InvalidChannel)?;
-        if self.channel.band == Band::Ghz6 {
+        if self.channel.band == Band::Ghz6 && !modern {
             return Err(Error::InvalidChannel);
         }
         let mask = if self.channel.band == Band::Ghz2 {
@@ -121,7 +144,15 @@ impl Profile {
     /// ASSOC=2 includes the source single-link MLD record. PORT_SECURE is the
     /// source wire state only; the shared OS controlled port stays independent.
     pub fn peer_request(self, enable: bool, associated: bool) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.peer_request_inner(enable, associated, None)
+    }
+    fn peer_request_inner(
+        self,
+        enable: bool,
+        associated: bool,
+        modern: Option<&modern::Configuration>,
+    ) -> Result<Vec<u8>, Error> {
+        self.validate_inner(modern.is_some())?;
         let mut out = vec![0; 8];
         out[0] = self.interface.bss_index;
         out[1] = self.wcid as u8;
@@ -146,6 +177,9 @@ impl Profile {
         } else {
             8
         };
+        if let Some(m) = modern {
+            m.peer_capabilities(self, &mut out)?;
+        }
         let ra = tlv(&mut out, 1, 16);
         put16(
             ra,
@@ -156,8 +190,14 @@ impl Profile {
                 self.supported_rates << 6
             },
         );
+        if let Some(h) = modern.and_then(|m| m.negotiated().ht.as_ref()) {
+            ra[6..16].copy_from_slice(&h.peer_rx_mcs);
+        }
         let state = tlv(&mut out, 7, 16);
         state[4] = if associated { 2 } else { 0 };
+        if let Some(m) = modern.filter(|m| m.negotiated().vht.is_some()) {
+            state[12] = m.station_bandwidth() | m.negotiated().tx_nss << 4;
+        }
         if associated {
             let mld = tlv(&mut out, 0x20, 28);
             mld[4..10].copy_from_slice(&self.peer.0);
@@ -170,7 +210,7 @@ impl Profile {
         let hdr = tlv(&mut out, 0x2b, 8);
         hdr[5] = 1;
         hdr[6] = 1;
-        put16(&mut out, 2, if associated { 6 } else { 5 });
+        recount(&mut out, 8);
         Ok(out)
     }
     /// Broadcast slot uses the source no-link_sta path: only its own header
@@ -254,7 +294,14 @@ impl Profile {
     }
     /// Full associated BSS helper for the admitted local/peer legacy profile.
     pub fn bss_request(self, enable: bool) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.bss_request_inner(enable, None)
+    }
+    fn bss_request_inner(
+        self,
+        enable: bool,
+        modern: Option<&modern::Configuration>,
+    ) -> Result<Vec<u8>, Error> {
+        self.validate_inner(modern.is_some())?;
         let c = self.interface;
         let two = self.channel.band == Band::Ghz2;
         let mut out = vec![c.bss_index, 0, 0, 0];
@@ -293,6 +340,9 @@ impl Profile {
         let ifs = tlv(&mut out, 23, 20);
         ifs[4] = 1;
         put16(ifs, 8, self.slot_time);
+        if let Some(m) = modern {
+            m.bss_capabilities(self, enable, &mut out)?;
+        }
         if enable {
             let r = tlv(&mut out, 2, 16);
             r[4] = self.channel.number as u8;
@@ -300,9 +350,16 @@ impl Profile {
             r[8] = self.antenna_mask.count_ones() as u8;
             r[9] = r[8];
             r[12] = if two { 1 } else { 2 };
-            tlv(&mut out, 6, 8);
+            if let Some(m) = modern {
+                m.rlm(self, r);
+            }
+            let mbssid = tlv(&mut out, 6, 8);
+            if let Some(m) = modern {
+                mbssid[4] = m.operation().mbssid_indicator;
+                mbssid[5] = m.operation().mbssid_index;
+            }
         }
-        put16(&mut out, 2, if enable { 8 } else { 6 });
+        recount(&mut out, 4);
         Ok(out)
     }
 }

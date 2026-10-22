@@ -82,6 +82,7 @@ struct Owned<C> {
     capabilities: CapabilityReport,
     eeprom: super::eeprom::Report,
     plan: Plan,
+    inputs: Inputs,
     phase: Phase,
     facts: Vec<Fact>,
     interrupted: Option<Reply>,
@@ -150,6 +151,7 @@ impl<C: 'static> Execution<C> {
                 capabilities,
                 eeprom,
                 plan,
+                inputs,
                 phase: Phase::Fresh,
                 facts,
                 interrupted: None,
@@ -204,6 +206,11 @@ impl<C: 'static> Execution<C> {
     }
     pub fn plan(&self) -> &Plan {
         &self.owned().plan
+    }
+    /// Exact original source observations retained with their genuine guard.
+    /// This is not a new applied-policy or radio-permission receipt.
+    pub(in crate::net::wifi::mediatek) fn source_inputs(&self) -> Inputs {
+        self.owned().inputs
     }
     pub fn facts(&self) -> &[Fact] {
         &self.owned().facts

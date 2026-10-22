@@ -15,6 +15,7 @@ pub enum Command {
     DeviceInfo = 1,
     BssInfo = 2,
     StationRecord = 3,
+    Edca = 4,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
