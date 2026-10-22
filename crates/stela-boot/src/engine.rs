@@ -52,6 +52,7 @@ use stela_loader::{
 use stela_runtime::machine::apple::{RtcEpoch, WallClock};
 use stela_runtime::machine::{
     Chip, Cpu, CpuProfile, Event, Host, Machine, PeerState, Stop, Transition,
+    apple::memory_resources::amcc,
     apple::{AicInput, AicLayout, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
     identification::Speculation,
@@ -899,11 +900,33 @@ struct Disks {
     agx_observe: bool,
 }
 
+/// The regions iBoot leaves in the memory controller's lock groups:
+/// CTRR-A over the bundle's read-only run, and CTRR-C and CTRR-D over the
+/// cores' regions of those names, which SPTM requires the AMCC's to match
+/// before it locks them (`amcc`). CTRR-B stays unprogrammed.
+fn memory_locks(
+    read_only_region: Option<(u64, u64)>,
+    core_locks: &stela_runtime::machine::ctrr::Handoff,
+) -> amcc::Programmed {
+    let mut programmed = amcc::ctrr_a(read_only_region);
+    for locked in &core_locks.locked {
+        let group = match locked.region {
+            stela_runtime::machine::ctrr::Region::CtrrC => 2,
+            stela_runtime::machine::ctrr::Region::CtrrD => 3,
+            _ => continue,
+        };
+        programmed[group] = Some((locked.first, locked.last + 1 - locked.first));
+    }
+    programmed
+}
+
 /// The board's devices. `reset` is the entry point a boot bundle hands off
-/// to, on which boot firmware locks every PE's RVBAR.
+/// to, on which boot firmware locks every PE's RVBAR. `programmed` is the
+/// region iBoot leaves in each memory-controller lock group
+/// ([`memory_locks`]).
 fn devices<'f>(
     board: Option<&soc::Board>,
-    read_only_region: Option<(u64, u64)>,
+    programmed: amcc::Programmed,
     reset: Option<u64>,
     clock: Clock,
     disks: Disks,
@@ -1330,10 +1353,16 @@ fn devices<'f>(
     let memory_controller = board.and_then(|board| board.memory_controller.as_ref());
     let memory_cache = board.and_then(|board| board.memory_cache.as_ref());
     if let Some(controller) = memory_controller {
+        let mut programmed = programmed;
+        for (region, group) in programmed.iter_mut().zip(controller.layout.groups) {
+            if group.is_none() {
+                *region = None;
+            }
+        }
         devices.add_memory_controller(
             &controller.apertures,
             controller.layout,
-            read_only_region,
+            programmed,
             memory_cache.map(|mcc| mcc.cache),
         )?;
     }
@@ -1341,7 +1370,7 @@ fn devices<'f>(
         devices.add_io_access_controller(
             &controller.apertures,
             controller.layout,
-            read_only_region,
+            amcc::ctrr_a(programmed[0]),
         )?;
     }
     if let Some(mcc) = memory_cache {
@@ -2163,7 +2192,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     };
     let (devices, restore_usb) = match devices(
         board.as_ref(),
-        read_only_region,
+        memory_locks(read_only_region, &core_locks),
         reset,
         Clock {
             now,

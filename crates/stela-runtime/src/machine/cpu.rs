@@ -268,7 +268,7 @@ pub struct Cpu {
     pub core_locks: Rc<super::ctrr::Handoff>,
     /// The region the memory controller has locked against writes, first
     /// and last byte, as the engine last read it from the devices.
-    pub memory_lock: Option<(u64, u64)>,
+    pub memory_lock: super::mmu::MemoryLocks,
     /// System registers answered as storage after their model refused an
     /// access outside strict mode, by encoding selector: each reads the
     /// value last written to it until its model accepts a write
@@ -410,7 +410,7 @@ impl Cpu {
             ctrr: Rc::default(),
             ctrr_core: super::ctrr::Core::default(),
             core_locks: Rc::default(),
-            memory_lock: None,
+            memory_lock: [None; 4],
             degraded: alloc::collections::BTreeMap::new(),
         }
     }

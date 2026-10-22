@@ -913,13 +913,13 @@ impl AppleDevices {
     }
 
     /// The AMCC's lock registers at each aperture of `layout`, with the
-    /// CTRR-A region iBoot programmed (`[base, base + bytes)`), and the
+    /// regions iBoot programmed per CTRR group (`[base, base + bytes)`), and the
     /// memory cache's registers when the board shows its `cache`.
     pub fn add_memory_controller(
         &mut self,
         apertures: &[u64],
         layout: amcc::Layout,
-        programmed: Option<(u64, u64)>,
+        programmed: amcc::Programmed,
         cache: Option<amcc::Cache>,
     ) -> Result<(), String> {
         let device = self.map_lock_controller(apertures, layout, programmed, cache)?;
@@ -933,7 +933,7 @@ impl AppleDevices {
         &mut self,
         apertures: &[u64],
         layout: amcc::Layout,
-        programmed: Option<(u64, u64)>,
+        programmed: amcc::Programmed,
     ) -> Result<(), String> {
         self.map_lock_controller(apertures, layout, programmed, None)?;
         Ok(())
@@ -943,7 +943,7 @@ impl AppleDevices {
         &mut self,
         apertures: &[u64],
         layout: amcc::Layout,
-        programmed: Option<(u64, u64)>,
+        programmed: amcc::Programmed,
         cache: Option<amcc::Cache>,
     ) -> Result<DeviceId, String> {
         if cache.is_some() {
@@ -3115,12 +3115,16 @@ impl Devices for AppleDevices {
         self.sleep.asleep
     }
 
-    fn memory_lock(&self) -> Option<(u64, u64)> {
-        let device = self.memory_controller?;
+    fn memory_lock(&self) -> super::mmu::MemoryLocks {
+        let Some(device) = self.memory_controller else {
+            return [None; amcc::GROUPS];
+        };
         if let Some(owner) = self.bus.device::<memory_resources::Prepared>(device) {
-            owner.locked_region()
+            owner.locked_regions()
         } else {
-            self.bus.device::<Amcc>(device)?.locked_region()
+            self.bus
+                .device::<Amcc>(device)
+                .map_or([None; amcc::GROUPS], Amcc::locked_regions)
         }
     }
 

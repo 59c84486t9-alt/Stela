@@ -653,10 +653,10 @@ pub trait Devices {
     fn waits_on_host(&self) -> bool {
         false
     }
-    /// The physical region a memory controller has locked against writes,
-    /// first and last byte.
-    fn memory_lock(&self) -> Option<(u64, u64)> {
-        None
+    /// The physical regions the memory controllers have locked against writes,
+    /// first and last byte, by CTRR lock group.
+    fn memory_lock(&self) -> super::mmu::MemoryLocks {
+        [None; 4]
     }
     /// A native bus peer's next bounded DMA step. None adds no polling work.
     fn dma_deadline(&self) -> Option<u64> {
@@ -678,7 +678,7 @@ pub trait Devices {
 /// Guest RAM through the host, as device DMA reaches it.
 struct HostMemory<'a, H: Host> {
     host: &'a mut H,
-    lock: Option<(u64, u64)>,
+    lock: super::mmu::MemoryLocks,
 }
 
 impl<H: Host> Memory for HostMemory<'_, H> {
@@ -695,7 +695,9 @@ impl<H: Host> Memory for HostMemory<'_, H> {
             };
             if self
                 .lock
-                .is_some_and(|(first, end)| physical <= end && first <= last)
+                .into_iter()
+                .flatten()
+                .any(|(first, end)| physical <= end && first <= last)
             {
                 return false;
             }
@@ -6552,7 +6554,7 @@ mod tests {
         let last = BASE + 0x80f;
         let mut memory = HostMemory {
             host: &mut machine.host,
-            lock: Some((first, last)),
+            lock: [Some((first, last)), None, None, None],
         };
         let mut before = [0u8; 32];
         assert!(memory.read(BASE + 0x800, &mut before));
@@ -6571,7 +6573,7 @@ mod tests {
         assert_eq!(&observed[16..24], &[0x34; 8]);
         // Reads of locked RAM remain ordinary RAM reads. Address overflow
         // refuses before calling the native copy provider, even without a lock.
-        memory.lock = None;
+        memory.lock = [None; 4];
         assert!(!memory.write(u64::MAX - 1, &[0x56; 4]));
     }
 

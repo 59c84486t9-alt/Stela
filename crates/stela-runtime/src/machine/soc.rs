@@ -3834,6 +3834,28 @@ fn lock_register_optional(
         .transpose()
 }
 
+/// The lock group at `path` (a child of `node`), or `None` for a template
+/// node iBoot left empty (no `page-size-shift`) or none at all.
+fn lock_group(node: &Node<'_>, path: &str) -> Result<Option<amcc::LockGroup>, String> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let Some(group) = node.child(name) else {
+        return Ok(None);
+    };
+    let Some(page_size_shift) = group.first_u32("page-size-shift") else {
+        return Ok(None);
+    };
+    let register = |name: &str, bit: bool| lock_register(&group, path, name, bit);
+    let optional_register = |name: &str| lock_register_optional(&group, path, name);
+    Ok(Some(amcc::LockGroup {
+        page_size_shift,
+        lower_limit: register("lower-limit", false)?,
+        upper_limit: register("upper-limit", false)?,
+        enable: optional_register("enable")?,
+        write_disable: optional_register("write-disable")?,
+        lock: optional_register("lock")?,
+    }))
+}
+
 fn memory_controller(chosen: &Node<'_>) -> Result<Option<MemoryController>, String> {
     memory_controller_named(chosen, "amcc")
 }
@@ -3881,23 +3903,16 @@ fn memory_controller_named(
             "{path} aperture-phys-addr does not list aperture-count apertures"
         ));
     }
-    let group_path = format!("{path}/{controller}-ctrr-a");
-    let group = node
-        .child(&format!("{controller}-ctrr-a"))
-        .ok_or_else(|| format!("missing lock group {group_path}"))?;
-    for suffix in ["b", "c", "d"] {
-        let name = format!("{controller}-ctrr-{suffix}");
-        if node
-            .child(&name)
-            .is_some_and(|empty| empty.property("page-size-shift").is_some())
-        {
-            return Err(format!(
-                "{path}/{name} is a lock group the AMCC model does not implement"
-            ));
-        }
+    if node.child(&format!("{controller}-ctrr-a")).is_none() {
+        return Err(format!("missing lock group {path}/{controller}-ctrr-a"));
     }
-    let register = |name: &str, bit: bool| lock_register(&group, &group_path, name, bit);
-    let optional_register = |name: &str| lock_register_optional(&group, &group_path, name);
+    let mut groups = [None; amcc::GROUPS];
+    for (group, suffix) in groups.iter_mut().zip(["a", "b", "c", "d"]) {
+        *group = lock_group(&node, &format!("{path}/{controller}-ctrr-{suffix}"))?;
+    }
+    if groups[0].is_none() {
+        return Err(format!("{path}/{controller}-ctrr-a has no page-size-shift"));
+    }
     let dram_base = chosen
         .property("dram-base")
         .and_then(|value| {
@@ -3915,16 +3930,7 @@ fn memory_controller_named(
         } else {
             lock_register_optional(&node, &path, "cache-status")?
         },
-        group: amcc::LockGroup {
-            page_size_shift: group
-                .first_u32("page-size-shift")
-                .ok_or_else(|| format!("{group_path} has no page-size-shift"))?,
-            lower_limit: register("lower-limit", false)?,
-            upper_limit: register("upper-limit", false)?,
-            enable: optional_register("enable")?,
-            write_disable: optional_register("write-disable")?,
-            lock: optional_register("lock")?,
-        },
+        groups,
         // SPTM normalizes IOA absolute page limits by subtracting the
         // DRAM page base (T6000 26A434 VA 0xfffffff0270d7748..d777c).
         dram_base: if controller == "ioa" { 0 } else { dram_base },
@@ -5610,13 +5616,90 @@ mod tests {
         assert_eq!(ioa.layout.dram_base, 0);
         assert_eq!(ioa.layout.stride, 0);
         assert_eq!(ioa.layout.cache_status, None);
-        assert_eq!(ioa.layout.group.lower_limit.offset, 0x220);
-        assert_eq!(ioa.layout.group.enable.unwrap().offset, 0x228);
-        assert_eq!(ioa.layout.group.write_disable, None);
-        assert_eq!(ioa.layout.group.lock, None);
+        assert_eq!(ioa.layout.groups[0].unwrap().lower_limit.offset, 0x220);
+        assert_eq!(ioa.layout.groups[0].unwrap().enable.unwrap().offset, 0x228);
+        assert_eq!(ioa.layout.groups[0].unwrap().write_disable, None);
+        assert_eq!(ioa.layout.groups[0].unwrap().lock, None);
         for bytes in [chosen(true, false), chosen(false, true)] {
             assert!(memory_controller_named(&Node::root(&bytes).unwrap(), "ioa").is_err());
         }
+    }
+
+    /// The M4 and later maps fill CTRR-A to D; a template group iBoot leaves
+    /// empty describes none.
+    #[test]
+    fn every_filled_amcc_lock_group_is_described() {
+        use crate::machine::adt::encode;
+        let word = |value: u32| value.to_le_bytes().to_vec();
+        let group = |name: &str, index: u32, filled: bool| {
+            let mut properties = vec![("name".to_string(), [name.as_bytes(), &[0]].concat())];
+            if filled {
+                properties.push(("page-size-shift".into(), word(14)));
+                for (field, base, value) in [
+                    ("lower-limit", 0xaa0, Some(0)),
+                    ("upper-limit", 0xab0, Some(0)),
+                    ("enable", 0xac0, Some(1)),
+                    ("lock", 0xad0, Some(1)),
+                    ("write-disable", 0xae0, Some(1)),
+                ] {
+                    let mask = if value == Some(0) { u32::MAX } else { 1 };
+                    properties.push((format!("{field}-reg-offset"), word(base + 4 * index)));
+                    properties.push((format!("{field}-reg-mask"), word(mask)));
+                    if let Some(value) = value {
+                        properties.push((format!("{field}-reg-value"), word(value)));
+                    }
+                }
+            }
+            let refs: Vec<_> = properties
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_slice()))
+                .collect();
+            encode(&refs, &[])
+        };
+        let chosen = |d_filled: bool| {
+            let controller = encode(
+                &[
+                    ("name", b"amcc\0"),
+                    ("aperture-count", &word(1)),
+                    ("aperture-size", &word(0x14_0000)),
+                    ("aperture-phys-addr", &0x2_2000_0000u64.to_le_bytes()),
+                    ("plane-count", &word(4)),
+                    ("plane-stride", &word(0x4_0000)),
+                    ("cache-status-reg-offset", &word(0x82c)),
+                    ("cache-status-reg-mask", &word(1)),
+                    ("cache-status-reg-value", &word(1)),
+                ],
+                &[
+                    group("amcc-ctrr-a", 0, true),
+                    group("amcc-ctrr-b", 1, true),
+                    group("amcc-ctrr-c", 2, true),
+                    group("amcc-ctrr-d", 3, d_filled),
+                ],
+            );
+            let registers = encode(&[("name", b"lock-regs\0")], &[controller]);
+            encode(
+                &[("dram-base", &0x100_0000_0000u64.to_le_bytes())],
+                &[registers],
+            )
+        };
+        let bytes = chosen(true);
+        let amcc = memory_controller(&Node::root(&bytes).unwrap())
+            .unwrap()
+            .unwrap();
+        for (index, group) in amcc.layout.groups.iter().enumerate() {
+            let group = group.unwrap();
+            assert_eq!(group.lower_limit.offset, 0xaa0 + 4 * index as u64);
+            assert_eq!(group.lock.unwrap().offset, 0xad0 + 4 * index as u64);
+            assert_eq!(
+                group.write_disable.unwrap().offset,
+                0xae0 + 4 * index as u64
+            );
+        }
+        let bytes = chosen(false);
+        let amcc = memory_controller(&Node::root(&bytes).unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(amcc.layout.groups[2].is_some() && amcc.layout.groups[3].is_none());
     }
 
     #[test]
@@ -8773,34 +8856,39 @@ mod tests {
                     mask: 1,
                     value: 1,
                 }),
-                group: amcc::LockGroup {
-                    page_size_shift: 14,
-                    lower_limit: amcc::Register {
-                        offset: 0x680,
-                        mask: u32::MAX,
-                        value: 0,
-                    },
-                    upper_limit: amcc::Register {
-                        offset: 0x684,
-                        mask: u32::MAX,
-                        value: 0,
-                    },
-                    enable: Some(amcc::Register {
-                        offset: 0x688,
-                        mask: 1,
-                        value: 1,
+                groups: [
+                    Some(amcc::LockGroup {
+                        page_size_shift: 14,
+                        lower_limit: amcc::Register {
+                            offset: 0x680,
+                            mask: u32::MAX,
+                            value: 0,
+                        },
+                        upper_limit: amcc::Register {
+                            offset: 0x684,
+                            mask: u32::MAX,
+                            value: 0,
+                        },
+                        enable: Some(amcc::Register {
+                            offset: 0x688,
+                            mask: 1,
+                            value: 1,
+                        }),
+                        write_disable: Some(amcc::Register {
+                            offset: 0x7f0,
+                            mask: 1,
+                            value: 1,
+                        }),
+                        lock: Some(amcc::Register {
+                            offset: 0x68c,
+                            mask: 1,
+                            value: 1,
+                        }),
                     }),
-                    write_disable: Some(amcc::Register {
-                        offset: 0x7f0,
-                        mask: 1,
-                        value: 1,
-                    }),
-                    lock: Some(amcc::Register {
-                        offset: 0x68c,
-                        mask: 1,
-                        value: 1,
-                    }),
-                },
+                    None,
+                    None,
+                    None,
+                ],
                 dram_base: 0x8_0000_0000,
             },
         };

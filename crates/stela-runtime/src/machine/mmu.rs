@@ -72,9 +72,12 @@ pub struct Controls {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Ctrr {
     pub privileged: [Option<CtrrRegion>; 2],
-    /// The locked region's first and last byte.
-    pub memory: Option<(u64, u64)>,
+    pub memory: MemoryLocks,
 }
+
+/// The regions the memory controller's lock groups (CTRR-A to CTRR-D) have
+/// locked against writes, each its first and last byte.
+pub type MemoryLocks = [Option<(u64, u64)>; 4];
 
 /// A core CTRR group's region, first and last byte, and what it forbids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +112,7 @@ impl Ctrr {
             .into_iter()
             .flatten()
             .map(|region| (region.first, region.last))
-            .chain(self.memory);
+            .chain(self.memory.into_iter().flatten());
         for region in bounds.clone() {
             let base = translation.physical & !(translation.size - 1);
             if overlaps(base, translation.size, region) && !within(base, translation.size, region) {
@@ -121,7 +124,9 @@ impl Ctrr {
         let mut execute = None;
         if self
             .memory
-            .is_some_and(|region| overlaps(base, translation.size, region))
+            .into_iter()
+            .flatten()
+            .any(|region| overlaps(base, translation.size, region))
         {
             write = Some("write into the memory controller's locked CTRR region");
         }

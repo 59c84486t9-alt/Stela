@@ -298,14 +298,14 @@ mod tests {
                 Ok((id, offset + bytes - 4))
             );
         }
-        assert_eq!(devices.memory_lock(), None);
+        assert_eq!(devices.memory_lock(), [None; 4]);
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         devices
             .bus
             .write(0x200000688, Width::Word, 1, &mut access)
             .unwrap();
-        assert_eq!(devices.memory_lock(), Some((0x800004000, 0x800007fff)));
+        assert_eq!(devices.memory_lock()[0], Some((0x800004000, 0x800007fff)));
         let owner = super::super::tests::prepared()
             .with_registered_ram(ram())
             .unwrap();

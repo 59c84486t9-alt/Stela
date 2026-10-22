@@ -33,7 +33,7 @@ impl Prepared {
     pub fn new(
         descriptor: DirectMemoryCache,
         locks: &MemoryController,
-        programmed: Option<(u64, u64)>,
+        programmed: amcc::Programmed,
         configuration: Configuration,
         lifecycle: LifecycleState,
         ptd_bindings: [Option<Wire>; 16],
@@ -59,7 +59,7 @@ impl Prepared {
     pub fn new_local(
         descriptor: DirectMemoryCache,
         locks: &MemoryController,
-        programmed: Option<(u64, u64)>,
+        programmed: amcc::Programmed,
         configuration: Configuration,
         lifecycle: LifecycleState,
     ) -> Result<(Self, LocalNotifications), &'static str> {
@@ -84,7 +84,7 @@ impl Prepared {
     fn prepare_router(
         descriptor: &DirectMemoryCache,
         locks: &MemoryController,
-        programmed: Option<(u64, u64)>,
+        programmed: amcc::Programmed,
         configuration: Configuration,
         lifecycle: LifecycleState,
     ) -> Result<Router, &'static str> {
@@ -112,8 +112,8 @@ impl Prepared {
     pub fn descriptor(&self) -> &DirectMemoryCache {
         &self.descriptor
     }
-    pub fn locked_region(&self) -> Option<(u64, u64)> {
-        self.router.locks.locked_region()
+    pub fn locked_regions(&self) -> amcc::Locked {
+        self.router.locks.locked_regions()
     }
     /// Complete aperture bindings, not a permission to publish them yet. One
     /// bus device owns both register interpretations and every actual aperture.
@@ -291,7 +291,7 @@ struct Router {
 impl Router {
     fn new(
         mut layout: Layout,
-        programmed: Option<(u64, u64)>,
+        programmed: amcc::Programmed,
         controller: Controller,
         apertures: usize,
     ) -> Result<Self, &'static str> {
@@ -328,17 +328,17 @@ impl Router {
         let offsets = controller.register_offsets();
         // A lock word colliding with an MCC word needs one source-qualified
         // protocol, not priority-based fallback between independent devices.
-        let group = layout.group;
-        for register in [
-            Some(group.lower_limit),
-            Some(group.upper_limit),
-            group.enable,
-            group.write_disable,
-            group.lock,
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for register in layout.groups.into_iter().flatten().flat_map(|group| {
+            [
+                Some(group.lower_limit),
+                Some(group.upper_limit),
+                group.enable,
+                group.write_disable,
+                group.lock,
+            ]
+            .into_iter()
+            .flatten()
+        }) {
             for plane in 0..layout.planes {
                 if offsets.contains(&(register.offset + u64::from(plane) * layout.stride)) {
                     return Err("MCC and CTRR registers overlap without a shared protocol");
@@ -469,14 +469,19 @@ mod tests {
                 stride: mcc::PLANE_STRIDE,
                 cache_status: Some(reg(0x10000c, 1, 1)),
                 dram_base: 0x800000000,
-                group: LockGroup {
-                    page_size_shift: 14,
-                    lower_limit: reg(0x680, u32::MAX, 0),
-                    upper_limit: reg(0x684, u32::MAX, 0),
-                    enable: Some(reg(0x688, 1, 1)),
-                    write_disable: None,
-                    lock: Some(reg(0x68c, 1, 1)),
-                },
+                groups: [
+                    Some(LockGroup {
+                        page_size_shift: 14,
+                        lower_limit: reg(0x680, u32::MAX, 0),
+                        upper_limit: reg(0x684, u32::MAX, 0),
+                        enable: Some(reg(0x688, 1, 1)),
+                        write_disable: None,
+                        lock: Some(reg(0x68c, 1, 1)),
+                    }),
+                    None,
+                    None,
+                    None,
+                ],
             },
         };
         let descriptor = DirectMemoryCache {
@@ -499,7 +504,7 @@ mod tests {
         Prepared::new(
             descriptor,
             &locks,
-            Some((0x800004000, 0x4000)),
+            amcc::ctrr_a(Some((0x800004000, 0x4000))),
             Configuration {
                 dram: vec![[7; 4]; 2],
                 weights: [1; 32],
@@ -597,7 +602,10 @@ mod tests {
             publication.consume_entry(0, &mut access).unwrap().value,
             0x1234
         );
-        assert_eq!(bus.device::<Prepared>(id).unwrap().locked_region(), None);
+        assert_eq!(
+            bus.device::<Prepared>(id).unwrap().locked_regions(),
+            [None; 4]
+        );
         // No register beyond AMCC's smaller lock aperture can alias a later
         // aperture's lock plane through a changed device-offset divisor.
         assert!(bus.read(base + 0x200680, Width::Word, &mut access).is_err());
@@ -610,7 +618,7 @@ mod tests {
         let missing = devices.add_memory_controller(
             &[0x400000000],
             layout,
-            None,
+            [None; 4],
             Some(crate::platform::apple::amcc::Cache {
                 shared: (0x100000, 0x80000),
                 broadcast: 0xf00000,
@@ -632,7 +640,7 @@ mod tests {
         });
         assert!(
             devices
-                .add_memory_controller(&[0x400000000], layout, None, None)
+                .add_memory_controller(&[0x400000000], layout, [None; 4], None)
                 .is_err()
         );
         assert!(devices.bus.route(0x400000680, Width::Word).is_err());
@@ -642,7 +650,7 @@ mod tests {
         devices.bus.install(Box::new(owner), &bindings).unwrap();
         assert!(
             devices
-                .add_io_access_controller(&[0x400000000, 0x200000000], layout, None)
+                .add_io_access_controller(&[0x400000000, 0x200000000], layout, [None; 4])
                 .is_err()
         );
         assert!(devices.bus.route(0x400000680, Width::Word).is_err());
@@ -683,7 +691,7 @@ mod tests {
                 .is_err()
         );
         owner.write(0x688, Width::Word, 1, &mut access).unwrap();
-        assert_eq!(owner.locked_region(), Some((0x800004000, 0x800007fff)));
+        assert_eq!(owner.locked_regions()[0], Some((0x800004000, 0x800007fff)));
         for aperture in 0..2 {
             for plane in 0..4 {
                 owner
@@ -696,7 +704,7 @@ mod tests {
                     .unwrap();
             }
         }
-        assert_eq!(owner.locked_region(), Some((0x800004000, 0x800007fff)));
+        assert_eq!(owner.locked_regions()[0], Some((0x800004000, 0x800007fff)));
     }
 
     #[test]
@@ -741,7 +749,7 @@ mod tests {
             .bus
             .write(0x200000688, Width::Word, 1, &mut access)
             .unwrap();
-        assert_eq!(board.memory_lock(), Some((0x800004000, 0x800007fff)));
+        assert_eq!(board.memory_lock()[0], Some((0x800004000, 0x800007fff)));
     }
 
     #[test]
@@ -763,7 +771,7 @@ mod tests {
         let (mut owner, local) = Prepared::new_local(
             original.descriptor,
             &locks,
-            None,
+            [None; 4],
             Configuration {
                 dram: vec![[7; 4]; 2],
                 weights: [1; 32],

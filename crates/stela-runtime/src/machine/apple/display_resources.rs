@@ -289,14 +289,19 @@ mod tests {
                 stride: mcc::PLANE_STRIDE,
                 cache_status: Some(reg(0x10000c, 1, 1)),
                 dram_base: 0x800000000,
-                group: LockGroup {
-                    page_size_shift: 14,
-                    lower_limit: reg(0x680, u32::MAX, 0),
-                    upper_limit: reg(0x684, u32::MAX, 0),
-                    enable: Some(reg(0x688, 1, 1)),
-                    write_disable: None,
-                    lock: Some(reg(0x68c, 1, 1)),
-                },
+                groups: [
+                    Some(LockGroup {
+                        page_size_shift: 14,
+                        lower_limit: reg(0x680, u32::MAX, 0),
+                        upper_limit: reg(0x684, u32::MAX, 0),
+                        enable: Some(reg(0x688, 1, 1)),
+                        write_disable: None,
+                        lock: Some(reg(0x68c, 1, 1)),
+                    }),
+                    None,
+                    None,
+                    None,
+                ],
             },
         };
         let descriptor = DirectMemoryCache {
@@ -319,7 +324,7 @@ mod tests {
         memory_resources::Prepared::new(
             descriptor,
             &locks,
-            Some((0x800004000, 0x4000)),
+            memory_resources::amcc::ctrr_a(Some((0x800004000, 0x4000))),
             Configuration {
                 dram: vec![[7; 4]; 2],
                 weights: [1; 32],

@@ -34,14 +34,19 @@ pub(super) fn devices(ram: Arc<RegisteredSystemRam>) -> Result<AppleDevices, &'s
             stride: mcc::PLANE_STRIDE,
             cache_status: Some(register(0x10000c, 1, 1)),
             dram_base: super::source::BASE,
-            group: LockGroup {
-                page_size_shift: 14,
-                lower_limit: register(0x680, u32::MAX, 0),
-                upper_limit: register(0x684, u32::MAX, 0),
-                enable: Some(register(0x688, 1, 1)),
-                write_disable: None,
-                lock: Some(register(0x68c, 1, 1)),
-            },
+            groups: [
+                Some(LockGroup {
+                    page_size_shift: 14,
+                    lower_limit: register(0x680, u32::MAX, 0),
+                    upper_limit: register(0x684, u32::MAX, 0),
+                    enable: Some(register(0x688, 1, 1)),
+                    write_disable: None,
+                    lock: Some(register(0x68c, 1, 1)),
+                }),
+                None,
+                None,
+                None,
+            ],
         },
     };
     let descriptor = DirectMemoryCache {
@@ -64,7 +69,7 @@ pub(super) fn devices(ram: Arc<RegisteredSystemRam>) -> Result<AppleDevices, &'s
     let owner = Prepared::new_local(
         descriptor,
         &locks,
-        None,
+        [None; 4],
         mcc::Configuration {
             dram: vec![[0; mcc::CHANNELS as usize]],
             weights: [1; 32],

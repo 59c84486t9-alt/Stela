@@ -1,7 +1,8 @@
-//! The AMCC memory controller aperture: the cache status and CTRR-A lock
-//! group of every plane, as iBoot describes them in `/chosen/lock-regs/amcc`
-//! (`machine::soc::MemoryController`), and, when the DeviceTree shows the
-//! `mcc,t8112` memory cache controller, the registers its driver programs.
+//! The AMCC memory controller aperture: the cache status and the CTRR-A to
+//! CTRR-D lock groups of every plane, as iBoot describes them in
+//! `/chosen/lock-regs/amcc` (`machine::soc::MemoryController`), and, when the
+//! DeviceTree shows the `mcc,t8112` memory cache controller, the registers
+//! its driver programs.
 //!
 //! No public source documents the AMCC. The lock register map is iBoot's
 //! (26A434 `iBoot.j473.RELEASE` builds it, `stela_loader::lock_regs`); the
@@ -11,17 +12,35 @@
 //! - each plane's cache-status register reads `value` under `mask` while
 //!   the cache is disabled, which SPTM asserts before the lockdown; iBoot
 //!   leaves it disabled on this boot (no `early-memcache-enable`);
-//! - the lower and upper limit registers hold the CTRR-A region iBoot
+//! - a group's lower and upper limit registers hold the region iBoot
 //!   programs, in pages of `1 << page-size-shift` bytes from the DRAM base,
 //!   upper inclusive, the same on every plane;
 //! - SPTM finds enable, write-disable and lock clear, then sets them in that
 //!   order on every plane.
 //!
+//! The M1 to M3 describe CTRR-A alone, which SPTM locks. The M4 and later
+//! describe CTRR-A to D (`stela_loader::lock_regs`). Their SPTM (T8132
+//! link addresses; T6041, T8140, T8142, T6050 and T8152 carry the same
+//! code and messages) reads all four groups (`0x...cab04..0x...cab48`,
+//! register reader `0x...cae6c`: lower, upper and lock required, enable and
+//! write-disable optional), requires every aperture's and plane's limits to
+//! agree, and requires CTRR-C's and, unless `kernel-ctrr-to-be-enabled` is
+//! 0, CTRR-D's limits to name the regions iBoot locked into the clusters'
+//! CTRR-C/D copies ("AMCC [%p-%p] and ACC [%p-%p] CTRR-C regions don't
+//! match", `0x...e8e00..0x...e90bc`). `ctrr_lock_sptm` (`0x...c7234`) then
+//! asserts CTRR-C and D unlocked (`0x...caff8`: write-disable and lock
+//! read clear on every plane) and locks CTRR-C (`0x...cb130` with group 2:
+//! enable, write-disable and lock written on every plane, last plane
+//! first), and `0x...c7460` does the same for CTRR-D. No component writes
+//! CTRR-A or B on these chips: they keep what iBoot leaves (the bundle's
+//! CTRR-A region, CTRR-B zero).
+//!
 //! Inferred from that order: write-disable freezes the limits and lock
 //! freezes the group, so a change after either stops, because what hardware
-//! does is not documented. Once enable or write-disable is set the region is
-//! taken as locked against writes from any requester, which the engine
-//! applies to every PE (`machine::mmu::Ctrr`).
+//! does is not documented. Once a group's enable or write-disable is set its
+//! region is taken as locked against writes from any requester, which the
+//! engine applies to every PE (`machine::mmu::Ctrr`), each group's region
+//! on its own.
 //!
 //! The memory cache ([`Cache`]) follows the 26A434 J473AP
 //! `AppleT8112MemCacheController` driver, which reaches each plane through
@@ -71,7 +90,22 @@ pub struct Register {
     pub value: u32,
 }
 
-/// The CTRR-A lock group's registers.
+/// The lock groups a map can describe: CTRR-A to CTRR-D, in that order.
+pub const GROUPS: usize = 4;
+
+/// Each group's region iBoot programs into its limits: a base and a length
+/// in bytes.
+pub type Programmed = [Option<(u64, u64)>; GROUPS];
+
+/// Each group's region locked against writes: first and last byte.
+pub type Locked = [Option<(u64, u64)>; GROUPS];
+
+/// What iBoot leaves when it programs CTRR-A alone.
+pub const fn ctrr_a(region: Option<(u64, u64)>) -> Programmed {
+    [region, None, None, None]
+}
+
+/// A lock group's registers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LockGroup {
     pub page_size_shift: u32,
@@ -89,7 +123,8 @@ pub struct Layout {
     pub planes: u32,
     pub stride: u64,
     pub cache_status: Option<Register>,
-    pub group: LockGroup,
+    /// CTRR-A to CTRR-D, as described; CTRR-A always is.
+    pub groups: [Option<LockGroup>; GROUPS],
     /// The address limit 0 names.
     pub dram_base: u64,
 }
@@ -165,13 +200,19 @@ const T8112_SHARED: [Span<Role>; 8] = [
     Span::new(0x5_e000, 0x5_e004, Width::Word, Role::Held),
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Plane {
+/// One lock group's state in one plane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Group {
     lower: u32,
     upper: u32,
     enable: bool,
     write_disable: bool,
     lock: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Plane {
+    groups: [Group; GROUPS],
     cache_disabled: bool,
     dram_access: bool,
     ways: u32,
@@ -182,11 +223,7 @@ struct Plane {
 impl Default for Plane {
     fn default() -> Self {
         Self {
-            lower: 0,
-            upper: 0,
-            enable: false,
-            write_disable: false,
-            lock: false,
+            groups: [Group::default(); GROUPS],
             cache_disabled: true,
             dram_access: true,
             ways: 0,
@@ -196,14 +233,16 @@ impl Default for Plane {
     }
 }
 
+/// A lock register: the cache status, or a field of the group with this
+/// index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     CacheStatus,
-    Lower,
-    Upper,
-    Enable,
-    WriteDisable,
-    Lock,
+    Lower(usize),
+    Upper(usize),
+    Enable(usize),
+    WriteDisable(usize),
+    Lock(usize),
 }
 
 /// Where an aperture offset lands.
@@ -242,18 +281,19 @@ impl Clone for Amcc {
 pub mod firmware;
 
 impl Amcc {
-    /// The controller with `apertures` apertures and the CTRR-A region iBoot
-    /// programmed, `[base, base + bytes)` in whole pages above the DRAM
-    /// base, on every plane; with none programmed the limits read 0. With a
-    /// `cache`, its registers are modeled too.
+    /// The controller with `apertures` apertures and each group's region
+    /// iBoot programmed, `[base, base + bytes)` in whole pages above the
+    /// DRAM base, on every plane; a group with none programmed reads limits
+    /// of 0. With a `cache`, its registers are modeled too.
     pub fn new(
         layout: Layout,
         apertures: usize,
-        programmed: Option<(u64, u64)>,
+        programmed: Programmed,
         cache: Option<Cache>,
     ) -> Result<Self, &'static str> {
-        let shift = layout.group.page_size_shift;
-        let page = 1u64.checked_shl(shift).ok_or("page-size-shift too large")?;
+        if layout.groups[0].is_none() {
+            return Err("AMCC map without CTRR-A");
+        }
         let stride = if layout.planes == 1 && layout.stride == 0 {
             layout.aperture_bytes
         } else {
@@ -270,17 +310,8 @@ impl Amcc {
         if apertures == 0 || apertures.checked_mul(layout.planes as usize).is_none() {
             return Err("AMCC aperture count is empty or overflows");
         }
-        let group = layout.group;
-        let registers = [
-            layout.cache_status,
-            Some(group.lower_limit),
-            Some(group.upper_limit),
-            group.enable,
-            group.write_disable,
-            group.lock,
-        ];
         let mut addresses = Vec::new();
-        for register in registers.into_iter().flatten() {
+        for register in lock_registers(&layout).map(|(register, _)| register) {
             if !register.offset.is_multiple_of(4)
                 || register.mask == 0
                 || register.value & !register.mask != 0
@@ -326,15 +357,23 @@ impl Amcc {
             }
         }
         let mut plane = Plane::default();
-        if let Some((base, bytes)) = programmed {
-            let end = base.checked_add(bytes).ok_or("CTRR-A region overflows")?;
+        for ((group, state), region) in layout.groups.iter().zip(&mut plane.groups).zip(programmed)
+        {
+            let Some((base, bytes)) = region else {
+                continue;
+            };
+            let group = group.ok_or("a lock group the map does not describe is programmed")?;
+            let shift = group.page_size_shift;
+            let page = 1u64.checked_shl(shift).ok_or("page-size-shift too large")?;
+            let end = base
+                .checked_add(bytes)
+                .ok_or("lock group region overflows")?;
             if base < layout.dram_base || bytes == 0 || base % page != 0 || end % page != 0 {
-                return Err("CTRR-A region is not whole pages above the DRAM base");
+                return Err("lock group region is not whole pages above the DRAM base");
             }
             let limit = |address: u64| u32::try_from((address - layout.dram_base) >> shift);
-            plane.lower = limit(base).map_err(|_| "CTRR-A region beyond the limit registers")?;
-            plane.upper =
-                limit(end - page).map_err(|_| "CTRR-A region beyond the limit registers")?;
+            state.lower = limit(base).map_err(|_| "lock group region beyond its limits")?;
+            state.upper = limit(end - page).map_err(|_| "lock group region beyond its limits")?;
         }
         Ok(Self {
             planes: Rc::new(RefCell::new(
@@ -346,22 +385,26 @@ impl Amcc {
         })
     }
 
-    /// The region locked against writes, first and last byte: the limits of
-    /// every plane that has set enable or write-disable.
-    pub fn locked_region(&self) -> Option<(u64, u64)> {
-        let shift = self.layout.group.page_size_shift;
+    /// Each group's region locked against writes, first and last byte: the
+    /// limits of every plane that has set the group's enable or
+    /// write-disable.
+    pub fn locked_regions(&self) -> Locked {
         let base = self.layout.dram_base;
-        self.planes
-            .borrow()
-            .iter()
-            .filter(|plane| plane.enable || plane.write_disable)
-            .map(|plane| {
-                (
-                    base + (u64::from(plane.lower) << shift),
-                    base + ((u64::from(plane.upper) + 1) << shift) - 1,
-                )
-            })
-            .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+        let planes = self.planes.borrow();
+        core::array::from_fn(|index| {
+            let shift = self.layout.groups[index]?.page_size_shift;
+            planes
+                .iter()
+                .map(|plane| plane.groups[index])
+                .filter(|group| group.enable || group.write_disable)
+                .map(|group| {
+                    (
+                        base + (u64::from(group.lower) << shift),
+                        base + ((u64::from(group.upper) + 1) << shift) - 1,
+                    )
+                })
+                .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+        })
     }
 
     fn target(&self, offset: u64) -> Result<Target, &'static str> {
@@ -406,22 +449,8 @@ impl Amcc {
         }
     }
 
-    fn lock_registers(&self) -> impl Iterator<Item = (Register, Kind)> {
-        let group = &self.layout.group;
-        [
-            self.layout
-                .cache_status
-                .map(|register| (register, Kind::CacheStatus)),
-            Some((group.lower_limit, Kind::Lower)),
-            Some((group.upper_limit, Kind::Upper)),
-            group.enable.map(|register| (register, Kind::Enable)),
-            group
-                .write_disable
-                .map(|register| (register, Kind::WriteDisable)),
-            group.lock.map(|register| (register, Kind::Lock)),
-        ]
-        .into_iter()
-        .flatten()
+    fn lock_registers(&self) -> impl Iterator<Item = (Register, Kind)> + '_ {
+        lock_registers(&self.layout)
     }
 
     fn lock_kind(&self, register: u64) -> Option<(Kind, Register)> {
@@ -444,13 +473,14 @@ impl Amcc {
             if width != Width::Word {
                 return Err("AMCC register access other than 32 bits");
             }
+            let group = |index: usize| plane.groups[index];
             return Ok(match kind {
                 Kind::CacheStatus => bit(plane.cache_disabled, bits),
-                Kind::Lower => u64::from(plane.lower),
-                Kind::Upper => u64::from(plane.upper),
-                Kind::Enable => bit(plane.enable, bits),
-                Kind::WriteDisable => bit(plane.write_disable, bits),
-                Kind::Lock => bit(plane.lock, bits),
+                Kind::Lower(index) => u64::from(group(index).lower),
+                Kind::Upper(index) => u64::from(group(index).upper),
+                Kind::Enable(index) => bit(group(index).enable, bits),
+                Kind::WriteDisable(index) => bit(group(index).write_disable, bits),
+                Kind::Lock(index) => bit(group(index).lock, bits),
             });
         }
         Ok(match self.plane_role(register, width)? {
@@ -512,13 +542,15 @@ impl Amcc {
         let plane = &mut planes[index];
         let set = match kind {
             Kind::CacheStatus if self.cache.is_none() => return Err("AMCC cache-status write"),
-            Kind::Lower | Kind::Upper => {
-                let limit = if kind == Kind::Lower {
-                    &mut plane.lower
+            Kind::Lower(group) | Kind::Upper(group) => {
+                let group = &mut plane.groups[group];
+                let frozen = group.lock || group.write_disable;
+                let limit = if matches!(kind, Kind::Lower(_)) {
+                    &mut group.lower
                 } else {
-                    &mut plane.upper
+                    &mut group.upper
                 };
-                if *limit != value && (plane.lock || plane.write_disable) {
+                if *limit != value && frozen {
                     return Err("AMCC limit change after write-disable or lock");
                 }
                 *limit = value;
@@ -528,15 +560,22 @@ impl Amcc {
             _ if value == 0 => false,
             _ => return Err("AMCC bit register value other than set or clear"),
         };
-        let locked = plane.lock;
-        let flag = match kind {
+        let group = match kind {
             Kind::CacheStatus => {
                 plane.cache_disabled = set;
                 return Ok(());
             }
-            Kind::Enable => &mut plane.enable,
-            Kind::WriteDisable => &mut plane.write_disable,
-            _ => &mut plane.lock,
+            Kind::Lower(group)
+            | Kind::Upper(group)
+            | Kind::Enable(group)
+            | Kind::WriteDisable(group)
+            | Kind::Lock(group) => &mut plane.groups[group],
+        };
+        let locked = group.lock;
+        let flag = match kind {
+            Kind::Enable(_) => &mut group.enable,
+            Kind::WriteDisable(_) => &mut group.write_disable,
+            _ => &mut group.lock,
         };
         if locked && *flag != set {
             return Err("AMCC lock group change after its lock");
@@ -618,6 +657,30 @@ impl Amcc {
             }
         }
     }
+}
+
+/// Every lock register `layout` describes: the cache status, then each
+/// group's limits and controls.
+fn lock_registers(layout: &Layout) -> impl Iterator<Item = (Register, Kind)> + '_ {
+    let status = layout
+        .cache_status
+        .map(|register| (register, Kind::CacheStatus));
+    let groups = layout.groups.iter().enumerate().flat_map(|(index, group)| {
+        group.iter().flat_map(move |group| {
+            [
+                Some((group.lower_limit, Kind::Lower(index))),
+                Some((group.upper_limit, Kind::Upper(index))),
+                group.enable.map(|register| (register, Kind::Enable(index))),
+                group
+                    .write_disable
+                    .map(|register| (register, Kind::WriteDisable(index))),
+                group.lock.map(|register| (register, Kind::Lock(index))),
+            ]
+            .into_iter()
+            .flatten()
+        })
+    });
+    status.into_iter().chain(groups)
 }
 
 fn bit(set: bool, register: Register) -> u64 {
@@ -716,16 +779,129 @@ mod tests {
             planes: 4,
             stride: 0x4_0000,
             cache_status: Some(bit_register(0x424)),
-            group: LockGroup {
-                page_size_shift: 14,
-                lower_limit: limit(0x680),
-                upper_limit: limit(0x684),
-                enable: Some(bit_register(0x688)),
-                write_disable: Some(bit_register(0x7f0)),
-                lock: Some(bit_register(0x68c)),
-            },
+            groups: [
+                Some(LockGroup {
+                    page_size_shift: 14,
+                    lower_limit: limit(0x680),
+                    upper_limit: limit(0x684),
+                    enable: Some(bit_register(0x688)),
+                    write_disable: Some(bit_register(0x7f0)),
+                    lock: Some(bit_register(0x68c)),
+                }),
+                None,
+                None,
+                None,
+            ],
             dram_base: 0x8_0000_0000,
         }
+    }
+
+    const NONE: Programmed = [None; GROUPS];
+
+    /// CTRR-A's registers.
+    fn a(layout: &mut Layout) -> &mut LockGroup {
+        layout.groups[0].as_mut().unwrap()
+    }
+
+    /// The M4 Pro and later's map: four groups, each register a word apart
+    /// from the same register of the next group.
+    fn interleaved() -> Layout {
+        let limit = |offset| Register {
+            offset,
+            mask: u32::MAX,
+            value: 0,
+        };
+        let group = |index: u64| {
+            Some(LockGroup {
+                page_size_shift: 14,
+                lower_limit: limit(0xaa0 + 4 * index),
+                upper_limit: limit(0xab0 + 4 * index),
+                enable: Some(bit_register(0xac0 + 4 * index)),
+                write_disable: Some(bit_register(0xae0 + 4 * index)),
+                lock: Some(bit_register(0xad0 + 4 * index)),
+            })
+        };
+        Layout {
+            aperture_bytes: 0x14_0000,
+            planes: 4,
+            stride: 0x4_0000,
+            cache_status: Some(bit_register(0x82c)),
+            groups: [group(0), group(1), group(2), group(3)],
+            dram_base: 0x100_0000_0000,
+        }
+    }
+
+    /// SPTM's `ctrr_lock_sptm` on the M4 and later: CTRR-C and D read
+    /// iBoot's limits and unlocked controls on every plane, then lock, last
+    /// plane first; each group's region is locked on its own, and CTRR-A
+    /// and B, which no component writes, stay unlocked.
+    #[test]
+    fn sptm_locks_ctrr_c_and_d_each_over_its_own_region() {
+        let base = 0x100_0000_0000;
+        let c = (base + 0x400_0000, 0x10_0000);
+        let d = (base + 0x800_0000, 0x40_0000);
+        let mut amcc = Amcc::new(
+            interleaved(),
+            2,
+            [Some((base + 0x200_0000, 0x4000)), None, Some(c), Some(d)],
+            None,
+        )
+        .unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let at = |aperture: u64, plane: u64, offset: u64| {
+            aperture * 0x14_0000 + plane * 0x4_0000 + offset
+        };
+        for aperture in 0..2 {
+            for plane in 0..4 {
+                let read = |amcc: &mut Amcc, offset, access: &mut Access<'_>| {
+                    amcc.read(at(aperture, plane, offset), Width::Word, access)
+                };
+                assert_eq!(read(&mut amcc, 0xaa8, &mut access), Ok(0x1000));
+                assert_eq!(read(&mut amcc, 0xab8, &mut access), Ok(0x103f));
+                assert_eq!(read(&mut amcc, 0xaac, &mut access), Ok(0x2000));
+                assert_eq!(read(&mut amcc, 0xabc, &mut access), Ok(0x20ff));
+                assert_eq!(read(&mut amcc, 0xaa4, &mut access), Ok(0));
+                for control in [0xae8, 0xad8, 0xaec, 0xadc] {
+                    assert_eq!(read(&mut amcc, control, &mut access), Ok(0));
+                }
+            }
+        }
+        for group in [2, 3] {
+            for aperture in 0..2 {
+                for plane in (0..4).rev() {
+                    for control in [0xac0, 0xae0, 0xad0] {
+                        amcc.write(
+                            at(aperture, plane, control + 4 * group),
+                            Width::Word,
+                            1,
+                            &mut access,
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            amcc.locked_regions(),
+            [
+                None,
+                None,
+                Some((c.0, c.0 + c.1 - 1)),
+                Some((d.0, d.0 + d.1 - 1)),
+            ]
+        );
+        // A locked group's limits and controls stay; others still change.
+        assert!(amcc.write(0xaa8, Width::Word, 0, &mut access).is_err());
+        assert!(amcc.write(0xac8, Width::Word, 0, &mut access).is_err());
+        amcc.write(0xaa4, Width::Word, 7, &mut access).unwrap();
+        assert_eq!(amcc.read(0xaa4, Width::Word, &mut access), Ok(7));
+        // A region programmed into a group the map lacks refuses.
+        let mut lacking = interleaved();
+        lacking.groups[3] = None;
+        assert!(Amcc::new(lacking, 1, [None, None, None, Some(d)], None).is_err());
+        lacking.groups[0] = None;
+        assert!(Amcc::new(lacking, 1, NONE, None).is_err());
     }
 
     #[test]
@@ -736,16 +912,16 @@ mod tests {
         description.stride = 0;
         description.dram_base = 0;
         description.cache_status = None;
-        description.group.lower_limit.offset = 0x220;
-        description.group.upper_limit.offset = 0x224;
-        description.group.enable = Some(bit_register(0x228));
-        description.group.write_disable = None;
-        description.group.lock = None;
+        a(&mut description).lower_limit.offset = 0x220;
+        a(&mut description).upper_limit.offset = 0x224;
+        a(&mut description).enable = Some(bit_register(0x228));
+        a(&mut description).write_disable = None;
+        a(&mut description).lock = None;
         let base = 0x100_0200_0000;
-        let mut model = Amcc::new(description, 4, Some((base, 0x8000)), None).unwrap();
+        let mut model = Amcc::new(description, 4, ctrr_a(Some((base, 0x8000))), None).unwrap();
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
-        assert_eq!(model.locked_region(), None);
+        assert_eq!(model.locked_regions()[0], None);
         for aperture in 0..4 {
             let origin = aperture * 0x4000;
             assert_eq!(
@@ -773,16 +949,16 @@ mod tests {
                 );
             }
         }
-        assert_eq!(model.locked_region(), Some((base, base + 0x7fff)));
+        assert_eq!(model.locked_regions()[0], Some((base, base + 0x7fff)));
         description.planes = 2;
-        assert!(Amcc::new(description, 1, None, None).is_err());
+        assert!(Amcc::new(description, 1, NONE, None).is_err());
     }
 
     #[test]
     fn disabling_dram_broadcasts_and_stops_before_further_guest_ram_execution() {
         let mut sink = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut sink);
-        let mut m = Amcc::new(layout(), 1, None, Some(CACHE)).unwrap();
+        let mut m = Amcc::new(layout(), 1, NONE, Some(CACHE)).unwrap();
         assert!(m.planes.borrow().iter().all(|p| p.dram_access));
         assert!(
             m.write(CACHE.broadcast + DRAM_ACCESS, Width::Word, 1, &mut a)
@@ -811,10 +987,15 @@ mod tests {
         let mut description = layout();
         description.aperture_bytes = 0x20_0000;
         description.cache_status = Some(bit_register(0x10_000c));
-        description.group.write_disable = None;
+        a(&mut description).write_disable = None;
         let base = description.dram_base;
-        let mut device =
-            Amcc::new(description, 2, Some((base + 0x200_0000, 0x4000)), None).unwrap();
+        let mut device = Amcc::new(
+            description,
+            2,
+            ctrr_a(Some((base + 0x200_0000, 0x4000))),
+            None,
+        )
+        .unwrap();
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         for aperture in 0..2 {
@@ -852,7 +1033,7 @@ mod tests {
             }
         }
         assert_eq!(
-            device.locked_region(),
+            device.locked_regions()[0],
             Some((base + 0x200_0000, base + 0x200_3fff))
         );
         assert!(
@@ -860,21 +1041,22 @@ mod tests {
                 .read(2 * description.aperture_bytes, Width::Word, &mut access)
                 .is_err()
         );
-        description.group.enable = None;
-        let mut absent = Amcc::new(description, 1, None, None).unwrap();
+        a(&mut description).enable = None;
+        let mut absent = Amcc::new(description, 1, NONE, None).unwrap();
         assert!(absent.read(0x688, Width::Word, &mut access).is_err());
         description.cache_status.as_mut().unwrap().offset = 0x20_0000;
-        assert!(Amcc::new(description, 1, None, None).is_err());
+        assert!(Amcc::new(description, 1, NONE, None).is_err());
         description.cache_status.as_mut().unwrap().offset =
-            description.group.lower_limit.offset + description.stride;
-        assert!(Amcc::new(description, 1, None, None).is_err());
+            a(&mut description).lower_limit.offset + description.stride;
+        assert!(Amcc::new(description, 1, NONE, None).is_err());
     }
 
     #[test]
     fn sptms_lockdown_reads_iboots_limits_and_locks_every_plane() {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
-        let mut amcc = Amcc::new(layout(), 1, Some((0x8_0200_0000, 0x579_0000)), None).unwrap();
+        let mut amcc =
+            Amcc::new(layout(), 1, ctrr_a(Some((0x8_0200_0000, 0x579_0000))), None).unwrap();
         for plane in 0..4u64 {
             let at = |offset: u64| plane * 0x4_0000 + offset;
             assert_eq!(amcc.read(at(0x424), Width::Word, &mut access), Ok(1));
@@ -883,14 +1065,17 @@ mod tests {
             assert_eq!(amcc.read(at(0x7f0), Width::Word, &mut access), Ok(0));
             assert_eq!(amcc.read(at(0x68c), Width::Word, &mut access), Ok(0));
         }
-        assert_eq!(amcc.locked_region(), None);
+        assert_eq!(amcc.locked_regions()[0], None);
         for plane in (0..4u64).rev() {
             for offset in [0x688, 0x7f0, 0x68c] {
                 amcc.write(plane * 0x4_0000 + offset, Width::Word, 1, &mut access)
                     .unwrap();
             }
         }
-        assert_eq!(amcc.locked_region(), Some((0x8_0200_0000, 0x8_0778_ffff)));
+        assert_eq!(
+            amcc.locked_regions()[0],
+            Some((0x8_0200_0000, 0x8_0778_ffff))
+        );
         // A repeat completes; a change, other registers and widths stop.
         amcc.write(0x688, Width::Word, 1, &mut access).unwrap();
         amcc.write(0x680, Width::Word, 0x800, &mut access).unwrap();
@@ -904,9 +1089,9 @@ mod tests {
 
     #[test]
     fn programmed_regions_are_whole_pages_above_dram() {
-        assert!(Amcc::new(layout(), 1, Some((0x8_0200_1000, 0x4000)), None).is_err());
-        assert!(Amcc::new(layout(), 1, Some((0x7_0000_0000, 0x4000)), None).is_err());
-        let blank = Amcc::new(layout(), 2, None, None).unwrap();
+        assert!(Amcc::new(layout(), 1, ctrr_a(Some((0x8_0200_1000, 0x4000))), None).is_err());
+        assert!(Amcc::new(layout(), 1, ctrr_a(Some((0x7_0000_0000, 0x4000))), None).is_err());
+        let blank = Amcc::new(layout(), 2, NONE, None).unwrap();
         assert_eq!(blank.planes.borrow().len(), 8);
     }
 
@@ -923,7 +1108,7 @@ mod tests {
     fn the_memory_cache_powers_ways_enables_and_flushes_at_once() {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
-        let mut amcc = Amcc::new(layout(), 1, None, Some(CACHE)).unwrap();
+        let mut amcc = Amcc::new(layout(), 1, NONE, Some(CACHE)).unwrap();
         let plane = |n: u64, offset: u64| n * 0x4_0000 + offset;
         let mut read = |amcc: &mut Amcc, offset, width| amcc.read(offset, width, &mut access);
         assert_eq!(read(&mut amcc, 0x10_001c, Width::Word), Ok(0x800));
@@ -973,7 +1158,7 @@ mod tests {
     fn a_broadcast_write_reaches_every_plane_or_none() {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
-        let mut amcc = Amcc::new(layout(), 1, None, Some(CACHE)).unwrap();
+        let mut amcc = Amcc::new(layout(), 1, NONE, Some(CACHE)).unwrap();
         // Plane 3 locks its group; a broadcast change of enable then stops
         // without changing planes 0 to 2.
         for offset in [0x688, 0x68c] {
@@ -988,12 +1173,12 @@ mod tests {
             shared: (0xf0_0000, 0x8_0000),
             ..CACHE
         };
-        assert!(Amcc::new(layout(), 1, None, Some(overlapping)).is_err());
+        assert!(Amcc::new(layout(), 1, NONE, Some(overlapping)).is_err());
     }
     #[test]
     fn native_firmware_dsid_commands_share_the_actual_controller_and_veto_late_disabled_planes() {
         let base = 0x200000000;
-        let mut model = Amcc::new(layout(), 1, None, Some(CACHE)).unwrap();
+        let mut model = Amcc::new(layout(), 1, NONE, Some(CACHE)).unwrap();
         let handle = model.firmware_cache(&[base]).unwrap();
         assert!(
             handle
@@ -1063,7 +1248,7 @@ mod tests {
         handle.invalidate(base + register).unwrap();
         assert_eq!(clone.planes.borrow()[0].dsid_completions, [(255, 2)]);
         assert_eq!(model.planes.borrow()[0].dsid_completions, [(255, 3)]);
-        let unknown = Amcc::new(layout(), 1, None, None).unwrap();
+        let unknown = Amcc::new(layout(), 1, NONE, None).unwrap();
         assert!(unknown.firmware_cache(&[base]).is_err());
     }
     #[test]
@@ -1075,7 +1260,7 @@ mod tests {
                     ..layout()
                 },
                 1,
-                None,
+                NONE,
                 Some(CACHE)
             )
             .unwrap_err()
@@ -1088,7 +1273,7 @@ mod tests {
                     ..layout()
                 },
                 1,
-                None,
+                NONE,
                 Some(CACHE)
             )
             .is_err()
