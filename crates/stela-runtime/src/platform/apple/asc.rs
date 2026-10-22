@@ -167,7 +167,8 @@ pub trait Firmware: Any {
     /// The coprocessor's own error reply to `message`, a request it does
     /// not implement (`reason`), outside strict mode (docs/design/runtime.md
     /// "Unsupported operations"). `None`, the default, when its protocol
-    /// has no error reply for that request: the request stays refused.
+    /// has no error reply for that request: the request is then left
+    /// unanswered, so the client's own timeout path runs.
     fn error_reply(&mut self, _message: Message, _reason: &'static str) -> Option<Vec<Message>> {
         None
     }
@@ -211,10 +212,10 @@ pub struct Asc {
     lines: Lines,
     /// Levels last reported, in [`Lines`] order.
     levels: [Option<bool>; 4],
-    /// Refuse unimplemented requests instead of answering them with the
-    /// firmware's error reply ([`Self::set_strict`]).
+    /// Refuse unimplemented requests instead of answering them degraded
+    /// ([`Self::set_strict`]).
     strict: bool,
-    /// The endpoints and refusals answered with an error reply so far.
+    /// The endpoints and refusals answered degraded so far.
     reported: BTreeSet<(u8, &'static str)>,
     /// Reports not yet taken ([`Self::take_unmodeled`]).
     unmodeled: Vec<String>,
@@ -259,14 +260,14 @@ impl Asc {
 
     /// Refuse the mailbox write of each request the firmware does not
     /// implement (strict, the default), or answer it with the firmware's
-    /// own error reply where its protocol has one and report it once per
-    /// endpoint and refusal.
+    /// own error reply where its protocol has one, else leave it
+    /// unanswered, and report it once per endpoint and refusal.
     pub fn set_strict(&mut self, strict: bool) {
         self.strict = strict;
     }
 
-    /// The requests answered with an error reply for the first time since
-    /// the last call.
+    /// The requests answered degraded for the first time since the last
+    /// call.
     pub fn take_unmodeled(&mut self) -> Vec<String> {
         core::mem::take(&mut self.unmodeled)
     }
@@ -424,20 +425,22 @@ impl Asc {
         let mut replies = Vec::new();
         let result = match self.firmware.receive(message, &mut replies) {
             Ok(()) => Ok(replies),
-            Err(reason) if !self.strict => match self.firmware.error_reply(message, reason) {
-                Some(error) => {
-                    if self.reported.insert((message.endpoint, reason)) {
-                        self.unmodeled.push(alloc::format!(
-                            "endpoint {:#x} payload {:#018x}: {reason}; answered with the \
-                             firmware's error reply",
-                            message.endpoint,
-                            message.payload
-                        ));
-                    }
-                    Ok(error)
+            Err(reason) if !self.strict => {
+                let error = self.firmware.error_reply(message, reason);
+                if self.reported.insert((message.endpoint, reason)) {
+                    self.unmodeled.push(alloc::format!(
+                        "endpoint {:#x} payload {:#018x}: {reason}; {}",
+                        message.endpoint,
+                        message.payload,
+                        if error.is_some() {
+                            "answered with the firmware's error reply"
+                        } else {
+                            "left unanswered for the client's timeout"
+                        }
+                    ));
                 }
-                None => Err(reason),
-            },
+                Ok(error.unwrap_or_default())
+            }
             Err(reason) => Err(reason),
         };
         self.deliver(result)?;
@@ -735,7 +738,11 @@ mod tests {
             outbox: &mut Vec<Message>,
         ) -> Result<(), &'static str> {
             if message.endpoint == 0xff {
-                return Err("refused");
+                return Err(if message.payload == 0 {
+                    "refused without a reply"
+                } else {
+                    "refused"
+                });
             }
             outbox.push(Message {
                 endpoint: message.endpoint + 1,
@@ -755,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn non_strict_mode_answers_with_the_firmware_error_reply_and_reports_once() {
+    fn graceful_mode_answers_with_the_error_reply_or_none_and_reports_once() {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let mut asc = Asc::booted(Box::new(Echo), Lines::from_interrupts(LINES)).unwrap();
@@ -775,9 +782,17 @@ mod tests {
         let reports = asc.take_unmodeled();
         assert_eq!(reports.len(), 1);
         assert!(reports[0].contains("refused"), "{}", reports[0]);
-        // Without an error reply in its protocol the request stays refused.
+        // Without an error reply in its protocol the request is left
+        // unanswered, so the client's timeout runs; strict mode refuses it.
+        for _ in 0..2 {
+            send(&mut asc, 0, &mut access).unwrap();
+            assert!(asc.outbox.is_empty());
+        }
+        let reports = asc.take_unmodeled();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].contains("left unanswered"), "{}", reports[0]);
+        asc.set_strict(true);
         assert!(send(&mut asc, 0, &mut access).is_err());
-        assert!(asc.take_unmodeled().is_empty());
     }
 
     const LINES: [AicInput; 4] = [
