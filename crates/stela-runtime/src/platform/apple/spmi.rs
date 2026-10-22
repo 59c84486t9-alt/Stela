@@ -783,11 +783,11 @@ mod tests {
     fn pmu_output_edges_latch_local_vector_independently_of_mask_response_and_ack() {
         use crate::platform::apple::{
             counter::FREQUENCY_HZ,
-            pmu::{Pmu, Rtc},
+            pmu::{ClockOffset, Pmu, Rtc},
         };
         let rtc = Rtc {
             upcount: 0x1406,
-            clock_offset: 0x1411,
+            clock_offset: ClockOffset::Register(0x1411),
             alarm_control: 0x1401,
             alarm_enable: 0x40,
             alarm_offset: 0x140c,
@@ -867,7 +867,7 @@ mod tests {
     fn autonomous_preflight_refusal_does_not_advance_any_peer() {
         use crate::platform::apple::{
             counter::FREQUENCY_HZ,
-            pmu::{Pmu, RTC_HZ, Rtc},
+            pmu::{ClockOffset, Pmu, RTC_HZ, Rtc},
         };
         struct Peer(alloc::rc::Rc<core::cell::Cell<u32>>);
         impl SpmiSlave for Peer {
@@ -891,7 +891,7 @@ mod tests {
                 Vec::new(),
                 Some(Rtc {
                     upcount: 0x1406,
-                    clock_offset: 0x1411,
+                    clock_offset: ClockOffset::Register(0x1411),
                     alarm_control: 0x1401,
                     alarm_enable: 0x40,
                     alarm_offset: 0x140c,
@@ -916,7 +916,7 @@ mod tests {
 
     #[test]
     fn routed_outputs_require_unique_real_deasserted_owners_and_valid_vectors() {
-        use crate::platform::apple::pmu::{Pmu, Rtc};
+        use crate::platform::apple::pmu::{ClockOffset, Pmu, Rtc};
         let mut c = Spmi::with_configuration(
             AicInput::new(0, 1),
             Configuration::new(Profile::Gen1, 192, [256, 256]).unwrap(),
@@ -926,7 +926,7 @@ mod tests {
                 Vec::new(),
                 Some(Rtc {
                     upcount: 0x1406,
-                    clock_offset: 0x1411,
+                    clock_offset: ClockOffset::Register(0x1411),
                     alarm_control: 0x1401,
                     alarm_enable: 0x40,
                     alarm_offset: 0x140c,
@@ -957,11 +957,11 @@ mod tests {
     fn actual_pmic_alarm_time_and_output_continue_while_spmi_master_clock_is_paused() {
         use crate::platform::apple::{
             counter::FREQUENCY_HZ,
-            pmu::{Pmu, Rtc},
+            pmu::{ClockOffset, Pmu, Rtc},
         };
         let rtc = Rtc {
             upcount: 0xf802,
-            clock_offset: 0xf900,
+            clock_offset: ClockOffset::Register(0xf900),
             alarm_control: 0xf800,
             alarm_enable: 0x40,
             alarm_offset: 0xf808,

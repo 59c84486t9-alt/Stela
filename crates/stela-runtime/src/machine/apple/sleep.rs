@@ -333,7 +333,7 @@ mod tests {
         let mut devices = board();
         let rtc = pmu::Rtc {
             upcount: 0xf802,
-            clock_offset: 0xf900,
+            clock_offset: pmu::ClockOffset::Register(0xf900),
             alarm_control: 0xf800,
             alarm_enable: 0x40,
             alarm_offset: 0xf808,

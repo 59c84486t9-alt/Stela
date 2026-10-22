@@ -15,7 +15,15 @@
 //! `_readCurrentOffsetTicks` 0xfffffe0009dddee4 and `_writeCurrentOffsetTicks`
 //! 0xfffffe0009dde0d4 keep a signed 48-bit tick offset at `info-clock_offset`
 //! (`<base 6>`); `getUTCTimeOfDay` 0xfffffe0009dde9e4 returns
-//! `(upcount + offset) >> 15` Unix seconds. `updatePMSetting`
+//! `(upcount + offset) >> 15` Unix seconds. Without `info-clock_offset` (the
+//! J700AP Baku primary), the RTC `_readConfiguration` (mac17p 26A434 VA
+//! 0xfffffe0009a25e60..25ed4) logs "Read RTC offset from leg_scrpad" and
+//! takes `info-leg_scrpad` + 4 and + 0x15 instead; `_readCurrentOffsetTicks`
+//! (0xfffffe0009a264b0..2655c) reads four little-endian bytes there as the
+//! offset's seconds and two bytes at + 0x15 as its 15-bit fraction (low byte,
+//! then seven bits), and sign-extends `seconds << 15 | fraction` from 47
+//! bits; `_writeCurrentOffsetTicks` (0xfffffe0009a2661c..266d0) writes the
+//! same fields. Those bytes are legacy-scratch storage. `updatePMSetting`
 //! 0xfffffe0009dd44d8 read-modify-writes the byte at `info-pm_setting`.
 //!
 //! The alarm (KC file offsets): `AppleDialogSPMIPMURTC::_readConfiguration`
@@ -102,6 +110,9 @@ const SECOND_SHIFT: u32 = 15;
 const UPCOUNT_BYTES: u16 = 6;
 const OFFSET_BYTES: u16 = 6;
 const ALARM_BYTES: u16 = 4;
+/// A legacy-scratch offset's seconds and fraction within the scratchpad.
+const LEGACY_OFFSET_SECONDS: u16 = 0x4;
+const LEGACY_OFFSET_FRACTION: u16 = 0x15;
 /// The legacy scratchpad's extent (see the module comment).
 pub const LEGACY_SCRATCH_BYTES: u16 = 0x100;
 /// `AppleDialogSPMIPMURTC::_readConfiguration`'s event mask when the
@@ -125,7 +136,7 @@ impl Window {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rtc {
     pub upcount: u16,
-    pub clock_offset: u16,
+    pub clock_offset: ClockOffset,
     pub alarm_control: u16,
     /// `info-rtc_alarm_ctrl_en_mask`: the alarm-enable bits of the control.
     pub alarm_enable: u8,
@@ -138,6 +149,44 @@ pub struct Rtc {
     pub interrupt_mask: u8,
 }
 
+/// Where `AppleDialogSPMIPMURTC` keeps the signed calendar offset in ticks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockOffset {
+    /// `info-clock_offset=<base 6>`: a six-byte little-endian register.
+    Register(u16),
+    /// No `info-clock_offset`: inside the legacy scratchpad at this base, the
+    /// offset's seconds as four little-endian bytes at +4 and its 15-bit
+    /// fraction as two bytes at +0x15 (see the module comment).
+    LegacyScratch(u16),
+}
+
+impl ClockOffset {
+    /// The register's base, when the offset has its own register.
+    pub fn register(self) -> Option<u16> {
+        match self {
+            Self::Register(base) => Some(base),
+            Self::LegacyScratch(_) => None,
+        }
+    }
+
+    /// The seconds and fraction fields of a legacy-scratch offset.
+    fn legacy_fields(self) -> Option<[Window; 2]> {
+        let Self::LegacyScratch(base) = self else {
+            return None;
+        };
+        Some([
+            Window {
+                base: base.checked_add(LEGACY_OFFSET_SECONDS)?,
+                bytes: 4,
+            },
+            Window {
+                base: base.checked_add(LEGACY_OFFSET_FRACTION)?,
+                bytes: 2,
+            },
+        ])
+    }
+}
+
 impl Rtc {
     /// Chapel, Abbey and Woodcote declare one byte for the alarm control and
     /// its event (see the module comment).
@@ -146,15 +195,12 @@ impl Rtc {
     }
 
     /// Every register byte the RTC owns, one window per distinct register.
+    /// A legacy-scratch offset is scratch storage, not an RTC register.
     fn windows(&self) -> Vec<Window> {
         let mut windows = alloc::vec![
             Window {
                 base: self.upcount,
                 bytes: UPCOUNT_BYTES,
-            },
-            Window {
-                base: self.clock_offset,
-                bytes: OFFSET_BYTES,
             },
             Window {
                 base: self.alarm_control,
@@ -173,6 +219,12 @@ impl Rtc {
             windows.push(Window {
                 base: self.alarm_event,
                 bytes: 1,
+            });
+        }
+        if let Some(base) = self.clock_offset.register() {
+            windows.push(Window {
+                base,
+                bytes: OFFSET_BYTES,
             });
         }
         windows
@@ -288,10 +340,12 @@ impl Pmu {
             None
         };
         if let Some(rtc) = rtc {
-            windows.push(Window {
-                base: rtc.clock_offset,
-                bytes: OFFSET_BYTES,
-            });
+            if let Some(base) = rtc.clock_offset.register() {
+                windows.push(Window {
+                    base,
+                    bytes: OFFSET_BYTES,
+                });
+            }
             for (base, bytes) in [(rtc.alarm_offset, ALARM_BYTES), (rtc.irq_mask, 1)] {
                 windows.push(Window { base, bytes });
             }
@@ -320,12 +374,25 @@ impl Pmu {
             let upcount = pmu.clock.check(wall.counter)?;
             let target = i128::from(wall.unix_seconds) * i128::from(RTC_HZ);
             let offset = target - i128::from(upcount);
-            if !(-(1i128 << 47)..(1i128 << 47)).contains(&offset) {
-                return Err("PMU initial RTC offset exceeds signed 48-bit resource");
+            match rtc.clock_offset {
+                ClockOffset::Register(base) => {
+                    if !(-(1i128 << 47)..(1i128 << 47)).contains(&offset) {
+                        return Err("PMU initial RTC offset exceeds signed 48-bit resource");
+                    }
+                    let bytes = (offset as i64).to_le_bytes();
+                    pmu.store(base, &bytes[..OFFSET_BYTES.into()]);
+                }
+                ClockOffset::LegacyScratch(_) => {
+                    // `_readCurrentOffsetTicks` sign-extends 47 bits.
+                    if !(-(1i128 << 46)..(1i128 << 46)).contains(&offset) {
+                        return Err("PMU initial RTC offset exceeds signed 47-bit resource");
+                    }
+                    let [seconds, fraction] = rtc.clock_offset.legacy_fields().expect("validated");
+                    let offset = offset as i64;
+                    pmu.store(seconds.base, &((offset >> 15) as u32).to_le_bytes());
+                    pmu.store(fraction.base, &[offset as u8, (offset >> 8) as u8 & 0x7f]);
+                }
             }
-            let offset = offset as i64;
-            let bytes = offset.to_le_bytes();
-            pmu.store(rtc.clock_offset, &bytes[..OFFSET_BYTES.into()]);
         }
         Ok(pmu)
     }
@@ -723,7 +790,7 @@ mod tests {
 
     const RTC: Rtc = Rtc {
         upcount: 0xf802,
-        clock_offset: 0xf900,
+        clock_offset: ClockOffset::Register(0xf900),
         alarm_control: 0xf800,
         alarm_enable: 0x40,
         alarm_offset: 0xf808,
@@ -732,6 +799,8 @@ mod tests {
         event_mask: DEFAULT_EVENT_MASK,
         interrupt_mask: 0x1,
     };
+    const STOWE_OFFSET: u16 = 0xf900;
+    const MAVERICK_OFFSET: u16 = 0x1411;
     fn stowe(wall: Option<WallClock>) -> Pmu {
         let windows = alloc::vec![
             Window {
@@ -757,7 +826,7 @@ mod tests {
     pub(super) fn maverick() -> Rtc {
         Rtc {
             upcount: 0x1406,
-            clock_offset: 0x1411,
+            clock_offset: ClockOffset::Register(0x1411),
             alarm_control: 0x1401,
             alarm_enable: 0x40,
             alarm_offset: 0x140c,
@@ -808,7 +877,7 @@ mod tests {
                 ..rtc
             },
             Rtc {
-                clock_offset: 0xfffb,
+                clock_offset: ClockOffset::Register(0xfffb),
                 ..rtc
             },
             Rtc {
@@ -875,10 +944,10 @@ mod tests {
         let mut secondary =
             Pmu::configured(Configuration::new(Vec::new(), Some(rtc), 1).unwrap(), None).unwrap();
         primary
-            .write(rtc.clock_offset, &[1, 2, 3, 4, 5, 6], 0)
+            .write(MAVERICK_OFFSET, &[1, 2, 3, 4, 5, 6], 0)
             .unwrap();
         let mut data = [0xff; 6];
-        secondary.read(rtc.clock_offset, &mut data, 0).unwrap();
+        secondary.read(MAVERICK_OFFSET, &mut data, 0).unwrap();
         assert_eq!(data, [0; 6]);
         secondary
             .read(rtc.upcount, &mut data, 3 * FREQUENCY_HZ)
@@ -897,7 +966,7 @@ mod tests {
     fn chapel() -> Rtc {
         Rtc {
             upcount: 0x2002,
-            clock_offset: 0x2100,
+            clock_offset: ClockOffset::Register(0x2100),
             alarm_control: 0x2000,
             alarm_enable: 0x40,
             alarm_offset: 0x2008,
@@ -977,6 +1046,92 @@ mod tests {
         assert_eq!(pmu.advance(39 * FREQUENCY_HZ), Some(40 * FREQUENCY_HZ));
         assert_eq!(pmu.advance(40 * FREQUENCY_HZ), None);
         assert!(output.asserted());
+    }
+
+    /// `_readCurrentOffsetTicks`'s legacy-scratch decode.
+    fn legacy_offset(pmu: &mut Pmu, base: u16, now: u64) -> i64 {
+        let mut seconds = [0; 4];
+        let mut fraction = [0; 2];
+        pmu.read(base + 4, &mut seconds, now).unwrap();
+        pmu.read(base + 0x15, &mut fraction, now).unwrap();
+        let raw = u64::from(u32::from_le_bytes(seconds)) << 15
+            | u64::from(fraction[1] & 0x7f) << 8
+            | u64::from(fraction[0]);
+        ((raw << 17) as i64) >> 17
+    }
+
+    #[test]
+    fn a_legacy_scratch_clock_offset_keeps_seconds_and_fraction_in_scratch_storage() {
+        // The J700AP Baku primary declares no `info-clock_offset`.
+        let rtc = Rtc {
+            clock_offset: ClockOffset::LegacyScratch(0xf700),
+            ..RTC
+        };
+        let windows = || {
+            alloc::vec![
+                Window {
+                    base: 0x8000,
+                    bytes: 0x1000
+                },
+                Window {
+                    base: 0xf700,
+                    bytes: LEGACY_SCRATCH_BYTES
+                },
+                Window {
+                    base: 0xf801,
+                    bytes: 1
+                },
+            ]
+        };
+        // The fields must be existing scratch storage, never RTC registers.
+        assert!(Configuration::new(windows()[..1].to_vec(), Some(rtc), 1).is_err());
+        let partial = alloc::vec![Window {
+            base: 0xf700,
+            bytes: 0x16
+        }];
+        assert!(Configuration::new(partial, Some(rtc), 1).is_err());
+        let wrapped = Rtc {
+            clock_offset: ClockOffset::LegacyScratch(0xfff0),
+            ..rtc
+        };
+        assert!(Configuration::new(windows(), Some(wrapped), 1).is_err());
+        let wall = WallClock {
+            unix_seconds: 1_792_000_000,
+            counter: 5 * FREQUENCY_HZ,
+        };
+        let config = || Configuration::new(windows(), Some(rtc), 1).unwrap();
+        let mut pmu = Pmu::configured(config(), Some(wall)).unwrap();
+        let now = 125 * FREQUENCY_HZ;
+        let offset = legacy_offset(&mut pmu, 0xf700, now);
+        let mut up = [0u8; 8];
+        pmu.read(rtc.upcount, &mut up[..6], now).unwrap();
+        let upcount = (u64::from_le_bytes(up) >> 1) as i64;
+        assert_eq!((upcount + offset) >> 15, 1_792_000_000 + 120);
+        // No six-byte register exists beside the boot keys.
+        assert_eq!(pmu.read(0xf900, &mut [0; 6], now), Err(SlaveError::Nack));
+        // A negative offset (wall time behind the upcount) round-trips.
+        let behind = WallClock {
+            unix_seconds: 2,
+            counter: 1000 * FREQUENCY_HZ,
+        };
+        let mut pmu = Pmu::configured(config(), Some(behind)).unwrap();
+        assert_eq!(
+            legacy_offset(&mut pmu, 0xf700, 0),
+            (2 - 1000) * RTC_HZ as i64
+        );
+        let mut seconds = [0; 4];
+        pmu.read(0xf704, &mut seconds, 0).unwrap();
+        assert_eq!(i32::from_le_bytes(seconds), 2 - 1000);
+        assert!(
+            Pmu::configured(
+                config(),
+                Some(WallClock {
+                    unix_seconds: 1 << 32,
+                    counter: 0
+                })
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1114,14 +1269,14 @@ mod tests {
         ));
         assert_eq!(data, [0xaa; 6]);
         assert!(matches!(
-            pmu.write(RTC.clock_offset, &[0xaa; 6], now),
+            pmu.write(STOWE_OFFSET, &[0xaa; 6], now),
             Err(SlaveError::Unsupported(_))
         ));
         assert!(matches!(
             pmu.check_time(now),
             Err(SlaveError::Unsupported(_))
         ));
-        pmu.read(RTC.clock_offset, &mut data, 0).unwrap();
+        pmu.read(STOWE_OFFSET, &mut data, 0).unwrap();
         assert_eq!(data, [0; 6]);
     }
 
@@ -1140,15 +1295,14 @@ mod tests {
         let upcount = u64::from_le_bytes(raw) >> 1;
         assert_eq!(upcount, 125 * RTC_HZ);
         let mut off = [0u8; 8];
-        pmu.read(RTC.clock_offset, &mut off[..6], now).unwrap();
+        pmu.read(STOWE_OFFSET, &mut off[..6], now).unwrap();
         // Sign-extend the 48-bit offset, as `_readCurrentOffsetTicks` does.
         let offset = (i64::from_le_bytes(off) << 16) >> 16;
         let seconds = (upcount as i64 + offset) >> 15;
         assert_eq!(seconds, 1_792_000_000 + 120);
         // settimeofday rewrites the offset, which then reads back.
-        pmu.write(RTC.clock_offset, &[1, 2, 3, 4, 5, 6], now)
-            .unwrap();
-        pmu.read(RTC.clock_offset, &mut off[..6], now).unwrap();
+        pmu.write(STOWE_OFFSET, &[1, 2, 3, 4, 5, 6], now).unwrap();
+        pmu.read(STOWE_OFFSET, &mut off[..6], now).unwrap();
         assert_eq!(off[..6], [1, 2, 3, 4, 5, 6]);
         assert_eq!(pmu.write(RTC.upcount, &[0], now), Err(SlaveError::Nack));
     }
@@ -1172,7 +1326,7 @@ mod tests {
         assert_eq!(pmu.read(0x1234, &mut [0], 0), Err(SlaveError::Nack));
         // Without the host's wall time the RTC reads the Unix epoch.
         let mut off = [0xffu8; 6];
-        pmu.read(RTC.clock_offset, &mut off, 0).unwrap();
+        pmu.read(STOWE_OFFSET, &mut off, 0).unwrap();
         assert_eq!(off, [0; 6]);
     }
 

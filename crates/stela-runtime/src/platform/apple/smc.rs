@@ -991,12 +991,12 @@ mod tests {
     fn smc_and_spmi_sample_one_epoch_while_calendar_offset_has_one_pmu_owner() {
         use crate::platform::apple::{
             counter::FREQUENCY_HZ,
-            pmu::{Configuration, Pmu, RTC_HZ, Rtc, RtcClock, RtcEpoch, WallClock},
+            pmu::{ClockOffset, Configuration, Pmu, RTC_HZ, Rtc, RtcClock, RtcEpoch, WallClock},
             spmi::SpmiSlave,
         };
         let rtc = Rtc {
             upcount: 0x1406,
-            clock_offset: 0x1411,
+            clock_offset: ClockOffset::Register(0x1411),
             alarm_control: 0x1401,
             alarm_enable: 0x40,
             alarm_offset: 0x140c,
@@ -1032,8 +1032,7 @@ mod tests {
         assert_eq!(logical, 987654321 + 3 * RTC_HZ);
         pmu.read(rtc.upcount, &mut raw[..6], now).unwrap();
         assert_eq!(u64::from_le_bytes(raw) >> 1, logical);
-        pmu.write(rtc.clock_offset, &[9, 8, 7, 6, 5, 4], now)
-            .unwrap();
+        pmu.write(0x1411, &[9, 8, 7, 6, 5, 4], now).unwrap();
         send(&mut smc, request(READ, 1, 6, 0, rtc::KEY));
         raw[..6].copy_from_slice(&sram.get(6));
         assert_eq!(u64::from_le_bytes(raw), logical);

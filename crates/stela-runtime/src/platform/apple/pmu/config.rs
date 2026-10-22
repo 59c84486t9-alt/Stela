@@ -1,7 +1,7 @@
 //! Validated byte-resource ownership for the source-qualified RTC interface.
 use super::fault::FaultHistory;
 use super::firmware::FirmwareHistory;
-use super::{FirmwareSram, FirmwareStartup, PmicEpoch, Rtc, Window};
+use super::{ClockOffset, FirmwareSram, FirmwareStartup, PmicEpoch, Rtc, Window};
 use alloc::vec::Vec;
 
 /// An explicit PMU register resource configuration, independent of its SID or SKU.
@@ -62,6 +62,22 @@ impl Configuration {
                 || (rtc.shares_event() && rtc.event_mask & (monitor | rtc.alarm_enable) != 0)
             {
                 return Err("PMU RTC has empty or overlapping control masks");
+            }
+            if let ClockOffset::LegacyScratch(_) = rtc.clock_offset {
+                let inside = |field: Window| {
+                    windows.iter().any(|window| {
+                        field.base >= window.base
+                            && u32::from(field.base) + u32::from(field.bytes)
+                                <= u32::from(window.base) + u32::from(window.bytes)
+                    })
+                };
+                if !rtc
+                    .clock_offset
+                    .legacy_fields()
+                    .is_some_and(|fields| fields.into_iter().all(inside))
+                {
+                    return Err("PMU legacy RTC offset lies outside scratch storage");
+                }
             }
             occupied.extend(rtc.windows());
         } else if monitor != 0 {

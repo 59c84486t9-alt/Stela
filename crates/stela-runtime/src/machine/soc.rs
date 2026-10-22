@@ -3507,9 +3507,16 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
             let need = |name: &str| -> Result<u16, String> {
                 single(name)?.ok_or_else(|| format!("PMU RTC has no {name}"))
             };
-            let clock_offset = pair("info-clock_offset")?
-                .filter(|w| w.bytes == 6)
-                .ok_or("PMU RTC clock offset is not six bytes")?;
+            // Without `info-clock_offset` the driver keeps the offset in the
+            // legacy scratchpad (`pmu::ClockOffset::LegacyScratch`).
+            let clock_offset = match pair("info-clock_offset")? {
+                Some(window) if window.bytes == 6 => pmu::ClockOffset::Register(window.base),
+                Some(_) => return Err("PMU RTC clock offset is not six bytes".into()),
+                None => pmu::ClockOffset::LegacyScratch(
+                    single("info-leg_scrpad")?
+                        .ok_or("PMU RTC has neither a clock offset nor a legacy scratchpad")?,
+                ),
+            };
             if node
                 .property("info-rtc_alarm_ctrl_en_mask")
                 .is_none_or(|bytes| bytes.len() != 4)
@@ -3532,7 +3539,7 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
             };
             Some(pmu::Rtc {
                 upcount,
-                clock_offset: clock_offset.base,
+                clock_offset,
                 alarm_control: need("info-rtc_alarm_ctrl")?,
                 alarm_enable,
                 alarm_offset: need("info-rtc_alarm_offset")?,
@@ -7022,7 +7029,7 @@ mod tests {
         let rtc = pmu.rtc.unwrap();
         assert_eq!(
             (rtc.upcount, rtc.clock_offset, rtc.alarm_enable),
-            (0xf802, 0xf900, 0x40)
+            (0xf802, pmu::ClockOffset::Register(0xf900), 0x40)
         );
         // J473AP gives no event mask: the driver's default holds.
         assert_eq!((rtc.event_mask, rtc.interrupt_mask), (0x1, 0x1));
@@ -7030,6 +7037,55 @@ mod tests {
         let bytes = tree(&[0xf900, 4]);
         let io = Node::root(&bytes).unwrap();
         assert!(spmi_controllers(&io, &flat_fixture_extent(&translate), 0x63).is_err());
+    }
+
+    #[test]
+    fn an_rtc_without_a_clock_offset_register_keeps_it_in_the_legacy_scratchpad() {
+        use crate::machine::adt::encode;
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let cells = |values: &[u32]| {
+            values
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        // The J700AP Baku pmu-main, trimmed: no `info-clock_offset`.
+        let node = |legacy: bool| {
+            let mut properties: Vec<(&str, Vec<u8>)> = alloc::vec![
+                ("name", z("pmu-main")),
+                ("compatible", b"pmu,spmi\0pmu,baku\0".to_vec()),
+                ("reg", cells(&[0xe, 3, 0, 4, 0, 0])),
+                ("info-scrpad", cells(&[0x8000, 0x1000])),
+                ("info-pm_setting", cells(&[0xf801])),
+                ("info-rtc", cells(&[0xf802])),
+                ("info-rtc_alarm_ctrl", cells(&[0xf800])),
+                ("info-rtc_alarm_ctrl_en_mask", cells(&[0x40])),
+                ("info-rtc_alarm_monitor_mask", cells(&[1])),
+                ("info-rtc_alarm_offset", cells(&[0xf808])),
+                ("info-rtc_alarm_event", cells(&[0xf80c])),
+                ("info-rtc_irq_mask_offset", cells(&[0xf80e])),
+                ("info-rtc_alarm_mask", cells(&[1])),
+            ];
+            if legacy {
+                properties.push(("info-leg_scrpad", cells(&[0xf700])));
+            }
+            let properties: Vec<(&str, &[u8])> = properties
+                .iter()
+                .map(|(name, value)| (*name, value.as_slice()))
+                .collect();
+            let pmu = encode(&properties, &[]);
+            encode(&[("name", &z("arm-io"))], &[pmu])
+        };
+        let bytes = node(true);
+        let io = Node::root(&bytes).unwrap();
+        let pmu = spmi_pmu(&io.children().unwrap()[0], &io).unwrap();
+        assert_eq!(
+            pmu.rtc.unwrap().clock_offset,
+            pmu::ClockOffset::LegacyScratch(0xf700)
+        );
+        let bytes = node(false);
+        let io = Node::root(&bytes).unwrap();
+        assert!(spmi_pmu(&io.children().unwrap()[0], &io).is_err());
     }
 
     #[test]
