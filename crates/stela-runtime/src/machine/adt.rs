@@ -33,6 +33,51 @@ fn u32_at(data: &[u8], offset: usize) -> Option<u32> {
 }
 
 impl<'a> Node<'a> {
+    /// Translate a complete extent through this node's actual `ranges`.
+    /// Adjacent rows may contribute only when every byte has the same affine
+    /// translation. Matching endpoints alone cannot establish ownership.
+    pub fn translate_range(&self, offset: u64, bytes: u64) -> Option<u64> {
+        let raw = self.property("ranges")?;
+        if raw.is_empty() || !raw.len().is_multiple_of(24) || bytes == 0 {
+            return None;
+        }
+        let end = offset.checked_add(bytes)?;
+        let mut ranges = self.ranges()?;
+        for &(child, parent, size) in &ranges {
+            if size == 0 {
+                return None;
+            }
+            child.checked_add(size)?;
+            parent.checked_add(size)?;
+        }
+        ranges.sort_unstable_by_key(|&(child, _, _)| child);
+        if ranges
+            .windows(2)
+            .any(|rows| rows[0].0 + rows[0].2 > rows[1].0)
+        {
+            return None;
+        }
+        let &(child, parent, _) = ranges
+            .iter()
+            .find(|&&(child, _, size)| child <= offset && offset < child + size)?;
+        let physical = parent.checked_add(offset - child)?;
+        physical.checked_add(bytes)?;
+        let mut cursor = offset;
+        for (child, parent, size) in ranges {
+            if child + size <= cursor {
+                continue;
+            }
+            if child > cursor || parent + (cursor - child) != physical + (cursor - offset) {
+                return None;
+            }
+            cursor = end.min(child + size);
+            if cursor == end {
+                return Some(physical);
+            }
+        }
+        None
+    }
+
     pub fn root(data: &'a [u8]) -> Option<Self> {
         Self::at(data, 0)
     }
@@ -206,6 +251,58 @@ pub(crate) fn encode(properties: &[(&str, &[u8])], children: &[Vec<u8>]) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn translate(ranges: &[(u64, u64, u64)], offset: u64, bytes: u64) -> Option<u64> {
+        let raw = ranges
+            .iter()
+            .flat_map(|&(child, parent, size)| [child, parent, size])
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let tree = encode(&[("ranges", &raw)], &[]);
+        Node::root(&tree).unwrap().translate_range(offset, bytes)
+    }
+
+    #[test]
+    fn extent_translation_requires_every_byte_not_just_matching_endpoints() {
+        assert_eq!(
+            translate(&[(0, 0x1000, 0x100), (0x200, 0x1200, 0x100)], 0, 0x300),
+            None
+        );
+        assert_eq!(
+            translate(&[(0, 0x1000, 0x100), (0x100, 0x1100, 0x200)], 0x80, 0x200),
+            Some(0x1080)
+        );
+        assert_eq!(
+            translate(&[(0x100, 0x1100, 0x200), (0, 0x1000, 0x100)], 0x80, 0x200),
+            Some(0x1080)
+        );
+        assert_eq!(
+            translate(&[(0, 0x1000, 0x100), (0x100, 0x2100, 0x200)], 0x80, 0x200),
+            None
+        );
+        assert_eq!(
+            translate(&[(0, 0x1000, 0x100), (0x80, 0x1080, 0x200)], 0x80, 4),
+            None
+        );
+        assert_eq!(translate(&[(0, 0x1000, 0x100)], 0, 0x100), Some(0x1000));
+        assert_eq!(translate(&[(0, 0x1000, 0x100)], 0x100, 1), None);
+    }
+
+    #[test]
+    fn extent_translation_refuses_malformed_zero_and_overflowing_authority() {
+        for ranges in [
+            vec![],
+            vec![(0, 0, 0)],
+            vec![(u64::MAX, 0, 2)],
+            vec![(0, u64::MAX, 2)],
+        ] {
+            assert_eq!(translate(&ranges, 0, 1), None);
+        }
+        assert_eq!(translate(&[(0, 0x1000, 0x100)], 0, 0), None);
+        assert_eq!(translate(&[(0, 0x1000, 0x100)], u64::MAX, 2), None);
+        let tree = encode(&[("ranges", &[0; 25])], &[]);
+        assert_eq!(Node::root(&tree).unwrap().translate_range(0, 1), None);
+    }
 
     #[test]
     fn nodes_properties_and_compatibles_read_back() {

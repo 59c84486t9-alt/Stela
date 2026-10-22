@@ -4595,9 +4595,13 @@ fn dcp_device(
         if bytes == 0 {
             return Err(err("aperture is empty"));
         }
-        let physical = translate(offset).ok_or_else(|| err("lies outside arm-io ranges"))?;
-        if offset.checked_add(bytes - 1).and_then(translate) != physical.checked_add(bytes - 1) {
-            return Err(err("aperture crosses arm-io ranges"));
+        let physical = io
+            .translate_range(offset, bytes)
+            .ok_or_else(|| err("complete aperture is not owned by contiguous arm-io ranges"))?;
+        if translate(offset) != Some(physical) {
+            return Err(err(
+                "aperture translation differs from its declared arm-io owner",
+            ));
         }
         Ok((physical, bytes))
     };
