@@ -36,6 +36,11 @@ const M6_COUNTERS: [Encoding; MAX_COUNTERS] = [
 
 // Original mac18g's register-application routine separately writes these
 // controls. Their enabled effects are not supplied by the H13–H17 sources.
+// xnu-12377.121.6 names S3_2_C15_C2_1..C9_1 PMEFR2–9 under
+// CPMU_EVENT_FILTERING and writes them, with PMCR2–4, OPMAT, OPMSK and
+// PM_MEMFLT_CTL23/45, only for an extended raw configuration (`cacr_ext`,
+// cpc_arm64.c:667–688); the boot and reset configurations leave them alone
+// (cpc_arm64.c:590–601).
 const M6_UNQUALIFIED: [Encoding; 11] = [
     Encoding::new(3, 0, 11, 13, 5),
     Encoding::new(3, 0, 11, 13, 6),

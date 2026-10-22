@@ -911,18 +911,21 @@ const UNCORE_CONTROL_1_EVIDENCE: &str = "no public name; the M6 kernel writes 1 
 const UNCORE_CONTROL_1_UNMODELED: &str = "M6 uncore monitor control set; uncore events are not \
     counted";
 
-const UNCORE_SELECT_24: &str = "no public name; the M6 kernel writes it from its uncore \
-    configuration beside UPMESR0/1 (S3_7_C15_C11_7, C12_0, C12_1, C12_5) or UPMECM0-3 \
-    (S3_6_C11_C12_6, C12_7), event selections and core masks for counters 16-23 by that \
-    position (inference), only while uncore counting is configured (kernelcache.release.mac18g \
-    0xfffffe000be00e4c to 0xfffffe000be00ea0), and never reads it. No uncore counter counts \
+const UNCORE_SELECT_24: &str = "xnu-12377.121.6 monotonic_arm64.c:466-477 and 498-509 write \
+    S3_7_C15_C11_7, C12_0, C12_1 and C12_5 as UPMESR2-5 (uc_event_regs[2..5]) and \
+    S3_6_C11_C12_6 and C12_7 as UPMECM4-5, the event selections and core masks of counters \
+    16-23 when UPMU_PMC_COUNT > 16, with plain writes because they are write-ignored on SoCs \
+    with fewer than six CPUs per cluster; the M6 kernel writes them from its uncore \
+    configuration only while uncore counting is configured (kernelcache.release.mac18g \
+    0xfffffe000be00e4c to 0xfffffe000be00ea0) and never reads them. No uncore counter counts \
     here, so the selection has no effect. One per cluster";
 
-const UNCORE_COUNTER_24: &str = "no public name; the M6 kernel's uncore monitor reads it as \
-    counter 16 to 23 (kernelcache.release.mac18g 0xfffffe000be00a1c), and zeroes and restores \
-    it with UPMC0-15 (0xfffffe000be0126c, 0xfffffe000be01b7c). It counts only under a UPMCR0 \
-    counter enable, which stops here, so it holds what software writes, 0 from reset \
-    (inference). One per cluster";
+const UNCORE_COUNTER_24: &str = "xnu-12377.121.6 monotonic_arm64.c:337-356 reads it as uncore \
+    counter 16 to 23 when UPMU_PMC_COUNT > 16, as the M6 kernel's uncore monitor does \
+    (kernelcache.release.mac18g 0xfffffe000be00a1c), which zeroes and restores it with UPMC0-15 \
+    (0xfffffe000be0126c, 0xfffffe000be01b7c). It counts only under a UPMCR0 counter enable, \
+    which stops here, so it holds what software writes, 0 from reset (inference). One per \
+    cluster";
 
 const TRACE_SESSION: &str = "no public name; AppleProcessorTrace programs it only from its \
     per-core trace-source methods (AppleProcessorTraceACC8_9_10Src and the other cores' \
