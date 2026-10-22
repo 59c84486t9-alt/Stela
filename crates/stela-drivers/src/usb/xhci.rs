@@ -966,14 +966,15 @@ impl Controller {
             speed: attachment.speed,
             current_configuration: Some(0),
         });
-        during(
-            format!("slot {slot} Address Device"),
-            self.command(
-                input_address,
-                0,
-                ADDRESS_DEVICE << 10 | u32::from(slot) << 24,
-            ),
-        )?;
+        let addressed = self.command(
+            input_address,
+            0,
+            ADDRESS_DEVICE << 10 | u32::from(slot) << 24,
+        );
+        if let Err(error) = addressed {
+            let _ = self.disable_slot(slot, reset::Ownership::Vacant);
+            return Err((format!("slot {slot} Address Device"), error));
+        }
         // Address Device sends SET_ADDRESS with BSR=0. The xHC does not
         // time the device's recovery interval (xHCI 1.2b 4.6.5); USB 2.0
         // 9.2.6.3 permits it to ignore Setup packets for another 2 ms.
@@ -1800,6 +1801,8 @@ impl Controller {
         Ok(())
     }
 
+    /// Address a new device and read its descriptors. A device that fails
+    /// gives its slot back.
     fn identify(
         &mut self,
         attachment: Attachment,
@@ -1807,6 +1810,20 @@ impl Controller {
         dma: &mut dyn DmaAllocator,
     ) -> Result<Device, (String, BlockError)> {
         let slot = self.address(attachment, dma)?;
+        let described = self.describe(slot, attachment, location);
+        if described.is_err() {
+            // Best effort: a slot that will not disable stays enabled.
+            let _ = self.disable_slot(slot, reset::Ownership::Vacant);
+        }
+        described
+    }
+
+    fn describe(
+        &mut self,
+        slot: u8,
+        attachment: Attachment,
+        location: String,
+    ) -> Result<Device, (String, BlockError)> {
         let first = self.enumeration_descriptor(slot, DEVICE_DESCRIPTOR, 0, 8)?;
         if first.len() < 8 {
             return during(
@@ -2765,8 +2782,14 @@ pub(crate) mod tests {
             )
         );
         let state = model.borrow();
-        assert_eq!(state.commands_seen, [ENABLE_SLOT, ADDRESS_DEVICE]);
+        // The slot no driver was given is disabled and free for reuse.
+        assert_eq!(
+            state.commands_seen,
+            [ENABLE_SLOT, ADDRESS_DEVICE, reset::DISABLE_SLOT]
+        );
         assert!(state.setup_seen.is_empty());
+        assert_eq!(controller.slot_ownership[1], reset::Ownership::Vacant);
+        assert_eq!(controller.dcbaa.read::<u64>(8), 0);
     }
 
     #[test]

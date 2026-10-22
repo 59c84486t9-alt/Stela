@@ -4,7 +4,7 @@
 // Intel xHCI1.2b4.5.3.3,4.6.4,4.19.5,5.4.8. See THIRD_PARTY.md.
 use super::*;
 
-const DISABLE_SLOT: u32 = 10;
+pub(super) const DISABLE_SLOT: u32 = 10;
 const PORT_STATUS_CHANGE: u32 = 34;
 const POST_RESET_US: u64 = 50_000;
 const PLS: u32 = 15 << 5;
@@ -111,26 +111,8 @@ impl Controller {
         // 4.6.4 requires all active endpoints stopped/idle and all transfer and
         // command events received BEFORE Disable Slot. cancel_inner supplies
         // acknowledged Stop/Reset/SetDequeue and drains every stream's events.
-        during("pre-Disable Slot event retirement", self.ready())?;
-        let completion = during(
-            "acknowledge Disable Slot",
-            self.command(0, 0, DISABLE_SLOT << 10 | u32::from(slot) << 24),
-        )?;
-        if completion.slot() != slot {
-            self.command_poisoned = true;
-            return Err((
-                "acknowledge Disable Slot identity".into(),
-                BlockError::Unsupported("Disable Slot completion named another slot"),
-            ));
-        }
-        self.drain();
-        during("post-Disable Slot controller status", self.ready())?;
-        self.pending
-            .retain(|event| !(event.kind() == TRANSFER_EVENT && event.slot() == slot));
-        self.slot_ownership[usize::from(slot)] = Ownership::Retired;
-        // Spec4.6.4 requires clearing the DCBAA entry after completion. Old
-        // contexts/rings/stream records remain retained in the tombstoned Slot.
-        self.dcbaa.write(usize::from(slot) * 8, 0u64);
+        self.disable_slot(slot, Ownership::Retired)
+            .map_err(|(operation, error)| (operation.into(), error))?;
         during(
             "acknowledge physical root-port reset",
             self.reset_root_device(attachment),
@@ -149,6 +131,42 @@ impl Controller {
         }
         result
     }
+    /// Disable Slot (xHCI 4.6.4) and clear the slot's DCBAA entry, leaving
+    /// it `ownership`: `Vacant` for a slot no driver was ever given, which
+    /// Linux `xhci_free_dev` disables the same way, or `Retired` after a
+    /// reset, since stale class handles may still name it. Old contexts and
+    /// rings stay allocated in the slot record until the ID is reused.
+    pub(super) fn disable_slot(
+        &mut self,
+        slot: u8,
+        ownership: Ownership,
+    ) -> Result<(), (&'static str, BlockError)> {
+        let fail = |operation| move |error| (operation, error);
+        self.ready()
+            .map_err(fail("pre-Disable Slot event retirement"))?;
+        let completion = self
+            .command(0, 0, DISABLE_SLOT << 10 | u32::from(slot) << 24)
+            .map_err(fail("acknowledge Disable Slot"))?;
+        if completion.slot() != slot {
+            self.command_poisoned = true;
+            return Err((
+                "acknowledge Disable Slot identity",
+                BlockError::Unsupported("Disable Slot completion named another slot"),
+            ));
+        }
+        self.drain();
+        self.ready()
+            .map_err(fail("post-Disable Slot controller status"))?;
+        self.pending
+            .retain(|event| !(event.kind() == TRANSFER_EVENT && event.slot() == slot));
+        self.slot_ownership[usize::from(slot)] = ownership;
+        self.dcbaa.write(usize::from(slot) * 8, 0u64);
+        if ownership == Ownership::Vacant {
+            self.slots[usize::from(slot)] = None;
+        }
+        Ok(())
+    }
+
     fn reset_preflight(&self, device: &Device, endpoints: &[Endpoint]) -> Result<(), BlockError> {
         self.live_slot(device.slot)?;
         let slot = self.slots[usize::from(device.slot)].as_ref().unwrap();
