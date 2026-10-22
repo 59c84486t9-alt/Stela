@@ -12,6 +12,8 @@ pub(super) struct Layout {
     pub selectors: u64,
     pub events: events::Set,
     pub unqualified_controls: &'static [Encoding],
+    /// The M5 kpc's [`super::KPC_C5_1`], which takes only 0.
+    pub kpc_c5_1: bool,
 }
 
 const M6_COUNTERS: [Encoding; MAX_COUNTERS] = [
@@ -57,6 +59,7 @@ impl Layout {
                 selectors: u32::MAX as u64,
                 events: events::Set::M1M2,
                 unqualified_controls: &[],
+                kpc_c5_1: false,
             },
             Chip::AppleM2 => Self {
                 width: Width::Bits64,
@@ -64,6 +67,7 @@ impl Layout {
                 selectors: u32::MAX as u64,
                 events: events::Set::M1M2,
                 unqualified_controls: &[],
+                kpc_c5_1: false,
             },
             Chip::AppleM3 | Chip::AppleM4 | Chip::AppleM5 => Self {
                 width: Width::Bits64,
@@ -71,6 +75,7 @@ impl Layout {
                 selectors: u64::MAX,
                 events: events::Set::Unqualified,
                 unqualified_controls: &[],
+                kpc_c5_1: chip == Chip::AppleM5,
             },
             Chip::AppleM6 => Self {
                 width: Width::Bits64,
@@ -80,6 +85,7 @@ impl Layout {
                 selectors: 0,
                 events: events::Set::Unqualified,
                 unqualified_controls: &M6_UNQUALIFIED,
+                kpc_c5_1: false,
             },
         }
     }

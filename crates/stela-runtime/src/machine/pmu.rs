@@ -78,6 +78,12 @@ pub const OPMSK1: Encoding = monitor(1, 10, 0);
 /// inference. They configure nothing at 0.
 pub const PM_MEMFLT_CTL23: Encoding = monitor(1, 0, 4);
 pub const PM_MEMFLT_CTL45: Encoding = monitor(1, 1, 4);
+/// The M5 kpc's tenth raw configuration register: its `kpc_get_config`
+/// saves it after PM_MEMFLT_CTL45 and its restore writes it back
+/// (kernelcache.release.mac17g 0xfffffe000be64104, 0xfffffe000beb56b0), a
+/// slot public XNU does not have. No public name; it configures nothing at
+/// 0 (inference, as for the others). The M6 layout leaves it unqualified.
+pub const KPC_C5_1: Encoding = monitor(1, 5, 1);
 /// PMCR1's EL1&0 copy ([`Filter::Guest`]).
 pub const PMCR1_EL12: Encoding = monitor(1, 7, 2);
 pub const PMSR: Encoding = monitor(1, 13, 0);
@@ -209,6 +215,8 @@ pub struct Pmu {
     pmcr1_gl1: u64,
     pmesr: [Option<u64>; 2],
     extension: [Option<u64>; EXTENSIONS],
+    /// [`KPC_C5_1`], on a layout that has it.
+    kpc_c5_1: Option<u64>,
     /// The counts as of `synced_count` and `synced_retired`.
     counters: [u64; layout::MAX_COUNTERS],
     synced_count: u64,
@@ -252,6 +260,7 @@ impl Pmu {
             pmcr1_gl1: 0,
             pmesr: [None; 2],
             extension: [None; EXTENSIONS],
+            kpc_c5_1: None,
             counters: [0; layout::MAX_COUNTERS],
             synced_count: 0,
             synced_retired: 0,
@@ -286,6 +295,7 @@ impl Pmu {
         Self::common(encoding)
             || layout.counters.contains(&encoding)
             || layout.unqualified_controls.contains(&encoding)
+            || layout.kpc_c5_1 && encoding == KPC_C5_1
     }
 
     pub fn counter_count(&self) -> usize {
@@ -306,7 +316,10 @@ impl Pmu {
     fn check_access(&self, encoding: Encoding) -> Result<(), &'static str> {
         if self.layout.unqualified_controls.contains(&encoding) {
             Err("M6 CPMU control effects are not source-qualified")
-        } else if Self::common(encoding) || self.layout.counters.contains(&encoding) {
+        } else if Self::common(encoding)
+            || self.layout.counters.contains(&encoding)
+            || self.layout.kpc_c5_1 && encoding == KPC_C5_1
+        {
             Ok(())
         } else {
             Err("register is not allocated in the selected CPMU layout")
@@ -519,6 +532,7 @@ impl Pmu {
                 .filter(|&n| self.counters[n] & self.layout.width.overflow() != 0)
                 .fold(0, |status, n| status | self.layout.status_bit(n)),
             PC_CAPTURE => return Err("PMI PC capture is not modelled"),
+            KPC_C5_1 => stored(self.kpc_c5_1)?,
             _ => match self.layout.counters.iter().position(|&pmc| pmc == encoding) {
                 Some(n) => self.counters[n],
                 None => {
@@ -586,6 +600,10 @@ impl Pmu {
                 self.pmesr = selectors;
             }
             PMSR | PC_CAPTURE => return Err("write of a performance monitor status register"),
+            KPC_C5_1 if value != 0 => {
+                return Err("M5 kpc configuration S3_1_C15_C5_1 is not modelled");
+            }
+            KPC_C5_1 => self.kpc_c5_1 = Some(0),
             _ => match self.layout.counters.iter().position(|&pmc| pmc == encoding) {
                 Some(n) => self.counters[n] = value & self.layout.width.mask(),
                 None => {
@@ -1131,6 +1149,22 @@ mod tests {
         pmu.sync(0, 60, guarded);
         pmu.set_guarded_filter(0, 0, 70, guarded);
         assert_eq!(pmu.read(PMC[1], 0, 80, KERNEL), Ok(40));
+    }
+
+    /// The M5 kpc saves and restores S3_1_C15_C5_1 with the other raw
+    /// configurations; the M6 leaves it unqualified, and no earlier chip
+    /// has it.
+    #[test]
+    fn the_m5_kpc_configuration_takes_only_0() {
+        let mut m5 = Pmu::for_chip(Chip::AppleM5, CLOCK, FREQUENCY).unwrap();
+        assert!(Pmu::owns_on(Chip::AppleM5, KPC_C5_1));
+        assert!(m5.read(KPC_C5_1, 0, 0, KERNEL).is_err());
+        assert!(m5.write(KPC_C5_1, 1, 0, 0, KERNEL).is_err());
+        m5.write(KPC_C5_1, 0, 0, 0, KERNEL).unwrap();
+        assert_eq!(m5.read(KPC_C5_1, 0, 0, KERNEL), Ok(0));
+        let mut m6 = Pmu::for_chip(Chip::AppleM6, CLOCK, FREQUENCY).unwrap();
+        assert!(m6.write(KPC_C5_1, 0, 0, 0, KERNEL).is_err());
+        assert!(!Pmu::owns_on(Chip::AppleM4, KPC_C5_1));
     }
 
     #[test]

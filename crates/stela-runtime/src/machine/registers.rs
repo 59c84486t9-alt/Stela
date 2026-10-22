@@ -1871,22 +1871,10 @@ mod tests {
         }
     }
 
-    /// The M3-and-later encodings whose owners are being written outside
-    /// `machine::impdef`: the M5 kpc state S3_1_C15_C5_1, which
-    /// `machine::pmu` owns on the M6 only (mac17g save 0xfffffe000be64104,
-    /// restore 0xfffffe000beb56b0). Each family leaves this list when its
-    /// owner lands.
-    fn pending_owner(encoding: Encoding) -> bool {
-        const KPC: (u8, u8, u8) = (1, 5, 1);
-        let key = (encoding.op1(), encoding.crm(), encoding.op2());
-        encoding.crn() == 15 && key == KPC
-    }
-
     /// Every IMPLEMENTATION DEFINED encoding a chip's censused components
     /// access has an owner: a modeled register here, CTRR, AMX, the core
     /// PMU, the board's fast IPIs, the Apple generic timer or a
-    /// `machine::impdef` entry with a class other than `Unsupported`
-    /// ([`pending_owner`] aside on the later chips).
+    /// `machine::impdef` entry with a class other than `Unsupported`.
     #[test]
     fn every_encoding_the_components_access_has_a_model() {
         use crate::platform::apple::ipi;
@@ -1901,7 +1889,6 @@ mod tests {
                         || Pmu::owns_on(chip, encoding)
                         || ipi::Register::decode(encoding).is_some()
                         || super::super::timer::agt::decode(encoding, chip).is_some()
-                        || pending_owner(encoding)
                     {
                         continue;
                     }
