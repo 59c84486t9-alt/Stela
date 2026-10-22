@@ -883,18 +883,15 @@ impl Cpu {
         }
     }
 
-    /// EL0 reaches only SPRR_PERM_EL0 (the user JIT toggle; Sven Peter,
-    /// "Apple Silicon Hardware Secrets"), the counter alias, under the same
-    /// enable as CNTVCT_EL0, the Apple generic timer's views of EL0
-    /// registers, under their architectural registers' enables, and
-    /// JCTL_EL0 on the chips whose components use it. XNU's user MSR test
-    /// (`xnu-12377.121.6` `tests/user_msrs.c`) skips JCTL_EL0 and TPIDR_EL0
-    /// alone as registers EL0 is meant to write, which the kernel context
-    /// switches; every other implementation-defined register it probes must
-    /// fault at EL0 or not hold a value across a switch. So the others stay
-    /// UNDEFINED: AFPCR_EL0 is EL0 by name only, and `S3_5_C15_C10_1`, which
-    /// the kernel clears at every context switch and qemu-t8030 gives EL0
-    /// access on the A13, is unestablished on these chips.
+    /// EL0 reaches the established user registers, including AFPCR through
+    /// its existing zero-only model. The original 26A434 OS-resident Rosetta
+    /// runtime reads AFPCR at file 0xea4/0x203e0 and writes it at 0xdf8
+    /// (SHA-256 2adfa4a95ae456b4e44e316c4713d9dfcdd87d421a97b1b4c4fd848c562f3d28).
+    /// This establishes the user ABI, not nonzero AFP semantics or new banks.
+    /// XNU's `user_msrs.c` permits writable registers that reset by a context
+    /// switch; absence from its whitelist does not prove UNDEFINED. The
+    /// censused TRACE_CLEARED's EL0 permissions and effects remain unqualified
+    /// on these Macs (qemu-t8030's PL0_RW entry establishes A13 alone).
     fn apple_el0(&mut self, encoding: Encoding, read: bool, value: u64, physical: u64) -> Outcome {
         if let Some(agt::Name::View(architectural)) = agt::decode(encoding, self.registers.chip()) {
             return Outcome::View(architectural, agt::Bank::Apple);
@@ -915,10 +912,17 @@ impl Cpu {
             ACNTPCT_EL0 => Outcome::Refused(Refusal::UnsupportedSetting(
                 "ACNTPCT_EL0 access below EL2 lacks permission qualification",
             )),
-            impdef::JCTL_EL0 => match impdef::lookup(encoding, self.registers.chip()) {
-                Some(entry) => self.impdef_access(entry, read, value, physical),
-                None => Outcome::Undefined,
-            },
+            impdef::JCTL_EL0 | impdef::AFPCR_EL0 => {
+                match impdef::lookup(encoding, self.registers.chip()) {
+                    Some(entry) => self.impdef_access(entry, read, value, physical),
+                    None => Outcome::Undefined,
+                }
+            }
+            impdef::TRACE_CLEARED if impdef::consumed(encoding, self.registers.chip()) => {
+                Outcome::Refused(Refusal::UnsupportedSetting(
+                    "TRACE_CLEARED EL0 permission and trace side effects lack qualification",
+                ))
+            }
             CNTVCT_ALIAS_EL0 if !read => Outcome::Undefined,
             CNTVCT_ALIAS_EL0 => {
                 let control = if self.in_host() {
@@ -1521,8 +1525,7 @@ mod tests {
     }
 
     /// EL0 programs JCTL_EL0, the per-thread register XNU's user MSR test
-    /// leaves user-writable, on the chips whose components use it (M2 on);
-    /// other implementation-defined registers stay UNDEFINED at EL0.
+    /// leaves user-writable, on the chips whose components use it (M2 on).
     #[test]
     fn el0_reaches_jctl_on_the_chips_that_use_it() {
         use super::super::Chip;
@@ -1539,14 +1542,213 @@ mod tests {
             m2.apple_access(mrs(0, impdef::JCTL_EL0), 0),
             Outcome::Read(0x4000)
         );
-        for encoding in [impdef::AFPCR_EL0, impdef::TRACE_CLEARED, impdef::HID4] {
-            assert_eq!(m2.apple_access(mrs(0, encoding), 0), Outcome::Undefined);
-        }
+        assert_eq!(m2.apple_access(mrs(0, impdef::HID4), 0), Outcome::Undefined);
         let mut m1 = Cpu::of(Chip::AppleM1, 0, Pstate::reset(0));
         assert_eq!(
             m1.apple_access(mrs(0, impdef::JCTL_EL0), 0),
             Outcome::Undefined
         );
+    }
+
+    /// Bounded original-source integrity fixture. It decodes the original
+    /// accesses; it does not execute Apple code or qualify hardware effects.
+    #[cfg(feature = "std")]
+    #[test]
+    #[ignore = "requires original 26A434 OS files via STELA_TEST_EL0_OS_FILES"]
+    fn el0_apple_control_original_runtime_pins_the_user_afpcr_accesses() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("STELA_TEST_EL0_OS_FILES").expect("original OS-file extraction"),
+        );
+        let read = |path: &str, length, hash| {
+            let path = root.join(path);
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            assert!(
+                metadata.file_type().is_file(),
+                "original must be a regular file"
+            );
+            assert_eq!(metadata.len(), length);
+            let bytes = std::fs::read(path).unwrap();
+            assert_eq!(crate::sha256(&bytes), hash);
+            bytes
+        };
+        let version = read(
+            "System/Library/CoreServices/SystemVersion.plist",
+            604,
+            "bd61e19dd67dd97ce9a27c79a2148d42cc9685a71c6f17ff27d62b819f39f983",
+        );
+        const BUILD: &[u8] = b"<string>26A434</string>";
+        assert!(version.windows(BUILD.len()).any(|bytes| bytes == BUILD));
+        let runtime = read(
+            "usr/libexec/rosetta/runtime",
+            231_808,
+            "2adfa4a95ae456b4e44e316c4713d9dfcdd87d421a97b1b4c4fd848c562f3d28",
+        );
+        for (offset, expected) in [
+            (0xdf8, msr(0, impdef::AFPCR_EL0)),
+            (0xea4, mrs(2, impdef::AFPCR_EL0)),
+            (0x203e0, mrs(25, impdef::AFPCR_EL0)),
+        ] {
+            let word = u32::from_le_bytes(runtime[offset..offset + 4].try_into().unwrap());
+            assert_eq!(decode(word), Some(expected));
+        }
+    }
+
+    #[test]
+    fn el0_apple_control_afpcr_uses_the_existing_pe_model_without_fp_effects() {
+        use crate::machine::Chip;
+
+        let encoding = impdef::AFPCR_EL0;
+        let key = encoding.selector();
+        for chip in Chip::ALL {
+            // All declared family profiles census AFPCR. Its owner is
+            // physical PE state, not a new EL0, host or cluster bank.
+            assert!(impdef::consumed(encoding, chip));
+            assert_eq!(
+                impdef::lookup(encoding, chip).unwrap().scope,
+                impdef::Scope::Pe
+            );
+            let mut cpu = Cpu::of(chip, 0, Pstate::reset(0));
+            cpu.state.fpcr = 0x0040_0000;
+            cpu.state.fpsr = 0x0800_0001;
+            cpu.state.x[5] = 0x1234;
+            let before = cpu.state.clone();
+            let aidr = cpu.read(Register::AIDR_EL1);
+            for host in [false, true] {
+                cpu.registers.set(
+                    Register::HCR_EL2,
+                    0,
+                    (1 << HCR_TIDCP) | if host { 1 << HCR_TGE } else { 0 },
+                );
+                assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Read(0));
+                // XZR writes zero even while X5 holds unsupported controls.
+                assert_eq!(
+                    cpu.apple_access(msr(31, encoding), 0),
+                    Outcome::Written(Changes::default())
+                );
+                let writes = cpu.apple.impdef.writes.clone();
+                for value in [1, 2, 3, 1 << 63] {
+                    cpu.state.x[5] = value;
+                    let state = cpu.state.clone();
+                    assert!(matches!(
+                        cpu.apple_access(msr(5, encoding), 0),
+                        Outcome::Refused(Refusal::UnsupportedSetting(_))
+                    ));
+                    assert_eq!(cpu.state, state);
+                    assert_eq!(cpu.apple.impdef.writes, writes);
+                }
+                cpu.state.x[5] = before.x[5];
+                assert_eq!(cpu.state, before);
+                assert_eq!(cpu.read(Register::AIDR_EL1), aidr);
+            }
+            assert_eq!(cpu.apple.impdef.writes.get(&key), Some(&2));
+            cpu.registers.set(Register::HCR_EL2, 0, 0);
+            cpu.pstate.el = 1;
+            assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Read(0));
+            assert_eq!(cpu.apple.impdef.reads.get(&key), Some(&3));
+            assert_eq!(cpu.apple.impdef.used().count(), 1);
+            let mut peer = Cpu::of(chip, 1, Pstate::reset(0));
+            peer.apple.impdef.join(&cpu.apple.impdef);
+            assert!(peer.apple.impdef.reads.is_empty());
+            assert!(peer.apple.impdef.writes.is_empty());
+            assert_eq!(
+                peer.apple_access(msr(31, encoding), 0),
+                Outcome::Written(Changes::default())
+            );
+            assert_eq!(peer.apple.impdef.writes.get(&key), Some(&1));
+            assert_eq!(cpu.apple.impdef.writes.get(&key), Some(&2));
+        }
+    }
+
+    #[test]
+    fn el0_apple_control_afpcr_keeps_el1_tidcp_ordering_and_el2_access() {
+        use crate::machine::Chip;
+
+        let encoding = impdef::AFPCR_EL0;
+        for chip in Chip::ALL {
+            let mut cpu = Cpu::of(chip, 0, Pstate::reset(1));
+            cpu.state.x[5] = 3;
+            let before = cpu.state.clone();
+            cpu.registers.set(Register::HCR_EL2, 0, 1 << HCR_TIDCP);
+            for access in [mrs(0, encoding), msr(5, encoding), msr(31, encoding)] {
+                assert_eq!(cpu.apple_access(access, 0), Outcome::Trapped(Some(2)));
+            }
+            assert_eq!(cpu.state, before);
+            assert_eq!(cpu.apple.impdef.used().count(), 0);
+            // At EL2 TIDCP does not trap. The same zero-only physical
+            // owner remains in use; no permissive floating-point substitute.
+            cpu.pstate.el = 2;
+            assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Read(0));
+            assert!(matches!(
+                cpu.apple_access(msr(5, encoding), 0),
+                Outcome::Refused(Refusal::UnsupportedSetting(_))
+            ));
+            assert!(cpu.apple.impdef.writes.is_empty());
+            assert_eq!(
+                cpu.apple_access(msr(31, encoding), 0),
+                Outcome::Written(Changes::default())
+            );
+            cpu.pstate.el = 1;
+            cpu.registers.set(Register::HCR_EL2, 0, 0);
+            assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Read(0));
+            assert_eq!(cpu.apple.impdef.used().count(), 1);
+            assert_eq!(cpu.state, before);
+        }
+    }
+
+    #[test]
+    fn el0_apple_control_trace_permissions_remain_explicitly_unqualified() {
+        use crate::machine::Chip;
+
+        let encoding = impdef::TRACE_CLEARED;
+        for chip in Chip::ALL {
+            let consumed = matches!(chip, Chip::AppleM1 | Chip::AppleM2);
+            assert_eq!(impdef::consumed(encoding, chip), consumed);
+            let mut cpu = Cpu::of(chip, 0, Pstate::reset(0));
+            for host in [false, true] {
+                cpu.registers
+                    .set(Register::HCR_EL2, 0, if host { 1 << HCR_TGE } else { 0 });
+                for value in [0, 1] {
+                    cpu.state.x[5] = value;
+                    let before = cpu.state.clone();
+                    for access in [mrs(0, encoding), msr(5, encoding)] {
+                        let expected = if consumed {
+                            Outcome::Refused(Refusal::UnsupportedSetting(
+                                "TRACE_CLEARED EL0 permission and trace side effects lack qualification",
+                            ))
+                        } else {
+                            Outcome::Undefined
+                        };
+                        assert_eq!(cpu.apple_access(access, 0), expected);
+                    }
+                    assert_eq!(cpu.state, before);
+                    assert_eq!(cpu.apple.impdef.used().count(), 0);
+                }
+            }
+            cpu.pstate.el = 1;
+            cpu.registers.set(Register::HCR_EL2, 0, 1 << HCR_TIDCP);
+            for access in [mrs(0, encoding), msr(31, encoding)] {
+                assert_eq!(cpu.apple_access(access, 0), Outcome::Trapped(Some(2)));
+            }
+            assert_eq!(cpu.apple.impdef.used().count(), 0);
+            cpu.registers.set(Register::HCR_EL2, 0, 0);
+            // Original M1/M2 XNU can still clear the register at a
+            // context switch. Non-censused chips retain the census inference.
+            let expected = if consumed {
+                Outcome::Written(Changes::default())
+            } else {
+                Outcome::Undefined
+            };
+            assert_eq!(cpu.apple_access(msr(31, encoding), 0), expected);
+            if consumed {
+                let writes = cpu.apple.impdef.writes.clone();
+                cpu.state.x[5] = 1;
+                assert!(matches!(
+                    cpu.apple_access(msr(5, encoding), 0),
+                    Outcome::Refused(Refusal::UnsupportedSetting(_))
+                ));
+                assert_eq!(cpu.apple.impdef.writes, writes);
+            }
+        }
     }
 
     /// CRn 11 reaches `machine::impdef` where an entry owns it, and stays
