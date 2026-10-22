@@ -1,6 +1,7 @@
 //! The dispatch loop: fetch translation, block cache, native execution and
 //! every exit back from native code.
 mod amx;
+mod apple_maintenance;
 mod clock;
 mod compression;
 mod device_access;
@@ -5164,6 +5165,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             SystemOperation::CheckedPointer(operand) => self.checked_pointer(operand),
             SystemOperation::Compression(instruction) => self.compression(word, instruction),
             SystemOperation::Guarded(operation) => self.guarded(word, operation),
+            SystemOperation::AppleMaintenance(operation) => self.apple_maintenance(word, operation),
         }
     }
 

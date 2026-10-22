@@ -44,6 +44,9 @@ pub enum AmxOperation {
     /// Operations 23..31. On hardware these words raise an undefined
     /// instruction exception (EC 0): Asahi Linux observed "faults with unknown
     /// instruction" for `0x002012e0..` on M1; the M2 behavior is inferred.
+    /// From the M4, operations 24 and 25, and from the M5 26, are Apple
+    /// maintenance words (`block::system::AppleMaintenance`), which the
+    /// system-mode profile decodes first.
     Unallocated,
 }
 

@@ -326,6 +326,12 @@ fn oracle_limit(form: &str, state: &GuestState) -> bool {
     // are not differential subjects either: the engine's own tests
     // (`machine::engine::compression`) cover them, and no hardware oracle
     // exists for their compressed format.
+    // QEMU has no Apple GXF or M4 maintenance words either: GENTER, GEXIT,
+    // DC INCPA4K and its undocumented neighbours (0x00201300 | op << 5 | Rt,
+    // 0x00201401) are not subjects. The qemu-sptm `-M darwin` build decodes
+    // GENTER and GEXIT but none of the maintenance words, so its M4 runs are
+    // no evidence for them; runtime tests cover them (`engine::guarded`,
+    // `engine::apple_maintenance`).
     (sign_of_nan || estimate) && state.fpcr & FPCR_AH != 0 || tile_slice_load
 }
 

@@ -1552,6 +1552,10 @@ mod tests {
             (0x0020_0820, ExitKind::System),     // wkdmc x0, x1 (Apple)
             (0x0020_0c20, ExitKind::System),     // wkdmd x0, x1 (Apple)
             (0x0020_1428, ExitKind::System),     // genter #8 (Apple GXF)
+            (0x0020_1308, ExitKind::System),     // dc incpa4k, x8 (Apple)
+            (0x0020_1330, ExitKind::System),     // Apple operation 25, x16
+            (0x0020_134d, ExitKind::System),     // Apple operation 26, x13
+            (0x0020_1401, ExitKind::System),     // Apple 0x00201401
             (0xc04c_73e5, ExitKind::System),     // movt x5, zt0[7] (Debug state)
             (0xc04e_03e0, ExitKind::System),     // movt zt0[0], x0 (Debug state)
             (0xd503_237f, ExitKind::PointerAuthentication), // pacibsp

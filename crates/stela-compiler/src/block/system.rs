@@ -35,6 +35,9 @@ pub enum SystemOperation {
     /// through translated memory (`crate::wkdm`). Only the system-mode
     /// profile produces it.
     Compression(crate::wkdm::Instruction),
+    /// Apple's M4 and later maintenance words. Only the system-mode profile
+    /// produces it.
+    AppleMaintenance(AppleMaintenance),
     /// An instruction that exists only in Debug state, which a PE without
     /// halting debug never enters: UNDEFINED. Only the system-mode profile
     /// produces it.
@@ -99,6 +102,55 @@ impl GuardedOperation {
     }
 }
 
+/// Apple maintenance words that the M4 and later 26A434 SPTMs execute at GL2
+/// and no M1 to M3 SPTM, TXM or kernel holds. Operations 24 to 26 overlay
+/// AMX's unallocated operations (`0x00201000 | op << 5 | Rt`), which the
+/// runtime keeps for the chips without them. Only DC INCPA4K is named by a
+/// public source; m1n1's SPTM emulator (`proxyclient/m1n1/hv/sprr.py`
+/// `GXF_TLBI_ALL`, `GXF_TLBI_WITH_ARG`) flushes the TLB for `0x00201401` and
+/// all of `0x00201300..0x0020133f`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppleMaintenance {
+    /// Operation 24, DC INCPA4K Xt: "Enable coprocessor cache flush" (XNU
+    /// `H16.h`/`H17.h` `HAS_DC_INCPA`); `pmap_flush_noncoherent_page` issues
+    /// `.long 0x201308` with x8 the physical address of each 4 KiB of a
+    /// page, then DSB OSH (`osfmk/arm/pmap/pmap_data.c`), as SPTM does.
+    CoprocessorCacheFlush { register: u8 },
+    /// Operation 25: Rt holds a physical page number, `PA >> 12` with bits
+    /// 1:0 clear, once per 16 KiB frame between DSB OSHNXS barriers after
+    /// SPTM changes the frame's `/arm-io/sapt` entry.
+    PhysicalPage { register: u8 },
+    /// Operation 26 (from the M5): Rt holds the 16-bit address-space word
+    /// of a pmap (ASID byte, generation byte), issued when the CPU's
+    /// recorded generation for that ASID is stale.
+    AddressSpace { register: u8 },
+    /// `0x00201401`, without an operand: SPTM's choice in place of
+    /// operation 25 when the page is 0 or a batch exceeds 63 pages.
+    All,
+}
+
+const APPLE_MAINTENANCE_ALL: u32 = 0x0020_1401;
+/// Operations 24, 25 and 26 with Rt 0; bits 4:0 are Rt.
+const DC_INCPA4K: u32 = 0x0020_1300;
+const APPLE_MAINTENANCE_PAGE: u32 = 0x0020_1320;
+const APPLE_MAINTENANCE_ADDRESS_SPACE: u32 = 0x0020_1340;
+const APPLE_MAINTENANCE_RT: u32 = 0x1f;
+
+impl AppleMaintenance {
+    pub const fn decode(word: u32) -> Option<Self> {
+        if word == APPLE_MAINTENANCE_ALL {
+            return Some(Self::All);
+        }
+        let register = (word & APPLE_MAINTENANCE_RT) as u8;
+        match word & !APPLE_MAINTENANCE_RT {
+            DC_INCPA4K => Some(Self::CoprocessorCacheFlush { register }),
+            APPLE_MAINTENANCE_PAGE => Some(Self::PhysicalPage { register }),
+            APPLE_MAINTENANCE_ADDRESS_SPACE => Some(Self::AddressSpace { register }),
+            _ => None,
+        }
+    }
+}
+
 /// Debug-state-only instructions outside the exception-generation class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugStateOperation {
@@ -157,6 +209,7 @@ fn serialize_family<S: Serializer>(
         SystemOperation::Maintenance(_) => "maintenance",
         SystemOperation::Guarded(_) => "guarded",
         SystemOperation::Compression(_) => "compression",
+        SystemOperation::AppleMaintenance(_) => "apple_maintenance",
         SystemOperation::DebugStateOnly(_) => "debug_state_only",
         SystemOperation::Unprivileged(_) => "unprivileged",
         SystemOperation::Exclusive(_) => "exclusive",
@@ -268,6 +321,8 @@ pub fn decode_system_mode_instruction(
     }
     let operation = if let Some(operation) = GuardedOperation::decode(word) {
         SystemOperation::Guarded(operation)
+    } else if let Some(operation) = AppleMaintenance::decode(word) {
+        SystemOperation::AppleMaintenance(operation)
     } else if let Some(operation) = decode_sdsb(word) {
         SystemOperation::Synchronization(operation)
     } else if let Some(instruction) = crate::wkdm::decode(word) {
@@ -458,6 +513,40 @@ mod tests {
         }
         for word in [GENTER, GEXIT] {
             assert!(decode_system_instruction(pc, word).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn system_mode_decodes_each_apple_maintenance_form_with_its_register() {
+        use AppleMaintenance::{AddressSpace, All, CoprocessorCacheFlush, PhysicalPage};
+        let pc = GuestAddress(0x1000);
+        let operation = |word| {
+            decode_system_mode_instruction(pc, word)
+                .unwrap()
+                .map(|instruction| instruction.operation)
+        };
+        // Every such word of the 26A434 M4 to M6 SPTMs.
+        for (word, maintenance) in [
+            (0x0020_1308, CoprocessorCacheFlush { register: 8 }),
+            (0x0020_1309, CoprocessorCacheFlush { register: 9 }),
+            (0x0020_1310, CoprocessorCacheFlush { register: 16 }),
+            (0x0020_1328, PhysicalPage { register: 8 }),
+            (0x0020_132b, PhysicalPage { register: 11 }),
+            (0x0020_1330, PhysicalPage { register: 16 }),
+            (0x0020_1331, PhysicalPage { register: 17 }),
+            (0x0020_134d, AddressSpace { register: 13 }),
+            (0x0020_1401, All),
+        ] {
+            assert_eq!(
+                operation(word),
+                Some(SystemOperation::AppleMaintenance(maintenance)),
+                "{word:#x}"
+            );
+            assert!(decode_system_instruction(pc, word).unwrap().is_none());
+        }
+        // AMX operations 23 and 27 stay AMX words.
+        for word in [0x0020_12ff, 0x0020_1360] {
+            assert_eq!(operation(word), None, "{word:#x}");
         }
     }
 
