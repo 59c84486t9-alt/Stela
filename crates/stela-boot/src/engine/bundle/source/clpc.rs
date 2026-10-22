@@ -46,19 +46,21 @@ pub(super) fn verify(
     original: &DeviceTree,
     prepared: &DeviceTree,
     ledger: &[String],
+    soc: u32,
+    board: u32,
 ) -> Result<Vec<String>, String> {
+    // Only the actual selected variant pass proves which overlay paths go.
+    // This derived copy supplies CLPC class membership, never CPU provenance:
+    // the source CPU indices are still checked against the immutable input.
+    let mut projected = original.clone();
+    stela_loader::soc_variant::apply(&mut projected, Some(soc), Some(board))
+        .map_err(|error| format!("CLPC source variant projection: {error}"))?;
     let mut source = Vec::new();
     let mut current = Vec::new();
-    nodes(&original.root, "", &mut source)?;
+    nodes(&projected.root, "", &mut source)?;
     nodes(&prepared.root, "", &mut current)?;
     let mut hidden: Vec<String> = Vec::new();
     for (path, _) in source.iter().filter(|(_, node)| class(node)) {
-        // iBoot variant overlays are not retained devices. Their removed paths
-        // carry no runtime class notice; the retained parent's dummy identity
-        // independently identifies the T6050 CLPC class.
-        if !current.iter().any(|(candidate, _)| candidate == path) {
-            continue;
-        }
         if hidden.contains(path) || ledger.iter().filter(|entry| *entry == path).count() != 1 {
             return Err("original CLPC requires exact once-only hidden_devices evidence".into());
         }
@@ -87,30 +89,18 @@ mod tests {
             root: Node::named("device-tree").unwrap(),
         };
         tree.ensure_child("/", "arbitrary").unwrap();
-        tree.set_property(
-            "/arbitrary",
-            "compatible",
-            b"clpc,dummy\0clpc,t6050\0".to_vec(),
-        )
-        .unwrap();
-        tree.ensure_child("/arbitrary", ":variant").unwrap();
-        tree.set_property(
-            "/arbitrary/:variant",
-            "compatible",
-            b"clpc,t6050d\0".to_vec(),
-        )
-        .unwrap();
+        tree.set_property("/arbitrary", "compatible", b"clpc,t8112\0".to_vec())
+            .unwrap();
         tree
     }
 
     #[test]
-    fn hidden_clpc_uses_original_class_and_exact_evidence_without_variant_notices() {
+    fn hidden_clpc_uses_original_class_and_exact_evidence() {
         let original = tree();
         let mut prepared = original.clone();
         let node = prepared.node_mut("/arbitrary").unwrap();
         node.remove_property("compatible");
-        node.children.clear();
-        let hidden = verify(&original, &prepared, &["/arbitrary".into()]).unwrap();
+        let hidden = verify(&original, &prepared, &["/arbitrary".into()], 0x8112, 0x28).unwrap();
         assert_eq!(hidden, ["/arbitrary"]);
         assert!(validate_live(&prepared, &hidden).is_ok());
         for ledger in [
@@ -118,13 +108,29 @@ mod tests {
             vec!["/arbitrary +note".into()],
             vec!["/arbitrary".into(), "/arbitrary".into()],
         ] {
-            assert!(verify(&original, &prepared, &ledger).is_err());
+            assert!(verify(&original, &prepared, &ledger, 0x8112, 0x28).is_err());
         }
-        assert!(verify(&original, &original, &["/arbitrary".into()]).is_err());
+        assert!(verify(&original, &original, &["/arbitrary".into()], 0x8112, 0x28).is_err());
         prepared
             .set_property("/arbitrary", "compatible", b"clpc,t6050\0".to_vec())
             .unwrap();
         assert!(validate_live(&prepared, &hidden).is_err());
+    }
+
+    #[test]
+    fn deleting_an_ordinary_retained_clpc_cannot_waive_its_absence_notice() {
+        let original = tree();
+        let mut removed = original.clone();
+        removed.root.children.clear();
+        assert!(verify(&original, &removed, &[], 0x8112, 0x28).is_err());
+        assert!(verify(&original, &removed, &["/arbitrary".into()], 0x8112, 0x28).is_err());
+        assert!(
+            original
+                .node("/arbitrary")
+                .unwrap()
+                .property("compatible")
+                .is_some()
+        );
     }
 
     #[test]
@@ -134,14 +140,21 @@ mod tests {
             .node_mut("/arbitrary")
             .unwrap()
             .remove_property("compatible");
-        original.node_mut("/arbitrary").unwrap().children.clear();
         original
             .set_property("/arbitrary", "device_type", b"clpc\0".to_vec())
             .unwrap();
-        assert!(verify(&original, &original, &[]).unwrap().is_empty());
+        assert!(
+            verify(&original, &original, &[], 0x8112, 0x28)
+                .unwrap()
+                .is_empty()
+        );
         original
             .set_property("/arbitrary", "compatible", b"clpc,\0other,clpc\0".to_vec())
             .unwrap();
-        assert!(verify(&original, &original, &[]).unwrap().is_empty());
+        assert!(
+            verify(&original, &original, &[], 0x8112, 0x28)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

@@ -195,7 +195,13 @@ impl Intake {
         let prepared_tree =
             DeviceTree::parse(prepared).map_err(|e| format!("prepared selected ADT: {e}"))?;
         let cpus = cpus::Prepared::verify(&original_tree, &prepared_tree, boot_cpu)?;
-        let hidden_clpc = clpc::verify(&original_tree, &prepared_tree, &manifest.hidden_devices)?;
+        let hidden_clpc = clpc::verify(
+            &original_tree,
+            &prepared_tree,
+            &manifest.hidden_devices,
+            soc,
+            board,
+        )?;
         let intake = Self {
             original: kept,
             original_sha256,
@@ -488,6 +494,15 @@ mod tests {
         json["hidden_devices"] = json!(["/counter-control"]);
         let source = intake(&json, &original, &prepared).unwrap();
         assert_eq!(source.hidden_clpc(), ["/counter-control"]);
+        let mut removed = DeviceTree::parse(&prepared).unwrap();
+        removed
+            .root
+            .children
+            .retain(|node| node.name() != Some("counter-control"));
+        let removed = removed.serialize();
+        let mut removed_manifest = fixture(&original, &removed);
+        removed_manifest["hidden_devices"] = json!(["/counter-control"]);
+        assert!(intake(&removed_manifest, &original, &removed).is_err());
         let mut live = DeviceTree::parse(&prepared).unwrap();
         live.set_property("/counter-control", "compatible", b"clpc,t8112\0".to_vec())
             .unwrap();
