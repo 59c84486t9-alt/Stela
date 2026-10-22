@@ -729,15 +729,9 @@ fn check_owners(
 /// global. Local reservations can be lost at any time (as at a PE switch).
 fn pause_cpu(cpu: &mut Cpu, waiting: Option<Wait>, now: u64, paused: bool) {
     let waiting = paused || waiting.is_some();
+    let context = cpu.pmu_context(waiting);
     if let Some(pmu) = cpu.pmu.as_mut() {
-        pmu.sync(
-            now,
-            cpu.retired,
-            crate::machine::pmu::Context {
-                el: cpu.pstate.el,
-                waiting,
-            },
-        );
+        pmu.sync(now, cpu.retired, context);
     }
     if let Some(amu) = cpu.amu.as_mut() {
         amu.sync(now, cpu.retired, waiting);
@@ -1412,13 +1406,14 @@ mod tests {
         machine.cpu.retired = 10;
         let context = Context {
             el: 1,
+            filter: pmu::Filter::Guest,
             waiting: false,
         };
         let seed = (1 << 63) | 10;
         let mut monitor = Pmu::new(36_000_000, 24_000_000);
         monitor.write(pmu::PMCR1, 1 << 16, 0, 10, context).unwrap();
         monitor
-            .write(pmu::PMCR1_ALTERNATE, 1 << 16, 0, 10, context)
+            .write(pmu::PMCR1_EL12, 1 << 16, 0, 10, context)
             .unwrap();
         monitor.write(pmu::PMC[0], seed, 0, 10, context).unwrap();
         monitor

@@ -38,7 +38,6 @@ use super::{
     },
     hacr, identification,
     mmu::{self, Access, Controls, Outcome as Translated},
-    pmu,
     registers::{self, CpuProfile, HCR_TIDCP, Lines, Outcome as RegisterOutcome, Refusal},
     streaming::{self, Denial},
     system::{Feature, Register as SystemRegister},
@@ -2206,10 +2205,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// change of either passes here: exception entry and return through
     /// `sync_regime`, and the start and end of a wait.
     pub(super) fn sync_monitor(&mut self) {
-        let context = pmu::Context {
-            el: self.cpu.pstate.el,
-            waiting: self.waiting.is_some() || self.processor_paused(self.current),
-        };
+        let context = self
+            .cpu
+            .pmu_context(self.waiting.is_some() || self.processor_paused(self.current));
         let retired = self.cpu.retired;
         let pmu_timed = self.cpu.pmu.as_ref().map(|monitor| monitor.timed());
         let amu_timed = self.cpu.amu.as_ref().map(|monitors| monitors.timed());
@@ -7418,7 +7416,6 @@ mod tests {
                 1u64 << 63
             };
             const MSR_PMCR1_X1: u32 = 0xd519_f101;
-            const MSR_PMCR1_COPY_X1: u32 = 0xd519_f741;
             const MSR_PMCR0_X2: u32 = 0xd519_f002;
             const MSR_PMC1_X6: u32 = 0xd51a_f106;
             const MRS_X3_PMC1: u32 = 0xd53a_f103;
@@ -7434,7 +7431,6 @@ mod tests {
             const SVC: u32 = 0xd400_0001;
             let mut words = vec![
                 MSR_PMCR1_X1,
-                MSR_PMCR1_COPY_X1,
                 MSR_PMCR0_X2,
                 ADD,
                 ADD,
@@ -7480,15 +7476,15 @@ mod tests {
                 });
                 machine.step().unwrap();
             };
-            for pc in [BASE, BASE + 4, BASE + 8] {
+            for pc in [BASE, BASE + 4] {
                 run(&mut machine, pc, ExitKind::System);
             }
             // The two ADDs and the branch, then the MRS, which counts itself.
-            run(&mut machine, BASE + 24, ExitKind::Direct);
-            run(&mut machine, BASE + 24, ExitKind::System);
+            run(&mut machine, BASE + 20, ExitKind::Direct);
+            run(&mut machine, BASE + 20, ExitKind::System);
             assert_eq!(machine.cpu.state.x[3], 4);
             // An UNDEFINED MRS does not retire; the vector's MRS does.
-            run(&mut machine, BASE + 28, ExitKind::System);
+            run(&mut machine, BASE + 24, ExitKind::System);
             assert_eq!(machine.cpu.pc, BASE + 0xa00);
             run(&mut machine, BASE + 0xa00, ExitKind::System);
             assert_eq!(machine.cpu.state.x[5], 5);

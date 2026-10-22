@@ -538,8 +538,8 @@ const PMCR1_GL1_EVIDENCE: &str = "m1n1's apple_regs.json names it PMCR1_GL1, the
     core PMU's mode filter for the guarded level: SPTM 26A434 writes 0x30300 (PMC0 and PMC1 \
     counting at EL0 and EL1) or a full enable pattern once per CPU at boot (__text+0x1bec8), and \
     the 26A434 kernel only saves and restores it with a VM's GL12 registers (0xfffffe000bd9eddc, \
-    0xfffffe000bda2bb4). Stored: machine::pmu does not consult it, so counting at a guarded level \
-    follows PMCR1 (a core PMU gap)";
+    0xfffffe000bda2bb4). Stored, and machine::pmu filters counting at a guarded level by its \
+    kernel field (pmu::Filter::Guarded)";
 
 const ACC_CFG_EVIDENCE: &str = "m1n1 cpu_regs.h names it, with the branch-predictor sleep field \
     ACC_CFG_BP_SLEEP (bits 2-3), which 26A434 XNU sets with read-modify-write \

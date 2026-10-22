@@ -180,15 +180,9 @@ impl NativeProcessorState<'_> {
             } else {
                 0
             };
+            let context = cpu.pmu_context(waiting);
             if let Some(monitor) = cpu.pmu.as_mut() {
-                monitor.sync(
-                    now,
-                    cpu.retired,
-                    crate::machine::pmu::Context {
-                        el: cpu.pstate.el,
-                        waiting,
-                    },
-                );
+                monitor.sync(now, cpu.retired, context);
             }
             if let Some(monitors) = cpu.amu.as_mut() {
                 monitors.sync(now, cpu.retired, waiting);

@@ -16,11 +16,19 @@
 //!   and EL0 access (bit 30).
 //! - PMCR1 filters counting by mode: bits 8-15 and 40-41 at EL0, bits 16-23
 //!   and 48-49 in the kernel. XNU, which runs at EL2 on the M2, calls bits
-//!   16 and 17 the EL2 enables, so they count at EL1 and EL2 alike
-//!   (inference); a guarded level counts as its EL (inference).
-//! - With `CONFIG_EXCLAVES || HYPERVISOR` XNU writes PMCR1's value to
-//!   `S3_1_C15_C7_2` as well, before PMCR0. What that register filters is not
-//!   described, so counting while it differs from PMCR1 stops.
+//!   16 and 17 the EL2 enables, so in the EL2&0 host they count at EL2
+//!   (inference). Which PMCR1 applies follows where the PE runs
+//!   ([`Filter`]): `S3_1_C15_C7_2` is PMCR1_EL12 (Linux
+//!   `arch/arm64/include/asm/apple_m1_pmu.h`), the EL1&0 regime's copy, which
+//!   XNU writes with PMCR1's value before PMCR0 under `CONFIG_EXCLAVES ||
+//!   HYPERVISOR` (`osfmk/arm64/cpc_arm64.c`) and which, like the VHE `_EL12`
+//!   registers, is UNDEFINED below EL2 and is what PMCR1 reaches in the EL1&0
+//!   regime (inference from the name); a guarded
+//!   level counts by PMCR1_GL1 (`S3_1_C15_C8_2`, m1n1 `apple_regs.json`),
+//!   whose kernel field applies, which SPTM 26A434 writes once per PE at
+//!   boot with 0x30300 or a full enable pattern and the kernel saves and
+//!   restores around a VM (its storage is `machine::impdef`'s entry, which
+//!   `Pmu::set_guarded_filter` mirrors).
 //!
 //! This machine counts cycles at the PE's core clock while it is not waiting
 //! in WFI or WFE, and instructions as the engine retires them: each
@@ -62,13 +70,16 @@ pub const OPMAT0: Encoding = monitor(1, 7, 0);
 pub const OPMAT1: Encoding = monitor(1, 8, 0);
 pub const OPMSK0: Encoding = monitor(1, 9, 0);
 pub const OPMSK1: Encoding = monitor(1, 10, 0);
-/// Two further controls without a public name that 26A434 XNU's kpc saves
-/// after OPMSK1 (`kpc_get_config`, 0xfffffe000bd41050) and restores with the
-/// others (0xfffffe000bd8db14); they configure nothing at 0.
-pub const PMCR_C0_4: Encoding = monitor(1, 0, 4);
-pub const PMCR_C1_4: Encoding = monitor(1, 1, 4);
-/// Written with PMCR1's value (`S3_1_C15_C7_2`, no public name).
-pub const PMCR1_ALTERNATE: Encoding = monitor(1, 7, 2);
+/// The two controls 26A434 XNU's kpc saves after OPMSK1 (`kpc_get_config`,
+/// 0xfffffe000bd41050) and restores with the others (0xfffffe000bd8db14):
+/// XNU's `kpc_get_rawpmu_config` saves PM_MEMFLT_CTL23_EL1 and
+/// PM_MEMFLT_CTL45_EL1 there, in that order (`xnu-12377.121.6`
+/// `osfmk/arm64/kpc.c`), by symbolic name, so the encodings' match is an
+/// inference. They configure nothing at 0.
+pub const PM_MEMFLT_CTL23: Encoding = monitor(1, 0, 4);
+pub const PM_MEMFLT_CTL45: Encoding = monitor(1, 1, 4);
+/// PMCR1's EL1&0 copy ([`Filter::Guest`]).
+pub const PMCR1_EL12: Encoding = monitor(1, 7, 2);
 pub const PMSR: Encoding = monitor(1, 13, 0);
 /// The PC captured for a PMC5-7 PMI (`S3_1_C15_C14_1`).
 pub const PC_CAPTURE: Encoding = monitor(1, 14, 1);
@@ -89,7 +100,15 @@ pub const PMC: [Encoding; COUNTERS] = [
 /// The registers that store a configuration and accept only 0, which
 /// configures nothing, in [`Pmu::extension`] order.
 const EXTENSION: [Encoding; EXTENSIONS] = [
-    PMCR2, PMCR3, PMCR4, OPMAT0, OPMAT1, OPMSK0, OPMSK1, PMCR_C0_4, PMCR_C1_4,
+    PMCR2,
+    PMCR3,
+    PMCR4,
+    OPMAT0,
+    OPMAT1,
+    OPMSK0,
+    OPMSK1,
+    PM_MEMFLT_CTL23,
+    PM_MEMFLT_CTL45,
 ];
 const EXTENSIONS: usize = 9;
 
@@ -145,11 +164,35 @@ const fn counter_bit(low: u32, high: u32, n: usize) -> u64 {
     }
 }
 
-/// Where the PE runs, for counting: its EL and whether it waits.
+/// Where the PE runs, for counting: its EL, the PMCR1 that filters there
+/// and whether it waits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Context {
     pub el: u8,
+    pub filter: Filter,
     pub waiting: bool,
+}
+
+/// Which PMCR1 filters counting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Filter {
+    /// PMCR1, in the EL2&0 regime.
+    Host,
+    /// PMCR1_EL12, in the EL1&0 regime.
+    Guest,
+    /// PMCR1_GL1's kernel field, at a guarded level.
+    Guarded,
+}
+
+/// The register an access to `encoding` reaches: PMCR1 in the EL1&0
+/// regime is that regime's copy, PMCR1_EL12, as the VHE `_EL1` encodings
+/// reach the EL1 registers below EL2 (inference from the name).
+fn regime_copy(encoding: Encoding, context: Context) -> Encoding {
+    if encoding == PMCR1 && context.filter == Filter::Guest {
+        PMCR1_EL12
+    } else {
+        encoding
+    }
 }
 
 /// One PE's CPMU.
@@ -161,7 +204,9 @@ pub struct Pmu {
     frequency: u64,
     pmcr0: u64,
     pmcr1: u64,
-    alternate: Option<u64>,
+    pmcr1_el12: u64,
+    /// PMCR1_GL1, mirrored from its `machine::impdef` entry.
+    pmcr1_gl1: u64,
     pmesr: [Option<u64>; 2],
     extension: [Option<u64>; EXTENSIONS],
     /// The counts as of `synced_count` and `synced_retired`.
@@ -203,7 +248,8 @@ impl Pmu {
             frequency,
             pmcr0: 0,
             pmcr1: 0,
-            alternate: None,
+            pmcr1_el12: 0,
+            pmcr1_gl1: 0,
             pmesr: [None; 2],
             extension: [None; EXTENSIONS],
             counters: [0; layout::MAX_COUNTERS],
@@ -212,6 +258,7 @@ impl Pmu {
             remainder: [0; layout::MAX_COUNTERS],
             context: Context {
                 el: 2,
+                filter: Filter::Host,
                 waiting: false,
             },
             cycle_deadline: None,
@@ -252,7 +299,7 @@ impl Pmu {
     fn common(encoding: Encoding) -> bool {
         matches!(
             encoding,
-            PMCR0 | PMCR1 | PMESR0 | PMESR1 | PMCR1_ALTERNATE | PMSR | PC_CAPTURE
+            PMCR0 | PMCR1 | PMESR0 | PMESR1 | PMCR1_EL12 | PMSR | PC_CAPTURE
         ) || EXTENSION.contains(&encoding)
     }
 
@@ -293,13 +340,18 @@ impl Pmu {
 
     /// Whether counter `n` counts in `context`.
     fn counts(&self, n: usize, context: Context) -> bool {
-        let filter = if context.el == 0 {
+        let (pmcr1, el) = match context.filter {
+            Filter::Host => (self.pmcr1, context.el),
+            Filter::Guest => (self.pmcr1_el12, context.el),
+            Filter::Guarded => (self.pmcr1_gl1, 1),
+        };
+        let filter = if el == 0 {
             counter_bit(8, 40, n)
         } else {
             counter_bit(16, 48, n)
         };
         self.pmcr0 & counter_bit(0, 32, n) != 0
-            && self.pmcr1 & filter != 0
+            && pmcr1 & filter != 0
             && !(self.event(n) == Some(Event::Cycles) && context.waiting)
     }
 
@@ -435,6 +487,15 @@ impl Pmu {
         }
     }
 
+    /// PMCR1_GL1 took `value` at system count `now` with `retired`
+    /// instructions retired.
+    pub fn set_guarded_filter(&mut self, value: u64, now: u64, retired: u64, context: Context) {
+        self.advance(now, retired);
+        self.pmcr1_gl1 = value;
+        self.context = context;
+        self.update();
+    }
+
     pub fn read(
         &mut self,
         encoding: Encoding,
@@ -443,6 +504,7 @@ impl Pmu {
         context: Context,
     ) -> Result<u64, &'static str> {
         self.check_access(encoding)?;
+        let encoding = regime_copy(encoding, context);
         self.sync(now, retired, context);
         let stored = |value: Option<u64>| {
             value.ok_or("read of a performance monitor control before its first write")
@@ -450,7 +512,7 @@ impl Pmu {
         Ok(match encoding {
             PMCR0 => self.pmcr0 | if self.asserted { PMCR0_PMAI } else { 0 },
             PMCR1 => self.pmcr1,
-            PMCR1_ALTERNATE => stored(self.alternate)?,
+            PMCR1_EL12 => self.pmcr1_el12,
             PMESR0 => stored(self.pmesr[0])?,
             PMESR1 => stored(self.pmesr[1])?,
             PMSR => (0..self.counter_count())
@@ -477,7 +539,7 @@ impl Pmu {
     ) -> Result<(), &'static str> {
         self.check_access(encoding)?;
         self.advance(now, retired);
-        let written = self.store(encoding, value);
+        let written = self.store(regime_copy(encoding, context), value);
         self.context = context;
         self.update();
         written
@@ -499,23 +561,17 @@ impl Pmu {
                 if value & PMCR0_USER_ACCESS != 0 {
                     return Err("PMCR0 EL0 access to the monitor is not modelled");
                 }
-                if value & PMCR0_COUNT != 0 && self.alternate != Some(self.pmcr1) {
-                    return Err("counting while S3_1_C15_C7_2 differs from PMCR1");
-                }
                 // PMAI reports the PMI; writing it changes nothing.
                 self.pmcr0 = value & !PMCR0_PMAI;
             }
-            PMCR1 | PMCR1_ALTERNATE => {
+            PMCR1 | PMCR1_EL12 => {
                 if value & !PMCR1_KNOWN != 0 {
                     return Err("PMCR1 bit without public description");
                 }
                 if encoding == PMCR1 {
-                    if self.pmcr0 & PMCR0_COUNT != 0 && self.alternate != Some(value) {
-                        return Err("counting while S3_1_C15_C7_2 differs from PMCR1");
-                    }
                     self.pmcr1 = value;
                 } else {
-                    self.alternate = Some(value);
+                    self.pmcr1_el12 = value;
                 }
             }
             PMESR0 | PMESR1 => {
@@ -539,7 +595,7 @@ impl Pmu {
                         .expect("owned");
                     if value != 0 {
                         return Err(
-                            "PMCR2-4, OPMAT, OPMSK and S3_1_C15_C0_4/C1_4 settings are not modelled",
+                            "PMCR2-4, OPMAT, OPMSK and PM_MEMFLT_CTL settings are not modelled",
                         );
                     }
                     self.extension[index] = Some(0);
@@ -557,12 +613,10 @@ mod tests {
 
     const KERNEL: Context = Context {
         el: 2,
+        filter: Filter::Host,
         waiting: false,
     };
-    const USER: Context = Context {
-        el: 0,
-        waiting: false,
-    };
+    const USER: Context = Context { el: 0, ..KERNEL };
     /// XNU's `PMCR0_INIT` and `PMCR1_INIT` without `CPMU_AIC_PMI`.
     const PMCR0_INIT: u64 = 0x3 | 0x3000 | 0x400;
     const PMCR1_INIT: u64 = 0x30300;
@@ -578,8 +632,7 @@ mod tests {
         let mut pmu = Pmu::for_chip(chip, clock, FREQUENCY).unwrap();
         // `_cpc_cpmu_pmcr01_write`: PMCR1, its copy, then PMCR0.
         pmu.write(PMCR1, PMCR1_INIT, 0, 0, KERNEL).unwrap();
-        pmu.write(PMCR1_ALTERNATE, PMCR1_INIT, 0, 0, KERNEL)
-            .unwrap();
+        pmu.write(PMCR1_EL12, PMCR1_INIT, 0, 0, KERNEL).unwrap();
         pmu.write(PMCR0, PMCR0_INIT, 0, 0, KERNEL).unwrap();
         pmu
     }
@@ -605,6 +658,7 @@ mod tests {
             100,
             Context {
                 el: 2,
+                filter: Filter::Host,
                 waiting: true,
             },
         );
@@ -612,9 +666,6 @@ mod tests {
         assert_eq!(pmu.read(PMC[0], 1024, 110, USER), Ok(3796 + 3504));
         assert_eq!(pmu.read(PMC[1], 1024, 110, USER), Ok(110));
         // PMCR1's filter: kernel-only counting skips EL0.
-        pmu.write(PMCR1, 0x30000, 1024, 110, USER).unwrap_err();
-        pmu.write(PMCR1_ALTERNATE, 0x30000, 1024, 110, USER)
-            .unwrap();
         pmu.write(PMCR1, 0x30000, 1024, 110, USER).unwrap();
         assert_eq!(pmu.read(PMC[1], 2000, 150, USER), Ok(110));
         assert_eq!(pmu.read(PMSR, 2000, 150, USER), Ok(0));
@@ -652,6 +703,7 @@ mod tests {
             1000,
             Context {
                 el: 2,
+                filter: Filter::Host,
                 waiting: true,
             },
         );
@@ -829,6 +881,7 @@ mod tests {
         assert_eq!(pmu.deadline(), Some(3));
         let waiting = Context {
             el: 2,
+            filter: Filter::Host,
             waiting: true,
         };
         pmu.sync(2, 0, waiting);
@@ -838,7 +891,7 @@ mod tests {
         assert_eq!(pmu.read(PMC[0], 101, 0, USER), Ok(M1_OVERFLOW));
         assert_eq!(pmu.read(PMCR0, 101, 0, USER), Ok(PMCR0_INIT | PMCR0_PMAI));
         // Disable user counting without changing the fixed events.
-        pmu.write(PMCR1_ALTERNATE, 0x30000, 101, 0, USER).unwrap();
+        pmu.write(PMCR1_EL12, 0x30000, 101, 0, USER).unwrap();
         pmu.write(PMCR1, 0x30000, 101, 0, USER).unwrap();
         assert_eq!(pmu.read(PMC[0], 200, 100, USER), Ok(M1_OVERFLOW));
         assert_eq!(pmu.read(PMC[1], 200, 100, USER), Ok(0));
@@ -849,7 +902,7 @@ mod tests {
     fn programmed(chip: Chip, clock: u64, selectors: [u64; 2], control: u64, filter: u64) -> Pmu {
         let mut pmu = Pmu::for_chip(chip, clock, FREQUENCY).unwrap();
         pmu.write(PMCR1, filter, 0, 0, KERNEL).unwrap();
-        pmu.write(PMCR1_ALTERNATE, filter, 0, 0, KERNEL).unwrap();
+        pmu.write(PMCR1_EL12, filter, 0, 0, KERNEL).unwrap();
         pmu.write(PMESR0, selectors[0], 0, 0, KERNEL).unwrap();
         pmu.write(PMESR1, selectors[1], 0, 0, KERNEL).unwrap();
         pmu.write(PMCR0, control, 0, 0, KERNEL).unwrap();
@@ -956,6 +1009,7 @@ mod tests {
                 0,
                 Context {
                     el: 2,
+                    filter: Filter::Host,
                     waiting: true,
                 },
             );
@@ -1034,10 +1088,49 @@ mod tests {
             let mut pmu = Pmu::for_chip(chip, CLOCK, FREQUENCY).unwrap();
             pmu.write(PMESR0, selector, 0, 0, KERNEL).unwrap();
             pmu.write(PMCR1, 1 << 18, 0, 0, KERNEL).unwrap();
-            pmu.write(PMCR1_ALTERNATE, 1 << 18, 0, 0, KERNEL).unwrap();
+            pmu.write(PMCR1_EL12, 1 << 18, 0, 0, KERNEL).unwrap();
             assert!(pmu.write(PMCR0, 4, 0, 0, KERNEL).is_err());
             assert_eq!(pmu.read(PMCR0, 0, 0, KERNEL), Ok(0));
         }
+    }
+
+    /// PMCR1 filters the EL2&0 host, PMCR1_EL12 the EL1&0 regime, which
+    /// reaches it as PMCR1, and PMCR1_GL1's kernel field a guarded level.
+    #[test]
+    fn each_regime_and_the_guarded_level_count_by_their_own_pmcr1() {
+        let mut pmu = Pmu::for_chip(Chip::AppleM2, CLOCK, FREQUENCY).unwrap();
+        let guest = Context {
+            el: 1,
+            filter: Filter::Guest,
+            ..KERNEL
+        };
+        let guarded = Context {
+            filter: Filter::Guarded,
+            ..KERNEL
+        };
+        // Each step counts the instructions retired since the last under
+        // the context it leaves. With PMCR1 alone set, only the host counts.
+        pmu.write(PMCR1, 1 << 17, 0, 0, KERNEL).unwrap();
+        pmu.write(PMCR0, 0b10, 0, 0, KERNEL).unwrap();
+        pmu.sync(0, 10, guest);
+        pmu.sync(0, 30, guarded);
+        assert_eq!(pmu.read(PMC[1], 0, 40, KERNEL), Ok(10));
+        // PMCR1_EL12 and PMCR1_GL1 enable the guest and the guarded level.
+        pmu.write(PMCR1_EL12, 1 << 17, 0, 40, guest).unwrap();
+        pmu.set_guarded_filter(1 << 17, 0, 40, guarded);
+        assert_eq!(pmu.read(PMC[1], 0, 45, guest), Ok(15));
+        assert_eq!(pmu.read(PMC[1], 0, 52, KERNEL), Ok(22));
+        assert_eq!(pmu.read(PMCR1, 0, 52, guest), Ok(1 << 17));
+        pmu.write(PMCR1, 1 << 16, 0, 52, guest).unwrap();
+        assert_eq!(pmu.read(PMCR1_EL12, 0, 52, KERNEL), Ok(1 << 16));
+        assert_eq!(pmu.read(PMCR1, 0, 52, KERNEL), Ok(1 << 17));
+        pmu.write(PMCR1_EL12, 1 << 17, 0, 52, KERNEL).unwrap();
+        // SPTM's 0x30300 enables PMC0 and PMC1 at the guarded level; 0
+        // stops it there.
+        pmu.set_guarded_filter(0x30300, 0, 52, guarded);
+        pmu.sync(0, 60, guarded);
+        pmu.set_guarded_filter(0, 0, 70, guarded);
+        assert_eq!(pmu.read(PMC[1], 0, 80, KERNEL), Ok(40));
     }
 
     #[test]
@@ -1045,8 +1138,7 @@ mod tests {
         let mut pmu = Pmu::new(CLOCK, FREQUENCY);
         assert!(pmu.read(PMESR0, 0, 0, KERNEL).is_err());
         assert!(pmu.read(PMCR2, 0, 0, KERNEL).is_err());
-        assert!(pmu.write(PMCR0, 1, 0, 0, KERNEL).is_err(), "copy unwritten");
-        pmu.write(PMCR1_ALTERNATE, 0, 0, 0, KERNEL).unwrap();
+        assert_eq!(pmu.read(PMCR1_EL12, 0, 0, KERNEL), Ok(0));
         for value in [1 << 2, 1 << 32, 2 << 8, 1 << 24, 1 << 30, 1 << 20] {
             assert!(pmu.write(PMCR0, value, 0, 0, KERNEL).is_err(), "{value:#x}");
         }
@@ -1054,10 +1146,10 @@ mod tests {
         assert!(pmu.write(OPMSK0, 1, 0, 0, KERNEL).is_err());
         pmu.write(OPMSK0, 0, 0, 0, KERNEL).unwrap();
         assert_eq!(pmu.read(OPMSK0, 0, 0, KERNEL), Ok(0));
-        assert!(pmu.read(PMCR_C1_4, 0, 0, KERNEL).is_err());
-        assert!(pmu.write(PMCR_C0_4, 1, 0, 0, KERNEL).is_err());
-        pmu.write(PMCR_C1_4, 0, 0, 0, KERNEL).unwrap();
-        assert_eq!(pmu.read(PMCR_C1_4, 0, 0, KERNEL), Ok(0));
+        assert!(pmu.read(PM_MEMFLT_CTL45, 0, 0, KERNEL).is_err());
+        assert!(pmu.write(PM_MEMFLT_CTL23, 1, 0, 0, KERNEL).is_err());
+        pmu.write(PM_MEMFLT_CTL45, 0, 0, 0, KERNEL).unwrap();
+        assert_eq!(pmu.read(PM_MEMFLT_CTL45, 0, 0, KERNEL), Ok(0));
         pmu.write(PMESR1, 0x8c, 0, 0, KERNEL).unwrap();
         assert_eq!(pmu.read(PMESR1, 0, 0, KERNEL), Ok(0x8c));
         assert!(pmu.write(PMSR, 0, 0, 0, KERNEL).is_err());

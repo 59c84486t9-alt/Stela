@@ -717,14 +717,14 @@ impl Cpu {
             return self.tag_offset_access(read, value);
         }
         if Pmu::owns_on(self.registers.chip(), encoding) {
+            if encoding == super::pmu::PMCR1_EL12 && self.pstate.el != 2 {
+                return Outcome::Undefined;
+            }
+            let context = self.pmu_context(false);
             let Some(pmu) = self.pmu.as_mut() else {
                 return Outcome::Refused(Refusal::UnsupportedSetting(
                     "CPMU access requires an explicit PE clock in the CPU profile",
                 ));
-            };
-            let context = super::pmu::Context {
-                el: self.pstate.el,
-                waiting: false,
             };
             let retired = self.retired;
             let outcome = if read {
@@ -784,7 +784,7 @@ impl Cpu {
                     }
                 };
             }
-            return self.impdef_access(entry, read, value);
+            return self.impdef_access(entry, read, value, physical);
         }
         if encoding.crn() == 11 {
             return if consumed {
@@ -806,13 +806,44 @@ impl Cpu {
         }
     }
 
-    /// A read or write of a `machine::impdef` entry.
-    fn impdef_access(&mut self, entry: &'static impdef::Entry, read: bool, value: u64) -> Outcome {
+    /// Where the PE runs, for its performance monitor: the PMCR1 that
+    /// filters there (`pmu::Filter`) and whether it waits.
+    pub fn pmu_context(&self, waiting: bool) -> super::pmu::Context {
+        use super::pmu::Filter;
+        super::pmu::Context {
+            el: self.pstate.el,
+            filter: if self.pstate.guarded {
+                Filter::Guarded
+            } else if self.regime() == TranslationRegime::El20 {
+                Filter::Host
+            } else {
+                Filter::Guest
+            },
+            waiting,
+        }
+    }
+
+    /// A read or write of a `machine::impdef` entry; `physical` is the
+    /// system counter, for the performance monitor PMCR1_GL1 filters.
+    fn impdef_access(
+        &mut self,
+        entry: &'static impdef::Entry,
+        read: bool,
+        value: u64,
+        physical: u64,
+    ) -> Outcome {
         if read {
             return match self.apple.impdef.read(entry) {
                 Ok(value) => Outcome::Read(value),
                 Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
             };
+        }
+        if entry.encoding == impdef::PMCR1_GL1 {
+            let context = self.pmu_context(false);
+            let retired = self.retired;
+            if let Some(pmu) = self.pmu.as_mut() {
+                pmu.set_guarded_filter(value, physical, retired, context);
+            }
         }
         match self.apple.impdef.write(entry, value) {
             Ok(()) => Outcome::Written(Changes {
@@ -858,7 +889,7 @@ impl Cpu {
                 "ACNTPCT_EL0 access below EL2 lacks permission qualification",
             )),
             impdef::JCTL_EL0 => match impdef::lookup(encoding, self.registers.chip()) {
-                Some(entry) => self.impdef_access(entry, read, value),
+                Some(entry) => self.impdef_access(entry, read, value, physical),
                 None => Outcome::Undefined,
             },
             CNTVCT_ALIAS_EL0 if !read => Outcome::Undefined,
@@ -1401,6 +1432,15 @@ mod tests {
         for encoding in [SPR_LOCKDOWN_EL2, SPR_LOCKDOWN_EL1, SPR_LOCKDOWN_COMMIT] {
             assert_eq!(write(&mut el1, encoding, 0), Outcome::Undefined);
         }
+    }
+
+    /// PMCR1_EL12, the EL1&0 regime's PMCR1, is UNDEFINED below EL2.
+    #[test]
+    fn pmcr1_el12_is_undefined_below_el2() {
+        let mut cpu = Cpu::new(0, Pstate::reset(1));
+        let pmcr1_el12 = super::super::pmu::PMCR1_EL12;
+        assert_eq!(cpu.apple_access(mrs(0, pmcr1_el12), 0), Outcome::Undefined);
+        assert_eq!(cpu.apple_access(msr(0, pmcr1_el12), 0), Outcome::Undefined);
     }
 
     /// A SIQ_CFG_EL1 write tells the board whether the PE now refuses the
