@@ -10,7 +10,13 @@
 //!
 //! The 26A434 J473AP kernel's PMGR `enable_core` writes `+0x4` and each
 //! cluster's start word for every secondary PE, a cleared bit leaving its
-//! core alone. Here `+0x4` holds what is written, a start bit queues that
+//! core alone. The J873GAP (M6) kernel's `T8152ACC::setCoreOnline` sets bit
+//! `6 * cluster + core` of `+0x4` and `T8152ACC::wakeCore` bit `core` of
+//! `+0x8 + 4 * cluster`, each read-modify-write and for clusters 0 and 1
+//! only (kernelcache 0xfffffe000a0474cc and 0xfffffe000a047634). It reaches
+//! them through `/arm-io/pmgr-child` register map 0x128, `reg[42]`
+//! (0x1_0073_0000) + 0x4004 and + 0x4008, which is `reg[0]` + 0x34000, the
+//! node's `misc-cores-offset`. Here `+0x4` holds what is written, a start bit queues that
 //! core's release for the machine ([`CpuStart::take`]), and the start words
 //! read 0. Stopping a core is not modelled: a stop request refuses, as does
 //! every other register.

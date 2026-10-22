@@ -90,7 +90,7 @@ pub use topology::{KernelLimits, assigned};
 /// `aon_fuses` the `/arm-io/pmgr` `reg` index of the always-on eFuses
 /// (`platform::apple::fuse`): the T8112's 26A434 `ApplePMGR::
 /// readPMGRAONFuseReg` reads `reg[36]`. `cpu_start` is the offset of the
-/// CPU start registers (`platform::apple::cpustart`) from `/arm-io/pmgr`
+/// CPU start registers (`platform::apple::cpustart`) from the PMGR node's
 /// `reg[0]` ([`CPU_START_T8112`] and its siblings). Each [`CoreType`] also
 /// holds its cache geometry ([`CoreCaches`]), where known.
 struct Soc {
@@ -335,8 +335,16 @@ const T8142_LIMITS: KernelLimits = KernelLimits::new(10, 2, 1);
 /// `t8112.dtsi` (0x39a88).
 const AIC3_EVENT: u64 = 0x40000;
 
-/// The CPU start registers' offsets from `/arm-io/pmgr` `reg[0]`, m1n1
-/// `src/smp.c` `CPU_START_OFF_*` and the chips its `smp_init` gives each.
+/// The generic `/arm-io/pmgr` of the M6, whose SoC registers are in
+/// `/arm-io/pmgr-child` (m1n1 `pmgr.c`).
+const PMGR2_ARCH: &str = "pmgr2,arch";
+
+/// The CPU start registers' offsets from the PMGR's `reg[0]` ([`cpu_start`]),
+/// m1n1 `src/smp.c` `CPU_START_OFF_*` and the chips its `smp_init` gives
+/// each. The M6's is also its `/arm-io/pmgr-child` `misc-cores-offset`,
+/// which the 26A434 J873GAP `AppleT8152PMGR` `HAL::initRegGroups` reads as
+/// the misc-cores register group at `reg[0]` plus that offset (kernelcache
+/// 0xfffffe000a05521c).
 const CPU_START_T8103: u64 = 0x54000;
 const CPU_START_T8112: u64 = 0x34000;
 const CPU_START_T6020: u64 = 0x28000;
@@ -685,7 +693,7 @@ const SOCS: [Soc; 18] = [
     Soc {
         chip_id: 0x8152,
         name: "Apple M6",
-        pmgr: "pmgr2,arch",
+        pmgr: PMGR2_ARCH,
         chip: Chip::AppleM6,
         cores: &M6_CORES,
         aic: Some(("aic,3", AIC3_EVENT)),
@@ -695,9 +703,9 @@ const SOCS: [Soc; 18] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        // The original PMGR2 architecture node has no reg aperture. Its
-        // child register layout does not establish PMGR1 CPU-start offsets.
-        cpu_start: None,
+        // In `/arm-io/pmgr-child` (`pmgr2,t8152`), whose
+        // `misc-cores-offset` is 0x34000.
+        cpu_start: Some(CPU_START_T8112),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -1705,8 +1713,8 @@ pub struct Board {
     pub performance: Vec<PerfBank>,
     /// AOP wake masks and reporting source IDs.
     pub wake_masks: Option<WakeBank>,
-    /// The CPU start registers' guest PA and the clusters they start, under
-    /// the same conditions.
+    /// The CPU start registers' guest PA and the clusters they start, where
+    /// the SoC row places them ([`cpu_start`]).
     pub cpu_start: Option<(u64, u8)>,
     /// Visible SPMI controllers and the PMUs on them.
     pub spmis: Vec<SpmiController>,
@@ -3643,12 +3651,10 @@ fn pmgr_registers(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     chip_id: u32,
-    processors: &[Identity],
 ) -> Result<PmgrRegisters, String> {
     let none = PmgrRegisters {
         clusters: Vec::new(),
         aon_fuses: None,
-        cpu_start: None,
         wake_masks: None,
         energy: Vec::new(),
         performance: Vec::new(),
@@ -3728,21 +3734,6 @@ fn pmgr_registers(
                 .ok_or_else(|| format!("/arm-io/pmgr reg[{index}] is not the eFuse block"))
         })
         .transpose()?;
-    let mut cluster_ids: Vec<u64> = processors.iter().map(|pe| (pe.mpidr >> 8) & 0xff).collect();
-    cluster_ids.sort_unstable();
-    cluster_ids.dedup();
-    let clusters_started = cluster_ids.last().map_or(0, |&last| last as u8 + 1);
-    let cpu_start = match (soc.cpu_start, reg.first().copied().flatten()) {
-        (None, _) => None,
-        (Some(offset), Some((base, bytes)))
-            if offset + cpustart::bytes(clusters_started) <= bytes =>
-        {
-            Some((base + offset, clusters_started))
-        }
-        (Some(_), _) => {
-            return Err("/arm-io/pmgr reg[0] does not hold the CPU start registers".into());
-        }
-    };
     let bridges = place_bridges(&node, &reg, soc.bridge_fields)?;
     let cluster_events = acc_events(&node, clusters.len())?;
     let power_banks = place_power_banks(&reg, soc.power_banks)?;
@@ -3766,8 +3757,56 @@ fn pmgr_registers(
         energy,
         clusters,
         aon_fuses: fuses,
-        cpu_start,
     })
+}
+
+/// The CPU start registers' guest PA and the clusters they start, where the
+/// SoC row gives their offset ([`CPU_START_T8112`] and its siblings) from
+/// `reg[0]` of the PMGR node: `/arm-io/pmgr`, or `/arm-io/pmgr-child` where
+/// `/arm-io/pmgr` is the generic `pmgr2,arch` (m1n1 `pmgr.c`
+/// `pmgr_adt_path_offset_trace`; the 26A434 ApplePMGR "Looked up under
+/// 'pmgr' and 'pmgr-child'"), when `/arm-io/pmgr` is the row's `pmgr`. The
+/// registers must lie in that `reg[0]` with a start word for each cluster
+/// of the board's PEs.
+fn cpu_start(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
+    chip_id: u32,
+    processors: &[Identity],
+) -> Result<Option<(u64, u8)>, String> {
+    let Some(soc) = SOCS.iter().find(|soc| soc.chip_id == chip_id) else {
+        return Ok(None);
+    };
+    let (Some(offset), Some(pmgr)) = (soc.cpu_start, io.child("pmgr")) else {
+        return Ok(None);
+    };
+    if !pmgr.compatible(soc.pmgr) {
+        return Ok(None);
+    }
+    let (name, node) = if pmgr.compatible(PMGR2_ARCH) {
+        let child = io
+            .child("pmgr-child")
+            .ok_or("/arm-io/pmgr is pmgr2,arch without /arm-io/pmgr-child")?;
+        ("pmgr-child", child)
+    } else {
+        ("pmgr", pmgr)
+    };
+    let (base, bytes) = apertures::registers(&node)
+        .and_then(|reg| reg.first().copied())
+        .ok_or_else(|| format!("/arm-io/{name} has no reg"))?;
+    let clusters = processors
+        .iter()
+        .map(|pe| ((pe.mpidr >> 8) & 0xff) as u8 + 1)
+        .max()
+        .unwrap_or(0);
+    if offset + cpustart::bytes(clusters) > bytes {
+        return Err(format!(
+            "/arm-io/{name} reg[0] does not hold the CPU start registers"
+        ));
+    }
+    let physical = translate(base + offset, cpustart::bytes(clusters))
+        .ok_or_else(|| format!("/arm-io/{name} reg[0] is outside /arm-io ranges"))?;
+    Ok(Some((physical, clusters)))
 }
 
 /// Special CPU event types2/7 select E/P ACC accessors, not the SOC-bank
@@ -4179,7 +4218,6 @@ struct PmgrRegisters {
     energy: Vec<EnergyBank>,
     clusters: Vec<CpuCluster>,
     aon_fuses: Option<(u64, u64)>,
-    cpu_start: Option<(u64, u8)>,
 }
 
 /// `/arm-io/mcc`, if it is a modeled memory cache controller. Its planes
@@ -5037,8 +5075,8 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         energy,
         clusters,
         aon_fuses,
-        cpu_start,
-    } = pmgr_registers(&io, &extent, chip_id, &cpus.processors)?;
+    } = pmgr_registers(&io, &extent, chip_id)?;
+    let cpu_start = cpu_start(&io, &extent, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &extent, chip_id, memory_controller.as_ref())?;
     let direct_memory_cache =
         memory_resources::direct_memory_cache(&io, &extent, memory_controller.as_ref())?;
@@ -9030,10 +9068,75 @@ mod tests {
         }
     }
 
+    /// The CPU start registers sit in `/arm-io/pmgr` `reg[0]`, or in
+    /// `/arm-io/pmgr-child` `reg[0]` under the M6's `pmgr2,arch`, with a
+    /// start word for each cluster (J873GAP: `pmgr-child` `reg[0]` is
+    /// 0x1_0070_0000 for 0xd0000 bytes, two clusters).
+    #[test]
+    fn cpu_start_registers_follow_the_pmgr_node_with_registers() {
+        use crate::machine::adt::encode;
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let reg = |base: u64, bytes: u64| [base.to_le_bytes(), bytes.to_le_bytes()].concat();
+        let io = |pmgr: &str, pmgr_reg: Option<(u64, u64)>, child: Option<(u64, u64)>| {
+            let (name, compatible) = (z("pmgr"), z(pmgr));
+            let pmgr_reg = pmgr_reg.map(|(base, bytes)| reg(base, bytes));
+            let mut properties: Vec<(&str, &[u8])> =
+                vec![("name", &name), ("compatible", &compatible)];
+            if let Some(pmgr_reg) = &pmgr_reg {
+                properties.push(("reg", pmgr_reg));
+            }
+            let mut children = vec![encode(&properties, &[])];
+            if let Some((base, bytes)) = child {
+                children.push(encode(
+                    &[
+                        ("name", &z("pmgr-child")),
+                        ("compatible", &z("pmgr2,t8152")),
+                        ("reg", &reg(base, bytes)),
+                    ],
+                    &[],
+                ));
+            }
+            let io = encode(&[("name", &z("arm-io"))], &children);
+            encode(&[("name", &z("device-tree"))], &[io])
+        };
+        let place = |tree: &[u8], chip_id, clusters: &[u64]| {
+            let processors: Vec<Identity> = clusters
+                .iter()
+                .map(|&cluster| Identity {
+                    midr: 0,
+                    mpidr: 0x8000_0000 | cluster << 8,
+                    clock: None,
+                    caches: None,
+                })
+                .collect();
+            let root = Node::root(tree).unwrap();
+            let io = root.child("arm-io").unwrap();
+            let translate = |address: u64, _| Some(address + 0x2_0000_0000);
+            cpu_start(&io, &translate, chip_id, &processors)
+        };
+        let m6 = io("pmgr2,arch", None, Some((0x1_0070_0000, 0xd0000)));
+        assert_eq!(place(&m6, 0x8152, &[0, 1]), Ok(Some((0x3_0073_4000, 2))));
+        assert_eq!(
+            place(&io("pmgr2,arch", None, None), 0x8152, &[0, 1]),
+            Err("/arm-io/pmgr is pmgr2,arch without /arm-io/pmgr-child".into())
+        );
+        let short = io("pmgr2,arch", None, Some((0x1_0070_0000, 0x34008)));
+        assert_eq!(
+            place(&short, 0x8152, &[0, 1]),
+            Err("/arm-io/pmgr-child reg[0] does not hold the CPU start registers".into())
+        );
+        // An M3 (J613AP `reg[0]` 0xc070_0000 for 0xcc000 bytes) without a
+        // modeled PMGR still has its CPU start registers.
+        let m3 = io("pmgr1,t8122", Some((0xc070_0000, 0xcc000)), None);
+        assert_eq!(place(&m3, 0x8122, &[0, 1]), Ok(Some((0x2_c073_4000, 2))));
+        // Another SoC's PMGR is not the row's.
+        assert_eq!(place(&m3, 0x8132, &[0, 1]), Ok(None));
+    }
+
     #[test]
     fn core_requirements_keep_unknown_m6_capabilities_explicit() {
         let soc = SOCS.iter().find(|soc| soc.chip_id == 0x8152).unwrap();
-        assert_eq!(soc.cpu_start, None);
+        assert_eq!(soc.cpu_start, Some(CPU_START_T8112));
         let cores = core_types(0x8152).unwrap();
         assert_eq!(
             cores
