@@ -14,10 +14,11 @@ impl AppleDevices {
         mut memory: Option<&mut dyn CanonicalDeviceMemory>,
     ) -> Result<ConsumedWrite, DeviceError> {
         let width = width(bytes)?;
-        let canonical = self.read_needs_ram(physical, DeviceReadShape::Scalar { bytes });
+        let canonical = self.read_needs_ram(physical, DeviceReadShape::Scalar { bytes })
+            || self.empty_cache_flush_needs_ram(physical, width);
         if canonical && memory.is_none() {
             return Err(DeviceError::TransferRefused(
-                "DCS drain write requires the actual live canonical RAM service".into(),
+                "memory controller write requires the actual live canonical RAM service".into(),
             ));
         }
         let reached: Result<Option<Reset>, DeviceError> = (|| {
@@ -48,13 +49,22 @@ impl AppleDevices {
                     .as_mut()
                     .expect("canonical write requires its live service");
                 let (device, offset) = self.bus.route(physical, width).map_err(describe)?;
-                let owner = memory_resources::resource_for(&self.bus, device)
-                    .expect("exclusive board borrow retains the classified prepared owner");
-                // SAFETY: the sealed consuming owner retains the whole stopped
-                // native cohort and closed synchronous RAM producer set. No RAM
-                // publication, new submission or native resume occurs here.
-                unsafe { owner.write_ram_drain(offset, width, value, now, memory.memory()) }
-                    .map_err(|reason| DeviceError::TransferRefused(reason.into()))
+                if let Some(owner) = self
+                    .bus
+                    .device_mut::<memory_resources::t8112::cache::EmptyResource>(device)
+                {
+                    owner
+                        .write_ram_flush(offset, width, value, now, &mut **memory)
+                        .map_err(|reason| DeviceError::TransferRefused(reason.into()))
+                } else {
+                    let owner = memory_resources::resource_for(&self.bus, device)
+                        .expect("exclusive board borrow retains the classified prepared owner");
+                    // SAFETY: the sealed consuming owner retains the whole stopped
+                    // native cohort and closed synchronous RAM producer set. No RAM
+                    // publication, new submission or native resume occurs here.
+                    unsafe { owner.write_ram_drain(offset, width, value, now, memory.memory()) }
+                        .map_err(|reason| DeviceError::TransferRefused(reason.into()))
+                }
             } else {
                 self.bus
                     .write(physical, width, value, &mut access)

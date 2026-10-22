@@ -8,12 +8,13 @@
 //! Construction initializes declared software backing, never hardware readiness,
 //! native PMP services, DVFS completion or an AP AIC wire.
 use super::dcs::NativeDcs;
+pub use crate::platform::apple::dcs::native::{CHANNEL_STRIDE, CHANNELS, ChannelConfiguration};
 use crate::{
     machine::soc::MemoryCache,
     memory::{CanonicalRamService, RegisteredSystemRam},
     platform::apple::{
         bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-        dcs::native::{CHANNEL_STRIDE, CHANNELS, ChannelConfiguration, ChannelProgress},
+        dcs::native::ChannelProgress,
         ptd::{
             self, Geometry, Ptd,
             transport::{

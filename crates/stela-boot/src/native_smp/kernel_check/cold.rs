@@ -7,6 +7,7 @@ mod tree;
 const STR_X0_X1: u32 = 0xf9000020;
 const LDR_X6_X1: u32 = 0xf9400026;
 const LDR_W10_X9: u32 = 0xb940012a;
+const STR_W11_X12: u32 = 0xb900018b;
 const LDRSW_X3_X2: u32 = 0xb9800043;
 const LDP_X4_X5_X2_POST16: u32 = 0xa8c11444;
 const LDP_X7_X8_X2_POST16: u32 = 0xa8c12047;
@@ -39,6 +40,21 @@ impl Devices for Device {
     }
     fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
         Err(DeviceError::NoDevice)
+    }
+    fn write_canonical(
+        &mut self,
+        pe: usize,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+        owners: &mut dyn engine::CanonicalDeviceWrite,
+    ) -> Result<engine::ConsumedWrite, DeviceError> {
+        if physical != mcc::FLUSH || bytes != 4 || value != 1 {
+            return Err(DeviceError::NoDevice);
+        }
+        self.memory
+            .write_canonical(pe, physical, bytes, value, now, owners)
     }
     fn lines(&mut self, _: usize, _: u64) -> Lines {
         Lines::default()
@@ -152,6 +168,9 @@ pub(super) unsafe fn check(
     source::constant(&mut words, 0, VALUE);
     source::constant(&mut words, 1, source::DATA);
     words.extend_from_slice(&[STR_X0_X1, LDR_X6_X1, DSB_SY]);
+    source::constant(&mut words, 11, 1);
+    source::constant(&mut words, 12, mcc::FLUSH);
+    words.push(STR_W11_X12);
     source::constant(&mut words, 9, mcc::DRAIN);
     words.push(LDR_W10_X9);
     source::constant(&mut words, 2, source::READY);
@@ -221,6 +240,8 @@ pub(super) unsafe fn check(
     expected.x[8] = 0xdddd;
     expected.x[9] = mcc::DRAIN;
     expected.x[10] = 0;
+    expected.x[11] = 1;
+    expected.x[12] = mcc::FLUSH;
     crate::output::arguments(format_args!(
         "NATIVE COLD frame pc={:#x} retired={} pstate={:?} state={:?}\n",
         machine.cpu.pc, machine.cpu.retired, machine.cpu.pstate, machine.cpu.state
@@ -231,6 +252,13 @@ pub(super) unsafe fn check(
         || machine.devices.reads != 3
         || machine.devices.drains != 1
         || machine.devices.observed_ram != Some(VALUE)
+        || machine
+            .devices
+            .memory
+            .t8112_cache_progress()
+            .is_none_or(|progress| {
+                progress.completed_flushes != 1 || progress.latest_flush.is_none()
+            })
         || machine.cpu.pstate != Pstate::reset(2)
     {
         return Err("cold complete frame/data/writeback/retirement mismatch");
@@ -238,11 +266,17 @@ pub(super) unsafe fn check(
     if unsafe { machine.complete_device_read() }.is_ok()
         || machine.devices.reads != 3
         || unsafe { machine.native_round() }.is_ok()
+        || machine
+            .devices
+            .memory
+            .t8112_cache_progress()
+            .map(|progress| progress.completed_flushes)
+            != Some(1)
     {
         return Err("cold consumed read replayed or resumed after failed settlement");
     }
     crate::output::arguments(format_args!(
-        "CHECK native-cold PASS actual_BSP=1 warmup=none live_ADT_publish=canonical checked_Device_RAM=store+load CPU_DSB=1 actual_MCC_drain=1 consumed_reads=4 scalar_signextend=1 pair_writeback=2 postfailure_retired=1 full_frame=preserved replay=refused; no macOS/SMP/DRAM completion claim\n"
+        "CHECK native-cold PASS actual_BSP=1 warmup=none live_ADT_publish=canonical checked_Device_RAM=store+load CPU_DSB=1 actual_MCC_drain=1 actual_empty_cache_flush=1 consumed_reads=4 scalar_signextend=1 pair_writeback=2 postfailure_retired=1 full_frame=preserved replay=refused; no macOS/SMP/DRAM completion claim\n"
     ));
     Ok(())
 }

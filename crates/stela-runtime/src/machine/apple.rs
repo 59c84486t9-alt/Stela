@@ -87,6 +87,7 @@ mod display_resources;
 pub mod memory_resources;
 mod service;
 mod sleep;
+mod t8112_memory;
 pub use service::{AicDelivery, ServiceBatch, ServiceInput};
 pub use sleep::PowerLog;
 
@@ -3169,6 +3170,16 @@ impl Devices for AppleDevices {
             return [None; amcc::GROUPS];
         };
         if let Some(owner) = self.bus.device::<memory_resources::Prepared>(device) {
+            owner.locked_regions()
+        } else if let Some(owner) = self
+            .bus
+            .device::<memory_resources::t8112::cache::EmptyResource>(device)
+        {
+            owner.locked_regions()
+        } else if let Some(owner) = self
+            .bus
+            .device::<memory_resources::t8112::amcc::LockResource>(device)
+        {
             owner.locked_regions()
         } else {
             self.bus

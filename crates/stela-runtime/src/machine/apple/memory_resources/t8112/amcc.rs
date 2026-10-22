@@ -273,7 +273,7 @@ impl MmioDevice for LockResource {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(in crate::machine::apple) mod tests {
     use super::super::tests::{configuration, descriptor, ram_at};
     use super::*;
     use crate::{
@@ -298,7 +298,7 @@ pub(super) mod tests {
     struct Storage(UnsafeCell<[u8; 0x8000]>);
     // SAFETY: the fixture transfers these stable, disjoint bytes to registration.
     unsafe impl Sync for Storage {}
-    pub(in super::super) fn ram() -> Arc<RegisteredSystemRam> {
+    pub(in crate::machine::apple) fn ram() -> Arc<RegisteredSystemRam> {
         let storage = Arc::new(Storage(UnsafeCell::new([0; 0x8000])));
         let range = ReservedSystemRamRange {
             source_pa: RAM,
@@ -309,7 +309,7 @@ pub(super) mod tests {
         // SAFETY: no PE or independent producer exists; fixture owns all bytes.
         Arc::new(unsafe { fixture(&[range], storage) })
     }
-    pub(in super::super) fn source() -> MemoryController {
+    pub(in crate::machine::apple) fn source() -> MemoryController {
         let limit = |offset| Register {
             offset,
             mask: u32::MAX,
@@ -344,7 +344,7 @@ pub(super) mod tests {
             },
         }
     }
-    pub(in super::super) fn frontend(ram: Arc<RegisteredSystemRam>) -> Prepared {
+    pub(in crate::machine::apple) fn frontend(ram: Arc<RegisteredSystemRam>) -> Prepared {
         let mut d = descriptor();
         d.cache.shared = SHARED;
         d.cache.broadcast = BROADCAST;
