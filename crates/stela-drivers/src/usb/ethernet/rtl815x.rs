@@ -3,6 +3,9 @@
 //! Linux r8152 register/OCP and distinct RTL8152B/RTL8153A startup paths.
 //! Revision-specific implementations must be ready before configuration selection.
 use super::registers::*;
+use crate::usb::xhci::{
+    DEVICE_TO_HOST, FULL_SPEED, HIGH_SPEED, LOW_SPEED, SUPER_SPEED, TYPE_VENDOR, setup,
+};
 use crate::{block::BlockError, net::Mac};
 use alloc::vec::Vec;
 mod rtl8153a;
@@ -32,12 +35,21 @@ const PHYSTATUS_10: u32 = 0x04;
 pub use super::Control;
 
 /// Hardware identity, read from PLA_TCR0, independently of USB product strings.
+/// Linux `RTL8152_REQ_GET_REGS` and `RTL8152_REQ_SET_REGS`.
+const REGISTERS_REQUEST: u8 = 5;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Revision(pub u16);
 
 impl Revision {
     pub(crate) fn request() -> [u8; 8] {
-        super::super::xhci::setup(0xc0, 5, PLA_TCR0 as u16, PLA, 4)
+        setup(
+            DEVICE_TO_HOST | TYPE_VENDOR,
+            REGISTERS_REQUEST,
+            PLA_TCR0 as u16,
+            PLA,
+            4,
+        )
     }
 
     pub(crate) fn from_register(bytes: &[u8]) -> Result<Self, BlockError> {
@@ -129,11 +141,7 @@ impl<C: Control> Chip<C> {
         Self::attach_with_firmware(
             io,
             expected,
-            if full_speed {
-                super::super::xhci::FULL_SPEED
-            } else {
-                super::super::xhci::HIGH_SPEED
-            },
+            if full_speed { FULL_SPEED } else { HIGH_SPEED },
             None,
         )
     }
@@ -192,7 +200,7 @@ impl<C: Control> Chip<C> {
         } else if chip.revision.is_8156() {
             chip.initialize_8156(firmware)?;
         } else {
-            chip.initialize(speed <= super::super::xhci::LOW_SPEED)?;
+            chip.initialize(matches!(speed, FULL_SPEED | LOW_SPEED))?;
         }
         // set_ethernet_addr leaves revision01 IDR untouched. Later revisions
         // restore the permanent backup address through the configuration gate.
@@ -236,7 +244,7 @@ impl<C: Control> Chip<C> {
         }
         if self.revision.is_8153b()
             || self.revision.is_8153c()
-            || (self.revision.is_8153a() && self.usb_speed >= super::super::xhci::SUPER_SPEED)
+            || (self.revision.is_8153a() && self.usb_speed >= SUPER_SPEED)
         {
             32 * 1024
         } else {
@@ -267,7 +275,13 @@ impl<C: Control> Chip<C> {
         }
         // The donor's word read passes the duplicated byte enables too.
         let index = bank | if width == 2 { 0x33 << shift } else { 0 };
-        let request = super::super::xhci::setup(0xc0, 5, (address & !3) as u16, index, 4);
+        let request = setup(
+            DEVICE_TO_HOST | TYPE_VENDOR,
+            REGISTERS_REQUEST,
+            (address & !3) as u16,
+            index,
+            4,
+        );
         let bytes = self.transaction(request, &[])?;
         let Ok(data) = <[u8; 4]>::try_from(bytes) else {
             self.accessible = false;
@@ -291,7 +305,13 @@ impl<C: Control> Chip<C> {
             2 => 0x33,
             _ => 0xff,
         } << shift;
-        let request = super::super::xhci::setup(0x40, 5, (address & !3) as u16, bank | enables, 4);
+        let request = setup(
+            TYPE_VENDOR,
+            REGISTERS_REQUEST,
+            (address & !3) as u16,
+            bank | enables,
+            4,
+        );
         let mask = u32::MAX >> ((4 - width) * 8);
         self.transaction(request, &((value & mask) << (shift * 8)).to_le_bytes())?;
         Ok(())

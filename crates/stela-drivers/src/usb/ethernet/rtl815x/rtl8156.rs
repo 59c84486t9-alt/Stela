@@ -137,7 +137,7 @@ impl<C: Control> Chip<C> {
             self.phy_modify(
                 OCP_10GBT_CTRL,
                 MDIO_ADV_MULTIGIG_MASK,
-                if self.usb_speed >= super::super::super::xhci::SUPER_SPEED {
+                if self.usb_speed >= SUPER_SPEED {
                     MDIO_ADV_2500
                 } else {
                     0
@@ -202,7 +202,7 @@ impl<C: Control> Chip<C> {
         self.write(PLA, PLA_CRWECR, 1, 0xc0)?;
         self.modify(PLA, PLA_CONFIG34, 2, LINK_OFF_WAKE_EN, 0)?;
         self.write(PLA, PLA_CRWECR, 1, 0)?;
-        if self.usb_speed >= super::super::super::xhci::SUPER_SPEED {
+        if self.usb_speed >= SUPER_SPEED {
             self.u1u2_8153b(true)?;
         }
         if self.revision.is_8156b() {
@@ -288,7 +288,7 @@ impl<C: Control> Chip<C> {
         // Wake filters were preserved throughout this non-suspending path.
         self.aldps(true)?;
         self.u2p3(true)?;
-        if self.usb_speed >= super::super::super::xhci::SUPER_SPEED {
+        if self.usb_speed >= SUPER_SPEED {
             self.u1u2_8153b(true)?;
         }
         Ok(())
@@ -413,7 +413,11 @@ mod tests {
                         let hw = model.borrow();
                         assert_eq!(
                             hw.core.get(PLA, OCP_10GBT_CTRL, 2) & MDIO_ADV_MULTIGIG_MASK,
-                            if speed >= 4 { MDIO_ADV_2500 } else { 0 }
+                            if speed >= SUPER_SPEED {
+                                MDIO_ADV_2500
+                            } else {
+                                0
+                            }
                         );
                         assert_eq!(hw.core.get(PLA, OCP_EEE_ADV2, 2), 0xfffc);
                         assert_eq!(hw.core.get(PLA, PLA_RCR1, 2), 0xa53f);

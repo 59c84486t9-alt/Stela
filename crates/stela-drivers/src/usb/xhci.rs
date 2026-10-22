@@ -1,6 +1,6 @@
 //! xHCI host controllers (PCI class 0C0330) that the mount drives itself
 //! after ExitBootServices, polled, for the host's USB keyboards, pointers,
-//! disks and Ethernet adapters.
+//! disks, Ethernet adapters, Bluetooth controllers and audio devices.
 //!
 //! Evidence: eXtensible Host Controller Interface 1.2: initialization
 //! (4.2), the USB Legacy Support capability and BIOS handoff (7.1), the
@@ -18,10 +18,12 @@
 //! buffers come from aligned DMA pages). Contexts are 32 or 64 bytes as
 //! HCCPARAMS1.CSZ says; scratchpad pages are given when the controller
 //! asks. Devices are enumerated once, at attach: every powered root port
-//! with a connection is reset (USB 2 ports) or trained (USB 3 ports), and
-//! every USB 2.0 hub's ports are powered, reset and enumerated in turn,
-//! with each slot's route string and, for low- and full-speed devices
-//! behind a high-speed hub, its transaction translator. A STALL on a
+//! with a connection is debounced, then reset (USB 2 ports) or trained (USB 3
+//! ports, warm-reset out of SS.Inactive or Compliance), with up to four
+//! reset/enumeration attempts as in Linux `hub_port_init`. Every USB 2.0 hub's
+//! ports are powered, reset and enumerated in turn, with each slot's route
+//! string and, for low- and full-speed devices behind a high-speed hub, its
+//! single or multiple transaction translator. A STALL on a
 //! control pipe resets the endpoint and fails the request; on a bulk or
 //! interrupt pipe it also clears the device's halt (USB 2.0 9.4.5). Missing
 //! transfer completions require acknowledged Stop Endpoint and Set TR Dequeue;
@@ -30,7 +32,7 @@
 //! independently proven controller reset (not implemented as recovery here).
 //!
 //! Root-direct FS/HS isochronous service intervals use the dedicated queued
-//! submit_iso/completed_iso API on audited AMD/QEMU PCI profiles. Payloads fit
+//! submit_iso/completed_iso API on any xHCI 1.0+ controller. Payloads fit
 //! one TRB/service and completion ownership survives uncertain cancellation.
 //!
 //! Refused rather than handled: SuperSpeed hubs (they need Set Hub Depth
@@ -251,6 +253,7 @@ pub const CONFIGURATION_DESCRIPTOR: u8 = 2;
 pub const STRING_DESCRIPTOR: u8 = 3;
 pub const INTERFACE_DESCRIPTOR: u8 = 4;
 pub const ENDPOINT_DESCRIPTOR: u8 = 5;
+pub const INTERFACE_ASSOCIATION_DESCRIPTOR: u8 = 11;
 const HUB_DESCRIPTOR: u8 = 0x29;
 const HUB_CLASS: u8 = 9;
 /// The multi-TT hub bDeviceProtocol (USB 2.0 11.23.1), and the interface

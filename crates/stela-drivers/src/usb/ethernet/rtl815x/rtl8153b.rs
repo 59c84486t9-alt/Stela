@@ -141,7 +141,7 @@ impl<C: Control> Chip<C> {
             CUR_LINK_OK,
             POLL_LINK_CHG | if linked { CUR_LINK_OK } else { 0 },
         )?;
-        if self.usb_speed >= super::super::super::xhci::SUPER_SPEED {
+        if self.usb_speed >= SUPER_SPEED {
             self.u1u2_8153b(true)?;
         }
         self.modify(PLA, PLA_MAC_PWR_CTRL2, 2, 0, MAC_CLK_SPDWN_EN)?;
@@ -160,7 +160,7 @@ impl<C: Control> Chip<C> {
         self.write(USB, USB_RX_BUF_TH, 4, RX_THR_B)?;
         self.modify(PLA, PLA_MAC_PWR_CTRL3, 2, PLA_MCU_SPDWN_EN, 0)?;
         self.aldps(true)?;
-        if self.usb_speed >= super::super::super::xhci::SUPER_SPEED {
+        if self.usb_speed >= SUPER_SPEED {
             self.u1u2_8153b(true)?;
         }
         Ok(())
@@ -253,7 +253,7 @@ mod tests {
                         assert_eq!(hw.core.get(USB, USB_POWER_CUT, 2), PHASE2_EN);
                         assert_eq!(
                             hw.core.get(USB, USB_LPM_CONFIG, 2) & LPM_U1U2_EN,
-                            if speed >= 4 { LPM_U1U2_EN } else { 0 }
+                            if speed >= SUPER_SPEED { LPM_U1U2_EN } else { 0 }
                         );
                         assert_eq!(
                             hw.core.get(PLA, OCP_ADC_IOFFSET, 2),

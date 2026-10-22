@@ -156,7 +156,7 @@ mod tests {
                             hw.core.get(PLA, OCP_10GBT_CTRL, 2),
                             if revision == 0x7420 {
                                 0x1020
-                            } else if speed >= 4 {
+                            } else if speed >= SUPER_SPEED {
                                 0xa0
                             } else {
                                 0x20

@@ -9,7 +9,8 @@
 //!
 //! Attachment opens a **raw transport** and always leaves firmware initialization
 //! [`FirmwareStatus::Unverified`]. It does not reset/initialize a controller,
-//! load firmware, pair, advertise, manage HCI credits or provide profiles.
+//! load firmware, pair, advertise or provide profiles. The vendor initializers
+//! below honor the controller's Num_HCI_Command_Packets credits.
 //! The explicit [`intel::initialize`] path adds identified Intel legacy-RSA
 //! bootloader bulk framing and returns a controller-specific firmware report.
 //! The explicit native [`Hci::initialize_with_provider`] consumer retains owned

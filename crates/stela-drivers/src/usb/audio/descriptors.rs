@@ -4,12 +4,20 @@
 use super::{CLASS, CONTROL_SUBCLASS, Error, STREAMING_SUBCLASS, UAC2};
 use crate::{
     audio::Direction,
-    usb::xhci::{Endpoint, Interface},
+    usb::xhci::{
+        ENDPOINT_DESCRIPTOR, Endpoint, FULL_SPEED, HIGH_SPEED, INTERFACE_ASSOCIATION_DESCRIPTOR,
+        INTERFACE_DESCRIPTOR, Interface,
+    },
 };
 use alloc::vec::Vec;
 
 const CS_INTERFACE: u8 = 0x24;
 const CS_ENDPOINT: u8 = 0x25;
+const ISOCHRONOUS: u8 = 1;
+/// bmAttributes usage type (USB 2.0 Table 9-13).
+const USAGE: u8 = 0x30;
+const FEEDBACK: u8 = 0x10;
+const IMPLICIT_FEEDBACK: u8 = 0x20;
 const USB_STREAMING: u16 = 0x0101;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -372,7 +380,7 @@ fn scope(
         }
         let d = &configuration[at..at + n];
         match d[1] {
-            4 => {
+            INTERFACE_DESCRIPTOR => {
                 if n < 9
                     || expected.is_some_and(|count| count != endpoint_count)
                     || settings.contains(&(d[2], d[3]))
@@ -389,7 +397,7 @@ fn scope(
                 endpoint_count = 0;
                 addresses.clear();
             }
-            5 => {
+            ENDPOINT_DESCRIPTOR => {
                 if n < 7 || expected.is_none() || addresses.contains(&d[2]) {
                     return Err(Error::Descriptor("invalid audio endpoint extent/count"));
                 }
@@ -398,7 +406,7 @@ fn scope(
             }
             _ => {}
         }
-        if d[1] == 11 {
+        if d[1] == INTERFACE_ASSOCIATION_DESCRIPTOR {
             if n != 8 || d[3] == 0 {
                 return Err(Error::Descriptor("invalid interface association"));
             }
@@ -471,13 +479,13 @@ fn format(
     let data: Vec<_> = interface
         .endpoints
         .iter()
-        .filter(|ep| ep.kind() == 1 && ep.attributes & 0x30 != 0x10)
+        .filter(|ep| ep.kind() == ISOCHRONOUS && ep.attributes & USAGE != FEEDBACK)
         .copied()
         .collect();
     let feedback: Vec<_> = interface
         .endpoints
         .iter()
-        .filter(|ep| ep.kind() == 1 && ep.attributes & 0x30 == 0x10)
+        .filter(|ep| ep.kind() == ISOCHRONOUS && ep.attributes & USAGE == FEEDBACK)
         .copied()
         .collect();
     if data.len() != 1
@@ -501,7 +509,7 @@ fn format(
         (1, Direction::Capture) => Sync::Synchronous,
         (1, Direction::Playback) => {
             if let Some(fb) = feedback.first().copied() {
-                if !fb.is_in() || capacity(fb, speed)? < if speed == 3 { 4 } else { 3 } {
+                if !fb.is_in() || capacity(fb, speed)? < if speed == HIGH_SPEED { 4 } else { 3 } {
                     return Err(Error::Descriptor("UAC2 feedback endpoint"));
                 }
                 service_interval(fb, speed)?;
@@ -526,7 +534,11 @@ fn format(
                     .endpoints
                     .first()
                     .copied()
-                    .filter(|e| e.kind() == 1 && e.is_in() && e.attributes & 0x30 == 0x20)
+                    .filter(|e| {
+                        e.kind() == ISOCHRONOUS
+                            && e.is_in()
+                            && e.attributes & USAGE == IMPLICIT_FEEDBACK
+                    })
                     .ok_or(Error::Unsupported(
                         "adjacent AS interface is not implicit feedback",
                     ))?;
@@ -579,9 +591,9 @@ fn format(
 pub(super) fn capacity(endpoint: Endpoint, speed: u8) -> Result<usize, Error> {
     let packet = usize::from(endpoint.max_packet & 0x7ff);
     let extra = (endpoint.max_packet >> 11) & 3;
-    if endpoint.kind() != 1
+    if endpoint.kind() != ISOCHRONOUS
         || endpoint.attributes & 0xc0 != 0
-        || endpoint.attributes & 0x30 == 0x30
+        || endpoint.attributes & USAGE == USAGE
         || endpoint.address & 0x70 != 0
         || endpoint.address & 15 == 0
         || packet == 0
@@ -591,8 +603,8 @@ pub(super) fn capacity(endpoint: Endpoint, speed: u8) -> Result<usize, Error> {
         return Err(Error::Descriptor("invalid USB2 isochronous endpoint"));
     }
     match speed {
-        1 if packet <= 1023 && extra == 0 => Ok(packet),
-        3 if packet <= 1024 && extra <= 2 => Ok(packet * (usize::from(extra) + 1)),
+        FULL_SPEED if packet <= 1023 && extra == 0 => Ok(packet),
+        HIGH_SPEED if packet <= 1024 && extra <= 2 => Ok(packet * (usize::from(extra) + 1)),
         _ => Err(Error::Unsupported(
             "USB audio requires full/high-speed isochronous transport",
         )),
@@ -603,8 +615,8 @@ pub(super) fn service_interval(endpoint: Endpoint, speed: u8) -> Result<u32, Err
         return Err(Error::Descriptor("invalid isochronous bInterval"));
     }
     match speed {
-        1 => Ok(8u32 << u32::from(endpoint.interval - 1)),
-        3 => Ok(1u32 << u32::from(endpoint.interval - 1)),
+        FULL_SPEED => Ok(8u32 << u32::from(endpoint.interval - 1)),
+        HIGH_SPEED => Ok(1u32 << u32::from(endpoint.interval - 1)),
         _ => Err(Error::Unsupported("USB audio speed")),
     }
 }

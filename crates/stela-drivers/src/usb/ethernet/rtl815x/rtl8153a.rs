@@ -110,9 +110,7 @@ impl<C: Control> Chip<C> {
         self.modify(USB, USB_CSR_DUMMY2, 1, 0, EP4_FULL_FC)?;
         self.modify(USB, USB_WDT11_CTRL, 2, TIMER11_EN, 0)?;
         self.modify(PLA, PLA_LED_FEATURE, 2, LED_MODE_MASK, 0)?;
-        let timer = if self.revision.0 == 0x5c10
-            && self.usb_speed < super::super::super::xhci::SUPER_SPEED
-        {
+        let timer = if self.revision.0 == 0x5c10 && self.usb_speed < SUPER_SPEED {
             LPM_TIMER_500MS
         } else {
             LPM_TIMER_500US
@@ -366,7 +364,10 @@ mod tests {
                     .unwrap();
                     assert_eq!(mac.0, [2, 0x11, 0x22, 0x33, 0x44, 0x55]);
                     assert!(chip.initialized);
-                    assert_eq!(chip.receive_bytes(), if speed >= 4 { 32768 } else { 16384 });
+                    assert_eq!(
+                        chip.receive_bytes(),
+                        if speed >= SUPER_SPEED { 32768 } else { 16384 }
+                    );
                     {
                         let hw = model.borrow();
                         assert_eq!(hw.core.get(PLA, PLA_RXFIFO_CTRL0, 4), 0x0008_0002);
@@ -393,7 +394,7 @@ mod tests {
                             hw.core.get(USB, USB_LPM_CTRL, 1),
                             FIFO_EMPTY_1FB
                                 | ROK_EXIT_LPM
-                                | if revision == 0x5c10 && speed < 4 {
+                                | if revision == 0x5c10 && speed < SUPER_SPEED {
                                     LPM_TIMER_500MS
                                 } else {
                                     LPM_TIMER_500US
