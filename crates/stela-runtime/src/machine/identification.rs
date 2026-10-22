@@ -1237,13 +1237,19 @@ pub const TABLE: &[Row] = &[
         None,
         engine(false, "MUL53 instructions are not modeled"),
     ),
+    // WKdm: WKDMC and WKDMD (`stela_compiler::wkdm`), which every chip's
+    // 26A434 kernel executes unless booted with `-vm_compressor_wk_sw`; it
+    // does not read this bit.
     row(
         AIDR_EL1,
         1,
         1,
         0,
         None,
-        engine(false, "WKdm compression instructions are not modeled"),
+        Basis::Instructions(&[
+            stela_compiler::wkdm::COMPRESS_X0_X1,
+            stela_compiler::wkdm::DECOMPRESS_X0_X1,
+        ]),
     ),
     row(
         AIDR_EL1,
@@ -1750,7 +1756,7 @@ mod tests {
         // With FEAT_MTE2, TminLine 4.
         let tag_line = if has(chip, "FEAT_MTE2") { 4 << 32 } else { 0 };
         assert_eq!(value(CTR_EL0), 0x9444_c004 | tag_line);
-        assert_eq!(value(AIDR_EL1), 1 << 4 | 1 << 16);
+        assert_eq!(value(AIDR_EL1), 1 << 1 | 1 << 4 | 1 << 16);
         assert_eq!(value(ID_AA64MMFR1_EL1) >> 8 & 0xf, 0);
         // No stage 2 without EL2; HPDS; CnP, TTL and E0PD.
         assert_eq!(value(ID_AA64MMFR0_EL1) >> 32 & 0xfff, 0x111);
