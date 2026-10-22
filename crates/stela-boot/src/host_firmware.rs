@@ -3,12 +3,14 @@
 //! relocation. Only immutable bytes in reserved LOADER_DATA pages cross it.
 use crate::{firmware, handoff::Region, layout, output, paging::PAGE};
 use alloc::{format, string::ToString, sync::Arc, vec::Vec};
+use sha2::Digest;
 use stela_drivers::firmware::{Catalog, Provider, Requirement, Target};
 use stela_loader::host_firmware::{self as manifest, MAX_IMAGES, MAX_MANIFEST_BYTES, Manifest};
 use uefi::{
     CString16,
     proto::media::file::{Directory, File as _, FileAttribute, FileInfo, FileMode, RegularFile},
 };
+mod smbios;
 mod wifi;
 use stela_drivers::net::wifi::intel::platform::{
     CapturedVariable, Observation, Observations, VARIABLE_DESCRIPTORS,
@@ -28,11 +30,13 @@ pub struct Resources {
     pub images: [Region; MAX_IMAGES],
     pub count: usize,
     wifi: [wifi::Capture; VARIABLE_DESCRIPTORS.len()],
+    smbios: smbios::Capture,
 }
 impl Resources {
     pub const fn absent() -> Self {
         Self {
             present: false,
+            smbios: smbios::Capture::empty(),
             manifest: Region {
                 physical: 0,
                 bytes: 0,
@@ -172,10 +176,74 @@ impl Resources {
                 return Err("failed Wi-Fi observation has a resource region");
             }
         }
-        let additional: Vec<_> = captures
+        if parsed.as_ref().is_some_and(|parsed| {
+            parsed.images.iter().any(|image| {
+                image.name == stela_drivers::firmware::smbios::NAME
+                    || (image.target.driver == stela_drivers::firmware::smbios::TARGET.driver
+                        && image.target.hardware
+                            == stela_drivers::firmware::smbios::TARGET.hardware
+                        && image.target.revision
+                            == stela_drivers::firmware::smbios::TARGET.revision
+                        && image.target.board.is_none())
+            })
+        }) {
+            return Err("installed firmware collides with a live SMBIOS observation");
+        }
+        let mut smbios_capture = match self.smbios.state {
+            smbios::State::Present => {
+                if self.smbios.region.bytes
+                    > (stela_drivers::firmware::smbios::MAX_ENTRY_BYTES
+                        + stela_drivers::firmware::smbios::MAX_TABLE_BYTES)
+                        as u64
+                {
+                    return Err("SMBIOS observation wire exceeds its resource budget");
+                }
+                let raw = view(self.smbios.region)?;
+                if <[u8; 32]>::from(sha2::Sha256::digest(raw)) != self.smbios.sha256 {
+                    return Err("SMBIOS observation wire digest mismatch");
+                }
+                Some(
+                    stela_drivers::firmware::smbios::Captured::new(raw)
+                        .map_err(|_| "invalid permanent SMBIOS observation")?,
+                )
+            }
+            _ => {
+                if self.smbios.region.bytes != 0 || self.smbios.region.physical != 0 {
+                    return Err("unobserved SMBIOS has a resource region");
+                }
+                None
+            }
+        };
+        let mut additional: Vec<_> = captures
             .iter_mut()
             .filter_map(CapturedVariable::take_resource)
             .collect();
+        additional.extend(
+            smbios_capture
+                .as_mut()
+                .and_then(stela_drivers::firmware::smbios::Captured::take_resource),
+        );
+        let smbios_identity = additional
+            .iter()
+            .find(|resource| resource.name == stela_drivers::firmware::smbios::NAME)
+            .map(|resource| {
+                let raw = resource.bytes;
+                let format = self.smbios.format.ok_or("SMBIOS wire has no source GUID")?;
+                let length = stela_drivers::firmware::smbios::entry_length(raw, format)
+                    .map_err(|_| "SMBIOS wire source mismatch")?;
+                let entry = stela_drivers::firmware::smbios::entry(&raw[..length], format)
+                    .map_err(|_| "SMBIOS wire source mismatch")?;
+                if <[u8; 32]>::from(sha2::Sha256::digest(&raw[..length]))
+                    != self.smbios.entry_sha256
+                    || <[u8; 32]>::from(sha2::Sha256::digest(&raw[length..]))
+                        != self.smbios.table_sha256
+                {
+                    return Err("SMBIOS observation component digest mismatch");
+                }
+                stela_drivers::firmware::smbios::identity(entry, &raw[length..])
+                    .map_err(|_| "invalid SMBIOS identity")
+            })
+            .transpose()?;
         if self.count + additional.len() > MAX_IMAGES
             || bytes.iter().map(|b| b.len()).sum::<usize>()
                 + additional.iter().map(|r| r.bytes.len()).sum::<usize>()
@@ -203,7 +271,11 @@ impl Resources {
                     .collect::<Vec<_>>()
             })
             .collect();
+        let smbios_record = phase.map(|phase| smbios::record(phase, &self.smbios, smbios_identity));
         if !self.present && additional.is_empty() {
+            if let Some(record) = smbios_record {
+                output::arguments(format_args!("HOST SMBIOS RECORD {record}\n"));
+            }
             for record in records {
                 output::arguments(format_args!("HOST WIFI UEFI RECORD {record}\n"));
             }
@@ -215,6 +287,14 @@ impl Resources {
             Catalog::from_persistent_handoff(additional)
                 .map_err(|_| "invalid permanent Wi-Fi resources")?
         });
+        if let Some(record) = smbios_record {
+            // Canonical lookup also checks returned image identity/provenance.
+            if self.smbios.state == smbios::State::Present {
+                let _ = stela_drivers::firmware::smbios::load(catalog.as_ref())
+                    .map_err(|_| "SMBIOS canonical resource binding mismatch")?;
+            }
+            output::arguments(format_args!("HOST SMBIOS RECORD {record}\n"));
+        }
         for record in records {
             output::arguments(format_args!("HOST WIFI UEFI RECORD {record}\n"));
         }
@@ -409,6 +489,7 @@ fn read_file(
 /// Absence alone is optional. Any unreadable/malformed present manifest or
 /// missing/corrupt resource is a boot refusal, with no alternate-volume search.
 pub fn read(root: &mut Directory) -> Result<Resources, &'static str> {
+    let smbios = smbios::capture();
     let mut wifi = [wifi::Capture::default(); VARIABLE_DESCRIPTORS.len()];
     for (slot, descriptor) in wifi.iter_mut().zip(&VARIABLE_DESCRIPTORS) {
         *slot = wifi::capture(descriptor.variable)?;
@@ -417,6 +498,7 @@ pub fn read(root: &mut Directory) -> Result<Resources, &'static str> {
         output::arguments(format_args!("HOST FIRMWARE manifest=absent\n"));
         let resources = Resources {
             wifi,
+            smbios,
             ..Resources::absent()
         };
         // SAFETY: freshly captured immutable permanent pages, identity mapped.
@@ -433,6 +515,7 @@ pub fn read(root: &mut Directory) -> Result<Resources, &'static str> {
         manifest: region,
         count: parsed.images.len(),
         wifi,
+        smbios,
         ..Resources::absent()
     };
     // Parse/identity checks and the total budget precede every image allocation.
@@ -460,14 +543,19 @@ mod tests {
     #[test]
     fn installed_resources_cannot_substitute_a_live_observation_name_or_target() {
         static RAW: [u8; 14] = [1; 14];
-        for (variable, collide_name) in [Variable::Step, Variable::Eckv, Variable::PhyFilters]
-            .into_iter()
-            .flat_map(|variable| [true, false].map(|collide| (variable, collide)))
+        for (requirement, collide_name) in [
+            Variable::Step.requirement(),
+            Variable::Eckv.requirement(),
+            Variable::PhyFilters.requirement(),
+            stela_drivers::firmware::smbios::REQUIREMENT,
+        ]
+        .into_iter()
+        .flat_map(|requirement| [true, false].map(|collide| (requirement, collide)))
         {
-            let target = variable.requirement().target;
+            let target = requirement.target;
             let digest = stela_runtime::sha256(&RAW);
             let manifest = serde_json::json!({"schema":1,"images":[{
-                "name":if collide_name {variable.resource_name()} else {"synthetic/raw.bin"},
+                "name":if collide_name {requirement.name} else {"synthetic/raw.bin"},
                 "path":"raw.bin","length":RAW.len(),"sha256":digest,
                 "target":if collide_name {serde_json::json!({"driver":"fixture","hardware":"synthetic","revision":"v1","board":null})} else {serde_json::json!({"driver":target.driver,"hardware":target.hardware,"revision":target.revision,"board":target.board})},
                 "provenance":{"source":"synthetic","revision":"v1","member":"raw.bin","license":"CC0-1.0"}
@@ -490,9 +578,77 @@ mod tests {
                 unsafe { resources.catalog(|address| address, None) }
                     .err()
                     .unwrap(),
-                "installed firmware collides with a live UEFI observation"
+                if requirement.name == stela_drivers::firmware::smbios::NAME {
+                    "installed firmware collides with a live SMBIOS observation"
+                } else {
+                    "installed firmware collides with a live UEFI observation"
+                }
             );
         }
+    }
+
+    #[test]
+    fn physical_host_identity_uses_one_immutable_catalog_image_across_wire_copy() {
+        use stela_drivers::firmware::smbios as host;
+        let mut table = alloc::vec![1, 8, 1, 0, 1, 0, 2, 0];
+        table.extend_from_slice(b"SYNTH-HOST\0SYNTH-VERSION\0\0");
+        table.extend_from_slice(&[127, 4, 255, 255, 0, 0]);
+        let mut bytes = alloc::vec![0;24];
+        bytes[..5].copy_from_slice(b"_SM3_");
+        bytes[6] = 24;
+        bytes[7] = 3;
+        bytes[8] = 8;
+        bytes[10] = 1;
+        bytes[12..16].copy_from_slice(&(table.len() as u32).to_le_bytes());
+        bytes[16..24].copy_from_slice(&0x2000u64.to_le_bytes());
+        bytes[5] = 0u8.wrapping_sub(bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b)));
+        bytes.extend_from_slice(&table);
+        let raw = alloc::boxed::Box::leak(bytes.into_boxed_slice());
+        let mut resources = Resources::absent();
+        resources.smbios = smbios::Capture {
+            state: smbios::State::Present,
+            region: Region {
+                physical: 0x1000,
+                bytes: raw.len() as u64,
+            },
+            format: Some(host::Format::Smbios3),
+            source_address: 0x3000,
+            sha256: sha2::Sha256::digest(&*raw).into(),
+            entry_sha256: sha2::Sha256::digest(&raw[..24]).into(),
+            table_sha256: sha2::Sha256::digest(&raw[24..]).into(),
+        };
+        let copied = resources;
+        // SAFETY: the static complete fixture models the permanent new alias.
+        let catalog =
+            unsafe { copied.catalog(|address| address - 0x1000 + raw.as_ptr() as u64, None) }
+                .unwrap()
+                .unwrap();
+        let snapshot = host::load(catalog.as_ref()).unwrap();
+        assert_eq!(snapshot.image.bytes().as_ptr(), raw.as_ptr());
+        assert_eq!(
+            snapshot.identity.system_vendor,
+            host::Observation::Value(&b"SYNTH-HOST\0"[..])
+        );
+        assert_eq!(snapshot.identity.product_name, host::Observation::Absent);
+        assert_eq!(
+            snapshot.identity.product_version,
+            host::Observation::Value(&b"SYNTH-VERSION\0"[..])
+        );
+        assert_eq!(catalog.inventory(), (1, raw.len()));
+        resources.smbios.region.bytes = (host::MAX_ENTRY_BYTES + host::MAX_TABLE_BYTES + 1) as u64;
+        // SAFETY: invalid wire must refuse before invoking any mapper.
+        assert_eq!(
+            unsafe { resources.catalog(|_| panic!("over-bound SMBIOS must not map"), None) }.err(),
+            Some("SMBIOS observation wire exceeds its resource budget")
+        );
+        resources = copied;
+        resources.smbios.sha256[0] ^= 1;
+        // SAFETY: same complete static fixture with intentionally wrong digest.
+        assert_eq!(
+            unsafe { resources.catalog(|address| address - 0x1000 + raw.as_ptr() as u64, None) }
+                .err(),
+            Some("SMBIOS observation wire digest mismatch")
+        );
     }
 
     #[test]

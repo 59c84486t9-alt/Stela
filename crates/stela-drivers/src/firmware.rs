@@ -37,6 +37,8 @@
 //! let _ = image.bytes();
 //! ```
 
+pub mod smbios;
+
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 use sha2::{Digest, Sha256};
