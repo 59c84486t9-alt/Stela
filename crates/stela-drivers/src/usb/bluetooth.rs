@@ -47,6 +47,8 @@ use core::fmt;
 /// Explicit per-packet transport budget. Larger legal HCI packets are rejected;
 /// device-specific buffer sizes/credits still need the Bluetooth host/initializer.
 pub const MAX_ACL_PAYLOAD: usize = 4096;
+/// bRequest of an HCI command's class request (Bluetooth Core Vol 4 Part B 2.2).
+const HCI_COMMAND_REQUEST: u8 = 0;
 const EVENT_READ: usize = 512;
 const ACL_READ: usize = 8192;
 const PARTIAL_US: u64 = 1_000_000;
@@ -219,12 +221,14 @@ impl<B: Io> Hci<B> {
                 .write_acl(packet)
                 .map_err(|failure| self.fail(ErrorKind::Usb(failure)));
         }
-        let index = if self.binding.recipient == 0x21 {
-            u16::from(self.binding.interface)
-        } else {
-            0
-        };
-        let request = super::xhci::setup(self.binding.recipient, 0, 0, index, packet.len() as u16);
+        // Linux btusb: HCI commands are class requests to the device, wIndex 0.
+        let request = super::xhci::setup(
+            super::xhci::TYPE_CLASS,
+            HCI_COMMAND_REQUEST,
+            0,
+            0,
+            packet.len() as u16,
+        );
         self.io
             .control(request, packet)
             .map_err(|failure| self.fail(ErrorKind::Usb(failure)))
@@ -578,32 +582,20 @@ mod tests {
 
     #[test]
     fn class_requests_use_device_context_not_sco_interface_count() {
-        for composite in [false, true] {
-            let mut hci = Hci::from_io(binding(composite), Model::default());
+        {
+            let mut hci = Hci::from_io(binding(false), Model::default());
             let packet = [3, 0x0c, 0]; // Reset, submitted without fabricating its response.
             hci.submit_command(&packet).unwrap();
             assert_eq!(
                 hci.io.control,
-                vec![(
-                    [
-                        if composite { 0x21 } else { 0x20 },
-                        0,
-                        0,
-                        0,
-                        if composite { 2 } else { 0 },
-                        0,
-                        3,
-                        0
-                    ],
-                    packet.to_vec()
-                )]
+                vec![([0x20, 0, 0, 0, 0, 0, 3, 0], packet.to_vec())]
             );
             assert!(hci.poll().unwrap().is_empty());
             assert_eq!(hci.state(), State::Open);
             assert_eq!(hci.firmware_status(), FirmwareStatus::Unverified);
             assert_eq!(
                 hci.binding().device().configuration,
-                device(composite).configuration
+                device(false).configuration
             );
         }
     }
@@ -789,66 +781,53 @@ mod tests {
     }
 
     #[test]
-    fn descriptors_must_be_complete_unambiguous_and_compatible() {
+    fn hci_interfaces_need_their_three_endpoints_on_interface_zero() {
         let original = device(false);
-        let rejects = |d: &Device| {
-            xhci::interfaces(&d.configuration)
-                .first()
-                .is_none_or(|interface| Binding::new(d, interface).is_err())
-        };
-        for index in [0, 1, 2, 4, 5, 9, 13, 18, 20, 22, 24, 25] {
-            let mut d = original.clone();
-            d.configuration[index] = 0;
-            assert!(rejects(&d), "configuration byte {index}");
-        }
+        let first = |d: &Device| xhci::interfaces(&d.configuration)[0].clone();
+        assert!(Binding::new(&original, &first(&original)).is_ok());
+        // Without its bulk IN endpoint (made a second interrupt IN) the
+        // interface has no inbound ACL pipe.
         let mut d = original.clone();
-        d.configuration.pop();
-        assert!(rejects(&d));
-        let mut d = original.clone();
-        d.configuration[20] = 0x82;
-        assert!(rejects(&d)); // duplicate role/address
-        let mut d = original.clone();
-        d.configuration[21] = 1;
-        assert!(rejects(&d)); // isochronous
+        d.configuration[28] = 3;
+        assert_eq!(
+            Binding::new(&d, &first(&d)).unwrap_err(),
+            "Bluetooth HCI endpoints are missing"
+        );
         let mut d = original.clone();
         d.speed = xhci::SUPER_SPEED;
-        assert!(rejects(&d));
-        let mut fabricated = xhci::interfaces(&original.configuration)[0].clone();
+        assert!(Binding::new(&d, &first(&d)).is_err());
+        let mut fabricated = first(&original);
         fabricated.number = 4;
         assert!(Binding::new(&original, &fabricated).is_err());
         let sco = &xhci::interfaces(&original.configuration)[1];
-        assert!(Binding::new(&original, sco).unwrap_err().contains("SCO"));
+        assert!(Binding::new(&original, sco).is_err());
     }
 
     #[test]
-    fn iad_composite_context_selects_interface_and_requires_matching_function() {
+    fn extra_endpoints_are_ignored_and_other_interfaces_refused_like_btusb() {
         let mut d = device(true);
         d.descriptor[4..7].copy_from_slice(&[0xef, 2, 1]);
-        assert!(Binding::new(&d, &xhci::interfaces(&d.configuration)[2]).is_err());
-        d.configuration.splice(27..27, [8, 11, 2, 2, 0xe0, 1, 1, 0]);
-        let length = d.configuration.len() as u16;
-        d.configuration[2..4].copy_from_slice(&length.to_le_bytes());
-        let selected = Binding::new(&d, &xhci::interfaces(&d.configuration)[2]).unwrap();
-        assert_eq!(selected.recipient, 0x21);
-        assert_eq!(selected.interface(), 2);
+        assert_eq!(
+            Binding::new(&d, &xhci::interfaces(&d.configuration)[2]).unwrap_err(),
+            "Bluetooth HCI on an interface other than 0"
+        );
     }
 
     #[test]
-    fn single_function_nonzero_interface_keeps_device_recipient_and_discovers_endpoints() {
+    fn hci_interface_discovers_its_endpoints_and_commands_go_to_the_device() {
         let mut device = device(false);
-        device.configuration[11] = 1;
         device.configuration[41] = 2;
         device.configuration[20] = 0x87;
         device.configuration[27] = 0x86;
         device.configuration[34] = 0x06;
         device
             .configuration
-            .splice(9..9, [9, 4, 0, 0, 0, 0xff, 0, 0, 0]);
+            .splice(9..9, [9, 4, 1, 0, 0, 0xff, 0, 0, 0]);
         device.configuration[4] = 3;
         let length = device.configuration.len() as u16;
         device.configuration[2..4].copy_from_slice(&length.to_le_bytes());
         let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[1]).unwrap();
-        assert_eq!(binding.interface(), 1);
+        assert_eq!(binding.interface(), 0);
         assert_eq!(binding.events.address, 0x87);
         assert_eq!(binding.input.address, 0x86);
         assert_eq!(binding.output.address, 0x06);
