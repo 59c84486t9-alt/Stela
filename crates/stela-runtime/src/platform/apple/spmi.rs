@@ -66,7 +66,8 @@
 //! Gen4 arbiter reset (`reg[2]` + 0x20, which the driver pulses only when a
 //! queue reset leaves the FIFOs non-empty, never here), nonzero control on
 //! every generation but Gen2, command types outside the extended/scalar register
-//! forms and request or response overflow refuse.
+//! and four payloadless forms, unqualified slave command effects, and request
+//! or response overflow refuse.
 mod config;
 pub use config::{Configuration, Profile};
 
@@ -104,11 +105,29 @@ pub enum SlaveError {
     Unsupported(&'static str),
 }
 
+/// Payloadless MIPI commands recovered from the original AP command table
+/// (26A434 mac15g VA772ff48[8..12]). Dispatch is not an implementation of
+/// the attached slave's reset, supply or low-power effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Command {
+    Reset = 0x10,
+    Sleep = 0x11,
+    Shutdown = 0x12,
+    Wakeup = 0x13,
+}
+
 /// One SPMI slave on a controller, addressed by its slave ID. Accesses
 /// cover consecutive register addresses. A failed access changes nothing.
 pub trait SpmiSlave {
     fn read(&mut self, address: u16, data: &mut [u8], now: u64) -> Result<(), SlaveError>;
     fn write(&mut self, address: u16, data: &[u8], now: u64) -> Result<(), SlaveError>;
+    /// Execute an actual slave-owned command. Unqualified effects must not ACK.
+    fn command(&mut self, _command: Command, _now: u64) -> Result<(), SlaveError> {
+        Err(SlaveError::Unsupported(
+            "SPMI slave payloadless command is unqualified",
+        ))
+    }
     /// Bring time-driven state up to `now`; the next counter value at which
     /// the slave changes state by itself, if any.
     /// Validate an autonomous time step before any attached slave advances.
@@ -119,6 +138,15 @@ pub trait SpmiSlave {
     /// Actual slave output. None means this slave has no qualified output contract.
     fn interrupt_level(&self) -> Option<bool> {
         None
+    }
+    /// Indexed output, in the slave's source-declared order. The legacy
+    /// single-output boundary is output zero; other wires require an owner.
+    fn interrupt_level_at(&self, output: u8) -> Option<bool> {
+        if output == 0 {
+            self.interrupt_level()
+        } else {
+            None
+        }
     }
     /// Could an autonomous output change while the master is paused? Unknown
     /// slaves conservatively retain ownership; a masked local vector is irrelevant.
@@ -134,6 +162,7 @@ pub trait SpmiSlave {
 enum Kind {
     Write,
     Read,
+    Command(Command),
 }
 
 /// A decoded request chunk.
@@ -172,6 +201,19 @@ impl Chunk {
                     1,
                     (opcode == REGISTER_WRITE).then_some((header >> 24) as u8),
                 )
+            }
+            0x10..=0x13 => {
+                if header >> 16 != 0 {
+                    return Err("SPMI payloadless command carries address or data bits");
+                }
+                let command = match opcode {
+                    0x10 => Command::Reset,
+                    0x11 => Command::Sleep,
+                    0x12 => Command::Shutdown,
+                    0x13 => Command::Wakeup,
+                    _ => unreachable!(),
+                };
+                (Kind::Command(command), 0, 0, None)
             }
             REGISTER_ZERO_WRITE => {
                 let data = (header >> 24) as u8;
@@ -229,7 +271,7 @@ pub struct Spmi {
     lifecycle: LifecycleState,
     irq: AicInput,
     slaves: Vec<(u8, Box<dyn SpmiSlave>)>,
-    inputs: Vec<(u8, u16, bool)>,
+    inputs: Vec<(u8, u8, u16, bool)>,
     enable: [u32; GROUPS],
     pending: [u32; GROUPS],
     control: u32,
@@ -278,28 +320,52 @@ impl Spmi {
         vector: u16,
         slave: Box<dyn SpmiSlave>,
     ) -> Result<(), &'static str> {
-        if usize::from(vector) >= GROUPS * 32
-            || u32::from(vector) == self.configuration.response_vector()
-            || self.inputs.iter().any(|(_, input, _)| *input == vector)
-        {
-            return Err("invalid, response-aliasing or duplicate SPMI input vector");
+        self.attach_with_interrupts(sid, &[(0, vector)], slave)
+    }
+    /// Attach every source-declared output atomically. Output indices select
+    /// actual independent slave levels; vector order never invents semantics.
+    pub fn attach_with_interrupts(
+        &mut self,
+        sid: u8,
+        outputs: &[(u8, u16)],
+        slave: Box<dyn SpmiSlave>,
+    ) -> Result<(), &'static str> {
+        if outputs.is_empty() {
+            return Err("SPMI interrupt attachment has no outputs");
         }
-        if slave.interrupt_level() != Some(false) {
-            return Err("SPMI input requires an actual qualified deasserted output");
+        for (index, &(output, vector)) in outputs.iter().enumerate() {
+            if usize::from(vector) >= GROUPS * 32
+                || u32::from(vector) == self.configuration.response_vector()
+                || self.inputs.iter().any(|(_, _, input, _)| *input == vector)
+                || outputs[..index]
+                    .iter()
+                    .any(|&(previous, input)| previous == output || input == vector)
+            {
+                return Err("invalid, response-aliasing or duplicate SPMI input vector/output");
+            }
+            if slave.interrupt_level_at(output) != Some(false) {
+                return Err("SPMI input requires an actual qualified deasserted output");
+            }
         }
         self.attach(sid, slave)?;
-        self.inputs.push((sid, vector, false));
+        self.inputs.extend(
+            outputs
+                .iter()
+                .map(|&(output, vector)| (sid, output, vector, false)),
+        );
         Ok(())
     }
     fn capture_inputs(&mut self) {
-        for (sid, vector, previous) in &mut self.inputs {
+        for (sid, output, vector, previous) in &mut self.inputs {
             let slave = &self
                 .slaves
                 .iter()
                 .find(|(id, _)| id == sid)
                 .expect("attached input owner")
                 .1;
-            let level = slave.interrupt_level().expect("qualified input owner");
+            let level = slave
+                .interrupt_level_at(*output)
+                .expect("qualified input owner");
             if level && !*previous {
                 self.pending[usize::from(*vector / 32)] |= 1 << (*vector % 32);
             }
@@ -390,6 +456,17 @@ impl Spmi {
                     Err(SlaveError::Unsupported(reason)) => return Err(reason),
                 }
             }
+            Kind::Command(command) => {
+                let result = match slave {
+                    Some(slave) => slave.command(command, now),
+                    None => Err(SlaveError::Nack),
+                };
+                match result {
+                    Ok(()) => self.responses.push_back(echo | ACK),
+                    Err(SlaveError::Nack) => self.responses.push_back(echo),
+                    Err(SlaveError::Unsupported(reason)) => return Err(reason),
+                }
+            }
             Kind::Read => {
                 let mut bytes = [0u8; 16];
                 let data = &mut bytes[..chunk.bytes];
@@ -430,7 +507,7 @@ impl Lifecycle for Spmi {
             );
         }
         if !proposed.clocked || proposed.quiesced {
-            if self.inputs.iter().any(|(sid, _, _)| {
+            if self.inputs.iter().any(|(sid, _, _, _)| {
                 self.slaves
                     .iter()
                     .any(|(id, slave)| id == sid && slave.interrupt_armed())
@@ -656,6 +733,222 @@ mod tests {
         c
     }
 
+    /// Authored mailbox body for transport/queue tests only. Its bytes and
+    /// sleep/wake outputs are not physical SN201202x protocol evidence.
+    #[derive(Clone, Default)]
+    struct MailboxBody {
+        data: [u8; 4],
+        sleeping: bool,
+        outputs: [bool; 3],
+    }
+    impl crate::platform::apple::hpm::spmi::Registers for MailboxBody {
+        fn select(&mut self, register: u8, _: u64) -> Result<(), SlaveError> {
+            if self.sleeping {
+                return Err(SlaveError::Nack);
+            }
+            if register != 9 {
+                return Err(SlaveError::Unsupported("fixture register"));
+            }
+            Ok(())
+        }
+        fn read(
+            &mut self,
+            _: u8,
+            _: u64,
+        ) -> Result<crate::platform::apple::hpm::spmi::Register, SlaveError> {
+            crate::platform::apple::hpm::spmi::Register::new(&self.data, 4)
+        }
+        fn write(&mut self, _: u8, data: &[u8], _: u64) -> Result<(), SlaveError> {
+            let bytes: [u8; 4] = data
+                .try_into()
+                .map_err(|_| SlaveError::Unsupported("fixture body length"))?;
+            self.data = bytes;
+            self.outputs[0] = bytes[0] & 1 != 0;
+            Ok(())
+        }
+        fn command(&mut self, command: Command, _: u64) -> Result<(), SlaveError> {
+            match command {
+                Command::Sleep => {
+                    self.sleeping = true;
+                    self.outputs[1] = true;
+                    self.outputs[2] = false;
+                }
+                Command::Wakeup => {
+                    self.sleeping = false;
+                    self.outputs[1] = false;
+                    self.outputs[2] = true;
+                }
+                _ => return Err(SlaveError::Unsupported("fixture command")),
+            }
+            Ok(())
+        }
+        fn interrupt_level(&self, output: u8) -> Option<bool> {
+            self.outputs.get(usize::from(output)).copied()
+        }
+        fn interrupt_armed(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn mailbox_commands_share_queue_backpressure_and_three_independent_input_edges() {
+        use crate::platform::apple::hpm::spmi::Mailbox;
+        for profile in [Profile::Gen1, Profile::Gen2, Profile::Gen3, Profile::Gen4] {
+            let mut c = Spmi::with_configuration(
+                AicInput::new(0, 0x180),
+                Configuration::new(profile, 256, [256, 20]).unwrap(),
+            );
+            let layout = profile.layout();
+            let model = || Box::new(Mailbox::new(MailboxBody::default())) as Box<dyn SpmiSlave>;
+            for outputs in [
+                &[(0, 11), (1, 17), (3, 19)][..],
+                &[(0, 11), (1, 11)],
+                &[(0, 11), (0, 17)],
+                &[(0, 256)],
+            ] {
+                assert!(c.attach_with_interrupts(12, outputs, model()).is_err());
+                assert!(c.slaves.is_empty());
+                assert!(c.inputs.is_empty());
+            }
+            c.attach_with_interrupts(12, &[(0, 11), (1, 17), (2, 19)], model())
+                .unwrap();
+            let mut latch = InterruptLatch::new();
+            let mut access = Access::new(0, 0, &mut latch);
+            let request = |opcode: u32| LAST | 12 << 8 | opcode;
+            let select = request(REGISTER_ZERO_WRITE) | 9 << 24;
+            wr(
+                &mut c,
+                &mut access,
+                layout.enable,
+                (1 << 11) | (1 << 17) | (1 << 19),
+            );
+            // Fill exactly five response words with successful selections.
+            for _ in 0..5 {
+                wr(&mut c, &mut access, layout.request, select);
+            }
+            assert_eq!(c.responses.len(), 5);
+            assert!(
+                c.write(
+                    layout.request,
+                    Width::Word,
+                    request(Command::Sleep as u32).into(),
+                    &mut access
+                )
+                .is_err()
+            );
+            assert_eq!(c.pending[0], 0); // no slave sleep before FIFO capacity
+            assert_eq!(rd(&mut c, &mut access, layout.response), ACK | 0xc89);
+            wr(
+                &mut c,
+                &mut access,
+                layout.request,
+                request(Command::Sleep as u32),
+            );
+            assert!(c.partial.is_none());
+            assert_eq!(c.responses.back(), Some(&(ACK | 0xc11)));
+            assert_eq!(c.pending[0], 1 << 17);
+            assert!(
+                c.write(
+                    layout.request,
+                    Width::Word,
+                    request(Command::Wakeup as u32).into(),
+                    &mut access
+                )
+                .is_err()
+            );
+            assert_eq!(c.pending[0], 1 << 17);
+            rd(&mut c, &mut access, layout.response);
+            wr(
+                &mut c,
+                &mut access,
+                layout.request,
+                request(Command::Wakeup as u32),
+            );
+            assert_eq!(c.responses.back(), Some(&(ACK | 0xc13)));
+            assert_eq!(c.pending[0], (1 << 17) | (1 << 19));
+            wr(&mut c, &mut access, layout.queue_reset, 1);
+            assert_eq!(c.pending[0], (1 << 17) | (1 << 19)); // reset is not a slave ACK
+            wr(&mut c, &mut access, layout.pending, (1 << 17) | (1 << 19));
+            assert_eq!(c.pending[0], 0);
+            c.advance(&mut access).unwrap();
+            assert_eq!(c.pending[0], 0); // high wake output is not another edge
+            // An accepted mailbox body survives master FIFO reset. The
+            // separately accepted, incomplete FIFO header does not reach it.
+            wr(&mut c, &mut access, layout.request, request(3) | 0xa0 << 16);
+            wr(&mut c, &mut access, layout.request, 0x0403_0201);
+            assert_eq!(c.pending[0], 0); // staging has no backend/event effect
+            assert_ne!(rd(&mut c, &mut access, layout.response) & ACK, 0);
+            wr(&mut c, &mut access, layout.request, request(3) | 0xb0 << 16);
+            assert!(c.partial.is_some());
+            wr(&mut c, &mut access, layout.queue_reset, 1);
+            wr(&mut c, &mut access, layout.request, select); // actual body commit
+            assert_eq!(c.pending[0], 1 << 11);
+            assert_eq!(rd(&mut c, &mut access, layout.response), ACK | 0xc89);
+            assert_eq!(c.pending[0], 1 << 11); // FIFO pop does not ACK an output
+            wr(&mut c, &mut access, layout.request, request(REGISTER_READ));
+            assert_eq!(
+                rd(&mut c, &mut access, layout.response),
+                ACK | (1 << 16) | 0xc60
+            );
+            assert_eq!(rd(&mut c, &mut access, layout.response), 9);
+            wr(
+                &mut c,
+                &mut access,
+                layout.request,
+                request(REGISTER_READ) | 0x1f << 16,
+            );
+            assert_eq!(
+                rd(&mut c, &mut access, layout.response),
+                ACK | (1 << 16) | 0xc7f
+            );
+            assert_eq!(rd(&mut c, &mut access, layout.response), 4);
+            wr(
+                &mut c,
+                &mut access,
+                layout.request,
+                request(0x23) | 0x20 << 16,
+            );
+            assert_eq!(
+                rd(&mut c, &mut access, layout.response),
+                ACK | (0xf << 16) | 0xc23
+            );
+            assert_eq!(rd(&mut c, &mut access, layout.response), 0x0403_0201);
+            wr(&mut c, &mut access, layout.pending, 1 << 11);
+            c.advance(&mut access).unwrap();
+            assert_eq!(c.pending[0], 0);
+            assert!(c.responses.is_empty());
+        }
+    }
+
+    #[test]
+    fn payloadless_commands_never_ack_unqualified_slaves_or_reserved_packet_fields() {
+        let mut c = controller();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        for command in [
+            Command::Reset,
+            Command::Sleep,
+            Command::Shutdown,
+            Command::Wakeup,
+        ] {
+            let packet = LAST | 14 << 8 | command as u32;
+            assert!(
+                c.write(REQUEST, Width::Word, packet.into(), &mut access)
+                    .is_err()
+            );
+            assert!(c.responses.is_empty());
+            assert!(c.partial.is_none());
+            assert!(c.pending.iter().all(|&pending| pending == 0));
+            for bits in [1 << 16, 1 << 24, 1 << 12] {
+                assert!(Chunk::decode(packet | bits).is_err());
+            }
+            // An absent slave gives a real NACK, not a successful command.
+            wr(&mut c, &mut access, REQUEST, LAST | 3 << 8 | command as u32);
+            assert_eq!(rd(&mut c, &mut access, RESPONSE), 3 << 8 | command as u32);
+            wr(&mut c, &mut access, PENDING + 8 * 4, 1);
+        }
+    }
+
     #[test]
     fn extended_long_write_then_read_round_trips_with_ack_parity_and_vector() {
         let mut latch = InterruptLatch::new();
@@ -737,6 +1030,14 @@ mod tests {
         assert_eq!(data[table + 5], REGISTER_WRITE as u8);
         assert_eq!(data[table + 6], REGISTER_READ as u8);
         assert_eq!(data[table + 7], REGISTER_ZERO_WRITE as u8);
+        for (index, command) in [
+            (8, Command::Reset),
+            (9, Command::Sleep),
+            (10, Command::Shutdown),
+            (11, Command::Wakeup),
+        ] {
+            assert_eq!(data[table + index], command as u8);
+        }
         for (va, encoding) in [
             (0xffff_fe00_09d5_c8a0, 0x7100_7f9f), // CMP address, #31
             (0xffff_fe00_09d5_c9ac, 0x2a1c_4129), // ORR address, LSL #16
@@ -750,6 +1051,9 @@ mod tests {
         assert_eq!(word(masks + 4 * 4), 0xfe0);
         assert_eq!(word(masks + 4 * 5), 0xfe0);
         assert_eq!(word(masks + 4 * 6), 0xf80);
+        for index in 7..=10 {
+            assert_eq!(word(masks + 4 * index), 0xfff);
+        }
     }
 
     #[test]

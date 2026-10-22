@@ -21,6 +21,8 @@
 //! states 0 and 2), `USBd`, `USBw` and `ABRT` record their effect; sleep and
 //! every other command refuse rather than fake a firmware effect. The bus
 //! manager's summary at address 0x6b is `Summary`.
+pub mod spmi;
+
 use alloc::vec::Vec;
 
 use super::{
