@@ -239,7 +239,7 @@ pub(crate) struct Prepare {
     #[arg(long, value_parser = |name: &str| OsEnvironment::parse(name).map_err(|e| e.to_string()))]
     osenvironment: Option<OsEnvironment>,
     /// Guest DRAM base; the target SoC's by default (0x800000000 on the M1
-    /// and M2, 0x10000000000 on their Pro and Max).
+    /// and M2, 0x10000000000 on every other SoC).
     #[arg(long, value_parser = parse_address)]
     dram_base: Option<u64>,
     /// Guest DRAM size assumed until the mount patches it at boot.

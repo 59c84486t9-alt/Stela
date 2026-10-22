@@ -65,11 +65,16 @@ pub use topology::{KernelLimits, assigned};
 /// (0x8000 in `t8112.dtsi`, 0xc000 in `t600x-die0.dtsi` and
 /// `t602x-die0.dtsi`, 0x40000 in `t8122.dtsi`, `t6030.dtsi`,
 /// `t6031-die0.dtsi` and `t8132.dtsi`) and [`AIC3_EVENT`] states for the
-/// later SoCs. `dram_base` is where the
-/// SoC places DRAM (the `memory@` node of Linux `t8103-jxxx.dtsi`,
-/// `t8112-jxxx.dtsi`, `t600x-j314-j316.dtsi` and `t600x-j375.dtsi`, which the
-/// t602x boards include); the SoCs without a public memory node have none,
-/// and their boards state it in their DeviceTree ([`board_dram_base`]).
+/// later SoCs. `dram_base` is where the SoC places DRAM: the constant every
+/// 26A434 iBoot of the SoC writes to `/chosen dram-base` (payload file
+/// offsets: T8103 J274 0x15950 and T8112 J473 0x23904, 0x8_0000_0000; T6000
+/// J314s 0x23e78, T8122 J433 0x2479c, A18 Pro J700 0x20d60, M5 J704 0x24168
+/// and M6 J873g 0x22e38, 0x100_0000_0000, as on every other SoC;
+/// `docs/research/apple-socs.md#dram-base`). It is also the base of carveout
+/// 1 in each iBoot's carveout table, the `memory@` node of Linux
+/// `t8103-jxxx.dtsi`, `t8112-jxxx.dtsi`, `t600x-j314-j316.dtsi` and
+/// `t600x-j375.dtsi`, and the M3 and later boards' `/arm-io/mcc dram-base`
+/// ([`board_dram_base`]).
 /// `pmgr` is the `compatible` of the SoC's `/arm-io/pmgr` in its boards'
 /// DeviceTrees (`isa/apple-soc-facts.json` `boards[].pmgr`), modeled once
 /// the row has its clusters and bridge layouts ([`Soc::pmgr_modeled`]).
@@ -104,7 +109,7 @@ struct Soc {
     chip: Chip,
     cores: &'static [CoreType],
     aic: Option<(&'static str, u64)>,
-    dram_base: Option<u64>,
+    dram_base: u64,
     lockdown: Option<[u64; 2]>,
     limits: Option<KernelLimits>,
     memory_cache: Option<(u64, u32)>,
@@ -435,7 +440,7 @@ const M1_MAX: Soc = Soc {
     chip: Chip::AppleM1,
     cores: &ep_cores(0x028, 0x029, Some(M1_PRO_POINTS)),
     aic: Some(("aic,2", 0xc000)),
-    dram_base: Some(0x100_0000_0000),
+    dram_base: 0x100_0000_0000,
     lockdown: Some(LOCKDOWN),
     limits: Some(T6000_LIMITS),
     memory_cache: None,
@@ -455,7 +460,7 @@ const M2_MAX: Soc = Soc {
     chip: Chip::AppleM2,
     cores: &ep_cores(0x038, 0x039, Some(M2_PRO_POINTS)),
     aic: Some(("aic,2", 0xc000)),
-    dram_base: Some(0x100_0000_0000),
+    dram_base: 0x100_0000_0000,
     lockdown: Some(LOCKDOWN),
     limits: Some(T6020_LIMITS),
     memory_cache: None,
@@ -475,7 +480,7 @@ const M3_MAX: Soc = Soc {
     chip: Chip::AppleM3,
     cores: &ep_cores(0x048, 0x049, None),
     aic: Some(("aic,3", AIC3_EVENT)),
-    dram_base: None,
+    dram_base: 0x100_0000_0000,
     lockdown: Some(LOCKDOWN),
     limits: Some(T6031_LIMITS),
     memory_cache: None,
@@ -510,7 +515,7 @@ const M5_PRO: Soc = Soc {
     chip: Chip::AppleM5,
     cores: &sotra_cores(0x064, 0x065),
     aic: Some(("aic,3", AIC3_EVENT)),
-    dram_base: None,
+    dram_base: 0x100_0000_0000,
     lockdown: None,
     limits: Some(T6050_LIMITS),
     memory_cache: None,
@@ -531,7 +536,7 @@ const SOCS: [Soc; 22] = [
         chip: Chip::AppleM1,
         cores: &ep_cores(0x022, 0x023, Some(M1_POINTS)),
         aic: Some(("aic,1", AIC1_EVENT)),
-        dram_base: Some(0x8_0000_0000),
+        dram_base: 0x8_0000_0000,
         lockdown: Some(LOCKDOWN),
         limits: Some(T8103_LIMITS),
         memory_cache: None,
@@ -550,7 +555,7 @@ const SOCS: [Soc; 22] = [
         chip: Chip::AppleM1,
         cores: &ep_cores(0x024, 0x025, Some(M1_PRO_POINTS)),
         aic: Some(("aic,2", 0xc000)),
-        dram_base: Some(0x100_0000_0000),
+        dram_base: 0x100_0000_0000,
         lockdown: Some(LOCKDOWN),
         limits: Some(T6000_LIMITS),
         memory_cache: None,
@@ -586,7 +591,7 @@ const SOCS: [Soc; 22] = [
             ]),
         ),
         aic: Some(("aic,2", 0x8000)),
-        dram_base: Some(0x8_0000_0000),
+        dram_base: 0x8_0000_0000,
         lockdown: Some(LOCKDOWN),
         limits: Some(T8112_LIMITS),
         memory_cache: Some((8 << 20, 16)),
@@ -628,7 +633,7 @@ const SOCS: [Soc; 22] = [
         chip: Chip::AppleM2,
         cores: &ep_cores(0x034, 0x035, Some(M2_PRO_POINTS)),
         aic: Some(("aic,2", 0xc000)),
-        dram_base: Some(0x100_0000_0000),
+        dram_base: 0x100_0000_0000,
         lockdown: Some(LOCKDOWN),
         limits: Some(T6020_LIMITS),
         memory_cache: None,
@@ -654,7 +659,7 @@ const SOCS: [Soc; 22] = [
         chip: Chip::AppleM3,
         cores: &ep_cores(0x042, 0x043, None),
         aic: Some(("aic,3", AIC3_EVENT)),
-        dram_base: None,
+        dram_base: 0x100_0000_0000,
         lockdown: Some(LOCKDOWN),
         limits: Some(T8122_LIMITS),
         memory_cache: None,
@@ -673,7 +678,7 @@ const SOCS: [Soc; 22] = [
         chip: Chip::AppleM3,
         cores: &ep_cores(0x044, 0x045, None),
         aic: Some(("aic,3", AIC3_EVENT)),
-        dram_base: None,
+        dram_base: 0x100_0000_0000,
         lockdown: Some(LOCKDOWN),
         limits: Some(T6030_LIMITS),
         memory_cache: None,
@@ -708,7 +713,7 @@ const SOCS: [Soc; 22] = [
         chip: Chip::AppleM4,
         cores: &ep_cores(0x052, 0x053, None),
         aic: Some(("aic,3", AIC3_EVENT)),
-        dram_base: None,
+        dram_base: 0x100_0000_0000,
         lockdown: None,
         limits: Some(T8132_LIMITS),
         memory_cache: None,
@@ -727,7 +732,7 @@ const SOCS: [Soc; 22] = [
         chip: Chip::AppleM4,
         cores: &ep_cores(0x054, 0x055, None),
         aic: Some(("aic,3", AIC3_EVENT)),
-        dram_base: None,
+        dram_base: 0x100_0000_0000,
         lockdown: None,
         limits: Some(T6041_LIMITS),
         memory_cache: None,
@@ -746,7 +751,7 @@ const SOCS: [Soc; 22] = [
         chip: Chip::AppleM4,
         cores: &ep_cores(0x058, 0x059, None),
         aic: Some(("aic,3", AIC3_EVENT)),
-        dram_base: None,
+        dram_base: 0x100_0000_0000,
         lockdown: None,
         limits: Some(T6041_LIMITS),
         memory_cache: None,
@@ -776,7 +781,7 @@ const SOCS: [Soc; 22] = [
         chip: Chip::AppleM4,
         cores: &ep_cores(0x060, 0x061, None),
         aic: Some(("aic,3", AIC3_EVENT)),
-        dram_base: None,
+        dram_base: 0x100_0000_0000,
         lockdown: None,
         limits: Some(T8140_LIMITS),
         memory_cache: None,
@@ -795,7 +800,7 @@ const SOCS: [Soc; 22] = [
         chip: Chip::AppleM5,
         cores: &ep_cores(0x062, 0x063, None),
         aic: Some(("aic,3", AIC3_EVENT)),
-        dram_base: None,
+        dram_base: 0x100_0000_0000,
         lockdown: None,
         limits: Some(T8142_LIMITS),
         memory_cache: None,
@@ -825,7 +830,7 @@ const SOCS: [Soc; 22] = [
         chip: Chip::AppleM6,
         cores: &M6_CORES,
         aic: Some(("aic,3", AIC3_EVENT)),
-        dram_base: None,
+        dram_base: 0x100_0000_0000,
         lockdown: None,
         limits: Some(T8152_LIMITS),
         memory_cache: None,
@@ -940,13 +945,13 @@ pub fn level1_caches(chip_id: u32, cluster_type: u8) -> Option<(Cache, Cache)> {
 /// The guest DRAM base of the SoC with `chip_id`.
 pub fn dram_base(chip_id: u32) -> Result<u64, String> {
     chip_row(chip_id)
-        .and_then(|soc| soc.dram_base)
-        .ok_or_else(|| format!("ApChipID {chip_id:#x} has no public DRAM base"))
+        .map(|soc| soc.dram_base)
+        .ok_or_else(|| format!("ApChipID {chip_id:#x} has no SoC row and no DRAM base"))
 }
 
 /// The guest DRAM base of a board whose SoC is `chip_id`: its DeviceTree's
-/// `/arm-io/mcc` `dram-base`, which the M3 and later boards state, or else
-/// the SoC's public base ([`dram_base`]). Where both exist they must agree.
+/// `/arm-io/mcc` `dram-base`, which most M3 and later boards state, or else
+/// the SoC's base ([`dram_base`]). Where both exist they must agree.
 pub fn board_dram_base(tree: &[u8], chip_id: u32) -> Result<u64, String> {
     let root = Node::root(tree).ok_or("DeviceTree has no root")?;
     let stated = root
@@ -6894,7 +6899,10 @@ mod tests {
         );
         assert_eq!(dram_base(0x8112), Ok(0x8_0000_0000));
         assert_eq!(dram_base(0x6021), Ok(0x100_0000_0000));
-        assert!(dram_base(0x8132).is_err());
+        for chip_id in [0x8132, 0x8140, 0x8142, 0x8152] {
+            assert_eq!(dram_base(chip_id), Ok(0x100_0000_0000));
+        }
+        assert!(dram_base(0x8101).is_err());
         // Every ApChipID and name pair appears once, and the rows of one
         // ApChipID share its chip-level facts.
         for (index, soc) in SOCS.iter().enumerate() {
@@ -7195,13 +7203,18 @@ mod tests {
         };
         let m3 = 0x8122;
         let stated = 0x100_0000_0000_u64.to_le_bytes();
-        // The M3's base is in its DeviceTree only.
+        // An M3 board states its base; an M5 board states none and takes its
+        // SoC's.
         assert_eq!(
             board_dram_base(&with_base(Some(&stated)), m3),
             Ok(0x100_0000_0000)
         );
-        assert!(board_dram_base(&with_base(None), m3).is_err());
-        // The M2's board states none and takes the public base; a stated base
+        assert_eq!(
+            board_dram_base(&with_base(None), 0x8142),
+            Ok(0x100_0000_0000)
+        );
+        assert!(board_dram_base(&with_base(None), 0x8101).is_err());
+        // The M2's board states none and takes its SoC's base; a stated base
         // must agree with it.
         assert_eq!(board_dram_base(&with_base(None), 0x8112), Ok(0x8_0000_0000));
         assert!(board_dram_base(&with_base(Some(&stated)), 0x8112).is_err());
