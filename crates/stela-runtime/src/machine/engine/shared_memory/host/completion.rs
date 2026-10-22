@@ -62,6 +62,19 @@ impl<H: Host, T: NativeTransport> HeldRamService<'_, H, T> {
             }
         }
     }
+    /// End only RAM exclusion, keeping the SAME actual worker stop and open
+    /// owner-local sessions for a synchronous controller/CPU transaction.
+    /// Only engine continuation code can consume the returned stop authority.
+    pub(in crate::machine::engine) fn finish_memory(mut self) -> publication::StoppedWorkers {
+        if self.validate_current().is_err() {
+            self.transport
+                .fail_stopped("canonical write lost its actual RAM hold");
+        }
+        self.fence_cpu_memory();
+        drop(self.ram.take());
+        self.held.take().expect("actual retained worker hold")
+    }
+
     /// Call only after the real controller owner has settled its prepared
     /// request, including its ACK or a proved effect-free refusal. The source
     /// instruction's own architectural retirement remains the engine's job.

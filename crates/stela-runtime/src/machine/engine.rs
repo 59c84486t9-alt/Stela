@@ -2,12 +2,17 @@
 //! every exit back from native code.
 mod amx;
 mod clock;
+mod device_access;
 mod device_read;
+mod device_write;
 mod exclusive;
 mod hosted;
 mod pointer;
 mod prepare;
 pub use device_read::{CanonicalDeviceMemory, ConsumedScalar, DeviceReadRequest, DeviceReadShape};
+pub use device_write::{
+    CanonicalDeviceWrite, CanonicalWriteMemory, ConsumedWrite, DeviceWriteRequest, DeviceWriteShape,
+};
 mod processors;
 mod scalable;
 mod shared_memory;
@@ -534,6 +539,36 @@ pub trait Devices {
             "canonical device pair read has no live backend".into(),
         ))
     }
+    /// Outer Err is proved effect-free. Partial or unknown effects must be
+    /// returned explicitly; no raw write fallback or fabricated ACK is allowed.
+    fn write_canonical(
+        &mut self,
+        _cpu: usize,
+        _physical: u64,
+        _bytes: u8,
+        _value: u64,
+        _now: u64,
+        _owners: &mut dyn CanonicalDeviceWrite,
+    ) -> Result<ConsumedWrite, DeviceError> {
+        Err(DeviceError::TransferRefused(
+            "canonical device write has no live backend".into(),
+        ))
+    }
+    /// One qualified whole-pair owner; adjacent scalar registers are never
+    /// combined by this default boundary.
+    fn write_pair_canonical(
+        &mut self,
+        _cpu: usize,
+        _physical: u64,
+        _bytes: u8,
+        _values: [u64; 2],
+        _now: u64,
+        _owners: &mut dyn CanonicalDeviceWrite,
+    ) -> Result<ConsumedWrite, DeviceError> {
+        Err(DeviceError::TransferRefused(
+            "canonical device pair write has no live backend".into(),
+        ))
+    }
     /// Optional whole-pair boundary for a device with a qualified consuming
     /// read protocol. `Ok(None)` has no effects and requests ordinary scalar
     /// reads. `Err` refuses before consumption; `Ok(Some(..))` must retain the
@@ -869,6 +904,8 @@ pub enum Stop {
     Unsupported(Requirement),
     /// An unexecuted device read retained by the actual canonical scheduler.
     DeviceRead(DeviceReadRequest),
+    /// An unexecuted write, retained by the same canonical cohort owner.
+    DeviceWrite(DeviceWriteRequest),
     /// The running PE reached a host breakpoint (`Machine::set_breakpoints`)
     /// at this PC, before executing its instruction.
     Breakpoint(u64),
@@ -1371,6 +1408,8 @@ pub struct Machine<H: Host, D: Devices> {
     /// Identity of this Machine's persistent checked PE memory/event owners.
     native_memory_identity: Arc<()>,
     pending_device_read: Option<device_read::Pending>,
+    pending_device_write: Option<device_write::Pending>,
+    pending_device_tail: alloc::collections::VecDeque<shared_memory::RecoveredDeviceAccess>,
     /// Host breakpoints, ascending (`set_breakpoints`).
     breakpoints: Vec<u64>,
     /// Host trace points, ascending (`set_traces`), and the hits not yet
@@ -1513,6 +1552,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             native_publication: None,
             native_memory_identity: Arc::new(()),
             pending_device_read: None,
+            pending_device_write: None,
+            pending_device_tail: alloc::collections::VecDeque::new(),
             breakpoints: Vec::new(),
             traces: Vec::new(),
             trace_hits: Vec::new(),
@@ -2448,8 +2489,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Run until a stop. `budget` limits executed blocks (0 = unlimited).
     pub fn run(&mut self, budget: u64) -> Stop {
-        if let Some(pending) = &self.pending_device_read {
-            return pending.stop();
+        if let Some(pending) = self.pending_native_device_access() {
+            return pending;
         }
         if self.cpu.has_canonical_memory() || self.peers.iter().any(|peer|
             matches!(peer, processors::Peer::Parked(parked) if parked.cpu().has_canonical_memory())) {

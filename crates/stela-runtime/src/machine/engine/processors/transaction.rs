@@ -69,7 +69,53 @@ struct NativeSettlement {
     isolations: u64,
 }
 
+impl ProcessorWrite<'_> {
+    pub(in crate::machine::engine) fn require_native_hold(
+        &self,
+        held: &super::publication::StoppedWorkers,
+    ) -> Result<(), super::publication::PublicationError> {
+        self.publication
+            .as_ref()
+            .ok_or(super::publication::PublicationError::NotInitialized)?
+            .require_all_held(held)
+    }
+    pub(in crate::machine::engine) fn native_host(&mut self) -> &mut dyn Host {
+        &mut *self.native.host
+    }
+    pub(in crate::machine::engine) fn reborrow(&mut self) -> ProcessorWrite<'_> {
+        ProcessorWrite {
+            processors: &mut *self.processors,
+            publication: &mut *self.publication,
+            current: self.current,
+            cpu: &mut *self.cpu,
+            peers: &mut *self.peers,
+            waiting: self.waiting,
+            clock: &mut *self.clock,
+            slice_end: &mut *self.slice_end,
+            native: self.native.reborrow(),
+        }
+    }
+}
+
 impl NativeProcessorState<'_> {
+    fn reborrow(&mut self) -> NativeProcessorState<'_> {
+        NativeProcessorState {
+            host: &mut *self.host,
+            statistics: &mut *self.statistics,
+            translation_generation: &mut *self.translation_generation,
+            timers: &mut *self.timers,
+            floating_point: &mut *self.floating_point,
+            memory_checks: &mut *self.memory_checks,
+            native_system: &mut *self.native_system,
+            debug: &mut *self.debug,
+            pointer: &mut *self.pointer,
+            mirrors: &mut *self.mirrors,
+            device_lines: &mut *self.device_lines,
+            watch: &mut *self.watch,
+            tag_checks: &mut *self.tag_checks,
+            prediction_context: &mut *self.prediction_context,
+        }
+    }
     fn prepare(&self, cpu: &Cpu) -> Result<NativeSettlement, ProcessorPowerError> {
         let watch = Watch {
             pass: self.watch.pass,

@@ -21,6 +21,7 @@ const MOVK64: u32 = 0xf2800000;
 const IMMEDIATE_SHIFT: u32 = 5;
 const HALFWORD_SHIFT: u32 = 21;
 const STR_X1_X0: u32 = 0xf9000001;
+const STP_X1_X1_X0: u32 = 0xa9000401;
 const LDADD_X1_X2_X0: u32 = 0xf8210002;
 const STXP_W7_X4_X5_X6: u32 = 0xc82714c4;
 const LDXP_X4_X5_X6: u32 = 0xc87f14c4;
@@ -182,6 +183,9 @@ pub(super) fn scheduler_body(entry: u64, spsr: u64) -> KernelProgram {
         .map(|word| u32::from_le_bytes(*word))
         .collect();
     words.pop(); // continue after the exact atomic body, rather than looping it
+    constant(&mut words, 0, READY);
+    constant(&mut words, 1, 1);
+    words.extend([STR_X1_X0, STP_X1_X1_X0]);
     let resume_constant = words.len();
     constant(&mut words, 10, 0);
     words.push(msr(ELR_EL2, 10));

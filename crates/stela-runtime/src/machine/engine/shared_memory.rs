@@ -13,11 +13,13 @@ use super::{Devices, Host, Machine, mmu};
 use crate::memory::{RegisteredSystemRam, domain::MemoryThread};
 use alloc::{sync::Arc, vec::Vec};
 use controls::Controls;
-pub(in crate::machine::engine) use native_run::RecoveredRead;
 pub use native_run::{
     Cohort as NativeCohort, Identity as NativeRunIdentity, NativeRun,
     Observation as NativeRunObservation, ReturnedRun, dispatch as dispatch_native_run,
     recover as recover_native_run,
+};
+pub(in crate::machine::engine) use native_run::{
+    RecoveredDeviceAccess, RecoveredRead, RecoveredWrite,
 };
 use policy::Policy;
 pub use policy::{Failure as SharedMemoryFailure, Refusal as SharedMemoryRefusal};
@@ -49,6 +51,9 @@ impl SharedMemory {
     }
     pub fn processor(&self) -> usize {
         self.pe
+    }
+    pub(in crate::machine::engine) fn ram_owner(&self) -> &Arc<RegisteredSystemRam> {
+        &self.ram
     }
     pub(super) fn prepare_reset_peer(
         &self,
@@ -82,12 +87,12 @@ impl SharedMemory {
     pub fn event_endpoint(&self) -> &crate::system::events::EventEndpoint {
         &self.event
     }
-    pub(in crate::machine::engine) fn current_read_source(
+    pub(in crate::machine::engine) fn current_access_source<const WRITE: bool>(
         &self,
         cpu: &crate::machine::Cpu,
         profile: &crate::machine::CpuProfile,
         missing: &[crate::machine::system::Register],
-        recovered: &RecoveredRead,
+        recovered: &native_run::RecoveredAccess<WRITE>,
         held: &crate::memory::CanonicalRamService<'_>,
     ) -> Result<(), MemoryStatus> {
         let (binding, _, pc, _) = recovered.source();
@@ -112,7 +117,7 @@ impl SharedMemory {
         Ok(())
     }
 
-    pub(in crate::machine::engine) fn current_device_read(
+    pub(in crate::machine::engine) fn current_device_access(
         &self,
         cpu: &crate::machine::Cpu,
         profile: &crate::machine::CpuProfile,
@@ -137,13 +142,25 @@ impl SharedMemory {
                 DataPart {
                     address,
                     bytes: width,
-                    kind: AccessKind::Read,
+                    kind: if request.flags & stela_compiler::context::memory::flags::WRITE != 0 {
+                        AccessKind::Write
+                    } else {
+                        AccessKind::Read
+                    },
                 },
             );
+            let write = request.flags & stela_compiler::context::memory::flags::WRITE != 0;
+            let reached = match policy.failure {
+                Some(policy::Failure::DeviceRead {
+                    physical, bytes, ..
+                }) if !write => Some((physical, bytes)),
+                Some(policy::Failure::DeviceWrite {
+                    physical, bytes, ..
+                }) if write => Some((physical, bytes)),
+                _ => None,
+            };
             if result != Err((MemoryStatus::Unsupported, address))
-                || !matches!(policy.failure,
-                Some(policy::Failure::DeviceRead { physical: reached, bytes, .. })
-                if reached == physical + offset as u64 && bytes == width)
+                || reached != Some((physical + offset as u64, width))
             {
                 return Err(MemoryStatus::Unsupported);
             }

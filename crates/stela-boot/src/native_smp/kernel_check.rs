@@ -27,6 +27,8 @@ struct Reservation {
 struct TestDevices {
     starts: Vec<engine::Start>,
     ready: Vec<bool>,
+    canonical_writes: usize,
+    cpu_commits: usize,
 }
 impl Devices for TestDevices {
     fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
@@ -46,6 +48,34 @@ impl Devices for TestDevices {
         *self.ready.get_mut(pe).ok_or(DeviceError::NoDevice)? = true;
         Ok(())
     }
+    fn write_canonical(
+        &mut self,
+        pe: usize,
+        address: u64,
+        bytes: u8,
+        value: u64,
+        _: u64,
+        owners: &mut dyn engine::CanonicalDeviceWrite,
+    ) -> Result<engine::ConsumedWrite, DeviceError> {
+        if address != source::READY || bytes != 8 || value != 1 {
+            return Err(DeviceError::NoDevice);
+        }
+        self.consume_write(pe, owners)
+    }
+    fn write_pair_canonical(
+        &mut self,
+        pe: usize,
+        address: u64,
+        bytes: u8,
+        values: [u64; 2],
+        _: u64,
+        owners: &mut dyn engine::CanonicalDeviceWrite,
+    ) -> Result<engine::ConsumedWrite, DeviceError> {
+        if address != source::READY || bytes != 8 || values != [1, 1] {
+            return Err(DeviceError::NoDevice);
+        }
+        self.consume_write(pe, owners)
+    }
     fn lines(&mut self, _: usize, _: u64) -> Lines {
         Lines {
             irq: self.ready.iter().all(|ready| *ready),
@@ -54,6 +84,75 @@ impl Devices for TestDevices {
     }
     fn take_start(&mut self) -> Option<engine::Start> {
         self.starts.pop()
+    }
+}
+impl TestDevices {
+    fn consume_write(
+        &mut self,
+        pe: usize,
+        owners: &mut dyn engine::CanonicalDeviceWrite,
+    ) -> Result<engine::ConsumedWrite, DeviceError> {
+        use engine::CanonicalDeviceMemory;
+        {
+            let mut memory = owners.memory()?;
+            memory.memory().validate_current().map_err(|e| {
+                DeviceError::TransferRefused(alloc::format!("fixture canonical memory {e:?}"))
+            })?;
+            memory.fence_cpu_memory();
+        }
+        // Authored controller: both transactions commit while the actual
+        // recovered cohort remains held, including the OTHER physical PE.
+        let other = (pe + 1) % self.ready.len();
+        let active = machine::apple::memory_resources::LifecycleState {
+            powered: true,
+            clocked: true,
+            quiesced: false,
+            reset: false,
+            retention: false,
+        };
+        let paused = owners
+            .processors()?
+            .apply(&[engine::ProcessorChange {
+                domain: 1 + other as u64,
+                state: machine::apple::memory_resources::LifecycleState {
+                    clocked: false,
+                    ..active
+                },
+            }])
+            .map_err(|e| {
+                DeviceError::TransferRefused(alloc::format!("fixture CPU preflight {e:?}"))
+            })?;
+        assert_eq!(paused.paused(other), Some(true));
+        self.cpu_commits += 1; // actual prepared-controller ACK inside lease
+        drop(paused);
+        let settlement = (|| {
+            let resumed = owners
+                .processors()?
+                .apply(&[engine::ProcessorChange {
+                    domain: 1 + other as u64,
+                    state: active,
+                }])
+                .map_err(|e| {
+                    DeviceError::TransferRefused(alloc::format!("fixture CPU resume {e:?}"))
+                })?;
+            assert_eq!(resumed.paused(other), Some(false));
+            self.cpu_commits += 1;
+            drop(resumed);
+            let mut memory = owners.memory()?;
+            memory.memory().validate_current().map_err(|e| {
+                DeviceError::TransferRefused(alloc::format!(
+                    "fixture post-CPU canonical memory {e:?}"
+                ))
+            })?;
+            memory.fence_cpu_memory();
+            Ok(())
+        })();
+        if let Err(error) = settlement {
+            return Ok(engine::ConsumedWrite::Unknown { error });
+        }
+        self.ready[pe] = true;
+        self.canonical_writes += 1;
+        Ok(engine::ConsumedWrite::Complete { settlement: Ok(()) })
     }
 }
 fn reservation() -> Result<Arc<RegisteredSystemRam>, &'static str> {
@@ -176,6 +275,8 @@ pub(crate) unsafe fn check(
             })
             .collect(),
         ready: alloc::vec![false; cores],
+        canonical_writes: 0,
+        cpu_commits: 0,
     };
     let transport =
         super::transport::FixedWorkers::new(executors, sender, handoff.tsc_hz, Arc::clone(&ram));
@@ -197,6 +298,23 @@ pub(crate) unsafe fn check(
             worker: WorkerId(pe),
         })
         .collect();
+    machine
+        .bind_processor_power(
+            &(0..cores)
+                .map(|pe| engine::ProcessorBinding {
+                    domain: 1 + pe as u64,
+                    target: engine::ProcessorTarget::Core { pe },
+                    initial: machine::apple::memory_resources::LifecycleState {
+                        powered: true,
+                        clocked: true,
+                        quiesced: false,
+                        reset: false,
+                        retention: false,
+                    },
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|_| "fixture CPU power bindings refused")?;
     let owners = machine
         .bind_assigned_native_workers(&bindings)
         .map_err(|_| "native cold assigned physical roster refused")?;
@@ -238,15 +356,32 @@ pub(crate) unsafe fn check(
     unsafe { ram.publish_physical(alias, &descriptor.to_le_bytes()) }
         .map_err(|_| "native scheduler source alias publication refused")?;
     let mut rounds = 0;
+    let mut max_pending = 0;
     loop {
         // SAFETY: the real fixed BSP/AP owners, canonical RAM and source bytes
         // stay pinned. The diagnostic admits no external DMA/debug/AMX writer;
         // every actual frame and stopped Host effect is synchronously joined.
         match unsafe { machine.native_round() } {
             Ok(_) => {}
+            Err(stop) if machine.pending_native_device_access().is_some() => {
+                let _ = stop;
+            }
             Err(stop) => {
                 crate::output::arguments(format_args!("NATIVE SCHEDULER stopped {stop:?}\n"));
                 return Err("native scheduler reached an unqualified source boundary");
+            }
+        }
+        max_pending = max_pending.max(machine.pending_native_device_access_count());
+        while machine.pending_native_device_access().is_some() {
+            // SAFETY: closed synchronous fixture, same actual recovered cohort;
+            // no external producer or direct writer can run between phases.
+            match unsafe { machine.complete_native_device_access() } {
+                Ok(()) => {}
+                Err(Stop::DeviceRead(_) | Stop::DeviceWrite(_)) => {}
+                Err(stop) => {
+                    crate::output::arguments(format_args!("NATIVE SCHEDULER device {stop:?}\n"));
+                    return Err("native scheduler canonical device settlement failed");
+                }
             }
         }
         rounds += 1;
@@ -260,6 +395,12 @@ pub(crate) unsafe fn check(
         if rounds >= 256 || crate::apic::rdtsc().wrapping_sub(started) >= handoff.tsc_hz * 10 {
             return Err("native scheduler source program/IRQ deadline");
         }
+    }
+    if max_pending < 2
+        || machine.devices.canonical_writes != cores * 2
+        || machine.devices.cpu_commits != cores * 4
+    {
+        return Err("native scheduler did not consume whole actual pending cohort/CPU leases");
     }
     let after = states(&machine)?;
     for (old, actual) in before.iter().zip(&after) {
@@ -324,9 +465,11 @@ pub(crate) unsafe fn check(
         return Err("native scheduler ordinary translated store did not use canonical RAM");
     }
     crate::output::arguments(format_args!(
-        "CHECK native-shared-kernel PASS physical_cores={cores} actual_frames={cores} lse_updates={} full_GPR_SIMD_FP_state=preserved canonical_RAM=shared cold_M0_to_M1=checked CPU_starts={} legacy_warmup=none scheduler_rounds={rounds} source_ERET_STXP=failed source_WFE=completed source_timer_FIQ=delivered source_permission_abort=precise actual_Host_effects=receipted; original macOS SMP unqualified\n",
+        "CHECK native-shared-kernel PASS physical_cores={cores} actual_frames={cores} lse_updates={} full_GPR_SIMD_FP_state=preserved canonical_RAM=shared cold_M0_to_M1=checked CPU_starts={} consumed_device_writes={} CPU_controller_commits={} max_pending={max_pending} legacy_warmup=none scheduler_rounds={rounds} source_ERET_STXP=failed source_WFE=completed source_timer_FIQ=delivered source_permission_abort=precise actual_Host_effects=receipted; original macOS SMP unqualified\n",
         cores * source::INCREMENTS,
-        cores - 1
+        cores - 1,
+        machine.devices.canonical_writes,
+        machine.devices.cpu_commits
     ));
     Ok(())
 }

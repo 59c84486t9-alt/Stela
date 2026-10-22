@@ -81,7 +81,10 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         Ok(held)
     }
 
-    fn release_native_services(&mut self, held: publication::StoppedWorkers) {
+    pub(in crate::machine::engine) fn release_native_services(
+        &mut self,
+        held: publication::StoppedWorkers,
+    ) {
         let inventory = self
             .native_publication
             .as_mut()
@@ -132,8 +135,8 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// refusals until their actual platform owners join this candidate. Calling
     /// this method does not enable production SMP or qualify original macOS.
     pub unsafe fn native_round(&mut self) -> Result<usize, Stop> {
-        if let Some(pending) = &self.pending_device_read {
-            return Err(pending.stop());
+        if let Some(pending) = self.pending_native_device_access() {
+            return Err(pending);
         }
         let bindings: Vec<_> = self
             .native_publication
@@ -234,7 +237,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 .transport
                 .fail_stopped("native transport returned an incomplete actual cohort");
         }
-        let mut pending_read = None;
+        let mut pending_accesses = Vec::new();
         let mut seen = Vec::with_capacity(reports.len());
         for mut report in reports {
             let Some(settlement) = report.settlement.take() else {
@@ -248,23 +251,22 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                     .fail_stopped("native source report has duplicate/wrong PE authority");
             }
             seen.push(settlement.binding.pe);
-            if matches!(
-                settlement.source_failure,
-                Some(policy::Failure::DeviceRead { .. })
-            ) {
-                self.validate_native_source(&settlement)?;
-                if pending_read.is_some() {
-                    return Err(self.unsupported(RequirementKind::Native(
-                        "multiple concurrent device-read continuations are not yet admitted",
-                    )));
+            match settlement.source_failure {
+                Some(policy::Failure::DeviceRead { .. }) => {
+                    self.validate_native_source(&settlement)?;
+                    pending_accesses
+                        .push(super::RecoveredDeviceAccess::Read(settlement.into_read()));
                 }
-                pending_read = Some(settlement.into_read());
-            } else {
-                self.settle_native_source(settlement)?;
+                Some(policy::Failure::DeviceWrite { .. }) => {
+                    self.validate_native_source(&settlement)?;
+                    pending_accesses
+                        .push(super::RecoveredDeviceAccess::Write(settlement.into_write()));
+                }
+                _ => self.settle_native_source(settlement)?,
             }
         }
-        if let Some(read) = pending_read {
-            return Err(self.queue_device_read(read, held));
+        if !pending_accesses.is_empty() {
+            return Err(self.queue_device_accesses(pending_accesses, held));
         }
         self.release_native_services(held);
         Ok(expected.len())

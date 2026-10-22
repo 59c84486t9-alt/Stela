@@ -172,19 +172,21 @@ pub(crate) unsafe fn run_slice<D: Devices>(
     machine: &mut CanonicalMachine<'_, D>,
     limit: u64,
 ) -> Stop {
-    while machine.statistics.blocks < limit {
+    loop {
+        if machine.pending_native_device_access().is_some() {
+            // SAFETY: same retained cohort, controller and closed producers.
+            match unsafe { machine.complete_native_device_access() } {
+                Ok(()) | Err(Stop::DeviceRead(_) | Stop::DeviceWrite(_)) => continue,
+                Err(stop) => return stop,
+            }
+        }
+        if machine.statistics.blocks >= limit {
+            return Stop::Budget;
+        }
         // SAFETY: same registered owner/fixed executor and closed providers.
         match unsafe { machine.native_round() } {
-            Ok(_) => {}
-            Err(Stop::DeviceRead(_)) => {
-                // SAFETY: the actual private pending frame/hold continues the
-                // same synchronous producer contract; diagnostics grant nothing.
-                if let Err(stop) = unsafe { machine.complete_device_read() } {
-                    return stop;
-                }
-            }
+            Ok(_) | Err(Stop::DeviceRead(_) | Stop::DeviceWrite(_)) => {}
             Err(stop) => return stop,
         }
     }
-    Stop::Budget
 }

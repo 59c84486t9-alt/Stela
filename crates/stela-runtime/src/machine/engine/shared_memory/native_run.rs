@@ -1,7 +1,11 @@
 //! An actual borrowed architectural frame; no Cpu or Host crosses a core.
+mod access;
 use super::super::{NativeExit, publication};
 use super::*;
 use crate::{execution::context::ContextLoan, platform::cpu::system::NativeSystemTarget};
+pub(in crate::machine::engine) use access::{
+    RecoveredAccess, RecoveredDeviceAccess, RecoveredRead, RecoveredWrite,
+};
 use alloc::boxed::Box;
 use stela_compiler::{
     GuestState,
@@ -84,61 +88,6 @@ pub(super) struct Settlement {
     controls_sha256: Option<alloc::string::String>,
 }
 
-/// Non-Clone authority obtained only by consuming a real recovered settlement.
-/// Public request diagnostics cannot construct or replace this owner.
-#[derive(Debug)]
-pub(in crate::machine::engine) struct RecoveredRead {
-    source: Settlement,
-}
-impl Settlement {
-    pub(super) fn into_read(self) -> RecoveredRead {
-        RecoveredRead { source: self }
-    }
-}
-impl RecoveredRead {
-    pub(in crate::machine::engine) fn source(&self) -> (publication::WorkerBinding, u64, u64, u64) {
-        (
-            self.source.binding,
-            self.source.generation,
-            self.source.pc,
-            self.source.retired,
-        )
-    }
-    pub(in crate::machine::engine) fn machine_matches(&self, identity: &Arc<()>) -> bool {
-        Arc::ptr_eq(&self.source.machine, identity)
-    }
-    pub(in crate::machine::engine) fn controls(&self) -> Option<&str> {
-        self.source.controls_sha256.as_deref()
-    }
-    pub(in crate::machine::engine) fn access(
-        &self,
-    ) -> Option<(u32, crate::memory::domain::DataRequest, u64, u64, usize)> {
-        let fault = self.source.memory_fault?;
-        let policy::Failure::DeviceRead {
-            request,
-            address,
-            physical,
-            bytes,
-        } = self.source.source_failure?
-        else {
-            return None;
-        };
-        if self.source.status.is_err()
-            || fault.status != MemoryStatus::Unsupported
-            || fault.completed_bytes != 0
-            || fault.pc != self.source.pc
-            || fault.address != address
-            || fault.access == FaultAccess::Write
-            || request.operation != crate::memory::domain::DataOperation::Ordinary
-            || request.flags & stela_compiler::context::memory::flags::WRITE != 0
-            || request.pc != Some(self.source.pc)
-            || request.address != address
-        {
-            return None;
-        }
-        Some((self.source.fault_word?, request, address, physical, bytes))
-    }
-}
 impl publication::sealed::NativeFrame for NativeRun<'_> {}
 impl<'a> publication::NativeFrame for NativeRun<'a> {
     type Returned = ReturnedRun<'a>;
@@ -319,6 +268,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .as_ref()
             .ok_or(MemoryStatus::Unsupported)?;
         if !Arc::ptr_eq(&memory.machine, &self.native_memory_identity) {
+            return Err(MemoryStatus::Unsupported);
+        }
+        if self.pending_native_device_access().is_some() {
             return Err(MemoryStatus::Unsupported);
         }
         prepare(
@@ -519,6 +471,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         &'a mut self,
         bindings: &[publication::WorkerBinding],
     ) -> Result<Cohort<'a, H>, MemoryStatus> {
+        if self.pending_native_device_access().is_some() {
+            return Err(MemoryStatus::Unsupported);
+        }
         self.native_cohort(bindings, false)
     }
 
@@ -686,7 +641,7 @@ pub fn recover<'a>(
                 status: observed.status,
                 controls_sha256: matches!(
                     observed.source_failure,
-                    Some(policy::Failure::DeviceRead { .. })
+                    Some(policy::Failure::DeviceRead { .. } | policy::Failure::DeviceWrite { .. })
                 )
                 .then(|| actual.run.artifact.identity.controls_sha256.clone()),
             });
@@ -695,297 +650,4 @@ pub fn recover<'a>(
         })
         .map_err(Box::new)?;
     Ok(observation.expect("successful recovery consumed actual returned payload"))
-}
-
-#[cfg(test)]
-mod read_continuation_tests {
-    use super::super::host::tests::{Local, OneWorker};
-    use super::*;
-    use crate::machine::{DeviceError, Lines, Stop, exception::Pstate};
-    use crate::memory::domain::{DataOperation, DataRequest};
-    use stela_compiler::context::memory::FaultAccess;
-    const PC: u64 = 0x14000;
-    const DEVICE: u64 = 0x90000;
-    const LDR: u32 = 0xf9400020; // LDR X0,[X1]
-    const LDP_POST: u32 = 0xa8c10440; // LDP X0,X1,[X2],#16
-    struct Device {
-        reads: usize,
-        fail: bool,
-        shape: Option<super::super::super::DeviceReadShape>,
-    }
-    impl Devices for Device {
-        fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
-            panic!("raw/replayed read")
-        }
-        fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
-            Err(DeviceError::NoDevice)
-        }
-        fn lines(&mut self, _: usize, _: u64) -> Lines {
-            Lines::default()
-        }
-        fn read_canonical(
-            &mut self,
-            _: usize,
-            physical: u64,
-            bytes: u8,
-            _: u64,
-            memory: &mut dyn super::super::super::CanonicalDeviceMemory,
-        ) -> Result<super::super::super::ConsumedScalar, DeviceError> {
-            assert_eq!(physical, DEVICE);
-            assert!(matches!(bytes, 1 | 2 | 4 | 8));
-            memory.fence_cpu_memory();
-            memory.memory().validate_current().unwrap();
-            self.reads += 1;
-            self.shape = Some(super::super::super::DeviceReadShape::Scalar { bytes });
-            Ok(super::super::super::ConsumedScalar {
-                value: 0x8877665544332211,
-                settlement: self.settlement(),
-            })
-        }
-        fn read_pair_canonical(
-            &mut self,
-            _: usize,
-            physical: u64,
-            bytes: u8,
-            _: u64,
-            memory: &mut dyn super::super::super::CanonicalDeviceMemory,
-        ) -> Result<super::super::super::ConsumedPair, DeviceError> {
-            assert_eq!(physical, DEVICE);
-            assert!(matches!(bytes, 1 | 2 | 4 | 8));
-            memory.fence_cpu_memory();
-            memory.memory().validate_current().unwrap();
-            self.reads += 1;
-            self.shape = Some(super::super::super::DeviceReadShape::Pair { bytes });
-            Ok(super::super::super::ConsumedPair {
-                values: [0x8877665544332211, 0xffeeddccbbaa0099],
-                settlement: self.settlement(),
-            })
-        }
-    }
-    impl Device {
-        fn settlement(&self) -> Result<(), DeviceError> {
-            if self.fail {
-                Err(DeviceError::TransferRefused(
-                    "model post-consume failure".into(),
-                ))
-            } else {
-                Ok(())
-            }
-        }
-    }
-    type TestMachine = Machine<ServiceHost<Local, OneWorker>, Device>;
-    /// Protocol model only: the real publication loan is actually returned
-    /// after CPL0 refusal on this hosted runner. Its failure diagnostics are
-    /// replaced ONLY here to drive continuation adversaries. No native memory
-    /// callback/CPL0 execution is claimed by these tests.
-    fn pending(word: u32, fail: bool) -> (TestMachine, Arc<RegisteredSystemRam>) {
-        pending_at(word, fail, DEVICE)
-    }
-    fn pending_at(word: u32, fail: bool, base: u64) -> (TestMachine, Arc<RegisteredSystemRam>) {
-        let (mut cpu, profile, missing, ram) = super::super::policy::tests::fixture();
-        cpu.pstate = Pstate::reset(2);
-        cpu.registers
-            .set_raw(crate::machine::system::Register::SCTLR_EL2, 0, 0);
-        cpu.pc = PC;
-        cpu.state.x[1] = base;
-        cpu.state.x[2] = base;
-        let mut source = word.to_le_bytes().to_vec();
-        source.extend_from_slice(&0x14000000u32.to_le_bytes());
-        unsafe { ram.publish_physical(PC, &source) }.unwrap();
-        let native_host = ServiceHost::new(Local, OneWorker(None), Arc::clone(&ram));
-        let mut machine = Machine::new(
-            cpu,
-            native_host,
-            Device {
-                reads: 0,
-                fail,
-                shape: None,
-            },
-            profile,
-            ram.target(),
-        );
-        machine.profile_missing = missing;
-        machine
-            .install_shared_memory_for_active_processors(
-                Arc::clone(&ram),
-                &crate::system::events::EventDomain::new(),
-            )
-            .unwrap();
-        let binding = publication::WorkerBinding {
-            pe: 0,
-            worker: publication::WorkerId(17),
-        };
-        let owners = machine.bind_active_native_workers(&[binding]).unwrap();
-        machine.initialize_native_transport(owners);
-        let cohort = machine.native_cohort(&[binding], true).unwrap();
-        let controls = cohort.frames[0].identity().controls_sha256.clone();
-        let mut reports =
-            cohort
-                .host
-                .transport
-                .execute(&mut cohort.host.local, cohort.inventory, cohort.frames);
-        let mut settlement = reports.pop().unwrap().settlement.take().unwrap();
-        assert!(settlement.status.is_err()); // actual CPL0 refusal, never a success substitute
-        let instruction = stela_compiler::Lifter::lift(
-            &stela_compiler::aarch64::Decoder,
-            stela_compiler::GuestAddress(PC),
-            word,
-        )
-        .unwrap();
-        let (pair, bytes) = match instruction.operation {
-            stela_compiler::aarch64::Operation::MemoryPair { bytes, .. } => {
-                (true, usize::from(bytes) * 2)
-            }
-            _ => (
-                false,
-                usize::from(
-                    stela_compiler::block::el1_platform::ScalarLoad::from_instruction(&instruction)
-                        .unwrap()
-                        .bytes(),
-                ),
-            ),
-        };
-        let request = DataRequest {
-            address: DEVICE,
-            bytes,
-            flags: if pair {
-                stela_compiler::context::memory::flags::PAIR
-            } else {
-                0
-            },
-            pc: Some(PC),
-            operation: DataOperation::Ordinary,
-        };
-        settlement.status = Ok(());
-        settlement.fault_word = Some(word);
-        settlement.controls_sha256 = Some(controls);
-        settlement.memory_fault = Some(crate::memory::domain::MemoryFault {
-            status: MemoryStatus::Unsupported,
-            address: DEVICE,
-            pc: PC,
-            completed_bytes: 0,
-            access: FaultAccess::Read,
-        });
-        settlement.source_failure = Some(policy::Failure::DeviceRead {
-            request,
-            address: DEVICE,
-            physical: DEVICE,
-            bytes,
-        });
-        let held = machine.hold_native_services().unwrap();
-        assert!(matches!(
-            machine.queue_device_read(settlement.into_read(), held),
-            Stop::DeviceRead(_)
-        ));
-        (machine, ram)
-    }
-    #[test]
-    fn scalar_and_pair_retire_once_and_preserve_consumed_data_on_settlement_failure() {
-        for word in [LDR, LDP_POST] {
-            for fail in [false, true] {
-                let (mut machine, ram) = pending(word, fail);
-                let before = machine.cpu.state.clone();
-                let retired = machine.cpu.retired;
-                let result = unsafe { machine.complete_device_read() };
-                assert_eq!(result.is_err(), fail);
-                assert_eq!(machine.devices.reads, 1);
-                assert_eq!(machine.cpu.pc, PC + 4);
-                assert_eq!(machine.cpu.retired, retired + 1);
-                let mut expected = before;
-                expected.x[0] = 0x8877665544332211;
-                if word == LDP_POST {
-                    expected.x[1] = 0xffeeddccbbaa0099;
-                    expected.x[2] = DEVICE + 16;
-                }
-                assert_eq!(machine.cpu.state, expected);
-                assert!(unsafe { machine.complete_device_read() }.is_err());
-                assert_eq!(machine.devices.reads, 1);
-                assert!(matches!(machine.run(1), Stop::Unsupported(_)));
-                assert_eq!(ram.check_physical(PC, 4).is_err(), fail);
-            }
-        }
-    }
-    #[test]
-    fn original_scalar_pair_address_and_sign_modes_retain_full_state_and_exact_writeback() {
-        // Unchanged source encodings through the shared decoder; closed model
-        // only. The QEMU cold fixture separately executes the real pair path.
-        for (word, base, first, second, writeback) in [
-            (
-                0xf8408420,
-                DEVICE,
-                0x8877665544332211,
-                None,
-                Some((1, DEVICE + 8)),
-            ), // LDR X0,[X1],#8
-            (0xb89fcc20, DEVICE + 4, 0x44332211, None, Some((1, DEVICE))), // LDRSW X0,[X1,#-4]!
-            (
-                0x29ff0440,
-                DEVICE + 8,
-                0x44332211,
-                Some(0xbbaa0099),
-                Some((2, DEVICE)),
-            ), // LDP W0,W1,[X2,#-8]!
-            (
-                0x68c10440,
-                DEVICE,
-                0x44332211,
-                Some(0xffffffffbbaa0099),
-                Some((2, DEVICE + 8)),
-            ), // LDPSW X0,X1,[X2],#8
-            (0xf8636820, DEVICE, 0x8877665544332211, None, None),          // LDR X0,[X1,X3]
-            (0x583e0000, DEVICE, 0x8877665544332211, None, None),          // LDR X0,literal(Device)
-        ] {
-            let (mut machine, _) = pending_at(word, false, base);
-            let mut expected = machine.cpu.state.clone();
-            expected.x[0] = first;
-            if let Some(value) = second {
-                expected.x[1] = value;
-            }
-            if let Some((register, value)) = writeback {
-                expected.x[register] = value;
-            }
-            unsafe { machine.complete_device_read() }.unwrap();
-            assert_eq!(machine.cpu.state, expected, "word={word:#x}");
-            assert_eq!(machine.cpu.pc, PC + 4);
-            assert_eq!(machine.cpu.retired, 1);
-            assert_eq!(machine.devices.reads, 1);
-        }
-    }
-    #[test]
-    fn changed_actual_frame_controls_or_source_refuses_before_device_consumption() {
-        for tamper in 0..5 {
-            let (mut machine, ram) = pending(LDR, false);
-            match tamper {
-                0 => machine.cpu.state.x[3] ^= 1,
-                1 => machine.cpu.pc += 4,
-                2 => machine.cpu.pstate.daif ^= 1,
-                3 => {
-                    machine
-                        .cpu
-                        .registers
-                        .set_raw(crate::machine::system::Register::SCTLR_EL2, 0, 1)
-                }
-                _ => {
-                    unsafe { ram.publish_physical(PC, &0xd503201fu32.to_le_bytes()) }.unwrap();
-                }
-            }
-            let before = (
-                machine.cpu.state.clone(),
-                machine.cpu.pc,
-                machine.cpu.retired,
-            );
-            assert!(unsafe { machine.complete_device_read() }.is_err());
-            assert_eq!(machine.devices.reads, 0);
-            assert_eq!(
-                (
-                    machine.cpu.state.clone(),
-                    machine.cpu.pc,
-                    machine.cpu.retired
-                ),
-                before
-            );
-            assert!(unsafe { machine.native_round() }.is_err());
-            assert_eq!(machine.devices.reads, 0);
-        }
-    }
 }

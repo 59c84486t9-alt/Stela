@@ -160,13 +160,20 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         recovered: RecoveredRead,
         held: publication::StoppedWorkers,
     ) -> Stop {
-        let refuse = self.unsupported(RequirementKind::Native(
-            "native device read lacks a complete original scalar/pair continuation",
-        ));
+        let (word, fault) = recovered.diagnostic();
+        let refuse = self.unsupported(RequirementKind::Instruction {
+            word,
+            detail: alloc::format!(
+                "native device read lacks a complete original scalar/pair continuation: {fault:?}"
+            ),
+        });
         // An error cannot discard the held generation and become replayable.
         self.pending_device_read = Some(Pending::Terminal(refuse.clone()));
-        let (binding, _, pc, _) = recovered.source();
-        if self.native_source_pe(binding).is_err() {
+        let (binding, _, pc, retired) = recovered.source();
+        if self.native_source_pe(binding).is_err()
+            || self.cpu.pc != pc
+            || self.cpu.retired != retired
+        {
             return refuse;
         }
         let Some((word, access, address, physical, first_bytes)) = recovered.access() else {
@@ -223,6 +230,9 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// external writer or reentrant device submission is admitted. The same
     /// controller/request owner must settle its actual effect before returning.
     pub unsafe fn complete_device_read(&mut self) -> Step {
+        if let Some(Pending::Terminal(stop)) = &self.pending_device_read {
+            return Err(stop.clone());
+        }
         let terminal = self.unsupported(RequirementKind::Native(
             "canonical device read is terminal or already consumed",
         ));
@@ -270,7 +280,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             .as_ref()
             .expect("recovered actual memory");
         if memory
-            .current_read_source(
+            .current_access_source(
                 &self.cpu,
                 &self.profile,
                 &self.profile_missing,
@@ -279,7 +289,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             )
             .is_err()
             || memory
-                .current_device_read(
+                .current_device_access(
                     &self.cpu,
                     &self.profile,
                     &self.profile_missing,
@@ -291,7 +301,6 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         {
             // No device effect; closing the failed continuation is safe. The
             // private terminal marker still prevents replay or native resume.
-            service.finish();
             return Err(terminal);
         }
         let consumed = match read.request.shape {
@@ -309,12 +318,14 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             Err(error) => {
                 // Err is contractually effect-free. It may not be retried as
                 // another source read; retain the terminal pending marker.
-                service.finish();
-                return Err(self.unsupported(RequirementKind::Device {
+                drop(service);
+                let stop = self.unsupported(RequirementKind::Device {
                     physical: read.request.physical,
                     write: false,
                     detail: alloc::format!("canonical read refused before consumption: {error:?}"),
-                }));
+                });
+                self.pending_device_read = Some(Pending::Terminal(stop.clone()));
+                return Err(stop);
             }
         };
         // Consumption is irrevocable: settle architectural data/writeback/PC
@@ -343,16 +354,18 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             // Unknown board settlement poisons RAM/monitor and leaves actual
             // worker sessions held. Returned load data is nevertheless final.
             drop(service);
-            return Err(self.unsupported(RequirementKind::Device {
+            let stop = self.unsupported(RequirementKind::Device {
                 physical: read.request.physical,
                 write: false,
                 detail: alloc::format!(
                     "consumed canonical read: board settlement failed: {error:?}"
                 ),
-            }));
+            });
+            self.pending_device_read = Some(Pending::Terminal(stop.clone()));
+            return Err(stop);
         }
-        service.finish();
+        let held = service.finish_memory();
         self.pending_device_read = None;
-        Ok(())
+        self.finish_device_access(held)
     }
 }

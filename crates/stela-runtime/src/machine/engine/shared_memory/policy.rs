@@ -19,6 +19,12 @@ pub enum Failure {
         physical: u64,
         bytes: usize,
     },
+    DeviceWrite {
+        request: DataRequest,
+        address: u64,
+        physical: u64,
+        bytes: usize,
+    },
     Fault {
         request: DataRequest,
         address: u64,
@@ -229,16 +235,25 @@ impl DataPolicy for Policy {
         }
         if translated.memory == mmu::MemoryType::Device
             && request.operation == DataOperation::Ordinary
-            && request.flags & flags::WRITE == 0
             && self.ram.check_physical(translated.physical, part.bytes)
                 == Err(MemoryStatus::Translation)
         {
-            self.failure.get_or_insert(Failure::DeviceRead {
-                request,
-                address: part.address,
-                physical: translated.physical,
-                bytes: part.bytes,
-            });
+            let reached = if request.flags & flags::WRITE == 0 {
+                Failure::DeviceRead {
+                    request,
+                    address: part.address,
+                    physical: translated.physical,
+                    bytes: part.bytes,
+                }
+            } else {
+                Failure::DeviceWrite {
+                    request,
+                    address: part.address,
+                    physical: translated.physical,
+                    bytes: part.bytes,
+                }
+            };
+            self.failure.get_or_insert(reached);
             return Err((MemoryStatus::Unsupported, part.address));
         }
         let cold_device = self.controls.cold_m0()
