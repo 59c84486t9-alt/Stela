@@ -151,10 +151,13 @@ const TLB_STREAM: u32 = 0xff;
 /// range words at +0x98/+0xa0, and OP 2 with its parameter at +0x84. Bits
 /// 13 and 15 qualify a request further: SPTM's whole-DART flush is OP 0
 /// with bit 13, and bit 15 too from version 2.2 on (file 0xcd7cc..0xcd7dc).
-/// With no translation cached, each completes at once whatever subset it
-/// names; the words are retained.
+/// A ranged stream flush is OP 1 with bits 13 and 14, adding bit 12 unless
+/// its caller passes a nonzero flag (T8112 VA 0xfffffff0270d2c20..
+/// 0xfffffff0270d2c2c, T8132 VA 0xfffffff0270d5940). With no translation
+/// cached, each completes at once whatever subset it names; the words are
+/// retained.
 const TLB_OPS: [u32; 4] = [TLB_OP_FLUSH_ALL, TLB_OP_FLUSH_STREAM, 2 << 8, 4 << 8];
-const TLB_QUALIFIERS: u32 = 1 << 13 | 1 << 14 | 1 << 15;
+const TLB_QUALIFIERS: u32 = 1 << 12 | 1 << 13 | 1 << 14 | 1 << 15;
 const TLB_PARAMETER: u64 = 0x84;
 const TLB_RANGE: [u64; 2] = [0x98, 0xa0];
 /// After a bit-15 request of OP 0 or 1, SPTM writes zero to +0x600 on each
@@ -947,6 +950,7 @@ mod tests {
             (TLB_RANGE[0], 0x40),
             (TLB_RANGE[1], 0x80),
             (TLB_CMD, 1 << 14 | 1 << 8 | 3),
+            (TLB_CMD, 0x7100 | 3),
             (TLB_PARAMETER, 7),
             (TLB_CMD, 2 << 8),
             (TLB_CMD, 1 << 15 | 4 << 8),
