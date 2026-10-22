@@ -189,13 +189,13 @@ impl Command {
         Self::connector(STATUS, connector)
     }
     pub fn cable_property(connector: ConnectorNumber) -> Self {
-        Self::connector(0x11, connector)
+        Self::connector(CABLE_PROPERTY, connector)
     }
     pub fn current_cam(connector: ConnectorNumber) -> Self {
-        Self::connector(0x0e, connector)
+        Self::connector(CURRENT_CAM, connector)
     }
     pub fn cam_supported(connector: ConnectorNumber) -> Self {
-        Self::connector(0x0d, connector)
+        Self::connector(CAM_SUPPORTED, connector)
     }
     pub fn new_cam(connector: ConnectorNumber, mode: u8, enter: bool) -> Self {
         Self::new_cam_configuration(connector, mode, enter, 0)
@@ -207,7 +207,8 @@ impl Command {
         configuration: u32,
     ) -> Self {
         Self::connector(
-            0x0f | (u64::from(enter) << 23)
+            NEW_CAM
+                | (u64::from(enter) << 23)
                 | (u64::from(mode) << 24)
                 | (u64::from(configuration) << 32),
             connector,
@@ -221,7 +222,7 @@ impl Command {
             Recipient::CablePlugOther => 3,
         };
         Self {
-            control: 0x0c
+            control: ALTERNATE_MODES
                 | (recipient << 16)
                 | (u64::from(connector.get()) << 24)
                 | (u64::from(offset) << 32),
@@ -239,7 +240,7 @@ impl Command {
             return Err(Error::InvalidArgument);
         }
         Ok(Self::connector(
-            0x10 | (u64::from(partner) << 23)
+            PDOS | (u64::from(partner) << 23)
                 | (u64::from(offset) << 24)
                 | (u64::from(count - 1) << 32)
                 | (u64::from(source) << 34),
@@ -252,10 +253,11 @@ impl Command {
         accept_swaps: bool,
     ) -> Self {
         Self::connector(
-            0x09 | (match role {
-                DataRole::Host => 1,
-                DataRole::Device => 2,
-            } << 23)
+            SET_DATA_ROLE
+                | (match role {
+                    DataRole::Host => 1,
+                    DataRole::Device => 2,
+                } << 23)
                 | (u64::from(accept_swaps) << 25),
             connector,
         )
@@ -266,10 +268,11 @@ impl Command {
         accept_swaps: bool,
     ) -> Self {
         Self::connector(
-            0x0b | (match role {
-                PowerRole::Source => 1,
-                PowerRole::Sink => 2,
-            } << 23)
+            SET_POWER_ROLE
+                | (match role {
+                    PowerRole::Source => 1,
+                    PowerRole::Sink => 2,
+                } << 23)
                 | (u64::from(accept_swaps) << 25),
             connector,
         )
@@ -520,23 +523,26 @@ impl<T: Transport, C: Timer> Controller<T, C> {
             }
         }
         self.submit(RESET)?;
+        // Linux ucsi_reset_ppm: done once the reset bit is set, resetting
+        // again whenever the PPM still reports other work.
         let start = self.timer.now_us();
+        let mut cci = initial;
         loop {
-            self.timer.delay_us(RESET_POLL_US);
-            let cci = self.cci()?;
-            if cci.0 == RESET_COMPLETE {
-                self.fault = None;
-                self.ready = true;
-                return Ok(());
-            }
             if self.expired(start) {
                 return Err(self.poison(Error::Timeout {
                     phase: Phase::Reset,
                     cci: cci.0,
                 }));
             }
+            self.timer.delay_us(RESET_POLL_US);
+            cci = self.cci()?;
             if cci.0 & !RESET_COMPLETE != 0 {
                 self.submit(RESET)?;
+            }
+            if cci.0 & RESET_COMPLETE != 0 {
+                self.fault = None;
+                self.ready = true;
+                return Ok(());
             }
         }
     }
@@ -584,13 +590,13 @@ impl<T: Transport, C: Timer> Controller<T, C> {
         };
         let bytes = cci.length();
         let mut staged = [0u8; 255];
-        let minimum = match command.control as u8 {
-            6 => 16,
-            7 => 2,
-            0x0e => 1,
-            0x11 => 5,
-            0x12 => 9,
-            0x13 => 2,
+        let minimum = match command.control & 0xff {
+            CAPABILITY => 16,
+            CONNECTOR_CAPABILITY => 2,
+            CURRENT_CAM => 1,
+            CABLE_PROPERTY => 5,
+            STATUS => 9,
+            ERROR_STATUS => 2,
             _ => 0,
         };
         let protocol_length =
@@ -836,6 +842,8 @@ mod tests {
         fail_after_control: Option<u8>,
         cancel_complete: bool,
         reset_complete: bool,
+        /// CCI bits reported once alongside the next reset completion.
+        reset_extra: u32,
     }
     impl Ppm {
         fn new(replies: Vec<Reply>) -> Self {
@@ -856,6 +864,7 @@ mod tests {
                 fail_after_control: None,
                 cancel_complete: true,
                 reset_complete: true,
+                reset_extra: 0,
             }
         }
         fn io(&mut self) -> Result<(), TransportError> {
@@ -876,7 +885,9 @@ mod tests {
             self.io()?;
             self.cci = match self.state {
                 State::Idle => u32::from(self.connector) << 1,
-                State::Reset if self.reset_complete => RESET_COMPLETE,
+                State::Reset if self.reset_complete => {
+                    RESET_COMPLETE | core::mem::take(&mut self.reset_extra)
+                }
                 State::Reset => 0,
                 State::Command(Wait::Complete) => {
                     COMMAND_COMPLETE
@@ -1028,6 +1039,13 @@ mod tests {
         controller.reset().unwrap();
         assert_eq!(controller.transport.controls, vec![NOTIFY, RESET]);
         assert_eq!(controller.timer.now_us(), RESET_POLL_US);
+    }
+    #[test]
+    fn reset_completes_on_its_bit_and_resets_again_while_the_ppm_reports_other_work() {
+        let mut controller = make_controller(Vec::new());
+        controller.transport.reset_extra = BUSY;
+        controller.reset().unwrap();
+        assert_eq!(controller.transport.controls, vec![RESET, RESET]);
     }
     #[test]
     fn busy_timeout_cancels_acknowledges_and_never_claims_command_success() {
