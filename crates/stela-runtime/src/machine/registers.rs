@@ -771,20 +771,7 @@ impl Cpu {
                     }
                 };
             }
-            return if read {
-                match self.apple.impdef.read(entry) {
-                    Ok(value) => Outcome::Read(value),
-                    Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
-                }
-            } else {
-                match self.apple.impdef.write(entry, value) {
-                    Ok(()) => Outcome::Written(Changes {
-                        unmodeled: entry.unmodeled_effect(value),
-                        ..Changes::default()
-                    }),
-                    Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
-                }
-            };
+            return self.impdef_access(entry, read, value);
         }
         if encoding.crn() == 11 {
             return if consumed {
@@ -806,10 +793,35 @@ impl Cpu {
         }
     }
 
+    /// A read or write of a `machine::impdef` entry.
+    fn impdef_access(&mut self, entry: &'static impdef::Entry, read: bool, value: u64) -> Outcome {
+        if read {
+            return match self.apple.impdef.read(entry) {
+                Ok(value) => Outcome::Read(value),
+                Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
+            };
+        }
+        match self.apple.impdef.write(entry, value) {
+            Ok(()) => Outcome::Written(Changes {
+                unmodeled: entry.unmodeled_effect(value),
+                ..Changes::default()
+            }),
+            Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
+        }
+    }
+
     /// EL0 reaches only SPRR_PERM_EL0 (the user JIT toggle; Sven Peter,
     /// "Apple Silicon Hardware Secrets"), the counter alias, under the same
-    /// enable as CNTVCT_EL0, and the Apple generic timer's views of EL0
-    /// registers, under their architectural registers' enables.
+    /// enable as CNTVCT_EL0, the Apple generic timer's views of EL0
+    /// registers, under their architectural registers' enables, and
+    /// JCTL_EL0 on the chips whose components use it. XNU's user MSR test
+    /// (`xnu-12377.121.6` `tests/user_msrs.c`) skips JCTL_EL0 and TPIDR_EL0
+    /// alone as registers EL0 is meant to write, which the kernel context
+    /// switches; every other implementation-defined register it probes must
+    /// fault at EL0 or not hold a value across a switch. So the others stay
+    /// UNDEFINED: AFPCR_EL0 is EL0 by name only, and `S3_5_C15_C10_1`, which
+    /// the kernel clears at every context switch and qemu-t8030 gives EL0
+    /// access on the A13, is unestablished on these chips.
     fn apple_el0(&mut self, encoding: Encoding, read: bool, value: u64, physical: u64) -> Outcome {
         if let Some(agt::Name::View(architectural)) = agt::decode(encoding, self.registers.chip()) {
             return Outcome::View(architectural, agt::Bank::Apple);
@@ -830,6 +842,10 @@ impl Cpu {
             ACNTPCT_EL0 => Outcome::Refused(Refusal::UnsupportedSetting(
                 "ACNTPCT_EL0 access below EL2 lacks permission qualification",
             )),
+            impdef::JCTL_EL0 => match impdef::lookup(encoding, self.registers.chip()) {
+                Some(entry) => self.impdef_access(entry, read, value),
+                None => Outcome::Undefined,
+            },
             CNTVCT_ALIAS_EL0 if !read => Outcome::Undefined,
             CNTVCT_ALIAS_EL0 => {
                 let control = if self.in_host() {
@@ -1370,6 +1386,35 @@ mod tests {
         for encoding in [SPR_LOCKDOWN_EL2, SPR_LOCKDOWN_EL1, SPR_LOCKDOWN_COMMIT] {
             assert_eq!(write(&mut el1, encoding, 0), Outcome::Undefined);
         }
+    }
+
+    /// EL0 programs JCTL_EL0, the per-thread register XNU's user MSR test
+    /// leaves user-writable, on the chips whose components use it (M2 on);
+    /// other implementation-defined registers stay UNDEFINED at EL0.
+    #[test]
+    fn el0_reaches_jctl_on_the_chips_that_use_it() {
+        use super::super::Chip;
+        let mut m2 = Cpu::of(Chip::AppleM2, 0, Pstate::reset(0));
+        m2.state.x[5] = 0x4000;
+        assert!(matches!(
+            m2.apple_access(msr(5, impdef::JCTL_EL0), 0),
+            Outcome::Written(Changes {
+                unmodeled: Some(_),
+                ..
+            })
+        ));
+        assert_eq!(
+            m2.apple_access(mrs(0, impdef::JCTL_EL0), 0),
+            Outcome::Read(0x4000)
+        );
+        for encoding in [impdef::AFPCR_EL0, impdef::TRACE_CLEARED, impdef::HID4] {
+            assert_eq!(m2.apple_access(mrs(0, encoding), 0), Outcome::Undefined);
+        }
+        let mut m1 = Cpu::of(Chip::AppleM1, 0, Pstate::reset(0));
+        assert_eq!(
+            m1.apple_access(mrs(0, impdef::JCTL_EL0), 0),
+            Outcome::Undefined
+        );
     }
 
     /// CRn 11 reaches `machine::impdef` where an entry owns it, and stays
