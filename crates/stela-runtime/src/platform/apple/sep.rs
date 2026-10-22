@@ -8,17 +8,20 @@
 //! The emulated SEP boots: SEPROM accepts the delivered container under
 //! Stela's own explicit, TSS-free trust policy (recording measured evidence),
 //! then the native sepOS phase maps shared memory and notifies the control
-//! endpoint that the OS is active and answers its control requests. Of the
-//! application services only the xART pair is advertised (`xart`); its
-//! anti-replay operations, and the other services (sks, pnon, scrd, ...),
-//! refuse rather than fake replies. See `firmware`/`os`/`control` and
-//! docs/research/sep.md.
+//! endpoint that the OS is active and answers its control requests. It
+//! advertises the xART pair (`xart`), the keystore (`keystore`) and
+//! BootPolicy (`boot_policy`) services; each answers the requests whose
+//! contract is recovered and refuses the rest rather than fake a reply, and
+//! the other services (scrd, ...) are not advertised. See
+//! `firmware`/`os`/`control` and docs/research/sep.md.
+pub mod boot_policy;
 pub mod control;
 pub mod endpoint;
 pub mod firmware;
 pub mod image;
 pub mod inline_key;
 pub mod keys;
+pub mod keystore;
 pub mod message;
 pub mod observe;
 pub mod ool;

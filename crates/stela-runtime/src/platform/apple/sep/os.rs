@@ -34,14 +34,16 @@
 use super::super::asc::Message;
 use super::{
     Entropy, SecurityMode,
+    boot_policy::{self, BootPolicy},
     control::{self, Request, Status},
     endpoint::Catalog,
+    keystore::{self, KeyStore},
     message::{self, Frame},
     observe::{self, Journal},
     ool::Buffers,
     shared::{Layout, Region},
     store::{Backend, Nonces},
-    transaction::Payload,
+    transaction::{Payload, Refusal},
     xart::{self, Xart},
 };
 use crate::platform::dma::{DmaError, Port};
@@ -67,17 +69,23 @@ pub struct SepOs {
     ap_sleep_ready: bool,
     buffers: Vec<Buffers>,
     catalog: Catalog,
-    xart: Option<Xart>,
+    services: Option<Services>,
     /// Application-service requests awaiting the DMA step, in arrival order.
     pending: VecDeque<Frame>,
     /// When observing (`--sep-observe`), the recorded `sks`/`pnon`/`scrd`
-    /// traffic. Those services are then advertised and their requests logged
-    /// and never answered.
+    /// traffic; `scrd` is then advertised and its requests never answered.
     observe: Option<Journal>,
-    /// Strict mode ([`Self::set_strict`]): a refused or observed request
-    /// stops the boot. Otherwise a refusal gets its failure answer, an
-    /// observed request none, and the boot goes on.
+    /// Strict mode ([`Self::set_strict`]): a refused or observed `scrd`
+    /// request stops the boot. Otherwise a refusal gets its failure answer,
+    /// an observed request none, and the boot goes on.
     strict: bool,
+}
+
+/// The native application services behind the catalog.
+struct Services {
+    xart: Xart,
+    keystore: KeyStore,
+    boot_policy: BootPolicy,
 }
 
 /// The SEP page that scales discovery capacities: 16 KiB, since
@@ -99,7 +107,7 @@ impl SepOs {
             ap_sleep_ready: false,
             buffers: Vec::new(),
             catalog: Catalog::empty(),
-            xart: None,
+            services: None,
             pending: VecDeque::new(),
             observe: None,
             strict: true,
@@ -107,33 +115,39 @@ impl SepOs {
     }
 
     /// Strict mode (the default) stops at each refused service request, and
-    /// at each observed request once it is recorded. Graceful mode answers a
-    /// refusal with its failure answer and leaves an observed request
-    /// unanswered, so the kernel client takes its own timeout path and the
-    /// run records the requests that follow: a diagnostic exception to the
-    /// error-reply rule (docs/design/runtime.md "Unsupported operations"),
-    /// never a reply.
+    /// at each observed `scrd` request once it is recorded. Graceful mode
+    /// answers a refusal with its failure answer and leaves an observed
+    /// request unanswered, so the kernel client takes its own timeout path
+    /// and the run records the requests that follow: a diagnostic exception
+    /// to the error-reply rule (docs/design/runtime.md "Unsupported
+    /// operations"), never a reply.
     pub fn set_strict(&mut self, strict: bool) {
         self.strict = strict;
     }
 
-    /// The SEP's native services: the xART pair, advertised once OS active
-    /// is reported, over the anti-replay store `store`. With `observe`, the
-    /// `sks`/`pnon`/`scrd` services are also advertised so their kernel
-    /// clients bind; their requests are recorded and never answered (a
-    /// diagnostic mode: it qualifies nothing beyond its log).
+    /// The SEP's native services, advertised once OS active is reported:
+    /// the xART pair over the anti-replay store `store`, the keystore and
+    /// BootPolicy. With `observe`, their traffic is journaled and `scrd` is
+    /// also advertised so its kernel client binds; its requests are
+    /// recorded and never answered (a diagnostic mode: it qualifies nothing
+    /// beyond its log).
     pub fn with_services(
         mut self,
         store: Nonces<Box<dyn Backend>>,
         observe: bool,
     ) -> Result<Self, &'static str> {
         let mut services = xart::services().to_vec();
+        services.extend([keystore::service(), boot_policy::service()]);
         if observe {
             services.extend(observe::services());
             self.observe = Some(Journal::default());
         }
         self.catalog = Catalog::new(services)?;
-        self.xart = Some(Xart::new(store));
+        self.services = Some(Services {
+            xart: Xart::new(store),
+            keystore: KeyStore::default(),
+            boot_policy: BootPolicy::new(None),
+        });
         Ok(self)
     }
 
@@ -147,7 +161,12 @@ impl SepOs {
 
     /// The xART service state, when installed.
     pub fn xart(&self) -> Option<&Xart> {
-        self.xart.as_ref()
+        self.services.as_ref().map(|services| &services.xart)
+    }
+
+    /// The keystore service state, when installed.
+    pub fn keystore(&self) -> Option<&KeyStore> {
+        self.services.as_ref().map(|services| &services.keystore)
     }
 
     /// Whether application-service requests await the DMA step.
@@ -157,8 +176,8 @@ impl SepOs {
 
     /// Answer the queued application-service requests through `port`. A
     /// refusal or DMA fault returns its reason instead of the reply, after
-    /// queueing its failure answer outside strict mode; an observed request
-    /// is recorded and gets none.
+    /// queueing its failure answer outside strict mode; an observed `scrd`
+    /// request is recorded and gets none.
     pub fn dma(
         &mut self,
         port: &mut Port<'_, '_>,
@@ -188,41 +207,57 @@ impl SepOs {
         // earlier committed operation's reply. A failed request may
         // already have committed durable state before output DMA failed;
         // do not replay it or silently discard unrelated later requests.
-        if let Some(frame) = self.pending.pop_front() {
-            if let Some(name) = observe::name(frame.service) {
-                // Record the request (frame plus a bounded prefix of its OOL
-                // input); observation never answers.
-                self.record(name, frame, &mut *port);
-                if self.strict {
-                    return Err(observe::refusal(frame.service));
-                }
-                return Ok(());
-            }
-            let xart = self
-                .xart
-                .as_mut()
-                .ok_or("SEP application service has no native handler")?;
-            let mut payload = Ool {
-                buffers: self.buffers.iter().find(|b| b.service() == frame.service),
-                port: &mut *port,
-                read: 0,
+        let Some(frame) = self.pending.pop_front() else {
+            return Ok(());
+        };
+        if self.observe.is_some()
+            && let Some(name) = observe::name(frame.service)
+        {
+            // Record the request: its frame plus a bounded prefix of its
+            // OOL input.
+            self.record(name, frame, &mut *port);
+        }
+        if frame.service == observe::CREDENTIALS_ID {
+            // Observation never answers scrd.
+            return if self.strict {
+                Err(observe::REFUSAL)
+            } else {
+                Ok(())
             };
-            match xart.request(frame, &mut payload, entropy) {
-                Ok(reply) => outbox.push(reply.mailbox()),
-                Err(refusal) => {
-                    // Graceful: the failure answer, once its bytes are
-                    // written.
-                    if !self.strict
-                        && let Some(answer) = refusal.answer
-                        && (answer.output.is_empty() || payload.output(&answer.output).is_ok())
-                    {
-                        outbox.push(answer.frame.mailbox());
-                    }
-                    return Err(refusal.reason);
+        }
+        let services = self
+            .services
+            .as_mut()
+            .ok_or("SEP application service has no native handler")?;
+        let mut payload = Ool {
+            buffers: self.buffers.iter().find(|b| b.service() == frame.service),
+            port: &mut *port,
+            read: 0,
+        };
+        let result = match frame.service {
+            xart::MASTER_ID | xart::SLAVE_ID => services.xart.request(frame, &mut payload, entropy),
+            keystore::ID => services.keystore.request(frame, &mut payload),
+            boot_policy::ID => services.boot_policy.request(frame, &mut payload),
+            _ => Err(Refusal::unanswerable(
+                "SEP application service has no native handler",
+            )),
+        };
+        match result {
+            Ok(reply) => {
+                outbox.push(reply.mailbox());
+                Ok(())
+            }
+            Err(refusal) => {
+                // Graceful: the failure answer, once its bytes are written.
+                if !self.strict
+                    && let Some(answer) = refusal.answer
+                    && (answer.output.is_empty() || payload.output(&answer.output).is_ok())
+                {
+                    outbox.push(answer.frame.mailbox());
                 }
+                Err(refusal.reason)
             }
         }
-        Ok(())
     }
 
     /// Record one observed `sks`/`pnon`/`scrd` request: its frame fields and,
@@ -316,7 +351,7 @@ impl SepOs {
                 Err("SEP discovery is advertised by the SEP, not received from the AP")
             }
             message::ROM => Err("SEPROM commands are not valid once sepOS is active"),
-            service if self.xart.is_some() && self.catalog.service(service).is_ok() => {
+            service if self.services.is_some() && self.catalog.service(service).is_ok() => {
                 if !self.os_active_sent {
                     return Err("SEP service request before sepOS reported OS active");
                 }
@@ -452,9 +487,10 @@ impl SepOs {
                         "SEP erase-install while application requests are pending is not modeled",
                     );
                 }
-                self.xart
+                self.services
                     .as_mut()
                     .ok_or("SEP erase-install needs the xART store")?
+                    .xart
                     .store_mut()
                     .erase()?;
                 Some(0)
@@ -737,12 +773,26 @@ mod tests {
         result.map(|()| frames)
     }
 
+    /// Register `service`'s OOL buffers: `input` bytes at 0x10_0000 and
+    /// `output` bytes right after.
+    fn register(os: &mut SepOs, service: u8, input: u32, output: u32) {
+        for (tag, opcode, data) in [
+            (1, control::SET_OOL_IN_LENGTH, input),
+            (2, control::SET_OOL_IN_ADDRESS, 0x100),
+            (3, control::SET_OOL_OUT_LENGTH, output),
+            (4, control::SET_OOL_OUT_ADDRESS, 0x100 + (input >> 12)),
+        ] {
+            reply(os, control(tag, opcode, service, data)).unwrap();
+        }
+    }
+
     #[test]
     fn xart_requests_are_answered_after_their_ool_input_is_read() {
         let mut os = SepOs::new(None).with_services(store(), false).unwrap();
         let advertised = map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
-        // OS active, then name and capacities for each of xarm and xars.
-        assert_eq!(advertised.len(), 5);
+        // OS active, then name and capacities for each of xarm, xars, sks
+        // and pnon.
+        assert_eq!(advertised.len(), 9);
         assert_eq!(advertised[1].data, xart::MASTER);
         assert_eq!(advertised[3].data, xart::SLAVE);
         let request = xart::XartMessage {
@@ -920,12 +970,41 @@ mod tests {
     }
 
     #[test]
-    fn observed_services_are_advertised_logged_and_refused_without_a_reply() {
-        use super::observe;
+    fn the_keystore_startup_is_answered_through_its_ool_buffers() {
+        let mut os = SepOs::new(None).with_services(store(), false).unwrap();
+        map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
+        register(&mut os, keystore::ID, 0x8000, 0x8000);
+        let request = keystore::tests::message(1, 0, 1, &[]);
+        let frame = Frame {
+            service: keystore::ID,
+            tag: keystore::GET_CAPABILITIES,
+            opcode: 3,
+            parameter: 0,
+            data: (request.len() as u32) << 16,
+        };
+        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x10000);
+        ram.bytes[..request.len()].copy_from_slice(&request);
+        assert!(reply(&mut os, frame).unwrap().is_empty());
+        let answer = dma(&mut os, &mut ram).unwrap();
+        assert_eq!(
+            answer,
+            [Frame {
+                tag: keystore::GET_CAPABILITIES | keystore::REPLY,
+                data: 92 << 16,
+                ..frame
+            }]
+        );
+        // The negotiated version, 2, follows the header and result.
+        assert_eq!(ram.bytes[0x8000 + 80..0x8000 + 88], 2u64.to_le_bytes());
+        assert!(os.keystore().unwrap().environment().is_none());
+    }
+
+    #[test]
+    fn native_and_observed_services_are_advertised_and_journaled() {
         let mut os = SepOs::new(None).with_services(store(), true).unwrap();
         let advertised = map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
-        // OS active, then the xART pair and the three observed services.
-        assert_eq!(advertised.len(), 1 + 2 * (2 + 3));
+        // OS active, then xarm, xars, sks, pnon and the observed scrd.
+        assert_eq!(advertised.len(), 1 + 2 * 5);
         let names: Vec<u32> = advertised[1..]
             .iter()
             .filter(|f| f.opcode == 0)
@@ -934,53 +1013,40 @@ mod tests {
         assert!(names.contains(&u32::from_be_bytes(*b"sks\0")));
         assert!(names.contains(&u32::from_be_bytes(*b"pnon")));
         assert!(names.contains(&u32::from_be_bytes(*b"scrd")));
-        // The kernel registers a pnon input buffer, then sends a request.
-        reply(
-            &mut os,
-            control(
-                1,
-                control::SET_OOL_IN_LENGTH,
-                observe::BOOT_POLICY_ID,
-                0x4000,
-            ),
-        )
-        .unwrap();
-        reply(
-            &mut os,
-            control(
-                2,
-                control::SET_OOL_IN_ADDRESS,
-                observe::BOOT_POLICY_ID,
-                0x100,
-            ),
-        )
-        .unwrap();
+        // BootPolicy's buffers, then its current-OS-type command.
+        register(&mut os, boot_policy::ID, 0x1c000, 0x14000);
         let request = Frame {
-            service: observe::BOOT_POLICY_ID,
+            service: boot_policy::ID,
             tag: 2,
             opcode: 0,
             parameter: 0,
-            data: 24,
+            data: 32,
         };
+        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x30000);
+        ram.bytes[..4].copy_from_slice(b"hcPB");
+        ram.bytes[4] = 0x3e;
+        // Strict: recorded, then refused with no answer.
         assert!(reply(&mut os, request).unwrap().is_empty());
-        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x10000);
-        ram.bytes[..24].copy_from_slice(&[0xc3; 24]);
-        // The request is recorded then refused; no reply is produced.
-        assert!(dma(&mut os, &mut ram).is_err());
+        assert_eq!(dma_step(&mut os, &mut ram).1, []);
         let lines = os.observations();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].starts_with("pnon tag=2 op=0"), "{}", lines[0]);
-        assert!(
-            lines[0].contains(&observe::hex(&[0xc3; 24])),
-            "{}",
-            lines[0]
-        );
+        assert!(lines[0].contains("686350423e000000"), "{}", lines[0]);
+        // Graceful: the not-supported reply header answers it.
+        os.set_strict(false);
+        assert!(reply(&mut os, request).unwrap().is_empty());
+        let (result, answer) = dma_step(&mut os, &mut ram);
+        assert!(result.is_err());
+        assert_eq!(answer, [request]);
+        assert_eq!(ram.bytes[0x1c000..0x1c004], *b"hrPB");
+        assert_eq!(ram.bytes[0x1c004..0x1c008], 255u32.to_le_bytes());
+        assert_eq!(os.observations().len(), 1);
         // Draining empties the journal.
         assert!(os.observations().is_empty());
     }
 
     #[test]
-    fn graceful_observation_records_each_request_and_answers_none() {
+    fn graceful_runs_answer_refusals_but_never_an_observed_scrd_request() {
         use super::observe;
         let mut os = SepOs::new(None).with_services(store(), true).unwrap();
         os.set_strict(false);
@@ -993,14 +1059,17 @@ mod tests {
             data: 8,
         };
         for frame in [
-            request(observe::KEYSTORE_ID, 1),
+            request(keystore::ID, 1),
             request(observe::CREDENTIALS_ID, 2),
         ] {
             assert!(reply(&mut os, frame).unwrap().is_empty());
         }
         let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x1000);
-        // Each DMA step consumes one request; neither observation gets a reply.
-        assert!(dma(&mut os, &mut ram).unwrap().is_empty());
+        // Each DMA step consumes one request. The keystore refusal is
+        // answered with its failure status; scrd is not answered at all.
+        let (result, answer) = dma_step(&mut os, &mut ram);
+        assert!(result.is_err());
+        assert_eq!(answer, [keystore::failure(request(keystore::ID, 1))]);
         assert!(os.dma_pending());
         assert!(dma(&mut os, &mut ram).unwrap().is_empty());
         assert!(!os.dma_pending());

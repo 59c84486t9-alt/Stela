@@ -1,28 +1,27 @@
-//! Opt-in observation of the SEP application services whose request and
-//! reply contracts are not recovered: `sks` (AppleKeyStore), `pnon`
-//! (BootPolicy) and `scrd` (AppleCredentialManager).
+//! Opt-in journal of the SEP's keystore (`sks`), BootPolicy (`pnon`) and
+//! credential manager (`scrd`) traffic.
 //!
-//! These contracts are learned by watching what the unchanged kernel sends
-//! to Stela's own SEP model, not by recovering sepOS. With observation on,
-//! the SEP also advertises these services, so their kernel clients bind and
-//! register OOL buffers. Each request is then recorded in the SEP's
-//! [`Journal`] (the frame and a bounded prefix of its OOL input) and gets no
-//! reply. In strict mode it is also refused by name, so the boot stops at it;
-//! in graceful mode the kernel client times out on its own and the run goes
-//! on to record the requests that follow (docs/design/runtime.md
-//! "Unsupported operations" names this diagnostic exception). Observation
-//! never answers a request; it is off by default, and a run with it on
-//! qualifies nothing beyond what it logs.
+//! With observation on (`--sep-observe`), each request to one of these
+//! services is recorded in the SEP's [`Journal`]: the frame and a bounded
+//! prefix of its OOL input, read by the SEP model, not by recovering sepOS.
+//! `sks` and `pnon` are native services ([`super::keystore`],
+//! [`super::boot_policy`]) and are answered as usual after the record; the
+//! journal shows the bodies of the commands they refuse. `scrd`'s contract
+//! is not recovered: observation alone advertises it, so its kernel client
+//! binds and registers OOL buffers, and each request is recorded and never
+//! answered. In strict mode it is also refused by name, so the boot stops
+//! at it; in graceful mode the kernel client times out on its own and the
+//! run goes on to record the requests that follow (docs/design/runtime.md
+//! "Unsupported operations" names this diagnostic exception). Observation is
+//! off by default, and a run with it on qualifies nothing beyond its log.
 //!
-//! The capacities are Stela's broad diagnostic choice, one to 32 SEP pages
-//! each way, not recovered limits: a client whose registration falls
-//! outside them is refused by length, which the journal also records.
-use super::endpoint::Service;
+//! The `scrd` capacities are Stela's broad diagnostic choice, one to 32 SEP
+//! pages each way, not recovered limits: a client whose registration falls
+//! outside them is refused by length.
+use super::{boot_policy, endpoint::Service, keystore};
 use alloc::{collections::VecDeque, format, string::String};
 
-/// Stela's catalog IDs for the observed services, after the xART pair.
-pub const KEYSTORE_ID: u8 = 0x12;
-pub const BOOT_POLICY_ID: u8 = 0x13;
+/// Stela's catalog ID for `scrd`, after the native services.
 pub const CREDENTIALS_ID: u8 = 0x14;
 const CAPACITIES: [u8; 4] = [1, 0x20, 1, 0x20];
 /// The OOL input prefix each recorded request logs: one 4 KiB page, enough
@@ -31,48 +30,26 @@ const CAPACITIES: [u8; 4] = [1, 0x20, 1, 0x20];
 pub const INPUT_PREFIX: usize = 4096;
 /// Lines the journal keeps before the host drains it; older ones are counted.
 const JOURNAL_LINES: usize = 512;
+/// The refusal that ends an observed `scrd` request in strict mode.
+pub const REFUSAL: &str =
+    "SEP scrd request recorded (--sep-observe); its contract is not recovered";
 
-pub fn services() -> [Service; 3] {
-    [
-        Service {
-            id: KEYSTORE_ID,
-            name: u32::from_be_bytes(*b"sks\0"),
-            capacities: CAPACITIES,
-        },
-        Service {
-            id: BOOT_POLICY_ID,
-            name: u32::from_be_bytes(*b"pnon"),
-            capacities: CAPACITIES,
-        },
-        Service {
-            id: CREDENTIALS_ID,
-            name: u32::from_be_bytes(*b"scrd"),
-            capacities: CAPACITIES,
-        },
-    ]
+/// The services only observation advertises.
+pub fn services() -> [Service; 1] {
+    [Service {
+        id: CREDENTIALS_ID,
+        name: u32::from_be_bytes(*b"scrd"),
+        capacities: CAPACITIES,
+    }]
 }
 
-/// The observed service's name, if `id` is one.
+/// The journaled service's name, if `id` is one.
 pub fn name(id: u8) -> Option<&'static str> {
     match id {
-        KEYSTORE_ID => Some("sks"),
-        BOOT_POLICY_ID => Some("pnon"),
+        keystore::ID => Some("sks"),
+        boot_policy::ID => Some("pnon"),
         CREDENTIALS_ID => Some("scrd"),
         _ => None,
-    }
-}
-
-/// The refusal that ends an observed request.
-pub fn refusal(id: u8) -> &'static str {
-    match id {
-        KEYSTORE_ID => "SEP sks request recorded (--sep-observe); its contract is not recovered",
-        BOOT_POLICY_ID => {
-            "SEP pnon request recorded (--sep-observe); its contract is not recovered"
-        }
-        CREDENTIALS_ID => {
-            "SEP scrd request recorded (--sep-observe); its contract is not recovered"
-        }
-        _ => "SEP application service is not modeled",
     }
 }
 
@@ -114,16 +91,20 @@ mod tests {
     use alloc::vec::Vec;
 
     #[test]
-    fn the_observed_catalog_is_valid_and_disjoint_from_xart() {
+    fn the_observed_catalog_is_valid_and_disjoint_from_the_native_services() {
         let mut all = super::super::xart::services().to_vec();
+        all.extend([keystore::service(), boot_policy::service()]);
         all.extend(services());
         assert!(super::super::endpoint::Catalog::new(all).is_ok());
-        for service in services() {
-            assert!(name(service.id).is_some());
-            assert!(service.accepts(true, 0x14000, 0x4000));
-            assert!(!service.accepts(true, 0x84000, 0x4000));
-            assert!(refusal(service.id).contains(name(service.id).unwrap()));
-        }
+        let [scrd] = services();
+        assert_eq!(name(scrd.id), Some("scrd"));
+        assert!(scrd.accepts(true, 0x14000, 0x4000));
+        assert!(!scrd.accepts(true, 0x84000, 0x4000));
+        assert!(REFUSAL.contains("scrd"));
+        assert_eq!(
+            (name(keystore::ID), name(boot_policy::ID)),
+            (Some("sks"), Some("pnon"))
+        );
         assert_eq!(name(0x11), None);
     }
 

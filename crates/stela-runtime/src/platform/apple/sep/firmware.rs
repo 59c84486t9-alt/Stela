@@ -13,10 +13,10 @@
 //! contract and the trust-policy boundary.
 use super::super::asc::{Firmware, Message};
 use super::{
-    Entropy, SecurityMode, control,
+    Entropy, SecurityMode, boot_policy, control,
     image::{self, signature},
+    keystore,
     message::{self, Frame},
-    observe,
     os::SepOs,
     rom::Rom,
     state, xart,
@@ -33,10 +33,6 @@ const IMAGE_TAG: u8 = 1;
 /// word. `_bootAction` 0x2d72ca8 tolerates only data 0x1e (the iBIC capture
 /// a platform lacks) and panics on any other.
 const ROM_FAILURE: u8 = 199;
-/// A graceful `pnon` reply's status: BootPolicy's `handleSEPMessage`
-/// 0x329d940 takes any nonzero opcode byte as the command's failure. The
-/// value is Stela's; sepOS's status codes are not recovered.
-const BOOT_POLICY_FAILURE: u8 = 1;
 const FIRMWARE_SEPI: u8 = 0;
 
 /// What Stela measured and recorded about the delivered firmware. Evidence,
@@ -62,9 +58,10 @@ pub struct SepFirmware {
     security: Option<SecurityMode>,
     /// The machine's `/chosen` `unique-chip-id`, bound into the key hierarchy.
     ecid: u64,
-    /// Observe (`--sep-observe`): advertise and log `sks`/`pnon`/`scrd`.
+    /// Observe (`--sep-observe`): journal `sks`/`pnon`/`scrd`, advertise
+    /// `scrd`.
     observe: bool,
-    /// Strict mode, which sepOS applies to observed requests
+    /// Strict mode, which sepOS applies to its service requests
     /// ([`SepOs::set_strict`]).
     strict: bool,
     /// Where sepOS finds its state, until it activates.
@@ -91,7 +88,7 @@ impl SepFirmware {
         }
     }
 
-    /// Strict mode for sepOS's observed requests ([`SepOs::set_strict`]),
+    /// Strict mode for sepOS's service requests ([`SepOs::set_strict`]),
     /// now and once it activates.
     pub fn set_strict(&mut self, strict: bool) {
         self.strict = strict;
@@ -175,9 +172,11 @@ impl Firmware for SepFirmware {
 
     /// SEPROM answers a command it lacks with its failure report; sepOS
     /// answers a tagged control request with kIOReturnDeviceError's status,
-    /// a tagged `xars` operation with `ENOTSUP` and a `pnon` command with a
-    /// failure status. `sks`, `scrd`, the master instance and notifications
-    /// have no recovered error reply and stay refused.
+    /// an `xars` operation with `ENOTSUP`, a keystore request with its
+    /// failure status and a BootPolicy command with a transport failure.
+    /// These refusals precede any OOL transfer, so none carries reply
+    /// bytes. `scrd`, the master instance and notifications have no error
+    /// reply and stay refused.
     fn error_reply(&mut self, message: Message, _reason: &'static str) -> Option<Vec<Message>> {
         let frame = Frame::from_mailbox(message).ok()?;
         let reply = match (&self.phase, frame.service) {
@@ -192,12 +191,10 @@ impl Firmware for SepFirmware {
                 control::reply(frame, control::Status::DeviceError, 0)
             }
             (Phase::Active(_), xart::SLAVE_ID) if frame.tag != 0 => xart::unsupported(frame),
-            (Phase::Active(_), observe::BOOT_POLICY_ID) => Frame {
-                opcode: BOOT_POLICY_FAILURE,
-                parameter: 0,
-                data: 0,
-                ..frame
-            },
+            (Phase::Active(_), keystore::ID) if frame.tag & keystore::REPLY == 0 => {
+                keystore::failure(frame)
+            }
+            (Phase::Active(_), boot_policy::ID) => boot_policy::transport_failure(frame),
             _ => return None,
         };
         Some(alloc::vec![reply.mailbox()])
@@ -255,6 +252,7 @@ impl Firmware for SepFirmware {
 
 #[cfg(test)]
 mod tests {
+    use super::super::observe;
     use super::*;
     use crate::platform::{
         apple::{bus::Access, interrupt::InterruptLatch},
@@ -406,11 +404,11 @@ mod tests {
 
     #[test]
     fn strict_mode_reaches_sepos_before_and_after_it_activates() {
-        // An observed sks request, queued then run through the DMA step.
+        // An observed scrd request, queued then run through the DMA step.
         let observed = |fw: &mut SepFirmware| {
             let mut outbox = Vec::new();
             let request = Frame {
-                service: observe::KEYSTORE_ID,
+                service: observe::CREDENTIALS_ID,
                 tag: 1,
                 opcode: 0,
                 parameter: 0,
@@ -435,11 +433,53 @@ mod tests {
         // Graceful from before activation: recorded, unanswered, no stop.
         assert_eq!(observed(&mut fw), Ok(Vec::new()));
         fw.set_strict(true);
-        assert_eq!(
-            observed(&mut fw),
-            Err(observe::refusal(observe::KEYSTORE_ID))
-        );
+        assert_eq!(observed(&mut fw), Err(observe::REFUSAL));
         assert_eq!(fw.drain_observations().len(), 2);
+    }
+
+    #[test]
+    fn graceful_mode_answers_a_refused_service_request_from_the_dma_step() {
+        let mut fw = SepFirmware::new(
+            entropy(),
+            None,
+            0xa5a5_0004,
+            false,
+            state::Location::Volatile,
+        );
+        booted(&mut fw);
+        deliver(&mut fw, &crate::img4::tests::im4p(b"sepi", b"x"), false).unwrap();
+        map_shared(&mut fw);
+        // A keystore command it does not implement, without its buffers.
+        let request = Frame {
+            service: keystore::ID,
+            tag: 0x01,
+            opcode: 7,
+            parameter: 0,
+            data: 0x80 << 16,
+        };
+        let mut ram = Ram::new(0x4000, 0x4000);
+        let mut outbox = Vec::new();
+        fw.receive(request.mailbox(), &mut outbox).unwrap();
+        assert_eq!(
+            dma(&mut fw, &mut ram, false),
+            Err("SEP keystore command is not implemented")
+        );
+        fw.set_strict(false);
+        fw.receive(request.mailbox(), &mut outbox).unwrap();
+        let mut produced = Vec::new();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut port = Port {
+            iommu: &mut Identity { fault: false },
+            stream: 0,
+            memory: &mut ram,
+            access: &mut access,
+        };
+        assert_eq!(
+            fw.dma(&mut port, &mut produced),
+            Err("SEP keystore command is not implemented")
+        );
+        assert_eq!(produced, [keystore::failure(request).mailbox()]);
     }
 
     #[test]
@@ -571,7 +611,8 @@ mod tests {
             Frame::from_mailbox(replies[0]).unwrap().opcode,
             control::OS_ACTIVE
         );
-        assert_eq!(replies.len(), 5);
+        // OS active, then the xART pair, sks and pnon, name and capacities.
+        assert_eq!(replies.len(), 9);
         assert!(!fw.dma_pending());
     }
 
@@ -601,20 +642,27 @@ mod tests {
         };
         let rom = reply(&mut fw, request(message::ROM, 2, 0x30)).unwrap();
         assert_eq!((rom.tag, rom.opcode, rom.data), (2, ROM_FAILURE, 0x30));
-        assert_eq!(reply(&mut fw, request(observe::BOOT_POLICY_ID, 3, 4)), None);
+        assert_eq!(reply(&mut fw, request(boot_policy::ID, 2, 0)), None);
 
         let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
         deliver(&mut fw, &image, false).unwrap();
         map_shared(&mut fw);
         assert!(fw.booted());
-        let policy = reply(&mut fw, request(observe::BOOT_POLICY_ID, 3, 4)).unwrap();
+        let policy = reply(&mut fw, request(boot_policy::ID, 2, 0)).unwrap();
         assert_eq!(
             (policy.service, policy.tag, policy.opcode, policy.data),
-            (observe::BOOT_POLICY_ID, 3, BOOT_POLICY_FAILURE, 0)
+            (boot_policy::ID, 2, boot_policy::TRANSPORT_FAILURE, 0)
         );
         let xart = reply(&mut fw, request(xart::SLAVE_ID, 5, 6)).unwrap();
         assert_eq!((xart.tag, xart.opcode, xart.data), (5, 45, 0));
         assert_eq!(reply(&mut fw, request(xart::SLAVE_ID, 0, 6)), None);
+        let keys = reply(&mut fw, request(keystore::ID, 0x4d, 6)).unwrap();
+        assert_eq!(
+            (keys.tag, keys.opcode, keys.parameter, keys.data),
+            (0x4d | keystore::REPLY, 6, keystore::FAILURE, 0)
+        );
+        assert_eq!(reply(&mut fw, request(keystore::ID, 0xcd, 6)), None);
+        assert_eq!(reply(&mut fw, request(observe::CREDENTIALS_ID, 3, 4)), None);
         let control = reply(&mut fw, request(message::CONTROL, 1, 99)).unwrap();
         assert_eq!(
             control,
@@ -625,7 +673,6 @@ mod tests {
             )
         );
         assert_eq!(reply(&mut fw, request(message::CONTROL, 0, 99)), None);
-        assert_eq!(reply(&mut fw, request(observe::KEYSTORE_ID, 3, 4)), None);
         assert_eq!(reply(&mut fw, request(message::ROM, 2, 0x30)), None);
     }
 }
