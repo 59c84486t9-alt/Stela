@@ -56,6 +56,19 @@
 //! asserted while the event is latched and the IRQ mask leaves it
 //! unmasked; where it leads is the board's. Every other address NACKs.
 //!
+//! Chapel (T603x/T604x), Abbey (M4/M5) and Woodcote declare the same byte for
+//! `info-rtc_alarm_ctrl` and `info-rtc_alarm_event` (`0x2000`), with event
+//! mask 0x2 beside monitor 0x1 and enable 0x40. The same `programRTCAlarm`
+//! (mac15s 26A434 VA 0xfffffe0009d5f4e8) reads the event byte and, when an
+//! event-mask bit is set, writes the byte it read back before it writes the
+//! control (`..d5f590..d5f5d4`, `..d5f6d8..d5f70c`); `checkRTCWakeEvent`
+//! (0xfffffe0009d5fe20) tests the event-mask bits of that byte. On a shared
+//! byte that write-back keeps the control bits it read and clears the event
+//! bits it carries, so the byte reads as control | event, its event-mask bits
+//! are write-one-to-clear and its other bits are the control. The event and
+//! control fields must be disjoint; the control field keeps the qualified
+//! monitor / monitor+enable encodings of a separate control register.
+//!
 //! A PMU without RTC registers can still declare an output (`interrupts`
 //! on the 26A434 Simetra, Vale, Spitfire, Portier, Club and Jerez PMUs,
 //! from T8103 to T6050). The AP consumer of every PMU output is
@@ -125,6 +138,47 @@ pub struct Rtc {
     pub interrupt_mask: u8,
 }
 
+impl Rtc {
+    /// Chapel, Abbey and Woodcote declare one byte for the alarm control and
+    /// its event (see the module comment).
+    pub fn shares_event(&self) -> bool {
+        self.alarm_control == self.alarm_event
+    }
+
+    /// Every register byte the RTC owns, one window per distinct register.
+    fn windows(&self) -> Vec<Window> {
+        let mut windows = alloc::vec![
+            Window {
+                base: self.upcount,
+                bytes: UPCOUNT_BYTES,
+            },
+            Window {
+                base: self.clock_offset,
+                bytes: OFFSET_BYTES,
+            },
+            Window {
+                base: self.alarm_control,
+                bytes: 1,
+            },
+            Window {
+                base: self.alarm_offset,
+                bytes: ALARM_BYTES,
+            },
+            Window {
+                base: self.irq_mask,
+                bytes: 1,
+            },
+        ];
+        if !self.shares_event() {
+            windows.push(Window {
+                base: self.alarm_event,
+                bytes: 1,
+            });
+        }
+        windows
+    }
+}
+
 /// Host wall time at a system counter value, for the RTC's initial offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WallClock {
@@ -150,6 +204,8 @@ enum Byte {
     Upcount(u16),
     AlarmControl,
     AlarmEvent,
+    /// One byte holding both the control and the event bits.
+    AlarmShared,
     IrqMask,
 }
 
@@ -295,7 +351,11 @@ impl Pmu {
                 return Some(Byte::Upcount(address - rtc.upcount));
             }
             if address == rtc.alarm_control {
-                return Some(Byte::AlarmControl);
+                return Some(if rtc.shares_event() {
+                    Byte::AlarmShared
+                } else {
+                    Byte::AlarmControl
+                });
             }
             if address == rtc.alarm_event {
                 return Some(Byte::AlarmEvent);
@@ -487,6 +547,7 @@ impl SpmiSlave for Pmu {
                 Byte::Upcount(i) => raw[usize::from(i)],
                 Byte::AlarmControl => self.alarm_control,
                 Byte::AlarmEvent => self.alarm_event,
+                Byte::AlarmShared => self.alarm_control | self.alarm_event,
             };
         }
         if let Some(faults) = &mut self.faults {
@@ -575,12 +636,12 @@ impl SpmiSlave for Pmu {
         }
         // Preflight the complete transfer before time, storage, event or output effects.
         if let Some(rtc) = self.rtc {
+            let control = |value| value == self.monitor || value == self.monitor | rtc.alarm_enable;
             for ((_, cell), &value) in cells.iter().zip(data) {
                 let qualified = match cell {
-                    Byte::AlarmControl => {
-                        value == self.monitor || value == self.monitor | rtc.alarm_enable
-                    }
+                    Byte::AlarmControl => control(value),
                     Byte::AlarmEvent => value & !rtc.event_mask == 0,
+                    Byte::AlarmShared => control(value & !rtc.event_mask),
                     Byte::IrqMask => value == 0 || value == rtc.interrupt_mask,
                     _ => true,
                 };
@@ -607,6 +668,12 @@ impl SpmiSlave for Pmu {
                     programmed = true;
                 }
                 Byte::AlarmEvent => self.alarm_event &= !value,
+                Byte::AlarmShared => {
+                    let events = self.rtc.expect("RTC byte").event_mask;
+                    self.alarm_control = value & !events;
+                    self.alarm_event &= !(value & events);
+                    programmed = true;
+                }
                 Byte::Fault(_) => {} // One complete snapshot is acknowledged below.
                 Byte::Upcount(_) => unreachable!(),
             }
@@ -824,6 +891,92 @@ mod tests {
             assert_eq!(pmu.read(0, &mut [0; 10], 0), Err(SlaveError::Nack));
             assert_eq!(pmu.read(0x3000, &mut [0; 16], 0), Err(SlaveError::Nack));
         }
+    }
+
+    /// The J514sAP Chapel RTC, whose control and event share one byte.
+    fn chapel() -> Rtc {
+        Rtc {
+            upcount: 0x2002,
+            clock_offset: 0x2100,
+            alarm_control: 0x2000,
+            alarm_enable: 0x40,
+            alarm_offset: 0x2008,
+            alarm_event: 0x2000,
+            irq_mask: 0x200e,
+            event_mask: 0x2,
+            interrupt_mask: 0x1,
+        }
+    }
+
+    /// `programRTCAlarm` on a shared byte: the event write-back carries the
+    /// control bits it read.
+    fn program_shared(pmu: &mut Pmu, seconds: u32, now: u64) -> u8 {
+        let rtc = chapel();
+        let mut read = [0];
+        pmu.read(rtc.alarm_event, &mut read, now).unwrap();
+        if read[0] & rtc.event_mask != 0 {
+            pmu.write(rtc.alarm_event, &read, now).unwrap();
+        }
+        if seconds != 0 {
+            pmu.write(rtc.alarm_offset, &seconds.to_le_bytes(), now)
+                .unwrap();
+        }
+        let mask = if seconds != 0 { 0 } else { rtc.interrupt_mask };
+        pmu.write(rtc.irq_mask, &[mask], now).unwrap();
+        let control = 0x1 | if seconds != 0 { rtc.alarm_enable } else { 0 };
+        pmu.write(rtc.alarm_control, &[control], now).unwrap();
+        read[0]
+    }
+
+    #[test]
+    fn a_shared_control_and_event_byte_keeps_control_and_clears_written_events() {
+        let rtc = chapel();
+        for overlapping in [1, 0x40] {
+            let bad = Rtc {
+                event_mask: overlapping,
+                ..rtc
+            };
+            assert!(Configuration::new(Vec::new(), Some(bad), 1).is_err());
+        }
+        let scratch = alloc::vec![Window {
+            base: 0x8000,
+            bytes: 0x2800
+        }];
+        let mut pmu =
+            Pmu::configured(Configuration::new(scratch, Some(rtc), 1).unwrap(), None).unwrap();
+        let output = pmu.interrupt();
+        assert_eq!(program_shared(&mut pmu, 30, 0), 0);
+        let mut byte = [0];
+        pmu.read(rtc.alarm_control, &mut byte, 0).unwrap();
+        assert_eq!(byte, [0x41]);
+        // Control writes never carry an event acknowledgement by themselves.
+        assert_eq!(pmu.advance(30 * FREQUENCY_HZ), None);
+        assert!(output.asserted());
+        pmu.write(rtc.alarm_control, &[0x41], 31 * FREQUENCY_HZ)
+            .unwrap();
+        assert!(output.asserted());
+        pmu.read(rtc.alarm_event, &mut byte, 31 * FREQUENCY_HZ)
+            .unwrap();
+        assert_eq!(byte, [0x43]);
+        // A control field outside monitor / monitor+enable refuses whole.
+        for value in [0x42, 0x02, 0x83] {
+            assert!(matches!(
+                pmu.write(rtc.alarm_control, &[value], 31 * FREQUENCY_HZ),
+                Err(SlaveError::Unsupported(_))
+            ));
+        }
+        assert!(output.asserted());
+        // Disabling: the write-back of 0x43 clears the event, then monitor alone.
+        assert_eq!(program_shared(&mut pmu, 0, 31 * FREQUENCY_HZ), 0x43);
+        assert!(!output.asserted() && !pmu.interrupt_armed());
+        pmu.read(rtc.alarm_control, &mut byte, 31 * FREQUENCY_HZ)
+            .unwrap();
+        assert_eq!(byte, [0x01]);
+        // A future alarm fires once again through the same byte.
+        program_shared(&mut pmu, 40, 31 * FREQUENCY_HZ);
+        assert_eq!(pmu.advance(39 * FREQUENCY_HZ), Some(40 * FREQUENCY_HZ));
+        assert_eq!(pmu.advance(40 * FREQUENCY_HZ), None);
+        assert!(output.asserted());
     }
 
     #[test]

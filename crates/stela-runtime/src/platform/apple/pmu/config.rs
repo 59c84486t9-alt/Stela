@@ -1,9 +1,7 @@
 //! Validated byte-resource ownership for the source-qualified RTC interface.
 use super::fault::FaultHistory;
 use super::firmware::FirmwareHistory;
-use super::{
-    ALARM_BYTES, FirmwareSram, FirmwareStartup, OFFSET_BYTES, PmicEpoch, Rtc, UPCOUNT_BYTES, Window,
-};
+use super::{FirmwareSram, FirmwareStartup, PmicEpoch, Rtc, Window};
 use alloc::vec::Vec;
 
 /// An explicit PMU register resource configuration, independent of its SID or SKU.
@@ -61,35 +59,11 @@ impl Configuration {
                 || monitor & rtc.alarm_enable != 0
                 || rtc.event_mask == 0
                 || rtc.interrupt_mask == 0
+                || (rtc.shares_event() && rtc.event_mask & (monitor | rtc.alarm_enable) != 0)
             {
                 return Err("PMU RTC has empty or overlapping control masks");
             }
-            occupied.extend([
-                Window {
-                    base: rtc.upcount,
-                    bytes: UPCOUNT_BYTES,
-                },
-                Window {
-                    base: rtc.clock_offset,
-                    bytes: OFFSET_BYTES,
-                },
-                Window {
-                    base: rtc.alarm_control,
-                    bytes: 1,
-                },
-                Window {
-                    base: rtc.alarm_offset,
-                    bytes: ALARM_BYTES,
-                },
-                Window {
-                    base: rtc.alarm_event,
-                    bytes: 1,
-                },
-                Window {
-                    base: rtc.irq_mask,
-                    bytes: 1,
-                },
-            ]);
+            occupied.extend(rtc.windows());
         } else if monitor != 0 {
             return Err("PMU without RTC has an RTC monitor mask");
         }
@@ -198,34 +172,7 @@ impl Configuration {
             .iter()
             .copied()
             .chain(self.identity)
-            .chain(self.rtc.into_iter().flat_map(|rtc| {
-                [
-                    Window {
-                        base: rtc.upcount,
-                        bytes: UPCOUNT_BYTES,
-                    },
-                    Window {
-                        base: rtc.clock_offset,
-                        bytes: OFFSET_BYTES,
-                    },
-                    Window {
-                        base: rtc.alarm_control,
-                        bytes: 1,
-                    },
-                    Window {
-                        base: rtc.alarm_offset,
-                        bytes: ALARM_BYTES,
-                    },
-                    Window {
-                        base: rtc.alarm_event,
-                        bytes: 1,
-                    },
-                    Window {
-                        base: rtc.irq_mask,
-                        bytes: 1,
-                    },
-                ]
-            }))
+            .chain(self.rtc.into_iter().flat_map(|rtc| rtc.windows()))
             .chain(self.fault_history.iter().map(|history| history.window))
             .chain(
                 self.firmware
