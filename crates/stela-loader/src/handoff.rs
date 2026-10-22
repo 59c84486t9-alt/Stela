@@ -375,8 +375,36 @@ pub fn apply(tree: &mut DeviceTree, chip_id: Option<u32>) -> Result<(Vec<Decisio
     platform_name(tree, chip_id, &mut decisions, &mut gaps);
     core_counts(tree, &mut decisions, &mut gaps)?;
     l2_cache_sizes(tree, chip_id, &mut decisions, &mut gaps)?;
+    gaps.extend(template_groups(tree));
     gaps.extend(unproduced(tree));
     Ok((decisions, gaps))
+}
+
+/// The template's variant groups: a root `:<group>` node whose `option`
+/// lists variants, each with `:<group>_<variant>_<n>` overlay nodes beside
+/// the properties they override (J700AP's `:j700`, `has_mesa|no_mesa`; the
+/// T6050 boards' `:sotra`, `h17s|h17c|h17cr1|h17cr2|h17d`, whose
+/// `/product` overlays name the SoC). iBoot picks the variant from the chip:
+/// each board's iBoot carries every option of its group (26A434
+/// `iBoot.j714s` and `iBoot.j714c` alike list all five `:sotra` variants).
+/// Which variant the emulated chip is and how iBoot merges an overlay are
+/// not established, so the overlays stay unapplied, reported.
+fn template_groups(tree: &DeviceTree) -> Vec<String> {
+    let Some(root) = tree.node(ROOT) else {
+        return vec![];
+    };
+    root.children
+        .iter()
+        .filter_map(|node| {
+            let group = node.name()?.strip_prefix(':')?;
+            let options = node.property("option")?.value.as_slice();
+            let options = core::str::from_utf8(options).ok()?.trim_end_matches('\0');
+            Some(format!(
+                "template group :{group} ({options}): iBoot picks the variant from the chip; \
+                 its :{group}_<variant>_<n> overlays stay unapplied"
+            ))
+        })
+        .collect()
 }
 
 /// iBoot's finalizer deletes `/osenvironments` once the selected
@@ -511,6 +539,24 @@ mod tests {
 
     /// J700AP's P cores carry only per-variant L2 sizes; the A18 Pro's
     /// cores are H17P, and another SoC names no variant.
+    #[test]
+    fn template_variant_groups_stay_unapplied_and_reported() -> Result<()> {
+        let mut tree = tree();
+        assert!(template_groups(&tree).is_empty());
+        tree.ensure_child(ROOT, ":sotra")?;
+        tree.set_property("/:sotra", "option", b"h17s|h17c|h17d\0".to_vec())?;
+        tree.ensure_child(ROOT, ":version")?;
+        tree.set_property("/:version", "version", 1u32.to_le_bytes().to_vec())?;
+        assert_eq!(
+            template_groups(&tree),
+            [
+                "template group :sotra (h17s|h17c|h17d): iBoot picks the variant from the chip; \
+              its :sotra_<variant>_<n> overlays stay unapplied"
+            ]
+        );
+        Ok(())
+    }
+
     #[test]
     fn per_variant_l2_sizes_take_the_socs_own_variant() -> Result<()> {
         let template = || -> Result<DeviceTree> {
