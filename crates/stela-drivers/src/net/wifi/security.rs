@@ -268,6 +268,37 @@ enum State {
     Quarantined,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ReceiveHistory {
+    index: u8,
+    cipher: Cipher,
+    scope: KeyScope,
+    floor: [u64; 17],
+}
+
+#[derive(Debug)]
+struct UsedMaterial {
+    digest: [u8; 32],
+    /// None permanently prohibits resuming material ever used by a transmitting
+    /// key, or material outside the exact receive-only group-key profile.
+    receive: Option<ReceiveHistory>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingMaterial {
+    digest: [u8; 32],
+    key: KeyIdentity,
+    receive: ReplaySeed,
+    /// A receive-only continuation reuses its original retained history.
+    history: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum InstallMode {
+    Fresh(TransmitSeed),
+    ReceiveOnlyResume,
+}
+
 /// Serialized key slot and its per-TID replay state (queue16 is non-QoS).
 /// Keep this object for the lifetime of the physical slot; recreating it while
 /// old RX/completions can still arrive would invalidate generation isolation.
@@ -280,10 +311,11 @@ pub struct KeySlot {
     rx_pn: [u64; 17],
     tx_pn: u64,
     material_digest: Option<[u8; 32]>,
-    pending_digest: Option<[u8; 32]>,
+    pending_material: Option<PendingMaterial>,
+    installed_history: Option<usize>,
     /// Every accepted or uncertain candidate may already have used its nonce
     /// space. Keep its identity across all later attempts in this slot owner.
-    used_materials: Vec<[u8; 32]>,
+    used_materials: Vec<UsedMaterial>,
 }
 
 impl KeySlot {
@@ -312,7 +344,8 @@ impl KeySlot {
             rx_pn: [0; 17],
             tx_pn: 0,
             material_digest: None,
-            pending_digest: None,
+            pending_material: None,
+            installed_history: None,
             used_materials: Vec::new(),
         })
     }
@@ -326,6 +359,68 @@ impl KeySlot {
         scope: KeyScope,
         transmit: TransmitSeed,
     ) -> Result<InstallTicket, Error> {
+        self.begin_install_inner(
+            index,
+            cipher,
+            material,
+            receive,
+            scope,
+            InstallMode::Fresh(transmit),
+        )
+    }
+
+    /// Continue a known receive-only GTK after actual removal and retirement.
+    /// It never authorizes transmission or resets any retained replay floor.
+    ///
+    /// # Safety
+    /// `material`, exact group/BSSID scope, cipher/index and `authenticated_rsc`
+    /// must come from this association's real authenticated OS key exchange.
+    /// Do not manufacture an RSC, use a copied installation receipt as handshake
+    /// authority, or call this for a transmitting key. The caller must preserve
+    /// this slot/history through reconnect. Actual removal/drain is independently
+    /// required by `retire_after_drain`; uncertainty stays quarantined until then.
+    /// A new generation becomes usable only after actual matching install ACK.
+    ///
+    /// ```compile_fail
+    /// use stela_drivers::net::{Mac, wifi::security::{KeySlot, Cipher, KeyScope, ReplaySeed}};
+    /// let mut slot = unsafe { KeySlot::new(7).unwrap() };
+    /// slot.begin_receive_only_resume(2, Cipher::Ccmp128, &[0; 16],
+    ///     ReplaySeed::ZERO, KeyScope::Group(Mac([2, 0, 0, 0, 0, 1])));
+    /// ```
+    pub unsafe fn begin_receive_only_resume(
+        &mut self,
+        index: u8,
+        cipher: Cipher,
+        material: &[u8],
+        authenticated_rsc: ReplaySeed,
+        scope: KeyScope,
+    ) -> Result<InstallTicket, Error> {
+        if !matches!(scope, KeyScope::Group(_)) {
+            return Err(Error::WrongNonceOwner);
+        }
+        self.begin_install_inner(
+            index,
+            cipher,
+            material,
+            authenticated_rsc,
+            scope,
+            InstallMode::ReceiveOnlyResume,
+        )
+    }
+
+    fn begin_install_inner(
+        &mut self,
+        index: u8,
+        cipher: Cipher,
+        material: &[u8],
+        mut receive: ReplaySeed,
+        scope: KeyScope,
+        mode: InstallMode,
+    ) -> Result<InstallTicket, Error> {
+        let (transmit, resume) = match mode {
+            InstallMode::Fresh(transmit) => (transmit, false),
+            InstallMode::ReceiveOnlyResume => (TransmitSeed::RECEIVE_ONLY, true),
+        };
         if index > 3 || (matches!(scope, KeyScope::Pairwise(_)) && index > 1) {
             return Err(Error::InvalidKeyIndex);
         }
@@ -358,13 +453,36 @@ impl KeySlot {
             {
                 return Err(Error::AlreadyInstalled(key));
             }
-            return Err(Error::Reinstallation);
+            if !resume {
+                return Err(Error::Reinstallation);
+            }
         }
-        if self
+        let history = self
             .used_materials
             .iter()
-            .fold(false, |seen, old| same_digest(&digest, old) | seen)
-        {
+            .enumerate()
+            .fold(None, |found, (index, old)| {
+                if same_digest(&digest, &old.digest) {
+                    Some(index)
+                } else {
+                    found
+                }
+            });
+        if resume {
+            let old = history
+                .and_then(|index| self.used_materials[index].receive)
+                .ok_or(Error::Reinstallation)?;
+            if old.index != index
+                || old.cipher != cipher
+                || old.scope != scope
+                || transmit.owner() != NonceOwner::ReceiveOnly
+            {
+                return Err(Error::Reinstallation);
+            }
+            for (seed, floor) in receive.0.iter_mut().zip(old.floor) {
+                *seed = (*seed).max(floor);
+            }
+        } else if history.is_some() {
             return Err(Error::Reinstallation);
         }
         match self.state {
@@ -380,7 +498,7 @@ impl KeySlot {
         // Reserve before a ticket can reach hardware. Any accepted/uncertain
         // completion or later drain must retain this digest without allocating.
         self.used_materials
-            .try_reserve(1)
+            .try_reserve(usize::from(history.is_none()))
             .map_err(|_| Error::NoMemory)?;
         self.generation = generation;
         let key = KeyIdentity {
@@ -394,7 +512,18 @@ impl KeySlot {
         };
         // Invalidate the old binding before a command can change hardware state.
         self.state = State::Pending(key);
-        self.pending_digest = Some(digest);
+        self.installed_history = None;
+        if let Some(index) = history {
+            // An authenticated RSC is a learned floor even if this particular
+            // hardware attempt is rejected. A later retry must not regress it.
+            self.used_materials[index].receive.as_mut().unwrap().floor = receive.0;
+        }
+        self.pending_material = Some(PendingMaterial {
+            digest,
+            key,
+            receive,
+            history,
+        });
         Ok(InstallTicket {
             key,
             receive,
@@ -416,16 +545,17 @@ impl KeySlot {
             InstallOutcome::Accepted => {
                 self.rx_pn = ticket.receive.0;
                 self.tx_pn = ticket.transmit.initial_counter().value();
-                self.material_digest = self.pending_digest;
-                self.retain_pending_material();
+                self.material_digest = self.pending_material.map(|pending| pending.digest);
+                self.installed_history = self.retain_pending_material();
                 State::Installed(ticket.key)
             }
             InstallOutcome::RejectedAndEmpty => {
-                self.pending_digest = None;
+                self.pending_material = None;
+                self.installed_history = None;
                 State::Empty
             }
             InstallOutcome::Uncertain => {
-                self.retain_pending_material();
+                let _ = self.retain_pending_material();
                 State::Quarantined
             }
         };
@@ -444,13 +574,36 @@ impl KeySlot {
     /// Use `retire_after_drain` after acknowledgement and old RX/work retirement.
     pub fn invalidate(&mut self) {
         self.state = State::Quarantined;
+        self.installed_history = None;
     }
 
-    fn retain_pending_material(&mut self) {
-        if let Some(digest) = self.pending_digest.take() {
+    fn retain_pending_material(&mut self) -> Option<usize> {
+        if let Some(pending) = self.pending_material.take() {
+            if let Some(index) = pending.history {
+                return Some(index);
+            }
             // begin_install reserved space before issuing the only pending
             // ticket; this push cannot need an allocation at completion/drain.
-            self.used_materials.push(digest);
+            let receive = if pending.key.nonce_owner == NonceOwner::ReceiveOnly
+                && matches!(pending.key.scope, KeyScope::Group(_))
+            {
+                Some(ReceiveHistory {
+                    index: pending.key.index,
+                    cipher: pending.key.cipher,
+                    scope: pending.key.scope,
+                    floor: pending.receive.0,
+                })
+            } else {
+                None
+            };
+            let index = self.used_materials.len();
+            self.used_materials.push(UsedMaterial {
+                digest: pending.digest,
+                receive,
+            });
+            Some(index)
+        } else {
+            None
         }
     }
 
@@ -462,8 +615,9 @@ impl KeySlot {
         // Drain proves no remaining users, not that an unacknowledged key was
         // never used. This also covers invalidating/draining a pending command
         // before complete_install can report its final outcome.
-        self.retain_pending_material();
+        let _ = self.retain_pending_material();
         self.state = State::Empty;
+        self.installed_history = None;
         // Retain all possibly-used material identities: device reset is not
         // permission to restart an older key's transmit/replay counters.
     }
@@ -530,6 +684,11 @@ impl KeySlot {
             return Err(Error::Replay);
         }
         self.rx_pn[queue] = pn.0;
+        if let Some(history) = self.installed_history
+            && let Some(receive) = self.used_materials[history].receive.as_mut()
+        {
+            receive.floor[queue] = pn.0;
+        }
         Ok(AuthenticatedData {
             mpdu,
             start,
