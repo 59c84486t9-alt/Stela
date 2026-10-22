@@ -232,6 +232,10 @@ pub struct Descriptor {
     pub info: u32,
 }
 impl Assembly {
+    /// CPU assembly ownership only; this is not hardware/IRQ quiescence.
+    pub(in crate::net::wifi::mediatek) fn is_idle(&self) -> bool {
+        self.bytes.is_empty() && self.descriptors.is_empty() && !self.poisoned
+    }
     pub fn push(&mut self, fragment: Fragment) -> Result<Option<Frame>, Error> {
         if self.poisoned {
             return Err(Error::Poisoned);

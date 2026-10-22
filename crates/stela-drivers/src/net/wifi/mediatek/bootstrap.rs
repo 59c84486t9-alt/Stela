@@ -28,6 +28,8 @@ use crate::{
 use alloc::{alloc::alloc, boxed::Box, sync::Arc, vec::Vec};
 use core::{alloc::Layout, ptr::NonNull};
 
+pub mod client;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Phase {
     Fresh,
@@ -85,7 +87,7 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     aspm: Option<bool>,
     native: Option<NativeWindow>,
     mailbox: Option<Mailbox<Q, Q, Q>>,
-    data_tx: Option<DataRing<Q, ()>>,
+    data_tx: Option<DataRing<Q, client::PacketOwner<C>>>,
     data_rx: Option<RxRing<Q>>,
     data_assembly: Assembly,
     // Retain partially installed rings before enabling or constructing mailbox.
@@ -123,6 +125,12 @@ impl<C: 'static> Controller<MmioBar, MmioQueue, C> {
     /// NoSnoop/PRI/PASID off and its canonical PageSource/DmaDomain. Do not
     /// qualify physical hardware from the QEMU or WB cache-type observation.
     /// Serialize all raw reset/IRQ/power/firmware paths for this retained owner.
+    /// On a combo MT7925, this same genuine owner must serialize both PCIe
+    /// Wi-Fi and USB Bluetooth for their complete lifetimes: initial Wi-Fi
+    /// restart/bootstrap precedes Bluetooth initialization. Never construct or
+    /// rebootstrap while the sibling has live/uncertain users. Neither a local
+    /// phase value nor a copied combo identifier proves this physical ordering;
+    /// actual attachment supplies it. Automatic shared reset is unsupported.
     pub unsafe fn new(
         identity: Identity,
         base: NonNull<u8>,
@@ -186,6 +194,8 @@ impl<C: 'static> Controller<MmioBar, MmioQueue, C> {
     }
 }
 impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
+    // Vendor model/native constructors preserve the exclusive initial combo
+    // ordering contract above; this is not an alternative physical admission.
     pub(in crate::net::wifi::mediatek) fn claim(
         identity: Identity,
         control: Control<I>,
@@ -351,6 +361,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
     /// Actual NIC restart is one-way DMA completion, followed by real power
     /// observation and full bound download. The same private mailbox continues
     /// source sequence numbers; no public diagnostic can forge that permission.
+    /// Consume the genuine initial sequencing epoch exactly once. The actual
+    /// constructor/attachment combo owner must keep Bluetooth uninitialized
+    /// until this Wi-Fi restart/download completes, and retain/serialize both
+    /// siblings on uncertainty. A failed boot cannot be retried in this owner.
     pub fn boot(&mut self, prepared: &Prepared<'_>) -> Result<(), Error> {
         self.require(Phase::Queues)?;
         if *prepared.requests() != super::firmware::Requests::new(&self.state().identity) {

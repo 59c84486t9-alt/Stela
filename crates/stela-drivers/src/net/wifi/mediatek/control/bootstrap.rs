@@ -112,6 +112,14 @@ impl<I: BarIo> Control<I> {
             last,
         })
     }
+    pub(in crate::net::wifi::mediatek) fn clear_peer_admission(
+        &mut self,
+        index: u16,
+    ) -> Result<Observation, Error> {
+        self.guard(true)?;
+        let result = self.wtbl_clear_admission(u32::from(index));
+        self.finish(result)
+    }
     /// # Safety
     /// This is actual initial post-EFUSE MAC setup on freshly booted firmware
     /// with no live peer/key/WTBL/TX/RX consumer. The owning lifecycle serializes

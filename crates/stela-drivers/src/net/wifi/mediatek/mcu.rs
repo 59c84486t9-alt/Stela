@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 pub mod bootstrap;
 pub mod capabilities;
 pub mod clc;
+pub mod client;
 pub mod device;
 pub mod domain;
 pub mod eeprom;
@@ -152,6 +153,9 @@ pub struct Event<'a> {
     unsolicited: bool,
 }
 impl<'a> Event<'a> {
+    pub fn is_unsolicited(&self) -> bool {
+        self.unsolicited
+    }
     pub fn parse(chip: Chip, bytes: &'a [u8]) -> Result<Self, Error> {
         let words = if chip == Chip::Mt7925 { 8 } else { 6 };
         let base = words * 4;

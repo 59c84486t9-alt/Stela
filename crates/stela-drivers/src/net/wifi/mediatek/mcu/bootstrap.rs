@@ -18,6 +18,10 @@ use alloc::vec::Vec;
 pub enum Kind {
     Restart,
     FirmwareLog,
+    Scan,
+    CancelScan,
+    ClientFilter,
+    Roc,
     EfuseMode,
     RtsThreshold,
     MacEnable(bool),
@@ -241,6 +245,23 @@ impl Request {
             body,
             true,
         ))
+    }
+    /// MT7925 scan uses the generic source response path, unlike plain
+    /// DEV/BSS/STA commands with a status record. An ACK is not scan done.
+    pub(in crate::net::wifi::mediatek) fn scan(body: Vec<u8>, cancel: bool) -> Self {
+        Self::new(
+            Chip::Mt7925,
+            if cancel { Kind::CancelScan } else { Kind::Scan },
+            (1 << 17) | 0x16,
+            body,
+            true,
+        )
+    }
+    pub(in crate::net::wifi::mediatek) fn client_filter(body: Vec<u8>) -> Self {
+        Self::new(Chip::Mt7925, Kind::ClientFilter, (1 << 17) | 8, body, true)
+    }
+    pub(in crate::net::wifi::mediatek) fn roc(body: Vec<u8>) -> Self {
+        Self::new(Chip::Mt7925, Kind::Roc, (1 << 17) | 0x27, body, true)
     }
     pub fn chip(&self) -> Chip {
         self.chip

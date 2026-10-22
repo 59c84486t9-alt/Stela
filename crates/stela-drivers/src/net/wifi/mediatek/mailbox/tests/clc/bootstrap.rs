@@ -770,3 +770,5 @@ fn wrong_prepared_input_refuses_before_restart_or_firmware_mutation() {
     assert!(f.model.lock().unwrap().initial_commands.is_empty());
     f.retire();
 }
+
+mod client;

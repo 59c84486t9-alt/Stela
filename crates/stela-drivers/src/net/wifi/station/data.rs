@@ -15,6 +15,7 @@ use crate::net::{
     },
 };
 use alloc::{vec, vec::Vec};
+use core::borrow::{Borrow, BorrowMut};
 
 const EAPOL: u16 = 0x888e;
 const PAE_GROUP: Mac = Mac([1, 0x80, 0xc2, 0, 0, 3]);
@@ -197,10 +198,13 @@ fn msdu(ethernet: &[u8]) -> Result<(Mac, Mac, u16, Vec<u8>), Error> {
 }
 
 impl Station {
-    fn authorized_keys_present(&self, keys: &[KeySlot]) -> bool {
+    fn authorized_keys_present<K: Borrow<KeySlot>>(&self, keys: &[K]) -> bool {
         self.authorization.is_some_and(|(ptk, gtk)| {
-            keys.iter().any(|slot| slot.installed() == Some(ptk))
-                && keys.iter().any(|slot| slot.installed() == Some(gtk))
+            keys.iter()
+                .any(|slot| slot.borrow().installed() == Some(ptk))
+                && keys
+                    .iter()
+                    .any(|slot| slot.borrow().installed() == Some(gtk))
         })
     }
 
@@ -213,6 +217,17 @@ impl Station {
         &self,
         plan: &TxPlan,
         keys: &[KeySlot],
+        policy: &mut impl RegulatoryPolicy,
+    ) -> Result<(), Error> {
+        self.validate_tx_plan_refs(plan, keys, policy)
+    }
+
+    /// The same publication check for separately retained key owners. Borrowed
+    /// entries refer to the original slots; no key or nonce state is recreated.
+    pub fn validate_tx_plan_refs<K: Borrow<KeySlot>>(
+        &self,
+        plan: &TxPlan,
+        keys: &[K],
         policy: &mut impl RegulatoryPolicy,
     ) -> Result<(), Error> {
         if self.phase != Phase::Associated {
@@ -241,7 +256,9 @@ impl Station {
             }
         }
         if let Some(key) = key
-            && !keys.iter().any(|slot| slot.installed() == Some(key))
+            && !keys
+                .iter()
+                .any(|slot| slot.borrow().installed() == Some(key))
         {
             return Err(Error::WrongKey);
         }
@@ -255,6 +272,18 @@ impl Station {
         epoch: u64,
         frame: &Mpdu,
         keys: &mut [KeySlot],
+    ) -> Result<Ingress, Error> {
+        self.receive_msdu_refs(epoch, frame, keys)
+    }
+
+    /// Borrow separately owned slots exclusively for this RX operation. Replay
+    /// mutation occurs in the actual selected slot. Safe Rust forbids aliasing
+    /// mutable entries; the implementation never manufactures references.
+    pub fn receive_msdu_refs<K: BorrowMut<KeySlot>>(
+        &self,
+        epoch: u64,
+        frame: &Mpdu,
+        keys: &mut [K],
     ) -> Result<Ingress, Error> {
         if self.phase != Phase::Associated {
             return Err(Error::NotAssociated);
@@ -322,9 +351,9 @@ impl Station {
             }
             let slot = keys
                 .iter_mut()
-                .find(|slot| slot.installed() == Some(key))
+                .find(|slot| K::borrow(&**slot).installed() == Some(key))
                 .ok_or(Error::WrongKey)?;
-            let authenticated = slot.authorize(frame)?;
+            let authenticated = slot.borrow_mut().authorize(frame)?;
             selected_key = Some(authenticated.key());
             authenticated.payload()
         } else {
@@ -369,6 +398,21 @@ impl Station {
         class: TxClass,
         sequence_owner: SequenceOwner,
         keys: &mut [KeySlot],
+        policy: &mut impl RegulatoryPolicy,
+    ) -> Result<TxPlan, Error> {
+        self.prepare_msdu_refs(epoch, ethernet, class, sequence_owner, keys, policy)
+    }
+
+    /// Prepare against borrowed original slots from independently retained
+    /// hardware owners, using exactly the same admission and nonce algorithm.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_msdu_refs<K: BorrowMut<KeySlot>>(
+        &mut self,
+        epoch: u64,
+        ethernet: &[u8],
+        class: TxClass,
+        sequence_owner: SequenceOwner,
+        keys: &mut [K],
         policy: &mut impl RegulatoryPolicy,
     ) -> Result<TxPlan, Error> {
         if self.phase != Phase::Associated {
@@ -424,11 +468,11 @@ impl Station {
             }
             let slot = keys
                 .iter_mut()
-                .find(|slot| slot.installed() == Some(key))
+                .find(|slot| K::borrow(&**slot).installed() == Some(key))
                 .ok_or(Error::WrongKey)?;
             match key.nonce_owner() {
                 NonceOwner::Host => {
-                    let nonce = slot.reserve_host_tx_nonce(key)?;
+                    let nonce = slot.borrow_mut().reserve_host_tx_nonce(key)?;
                     let pn = nonce.packet_number();
                     (Protection::HostIv { key, pn }, Some(nonce.into_header()))
                 }
@@ -611,6 +655,76 @@ mod tests {
         bytes.extend_from_slice(&protocol.to_be_bytes());
         bytes.extend_from_slice(&[1, 2, 3]);
         bytes
+    }
+
+    #[test]
+    fn separately_boxed_keys_keep_exact_original_replay_and_publication_guards() {
+        use alloc::boxed::Box;
+        let (mut station, mut original) = station(PortPolicy::Controlled, false);
+        let mut gtk = Box::new(original.pop().unwrap());
+        let mut ptk = Box::new(original.pop().unwrap());
+        let mut unrelated = Box::new(key(9, KeyScope::Group(AP), TransmitSeed::RECEIVE_ONLY));
+        let ptk_id = ptk.installed().unwrap();
+        let gtk_id = gtk.installed().unwrap();
+        station.authorize_port(42, &ptk, &gtk).unwrap();
+        let plan = station
+            .prepare_msdu_refs(
+                42,
+                &eth(SOURCE, 0x0800),
+                TxClass::Data,
+                SequenceOwner::Device,
+                &mut [&mut *gtk, &mut *ptk, &mut *unrelated],
+                &mut Policy(true),
+            )
+            .unwrap();
+        assert_eq!(plan.protection(), Protection::Firmware { key: ptk_id });
+        station
+            .validate_tx_plan_refs(&plan, &[&*unrelated, &*ptk, &*gtk], &mut Policy(true))
+            .unwrap();
+        assert_eq!(
+            station.validate_tx_plan_refs(&plan, &[&*ptk], &mut Policy(true)),
+            Err(Error::ClosedPort)
+        );
+        assert_eq!(
+            station.validate_tx_plan_refs(&plan, &[&*ptk, &*gtk], &mut Policy(false)),
+            Err(Error::Regulatory)
+        );
+        let pair = packet(LOCAL, 0x0800, protected(ptk_id, 7));
+        assert!(matches!(
+            station.receive_msdu_refs(41, &pair, &mut [&mut *ptk, &mut *gtk]),
+            Err(Error::Stale)
+        ));
+        assert!(matches!(
+            station.receive_msdu_refs(42, &pair, &mut [&mut *gtk, &mut *unrelated, &mut *ptk]),
+            Ok(Ingress::Data(_))
+        ));
+        // The same original owner observes replay even outside the borrowed array.
+        assert!(matches!(ptk.authorize(&pair), Err(security::Error::Replay)));
+        let group = packet(Mac::BROADCAST, 0x0800, protected(gtk_id, 7));
+        assert!(matches!(
+            station.receive_msdu_refs(42, &group, &mut [&mut *ptk, &mut *gtk]),
+            Ok(Ingress::Data(_))
+        ));
+        assert!(matches!(
+            gtk.authorize(&group),
+            Err(security::Error::Replay)
+        ));
+        // Unrelated same-scope slots do not acquire another slot's replay state.
+        let foreign = packet(
+            Mac::BROADCAST,
+            0x0800,
+            protected(unrelated.installed().unwrap(), 7),
+        );
+        assert!(unrelated.authorize(&foreign).is_ok());
+        ptk.invalidate();
+        assert_eq!(
+            station.validate_tx_plan_refs(&plan, &[&*ptk, &*gtk], &mut Policy(true)),
+            Err(Error::ClosedPort)
+        );
+        assert!(matches!(
+            station.receive_msdu_refs(42, &pair, &mut [&mut *ptk, &mut *gtk]),
+            Err(Error::WrongKey)
+        ));
     }
 
     #[test]

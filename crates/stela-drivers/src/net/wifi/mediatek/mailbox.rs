@@ -341,6 +341,9 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
         mailbox.runtime_rx = runtime_rx;
         Ok(mailbox)
     }
+    pub(in crate::net::wifi::mediatek) fn receive_idle(&self) -> bool {
+        self.assembly.is_idle() && self.runtime_assembly.is_idle() && self.events.is_empty()
+    }
     pub fn has_runtime_rx(&self) -> bool {
         self.runtime_rx.is_some()
     }
@@ -823,6 +826,12 @@ mod tests {
     use std::sync::Mutex;
     struct Response {
         initial_execution: bool,
+        client_execution: bool,
+        roc_channel: Option<u8>,
+        home_channel: Option<u8>,
+        wrong_roc_token: bool,
+        client_commands: Vec<Vec<u8>>,
+        peers: alloc::collections::BTreeMap<u16, Vec<u8>>,
         initial_commands: Vec<Vec<u8>>,
         initial_fail_at: Option<usize>,
         raw_disabled: alloc::collections::BTreeSet<u16>,
@@ -868,6 +877,12 @@ mod tests {
         fn default() -> Self {
             Self {
                 initial_execution: false,
+                client_execution: false,
+                roc_channel: None,
+                home_channel: None,
+                wrong_roc_token: false,
+                client_commands: Vec::new(),
+                peers: alloc::collections::BTreeMap::new(),
                 initial_commands: Vec::new(),
                 initial_fail_at: None,
                 raw_disabled: alloc::collections::BTreeSet::new(),
@@ -1100,6 +1115,7 @@ mod tests {
                                 && matches!(packet[41], 0x21 | 0x3e | 0x46 | 0x4e | 5))))
                         || (unified
                             && (command == 0xb
+                                || command == 0x27
                                 || command == 8
                                 || (command == 0x2d && packet[43] == 7))));
                 if initial {
@@ -1124,6 +1140,32 @@ mod tests {
                     response[base + 5] = seq;
                     response[base + 6] = if unified { 2 } else { 0 };
                     device_receive(&self.rx, &response, true, 0);
+                    if command == 0x27 && model.client_execution {
+                        let body = &packet[48..];
+                        if body[4] == 0 {
+                            assert_eq!(body.len(), 28);
+                            assert_eq!(&body[4..8], &[0, 0, 24, 0]);
+                            model.roc_channel = Some(body[10]);
+                            let mut grant = vec![0; 68];
+                            grant[..4].copy_from_slice(&(7u32 << 27).to_le_bytes());
+                            grant[36] = 0x27;
+                            grant[38] = 6;
+                            grant[50] = 20;
+                            grant[52] = body[8];
+                            grant[53] = body[9].wrapping_add(u8::from(model.wrong_roc_token));
+                            grant[54] = 0xa5; // raw status is not inspected by source grant callback
+                            grant[55] = body[10];
+                            grant[57] = body[12];
+                            grant[59] = body[14];
+                            grant[61] = 0;
+                            grant[62] = 0;
+                            grant[64..68].copy_from_slice(&body[20..24]);
+                            device_receive(&self.rx, &grant, true, 0);
+                        } else {
+                            assert_eq!(body.len(), 16);
+                            model.roc_channel = None;
+                        }
+                    }
                     return Ok(());
                 }
                 let capability = (unified && command == 14) || (!unified && command == 0x8a);
@@ -1232,7 +1274,7 @@ mod tests {
                         packet.len() - 32
                     );
                     let mut model = self.response.lock().unwrap();
-                    if model.initial_execution && command == 3 {
+                    if model.initial_execution && !model.client_execution && command == 3 {
                         let body = &packet[48..];
                         assert!(model.device_active && model.bss_active);
                         if body[5] != 0xe {
@@ -1251,7 +1293,10 @@ mod tests {
                         model.raw_disabled.insert(u16::from(body[1]));
                         model.initial_commands.push(packet.clone());
                     }
-                    if model.key_execution && command == 3 {
+                    if model.key_execution
+                        && command == 3
+                        && (!model.client_execution || packet.get(56) == Some(&0x27))
+                    {
                         // Execute the actual DMA-read key body before ACK. A
                         // negative/absent ACK may still leave programmed state;
                         // tests must not infer atomic rejection from status.
@@ -1273,6 +1318,33 @@ mod tests {
                             model.keys.remove(&body[1]);
                         }
                     }
+                    if model.client_execution {
+                        model.client_commands.push(packet.clone());
+                        if command == 2 && packet[52] == 0 && packet.len() > 84 {
+                            let mut rest = &packet[52..];
+                            while !rest.is_empty() {
+                                let len =
+                                    u16::from_le_bytes(rest[2..4].try_into().unwrap()) as usize;
+                                if rest[0] == 2 {
+                                    model.home_channel = Some(rest[4]);
+                                }
+                                rest = &rest[len..];
+                            }
+                        }
+                        if command == 3 && packet.get(56) != Some(&0x27) {
+                            let body = &packet[48..];
+                            let slot = u16::from(body[1]);
+                            if body[8] == 0x25 {
+                                model.peers.remove(&slot);
+                                model.raw_disabled.remove(&slot);
+                            } else {
+                                let last = &body[body.len() - 8..];
+                                assert_eq!(last, &[0x2b, 0, 8, 0, 0, 1, 1, 0]);
+                                model.peers.insert(slot, body.to_vec());
+                                model.raw_disabled.insert(slot);
+                            }
+                        }
+                    }
                     let status = if model.device_execution && (command == 1 || command == 2) {
                         let body = &packet[48..];
                         if command == 1 {
@@ -1281,9 +1353,11 @@ mod tests {
                             model.device_active = body[8] != 0;
                             model.device_status
                         } else {
-                            assert_eq!(body.len(), 36);
-                            assert_eq!(&body[4..8], &[0, 0, 32, 0]);
-                            model.bss_active = body[8] != 0;
+                            if !model.client_execution || body[4] == 0 {
+                                assert!(body.len() == 36 || model.client_execution);
+                                assert_eq!(&body[4..8], &[0, 0, 32, 0]);
+                                model.bss_active = body[8] != 0;
+                            }
                             model.bss_status
                         }
                     } else {

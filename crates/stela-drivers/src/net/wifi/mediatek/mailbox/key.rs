@@ -126,6 +126,31 @@ impl<C: 'static> HardwareKey<C> {
     pub fn slot(&self) -> &KeySlot {
         &self.owned().slot
     }
+    pub(in crate::net::wifi::mediatek) fn slot_mut(&mut self) -> &mut KeySlot {
+        &mut self.owned_mut().slot
+    }
+    /// # Safety
+    /// The old key and peer generation are actually removed and all RX/TX,
+    /// firmware, IRQ/deferred users drained. The same physical slot remains
+    /// exclusively owned; the new scope/context belongs to its real acknowledged
+    /// peer. Preserve this owner and all material history across rebinding.
+    pub(in crate::net::wifi::mediatek) unsafe fn rebind(
+        &mut self,
+        context: Context,
+        scope: KeyScope,
+    ) -> Result<(), Error> {
+        if self.owned().phase != Phase::Empty
+            || context.omac_index > 63
+            || scope.peer().is_multicast()
+            || scope.peer().0 == [0; 6]
+        {
+            return Err(Error::InvalidContext);
+        }
+        let s = self.owned_mut();
+        s.context = context;
+        s.scope = scope;
+        Ok(())
+    }
     /// Apply canonical replay checks to an actual normalized vendor RX frame.
     /// The controller must bind its real association/key generation and decoded
     /// integrity/PN observations before this call; this creates no RX evidence.
