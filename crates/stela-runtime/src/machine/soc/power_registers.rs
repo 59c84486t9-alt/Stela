@@ -4,6 +4,7 @@ use super::{
     CpuCluster, Identity, Node, PMGR2_ARCH, SOCS, String, Vec, WakeLayout, apertures, bridge,
     cluster, cpm, cpustart, dpe, energy, format, fuse, power, wake,
 };
+use crate::platform::apple::pmgr::dvfs;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeBank {
@@ -64,6 +65,8 @@ pub enum PmgrBank {
     Performance,
     CpuEnergy,
     Services,
+    /// Source-qualified protocol, awaiting actual native controller effects.
+    Dvfs(dvfs::Controller),
 }
 
 /// A visible register family whose semantics have not been established.
@@ -73,6 +76,15 @@ pub enum PmgrBank {
 pub struct PmgrBankRefusal {
     pub bank: PmgrBank,
     pub reason: &'static str,
+}
+
+impl From<dvfs::UnqualifiedEffects> for PmgrBankRefusal {
+    fn from(refusal: dvfs::UnqualifiedEffects) -> Self {
+        Self {
+            bank: PmgrBank::Dvfs(refusal.controller),
+            reason: refusal.reason(),
+        }
+    }
 }
 
 /// Validate advertised legacy record envelopes even when their register model

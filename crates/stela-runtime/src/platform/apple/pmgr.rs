@@ -20,6 +20,7 @@
 //! inventing a functional device. Uncovered domains retain named refusals. Parent
 //! arbitration is not modeled; coverage includes their actual consumers.
 pub mod coverage;
+pub mod dvfs;
 pub mod install;
 pub mod sequencer;
 pub mod t6000;
