@@ -34,6 +34,11 @@ fn repeated_drop_and_configure_preserves_ring_cursor_without_more_dma_allocation
                     .submit_iso(1, endpoint.dci(), buffer.physical(), 32)
                     .unwrap()
             });
+            // Before this generation's hardware event, an old event must not
+            // retire its buffer, including when physical TRB positions recur.
+            for ticket in &tickets {
+                assert!(controller.completed_iso(ticket).is_none());
+            }
             for endpoint in endpoints {
                 model.borrow_mut().complete(endpoint.dci(), 0, SUCCESS, 0);
             }
