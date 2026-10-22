@@ -172,6 +172,24 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
             self.poisoned = true;
             return Err(Error::NotFresh);
         }
+        self.download_bound_input(prepared)
+    }
+    /// Only the actual private NIC_POWER_CTRL one-way completion on this
+    /// otherwise unused owner permits source sequence continuation. This is
+    /// no reset/fresh-epoch proof and is invalidated by any intervening command.
+    pub(in crate::net::wifi::mediatek) fn download_after_source_restart(
+        &mut self,
+        prepared: &Prepared<'_>,
+    ) -> Result<&Binding, Error> {
+        self.download_binding = None;
+        if self.poisoned || self.cookie != 1 || self.source_restart_cookie != Some(1) {
+            self.poisoned = true;
+            return Err(Error::NotFresh);
+        }
+        self.source_restart_cookie = None;
+        self.download_bound_input(prepared)
+    }
+    fn download_bound_input(&mut self, prepared: &Prepared<'_>) -> Result<&Binding, Error> {
         // Own the exact canonical Prepared identity/provenance before any
         // device mutation. Canonical Requests::load checked returned Images.
         let requests = prepared.requests().clone();

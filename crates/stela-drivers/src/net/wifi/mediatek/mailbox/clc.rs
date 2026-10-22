@@ -70,6 +70,9 @@ enum Phase {
     CompletedFacts,
     RemainingUncertain,
     RemainingFacts,
+    StartUncertain,
+    StartDomainFacts,
+    StartPowerFacts,
     Retired,
 }
 struct Owned<C> {

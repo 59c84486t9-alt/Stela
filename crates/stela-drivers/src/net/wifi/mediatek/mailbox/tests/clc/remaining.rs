@@ -9,7 +9,7 @@ use crate::net::wifi::{
     },
 };
 
-fn caps(chip: Chip, bands: [bool; 3]) -> Vec<u8> {
+pub(super) fn caps(chip: Chip, bands: [bool; 3]) -> Vec<u8> {
     let mut bytes = vec![3, 0, 0xa5, 0x5a];
     let mut phy = [1, 1, 1, 0, 2, 0, 1, 1, 0, 0, 0, 1, 1];
     phy[10] = u8::from(bands[0]) | (u8::from(bands[1]) << 1);
@@ -34,7 +34,7 @@ fn complete_caps(fixture: &mut Fixture, bands: [bool; 3]) {
         Some(caps(fixture.mailbox.identity.chip, bands));
     fixture.capabilities = Some(fixture.mailbox.query_capabilities().unwrap());
 }
-fn rates(chip: Chip, band: Band) -> Vec<power::Channel> {
+pub(super) fn rates(chip: Chip, band: Band) -> Vec<power::Channel> {
     power::channels(chip, band)
         .iter()
         .map(|&hardware_value| power::Channel {
@@ -43,7 +43,7 @@ fn rates(chip: Chip, band: Band) -> Vec<power::Channel> {
         })
         .collect()
 }
-fn domain_channels(band: Band) -> Vec<domain::Channel> {
+pub(super) fn domain_channels(band: Band) -> Vec<domain::Channel> {
     vec![domain::Channel {
         hardware_value: match band {
             Band::Ghz2 => 1,

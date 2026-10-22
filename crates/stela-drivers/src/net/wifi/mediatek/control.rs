@@ -4,6 +4,7 @@
 //! are actual register observations, not a firmware epoch or DMA/IRQ fence.
 use super::registers::{self, BarIo, Registers};
 
+pub mod bootstrap;
 pub mod dma;
 
 const LPCTL: u32 = 0x7c060010;
@@ -73,7 +74,7 @@ pub struct DmaStopped {
 
 pub struct Control<I: BarIo> {
     registers: Registers<I>,
-    clock: crate::Clock,
+    pub(super) clock: crate::Clock,
     driver_owned: bool,
     dma_stopped: bool,
     poisoned: bool,

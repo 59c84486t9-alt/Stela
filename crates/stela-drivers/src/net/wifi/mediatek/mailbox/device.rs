@@ -129,6 +129,12 @@ impl<C: 'static> Interface<C> {
     fn owned_mut(&mut self) -> &mut Owned<C> {
         self.owned.as_deref_mut().expect("owned initial interface")
     }
+    pub(in crate::net::wifi::mediatek) fn belongs_to<W: QueueIo, F: QueueIo, R: QueueIo>(
+        &self,
+        mailbox: &Mailbox<W, F, R>,
+    ) -> bool {
+        self.owned().owner == mailbox.owner
+    }
     pub fn resource(&self) -> &C {
         &self.owned().resource
     }

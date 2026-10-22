@@ -66,6 +66,7 @@ pub(super) struct Chain {
     power: power::Plan,
     facts: Vec<Fact>,
     interrupted: Option<Reply>,
+    start_facts: Vec<Fact>,
 }
 
 impl<C: 'static> Execution<C> {
@@ -157,6 +158,7 @@ impl<C: 'static> Execution<C> {
             power,
             facts,
             interrupted: None,
+            start_facts: Vec::new(),
         });
         Ok(())
     }
@@ -270,5 +272,147 @@ impl<C: 'static> Execution<C> {
         }
         state.phase = Phase::RemainingFacts;
         Ok(())
+    }
+}
+
+impl<C: 'static> Execution<C> {
+    pub fn start_facts(&self) -> &[Fact] {
+        self.owned()
+            .remaining
+            .as_ref()
+            .map_or(&[], |c| c.start_facts.as_slice())
+    }
+    /// Vendor initial lifecycle only: source repeats the same resolved domain
+    /// at first start. This does not replay CLC or manufacture new authority.
+    pub(in crate::net::wifi::mediatek) fn start_domain<W: QueueIo, F: QueueIo, R: QueueIo>(
+        &mut self,
+        mailbox: &mut Mailbox<W, F, R>,
+    ) -> Result<(), Error> {
+        let s = self.owned_mut();
+        if s.owner != mailbox.owner {
+            return Err(Error::Clc(super::Error::WrongMailbox));
+        }
+        if s.phase != Phase::RemainingFacts {
+            return Err(Error::WrongPhase);
+        }
+        Self::check_inputs(mailbox, &s.auxiliary, &s.capabilities, &s.eeprom)
+            .map_err(Error::Clc)?;
+        let chain = s.remaining.as_mut().ok_or(Error::NotPrepared)?;
+        chain
+            .start_facts
+            .try_reserve_exact(1 + chain.power.requests().len())
+            .map_err(|_| Error::NoMemory)?;
+        s.phase = Phase::StartUncertain;
+        let packet = Packet::Domain(mailbox.encoder.encode_domain(&chain.domain));
+        Self::start_exchange(mailbox, chain, Step::Domain, packet)?;
+        s.phase = Phase::StartDomainFacts;
+        Ok(())
+    }
+    pub(in crate::net::wifi::mediatek) fn start_power<W: QueueIo, F: QueueIo, R: QueueIo>(
+        &mut self,
+        mailbox: &mut Mailbox<W, F, R>,
+    ) -> Result<(), Error> {
+        let s = self.owned_mut();
+        if s.owner != mailbox.owner {
+            return Err(Error::Clc(super::Error::WrongMailbox));
+        }
+        if s.phase != Phase::StartDomainFacts || mailbox.identity.chip == Chip::Mt7925 {
+            return Err(Error::WrongPhase);
+        }
+        Self::check_inputs(mailbox, &s.auxiliary, &s.capabilities, &s.eeprom)
+            .map_err(Error::Clc)?;
+        s.phase = Phase::StartUncertain;
+        let chain = s.remaining.as_mut().ok_or(Error::NotPrepared)?;
+        for request in 0..chain.power.requests().len() {
+            let body = &chain.power.requests()[request];
+            let step = Step::Power {
+                request,
+                kind: body.kind(),
+            };
+            let packet = Packet::Power(mailbox.encoder.encode_power(body));
+            Self::start_exchange(mailbox, chain, step, packet)?;
+        }
+        s.phase = Phase::StartPowerFacts;
+        Ok(())
+    }
+    fn start_exchange<W: QueueIo, F: QueueIo, R: QueueIo>(
+        mailbox: &mut Mailbox<W, F, R>,
+        chain: &mut Chain,
+        step: Step,
+        packet: Packet,
+    ) -> Result<(), Error> {
+        let sequence = packet.sequence();
+        if let Err(failure) = mailbox.execute(&packet, PCI_TIMEOUT_US) {
+            chain.interrupted = mailbox.interrupted_regulatory_reply.take();
+            return Err(Error::Transport { step, failure });
+        }
+        let observed = if !packet.expects_response() {
+            Observation::OneWayDmaCompleted
+        } else {
+            let reply = mailbox
+                .interrupted_regulatory_reply
+                .take()
+                .expect("actual initial repeat response");
+            if matches!(
+                step,
+                Step::Power {
+                    kind: power::Kind::PseFlush,
+                    ..
+                }
+            ) {
+                let event = Event::parse(mailbox.identity.chip, &reply.frame.bytes)
+                    .expect("actual PSE event");
+                match power::flush_value(event.payload) {
+                    Ok((register, value)) => Observation::PseRead {
+                        reply,
+                        register,
+                        value,
+                    },
+                    Err(error) => {
+                        chain.interrupted = Some(reply);
+                        return Err(Error::Malformed { step, error });
+                    }
+                }
+            } else {
+                Observation::GenericResponse(reply)
+            }
+        };
+        chain.start_facts.push(Fact {
+            step,
+            sequence,
+            observed,
+        });
+        Ok(())
+    }
+}
+
+impl<C: 'static> Execution<C> {
+    pub(in crate::net::wifi::mediatek) fn initial_channel_present(
+        &self,
+        band: crate::net::wifi::Band,
+        channel: u8,
+    ) -> bool {
+        let Some(c) = self.owned().remaining.as_ref() else {
+            return false;
+        };
+        let counts = c.domain.counts();
+        let index = match band {
+            crate::net::wifi::Band::Ghz2 => 0,
+            crate::net::wifi::Band::Ghz5 => 1,
+            crate::net::wifi::Band::Ghz6 => 2,
+        };
+        let first: usize = counts[..index].iter().map(|&n| usize::from(n)).sum();
+        let header = if c.domain.chip() == Chip::Mt7925 {
+            16
+        } else {
+            12
+        };
+        c.domain.body()[header..]
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .skip(first)
+            .take(counts[index] as usize)
+            .any(|e| u16::from_le_bytes([e[0], e[1]]) == u16::from(channel))
     }
 }

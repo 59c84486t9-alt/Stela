@@ -7,6 +7,7 @@
 use super::identity::Chip;
 use alloc::vec::Vec;
 
+pub mod bootstrap;
 pub mod capabilities;
 pub mod clc;
 pub mod device;

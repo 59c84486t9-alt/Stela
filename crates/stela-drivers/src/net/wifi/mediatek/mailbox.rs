@@ -18,6 +18,7 @@ use super::{
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+pub mod bootstrap;
 pub mod clc;
 pub mod device;
 pub mod eeprom;
@@ -61,6 +62,7 @@ pub enum Operation {
     Clc,
     Domain,
     Power(mcu::power::Kind),
+    Initial(mcu::bootstrap::Kind),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Failure {
@@ -154,6 +156,7 @@ enum Packet {
     Clc(mcu::clc::Packet),
     Domain(mcu::domain::Packet),
     Power(mcu::power::Packet),
+    Initial(mcu::bootstrap::Packet),
 }
 impl Packet {
     fn operation(&self) -> Operation {
@@ -165,6 +168,7 @@ impl Packet {
             Self::Clc(_) => Operation::Clc,
             Self::Domain(_) => Operation::Domain,
             Self::Power(p) => Operation::Power(p.kind()),
+            Self::Initial(p) => Operation::Initial(p.kind()),
         }
     }
     fn sequence(&self) -> u8 {
@@ -176,6 +180,7 @@ impl Packet {
             Self::Clc(p) => p.sequence(),
             Self::Domain(p) => p.sequence(),
             Self::Power(p) => p.sequence(),
+            Self::Initial(p) => p.sequence(),
         }
     }
     fn bytes(&self) -> &[u8] {
@@ -187,12 +192,13 @@ impl Packet {
             Self::Clc(p) => p.bytes(),
             Self::Domain(p) => p.bytes(),
             Self::Power(p) => p.bytes(),
+            Self::Initial(p) => p.bytes(),
         }
     }
     fn queue(&self) -> Queue {
         match self {
             Self::Boot(p) => p.queue,
-            Self::Domain(_) | Self::Power(_) => Queue::Wm,
+            Self::Domain(_) | Self::Power(_) | Self::Initial(_) => Queue::Wm,
             Self::Unified(_) | Self::Capabilities(_) | Self::Encapsulation(_) | Self::Clc(_) => {
                 Queue::Wm
             }
@@ -205,6 +211,7 @@ impl Packet {
             Self::Clc(p) => p.completion() != super::firmware::clc::Completion::OneWay,
             Self::Domain(p) => p.expects_response(),
             Self::Power(p) => p.expects_response(),
+            Self::Initial(p) => p.expects_response(),
         }
     }
     fn result(&self, event: &Event<'_>) -> Option<u32> {
@@ -216,6 +223,7 @@ impl Packet {
             Self::Clc(p) => event.clc_payload(p).ok().map(|_| 0),
             Self::Domain(p) => event.domain_payload(p).ok().map(|_| 0),
             Self::Power(p) => event.power_payload(p).ok().map(|_| 0),
+            Self::Initial(p) => event.bootstrap_result(p).ok().map(|s| s.unwrap_or(0)),
         }
     }
 }
@@ -227,6 +235,7 @@ enum ReplySlot {
     Encapsulation,
     Clc,
     Regulatory,
+    Initial,
 }
 
 pub struct Mailbox<W: QueueIo, F: QueueIo, R: QueueIo> {
@@ -235,7 +244,10 @@ pub struct Mailbox<W: QueueIo, F: QueueIo, R: QueueIo> {
     wm: TxRing<W>,
     fwdl: TxRing<F>,
     rx: RxRing<R>,
+    runtime_rx: Option<RxRing<R>>,
     assembly: Assembly,
+    runtime_assembly: Assembly,
+    runtime_next: bool,
     encoder: Encoder,
     clock: crate::Clock,
     cookie: u64,
@@ -250,6 +262,8 @@ pub struct Mailbox<W: QueueIo, F: QueueIo, R: QueueIo> {
     interrupted_clc_reply: Option<clc::Reply>,
     interrupted_regulatory_reply: Option<clc::Reply>,
     download_binding: Option<firmware::Binding>,
+    source_restart_cookie: Option<u64>,
+    interrupted_initial_reply: Option<bootstrap::Reply>,
 }
 impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
     /// # Safety
@@ -283,7 +297,10 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
             wm,
             fwdl,
             rx,
+            runtime_rx: None,
             assembly: Assembly::default(),
+            runtime_assembly: Assembly::default(),
+            runtime_next: false,
             encoder: Encoder::default(),
             clock,
             cookie: 0,
@@ -298,7 +315,34 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
             interrupted_clc_reply: None,
             interrupted_regulatory_reply: None,
             download_binding: None,
+            source_restart_cookie: None,
+            interrupted_initial_reply: None,
         })
+    }
+    /// # Safety
+    /// All `from_rings` real requester/coherence/fresh sequencing conditions
+    /// apply to every queue. `runtime_rx` is the same actual C2 requester's
+    /// source post-download MCU/WA queue (WFDMA0+0x540), independently owned
+    /// and posted before firmware can select it. No other consumer may poll,
+    /// reset, release or assemble either event stream. This does not create a
+    /// firmware epoch, install missing data queues or qualify a PCI claim.
+    pub(super) unsafe fn from_rings_with_runtime_rx(
+        identity: Identity,
+        wm: TxRing<W>,
+        fwdl: TxRing<F>,
+        rx: RxRing<R>,
+        runtime_rx: Option<RxRing<R>>,
+        clock: crate::Clock,
+    ) -> Result<Self, Cause> {
+        if identity.chip == super::identity::Chip::Mt7925 && runtime_rx.is_some() {
+            return Err(Cause::FirmwareTarget);
+        }
+        let mut mailbox = unsafe { Self::from_rings(identity, wm, fwdl, rx, clock) }?;
+        mailbox.runtime_rx = runtime_rx;
+        Ok(mailbox)
+    }
+    pub fn has_runtime_rx(&self) -> bool {
+        self.runtime_rx.is_some()
     }
     pub fn last_failure(&self) -> Option<Failure> {
         self.last_failure
@@ -315,6 +359,35 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
     pub fn take_events(&mut self) -> Vec<Frame> {
         self.event_bytes = 0;
         core::mem::take(&mut self.events)
+    }
+    /// Vendor lifecycle polling while no command is active. Complete actual
+    /// frames retain per-stream assembly and bounded asynchronous ownership;
+    /// they are not automatically classified as command ACKs or data packets.
+    pub(in crate::net::wifi::mediatek) fn poll_events(&mut self) -> Result<Vec<Frame>, Cause> {
+        if self.poisoned {
+            return Err(Cause::Poisoned);
+        }
+        let result = (|| {
+            for _ in 0..MAX_EVENTS {
+                let Some(frame) = self.next_frame().map_err(Cause::Ring)? else {
+                    break;
+                };
+                let core = Event::parse(self.identity.chip, &frame.bytes)
+                    .is_ok_and(|e| e.event_id == 0xf0 || (e.option & 2 != 0 && e.event_id == 0x0a));
+                self.retain(frame)?;
+                if core {
+                    return Err(Cause::CoreDump);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(cause) = result {
+            self.poisoned = true;
+            self.download_binding = None;
+            self.source_restart_cookie = None;
+            return Err(cause);
+        }
+        Ok(self.take_events())
     }
     pub fn replies(&self) -> &[Reply] {
         &self.replies
@@ -379,6 +452,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
     ) -> TransportFailure {
         self.poisoned = true;
         self.download_binding = None;
+        self.source_restart_cookie = None;
         if self.last_failure.is_none() {
             self.last_failure = Some(Failure {
                 command,
@@ -406,6 +480,26 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
         Ok(())
     }
     fn next_frame(&mut self) -> Result<Option<Frame>, ring::Error> {
+        if let Some(runtime) = self.runtime_rx.as_mut() {
+            // Never concatenate fragments from two hardware queues. Alternate
+            // complete-stream polls so a busy runtime queue cannot starve ROM
+            // responses or vice versa across the actual firmware transition.
+            for _ in 0..2 {
+                let use_runtime = self.runtime_next;
+                self.runtime_next = !self.runtime_next;
+                let (queue, assembly) = if use_runtime {
+                    (&mut *runtime, &mut self.runtime_assembly)
+                } else {
+                    (&mut self.rx, &mut self.assembly)
+                };
+                if let Some(fragment) = queue.poll()?
+                    && let Some(frame) = assembly.push(fragment)?
+                {
+                    return Ok(Some(frame));
+                }
+            }
+            return Ok(None);
+        }
         let Some(fragment) = self.rx.poll()? else {
             return Ok(None);
         };
@@ -497,6 +591,12 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
                     .expect("retained actual CLC reply")
                     .dma_released = true
             }
+            ReplySlot::Initial => {
+                self.interrupted_initial_reply
+                    .as_mut()
+                    .expect("retained actual initial reply")
+                    .dma_released = true;
+            }
             ReplySlot::Regulatory => {
                 self.interrupted_regulatory_reply
                     .as_mut()
@@ -506,6 +606,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
         }
     }
     fn execute(&mut self, packet: &Packet, timeout_us: u64) -> Result<u32, TransportFailure> {
+        self.source_restart_cookie = None;
         let command = packet.operation();
         let sequence = packet.sequence();
         let Some(cookie) = self.cookie.checked_add(1) else {
@@ -617,6 +718,15 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
                                     });
                                     ReplySlot::Clc
                                 }
+                                Operation::Initial(kind) => {
+                                    self.interrupted_initial_reply = Some(bootstrap::Reply {
+                                        kind,
+                                        sequence,
+                                        dma_released,
+                                        frame,
+                                    });
+                                    ReplySlot::Initial
+                                }
                                 Operation::Domain | Operation::Power(_) => {
                                     self.interrupted_regulatory_reply = Some(clc::Reply {
                                         sequence,
@@ -662,6 +772,9 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
             self.fwdl.release_after_quiesce()?;
             self.rx.release_after_quiesce()?
         };
+        if let Some(runtime) = self.runtime_rx.as_mut() {
+            unsafe { runtime.release_after_quiesce()? };
+        }
         Ok(())
     }
 }
@@ -709,6 +822,11 @@ mod tests {
     use alloc::sync::Arc;
     use std::sync::Mutex;
     struct Response {
+        initial_execution: bool,
+        initial_commands: Vec<Vec<u8>>,
+        initial_fail_at: Option<usize>,
+        raw_disabled: alloc::collections::BTreeSet<u16>,
+        qualified_peer_slots: alloc::collections::BTreeSet<u16>,
         capability_payload: Option<Vec<u8>>,
         encapsulation_payload: Option<Vec<u8>>,
         capability_wrong_event: bool,
@@ -749,6 +867,11 @@ mod tests {
     impl Default for Response {
         fn default() -> Self {
             Self {
+                initial_execution: false,
+                initial_commands: Vec::new(),
+                initial_fail_at: None,
+                raw_disabled: alloc::collections::BTreeSet::new(),
+                qualified_peer_slots: alloc::collections::BTreeSet::new(),
                 capability_payload: None,
                 encapsulation_payload: None,
                 capability_wrong_event: false,
@@ -969,8 +1092,42 @@ mod tests {
                     );
                     return Ok(());
                 }
+                let initial = self.response.lock().unwrap().initial_execution
+                    && ((!unified
+                        && (command == 4
+                            || command == 0xc5
+                            || (command == 0xed
+                                && matches!(packet[41], 0x21 | 0x3e | 0x46 | 0x4e | 5))))
+                        || (unified
+                            && (command == 0xb
+                                || command == 8
+                                || (command == 0x2d && packet[43] == 7))));
+                if initial {
+                    let mut model = self.response.lock().unwrap();
+                    if command != 4 {
+                        assert!(model.firmware_started && model.regulatory_domain);
+                    }
+                    model.initial_commands.push(packet.clone());
+                    let n = model.initial_commands.len();
+                    if model.initial_fail_at == Some(n) {
+                        return Err(ring::Error::RegisterFailure);
+                    }
+                    if !unified
+                        && (command == 4 || command == 0xc5 || (command == 0xed && packet[41] == 5))
+                    {
+                        return Ok(());
+                    }
+                    let mut response = vec![0; base + 12];
+                    response[..4].copy_from_slice(&(7u32 << 27).to_le_bytes());
+                    response[base..base + 2].copy_from_slice(&12u16.to_le_bytes());
+                    response[base + 4] = 0x55;
+                    response[base + 5] = seq;
+                    response[base + 6] = if unified { 2 } else { 0 };
+                    device_receive(&self.rx, &response, true, 0);
+                    return Ok(());
+                }
                 let capability = (unified && command == 14) || (!unified && command == 0x8a);
-                let encapsulation = (unified && command == 0x2d)
+                let encapsulation = (unified && command == 0x2d && packet[43] == 3)
                     || (!unified && command == 0xed && packet[41] == 1);
                 if capability || encapsulation {
                     let model = self.response.lock().unwrap();
@@ -1075,6 +1232,25 @@ mod tests {
                         packet.len() - 32
                     );
                     let mut model = self.response.lock().unwrap();
+                    if model.initial_execution && command == 3 {
+                        let body = &packet[48..];
+                        assert!(model.device_active && model.bss_active);
+                        if body[5] != 0xe {
+                            assert!(
+                                model.qualified_peer_slots.contains(&u16::from(body[1])),
+                                "separately qualified peer owner required"
+                            );
+                        }
+                        if self.chip == Chip::Mt7925 {
+                            assert_eq!(body.len(), 16);
+                            assert_eq!(&body[8..], [0x2b, 0, 8, 0, 0, 1, 1, 0]);
+                        } else {
+                            assert_eq!(body.len(), 28);
+                            assert_eq!(&body[20..], [6, 0, 8, 0, 1, 0, 1, 0]);
+                        }
+                        model.raw_disabled.insert(u16::from(body[1]));
+                        model.initial_commands.push(packet.clone());
+                    }
                     if model.key_execution && command == 3 {
                         // Execute the actual DMA-read key body before ACK. A
                         // negative/absent ACK may still leave programmed state;

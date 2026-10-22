@@ -1,4 +1,5 @@
 use super::*;
+mod bootstrap;
 mod remaining;
 use crate::net::wifi::mediatek::{
     firmware::{
