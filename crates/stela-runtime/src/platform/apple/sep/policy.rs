@@ -115,17 +115,21 @@ impl PolicyKeys {
     /// The signature over a macOS LocalPolicy's authenticated body (the bytes
     /// the host presents as the policy's signed content).
     pub fn sign(&self, body: &[u8]) -> [u8; DIGEST_BYTES] {
-        let mut mac = Hmac::<Sha384>::new_from_slice(&*self.key).expect("HMAC accepts any key");
-        mac.update(SIGNATURE_DOMAIN);
-        mac.update(&(body.len() as u64).to_be_bytes());
-        mac.update(body);
-        mac.finalize().into_bytes().into()
+        self.authenticator(body).finalize().into_bytes().into()
     }
 
     /// Whether `signature` is this machine's SEP signature over `body`. A
     /// different machine, body or signature is rejected.
     pub fn verify(&self, body: &[u8], signature: &[u8]) -> bool {
-        signature.len() == DIGEST_BYTES && self.sign(body).as_slice() == signature
+        self.authenticator(body).verify_slice(signature).is_ok()
+    }
+
+    fn authenticator(&self, body: &[u8]) -> Hmac<Sha384> {
+        let mut mac = Hmac::<Sha384>::new_from_slice(&*self.key).expect("HMAC accepts any key");
+        mac.update(SIGNATURE_DOMAIN);
+        mac.update(&(body.len() as u64).to_be_bytes());
+        mac.update(body);
+        mac
     }
 }
 
@@ -200,6 +204,12 @@ mod tests {
         assert!(!keys.verify(b"other body", &signature));
         assert!(!keys.verify(body, &[0; DIGEST_BYTES]));
         assert!(!keys.verify(body, &signature[..DIGEST_BYTES - 1]));
+        assert!(!keys.verify(body, &[0; DIGEST_BYTES + 1]));
+        for byte in 0..DIGEST_BYTES {
+            let mut changed = signature;
+            changed[byte] ^= 1;
+            assert!(!keys.verify(body, &changed));
+        }
         // A different machine's SEP rejects this machine's policy.
         let other = PolicyKeys::derive(&Roots::provisioned([9; 32], [8; 32], 0xbeef_0001).unwrap())
             .unwrap();
