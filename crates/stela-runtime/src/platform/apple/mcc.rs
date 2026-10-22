@@ -8,9 +8,11 @@ use super::bus::{
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
 
+mod configuration;
 pub mod policy;
 mod drain;
 mod status;
+pub use configuration::Configuration;
 use policy::CacheResource;
 
 const NAME: &str = "t6000-mcc";
@@ -50,14 +52,6 @@ pub struct Observation {
     pub offset: u64,
     pub value: u64,
     pub known: u64,
-}
-
-/// Actual software configuration for a newly owned controller. Quotas start
-/// at zero; weights are a declared policy, not measured Apple reset values.
-#[derive(Debug, Clone)]
-pub struct Configuration {
-    pub dram: Vec<[u32; CHANNELS as usize]>,
-    pub weights: [u8; GROUPS as usize],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,15 +210,7 @@ impl Controller {
         configuration: Configuration,
         lifecycle: LifecycleState,
     ) -> Result<Self, &'static str> {
-        let apertures = u8::try_from(configuration.dram.len())
-            .map_err(|_| "MCC aperture count exceeds source capacity")?;
-        if configuration
-            .weights
-            .iter()
-            .any(|&weight| weight == 0 || weight > 0x7f)
-        {
-            return Err("MCC quota policy weight is outside its source field");
-        }
+        let apertures = configuration.validate()?;
         let mut observations = Vec::new();
         for aperture in 0..apertures {
             for offset in offsets() {
