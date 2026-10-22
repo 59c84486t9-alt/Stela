@@ -4,7 +4,8 @@ version.workspace = true
 edition.workspace = true
 # Original Stela code is MIT; Linux-derived controller code retains its
 # GPL/ISC notices and the Intel shared initialization also retains BSD terms.
-license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later AND BSD-3-Clause-Clear AND ISC"
+# GPU patches keep the terms of the upstream files they change.
+license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later AND BSD-3-Clause-Clear AND ISC AND Apache-2.0 WITH LLVM-exception"
 
 [lints]
 workspace = true

@@ -1,0 +1,3454 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 00:00:00 +0000
+Subject: [PATCH 4/6] intel: split device info, binding tables and sampler
+ state for Stela's native port
+
+---
+ .../drivers/crocus/crocus_binding_table.c     | 379 ++++++++++++++++
+ .../drivers/crocus/crocus_binding_table.h     | 112 +++++
+ src/gallium/drivers/crocus/crocus_context.h   |  75 +---
+ src/gallium/drivers/crocus/crocus_program.c   | 347 ---------------
+ src/gallium/drivers/crocus/meson.build        |   1 +
+ src/gallium/drivers/iris/iris_binding_table.c | 403 ++++++++++++++++++
+ src/gallium/drivers/iris/iris_binding_table.h |  56 +++
+ src/gallium/drivers/iris/iris_context.h       |  39 +-
+ src/gallium/drivers/iris/iris_program.c       | 382 -----------------
+ src/gallium/drivers/iris/iris_sampler_state.h | 172 ++++++++
+ src/gallium/drivers/iris/iris_state.c         | 154 +------
+ src/gallium/drivers/iris/meson.build          |   1 +
+ src/intel/compiler/elk/elk_vec4.h             |   1 -
+ src/intel/compiler/intel_gfx_ver_enum.h       |   2 +
+ src/intel/dev/i915/intel_device_info.c        | 104 +----
+ src/intel/dev/i915/intel_device_info.h        |   6 +
+ src/intel/dev/intel_device_info.c             | 335 +--------------
+ src/intel/dev/intel_device_info_private.h     |  12 +
+ src/intel/dev/intel_device_info_query.c       | 352 +++++++++++++++
+ src/intel/dev/intel_device_info_topology.c    | 131 ++++++
+ src/intel/dev/meson.build                     |  19 +-
+ src/intel/genxml/gen_pack_header.py           |  19 +-
+ 22 files changed, 1662 insertions(+), 1440 deletions(-)
+ create mode 100644 src/gallium/drivers/crocus/crocus_binding_table.c
+ create mode 100644 src/gallium/drivers/crocus/crocus_binding_table.h
+ create mode 100644 src/gallium/drivers/iris/iris_binding_table.c
+ create mode 100644 src/gallium/drivers/iris/iris_binding_table.h
+ create mode 100644 src/gallium/drivers/iris/iris_sampler_state.h
+ create mode 100644 src/intel/dev/intel_device_info_private.h
+ create mode 100644 src/intel/dev/intel_device_info_query.c
+ create mode 100644 src/intel/dev/intel_device_info_topology.c
+
+diff --git a/src/gallium/drivers/crocus/crocus_binding_table.c b/src/gallium/drivers/crocus/crocus_binding_table.c
+new file mode 100644
+index 0000000..d0ed526
+--- /dev/null
++++ b/src/gallium/drivers/crocus/crocus_binding_table.c
+@@ -0,0 +1,379 @@
++/*
++ * Copyright © 2017 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included
++ * in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ */
++
++#include "crocus_binding_table.h"
++#include "compiler/nir/nir_builder.h"
++#include "intel/dev/intel_device_info.h"
++#include "intel/dev/intel_debug.h"
++#include "util/u_debug.h"
++#include "util/u_math.h"
++#include <stdio.h>
++#include <string.h>
++#include "intel/compiler/elk/elk_compiler.h"
++
++static const char *surface_group_names[] = {
++   [CROCUS_SURFACE_GROUP_RENDER_TARGET]      = "render target",
++   [CROCUS_SURFACE_GROUP_RENDER_TARGET_READ] = "non-coherent render target read",
++   [CROCUS_SURFACE_GROUP_SOL]                = "streamout",
++   [CROCUS_SURFACE_GROUP_CS_WORK_GROUPS]     = "CS work groups",
++   [CROCUS_SURFACE_GROUP_TEXTURE]            = "texture",
++   [CROCUS_SURFACE_GROUP_TEXTURE_GATHER]     = "texture gather",
++   [CROCUS_SURFACE_GROUP_UBO]                = "ubo",
++   [CROCUS_SURFACE_GROUP_SSBO]               = "ssbo",
++   [CROCUS_SURFACE_GROUP_IMAGE]              = "image",
++};
++
++static void
++crocus_print_binding_table(FILE *fp, const char *name,
++                           const struct crocus_binding_table *bt)
++{
++   STATIC_ASSERT(ARRAY_SIZE(surface_group_names) == CROCUS_SURFACE_GROUP_COUNT);
++
++   uint32_t total = 0;
++   uint32_t compacted = 0;
++
++   for (int i = 0; i < CROCUS_SURFACE_GROUP_COUNT; i++) {
++      uint32_t size = bt->sizes[i];
++      total += size;
++      if (size)
++         compacted += util_bitcount64(bt->used_mask[i]);
++   }
++
++   if (total == 0) {
++      fprintf(fp, "Binding table for %s is empty\n\n", name);
++      return;
++   }
++
++   if (total != compacted) {
++      fprintf(fp, "Binding table for %s "
++              "(compacted to %u entries from %u entries)\n",
++              name, compacted, total);
++   } else {
++      fprintf(fp, "Binding table for %s (%u entries)\n", name, total);
++   }
++
++   uint32_t entry = 0;
++   for (int i = 0; i < CROCUS_SURFACE_GROUP_COUNT; i++) {
++      uint64_t mask = bt->used_mask[i];
++      while (mask) {
++         int index = u_bit_scan64(&mask);
++         fprintf(fp, "  [%u] %s #%d\n", entry++, surface_group_names[i], index);
++      }
++   }
++   fprintf(fp, "\n");
++}
++
++enum {
++   /* Max elements in a surface group. */
++   SURFACE_GROUP_MAX_ELEMENTS = 64,
++};
++
++static void
++rewrite_src_with_bti(nir_builder *b, struct crocus_binding_table *bt,
++                     nir_instr *instr, nir_src *src,
++                     enum crocus_surface_group group)
++{
++   assert(bt->sizes[group] > 0);
++
++   b->cursor = nir_before_instr(instr);
++   nir_def *bti;
++   if (nir_src_is_const(*src)) {
++      uint32_t index = nir_src_as_uint(*src);
++      bti = nir_imm_intN_t(b, crocus_group_index_to_bti(bt, group, index),
++                           src->ssa->bit_size);
++   } else {
++      /* Indirect usage makes all the surfaces of the group to be available,
++       * so we can just add the base.
++       */
++      assert(bt->used_mask[group] == BITFIELD64_MASK(bt->sizes[group]));
++      bti = nir_iadd_imm(b, src->ssa, bt->offsets[group]);
++   }
++   nir_src_rewrite(src, bti);
++}
++
++static void
++mark_used_with_src(struct crocus_binding_table *bt, nir_src *src,
++                   enum crocus_surface_group group)
++{
++   assert(bt->sizes[group] > 0);
++
++   if (nir_src_is_const(*src)) {
++      uint64_t index = nir_src_as_uint(*src);
++      assert(index < bt->sizes[group]);
++      bt->used_mask[group] |= 1ull << index;
++   } else {
++      /* There's an indirect usage, we need all the surfaces. */
++      bt->used_mask[group] = BITFIELD64_MASK(bt->sizes[group]);
++   }
++}
++
++static bool
++skip_compacting_binding_tables(void)
++{
++   static int skip = -1;
++   if (skip < 0)
++      skip = debug_get_bool_option("INTEL_DISABLE_COMPACT_BINDING_TABLE", false);
++   return skip;
++}
++
++/**
++ * Set up the binding table indices and apply to the shader.
++ */
++void
++crocus_setup_binding_table(const struct intel_device_info *devinfo,
++                           struct nir_shader *nir,
++                           struct crocus_binding_table *bt,
++                           unsigned num_render_targets,
++                           unsigned num_system_values,
++                           unsigned num_cbufs,
++                           const struct elk_sampler_prog_key_data *key)
++{
++   const struct shader_info *info = &nir->info;
++
++   memset(bt, 0, sizeof(*bt));
++
++   /* Set the sizes for each surface group.  For some groups, we already know
++    * upfront how many will be used, so mark them.
++    */
++   if (info->stage == MESA_SHADER_FRAGMENT) {
++      bt->sizes[CROCUS_SURFACE_GROUP_RENDER_TARGET] = num_render_targets;
++      /* All render targets used. */
++      bt->used_mask[CROCUS_SURFACE_GROUP_RENDER_TARGET] =
++         BITFIELD64_MASK(num_render_targets);
++
++      /* Setup render target read surface group in order to support non-coherent
++       * framebuffer fetch on Gfx7
++       */
++      if (devinfo->ver >= 6 && info->outputs_read) {
++         bt->sizes[CROCUS_SURFACE_GROUP_RENDER_TARGET_READ] = num_render_targets;
++         bt->used_mask[CROCUS_SURFACE_GROUP_RENDER_TARGET_READ] =
++            BITFIELD64_MASK(num_render_targets);
++      }
++   } else if (info->stage == MESA_SHADER_COMPUTE) {
++      bt->sizes[CROCUS_SURFACE_GROUP_CS_WORK_GROUPS] = 1;
++   } else if (info->stage == MESA_SHADER_GEOMETRY) {
++      /* In gfx6 we reserve the first ELK_MAX_SOL_BINDINGS entries for transform
++       * feedback surfaces.
++       */
++      if (devinfo->ver == 6) {
++         bt->sizes[CROCUS_SURFACE_GROUP_SOL] = ELK_MAX_SOL_BINDINGS;
++         bt->used_mask[CROCUS_SURFACE_GROUP_SOL] = (uint64_t)-1;
++      }
++   }
++
++   bt->sizes[CROCUS_SURFACE_GROUP_TEXTURE] = BITSET_LAST_BIT(info->textures_used);
++   bt->used_mask[CROCUS_SURFACE_GROUP_TEXTURE] = info->textures_used[0];
++
++   if (info->uses_texture_gather && devinfo->ver < 8) {
++      bt->sizes[CROCUS_SURFACE_GROUP_TEXTURE_GATHER] = BITSET_LAST_BIT(info->textures_used);
++      bt->used_mask[CROCUS_SURFACE_GROUP_TEXTURE_GATHER] = info->textures_used[0];
++   }
++
++   bt->sizes[CROCUS_SURFACE_GROUP_IMAGE] = info->num_images;
++
++   /* Allocate an extra slot in the UBO section for NIR constants.
++    * Binding table compaction will remove it if unnecessary.
++    *
++    * We don't include them in crocus_compiled_shader::num_cbufs because
++    * they are uploaded separately from shs->constbufs[], but from a shader
++    * point of view, they're another UBO (at the end of the section).
++    */
++   bt->sizes[CROCUS_SURFACE_GROUP_UBO] = num_cbufs + 1;
++
++   bt->sizes[CROCUS_SURFACE_GROUP_SSBO] = info->num_ssbos;
++
++   for (int i = 0; i < CROCUS_SURFACE_GROUP_COUNT; i++)
++      assert(bt->sizes[i] <= SURFACE_GROUP_MAX_ELEMENTS);
++
++   /* Mark surfaces used for the cases we don't have the information available
++    * upfront.
++    */
++   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
++   nir_foreach_block (block, impl) {
++      nir_foreach_instr (instr, block) {
++         if (instr->type != nir_instr_type_intrinsic)
++            continue;
++
++         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
++         switch (intrin->intrinsic) {
++         case nir_intrinsic_load_num_workgroups:
++            bt->used_mask[CROCUS_SURFACE_GROUP_CS_WORK_GROUPS] = 1;
++            break;
++
++         case nir_intrinsic_load_output:
++            if (devinfo->ver >= 6) {
++               mark_used_with_src(bt, &intrin->src[0],
++                                  CROCUS_SURFACE_GROUP_RENDER_TARGET_READ);
++            }
++            break;
++
++         case nir_intrinsic_image_size:
++         case nir_intrinsic_image_load:
++         case nir_intrinsic_image_store:
++         case nir_intrinsic_image_atomic:
++         case nir_intrinsic_image_atomic_swap:
++         case nir_intrinsic_image_load_raw_intel:
++         case nir_intrinsic_image_store_raw_intel:
++            mark_used_with_src(bt, &intrin->src[0], CROCUS_SURFACE_GROUP_IMAGE);
++            break;
++
++         case nir_intrinsic_load_ubo:
++            mark_used_with_src(bt, &intrin->src[0], CROCUS_SURFACE_GROUP_UBO);
++            break;
++
++         case nir_intrinsic_store_ssbo:
++            mark_used_with_src(bt, &intrin->src[1], CROCUS_SURFACE_GROUP_SSBO);
++            break;
++
++         case nir_intrinsic_get_ssbo_size:
++         case nir_intrinsic_ssbo_atomic:
++         case nir_intrinsic_ssbo_atomic_swap:
++         case nir_intrinsic_load_ssbo:
++            mark_used_with_src(bt, &intrin->src[0], CROCUS_SURFACE_GROUP_SSBO);
++            break;
++
++         default:
++            break;
++         }
++      }
++   }
++
++   /* When disable we just mark everything as used. */
++   if (unlikely(skip_compacting_binding_tables())) {
++      for (int i = 0; i < CROCUS_SURFACE_GROUP_COUNT; i++)
++         bt->used_mask[i] = BITFIELD64_MASK(bt->sizes[i]);
++   }
++
++   /* Calculate the offsets and the binding table size based on the used
++    * surfaces.  After this point, the functions to go between "group indices"
++    * and binding table indices can be used.
++    */
++   uint32_t next = 0;
++   for (int i = 0; i < CROCUS_SURFACE_GROUP_COUNT; i++) {
++      if (bt->used_mask[i] != 0) {
++         bt->offsets[i] = next;
++         next += util_bitcount64(bt->used_mask[i]);
++      }
++   }
++   bt->size_bytes = next * 4;
++
++   if (INTEL_DEBUG(DEBUG_BT)) {
++      crocus_print_binding_table(stderr, mesa_shader_stage_name(info->stage), bt);
++   }
++
++   /* Apply the binding table indices.  The backend compiler is not expected
++    * to change those, as we haven't set any of the *_start entries in elk
++    * binding_table.
++    */
++   nir_builder b = nir_builder_create(impl);
++
++   nir_foreach_block (block, impl) {
++      nir_foreach_instr (instr, block) {
++         if (instr->type == nir_instr_type_tex) {
++            nir_tex_instr *tex = nir_instr_as_tex(instr);
++            bool is_gather = devinfo->ver < 8 && tex->op == nir_texop_tg4;
++
++            /* rewrite the tg4 component from green to blue before replacing the
++               texture index */
++            if (devinfo->verx10 == 70) {
++               if (tex->component == 1)
++                  if (key->gather_channel_quirk_mask & (1 << tex->texture_index))
++                     tex->component = 2;
++            }
++
++            if (is_gather && devinfo->ver == 6 && key->gfx6_gather_wa[tex->texture_index]) {
++               b.cursor = nir_after_instr(instr);
++               enum elk_gfx6_gather_sampler_wa wa = key->gfx6_gather_wa[tex->texture_index];
++               int width = (wa & ELK_WA_8BIT) ? 8 : 16;
++
++               nir_def *val = nir_fmul_imm(&b, &tex->def, (1 << width) - 1);
++               val = nir_f2u32(&b, val);
++               if (wa & ELK_WA_SIGN) {
++                  val = nir_ishl_imm(&b, val, 32 - width);
++                  val = nir_ishr_imm(&b, val, 32 - width);
++               }
++               nir_def_rewrite_uses_after(&tex->def, val);
++            }
++
++            tex->texture_index =
++               crocus_group_index_to_bti(bt, is_gather ? CROCUS_SURFACE_GROUP_TEXTURE_GATHER : CROCUS_SURFACE_GROUP_TEXTURE,
++                                         tex->texture_index);
++            continue;
++         }
++
++         if (instr->type != nir_instr_type_intrinsic)
++            continue;
++
++         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
++         switch (intrin->intrinsic) {
++         case nir_intrinsic_image_size:
++         case nir_intrinsic_image_load:
++         case nir_intrinsic_image_store:
++         case nir_intrinsic_image_atomic:
++         case nir_intrinsic_image_atomic_swap:
++         case nir_intrinsic_image_load_raw_intel:
++         case nir_intrinsic_image_store_raw_intel:
++            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
++                                 CROCUS_SURFACE_GROUP_IMAGE);
++            break;
++
++         case nir_intrinsic_load_ubo:
++            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
++                                 CROCUS_SURFACE_GROUP_UBO);
++            break;
++
++         case nir_intrinsic_store_ssbo:
++            rewrite_src_with_bti(&b, bt, instr, &intrin->src[1],
++                                 CROCUS_SURFACE_GROUP_SSBO);
++            break;
++
++         case nir_intrinsic_load_output:
++            if (devinfo->ver >= 6) {
++               /* We're using a BTI as the load_output offset here which
++                * breaks newer NIR assumptions.
++                */
++               nir_io_semantics io_sem = nir_intrinsic_io_semantics(intrin);
++               io_sem.no_validate = true;
++               nir_intrinsic_set_io_semantics(intrin, io_sem);
++
++               rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
++                                    CROCUS_SURFACE_GROUP_RENDER_TARGET_READ);
++            }
++            break;
++
++         case nir_intrinsic_get_ssbo_size:
++         case nir_intrinsic_ssbo_atomic:
++         case nir_intrinsic_ssbo_atomic_swap:
++         case nir_intrinsic_load_ssbo:
++            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
++                                 CROCUS_SURFACE_GROUP_SSBO);
++            break;
++
++         default:
++            break;
++         }
++      }
++   }
++
++   nir_validate_shader(nir, "after crocus_setup_binding_table");
++}
++
+diff --git a/src/gallium/drivers/crocus/crocus_binding_table.h b/src/gallium/drivers/crocus/crocus_binding_table.h
+new file mode 100644
+index 0000000..e36c118
+--- /dev/null
++++ b/src/gallium/drivers/crocus/crocus_binding_table.h
+@@ -0,0 +1,112 @@
++/*
++ * Copyright © 2017 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * on the rights to use, copy, modify, merge, publish, distribute, sub
++ * license, and/or sell copies of the Software, and to permit persons to whom
++ * the Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
++ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
++ * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
++ * USE OR OTHER DEALINGS IN THE SOFTWARE.
++ */
++#ifndef CROCUS_BINDING_TABLE_H
++#define CROCUS_BINDING_TABLE_H
++#include <stdbool.h>
++#include <stdint.h>
++#include <assert.h>
++#include "util/bitscan.h"
++
++enum crocus_surface_group {
++   CROCUS_SURFACE_GROUP_RENDER_TARGET,
++   CROCUS_SURFACE_GROUP_RENDER_TARGET_READ,
++   CROCUS_SURFACE_GROUP_SOL,
++   CROCUS_SURFACE_GROUP_CS_WORK_GROUPS,
++   CROCUS_SURFACE_GROUP_TEXTURE,
++   CROCUS_SURFACE_GROUP_TEXTURE_GATHER,
++   CROCUS_SURFACE_GROUP_IMAGE,
++   CROCUS_SURFACE_GROUP_UBO,
++   CROCUS_SURFACE_GROUP_SSBO,
++
++   CROCUS_SURFACE_GROUP_COUNT,
++};
++
++enum {
++   /* Invalid value for a binding table index. */
++   CROCUS_SURFACE_NOT_USED = 0xa0a0a0a0,
++};
++
++struct crocus_binding_table {
++   uint32_t size_bytes;
++
++   /** Number of surfaces in each group, before compacting. */
++   uint32_t sizes[CROCUS_SURFACE_GROUP_COUNT];
++
++   /** Initial offset of each group. */
++   uint32_t offsets[CROCUS_SURFACE_GROUP_COUNT];
++
++   /** Mask of surfaces used in each group. */
++   uint64_t used_mask[CROCUS_SURFACE_GROUP_COUNT];
++};
++
++/**
++ * Map a <group, index> pair to a binding table index.
++ *
++ * For example: <UBO, 5> => binding table index 12
++ */
++static inline uint32_t crocus_group_index_to_bti(const struct crocus_binding_table *bt,
++                                                 enum crocus_surface_group group,
++                                                 uint32_t index)
++{
++   assert(index < bt->sizes[group]);
++   uint64_t mask = bt->used_mask[group];
++   uint64_t bit = 1ull << index;
++   if (bit & mask) {
++      return bt->offsets[group] + util_bitcount64((bit - 1) & mask);
++   } else {
++      return CROCUS_SURFACE_NOT_USED;
++   }
++}
++
++/**
++ * Map a binding table index back to a <group, index> pair.
++ *
++ * For example: binding table index 12 => <UBO, 5>
++ */
++static inline uint32_t
++crocus_bti_to_group_index(const struct crocus_binding_table *bt,
++                          enum crocus_surface_group group, uint32_t bti)
++{
++   uint64_t used_mask = bt->used_mask[group];
++   assert(bti >= bt->offsets[group]);
++
++   uint32_t c = bti - bt->offsets[group];
++   while (used_mask) {
++      int i = u_bit_scan64(&used_mask);
++      if (c == 0)
++         return i;
++      c--;
++   }
++
++   return CROCUS_SURFACE_NOT_USED;
++}
++
++
++struct intel_device_info;
++struct nir_shader;
++struct elk_sampler_prog_key_data;
++void crocus_setup_binding_table(const struct intel_device_info *, struct nir_shader *,
++                                struct crocus_binding_table *, unsigned, unsigned, unsigned,
++                                const struct elk_sampler_prog_key_data *);
++
++#endif
+diff --git a/src/gallium/drivers/crocus/crocus_context.h b/src/gallium/drivers/crocus/crocus_context.h
+index df8f43c..2017772 100644
+--- a/src/gallium/drivers/crocus/crocus_context.h
++++ b/src/gallium/drivers/crocus/crocus_context.h
+@@ -328,37 +328,7 @@ struct crocus_uncompiled_shader {
+    struct crocus_state_ref const_data_state;
+ };
+ 
+-enum crocus_surface_group {
+-   CROCUS_SURFACE_GROUP_RENDER_TARGET,
+-   CROCUS_SURFACE_GROUP_RENDER_TARGET_READ,
+-   CROCUS_SURFACE_GROUP_SOL,
+-   CROCUS_SURFACE_GROUP_CS_WORK_GROUPS,
+-   CROCUS_SURFACE_GROUP_TEXTURE,
+-   CROCUS_SURFACE_GROUP_TEXTURE_GATHER,
+-   CROCUS_SURFACE_GROUP_IMAGE,
+-   CROCUS_SURFACE_GROUP_UBO,
+-   CROCUS_SURFACE_GROUP_SSBO,
+-
+-   CROCUS_SURFACE_GROUP_COUNT,
+-};
+-
+-enum {
+-   /* Invalid value for a binding table index. */
+-   CROCUS_SURFACE_NOT_USED = 0xa0a0a0a0,
+-};
+-
+-struct crocus_binding_table {
+-   uint32_t size_bytes;
+-
+-   /** Number of surfaces in each group, before compacting. */
+-   uint32_t sizes[CROCUS_SURFACE_GROUP_COUNT];
+-
+-   /** Initial offset of each group. */
+-   uint32_t offsets[CROCUS_SURFACE_GROUP_COUNT];
+-
+-   /** Mask of surfaces used in each group. */
+-   uint64_t used_mask[CROCUS_SURFACE_GROUP_COUNT];
+-};
++#include "crocus_binding_table.h"
+ 
+ /**
+  * A compiled shader variant, containing a pointer to the GPU assembly,
+@@ -846,49 +816,6 @@ const struct shader_info *crocus_get_shader_info(const struct crocus_context *ic
+ struct crocus_bo *crocus_get_scratch_space(struct crocus_context *ice,
+                                            unsigned per_thread_scratch,
+                                            mesa_shader_stage stage);
+-/**
+- * Map a <group, index> pair to a binding table index.
+- *
+- * For example: <UBO, 5> => binding table index 12
+- */
+-static inline uint32_t crocus_group_index_to_bti(const struct crocus_binding_table *bt,
+-                                                 enum crocus_surface_group group,
+-                                                 uint32_t index)
+-{
+-   assert(index < bt->sizes[group]);
+-   uint64_t mask = bt->used_mask[group];
+-   uint64_t bit = 1ull << index;
+-   if (bit & mask) {
+-      return bt->offsets[group] + util_bitcount64((bit - 1) & mask);
+-   } else {
+-      return CROCUS_SURFACE_NOT_USED;
+-   }
+-}
+-
+-/**
+- * Map a binding table index back to a <group, index> pair.
+- *
+- * For example: binding table index 12 => <UBO, 5>
+- */
+-static inline uint32_t
+-crocus_bti_to_group_index(const struct crocus_binding_table *bt,
+-                          enum crocus_surface_group group, uint32_t bti)
+-{
+-   uint64_t used_mask = bt->used_mask[group];
+-   assert(bti >= bt->offsets[group]);
+-
+-   uint32_t c = bti - bt->offsets[group];
+-   while (used_mask) {
+-      int i = u_bit_scan64(&used_mask);
+-      if (c == 0)
+-         return i;
+-      c--;
+-   }
+-
+-   return CROCUS_SURFACE_NOT_USED;
+-}
+-
+-
+ /* crocus_disk_cache.c */
+ 
+ void crocus_disk_cache_store(struct disk_cache *cache,
+diff --git a/src/gallium/drivers/crocus/crocus_program.c b/src/gallium/drivers/crocus/crocus_program.c
+index b6882d9..0b82053 100644
+--- a/src/gallium/drivers/crocus/crocus_program.c
++++ b/src/gallium/drivers/crocus/crocus_program.c
+@@ -704,353 +704,6 @@ crocus_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
+    *out_num_cbufs = num_cbufs;
+ }
+ 
+-static const char *surface_group_names[] = {
+-   [CROCUS_SURFACE_GROUP_RENDER_TARGET]      = "render target",
+-   [CROCUS_SURFACE_GROUP_RENDER_TARGET_READ] = "non-coherent render target read",
+-   [CROCUS_SURFACE_GROUP_SOL]                = "streamout",
+-   [CROCUS_SURFACE_GROUP_CS_WORK_GROUPS]     = "CS work groups",
+-   [CROCUS_SURFACE_GROUP_TEXTURE]            = "texture",
+-   [CROCUS_SURFACE_GROUP_TEXTURE_GATHER]     = "texture gather",
+-   [CROCUS_SURFACE_GROUP_UBO]                = "ubo",
+-   [CROCUS_SURFACE_GROUP_SSBO]               = "ssbo",
+-   [CROCUS_SURFACE_GROUP_IMAGE]              = "image",
+-};
+-
+-static void
+-crocus_print_binding_table(FILE *fp, const char *name,
+-                           const struct crocus_binding_table *bt)
+-{
+-   STATIC_ASSERT(ARRAY_SIZE(surface_group_names) == CROCUS_SURFACE_GROUP_COUNT);
+-
+-   uint32_t total = 0;
+-   uint32_t compacted = 0;
+-
+-   for (int i = 0; i < CROCUS_SURFACE_GROUP_COUNT; i++) {
+-      uint32_t size = bt->sizes[i];
+-      total += size;
+-      if (size)
+-         compacted += util_bitcount64(bt->used_mask[i]);
+-   }
+-
+-   if (total == 0) {
+-      fprintf(fp, "Binding table for %s is empty\n\n", name);
+-      return;
+-   }
+-
+-   if (total != compacted) {
+-      fprintf(fp, "Binding table for %s "
+-              "(compacted to %u entries from %u entries)\n",
+-              name, compacted, total);
+-   } else {
+-      fprintf(fp, "Binding table for %s (%u entries)\n", name, total);
+-   }
+-
+-   uint32_t entry = 0;
+-   for (int i = 0; i < CROCUS_SURFACE_GROUP_COUNT; i++) {
+-      uint64_t mask = bt->used_mask[i];
+-      while (mask) {
+-         int index = u_bit_scan64(&mask);
+-         fprintf(fp, "  [%u] %s #%d\n", entry++, surface_group_names[i], index);
+-      }
+-   }
+-   fprintf(fp, "\n");
+-}
+-
+-enum {
+-   /* Max elements in a surface group. */
+-   SURFACE_GROUP_MAX_ELEMENTS = 64,
+-};
+-
+-static void
+-rewrite_src_with_bti(nir_builder *b, struct crocus_binding_table *bt,
+-                     nir_instr *instr, nir_src *src,
+-                     enum crocus_surface_group group)
+-{
+-   assert(bt->sizes[group] > 0);
+-
+-   b->cursor = nir_before_instr(instr);
+-   nir_def *bti;
+-   if (nir_src_is_const(*src)) {
+-      uint32_t index = nir_src_as_uint(*src);
+-      bti = nir_imm_intN_t(b, crocus_group_index_to_bti(bt, group, index),
+-                           src->ssa->bit_size);
+-   } else {
+-      /* Indirect usage makes all the surfaces of the group to be available,
+-       * so we can just add the base.
+-       */
+-      assert(bt->used_mask[group] == BITFIELD64_MASK(bt->sizes[group]));
+-      bti = nir_iadd_imm(b, src->ssa, bt->offsets[group]);
+-   }
+-   nir_src_rewrite(src, bti);
+-}
+-
+-static void
+-mark_used_with_src(struct crocus_binding_table *bt, nir_src *src,
+-                   enum crocus_surface_group group)
+-{
+-   assert(bt->sizes[group] > 0);
+-
+-   if (nir_src_is_const(*src)) {
+-      uint64_t index = nir_src_as_uint(*src);
+-      assert(index < bt->sizes[group]);
+-      bt->used_mask[group] |= 1ull << index;
+-   } else {
+-      /* There's an indirect usage, we need all the surfaces. */
+-      bt->used_mask[group] = BITFIELD64_MASK(bt->sizes[group]);
+-   }
+-}
+-
+-static bool
+-skip_compacting_binding_tables(void)
+-{
+-   static int skip = -1;
+-   if (skip < 0)
+-      skip = debug_get_bool_option("INTEL_DISABLE_COMPACT_BINDING_TABLE", false);
+-   return skip;
+-}
+-
+-/**
+- * Set up the binding table indices and apply to the shader.
+- */
+-static void
+-crocus_setup_binding_table(const struct intel_device_info *devinfo,
+-                           struct nir_shader *nir,
+-                           struct crocus_binding_table *bt,
+-                           unsigned num_render_targets,
+-                           unsigned num_system_values,
+-                           unsigned num_cbufs,
+-                           const struct elk_sampler_prog_key_data *key)
+-{
+-   const struct shader_info *info = &nir->info;
+-
+-   memset(bt, 0, sizeof(*bt));
+-
+-   /* Set the sizes for each surface group.  For some groups, we already know
+-    * upfront how many will be used, so mark them.
+-    */
+-   if (info->stage == MESA_SHADER_FRAGMENT) {
+-      bt->sizes[CROCUS_SURFACE_GROUP_RENDER_TARGET] = num_render_targets;
+-      /* All render targets used. */
+-      bt->used_mask[CROCUS_SURFACE_GROUP_RENDER_TARGET] =
+-         BITFIELD64_MASK(num_render_targets);
+-
+-      /* Setup render target read surface group in order to support non-coherent
+-       * framebuffer fetch on Gfx7
+-       */
+-      if (devinfo->ver >= 6 && info->outputs_read) {
+-         bt->sizes[CROCUS_SURFACE_GROUP_RENDER_TARGET_READ] = num_render_targets;
+-         bt->used_mask[CROCUS_SURFACE_GROUP_RENDER_TARGET_READ] =
+-            BITFIELD64_MASK(num_render_targets);
+-      }
+-   } else if (info->stage == MESA_SHADER_COMPUTE) {
+-      bt->sizes[CROCUS_SURFACE_GROUP_CS_WORK_GROUPS] = 1;
+-   } else if (info->stage == MESA_SHADER_GEOMETRY) {
+-      /* In gfx6 we reserve the first ELK_MAX_SOL_BINDINGS entries for transform
+-       * feedback surfaces.
+-       */
+-      if (devinfo->ver == 6) {
+-         bt->sizes[CROCUS_SURFACE_GROUP_SOL] = ELK_MAX_SOL_BINDINGS;
+-         bt->used_mask[CROCUS_SURFACE_GROUP_SOL] = (uint64_t)-1;
+-      }
+-   }
+-
+-   bt->sizes[CROCUS_SURFACE_GROUP_TEXTURE] = BITSET_LAST_BIT(info->textures_used);
+-   bt->used_mask[CROCUS_SURFACE_GROUP_TEXTURE] = info->textures_used[0];
+-
+-   if (info->uses_texture_gather && devinfo->ver < 8) {
+-      bt->sizes[CROCUS_SURFACE_GROUP_TEXTURE_GATHER] = BITSET_LAST_BIT(info->textures_used);
+-      bt->used_mask[CROCUS_SURFACE_GROUP_TEXTURE_GATHER] = info->textures_used[0];
+-   }
+-
+-   bt->sizes[CROCUS_SURFACE_GROUP_IMAGE] = info->num_images;
+-
+-   /* Allocate an extra slot in the UBO section for NIR constants.
+-    * Binding table compaction will remove it if unnecessary.
+-    *
+-    * We don't include them in crocus_compiled_shader::num_cbufs because
+-    * they are uploaded separately from shs->constbufs[], but from a shader
+-    * point of view, they're another UBO (at the end of the section).
+-    */
+-   bt->sizes[CROCUS_SURFACE_GROUP_UBO] = num_cbufs + 1;
+-
+-   bt->sizes[CROCUS_SURFACE_GROUP_SSBO] = info->num_ssbos;
+-
+-   for (int i = 0; i < CROCUS_SURFACE_GROUP_COUNT; i++)
+-      assert(bt->sizes[i] <= SURFACE_GROUP_MAX_ELEMENTS);
+-
+-   /* Mark surfaces used for the cases we don't have the information available
+-    * upfront.
+-    */
+-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+-   nir_foreach_block (block, impl) {
+-      nir_foreach_instr (instr, block) {
+-         if (instr->type != nir_instr_type_intrinsic)
+-            continue;
+-
+-         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+-         switch (intrin->intrinsic) {
+-         case nir_intrinsic_load_num_workgroups:
+-            bt->used_mask[CROCUS_SURFACE_GROUP_CS_WORK_GROUPS] = 1;
+-            break;
+-
+-         case nir_intrinsic_load_output:
+-            if (devinfo->ver >= 6) {
+-               mark_used_with_src(bt, &intrin->src[0],
+-                                  CROCUS_SURFACE_GROUP_RENDER_TARGET_READ);
+-            }
+-            break;
+-
+-         case nir_intrinsic_image_size:
+-         case nir_intrinsic_image_load:
+-         case nir_intrinsic_image_store:
+-         case nir_intrinsic_image_atomic:
+-         case nir_intrinsic_image_atomic_swap:
+-         case nir_intrinsic_image_load_raw_intel:
+-         case nir_intrinsic_image_store_raw_intel:
+-            mark_used_with_src(bt, &intrin->src[0], CROCUS_SURFACE_GROUP_IMAGE);
+-            break;
+-
+-         case nir_intrinsic_load_ubo:
+-            mark_used_with_src(bt, &intrin->src[0], CROCUS_SURFACE_GROUP_UBO);
+-            break;
+-
+-         case nir_intrinsic_store_ssbo:
+-            mark_used_with_src(bt, &intrin->src[1], CROCUS_SURFACE_GROUP_SSBO);
+-            break;
+-
+-         case nir_intrinsic_get_ssbo_size:
+-         case nir_intrinsic_ssbo_atomic:
+-         case nir_intrinsic_ssbo_atomic_swap:
+-         case nir_intrinsic_load_ssbo:
+-            mark_used_with_src(bt, &intrin->src[0], CROCUS_SURFACE_GROUP_SSBO);
+-            break;
+-
+-         default:
+-            break;
+-         }
+-      }
+-   }
+-
+-   /* When disable we just mark everything as used. */
+-   if (unlikely(skip_compacting_binding_tables())) {
+-      for (int i = 0; i < CROCUS_SURFACE_GROUP_COUNT; i++)
+-         bt->used_mask[i] = BITFIELD64_MASK(bt->sizes[i]);
+-   }
+-
+-   /* Calculate the offsets and the binding table size based on the used
+-    * surfaces.  After this point, the functions to go between "group indices"
+-    * and binding table indices can be used.
+-    */
+-   uint32_t next = 0;
+-   for (int i = 0; i < CROCUS_SURFACE_GROUP_COUNT; i++) {
+-      if (bt->used_mask[i] != 0) {
+-         bt->offsets[i] = next;
+-         next += util_bitcount64(bt->used_mask[i]);
+-      }
+-   }
+-   bt->size_bytes = next * 4;
+-
+-   if (INTEL_DEBUG(DEBUG_BT)) {
+-      crocus_print_binding_table(stderr, mesa_shader_stage_name(info->stage), bt);
+-   }
+-
+-   /* Apply the binding table indices.  The backend compiler is not expected
+-    * to change those, as we haven't set any of the *_start entries in elk
+-    * binding_table.
+-    */
+-   nir_builder b = nir_builder_create(impl);
+-
+-   nir_foreach_block (block, impl) {
+-      nir_foreach_instr (instr, block) {
+-         if (instr->type == nir_instr_type_tex) {
+-            nir_tex_instr *tex = nir_instr_as_tex(instr);
+-            bool is_gather = devinfo->ver < 8 && tex->op == nir_texop_tg4;
+-
+-            /* rewrite the tg4 component from green to blue before replacing the
+-               texture index */
+-            if (devinfo->verx10 == 70) {
+-               if (tex->component == 1)
+-                  if (key->gather_channel_quirk_mask & (1 << tex->texture_index))
+-                     tex->component = 2;
+-            }
+-
+-            if (is_gather && devinfo->ver == 6 && key->gfx6_gather_wa[tex->texture_index]) {
+-               b.cursor = nir_after_instr(instr);
+-               enum elk_gfx6_gather_sampler_wa wa = key->gfx6_gather_wa[tex->texture_index];
+-               int width = (wa & ELK_WA_8BIT) ? 8 : 16;
+-
+-               nir_def *val = nir_fmul_imm(&b, &tex->def, (1 << width) - 1);
+-               val = nir_f2u32(&b, val);
+-               if (wa & ELK_WA_SIGN) {
+-                  val = nir_ishl_imm(&b, val, 32 - width);
+-                  val = nir_ishr_imm(&b, val, 32 - width);
+-               }
+-               nir_def_rewrite_uses_after(&tex->def, val);
+-            }
+-
+-            tex->texture_index =
+-               crocus_group_index_to_bti(bt, is_gather ? CROCUS_SURFACE_GROUP_TEXTURE_GATHER : CROCUS_SURFACE_GROUP_TEXTURE,
+-                                         tex->texture_index);
+-            continue;
+-         }
+-
+-         if (instr->type != nir_instr_type_intrinsic)
+-            continue;
+-
+-         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+-         switch (intrin->intrinsic) {
+-         case nir_intrinsic_image_size:
+-         case nir_intrinsic_image_load:
+-         case nir_intrinsic_image_store:
+-         case nir_intrinsic_image_atomic:
+-         case nir_intrinsic_image_atomic_swap:
+-         case nir_intrinsic_image_load_raw_intel:
+-         case nir_intrinsic_image_store_raw_intel:
+-            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+-                                 CROCUS_SURFACE_GROUP_IMAGE);
+-            break;
+-
+-         case nir_intrinsic_load_ubo:
+-            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+-                                 CROCUS_SURFACE_GROUP_UBO);
+-            break;
+-
+-         case nir_intrinsic_store_ssbo:
+-            rewrite_src_with_bti(&b, bt, instr, &intrin->src[1],
+-                                 CROCUS_SURFACE_GROUP_SSBO);
+-            break;
+-
+-         case nir_intrinsic_load_output:
+-            if (devinfo->ver >= 6) {
+-               /* We're using a BTI as the load_output offset here which
+-                * breaks newer NIR assumptions.
+-                */
+-               nir_io_semantics io_sem = nir_intrinsic_io_semantics(intrin);
+-               io_sem.no_validate = true;
+-               nir_intrinsic_set_io_semantics(intrin, io_sem);
+-
+-               rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+-                                    CROCUS_SURFACE_GROUP_RENDER_TARGET_READ);
+-            }
+-            break;
+-
+-         case nir_intrinsic_get_ssbo_size:
+-         case nir_intrinsic_ssbo_atomic:
+-         case nir_intrinsic_ssbo_atomic_swap:
+-         case nir_intrinsic_load_ssbo:
+-            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+-                                 CROCUS_SURFACE_GROUP_SSBO);
+-            break;
+-
+-         default:
+-            break;
+-         }
+-      }
+-   }
+-
+-   nir_validate_shader(nir, "after crocus_setup_binding_table");
+-}
+-
+ static void
+ crocus_debug_recompile(struct crocus_context *ice,
+                        struct shader_info *info,
+diff --git a/src/gallium/drivers/crocus/meson.build b/src/gallium/drivers/crocus/meson.build
+index f6928fc..ebe6be5 100644
+--- a/src/gallium/drivers/crocus/meson.build
++++ b/src/gallium/drivers/crocus/meson.build
+@@ -6,6 +6,7 @@ files_libcrocus = files(
+   'driinfo_crocus.h',
+   'crocus_batch.c',
+   'crocus_batch.h',
++  'crocus_binding_table.c',
+   'crocus_blit.c',
+   'crocus_bufmgr.c',
+   'crocus_bufmgr.h',
+diff --git a/src/gallium/drivers/iris/iris_binding_table.c b/src/gallium/drivers/iris/iris_binding_table.c
+new file mode 100644
+index 0000000..ac022f2
+--- /dev/null
++++ b/src/gallium/drivers/iris/iris_binding_table.c
+@@ -0,0 +1,403 @@
++/*
++ * Copyright © 2017 Intel Corporation
++ * SPDX-License-Identifier: MIT
++ *
++ * @file iris_program.c
++ *
++ * This file contains the driver interface for compiling shaders.
++ *
++ * See iris_program_cache.c for the in-memory program cache where the
++ * compiled shaders are stored.
++ */
++
++#include "iris_binding_table.h"
++#include "compiler/nir/nir_builder.h"
++#include "intel/dev/intel_device_info.h"
++#include "intel/dev/intel_debug.h"
++#include "util/u_debug.h"
++#include "util/u_math.h"
++#include <stdio.h>
++#include <string.h>
++
++static const char *surface_group_names[] = {
++   [IRIS_SURFACE_GROUP_RENDER_TARGET]      = "render target",
++   [IRIS_SURFACE_GROUP_RENDER_TARGET_READ] = "non-coherent render target read",
++   [IRIS_SURFACE_GROUP_CS_WORK_GROUPS]     = "CS work groups",
++   [IRIS_SURFACE_GROUP_TEXTURE_LOW64]      = "texture",
++   [IRIS_SURFACE_GROUP_TEXTURE_HIGH64]     = "texture",
++   [IRIS_SURFACE_GROUP_UBO]                = "ubo",
++   [IRIS_SURFACE_GROUP_SSBO]               = "ssbo",
++   [IRIS_SURFACE_GROUP_IMAGE]              = "image",
++};
++
++static void
++iris_print_binding_table(FILE *fp, const char *name,
++                         const struct iris_binding_table *bt)
++{
++   STATIC_ASSERT(ARRAY_SIZE(surface_group_names) == IRIS_SURFACE_GROUP_COUNT);
++
++   uint32_t total = 0;
++   uint32_t compacted = 0;
++
++   for (int i = 0; i < IRIS_SURFACE_GROUP_COUNT; i++) {
++      uint32_t surf_count = bt->surf_count[i];
++      total += surf_count;
++      if (surf_count)
++         compacted += util_bitcount64(bt->used_mask[i]);
++   }
++
++   if (total == 0) {
++      fprintf(fp, "Binding table for %s is empty\n\n", name);
++      return;
++   }
++
++   if (total != compacted) {
++      fprintf(fp, "Binding table for %s "
++              "(compacted to %u entries from %u entries)\n",
++              name, compacted, total);
++   } else {
++      fprintf(fp, "Binding table for %s (%u entries)\n", name, total);
++   }
++
++   uint32_t entry = 0;
++   for (int i = 0; i < IRIS_SURFACE_GROUP_COUNT; i++) {
++      uint64_t mask = bt->used_mask[i];
++      while (mask) {
++         int index = u_bit_scan64(&mask);
++         fprintf(fp, "  [%u] %s #%d\n", entry++, surface_group_names[i], index);
++      }
++   }
++   fprintf(fp, "\n");
++}
++
++enum {
++   /* Max elements in a surface group. */
++   SURFACE_GROUP_MAX_ELEMENTS = 64,
++};
++
++/**
++ * Map a <group, index> pair to a binding table index.
++ *
++ * For example: <UBO, 5> => binding table index 12
++ */
++uint32_t
++iris_group_index_to_bti(const struct iris_binding_table *bt,
++                        enum iris_surface_group group, uint32_t index)
++{
++   assert(index < bt->surf_count[group]);
++   uint64_t mask = bt->used_mask[group];
++   uint64_t bit = 1ull << index;
++   if (bit & mask) {
++      return bt->offsets[group] + util_bitcount64((bit - 1) & mask);
++   } else {
++      return IRIS_SURFACE_NOT_USED;
++   }
++}
++
++/**
++ * Map a binding table index back to a <group, index> pair.
++ *
++ * For example: binding table index 12 => <UBO, 5>
++ */
++uint32_t
++iris_bti_to_group_index(const struct iris_binding_table *bt,
++                        enum iris_surface_group group, uint32_t bti)
++{
++   uint64_t used_mask = bt->used_mask[group];
++   assert(bti >= bt->offsets[group]);
++
++   uint32_t c = bti - bt->offsets[group];
++   while (used_mask) {
++      int i = u_bit_scan64(&used_mask);
++      if (c == 0)
++         return i;
++      c--;
++   }
++
++   return IRIS_SURFACE_NOT_USED;
++}
++
++static void
++rewrite_src_with_bti(nir_builder *b, struct iris_binding_table *bt,
++                     nir_instr *instr, nir_src *src,
++                     enum iris_surface_group group)
++{
++   assert(bt->surf_count[group] > 0);
++
++   b->cursor = nir_before_instr(instr);
++   nir_def *bti;
++   if (nir_src_is_const(*src)) {
++      uint32_t index = nir_src_as_uint(*src);
++      bti = nir_imm_intN_t(b, iris_group_index_to_bti(bt, group, index),
++                           src->ssa->bit_size);
++   } else {
++      /* Indirect usage makes all the surfaces of the group to be available,
++       * so we can just add the base.
++       */
++      assert(bt->used_mask[group] == BITFIELD64_MASK(bt->surf_count[group]));
++      bti = nir_iadd_imm(b, src->ssa, bt->offsets[group]);
++   }
++   nir_src_rewrite(src, bti);
++}
++
++static void
++mark_used_with_src(struct iris_binding_table *bt, nir_src *src,
++                   enum iris_surface_group group)
++{
++   assert(bt->surf_count[group] > 0);
++
++   if (nir_src_is_const(*src)) {
++      uint64_t index = nir_src_as_uint(*src);
++      assert(index < bt->surf_count[group]);
++      bt->used_mask[group] |= 1ull << index;
++   } else {
++      /* There's an indirect usage, we need all the surfaces. */
++      bt->used_mask[group] = BITFIELD64_MASK(bt->surf_count[group]);
++   }
++}
++
++static bool
++skip_compacting_binding_tables(void)
++{
++   static int skip = -1;
++   if (skip < 0)
++      skip = debug_get_bool_option("INTEL_DISABLE_COMPACT_BINDING_TABLE", false);
++   return skip;
++}
++
++/**
++ * Set up the binding table indices and apply to the shader.
++ */
++void
++iris_setup_binding_table(const struct intel_device_info *devinfo,
++                         struct nir_shader *nir,
++                         struct iris_binding_table *bt,
++                         unsigned num_render_targets,
++                         unsigned num_system_values,
++                         unsigned num_cbufs,
++                         bool use_null_rt)
++{
++   const struct shader_info *info = &nir->info;
++
++   memset(bt, 0, sizeof(*bt));
++
++   /* Set the sizes for each surface group.  For some groups, we already know
++    * upfront how many will be used, so mark them.
++    */
++   if (info->stage == MESA_SHADER_FRAGMENT) {
++      bt->surf_count[IRIS_SURFACE_GROUP_RENDER_TARGET] = num_render_targets;
++      /* All render targets used. */
++      bt->used_mask[IRIS_SURFACE_GROUP_RENDER_TARGET] =
++         BITFIELD64_MASK(num_render_targets);
++
++      /* Setup render target read surface group in order to support non-coherent
++       * framebuffer fetch on Gfx8
++       */
++      if (devinfo->ver == 8 && info->outputs_read) {
++         bt->surf_count[IRIS_SURFACE_GROUP_RENDER_TARGET_READ] = num_render_targets;
++         bt->used_mask[IRIS_SURFACE_GROUP_RENDER_TARGET_READ] =
++            BITFIELD64_MASK(num_render_targets);
++      }
++
++      bt->use_null_rt = use_null_rt;
++   } else if (info->stage == MESA_SHADER_COMPUTE) {
++      bt->surf_count[IRIS_SURFACE_GROUP_CS_WORK_GROUPS] = 1;
++   }
++
++   assert(ARRAY_SIZE(info->textures_used) >= 4);
++   int max_tex = BITSET_LAST_BIT(info->textures_used);
++   assert(max_tex <= 128);
++   bt->surf_count[IRIS_SURFACE_GROUP_TEXTURE_LOW64] = MIN2(64, max_tex);
++   bt->surf_count[IRIS_SURFACE_GROUP_TEXTURE_HIGH64] = MAX2(0, max_tex - 64);
++   bt->used_mask[IRIS_SURFACE_GROUP_TEXTURE_LOW64] =
++      info->textures_used[0] | ((uint64_t)info->textures_used[1]) << 32;
++   bt->used_mask[IRIS_SURFACE_GROUP_TEXTURE_HIGH64] =
++      info->textures_used[2] | ((uint64_t)info->textures_used[3]) << 32;
++   bt->samplers_used_mask = info->samplers_used[0];
++
++   bt->surf_count[IRIS_SURFACE_GROUP_IMAGE] = BITSET_LAST_BIT(info->images_used);
++
++   /* Allocate an extra slot in the UBO section for NIR constants.
++    * Binding table compaction will remove it if unnecessary.
++    *
++    * We don't include them in iris_compiled_shader::num_cbufs because
++    * they are uploaded separately from shs->constbuf[], but from a shader
++    * point of view, they're another UBO (at the end of the section).
++    */
++   bt->surf_count[IRIS_SURFACE_GROUP_UBO] = num_cbufs + 1;
++
++   bt->surf_count[IRIS_SURFACE_GROUP_SSBO] = info->num_ssbos;
++
++   for (int i = 0; i < IRIS_SURFACE_GROUP_COUNT; i++)
++      assert(bt->surf_count[i] <= SURFACE_GROUP_MAX_ELEMENTS);
++
++   /* Mark surfaces used for the cases we don't have the information available
++    * upfront.
++    */
++   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
++   nir_foreach_block (block, impl) {
++      nir_foreach_instr (instr, block) {
++         if (instr->type != nir_instr_type_intrinsic)
++            continue;
++
++         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
++         switch (intrin->intrinsic) {
++         case nir_intrinsic_load_num_workgroups:
++            bt->used_mask[IRIS_SURFACE_GROUP_CS_WORK_GROUPS] = 1;
++            break;
++
++         case nir_intrinsic_load_output:
++            if (devinfo->ver == 8) {
++               mark_used_with_src(bt, &intrin->src[0],
++                                  IRIS_SURFACE_GROUP_RENDER_TARGET_READ);
++            }
++            break;
++
++         case nir_intrinsic_image_size:
++         case nir_intrinsic_image_load:
++         case nir_intrinsic_image_store:
++         case nir_intrinsic_image_atomic:
++         case nir_intrinsic_image_atomic_swap:
++         case nir_intrinsic_image_load_raw_intel:
++         case nir_intrinsic_image_store_raw_intel:
++            mark_used_with_src(bt, &intrin->src[0], IRIS_SURFACE_GROUP_IMAGE);
++            break;
++
++         case nir_intrinsic_load_ubo:
++            mark_used_with_src(bt, &intrin->src[0], IRIS_SURFACE_GROUP_UBO);
++            break;
++
++         case nir_intrinsic_store_ssbo:
++            mark_used_with_src(bt, &intrin->src[1], IRIS_SURFACE_GROUP_SSBO);
++            break;
++
++         case nir_intrinsic_get_ssbo_size:
++         case nir_intrinsic_ssbo_atomic:
++         case nir_intrinsic_ssbo_atomic_swap:
++         case nir_intrinsic_load_ssbo:
++            mark_used_with_src(bt, &intrin->src[0], IRIS_SURFACE_GROUP_SSBO);
++            break;
++
++         default:
++            break;
++         }
++      }
++   }
++
++   /* When disable we just mark everything as used. */
++   if (unlikely(skip_compacting_binding_tables())) {
++      for (int i = 0; i < IRIS_SURFACE_GROUP_COUNT; i++)
++         bt->used_mask[i] = BITFIELD64_MASK(bt->surf_count[i]);
++   }
++
++   /* Calculate the offsets and the binding table size based on the used
++    * surfaces.  After this point, the functions to go between "group indices"
++    * and binding table indices can be used.
++    */
++   uint32_t next = 0;
++   for (int i = 0; i < IRIS_SURFACE_GROUP_COUNT; i++) {
++      if (bt->used_mask[i] != 0) {
++         bt->offsets[i] = next;
++         next += util_bitcount64(bt->used_mask[i]);
++      }
++   }
++   bt->size_bytes = next * 4;
++
++   if (INTEL_DEBUG(DEBUG_BT)) {
++      iris_print_binding_table(stderr, mesa_shader_stage_name(info->stage), bt);
++   }
++
++   /* Apply the binding table indices.  The backend compiler is not expected
++    * to change those, as we haven't set any of the *_start entries in brw
++    * binding_table.
++    */
++   nir_builder b = nir_builder_create(impl);
++
++   nir_foreach_block (block, impl) {
++      nir_foreach_instr_safe (instr, block) {
++         if (instr->type == nir_instr_type_tex) {
++            nir_tex_instr *tex = nir_instr_as_tex(instr);
++            if (tex->texture_index < 64) {
++               tex->texture_index =
++                  iris_group_index_to_bti(bt, IRIS_SURFACE_GROUP_TEXTURE_LOW64,
++                                          tex->texture_index);
++            } else {
++               tex->texture_index =
++                  iris_group_index_to_bti(bt, IRIS_SURFACE_GROUP_TEXTURE_HIGH64,
++                                          tex->texture_index - 64);
++            }
++            continue;
++         }
++
++         if (instr->type != nir_instr_type_intrinsic)
++            continue;
++
++         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
++         switch (intrin->intrinsic) {
++         case nir_intrinsic_image_size:
++         case nir_intrinsic_image_load:
++         case nir_intrinsic_image_store:
++         case nir_intrinsic_image_atomic:
++         case nir_intrinsic_image_atomic_swap:
++         case nir_intrinsic_image_load_raw_intel:
++         case nir_intrinsic_image_store_raw_intel:
++            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
++                                 IRIS_SURFACE_GROUP_IMAGE);
++            break;
++
++         case nir_intrinsic_load_ubo:
++            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
++                                 IRIS_SURFACE_GROUP_UBO);
++            break;
++
++         case nir_intrinsic_store_ssbo:
++            rewrite_src_with_bti(&b, bt, instr, &intrin->src[1],
++                                 IRIS_SURFACE_GROUP_SSBO);
++            break;
++
++         case nir_intrinsic_load_output:
++            if (devinfo->ver == 8) {
++               /* We're using a BTI as the load_output offset here which
++                * breaks newer NIR assumptions.
++                */
++               nir_io_semantics io_sem = nir_intrinsic_io_semantics(intrin);
++               io_sem.no_validate = true;
++               nir_intrinsic_set_io_semantics(intrin, io_sem);
++
++               rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
++                                    IRIS_SURFACE_GROUP_RENDER_TARGET_READ);
++            }
++            break;
++
++         case nir_intrinsic_get_ssbo_size:
++         case nir_intrinsic_ssbo_atomic:
++         case nir_intrinsic_ssbo_atomic_swap:
++         case nir_intrinsic_load_ssbo:
++            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
++                                 IRIS_SURFACE_GROUP_SSBO);
++            break;
++
++         case nir_intrinsic_load_num_workgroups:
++            b.cursor = nir_before_instr(instr);
++            nir_def_replace(
++               &intrin->def,
++               nir_load_ubo(&b,
++                            intrin->def.num_components,
++                            intrin->def.bit_size,
++                            nir_imm_int(&b, bt->offsets[
++                                           IRIS_SURFACE_GROUP_CS_WORK_GROUPS]),
++                            nir_imm_int(&b, 0),
++                            .range_base = 0,
++                            .range = intrin->def.num_components *
++                                     intrin->def.bit_size / 8));
++            break;
++
++         default:
++            break;
++         }
++      }
++   }
++
++   nir_validate_shader(nir, "after iris_setup_binding_table");
++}
++
+diff --git a/src/gallium/drivers/iris/iris_binding_table.h b/src/gallium/drivers/iris/iris_binding_table.h
+new file mode 100644
+index 0000000..4bdf01d
+--- /dev/null
++++ b/src/gallium/drivers/iris/iris_binding_table.h
+@@ -0,0 +1,56 @@
++/*
++ * Copyright © 2017 Intel Corporation
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef IRIS_BINDING_TABLE_H
++#define IRIS_BINDING_TABLE_H
++#include <stdbool.h>
++#include <stdint.h>
++
++enum iris_surface_group {
++   IRIS_SURFACE_GROUP_RENDER_TARGET,
++   IRIS_SURFACE_GROUP_RENDER_TARGET_READ,
++   IRIS_SURFACE_GROUP_CS_WORK_GROUPS,
++   IRIS_SURFACE_GROUP_TEXTURE_LOW64,
++   IRIS_SURFACE_GROUP_TEXTURE_HIGH64,
++   IRIS_SURFACE_GROUP_IMAGE,
++   IRIS_SURFACE_GROUP_UBO,
++   IRIS_SURFACE_GROUP_SSBO,
++
++   IRIS_SURFACE_GROUP_COUNT,
++};
++
++enum {
++   /* Workaround index to HSDES #22020184996 */
++   IRIS_SURFACE_NULL_PUSH_TBIMR_WA = UINT16_MAX,
++
++   /* Invalid value for a binding table index. */
++   IRIS_SURFACE_NOT_USED = 0xa0a0a0a0,
++};
++
++struct iris_binding_table {
++   uint32_t size_bytes;
++
++   /** Number of surfaces in each group, before compacting. */
++   uint32_t surf_count[IRIS_SURFACE_GROUP_COUNT];
++
++   /** Initial offset of each group. */
++   uint32_t offsets[IRIS_SURFACE_GROUP_COUNT];
++
++   /** Mask of surfaces used in each group. */
++   uint64_t used_mask[IRIS_SURFACE_GROUP_COUNT];
++
++   uint64_t samplers_used_mask;
++
++   /** Whether the first render target is a null fb surface */
++   uint8_t use_null_rt;
++};
++
++struct intel_device_info;
++struct nir_shader;
++uint32_t iris_group_index_to_bti(const struct iris_binding_table *, enum iris_surface_group, uint32_t);
++uint32_t iris_bti_to_group_index(const struct iris_binding_table *, enum iris_surface_group, uint32_t);
++void iris_setup_binding_table(const struct intel_device_info *, struct nir_shader *,
++                              struct iris_binding_table *, unsigned, unsigned, unsigned, bool);
++
++#endif
+diff --git a/src/gallium/drivers/iris/iris_context.h b/src/gallium/drivers/iris/iris_context.h
+index f7022ca..a37370a 100644
+--- a/src/gallium/drivers/iris/iris_context.h
++++ b/src/gallium/drivers/iris/iris_context.h
+@@ -576,44 +576,7 @@ struct iris_uncompiled_shader {
+    struct util_queue_fence ready;
+ };
+ 
+-enum iris_surface_group {
+-   IRIS_SURFACE_GROUP_RENDER_TARGET,
+-   IRIS_SURFACE_GROUP_RENDER_TARGET_READ,
+-   IRIS_SURFACE_GROUP_CS_WORK_GROUPS,
+-   IRIS_SURFACE_GROUP_TEXTURE_LOW64,
+-   IRIS_SURFACE_GROUP_TEXTURE_HIGH64,
+-   IRIS_SURFACE_GROUP_IMAGE,
+-   IRIS_SURFACE_GROUP_UBO,
+-   IRIS_SURFACE_GROUP_SSBO,
+-
+-   IRIS_SURFACE_GROUP_COUNT,
+-};
+-
+-enum {
+-   /* Workaround index to HSDES #22020184996 */
+-   IRIS_SURFACE_NULL_PUSH_TBIMR_WA = UINT16_MAX,
+-
+-   /* Invalid value for a binding table index. */
+-   IRIS_SURFACE_NOT_USED = 0xa0a0a0a0,
+-};
+-
+-struct iris_binding_table {
+-   uint32_t size_bytes;
+-
+-   /** Number of surfaces in each group, before compacting. */
+-   uint32_t surf_count[IRIS_SURFACE_GROUP_COUNT];
+-
+-   /** Initial offset of each group. */
+-   uint32_t offsets[IRIS_SURFACE_GROUP_COUNT];
+-
+-   /** Mask of surfaces used in each group. */
+-   uint64_t used_mask[IRIS_SURFACE_GROUP_COUNT];
+-
+-   uint64_t samplers_used_mask;
+-
+-   /** Whether the first render target is a null fb surface */
+-   uint8_t use_null_rt;
+-};
++#include "iris_binding_table.h"
+ 
+ #define IRIS_SYSVAL_CLIP_PLANE(plane, component) \
+    (IRIS_SYSVAL_CLIP_PLANE_START + ((plane) * 4) + (component))
+diff --git a/src/gallium/drivers/iris/iris_program.c b/src/gallium/drivers/iris/iris_program.c
+index 917f85f..25202c1 100644
+--- a/src/gallium/drivers/iris/iris_program.c
++++ b/src/gallium/drivers/iris/iris_program.c
+@@ -1229,388 +1229,6 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
+    *out_num_cbufs = num_cbufs;
+ }
+ 
+-static const char *surface_group_names[] = {
+-   [IRIS_SURFACE_GROUP_RENDER_TARGET]      = "render target",
+-   [IRIS_SURFACE_GROUP_RENDER_TARGET_READ] = "non-coherent render target read",
+-   [IRIS_SURFACE_GROUP_CS_WORK_GROUPS]     = "CS work groups",
+-   [IRIS_SURFACE_GROUP_TEXTURE_LOW64]      = "texture",
+-   [IRIS_SURFACE_GROUP_TEXTURE_HIGH64]     = "texture",
+-   [IRIS_SURFACE_GROUP_UBO]                = "ubo",
+-   [IRIS_SURFACE_GROUP_SSBO]               = "ssbo",
+-   [IRIS_SURFACE_GROUP_IMAGE]              = "image",
+-};
+-
+-static void
+-iris_print_binding_table(FILE *fp, const char *name,
+-                         const struct iris_binding_table *bt)
+-{
+-   STATIC_ASSERT(ARRAY_SIZE(surface_group_names) == IRIS_SURFACE_GROUP_COUNT);
+-
+-   uint32_t total = 0;
+-   uint32_t compacted = 0;
+-
+-   for (int i = 0; i < IRIS_SURFACE_GROUP_COUNT; i++) {
+-      uint32_t surf_count = bt->surf_count[i];
+-      total += surf_count;
+-      if (surf_count)
+-         compacted += util_bitcount64(bt->used_mask[i]);
+-   }
+-
+-   if (total == 0) {
+-      fprintf(fp, "Binding table for %s is empty\n\n", name);
+-      return;
+-   }
+-
+-   if (total != compacted) {
+-      fprintf(fp, "Binding table for %s "
+-              "(compacted to %u entries from %u entries)\n",
+-              name, compacted, total);
+-   } else {
+-      fprintf(fp, "Binding table for %s (%u entries)\n", name, total);
+-   }
+-
+-   uint32_t entry = 0;
+-   for (int i = 0; i < IRIS_SURFACE_GROUP_COUNT; i++) {
+-      uint64_t mask = bt->used_mask[i];
+-      while (mask) {
+-         int index = u_bit_scan64(&mask);
+-         fprintf(fp, "  [%u] %s #%d\n", entry++, surface_group_names[i], index);
+-      }
+-   }
+-   fprintf(fp, "\n");
+-}
+-
+-enum {
+-   /* Max elements in a surface group. */
+-   SURFACE_GROUP_MAX_ELEMENTS = 64,
+-};
+-
+-/**
+- * Map a <group, index> pair to a binding table index.
+- *
+- * For example: <UBO, 5> => binding table index 12
+- */
+-uint32_t
+-iris_group_index_to_bti(const struct iris_binding_table *bt,
+-                        enum iris_surface_group group, uint32_t index)
+-{
+-   assert(index < bt->surf_count[group]);
+-   uint64_t mask = bt->used_mask[group];
+-   uint64_t bit = 1ull << index;
+-   if (bit & mask) {
+-      return bt->offsets[group] + util_bitcount64((bit - 1) & mask);
+-   } else {
+-      return IRIS_SURFACE_NOT_USED;
+-   }
+-}
+-
+-/**
+- * Map a binding table index back to a <group, index> pair.
+- *
+- * For example: binding table index 12 => <UBO, 5>
+- */
+-uint32_t
+-iris_bti_to_group_index(const struct iris_binding_table *bt,
+-                        enum iris_surface_group group, uint32_t bti)
+-{
+-   uint64_t used_mask = bt->used_mask[group];
+-   assert(bti >= bt->offsets[group]);
+-
+-   uint32_t c = bti - bt->offsets[group];
+-   while (used_mask) {
+-      int i = u_bit_scan64(&used_mask);
+-      if (c == 0)
+-         return i;
+-      c--;
+-   }
+-
+-   return IRIS_SURFACE_NOT_USED;
+-}
+-
+-static void
+-rewrite_src_with_bti(nir_builder *b, struct iris_binding_table *bt,
+-                     nir_instr *instr, nir_src *src,
+-                     enum iris_surface_group group)
+-{
+-   assert(bt->surf_count[group] > 0);
+-
+-   b->cursor = nir_before_instr(instr);
+-   nir_def *bti;
+-   if (nir_src_is_const(*src)) {
+-      uint32_t index = nir_src_as_uint(*src);
+-      bti = nir_imm_intN_t(b, iris_group_index_to_bti(bt, group, index),
+-                           src->ssa->bit_size);
+-   } else {
+-      /* Indirect usage makes all the surfaces of the group to be available,
+-       * so we can just add the base.
+-       */
+-      assert(bt->used_mask[group] == BITFIELD64_MASK(bt->surf_count[group]));
+-      bti = nir_iadd_imm(b, src->ssa, bt->offsets[group]);
+-   }
+-   nir_src_rewrite(src, bti);
+-}
+-
+-static void
+-mark_used_with_src(struct iris_binding_table *bt, nir_src *src,
+-                   enum iris_surface_group group)
+-{
+-   assert(bt->surf_count[group] > 0);
+-
+-   if (nir_src_is_const(*src)) {
+-      uint64_t index = nir_src_as_uint(*src);
+-      assert(index < bt->surf_count[group]);
+-      bt->used_mask[group] |= 1ull << index;
+-   } else {
+-      /* There's an indirect usage, we need all the surfaces. */
+-      bt->used_mask[group] = BITFIELD64_MASK(bt->surf_count[group]);
+-   }
+-}
+-
+-static bool
+-skip_compacting_binding_tables(void)
+-{
+-   static int skip = -1;
+-   if (skip < 0)
+-      skip = debug_get_bool_option("INTEL_DISABLE_COMPACT_BINDING_TABLE", false);
+-   return skip;
+-}
+-
+-/**
+- * Set up the binding table indices and apply to the shader.
+- */
+-static void
+-iris_setup_binding_table(const struct intel_device_info *devinfo,
+-                         struct nir_shader *nir,
+-                         struct iris_binding_table *bt,
+-                         unsigned num_render_targets,
+-                         unsigned num_system_values,
+-                         unsigned num_cbufs,
+-                         bool use_null_rt)
+-{
+-   const struct shader_info *info = &nir->info;
+-
+-   memset(bt, 0, sizeof(*bt));
+-
+-   /* Set the sizes for each surface group.  For some groups, we already know
+-    * upfront how many will be used, so mark them.
+-    */
+-   if (info->stage == MESA_SHADER_FRAGMENT) {
+-      bt->surf_count[IRIS_SURFACE_GROUP_RENDER_TARGET] = num_render_targets;
+-      /* All render targets used. */
+-      bt->used_mask[IRIS_SURFACE_GROUP_RENDER_TARGET] =
+-         BITFIELD64_MASK(num_render_targets);
+-
+-      /* Setup render target read surface group in order to support non-coherent
+-       * framebuffer fetch on Gfx8
+-       */
+-      if (devinfo->ver == 8 && info->outputs_read) {
+-         bt->surf_count[IRIS_SURFACE_GROUP_RENDER_TARGET_READ] = num_render_targets;
+-         bt->used_mask[IRIS_SURFACE_GROUP_RENDER_TARGET_READ] =
+-            BITFIELD64_MASK(num_render_targets);
+-      }
+-
+-      bt->use_null_rt = use_null_rt;
+-   } else if (info->stage == MESA_SHADER_COMPUTE) {
+-      bt->surf_count[IRIS_SURFACE_GROUP_CS_WORK_GROUPS] = 1;
+-   }
+-
+-   assert(ARRAY_SIZE(info->textures_used) >= 4);
+-   int max_tex = BITSET_LAST_BIT(info->textures_used);
+-   assert(max_tex <= 128);
+-   bt->surf_count[IRIS_SURFACE_GROUP_TEXTURE_LOW64] = MIN2(64, max_tex);
+-   bt->surf_count[IRIS_SURFACE_GROUP_TEXTURE_HIGH64] = MAX2(0, max_tex - 64);
+-   bt->used_mask[IRIS_SURFACE_GROUP_TEXTURE_LOW64] =
+-      info->textures_used[0] | ((uint64_t)info->textures_used[1]) << 32;
+-   bt->used_mask[IRIS_SURFACE_GROUP_TEXTURE_HIGH64] =
+-      info->textures_used[2] | ((uint64_t)info->textures_used[3]) << 32;
+-   bt->samplers_used_mask = info->samplers_used[0];
+-
+-   bt->surf_count[IRIS_SURFACE_GROUP_IMAGE] = BITSET_LAST_BIT(info->images_used);
+-
+-   /* Allocate an extra slot in the UBO section for NIR constants.
+-    * Binding table compaction will remove it if unnecessary.
+-    *
+-    * We don't include them in iris_compiled_shader::num_cbufs because
+-    * they are uploaded separately from shs->constbuf[], but from a shader
+-    * point of view, they're another UBO (at the end of the section).
+-    */
+-   bt->surf_count[IRIS_SURFACE_GROUP_UBO] = num_cbufs + 1;
+-
+-   bt->surf_count[IRIS_SURFACE_GROUP_SSBO] = info->num_ssbos;
+-
+-   for (int i = 0; i < IRIS_SURFACE_GROUP_COUNT; i++)
+-      assert(bt->surf_count[i] <= SURFACE_GROUP_MAX_ELEMENTS);
+-
+-   /* Mark surfaces used for the cases we don't have the information available
+-    * upfront.
+-    */
+-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+-   nir_foreach_block (block, impl) {
+-      nir_foreach_instr (instr, block) {
+-         if (instr->type != nir_instr_type_intrinsic)
+-            continue;
+-
+-         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+-         switch (intrin->intrinsic) {
+-         case nir_intrinsic_load_num_workgroups:
+-            bt->used_mask[IRIS_SURFACE_GROUP_CS_WORK_GROUPS] = 1;
+-            break;
+-
+-         case nir_intrinsic_load_output:
+-            if (devinfo->ver == 8) {
+-               mark_used_with_src(bt, &intrin->src[0],
+-                                  IRIS_SURFACE_GROUP_RENDER_TARGET_READ);
+-            }
+-            break;
+-
+-         case nir_intrinsic_image_size:
+-         case nir_intrinsic_image_load:
+-         case nir_intrinsic_image_store:
+-         case nir_intrinsic_image_atomic:
+-         case nir_intrinsic_image_atomic_swap:
+-         case nir_intrinsic_image_load_raw_intel:
+-         case nir_intrinsic_image_store_raw_intel:
+-            mark_used_with_src(bt, &intrin->src[0], IRIS_SURFACE_GROUP_IMAGE);
+-            break;
+-
+-         case nir_intrinsic_load_ubo:
+-            mark_used_with_src(bt, &intrin->src[0], IRIS_SURFACE_GROUP_UBO);
+-            break;
+-
+-         case nir_intrinsic_store_ssbo:
+-            mark_used_with_src(bt, &intrin->src[1], IRIS_SURFACE_GROUP_SSBO);
+-            break;
+-
+-         case nir_intrinsic_get_ssbo_size:
+-         case nir_intrinsic_ssbo_atomic:
+-         case nir_intrinsic_ssbo_atomic_swap:
+-         case nir_intrinsic_load_ssbo:
+-            mark_used_with_src(bt, &intrin->src[0], IRIS_SURFACE_GROUP_SSBO);
+-            break;
+-
+-         default:
+-            break;
+-         }
+-      }
+-   }
+-
+-   /* When disable we just mark everything as used. */
+-   if (unlikely(skip_compacting_binding_tables())) {
+-      for (int i = 0; i < IRIS_SURFACE_GROUP_COUNT; i++)
+-         bt->used_mask[i] = BITFIELD64_MASK(bt->surf_count[i]);
+-   }
+-
+-   /* Calculate the offsets and the binding table size based on the used
+-    * surfaces.  After this point, the functions to go between "group indices"
+-    * and binding table indices can be used.
+-    */
+-   uint32_t next = 0;
+-   for (int i = 0; i < IRIS_SURFACE_GROUP_COUNT; i++) {
+-      if (bt->used_mask[i] != 0) {
+-         bt->offsets[i] = next;
+-         next += util_bitcount64(bt->used_mask[i]);
+-      }
+-   }
+-   bt->size_bytes = next * 4;
+-
+-   if (INTEL_DEBUG(DEBUG_BT)) {
+-      iris_print_binding_table(stderr, mesa_shader_stage_name(info->stage), bt);
+-   }
+-
+-   /* Apply the binding table indices.  The backend compiler is not expected
+-    * to change those, as we haven't set any of the *_start entries in brw
+-    * binding_table.
+-    */
+-   nir_builder b = nir_builder_create(impl);
+-
+-   nir_foreach_block (block, impl) {
+-      nir_foreach_instr_safe (instr, block) {
+-         if (instr->type == nir_instr_type_tex) {
+-            nir_tex_instr *tex = nir_instr_as_tex(instr);
+-            if (tex->texture_index < 64) {
+-               tex->texture_index =
+-                  iris_group_index_to_bti(bt, IRIS_SURFACE_GROUP_TEXTURE_LOW64,
+-                                          tex->texture_index);
+-            } else {
+-               tex->texture_index =
+-                  iris_group_index_to_bti(bt, IRIS_SURFACE_GROUP_TEXTURE_HIGH64,
+-                                          tex->texture_index - 64);
+-            }
+-            continue;
+-         }
+-
+-         if (instr->type != nir_instr_type_intrinsic)
+-            continue;
+-
+-         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+-         switch (intrin->intrinsic) {
+-         case nir_intrinsic_image_size:
+-         case nir_intrinsic_image_load:
+-         case nir_intrinsic_image_store:
+-         case nir_intrinsic_image_atomic:
+-         case nir_intrinsic_image_atomic_swap:
+-         case nir_intrinsic_image_load_raw_intel:
+-         case nir_intrinsic_image_store_raw_intel:
+-            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+-                                 IRIS_SURFACE_GROUP_IMAGE);
+-            break;
+-
+-         case nir_intrinsic_load_ubo:
+-            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+-                                 IRIS_SURFACE_GROUP_UBO);
+-            break;
+-
+-         case nir_intrinsic_store_ssbo:
+-            rewrite_src_with_bti(&b, bt, instr, &intrin->src[1],
+-                                 IRIS_SURFACE_GROUP_SSBO);
+-            break;
+-
+-         case nir_intrinsic_load_output:
+-            if (devinfo->ver == 8) {
+-               /* We're using a BTI as the load_output offset here which
+-                * breaks newer NIR assumptions.
+-                */
+-               nir_io_semantics io_sem = nir_intrinsic_io_semantics(intrin);
+-               io_sem.no_validate = true;
+-               nir_intrinsic_set_io_semantics(intrin, io_sem);
+-
+-               rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+-                                    IRIS_SURFACE_GROUP_RENDER_TARGET_READ);
+-            }
+-            break;
+-
+-         case nir_intrinsic_get_ssbo_size:
+-         case nir_intrinsic_ssbo_atomic:
+-         case nir_intrinsic_ssbo_atomic_swap:
+-         case nir_intrinsic_load_ssbo:
+-            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+-                                 IRIS_SURFACE_GROUP_SSBO);
+-            break;
+-
+-         case nir_intrinsic_load_num_workgroups:
+-            b.cursor = nir_before_instr(instr);
+-            nir_def_replace(
+-               &intrin->def,
+-               nir_load_ubo(&b,
+-                            intrin->def.num_components,
+-                            intrin->def.bit_size,
+-                            nir_imm_int(&b, bt->offsets[
+-                                           IRIS_SURFACE_GROUP_CS_WORK_GROUPS]),
+-                            nir_imm_int(&b, 0),
+-                            .range_base = 0,
+-                            .range = intrin->def.num_components *
+-                                     intrin->def.bit_size / 8));
+-            break;
+-
+-         default:
+-            break;
+-         }
+-      }
+-   }
+-
+-   nir_validate_shader(nir, "after iris_setup_binding_table");
+-}
+-
+ static void iris_shader_perf_log(void *, unsigned *id, const char *fmt, ...);
+ 
+ #define perf_log(dbg, fmt, ...) do {                   \
+diff --git a/src/gallium/drivers/iris/iris_sampler_state.h b/src/gallium/drivers/iris/iris_sampler_state.h
+new file mode 100644
+index 0000000..1c1059d
+--- /dev/null
++++ b/src/gallium/drivers/iris/iris_sampler_state.h
+@@ -0,0 +1,172 @@
++/*
++ * Copyright © 2017 Intel Corporation
++ * SPDX-License-Identifier: MIT
++ *
++ * Allocation-free sampler policy shared with the retained Iris caller.
++ * Include after original generation packers, GENX and iris_pack_state.
++ * Bodies below are moved unchanged from iris_state.c; API object creation,
++ * border-color ownership and state upload remain with their actual owners.
++ */
++#ifndef IRIS_SAMPLER_STATE_H
++#define IRIS_SAMPLER_STATE_H
++#include "pipe/p_state.h"
++#include "util/macros.h"
++#if !defined(GFX_VER) || !defined(iris_pack_state)
++#error "Sampler policy needs its actual generation and generated packer context"
++#endif
++
++static unsigned
++translate_shadow_func(enum pipe_compare_func pipe_func)
++{
++   /* Gallium specifies the result of shadow comparisons as:
++    *
++    *    1 if ref <op> texel,
++    *    0 otherwise.
++    *
++    * The hardware does:
++    *
++    *    0 if texel <op> ref,
++    *    1 otherwise.
++    *
++    * So we need to flip the operator and also negate.
++    */
++   static const unsigned map[] = {
++      [PIPE_FUNC_NEVER]    = PREFILTEROP_ALWAYS,
++      [PIPE_FUNC_LESS]     = PREFILTEROP_LEQUAL,
++      [PIPE_FUNC_EQUAL]    = PREFILTEROP_NOTEQUAL,
++      [PIPE_FUNC_LEQUAL]   = PREFILTEROP_LESS,
++      [PIPE_FUNC_GREATER]  = PREFILTEROP_GEQUAL,
++      [PIPE_FUNC_NOTEQUAL] = PREFILTEROP_EQUAL,
++      [PIPE_FUNC_GEQUAL]   = PREFILTEROP_GREATER,
++      [PIPE_FUNC_ALWAYS]   = PREFILTEROP_NEVER,
++   };
++   return map[pipe_func];
++}
++
++static unsigned
++translate_mip_filter(enum pipe_tex_mipfilter pipe_mip)
++{
++   static const unsigned map[] = {
++      [PIPE_TEX_MIPFILTER_NEAREST] = MIPFILTER_NEAREST,
++      [PIPE_TEX_MIPFILTER_LINEAR]  = MIPFILTER_LINEAR,
++      [PIPE_TEX_MIPFILTER_NONE]    = MIPFILTER_NONE,
++   };
++   return map[pipe_mip];
++}
++
++static uint32_t
++translate_wrap(unsigned pipe_wrap)
++{
++   static const unsigned map[] = {
++      [PIPE_TEX_WRAP_REPEAT]                 = TCM_WRAP,
++      [PIPE_TEX_WRAP_CLAMP]                  = TCM_HALF_BORDER,
++      [PIPE_TEX_WRAP_CLAMP_TO_EDGE]          = TCM_CLAMP,
++      [PIPE_TEX_WRAP_CLAMP_TO_BORDER]        = TCM_CLAMP_BORDER,
++      [PIPE_TEX_WRAP_MIRROR_REPEAT]          = TCM_MIRROR,
++      [PIPE_TEX_WRAP_MIRROR_CLAMP_TO_EDGE]   = TCM_MIRROR_ONCE,
++
++      /* These are unsupported. */
++      [PIPE_TEX_WRAP_MIRROR_CLAMP]           = -1,
++      [PIPE_TEX_WRAP_MIRROR_CLAMP_TO_BORDER] = -1,
++   };
++   return map[pipe_wrap];
++}
++
++#if GFX_VER > 8
++static uint32_t
++translate_tex_filter_mode(unsigned mode)
++{
++   static const unsigned map[] = {
++      [PIPE_TEX_REDUCTION_WEIGHTED_AVERAGE] = STD_FILTER,
++      [PIPE_TEX_REDUCTION_MIN]              = MINIMUM,
++      [PIPE_TEX_REDUCTION_MAX]              = MAXIMUM,
++   };
++   return map[mode];
++}
++#endif
++
++static void
++fill_sampler_state(uint32_t *sampler_state,
++                   const struct pipe_sampler_state *state,
++                   unsigned max_anisotropy)
++{
++   float min_lod = state->min_lod;
++   unsigned mag_img_filter = state->mag_img_filter;
++
++   // XXX: explain this code ported from ilo...I don't get it at all...
++   if (state->min_mip_filter == PIPE_TEX_MIPFILTER_NONE &&
++       state->min_lod > 0.0f) {
++      min_lod = 0.0f;
++      mag_img_filter = state->min_img_filter;
++   }
++
++#if GFX_VER > 8
++   uint32_t reduction_mode =
++      translate_tex_filter_mode(state->reduction_mode);
++#endif
++
++   iris_pack_state(GENX(SAMPLER_STATE), sampler_state, samp) {
++      samp.TCXAddressControlMode = translate_wrap(state->wrap_s);
++      samp.TCYAddressControlMode = translate_wrap(state->wrap_t);
++      samp.TCZAddressControlMode = translate_wrap(state->wrap_r);
++      samp.CubeSurfaceControlMode = state->seamless_cube_map;
++      samp.NonnormalizedCoordinateEnable = state->unnormalized_coords;
++      samp.MinModeFilter = state->min_img_filter;
++      samp.MagModeFilter = mag_img_filter;
++      samp.MipModeFilter = translate_mip_filter(state->min_mip_filter);
++      samp.MaximumAnisotropy = RATIO21;
++#if GFX_VER > 8
++      samp.ReductionType = reduction_mode;
++      samp.ReductionTypeEnable =
++         reduction_mode != PIPE_TEX_REDUCTION_WEIGHTED_AVERAGE;
++#endif
++      if (max_anisotropy >= 2) {
++         if (state->min_img_filter == PIPE_TEX_FILTER_LINEAR) {
++#if GFX_VER >= 30
++            samp.MinModeFilter = MAPFILTER_ANISOTROPIC_FAST;
++#else
++            samp.MinModeFilter = MAPFILTER_ANISOTROPIC;
++#endif
++            samp.AnisotropicAlgorithm = EWAApproximation;
++         }
++
++         if (state->mag_img_filter == PIPE_TEX_FILTER_LINEAR) {
++#if GFX_VER >= 30
++            samp.MagModeFilter = MAPFILTER_ANISOTROPIC_FAST;
++#else
++            samp.MagModeFilter = MAPFILTER_ANISOTROPIC;
++#endif
++         }
++
++         samp.MaximumAnisotropy =
++            MIN2((max_anisotropy - 2) / 2, RATIO161);
++      }
++
++      /* Set address rounding bits if not using nearest filtering. */
++      if (state->min_img_filter != PIPE_TEX_FILTER_NEAREST) {
++         samp.UAddressMinFilterRoundingEnable = true;
++         samp.VAddressMinFilterRoundingEnable = true;
++         samp.RAddressMinFilterRoundingEnable = true;
++      }
++
++      if (state->mag_img_filter != PIPE_TEX_FILTER_NEAREST) {
++         samp.UAddressMagFilterRoundingEnable = true;
++         samp.VAddressMagFilterRoundingEnable = true;
++         samp.RAddressMagFilterRoundingEnable = true;
++      }
++
++      if (state->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE)
++         samp.ShadowFunction = translate_shadow_func(state->compare_func);
++
++      const float hw_max_lod = GFX_VER >= 7 ? 14 : 13;
++
++      samp.LODPreClampMode = CLAMP_MODE_OGL;
++      samp.MinLOD = CLAMP(min_lod, 0, hw_max_lod);
++      samp.MaxLOD = CLAMP(state->max_lod, 0, hw_max_lod);
++      samp.TextureLODBias = CLAMP(state->lod_bias, -16, 15);
++
++      /* .BorderColorPointer is filled in by iris_bind_sampler_states. */
++   }
++}
++
++#endif
+diff --git a/src/gallium/drivers/iris/iris_state.c b/src/gallium/drivers/iris/iris_state.c
+index d5d365a..fe72cf1 100644
+--- a/src/gallium/drivers/iris/iris_state.c
++++ b/src/gallium/drivers/iris/iris_state.c
+@@ -213,33 +213,7 @@ translate_compare_func(enum pipe_compare_func pipe_func)
+    return map[pipe_func];
+ }
+ 
+-static unsigned
+-translate_shadow_func(enum pipe_compare_func pipe_func)
+-{
+-   /* Gallium specifies the result of shadow comparisons as:
+-    *
+-    *    1 if ref <op> texel,
+-    *    0 otherwise.
+-    *
+-    * The hardware does:
+-    *
+-    *    0 if texel <op> ref,
+-    *    1 otherwise.
+-    *
+-    * So we need to flip the operator and also negate.
+-    */
+-   static const unsigned map[] = {
+-      [PIPE_FUNC_NEVER]    = PREFILTEROP_ALWAYS,
+-      [PIPE_FUNC_LESS]     = PREFILTEROP_LEQUAL,
+-      [PIPE_FUNC_EQUAL]    = PREFILTEROP_NOTEQUAL,
+-      [PIPE_FUNC_LEQUAL]   = PREFILTEROP_LESS,
+-      [PIPE_FUNC_GREATER]  = PREFILTEROP_GEQUAL,
+-      [PIPE_FUNC_NOTEQUAL] = PREFILTEROP_EQUAL,
+-      [PIPE_FUNC_GEQUAL]   = PREFILTEROP_GREATER,
+-      [PIPE_FUNC_ALWAYS]   = PREFILTEROP_NEVER,
+-   };
+-   return map[pipe_func];
+-}
++#include "iris_sampler_state.h"
+ 
+ static unsigned
+ translate_cull_mode(unsigned pipe_face)
+@@ -265,48 +239,6 @@ translate_fill_mode(unsigned pipe_polymode)
+    return map[pipe_polymode];
+ }
+ 
+-static unsigned
+-translate_mip_filter(enum pipe_tex_mipfilter pipe_mip)
+-{
+-   static const unsigned map[] = {
+-      [PIPE_TEX_MIPFILTER_NEAREST] = MIPFILTER_NEAREST,
+-      [PIPE_TEX_MIPFILTER_LINEAR]  = MIPFILTER_LINEAR,
+-      [PIPE_TEX_MIPFILTER_NONE]    = MIPFILTER_NONE,
+-   };
+-   return map[pipe_mip];
+-}
+-
+-static uint32_t
+-translate_wrap(unsigned pipe_wrap)
+-{
+-   static const unsigned map[] = {
+-      [PIPE_TEX_WRAP_REPEAT]                 = TCM_WRAP,
+-      [PIPE_TEX_WRAP_CLAMP]                  = TCM_HALF_BORDER,
+-      [PIPE_TEX_WRAP_CLAMP_TO_EDGE]          = TCM_CLAMP,
+-      [PIPE_TEX_WRAP_CLAMP_TO_BORDER]        = TCM_CLAMP_BORDER,
+-      [PIPE_TEX_WRAP_MIRROR_REPEAT]          = TCM_MIRROR,
+-      [PIPE_TEX_WRAP_MIRROR_CLAMP_TO_EDGE]   = TCM_MIRROR_ONCE,
+-
+-      /* These are unsupported. */
+-      [PIPE_TEX_WRAP_MIRROR_CLAMP]           = -1,
+-      [PIPE_TEX_WRAP_MIRROR_CLAMP_TO_BORDER] = -1,
+-   };
+-   return map[pipe_wrap];
+-}
+-
+-#if GFX_VER > 8
+-static uint32_t
+-translate_tex_filter_mode(unsigned mode)
+-{
+-   static const unsigned map[] = {
+-      [PIPE_TEX_REDUCTION_WEIGHTED_AVERAGE] = STD_FILTER,
+-      [PIPE_TEX_REDUCTION_MIN]              = MINIMUM,
+-      [PIPE_TEX_REDUCTION_MAX]              = MAXIMUM,
+-   };
+-   return map[mode];
+-}
+-#endif
+-
+ /**
+  * Allocate space for some indirect state.
+  *
+@@ -2514,90 +2446,6 @@ struct iris_sampler_state {
+ #endif
+ };
+ 
+-static void
+-fill_sampler_state(uint32_t *sampler_state,
+-                   const struct pipe_sampler_state *state,
+-                   unsigned max_anisotropy)
+-{
+-   float min_lod = state->min_lod;
+-   unsigned mag_img_filter = state->mag_img_filter;
+-
+-   // XXX: explain this code ported from ilo...I don't get it at all...
+-   if (state->min_mip_filter == PIPE_TEX_MIPFILTER_NONE &&
+-       state->min_lod > 0.0f) {
+-      min_lod = 0.0f;
+-      mag_img_filter = state->min_img_filter;
+-   }
+-
+-#if GFX_VER > 8
+-   uint32_t reduction_mode =
+-      translate_tex_filter_mode(state->reduction_mode);
+-#endif
+-
+-   iris_pack_state(GENX(SAMPLER_STATE), sampler_state, samp) {
+-      samp.TCXAddressControlMode = translate_wrap(state->wrap_s);
+-      samp.TCYAddressControlMode = translate_wrap(state->wrap_t);
+-      samp.TCZAddressControlMode = translate_wrap(state->wrap_r);
+-      samp.CubeSurfaceControlMode = state->seamless_cube_map;
+-      samp.NonnormalizedCoordinateEnable = state->unnormalized_coords;
+-      samp.MinModeFilter = state->min_img_filter;
+-      samp.MagModeFilter = mag_img_filter;
+-      samp.MipModeFilter = translate_mip_filter(state->min_mip_filter);
+-      samp.MaximumAnisotropy = RATIO21;
+-#if GFX_VER > 8
+-      samp.ReductionType = reduction_mode;
+-      samp.ReductionTypeEnable =
+-         reduction_mode != PIPE_TEX_REDUCTION_WEIGHTED_AVERAGE;
+-#endif
+-      if (max_anisotropy >= 2) {
+-         if (state->min_img_filter == PIPE_TEX_FILTER_LINEAR) {
+-#if GFX_VER >= 30
+-            samp.MinModeFilter = MAPFILTER_ANISOTROPIC_FAST;
+-#else
+-            samp.MinModeFilter = MAPFILTER_ANISOTROPIC;
+-#endif
+-            samp.AnisotropicAlgorithm = EWAApproximation;
+-         }
+-
+-         if (state->mag_img_filter == PIPE_TEX_FILTER_LINEAR) {
+-#if GFX_VER >= 30
+-            samp.MagModeFilter = MAPFILTER_ANISOTROPIC_FAST;
+-#else
+-            samp.MagModeFilter = MAPFILTER_ANISOTROPIC;
+-#endif
+-         }
+-
+-         samp.MaximumAnisotropy =
+-            MIN2((max_anisotropy - 2) / 2, RATIO161);
+-      }
+-
+-      /* Set address rounding bits if not using nearest filtering. */
+-      if (state->min_img_filter != PIPE_TEX_FILTER_NEAREST) {
+-         samp.UAddressMinFilterRoundingEnable = true;
+-         samp.VAddressMinFilterRoundingEnable = true;
+-         samp.RAddressMinFilterRoundingEnable = true;
+-      }
+-
+-      if (state->mag_img_filter != PIPE_TEX_FILTER_NEAREST) {
+-         samp.UAddressMagFilterRoundingEnable = true;
+-         samp.VAddressMagFilterRoundingEnable = true;
+-         samp.RAddressMagFilterRoundingEnable = true;
+-      }
+-
+-      if (state->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE)
+-         samp.ShadowFunction = translate_shadow_func(state->compare_func);
+-
+-      const float hw_max_lod = GFX_VER >= 7 ? 14 : 13;
+-
+-      samp.LODPreClampMode = CLAMP_MODE_OGL;
+-      samp.MinLOD = CLAMP(min_lod, 0, hw_max_lod);
+-      samp.MaxLOD = CLAMP(state->max_lod, 0, hw_max_lod);
+-      samp.TextureLODBias = CLAMP(state->lod_bias, -16, 15);
+-
+-      /* .BorderColorPointer is filled in by iris_bind_sampler_states. */
+-   }
+-}
+-
+ /**
+  * The pipe->create_sampler_state() driver hook.
+  *
+diff --git a/src/gallium/drivers/iris/meson.build b/src/gallium/drivers/iris/meson.build
+index 46631da..6cf26a4 100644
+--- a/src/gallium/drivers/iris/meson.build
++++ b/src/gallium/drivers/iris/meson.build
+@@ -15,6 +15,7 @@ files_libiris = files(
+   'driinfo_iris.h',
+   'iris_batch.c',
+   'iris_batch.h',
++  'iris_binding_table.c',
+   'iris_binder.c',
+   'iris_binder.h',
+   'iris_blit.c',
+diff --git a/src/intel/compiler/elk/elk_vec4.h b/src/intel/compiler/elk/elk_vec4.h
+index 592b02b..ce5487e 100644
+--- a/src/intel/compiler/elk/elk_vec4.h
++++ b/src/intel/compiler/elk/elk_vec4.h
+@@ -14,7 +14,6 @@
+ #include "elk_vec4_live_variables.h"
+ #endif
+ 
+-#include "compiler/glsl/ir.h"
+ #include "compiler/nir/nir.h"
+ 
+ 
+diff --git a/src/intel/compiler/intel_gfx_ver_enum.h b/src/intel/compiler/intel_gfx_ver_enum.h
+index 3ceb085..35302b0 100644
+--- a/src/intel/compiler/intel_gfx_ver_enum.h
++++ b/src/intel/compiler/intel_gfx_ver_enum.h
+@@ -23,6 +23,7 @@ enum gfx_ver {
+    GFX125  = (1 << 11),
+    XE2     = (1 << 12),
+    XE3     = (1 << 13),
++   XE3P    = (1 << 14),
+    GFX_ALL = ~0
+ };
+ 
+@@ -47,6 +48,7 @@ gfx_ver_from_devinfo(const struct intel_device_info *devinfo)
+    case 125: return GFX125;
+    case 200: return XE2;
+    case 300: return XE3;
++   case 350: return XE3P;
+    default:
+       UNREACHABLE("not reached");
+    }
+diff --git a/src/intel/dev/i915/intel_device_info.c b/src/intel/dev/i915/intel_device_info.c
+index 3bc38b4..298da66 100644
+--- a/src/intel/dev/i915/intel_device_info.c
++++ b/src/intel/dev/i915/intel_device_info.c
+@@ -124,108 +124,6 @@ update_from_single_slice_topology(struct intel_device_info *devinfo,
+    intel_device_info_update_l3_banks(devinfo);
+ }
+ 
+-static void
+-update_from_topology(struct intel_device_info *devinfo,
+-                     const struct drm_i915_query_topology_info *topology)
+-{
+-   intel_device_info_topology_reset_masks(devinfo);
+-
+-   assert(topology->max_slices > 0);
+-   assert(topology->max_subslices > 0);
+-   assert(topology->max_eus_per_subslice > 0);
+-
+-   devinfo->subslice_slice_stride = topology->subslice_stride;
+-
+-   devinfo->eu_subslice_stride = DIV_ROUND_UP(topology->max_eus_per_subslice, 8);
+-   devinfo->eu_slice_stride = topology->max_subslices * devinfo->eu_subslice_stride;
+-
+-   assert(sizeof(devinfo->slice_masks) >= DIV_ROUND_UP(topology->max_slices, 8));
+-   memcpy(&devinfo->slice_masks, topology->data, DIV_ROUND_UP(topology->max_slices, 8));
+-   devinfo->max_slices = topology->max_slices;
+-   devinfo->max_subslices_per_slice = topology->max_subslices;
+-   devinfo->max_eus_per_subslice = topology->max_eus_per_subslice;
+-
+-   uint32_t subslice_mask_len =
+-      topology->max_slices * topology->subslice_stride;
+-   assert(sizeof(devinfo->subslice_masks) >= subslice_mask_len);
+-   memcpy(devinfo->subslice_masks, &topology->data[topology->subslice_offset],
+-          subslice_mask_len);
+-
+-   uint32_t eu_mask_len =
+-      topology->eu_stride * topology->max_subslices * topology->max_slices;
+-   assert(sizeof(devinfo->eu_masks) >= eu_mask_len);
+-   memcpy(devinfo->eu_masks, &topology->data[topology->eu_offset], eu_mask_len);
+-
+-   /* Now that all the masks are in place, update the counts. */
+-   intel_device_info_topology_update_counts(devinfo);
+-   intel_device_info_update_pixel_pipes(devinfo, devinfo->subslice_masks);
+-   intel_device_info_update_l3_banks(devinfo);
+-}
+-
+-/* Generate detailed mask from the I915_PARAM_SLICE_MASK,
+- * I915_PARAM_SUBSLICE_MASK & I915_PARAM_EU_TOTAL getparam.
+- */
+-bool
+-intel_device_info_i915_update_from_masks(struct intel_device_info *devinfo, uint32_t slice_mask,
+-                       uint32_t subslice_mask, uint32_t n_eus)
+-{
+-   struct drm_i915_query_topology_info *topology;
+-
+-   assert((slice_mask & 0xff) == slice_mask);
+-
+-   size_t data_length = 100;
+-
+-   topology = calloc(1, sizeof(*topology) + data_length);
+-   if (!topology)
+-      return false;
+-
+-   topology->max_slices = util_last_bit(slice_mask);
+-   topology->max_subslices = util_last_bit(subslice_mask);
+-
+-   topology->subslice_offset = DIV_ROUND_UP(topology->max_slices, 8);
+-   topology->subslice_stride = DIV_ROUND_UP(topology->max_subslices, 8);
+-
+-   uint32_t n_subslices = __builtin_popcount(slice_mask) *
+-      __builtin_popcount(subslice_mask);
+-   uint32_t max_eus_per_subslice = DIV_ROUND_UP(n_eus, n_subslices);
+-   uint32_t eu_mask = (1U << max_eus_per_subslice) - 1;
+-
+-   topology->max_eus_per_subslice = max_eus_per_subslice;
+-   topology->eu_offset = topology->subslice_offset +
+-      topology->max_slices * DIV_ROUND_UP(topology->max_subslices, 8);
+-   topology->eu_stride = DIV_ROUND_UP(max_eus_per_subslice, 8);
+-
+-   /* Set slice mask in topology */
+-   for (int b = 0; b < topology->subslice_offset; b++)
+-      topology->data[b] = (slice_mask >> (b * 8)) & 0xff;
+-
+-   for (int s = 0; s < topology->max_slices; s++) {
+-
+-      /* Set subslice mask in topology */
+-      for (int b = 0; b < topology->subslice_stride; b++) {
+-         int subslice_offset = topology->subslice_offset +
+-            s * topology->subslice_stride + b;
+-
+-         topology->data[subslice_offset] = (subslice_mask >> (b * 8)) & 0xff;
+-      }
+-
+-      /* Set eu mask in topology */
+-      for (int ss = 0; ss < topology->max_subslices; ss++) {
+-         for (int b = 0; b < topology->eu_stride; b++) {
+-            int eu_offset = topology->eu_offset +
+-               (s * topology->max_subslices + ss) * topology->eu_stride + b;
+-
+-            topology->data[eu_offset] = (eu_mask >> (b * 8)) & 0xff;
+-         }
+-      }
+-   }
+-
+-   update_from_topology(devinfo, topology);
+-   free(topology);
+-
+-   return true;
+-}
+-
+ static bool
+ getparam(int fd, uint32_t param, int *value)
+ {
+@@ -313,7 +211,7 @@ query_topology(struct intel_device_info *devinfo, int fd)
+       update_from_single_slice_topology(devinfo, topo_info, geom_topo_info);
+       free(geom_topo_info);
+    } else {
+-      update_from_topology(devinfo, topo_info);
++      intel_device_info_i915_update_from_topology(devinfo, topo_info);
+    }
+ 
+    free(topo_info);
+diff --git a/src/intel/dev/i915/intel_device_info.h b/src/intel/dev/i915/intel_device_info.h
+index 14df6c5..fc4bbe8 100644
+--- a/src/intel/dev/i915/intel_device_info.h
++++ b/src/intel/dev/i915/intel_device_info.h
+@@ -27,6 +27,12 @@
+ #include <stdbool.h>
+ 
+ struct intel_device_info;
++struct drm_i915_query_topology_info;
++
++void
++intel_device_info_i915_update_from_topology(
++   struct intel_device_info *devinfo,
++   const struct drm_i915_query_topology_info *topology);
+ 
+ bool
+ intel_device_info_i915_get_info_from_fd(int fd,
+diff --git a/src/intel/dev/intel_device_info.c b/src/intel/dev/intel_device_info.c
+index 2af1b5e..1df02bf 100644
+--- a/src/intel/dev/intel_device_info.c
++++ b/src/intel/dev/intel_device_info.c
+@@ -28,16 +28,11 @@
+ #include <string.h>
+ #include <unistd.h>
+ 
+-#include "util/libdrm.h"
+-
+ #include "intel_device_info.h"
+-#include "intel_hwconfig.h"
++#include "intel_device_info_private.h"
+ #include "intel_wa.h"
+ #include "i915/intel_device_info.h"
+-#include "xe/intel_device_info.h"
+-#include "virtio/intel_virtio.h"
+ 
+-#include "common/intel_gem.h"
+ #include "util/u_debug.h"
+ #include "util/log.h"
+ #include "util/macros.h"
+@@ -1523,7 +1518,7 @@ struct device_init_config {
+  */
+ #define FORCE_PROBE .require_force_probe = true
+ 
+-static bool
++bool
+ intel_device_info_init_common(int pci_id, bool building,
+                               struct intel_device_info *devinfo)
+ {
+@@ -1665,7 +1660,7 @@ intel_device_info_init_common(int pci_id, bool building,
+    return true;
+ }
+ 
+-static void
++void
+ intel_device_info_apply_workarounds(struct intel_device_info *devinfo)
+ {
+    if (intel_needs_workaround(devinfo, 18012660806))
+@@ -1695,10 +1690,11 @@ static bool
+ intel_get_device_info_from_pci_id_common(int pci_id, bool building,
+                                          struct intel_device_info *devinfo)
+ {
+-   intel_device_info_init_common(pci_id, building, devinfo);
++   if (!intel_device_info_init_common(pci_id, building, devinfo))
++      return false;
+ 
+-   /* This is a placeholder until a proper value is set. */
+-   devinfo->kmd_type = INTEL_KMD_TYPE_I915;
++   /* A compile target is not a device bound to a kernel driver. */
++   devinfo->kmd_type = building ? INTEL_KMD_TYPE_INVALID : INTEL_KMD_TYPE_I915;
+ 
+    intel_device_info_init_was(devinfo);
+    intel_device_info_apply_workarounds(devinfo);
+@@ -1720,323 +1716,6 @@ intel_get_device_info_for_build(int pci_id,
+    return intel_get_device_info_from_pci_id_common(pci_id, true, devinfo);
+ }
+ 
+-bool
+-intel_device_info_compute_system_memory(struct intel_device_info *devinfo, bool update)
+-{
+-   if (!update) {
+-      if (!os_get_total_physical_memory(&devinfo->mem.sram.mappable.size))
+-         return false;
+-   }
+-
+-   os_get_available_system_memory(&devinfo->mem.sram.mappable.free);
+-
+-   return true;
+-}
+-
+-static void
+-intel_device_info_adjust_memory(struct intel_device_info *devinfo)
+-{
+-   uint64_t available;
+-
+-   /* Applications running without elevated privileges don't report valid
+-    * numbers for free sram
+-    */
+-   if (os_get_available_system_memory(&available)) {
+-      devinfo->mem.sram.mappable.free = MIN3(devinfo->mem.sram.mappable.free,
+-                                             devinfo->mem.sram.mappable.size,
+-                                             available);
+-   }
+-}
+-
+-static void
+-init_max_scratch_ids(struct intel_device_info *devinfo)
+-{
+-   /* Determine the max subslice that potentially might be used in
+-    * scratch space ids.
+-    */
+-   unsigned subslices = intel_device_info_dual_subslice_id_bound(devinfo);
+-   assert(subslices >= devinfo->subslice_total);
+-
+-   unsigned scratch_ids_per_subslice;
+-   if (devinfo->ver >= 12) {
+-      /* Same as ICL below, but with 16 EUs. */
+-      scratch_ids_per_subslice = 16 * 8;
+-   } else if (devinfo->ver >= 11) {
+-      /* The MEDIA_VFE_STATE docs say:
+-       *
+-       *    "Starting with this configuration, the Maximum Number of
+-       *     Threads must be set to (#EU * 8) for GPGPU dispatches.
+-       *
+-       *     Although there are only 7 threads per EU in the configuration,
+-       *     the FFTID is calculated as if there are 8 threads per EU,
+-       *     which in turn requires a larger amount of Scratch Space to be
+-       *     allocated by the driver."
+-       */
+-      scratch_ids_per_subslice = 8 * 8;
+-   } else if (devinfo->platform == INTEL_PLATFORM_HSW) {
+-      /* WaCSScratchSize:hsw
+-       *
+-       * Haswell's scratch space address calculation appears to be sparse
+-       * rather than tightly packed. The Thread ID has bits indicating
+-       * which subslice, EU within a subslice, and thread within an EU it
+-       * is. There's a maximum of two slices and two subslices, so these
+-       * can be stored with a single bit. Even though there are only 10 EUs
+-       * per subslice, this is stored in 4 bits, so there's an effective
+-       * maximum value of 16 EUs. Similarly, although there are only 7
+-       * threads per EU, this is stored in a 3 bit number, giving an
+-       * effective maximum value of 8 threads per EU.
+-       *
+-       * This means that we need to use 16 * 8 instead of 10 * 7 for the
+-       * number of threads per subslice.
+-       */
+-      scratch_ids_per_subslice = 16 * 8;
+-   } else if (devinfo->platform == INTEL_PLATFORM_CHV) {
+-      /* Cherryview devices have either 6 or 8 EUs per subslice, and each
+-       * EU has 7 threads. The 6 EU devices appear to calculate thread IDs
+-       * as if it had 8 EUs.
+-       */
+-      scratch_ids_per_subslice = 8 * 7;
+-   } else {
+-      scratch_ids_per_subslice = devinfo->max_cs_threads;
+-   }
+-
+-   unsigned max_thread_ids = scratch_ids_per_subslice * subslices;
+-
+-   if (devinfo->verx10 >= 125) {
+-      /* On GFX version 12.5, scratch access changed to a surface-based model.
+-       * Instead of each shader type having its own layout based on IDs passed
+-       * from the relevant fixed-function unit, all scratch access is based on
+-       * thread IDs like it always has been for compute.
+-       */
+-      for (int i = MESA_SHADER_VERTEX; i < MESA_SHADER_STAGES; i++)
+-         devinfo->max_scratch_ids[i] = max_thread_ids;
+-   } else {
+-      unsigned max_scratch_ids[] = {
+-         [MESA_SHADER_VERTEX]    = devinfo->max_vs_threads,
+-         [MESA_SHADER_TESS_CTRL] = devinfo->max_tcs_threads,
+-         [MESA_SHADER_TESS_EVAL] = devinfo->max_tes_threads,
+-         [MESA_SHADER_GEOMETRY]  = devinfo->max_gs_threads,
+-         [MESA_SHADER_FRAGMENT]  = devinfo->max_wm_threads,
+-         [MESA_SHADER_COMPUTE]   = max_thread_ids,
+-      };
+-      STATIC_ASSERT(sizeof(devinfo->max_scratch_ids) == sizeof(max_scratch_ids));
+-      memcpy(devinfo->max_scratch_ids, max_scratch_ids,
+-             sizeof(devinfo->max_scratch_ids));
+-   }
+-}
+-
+-static unsigned
+-intel_device_info_calc_engine_prefetch(const struct intel_device_info *devinfo,
+-                                       enum intel_engine_class engine_class)
+-{
+-   if (devinfo->verx10 >= 200) {
+-      switch (engine_class) {
+-      case INTEL_ENGINE_CLASS_RENDER:
+-         return 4096;
+-      case INTEL_ENGINE_CLASS_COMPUTE:
+-         return 1024;
+-      default:
+-         return 512;
+-      }
+-   }
+-
+-   if (intel_device_info_is_mtl_or_arl(devinfo)) {
+-      switch (engine_class) {
+-      case INTEL_ENGINE_CLASS_RENDER:
+-         return 2048;
+-      case INTEL_ENGINE_CLASS_COMPUTE:
+-         return 1024;
+-      default:
+-         return 512;
+-      }
+-   }
+-
+-   /* DG2 */
+-   if (devinfo->verx10 == 125)
+-      return 1024;
+-
+-   /* Older than DG2/MTL */
+-   return 512;
+-}
+-
+-static void
+-intel_device_info_update_after_hwconfig(struct intel_device_info *devinfo)
+-{
+-   /* After applying hwconfig values, some items need to be recalculated. */
+-   devinfo->max_cs_threads =
+-      devinfo->max_eus_per_subslice * devinfo->num_thread_per_eu;
+-
+-   intel_device_info_update_cs_workgroup_threads(devinfo);
+-
+-   /* On Skylake through Xe, the 3DSTATE_GS_BODY docs include a note:
+-    *
+-    *   "The driver must send pipe control with a cs stall after a
+-    *    3dstate_gs state change and the Dispatch Mode is simd8 and
+-    *    the number of handles allocated to gs is less than 16."
+-    *
+-    * We don't implement such a PIPE_CONTROL, so instead we set the minimum
+-    * number of GS URB entries to 16.  The Xe2+ docs don't have such a note,
+-    * but considering they use SIMD16 GS threads, retaining 16 as the minimum
+-    * likely makes sense there as well.
+-    *
+-    * Assuming we did implement that flush, the 3DSTATE_GS docs also note:
+-    *
+-    *   "At least 8 URB entries must be allocated in order to use SIMD8
+-    *    DispatchMode."
+-    *
+-    * The hardware config tables instead have the limit set as 2, which is
+-    * likely an older limit from the SIMD4x2 dual-object/instance era which
+-    * is no longer accurate.
+-    */
+-   devinfo->urb.min_entries[MESA_SHADER_GEOMETRY] =
+-      MAX2(16, devinfo->urb.min_entries[MESA_SHADER_GEOMETRY]);
+-}
+-
+-bool
+-intel_get_device_info_from_fd(int fd, struct intel_device_info *devinfo, int min_ver, int max_ver)
+-{
+-   if (NULL != os_get_option("INTEL_STUB_GPU_JSON")) {
+-      /* This call will succeed when shim-drm has been initialized with a
+-       * serialized intel_device_info structure.
+-       */
+-      struct drm_intel_stub_devinfo arg = {
+-         .addr = (uintptr_t)devinfo,
+-         .size = sizeof(*devinfo),
+-      };
+-      if (0 == intel_ioctl(fd, DRM_IOCTL_INTEL_STUB_DEVINFO, &arg)) {
+-         intel_device_info_init_was(devinfo);
+-         intel_device_info_apply_workarounds(devinfo);
+-         return true;
+-      }
+-   }
+-
+-   /* Get PCI info.
+-    *
+-    * Some callers may already have a valid drm device which holds values of
+-    * PCI fields queried here prior to calling this function. But making this
+-    * query optional leads to a more cumbersome implementation. These callers
+-    * still need to initialize the fields somewhere out of this function and
+-    * rely on an ioctl to get PCI device id for the next step when skipping
+-    * this drm query.
+-    */
+-   if (is_intel_virtio_fd(fd)) {
+-      if (!intel_virtio_get_pci_device_info(fd, devinfo))
+-         return false;
+-
+-      if (!intel_device_info_init_common(devinfo->pci_device_id,
+-                                         false, devinfo))
+-         return false;
+-
+-      devinfo->is_virtio = true;
+-   } else {
+-      drmDevicePtr drmdev = NULL;
+-      if (drmGetDevice2(fd, DRM_DEVICE_GET_PCI_REVISION, &drmdev)) {
+-         mesa_loge("Failed to query drm device.");
+-         return false;
+-      }
+-      if (!intel_device_info_init_common(drmdev->deviceinfo.pci->device_id,
+-                                         false, devinfo)) {
+-         drmFreeDevice(&drmdev);
+-         return false;
+-      }
+-
+-      devinfo->pci_domain = drmdev->businfo.pci->domain;
+-      devinfo->pci_bus = drmdev->businfo.pci->bus;
+-      devinfo->pci_dev = drmdev->businfo.pci->dev;
+-      devinfo->pci_func = drmdev->businfo.pci->func;
+-      devinfo->pci_device_id = drmdev->deviceinfo.pci->device_id;
+-      devinfo->pci_revision_id = drmdev->deviceinfo.pci->revision_id;
+-      drmFreeDevice(&drmdev);
+-   }
+-
+-   if ((min_ver > 0 && devinfo->ver < min_ver) || (max_ver > 0 && devinfo->ver > max_ver))
+-      return false;
+-
+-   devinfo->no_hw = debug_get_bool_option("INTEL_NO_HW", false);
+-
+-   devinfo->kmd_type = intel_get_kmd_type(fd);
+-   if (devinfo->kmd_type == INTEL_KMD_TYPE_INVALID) {
+-      mesa_loge("Unknown kernel mode driver");
+-      return false;
+-   }
+-
+-   /* remaining initialization queries the kernel for device info */
+-   if (devinfo->no_hw) {
+-      /* Provide some sensible values for NO_HW. */
+-      devinfo->gtt_size =
+-         devinfo->ver >= 8 ? (1ull << 48) : 2ull * 1024 * 1024 * 1024;
+-      intel_device_info_compute_system_memory(devinfo, false);
+-      return true;
+-   }
+-
+-   bool ret;
+-   switch (devinfo->kmd_type) {
+-   case INTEL_KMD_TYPE_I915:
+-      ret = intel_device_info_i915_get_info_from_fd(fd, devinfo);
+-      break;
+-   case INTEL_KMD_TYPE_XE:
+-      ret = intel_device_info_xe_get_info_from_fd(fd, devinfo);
+-      if (devinfo->verx10 < 200) {
+-         if (!debug_get_bool_option("INTEL_XE_IGNORE_EXPERIMENTAL_WARNING", false))
+-            mesa_logw("Support for this platform is experimental with Xe KMD, bug reports may be ignored.");
+-      }
+-      break;
+-   default:
+-      ret = false;
+-      UNREACHABLE("Missing");
+-   }
+-   if (!ret) {
+-      mesa_logw("Could not get intel_device_info.");
+-      return false;
+-   }
+-
+-   /* region info is required for lmem support */
+-   if (devinfo->has_local_mem && !devinfo->mem.use_class_instance) {
+-      mesa_logw("Could not query local memory size.");
+-      return false;
+-   }
+-
+-   if (intel_hwconfig_is_required(devinfo))
+-      intel_device_info_update_after_hwconfig(devinfo);
+-   intel_device_info_adjust_memory(devinfo);
+-
+-   /* Gfx7 and older do not support EU/Subslice info */
+-   assert(devinfo->subslice_total >= 1 || devinfo->ver <= 7);
+-   devinfo->subslice_total = MAX2(devinfo->subslice_total, 1);
+-
+-   init_max_scratch_ids(devinfo);
+-
+-   for (enum intel_engine_class engine = INTEL_ENGINE_CLASS_RENDER;
+-        engine < ARRAY_SIZE(devinfo->engine_class_prefetch); engine++)
+-      devinfo->engine_class_prefetch[engine] =
+-            intel_device_info_calc_engine_prefetch(devinfo, engine);
+-
+-   intel_device_info_init_was(devinfo);
+-   intel_device_info_apply_workarounds(devinfo);
+-
+-   return true;
+-}
+-
+-bool intel_device_info_update_memory_info(struct intel_device_info *devinfo, int fd)
+-{
+-   bool ret;
+-
+-   switch (devinfo->kmd_type) {
+-   case INTEL_KMD_TYPE_I915:
+-      ret = intel_device_info_i915_query_regions(devinfo, fd, true);
+-      break;
+-   case INTEL_KMD_TYPE_XE:
+-      ret = intel_device_info_xe_query_regions(fd, devinfo, true);
+-      break;
+-   default:
+-      ret = false;
+-   }
+-
+-   if (ret)
+-      intel_device_info_adjust_memory(devinfo);
+-   return ret;
+-}
+-
+ enum intel_wa_steppings
+ intel_device_info_wa_stepping(struct intel_device_info *devinfo)
+ {
+diff --git a/src/intel/dev/intel_device_info_private.h b/src/intel/dev/intel_device_info_private.h
+new file mode 100644
+index 0000000..c8b1eca
+--- /dev/null
++++ b/src/intel/dev/intel_device_info_private.h
+@@ -0,0 +1,12 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef INTEL_DEVICE_INFO_PRIVATE_H
++#define INTEL_DEVICE_INFO_PRIVATE_H
++
++#include "intel_device_info.h"
++
++/* Shared by static compiler targets and the separate device-query layer. */
++bool intel_device_info_init_common(int pci_id, bool building,
++                                  struct intel_device_info *devinfo);
++void intel_device_info_apply_workarounds(struct intel_device_info *devinfo);
++
++#endif
+diff --git a/src/intel/dev/intel_device_info_query.c b/src/intel/dev/intel_device_info_query.c
+new file mode 100644
+index 0000000..87fe652
+--- /dev/null
++++ b/src/intel/dev/intel_device_info_query.c
+@@ -0,0 +1,352 @@
++/*
++ * Copyright © 2013 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#include <string.h>
++#include "intel_device_info_private.h"
++#include "intel_hwconfig.h"
++#include "intel_wa.h"
++#include "i915/intel_device_info.h"
++#include "xe/intel_device_info.h"
++#include "virtio/intel_virtio.h"
++#include "common/intel_gem.h"
++#include "util/libdrm.h"
++#include "util/log.h"
++#include "util/os_misc.h"
++#include "util/u_debug.h"
++
++bool
++intel_device_info_compute_system_memory(struct intel_device_info *devinfo, bool update)
++{
++   if (!update) {
++      if (!os_get_total_physical_memory(&devinfo->mem.sram.mappable.size))
++         return false;
++   }
++
++   os_get_available_system_memory(&devinfo->mem.sram.mappable.free);
++
++   return true;
++}
++
++static void
++intel_device_info_adjust_memory(struct intel_device_info *devinfo)
++{
++   uint64_t available;
++
++   /* Applications running without elevated privileges don't report valid
++    * numbers for free sram
++    */
++   if (os_get_available_system_memory(&available)) {
++      devinfo->mem.sram.mappable.free = MIN3(devinfo->mem.sram.mappable.free,
++                                             devinfo->mem.sram.mappable.size,
++                                             available);
++   }
++}
++
++static void
++init_max_scratch_ids(struct intel_device_info *devinfo)
++{
++   /* Determine the max subslice that potentially might be used in
++    * scratch space ids.
++    */
++   unsigned subslices = intel_device_info_dual_subslice_id_bound(devinfo);
++   assert(subslices >= devinfo->subslice_total);
++
++   unsigned scratch_ids_per_subslice;
++   if (devinfo->ver >= 12) {
++      /* Same as ICL below, but with 16 EUs. */
++      scratch_ids_per_subslice = 16 * 8;
++   } else if (devinfo->ver >= 11) {
++      /* The MEDIA_VFE_STATE docs say:
++       *
++       *    "Starting with this configuration, the Maximum Number of
++       *     Threads must be set to (#EU * 8) for GPGPU dispatches.
++       *
++       *     Although there are only 7 threads per EU in the configuration,
++       *     the FFTID is calculated as if there are 8 threads per EU,
++       *     which in turn requires a larger amount of Scratch Space to be
++       *     allocated by the driver."
++       */
++      scratch_ids_per_subslice = 8 * 8;
++   } else if (devinfo->platform == INTEL_PLATFORM_HSW) {
++      /* WaCSScratchSize:hsw
++       *
++       * Haswell's scratch space address calculation appears to be sparse
++       * rather than tightly packed. The Thread ID has bits indicating
++       * which subslice, EU within a subslice, and thread within an EU it
++       * is. There's a maximum of two slices and two subslices, so these
++       * can be stored with a single bit. Even though there are only 10 EUs
++       * per subslice, this is stored in 4 bits, so there's an effective
++       * maximum value of 16 EUs. Similarly, although there are only 7
++       * threads per EU, this is stored in a 3 bit number, giving an
++       * effective maximum value of 8 threads per EU.
++       *
++       * This means that we need to use 16 * 8 instead of 10 * 7 for the
++       * number of threads per subslice.
++       */
++      scratch_ids_per_subslice = 16 * 8;
++   } else if (devinfo->platform == INTEL_PLATFORM_CHV) {
++      /* Cherryview devices have either 6 or 8 EUs per subslice, and each
++       * EU has 7 threads. The 6 EU devices appear to calculate thread IDs
++       * as if it had 8 EUs.
++       */
++      scratch_ids_per_subslice = 8 * 7;
++   } else {
++      scratch_ids_per_subslice = devinfo->max_cs_threads;
++   }
++
++   unsigned max_thread_ids = scratch_ids_per_subslice * subslices;
++
++   if (devinfo->verx10 >= 125) {
++      /* On GFX version 12.5, scratch access changed to a surface-based model.
++       * Instead of each shader type having its own layout based on IDs passed
++       * from the relevant fixed-function unit, all scratch access is based on
++       * thread IDs like it always has been for compute.
++       */
++      for (int i = MESA_SHADER_VERTEX; i < MESA_SHADER_STAGES; i++)
++         devinfo->max_scratch_ids[i] = max_thread_ids;
++   } else {
++      unsigned max_scratch_ids[] = {
++         [MESA_SHADER_VERTEX]    = devinfo->max_vs_threads,
++         [MESA_SHADER_TESS_CTRL] = devinfo->max_tcs_threads,
++         [MESA_SHADER_TESS_EVAL] = devinfo->max_tes_threads,
++         [MESA_SHADER_GEOMETRY]  = devinfo->max_gs_threads,
++         [MESA_SHADER_FRAGMENT]  = devinfo->max_wm_threads,
++         [MESA_SHADER_COMPUTE]   = max_thread_ids,
++      };
++      STATIC_ASSERT(sizeof(devinfo->max_scratch_ids) == sizeof(max_scratch_ids));
++      memcpy(devinfo->max_scratch_ids, max_scratch_ids,
++             sizeof(devinfo->max_scratch_ids));
++   }
++}
++
++static unsigned
++intel_device_info_calc_engine_prefetch(const struct intel_device_info *devinfo,
++                                       enum intel_engine_class engine_class)
++{
++   if (devinfo->verx10 >= 200) {
++      switch (engine_class) {
++      case INTEL_ENGINE_CLASS_RENDER:
++         return 4096;
++      case INTEL_ENGINE_CLASS_COMPUTE:
++         return 1024;
++      default:
++         return 512;
++      }
++   }
++
++   if (intel_device_info_is_mtl_or_arl(devinfo)) {
++      switch (engine_class) {
++      case INTEL_ENGINE_CLASS_RENDER:
++         return 2048;
++      case INTEL_ENGINE_CLASS_COMPUTE:
++         return 1024;
++      default:
++         return 512;
++      }
++   }
++
++   /* DG2 */
++   if (devinfo->verx10 == 125)
++      return 1024;
++
++   /* Older than DG2/MTL */
++   return 512;
++}
++
++static void
++intel_device_info_update_after_hwconfig(struct intel_device_info *devinfo)
++{
++   /* After applying hwconfig values, some items need to be recalculated. */
++   devinfo->max_cs_threads =
++      devinfo->max_eus_per_subslice * devinfo->num_thread_per_eu;
++
++   intel_device_info_update_cs_workgroup_threads(devinfo);
++
++   /* On Skylake through Xe, the 3DSTATE_GS_BODY docs include a note:
++    *
++    *   "The driver must send pipe control with a cs stall after a
++    *    3dstate_gs state change and the Dispatch Mode is simd8 and
++    *    the number of handles allocated to gs is less than 16."
++    *
++    * We don't implement such a PIPE_CONTROL, so instead we set the minimum
++    * number of GS URB entries to 16.  The Xe2+ docs don't have such a note,
++    * but considering they use SIMD16 GS threads, retaining 16 as the minimum
++    * likely makes sense there as well.
++    *
++    * Assuming we did implement that flush, the 3DSTATE_GS docs also note:
++    *
++    *   "At least 8 URB entries must be allocated in order to use SIMD8
++    *    DispatchMode."
++    *
++    * The hardware config tables instead have the limit set as 2, which is
++    * likely an older limit from the SIMD4x2 dual-object/instance era which
++    * is no longer accurate.
++    */
++   devinfo->urb.min_entries[MESA_SHADER_GEOMETRY] =
++      MAX2(16, devinfo->urb.min_entries[MESA_SHADER_GEOMETRY]);
++}
++
++bool
++intel_get_device_info_from_fd(int fd, struct intel_device_info *devinfo, int min_ver, int max_ver)
++{
++   if (NULL != os_get_option("INTEL_STUB_GPU_JSON")) {
++      /* This call will succeed when shim-drm has been initialized with a
++       * serialized intel_device_info structure.
++       */
++      struct drm_intel_stub_devinfo arg = {
++         .addr = (uintptr_t)devinfo,
++         .size = sizeof(*devinfo),
++      };
++      if (0 == intel_ioctl(fd, DRM_IOCTL_INTEL_STUB_DEVINFO, &arg)) {
++         intel_device_info_init_was(devinfo);
++         intel_device_info_apply_workarounds(devinfo);
++         return true;
++      }
++   }
++
++   /* Get PCI info.
++    *
++    * Some callers may already have a valid drm device which holds values of
++    * PCI fields queried here prior to calling this function. But making this
++    * query optional leads to a more cumbersome implementation. These callers
++    * still need to initialize the fields somewhere out of this function and
++    * rely on an ioctl to get PCI device id for the next step when skipping
++    * this drm query.
++    */
++   if (is_intel_virtio_fd(fd)) {
++      if (!intel_virtio_get_pci_device_info(fd, devinfo))
++         return false;
++
++      if (!intel_device_info_init_common(devinfo->pci_device_id,
++                                         false, devinfo))
++         return false;
++
++      devinfo->is_virtio = true;
++   } else {
++      drmDevicePtr drmdev = NULL;
++      if (drmGetDevice2(fd, DRM_DEVICE_GET_PCI_REVISION, &drmdev)) {
++         mesa_loge("Failed to query drm device.");
++         return false;
++      }
++      if (!intel_device_info_init_common(drmdev->deviceinfo.pci->device_id,
++                                         false, devinfo)) {
++         drmFreeDevice(&drmdev);
++         return false;
++      }
++
++      devinfo->pci_domain = drmdev->businfo.pci->domain;
++      devinfo->pci_bus = drmdev->businfo.pci->bus;
++      devinfo->pci_dev = drmdev->businfo.pci->dev;
++      devinfo->pci_func = drmdev->businfo.pci->func;
++      devinfo->pci_device_id = drmdev->deviceinfo.pci->device_id;
++      devinfo->pci_revision_id = drmdev->deviceinfo.pci->revision_id;
++      drmFreeDevice(&drmdev);
++   }
++
++   if ((min_ver > 0 && devinfo->ver < min_ver) || (max_ver > 0 && devinfo->ver > max_ver))
++      return false;
++
++   devinfo->no_hw = debug_get_bool_option("INTEL_NO_HW", false);
++
++   devinfo->kmd_type = intel_get_kmd_type(fd);
++   if (devinfo->kmd_type == INTEL_KMD_TYPE_INVALID) {
++      mesa_loge("Unknown kernel mode driver");
++      return false;
++   }
++
++   /* remaining initialization queries the kernel for device info */
++   if (devinfo->no_hw) {
++      /* Provide some sensible values for NO_HW. */
++      devinfo->gtt_size =
++         devinfo->ver >= 8 ? (1ull << 48) : 2ull * 1024 * 1024 * 1024;
++      intel_device_info_compute_system_memory(devinfo, false);
++      return true;
++   }
++
++   bool ret;
++   switch (devinfo->kmd_type) {
++   case INTEL_KMD_TYPE_I915:
++      ret = intel_device_info_i915_get_info_from_fd(fd, devinfo);
++      break;
++   case INTEL_KMD_TYPE_XE:
++      ret = intel_device_info_xe_get_info_from_fd(fd, devinfo);
++      if (devinfo->verx10 < 200) {
++         if (!debug_get_bool_option("INTEL_XE_IGNORE_EXPERIMENTAL_WARNING", false))
++            mesa_logw("Support for this platform is experimental with Xe KMD, bug reports may be ignored.");
++      }
++      break;
++   default:
++      ret = false;
++      UNREACHABLE("Missing");
++   }
++   if (!ret) {
++      mesa_logw("Could not get intel_device_info.");
++      return false;
++   }
++
++   /* region info is required for lmem support */
++   if (devinfo->has_local_mem && !devinfo->mem.use_class_instance) {
++      mesa_logw("Could not query local memory size.");
++      return false;
++   }
++
++   if (intel_hwconfig_is_required(devinfo))
++      intel_device_info_update_after_hwconfig(devinfo);
++   intel_device_info_adjust_memory(devinfo);
++
++   /* Gfx7 and older do not support EU/Subslice info */
++   assert(devinfo->subslice_total >= 1 || devinfo->ver <= 7);
++   devinfo->subslice_total = MAX2(devinfo->subslice_total, 1);
++
++   init_max_scratch_ids(devinfo);
++
++   for (enum intel_engine_class engine = INTEL_ENGINE_CLASS_RENDER;
++        engine < ARRAY_SIZE(devinfo->engine_class_prefetch); engine++)
++      devinfo->engine_class_prefetch[engine] =
++            intel_device_info_calc_engine_prefetch(devinfo, engine);
++
++   intel_device_info_init_was(devinfo);
++   intel_device_info_apply_workarounds(devinfo);
++
++   return true;
++}
++
++bool intel_device_info_update_memory_info(struct intel_device_info *devinfo, int fd)
++{
++   bool ret;
++
++   switch (devinfo->kmd_type) {
++   case INTEL_KMD_TYPE_I915:
++      ret = intel_device_info_i915_query_regions(devinfo, fd, true);
++      break;
++   case INTEL_KMD_TYPE_XE:
++      ret = intel_device_info_xe_query_regions(fd, devinfo, true);
++      break;
++   default:
++      ret = false;
++   }
++
++   if (ret)
++      intel_device_info_adjust_memory(devinfo);
++   return ret;
++}
+diff --git a/src/intel/dev/intel_device_info_topology.c b/src/intel/dev/intel_device_info_topology.c
+new file mode 100644
+index 0000000..1eb6ad3
+--- /dev/null
++++ b/src/intel/dev/intel_device_info_topology.c
+@@ -0,0 +1,131 @@
++/*
++ * Copyright © 2023 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#include <stdlib.h>
++#include <string.h>
++#include "intel_device_info.h"
++#include "i915/intel_device_info.h"
++#include "util/bitscan.h"
++#include "drm-uapi/i915_drm.h"
++
++void
++intel_device_info_i915_update_from_topology(struct intel_device_info *devinfo,
++                     const struct drm_i915_query_topology_info *topology)
++{
++   intel_device_info_topology_reset_masks(devinfo);
++
++   assert(topology->max_slices > 0);
++   assert(topology->max_subslices > 0);
++   assert(topology->max_eus_per_subslice > 0);
++
++   devinfo->subslice_slice_stride = topology->subslice_stride;
++
++   devinfo->eu_subslice_stride = DIV_ROUND_UP(topology->max_eus_per_subslice, 8);
++   devinfo->eu_slice_stride = topology->max_subslices * devinfo->eu_subslice_stride;
++
++   assert(sizeof(devinfo->slice_masks) >= DIV_ROUND_UP(topology->max_slices, 8));
++   memcpy(&devinfo->slice_masks, topology->data, DIV_ROUND_UP(topology->max_slices, 8));
++   devinfo->max_slices = topology->max_slices;
++   devinfo->max_subslices_per_slice = topology->max_subslices;
++   devinfo->max_eus_per_subslice = topology->max_eus_per_subslice;
++
++   uint32_t subslice_mask_len =
++      topology->max_slices * topology->subslice_stride;
++   assert(sizeof(devinfo->subslice_masks) >= subslice_mask_len);
++   memcpy(devinfo->subslice_masks, &topology->data[topology->subslice_offset],
++          subslice_mask_len);
++
++   uint32_t eu_mask_len =
++      topology->eu_stride * topology->max_subslices * topology->max_slices;
++   assert(sizeof(devinfo->eu_masks) >= eu_mask_len);
++   memcpy(devinfo->eu_masks, &topology->data[topology->eu_offset], eu_mask_len);
++
++   /* Now that all the masks are in place, update the counts. */
++   intel_device_info_topology_update_counts(devinfo);
++   intel_device_info_update_pixel_pipes(devinfo, devinfo->subslice_masks);
++   intel_device_info_update_l3_banks(devinfo);
++}
++
++/* Generate detailed mask from the I915_PARAM_SLICE_MASK,
++ * I915_PARAM_SUBSLICE_MASK & I915_PARAM_EU_TOTAL getparam.
++ */
++bool
++intel_device_info_i915_update_from_masks(struct intel_device_info *devinfo, uint32_t slice_mask,
++                       uint32_t subslice_mask, uint32_t n_eus)
++{
++   struct drm_i915_query_topology_info *topology;
++
++   assert((slice_mask & 0xff) == slice_mask);
++
++   size_t data_length = 100;
++
++   topology = calloc(1, sizeof(*topology) + data_length);
++   if (!topology)
++      return false;
++
++   topology->max_slices = util_last_bit(slice_mask);
++   topology->max_subslices = util_last_bit(subslice_mask);
++
++   topology->subslice_offset = DIV_ROUND_UP(topology->max_slices, 8);
++   topology->subslice_stride = DIV_ROUND_UP(topology->max_subslices, 8);
++
++   uint32_t n_subslices = __builtin_popcount(slice_mask) *
++      __builtin_popcount(subslice_mask);
++   uint32_t max_eus_per_subslice = DIV_ROUND_UP(n_eus, n_subslices);
++   uint32_t eu_mask = (1U << max_eus_per_subslice) - 1;
++
++   topology->max_eus_per_subslice = max_eus_per_subslice;
++   topology->eu_offset = topology->subslice_offset +
++      topology->max_slices * DIV_ROUND_UP(topology->max_subslices, 8);
++   topology->eu_stride = DIV_ROUND_UP(max_eus_per_subslice, 8);
++
++   /* Set slice mask in topology */
++   for (int b = 0; b < topology->subslice_offset; b++)
++      topology->data[b] = (slice_mask >> (b * 8)) & 0xff;
++
++   for (int s = 0; s < topology->max_slices; s++) {
++
++      /* Set subslice mask in topology */
++      for (int b = 0; b < topology->subslice_stride; b++) {
++         int subslice_offset = topology->subslice_offset +
++            s * topology->subslice_stride + b;
++
++         topology->data[subslice_offset] = (subslice_mask >> (b * 8)) & 0xff;
++      }
++
++      /* Set eu mask in topology */
++      for (int ss = 0; ss < topology->max_subslices; ss++) {
++         for (int b = 0; b < topology->eu_stride; b++) {
++            int eu_offset = topology->eu_offset +
++               (s * topology->max_subslices + ss) * topology->eu_stride + b;
++
++            topology->data[eu_offset] = (eu_mask >> (b * 8)) & 0xff;
++         }
++      }
++   }
++
++   intel_device_info_i915_update_from_topology(devinfo, topology);
++   free(topology);
++
++   return true;
++}
+diff --git a/src/intel/dev/meson.build b/src/intel/dev/meson.build
+index ad18130..9d6191a 100644
+--- a/src/intel/dev/meson.build
++++ b/src/intel/dev/meson.build
+@@ -4,20 +4,23 @@
+ # TODO: android?
+ 
+ files_libintel_dev = files(
+-  'i915/intel_device_info.c',
+-  'i915/intel_device_info.h',
+-  'xe/intel_device_info.c',
+-  'xe/intel_device_info.h',
+   'intel_debug.c',
+   'intel_debug.h',
+   'intel_device_info.c',
+   'intel_device_info.h',
+-  'intel_hwconfig.c',
+-  'intel_hwconfig.h',
+-  'intel_kmd.c',
+-  'intel_kmd.h',
++  'intel_device_info_topology.c',
+ )
+ 
++if not with_stela_intel
++  files_libintel_dev += files(
++    'i915/intel_device_info.c',
++    'xe/intel_device_info.c',
++    'intel_device_info_query.c',
++    'intel_hwconfig.c',
++    'intel_kmd.c',
++  )
++endif
++
+ inc_intel_dev_virtio = []
+ link_intel_dev_virtio = []
+ 
+diff --git a/src/intel/genxml/gen_pack_header.py b/src/intel/genxml/gen_pack_header.py
+index 4b0a8f9..5a10e9c 100644
+--- a/src/intel/genxml/gen_pack_header.py
++++ b/src/intel/genxml/gen_pack_header.py
+@@ -44,9 +44,7 @@ pack_header = """%(license)s
+ #define %(guard)s
+ 
+ #ifndef __OPENCL_VERSION__
+-#include <stdio.h>
+-#include "util/bitpack_helpers.h"
+-#include "genX_helpers.h"
++%(helpers)s
+ #else
+ #include "genX_cl_helpers.h"
+ #endif
+@@ -419,7 +417,7 @@ class Value(object):
+         self.dont_use = int(attrs["dont_use"]) != 0 if "dont_use" in attrs else False
+ 
+ class Parser(object):
+-    def __init__(self, opencl, repack):
++    def __init__(self, opencl, repack, helpers_include=None):
+         self.instruction = None
+         self.structs = {}
+         # Set of enum names we've seen.
+@@ -427,6 +425,7 @@ class Parser(object):
+         self.registers = {}
+         self.opencl = opencl
+         self.repack = repack
++        self.helpers_include = helpers_include
+ 
+     def gen_prefix(self, name):
+         if name[0] == "_":
+@@ -637,7 +636,11 @@ class Parser(object):
+         root = genxml.et.getroot()
+         self.platform = root.attrib["name"]
+         self.gen = root.attrib["gen"].replace('.', '')
+-        print(pack_header % {'license': license, 'platform': self.platform, 'guard': self.gen_guard()})
++        helpers = '#include <stdio.h>\n#include "util/bitpack_helpers.h"\n#include "genX_helpers.h"'
++        if self.helpers_include:
++            helpers = '#include "%s"' % self.helpers_include
++        print(pack_header % {'license': license, 'platform': self.platform,
++                             'guard': self.gen_guard(), 'helpers': helpers})
+         for item in root:
+             self.process_item(item)
+         print('#endif /* %s */' % self.gen_guard())
+@@ -652,8 +655,12 @@ def parse_args():
+                    help="List of instruction/structures to generate")
+     p.add_argument('--opencl', action='store_true', help="Generate OpenCL code")
+     p.add_argument('--repack', action='store_true', help="Emit repacking code")
++    p.add_argument('--helpers-include', metavar='HEADER',
++                   help="Use a caller-provided packing helper header (default: Mesa helpers)")
+ 
+     pargs = p.parse_args()
++    if pargs.helpers_include and not re.fullmatch(r'[A-Za-z0-9_./-]+', pargs.helpers_include):
++        p.error("--helpers-include must be an include path without quoting or whitespace")
+ 
+     if pargs.engines is None:
+         print("No engines specified")
+@@ -678,7 +685,7 @@ def main():
+     genxml.filter_engines(engines)
+     if pargs.include_symbols:
+         genxml.filter_symbols(pargs.include_symbols.split(','))
+-    p = Parser(pargs.opencl, pargs.repack)
++    p = Parser(pargs.opencl, pargs.repack, pargs.helpers_include)
+     p.emit_genxml(genxml)
+ 
+ if __name__ == '__main__':

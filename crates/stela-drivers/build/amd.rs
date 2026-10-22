@@ -21,6 +21,10 @@ pub fn build() {
     let manifest =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo supplies manifest"));
     let source = manifest.join("src/gpu/common/mesa");
+    assert!(
+        source.join("meson.build").is_file(),
+        "the upstream GPU sources are missing; run `cargo xtask gpu fetch`"
+    );
     let build = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"))
         .join("mesa-amd-commands");
     let local = manifest.join("../../.tools/gpu/generators/bin");

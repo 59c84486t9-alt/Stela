@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 00:00:00 +0000
+Subject: [PATCH 3/4] drm/i915: split batch emission into a header for Stela's
+ native port
+
+---
+ drivers/gpu/drm/i915/gt/gen8_engine_cs.c     | 20 +++--------
+ drivers/gpu/drm/i915/gt/intel_batch_emit.h   | 36 ++++++++++++++++++++
+ drivers/gpu/drm/i915/gt/intel_gpu_commands.h |  4 +++
+ 3 files changed, 45 insertions(+), 15 deletions(-)
+ create mode 100644 drivers/gpu/drm/i915/gt/intel_batch_emit.h
+
+diff --git a/drivers/gpu/drm/i915/gt/gen8_engine_cs.c b/drivers/gpu/drm/i915/gt/gen8_engine_cs.c
+index 071c1cc4..c5b15f85 100644
+--- a/drivers/gpu/drm/i915/gt/gen8_engine_cs.c
++++ b/drivers/gpu/drm/i915/gt/gen8_engine_cs.c
+@@ -8,6 +8,7 @@
+ #include "gen8_engine_cs.h"
+ #include "intel_engine_regs.h"
+ #include "intel_gpu_commands.h"
++#include "intel_batch_emit.h"
+ #include "intel_gt.h"
+ #include "intel_lrc.h"
+ #include "intel_ring.h"
+@@ -558,13 +559,9 @@ int gen8_emit_bb_start_noarb(struct i915_request *rq,
+ 	 * re-enabled before we close the request
+ 	 * (engine->emit_fini_breadcrumb).
+ 	 */
+-	*cs++ = MI_ARB_ON_OFF | MI_ARB_DISABLE;
+-
+ 	/* FIXME(BDW+): Address space and security selectors. */
+-	*cs++ = MI_BATCH_BUFFER_START_GEN8 |
+-		(flags & I915_DISPATCH_SECURE ? 0 : BIT(8));
+-	*cs++ = lower_32_bits(offset);
+-	*cs++ = upper_32_bits(offset);
++	cs = __gen8_emit_bb_start_noarb(cs, offset,
++				      flags & I915_DISPATCH_SECURE ? 0 : BIT(8));
+ 
+ 	intel_ring_advance(rq, cs);
+ 
+@@ -584,15 +581,8 @@ int gen8_emit_bb_start(struct i915_request *rq,
+ 	if (IS_ERR(cs))
+ 		return PTR_ERR(cs);
+ 
+-	*cs++ = MI_ARB_ON_OFF | MI_ARB_ENABLE;
+-
+-	*cs++ = MI_BATCH_BUFFER_START_GEN8 |
+-		(flags & I915_DISPATCH_SECURE ? 0 : BIT(8));
+-	*cs++ = lower_32_bits(offset);
+-	*cs++ = upper_32_bits(offset);
+-
+-	*cs++ = MI_ARB_ON_OFF | MI_ARB_DISABLE;
+-	*cs++ = MI_NOOP;
++	cs = __gen8_emit_bb_start_with_arb(cs, offset,
++					 flags & I915_DISPATCH_SECURE ? 0 : BIT(8));
+ 
+ 	intel_ring_advance(rq, cs);
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_batch_emit.h b/drivers/gpu/drm/i915/gt/intel_batch_emit.h
+new file mode 100644
+index 00000000..a4ff032e
+--- /dev/null
++++ b/drivers/gpu/drm/i915/gt/intel_batch_emit.h
+@@ -0,0 +1,36 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright © 2014 Intel Corporation */
++#ifndef INTEL_BATCH_EMIT_H
++#define INTEL_BATCH_EMIT_H
++
++#include "intel_gpu_commands.h"
++
++/* Pure packet bodies from gen8_emit_bb_start{,_noarb}(). Address/security
++ * policy and request workarounds remain with their original callers.
++ */
++static inline u32 *__gen8_emit_bb_start_noarb(u32 *cs, u64 offset, u32 ppgtt_flag)
++{
++	*cs++ = MI_ARB_ON_OFF | MI_ARB_DISABLE;
++
++	*cs++ = MI_BATCH_BUFFER_START_GEN8 | ppgtt_flag;
++	*cs++ = lower_32_bits(offset);
++	*cs++ = upper_32_bits(offset);
++
++	return cs;
++}
++
++static inline u32 *__gen8_emit_bb_start_with_arb(u32 *cs, u64 offset, u32 ppgtt_flag)
++{
++	*cs++ = MI_ARB_ON_OFF | MI_ARB_ENABLE;
++
++	*cs++ = MI_BATCH_BUFFER_START_GEN8 | ppgtt_flag;
++	*cs++ = lower_32_bits(offset);
++	*cs++ = upper_32_bits(offset);
++
++	*cs++ = MI_ARB_ON_OFF | MI_ARB_DISABLE;
++	*cs++ = MI_NOOP;
++
++	return cs;
++}
++
++#endif
+diff --git a/drivers/gpu/drm/i915/gt/intel_gpu_commands.h b/drivers/gpu/drm/i915/gt/intel_gpu_commands.h
+index 5394bc7d..e83f7a1c 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gpu_commands.h
++++ b/drivers/gpu/drm/i915/gt/intel_gpu_commands.h
+@@ -6,7 +6,11 @@
+ #ifndef _INTEL_GPU_COMMANDS_H_
+ #define _INTEL_GPU_COMMANDS_H_
+ 
++#ifdef STELA_NATIVE
++#include "../../stela/i915_bits.h"
++#else
+ #include <linux/bitops.h>
++#endif
+ 
+ /*
+  * Target address alignments required for GPU access e.g.

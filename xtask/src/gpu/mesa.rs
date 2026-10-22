@@ -1,5 +1,5 @@
 //! Native host compiler builds. Device access and Metal are separate ports.
-use super::support::{capture, evidence_directory, source_binding};
+use super::support::{capture, evidence_directory, source_binding, tool};
 use crate::tools;
 use anyhow::{Context, Result, ensure};
 use object::{Object, ObjectSymbol, read::archive::ArchiveFile};
@@ -56,15 +56,6 @@ const PROBES: &[(&str, &str)] = &[
     ("brw-codegen", "src/stela/stela_brw_probe"),
     ("elk-codegen", "src/stela/stela_elk_probe"),
 ];
-
-fn tool(name: &str, local: &str) -> Result<PathBuf> {
-    tools::which(name)
-        .or_else(|| {
-            let path = tools::root().join(".tools/gpu").join(local).join(name);
-            path.is_file().then_some(path)
-        })
-        .with_context(|| format!("install {name} and put it in PATH"))
-}
 
 fn run(command: &mut Command, evidence: &Path, stage: &str) -> Result<()> {
     let path = evidence.join(format!("{stage}.log"));

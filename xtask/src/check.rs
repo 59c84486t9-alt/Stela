@@ -11,6 +11,8 @@ const BOOT_RUSTFLAGS: &str = "--cfg aes_force_soft";
 
 pub fn run(fix: bool) -> Result<()> {
     let boot = ["--manifest-path", BOOT_MANIFEST];
+    // The GPU ports build against the pinned, patched upstream sources.
+    crate::gpu::fetch::fetch(false)?;
     if fix {
         exec(cargo().args(["fmt", "--all"]))?;
         exec(cargo().arg("fmt").args(boot).arg("--all"))?;

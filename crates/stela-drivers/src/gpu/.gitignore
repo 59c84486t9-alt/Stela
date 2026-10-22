@@ -1,0 +1,25 @@
+# Upstream files linked by `cargo xtask gpu fetch` from the pinned checkouts
+# in .tools/gpu/src; Stela's changes to them live in patches/.
+/amd/acp/
+/amd/amdgpu/
+/amd/amdkfd/
+/amd/amdxcp/
+/amd/display/
+/amd/include/
+/amd/pm/
+/amd/ras/
+/intel/i915/
+/intel/xe/
+/nvidia/COPYING
+/nvidia/README.md
+/nvidia/nv-compiler.sh
+/nvidia/src/
+/nvidia/utils.mk
+/nvidia/version.mk
+/common/linux/
+/common/mesa/*
+!/common/mesa/src/
+/common/mesa/src/*
+!/common/mesa/src/stela/
+/common/mesa/src/stela/llvm/include/
+/common/mesa/src/stela/llvm/LICENSE.TXT

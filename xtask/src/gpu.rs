@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 #[cfg(test)]
 mod amd;
+pub mod fetch;
 #[cfg(test)]
 mod intel;
 mod macos;
@@ -40,6 +41,15 @@ impl AirFpProfile {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Check out each pinned upstream GPU source under `.tools/gpu/src`,
+    /// apply Stela's patch series and link the imported files into `gpu/`.
+    Fetch {
+        /// Discard commits and edits in a checkout that were never exported.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Write each upstream checkout's commits back to its patch series.
+    Export,
     /// Build the IOKit kernel helper and separate user-space Metal library
     /// objects for arm64e, arm64 and x86-64. No driver is installed or loaded.
     Macos,
@@ -96,6 +106,8 @@ pub enum Command {
 
 pub fn run(command: Command) -> Result<()> {
     match command {
+        Command::Fetch { force } => fetch::fetch(force),
+        Command::Export => fetch::export(),
         Command::Macos => macos::build(),
         Command::Compilers {
             jobs,

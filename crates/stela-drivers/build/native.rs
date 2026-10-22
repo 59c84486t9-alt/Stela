@@ -1,7 +1,16 @@
 //! Native x86-64 tool selection shared by the physical GPU support libraries.
 use std::{env, path::PathBuf, process::Command};
 
+/// Upstream GPU sources are linked into `src/gpu` by `cargo xtask gpu fetch`.
+pub fn require_sources() {
+    assert!(
+        std::path::Path::new("src/gpu/common/linux/include").is_dir(),
+        "the upstream GPU sources are missing; run `cargo xtask gpu fetch`"
+    );
+}
+
 pub fn configure() -> cc::Build {
+    require_sources();
     assert_eq!(
         env::var("CARGO_CFG_TARGET_ARCH").as_deref(),
         Ok("x86_64"),
