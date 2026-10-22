@@ -18,7 +18,7 @@ use super::{
     registers::Identity,
 };
 use crate::platform::apple::{
-    agx,
+    aes, agx,
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
     amcc, ans, asc, atc_phy, bridge, cluster, core_counters, coresight, cpm, cpustart, dart, dcp,
@@ -2475,9 +2475,10 @@ pub struct Iommu {
     pub smmu: Option<(u64, u64)>,
 }
 
-/// The AES engine: its block and key-disable register ranges, its
-/// `aes-version`, its AIC input, and the [`Board::darts`] index and stream
-/// of its `iommu-parent`.
+/// The AES engine: its block and key-disable register ranges, from
+/// version 5 its DKey range, its `aes-version`, `address-width` and
+/// key-disable layout, its AIC input, and the [`Board::darts`] index and
+/// stream of its `iommu-parent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AesEngine {
     pub phandle: Option<u32>,
@@ -2485,7 +2486,8 @@ pub struct AesEngine {
     pub mapper_context: u32,
     pub instance: usize,
     pub ranges: [(u64, u64); 2],
-    pub version: u32,
+    pub dkey: Option<(u64, u64)>,
+    pub config: aes::Config,
     pub irq: u32,
     pub iommu: usize,
     pub stream: u32,
@@ -4222,7 +4224,11 @@ fn memory_cache(
 }
 
 /// The modeled AES engine under `/arm-io`, if the DeviceTree keeps one; its
-/// `iommu-parent` must be a mapper of a modeled DART.
+/// `iommu-parent` must be a mapper of a modeled DART. Its `reg` has the
+/// DKey range third from `aes-version` 5, as the 26A434
+/// AppleS8000AESAccelerator `start` maps it; `address-width` (default 36)
+/// and the `sioaesdisable*-offset` words are the driver's
+/// `OverrideRegMap` inputs, 32-bit like its `getDTProperty` requires.
 fn aes_engine(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
@@ -4232,19 +4238,46 @@ fn aes_engine(
         return Ok(None);
     };
     const PATH: &str = "/arm-io/aes";
+    let number = |name: &str| {
+        node.first_u32(name)
+            .ok_or_else(|| format!("{PATH} has no {name}"))
+    };
+    let optional = |name: &str| match node.property(name) {
+        None => Ok(None),
+        Some(&[a, b, c, d]) => Ok(Some(u32::from_le_bytes([a, b, c, d]))),
+        Some(_) => Err(format!("{PATH} {name} is not one 32-bit cell")),
+    };
+    let version = number("aes-version")?;
     let reg = apertures::registers(&node).unwrap_or_default();
-    let &[block, key_disable] = reg.as_slice() else {
-        return Err(format!("{PATH} has {} register ranges, not two", reg.len()));
+    let (block, key_disable, dkey) = match (reg.as_slice(), version >= aes::DKEY_VERSION) {
+        (&[block, key_disable], false) => (block, key_disable, None),
+        (&[block, key_disable, dkey], true) => (block, key_disable, Some(dkey)),
+        _ => {
+            return Err(format!(
+                "{PATH} aes-version {version} has {} register ranges",
+                reg.len()
+            ));
+        }
     };
     let place = |(offset, bytes): (u64, u64)| {
         translate(offset, bytes)
             .map(|physical| (physical, bytes))
             .ok_or_else(|| format!("{PATH} lies outside /arm-io ranges"))
     };
-    let number = |name: &str| {
-        node.first_u32(name)
-            .ok_or_else(|| format!("{PATH} has no {name}"))
+    let config = aes::Config {
+        version,
+        address_width: optional("address-width")?.unwrap_or(aes::DEFAULT_ADDRESS_WIDTH),
+        key_disable: aes::KeyDisable {
+            bytes: key_disable.1,
+            word: optional("sioaesdisable-offset")?.unwrap_or(0),
+            keys: [
+                optional("sioaesdisableuid1-offset")?,
+                optional("sioaesdisablegid0-offset")?,
+                optional("sioaesdisablegid1-offset")?,
+            ],
+        },
     };
+    config.validate().map_err(|why| format!("{PATH}: {why}"))?;
     let phandle =
         native_dma_phandle(&node, "AAPL,phandle").map_err(|why| format!("{PATH} {why}"))?;
     let parent = native_dma_phandle(&node, "iommu-parent")
@@ -4275,7 +4308,8 @@ fn aes_engine(
         mapper_context,
         instance: 0,
         ranges: [place(block)?, place(key_disable)?],
-        version: number("aes-version")?,
+        dkey: dkey.map(place).transpose()?,
+        config,
         irq: number("interrupts")?,
         iommu,
         stream,
@@ -6875,11 +6909,88 @@ mod tests {
                 mapper_context: 1,
                 instance: 0,
                 ranges: [(0x2_3500_c000, 0x4000), (0x2_3d2d_c000, 0x8000)],
-                version: 3,
+                dkey: None,
+                config: aes::Config {
+                    version: 3,
+                    address_width: aes::DEFAULT_ADDRESS_WIDTH,
+                    key_disable: aes::KeyDisable {
+                        bytes: 0x8000,
+                        word: 0,
+                        keys: [None; 3],
+                    },
+                },
                 irq: 0x2f7,
                 iommu: 0,
                 stream: 1,
             })
+        );
+        // J773g: version 5 with its DKey range, 42-bit addresses and a
+        // disable word per key.
+        let m4 = |reg: &[u64], version: u32, gid1: &[u8]| {
+            encode(
+                &[
+                    ("name", &z("aes")),
+                    ("compatible", &z(AES)),
+                    ("reg", &u64s(reg)),
+                    ("interrupts", &u32s(&[0x425])),
+                    ("iommu-parent", &u32s(&[0x8a])),
+                    ("aes-version", &u32s(&[version])),
+                    ("address-width", &u32s(&[42])),
+                    ("sioaesdisable-offset", &u32s(&[0])),
+                    ("sioaesdisableuid1-offset", &u32s(&[0x40])),
+                    ("sioaesdisablegid0-offset", &u32s(&[0x44])),
+                    ("sioaesdisablegid1-offset", gid1),
+                ],
+                &[],
+            )
+        };
+        let three = [
+            0x3500_c000,
+            0x4000,
+            0x3d2d_c000,
+            0x8000,
+            0x3d07_8000,
+            0x4000,
+        ];
+        let parse = |node: Vec<u8>| {
+            board(&tree_with_io(
+                0x8112,
+                "Apple M2",
+                MODELED,
+                &[],
+                &[sio.clone(), node],
+            ))
+            .map(|board| board.aes.unwrap())
+        };
+        let wide = parse(m4(&three, 5, &u32s(&[0x48]))).unwrap();
+        assert_eq!(wide.dkey, Some((0x2_3d07_8000, 0x4000)));
+        assert_eq!(
+            wide.config,
+            aes::Config {
+                version: 5,
+                address_width: 42,
+                key_disable: aes::KeyDisable {
+                    bytes: 0x8000,
+                    word: 0,
+                    keys: [Some(0x40), Some(0x44), Some(0x48)],
+                },
+            }
+        );
+        assert_eq!(
+            parse(m4(&three[..4], 5, &u32s(&[0x48]))),
+            Err("/arm-io/aes aes-version 5 has 2 register ranges".into())
+        );
+        assert_eq!(
+            parse(m4(&three, 3, &u32s(&[0x48]))),
+            Err("/arm-io/aes aes-version 3 has 3 register ranges".into())
+        );
+        assert_eq!(
+            parse(m4(&three, 5, &u32s(&[0x48, 0]))),
+            Err("/arm-io/aes sioaesdisablegid1-offset is not one 32-bit cell".into())
+        );
+        assert_eq!(
+            parse(m4(&three, 5, &u32s(&[0x44]))),
+            Err("/arm-io/aes: AES key-disable words overlap".into())
         );
         assert_eq!(
             board(&tree_with_io(

@@ -1252,14 +1252,17 @@ fn devices<'f>(
         }
     }
     if let Some(aes) = board.and_then(|board| board.aes) {
-        let [block, key_disable] = aes
+        let ranges: Vec<Range> = aes
             .ranges
-            .map(|(physical, bytes)| Range { physical, bytes });
+            .into_iter()
+            .chain(aes.dkey)
+            .map(|(physical, bytes)| Range { physical, bytes })
+            .collect();
         // No per-installation UID1 key is provisioned yet: the engine
         // reports every hardware key disabled.
         devices.add_aes(
-            [block, key_disable],
-            aes.version,
+            &ranges,
+            aes.config,
             Some(AicInput::new(0, aes.irq as u16)),
             (native_dart(aes.iommu, aes.instance)?, aes.stream as usize),
             None,

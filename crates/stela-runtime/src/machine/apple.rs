@@ -1976,29 +1976,42 @@ impl AppleDevices {
             .find_map(|master| master.session.take_log())
     }
 
-    /// An `aes,s8000` of `aes-version` `version` at its block and
-    /// key-disable ranges, whose DMA goes through `stream` of `dart` and
-    /// whose UID1 key is `uid`, if the board has one.
+    /// An `aes,s8000` the ADT describes in `config`, at its block and
+    /// key-disable ranges and, from version 5, its DKey range, whose DMA
+    /// goes through `stream` of `dart` and whose UID1 key is `uid`, if the
+    /// board has one.
     pub fn add_aes(
         &mut self,
-        [block, key_disable]: [Range; 2],
-        version: u32,
+        ranges: &[Range],
+        config: aes::Config,
         irq: Option<AicInput>,
         (dart, stream): (DartId, usize),
         uid: Option<[u8; 32]>,
     ) -> Result<(), String> {
         self.validate_native_dart("AES", dart, stream)?;
-        if block.bytes != aes::BLOCK_BYTES {
+        let expected = if config.has_dkey() { 3 } else { 2 };
+        if ranges.len() != expected {
+            return Err(format!(
+                "AES aes-version {} has {expected} register ranges, not {}",
+                config.version,
+                ranges.len()
+            ));
+        }
+        if ranges[0].bytes != aes::BLOCK_BYTES {
             return Err(format!(
                 "AES block registers span {:#x} bytes, not the modeled {:#x}",
-                block.bytes,
+                ranges[0].bytes,
                 aes::BLOCK_BYTES
             ));
         }
-        let device = self.bus.add(Box::new(Aes::new(version, irq, uid)));
-        self.map(device, &[block, key_disable])
+        if ranges[1].bytes != config.key_disable.bytes {
+            return Err("AES key-disable range differs from its layout".into());
+        }
+        let engine = Aes::new(config, irq, uid).map_err(String::from)?;
+        let device = self.bus.add(Box::new(engine));
+        self.map(device, ranges)
             .map_err(|error| format!("AES placement: {error:?}"))?;
-        self.register_power_device(block.physical, device, false)?;
+        self.register_power_device(ranges[0].physical, device, false)?;
         self.masters.push(Master {
             aes: device,
             dart: dart.0,
@@ -3343,6 +3356,19 @@ impl Devices for AppleDevices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The J473 `/arm-io/aes`: version 3, one key-disable word.
+    fn j473_aes() -> aes::Config {
+        aes::Config {
+            version: 3,
+            address_width: aes::DEFAULT_ADDRESS_WIDTH,
+            key_disable: aes::KeyDisable {
+                bytes: 0x8000,
+                word: 0,
+                keys: [None; 3],
+            },
+        }
+    }
     use crate::platform::{
         apple::bus::MmioDevice,
         dma::{Iommu, tests::Ram},
@@ -5130,7 +5156,7 @@ mod tests {
         fn refuse(d: &mut AppleDevices, dart: DartId, input: usize) {
             assert!(
                 d.add_aes(
-                    [
+                    &[
                         Range {
                             physical: AES,
                             bytes: aes::BLOCK_BYTES
@@ -5140,7 +5166,7 @@ mod tests {
                             bytes: 0x8000
                         }
                     ],
-                    3,
+                    j473_aes(),
                     None,
                     (dart, input),
                     None
@@ -5230,7 +5256,7 @@ mod tests {
             assert!(d.read(0, WRAPPER + 0x8114, 4, 0).is_err());
             // Every refusal left the apertures available for a valid native retry.
             d.add_aes(
-                [
+                &[
                     Range {
                         physical: AES,
                         bytes: aes::BLOCK_BYTES,
@@ -5240,7 +5266,7 @@ mod tests {
                         bytes: 0x8000,
                     },
                 ],
-                3,
+                j473_aes(),
                 None,
                 (owner, 1),
                 None,
@@ -5820,7 +5846,9 @@ mod tests {
                 bytes: 0x8000,
             },
         ];
-        devices.add_aes(ranges, 3, None, (dart, 1), None).unwrap();
+        devices
+            .add_aes(&ranges, j473_aes(), None, (dart, 1), None)
+            .unwrap();
         let mut ram = Ram::new(RAM, 0x1000);
         let plain: Vec<u8> = (0..16).map(|byte| byte * 0x11).collect();
         assert!(Memory::write(&mut ram, RAM, &plain));
@@ -5852,6 +5880,51 @@ mod tests {
         );
         // The FIFO drained: EMPTY with LEVEL 0.
         assert_eq!(devices.read(0, AES + 0x24, 4, 0).unwrap() & 0xff02, 0b10);
+    }
+
+    /// A J773g-shaped version 5 engine owns its DKey range third; its key
+    /// words follow the ADT offsets.
+    #[test]
+    fn version_5_aes_places_its_dkey_range_after_the_key_disable_words() {
+        const DART: u64 = 0x1_ad00_4000;
+        const AES: u64 = 0x1_ad00_c000;
+        const DISABLE: u64 = 0x1_882d_c000;
+        const DKEY: u64 = 0x1_8807_8000;
+        let mut devices = AppleDevices::new();
+        let dart = devices
+            .add_dart(
+                Range {
+                    physical: DART,
+                    bytes: 0x4000,
+                },
+                16,
+                None,
+                None,
+            )
+            .unwrap();
+        let config = aes::Config {
+            version: 5,
+            address_width: 42,
+            key_disable: aes::KeyDisable {
+                bytes: 0x8000,
+                word: 0,
+                keys: [Some(0x40), Some(0x44), Some(0x48)],
+            },
+        };
+        let ranges = [(AES, 0x4000), (DISABLE, 0x8000), (DKEY, 0x4000)]
+            .map(|(physical, bytes)| Range { physical, bytes });
+        assert!(
+            devices
+                .add_aes(&ranges[..2], config, None, (dart, 1), None)
+                .unwrap_err()
+                .contains("has 3 register ranges, not 2")
+        );
+        devices
+            .add_aes(&ranges, config, None, (dart, 1), None)
+            .unwrap();
+        assert_eq!(devices.read(0, DISABLE, 4, 0).unwrap(), 0xf);
+        assert_eq!(devices.read(0, DISABLE + 0x40, 4, 0).unwrap(), 0);
+        assert!(devices.write(0, DKEY + 4, 4, 1, 0).is_err());
     }
     #[test]
     fn sep_native_nonzero_routes_read_actual_firmware_and_preflight_owner_capacity() {

@@ -24,9 +24,30 @@
 //! - COMMAND_FIFO (0x200, 0x100 in version 0): each word written joins the
 //!   FIFO.
 //!
-//! The second range holds the key-disable register at its start (the
-//! driver's default `sioaesdisable-offset`): UID1 0, GID0 1, GID1 2 and a
-//! fourth hardware key 3, each sticky once written as one.
+//! The second range holds the key-disable words. The word at
+//! `sioaesdisable-offset` (default 0) has a sticky bit per hardware key:
+//! UID1 0, GID0 1, GID1 2 and a fourth key 3 (IOAESAccelerator handle 3000),
+//! each set by writing it as one. A key whose ADT names its own word
+//! (`sioaesdisableuid1-offset`, `-gid0-`, `-gid1-`; 0x40, 0x44, 0x48 on M3
+//! and M4, 4, 8, 0xc on M5 and M6) is enabled while that word reads
+//! 0xa050c030, and writing 0xa55ac33c disables it (`OverrideRegMap`,
+//! `_isKeyDisabled`, `disableHardwareKey`). The layout follows the ADT, not
+//! `aes-version`: version 3 M3 boards have the separate words too.
+//!
+//! The 26A434 driver is one binary for every board (M2 J473, M3 J613, M4
+//! J773g, M5 J813 and M6 J873g, identical code apart from relocation and
+//! the M6 build's lack of pointer authentication). Its only `aes-version`
+//! branches: the FIFO at 0x100 in version 0; CLEAR_FIFO before version 2;
+//! the seeded STATUS bits and interrupt masks from version 2; a third
+//! `reg` range, the DKey range, from version 5 (`start`); its distribution
+//! register at 4 in version 5 and 8 from version 6 (`_distribute_dkey`);
+//! and the H16 scrambler option from version 5 (`getSupportedOptions`).
+//! Distribution writes one and waits up to 5 s for bit 0 to clear; it
+//! precedes command 13 (H16 scrambled key) for AppleAVD, whose payload
+//! seed the driver first writes to the block's 0x50-0x5c. The ADT
+//! `address-width` (default 36) sets the high address fields: 10 bits at
+//! 42 (every M3 to M6 board, whose `dart-sio` window starts at 2^40),
+//! 8 bits otherwise.
 //!
 //! Commands are an opcode [31:28] and its operands, in FIFO words:
 //! - KEY (1): context 27, select [26:24] (0 software, 1 UID1, 2 and 3 GID0
@@ -35,11 +56,11 @@
 //!   CTR), then a software key's words.
 //! - IV (2): context [27:26], then four words.
 //! - DATA (5): key context 27, IV context [26:25], length [23:0] in bytes,
-//!   then source [23:16] and destination [7:0] high address bits, the
-//!   source's and the destination's low 32 bits: I/O addresses through the
-//!   engine's IOMMU stream.
-//! - STORE_IV (6): context [27:26], destination high bits [7:0], then its
-//!   low 32 bits: writes the context's chaining value.
+//!   then the source's high address bits from bit 16 and the destination's
+//!   from bit 0 (8 or 10 bits each), the source's and the destination's
+//!   low 32 bits: I/O addresses through the engine's IOMMU stream.
+//! - STORE_IV (6): context [27:26], destination high bits from bit 0, then
+//!   its low 32 bits: writes the context's chaining value.
 //! - FLAG (8): code [7:0], STOP 26, INTERRUPT 27.
 //!
 //! Inferred, not documented: the engine has no DPA countermeasure to seed,
@@ -49,13 +70,17 @@
 //! hardware key the key-disable register disables raises KEY_DISABLED and
 //! leaves its context without a key, and DATA with no key raises
 //! KEY_INVALID_AT_USE_TIME, transferring nothing; a FLAG with STOP stops the
-//! FIFO like CONTROL STOP. Stela has no Apple GID keys, so GID0, GID1 and the
-//! fourth key read disabled; UID1 is the board's own per-installation key
-//! when it has one, else disabled too. VERSION, CONFIG, KEY_ID, AXI_STATUS,
-//! COMMAND_FIFO_COUNT, SKG_KEY, the history FIFO, the tag registers
-//! (0x50-0x6c), RESET and RESET_AES, wrapped keys, key functions, HDCP keys
-//! and the DSB, SKG and WRITE_REG commands are refused until their values or
-//! behavior are known.
+//! FIFO like CONTROL STOP; a key's own disable word reads zero once
+//! disabled (the driver only compares it with the enabled value); the
+//! per-key bit word reports a key with its own word in that key's bit, and
+//! writing such a bit there is refused. Stela has no Apple GID keys, so
+//! GID0, GID1 and the fourth key read disabled; UID1 is the board's own
+//! per-installation key when it has one, else disabled too. VERSION,
+//! CONFIG, KEY_ID, AXI_STATUS, COMMAND_FIFO_COUNT, SKG_KEY, the history
+//! FIFO, the tag registers (0x50-0x6c), RESET and RESET_AES, wrapped keys,
+//! key functions, HDCP keys, the DSB, SKG, WRITE_REG and H16 scrambled-key
+//! commands, DKey distribution, DATA bit 24 and the reserved bits of the
+//! address words are refused until their values or behavior are known.
 use super::bus::{
     Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
 };
@@ -68,8 +93,20 @@ use alloc::vec;
 
 const NAME: &str = "aes-s8000";
 
-/// Bytes of the block register range; the key-disable range follows it.
+/// Bytes of the block register range; the key-disable range follows it,
+/// then the DKey range from version 5.
 pub const BLOCK_BYTES: u64 = 0x4000;
+/// The driver's `address-width` when the ADT gives none.
+pub const DEFAULT_ADDRESS_WIDTH: u32 = 36;
+/// The first `aes-version` with a DKey range.
+pub const DKEY_VERSION: u32 = 5;
+/// The `address-width` whose high address fields are 10 bits wide.
+const WIDE_ADDRESS_WIDTH: u32 = 42;
+/// The widest `address-width` with 8-bit high address fields.
+const NARROW_ADDRESS_WIDTH: u32 = 40;
+const NARROW_HIGH: u32 = 0xff;
+const WIDE_HIGH: u32 = 0x3ff;
+const SOURCE_HIGH_SHIFT: u32 = 16;
 const CONTROL: u64 = 0x8;
 const STATUS: u64 = 0xc;
 const INT_STATUS: u64 = 0x18;
@@ -78,7 +115,9 @@ const WATERMARKS: u64 = 0x20;
 const FIFO_STATUS: u64 = 0x24;
 const FLAG_COMMAND: u64 = 0x30;
 const CLEAR_FIFO: u64 = 0x38;
-const KEY_DISABLE: u64 = BLOCK_BYTES;
+/// The DKey distribution register: write one, wait for bit 0 to clear.
+const DKEY_DISTRIBUTE_V5: u64 = 0x4;
+const DKEY_DISTRIBUTE_V6: u64 = 0x8;
 
 const CONTROL_START: u32 = 1;
 const CONTROL_STOP: u32 = 1 << 1;
@@ -108,6 +147,12 @@ const WATERMARK: u32 = 0x7f;
 const DISABLE_UID1: u32 = 1;
 const DISABLE_KNOWN: u32 = 0xf;
 const DISABLE_ALL_BUT_UID1: u32 = DISABLE_KNOWN & !DISABLE_UID1;
+/// What a key's own disable word reads while the key is enabled.
+const KEY_ENABLED: u32 = 0xa050_c030;
+/// The value that disables a key through its own word.
+const KEY_DISABLE: u32 = 0xa55a_c33c;
+/// What a key's own disable word reads once disabled (inferred).
+const KEY_DISABLED: u32 = 0;
 
 const OPCODE_KEY: u32 = 1;
 const OPCODE_IV: u32 = 2;
@@ -117,11 +162,19 @@ const OPCODE_DATA: u32 = 5;
 const OPCODE_STORE_IV: u32 = 6;
 const OPCODE_WRITE_REG: u32 = 7;
 const OPCODE_FLAG: u32 = 8;
+const OPCODE_SCRAMBLED_KEY: u32 = 0xd;
 
+const OPCODE_SHIFT: u32 = 28;
+const OPCODE_FIELD: u32 = 0xf << OPCODE_SHIFT;
 const KEY_WRAPPED: u32 = 1 << 21;
 const KEY_ENCRYPT: u32 = 1 << 20;
 const FLAG_STOP: u32 = 1 << 26;
 const FLAG_INTERRUPT: u32 = 1 << 27;
+const DATA_LENGTH: u32 = 0xff_ffff;
+/// DATA bit 24, which the driver never sets.
+const DATA_RESERVED: u32 = 1 << 24;
+const STORE_IV_CONTEXT_SHIFT: u32 = 26;
+const CONTEXT_MASK: u32 = 3;
 
 /// Operand words of the longest command, a KEY with a 256-bit key.
 const MAX_OPERANDS: usize = 8;
@@ -212,9 +265,88 @@ fn xor(block: &mut [u8; BLOCK], other: &[u8; BLOCK]) {
     }
 }
 
+/// What the ADT states about one engine (`/arm-io/aes`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Config {
+    /// `aes-version`.
+    pub version: u32,
+    /// `address-width`, or [`DEFAULT_ADDRESS_WIDTH`].
+    pub address_width: u32,
+    pub key_disable: KeyDisable,
+}
+
+/// The key-disable range's ADT layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyDisable {
+    /// Bytes of the range (`reg[1]`).
+    pub bytes: u64,
+    /// `sioaesdisable-offset`, the per-key bit word, or 0.
+    pub word: u32,
+    /// `sioaesdisableuid1-offset`, `-gid0-` and `-gid1-`, each key's own
+    /// word when the ADT names one.
+    pub keys: [Option<u32>; 3],
+}
+
+impl Config {
+    /// Whether the engine has a DKey range (`reg[2]`).
+    pub fn has_dkey(&self) -> bool {
+        self.version >= DKEY_VERSION
+    }
+
+    /// Refuses a version, width or key-disable layout no established
+    /// driver contract covers.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !matches!(self.version, 0..=3 | 5 | 6) {
+            return Err("AES aes-version without an established layout");
+        }
+        if self.address_width > NARROW_ADDRESS_WIDTH && self.address_width != WIDE_ADDRESS_WIDTH {
+            return Err("AES address-width without an established address field width");
+        }
+        let disable = &self.key_disable;
+        let words = core::iter::once(Some(disable.word)).chain(disable.keys);
+        for (index, offset) in words.clone().enumerate() {
+            let Some(offset) = offset else { continue };
+            if !offset.is_multiple_of(4) || u64::from(offset) + 4 > disable.bytes {
+                return Err("AES key-disable word outside its range or unaligned");
+            }
+            if words
+                .clone()
+                .skip(index + 1)
+                .any(|other| other == Some(offset))
+            {
+                return Err("AES key-disable words overlap");
+            }
+        }
+        Ok(())
+    }
+
+    fn high_mask(&self) -> u32 {
+        if self.address_width == WIDE_ADDRESS_WIDTH {
+            WIDE_HIGH
+        } else {
+            NARROW_HIGH
+        }
+    }
+
+    fn dkey_distribute(&self) -> u64 {
+        if self.version > DKEY_VERSION {
+            DKEY_DISTRIBUTE_V6
+        } else {
+            DKEY_DISTRIBUTE_V5
+        }
+    }
+}
+
+/// Where a device offset lands.
+enum Space {
+    Block(u64),
+    KeyDisable(u64),
+    DKey(u64),
+}
+
 pub struct Aes {
     lifecycle: LifecycleState,
-    version: u32,
+    config: Config,
     irq: Option<AicInput>,
     irq_level: bool,
     uid: Option<[u8; 32]>,
@@ -231,14 +363,19 @@ pub struct Aes {
 }
 
 impl Aes {
-    /// An engine of ADT `aes-version` `version`, interrupting on `irq`,
-    /// whose UID1 key is `uid` (disabled without one).
-    pub fn new(version: u32, irq: Option<AicInput>, uid: Option<[u8; 32]>) -> Self {
+    /// An engine as the ADT describes it in `config`, interrupting on
+    /// `irq`, whose UID1 key is `uid` (disabled without one).
+    pub fn new(
+        config: Config,
+        irq: Option<AicInput>,
+        uid: Option<[u8; 32]>,
+    ) -> Result<Self, &'static str> {
+        config.validate()?;
         let disabled = match uid {
             Some(_) => DISABLE_ALL_BUT_UID1,
             None => DISABLE_KNOWN,
         };
-        Self {
+        Ok(Self {
             lifecycle: LifecycleState {
                 powered: true,
                 clocked: true,
@@ -246,7 +383,7 @@ impl Aes {
                 reset: false,
                 retention: false,
             },
-            version,
+            config,
             irq,
             irq_level: false,
             uid,
@@ -260,6 +397,78 @@ impl Aes {
             flag: 0,
             keys: [None, None],
             ivs: [[0; BLOCK]; 4],
+        })
+    }
+
+    fn space(&self, offset: u64) -> Space {
+        let disable = BLOCK_BYTES + self.config.key_disable.bytes;
+        if offset < BLOCK_BYTES {
+            Space::Block(offset)
+        } else if offset < disable {
+            Space::KeyDisable(offset - BLOCK_BYTES)
+        } else {
+            Space::DKey(offset - disable)
+        }
+    }
+
+    /// The key-disable bit of the key whose own word is at `offset`.
+    fn own_word(&self, offset: u64) -> Option<u32> {
+        let keys = self.config.key_disable.keys;
+        let index = keys
+            .iter()
+            .position(|&word| word.map(u64::from) == Some(offset))?;
+        Some(1 << index)
+    }
+
+    /// The key-disable bits of the keys that have their own words.
+    fn own_words(&self) -> u32 {
+        let keys = self.config.key_disable.keys.iter();
+        keys.enumerate()
+            .filter(|(_, word)| word.is_some())
+            .fold(0, |bits, (index, _)| bits | 1 << index)
+    }
+
+    fn read_key_disable(&self, offset: u64) -> Option<u32> {
+        if offset == u64::from(self.config.key_disable.word) {
+            return Some(self.disabled);
+        }
+        let bit = self.own_word(offset)?;
+        Some(if self.disabled & bit != 0 {
+            KEY_DISABLED
+        } else {
+            KEY_ENABLED
+        })
+    }
+
+    fn write_key_disable(&mut self, offset: u64, value: u32) -> Result<(), &'static str> {
+        if offset == u64::from(self.config.key_disable.word) {
+            if value & !DISABLE_KNOWN != 0 {
+                return Err("AES key-disable reserved bits");
+            }
+            if value & self.own_words() != 0 {
+                return Err("AES key-disable bit of a key with its own disable word");
+            }
+            self.disabled |= value;
+            return Ok(());
+        }
+        let bit = self
+            .own_word(offset)
+            .ok_or("unknown AES key-disable register")?;
+        if value != KEY_DISABLE {
+            return Err("AES key-disable word value other than the disable value");
+        }
+        self.disabled |= bit;
+        Ok(())
+    }
+
+    /// Why an access at `offset` in the DKey range is refused.
+    fn dkey_refusal(&self, offset: u64) -> &'static str {
+        if !self.config.has_dkey() {
+            "unknown AES register"
+        } else if offset == self.config.dkey_distribute() {
+            "AES DKey distribution to AppleAVD"
+        } else {
+            "unknown AES DKey register"
         }
     }
 
@@ -281,7 +490,11 @@ impl Aes {
     }
 
     fn command_fifo(&self) -> u64 {
-        if self.version == 0 { 0x100 } else { 0x200 }
+        if self.config.version == 0 {
+            0x100
+        } else {
+            0x200
+        }
     }
 
     fn low(&self) -> bool {
@@ -366,7 +579,7 @@ impl Aes {
                 reason,
             )
         };
-        Ok(match command >> 28 {
+        Ok(match command >> OPCODE_SHIFT {
             OPCODE_KEY if (command >> 24) & 7 == 0 => 1 + key_bytes(command) / 4,
             OPCODE_KEY => 1,
             OPCODE_IV => 5,
@@ -376,6 +589,7 @@ impl Aes {
             OPCODE_DSB => return Err(fail("AES DSB command")),
             OPCODE_SKG => return Err(fail("AES SKG command")),
             OPCODE_WRITE_REG => return Err(fail("AES WRITE_REG command")),
+            OPCODE_SCRAMBLED_KEY => return Err(fail("AES H16 scrambled-key command")),
             _ => 1,
         })
     }
@@ -395,7 +609,7 @@ impl Aes {
                 reason,
             )
         };
-        match command >> 28 {
+        match command >> OPCODE_SHIFT {
             OPCODE_KEY => {
                 if command & KEY_WRAPPED != 0 {
                     return Err(fail("AES wrapped keys"));
@@ -462,8 +676,13 @@ impl Aes {
             }
             OPCODE_DATA => self.data(command, operands, port)?,
             OPCODE_STORE_IV => {
-                let context = (command >> 26 & 3) as usize;
-                let destination = u64::from(command & 0xff) << 32 | u64::from(operands[0]);
+                let high = self.config.high_mask();
+                let fields = OPCODE_FIELD | CONTEXT_MASK << STORE_IV_CONTEXT_SHIFT | high;
+                if command & !fields != 0 {
+                    return Err(fail("AES STORE_IV reserved bits"));
+                }
+                let context = (command >> STORE_IV_CONTEXT_SHIFT & CONTEXT_MASK) as usize;
+                let destination = u64::from(command & high) << 32 | u64::from(operands[0]);
                 let iv = self.ivs[context];
                 if let Err(error) = port.write(destination, &iv) {
                     self.dma_failed(error, INT_AXI_WRITE)?;
@@ -489,12 +708,28 @@ impl Aes {
         operands: &[u32],
         port: &mut Port<'_, '_>,
     ) -> Result<(), MmioError> {
-        let length = (command & 0xff_ffff) as usize;
+        let fail = |reason| {
+            refuse(
+                NAME,
+                self.command_fifo(),
+                Width::Word,
+                Direction::Write,
+                reason,
+            )
+        };
+        let length = (command & DATA_LENGTH) as usize;
         let context = (command >> 27 & 1) as usize;
-        let iv_context = (command >> 25 & 3) as usize;
+        let iv_context = (command >> 25 & CONTEXT_MASK) as usize;
         let [upper, source, destination] = [operands[0], operands[1], operands[2]];
-        let source = u64::from(upper >> 16 & 0xff) << 32 | u64::from(source);
-        let destination = u64::from(upper & 0xff) << 32 | u64::from(destination);
+        let high = self.config.high_mask();
+        if command & DATA_RESERVED != 0 {
+            return Err(fail("AES DATA bit 24"));
+        }
+        if upper & !(high << SOURCE_HIGH_SHIFT | high) != 0 {
+            return Err(fail("AES DATA address word reserved bits"));
+        }
+        let source = u64::from(upper >> SOURCE_HIGH_SHIFT & high) << 32 | u64::from(source);
+        let destination = u64::from(upper & high) << 32 | u64::from(destination);
         if !length.is_multiple_of(BLOCK) {
             self.int_status |= INT_INVALID_LENGTH;
             return Ok(());
@@ -594,6 +829,16 @@ impl MmioDevice for Aes {
         if width != Width::Word {
             return Err(fail("AES registers are 32-bit"));
         }
+        let offset = match self.space(offset) {
+            Space::Block(offset) => offset,
+            Space::KeyDisable(at) => {
+                let value = self.read_key_disable(at);
+                return value
+                    .map(u64::from)
+                    .ok_or_else(|| fail("unknown AES key-disable register"));
+            }
+            Space::DKey(at) => return Err(fail(self.dkey_refusal(at))),
+        };
         let value = match offset {
             CONTROL => 0,
             STATUS => STATUS_SEEDED | if self.started { STATUS_FIFO_ENABLED } else { 0 },
@@ -602,7 +847,6 @@ impl MmioDevice for Aes {
             WATERMARKS => self.watermark,
             FIFO_STATUS => self.fifo_status(),
             FLAG_COMMAND => self.flag,
-            KEY_DISABLE => self.disabled,
             _ => return Err(fail("unknown AES register")),
         };
         Ok(u64::from(value))
@@ -627,6 +871,11 @@ impl MmioDevice for Aes {
             return Err(fail("AES registers are 32-bit"));
         }
         let value = value as u32;
+        let offset = match self.space(offset) {
+            Space::Block(offset) => offset,
+            Space::KeyDisable(at) => return self.write_key_disable(at, value).map_err(fail),
+            Space::DKey(at) => return Err(fail(self.dkey_refusal(at))),
+        };
         match offset {
             CONTROL => match value {
                 CONTROL_START => self.started = true,
@@ -643,8 +892,6 @@ impl MmioDevice for Aes {
                     self.overflow = false;
                 }
             }
-            KEY_DISABLE if value & !DISABLE_KNOWN == 0 => self.disabled |= value,
-            KEY_DISABLE => return Err(fail("AES key-disable reserved bits")),
             _ if offset == self.command_fifo() => {
                 if self.fifo.len() < FIFO_WORDS {
                     self.fifo.push_back(value);
@@ -671,9 +918,16 @@ mod tests {
     const SOURCE: u64 = RAM + 0x1000;
     const DESTINATION: u64 = RAM + 0x2000;
 
-    /// Every stream reaches RAM at its I/O address.
-    struct Identity;
-    impl Iommu for Identity {
+    /// The per-key bit word of the J473 layout, which has no others.
+    const DISABLE_WORD: u64 = BLOCK_BYTES;
+    /// J773g `dart-sio` `vm-base`: I/O addresses above 40 bits.
+    const VM_BASE: u64 = 0x100_0000_0000;
+
+    /// Every stream reaches RAM at its I/O address less `iova`, plus [`RAM`].
+    struct Window {
+        iova: u64,
+    }
+    impl Iommu for Window {
         fn page(&self) -> u64 {
             0x4000
         }
@@ -686,7 +940,33 @@ mod tests {
             _: bool,
             _: &mut Access<'_>,
         ) -> Result<u64, DmaError> {
-            Ok(iova)
+            Ok(iova - self.iova + RAM)
+        }
+    }
+
+    /// The J473 ADT: version 3, no `address-width`, one key-disable word.
+    fn j473() -> Config {
+        Config {
+            version: 3,
+            address_width: DEFAULT_ADDRESS_WIDTH,
+            key_disable: KeyDisable {
+                bytes: 0x8000,
+                word: 0,
+                keys: [None; 3],
+            },
+        }
+    }
+
+    /// The J773g ADT: version 5, 42-bit addresses, a word per key.
+    fn j773g() -> Config {
+        Config {
+            version: 5,
+            address_width: 42,
+            key_disable: KeyDisable {
+                bytes: 0x8000,
+                word: 0,
+                keys: [Some(0x40), Some(0x44), Some(0x48)],
+            },
         }
     }
 
@@ -709,15 +989,23 @@ mod tests {
         aes: Aes,
         ram: Ram,
         latch: InterruptLatch,
+        /// The I/O address of [`RAM`].
+        iova: u64,
     }
 
     impl Bench {
         /// The J473 driver's `_enableAES(true)` on a version 3 engine.
         fn new(uid: Option<[u8; 32]>) -> Self {
+            Self::with(j473(), uid, RAM)
+        }
+        /// `_enableAES(true)` on an engine of `config` whose stream maps
+        /// RAM at `iova`.
+        fn with(config: Config, uid: Option<[u8; 32]>, iova: u64) -> Self {
             let mut bench = Self {
-                aes: Aes::new(3, Some(AicInput::new(0, 0x2f7)), uid),
+                aes: Aes::new(config, Some(AicInput::new(0, 0x2f7)), uid).unwrap(),
                 ram: Ram::new(RAM, 0x4000),
                 latch: InterruptLatch::new(),
+                iova,
             };
             assert_eq!(bench.read(STATUS) & STATUS_SEEDED, STATUS_SEEDED);
             let status = bench.read(INT_STATUS);
@@ -726,6 +1014,21 @@ mod tests {
             bench.write(WATERMARKS, 0x40);
             bench.write(CONTROL, u64::from(CONTROL_START));
             bench
+        }
+        /// The I/O address of `physical`.
+        fn io(&self, physical: u64) -> u64 {
+            physical - RAM + self.iova
+        }
+        /// A 32-bit read, or a write of `value`, that may be refused.
+        fn access(&mut self, offset: u64, value: Option<u64>) -> Result<u64, MmioError> {
+            let mut access = Access::new(0, 0, &mut self.latch);
+            match value {
+                Some(value) => self
+                    .aes
+                    .write(offset, Width::Word, value, &mut access)
+                    .map(|()| value),
+                None => self.aes.read(offset, Width::Word, &mut access),
+            }
         }
         fn read(&mut self, offset: u64) -> u32 {
             let mut access = Access::new(0, 0, &mut self.latch);
@@ -745,7 +1048,7 @@ mod tests {
             }
             let mut access = Access::new(0, 0, &mut self.latch);
             let mut port = Port {
-                iommu: &mut Identity,
+                iommu: &mut Window { iova: self.iova },
                 stream: 1,
                 memory: &mut self.ram,
                 access: &mut access,
@@ -753,12 +1056,13 @@ mod tests {
             self.aes.run(&mut port)
         }
         fn data(&mut self, command: u32, length: usize) -> Result<(), MmioError> {
-            let upper = ((SOURCE >> 32) << 16 | DESTINATION >> 32) as u32;
+            let [source, destination] = [self.io(SOURCE), self.io(DESTINATION)];
+            let upper = ((source >> 32) << SOURCE_HIGH_SHIFT | destination >> 32) as u32;
             self.push([
-                OPCODE_DATA << 28 | command | length as u32,
+                OPCODE_DATA << OPCODE_SHIFT | command | length as u32,
                 upper,
-                SOURCE as u32,
-                DESTINATION as u32,
+                source as u32,
+                destination as u32,
             ])
         }
         fn bytes(&mut self, physical: u64, length: usize) -> alloc::vec::Vec<u8> {
@@ -960,7 +1264,7 @@ mod tests {
     fn hardware_keys_follow_the_key_disable_register() {
         let uid = [0x5a; 32];
         let mut bench = Bench::new(Some(uid));
-        assert_eq!(bench.read(KEY_DISABLE), DISABLE_ALL_BUT_UID1);
+        assert_eq!(bench.read(DISABLE_WORD), DISABLE_ALL_BUT_UID1);
         assert!(bench.ram.write(SOURCE, &[0; 16]));
         // UID1, 256-bit ECB encrypt matches the same key given in software.
         bench
@@ -987,15 +1291,15 @@ mod tests {
         bench.data(0, 16).unwrap();
         assert_ne!(bench.read(INT_STATUS) & INT_KEY_INVALID_AT_USE[0], 0);
         bench.write(INT_STATUS, u64::from(INT_KNOWN));
-        bench.write(KEY_DISABLE, u64::from(DISABLE_UID1));
-        assert_eq!(bench.read(KEY_DISABLE), DISABLE_KNOWN);
+        bench.write(DISABLE_WORD, u64::from(DISABLE_UID1));
+        assert_eq!(bench.read(DISABLE_WORD), DISABLE_KNOWN);
         bench.push([OPCODE_KEY << 28 | 1 << 27 | 1 << 24]).unwrap();
         assert_eq!(
             bench.read(INT_STATUS) & INT_KEY_DISABLED[1],
             INT_KEY_DISABLED[1]
         );
         // Without a UID every hardware key reads disabled.
-        assert_eq!(Bench::new(None).read(KEY_DISABLE), DISABLE_KNOWN);
+        assert_eq!(Bench::new(None).read(DISABLE_WORD), DISABLE_KNOWN);
     }
 
     #[test]
@@ -1024,5 +1328,197 @@ mod tests {
         let mut access = Access::new(0, 0, &mut bench.latch);
         assert!(bench.aes.read(0x0, Width::Word, &mut access).is_err());
         assert!(bench.aes.write(0x50, Width::Word, 0, &mut access).is_err());
+    }
+
+    fn reason(result: Result<impl core::fmt::Debug, MmioError>) -> &'static str {
+        match result {
+            Err(MmioError::Unsupported { reason, .. }) => reason,
+            other => panic!("not refused: {other:?}"),
+        }
+    }
+
+    /// NIST SP 800-38A F.2.1 through the J773g `dart-sio` window above
+    /// 2^40: the 10-bit high address fields of `address-width` 42.
+    #[test]
+    fn wide_address_engines_move_data_and_chaining_values_above_40_bits() {
+        let mut bench = Bench::with(j773g(), None, VM_BASE);
+        let key = hex("2b7e151628aed2a6abf7158809cf4f3c");
+        let plain = hex("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51");
+        assert!(bench.ram.write(SOURCE, &plain));
+        let command = OPCODE_KEY << OPCODE_SHIFT | KEY_ENCRYPT | 1 << 16;
+        bench
+            .push(core::iter::once(command).chain(words(&key)))
+            .unwrap();
+        let iv = hex("000102030405060708090a0b0c0d0e0f");
+        bench
+            .push(core::iter::once(OPCODE_IV << OPCODE_SHIFT).chain(words(&iv)))
+            .unwrap();
+        // The driver's `_prepareTransfer` word: 0x100 above bit 16 and 0.
+        assert_eq!(bench.io(SOURCE) >> 32, 0x100);
+        bench.data(0, 32).unwrap();
+        assert_eq!(
+            bench.bytes(DESTINATION, 32),
+            hex("7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2")
+        );
+        let chain = bench.io(RAM);
+        bench
+            .push([
+                OPCODE_STORE_IV << OPCODE_SHIFT | (chain >> 32) as u32,
+                chain as u32,
+            ])
+            .unwrap();
+        assert_eq!(
+            bench.bytes(RAM, 16),
+            hex("5086cb9b507219ee95db113a917678b2")
+        );
+        assert_eq!(bench.read(INT_STATUS) & !INT_FIFO_LOW, 0);
+    }
+
+    /// Bits the established encodings leave clear stay queued and refuse:
+    /// a narrow engine has no high address bits 8 and 9.
+    #[test]
+    fn reserved_command_bits_refuse_and_stay_queued() {
+        let mut bench = Bench::with(j473(), None, VM_BASE);
+        let key = hex("2b7e151628aed2a6abf7158809cf4f3c");
+        bench
+            .push(core::iter::once(OPCODE_KEY << OPCODE_SHIFT | KEY_ENCRYPT).chain(words(&key)))
+            .unwrap();
+        assert_eq!(
+            reason(bench.data(0, 16)),
+            "AES DATA address word reserved bits"
+        );
+        assert_eq!(bench.read(FIFO_STATUS) >> FIFO_LEVEL_SHIFT, 4);
+        bench.write(CLEAR_FIFO, 1);
+        let mut bench = Bench::new(None);
+        assert_eq!(reason(bench.data(DATA_RESERVED, 16)), "AES DATA bit 24");
+        bench.write(CLEAR_FIFO, 1);
+        let store = OPCODE_STORE_IV << OPCODE_SHIFT | 1 << 8;
+        assert_eq!(reason(bench.push([store, 0])), "AES STORE_IV reserved bits");
+        bench.write(CLEAR_FIFO, 1);
+        let scrambled = OPCODE_SCRAMBLED_KEY << OPCODE_SHIFT;
+        assert_eq!(
+            reason(bench.push([scrambled])),
+            "AES H16 scrambled-key command"
+        );
+    }
+
+    /// The J773g (0x40, 0x44, 0x48) and J813 (4, 8, 0xc) key words.
+    #[test]
+    fn keys_with_their_own_disable_words_follow_the_adt_offsets() {
+        for keys in [[0x40, 0x44, 0x48], [4, 8, 0xc]] {
+            let mut config = j773g();
+            config.key_disable.keys = keys.map(Some);
+            let [uid1, gid0, gid1] = keys.map(|offset| BLOCK_BYTES + u64::from(offset));
+            let uid = [0x5a; 32];
+            let mut bench = Bench::with(config, Some(uid), VM_BASE);
+            assert_eq!(bench.read(uid1), KEY_ENABLED);
+            assert_eq!(bench.read(gid0), KEY_DISABLED);
+            assert_eq!(bench.read(gid1), KEY_DISABLED);
+            assert_eq!(bench.read(DISABLE_WORD), DISABLE_ALL_BUT_UID1);
+            // UID1 encrypts as the same key given in software.
+            assert!(bench.ram.write(SOURCE, &[0; 16]));
+            let hardware = OPCODE_KEY << OPCODE_SHIFT | 1 << 24 | 2 << 22 | KEY_ENCRYPT;
+            bench.push([hardware]).unwrap();
+            bench.data(0, 16).unwrap();
+            let encrypted = bench.bytes(DESTINATION, 16);
+            let software = OPCODE_KEY << OPCODE_SHIFT | 2 << 22 | KEY_ENCRYPT;
+            bench
+                .push(core::iter::once(software).chain(words(&uid)))
+                .unwrap();
+            bench.data(0, 16).unwrap();
+            assert_eq!(bench.bytes(DESTINATION, 16), encrypted);
+            // Only the disable value disables, and only through the word.
+            assert_eq!(
+                reason(bench.access(uid1, Some(u64::from(KEY_ENABLED)))),
+                "AES key-disable word value other than the disable value"
+            );
+            assert_eq!(
+                reason(bench.access(DISABLE_WORD, Some(u64::from(DISABLE_UID1)))),
+                "AES key-disable bit of a key with its own disable word"
+            );
+            assert_eq!(bench.read(uid1), KEY_ENABLED);
+            bench.write(uid1, u64::from(KEY_DISABLE));
+            assert_eq!(bench.read(uid1), KEY_DISABLED);
+            assert_eq!(bench.read(DISABLE_WORD), DISABLE_KNOWN);
+            bench.push([hardware]).unwrap();
+            assert_ne!(bench.read(INT_STATUS) & INT_KEY_DISABLED[0], 0);
+            // The fourth key keeps its bit in the shared word.
+            bench.write(DISABLE_WORD, 1 << 3);
+            assert_eq!(
+                reason(bench.access(BLOCK_BYTES + 0x10, None)),
+                "unknown AES key-disable register"
+            );
+        }
+        // J473 names no own words.
+        let mut bench = Bench::new(None);
+        assert_eq!(
+            reason(bench.access(BLOCK_BYTES + 0x40, None)),
+            "unknown AES key-disable register"
+        );
+    }
+
+    /// `_distribute_dkey` writes the third range's 4 in version 5 and 8 in
+    /// version 6; the distribution to AppleAVD is not modeled.
+    #[test]
+    fn dkey_distribution_refuses_at_its_version_register() {
+        let dkey = BLOCK_BYTES + 0x8000;
+        let mut v5 = Bench::with(j773g(), None, VM_BASE);
+        assert_eq!(
+            reason(v5.access(dkey + DKEY_DISTRIBUTE_V5, Some(1))),
+            "AES DKey distribution to AppleAVD"
+        );
+        assert_eq!(
+            reason(v5.access(dkey + DKEY_DISTRIBUTE_V6, None)),
+            "unknown AES DKey register"
+        );
+        let mut config = j773g();
+        config.version = 6;
+        let mut v6 = Bench::with(config, None, VM_BASE);
+        assert_eq!(
+            reason(v6.access(dkey + DKEY_DISTRIBUTE_V6, Some(1))),
+            "AES DKey distribution to AppleAVD"
+        );
+        assert_eq!(
+            reason(Bench::new(None).access(dkey + DKEY_DISTRIBUTE_V5, Some(1))),
+            "unknown AES register"
+        );
+        assert!(config.has_dkey() && !j473().has_dkey());
+    }
+
+    #[test]
+    fn configs_without_an_established_contract_refuse() {
+        let with = |change: fn(&mut Config)| {
+            let mut config = j773g();
+            change(&mut config);
+            Aes::new(config, None, None).err()
+        };
+        assert_eq!(with(|_| {}), None);
+        assert_eq!(with(|config| config.address_width = 40), None);
+        for version in [4, 7] {
+            let mut config = j773g();
+            config.version = version;
+            assert_eq!(
+                Aes::new(config, None, None).err(),
+                Some("AES aes-version without an established layout")
+            );
+        }
+        assert_eq!(
+            with(|config| config.address_width = 41),
+            Some("AES address-width without an established address field width")
+        );
+        let outside = Some("AES key-disable word outside its range or unaligned");
+        assert_eq!(
+            with(|config| config.key_disable.keys[0] = Some(0x42)),
+            outside
+        );
+        assert_eq!(with(|config| config.key_disable.word = 0x7ffd), outside);
+        assert_eq!(
+            with(|config| config.key_disable.keys[2] = Some(0x8000)),
+            outside
+        );
+        assert_eq!(
+            with(|config| config.key_disable.keys[1] = Some(0)),
+            Some("AES key-disable words overlap")
+        );
     }
 }
