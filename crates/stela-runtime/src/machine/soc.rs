@@ -56,7 +56,9 @@ use memory_topology::{PTD_RANGE, memory_cache, memory_controller, memory_control
 mod processor_registers;
 pub use processor_registers::ProcessorRegisters;
 mod power_registers;
-pub use power_registers::{BridgeBank, EnergyBank, PerfBank, PowerBank, SocDpe, WakeBank};
+pub use power_registers::{
+    BridgeBank, EnergyBank, PerfBank, PmgrBank, PmgrBankRefusal, PowerBank, SocDpe, WakeBank,
+};
 use power_registers::{PmgrRegisters, cpu_start, pmgr_registers};
 mod pmp_topology;
 pub use pmp_topology::PmpController;
@@ -117,8 +119,8 @@ pub use topology::{KernelLimits, assigned};
 /// `t600x-j375.dtsi`, and the M3 and later boards' `/arm-io/mcc dram-base`
 /// ([`board_dram_base`]).
 /// `pmgr` is the `compatible` of the SoC's `/arm-io/pmgr` in its boards'
-/// DeviceTrees (`isa/apple-soc-facts.json` `boards[].pmgr`), modeled once
-/// the row has its clusters and bridge layouts ([`Soc::pmgr_modeled`]).
+/// DeviceTrees (`isa/apple-soc-facts.json` `boards[].pmgr`). Power-state
+/// ownership and optional register-family qualification are independent.
 /// `lockdown` is
 /// the CONTROL offset of the lockdown registers in each PE's `cpu-impl-reg`
 /// and each cluster's `cpm-impl-reg` (`platform::apple::lockdown`), on the
@@ -437,6 +439,8 @@ const AIC3_EVENT: u64 = 0x40000;
 /// The generic `/arm-io/pmgr` of the M6, whose SoC registers are in
 /// `/arm-io/pmgr-child` (m1n1 `pmgr.c`).
 const PMGR2_ARCH: &str = "pmgr2,arch";
+/// T8152 physical groups below the generic PMGRv2 interface (original J873g ADT).
+const PMGR2_IMPLEMENTATION: &str = "pmgr2,t8152";
 
 /// The CPU start registers' offsets from the PMGR's `reg[0]` ([`cpu_start`]),
 /// m1n1 `src/smp.c` `CPU_START_OFF_*` and the chips its `smp_init` gives
@@ -1183,28 +1187,15 @@ pub const DART: &str = "dart,t8110";
 /// The `compatible` of a DART child naming one client's stream (its `reg`),
 /// which XNU's IODARTMapper binds and clients name as `iommu-parent`.
 pub const IOMMU_MAPPER: &str = "iommu-mapper";
-/// The `compatible` of the SoC's PMGR (each row's `pmgr`) when the machine
-/// models it ([`Soc::pmgr_modeled`]): `platform::apple::pmgr` and the PMGR
+/// The `compatible` of the SoC's PMGR (each row's `pmgr`). The PMGR
 /// family models place its power states and CPU start registers (m1n1
 /// `src/pmgr.c` and `src/smp.c` read them alike on every SoC), clusters,
 /// eFuses, energy, performance counters, wake masks, voltage, DPE and
 /// fabric bridges.
 pub fn pmgr(chip_id: u32) -> Option<&'static str> {
-    chip_row(chip_id)
-        .filter(|soc| soc.pmgr_modeled())
-        .map(|soc| soc.pmgr)
+    chip_row(chip_id).map(|soc| soc.pmgr)
 }
 
-impl Soc {
-    /// Whether the row has the facts the PMGR models need beyond the power
-    /// states and CPU start: its CPU clusters' registers and its fabric
-    /// bridges' register layouts. Without them the PMGR's cluster and bridge
-    /// windows would have no model, so the PMGR stays hidden (`models`), as
-    /// every unmodeled device does, rather than present a partial one.
-    const fn pmgr_modeled(&self) -> bool {
-        self.clusters.is_some() && self.bridge_fields.is_some()
-    }
-}
 /// The `compatible` of the AES engine the engine models
 /// (`platform::apple::aes`).
 pub const AES: &str = "aes,s8000";
@@ -1527,9 +1518,8 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         || GPU_ADMITTED && (name == GFX_MAPPER || admitted_gpu(name))
         || AICS.contains(&name)
         || ATC_PHY_LAYOUTS.iter().any(|&(layout, _)| layout == name)
-        || SOCS
-            .iter()
-            .any(|soc| soc.pmgr == name && soc.pmgr_modeled())
+        || SOCS.iter().any(|soc| soc.pmgr == name)
+        || name == PMGR2_IMPLEMENTATION
         || ROLE_MODELS.iter().any(|claim| {
             claim.admitted
                 && claim.compatible == name
@@ -1708,6 +1698,8 @@ pub struct Board {
     /// `/arm-io/pmgr`'s power-state registers, when the DeviceTree shows the
     /// SoC's PMGR ([`pmgr`]).
     pub power_states: Option<PowerStates>,
+    /// Unsupported PMGR families; these grant no register/lifecycle effects.
+    pub pmgr_refusals: Vec<PmgrBankRefusal>,
     /// `/arm-io/mcc`, when the DeviceTree shows an `mcc,t8112`.
     pub memory_cache: Option<MemoryCache>,
     /// Direct T6000 resources; parsing does not grant native RAM/DSB authority.
@@ -2104,6 +2096,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let usbs = usb_controllers(&io, &extent, &darts)?;
     let power_states = power_states(&root, &extent, chip_id)?;
     let PmgrRegisters {
+        refusals: pmgr_refusals,
         cluster_events,
         bridges,
         soc_dpe,
@@ -2155,6 +2148,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         sep,
         usbs,
         power_states,
+        pmgr_refusals,
         memory_cache,
         direct_memory_cache,
         clusters,

@@ -91,7 +91,9 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// platform-function admission, preserving their original metadata.
 /// Revision 24: publish T6000's original AMCC broadcast/cache-status and
 /// IOA master-lock labels, matching the jointly routed memory owner.
-pub const REVISION: u32 = 24;
+/// Revision 25: keep common PMGR power-state interfaces independently of
+/// optional register-family qualification, including T8152's physical child.
+pub const REVISION: u32 = 25;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;

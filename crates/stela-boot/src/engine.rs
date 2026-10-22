@@ -1596,6 +1596,17 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::fatal("the board could not be modeled")
         })
     });
+    if options.strict
+        && let Some(board) = board.as_ref()
+    {
+        mount::pmgr_qualifications(&board.pmgr_refusals, true, &mut |arguments| {
+            output::arguments(arguments)
+        })
+        .unwrap_or_else(|error| {
+            output::arguments(format_args!("board qualification refusal: {error}\n"));
+            output::fatal("strict mode requires qualified PMGR register families")
+        });
+    }
     if let (Some(board), Some(tree)) = (board.as_mut(), tree)
         && let Some(states) = board.power_states.as_mut()
     {

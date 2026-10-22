@@ -6,7 +6,9 @@
 //! their ADT ancestors' activated gates, including nubs and firmware endpoints.
 //! Source PMGR provider gate-index metadata remains inventoried separately from
 //! the consumer dependencies its IOService start actually activates.
-use super::{ATC_PHY_LAYOUTS, IOMMU_MAPPER, Node, PMGR2_ARCH, SOCS, USB_DRD, name_of};
+use super::{
+    ATC_PHY_LAYOUTS, IOMMU_MAPPER, Node, PMGR2_ARCH, PMGR2_IMPLEMENTATION, SOCS, USB_DRD, name_of,
+};
 use crate::platform::apple::{
     dart::Profile,
     pmgr::coverage::{self, Admission, Consumer, Domain, DomainId, LifecycleSinks},
@@ -670,7 +672,7 @@ pub(super) fn register_node<'a>(io: &Node<'a>, parent: &Node<'a>) -> Result<Node
         return Ok(parent.clone());
     }
     io.child("pmgr-child")
-        .filter(|node| node.compatible("pmgr2,t8152"))
+        .filter(|node| node.compatible(PMGR2_IMPLEMENTATION))
         .ok_or_else(|| "pmgr2,arch has no qualified register-bearing pmgr-child".into())
 }
 

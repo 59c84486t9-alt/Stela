@@ -8,7 +8,7 @@ use super::apple::{
     SepProvisioning, UsbCables, UsbId, WallClock, memory_resources::amcc, sep_state, typec,
 };
 use super::ctrr;
-use super::soc::Board;
+use super::soc::{Board, PmgrBankRefusal};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::fmt;
 use stela_drivers::block::BlockDevice;
@@ -31,6 +31,29 @@ pub fn memory_locks(
         programmed[group] = Some((locked.first, locked.last + 1 - locked.first));
     }
     programmed
+}
+
+/// Report unsupported PMGR qualifications once, before a device is placed.
+/// A diagnostic supplies no successful MMIO or lifecycle response. Strict
+/// callers preflight this list before handing any host resources to the mount.
+pub fn pmgr_qualifications(
+    refusals: &[PmgrBankRefusal],
+    strict: bool,
+    log: &mut dyn FnMut(fmt::Arguments<'_>),
+) -> Result<(), String> {
+    for (index, refusal) in refusals.iter().enumerate() {
+        if refusals[..index].contains(refusal) {
+            continue;
+        }
+        log(format_args!(
+            "UNMODELED PMGR {:?}: {}; no register/lifecycle model\n",
+            refusal.bank, refusal.reason,
+        ));
+        if strict {
+            return Err(format!("PMGR {:?}: {}", refusal.bank, refusal.reason));
+        }
+    }
+    Ok(())
 }
 
 /// What the host connects to the board.
@@ -73,6 +96,7 @@ pub fn devices<C: ConsoleSink + 'static>(
     inputs: Inputs<'_>,
     log: &mut dyn FnMut(fmt::Arguments<'_>),
 ) -> Result<(AppleDevices, Option<UsbId>), String> {
+    pmgr_qualifications(&board.pmgr_refusals, false, log)?;
     let Inputs {
         programmed,
         reset,
@@ -476,7 +500,10 @@ pub fn devices<C: ConsoleSink + 'static>(
             .get(index)
             .ok_or("CPU cluster has no DT event selection")?;
         // The board validated each CPM word against the translated DT reg.
-        devices.add_cpm_power(cluster.base + 0x40000, cluster.counter_map)?;
+        devices.add_cpm_power(
+            cluster.base + crate::platform::apple::cpm::T8112_OFFSET,
+            cluster.counter_map,
+        )?;
         devices.add_cpu_cluster(
             cluster.base,
             cluster.dvmr,
@@ -574,4 +601,57 @@ pub fn devices<C: ConsoleSink + 'static>(
         return Err("restore study requires a DT-placed USB device".into());
     }
     Ok((devices, restore_usb))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::machine::soc::PmgrBank;
+
+    #[test]
+    fn graceful_qualifications_report_each_requirement_once_without_a_model() {
+        let unsupported = PmgrBankRefusal {
+            bank: PmgrBank::CpuClusters,
+            reason: "unknown cluster layout",
+        };
+        let bridge = PmgrBankRefusal {
+            bank: PmgrBank::Bridges,
+            reason: "unknown bridge layout",
+        };
+        let mut messages = Vec::new();
+        assert_eq!(
+            pmgr_qualifications(&[unsupported, unsupported, bridge], false, &mut |message| {
+                messages.push(format!("{message}"))
+            }),
+            Ok(())
+        );
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].contains("UNMODELED PMGR CpuClusters"));
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.contains("no register/lifecycle model"))
+        );
+    }
+
+    #[test]
+    fn strict_qualifications_stop_at_the_first_requirement() {
+        let refusals = [
+            PmgrBankRefusal {
+                bank: PmgrBank::CpuClusters,
+                reason: "unknown cluster layout",
+            },
+            PmgrBankRefusal {
+                bank: PmgrBank::Bridges,
+                reason: "unknown bridge layout",
+            },
+        ];
+        let mut messages = Vec::new();
+        assert_eq!(
+            pmgr_qualifications(&refusals, true, &mut |message| messages
+                .push(format!("{message}"))),
+            Err("PMGR CpuClusters: unknown cluster layout".into())
+        );
+        assert_eq!(messages.len(), 1);
+    }
 }
