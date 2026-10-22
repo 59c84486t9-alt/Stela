@@ -607,13 +607,13 @@ fn status_iu(bytes: &[u8], tag: u16) -> Option<Frame> {
         READ_READY_IU if bytes.len() == 4 => Some(Frame::Ready(true)),
         WRITE_READY_IU if bytes.len() == 4 => Some(Frame::Ready(false)),
         STATUS_IU if bytes.len() >= 16 => {
+            // Like Linux uas_sense, a sense length that disagrees with the
+            // transfer is clamped to the bytes that actually arrived.
             let length = usize::from(u16::from_be_bytes(bytes[14..16].try_into().ok()?));
-            if length.checked_add(16)? != bytes.len() {
-                return None;
-            }
+            let end = bytes.len().min(16 + length);
             Some(Frame::Done(Status {
                 code: bytes[6],
-                sense: bytes[16..].to_vec(),
+                sense: bytes[16..end].to_vec(),
                 response: None,
             }))
         }
@@ -914,7 +914,8 @@ mod tests {
                         bytes[2..4].copy_from_slice(&s.tag.wrapping_add(1).to_be_bytes());
                     }
                     if s.fault == Fault::MalformedStatus {
-                        bytes.push(0xa5);
+                        // An IU ID Linux uas_stat_cmplt logs as bogus.
+                        bytes[0] = 0x7f;
                     }
                     if bytes[0] == STATUS_IU {
                         s.terminal_sent = true;
@@ -2267,6 +2268,21 @@ mod tests {
         };
         assert_eq!(status.code, 0);
         assert_eq!(status.response, Some(8));
+        // Disagreeing sense lengths clamp to the transfer, as Linux uas_sense does.
+        let mut sense = vec![STATUS_IU, 0, 0, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 40];
+        sense.extend([0x70, 0, 6]);
+        let Frame::Done(status) = status_iu(&sense, 1).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            (status.code, status.sense.as_slice()),
+            (2, &[0x70, 0, 6][..])
+        );
+        sense[15] = 1;
+        let Frame::Done(status) = status_iu(&sense, 1).unwrap() else {
+            panic!()
+        };
+        assert_eq!(status.sense, [0x70]);
     }
     #[test]
     fn terminal_status_before_data_completion_still_waits_for_actual_data() {
