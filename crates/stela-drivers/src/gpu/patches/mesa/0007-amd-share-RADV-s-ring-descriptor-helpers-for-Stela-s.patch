@@ -13,7 +13,7 @@ Subject: [PATCH] amd: share RADV's ring descriptor helpers for Stela's render
  create mode 100644 src/amd/common/nir/ac_nir_abi.c
 
 diff --git a/src/amd/common/meson.build b/src/amd/common/meson.build
-index 25f3668..e303f26 100644
+index 25f366841710f7c4f895bdc53251c55cc03fb23a..e303f2600cd78744dee2c1f66490b6c5be9bc1b6 100644
 --- a/src/amd/common/meson.build
 +++ b/src/amd/common/meson.build
 @@ -166,6 +166,7 @@ amd_common_files = files(
@@ -34,7 +34,7 @@ index 25f3668..e303f26 100644
            'nir/ac_nir_opt_shared_append.c') +
        [gfx10_format_table_c] +
 diff --git a/src/amd/common/nir/ac_nir.h b/src/amd/common/nir/ac_nir.h
-index 14bbd6b..94865ce 100644
+index 14bbd6b3312a6521c1d87516691c8f345414322e..94865cedacc7d9d8563b6d106c7a183886f491d5 100644
 --- a/src/amd/common/nir/ac_nir.h
 +++ b/src/amd/common/nir/ac_nir.h
 @@ -76,6 +76,14 @@ ac_nir_load_arg_at_offset(nir_builder *b, const struct ac_shader_args *ac_args,
@@ -54,7 +54,7 @@ index 14bbd6b..94865ce 100644
                              unsigned upper_bound);
 diff --git a/src/amd/common/nir/ac_nir_abi.c b/src/amd/common/nir/ac_nir_abi.c
 new file mode 100644
-index 0000000..db8a0be
+index 0000000000000000000000000000000000000000..db8a0be2acef46b5b5f60f7a81855bd08479449f
 --- /dev/null
 +++ b/src/amd/common/nir/ac_nir_abi.c
 @@ -0,0 +1,32 @@
@@ -91,7 +91,7 @@ index 0000000..db8a0be
 +   return descriptor;
 +}
 diff --git a/src/amd/vulkan/nir/radv_nir_lower_abi.c b/src/amd/vulkan/nir/radv_nir_lower_abi.c
-index 382cab6..c09e0bb 100644
+index 382cab62d0e9286398d2d0bcc7e42576792b90ef..c09e0bb1178f8b987ed9c5e9951037f71c4dc83f 100644
 --- a/src/amd/vulkan/nir/radv_nir_lower_abi.c
 +++ b/src/amd/vulkan/nir/radv_nir_lower_abi.c
 @@ -31,9 +31,7 @@ load_ring(nir_builder *b, unsigned ring, lower_abi_state *s)

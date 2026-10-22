@@ -29,7 +29,7 @@ Subject: [PATCH] amd: split command, register and surface helpers for Stela's
  create mode 100644 src/amd/common/ac_surface_debug.c
 
 diff --git a/src/amd/addrlib/meson.build b/src/amd/addrlib/meson.build
-index 35ac568..4e6b49f 100644
+index 35ac56890be65cfe1a04567982296cfc3e67a67e..4e6b49f6f7f2a7d59964f75e6b96509a9fb38652 100644
 --- a/src/amd/addrlib/meson.build
 +++ b/src/amd/addrlib/meson.build
 @@ -51,6 +51,12 @@ files_addrlib = files(
@@ -46,7 +46,7 @@ index 35ac568..4e6b49f 100644
  if host_machine.cpu_family() in ['x86', 'x86_64', 'aarch64']
    cpp_args_addrlib += '-DADDR_ALLOW_SIMD=1'
 diff --git a/src/amd/addrlib/src/core/addrlib.cpp b/src/amd/addrlib/src/core/addrlib.cpp
-index 916b77b..27d1a3f 100644
+index 916b77b5309a9a605a342203cdcf860da37ffca0..27d1a3f798ad0f168470ac6e8cade172eda2a5f9 100644
 --- a/src/amd/addrlib/src/core/addrlib.cpp
 +++ b/src/amd/addrlib/src/core/addrlib.cpp
 @@ -17,7 +17,7 @@
@@ -68,7 +68,7 @@ index 916b77b..27d1a3f 100644
  namespace Addr
  {
 diff --git a/src/amd/common/ac_cmdbuf.c b/src/amd/common/ac_cmdbuf.c
-index ea67cbf..8dcdefd 100644
+index ea67cbf1c2b3028fe09d750b03349f06f724fe01..8dcdefdcddaeae3cd73017063ee2de97ba03eae6 100644
 --- a/src/amd/common/ac_cmdbuf.c
 +++ b/src/amd/common/ac_cmdbuf.c
 @@ -15,170 +15,6 @@
@@ -244,7 +244,7 @@ index ea67cbf..8dcdefd 100644
  {
 diff --git a/src/amd/common/ac_cmdbuf_compute.c b/src/amd/common/ac_cmdbuf_compute.c
 new file mode 100644
-index 0000000..7df2d93
+index 0000000000000000000000000000000000000000..7df2d9346ee5ea2384816e7f0041a4da2b46729b
 --- /dev/null
 +++ b/src/amd/common/ac_cmdbuf_compute.c
 @@ -0,0 +1,175 @@
@@ -425,7 +425,7 @@ index 0000000..7df2d93
 +
 diff --git a/src/amd/common/ac_compiler_info.c b/src/amd/common/ac_compiler_info.c
 new file mode 100644
-index 0000000..fb92eb6
+index 0000000000000000000000000000000000000000..fb92eb60e3f7860f32e2ff8f47b7f3c37162e510
 --- /dev/null
 +++ b/src/amd/common/ac_compiler_info.c
 @@ -0,0 +1,214 @@
@@ -644,7 +644,7 @@ index 0000000..fb92eb6
 +                                  info->family == CHIP_GFX1156;
 +}
 diff --git a/src/amd/common/ac_debug.c b/src/amd/common/ac_debug.c
-index 835cc9c..2d23bfb 100644
+index 835cc9c3b2048739a733072f0ca6c6fed2252e51..2d23bfb614a1149f147312659a1385d34cfd8ecd 100644
 --- a/src/amd/common/ac_debug.c
 +++ b/src/amd/common/ac_debug.c
 @@ -12,87 +12,6 @@
@@ -736,7 +736,7 @@ index 835cc9c..2d23bfb 100644
   * Parse dmesg and return TRUE if a VM fault has been detected.
   *
 diff --git a/src/amd/common/ac_gpu_info.c b/src/amd/common/ac_gpu_info.c
-index b67c4e8..d716e28 100644
+index b67c4e8780322c24168c52a6bcae394cfe04de9a..d716e281ec15eaeb01696c71ad6c35d5921e7227 100644
 --- a/src/amd/common/ac_gpu_info.c
 +++ b/src/amd/common/ac_gpu_info.c
 @@ -233,208 +233,6 @@ static bool handle_env_var_force_family(struct radeon_info *info)
@@ -997,7 +997,7 @@ index b67c4e8..d716e28 100644
     /* Number of task shader ring entries. Needs to be a power of two.
 diff --git a/src/amd/common/ac_gpu_info_compute.c b/src/amd/common/ac_gpu_info_compute.c
 new file mode 100644
-index 0000000..17118ff
+index 0000000000000000000000000000000000000000..17118ff87f2b1ac18a18f0542e5743d5b3484b80
 --- /dev/null
 +++ b/src/amd/common/ac_gpu_info_compute.c
 @@ -0,0 +1,50 @@
@@ -1052,7 +1052,7 @@ index 0000000..17118ff
 +   return compute_resource_limits;
 +}
 diff --git a/src/amd/common/ac_parse_ib.c b/src/amd/common/ac_parse_ib.c
-index 50cc803..96e3422 100644
+index 50cc803ced2a188f41c00b2403ddc41ddfc36a05..96e3422402acccad9ce53de11c1e7a393d2d1b55 100644
 --- a/src/amd/common/ac_parse_ib.c
 +++ b/src/amd/common/ac_parse_ib.c
 @@ -8,7 +8,6 @@
@@ -1065,7 +1065,7 @@ index 50cc803..96e3422 100644
  #include "ac_vcn_dec.h"
 diff --git a/src/amd/common/ac_registers.c b/src/amd/common/ac_registers.c
 new file mode 100644
-index 0000000..5eedb6b
+index 0000000000000000000000000000000000000000..5eedb6b9629b6785fe3490fb98ec943c84723320
 --- /dev/null
 +++ b/src/amd/common/ac_registers.c
 @@ -0,0 +1,92 @@
@@ -1162,7 +1162,7 @@ index 0000000..5eedb6b
 +}
 +
 diff --git a/src/amd/common/ac_surface.c b/src/amd/common/ac_surface.c
-index 9eed327..24efd24 100644
+index 9eed327103389f63fb33abde5621b42e123f8bac..24efd24781d5cce6458f5f617d71ca94fd45c0ad 100644
 --- a/src/amd/common/ac_surface.c
 +++ b/src/amd/common/ac_surface.c
 @@ -71,15 +71,8 @@
@@ -1298,7 +1298,7 @@ index 9eed327..24efd24 100644
 -}
 diff --git a/src/amd/common/ac_surface_debug.c b/src/amd/common/ac_surface_debug.c
 new file mode 100644
-index 0000000..0f15644
+index 0000000000000000000000000000000000000000..0f15644d4df62749a47042f59de7e4e8d079aa8f
 --- /dev/null
 +++ b/src/amd/common/ac_surface_debug.c
 @@ -0,0 +1,134 @@
@@ -1437,7 +1437,7 @@ index 0000000..0f15644
 +   }
 +}
 diff --git a/src/amd/common/meson.build b/src/amd/common/meson.build
-index d0ff6c7..25f3668 100644
+index d0ff6c730c3196f9f3dba00362e3ea5c327df7ab..25f366841710f7c4f895bdc53251c55cc03fb23a 100644
 --- a/src/amd/common/meson.build
 +++ b/src/amd/common/meson.build
 @@ -94,9 +94,11 @@ gfx10_format_table_c = custom_target(
@@ -1500,7 +1500,7 @@ index d0ff6c7..25f3668 100644
    'amd_common',
    [amd_common_files, gfx10_format_table_c],
 diff --git a/src/amd/compiler/meson.build b/src/amd/compiler/meson.build
-index e253d49..3293642 100644
+index e253d4926434853fa8e5d777d076b7d5ff6e7b8b..3293642cc4b1e2ebd36b7f16de321d65e155a4c7 100644
 --- a/src/amd/compiler/meson.build
 +++ b/src/amd/compiler/meson.build
 @@ -99,6 +99,6 @@ _libaco = static_library(
@@ -1512,7 +1512,7 @@ index e253d49..3293642 100644
    sources : [aco_opcodes_h, aco_builder_h],
  )
 diff --git a/src/amd/llvm/meson.build b/src/amd/llvm/meson.build
-index add6ccc..ddf6a4f 100644
+index add6ccc6460a753e1a77cfe75ee69474b1f2f1c2..ddf6a4f2f9f6e49b981f8f8d9e09fc7ad49b3c87 100644
 --- a/src/amd/llvm/meson.build
 +++ b/src/amd/llvm/meson.build
 @@ -19,7 +19,7 @@ libamd_common_llvm = static_library(
@@ -1525,7 +1525,7 @@ index add6ccc..ddf6a4f 100644
    dependencies : [
      dep_llvm, dep_thread, dep_elf, dep_libdrm_amdgpu, dep_valgrind,
 diff --git a/src/amd/meson.build b/src/amd/meson.build
-index 92fe3d1..175e113 100644
+index 92fe3d19053aedd0513ad762c7adf14cfbd39983..175e113905831eb006820edd5be696d238b7b778 100644
 --- a/src/amd/meson.build
 +++ b/src/amd/meson.build
 @@ -7,7 +7,7 @@ if with_tools.contains('drm-shim')

@@ -39,7 +39,7 @@ Subject: [PATCH] intel: split device info, binding tables and sampler state
 
 diff --git a/src/gallium/drivers/crocus/crocus_binding_table.c b/src/gallium/drivers/crocus/crocus_binding_table.c
 new file mode 100644
-index 0000000..d0ed526
+index 0000000000000000000000000000000000000000..d0ed52612a5c07f3e8659ea77af6133ac66f1372
 --- /dev/null
 +++ b/src/gallium/drivers/crocus/crocus_binding_table.c
 @@ -0,0 +1,379 @@
@@ -424,7 +424,7 @@ index 0000000..d0ed526
 +
 diff --git a/src/gallium/drivers/crocus/crocus_binding_table.h b/src/gallium/drivers/crocus/crocus_binding_table.h
 new file mode 100644
-index 0000000..e36c118
+index 0000000000000000000000000000000000000000..e36c118ddd7e9808403d85143d2dd0819c847fe7
 --- /dev/null
 +++ b/src/gallium/drivers/crocus/crocus_binding_table.h
 @@ -0,0 +1,112 @@
@@ -541,7 +541,7 @@ index 0000000..e36c118
 +
 +#endif
 diff --git a/src/gallium/drivers/crocus/crocus_context.h b/src/gallium/drivers/crocus/crocus_context.h
-index df8f43c..2017772 100644
+index df8f43cb466be3fd0caedb09cdb2c8c6c4cbc829..2017772564062690bada0b1e423c8d0f7f181e87 100644
 --- a/src/gallium/drivers/crocus/crocus_context.h
 +++ b/src/gallium/drivers/crocus/crocus_context.h
 @@ -328,37 +328,7 @@ struct crocus_uncompiled_shader {
@@ -634,7 +634,7 @@ index df8f43c..2017772 100644
  
  void crocus_disk_cache_store(struct disk_cache *cache,
 diff --git a/src/gallium/drivers/crocus/crocus_program.c b/src/gallium/drivers/crocus/crocus_program.c
-index b6882d9..0b82053 100644
+index b6882d950a5256bc91aa247249164440986354cc..0b82053d1a34adefb561ba8e743e690bec576646 100644
 --- a/src/gallium/drivers/crocus/crocus_program.c
 +++ b/src/gallium/drivers/crocus/crocus_program.c
 @@ -704,353 +704,6 @@ crocus_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
@@ -992,7 +992,7 @@ index b6882d9..0b82053 100644
  crocus_debug_recompile(struct crocus_context *ice,
                         struct shader_info *info,
 diff --git a/src/gallium/drivers/crocus/meson.build b/src/gallium/drivers/crocus/meson.build
-index f6928fc..ebe6be5 100644
+index f6928fcfd99e394ba4a4490730970634a8a3f1fb..ebe6be58f8c5cdf7096f3f70835e05410a46b968 100644
 --- a/src/gallium/drivers/crocus/meson.build
 +++ b/src/gallium/drivers/crocus/meson.build
 @@ -6,6 +6,7 @@ files_libcrocus = files(
@@ -1005,7 +1005,7 @@ index f6928fc..ebe6be5 100644
    'crocus_bufmgr.h',
 diff --git a/src/gallium/drivers/iris/iris_binding_table.c b/src/gallium/drivers/iris/iris_binding_table.c
 new file mode 100644
-index 0000000..ac022f2
+index 0000000000000000000000000000000000000000..ac022f2b1fc06181dab80c719ae7c6615e7ec44c
 --- /dev/null
 +++ b/src/gallium/drivers/iris/iris_binding_table.c
 @@ -0,0 +1,403 @@
@@ -1414,7 +1414,7 @@ index 0000000..ac022f2
 +
 diff --git a/src/gallium/drivers/iris/iris_binding_table.h b/src/gallium/drivers/iris/iris_binding_table.h
 new file mode 100644
-index 0000000..4bdf01d
+index 0000000000000000000000000000000000000000..4bdf01d7f8cad0ab2e5a1ab400fed8044466b058
 --- /dev/null
 +++ b/src/gallium/drivers/iris/iris_binding_table.h
 @@ -0,0 +1,56 @@
@@ -1475,7 +1475,7 @@ index 0000000..4bdf01d
 +
 +#endif
 diff --git a/src/gallium/drivers/iris/iris_context.h b/src/gallium/drivers/iris/iris_context.h
-index f7022ca..a37370a 100644
+index f7022ca5738aa7d5d6ce709dba706654afb5f56a..a37370a325ad7151cc8a50301789e352d364bcf9 100644
 --- a/src/gallium/drivers/iris/iris_context.h
 +++ b/src/gallium/drivers/iris/iris_context.h
 @@ -576,44 +576,7 @@ struct iris_uncompiled_shader {
@@ -1525,7 +1525,7 @@ index f7022ca..a37370a 100644
  #define IRIS_SYSVAL_CLIP_PLANE(plane, component) \
     (IRIS_SYSVAL_CLIP_PLANE_START + ((plane) * 4) + (component))
 diff --git a/src/gallium/drivers/iris/iris_program.c b/src/gallium/drivers/iris/iris_program.c
-index 917f85f..25202c1 100644
+index 917f85f6cdf8c7ca272e83ab8dad9c123d5284a0..25202c1846ef6cb78f1da61b0bb7143525bd6b4d 100644
 --- a/src/gallium/drivers/iris/iris_program.c
 +++ b/src/gallium/drivers/iris/iris_program.c
 @@ -1229,388 +1229,6 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
@@ -1919,7 +1919,7 @@ index 917f85f..25202c1 100644
  #define perf_log(dbg, fmt, ...) do {                   \
 diff --git a/src/gallium/drivers/iris/iris_sampler_state.h b/src/gallium/drivers/iris/iris_sampler_state.h
 new file mode 100644
-index 0000000..1c1059d
+index 0000000000000000000000000000000000000000..1c1059daded68d6be8eab6c37d42741fbee0af2b
 --- /dev/null
 +++ b/src/gallium/drivers/iris/iris_sampler_state.h
 @@ -0,0 +1,172 @@
@@ -2096,7 +2096,7 @@ index 0000000..1c1059d
 +
 +#endif
 diff --git a/src/gallium/drivers/iris/iris_state.c b/src/gallium/drivers/iris/iris_state.c
-index d5d365a..fe72cf1 100644
+index d5d365aab4633f483f4f0985897aac2a8d69424c..fe72cf124efca19950a6d949db34e07318c05337 100644
 --- a/src/gallium/drivers/iris/iris_state.c
 +++ b/src/gallium/drivers/iris/iris_state.c
 @@ -213,33 +213,7 @@ translate_compare_func(enum pipe_compare_func pipe_func)
@@ -2275,7 +2275,7 @@ index d5d365a..fe72cf1 100644
   * The pipe->create_sampler_state() driver hook.
   *
 diff --git a/src/gallium/drivers/iris/meson.build b/src/gallium/drivers/iris/meson.build
-index 46631da..6cf26a4 100644
+index 46631dada2bb841afab6c87b9400996ed38b85a9..6cf26a4c9e8950e92b30cfc42100ada6ffec33c2 100644
 --- a/src/gallium/drivers/iris/meson.build
 +++ b/src/gallium/drivers/iris/meson.build
 @@ -15,6 +15,7 @@ files_libiris = files(
@@ -2287,7 +2287,7 @@ index 46631da..6cf26a4 100644
    'iris_binder.h',
    'iris_blit.c',
 diff --git a/src/intel/compiler/elk/elk_vec4.h b/src/intel/compiler/elk/elk_vec4.h
-index 592b02b..ce5487e 100644
+index 592b02bd69e255419704cb4d015ddf6181ea81a1..ce5487ec4a70c5624e7e5b02c4659ec5c633032c 100644
 --- a/src/intel/compiler/elk/elk_vec4.h
 +++ b/src/intel/compiler/elk/elk_vec4.h
 @@ -14,7 +14,6 @@
@@ -2299,7 +2299,7 @@ index 592b02b..ce5487e 100644
  
  
 diff --git a/src/intel/compiler/intel_gfx_ver_enum.h b/src/intel/compiler/intel_gfx_ver_enum.h
-index 3ceb085..35302b0 100644
+index 3ceb085d90fb1bd274c1ded10c95aa7de913132b..35302b0a3362ba9511d226f6ac66ef1357984680 100644
 --- a/src/intel/compiler/intel_gfx_ver_enum.h
 +++ b/src/intel/compiler/intel_gfx_ver_enum.h
 @@ -23,6 +23,7 @@ enum gfx_ver {
@@ -2319,7 +2319,7 @@ index 3ceb085..35302b0 100644
        UNREACHABLE("not reached");
     }
 diff --git a/src/intel/dev/i915/intel_device_info.c b/src/intel/dev/i915/intel_device_info.c
-index 3bc38b4..298da66 100644
+index 3bc38b467bdbfb02dad3f84bb0fd4cb87218dd71..298da664feed4b6ca81715c9c0eff13af17d9553 100644
 --- a/src/intel/dev/i915/intel_device_info.c
 +++ b/src/intel/dev/i915/intel_device_info.c
 @@ -124,108 +124,6 @@ update_from_single_slice_topology(struct intel_device_info *devinfo,
@@ -2441,7 +2441,7 @@ index 3bc38b4..298da66 100644
  
     free(topo_info);
 diff --git a/src/intel/dev/i915/intel_device_info.h b/src/intel/dev/i915/intel_device_info.h
-index 14df6c5..fc4bbe8 100644
+index 14df6c57aacc2423ae78f91e7799777a9b8e945e..fc4bbe8435925d24fcb63796d155518625ec73df 100644
 --- a/src/intel/dev/i915/intel_device_info.h
 +++ b/src/intel/dev/i915/intel_device_info.h
 @@ -27,6 +27,12 @@
@@ -2458,7 +2458,7 @@ index 14df6c5..fc4bbe8 100644
  bool
  intel_device_info_i915_get_info_from_fd(int fd,
 diff --git a/src/intel/dev/intel_device_info.c b/src/intel/dev/intel_device_info.c
-index 2af1b5e..1df02bf 100644
+index 2af1b5ec3ac7850e3fc540b26cd9935e76f716fe..1df02bf63700d77e4021a4e95f6d3c93c61f5e85 100644
 --- a/src/intel/dev/intel_device_info.c
 +++ b/src/intel/dev/intel_device_info.c
 @@ -28,16 +28,11 @@
@@ -2838,7 +2838,7 @@ index 2af1b5e..1df02bf 100644
  {
 diff --git a/src/intel/dev/intel_device_info_private.h b/src/intel/dev/intel_device_info_private.h
 new file mode 100644
-index 0000000..c8b1eca
+index 0000000000000000000000000000000000000000..c8b1ecaeb75d2af979e63d6580f3a83c87a1b041
 --- /dev/null
 +++ b/src/intel/dev/intel_device_info_private.h
 @@ -0,0 +1,12 @@
@@ -2856,7 +2856,7 @@ index 0000000..c8b1eca
 +#endif
 diff --git a/src/intel/dev/intel_device_info_query.c b/src/intel/dev/intel_device_info_query.c
 new file mode 100644
-index 0000000..87fe652
+index 0000000000000000000000000000000000000000..87fe6523d80f0a98046e113181c6ca25ab748d50
 --- /dev/null
 +++ b/src/intel/dev/intel_device_info_query.c
 @@ -0,0 +1,352 @@
@@ -3214,7 +3214,7 @@ index 0000000..87fe652
 +}
 diff --git a/src/intel/dev/intel_device_info_topology.c b/src/intel/dev/intel_device_info_topology.c
 new file mode 100644
-index 0000000..1eb6ad3
+index 0000000000000000000000000000000000000000..1eb6ad36951f8d78e1ea1403bbdb740209f9a20b
 --- /dev/null
 +++ b/src/intel/dev/intel_device_info_topology.c
 @@ -0,0 +1,131 @@
@@ -3350,7 +3350,7 @@ index 0000000..1eb6ad3
 +   return true;
 +}
 diff --git a/src/intel/dev/meson.build b/src/intel/dev/meson.build
-index ad18130..9d6191a 100644
+index ad18130a4d16b115085d62f4138b2ab1328570b3..9d6191ad009d799fb80430782b7689ec9fc81280 100644
 --- a/src/intel/dev/meson.build
 +++ b/src/intel/dev/meson.build
 @@ -4,20 +4,23 @@
@@ -3386,7 +3386,7 @@ index ad18130..9d6191a 100644
  link_intel_dev_virtio = []
  
 diff --git a/src/intel/genxml/gen_pack_header.py b/src/intel/genxml/gen_pack_header.py
-index 4b0a8f9..5a10e9c 100644
+index 4b0a8f990a7ad009e2a34c1080f5e61ed2eebd0f..5a10e9cb883ef2424539ec5d9e52400279dc10ed 100644
 --- a/src/intel/genxml/gen_pack_header.py
 +++ b/src/intel/genxml/gen_pack_header.py
 @@ -44,9 +44,7 @@ pack_header = """%(license)s

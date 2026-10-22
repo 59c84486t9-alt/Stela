@@ -17,7 +17,7 @@ Subject: [PATCH] nouveau: share NVK's shader layout and constant lowering for
 
 diff --git a/src/nouveau/compiler/nak_nir_lower_constant.h b/src/nouveau/compiler/nak_nir_lower_constant.h
 new file mode 100644
-index 0000000..0d45c77
+index 0000000000000000000000000000000000000000..0d45c770407874b1948704a3a4a0a4aa722705ee
 --- /dev/null
 +++ b/src/nouveau/compiler/nak_nir_lower_constant.h
 @@ -0,0 +1,34 @@
@@ -57,7 +57,7 @@ index 0000000..0d45c77
 +#endif
 diff --git a/src/nouveau/compiler/nak_shader_layout.h b/src/nouveau/compiler/nak_shader_layout.h
 new file mode 100644
-index 0000000..5aaa63f
+index 0000000000000000000000000000000000000000..5aaa63f57e039e327f9ea509d8b39084525b4839
 --- /dev/null
 +++ b/src/nouveau/compiler/nak_shader_layout.h
 @@ -0,0 +1,93 @@
@@ -155,7 +155,7 @@ index 0000000..5aaa63f
 +
 +#endif
 diff --git a/src/nouveau/vulkan/nvk_nir_lower_descriptors.c b/src/nouveau/vulkan/nvk_nir_lower_descriptors.c
-index 9361402..5c30985 100644
+index 936140270ca6f8e6803f065e8008b8e52af3c946..5c30985a36987d294154d34000ddec9fb2ff46a5 100644
 --- a/src/nouveau/vulkan/nvk_nir_lower_descriptors.c
 +++ b/src/nouveau/vulkan/nvk_nir_lower_descriptors.c
 @@ -6,6 +6,7 @@
@@ -188,7 +188,7 @@ index 9361402..5c30985 100644
  
  static nir_def *
 diff --git a/src/nouveau/vulkan/nvk_physical_device.h b/src/nouveau/vulkan/nvk_physical_device.h
-index 06d4cc3..8ae661f 100644
+index 06d4cc3bc8367e3a89d05ebbea95fe93745271cc..8ae661f2f5292bbbf6a6586cbb06b6798b7b7f9f 100644
 --- a/src/nouveau/vulkan/nvk_physical_device.h
 +++ b/src/nouveau/vulkan/nvk_physical_device.h
 @@ -9,6 +9,7 @@
@@ -209,7 +209,7 @@ index 06d4cc3..8ae661f 100644
  
  VK_DEFINE_HANDLE_CASTS(nvk_physical_device,
 diff --git a/src/nouveau/vulkan/nvk_shader.c b/src/nouveau/vulkan/nvk_shader.c
-index 6f649f8..a412cbc 100644
+index 6f649f8572649d11ec15895d188a47da9796da34..a412cbcad9a02eefaa4510279812625a416bca40 100644
 --- a/src/nouveau/vulkan/nvk_shader.c
 +++ b/src/nouveau/vulkan/nvk_shader.c
 @@ -598,23 +598,15 @@ nvk_compile_nir(struct nvk_device *dev, nir_shader *nir,
@@ -287,7 +287,7 @@ index 6f649f8..a412cbc 100644
  
  static VkResult
 diff --git a/src/nouveau/vulkan/nvk_shader.h b/src/nouveau/vulkan/nvk_shader.h
-index e50c36b..56c8cad 100644
+index e50c36be79162370618e80dc7bfebd0638f46536..56c8cad833509ba909f6d517c1978e651c092e8a 100644
 --- a/src/nouveau/vulkan/nvk_shader.h
 +++ b/src/nouveau/vulkan/nvk_shader.h
 @@ -11,6 +11,7 @@

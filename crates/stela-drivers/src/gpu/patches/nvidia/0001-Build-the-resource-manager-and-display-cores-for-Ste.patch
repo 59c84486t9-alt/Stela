@@ -18,7 +18,7 @@ Subject: [PATCH] Build the resource-manager and display cores for Stela
  11 files changed, 123 insertions(+), 12 deletions(-)
 
 diff --git a/src/common/inc/nvUnixVersion.h b/src/common/inc/nvUnixVersion.h
-index b757607..ec2c519 100644
+index b757607fa0d89af534106507fd94246a4c4d295e..ec2c519576ea6d8e0835d9c59d5de6ffea35193b 100644
 --- a/src/common/inc/nvUnixVersion.h
 +++ b/src/common/inc/nvUnixVersion.h
 @@ -1,7 +1,7 @@
@@ -31,7 +31,7 @@ index b757607..ec2c519 100644
      defined(NV_DCECORE)
  
 diff --git a/src/common/inc/nvVer.h b/src/common/inc/nvVer.h
-index 9f74078..32cea9a 100644
+index 9f74078f9356bd9b5425ffce90f356e917808d5f..32cea9aada003ea712ce664860b03d4154af5ce5 100644
 --- a/src/common/inc/nvVer.h
 +++ b/src/common/inc/nvVer.h
 @@ -6,7 +6,7 @@
@@ -44,7 +44,7 @@ index 9f74078..32cea9a 100644
      defined(NV_DCECORE)
  
 diff --git a/src/common/sdk/nvidia/inc/cpuopsys.h b/src/common/sdk/nvidia/inc/cpuopsys.h
-index 6467b39..c5852f3 100644
+index 6467b396a696a47fa71d4ad41e32d27f344fcdce..c5852f32ad43bfe276ac69a7616d3ec180d496e9 100644
 --- a/src/common/sdk/nvidia/inc/cpuopsys.h
 +++ b/src/common/sdk/nvidia/inc/cpuopsys.h
 @@ -51,6 +51,12 @@
@@ -83,7 +83,7 @@ index 6467b39..c5852f3 100644
  #if defined(NV_WINDOWS_CE)
  #define NVOS_IS_WINDOWS_CE 1
 diff --git a/src/common/sdk/nvidia/inc/nvmisc.h b/src/common/sdk/nvidia/inc/nvmisc.h
-index 4f23e39..81b1572 100644
+index 4f23e392d9eaeb2736235150cdf75906fe56f38d..81b157293e6eb9326d3b3b59cb62b22cdd6755c1 100644
 --- a/src/common/sdk/nvidia/inc/nvmisc.h
 +++ b/src/common/sdk/nvidia/inc/nvmisc.h
 @@ -789,7 +789,7 @@ nvGetNthSetBitIndex32(NvU32 mask, NvU32 n)
@@ -96,7 +96,7 @@ index 4f23e39..81b1572 100644
      #else
          #define NV_OFFSETOF(type, member)    ((NvUPtr) &(((type *)0)->member))
 diff --git a/src/nvidia-modeset/Makefile b/src/nvidia-modeset/Makefile
-index 9f7de4b..bff0098 100644
+index 9f7de4be57e20d8fb03715348aab99e6004ad6ad..bff00980245582b3482fc91218c81e0d9edfa6d5 100644
 --- a/src/nvidia-modeset/Makefile
 +++ b/src/nvidia-modeset/Makefile
 @@ -33,6 +33,10 @@ LD_HAS_FORCE_GROUP_ALLOCATION = \
@@ -131,7 +131,7 @@ index 9f7de4b..bff0098 100644
  $(NV_MODESET_KERNEL_O): $(OBJS) $(LINKER_DEPS)
  	$(call quiet_cmd,LD) $(LDFLAGS) $(EXTRA_LINKER_ARGS) -r \
 diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
-index f0e917d..614a58f 100644
+index f0e917d3bfe70e911bd75aab1fe2a51e4ededd7a..614a58f56c9c54659c3a0d324241664cceb31ae3 100644
 --- a/src/nvidia-modeset/include/nvkms-types.h
 +++ b/src/nvidia-modeset/include/nvkms-types.h
 @@ -897,13 +897,37 @@ typedef struct  {
@@ -177,7 +177,7 @@ index f0e917d..614a58f 100644
      NvBool rasterLockAcrossProtocolsAllowed :1;
      NvBool adaptiveSyncSdpSupported         :1;
 diff --git a/src/nvidia/Makefile b/src/nvidia/Makefile
-index 9abfc7c..e0a8104 100644
+index 9abfc7cf43adb10fd6985f2fb05be7888f1df900..e0a8104059f1dffae92f36ababbc0ffdc01c5041 100644
 --- a/src/nvidia/Makefile
 +++ b/src/nvidia/Makefile
 @@ -21,6 +21,21 @@ GET_COMPILER_TYPE = \
@@ -241,7 +241,7 @@ index 9abfc7c..e0a8104 100644
  LINKER_SCRIPT = nv-kernel.ld
  
 diff --git a/src/nvidia/arch/nvalloc/unix/include/x86emu/regs.h b/src/nvidia/arch/nvalloc/unix/include/x86emu/regs.h
-index 4cd0f8b..6f73258 100644
+index 4cd0f8b0c8b71b4ab3ab3ec7d156b6e3f3cc7584..6f73258feab697b47d03139703f79fe692c2d53a 100644
 --- a/src/nvidia/arch/nvalloc/unix/include/x86emu/regs.h
 +++ b/src/nvidia/arch/nvalloc/unix/include/x86emu/regs.h
 @@ -40,6 +40,7 @@
@@ -265,7 +265,7 @@ index 4cd0f8b..6f73258 100644
          X86EMU_regs             x86;
          } X86EMU_sysEnv;
 diff --git a/src/nvidia/inc/kernel/os/workitem.h b/src/nvidia/inc/kernel/os/workitem.h
-index f335ef0..a839995 100644
+index f335ef029536e77f5b3df6a5db82a6af35e7b254..a8399959fef82bd65418f3a59fe97f2f48166b3e 100644
 --- a/src/nvidia/inc/kernel/os/workitem.h
 +++ b/src/nvidia/inc/kernel/os/workitem.h
 @@ -54,7 +54,9 @@ typedef struct
@@ -280,7 +280,7 @@ index f335ef0..a839995 100644
      NvU32 bLockGpuGroupDevice:1;
      NvU32 bLockGpuGroupSubdevice:1;
 diff --git a/src/nvidia/inc/libraries/nvport/inline/util_gcc_clang.h b/src/nvidia/inc/libraries/nvport/inline/util_gcc_clang.h
-index be58d89..eae6bd6 100644
+index be58d89a333b139dd44bd7e94c8dc668cb29cfcb..eae6bd681af1e75a92bf32cd8d3857e23fb2b92a 100644
 --- a/src/nvidia/inc/libraries/nvport/inline/util_gcc_clang.h
 +++ b/src/nvidia/inc/libraries/nvport/inline/util_gcc_clang.h
 @@ -108,7 +108,7 @@
@@ -293,7 +293,7 @@ index be58d89..eae6bd6 100644
  #else
  PORT_UTIL_INLINE NvU32 portUtilCountLeadingZeros64(NvU64 n)
 diff --git a/utils.mk b/utils.mk
-index 7cc9e2c..a8f1e7d 100644
+index 7cc9e2c2812c6e9beebb8341dc130d71fa663f6f..a8f1e7d36b4fa8eb5b51138f19057ca04e561d14 100644
 --- a/utils.mk
 +++ b/utils.mk
 @@ -127,6 +127,11 @@ ifeq ($(TARGET_OS),Linux)

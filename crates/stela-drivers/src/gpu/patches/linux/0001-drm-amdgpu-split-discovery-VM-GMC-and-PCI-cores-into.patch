@@ -63,7 +63,7 @@ Subject: [PATCH] drm/amdgpu: split discovery, VM, GMC and PCI cores into
  create mode 100644 drivers/gpu/drm/amd/include/amd_harvest_masks.h
 
 diff --git a/drivers/gpu/drm/amd/amdgpu/Makefile b/drivers/gpu/drm/amd/amdgpu/Makefile
-index ba80542e..d5ea56ef 100644
+index ba80542ead9d90e895c5ddb1b9ce008338a11e84..d5ea56efbf4d829f2f24ab9b5f0c03198780e4e2 100644
 --- a/drivers/gpu/drm/amd/amdgpu/Makefile
 +++ b/drivers/gpu/drm/amd/amdgpu/Makefile
 @@ -49,6 +49,8 @@ subdir-ccflags-y += -Wno-override-init
@@ -77,7 +77,7 @@ index ba80542e..d5ea56ef 100644
  amdgpu-y += amdgpu_device.o amdgpu_reg_access.o amdgpu_doorbell_mgr.o amdgpu_kms.o \
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_apu_flags_core.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_apu_flags_core.h
 new file mode 100644
-index 00000000..c068d02a
+index 0000000000000000000000000000000000000000..c068d02ad8127cadd02d1cc210557de148b1ac8b
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_apu_flags_core.h
 @@ -0,0 +1,70 @@
@@ -152,7 +152,7 @@ index 00000000..c068d02a
 +}
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
-index e84b75c0..49ddc7ec 100644
+index e84b75c03c6f904273d19ef55021e95ed75396c2..49ddc7ece7b3b525b04935386e14d14dd85f7c6c 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
 @@ -48,6 +48,9 @@
@@ -328,7 +328,7 @@ index e84b75c0..49ddc7ec 100644
  	for (i = 0; i < AMD_IP_BLOCK_TYPE_NUM; i++)
  		atomic_set(&adev->pm.pwr_state[i], POWER_STATE_UNKNOWN);
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.c
-index 47e0680e..6247ff29 100644
+index 47e0680ed7b15f72fec3c07f4b9bf3f6039c38bb..6247ff2963e902b63b010c3538aa19a22c6056a9 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.c
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.c
 @@ -24,9 +24,12 @@
@@ -1761,7 +1761,7 @@ index 47e0680e..6247ff29 100644
  			if (r)
  				return -EINVAL;
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.h
-index e0010f6a..672f5339 100644
+index e0010f6a3eda5064bc05e3a42a335f291b228a64..672f5339a9a1250c593b65c9409aba8d8954e1b6 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.h
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.h
 @@ -26,8 +26,7 @@
@@ -1776,7 +1776,7 @@ index e0010f6a..672f5339 100644
  struct drm_printer;
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_file_core.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_file_core.h
 new file mode 100644
-index 00000000..a07bae84
+index 0000000000000000000000000000000000000000..a07bae8431cbf82a42e3f1fb6028f0b422b84380
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_file_core.h
 @@ -0,0 +1,53 @@
@@ -1835,7 +1835,7 @@ index 00000000..a07bae84
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_info_core.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_info_core.h
 new file mode 100644
-index 00000000..f48426b0
+index 0000000000000000000000000000000000000000..f48426b06631b9fef70852ead4e630312769069f
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_info_core.h
 @@ -0,0 +1,531 @@
@@ -2372,7 +2372,7 @@ index 00000000..f48426b0
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_ip_core.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_ip_core.h
 new file mode 100644
-index 00000000..40f9a9e1
+index 0000000000000000000000000000000000000000..40f9a9e18d901b6a052418f308a3e8b54397d033
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_ip_core.h
 @@ -0,0 +1,308 @@
@@ -2686,7 +2686,7 @@ index 00000000..40f9a9e1
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_source_core.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_source_core.h
 new file mode 100644
-index 00000000..1d41b61c
+index 0000000000000000000000000000000000000000..1d41b61c522774a09daf71e6ee66e17977a30bc7
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_source_core.h
 @@ -0,0 +1,142 @@
@@ -2834,7 +2834,7 @@ index 00000000..1d41b61c
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_tmr_core.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_tmr_core.h
 new file mode 100644
-index 00000000..3207b0a7
+index 0000000000000000000000000000000000000000..3207b0a7d523de0f927a76c41a95bbed08e6166b
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_tmr_core.h
 @@ -0,0 +1,159 @@
@@ -2999,7 +2999,7 @@ index 00000000..3207b0a7
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_tmr_limits.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_tmr_limits.h
 new file mode 100644
-index 00000000..0d108446
+index 0000000000000000000000000000000000000000..0d108446c844c316bc1a54a76a8af6506e9130e0
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery_tmr_limits.h
 @@ -0,0 +1,28 @@
@@ -3032,7 +3032,7 @@ index 00000000..0d108446
 +#define DISCOVERY_TMR_OFFSET    (64 << 10)
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_doorbell_mgr.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_doorbell_mgr.c
-index bc785856..395adaf3 100644
+index bc78585673215e17728e9e0d87e608e7485e6132..395adaf323013989814c2a596303ad869fe6ac67 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_doorbell_mgr.c
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_doorbell_mgr.c
 @@ -23,6 +23,7 @@
@@ -3078,7 +3078,7 @@ index bc785856..395adaf3 100644
  }
  
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
-index 1aed121f..78057c93 100644
+index 1aed121f4ddb6773d07ae3e071ac552894f7ff9c..78057c93b595141a1d37c070d31d5af9f6f0c804 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
 @@ -1125,1095 +1125,11 @@ module_param_named(hdmi_hpd_debounce_delay_ms, amdgpu_hdmi_hpd_debounce_delay_ms
@@ -4265,7 +4265,7 @@ index 1aed121f..78057c93 100644
  			 "See modparam exp_hw_support\n");
  		return -ENODEV;
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_gfx.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_gfx.h
-index 54c1eb9c..ab35c3db 100644
+index 54c1eb9c499ba077239fa1e5bd06a0bbf68397a5..ab35c3dba251048ae5e29032a8fadc868c5b3646 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_gfx.h
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_gfx.h
 @@ -24,6 +24,8 @@
@@ -4442,7 +4442,7 @@ index 54c1eb9c..ab35c3db 100644
  	struct amdgpu_ras_block_object  ras_block;
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_gfx_config.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_gfx_config.h
 new file mode 100644
-index 00000000..dc164e7e
+index 0000000000000000000000000000000000000000..dc164e7e4e37001890f66e7ad3e7b6262f40942d
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_gfx_config.h
 @@ -0,0 +1,182 @@
@@ -4629,7 +4629,7 @@ index 00000000..dc164e7e
 +
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_gmc.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_gmc.c
-index 5d6149ba..ecb0e4a2 100644
+index 5d6149ba7ab78e8a62529a04e25779bf8429686e..ecb0e4a2da7e4657f279b1488d07d8eb5579fe9f 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_gmc.c
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_gmc.c
 @@ -31,6 +31,7 @@
@@ -4652,7 +4652,7 @@ index 5d6149ba..ecb0e4a2 100644
  	return 0;
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_gmc_pte.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_gmc_pte.h
 new file mode 100644
-index 00000000..764fa1f3
+index 0000000000000000000000000000000000000000..764fa1f32a1a0eccda396ff44d1fe0766ef3b51b
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_gmc_pte.h
 @@ -0,0 +1,48 @@
@@ -4705,7 +4705,7 @@ index 00000000..764fa1f3
 +
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_ip.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_ip.h
-index 1d0df6d9..7d50d8aa 100644
+index 1d0df6d93957e0e2b745fd78e37300cd20ef5aa9..7d50d8aa788752db89fff349da256f16eac2ec6c 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_ip.h
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_ip.h
 @@ -25,64 +25,11 @@
@@ -4777,7 +4777,7 @@ index 1d0df6d9..7d50d8aa 100644
  	/* Map of logical to actual dev instances/mask */
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_ip_instance_limits.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_ip_instance_limits.h
 new file mode 100644
-index 00000000..1f207266
+index 0000000000000000000000000000000000000000..1f2072660c10796d787bac146df3ca919d878091
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_ip_instance_limits.h
 @@ -0,0 +1,29 @@
@@ -4812,7 +4812,7 @@ index 00000000..1f207266
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_ip_limits.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_ip_limits.h
 new file mode 100644
-index 00000000..3dd19bba
+index 0000000000000000000000000000000000000000..3dd19bbad88ae119feaae639e532de3379d0aae2
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_ip_limits.h
 @@ -0,0 +1,32 @@
@@ -4850,7 +4850,7 @@ index 00000000..3dd19bba
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_ip_types.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_ip_types.h
 new file mode 100644
-index 00000000..d7dcffe7
+index 0000000000000000000000000000000000000000..d7dcffe79de041a411011e2405209d4de852d7d7
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_ip_types.h
 @@ -0,0 +1,80 @@
@@ -4936,7 +4936,7 @@ index 00000000..d7dcffe7
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_mm_access_core.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_mm_access_core.h
 new file mode 100644
-index 00000000..04d28e86
+index 0000000000000000000000000000000000000000..04d28e8649589855371825a822a3f3926162e66b
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_mm_access_core.h
 @@ -0,0 +1,73 @@
@@ -5015,7 +5015,7 @@ index 00000000..04d28e86
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_pci_match_core.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_pci_match_core.h
 new file mode 100644
-index 00000000..141ced9c
+index 0000000000000000000000000000000000000000..141ced9ce976f8c8e51b7b737aa18491e7f60593
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_pci_match_core.h
 @@ -0,0 +1,1210 @@
@@ -6230,7 +6230,7 @@ index 00000000..141ced9c
 +#endif
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_sdma.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_sdma.h
-index 2bf36560..9e4cf07a 100644
+index 2bf365609775a268bbc2a850741c7d4d2b4d152c..9e4cf07a53dc48a0bb397ea8691c57314d3a4740 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_sdma.h
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_sdma.h
 @@ -26,7 +26,7 @@
@@ -6243,7 +6243,7 @@ index 2bf36560..9e4cf07a 100644
  enum amdgpu_sdma_irq {
  	AMDGPU_SDMA_IRQ_INSTANCE0  = 0,
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_vcn.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_vcn.h
-index 82624b44..1db99733 100644
+index 82624b44e661a8d08f5f9ac29dd1e1d29b0df3b7..1db99733b71dbb4627347a4ae4f5d568314763d4 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_vcn.h
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vcn.h
 @@ -32,11 +32,10 @@
@@ -6261,7 +6261,7 @@ index 82624b44..1db99733 100644
  #define VCN_DEC_KMD_CMD 		0x80000000
  #define VCN_DEC_CMD_FENCE		0x00000000
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.c
-index 9e8f7d2b..e07a553e 100644
+index 9e8f7d2b898cf85c8a281ff9973e15e400f7bc6e..e07a553ed04a3c5ca0dbc97ded3c8b796bed1cf0 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.c
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.c
 @@ -902,25 +902,11 @@ static u32 amdgpu_virt_init_detect_asic(struct amdgpu_device *adev)
@@ -6296,7 +6296,7 @@ index 9e8f7d2b..e07a553e 100644
  	if (reg & 1)
  		adev->virt.caps |= AMDGPU_SRIOV_CAPS_IS_VF;
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.h
-index d8500c3e..4819680b 100644
+index d8500c3e48a17ff6c047e70e6986ca8055c3dec6..4819680b324b1c7b0c6a88d84920a4f4b0a46460 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.h
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.h
 @@ -56,10 +56,7 @@
@@ -6313,7 +6313,7 @@ index d8500c3e..4819680b 100644
  
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_virt_bootstrap_core.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_virt_bootstrap_core.h
 new file mode 100644
-index 00000000..42cfe398
+index 0000000000000000000000000000000000000000..42cfe398b9c9d76c25781eb5c547f690fb352dff
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_virt_bootstrap_core.h
 @@ -0,0 +1,62 @@
@@ -6380,7 +6380,7 @@ index 00000000..42cfe398
 +}
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
-index 1baad762..b6ca70b2 100644
+index 1baad7624f1f9870e6360d7b2af615e5741c2743..b6ca70b29de8a4d83b2e36de43ea597e6ac2a901 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
 @@ -37,6 +37,7 @@
@@ -6412,7 +6412,7 @@ index 1baad762..b6ca70b2 100644
  
  /**
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm_cpu.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm_cpu.c
-index b31ff6f5..3c03a04c 100644
+index b31ff6f56f0d615ae74204174229e0597423ba76..3c03a04c5058d8c3c8c684840ba25d47d71a5531 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm_cpu.c
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm_cpu.c
 @@ -21,6 +21,7 @@
@@ -6507,7 +6507,7 @@ index b31ff6f5..3c03a04c 100644
  
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm_cpu_entries.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm_cpu_entries.h
 new file mode 100644
-index 00000000..95a512fd
+index 0000000000000000000000000000000000000000..95a512fda4cb6e20331a91bdb889f75087ece4b3
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm_cpu_entries.h
 @@ -0,0 +1,84 @@
@@ -6596,7 +6596,7 @@ index 00000000..95a512fd
 +
 +#endif
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_vpe.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_vpe.h
-index 5c9a9f59..92f3f5b7 100644
+index 5c9a9f59a02b1b425b7b2ad7cf140c7ea35eba5f..92f3f5b732501d1e37945f59dc45059f62c6c287 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_vpe.h
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vpe.h
 @@ -27,7 +27,7 @@
@@ -6610,7 +6610,7 @@ index 5c9a9f59..92f3f5b7 100644
  
 diff --git a/drivers/gpu/drm/amd/include/amd_chip_flags.h b/drivers/gpu/drm/amd/include/amd_chip_flags.h
 new file mode 100644
-index 00000000..48ca569f
+index 0000000000000000000000000000000000000000..48ca569fc4fac7eb3afaa6d50e437dfe03b0a879
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/include/amd_chip_flags.h
 @@ -0,0 +1,48 @@
@@ -6664,7 +6664,7 @@ index 00000000..48ca569f
 +#endif
 diff --git a/drivers/gpu/drm/amd/include/amd_harvest_masks.h b/drivers/gpu/drm/amd/include/amd_harvest_masks.h
 new file mode 100644
-index 00000000..e02396a2
+index 0000000000000000000000000000000000000000..e02396a2f2cd77396da4f0719082d572524749e2
 --- /dev/null
 +++ b/drivers/gpu/drm/amd/include/amd_harvest_masks.h
 @@ -0,0 +1,34 @@
@@ -6703,7 +6703,7 @@ index 00000000..e02396a2
 +#define AMDGPU_VCN_HARVEST_VCN1 (1 << 1)
 +#endif
 diff --git a/drivers/gpu/drm/amd/include/amd_shared.h b/drivers/gpu/drm/amd/include/amd_shared.h
-index 3fd38323..5d62c371 100644
+index 3fd38323a88ba7a70baa92bf7695784b40d1253c..5d62c371c4b6774bc7ff9d977efd5b2ef173b1c6 100644
 --- a/drivers/gpu/drm/amd/include/amd_shared.h
 +++ b/drivers/gpu/drm/amd/include/amd_shared.h
 @@ -31,27 +31,7 @@
@@ -6749,7 +6749,7 @@ index 3fd38323..5d62c371 100644
  /**
   * enum DC_FEATURE_MASK - Bits that control DC feature defaults
 diff --git a/drivers/gpu/drm/amd/include/discovery.h b/drivers/gpu/drm/amd/include/discovery.h
-index 76c9f951..ff1d6b33 100644
+index 76c9f951bc1c86a37c58369bccdd7faa69f51eaf..ff1d6b33f99bd028dc196475f133b3c8a08002b7 100644
 --- a/drivers/gpu/drm/amd/include/discovery.h
 +++ b/drivers/gpu/drm/amd/include/discovery.h
 @@ -24,6 +24,20 @@
@@ -6819,7 +6819,7 @@ index 76c9f951..ff1d6b33 100644
  
  typedef struct die_header
 diff --git a/include/drm/amd_asic_type.h b/include/drm/amd_asic_type.h
-index 9be85b82..a82b0acc 100644
+index 9be85b821aa6d0e328479cded2868c86253fe128..a82b0acc0629db5bd98f97cabae75aa7267d4507 100644
 --- a/include/drm/amd_asic_type.h
 +++ b/include/drm/amd_asic_type.h
 @@ -23,7 +23,11 @@

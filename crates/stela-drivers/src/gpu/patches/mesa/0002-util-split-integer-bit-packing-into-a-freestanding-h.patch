@@ -10,7 +10,7 @@ Subject: [PATCH] util: split integer bit packing into a freestanding header
  create mode 100644 src/util/bitpack_uint.h
 
 diff --git a/src/util/bitpack_helpers.h b/src/util/bitpack_helpers.h
-index a55eae9..f30ae5c 100644
+index a55eae9ec75821641043042899e25bc161a2ae05..f30ae5c7b251b930792621ab4e45ce34f046b62c 100644
 --- a/src/util/bitpack_helpers.h
 +++ b/src/util/bitpack_helpers.h
 @@ -43,34 +43,7 @@
@@ -51,7 +51,7 @@ index a55eae9..f30ae5c 100644
  util_bitpack_sint(int64_t v, uint32_t start, uint32_t end)
 diff --git a/src/util/bitpack_uint.h b/src/util/bitpack_uint.h
 new file mode 100644
-index 0000000..0617beb
+index 0000000000000000000000000000000000000000..0617beb5dd19d4a09641c3a5194868e59e5bea4e
 --- /dev/null
 +++ b/src/util/bitpack_uint.h
 @@ -0,0 +1,59 @@

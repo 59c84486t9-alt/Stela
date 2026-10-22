@@ -11,7 +11,7 @@ Subject: [PATCH] rbtree: keep every pointer bit in the parent word on LLP64
  3 files changed, 18 insertions(+), 11 deletions(-)
 
 diff --git a/include/linux/rbtree.h b/include/linux/rbtree.h
-index 48acdc38..2ea2468f 100644
+index 48acdc3889dd4e76a2313d822407a570c1b0fe90..2ea2468f117b0caea2a8980843827b6f43d70811 100644
 --- a/include/linux/rbtree.h
 +++ b/include/linux/rbtree.h
 @@ -23,7 +23,7 @@
@@ -54,7 +54,7 @@ index 48acdc38..2ea2468f 100644
  
  	rcu_assign_pointer(*rb_link, node);
 diff --git a/include/linux/rbtree_augmented.h b/include/linux/rbtree_augmented.h
-index 6dbc5a1b..35266d76 100644
+index 6dbc5a1bf6a8ce04042df4c07167cc226d53a466..35266d766258420099e44f8dcdf5335106e14a10 100644
 --- a/include/linux/rbtree_augmented.h
 +++ b/include/linux/rbtree_augmented.h
 @@ -171,7 +171,7 @@ RB_DECLARE_CALLBACKS(RBSTATIC, RBNAME,					      \
@@ -92,7 +92,7 @@ index 6dbc5a1b..35266d76 100644
  	if (!tmp) {
  		/*
 diff --git a/include/linux/rbtree_types.h b/include/linux/rbtree_types.h
-index 3c7ae53e..d7cb0faf 100644
+index 3c7ae53e813976bd340e3c91c8833910ed1fda56..d7cb0fafeeae95adf45e813cccede5867b6a4a1f 100644
 --- a/include/linux/rbtree_types.h
 +++ b/include/linux/rbtree_types.h
 @@ -2,11 +2,18 @@

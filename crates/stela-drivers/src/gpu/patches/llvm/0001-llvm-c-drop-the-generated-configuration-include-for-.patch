@@ -10,7 +10,7 @@ Subject: [PATCH] llvm-c: drop the generated configuration include for Stela's
  2 files changed, 142 deletions(-)
 
 diff --git a/llvm/include/llvm-c/Target.h b/llvm/include/llvm-c/Target.h
-index 12bc1ac..8695d0c 100644
+index 12bc1ac43872975c662e075dfd695b5451e9ae17..8695d0ca6fbb5fc0a3b5fb2b4c7702f69c3371d2 100644
 --- a/llvm/include/llvm-c/Target.h
 +++ b/llvm/include/llvm-c/Target.h
 @@ -23,7 +23,6 @@
@@ -169,7 +169,7 @@ index 12bc1ac..8695d0c 100644
  
  /**
 diff --git a/llvm/include/llvm-c/Visibility.h b/llvm/include/llvm-c/Visibility.h
-index 371b981..3b93dd0 100644
+index 371b981b6d32cbd799b196286a936a31fef87a46..3b93dd00af31d9e79c7e7902b3907567fba9d319 100644
 --- a/llvm/include/llvm-c/Visibility.h
 +++ b/llvm/include/llvm-c/Visibility.h
 @@ -16,7 +16,6 @@

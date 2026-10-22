@@ -407,6 +407,8 @@ pub fn export() -> Result<()> {
                         "-q",
                         "--no-numbered",
                         "--zero-commit",
+                        // Abbreviated blob names grow with the checkout.
+                        "--full-index",
                         "--no-signature",
                     ])
                     .arg("-o")

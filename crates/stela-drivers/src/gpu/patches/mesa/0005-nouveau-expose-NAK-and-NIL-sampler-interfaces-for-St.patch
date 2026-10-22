@@ -21,7 +21,7 @@ Subject: [PATCH] nouveau: expose NAK and NIL sampler interfaces for Stela's
  create mode 100644 src/nouveau/nil/nil_sampler.h
 
 diff --git a/src/nouveau/compiler/meson.build b/src/nouveau/compiler/meson.build
-index df19299..6b294be 100644
+index df192993e9e33e6cef9120aed38f46917771c367..6b294bed6fd119ecaa82f3e682bf45cef5812bb1 100644
 --- a/src/nouveau/compiler/meson.build
 +++ b/src/nouveau/compiler/meson.build
 @@ -40,11 +40,20 @@ libnak_deps = [
@@ -65,7 +65,7 @@ index df19299..6b294be 100644
      'nak',
      _libnak_rs,
 diff --git a/src/nouveau/compiler/nak.h b/src/nouveau/compiler/nak.h
-index 54a3123..f50b07a 100644
+index 54a31230f642667f388e6f370430a94615949274..f50b07a4a1497940f98d44d4dca4a8dca5fde653 100644
 --- a/src/nouveau/compiler/nak.h
 +++ b/src/nouveau/compiler/nak.h
 @@ -21,8 +21,15 @@ extern "C" {
@@ -95,7 +95,7 @@ index 54a3123..f50b07a 100644
  #define NAK_PRINTF_BUFFER_SIZE 0x40000
  
 diff --git a/src/nouveau/compiler/nak/api.rs b/src/nouveau/compiler/nak/api.rs
-index f091e3d..e111ce5 100644
+index f091e3d3702c648dd0e3ec61f0cc019f6cf102fc..e111ce55c3805a945c98c7a2f3a34b3afe51b856 100644
 --- a/src/nouveau/compiler/nak/api.rs
 +++ b/src/nouveau/compiler/nak/api.rs
 @@ -200,14 +200,20 @@ fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
@@ -121,7 +121,7 @@ index f091e3d..e111ce5 100644
  
      Box::into_raw(nak)
 diff --git a/src/nouveau/compiler/nak_bindings.h b/src/nouveau/compiler/nak_bindings.h
-index e766da1..e3ffa21 100644
+index e766da19f9872923fe845de07d9648199856a29f..e3ffa21e0c2c72170b974a1164153b4a521f5907 100644
 --- a/src/nouveau/compiler/nak_bindings.h
 +++ b/src/nouveau/compiler/nak_bindings.h
 @@ -5,6 +5,7 @@
@@ -138,7 +138,7 @@ index e766da1..e3ffa21 100644
  };
 +#endif
 diff --git a/src/nouveau/compiler/nak_private.h b/src/nouveau/compiler/nak_private.h
-index 0d79e95..3849dc8 100644
+index 0d79e959998f45eec23b30de22734ec4c0cc2b09..3849dc80153d76173e4346426d48197a577faace 100644
 --- a/src/nouveau/compiler/nak_private.h
 +++ b/src/nouveau/compiler/nak_private.h
 @@ -22,6 +22,8 @@ struct nak_compiler {
@@ -163,7 +163,7 @@ index 0d79e95..3849dc8 100644
  }
  
 diff --git a/src/nouveau/headers/meson.build b/src/nouveau/headers/meson.build
-index b3a0273..dd11fb2 100644
+index b3a0273874659ac618f4efeb634f08c2e4b91126..dd11fb2974e56540b39e9512b69a84950c797f1c 100644
 --- a/src/nouveau/headers/meson.build
 +++ b/src/nouveau/headers/meson.build
 @@ -76,6 +76,7 @@ hwref_gens = [
@@ -194,7 +194,7 @@ index b3a0273..dd11fb2 100644
    foreach cl : nv_classes
      cl_rs_generated += custom_target(
 diff --git a/src/nouveau/meson.build b/src/nouveau/meson.build
-index de6d458..b971fde 100644
+index de6d45806b727781a2b855f82c06c9a1545f1279..b971fde3c5ce51e41a9da073021b43731a7f4242 100644
 --- a/src/nouveau/meson.build
 +++ b/src/nouveau/meson.build
 @@ -2,9 +2,11 @@
@@ -214,7 +214,7 @@ index de6d458..b971fde 100644
    subdir('compiler')
 diff --git a/src/nouveau/nil/nil_sampler.h b/src/nouveau/nil/nil_sampler.h
 new file mode 100644
-index 0000000..6561199
+index 0000000000000000000000000000000000000000..65611990c98ca6dfc5199887a7d5e953bdf1226c
 --- /dev/null
 +++ b/src/nouveau/nil/nil_sampler.h
 @@ -0,0 +1,332 @@
@@ -551,7 +551,7 @@ index 0000000..6561199
 +#endif
 +#endif
 diff --git a/src/nouveau/vulkan/nvk_physical_device.c b/src/nouveau/vulkan/nvk_physical_device.c
-index 71242e7..b24d65c 100644
+index 71242e72cd91dc34258f161860ee551394799f99..b24d65cd4b3975d4cd1fc6409fbf1442a251715a 100644
 --- a/src/nouveau/vulkan/nvk_physical_device.c
 +++ b/src/nouveau/vulkan/nvk_physical_device.c
 @@ -1573,7 +1573,8 @@ nvk_create_drm_physical_device(struct vk_instance *_instance,
@@ -565,7 +565,7 @@ index 71242e7..b24d65c 100644
        result = vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
        goto fail_init;
 diff --git a/src/nouveau/vulkan/nvk_sampler.c b/src/nouveau/vulkan/nvk_sampler.c
-index 32f7f9b..7102374 100644
+index 32f7f9bc19525cc3ccb0bea5abf027b432abba1a..7102374657dac013303dd0a150aa499f3d2372f7 100644
 --- a/src/nouveau/vulkan/nvk_sampler.c
 +++ b/src/nouveau/vulkan/nvk_sampler.c
 @@ -22,269 +22,33 @@
@@ -862,7 +862,7 @@ index 32f7f9b..7102374 100644
  
  struct nvk_sampler_header
 diff --git a/src/nouveau/vulkan/nvk_sampler.h b/src/nouveau/vulkan/nvk_sampler.h
-index 7d99e9a..52c521f 100644
+index 7d99e9a8493ae71a9567f3b171fa51d6ba52c117..52c521f952e9825d66dcfe97d273384f47070e2f 100644
 --- a/src/nouveau/vulkan/nvk_sampler.h
 +++ b/src/nouveau/vulkan/nvk_sampler.h
 @@ -13,9 +13,7 @@
@@ -877,7 +877,7 @@ index 7d99e9a..52c521f 100644
  struct nvk_sampler {
     struct vk_sampler vk;
 diff --git a/src/nouveau/vulkan/nvk_shader.h b/src/nouveau/vulkan/nvk_shader.h
-index 782a788..e50c36b 100644
+index 782a78851e47ca9c1b6be3125e3df5de8acb3394..e50c36be79162370618e80dc7bfebd0638f46536 100644
 --- a/src/nouveau/vulkan/nvk_shader.h
 +++ b/src/nouveau/vulkan/nvk_shader.h
 @@ -170,4 +170,8 @@ nvk_compile_nir_shader(struct nvk_device *dev, nir_shader *nir,

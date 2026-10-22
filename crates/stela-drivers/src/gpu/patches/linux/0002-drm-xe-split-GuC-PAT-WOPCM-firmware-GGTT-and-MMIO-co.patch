@@ -92,7 +92,7 @@ Subject: [PATCH] drm/xe: split GuC, PAT, WOPCM, firmware, GGTT and MMIO cores
  create mode 100644 drivers/gpu/drm/xe/xe_wopcm_size.h
 
 diff --git a/drivers/gpu/drm/xe/abi/guc_communication_ctb_abi.h b/drivers/gpu/drm/xe/abi/guc_communication_ctb_abi.h
-index f58198cf..090ffa9d 100644
+index f58198cf2cf639571cd796a48a4d6756378e33a7..090ffa9d01edb61dc75a07af20e65ddfa3ef2796 100644
 --- a/drivers/gpu/drm/xe/abi/guc_communication_ctb_abi.h
 +++ b/drivers/gpu/drm/xe/abi/guc_communication_ctb_abi.h
 @@ -6,8 +6,12 @@
@@ -109,7 +109,7 @@ index f58198cf..090ffa9d 100644
  #include "guc_messages_abi.h"
  
 diff --git a/drivers/gpu/drm/xe/abi/uc_fw_abi.h b/drivers/gpu/drm/xe/abi/uc_fw_abi.h
-index 198e9496..c29f124d 100644
+index 198e949660e09dca764608e8df03a3b270e93946..c29f124d8767fb9574a15ec470d466d5b2f1ef09 100644
 --- a/drivers/gpu/drm/xe/abi/uc_fw_abi.h
 +++ b/drivers/gpu/drm/xe/abi/uc_fw_abi.h
 @@ -6,8 +6,13 @@
@@ -127,7 +127,7 @@ index 198e9496..c29f124d 100644
  /**
   * DOC: CSS-based Firmware Layout
 diff --git a/drivers/gpu/drm/xe/instructions/xe_instr_defs.h b/drivers/gpu/drm/xe/instructions/xe_instr_defs.h
-index e5599694..b9dfe8e5 100644
+index e559969468c443832371351ca49a86a123fd9eeb..b9dfe8e5ebfa558a62820ebde12a57d85bf81ef3 100644
 --- a/drivers/gpu/drm/xe/instructions/xe_instr_defs.h
 +++ b/drivers/gpu/drm/xe/instructions/xe_instr_defs.h
 @@ -6,7 +6,11 @@
@@ -144,7 +144,7 @@ index e5599694..b9dfe8e5 100644
   * The first dword of any GPU instruction is the "instruction header."  Bits
 diff --git a/drivers/gpu/drm/xe/regs/xe_guc_ct_regs.h b/drivers/gpu/drm/xe/regs/xe_guc_ct_regs.h
 new file mode 100644
-index 00000000..6aeb49f8
+index 0000000000000000000000000000000000000000..6aeb49f8a09cad325968218ee301ff31025110a6
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/regs/xe_guc_ct_regs.h
 @@ -0,0 +1,11 @@
@@ -160,7 +160,7 @@ index 00000000..6aeb49f8
 +
 +#endif
 diff --git a/drivers/gpu/drm/xe/regs/xe_guc_regs.h b/drivers/gpu/drm/xe/regs/xe_guc_regs.h
-index 5faac831..7d9c9e03 100644
+index 5faac8316b66c4e7fedd70994c39e29a856d0dfb..7d9c9e03165634608533af56223f09e88d0f6515 100644
 --- a/drivers/gpu/drm/xe/regs/xe_guc_regs.h
 +++ b/drivers/gpu/drm/xe/regs/xe_guc_regs.h
 @@ -6,10 +6,18 @@
@@ -198,7 +198,7 @@ index 5faac831..7d9c9e03 100644
  #define MED_VF_SW_FLAG(n)			XE_REG(0x190310 + (n) * 4, XE_REG_OPTION_VF)
  #define MED_VF_SW_FLAG_COUNT			4
 diff --git a/drivers/gpu/drm/xe/regs/xe_reg_defs.h b/drivers/gpu/drm/xe/regs/xe_reg_defs.h
-index 27ac0bf1..25e5d007 100644
+index 27ac0bf1f6cda7df0331fd12da5634f7f457a156..25e5d0077c17165e69fe1e7b256ae068d164a353 100644
 --- a/drivers/gpu/drm/xe/regs/xe_reg_defs.h
 +++ b/drivers/gpu/drm/xe/regs/xe_reg_defs.h
 @@ -6,6 +6,9 @@
@@ -269,7 +269,7 @@ index 27ac0bf1..25e5d007 100644
   * struct xe_reg_mcr - MCR register definition
 diff --git a/drivers/gpu/drm/xe/regs/xe_reg_type.h b/drivers/gpu/drm/xe/regs/xe_reg_type.h
 new file mode 100644
-index 00000000..861a9bd0
+index 0000000000000000000000000000000000000000..861a9bd06da60e4bfc4656add6ccb577a0f4cf8f
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/regs/xe_reg_type.h
 @@ -0,0 +1,55 @@
@@ -329,7 +329,7 @@ index 00000000..861a9bd0
 +
 +#endif
 diff --git a/drivers/gpu/drm/xe/regs/xe_regs.h b/drivers/gpu/drm/xe/regs/xe_regs.h
-index ad93c57e..15c2a49b 100644
+index ad93c57edd17c4d901c7bc5b9773a8ec55b9a6d1..15c2a49bf566afb8ba550a55b81f8a7f588df8f3 100644
 --- a/drivers/gpu/drm/xe/regs/xe_regs.h
 +++ b/drivers/gpu/drm/xe/regs/xe_regs.h
 @@ -6,6 +6,7 @@
@@ -351,7 +351,7 @@ index ad93c57e..15c2a49b 100644
  #define PVC_RP_STATE_CAP			XE_REG(0x281014)
 diff --git a/drivers/gpu/drm/xe/xe_cache_level.h b/drivers/gpu/drm/xe/xe_cache_level.h
 new file mode 100644
-index 00000000..52afe229
+index 0000000000000000000000000000000000000000..52afe229c9384fb1b2a30db8135c2b53acb18e23
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_cache_level.h
 @@ -0,0 +1,13 @@
@@ -369,7 +369,7 @@ index 00000000..52afe229
 +};
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_device_types.h b/drivers/gpu/drm/xe/xe_device_types.h
-index aad10899..7a762360 100644
+index aad10899d9ace1be81b84be4c4545945bb6b0916..7a762360448a1039bd64c9d6b98059deec40ae90 100644
 --- a/drivers/gpu/drm/xe/xe_device_types.h
 +++ b/drivers/gpu/drm/xe/xe_device_types.h
 @@ -19,6 +19,7 @@
@@ -390,7 +390,7 @@ index aad10899..7a762360 100644
  #define XE_GT1		1
 diff --git a/drivers/gpu/drm/xe/xe_engine_ids.h b/drivers/gpu/drm/xe/xe_engine_ids.h
 new file mode 100644
-index 00000000..740d4540
+index 0000000000000000000000000000000000000000..740d4540ae4581b32e6479f0ba608832cf589053
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_engine_ids.h
 @@ -0,0 +1,54 @@
@@ -449,7 +449,7 @@ index 00000000..740d4540
 +
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_force_wake.c b/drivers/gpu/drm/xe/xe_force_wake.c
-index 197e2197..875b0c28 100644
+index 197e2197bd0a300e4e83e5653b07eb861b39c6e2..875b0c281bdbe7306e533491fecf75bbafbc5ff7 100644
 --- a/drivers/gpu/drm/xe/xe_force_wake.c
 +++ b/drivers/gpu/drm/xe/xe_force_wake.c
 @@ -13,8 +13,7 @@
@@ -618,7 +618,7 @@ index 197e2197..875b0c28 100644
  
  	xe_gt_WARN(gt, ack_fail, "Forcewake domain%s %#x failed to acknowledge sleep request\n",
 diff --git a/drivers/gpu/drm/xe/xe_force_wake.h b/drivers/gpu/drm/xe/xe_force_wake.h
-index e2721f20..e8a1b31a 100644
+index e2721f205d6c5d0642d198b6194ebbbacb2130aa..e8a1b31ae8bb2a014529dba9adb16e6e22f71bee 100644
 --- a/drivers/gpu/drm/xe/xe_force_wake.h
 +++ b/drivers/gpu/drm/xe/xe_force_wake.h
 @@ -21,11 +21,7 @@ void xe_force_wake_put(struct xe_force_wake *fw, unsigned int fw_ref);
@@ -636,7 +636,7 @@ index e2721f20..e8a1b31a 100644
  	for_each_fw_domain_masked((domain__), (fw__)->initialized_domains, (fw__), (tmp__))
 diff --git a/drivers/gpu/drm/xe/xe_force_wake_core.h b/drivers/gpu/drm/xe/xe_force_wake_core.h
 new file mode 100644
-index 00000000..c74ebce9
+index 0000000000000000000000000000000000000000..c74ebce9c990f1d7ebe40e3e853a88c7a09243ec
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_force_wake_core.h
 @@ -0,0 +1,78 @@
@@ -720,7 +720,7 @@ index 00000000..c74ebce9
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_force_wake_domain_types.h b/drivers/gpu/drm/xe/xe_force_wake_domain_types.h
 new file mode 100644
-index 00000000..d3bc8fb0
+index 0000000000000000000000000000000000000000..d3bc8fb0f1362453f55c97a91df93394aaafd440
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_force_wake_domain_types.h
 @@ -0,0 +1,81 @@
@@ -807,7 +807,7 @@ index 00000000..d3bc8fb0
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_force_wake_gt.h b/drivers/gpu/drm/xe/xe_force_wake_gt.h
 new file mode 100644
-index 00000000..bb76250f
+index 0000000000000000000000000000000000000000..bb76250fbff245239ee72c145a7ca9246c261fe5
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_force_wake_gt.h
 @@ -0,0 +1,30 @@
@@ -842,7 +842,7 @@ index 00000000..bb76250f
 +}
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_force_wake_types.h b/drivers/gpu/drm/xe/xe_force_wake_types.h
-index 14b7b86e..4e889e50 100644
+index 14b7b86e801b75d7b8620236be5265f4500a7151..4e889e500a9e193beb6d2b54ac25925e458d8d32 100644
 --- a/drivers/gpu/drm/xe/xe_force_wake_types.h
 +++ b/drivers/gpu/drm/xe/xe_force_wake_types.h
 @@ -11,78 +11,7 @@
@@ -926,7 +926,7 @@ index 14b7b86e..4e889e50 100644
  /**
   * struct xe_force_wake - Xe force wake collection
 diff --git a/drivers/gpu/drm/xe/xe_ggtt.c b/drivers/gpu/drm/xe/xe_ggtt.c
-index a351c578..fee6f588 100644
+index a351c578b17055b31d03f5cbf8ba06a71590c624..fee6f588e4c816e9d0d81316dd3780360b0fdcba 100644
 --- a/drivers/gpu/drm/xe/xe_ggtt.c
 +++ b/drivers/gpu/drm/xe/xe_ggtt.c
 @@ -171,13 +171,16 @@ static u64 xelpg_ggtt_pte_flags(struct xe_bo *bo, u16 pat_index)
@@ -997,7 +997,7 @@ index a351c578..fee6f588 100644
  		ggtt->pt_ops =
 diff --git a/drivers/gpu/drm/xe/xe_ggtt_probe_core.h b/drivers/gpu/drm/xe/xe_ggtt_probe_core.h
 new file mode 100644
-index 00000000..56ee1f31
+index 0000000000000000000000000000000000000000..56ee1f3119560197db8f7e047d0787db2c43a0ec
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_ggtt_probe_core.h
 @@ -0,0 +1,44 @@
@@ -1047,7 +1047,7 @@ index 00000000..56ee1f31
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_gt_type.h b/drivers/gpu/drm/xe/xe_gt_type.h
 new file mode 100644
-index 00000000..3cd1f691
+index 0000000000000000000000000000000000000000..3cd1f6919d34bc4a23893bb3408eeec3ccdfaaa5
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_gt_type.h
 @@ -0,0 +1,12 @@
@@ -1064,7 +1064,7 @@ index 00000000..3cd1f691
 +};
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_gt_types.h b/drivers/gpu/drm/xe/xe_gt_types.h
-index e5588c88..f9c0ab52 100644
+index e5588c88800af08bb794d014be38db60daf16cd3..f9c0ab52350aa232a60ee6e3f254893155c81f9b 100644
 --- a/drivers/gpu/drm/xe/xe_gt_types.h
 +++ b/drivers/gpu/drm/xe/xe_gt_types.h
 @@ -24,11 +24,7 @@ struct xe_exec_queue_ops;
@@ -1081,7 +1081,7 @@ index e5588c88..f9c0ab52 100644
  enum xe_gt_eu_type {
  	XE_GT_EU_TYPE_SIMD8,
 diff --git a/drivers/gpu/drm/xe/xe_guc.c b/drivers/gpu/drm/xe/xe_guc.c
-index 4023700f..33e5778c 100644
+index 4023700ff2a9678f6168d776b49c892adc8a58e5..33e5778cbe638015beb34693f399fbe482ff529c 100644
 --- a/drivers/gpu/drm/xe/xe_guc.c
 +++ b/drivers/gpu/drm/xe/xe_guc.c
 @@ -925,77 +925,29 @@ int xe_guc_post_load_init(struct xe_guc *guc)
@@ -1183,7 +1183,7 @@ index 4023700f..33e5778c 100644
  
  static void guc_prepare_xfer(struct xe_guc *guc)
 diff --git a/drivers/gpu/drm/xe/xe_guc.h b/drivers/gpu/drm/xe/xe_guc.h
-index 02514914..d4f42cf5 100644
+index 02514914f404851df326a2b0bb048ef1d092d754..d4f42cf548726fb1f44f79299674fcd9b102b0d5 100644
 --- a/drivers/gpu/drm/xe/xe_guc.h
 +++ b/drivers/gpu/drm/xe/xe_guc.h
 @@ -11,13 +11,7 @@
@@ -1202,7 +1202,7 @@ index 02514914..d4f42cf5 100644
  	(BUILD_BUG_ON_ZERO(COUNT_ARGS(ver) < 2 || COUNT_ARGS(ver) > 3) + \
  	 MAKE_GUC_VER(PICK_ARG1(ver), PICK_ARG2(ver), IF_ARGS(PICK_ARG3(ver), 0, PICK_ARG3(ver))))
 diff --git a/drivers/gpu/drm/xe/xe_guc_ct.c b/drivers/gpu/drm/xe/xe_guc_ct.c
-index 21e0dad9..bccb3b9f 100644
+index 21e0dad9a4815428d87cebbcb1a8b596a77f0251..bccb3b9f36f448ffbad5006f6a02ac20b032f024 100644
 --- a/drivers/gpu/drm/xe/xe_guc_ct.c
 +++ b/drivers/gpu/drm/xe/xe_guc_ct.c
 @@ -25,6 +25,7 @@
@@ -1254,7 +1254,7 @@ index 21e0dad9..bccb3b9f 100644
  	/* H2G header in cmd[1] replaces action[0] so: */
 diff --git a/drivers/gpu/drm/xe/xe_guc_ct_message.h b/drivers/gpu/drm/xe/xe_guc_ct_message.h
 new file mode 100644
-index 00000000..24d42aae
+index 0000000000000000000000000000000000000000..24d42aaea292a612ea3af80416faa383a9c4b4a7
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_guc_ct_message.h
 @@ -0,0 +1,22 @@
@@ -1282,7 +1282,7 @@ index 00000000..24d42aae
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_guc_reset_core.h b/drivers/gpu/drm/xe/xe_guc_reset_core.h
 new file mode 100644
-index 00000000..e01f2422
+index 0000000000000000000000000000000000000000..e01f24224f80360d3fe10d5028fff22fb25fe2aa
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_guc_reset_core.h
 @@ -0,0 +1,129 @@
@@ -1416,7 +1416,7 @@ index 00000000..e01f2422
 +#undef XE_GUC_RESET_ERROR_STATUS
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_huc.c b/drivers/gpu/drm/xe/xe_huc.c
-index 57afe214..f7a2eeb0 100644
+index 57afe21444b183f298a106e29f0e802d2ce343b3..f7a2eeb05402bb61fbfea3500bf058ab958c90a3 100644
 --- a/drivers/gpu/drm/xe/xe_huc.c
 +++ b/drivers/gpu/drm/xe/xe_huc.c
 @@ -4,6 +4,7 @@
@@ -1438,7 +1438,7 @@ index 57afe214..f7a2eeb0 100644
  	}
 diff --git a/drivers/gpu/drm/xe/xe_huc_role.h b/drivers/gpu/drm/xe/xe_huc_role.h
 new file mode 100644
-index 00000000..4c2bc05e
+index 0000000000000000000000000000000000000000..4c2bc05e091d0ec756877a1ef11df1010c6e20c1
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_huc_role.h
 @@ -0,0 +1,10 @@
@@ -1453,7 +1453,7 @@ index 00000000..4c2bc05e
 +}
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_hw_engine_types.h b/drivers/gpu/drm/xe/xe_hw_engine_types.h
-index 84c097da..a5e692a0 100644
+index 84c097da9b6f214c03699d547ff46fce0341cb0c..a5e692a0111e1adbd78ee755784b2c9beba0455b 100644
 --- a/drivers/gpu/drm/xe/xe_hw_engine_types.h
 +++ b/drivers/gpu/drm/xe/xe_hw_engine_types.h
 @@ -11,52 +11,7 @@
@@ -1511,7 +1511,7 @@ index 84c097da..a5e692a0 100644
  /* FIXME: s/XE_HW_ENGINE_MAX_INSTANCE/XE_HW_ENGINE_MAX_COUNT */
  #define XE_HW_ENGINE_MAX_INSTANCE	9
 diff --git a/drivers/gpu/drm/xe/xe_mmio.c b/drivers/gpu/drm/xe/xe_mmio.c
-index 78adb303..d64970bc 100644
+index 78adb303b66303e7373b0af4b0b2f43abe80c5bd..d64970bcac4ce1ccfb6a208a445e169936b83196 100644
 --- a/drivers/gpu/drm/xe/xe_mmio.c
 +++ b/drivers/gpu/drm/xe/xe_mmio.c
 @@ -218,15 +218,16 @@ u32 xe_mmio_rmw32(struct xe_mmio *mmio, struct xe_reg reg, u32 clr, u32 set)
@@ -1619,7 +1619,7 @@ index 78adb303..d64970bc 100644
   * xe_mmio_wait32() - Wait for a register to match the desired masked value
 diff --git a/drivers/gpu/drm/xe/xe_mmio_poll.h b/drivers/gpu/drm/xe/xe_mmio_poll.h
 new file mode 100644
-index 00000000..3cf1c9c5
+index 0000000000000000000000000000000000000000..3cf1c9c588eaba02a97bd48f931f3ec15f681ce5
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_mmio_poll.h
 @@ -0,0 +1,57 @@
@@ -1682,7 +1682,7 @@ index 00000000..3cf1c9c5
 +}
 diff --git a/drivers/gpu/drm/xe/xe_mmio_verify.h b/drivers/gpu/drm/xe/xe_mmio_verify.h
 new file mode 100644
-index 00000000..9717b93a
+index 0000000000000000000000000000000000000000..9717b93a4be61442a066fa409c66f54dae313fb2
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_mmio_verify.h
 @@ -0,0 +1,21 @@
@@ -1708,7 +1708,7 @@ index 00000000..9717b93a
 +#undef XE_MMIO_VERIFY_WRITE
 +#undef XE_MMIO_VERIFY_READ
 diff --git a/drivers/gpu/drm/xe/xe_pat.c b/drivers/gpu/drm/xe/xe_pat.c
-index fad5b5a5..21265643 100644
+index fad5b5a5ed4a0ca256a98168e4beda1dab3f5bd5..21265643b78935767293ca1759905c5d5a2a634a 100644
 --- a/drivers/gpu/drm/xe/xe_pat.c
 +++ b/drivers/gpu/drm/xe/xe_pat.c
 @@ -20,36 +20,7 @@
@@ -2119,7 +2119,7 @@ index fad5b5a5..21265643 100644
  	xe_assert(xe, xe->pat.ops->dump);
  	xe_assert(xe, xe->pat.ops->program_graphics);
 diff --git a/drivers/gpu/drm/xe/xe_pat.h b/drivers/gpu/drm/xe/xe_pat.h
-index 7060f66e..9b800b9a 100644
+index 7060f66e1d638af52d9b77e3d212a5044895ad62..9b800b9abb337a37311c14fdd357f9b57a587636 100644
 --- a/drivers/gpu/drm/xe/xe_pat.h
 +++ b/drivers/gpu/drm/xe/xe_pat.h
 @@ -6,13 +6,21 @@
@@ -2146,7 +2146,7 @@ index 7060f66e..9b800b9a 100644
   * struct xe_pat_table_entry - The pat_index encoding and other meta information.
 diff --git a/drivers/gpu/drm/xe/xe_pat_program.h b/drivers/gpu/drm/xe/xe_pat_program.h
 new file mode 100644
-index 00000000..677560e5
+index 0000000000000000000000000000000000000000..677560e5772c00a294f6ef67c3658afe43ca42df
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_pat_program.h
 @@ -0,0 +1,25 @@
@@ -2177,7 +2177,7 @@ index 00000000..677560e5
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_pat_select.h b/drivers/gpu/drm/xe/xe_pat_select.h
 new file mode 100644
-index 00000000..833fe20b
+index 0000000000000000000000000000000000000000..833fe20b83bbee4ddc4480c2d72dd0e4931d9ac9
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_pat_select.h
 @@ -0,0 +1,132 @@
@@ -2315,7 +2315,7 @@ index 00000000..833fe20b
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_pat_tables.h b/drivers/gpu/drm/xe/xe_pat_tables.h
 new file mode 100644
-index 00000000..a3f9a44f
+index 0000000000000000000000000000000000000000..a3f9a44f61b49387af4fc021719b5dc4efe00b38
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_pat_tables.h
 @@ -0,0 +1,238 @@
@@ -2558,7 +2558,7 @@ index 00000000..a3f9a44f
 +
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_pci.c b/drivers/gpu/drm/xe/xe_pci.c
-index 9cd87370..a6a5da0b 100644
+index 9cd873708136c5ac6cedc1360e89af67c446a1b2..a6a5da0b8b58af0196e16eb3331625a7dc4145d7 100644
 --- a/drivers/gpu/drm/xe/xe_pci.c
 +++ b/drivers/gpu/drm/xe/xe_pci.c
 @@ -41,488 +41,7 @@ enum toggle_d3cold {
@@ -3132,7 +3132,7 @@ index 9cd87370..a6a5da0b 100644
  		drm_info(&xe->drm, "tile_count: %d, reduced_tile_count %d\n",
 diff --git a/drivers/gpu/drm/xe/xe_pci_device_info.h b/drivers/gpu/drm/xe/xe_pci_device_info.h
 new file mode 100644
-index 00000000..0483678e
+index 0000000000000000000000000000000000000000..0483678e7ee01cea263b8eb537e260605f1ef285
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_pci_device_info.h
 @@ -0,0 +1,492 @@
@@ -3630,7 +3630,7 @@ index 00000000..0483678e
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_pci_runtime.h b/drivers/gpu/drm/xe/xe_pci_runtime.h
 new file mode 100644
-index 00000000..d44ff5f0
+index 0000000000000000000000000000000000000000..d44ff5f065492fa5409f0d22f5734a28b500b033
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_pci_runtime.h
 @@ -0,0 +1,65 @@
@@ -3700,7 +3700,7 @@ index 00000000..d44ff5f0
 +
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_pci_types.h b/drivers/gpu/drm/xe/xe_pci_types.h
-index 5b85e2c2..16d61c8f 100644
+index 5b85e2c24b7b2874192b9de89cbead8346688e99..16d61c8fdbdc32300ba39f3e9c895436fa4277b6 100644
 --- a/drivers/gpu/drm/xe/xe_pci_types.h
 +++ b/drivers/gpu/drm/xe/xe_pci_types.h
 @@ -6,10 +6,16 @@
@@ -3721,7 +3721,7 @@ index 5b85e2c2..16d61c8f 100644
  	enum xe_subplatform subplatform;
  	const char *name;
 diff --git a/drivers/gpu/drm/xe/xe_pt_types.h b/drivers/gpu/drm/xe/xe_pt_types.h
-index a7d1bb70..dc9e839f 100644
+index a7d1bb708b69e71f4a14d756c1ac1a6b5c5eadcd..dc9e839f6820927666e3b3a96f9c617d8f0ef32a 100644
 --- a/drivers/gpu/drm/xe/xe_pt_types.h
 +++ b/drivers/gpu/drm/xe/xe_pt_types.h
 @@ -15,14 +15,7 @@ struct xe_bo;
@@ -3741,7 +3741,7 @@ index a7d1bb70..dc9e839f 100644
  #define XE_VM_MAX_LEVEL 4
  
 diff --git a/drivers/gpu/drm/xe/xe_pt_walk.c b/drivers/gpu/drm/xe/xe_pt_walk.c
-index be602a76..366e69de 100644
+index be602a763ff32b75c96891c82230af3a3a560354..366e69dea3cb7833bac2d8e853de0c80d80fb9bb 100644
 --- a/drivers/gpu/drm/xe/xe_pt_walk.c
 +++ b/drivers/gpu/drm/xe/xe_pt_walk.c
 @@ -40,7 +40,7 @@ static bool xe_pt_next(pgoff_t *offset, u64 *addr, u64 next, u64 end,
@@ -3754,7 +3754,7 @@ index be602a76..366e69de 100644
  
  		if (skip_to > next) {
 diff --git a/drivers/gpu/drm/xe/xe_pt_walk.h b/drivers/gpu/drm/xe/xe_pt_walk.h
-index e91995fa..02b52b76 100644
+index e91995fa703b0347710c9aaa17406ba72afb6322..02b52b767c63f048772b4f33293e28ce51f8335b 100644
 --- a/drivers/gpu/drm/xe/xe_pt_walk.h
 +++ b/drivers/gpu/drm/xe/xe_pt_walk.h
 @@ -5,8 +5,12 @@
@@ -3772,7 +3772,7 @@ index e91995fa..02b52b76 100644
   * struct xe_ptw - base class for driver pagetable subclassing.
 diff --git a/drivers/gpu/drm/xe/xe_ring_emit.h b/drivers/gpu/drm/xe/xe_ring_emit.h
 new file mode 100644
-index 00000000..7c309b81
+index 0000000000000000000000000000000000000000..7c309b81f54ad21f61ff9d3e78329cd2c0c7d729
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_ring_emit.h
 @@ -0,0 +1,52 @@
@@ -3829,7 +3829,7 @@ index 00000000..7c309b81
 +
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_ring_ops.c b/drivers/gpu/drm/xe/xe_ring_ops.c
-index 39a670e9..bc0fac3c 100644
+index 39a670e91ba7221755e836ba6a835db076f4a7ee..bc0fac3c47da841b3e27daeb93288cff7ec31c1d 100644
 --- a/drivers/gpu/drm/xe/xe_ring_ops.c
 +++ b/drivers/gpu/drm/xe/xe_ring_ops.c
 @@ -19,6 +19,7 @@
@@ -3910,7 +3910,7 @@ index 39a670e9..bc0fac3c 100644
  	struct xe_exec_queue *q = job->q;
 diff --git a/drivers/gpu/drm/xe/xe_scalar_types.h b/drivers/gpu/drm/xe/xe_scalar_types.h
 new file mode 100644
-index 00000000..ef40859b
+index 0000000000000000000000000000000000000000..ef40859bbd58fa6a8f37adb3e36811c0949eb642
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_scalar_types.h
 @@ -0,0 +1,26 @@
@@ -3941,7 +3941,7 @@ index 00000000..ef40859b
 +#define REG_FIELD_PREP(mask, value) (((u32)(value) << __builtin_ctz((u32)(mask))) & (u32)(mask))
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_uc_fw.c b/drivers/gpu/drm/xe/xe_uc_fw.c
-index 3f08a3b5..0c59ecd4 100644
+index 3f08a3b54062842f268da77f913aab57c3c09fb4..0c59ecd46ea08fd121e878067e60fa9e1241aa40 100644
 --- a/drivers/gpu/drm/xe/xe_uc_fw.c
 +++ b/drivers/gpu/drm/xe/xe_uc_fw.c
 @@ -91,94 +91,7 @@
@@ -4445,7 +4445,7 @@ index 3f08a3b5..0c59ecd4 100644
  	default:
 diff --git a/drivers/gpu/drm/xe/xe_uc_fw_catalog.h b/drivers/gpu/drm/xe/xe_uc_fw_catalog.h
 new file mode 100644
-index 00000000..60323b01
+index 0000000000000000000000000000000000000000..60323b01c97953f53a47f5119966c142325e2ad8
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_uc_fw_catalog.h
 @@ -0,0 +1,145 @@
@@ -4596,7 +4596,7 @@ index 00000000..60323b01
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_uc_fw_cpd.h b/drivers/gpu/drm/xe/xe_uc_fw_cpd.h
 new file mode 100644
-index 00000000..812703cd
+index 0000000000000000000000000000000000000000..812703cd272fcd7dbf7dd6461c62bd30cc93b2a3
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_uc_fw_cpd.h
 @@ -0,0 +1,144 @@
@@ -4746,7 +4746,7 @@ index 00000000..812703cd
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_uc_fw_css.h b/drivers/gpu/drm/xe/xe_uc_fw_css.h
 new file mode 100644
-index 00000000..76a76b0b
+index 0000000000000000000000000000000000000000..76a76b0b3ab6f7582add890b365a87833a56731a
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_uc_fw_css.h
 @@ -0,0 +1,132 @@
@@ -4883,7 +4883,7 @@ index 00000000..76a76b0b
 +}
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_uc_fw_types.h b/drivers/gpu/drm/xe/xe_uc_fw_types.h
-index 2ebe8c9d..7f0f1691 100644
+index 2ebe8c9db6ce1ea64f2f39f7458650d8f014774e..7f0f1691c7532976e225eb0aa86841603519423e 100644
 --- a/drivers/gpu/drm/xe/xe_uc_fw_types.h
 +++ b/drivers/gpu/drm/xe/xe_uc_fw_types.h
 @@ -6,7 +6,11 @@
@@ -4900,7 +4900,7 @@ index 2ebe8c9d..7f0f1691 100644
  
 diff --git a/drivers/gpu/drm/xe/xe_uc_fw_version.h b/drivers/gpu/drm/xe/xe_uc_fw_version.h
 new file mode 100644
-index 00000000..bc8e37e5
+index 0000000000000000000000000000000000000000..bc8e37e534a2047419ec48892ebd9e7ba8275bfe
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_uc_fw_version.h
 @@ -0,0 +1,12 @@
@@ -4917,7 +4917,7 @@ index 00000000..bc8e37e5
 +#define MAKE_GUC_VER_STRUCT(ver)	MAKE_GUC_VER((ver).major, (ver).minor, (ver).patch)
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_wopcm.c b/drivers/gpu/drm/xe/xe_wopcm.c
-index fe65ed24..1ca94cf8 100644
+index fe65ed246775d99973db5ac3552c40003cea9a55..1ca94cf8ebafa0ba13a1e58ee4269bcc0313513b 100644
 --- a/drivers/gpu/drm/xe/xe_wopcm.c
 +++ b/drivers/gpu/drm/xe/xe_wopcm.c
 @@ -48,27 +48,6 @@
@@ -5220,7 +5220,7 @@ index fe65ed24..1ca94cf8 100644
  ALLOW_ERROR_INJECTION(xe_wopcm_init, ERRNO); /* See xe_pci_probe() */
 diff --git a/drivers/gpu/drm/xe/xe_wopcm_core.h b/drivers/gpu/drm/xe/xe_wopcm_core.h
 new file mode 100644
-index 00000000..e42b7b1d
+index 0000000000000000000000000000000000000000..e42b7b1d7fee9d971e598e171d0c7a812e596f58
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_wopcm_core.h
 @@ -0,0 +1,230 @@
@@ -5456,7 +5456,7 @@ index 00000000..e42b7b1d
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_wopcm_size.h b/drivers/gpu/drm/xe/xe_wopcm_size.h
 new file mode 100644
-index 00000000..ddff1a56
+index 0000000000000000000000000000000000000000..ddff1a56d0dce91897c4ad96d98f63cef78cd82f
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_wopcm_size.h
 @@ -0,0 +1,24 @@
@@ -5485,7 +5485,7 @@ index 00000000..ddff1a56
 +
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_wopcm_types.h b/drivers/gpu/drm/xe/xe_wopcm_types.h
-index 99d34837..38de3af3 100644
+index 99d34837c408a7a5035ae9b0fdfec53a612b2b0a..38de3af3214aa9028ed007534af48ca85a6b6d4e 100644
 --- a/drivers/gpu/drm/xe/xe_wopcm_types.h
 +++ b/drivers/gpu/drm/xe/xe_wopcm_types.h
 @@ -6,7 +6,11 @@

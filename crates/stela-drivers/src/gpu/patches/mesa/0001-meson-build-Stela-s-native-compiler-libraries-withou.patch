@@ -12,7 +12,7 @@ Subject: [PATCH] meson: build Stela's native compiler libraries without API
  4 files changed, 67 insertions(+), 22 deletions(-)
 
 diff --git a/meson.build b/meson.build
-index a864ed0..f0de2d4 100644
+index a864ed0b23cdb0c4853e68432cdfdb6fcdd519c2..f0de2d424d0253d3587506c0584c91ee1600771e 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -39,6 +39,16 @@ sizeof_pointer = cc.sizeof('void*').to_string()
@@ -108,7 +108,7 @@ index a864ed0..f0de2d4 100644
    pre_args += '-DLLVM_IS_SHARED=@0@'.format(_shared_llvm.to_int())
  
 diff --git a/meson.options b/meson.options
-index 93a60e3..c61b031 100644
+index 93a60e3047b91efb89394fddacacf927009f26d6..c61b031529ac22c289dd49710510ad15f33abff4 100644
 --- a/meson.options
 +++ b/meson.options
 @@ -915,3 +915,28 @@ option(
@@ -141,7 +141,7 @@ index 93a60e3..c61b031 100644
 +  description : 'Matching hosted Rust input static library for the optional Darwin Metal library assembler',
 +)
 diff --git a/src/compiler/meson.build b/src/compiler/meson.build
-index 68f0832..34728fe 100644
+index 68f083273dfbbb1739b6d1c131b7606e8b6f3878..34728fe6225915a3be2ecd2fdf502ab626e09a07 100644
 --- a/src/compiler/meson.build
 +++ b/src/compiler/meson.build
 @@ -68,11 +68,9 @@ subdir('spirv')
@@ -159,7 +159,7 @@ index 68f0832..34728fe 100644
    subdir('rust')
  endif
 diff --git a/src/meson.build b/src/meson.build
-index c36f44b..420551f 100644
+index c36f44b1397846860b3101f4512c44a0158ce4fa..420551f2fd94d5759eb09b9c4d0bae158ade82e3 100644
 --- a/src/meson.build
 +++ b/src/meson.build
 @@ -8,22 +8,27 @@ mesa_python_path = [

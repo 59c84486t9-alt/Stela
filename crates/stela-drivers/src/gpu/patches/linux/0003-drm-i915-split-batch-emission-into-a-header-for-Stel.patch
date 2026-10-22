@@ -12,7 +12,7 @@ Subject: [PATCH] drm/i915: split batch emission into a header for Stela's
  create mode 100644 drivers/gpu/drm/i915/gt/intel_batch_emit.h
 
 diff --git a/drivers/gpu/drm/i915/gt/gen8_engine_cs.c b/drivers/gpu/drm/i915/gt/gen8_engine_cs.c
-index 071c1cc4..c5b15f85 100644
+index 071c1cc45257a78515f7c5c2e7dfb8951ff343af..c5b15f85ee1b5a6bbebe5d32adb301687b19b78e 100644
 --- a/drivers/gpu/drm/i915/gt/gen8_engine_cs.c
 +++ b/drivers/gpu/drm/i915/gt/gen8_engine_cs.c
 @@ -8,6 +8,7 @@
@@ -59,7 +59,7 @@ index 071c1cc4..c5b15f85 100644
  
 diff --git a/drivers/gpu/drm/i915/gt/intel_batch_emit.h b/drivers/gpu/drm/i915/gt/intel_batch_emit.h
 new file mode 100644
-index 00000000..a4ff032e
+index 0000000000000000000000000000000000000000..a4ff032ecbe238d80743bc920c3ba1c7094b4e68
 --- /dev/null
 +++ b/drivers/gpu/drm/i915/gt/intel_batch_emit.h
 @@ -0,0 +1,36 @@
@@ -100,7 +100,7 @@ index 00000000..a4ff032e
 +
 +#endif
 diff --git a/drivers/gpu/drm/i915/gt/intel_gpu_commands.h b/drivers/gpu/drm/i915/gt/intel_gpu_commands.h
-index 5394bc7d..e83f7a1c 100644
+index 5394bc7d4daf81977265d80fe6f6db62810472fa..e83f7a1cb9a6bd62ae2b886b817e6016c37326e3 100644
 --- a/drivers/gpu/drm/i915/gt/intel_gpu_commands.h
 +++ b/drivers/gpu/drm/i915/gt/intel_gpu_commands.h
 @@ -6,7 +6,11 @@

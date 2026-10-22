@@ -11,7 +11,7 @@ Subject: [PATCH] vulkan: split clear color swizzling into a shared header
  create mode 100644 src/vulkan/util/vk_color_value.h
 
 diff --git a/src/vulkan/runtime/vk_sampler.c b/src/vulkan/runtime/vk_sampler.c
-index b57f91c..20a6281 100644
+index b57f91cf635e012efbc41b7cc68f6b1e5482be71..20a6281563afef422d5d82a8eb6fef3e8fb902e2 100644
 --- a/src/vulkan/runtime/vk_sampler.c
 +++ b/src/vulkan/runtime/vk_sampler.c
 @@ -25,6 +25,7 @@
@@ -46,7 +46,7 @@ index b57f91c..20a6281 100644
  VkClearColorValue
 diff --git a/src/vulkan/util/vk_color_value.h b/src/vulkan/util/vk_color_value.h
 new file mode 100644
-index 0000000..aee8f04
+index 0000000000000000000000000000000000000000..aee8f0447406ebeb197f90dbeba1c9384cc97eae
 --- /dev/null
 +++ b/src/vulkan/util/vk_color_value.h
 @@ -0,0 +1,81 @@
@@ -132,7 +132,7 @@ index 0000000..aee8f04
 +
 +#endif
 diff --git a/src/vulkan/util/vk_format.c b/src/vulkan/util/vk_format.c
-index e453d23..1eb66f1 100644
+index e453d23bc71cf59a6dffe4b8315e888df6a4c945..1eb66f1bcc8ef4d4d942b15e2bf142e110fabb22 100644
 --- a/src/vulkan/util/vk_format.c
 +++ b/src/vulkan/util/vk_format.c
 @@ -26,6 +26,7 @@
