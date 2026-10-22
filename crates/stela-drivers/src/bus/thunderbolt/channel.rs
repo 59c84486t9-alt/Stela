@@ -349,3 +349,236 @@ impl<R: ring::Registers> Channel<R> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use crate::bus::dma::mapping::DmaError;
+
+    use crate::bus::thunderbolt::config::PacketType;
+    use crate::bus::thunderbolt::ring::{
+        self, COMPLETED, Direction, ENABLE, RAW, RX_OPTIONS, TX_OPTIONS, model::*,
+    };
+
+    use core::sync::atomic::Ordering;
+
+    #[test]
+    fn configuration_channel_owns_actual_ring_dma_and_wraps_sequence_and_rings() {
+        use super::super::{
+            channel::{Error as ChannelError, Event},
+            config::{Reply, Route},
+        };
+        let (source, domain, model, mut channel) = channel();
+        channel.start(0).unwrap();
+        let writes = &model.state.lock().unwrap().writes.clone();
+        let rx_enable = writes
+            .iter()
+            .position(|(offset, value)| *offset == RX_OPTIONS && *value == ENABLE | RAW)
+            .unwrap();
+        let tx_enable = writes
+            .iter()
+            .position(|(offset, value)| *offset == TX_OPTIONS && *value == ENABLE | RAW)
+            .unwrap();
+        assert!(rx_enable < tx_enable);
+        for cycle in 0..24u32 {
+            let now = u64::from(cycle);
+            let id = channel
+                .read(Route::new(19).unwrap(), cfg_address(), now, now + 100)
+                .unwrap();
+            assert_eq!(id, now + 1);
+            let before = model.state.lock().unwrap().writes.len();
+            assert_eq!(
+                channel.read(Route::new(20).unwrap(), cfg_address(), now, now + 100),
+                Err(ChannelError::Busy)
+            );
+            assert_eq!(before, model.state.lock().unwrap().writes.len());
+            let transmitted = domain.data(
+                model.frame_address(Direction::Tx, (cycle % 10) as usize),
+                16,
+            );
+            let address = u32::from_be_bytes(transmitted[8..12].try_into().unwrap());
+            assert_eq!((address >> 27) & 3, cycle & 3);
+            assert_eq!(&transmitted[..8], &[0, 0, 0, 0, 0, 0, 0, 19]);
+            model.finish(Direction::Tx, (cycle % 10) as usize, &[], None);
+            let reply = incoming(PacketType::Read, &[1 << 31, 19, address, cycle]);
+            finish_rx(&model, (cycle % 10) as usize, &reply);
+            assert_eq!(
+                channel.poll(now).unwrap(),
+                Some(Event::Completed {
+                    request: id,
+                    reply: Reply::Configuration {
+                        upstream_port: 2,
+                        data: vec![cycle]
+                    }
+                })
+            );
+        }
+        channel_release(&mut channel);
+        drop(channel);
+        assert!(domain.state.lock().unwrap().maps.is_empty());
+        assert_eq!(
+            source.allocated.load(Ordering::Relaxed),
+            source.released.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn unrelated_corrupt_and_asynchronous_packets_do_not_finish_outstanding_request() {
+        use super::super::{
+            channel::{Error as ChannelError, Event},
+            config::{Reply, Route},
+        };
+        let (_source, domain, model, mut channel) = channel();
+        channel.start(1).unwrap();
+        let id = channel
+            .read(Route::new(19).unwrap(), cfg_address(), 1, 100)
+            .unwrap();
+        let transmitted = domain.data(model.frame_address(Direction::Tx, 0), 16);
+        let address = u32::from_be_bytes(transmitted[8..12].try_into().unwrap());
+        let wrong = incoming(PacketType::Read, &[1 << 31, 19, address ^ (1 << 27), 55]);
+        finish_rx(&model, 0, &wrong);
+        assert_eq!(
+            channel.poll(2).unwrap(),
+            Some(Event::Discarded(
+                super::super::config::Error::UnexpectedReply
+            ))
+        );
+        let mut corrupt = incoming(PacketType::Read, &[1 << 31, 19, address, 55]);
+        corrupt.bytes[12] ^= 1;
+        finish_rx(&model, 1, &corrupt);
+        assert_eq!(
+            channel.poll(3).unwrap(),
+            Some(Event::Discarded(super::super::config::Error::Checksum))
+        );
+        let plug = incoming(PacketType::Event, &[0, 7, 6]);
+        finish_rx(&model, 2, &plug);
+        assert!(
+            matches!(channel.poll(4).unwrap(),Some(Event::Plug(event)) if event.route.raw()==7 && event.port==6)
+        );
+        let plug_ack = domain.data(model.frame_address(Direction::Tx, 1), 16);
+        assert_eq!(&plug_ack[..12], &[0, 0, 0, 0, 0, 0, 0, 7, 0x80, 0, 6, 7]);
+        let notice = incoming(PacketType::Error, &[0, 8, 35 | (4 << 8)]);
+        finish_rx(&model, 3, &notice);
+        assert!(
+            matches!(channel.poll(5).unwrap(),Some(Event::Notification(event)) if event.route.raw()==8 && event.code==35)
+        );
+        let notification_ack = domain.data(model.frame_address(Direction::Tx, 2), 12);
+        assert_eq!(&notification_ack[..8], &[0, 0, 0, 0, 0, 0, 0, 8]);
+        let before = model.state.lock().unwrap().writes.len();
+        assert_eq!(
+            channel.read(Route::new(1).unwrap(), cfg_address(), 6, 50),
+            Err(ChannelError::Busy)
+        );
+        assert_eq!(before, model.state.lock().unwrap().writes.len());
+        let upstream_error = incoming(PacketType::Error, &[1 << 31, 0, 15 | (9 << 8)]);
+        finish_rx(&model, 4, &upstream_error);
+        assert!(
+            matches!(channel.poll(6).unwrap(),Some(Event::Completed { request,reply:Reply::ControllerError { route,port:9,code:15,.. } }) if request==id && route.raw()==0)
+        );
+        channel_release(&mut channel);
+    }
+
+    #[test]
+    fn channel_timeout_cancel_and_clock_regression_never_reuse_ambiguous_dma() {
+        use super::super::{channel::Error as ChannelError, config::Route};
+        for case in 0..3 {
+            let (_source, _domain, model, mut channel) = channel();
+            channel.start(5).unwrap();
+            let id = channel
+                .read(Route::new(0).unwrap(), cfg_address(), 5, 10)
+                .unwrap();
+            let writes = model.state.lock().unwrap().writes.len();
+            match case {
+                0 => assert_eq!(channel.poll(10), Err(ChannelError::Timeout { request: id })),
+                1 => assert_eq!(channel.cancel(), Ok(Some(id))),
+                _ => assert_eq!(channel.poll(4), Err(ChannelError::ClockRegressed)),
+            }
+            assert_eq!(
+                channel.read(Route::new(0).unwrap(), cfg_address(), 11, 30),
+                Err(ChannelError::Poisoned)
+            );
+            assert_eq!(channel.poll(11), Err(ChannelError::Poisoned));
+            assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            channel_release(&mut channel);
+        }
+    }
+
+    #[test]
+    fn full_ack_ring_retains_event_and_defers_rx_until_actual_tx_completion() {
+        use super::super::{channel::Event, config::Route};
+        let (_source, domain, model, mut channel) = channel();
+        channel.start(0).unwrap();
+        let id = channel
+            .read(Route::new(19).unwrap(), cfg_address(), 0, 100)
+            .unwrap();
+        let sent = domain.data(model.frame_address(Direction::Tx, 0), 16);
+        let address = u32::from_be_bytes(sent[8..12].try_into().unwrap());
+        for index in 0..9 {
+            let plug = incoming(PacketType::Event, &[0, 7, index as u32]);
+            finish_rx(&model, index, &plug);
+            let result = channel.poll(1).unwrap();
+            if index < 8 {
+                assert!(matches!(result, Some(Event::Plug(_))));
+            } else {
+                assert_eq!(result, None);
+            }
+        }
+        let reply = incoming(PacketType::Read, &[1 << 31, 19, address, 77]);
+        finish_rx(&model, 9, &reply);
+        let before = model.state.lock().unwrap().writes.len();
+        assert_eq!(channel.poll(2).unwrap(), None);
+        assert_eq!(model.state.lock().unwrap().writes.len(), before);
+        model.finish(Direction::Tx, 0, &[], None);
+        assert!(matches!(channel.poll(3).unwrap(),Some(Event::Plug(event)) if event.port==8));
+        assert!(
+            matches!(channel.poll(4).unwrap(),Some(Event::Completed { request,.. }) if request==id)
+        );
+        channel_release(&mut channel);
+    }
+
+    #[test]
+    fn channel_partial_final_invalidation_can_retry_after_one_ring_is_released() {
+        let (source, domain, _model, mut channel) = channel();
+        channel.start(0).unwrap();
+        channel.disable().unwrap();
+        domain.fail_unmap_at.store(12, Ordering::Relaxed);
+        // SAFETY: no synthetic activity survives the containing final drain.
+        assert_eq!(
+            unsafe { channel.release() },
+            Err(super::super::channel::Error::Ring(ring::Error::Dma(
+                DmaError::InvalidationFailed
+            )))
+        );
+        // Repeating disable cannot touch an already-released TX ring or lose
+        // the RX invalidation retry; both outcomes previously succeeded.
+        channel.disable().unwrap();
+        // SAFETY: the same acknowledged final synthetic drain still applies.
+        unsafe { channel.release() }.unwrap();
+        drop(channel);
+        assert!(domain.state.lock().unwrap().maps.is_empty());
+        assert_eq!(
+            source.allocated.load(Ordering::Relaxed),
+            source.released.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn raw_rx_preserves_posted_and_frame_mode_aliases_in_completed_descriptors() {
+        for flags in 0..16u16 {
+            let (_source, _domain, model, mut ring) = self::ring(Direction::Rx, 4);
+            ring.start().unwrap();
+            ring.receive().unwrap();
+            model.finish(
+                Direction::Rx,
+                0,
+                &[0x45; 16],
+                Some((u32::from(flags | COMPLETED) << 20) | (1 << 12) | 16),
+            );
+            let completed = ring.poll().unwrap().unwrap();
+            assert_eq!(completed.flags, flags | COMPLETED);
+            assert_eq!(completed.data, vec![0x45; 16]);
+            release(&mut ring);
+        }
+    }
+}

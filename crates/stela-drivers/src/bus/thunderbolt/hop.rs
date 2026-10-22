@@ -375,8 +375,14 @@ impl<R: Registers> Drop for Teardown<R> {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
+
+    use crate::bus::thunderbolt::ring::{Direction, TX_DESCRIPTOR, model::*};
     use alloc::vec::Vec;
+
+    use core::sync::atomic::AtomicUsize;
+
     #[test]
     fn owned_hop_bounds_keep_control_and_reserved_protocol_paths_explicit() {
         let mut target = Target {
@@ -459,5 +465,209 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 8192);
+    }
+
+    #[test]
+    fn actual_hop_disable_pending_drain_and_flow_clear_preserve_usb4_vendor_ingress() {
+        use super::super::{
+            config::Route,
+            hop::{Event, Target, Teardown, Words},
+            topology::AdapterKind,
+        };
+        for (usb4, kind) in [
+            (true, AdapterKind::Lane),
+            (true, AdapterKind::PcieDown),
+            (false, AdapterKind::PcieDown),
+        ] {
+            for clear_flow_control in [false, true] {
+                let (_source, domain, model, mut channel) = channel();
+                channel.start(0).unwrap();
+                let dropped = Arc::new(AtomicUsize::new(0));
+                let target = Target {
+                    route: Route::new(0).unwrap(),
+                    port: 1,
+                    hop: 8,
+                    kind,
+                    usb4,
+                    clear_flow_control,
+                };
+                let owner = Arc::new(HopOwner {
+                    target,
+                    dropped: dropped.clone(),
+                });
+                // SAFETY: this exact synthetic Owner and Channel share the same
+                // exclusive NHI/model requester, reservation and reset epoch;
+                // its observed adapter metadata is unchanged and channel idle.
+                let mut teardown = unsafe { Teardown::new(channel, owner.clone(), 0) }.unwrap();
+                assert_eq!(teardown.poll(0).unwrap(), None);
+                let initial = [0x81012345, 0x1f5abcde];
+                let disabled = [initial[0] & !(1 << 31), initial[1]];
+                let drained = [disabled[0], disabled[1] & !(1 << 28)];
+                let clear_mask = (1 << 25)
+                    | (1 << 27)
+                    | if kind == AdapterKind::Lane || !usb4 {
+                        (1 << 24) | (1 << 26)
+                    } else {
+                        0
+                    };
+                let cleared = [drained[0], drained[1] & !clear_mask];
+                let mut result = None;
+                let steps = if clear_flow_control { 6 } else { 4 };
+                for index in 0..steps {
+                    let sent = domain.data(
+                        model.frame_address(Direction::Tx, index),
+                        if index == 1 || index == 4 { 24 } else { 16 },
+                    );
+                    if index == 1 || index == 4 {
+                        let expected = if index == 1 { disabled } else { cleared };
+                        let actual: Vec<_> = sent[12..20]
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|raw| u32::from_be_bytes(*raw))
+                            .collect();
+                        assert_eq!(actual, expected);
+                    }
+                    let data: &[u32] = match index {
+                        0 => &initial,
+                        1 | 4 => &[],
+                        2 => &disabled,
+                        3 => &drained,
+                        5 => &cleared,
+                        _ => unreachable!(),
+                    };
+                    let reply = hop_response(&domain, &model, index, data);
+                    model.finish(Direction::Tx, index, &[], None);
+                    finish_rx(&model, index, &reply);
+                    result = teardown.poll(index as u64 + 1).unwrap();
+                    if index < steps - 1 {
+                        assert_eq!(result, None);
+                    }
+                }
+                let Some(Event::Drained(receipt)) = result else {
+                    panic!("drain receipt")
+                };
+                assert_eq!(receipt.before, Words { raw: initial });
+                assert_eq!(
+                    receipt.after,
+                    Words {
+                        raw: if clear_flow_control { cleared } else { drained }
+                    }
+                );
+                assert_eq!(teardown.poll(20), Err(super::super::hop::Error::Stopped));
+                let mut channel = teardown.into_channel();
+                drop(owner);
+                assert_eq!(dropped.load(Ordering::Relaxed), 1);
+                channel_release(&mut channel);
+            }
+        }
+    }
+
+    #[test]
+    fn uncertain_hop_pending_or_rejected_disable_retains_allocation_and_poisoned_channel() {
+        use super::super::{
+            channel::Error as ChannelError,
+            config::Route,
+            hop::{Error as HopError, Target, Teardown},
+            topology::AdapterKind,
+        };
+        for reject in [false, true] {
+            let (_source, domain, model, mut channel) = channel();
+            channel.start(0).unwrap();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let target = Target {
+                route: Route::new(0).unwrap(),
+                port: 1,
+                hop: 8,
+                kind: AdapterKind::Lane,
+                usb4: true,
+                clear_flow_control: true,
+            };
+            let owner = Arc::new(HopOwner {
+                target,
+                dropped: dropped.clone(),
+            });
+            let before = super::super::hop::quarantined_hops();
+            // SAFETY: this exact synthetic Owner and Channel share the same
+            // exclusive NHI/model requester, reservation and reset epoch;
+            // its observed adapter metadata is unchanged and channel idle.
+            let mut teardown = unsafe { Teardown::new(channel, owner.clone(), 0) }.unwrap();
+            teardown.poll(0).unwrap();
+            let initial = [1 << 31, 0x1f000000];
+            for index in 0..2 {
+                let reply = hop_response(
+                    &domain,
+                    &model,
+                    index,
+                    if index == 0 { &initial } else { &[] },
+                );
+                model.finish(Direction::Tx, index, &[], None);
+                finish_rx(&model, index, &reply);
+                assert_eq!(teardown.poll(index as u64 + 1).unwrap(), None);
+            }
+            let response = if reject { initial } else { [0, 1 << 28] };
+            let reply = hop_response(&domain, &model, 2, &response);
+            model.finish(Direction::Tx, 2, &[], None);
+            finish_rx(&model, 2, &reply);
+            if reject {
+                assert_eq!(teardown.poll(3), Err(HopError::Readback));
+            } else {
+                assert_eq!(teardown.poll(3).unwrap(), None);
+                assert_eq!(teardown.poll(500), Err(HopError::Timeout));
+            }
+            let writes = model.state.lock().unwrap().writes.len();
+            assert_eq!(teardown.poll(501), Err(HopError::Poisoned));
+            let mut channel = teardown.into_channel();
+            assert!(super::super::hop::quarantined_hops() > before);
+            drop(owner);
+            assert_eq!(dropped.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                channel.read(Route::new(0).unwrap(), cfg_address(), 501, 600),
+                Err(ChannelError::Poisoned)
+            );
+            assert_eq!(writes, model.state.lock().unwrap().writes.len());
+            channel_release(&mut channel);
+        }
+    }
+
+    #[test]
+    fn already_disabled_hop_is_observed_without_fabricated_flow_control_writes() {
+        use super::super::{
+            config::Route,
+            hop::{Event, Target, Teardown},
+            topology::AdapterKind,
+        };
+        let (_source, domain, model, mut channel) = channel();
+        channel.start(0).unwrap();
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let target = Target {
+            route: Route::new(0).unwrap(),
+            port: 1,
+            hop: 8,
+            kind: AdapterKind::Lane,
+            usb4: true,
+            clear_flow_control: true,
+        };
+        let owner = Arc::new(HopOwner {
+            target,
+            dropped: dropped.clone(),
+        });
+        // SAFETY: this exact synthetic Owner and Channel share the same
+        // exclusive NHI/model requester, reservation and reset epoch;
+        // its observed adapter metadata is unchanged and channel idle.
+        let mut teardown = unsafe { Teardown::new(channel, owner.clone(), 0) }.unwrap();
+        teardown.poll(0).unwrap();
+        let words = [0x12345, 0x0f0abcde];
+        let reply = hop_response(&domain, &model, 0, &words);
+        model.finish(Direction::Tx, 0, &[], None);
+        finish_rx(&model, 0, &reply);
+        assert!(
+            matches!(teardown.poll(1).unwrap(),Some(Event::Drained(receipt)) if receipt.before.raw==words && receipt.after.raw==words)
+        );
+        assert_eq!(model.read32(TX_DESCRIPTOR + 8) >> 16, 1);
+        let mut channel = teardown.into_channel();
+        drop(owner);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        channel_release(&mut channel);
     }
 }

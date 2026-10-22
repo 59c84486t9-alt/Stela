@@ -638,6 +638,11 @@ impl<R: Registers> Host<R> {
 
 #[cfg(test)]
 mod tests {
+
+    use crate::bus::thunderbolt::ring::{self, Direction, model::*};
+
+    use core::sync::atomic::Ordering;
+
     extern crate std;
     use super::*;
     fn message(code: u8, index: u8, count: u8, flags: u8, info: u16, words: usize) -> Message {
@@ -826,5 +831,214 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 4096);
+    }
+
+    #[test]
+    fn icm_actual_dma_driver_ready_and_raw_notification_wrap_rings() {
+        use super::super::icm::{Event, Security};
+        let (_source, domain, model, mut host) = icm(0x15e8);
+        host.start(0).unwrap();
+        let mut rx = 0;
+        for index in 0..25 {
+            let request = host.driver_ready(index * 2).unwrap();
+            let txindex = index as usize % 10;
+            let wire = domain.data(model.frame_address(Direction::Tx, txindex), 8);
+            assert_eq!(wire, incoming(PacketType::IcmCommand, &[3]).bytes);
+            let descriptor = domain.read32(model.descriptor_address(Direction::Tx, txindex) + 8);
+            assert_eq!((descriptor >> 12) & 0xf, 11);
+            assert_eq!((descriptor >> 16) & 0xf, 11);
+            model.finish(Direction::Tx, txindex, &[], None);
+            if index == 0 {
+                let mut event = incoming(PacketType::IcmEvent, &[0x00fe_40fe, 0xdeadbeef]);
+                let len = event.bytes.len();
+                event.bytes[len - 4..].copy_from_slice(&[1, 2, 3, 4]);
+                model.finish(
+                    Direction::Rx,
+                    rx,
+                    &event.bytes,
+                    Some((2 << 20) | (15 << 16) | (10 << 12) | (len as u32)),
+                );
+                match host.poll(1).unwrap().unwrap() {
+                    Event::Notification(m) => {
+                        assert_eq!(m.code, 0xfe);
+                        assert_eq!(m.sof, 15);
+                        assert_eq!(m.unverified_trailer, [1, 2, 3, 4]);
+                    }
+                    other => panic!("{other:?}"),
+                }
+                rx = (rx + 1) % 10;
+                assert_eq!(host.driver_ready(1), Err(super::super::icm::Error::Busy));
+            }
+            let reply = incoming(
+                PacketType::IcmResponse,
+                &[0x01004003, 0x00920000, 0x12345678, 0xabcdef01],
+            );
+            finish_rx(&model, rx, &reply);
+            rx = (rx + 1) % 10;
+            match host.poll(index * 2 + 1).unwrap().unwrap() {
+                Event::DriverReady {
+                    request: id,
+                    parameters,
+                } => {
+                    assert_eq!(id, request);
+                    assert_eq!(parameters.security, Some(Security::Secure));
+                    assert_eq!(parameters.protocol_version, Some(1));
+                    assert_eq!(parameters.boot_acl_slots, Some(1));
+                    assert!(parameters.runtime_pm);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        icm_release(&mut host);
+    }
+
+    #[test]
+    fn icm_timeout_never_reuses_ambiguous_firmware_code() {
+        use super::super::icm::Error;
+        for (device, timeout) in [
+            (0x1575, 5000),
+            (0x15e8, 250),
+            (0x1134, 250),
+            (0x8a0d, 20000),
+        ] {
+            let (_source, _domain, model, mut host) = icm(device);
+            host.start(100).unwrap();
+            let id = host.driver_ready(100).unwrap();
+            assert!(host.poll(100 + timeout - 1).unwrap().is_none());
+            assert_eq!(
+                host.poll(100 + timeout),
+                Err(Error::Timeout { request: id })
+            );
+            assert_eq!(host.driver_ready(101 + timeout), Err(Error::Poisoned));
+            let writes = model.state.lock().unwrap().writes.len();
+            assert_eq!(host.poll(102 + timeout), Err(Error::Poisoned));
+            assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            icm_release(&mut host);
+        }
+    }
+
+    #[test]
+    fn icm_firmware_error_and_epoch_observation_loss_poison() {
+        use super::super::icm::Error;
+        for loss in [false, true] {
+            let (_source, _domain, model, mut host) = icm(0x9a1b);
+            host.start(0).unwrap();
+            host.driver_ready(0).unwrap();
+            finish_rx(
+                &model,
+                0,
+                &incoming(PacketType::IcmResponse, &[0x01000103, 0, 0, 0]),
+            );
+            if loss {
+                model.state.lock().unwrap().values[0x39944 / 4] = 0;
+            }
+            assert_eq!(
+                host.poll(1),
+                Err(if loss {
+                    Error::FirmwareNotAuthenticated
+                } else {
+                    Error::FirmwareError(1)
+                })
+            );
+            assert_eq!(host.driver_ready(2), Err(Error::Poisoned));
+            icm_release(&mut host);
+        }
+    }
+
+    #[test]
+    fn icm_prerequisites_refuse_before_any_ring_programming() {
+        use super::super::icm::{Error, Host};
+        for (device, command, status, mode, expected) in [
+            (0xdead, 6, 0x80000001, 3, Error::Unsupported),
+            (0x1575, 2, 0x80000001, 3, Error::PciState),
+            (0x1575, 6, 0x80000000, 3, Error::FirmwareNotRunning),
+            (0x15e8, 6, 1, 3, Error::FirmwareNotAuthenticated),
+            (0x1134, 6, 0x80000001, 0, Error::SafeMode),
+            (0x1575, 6, 0x80000001, 2, Error::WrongMode(2)),
+            (0x9a1b, 6, 1, 0, Error::FirmwareNotAuthenticated),
+        ] {
+            let source = Source::new();
+            let domain = Arc::new(Domain::new());
+            let model = Arc::new(Model::new(domain.clone()));
+            model.state.lock().unwrap().values[0x39944 / 4] = status;
+            model.state.lock().unwrap().values[0x3990c / 4] = mode << 8;
+            // SAFETY: negative synthetic prerequisites cannot authorize any DMA.
+            let result = unsafe {
+                Host::new(
+                    &IcmPci { device, command },
+                    model.clone(),
+                    &source,
+                    domain,
+                    u64::MAX,
+                )
+            };
+            assert!(matches!(result,Err(error) if error==expected));
+            assert!(model.state.lock().unwrap().writes.is_empty());
+        }
+        let (_source, _domain, model, mut host) = icm(0x8a0d);
+        model.state.lock().unwrap().values[0x39944 / 4] = 0;
+        host.start(0).unwrap();
+        icm_release(&mut host);
+    }
+
+    #[test]
+    fn icm_malformed_frame_keeps_request_pending_until_real_reply() {
+        use super::super::icm::{Error, Event};
+        let (_source, _domain, model, mut host) = icm(0x1575);
+        host.start(0).unwrap();
+        let id = host.driver_ready(0).unwrap();
+        for (index, words, error) in [
+            (0, vec![0x01000004, 0], Error::WrongCode),
+            (1, vec![0x02000003, 0], Error::PacketCount),
+            (2, vec![0x01000003], Error::Length),
+        ] {
+            finish_rx(&model, index, &incoming(PacketType::IcmResponse, &words));
+            assert_eq!(
+                host.poll(1 + index as u64),
+                Ok(Some(Event::Discarded(error)))
+            );
+            assert_eq!(host.driver_ready(1 + index as u64), Err(Error::Busy));
+        }
+        finish_rx(
+            &model,
+            3,
+            &incoming(PacketType::IcmResponse, &[0x01000003, 0]),
+        );
+        assert!(matches!(host.poll(4),Ok(Some(Event::DriverReady{request,..})) if request==id));
+        icm_release(&mut host);
+    }
+
+    #[test]
+    fn icm_tx_backpressure_never_publishes_a_ghost_request_and_release_retries() {
+        use super::super::icm::{Error, Event};
+        let (_source, domain, model, mut host) = icm(0x15e8);
+        host.start(0).unwrap();
+        // Firmware has replied but the modeled TX descriptor consumer is stalled.
+        for i in 0..9 {
+            let id = host.driver_ready(i * 2).unwrap();
+            finish_rx(
+                &model,
+                i as usize,
+                &incoming(PacketType::IcmResponse, &[0x01000003, 0, 0, 0]),
+            );
+            assert!(
+                matches!(host.poll(i*2+1),Ok(Some(Event::DriverReady{request,..})) if request==id)
+            );
+        }
+        let writes = model.state.lock().unwrap().writes.len();
+        assert_eq!(host.driver_ready(20), Err(Error::Ring(ring::Error::Full)));
+        assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+        model.finish(Direction::Tx, 0, &[], None);
+        assert_eq!(host.poll(21), Ok(None));
+        assert_eq!(host.driver_ready(22), Ok(10));
+        host.disable().unwrap();
+        domain.fail_unmap_at.store(12, Ordering::Relaxed);
+        // SAFETY: final synthetic device/IRQ/work drain is complete, including
+        // the active request. Failed invalidation retains its mapping for retry.
+        assert!(unsafe { host.release() }.is_err());
+        assert!(!domain.state.lock().unwrap().maps.is_empty());
+        // SAFETY: the same exact drained reservation remains retained.
+        unsafe { host.release() }.unwrap();
+        assert!(domain.state.lock().unwrap().maps.is_empty());
     }
 }
