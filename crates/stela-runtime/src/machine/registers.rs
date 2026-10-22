@@ -477,6 +477,30 @@ fn bank_write(bank: &mut GuardedBank, encoding: Encoding, value: u64) {
     }
 }
 
+/// `S3_5_C15_C5_7`, the trace unit's control and status, which the M5 and M6
+/// SPTMs' `sptm_cputrace_va_init` and `_deinit` program (sptm.t8142 file
+/// 0xbdea4..0xbdfac, 0xbdb58..0xbdcbc): init writes 4 and polls bit 36,
+/// then writes 3; deinit clears bit 1, polls until bits 27:20 read 0, sets
+/// bit 2 and polls bit 36, then clears bit 0, each poll panicking after
+/// 1 ms. Inferred from that use: bit 2 requests a drain whose completion
+/// bit 36 reports, and bits 27:20 count the trace data in flight. No trace
+/// data is ever produced here, so nothing is in flight and a requested
+/// drain is complete at once: the stored value reads with bits 27:20 clear
+/// and bit 36 equal to bit 2. The trace itself stays unmodeled
+/// (`machine::impdef`'s processor-trace entries).
+const TRACE_IN_FLIGHT: u64 = 0xff << 20;
+const TRACE_DRAIN: u64 = 1 << 2;
+const TRACE_DRAINED: u64 = 1 << 36;
+
+fn trace_unit_status(stored: u64) -> u64 {
+    let drained = if stored & TRACE_DRAIN != 0 {
+        TRACE_DRAINED
+    } else {
+        0
+    };
+    stored & !(TRACE_IN_FLIGHT | TRACE_DRAINED) | drained
+}
+
 /// CNTVCT_ALIAS_EL0 reads the virtual count of the current regime: the
 /// physical count, minus CNTVOFF_EL2 outside the EL2&0 host.
 fn count_alias(cpu: &Cpu, physical: u64) -> u64 {
@@ -834,6 +858,9 @@ impl Cpu {
     ) -> Outcome {
         if read {
             return match self.apple.impdef.read(entry) {
+                Ok(value) if entry.encoding == impdef::TRACE_VA_C5_7 => {
+                    Outcome::Read(trace_unit_status(value))
+                }
                 Ok(value) => Outcome::Read(value),
                 Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
             };
@@ -1432,6 +1459,39 @@ mod tests {
         for encoding in [SPR_LOCKDOWN_EL2, SPR_LOCKDOWN_EL1, SPR_LOCKDOWN_COMMIT] {
             assert_eq!(write(&mut el1, encoding, 0), Outcome::Undefined);
         }
+    }
+
+    /// The M5 cputrace init and deinit polls complete: nothing is in
+    /// flight and a drain request reads complete.
+    #[test]
+    fn the_trace_units_polls_see_no_session() {
+        use super::super::Chip;
+        let mut cpu = Cpu::of(Chip::AppleM5, 0, Pstate::reset(2));
+        let write = |cpu: &mut Cpu, value| {
+            cpu.state.x[5] = value;
+            assert!(matches!(
+                cpu.apple_access(msr(5, impdef::TRACE_VA_C5_7), 0),
+                Outcome::Written(_)
+            ));
+        };
+        let read = |cpu: &mut Cpu| match cpu.apple_access(mrs(0, impdef::TRACE_VA_C5_7), 0) {
+            Outcome::Read(value) => value,
+            other => panic!("{other:?}"),
+        };
+        // va_init: request a drain, poll bit 36, enable.
+        write(&mut cpu, TRACE_DRAIN);
+        assert_ne!(read(&mut cpu) & TRACE_DRAINED, 0);
+        write(&mut cpu, 3);
+        // va_deinit: stop, poll the in-flight count, drain, disable.
+        let value = read(&mut cpu) & !2;
+        write(&mut cpu, value | TRACE_IN_FLIGHT);
+        assert_eq!(read(&mut cpu) & TRACE_IN_FLIGHT, 0);
+        let value = read(&mut cpu) | TRACE_DRAIN;
+        write(&mut cpu, value);
+        assert_ne!(read(&mut cpu) & TRACE_DRAINED, 0);
+        let value = read(&mut cpu) & !1;
+        write(&mut cpu, value);
+        assert_eq!(read(&mut cpu), TRACE_DRAIN | TRACE_DRAINED);
     }
 
     /// PMCR1_EL12, the EL1&0 regime's PMCR1, is UNDEFINED below EL2.

@@ -941,8 +941,9 @@ const SPTM_TRACE: &str = "the 26A434 M3-and-later SPTMs program it only from the
     S3_5_C15_C11_2 (file 0xbec68), and the M5 and M6 sptm_cputrace_va_init and \
     sptm_cputrace_va_deinit program S3_5_C15_C4_7, C5_7 and C11_1, polling C5_7 bits 20-27 and \
     36 with 1 ms timeouts after requiring C11_2 clear and C10_6 bit 33 clear (sptm.t8142 file \
-    0xbdea4, 0xbdb58). The trace unit is not modeled: held, so a deinit's polls time out, and \
-    a nonzero value is reported once as unmodeled";
+    0xbdea4, 0xbdb58). The trace unit is not modeled: held, and a nonzero value is reported \
+    once as unmodeled; C5_7 reads nothing in flight and a requested drain complete, so those \
+    polls end (machine::registers trace_unit_status)";
 
 const PROD_TRACE_CORE_EVIDENCE: &str = "no public name; the M4-and-later kernels' CPU \
     initialization ORs in 0x1c000000 (bits 26-28) with read-modify-write while the \
