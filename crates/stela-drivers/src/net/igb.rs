@@ -12,12 +12,20 @@
 //! offloads, SR-IOV, timestamping, EEE, fiber, SerDes or SGMII. Matching a
 //! copper PCI ID still requires a supported PHY and valid programmed NVM.
 //! DMA remains allocated until reboot, including after errors or drop.
-use super::{Link, LinkError, MAX_FRAME, MIN_FRAME, Mac};
+use super::{
+    HEADER, Link, LinkError, MAX_FRAME, MIN_FRAME, Mac,
+    advanced::{
+        self, QUEUE_ENABLE, RX_DD, RX_EOP, RXDCTL_THRESHOLDS, SRRCTL_ONE_BUFFER, TXDCTL_THRESHOLDS,
+        TransmitQueue, transmitted,
+    },
+    check_frame,
+    ring::{DESCRIPTOR, DESCRIPTORS, Ring},
+};
 use crate::{
     Clock, Handoff,
     block::BlockError,
     bus::{
-        dma::{DmaAllocator, DmaBuffer},
+        dma::DmaAllocator,
         mmio::Mmio,
         pci::{ConfigSpace, Function},
     },
@@ -33,14 +41,14 @@ mod registers;
 use hardware::{Hardware, PciCapabilities};
 use registers::*;
 
-const DESCRIPTORS: usize = 32;
-const DESCRIPTOR: usize = 16;
-const BUFFER: usize = 2048;
-const RX_DONE: u32 = 1;
-const RX_EOP: u32 = 1 << 1;
+/// Receive descriptor errors that drop a frame: RXE, IPE, TCPE and CE;
+/// checksum errors are irrelevant with checksum offload disabled.
 const RX_FRAME_ERRORS: u32 = 0x9700_0000;
-const TX_DONE: u32 = 1;
-const TX_COMMAND: u32 = (3 << 20) | (1 << 24) | (1 << 25) | (1 << 27) | (1 << 29);
+const TRANSMIT_QUEUE: TransmitQueue = TransmitQueue {
+    head: TDH,
+    tail: TDT,
+    control: TXDCTL,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Chip {
@@ -136,38 +144,13 @@ impl Timer for Clock {
     }
 }
 
-struct Ring {
-    descriptors: DmaBuffer,
-    buffers: DmaBuffer,
-}
-impl Ring {
-    fn new(dma: &mut dyn DmaAllocator) -> Result<Self, BlockError> {
-        Ok(Self {
-            descriptors: dma.allocate(DESCRIPTORS * DESCRIPTOR, 4096)?,
-            buffers: dma.allocate(DESCRIPTORS * BUFFER, 4096)?,
-        })
-    }
-    fn address(&self, index: usize) -> u64 {
-        self.buffers.physical() + (index * BUFFER) as u64
-    }
-    fn buffer(&mut self, index: usize) -> &mut [u8] {
-        &mut self.buffers.bytes_mut()[index * BUFFER..(index + 1) * BUFFER]
-    }
-    fn program(&self, io: &impl RegisterIo, low: usize, high: usize, length: usize) {
-        io.write(low, self.descriptors.physical() as u32);
-        io.write(high, (self.descriptors.physical() >> 32) as u32);
-        io.write(length, (DESCRIPTORS * DESCRIPTOR) as u32);
-    }
-}
-
 pub struct Igb {
     device: Mmio,
     receive: Ring,
     transmit: Ring,
-    received: usize,
-    tail: usize,
-    clean: usize,
     dropping: bool,
+    /// Register reads return all ones: the function is gone.
+    faulted: bool,
     mac: Mac,
     clock: Clock,
     pub location: String,
@@ -199,34 +182,38 @@ impl Igb {
             device,
             receive: Ring::new(dma)?,
             transmit: Ring::new(dma)?,
-            received: 0,
-            tail: 0,
-            clean: 0,
             dropping: false,
+            faulted: false,
             mac,
             clock: handoff.clock,
             location: format!("{} Intel {}", function.address, chip.name()),
             warnings,
         };
-        net.start()?;
+        start_queues(&net.device, &net.clock, &mut net.receive, &net.transmit)?;
         Ok(net)
     }
 
-    fn start(&mut self) -> Result<(), BlockError> {
-        start_queues(&self.device, &self.clock, &mut self.receive, &self.transmit)?;
-        Ok(())
-    }
-
-    fn reclaim(&mut self) -> bool {
-        while self.clean != self.tail {
-            let status: u32 = self.transmit.descriptors.read(self.clean * DESCRIPTOR + 12);
-            if status & TX_DONE == 0 {
-                break;
-            }
-            fence(Ordering::Acquire);
-            self.clean = (self.clean + 1) % DESCRIPTORS;
+    /// Report a lost function, and discard the transmit work a lost link
+    /// strands (Linux `igb_watchdog_task` resets for it). Returns the carrier.
+    fn watchdog(&mut self) -> Result<bool, LinkError> {
+        let status = self.device.read32(STATUS);
+        self.faulted |= status == u32::MAX;
+        if !self.faulted && status & STATUS_LU == 0 && self.transmit.pending() {
+            let device = self.device;
+            self.faulted = !TRANSMIT_QUEUE.flush(
+                &mut self.transmit,
+                self.clock,
+                |offset| device.read32(offset),
+                |offset, value| device.write32(offset, value),
+            );
         }
-        (self.tail + 1) % DESCRIPTORS != self.clean
+        match self.faulted {
+            true => Err(LinkError::Adapter(format!(
+                "{} lost register access; reinitialization required",
+                self.location
+            ))),
+            false => Ok(status & STATUS_LU != 0),
+        }
     }
 }
 
@@ -236,16 +223,17 @@ fn start_queues(
     receive: &mut Ring,
     transmit: &Ring,
 ) -> Result<(), BlockError> {
-    receive.program(io, RDBAL, RDBAH, RDLEN);
-    transmit.program(io, TDBAL, TDBAH, TDLEN);
+    let write = |offset, value| io.write(offset, value);
+    receive.program(write, RDBAL, RDBAH, RDLEN);
+    transmit.program(write, TDBAL, TDBAH, TDLEN);
     io.write(RDH, 0);
     io.write(RDT, 0);
     io.write(TDH, 0);
     io.write(TDT, 0);
-    io.write(SRRCTL, (BUFFER >> 10) as u32 | (1 << 25));
+    io.write(SRRCTL, SRRCTL_ONE_BUFFER);
     // One-at-a-time write-back keeps polling live even for isolated packets.
-    io.write(RXDCTL, 8 | (8 << 8) | (1 << 16) | QUEUE_ENABLE);
-    io.write(TXDCTL, 8 | (1 << 8) | QUEUE_ENABLE);
+    io.write(RXDCTL, RXDCTL_THRESHOLDS | QUEUE_ENABLE);
+    io.write(TXDCTL, TXDCTL_THRESHOLDS | QUEUE_ENABLE);
     let enabled = clock.wait(20_000, || {
         io.read(RXDCTL) & QUEUE_ENABLE != 0 && io.read(TXDCTL) & QUEUE_ENABLE != 0
     });
@@ -257,7 +245,7 @@ fn start_queues(
         return Err(BlockError::Timeout);
     }
     for index in 0..DESCRIPTORS {
-        offer_receive(receive, index);
+        advanced::offer_receive(receive, index);
     }
     fence(Ordering::SeqCst);
     io.write(RDT, (DESCRIPTORS - 1) as u32);
@@ -267,55 +255,34 @@ fn start_queues(
     Ok(())
 }
 
-fn offer_receive(ring: &mut Ring, index: usize) {
-    let address = ring.address(index);
-    ring.descriptors.write(index * DESCRIPTOR, address);
-    ring.descriptors.write(index * DESCRIPTOR + 8, 0u64);
-}
-
 impl Link for Igb {
     fn mac(&self) -> Mac {
         self.mac
     }
     fn carrier(&mut self) -> bool {
-        self.device.read32(STATUS) & STATUS_LU != 0
+        self.watchdog().unwrap_or(false)
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
-        if !(14..=MAX_FRAME).contains(&frame.len()) {
-            return Err(LinkError::Invalid("frame length is outside 14..=1514"));
+        check_frame(frame)?;
+        if !self.watchdog()? {
+            return Err(LinkError::NoCarrier);
         }
-        if !self.reclaim() {
-            let clock = self.clock;
-            if !clock.wait(100_000, || self.reclaim()) {
-                return Err(LinkError::Adapter(format!(
-                    "{} transmit ring stalled",
-                    self.location
-                )));
-            }
+        if !self.transmit.free(self.clock, transmitted) {
+            return Err(LinkError::Adapter(format!(
+                "{} transmit ring stalled",
+                self.location
+            )));
         }
-        let index = self.tail;
-        let length = frame.len().max(MIN_FRAME);
-        let buffer = self.transmit.buffer(index);
-        buffer[..length].fill(0);
-        buffer[..frame.len()].copy_from_slice(frame);
-        let address = self.transmit.address(index);
-        self.transmit.descriptors.write(index * DESCRIPTOR, address);
-        self.transmit
-            .descriptors
-            .write(index * DESCRIPTOR + 8, TX_COMMAND | length as u32);
-        self.transmit
-            .descriptors
-            .write(index * DESCRIPTOR + 12, (length as u32) << 14);
-        self.tail = (index + 1) % DESCRIPTORS;
-        fence(Ordering::SeqCst);
-        self.device.write32(TDT, self.tail as u32);
+        advanced::queue_frame(&mut self.transmit, frame, frame.len().max(MIN_FRAME));
+        self.device.write32(TDT, self.transmit.next as u32);
         Ok(())
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
+        self.watchdog()?;
         for _ in 0..DESCRIPTORS {
-            let index = self.received;
+            let index = self.receive.next;
             let status: u32 = self.receive.descriptors.read(index * DESCRIPTOR + 8);
-            if status & RX_DONE == 0 {
+            if status & RX_DD == 0 {
                 return Ok(None);
             }
             fence(Ordering::Acquire);
@@ -328,11 +295,11 @@ impl Link for Igb {
             let good = !self.dropping
                 && eop
                 && status & RX_FRAME_ERRORS == 0
-                && (14..=MAX_FRAME).contains(&length);
+                && (HEADER..=MAX_FRAME).contains(&length);
             let frame = good.then(|| self.receive.buffer(index)[..length].to_vec());
             self.dropping = !eop;
-            offer_receive(&mut self.receive, index);
-            self.received = (index + 1) % DESCRIPTORS;
+            advanced::offer_receive(&mut self.receive, index);
+            self.receive.advance();
             fence(Ordering::SeqCst);
             self.device.write32(RDT, index as u32);
             if frame.is_some() {

@@ -678,10 +678,8 @@ impl DmaFixture {
             device: unsafe { Mmio::new(registers.as_mut_ptr() as u64) },
             receive: Ring::new(&mut dma).unwrap(),
             transmit: Ring::new(&mut dma).unwrap(),
-            received: 0,
-            tail: 0,
-            clean: 0,
             dropping: false,
+            faulted: false,
             mac: Model::MAC,
             clock: Clock {
                 ticks_per_microsecond: 1,
@@ -689,7 +687,8 @@ impl DmaFixture {
             location: String::from("DMA peer"),
             warnings: InitializationWarnings::default(),
         };
-        net.start().unwrap();
+        start_queues(&net.device, &net.clock, &mut net.receive, &net.transmit).unwrap();
+        registers[STATUS / 4] = STATUS_LU;
         Self {
             net,
             registers,
@@ -772,21 +771,42 @@ fn failed_queue_enable_never_rings_the_receive_doorbell() {
 }
 
 #[test]
+fn link_loss_discards_queued_transmit_work_and_absent_functions_report_no_link() {
+    let mut fixture = DmaFixture::new();
+    for _ in 0..3 {
+        fixture.net.transmit(&[1; 60]).unwrap();
+    }
+    fixture.registers[STATUS / 4] = 0;
+    assert!(!fixture.net.carrier());
+    assert!(!fixture.net.transmit.pending());
+    assert_eq!(fixture.registers[TDT / 4], 0);
+    assert_ne!(fixture.registers[TXDCTL / 4] & QUEUE_ENABLE, 0);
+    assert_eq!(fixture.net.transmit(&[1; 60]), Err(LinkError::NoCarrier));
+    fixture.registers[STATUS / 4] = u32::MAX;
+    assert!(!fixture.net.carrier());
+    assert!(matches!(fixture.net.receive(), Err(LinkError::Adapter(_))));
+}
+
+#[test]
 fn full_transmit_ring_refuses_overwrite_and_recovers_only_completed_slots() {
     let mut fixture = DmaFixture::new();
     for _ in 0..31 {
         fixture.net.transmit(&[7; 60]).unwrap();
     }
     let descriptors = fixture.net.transmit.descriptors.bytes().to_vec();
-    let buffers = fixture.net.transmit.buffers.bytes().to_vec();
+    let buffers: Vec<Vec<u8>> = (0..DESCRIPTORS)
+        .map(|index| fixture.net.transmit.buffer(index).to_vec())
+        .collect();
     assert!(fixture.net.transmit(&[8; 60]).is_err());
     assert_eq!(fixture.net.transmit.descriptors.bytes(), descriptors);
-    assert_eq!(fixture.net.transmit.buffers.bytes(), buffers);
+    for (index, buffer) in buffers.iter().enumerate() {
+        assert_eq!(fixture.net.transmit.buffer(index), &buffer[..]);
+    }
     fixture.net.transmit.descriptors.write(12, 1u32);
     fixture.net.transmit(&[9; 60]).unwrap();
-    assert_eq!(fixture.net.tail, 0);
-    assert_eq!(fixture.net.clean, 1);
-    assert!(!fixture.net.reclaim());
+    assert_eq!(fixture.net.transmit.next, 0);
+    assert_eq!(fixture.net.transmit.clean, 1);
+    assert!(!fixture.net.transmit.reclaim(transmitted));
 }
 
 #[test]
@@ -851,8 +871,8 @@ fn seeded_ethernet_payloads_survive_both_rings_for_many_wraps() {
         );
         assert_eq!(fixture.registers[RDT / 4], index as u32);
     }
-    assert_eq!(fixture.net.tail, 0);
-    assert_eq!(fixture.net.received, 0);
+    assert_eq!(fixture.net.transmit.next, 0);
+    assert_eq!(fixture.net.receive.next, 0);
 }
 
 #[test]
@@ -865,7 +885,7 @@ fn receive_discards_whole_fragment_chains_crc_errors_and_out_of_bounds_lengths()
     fixture.deliver(4, &[5; 13], 3, 13);
     fixture.deliver(5, &[6; 60], 3, 60);
     assert_eq!(fixture.net.receive().unwrap(), Some(vec![6; 60]));
-    assert_eq!(fixture.net.received, 6);
+    assert_eq!(fixture.net.receive.next, 6);
     assert_eq!(fixture.registers[RDT / 4], 5);
     assert_eq!(fixture.net.receive().unwrap(), None);
 }
@@ -875,13 +895,13 @@ fn checksum_flags_do_not_substitute_for_a_software_checksum_when_offload_is_disa
     let mut fixture = DmaFixture::new();
     fixture.deliver(0, &[7; 60], 0x6000_0003, 60);
     assert_eq!(fixture.net.receive().unwrap(), Some(vec![7; 60]));
-    let tail = fixture.net.tail;
+    let tail = fixture.net.transmit.next;
     for invalid in [vec![], vec![0; 13], vec![0; MAX_FRAME + 1]] {
         assert!(matches!(
             fixture.net.transmit(&invalid),
             Err(LinkError::Invalid(_))
         ));
-        assert_eq!(fixture.net.tail, tail);
+        assert_eq!(fixture.net.transmit.next, tail);
     }
 }
 

@@ -2,7 +2,9 @@
 // Copyright(c) 2007 - 2018 Intel Corporation.
 // Copyright (c) 2026 Stela contributors
 //! Function reset, firmware synchronization and MAC setup from Linux igb.
-use super::{Chip, InitializationWarnings, MAX_FRAME, Mac, RegisterIo, Timer, registers::*};
+use super::{
+    Chip, InitializationWarnings, MAX_FRAME, Mac, QUEUE_ENABLE, RegisterIo, Timer, registers::*,
+};
 use crate::{
     block::BlockError,
     bus::pci::{ConfigSpace, Function},

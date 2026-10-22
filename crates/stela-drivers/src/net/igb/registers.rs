@@ -85,7 +85,6 @@ pub const TCTL_EN: u32 = 1 << 1;
 pub const TCTL_PSP: u32 = 1 << 3;
 pub const TCTL_COLLISIONS: u32 = (15 << 4) | (63 << 12);
 pub const TCTL_RTLC: u32 = 1 << 24;
-pub const QUEUE_ENABLE: u32 = 1 << 25;
 pub const RFCTL_IPV6_EX_DIS: u32 = 1 << 16;
 pub const RFCTL_LEF: u32 = 1 << 18;
 pub const MANC_TCO: u32 = 1 << 17;
