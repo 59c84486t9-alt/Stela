@@ -107,6 +107,7 @@ static APIC_BASE: AtomicU64 = AtomicU64::new(0);
 struct Options {
     native_dma_check: bool,
     native_work_check: bool,
+    native_irq_work_check: bool,
     native_dma_isolation_check: bool,
     nor_file: Option<(Guid, String)>,
     deadline: Option<u64>,
@@ -129,6 +130,7 @@ impl Options {
         let mut options = Self {
             native_dma_check: false,
             native_work_check: false,
+            native_irq_work_check: false,
             native_dma_isolation_check: false,
             nor_file: None,
             deadline: None,
@@ -136,6 +138,7 @@ impl Options {
         };
         while let Some(word) = words.next() {
             match word {
+                "--native-irq-work-check" => options.native_irq_work_check = true,
                 "--native-work-check" => options.native_work_check = true,
                 "--native-dma-check" => options.native_dma_check = true,
                 "--native-dma-isolation-check" => options.native_dma_isolation_check = true,
@@ -154,6 +157,7 @@ impl Options {
         if u8::from(options.native_dma_check)
             + u8::from(options.native_dma_isolation_check)
             + u8::from(options.native_work_check)
+            + u8::from(options.native_irq_work_check)
             > 1
         {
             return Err("host check: native diagnostic fixture modes are exclusive");
@@ -330,7 +334,10 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
         Ok(handoff) => machine.storage = Some(handoff),
         Err(error) => machine.record("storage", Verdict::Fail, format!("no PCI access: {error}")),
     }
-    if machine.options.native_dma_check || machine.options.native_dma_isolation_check {
+    if machine.options.native_dma_check
+        || machine.options.native_dma_isolation_check
+        || machine.options.native_irq_work_check
+    {
         let handoff = machine
             .storage
             .as_ref()
@@ -352,7 +359,7 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
             }
         }
     }
-    if machine.options.native_work_check {
+    if machine.options.native_work_check || machine.options.native_irq_work_check {
         let clock = machine
             .storage
             .as_ref()
@@ -400,7 +407,18 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
     unsafe { interrupts::install(interrupt) };
     APIC_BASE.store(machine.apic_base, Ordering::Relaxed);
     if let Some(prepared) = machine.native_dma.take() {
-        match prepared.run() {
+        let result = if machine.options.native_irq_work_check {
+            match machine.native_work.take() {
+                Some(work) => prepared.run_irq_work(work),
+                None => Err(String::from("IRQ work stacks missing")),
+            }
+        } else {
+            prepared.run()
+        };
+        match result {
+            Ok(crate::native_dma::diagnostic::Report::IrqWork(proof)) => {
+                machine.record("native-irq-work", Verdict::Pass, proof);
+            }
             Ok(crate::native_dma::diagnostic::Report::Single(dma, irq)) => {
                 machine.record("native-dma", Verdict::Pass, dma);
                 machine.record("native-irq", Verdict::Pass, irq);
@@ -409,7 +427,15 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
                 machine.record("native-dma-isolation", Verdict::Pass, proof);
             }
             Err(error) => {
-                machine.record("native-dma", Verdict::Fail, error);
+                machine.record(
+                    if machine.options.native_irq_work_check {
+                        "native-irq-work"
+                    } else {
+                        "native-dma"
+                    },
+                    Verdict::Fail,
+                    error,
+                );
                 // The unit/requester may be in an uncertain DMA state. Unit
                 // and lease Drop retained its resources; do not resume probe.
                 output::fatal("native DMA fixture failed; normal probing inhibited");
@@ -672,7 +698,8 @@ fn enabled(ticks: u64, mut done: impl FnMut() -> bool) -> u64 {
 }
 
 extern "sysv64" fn interrupt(frame: &mut Frame) {
-    if crate::native_irq::dispatch(frame.vector as u8) {
+    // SAFETY: unchanged IDT/IST entry supplies this actual hardware frame.
+    if unsafe { crate::native_irq::dispatch_frame(frame.vector as u8, frame.rsp as usize) } {
         return;
     }
     let eoi = || {

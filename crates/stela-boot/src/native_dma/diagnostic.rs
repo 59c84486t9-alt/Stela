@@ -296,7 +296,20 @@ impl Prepared {
         if self.second.is_some() {
             return super::isolation_diagnostic::run(self).map(Report::Isolation);
         }
-        self.run_single().map(|(dma, irq)| Report::Single(dma, irq))
+        self.run_single(None)
+            .map(|(dma, irq)| Report::Single(dma, irq))
+    }
+
+    pub(crate) fn run_irq_work(
+        mut self,
+        work: crate::native_work_check::Prepared,
+    ) -> Result<Report, String> {
+        self.quiesce()?;
+        if self.second.is_some() {
+            return Err(String::from("IRQ work requires the single EDU grant"));
+        }
+        self.run_single(Some(work))
+            .map(|(dma, irq)| Report::IrqWork(format!("{dma}; {irq}")))
     }
 
     fn quiesce(&mut self) -> Result<(), String> {
@@ -375,7 +388,10 @@ impl Prepared {
         Ok(())
     }
 
-    fn run_single(mut self) -> Result<(String, String), String> {
+    fn run_single(
+        mut self,
+        work: Option<crate::native_work_check::Prepared>,
+    ) -> Result<(String, String), String> {
         let device = self.device();
         let timeout = self
             .clock
@@ -556,6 +572,15 @@ impl Prepared {
             receive.physical_pages()[0],
             fault.reason
         );
+        if let Some(work) = work {
+            let irq = crate::native_irq::work_diagnostic::run(
+                function,
+                self.edu_registers.start,
+                self.clock,
+                work,
+            )?;
+            return Ok((dma, irq));
+        }
         let irq =
             crate::native_irq::diagnostic::run(function, self.edu_registers.start, self.clock)?;
         // Release every remaining configuration-space owner before the next
@@ -572,6 +597,7 @@ impl Prepared {
 pub(crate) enum Report {
     Single(String, String),
     Isolation(String),
+    IrqWork(String),
 }
 
 pub(super) struct Device {

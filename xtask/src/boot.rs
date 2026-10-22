@@ -241,6 +241,12 @@ pub struct Run {
         "usb_input", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
     ])]
     native_work_check: bool,
+    /// Actual EDU MSI admission into the owned native BSP work executor.
+    #[arg(long, conflicts_with_all = [
+        "native_dma_check", "native_dma_isolation_check", "native_work_check", "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
+        "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
+    ])]
+    native_irq_work_check: bool,
     /// Boot an existing USB disk image, such as one `stela setup` prepared,
     /// from its removable-media boot loader; writes go to a temporary
     /// overlay.
@@ -538,12 +544,15 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     if arguments.native_dma_check
         || arguments.native_dma_isolation_check
         || arguments.native_work_check
+        || arguments.native_irq_work_check
     {
         ensure!(
             matches!(arguments.display, Display::None),
             "native fixture uses a headless single-BSP topology"
         );
-        let mode = if arguments.native_work_check {
+        let mode = if arguments.native_irq_work_check {
+            "--native-irq-work-check"
+        } else if arguments.native_work_check {
             "--native-work-check"
         } else if arguments.native_dma_isolation_check {
             "--native-dma-isolation-check"
@@ -719,7 +728,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             || system
             || arguments.native_dma_check
             || arguments.native_dma_isolation_check
-            || arguments.native_work_check,
+            || arguments.native_work_check
+            || arguments.native_irq_work_check,
     );
     let (keyboard, access) = if usb {
         ("on", "readonly=off,file=fat:rw:")
@@ -945,7 +955,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             .arg("-device")
             .arg(format!("nvme,drive=ans{index},serial={serial}"));
     }
-    if arguments.native_dma_check || arguments.native_dma_isolation_check {
+    if arguments.native_dma_check
+        || arguments.native_dma_isolation_check
+        || arguments.native_irq_work_check
+    {
         command.args(["-device", "intel-iommu,intremap=off,caching-mode=on"]);
         if arguments.native_dma_isolation_check {
             command.args(["-device", "edu,addr=2", "-device", "edu,addr=3"]);
@@ -1025,6 +1038,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         && !arguments.native_dma_check
         && !arguments.native_dma_isolation_check
         && !arguments.native_work_check
+        && !arguments.native_irq_work_check
         && arguments.scenario == Scenario::SystemKernel
     {
         let checked = verify_kernel(&serial_text);
@@ -1101,6 +1115,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         Ok::<_, anyhow::Error>(report)
     });
     let qemu_process_image = qemu_process_image.and_then(|path| binding(&path).ok());
+    let native_irq_work = arguments.native_irq_work_check.then(|| {
+        json!({ "passed": native_irq_work_verified(&serial_text) && status.is_some() && code == IDLE_EXIT
+            && !serial_text.contains("STELA PANIC") && !serial_text.contains("STOP UNSUPPORTED") })
+    });
     let native_work = arguments.native_work_check.then(|| {
         json!({
             "passed":native_work_verified(&serial_text) && status.is_some() && code==IDLE_EXIT
@@ -1161,6 +1179,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "no_la57": arguments.no_la57,
         "native_dma": native_dma,
         "native_work": native_work,
+        "native_irq_work": native_irq_work,
         "native_dma_isolation": native_dma_isolation,
         "native_irq": native_irq,
         "options": options,
@@ -1227,9 +1246,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         !arguments.native_work_check || report["native_work"]["passed"] == true,
         "native work did not verify actual owned contexts, ABI/control/flags and teardown"
     );
+    ensure!(
+        !arguments.native_irq_work_check || report["native_irq_work"]["passed"] == true,
+        "native IRQ work did not qualify actual MSI/context/deferred execution and lifecycle"
+    );
     if arguments.native_dma_check
         || arguments.native_dma_isolation_check
         || arguments.native_work_check
+        || arguments.native_irq_work_check
     {
         return Ok(ExitCode::SUCCESS);
     }
@@ -1442,6 +1466,32 @@ fn fat_image(volume: &Path, output: &Path) -> Result<PathBuf> {
     Ok(output.join("volume.cdr"))
 }
 
+fn native_irq_work_verified(serial: &str) -> bool {
+    serial.lines().any(|line| {
+        line.starts_with("CHECK native-irq-work PASS ")
+            && [
+                "roundtrip=verified",
+                "teardown=IOTLB+TE-off-ack",
+                "actual_cause=0x1",
+                "IRQ_depth=real",
+                "interrupted_SP=owned-foreground",
+                "ISR_SP=separate-IST",
+                "current_id=IRQ-refused",
+                "enqueue=owned/noninline",
+                "worker=owned-distinct-context",
+                "async_FXSAVE=unchanged",
+                "mask+hardware+IRR/ISR+inflight+work=drained",
+                "late_delivery=absent",
+                "stack_leases=4-released",
+                "BSP_device_owner=!Send",
+            ]
+            .iter()
+            .all(|s| line.contains(s))
+    }) && !serial
+        .lines()
+        .any(|line| line.starts_with("CHECK native-irq-work FAIL "))
+}
+
 fn native_work_verified(serial: &str) -> bool {
     serial.lines().any(|line| {
         line.starts_with("CHECK native-work PASS ")
@@ -1640,6 +1690,56 @@ mod tests {
         assert!(!native_level_verified(&format!(
             "{full}\nCHECK native-dma FAIL stop uncertain"
         )));
+    }
+
+    #[test]
+    fn native_irq_work_requires_actual_irq_and_async_state_proof_exclusively() {
+        use clap::Parser;
+        let full = "CHECK native-irq-work PASS roundtrip=verified teardown=IOTLB+TE-off-ack actual_cause=0x1 IRQ_depth=real interrupted_SP=owned-foreground ISR_SP=separate-IST current_id=IRQ-refused enqueue=owned/noninline worker=owned-distinct-context async_FXSAVE=unchanged mask+hardware+IRR/ISR+inflight+work=drained late_delivery=absent stack_leases=4-released BSP_device_owner=!Send";
+        assert!(native_irq_work_verified(full));
+        for marker in [
+            "IRQ_depth=real",
+            "interrupted_SP=owned-foreground",
+            "current_id=IRQ-refused",
+            "worker=owned-distinct-context",
+            "async_FXSAVE=unchanged",
+            "mask+hardware+IRR/ISR+inflight+work=drained",
+            "BSP_device_owner=!Send",
+        ] {
+            assert!(!native_irq_work_verified(&full.replace(marker, "unproven")));
+        }
+        assert!(!native_irq_work_verified(
+            "CHECK native-work PASS source_IRQ_enqueue=not-qualified"
+        ));
+        assert!(!native_irq_work_verified(
+            "CHECK native-irq PASS actual_cause=0x1"
+        ));
+        assert!(!native_irq_work_verified(&format!(
+            "{full}\nCHECK native-irq-work FAIL uncertain owner"
+        )));
+        let prefix = ["xtask", "boot", "run", "--output", "/tmp/native-irq-work"];
+        let parsed =
+            crate::Cli::try_parse_from(prefix.into_iter().chain(["--native-irq-work-check"]))
+                .unwrap();
+        let crate::Task::Boot(Command::Run(run)) = parsed.task else {
+            panic!("boot run")
+        };
+        assert!(run.native_irq_work_check);
+        for conflict in [
+            "--native-dma-check",
+            "--native-dma-isolation-check",
+            "--native-work-check",
+            "--audio-check",
+            "--network",
+            "--storage-check",
+        ] {
+            for pair in [
+                ["--native-irq-work-check", conflict],
+                [conflict, "--native-irq-work-check"],
+            ] {
+                assert!(crate::Cli::try_parse_from(prefix.into_iter().chain(pair)).is_err());
+            }
+        }
     }
 
     #[test]

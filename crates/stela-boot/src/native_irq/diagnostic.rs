@@ -12,21 +12,33 @@ use stela_drivers::{
     },
 };
 
-struct Edu {
+pub(super) struct Edu {
     base: usize,
     received: AtomicU64,
     observed: AtomicU32,
     bad_ack: AtomicU32,
 }
 impl Edu {
-    fn read(&self, offset: usize) -> u32 {
+    pub(super) fn read(&self, offset: usize) -> u32 {
         // SAFETY: actual retained root-stable UC EDU BAR, checked by the
         // enclosing exclusive QEMU-only fixture before ownership transfer.
         unsafe { ((self.base + offset) as *const u32).read_volatile() }
     }
-    fn write(&self, offset: usize, value: u32) {
+    pub(super) fn write(&self, offset: usize, value: u32) {
         // SAFETY: as for read; exact 32-bit EDU register below 0x80.
         unsafe { ((self.base + offset) as *mut u32).write_volatile(value) };
+    }
+    pub(super) fn interrupt_trigger(&self) -> *mut u32 {
+        (self.base + 0x60) as *mut u32
+    }
+    pub(super) fn received(&self) -> u64 {
+        self.received.load(Ordering::Acquire)
+    }
+    pub(super) fn observed(&self) -> u32 {
+        self.observed.load(Ordering::Relaxed)
+    }
+    pub(super) fn bad_ack(&self) -> u32 {
+        self.bad_ack.load(Ordering::Relaxed)
     }
     fn dma_idle(&self) -> bool {
         // SAFETY: actual owned EDU DMA_COMMAND supports a 64-bit read.
@@ -51,7 +63,7 @@ impl Handler for Edu {
     }
 }
 
-struct EduSource {
+pub(super) struct EduSource {
     function: Function,
     msi: Msi,
     edu: Arc<Edu>,
@@ -185,7 +197,11 @@ unsafe impl Source for EduSource {
 
 /// Only called after the exact controlled fixture's VT-d teardown succeeded.
 /// Its existing IDT/APIC page is installed/mapped; interrupts are off.
-pub(crate) fn run(function: Function, base: u64, clock: Clock) -> Result<String, String> {
+pub(super) struct Parts {
+    pub source: EduSource,
+    pub edu: Arc<Edu>,
+}
+pub(super) fn prepare_source(function: Function, base: u64, clock: Clock) -> Result<Parts, String> {
     let interrupts = function.interrupts();
     if interrupts.msix.is_some() {
         return Err(String::from("EDU fixture has unexpected MSI-X"));
@@ -218,11 +234,17 @@ pub(crate) fn run(function: Function, base: u64, clock: Clock) -> Result<String,
         observed: AtomicU32::new(0),
         bad_ack: AtomicU32::new(0),
     });
-    let source = Box::new(EduSource {
+    let source = EduSource {
         function,
         msi,
         edu: edu.clone(),
-    });
+    };
+    Ok(Parts { source, edu })
+}
+
+pub(crate) fn run(function: Function, base: u64, clock: Clock) -> Result<String, String> {
+    let Parts { source, edu } = prepare_source(function, base, clock)?;
+    let source = Box::new(source);
     let mut registration = super::service()
         .map_err(|error| format!("native IRQ service: {error:?}"))?
         .request(source, edu.clone())

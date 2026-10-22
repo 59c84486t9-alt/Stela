@@ -42,6 +42,17 @@ pub(crate) struct Prepared {
     madt: &'static [u8],
     madt_hash: [u8; 32],
 }
+pub(crate) struct StackBatch {
+    pub stacks: Vec<Stack>,
+    pub spans: Vec<Range<usize>>,
+    pub releases: ReleaseCount,
+}
+pub(crate) struct ReleaseCount(Arc<Reservation>);
+impl ReleaseCount {
+    pub fn released(&self) -> u64 {
+        self.0.released.load(Ordering::Acquire)
+    }
+}
 struct Backing {
     reservation: Arc<Reservation>,
     bounds: Range<usize>,
@@ -115,7 +126,7 @@ impl Prepared {
         }
         Ok(())
     }
-    pub(crate) fn run(self) -> Result<String, String> {
+    fn verify_arena(&self) -> Result<(), String> {
         if Sha256::digest(self.madt).as_slice() != self.madt_hash {
             return Err(String::from("work MADT changed before execution"));
         }
@@ -139,6 +150,31 @@ impl Prepared {
                 }
             }
         }
+        Ok(())
+    }
+    /// Reuse the exact LoaderData/guard/cache proof for the separate real-IRQ
+    /// composition, without invoking or broadening the process-only acceptance.
+    pub(crate) fn into_irq_stacks(self) -> Result<StackBatch, String> {
+        self.verify_arena()?;
+        let spans: Vec<_> = (0..4).map(|i| bounds(self.reservation.arena, i)).collect();
+        let stacks = spans
+            .iter()
+            .map(|span| {
+                Stack::new(Box::new(Backing {
+                    reservation: self.reservation.clone(),
+                    bounds: span.clone(),
+                }))
+                .map_err(error)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(StackBatch {
+            stacks,
+            spans,
+            releases: ReleaseCount(self.reservation),
+        })
+    }
+    pub(crate) fn run(self) -> Result<String, String> {
+        self.verify_arena()?;
         let cpu = Arc::new(NativeCpu { apic_id: apic_id() });
         let state = Arc::new(Probe {
             runtime: AtomicUsize::new(0),

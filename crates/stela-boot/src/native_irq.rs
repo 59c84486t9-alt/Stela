@@ -7,13 +7,16 @@ use core::{
 };
 use stela_drivers::bus::irq::{IrqController, IrqError, Platform, Registry, Target};
 
+mod context;
 pub(crate) mod diagnostic;
 #[allow(dead_code)]
 pub mod ioapic;
 pub(crate) mod level_diagnostic;
 #[allow(dead_code)]
 pub mod madt;
+pub(crate) mod work_diagnostic;
 
+static CONTEXT: context::Context = context::Context::new();
 static READY: AtomicBool = AtomicBool::new(false);
 static BASE: AtomicU64 = AtomicU64::new(0);
 static REGISTERS: AtomicU64 = AtomicU64::new(0);
@@ -83,10 +86,38 @@ pub unsafe fn initialize(base: u64, registers: u64, timeout_ticks: u64) -> Resul
 }
 
 pub fn dispatch(vector: u8) -> bool {
-    if !READY.load(Ordering::Acquire) {
+    // Existing CPU entry calls this with local IRQs off. It does not supply
+    // an interrupted-SP witness, so no such frame proof may be claimed.
+    unsafe { dispatch_entry(vector, None) }
+}
+
+/// Actual device-vector dispatch with the unchanged IDT's hardware frame.
+/// # Safety
+/// Called only by the genuine existing CPU interrupt handler with IRQs off;
+/// `interrupted_rsp` is Frame.rsp from that entry, not the ISR's current RSP.
+pub(crate) unsafe fn dispatch_frame(vector: u8, interrupted_rsp: usize) -> bool {
+    unsafe { dispatch_entry(vector, Some(interrupted_rsp)) }
+}
+unsafe fn dispatch_entry(vector: u8, interrupted_rsp: Option<usize>) -> bool {
+    use stela_drivers::bus::irq::{FIRST_VECTOR, VECTOR_COUNT};
+    if !READY.load(Ordering::Acquire)
+        || vector < FIRST_VECTOR
+        || usize::from(vector - FIRST_VECTOR) >= VECTOR_COUNT
+    {
         return false;
     }
+    let cpu = NativePlatform(()).check_cpu();
+    if cpu.is_err() {
+        return false;
+    }
+    // SAFETY: the actual existing ISR entry and owning BSP were checked above;
+    // IRQs stay disabled through this balanced callback/EOI scope.
+    let _context = unsafe { CONTEXT.enter(cpu, interrupted_rsp) }
+        .unwrap_or_else(|_| crate::output::fatal("native IRQ context depth exhausted"));
     CONTROLLER.dispatch(vector)
+}
+pub(crate) fn current_context() -> Result<Option<context::Snapshot>, IrqError> {
+    CONTEXT.current(NativePlatform(()).check_cpu())
 }
 
 // SAFETY: initialization qualifies the actual existing APIC/IDT on one BSP,
