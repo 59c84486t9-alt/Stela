@@ -488,6 +488,9 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
     for (address, error) in &disks.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
+    for (location, error) in &disks.port_failures {
+        output::arguments(format_args!("STORAGE FAILED {location}: {error}\n"));
+    }
     for (location, error) in &disks.usb_failures {
         output::arguments(format_args!(
             "USB FAILED {location}: {}\n",
@@ -500,7 +503,7 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
     for device in &disks.usb_inputs {
         output::arguments(format_args!("USB INPUT {}\n", device.name));
     }
-    let failures = disks.failures.len() + disks.usb_failures.len();
+    let failures = disks.failures.len() + disks.port_failures.len() + disks.usb_failures.len();
     machine.record(
         "storage",
         if disks.devices.is_empty() || failures > 0 {

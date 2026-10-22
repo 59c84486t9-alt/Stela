@@ -182,6 +182,9 @@ pub struct Disks {
     /// Network adapters, as raw Ethernet links.
     pub links: Vec<Adapter>,
     pub failures: Vec<(Address, Error)>,
+    /// Controller ports that failed while the rest of their controller
+    /// attached, by location.
+    pub port_failures: Vec<(String, BlockError)>,
     /// Nonfatal initialization diagnostics, including adapters not selected.
     pub warnings: Vec<(Address, Warning)>,
     /// USB devices that failed to enumerate or bind, by location.
@@ -376,8 +379,15 @@ pub unsafe fn probe_with_provider(
                 }
                 continue;
             } else if function.class == ahci::CLASS {
-                ahci::attach(&mut function, handoff, dma).map(|ports| {
-                    ports
+                ahci::attach(&mut function, handoff, dma).map(|attached| {
+                    disks.port_failures.extend(
+                        attached
+                            .failures
+                            .into_iter()
+                            .map(|(port, error)| (alloc::format!("{address} port {port}"), error)),
+                    );
+                    attached
+                        .disks
                         .into_iter()
                         .map(|device| Box::new(device) as Box<dyn BlockDevice>)
                         .collect()

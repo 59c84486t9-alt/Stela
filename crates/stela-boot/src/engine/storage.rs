@@ -150,6 +150,9 @@ pub unsafe fn open(
     for (location, error) in &disks.usb_vendor_failures {
         output::arguments(format_args!("USB VENDOR FAILED {location}: {error}\n"));
     }
+    for (location, error) in &disks.port_failures {
+        output::arguments(format_args!("STORAGE FAILED {location}: {error}\n"));
+    }
     for (location, error) in &disks.usb_failures {
         output::arguments(format_args!(
             "USB FAILED {location}: {}\n",
