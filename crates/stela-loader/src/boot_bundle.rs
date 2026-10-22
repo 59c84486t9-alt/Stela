@@ -78,7 +78,9 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// its SoC's own `l2-cache-size` (J700AP's P cores).
 /// Revision 18: reserve and publish every SoC's ordinary fixed carveouts from
 /// its iBoot table, and name each table's special-attribute carveouts.
-pub const REVISION: u32 = 18;
+/// Revision 19: publish every SoC's iBoot AMCC and IOA lock-register maps,
+/// into the template's nodes only.
+pub const REVISION: u32 = 19;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -961,16 +963,25 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         aic::publish(&mut tree, chip_id)?;
     }
     let nvram_published = nvram::publish(&mut tree)?;
-    let memory_controller = inputs.target.chip_id.and_then(lock_regs::table);
-    match memory_controller {
-        Some(controller) => lock_regs::publish(&mut tree, controller)?,
-        None if tree.node(lock_regs::AMCC).is_some() => unresolved.push(format!(
-            "{}: no iBoot AMCC map for this SoC; the template stays empty and SPTM's CTRR \
-             setup stops on it",
-            lock_regs::AMCC
-        )),
-        None => {}
-    }
+    let memory_controller = match inputs.target.chip_id.and_then(lock_regs::table) {
+        Some(controller) if lock_regs::publish(&mut tree, controller)? => Some(controller),
+        Some(_) => {
+            unresolved.push(format!(
+                "{}: the template has no node for iBoot's AMCC map; SPTM's CTRR setup stops",
+                lock_regs::AMCC
+            ));
+            None
+        }
+        None if tree.node(lock_regs::AMCC).is_some() => {
+            unresolved.push(format!(
+                "{}: no iBoot AMCC map for this SoC; the template stays empty and SPTM's CTRR \
+                 setup stops on it",
+                lock_regs::AMCC
+            ));
+            None
+        }
+        None => None,
+    };
     if let Some(controller) = inputs.target.chip_id.and_then(lock_regs::ioa_table) {
         lock_regs::publish_ioa(&mut tree, controller)?;
     }
@@ -2080,6 +2091,7 @@ mod tests {
             tree.ensure_child("/", child).unwrap();
         }
         tree.ensure_child("/chosen", "memory-map").unwrap();
+        lock_regs::tests::template(&mut tree, false).unwrap();
         tree.ensure_child("/cpus", "cpu0").unwrap();
         tree.set_property("/cpus/cpu0", "state", b"waiting\0".to_vec())
             .unwrap();

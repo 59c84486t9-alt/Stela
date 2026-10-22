@@ -10,6 +10,15 @@
 //! means set. Of the template's four groups iBoot fills only `amcc-ctrr-a`;
 //! the others stay empty, as it leaves them.
 //!
+//! Every SoC's map comes from its own iBoot's `harr` builder, run over the
+//! decoded image ([`FAMILIES`]; builders, emulation and checks in
+//! docs/research/iboot-handoff.md, "Memory-controller lock registers"). The
+//! M4 and later fill all four AMCC groups, CTRR-B to D with zero limits. The
+//! publisher writes only into the nodes the template carries, so a group or
+//! controller it describes without one (IOA-B and later everywhere, the whole
+//! IOA on the M4 and later) stays unpublished. The M1 and M2 iBoots describe
+//! no IOA.
+//!
 //! T6000 is independently recovered from 26A434 `iBoot.j314s` (decoded
 //! SHA256 `20dfa3a5e6d4e4b2844c7558e6d4f8ab74397d11eae63312f00a559cf9612b03`).
 //! Its builder at file `0x3848c` and publisher `0x1376d4` describe four AMCC
@@ -107,14 +116,6 @@ pub struct MemoryController {
     pub groups: &'static [LockGroup],
 }
 
-const fn limit(offset: u32) -> Register {
-    Register {
-        offset,
-        mask: u32::MAX,
-        value: None,
-    }
-}
-
 const fn bit(offset: u32) -> Register {
     Register {
         offset,
@@ -123,30 +124,197 @@ const fn bit(offset: u32) -> Register {
     }
 }
 
-/// The empty groups iBoot leaves in the template tree.
-const EMPTY_GROUPS: [&str; 3] = ["amcc-ctrr-b", "amcc-ctrr-c", "amcc-ctrr-d"];
+/// Limit registers: pages under `mask`, with the value iBoot describes, if
+/// any.
+const fn limits(mask: u32, value: Option<u32>) -> Register {
+    Register {
+        offset: 0,
+        mask,
+        value,
+    }
+}
 
-const T8112: MemoryController = MemoryController {
-    apertures: &[0x2_0000_0000],
-    aperture_size: 0xf4_0000,
-    plane_count: 4,
-    plane_stride: 0x4_0000,
-    cache_status: Some(bit(0x424)),
-    master_lock: None,
-    broadcast: None,
-    groups: &[LockGroup {
-        name: "amcc-ctrr-a",
-        page_size_shift: 14,
-        lower_limit: limit(0x680),
-        upper_limit: limit(0x684),
-        enable: Some(bit(0x688)),
-        write_disable: Some(bit(0x7f0)),
-        lock: Some(bit(0x68c)),
-    }],
+/// The limits of a group iBoot programs (CTRR-A): no described value.
+const PROGRAMMED: Register = limits(u32::MAX, None);
+/// The limits of a group iBoot describes as zero and leaves unprogrammed.
+const ZERO: Register = limits(u32::MAX, Some(0));
+
+impl LockGroup {
+    /// A group of 16 KiB pages, its limits at `lower` and `upper` as `limit`
+    /// describes them, enabled at `enable`.
+    const fn new(name: &'static str, limit: Register, lower: u32, upper: u32, enable: u32) -> Self {
+        Self {
+            name,
+            page_size_shift: 14,
+            lower_limit: Register {
+                offset: lower,
+                ..limit
+            },
+            upper_limit: Register {
+                offset: upper,
+                ..limit
+            },
+            enable: Some(bit(enable)),
+            write_disable: None,
+            lock: None,
+        }
+    }
+
+    const fn with_lock(mut self, offset: u32) -> Self {
+        self.lock = Some(bit(offset));
+        self
+    }
+
+    const fn with_write_disable(mut self, offset: u32) -> Self {
+        self.write_disable = Some(bit(offset));
+        self
+    }
+
+    /// Lower, upper, enable, lock and write-disable in consecutive words.
+    const fn consecutive(name: &'static str, limit: Register, lower: u32) -> Self {
+        Self::new(name, limit, lower, lower + 4, lower + 8)
+            .with_lock(lower + 0xc)
+            .with_write_disable(lower + 0x10)
+    }
+
+    /// The M4 Pro's and later AMCC layout: four words of each register,
+    /// one per group, `index` naming the group.
+    const fn interleaved(name: &'static str, limit: Register, index: u32) -> Self {
+        let at = 4 * index;
+        Self::new(name, limit, 0xaa0 + at, 0xab0 + at, 0xac0 + at)
+            .with_lock(0xad0 + at)
+            .with_write_disable(0xae0 + at)
+    }
+
+    /// An IOA group: limits under `limit`, enable after them.
+    const fn ioa(
+        name: &'static str,
+        limit: Register,
+        lower: u32,
+        write_disable: u32,
+        lock: u32,
+    ) -> Self {
+        Self::new(name, limit, lower, lower + 4, lower + 8)
+            .with_lock(lock)
+            .with_write_disable(write_disable)
+    }
+}
+
+const M1_AMCC: [LockGroup; 1] =
+    [LockGroup::new("amcc-ctrr-a", PROGRAMMED, 0x680, 0x684, 0x688).with_lock(0x68c)];
+const T8112_AMCC: [LockGroup; 1] = [
+    LockGroup::new("amcc-ctrr-a", PROGRAMMED, 0x680, 0x684, 0x688)
+        .with_lock(0x68c)
+        .with_write_disable(0x7f0),
+];
+const T6020_AMCC: [LockGroup; 1] = [LockGroup::consecutive("amcc-ctrr-a", PROGRAMMED, 0x680)];
+const T8122_AMCC: [LockGroup; 1] = [LockGroup::consecutive("amcc-ctrr-a", PROGRAMMED, 0x690)];
+const T6030_AMCC: [LockGroup; 1] = [LockGroup::consecutive("amcc-ctrr-a", PROGRAMMED, 0x6a0)];
+const T6031_AMCC: [LockGroup; 1] = [LockGroup::consecutive("amcc-ctrr-a", PROGRAMMED, 0x69c)];
+const T8132_AMCC: [LockGroup; 4] = [
+    LockGroup::consecutive("amcc-ctrr-a", PROGRAMMED, 0x6a0),
+    LockGroup::consecutive("amcc-ctrr-b", ZERO, 0x6b4),
+    LockGroup::consecutive("amcc-ctrr-c", ZERO, 0x6c8),
+    LockGroup::consecutive("amcc-ctrr-d", ZERO, 0x450),
+];
+const T6040_AMCC: [LockGroup; 4] = [
+    LockGroup::interleaved("amcc-ctrr-a", PROGRAMMED, 0),
+    LockGroup::interleaved("amcc-ctrr-b", ZERO, 1),
+    LockGroup::interleaved("amcc-ctrr-c", ZERO, 2),
+    LockGroup::interleaved("amcc-ctrr-d", ZERO, 3),
+];
+
+const M1_IOA: [LockGroup; 2] = [
+    LockGroup::new("ioa-ctrr-a", PROGRAMMED, 0x220, 0x224, 0x228),
+    LockGroup::new("ioa-ctrr-b", ZERO, 0x22c, 0x230, 0x234),
+];
+const M2_IOA: [LockGroup; 3] = [
+    LockGroup::ioa("ioa-ctrr-a", limits(0x3fff_ffff, None), 0x220, 0x14, 0x4),
+    LockGroup::ioa("ioa-ctrr-b", limits(0x3fff_ffff, Some(0)), 0x22c, 0x18, 0x8),
+    LockGroup::ioa("ioa-ctrr-c", limits(0x3fff_ffff, Some(0)), 0x238, 0x1c, 0xc),
+];
+const M4_IOA: [LockGroup; 4] = [
+    LockGroup::ioa("ioa-ctrr-a", limits(0x0fff_ffff, None), 0xa0, 0x18, 0x4),
+    LockGroup::ioa("ioa-ctrr-b", limits(0x0fff_ffff, Some(0)), 0xac, 0x1c, 0x8),
+    LockGroup::ioa("ioa-ctrr-c", limits(0x0fff_ffff, Some(0)), 0xb8, 0x20, 0xc),
+    LockGroup::ioa("ioa-ctrr-d", limits(0x0fff_ffff, Some(0)), 0xc4, 0x24, 0x10),
+];
+
+/// The M2 Pro's to the M4's cache status: bit 0 clear.
+const CACHE_CLEAR: Register = Register {
+    offset: 0x1c00,
+    mask: 1,
+    value: Some(0),
 };
+
+/// An AMCC of planes `0x40000` apart.
+const fn amcc(
+    apertures: &'static [u64],
+    aperture_size: u32,
+    plane_count: u32,
+    cache_status: Register,
+    groups: &'static [LockGroup],
+) -> MemoryController {
+    MemoryController {
+        apertures,
+        aperture_size,
+        plane_count,
+        plane_stride: 0x4_0000,
+        cache_status: Some(cache_status),
+        master_lock: None,
+        broadcast: None,
+        groups,
+    }
+}
+
+/// The M1 family's AMCC, as iBoot labels its controller registers.
+const fn m1_amcc(apertures: &'static [u64], aperture_size: u32) -> MemoryController {
+    let cache_status = Register {
+        offset: 0x1c00,
+        mask: 0x1f,
+        value: Some(0),
+    };
+    MemoryController {
+        broadcast: Some(bit(0x10_000c)),
+        ..amcc(apertures, aperture_size, 4, cache_status, &M1_AMCC)
+    }
+}
+
+/// Single-plane IOA apertures.
+const fn ioa(
+    apertures: &'static [u64],
+    aperture_size: u32,
+    groups: &'static [LockGroup],
+) -> MemoryController {
+    MemoryController {
+        apertures,
+        aperture_size,
+        plane_count: 1,
+        plane_stride: 0,
+        cache_status: None,
+        master_lock: None,
+        broadcast: None,
+        groups,
+    }
+}
+
+const fn m1_ioa(apertures: &'static [u64]) -> MemoryController {
+    MemoryController {
+        master_lock: Some(bit(0)),
+        ..ioa(apertures, 0x4000, &M1_IOA)
+    }
+}
+
+const T8112: MemoryController = amcc(&[0x2_0000_0000], 0xf4_0000, 4, bit(0x424), &T8112_AMCC);
 
 // J314s builder 0x385e4..0x38a6c: one die, four MCCs (not T6001/2's
 // eight), each a 2 MiB lock aperture in its 16 MiB MCC register window.
+// iBoot's own name for the 0x10000c register is broadcast and for
+// (0x1c00, 0x1f, 0) cache-status (specials table 0x1c83f8, indexed by kind
+// minus 0xc0; the builder stores kind 0xc0 at 0x3862c and 0xc1 at 0x38660),
+// as the other M1 rows publish them. This row keeps the labels the runtime's
+// joint MCC/AMCC router (`stela_runtime::machine::apple::memory_resources`)
+// is qualified against until that model is requalified.
 const T6000: MemoryController = MemoryController {
     apertures: &[0x2_0000_0000, 0x2_0100_0000, 0x2_0200_0000, 0x2_0300_0000],
     aperture_size: 0x20_0000,
@@ -159,19 +327,13 @@ const T6000: MemoryController = MemoryController {
         value: Some(0),
     }),
     broadcast: None,
-    groups: &[LockGroup {
-        name: "amcc-ctrr-a",
-        page_size_shift: 14,
-        lower_limit: limit(0x680),
-        upper_limit: limit(0x684),
-        enable: Some(bit(0x688)),
-        write_disable: None,
-        lock: Some(bit(0x68c)),
-    }],
+    groups: &M1_AMCC,
 };
 
 // J314s builder 0x38aa4..0x38d10. A single plane needs no stride. The
-// original template exposes only IOA-A; no fabricated lock/cache register.
+// original template exposes only IOA-A. iBoot names the (0, 1, 1) register
+// master-lock (kind 0xc2, builder 0x38ae4); the row keeps the label it was
+// published under, which nothing consumes.
 const T6000_IOA: MemoryController = MemoryController {
     apertures: &[0x2_8200_0000, 0x3_0400_0000, 0x3_8300_0000, 0x4_0200_0000],
     aperture_size: 0x4000,
@@ -180,33 +342,148 @@ const T6000_IOA: MemoryController = MemoryController {
     cache_status: None,
     master_lock: None,
     broadcast: Some(bit(0)),
-    groups: &[LockGroup {
-        name: "ioa-ctrr-a",
-        page_size_shift: 14,
-        lower_limit: limit(0x220),
-        upper_limit: limit(0x224),
-        enable: Some(bit(0x228)),
-        write_disable: None,
-        lock: None,
-    }],
+    groups: &[LockGroup::new(
+        "ioa-ctrr-a",
+        PROGRAMMED,
+        0x220,
+        0x224,
+        0x228,
+    )],
 };
+
+/// The M5 and M6 AMCC: one aperture.
+const M5_AMCC: MemoryController = amcc(&[0x2_2000_0000], 0x14_0000, 4, bit(0x82c), &T6040_AMCC);
+
+/// The SoCs one iBoot lock-register description covers.
+pub struct Family {
+    pub chips: &'static [u32],
+    pub amcc: MemoryController,
+    pub ioa: Option<MemoryController>,
+}
+
+/// Every SoC's description, as its iBoot's `harr` builder makes it
+/// (docs/research/iboot-handoff.md, "Memory-controller lock registers").
+#[rustfmt::skip]
+pub const FAMILIES: [Family; 20] = [
+    Family { chips: &[0x8103], amcc: m1_amcc(&[0x2_0000_0000], 0x10_4000), ioa: None },
+    Family { chips: &[0x6000], amcc: T6000, ioa: Some(T6000_IOA) },
+    Family {
+        chips: &[0x6001],
+        amcc: m1_amcc(&[0x2_0000_0000, 0x2_0100_0000, 0x2_0200_0000, 0x2_0300_0000, 0x2_0400_0000, 0x2_0500_0000, 0x2_0600_0000, 0x2_0700_0000], 0x20_0000),
+        ioa: Some(m1_ioa(&[0x2_8200_0000, 0x3_0400_0000, 0x3_8300_0000, 0x4_0200_0000, 0x4_8200_0000, 0x5_0200_0000])),
+    },
+    Family {
+        chips: &[0x6002],
+        amcc: m1_amcc(&[
+            0x2_0000_0000, 0x2_0100_0000, 0x2_0200_0000, 0x2_0300_0000, 0x2_0400_0000, 0x2_0500_0000, 0x2_0600_0000, 0x2_0700_0000,
+            0x22_0700_0000, 0x22_0600_0000, 0x22_0500_0000, 0x22_0400_0000, 0x22_0300_0000, 0x22_0200_0000, 0x22_0100_0000, 0x22_0000_0000,
+        ], 0x20_0000),
+        ioa: Some(m1_ioa(&[
+            0x2_8200_0000, 0x3_0400_0000, 0x3_8300_0000, 0x4_0200_0000, 0x4_8200_0000, 0x5_0200_0000,
+            0x22_8200_0000, 0x23_0400_0000, 0x23_8300_0000, 0x24_0200_0000, 0x24_8200_0000, 0x25_0200_0000,
+        ])),
+    },
+    Family { chips: &[0x8112], amcc: T8112, ioa: None },
+    Family {
+        chips: &[0x6020],
+        amcc: amcc(&[0x2_0000_0000, 0x2_0100_0000, 0x2_0200_0000, 0x2_0300_0000], 0x20_0000, 4, CACHE_CLEAR, &T6020_AMCC),
+        ioa: Some(ioa(&[0x2_8000_0000, 0x3_0000_0000, 0x3_4000_0000, 0x3_8000_0000, 0x4_0000_0000], 0x4000, &M2_IOA)),
+    },
+    Family {
+        chips: &[0x6021],
+        amcc: amcc(&[0x2_0000_0000, 0x2_0100_0000, 0x2_0200_0000, 0x2_0300_0000, 0x2_0400_0000, 0x2_0500_0000, 0x2_0600_0000, 0x2_0700_0000], 0x20_0000, 4, CACHE_CLEAR, &T6020_AMCC),
+        ioa: Some(ioa(&[0x2_8000_0000, 0x3_0000_0000, 0x3_4000_0000, 0x3_8000_0000, 0x4_0000_0000, 0x4_8000_0000, 0x5_0000_0000], 0x4000, &M2_IOA)),
+    },
+    Family {
+        chips: &[0x6022],
+        amcc: amcc(&[
+            0x2_0000_0000, 0x2_0100_0000, 0x2_0200_0000, 0x2_0300_0000, 0x2_0400_0000, 0x2_0500_0000, 0x2_0600_0000, 0x2_0700_0000,
+            0x22_0700_0000, 0x22_0600_0000, 0x22_0500_0000, 0x22_0400_0000, 0x22_0300_0000, 0x22_0200_0000, 0x22_0100_0000, 0x22_0000_0000,
+        ], 0x20_0000, 4, CACHE_CLEAR, &T6020_AMCC),
+        ioa: Some(ioa(&[
+            0x2_8000_0000, 0x3_0000_0000, 0x3_4000_0000, 0x3_8000_0000, 0x4_0000_0000, 0x4_8000_0000, 0x5_0000_0000,
+            0x22_8000_0000, 0x23_0000_0000, 0x23_4000_0000, 0x23_8000_0000, 0x24_0000_0000, 0x24_8000_0000, 0x25_0000_0000,
+        ], 0x4000, &M2_IOA)),
+    },
+    Family {
+        chips: &[0x8122],
+        amcc: amcc(&[0x2_2000_0000, 0x2_2200_0000], 0x20_0000, 2, CACHE_CLEAR, &T8122_AMCC),
+        ioa: Some(ioa(&[0x2_8000_0000, 0x3_0000_0000], 0x4000, &M2_IOA)),
+    },
+    Family {
+        chips: &[0x6030],
+        amcc: amcc(&[0x2_2000_0000, 0x2_2200_0000], 0x20_0000, 3, CACHE_CLEAR, &T6030_AMCC),
+        ioa: Some(ioa(&[0x2_8000_0000, 0x2_c000_0000, 0x3_0000_0000, 0x3_8000_0000], 0x4000, &M2_IOA)),
+    },
+    Family {
+        chips: &[0x6031],
+        amcc: amcc(&[0x2_2000_0000, 0x2_2200_0000, 0x2_2400_0000, 0x2_2600_0000, 0x2_2800_0000, 0x2_2a00_0000, 0x2_2c00_0000, 0x2_2e00_0000], 0x20_0000, 4, CACHE_CLEAR, &T6031_AMCC),
+        ioa: Some(ioa(&[0x2_8000_0000, 0x2_c000_0000, 0x3_0000_0000, 0x3_4000_0000, 0x3_8000_0000, 0x3_c000_0000, 0x4_0000_0000, 0x4_4000_0000], 0x4000, &M2_IOA)),
+    },
+    Family {
+        chips: &[0x6034],
+        amcc: amcc(&[0x2_2000_0000, 0x2_2200_0000, 0x2_2400_0000, 0x2_2600_0000, 0x2_2800_0000, 0x2_2a00_0000], 0x20_0000, 4, CACHE_CLEAR, &T6031_AMCC),
+        ioa: Some(ioa(&[0x2_8000_0000, 0x2_c000_0000, 0x3_0000_0000, 0x3_4000_0000, 0x3_8000_0000, 0x3_c000_0000, 0x4_0000_0000, 0x4_4000_0000], 0x4000, &M2_IOA)),
+    },
+    Family {
+        chips: &[0x6032],
+        amcc: amcc(&[
+            0x2_2000_0000, 0x2_2200_0000, 0x2_2400_0000, 0x2_2600_0000, 0x2_2800_0000, 0x2_2a00_0000, 0x2_2c00_0000, 0x2_2e00_0000,
+            0x22_2000_0000, 0x22_2200_0000, 0x22_2400_0000, 0x22_2600_0000, 0x22_2800_0000, 0x22_2a00_0000, 0x22_2c00_0000, 0x22_2e00_0000,
+        ], 0x20_0000, 4, CACHE_CLEAR, &T6031_AMCC),
+        ioa: Some(ioa(&[
+            0x2_8000_0000, 0x2_c000_0000, 0x3_0000_0000, 0x3_4000_0000, 0x3_8000_0000, 0x3_c000_0000, 0x4_0000_0000, 0x4_4000_0000,
+            0x22_8000_0000, 0x22_c000_0000, 0x23_0000_0000, 0x23_4000_0000, 0x23_8000_0000, 0x23_c000_0000, 0x24_0000_0000, 0x24_4000_0000,
+        ], 0x4000, &M2_IOA)),
+    },
+    Family {
+        chips: &[0x8132],
+        amcc: amcc(&[0x2_2000_0000, 0x2_2200_0000], 0x20_0000, 2, CACHE_CLEAR, &T8132_AMCC),
+        ioa: Some(ioa(&[0x4_0002_0000, 0x4_0802_0000, 0x4_1002_0000, 0x4_1802_0000, 0x4_9602_0000], 0x4000, &M4_IOA)),
+    },
+    Family {
+        chips: &[0x6040],
+        amcc: amcc(&[0x2_2000_0000, 0x2_2200_0000, 0x2_2400_0000, 0x2_2600_0000], 0x20_0000, 4, bit(0x82c), &T6040_AMCC),
+        ioa: Some(ioa(&[0x3_8002_0000, 0x3_8802_0000, 0x3_9002_0000, 0x3_9802_0000, 0x4_1602_0000], 0x4000, &M4_IOA)),
+    },
+    Family {
+        chips: &[0x6041],
+        amcc: amcc(&[0x2_2000_0000, 0x2_2200_0000, 0x2_2400_0000, 0x2_2600_0000, 0x2_2800_0000, 0x2_2a00_0000, 0x2_2c00_0000, 0x2_2e00_0000], 0x20_0000, 4, bit(0x82c), &T6040_AMCC),
+        ioa: Some(ioa(&[0x3_8002_0000, 0x3_8802_0000, 0x3_9002_0000, 0x3_9802_0000, 0x4_1602_0000], 0x4000, &M4_IOA)),
+    },
+    Family { chips: &[0x8140], amcc: M5_AMCC, ioa: Some(ioa(&[0x3_9602_0000], 0x4000, &M4_IOA)) },
+    Family {
+        chips: &[0x8142],
+        amcc: M5_AMCC,
+        ioa: Some(ioa(&[0x4_0002_0000, 0x4_0802_0000, 0x4_1002_0000, 0x4_1802_0000, 0x4_8e02_0000], 0x4000, &M4_IOA)),
+    },
+    Family {
+        chips: &[0x6050],
+        amcc: amcc(&[0x22_2000_0000, 0x22_2200_0000, 0x22_2400_0000, 0x22_2600_0000, 0x22_2800_0000, 0x22_2a00_0000, 0x22_2c00_0000, 0x22_2e00_0000], 0x14_0000, 4, bit(0x82c), &T6040_AMCC),
+        ioa: Some(ioa(&[0x2_a002_0000, 0x2_a802_0000, 0x3_8002_0000, 0x3_8802_0000, 0x4_1602_0000, 0x4_8602_0000], 0x1_0000, &M4_IOA)),
+    },
+    Family {
+        chips: &[0x8152],
+        amcc: M5_AMCC,
+        ioa: Some(ioa(&[0x4_0002_0000, 0x4_0802_0000, 0x3_8002_0000, 0x4_1002_0000, 0x3_8e02_0000], 0x4000, &M4_IOA)),
+    },
+];
+
+fn family(chip_id: u32) -> Option<&'static Family> {
+    FAMILIES
+        .iter()
+        .find(|family| family.chips.contains(&chip_id))
+}
 
 /// iBoot's AMCC map for the SoC with `chip_id`; `None` for a SoC whose
 /// iBoot has not been read.
 pub fn table(chip_id: u32) -> Option<&'static MemoryController> {
-    match chip_id {
-        0x6000 => Some(&T6000),
-        0x8112 => Some(&T8112),
-        _ => None,
-    }
+    family(chip_id).map(|family| &family.amcc)
 }
 
-/// The independently qualified IOA companion; absence does not reuse AMCC.
+/// iBoot's IOA map for the SoC with `chip_id`, which never reuses the AMCC's.
 pub fn ioa_table(chip_id: u32) -> Option<&'static MemoryController> {
-    match chip_id {
-        0x6000 => Some(&T6000_IOA),
-        _ => None,
-    }
+    family(chip_id)?.ioa.as_ref()
 }
 
 fn u32_value(value: u32) -> Vec<u8> {
@@ -248,27 +525,31 @@ fn set_optional_register(
     Ok(())
 }
 
-/// Writes the map into `/chosen/lock-regs/amcc` and its group nodes, as
-/// iBoot does.
-pub fn publish(tree: &mut DeviceTree, controller: &MemoryController) -> Result<()> {
-    publish_controller(tree, AMCC, "amcc", controller, &EMPTY_GROUPS)
+/// Writes the map into the template's `/chosen/lock-regs/amcc` and its group
+/// nodes, as iBoot does; `false` when the template has no such node.
+pub fn publish(tree: &mut DeviceTree, controller: &MemoryController) -> Result<bool> {
+    publish_controller(tree, AMCC, controller)
 }
 
-/// Publish the independently described IOA companion, when `ioa_table` provides
-/// one. It has no cache-status or lock property on T6000.
-pub fn publish_ioa(tree: &mut DeviceTree, controller: &MemoryController) -> Result<()> {
-    publish_controller(tree, IOA, "ioa", controller, &[])
+/// The same for `/chosen/lock-regs/ioa`, which only the M1 Pro to M3 Max
+/// templates carry.
+pub fn publish_ioa(tree: &mut DeviceTree, controller: &MemoryController) -> Result<bool> {
+    publish_controller(tree, IOA, controller)
 }
 
+/// iBoot's publisher fills only the nodes the template carries (J473
+/// `0x126f34`; J314s `0x137aa4` looks each group up with existing-child
+/// lookup `0xe0840` and skips a missing one at `0x137b28`): a group it
+/// describes without a node stays unpublished, and a node it does not fill
+/// stays empty.
 fn publish_controller(
     tree: &mut DeviceTree,
     path: &str,
-    name: &str,
     controller: &MemoryController,
-    empty_groups: &[&str],
-) -> Result<()> {
-    tree.ensure_child("/chosen", "lock-regs")?;
-    tree.ensure_child("/chosen/lock-regs", name)?;
+) -> Result<bool> {
+    if tree.node(path).is_none() {
+        return Ok(false);
+    }
     let count = u32::try_from(controller.apertures.len())?;
     tree.set_property(path, "aperture-count", u32_value(count))?;
     tree.set_property(path, "aperture-size", u32_value(controller.aperture_size))?;
@@ -288,8 +569,10 @@ fn publish_controller(
         set_optional_register(tree, path, name, register)?;
     }
     for group in controller.groups {
-        tree.ensure_child(path, group.name)?;
         let path = format!("{path}/{}", group.name);
+        if tree.node(&path).is_none() {
+            continue;
+        }
         tree.set_property(&path, "page-size-shift", u32_value(group.page_size_shift))?;
         for (name, register) in [
             ("lower-limit", Some(group.lower_limit)),
@@ -301,10 +584,7 @@ fn publish_controller(
             set_optional_register(tree, &path, name, register)?;
         }
     }
-    for name in empty_groups {
-        tree.ensure_child(path, name)?;
-    }
-    Ok(())
+    Ok(true)
 }
 
 /// A physical range iBoot programs into a lock group.
@@ -424,17 +704,40 @@ pub fn gaps(chip_id: Option<u32>) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::apple_device_tree::Node;
 
-    #[test]
-    fn publishes_the_amcc_map_sptm_reads() -> Result<()> {
+    const AMCC_GROUPS: [&str; 4] = ["amcc-ctrr-a", "amcc-ctrr-b", "amcc-ctrr-c", "amcc-ctrr-d"];
+
+    /// The IPSW templates' empty `/chosen/lock-regs`: the AMCC's four
+    /// groups and, from the M1 Pro to the M3 Max, the IOA's CTRR-A.
+    pub(crate) fn template(tree: &mut DeviceTree, ioa: bool) -> Result<()> {
+        tree.ensure_child("/chosen", "lock-regs")?;
+        tree.ensure_child("/chosen/lock-regs", "amcc")?;
+        for group in AMCC_GROUPS {
+            tree.ensure_child(AMCC, group)?;
+        }
+        if ioa {
+            tree.ensure_child("/chosen/lock-regs", "ioa")?;
+            tree.ensure_child(IOA, "ioa-ctrr-a")?;
+        }
+        Ok(())
+    }
+
+    fn chosen(ioa: bool) -> Result<DeviceTree> {
         let mut tree = DeviceTree {
             root: Node::named("device-tree")?,
         };
         tree.ensure_child("/", "chosen")?;
-        publish(&mut tree, &T8112)?;
+        template(&mut tree, ioa)?;
+        Ok(tree)
+    }
+
+    #[test]
+    fn publishes_the_amcc_map_sptm_reads() -> Result<()> {
+        let mut tree = chosen(false)?;
+        assert!(publish(&mut tree, &T8112)?);
         let u32_of = |path: &str, name: &str| tree.property(path, name).and_then(|p| p.as_u32());
         assert_eq!(u32_of(AMCC, "aperture-count"), Some(1));
         assert_eq!(u32_of(AMCC, "aperture-size"), Some(0xf4_0000));
@@ -464,10 +767,7 @@ mod tests {
 
     #[test]
     fn publishes_original_t6000_amcc_and_ioa_without_invented_registers() -> Result<()> {
-        let mut tree = DeviceTree {
-            root: Node::named("device-tree")?,
-        };
-        tree.ensure_child("/", "chosen")?;
+        let mut tree = chosen(true)?;
         let amcc = table(0x6000).unwrap();
         let ioa = ioa_table(0x6000).unwrap();
         // Re-publication must remove T8112-only fields, not retain a fake 7f0.
@@ -566,7 +866,7 @@ mod tests {
         assert_eq!(tree.node(AMCC).unwrap().properties.len(), 12);
         assert_eq!(tree.node(IOA).unwrap().properties.len(), 9);
         assert!(tree.node("/chosen/lock-regs/ioa/ioa-ctrr-b").is_none());
-        for name in EMPTY_GROUPS {
+        for name in &AMCC_GROUPS[1..] {
             assert_eq!(
                 tree.node(&format!("{AMCC}/{name}"))
                     .unwrap()
@@ -585,14 +885,56 @@ mod tests {
     }
 
     #[test]
-    fn source_qualification_does_not_alias_other_chips_or_ioa() {
-        assert!(ioa_table(0x8112).is_none());
-        for chip in [0x6001, 0x6002, 0x6020, 0x8103, 0xdead] {
+    fn every_soc_has_one_well_formed_description() {
+        let mut chips: Vec<u32> = FAMILIES.iter().flat_map(|f| f.chips).copied().collect();
+        let count = chips.len();
+        chips.sort_unstable();
+        chips.dedup();
+        assert_eq!(chips.len(), count, "a SoC in two families");
+        for family in &crate::carveouts::FAMILIES {
+            for &chip in family.chips {
+                assert!(
+                    table(chip).is_some() && gaps(Some(chip)).is_empty(),
+                    "{chip:#x}"
+                );
+            }
+        }
+        for family in &FAMILIES {
+            let controllers = core::iter::once(&family.amcc).chain(&family.ioa);
+            for (index, controller) in controllers.enumerate() {
+                let mut apertures = controller.apertures.to_vec();
+                apertures.sort_unstable();
+                apertures.dedup();
+                assert_eq!(apertures.len(), controller.apertures.len());
+                assert!(!apertures.is_empty());
+                let planes = u64::from(controller.plane_count) * u64::from(controller.plane_stride);
+                if index == 0 {
+                    assert!(planes <= u64::from(controller.aperture_size));
+                    assert!(controller.cache_status.is_some());
+                } else {
+                    assert_eq!((controller.plane_count, planes), (1, 0));
+                }
+                let first = &controller.groups[0];
+                assert!(first.name.ends_with("-ctrr-a") && first.lower_limit.value.is_none());
+                for group in controller.groups {
+                    let registers = [group.lower_limit, group.upper_limit]
+                        .into_iter()
+                        .chain(group.enable)
+                        .chain(group.write_disable)
+                        .chain(group.lock);
+                    for register in registers {
+                        let span = controller.plane_stride.max(controller.aperture_size);
+                        assert!(register.offset < span, "{:x?}", family.chips);
+                    }
+                }
+            }
+        }
+        assert!(ioa_table(0x8112).is_none() && ioa_table(0x8103).is_none());
+        for chip in [0x8101, 0xdead] {
             assert!(table(chip).is_none());
             assert!(ioa_table(chip).is_none());
             assert_eq!(gaps(Some(chip)).len(), 1);
         }
-        assert!(gaps(Some(0x6000)).is_empty());
         let region = ctrr_a(
             table(0x6000).unwrap(),
             0x8_0000_0000,
@@ -604,6 +946,44 @@ mod tests {
             (region.group, region.base, region.bytes),
             ("amcc-ctrr-a", 0x8_0200_0000, 0x579_0000)
         );
+    }
+
+    #[test]
+    fn publishes_only_into_the_templates_nodes() -> Result<()> {
+        let number = |tree: &DeviceTree, path: &str, name: &str| {
+            tree.property(path, name).and_then(|p| p.as_u32())
+        };
+        // The M4 Max fills all four AMCC groups; its template has no IOA.
+        let mut tree = chosen(false)?;
+        assert!(publish(&mut tree, table(0x6041).unwrap())?);
+        assert!(!publish_ioa(&mut tree, ioa_table(0x6041).unwrap())?);
+        assert!(tree.node(IOA).is_none());
+        assert_eq!(number(&tree, AMCC, "aperture-count"), Some(8));
+        assert_eq!(number(&tree, AMCC, "cache-status-reg-offset"), Some(0x82c));
+        let d = format!("{AMCC}/amcc-ctrr-d");
+        assert_eq!(number(&tree, &d, "lower-limit-reg-offset"), Some(0xaac));
+        assert_eq!(number(&tree, &d, "lower-limit-reg-value"), Some(0));
+        assert_eq!(number(&tree, &d, "write-disable-reg-offset"), Some(0xaec));
+        assert_eq!(number(&tree, &d, "lock-reg-offset"), Some(0xadc));
+        // The M2 Pro describes IOA-B and -C, which its template lacks.
+        let mut tree = chosen(true)?;
+        assert!(publish(&mut tree, table(0x6020).unwrap())?);
+        assert!(publish_ioa(&mut tree, ioa_table(0x6020).unwrap())?);
+        let a = format!("{IOA}/ioa-ctrr-a");
+        assert_eq!(number(&tree, &a, "upper-limit-reg-mask"), Some(0x3fff_ffff));
+        assert_eq!(number(&tree, &a, "write-disable-reg-offset"), Some(0x14));
+        assert_eq!(number(&tree, &a, "lock-reg-offset"), Some(0x4));
+        assert_eq!(tree.node(IOA).unwrap().children.len(), 1);
+        let b = format!("{AMCC}/amcc-ctrr-b");
+        assert_eq!(tree.node(&b).unwrap().properties.len(), 1);
+        // Without a template node nothing is published.
+        let mut bare = DeviceTree {
+            root: Node::named("device-tree")?,
+        };
+        bare.ensure_child("/", "chosen")?;
+        assert!(!publish(&mut bare, &T8112)?);
+        assert!(bare.node("/chosen/lock-regs").is_none());
+        Ok(())
     }
 
     #[test]

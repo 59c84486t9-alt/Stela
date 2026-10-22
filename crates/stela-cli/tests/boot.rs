@@ -106,6 +106,18 @@ fn device_tree() -> Vec<u8> {
         ],
         &[],
     );
+    // The template's empty AMCC lock-register nodes, which iBoot fills.
+    let named = |name: &str| {
+        node(
+            &[property("name", format!("{name}\0").as_bytes(), false)],
+            &[],
+        )
+    };
+    let amcc = node(
+        &[property("name", b"amcc\0", false)],
+        &["amcc-ctrr-a", "amcc-ctrr-b", "amcc-ctrr-c", "amcc-ctrr-d"].map(named),
+    );
+    let lock_regs = node(&[property("name", b"lock-regs\0", false)], &[amcc]);
     let chosen = node(
         &[
             property("name", b"chosen\0", false),
@@ -119,7 +131,7 @@ fn device_tree() -> Vec<u8> {
             property("cs-system-policy", b"default\0", false),
             property("osenvironment", &[0; 32], false),
         ],
-        &[memory_map, manifest_properties],
+        &[memory_map, manifest_properties, lock_regs],
     );
     let cpu0 = node(
         &[
