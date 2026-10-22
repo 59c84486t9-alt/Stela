@@ -55,6 +55,7 @@ impl Termination {
     /// parent's `wait` sees the same status.
     pub fn end_host_process(self) -> ! {
         translations::finish();
+        unsupported::summarize();
         match self {
             Self::Exited(status) => std::process::exit(status & 0xff),
             Self::Signaled(signal) => {

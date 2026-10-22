@@ -5,9 +5,10 @@
 //! apart operations one place serves (each MIG routine at the message
 //! trap, each exception type at its delivery): a `stela:` line on standard
 //! error, an entry in `~/Library/Logs/Stela/unsupported.log` and the
-//! notifier a host application installs ([`set_notifier`]). Strict mode
-//! (`stela run --strict`, `STELA_STRICT=1`) stops the run at the first one
-//! instead, as tests, benchmarks and tool comparisons run.
+//! notifier a host application installs ([`set_notifier`]), and counted in
+//! the summary the run ends with ([`summarize`]). Strict mode (`stela run
+//! --strict`, `STELA_STRICT=1`) stops the run at the first one instead, as
+//! tests, benchmarks and tool comparisons run; graceful is the default.
 //!
 //! A service refuses with [`refuse!`] (or [`refusal`]), naming the
 //! guest-visible [`Failure`]; the dispatcher that called it turns the
@@ -18,7 +19,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// What kind of operation was unsupported.
@@ -191,6 +192,9 @@ impl fmt::Display for Report {
 }
 
 static STRICT: AtomicBool = AtomicBool::new(false);
+/// Unsupported operations answered gracefully, and the distinct ones.
+static ANSWERED: AtomicU64 = AtomicU64::new(0);
+static DISTINCT: AtomicU64 = AtomicU64::new(0);
 static NOTIFIER: OnceLock<fn(&Report)> = OnceLock::new();
 static PROGRAM: OnceLock<String> = OnceLock::new();
 /// A report's identity: its kind, place and subject.
@@ -241,6 +245,7 @@ pub fn report(
     if strict() {
         anyhow::bail!("{operation}");
     }
+    ANSWERED.fetch_add(1, Ordering::Relaxed);
     let (image, offset) = place(pc);
     let report = Report {
         kind,
@@ -298,10 +303,33 @@ fn publish(report: Report, subject: Option<&str>) {
     if !first(key) {
         return;
     }
+    if report.failure != Failure::None {
+        DISTINCT.fetch_add(1, Ordering::Relaxed);
+    }
     eprintln!("stela: {report}");
     log(&report);
     if let Some(notifier) = NOTIFIER.get() {
         notifier(&report);
+    }
+}
+
+/// The run summary's line, when the run answered an unsupported operation.
+fn summary() -> Option<String> {
+    let answered = ANSWERED.load(Ordering::Relaxed);
+    (answered > 0).then(|| {
+        format!(
+            "stela: {answered} unsupported operations answered gracefully ({} distinct, \
+             each reported above and in ~/Library/Logs/Stela/unsupported.log)",
+            DISTINCT.load(Ordering::Relaxed)
+        )
+    })
+}
+
+/// End the run's account of unsupported operations: the summary line on
+/// standard error, when any was answered.
+pub fn summarize() {
+    if let Some(line) = summary() {
+        eprintln!("{line}");
     }
 }
 
@@ -417,6 +445,19 @@ mod tests {
         assert_eq!(unsupported.operation, "frob option 0x7");
         // Other errors stay errors.
         assert!(recover(anyhow::anyhow!("internal"), Kind::BsdCall, 0, None).is_err());
+    }
+
+    #[test]
+    fn graceful_answers_are_counted_in_the_summary() {
+        // Other tests' reports only add to the counts.
+        ANSWERED.fetch_add(2, Ordering::Relaxed);
+        DISTINCT.fetch_add(1, Ordering::Relaxed);
+        let line = summary().unwrap();
+        assert!(
+            line.contains("unsupported operations answered gracefully"),
+            "{line}"
+        );
+        assert!(line.contains("distinct"), "{line}");
     }
 
     #[test]
