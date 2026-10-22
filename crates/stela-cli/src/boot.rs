@@ -458,9 +458,10 @@ pub(crate) struct Prepare {
     /// `[{"path": "/chosen/lock-regs/amcc", "property": "aperture-count", "u32": 1}]`.
     #[arg(long)]
     dt_overlay: Option<PathBuf>,
-    /// The `/cpus` node of the boot CPU.
-    #[arg(long, default_value = "cpu0")]
-    boot_cpu: String,
+    /// Explicit `/cpus` child of the boot CPU; defaults to the first
+    /// performance CPU in the original DeviceTree order.
+    #[arg(long)]
+    boot_cpu: Option<String>,
     /// The generic timer rate the machine presents, in Hz.
     #[arg(long, value_parser = parse_address, default_value = "24000000")]
     timebase_frequency: u64,
@@ -1234,6 +1235,30 @@ mod tests {
         // An explicit `rd=md0` stays, and the loader refuses it.
         let explicit = boot_args("rd=md0", RECOVERY_MODE_ARGS);
         assert!(stela_loader::boot_policy::require_image_boot(&explicit).is_err());
+    }
+
+    #[test]
+    fn boot_cpu_omission_and_an_explicit_cpu0_remain_distinct() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Line {
+            #[command(flatten)]
+            prepare: Prepare,
+        }
+        let base = [
+            "prepare", "--ipsw", "a.ipsw", "--model", "Mac14,3", "--output", "out",
+        ];
+        let automatic = Line::try_parse_from(base).unwrap().prepare;
+        assert_eq!(automatic.boot_cpu, None);
+        assert_eq!(automatic.options(None, None).unwrap().boot_cpu, None);
+        let explicit = Line::try_parse_from(base.into_iter().chain(["--boot-cpu", "cpu0"]))
+            .unwrap()
+            .prepare;
+        assert_eq!(explicit.boot_cpu.as_deref(), Some("cpu0"));
+        assert_eq!(
+            explicit.options(None, None).unwrap().boot_cpu.as_deref(),
+            Some("cpu0")
+        );
     }
 
     #[test]

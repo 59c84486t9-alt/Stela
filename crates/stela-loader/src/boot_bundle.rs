@@ -35,9 +35,10 @@ use stela_runtime::machine::{ctrr, identification, soc, tag_storage};
 use stela_runtime::sha256;
 
 /// The format `stela.efi` reads (`stela_runtime::boot_bundle`).
-/// Schema3 requires the boot reader's selected target/source/original ADT
-/// provenance intake. Schema2 never qualified those previously ignored fields.
-pub const SCHEMA_VERSION: u32 = 3;
+/// Schema 4 requires the selected boot CPU and its original ADT identity;
+/// older mounts always started PE 0. Schema 3 requires target/source/original
+/// ADT provenance intake; schema 2 never qualified those fields.
+pub const SCHEMA_VERSION: u32 = 4;
 /// The revision of what [`prepare`] writes within its schema: bump it in the
 /// commit that changes the content of a prepared bundle (a DeviceTree
 /// property, a region, a patch, a boot argument) without changing its
@@ -95,7 +96,9 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// optional register-family qualification, including T8152's physical child.
 /// Revision 26: admit qualified early-family USB DRD, I2C and ATC PHY
 /// compatibles while preserving their distinct original alias geometry.
-pub const REVISION: u32 = 26;
+/// Revision 27: default to the first original performance CPU, preserve
+/// explicit overrides and publish one running node with source identity.
+pub const REVISION: u32 = 27;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -233,8 +236,9 @@ pub struct Options {
     /// First region's distance above `phys_base`.
     pub load_offset: u64,
     pub boot_args: String,
-    /// The DeviceTree `/cpus` child marked `running` for the boot CPU.
-    pub boot_cpu: String,
+    /// Explicit `/cpus` child name; absent selects the first performance CPU
+    /// in the retained original DeviceTree order.
+    pub boot_cpu: Option<String>,
     /// The generic timer rate (`CNTFRQ_EL0`) the machine presents.
     pub timebase_frequency: u64,
     /// Board configuration values by syscfg key, such as `SrNm` or `WMac`.
@@ -261,8 +265,8 @@ pub struct Options {
 }
 
 /// The defaults of `stela boot prepare` for an installed system: 8 GiB of
-/// DRAM at 0x8_0000_0000, verbose boot, `cpu0` booting with a 24 MHz
-/// generic timer, and Reduced Security with SIP enabled.
+/// DRAM at 0x8_0000_0000, verbose boot, the first performance CPU booting
+/// with a 24 MHz generic timer, and Reduced Security with SIP enabled.
 impl Options {
     /// These options with guest DRAM, and the physical base at the same
     /// distance into it, at `base` (a board's [`Inputs::dram_base`]); `None`
@@ -288,7 +292,7 @@ impl Default for Options {
             phys_base: DRAM_BASE,
             load_offset: 0,
             boot_args: "-v".into(),
-            boot_cpu: "cpu0".into(),
+            boot_cpu: None,
             timebase_frequency: 24_000_000,
             syscfg: BTreeMap::new(),
             mac_addresses: BTreeMap::new(),
@@ -396,6 +400,26 @@ pub struct PlaceholderDecision {
     pub resolution: String,
 }
 
+/// Why preparation selected this original CPU node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BootCpuSelection {
+    FirstPerformance,
+    Explicit,
+}
+
+/// Selected boot PE provenance, tied to the immutable input DeviceTree.
+/// The original index is a source coordinate, never a runtime logical PE ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BootCpu {
+    pub path: String,
+    /// Original u32 `reg`, retaining its die/cluster/core affinity bits.
+    pub affinity: u32,
+    pub cluster_type: u8,
+    pub original_index: usize,
+    pub selection: BootCpuSelection,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Manifest {
     pub schema_version: u32,
@@ -403,6 +427,7 @@ pub struct Manifest {
     pub revision: u32,
     pub target: Target,
     pub options: Options,
+    pub boot_cpu: BootCpu,
     pub sources: Vec<Source>,
     pub files: Vec<File>,
     pub regions: Vec<Region>,
@@ -949,6 +974,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     }
 
     let mut tree = DeviceTree::parse(inputs.device_tree.bytes)?;
+    let original_tree = tree.clone();
     // iBoot merges the fused variant's overlays as it loads the tree.
     let (variant, variant_decisions) =
         soc_variant::apply(&mut tree, inputs.target.chip_id, inputs.target.board_id)?
@@ -956,7 +982,8 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
                 (Some(variant), decisions)
             });
     let placeholders = resolve_placeholders(&mut tree, options)?;
-    let mut unresolved = shape_device_tree(&mut tree, &inputs.target, options)?;
+    let boot_cpu = select_boot_cpu(&tree, &original_tree, options.boot_cpu.as_deref())?;
+    let mut unresolved = shape_device_tree(&mut tree, &inputs.target, options, &boot_cpu)?;
     let (security, policy_unresolved) = boot_policy::apply(
         &mut tree,
         &options.security,
@@ -1098,6 +1125,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         ));
     }
     apply_overlay(&mut tree, &options.overlay)?;
+    verify_boot_cpu(&tree, &original_tree, &boot_cpu)?;
     unresolved.extend(platform_gaps(&tree, inputs));
 
     // Preserve the actual IM4M selected by boot policy. The payload tag
@@ -1527,6 +1555,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         revision: REVISION,
         target: inputs.target.clone(),
         options: options.clone(),
+        boot_cpu,
         sources,
         files: files
             .iter()
@@ -1625,11 +1654,198 @@ fn platform_gaps(tree: &DeviceTree, inputs: &Inputs) -> Vec<String> {
     gaps
 }
 
+const CPU_RUNNING: &[u8] = b"running\0";
+const CPU_WAITING: &[u8] = b"waiting\0";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CpuIdentity {
+    path: String,
+    affinity: u32,
+    cluster_type: u8,
+}
+
+/// Original 26A434 ADTs encode cluster-type as E/P/M plus NUL, reg as u32
+/// and state as running/waiting plus NUL. See the pinned source matrix in
+/// iboot-handoff.md. These are source identities, not inferred CPU ordinals.
+fn cpu_identities(tree: &DeviceTree) -> Result<Vec<CpuIdentity>> {
+    let cpus = tree.node("/cpus").context("DeviceTree has no /cpus")?;
+    ensure!(!cpus.children.is_empty(), "DeviceTree has no CPU nodes");
+    let mut identities: Vec<CpuIdentity> = Vec::new();
+    for cpu in &cpus.children {
+        let name = cpu.name().context("DeviceTree CPU has no name")?;
+        ensure!(
+            !name.is_empty() && !name.contains('/') && !matches!(name, "." | ".."),
+            "DeviceTree CPU name is not one child component"
+        );
+        let path = format!("/cpus/{name}");
+        let property = |name: &str| -> Result<&crate::apple_device_tree::Property> {
+            let mut matching = cpu
+                .properties
+                .iter()
+                .filter(|property| property.name() == name);
+            let property = matching
+                .next()
+                .with_context(|| format!("{path} has no {name}"))?;
+            ensure!(
+                matching.next().is_none(),
+                "{path} has ambiguous {name} properties"
+            );
+            ensure!(!property.placeholder, "{path} has no resolved {name}");
+            Ok(property)
+        };
+        property("name")?;
+        let cluster_type = match property("cluster-type")?.value.as_slice() {
+            [kind @ (b'E' | b'P' | b'M'), 0] => *kind,
+            _ => bail!("{path} cluster-type is not an original E/P/M string"),
+        };
+        let affinity = property("reg")?
+            .as_u32()
+            .with_context(|| format!("{path} reg is not one original u32 affinity"))?;
+        ensure!(
+            [CPU_RUNNING, CPU_WAITING].contains(&property("state")?.value.as_slice()),
+            "{path} state is not running or waiting"
+        );
+        ensure!(
+            !identities.iter().any(|cpu| cpu.path == path),
+            "duplicate original CPU path {path}"
+        );
+        ensure!(
+            !identities.iter().any(|cpu| cpu.affinity == affinity),
+            "duplicate original CPU affinity {affinity:#x}"
+        );
+        identities.push(CpuIdentity {
+            path,
+            affinity,
+            cluster_type,
+        });
+    }
+    Ok(identities)
+}
+
+fn select_boot_cpu(
+    tree: &DeviceTree,
+    original: &DeviceTree,
+    requested: Option<&str>,
+) -> Result<BootCpu> {
+    let cpus = cpu_identities(tree)?;
+    let source = cpu_identities(original)?;
+    let (selected, selection) = match requested {
+        Some(name) => {
+            ensure!(
+                !name.is_empty() && !name.contains('/') && !matches!(name, "." | ".."),
+                "boot CPU override must name one original /cpus child"
+            );
+            let path = format!("/cpus/{name}");
+            (
+                cpus.iter()
+                    .find(|cpu| cpu.path == path)
+                    .with_context(|| format!("DeviceTree has no boot CPU {path}"))?,
+                BootCpuSelection::Explicit,
+            )
+        }
+        None => (
+            cpus.iter()
+                .find(|cpu| cpu.cluster_type == b'P')
+                .context("DeviceTree has no performance CPU for automatic boot selection")?,
+            BootCpuSelection::FirstPerformance,
+        ),
+    };
+    let original_index = source
+        .iter()
+        .position(|cpu| cpu.path == selected.path)
+        .context("selected boot CPU is absent from the original DeviceTree")?;
+    ensure!(
+        source[original_index] == *selected,
+        "selected boot CPU identity differs from the original DeviceTree"
+    );
+    Ok(BootCpu {
+        path: selected.path.clone(),
+        affinity: selected.affinity,
+        cluster_type: selected.cluster_type,
+        original_index,
+        selection,
+    })
+}
+
+/// Preflight every state before publishing exactly one running node. The
+/// original iBoot publishes running at 26A434 J314s 0x3abd4..0x3abf8; choosing
+/// the first P core is Stela's explicit policy, not a claim about iBoot's BSP.
+fn mark_boot_cpu(tree: &mut DeviceTree, selected: &BootCpu) -> Result<()> {
+    let cpus = cpu_identities(tree)?;
+    ensure!(
+        cpus.iter().any(|cpu| cpu.path == selected.path
+            && cpu.affinity == selected.affinity
+            && cpu.cluster_type == selected.cluster_type),
+        "selected boot CPU does not match the prepared topology"
+    );
+    for cpu in cpus {
+        let state = if cpu.path == selected.path {
+            CPU_RUNNING
+        } else {
+            CPU_WAITING
+        };
+        tree.set_property(&cpu.path, "state", state.to_vec())?;
+    }
+    Ok(())
+}
+
+/// User overlays cannot replace the selected PE, rename/reorder CPUs or
+/// change a retained source affinity. Existing fused-variant filtering is
+/// independent of this selection and retains original relative order.
+fn verify_boot_cpu(tree: &DeviceTree, original: &DeviceTree, selected: &BootCpu) -> Result<()> {
+    let cpus = cpu_identities(tree)?;
+    let source = cpu_identities(original)?;
+    let original_cpu = source
+        .get(selected.original_index)
+        .context("boot CPU source index is outside the original DeviceTree")?;
+    ensure!(
+        original_cpu.path == selected.path
+            && original_cpu.affinity == selected.affinity
+            && original_cpu.cluster_type == selected.cluster_type,
+        "boot CPU provenance differs from the original DeviceTree"
+    );
+    let mut previous = None;
+    let mut running = Vec::new();
+    for cpu in &cpus {
+        let index = source
+            .iter()
+            .position(|original| original == cpu)
+            .with_context(|| {
+                format!("{} identity differs from the original DeviceTree", cpu.path)
+            })?;
+        ensure!(
+            previous.is_none_or(|previous| index > previous),
+            "CPU order differs from the original DeviceTree"
+        );
+        previous = Some(index);
+        if tree
+            .property(&cpu.path, "state")
+            .is_some_and(|p| p.value == CPU_RUNNING)
+        {
+            running.push(cpu);
+        }
+    }
+    ensure!(
+        running.len() == 1 && running[0].path == selected.path,
+        "prepared DeviceTree must have exactly the selected boot CPU running"
+    );
+    if selected.selection == BootCpuSelection::FirstPerformance {
+        ensure!(
+            cpus.iter()
+                .find(|cpu| cpu.cluster_type == b'P')
+                .is_some_and(|cpu| cpu.path == selected.path),
+            "automatic boot CPU is not the first original performance CPU"
+        );
+    }
+    Ok(())
+}
+
 /// Board facts and boot-time slots that iBoot adds to its template tree.
 fn shape_device_tree(
     tree: &mut DeviceTree,
     target: &Target,
     options: &Options,
+    boot_cpu: &BootCpu,
 ) -> Result<Vec<String>> {
     let mut unresolved = vec![];
     let chosen = "/chosen";
@@ -1654,16 +1870,7 @@ fn shape_device_tree(
     for key in ["key-sptm-ctrr", "key-xnu-ctrr"] {
         tree.set_property("/chosen/hibernation", key, vec![0; HIBERNATION_KEY_BYTES])?;
     }
-    let cpu = format!("/cpus/{}", options.boot_cpu);
-    let state = tree
-        .property(&cpu, "state")
-        .with_context(|| format!("DeviceTree has no {cpu} state"))?;
-    let running = b"running\0".to_vec();
-    ensure!(
-        state.value.len() == running.len(),
-        "{cpu} state field is not eight bytes"
-    );
-    tree.set_property(&cpu, "state", running)?;
+    mark_boot_cpu(tree, boot_cpu)?;
     // iBoot adds the clock rates at hand-off; every CPU node carries them.
     for cpu in cpu_nodes(tree)? {
         for property in CPU_FREQUENCY_PROPERTIES {
@@ -2239,6 +2446,10 @@ mod tests {
         tree.ensure_child("/cpus", "cpu0").unwrap();
         tree.set_property("/cpus/cpu0", "state", b"waiting\0".to_vec())
             .unwrap();
+        tree.set_property("/cpus/cpu0", "cluster-type", b"E\0".to_vec())
+            .unwrap();
+        tree.set_property("/cpus/cpu0", "reg", 0u32.to_le_bytes().to_vec())
+            .unwrap();
         tree.set_property("/vram", "reg", vec![0; 16]).unwrap();
         tree.set_property("/pram", "reg", vec![0; 16]).unwrap();
         tree.set_property("/chosen", "random-seed", vec![0; 0x100])
@@ -2406,6 +2617,292 @@ mod tests {
         Ok(())
     }
 
+    fn cpu_tree(layout: &[(&str, u32, u8)]) -> DeviceTree {
+        let mut cpus = crate::apple_device_tree::Node::named("cpus").unwrap();
+        for &(name, affinity, kind) in layout {
+            let mut cpu = crate::apple_device_tree::Node::named(name).unwrap();
+            cpu.set_property("reg", affinity.to_le_bytes().to_vec())
+                .unwrap();
+            cpu.set_property("cluster-type", vec![kind, 0]).unwrap();
+            cpu.set_property("state", CPU_WAITING.to_vec()).unwrap();
+            cpus.children.push(cpu);
+        }
+        let mut root = crate::apple_device_tree::Node::named("device-tree").unwrap();
+        root.children.push(cpus);
+        DeviceTree { root }
+    }
+
+    #[test]
+    fn boot_cpu_automatic_selection_preserves_original_order_and_publishes_one_running_node()
+    -> Result<()> {
+        // Names and numeric affinities deliberately disagree with DT order.
+        let original = cpu_tree(&[
+            ("cpu9", 0, b'E'),
+            ("cpu88", 0x902, b'P'),
+            ("cpu1", 0x100, b'P'),
+        ]);
+        let mut tree = original.clone();
+        tree.set_property("/cpus/cpu9", "state", CPU_RUNNING.to_vec())?;
+        tree.set_property("/cpus/cpu1", "state", CPU_RUNNING.to_vec())?;
+        let selected = select_boot_cpu(&tree, &original, None)?;
+        assert_eq!(
+            selected,
+            BootCpu {
+                path: "/cpus/cpu88".into(),
+                affinity: 0x902,
+                cluster_type: b'P',
+                original_index: 1,
+                selection: BootCpuSelection::FirstPerformance,
+            }
+        );
+        mark_boot_cpu(&mut tree, &selected)?;
+        verify_boot_cpu(&tree, &original, &selected)?;
+        assert_eq!(cpu_identities(&tree)?, cpu_identities(&original)?);
+        for (name, state) in [
+            ("cpu9", CPU_WAITING),
+            ("cpu88", CPU_RUNNING),
+            ("cpu1", CPU_WAITING),
+        ] {
+            assert_eq!(
+                tree.property(&format!("/cpus/{name}"), "state")
+                    .unwrap()
+                    .value,
+                state
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&selected)?,
+            serde_json::json!({
+                "path": "/cpus/cpu88", "affinity": 0x902, "cluster_type": b'P',
+                "original_index": 1, "selection": "first-performance",
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn boot_cpu_explicit_override_remains_distinct_from_automatic_selection() -> Result<()> {
+        let original = cpu_tree(&[("cpu0", 0, b'E'), ("cpu4", 0x100, b'P')]);
+        let mut tree = original.clone();
+        let selected = select_boot_cpu(&tree, &original, Some("cpu0"))?;
+        assert_eq!(selected.selection, BootCpuSelection::Explicit);
+        assert_eq!(
+            (
+                selected.path.as_str(),
+                selected.affinity,
+                selected.original_index
+            ),
+            ("/cpus/cpu0", 0, 0)
+        );
+        mark_boot_cpu(&mut tree, &selected)?;
+        verify_boot_cpu(&tree, &original, &selected)?;
+        assert_eq!(
+            tree.property("/cpus/cpu4", "state").unwrap().value,
+            CPU_WAITING
+        );
+        for name in ["", ".", "..", "cpu0/child", "/cpus/cpu0", "missing"] {
+            assert!(
+                select_boot_cpu(&tree, &original, Some(name)).is_err(),
+                "{name}"
+            );
+        }
+        let e_only = cpu_tree(&[("cpu0", 0, b'E')]);
+        assert!(select_boot_cpu(&e_only, &e_only, None).is_err());
+        assert!(select_boot_cpu(&e_only, &e_only, Some("cpu0")).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn boot_cpu_invalid_source_fields_refuse_before_any_state_is_written() -> Result<()> {
+        let original = cpu_tree(&[
+            ("cpu0", 0, b'E'),
+            ("cpu4", 0x100, b'P'),
+            ("cpu5", 0x101, b'P'),
+        ]);
+        let selected = select_boot_cpu(&original, &original, None)?;
+        for (property, value) in [
+            ("state", b"running".to_vec()),
+            ("state", b"unknown\0".to_vec()),
+            ("cluster-type", vec![b'P', 0, 0]),
+            ("cluster-type", vec![b'X', 0]),
+            ("reg", 0x100u64.to_le_bytes().to_vec()),
+        ] {
+            let mut tree = original.clone();
+            tree.set_property("/cpus/cpu4", property, value)?;
+            let before = tree.clone();
+            assert!(
+                select_boot_cpu(&tree, &original, None).is_err(),
+                "{property}"
+            );
+            assert!(mark_boot_cpu(&mut tree, &selected).is_err(), "{property}");
+            assert_eq!(tree, before);
+        }
+        for property in ["state", "reg", "cluster-type"] {
+            let mut tree = original.clone();
+            tree.node_mut("/cpus/cpu4")
+                .unwrap()
+                .remove_property(property);
+            let before = tree.clone();
+            assert!(select_boot_cpu(&tree, &original, None).is_err());
+            assert!(mark_boot_cpu(&mut tree, &selected).is_err());
+            assert_eq!(tree, before);
+        }
+        let mut duplicate = original.clone();
+        let cpu = duplicate.node("/cpus/cpu4").unwrap().clone();
+        duplicate.node_mut("/cpus").unwrap().children.push(cpu);
+        assert!(select_boot_cpu(&duplicate, &duplicate, None).is_err());
+        let mut aliased = original.clone();
+        aliased.set_property("/cpus/cpu5", "reg", 0x100u32.to_le_bytes().to_vec())?;
+        assert!(select_boot_cpu(&aliased, &aliased, None).is_err());
+        for property in ["name", "state", "reg", "cluster-type"] {
+            let mut duplicate = original.clone();
+            let repeated = duplicate.property("/cpus/cpu4", property).unwrap().clone();
+            duplicate
+                .node_mut("/cpus/cpu4")
+                .unwrap()
+                .properties
+                .push(repeated);
+            assert!(
+                select_boot_cpu(&duplicate, &original, None).is_err(),
+                "{property}"
+            );
+        }
+        let mut unresolved = original.clone();
+        unresolved
+            .node_mut("/cpus/cpu4")
+            .unwrap()
+            .property_mut("reg")
+            .unwrap()
+            .placeholder = true;
+        assert!(select_boot_cpu(&unresolved, &original, None).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn boot_cpu_source_index_does_not_become_a_prepared_runtime_index() -> Result<()> {
+        let original = cpu_tree(&[("source-removed", 0, b'E'), ("retained", 0x100, b'P')]);
+        // An independently qualified earlier variant projection may retain a
+        // subset. Selection itself never removes or renames a CPU.
+        let mut prepared = cpu_tree(&[("retained", 0x100, b'P')]);
+        let selected = select_boot_cpu(&prepared, &original, None)?;
+        assert_eq!(selected.original_index, 1);
+        assert_eq!(
+            prepared.node("/cpus").unwrap().children[0].name(),
+            Some("retained")
+        );
+        mark_boot_cpu(&mut prepared, &selected)?;
+        verify_boot_cpu(&prepared, &original, &selected)?;
+        let mut forged = selected.clone();
+        forged.original_index = 0;
+        assert!(verify_boot_cpu(&prepared, &original, &forged).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn boot_cpu_overlay_cannot_replace_the_selected_state_or_source_identity() -> Result<()> {
+        let original = cpu_tree(&[
+            ("cpu0", 0, b'E'),
+            ("cpu4", 0x100, b'P'),
+            ("cpu5", 0x101, b'P'),
+        ]);
+        let selected = select_boot_cpu(&original, &original, None)?;
+        let mut prepared = original.clone();
+        mark_boot_cpu(&mut prepared, &selected)?;
+        for (path, property, value) in [
+            ("/cpus/cpu0", "state", CPU_RUNNING.to_vec()),
+            ("/cpus/cpu4", "state", CPU_WAITING.to_vec()),
+            ("/cpus/cpu4", "reg", 0x999u32.to_le_bytes().to_vec()),
+            ("/cpus/cpu4", "name", b"renamed\0".to_vec()),
+            ("/cpus/cpu4", "cluster-type", b"E\0".to_vec()),
+        ] {
+            let mut tree = prepared.clone();
+            apply_overlay(
+                &mut tree,
+                &[OverlayProperty {
+                    path: path.into(),
+                    property: property.into(),
+                    value,
+                }],
+            )?;
+            assert!(
+                verify_boot_cpu(&tree, &original, &selected).is_err(),
+                "{path} {property}"
+            );
+        }
+        let mut reordered = prepared.clone();
+        reordered.node_mut("/cpus").unwrap().children.swap(0, 1);
+        assert!(verify_boot_cpu(&reordered, &original, &selected).is_err());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires pinned original 26A434 ADTs through STELA_TEST_CPU_DT_DIR"]
+    fn boot_cpu_first_performance_selection_preserves_every_original_board_identity() -> Result<()>
+    {
+        let directory = std::env::var("STELA_TEST_CPU_DT_DIR")?;
+        let facts: serde_json::Value =
+            serde_json::from_str(include_str!("../../../isa/apple-soc-facts.json"))?;
+        let boards = facts["boards"].as_array().unwrap();
+        for board in boards {
+            let name = board["device_class"].as_str().unwrap();
+            let input = std::fs::read(format!("{directory}/DeviceTree.{name}.adt"))?;
+            assert_eq!(
+                sha256(&input),
+                board["source"]["decoded_sha256"].as_str().unwrap()
+            );
+            let original = DeviceTree::parse(&input)?;
+            let mut tree = original.clone();
+            let cpus = original.node("/cpus").unwrap();
+            let (index, cpu) = cpus
+                .children
+                .iter()
+                .enumerate()
+                .find(|(_, cpu)| {
+                    cpu.property("cluster-type")
+                        .is_some_and(|p| p.value == b"P\0")
+                })
+                .with_context(|| format!("{name} has no original performance CPU"))?;
+            let selected = select_boot_cpu(&tree, &original, None)?;
+            assert_eq!(selected.original_index, index, "{name}");
+            assert_eq!(
+                selected.path,
+                format!("/cpus/{}", cpu.name().unwrap()),
+                "{name}"
+            );
+            assert_eq!(
+                selected.affinity,
+                cpu.property("reg").unwrap().as_u32().unwrap(),
+                "{name}"
+            );
+            mark_boot_cpu(&mut tree, &selected)?;
+            verify_boot_cpu(&tree, &original, &selected)?;
+            for (before, after) in cpus
+                .children
+                .iter()
+                .zip(&tree.node("/cpus").unwrap().children)
+            {
+                let mut expected = before.clone();
+                let state = if format!("/cpus/{}", before.name().unwrap()) == selected.path {
+                    CPU_RUNNING
+                } else {
+                    CPU_WAITING
+                };
+                expected.set_property("state", state.to_vec())?;
+                assert_eq!(*after, expected, "{name}");
+            }
+            assert_eq!(
+                cpus.children.len(),
+                tree.node("/cpus").unwrap().children.len(),
+                "{name}"
+            );
+        }
+        println!(
+            "qualified first-performance boot selection on {} pinned original board trees",
+            boards.len()
+        );
+        Ok(())
+    }
+
     fn trust_cache() -> Vec<u8> {
         let mut module = 2u32.to_le_bytes().to_vec();
         module.extend([0; 16]);
@@ -2454,7 +2951,7 @@ mod tests {
             phys_base: 0x8_0000_0000,
             load_offset: 0,
             boot_args: "-v".into(),
-            boot_cpu: "cpu0".into(),
+            boot_cpu: Some("cpu0".into()),
             osenvironment: None,
             boot_command: None,
             root: None,
@@ -2711,6 +3208,16 @@ mod tests {
         assert_eq!(
             tree.property("/cpus/cpu0", "state").unwrap().as_str(),
             Some("running")
+        );
+        assert_eq!(
+            manifest.boot_cpu,
+            BootCpu {
+                path: "/cpus/cpu0".into(),
+                affinity: 0,
+                cluster_type: b'E',
+                original_index: 0,
+                selection: BootCpuSelection::Explicit,
+            }
         );
         assert_eq!(
             tree.property("/chosen", "chip-id").unwrap().as_u32(),
