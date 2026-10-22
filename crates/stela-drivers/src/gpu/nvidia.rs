@@ -4,6 +4,7 @@ use crate::bus::pci::ConfigSpace;
 use core::{ffi::c_void, marker::PhantomData, marker::PhantomPinned, pin::Pin};
 
 pub mod allocation;
+pub mod device;
 mod dma;
 pub mod firmware;
 mod memory;

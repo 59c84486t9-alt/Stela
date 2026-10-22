@@ -29,6 +29,7 @@ ALL_SRCS := $(filter-out arch/nvalloc/unix/src/gcc_helper.c,$(ALL_SRCS))
 ALL_SRCS += ../../stela/pci.c ../../stela/memory.c ../../stela/stela_ram_mapping.c
 ALL_SRCS += ../../stela/stela_pages.c ../../stela/stela_page_geometry.c
 ALL_SRCS += ../../stela/stela_ordering.c
+ALL_SRCS += ../../stela/stela_device.c
 ALL_SRCS += ../../stela/stela_mmio.c ../../stela/stela_firmware.c
 ALL_SRCS += ../../stela/stela_primitives.c ../../stela/stela_nvlink_primitives.c
 ALL_SRCS += ../../stela/stela_nvswitch_primitives.c

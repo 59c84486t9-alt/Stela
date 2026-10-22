@@ -140,6 +140,7 @@ fn nvidia() {
         .file(format!("{source}/stela/stela_pages.c"))
         .file(format!("{source}/stela/stela_page_geometry.c"))
         .file(format!("{source}/stela/stela_ordering.c"))
+        .file(format!("{source}/stela/stela_device.c"))
         .file(format!("{source}/stela/stela_mmio.c"))
         .file(format!("{source}/stela/stela_firmware.c"))
         .file(format!("{source}/stela/stela_primitives.c"))
