@@ -9,6 +9,7 @@ use serde::Serialize;
 use stela_runtime::sha256;
 
 pub mod entropy;
+pub mod heap;
 pub mod native;
 
 #[derive(Debug, Clone, Serialize)]

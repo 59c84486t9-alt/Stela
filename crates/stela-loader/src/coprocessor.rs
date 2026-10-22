@@ -681,6 +681,29 @@ pub(super) mod tests {
             let tag = field.tag;
             *policy.fields.iter_mut().find(|f| f.tag == tag).unwrap() = field;
         }
+        // Synthetic coordinates exercise field preparation only; no allocator
+        // or IOP mapping owner is established by this file-level fixture.
+        let heap_policy = configuration::heap::Policy {
+            bank: 0x4a,
+            alignment: 0x4000,
+            state: configuration::heap::BankState::Allocate,
+            provenance: provenance(),
+        };
+        assert_eq!(staged.heap_request(&heap_policy)?.bytes, 0x1000000);
+        let heap = staged.heap_fields(
+            &heap_policy,
+            configuration::heap::Mapping {
+                bank: 0x4a,
+                physical: 0xa0000000,
+                iop: 0x10000000,
+                bytes: 0x1000000,
+                provenance: provenance(),
+            },
+        )?;
+        for field in [heap.base, heap.size] {
+            let tag = field.tag;
+            *policy.fields.iter_mut().find(|f| f.tag == tag).unwrap() = field;
+        }
         let configured = staged.configure_cold(policy, proposal)?;
         assert_eq!(configured.receipt().fields.len(), 61);
         assert_eq!(
@@ -690,7 +713,15 @@ pub(super) mod tests {
                 .iter()
                 .filter(|f| f.changed)
                 .count(),
-            3
+            4 // RHS1 already requests this exact allocated size.
+        );
+        assert_eq!(
+            u64::from_le_bytes(configured.bytes()[0x962908..0x962910].try_into()?),
+            0x10000000
+        );
+        assert_eq!(
+            u32::from_le_bytes(configured.bytes()[0x962918..0x96291c].try_into()?),
+            0x1000000
         );
         assert_ne!(
             configured.receipt().configured_sha256,
