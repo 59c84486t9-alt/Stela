@@ -2652,7 +2652,7 @@ const SUSPENSION_CHAIN: usize = 12;
 fn suspension_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
     const SHOWN: usize = 32;
     let now = machine.host.counter();
-    let frequency = machine.cpu.read(Register::CNTFRQ_EL0).max(1);
+    let frequency = stela_runtime::machine::timer::system_frequency(&machine.cpu).max(1);
     let suspended: Vec<_> = machine.suspended().values().copied().collect();
     let mut chains: Vec<([u64; SUSPENSION_CHAIN], u64)> = suspended
         .iter()

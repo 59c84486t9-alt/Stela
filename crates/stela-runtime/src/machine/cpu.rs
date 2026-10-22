@@ -173,7 +173,7 @@ impl Default for AppleState {
             spr_lockdown: None,
             spr_locked: false,
             cyc_ovrd: 0,
-            generic_timer: super::timer::agt::State::default(),
+            generic_timer: super::timer::agt::State::new(super::Chip::DEFAULT),
             impdef: super::impdef::Registers::default(),
         }
     }
@@ -386,7 +386,10 @@ impl Cpu {
             pc,
             pstate,
             registers,
-            apple: AppleState::default(),
+            apple: AppleState {
+                generic_timer: super::timer::agt::State::new(chip),
+                ..AppleState::default()
+            },
             event: false,
             step_advance: false,
             dcc: super::debug::Dcc::default(),

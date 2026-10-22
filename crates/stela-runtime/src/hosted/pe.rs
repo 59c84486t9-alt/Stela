@@ -373,6 +373,14 @@ pub fn user_thread(chip: Chip, pc: u64, tables: &Tables, keys: &Keys, jop: UserJ
     ] {
         registers.set_raw(register, 0, value);
     }
+    // From the M3 on, the thread's counter reads reach the Apple generic
+    // timer's bank (`timer::agt`), whose controls XNU sets alike.
+    for (register, value) in [
+        (Register::CNTKCTL_EL1, CNTKCTL_EL1),
+        (Register::CNTHCTL_EL2, CNTHCTL_EL2),
+    ] {
+        cpu.apple.generic_timer.set(register, value);
+    }
     cpu
 }
 

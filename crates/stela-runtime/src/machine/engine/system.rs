@@ -33,7 +33,7 @@ use crate::machine::{
         ACCESSORS, AtAccess, CacheOp, CacheScope, CacheType, Chip, Context, Effect, ErrorRecord,
         Feature, File, Limit, Operation, Pstate, Register, Stage, Tlbi, helpers::sign_extend,
     },
-    timer::Channel,
+    timer::{self, Channel, agt::Bank},
 };
 use alloc::vec::Vec;
 use core::cell::Cell;
@@ -385,6 +385,8 @@ pub(super) struct Access<'a, H: Host, D: Devices> {
     reset: bool,
     code: Code,
     refusal: Cell<Option<&'static str>>,
+    /// The timer bank the generic timer registers name (`timer::agt`).
+    bank: Bank,
 }
 
 /// The cached translations an access makes stale.
@@ -672,8 +674,11 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Register::OSDTRRX_EL1 => u64::from(cpu.dcc.rx),
             Register::OSDTRTX_EL1 => u64::from(cpu.dcc.tx),
             _ => match Channel::by_control(register) {
-                Some(channel) => channel.read_control(cpu, self.now),
-                None => cpu.registers.get(register, index),
+                Some(channel) => channel.read_control(cpu, self.bank, self.now),
+                None => match (self.bank, cpu.apple.generic_timer.get(register)) {
+                    (Bank::Apple, Some(value)) => value,
+                    _ => cpu.registers.get(register, index),
+                },
             },
         }
     }
@@ -804,7 +809,16 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             self.machine.switch_thread(value, self.now);
         }
         let cpu = &mut self.machine.cpu;
-        cpu.registers.set(register, index, value);
+        // The Apple bank's copy keeps the register's reserved bits.
+        let banked = self.bank == Bank::Apple && {
+            let (res0, res1) = (cpu.registers.res0(register), cpu.registers.res1(register));
+            cpu.apple
+                .generic_timer
+                .set(register, value & !res0 & !res1 | res1)
+        };
+        if !banked {
+            cpu.registers.set(register, index, value);
+        }
         self.machine.derived_changed();
         self.machine
             .profile_missing
@@ -830,7 +844,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
     }
 
     fn physical_count(&self) -> u64 {
-        self.now
+        timer::count(&self.machine.cpu, self.bank, self.now)
     }
 
     fn nv_mem(&mut self, offset: u64) -> Result<u64, Effect> {
@@ -1236,17 +1250,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Execute MRS, MSR, SYS or SYSL through the generated accessor for its
     /// encoding. `None` when no architectural accessor matches.
     pub(super) fn system_access(&mut self, word: u32, access: RegisterAccess) -> Option<Step> {
-        self.system_access_as(word, access, access.encoding())
+        let bank = timer::agt::selected(&self.cpu);
+        self.system_access_as(word, access, access.encoding(), bank)
     }
 
-    /// [`Self::system_access`] through the accessor of `encoding`, for an
-    /// Apple view of an architectural register (`registers::Outcome::View`);
-    /// a trap still reports the encoding `access` names.
+    /// [`Self::system_access`] through the accessor of `encoding` on the
+    /// timer bank `bank`, for an Apple view of an architectural register
+    /// (`registers::Outcome::View`); a trap still reports the encoding
+    /// `access` names.
     pub(super) fn system_access_as(
         &mut self,
         word: u32,
         access: RegisterAccess,
         encoding: Encoding,
+        bank: Bank,
     ) -> Option<Step> {
         let read =
             access.direction() == stela_compiler::aarch64::system::registers::Direction::Read;
@@ -1264,6 +1281,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             reset: false,
             code: Code::Unchanged,
             refusal: Cell::new(None),
+            bank,
         };
         let effect = match (accessor.run)(&mut context, index) {
             Ok(effect) | Err(effect) => effect,
@@ -1374,8 +1392,17 @@ pub(super) fn identify(
         profile.chip,
         &profile.fixed,
     ));
-    cpu.registers
-        .set_raw(Register::CNTFRQ_EL0, 0, profile.counter_frequency);
+    // From the M3 on, CNTFRQ_EL0 of the Arm bank reads its scaled
+    // frequency and the Apple bank counts the profile's (`timer::agt`).
+    let frequency = if timer::agt::present(profile.chip) {
+        cpu.apple
+            .generic_timer
+            .set_timebase(profile.counter_frequency);
+        timer::agt::SCALED_HZ
+    } else {
+        profile.counter_frequency
+    };
+    cpu.registers.set_raw(Register::CNTFRQ_EL0, 0, frequency);
     let own = profile.processors.get(pe);
     cpu.pmu = own
         .and_then(|identity| identity.clock)
@@ -1443,7 +1470,7 @@ pub(super) fn identify(
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{BASE, machine, machine_on, normal_memory};
+    use super::super::tests::{BASE, machine, machine_on, normal_memory, one_timer_bank};
     use super::{Code, Translation};
     use crate::machine::{
         Chip, Stop,
@@ -2268,7 +2295,7 @@ mod tests {
 
     #[test]
     fn a_vhe_host_redirects_el1_names_and_reaches_el1_through_el12() {
-        let mut machine = machine(&[]);
+        let mut machine = machine_on(one_timer_bank(), &[]);
         machine.cpu.pstate = Pstate::reset(2);
         machine.cpu.state.x[1] = 0x1005;
         machine
@@ -2294,7 +2321,7 @@ mod tests {
 
     #[test]
     fn el0_counter_traps_follow_cntkctl_or_cnthctl_in_the_host() {
-        let mut machine = machine(&[]);
+        let mut machine = machine_on(one_timer_bank(), &[]);
         let user = Pstate {
             el: 0,
             sp: false,
@@ -2329,13 +2356,16 @@ mod tests {
         assert_eq!((machine.cpu.state.x[4], machine.cpu.pstate.el), (77, 0));
     }
 
-    /// The M3's Apple generic timer: its registers reach the architectural
-    /// timer state with VHE redirection and the architectural traps, which
-    /// report the Apple encoding; AGTCNTRDIR is held, reporting the scaled
-    /// counter it cannot honor. The M2 has none of it.
+    /// The M3's two timer banks: the Apple registers reach the Apple bank
+    /// with VHE redirection and the architectural traps, which report the
+    /// Apple encoding; the architectural encodings reach the bank
+    /// AGTCNTRDIR selects for the regime, the Arm bank counting 1 GHz. The
+    /// M2 has one bank and none of the Apple registers.
     #[test]
-    fn apple_generic_timer_views_the_architectural_timers_from_the_m3_on() {
+    fn apple_generic_timer_banks_follow_the_counter_redirect_from_the_m3_on() {
         use crate::machine::timer::{ENABLE, ISTATUS, agt};
+        const CNTFRQ_EL0: Encoding = Encoding::new(3, 3, 14, 0, 0);
+        const CNTV_CTL_EL0: Encoding = Encoding::new(3, 3, 14, 3, 1);
         let mut machine = machine_on(Chip::AppleM3, &[]);
         machine
             .cpu
@@ -2351,40 +2381,76 @@ mod tests {
                 .unwrap();
             machine.cpu.state.x[1]
         };
-        // The kernel's timer at EL2 is the EL2 virtual timer.
+        let apple = |machine: &TestMachine, register| {
+            machine.cpu.apple.generic_timer.get(register).unwrap()
+        };
+        // The kernel's timer at EL2 is the Apple bank's EL2 virtual timer.
         machine.host.now = 1000;
         run(&mut machine, 2, false, agt::AGTCNTV_TVAL_EL0, 50);
         run(&mut machine, 2, false, agt::AGTCNTV_CTL_EL0, ENABLE);
-        assert_eq!(machine.cpu.read(Register::CNTHV_CVAL_EL2), 1050);
-        assert_eq!(machine.cpu.read(Register::CNTHV_CTL_EL2), ENABLE);
+        assert_eq!(apple(&machine, Register::CNTHV_CVAL_EL2), 1050);
+        assert_eq!(machine.cpu.read(Register::CNTHV_CTL_EL2), 0);
         machine.host.now = 1050;
         assert_eq!(
             run(&mut machine, 2, true, agt::AGTCNTV_CTL_EL0, 0),
             ENABLE | ISTATUS
         );
         assert_eq!(run(&mut machine, 2, true, agt::AGTCNTVCT_EL0, 0), 1050);
-        // KCTL names CNTHCTL_EL2 at EL2, and the EL12 and EL02 forms the
-        // EL1&0 regime's registers.
+        // KCTL names CNTHCTL_EL2 at EL2, the EL12 and EL02 forms and
+        // AGTCNTKCTL_NOREDIR the EL1&0 regime's registers.
         run(&mut machine, 2, false, agt::AGTCNTKCTL_EL1, 0xf);
-        assert_eq!(machine.cpu.read(Register::CNTHCTL_EL2) & 0xf, 0xf);
+        assert_eq!(apple(&machine, Register::CNTHCTL_EL2) & 0xf, 0xf);
         run(&mut machine, 2, false, agt::AGTCNTKCTL_EL12, 0x2);
-        assert_eq!(machine.cpu.read(Register::CNTKCTL_EL1) & 0xf, 0x2);
+        assert_eq!(apple(&machine, Register::CNTKCTL_EL1) & 0xf, 0x2);
+        run(&mut machine, 2, false, agt::AGTCNTKCTL_NOREDIR_EL1, 0x1);
+        assert_eq!(apple(&machine, Register::CNTKCTL_EL1) & 0xf, 0x1);
         run(&mut machine, 2, false, agt::AGTCNTV_CTL_EL02, ENABLE);
-        assert_eq!(machine.cpu.read(Register::CNTV_CTL_EL0), ENABLE);
-        // EL0 reads of the count trap as CNTVCT_EL0's do, with the Apple
-        // encoding in the syndrome.
-        machine.cpu.registers.set(Register::CNTHCTL_EL2, 0, 0);
-        run(&mut machine, 0, true, agt::AGTCNTVCT_EL0, 0);
+        assert_eq!(apple(&machine, Register::CNTV_CTL_EL0), ENABLE);
+        // Firmware leaves the redirect disabled: the architectural
+        // encodings reach the Apple bank. With it enabled for the host they
+        // reach the Arm bank, on the 1 GHz count, unless EL0's bit gives a
+        // thread the Apple bank.
+        assert_eq!(run(&mut machine, 2, true, CNTFRQ_EL0, 0), 24_000_000);
+        assert_eq!(
+            run(&mut machine, 2, true, CNTV_CTL_EL0, 0),
+            ENABLE | ISTATUS
+        );
+        run(&mut machine, 2, false, agt::AGTCNTRDIR_EL1, 0);
+        assert_eq!(run(&mut machine, 2, true, CNTFRQ_EL0, 0), 1_000_000_000);
+        assert_eq!(run(&mut machine, 2, true, CNTVCT_EL0, 0), 43_750);
+        run(&mut machine, 2, false, CNTV_CTL_EL0, ENABLE);
+        assert_eq!(machine.cpu.read(Register::CNTHV_CTL_EL2), ENABLE);
+        machine.cpu.registers.set(Register::CNTHCTL_EL2, 0, 0b11);
+        assert_eq!(run(&mut machine, 0, true, CNTFRQ_EL0, 0), 1_000_000_000);
+        run(&mut machine, 2, false, agt::AGTCNTRDIR_EL1, 1);
+        assert_eq!(run(&mut machine, 0, true, CNTVCT_EL0, 0), 1050);
+        assert_eq!(run(&mut machine, 2, true, CNTFRQ_EL0, 0), 1_000_000_000);
+        // EL0 reads of the Apple count trap under the Apple bank's controls,
+        // with the Apple encoding in the syndrome.
+        machine
+            .cpu
+            .apple
+            .generic_timer
+            .set(Register::CNTHCTL_EL2, 0);
+        run(&mut machine, 0, true, agt::AGTCNTVCTSS_EL0, 0);
         assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (2, 0x4_0400));
         let iss = machine.cpu.read(Register::ESR_EL2) & 0x1ff_ffff;
         assert_eq!(iss >> 10 & 0xf, 15, "CRn of the Apple encoding");
-        // AGTCNTRDIR: per regime, held; the EL12 form is EL2's alone.
-        run(&mut machine, 2, false, agt::AGTCNTRDIR_EL1, 3);
-        run(&mut machine, 2, false, agt::AGTCNTRDIR_EL12, 3);
+        // AGTCNTRDIR: per regime; the EL12 form is EL2's alone, and only an
+        // unknown bit is reported.
+        assert_eq!(run(&mut machine, 2, true, agt::AGTCNTRDIR_EL12, 0), 3);
+        run(&mut machine, 2, false, agt::AGTCNTRDIR_EL12, 0);
         assert!(machine.take_unmodeled().is_empty());
-        run(&mut machine, 2, false, agt::AGTCNTRDIR_EL1, 0);
-        assert_eq!(run(&mut machine, 2, true, agt::AGTCNTRDIR_EL1, 7), 0);
-        assert_eq!(run(&mut machine, 2, true, agt::AGTCNTRDIR_EL12, 7), 3);
+        machine.cpu.set_pstate(Pstate::reset(2));
+        machine.cpu.pc = BASE;
+        machine.cpu.state.x[1] = 1 << 2;
+        let unknown = access(false, agt::AGTCNTRDIR_EL1, 1);
+        assert!(matches!(
+            machine.system_instruction(unknown),
+            Err(Stop::Unsupported(_))
+        ));
+        machine.set_strict(false);
+        run(&mut machine, 2, false, agt::AGTCNTRDIR_EL1, 1 << 2);
         assert_eq!(machine.take_unmodeled().len(), 1);
         machine.cpu.registers.set(Register::HCR_EL2, 0, 0);
         machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
@@ -2395,6 +2461,7 @@ mod tests {
             "UNDEFINED"
         );
         let mut m2 = machine_on(Chip::AppleM2, &[]);
+        assert_eq!(run(&mut m2, 2, true, CNTFRQ_EL0, 0), 24_000_000);
         m2.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
         run(&mut m2, 1, true, agt::AGTCNTV_CTL_EL0, 0);
         assert_eq!(
@@ -3094,7 +3161,7 @@ mod tests {
         const CNTVCTSS_EL0: Encoding = Encoding::new(3, 3, 14, 0, 6);
         const CNTV_CTL_EL0: Encoding = Encoding::new(3, 3, 14, 3, 1);
         const EL1PCTEN: u64 = 1 << 10;
-        let mut machine = machine(&[]);
+        let mut machine = machine_on(one_timer_bank(), &[]);
         let kernel = machine.cpu.pstate;
         machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
         machine.cpu.registers.set(Register::CNTVOFF_EL2, 0, 100);
@@ -3175,6 +3242,7 @@ mod tests {
                     reset: false,
                     code: Code::Unchanged,
                     refusal: Cell::new(None),
+                    bank: super::Bank::Arm,
                 };
                 let effect = match (accessor.run)(&mut context, m) {
                     Ok(effect) | Err(effect) => effect,
@@ -3865,6 +3933,9 @@ mod tests {
         // FEAT_AMUv1p1's virtual offsets apply at EL1 under AMVOFFEN.
         if Feature::FEAT_AMUv1p1.on(chip) {
             at(&mut machine, 2, false, offset(2), 7);
+            // The Arm bank's CNTVOFF_EL2, with the M3-and-later counter
+            // redirect enabled at EL2 (`timer::agt`).
+            machine.cpu.apple.generic_timer.set_redirect(1, 0);
             at(&mut machine, 2, false, CNTVOFF_EL2, 5);
             machine
                 .cpu

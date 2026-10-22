@@ -1759,15 +1759,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// The architectural system count and each generic timer's `(CTL, CVAL)`
-    /// in [`timer::CHANNELS`] order, sampled at that count. Diagnostics must
-    /// use this count, including slice lag and idle leaps, just as guest
-    /// register reads and timer delivery do; the host counter can differ.
+    /// in [`timer::CHANNELS`] order, sampled at that count, of the bank that
+    /// counts it: the Apple generic timer's from the M3 on, where the kernel
+    /// keeps its timer (`timer::agt`). Diagnostics must use this count,
+    /// including slice lag and idle leaps, just as guest register reads and
+    /// timer delivery do; the host counter can differ.
     pub fn timer_snapshot(&mut self) -> (u64, [(u64, u64); 4]) {
         let now = self.now();
+        let bank = timer::system_bank(&self.cpu);
         let timers = timer::CHANNELS.map(|channel| {
             (
-                channel.read_control(&self.cpu, now),
-                self.cpu.read(channel.compare),
+                channel.read_control(&self.cpu, bank, now),
+                timer::value(&self.cpu, bank, channel.compare),
             )
         });
         (now, timers)
@@ -5573,10 +5576,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             RegisterOutcome::Refused(refusal) => {
                 return self.register_refused(word, access, refusal);
             }
-            RegisterOutcome::View(encoding) => {
+            RegisterOutcome::View(encoding, bank) => {
                 let access = access.expect("views come from MRS and MSR");
                 return self
-                    .system_access_as(word, access, encoding)
+                    .system_access_as(word, access, encoding, bank)
                     .unwrap_or_else(|| {
                         Err(Stop::Unsupported(self.register_requirement(
                             word,
@@ -5677,17 +5680,28 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Err(reason) => return Err(self.unsupported(RequirementKind::Native(reason))),
             }
         }
-        let timeout = register.map(|register| Timeout {
-            limit: if register == 31 {
+        let timeout = register.map(|register| {
+            let limit = if register == 31 {
                 0
             } else {
                 self.cpu.state.x[usize::from(register)]
-            },
-            offset: if self.cpu.regime() == crate::machine::cpu::TranslationRegime::El20 {
+            };
+            // The virtual count of the timer bank the regime reads
+            // (`timer::agt`); a scaled bank's limit becomes a system count.
+            let bank = timer::agt::selected(&self.cpu);
+            let offset = if self.cpu.regime() == crate::machine::cpu::TranslationRegime::El20 {
                 0
             } else {
-                self.cpu.read(SystemRegister::CNTVOFF_EL2)
-            },
+                timer::value(&self.cpu, bank, SystemRegister::CNTVOFF_EL2)
+            };
+            if timer::scaled(&self.cpu, bank) {
+                Timeout {
+                    limit: timer::system_count(&self.cpu, bank, limit.wrapping_add(offset)),
+                    offset: 0,
+                }
+            } else {
+                Timeout { limit, offset }
+            }
         });
         let el = self.cpu.pstate.el;
         let sctlr = self.cpu.regime_sctlr();
@@ -6061,6 +6075,18 @@ mod tests {
     /// tests run on ([`crate::machine::test_chip`]).
     pub(super) fn machine(words: &[u32]) -> Machine<FakeHost, NoDevices> {
         board(words, NoDevices, Vec::new())
+    }
+
+    /// The chip the tests run on, or the M2 where it has the Apple generic
+    /// timer's two banks (`timer::agt`): for tests of one bank's
+    /// architectural generic timer.
+    pub(super) fn one_timer_bank() -> crate::machine::Chip {
+        let chip = crate::machine::test_chip();
+        if crate::machine::timer::agt::present(chip) {
+            crate::machine::Chip::AppleM2
+        } else {
+            chip
+        }
     }
 
     /// [`machine`] on `chip`, for a test that fixes its chip.
@@ -7996,7 +8022,7 @@ mod tests {
 
     #[test]
     fn tlbi_invalidates_and_wfi_waits_for_the_virtual_timer() {
-        let mut machine = machine(&[]);
+        let mut machine = machine_on(one_timer_bank(), &[]);
         machine.system_instruction(0xd508_871f).unwrap(); // tlbi vmalle1
         assert_eq!(machine.host.invalidations, 1);
         // Arm the virtual timer 1500 ticks ahead and wait.
@@ -8024,7 +8050,7 @@ mod tests {
 
     #[test]
     fn timer_snapshot_tracks_guest_reads_and_wfi_when_the_clock_lags() {
-        let mut machine = machine(&[]);
+        let mut machine = machine_on(one_timer_bank(), &[]);
         // Three slow slices each run ten blocks in 1000 host counts. The
         // initial observed overshoot remains monotonic, but repeated slow
         // work advances it only by ten per slice, not by host duration.
@@ -8044,7 +8070,7 @@ mod tests {
             .set(SystemRegister::CNTV_CTL_EL0, 0, timer::ENABLE);
         machine.derived_changed();
         assert_eq!(
-            timer::CHANNELS[1].read_control(&machine.cpu, machine.host.now),
+            timer::CHANNELS[1].read_control(&machine.cpu, timer::agt::Bank::Arm, machine.host.now),
             timer::ENABLE | timer::ISTATUS,
             "the host count would incorrectly report an expired timer"
         );

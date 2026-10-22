@@ -219,10 +219,10 @@ pub enum Outcome {
     /// An SME access trap (EC 0x1D, SMTC 0) to the given EL.
     SmeTrapped(u8),
     Refused(Refusal),
-    /// A view of the architectural register at this encoding: the engine
-    /// runs its generated accessor, and a trap reports the encoding the
-    /// instruction names.
-    View(Encoding),
+    /// A view of the architectural register at this encoding in this
+    /// timer bank (`timer::agt`): the engine runs its generated accessor on
+    /// the bank, and a trap reports the encoding the instruction names.
+    View(Encoding, agt::Bank),
 }
 
 /// ISS for EC 0x18 (MSR, MRS or System instruction trap).
@@ -376,7 +376,8 @@ enum Apple {
     VmTimerFiq,
     CountAlias,
     PhysicalCountAlias,
-    GenericTimer(agt::Register),
+    /// AGTCNTRDIR of the EL1&0 (0) or EL2&0 (1) regime.
+    TimerRedirect(usize),
     /// SPR_LOCKDOWN_EL2 (`false`) and `S3_4_C15_C12_5` (`true`). SPTM 26A434
     /// writes SPR_LOCKDOWN_EL2 once per PE, with every bit except 4, 27 and
     /// 63, after its MMIO lockdown (`__text+0x181a4`), then writes 1 to
@@ -437,16 +438,12 @@ impl Cpu {
             })
         };
         if let Some(name) = agt::decode(encoding, self.registers.chip()) {
-            use agt::{Name, Register};
+            let apple = |architectural| Some(Err(Outcome::View(architectural, agt::Bank::Apple)));
             return match name {
-                Name::View(architectural) => Some(Err(Outcome::View(architectural))),
-                Name::Redirect { el12: true } => el2(Apple::GenericTimer(Register::Redirect(0))),
-                Name::Redirect { el12: false } => {
-                    Some(Ok(Apple::GenericTimer(Register::Redirect(level))))
-                }
-                Name::NoRedirectControl => {
-                    Some(Ok(Apple::GenericTimer(Register::NoRedirectControl(level))))
-                }
+                agt::Name::View(architectural) => apple(architectural),
+                agt::Name::Redirect { el12: true } => el2(Apple::TimerRedirect(0)),
+                agt::Name::Redirect { el12: false } => Some(Ok(Apple::TimerRedirect(level))),
+                agt::Name::NoRedirectControl => apple(agt::no_redirect_control(self.pstate.el)),
             };
         }
         if let Some(register) = super::pointer_keys::Register::decode(encoding) {
@@ -706,7 +703,7 @@ impl Cpu {
                 return if read {
                     let activity = impdef::Activity {
                         count: physical,
-                        frequency: self.read(Register::CNTFRQ_EL0),
+                        frequency: super::timer::system_frequency(self),
                         mpidr: self.read(Register::MPIDR_EL1),
                     };
                     match self.apple.impdef.energy(entry, activity) {
@@ -761,7 +758,7 @@ impl Cpu {
     /// registers, under their architectural registers' enables.
     fn apple_el0(&mut self, encoding: Encoding, read: bool, value: u64, physical: u64) -> Outcome {
         if let Some(agt::Name::View(architectural)) = agt::decode(encoding, self.registers.chip()) {
-            return Outcome::View(architectural);
+            return Outcome::View(architectural, agt::Bank::Apple);
         }
         if super::pointer_keys::Register::decode(encoding).is_some() {
             return Outcome::Refused(Refusal::UnsupportedSetting(
@@ -930,7 +927,7 @@ impl Apple {
             }
             Self::VmsaLock => apple.vmsa_lock,
             Self::VmTimerFiq => apple.vm_timer_fiq,
-            Self::GenericTimer(register) => apple.generic_timer.read(register),
+            Self::TimerRedirect(regime) => apple.generic_timer.redirect(regime),
             Self::CountAlias | Self::PhysicalCountAlias => {
                 unreachable!("the caller completes the count alias")
             }
@@ -1045,8 +1042,8 @@ impl Apple {
                 apple.vm_timer_fiq = value;
                 changes.interrupts = true;
             }
-            Self::GenericTimer(register) => {
-                changes.unmodeled = apple.generic_timer.write(register, value);
+            Self::TimerRedirect(regime) => {
+                changes.unmodeled = apple.generic_timer.set_redirect(regime, value);
             }
             Self::SprLockdown(false) => {
                 if apple.spr_locked && apple.spr_lockdown != Some(value) {
@@ -1665,8 +1662,7 @@ mod tests {
     }
 
     /// The M3-and-later encodings whose owners are being written outside
-    /// `machine::impdef`: the Apple generic timer (`machine::timer`), the
-    /// M5 kpc state S3_1_C15_C5_1, which `machine::pmu` owns on the M6 only
+    /// `machine::impdef`: the M5 kpc state S3_1_C15_C5_1, which `machine::pmu` owns on the M6 only
     /// (mac17g save 0xfffffe000be64104, restore 0xfffffe000beb56b0), and
     /// the M3 SPTMs' SPR_LOCKDOWN_EL1 (`S3_4_C15_C0_6`), which joins
     /// SPR_LOCKDOWN_EL2 in its own batch. Each family leaves this list when
@@ -1674,31 +1670,15 @@ mod tests {
     fn pending_owner(encoding: Encoding) -> bool {
         const KPC: (u8, u8, u8) = (1, 5, 1);
         const SPR_LOCKDOWN_EL1: (u8, u8, u8) = (4, 0, 6);
-        const TIMER: [(u8, u8, u8); 15] = [
-            (1, 0, 5),
-            (1, 1, 5),
-            (1, 1, 6),
-            (1, 7, 4),
-            (1, 13, 4),
-            (1, 15, 4),
-            (4, 2, 7),
-            (4, 4, 1),
-            (4, 4, 3),
-            (4, 4, 4),
-            (4, 9, 6),
-            (4, 9, 7),
-            (4, 11, 7),
-            (4, 12, 6),
-            (4, 14, 6),
-        ];
         let key = (encoding.op1(), encoding.crm(), encoding.op2());
-        encoding.crn() == 15 && (TIMER.contains(&key) || [KPC, SPR_LOCKDOWN_EL1].contains(&key))
+        encoding.crn() == 15 && [KPC, SPR_LOCKDOWN_EL1].contains(&key)
     }
 
     /// Every IMPLEMENTATION DEFINED encoding a chip's censused components
     /// access has an owner: a modeled register here, CTRR, AMX, the core
-    /// PMU, the board's fast IPIs or a `machine::impdef` entry with a class
-    /// other than `Unsupported` ([`pending_owner`] aside on the later chips).
+    /// PMU, the board's fast IPIs, the Apple generic timer or a
+    /// `machine::impdef` entry with a class other than `Unsupported`
+    /// ([`pending_owner`] aside on the later chips).
     #[test]
     fn every_encoding_the_components_access_has_a_model() {
         use crate::platform::apple::ipi;
@@ -1712,6 +1692,7 @@ mod tests {
                     if !impdef::consumed(encoding, chip)
                         || Pmu::owns_on(chip, encoding)
                         || ipi::Register::decode(encoding).is_some()
+                        || super::super::timer::agt::decode(encoding, chip).is_some()
                         || pending_owner(encoding)
                     {
                         continue;

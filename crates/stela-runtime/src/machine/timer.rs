@@ -5,12 +5,17 @@
 //! count minus CNTVOFF_EL2; the EL2 virtual timer counts without an offset,
 //! because HCR_EL2.E2H is RES1. Apple cores signal the timers as FIQ, and
 //! VM_TMR_FIQ_ENA_EL2 gates the EL1 timers (m1n1 `cpu_regs.h`). The event
-//! streams of CNTHCTL_EL2 and CNTKCTL_EL1 set the event register. From the
-//! M3 on, the Apple generic timer's registers are views of these ([`agt`]).
+//! streams of CNTHCTL_EL2 and CNTKCTL_EL1 set the event register.
+//!
+//! From the M3 on, these registers form the Arm bank, counting the system
+//! count scaled to 1 GHz, beside the Apple generic timer's bank on the
+//! unscaled count ([`agt`]); each bank has its own timers and event streams.
+//! Counts here are system counts, converted to a bank's count to compare.
 use super::{
     cpu::{Cpu, VM_TIMER_FIQ_PHYSICAL, VM_TIMER_FIQ_VIRTUAL},
     system::Register,
 };
+use agt::Bank;
 
 pub mod agt;
 
@@ -56,6 +61,51 @@ pub const CHANNELS: [Channel; 4] = [
     },
 ];
 
+/// The banks `cpu` has: the Arm bank, and the Apple bank on a chip with the
+/// Apple generic timer.
+pub fn banks(cpu: &Cpu) -> &'static [Bank] {
+    if agt::present(cpu.registers.chip()) {
+        &[Bank::Arm, Bank::Apple]
+    } else {
+        &[Bank::Arm]
+    }
+}
+
+/// `bank`'s copy of a generic timer register.
+pub fn value(cpu: &Cpu, bank: Bank, register: Register) -> u64 {
+    match bank {
+        Bank::Apple => cpu
+            .apple
+            .generic_timer
+            .get(register)
+            .unwrap_or_else(|| cpu.read(register)),
+        Bank::Arm => cpu.read(register),
+    }
+}
+
+/// Whether `bank` counts the system count scaled to 1 GHz.
+pub fn scaled(cpu: &Cpu, bank: Bank) -> bool {
+    bank == Bank::Arm && agt::present(cpu.registers.chip())
+}
+
+/// `bank`'s count at system count `physical`.
+pub fn count(cpu: &Cpu, bank: Bank, physical: u64) -> u64 {
+    if scaled(cpu, bank) {
+        cpu.apple.generic_timer.scale(physical)
+    } else {
+        physical
+    }
+}
+
+/// The first system count at which `bank` counts `count`.
+pub fn system_count(cpu: &Cpu, bank: Bank, count: u64) -> u64 {
+    if scaled(cpu, bank) {
+        cpu.apple.generic_timer.unscale(count)
+    } else {
+        count
+    }
+}
+
 impl Channel {
     pub fn by_control(register: Register) -> Option<Self> {
         CHANNELS
@@ -63,61 +113,83 @@ impl Channel {
             .find(|channel| channel.control == register)
     }
 
-    fn count(&self, cpu: &Cpu, physical: u64) -> u64 {
+    fn offset_of(&self, cpu: &Cpu, bank: Bank) -> u64 {
         if self.offset {
-            physical.wrapping_sub(cpu.read(Register::CNTVOFF_EL2))
+            value(cpu, bank, Register::CNTVOFF_EL2)
         } else {
-            physical
+            0
         }
     }
 
     /// The timer condition, independent of IMASK.
-    pub fn met(&self, cpu: &Cpu, physical: u64) -> bool {
-        cpu.read(self.control) & ENABLE != 0 && self.count(cpu, physical) >= cpu.read(self.compare)
+    pub fn met(&self, cpu: &Cpu, bank: Bank, physical: u64) -> bool {
+        let count = count(cpu, bank, physical).wrapping_sub(self.offset_of(cpu, bank));
+        value(cpu, bank, self.control) & ENABLE != 0 && count >= value(cpu, bank, self.compare)
     }
 
     /// CTL with ISTATUS.
-    pub fn read_control(&self, cpu: &Cpu, physical: u64) -> u64 {
-        (cpu.read(self.control) & !ISTATUS) | if self.met(cpu, physical) { ISTATUS } else { 0 }
+    pub fn read_control(&self, cpu: &Cpu, bank: Bank, physical: u64) -> u64 {
+        let status = if self.met(cpu, bank, physical) {
+            ISTATUS
+        } else {
+            0
+        };
+        (value(cpu, bank, self.control) & !ISTATUS) | status
+    }
+
+    fn gated(&self, cpu: &Cpu) -> bool {
+        self.gate
+            .is_some_and(|bit| cpu.apple.vm_timer_fiq & bit == 0)
     }
 
     /// The FIQ output: enabled, unmasked, met and not gated off.
-    pub fn asserted(&self, cpu: &Cpu, physical: u64) -> bool {
-        let gated = self
-            .gate
-            .is_some_and(|bit| cpu.apple.vm_timer_fiq & bit == 0);
-        !gated && cpu.read(self.control) & IMASK == 0 && self.met(cpu, physical)
+    pub fn asserted(&self, cpu: &Cpu, bank: Bank, physical: u64) -> bool {
+        !self.gated(cpu)
+            && value(cpu, bank, self.control) & IMASK == 0
+            && self.met(cpu, bank, physical)
     }
 
-    /// The physical count at which the output can assert.
-    pub fn deadline(&self, cpu: &Cpu) -> Option<u64> {
-        let gated = self
-            .gate
-            .is_some_and(|bit| cpu.apple.vm_timer_fiq & bit == 0);
-        if gated || cpu.read(self.control) & (ENABLE | IMASK) != ENABLE {
+    /// The system count at which the output can assert.
+    pub fn deadline(&self, cpu: &Cpu, bank: Bank) -> Option<u64> {
+        if self.gated(cpu) || value(cpu, bank, self.control) & (ENABLE | IMASK) != ENABLE {
             return None;
         }
-        let compare = cpu.read(self.compare);
-        Some(if self.offset {
-            compare.wrapping_add(cpu.read(Register::CNTVOFF_EL2))
-        } else {
-            compare
-        })
+        let compare = value(cpu, bank, self.compare).wrapping_add(self.offset_of(cpu, bank));
+        Some(system_count(cpu, bank, compare))
     }
+}
+
+/// The bank that counts the system count unscaled: the Apple bank where
+/// the chip has one.
+pub fn system_bank(cpu: &Cpu) -> Bank {
+    if agt::present(cpu.registers.chip()) {
+        Bank::Apple
+    } else {
+        Bank::Arm
+    }
+}
+
+/// The system counter's frequency: [`system_bank`]'s CNTFRQ_EL0.
+pub fn system_frequency(cpu: &Cpu) -> u64 {
+    value(cpu, system_bank(cpu), Register::CNTFRQ_EL0)
+}
+
+/// Every timer of every bank.
+fn timers(cpu: &Cpu) -> impl Iterator<Item = (Bank, Channel)> + '_ {
+    banks(cpu)
+        .iter()
+        .flat_map(|&bank| CHANNELS.into_iter().map(move |channel| (bank, channel)))
 }
 
 /// Whether any timer signals FIQ.
 pub fn asserted(cpu: &Cpu, physical: u64) -> bool {
-    CHANNELS
-        .iter()
-        .any(|channel| channel.asserted(cpu, physical))
+    timers(cpu).any(|(bank, channel)| channel.asserted(cpu, bank, physical))
 }
 
-/// The earliest physical count at which a timer can signal FIQ.
+/// The earliest system count at which a timer can signal FIQ.
 pub fn deadline(cpu: &Cpu) -> Option<u64> {
-    CHANNELS
-        .iter()
-        .filter_map(|channel| channel.deadline(cpu))
+    timers(cpu)
+        .filter_map(|(bank, channel)| channel.deadline(cpu, bank))
         .min()
 }
 
@@ -130,23 +202,25 @@ const HCR_TGE: u64 = 1 << 27;
 const HCR_E2H: u64 = 1 << 34;
 
 /// One generic timer event stream (Arm `TestEventCNTP`, `TestEventCNTV`): an
-/// event each time the selected bit of the count minus `offset` rises, or
-/// falls under EVNTDIR.
+/// event each time the selected bit of its bank's count minus `offset`
+/// rises, or falls under EVNTDIR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stream {
+    bank: Bank,
     offset: u64,
     bit: u32,
     falling: bool,
 }
 
 impl Stream {
-    fn from_control(control: u64, offset: u64) -> Option<Self> {
+    fn from_control(bank: Bank, control: u64, offset: u64) -> Option<Self> {
         if control & EVNTEN == 0 {
             return None;
         }
         // FEAT_ECV's EVNTIS selects bits 8 to 23.
         let scale = if control & EVNTIS != 0 { 8 } else { 0 };
         Some(Self {
+            bank,
             offset,
             bit: (control >> EVNTI_SHIFT) as u32 % 16 + scale,
             falling: control & EVNTDIR != 0,
@@ -157,60 +231,69 @@ impl Stream {
         1 << (self.bit + 1)
     }
 
-    /// How far the counter at physical count `count` is past this stream's
-    /// last edge, within one period.
+    /// How far the bank's `count` is past this stream's last edge, within
+    /// one period.
     fn phase(&self, count: u64) -> u64 {
         let edge = if self.falling { 0 } else { 1 << self.bit };
         count.wrapping_sub(self.offset).wrapping_sub(edge) & (self.period() - 1)
     }
 
-    /// Whether an edge falls in the physical counts (previous, current].
-    pub fn signals(&self, previous: u64, current: u64) -> bool {
+    /// Whether an edge falls in the system counts (previous, current].
+    pub fn signals(&self, cpu: &Cpu, previous: u64, current: u64) -> bool {
+        let previous = count(cpu, self.bank, previous);
+        let current = count(cpu, self.bank, current);
         current > previous && current - previous >= self.period() - self.phase(previous)
     }
 
-    /// The first physical count after `now` with an edge.
-    pub fn next(&self, now: u64) -> u64 {
-        now.saturating_add(self.period() - self.phase(now))
+    /// The first system count after `now` with an edge.
+    pub fn next(&self, cpu: &Cpu, now: u64) -> u64 {
+        let at = count(cpu, self.bank, now);
+        let edge = at.saturating_add(self.period() - self.phase(at));
+        system_count(cpu, self.bank, edge)
     }
 }
 
-/// The enabled event streams: CNTHCTL_EL2's on the physical count, and
-/// CNTKCTL_EL1's on the virtual count unless HCR_EL2.{E2H,TGE} is {1,1}.
-pub fn streams(cpu: &Cpu) -> impl Iterator<Item = Stream> {
-    let hcr = cpu.read(Register::CNTHCTL_EL2);
-    let physical = Stream::from_control(hcr, 0);
+/// The enabled event streams of each bank: CNTHCTL_EL2's on the physical
+/// count, and CNTKCTL_EL1's on the virtual count unless HCR_EL2.{E2H,TGE}
+/// is {1,1}.
+pub fn streams(cpu: &Cpu) -> impl Iterator<Item = Stream> + '_ {
     let host = cpu.read(Register::HCR_EL2) & (HCR_E2H | HCR_TGE) == HCR_E2H | HCR_TGE;
-    let virtual_stream = (!host)
-        .then(|| {
-            Stream::from_control(
-                cpu.read(Register::CNTKCTL_EL1),
-                cpu.read(Register::CNTVOFF_EL2),
-            )
-        })
-        .flatten();
-    physical.into_iter().chain(virtual_stream)
+    banks(cpu).iter().flat_map(move |&bank| {
+        let read = |register| value(cpu, bank, register);
+        let physical = Stream::from_control(bank, read(Register::CNTHCTL_EL2), 0);
+        let virtual_stream = (!host)
+            .then(|| {
+                Stream::from_control(
+                    bank,
+                    read(Register::CNTKCTL_EL1),
+                    read(Register::CNTVOFF_EL2),
+                )
+            })
+            .flatten();
+        physical.into_iter().chain(virtual_stream)
+    })
 }
 
-/// Whether an enabled event stream signals in the physical counts
+/// Whether an enabled event stream signals in the system counts
 /// (previous, current] (Arm `GenericCounterTick`).
 pub fn event(cpu: &Cpu, previous: u64, current: u64) -> bool {
-    streams(cpu).any(|stream| stream.signals(previous, current))
+    streams(cpu).any(|stream| stream.signals(cpu, previous, current))
 }
 
-/// The first physical count after `now` at which an event stream signals.
+/// The first system count after `now` at which an event stream signals.
 pub fn next_event(cpu: &Cpu, now: u64) -> Option<u64> {
-    streams(cpu).map(|stream| stream.next(now)).min()
+    streams(cpu).map(|stream| stream.next(cpu, now)).min()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::exception::Pstate;
+    use crate::machine::{Chip, exception::Pstate};
 
+    /// The one bank of a chip without the Apple generic timer.
     #[test]
     fn compare_offset_gating_and_status() {
-        let mut cpu = Cpu::new(0, Pstate::reset(1));
+        let mut cpu = Cpu::of(Chip::AppleM2, 0, Pstate::reset(1));
         let virtual_timer = CHANNELS[1];
         cpu.registers.set(Register::CNTV_CVAL_EL0, 0, 1500);
         cpu.registers.set(Register::CNTVOFF_EL2, 0, 100);
@@ -218,11 +301,14 @@ mod tests {
         cpu.registers.set(Register::CNTV_CTL_EL0, 0, ENABLE);
         assert_eq!(deadline(&cpu), Some(1600));
         assert!(!asserted(&cpu, 1599) && asserted(&cpu, 1600));
-        assert_eq!(virtual_timer.read_control(&cpu, 1600), ENABLE | ISTATUS);
+        assert_eq!(
+            virtual_timer.read_control(&cpu, Bank::Arm, 1600),
+            ENABLE | ISTATUS
+        );
         cpu.apple.vm_timer_fiq = 0;
         assert!(!asserted(&cpu, 1600) && deadline(&cpu).is_none());
         assert!(
-            virtual_timer.met(&cpu, 1600),
+            virtual_timer.met(&cpu, Bank::Arm, 1600),
             "the condition ignores the gate"
         );
         // The EL2 timers are never gated.
@@ -236,7 +322,7 @@ mod tests {
 
     #[test]
     fn event_streams_signal_on_the_selected_edge() {
-        let mut cpu = Cpu::new(0, Pstate::reset(2));
+        let mut cpu = Cpu::of(Chip::AppleM2, 0, Pstate::reset(2));
         cpu.registers.set(Register::HCR_EL2, 0, HCR_E2H | HCR_TGE);
         assert_eq!(next_event(&cpu, 0), None);
         // CNTHCTL_EL2: bit 2 rising, at counts 4, 12, 20, ...
@@ -270,5 +356,40 @@ mod tests {
         cpu.registers.set(Register::HCR_EL2, 0, HCR_E2H);
         assert!(!event(&cpu, 0, 4) && event(&cpu, 4, 5));
         assert_eq!(next_event(&cpu, 5), Some(13));
+    }
+
+    /// From the M3 on, the Arm bank's timers and streams count the system
+    /// count scaled to 1 GHz, and the Apple bank's the unscaled count; each
+    /// signals on its own.
+    #[test]
+    fn both_banks_signal_on_their_own_counts() {
+        let mut cpu = Cpu::of(Chip::AppleM3, 0, Pstate::reset(2));
+        cpu.registers.set(Register::HCR_EL2, 0, HCR_E2H | HCR_TGE);
+        // 125 Arm ticks are 3 system ticks.
+        cpu.registers.set(Register::CNTV_CVAL_EL0, 0, 125);
+        cpu.registers.set(Register::CNTV_CTL_EL0, 0, ENABLE);
+        assert_eq!(deadline(&cpu), Some(3));
+        assert!(!asserted(&cpu, 2) && asserted(&cpu, 3));
+        let apple = &mut cpu.apple.generic_timer;
+        assert!(
+            apple.set(Register::CNTHV_CVAL_EL2, 2) && apple.set(Register::CNTHV_CTL_EL2, ENABLE)
+        );
+        assert_eq!(deadline(&cpu), Some(2));
+        let el2_virtual = CHANNELS[3];
+        assert_eq!(
+            el2_virtual.read_control(&cpu, Bank::Apple, 2),
+            ENABLE | ISTATUS
+        );
+        assert_eq!(el2_virtual.read_control(&cpu, Bank::Arm, 2), 0);
+        // CNTHCTL_EL2 of each bank: the Apple one's rising bit 1 at system
+        // count 2, the Arm one's rising bit 9 at scaled count 512, system
+        // count 13.
+        cpu.registers
+            .set(Register::CNTHCTL_EL2, 0, EVNTEN | 9 << EVNTI_SHIFT);
+        assert_eq!(next_event(&cpu, 0), Some(13));
+        assert!(!event(&cpu, 0, 12) && event(&cpu, 12, 13));
+        let control = EVNTEN | 1 << EVNTI_SHIFT;
+        assert!(cpu.apple.generic_timer.set(Register::CNTHCTL_EL2, control));
+        assert_eq!(next_event(&cpu, 0), Some(2));
     }
 }

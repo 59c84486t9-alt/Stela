@@ -48,6 +48,9 @@ pub enum Basis {
     /// Holds when no data a faulting access would load reaches later
     /// speculative execution ([`Speculation::faulting_data`]).
     FaultingData(&'static str),
+    /// Holds on a chip with the Apple generic timer and its 1 GHz scaled
+    /// Arm bank ([`super::timer::agt::present`]).
+    GenericTimer(&'static str),
 }
 
 /// The speculation guarantees the host gives guest code, which the
@@ -1297,6 +1300,17 @@ pub const TABLE: &[Row] = &[
             "the alternate floating-point mode it selects is not modeled",
         ),
     ),
+    // XNU's `AIDR_AGT` (xnu-12377.121.6 `tests/apple_generic_timer.c`):
+    // CNTFRQ_EL0 reads 1 GHz, which m1n1 reads beside the 24 MHz Apple
+    // timer on an M4 Pro (`src/hv/hv_sprr.c`).
+    row(
+        AIDR_EL1,
+        32,
+        1,
+        0,
+        None,
+        Basis::GenericTimer("the Arm bank counts 1 GHz beside the Apple generic timer"),
+    ),
 ];
 
 /// The chip has `feature`: in its Apple clang feature set, or implied by it.
@@ -1320,6 +1334,7 @@ fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool, speculation: Specu
         Basis::Timing(_) => target.data_independent_timing_target().is_some(),
         Basis::Contexts(_) => speculation.contexts,
         Basis::FaultingData(_) => speculation.faulting_data,
+        Basis::GenericTimer(_) => super::timer::agt::present(chip),
         Basis::Instructions(samples) => samples.iter().all(|word| {
             CompilationPlan::new(
                 &word.to_le_bytes(),
@@ -1756,7 +1771,8 @@ mod tests {
         // With FEAT_MTE2, TminLine 4.
         let tag_line = if has(chip, "FEAT_MTE2") { 4 << 32 } else { 0 };
         assert_eq!(value(CTR_EL0), 0x9444_c004 | tag_line);
-        assert_eq!(value(AIDR_EL1), 1 << 1 | 1 << 4 | 1 << 16);
+        let scaled = u64::from(crate::machine::timer::agt::present(chip)) << 32;
+        assert_eq!(value(AIDR_EL1), 1 << 1 | 1 << 4 | 1 << 16 | scaled);
         assert_eq!(value(ID_AA64MMFR1_EL1) >> 8 & 0xf, 0);
         // No stage 2 without EL2; HPDS; CnP, TTL and E0PD.
         assert_eq!(value(ID_AA64MMFR0_EL1) >> 32 & 0xfff, 0x111);

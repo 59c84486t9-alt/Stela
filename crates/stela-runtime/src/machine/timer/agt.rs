@@ -5,38 +5,52 @@
 //! timer's in Apple's encoding space, with the VHE pattern of their `_EL02`
 //! and `_EL12` names.
 //!
-//! The kernel's timer always uses the Apple timebase: XNU names
-//! `S3_1_C15_C15_4`, `S3_4_C15_C11_7`, `S3_1_C15_C0_5` and `S3_4_C15_C9_6`
-//! where other chips use CNTV_TVAL_EL0, CNTVCT_EL0, CNTV_CTL_EL0 and
-//! CNTKCTL_EL1 (`osfmk/arm64/machine_routines.c`), and masks the physical
-//! timer in both families. On hardware the architectural registers can
-//! instead count a counter scaled to 1 GHz, Armv8.6's frequency: m1n1 sets
-//! up that "counter redirect" on the M3 (`src/chickens.c`), and reads 1 GHz
-//! from CNTFRQ_EL0 beside 24 MHz from the Apple frequency register on an
-//! M4 Pro (`src/hv/hv_sprr.c`). XNU's `AIDR_AGT` test (AIDR_EL1 bit 32)
-//! expects CNTFRQ_EL0 to read 1 GHz when that bit is set.
+//! These chips have two timer banks on one time base:
+//! - The Apple bank counts the 24 MHz Apple timebase. The kernel's timer
+//!   always uses it: XNU names `S3_1_C15_C15_4`, `S3_4_C15_C11_7`,
+//!   `S3_4_C15_C10_6`, `S3_1_C15_C0_5` and `S3_4_C15_C9_6` where other chips
+//!   use CNTV_TVAL_EL0, CNTVCT_EL0, CNTVCTSS_EL0, CNTV_CTL_EL0 and
+//!   CNTKCTL_EL1 (`osfmk/arm64/machine_routines.c`), and the commpage's
+//!   `mach_absolute_time` reads `S3_4_C15_C10_6` (`user_timebase_type`).
+//! - The Arm bank is the architectural generic timer on a counter scaled to
+//!   1 GHz, Armv8.6's frequency: m1n1 programs this "counter redirect" on
+//!   the M3 (`src/chickens.c`) and reads 1 GHz from CNTFRQ_EL0 beside a
+//!   24 MHz Apple timer on an M4 Pro (`src/hv/hv_sprr.c`); XNU expects
+//!   CNTFRQ_EL0 to read 1 GHz where AIDR_EL1 bit 32 (`AIDR_AGT`) is set
+//!   (`tests/apple_generic_timer.c`), as the identification sets it here.
 //!
-//! The profiles leave AIDR_EL1 bit 32 clear and count 24 MHz, so this
-//! machine has one timer bank on the Apple timebase and the Apple registers
-//! are views of the architectural ones (`machine::timer`), reached through
-//! their generated accessors with the same traps and VHE redirection.
-//! Whether hardware gives the families separate comparators or scales one
-//! bank is not established; the kernel programs them consistently.
+//! The banks are separate registers, not one bank seen at two scales: XNU
+//! masks the physical timer in both because "its registers reset to
+//! architecturally unknown values" and, after programming the Apple
+//! CNTKCTL, enables "EL0 access to the ARM timebase registers too", and
+//! m1n1 writes CNTHCTL_EL2 only after the redirect on the M3 and later
+//! (`src/hv/hv.c`). Both banks' timers signal FIQ, under the same
+//! VM_TMR_FIQ_ENA_EL2 gate for the EL1 timers (inference).
 //!
-//! AGTCNTRDIR is held per regime. Bit 1 (m1n1 `AGTCNTRDIR_DISABLE`) turns
-//! the 1 GHz redirect off, so the architectural registers count the Apple
-//! timebase: firmware leaves it set for macOS (m1n1
-//! `proxyclient/tools/run_guest.py`), SPTM sets it at boot and the kernel
-//! sets it for the EL1&0 regime, whose guests' timers its hypervisor saves
-//! through the Apple `_EL02` and `_EL12` forms alone. A value with it clear
-//! asks for the scaled counter, which is not modeled and is reported. Bit
-//! 0 (m1n1 `AGTCNTRDIR_EL0_TRAP_CTL`) the 26A434 kernel sets on a switch to
-//! a thread without `ARM_MACHINE_THREAD_USES_1GHZ_TIMBASE` and clears for
-//! one with it (J613AP 0xfffffe000bcffe18, 0xfffffe000bcfc5a0): EL0 keeps
-//! the Apple timebase, which EL0 always sees here. AGTCNTKCTL_NOREDIR,
-//! which bypasses the redirect, has no bank of its own here: it is held, and
-//! a nonzero value is reported as unmodeled.
-use super::super::{Chip, impdef};
+//! The Apple registers (`AGTCNT*`) always reach the Apple bank, with the
+//! traps and VHE redirection of their architectural counterparts. The
+//! architectural encodings reach the bank AGTCNTRDIR selects for the current
+//! regime (`_EL1` names it, at EL2 the EL2&0 one; `_EL12` the EL1&0 one):
+//! - Bit 1 (m1n1 `AGTCNTRDIR_DISABLE`) turns the redirect off, so the
+//!   architectural encodings reach the Apple bank. Firmware leaves both set
+//!   for macOS (m1n1 `proxyclient/tools/run_guest.py`), which is their
+//!   value here at reset; the kernel sets it for the EL1&0 regime, whose
+//!   guests' timers its hypervisor saves through the Apple `_EL02` and
+//!   `_EL12` forms alone, and clears it for its own.
+//! - Bit 0 (m1n1 `AGTCNTRDIR_EL0_TRAP_CTL`) gives EL0 the Apple bank. The
+//!   26A434 kernel sets it on a switch to a thread without
+//!   `ARM_MACHINE_THREAD_USES_1GHZ_TIMBASE` and clears it for one with it
+//!   (J613AP 0xfffffe000bcffe18, 0xfffffe000bcfc5a0); such a thread expects
+//!   a 24 MHz CNTFRQ_EL0 (`tests/apple_generic_timer_legacy.c`), and XNU
+//!   handles an EL0 MSR or MRS trap only as EXC_BAD_INSTRUCTION
+//!   (`osfmk/arm64/sleh.c` `handle_msr_trap`), so it is taken to redirect,
+//!   not trap (inference from the name and those consumers).
+//!
+//! AGTCNTKCTL_NOREDIR bypasses both redirections: it reaches the Apple
+//! bank's EL1&0 CNTKCTL from EL1 and EL2 alike (inference: SPTM saves it,
+//! clears it for an EL1 guest whose CNTKCTL it then writes through
+//! AGTCNTKCTL_EL12, and restores it after).
+use super::super::{Chip, cpu::Cpu, impdef, system::Register};
 use stela_compiler::aarch64::system::registers::{CNTVCT_EL0, Encoding};
 
 macro_rules! encodings {
@@ -50,6 +64,7 @@ encodings! {
     AGTCNTV_TVAL_EL0 = 3, 1, 15, 15, 4;
     AGTCNTP_CTL_EL0 = 3, 1, 15, 13, 4;
     AGTCNTVCT_EL0 = 3, 4, 15, 11, 7;
+    AGTCNTVCTSS_EL0 = 3, 4, 15, 10, 6;
     AGTCNTKCTL_EL1 = 3, 4, 15, 9, 6;
     AGTCNTKCTL_EL12 = 3, 4, 15, 9, 7;
     AGTCNTV_CTL_EL02 = 3, 4, 15, 2, 7;
@@ -69,6 +84,7 @@ encodings! {
     CNTV_CTL_EL0 = 3, 3, 14, 3, 1;
     CNTV_TVAL_EL0 = 3, 3, 14, 3, 0;
     CNTP_CTL_EL0 = 3, 3, 14, 2, 1;
+    CNTVCTSS_EL0 = 3, 3, 14, 0, 6;
     CNTKCTL_EL1 = 3, 0, 14, 1, 0;
     CNTKCTL_EL12 = 3, 5, 14, 1, 0;
     CNTV_CTL_EL02 = 3, 5, 14, 3, 1;
@@ -80,12 +96,13 @@ encodings! {
     CNTHV_CTL_EL2 = 3, 4, 14, 3, 1;
 }
 
-/// Each Apple register that is a view, with the architectural register it
-/// shows. Consumers in the 26A434 J613AP (M3) kernel unless noted:
-/// - The four `KERNEL_*` registers and AGTCNTP_CTL_EL0 as XNU names them
-///   (timer setup 0xfffffe000c4aabd0, 0xfffffe000c4ab194; deadlines
+/// Each Apple register with the architectural register whose Apple bank
+/// copy it reaches. Consumers in the 26A434 J613AP (M3) kernel unless noted:
+/// - The `KERNEL_*` registers and AGTCNTP_CTL_EL0 as XNU names them (timer
+///   setup 0xfffffe000c4aabd0, 0xfffffe000c4ab194; deadlines
 ///   0xfffffe000bd020a8; the FIQ handler tests ISTATUS at
-///   0xfffffe000bcf762c).
+///   0xfffffe000bcf762c). AGTCNTVCTSS_EL0 is the encoding of the M1 and
+///   M2's CNTVCT_ALIAS_EL0, which on those chips reads their one bank.
 /// - The `_EL02` and `_EL12` forms: the hypervisor saves a guest's timers
 ///   with them (0xfffffe000bd1ae98) and restores them (0xfffffe000bd1eb18);
 ///   this kernel never accesses the architectural forms.
@@ -97,11 +114,12 @@ encodings! {
 /// - AGTCNTHV_CTL_EL2: the J773GAP (M4) kernel clears its ENABLE before
 ///   WFI (0xfffffe000bc31628), where the kernel's AGTCNTV_CTL_EL0 timer
 ///   reaches at EL2.
-const VIEWS: [(Encoding, Encoding); 13] = [
+const VIEWS: [(Encoding, Encoding); 14] = [
     (AGTCNTV_CTL_EL0, CNTV_CTL_EL0),
     (AGTCNTV_TVAL_EL0, CNTV_TVAL_EL0),
     (AGTCNTP_CTL_EL0, CNTP_CTL_EL0),
     (AGTCNTVCT_EL0, CNTVCT_EL0),
+    (AGTCNTVCTSS_EL0, CNTVCTSS_EL0),
     (AGTCNTKCTL_EL1, CNTKCTL_EL1),
     (AGTCNTKCTL_EL12, CNTKCTL_EL12),
     (AGTCNTV_CTL_EL02, CNTV_CTL_EL02),
@@ -113,26 +131,43 @@ const VIEWS: [(Encoding, Encoding); 13] = [
     (AGTCNTHV_CTL_EL2, CNTHV_CTL_EL2),
 ];
 
-/// AGTCNTRDIR bit 0: EL0 keeps the Apple timebase.
+/// Whether `chip` has the Apple generic timer and the scaled Arm bank: the
+/// M3 to M5 by XNU's `HAS_APPLE_GENERIC_TIMER`, and every chip whose
+/// censused SPTM or kernel programs AGTCNTRDIR (the M3 to M6 SPTMs at boot,
+/// the M3 to M5 kernels at boot and on every thread switch).
+pub const fn present(chip: Chip) -> bool {
+    !matches!(chip, Chip::AppleM1 | Chip::AppleM2)
+}
+
+/// The Arm bank's frequency on a chip with the Apple generic timer.
+pub const SCALED_HZ: u64 = 1_000_000_000;
+/// The Apple timebase, XNU's "24 MHz Apple timer", until the profile's
+/// counter frequency is loaded ([`State::set_timebase`]).
+const APPLE_HZ: u64 = 24_000_000;
+
+/// One timer bank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bank {
+    /// The architectural generic timer: the system counter, scaled to
+    /// [`SCALED_HZ`] on a chip with the Apple generic timer.
+    Arm,
+    /// The Apple generic timer, on the unscaled system counter.
+    Apple,
+}
+
+/// AGTCNTRDIR bit 0: EL0 reaches the Apple bank.
 pub const REDIRECT_EL0_TRAP_CONTROL: u64 = 1 << 0;
-/// AGTCNTRDIR bit 1: the architectural registers count the Apple timebase,
-/// not the scaled 1 GHz counter.
+/// AGTCNTRDIR bit 1: the architectural encodings reach the Apple bank.
 pub const REDIRECT_DISABLE: u64 = 1 << 1;
 const REDIRECT_KNOWN: u64 = REDIRECT_EL0_TRAP_CONTROL | REDIRECT_DISABLE;
 
 const REDIRECT_UNMODELED: &str = "AGTCNTRDIR bit without known meaning: no software sets it and \
     its effect is not modeled";
-const SCALED_COUNTER_UNMODELED: &str = "AGTCNTRDIR enables the 1 GHz scaled counter, which is \
-    not modeled: the architectural registers keep counting the 24 MHz Apple timebase that \
-    CNTFRQ_EL0 and AIDR_EL1 bit 32 describe";
-const NO_REDIRECT_UNMODELED: &str = "AGTCNTKCTL_NOREDIR nonzero: the non-redirected generic \
-    timer controls have no bank of their own here, where both timer families share the 24 MHz \
-    Apple timebase";
 
 /// What an Apple generic timer encoding names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Name {
-    /// A view of the architectural register at this encoding.
+    /// The Apple bank copy of the architectural register at this encoding.
     View(Encoding),
     /// AGTCNTRDIR of the current regime (`_EL1`) or, from EL2, of the
     /// EL1&0 regime (`_EL12`): SPTM writes 3 to both at boot (J613AP
@@ -142,16 +177,15 @@ pub enum Name {
     /// writes 0 to its own and 3 to the EL12 one at boot (J613AP
     /// 0xfffffe000c4aabac, 0xfffffe000c4aabb4).
     Redirect { el12: bool },
-    /// AGTCNTKCTL_NOREDIR of the current regime: SPTM saves it, clears it
-    /// for an EL1 guest it runs and restores it after (J613AP
-    /// `__text+0x4b34c`, `__text+0x4b5c0`).
+    /// AGTCNTKCTL_NOREDIR: SPTM saves it, clears it for an EL1 guest it runs
+    /// and restores it after (J613AP `__text+0x4b34c`, `__text+0x4b5c0`).
     NoRedirectControl,
 }
 
 /// What `encoding` names on `chip`: an Apple generic timer register the
 /// chip's censused components access ([`impdef::consumed`]).
 pub fn decode(encoding: Encoding, chip: Chip) -> Option<Name> {
-    if !impdef::consumed(encoding, chip) {
+    if !present(chip) || !impdef::consumed(encoding, chip) {
         return None;
     }
     match encoding {
@@ -165,55 +199,124 @@ pub fn decode(encoding: Encoding, chip: Chip) -> Option<Name> {
     }
 }
 
-/// The Apple generic timer's own registers, each per regime: EL1&0 (0)
-/// and EL2&0 (1). Both reset to 0; software writes them before it reads.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct State {
-    redirect: [u64; 2],
-    no_redirect_control: [u64; 2],
+/// The architectural encoding AGTCNTKCTL_NOREDIR reaches at `el`: the
+/// EL1&0 CNTKCTL, named from EL2 by its `_EL12` form.
+pub fn no_redirect_control(el: u8) -> Encoding {
+    if el == 2 { CNTKCTL_EL12 } else { CNTKCTL_EL1 }
 }
 
-/// One of [`State`]'s registers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Register {
-    Redirect(usize),
-    NoRedirectControl(usize),
+/// The registers each bank has its own copy of.
+const BANKED: [Register; 12] = [
+    Register::CNTFRQ_EL0,
+    Register::CNTKCTL_EL1,
+    Register::CNTHCTL_EL2,
+    Register::CNTVOFF_EL2,
+    Register::CNTP_CTL_EL0,
+    Register::CNTP_CVAL_EL0,
+    Register::CNTV_CTL_EL0,
+    Register::CNTV_CVAL_EL0,
+    Register::CNTHP_CTL_EL2,
+    Register::CNTHP_CVAL_EL2,
+    Register::CNTHV_CTL_EL2,
+    Register::CNTHV_CVAL_EL2,
+];
+
+/// The Apple generic timer's state: AGTCNTRDIR of the EL1&0 (0) and EL2&0
+/// (1) regimes, the Apple bank's registers and the system counter's
+/// frequency (the Arm bank lives in the System register file).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct State {
+    redirect: [u64; 2],
+    bank: [u64; BANKED.len()],
+    timebase: u64,
 }
 
 impl State {
-    pub fn read(&self, register: Register) -> u64 {
-        match register {
-            Register::Redirect(regime) => self.redirect[regime],
-            Register::NoRedirectControl(regime) => self.no_redirect_control[regime],
+    /// Reset: the redirect disabled for every level, as firmware hands the
+    /// PE over, and the Apple bank at the generic timer's reset values with
+    /// the Apple timebase in CNTFRQ_EL0.
+    pub fn new(chip: Chip) -> Self {
+        let mut bank = BANKED.map(|register| register.reset(chip));
+        bank[0] = APPLE_HZ;
+        Self {
+            redirect: [REDIRECT_KNOWN; 2],
+            bank,
+            timebase: APPLE_HZ,
         }
     }
 
-    /// Hold `value`; what it would need that this machine does not model.
-    pub fn write(&mut self, register: Register, value: u64) -> Option<&'static str> {
-        match register {
-            Register::Redirect(regime) => {
-                self.redirect[regime] = value;
-                if value & !REDIRECT_KNOWN != 0 {
-                    Some(REDIRECT_UNMODELED)
-                } else {
-                    (value & REDIRECT_DISABLE == 0).then_some(SCALED_COUNTER_UNMODELED)
-                }
-            }
-            Register::NoRedirectControl(regime) => {
-                self.no_redirect_control[regime] = value;
-                (value != 0).then_some(NO_REDIRECT_UNMODELED)
-            }
-        }
+    /// Count the system counter at `hz`: the Apple bank's CNTFRQ_EL0 and
+    /// the base the Arm bank scales from.
+    pub fn set_timebase(&mut self, hz: u64) {
+        self.timebase = hz;
+        self.bank[0] = hz;
     }
+
+    pub fn redirect(&self, regime: usize) -> u64 {
+        self.redirect[regime]
+    }
+
+    /// Set AGTCNTRDIR of `regime`; what it would need that this machine
+    /// does not model.
+    pub fn set_redirect(&mut self, regime: usize, value: u64) -> Option<&'static str> {
+        self.redirect[regime] = value;
+        (value & !REDIRECT_KNOWN != 0).then_some(REDIRECT_UNMODELED)
+    }
+
+    /// The Apple bank's copy of `register`, if it has one.
+    pub fn get(&self, register: Register) -> Option<u64> {
+        BANKED
+            .iter()
+            .position(|&banked| banked == register)
+            .map(|slot| self.bank[slot])
+    }
+
+    /// Store an already masked value in the Apple bank's copy of `register`;
+    /// false when the bank has none.
+    pub fn set(&mut self, register: Register, value: u64) -> bool {
+        let slot = BANKED.iter().position(|&banked| banked == register);
+        if let Some(slot) = slot {
+            self.bank[slot] = value;
+        }
+        slot.is_some()
+    }
+
+    /// The Arm bank's count at system count `physical`.
+    pub fn scale(&self, physical: u64) -> u64 {
+        (u128::from(physical) * u128::from(SCALED_HZ) / u128::from(self.timebase)) as u64
+    }
+
+    /// The first system count whose scaled count reaches `count`.
+    pub fn unscale(&self, count: u64) -> u64 {
+        let base = u128::from(self.timebase);
+        let product = u128::from(count) * base;
+        let scaled = u128::from(SCALED_HZ);
+        u64::try_from(product.div_ceil(scaled)).unwrap_or(u64::MAX)
+    }
+}
+
+/// The bank an architectural encoding reaches on `cpu`: the Arm bank
+/// without the Apple generic timer, else the one AGTCNTRDIR of the current
+/// regime selects.
+pub fn selected(cpu: &Cpu) -> Bank {
+    let pstate = cpu.pstate;
+    if !present(cpu.registers.chip()) {
+        return Bank::Arm;
+    }
+    let host = pstate.el == 2 || (pstate.el == 0 && cpu.in_host());
+    let redirect = cpu.apple.generic_timer.redirect(usize::from(host));
+    let apple = redirect & REDIRECT_DISABLE != 0
+        || (pstate.el == 0 && redirect & REDIRECT_EL0_TRAP_CONTROL != 0);
+    if apple { Bank::Apple } else { Bank::Arm }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The census gates the family: the M1 and M2 components access none
-    /// of it, every later chip all but AGTCNTHV_CTL_EL2, which the M4 and
-    /// later add.
+    /// The family is present from the M3 on, as the census shows: there the
+    /// components program AGTCNTRDIR, and they access every view but
+    /// AGTCNTHV_CTL_EL2, which the M4 and later add.
     #[test]
     fn the_census_gates_each_register_by_chip() {
         let all = VIEWS.map(|(apple, _)| apple).into_iter().chain([
@@ -222,12 +325,13 @@ mod tests {
             AGTCNTKCTL_NOREDIR_EL1,
         ]);
         for chip in Chip::ALL {
+            assert_eq!(present(chip), impdef::consumed(AGTCNTRDIR_EL1, chip));
             for encoding in all.clone() {
-                let modern = !matches!(chip, Chip::AppleM1 | Chip::AppleM2);
-                let present = modern && (encoding != AGTCNTHV_CTL_EL2 || chip != Chip::AppleM3);
+                let expected =
+                    present(chip) && (encoding != AGTCNTHV_CTL_EL2 || chip != Chip::AppleM3);
                 assert_eq!(
                     decode(encoding, chip).is_some(),
-                    present,
+                    expected,
                     "{chip:?} {encoding:?}"
                 );
             }
@@ -257,33 +361,43 @@ mod tests {
         }
     }
 
-    /// The redirect is held per regime; it completes with the 1 GHz
-    /// redirect disabled, and reports enabling it or an unknown bit. A
-    /// nonzero non-redirected control is held and reported.
+    /// AGTCNTRDIR resets disabled, holds its two known bits and reports
+    /// another; the Apple bank holds its own copies.
     #[test]
-    fn own_registers_hold_and_report_unmodeled_settings() {
-        let mut state = State::default();
-        for (value, unmodeled) in [
-            (REDIRECT_DISABLE | REDIRECT_EL0_TRAP_CONTROL, None),
-            (REDIRECT_DISABLE, None),
-            (REDIRECT_EL0_TRAP_CONTROL, Some(SCALED_COUNTER_UNMODELED)),
-            (0, Some(SCALED_COUNTER_UNMODELED)),
-        ] {
-            assert_eq!(state.write(Register::Redirect(1), value), unmodeled);
-            assert_eq!(state.read(Register::Redirect(1)), value);
+    fn state_holds_the_redirect_and_the_apple_bank() {
+        let mut state = State::new(Chip::AppleM3);
+        assert_eq!(state.redirect(0), REDIRECT_KNOWN);
+        for value in [3, 1, 0, REDIRECT_DISABLE] {
+            assert_eq!(state.set_redirect(1, value), None);
+            assert_eq!(state.redirect(1), value);
         }
-        assert_eq!(state.read(Register::Redirect(0)), 0);
         assert_eq!(
-            state.write(Register::Redirect(0), 1 << 2 | REDIRECT_DISABLE),
+            state.set_redirect(0, 1 << 2 | REDIRECT_DISABLE),
             Some(REDIRECT_UNMODELED)
         );
-        assert_eq!(state.read(Register::Redirect(0)), 0b110);
-        assert_eq!(state.write(Register::NoRedirectControl(1), 0), None);
+        assert_eq!(state.redirect(0), 0b110);
+        assert_eq!(state.get(Register::CNTFRQ_EL0), Some(APPLE_HZ));
+        assert!(state.set(Register::CNTV_CVAL_EL0, 7));
+        assert_eq!(state.get(Register::CNTV_CVAL_EL0), Some(7));
+        assert!(!state.set(Register::SCTLR_EL1, 7));
+        assert_eq!(state.get(Register::SCTLR_EL1), None);
+    }
+
+    /// The Arm bank counts 125 ticks per 3 of the 24 MHz system counter,
+    /// and `unscale` gives the first system count reaching a scaled count.
+    #[test]
+    fn scaling_is_exact_and_its_inverse_rounds_up() {
+        let state = State::new(Chip::AppleM4);
+        assert_eq!(state.scale(APPLE_HZ), SCALED_HZ);
+        assert_eq!((state.scale(1), state.scale(3)), (41, 125));
         assert_eq!(
-            state.write(Register::NoRedirectControl(1), 0xf),
-            Some(NO_REDIRECT_UNMODELED)
+            (state.unscale(0), state.unscale(41), state.unscale(42)),
+            (0, 1, 2)
         );
-        assert_eq!(state.read(Register::NoRedirectControl(1)), 0xf);
-        assert_eq!(state.read(Register::NoRedirectControl(0)), 0);
+        assert_eq!(state.unscale(125), 3);
+        for count in [1, 41, 42, 1000, 1 << 40] {
+            let physical = state.unscale(count);
+            assert!(state.scale(physical) >= count && state.scale(physical - 1) < count);
+        }
     }
 }
