@@ -838,8 +838,10 @@ impl Cpu {
 
     /// GENTER at EL1 or EL2: bank the return state in that GL's registers and
     /// continue at GXF_ENTER_ELx on the GL stack with every exception masked.
-    /// Masking follows exception entry; it is an inference, as is the stack
-    /// selection (m1n1 sets `sp` after GENTER).
+    /// SPTM 26A434 needs IRQ and FIQ masked: the kernel enters with them
+    /// unmasked and SPTM's GL2 SP_ELx interrupt vectors park
+    /// (`__exc+0x280`). Masking A and D too follows exception entry
+    /// (inference), as does the stack selection (m1n1 sets `sp` after GENTER).
     pub fn guarded_enter(&mut self) -> Result<(), GuardedRefusal> {
         if self.pstate.el == 0 || self.pstate.guarded || !self.guarded_enabled() {
             return Err(GuardedRefusal::Enter);
@@ -929,10 +931,10 @@ impl Cpu {
     }
 
     /// The guarded level GL0 takes its exceptions to: GL2 while EL2's GXF is
-    /// enabled, else GL1. SPTM 26A434 enters TXM at GL0 with HCR_EL2.TGE
-    /// clear, and handles its SVCs in VBAR_GL2's lower-EL vector
-    /// (`__exc+0x400`, reading ESR_GL), with EL1's GXF disabled; no public
-    /// source describes the routing (inference).
+    /// enabled, else GL1. SPTM 26A434 enters TXM at GL0 with HCR_EL2.TGE set
+    /// (`__text+0xb0c0`) and handles its SVCs in VBAR_GL2's lower-EL vector
+    /// (`__exc+0x400`, reading ESR_GL), with EL1's GXF disabled; the GL1 case
+    /// has no public description (inference).
     fn guarded_el0_target(&self) -> u8 {
         if self.apple.gxf_config[1] & GXF_CONFIG_EN != 0 {
             2
