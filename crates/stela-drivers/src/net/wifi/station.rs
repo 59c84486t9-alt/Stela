@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 pub mod data;
+pub mod phy;
 pub mod wire;
 
 static NEXT_ASSOCIATION: AtomicU64 = AtomicU64::new(1);
