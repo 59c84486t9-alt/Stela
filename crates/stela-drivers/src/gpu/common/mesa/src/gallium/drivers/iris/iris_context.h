@@ -576,44 +576,7 @@ struct iris_uncompiled_shader {
    struct util_queue_fence ready;
 };
 
-enum iris_surface_group {
-   IRIS_SURFACE_GROUP_RENDER_TARGET,
-   IRIS_SURFACE_GROUP_RENDER_TARGET_READ,
-   IRIS_SURFACE_GROUP_CS_WORK_GROUPS,
-   IRIS_SURFACE_GROUP_TEXTURE_LOW64,
-   IRIS_SURFACE_GROUP_TEXTURE_HIGH64,
-   IRIS_SURFACE_GROUP_IMAGE,
-   IRIS_SURFACE_GROUP_UBO,
-   IRIS_SURFACE_GROUP_SSBO,
-
-   IRIS_SURFACE_GROUP_COUNT,
-};
-
-enum {
-   /* Workaround index to HSDES #22020184996 */
-   IRIS_SURFACE_NULL_PUSH_TBIMR_WA = UINT16_MAX,
-
-   /* Invalid value for a binding table index. */
-   IRIS_SURFACE_NOT_USED = 0xa0a0a0a0,
-};
-
-struct iris_binding_table {
-   uint32_t size_bytes;
-
-   /** Number of surfaces in each group, before compacting. */
-   uint32_t surf_count[IRIS_SURFACE_GROUP_COUNT];
-
-   /** Initial offset of each group. */
-   uint32_t offsets[IRIS_SURFACE_GROUP_COUNT];
-
-   /** Mask of surfaces used in each group. */
-   uint64_t used_mask[IRIS_SURFACE_GROUP_COUNT];
-
-   uint64_t samplers_used_mask;
-
-   /** Whether the first render target is a null fb surface */
-   uint8_t use_null_rt;
-};
+#include "iris_binding_table.h"
 
 #define IRIS_SYSVAL_CLIP_PLANE(plane, component) \
    (IRIS_SYSVAL_CLIP_PLANE_START + ((plane) * 4) + (component))

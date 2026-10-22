@@ -6,6 +6,7 @@ files_libcrocus = files(
   'driinfo_crocus.h',
   'crocus_batch.c',
   'crocus_batch.h',
+  'crocus_binding_table.c',
   'crocus_blit.c',
   'crocus_bufmgr.c',
   'crocus_bufmgr.h',

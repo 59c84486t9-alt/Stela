@@ -15,6 +15,7 @@ files_libiris = files(
   'driinfo_iris.h',
   'iris_batch.c',
   'iris_batch.h',
+  'iris_binding_table.c',
   'iris_binder.c',
   'iris_binder.h',
   'iris_blit.c',

@@ -328,37 +328,7 @@ struct crocus_uncompiled_shader {
    struct crocus_state_ref const_data_state;
 };
 
-enum crocus_surface_group {
-   CROCUS_SURFACE_GROUP_RENDER_TARGET,
-   CROCUS_SURFACE_GROUP_RENDER_TARGET_READ,
-   CROCUS_SURFACE_GROUP_SOL,
-   CROCUS_SURFACE_GROUP_CS_WORK_GROUPS,
-   CROCUS_SURFACE_GROUP_TEXTURE,
-   CROCUS_SURFACE_GROUP_TEXTURE_GATHER,
-   CROCUS_SURFACE_GROUP_IMAGE,
-   CROCUS_SURFACE_GROUP_UBO,
-   CROCUS_SURFACE_GROUP_SSBO,
-
-   CROCUS_SURFACE_GROUP_COUNT,
-};
-
-enum {
-   /* Invalid value for a binding table index. */
-   CROCUS_SURFACE_NOT_USED = 0xa0a0a0a0,
-};
-
-struct crocus_binding_table {
-   uint32_t size_bytes;
-
-   /** Number of surfaces in each group, before compacting. */
-   uint32_t sizes[CROCUS_SURFACE_GROUP_COUNT];
-
-   /** Initial offset of each group. */
-   uint32_t offsets[CROCUS_SURFACE_GROUP_COUNT];
-
-   /** Mask of surfaces used in each group. */
-   uint64_t used_mask[CROCUS_SURFACE_GROUP_COUNT];
-};
+#include "crocus_binding_table.h"
 
 /**
  * A compiled shader variant, containing a pointer to the GPU assembly,
@@ -846,49 +816,6 @@ const struct shader_info *crocus_get_shader_info(const struct crocus_context *ic
 struct crocus_bo *crocus_get_scratch_space(struct crocus_context *ice,
                                            unsigned per_thread_scratch,
                                            mesa_shader_stage stage);
-/**
- * Map a <group, index> pair to a binding table index.
- *
- * For example: <UBO, 5> => binding table index 12
- */
-static inline uint32_t crocus_group_index_to_bti(const struct crocus_binding_table *bt,
-                                                 enum crocus_surface_group group,
-                                                 uint32_t index)
-{
-   assert(index < bt->sizes[group]);
-   uint64_t mask = bt->used_mask[group];
-   uint64_t bit = 1ull << index;
-   if (bit & mask) {
-      return bt->offsets[group] + util_bitcount64((bit - 1) & mask);
-   } else {
-      return CROCUS_SURFACE_NOT_USED;
-   }
-}
-
-/**
- * Map a binding table index back to a <group, index> pair.
- *
- * For example: binding table index 12 => <UBO, 5>
- */
-static inline uint32_t
-crocus_bti_to_group_index(const struct crocus_binding_table *bt,
-                          enum crocus_surface_group group, uint32_t bti)
-{
-   uint64_t used_mask = bt->used_mask[group];
-   assert(bti >= bt->offsets[group]);
-
-   uint32_t c = bti - bt->offsets[group];
-   while (used_mask) {
-      int i = u_bit_scan64(&used_mask);
-      if (c == 0)
-         return i;
-      c--;
-   }
-
-   return CROCUS_SURFACE_NOT_USED;
-}
-
-
 /* crocus_disk_cache.c */
 
 void crocus_disk_cache_store(struct disk_cache *cache,
