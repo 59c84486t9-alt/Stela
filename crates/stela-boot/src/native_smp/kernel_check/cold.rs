@@ -183,6 +183,12 @@ pub(super) unsafe fn check(
             cpu,
             devices,
             profile(1)?,
+            0,
+            &[WorkerBinding {
+                pe: 0,
+                worker: WorkerId(0),
+            }],
+            &[],
         )
     }?;
     crate::output::arguments(format_args!(

@@ -17,7 +17,6 @@ use stela_runtime::{
         exception::Pstate,
     },
     memory::{RegisteredSystemRam, ReservedSystemRamRange},
-    system::events::EventDomain,
 };
 
 struct Reservation {
@@ -257,18 +256,17 @@ pub(crate) unsafe fn check(
         return unsafe { cold::check(handoff, capture, executors, host_owner, sender) };
     }
     let ram = reservation()?;
-    let bsp = capture.processors[capture.selected[0] as usize];
-    host_owner.bind_worker(WorkerId(0), bsp.apic_id as u32)?;
-    // SAFETY: actual pinned canonical RAM owns all physical byte accesses;
-    // the warmup has no guest RAM writer and no DMA is admitted.
-    unsafe { host_owner.register_system_ram(Arc::clone(&ram)) }?;
+    // Deliberately preserve a nonzero guest boot PE while the physical BSP
+    // remains worker0. Other identities and their source affinity stay ordered.
+    let boot_processor = cores - 1;
     let mut cpu = Cpu::of(Chip::AppleM1, source::CODE, Pstate::reset(2));
     for (index, vector) in cpu.state.v.iter_mut().enumerate() {
         *vector = [0x10203040 + index as u64, !(index as u64)];
     }
     let spsr = cpu.pstate.to_spsr(cpu.state.nzcv);
     let devices = TestDevices {
-        starts: (1..cores)
+        starts: (0..cores)
+            .filter(|&pe| pe != boot_processor)
             .map(|cpu| engine::Start {
                 cpu,
                 address: source::CODE,
@@ -278,28 +276,34 @@ pub(crate) unsafe fn check(
         canonical_writes: 0,
         cpu_commits: 0,
     };
-    let transport =
-        super::transport::FixedWorkers::new(executors, sender, handoff.tsc_hz, Arc::clone(&ram));
-    let native_host = engine::ServiceHost::new(host_owner.host(), transport, Arc::clone(&ram));
-    let mut machine = Machine::new(cpu, native_host, devices, profile(cores)?, ram.target());
-    machine.set_strict(true);
     let (_, entry) = source::warmup();
     let startup = source::cold_startup(entry);
     // SAFETY: before the first guest instruction; every assigned physical
     // executor is still stopped and shares this exact registered reservation.
     unsafe { ram.publish_physical(source::CODE, &startup) }
         .map_err(|_| "native cold startup publication refused")?;
-    machine
-        .install_shared_memory_for_active_processors(Arc::clone(&ram), &EventDomain::new())
-        .map_err(|_| "native cold BSP canonical owner refused")?;
     let bindings: Vec<_> = (0..cores)
         .map(|pe| WorkerBinding {
             pe,
-            worker: WorkerId(pe),
+            worker: WorkerId(if pe == boot_processor { 0 } else { pe + 1 }),
         })
         .collect();
-    machine
-        .bind_processor_power(
+    // SAFETY: every source byte belongs to this retained canonical fixture,
+    // all assigned actual BSP/AP Hosts are stopped, and no guest or DMA has
+    // executed. This exercises the same cold constructor as original adoption.
+    let mut machine = unsafe {
+        super::canonical::prepare(
+            handoff,
+            capture,
+            executors,
+            sender,
+            host_owner,
+            Arc::clone(&ram),
+            cpu,
+            devices,
+            profile(cores)?,
+            boot_processor,
+            &bindings,
             &(0..cores)
                 .map(|pe| engine::ProcessorBinding {
                     domain: 1 + pe as u64,
@@ -314,11 +318,8 @@ pub(crate) unsafe fn check(
                 })
                 .collect::<Vec<_>>(),
         )
-        .map_err(|_| "fixture CPU power bindings refused")?;
-    let owners = machine
-        .bind_assigned_native_workers(&bindings)
-        .map_err(|_| "native cold assigned physical roster refused")?;
-    machine.initialize_native_transport(owners);
+    }?;
+    machine.set_strict(true);
     let started = crate::apic::rdtsc();
     while !ready(&machine, entry) {
         // SAFETY: actual source-started Cpu loans and owner-local AP Hosts;
@@ -465,7 +466,7 @@ pub(crate) unsafe fn check(
         return Err("native scheduler ordinary translated store did not use canonical RAM");
     }
     crate::output::arguments(format_args!(
-        "CHECK native-shared-kernel PASS physical_cores={cores} actual_frames={cores} lse_updates={} full_GPR_SIMD_FP_state=preserved canonical_RAM=shared cold_M0_to_M1=checked CPU_starts={} consumed_device_writes={} CPU_controller_commits={} max_pending={max_pending} legacy_warmup=none scheduler_rounds={rounds} source_ERET_STXP=failed source_WFE=completed source_timer_FIQ=delivered source_permission_abort=precise actual_Host_effects=receipted; original macOS SMP unqualified\n",
+        "CHECK native-shared-kernel PASS physical_cores={cores} boot_PE={boot_processor} BSP_worker=0 actual_frames={cores} lse_updates={} full_GPR_SIMD_FP_state=preserved canonical_RAM=shared cold_M0_to_M1=checked CPU_starts={} consumed_device_writes={} CPU_controller_commits={} max_pending={max_pending} legacy_warmup=none scheduler_rounds={rounds} source_ERET_STXP=failed source_WFE=completed source_timer_FIQ=delivered source_permission_abort=precise actual_Host_effects=receipted; original macOS SMP unqualified\n",
         cores * source::INCREMENTS,
         cores - 1,
         machine.devices.canonical_writes,

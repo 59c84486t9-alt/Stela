@@ -1,6 +1,8 @@
 //! Cold fixed-physical-core adapter over the boot's existing physical reservations.
 //! Final Apple topology/device/DMA/reset admission belongs to the mount. This
 //! constructs the actual checked Machine; it never certifies legacy raw V1.
+mod bindings;
+
 use super::{executor::Executors, firmware::Capture, transport::FixedWorkers};
 use crate::{apic::Apic, engine::host, handoff::Handoff, layout};
 use alloc::{sync::Arc, vec::Vec};
@@ -100,7 +102,9 @@ pub(crate) unsafe fn reserve(
 /// merely marked Off. All host
 /// interfaces are synchronous through this Machine's Devices/Host; no external
 /// DMA/background producer or legacy raw V1 execution is admitted. The actual
-/// topology capture, executor, HostOwner and mappings remain pinned. Native IRQ,
+/// topology capture, executor, HostOwner and mappings remain pinned. The explicit
+/// PE/worker bijection binds the selected boot PE to physical BSP worker0; no
+/// source CPU or profile entry is reordered. Native IRQ,
 /// reset, PMU and other unjoined platform services remain explicit refusals.
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn prepare<'a, D: Devices>(
@@ -113,6 +117,9 @@ pub(crate) unsafe fn prepare<'a, D: Devices>(
     cpu: Cpu,
     devices: D,
     profile: CpuProfile,
+    boot_processor: usize,
+    assignments: &[WorkerBinding],
+    processor_power: &[stela_runtime::machine::engine::ProcessorBinding],
 ) -> Result<CanonicalMachine<'a, D>, &'static str> {
     let cores = handoff.native_resources.cores as usize;
     if cores == 0
@@ -122,6 +129,7 @@ pub(crate) unsafe fn prepare<'a, D: Devices>(
     {
         return Err("canonical mount requires the same assigned physical and visible PE roster");
     }
+    bindings::validate(cores, boot_processor, assignments)?;
     for slot in 1..cores {
         let selected = capture.processors[capture.selected[slot] as usize];
         let Some(processor) = executors
@@ -144,18 +152,19 @@ pub(crate) unsafe fn prepare<'a, D: Devices>(
     unsafe { owner.register_system_ram(Arc::clone(&ram)) }?;
     let transport = FixedWorkers::new(executors, sender, handoff.tsc_hz, Arc::clone(&ram));
     let host = ServiceHost::new(owner.host(), transport, Arc::clone(&ram));
-    let mut machine = Machine::new(cpu, host, devices, profile, ram.target());
+    let mut machine = Machine::new_at(cpu, host, devices, profile, ram.target(), boot_processor)?;
     machine
         .install_shared_memory_for_active_processors(ram, &EventDomain::new())
         .map_err(|_| "cold source controls/canonical CPU ownership refused before entry")?;
-    let bindings: Vec<_> = (0..cores)
-        .map(|pe| WorkerBinding {
-            pe,
-            worker: WorkerId(pe),
-        })
-        .collect();
+    // Initial handoff bindings must settle before any physical worker owner
+    // publishes. Later changes require the complete held native cohort.
+    if !processor_power.is_empty() {
+        machine
+            .bind_processor_power(processor_power)
+            .map_err(|_| "canonical initial processor power bindings refused")?;
+    }
     let owners = machine
-        .bind_assigned_native_workers(&bindings)
+        .bind_assigned_native_workers(assignments)
         .map_err(|_| "canonical assigned physical roster binding refused")?;
     machine.initialize_native_transport(owners);
     Ok(machine)

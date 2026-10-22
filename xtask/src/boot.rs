@@ -116,7 +116,7 @@ pub enum Command {
         #[arg(long)]
         release: bool,
     },
-    /// Boot `stela.efi` with an ARM image in single-CPU x86 QEMU.
+    /// Boot `stela.efi` with an ARM image in x86 QEMU.
     Run(Box<Run>),
 }
 
@@ -138,6 +138,10 @@ pub struct Run {
     /// model: QEMU's AMD models lack the required AMD routing-control MSRs.
     #[arg(long)]
     cpu: Option<String>,
+    /// Firmware-visible x86 cores, one thread each. This supplies the host
+    /// inventory; the mount independently selects/qualifies native workers.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=64))]
+    host_cores: u16,
     /// Guest machine memory for QEMU; defaults to 1G, 8G for system mode
     /// and 12G with a boot bundle.
     #[arg(long)]
@@ -754,7 +758,11 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .arg(format!(
             "q35,smm=off,sata=off,usb=off,smbus=off,hpet=off,i8042={keyboard},vmport=off"
         ))
-        .args(["-accel", "tcg,thread=single", "-cpu", &cpu, "-smp", "1"])
+        .args(["-accel", "tcg,thread=single", "-cpu", &cpu, "-smp"])
+        .arg(format!(
+            "cpus={0},sockets=1,cores={0},threads=1",
+            arguments.host_cores
+        ))
         .args(
             arguments
                 .icount
@@ -1180,6 +1188,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "source": source.exists().then(|| binding(&source)).transpose()?,
         "usb_image": arguments.usb_image,
         "no_la57": arguments.no_la57,
+        "qemu_host_cores": arguments.host_cores,
         "native_dma": native_dma,
         "native_work": native_work,
         "native_irq_work": native_irq_work,
@@ -1698,6 +1707,25 @@ mod tests {
         assert!(!native_level_verified(&format!(
             "{full}\nCHECK native-dma FAIL stop uncertain"
         )));
+    }
+
+    #[test]
+    fn qemu_host_inventory_does_not_synthesize_a_native_worker_grant() {
+        use clap::Parser;
+        let prefix = ["xtask", "boot", "run", "--output", "/tmp/owned-cores"];
+        let parsed =
+            crate::Cli::try_parse_from(prefix.into_iter().chain(["--host-cores", "2"])).unwrap();
+        let crate::Task::Boot(Command::Run(run)) = parsed.task else {
+            panic!("boot run")
+        };
+        assert_eq!(run.host_cores, 2);
+        assert!(run.append.is_none());
+        for invalid in ["0", "65", "-1", "two"] {
+            assert!(
+                crate::Cli::try_parse_from(prefix.into_iter().chain(["--host-cores", invalid]))
+                    .is_err()
+            );
+        }
     }
 
     #[test]
