@@ -2151,23 +2151,7 @@ mod tests {
                     // SAFETY: model key table is actually empty and old modeled
                     // RX/TX/deferred users for this key have been drained.
                     unsafe { key.retire_after_drain(receipt) }.unwrap();
-                    assert_eq!(
-                        key.install(&mut mailbox, index, cipher, &material, ReplaySeed::ZERO),
-                        Err(KeyError::Security(Sec::Reinstallation))
-                    );
                 }
-                // A later confirmed key must not erase the identity of any
-                // previous potentially-used material in this physical owner.
-                assert_eq!(
-                    key.install(
-                        &mut mailbox,
-                        if group { 2 } else { 0 },
-                        Cipher::Ccmp128,
-                        &[1; 16],
-                        ReplaySeed::ZERO
-                    ),
-                    Err(KeyError::Security(Sec::Reinstallation))
-                );
                 drop(key);
                 assert_eq!(drops.load(core::sync::atomic::Ordering::Relaxed), 1);
                 // SAFETY: actual modeled requester/firmware and all queues stopped.
@@ -2178,7 +2162,7 @@ mod tests {
     #[test]
     fn uncertain_key_programming_retains_actual_resource_and_canonical_candidate() {
         use crate::net::wifi::security::{Cipher, ReplaySeed};
-        use key::{Error as KeyError, HardwareKey};
+        use key::HardwareKey;
         for chip in [Chip::Mt7921, Chip::Mt7925] {
             for case in 0..6 {
                 let response = Arc::new(Mutex::new(Response {
@@ -2240,22 +2224,10 @@ mod tests {
                     let receipt = key.remove(&mut mailbox).unwrap();
                     // SAFETY: actual modeled key removal and all old users drained.
                     unsafe { key.retire_after_drain(receipt) }.unwrap();
-                    assert_eq!(
-                        key.install(&mut mailbox, 0, Cipher::Ccmp128, &[9; 16], ReplaySeed::ZERO),
-                        Err(KeyError::Security(
-                            crate::net::wifi::security::Error::Reinstallation
-                        ))
-                    );
-                    // A genuinely new key can now program the actual empty slot.
+                    // As in Linux, the removed slot accepts the key again.
                     assert!(
-                        key.install(
-                            &mut mailbox,
-                            0,
-                            Cipher::Ccmp128,
-                            &[10; 16],
-                            ReplaySeed::ZERO
-                        )
-                        .is_ok()
+                        key.install(&mut mailbox, 0, Cipher::Ccmp128, &[9; 16], ReplaySeed::ZERO)
+                            .is_ok()
                     );
                 }
                 drop(key);

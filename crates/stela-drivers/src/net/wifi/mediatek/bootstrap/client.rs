@@ -547,32 +547,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         material: &[u8],
         seed: ReplaySeed,
     ) -> Result<KeyIdentity, Error> {
-        self.install_key_inner(pairwise, index, material, seed, false)
-    }
-    /// Explicit authenticated continuation of a retired receive-only GTK.
-    ///
-    /// # Safety
-    /// The actual current OS key exchange authenticated this exact GTK/index/
-    /// BSSID and RSC. The old peer/GTK users were genuinely removed/drained,
-    /// not merely assigned a new association epoch. Preserve this Client and
-    /// its original canonical key owner/history; never use this for a PTK or
-    /// for a device-owned transmitting PN reset. Firmware ACK remains required.
-    pub unsafe fn resume_group_key(
-        &mut self,
-        index: u8,
-        material: &[u8],
-        authenticated_rsc: ReplaySeed,
-    ) -> Result<KeyIdentity, Error> {
-        self.install_key_inner(false, index, material, authenticated_rsc, true)
-    }
-    fn install_key_inner(
-        &mut self,
-        pairwise: bool,
-        index: u8,
-        material: &[u8],
-        seed: ReplaySeed,
-        resume: bool,
-    ) -> Result<KeyIdentity, Error> {
         let s = self.state_mut();
         if s.phase != Phase::Associated {
             return Err(Error::WrongPhase);
@@ -595,13 +569,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         .ok_or(Error::NoKey)?;
         s.phase = Phase::Quarantined;
         let mailbox = s.controller.state_mut().mailbox.as_mut().unwrap();
-        let outcome = if resume {
-            // SAFETY: inherited actual authenticated exchange and old-user
-            // drain contract, retaining the original native/canonical owner.
-            unsafe { key.resume_receive_only(mailbox, index, Cipher::Ccmp128, material, seed) }
-        } else {
-            key.install(mailbox, index, Cipher::Ccmp128, material, seed)
-        };
+        let outcome = key.install(mailbox, index, Cipher::Ccmp128, material, seed);
         if !key.is_quarantined() {
             s.phase = Phase::Associated;
         }

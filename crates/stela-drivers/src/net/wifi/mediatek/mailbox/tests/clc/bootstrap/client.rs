@@ -423,31 +423,19 @@ fn actual_mt7925_init_scan_secure_client_reconnect_and_stop() {
     unsafe { driver.retire_peer_after_drain() }.unwrap();
     associated(&mut driver, &model, 30);
     assert_ne!(driver.station().association_epoch().unwrap(), epoch);
-    assert!(matches!(
-        driver.install_key(true, 0, &[1; 16], ReplaySeed::ZERO),
-        Err(ClientError::Key(
-            crate::net::wifi::mediatek::mailbox::key::Error::Security(
-                wifi::security::Error::Reinstallation
-            )
-        ))
-    ));
-    // Confirmed history rejects repeated temporal material without submitting
-    // another key command. A fresh candidate remains the allowed recovery.
+    // As in Linux, removed keys install again; the GTK takes the RSC the OS
+    // learned in its key exchange, here PN1.
     driver
-        .install_key(true, 0, &[3; 16], ReplaySeed::ZERO)
+        .install_key(true, 0, &[1; 16], ReplaySeed::ZERO)
         .unwrap();
-    // Ordinary fresh-key installation cannot silently reset the old GTK.
-    assert!(matches!(
-        driver.install_key(false, 2, &[2; 16], ReplaySeed::ZERO),
-        Err(ClientError::Key(
-            crate::net::wifi::mediatek::mailbox::key::Error::Security(
-                wifi::security::Error::Reinstallation
-            )
-        ))
-    ));
-    // Actual modeled OS exchange authenticates the same AP GTK and RSC0;
-    // previous delivered PN1 remains authoritative in the original slot.
-    unsafe { driver.resume_group_key(2, &[2; 16], ReplaySeed::ZERO) }.unwrap();
+    driver
+        .install_key(
+            false,
+            2,
+            &[2; 16],
+            ReplaySeed::uniform(wifi::security::PacketNumber::new(1).unwrap()),
+        )
+        .unwrap();
     let next = driver.station().association_epoch().unwrap();
     driver.authorize_port(next).unwrap();
     incoming(&model, &data(true), Some((1, 2, 1)), false);
@@ -678,7 +666,7 @@ fn actual_roc_expiring_during_native_packet_preparation_never_publishes() {
     assert!(!model.memory.lock().unwrap().mappings.is_empty());
 }
 
-fn retired_group_for_authenticated_resume() -> (
+fn retired_group_for_reinstall() -> (
     Client<Bar, Q, NativeGuard>,
     Model,
     wifi::security::KeyIdentity,
@@ -707,18 +695,18 @@ fn retired_group_for_authenticated_resume() -> (
     (driver, model, old)
 }
 #[test]
-fn actual_authenticated_gtk_resume_retains_old_identity_history_and_higher_os_rsc() {
+fn reinstalled_gtk_keeps_its_slot_and_takes_the_os_rsc() {
     for rsc in [3, 9] {
-        let (mut driver, model, old) = retired_group_for_authenticated_resume();
+        let (mut driver, model, old) = retired_group_for_reinstall();
         let seed = ReplaySeed::uniform(wifi::security::PacketNumber::new(rsc).unwrap());
-        let key = unsafe { driver.resume_group_key(2, &[2; 16], seed) }.unwrap();
+        let key = driver.install_key(false, 2, &[2; 16], seed).unwrap();
         assert_eq!(key.slot(), old.slot());
         assert_eq!(key.native_epoch(), old.native_epoch());
         assert_ne!(key.generation(), old.generation());
         driver
             .authorize_port(driver.station().association_epoch().unwrap())
             .unwrap();
-        let floor = rsc.max(7);
+        let floor = rsc;
         incoming(&model, &data(true), Some((1, 2, floor)), false);
         assert!(matches!(
             driver.poll(frontend_tick(41), &Source, &mut Policy(true)),
@@ -745,11 +733,11 @@ fn actual_authenticated_gtk_resume_retains_old_identity_history_and_higher_os_rs
     }
 }
 #[test]
-fn uncertain_actual_gtk_resume_never_authorizes_port_or_drops_real_peer_owner() {
-    let (mut driver, model, _) = retired_group_for_authenticated_resume();
+fn uncertain_gtk_install_never_authorizes_port_or_drops_real_peer_owner() {
+    let (mut driver, model, _) = retired_group_for_reinstall();
     model.response.lock().unwrap().status = 0xdead;
     assert!(matches!(
-        unsafe { driver.resume_group_key(2, &[2; 16], ReplaySeed::ZERO) },
+        driver.install_key(false, 2, &[2; 16], ReplaySeed::ZERO),
         Err(ClientError::Key(
             crate::net::wifi::mediatek::mailbox::key::Error::Firmware(0xdead)
         ))
@@ -760,7 +748,7 @@ fn uncertain_actual_gtk_resume_never_authorizes_port_or_drops_real_peer_owner() 
         Err(ClientError::WrongPhase)
     ));
     assert!(matches!(
-        unsafe { driver.resume_group_key(2, &[2; 16], ReplaySeed::ZERO) },
+        driver.install_key(false, 2, &[2; 16], ReplaySeed::ZERO),
         Err(ClientError::WrongPhase)
     ));
     // Model processes the actual install before returning its nonzero status;

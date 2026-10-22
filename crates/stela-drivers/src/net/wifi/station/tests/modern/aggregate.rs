@@ -325,7 +325,7 @@ fn malformed_shape_payload_bound_and_rfc1042_injection_never_consume_pn() {
 }
 
 #[test]
-fn ordered_qos_and_nonqos_floors_survive_same_gtk_reconnect_resume() {
+fn reinstalled_gtk_takes_per_queue_floors_from_the_os_rsc() {
     let (s, c) = current(true);
     let material = [9; 16];
     let (mut slot, k) = install(KeyScope::Group(AP), &material);
@@ -340,18 +340,18 @@ fn ordered_qos_and_nonqos_floors_survive_same_gtk_reconnect_resume() {
     unsafe {
         slot.retire_after_drain();
     }
-    // SAFETY: exact previously received GTK and authenticated real-modelRSC0;
-    // same material cannot become a transmitting or pairwise key.
-    let t = unsafe {
-        slot.begin_receive_only_resume(
+    // The OS supplies each queue's RSC from its authenticated key exchange.
+    let rsc = core::array::from_fn(|queue| PacketNumber::new(20 + queue as u64).unwrap());
+    let t = slot
+        .begin_install(
             1,
             Cipher::Ccmp128,
             &material,
-            ReplaySeed::ZERO,
+            ReplaySeed::per_queue(rsc),
             KeyScope::Group(AP),
+            TransmitSeed::RECEIVE_ONLY,
         )
-    }
-    .unwrap();
+        .unwrap();
     slot.complete_install(t, InstallOutcome::Accepted).unwrap();
     let next = slot.installed().unwrap();
     let (s, c) = current(true); // New actual association context, sameAP.

@@ -22,7 +22,6 @@
 
 use super::{Aggregation, frame::Mpdu};
 use crate::net::Mac;
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
 
@@ -82,9 +81,8 @@ impl PacketNumber {
     /// CCMP and GCMP share this eight-byte ExtIV header layout.
     pub fn from_header(header: &[u8]) -> Result<(Self, u8), Error> {
         let h: &[u8; 8] = header.get(..8).ok_or(Error::Truncated)?.try_into().unwrap();
-        if h[2] != 0 || h[3] & 0x3f != 0x20 {
-            return Err(Error::CryptoHeader);
-        }
+        // Like Linux `ccmp_hdr2pn` and `ieee80211_get_keyid`, only the PN
+        // bytes and the key ID are read.
         let value = u64::from_le_bytes([h[0], h[1], h[4], h[5], h[6], h[7], 0, 0]);
         Ok((Self(value), h[3] >> 6))
     }
@@ -186,7 +184,6 @@ pub enum Error {
     PacketNumberExhausted,
     InvalidKeyLength,
     AlreadyInstalled(KeyIdentity),
-    Reinstallation,
     KeyStillInstalled,
     Busy,
     Quarantined,
@@ -199,7 +196,6 @@ pub enum Error {
     NotProtected,
     Integrity,
     MissingPacketNumber,
-    CryptoHeader,
     InconsistentPacketNumber,
     Replay,
     Truncated,
@@ -271,37 +267,6 @@ enum State {
     Quarantined,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ReceiveHistory {
-    index: u8,
-    cipher: Cipher,
-    scope: KeyScope,
-    floor: [u64; 17],
-}
-
-#[derive(Debug)]
-struct UsedMaterial {
-    digest: [u8; 32],
-    /// None permanently prohibits resuming material ever used by a transmitting
-    /// key, or material outside the exact receive-only group-key profile.
-    receive: Option<ReceiveHistory>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PendingMaterial {
-    digest: [u8; 32],
-    key: KeyIdentity,
-    receive: ReplaySeed,
-    /// A receive-only continuation reuses its original retained history.
-    history: Option<usize>,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum InstallMode {
-    Fresh(TransmitSeed),
-    ReceiveOnlyResume,
-}
-
 /// Serialized key slot and its per-TID replay state (queue16 is non-QoS).
 /// Keep this object for the lifetime of the physical slot; recreating it while
 /// old RX/completions can still arrive would invalidate generation isolation.
@@ -313,12 +278,8 @@ pub struct KeySlot {
     state: State,
     rx_pn: [u64; 17],
     tx_pn: u64,
+    /// The digest of the pending or installed key's material.
     material_digest: Option<[u8; 32]>,
-    pending_material: Option<PendingMaterial>,
-    installed_history: Option<usize>,
-    /// Every accepted or uncertain candidate may already have used its nonce
-    /// space. Keep its identity across all later attempts in this slot owner.
-    used_materials: Vec<UsedMaterial>,
 }
 
 impl KeySlot {
@@ -329,9 +290,7 @@ impl KeySlot {
     /// vendor key table. Removal/reset of any previous key must be acknowledged;
     /// all previous DMA RX, completions and deferred key users must be drained.
     /// No other `KeySlot` may control the same physical slot concurrently.
-    /// The caller must also prevent reinstalling any previous temporal key
-    /// with reset transmit/receive counters. Preserve this object for retries;
-    /// a recreated owner requires a genuinely fresh authenticated key epoch.
+    /// Preserve this object for retries, so an identical reinstall is seen.
     ///
     /// ```compile_fail
     /// use stela_drivers::net::wifi::security::KeySlot;
@@ -347,12 +306,12 @@ impl KeySlot {
             rx_pn: [0; 17],
             tx_pn: 0,
             material_digest: None,
-            pending_material: None,
-            installed_history: None,
-            used_materials: Vec::new(),
         })
     }
 
+    /// Begin installing a key. A group key is receive-only and takes the RSC
+    /// the OS learned in its authenticated key exchange, including when the
+    /// same GTK is installed again after a reconnect.
     pub fn begin_install(
         &mut self,
         index: u8,
@@ -362,68 +321,6 @@ impl KeySlot {
         scope: KeyScope,
         transmit: TransmitSeed,
     ) -> Result<InstallTicket, Error> {
-        self.begin_install_inner(
-            index,
-            cipher,
-            material,
-            receive,
-            scope,
-            InstallMode::Fresh(transmit),
-        )
-    }
-
-    /// Continue a known receive-only GTK after actual removal and retirement.
-    /// It never authorizes transmission or resets any retained replay floor.
-    ///
-    /// # Safety
-    /// `material`, exact group/BSSID scope, cipher/index and `authenticated_rsc`
-    /// must come from this association's real authenticated OS key exchange.
-    /// Do not manufacture an RSC, use a copied installation receipt as handshake
-    /// authority, or call this for a transmitting key. The caller must preserve
-    /// this slot/history through reconnect. Actual removal/drain is independently
-    /// required by `retire_after_drain`; uncertainty stays quarantined until then.
-    /// A new generation becomes usable only after actual matching install ACK.
-    ///
-    /// ```compile_fail
-    /// use stela_drivers::net::{Mac, wifi::security::{KeySlot, Cipher, KeyScope, ReplaySeed}};
-    /// let mut slot = unsafe { KeySlot::new(7).unwrap() };
-    /// slot.begin_receive_only_resume(2, Cipher::Ccmp128, &[0; 16],
-    ///     ReplaySeed::ZERO, KeyScope::Group(Mac([2, 0, 0, 0, 0, 1])));
-    /// ```
-    pub unsafe fn begin_receive_only_resume(
-        &mut self,
-        index: u8,
-        cipher: Cipher,
-        material: &[u8],
-        authenticated_rsc: ReplaySeed,
-        scope: KeyScope,
-    ) -> Result<InstallTicket, Error> {
-        if !matches!(scope, KeyScope::Group(_)) {
-            return Err(Error::WrongNonceOwner);
-        }
-        self.begin_install_inner(
-            index,
-            cipher,
-            material,
-            authenticated_rsc,
-            scope,
-            InstallMode::ReceiveOnlyResume,
-        )
-    }
-
-    fn begin_install_inner(
-        &mut self,
-        index: u8,
-        cipher: Cipher,
-        material: &[u8],
-        mut receive: ReplaySeed,
-        scope: KeyScope,
-        mode: InstallMode,
-    ) -> Result<InstallTicket, Error> {
-        let (transmit, resume) = match mode {
-            InstallMode::Fresh(transmit) => (transmit, false),
-            InstallMode::ReceiveOnlyResume => (TransmitSeed::RECEIVE_ONLY, true),
-        };
         if index > 3 || (matches!(scope, KeyScope::Pairwise(_)) && index > 1) {
             return Err(Error::InvalidKeyIndex);
         }
@@ -441,68 +338,28 @@ impl KeySlot {
             return Err(Error::InvalidKeyLength);
         }
         let digest: [u8; 32] = Sha256::digest(material).into();
-        // Linux key.c::ieee80211_key_identical prevents reinstalling an
-        // identical temporal key. Do not reset nonce/replay state on a retry.
-        if self
-            .material_digest
-            .as_ref()
-            .is_some_and(|old| same_digest(&digest, old))
-        {
-            if let State::Installed(key) = self.state
-                && key.index == index
-                && key.cipher == cipher
-                && key.scope == scope
-                && key.nonce_owner == transmit.owner()
+        match self.state {
+            // Linux `ieee80211_key_link`: reinstalling the identical key
+            // changes nothing, so its nonce and replay state never reset.
+            State::Installed(key)
+                if key.index == index
+                    && key.cipher == cipher
+                    && key.scope == scope
+                    && self
+                        .material_digest
+                        .is_some_and(|old| same_digest(&digest, &old)) =>
             {
                 return Err(Error::AlreadyInstalled(key));
             }
-            if !resume {
-                return Err(Error::Reinstallation);
-            }
-        }
-        let history = self
-            .used_materials
-            .iter()
-            .enumerate()
-            .fold(None, |found, (index, old)| {
-                if same_digest(&digest, &old.digest) {
-                    Some(index)
-                } else {
-                    found
-                }
-            });
-        if resume {
-            let old = history
-                .and_then(|index| self.used_materials[index].receive)
-                .ok_or(Error::Reinstallation)?;
-            if old.index != index
-                || old.cipher != cipher
-                || old.scope != scope
-                || transmit.owner() != NonceOwner::ReceiveOnly
-            {
-                return Err(Error::Reinstallation);
-            }
-            for (seed, floor) in receive.0.iter_mut().zip(old.floor) {
-                *seed = (*seed).max(floor);
-            }
-        } else if history.is_some() {
-            return Err(Error::Reinstallation);
-        }
-        match self.state {
             State::Installed(_) => return Err(Error::KeyStillInstalled),
             State::Pending(_) => return Err(Error::Busy),
             State::Quarantined => return Err(Error::Quarantined),
-            _ => (),
+            State::Empty => (),
         }
         let generation = self
             .generation
             .checked_add(1)
             .ok_or(Error::GenerationExhausted)?;
-        // Reserve before a ticket can reach hardware. Any accepted/uncertain
-        // completion or later drain must retain this digest without allocating.
-        self.used_materials
-            .try_reserve(usize::from(history.is_none()))
-            .map_err(|_| Error::NoMemory)?;
         self.generation = generation;
         let key = KeyIdentity {
             slot: self.slot,
@@ -515,18 +372,7 @@ impl KeySlot {
         };
         // Invalidate the old binding before a command can change hardware state.
         self.state = State::Pending(key);
-        self.installed_history = None;
-        if let Some(index) = history {
-            // An authenticated RSC is a learned floor even if this particular
-            // hardware attempt is rejected. A later retry must not regress it.
-            self.used_materials[index].receive.as_mut().unwrap().floor = receive.0;
-        }
-        self.pending_material = Some(PendingMaterial {
-            digest,
-            key,
-            receive,
-            history,
-        });
+        self.material_digest = Some(digest);
         Ok(InstallTicket {
             key,
             receive,
@@ -548,19 +394,13 @@ impl KeySlot {
             InstallOutcome::Accepted => {
                 self.rx_pn = ticket.receive.0;
                 self.tx_pn = ticket.transmit.initial_counter().value();
-                self.material_digest = self.pending_material.map(|pending| pending.digest);
-                self.installed_history = self.retain_pending_material();
                 State::Installed(ticket.key)
             }
             InstallOutcome::RejectedAndEmpty => {
-                self.pending_material = None;
-                self.installed_history = None;
+                self.material_digest = None;
                 State::Empty
             }
-            InstallOutcome::Uncertain => {
-                let _ = self.retain_pending_material();
-                State::Quarantined
-            }
+            InstallOutcome::Uncertain => State::Quarantined,
         };
         Ok(())
     }
@@ -577,37 +417,7 @@ impl KeySlot {
     /// Use `retire_after_drain` after acknowledgement and old RX/work retirement.
     pub fn invalidate(&mut self) {
         self.state = State::Quarantined;
-        self.installed_history = None;
-    }
-
-    fn retain_pending_material(&mut self) -> Option<usize> {
-        if let Some(pending) = self.pending_material.take() {
-            if let Some(index) = pending.history {
-                return Some(index);
-            }
-            // begin_install reserved space before issuing the only pending
-            // ticket; this push cannot need an allocation at completion/drain.
-            let receive = if pending.key.nonce_owner == NonceOwner::ReceiveOnly
-                && matches!(pending.key.scope, KeyScope::Group(_))
-            {
-                Some(ReceiveHistory {
-                    index: pending.key.index,
-                    cipher: pending.key.cipher,
-                    scope: pending.key.scope,
-                    floor: pending.receive.0,
-                })
-            } else {
-                None
-            };
-            let index = self.used_materials.len();
-            self.used_materials.push(UsedMaterial {
-                digest: pending.digest,
-                receive,
-            });
-            Some(index)
-        } else {
-            None
-        }
+        self.material_digest = None;
     }
 
     /// # Safety
@@ -615,14 +425,8 @@ impl KeySlot {
     /// completions and deferred key users drained. The caller retains this
     /// slot's monotonically increasing generation across subsequent installs.
     pub unsafe fn retire_after_drain(&mut self) {
-        // Drain proves no remaining users, not that an unacknowledged key was
-        // never used. This also covers invalidating/draining a pending command
-        // before complete_install can report its final outcome.
-        let _ = self.retain_pending_material();
         self.state = State::Empty;
-        self.installed_history = None;
-        // Retain all possibly-used material identities: device reset is not
-        // permission to restart an older key's transmit/replay counters.
+        self.material_digest = None;
     }
 
     /// Validate one non-aggregated, non-fragmented protected data MPDU and
@@ -704,11 +508,6 @@ impl KeySlot {
             return Err(Error::Replay);
         }
         self.rx_pn[queue] = pn.0;
-        if let Some(history) = self.installed_history
-            && let Some(receive) = self.used_materials[history].receive.as_mut()
-        {
-            receive.floor[queue] = pn.0;
-        }
         Ok(())
     }
 }
@@ -947,114 +746,40 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_first_firmware_key_stays_burned_after_actual_retirement() {
+    fn only_the_installed_key_is_compared_for_reinstallation() {
         let mut slot = slot(7);
-        let ticket = begin_firmware_key(&mut slot, 0xb1).unwrap();
-        slot.complete_install(ticket, InstallOutcome::Uncertain)
+        let first = begin_firmware_key(&mut slot, 0xa0).unwrap();
+        slot.complete_install(first, InstallOutcome::Accepted)
             .unwrap();
-        assert_eq!(slot.installed(), None);
-        drain_model(&mut slot);
+        // An identical install changes nothing; another key needs removal first.
+        assert_eq!(
+            begin_firmware_key(&mut slot, 0xa0),
+            Err(Error::AlreadyInstalled(first.identity()))
+        );
         assert_eq!(
             begin_firmware_key(&mut slot, 0xb1),
-            Err(Error::Reinstallation)
+            Err(Error::KeyStillInstalled)
         );
-        // A fabricated different counter/owner is not a firmware PN snapshot.
-        assert_eq!(
-            slot.begin_install(
-                0,
-                Cipher::Ccmp128,
-                &[0xb1; 16],
-                ReplaySeed::uniform(PacketNumber(9)),
-                KeyScope::Pairwise(Mac([2, 0, 0, 0, 0, 1])),
-                TransmitSeed::host(PacketNumber(17))
-            ),
-            Err(Error::Reinstallation)
-        );
+        slot.invalidate();
         drain_model(&mut slot);
-        assert_eq!(
-            begin_firmware_key(&mut slot, 0xb1),
-            Err(Error::Reinstallation)
-        );
+        // After removal, as in Linux, any key installs with fresh counters.
+        let again = begin_firmware_key(&mut slot, 0xa0).unwrap();
+        assert!(again.identity().generation() > first.identity().generation());
+        slot.complete_install(again, InstallOutcome::Uncertain)
+            .unwrap();
+        assert_eq!(begin_firmware_key(&mut slot, 0xc2), Err(Error::Quarantined));
+        drain_model(&mut slot);
+        let rejected = begin_firmware_key(&mut slot, 0xc2).unwrap();
+        slot.complete_install(rejected, InstallOutcome::RejectedAndEmpty)
+            .unwrap();
         let fresh = begin_firmware_key(&mut slot, 0xc2).unwrap();
-        assert!(fresh.identity().generation() > ticket.identity().generation());
         slot.complete_install(fresh, InstallOutcome::Accepted)
             .unwrap();
         assert_eq!(slot.installed(), Some(fresh.identity()));
     }
 
     #[test]
-    fn uncertain_replacement_retains_both_previous_confirmed_and_candidate_guard() {
-        let mut slot = slot(7);
-        let confirmed = begin_firmware_key(&mut slot, 0xa0).unwrap();
-        slot.complete_install(confirmed, InstallOutcome::Accepted)
-            .unwrap();
-        slot.invalidate();
-        drain_model(&mut slot);
-        let replacement = begin_firmware_key(&mut slot, 0xb1).unwrap();
-        slot.complete_install(replacement, InstallOutcome::Uncertain)
-            .unwrap();
-        drain_model(&mut slot);
-        for material in [0xa0, 0xb1] {
-            assert_eq!(
-                begin_firmware_key(&mut slot, material),
-                Err(Error::Reinstallation)
-            );
-        }
-        assert_eq!(slot.installed(), None);
-        assert!(matches!(
-            slot.authorize(&packet(confirmed.identity(), 1, None)),
-            Err(Error::NoInstalledKey)
-        ));
-        let fresh = begin_firmware_key(&mut slot, 0xc2).unwrap();
-        slot.complete_install(fresh, InstallOutcome::Accepted)
-            .unwrap();
-        slot.invalidate();
-        drain_model(&mut slot);
-        assert_eq!(
-            begin_firmware_key(&mut slot, 0xb1),
-            Err(Error::Reinstallation)
-        );
-    }
-
-    #[test]
-    fn later_uncertainty_and_rejection_cannot_erase_prior_uncertain_material() {
-        let mut slot = slot(7);
-        let confirmed = begin_firmware_key(&mut slot, 0xa0).unwrap();
-        slot.complete_install(confirmed, InstallOutcome::Accepted)
-            .unwrap();
-        slot.invalidate();
-        drain_model(&mut slot);
-        for material in [0xb1, 0xc2] {
-            let uncertain = begin_firmware_key(&mut slot, material).unwrap();
-            slot.complete_install(uncertain, InstallOutcome::Uncertain)
-                .unwrap();
-            drain_model(&mut slot);
-        }
-        let rejected = begin_firmware_key(&mut slot, 0xd3).unwrap();
-        slot.complete_install(rejected, InstallOutcome::RejectedAndEmpty)
-            .unwrap();
-        drain_model(&mut slot);
-        for material in [0xa0, 0xb1, 0xc2] {
-            assert_eq!(
-                begin_firmware_key(&mut slot, material),
-                Err(Error::Reinstallation)
-            );
-        }
-        let fresh = begin_firmware_key(&mut slot, 0xd3).unwrap();
-        slot.complete_install(fresh, InstallOutcome::Accepted)
-            .unwrap();
-        slot.invalidate();
-        drain_model(&mut slot);
-        for material in [0xb1, 0xc2, 0xd3] {
-            assert_eq!(
-                begin_firmware_key(&mut slot, material),
-                Err(Error::Reinstallation)
-            );
-        }
-    }
-
-    #[test]
-    fn invalidating_pending_install_before_ack_preserves_its_possible_nonce_use() {
+    fn invalidating_a_pending_install_refuses_its_late_acknowledgement() {
         for invalidate_first in [false, true] {
             let mut slot = slot(7);
             let pending = begin_firmware_key(&mut slot, 0xb1).unwrap();
@@ -1066,11 +791,7 @@ mod tests {
                 slot.complete_install(pending, InstallOutcome::Accepted),
                 Err(Error::StaleAcknowledgement)
             );
-            assert_eq!(
-                begin_firmware_key(&mut slot, 0xb1),
-                Err(Error::Reinstallation)
-            );
-            assert!(begin_firmware_key(&mut slot, 0xc2).is_ok());
+            assert!(begin_firmware_key(&mut slot, 0xb1).is_ok());
         }
     }
 
@@ -1162,22 +883,6 @@ mod tests {
             slot.authorize(&packet(key, 10, None)),
             Err(Error::Replay)
         ));
-        slot.invalidate();
-        // Explicit quiescence does not grant permission for counter reset.
-        unsafe {
-            slot.retire_after_drain();
-        }
-        assert_eq!(
-            slot.begin_install(
-                2,
-                Cipher::Ccmp128,
-                &[0x42; 16],
-                ReplaySeed::ZERO,
-                KeyScope::Group(Mac([2, 0, 0, 0, 0, 1])),
-                TransmitSeed::RECEIVE_ONLY
-            ),
-            Err(Error::Reinstallation)
-        );
     }
 
     #[test]
@@ -1377,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn ccmp_header_layout_bounds_and_reserved_bits() {
+    fn ccmp_header_layout_and_bounds() {
         assert_eq!(
             PacketNumber::from_header(&[0x66, 0x55, 0, 0xa0, 0x44, 0x33, 0x22, 0x11]),
             Ok((PacketNumber(0x112233445566), 2))
@@ -1389,11 +1094,10 @@ mod tests {
                 Err(Error::Truncated)
             );
         }
-        for (offset, value) in [(2, 1), (3, 0), (3, 0x21)] {
-            let mut hdr = [0; 8];
-            hdr[3] = 0x20;
-            hdr[offset] = value;
-            assert_eq!(PacketNumber::from_header(&hdr), Err(Error::CryptoHeader));
-        }
+        // Linux reads only the PN bytes and key ID; reserved bits are ignored.
+        assert_eq!(
+            PacketNumber::from_header(&[1, 0, 0xff, 0x5f, 0, 0, 0, 0]),
+            Ok((PacketNumber(1), 1))
+        );
     }
 }

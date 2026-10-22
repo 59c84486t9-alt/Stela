@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn nonce_owner_cannot_change_by_reinstalling_an_identical_key() {
+    fn reinstalling_an_identical_key_keeps_its_nonce_owner() {
         let (mut slot, key) = installed(TransmitSeed::host(PacketNumber(100)));
         assert_eq!(
             slot.begin_install(
@@ -233,7 +233,7 @@ mod tests {
                 key.scope(),
                 TransmitSeed::FIRMWARE_FRESH
             ),
-            Err(Error::Reinstallation)
+            Err(Error::AlreadyInstalled(key))
         );
         assert_eq!(slot.host_tx_counter(key).unwrap().value(), 100);
         slot.invalidate();

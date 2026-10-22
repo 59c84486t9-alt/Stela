@@ -398,12 +398,11 @@ mod tests {
             // header + IV + pad + reported tail
             assert!(normalize(metadata, &raw[..length], 0, true).is_err());
         }
-        let mut bad_iv = raw.clone();
-        bad_iv[26] = 1;
-        assert!(matches!(
-            normalize(metadata, &bad_iv, 0, true),
-            Err(Error::PacketNumber)
-        ));
+        // Like mac80211, the reserved CCMP header byte is not read.
+        let mut reserved = raw.clone();
+        reserved[26] = 1;
+        let normalized = normalize(metadata, &reserved, 0, true).unwrap();
+        assert_eq!(normalized.frame.security.pn.unwrap().value(), 1);
         let mut control = raw.clone();
         control[..2].copy_from_slice(&0x40c4u16.to_le_bytes());
         control[10..18].copy_from_slice(&[1, 0, 0, 0x20, 0, 0, 0, 0]);

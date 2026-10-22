@@ -26,7 +26,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// # Safety
     /// The exact-controller, policy retention and revocation requirements of
     /// `configure_modern` apply to both actual BSS and key command publication.
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn install_key_modern<
         H: wifi::regulatory::HardwarePolicy,
         O: wifi::regulatory::OsPolicy,
@@ -39,40 +38,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         material: &[u8],
         seed: ReplaySeed,
     ) -> Result<KeyIdentity, Error> {
-        unsafe { self.modern_key(authority, admission, pairwise, index, material, seed, false) }
+        unsafe { self.modern_key(authority, admission, pairwise, index, material, seed) }
     }
 
-    /// Explicit authenticated same-GTK continuation, retaining the original
-    /// canonical material history and all17 replay floors.
-    ///
-    /// # Safety
-    /// The `resume_group_key` actual authenticated exchange/old-user-retirement
-    /// contract AND `configure_modern` same physical policy contract both apply.
-    pub unsafe fn resume_group_key_modern<
-        H: wifi::regulatory::HardwarePolicy,
-        O: wifi::regulatory::OsPolicy,
-    >(
-        &mut self,
-        authority: &mut wifi::regulatory::Owner<H, O>,
-        admission: wifi::regulatory::AssociationAdmission,
-        index: u8,
-        material: &[u8],
-        authenticated_rsc: ReplaySeed,
-    ) -> Result<KeyIdentity, Error> {
-        unsafe {
-            self.modern_key(
-                authority,
-                admission,
-                false,
-                index,
-                material,
-                authenticated_rsc,
-                true,
-            )
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
     unsafe fn modern_key<H: wifi::regulatory::HardwarePolicy, O: wifi::regulatory::OsPolicy>(
         &mut self,
         authority: &mut wifi::regulatory::Owner<H, O>,
@@ -81,7 +49,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         index: u8,
         material: &[u8],
         seed: ReplaySeed,
-        resume: bool,
     ) -> Result<KeyIdentity, Error> {
         let s = self.state_mut();
         if s.phase != Phase::Associated {
@@ -132,13 +99,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         *current_profile = Some(profile);
                     }
                     let mailbox = controller.state_mut().mailbox.as_mut().unwrap();
-                    let result = if resume {
-                        // SAFETY: inherited exact authenticated continuation; the
-                        // same original material borrow creates ticket and bytes.
-                        key.resume_receive_only(mailbox, index, cipher, material, seed)
-                    } else {
-                        key.install(mailbox, index, cipher, material, seed)
-                    };
+                    let result = key.install(mailbox, index, cipher, material, seed);
                     if !key.is_quarantined() {
                         *phase = Phase::Associated;
                     }
