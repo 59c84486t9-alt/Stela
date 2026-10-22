@@ -82,8 +82,7 @@ pub fn configure(build: &mut cc::Build) {
         "xe/regs/xe_regs.h",
         "xe/regs/xe_reg_defs.h",
         "xe/regs/xe_reg_type.h",
-        "i915/gt/intel_gpu_commands.h",
-        "i915/gt/intel_batch_emit.h",
+        "i915/gt",
     ] {
         println!("cargo:rerun-if-changed={source}/{path}");
     }

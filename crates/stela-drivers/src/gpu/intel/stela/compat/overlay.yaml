@@ -10,6 +10,15 @@ roots:
   - {type: file, name: ../../../common/linux/include/drm/drm_device.h, external-contents: drm/drm_device.h} # sha256:e1e5cef551ef6d051856baabf77d241d10899e1c9b85d4f992b554791ebcb50c
   - {type: file, name: ../../../common/linux/include/drm/drm_managed.h, external-contents: drm/drm_managed.h} # sha256:18c8af7e58168c5e5cb9d3a66ff75975219c8d9895e6946eb38f3951779d3707
   - {type: file, name: ../../../common/linux/include/drm/drm_print.h, external-contents: drm/drm_print.h} # sha256:00c6b2883e81ed9a986b7226861cef2922473e5e3cb48b0b2c551269d11dcb95
+  - {type: file, name: ../../i915/i915_drv.h, external-contents: i915/i915_drv.h} # sha256:9474f2666449dc78bb97c4b22a7e14279c3182b49c90d4a73df5a9b4c6b71620
+  - {type: file, name: ../../i915/i915_gem.h, external-contents: i915/i915_gem.h} # sha256:97c63eba5158c4a41cc51ff68117d7beebfb1cc09d3dbcab7a223917fa791159
+  - {type: file, name: ../../i915/i915_request.h, external-contents: i915/i915_request.h} # sha256:628ac4266f3f43ec878af2a2b00ca749aad37224980dc9c494555c27073a68d9
+  - {type: file, name: ../../i915/intel_uncore.h, external-contents: i915/intel_uncore.h} # sha256:f7eb9fab5de3ea62fa36f857f14d16a171fb8cc8e1034628e8552bfa8423b36a
+  - {type: file, name: ../../i915/gt/intel_engine.h, external-contents: i915/gt/intel_engine.h} # sha256:d07100bbdd00a2874b19851134c56b56c448df0219be67acb01e89ab3ed996cc
+  - {type: file, name: ../../i915/gt/intel_engine_types.h, external-contents: i915/gt/intel_engine_types.h} # sha256:47b77f01148818361cf0f0c02bb40fd6420b06941d6e06516e9447f3146b6a62
+  - {type: file, name: ../../i915/gt/intel_gt.h, external-contents: i915/gt/intel_gt.h} # sha256:74be24390462209952217f05d61be0793a2b2d6aad1d4867a84ee40711c3c855
+  - {type: file, name: ../../i915/gt/intel_lrc.h, external-contents: i915/gt/intel_lrc.h} # sha256:e71534746b6f6720c978c0096316c51873f5afc2974d94cd4979303384a6f5b3
+  - {type: file, name: ../../i915/gt/intel_ring.h, external-contents: i915/gt/intel_ring.h} # sha256:2057ac91d51ef486292595390de04e7e3435acafc2fa35a237de3bfd7b23c035
   - {type: file, name: ../../../common/linux/include/linux/bitfield.h, external-contents: linux/bitfield.h} # sha256:46c21a28fda259f46b3997c36d66ebc6ba4eb8901220bd479ff709d4cc0ae6d5
   - {type: file, name: ../../../common/linux/include/linux/bitops.h, external-contents: linux/bitops.h} # sha256:fdee528a2e2a17a568d305dd40cfa6f1bea510e155a0ed32df53bfda47a45209
   - {type: file, name: ../../../common/linux/include/linux/bits.h, external-contents: linux/bits.h} # sha256:fec9de74956535b6664b36ef4e1b0399af0cdc63e50002dbe83c09e1c066825f
@@ -24,8 +33,10 @@ roots:
   - {type: file, name: ../../../common/linux/include/linux/log2.h, external-contents: linux/log2.h} # sha256:e0b06d79199b142aed20ed052677f52a6f7e3dc58eeea421ecd677faa83acc0b
   - {type: file, name: ../../../common/linux/include/linux/math.h, external-contents: linux/math.h} # sha256:e0437f2850ef21b25d7f574830d2213cfc97441883624577d7bf1fd7e61adcf1
   - {type: file, name: ../../../common/linux/include/linux/minmax.h, external-contents: linux/minmax.h} # sha256:1bf125042d9ef0c1892a99d1db8daf85171dd21e2afbe7f99f60a2df97488aa9
+  - {type: file, name: ../../../common/linux/include/linux/mm.h, external-contents: linux/mm.h} # sha256:9afc342cd0c0135f8a05d030265404a4f80be211166ea748ebdc2a994d73a342
   - {type: file, name: ../../../common/linux/include/linux/module.h, external-contents: linux/module.h} # sha256:5fc2b60606c87968c5f4c2b1a5a690834206879f40a74d2ac12b59256e3a3ab3
   - {type: file, name: ../../../common/linux/include/linux/pagewalk.h, external-contents: linux/pagewalk.h} # sha256:ea7d507f5db2f0ca4d48036091d5b9c1144d3b09e4232fc3d817c3b29ee8110f
+  - {type: file, name: ../../../common/linux/include/linux/rcupdate.h, external-contents: linux/rcupdate.h} # sha256:d2d7cf066082a4e44a0bb5317a8791bdffc797638c2c6daffd48fbdfff43afe9
   - {type: file, name: ../../../common/linux/include/linux/sprintf.h, external-contents: linux/sprintf.h} # sha256:72a0226d5631211916ccce67a50033e53f0bba043ca39823d4f346179ecff9df
   - {type: file, name: ../../../common/linux/include/linux/stddef.h, external-contents: linux/stddef.h} # sha256:be64ec13fdb2d724c1830ebcd04854612ccab9593e2d829011c8352f73a378b2
   - {type: file, name: ../../../common/linux/include/linux/string.h, external-contents: linux/string.h} # sha256:4dbc380b35f81d4e3992abae48fbb23b4f392fd28f633d0d96114be166d5dfd5

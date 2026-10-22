@@ -31,8 +31,7 @@ OBJECTS := $(BUILD)/xe_pt_walk.o $(BUILD)/pt_walk.o $(BUILD)/commands.o $(BUILD)
 HEADERS := $(wildcard $(SOURCE)/*.h $(SOURCE)/../xe/xe_pt_walk.h \
              $(SOURCE)/../xe/xe_ring_emit.h $(SOURCE)/../xe/instructions/*.h \
              $(SOURCE)/../xe/xe_guc_ct_message.h $(SOURCE)/../xe/abi/*.h \
-             $(SOURCE)/../xe/regs/xe_guc_ct_regs.h $(SOURCE)/../i915/gt/intel_gpu_commands.h \
-             $(SOURCE)/../i915/gt/intel_batch_emit.h)
+             $(SOURCE)/../xe/regs/xe_guc_ct_regs.h $(SOURCE)/../i915/gt/intel_gpu_commands.h)
 MESA_SOURCE ?= $(abspath $(SOURCE)/../../common/mesa)
 MESA_BUILD ?=
 PYTHON ?= python3
