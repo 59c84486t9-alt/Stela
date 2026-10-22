@@ -54,8 +54,8 @@ impl AppleDevices {
         // physical resource. Only the actual prepared owner can supply this
         // subview; a bare overlap or matching name never qualifies it.
         let mut shared: Vec<crate::platform::apple::bus::SharedView> = Vec::new();
-        if let Some(device) = self.memory_controller
-            && let Some(owner) = self.bus.device::<memory_resources::Prepared>(device)
+        if let Some(device) = self.memory_publication.or(self.memory_controller)
+            && let Some(owner) = memory_resources::resource_for(&self.bus, device)
         {
             let (bank_start, bank_bytes, bank_offset) = owner.publication_binding();
             let bank_end = bank_start + bank_bytes;
@@ -93,10 +93,7 @@ impl AppleDevices {
             let inside = physical + bytes <= end && end - start > bytes;
             if !inside
                 || children.contains(&owner)
-                || self
-                    .bus
-                    .device::<memory_resources::Prepared>(owner)
-                    .is_some()
+                || memory_resources::resource_for(&self.bus, owner).is_some()
             {
                 continue;
             }

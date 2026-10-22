@@ -10,7 +10,7 @@ impl super::super::AppleDevices {
     /// registered RAM, stopped-worker reads, PMP services and source policy.
     /// A failed placement leaves the bus and its existing lock owner intact.
     pub fn add_memory_resources(&mut self, owner: Prepared) -> Result<(), alloc::string::String> {
-        if self.memory_controller.is_some() {
+        if self.memory_controller.is_some() || self.memory_publication.is_some() {
             return Err("memory controller already has an actual owner".into());
         }
         if owner.ram.is_none() {

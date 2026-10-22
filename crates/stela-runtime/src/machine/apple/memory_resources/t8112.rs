@@ -291,6 +291,30 @@ impl MmioDevice for Prepared {
     }
 }
 
+impl crate::machine::apple::AppleDevices {
+    /// Place the supplied DCS/PTD storage without changing AMCC locks or
+    /// admitting the remaining cache/PMP/IRQ requirements of a whole mount.
+    pub fn add_t8112_memory_resources(
+        &mut self,
+        owner: Prepared,
+    ) -> Result<(), alloc::string::String> {
+        if self.memory_publication.is_some()
+            || self
+                .memory_controller
+                .is_some_and(|id| super::resource_for(&self.bus, id).is_some())
+        {
+            return Err("memory publication storage is already installed".into());
+        }
+        let bindings = owner.bindings();
+        let id = self
+            .bus
+            .install(alloc::boxed::Box::new(owner), &bindings)
+            .map_err(|error| alloc::format!("T8112 DCS/PTD placement: {error:?}"))?;
+        self.memory_publication = Some(id);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,12 +441,13 @@ mod tests {
         let publication = owner.publication_bank().clone();
         assert!(local.owns(&publication));
         assert!(!local.owns(owner_for_other_bank().publication_bank()));
-        let bindings = owner.bindings();
         let update = owner
             .display_publication_view(PTD + ptd::UPDATE_OFFSET, 0x4000)
             .unwrap();
         let mut board = AppleDevices::new();
-        let id = board.bus.install(Box::new(owner), &bindings).unwrap();
+        board.add_t8112_memory_resources(owner).unwrap();
+        let id = board.memory_publication.unwrap();
+        assert!(board.memory_controller.is_none());
         assert_eq!(
             board.bus.route(PTD + 255 * 16, Width::Double),
             Ok((id, PTD_OFFSET + 255 * 16))
@@ -460,9 +485,9 @@ mod tests {
             resource.display_publication_view(update.0, update.1),
             Ok(update)
         );
-        let pair = resource
-            .read_pair_values(PTD_OFFSET + 255 * 16, 8, &mut access)
-            .unwrap();
+        let pair = board.read_pair(0, PTD + 255 * 16, 8, 7).unwrap().unwrap();
+        pair.settlement.unwrap();
+        let pair = pair.values;
         assert_eq!(pair[0], 0x1234);
         assert_ne!(pair[1] & 2, 0);
         assert_eq!(local.asserted(), 0);
@@ -474,6 +499,7 @@ mod tests {
                 & 3,
             0
         );
+        let resource = super::super::resource_for(&board.bus, id).unwrap();
         for (offset, bytes) in [
             (PTD_OFFSET + 256 * 16, 8),
             (PTD_OFFSET + 8, 8),
@@ -489,6 +515,55 @@ mod tests {
             );
         }
         assert!(latch.take_aic_inputs().is_empty());
+    }
+    #[test]
+    fn placement_keeps_actual_amcc_lock_identity_and_refuses_a_second_publication_owner() {
+        let mut board = AppleDevices::new();
+        let reg = |offset| amcc::Register {
+            offset,
+            mask: u32::MAX,
+            value: 1,
+        };
+        let layout = amcc::Layout {
+            aperture_bytes: 0x1000,
+            planes: 1,
+            stride: 0x1000,
+            cache_status: None,
+            dram_base: 0x800000000,
+            groups: [
+                Some(amcc::LockGroup {
+                    page_size_shift: 14,
+                    lower_limit: reg(0x680),
+                    upper_limit: reg(0x684),
+                    enable: Some(reg(0x688)),
+                    write_disable: Some(reg(0x68c)),
+                    lock: Some(reg(0x690)),
+                }),
+                None,
+                None,
+                None,
+            ],
+        };
+        let programmed = amcc::ctrr_a(Some((0x800004000, 0x4000)));
+        board
+            .add_memory_controller(&[0x400000000], layout, programmed, None)
+            .unwrap();
+        let lock = board.memory_controller.unwrap();
+        board.write(0, 0x400000688, 4, 1, 0).unwrap();
+        let before = board.memory_lock();
+        assert_eq!(before, [Some((0x800004000, 0x800007fff)), None, None, None]);
+        board.add_t8112_memory_resources(owner(ram())).unwrap();
+        let publication = board.memory_publication.unwrap();
+        assert_ne!(lock, publication);
+        assert_eq!(board.memory_controller, Some(lock));
+        assert_eq!(board.memory_lock(), before);
+        assert_eq!(board.bus.route(0x400000680, Width::Word), Ok((lock, 0x680)));
+        let route = board.bus.route(PTD, Width::Double).unwrap();
+        assert_eq!(route.0, publication);
+        assert!(board.add_t8112_memory_resources(owner(ram())).is_err());
+        assert_eq!(board.memory_publication, Some(publication));
+        assert_eq!(board.bus.route(PTD, Width::Double), Ok(route));
+        assert_eq!(board.memory_lock(), before);
     }
     fn owner_for_other_bank() -> Prepared {
         owner(ram())

@@ -127,6 +127,8 @@ pub struct AppleDevices {
     reset: Option<Reset>,
     service: ServiceBatch,
     memory_controller: Option<DeviceId>,
+    /// DCS/PTD storage is separate from the AMCC lock controller.
+    memory_publication: Option<DeviceId>,
     ipi: Option<FastIpi>,
     masters: Vec<Master>,
     coprocessors: Vec<(&'static str, DeviceId)>,
@@ -471,6 +473,7 @@ impl AppleDevices {
             reset: None,
             service: ServiceBatch::default(),
             memory_controller: None,
+            memory_publication: None,
             ipi: None,
             masters: Vec::new(),
             storage_masters: Vec::new(),
@@ -2967,9 +2970,7 @@ impl Devices for AppleDevices {
         if self.bus.route(next, width).ok() != Some((device, next_offset)) {
             return Ok(None);
         }
-        if !self
-            .bus
-            .device::<memory_resources::Prepared>(device)
+        if !memory_resources::resource_for(&self.bus, device)
             .is_some_and(|owner| owner.supports_pair(offset, bytes))
         {
             return Ok(None);
@@ -2977,9 +2978,7 @@ impl Devices for AppleDevices {
         self.publish_rtc_time(now)?;
         self.settle_lifecycle(cpu, now);
         let mut access = Access::new(cpu, now, &mut self.latch);
-        let values = self
-            .bus
-            .device::<memory_resources::Prepared>(device)
+        let values = memory_resources::resource_for(&self.bus, device)
             .expect("paired read retains the prepared resource")
             .read_pair_values(offset, bytes, &mut access)
             .map_err(|reason| DeviceError::Refused(reason.into()))?;
