@@ -38,7 +38,7 @@ use core::{
     fmt,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use host::{BareHost, Config, RamRange};
+use host::{Config, RamRange};
 use stela_compiler::TargetCpu;
 use stela_loader::{
     boot_bundle,
@@ -48,7 +48,7 @@ use stela_loader::{
 };
 use stela_runtime::machine::apple::{RtcEpoch, WallClock};
 use stela_runtime::machine::{
-    Chip, Cpu, CpuProfile, Event, Machine, PeerState, Stop, Transition,
+    Chip, Cpu, CpuProfile, Event, Host, Machine, PeerState, Stop, Transition,
     apple::{AicInput, AicLayout, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
     identification::Speculation,
@@ -2312,6 +2312,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         guest_network.as_mut(),
         host_nor.as_mut(),
         &mut host_power,
+        Machine::run,
     );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
     finish(&mut machine, stop, seconds, &options.dumps, &host_power)
@@ -2334,10 +2335,12 @@ const BEAT_SECONDS: u64 = 10;
 /// Run up to `budget` blocks (0: no limit), showing what macOS prints last
 /// as the running step's detail, reporting the PE's position
 /// every [`BEAT_SECONDS`], and making ANS namespace erases durable on the
-/// host between slices and before the stop ([`erase`]).
+/// host between slices and before the stop ([`erase`]). The caller supplies
+/// its admitted execution path; reporting and host polling never select a
+/// different memory or native-entry path.
 #[allow(clippy::too_many_arguments)]
-fn run(
-    machine: &mut Machine<BareHost, AppleDevices>,
+fn run<H: Host>(
+    machine: &mut Machine<H, AppleDevices>,
     budget: u64,
     tsc_hz: u64,
     mut restore: Option<&mut restore::Experiment>,
@@ -2345,6 +2348,7 @@ fn run(
     mut guest_network: Option<&mut network::GuestNetwork>,
     mut host_nor: Option<&mut nor::HostNor>,
     host_power: &mut power::HostPowerControl,
+    mut execute: impl FnMut(&mut Machine<H, AppleDevices>, u64) -> Stop,
 ) -> Stop {
     let mut beat = (
         host::rdtsc(),
@@ -2381,7 +2385,7 @@ fn run(
         } else {
             budget.min(slice)
         };
-        let stop = machine.run(limit);
+        let stop = execute(machine, limit);
         let lines = GUEST_LINES
             .0
             .try_borrow_mut()
@@ -2584,8 +2588,8 @@ const CHAIN: usize = 6;
 
 /// `pc` and the return addresses of the frame records from `frame`,
 /// without their PACs; zero past the chain's end.
-fn call_chain<const N: usize>(
-    machine: &mut Machine<BareHost, AppleDevices>,
+fn call_chain<const N: usize, H: Host>(
+    machine: &mut Machine<H, AppleDevices>,
     pc: u64,
     mut frame: u64,
 ) -> [u64; N] {
@@ -2613,9 +2617,8 @@ const SUSPENSION_CHAIN: usize = 12;
 /// chain of the link register and the frame records, with its thread count
 /// and the seconds since the most recent of them stopped. A guest that idles
 /// without progress shows here the wait it never leaves.
-fn suspension_report(machine: &mut Machine<BareHost, AppleDevices>) {
+fn suspension_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
     const SHOWN: usize = 32;
-    use stela_runtime::machine::engine::Host;
     let now = machine.host.counter();
     let frequency = machine.cpu.read(Register::CNTFRQ_EL0).max(1);
     let suspended: Vec<_> = machine.suspended().values().copied().collect();
@@ -2680,7 +2683,7 @@ fn sample_report(samples: &mut Vec<[u64; CHAIN]>, user: u32) {
 
 /// The counter, PSTATE.DAIF and each generic timer's CTL and CVAL, which
 /// show why a PE that should sleep in WFI does not.
-fn timer_report(machine: &mut Machine<BareHost, AppleDevices>) {
+fn timer_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
     use stela_runtime::machine::timer::CHANNELS;
     let (now, timers) = machine.timer_snapshot();
     output::arguments(format_args!(
@@ -2708,7 +2711,7 @@ impl TranslatedSeen {
     /// translated variant, or that fell in the four-level guard, with the
     /// counts so far: such a guest runs correctly, through the translation
     /// helper, but slower, and may call for a different placement.
-    fn report(&mut self, machine: &Machine<BareHost, AppleDevices>) {
+    fn report<H: Host>(&mut self, machine: &Machine<H, AppleDevices>) {
         let host = host::statistics();
         let first = machine.first_translated();
         if self.reported || (first.is_none() && host.guard_faults == 0) {
@@ -2750,7 +2753,7 @@ impl ExitsSeen {
     /// that did not end in a counted exit ran out of their chain budget),
     /// the exits by `ExitKind`, and the instruction words that most often
     /// left compiled code, so the engine's exit causes can be ranked.
-    fn report(&mut self, machine: &Machine<BareHost, AppleDevices>) {
+    fn report<H: Host>(&mut self, machine: &Machine<H, AppleDevices>) {
         const SHOWN: usize = 12;
         let statistics = &machine.statistics;
         let entries = statistics.blocks - statistics.chained;
@@ -2809,7 +2812,7 @@ impl ExitsSeen {
 }
 
 /// The instruction words that most often left compiled code for the engine.
-fn exit_report(machine: &Machine<BareHost, AppleDevices>) {
+fn exit_report<H: Host>(machine: &Machine<H, AppleDevices>) {
     const SHOWN: usize = 16;
     let mut words: Vec<_> = machine
         .exit_words()
@@ -2828,7 +2831,7 @@ fn exit_report(machine: &Machine<BareHost, AppleDevices>) {
 /// wait path can be located.
 /// The frame records from `frame` on, read through the running PE's
 /// translation regime (a parked PE's kernel frames share it).
-fn frames(machine: &mut Machine<BareHost, AppleDevices>, label: &str, mut frame: u64) {
+fn frames<H: Host>(machine: &mut Machine<H, AppleDevices>, label: &str, mut frame: u64) {
     for depth in 0..16 {
         let mut record = [0u8; 16];
         if frame == 0 || !frame.is_multiple_of(8) || !machine.read_virtual(frame, &mut record) {
@@ -2843,7 +2846,7 @@ fn frames(machine: &mut Machine<BareHost, AppleDevices>, label: &str, mut frame:
 
 /// The guest virtual ranges `--dump` names, 16 bytes a line, through the
 /// stopped PE's translation regime.
-fn dump_report(machine: &mut Machine<BareHost, AppleDevices>, dumps: &[(Base, u64)]) {
+fn dump_report<H: Host>(machine: &mut Machine<H, AppleDevices>, dumps: &[(Base, u64)]) {
     for &(base, bytes) in dumps {
         let address = base.resolve(&machine.cpu.state.x);
         for line in (address..address + bytes).step_by(16) {
@@ -2861,7 +2864,7 @@ fn dump_report(machine: &mut Machine<BareHost, AppleDevices>, dumps: &[(Base, u6
     }
 }
 
-fn stack_report(machine: &mut Machine<BareHost, AppleDevices>) {
+fn stack_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
     frames(machine, "FRAME", machine.cpu.state.x[29]);
     let sp = machine.cpu.state.sp;
     for line in 0..32u64 {
@@ -2890,7 +2893,7 @@ fn stack_report(machine: &mut Machine<BareHost, AppleDevices>) {
 /// The text a general-purpose register points to, when it reads as at least
 /// eight printable characters: a guest's panic message often sits in one at
 /// a stop, while the console that would print it is off.
-fn text_report(machine: &mut Machine<BareHost, AppleDevices>) {
+fn text_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
     const LIMIT: usize = 512;
     for register in 0..29 {
         let address = machine.cpu.state.x[register];
@@ -2916,7 +2919,7 @@ fn text_report(machine: &mut Machine<BareHost, AppleDevices>) {
 
 /// The SEP's `--sep-observe` journal, printed as it fills: a graceful run
 /// keeps going past each observed request and may end at the host timeout.
-fn sep_observation_report(machine: &mut Machine<BareHost, AppleDevices>) {
+fn sep_observation_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
     for line in machine.devices.sep_observations() {
         output::arguments(format_args!("SEP OBSERVE {line}\n"));
     }
@@ -2925,7 +2928,7 @@ fn sep_observation_report(machine: &mut Machine<BareHost, AppleDevices>) {
 /// Each unsupported operation answered outside strict mode for the first
 /// time since the last report: machine effects and device accesses, then
 /// coprocessor requests answered with their firmware's error reply.
-fn unmodeled_report(machine: &mut Machine<BareHost, AppleDevices>) {
+fn unmodeled_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
     static ORDER_NOTED: AtomicBool = AtomicBool::new(false);
     let requirements = machine.take_unmodeled();
     let requests = machine.devices.take_unmodeled();
@@ -2948,7 +2951,7 @@ fn unmodeled_report(machine: &mut Machine<BareHost, AppleDevices>) {
 /// Each device register a survey answered for the first time since the last
 /// report: guest PA, width, direction, the PC and link register that first
 /// reached it, its count so far, the last value written and the refusal it replaced.
-fn survey_report(machine: &mut Machine<BareHost, AppleDevices>) {
+fn survey_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
     for record in machine.take_survey() {
         output::arguments(format_args!(
             "SURVEY pa={:#x} bytes={} {} pc={:#x} lr={:#x} count={} value={:#x}: {}\n",
@@ -2968,8 +2971,8 @@ fn survey_report(machine: &mut Machine<BareHost, AppleDevices>) {
 /// whenever it differs from the last one shown: the level-1 ranges its
 /// tables map and the outermost mapped 32 MiB, which decide whether a
 /// four-level host's upper window can lie below the guest's mappings.
-fn occupancy_report(
-    machine: &mut Machine<BareHost, AppleDevices>,
+fn occupancy_report<H: Host>(
+    machine: &mut Machine<H, AppleDevices>,
     last: &mut Option<stela_runtime::machine::engine::Occupancy>,
 ) {
     let Some(now) = machine.upper_occupancy() else {
@@ -3005,8 +3008,8 @@ fn general_registers(cpu: &Cpu) {
 /// compiled instructions and stored blocks then, for the `compiled` blocks
 /// compiled since: nanoseconds per block and per guest
 /// instruction, and the blocks the translation store gave. The new `last`.
-fn translation_report(
-    machine: &Machine<BareHost, AppleDevices>,
+fn translation_report<H: Host>(
+    machine: &Machine<H, AppleDevices>,
     last: (u64, u64, u64),
     compiled: u64,
 ) -> (u64, u64, u64) {
@@ -3035,7 +3038,7 @@ fn translation_report(
 /// Where every PE is: `R` running, `-` held in reset, `d` powered down,
 /// or a parked PE's PC and its wait (`i` WFI, `e` WFE, `p` preempted), with
 /// the switch count.
-fn peers_report(machine: &Machine<BareHost, AppleDevices>) {
+fn peers_report<H: Host>(machine: &Machine<H, AppleDevices>) {
     output::arguments(format_args!("PES switches={}", machine.statistics.switches));
     for (number, state) in machine.peer_states().into_iter().enumerate() {
         match state {
@@ -3119,8 +3122,8 @@ impl fmt::Display for Registers<'_> {
     }
 }
 
-fn finish(
-    machine: &mut Machine<BareHost, AppleDevices>,
+fn finish<H: Host>(
+    machine: &mut Machine<H, AppleDevices>,
     stop: Stop,
     seconds: f64,
     dumps: &[(Base, u64)],
