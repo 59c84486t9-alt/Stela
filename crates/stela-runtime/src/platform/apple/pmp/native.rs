@@ -10,6 +10,7 @@ use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
 
 pub mod memory;
+pub mod power;
 pub mod publication;
 pub mod registry;
 mod transport;
