@@ -606,6 +606,8 @@ struct Transfer {
     poisoned: bool,
     /// Only an acknowledged Configure Endpoint permits transfer submission.
     enabled: bool,
+    /// Bulk and interrupt TDs submitted and not yet completed or cancelled.
+    in_flight: usize,
 }
 
 struct Slot {
@@ -864,7 +866,11 @@ impl Controller {
             self.error = Some(status);
         }
         while let Some(event) = self.next_event() {
-            if event.kind() == TRANSFER_EVENT || event.kind() == COMMAND_COMPLETION {
+            // A transfer event for a slot no longer enabled has no waiter.
+            let stale = event.kind() == TRANSFER_EVENT
+                && self.slot_ownership.get(usize::from(event.slot()))
+                    != Some(&reset::Ownership::Enabled);
+            if !stale && matches!(event.kind(), TRANSFER_EVENT | COMMAND_COMPLETION) {
                 self.pending.push(event);
             }
         }
@@ -1006,6 +1012,7 @@ impl Controller {
             is_in: false,
             poisoned: false,
             enabled: true,
+            in_flight: 0,
         });
         let input_address = input.physical();
         self.dcbaa.write(usize::from(slot) * 8, output.physical());
@@ -1462,6 +1469,7 @@ impl Controller {
                 is_in: endpoint.is_in(),
                 poisoned: false,
                 enabled: false,
+                in_flight: 0,
             });
             add |= 1 << dci;
             last = last.max(dci);
@@ -1533,6 +1541,12 @@ impl Controller {
                     "stream ID required for this endpoint",
                 ));
             }
+            // One TRB per TD; the Link TRB and the one gap that keeps a full
+            // ring from looking empty stay free.
+            if transfer.in_flight >= RING_TRBS - 2 {
+                return Err(BlockError::Unsupported("xHCI transfer ring full"));
+            }
+            transfer.in_flight += 1;
             let direction = if transfer.is_in { ISP } else { 0 };
             transfer
                 .ring
@@ -1573,6 +1587,13 @@ impl Controller {
         let Some(event) = event else {
             return self.error.map(|status| Err(BlockError::Device { status }));
         };
+        if let Some(transfer) = self
+            .slot(slot)
+            .ok()
+            .and_then(|slot| slot.endpoints[usize::from(dci)].as_mut())
+        {
+            transfer.in_flight = transfer.in_flight.saturating_sub(1);
+        }
         Some(match event.code() {
             SUCCESS | SHORT_PACKET => Ok(length.saturating_sub(event.residual())),
             status => Err(BlockError::Device { status }),
@@ -1707,6 +1728,7 @@ impl Controller {
             iso.cancelled();
         }
         endpoint.poisoned = false;
+        endpoint.in_flight = 0;
         Ok(())
     }
 
@@ -4435,6 +4457,26 @@ pub(crate) mod tests {
             assert_eq!(controller.completed(1, 3, trb, 512), None);
             assert!(controller.submit(1, 3, buffer.physical(), 512).is_ok());
         }
+    }
+
+    #[test]
+    fn a_full_transfer_ring_refuses_submission_until_cancelled() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing is exclusive live DMA throughout this test.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let buffer = dma.allocate(512, 512).unwrap();
+        for _ in 0..RING_TRBS - 2 {
+            controller.submit(1, 3, buffer.physical(), 512).unwrap();
+        }
+        assert_eq!(
+            controller.submit(1, 3, buffer.physical(), 512),
+            Err(BlockError::Unsupported("xHCI transfer ring full"))
+        );
+        model.borrow_mut().set_state(3, 1);
+        controller.cancel(1, 3).unwrap();
+        assert!(controller.submit(1, 3, buffer.physical(), 512).is_ok());
     }
 
     #[test]
