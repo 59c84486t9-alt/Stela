@@ -418,6 +418,7 @@ impl<'p, 's> Projection<'p, 's> {
                             | "cpu-map"
                             | "cpu-mask"
                             | "cpumask"
+                            | "#main-cpus"
                     ) {
                         ensure!(
                             locations.contains(&(path, p.name())),
@@ -1031,6 +1032,37 @@ mod tests {
             2
         );
     }
+
+    #[test]
+    fn interrupt_provider_cpu_count_requires_an_explicit_assigned_plan_binding() {
+        let mut f = Fixture::new();
+        f.tree.root.children.push(Node::named("aic").unwrap());
+        f.tree
+            .set_property("/aic", "#main-cpus", 10u32.to_le_bytes().to_vec())
+            .unwrap();
+        let plan = f.plan();
+        assert!(
+            Projection::prepare(&plan, &f.tree, &f.source())
+                .unwrap_err()
+                .to_string()
+                .contains("#main-cpus")
+        );
+        f.counts.push(CountField {
+            path: "/aic",
+            property: "#main-cpus",
+            count: Count::Pes,
+        });
+        let plan = f.plan();
+        let mut tree = f.tree.clone();
+        Projection::prepare(&plan, &tree, &f.source())
+            .unwrap()
+            .apply(&mut tree)
+            .unwrap();
+        assert_eq!(
+            word(tree.node("/aic").unwrap(), "#main-cpus").unwrap(),
+            plan.pes().len() as u32
+        );
+    }
     #[test]
     #[ignore = "requires immutable original 26A434 J314s DT via STELA_TEST_ASSIGNED_DT"]
     fn original_j314s_subsets_roundtrip_without_firmware_id_or_resource_extrapolation() {
@@ -1164,7 +1196,15 @@ mod tests {
                 cluster_power: power(100 + cluster.0 as u16),
             });
         }
-        let counts = Fixture::new().counts;
+        let mut counts = Fixture::new().counts;
+        // Original AppleInterruptControllerV2 reads this provider CPU count
+        // and iterates that many CPU indices (26A434 KC file0x2822dc4 and
+        // 0x282375c). It follows the same assigned PE plan as /cpus.
+        counts.push(CountField {
+            path: "/arm-io/aic",
+            property: "#main-cpus",
+            count: Count::Pes,
+        });
         for selected in [
             vec![0],
             vec![0, 1, 2, 3],
