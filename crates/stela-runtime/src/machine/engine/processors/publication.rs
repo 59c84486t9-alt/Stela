@@ -13,7 +13,11 @@ pub struct WorkerId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerBinding {
+    /// Index in the unchanged guest CPU/resource profile, independent of the
+    /// physical worker and the ordering of the publication roster.
     pub pe: usize,
+    /// Fixed physical owner. A nonzero guest boot PE may belong to BSP worker 0;
+    /// every owner must still publish and execute on its exact qualified Host.
     pub worker: WorkerId,
 }
 

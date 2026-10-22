@@ -199,15 +199,387 @@ mod tests {
     // This is the real publication state machine with non-executing owner-local
     // test Hosts. It proves lifecycle authority, not physical/native execution.
     fn hold(machine: &mut Machine<Local, Board>, owners: &mut [WorkerOwner]) -> StoppedWorkers {
-        let inventory = machine.native_publication.as_mut().unwrap();
-        let members: Vec<_> = (0..owners.len()).collect();
-        let request = inventory.request_stop(&members).unwrap();
+        let members: Vec<_> = owners.iter().map(|owner| owner.binding().pe).collect();
+        hold_members(
+            machine.native_publication.as_mut().unwrap(),
+            owners,
+            &members,
+        )
+    }
+    fn hold_members(
+        inventory: &mut publication::WorkerPublications,
+        owners: &mut [WorkerOwner],
+        members: &[usize],
+    ) -> StoppedWorkers {
+        let request = inventory.request_stop(members).unwrap();
         for command in inventory.native_stop_commands(&request).unwrap() {
-            let pe = command.binding().pe;
-            let receipt = owners[pe].invalidate(command, &mut Local(pe)).unwrap();
+            let binding = command.binding();
+            let owner = owners
+                .iter_mut()
+                .find(|owner| owner.binding() == binding)
+                .unwrap();
+            let receipt = owner
+                .invalidate(command, &mut Local(binding.worker.0))
+                .unwrap();
             inventory.accept_invalidation(receipt).unwrap();
         }
         inventory.hold_stop(request).unwrap()
+    }
+    fn release_members(
+        inventory: &mut publication::WorkerPublications,
+        owners: &mut [WorkerOwner],
+        held: StoppedWorkers,
+    ) {
+        for command in inventory.release(held).unwrap() {
+            let owner = owners
+                .iter_mut()
+                .find(|owner| owner.binding() == command.binding())
+                .unwrap();
+            inventory
+                .accept_release(owner.release(command).unwrap())
+                .unwrap();
+        }
+    }
+
+    // These Hosts model fixed physical identities, not concurrent processors or
+    // privileged native entry. Effects still require the real held owner token.
+    struct OwnerServices(Vec<WorkerOwner>);
+    impl ServiceTransport for OwnerServices {
+        fn apply(
+            &mut self,
+            local: &mut dyn Host,
+            command: publication::HostEffectCommand,
+        ) -> Result<
+            publication::HostEffectReceipt,
+            publication::WithPayload<publication::HostEffectCommand>,
+        > {
+            let binding = command.binding();
+            let owner = self
+                .0
+                .iter_mut()
+                .find(|owner| owner.binding() == binding)
+                .unwrap();
+            if binding.worker == WorkerId(0) {
+                owner.apply_host_effect(command, local)
+            } else {
+                owner.apply_host_effect(command, &mut Local(binding.worker.0))
+            }
+        }
+        fn fail_stopped(&mut self, reason: &'static str) -> ! {
+            panic!("{reason}");
+        }
+    }
+    type FirstPMachine = Machine<ServiceHost<Local, OwnerServices>, Board>;
+    const FIRST_P: usize = 2;
+    const SOURCE: u64 = 0x14000;
+    // Deliberately neither PE order nor worker order; PE2 is the host BSP.
+    const PERMUTED: [WorkerBinding; 4] = [
+        WorkerBinding {
+            pe: 3,
+            worker: WorkerId(2),
+        },
+        WorkerBinding {
+            pe: 0,
+            worker: WorkerId(3),
+        },
+        WorkerBinding {
+            pe: 2,
+            worker: WorkerId(0),
+        },
+        WorkerBinding {
+            pe: 1,
+            worker: WorkerId(1),
+        },
+    ];
+    fn first_p_fixture() -> (FirstPMachine, Arc<RegisteredSystemRam>) {
+        let (mut cpu, mut profile, missing, ram) = super::super::policy::tests::fixture();
+        // Authored E,E,P,P roster; preserve the original indices and affinities.
+        profile.processors = (0..4)
+            .map(|pe| crate::machine::registers::Identity {
+                midr: if pe < FIRST_P { 0x611f0220 } else { 0x611f0230 },
+                mpidr: 0x80000000
+                    | if pe < FIRST_P {
+                        pe as u64
+                    } else {
+                        0x10100 + (pe - FIRST_P) as u64
+                    },
+                clock: None,
+                caches: None,
+            })
+            .collect();
+        cpu.pstate = Pstate::reset(2);
+        cpu.pc = SOURCE;
+        cpu.registers
+            .set_raw(crate::machine::system::Register::SCTLR_EL2, 0, 0);
+        cpu.state.x[0] = 0xfeed1234;
+        cpu.state.sp = 0x15800;
+        // SAFETY: the fixture owns these registered bytes; no executor exists.
+        unsafe { ram.publish_physical(SOURCE, &0x14000000u32.to_le_bytes()) }.unwrap();
+        let mut machine = Machine::new_at(
+            cpu,
+            ServiceHost::new(Local(0), OwnerServices(Vec::new()), Arc::clone(&ram)),
+            Board { power: Vec::new() },
+            profile,
+            ram.target(),
+            FIRST_P,
+        )
+        .unwrap();
+        machine.profile_missing = missing;
+        machine
+            .install_shared_memory_for_active_processors(
+                Arc::clone(&ram),
+                &crate::system::events::EventDomain::new(),
+            )
+            .unwrap();
+        (machine, ram)
+    }
+    fn bind_first_p(machine: &mut FirstPMachine) {
+        let mut owners = machine.bind_assigned_native_workers(&PERMUTED).unwrap();
+        for owner in &mut owners {
+            let initial = if owner.binding().worker == WorkerId(0) {
+                owner.publish_initial(&mut machine.host)
+            } else {
+                owner.publish_initial(&mut Local(owner.binding().worker.0))
+            }
+            .unwrap();
+            machine
+                .native_publication
+                .as_mut()
+                .unwrap()
+                .accept_initial(initial)
+                .unwrap();
+        }
+        machine.host.transport.0 = owners;
+    }
+    fn hold_first_p(machine: &mut FirstPMachine, members: &[usize]) -> StoppedWorkers {
+        hold_members(
+            machine.native_publication.as_mut().unwrap(),
+            &mut machine.host.transport.0,
+            members,
+        )
+    }
+    fn release_first_p(machine: &mut FirstPMachine, held: StoppedWorkers) {
+        release_members(
+            machine.native_publication.as_mut().unwrap(),
+            &mut machine.host.transport.0,
+            held,
+        );
+    }
+
+    #[test]
+    fn nonzero_first_p_binding_refuses_incomplete_or_nonbijective_rosters_before_publication() {
+        use publication::PublicationError;
+        let (mut machine, _) = first_p_fixture();
+        let mut repeated_pe = PERMUTED;
+        repeated_pe[3].pe = FIRST_P;
+        let mut repeated_worker = PERMUTED;
+        repeated_worker[3].worker = WorkerId(0);
+        for (bindings, error) in [
+            (
+                &PERMUTED[..3],
+                PublicationError::ProcessorCount {
+                    expected: 4,
+                    actual: 3,
+                },
+            ),
+            (
+                repeated_pe.as_slice(),
+                PublicationError::ProcessorCount {
+                    expected: 4,
+                    actual: 4,
+                },
+            ),
+            (
+                repeated_worker.as_slice(),
+                PublicationError::DuplicateWorker(WorkerId(0)),
+            ),
+        ] {
+            assert_eq!(
+                machine.bind_assigned_native_workers(bindings).unwrap_err(),
+                error
+            );
+            assert!(machine.native_publication.is_none());
+            assert_eq!(machine.current, FIRST_P);
+            assert!(matches!(machine.peers[0], Peer::Off));
+        }
+        bind_first_p(&mut machine);
+        assert_eq!(
+            machine
+                .native_publication
+                .as_ref()
+                .unwrap()
+                .bindings()
+                .collect::<Vec<_>>(),
+            PERMUTED
+        );
+    }
+
+    #[test]
+    fn nonzero_first_p_bsp_recovers_actual_native_refusal_and_starts_unrenumbered_peers() {
+        use publication::PublicationError;
+        let (mut machine, ram) = first_p_fixture();
+        let identities = machine.profile.processors.clone();
+        let state = machine.cpu.state.clone();
+        bind_first_p(&mut machine);
+        assert_eq!(machine.cpu.canonical_memory.as_ref().unwrap().pe, FIRST_P);
+        assert!(matches!(machine.peers[FIRST_P], Peer::Running));
+        assert!(
+            machine
+                .start(Start {
+                    cpu: 0,
+                    address: SOURCE
+                })
+                .is_err()
+        );
+        assert!(matches!(machine.peers[0], Peer::Off));
+
+        // Real source compilation, mutable architectural frame and publication
+        // recovery; never replace the hosted privilege refusal with success.
+        for start_others in [false, true] {
+            if start_others {
+                let held = hold_first_p(&mut machine, &[1, 3, 2, 0]);
+                let inventory = machine.native_publication.as_mut().unwrap();
+                let services = PERMUTED
+                    .iter()
+                    .map(|binding| inventory.open_services(&held, binding.pe).unwrap())
+                    .collect();
+                machine.host.begin_services(services).unwrap();
+                for binding in PERMUTED {
+                    assert!(machine.host.select_native_service(binding.worker));
+                    machine.host.invalidate_translations();
+                }
+                for services in machine.host.end_services() {
+                    inventory.close_services(services).unwrap();
+                }
+                for pe in [0, 1, 3] {
+                    machine
+                        .start(Start {
+                            cpu: pe,
+                            address: SOURCE,
+                        })
+                        .unwrap();
+                }
+                assert_eq!(machine.devices.power, [(0, true), (1, true), (3, true)]);
+                release_first_p(&mut machine, held);
+            }
+            // SAFETY: actual canonical owners and exclusive borrowed frames;
+            // no external writer or concurrent worker. Hosted entry must refuse.
+            let cohort = unsafe { machine.shared_native_cohort(&PERMUTED) }.unwrap();
+            assert_eq!(cohort.frames.len(), if start_others { 4 } else { 1 });
+            for frame in cohort.frames {
+                let pe = frame.identity().pe;
+                let loan = super::super::dispatch_native_run(cohort.inventory, frame)
+                    .unwrap_or_else(|_| panic!("actual frame dispatch"));
+                let binding = loan.binding();
+                assert_eq!(
+                    binding,
+                    *PERMUTED.iter().find(|binding| binding.pe == pe).unwrap()
+                );
+                let index = cohort
+                    .host
+                    .transport
+                    .0
+                    .iter()
+                    .position(|owner| owner.binding() == binding)
+                    .unwrap();
+                let mut owner = cohort.host.transport.0.remove(index);
+                let refused = match owner.execute(loan, &mut Local((binding.worker.0 + 1) % 4)) {
+                    Err(refused) => refused,
+                    Ok(_) => panic!("wrong Host must retain the unexecuted frame"),
+                };
+                assert_eq!(refused.error, PublicationError::WrongOwner);
+                let returned = if binding.worker == WorkerId(0) {
+                    owner.execute(refused.payload, cohort.host)
+                } else {
+                    owner.execute(refused.payload, &mut Local(binding.worker.0))
+                }
+                .unwrap_or_else(|_| panic!("actual owner return"));
+                let generation = returned.generation();
+                let observation = super::super::recover_native_run(cohort.inventory, returned)
+                    .unwrap_or_else(|_| panic!("actual frame recovery"));
+                assert_eq!(observation.identity.pe, pe);
+                assert_eq!(observation.status, Err(MemoryStatus::Unsupported));
+                assert_eq!(observation.native, None);
+                assert_eq!(observation.physical_processor, None);
+                assert_eq!((observation.settled_pc, observation.retired), (SOURCE, 0));
+                cohort
+                    .inventory
+                    .require_recovered(binding, generation)
+                    .unwrap();
+                assert_eq!(
+                    cohort.inventory.require_recovered(binding, generation - 1),
+                    Err(PublicationError::StaleRun)
+                );
+                cohort.host.transport.0.insert(index, owner);
+            }
+        }
+        assert_eq!(machine.profile.processors, identities);
+        assert_eq!(machine.current, FIRST_P);
+        assert_eq!(machine.cpu.state, state);
+        assert_eq!((machine.cpu.pc, machine.cpu.retired), (SOURCE, 0));
+        // The real domain loan pins every PE's same RAM owner. A numeric PE or
+        // worker permutation cannot substitute for this all-writer exclusion.
+        let execution = machine
+            .cpu
+            .canonical_memory
+            .as_ref()
+            .unwrap()
+            .memory
+            .execution_loan()
+            .unwrap();
+        for (pe, peer) in machine.peers.iter().enumerate() {
+            let cpu = match peer {
+                Peer::Running => &machine.cpu,
+                Peer::Parked(parked) => parked.cpu(),
+                Peer::Off => panic!("started PE"),
+            };
+            let memory = cpu.canonical_memory.as_ref().unwrap();
+            assert_eq!(memory.pe, pe);
+            execution.check_thread_domain(&memory.memory).unwrap();
+            assert!(Arc::ptr_eq(&memory.ram, &ram));
+            assert_eq!(
+                cpu.read(crate::machine::system::Register::MPIDR_EL1),
+                identities[pe].mpidr
+            );
+        }
+        assert!(ram.try_service().unwrap().is_none());
+        drop(execution);
+        let service = ram.try_service().unwrap().unwrap();
+        service.validate_current().unwrap();
+        assert!(matches!(
+            ram.domain().try_execution_loan().unwrap(),
+            crate::memory::domain::ExecutionLoanAttempt::ServiceBusy
+        ));
+    }
+
+    #[test]
+    fn nonzero_first_p_lifecycle_refuses_mixed_and_released_stop_generations() {
+        let (mut machine, _) = first_p_fixture();
+        bind_first_p(&mut machine);
+        let state = machine.cpu.state.clone();
+        let first = hold_first_p(&mut machine, &[FIRST_P]);
+        let second = hold_first_p(&mut machine, &[0, 1, 3]);
+        let mut reset = fresh(&machine.profile, 0);
+        assert_eq!(
+            machine.prepare_native_reset(0, &mut reset),
+            Err(MemoryStatus::Unsupported)
+        );
+        assert!(reset.canonical_memory.is_none());
+        assert_eq!(machine.cpu.state, state);
+        release_first_p(&mut machine, first);
+        release_first_p(&mut machine, second);
+        let held = hold_first_p(&mut machine, &[3, 1, 0, FIRST_P]);
+        machine.prepare_native_reset(0, &mut reset).unwrap();
+        assert_eq!(reset.canonical_memory.as_ref().unwrap().pe, 0);
+        release_first_p(&mut machine, held);
+        let mut next = fresh(&machine.profile, 1);
+        assert_eq!(
+            machine.prepare_native_reset(1, &mut next),
+            Err(MemoryStatus::Unsupported)
+        );
+        assert!(next.canonical_memory.is_none());
+        assert!(matches!(machine.peers[0], Peer::Off));
+        assert!(machine.devices.power.is_empty());
     }
     fn fresh(profile: &CpuProfile, pe: usize) -> Cpu {
         let mut cpu = Cpu::of(profile.chip, 0x8000, Pstate::reset(2));
