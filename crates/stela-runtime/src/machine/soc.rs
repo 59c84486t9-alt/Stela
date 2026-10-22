@@ -2074,6 +2074,7 @@ pub struct SpmiPmu {
     pub primary: bool,
     /// PMU output's local edge vector, independently of the response vector.
     pub interrupt: Option<u16>,
+    pub mailbox: Option<FirmwareMailbox>,
     pub alarm_monitor: u8,
     pub rtc_helper: Option<smc::RtcKeyProfile>,
     pub identity: Option<pmu::Window>,
@@ -2085,7 +2086,39 @@ pub struct SpmiPmu {
     pub rtc: Option<pmu::Rtc>,
 }
 
+/// A PMIC firmware mailbox (`fw-mcom-address`, `fw-host-irq-address` and, on
+/// M4 and later, `fw-mcom-int-index`), served by PMIC firmware that does not
+/// execute: its registers are unqualified and its vector is never driven,
+/// so it stays unrouted (`pmu::Configuration::with_unqualified_firmware_mailbox`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirmwareMailbox {
+    pub registers: u16,
+    pub doorbell: u16,
+    pub vector: Option<u16>,
+}
+
 impl SpmiPmu {
+    /// This PMU's register owners, with `history`'s initial bytes for each
+    /// retained-history owner.
+    pub fn configuration(
+        &self,
+        mut history: impl FnMut(pmu::Retained, pmu::Window) -> Result<Vec<u8>, String>,
+    ) -> Result<pmu::Configuration, String> {
+        let mut configuration =
+            pmu::Configuration::new(self.windows.clone(), self.rtc, self.alarm_monitor)?;
+        for (kind, window) in self.retained() {
+            configuration = configuration.with_retained(kind, window, history(kind, window)?)?;
+        }
+        if let Some(identity) = self.identity {
+            configuration = configuration.with_unqualified_identity(identity)?;
+        }
+        if let Some(mailbox) = self.mailbox {
+            configuration = configuration
+                .with_unqualified_firmware_mailbox(mailbox.registers, mailbox.doorbell)?;
+        }
+        Ok(configuration)
+    }
+
     /// The retained-history owners whose initial bytes placement supplies.
     pub fn retained(&self) -> impl Iterator<Item = (pmu::Retained, pmu::Window)> + use<> {
         let fault = self.fault_log.map(|log| (pmu::Retained::FaultLog, log));
@@ -3376,7 +3409,8 @@ fn spmi_controllers(
         for child in node.children().ok_or("SPMI children are malformed")? {
             if child.compatible(PMU) {
                 let pmu = spmi_pmu(&child, io)?;
-                if pmu.interrupt.is_some()
+                if (pmu.interrupt.is_some()
+                    || pmu.mailbox.is_some_and(|mailbox| mailbox.vector.is_some()))
                     && (child
                         .property("interrupt-parent")
                         .is_none_or(|bytes| bytes.len() != 4)
@@ -3386,6 +3420,24 @@ fn spmi_controllers(
                 }
                 pmus.push(pmu);
             }
+        }
+        let mut vectors: Vec<u16> = pmus
+            .iter()
+            .flat_map(|pmu| {
+                pmu.interrupt
+                    .into_iter()
+                    .chain(pmu.mailbox.and_then(|mailbox| mailbox.vector))
+            })
+            .collect();
+        let routed = vectors.len();
+        vectors.sort_unstable();
+        vectors.dedup();
+        if vectors.len() != routed
+            || vectors
+                .iter()
+                .any(|&vector| u32::from(vector) == configuration.response_vector())
+        {
+            return Err("PMU interrupt vectors alias each other or the response".into());
         }
         controllers.push(SpmiController {
             configuration,
@@ -3424,16 +3476,45 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
         },
         _ => return Err("PMU is-primary is not one full32 word".into()),
     };
-    let interrupt = match node.property("interrupts") {
-        None => None,
-        Some(bytes) if bytes.len() == 4 => Some(
-            node.first_u32("interrupts")
-                .and_then(|vector| u16::try_from(vector).ok())
-                .filter(|&vector| vector < 288)
-                .ok_or("PMU local interrupt vector exceeds the SPMI input bank")?,
-        ),
-        _ => return Err("PMU interrupt vector is not one full32 word".into()),
+    // `interrupts` lists the PMU output and, at `fw-mcom-int-index` where
+    // given, the PMIC firmware mailbox's vector (`pmu::Pmu`).
+    let vectors = match node.property("interrupts") {
+        None => Vec::new(),
+        Some(bytes) if bytes.len() == 4 || bytes.len() == 8 => node
+            .cells32("interrupts")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|vector| {
+                u16::try_from(vector)
+                    .ok()
+                    .filter(|&vector| vector < 288)
+                    .ok_or("PMU local interrupt vector exceeds the SPMI input bank")
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err("PMU interrupts are not one or two full32 vectors".into()),
     };
+    let mailbox_index = match node.property("fw-mcom-int-index") {
+        None => None,
+        Some(bytes) if bytes.len() == 4 => node
+            .first_u32("fw-mcom-int-index")
+            .and_then(|index| usize::try_from(index).ok()),
+        _ => return Err("PMU fw-mcom-int-index is not one full32 word".into()),
+    };
+    let mailbox_vector = mailbox_index
+        .map(|index| {
+            vectors
+                .get(index)
+                .copied()
+                .ok_or("PMU firmware mailbox index names no interrupt")
+        })
+        .transpose()?;
+    let mut outputs = (0..vectors.len())
+        .filter(|&index| Some(index) != mailbox_index)
+        .map(|index| vectors[index]);
+    let interrupt = outputs.next();
+    if outputs.next().is_some() || (vectors.len() == 2 && vectors[0] == vectors[1]) {
+        return Err("PMU interrupts are not one output and one firmware mailbox".into());
+    }
     let address = |value: u32| u16::try_from(value).map_err(|_| "PMU address above 16 bits");
     let pair = |name: &str| -> Result<Option<pmu::Window>, String> {
         match node.cells32(name).as_deref() {
@@ -3610,12 +3691,20 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
         }
     };
     let identity = pair("info-id")?;
-    let mut configuration =
-        pmu::Configuration::new(windows.clone(), rtc, alarm_monitor).map_err(String::from)?;
+    let mailbox = match (single("fw-mcom-address")?, single("fw-host-irq-address")?) {
+        (None, None) if mailbox_vector.is_none() => None,
+        (Some(registers), Some(doorbell)) => Some(FirmwareMailbox {
+            registers,
+            doorbell,
+            vector: mailbox_vector,
+        }),
+        _ => return Err("PMU firmware mailbox is incomplete".into()),
+    };
     let pmu = SpmiPmu {
         sid,
         primary,
         interrupt,
+        mailbox,
         alarm_monitor,
         rtc_helper,
         identity,
@@ -3624,18 +3713,9 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
         windows,
         rtc,
     };
-    for (kind, window) in pmu.retained() {
-        // Validate geometry only. This temporary value never becomes a PMU;
-        // actual placement separately requires explicit resource history.
-        configuration = configuration
-            .with_retained(kind, window, alloc::vec![0; usize::from(window.bytes)])
-            .map_err(String::from)?;
-    }
-    if let Some(identity) = identity {
-        configuration
-            .with_unqualified_identity(identity)
-            .map_err(String::from)?;
-    }
+    // Validate geometry only. This temporary value never becomes a PMU;
+    // actual placement separately requires explicit resource history.
+    pmu.configuration(|_, window| Ok(alloc::vec![0; usize::from(window.bytes)]))?;
     Ok(pmu)
 }
 
@@ -7237,6 +7317,112 @@ mod tests {
         let bytes = node(false);
         let io = Node::root(&bytes).unwrap();
         assert!(spmi_pmu(&io.children().unwrap()[0], &io).is_err());
+    }
+
+    #[test]
+    fn a_firmware_mailbox_names_its_vector_registers_and_doorbell() {
+        use crate::machine::adt::encode;
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let cells = |values: &[u32]| {
+            values
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let pairs = |values: &[(u64, u64)]| {
+            values
+                .iter()
+                .flat_map(|&(a, b)| [a, b])
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        // J604AP-shaped Club and Jerez-shaped secondary: `interrupts` holds the
+        // output and the mailbox vector `fw-mcom-int-index` selects.
+        let tree = |pmus: &[(&[u32], Option<u32>, bool)]| {
+            let children: Vec<Vec<u8>> = pmus
+                .iter()
+                .enumerate()
+                .map(|(sid, &(vectors, index, addresses))| {
+                    let mut properties: Vec<(&str, Vec<u8>)> = alloc::vec![
+                        ("name", z("pmu")),
+                        ("compatible", b"pmu,spmi\0pmu,club\0".to_vec()),
+                        ("reg", cells(&[sid as u32 + 0xd, 3, 0, 4, 0, 0])),
+                        ("info-fault_log", cells(&[0x1000, 5])),
+                        ("interrupt-parent", cells(&[0x146])),
+                        ("interrupts", cells(vectors)),
+                    ];
+                    if let Some(index) = index {
+                        properties.push(("fw-mcom-int-index", cells(&[index])));
+                    }
+                    if addresses {
+                        properties.push(("fw-mcom-address", cells(&[0x2860])));
+                        properties.push(("fw-host-irq-address", cells(&[0x2808])));
+                    }
+                    let properties: Vec<(&str, &[u8])> = properties
+                        .iter()
+                        .map(|(name, value)| (*name, value.as_slice()))
+                        .collect();
+                    encode(&properties, &[])
+                })
+                .collect();
+            let spmi = encode(
+                &[
+                    ("name", &z("nub-spmi1")),
+                    ("compatible", &z(SPMI)),
+                    ("gen", &cells(&[3])),
+                    ("queue-depth", &cells(&[256, 256])),
+                    ("AAPL,phandle", &cells(&[0x146])),
+                    (
+                        "reg",
+                        &pairs(&[
+                            (0x8861_4000, 0x4000),
+                            (0x8860_4000, 0x4000),
+                            (0x8860_0000, 0x4000),
+                        ]),
+                    ),
+                    ("interrupt-parent", &cells(&[0x146, 0x63, 0x146])),
+                    ("interrupts", &cells(&[0x100, 0x206, 0x119, 0x104])),
+                ],
+                &children,
+            );
+            encode(&[("name", &z("arm-io"))], &[spmi])
+        };
+        let translate = |offset| Some(0x1_0000_0000 + offset);
+        let parse = |pmus: &[(&[u32], Option<u32>, bool)]| {
+            let bytes = tree(pmus);
+            let io = Node::root(&bytes).unwrap();
+            spmi_controllers(&io, &flat_fixture_extent(&translate), 0x63)
+                .map(|controllers| controllers[0].pmus.clone())
+        };
+        let pmus = parse(&[(&[2, 62], Some(1), true), (&[126], Some(0), true)]).unwrap();
+        assert_eq!(pmus[0].interrupt, Some(2));
+        assert_eq!(
+            pmus[0].mailbox,
+            Some(FirmwareMailbox {
+                registers: 0x2860,
+                doorbell: 0x2808,
+                vector: Some(62)
+            })
+        );
+        assert_eq!(pmus[1].interrupt, None);
+        assert_eq!(pmus[1].mailbox.unwrap().vector, Some(126));
+        // T6030 Chapel declares the registers without a vector.
+        let pmus = parse(&[(&[2], None, true)]).unwrap();
+        assert_eq!(
+            (pmus[0].interrupt, pmus[0].mailbox.unwrap().vector),
+            (Some(2), None)
+        );
+        for invalid in [
+            &[(&[2, 62][..], None, true)][..],
+            &[(&[2, 62], Some(2), true)],
+            &[(&[2, 62], Some(1), false)],
+            &[(&[2, 2], Some(1), true)],
+            &[(&[2, 0x100], Some(1), true)],
+            &[(&[2, 62], Some(1), true), (&[62], Some(0), true)],
+            &[(&[2, 62, 63], Some(1), true)],
+        ] {
+            assert!(parse(invalid).is_err());
+        }
     }
 
     #[test]

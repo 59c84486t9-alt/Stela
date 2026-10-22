@@ -82,6 +82,17 @@
 //! control fields must be disjoint; the control field keeps the qualified
 //! monitor / monitor+enable encodings of a separate control register.
 //!
+//! Chapel and later PMICs declare a firmware mailbox: `fw-mcom-address`,
+//! `fw-host-irq-address` and, from M4, `fw-mcom-int-index` naming its entry
+//! in `interrupts`. Its AP consumer is `ApplePMUFirmwareDriver` (mac16g
+//! 26A434; absent from mac15s): `start` (VA 0xfffffe0009be9418) reads the
+//! three as 16-bit values, `mailboxTransactionGated` (0xfffffe0009bea2cc)
+//! moves a five-byte message at +0, a byte at +5, five bytes at +6 and a
+//! byte at +0xa around the mailbox interrupt, and `writeHostIRQGated`
+//! (0xfffffe0009bea894) writes the doorbell byte. The answers are PMIC
+//! firmware's, which does not execute here, so these 11 + 1 bytes are
+//! explicit unsupported requirements and the mailbox vector is never driven.
+//!
 //! A PMU without RTC registers can still declare an output (`interrupts`
 //! on the 26A434 Simetra, Vale, Spitfire, Portier, Club and Jerez PMUs,
 //! from T8103 to T6050). The AP consumer of every PMU output is
@@ -118,6 +129,9 @@ const ALARM_BYTES: u16 = 4;
 /// A legacy-scratch offset's seconds and fraction within the scratchpad.
 const LEGACY_OFFSET_SECONDS: u16 = 0x4;
 const LEGACY_OFFSET_FRACTION: u16 = 0x15;
+/// The firmware mailbox's message, doorbell, response and status bytes
+/// (see the module comment).
+const MAILBOX_BYTES: u16 = 0xb;
 /// The legacy scratchpad's extent (see the module comment).
 pub const LEGACY_SCRATCH_BYTES: u16 = 0x100;
 /// `AppleDialogSPMIPMURTC::_readConfiguration`'s event mask when the
@@ -284,6 +298,7 @@ pub struct Pmu {
     clock: RtcClock,
     monitor: u8,
     identity: Option<Window>,
+    mailbox: Option<[Window; 2]>,
     /// The outside-scratch fault log and off-to-wake source, where declared.
     histories: Vec<fault::FaultLog>,
     firmware: Option<firmware::FirmwareMemory>,
@@ -335,6 +350,7 @@ impl Pmu {
             rtc,
             monitor,
             identity,
+            mailbox,
             fault_history,
             wake_source,
             firmware,
@@ -378,6 +394,7 @@ impl Pmu {
             clock,
             monitor,
             identity,
+            mailbox,
             histories: fault_history
                 .into_iter()
                 .chain(wake_source)
@@ -475,11 +492,19 @@ impl Pmu {
             *self.byte(base + i as u16) = value;
         }
     }
-    fn check_identity(&self, address: u16, bytes: usize) -> Result<(), SlaveError> {
+    fn check_unqualified(&self, address: u16, bytes: usize) -> Result<(), SlaveError> {
         for address in Self::span(address, bytes)? {
             if self.identity.is_some_and(|window| window.contains(address)) {
                 return Err(SlaveError::Unsupported(
                     "PMU declared identity register contents are unqualified",
+                ));
+            }
+            if self
+                .mailbox
+                .is_some_and(|windows| windows.iter().any(|window| window.contains(address)))
+            {
+                return Err(SlaveError::Unsupported(
+                    "PMU firmware mailbox requires executing PMIC firmware",
                 ));
             }
         }
@@ -579,7 +604,7 @@ impl Pmu {
 
 impl SpmiSlave for Pmu {
     fn read(&mut self, address: u16, data: &mut [u8], now: u64) -> Result<(), SlaveError> {
-        self.check_identity(address, data.len())?;
+        self.check_unqualified(address, data.len())?;
         self.check_firmware_startup(address, data.len())?;
         if let Some(loader) = &self.loader
             && loader.claims(address, data.len())
@@ -649,7 +674,7 @@ impl SpmiSlave for Pmu {
         Ok(())
     }
     fn write(&mut self, address: u16, data: &[u8], now: u64) -> Result<(), SlaveError> {
-        self.check_identity(address, data.len())?;
+        self.check_unqualified(address, data.len())?;
         self.check_firmware_startup(address, data.len())?;
         if let Some(loader) = &self.loader
             && loader.claims(address, data.len())
@@ -1194,6 +1219,65 @@ mod tests {
             Controller::new(Profile::Gen2, 192, [256, 256]).unwrap(),
         );
         spmi.attach_with_interrupt(0xe, 2, Box::new(pmu)).unwrap();
+    }
+
+    #[test]
+    fn firmware_mailbox_and_doorbell_are_explicit_requirements_without_firmware() {
+        let scratch = || {
+            Configuration::new(
+                alloc::vec![Window {
+                    base: 0x8000,
+                    bytes: 0x1000
+                }],
+                None,
+                0,
+            )
+            .unwrap()
+        };
+        for (mailbox, doorbell) in [(0x8ff8, 0x2808), (0x2860, 0x8000), (0xfff8, 0x2808)] {
+            assert!(
+                scratch()
+                    .with_unqualified_firmware_mailbox(mailbox, doorbell)
+                    .is_err()
+            );
+        }
+        // The doorbell may not sit inside the mailbox's own bytes.
+        assert!(
+            scratch()
+                .with_unqualified_firmware_mailbox(0x2860, 0x2865)
+                .is_err()
+        );
+        let config = scratch()
+            .with_unqualified_firmware_mailbox(0x2860, 0x2808)
+            .unwrap();
+        assert!(
+            config
+                .clone()
+                .with_unqualified_firmware_mailbox(0x3000, 0x3100)
+                .is_err()
+        );
+        let mut pmu = Pmu::configured(config, None).unwrap();
+        // `mailboxTransactionGated` touches +0..+0xa; the doorbell is one byte.
+        for (address, bytes) in [
+            (0x2860, 5),
+            (0x2865, 1),
+            (0x2866, 5),
+            (0x286a, 1),
+            (0x2808, 1),
+        ] {
+            let mut data = alloc::vec![0xaa; bytes];
+            assert!(matches!(
+                pmu.read(address, &mut data, 0),
+                Err(SlaveError::Unsupported(_))
+            ));
+            assert!(data.iter().all(|&byte| byte == 0xaa));
+            assert!(matches!(
+                pmu.write(address, &data, 0),
+                Err(SlaveError::Unsupported(_))
+            ));
+        }
+        assert_eq!(pmu.read(0x286b, &mut [0], 0), Err(SlaveError::Nack));
+        assert_eq!(pmu.read(0x2809, &mut [0], 0), Err(SlaveError::Nack));
     }
 
     #[test]

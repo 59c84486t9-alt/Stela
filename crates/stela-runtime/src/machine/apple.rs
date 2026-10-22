@@ -1357,23 +1357,13 @@ impl AppleDevices {
             if pmu.primary && pmu.rtc.is_none() {
                 return Err("PMU primary system service requires a qualified RTC owner".into());
             }
-            let mut configuration =
-                pmu::Configuration::new(pmu.windows.clone(), pmu.rtc, pmu.alarm_monitor)
-                    .map_err(String::from)?;
-            for (kind, window) in pmu.retained() {
+            let configuration = pmu.configuration(|kind, _| {
                 let (_, _, bytes) = history
                     .iter()
                     .find(|(sid, owner, _)| *sid == pmu.sid && *owner == kind)
                     .expect("all retained owners preflighted");
-                configuration = configuration
-                    .with_retained(kind, window, bytes.clone())
-                    .map_err(String::from)?;
-            }
-            if let Some(identity) = pmu.identity {
-                configuration = configuration
-                    .with_unqualified_identity(identity)
-                    .map_err(String::from)?;
-            }
+                Ok(bytes.clone())
+            })?;
             let clock = pmu::RtcClock::new(epoch).map_err(String::from)?;
             let model = Pmu::with_clock(configuration, clock, wall.filter(|_| pmu.rtc.is_some()))
                 .map_err(String::from)?;

@@ -1,7 +1,9 @@
 //! Validated byte-resource ownership for the source-qualified RTC interface.
 use super::fault::FaultHistory;
 use super::firmware::FirmwareHistory;
-use super::{ClockOffset, FirmwareSram, FirmwareStartup, PmicEpoch, Retained, Rtc, Window};
+use super::{
+    ClockOffset, FirmwareSram, FirmwareStartup, MAILBOX_BYTES, PmicEpoch, Retained, Rtc, Window,
+};
 use alloc::vec::Vec;
 
 /// An explicit PMU register resource configuration, independent of its SID or SKU.
@@ -11,6 +13,7 @@ pub struct Configuration {
     pub(super) rtc: Option<Rtc>,
     pub(super) monitor: u8,
     pub(super) identity: Option<Window>,
+    pub(super) mailbox: Option<[Window; 2]>,
     pub(super) fault_history: Option<FaultHistory>,
     pub(super) wake_source: Option<FaultHistory>,
     pub(super) firmware: Option<FirmwareHistory>,
@@ -98,6 +101,7 @@ impl Configuration {
             rtc,
             monitor,
             identity: None,
+            mailbox: None,
             fault_history: None,
             wake_source: None,
             firmware: None,
@@ -220,6 +224,7 @@ impl Configuration {
             .iter()
             .copied()
             .chain(self.identity)
+            .chain(self.mailbox.into_iter().flatten())
             .chain(self.rtc.into_iter().flat_map(|rtc| rtc.windows()))
             .chain(self.fault_history.iter().map(|history| history.window))
             .chain(self.wake_source.iter().map(|history| history.window))
@@ -245,6 +250,37 @@ impl Configuration {
             return Err("PMU identity overlaps another register owner");
         }
         self.identity = Some(identity);
+        Ok(self)
+    }
+
+    /// Retain the PMIC firmware mailbox (`fw-mcom-address`) and host doorbell
+    /// (`fw-host-irq-address`). Their answers come from PMIC firmware, which
+    /// does not execute, so every access is an explicit unsupported requirement.
+    pub fn with_unqualified_firmware_mailbox(
+        mut self,
+        mailbox: u16,
+        host_irq: u16,
+    ) -> Result<Self, &'static str> {
+        let windows = [
+            Window {
+                base: mailbox,
+                bytes: MAILBOX_BYTES,
+            },
+            Window {
+                base: host_irq,
+                bytes: 1,
+            },
+        ];
+        if self.mailbox.is_some()
+            || u32::from(mailbox) + u32::from(MAILBOX_BYTES) > 0x10000
+            || overlaps(windows[0], windows[1])
+            || windows
+                .iter()
+                .any(|window| self.occupied().any(|other| overlaps(*window, other)))
+        {
+            return Err("PMU firmware mailbox duplicates or overlaps another register owner");
+        }
+        self.mailbox = Some(windows);
         Ok(self)
     }
 }
