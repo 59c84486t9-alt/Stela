@@ -723,7 +723,6 @@ mod tests {
             timestamp_base: AIC2_TIMESTAMPS,
             cpus: 1,
             default_cpus: 1,
-            target_groups: [None; 4],
         })
         .unwrap();
         let mut bus = Bus::new();

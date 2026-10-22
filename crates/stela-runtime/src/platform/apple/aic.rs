@@ -92,13 +92,23 @@
 //! timestamp slot latches the system counter at each rising edge of its
 //! hardware input, and a slot reads 0 until it first latches; the reset state masks every IRQ with zero
 //! configuration; `SET`/`CLR` reads return the current bits; IRQs with TARGET 0
-//! go to the default CPU set, and each TARGET bit selects a CPU group that the
-//! board configuration must name (the hardware group assignment is not
-//! public), so an unnamed group is refused; the first CPU to read the event
-//! register claims the IRQ; delay groups only affect coalescing latency, so
-//! immediate delivery is a permitted timing. Across dies, the lowest die
+//! use the configured AP eligible CPU set; the first CPU to read the event
+//! register claims the IRQ. Across dies, the lowest die
 //! number wins before the lowest IRQ number; cross-die arbitration is not
 //! documented, so this is a deterministic permitted ordering.
+//!
+//! TARGET [3:0] is a destination selector, not four CPU-group mask bits.
+//! Hector Martin's 2021-12-18 AICv2 observations identify selector 0 as AP
+//! delivery and suggest coprocessor destinations otherwise; they distinguish
+//! the separate three-bit IRQ configuration group. Linux names that group
+//! DELAY_IDX [7:5], but its delay/priority effects remain unqualified here.
+//! Nonzero TARGET or DELAY_IDX therefore refuses before changing state.
+//! The configured AP roster is software policy, not a silicon arbitration
+//! contract or proof of delivery to any physical MPIDR (including 0x100).
+//! 26A434 J473's AIC start at 0xfffffe0009825a84..0xfffffe0009825ad0
+//! preserves inherited CONFIG except enabling bit 0; its optional
+//! `aic-ext-intr-cfg` consumer only replaces the per-source low four bits.
+//! Neither operation derives a physical recipient from a CPU's logical ID.
 //!
 //! Multiple dies and AICv3's relocated capability/array registers require an
 //! explicit [`Aic2Layout`]. m1n1 `src/aic.c` reads `cap0-offset`,
@@ -161,7 +171,6 @@ const CONFIG_ENABLE: u32 = 1;
 const IRQ_CFG_TARGET: u32 = 0xf;
 const IRQ_CFG_DELAY_IDX: u32 = 0b111 << 5;
 const EVENT_TYPE_IRQ: u32 = 1 << 16;
-const TARGET_GROUPS: usize = 4;
 
 /// Which AIC a board has: an AICv1 (`aic1`), whose event register is in its
 /// core block, or an AICv2 or AICv3 of generation `version` with its per-die
@@ -276,10 +285,9 @@ pub struct Aic2Config {
     /// [`AIC3_TIMESTAMPS`].
     pub timestamp_base: u64,
     pub cpus: usize,
-    /// CPUs that receive IRQs whose TARGET is 0, as a bit mask.
+    /// Software-configured AP eligible CPUs for TARGET 0, as a bit mask.
+    /// This roster does not establish silicon arbitration or physical affinity.
     pub default_cpus: u64,
-    /// CPUs selected by each TARGET bit; `None` refuses that bit.
-    pub target_groups: [Option<u64>; TARGET_GROUPS],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,11 +383,7 @@ impl Aic2 {
             return invalid("the CPU count must be in 1..=64");
         }
         let all_cpus = u64::MAX >> (64 - config.cpus);
-        let groups = config.target_groups.iter().flatten();
-        if core::iter::once(&config.default_cpus)
-            .chain(groups)
-            .any(|cpus| cpus & !all_cpus != 0)
-        {
+        if config.default_cpus & !all_cpus != 0 {
             return invalid("a CPU set names a CPU beyond the CPU count");
         }
         if config.irq_config <= CONFIG || !config.irq_config.is_multiple_of(4) {
@@ -463,7 +467,9 @@ impl Aic2 {
             if usize::from(input.die) >= self.layout.dies.len() || input.irq >= self.config.nr_irq {
                 return Err(Aic2Error::UnknownInput(input));
             }
-            self.check_target(u32::from(entry[2]))
+            Self::check_target(u32::from(entry[2])).map_err(Aic2Error::InvalidConfig)?;
+            let index = self.input_index(input);
+            Self::check_irq_config(self.irq_cfg[index] & !IRQ_CFG_TARGET | u32::from(entry[2]))
                 .map_err(Aic2Error::InvalidConfig)?;
         }
         for entry in property.as_chunks::<3>().0 {
@@ -483,26 +489,24 @@ impl Aic2 {
         usize::from(input.die) * usize::from(self.config.max_irq) + usize::from(input.irq)
     }
 
-    fn check_target(&self, target: u32) -> Result<(), &'static str> {
+    fn check_target(target: u32) -> Result<(), &'static str> {
         if target & !IRQ_CFG_TARGET != 0 {
             return Err("IRQ_CFG TARGET has only four bits");
         }
-        if (0..TARGET_GROUPS)
-            .any(|group| target & 1 << group != 0 && self.config.target_groups[group].is_none())
-        {
-            return Err("IRQ_CFG TARGET names a CPU group the board profile does not define");
+        if target != 0 {
+            return Err("nonzero IRQ_CFG TARGET destination selectors are unqualified");
         }
         Ok(())
     }
-    fn cpus_of(&self, irq: usize) -> u64 {
-        let target = self.irq_cfg[irq] & IRQ_CFG_TARGET;
-        if target == 0 {
-            return self.config.default_cpus;
+    fn check_irq_config(value: u32) -> Result<(), &'static str> {
+        if value & !(IRQ_CFG_TARGET | IRQ_CFG_DELAY_IDX) != 0 {
+            return Err("AIC2 IRQ_CFG reserved field is not modeled");
         }
-        (0..TARGET_GROUPS)
-            .filter(|group| target & 1 << group != 0)
-            .filter_map(|group| self.config.target_groups[group])
-            .fold(0, |cpus, group| cpus | group)
+        Self::check_target(value & IRQ_CFG_TARGET)?;
+        if value & IRQ_CFG_DELAY_IDX != 0 {
+            return Err("nonzero IRQ_CFG DELAY_IDX delay/priority effects are unqualified");
+        }
+        Ok(())
     }
     /// CPU `cpu`'s SIQ_CFG_EL1 mode refuses IRQs (`true`) or accepts them:
     /// a refusing CPU is sent none, so an IRQ targeting it reaches only the
@@ -526,6 +530,7 @@ impl Aic2 {
             || !self.lifecycle.clocked
             || self.lifecycle.quiesced
             || self.refusing & 1 << cpu != 0
+            || self.config.default_cpus & 1 << cpu == 0
         {
             return None;
         }
@@ -536,8 +541,7 @@ impl Aic2 {
                     .filter(move |bit| pending & 1 << bit != 0)
                     .map(move |bit| word * 32 + bit)
             })
-            .filter(|&irq| irq % usize::from(self.config.max_irq) < usize::from(self.config.nr_irq))
-            .find(|&irq| self.cpus_of(irq) & 1 << cpu != 0)
+            .find(|&irq| irq % usize::from(self.config.max_irq) < usize::from(self.config.nr_irq))
     }
     fn update(&mut self, access: &mut Access<'_>) {
         for cpu in 0..self.config.cpus {
@@ -671,10 +675,7 @@ impl Aic2 {
                 self.enabled = value & CONFIG_ENABLE != 0;
             }
             Register::IrqConfig(irq) => {
-                if value & !(IRQ_CFG_TARGET | IRQ_CFG_DELAY_IDX) != 0 {
-                    return Err("AIC2 IRQ_CFG reserved field is not modeled");
-                }
-                self.check_target(value & IRQ_CFG_TARGET)?;
+                Self::check_irq_config(value)?;
                 self.irq_cfg[irq] = value;
             }
             Register::Bits(array, word) => {
@@ -833,7 +834,6 @@ mod tests {
             timestamp_base: AIC2_TIMESTAMPS,
             cpus,
             default_cpus: 1,
-            target_groups: [Some(0b0001), Some(0b0010), None, None],
         })
         .unwrap()
     }
@@ -1049,7 +1049,6 @@ mod tests {
             timestamp_base: AIC2_TIMESTAMPS,
             cpus: 1,
             default_cpus: 1,
-            target_groups: [None; 4],
         })
         .unwrap();
         assert_eq!(read(&mut aic, &mut latch, 0, VERSION) & 0xff, 2);
@@ -1121,7 +1120,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_controller_and_targets_gate_delivery() {
+    fn disabled_controller_gates_default_ap_delivery() {
         let mut latch = InterruptLatch::new();
         let mut aic = aic(2);
         write(&mut aic, &mut latch, MASK_CLR, 1);
@@ -1133,56 +1132,46 @@ mod tests {
         .unwrap();
         assert!(!latch.pins(0).irq, "CONFIG.ENABLE is clear");
         write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
-        assert!(
-            latch.pins(0).irq && !latch.pins(1).irq,
-            "TARGET 0 uses the default CPUs"
-        );
-        write(&mut aic, &mut latch, IRQ_CFG, 0b10);
-        assert!(!latch.pins(0).irq && latch.pins(1).irq);
-        assert_eq!(read(&mut aic, &mut latch, 0, EVENT), 0);
-        assert_eq!(read(&mut aic, &mut latch, 1, EVENT), 1 << 16);
-        assert!(
-            aic.write(
-                IRQ_CFG,
-                Width::Word,
-                0b100,
-                &mut Access::new(0, 0, &mut latch)
-            )
-            .is_err()
-        );
+        assert!(latch.pins(0).irq && !latch.pins(1).irq);
+        assert_eq!(read(&mut aic, &mut latch, 1, EVENT), 0);
+        assert_eq!(read(&mut aic, &mut latch, 0, EVENT), EVENT_TYPE_IRQ);
+        assert!(!latch.pins(0).irq);
     }
 
-    /// A CPU whose SIQ_CFG_EL1 mode is 3 is sent no IRQs: one targeting
-    /// both CPUs goes to the other, and one targeting it alone waits.
+    /// TARGET0 uses the explicit AP roster; SIQ filters each PE independently.
     #[test]
     fn a_cpu_refusing_irqs_through_siq_cfg_is_sent_none() {
         let mut latch = InterruptLatch::new();
         let mut aic = aic(2);
+        aic.config.default_cpus = 0b11;
         write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
-        write(&mut aic, &mut latch, IRQ_CFG, 0b11);
         write(&mut aic, &mut latch, MASK_CLR, 1);
-        let mut access = Access::new(0, 0, &mut latch);
-        aic.set_input(AicInput::new(0, 0), true, &mut access)
-            .unwrap();
-        aic.steer(0, true, &mut access);
+        aic.set_input(
+            AicInput::new(0, 0),
+            true,
+            &mut Access::new(0, 0, &mut latch),
+        )
+        .unwrap();
+        assert!(latch.pins(0).irq && latch.pins(1).irq);
+        aic.steer(0, true, &mut Access::new(0, 0, &mut latch));
         assert!(!latch.pins(0).irq && latch.pins(1).irq);
         assert_eq!(read(&mut aic, &mut latch, 0, EVENT), 0);
-        write(&mut aic, &mut latch, IRQ_CFG, 0b01);
+        aic.steer(1, true, &mut Access::new(0, 0, &mut latch));
         assert!(!latch.pins(0).irq && !latch.pins(1).irq);
         aic.steer(0, false, &mut Access::new(0, 0, &mut latch));
-        assert!(latch.pins(0).irq);
-        assert_eq!(read(&mut aic, &mut latch, 0, EVENT), 1 << 16);
+        assert!(latch.pins(0).irq && !latch.pins(1).irq);
         // A CPU the AIC does not serve changes nothing.
         aic.steer(5, true, &mut Access::new(0, 0, &mut latch));
+        assert_eq!(read(&mut aic, &mut latch, 0, EVENT), EVENT_TYPE_IRQ);
     }
 
     #[test]
     fn ext_intr_cfg_and_refusals() {
         let mut latch = InterruptLatch::new();
         let mut aic = aic(2);
-        // IRQ 0x2e3 (739) to TARGET 2.
-        aic.apply_ext_intr_cfg(&[0xe3, 0x02, 0x02]).unwrap();
-        assert_eq!(read(&mut aic, &mut latch, 0, IRQ_CFG + 4 * 739), 2);
+        // IRQ 0x2e3 (739) retains the supported AP selector0.
+        aic.apply_ext_intr_cfg(&[0xe3, 0x02, 0x00]).unwrap();
+        assert_eq!(read(&mut aic, &mut latch, 0, IRQ_CFG + 4 * 739), 0);
         assert!(
             aic.apply_ext_intr_cfg(&[0xe3, 0x12, 0x01]).is_err(),
             "die 1"
@@ -1223,7 +1212,6 @@ mod tests {
             timestamp_base: AIC2_TIMESTAMPS,
             cpus: 2,
             default_cpus: 1,
-            target_groups: [Some(1), Some(2), None, None],
         };
         let first = Aic2DieLayout::contiguous(IRQ_CFG, config.max_irq).unwrap();
         let mut second = Aic2DieLayout::contiguous(0x4000, config.max_irq).unwrap();
@@ -1310,14 +1298,38 @@ mod tests {
     }
 
     #[test]
-    fn firmware_routing_is_atomic_and_multi_die_targets_reach_the_selected_cpu() {
-        let (config, layout) = two_dies();
+    fn firmware_routing_refusals_are_atomic_across_dies() {
+        let (mut config, layout) = two_dies();
+        config.default_cpus = 0b10;
         let second = layout.dies[1];
         let mut aic = Aic2::new_with_layout(config, layout).unwrap();
-        assert!(aic.apply_ext_intr_cfg(&[3, 0x10, 2, 0, 0x20, 1]).is_err());
+        let first_index = aic.input_index(AicInput::new(0, 3));
+        let second_index = aic.input_index(AicInput::new(1, 3));
+        // Seed an unadmitted retained selector so applying the valid prefix
+        // would visibly change it. Production never accepts this selector.
+        aic.irq_cfg[first_index] = 5;
+        let before = aic.irq_cfg.clone();
+        for suffix in [[3, 0x10, 2], [0, 0x20, 0], [3, 0x10, 0x20]] {
+            let property = [3, 0, 0, suffix[0], suffix[1], suffix[2]];
+            assert!(aic.apply_ext_intr_cfg(&property).is_err());
+            assert_eq!(aic.irq_cfg, before);
+        }
+        // A firmware target replacement must also validate the whole word:
+        // it cannot preserve an unqualified nonzero delay field.
+        aic.irq_cfg[second_index] = 1 << 5;
+        let before = aic.irq_cfg.clone();
+        assert_eq!(
+            aic.apply_ext_intr_cfg(&[3, 0, 0, 3, 0x10, 0]),
+            Err(Aic2Error::InvalidConfig(
+                "nonzero IRQ_CFG DELAY_IDX delay/priority effects are unqualified"
+            ))
+        );
+        assert_eq!(aic.irq_cfg, before);
+        aic.irq_cfg[second_index] = 0;
+        aic.apply_ext_intr_cfg(&[3, 0, 0, 3, 0x10, 0]).unwrap();
+        assert_eq!(aic.irq_cfg[first_index], 0);
+        assert_eq!(aic.irq_cfg[second_index], 0);
         let mut latch = InterruptLatch::new();
-        assert_eq!(read(&mut aic, &mut latch, 0, second.irq_config + 12), 0);
-        aic.apply_ext_intr_cfg(&[3, 0x10, 2]).unwrap();
         write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
         write(&mut aic, &mut latch, second.mask_clear, 1 << 3);
         write(&mut aic, &mut latch, second.software_set, 1 << 3);
@@ -1327,6 +1339,84 @@ mod tests {
             read(&mut aic, &mut latch, 1, EVENT),
             1 << 24 | EVENT_TYPE_IRQ | 3
         );
+    }
+
+    #[test]
+    fn unqualified_irq_cfg_selectors_and_delays_refuse_without_effects() {
+        for version in [2, 3] {
+            let (mut config, layout) = two_dies();
+            config.version = version;
+            config.default_cpus = 0b10;
+            for die in 0..2 {
+                let bank = layout.dies[die];
+                let mut aic = Aic2::new_with_layout(config.clone(), layout.clone()).unwrap();
+                let mut latch = InterruptLatch::new();
+                write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+                write(&mut aic, &mut latch, bank.mask_clear, 1 << 3);
+                write(&mut aic, &mut latch, bank.software_set, 1 << 3);
+                write(
+                    &mut aic,
+                    &mut latch,
+                    AIC2_TIMESTAMPS,
+                    TIMESTAMP_ENABLE | (die as u32) << 24 | 3,
+                );
+                aic.set_input(
+                    AicInput::new(die as u8, 3),
+                    true,
+                    &mut Access::new(0, 123, &mut latch),
+                )
+                .unwrap();
+                assert!(!latch.pins(0).irq && latch.pins(1).irq);
+                let before = (
+                    aic.irq_cfg.clone(),
+                    aic.software.clone(),
+                    aic.hardware.clone(),
+                    aic.mask.clone(),
+                    aic.irq_level.clone(),
+                    aic.refusing,
+                    aic.timestamps
+                        .iter()
+                        .map(|t| (t.config, t.counter))
+                        .collect::<Vec<_>>(),
+                );
+                let pins = [latch.pins(0), latch.pins(1)];
+                for value in (1..=15).chain((1..=7).map(|index| index << 5)) {
+                    let reason = if value & IRQ_CFG_TARGET != 0 {
+                        "nonzero IRQ_CFG TARGET destination selectors are unqualified"
+                    } else {
+                        "nonzero IRQ_CFG DELAY_IDX delay/priority effects are unqualified"
+                    };
+                    assert!(matches!(
+                        aic.write(bank.irq_config + 12, Width::Word, u64::from(value),
+                                  &mut Access::new(0, 456, &mut latch)),
+                        Err(MmioError::Unsupported { reason: actual, .. }) if actual == reason
+                    ));
+                    assert_eq!(
+                        (
+                            aic.irq_cfg.clone(),
+                            aic.software.clone(),
+                            aic.hardware.clone(),
+                            aic.mask.clone(),
+                            aic.irq_level.clone(),
+                            aic.refusing,
+                            aic.timestamps
+                                .iter()
+                                .map(|t| (t.config, t.counter))
+                                .collect::<Vec<_>>()
+                        ),
+                        before
+                    );
+                    assert_eq!([latch.pins(0), latch.pins(1)], pins);
+                }
+                write(&mut aic, &mut latch, bank.irq_config + 12, 0);
+                assert_eq!(read(&mut aic, &mut latch, 0, bank.irq_config + 12), 0);
+                assert_eq!(
+                    read(&mut aic, &mut latch, 1, EVENT),
+                    (die as u32) << 24 | EVENT_TYPE_IRQ | 3
+                );
+                assert!(!latch.pins(1).irq);
+            }
+        }
     }
 
     #[test]
@@ -1391,7 +1481,6 @@ mod tests {
                 timestamp_base: AIC3_TIMESTAMPS,
                 cpus: 1,
                 default_cpus: 1,
-                target_groups: [None; 4],
             })
         };
         let mut aic = v3(AIC3_IRQ_CFG, 0x40000).unwrap();
@@ -1445,7 +1534,6 @@ mod tests {
             timestamp_base: AIC3_TIMESTAMPS,
             cpus: 1,
             default_cpus: 1,
-            target_groups: [None; 4],
         };
         let mut aic = Aic2::stacked(config.clone(), 2).unwrap();
         let mut latch = InterruptLatch::new();

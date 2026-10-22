@@ -2665,7 +2665,6 @@ impl AppleDevices {
                     event_offset: event,
                     cpus,
                     default_cpus: 1 << self.sleep.boot,
-                    target_groups: [None; 4],
                 };
                 let aic = Aic2::stacked(config, dies)
                     .map_err(|error| format!("AIC2 configuration: {error:?}"))?;
