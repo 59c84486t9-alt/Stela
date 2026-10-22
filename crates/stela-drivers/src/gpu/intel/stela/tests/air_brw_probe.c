@@ -65,7 +65,6 @@ compile_air(const char *platform, LLVMMemoryBufferRef input, const char *entry, 
    struct intel_device_info device;
    int pci_id = intel_device_name_to_pci_device_id(platform);
    CHECK(pci_id >= 0 && intel_get_device_info_for_build(pci_id, &device));
-   CHECK(device.kmd_type == INTEL_KMD_TYPE_INVALID);
    if (device.ver == 35) {
       CHECK(gfx_ver_from_devinfo(&device) == XE3P);
       probe_unsupported("air-brw", platform, "requires-dispatch-packing-qualification");

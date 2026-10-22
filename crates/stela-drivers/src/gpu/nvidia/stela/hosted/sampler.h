@@ -3,20 +3,48 @@
 #define STELA_NVIDIA_HOSTED_SAMPLER_H
 
 #include "image.h"
-#include "nouveau/nil/nil_sampler.h"
+#include "vulkan/vulkan_core.h"
+
+/* Vulkan sampler values; no Vulkan object, frontend or runtime is used. */
+struct stela_nv_sampler_state {
+    VkSamplerCreateFlags flags;
+    VkFilter mag_filter;
+    VkFilter min_filter;
+    VkSamplerMipmapMode mipmap_mode;
+    VkSamplerAddressMode address_mode_u;
+    VkSamplerAddressMode address_mode_v;
+    VkSamplerAddressMode address_mode_w;
+    float mip_lod_bias;
+    float max_anisotropy;
+    VkCompareOp compare_op;
+    float min_lod;
+    float max_lod;
+    VkBorderColor border_color;
+    bool anisotropy_enable;
+    bool compare_enable;
+    bool unnormalized_coordinates;
+    bool image_view_is_srgb;
+    VkClearColorValue border_color_value;
+    VkComponentMapping border_color_component_mapping;
+    VkSamplerReductionMode reduction_mode;
+};
+
+/* The 32-byte TEXSAMP sampler header. */
+struct stela_nv_sampler_header {
+    uint32_t bits[8];
+};
 
 struct stela_nv_sampler {
     const struct nv_device_info *device;
     const void *image_owner;
-    struct nvk_sampler_header header;
+    struct stela_nv_sampler_header header;
 };
 
-/* Hosted internal same-process value encoder, with original NVK packing and
- * retained enum/color declarations. No Vulkan object/frontend/runtime library
- * is used. The image/device/owner lifetime and immutable metadata contract is
+/* Hosted internal same-process value encoder, packing TEXSAMP fields as NVK
+ * does. The image/device/owner lifetime and immutable metadata contract is
  * exactly image.h. No CPU pointers may cross a translated guest/native ABI.
  *
- * Initial subset: normalized color sampling; original nearest/linear
+ * Initial subset: normalized color sampling; nearest/linear
  * min/mag/mip filters and five address modes; anisotropy 1..16; standard
  * transparent-black/opaque-black/opaque-white float or integer borders; identity
  * mapping and weighted-average reduction. Actual paired image format must
@@ -26,9 +54,9 @@ struct stela_nv_sampler {
  * No Metal feature/family support is advertised by this helper.
  *
  * All numeric fields must be finite. LOD clamps are 0..4095/256, bias is
- * -16..4095/256 and minLOD<=maxLOD; original 8-fraction-bit packing/anisotropy
- * quantization is preserved. Disabled anisotropy uses max_anisotropy=1 exactly
- * as the original runtime value producer. Border payload and sRGB metadata
+ * -16..4095/256 and minLOD<=maxLOD; their 8-fraction-bit packing and the
+ * anisotropy quantization are NVK's. Disabled anisotropy uses max_anisotropy=1 exactly
+ * as the Vulkan runtime's value producer. Border payload and sRGB metadata
  * must match the selected standard border and the actual paired image format,
  * including its floating-point versus signed/unsigned integer numeric type.
  *
@@ -40,5 +68,5 @@ struct stela_nv_sampler {
  * Bind only to the validated image format and honor its image-view/mip limits.
  */
 int stela_nv_sampler_encode(const struct stela_nv_image *,
-                            const struct nil_sampler_state *, struct stela_nv_sampler *);
+                            const struct stela_nv_sampler_state *, struct stela_nv_sampler *);
 #endif

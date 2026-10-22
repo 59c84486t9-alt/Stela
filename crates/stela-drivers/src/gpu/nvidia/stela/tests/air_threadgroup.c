@@ -221,11 +221,7 @@ static void bytes_artifact(const char *directory, const char *name, unsigned sm,
 static void compile_fixture(struct fixture *fixture, unsigned sm, unsigned cls, const char *directory)
 {
     const struct nv_device_info dev = fixture_device(sm, cls);
-    const struct nak_constant_offset_info layout = {
-        .sample_info_cb = 0, .sample_locations_offset = 0, .sample_masks_offset = 256,
-        .printf_cb = 0, .printf_buffer_offset = 512,
-    };
-    struct nak_compiler *compiler = nak_compiler_create(&dev, &layout, &layout); CHECK(compiler);
+    struct nak_compiler *compiler = nak_compiler_create(&dev); CHECK(compiler);
     const struct stela_air_options options = {
         .workgroup_size = {fixture->threads, 1, 1}, .max_instructions = fixture->budget,
         .bind_buffer = bind_buffer, .binding_data = fixture, .fp_profile = STELA_AIR_FP_IEEE_DEFAULT,

@@ -177,9 +177,7 @@ static struct nv_device_info model(unsigned sm, unsigned cls)
 }
 static struct nak_compiler *compiler(const struct nv_device_info *device)
 {
-    const struct nak_constant_offset_info layout = {.sample_info_cb = 0,
-        .sample_locations_offset = 0, .sample_masks_offset = 256, .printf_cb = 0, .printf_buffer_offset = 512};
-    struct nak_compiler *nak = nak_compiler_create(device, &layout, &layout); CHECK(nak); return nak;
+    struct nak_compiler *nak = nak_compiler_create(device); CHECK(nak); return nak;
 }
 static struct stela_nv_air_options options(void)
 {

@@ -229,11 +229,7 @@ static void
 compile_and_encode(LLVMMemoryBufferRef bitcode, unsigned sm, unsigned cls)
 {
    struct nv_device_info dev = fixture_device(sm, cls);
-   const struct nak_constant_offset_info layout = {
-      .sample_info_cb = 0, .sample_locations_offset = 0,
-      .sample_masks_offset = 256, .printf_cb = 0, .printf_buffer_offset = 512,
-   };
-   struct nak_compiler *compiler = nak_compiler_create(&dev, &layout, &layout);
+   struct nak_compiler *compiler = nak_compiler_create(&dev);
    CHECK(compiler);
    const struct stela_air_options options = {
       .workgroup_size = {32, 1, 1}, .max_instructions = 100, .bind_buffer = bind_buffer,

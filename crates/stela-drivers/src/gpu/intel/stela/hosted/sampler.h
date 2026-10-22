@@ -23,8 +23,8 @@ enum {
  * none/nearest/linear mip, repeat/mirror-repeat/clamp-edge/mirror-clamp-edge,
  * weighted reduction and no anisotropy, comparison, cube or border. Any linear
  * min/mag/mip filtering requires the actual format's ISL filtering capability. Finite,
- * ordered LOD bounds and finite bias use original Iris clamps and original
- * XML fixed-point packing, including its no-mip/min-LOD policy. Border values
+ * ordered LOD bounds and finite bias use Iris's clamps and no-mip/min-LOD
+ * policy with the XML fixed-point packing. Border values
  * and compare_func have no effect while their modes are disabled; border
  * pointer remains zero and no border allocation is implied. Unknown padding
  * flags and unsupported behavior are refused, never silently approximated.

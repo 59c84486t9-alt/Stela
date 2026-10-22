@@ -74,7 +74,7 @@ pub fn build() {
         .env("PYTHONDONTWRITEBYTECODE", "1");
     compile.arg("-C").arg(&build).args([
         "src/stela/libstela_amd_commands.a",
-        "src/amd/common/libamd_command_support.a",
+        "src/amd/common/libamd_common.a",
     ]);
     if let Some(jobs) = env::var_os("NUM_JOBS") {
         compile.arg("-j").arg(jobs);
@@ -89,7 +89,9 @@ pub fn build() {
         build.join("src/amd/common").display()
     );
     println!("cargo:rustc-link-lib=static=stela_amd_commands");
-    println!("cargo:rustc-link-lib=static=amd_command_support");
+    // Mesa's whole common archive: the linker keeps only the command encoders
+    // and drops its unused device-query code, whose libdrm calls never link.
+    println!("cargo:rustc-link-lib=static=amd_common");
     // The command tests' immutable radeon_info fixture; only cfg(test) links it.
     cc::Build::new()
         .file(manifest.join("src/gpu/amd/tests/commands_fixture.c"))

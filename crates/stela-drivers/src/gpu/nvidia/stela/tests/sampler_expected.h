@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: MIT */
-/* Frozen from original Mesa 31e9a6b2 NVK/color blocks before extraction.
- * Corpus: sampler_cases.h. Two classes exercise the original reduction gate.
+/* NVK's sampler headers (Mesa 31e9a6b2) for sampler_cases.h, recorded before
+ * Stela packed its own. Two classes exercise NVK's reduction gate.
  * Raw output SHA256: b6a22d592b651238b1a0580710737cf6b012c0220e89e950cab5262eb73e778b
  */
-static const uint32_t sampler_donor_words[2][STELA_NV_SAMPLER_DONOR_CASES][8] = {
+static const uint32_t sampler_expected_words[2][STELA_NV_SAMPLER_CASES][8] = {
     {
         {0x00026092u, 0x00000291u, 0x00800000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u},
         {0x00026092u, 0x00000292u, 0x00800000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u},

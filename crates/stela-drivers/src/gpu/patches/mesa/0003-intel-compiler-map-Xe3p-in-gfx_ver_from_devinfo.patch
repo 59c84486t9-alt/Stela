@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 00:00:00 +0000
+Subject: [PATCH] intel/compiler: map Xe3p in gfx_ver_from_devinfo
+
+---
+ src/intel/compiler/intel_gfx_ver_enum.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/intel/compiler/intel_gfx_ver_enum.h b/src/intel/compiler/intel_gfx_ver_enum.h
+index 3ceb085d90fb1bd274c1ded10c95aa7de913132b..35302b0a3362ba9511d226f6ac66ef1357984680 100644
+--- a/src/intel/compiler/intel_gfx_ver_enum.h
++++ b/src/intel/compiler/intel_gfx_ver_enum.h
+@@ -23,6 +23,7 @@ enum gfx_ver {
+    GFX125  = (1 << 11),
+    XE2     = (1 << 12),
+    XE3     = (1 << 13),
++   XE3P    = (1 << 14),
+    GFX_ALL = ~0
+ };
+ 
+@@ -47,6 +48,7 @@ gfx_ver_from_devinfo(const struct intel_device_info *devinfo)
+    case 125: return GFX125;
+    case 200: return XE2;
+    case 300: return XE3;
++   case 350: return XE3P;
+    default:
+       UNREACHABLE("not reached");
+    }

@@ -3,6 +3,28 @@
 # They do not open a device, submit GPU work, or expose a Metal device.
 # Hosted source compilation is independent of Mesa and the physical backend.
 # Resolve matching Apple LLVM functions dynamically; never link host LLVM here.
+# Stela links unchanged upstream sources and archives whose unused functions
+# reach device and OS services it does not provide; the linker drops them.
+stela_sections = cc.get_supported_arguments(['-ffunction-sections', '/Gy'])
+stela_dead_strip = cpp.get_supported_link_arguments(
+  ['-Wl,-dead_strip', '-Wl,--gc-sections', '/OPT:REF'])
+# NAK reads its frontend's constant-buffer layout from globals NVK defines;
+# Stela defines its own.
+if with_stela_nvidia
+  stela_nak = [_libnak_rs, static_library(
+    'stela_nak_layout',
+    '../../../../nvidia/stela/hosted/nak_layout.c',
+    include_directories : [inc_include, inc_src],
+    dependencies : [idep_nak, idep_nir_headers],
+    c_args : ['-Werror'],
+  )]
+endif
+# With LLVM, ACO disassembles through the AMD LLVM helpers.
+stela_aco_links = []
+if with_stela_amd_llvm
+  stela_aco_links = [libamd_common_llvm]
+endif
+
 stela_apple_source = static_library(
   'stela_apple_source',
   '../../../../metal/compiler/apple_source.c',
@@ -115,14 +137,14 @@ if stela_air_llvm != ''
   stela_air_test_args = ['-Werror']
   if with_stela_nvidia
     stela_air_test_dependencies += [idep_nak]
-    stela_air_test_links += [_libnak_rs]
+    stela_air_test_links += stela_nak
     stela_air_test_args += ['-DSTELA_AIR_TEST_NAK']
     stela_air_input_nak_probe = executable(
       'stela_air_input_nak_probe',
       'air_input_nak_probe.c',
       include_directories : [inc_include, inc_src],
       dependencies : [idep_stela_air, idep_nak],
-      link_with : [_libnak_rs],
+      link_with : stela_nak,
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
@@ -161,7 +183,7 @@ if stela_air_llvm != ''
       '../../../../nvidia/stela/tests/air_render.c',
       include_directories : [inc_include, inc_src],
       dependencies : [idep_stela_air, idep_nak],
-      link_with : [_libnak_rs],
+      link_with : stela_nak,
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
@@ -176,8 +198,9 @@ if stela_air_llvm != ''
         # Keep the full matching development headers. idep_stela_air exposes
         # the narrow C-only header set, unsuitable for this C++ LLVM backend.
         dependencies : [idep_nir, idep_mesautil, dep_llvm, idep_amd_generated_headers],
-        link_with : [stela_air, libamd_common_llvm, libamd_compiler_support,
+        link_with : [stela_air, libamd_common_llvm, libamd_common,
                      stela_amd_llvm_float],
+        link_args : stela_dead_strip,
         c_args : ['-Werror'],
         build_rpath : fs.parent(stela_air_llvm),
       )
@@ -189,7 +212,8 @@ if stela_air_llvm != ''
       include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
       dependencies : [idep_stela_air, idep_aco, idep_amd_generated_headers] +
                      (with_stela_amd_llvm ? [dep_llvm] : []),
-      link_with : [libamd_compiler_support],
+      link_with : [libamd_common] + stela_aco_links,
+      link_args : stela_dead_strip,
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
@@ -214,7 +238,8 @@ if stela_air_llvm != ''
       include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
       dependencies : [idep_stela_air, idep_aco, idep_amd_generated_headers] +
                      (with_stela_amd_llvm ? [dep_llvm] : []),
-      link_with : [stela_amd_render_lowering, libamd_compiler_support],
+      link_with : [stela_amd_render_lowering, libamd_common] + stela_aco_links,
+      link_args : stela_dead_strip,
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
@@ -312,7 +337,7 @@ if with_stela_nvidia
       include_directories : [inc_include, inc_src,
                              include_directories('../nouveau/headers', '../nouveau/headers/nvidia/classes')],
       dependencies : [idep_stela_air, idep_nak],
-      link_with : [stela_nv_compute, _libnak_rs],
+      link_with : [stela_nv_compute, stela_nak],
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
@@ -325,7 +350,7 @@ if with_stela_nvidia
       include_directories : [inc_include, inc_src,
                              include_directories('../nouveau/headers', '../nouveau/headers/nvidia/classes')],
       dependencies : [idep_stela_air, idep_nak, idep_mesautil],
-      link_with : [stela_nv_compute, _libnak_rs],
+      link_with : [stela_nv_compute, stela_nak],
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
@@ -336,7 +361,7 @@ if with_stela_nvidia
       '../../../../nvidia/stela/hosted/air_compile.c',
       include_directories : [inc_include, inc_src, include_directories('../nouveau/headers')],
       dependencies : [idep_stela_air, idep_nak, idep_nir_headers],
-      link_with : [stela_metal_assembly, stela_metal_threadgroup, _libnak_rs],
+      link_with : [stela_metal_assembly, stela_metal_threadgroup, stela_nak],
       c_args : ['-Werror'],
     )
     stela_nv_air_compile_test = executable(
@@ -346,7 +371,7 @@ if with_stela_nvidia
                              include_directories('../nouveau/headers', '../nouveau/headers/nvidia/classes')],
       dependencies : [idep_stela_air, idep_nak, idep_nir_headers,
                       dependency('appleframeworks', modules : ['CoreFoundation'])],
-      link_with : [stela_nv_air, stela_nv_compute, stela_apple_source, _libnak_rs],
+      link_with : [stela_nv_air, stela_nv_compute, stela_apple_source, stela_nak],
       link_args : [stela_metal_input, '-lresolv', '-liconv'],
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
@@ -362,7 +387,7 @@ if with_stela_nvidia
                                include_directories('../nouveau/headers', '../nouveau/headers/nvidia/classes')],
         dependencies : [idep_stela_air, idep_nak, idep_nir_headers, idep_mesautil,
                         dependency('appleframeworks', modules : ['CoreFoundation'])],
-        link_with : [stela_metal_assembly, stela_apple_source, _libnak_rs],
+        link_with : [stela_metal_assembly, stela_apple_source, stela_nak],
         link_args : [stela_metal_input, '-lresolv', '-liconv'],
         c_args : ['-Werror'] + variant[1],
         build_rpath : fs.parent(stela_air_llvm),
@@ -375,7 +400,7 @@ if with_stela_nvidia
     'nak_probe.c',
     include_directories : [inc_include, inc_src],
     dependencies : [idep_nak, idep_nir, idep_mesautil],
-    link_with : [_libnak_rs],
+    link_with : stela_nak,
   )
   test('stela_nak_codegen', stela_nak_probe, suite : 'stela')
 endif
@@ -531,11 +556,8 @@ if with_stela_intel
                            include_directories('../../../../intel/stela', '../intel/genxml')],
     c_args : ['-Werror'],
   )
-  # Keep these original policy TUs intact. Function-section dead stripping
-  # removes unused device-query entry points; no Linux OS stubs are supplied.
-  stela_intel_policy_sections = cc.get_supported_arguments(['-ffunction-sections', '/Gy'])
-  stela_intel_policy_gc = cpp.get_supported_link_arguments(
-    ['-Wl,-dead_strip', '-Wl,--gc-sections', '/OPT:REF'])
+  # Keep these original policy TUs intact; stela_dead_strip removes their
+  # unused device-query entry points.
   stela_intel_compute_policy = static_library(
     'stela_intel_compute_policy',
     ['../../../../intel/stela/hosted/compute.c',
@@ -543,7 +565,7 @@ if with_stela_intel
     include_directories : [inc_include, inc_src, inc_intel],
     dependencies : [idep_intel_compiler_brw, idep_intel_dev, idep_mesautil],
     link_with : [libisl],
-    c_args : ['-Werror'] + stela_intel_policy_sections,
+    c_args : ['-Werror'] + stela_sections,
   )
   stela_intel_compute_program_probe = executable(
     'stela_intel_compute_program_probe',
@@ -552,7 +574,7 @@ if with_stela_intel
     dependencies : [idep_intel_compiler_brw, idep_intel_dev, idep_mesautil],
     link_with : [stela_intel_compute_policy, stela_intel_compute_native, libisl],
     c_args : ['-Werror'],
-    link_args : stela_intel_policy_gc,
+    link_args : stela_dead_strip,
   )
   test('stela_intel_compute_program', stela_intel_compute_program_probe, suite : 'stela')
   # The hosted legacy producer reuses the same original SLM policy archive and
@@ -583,7 +605,7 @@ if with_stela_intel
                     idep_intel_compiler_gen, idep_intel_dev, idep_mesautil],
     link_with : [stela_intel_legacy_compute],
     c_args : ['-Werror'],
-    link_args : stela_intel_policy_gc,
+    link_args : stela_dead_strip,
   )
   test('stela_intel_legacy_compute_program', stela_intel_legacy_compute_program_probe,
        suite : 'stela')
@@ -612,19 +634,11 @@ if with_stela_intel
                    stela_intel_compute_policy, stela_intel_compute_native,
                    stela_intel_legacy_compute, stela_intel_gpgpu_native,
                    libisl, stela_apple_source],
-      link_args : [stela_metal_input, '-lresolv', '-liconv'] + stela_intel_policy_gc,
+      link_args : [stela_metal_input, '-lresolv', '-liconv'] + stela_dead_strip,
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
     test('stela_intel_air_owned', stela_intel_air_compile_test, suite : 'stela')
-    stela_intel_binding_tables = static_library(
-      'stela_intel_binding_tables',
-      files('../gallium/drivers/iris/iris_binding_table.c',
-            '../gallium/drivers/crocus/crocus_binding_table.c'),
-      include_directories : [inc_include, inc_src, inc_intel],
-      dependencies : [idep_nir_headers, idep_mesautil, idep_intel_dev, idep_intel_compiler_elk],
-      c_args : ['-Werror'],
-    )
     # Needs the unchanged Apple triangle and the Intel render probe's
     # artifacts; `cargo xtask gpu compilers` runs both variants with them.
     # The test includes air_graphics.c itself; the second variant denies its
@@ -638,11 +652,11 @@ if with_stela_intel
                         idep_intel_compiler_elk, idep_intel_compiler_gen,
                         idep_intel_dev, idep_mesautil,
                         dependency('appleframeworks', modules : ['CoreFoundation'])],
-        link_with : [stela_intel_air, stela_intel_binding_tables, stela_intel_surface,
+        link_with : [stela_intel_air, stela_intel_surface,
                      stela_intel_compute_policy, stela_intel_compute_native,
                      stela_intel_legacy_compute, stela_intel_gpgpu_native,
                      libisl, stela_apple_source],
-        link_args : [stela_metal_input, '-lresolv', '-liconv'] + stela_intel_policy_gc,
+        link_args : [stela_metal_input, '-lresolv', '-liconv'] + stela_dead_strip,
         c_args : ['-Werror'] + variant[1],
         build_rpath : fs.parent(stela_air_llvm),
       )
@@ -661,7 +675,7 @@ if with_stela_intel
       link_with : [stela_intel_compute_policy, stela_intel_compute_native,
                    stela_intel_legacy_compute, libisl],
       c_args : ['-Werror'],
-      link_args : stela_intel_policy_gc,
+      link_args : stela_dead_strip,
       build_rpath : fs.parent(stela_air_llvm),
     )
     test('stela_intel_fp_controls', stela_intel_fp_controls_probe, suite : 'stela')
@@ -692,7 +706,7 @@ if with_stela_intel
       link_with : [stela_intel_compute_policy, stela_intel_compute_native,
                    stela_intel_legacy_compute, libisl],
       c_args : ['-Werror'],
-      link_args : stela_intel_policy_gc,
+      link_args : stela_dead_strip,
       build_rpath : fs.parent(stela_air_llvm),
     )
   endif
@@ -739,7 +753,7 @@ if with_stela_amd
     '../../../../amd/stela/sampler.c',
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
-    link_with : [libamd_compiler_support],
+    link_with : [libamd_common],
     c_args : ['-Werror'],
   )
   stela_amd_sampler_probe = executable(
@@ -747,24 +761,18 @@ if with_stela_amd
     '../../../../amd/tests/sampler_test.c',
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
-    link_with : [stela_amd_sampler, libamd_compiler_support],
+    link_with : [stela_amd_sampler, libamd_common],
+    link_args : stela_dead_strip,
     c_args : ['-Werror'],
   )
   test('stela_amd_sampler', stela_amd_sampler_probe, suite : 'stela')
-  stela_amd_surface = static_library(
-    'stela_amd_surface',
-    '../amd/common/ac_surface.c',
-    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
-    dependencies : [idep_mesautil, idep_amd_generated_headers],
-    link_with : [libamdgpu_addrlib, libamd_compiler_support],
-    c_args : cpp_args_addrlib + ['-Werror'],
-  )
   stela_amd_surface_probe = executable(
     'stela_amd_surface_probe',
     ['../../../../amd/tests/surface_host_test.c', '../amd/common/amdgpu_devices.c'],
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
-    link_with : [stela_amd_surface],
+    link_with : [libamd_common],
+    link_args : stela_dead_strip,
     c_args : cpp_args_addrlib + ['-Werror'],
   )
   test('stela_amd_surface', stela_amd_surface_probe, suite : 'stela')
@@ -773,7 +781,7 @@ if with_stela_amd
     '../../../../amd/stela/buffer.c',
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
-    link_with : [libamd_compiler_support],
+    link_with : [libamd_common],
     c_args : ['-Werror'],
   )
   stela_amd_buffer_probe = executable(
@@ -781,7 +789,8 @@ if with_stela_amd
     '../../../../amd/tests/buffer_test.c',
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
-    link_with : [stela_amd_buffer, libamd_compiler_support],
+    link_with : [stela_amd_buffer, libamd_common],
+    link_args : stela_dead_strip,
     c_args : ['-Werror'],
   )
   test('stela_amd_buffer', stela_amd_buffer_probe, suite : 'stela')
@@ -791,7 +800,7 @@ if with_stela_amd
      '../../../../amd/stela/image_copy.c'],
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
-    link_with : [stela_amd_surface, stela_amd_buffer, libamd_compiler_support],
+    link_with : [stela_amd_buffer, libamd_common],
     c_args : cpp_args_addrlib + ['-Werror'],
   )
   stela_amd_image_probe = executable(
@@ -800,6 +809,7 @@ if with_stela_amd
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
     link_with : [stela_amd_image],
+    link_args : stela_dead_strip,
     c_args : cpp_args_addrlib + ['-Werror'],
   )
   test('stela_amd_image', stela_amd_image_probe, suite : 'stela')
@@ -809,6 +819,7 @@ if with_stela_amd
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
     link_with : [stela_amd_image],
+    link_args : stela_dead_strip,
     c_args : cpp_args_addrlib + ['-Werror'],
   )
   test('stela_amd_image_resource', stela_amd_image_resource_probe, suite : 'stela')
@@ -818,6 +829,7 @@ if with_stela_amd
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
     link_with : [stela_amd_image],
+    link_args : stela_dead_strip,
     c_args : cpp_args_addrlib + ['-Werror'],
   )
   test('stela_amd_image_copy', stela_amd_image_copy_probe, suite : 'stela')
@@ -826,7 +838,7 @@ if with_stela_amd
     'amd_commands.c',
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
-    link_with : [libamd_command_support],
+    link_with : [libamd_common],
   )
 
   stela_amd_compute = static_library(
@@ -835,7 +847,7 @@ if with_stela_amd
      '../../../../amd/stela/llvm_compute.c'],
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     dependencies : [idep_nir_headers, idep_mesautil, idep_amd_generated_headers],
-    link_with : [stela_amd_buffer, stela_amd_commands, libamd_compiler_support],
+    link_with : [stela_amd_buffer, stela_amd_commands, libamd_common],
     c_args : ['-Werror'],
   )
   stela_amd_compute_probe = executable(
@@ -844,7 +856,8 @@ if with_stela_amd
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     dependencies : [idep_aco, idep_nir, idep_mesautil, idep_amd_generated_headers] +
                    (with_stela_amd_llvm ? [dep_llvm] : []),
-    link_with : [stela_amd_compute] + (with_stela_amd_llvm ? [stela_amd_llvm_float] : []),
+    link_with : [stela_amd_compute] + stela_aco_links + (with_stela_amd_llvm ? [stela_amd_llvm_float] : []),
+    link_args : stela_dead_strip,
     c_args : ['-Werror', '-DSTELA_AMD_TEST_LLVM=' + (with_stela_amd_llvm ? '1' : '0')],
   )
   test('stela_amd_compute', stela_amd_compute_probe, suite : 'stela')
@@ -855,7 +868,7 @@ if with_stela_amd
       include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
       dependencies : [idep_stela_air, idep_aco, idep_amd_generated_headers] +
                      (with_stela_amd_llvm ? [dep_llvm] : []),
-      link_with : [stela_metal_assembly, stela_metal_threadgroup, stela_amd_buffer, libamd_compiler_support],
+      link_with : [stela_metal_assembly, stela_metal_threadgroup, stela_amd_buffer, libamd_common] + stela_aco_links,
       c_args : ['-Werror'],
     )
     stela_amd_air_compile_test = executable(
@@ -865,8 +878,8 @@ if with_stela_amd
       dependencies : [idep_stela_air, idep_aco, idep_amd_generated_headers,
                       dependency('appleframeworks', modules : ['CoreFoundation'])] +
                      (with_stela_amd_llvm ? [dep_llvm] : []),
-      link_with : [stela_amd_air, stela_amd_compute, stela_apple_source],
-      link_args : [stela_metal_input, '-lresolv', '-liconv'],
+      link_with : [stela_amd_air, stela_amd_compute, stela_apple_source] + stela_aco_links,
+      link_args : [stela_metal_input, '-lresolv', '-liconv'] + stela_dead_strip,
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
@@ -881,7 +894,8 @@ if with_stela_amd
       dependencies : [idep_nir, idep_aco, idep_mesautil, dep_llvm,
                       idep_amd_generated_headers],
       link_with : [stela_air, stela_amd_compute, stela_amd_llvm_float,
-                   libamd_common_llvm, libamd_compiler_support, libamd_command_support],
+                   libamd_common_llvm, libamd_common],
+      link_args : stela_dead_strip,
       c_args : ['-Werror', '-DSTELA_AMD_TEST_LLVM=1'],
       build_rpath : fs.parent(stela_air_llvm),
     )
@@ -892,7 +906,8 @@ if with_stela_amd
     'amd_commands_probe.c',
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
-    link_with : [stela_amd_commands, libamd_command_support],
+    link_with : [stela_amd_commands, libamd_common],
+    link_args : stela_dead_strip,
   )
   test('stela_amd_commands', stela_amd_commands_probe, suite : 'stela')
 
@@ -902,7 +917,8 @@ if with_stela_amd
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     dependencies : [idep_aco, idep_nir, idep_mesautil, idep_amd_generated_headers] +
                    (with_stela_amd_llvm ? [dep_llvm] : []),
-    link_with : [libamd_compiler_support],
+    link_with : [libamd_common] + stela_aco_links,
+    link_args : stela_dead_strip,
   )
   test('stela_aco_codegen', stela_aco_probe, suite : 'stela')
 endif

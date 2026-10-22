@@ -1,10 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_NV_SAMPLER_CASES_H
 #define STELA_NV_SAMPLER_CASES_H
-/* Test values only. Used before extraction with original vk_sampler_state and
- * afterwards with the plain nil_sampler_state. No packing algorithm lives here.
- */
-#define STELA_NV_SAMPLER_DONOR_CASES 42
+/* Test values only; sampler_expected.h holds NVK's headers for them. */
+#define STELA_NV_SAMPLER_CASES 42
 static SAMPLER_CASE_STATE sampler_case(unsigned index)
 {
     SAMPLER_CASE_STATE state = {
@@ -68,7 +66,7 @@ static SAMPLER_CASE_STATE sampler_case(unsigned index)
             VK_COMPONENT_SWIZZLE_A, VK_COMPONENT_SWIZZLE_ONE,
             VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R};
         break;
-    default: assert(!"invalid donor case");
+    default: assert(!"invalid sampler case");
     }
     return state;
 }

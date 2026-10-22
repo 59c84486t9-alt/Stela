@@ -376,7 +376,6 @@ static void target(const struct input *input, const char *name, bool legacy)
 {
     struct intel_device_info dev; int pci = intel_device_name_to_pci_device_id(name);
     CHECK(pci >= 0 && intel_get_device_info_for_build(pci, &dev));
-    CHECK(dev.kmd_type == INTEL_KMD_TYPE_INVALID);
     if (dev.ver >= 35) {
         printf("STELA_RENDER_HOLD {\"target\":\"%s\",\"reason\":\"Gen35-dispatch-execution-policy-unqualified\"}\n", name);
         return;

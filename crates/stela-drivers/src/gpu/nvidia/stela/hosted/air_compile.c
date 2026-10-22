@@ -222,8 +222,8 @@ enum stela_nv_air_status stela_nv_air_compile_specialized(const struct nv_device
     struct stela_nv_air_compilation *owner = calloc(1, sizeof(*owner));
     if (!owner) return report(error, STELA_NV_AIR_ALLOCATION, "Compilation owner allocation failed");
     owner->provenance.options = *options; owner->provenance.threadgroup = threadgroup; owner->provenance.device = *device;
-    owner->provenance.base_layout = compiler->const_offsets_base;
-    owner->provenance.graphics_layout = compiler->const_offsets_turing_graphics;
+    owner->provenance.base_layout = nak_const_offsets_base;
+    owner->provenance.graphics_layout = nak_const_offsets_turing_graphics;
     owner->nir_options = *actual_options;
     enum stela_nv_air_status status = copy_provenance(owner, manifest, record, selected, error);
     if (!status) status = prepare_bindings(owner, error);

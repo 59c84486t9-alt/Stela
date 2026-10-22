@@ -1,6 +1,4 @@
 /* SPDX-License-Identifier: MIT */
-#include "nouveau/compiler/nak_shader_layout.h"
-#include "nouveau/compiler/nak_nir_lower_constant.h"
 #include "util/ralloc.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,60 +34,10 @@ static void owner_free(void *pointer)
 #undef free
 #endif
 
-/* Expected byte boundaries are independent of the helper's running-size
- * implementation. Fermi graphics is not an admitted render target: its
- * historical NVK helper asserts when asked for an aligned code offset. We
- * still preserve and qualify its size/header/alignment branch with that
- * optional output omitted. No unchecked helper is fed overflowing input. */
-static void layout_tests(void)
-{
-    static const uint16_t classes[] = {0, KEPLER_A - 1, KEPLER_A,
-        TURING_A - 1, TURING_A, 0xc797, 0xcd97, UINT16_MAX};
-    static const uint32_t code_sizes[] = {0, 1, 63, 64, 127, 128, 257, 4096,
-        UINT32_MAX - 1024};
-    unsigned cases = 0;
-    for (unsigned c = 0; c < ARRAY_SIZE(classes); ++c) {
-        const struct nv_device_info dev = {.cls_eng3d = classes[c]};
-        const bool old_header = classes[c] < TURING_A;
-        const uint32_t cbuf_align = old_header ? 256u : 64u;
-        const uint32_t instruction_align = classes[c] < KEPLER_A ? 64u : 128u;
-        CHECK(nak_min_cbuf_alignment(&dev) == cbuf_align);
-        CHECK(nak_shader_get_shader_alignment(&dev) == instruction_align);
-        for (unsigned stage = MESA_SHADER_VERTEX; stage <= MESA_SHADER_MESH; ++stage) {
-            for (unsigned mesh_header = 0; mesh_header < 2; ++mesh_header) {
-                struct nak_shader_info info = {.stage = (mesa_shader_stage)stage};
-                if (stage == MESA_SHADER_MESH) info.mesh.has_gs_sph = mesh_header != 0;
-                const bool compute = stage == MESA_SHADER_COMPUTE;
-                const uint32_t header_bytes = compute ? 0u : old_header ? 80u : 128u;
-                const uint32_t prefix = !compute && classes[c] >= KEPLER_A && old_header ? 48u : 0u;
-                CHECK(nak_shader_get_hdr_size(&dev, &info) == header_bytes);
-                for (unsigned code = 0; code < ARRAY_SIZE(code_sizes); ++code) {
-                    const uint32_t code_offset_expected = prefix + header_bytes;
-                    const uint32_t code_end = code_offset_expected + code_sizes[code];
-                    uint32_t expected_gs = 0, expected_size = code_end;
-                    if (stage == MESA_SHADER_MESH && mesh_header) {
-                        expected_gs = (code_end + cbuf_align - 1u) & ~(cbuf_align - 1u);
-                        expected_size = expected_gs + header_bytes;
-                    }
-                    uint32_t hdr = UINT32_MAX, code_offset = UINT32_MAX, gs = UINT32_MAX;
-                    const bool request_code = compute || classes[c] >= KEPLER_A;
-                    const uint32_t size = nak_shader_get_shader_size(&dev, &info,
-                        code_sizes[code], &hdr, request_code ? &code_offset : NULL, &gs);
-                    CHECK(size == expected_size && hdr == prefix && gs == expected_gs);
-                    if (request_code) CHECK(code_offset == code_offset_expected && code_offset % instruction_align == 0);
-                    CHECK(nak_shader_get_shader_size(&dev, &info, code_sizes[code], NULL, NULL, NULL) == size);
-                    ++cases;
-                }
-            }
-        }
-    }
-    printf("layout_cases=%u\n", cases);
-}
-
 static bool lower_constant(nir_builder *b, nir_intrinsic_instr *load, void *data)
 {
     if (load->intrinsic != nir_intrinsic_load_constant) return false;
-    return nak_nir_lower_load_constant(b, load, *(const uint32_t *)data);
+    return lower_constant_load(b, load, *(const uint32_t *)data);
 }
 
 static void constant_tests(void)
@@ -151,9 +99,7 @@ static void constant_image_tests(void)
     for (unsigned t = 0; t < ARRAY_SIZE(targets); ++t) for (unsigned dynamic = 0; dynamic < 2; ++dynamic) {
         const struct nv_device_info device = {.sm = targets[t].sm, .max_warps_per_mp = targets[t].warps,
             .cls_eng3d = targets[t].cls};
-        const struct nak_constant_offset_info layout = {.sample_info_cb = 0,
-            .sample_locations_offset = 0, .sample_masks_offset = 256, .printf_cb = 1};
-        struct nak_compiler *compiler = nak_compiler_create(&device, &layout, &layout); CHECK(compiler);
+        struct nak_compiler *compiler = nak_compiler_create(&device); CHECK(compiler);
         nir_shader_compiler_options options = *nak_nir_options(compiler); CHECK(!options.cb_data);
         nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX, &options, "original constant upload");
         b.shader->constant_data_size = 115;
@@ -354,8 +300,7 @@ static void unused_owner_tests(void)
         LLVMDisposeMemoryBuffer(module);
         struct stela_metal_assembly *sources[2]; assemble_pair(input, sources);
         const struct nv_device_info device = {.sm = 75, .max_warps_per_mp = 32, .cls_eng3d = TURING_A};
-        const struct nak_constant_offset_info layout = {.sample_info_cb = 0, .sample_masks_offset = 256, .printf_cb = 1};
-        struct nak_compiler *compiler = nak_compiler_create(&device, &layout, &layout); CHECK(compiler);
+        struct nak_compiler *compiler = nak_compiler_create(&device); CHECK(compiler);
         struct stela_nv_render_options options = render_options(1);
         struct stela_nv_render_compilation *result = NULL; struct stela_nv_render_error error;
         enum stela_nv_render_status status = stela_nv_render_compile(&device, compiler, &sources[0], &sources[1], &options, &result, &error);
@@ -391,7 +336,7 @@ static void refusals(const struct nv_device_info *device, struct nak_compiler *c
     struct stela_metal_assembly *sources[2], const struct stela_nv_render_options *options)
 {
     struct stela_nv_render_options bad = *options;
-    bad.argument_cbuf[0] = compiler->const_offsets_base.sample_info_cb;
+    bad.argument_cbuf[0] = nak_const_offsets_base.sample_info_cb;
     expect_failure(device, compiler, sources, &bad, STELA_NV_RENDER_UNSUPPORTED);
     bad = *options; bad.fs_key.force_sample_shading = !bad.fs_key.force_sample_shading;
     expect_failure(device, compiler, sources, &bad, STELA_NV_RENDER_UNSUPPORTED);
@@ -490,9 +435,7 @@ static void owned_tests(const struct bytes *raw, const char *vertex, const char 
          * same actual record, and layout policy independently receives class. */
         const struct nv_device_info device = {.sm = (uint8_t)sm, .cls_eng3d = TURING_A,
             .max_warps_per_mp = sm == 75 ? 32 : (sm == 86 || sm == 87 || sm == 89 || sm == 120 ? 48 : 64)};
-        const struct nak_constant_offset_info layout = {.sample_info_cb = 0,
-            .sample_locations_offset = 0, .sample_masks_offset = 256, .printf_cb = 1};
-        struct nak_compiler *compiler = nak_compiler_create(&device, &layout, &layout); CHECK(compiler);
+        struct nak_compiler *compiler = nak_compiler_create(&device); CHECK(compiler);
         struct stela_nv_render_options options = render_options(samples);
         struct bytes input[2] = {archive(raw->data, raw->count, vertex, 0), archive(raw->data, raw->count, fragment, 1)};
         struct stela_metal_assembly *sources[2]; assemble_pair(input, sources);
@@ -548,7 +491,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--output")) output = argv[i + 1];
         else CHECK(false);
     }
-    layout_tests(); constant_tests(); constant_image_tests(); unused_owner_tests();
+    constant_tests(); constant_image_tests(); unused_owner_tests();
     if (argc == 1) { puts("No external stage input requested; authored fixtures only"); return 0; }
     CHECK(input && vertex && fragment);
     FILE *file = fopen(input, "rb"); CHECK(file);

@@ -18,14 +18,7 @@ compile_store(unsigned sm)
       .sm = sm,
       .max_warps_per_mp = 32,
    };
-   const struct nak_constant_offset_info layout = {
-      .sample_info_cb = 0,
-      .sample_locations_offset = 0,
-      .sample_masks_offset = 256,
-      .printf_cb = 0,
-      .printf_buffer_offset = 512,
-   };
-   struct nak_compiler *nak = nak_compiler_create(&dev, &layout, &layout);
+   struct nak_compiler *nak = nak_compiler_create(&dev);
    if (!nak)
       return 1;
 

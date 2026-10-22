@@ -180,6 +180,7 @@
         }
       ],
       "wraps": [
+        "libdrm",
         "paste-1-rs",
         "proc-macro2-1-rs",
         "quote-1-rs",

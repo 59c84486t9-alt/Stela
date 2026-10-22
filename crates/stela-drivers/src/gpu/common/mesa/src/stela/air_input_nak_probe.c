@@ -40,11 +40,7 @@ compile_input(const void *input, size_t size, const char *entry, unsigned sm,
               enum stela_air_fp_profile fp_profile)
 {
    const struct nv_device_info device = {.sm = sm, .max_warps_per_mp = 32};
-   const struct nak_constant_offset_info layout = {
-      .sample_info_cb = 0, .sample_locations_offset = 0,
-      .sample_masks_offset = 256, .printf_cb = 0, .printf_buffer_offset = 512,
-   };
-   struct nak_compiler *compiler = nak_compiler_create(&device, &layout, &layout);
+   struct nak_compiler *compiler = nak_compiler_create(&device);
    CHECK(compiler);
    unsigned bindings = 0;
    const struct stela_air_options options = {

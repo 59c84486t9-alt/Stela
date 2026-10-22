@@ -3,8 +3,8 @@
 #include "../../../metal/compiler/library_assembly.h"
 #include "air_compile.h" /* Reuse the existing immutable resource-view record. */
 #include "nouveau/compiler/nak_private.h"
-#include "nouveau/compiler/nak_shader_layout.h"
-#include "nouveau/compiler/nak_nir_lower_constant.h"
+#include "nouveau/headers/nvidia/classes/cla097.h"
+#include "nouveau/headers/nvidia/classes/clc597.h"
 #include "util/ralloc.h"
 #include <math.h>
 #include <stdio.h>
@@ -88,10 +88,10 @@ static bool layout_valid(const struct nak_constant_offset_info *layout)
 }
 static bool slot_free(uint32_t slot, const struct nak_compiler *compiler)
 {
-    return slot < CBUF_COUNT && slot != compiler->const_offsets_base.sample_info_cb &&
-        slot != compiler->const_offsets_base.printf_cb &&
-        slot != compiler->const_offsets_turing_graphics.sample_info_cb &&
-        slot != compiler->const_offsets_turing_graphics.printf_cb;
+    return slot < CBUF_COUNT && slot != nak_const_offsets_base.sample_info_cb &&
+        slot != nak_const_offsets_base.printf_cb &&
+        slot != nak_const_offsets_turing_graphics.sample_info_cb &&
+        slot != nak_const_offsets_turing_graphics.printf_cb;
 }
 static bool same_buffer(const struct stela_air_buffer *a, const struct stela_air_buffer *b)
 {
@@ -129,11 +129,23 @@ static bool bind_buffer(const struct stela_air_buffer *buffer, unsigned *slot, v
     }
     return false;
 }
+/* Shader constant data is uploaded behind the code and bound as its own
+ * constant buffer, so each load reads that buffer at its base plus offset. */
+static bool lower_constant_load(nir_builder *b, nir_intrinsic_instr *load, uint32_t cbuf)
+{
+    b->cursor = nir_before_instr(&load->instr);
+    nir_def *offset = nir_iadd_imm(b, load->src[0].ssa, nir_intrinsic_base(load));
+    nir_def *data = nir_ldc_nv(b, load->def.num_components, load->def.bit_size,
+        nir_imm_int(b, (int)cbuf), offset,
+        .align_mul = nir_intrinsic_align_mul(load), .align_offset = nir_intrinsic_align_offset(load));
+    nir_def_replace(&load->def, data);
+    return true;
+}
 static bool lower_resource(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 {
     const struct lower_context *ctx = data;
     if (intrin->intrinsic == nir_intrinsic_load_constant)
-        return nak_nir_lower_load_constant(b, intrin, ctx->data_cbuf);
+        return lower_constant_load(b, intrin, ctx->data_cbuf);
     if (intrin->intrinsic != nir_intrinsic_load_ssbo_address &&
         intrin->intrinsic != nir_intrinsic_get_ssbo_size) return false;
     /* Checked for every occurrence before this pass. */
@@ -212,21 +224,21 @@ static enum stela_nv_render_status make_upload(struct render_stage *stage, const
     const struct nak_shader_info *info = &stage->bin->info;
     if (device->cls_eng3d < KEPLER_A) return STELA_NV_RENDER_UNSUPPORTED;
     if (info->stage != MESA_SHADER_VERTEX && info->stage != MESA_SHADER_FRAGMENT) return STELA_NV_RENDER_BACKEND;
-    uint32_t header = nak_shader_get_hdr_size(device, info);
-    uint32_t instruction_align = nak_shader_get_shader_alignment(device);
-    uint32_t cbuf_align = nak_min_cbuf_alignment(device);
-    /* VS/FS only. Bound every original unchecked addition/alignment first. */
-    uint32_t prefix = device->cls_eng3d < TURING_A ? instruction_align - header : 0;
-    if (header > sizeof(info->hdr) || prefix > UINT32_MAX - header ||
-        stage->bin->code_size > UINT32_MAX - prefix - header ||
+    /* NVK's upload layout for a vertex or fragment shader on Kepler and
+     * later: the shader program header (20 words before Turing, 32 from
+     * Turing) ends where the 128-byte aligned code begins. Constant buffers
+     * bind at 256-byte alignment before Turing and 64-byte from Turing. */
+    const bool turing = device->cls_eng3d >= TURING_A;
+    const uint32_t header = turing ? 32u * 4u : 20u * 4u, code_offset = 128u;
+    const uint32_t header_offset = code_offset - header, cbuf_align = turing ? 64u : 256u;
+    /* Bound every addition and alignment first. */
+    if (header > sizeof(info->hdr) || stage->bin->code_size > UINT32_MAX - code_offset ||
         stage->nir->constant_data_size > max_constant_bytes ||
         stage->nir->constant_data_size > CBUF_BYTES ||
         stage->nir->constant_data_size > UINT32_MAX - (cbuf_align - 1u)) return STELA_NV_RENDER_LIMIT;
     uint32_t data_size = align(stage->nir->constant_data_size, cbuf_align);
-    uint32_t header_offset, code_offset;
-    uint32_t size = nak_shader_get_shader_size(device, info, stage->bin->code_size,
-        &header_offset, &code_offset, NULL);
-    uint32_t data_offset = 0, alignment = instruction_align;
+    uint32_t size = code_offset + stage->bin->code_size;
+    uint32_t data_offset = 0, alignment = code_offset;
     if (data_size) {
         if (!stage->nir->constant_data) return STELA_NV_RENDER_BACKEND;
         if (data_size > max_constant_bytes || data_size > CBUF_BYTES ||
@@ -276,7 +288,7 @@ enum stela_nv_render_status stela_nv_render_compile(const struct nv_device_info 
         options->fs_key.zs_self_dep != options->depth_stencil_feedback ||
         options->fs_key.uses_underestimate != options->conservative_underestimate)
         return report(error, STELA_NV_RENDER_UNSUPPORTED, "Explicit known raster/sample/original FS-key facts required");
-    if (!layout_valid(&compiler->const_offsets_base) || !layout_valid(&compiler->const_offsets_turing_graphics))
+    if (!layout_valid(&nak_const_offsets_base) || !layout_valid(&nak_const_offsets_turing_graphics))
         return report(error, STELA_NV_RENDER_UNSUPPORTED, "Original compiler constant layout not representable");
     for (unsigned s = 0; s < 2; ++s) {
         if (!slot_free(options->argument_cbuf[s], compiler) || !slot_free(options->constant_data_cbuf[s], compiler) ||
@@ -303,7 +315,7 @@ enum stela_nv_render_status stela_nv_render_compile(const struct nv_device_info 
     struct stela_nv_render_compilation *owner = calloc(1, sizeof(*owner));
     if (!owner) return report(error, STELA_NV_RENDER_ALLOCATION, "Render owner allocation failed");
     owner->provenance = (struct stela_nv_render_provenance){.options = *options, .device = *device,
-        .base_layout = compiler->const_offsets_base, .graphics_layout = compiler->const_offsets_turing_graphics,
+        .base_layout = nak_const_offsets_base, .graphics_layout = nak_const_offsets_turing_graphics,
         .nak_debug_flags = nak_debug_flags(compiler)};
     owner->nir_options = *actual_options;
     struct stela_air_error air_error;

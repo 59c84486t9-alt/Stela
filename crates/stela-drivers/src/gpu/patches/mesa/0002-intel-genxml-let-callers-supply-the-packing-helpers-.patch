@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 00:00:00 +0000
+Subject: [PATCH] intel/genxml: let callers supply the packing helpers include
+
+---
+ src/intel/genxml/gen_pack_header.py | 19 +++++++++++++------
+ 1 file changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/src/intel/genxml/gen_pack_header.py b/src/intel/genxml/gen_pack_header.py
+index 4b0a8f990a7ad009e2a34c1080f5e61ed2eebd0f..5a10e9cb883ef2424539ec5d9e52400279dc10ed 100644
+--- a/src/intel/genxml/gen_pack_header.py
++++ b/src/intel/genxml/gen_pack_header.py
+@@ -44,9 +44,7 @@ pack_header = """%(license)s
+ #define %(guard)s
+ 
+ #ifndef __OPENCL_VERSION__
+-#include <stdio.h>
+-#include "util/bitpack_helpers.h"
+-#include "genX_helpers.h"
++%(helpers)s
+ #else
+ #include "genX_cl_helpers.h"
+ #endif
+@@ -419,7 +417,7 @@ class Value(object):
+         self.dont_use = int(attrs["dont_use"]) != 0 if "dont_use" in attrs else False
+ 
+ class Parser(object):
+-    def __init__(self, opencl, repack):
++    def __init__(self, opencl, repack, helpers_include=None):
+         self.instruction = None
+         self.structs = {}
+         # Set of enum names we've seen.
+@@ -427,6 +425,7 @@ class Parser(object):
+         self.registers = {}
+         self.opencl = opencl
+         self.repack = repack
++        self.helpers_include = helpers_include
+ 
+     def gen_prefix(self, name):
+         if name[0] == "_":
+@@ -637,7 +636,11 @@ class Parser(object):
+         root = genxml.et.getroot()
+         self.platform = root.attrib["name"]
+         self.gen = root.attrib["gen"].replace('.', '')
+-        print(pack_header % {'license': license, 'platform': self.platform, 'guard': self.gen_guard()})
++        helpers = '#include <stdio.h>\n#include "util/bitpack_helpers.h"\n#include "genX_helpers.h"'
++        if self.helpers_include:
++            helpers = '#include "%s"' % self.helpers_include
++        print(pack_header % {'license': license, 'platform': self.platform,
++                             'guard': self.gen_guard(), 'helpers': helpers})
+         for item in root:
+             self.process_item(item)
+         print('#endif /* %s */' % self.gen_guard())
+@@ -652,8 +655,12 @@ def parse_args():
+                    help="List of instruction/structures to generate")
+     p.add_argument('--opencl', action='store_true', help="Generate OpenCL code")
+     p.add_argument('--repack', action='store_true', help="Emit repacking code")
++    p.add_argument('--helpers-include', metavar='HEADER',
++                   help="Use a caller-provided packing helper header (default: Mesa helpers)")
+ 
+     pargs = p.parse_args()
++    if pargs.helpers_include and not re.fullmatch(r'[A-Za-z0-9_./-]+', pargs.helpers_include):
++        p.error("--helpers-include must be an include path without quoting or whitespace")
+ 
+     if pargs.engines is None:
+         print("No engines specified")
+@@ -678,7 +685,7 @@ def main():
+     genxml.filter_engines(engines)
+     if pargs.include_symbols:
+         genxml.filter_symbols(pargs.include_symbols.split(','))
+-    p = Parser(pargs.opencl, pargs.repack)
++    p = Parser(pargs.opencl, pargs.repack, pargs.helpers_include)
+     p.emit_genxml(genxml)
+ 
+ if __name__ == '__main__':

@@ -22,17 +22,16 @@ const LIBRARIES: &[&str] = &[
     "src/compiler/nir/libnir.a",
     "src/nouveau/compiler/libnak.a",
     "src/nouveau/compiler/libnak_rs.a",
+    "src/stela/libstela_nak_layout.a",
     "src/nouveau/nil/libnil.a",
     "src/stela/libstela_nv_compute.a",
     "src/stela/libstela_nv_image.a",
     "src/stela/libstela_nv_sampler.a",
     "src/amd/compiler/libaco.a",
-    "src/amd/common/libamd_compiler_support.a",
-    "src/amd/common/libamd_command_support.a",
+    "src/amd/common/libamd_common.a",
     "src/stela/libstela_amd_commands.a",
     "src/stela/libstela_amd_buffer.a",
     "src/stela/libstela_amd_sampler.a",
-    "src/stela/libstela_amd_surface.a",
     "src/stela/libstela_amd_image.a",
     "src/amd/addrlib/libaddrlib.a",
     "src/stela/libstela_amd_compute.a",
@@ -107,17 +106,16 @@ fn inspect_archive(path: &Path) -> Result<Value> {
         count += 1;
     }
     ensure!(count > 0, "{} contains no objects", path.display());
-    // The capability/format libraries must remain independent of Linux
+    // Stela's capability/format libraries must remain independent of Linux
     // device access. Inspect actual objects rather than only Meson options.
+    // Upstream archives keep device queries Stela never calls; libdrm is
+    // headers only, so a live call into it cannot link.
     if matches!(
         path.file_name().and_then(|name| name.to_str()),
         Some(
-            "libamd_compiler_support.a"
-                | "libstela_amd_air.a"
+            "libstela_amd_air.a"
                 | "libstela_nv_air.a"
                 | "libstela_intel_air.a"
-                | "libintel_dev.a"
-                | "libstela_amd_surface.a"
                 | "libstela_amd_image.a"
                 | "libstela_intel_surface.a"
                 | "libstela_intel_image_copy.a"
@@ -439,11 +437,12 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             "nvidia/stela/hosted/copy.c",
             "nvidia/stela/hosted/copy.h",
             "nvidia/stela/tests/copy.c",
+            "nvidia/stela/hosted/nak_layout.c",
             "nvidia/stela/hosted/sampler.c",
             "nvidia/stela/hosted/sampler.h",
             "nvidia/stela/tests/sampler.c",
             "nvidia/stela/tests/sampler_cases.h",
-            "nvidia/stela/tests/sampler_donor.h",
+            "nvidia/stela/tests/sampler_expected.h",
             "amd/stela/buffer.c",
             "amd/stela/buffer.h",
             "amd/tests/buffer_test.c",

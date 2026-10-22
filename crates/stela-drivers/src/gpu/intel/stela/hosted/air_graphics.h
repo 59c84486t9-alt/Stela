@@ -34,7 +34,7 @@ struct stela_intel_graphics_binding {
     struct stela_air_buffer buffer;
     uint32_t logical_slot, bti;
     bool used; /* Actual pre-BTI NIR resource use, not reflection alone. */
-    bool table_entry; /* bti is meaningful when retained by original table policy. */
+    bool table_entry; /* Only used buffers get a table entry and a meaningful bti. */
 };
 struct stela_intel_graphics_stage_binary {
     enum stela_air_stage stage;
@@ -86,8 +86,8 @@ struct stela_intel_graphics_compilation;
  * No allocation or other failure remains after that ownership transition.
  *
  * Logical readonly AS2 bindings retain exact reflected size/alignment and
- * shared 64-bit bounds. Original Iris/Crocus table setup determines real BTIs,
- * including render-target prefixes, unused/compacted surfaces and debug policy.
+ * shared 64-bit bounds. Their BTIs follow the Iris/Crocus table layout: the
+ * fragment render target first, then the used buffers in index order.
  * Real resource binding still needs actual initialized ISL/cache policy and
  * stela_intel_raw_buffer_state/image_state with genuine views, mapped padding,
  * rights, surface/table heaps and visibility lifetimes. State does not protect
@@ -114,15 +114,6 @@ const struct stela_intel_graphics_stage_binary *stela_intel_graphics_binary(
 const struct stela_intel_graphics_binding *stela_intel_graphics_bindings(
     const struct stela_intel_graphics_compilation *, enum stela_air_stage, uint32_t *count);
 const nir_shader *stela_intel_graphics_nir(
-    const struct stela_intel_graphics_compilation *, enum stela_air_stage);
-/* Original records distinguish real resources from retained unused/null table
- * entries (for example original debug-disabled compaction). An unused logical
- * buffer requires no real resource view solely because reflection names it. */
-struct iris_binding_table;
-struct crocus_binding_table;
-const struct iris_binding_table *stela_intel_graphics_iris_table(
-    const struct stela_intel_graphics_compilation *, enum stela_air_stage);
-const struct crocus_binding_table *stela_intel_graphics_crocus_table(
     const struct stela_intel_graphics_compilation *, enum stela_air_stage);
 void stela_intel_graphics_destroy(struct stela_intel_graphics_compilation **);
 /* Whole-span ISA validation; the ELK half lives in air_validate_elk.c because

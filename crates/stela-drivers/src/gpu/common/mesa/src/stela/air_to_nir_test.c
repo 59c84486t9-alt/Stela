@@ -1685,11 +1685,7 @@ nak_shared_codegen(bool dynamic)
    LLVMMemoryBufferRef input = shared_bitcode(dynamic ? body : shared_body, dynamic, extra);
    for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
       const struct nv_device_info dev = {.sm = targets[i], .max_warps_per_mp = 32};
-      const struct nak_constant_offset_info layout = {
-         .sample_info_cb = 0, .sample_locations_offset = 0, .sample_masks_offset = 256,
-         .printf_cb = 0, .printf_buffer_offset = 512,
-      };
-      struct nak_compiler *compiler = nak_compiler_create(&dev, &layout, &layout);
+      struct nak_compiler *compiler = nak_compiler_create(&dev);
       CHECK(compiler);
       struct shared_bindings bindings = {.view = {256,4,STELA_AIR_READ_WRITE}};
       struct stela_air_error error;
@@ -1719,11 +1715,7 @@ nak_codegen(const char *body, const char *label, bool ieee)
                                     stela_air_test_bitcode(body, "");
    for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
       const struct nv_device_info dev = {.sm = targets[i], .max_warps_per_mp = 32};
-      const struct nak_constant_offset_info layout = {
-         .sample_info_cb = 0, .sample_locations_offset = 0,
-         .sample_masks_offset = 256, .printf_cb = 0, .printf_buffer_offset = 512,
-      };
-      struct nak_compiler *compiler = nak_compiler_create(&dev, &layout, &layout);
+      struct nak_compiler *compiler = nak_compiler_create(&dev);
       CHECK(compiler);
       struct stela_air_error error;
       nir_shader *nir = translate(input, nak_nir_options(compiler), 1000, &error);

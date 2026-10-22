@@ -253,9 +253,7 @@ static void compile_target(struct run *run, const struct stela_air_stage_entry *
     CHECK(sm <= UINT8_MAX);
     const struct nv_device_info device = {.sm = (uint8_t)sm,
         .max_warps_per_mp = sm == 75 ? 32u : (sm == 86 || sm == 87 || sm == 89 || sm == 120 ? 48u : 64u)};
-    const struct nak_constant_offset_info layout = {.sample_info_cb = 0,
-        .sample_locations_offset = 0, .sample_masks_offset = 256,
-        .printf_cb = 1, .printf_buffer_offset = 0};
+    const struct nak_constant_offset_info layout = nak_const_offsets_base;
     CHECK(TABLE_CB != layout.sample_info_cb && TABLE_CB != layout.printf_cb);
     struct nak_fs_key key; CHECK(model_key(model, &key));
     printf("STELA_RENDER_MODEL {\"sm\":%u,\"max_warps_per_mp\":%u,\"samples\":%u,\"sample_shading\":%s,"
@@ -265,7 +263,7 @@ static void compile_target(struct run *run, const struct stela_air_stage_entry *
         sm, device.max_warps_per_mp, model->samples, model->sample_shading ? "true" : "false",
         layout.sample_info_cb, layout.sample_locations_offset, layout.sample_masks_offset,
         layout.printf_cb, layout.printf_buffer_offset, TABLE_CB, TABLE_BYTES);
-    struct nak_compiler *compiler = nak_compiler_create(&device, &layout, &layout); CHECK(compiler);
+    struct nak_compiler *compiler = nak_compiler_create(&device); CHECK(compiler);
     const nir_shader_compiler_options *options = nak_nir_options(compiler); CHECK(options && !options->cb_data);
     if (sm == 75 && model->samples == 1) frontend_refusals(run, options);
     for (unsigned stage = 0; stage < 2; ++stage) {

@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "air_graphics.h"
 #include "fp_controls.h"
-#include "gallium/drivers/iris/iris_binding_table.h"
-#include "gallium/drivers/crocus/crocus_binding_table.h"
+#include "compiler/nir/nir_builder.h"
 #include "intel/compiler/brw/brw_nir.h"
 #include "intel/compiler/elk/elk_nir.h"
 #include "intel/compiler/gen/gen.h"
@@ -23,8 +22,6 @@ struct stela_intel_graphics_compilation {
     unsigned varying_count;
     nir_shader_compiler_options nir_options[2];
     nir_shader *nir[2];
-    struct iris_binding_table iris[2];
-    struct crocus_binding_table crocus[2];
     struct brw_vs_prog_data brw_vs;
     struct brw_fs_prog_data brw_fs;
     struct elk_vs_prog_data elk_vs;
@@ -77,19 +74,6 @@ const nir_shader *stela_intel_graphics_nir(const struct stela_intel_graphics_com
 {
     int i = ordinal(stage); return owner && i >= 0 ? owner->nir[i] : NULL;
 }
-const struct iris_binding_table *stela_intel_graphics_iris_table(
-    const struct stela_intel_graphics_compilation *owner, enum stela_air_stage stage)
-{
-    int i = ordinal(stage);
-    return owner && i >= 0 && owner->provenance.backend == STELA_INTEL_GRAPHICS_BRW ? &owner->iris[i] : NULL;
-}
-const struct crocus_binding_table *stela_intel_graphics_crocus_table(
-    const struct stela_intel_graphics_compilation *owner, enum stela_air_stage stage)
-{
-    int i = ordinal(stage);
-    return owner && i >= 0 && owner->provenance.backend == STELA_INTEL_GRAPHICS_ELK ? &owner->crocus[i] : NULL;
-}
-
 static bool device_supported(const struct intel_device_info *device, bool elk)
 {
     if (!device || !device->slice_masks || !device->subslice_total || !device->num_thread_per_eu ||
@@ -160,6 +144,29 @@ static bool bind_ssbo(const struct stela_air_buffer *buffer, unsigned *slot, voi
         }
     }
     return false;
+}
+/* The admitted stages bind only render targets and read-only SSBOs. As in
+ * the iris and crocus tables, a fragment shader's render targets come first,
+ * then the SSBOs the stage uses, in index order, and each SSBO access is
+ * rewritten to name its table entry. Returns the table's size in bytes. */
+static uint32_t bind_surfaces(nir_shader *nir, unsigned render_targets, unsigned count,
+    uint64_t used, struct stela_intel_graphics_binding *bindings)
+{
+    uint32_t next = render_targets;
+    for (unsigned j = 0; j < count; j++) {
+        bindings[j].used = bindings[j].table_entry = (used >> j) & 1;
+        bindings[j].bti = bindings[j].used ? next++ : 0;
+    }
+    nir_builder b = nir_builder_create(nir_shader_get_entrypoint(nir));
+    nir_foreach_block(block, b.impl) nir_foreach_instr(instr, block) {
+        if (instr->type != nir_instr_type_intrinsic) continue;
+        nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+        if (in->intrinsic != nir_intrinsic_load_ssbo && in->intrinsic != nir_intrinsic_get_ssbo_size) continue;
+        b.cursor = nir_before_instr(instr);
+        nir_src_rewrite(&in->src[0], nir_imm_intN_t(&b, bindings[nir_src_as_uint(in->src[0])].bti,
+                                                    in->src[0].ssa->bit_size));
+    }
+    return next * 4;
 }
 static void snapshot_policy(struct stela_intel_graphics_compilation *owner,
     const struct brw_compiler *brw, const struct elk_compiler *elk)
@@ -241,22 +248,8 @@ static enum stela_intel_graphics_status prepare_nir(struct stela_intel_graphics_
                 return report(error, STELA_INTEL_GRAPHICS_BACKEND, "Unexpected logical stage resource index");
             resource_use |= 1ull << nir_src_as_uint(in->src[0]);
         }
-        if (brw) iris_setup_binding_table(brw->devinfo, nir, &owner->iris[i], i ? 1 : 0, 0, 0, false);
-        else {
-            const struct elk_sampler_prog_key_data key = {0};
-            crocus_setup_binding_table(elk->devinfo, nir, &owner->crocus[i], i ? 1 : 0, 0, 0, &key);
-        }
-        owner->binaries[i].binding_table_bytes = brw ? owner->iris[i].size_bytes : owner->crocus[i].size_bytes;
-        for (unsigned j = 0; j < count; j++) {
-            uint32_t bti = brw ? iris_group_index_to_bti(&owner->iris[i], IRIS_SURFACE_GROUP_SSBO, j) :
-                crocus_group_index_to_bti(&owner->crocus[i], CROCUS_SURFACE_GROUP_SSBO, j);
-            bool retained = brw ? bti != IRIS_SURFACE_NOT_USED : bti != CROCUS_SURFACE_NOT_USED;
-            bool used = (resource_use & (1ull << j)) != 0;
-            if (used && !retained)
-                return report(error, STELA_INTEL_GRAPHICS_BACKEND, "Original table dropped an actual resource use");
-            owner->bindings[i][j].used = used; owner->bindings[i][j].table_entry = retained;
-            owner->bindings[i][j].bti = retained ? bti : 0;
-        }
+        owner->binaries[i].binding_table_bytes =
+            bind_surfaces(nir, i ? 1 : 0, count, resource_use, owner->bindings[i]);
     }
     return STELA_INTEL_GRAPHICS_OK;
 }

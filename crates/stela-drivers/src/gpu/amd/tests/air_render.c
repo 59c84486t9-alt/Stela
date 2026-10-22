@@ -18,8 +18,6 @@
 #include "amd/compiler/aco_interface.h"
 #include "amdgfxregs.h"
 #include "vulkan/radv_constants.h"
-#include "nir_serialize.h"
-#include "util/blob.h"
 #include "util/mesa-blake3.h"
 #include "util/ralloc.h"
 #include <inttypes.h>
@@ -62,62 +60,25 @@ struct input {
    char hash[BLAKE3_HEX_LEN];
    unsigned compiled, held;
 };
-/* Frozen original RADV bodies, only test-local parameter names/types adapted.
- * These oracle copies never serve a production caller. Mesa pin above. */
-static nir_def *
-donor_ring(nir_builder *b, const struct ac_shader_args *args, struct ac_arg arg, unsigned ring)
-{
-   nir_def *ring_offsets = ac_nir_load_arg(b, args, arg);
-   ring_offsets = nir_pack_64_2x32_split(b, nir_channel(b, ring_offsets, 0), nir_channel(b, ring_offsets, 1));
-   return ac_nir_load_smem(b, 4, ring_offsets, nir_imm_int(b, ring * 16u), 4, ACCESS_CAN_SPECULATE);
-}
-static nir_def *
-donor_stride(nir_builder *b, nir_def *replacement, unsigned param_exports, unsigned prim_param_exports)
-{
-   /* Note, the HW always assumes there is at least 1 per-vertex param. */
-   const unsigned total_num_params = MAX2(1, param_exports) + prim_param_exports;
-
-   nir_def *dword1 = nir_channel(b, replacement, 1);
-   dword1 = nir_ior_imm(b, dword1, S_008F04_STRIDE(16 * total_num_params));
-   replacement = nir_vector_insert_imm(b, replacement, dword1, 1);
-   return replacement;
-}
-static void
-helper_equivalence(void)
-{
-   static const nir_shader_compiler_options options = {0};
-   unsigned cases = 0;
-   for (unsigned ring = 0; ring <= RING_PS_ATTR; ring++)
-      for (unsigned params = 0; params <= PARAM_LIMIT; params++)
-         for (unsigned prim = 0; prim <= 1; prim++) {
-            struct blob bytes[2];
-            for (unsigned original = 0; original < 2; original++) {
-               struct ac_shader_args args = {0};
-               /* Also exercise a nonzero architectural argument offset. */
-               ac_add_arg(&args, AC_ARG_SGPR, 3, AC_ARG_VALUE, NULL);
-               ac_add_arg(&args, AC_ARG_SGPR, 2, AC_ARG_CONST_ADDR, &args.ring_offsets);
-               nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, &options, "ring-oracle");
-               nir_def *desc = original ? donor_ring(&b, &args, args.ring_offsets, ring)
-                                        : ac_nir_load_ring_descriptor(&b, &args, args.ring_offsets, ring);
-               desc = original ? donor_stride(&b, desc, params, prim)
-                               : ac_nir_apply_attribute_ring_stride(&b, desc, params, prim);
-               nir_store_ssbo(&b, desc, nir_imm_int(&b, 0), nir_imm_int(&b, 0), .align_mul = 16);
-               nir_validate_shader(b.shader, "ring helper oracle");
-               blob_init(&bytes[original]);
-               nir_serialize(&bytes[original], b.shader, true);
-               ralloc_free(b.shader);
-            }
-            CHECK(bytes[0].size == bytes[1].size && !memcmp(bytes[0].data, bytes[1].data, bytes[0].size));
-            blob_finish(&bytes[0]);
-            blob_finish(&bytes[1]);
-            cases++;
-         }
-   printf("STELA_RENDER_HELPER_EQUIVALENCE cases=%u serialized-NIR-identical\n", cases);
-}
 static void
 add(struct abi *a, enum ac_arg_regfile file, unsigned size, struct ac_arg *arg)
 {
    ac_add_arg(&a->args, file, size, AC_ARG_VALUE, arg);
+}
+
+/* The attribute ring's descriptor, from the 16-byte ring table the
+ * ring_offsets SGPR pair addresses. The hardware counts at least one
+ * per-vertex parameter in the ring's stride; this probe exports no
+ * per-primitive parameters. */
+static nir_def *
+attribute_ring(nir_builder *b, const struct abi *a)
+{
+   nir_def *table = nir_pack_64_2x32(b, ac_nir_load_arg(b, &a->args, a->args.ring_offsets));
+   nir_def *desc = ac_nir_load_smem(b, 4, table, nir_imm_int(b, RING_PS_ATTR * 16u), 4,
+                                    ACCESS_CAN_SPECULATE);
+   const unsigned stride = 16 * MAX2(1, a->param_exports);
+   nir_def *dword1 = nir_ior_imm(b, nir_channel(b, desc, 1), S_008F04_STRIDE(stride));
+   return nir_vector_insert_imm(b, desc, dword1, 1);
 }
 
 /* Architectural VGPR recipes retain original RADV ordering. User resource
@@ -236,9 +197,7 @@ lower_abi(nir_builder *b, nir_intrinsic_instr *i, void *data)
       return true;
    }
    if (i->intrinsic == nir_intrinsic_load_ring_attr_amd) {
-      nir_def *desc = ac_nir_load_ring_descriptor(b, &a->args, a->args.ring_offsets, RING_PS_ATTR);
-      desc = ac_nir_apply_attribute_ring_stride(b, desc, a->param_exports, 0);
-      nir_def_replace(&i->def, desc);
+      nir_def_replace(&i->def, attribute_ring(b, a));
       a->attribute_loads++;
       return true;
    }
@@ -746,7 +705,6 @@ main(int argc, char **argv)
    ac_init_llvm_once();
 #endif
    glsl_type_singleton_init_or_ref();
-   helper_equivalence();
    LLVMMemoryBufferRef buffer = read_raw_input(argv[2]);
    CHECK(buffer);
    struct input input = {.bytes = LLVMGetBufferStart(buffer),

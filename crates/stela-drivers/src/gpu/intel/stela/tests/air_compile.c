@@ -196,7 +196,6 @@ static void context(struct context *c,const char *target)
 {
     memset(c,0,sizeof(*c));int pci=intel_device_name_to_pci_device_id(target);
     CHECK(pci>=0&&intel_get_device_info_for_build(pci,&c->device));
-    CHECK(c->device.kmd_type==INTEL_KMD_TYPE_INVALID);
     c->memory=ralloc_context(NULL);CHECK(c->memory);isl_device_init(&c->isl,&c->device);
     if(c->device.ver<=8) { c->elk=elk_compiler_create(c->memory,&c->device);CHECK(c->elk);
         c->elk->shader_debug_log=c->elk->shader_perf_log=logger;

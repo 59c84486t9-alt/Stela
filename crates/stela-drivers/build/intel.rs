@@ -123,5 +123,4 @@ fn configure_dispatch(build: &mut cc::Build, output: &std::path::Path, python: &
         .include("src/gpu/common/mesa/src")
         .include(genxml);
     println!("cargo:rerun-if-changed={genxml}");
-    println!("cargo:rerun-if-changed=src/gpu/common/mesa/src/util/bitpack_uint.h");
 }

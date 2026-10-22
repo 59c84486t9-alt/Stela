@@ -5,14 +5,19 @@ Subject: [PATCH] meson: build Stela's native compiler libraries without API
  frontends
 
 ---
- meson.build              | 29 ++++++++++++++++++++++++-----
- meson.options            | 25 +++++++++++++++++++++++++
- src/compiler/meson.build |  6 ++----
- src/meson.build          | 29 ++++++++++++++++-------------
- 4 files changed, 67 insertions(+), 22 deletions(-)
+ meson.build                         | 43 +++++++++++++++++++++++++----
+ meson.options                       | 25 +++++++++++++++++
+ src/amd/meson.build                 |  2 +-
+ src/compiler/meson.build            |  6 ++--
+ src/meson.build                     | 29 ++++++++++---------
+ src/nouveau/compiler/meson.build    | 14 ++++++++--
+ src/nouveau/compiler/nak_bindings.h |  2 ++
+ src/nouveau/headers/meson.build     |  6 +++-
+ src/nouveau/meson.build             |  8 ++++--
+ 9 files changed, 105 insertions(+), 30 deletions(-)
 
 diff --git a/meson.build b/meson.build
-index a864ed0b23cdb0c4853e68432cdfdb6fcdd519c2..f0de2d424d0253d3587506c0584c91ee1600771e 100644
+index a864ed0b23cdb0c4853e68432cdfdb6fcdd519c2..95ef033b486eb8cbf8ca0f9daf11371471baca81 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -39,6 +39,16 @@ sizeof_pointer = cc.sizeof('void*').to_string()
@@ -88,7 +93,28 @@ index a864ed0b23cdb0c4853e68432cdfdb6fcdd519c2..f0de2d424d0253d3587506c0584c91ee
    with_any_opengl,
    with_any_vk,
    with_clc,
-@@ -1961,7 +1977,7 @@ endif
+@@ -1954,6 +1970,20 @@ foreach d : _libdrm_checks
+   endif
+ endforeach
+ 
++# Stela's AMD compilers use libdrm's types but never call it, and libdrm does
++# not build on every host, so they take its headers alone from Mesa's wrap.
++if with_stela_amd and not dep_libdrm_amdgpu.found()
++  _libdrm_headers = 'subprojects/libdrm-2.4.133'
++  dep_libdrm_amdgpu = declare_dependency(
++    include_directories : include_directories(
++      _libdrm_headers, _libdrm_headers / 'include/drm', _libdrm_headers / 'amdgpu'),
++  )
++endif
++# Addrlib's Apple path needs Apple's private headers; use its public one.
++if with_stela_amd and host_machine.system() == 'darwin'
++  pre_args += '-DHAVE_TSERVER'
++endif
++
+ dep_libudev = dependency('libudev', required : false)
+ if dep_libudev.found()
+   pre_args += '-DHAVE_LIBUDEV'
+@@ -1961,7 +1991,7 @@ endif
  
  llvm_modules = ['bitwriter', 'engine', 'mcdisassembler', 'mcjit', 'core', 'executionengine', 'scalaropts', 'transformutils', 'instcombine']
  llvm_optional_modules = ['coroutines']
@@ -97,7 +123,7 @@ index a864ed0b23cdb0c4853e68432cdfdb6fcdd519c2..f0de2d424d0253d3587506c0584c91ee
    llvm_modules += ['amdgpu', 'bitreader', 'ipo']
  endif
  if with_clc
-@@ -2013,6 +2029,9 @@ dep_llvm = dependency(
+@@ -2013,6 +2043,9 @@ dep_llvm = dependency(
    include_type : 'system',
  )
  if dep_llvm.found()
@@ -140,6 +166,19 @@ index 93a60e3047b91efb89394fddacacf927009f26d6..c61b031529ac22c289dd49710510ad15
 +  value : '',
 +  description : 'Matching hosted Rust input static library for the optional Darwin Metal library assembler',
 +)
+diff --git a/src/amd/meson.build b/src/amd/meson.build
+index 92fe3d19053aedd0513ad762c7adf14cfbd39983..175e113905831eb006820edd5be696d238b7b778 100644
+--- a/src/amd/meson.build
++++ b/src/amd/meson.build
+@@ -7,7 +7,7 @@ if with_tools.contains('drm-shim')
+   subdir('drm-shim')
+ endif
+ 
+-if with_amd_vk or with_gallium_radeonsi
++if with_amd_vk or with_gallium_radeonsi or with_stela_amd
+   subdir('addrlib')
+   subdir('common')
+   if amd_with_llvm
 diff --git a/src/compiler/meson.build b/src/compiler/meson.build
 index 68f083273dfbbb1739b6d1c131b7606e8b6f3878..34728fe6225915a3be2ecd2fdf502ab626e09a07 100644
 --- a/src/compiler/meson.build
@@ -229,3 +268,114 @@ index c36f44b1397846860b3101f4512c44a0158ce4fa..420551f2fd94d5759eb09b9c4d0bae15
  if with_gfxstream_vk
    dep_virtgpu_kumquat_ffi = null_dep
    if with_virtgpu_kumquat
+diff --git a/src/nouveau/compiler/meson.build b/src/nouveau/compiler/meson.build
+index df192993e9e33e6cef9120aed38f46917771c367..6b294bed6fd119ecaa82f3e682bf45cef5812bb1 100644
+--- a/src/nouveau/compiler/meson.build
++++ b/src/nouveau/compiler/meson.build
+@@ -40,11 +40,20 @@ libnak_deps = [
+   idep_nil_h,
+ ]
+ 
++nak_bindgen_args = []
++nak_platform_deps = []
++if with_stela_nvidia
++  nak_bindgen_args += '-DSTELA_COMPILERS'
++else
++  nak_platform_deps += [dep_libdrm, idep_nouveau_ws]
++endif
++
+ _nak_bindings_rs = rust.bindgen(
+   input : ['nak_bindings.h'],
+   output : 'nak_bindings.rs',
+   c_args : [
+     pre_args,
++    nak_bindgen_args,
+   ],
+   args : [
+     bindgen_output_args,
+@@ -66,8 +75,7 @@ _nak_bindings_rs = rust.bindgen(
+     '--with-derive-default',
+   ],
+   dependencies : [
+-    dep_libdrm,
+-    idep_nouveau_ws,
++    nak_platform_deps,
+     libnak_deps,
+   ],
+ )
+@@ -119,7 +127,7 @@ _libnak_rs = static_library(
+ #
+ # Also, don't build on Android because we do cross-builds and, unlike most
+ # tests, these depend on libdrm and that confuses the build system.
+-if with_tests and get_option('b_sanitize') == 'none' and not with_platform_android
++if with_tests and get_option('b_sanitize') == 'none' and not with_platform_android and not with_stela_nvidia
+   rust.test(
+     'nak',
+     _libnak_rs,
+diff --git a/src/nouveau/compiler/nak_bindings.h b/src/nouveau/compiler/nak_bindings.h
+index e766da19f9872923fe845de07d9648199856a29f..e3ffa21e0c2c72170b974a1164153b4a521f5907 100644
+--- a/src/nouveau/compiler/nak_bindings.h
++++ b/src/nouveau/compiler/nak_bindings.h
+@@ -5,6 +5,7 @@
+ 
+ #include "nak_private.h"
+ 
++#ifndef STELA_COMPILERS
+ #include "nouveau_bo.h"
+ #include "nouveau_context.h"
+ #include "nouveau_device.h"
+@@ -18,3 +19,4 @@
+ enum ENUM_PACKED drm_rs_ioctls {
+    DRM_RS_IOCTL(NOUVEAU_EXEC),
+ };
++#endif
+diff --git a/src/nouveau/headers/meson.build b/src/nouveau/headers/meson.build
+index b3a0273874659ac618f4efeb634f08c2e4b91126..dd11fb2974e56540b39e9512b69a84950c797f1c 100644
+--- a/src/nouveau/headers/meson.build
++++ b/src/nouveau/headers/meson.build
+@@ -76,6 +76,7 @@ hwref_gens = [
+ flat_nv_classes = ''
+ 
+ cl_generated = []
++stela_nv_compute_headers = []
+ foreach cl : nv_classes
+   prev_cl_h = []
+   prev_cl_args = []
+@@ -98,6 +99,9 @@ foreach cl : nv_classes
+     command : [prog_python, '@INPUT0@', '--in-h', '@INPUT1@', prev_cl_args,
+                '--out-h', '@OUTPUT0@', '--out-c', '@OUTPUT1@'],
+   )
++  if ['cla0c0', 'clc6c0'].contains(cl)
++    stela_nv_compute_headers += [cl_generated[-1][0]]
++  endif
+ endforeach
+ 
+ nv_push_class_dump_h = custom_target(
+@@ -133,7 +137,7 @@ nouveau_util_py = files('util.py')
+ nouveau_util_py_path = meson.current_source_dir()
+ 
+ # Only generate Rust bindings for NVK
+-if with_nouveau_vk
++if with_nouveau_vk or with_stela_nvidia
+   cl_rs_generated = []
+   foreach cl : nv_classes
+     cl_rs_generated += custom_target(
+diff --git a/src/nouveau/meson.build b/src/nouveau/meson.build
+index de6d45806b727781a2b855f82c06c9a1545f1279..b971fde3c5ce51e41a9da073021b43731a7f4242 100644
+--- a/src/nouveau/meson.build
++++ b/src/nouveau/meson.build
+@@ -2,9 +2,11 @@
+ # SPDX-License-Identifier: MIT
+ 
+ subdir('headers')
+-subdir('drm')
+-subdir('winsys')
+-if with_nouveau_vk
++if not with_stela_nvidia
++  subdir('drm')
++  subdir('winsys')
++endif
++if with_nouveau_vk or with_stela_nvidia
+   subdir('rust')
+   subdir('nil')
+   subdir('compiler')

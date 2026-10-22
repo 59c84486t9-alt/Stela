@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #include "../hosted/sampler.h"
+#include "nouveau/headers/drf.h"
+#include "nouveau/headers/nvidia/classes/cl9097tex.h"
 #include "nouveau/headers/nvidia/classes/clb097.h"
+#include "nouveau/headers/nvidia/classes/clb197.h"
 #include "nouveau/headers/nvidia/classes/clc097.h"
 #include "nouveau/headers/nvidia/classes/clc197.h"
 #include "nouveau/headers/nvidia/classes/clc397.h"
@@ -11,10 +14,10 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
-#define SAMPLER_CASE_STATE struct nil_sampler_state
+#define SAMPLER_CASE_STATE struct stela_nv_sampler_state
 #include "sampler_cases.h"
 #undef SAMPLER_CASE_STATE
-#include "sampler_donor.h"
+#include "sampler_expected.h"
 
 static const unsigned owner = 1;
 
@@ -29,65 +32,24 @@ static struct stela_nv_image make_image(const struct nv_device_info *dev, enum p
     return image;
 }
 
-static void frozen_original_and_decoded_fields(void)
+static bool integer_color(VkBorderColor color)
 {
-    const uint16_t classes[2] = {MAXWELL_A, MAXWELL_B};
-    for (unsigned c = 0; c < 2; c++) {
-        const struct nv_device_info dev = {.type = NV_DEVICE_TYPE_DIS, .cls_eng3d = classes[c]};
-        for (unsigned i = 0; i < STELA_NV_SAMPLER_DONOR_CASES; i++) {
-            const struct nil_sampler_state state = sampler_case(i);
-            const struct nvk_sampler_header actual = nil_sampler_pack(&dev, &state);
-            assert(memcmp(actual.bits, sampler_donor_words[c][i], sizeof(actual.bits)) == 0);
-            assert(NVVAL_GET_X(actual.bits[0], NV9097_TEXSAMP0_DEPTH_COMPARE) == state.compare_enable);
-            if (state.compare_enable)
-                assert(NVVAL_GET_X(actual.bits[0], NV9097_TEXSAMP0_DEPTH_COMPARE_FUNC) == (unsigned)state.compare_op);
-            const uint32_t mag = state.mag_filter == VK_FILTER_LINEAR ?
-                NV9097_TEXSAMP1_MAG_FILTER_MAG_LINEAR : NV9097_TEXSAMP1_MAG_FILTER_MAG_POINT;
-            assert(NVVAL_GET_X(actual.bits[1], NV9097_TEXSAMP1_MAG_FILTER) == mag);
-            const int32_t bias_raw = (int32_t)NVVAL_GET_X(actual.bits[1], NV9097_TEXSAMP1_MIP_LOD_BIAS);
-            const int32_t bias = (bias_raw & 4096) ? bias_raw - 8192 : bias_raw;
-            assert(bias == (int32_t)roundf(state.mip_lod_bias * 256.0f));
-            assert(NVVAL_GET_X(actual.bits[2], NV9097_TEXSAMP2_MIN_LOD_CLAMP) == (unsigned)roundf(state.min_lod * 256.0f));
-            assert(NVVAL_GET_X(actual.bits[2], NV9097_TEXSAMP2_MAX_LOD_CLAMP) == (unsigned)roundf(state.max_lod * 256.0f));
-            if (!state.image_view_is_srgb && state.border_color_component_mapping.r == VK_COMPONENT_SWIZZLE_IDENTITY &&
-                state.border_color_component_mapping.g == VK_COMPONENT_SWIZZLE_IDENTITY &&
-                state.border_color_component_mapping.b == VK_COMPONENT_SWIZZLE_IDENTITY &&
-                state.border_color_component_mapping.a == VK_COMPONENT_SWIZZLE_IDENTITY)
-                assert(memcmp(&actual.bits[4], state.border_color_value.uint32, 4 * sizeof(uint32_t)) == 0);
-        }
-    }
-    /* The original hardware reduction gate remains generation dependent. */
-    assert(memcmp(sampler_donor_words[0][29], sampler_donor_words[1][29], 32) != 0);
-    assert(memcmp(sampler_donor_words[0][30], sampler_donor_words[1][30], 32) != 0);
+    return color == VK_BORDER_COLOR_INT_CUSTOM_EXT || (color <= VK_BORDER_COLOR_INT_OPAQUE_WHITE && color % 2);
 }
 
-static void color_value_helpers(void)
+/* Fields decoded independently of the expected words. */
+static void decoded_fields(const struct stela_nv_sampler_state *state, const uint32_t *bits)
 {
-    const VkBorderColor float_colors[] = {VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
-        VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK, VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE, VK_BORDER_COLOR_FLOAT_CUSTOM_EXT};
-    const VkBorderColor int_colors[] = {VK_BORDER_COLOR_INT_TRANSPARENT_BLACK,
-        VK_BORDER_COLOR_INT_OPAQUE_BLACK, VK_BORDER_COLOR_INT_OPAQUE_WHITE, VK_BORDER_COLOR_INT_CUSTOM_EXT};
-    for (unsigned i = 0; i < 4; i++) {
-        assert(!vk_color_value_is_int(float_colors[i]));
-        assert(vk_color_value_is_int(int_colors[i]));
-    }
-    const VkClearColorValue value = {.uint32 = {13, 42, 71, 99}};
-    for (unsigned integer = 0; integer < 2; integer++) {
-        for (unsigned component = VK_COMPONENT_SWIZZLE_IDENTITY; component <= VK_COMPONENT_SWIZZLE_A; component++) {
-            const VkComponentMapping map = {component, component, component, component};
-            const VkClearColorValue actual = vk_color_value_swizzle(value, map, integer != 0);
-            for (unsigned c = 0; c < 4; c++) {
-                uint32_t expected;
-                switch (component) {
-                case VK_COMPONENT_SWIZZLE_IDENTITY: expected = value.uint32[c]; break;
-                case VK_COMPONENT_SWIZZLE_ZERO: expected = 0; break;
-                case VK_COMPONENT_SWIZZLE_ONE: expected = integer ? 1 : 0x3f800000; break;
-                default: expected = value.uint32[component - VK_COMPONENT_SWIZZLE_R]; break;
-                }
-                assert(actual.uint32[c] == expected);
-            }
-        }
-    }
+    assert(!NVVAL_GET_X(bits[0], NV9097_TEXSAMP0_DEPTH_COMPARE));
+    const uint32_t mag = state->mag_filter == VK_FILTER_LINEAR ?
+        NV9097_TEXSAMP1_MAG_FILTER_MAG_LINEAR : NV9097_TEXSAMP1_MAG_FILTER_MAG_POINT;
+    assert(NVVAL_GET_X(bits[1], NV9097_TEXSAMP1_MAG_FILTER) == mag);
+    const int32_t bias_raw = (int32_t)NVVAL_GET_X(bits[1], NV9097_TEXSAMP1_MIP_LOD_BIAS);
+    const int32_t bias = (bias_raw & 4096) ? bias_raw - 8192 : bias_raw;
+    assert(bias == (int32_t)roundf(state->mip_lod_bias * 256.0f));
+    assert(NVVAL_GET_X(bits[2], NV9097_TEXSAMP2_MIN_LOD_CLAMP) == (unsigned)roundf(state->min_lod * 256.0f));
+    assert(NVVAL_GET_X(bits[2], NV9097_TEXSAMP2_MAX_LOD_CLAMP) == (unsigned)roundf(state->max_lod * 256.0f));
+    assert(memcmp(&bits[4], state->border_color_value.uint32, 4 * sizeof(uint32_t)) == 0);
 }
 
 static bool supported_case(unsigned index)
@@ -99,14 +61,14 @@ static bool supported_case(unsigned index)
 static void paired_formats(const struct nv_device_info *dev, enum pipe_format format)
 {
     struct stela_nv_image image = make_image(dev, format);
-    for (unsigned i = 0; i < STELA_NV_SAMPLER_DONOR_CASES; i++) {
-        struct nil_sampler_state state = sampler_case(i);
+    for (unsigned i = 0; i < STELA_NV_SAMPLER_CASES; i++) {
+        struct stela_nv_sampler_state state = sampler_case(i);
         state.image_view_is_srgb = util_format_is_srgb(format);
         struct stela_nv_sampler actual, before;
         memset(&actual, 0xa5, sizeof(actual)); memcpy(&before, &actual, sizeof(actual));
         const bool filtering = state.mag_filter == VK_FILTER_LINEAR || state.min_filter == VK_FILTER_LINEAR ||
                                state.mipmap_mode == VK_SAMPLER_MIPMAP_MODE_LINEAR || state.anisotropy_enable;
-        const bool numeric_match = vk_color_value_is_int(state.border_color) == util_format_is_pure_integer(format);
+        const bool numeric_match = integer_color(state.border_color) == util_format_is_pure_integer(format);
         const int expected = !supported_case(i) ? -95 : !numeric_match ? -22 :
                              filtering && !nil_format_supports_filtering(dev, format) ? -95 : 0;
         const int error = stela_nv_sampler_encode(&image, &state, &actual);
@@ -115,8 +77,9 @@ static void paired_formats(const struct nv_device_info *dev, enum pipe_format fo
             assert(memcmp(&actual, &before, sizeof(actual)) == 0);
         } else {
             assert(actual.device == dev && actual.image_owner == &owner);
-            assert(memcmp(actual.header.bits, sampler_donor_words[dev->cls_eng3d == MAXWELL_A ? 0 : 1][i],
+            assert(memcmp(actual.header.bits, sampler_expected_words[dev->cls_eng3d == MAXWELL_A ? 0 : 1][i],
                           sizeof(actual.header.bits)) == 0);
+            decoded_fields(&state, actual.header.bits);
             /* Caller-written layout metadata is never used for format policy. */
             struct stela_nv_image candidate = image;
             memset(&candidate.layout, 0xff, sizeof(candidate.layout));
@@ -132,7 +95,7 @@ static void invalid_states_are_atomic(const struct nv_device_info *dev)
     const struct stela_nv_image image = make_image(dev, PIPE_FORMAT_R8G8B8A8_UNORM);
     for (unsigned fault = 0; fault < 37; fault++) {
         struct stela_nv_image candidate = image;
-        struct nil_sampler_state state = sampler_case(0);
+        struct stela_nv_sampler_state state = sampler_case(0);
         struct stela_nv_sampler out, before;
         memset(&out, 0xa5, sizeof(out)); memcpy(&before, &out, sizeof(out));
         int expected = -22;
@@ -178,7 +141,7 @@ static void invalid_states_are_atomic(const struct nv_device_info *dev)
         assert(stela_nv_sampler_encode(&candidate, &state, &out) == expected);
         assert(memcmp(&out, &before, sizeof(out)) == 0);
     }
-    struct nil_sampler_state state = sampler_case(0);
+    struct stela_nv_sampler_state state = sampler_case(0);
     struct stela_nv_sampler out;
     assert(stela_nv_sampler_encode(NULL, &state, &out) == -22);
     assert(stela_nv_sampler_encode(&image, NULL, &out) == -22);
@@ -193,7 +156,7 @@ static void standard_borders_and_integer_filtering(const struct nv_device_info *
         VK_BORDER_COLOR_INT_TRANSPARENT_BLACK, VK_BORDER_COLOR_INT_OPAQUE_BLACK, VK_BORDER_COLOR_INT_OPAQUE_WHITE};
     const bool image_integer = util_format_is_pure_integer(format);
     for (unsigned color = 0; color < ARRAY_SIZE(colors); color++) {
-        struct nil_sampler_state state = sampler_case(0);
+        struct stela_nv_sampler_state state = sampler_case(0);
         state.border_color = colors[color];
         state.image_view_is_srgb = util_format_is_srgb(format);
         const bool integer = color >= 3;
@@ -212,13 +175,12 @@ static void standard_borders_and_integer_filtering(const struct nv_device_info *
             assert(memcmp(&out, &before, sizeof(out)) == 0);
             continue;
         }
-        /* Original standard integer border producer uses signed0/1 literals;
-         * exact raw payload words are equally0/1for signed and unsigned images.
-         */
+        /* The Vulkan runtime's standard integer borders are signed 0/1, whose
+         * payload words are the same for signed and unsigned images. */
         assert(memcmp(&out.header.bits[4], state.border_color_value.uint32, 16) == 0);
         if (integer) {
             for (unsigned filtering = 0; filtering < 4; filtering++) {
-                struct nil_sampler_state filtered = state;
+                struct stela_nv_sampler_state filtered = state;
                 if (filtering == 0) filtered.mag_filter = VK_FILTER_LINEAR;
                 if (filtering == 1) filtered.min_filter = VK_FILTER_LINEAR;
                 if (filtering == 2) filtered.mipmap_mode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
@@ -239,8 +201,6 @@ static void standard_borders_and_integer_filtering(const struct nv_device_info *
 
 int main(void)
 {
-    frozen_original_and_decoded_fields();
-    color_value_helpers();
     const uint16_t classes[] = {MAXWELL_A, MAXWELL_B, PASCAL_A, PASCAL_B, VOLTA_A,
                                TURING_A, AMPERE_A, AMPERE_B, ADA_A};
     const enum pipe_format formats[] = {PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_FORMAT_B8G8R8A8_SRGB,
@@ -253,6 +213,6 @@ int main(void)
         }
         invalid_states_are_atomic(&dev);
     }
-    puts("NVIDIA sampler:84 frozen original outputs, color helpers/decodedfields,9classes/pairedformats/filter rights and atomic failures passed; hardware_executed=false");
+    puts("NVIDIA sampler: NVK's recorded headers, decoded fields, 9 classes, paired formats, filter rights and atomic failures passed; hardware_executed=false");
     return 0;
 }

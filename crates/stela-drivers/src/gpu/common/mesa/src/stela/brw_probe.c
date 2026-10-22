@@ -26,8 +26,7 @@ compile_store(const char *platform)
 {
    struct intel_device_info device;
    int pci_id = intel_device_name_to_pci_device_id(platform);
-   if (pci_id < 0 || !intel_get_device_info_for_build(pci_id, &device) ||
-       device.kmd_type != INTEL_KMD_TYPE_INVALID)
+   if (pci_id < 0 || !intel_get_device_info_for_build(pci_id, &device))
       return 1;
    if (device.ver == 35) {
       /* The imported backend explicitly requires dispatch qualification on

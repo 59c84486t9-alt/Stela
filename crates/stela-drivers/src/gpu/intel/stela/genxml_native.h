@@ -15,7 +15,6 @@
  * Public packet inputs are validated before any output is modified.
  */
 #define assert(condition) do { if (!(condition)) __builtin_trap(); } while (0)
-#define util_bitpack_validate_value(value)
 
 /* Same scalar limit operation as Mesa's util/macros.h, without pulling in
  * that hosted header's stdio/string/assert and unrelated platform facilities.
@@ -27,11 +26,28 @@ u_uintN_max(unsigned bit_size)
    return UINT64_MAX >> (64 - bit_size);
 }
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wconversion"
-#pragma clang diagnostic ignored "-Wsign-conversion"
-#include "util/bitpack_uint.h"
-#pragma clang diagnostic pop
+/* The integer field packers the generated headers call, with the meaning
+ * Mesa's util/bitpack_helpers.h gives them; that header also needs hosted
+ * floating-point and C library facilities. */
+static inline uint64_t
+util_bitpack_ones(uint32_t start, uint32_t end)
+{
+   return (UINT64_MAX >> (64 - (end - start + 1))) << start;
+}
+
+static inline uint64_t
+util_bitpack_uint(uint64_t value, uint32_t start, uint32_t end)
+{
+   assert(value <= u_uintN_max(end - start + 1));
+   return value << start;
+}
+
+static inline uint64_t
+util_bitpack_uint_nonzero(uint64_t value, uint32_t start, uint32_t end)
+{
+   assert(value != 0);
+   return util_bitpack_uint(value, start, end);
+}
 
 #define __gen_address_type uint64_t
 #define __gen_user_data void

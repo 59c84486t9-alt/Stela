@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 00:00:00 +0000
+Subject: [PATCH] intel/dev: fail device info lookups for unknown PCI IDs
+
+---
+ src/intel/dev/intel_device_info.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/intel/dev/intel_device_info.c b/src/intel/dev/intel_device_info.c
+index 2af1b5ec3ac7850e3fc540b26cd9935e76f716fe..fa86a07c571241d92bf7ebbd3ed96a9b92d8f1a5 100644
+--- a/src/intel/dev/intel_device_info.c
++++ b/src/intel/dev/intel_device_info.c
+@@ -1695,7 +1695,8 @@ static bool
+ intel_get_device_info_from_pci_id_common(int pci_id, bool building,
+                                          struct intel_device_info *devinfo)
+ {
+-   intel_device_info_init_common(pci_id, building, devinfo);
++   if (!intel_device_info_init_common(pci_id, building, devinfo))
++      return false;
+ 
+    /* This is a placeholder until a proper value is set. */
+    devinfo->kmd_type = INTEL_KMD_TYPE_I915;
