@@ -1,10 +1,11 @@
-//! SART v3 and v4 (`sart,coastguard`): identity-mapped DMA allow-list
-//! entries. Linux `drivers/soc/apple/sart.c`, `sart3_{get,set}_entry`, gives
-//! v3's sixteen as CONFIG at 4*i, PADDR at 0x40+4*i and SIZE at 0x80+4*i;
-//! addresses and lengths are in 4 KiB units. SPTM writes SIZE as the page
-//! count less one unless the SART's DT node has `exclusive-bounds`
-//! ([`Bounds`]). Only flags 0 (disabled) and 0xff (allow) have known
-//! semantics. Other flags refuse rather than widening permissions.
+//! SART (`sart,coastguard`): identity-mapped DMA allow-list entries in the
+//! four layouts SPTM knows ([`Layout`]). Linux `drivers/soc/apple/sart.c`,
+//! `sart3_{get,set}_entry`, gives v3's sixteen as CONFIG at 4*i, PADDR at
+//! 0x40+4*i and SIZE at 0x80+4*i; addresses and lengths are in 4 KiB units.
+//! SPTM writes SIZE as the page count less one unless the SART's DT node has
+//! `exclusive-bounds` ([`Bounds`]). Only no permission (0) and the
+//! read-write pattern SPTM writes have known semantics; other permission
+//! bits refuse rather than widening or narrowing access.
 //!
 //! On ANS2 the allow-list covers only what the coprocessor reaches at raw
 //! addresses carried in commands, the tunnel buffers: the NVMe engine reads
@@ -22,8 +23,10 @@
 //! `sart-version` from a table of four at 0xfffffff027019b30 and a throttle
 //! layout by `sart-throttle-version` (default `sart-version`) from a table
 //! of four at 0xfffffff027019a80, whose throttle and status words it offsets
-//! by `sart-throttle-offset` (default 0) ([`Layout`]); the J813AP (M5)
-//! SPTM has the same tables at 0xfffffff02701a9c8 and 0xfffffff02701a918. With
+//! by `sart-throttle-offset` (default 0) ([`Layout`]). The J813AP (M5)
+//! SPTM has the same tables at 0xfffffff02701a9c8 and 0xfffffff02701a918,
+//! and the T8103 (M1) SPTM at 0xfffffff027017b20 and 0xfffffff027017a70
+//! (`sart_bootstrap_parse_edt` 0xfffffff0270cbc00..0xfffffff0270cc0dc). With
 //! `power-canary-offset` it maps `reg[1]` and, while it holds the SART
 //! powered, keeps 0xabfedeed in the word at that offset: it writes it when
 //! its reference count leaves 0 (0xfffffff0270d94c0) and panics unless the
@@ -63,15 +66,35 @@ pub const IDLE: u64 = 0x1000;
 pub const CANARY: u64 = 0x2000;
 const BASE: u64 = 0x40;
 const SIZE: u64 = 0x80;
-const SIZE_MASK: u32 = (1 << 30) - 1;
-const ALLOW: u32 = 0xff;
+/// Versions 3 and 4: 30-bit PADDR and SIZE fields.
+const WIDE: u32 = (1 << 30) - 1;
+/// Versions 1 and 2: 24-bit PADDR fields.
+const NARROW: u32 = (1 << 24) - 1;
+/// The version 3 and 4 read-write CONFIG value.
+const ALLOW: u32 = read_write([0, 2, 4, 6, 7]);
 
-/// Where a SART's entry and throttle registers sit in `reg[0]`.
+/// The read-write CONFIG value of a layout whose permission fields start at
+/// `bits`. Each row of SPTM's entry-layout table (44 bytes: magic `SRT<n>`,
+/// entry count, CONFIG offset and stride, five permission bit positions,
+/// SIZE offset, stride, shift and mask, PADDR offset, stride, shift and
+/// mask) names three 2-bit fields and two 1-bit fields. The T8103 SPTM's
+/// map path (0xfffffff0270cb3dc..0xfffffff0270cb420) puts 3 in each 2-bit
+/// field for a read-write mapping (2 otherwise) and sets both single bits.
+const fn read_write(bits: [u32; 5]) -> u32 {
+    3 << bits[0] | 3 << bits[1] | 3 << bits[2] | 1 << bits[3] | 1 << bits[4]
+}
+
+/// Where a SART's entry and throttle registers sit in `reg[0]`, and how an
+/// entry's fields pack into them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
     entries: usize,
     base: u64,
-    size: u64,
+    /// The SIZE words' offset, or `None` when SIZE is CONFIG's low bits.
+    size: Option<u64>,
+    size_mask: u32,
+    base_mask: u32,
+    allow: u32,
     channels: usize,
     throttles: [u64; 4],
     status: [u64; 4],
@@ -82,23 +105,47 @@ impl Layout {
     pub const V3: Self = Self {
         entries: 16,
         base: BASE,
-        size: SIZE,
+        size: Some(SIZE),
+        size_mask: WIDE,
+        base_mask: WIDE,
+        allow: ALLOW,
         channels: 3,
         throttles: [THROTTLES[0], THROTTLES[1], THROTTLES[2], 0],
         status: [STATUS[0], STATUS[1], STATUS[2], 0],
     };
 
     /// The layout SPTM's tables give `sart-version`, `sart-throttle-version`
-    /// and `sart-throttle-offset`. The SPTM's version 3 and 4 entry layouts
-    /// are 16 and 24 CONFIG words from 0, PADDR words from 0x40 and 0x60 and
-    /// SIZE words from 0x80 and 0xc0, each 4 bytes apart with 30-bit fields;
-    /// versions 1 and 2 pack an entry's fields into shared words, which the
-    /// model does not decode.
+    /// and `sart-throttle-offset`. Every version has CONFIG words from 0 and
+    /// unshifted PADDR words, each 4 bytes apart. Versions 3 and 4 have 16
+    /// and 24 entries, PADDR words from 0x40 and 0x60, SIZE words from 0x80
+    /// and 0xc0, 30-bit PADDR and SIZE fields, and permissions at CONFIG
+    /// bits 0, 2, 4, 6 and 7. Versions 1 and 2 have 16 entries, PADDR words
+    /// from 0x40 and 24-bit PADDR fields, but no SIZE words: SIZE is
+    /// CONFIG's low 19 or 24 bits, and the permissions sit at bits 22, 24,
+    /// 26, 29 and 30 or 24, 26, 28, 30 and 31. Their entry write (T8103
+    /// 0xfffffff0270cb6b0) stores CONFIG with the permissions alone, then
+    /// PADDR, then CONFIG again with SIZE in its low bits.
     pub fn new(version: u32, throttle_version: u32, offset: u32) -> Result<Self, &'static str> {
-        let (entries, base, size) = match version {
-            3 => (16, BASE, SIZE),
-            4 => (24, 0x60, 0xc0),
-            _ => return Err("SART entry layout other than versions 3 and 4"),
+        let (entries, base, size, size_mask, base_mask, allow) = match version {
+            1 => (
+                16,
+                BASE,
+                None,
+                (1 << 19) - 1,
+                NARROW,
+                read_write([22, 24, 26, 29, 30]),
+            ),
+            2 => (
+                16,
+                BASE,
+                None,
+                NARROW,
+                NARROW,
+                read_write([24, 26, 28, 30, 31]),
+            ),
+            3 => (16, BASE, Some(SIZE), WIDE, WIDE, ALLOW),
+            4 => (24, 0x60, Some(0xc0), WIDE, WIDE, ALLOW),
+            _ => return Err("SART entry layout other than versions 1 to 4"),
         };
         let (channels, throttles, status) = match throttle_version {
             1 => (3, [0x4014, 0x401c, 0x4024, 0], [0x4010, 0x4018, 0x4020, 0]),
@@ -118,6 +165,9 @@ impl Layout {
             entries,
             base,
             size,
+            size_mask,
+            base_mask,
+            allow,
             channels,
             throttles: at(throttles),
             status: at(status),
@@ -130,7 +180,7 @@ impl Layout {
             .iter()
             .chain(&self.status[..self.channels])
             .map(|&word| word + 4)
-            .chain([self.size + 4 * self.entries as u64])
+            .chain([self.size.unwrap_or(self.base) + 4 * self.entries as u64])
             .max()
             .expect("a layout has registers")
     }
@@ -146,21 +196,33 @@ impl Layout {
         if !offset.is_multiple_of(4) {
             return None;
         }
-        [0, self.base, self.size]
+        [Some(0), Some(self.base), self.size]
             .iter()
             .enumerate()
             .find_map(|(field, &start)| {
-                let index = offset.checked_sub(start)? / 4;
+                let index = offset.checked_sub(start?)? / 4;
                 (index < self.entries as u64).then_some((index as usize, field))
             })
     }
+
+    /// An entry's permission bits and SIZE.
+    fn decode(&self, entry: Entry) -> (u32, u32) {
+        match self.size {
+            Some(_) => (entry.config, entry.size),
+            None => (
+                entry.config & !self.size_mask,
+                entry.config & self.size_mask,
+            ),
+        }
+    }
 }
 
+/// One entry's registers as written.
 #[derive(Clone, Copy, Default)]
 struct Entry {
-    flags: u32,
+    config: u32,
     base: u32,
-    pages: u32,
+    size: u32,
 }
 
 /// How an entry's SIZE counts its pages.
@@ -210,11 +272,12 @@ impl Sart {
     pub fn allows(&self, first: u64, last: u64) -> bool {
         self.executing()
             && first <= last
-            && self.entries[..self.layout.entries].iter().any(|entry| {
-                let pages = u64::from(entry.pages) + u64::from(self.bounds == Bounds::Inclusive);
+            && self.entries[..self.layout.entries].iter().any(|&entry| {
+                let (flags, size) = self.layout.decode(entry);
+                let pages = u64::from(size) + u64::from(self.bounds == Bounds::Inclusive);
                 let base = u64::from(entry.base) * PAGE;
                 let end = base + pages * PAGE;
-                entry.flags == ALLOW && first >= base && last < end
+                flags == self.layout.allow && first >= base && last < end
             })
     }
 
@@ -241,7 +304,7 @@ impl Sart {
     fn register(&self, offset: u64) -> Option<u32> {
         let (index, field) = self.layout.entry(offset)?;
         let entry = self.entries[index];
-        Some([entry.flags, entry.base, entry.pages][field])
+        Some([entry.config, entry.base, entry.size][field])
     }
 }
 
@@ -372,13 +435,23 @@ impl MmioDevice for Sart {
             return Err(fail("SART register without a model"));
         };
         let value = value as u32;
+        let layout = self.layout;
         let entry = &mut self.entries[index];
         match field {
-            0 if value == 0 || value == ALLOW => entry.flags = value,
-            0 => return Err(fail("SART permission bits without known semantics")),
-            1 => entry.base = value,
-            2 if value & !SIZE_MASK == 0 => entry.pages = value,
-            2 => return Err(fail("SART size exceeds thirty bits")),
+            0 => {
+                let (flags, _) = layout.decode(Entry {
+                    config: value,
+                    ..*entry
+                });
+                if flags != 0 && flags != layout.allow {
+                    return Err(fail("SART permission bits without known semantics"));
+                }
+                entry.config = value;
+            }
+            1 if value & !layout.base_mask == 0 => entry.base = value,
+            1 => return Err(fail("SART address exceeds its field")),
+            2 if value & !layout.size_mask == 0 => entry.size = value,
+            2 => return Err(fail("SART size exceeds its field")),
             _ => unreachable!(),
         }
         Ok(())
@@ -567,8 +640,59 @@ mod tests {
         assert_eq!(m5.status, [0x8010, 0x8014, 0x8020, 0x8028]);
         assert_eq!(m5.register_bytes(), 0x8030);
         assert_eq!(m5.entry(0x40), Some((0, 1)));
-        for (version, throttle, offset) in [(2, 2, 0), (5, 4, 0), (3, 5, 0), (3, 4, 2)] {
+        // T8103: version 2 entries, whose SIZE is in CONFIG, and throttles.
+        let m1 = Layout::new(2, 2, 0).unwrap();
+        assert_eq!(m1.register_bytes(), 0x8028);
+        assert_eq!(m1.allow, 0xff00_0000);
+        assert_eq!(m1.entry(0x3c), Some((15, 0)));
+        assert_eq!(m1.entry(0x40), Some((0, 1)));
+        assert_eq!(m1.entry(0x80), None);
+        assert_eq!(Layout::new(1, 1, 0).unwrap().allow, 0x6fc0_0000);
+        assert_eq!(ALLOW, 0xff);
+        for (version, throttle, offset) in [(0, 2, 0), (5, 4, 0), (3, 5, 0), (3, 4, 2)] {
             assert!(Layout::new(version, throttle, offset).is_err());
+        }
+    }
+
+    #[test]
+    fn packed_layouts_carry_size_in_config_beside_the_permissions() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let address = 0x8_0000_0000;
+        for (version, allow, size_bits) in [(1, 0x6fc0_0000u32, 19), (2, 0xff00_0000, 24)] {
+            let mut sart =
+                Sart::with_layout(Bounds::Exclusive, Layout::new(version, version, 0).unwrap());
+            // SPTM's order: permissions alone, PADDR, then permissions and SIZE.
+            let entry = 4 * 15;
+            for (offset, value) in [
+                (entry, u64::from(allow)),
+                (BASE + entry, address / PAGE),
+                (entry, u64::from(allow | 2)),
+            ] {
+                sart.write(offset, Width::Word, value, &mut access).unwrap();
+                assert_eq!(sart.read(offset, Width::Word, &mut access), Ok(value));
+            }
+            assert!(sart.allows(address, address + 2 * PAGE - 1));
+            assert!(!sart.allows(address, address + 2 * PAGE));
+            // A size field filled to its top bit still decodes as size.
+            let full = (1u32 << size_bits) - 1;
+            sart.write(entry, Width::Word, u64::from(allow | full), &mut access)
+                .unwrap();
+            assert!(sart.allows(address, address + u64::from(full) * PAGE - 1));
+            // Bits outside SIZE and the read-write pattern, a PADDR wider
+            // than its field and the SIZE words of v3 refuse.
+            for (offset, value) in [
+                (entry, u64::from(1u32 << size_bits)),
+                (entry, u64::from(allow & (allow - 1))),
+                (BASE + entry, 1 << 24),
+                (SIZE, 1),
+            ] {
+                assert!(sart.write(offset, Width::Word, value, &mut access).is_err());
+            }
+            sart.write(entry, Width::Word, 2, &mut access).unwrap();
+            assert!(!sart.allows(address, address));
+            let throttle = sart.layout.throttles[0];
+            assert_eq!(sart.read(throttle, Width::Word, &mut access), Ok(1));
         }
     }
 

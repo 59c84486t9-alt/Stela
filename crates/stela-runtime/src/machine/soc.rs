@@ -6039,6 +6039,16 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(v4.sart_layout, sart::Layout::new(4, 4, 0).unwrap());
+        // So does T8103's version 2, whose throttles follow its version.
+        let bytes = tree(2, 0x8e, 4);
+        let v2 = ans_controller(
+            &Node::root(&bytes).unwrap(),
+            &flat_fixture_extent(&|a| Some(a)),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(v2.sart_layout, sart::Layout::new(2, 2, 0).unwrap());
         assert_eq!(placed.completion_irq, 724);
         assert_eq!(placed.interrupts, [718, 717, 720, 719]);
         assert_eq!(
@@ -6072,7 +6082,7 @@ mod tests {
             assert!(error.contains(flag), "{error}");
         }
         for bytes in [
-            tree(2, 0x8e, 4),
+            tree(5, 0x8e, 4),
             tree(3, 0x99, 4),
             tree(3, 0x8e, 3),
             tree(3, 0x8e, 5),
