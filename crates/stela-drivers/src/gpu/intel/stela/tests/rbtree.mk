@@ -52,7 +52,7 @@ rbtree-abi: $(BUILD)/rbtree/current/fixture.stamp $(SOURCE)/tests/rbtree_abi.c $
 	    done; \
 	done
 	@if $(CC) --target=x86_64-unknown-windows $(RBTREE_FLAGS) $(RBTREE_NATIVE_FLAGS) -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast -I$(BUILD)/rbtree/donor -c "$(SOURCE)/tests/rbtree_abi.c" -o "$(BUILD)/rbtree/broken-donor.o" > "$(BUILD)/rbtree/broken-donor.log" 2>&1; then echo "original LLP64 parent unexpectedly retained pointer width"; exit 1; fi
-	rg 'parent must retain all pointer bits' "$(BUILD)/rbtree/broken-donor.log" >/dev/null
+	grep -Eq 'parent must retain all pointer bits' "$(BUILD)/rbtree/broken-donor.log"
 	set -e; for t in x86_64-unknown-linux-gnu x86_64-apple-darwin; do \
 	    for unit in rbtree_abi rbtree_algorithm; do \
 	        $(CC) --target=$$t $(RBTREE_FLAGS) $(RBTREE_NATIVE_FLAGS) -I$(BUILD)/rbtree/donor -S -emit-llvm "$(SOURCE)/tests/$$unit.c" -o "$(BUILD)/rbtree/$$t-$$unit-donor.ll"; \

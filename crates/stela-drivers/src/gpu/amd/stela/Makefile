@@ -131,11 +131,11 @@ tmr-sanitize: $(OUT_DIR)/discovery_tmr_sanitize
 tmr-native: $(OUT_DIR)/discovery_tmr.o
 	$(NM) -u "$<" >"$<.undefined"
 	test "$$(wc -l < "$<.undefined" | tr -d ' ')" = 1
-	rg 'stela_amd_vram_mm_read' "$<.undefined"
+	grep -Eq 'stela_amd_vram_mm_read' "$<.undefined"
 tmr-uefi: $(OUT_DIR)/discovery_tmr_uefi.obj
 	$(NM) -u "$<" >"$<.undefined"
 	test "$$(wc -l < "$<.undefined" | tr -d ' ')" = 1
-	rg 'stela_amd_vram_mm_read' "$<.undefined"
+	grep -Eq 'stela_amd_vram_mm_read' "$<.undefined"
 $(OUT_DIR)/discovery-tmr-wrapper.inc: $(SOURCE)/../amdgpu/amdgpu_discovery.c | $(OUT_DIR)
 	sed -n '/^static uint32_t amdgpu_discovery_tmr_read32(/,/^static int amdgpu_discovery_read_binary_from_sysmem/{ /^static int amdgpu_discovery_read_binary_from_sysmem/d; p; }' "$<" > "$@"
 	test -s "$@"
@@ -281,11 +281,11 @@ ip-sanitize: $(OUT_DIR)/discovery_ip_sanitize
 ip-native: $(OUT_DIR)/discovery_ip.o
 	$(NM) -u "$<" >"$<.undefined"
 	test $$(wc -l <"$<.undefined") -eq 2
-	rg 'amdgpu_discovery_binary_(table|validate)' "$<.undefined"
+	grep -Eq 'amdgpu_discovery_binary_(table|validate)' "$<.undefined"
 ip-uefi: $(OUT_DIR)/discovery_ip_uefi.obj
 	$(NM) -u "$<" >"$<.undefined"
 	test $$(wc -l <"$<.undefined") -eq 2
-	rg 'amdgpu_discovery_binary_(table|validate)' "$<.undefined"
+	grep -Eq 'amdgpu_discovery_binary_(table|validate)' "$<.undefined"
 $(OUT_DIR)/discovery-ip-linux.inc: $(SOURCE)/../amdgpu/amdgpu_discovery.c | $(OUT_DIR)
 	sed -n '/^static void amdgpu_discovery_ip_debug(/,/^static uint32_t amdgpu_discovery_tmr_read32(/{ /^static uint32_t amdgpu_discovery_tmr_read32(/d; p; }' "$<" > "$@"
 	sed -n '/^static int amdgpu_discovery_validate_ip(struct amdgpu_device \*adev,/,/^}/p' "$<" >> "$@"
@@ -329,11 +329,11 @@ file-sanitize: $(OUT_DIR)/discovery_file_sanitize
 file-native: $(OUT_DIR)/discovery_file.o
 	$(NM) -u "$<" >"$<.undefined"
 	test $$(wc -l <"$<.undefined") -eq 1
-	rg 'amdgpu_discovery_binary_validate' "$<.undefined"
+	grep -Eq 'amdgpu_discovery_binary_validate' "$<.undefined"
 file-uefi: $(OUT_DIR)/discovery_file_uefi.obj
 	$(NM) -u "$<" >"$<.undefined"
 	test $$(wc -l <"$<.undefined") -eq 1
-	rg 'amdgpu_discovery_binary_validate' "$<.undefined"
+	grep -Eq 'amdgpu_discovery_binary_validate' "$<.undefined"
 $(OUT_DIR)/discovery-file-linux.inc: $(SOURCE)/../amdgpu/amdgpu_discovery.c | $(OUT_DIR)
 	sed -n '/^static int amdgpu_discovery_read_binary_from_file(/,/^static inline bool amdgpu_discovery_verify_checksum(/{ /^static inline bool amdgpu_discovery_verify_checksum(/d; p; }' "$<" > "$@"
 $(OUT_DIR)/discovery_file_test: $(FILE_SOURCES) $(FILE_TEST_DEPS)
@@ -370,10 +370,10 @@ info-isp-sanitize: $(OUT_DIR)/discovery_info_isp_sanitize
 	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 "$<" $(INFO_INPUTS)
 info-native: $(OUT_DIR)/discovery_info.o
 	$(NM) -u "$<" >"$<.undefined"
-	! rg -v 'amdgpu_discovery_binary_(table|validate)|mem(cpy|set)|___bzero' "$<.undefined"
+	! grep -Ev 'amdgpu_discovery_binary_(table|validate)|mem(cpy|set)|___bzero' "$<.undefined"
 info-uefi: $(OUT_DIR)/discovery_info_uefi.obj
 	$(NM) -u "$<" >"$<.undefined"
-	! rg -v 'amdgpu_discovery_binary_(table|validate)|mem(cpy|set)|___bzero' "$<.undefined"
+	! grep -Ev 'amdgpu_discovery_binary_(table|validate)|mem(cpy|set)|___bzero' "$<.undefined"
 $(OUT_DIR)/info-linux.inc: $(SOURCE)/../amdgpu/amdgpu_discovery.c | $(OUT_DIR)
 	sed -n '/^static int amdgpu_discovery_info_table(/,/^static int amdgpu_discovery_verify_npsinfo(/{ /^static int amdgpu_discovery_verify_npsinfo(/d; p; }' "$<" > "$@"
 	sed -n '/^static void amdgpu_discovery_harvest_ip(/,/^union nps_info /{ /^union nps_info /d; p; }' "$<" >> "$@"
@@ -397,7 +397,7 @@ $(OUT_DIR)/info-oracle.o: $(INFO_SOURCES) $(INFO_TEST_DEPS)
 .PHONY: info-elf
 info-elf: $(OUT_DIR)/discovery_info_elf.o
 	$(NM) -u "$<" >"$<.undefined"
-	! rg -v 'amdgpu_discovery_binary_(table|validate)|mem(cpy|set)' "$<.undefined"
+	! grep -Ev 'amdgpu_discovery_binary_(table|validate)|mem(cpy|set)' "$<.undefined"
 $(OUT_DIR)/discovery_info_elf.o: $(SOURCE)/discovery_info.c $(INFO_HEADERS) | $(OUT_DIR)
 	$(CLANG) --target=x86_64-unknown-linux-gnu $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 

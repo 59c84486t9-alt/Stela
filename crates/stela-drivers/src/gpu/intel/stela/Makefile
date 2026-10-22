@@ -463,7 +463,7 @@ $(PAT_COMPILE_DEFS): $(PAT_COMPILER) $(PAT_BUILD_BUG) | $(BUILD)
 	awk '/^#define __is_constexpr\(/ { active = 1 } active { print; if ($$0 !~ /\\$$/) exit }' "$(PAT_COMPILER)" >> "$@.tmp"
 	awk '/^#define BUILD_BUG_ON_ZERO\(/ { active = 1 } active { print; if ($$0 !~ /\\$$/) exit }' "$(PAT_BUILD_BUG)" >> "$@.tmp"
 	test "$$(sed -n '/^#define /p' "$@.tmp" | wc -l | tr -d ' ')" = 3
-	rg '_Static_assert' "$@.tmp" >/dev/null
+	grep -Eq '_Static_assert' "$@.tmp"
 	mv "$@.tmp" "$@"
 PAT_HEADERS := $(SOURCE)/pat.h $(SOURCE)/activation.h $(SOURCE)/../xe/xe_pat.h \
     $(SOURCE)/../xe/xe_pat_tables.h $(SOURCE)/../xe/xe_pat_select.h \
