@@ -9,6 +9,7 @@ use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
 
 pub mod policy;
+mod status;
 use policy::CacheResource;
 
 const NAME: &str = "t6000-mcc";
@@ -303,6 +304,9 @@ impl Controller {
     /// other MCC/performance effects in the source protocol matrix.
     pub fn register_offsets(&self) -> Vec<u64> {
         let mut offsets = offsets();
+        if self.0.borrow().origin == Origin::StelaInitialized {
+            offsets.extend(status::aliases());
+        }
         if self.0.borrow().resource == CacheResource::Cacheless {
             offsets.extend(policy::offsets());
         }
@@ -357,8 +361,14 @@ impl MmioDevice for View {
         if width != Width::Word {
             return Err(fail("MCC register requires an original 32-bit access"));
         }
+        let source = status::canonical(offset).unwrap_or(offset);
+        if source != offset && state.origin != Origin::StelaInitialized {
+            return Err(fail(
+                "retained physical MCC status-alias relationship is unqualified",
+            ));
+        }
         if matches!(
-            role(offset).map_err(fail)?,
+            role(source).map_err(fail)?,
             Role::DsidCommand(_) | Role::Persistence(_) | Role::PersistenceAuxiliary(_)
         ) {
             return Err(fail(
@@ -367,7 +377,7 @@ impl MmioDevice for View {
         }
         let word = state
             .words
-            .get(&(self.aperture, offset))
+            .get(&(self.aperture, source))
             .ok_or_else(|| fail("MCC register has no actual backing"))?;
         if word.known != u64::from(u32::MAX) {
             return Err(fail(

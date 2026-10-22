@@ -175,8 +175,8 @@ impl Router {
         }
         // DT cache-status offset0x10000c aliases the original MCC broadcast
         // selector. Do not retain Amcc's separate default cache_disabled bit.
-        // Only the exact MCC word is presently qualified; other per-plane
-        // cache-status aliases refuse until their original relationship is known.
+        // The source-consumer-derived Stela read aliases use this same
+        // actual selector. Retained physical alias observations stay separate.
         layout.cache_status = None;
         let locks = Amcc::new(layout, apertures, programmed, None)?;
         let mut views = Vec::new();
@@ -400,16 +400,16 @@ mod tests {
                 .value,
             1
         );
-        // The extra plane status addresses never fall back to independent
-        // Amcc cache-disabled defaults. The original relationship is unknown.
+        // The extra Stela status views share the actual selector; no
+        // independent Amcc disabled/ready values exist behind these addresses.
         for plane in 1..4 {
-            assert!(
+            assert_eq!(
                 bus.read(
                     base + 0x10000c + plane * mcc::PLANE_STRIDE,
                     Width::Word,
                     &mut access
-                )
-                .is_err()
+                ),
+                Ok(1)
             );
         }
         bus.write(base + 0x1c00, Width::Word, 0, &mut access)
