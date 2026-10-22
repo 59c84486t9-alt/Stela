@@ -36,6 +36,10 @@ impl<'a> Node<'a> {
     /// Translate a complete extent through this node's actual `ranges`.
     /// Adjacent rows may contribute only when every byte has the same affine
     /// translation. Matching endpoints alone cannot establish ownership.
+    /// Rows may overlap where they translate the shared bytes alike, as the
+    /// identity rows of the 26A434 J473AP `/arm-io` do (0x3_8000_0000 for
+    /// 0x1_8000_0000 beside 0x4_0000_0000 for 0x8000_0000); rows that
+    /// translate one source byte two ways refuse the node.
     pub fn translate_range(&self, offset: u64, bytes: u64) -> Option<u64> {
         let raw = self.property("ranges")?;
         if raw.is_empty() || !raw.len().is_multiple_of(24) || bytes == 0 {
@@ -51,10 +55,18 @@ impl<'a> Node<'a> {
             parent.checked_add(size)?;
         }
         ranges.sort_unstable_by_key(|&(child, _, _)| child);
-        if ranges
-            .windows(2)
-            .any(|rows| rows[0].0 + rows[0].2 > rows[1].0)
-        {
+        let conflicting = ranges
+            .iter()
+            .enumerate()
+            .any(|(i, &(child, parent, size))| {
+                ranges[i + 1..]
+                    .iter()
+                    .take_while(|&&(other, _, _)| other < child + size)
+                    .any(|&(other, other_parent, _)| {
+                        other_parent.wrapping_sub(other) != parent.wrapping_sub(child)
+                    })
+            });
+        if conflicting {
             return None;
         }
         let &(child, parent, _) = ranges
@@ -280,8 +292,27 @@ mod tests {
             translate(&[(0, 0x1000, 0x100), (0x100, 0x2100, 0x200)], 0x80, 0x200),
             None
         );
+        // Overlapping rows that translate their shared bytes alike, like
+        // J473AP's identity rows, translate; rows that translate one byte
+        // two ways refuse.
         assert_eq!(
-            translate(&[(0, 0x1000, 0x100), (0x80, 0x1080, 0x200)], 0x80, 4),
+            translate(&[(0, 0x1000, 0x100), (0x80, 0x1080, 0x200)], 0x80, 0x180),
+            Some(0x1080)
+        );
+        assert_eq!(
+            translate(
+                &[
+                    (0x3_8000_0000, 0x3_8000_0000, 0x1_8000_0000),
+                    (0x4_0000_0000, 0x4_0000_0000, 0x8000_0000),
+                    (0x4_8000_0000, 0x4_8000_0000, 0x8000_0000),
+                ],
+                0x4_8000_0000,
+                0x1000
+            ),
+            Some(0x4_8000_0000)
+        );
+        assert_eq!(
+            translate(&[(0, 0x1000, 0x100), (0x80, 0x2080, 0x200)], 0, 4),
             None
         );
         assert_eq!(translate(&[(0, 0x1000, 0x100)], 0, 0x100), Some(0x1000));

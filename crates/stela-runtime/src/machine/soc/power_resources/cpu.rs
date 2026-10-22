@@ -887,8 +887,10 @@ mod tests {
                         0,
                         0x2_0000_0000,
                         0x1_0000_0000,
+                        // An overlapping row that translates the same
+                        // bytes elsewhere.
                         PS_BUS_BASE,
-                        PS_PHYSICAL_BASE,
+                        PS_PHYSICAL_BASE + 0x1000,
                         80,
                     ]),
                 ),
