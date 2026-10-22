@@ -560,14 +560,31 @@ pub trait Devices {
 }
 
 /// Guest RAM through the host, as device DMA reaches it.
-struct HostMemory<'a, H: Host>(&'a mut H);
+struct HostMemory<'a, H: Host> {
+    host: &'a mut H,
+    lock: Option<(u64, u64)>,
+}
 
 impl<H: Host> Memory for HostMemory<'_, H> {
     fn read(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
-        self.0.read_ram(physical, buffer)
+        self.host.read_ram(physical, buffer)
     }
     fn write(&mut self, physical: u64, data: &[u8]) -> bool {
-        self.0.write_ram(physical, data)
+        if !data.is_empty() {
+            let Some(last) = u64::try_from(data.len() - 1)
+                .ok()
+                .and_then(|bytes| physical.checked_add(bytes))
+            else {
+                return false;
+            };
+            if self
+                .lock
+                .is_some_and(|(first, end)| physical <= end && first <= last)
+            {
+                return false;
+            }
+        }
+        self.host.write_ram(physical, data)
     }
 }
 
@@ -1750,7 +1767,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// substitutions. Enforce that boundary even
     /// when a provider returns an ordinary register error from its service.
     fn device_transfer(&mut self, now: u64) -> Result<(), DeviceError> {
-        let mut memory = HostMemory(&mut self.host);
+        // A just-accepted lock write precedes follow_memory_lock(), so query
+        // its actual device owner rather than the CPU's previous snapshot.
+        let mut memory = HostMemory {
+            host: &mut self.host,
+            lock: self.devices.memory_lock(),
+        };
         match self.devices.transfer(self.current, &mut memory, now) {
             Ok(()) => Ok(()),
             Err(DeviceError::Refused(reason) | DeviceError::TransferRefused(reason)) => {
@@ -6044,6 +6066,36 @@ mod tests {
             pair: None,
             pair_reads: 0,
         }
+    }
+
+    #[test]
+    fn device_dma_preflights_the_actual_memory_lock_before_any_copy() {
+        let mut machine = board(&[], pair_fault_device(), Vec::new());
+        let first = BASE + 0x808;
+        let last = BASE + 0x80f;
+        let mut memory = HostMemory {
+            host: &mut machine.host,
+            lock: Some((first, last)),
+        };
+        let mut before = [0u8; 32];
+        assert!(memory.read(BASE + 0x800, &mut before));
+        for (at, bytes) in [(first, 1), (last, 1), (first - 4, 8), (first - 8, 32)] {
+            assert!(!memory.write(at, &vec![0xa5; bytes]));
+            let mut observed = [0; 32];
+            assert!(memory.read(BASE + 0x800, &mut observed));
+            assert_eq!(observed, before);
+        }
+        assert!(memory.write(first - 8, &[0x12; 8]));
+        assert!(memory.write(last + 1, &[0x34; 8]));
+        let mut observed = [0; 32];
+        assert!(memory.read(BASE + 0x800, &mut observed));
+        assert_eq!(&observed[..8], &[0x12; 8]);
+        assert_eq!(&observed[8..16], &[0; 8]);
+        assert_eq!(&observed[16..24], &[0x34; 8]);
+        // Reads of locked RAM remain ordinary RAM reads. Address overflow
+        // refuses before calling the native copy provider, even without a lock.
+        memory.lock = None;
+        assert!(!memory.write(u64::MAX - 1, &[0x56; 4]));
     }
 
     #[test]
