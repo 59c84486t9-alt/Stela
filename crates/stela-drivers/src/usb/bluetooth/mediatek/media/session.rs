@@ -44,6 +44,9 @@ pub trait MediaIo: Io {
     fn read_media(&mut self, kind: Kind) -> core::result::Result<Option<Read>, BlockError>;
     fn write_media(&mut self, kind: Kind, bytes: &[u8]) -> Result<()>;
     fn quiesce_media(&mut self) -> core::result::Result<(), BlockError>;
+    /// Drain media, remove the old SCO voice/alternate, retaining the configured
+    /// third interrupt interface for ordinary HCI Reset. No shared reset.
+    fn reset_media_epoch(&mut self) -> core::result::Result<(), BlockError>;
     fn resume_media(&mut self) -> core::result::Result<(), BlockError>;
     fn close_media(&mut self) -> core::result::Result<(), BlockError>;
 }
@@ -61,7 +64,7 @@ pub enum Lifecycle {
     Closed,
     Failed,
 }
-/// Actual vendor command completion and returned command allowance. These
+/// Actual synchronous command completion and returned command allowance. These
 /// credits belong to the caller's HCI stack after setup, not this USB transport.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetupReport {
@@ -78,6 +81,7 @@ pub struct Session<B: MediaIo> {
     pending: Vec<Received>,
     lifecycle: Lifecycle,
     setup: SetupReport,
+    last_reset: Option<SetupReport>,
 }
 impl<B: MediaIo> Session<B> {
     /// Consume one initialized exact-device transport before handing it to a
@@ -92,6 +96,7 @@ impl<B: MediaIo> Session<B> {
                 hci,
                 bindings,
                 setup,
+                last_reset: None,
                 pending,
                 sco: None,
                 sco_frames: framing::Framer::new(Kind::Sco),
@@ -132,20 +137,44 @@ impl<B: MediaIo> Session<B> {
         hci.io.start_iso(bindings.iso(), dma)?;
         // Source btmtk_usb_isointf_init: receive is posted before this genuine
         // synchronous vendor command. A Command Status is not its completion.
-        hci.submit_command(&[0x98, 0xfd, 2, 8, 1])
-            .map_err(Error::Hci)?;
-        let deadline = hci.io.now_us().saturating_add(5_000_000);
         let mut pending = Vec::new();
-        let mut bytes = 0usize;
+        let setup = Self::command(hci, &[0x98, 0xfd, 2, 8, 1], &mut pending, false)?;
+        Ok((bindings, setup, pending))
+    }
+    fn command(
+        hci: &mut Hci<B>,
+        packet: &[u8],
+        pending: &mut Vec<Received>,
+        forward_completion: bool,
+    ) -> Result<SetupReport> {
+        let opcode = u16::from_le_bytes([packet[0], packet[1]]);
+        hci.submit_command(packet).map_err(Error::Hci)?;
+        let deadline = hci.io.now_us().saturating_add(5_000_000);
+        let mut bytes: usize = pending
+            .iter()
+            .map(|p| match p {
+                Received::Hci(Packet::Event(b) | Packet::Acl(b))
+                | Received::Sco(b)
+                | Received::Iso(b) => b.len(),
+                Received::Loss(_, _) => 0,
+            })
+            .sum();
         let mut completion = None;
         while completion.is_none() {
             for packet in hci.poll().map_err(Error::Hci)? {
                 let matched = match &packet {
                     Packet::Event(event)
-                        if event.len() >= 5 && event[0] == 0x0e && event[3..5] == [0x98, 0xfd] =>
+                        if event.len() >= 5
+                            && event[0] == 0x0e
+                            && event[3..5] == opcode.to_le_bytes() =>
                     {
-                        if completion.is_some() || event.len() < 6 {
-                            return Err(Error::Packet("one complete ISO setup Command Complete"));
+                        if completion.is_some()
+                            || event.len() < 6
+                            || (opcode == 0x0c03 && event.len() != 6)
+                        {
+                            return Err(Error::Packet(
+                                "one complete synchronous HCI Command Complete",
+                            ));
                         }
                         if event[5] != 0 {
                             return Err(Error::Controller {
@@ -157,10 +186,12 @@ impl<B: MediaIo> Session<B> {
                             completion: event.clone(),
                             command_credits: event[2],
                         });
-                        true
+                        !forward_completion
                     }
                     Packet::Event(event)
-                        if event.len() == 6 && event[0] == 0x0f && event[4..6] == [0x98, 0xfd] =>
+                        if event.len() == 6
+                            && event[0] == 0x0f
+                            && event[4..6] == opcode.to_le_bytes() =>
                     {
                         if event[2] != 0 {
                             return Err(Error::Controller {
@@ -177,7 +208,9 @@ impl<B: MediaIo> Session<B> {
                         Packet::Event(b) | Packet::Acl(b) => b.len(),
                     };
                     if bytes > 32768 || pending.len() >= 64 {
-                        return Err(Error::Packet("bounded setup asynchronous packets"));
+                        return Err(Error::Packet(
+                            "bounded synchronous HCI asynchronous packets",
+                        ));
                     }
                     pending.push(Received::Hci(packet));
                 }
@@ -190,13 +223,19 @@ impl<B: MediaIo> Session<B> {
                 core::hint::spin_loop();
             }
         }
-        Ok((bindings, completion.unwrap(), pending))
+        Ok(completion.unwrap())
     }
     pub fn lifecycle(&self) -> Lifecycle {
         self.lifecycle
     }
     pub fn setup_report(&self) -> &SetupReport {
         &self.setup
+    }
+    /// Latest ordinary HCI Reset completion, distinct from the historical vendor
+    /// setup and any physical/shared reset authority. Its CC is also queued for
+    /// the caller's HCI stack, in observed order with asynchronous packets.
+    pub fn last_reset(&self) -> Option<&SetupReport> {
+        self.last_reset.as_ref()
     }
     /// Historical initialization evidence for this retained owner, never proof
     /// that a later physical reset/power loss preserved radio state. Such a
@@ -223,19 +262,47 @@ impl<B: MediaIo> Session<B> {
     }
     pub fn submit_command(&mut self, packet: &[u8]) -> Result<()> {
         self.running()?;
+        if packet.len() >= 2 && packet[..2] == [3, 0x0c] {
+            if packet != [3, 0x0c, 0] {
+                return Err(Error::Packet("ordinary HCI Reset has no parameters"));
+            }
+            return self.reset();
+        }
         if packet.len() >= 2
-            && matches!(
-                u16::from_le_bytes([packet[0], packet[1]]),
-                0x0c03 | 0xfc6f | 0xfd98
-            )
+            && matches!(u16::from_le_bytes([packet[0], packet[1]]), 0xfc6f | 0xfd98)
         {
             return Err(Error::Unsupported(
-                "reset/WMT/media setup requires retirement and fresh initialization",
+                "WMT/media setup requires retirement and fresh initialization",
             ));
         }
         self.hci
             .submit_command(packet)
             .map_err(|e| self.fail(Error::Hci(e)))
+    }
+    /// Ordinary controller HCI Reset, as source hci_dev_init_sync performs after
+    /// vendor setup. Caller owns actual HCI command credits/no pending command.
+    /// Retire the old voice/partial media epoch, await genuine CC, then repost
+    /// third-interface RX without reapplying fd98. This is no USB/subsystem or
+    /// Wi-Fi reset, and failed completion cannot resume the media owner.
+    fn reset(&mut self) -> Result<()> {
+        self.hci
+            .io
+            .reset_media_epoch()
+            .map_err(|e| self.fail(e.into()))?;
+        self.lifecycle = Lifecycle::Quiescent;
+        self.sco = None;
+        self.sco_frames.reset();
+        self.iso_frames.reset();
+        self.last_reset = None;
+        let report = Self::command(&mut self.hci, &[3, 0x0c, 0], &mut self.pending, true)
+            .map_err(|e| self.fail(e))?;
+        self.last_reset = Some(report);
+        self.hci
+            .io
+            .resume_media()
+            .map_err(|e| self.fail(e.into()))?;
+        self.lifecycle = Lifecycle::Running;
+        Ok(())
     }
     pub fn submit_acl(&mut self, packet: &[u8]) -> Result<()> {
         self.running()?;

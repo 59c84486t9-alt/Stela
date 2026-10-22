@@ -113,6 +113,9 @@ impl Native {
                 "MT7925 exact fresh interrupt interface plan",
             ));
         }
+        host.controller
+            .borrow_mut()
+            .preflight_endpoints(host.slot, &pair.endpoints())?;
         Self::select(host, pair.interface, pair.alternate)?;
         // Record before Configure Endpoint: a failing command can leave hardware
         // ownership unresolved; cleanup must still attempt the exact contexts.
@@ -177,6 +180,11 @@ impl Native {
                 buffer.queued = None;
             }
             self.sco = None;
+        }
+        if let Some(pair) = next {
+            host.controller
+                .borrow_mut()
+                .preflight_endpoints(host.slot, &pair.endpoints())?;
         }
         Self::select(host, 1, next.map_or(0, |p| p.alternate))?;
         self.next_input = 0;
@@ -381,11 +389,10 @@ impl Native {
             }
         }
         if let Some(pair) = self.sco {
-            for (pending, ep) in [
-                (self.input.iter().any(|b| b.queued.is_some()), pair.input),
-                (self.output.iter().any(|b| b.queued.is_some()), pair.output),
-            ] {
-                if pending && let Err(e) = controller.cancel(host.slot, ep.dci()) {
+            // An idle completed ISO output still owns Queue.next. Always
+            // acknowledge retirement of both schedules, not just live payloads.
+            for ep in pair.endpoints() {
+                if let Err(e) = controller.cancel(host.slot, ep.dci()) {
                     failure.get_or_insert(e);
                 }
             }
@@ -400,6 +407,17 @@ impl Native {
             b.queued = None;
         }
         self.next_input = 0;
+        Ok(())
+    }
+    fn reset_epoch(&mut self, host: &mut Host) -> Result<(), BlockError> {
+        self.quiesce(host)?;
+        if let Some(pair) = self.sco {
+            host.controller
+                .borrow_mut()
+                .deconfigure(host.slot, &pair.endpoints())?;
+            self.sco = None;
+            Self::select(host, pair.interface, 0)?;
+        }
         Ok(())
     }
     fn resume(&mut self, host: &mut Host) -> Result<(), BlockError> {
@@ -506,6 +524,9 @@ impl MediaIo for Host {
     fn quiesce_media(&mut self) -> Result<(), BlockError> {
         self.with_media(|m, h| m.quiesce(h))
     }
+    fn reset_media_epoch(&mut self) -> Result<(), BlockError> {
+        self.with_media(|m, h| m.reset_epoch(h))
+    }
     fn resume_media(&mut self) -> Result<(), BlockError> {
         self.with_media(|m, h| m.resume(h))
     }
@@ -567,5 +588,70 @@ mod tests {
             assert_eq!(hci.state(), State::Failed);
             assert_eq!(backing, before);
         }
+    }
+    #[test]
+    fn native_quiesce_retires_idle_sco_output_schedule_before_repost_after_long_pause() {
+        let mut backing = vec![0u64; 256 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: exclusive synthetic RAM outlives model, rings and class owner.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let fixture = xhci::iso_class_fixture(&mut dma, xhci::HIGH_SPEED);
+        let controller = fixture.controller();
+        let binding = binding();
+        let device = binding.device().clone();
+        let mut native = Native::new(Bindings::new(&binding).unwrap(), &mut dma).unwrap();
+        let pair = native
+            .bindings
+            .sco(media::Voice {
+                connections: 1,
+                air_mode: media::AirMode::Cvsd,
+                voice_setting: 0,
+            })
+            .unwrap()
+            .unwrap();
+        controller
+            .borrow_mut()
+            .configure(1, &pair.endpoints(), None, &mut dma)
+            .unwrap();
+        let mut hci = Hci::attach(controller.clone(), &device, binding, &mut dma).unwrap();
+        native.sco = Some(pair);
+        native.running = true;
+        let dci = pair.output.dci();
+        let length = media::service_bytes(pair.output);
+        let ticket = controller
+            .borrow_mut()
+            .submit_iso(1, dci, native.output[0].dma.physical(), length)
+            .unwrap();
+        fixture.complete(dci, 1, 0);
+        let done = controller
+            .borrow_mut()
+            .completed_iso(&ticket)
+            .unwrap()
+            .unwrap();
+        assert_eq!(done.status, IsoStatus::Success);
+        assert_eq!(done.bytes, length);
+        assert!(native.output.iter().all(|b| b.queued.is_none())); // Payload done; schedule still retained.
+        native.quiesce(&mut hci.io).unwrap();
+        assert!(fixture.commands().contains(&(15, dci))); // Actual Stop Endpoint ACK.
+        assert!(fixture.commands().contains(&(16, dci))); // Actual Set Dequeue ACK resets Queue.next.
+        fixture.set_mfindex(8192); // Old FrameID is outside the actual scheduling window.
+        // Reuse the exact SCO repost operation from Native::resume. This opaque
+        // fixture models ISO rings only, not ordinary interrupt/HCI enumeration.
+        native.post_sco(&mut hci.io).unwrap();
+        let fresh = controller
+            .borrow_mut()
+            .submit_iso(1, dci, native.output[0].dma.physical(), length)
+            .unwrap();
+        fixture.complete(dci, 1, 0);
+        assert_eq!(
+            controller
+                .borrow_mut()
+                .completed_iso(&fresh)
+                .unwrap()
+                .unwrap()
+                .status,
+            IsoStatus::Success
+        );
+        controller.borrow_mut().cancel(1, pair.input.dci()).unwrap();
     }
 }

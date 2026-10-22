@@ -133,9 +133,27 @@ pub(in crate::usb::bluetooth) mod tests {
         output_status: Option<crate::usb::xhci::IsoStatus>,
         status: Option<u8>,
         no_complete: bool,
+        reset_credits: u8,
     }
     impl Io for Model {
         fn control(&mut self, _: [u8; 8], p: &[u8]) -> core::result::Result<(), BlockError> {
+            if p == [3, 0x0c, 0] {
+                self.actions.push("hci-reset");
+                if !self.no_complete {
+                    self.events.push_back(vec![
+                        0xff,
+                        1,
+                        0xbb,
+                        0x0e,
+                        4,
+                        self.reset_credits,
+                        3,
+                        0x0c,
+                        self.status.unwrap_or(0),
+                    ]);
+                }
+                return Ok(());
+            }
             assert_eq!(p, [0x98, 0xfd, 2, 8, 1]);
             self.actions.push("fd98");
             if !self.no_complete {
@@ -232,6 +250,15 @@ pub(in crate::usb::bluetooth) mod tests {
             } else {
                 Ok(())
             }
+        }
+        fn reset_media_epoch(&mut self) -> core::result::Result<(), BlockError> {
+            self.actions.push("reset-drain-sco-alt0");
+            if self.fail_quiesce {
+                return Err(BlockError::Timeout);
+            }
+            self.sco.clear();
+            self.iso.clear();
+            Ok(())
         }
         fn resume_media(&mut self) -> core::result::Result<(), BlockError> {
             self.actions.push("resume");
@@ -445,7 +472,7 @@ pub(in crate::usb::bluetooth) mod tests {
             assert!(s.poll().unwrap().is_empty());
             assert_eq!(s.poll().unwrap(), [Received::Loss(Kind::Iso, loss)]);
             assert_eq!(s.poll().unwrap(), [Received::Iso(vec![2, 0, 1, 0, 7])]);
-            for opcode in [0x0c03u16, 0xfc6f, 0xfd98] {
+            for opcode in [0xfc6fu16, 0xfd98] {
                 let [lo, hi] = opcode.to_le_bytes();
                 assert!(s.submit_command(&[lo, hi, 0]).is_err());
             }
@@ -499,5 +526,116 @@ pub(in crate::usb::bluetooth) mod tests {
         assert_eq!(s.hci.io.writes.len(), 1);
         assert!(s.submit(Kind::Sco, &[1, 0, 0]).is_err());
         assert_eq!(s.hci.io.writes.len(), 1);
+    }
+    #[test]
+    fn ordinary_reset_after_vendor_setup_forwards_actual_completion_and_credits_without_fd98_reapply()
+     {
+        let mut s = Session::start(
+            hci(Model {
+                reset_credits: 3,
+                ..Model::default()
+            }),
+            &mut NoDma,
+            1,
+        )
+        .unwrap();
+        s.submit_command(&[3, 0x0c, 0]).unwrap();
+        assert_eq!(
+            s.hci.io.actions,
+            [
+                "iso-posted",
+                "fd98",
+                "reset-drain-sco-alt0",
+                "hci-reset",
+                "resume"
+            ]
+        );
+        assert_eq!(s.last_reset().unwrap().completion, [0x0e, 4, 3, 3, 0x0c, 0]);
+        assert_eq!(s.last_reset().unwrap().command_credits, 3);
+        assert_eq!(
+            s.poll().unwrap(),
+            [
+                Received::Hci(crate::usb::bluetooth::Packet::Event(vec![
+                    0x0f, 4, 0, 1, 0x98, 0xfd
+                ])),
+                Received::Hci(crate::usb::bluetooth::Packet::Event(vec![0xff, 1, 0xaa])),
+                Received::Hci(crate::usb::bluetooth::Packet::Event(vec![0xff, 1, 0xbb])),
+                Received::Hci(crate::usb::bluetooth::Packet::Event(vec![
+                    0x0e, 4, 3, 3, 0x0c, 0
+                ])),
+            ]
+        );
+        assert_eq!(s.lifecycle(), Lifecycle::Running);
+    }
+    #[test]
+    fn ordinary_reset_retires_active_voice_and_partial_media_until_new_actual_voice_selection() {
+        let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
+        s.poll().unwrap();
+        s.set_voice(
+            Voice {
+                connections: 1,
+                air_mode: AirMode::Cvsd,
+                voice_setting: 0,
+            },
+            &mut NoDma,
+        )
+        .unwrap();
+        s.hci.io.sco.push_back(Read::Data(vec![1, 0, 2, 8]));
+        s.hci.io.iso.push_back(Read::Data(vec![1, 0, 2, 0, 8]));
+        assert!(s.poll().unwrap().is_empty());
+        s.submit_command(&[3, 0x0c, 0]).unwrap();
+        assert_eq!(s.last_reset().unwrap().command_credits, 0); // Preserve actual zero, never invent credit.
+        assert!(s.submit(Kind::Sco, &[1, 0, 0]).is_err());
+        assert!(
+            s.poll()
+                .unwrap()
+                .iter()
+                .all(|p| matches!(p, Received::Hci(_)))
+        );
+        s.set_voice(
+            Voice {
+                connections: 1,
+                air_mode: AirMode::Cvsd,
+                voice_setting: 0,
+            },
+            &mut NoDma,
+        )
+        .unwrap();
+        s.hci.io.sco.push_back(Read::Data(vec![2, 0, 1, 7]));
+        s.hci.io.iso.push_back(Read::Data(vec![2, 0, 1, 0, 6]));
+        assert_eq!(
+            s.poll().unwrap(),
+            [
+                Received::Iso(vec![2, 0, 1, 0, 6]),
+                Received::Sco(vec![2, 0, 1, 7])
+            ]
+        );
+    }
+    #[test]
+    fn reset_requires_real_matching_success_cc_and_known_media_retirement() {
+        for response in [
+            vec![0x0f, 4, 0, 1, 3, 0x0c],
+            vec![0x0e, 4, 1, 4, 0x0c, 0],
+            vec![0x0e, 4, 1, 3, 0x0c, 0x0c],
+            vec![0x0e, 3, 1, 3, 0x0c],
+            vec![0x0e, 5, 1, 3, 0x0c, 0, 0xaa],
+            vec![0x0e, 4, 1, 3, 0x0c, 0, 0x0e, 4, 1, 3, 0x0c, 0],
+        ] {
+            let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
+            s.poll().unwrap();
+            s.hci.io.no_complete = true;
+            s.hci.io.events.push_back(response);
+            assert!(s.submit_command(&[3, 0x0c, 0]).is_err());
+            assert_eq!(s.lifecycle(), Lifecycle::Failed);
+            assert!(!s.hci.io.actions.contains(&"resume"));
+            assert!(s.resume().is_err());
+        }
+        let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
+        assert!(s.submit_command(&[3, 0x0c, 1, 0]).is_err());
+        assert_eq!(s.lifecycle(), Lifecycle::Running);
+        s.hci.io.fail_quiesce = true;
+        assert!(s.submit_command(&[3, 0x0c, 0]).is_err());
+        assert!(!s.hci.io.actions.contains(&"hci-reset"));
+        assert_eq!(s.lifecycle(), Lifecycle::Failed);
     }
 }
