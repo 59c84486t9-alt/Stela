@@ -83,7 +83,9 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// into the template's nodes only.
 /// Revision 20: select the T6050 variant the board's fuses give, merge its
 /// template overlays, keep its dies' CPUs and size its lock maps by it.
-pub const REVISION: u32 = 20;
+/// Revision 21: publish `/arm-io` `die-count` on every SoC whose iBoot
+/// writes it, with that iBoot's value.
+pub const REVISION: u32 = 21;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -1669,6 +1671,7 @@ fn shape_device_tree(
         "/cpus fixed-frequency and peripheral-frequency take the timebase rate; Apple's values are unobserved"
             .into(),
     );
+    unresolved.extend(set_die_count(tree, target.chip_id)?);
     unresolved.push(
         "/chosen/boot-object-manifests: no signed LocalPolicy or personalized manifest objects; \
          a supplied original global boot manifest is forwarded separately"
@@ -1681,6 +1684,71 @@ fn shape_device_tree(
             .into(),
     );
     Ok(unresolved)
+}
+
+/// The ApChipIDs whose 26A434 iBoots carry no `die-count` row: every T8103
+/// (J274, J293, J313, J456, J457), T8112 (J413, J415, J473, J493) and T8140
+/// (J700) iBoot lacks the string. Every other board's iBoot writes it.
+const NO_DIE_COUNT: [u32; 3] = [0x8103, 0x8112, 0x8140];
+/// The Ultras, for which iBoot writes 2: J375D/J314C/J375C compute
+/// `chip == 0x6002 ? 2 : 1` (J375D 0x36454, compare 0x3c1d0), J575D/J514C/
+/// J514M `chip == 0x6032 ? 2 : 1` (J575D 0x3a66c, compare 0x41a00), and the
+/// T6022 boards' builds store 2 (J180D 0x39c1c, J475D 0x39bf0) where the
+/// T6020/T6021 builds store 1 (J414C 0x3a634).
+const ULTRAS: [u32; 3] = [0x6002, 0x6022, 0x6032];
+/// The M5 Pro, Max and Ultra share one ApChipID; their iBoot counts two dies
+/// only when the die-configuration fuses at 0x2_8837_4010 read
+/// `0xa050_c030`, `0xa55a_c33c` (J775D 0x520d8, J714C 0x50a5c), which is the
+/// `h17d` variant whose CPUs the variant pass keeps on both dies.
+const FUSED_DIES: u32 = 0x6050;
+
+/// iBoot's `/arm-io` `die-count` (J180D writes it beside `usbphy-frequency`
+/// on the `arm-io` node, file 0x39d84..0x39d98, creating the property).
+/// `ApplePMGR::start` reads it from its provider's provider's provider, the
+/// `arm-io` device (mac14j KC VA 0xfffffe0009b35804..0xfffffe0009b358e0),
+/// defaulting to one die (0xfffffe0009b357fc). The value is the chip's rule
+/// above; the CPU nodes' dies (`die-id`, which the runtime's PMGR reader
+/// counts) must agree, and give the fused count on the T6050.
+fn set_die_count(tree: &mut DeviceTree, chip_id: Option<u32>) -> Result<Option<String>> {
+    let Some(chip) = chip_id else {
+        return Ok(Some(
+            "/arm-io die-count: no ApChipID selects iBoot's row".into(),
+        ));
+    };
+    if NO_DIE_COUNT.contains(&chip) {
+        return Ok(None);
+    }
+    let dies = cpu_dies(tree)?;
+    let count = if chip == FUSED_DIES {
+        dies
+    } else {
+        let count = if ULTRAS.contains(&chip) { 2 } else { 1 };
+        ensure!(
+            dies == count,
+            "ApChipID {chip:#x}'s iBoot writes die-count {count}, but its CPUs are on {dies} dies"
+        );
+        count
+    };
+    ensure!(tree.node("/arm-io").is_some(), "DeviceTree has no /arm-io");
+    tree.set_property("/arm-io", "die-count", count.to_le_bytes().to_vec())?;
+    Ok(None)
+}
+
+/// The dies the CPU nodes name: their highest `die-id` plus one.
+fn cpu_dies(tree: &DeviceTree) -> Result<u32> {
+    let mut highest = 0u32;
+    for cpu in cpu_nodes(tree)? {
+        if let Some(die) = tree.property(&cpu, "die-id") {
+            let word = die
+                .value
+                .first_chunk::<4>()
+                .with_context(|| format!("{cpu} die-id is not a u32"))?;
+            highest = highest.max(u32::from_le_bytes(*word));
+        }
+    }
+    highest
+        .checked_add(1)
+        .context("CPU die-id exceeds the die count")
 }
 
 /// Paths of the `/cpus` children that describe processors.
@@ -2233,6 +2301,60 @@ mod tests {
             ],
             &[entry("test", &der(&[0x31], &[]))],
         )
+    }
+
+    #[test]
+    fn die_count_follows_each_chips_iboot_rule() -> Result<()> {
+        let tree = |dies: &[Option<u32>]| -> Result<DeviceTree> {
+            let mut tree = DeviceTree {
+                root: crate::apple_device_tree::Node::named("device-tree")?,
+            };
+            tree.ensure_child("/", "cpus")?;
+            tree.ensure_child("/", "arm-io")?;
+            for (index, die) in dies.iter().enumerate() {
+                let cpu = format!("cpu{index}");
+                tree.ensure_child("/cpus", &cpu)?;
+                let path = format!("/cpus/{cpu}");
+                tree.set_property(&path, "state", b"waiting\0".to_vec())?;
+                if let Some(die) = die {
+                    // The templates carry die-id as a 64-bit cell pair.
+                    tree.set_property(&path, "die-id", u64::from(*die).to_le_bytes().to_vec())?;
+                }
+            }
+            Ok(tree)
+        };
+        let two = [Some(0), Some(0), Some(1), Some(1)];
+        let one = [Some(0), Some(0)];
+        let count = |dies: &[Option<u32>], chip| -> Result<Option<u32>> {
+            let mut tree = tree(dies)?;
+            assert_eq!(set_die_count(&mut tree, Some(chip))?, None);
+            Ok(tree
+                .property("/arm-io", "die-count")
+                .map(|p| u32::from_le_bytes(p.value[..].try_into().unwrap())))
+        };
+        // The iBoots without the row, and the chip rules of those with it.
+        for chip in NO_DIE_COUNT {
+            assert_eq!(count(&one, chip)?, None);
+        }
+        for chip in ULTRAS {
+            assert_eq!(count(&two, chip)?, Some(2));
+            assert!(count(&one, chip).is_err());
+        }
+        for chip in [0x6000, 0x6021, 0x6031, 0x8122, 0x8152] {
+            assert_eq!(count(&one, chip)?, Some(1));
+            assert_eq!(count(&[None, None], chip)?, Some(1));
+            assert!(count(&two, chip).is_err());
+        }
+        // The T6050's fused count is the variant's remaining CPU dies.
+        assert_eq!(count(&two, FUSED_DIES)?, Some(2));
+        assert_eq!(count(&one, FUSED_DIES)?, Some(1));
+        let mut unknown = tree(&one)?;
+        assert!(set_die_count(&mut unknown, None)?.is_some());
+        assert!(unknown.property("/arm-io", "die-count").is_none());
+        let mut malformed = tree(&[Some(1)])?;
+        malformed.set_property("/cpus/cpu0", "die-id", vec![1])?;
+        assert!(set_die_count(&mut malformed, Some(0x6002)).is_err());
+        Ok(())
     }
 
     #[test]
