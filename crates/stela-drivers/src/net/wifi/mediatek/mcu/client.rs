@@ -47,7 +47,7 @@ pub struct Profile {
     pub dtim_period: u8,
     pub slot_time: u16,
     pub antenna_mask: u8,
-    /// Source Connac3 cipher number: native profile admits open0/CCMP1284.
+    /// Source Connac3 cipher number: open0, CCMP1284/CCMP25610/GCMP12811/GCMP25612.
     pub cipher: u8,
 }
 fn put16(bytes: &mut [u8], at: usize, v: u16) {
@@ -135,7 +135,7 @@ impl Profile {
         {
             return Err(Error::InvalidTiming);
         }
-        if !matches!(self.cipher, 0 | 4) {
+        if !matches!(self.cipher, 0 | 4 | 10 | 11 | 12) {
             return Err(Error::UnsupportedCipher);
         }
         Ok(())
@@ -322,8 +322,15 @@ impl Profile {
         put16(b, 28, if two { 1 } else { 3 });
         b[31] = c.bss_index;
         let sec = tlv(&mut out, 16, 8);
-        sec[4] = if self.cipher == 4 { 7 } else { 0 };
-        sec[5] = if self.cipher == 4 { 6 } else { 1 };
+        // Exact source switch, including its default for CCMP256. These are
+        // firmware BSS fields, never evidence of an OS SAE/RSN authentication.
+        let (mode, status) = match self.cipher {
+            4 => (7, 6),
+            11 | 12 => (11, 8),
+            _ => (0, 1),
+        };
+        sec[4] = mode;
+        sec[5] = status;
         sec[6] = self.cipher;
         let rate = tlv(&mut out, 11, 16);
         put16(rate, 6, if two { 15 } else { 0x540 });

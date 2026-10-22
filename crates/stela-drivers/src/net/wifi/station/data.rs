@@ -5,7 +5,7 @@
 //! work plan: its MPDU is plaintext, and required hardware cipher/MIC work must
 //! be completed by the selected actual vendor path before successful TX.
 
-use super::{Phase, PortPolicy, RegulatoryPolicy, Station};
+use super::{AssociationContext, Phase, PortPolicy, RegulatoryPolicy, Station};
 use crate::net::{
     MAX_FRAME, Mac,
     wifi::{
@@ -14,7 +14,7 @@ use crate::net::{
         security::{self, KeyIdentity, KeyScope, KeySlot, NonceOwner, PacketNumber},
     },
 };
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::borrow::{Borrow, BorrowMut};
 
 const EAPOL: u16 = 0x888e;
@@ -37,6 +37,8 @@ pub enum Error {
     WrongKey,
     Regulatory,
     InvalidEthernet,
+    NoMemory,
+    Busy,
     Crypto(security::Error),
 }
 
@@ -78,8 +80,9 @@ pub enum SequenceOwner {
 pub enum SequenceAssignment {
     /// Prepared host input, never an observed on-air sequence.
     Host(u16),
-    /// Header sequence is zero as unused input, never an on-air observation.
-    /// Actual vendor descriptor/command must request device assignment.
+    /// Device owns actual air assignment. QoS may still carry the canonical
+    /// source software sequence input for ADDBA bookkeeping; that input is
+    /// never an on-air observation. Actual descriptor must request device mode.
     Device,
 }
 
@@ -107,6 +110,7 @@ pub struct TxPlan {
     protection: Protection,
     sequence: SequenceAssignment,
     control_port: bool,
+    qos: Option<(u8, Arc<AssociationContext>)>,
 }
 
 impl TxPlan {
@@ -127,6 +131,12 @@ impl TxPlan {
     }
     pub const fn sequence(&self) -> SequenceAssignment {
         self.sequence
+    }
+    pub fn qos_tid(&self) -> Option<u8> {
+        self.qos.as_ref().map(|(tid, _)| *tid)
+    }
+    pub fn association_context(&self) -> Option<&Arc<AssociationContext>> {
+        self.qos.as_ref().map(|(_, context)| context)
     }
     /// Vendor queue must revalidate epoch/full key identity before publishing
     /// DMA, implement every requested protection/sequence effect or return unsupported,
@@ -239,6 +249,19 @@ impl Station {
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
         if plan.channel != join.channel {
             return Err(Error::WrongChannel);
+        }
+        if let Some((tid, context)) = &plan.qos {
+            self.validate_association_context(context)
+                .map_err(|_| Error::Stale)?;
+            let header = crate::net::wifi::frame::Header::parse(&plan.plaintext)
+                .map_err(|_| Error::InvalidEthernet)?;
+            if header.tid != Some(*tid)
+                || header.amsdu
+                || plan.plaintext.get(24..26) != Some(&[*tid, 0])
+            {
+                return Err(Error::Stale);
+            }
+            qos_access(context, *tid)?;
         }
         if !policy.allow_data_tx(join.channel) {
             return Err(Error::Regulatory);
@@ -388,6 +411,122 @@ impl Station {
         Ok(Ingress::Data(ethernet))
     }
 
+    /// Deliver a genuinely complete post-order parent already checked by the
+    /// canonical aggregate gate. This never authorizes a raw same-PN member or
+    /// repeats the parent's replay update. Current context, original installed
+    /// keys and controlled-port activation are rechecked before any output.
+    pub fn receive_group_refs<C, K: Borrow<KeySlot>>(
+        &self,
+        received: &security::aggregate::ReceivedGroup<'_, C>,
+        keys: &[K],
+    ) -> Result<Vec<Ingress>, Error> {
+        use security::aggregate::{GroupSecurity, Shape};
+        if self.phase != Phase::Associated {
+            return Err(Error::NotAssociated);
+        }
+        self.validate_association_context(received.group().context())
+            .map_err(|_| Error::Stale)?;
+        let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
+        let selected = match received.security() {
+            GroupSecurity::Open => {
+                if join.policy != PortPolicy::Open {
+                    return Err(Error::Unencrypted);
+                }
+                None
+            }
+            GroupSecurity::Protected { key, .. } => {
+                if join.policy != PortPolicy::Controlled
+                    || !keys
+                        .iter()
+                        .any(|slot| slot.borrow().installed() == Some(key))
+                {
+                    return Err(Error::WrongKey);
+                }
+                Some(key)
+            }
+        };
+        let mut out = Vec::new();
+        for member in received.members() {
+            let header = member.mpdu().header();
+            let mut frames = if header.amsdu {
+                subframes(
+                    member.payload(),
+                    header.receiver,
+                    received.group().shape() == Shape::HardwareSplitAmsdu,
+                )?
+            } else {
+                let source = Mac(member.mpdu().bytes()[16..22].try_into().unwrap());
+                vec![ethernet(header.receiver, source, member.payload())?]
+            };
+            out.try_reserve(frames.len()).map_err(|_| Error::NoMemory)?;
+            for ethernet in frames.drain(..) {
+                if u16::from_be_bytes([ethernet[12], ethernet[13]]) == EAPOL {
+                    let destination = Mac(ethernet[..6].try_into().unwrap());
+                    if destination != self.local && destination != PAE_GROUP {
+                        return Err(Error::WrongPeer);
+                    }
+                    out.push(Ingress::ControlPort {
+                        ethernet,
+                        encrypted: selected.is_some(),
+                        key: selected,
+                    });
+                } else {
+                    if join.policy == PortPolicy::Controlled {
+                        if !self.authorized_keys_present(keys) {
+                            return Err(Error::ClosedPort);
+                        }
+                        if !self.authorization.is_some_and(|(ptk, gtk)| {
+                            selected == Some(ptk) || selected == Some(gtk)
+                        }) {
+                            return Err(Error::WrongKey);
+                        }
+                    }
+                    out.push(Ingress::Data(ethernet));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Single-MSDU QoS with source-backed device sequence assignment. The
+    /// exact current acknowledged context supplies WMM; a copied capability or
+    /// TID cannot bypass it. Host per-TID sequences and TSPEC/ACM admission are
+    /// not implemented by this entry point. No BA/A-MSDU permission is implied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_qos_msdu_refs<K: BorrowMut<KeySlot>>(
+        &mut self,
+        epoch: u64,
+        ethernet: &[u8],
+        class: TxClass,
+        context: &Arc<AssociationContext>,
+        tid: u8,
+        keys: &mut [K],
+        policy: &mut impl RegulatoryPolicy,
+    ) -> Result<TxPlan, Error> {
+        self.validate_association_context(context)
+            .map_err(|_| Error::Stale)?;
+        qos_access(context, tid)?;
+        let mut plan =
+            self.prepare_msdu_refs(epoch, ethernet, class, SequenceOwner::Device, keys, policy)?;
+        plan.plaintext
+            .try_reserve_exact(2)
+            .map_err(|_| Error::NoMemory)?;
+        plan.plaintext[0] |= 0x80;
+        // Insert before the actual IV/PN reserve, if any. The body remains
+        // plaintext and the existing selected original key owns cipher work.
+        plan.plaintext.splice(24..24, [tid, 0]);
+        let sequence = self.allocate_qos_sequence(context, tid).map_err(|e| {
+            if e == super::Error::Busy {
+                Error::Busy
+            } else {
+                Error::Stale
+            }
+        })?;
+        plan.plaintext[22..24].copy_from_slice(&(sequence << 4).to_le_bytes());
+        plan.qos = Some((tid, context.clone()));
+        Ok(plan)
+    }
+
     /// Prepare one non-QoS MPDU. The physical backend selects its source-backed
     /// sequence owner independently of nonce ownership. Returns a hardware work
     /// plan, not successful queueing, on-air transmission or a ciphertext buffer.
@@ -512,13 +651,114 @@ impl Station {
             protection,
             sequence,
             control_port,
+            qos: None,
         })
     }
+}
+
+// Source ieee80211_amsdu_to_8023s station profile: Ethernet-length subheaders,
+// four-byte inter-subframe padding, first-DA RFC1042 injection rejection and
+// local unicast-DA matching. Station FromDS permits independent inner SAs.
+// A malformed later subframe refuses the whole output, never a partial prefix.
+fn subframes(mut bytes: &[u8], receiver: Mac, split_member: bool) -> Result<Vec<Vec<u8>>, Error> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    loop {
+        let header = bytes.get(..14).ok_or(Error::InvalidEthernet)?;
+        if index == 0 && header[..6] == RFC1042 {
+            return Err(Error::InvalidEthernet);
+        }
+        let length = usize::from(u16::from_be_bytes([header[12], header[13]]));
+        let end = 14usize.checked_add(length).ok_or(Error::InvalidEthernet)?;
+        bytes.get(14..end).ok_or(Error::InvalidEthernet)?;
+        let padding = (4 - end % 4) % 4;
+        let last = bytes.len() <= end + padding;
+        if split_member && !last {
+            return Err(Error::InvalidEthernet);
+        }
+        let destination = Mac(header[..6].try_into().unwrap());
+        let source = Mac(header[6..12].try_into().unwrap());
+        if destination.is_multicast() || destination == receiver {
+            out.try_reserve(1).map_err(|_| Error::NoMemory)?;
+            // Source reuses the final linear skb without trimming up to three
+            // trailing bytes. Preserve those actual bytes and the original
+            // length field for non-SNAP frames, rather than inventing a new
+            // length or silently discarding observed trailing padding.
+            let payload = if last { &bytes[14..] } else { &bytes[14..end] };
+            let mut frame = ethernet(destination, source, payload)?;
+            let tunnel = payload.get(..8).is_some_and(|p| {
+                let protocol = u16::from_be_bytes([p[6], p[7]]);
+                (p[..6] == RFC1042 && !matches!(protocol, AARP | IPX)) || p[..6] == BRIDGE_TUNNEL
+            });
+            if !tunnel {
+                frame[12..14].copy_from_slice(&header[12..14]);
+            }
+            out.push(frame);
+        }
+        if last {
+            return Ok(out);
+        }
+        bytes = bytes.get(end + padding..).ok_or(Error::InvalidEthernet)?;
+        index += 1;
+    }
+}
+
+fn qos_access(context: &AssociationContext, tid: u8) -> Result<(), Error> {
+    const ACI: [u8; 8] = [0, 1, 1, 0, 2, 2, 3, 3];
+    let aci = *ACI
+        .get(usize::from(tid))
+        .ok_or(Error::Unsupported("QoS TID above7"))?;
+    let wmm = context
+        .negotiated()
+        .wmm
+        .as_ref()
+        .ok_or(Error::Unsupported("missing actual WMM"))?;
+    let ac = wmm
+        .access_categories
+        .iter()
+        .find(|ac| ac.aci == aci)
+        .ok_or(Error::Unsupported("missing WMM access category"))?;
+    if ac.admission_control {
+        return Err(Error::Unsupported("unadmitted WMM access category"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires fresh pinned full A-MSDU helper trace via STELA_WIFI_AMSDU_ORACLE"]
+    fn full_source_amsdu_station_conversion_matches_all_bytes() {
+        extern crate std;
+        let path =
+            std::env::var_os("STELA_WIFI_AMSDU_ORACLE").expect("fresh unchanged Linux trace");
+        let trace = std::fs::read(path).unwrap();
+        let mut bytes = trace.as_slice();
+        fn take_u32(bytes: &mut &[u8]) -> usize {
+            let value = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+            *bytes = &bytes[4..];
+            value
+        }
+        for case in 0..512 {
+            let length = take_u32(&mut bytes);
+            let input = &bytes[..length];
+            bytes = &bytes[length..];
+            let count = take_u32(&mut bytes);
+            let mut expected = Vec::new();
+            for _ in 0..count {
+                let length = take_u32(&mut bytes);
+                expected.push(bytes[..length].to_vec());
+                bytes = &bytes[length..];
+            }
+            match subframes(input, Mac([2, 1, 2, 3, 4, 5]), false) {
+                Ok(actual) => assert_eq!(actual, expected, "full source case{case}"),
+                Err(_) => assert!(expected.is_empty(), "source forwarded refused case{case}"),
+            }
+        }
+        assert!(bytes.is_empty());
+    }
     use crate::net::wifi::{
         Band, RadioStatus, RawRate,
         security::{Cipher, InstallOutcome, Integrity, ReplaySeed, SecurityStatus, TransmitSeed},

@@ -832,6 +832,7 @@ mod tests {
         wrong_roc_token: bool,
         client_commands: Vec<Vec<u8>>,
         peers: alloc::collections::BTreeMap<u16, Vec<u8>>,
+        receive_ba: alloc::collections::BTreeMap<(u16, u8), Vec<u8>>,
         initial_commands: Vec<Vec<u8>>,
         initial_fail_at: Option<usize>,
         raw_disabled: alloc::collections::BTreeSet<u16>,
@@ -883,6 +884,7 @@ mod tests {
                 wrong_roc_token: false,
                 client_commands: Vec::new(),
                 peers: alloc::collections::BTreeMap::new(),
+                receive_ba: alloc::collections::BTreeMap::new(),
                 initial_commands: Vec::new(),
                 initial_fail_at: None,
                 raw_disabled: alloc::collections::BTreeSet::new(),
@@ -1334,7 +1336,19 @@ mod tests {
                         if command == 3 && packet.get(56) != Some(&0x27) {
                             let body = &packet[48..];
                             let slot = u16::from(body[1]);
-                            if body[8] == 0x25 {
+                            if body[8] == 6 {
+                                assert_eq!(body.len(), 24);
+                                assert_eq!(&body[8..12], &[6, 0, 16, 0]);
+                                assert_eq!(body[13], 2); // actual recipient direction
+                                assert_eq!(body[14], 0); // source RX_START params.amsdu
+                                let tid = body[12];
+                                if body[15] == 0 {
+                                    model.receive_ba.remove(&(slot, tid));
+                                } else {
+                                    assert_eq!(body[15], 1 << tid);
+                                    model.receive_ba.insert((slot, tid), body.to_vec());
+                                }
+                            } else if body[8] == 0x25 {
                                 model.peers.remove(&slot);
                                 model.raw_disabled.remove(&slot);
                             } else {

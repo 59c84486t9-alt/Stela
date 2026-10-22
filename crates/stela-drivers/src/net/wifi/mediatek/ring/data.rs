@@ -199,6 +199,17 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
     pub fn outstanding_tokens(&self) -> usize {
         self.outstanding
     }
+    /// Serialized native lifecycle view of actual retained packet contexts.
+    /// False does not establish requester-wide or unrelated deferred quiescence.
+    pub(in crate::net::wifi::mediatek) fn has_pending_context(
+        &self,
+        mut matches: impl FnMut(&C) -> bool,
+    ) -> bool {
+        self.tokens
+            .iter()
+            .flatten()
+            .any(|p| p.context.as_ref().is_some_and(&mut matches))
+    }
     fn live(&self) -> Result<(), Error> {
         if self.poisoned || self.released {
             Err(super::Error::Poisoned.into())
@@ -244,7 +255,7 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
         {
             return Err(Error::InvalidFrame);
         }
-        let txd = txwi::encode(config)?;
+        let txd = txwi::encode_mpdu(config, bytes)?;
         if self.queued + 1 >= self.slots.len() - 1 || self.outstanding == TOKENS {
             return Err(Error::Full);
         }

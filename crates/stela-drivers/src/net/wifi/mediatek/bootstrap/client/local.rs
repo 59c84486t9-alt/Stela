@@ -94,6 +94,8 @@ impl Advertisement {
                 .he_6ghz()
                 .is_some_and(|h| Some(h) != actual.he_6ghz())
             || requested.wmm() != actual.wmm()
+            || (requested.he().is_some()
+                && requested.local_he_source_maps() != Some(&self.he_source_maps))
             || !family(rates.selectors & 1 != 0, requested.ht().is_some())
             || !family(rates.selectors & 2 != 0, requested.vht().is_some())
             || !family(rates.selectors & 4 != 0, requested.he().is_some())
@@ -109,48 +111,53 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// actual SSID/security/operation observations. This does not enable MLO,
     /// power-save, regulatory permissions or any modern native publication.
     pub fn local_advertisement(&self, band: Band) -> Result<Advertisement, LocalError> {
-        let s = self.state();
-        let policy = s
-            .controller
-            .state()
-            .policy
-            .as_ref()
-            .ok_or(LocalError::MissingPhy)?;
-        let observations = policy.capabilities().observed();
-        let phy = observations.phy().ok_or(LocalError::MissingPhy)?;
-        if observations.chip() != Chip::Mt7925 {
-            return Err(LocalError::WrongDevice);
-        }
-        let available = match band {
-            Band::Ghz2 => phy.has_2ghz(),
-            Band::Ghz5 => phy.has_5ghz(),
-            Band::Ghz6 => observations.six_ghz().ok_or(LocalError::MissingSixGhz)?,
-        };
-        if !available {
-            return Err(LocalError::UnsupportedBand);
-        }
-        let antenna = phy.antenna_mask().map_err(|_| LocalError::UnsupportedNss)?;
-        // The pinned actual PHY callback sets chainmask=antenna_mask; it does
-        // not infer extra sounding chains from an unrelated EEPROM default.
-        let selection = policy
-            .auxiliary()
-            .select_clc(policy.eeprom().observed().byte())
-            .map_err(LocalError::Selection)?;
-        let inputs = policy.source_inputs();
-        let eht = source_eht_enabled(&selection, inputs.alpha2, inputs.mtcl_configuration)?;
-        make(
-            band,
-            antenna,
-            u16::from(antenna),
-            Width::Mhz20,
-            eht,
-            inputs.alpha2,
-            MloObservations {
-                flags: observations.chip_flags(),
-                eml: observations.eml(),
-            },
-        )
+        current(self.state(), band)
     }
+}
+pub(super) fn current<I: BarIo, Q: QueueIo, C: 'static>(
+    s: &Owned<I, Q, C>,
+    band: Band,
+) -> Result<Advertisement, LocalError> {
+    let policy = s
+        .controller
+        .state()
+        .policy
+        .as_ref()
+        .ok_or(LocalError::MissingPhy)?;
+    let observations = policy.capabilities().observed();
+    let phy = observations.phy().ok_or(LocalError::MissingPhy)?;
+    if observations.chip() != Chip::Mt7925 {
+        return Err(LocalError::WrongDevice);
+    }
+    let available = match band {
+        Band::Ghz2 => phy.has_2ghz(),
+        Band::Ghz5 => phy.has_5ghz(),
+        Band::Ghz6 => observations.six_ghz().ok_or(LocalError::MissingSixGhz)?,
+    };
+    if !available {
+        return Err(LocalError::UnsupportedBand);
+    }
+    let antenna = phy.antenna_mask().map_err(|_| LocalError::UnsupportedNss)?;
+    // The pinned actual PHY callback sets chainmask=antenna_mask; it does
+    // not infer extra sounding chains from an unrelated EEPROM default.
+    let selection = policy
+        .auxiliary()
+        .select_clc(policy.eeprom().observed().byte())
+        .map_err(LocalError::Selection)?;
+    let inputs = policy.source_inputs();
+    let eht = source_eht_enabled(&selection, inputs.alpha2, inputs.mtcl_configuration)?;
+    make(
+        band,
+        antenna,
+        u16::from(antenna),
+        Width::Mhz20,
+        eht,
+        inputs.alpha2,
+        MloObservations {
+            flags: observations.chip_flags(),
+            eml: observations.eml(),
+        },
+    )
 }
 /// Pure source BE-control selection. A missing list and MTCL invalid sentinel
 /// follow the source's EHT advertisement default; neither grants radio/policy
@@ -309,25 +316,27 @@ fn make(
     // Explicit native always-awake selection: no requested UAPSD service
     // period or queue is advertised before an actual native PM executor exists.
     ie(&mut elements, 221, &[0, 0x50, 0xf2, 2, 0, 1, 0]);
-    let capabilities =
-        Capabilities::parse(band, Role::Station, &elements).map_err(LocalError::Capabilities)?;
+    let he_source_maps = [
+        McsMaps {
+            rx: mcs(nss),
+            tx: mcs(nss),
+        },
+        McsMaps {
+            rx: mcs(nss),
+            tx: mcs(nss),
+        },
+        McsMaps { rx: 0, tx: 0 },
+    ];
+    let capabilities = Capabilities::parse(band, Role::Station, &elements)
+        .and_then(|cap| cap.with_local_he_source_maps(he_source_maps))
+        .map_err(LocalError::Capabilities)?;
     Ok(Advertisement {
         elements,
         capabilities,
         antenna_mask: antenna,
         alpha2,
         mlo,
-        he_source_maps: [
-            McsMaps {
-                rx: mcs(nss),
-                tx: mcs(nss),
-            },
-            McsMaps {
-                rx: mcs(nss),
-                tx: mcs(nss),
-            },
-            McsMaps { rx: 0, tx: 0 },
-        ],
+        he_source_maps,
     })
 }
 
@@ -446,7 +455,10 @@ mod tests {
             }
             at += 2 + n;
         }
-        let narrowed = Capabilities::parse(Band::Ghz5, Role::Station, &narrowed).unwrap();
+        let narrowed = Capabilities::parse(Band::Ghz5, Role::Station, &narrowed)
+            .unwrap()
+            .with_local_he_source_maps(*source.he_source_maps())
+            .unwrap();
         assert_eq!(source.validate_capabilities(&narrowed), Ok(()));
     }
     #[test]

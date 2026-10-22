@@ -73,6 +73,13 @@ impl Configuration {
             return Err(Error::InvalidNegotiation);
         }
         validate_geometry(profile, negotiated.width, operation)?;
+        if negotiated
+            .local()
+            .local_he_source_maps()
+            .is_some_and(|maps| *maps != local_he_maps)
+        {
+            return Err(Error::InvalidNegotiation);
+        }
         if let Some(local) = negotiated.local().he()
             && [Some(local.mcs_80), local.mcs_160, local.mcs_80p80]
                 .into_iter()
@@ -848,6 +855,7 @@ mod tests {
                         p.interface.omac_index = [0, 1, 17, 63][variant % 4];
                         p.interface.wmm_index = (variant % 4) as u8;
                         p.antenna_mask = [3, 5, 9, 15][variant % 4];
+                        p.cipher = [0, 4, 10, 11, 12, 4, 11, 12][variant];
                         let n = c.negotiated();
                         let op = c.operation();
                         let flags = u8::from(n.ht.is_some())

@@ -104,12 +104,55 @@ pub struct Config {
 }
 
 pub fn encode(c: Config) -> Result<[u8; 32], Error> {
+    encode_inner(c, None)
+}
+
+/// Body-qualified MT7925 Block Ack management path. Metadata-only Action
+/// encoding remains refused: the real category/action bytes select the donor
+/// ADDBA-request TID independently of ordinary response/DELBA management.
+/// This constructs no agreement, radio permission, protection or air receipt.
+pub(in crate::net::wifi::mediatek) fn encode_mpdu(
+    c: Config,
+    bytes: &[u8],
+) -> Result<[u8; 32], Error> {
+    if c.frame.kind != Kind::Management || c.frame.subtype != 13 {
+        return encode(c);
+    }
+    let h = crate::net::wifi::frame::Header::parse(bytes).map_err(|_| Error::InvalidHeader)?;
+    if c.chip != Chip::Mt7925
+        || c.protect
+        || h.protected()
+        || h.fragmented()
+        || h.control & 0x00fc != 0x00d0
+        || h.length != 24
+        || usize::from(c.frame.header_bytes) != h.length
+        || c.frame.bytes != bytes.len()
+    {
+        return Err(Error::UnsupportedFrame);
+    }
+    let body = bytes.get(h.length..).ok_or(Error::InvalidHeader)?;
+    if body.first() != Some(&3) {
+        return Err(Error::UnsupportedFrame);
+    }
+    let action = *body.get(1).ok_or(Error::InvalidHeader)?;
+    let minimum = match action {
+        0 | 1 => 9,
+        2 => 6,
+        _ => return Err(Error::UnsupportedFrame),
+    };
+    if body.len() < minimum {
+        return Err(Error::InvalidHeader);
+    }
+    encode_inner(c, Some(action))
+}
+
+fn encode_inner(c: Config, block_ack_action: Option<u8>) -> Result<[u8; 32], Error> {
     let f = c.frame;
     let connac3 = c.chip == Chip::Mt7925;
     // BAR derives TID/start sequence from its body; Action can select the
     // ADDBA-specific TID/flag path. This bounded metadata has neither body.
     if (f.kind == Kind::Control && f.subtype == 8)
-        || (f.kind == Kind::Management && f.subtype == 13)
+        || (f.kind == Kind::Management && f.subtype == 13 && block_ack_action.is_none())
     {
         return Err(Error::UnsupportedFrame);
     }
@@ -181,7 +224,14 @@ pub fn encode(c: Config) -> Result<[u8; 32], Error> {
     words[5] = u32::from(c.pid) | if c.pid >= 3 { 1 << 10 } else { 0 };
     let mut amsdu = c.hardware_amsdu && c.pid < 3;
     if connac3 {
-        let tid = if f.kind == Kind::Management { 0 } else { f.tid };
+        // pinned connac3 tx_mgnt_type::{MT_TX_NORMAL=0,MT_TX_ADDBA=2}.
+        let tid = if block_ack_action == Some(0) {
+            2
+        } else if f.kind == Kind::Management {
+            0
+        } else {
+            f.tid
+        };
         words[1] |= u32::from(vif.omac) << 25
             | u32::from(tid) << 21
             | u32::from(f.header_bytes / 2) << 16
@@ -523,6 +573,39 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+    #[test]
+    fn actual_block_ack_action_body_selects_source_request_or_normal_management_tid() {
+        for action in 0..=2u8 {
+            let mut bytes = [0; 33];
+            bytes[..2].copy_from_slice(&0x00d0u16.to_le_bytes());
+            bytes[4] = 2;
+            bytes[24] = 3;
+            bytes[25] = action;
+            let mut c = base(Chip::Mt7925);
+            c.frame = Frame {
+                bytes: bytes.len(),
+                header_bytes: 24,
+                kind: Kind::Management,
+                subtype: 13,
+                tid: 7,
+                multicast: false,
+                fragment: Fragment::None,
+                sequence: Sequence::Hardware,
+                minimum_rate: true,
+            };
+            c.protect = false;
+            c.hardware_amsdu = false;
+            c.fixed_rate = Some(FixedRate::Connac3(18));
+            assert_eq!(encode(c), Err(Error::UnsupportedFrame));
+            let w = words(encode_mpdu(c, &bytes).unwrap());
+            assert_eq!((w[1] >> 21) & 15, if action == 0 { 2 } else { 0 });
+            assert_eq!(w[2] & 0x3f, 13);
+            assert_ne!(w[1] & (1 << 31), 0);
+            assert_eq!(encode_mpdu(c, &bytes[..25]), Err(Error::UnsupportedFrame));
+            bytes[24] = 4;
+            assert_eq!(encode_mpdu(c, &bytes), Err(Error::UnsupportedFrame));
         }
     }
     #[test]

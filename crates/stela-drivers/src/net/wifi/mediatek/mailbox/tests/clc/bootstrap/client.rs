@@ -1,4 +1,5 @@
 use super::*;
+mod modern;
 use crate::net::{
     Mac,
     wifi::{
@@ -227,18 +228,45 @@ fn response(subtype: u16, body: &[u8]) -> Vec<u8> {
     b.extend_from_slice(body);
     b
 }
+// Native firmware commands use real elapsed time; these frontend model steps
+// are100ms, leaving auth/assoc within500ms and the next operation beyond an
+// accepted Configure's500ms bound. The old microsecond ordinal fixture hid
+// real native execution time and was not a coherent frontend clock.
+fn frontend_tick(step: u64) -> u64 {
+    step * 100_000
+}
 fn associated(driver: &mut Client<Bar, Q, NativeGuard>, model: &Model, now: u64) {
+    associated_with_configuration_delay(driver, model, now, 0).unwrap();
+}
+fn associated_with_configuration_delay(
+    driver: &mut Client<Bar, Q, NativeGuard>,
+    model: &Model,
+    now: u64,
+    delay: u64,
+) -> Result<(), ClientError> {
     driver
-        .join(join(), profile(), now, &Source, &mut Policy(true))
+        .join(
+            join(),
+            profile(),
+            frontend_tick(now),
+            &Source,
+            &mut Policy(true),
+        )
         .unwrap();
     assert_eq!(driver.phase(), ClientPhase::Joining);
     assert_eq!(finish_tx(model)[0][..2], [0xb0, 0]);
-    driver.poll(now + 1, &Source, &mut Policy(true)).unwrap();
+    driver
+        .poll(frontend_tick(now + 1), &Source, &mut Policy(true))
+        .unwrap();
     driver.poll_released().unwrap();
     incoming(model, &response(0xb0, &[0, 0, 2, 0, 0, 0]), None, false);
-    driver.poll(now + 2, &Source, &mut Policy(true)).unwrap();
+    driver
+        .poll(frontend_tick(now + 2), &Source, &mut Policy(true))
+        .unwrap();
     assert_eq!(finish_tx(model)[0][..2], [0, 0]);
-    driver.poll(now + 3, &Source, &mut Policy(true)).unwrap();
+    driver
+        .poll(frontend_tick(now + 3), &Source, &mut Policy(true))
+        .unwrap();
     driver.poll_released().unwrap();
     incoming(
         model,
@@ -251,8 +279,10 @@ fn associated(driver: &mut Client<Bar, Q, NativeGuard>, model: &Model, now: u64)
         None,
         false,
     );
-    driver.poll(now + 4, &Source, &mut Policy(true)).unwrap();
+    model.response.lock().unwrap().pause_next_index_us = delay;
+    driver.poll(frontend_tick(now + 4), &Source, &mut Policy(true))?;
     assert_eq!(driver.phase(), ClientPhase::Associated);
+    Ok(())
 }
 fn eth(protocol: u16) -> Vec<u8> {
     let mut b = vec![4, 1, 2, 3, 4, 5];
@@ -260,6 +290,19 @@ fn eth(protocol: u16) -> Vec<u8> {
     b.extend_from_slice(&protocol.to_be_bytes());
     b.extend_from_slice(&[1, 2, 3]);
     b
+}
+#[test]
+fn actual_late_legacy_configuration_ack_cannot_reuse_cached_poll_time() {
+    let (mut driver, model) = setup();
+    assert!(matches!(
+        associated_with_configuration_delay(&mut driver, &model, 0, 600_000),
+        Err(ClientError::Station(station::Error::Timeout))
+    ));
+    assert_eq!(driver.phase(), ClientPhase::Quarantined);
+    assert_eq!(driver.station().phase(), station::Phase::Quarantined);
+    drop(driver);
+    assert_eq!(model.drops.load(Ordering::Relaxed), 0);
+    assert!(!model.memory.lock().unwrap().mappings.is_empty());
 }
 fn data(group: bool) -> Vec<u8> {
     let mut b = response(0x4208, &[0xaa, 0xaa, 3, 0, 0, 0, 8, 0, 1, 2, 3]);
@@ -292,7 +335,7 @@ fn actual_mt7925_init_scan_secure_client_reconnect_and_stop() {
     incoming(&model, &beacon, None, false);
     assert!(matches!(
         driver
-            .poll(1, &Source, &mut Policy(true))
+            .poll(frontend_tick(1), &Source, &mut Policy(true))
             .unwrap()
             .as_slice(),
         [Event::Bss(_)]
@@ -303,7 +346,9 @@ fn actual_mt7925_init_scan_secure_client_reconnect_and_stop() {
     done[38] = 6;
     done[50] = 4;
     device_receive(&model.queues[&0xd4500], &done, true, 0);
-    driver.poll(2, &Source, &mut Policy(true)).unwrap();
+    driver
+        .poll(frontend_tick(2), &Source, &mut Policy(true))
+        .unwrap();
     assert_eq!(driver.phase(), ClientPhase::ScanCompleted);
     unsafe { driver.retire_scan_after_drain() }.unwrap();
     associated(&mut driver, &model, 10);
@@ -338,7 +383,9 @@ fn actual_mt7925_init_scan_secure_client_reconnect_and_stop() {
     let transmitted = finish_tx(&model);
     assert_eq!(&transmitted[0][..2], &[8, 0x41]);
     assert_eq!(&transmitted[0][24..30], &[0xaa, 0xaa, 3, 0, 0, 0]);
-    driver.poll(20, &Source, &mut Policy(true)).unwrap();
+    driver
+        .poll(frontend_tick(20), &Source, &mut Policy(true))
+        .unwrap();
     let released = driver.poll_released().unwrap();
     assert_eq!(released.len(), 1);
     assert_eq!(released[0].receipt, receipt);
@@ -348,23 +395,25 @@ fn actual_mt7925_init_scan_secure_client_reconnect_and_stop() {
     incoming(&model, &data(false), Some((1, 0, 1)), false);
     assert!(matches!(
         driver
-            .poll(21, &Source, &mut Policy(true))
+            .poll(frontend_tick(21), &Source, &mut Policy(true))
             .unwrap()
             .as_slice(),
         [Event::Ingress(station::data::Ingress::Data(_))]
     ));
     incoming(&model, &data(false), Some((1, 0, 1)), false);
     assert!(matches!(
-        driver.poll(22, &Source, &mut Policy(true)),
+        driver.poll(frontend_tick(22), &Source, &mut Policy(true)),
         Err(ClientError::Data(station::data::Error::Crypto(
             wifi::security::Error::Replay
         )))
     ));
     incoming(&model, &data(true), Some((1, 2, 1)), false);
-    driver.poll(23, &Source, &mut Policy(true)).unwrap();
+    driver
+        .poll(frontend_tick(23), &Source, &mut Policy(true))
+        .unwrap();
     incoming(&model, &data(false), Some((1, 0, 2)), true);
     assert!(matches!(
-        driver.poll(24, &Source, &mut Policy(true)),
+        driver.poll(frontend_tick(24), &Source, &mut Policy(true)),
         Err(ClientError::Rx(
             crate::net::wifi::mediatek::rx::Error::UnsupportedTranslation
         ))
@@ -403,7 +452,7 @@ fn actual_mt7925_init_scan_secure_client_reconnect_and_stop() {
     driver.authorize_port(next).unwrap();
     incoming(&model, &data(true), Some((1, 2, 1)), false);
     assert!(matches!(
-        driver.poll(41, &Source, &mut Policy(true)),
+        driver.poll(frontend_tick(41), &Source, &mut Policy(true)),
         Err(ClientError::Data(station::data::Error::Crypto(
             wifi::security::Error::Replay
         )))
@@ -411,7 +460,7 @@ fn actual_mt7925_init_scan_secure_client_reconnect_and_stop() {
     incoming(&model, &data(true), Some((1, 2, 2)), false);
     assert!(matches!(
         driver
-            .poll(42, &Source, &mut Policy(true))
+            .poll(frontend_tick(42), &Source, &mut Policy(true))
             .unwrap()
             .as_slice(),
         [Event::Ingress(station::data::Ingress::Data(_))]
@@ -539,7 +588,9 @@ fn peer_removal_cannot_retire_outstanding_actual_packet_owners() {
     // Even real remove ACKs cannot release still-reachable data mappings/key
     // owners. Complete actual hardware users before independent RX/work drain.
     finish_tx(&model);
-    driver.poll(10, &Source, &mut Policy(true)).unwrap();
+    driver
+        .poll(frontend_tick(10), &Source, &mut Policy(true))
+        .unwrap();
     driver.poll_released().unwrap();
     unsafe { driver.retire_peer_after_drain() }.unwrap();
     driver.stop().unwrap();
@@ -562,7 +613,9 @@ fn partial_actual_receive_chain_blocks_peer_generation_retirement() {
         .unwrap();
     let bytes = incoming_bytes(&data(false), Some((1, 0, 9)), false);
     device_receive(&model.queues[&0xd4520], &bytes[..40], false, 0);
-    driver.poll(10, &Source, &mut Policy(true)).unwrap();
+    driver
+        .poll(frontend_tick(10), &Source, &mut Policy(true))
+        .unwrap();
     driver.disconnect().unwrap();
     assert!(matches!(
         unsafe { driver.retire_peer_after_drain() },
@@ -571,7 +624,11 @@ fn partial_actual_receive_chain_blocks_peer_generation_retirement() {
     // End and consume the actual old chain before the independent old-user
     // drain can qualify a new key/peer generation. No old bytes are retagged.
     device_receive(&model.queues[&0xd4520], &bytes[40..], true, 0);
-    assert!(driver.poll(11, &Source, &mut Policy(true)).is_err());
+    assert!(
+        driver
+            .poll(frontend_tick(11), &Source, &mut Policy(true))
+            .is_err()
+    );
     unsafe { driver.retire_peer_after_drain() }.unwrap();
     driver.stop().unwrap();
     model.response.lock().unwrap().clc_processing = false;
@@ -638,7 +695,9 @@ fn retired_group_for_authenticated_resume() -> (
         .authorize_port(driver.station().association_epoch().unwrap())
         .unwrap();
     incoming(&model, &data(true), Some((1, 2, 7)), false);
-    driver.poll(12, &Source, &mut Policy(true)).unwrap();
+    driver
+        .poll(frontend_tick(12), &Source, &mut Policy(true))
+        .unwrap();
     driver.disconnect().unwrap();
     unsafe { driver.retire_peer_after_drain() }.unwrap();
     associated(&mut driver, &model, 30);
@@ -662,7 +721,7 @@ fn actual_authenticated_gtk_resume_retains_old_identity_history_and_higher_os_rs
         let floor = rsc.max(7);
         incoming(&model, &data(true), Some((1, 2, floor)), false);
         assert!(matches!(
-            driver.poll(41, &Source, &mut Policy(true)),
+            driver.poll(frontend_tick(41), &Source, &mut Policy(true)),
             Err(ClientError::Data(station::data::Error::Crypto(
                 wifi::security::Error::Replay
             )))
@@ -670,7 +729,7 @@ fn actual_authenticated_gtk_resume_retains_old_identity_history_and_higher_os_rs
         incoming(&model, &data(true), Some((1, 2, floor + 1)), false);
         assert!(matches!(
             driver
-                .poll(42, &Source, &mut Policy(true))
+                .poll(frontend_tick(42), &Source, &mut Policy(true))
                 .unwrap()
                 .as_slice(),
             [Event::Ingress(station::data::Ingress::Data(_))]

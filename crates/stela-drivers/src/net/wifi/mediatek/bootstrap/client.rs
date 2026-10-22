@@ -4,9 +4,12 @@
 //! raw-header format to the actual retained peer; generic WMWA facts never do.
 use super::{Controller, Phase as ControllerPhase};
 
+mod ba;
 mod local;
+mod modern;
 mod packet;
 mod radio;
+mod receive;
 use crate::{
     bus::dma::memory::PageSource,
     net::wifi::{
@@ -55,6 +58,8 @@ pub enum Error {
     NoKey,
     Unsupported,
     GrantTimeout,
+    ModernAdmissionRequired,
+    Regulatory(wifi::regulatory::Error),
     Bootstrap(super::Error),
     Codec(wire::Error),
     Station(station::Error),
@@ -66,6 +71,10 @@ pub enum Error {
     Ring(data::Error),
     Rx(rx::Error),
     Frame(wifi::frame::Error),
+    Aggregate(wifi::security::aggregate::Error),
+    IncompleteParent,
+    BlockAck(station::ba::Error),
+    Reorder(crate::net::wifi::mediatek::reorder::Error),
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -79,6 +88,7 @@ pub enum Phase {
     Scanning,
     ScanCompleted,
     Joining,
+    AwaitingModernAdmission,
     Associated,
     Removing,
     NeedsDrain,
@@ -92,16 +102,28 @@ pub struct PacketOwner<C: 'static> {
     resource: Arc<C>,
     association: u64,
     key: Option<KeyIdentity>,
+    context: Option<Arc<station::AssociationContext>>,
+    tid: Option<u8>,
+    tx_ba: Option<Arc<station::ba::tx::Session>>,
 }
 impl<C> PacketOwner<C> {
     pub fn association_epoch(&self) -> u64 {
         self.association
+    }
+    pub const fn tid(&self) -> Option<u8> {
+        self.tid
+    }
+    pub fn tx_block_ack(&self) -> Option<&station::ba::tx::Session> {
+        self.tx_ba.as_deref()
     }
     pub fn key(&self) -> Option<KeyIdentity> {
         self.key
     }
     pub fn resource(&self) -> &C {
         &self.resource
+    }
+    pub fn association_context(&self) -> Option<&station::AssociationContext> {
+        self.context.as_deref()
     }
 }
 struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
@@ -111,6 +133,7 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     scanner: scan::Scanner,
     phase: Phase,
     profile: Option<Profile>,
+    ciphers: Option<(Cipher, Cipher)>,
     peer_generation: u64,
     reserved_wcid: Option<u16>,
     format_generation: Option<u64>,
@@ -125,9 +148,14 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     replies: Vec<mailbox::UnifiedReply>,
     transport_facts: Vec<mailbox::bootstrap::Fact>,
     asynchronous: Vec<crate::net::wifi::mediatek::ring::rx::Frame>,
-    pending_rx: VecDeque<crate::net::wifi::mediatek::ring::rx::Frame>,
+    pending_rx: VecDeque<receive::ReceivedFrame>,
+    receive_groups: receive::Groups<C>,
+    receive_ba: [Option<ba::Receive<C>>; 8],
+    transmit_ba: [Option<ba::Transmit<C>>; 8],
+    ba_actions: VecDeque<station::ba::Action>,
     roc_token: u8,
     roc_deadline: Option<u64>,
+    modern: Option<modern::Configuration>,
 }
 /// On uncertain/live Drop retain the entire controller, station, real key
 /// material history and actual resources. No new owner may reset their PN.
@@ -176,6 +204,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 scanner,
                 phase: Phase::Idle,
                 profile: None,
+                ciphers: None,
                 peer_generation: 0,
                 reserved_wcid: None,
                 format_generation: None,
@@ -191,8 +220,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 transport_facts: Vec::new(),
                 asynchronous: Vec::new(),
                 pending_rx: VecDeque::new(),
+                receive_groups: receive::Groups::new(),
+                receive_ba: core::array::from_fn(|_| None),
+                transmit_ba: core::array::from_fn(|_| None),
+                ba_actions: VecDeque::new(),
                 roc_token: 0,
                 roc_deadline: None,
+                modern: None,
             })),
         })
     }
@@ -215,16 +249,25 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         &self.state().transport_facts
     }
     fn command(s: &mut Owned<I, Q, C>, command: Command, body: &[u8]) -> Result<(), Error> {
-        // Reserve before mutation so actual reply bytes stay owned.
         s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
         s.phase = Phase::Quarantined;
-        let m = s.controller.state_mut().mailbox.as_mut().unwrap();
+        Self::command_parts(&mut s.controller, &mut s.replies, command, body)
+    }
+    fn command_parts(
+        controller: &mut Controller<I, Q, C>,
+        replies: &mut Vec<mailbox::UnifiedReply>,
+        command: Command,
+        body: &[u8],
+    ) -> Result<(), Error> {
+        // Reserve before mutation so actual reply bytes stay owned.
+        replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let m = controller.state_mut().mailbox.as_mut().unwrap();
         let result = m.unified(command, body);
         match result {
             Ok(reply) => {
                 let status = reply.status;
                 let complete = reply.dma_released;
-                s.replies.push(reply);
+                replies.push(reply);
                 if status != 0 {
                     return Err(Error::Firmware(status));
                 }
@@ -235,7 +278,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             }
             Err(e) => {
                 if let Some(r) = m.interrupted_unified_reply() {
-                    s.replies.push(r.clone());
+                    replies.push(r.clone());
                 }
                 Err(Error::Transport(e))
             }
@@ -247,6 +290,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     pub fn join(
         &mut self,
         join: Join,
+        profile: Profile,
+        now: u64,
+        source: &dyn PageSource,
+        policy: &mut impl station::RegulatoryPolicy,
+    ) -> Result<(), Error> {
+        self.join_inner(join, None, profile, now, source, policy)
+    }
+    fn join_inner(
+        &mut self,
+        join: Join,
+        beacon: Option<scan::result::Bss>,
         profile: Profile,
         now: u64,
         source: &dyn PageSource,
@@ -264,10 +318,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         {
             return Err(Error::WrongProfile);
         }
-        if join
-            .request
-            .key_ciphers()
-            .is_some_and(|pair| pair != (Cipher::Ccmp128, Cipher::Ccmp128))
+        if beacon.is_none()
+            && join
+                .request
+                .key_ciphers()
+                .is_some_and(|pair| pair != (Cipher::Ccmp128, Cipher::Ccmp128))
         {
             return Err(Error::Unsupported);
         }
@@ -296,7 +351,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let mut ies = join.request.elements();
         while !ies.is_empty() {
             let len = usize::from(ies[1]);
-            if ies[0] == 221 && ies[2..2 + len].starts_with(&[0, 0x50, 0xf2, 2]) {
+            if beacon.is_none() && ies[0] == 221 && ies[2..2 + len].starts_with(&[0, 0x50, 0xf2, 2])
+            {
                 return Err(Error::Unsupported);
             }
             ies = &ies[2 + len..];
@@ -310,9 +366,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let bss = profile.bss_request(false).map_err(Error::Codec)?;
         let peer = profile.peer_request(true, false).map_err(Error::Codec)?;
         let broadcast = profile.broadcast_request().map_err(Error::Codec)?;
+        let ciphers = join.request.key_ciphers();
+        let action = match beacon {
+            Some(beacon) => s.station.begin_modern(join, beacon, now, policy),
+            None => s.station.begin(join, now, policy),
+        }
+        .map_err(Error::Station)?;
         // source peer-add clears admission counters before BSS(false), then
         // plain STA_REC(NONE). Neither creates an authorized OS port.
         s.profile = Some(profile);
+        s.ciphers = ciphers;
         s.reserved_wcid = Some(profile.wcid);
         s.peer_generation = generation;
         s.format_generation = None;
@@ -350,7 +413,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 );
             }
         }
-        let action = s.station.begin(join, now, policy).map_err(Error::Station)?;
         s.phase = Phase::Joining;
         Self::action(s, action, now, source, policy)
     }
@@ -389,11 +451,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 response,
                 context,
             } => {
-                // The retained native executor programs legacy associations.
-                // Modern context requires its own actual firmware commands.
-                if context.is_some() {
-                    return Err(Error::Unsupported);
+                if let Some(context) = context {
+                    return Self::prepare_modern(s, ticket, context);
                 }
+                let clock = s.controller.state().control.clock;
+                let began = clock.now_us();
                 let mut p = s.profile.ok_or(Error::WrongProfile)?;
                 if p.peer != bssid || p.channel != channel || response.aid == 0 {
                     return Err(Error::WrongProfile);
@@ -442,7 +504,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 s.format_generation = Some(s.peer_generation);
                 Self::abort_channel(s)?;
                 s.station
-                    .complete_configuration(ticket, Completion::Accepted, now)
+                    .complete_configuration(
+                        ticket,
+                        Completion::Accepted,
+                        clock
+                            .now_us()
+                            .checked_sub(began)
+                            .and_then(|elapsed| now.checked_add(elapsed))
+                            .ok_or(Error::WrongProfile)?,
+                    )
                     .map_err(Error::Station)?;
                 s.phase = Phase::Associated;
             }
@@ -507,10 +577,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.phase != Phase::Associated {
             return Err(Error::WrongPhase);
         }
+        if s.modern.is_some() {
+            return Err(Error::ModernAdmissionRequired);
+        }
         let mut p = s.profile.ok_or(Error::WrongProfile)?;
         if p.cipher == 0 {
             p.cipher = 4;
-            let b = p.bss_request(true).map_err(Error::Codec)?;
+            let b = Self::bss_request(s, p, true)?;
             Self::command(s, Command::BssInfo, &b)?;
             s.profile = Some(p);
         }
@@ -570,6 +643,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             Phase::Scanning
                 | Phase::ScanCompleted
                 | Phase::Joining
+                | Phase::AwaitingModernAdmission
                 | Phase::Associated
                 | Phase::Removing
                 | Phase::NeedsDrain
@@ -578,14 +652,23 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         if s.pending_rx.is_empty() {
             let raw = s.controller.poll_events().map_err(Error::Bootstrap)?;
-            s.pending_rx.extend(raw);
+            s.pending_rx
+                .extend(raw.into_iter().map(|frame| receive::ReceivedFrame {
+                    queue: receive::Queue::Event,
+                    frame,
+                }));
             if let Some(f) = s.controller.poll_data().map_err(Error::Bootstrap)? {
-                s.pending_rx.push_back(f);
+                s.pending_rx.push_back(receive::ReceivedFrame {
+                    queue: receive::Queue::Data,
+                    frame: f,
+                });
             }
         }
         let mut events = Vec::new();
-        while let Some(f) = s.pending_rx.pop_front() {
+        while let Some(received) = s.pending_rx.pop_front() {
+            let receive::ReceivedFrame { queue, frame: f } = received;
             if f.drop {
+                s.receive_groups.discard(queue);
                 return Err(Error::WrongProfile);
             }
             let kind = f
@@ -632,7 +715,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 s.asynchronous.push(f);
                 continue;
             }
-            let frame = Self::normalized(s, &f.bytes, policy)?;
+            let modern_data = s.modern.is_some() && s.phase == Phase::Associated;
+            let frame = Self::normalized(s, &f.bytes, modern_data, policy)?;
             if s.phase == Phase::Scanning {
                 events.push(Event::Bss(
                     s.scanner
@@ -642,6 +726,21 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 continue;
             }
             let epoch = s.station.association_epoch().ok_or(Error::WrongPhase)?;
+            if modern_data
+                && (frame.header().control & 0x00fc == 0x00d0
+                    || frame.header().control & 0x00fc == 0x0084)
+            {
+                let action = s
+                    .station
+                    .receive_block_ack(epoch, &frame, now)
+                    .map_err(Error::BlockAck)?;
+                events.extend(
+                    Self::queue_block_ack(s, action, now)?
+                        .into_iter()
+                        .map(Event::Ingress),
+                );
+                continue;
+            }
             if frame.header().control & 12 == 0 {
                 let action = s
                     .station
@@ -649,6 +748,18 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .map_err(Error::Station)?;
                 Self::action(s, action, now, source, policy)?;
             } else if s.phase == Phase::Associated {
+                if modern_data
+                    && (frame.header().protected()
+                        || frame.header().amsdu
+                        || frame.aggregation != wifi::Aggregation::default())
+                {
+                    events.extend(
+                        Self::receive_parent(s, queue, frame, now)?
+                            .into_iter()
+                            .map(Event::Ingress),
+                    );
+                    continue;
+                }
                 let (ptk, gtk) = (
                     s.ptk.as_mut().ok_or(Error::NoKey)?,
                     s.gtk.as_mut().ok_or(Error::NoKey)?,
@@ -660,6 +771,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 events.push(Event::Ingress(ingress));
             }
         }
+        events.extend(Self::poll_reorder(s, now)?.into_iter().map(Event::Ingress));
         events.extend(
             core::mem::take(&mut s.asynchronous)
                 .into_iter()
@@ -672,6 +784,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.remove_ticket = Some(ticket);
         s.phase = Phase::Removing;
         s.format_generation = None;
+        // Canonical disconnect has already invalidated these sessions. This
+        // serialized owner cancels its real timers/callbacks and terminally
+        // discards buffered CPU parents before actual firmware peer removal.
+        for native in s.receive_ba.iter_mut().flatten() {
+            native.stop();
+        }
         // Stop new publication first, then await actual TX-free, descriptor
         // consumption and mapping release before destroying firmware keys/peer.
         // A local queue-empty/index observation alone is insufficient.
@@ -722,17 +840,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .control
             .clear_peer_admission(p.wcid)
             .map_err(|e| Error::Bootstrap(super::Error::Control(e)))?;
-        Self::command(
-            s,
-            Command::BssInfo,
-            &p.bss_request(false).map_err(Error::Codec)?,
-        )?;
+        Self::command(s, Command::BssInfo, &Self::bss_request(s, p, false)?)?;
         s.phase = Phase::NeedsDrain;
         Ok(())
     }
     pub fn disconnect(&mut self) -> Result<(), Error> {
         let s = self.state_mut();
-        if !matches!(s.phase, Phase::Joining | Phase::Associated) {
+        if !matches!(
+            s.phase,
+            Phase::Joining | Phase::AwaitingModernAdmission | Phase::Associated
+        ) {
             return Err(Error::WrongPhase);
         }
         let a = s.station.disconnect().map_err(Error::Station)?;
@@ -785,7 +902,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             )
             .map_err(Error::Station)?;
         s.phase = Phase::Idle;
+        // The inherited actual hardware/RX/work drain contract is now complete;
+        // incomplete host-only parents can release their retained old owners.
+        s.receive_groups.clear();
+        s.ciphers = None;
+        s.receive_ba = core::array::from_fn(|_| None);
+        s.transmit_ba = core::array::from_fn(|_| None);
+        s.ba_actions.clear();
         s.profile = None;
+        s.modern = None;
         Ok(())
     }
     /// Actual interface disable ACKs then WFDMA disable/idle observation. This
