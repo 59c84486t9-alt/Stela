@@ -5,8 +5,8 @@ use super::{
     format, i2c,
 };
 
-/// The ATC PHY register layouts, by the first compatible a node lists that
-/// names one: `AppleT8103TypeCPhy` binds all of them. The T8103 (J274AP) and
+/// The ATC PHY register layouts, selected by the primary compatible.
+/// `AppleT8103TypeCPhy` binds all of them. The T8103 (J274AP) and
 /// T6020 (J414sAP, `atc-phy,t6020` then `atc-phy,t8112`) views are the
 /// T8112 (J473AP) views without its last, core+0x4c000, which is beyond the
 /// canonical core window. The views the model places (USB2, event block,
@@ -40,35 +40,93 @@ const USB_DRD_LAYOUTS: &[(&str, u64)] = &[
     ("usb-drd,t8122", 0x5800),
 ];
 
-/// Whether a compatible names a qualified I2C register family.
-pub fn i2c_compatible(compatible: &str) -> bool {
-    I2C_COMPATIBLES.contains(&compatible)
+/// Validate the complete property before admitting any of its family names.
+/// A missing property supports the loader's pure family-name queries.
+pub fn i2c_compatible(name: &str, compatibles: Option<&[u8]>) -> bool {
+    I2C_COMPATIBLES.contains(&name)
+        && compatibles.is_none_or(|raw| {
+            compatible_list(raw).is_some_and(|list| {
+                let mut entries = list.split('\0');
+                entries
+                    .next()
+                    .is_some_and(|first| I2C_COMPATIBLES.contains(&first))
+                    && entries.all(|entry| {
+                        I2C_COMPATIBLES.contains(&entry)
+                            || ["i2c,s5l8940x", "iic,soft"].contains(&entry)
+                    })
+                    && list.split('\0').any(|entry| entry == name)
+            })
+        })
 }
 
-/// Whether a compatible names a qualified nine-view USB DRD family.
-pub fn usb_controller_compatible(compatible: &str) -> bool {
-    USB_DRD_LAYOUTS.iter().any(|&(name, _)| name == compatible)
+/// Whether the full property selects a qualified nine-view USB DRD family.
+pub fn usb_controller_compatible(name: &str, compatibles: Option<&[u8]>) -> bool {
+    USB_DRD_LAYOUTS.iter().any(|&(family, _)| family == name)
+        && compatibles.is_none_or(|raw| {
+            usb_layout(raw).is_some()
+                && compatible_list(raw)
+                    .is_some_and(|list| list.split('\0').any(|entry| entry == name))
+        })
 }
 
-fn compatible_matches(node: &Node<'_>, accepts: fn(&str) -> bool) -> bool {
+/// Whether the full property selects a qualified ATC PHY register layout.
+pub fn atc_phy_compatible(name: &str, compatibles: Option<&[u8]>) -> bool {
+    ATC_PHY_LAYOUTS.iter().any(|&(family, _)| family == name)
+        && compatibles.is_none_or(|raw| {
+            atc_layout(raw).is_some()
+                && compatible_list(raw)
+                    .is_some_and(|list| list.split('\0').any(|entry| entry == name))
+        })
+}
+
+fn compatible_list(raw: &[u8]) -> Option<&str> {
+    let list = core::str::from_utf8(raw).ok()?.trim_end_matches('\0');
+    (!list.is_empty() && list.split('\0').all(|entry| !entry.is_empty())).then_some(list)
+}
+
+fn usb_layout(raw: &[u8]) -> Option<u64> {
+    let mut entries = compatible_list(raw)?.split('\0');
+    let first = entries.next()?;
+    let (_, bytes) = USB_DRD_LAYOUTS.iter().find(|&&(name, _)| name == first)?;
+    entries
+        .all(|entry| USB_DRD_LAYOUTS.contains(&(entry, *bytes)))
+        .then_some(*bytes)
+}
+
+fn atc_layout(raw: &[u8]) -> Option<(&'static str, usize)> {
+    let mut entries = compatible_list(raw)?.split('\0');
+    let first = entries.next()?;
+    let &(primary, count) = ATC_PHY_LAYOUTS.iter().find(|&&(name, _)| name == first)?;
+    entries
+        .all(|entry| {
+            ATC_PHY_LAYOUTS.contains(&(entry, count))
+            // Original T6020 lists this 29-view fallback after its 28-view primary.
+            || (primary == "atc-phy,t6020" && entry == ATC_PHY)
+        })
+        .then_some((primary, count))
+}
+
+pub(super) fn is_usb_controller(node: &Node<'_>) -> bool {
     node.property("compatible")
-        .into_iter()
-        .flat_map(|bytes| bytes.split(|byte| *byte == 0))
-        .any(|entry| core::str::from_utf8(entry).is_ok_and(accepts))
+        .is_some_and(|raw| usb_layout(raw).is_some())
 }
 
-/// Select the actual alias size, rejecting contradictory qualified layouts.
+pub(super) fn is_typec_phy(node: &Node<'_>) -> bool {
+    node.property("compatible")
+        .is_some_and(|raw| atc_layout(raw).is_some())
+}
+
+/// Recognize candidates independently of qualification so unsupported families
+/// produce a named refusal, including malformed lists with a known fallback.
+fn family_candidate(node: &Node<'_>, prefix: &[u8]) -> bool {
+    node.property("compatible").is_some_and(|raw| {
+        raw.split(|&byte| byte == 0)
+            .any(|entry| entry.starts_with(prefix))
+    })
+}
+
 fn usb_alias_bytes(node: &Node<'_>) -> Option<u64> {
-    let mut selected = None;
-    for &(compatible, bytes) in USB_DRD_LAYOUTS {
-        if node.compatible(compatible) {
-            if selected.is_some_and(|previous| previous != bytes) {
-                return None;
-            }
-            selected = Some(bytes);
-        }
-    }
-    selected
+    usb_layout(node.property("compatible")?)
 }
 
 /// Nine ADT windows, five interrupt inputs and the mapper-selected DMA
@@ -169,7 +227,14 @@ pub(super) fn typec_devices(
             return;
         }
         let result = (|| -> Result<(), String> {
-            if compatible_matches(node, i2c_compatible) {
+            if family_candidate(node, b"i2c,") || family_candidate(node, b"iic,") {
+                let raw = node.property("compatible").unwrap();
+                if !I2C_COMPATIBLES
+                    .iter()
+                    .any(|name| i2c_compatible(name, Some(raw)))
+                {
+                    return Err("I2C controller has no qualified compatible list".into());
+                }
                 let regs = apertures::registers(node).ok_or("I2C controller has no reg pairs")?;
                 let &[range] = regs.as_slice() else {
                     return Err("I2C controller requires one reg range".into());
@@ -307,16 +372,11 @@ pub(super) fn typec_devices(
                     targets,
                 });
             }
-            if let Some(&(layout, count)) = node
-                .property("compatible")
-                .into_iter()
-                .flat_map(|list| list.split(|byte| *byte == 0))
-                .find_map(|entry| {
-                    ATC_PHY_LAYOUTS
-                        .iter()
-                        .find(|(layout, _)| layout.as_bytes() == entry)
-                })
-            {
+            if family_candidate(node, b"atc-phy,") {
+                let (layout, count) = node
+                    .property("compatible")
+                    .and_then(atc_layout)
+                    .ok_or("ATC PHY has no qualified compatible list")?;
                 let reg = apertures::registers(node).ok_or("ATC PHY has no reg pairs")?;
                 if reg.len() != count {
                     return Err(format!(
@@ -412,7 +472,7 @@ pub(super) fn usb_controllers(
     let mut controllers = Vec::new();
     let mut failure = None;
     apertures::visit(io, translate, &mut |node, translate| {
-        if failure.is_none() && compatible_matches(node, usb_controller_compatible) {
+        if failure.is_none() && family_candidate(node, b"usb-drd,") {
             match usb_controller(node, translate, darts) {
                 Ok(controller) => controllers.push(controller),
                 Err(error) => failure = Some(error),
@@ -509,6 +569,93 @@ mod tests {
     use super::super::tests::{flat_fixture_extent, tree, tree_with_io};
     use super::super::*;
     use super::*;
+
+    #[test]
+    fn compatible_admission_checks_the_full_list() {
+        for (name, list) in [
+            (
+                "i2c,t8101",
+                b"i2c,t8101\0i2c,s5l8940x\0iic,soft\0".as_slice(),
+            ),
+            ("i2c,t6000", b"i2c,t6000\0i2c,s5l8940x\0iic,soft\0"),
+            ("i2c,t6020", b"i2c,t6020\0i2c,s5l8940x\0iic,soft\0"),
+        ] {
+            assert!(i2c_compatible(name, None));
+            assert!(i2c_compatible(name, Some(list)));
+        }
+        for (name, list) in [
+            (
+                "usb-drd,t8103",
+                b"usb-drd,t6000\0usb-drd,t8103\0".as_slice(),
+            ),
+            ("usb-drd,t8112", b"usb-drd,t6020\0usb-drd,t8112\0"),
+            ("usb-drd,t8122", b"usb-drd,t8122"),
+        ] {
+            assert!(usb_controller_compatible(name, None));
+            assert!(usb_controller_compatible(name, Some(list)));
+        }
+        assert!(atc_phy_compatible(
+            ATC_PHY,
+            Some(b"atc-phy,t6020\0atc-phy,t8112\0")
+        ));
+        assert!(atc_phy_compatible(
+            "atc-phy,t6000",
+            Some(b"atc-phy,t6000\0")
+        ));
+        for (name, accepts) in [
+            (
+                "i2c,t8101",
+                i2c_compatible as fn(&str, Option<&[u8]>) -> bool,
+            ),
+            ("usb-drd,t8112", usb_controller_compatible),
+            (ATC_PHY, atc_phy_compatible),
+        ] {
+            for list in [
+                format!("unknown\0{name}\0").into_bytes(),
+                format!("{name}\0unknown\0").into_bytes(),
+                format!("{name}\0\0unknown\0").into_bytes(),
+                [b"\xff\0".as_slice(), name.as_bytes()].concat(),
+            ] {
+                assert!(!accepts(name, Some(&list)), "{name}: {list:?}");
+            }
+        }
+        assert!(!i2c_compatible(
+            "i2c,t8101",
+            Some(b"i2c,t9999\0i2c,t8101\0")
+        ));
+        assert!(!i2c_compatible(
+            "i2c,t8101",
+            Some(b"i2c,s5l8940x\0i2c,t8101\0")
+        ));
+        assert!(!i2c_compatible("i2c,s5l8940x", None));
+        assert!(!i2c_compatible("iic,soft", None));
+        assert!(!usb_controller_compatible(
+            "usb-drd,t8112",
+            Some(b"usb-drd,t9999\0usb-drd,t8112\0")
+        ));
+        assert!(!usb_controller_compatible(
+            "usb-drd,t8112",
+            Some(b"usb-drd,t8103\0usb-drd,t8112\0")
+        ));
+        assert!(!atc_phy_compatible(
+            ATC_PHY,
+            Some(b"atc-phy,t9999\0atc-phy,t8112\0")
+        ));
+        assert!(!atc_phy_compatible(
+            ATC_PHY,
+            Some(b"atc-phy,t8112\0atc-phy,t6020\0")
+        ));
+        // A supplied property must actually contain the requested model name.
+        assert!(!i2c_compatible("i2c,t6000", Some(b"i2c,t8101\0")));
+        assert!(!usb_controller_compatible(
+            "usb-drd,t6020",
+            Some(b"usb-drd,t8112\0")
+        ));
+        assert!(!atc_phy_compatible(
+            "atc-phy,t6000",
+            Some(b"atc-phy,t8112\0")
+        ));
+    }
 
     #[test]
     fn typec_placement_distinguishes_i2c_addresses_from_mmio_and_preserves_phy_aliases() {
@@ -738,6 +885,30 @@ mod tests {
             let (controllers, _) = place(&bytes, 0x63, Some(&gpio)).unwrap();
             assert_eq!(controllers, buses);
         }
+        for compatible in [
+            b"i2c,t9999\0i2c,t8101\0".as_slice(),
+            b"i2c,t8101\0i2c,t9999\0",
+            b"unknown\0i2c,t8101\0",
+        ] {
+            let bytes = encode(&[("name", b"arm-io\0")], &[i2c_with(compatible)]);
+            assert!(
+                place(&bytes, 0x63, Some(&gpio))
+                    .unwrap_err()
+                    .contains("qualified compatible list")
+            );
+        }
+        for compatible in [
+            b"atc-phy,t9999\0atc-phy,t8112\0".as_slice(),
+            b"atc-phy,t8112\0atc-phy,t9999\0",
+            b"unknown\0atc-phy,t8112\0",
+        ] {
+            let bytes = encode(&[("name", b"arm-io\0")], &[phy(compatible)]);
+            assert!(
+                place(&bytes, 0x63, Some(&gpio))
+                    .unwrap_err()
+                    .contains("qualified compatible list")
+            );
+        }
         let t6000 = encode(
             &[("name", b"arm-io\0")],
             &[phy_views(b"atc-phy,t6000\0", &views[..ATC_PHY_BASE_VIEWS])],
@@ -874,6 +1045,9 @@ mod tests {
             b"usb-drd,t8142\0",
             b"usb-drd,t8152\0",
             b"usb-drd,t9999\0usb-drd,generic\0",
+            b"usb-drd,t9999\0usb-drd,t8112\0",
+            b"usb-drd,t8112\0usb-drd,t9999\0",
+            b"unknown\0usb-drd,t8112\0",
         ] {
             let bytes = usb_with(compatible, &ranges, 0xa4, &irqs);
             let node = Node::root(&bytes).unwrap();
