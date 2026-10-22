@@ -40,6 +40,22 @@
 //!   AP slot info (24): exactly 56 bytes out (8 nonce, 48 hash); set and get
 //!   provisional AP (27, 28) must succeed.
 //!
+//! The epochs are eight anti-rollback records, `SEPEpoch::EPOCH_COUNT`
+//! (`SEPEpoch::getFullEpochs` 0x2d61aa8 and `AppleSEPXART::getFullEpochs`
+//! 0x2d71efc assert it). A full read answers eight four-byte slots: byte 0
+//! the current epoch, which `AppleSEPUserClient::DispatchGetEpochs`
+//! 0x2d841c0..0x2d841dc copies out for `seputil --show-epochs`, byte 1 a
+//! proposal flag and bytes 2 and 3 the proposed values, which the M5 and M6
+//! kernels' `AppleEpochManager::processEpochProposalsGated` reads at every
+//! boot (T8142 restore kernelcache 0x24dfb48..0x24dfbd8) and commits as
+//! eight two-byte `{present, value}` records (`_updateEpochCommits`
+//! 0x24df4dc..0x24df4e4). That boot path panics unless the read succeeds
+//! with exactly 32 bytes (`SEPEpoch::getFullEpochs` asserts success at
+//! 0x2d87390, the xART read block its length at 0x2d8c7c0). This SEP
+//! enforces no epoch floor and proposes none, since it does not evaluate
+//! Image4 epoch properties: every slot reads epoch 0 with no proposal, and a
+//! commit, which the AP sends only for a proposal, refuses.
+//!
 //! `AppleMobileApNonce` uses the AP slots and the boot nonce only when the
 //! DeviceTree has `/arm-io/sep/iop-sep-nub/Sandcat`; J473AP has none, so
 //! this SEP has no Sandcat slots and refuses those operations by name.
@@ -61,6 +77,9 @@ const NONCE_SLOT: u8 = 0;
 const SANDCAT_SLOT_REQUEST: u8 = 1;
 /// setup_OS_UUID carries exactly one UUID.
 const UUID_BYTES: usize = 16;
+/// `SEPEpoch::EPOCH_COUNT` four-byte slots answer a full epoch read.
+const EPOCH_COUNT: usize = 8;
+const EPOCH_SLOT_BYTES: usize = 4;
 
 /// The master instance's fourcc (`AppleSEPXARTService::start` 0x2d7f690).
 pub const MASTER: u32 = u32::from_be_bytes(*b"xarm");
@@ -264,6 +283,7 @@ impl Xart {
                 | Operation::NonceGenerate
                 | Operation::NonceRead
                 | Operation::NonceInvalidate
+                | Operation::GetFullEpochs
         ) && (message.flags != 0 || message.reserved != 0 || message.slot != 0)
         {
             if matches!(operation, Operation::NonceGenerate | Operation::NonceRead)
@@ -327,6 +347,13 @@ impl Xart {
                 }
                 0
             }
+            Operation::GetFullEpochs => {
+                if length != 0 {
+                    return Err("xART epoch read carries an input payload");
+                }
+                payload.output(&[0; EPOCH_COUNT * EPOCH_SLOT_BYTES])?;
+                (EPOCH_COUNT * EPOCH_SLOT_BYTES) as u16
+            }
             Operation::BootNonceGenerate | Operation::ApSlot(_) => {
                 return Err(
                     "xART boot nonces and AP slots exist only on boards with a Sandcat SEP nub",
@@ -335,8 +362,8 @@ impl Xart {
             Operation::CommitHash => {
                 return Err("xART commit-hash types are not recovered");
             }
-            Operation::CommitEpochs | Operation::GetFullEpochs => {
-                return Err("xART epoch records are not recovered");
+            Operation::CommitEpochs => {
+                return Err("xART epoch commit without a SEP epoch proposal");
             }
             Operation::EraseSessionSeeds
             | Operation::EraseAllSeeds
@@ -494,7 +521,7 @@ mod tests {
             input: vec![0; 64],
             output: Vec::new(),
         };
-        for op in [2, 3, 4, 9, 10, 11, 18, 21, 22, 23, 24, 28, 32] {
+        for op in [2, 3, 4, 9, 10, 11, 18, 21, 22, 24, 28, 32] {
             assert!(
                 ask(&mut xart, request(SLAVE_ID, 1, op, 0), &mut buffers).is_err(),
                 "{op}"
@@ -518,11 +545,34 @@ mod tests {
             .frame();
             assert!(ask(&mut xart, frame, &mut buffers).is_err());
         }
-        for op in [15, 16] {
+        for op in [15, 16, 23] {
             assert!(ask(&mut xart, request(SLAVE_ID, 1, op, 1), &mut buffers).is_err());
         }
         assert!(buffers.output.is_empty());
         assert!(xart.os_uuid().is_none());
+    }
+
+    #[test]
+    fn a_full_epoch_read_answers_eight_empty_slots_and_a_commit_refuses() {
+        let mut xart = xart();
+        let mut buffers = Buffers {
+            input: vec![0; 16],
+            output: Vec::new(),
+        };
+        let reply = ask(&mut xart, request(SLAVE_ID, 6, 23, 0), &mut buffers).unwrap();
+        assert_eq!(reply, request(SLAVE_ID, 6, 0, 32));
+        assert_eq!(buffers.output, [0; 32]);
+        // The AP commits only a SEP proposal, and none was made.
+        assert_eq!(
+            ask(&mut xart, request(SLAVE_ID, 7, 22, 0), &mut buffers),
+            Err("xART epoch commit without a SEP epoch proposal")
+        );
+        // A slotted or flagged read is outside the AP's sender.
+        let slotted = XartMessage {
+            slot: 1,
+            ..XartMessage::from_frame(request(SLAVE_ID, 8, 23, 0))
+        };
+        assert!(ask(&mut xart, slotted.frame(), &mut buffers).is_err());
     }
 
     #[test]
