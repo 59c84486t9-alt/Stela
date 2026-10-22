@@ -3,7 +3,9 @@
 //! XNU's CPU parser enumerates every `/cpus` child; `state` identifies the
 //! boot PE, it does not disable an unassigned PE. Firmware `cpu-id` and
 //! `l2-cache-id` are separate from the kernel's dense IDs and our resource
-//! IDs. Those fields and source startup/interrupt/power recipes are preserved.
+//! IDs. IDs are preserved by default; an explicitly qualified recipe may
+//! project CPU IDs and their watchdog records together. Source identities and
+//! startup/interrupt/power payloads are preserved in either case.
 //! Source coordinates: original 26A434 J314s iBoot SHA-256
 //! 20dfa3a5e6d4e4b2844c7558e6d4f8ab74397d11eae63312f00a559cf9612b03,
 //! file 0x3ab04..0x3ab7c publishes u32 max_cpus/cpu-cluster-count/E/P
@@ -25,6 +27,8 @@ use sha2::{Digest, Sha256};
 use stela_runtime::machine::soc::assigned::{
     CacheId, DomainId, GuestSlotId, InterruptId, Plan, PlanIdentity, StartId,
 };
+mod cpu_ids;
+pub use cpu_ids::{CpuIdMapping, CpuIdRecipe, WatchdogProjection};
 
 const CPUS: &str = "/cpus";
 const RUNNING: &[u8] = b"running\0";
@@ -85,6 +89,9 @@ pub struct SourceBindings<'a> {
     pub nodes: &'a [NodeBinding<'a>],
     pub counts: &'a [CountField<'a>],
     pub references: &'a [ReferenceField<'a>],
+    /// Explicitly qualified coordinated consumer recipe; ordinary projections
+    /// preserve source IDs and cannot opt into renumbering implicitly.
+    pub cpu_ids: CpuIdRecipe<'a>,
 }
 
 #[derive(Debug)]
@@ -101,6 +108,8 @@ pub struct Receipt {
     pub projected_sha256: [u8; 32],
     pub boot_path: String,
     pub removed: Vec<String>,
+    pub cpu_ids: Vec<CpuIdMapping>,
+    pub watchdog: Option<WatchdogProjection>,
 }
 fn canonical_path(path: &str) -> bool {
     path == "/"
@@ -404,6 +413,7 @@ impl<'p, 's> Projection<'p, 's> {
             }
             selected.push(node);
         }
+        let cpu_ids = cpu_ids::Prepared::prepare(plan, tree, source)?;
         // Explicitly typed external lists are checked, never rewritten with
         // guessed mask/ID semantics. Ordinary matching integer values are not
         // evidence of a CPU reference.
@@ -437,6 +447,12 @@ impl<'p, 's> Projection<'p, 's> {
                     field.path,
                     field.property
                 );
+                if matches!(field.encoding, ReferenceEncoding::FirmwareCpuIds) {
+                    ensure!(
+                        cpu_ids.preserves_reference(id),
+                        "CPU ID consumer needs a coordinated projection recipe"
+                    );
+                }
             }
         }
         projected.node_mut(CPUS).unwrap().children = selected;
@@ -506,6 +522,7 @@ impl<'p, 's> Projection<'p, 's> {
             Ok(())
         }
         consumers(&tree.root, "/", &locations)?;
+        let (cpu_ids, watchdog) = cpu_ids.apply(&mut projected)?;
         let removed = cpus
             .children
             .iter()
@@ -525,6 +542,8 @@ impl<'p, 's> Projection<'p, 's> {
             projected_sha256: digest(&projected),
             boot_path,
             removed,
+            cpu_ids,
+            watchdog,
         };
         plan.revalidate()
             .map_err(|e| anyhow::anyhow!("topology plan changed: {e:?}"))?;
@@ -866,6 +885,7 @@ mod tests {
                 nodes: &self.bindings,
                 counts: &self.counts,
                 references: &[],
+                cpu_ids: CpuIdRecipe::Preserve,
             }
         }
         fn plan(&self) -> Plan<'_> {
@@ -1239,6 +1259,208 @@ mod tests {
         assert!(Projection::prepare(&f.plan(), &f.tree, &f.source()).is_err());
     }
 
+    fn dense_fixture() -> Fixture {
+        let mut f = Fixture::new();
+        f.inventory.soc = 0x8112;
+        for (index, cluster) in f.inventory.clusters.iter_mut().enumerate() {
+            cluster.firmware_id = index as u32;
+        }
+        let mut table = Vec::new();
+        for (index, node) in f
+            .tree
+            .node_mut(CPUS)
+            .unwrap()
+            .children
+            .iter_mut()
+            .enumerate()
+        {
+            let reg = word(node, "reg").unwrap();
+            set_word(node, "cluster-id", reg >> 8);
+            set_word(node, "cpu-id", index as u32);
+            let region = range(100 + index as u64);
+            set_range(node, "coresight-reg", region);
+            table.extend((region.base + 4).to_le_bytes());
+            table.extend(0xfu32.to_le_bytes());
+            table.extend(1u32.to_le_bytes());
+        }
+        let mut wdt = Node::named("watchdog").unwrap();
+        wdt.set_property("compatible", b"wdt,s5l8960x\0".to_vec())
+            .unwrap();
+        set_word(&mut wdt, "AAPL,phandle", 900);
+        set_range(&mut wdt, "reg", range(200));
+        wdt.set_property("trigger-config", table).unwrap();
+        f.tree.root.children.push(wdt);
+        f
+    }
+
+    #[test]
+    fn dense_cpu_ids_and_watchdog_records_follow_one_plan_without_changing_physical_recipes() {
+        let f = dense_fixture();
+        let original = f.tree.clone();
+        let plan = f.plan();
+        let mut source = f.source();
+        source.cpu_ids = CpuIdRecipe::DenseWithWatchdog {
+            original: &original,
+            original_sha256: digest(&original),
+            watchdog_path: "/watchdog",
+        };
+        let mut tree = f.tree.clone();
+        let receipt = Projection::prepare(&plan, &tree, &source)
+            .unwrap()
+            .apply(&mut tree)
+            .unwrap();
+        assert_eq!(word(tree.node(CPUS).unwrap(), "max_cpus").unwrap(), 2);
+        assert_eq!(
+            receipt
+                .cpu_ids
+                .iter()
+                .map(|m| (m.original_id, m.projected_id))
+                .collect::<Vec<_>>(),
+            [(2, 0), (0, 1)]
+        );
+        let old_table = bytes(original.node("/watchdog").unwrap(), "trigger-config").unwrap();
+        assert_eq!(
+            bytes(tree.node("/watchdog").unwrap(), "trigger-config").unwrap(),
+            [&old_table[32..48], &old_table[..16]].concat()
+        );
+        for mapping in &receipt.cpu_ids {
+            let before = original.node(&mapping.path).unwrap();
+            let after = tree.node(&mapping.path).unwrap();
+            assert_eq!(word(after, "cpu-id").unwrap(), mapping.projected_id);
+            for property in &before.properties {
+                if !matches!(property.name(), "state" | "cpu-id") {
+                    assert_eq!(after.property(property.name()), Some(property));
+                }
+            }
+        }
+        let wdt = receipt.watchdog.unwrap();
+        assert_eq!((wdt.original_records, wdt.projected_records), (3, 2));
+        assert_eq!(wdt.original_tree_sha256, digest(&original));
+        assert_eq!(f.tree, original);
+        assert_eq!(DeviceTree::parse(&tree.serialize()).unwrap(), tree);
+    }
+
+    #[test]
+    fn dense_recipe_refuses_bad_sources_tables_ranges_counts_and_references_atomically() {
+        let f = dense_fixture();
+        let original = f.tree.clone();
+        let plan = f.plan();
+        let mut source = f.source();
+        source.cpu_ids = CpuIdRecipe::DenseWithWatchdog {
+            original: &original,
+            original_sha256: digest(&original),
+            watchdog_path: "/watchdog",
+        };
+        let mut changed_inputs = Vec::new();
+        for len in [0, 16, 47, 64] {
+            let mut tree = f.tree.clone();
+            tree.set_property("/watchdog", "trigger-config", vec![0; len])
+                .unwrap();
+            changed_inputs.push(tree);
+        }
+        let mut missing = f.tree.clone();
+        missing
+            .node_mut("/watchdog")
+            .unwrap()
+            .remove_property("trigger-config");
+        changed_inputs.push(missing);
+        let mut duplicate = f.tree.clone();
+        let p = duplicate
+            .property("/watchdog", "trigger-config")
+            .unwrap()
+            .clone();
+        duplicate.node_mut("/watchdog").unwrap().properties.push(p);
+        changed_inputs.push(duplicate);
+        let mut changed = f.tree.clone();
+        set_word(changed.node_mut("/cpus/cpu2").unwrap(), "cpu-id", 99);
+        changed_inputs.push(changed);
+        let mut changed = f.tree.clone();
+        let mut table = bytes(changed.node("/watchdog").unwrap(), "trigger-config")
+            .unwrap()
+            .to_vec();
+        table[32] ^= 4;
+        changed
+            .set_property("/watchdog", "trigger-config", table)
+            .unwrap();
+        changed_inputs.push(changed);
+        for tree in changed_inputs {
+            source.tree_sha256 = digest(&tree);
+            let before = tree.clone();
+            assert!(Projection::prepare(&plan, &tree, &source).is_err());
+            assert_eq!(tree, before);
+        }
+        for (key, value) in [
+            ("cpu-id", 3u32.to_le_bytes().to_vec()),
+            ("cpu-id", 0u32.to_le_bytes().to_vec()),
+            ("coresight-reg", vec![0; 16]),
+        ] {
+            let mut invalid = original.clone();
+            invalid.set_property("/cpus/cpu2", key, value).unwrap();
+            let mut invalid_source = f.source();
+            invalid_source.tree_sha256 = digest(&invalid);
+            invalid_source.cpu_ids = CpuIdRecipe::DenseWithWatchdog {
+                original: &invalid,
+                original_sha256: digest(&invalid),
+                watchdog_path: "/watchdog",
+            };
+            assert!(Projection::prepare(&plan, &invalid, &invalid_source).is_err());
+        }
+        source.tree_sha256 = digest(&f.tree);
+        source.cpu_ids = CpuIdRecipe::DenseWithWatchdog {
+            original: &original,
+            original_sha256: [0; 32],
+            watchdog_path: "/watchdog",
+        };
+        assert!(Projection::prepare(&plan, &f.tree, &source).is_err());
+        source.cpu_ids = CpuIdRecipe::DenseWithWatchdog {
+            original: &original,
+            original_sha256: digest(&original),
+            watchdog_path: "/watchdog",
+        };
+        source.counts = &[];
+        assert!(Projection::prepare(&plan, &f.tree, &source).is_err());
+        let mut referenced = f.tree.clone();
+        referenced
+            .set_property("/", "cpu-refs", 2u32.to_le_bytes().to_vec())
+            .unwrap();
+        source.counts = &f.counts;
+        source.tree_sha256 = digest(&referenced);
+        let references = [ReferenceField {
+            path: "/",
+            property: "cpu-refs",
+            encoding: ReferenceEncoding::FirmwareCpuIds,
+        }];
+        source.references = &references;
+        assert!(Projection::prepare(&plan, &referenced, &source).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires pinned original T8112 ADTs in STELA_TEST_CPU_DT_DIR"]
+    fn original_t8112_source_byte_digests_survive_parse_serialization() {
+        let directory = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap());
+        let facts: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../isa/apple-soc-facts.json")).unwrap();
+        let mut count = 0;
+        for board in facts["boards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b["chip_id"] == "0x8112")
+        {
+            let name = board["device_class"].as_str().unwrap();
+            let raw = std::fs::read(directory.join(format!("DeviceTree.{name}.adt"))).unwrap();
+            assert_eq!(
+                stela_runtime::sha256(&raw),
+                board["source"]["decoded_sha256"].as_str().unwrap(),
+                "{name}: original identity"
+            );
+            let parsed = DeviceTree::parse(&raw).unwrap();
+            assert_eq!(parsed.serialize(), raw, "{name}: source roundtrip");
+            count += 1;
+        }
+        assert_eq!(count, 4);
+    }
+
     #[test]
     #[ignore = "requires pinned original J473 ADT in STELA_TEST_CPU_DT_DIR"]
     fn original_j473_first_p_projection_keeps_source_fields_and_absent_coordinates() {
@@ -1331,6 +1553,7 @@ mod tests {
             nodes: &bindings,
             counts: &counts,
             references: &[],
+            cpu_ids: CpuIdRecipe::Preserve,
         };
         let receipt = Projection::prepare(&plan, &tree, &source)
             .unwrap()
@@ -1342,6 +1565,49 @@ mod tests {
         assert_eq!(tree.node("/cpus/cpu4"), prior.node("/cpus/cpu4"));
         for key in ["die-id", "die-cluster-id", "cluster-core-id"] {
             assert!(tree.property("/cpus/cpu4", key).is_none());
+        }
+        assert_eq!(owner.source(), original);
+        // The separately selected recipe changes only the driver CPU ID and
+        // its coordinated per-PE watchdog record, preserving original source.
+        let immutable = DeviceTree::parse(&original).unwrap();
+        assert_eq!(immutable.serialize(), original);
+        let mut dense_source = source;
+        dense_source.cpu_ids = CpuIdRecipe::DenseWithWatchdog {
+            original: &immutable,
+            original_sha256: Sha256::digest(&original).into(),
+            watchdog_path: "/arm-io/wdt",
+        };
+        let mut dense = prior.clone();
+        let dense_receipt = Projection::prepare(&plan, &dense, &dense_source)
+            .unwrap()
+            .apply(&mut dense)
+            .unwrap();
+        let selected = dense.node("/cpus/cpu4").unwrap();
+        assert_eq!(word(selected, "cpu-id").unwrap(), 0);
+        assert_eq!(word(selected, "reg").unwrap(), 0x100);
+        assert_eq!(word(dense.node(CPUS).unwrap(), "max_cpus").unwrap(), 1);
+        let original_table =
+            bytes(immutable.node("/arm-io/wdt").unwrap(), "trigger-config").unwrap();
+        assert_eq!(
+            stela_runtime::sha256(original_table),
+            "e9e9875ee26054ce3129dcb658d3d39b819819ef5bc568ad885d15bca048980c"
+        );
+        assert_eq!(
+            bytes(dense.node("/arm-io/wdt").unwrap(), "trigger-config").unwrap(),
+            &original_table[64..80]
+        );
+        assert_eq!(
+            dense_receipt
+                .cpu_ids
+                .iter()
+                .map(|m| (m.original_id, m.projected_id))
+                .collect::<Vec<_>>(),
+            [(4, 0)]
+        );
+        for property in &prior.node("/cpus/cpu4").unwrap().properties {
+            if property.name() != "cpu-id" {
+                assert_eq!(selected.property(property.name()), Some(property));
+            }
         }
         assert_eq!(owner.source(), original);
     }
@@ -1523,6 +1789,7 @@ mod tests {
                 nodes: &bindings,
                 counts: &counts,
                 references: &[],
+                cpu_ids: CpuIdRecipe::Preserve,
             };
             let mut projected = tree.clone();
             let receipt = Projection::prepare(&plan, &projected, &source)
