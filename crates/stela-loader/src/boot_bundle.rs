@@ -87,7 +87,9 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// writes it, with that iBoot's value.
 /// Revision 22: truncate oversized syscfg fill-in values to the recipe's
 /// requested length, as iBoot does, while zero-padding shorter values.
-pub const REVISION: u32 = 22;
+/// Revision 23: retire unused SPMI bus compatibles after target and
+/// platform-function admission, preserving their original metadata.
+pub const REVISION: u32 = 23;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;

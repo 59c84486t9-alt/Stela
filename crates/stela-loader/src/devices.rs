@@ -67,6 +67,13 @@
 //! honor `compatible` or `AAPL,ignore`. The existing admission ledger keeps
 //! the hidden paths; original inputs retain the removed identity bytes.
 //! Structural and unaudited type metadata remain.
+//!
+//! An SPMI controller with no admitted target or external platform-function
+//! or interrupt consumer also loses `compatible`. Board templates may carry
+//! alternative controllers over the same banks (26A434 J623/J624); iBoot
+//! selects those by hardware straps. An unused bus needs no selection. If
+//! both alternatives serve retained consumers, both remain and mounting
+//! explicitly refuses their overlapping ownership rather than choosing one.
 use crate::apple_device_tree::{DeviceTree, Node};
 use alloc::{format, string::String, vec::Vec};
 use stela_runtime::machine::soc;
@@ -323,6 +330,7 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     visit(&mut tree.root, "", &parents, &[], &mut hidden);
     hide_unprovided_buttons(tree, &mut hidden);
     hide_unprovided_clients(tree, &mut hidden);
+    hide_unused_spmi(tree, &mut hidden);
     let selected = tree
         .property(DEFAULTS, SERIAL_DEVICE)
         .and_then(|property| property.as_u32())
@@ -359,6 +367,62 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     publish_gpu_ttbat(tree, &mut hidden);
     retire_hidden_service_identities(tree, &hidden);
     hidden
+}
+
+/// Retain buses only for actual visible targets or externally used provider
+/// identities. The latter includes name-matched clients with no compatible;
+/// the admission ledger and AAPL,ignore exclude unavailable consumers.
+fn hide_unused_spmi(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
+    fn target(node: &Node) -> bool {
+        node.property(IGNORE).is_none()
+            && (node.property(COMPATIBLE).is_some() || node.children.iter().any(target))
+    }
+
+    fn referenced(node: &Node, path: &str, bus: &str, phandle: u32, hidden: &[String]) -> bool {
+        let here = if path.is_empty() { "/" } else { path };
+        if here == bus || node.property(IGNORE).is_some() {
+            return false;
+        }
+        if !hidden.iter().any(|hidden| hidden == here)
+            && node.properties.iter().any(|property| {
+                if property.name().starts_with("function-") {
+                    property.value.first_chunk::<4>() == Some(&phandle.to_le_bytes())
+                } else if property.name() == "interrupt-parent" {
+                    property
+                        .value
+                        .as_chunks::<4>()
+                        .0
+                        .contains(&phandle.to_le_bytes())
+                } else {
+                    false
+                }
+            })
+        {
+            return true;
+        }
+        node.children.iter().any(|child| {
+            let path = format!("{path}/{}", child.name().unwrap_or("?"));
+            referenced(child, &path, bus, phandle, hidden)
+        })
+    }
+
+    let mut buses = Vec::new();
+    visible_paths(&tree.root, "", &|node| named(node, soc::SPMI), &mut buses);
+    for path in buses {
+        let bus = tree.node(&path).expect("visited SPMI path");
+        if bus.children.iter().any(target)
+            || bus
+                .property(PHANDLE)
+                .and_then(|p| p.as_u32())
+                .is_some_and(|phandle| referenced(&tree.root, "", &path, phandle, hidden))
+        {
+            continue;
+        }
+        tree.node_mut(&path)
+            .expect("visited SPMI path")
+            .remove_property(COMPATIBLE);
+        hidden.push(path);
+    }
 }
 
 /// Admit the external controller, same-role expert and selected pipe as one
@@ -1090,14 +1154,190 @@ mod tests {
         assert!(modeled.property("/arm-io/wdt", NO_PMU).is_none());
         let mut hidden = tree(Some(b"pmu,acme\0"));
         let paths = hide_unmodeled(&mut hidden);
-        assert_eq!(paths, ["/arm-io/nub-spmi0/pmu-main", "/arm-io/wdt +no-pmu"]);
+        assert_eq!(
+            paths,
+            [
+                "/arm-io/nub-spmi0/pmu-main",
+                "/arm-io/nub-spmi0",
+                "/arm-io/wdt +no-pmu"
+            ]
+        );
         let no_pmu = hidden.property("/arm-io/wdt", NO_PMU).unwrap();
         assert!(no_pmu.value.is_empty());
         // Already marked: nothing more to say.
         assert_eq!(hide_unmodeled(&mut hidden), Vec::<String>::new());
         // A tree without any PMU node at all is marked the same way.
         let mut absent = tree(None);
-        assert_eq!(hide_unmodeled(&mut absent), ["/arm-io/wdt +no-pmu"]);
+        assert_eq!(
+            hide_unmodeled(&mut absent),
+            ["/arm-io/nub-spmi0", "/arm-io/wdt +no-pmu"]
+        );
+    }
+
+    fn spmi_bus(name: &str, handle: u32, children: Vec<Node>) -> Node {
+        let mut bus = phandle(node(name, Some(b"aapl,spmi\0"), children), handle);
+        bus.set_property(
+            "reg",
+            [0x1000u64.to_le_bytes(), 0x4000u64.to_le_bytes()].concat(),
+        )
+        .unwrap();
+        // A controller's self-parented vectors do not create a consumer.
+        bus.set_property("interrupt-parent", handle.to_le_bytes().to_vec())
+            .unwrap();
+        bus
+    }
+
+    #[test]
+    fn unused_spmi_aliases_keep_metadata_without_choosing_a_controller() {
+        let mut tree = DeviceTree {
+            root: node(
+                "device-tree",
+                None,
+                vec![
+                    spmi_bus("first", 10, vec![]),
+                    spmi_bus("alternative", 20, vec![]),
+                    spmi_bus(
+                        "unsupported",
+                        30,
+                        vec![node("target", Some(b"unmodeled\0"), vec![])],
+                    ),
+                ],
+            ),
+        };
+        let original = tree.clone();
+        assert_eq!(
+            hide_unmodeled(&mut tree),
+            [
+                "/unsupported/target",
+                "/first",
+                "/alternative",
+                "/unsupported"
+            ]
+        );
+        for name in ["first", "alternative", "unsupported"] {
+            let mut expected = original.root.child(name).unwrap().clone();
+            expected.remove_property(COMPATIBLE);
+            if let Some(target) = expected.children.first_mut() {
+                target.remove_property(COMPATIBLE);
+            }
+            assert_eq!(tree.root.child(name).unwrap(), &expected);
+        }
+        assert!(hide_unmodeled(&mut tree).is_empty());
+    }
+
+    #[test]
+    fn spmi_targets_and_external_providers_keep_colliding_buses_explicit() {
+        let pmu = || node("pmu", Some(b"pmu,spmi\0"), vec![]);
+        let mut provider_client = node("provider-client", Some(soc::UART.as_bytes()), vec![]);
+        provider_client
+            .set_property(
+                "function-spmi_access",
+                [20u32.to_le_bytes(), 1u32.to_le_bytes()].concat(),
+            )
+            .unwrap();
+        let mut interrupt_client = node("interrupt-client", Some(soc::UART.as_bytes()), vec![]);
+        interrupt_client
+            .set_property(
+                "interrupt-parent",
+                [99u32.to_le_bytes(), 30u32.to_le_bytes()].concat(),
+            )
+            .unwrap();
+        let mut tree = DeviceTree {
+            root: node(
+                "device-tree",
+                None,
+                vec![
+                    spmi_bus("with-pmu", 10, vec![pmu()]),
+                    spmi_bus("function-provider", 20, vec![]),
+                    spmi_bus("interrupt-provider", 30, vec![]),
+                    spmi_bus("second-target", 40, vec![pmu()]),
+                    provider_client,
+                    interrupt_client,
+                ],
+            ),
+        };
+        let original = tree.clone();
+        assert!(hide_unmodeled(&mut tree).is_empty());
+        // Neither equal MMIO banks nor traversal order authorizes deduplication.
+        assert_eq!(tree, original);
+    }
+
+    #[test]
+    fn unavailable_clients_cannot_keep_an_unused_spmi_provider() {
+        let mut unavailable = node("unavailable", Some(b"unmodeled\0"), vec![]);
+        unavailable
+            .set_property("function-spmi_access", 10u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut ignored = node("ignored", Some(soc::UART.as_bytes()), vec![]);
+        ignored.set_property(IGNORE, vec![]).unwrap();
+        ignored
+            .set_property("interrupt-parent", 10u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut metadata_client = node("name-matched", None, vec![]);
+        metadata_client
+            .set_property("function-spmi_access", 20u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut tree = DeviceTree {
+            root: node(
+                "device-tree",
+                None,
+                vec![
+                    spmi_bus("unused", 10, vec![]),
+                    spmi_bus("named-provider", 20, vec![]),
+                    unavailable,
+                    ignored,
+                    metadata_client,
+                ],
+            ),
+        };
+        assert_eq!(hide_unmodeled(&mut tree), ["/unavailable", "/unused"]);
+        assert!(tree.property("/unused", COMPATIBLE).is_none());
+        assert!(tree.property("/named-provider", COMPATIBLE).is_some());
+    }
+
+    #[test]
+    #[ignore = "requires pinned original 26A434 templates through STELA_TEST_LOADER_DT_DIR"]
+    fn original_m4_imac_unused_spmi_alternatives_are_all_retired() {
+        let directory = std::env::var("STELA_TEST_LOADER_DT_DIR").unwrap();
+        for (board, digest) in [
+            (
+                "j623ap",
+                "b1ea7673bb96e22f2e5fcb755045c9c96de8e0fd3d3c30b7251f22d080b19f9d",
+            ),
+            (
+                "j624ap",
+                "21286eb2e7186a90106d75a38659e2081f22f514b49b884cb5e92e28d05383bc",
+            ),
+        ] {
+            let input = std::fs::read(format!("{directory}/DeviceTree.{board}")).unwrap();
+            assert_eq!(stela_runtime::sha256(&input), digest);
+            let mut tree = DeviceTree::parse(&input).unwrap();
+            let original = tree.clone();
+            let hidden = hide_unmodeled(&mut tree);
+            fn metadata(mut node: Node) -> Node {
+                node.remove_property(COMPATIBLE);
+                node.children = node.children.into_iter().map(metadata).collect();
+                node
+            }
+            for name in ["aop-spmi0", "aop-spmi1", "aop-spmi0-p1bu", "aop-spmi1-p1bu"] {
+                let path = format!("/arm-io/{name}");
+                // NFC descendants are unavailable too; ordinary admission
+                // removes their compatibles before the unused-bus pass.
+                let bus = tree.node(&path).unwrap();
+                assert!(bus.property(COMPATIBLE).is_none());
+                assert_eq!(
+                    metadata(bus.clone()),
+                    metadata(original.node(&path).unwrap().clone())
+                );
+                assert!(hidden.contains(&path));
+            }
+            for name in ["nub-spmi0", "nub-spmi1"] {
+                assert!(
+                    tree.property(&format!("/arm-io/{name}"), COMPATIBLE)
+                        .is_some()
+                );
+            }
+        }
     }
 
     #[test]
