@@ -50,7 +50,7 @@ pub use power_resources::{
     ClockRole, PmgrClockProvider, PowerOwner, PowerResource, PowerStates, ProcessorAssociation,
 };
 use power_resources::{PMGR_DEVICE, power_states};
-pub use topology::assigned;
+pub use topology::{KernelLimits, assigned};
 
 /// One SoC row: ApChipID, `product-soc-name`, chip, the MIDR_EL1 part
 /// number of each `cluster-type`, and the `aic` node's `compatible` with the
@@ -100,6 +100,7 @@ struct Soc {
     aic: Option<(&'static str, u64)>,
     dram_base: Option<u64>,
     lockdown: Option<[u64; 2]>,
+    limits: Option<KernelLimits>,
     memory_cache: Option<(u64, u32)>,
     clusters: Option<[CpuCluster; 2]>,
     aon_fuses: Option<usize>,
@@ -305,6 +306,25 @@ const T8112_CLUSTERS: [CpuCluster; 2] = [
 /// `__text+0x1b0e4..0x1b14c`). The M4 and later SPTMs write none.
 const LOCKDOWN: [u64; 2] = [0x5000, 0x9000];
 
+/// XNU's per-board CPU limits (`xnu-12377.121.6`
+/// `pexpert/pexpert/arm64/board_config.h` `MAX_CPUS`, `MAX_CPU_CLUSTERS`,
+/// `MAX_CPU_CLUSTER_PHY_ID`, defaulting to the cluster count less one):
+/// the T6000 configuration covers the M1 Pro, Max and Ultra, T6020 the M2
+/// Pro, Max and Ultra, T6031 the M3 Max and Ultra, T6041 the M4 Pro and
+/// Max. The T8140 and T8152 have no public configuration, so their boards
+/// are not bounded here. Every 26A434 board DeviceTree fits its chip's
+/// (`topology::KernelLimits`).
+const T8103_LIMITS: KernelLimits = KernelLimits::new(8, 2, 1);
+const T6000_LIMITS: KernelLimits = KernelLimits::new(20, 6, 10);
+const T8112_LIMITS: KernelLimits = KernelLimits::new(8, 2, 1);
+const T6020_LIMITS: KernelLimits = KernelLimits::new(24, 6, 10);
+const T8122_LIMITS: KernelLimits = KernelLimits::new(8, 2, 1);
+const T6030_LIMITS: KernelLimits = KernelLimits::new(12, 2, 1);
+const T6031_LIMITS: KernelLimits = KernelLimits::new(32, 6, 10);
+const T8132_LIMITS: KernelLimits = KernelLimits::new(10, 2, 1);
+const T6041_LIMITS: KernelLimits = KernelLimits::new(16, 3, 2);
+const T8142_LIMITS: KernelLimits = KernelLimits::new(10, 2, 1);
+
 /// The CPU start registers' offsets from `/arm-io/pmgr` `reg[0]`, m1n1
 /// `src/smp.c` `CPU_START_OFF_*` and the chips its `smp_init` gives each.
 const CPU_START_T8103: u64 = 0x54000;
@@ -347,6 +367,7 @@ const M1_MAX: Soc = Soc {
     aic: Some(("aic,2", 0xc000)),
     dram_base: Some(0x100_0000_0000),
     lockdown: Some(LOCKDOWN),
+    limits: Some(T6000_LIMITS),
     memory_cache: None,
     clusters: None,
     aon_fuses: None,
@@ -366,6 +387,7 @@ const M2_MAX: Soc = Soc {
     aic: Some(("aic,2", 0xc000)),
     dram_base: Some(0x100_0000_0000),
     lockdown: Some(LOCKDOWN),
+    limits: Some(T6020_LIMITS),
     memory_cache: None,
     clusters: None,
     aon_fuses: None,
@@ -385,6 +407,7 @@ const M3_MAX: Soc = Soc {
     aic: None,
     dram_base: None,
     lockdown: Some(LOCKDOWN),
+    limits: Some(T6031_LIMITS),
     memory_cache: None,
     clusters: None,
     aon_fuses: None,
@@ -405,6 +428,7 @@ const SOCS: [Soc; 18] = [
         aic: Some(("aic,1", AIC1_EVENT)),
         dram_base: Some(0x8_0000_0000),
         lockdown: Some(LOCKDOWN),
+        limits: Some(T8103_LIMITS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
@@ -423,6 +447,7 @@ const SOCS: [Soc; 18] = [
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
         lockdown: Some(LOCKDOWN),
+        limits: Some(T6000_LIMITS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
@@ -458,6 +483,7 @@ const SOCS: [Soc; 18] = [
         aic: Some(("aic,2", 0x8000)),
         dram_base: Some(0x8_0000_0000),
         lockdown: Some(LOCKDOWN),
+        limits: Some(T8112_LIMITS),
         memory_cache: Some((8 << 20, 16)),
         clusters: Some(T8112_CLUSTERS),
         aon_fuses: Some(36),
@@ -499,6 +525,7 @@ const SOCS: [Soc; 18] = [
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
         lockdown: Some(LOCKDOWN),
+        limits: Some(T6020_LIMITS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
@@ -524,6 +551,7 @@ const SOCS: [Soc; 18] = [
         aic: Some(("aic,3", 0x40000)),
         dram_base: None,
         lockdown: Some(LOCKDOWN),
+        limits: Some(T8122_LIMITS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
@@ -542,6 +570,7 @@ const SOCS: [Soc; 18] = [
         aic: None,
         dram_base: None,
         lockdown: Some(LOCKDOWN),
+        limits: Some(T6030_LIMITS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
@@ -576,6 +605,7 @@ const SOCS: [Soc; 18] = [
         aic: None,
         dram_base: None,
         lockdown: None,
+        limits: Some(T8132_LIMITS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
@@ -594,6 +624,7 @@ const SOCS: [Soc; 18] = [
         aic: None,
         dram_base: None,
         lockdown: None,
+        limits: Some(T6041_LIMITS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
@@ -612,6 +643,7 @@ const SOCS: [Soc; 18] = [
         aic: None,
         dram_base: None,
         lockdown: None,
+        limits: Some(T6041_LIMITS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
@@ -630,6 +662,7 @@ const SOCS: [Soc; 18] = [
         aic: None,
         dram_base: None,
         lockdown: None,
+        limits: Some(T8142_LIMITS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
@@ -648,6 +681,7 @@ const SOCS: [Soc; 18] = [
         aic: None,
         dram_base: None,
         lockdown: None,
+        limits: None,
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
@@ -804,6 +838,9 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
         return Err("the DeviceTree has no /cpus nodes".into());
     }
     topology::validate(processors)?;
+    if let Some(limits) = soc.limits {
+        limits.check(processors)?;
+    }
     let processors = processors
         .iter()
         .map(|processor| {
@@ -6503,10 +6540,18 @@ mod tests {
                 .aic,
             Some(("aic,2", 0xc000))
         );
-        // The M3's AICv3 has it at +0x40000.
+        // The M3's AICv3 has it at +0x40000; J613AP has four E and four P
+        // cores, within the M3's eight CPU slots (an M4's six E cores are
+        // not).
+        let j613 = [(b'E', 0), (b'E', 3), (b'P', 0x100), (b'P', 0x103)];
         assert_eq!(
-            cpus(0x8122, "Apple M3", &layout_of(&layout)).unwrap().aic,
+            cpus(0x8122, "Apple M3", &layout_of(&j613)).unwrap().aic,
             Some(("aic,3", 0x40000))
+        );
+        assert!(
+            cpus(0x8122, "Apple M3", &layout_of(&layout))
+                .unwrap_err()
+                .contains("CPU slots")
         );
         assert_eq!(dram_base(0x8112), Ok(0x8_0000_0000));
         assert_eq!(dram_base(0x6021), Ok(0x100_0000_0000));

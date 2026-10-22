@@ -9,7 +9,69 @@
 pub mod assigned;
 
 use super::Processor;
-use alloc::{format, string::String};
+use alloc::{collections::BTreeMap, format, string::String};
+
+/// A kernel's compiled CPU topology bounds: CPUs, clusters and the highest
+/// physical cluster number (MPIDR Aff1). XNU's `ml_parse_cpu_topology`
+/// checks them only with `assert`, which release kernels compile out, so a
+/// DeviceTree beyond them overruns the kernel's CPU and cluster arrays
+/// silently (`osfmk/arm64/machine_routines.c`). Its per-cluster CPU offset
+/// table also needs the sum over clusters of the highest Aff0 plus one to
+/// fit the CPU count, so holes in Aff0 consume slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KernelLimits {
+    cpus: usize,
+    clusters: usize,
+    cluster_id: u32,
+}
+
+impl KernelLimits {
+    pub const fn new(cpus: usize, clusters: usize, cluster_id: u32) -> Self {
+        Self {
+            cpus,
+            clusters,
+            cluster_id,
+        }
+    }
+
+    /// Refuse `processors` that exceed these bounds.
+    pub fn check(self, processors: &[Processor]) -> Result<(), String> {
+        let mut spans = BTreeMap::new();
+        for processor in processors {
+            let span = spans.entry(processor.reg >> 8).or_insert(0);
+            *span = (*span).max((processor.reg & 0xff) as usize + 1);
+        }
+        let cluster_id = spans.keys().copied().max().unwrap_or(0);
+        let span: usize = spans.values().sum();
+        if processors.len() > self.cpus {
+            return Err(format!(
+                "{} CPUs exceed the kernel's {} (MAX_CPUS)",
+                processors.len(),
+                self.cpus
+            ));
+        }
+        if spans.len() > self.clusters {
+            return Err(format!(
+                "{} CPU clusters exceed the kernel's {} (MAX_CPU_CLUSTERS)",
+                spans.len(),
+                self.clusters
+            ));
+        }
+        if cluster_id > self.cluster_id {
+            return Err(format!(
+                "CPU cluster {cluster_id} exceeds the kernel's highest, {} (MAX_CPU_CLUSTER_PHY_ID)",
+                self.cluster_id
+            ));
+        }
+        if span > self.cpus {
+            return Err(format!(
+                "the clusters' Aff0 spans need {span} CPU slots, beyond the kernel's {}",
+                self.cpus
+            ));
+        }
+        Ok(())
+    }
+}
 
 pub(super) fn validate(processors: &[Processor]) -> Result<(), String> {
     for (index, processor) in processors.iter().enumerate() {
@@ -38,6 +100,41 @@ mod tests {
             reg,
             l2_bytes: l2,
         }
+    }
+
+    /// XNU's T6000 bounds (20 CPUs, 6 clusters, cluster 10) admit the M1
+    /// Ultra's J375d topology and refuse one CPU, cluster, cluster number
+    /// or Aff0 slot more.
+    #[test]
+    fn kernel_limits_bound_cpus_clusters_cluster_ids_and_aff0_spans() {
+        let limits = KernelLimits::new(20, 6, 10);
+        let mut j375d = alloc::vec::Vec::new();
+        for die in [0, 0x800] {
+            j375d.extend([0, 1].map(|core| pe(b'E', die | core, Some(4 << 20))));
+            for cluster in [0x100, 0x200] {
+                j375d.extend((0..4).map(|core| pe(b'P', die | cluster | core, Some(16 << 20))));
+            }
+        }
+        assert_eq!(limits.check(&j375d), Ok(()));
+        let mut more = j375d.clone();
+        more.push(pe(b'E', 2, Some(4 << 20)));
+        assert!(limits.check(&more).unwrap_err().contains("MAX_CPUS"));
+        let clusters: alloc::vec::Vec<_> = (0..7).map(|c| pe(b'P', c << 8, None)).collect();
+        assert!(
+            limits
+                .check(&clusters)
+                .unwrap_err()
+                .contains("MAX_CPU_CLUSTERS")
+        );
+        assert!(
+            limits
+                .check(&[pe(b'P', 0xb00, None)])
+                .unwrap_err()
+                .contains("PHY_ID")
+        );
+        // Two cores at Aff0 0 and 15 of each of two clusters need 32 slots.
+        let sparse = [0x000, 0x00f, 0x100, 0x10f].map(|reg| pe(b'P', reg, None));
+        assert!(limits.check(&sparse).unwrap_err().contains("Aff0 spans"));
     }
 
     #[test]
