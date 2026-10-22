@@ -9,6 +9,10 @@
 //! such as `syscfg/WMac/6`); Asahi's m1n1 `proxyclient/m1n1/adt.py` reads the
 //! same flag. Parsing rejects anything that would not serialize back to the
 //! same bytes, so `serialize(parse(bytes)) == bytes` for every accepted tree.
+//! Readers step over a value's padding by its rounded length, so padding
+//! bytes a template leaves non-zero (26A434 J700AP's four SPMI
+//! `irq-behavior-map` values, two bytes followed by `21 04`) are kept as
+//! they are while the value keeps its length.
 pub mod assigned;
 
 use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
@@ -37,6 +41,9 @@ pub struct Property {
     pub value: Vec<u8>,
     /// Bit 31 of the encoded length: a template value iBoot must fill in.
     pub placeholder: bool,
+    /// Non-zero padding after the template's value, written back while the
+    /// value keeps its length.
+    padding: Vec<u8>,
 }
 
 impl Property {
@@ -53,6 +60,7 @@ impl Property {
             name: name.into(),
             value,
             placeholder: false,
+            padding: Vec::new(),
         })
     }
 
@@ -226,14 +234,16 @@ impl Reader<'_> {
         let length = (encoded & LENGTH_MASK) as usize;
         let value = self.take(length)?.to_vec();
         let padding = self.take(padded(length) - length)?;
-        ensure!(
-            padding.iter().all(|&b| b == 0),
-            "property {name} at {at:#x} has non-zero padding"
-        );
+        let padding = if padding.iter().any(|&b| b != 0) {
+            padding.to_vec()
+        } else {
+            Vec::new()
+        };
         Ok(Property {
             name,
             value,
             placeholder: encoded & PLACEHOLDER_FLAG != 0,
+            padding,
         })
     }
 
@@ -397,10 +407,12 @@ fn write_node(node: &Node, out: &mut Vec<u8>) {
         };
         out.extend((property.value.len() as u32 | flag).to_le_bytes());
         out.extend(&property.value);
-        out.resize(
-            out.len() + padded(property.value.len()) - property.value.len(),
-            0,
-        );
+        let pad = padded(property.value.len()) - property.value.len();
+        if property.padding.len() == pad {
+            out.extend(&property.padding);
+        } else {
+            out.resize(out.len() + pad, 0);
+        }
     }
     for child in &node.children {
         write_node(child, out);
@@ -526,6 +538,27 @@ mod tests {
     }
 
     #[test]
+    fn keeps_non_zero_padding_while_the_value_keeps_its_length() -> Result<()> {
+        // The 5-byte random-seed value has three padding bytes.
+        let mut bytes = fixture();
+        let header = PROPERTY_HEADER_BYTES;
+        let value = bytes.windows(11).position(|w| w == b"random-seed").unwrap() + header;
+        bytes[value + 5..value + 8].copy_from_slice(&[0x21, 0x04, 0x21]);
+        let mut tree = DeviceTree::parse(&bytes)?;
+        assert_eq!(tree.serialize(), bytes);
+        fn seed(tree: &mut DeviceTree) -> &mut Vec<u8> {
+            let chosen = tree.node_mut("/chosen").unwrap();
+            &mut chosen.property_mut("random-seed").unwrap().value
+        }
+        seed(&mut tree)[0] = 7;
+        bytes[value] = 7;
+        assert_eq!(tree.serialize(), bytes);
+        seed(&mut tree).push(0);
+        assert!(!tree.serialize().contains(&0x21));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_inputs_that_would_not_round_trip() {
         let good = fixture();
         assert!(DeviceTree::parse(&good[..good.len() - 1]).is_err());
@@ -536,12 +569,6 @@ mod tests {
         let mut name = good.clone();
         name[8 + 6] = b'x';
         assert!(DeviceTree::parse(&name).is_err());
-        // Non-zero padding after the 12-byte "device-tree\0" value is absent;
-        // corrupt the pad after the 11-byte "memory-map\0" value instead.
-        let pad = good.windows(11).position(|w| w == b"memory-map\0").unwrap() + 11;
-        let mut padding = good.clone();
-        padding[pad] = 1;
-        assert!(DeviceTree::parse(&padding).is_err());
         let mut counts = good;
         counts[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(DeviceTree::parse(&counts).is_err());
