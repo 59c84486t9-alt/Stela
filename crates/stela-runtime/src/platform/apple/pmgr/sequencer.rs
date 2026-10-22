@@ -63,6 +63,7 @@ pub enum Error {
     WidePadding,
     UnqualifiedInstruction(u32),
     UnqualifiedRetirement,
+    FinalizedExtent,
     ExpectedWrite,
     ExpectedRead,
     PollEncoding,
@@ -216,6 +217,48 @@ impl PacketCursor {
         } else {
             Err(Error::UnqualifiedInstruction(header))
         }
+    }
+
+    pub(crate) fn check_progress(&self) -> Result<(), Error> {
+        if self.quarantined() {
+            return Err(Error::UncertainEffects);
+        }
+        if self.in_flight.is_some() {
+            return Err(Error::InFlight);
+        }
+        if self.suspended {
+            return Err(Error::Suspended);
+        }
+        Ok(())
+    }
+    pub(crate) fn in_flight(&self) -> Option<bool> {
+        self.in_flight.as_ref().map(|flight| flight.dispatched)
+    }
+    /// The matching compiler appends one zero after its exact counted words.
+    /// Only the controller's bound finalized-image owner may call this after
+    /// every supported effect retired. An arbitrary/early zero is not an end.
+    pub(crate) fn retire_finalized(&mut self, counted_words: u32) -> Result<(), Error> {
+        if self.quarantined() {
+            return Err(Error::UncertainEffects);
+        }
+        if self.in_flight.is_some() {
+            return Err(Error::InFlight);
+        }
+        if self.suspended {
+            return Err(Error::Suspended);
+        }
+        let sram = self.sram.as_ref().ok_or(Error::UnknownSram)?;
+        if self.packet.is_some()
+            || self.poll.is_some()
+            || self.delay.is_some()
+            || self.pc != counted_words as usize
+            || sram.words.len() != self.pc + 1
+            || sram.words[self.pc] != 0
+        {
+            return Err(Error::FinalizedExtent);
+        }
+        self.pc += 1;
+        Ok(())
     }
 
     pub fn committed_writes(&self) -> u64 {

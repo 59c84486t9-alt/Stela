@@ -2,8 +2,10 @@
 //!
 //! These are the original native-program configuration/activation words and the
 //! physical SRAM used by `pmgr::install::t6000`. No request, installed pointer,
-//! zero instruction or observed control value establishes a hardware trigger
-//! or native retirement. Every view shares the parent controller's lifecycle,
+//! zero instruction or observed control value alone establishes a hardware
+//! trigger or retirement. The optional Stela-native CIO engine owns accepted
+//! requests, actual packet effects and exact finalized ends. It does not claim
+//! captured Apple microstate. Every view shares the parent controller's lifecycle,
 //! request prefix and actual byte storage; there is no parallel SRAM image.
 use super::{Controller, RequestKind};
 use crate::platform::apple::{
@@ -15,6 +17,7 @@ use crate::platform::apple::{
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 pub mod effects;
+pub mod engine;
 
 const NAME: &str = "t6000-native-controller";
 const SRAM_BYTES: usize = (SRAM_LIMIT - SRAM_BASE) as usize;
@@ -53,6 +56,7 @@ pub enum Error {
     Clock(super::clock::Error),
     ClockUnbound,
     ClockBound,
+    Engine(engine::Error),
 }
 impl Error {
     fn reason(self) -> &'static str {
@@ -82,6 +86,7 @@ impl Error {
             Self::Clock(error) => error.reason(),
             Self::ClockUnbound => "T6000 native packet clock inputs/phase are not bound",
             Self::ClockBound => "T6000 native packet clock already has an exclusive owner",
+            Self::Engine(error) => error.reason(),
         }
     }
 }
@@ -181,6 +186,7 @@ pub struct Observations {
     pub stela_initialization: Option<SramInitialization>,
     pub activation_inputs: Vec<ActivationInput>,
     pub packet_effects_owned: bool,
+    pub cio_engine: Option<engine::Observations>,
 }
 /// Chronological committed AP input, not a hardware trigger/completion report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +213,7 @@ pub(super) struct State {
     activation_inputs: Vec<ActivationInput>,
     packet_effects_owned: bool,
     pub(super) clock: Option<super::clock::phase::Clock>,
+    engine: Option<engine::State>,
 }
 impl State {
     pub(super) fn new(handoff: Handoff) -> Result<Self, Error> {
@@ -231,6 +238,7 @@ impl State {
             activation_inputs: Vec::new(),
             packet_effects_owned: false,
             clock: None,
+            engine: None,
         };
         match handoff {
             Handoff::Unknown => {}
@@ -279,6 +287,23 @@ impl State {
         }
         Ok(state)
     }
+    pub(super) fn engine_bound(&self) -> bool {
+        self.engine.is_some()
+    }
+    pub(super) fn request_retired(&self, serial: u64) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|engine| engine.completed(serial))
+    }
+    pub(super) fn accepts_cio(&self, requests: &[super::Request]) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|engine| engine.accepting(requests))
+            && [GPCE + 0x6c, GPCE + 0x74].into_iter().all(|address| {
+                self.read_control(address, Width::Word)
+                    .is_ok_and(|value| value & 1 != 0)
+            })
+    }
     fn observe(&self) -> Observations {
         let mut fragments = Vec::new();
         let mut offset = 0;
@@ -303,6 +328,7 @@ impl State {
             stela_initialization: self.initialization,
             activation_inputs: self.activation_inputs.clone(),
             packet_effects_owned: self.packet_effects_owned,
+            cio_engine: self.engine.as_ref().map(engine::State::observe),
         }
     }
     fn activation_word(address: u64) -> bool {
@@ -314,6 +340,7 @@ impl State {
     /// not erase earlier work that may already have started.
     fn reconfiguration_qualified(&self) -> bool {
         !self.packet_effects_owned
+            && self.engine.is_none()
             && self.activation_inputs.is_empty()
             && ACTIVATION_WORDS.iter().all(|(address, fields)| {
                 let word = self
@@ -543,13 +570,17 @@ pub struct View {
     sram: bool,
 }
 impl View {
-    fn pending(state: &super::State) -> bool {
+    pub(super) fn pending(state: &super::State) -> bool {
         !state.captured_pending.is_empty()
             || state.requests.iter().any(|request| {
-                !matches!(
-                    request.kind,
-                    RequestKind::AutomaticGating { enabled: false, .. }
-                )
+                !state
+                    .native
+                    .as_ref()
+                    .is_some_and(|native| native.request_retired(request.serial))
+                    && !matches!(
+                        request.kind,
+                        RequestKind::AutomaticGating { enabled: false, .. }
+                    )
             })
             || state.words.values().any(|word| {
                 word.bank == super::Bank::Pmgr

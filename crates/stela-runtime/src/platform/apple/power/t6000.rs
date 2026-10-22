@@ -8,10 +8,13 @@
 //! handoff observations; source selector capacity is not hardware inventory.
 //!
 //! Requests are committed controller inputs, not completed native programs.
-//! GPCE bits4/5/6 and CIO request/response readback become unknown after a
-//! request. No trigger-to-SRAM-PC, readiness, initial state, timeout success or
-//! native retirement is fabricated. A retained pause preserves every input,
-//! observation and chronological prefix across all mapped views.
+//! GPCE bits4/5/6 remain unknown after requests. CIO readback remains unknown
+//! without the explicitly bound Stela-native engine. That engine derives its
+//! command/busy state from actual requests and only retires them after routed
+//! effects, a matching source action and the finalized end. No captured Apple
+//! micro-PC, cold state or unsupported native operation is manufactured.
+//! A retained pause preserves every input, observation and chronological prefix
+//! across all mapped views.
 use super::super::bus::{
     Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
 };
@@ -165,9 +168,9 @@ impl State {
     }
 }
 
-/// Shared authority for every mapped instance. No method drains pending work
-/// or replaces a handoff observation after committed requests; those operations
-/// require the independently qualified native execution/retirement contract.
+/// Shared authority for every mapped instance. Handoff observations cannot be
+/// replaced after requests. The optional CIO native engine consumes only its
+/// own accepted requests through real effects and finalized retirement.
 #[derive(Clone)]
 pub struct Controller(Rc<RefCell<State>>);
 impl Controller {
@@ -409,11 +412,32 @@ impl MmioDevice for View {
                     "T6000 CIO only qualifies one admitted port request bit",
                 ));
             }
-            // The source directly writes the low request bit and polls a high
-            // response bit. It does not prove low-bit latch/W1/readback rules
-            // or reserved-field effects; preserve the observation and mark its
-            // post-request word unknown rather than invent those rules.
-            (RequestKind::Cio { port }, Observation { known: 0, ..old })
+            // Without the actual Stela-native execution owner, the AP request
+            // and wait alone establish no response or low-bit readback. Keep
+            // that unbound path unknown. The explicitly bound engine below
+            // instead reports its own retained command/busy state.
+            let next = if let Some(native) =
+                state.native.as_ref().filter(|native| native.engine_bound())
+            {
+                if old.known != u32::MAX
+                    || native::View::pending(&state)
+                    || !native.accepts_cio(&state.requests)
+                {
+                    return Err(fail(
+                        "T6000 CIO native engine requires known idle/activated command state and exclusive pending ownership",
+                    ));
+                }
+                // Stela engine command/busy state derives from this real
+                // accepted transaction. Native footer/end retirement, not a
+                // write-time success shortcut, consumes these bits.
+                Observation {
+                    value: old.value | value | (value << 16),
+                    ..old
+                }
+            } else {
+                Observation { known: 0, ..old }
+            };
+            (RequestKind::Cio { port }, next)
         } else if offset >= CPM_BASE {
             if old.known != u32::MAX || (value ^ old.value) & !CPM_ENABLE != 0 {
                 return Err(fail(
@@ -475,10 +499,13 @@ impl MmioDevice for View {
             return Ok(None);
         }
         if !state.captured_pending.is_empty()
-            || state
-                .requests
-                .iter()
-                .any(|request| !matches!(request.kind, RequestKind::AutomaticGating { .. }))
+            || state.requests.iter().any(|request| {
+                !matches!(request.kind, RequestKind::AutomaticGating { .. })
+                    && !state
+                        .native
+                        .as_ref()
+                        .is_some_and(|native| native.request_retired(request.serial))
+            })
         {
             return Err(refuse(
                 NAME,

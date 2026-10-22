@@ -7,11 +7,12 @@ use super::{Controller, Error};
 use crate::platform::apple::pmgr::sequencer::{
     self, AddressFormat, PacketCursor, PhysicalWrite, RouteOutcome, WriteClaim, delay, poll,
 };
-use alloc::vec;
+use alloc::{rc::Rc, vec};
+use core::cell::RefCell;
 
 pub struct Effects {
-    controller: Controller,
-    cursor: PacketCursor,
+    pub(super) controller: Controller,
+    pub(super) cursor: Rc<RefCell<PacketCursor>>,
 }
 impl Controller {
     /// Bind complete actual clock inputs and a separately qualified phase to
@@ -74,7 +75,7 @@ impl Controller {
         state.accessible().map_err(|_| Error::Paused)?;
         let suspended = state.paused();
         let native = state.native.as_mut().ok_or(Error::Unmounted)?;
-        if native.packet_effects_owned {
+        if native.packet_effects_owned || native.engine.is_some() {
             return Err(Error::EffectsOwned);
         }
         let entry = native.entry(group, slot)?;
@@ -93,12 +94,12 @@ impl Controller {
         native.packet_effects_owned = true;
         Ok(Effects {
             controller: self.clone(),
-            cursor,
+            cursor: Rc::new(RefCell::new(cursor)),
         })
     }
 }
 impl Effects {
-    fn refresh_pause(&mut self) -> Result<(), sequencer::Error> {
+    pub(super) fn refresh_pause(&mut self) -> Result<(), sequencer::Error> {
         let state = self.controller.0.borrow();
         if state
             .native
@@ -108,29 +109,29 @@ impl Effects {
         {
             return Err(sequencer::Error::UnqualifiedClockPhase);
         }
-        self.cursor.set_suspended(state.paused());
+        self.cursor.borrow_mut().set_suspended(state.paused());
         Ok(())
     }
     pub fn packet_pc(&self) -> Option<u64> {
-        self.cursor.packet_pc()
+        self.cursor.borrow().packet_pc()
     }
     pub fn packet_kind(&self) -> Result<sequencer::PacketKind, sequencer::Error> {
-        self.cursor.packet_kind()
+        self.cursor.borrow().packet_kind()
     }
     pub fn committed_writes(&self) -> u64 {
-        self.cursor.committed_writes()
+        self.cursor.borrow().committed_writes()
     }
     pub fn committed_reads(&self) -> u64 {
-        self.cursor.committed_reads()
+        self.cursor.borrow().committed_reads()
     }
     pub fn pending_poll(&self) -> Option<poll::Poll> {
-        self.cursor.pending_poll()
+        self.cursor.borrow().pending_poll()
     }
     pub fn last_poll_value(&self) -> Option<u64> {
-        self.cursor.last_poll_value()
+        self.cursor.borrow().last_poll_value()
     }
     pub fn pending_delay(&self) -> Option<u32> {
-        self.cursor.pending_delay()
+        self.cursor.borrow().pending_delay()
     }
     /// Earliest actual system-counter sample for the current delay. Unknown
     /// clocks return an error; a stopped clock or suspended service has no
@@ -149,6 +150,7 @@ impl Effects {
             .ok_or(Error::ClockUnbound)?;
         let Some(remaining) = self
             .cursor
+            .borrow()
             .remaining_delay_at(clock.cycles().map_err(Error::Clock)?)
             .map_err(Error::Cursor)?
         else {
@@ -174,55 +176,58 @@ impl Effects {
             .observe(now, running)
             .map_err(Error::Clock)?;
         drop(state);
-        self.cursor.set_suspended(paused);
-        self.cursor.advance_delay(cycles).map_err(Error::Cursor)
+        self.cursor.borrow_mut().set_suspended(paused);
+        self.cursor
+            .borrow_mut()
+            .advance_delay(cycles)
+            .map_err(Error::Cursor)
     }
     pub fn uncertain_write(&self) -> Option<PhysicalWrite> {
-        self.cursor.uncertain_write()
+        self.cursor.borrow().uncertain_write()
     }
     pub fn uncertain_read(&self) -> Option<poll::PhysicalRead> {
-        self.cursor.uncertain_read()
+        self.cursor.borrow().uncertain_read()
     }
     pub fn begin_write(&mut self) -> Result<WriteClaim, sequencer::Error> {
         self.refresh_pause()?;
-        self.cursor.begin_write()
+        self.cursor.borrow_mut().begin_write()
     }
     pub fn dispatch_write(
         &mut self,
         claim: &WriteClaim,
     ) -> Result<PhysicalWrite, sequencer::Error> {
         self.refresh_pause()?;
-        self.cursor.dispatch_write(claim)
+        self.cursor.borrow_mut().dispatch_write(claim)
     }
     pub fn cancel_write(&mut self, claim: &WriteClaim) -> Result<(), sequencer::Error> {
-        self.cursor.cancel_claim(claim)
+        self.cursor.borrow_mut().cancel_claim(claim)
     }
     pub fn finish_write<E>(
         &mut self,
         claim: &WriteClaim,
         outcome: RouteOutcome<E>,
     ) -> Result<(), sequencer::FinishError<E>> {
-        self.cursor.finish_write(claim, outcome)
+        self.cursor.borrow_mut().finish_write(claim, outcome)
     }
     pub fn begin_read(&mut self) -> Result<poll::ReadClaim, sequencer::Error> {
         self.refresh_pause()?;
-        self.cursor.begin_read()
+        self.cursor.borrow_mut().begin_read()
     }
     pub fn dispatch_read(
         &mut self,
         claim: &poll::ReadClaim,
     ) -> Result<poll::PhysicalRead, sequencer::Error> {
         self.refresh_pause()?;
-        self.cursor.dispatch_read(claim)
+        self.cursor.borrow_mut().dispatch_read(claim)
     }
     pub fn cancel_read(&mut self, claim: &poll::ReadClaim) -> Result<(), sequencer::Error> {
-        self.cursor.cancel_read(claim)
+        self.cursor.borrow_mut().cancel_read(claim)
     }
     pub fn finish_read<E>(
         &mut self,
         claim: &poll::ReadClaim,
         outcome: poll::Outcome<E>,
     ) -> Result<bool, poll::FinishError<E>> {
-        self.cursor.finish_read(claim, outcome)
+        self.cursor.borrow_mut().finish_read(claim, outcome)
     }
 }
