@@ -87,7 +87,7 @@ pub const CPU_STS_RUNNING: u64 = 1;
 #[derive(Debug, Clone)]
 pub struct Lockdown {
     name: &'static str,
-    control: u64,
+    control: Option<u64>,
     lock: u64,
     mask: u64,
     pe: Option<Pe>,
@@ -105,11 +105,28 @@ impl Lockdown {
     pub fn new(name: &'static str, control: u64) -> Self {
         Self {
             name,
-            control,
+            control: Some(control),
             lock: 0,
             mask: 0,
             pe: None,
         }
+    }
+
+    /// A PE implementation block with no legacy lockdown pair. The M4 and
+    /// later SPTM census describes no PIO lockdown writes, independently of
+    /// the PE's RVBAR and CPU_STS contract. m1n1 7cde7d1a `src/smp.c`
+    /// still accesses RVBAR at `cpu-impl-reg + 0` on those chips; XNU
+    /// xnu-12377.121.6 `apple_arm64_regs.h` defines CPU_STS and throttle
+    /// offsets independently of HAS_CTRR. No lock registers are fabricated.
+    pub fn processor(entry: u64) -> Self {
+        Self {
+            name: "cpu-impl-reg",
+            control: None,
+            lock: 0,
+            mask: 0,
+            pe: None,
+        }
+        .with_reset_vector(entry)
     }
 
     /// A PE's block, whose RVBAR the boot firmware locked on `entry`; the
@@ -142,7 +159,10 @@ impl Lockdown {
 
     fn register(&self, offset: u64, width: Width, direction: Direction) -> Result<bool, MmioError> {
         let refused = |reason| refuse(self.name, offset, width, direction, reason);
-        let is_mask = match offset.checked_sub(self.control) {
+        let control = self
+            .control
+            .ok_or_else(|| refused("this PE implementation block has no legacy lockdown pair"))?;
+        let is_mask = match offset.checked_sub(control) {
             Some(0) => false,
             Some(8) => true,
             _ => return Err(refused("register without public description")),
@@ -268,6 +288,49 @@ mod tests {
                 .is_err()
         );
         assert!(block.read(0, Width::Word, &mut access).is_err());
+    }
+
+    #[test]
+    fn processor_words_do_not_require_or_invent_a_legacy_lockdown_pair() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let entry = 0x100_0300_c000;
+        let mut block = Lockdown::processor(entry);
+        assert_eq!(block.reset_address(), Some(entry));
+        assert_eq!(
+            block.read(RVBAR, Width::Double, &mut access),
+            Ok(entry | LOCK)
+        );
+        assert_eq!(block.read(CPU_STS, Width::Double, &mut access), Ok(0));
+        block.set_running(true);
+        assert_eq!(
+            block.read(CPU_STS, Width::Double, &mut access),
+            Ok(CPU_STS_RUNNING)
+        );
+        block.set_running(false);
+        assert_eq!(block.read(CPU_STS, Width::Double, &mut access), Ok(0));
+        block
+            .write(CORE_THRTL_CFG2, Width::Double, 0xb2 << 56, &mut access)
+            .unwrap();
+        assert_eq!(
+            block.read(CORE_THRTL_CFG2, Width::Double, &mut access),
+            Ok(0xb2 << 56)
+        );
+        block
+            .write(RVBAR, Width::Double, entry | LOCK, &mut access)
+            .unwrap();
+        assert!(
+            block
+                .write(RVBAR, Width::Double, (entry + 0x1000) | LOCK, &mut access)
+                .is_err()
+        );
+        for offset in [0x5000, 0x5008, 0x9000, 0x9008] {
+            assert!(block.read(offset, Width::Double, &mut access).is_err());
+            assert!(block.write(offset, Width::Double, 0, &mut access).is_err());
+        }
+        assert!(block.write(CPU_STS, Width::Double, 0, &mut access).is_err());
+        assert!(block.read(RVBAR, Width::Word, &mut access).is_err());
+        assert!(!block.locked());
     }
 
     #[test]
