@@ -33,6 +33,12 @@ fn selected_discovery_file_preserves_original_validation_and_release_order() {
     run("file-test");
 }
 
+#[test]
+fn discovery_information_preserves_original_harvest_and_schema_results() {
+    run("info-test");
+    run("info-isp-test");
+}
+
 fn run(target: &str) {
     let directory = tempfile::tempdir().unwrap();
     let source = tools::root().join("crates/stela-drivers/src/gpu/amd/stela/Makefile");

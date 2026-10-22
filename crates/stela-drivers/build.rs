@@ -32,6 +32,7 @@ fn main() {
         // Preserve the original IP walk's signed counter semantics locally.
         native::configure()
             .file("src/gpu/amd/stela/discovery_ip.c")
+            .file("src/gpu/amd/stela/discovery_info.c")
             .include("src/gpu/common/linux/include")
             .flag("-fwrapv")
             .std("c11")
@@ -73,6 +74,8 @@ fn main() {
             "src/gpu/amd/amdgpu/amdgpu_discovery_tmr_core.h",
             "src/gpu/amd/amdgpu/amdgpu_discovery_tmr_limits.h",
             "src/gpu/amd/amdgpu/amdgpu_discovery_ip_core.h",
+            "src/gpu/amd/amdgpu/amdgpu_discovery_info_core.h",
+            "src/gpu/amd/amdgpu/amdgpu_gfx_config.h",
             "src/gpu/amd/amdgpu/amdgpu_discovery_file_core.h",
             "src/gpu/amd/amdgpu/amdgpu_ip_types.h",
             "src/gpu/amd/amdgpu/amdgpu_ip_instance_limits.h",
@@ -81,6 +84,7 @@ fn main() {
             "src/gpu/amd/amdgpu/amdgpu_apu_flags_core.h",
             "src/gpu/amd/amdgpu/amdgpu_discovery_source_core.h",
             "src/gpu/amd/include/amd_chip_flags.h",
+            "src/gpu/amd/include/amd_harvest_masks.h",
             "src/gpu/amd/include/asic_reg/bif/bif_4_1_d.h",
             "src/gpu/amd/tests/vm_ram_test.c",
             "src/gpu/amd/tests/native_bar_test.c",
