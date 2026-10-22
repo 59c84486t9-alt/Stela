@@ -11,6 +11,7 @@ use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
 
 mod container;
+pub(crate) use container::SharedView;
 
 /// Access width in bytes. Apple MMIO is little-endian.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,10 +211,14 @@ pub struct DeviceId(usize);
 pub enum MapError {
     Empty,
     Overflow,
-    Overlap { existing: DeviceId },
+    Overlap {
+        existing: DeviceId,
+    },
     UnknownDevice,
     Allocation,
     ProposedOverlap,
+    /// An explicit shared view lacks complete, matching existing ownership.
+    InvalidSharedView,
 }
 
 #[derive(Debug, Clone, Copy)]

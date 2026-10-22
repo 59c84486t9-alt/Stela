@@ -127,12 +127,48 @@ impl Prepared {
             .enumerate()
             .map(|(index, &pa)| (pa, mcc::APERTURE_BYTES, index as u64 * mcc::APERTURE_BYTES))
             .collect();
-        bindings.push((
+        bindings.push(self.publication_binding());
+        bindings
+    }
+    pub(super) fn publication_binding(&self) -> (u64, u64, u64) {
+        (
             self.descriptor.ptd.physical,
             crate::platform::apple::ptd::PTD_BYTES,
             self.ptd_offset(),
-        ));
-        bindings
+        )
+    }
+    /// A declared physical display view may cover the PTD update alias and its
+    /// unimplemented tail. It must start at the actual update bank, cover every
+    /// update slot and stay inside this owner's complete publication aperture.
+    /// The returned device offset routes to this exact Ptd, without increasing
+    /// its qualified register geometry or allocating another backing.
+    pub(super) fn display_publication_view(
+        &self,
+        physical: u64,
+        bytes: u64,
+    ) -> Result<(u64, u64, u64), &'static str> {
+        let end = physical
+            .checked_add(bytes)
+            .ok_or("display PTD view overflows")?;
+        let bank_end = self
+            .descriptor
+            .ptd
+            .physical
+            .checked_add(crate::platform::apple::ptd::PTD_BYTES)
+            .ok_or("prepared PTD bank overflows")?;
+        if physical != self.descriptor.ptd_updates.0
+            || bytes < self.descriptor.ptd_updates.1
+            || end > bank_end
+        {
+            return Err(
+                "display PTD view must cover the actual complete update alias within its bank",
+            );
+        }
+        Ok((
+            physical,
+            bytes,
+            self.ptd_offset() + crate::platform::apple::ptd::UPDATE_OFFSET,
+        ))
     }
     fn ptd_offset(&self) -> u64 {
         self.descriptor.apertures.len() as u64 * mcc::APERTURE_BYTES

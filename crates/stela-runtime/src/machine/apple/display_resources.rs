@@ -4,7 +4,9 @@ use super::*;
 impl AppleDevices {
     /// Mount all original physical display views in one transaction, leaving
     /// the selected coprocessor and explicitly supplied complete DART groups
-    /// at their existing routes. No display register gains fabricated meaning.
+    /// at their existing routes. A declared update subview also retains the
+    /// canonical Prepared PTD owner, offsets, lifecycle and unknown tail.
+    /// No display register gains fabricated meaning.
     pub fn add_display_with_darts(
         &mut self,
         regions: &[(&'static str, Range)],
@@ -48,7 +50,44 @@ impl AppleDevices {
             .iter()
             .map(|(_, range)| (range.physical, range.bytes))
             .collect::<Vec<_>>();
-        let bindings = self.bus.container_bindings(&spans, &children).map_err(|error| {
+        // The PMGR/AP full PTD bank and display's update view name the same
+        // physical resource. Only the actual prepared owner can supply this
+        // subview; a bare overlap or matching name never qualifies it.
+        let mut shared: Vec<crate::platform::apple::bus::SharedView> = Vec::new();
+        if let Some(device) = self.memory_controller
+            && let Some(owner) = self.bus.device::<memory_resources::Prepared>(device)
+        {
+            let (bank_start, bank_bytes, bank_offset) = owner.publication_binding();
+            let bank_end = bank_start + bank_bytes;
+            if spans
+                .iter()
+                .any(|&(physical, bytes)| physical < bank_end && bank_start < physical + bytes)
+            {
+                // The original parent owns the full publication bank, including
+                // LDP entries and IRQs outside display's narrower update view.
+                self.bus
+                    .shared_view(device, bank_start, bank_bytes, bank_offset)
+                    .map_err(|error| format!("display full PTD owner: {error:?}"))?;
+            }
+            for &(physical, bytes) in &spans {
+                // Region::physical has already checked these ends.
+                if physical < bank_end && bank_start < physical + bytes {
+                    let (start, bytes, offset) = owner.display_publication_view(physical, bytes)?;
+                    shared.push(
+                        self.bus
+                            .shared_view(device, start, bytes, offset)
+                            .map_err(|error| format!("display PTD shared view: {error:?}"))?,
+                    );
+                }
+            }
+        }
+        let plan = if shared.is_empty() {
+            self.bus.container_bindings(&spans, &children)
+        } else {
+            self.bus
+                .container_bindings_with_shared(&spans, &children, &shared)
+        };
+        let bindings = plan.map_err(|error| {
             let owner = match error {
                 MapError::Overlap { existing } => self.bus.device_name(existing).unwrap_or("unknown"),
                 _ => "none",
@@ -225,5 +264,311 @@ mod tests {
         assert_eq!(devices.bus.route(PRIMARY + 0x100000, Width::Word), Ok(old));
         assert!(devices.bus.route(PRIMARY, Width::Word).is_err());
         assert!(devices.bus.route(SHARED, Width::Word).is_err());
+    }
+    use crate::{
+        machine::soc::{DirectMemoryCache, MemoryController, PtdBank},
+        platform::apple::{
+            amcc::{Layout, LockGroup, Register},
+            bus::{Lifecycle, LifecycleState, MmioError},
+            interrupt::InterruptLatch,
+            mcc::{self, Configuration},
+            ptd,
+        },
+    };
+    fn prepared() -> memory_resources::Prepared {
+        let reg = |offset, mask, value| Register {
+            offset,
+            mask,
+            value,
+        };
+        let locks = MemoryController {
+            apertures: vec![0x200000000, 0x201000000],
+            layout: Layout {
+                aperture_bytes: 0x200000,
+                planes: 4,
+                stride: mcc::PLANE_STRIDE,
+                cache_status: Some(reg(0x10000c, 1, 1)),
+                dram_base: 0x800000000,
+                group: LockGroup {
+                    page_size_shift: 14,
+                    lower_limit: reg(0x680, u32::MAX, 0),
+                    upper_limit: reg(0x684, u32::MAX, 0),
+                    enable: Some(reg(0x688, 1, 1)),
+                    write_disable: None,
+                    lock: Some(reg(0x68c, 1, 1)),
+                },
+            },
+        };
+        let descriptor = DirectMemoryCache {
+            apertures: locks.apertures.clone(),
+            config_data: vec![1],
+            alternate_dram_configuration: 0xffff0000,
+            ptd: PtdBank {
+                physical: 0x28e3c0000,
+                ranges: vec![ptd::Range {
+                    id: 1,
+                    start: 0,
+                    count: 2,
+                    name: "DECLARED".into(),
+                }],
+                interrupts: vec![14],
+            },
+            ptd_updates: (0x28e3d0000, 0xc00),
+            ptd_entries: 384,
+        };
+        memory_resources::Prepared::new(
+            descriptor,
+            &locks,
+            Some((0x800004000, 0x4000)),
+            Configuration {
+                dram: vec![[7; 4]; 2],
+                weights: [1; 32],
+            },
+            LifecycleState {
+                powered: true,
+                clocked: true,
+                reset: false,
+                quiesced: false,
+                retention: true,
+            },
+            [None; 16],
+        )
+        .unwrap()
+    }
+
+    fn mount_prepared(
+        devices: &mut AppleDevices,
+        owner: memory_resources::Prepared,
+    ) -> (DeviceId, ptd::Ptd) {
+        let publication = owner.publication_bank().clone();
+        let bindings = owner.bindings();
+        let id = devices.bus.install(Box::new(owner), &bindings).unwrap();
+        devices.memory_controller = Some(id);
+        (id, publication)
+    }
+
+    #[test]
+    fn display_update_view_uses_actual_prepared_storage_and_preserves_unknown_tail() {
+        let (mut devices, owners, views) = placement();
+        let (id, publication) = mount_prepared(&mut devices, prepared());
+        let addresses = [
+            TRAD,
+            UMMS,
+            FIRMWARE,
+            WRAPPER + 0x8114,
+            SHARED - 0x10000,
+            SHARED,
+            SHARED + 0x3ffc,
+            SHARED + 0xfffc,
+        ];
+        let before = addresses.map(|pa| devices.bus.route(pa, Width::Word).unwrap());
+        devices
+            .add_display_with_darts(&views, "DCPEXT0", &owners)
+            .unwrap();
+        assert_eq!(
+            addresses.map(|pa| devices.bus.route(pa, Width::Word).unwrap()),
+            before
+        );
+        assert_eq!(
+            devices.bus.route(SHARED, Width::Double),
+            Ok((id, 2 * mcc::APERTURE_BYTES + ptd::UPDATE_OFFSET))
+        );
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 17, &mut latch);
+        for (entry, value) in [(0, 0x1234), (383, 0xdead_beef)] {
+            devices
+                .bus
+                .write(SHARED + entry * 8, Width::Double, value, &mut access)
+                .unwrap();
+            let consumed = publication
+                .consume_entry(entry as u32, &mut access)
+                .unwrap();
+            assert_eq!(consumed.value, value);
+            assert_eq!(consumed.metadata, (17 << 10) | 2);
+        }
+        let history = publication.requests();
+        assert_eq!(history.len(), 2);
+        for (pa, width) in [
+            (SHARED + 0xc00, Width::Double),
+            (SHARED + 0x3ff8, Width::Double),
+            (SHARED, Width::Word),
+        ] {
+            let error = devices.bus.write(pa, width, 7, &mut access).unwrap_err();
+            assert!(matches!(
+                error,
+                MmioError::Unsupported { device: "ptd", .. }
+            ));
+        }
+        assert!(
+            devices
+                .bus
+                .read(SHARED, Width::Double, &mut access)
+                .is_err()
+        );
+        assert_eq!(publication.requests(), history);
+        let active = publication.lifecycle_state();
+        devices
+            .bus
+            .device_mut::<memory_resources::Prepared>(id)
+            .unwrap()
+            .set_lifecycle(
+                LifecycleState {
+                    clocked: false,
+                    ..active
+                },
+                &mut access,
+            );
+        assert!(!publication.lifecycle_state().clocked);
+        assert!(
+            devices
+                .bus
+                .write(SHARED, Width::Double, 0x99, &mut access)
+                .is_err()
+        );
+        assert_eq!(publication.requests(), history);
+        devices
+            .bus
+            .device_mut::<memory_resources::Prepared>(id)
+            .unwrap()
+            .set_lifecycle(active, &mut access);
+        devices
+            .bus
+            .write(SHARED, Width::Double, 0x99, &mut access)
+            .unwrap();
+        assert_eq!(
+            publication.consume_entry(0, &mut access).unwrap().value,
+            0x99
+        );
+        assert_eq!(publication.requests().len(), 3);
+    }
+
+    #[test]
+    fn display_shared_view_refuses_wrong_offsets_holes_and_unrelated_prepared_identity_atomically()
+    {
+        for invalid in 0..5 {
+            let (mut devices, owners, views) = placement();
+            let owner = prepared();
+            let publication = owner.publication_bank().clone();
+            let mut bindings = owner.bindings();
+            let (pa, bytes, offset) = bindings.pop().unwrap();
+            match invalid {
+                0 => bindings.push((pa, bytes, offset + 8)),
+                1 => {
+                    bindings.push((pa, 0x10400, offset));
+                    bindings.push((pa + 0x11000, bytes - 0x11000, offset + 0x11000));
+                }
+                2 => bindings.push((pa, bytes, offset)),
+                3 => bindings.push((
+                    pa + ptd::UPDATE_OFFSET,
+                    bytes - ptd::UPDATE_OFFSET,
+                    offset + ptd::UPDATE_OFFSET,
+                )),
+                _ => {
+                    bindings.push((pa, ptd::UPDATE_OFFSET, offset + 8));
+                    bindings.push((
+                        pa + ptd::UPDATE_OFFSET,
+                        bytes - ptd::UPDATE_OFFSET,
+                        offset + ptd::UPDATE_OFFSET,
+                    ));
+                }
+            }
+            let id = devices.bus.install(Box::new(owner), &bindings).unwrap();
+            if invalid != 2 {
+                devices.memory_controller = Some(id);
+            }
+            let before = devices.bus.route(SHARED, Width::Double).unwrap();
+            assert!(
+                devices
+                    .add_display_with_darts(&views, "DCPEXT0", &owners)
+                    .is_err()
+            );
+            assert_eq!(devices.bus.route(SHARED, Width::Double), Ok(before));
+            assert!(devices.bus.route(PRIMARY, Width::Word).is_err());
+            assert!(devices.bus.route(0x2_8932_0000, Width::Word).is_err());
+            assert!(publication.requests().is_empty());
+        }
+    }
+
+    #[test]
+    fn display_subview_geometry_and_late_conflict_fail_without_partial_publication() {
+        for (physical, bytes) in [(SHARED - 8, 0x4008), (SHARED, 0xbf8), (SHARED, 0x10008)] {
+            let (mut devices, owners, mut views) = placement();
+            mount_prepared(&mut devices, prepared());
+            views[4].1 = Range { physical, bytes };
+            assert!(
+                devices
+                    .add_display_with_darts(&views, "DCPEXT0", &owners)
+                    .is_err()
+            );
+            assert!(devices.bus.route(PRIMARY, Width::Word).is_err());
+        }
+        let (mut devices, owners, views) = placement();
+        let (id, publication) = mount_prepared(&mut devices, prepared());
+        devices
+            .add_watchdog(
+                &[Range {
+                    physical: 0x2_8932_0000,
+                    bytes: 0x4000,
+                }],
+                None,
+                0,
+            )
+            .unwrap();
+        let before = devices.bus.route(SHARED, Width::Double).unwrap();
+        assert!(
+            devices
+                .add_display_with_darts(&views, "DCPEXT0", &owners)
+                .is_err()
+        );
+        assert_eq!(before.0, id);
+        assert_eq!(devices.bus.route(SHARED, Width::Double), Ok(before));
+        assert!(devices.bus.route(PRIMARY, Width::Word).is_err());
+        assert!(publication.requests().is_empty());
+    }
+    #[test]
+    #[ignore = "requires unchanged original 26A434 J314s DeviceTree"]
+    fn original_j314s_display_ptd_view_is_the_actual_pmgr_pmp_update_bank() {
+        use crate::machine::adt::Node;
+        let input =
+            std::env::var("STELA_T6000_MCC_DEVICE_TREE").expect("explicit original ADT input");
+        let bytes = std::fs::read(&input).unwrap();
+        assert_eq!(
+            crate::sha256(&bytes),
+            "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
+        );
+        let io = Node::root(&bytes).unwrap().child("arm-io").unwrap();
+        let display = io.child("dispext0").unwrap().pairs("reg").unwrap();
+        assert_eq!(display.len(), 5);
+        let (base, bytes) = display[4];
+        let physical = io.translate_range(base, bytes).unwrap();
+        assert_eq!((physical, bytes), (SHARED, 0x4000));
+        let (bank, bank_bytes) = io.child("pmgr").unwrap().pairs("reg").unwrap()[41];
+        let bank = io.translate_range(bank, bank_bytes).unwrap();
+        assert_eq!(
+            (bank, bank_bytes),
+            (SHARED - ptd::UPDATE_OFFSET, ptd::PTD_BYTES)
+        );
+        let pmp = io.child("pmp").unwrap();
+        let index = u32::from_le_bytes(
+            pmp.property("ptd-update-reg-index")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let (updates, update_bytes) = pmp.pairs("reg").unwrap()[index];
+        let updates = io.translate_range(updates, update_bytes).unwrap();
+        assert_eq!(index, 3);
+        assert_eq!((updates, update_bytes), (physical, 0xc00));
+        let owner = prepared();
+        assert_eq!(owner.descriptor().ptd.physical, bank);
+        assert_eq!(owner.descriptor().ptd_updates, (updates, update_bytes));
+        assert_eq!(
+            owner.display_publication_view(physical, bytes),
+            Ok((
+                physical,
+                bytes,
+                2 * mcc::APERTURE_BYTES + ptd::UPDATE_OFFSET
+            ))
+        );
     }
 }
