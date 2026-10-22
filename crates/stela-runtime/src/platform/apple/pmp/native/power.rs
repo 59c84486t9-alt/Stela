@@ -7,6 +7,8 @@
 //! See docs/research/apple-mcc.md and the pinned original-source tests below.
 use alloc::vec::Vec;
 
+pub mod policy;
+
 pub const RECORD_BYTES: usize = 124;
 const SOURCE_IDS: u32 = 256;
 
