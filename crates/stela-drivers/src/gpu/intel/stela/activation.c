@@ -7,6 +7,7 @@
 #include "guc_reset.h"
 #include "pat.h"
 #include "wopcm.h"
+#include <stela/module.h>
 #include <unsupported.h>
 #include "xe_bo.h"
 #include "xe_vram_types.h"

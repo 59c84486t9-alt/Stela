@@ -12,4 +12,3 @@ roots:
   - {type: file, name: ../common/linux/include/linux/types.h, external-contents: linux/types.h} # sha256:b12aab0f1569ba0dd6843839aa15515a414c171d3fedd583c9aa835a81b4561b
   - {type: file, name: ../common/linux/include/uapi/asm-generic/int-ll64.h, external-contents: uapi/asm-generic/int-ll64.h} # sha256:faca16150492e943a43c83e6b3069531dd498ef15dc612fb2051b88f7da83afc
   - {type: file, name: ../common/linux/include/linux/percpu-defs.h, external-contents: linux/percpu-defs.h} # sha256:409b36b90d949956583fc786b55367eca4ae0d4078fe2f79418732fa133f3195
-  - {type: file, name: ../common/linux/include/linux/module.h, external-contents: linux/module.h} # sha256:5fc2b60606c87968c5f4c2b1a5a690834206879f40a74d2ac12b59256e3a3ab3

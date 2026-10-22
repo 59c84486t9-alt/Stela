@@ -4,6 +4,7 @@
  * is reachable. */
 #include "pci_match.h"
 #include <stela/linux.h>
+#include <stela/module.h>
 #include <unsupported.h>
 #include "amdgpu_drv.c"
 
