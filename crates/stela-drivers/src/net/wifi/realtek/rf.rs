@@ -231,7 +231,6 @@ mod tests {
                 subsystem_vendor: 0x17aa,
                 subsystem_device: 0x1234,
                 pci_revision: 1,
-                class: [2, 0x80, 0],
                 sys_cfg1: 1 << 27,
             })
             .unwrap();

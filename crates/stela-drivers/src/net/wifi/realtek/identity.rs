@@ -20,7 +20,6 @@ pub struct Observed {
     pub subsystem_vendor: u16,
     pub subsystem_device: u16,
     pub pci_revision: u8,
-    pub class: [u8; 3],
     /// Actual 32-bit SYS_CFG1 at 0xf0, with every bit retained.
     pub sys_cfg1: u32,
 }
@@ -53,7 +52,7 @@ pub struct Staged<'a> {
 
 impl Profile {
     pub fn select(observed: Observed) -> Result<Self, IdentityError> {
-        if observed.vendor != 0x10ec || observed.class != [2, 0x80, 0] {
+        if observed.vendor != 0x10ec {
             return Err(IdentityError::UnsupportedPci);
         }
         let chip = match observed.device {
@@ -150,7 +149,6 @@ pub(crate) mod tests {
             subsystem_vendor: 0x17aa,
             subsystem_device: 0x1234,
             pci_revision: 1,
-            class: [2, 0x80, 0],
             sys_cfg1: u32::from(cut) << 12,
         }
     }
@@ -182,9 +180,6 @@ pub(crate) mod tests {
         assert_eq!(Profile::select(o), Err(IdentityError::TestChip));
         o = observed(0xb852, 1);
         o.vendor = 0x8086;
-        assert_eq!(Profile::select(o), Err(IdentityError::UnsupportedPci));
-        o = observed(0xb852, 1);
-        o.class = [2, 0, 0];
         assert_eq!(Profile::select(o), Err(IdentityError::UnsupportedPci));
     }
 

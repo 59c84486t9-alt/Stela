@@ -350,7 +350,6 @@ mod tests {
             subsystem_vendor: 0x8086,
             subsystem_device: 0x84,
             pci_revision: 0x1a,
-            class: [2, 0x80, 0],
             hardware_revision: 0x420,
             radio_id: 0x10d000,
         })
@@ -425,7 +424,6 @@ mod tests {
             subsystem_vendor: 0x8086,
             subsystem_device: 0x84,
             pci_revision: 0x1a,
-            class: [2, 0x80, 0],
             hardware_revision: 0x420,
             radio_id: 0x10d000,
         })

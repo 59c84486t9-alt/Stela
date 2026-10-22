@@ -189,7 +189,6 @@ mod tests {
             subsystem_vendor: 0x8086,
             subsystem_device: 0x0084,
             pci_revision: 0x1a,
-            class: [2, 0x80, 0],
             hardware_revision: if device == 0x2723 { 0x340 } else { 0x420 },
             radio_id: if device == 0x2723 { 0x10a000 } else { 0x10d000 },
         })

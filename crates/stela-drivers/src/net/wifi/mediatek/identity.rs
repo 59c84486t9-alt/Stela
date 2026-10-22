@@ -42,7 +42,6 @@ pub struct PciIdentity {
     pub subsystem_vendor: u16,
     pub subsystem_device: u16,
     pub revision: u8,
-    pub class: [u8; 3],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,7 +75,7 @@ impl Identity {
         raw_revision: u32,
         raw_bound: Option<u32>,
     ) -> Result<Self, IdentityError> {
-        let candidate = if pci.vendor == 0x14c3 && pci.class == [0x02, 0x80, 0x00] {
+        let candidate = if pci.vendor == 0x14c3 {
             match pci.device {
                 0x7961 | 0x0608 => Some((Chip::Mt7921, 0x7961)),
                 0x7922 | 0x0616 => Some((Chip::Mt7922, 0x7922)),
@@ -144,7 +143,6 @@ mod tests {
             subsystem_vendor: 0x1028,
             subsystem_device: 0x1234,
             revision: 3,
-            class: [2, 0x80, 0],
         }
     }
     #[test]
@@ -184,12 +182,6 @@ mod tests {
                 Err(IdentityError::FailedRegisterRead)
             );
         }
-        let mut other = pci(0x7961);
-        other.class = [2, 0, 0];
-        assert!(matches!(
-            Identity::observed(other, 0x7961, 1, Some(0)),
-            Err(IdentityError::UnsupportedPci(_))
-        ));
         assert_ne!(
             Identity::observed(pci(0x0608), 0x7961, 1, Some(0))
                 .unwrap()

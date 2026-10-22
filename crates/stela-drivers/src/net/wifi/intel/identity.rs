@@ -24,7 +24,6 @@ pub struct Observed {
     pub subsystem_vendor: u16,
     pub subsystem_device: u16,
     pub pci_revision: u8,
-    pub class: [u8; 3],
     /// Actual CSR_HW_REV and CSR_HW_RF_ID values, before normalization.
     pub hardware_revision: u32,
     pub radio_id: u32,
@@ -47,10 +46,7 @@ pub struct Profile {
 
 impl Profile {
     pub fn select(observed: Observed) -> Result<Self, IdentityError> {
-        if observed.vendor != INTEL
-            || !matches!(observed.device, AX200 | AX210)
-            || observed.class != [0x02, 0x80, 0]
-        {
+        if observed.vendor != INTEL || !matches!(observed.device, AX200 | AX210) {
             return Err(IdentityError::UnsupportedPci);
         }
         if observed.hardware_revision == u32::MAX || observed.radio_id == u32::MAX {
@@ -201,7 +197,6 @@ mod tests {
             subsystem_vendor: INTEL,
             subsystem_device: 0x0084,
             pci_revision: 0x1a,
-            class: [2, 0x80, 0],
             hardware_revision: if device == AX200 { 0x340 } else { 0x420 },
             radio_id: if device == AX200 {
                 RF_HR2 << 12
@@ -235,13 +230,12 @@ mod tests {
                 "hw-{:08x}-rf-{:08x}",
                 o.hardware_revision, o.radio_id
             )));
-            for field in 0..5 {
+            for field in 0..4 {
                 let mut bad = o;
                 match field {
-                    0 => bad.class = [2, 0, 0],
-                    1 => bad.vendor = 0x1234,
-                    2 => bad.hardware_revision = u32::MAX,
-                    3 => bad.radio_id = 0,
+                    0 => bad.vendor = 0x1234,
+                    1 => bad.hardware_revision = u32::MAX,
+                    2 => bad.radio_id = 0,
                     _ => bad.radio_id = u32::MAX,
                 };
                 assert!(Profile::select(bad).is_err());

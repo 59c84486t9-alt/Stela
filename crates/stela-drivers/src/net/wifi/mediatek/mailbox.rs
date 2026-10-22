@@ -1401,7 +1401,6 @@ mod tests {
                 subsystem_vendor: 0x1234,
                 subsystem_device: 0xabcd,
                 revision: 3,
-                class: [2, 0x80, 0],
             },
             u32::from(id),
             0x12340010,
