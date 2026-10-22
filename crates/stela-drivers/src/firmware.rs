@@ -218,7 +218,37 @@ pub enum ErrorKind {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "firmware {}: {:?}", self.name, self.kind)
+        write!(f, "firmware {}: {}", self.name, self.kind)
+    }
+}
+
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hex = |f: &mut fmt::Formatter<'_>, digest: &[u8; 32]| {
+            digest.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+        };
+        match self {
+            Self::InvalidName => f.write_str("invalid resource name"),
+            Self::InvalidTarget(field) => write!(f, "invalid target {field}"),
+            Self::InvalidProvenance(field) => write!(f, "invalid provenance {field}"),
+            Self::InvalidRequirement => f.write_str("invalid requirement"),
+            Self::Missing => f.write_str("not supplied"),
+            Self::WrongTarget => f.write_str("supplied only for another target"),
+            Self::Truncated { expected, actual } => {
+                write!(f, "{actual} bytes, shorter than {expected}")
+            }
+            Self::LengthMismatch { expected, actual } => {
+                write!(f, "{actual} bytes, longer than {expected}")
+            }
+            Self::DigestMismatch { expected, actual } => {
+                f.write_str("SHA-256 ")?;
+                hex(f, actual)?;
+                f.write_str(" instead of ")?;
+                hex(f, expected)
+            }
+            Self::Duplicate => f.write_str("supplied twice"),
+            Self::Conflict => f.write_str("supplied with conflicting manifests"),
+        }
     }
 }
 
@@ -931,7 +961,10 @@ mod tests {
         input.name = "bad\n\0\x1b[31m";
         let error = Catalog::from_handoff(vec![input]).err().unwrap();
         let rendered = alloc::format!("{error}");
-        assert_eq!(rendered, "firmware \"bad\\n\\0\\u{1b}[31m\": InvalidName");
+        assert_eq!(
+            rendered,
+            "firmware \"bad\\n\\0\\u{1b}[31m\": invalid resource name"
+        );
         assert!(!rendered.chars().any(char::is_control));
     }
 

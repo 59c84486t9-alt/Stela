@@ -16,8 +16,14 @@
 //! through ECAM ([`bus`]) and brings up every driver, one folder per device
 //! class: disks ([`storage`], behind [`block::BlockDevice`]), keyboards and
 //! pointers ([`input`]), raw Ethernet links ([`net`]) and the USB devices
-//! behind xHCI controllers ([`usb`]). [`gpu`] inventories display controllers;
-//! its vendor backends are not implemented yet.
+//! behind xHCI controllers ([`usb`]), reporting the functions it cannot take.
+//!
+//! [`firmware`] holds the exact device firmware catalog drivers load from.
+//! [`gpu`] inventories display controllers; its feature-gated vendor ports
+//! are support libraries that initialize no GPU. [`audio`] drives HD Audio
+//! for the mount's audio check only. The Wi-Fi libraries in [`net::wifi`],
+//! USB4/Thunderbolt and I²C/SMBus in [`bus`], Type-C in [`usb::typec`] and
+//! [`platform`] (ACPICA and work contexts) are not attached by `probe` yet.
 #![no_std]
 #[macro_use]
 extern crate alloc;
