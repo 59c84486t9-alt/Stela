@@ -617,6 +617,36 @@ if with_stela_intel
       build_rpath : fs.parent(stela_air_llvm),
     )
     test('stela_intel_air_owned', stela_intel_air_compile_test, suite : 'stela')
+    stela_intel_binding_tables = static_library(
+      'stela_intel_binding_tables',
+      files('../gallium/drivers/iris/iris_binding_table.c',
+            '../gallium/drivers/crocus/crocus_binding_table.c'),
+      include_directories : [inc_include, inc_src, inc_intel],
+      dependencies : [idep_nir_headers, idep_mesautil, idep_intel_dev, idep_intel_compiler_elk],
+      c_args : ['-Werror'],
+    )
+    # Needs the unchanged Apple triangle and the Intel render probe's
+    # artifacts; `cargo xtask gpu compilers` runs both variants with them.
+    # The test includes air_graphics.c itself; the second variant denies its
+    # allocations.
+    foreach variant : [['', []], ['_alloc', ['-DSTELA_INTEL_GRAPHICS_ALLOCATION_TEST']]]
+      executable(
+        'stela_intel_air_graphics_test' + variant[0],
+        '../../../../intel/stela/tests/air_graphics.c',
+        include_directories : [inc_include, inc_src, inc_intel],
+        dependencies : [idep_stela_air, idep_intel_compiler_brw,
+                        idep_intel_compiler_elk, idep_intel_compiler_gen,
+                        idep_intel_dev, idep_mesautil,
+                        dependency('appleframeworks', modules : ['CoreFoundation'])],
+        link_with : [stela_intel_air, stela_intel_binding_tables, stela_intel_surface,
+                     stela_intel_compute_policy, stela_intel_compute_native,
+                     stela_intel_legacy_compute, stela_intel_gpgpu_native,
+                     libisl, stela_apple_source],
+        link_args : [stela_metal_input, '-lresolv', '-liconv'] + stela_intel_policy_gc,
+        c_args : ['-Werror'] + variant[1],
+        build_rpath : fs.parent(stela_air_llvm),
+      )
+    endforeach
   endif
   if stela_air_llvm != ''
     stela_intel_fp_controls_probe = executable(

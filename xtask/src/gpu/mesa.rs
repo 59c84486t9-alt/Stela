@@ -426,6 +426,9 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             "intel/stela/hosted/air_compile.c",
             "intel/stela/hosted/air_compile.h",
             "intel/stela/hosted/air_validate_elk.c",
+            "intel/stela/hosted/air_graphics.c",
+            "intel/stela/hosted/air_graphics.h",
+            "intel/stela/tests/air_graphics.c",
             "intel/stela/tests/air_compile.c",
             "intel/stela/tests/air_render.c",
             "intel/stela/tests/air_render_elk.c",
@@ -749,6 +752,8 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             "src/stela/stela_nv_air_render_owned",
             "src/stela/stela_nv_air_render_owned_alloc",
             "src/stela/stela_intel_air_compile_test",
+            "src/stela/stela_intel_air_graphics_test",
+            "src/stela/stela_intel_air_graphics_test_alloc",
         ]);
     }
     run(&mut compile, &evidence, "compile")?;
@@ -775,6 +780,10 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         .as_ref()
         .map(|_| render::verify_nv_owned(&build, &evidence, &render_snapshots))
         .transpose()?;
+    let intel_graphics_owned = match metal_input {
+        Some(_) => render::verify_intel_owned(&build, &evidence, &render_snapshots)?,
+        None => None,
+    };
     let metal_assembly = metal_input
         .as_ref()
         .map(|input| library::verify(&build, &evidence, input, &gpu))
@@ -1061,6 +1070,7 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         "amd_owned_air_compilation": amd_air_owned,
         "nvidia_owned_air_compilation": nv_air_owned,
         "nvidia_owned_render_compilation": nv_render_owned,
+        "intel_owned_graphics_compilation": intel_graphics_owned,
         "intel_owned_air_compilation": intel_air_owned,
         "intel_gen7_shared_admission": intel_gen7_shared,
         "metal_threadgroup_values": metal_threadgroup_values,

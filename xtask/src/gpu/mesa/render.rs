@@ -300,3 +300,54 @@ pub(super) fn verify_nv_owned(build: &Path, evidence: &Path, inputs: &[Value]) -
         "runs":runs,"oracle_equal_artifacts":compared}),
     )
 }
+
+/// Runs the owned Intel graphics package, normally and with each of its own
+/// allocations denied in turn, against the Intel render probe's artifacts.
+/// It needs the Apple triangle, so it runs only when render inputs are given.
+pub(super) fn verify_intel_owned(
+    build: &Path,
+    evidence: &Path,
+    inputs: &[Value],
+) -> Result<Option<Value>> {
+    if inputs.is_empty() {
+        return Ok(None);
+    }
+    let mut runs = Vec::new();
+    for variant in ["", "_alloc"] {
+        let binary = build.join(format!("src/stela/stela_intel_air_graphics_test{variant}"));
+        let stage = format!("intel-air-graphics-owned{variant}");
+        run(
+            Command::new(&binary)
+                .arg(
+                    inputs[0]["snapshot"]["path"]
+                        .as_str()
+                        .context("triangle snapshot")?,
+                )
+                .args(["vertexShader", "fragmentShader"])
+                .arg(evidence.join("intel-render-artifacts")),
+            evidence,
+            &stage,
+        )?;
+        let log = evidence.join(format!("{stage}.log"));
+        let text = std::fs::read_to_string(&log)?;
+        let owned = text
+            .lines()
+            .filter(|line| line.starts_with("STELA_GRAPHICS_OWNED "))
+            .count();
+        let holds = text
+            .lines()
+            .filter(|line| line.starts_with("STELA_GRAPHICS_HOLD "))
+            .collect::<Vec<_>>();
+        ensure!(
+            owned == 22 && holds == ["STELA_GRAPHICS_HOLD nvl Gen35"],
+            "incomplete owned Intel graphics fixture {stage}"
+        );
+        runs.push(
+            json!({"binary":tools::binding(&binary)?,"output":tools::binding(&log)?,"owned":owned}),
+        );
+    }
+    Ok(Some(
+        json!({"scope":"Owned Intel VS/FS package equal to the render probe's original artifacts; no GPU allocation, upload or execution",
+        "runs":runs}),
+    ))
+}
