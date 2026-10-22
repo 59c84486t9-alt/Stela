@@ -516,6 +516,7 @@ pub(crate) mod tests {
             manufacturer: None,
             product: None,
             serial: None,
+            language: None,
         };
         device.configurations = vec![device.configuration.clone()];
         let sfi = image();

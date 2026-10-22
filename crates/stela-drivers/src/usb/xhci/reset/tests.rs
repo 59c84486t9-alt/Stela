@@ -824,7 +824,7 @@ fn reset_requires_every_retirement_ack_then_physical_reset_and_fresh_slot() {
             }
             assert!(unsafe { c.reset_and_identify(&old, &endpoints, &mut dma) }.is_err());
             assert!(c.clear(old.slot, &endpoints[0]).is_err());
-            assert!(c.string(old.slot, 1).is_none());
+            assert!(c.string(old.slot, 0x0409, 1).is_none());
             assert_eq!(
                 hardware.borrow().accesses,
                 before,

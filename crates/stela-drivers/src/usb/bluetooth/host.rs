@@ -282,6 +282,7 @@ mod tests {
                 manufacturer: None,
                 product: None,
                 serial: None,
+                language: None,
             };
             let binding =
                 Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();

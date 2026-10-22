@@ -308,6 +308,7 @@ mod tests {
             manufacturer: None,
             product: None,
             serial: None,
+            language: None,
             vendor_ethernet_revision: None,
             vendor_ethernet_tcr: None,
         };

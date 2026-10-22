@@ -515,6 +515,7 @@ mod tests {
             manufacturer: None,
             product: None,
             serial: None,
+            language: None,
         }
     }
     fn binding(composite: bool) -> Binding {

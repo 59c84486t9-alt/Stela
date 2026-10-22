@@ -498,6 +498,7 @@ pub(super) mod tests {
             manufacturer: None,
             product: None,
             serial: None,
+            language: None,
         }
     }
 

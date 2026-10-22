@@ -109,6 +109,7 @@ pub(in crate::usb::bluetooth) mod tests {
             manufacturer: None,
             product: None,
             serial: None,
+            language: None,
             vendor_ethernet_tcr: None,
             vendor_ethernet_revision: None,
         };

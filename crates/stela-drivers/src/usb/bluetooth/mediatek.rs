@@ -427,6 +427,7 @@ mod tests {
             manufacturer: None,
             product: None,
             serial: None,
+            language: None,
         };
         let usb = UsbIdentity {
             vendor: vid,

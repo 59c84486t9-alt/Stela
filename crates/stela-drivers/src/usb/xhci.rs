@@ -581,6 +581,8 @@ pub struct Device {
     pub manufacturer: Option<String>,
     pub product: Option<String>,
     pub serial: Option<String>,
+    /// The language of the device's strings, when it has any.
+    pub language: Option<u16>,
 }
 
 impl Device {
@@ -1266,23 +1268,34 @@ impl Controller {
         length: u16,
     ) -> Result<Vec<u8>, BlockError> {
         let value = u16::from(kind) << 8 | u16::from(index);
-        let language = if kind == STRING_DESCRIPTOR && index != 0 {
-            LANGUAGE_EN_US
-        } else {
-            0
-        };
         self.control(
             slot,
-            setup(DEVICE_TO_HOST, GET_DESCRIPTOR, value, language, length),
+            setup(DEVICE_TO_HOST, GET_DESCRIPTOR, value, 0, length),
             &[],
         )
     }
 
-    pub(crate) fn string(&mut self, slot: u8, index: u8) -> Option<String> {
+    /// Linux `usb_get_langid`: the first language string descriptor 0 lists,
+    /// English when it lists none, and no strings when it cannot be read.
+    fn language(&mut self, slot: u8) -> Option<u16> {
+        let bytes = self.descriptor(slot, STRING_DESCRIPTOR, 0, 255).ok()?;
+        if bytes.get(1).is_some_and(|kind| *kind != STRING_DESCRIPTOR) {
+            return Some(LANGUAGE_EN_US);
+        }
+        match usize::from(*bytes.first()?).min(bytes.len()) & !1 {
+            0 => None,
+            2 => Some(LANGUAGE_EN_US),
+            _ => Some(u16::from_le_bytes([bytes[2], bytes[3]])),
+        }
+    }
+
+    pub(crate) fn string(&mut self, slot: u8, language: u16, index: u8) -> Option<String> {
         if index == 0 {
             return None;
         }
-        let bytes = self.descriptor(slot, STRING_DESCRIPTOR, index, 255).ok()?;
+        let value = u16::from(STRING_DESCRIPTOR) << 8 | u16::from(index);
+        let request = setup(DEVICE_TO_HOST, GET_DESCRIPTOR, value, language, 255);
+        let bytes = self.control(slot, request, &[]).ok()?;
         if bytes.len() < 2 || bytes[1] != STRING_DESCRIPTOR {
             return None;
         }
@@ -1995,9 +2008,15 @@ impl Controller {
         let configurations = self
             .configurations(slot, descriptor[17])
             .map_err(|(operation, error)| (format!("{identity} {operation}"), error))?;
-        let manufacturer = self.string(slot, descriptor[14]);
-        let product = self.string(slot, descriptor[15]);
-        let serial = self.string(slot, descriptor[16]);
+        let language = if descriptor[14..17].iter().any(|index| *index != 0) {
+            self.language(slot)
+        } else {
+            None
+        };
+        let mut string = |index| language.and_then(|language| self.string(slot, language, index));
+        let manufacturer = string(descriptor[14]);
+        let product = string(descriptor[15]);
+        let serial = string(descriptor[16]);
         let device = Device {
             vendor_ethernet_revision: None,
             vendor_ethernet_tcr: None,
@@ -2010,6 +2029,7 @@ impl Controller {
             manufacturer,
             product,
             serial,
+            language,
         };
         Ok(device)
     }
@@ -3579,6 +3599,7 @@ pub(crate) mod tests {
         bytes[2..4].copy_from_slice(&total.to_le_bytes());
         configuration::sanitize(&bytes, SUPER_SPEED).unwrap();
         let mut device = configuration::tests::device(vec![bytes]);
+        device.language = Some(LANGUAGE_EN_US);
         configuration::select(&mut device).unwrap();
         device
     }
@@ -3619,6 +3640,26 @@ pub(crate) mod tests {
             }
             self.inner.allocate(bytes, align)
         }
+    }
+
+    #[test]
+    fn strings_use_the_first_listed_language_and_default_to_english() {
+        let mut backing = vec![0u64; 32 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives all modeled controller DMA.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+        for (descriptor, language) in [
+            (vec![6, STRING_DESCRIPTOR, 0x07, 0x04, 0x09, 0x04], 0x0407),
+            (vec![2, STRING_DESCRIPTOR], LANGUAGE_EN_US),
+            (vec![4, DEVICE_DESCRIPTOR, 0x07, 0x04], LANGUAGE_EN_US),
+        ] {
+            model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 0, descriptor)];
+            assert_eq!(controller.language(1), Some(language));
+        }
+        // A descriptor too short to hold a language means no strings at all.
+        model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 0, vec![1])];
+        assert_eq!(controller.language(1), None);
     }
 
     #[test]
@@ -5607,6 +5648,7 @@ pub(crate) mod tests {
                 manufacturer: None,
                 product: None,
                 serial: None,
+                language: None,
             };
             device.configurations = vec![device.configuration.clone()];
             let mut found = Found::default();

@@ -204,8 +204,9 @@ impl UsbNet {
     ) -> Result<Self, BlockError> {
         let (mac, framing) = {
             let mut c = controller.borrow_mut();
-            let text = c
-                .string(device.slot, binding.mac_string)
+            let text = device
+                .language
+                .and_then(|language| c.string(device.slot, language, binding.mac_string))
                 .ok_or(BlockError::Unsupported(
                     "CDC Ethernet adapter without a MAC address string",
                 ))?;
