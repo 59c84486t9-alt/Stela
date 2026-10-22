@@ -63,6 +63,8 @@ pub(crate) use reset::tests::{
     Fault as ResetFault, Hardware as ResetHardware, fixture as reset_fixture,
 };
 mod iso;
+#[cfg(test)]
+pub(crate) use iso::tests::class_fixture as iso_class_fixture;
 mod streams;
 mod teardown;
 

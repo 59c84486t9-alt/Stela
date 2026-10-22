@@ -942,3 +942,32 @@ fn unchanged_linux_actual_amd_pci_profiles_and_saved_smbus_do_not_inherit_legacy
     assert_eq!(actual_negative, 256);
     assert!(legacy_positive);
 }
+
+/// Opaque reuse of the real-ring ISO model by class lifecycle regressions. This
+/// is not USB enumeration, normal control/HCI I/O or a hardware qualification.
+pub(crate) struct ClassIsoFixture {
+    controller: Shared,
+    hardware: Rc<RefCell<Hardware>>,
+}
+pub(crate) fn class_fixture(dma: &mut dyn DmaAllocator, speed: u8) -> ClassIsoFixture {
+    let (controller, hardware) = controller(dma, speed, 32, true);
+    ClassIsoFixture {
+        controller: Rc::new(RefCell::new(controller)),
+        hardware,
+    }
+}
+impl ClassIsoFixture {
+    pub(crate) fn controller(&self) -> Shared {
+        self.controller.clone()
+    }
+    pub(crate) fn set_mfindex(&self, value: u32) {
+        self.hardware.borrow_mut().mfindex = value;
+    }
+    /// Complete the oldest actual queued service on this endpoint.
+    pub(crate) fn complete(&self, dci: u8, code: u32, residual: usize) {
+        self.hardware.borrow_mut().complete(dci, 0, code, residual);
+    }
+    pub(crate) fn commands(&self) -> Vec<(u32, u8)> {
+        self.hardware.borrow().seen.clone()
+    }
+}
