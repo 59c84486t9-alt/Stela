@@ -131,8 +131,9 @@ pub(crate) enum BootCommand {
     /// cache in guest physical memory for `stela.efi`.
     Prepare(Box<Prepare>),
     /// Check a prepared bundle's DeviceTree against the engine's board
-    /// models (`machine::soc::board`), as `stela.efi` does before entry, and
-    /// print the board the engine would run or the reason it refuses.
+    /// models (`machine::soc::board`) and mount its whole machine
+    /// (`machine::mount`), as `stela.efi` does before entry, and print the
+    /// board the engine would run or the reason it refuses.
     Check(Check),
 }
 
@@ -149,8 +150,11 @@ impl Check {
                 .join(stela_loader::boot_bundle::DEVICE_TREE_FILE),
         )
         .with_context(|| format!("{} has no DeviceTree", self.bundle.display()))?;
-        let board = stela_runtime::machine::soc::board(&tree)
+        let mut board = stela_runtime::machine::soc::board(&tree)
             .map_err(|reason| anyhow::anyhow!("the engine refuses this board: {reason}"))?;
+        let mount = mount(&self.bundle, &tree, &mut board).map_err(|reason| {
+            anyhow::anyhow!("the engine refuses to mount this board: {reason}")
+        })?;
         let hex = |value: u64| format!("{value:#x}");
         let report = serde_json::json!({
             "chip": board.cpus.chip.name(),
@@ -177,10 +181,187 @@ impl Check {
             "power_states": board.power_states.as_ref().map(|states| states.registers.len()),
             "clusters": board.clusters.len(),
             "memory_cache": board.memory_cache.is_some(),
+            "mount": mount,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         Ok(())
     }
+}
+
+/// Mount `board`'s whole machine as `stela.efi` does, with stand-in host
+/// inputs: a sparse disk for any internal SSD, a monitor that discards
+/// frames, zero entropy, a zero ECID when the bundle names none and no
+/// cables. Returns the mount's `DEVICES` lines and the
+/// PMGR domains whose lifecycle stays refused.
+fn mount(
+    bundle: &std::path::Path,
+    tree: &[u8],
+    board: &mut stela_runtime::machine::soc::Board,
+) -> std::result::Result<serde_json::Value, String> {
+    use stela_runtime::machine::{
+        apple::{ConsoleBusy, ConsoleSink, Scanout, ScanoutFormat, ScanoutMode, UsbCables},
+        mount,
+    };
+    struct Discard;
+    /// An internal SSD of zeros that keeps what is written.
+    struct Sparse {
+        identity: stela_drivers::block::Identity,
+        written: std::collections::BTreeMap<u64, Vec<u8>>,
+    }
+    impl stela_drivers::block::BlockDevice for Sparse {
+        fn identity(&self) -> &stela_drivers::block::Identity {
+            &self.identity
+        }
+        fn read(
+            &mut self,
+            lba: u64,
+            buffer: &mut [u8],
+        ) -> std::result::Result<(), stela_drivers::block::BlockError> {
+            self.identity.check(lba, buffer.len())?;
+            let size = self.identity.block_size as usize;
+            for (index, block) in buffer.chunks_mut(size).enumerate() {
+                match self.written.get(&(lba + index as u64)) {
+                    Some(bytes) => block.copy_from_slice(bytes),
+                    None => block.fill(0),
+                }
+            }
+            Ok(())
+        }
+        fn write(
+            &mut self,
+            lba: u64,
+            data: &[u8],
+        ) -> std::result::Result<(), stela_drivers::block::BlockError> {
+            self.identity.check_write(lba, data.len())?;
+            let size = self.identity.block_size as usize;
+            for (index, block) in data.chunks(size).enumerate() {
+                self.written.insert(lba + index as u64, block.to_vec());
+            }
+            Ok(())
+        }
+        fn flush(&mut self) -> std::result::Result<(), stela_drivers::block::BlockError> {
+            Ok(())
+        }
+    }
+    impl ConsoleSink for Discard {
+        fn transmit(&mut self, _: u8) -> std::result::Result<(), ConsoleBusy> {
+            Ok(())
+        }
+    }
+    impl Scanout for Discard {
+        fn mode(&self) -> ScanoutMode {
+            ScanoutMode {
+                width: 1920,
+                height: 1080,
+                format: ScanoutFormat::Bgra8888,
+            }
+        }
+        fn present(&mut self, _: &[u8]) -> std::result::Result<(), &'static str> {
+            Ok(())
+        }
+    }
+    let manifest = std::fs::read(bundle.join("bundle.json"))
+        .map_err(|error| format!("{} has no manifest: {error}", bundle.display()))?;
+    let manifest = stela_runtime::boot_bundle::Manifest::parse(&manifest)
+        .map_err(|error| format!("bundle manifest: {error:?}"))?;
+    // A bundle prepared for no particular machine has no ECID; the SEP
+    // takes a stand-in one, as the SSD takes a stand-in disk.
+    if let Some(sep) = board.sep.as_mut() {
+        sep.ecid.get_or_insert(0);
+    }
+    let unavailable = match board.power_states.as_mut() {
+        Some(states) => states.apply_admission(tree, &manifest.hidden_devices)?,
+        None => 0,
+    };
+    // Board device firmware travels in the bundle by guest file name; the
+    // boot images themselves are not device firmware.
+    let files = manifest
+        .files
+        .iter()
+        .filter(|file| file.bytes <= 16 << 20)
+        .map(|file| Ok((file.name.clone(), std::fs::read(bundle.join(&file.name))?)))
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| format!("bundle file: {error}"))?;
+    let firmware = |name: &str| {
+        files
+            .iter()
+            .find(|(file, _)| file == name)
+            .map(|(_, bytes)| bytes.as_slice())
+    };
+    let mut log = Vec::new();
+    let (devices, _) = mount::devices(
+        board,
+        Discard,
+        mount::Inputs {
+            programmed: mount::memory_locks(
+                manifest
+                    .read_only_region
+                    .map(|region| (region.base, region.bytes)),
+                &manifest.core_locks.unwrap_or_default(),
+            ),
+            reset: Some(manifest.entry.physical_address),
+            now: 0,
+            wall: None,
+            backing: board.ans.is_some().then(|| {
+                Box::new(Sparse {
+                    identity: stela_drivers::block::Identity {
+                        transport: stela_drivers::block::Transport::Nvme,
+                        location: "check".into(),
+                        model: "sparse".into(),
+                        serial: "STELACHECK".into(),
+                        blocks: 256 << 18,
+                        block_size: 4096,
+                        read_only: false,
+                    },
+                    written: Default::default(),
+                }) as Box<dyn stela_drivers::block::BlockDevice>
+            }),
+            sep_state: None,
+            sep_observe: false,
+            agx_observe: false,
+            entropy: Box::new(|bytes: &mut [u8]| {
+                bytes.fill(0);
+                Ok(())
+            }),
+            restore: false,
+            input: false,
+            usb: UsbCables::default(),
+            scanout: Some(Box::new(Discard)),
+            firmware: &firmware,
+        },
+        &mut |arguments| log.push(arguments.to_string().trim_end().to_owned()),
+    )?;
+    Ok(serde_json::json!({
+        "devices": {
+            "gpio": board.gpio.is_some(),
+            "spi_nor": board.spi_nor.is_some(),
+            "i2c": board.i2cs.len(),
+            "typec_phys": board.typec_phys.len(),
+            "darts": board.darts.len(),
+            "ans": board.ans.is_some(),
+            "smc": board.smc.is_some(),
+            "pmp": board.pmp.is_some(),
+            "gfx": board.gfx.is_some(),
+            "dcp": board.dcp.is_some(),
+            "sep": board.sep.is_some(),
+            "usb": board.usbs.len(),
+            "spmi": board.spmis.len(),
+            "pmgr": board.power_states.is_some(),
+            "mcc": board.memory_cache.is_some(),
+            "amcc": board.memory_controller.is_some(),
+            "cpu_clusters": board.clusters.len(),
+            "cpu_start": board.cpu_start.is_some(),
+            "lockdown": board.lockdown.len(),
+            "wake_masks": board.wake_masks.is_some(),
+        },
+        "log": log,
+        "pmgr_unavailable_resources": unavailable,
+        "pmgr_lifecycle_refusals": devices
+            .power_refusals()
+            .iter()
+            .map(|(address, reason)| format!("{address:#x} {reason}"))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 #[derive(Args)]

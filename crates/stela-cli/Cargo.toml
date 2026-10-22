@@ -22,7 +22,7 @@ sha2.workspace = true
 hex.workspace = true
 tempfile.workspace = true
 stela-compiler.workspace = true
-stela-drivers.workspace = true
+stela-drivers = { workspace = true, features = ["ram-disk"] }
 stela-runtime.workspace = true
 stela-loader.workspace = true
 base64 = "0.22"
