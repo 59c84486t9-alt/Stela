@@ -56,7 +56,7 @@ const STALL_SLOTS: usize = 8;
 const EXTRA_SLOTS: usize = 2;
 const MAX_AON: usize = AON_SLOTS + EXTRA_SLOTS;
 
-/// How many counters of each kind a SoC's cores have.
+/// The source-qualified counter slots exposed by both views of a SoC's cores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
     aon: u8,
@@ -73,7 +73,12 @@ pub fn layout(chip_id: u32) -> Option<Layout> {
         0x8103 | 0x8112 => (3, 4),
         0x6000 | 0x6001 | 0x6020 | 0x6021 => (4, 6),
         0x6002 | 0x6022 => (4, 8),
-        0x8122 => (3, 5),
+        // AppleT8140CLPC in 26A434 kernelcache.release.mac17p reads
+        // AON0..2 (file 0x2b61478, 0x2b61460, 0x2b62cd0) and
+        // stall0..4 (0x2b6aff8..0x2b6b0a8). Its config methods at
+        // 0x2b71a64/0x2b71aac use the same 0x4000/0x6010 bases.
+        // The A18 Pro uses an M4 ISA profile but has its own sampler row.
+        0x8122 | 0x8140 => (3, 5),
         0x6030 => (4, 5),
         0x6031 | 0x6034 | 0x6040 | 0x6041 => (5, 6),
         0x6032 => (5, 8),
@@ -286,6 +291,44 @@ mod tests {
         assert!(block.read(AON_EXTRA, Width::Double, &mut access).is_err());
     }
 
+    /// T8140's original CLPC accesses three AON and five stall slots;
+    /// selecting the M4 ISA must not substitute T8132's five AON slots.
+    #[test]
+    fn a18_pro_preserves_its_own_sampler_register_and_mmio_boundaries() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut block = CoreCounters::new(layout(0x8140).unwrap());
+        let aon2 = Encoding::new(3, 7, 15, 4, 3);
+        assert_eq!(block.register(aon2, Some(0x1234_5678)), Some(0));
+        assert_eq!(
+            block.read(AON + 2 * AON_STRIDE, Width::Double, &mut access),
+            Ok(0x1234_5678)
+        );
+        block
+            .write(
+                STALL + 4 * STALL_STRIDE,
+                Width::Double,
+                1 << 47,
+                &mut access,
+            )
+            .unwrap();
+        assert_eq!(block.register(STALL_4, None), Some(1 << 47));
+        assert_eq!(block.register(STALL_4, Some(0)), Some(0));
+        assert_eq!(
+            block.read(STALL + 4 * STALL_STRIDE, Width::Double, &mut access),
+            Ok(0)
+        );
+        for (encoding, offset) in [
+            (AON_3, AON + 3 * AON_STRIDE),
+            (Encoding::new(3, 1, 15, 13, 3), STALL + 5 * STALL_STRIDE),
+        ] {
+            assert_eq!(block.register(encoding, None), None);
+            assert!(block.read(offset, Width::Double, &mut access).is_err());
+        }
+        let mut m4 = CoreCounters::new(layout(0x8132).unwrap());
+        assert_eq!(m4.register(AON_3, None), Some(0));
+    }
+
     /// The T6050's ninth and tenth core counters are S3_7_C15_C14_0 and
     /// C14_1 at 0x3fc0 and 0x3fc8; it and the Ultras have eight
     /// memory-stall counters.
@@ -318,7 +361,7 @@ mod tests {
     fn the_windows_fit_the_block() {
         let all = [
             0x8103, 0x6000, 0x6001, 0x6002, 0x8112, 0x6020, 0x6021, 0x6022, 0x8122, 0x6030, 0x6031,
-            0x6032, 0x6034, 0x8132, 0x6040, 0x6041, 0x8142, 0x6050, 0x8152,
+            0x6032, 0x6034, 0x8132, 0x6040, 0x6041, 0x8140, 0x8142, 0x6050, 0x8152,
         ];
         for chip_id in all {
             for (offset, bytes) in layout(chip_id).unwrap().windows() {
