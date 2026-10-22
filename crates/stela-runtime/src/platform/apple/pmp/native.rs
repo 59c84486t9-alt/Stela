@@ -9,6 +9,7 @@ use super::super::{
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
 
+pub mod memory;
 pub mod publication;
 mod transport;
 pub use publication::Target as PublicationTarget;
@@ -210,6 +211,8 @@ pub struct Owner<B> {
     packets: Option<Packets>,
     refusal: Option<&'static str>,
     publisher_epoch: Option<Rc<Cell<bool>>>,
+    service_alive: Rc<Cell<bool>>,
+    memory_claimed: bool,
 }
 impl<B: Resources> Owner<B> {
     /// `selected_ids` is the original pm-ptd-ranges array, not range ordinals or
@@ -268,7 +271,22 @@ impl<B: Resources> Owner<B> {
             packets: None,
             refusal: None,
             publisher_epoch: None,
+            service_alive: Rc::new(Cell::new(true)),
+            memory_claimed: false,
         })
+    }
+    /// The original class1 callback/mutex slot belongs to this actual native
+    /// owner for its whole lifetime, including ordinary startup/exit cycles.
+    /// Dropping a claim never reopens it or releases remote allocations.
+    pub fn claim_memory_services(&mut self) -> Result<memory::Claim, Error> {
+        if self.memory_claimed {
+            return Err(Error::Contract("PMP memory class slot is already admitted"));
+        }
+        self.memory_claimed = true;
+        Ok(memory::Claim::new(
+            self.identity.clone(),
+            self.service_alive.clone(),
+        ))
     }
     pub fn notifications(&self) -> &LocalNotifications {
         &self.local
@@ -504,6 +522,7 @@ impl<B> Drop for Owner<B> {
     fn drop(&mut self) {
         // Poison escaped native API targets, never synthesize exit effects,
         // reset the bank, clear STATUS or cancel actual hardware/DMA work.
+        self.service_alive.set(false);
         if let Some(epoch) = &self.publisher_epoch {
             epoch.set(false);
         }
@@ -884,6 +903,8 @@ mod tests {
         let mut backend = Backend::new();
         backend.before = Some(Effect::DisablePowerActions);
         let mut owner = Owner::initialized(local.clone(), IDS, backend).unwrap();
+        let memory = owner.claim_memory_services().unwrap();
+        assert!(owner.claim_memory_services().is_err());
         let mut latch = InterruptLatch::new();
         owner.begin_startup().unwrap();
         step(&mut owner, &mut latch, 1).unwrap();
@@ -902,6 +923,7 @@ mod tests {
         assert!(owner.begin_exit().is_err());
         step(&mut owner, &mut latch, 3).unwrap();
         assert_eq!(owner.phase(), Phase::Dormant);
+        assert!(memory.check().is_ok());
         assert_eq!(local.bank().requests().len(), requests);
         assert_eq!(local.bank().requests(), prefix);
         assert!(
@@ -927,6 +949,11 @@ mod tests {
             .unwrap();
         assert_eq!(latest(&local, 64), Some(77));
         assert!(latch.take_aic_inputs().is_empty());
+        assert!(memory.check().is_ok());
+        drop(owner);
+        assert!(memory.check().is_err());
+        drop(memory);
+        assert!(Owner::initialized(local, IDS, Backend::new()).is_err());
     }
 
     #[test]
@@ -947,6 +974,8 @@ mod tests {
         assert!(Owner::initialized(local.clone(), IDS, backend).is_err());
         assert_eq!(local.bank().requests(), prefix);
         let mut first = Owner::initialized(local.clone(), IDS, Backend::new()).unwrap();
+        drop(first.claim_memory_services().unwrap());
+        assert!(first.claim_memory_services().is_err());
         assert!(Owner::initialized(local.clone(), IDS, Backend::new()).is_err());
         let mut second = Owner::initialized(self::local(), IDS, Backend::new()).unwrap();
         let mut latch = InterruptLatch::new();
