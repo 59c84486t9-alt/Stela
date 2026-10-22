@@ -393,7 +393,12 @@ mod tests {
         success(&mut policy, &mut store, BEGIN);
         let mut buffers = command(RESET);
         buffers.fail_output = true;
-        assert!(ask(&mut policy, &mut store, &mut buffers).unwrap_err().answer.is_none());
+        assert!(
+            ask(&mut policy, &mut store, &mut buffers)
+                .unwrap_err()
+                .answer
+                .is_none()
+        );
         assert_eq!(store.policy_nonce(PolicyNonce::Recovery), Ok(None));
         assert!(ask(&mut policy, &mut store, &mut command(PROPOSED_DIGEST)).is_err());
         assert!(ask(&mut policy, &mut store, &mut command(END)).is_err());
