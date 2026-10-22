@@ -165,23 +165,6 @@ $(OUT_DIR)/discovery_tmr_uefi.obj: $(SOURCE)/discovery_tmr.c $(TMR_HEADERS) | $(
 	$(CLANG) --target=x86_64-unknown-windows-gnu $(COMMON) $(CFLAGS) -ffreestanding \
 	 -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 
-# Test-only same-process canonical RAM fixture objects; never linked in a driver.
-.PHONY: tmr-ram-model
-tmr-ram-model: $(OUT_DIR)/tmr-model.o $(OUT_DIR)/tmr-query-model.o \
- $(OUT_DIR)/tmr-vram-model.o $(OUT_DIR)/tmr-fixture.o $(OUT_DIR)/tmr-binary.o
-$(OUT_DIR)/tmr-model.o: $(SOURCE)/../tests/discovery_tmr.c $(TMR_TEST_HEADERS) $(OUT_DIR)/discovery-tmr-wrapper.inc
-	$(CC) $(COMMON) $(CFLAGS) -DSTELA_TMR_RUST_MODEL -I$(OUT_DIR) -c "$<" -o "$@"
-$(OUT_DIR)/tmr-query-model.o: $(OUT_DIR)/discovery-tmr-instrumented.c $(TMR_HEADERS)
-	$(CC) $(COMMON) $(CFLAGS) -I$(SOURCE) -I$(SOURCE)/../tests \
-	 -Dstela_amd_discovery_tmr_test_query=stela_amd_discovery_tmr_query -c "$<" -o "$@"
-$(OUT_DIR)/tmr-vram-model.o: $(OUT_DIR)/tmr-vram-instrumented.c $(VRAM_MM_HEADERS)
-	$(CC) $(COMMON) $(CFLAGS) -I$(SOURCE) -I$(SOURCE)/../tests -c "$<" -o "$@"
-$(OUT_DIR)/tmr-fixture.o: $(SOURCE)/../tests/discovery_tmr_fixture.c \
- $(SOURCE)/../tests/discovery_binary_test.c $(SOURCE)/../tests/discovery_reference.h $(TMR_HEADERS)
-	$(CC) $(COMMON) $(CFLAGS) -c "$<" -o "$@"
-$(OUT_DIR)/tmr-binary.o: $(SOURCE)/discovery_binary.c $(TMR_HEADERS) $(SOURCE)/../include/soc15_hw_ip.h | $(OUT_DIR)
-	$(CC) $(COMMON) $(CFLAGS) -c "$<" -o "$@"
-
 # Immutable discovery snapshots only; optional external files are CPU fixtures.
 DISCOVERY_INPUTS ?=
 DISCOVERY_HEADERS := $(SOURCE)/discovery_binary.h $(SOURCE)/../include/discovery.h \
@@ -304,17 +287,6 @@ $(OUT_DIR)/discovery_ip.o: $(SOURCE)/discovery_ip.c $(IP_HEADERS) | $(OUT_DIR)
 $(OUT_DIR)/discovery_ip_uefi.obj: $(SOURCE)/discovery_ip.c $(IP_HEADERS) | $(OUT_DIR)
 	$(CLANG) --target=x86_64-unknown-windows-gnu $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 
-# Test-only independent frozen consumer for the canonical owned-source harness.
-# Never linked into the production driver archive or used as a provider.
-.PHONY: ip-ram-model
-ip-ram-model: $(OUT_DIR)/ip-oracle.o $(OUT_DIR)/ip-fixture.o
-$(OUT_DIR)/ip-oracle.o: $(IP_TEST_SOURCES) $(IP_TEST_DEPS)
-	$(CC) $(COMMON) $(CFLAGS) -fwrapv -Wno-sign-compare -DSTELA_IP_RUST_MODEL \
-	 -Dmain=stela_amd_ip_test_main -I$(OUT_DIR) -c "$(SOURCE)/../tests/discovery_ip.c" -o "$@"
-$(OUT_DIR)/ip-fixture.o: $(SOURCE)/../tests/discovery_ip_fixture.c $(DISCOVERY_TEST_HEADERS) \
- $(SOURCE)/../tests/discovery_binary_test.c | $(OUT_DIR)
-	$(CC) $(COMMON) $(CFLAGS) -c "$<" -o "$@"
-
 FILE_HEADERS := $(SOURCE)/discovery_file.h $(SOURCE)/../amdgpu/amdgpu_discovery_file_core.h $(DISCOVERY_HEADERS)
 FILE_SOURCES := $(SOURCE)/discovery_file.c $(SOURCE)/discovery_binary.c \
  $(SOURCE)/../tests/discovery_file.c $(SOURCE)/../tests/discovery_ip_fixture.c
@@ -345,12 +317,6 @@ $(OUT_DIR)/discovery_file.o: $(SOURCE)/discovery_file.c $(FILE_HEADERS) | $(OUT_
 $(OUT_DIR)/discovery_file_uefi.obj: $(SOURCE)/discovery_file.c $(FILE_HEADERS) | $(OUT_DIR)
 	$(CLANG) --target=x86_64-unknown-windows-gnu $(COMMON) $(CFLAGS) -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 
-.PHONY: file-ram-model
-file-ram-model: $(OUT_DIR)/file-oracle.o
-$(OUT_DIR)/file-oracle.o: $(FILE_SOURCES) $(FILE_TEST_DEPS)
-	$(CC) $(COMMON) $(CFLAGS) -fwrapv -Dmain=stela_amd_file_test_main \
-	 -I$(OUT_DIR) -c "$(SOURCE)/../tests/discovery_file.c" -o "$@"
-
 INFO_HEADERS := $(SOURCE)/discovery_info.h $(IP_HEADERS) \
  $(SOURCE)/../amdgpu/amdgpu_discovery_info_core.h \
  $(SOURCE)/../amdgpu/amdgpu_gfx_config.h $(SOURCE)/../include/amd_harvest_masks.h
@@ -359,7 +325,7 @@ INFO_SOURCES := $(SOURCE)/discovery_info.c $(SOURCE)/discovery_ip.c $(SOURCE)/di
 INFO_TEST_DEPS := $(INFO_HEADERS) $(SOURCE)/../tests/discovery_info_reference.h $(SOURCE)/../tests/discovery_info_legacy_reference.h \
  $(SOURCE)/../tests/discovery_binary_test.c $(SOURCE)/../tests/discovery_reference.h \
  $(OUT_DIR)/info-linux.inc
-.PHONY: info-test info-sanitize info-isp-test info-isp-sanitize info-native info-uefi info-ram-model
+.PHONY: info-test info-sanitize info-isp-test info-isp-sanitize info-native info-uefi
 info-test: $(OUT_DIR)/discovery_info_test
 	"$<" $(INFO_INPUTS)
 info-sanitize: $(OUT_DIR)/discovery_info_sanitize
@@ -389,17 +355,9 @@ $(OUT_DIR)/discovery_info.o: $(SOURCE)/discovery_info.c $(INFO_HEADERS) | $(OUT_
 	$(CC) $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 $(OUT_DIR)/discovery_info_uefi.obj: $(SOURCE)/discovery_info.c $(INFO_HEADERS) | $(OUT_DIR)
 	$(CLANG) --target=x86_64-unknown-windows-gnu $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
-# Frozen whole original consumer, CPU oracle only; never a production provider.
-info-ram-model: $(OUT_DIR)/info-oracle.o $(OUT_DIR)/info-fixture.o
-$(OUT_DIR)/info-oracle.o: $(INFO_SOURCES) $(INFO_TEST_DEPS)
-	$(CC) $(COMMON) $(CFLAGS) -fwrapv -Wno-sign-compare -Wno-pointer-sign -Dmain=stela_amd_info_test_main -I$(OUT_DIR) -c "$(SOURCE)/../tests/discovery_info.c" -o "$@"
-
 .PHONY: info-elf
 info-elf: $(OUT_DIR)/discovery_info_elf.o
 	$(NM) -u "$<" >"$<.undefined"
 	! grep -Ev 'amdgpu_discovery_binary_(table|validate)|mem(cpy|set)' "$<.undefined"
 $(OUT_DIR)/discovery_info_elf.o: $(SOURCE)/discovery_info.c $(INFO_HEADERS) | $(OUT_DIR)
 	$(CLANG) --target=x86_64-unknown-linux-gnu $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
-
-$(OUT_DIR)/info-fixture.o: $(SOURCE)/../tests/discovery_info_fixture.c $(DISCOVERY_TEST_HEADERS) $(SOURCE)/../tests/discovery_binary_test.c | $(OUT_DIR)
-	$(CC) $(COMMON) $(CFLAGS) -fwrapv -c "$<" -o "$@"

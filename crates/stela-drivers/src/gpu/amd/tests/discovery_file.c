@@ -90,11 +90,3 @@ int main(int argc,char **argv)
  printf("AMD selected-file: %u whole original/current request/log/copy/release comparisons; actual extent/zero-tail/error atomicity; CPU only\n",comparisons);
  return 0;
 }
-
-/* Test-only original packed-header query, no parallel Rust wire format. */
-size_t stela_amd_file_fixture_declared(const uint8_t *source,size_t bytes)
-{
- assert(!amdgpu_discovery_binary_validate(source,bytes));
- const struct binary_header *header=(const void*)source;
- return header->binary_size;
-}

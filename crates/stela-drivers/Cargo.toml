@@ -22,7 +22,7 @@ intel-port = ["dep:cc"]
 # Native AMD page-entry and BAR support; requires real mapping/GMC owners.
 amd-port = ["dep:cc"]
 # Hosted AMD encoder build; its C runtime is not yet ported to UEFI.
-amd-commands = []
+amd-commands = ["dep:cc"]
 # Shared Metal library input validation, independent of a physical GPU backend.
 metal = []
 
@@ -36,15 +36,12 @@ cc = { version = "1", optional = true }
 
 [[test]]
 name = "nvidia_mmio"
-path = "src/gpu/nvidia/stela/tests/mmio.rs"
 required-features = ["nvidia-port"]
 
 [[test]]
 name = "amd_native_mmio"
-path = "src/gpu/amd/tests/native_mmio.rs"
 required-features = ["amd-port"]
 
 [[test]]
 name = "intel_activation"
-path = "src/gpu/intel/stela/tests/activation.rs"
 required-features = ["intel-port"]

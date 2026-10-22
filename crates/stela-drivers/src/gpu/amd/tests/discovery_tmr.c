@@ -174,7 +174,6 @@ static __attribute__((unused)) void native_case(unsigned which)
  if(which==15)assert(m.polls==2000); /* No invented timeout/READY. */
  ++native_cases;
 }
-#ifndef STELA_TMR_RUST_MODEL
 int main(void)
 {
  selectors();
@@ -184,20 +183,3 @@ int main(void)
  for(unsigned a=0;a<CHIP_LAST;a++) {uint32_t r=0;bool has=amdgpu_virt_bootstrap_iov_register(a,&r);if(has)assert(r==0xde5||r==0x1503);}
  printf("AMD TMR: %u exact original ASIC selectors; %u original complete query/allocator/ordered-trace comparisons; %u native cases incl zero-I/O preflight, absent owners, mailbox bounds and2000 neverready; CPU models only\n",selector_cases,comparisons,native_cases);
 }
-
-#else
-static struct model rust_model;
-void stela_amd_tmr_model_begin(volatile uint32_t *registers, const uint8_t *vram, size_t bytes)
-{
- rust_model=(struct model){.register_base=registers,.vram=vram,.vram_size=bytes,
-  .vram_offset=(UINT64_C(64)<<20)-DISCOVERY_TMR_OFFSET};
- rust_model.regs[mmRCC_CONFIG_MEMSIZE]=64;
- active=&rust_model;
-}
-unsigned stela_amd_tmr_model_accesses(void) { return rust_model.count; }
-void stela_amd_tmr_model_delay(void) {rust_model.ready_after=1;}
-void stela_amd_tmr_model_vf(void) {rust_model.regs[mmRCC_IOV_FUNC_IDENTIFIER]=1;}
-void stela_amd_tmr_model_system(void) {rust_model.regs[mmRCC_CONFIG_MEMSIZE]=0;}
-void stela_amd_tmr_model_corrupt(void) {rust_model.corrupt=true;}
-void stela_amd_tmr_model_end(void) { active=NULL; }
-#endif

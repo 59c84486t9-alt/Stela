@@ -1,10 +1,8 @@
 //! Explicit RAM/MMIO models; never a production PCI/power/cache provider.
 extern crate alloc;
-#[path = "firmware.rs"]
 mod intel;
 use activation::{Device, Error, PciIdentity, ProbeOwner};
 use bus::mmio::owned::*;
-#[path = "wopcm.rs"]
 mod wopcm_tests;
 use std::{
     alloc::{Layout, alloc_zeroed, dealloc},

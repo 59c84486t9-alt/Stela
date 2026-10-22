@@ -90,6 +90,22 @@ pub fn build() {
     );
     println!("cargo:rustc-link-lib=static=stela_amd_commands");
     println!("cargo:rustc-link-lib=static=amd_command_support");
+    // The command tests' immutable radeon_info fixture; only cfg(test) links it.
+    cc::Build::new()
+        .file(manifest.join("src/gpu/amd/tests/commands_fixture.c"))
+        .include(source.join("include"))
+        .include(source.join("src"))
+        .include(build.join("src"))
+        .include(build.join("src/amd/common"))
+        .std("c11")
+        .warnings_into_errors(true)
+        .cargo_metadata(false)
+        .compile("stela-amd-commands-test");
+    println!(
+        "cargo:rustc-link-search=native={}",
+        env::var("OUT_DIR").expect("Cargo supplies OUT_DIR")
+    );
+    println!("cargo:rerun-if-changed=src/gpu/amd/tests/commands_fixture.c");
     println!("cargo:rerun-if-changed={}", source.display());
     for name in [
         "CC", "CXX", "AR", "CFLAGS", "CPPFLAGS", "CXXFLAGS", "LDFLAGS", "PATH",

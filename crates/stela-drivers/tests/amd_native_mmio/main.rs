@@ -3,9 +3,7 @@
 //! No physical GPU, page table, cache-policy or hardware activation is modeled
 //! as completed by a production adapter.
 extern crate alloc;
-#[path = "pci.rs"]
 mod pci_tests;
-#[path = "vram.rs"]
 mod vram_tests;
 use stela_drivers::{
     Clock, bus,
