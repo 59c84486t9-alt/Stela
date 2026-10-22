@@ -654,7 +654,7 @@ pub(super) mod tests {
         Arc<Owner>,
         Arc<AtomicUsize>,
     ) {
-        let (_, report) = super::super::phy_tables::control_fixture();
+        let (_, report) = super::super::phy::control_fixture();
         let (io, m, o, d) = bus(report.profile());
         let c = unsafe { Control::new(io, &report) }.unwrap();
         m.lock().unwrap().clear_log();
@@ -841,7 +841,7 @@ pub(super) mod tests {
     }
     #[test]
     fn missing_clock_stale_status_deadline_and_uncertain_reads_cannot_start_calibration() {
-        let (_, report) = super::super::phy_tables::control_fixture();
+        let (_, report) = super::super::phy::control_fixture();
         let (io, m, _, _) = bus(report.profile());
         m.lock().unwrap().clock_available = false;
         assert!(matches!(

@@ -4,15 +4,15 @@
 //! Retained ordinary PCIe bootstrap, including every source selectable queue.
 //! Actual protocol facts never publish an associated Link or qualify policy.
 use super::{
-    control::{self, Control, bootstrap::MacInitialized, rx_ring, tx_ring},
+    control::{self, Control, mac::MacInitialized, rx_ring, tx_ring},
     firmware::{Prepared, auxiliary::Auxiliary, clc::Inputs as ClcInputs},
     identity::{Chip, Identity},
     mailbox::{
         self, Mailbox,
-        bootstrap::Fact,
         clc::{Execution, remaining},
+        init::Fact,
     },
-    mcu::{bootstrap::Request, device::Context},
+    mcu::{device::Context, init::Request},
     registers::{self, BarIo, MmioBar, Registers},
     ring::{
         self, MmioQueue, QueueIo, TxRing,
@@ -66,7 +66,7 @@ pub enum Error {
     Eeprom(mailbox::eeprom::Failure),
     Clc(mailbox::clc::Error),
     Remaining(remaining::Error),
-    Codec(super::mcu::bootstrap::Error),
+    Codec(super::mcu::init::Error),
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -523,8 +523,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         if band == Band::Ghz6 {
             return Err(Error::UnsupportedBand);
         }
-        super::mcu::bootstrap::validate_channel(band, channel, frequency_mhz)
-            .map_err(Error::Codec)?;
+        super::mcu::init::validate_channel(band, channel, frequency_mhz).map_err(Error::Codec)?;
         let s = self.state_mut();
         let p = s.policy.as_mut().ok_or(Error::MissingPolicy)?;
         let caps = p.capabilities().observed();

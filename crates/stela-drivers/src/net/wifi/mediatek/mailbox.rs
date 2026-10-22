@@ -17,11 +17,11 @@ use super::{
 };
 use alloc::vec::Vec;
 
-pub mod bootstrap;
 pub mod clc;
 pub mod device;
 pub mod eeprom;
 pub mod firmware;
+pub mod init;
 pub mod key;
 
 static NEXT_OWNER: crate::net::wifi::Identities = crate::net::wifi::Identities::new();
@@ -54,7 +54,7 @@ pub enum Operation {
     Clc,
     Domain,
     Power(mcu::power::Kind),
-    Initial(mcu::bootstrap::Kind),
+    Initial(mcu::init::Kind),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Failure {
@@ -148,7 +148,7 @@ enum Packet {
     Clc(mcu::clc::Packet),
     Domain(mcu::domain::Packet),
     Power(mcu::power::Packet),
-    Initial(mcu::bootstrap::Packet),
+    Initial(mcu::init::Packet),
 }
 impl Packet {
     fn operation(&self) -> Operation {
@@ -255,7 +255,7 @@ pub struct Mailbox<W: QueueIo, F: QueueIo, R: QueueIo> {
     interrupted_regulatory_reply: Option<clc::Reply>,
     download_binding: Option<firmware::Binding>,
     source_restart_cookie: Option<u64>,
-    interrupted_initial_reply: Option<bootstrap::Reply>,
+    interrupted_initial_reply: Option<init::Reply>,
 }
 impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
     /// # Safety
@@ -712,7 +712,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
                                     ReplySlot::Clc
                                 }
                                 Operation::Initial(kind) => {
-                                    self.interrupted_initial_reply = Some(bootstrap::Reply {
+                                    self.interrupted_initial_reply = Some(init::Reply {
                                         kind,
                                         sequence,
                                         dma_released,

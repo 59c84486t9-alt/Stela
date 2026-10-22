@@ -434,8 +434,8 @@ fn complete_source_bootstrap_owns_all_queues_and_real_runtime_transition() {
         assert_eq!(f.controller.facts().len(), 1);
         assert!(matches!(
             f.controller.facts()[0],
-            crate::net::wifi::mediatek::mailbox::bootstrap::Fact::OneWayDmaCompleted {
-                kind: crate::net::wifi::mediatek::mcu::bootstrap::Kind::Restart,
+            crate::net::wifi::mediatek::mailbox::init::Fact::OneWayDmaCompleted {
+                kind: crate::net::wifi::mediatek::mcu::init::Kind::Restart,
                 sequence: 1
             }
         ));
@@ -615,7 +615,7 @@ fn actual_global_and_source_per_wcid_controls_match_receive_format() {
         assert!(f.model.lock().unwrap().raw_disabled.contains(&1));
         if chip == Chip::Mt7925 {
             assert!(
-                matches!(f.controller.facts().last(),Some(crate::net::wifi::mediatek::mailbox::bootstrap::Fact::GenericResponse(r)) if r.frame.bytes.ends_with(&0xdeadbeefu32.to_le_bytes()))
+                matches!(f.controller.facts().last(),Some(crate::net::wifi::mediatek::mailbox::init::Fact::GenericResponse(r)) if r.frame.bytes.ends_with(&0xdeadbeefu32.to_le_bytes()))
             );
         }
 

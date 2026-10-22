@@ -3,7 +3,7 @@
 //! Initial commands share the real serialized mailbox; only the actual owning
 //! lifecycle may publish them. Raw generic replies are not fabricated ACKs.
 use super::{Cause, Mailbox, Operation, PCI_TIMEOUT_US, Packet, QueueIo, TransportFailure};
-use crate::net::wifi::mediatek::{mcu::bootstrap as codec, ring::rx::Frame};
+use crate::net::wifi::mediatek::{mcu::init as codec, ring::rx::Frame};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Reply {
     pub kind: codec::Kind,

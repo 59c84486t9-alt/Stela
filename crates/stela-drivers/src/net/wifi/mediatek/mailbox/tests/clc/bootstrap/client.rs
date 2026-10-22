@@ -323,7 +323,7 @@ fn actual_mt7925_init_scan_secure_client_reconnect_and_stop() {
     // Generic scan command response has no status/scan completion authority.
     assert!(matches!(
         driver.transport_facts().last(),
-        Some(crate::net::wifi::mediatek::mailbox::bootstrap::Fact::GenericResponse(_))
+        Some(crate::net::wifi::mediatek::mailbox::init::Fact::GenericResponse(_))
     ));
     let mut beacon = response(
         0x80,

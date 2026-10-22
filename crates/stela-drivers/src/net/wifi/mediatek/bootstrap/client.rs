@@ -146,7 +146,7 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     scan_ticket: Option<scan::Ticket>,
     scan_sequence: u8,
     replies: Vec<mailbox::UnifiedReply>,
-    transport_facts: Vec<mailbox::bootstrap::Fact>,
+    transport_facts: Vec<mailbox::init::Fact>,
     asynchronous: Vec<crate::net::wifi::mediatek::ring::rx::Frame>,
     pending_rx: VecDeque<receive::ReceivedFrame>,
     receive_groups: receive::Groups<C>,
@@ -245,7 +245,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     pub fn replies(&self) -> &[mailbox::UnifiedReply] {
         &self.state().replies
     }
-    pub fn transport_facts(&self) -> &[mailbox::bootstrap::Fact] {
+    pub fn transport_facts(&self) -> &[mailbox::init::Fact] {
         &self.state().transport_facts
     }
     fn command(s: &mut Owned<I, Q, C>, command: Command, body: &[u8]) -> Result<(), Error> {

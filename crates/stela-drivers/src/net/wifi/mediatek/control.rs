@@ -4,9 +4,9 @@
 //! are actual register observations, not a firmware epoch or DMA/IRQ fence.
 use super::registers::{self, BarIo, Registers};
 
-pub mod bootstrap;
 mod cold_start;
 pub mod dma;
+pub mod mac;
 
 // Register names from mt76 `mt792x_regs.h` and `mt7921/regs.h`.
 const MT_PCIE_MAC_INT_ENABLE: u32 = 0x10188;

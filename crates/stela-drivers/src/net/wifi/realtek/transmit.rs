@@ -291,7 +291,7 @@ impl<R: Registers> Rings<R> {
     pub unsafe fn phydm_info(
         &mut self,
         source: &dyn PageSource,
-        phy: &super::phy_tables::PhyInitialized,
+        phy: &super::phy::PhyInitialized,
         report: &super::features::Report,
     ) -> Result<(), Error> {
         if self.poisoned || !self.configured {
@@ -689,7 +689,7 @@ mod tests {
     #[test]
     fn phydm_and_initial_iqk_use_real_dma_packets_and_fresh_status_not_consumer_release() {
         use super::super::firmware_control::{Control, tests::bus};
-        let (phy, report) = super::super::phy_tables::control_fixture();
+        let (phy, report) = super::super::phy::control_fixture();
         let (io, fw, _, _) = bus(report.profile());
         let mut control = unsafe { Control::new(io, &report) }.unwrap();
         let memory = Arc::new(Mutex::new(Model::default()));
@@ -733,7 +733,7 @@ mod tests {
     fn stale_iqk_zero_publication_timeout_unwind_and_packet_failure_quarantine_both_owners() {
         use super::super::firmware_control::{Control, Error as FwError, tests::bus};
         for mode in 0..4 {
-            let (_, report) = super::super::phy_tables::control_fixture();
+            let (_, report) = super::super::phy::control_fixture();
             let (io, fw, owner, _) = bus(report.profile());
             let mut control = unsafe { Control::new(io, &report) }.unwrap();
             let memory = Arc::new(Mutex::new(Model::default()));
@@ -788,7 +788,7 @@ mod tests {
             if fault > total && fault != 0 {
                 break;
             }
-            let (_, report) = super::super::phy_tables::control_fixture();
+            let (_, report) = super::super::phy::control_fixture();
             let (io, fw, owner, _) = bus(report.profile());
             let mut control = unsafe { Control::new(io, &report) }.unwrap();
             let memory = Arc::new(Mutex::new(Model::default()));
@@ -819,7 +819,7 @@ mod tests {
         }
         assert!(total < 64);
         for mode in 0..5 {
-            let (_, report) = super::super::phy_tables::control_fixture();
+            let (_, report) = super::super::phy::control_fixture();
             let (io, fw, _, _) = bus(report.profile());
             if mode == 2 {
                 fw.lock().unwrap().now = 100;
@@ -883,7 +883,7 @@ mod tests {
             offset += 32;
             let source = &bytes[offset..offset + h[1] as usize * 16];
             offset += source.len();
-            let (_, report) = super::super::phy_tables::control_fixture();
+            let (_, report) = super::super::phy::control_fixture();
             let (io, fw, _, _) = bus(report.profile());
             let mut control = unsafe { Control::new(io, &report) }.unwrap();
             let memory = Arc::new(Mutex::new(Model::default()));

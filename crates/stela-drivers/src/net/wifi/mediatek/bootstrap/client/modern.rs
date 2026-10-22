@@ -9,7 +9,7 @@ pub(super) struct Configuration {
     context: Arc<AssociationContext>,
     pub(super) wire: wire::modern::Configuration,
     commands: Vec<(Command, Vec<u8>)>,
-    filter: crate::net::wifi::mediatek::mcu::bootstrap::Request,
+    filter: crate::net::wifi::mediatek::mcu::init::Request,
     completed: usize,
 }
 impl Configuration {

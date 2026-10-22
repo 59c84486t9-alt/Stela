@@ -7,13 +7,13 @@
 use super::identity::Chip;
 use alloc::vec::Vec;
 
-pub mod bootstrap;
 pub mod capabilities;
 pub mod clc;
 pub mod client;
 pub mod device;
 pub mod domain;
 pub mod eeprom;
+pub mod init;
 pub mod key;
 pub mod power;
 pub mod runtime;

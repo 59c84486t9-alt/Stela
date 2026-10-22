@@ -1246,7 +1246,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(path.parent().unwrap().join("data.rs")).unwrap(),
-            include_bytes!("phy_tables/source_mac/data.rs")
+            include_bytes!("phy/source_mac/data.rs")
         );
         let trace = std::fs::read(path).unwrap();
         let mut offset = 0;

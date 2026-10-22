@@ -15,7 +15,7 @@ pub mod hci;
 pub mod identity;
 pub mod interrupt;
 pub mod io;
-pub mod phy_tables;
+pub mod phy;
 pub mod power;
 pub mod receive;
 pub mod registers;

@@ -109,7 +109,7 @@ impl Profile {
             return Err(Error::InvalidWcid);
         }
         let ch = u8::try_from(self.channel.number).map_err(|_| Error::InvalidChannel)?;
-        super::bootstrap::validate_channel(self.channel.band, ch, self.channel.frequency_mhz)
+        super::init::validate_channel(self.channel.band, ch, self.channel.frequency_mhz)
             .map_err(|_| Error::InvalidChannel)?;
         if self.channel.band == Band::Ghz6 && !modern {
             return Err(Error::InvalidChannel);
@@ -249,7 +249,7 @@ impl Profile {
         tlv(&mut b, 27, 4);
         Ok(b)
     }
-    pub fn filter_request(self, enable: bool) -> Result<super::bootstrap::Request, Error> {
+    pub fn filter_request(self, enable: bool) -> Result<super::init::Request, Error> {
         self.validate()?;
         let mut b = vec![0; 72];
         // Actual primary PHY band_idx is 0 for this single-PHY profile,
@@ -259,9 +259,9 @@ impl Profile {
         b[8] = 1;
         put32(&mut b, 16, 1 << 11);
         b[20] = if enable { 1 } else { 2 };
-        Ok(super::bootstrap::Request::client_filter(b))
+        Ok(super::init::Request::client_filter(b))
     }
-    pub fn roc(self, token: u8, duration_ms: u32) -> Result<super::bootstrap::Request, Error> {
+    pub fn roc(self, token: u8, duration_ms: u32) -> Result<super::init::Request, Error> {
         self.validate()?;
         if duration_ms == 0 {
             return Err(Error::InvalidTiming);
@@ -280,9 +280,9 @@ impl Profile {
         b[17] = self.channel.number as u8;
         put32(&mut b, 20, duration_ms);
         b[24] = 255;
-        Ok(super::bootstrap::Request::roc(b))
+        Ok(super::init::Request::roc(b))
     }
-    pub fn abort_roc(self, token: u8) -> Result<super::bootstrap::Request, Error> {
+    pub fn abort_roc(self, token: u8) -> Result<super::init::Request, Error> {
         self.validate()?;
         let mut b = vec![0; 16];
         put16(&mut b, 4, 1);
@@ -290,7 +290,7 @@ impl Profile {
         b[8] = self.interface.bss_index;
         b[9] = token;
         b[10] = 255;
-        Ok(super::bootstrap::Request::roc(b))
+        Ok(super::init::Request::roc(b))
     }
     /// Full associated BSS helper for the admitted local/peer legacy profile.
     pub fn bss_request(self, enable: bool) -> Result<Vec<u8>, Error> {
@@ -377,7 +377,7 @@ pub fn scan(
     context: Context,
     sequence: u8,
     request: &crate::net::wifi::scan::Request,
-) -> Result<super::bootstrap::Request, Error> {
+) -> Result<super::init::Request, Error> {
     Requests::station(context, true).map_err(Error::Context)?;
     let mut out = vec![
         sequence | (context.band_index << 7),
@@ -433,12 +433,12 @@ pub fn scan(
             .count()
     };
     put16(&mut out, 2, count as u16);
-    Ok(super::bootstrap::Request::scan(out, false))
+    Ok(super::init::Request::scan(out, false))
 }
-pub fn cancel_scan(context: Context, sequence: u8) -> super::bootstrap::Request {
+pub fn cancel_scan(context: Context, sequence: u8) -> super::init::Request {
     let mut b = vec![sequence, context.bss_index, 0, 0];
     tlv(&mut b, 2, 8);
-    super::bootstrap::Request::scan(b, true)
+    super::init::Request::scan(b, true)
 }
 /// UNI_SCAN_DONE's four-byte fixed header followed by source TLVs. Unknown
 /// country/channel facts stay raw; they never overwrite trusted policy.
