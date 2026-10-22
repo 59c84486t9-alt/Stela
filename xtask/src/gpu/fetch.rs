@@ -402,7 +402,13 @@ pub fn export() -> Result<()> {
             fs::create_dir_all(&patches)?;
             exec(
                 git(&directory)
-                    .args(["format-patch", "-q", "--zero-commit", "--no-signature"])
+                    .args([
+                        "format-patch",
+                        "-q",
+                        "--no-numbered",
+                        "--zero-commit",
+                        "--no-signature",
+                    ])
                     .arg("-o")
                     .arg(&patches)
                     .arg(format!("{}..HEAD", origin.commit)),
