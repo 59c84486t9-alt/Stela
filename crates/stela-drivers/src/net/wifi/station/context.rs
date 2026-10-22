@@ -102,8 +102,10 @@ impl AssociationContext {
         }
         let mut tim = None;
         for (id, b) in ies(&beacon.elements)? {
-            if matches!(id, 71 | 85) {
-                return Err(Error::Unsupported("multiple-BSSID association"));
+            // Outer71 is an unselected, opaque advertisement on this exact
+            // transmitted-BSSID path. Outer85 requires profile DTIM handling.
+            if id == 85 {
+                return Err(Error::Unsupported("nontransmitted BSSID index"));
             }
             if id == 5 {
                 if tim.is_some() || b.len() < 4 || b[1] == 0 || b[0] >= b[1] {

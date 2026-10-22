@@ -768,3 +768,56 @@ fn full_local_he_source_slots_are_explicit_and_preserve_normal_one_width_semanti
     assert_eq!(c.negotiated().local().he().unwrap().mcs_80p80, None);
     assert_eq!((c.negotiated().rx_nss, c.negotiated().tx_nss), (1, 1));
 }
+
+#[test]
+fn transmitted_bssid_ignores_opaque_nested_profiles_and_keeps_outer_facts() {
+    let j = modern_join();
+    let mut bss = beacon(&j);
+    let mut nested = vec![1, 0, 25]; // max indicator, opaque subelement
+    ie(&mut nested, 83, &[0x11, 0]);
+    ie(&mut nested, 0, b"other");
+    ie(&mut nested, 85, &[1, 9, 8]);
+    ie(&mut nested, 3, &[149]);
+    ie(&mut nested, 48, &[1, 0, 0, 0]);
+    ie(&mut bss.elements, 71, &nested);
+    // An invalid inner subelement still cannot become profile authority.
+    ie(&mut bss.elements, 71, &[255, 0, 255]);
+    let raw = bss.elements.clone();
+    let mut station = Station::new(LOCAL).unwrap();
+    let Action::Configure {
+        context: Some(c), ..
+    } = configuration(&mut station, j.clone(), bss).unwrap()
+    else {
+        panic!("modern context")
+    };
+    assert_eq!(c.bssid(), j.bssid);
+    assert_eq!(c.beacon().transmitter, j.bssid);
+    assert_eq!(c.beacon().ssid, Some(vec![b'x']));
+    assert_eq!(c.beacon().capabilities, 1);
+    assert_eq!(c.beacon().elements, raw);
+    assert_eq!((c.dtim_count(), c.dtim_period()), (0, 3));
+    assert_eq!(c.channel(), j.channel);
+    assert_eq!(c.definition().center1_mhz, 5210);
+    assert_eq!(c.operations().ht.as_ref().unwrap().primary, 36);
+}
+
+#[test]
+fn transmitted_bssid_retains_outer_bounds_and_refuses_profile_selection() {
+    let j = modern_join();
+    let mut bss = beacon(&j);
+    bss.elements.extend_from_slice(&[71, 5, 1]);
+    assert!(configuration(&mut Station::new(LOCAL).unwrap(), j.clone(), bss).is_err());
+    let mut bss = beacon(&j);
+    ie(&mut bss.elements, 85, &[1, 9, 8]);
+    assert!(matches!(
+        configuration(&mut Station::new(LOCAL).unwrap(), j.clone(), bss),
+        Err(Error::Unsupported(_))
+    ));
+    let mut bss = beacon(&j);
+    bss.transmitter = Mac([4; 6]);
+    ie(&mut bss.elements, 71, &[1]);
+    assert!(matches!(
+        configuration(&mut Station::new(LOCAL).unwrap(), j, bss),
+        Err(Error::Unsupported(_))
+    ));
+}
