@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 DRMMM_SOURCE := $(SOURCE)/../../common/linux/drivers/gpu/drm/drm_mm.c
 DRMMM_TREE_SOURCE := $(SOURCE)/../../common/linux/lib/rbtree.c
-DRMMM_FLAGS := -std=gnu23 -O2 -Wall -Wextra -Werror -Wno-unused-parameter -I$(SOURCE)/tests -D__DISABLE_EXPORTS
+DRMMM_FLAGS := -std=gnu11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter -I$(SOURCE)/tests -D__DISABLE_EXPORTS
 .PHONY: drm-mm-source-check
 drm-mm-source-check:
 	test "$$(shasum -a 256 "$(DRMMM_SOURCE)" | cut -d ' ' -f 1)" = 456a003da23d8d4b243d6ea2e59d69ddf593aef09d81c5b70015726fd666adbf
 	test "$$(shasum -a 256 "$(DRMMM_TREE_SOURCE)" | cut -d ' ' -f 1)" = 3bc417b068cba5aff0c9b6a4400ee5b217bc366fe7b6daa66fab8948d16829c3
 DRMMM_HEADERS := $(RBTREE_LINUX)/list.h $(RBTREE_LINUX)/types.h $(RBTREE_LINUX)/poison.h \
-    $(RBTREE_LINUX)/limits.h \
+    $(RBTREE_LINUX)/limits.h $(RBTREE_LINUX)/compiler_types.h \
     $(RBTREE_LINUX)/build_bug.h $(RBTREE_LINUX)/minmax.h $(RBTREE_LINUX)/math64.h \
     $(RBTREE_LINUX)/log2.h $(RBTREE_LINUX)/interval_tree_generic.h $(RBTREE_LINUX)/export.h \
     $(RBTREE_LINUX)/../asm-generic/bitops/generic-non-atomic.h $(RBTREE_LINUX)/../drm/drm_mm.h
 $(BUILD)/drm-mm/fixture.stamp: $(BUILD)/rbtree/current/fixture.stamp $(DRMMM_SOURCE) $(DRMMM_TREE_SOURCE) $(DRMMM_HEADERS) $(SOURCE)/tests/drm_mm.mk | drm-mm-source-check
 	mkdir -p "$(BUILD)/drm-mm"
 	for h in list poison build_bug minmax interval_tree_generic export; do sed '/^#include /d' "$(RBTREE_LINUX)/$$h.h" > "$(BUILD)/drm-mm/$$h.inc"; done
+	sed -n '/^#if __STDC_VERSION__ < 202311L/,/^#endif/p' "$(RBTREE_LINUX)/compiler_types.h" > "$(BUILD)/drm-mm/auto-compat.inc"
 	sed -n '/^struct list_head {/,/^};/p; /^struct hlist_head {/,/^};/p; /^struct hlist_node {/,/^};/p' "$(RBTREE_LINUX)/types.h" > "$(BUILD)/drm-mm/list_types.inc"
 	sed '/^#include /d' "$(RBTREE_LINUX)/../asm-generic/bitops/generic-non-atomic.h" > "$(BUILD)/drm-mm/generic-non-atomic.inc"
 	sed '/^#include /d' "$(RBTREE_LINUX)/../drm/drm_mm.h" > "$(BUILD)/drm-mm/drm_mm.inc"

@@ -31,6 +31,7 @@ typedef __SIZE_TYPE__ size_t;
 #define clear_bit_unlock(n, p) ((void)__atomic_fetch_and((p), ~BIT(n), __ATOMIC_RELEASE))
 #undef static_assert
 #include "build_bug.inc"
+#include "auto-compat.inc"
 #include "minmax.inc"
 #include "div64.inc"
 #include "power2.inc"
