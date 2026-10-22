@@ -677,6 +677,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         cpu.memory_lock = self.cpu.memory_lock;
         let now = self.now();
         pause_cpu(&mut cpu, None, now, self.processor_paused(pe));
+        // Its SIQ_CFG_EL1 restarts at 0, which accepts IRQs.
+        self.devices.irq_steering(pe, false, now);
         if pe == self.current {
             self.cpu = cpu;
             self.waiting = None;

@@ -553,9 +553,8 @@ const ACC_OVRD_EVIDENCE: &str = "m1n1 cpu_regs.h names it; XNU xnu-12377.121.6 \
 const SIQ_CFG: &str = "m1n1 cpu_regs.h names it SIQ_CFG_EL1, and Asahi's documentation says \
     the AICv2 sends a core that writes 3 to it no IRQs (FIQs are unaffected); 26A434 XNU sets bits \
     0-1 to a per-thread mode with read-modify-write at context switch (0xfffffe000bd7c388) and \
-    before a power-down, and clears it elsewhere (0xfffffe000bd70b74). The value is held, but the \
-    interrupt controller here does not consult it, so that IRQ steering is not modeled (an AIC \
-    gap; docs/design/system.md)";
+    before a power-down, and clears it elsewhere (0xfffffe000bd70b74). The value is held, and \
+    mode 3 keeps an AICv2 or AICv3 from sending the PE IRQs (machine::registers SIQ_CFG_NO_IRQ)";
 
 const XNU_THREAD_KEYS: &str = "26A434 XNU's context switch writes it with the thread's \
     APIBKey value plus 4 or 5, after APIBKey and APDBKey (0xfffffe000bb9bd38), and reads it \

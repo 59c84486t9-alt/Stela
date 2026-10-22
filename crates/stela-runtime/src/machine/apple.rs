@@ -3088,6 +3088,18 @@ impl Devices for AppleDevices {
         self.processor_powered(cpu, on);
     }
 
+    /// An AICv2 or AICv3 stops sending IRQs to a CPU whose SIQ_CFG_EL1
+    /// refuses them; an AICv1 is not documented to consult it.
+    fn irq_steering(&mut self, cpu: usize, refuses: bool, now: u64) {
+        let Some(Controller::V2(id)) = self.aic else {
+            return;
+        };
+        let mut access = Access::new(cpu, now, &mut self.latch);
+        if let Some(aic) = self.bus.device_mut::<Aic2>(id) {
+            aic.steer(cpu, refuses, &mut access);
+        }
+    }
+
     /// A sleeping SoC with no alarm due waits for the host's power button.
     fn waits_on_host(&self) -> bool {
         self.sleep.asleep

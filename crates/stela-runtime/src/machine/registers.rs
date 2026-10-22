@@ -196,7 +196,20 @@ pub struct Changes {
     /// (`impdef::Entry::unmodeled_effect`): what is missing, which the
     /// engine reports once, or stops at in strict mode.
     pub unmodeled: Option<&'static str>,
+    /// SIQ_CFG_EL1 now refuses (`true`) or accepts the AIC's IRQs for this
+    /// PE ([`SIQ_CFG_NO_IRQ`]).
+    pub irq_steering: Option<bool>,
 }
+
+/// SIQ_CFG_EL1's mode, bits 1:0, of which 3 keeps the AICv2 from sending
+/// the core IRQs, while FIQs, part of the core complex, are unaffected
+/// (Asahi `hw/cpu/system-registers.md`, "s3_4_c15_c10_4 (labeled
+/// SIQ_CFG_EL1 in m1n1)"); m1n1 writes 2 (`chickens.c`). 26A434 XNU sets
+/// the mode per thread at context switch, 3 for a thread its
+/// `siq_realtime_thread_mode` selects unless the CPU runs its idle thread
+/// (kernelcache.release.mac14g 0xfffffe000bd7c388..0xfffffe000bd7c3d0).
+pub const SIQ_CFG_MODE: u64 = 0b11;
+pub const SIQ_CFG_NO_IRQ: u64 = 0b11;
 
 /// Why an access cannot complete on this machine (not a guest exception).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -804,6 +817,8 @@ impl Cpu {
         match self.apple.impdef.write(entry, value) {
             Ok(()) => Outcome::Written(Changes {
                 unmodeled: entry.unmodeled_effect(value),
+                irq_steering: (entry.encoding == impdef::SIQ_CFG_EL1)
+                    .then_some(value & SIQ_CFG_MODE == SIQ_CFG_NO_IRQ),
                 ..Changes::default()
             }),
             Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
@@ -1385,6 +1400,23 @@ mod tests {
         let mut el1 = Cpu::new(0, Pstate::reset(1));
         for encoding in [SPR_LOCKDOWN_EL2, SPR_LOCKDOWN_EL1, SPR_LOCKDOWN_COMMIT] {
             assert_eq!(write(&mut el1, encoding, 0), Outcome::Undefined);
+        }
+    }
+
+    /// A SIQ_CFG_EL1 write tells the board whether the PE now refuses the
+    /// AIC's IRQs: mode 3 refuses, XNU's 0 and 2 accept.
+    #[test]
+    fn siq_cfg_steers_the_aics_irqs() {
+        let mut cpu = Cpu::new(0, Pstate::reset(2));
+        for (value, refuses) in [(3, true), (2, false), (0x7, true), (0, false)] {
+            cpu.state.x[5] = value;
+            assert!(matches!(
+                cpu.apple_access(msr(5, impdef::SIQ_CFG_EL1), 0),
+                Outcome::Written(Changes {
+                    irq_steering: Some(steering),
+                    ..
+                }) if steering == refuses
+            ));
         }
     }
 

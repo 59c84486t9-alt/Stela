@@ -644,6 +644,9 @@ pub trait Devices {
     /// PE `cpu` powered down (`false`: a WFI in CYC_OVRD's power-down
     /// mode) or left reset again (`true`: a start or a wake from power-down).
     fn processor_power(&mut self, _cpu: usize, _on: bool) {}
+    /// PE `cpu`'s SIQ_CFG_EL1 now refuses (`true`) or accepts the interrupt
+    /// controller's IRQs (`registers::SIQ_CFG_NO_IRQ`).
+    fn irq_steering(&mut self, _cpu: usize, _refuses: bool, _now: u64) {}
     /// Whether an input from outside the board, which the host delivers
     /// between runs, can still wake a PE when no device deadline will:
     /// a sleeping SoC's power button. Then a wait of every PE with no
@@ -5546,6 +5549,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 if let Some(missing) = changes.unmodeled {
                     let refusal = Refusal::UnsupportedSetting(missing);
                     self.degrade(self.register_requirement(word, access, refusal))?;
+                }
+                if let Some(refuses) = changes.irq_steering {
+                    let now = self.now();
+                    self.devices.irq_steering(self.current, refuses, now);
+                    self.device_lines = None;
                 }
                 // PSTATE.D and Apple registers can change what is derived.
                 self.derived_changed();

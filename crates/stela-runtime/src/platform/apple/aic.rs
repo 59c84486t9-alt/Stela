@@ -195,6 +195,8 @@ pub struct Aic2 {
     hardware: Vec<u32>,
     mask: Vec<u32>,
     irq_level: Vec<bool>,
+    /// The CPUs whose SIQ_CFG_EL1 refuses IRQs ([`Aic2::steer`]).
+    refusing: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,6 +290,7 @@ impl Aic2 {
             hardware: vec![0; words],
             mask: vec![u32::MAX; words],
             irq_level: vec![false; config.cpus],
+            refusing: 0,
             config,
             layout,
             span,
@@ -381,9 +384,29 @@ impl Aic2 {
             .filter_map(|group| self.config.target_groups[group])
             .fold(0, |cpus, group| cpus | group)
     }
+    /// CPU `cpu`'s SIQ_CFG_EL1 mode refuses IRQs (`true`) or accepts them:
+    /// a refusing CPU is sent none, so an IRQ targeting it reaches only the
+    /// other CPUs of its target set, or waits for one to accept
+    /// (`registers::SIQ_CFG_NO_IRQ`). A CPU the AIC does not serve changes
+    /// nothing.
+    pub fn steer(&mut self, cpu: CpuIndex, refuses: bool, access: &mut Access<'_>) {
+        if cpu >= self.config.cpus {
+            return;
+        }
+        if refuses {
+            self.refusing |= 1 << cpu;
+        } else {
+            self.refusing &= !(1 << cpu);
+        }
+        self.update(access);
+    }
     /// The highest-priority deliverable IRQ for `cpu`.
     fn pending_for(&self, cpu: CpuIndex) -> Option<usize> {
-        if !self.enabled || !self.lifecycle.clocked || self.lifecycle.quiesced {
+        if !self.enabled
+            || !self.lifecycle.clocked
+            || self.lifecycle.quiesced
+            || self.refusing & 1 << cpu != 0
+        {
             return None;
         }
         (0..self.software.len())
@@ -1004,6 +1027,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// A CPU whose SIQ_CFG_EL1 mode is 3 is sent no IRQs: one targeting
+    /// both CPUs goes to the other, and one targeting it alone waits.
+    #[test]
+    fn a_cpu_refusing_irqs_through_siq_cfg_is_sent_none() {
+        let mut latch = InterruptLatch::new();
+        let mut aic = aic(2);
+        write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+        write(&mut aic, &mut latch, IRQ_CFG, 0b11);
+        write(&mut aic, &mut latch, MASK_CLR, 1);
+        let mut access = Access::new(0, 0, &mut latch);
+        aic.set_input(AicInput::new(0, 0), true, &mut access)
+            .unwrap();
+        aic.steer(0, true, &mut access);
+        assert!(!latch.pins(0).irq && latch.pins(1).irq);
+        assert_eq!(read(&mut aic, &mut latch, 0, EVENT), 0);
+        write(&mut aic, &mut latch, IRQ_CFG, 0b01);
+        assert!(!latch.pins(0).irq && !latch.pins(1).irq);
+        aic.steer(0, false, &mut Access::new(0, 0, &mut latch));
+        assert!(latch.pins(0).irq);
+        assert_eq!(read(&mut aic, &mut latch, 0, EVENT), 1 << 16);
+        // A CPU the AIC does not serve changes nothing.
+        aic.steer(5, true, &mut Access::new(0, 0, &mut latch));
     }
 
     #[test]
