@@ -8,6 +8,8 @@ use crate::platform::apple::interrupt::Wire;
 use alloc::{collections::BTreeSet, rc::Rc, vec, vec::Vec};
 use core::cell::RefCell;
 
+pub mod notifications;
+
 const NAME: &str = "ptd";
 const ENTRY_BYTES: u64 = 16;
 const UPDATE_BYTES: u64 = 8;
@@ -91,9 +93,16 @@ struct State {
     enabled: Vec<Word>,
     routes: Vec<Word>,
     bindings: [Option<Wire>; ROUTES],
+    notification_owner: NotificationOwner,
     asserted: [bool; ROUTES],
     requests: Vec<Request>,
     serial: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NotificationOwner {
+    External,
+    PmpLocal,
 }
 impl State {
     fn accessible(&self) -> Result<(), &'static str> {
@@ -119,7 +128,9 @@ impl State {
             }
             let shift = (entry % 8) * 4;
             let route = (self.routes[entry / 8].read(0xf << shift)? >> shift) as usize;
-            if self.bindings[route].is_none() {
+            if self.notification_owner == NotificationOwner::External
+                && self.bindings[route].is_none()
+            {
                 return Err("PTD route has no qualified interrupt resource");
             }
             levels[route] = true;
@@ -270,6 +281,7 @@ impl Ptd {
             enabled: vec![initial; entries.div_ceil(32)],
             routes: vec![initial; entries.div_ceil(8)],
             bindings,
+            notification_owner: NotificationOwner::External,
             asserted: [false; ROUTES],
             requests: Vec::new(),
             serial: 0,
