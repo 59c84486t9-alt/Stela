@@ -588,15 +588,6 @@ impl Cpu {
                 .unwrap_or_else(|reason| Outcome::Refused(Refusal::UnsupportedSetting(reason)));
         }
         let consumed = impdef::consumed(encoding, self.registers.chip());
-        if encoding.crn() == 11 {
-            return if consumed {
-                Outcome::Refused(Refusal::UnsupportedSetting(
-                    "CRn=11 IMPLEMENTATION DEFINED register without a model",
-                ))
-            } else {
-                Outcome::Undefined
-            };
-        }
         if super::amx::Unit::owns(encoding) {
             let el = if self.regime() == TranslationRegime::El20 {
                 2
@@ -651,6 +642,15 @@ impl Cpu {
                     }),
                     Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
                 }
+            };
+        }
+        if encoding.crn() == 11 {
+            return if consumed {
+                Outcome::Refused(Refusal::UnsupportedSetting(
+                    "CRn=11 IMPLEMENTATION DEFINED register without a model",
+                ))
+            } else {
+                Outcome::Undefined
             };
         }
         match self.apple(encoding) {
@@ -1183,6 +1183,28 @@ mod tests {
         assert_eq!(write(&mut el1, SPR_LOCKDOWN_EL2, MASK), Outcome::Undefined);
     }
 
+    /// CRn 11 reaches `machine::impdef` where an entry owns it, and stays
+    /// UNDEFINED on a chip whose components never access it.
+    #[test]
+    fn crn_11_encodings_reach_their_impdef_entries() {
+        use super::super::Chip;
+        let mut m5 = Cpu::of(Chip::AppleM5, 0, Pstate::reset(2));
+        assert_eq!(
+            m5.apple_access(mrs(0, impdef::PL2_ERR_STS), 0),
+            Outcome::Read(0)
+        );
+        m5.state.x[5] = 0x57f;
+        assert!(matches!(
+            m5.apple_access(msr(5, impdef::PL2_ERR_STS), 0),
+            Outcome::Written(_)
+        ));
+        let mut m2 = Cpu::of(Chip::AppleM2, 0, Pstate::reset(2));
+        assert_eq!(
+            m2.apple_access(mrs(0, impdef::PL2_ERR_STS), 0),
+            Outcome::Undefined
+        );
+    }
+
     /// Exercise decoded MRS/MSR, including privilege routing before validation:
     /// no rejected access can corrupt the PE's predictor configuration.
     #[test]
@@ -1413,14 +1435,54 @@ mod tests {
         }
     }
 
-    /// Every IMPLEMENTATION DEFINED encoding the M1's and M2's censused
-    /// components access has an owner: a modeled register here, CTRR,
-    /// AMX, the core PMU, the board's fast IPIs or a `machine::impdef`
-    /// entry with a class other than `Unsupported`.
+    /// The M3-and-later encodings whose owners are being written outside
+    /// `machine::impdef`: the Apple generic timer (`machine::timer`), the
+    /// CRn 11 CTRR, CTXR and tag-offset registers (`machine::ctrr`), and the
+    /// M5 kpc state S3_1_C15_C5_1, which `machine::pmu` owns on the M6 only
+    /// (mac17g save 0xfffffe000be64104, restore 0xfffffe000beb56b0), and
+    /// the M3 SPTMs' SPR_LOCKDOWN_EL1 (`S3_4_C15_C0_6`), which joins
+    /// SPR_LOCKDOWN_EL2 in its own batch. Each family leaves this list when
+    /// its owner lands.
+    fn pending_owner(encoding: Encoding) -> bool {
+        const KPC: (u8, u8, u8) = (1, 5, 1);
+        const SPR_LOCKDOWN_EL1: (u8, u8, u8) = (4, 0, 6);
+        const TIMER: [(u8, u8, u8); 15] = [
+            (1, 0, 5),
+            (1, 1, 5),
+            (1, 1, 6),
+            (1, 7, 4),
+            (1, 13, 4),
+            (1, 15, 4),
+            (4, 2, 7),
+            (4, 4, 1),
+            (4, 4, 3),
+            (4, 4, 4),
+            (4, 9, 6),
+            (4, 9, 7),
+            (4, 11, 7),
+            (4, 12, 6),
+            (4, 14, 6),
+        ];
+        let (op1, crn, crm, op2) = (
+            encoding.op1(),
+            encoding.crn(),
+            encoding.crm(),
+            encoding.op2(),
+        );
+        (crn == 15
+            && (TIMER.contains(&(op1, crm, op2))
+                || [KPC, SPR_LOCKDOWN_EL1].contains(&(op1, crm, op2))))
+            || (crn == 11 && op1 == 0 && crm <= 9)
+    }
+
+    /// Every IMPLEMENTATION DEFINED encoding a chip's censused components
+    /// access has an owner: a modeled register here, CTRR, AMX, the core
+    /// PMU, the board's fast IPIs or a `machine::impdef` entry with a class
+    /// other than `Unsupported` ([`pending_owner`] aside on the later chips).
     #[test]
-    fn every_encoding_the_m1_and_m2_components_access_has_a_model() {
+    fn every_encoding_the_components_access_has_a_model() {
         use crate::platform::apple::ipi;
-        for chip in [super::super::Chip::AppleM1, super::super::Chip::AppleM2] {
+        for chip in super::super::Chip::ALL {
             let mut owned = 0;
             for crn in [11, 15] {
                 for selector in 0u16..1 << 10 {
@@ -1428,8 +1490,9 @@ mod tests {
                     let (op1, crm, op2) = (field(7, 7), field(3, 0xf), field(0, 7));
                     let encoding = Encoding::new(3, op1, crn, crm, op2);
                     if !impdef::consumed(encoding, chip)
-                        || Pmu::owns(encoding)
+                        || Pmu::owns_on(chip, encoding)
                         || ipi::Register::decode(encoding).is_some()
+                        || pending_owner(encoding)
                     {
                         continue;
                     }
@@ -1443,12 +1506,16 @@ mod tests {
                     // A modeled register may be UNDEFINED in this state
                     // (SPRR's permissions while SPRR is disabled), but none
                     // lacks a model.
-                    assert_eq!(crn, 15, "{} {encoding:?}", chip.name());
                     let mut cpu = Cpu::of(chip, 0, Pstate::reset(2));
                     let outcome = cpu.apple_access(mrs(0, encoding), 0);
-                    assert_ne!(
-                        outcome,
-                        Outcome::Refused(Refusal::Unimplemented),
+                    assert!(
+                        !matches!(
+                            outcome,
+                            Outcome::Refused(Refusal::Unimplemented)
+                                | Outcome::Refused(Refusal::UnsupportedSetting(
+                                    "CRn=11 IMPLEMENTATION DEFINED register without a model"
+                                ))
+                        ),
                         "{} {encoding:?}",
                         chip.name()
                     );
