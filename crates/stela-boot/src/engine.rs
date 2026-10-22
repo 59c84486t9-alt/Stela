@@ -21,6 +21,9 @@ pub(crate) mod power;
 mod restore;
 mod speculation;
 mod storage;
+// Compile the source adapter while actual RAM/PMGR adoption remains explicit.
+#[allow(dead_code)]
+mod topology;
 pub(crate) mod translations;
 
 use crate::{
