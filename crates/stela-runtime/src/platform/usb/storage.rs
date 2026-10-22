@@ -1191,10 +1191,9 @@ mod tests {
         let mut found = host::run(&mut bench);
         assert!(found.failures.is_empty(), "{:?}", found.failures);
         let mut disk = found.disks.remove(0);
-        assert!(
-            disk.identity().location.ends_with("port 1"),
-            "{}",
-            disk.identity().location
+        assert_eq!(
+            disk.identity().location,
+            "xhci test port 1 interface 0 LUN 0"
         );
         let mut block = [0u8; 512];
         disk.read(7, &mut block).unwrap();
@@ -1217,10 +1216,10 @@ mod tests {
         assert_eq!((identity.blocks, identity.block_size), (300, 512));
         assert_eq!(identity.model, "STELA Native Disk");
         assert_eq!(identity.serial, "00000000000A");
-        assert!(
-            identity.location.ends_with("port 1.1"),
-            "{}",
-            identity.location
+        assert_eq!(identity.location, "xhci test port 1.1 interface 0 LUN 0");
+        assert_eq!(
+            found.disks[0].identity().location,
+            "xhci test port 1.2 interface 0 LUN 0"
         );
         assert!(!identity.read_only);
         // 200 blocks: two chunks of at most 64 KiB.
