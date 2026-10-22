@@ -160,7 +160,11 @@ impl Check {
                 "clock_hz": pe.clock,
                 "caches": pe.caches.is_some(),
             })).collect::<Vec<_>>(),
-            "aic": { "physical": hex(board.aic.physical), "inputs": board.aic.inputs },
+            "aic": {
+                "physical": hex(board.aic.physical),
+                "inputs": board.aic.inputs,
+                "dies": board.aic.layout.dies(),
+            },
             "lockdown": board.lockdown.iter().map(|block| serde_json::json!({
                 "block": block.name,
                 "physical": hex(block.physical),
