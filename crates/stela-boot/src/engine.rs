@@ -1912,7 +1912,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         crate::status::done("");
         opened
     });
-    let (mut host_nor, nor_image, nvram, sep_state) = match nor {
+    let (host_nor, nor_image, nvram, sep_state) = match nor {
         Some((host_nor, image, nvram, sep_state)) => {
             (Some(host_nor), Some(image), Some(nvram), Some(sep_state))
         }
@@ -2183,46 +2183,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     if tree.is_some() {
         crate::status::done(profile.name);
     }
-    let mut machine = Machine::new(cpu, bare, devices, profile, target);
-    if options.survey {
-        output::arguments(format_args!(
-            "SURVEY RUN: device accesses without a model read 0 and drop writes; \
-             the guest's behavior is unverified\n"
-        ));
-        machine.begin_survey();
-    }
-    machine.set_idle_skip(options.idle_skip);
-    let strict = options.strict || options.restore;
-    machine.set_strict(strict);
-    machine.devices.set_strict(strict);
-    output::arguments(format_args!(
-        "UNSUPPORTED OPERATIONS {}\n",
-        if strict {
-            "mode=strict response=stop"
-        } else {
-            "mode=graceful response=soc-error diagnostics=once"
-        }
-    ));
-    if options.tss {
-        output::arguments(format_args!(
-            "TSS OPT-IN: the restore host sends this machine's ECID, the restore's nonces and \
-             its component hashes to gs.apple.com for its root tickets and recoveryOS LocalPolicy\n"
-        ));
-    }
-    // Waits return to this loop often enough that a press of the host's
-    // power button reaches a sleeping SoC, and other host inputs a waiting
-    // guest, promptly.
-    machine.set_wait_limit(Some(host::COUNTER_HZ / WAIT_POLLS_PER_SECOND));
-    if !options.breakpoints.is_empty() {
-        machine.set_breakpoints(&options.breakpoints);
-    }
-    if !options.traces.is_empty() {
-        machine.set_traces(&options.traces);
-    }
-    if !options.watches.is_empty() {
-        machine.set_watches(&options.watches);
-    }
-    let mut restore = source.map(|source| {
+    let restore = source.map(|source| {
         // `--tss` hands the restore client Apple's signing service, for the
         // machine whose ECID the bundle names (`/chosen unique-chip-id`).
         let signer = options.tss.then(|| {
@@ -2278,8 +2239,80 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::fatal("restore preparation failed")
         })
     });
-    let mut host_input = host_input;
-    let mut guest_network = guest_network;
+    run_machine(
+        Machine::new(cpu, bare, devices, profile, target),
+        &options,
+        handoff,
+        RunIo {
+            restore,
+            host_input,
+            guest_network,
+            host_nor,
+        },
+        Machine::run,
+    )
+}
+
+/// Retained host interfaces used by both ordinary authored inputs and the
+/// canonical original-image execution path. Reporting cannot choose a fallback.
+struct RunIo {
+    restore: Option<restore::Experiment>,
+    host_input: Option<input::HostInput>,
+    guest_network: Option<network::GuestNetwork>,
+    host_nor: Option<nor::HostNor>,
+}
+
+fn run_machine<H: Host>(
+    mut machine: Machine<H, AppleDevices>,
+    options: &Options,
+    handoff: &Handoff,
+    io: RunIo,
+    execute: impl FnMut(&mut Machine<H, AppleDevices>, u64) -> Stop,
+) -> ! {
+    if options.survey {
+        output::arguments(format_args!(
+            "SURVEY RUN: device accesses without a model read 0 and drop writes; \
+             the guest's behavior is unverified\n"
+        ));
+        machine.begin_survey();
+    }
+    machine.set_idle_skip(options.idle_skip);
+    let strict = options.strict || options.restore;
+    machine.set_strict(strict);
+    machine.devices.set_strict(strict);
+    output::arguments(format_args!(
+        "UNSUPPORTED OPERATIONS {}\n",
+        if strict {
+            "mode=strict response=stop"
+        } else {
+            "mode=graceful response=soc-error diagnostics=once"
+        }
+    ));
+    if options.tss {
+        output::arguments(format_args!(
+            "TSS OPT-IN: the restore host sends this machine's ECID, the restore's nonces and \
+             its component hashes to gs.apple.com for its root tickets and recoveryOS LocalPolicy\n"
+        ));
+    }
+    // Waits return to this loop often enough that a press of the host's
+    // power button reaches a sleeping SoC, and other host inputs a waiting
+    // guest, promptly.
+    machine.set_wait_limit(Some(host::COUNTER_HZ / WAIT_POLLS_PER_SECOND));
+    if !options.breakpoints.is_empty() {
+        machine.set_breakpoints(&options.breakpoints);
+    }
+    if !options.traces.is_empty() {
+        machine.set_traces(&options.traces);
+    }
+    if !options.watches.is_empty() {
+        machine.set_watches(&options.watches);
+    }
+    let RunIo {
+        mut restore,
+        mut host_input,
+        mut guest_network,
+        mut host_nor,
+    } = io;
     let mut host_power = power::HostPowerControl::new(handoff.power, handoff.tsc_hz);
     crate::status::begin(match restore {
         Some(_) => "Starting the macOS installer",
@@ -2295,7 +2328,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         guest_network.as_mut(),
         host_nor.as_mut(),
         &mut host_power,
-        Machine::run,
+        execute,
     );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
     finish(&mut machine, stop, seconds, &options.dumps, &host_power)
