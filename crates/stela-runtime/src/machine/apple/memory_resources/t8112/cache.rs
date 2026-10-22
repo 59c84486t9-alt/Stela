@@ -7,6 +7,10 @@
 //! direct quota2eff664..2eff924 and occupancy2effa54..2effb34. Exact original
 //! windows are retained in t8112-cache-contract-r1/contract.json. This is new
 //! software backing, never an Apple reset observation or a nonempty flush.
+//! Native quota views: t8112pmp SHA256
+//! b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c,
+//! file0x45e0..0x4664 reads low9 seeds; 0x4e20..0x4e8c writes low9 and
+//! optional bits23:16/30. AP file0x2eff890 masks low7 after a full32 read.
 use super::amcc::{BROADCAST, LOCK_REGISTERS, LockResource, MMIO_BYTES, Placement, STRIDE};
 use crate::{
     machine::{engine::CanonicalDeviceMemory, soc::MemoryController},
@@ -26,6 +30,7 @@ const FLUSH: u64 = 0x1c2c;
 const QUOTAS: u64 = 0xa000;
 const OCCUPANCY: u64 = 0xc000;
 const WAY_COUNTS: u32 = (0x1f << 10) | (0x1f << 5);
+const QUOTA_FIELDS: u32 = 0x1ff | (0xff << 16) | (1 << 30);
 
 /// Declared original driver configuration, not a readiness or mount token.
 /// The caller must coordinate this selection with the actual live original
@@ -46,7 +51,9 @@ pub struct SoftwareImage {
     pub way_status: [u32; PLANES],
     pub disabled: [bool; PLANES],
     pub flush_status: [u32; PLANES],
-    pub quota_units: [u8; 32],
+    /// One actual full32 register per group. AP's low7 getter and native
+    /// low9 programming/attributes observe this same backing, not two limits.
+    pub quota_words: [u32; 32],
 }
 impl SoftwareImage {
     /// Deliberately allocate clear software words and disabled controls. This
@@ -56,7 +63,7 @@ impl SoftwareImage {
             way_status: [0; PLANES],
             disabled: [true; PLANES],
             flush_status: [0; PLANES],
-            quota_units: [0; 32],
+            quota_words: [0; 32],
         }
     }
 }
@@ -100,7 +107,10 @@ impl EmptyResource {
     ) -> Result<Self, &'static str> {
         if image.way_status.iter().any(|value| value & WAY_COUNTS != 0)
             || image.flush_status.iter().any(|value| value & 1 != 0)
-            || image.quota_units.iter().any(|&value| value > 0x7f)
+            || image
+                .quota_words
+                .iter()
+                .any(|&value| value & !QUOTA_FIELDS != 0)
         {
             return Err(
                 "permanently empty T8112 cache image has powered ways, busy flush or invalid quota",
@@ -216,8 +226,12 @@ impl EmptyResource {
                 _ => {}
             }
         }
-        if let Some(group) = table(offset, QUOTAS, 32) {
-            return Ok(u64::from(self.image.quota_units[group]));
+        if let Some(group) = table(offset, QUOTAS, 32).or_else(|| {
+            offset
+                .checked_sub(BROADCAST)
+                .and_then(|offset| table(offset, QUOTAS, 32))
+        }) {
+            return Ok(u64::from(self.image.quota_words[group]));
         }
         if table(offset, OCCUPANCY, 256).is_some() {
             return Ok(0); // No outer tag/data allocation path exists in this owner.
@@ -247,11 +261,13 @@ impl EmptyResource {
             .checked_sub(BROADCAST)
             .and_then(|offset| table(offset, QUOTAS, 32))
         {
-            if value > 0x7f {
-                return Err("T8112 configured quota write exceeds its source low7 units");
+            if value & !u64::from(QUOTA_FIELDS) != 0 {
+                return Err(
+                    "T8112 quota write has fields outside native low9 and retained attributes",
+                );
             }
             let count = next(self.progress.quota_writes)?;
-            self.image.quota_units[group] = value as u8;
+            self.image.quota_words[group] = value as u32;
             self.progress.quota_writes = count;
             return Ok(());
         }
@@ -492,7 +508,7 @@ mod tests {
             assert_eq!(read(&mut cache, OCCUPANCY + 4 * dsid), 0);
         }
         assert_eq!(cache.progress().quota_writes, 32);
-        assert_eq!(cache.image().quota_units[31], 127);
+        assert_eq!(cache.image().quota_words[31], 127);
         let mut latch = InterruptLatch::new();
         let mut a = access(&mut latch);
         for offset in [
@@ -500,11 +516,66 @@ mod tests {
             OCCUPANCY + 1024,
             STRIDE + QUOTAS,
             STRIDE + OCCUPANCY,
-            BROADCAST + QUOTAS,
+            BROADCAST + QUOTAS + 128,
         ] {
             assert!(cache.read(offset, Width::Word, &mut a).is_err());
         }
         assert!(latch.take_aic_inputs().is_empty());
+    }
+    #[test]
+    fn native_and_ap_quota_views_share_full_words_without_truncating_or_shadowing() {
+        let mut image = SoftwareImage::zeroed_control_image();
+        image.quota_words[3] = 0x4012_0180;
+        let mut cache = resource(image);
+        let plane = QUOTAS + 3 * 4;
+        let broadcast = BROADCAST + plane;
+        assert_eq!(read(&mut cache, plane), 0x4012_0180);
+        assert_eq!(read(&mut cache, broadcast), 0x4012_0180);
+        assert_eq!(cache.progress().quota_writes, 0);
+        // The original AP masks low7 in its caller, not in the MMIO read.
+        assert_eq!(read(&mut cache, plane) & 0x7f, 0);
+        assert_eq!(read(&mut cache, broadcast) & 0x1ff, 384);
+        write(&mut cache, broadcast, 0x40fe_01ff);
+        assert_eq!(read(&mut cache, plane), 0x40fe_01ff);
+        assert_eq!(read(&mut cache, broadcast), 0x40fe_01ff);
+        // An AP full32 low7 write replaces the word, including the attributes;
+        // a native publisher must retain its own actual source attribute cache.
+        write(&mut cache, broadcast, 17);
+        assert_eq!(read(&mut cache, plane), 17);
+        assert_eq!(read(&mut cache, broadcast), 17);
+        assert_eq!(cache.progress().quota_writes, 2);
+        assert_eq!(cache.progress().completed_flushes, 0);
+        assert_eq!(read(&mut cache, OCCUPANCY + 3 * 4), 0);
+        let before = (cache.image(), cache.progress());
+        let mut latch = InterruptLatch::new();
+        for value in [1 << 9, 1 << 24, 1 << 29, 1 << 31, 1 << 32] {
+            assert!(
+                cache
+                    .write(broadcast, Width::Word, value, &mut access(&mut latch))
+                    .is_err()
+            );
+            assert_eq!((cache.image(), cache.progress()), before);
+        }
+        cache.set_lifecycle(
+            LifecycleState {
+                quiesced: true,
+                ..LIVE
+            },
+            &mut access(&mut latch),
+        );
+        assert!(
+            cache
+                .read(broadcast, Width::Word, &mut access(&mut latch))
+                .is_err()
+        );
+        assert!(
+            cache
+                .write(broadcast, Width::Word, 31, &mut access(&mut latch))
+                .is_err()
+        );
+        cache.set_lifecycle(LIVE, &mut access(&mut latch));
+        assert_eq!(read(&mut cache, plane), 17);
+        assert_eq!((cache.image(), cache.progress()), before);
     }
     #[test]
     fn invalid_images_widths_unknown_effects_and_overflow_refuse_before_any_state() {
@@ -522,7 +593,7 @@ mod tests {
                 ..SoftwareImage::zeroed_control_image()
             },
             SoftwareImage {
-                quota_units: [128; 32],
+                quota_words: [512; 32],
                 ..SoftwareImage::zeroed_control_image()
             },
         ] {
@@ -543,7 +614,7 @@ mod tests {
             (BROADCAST + WAY_REQUEST, 1),
             (BROADCAST + WAY_REQUEST, u64::MAX),
             (BROADCAST + STATUS, 2),
-            (BROADCAST + QUOTAS, 128),
+            (BROADCAST + QUOTAS, 512),
             (BROADCAST + FLUSH, 1),
             (WAY_REQUEST, 0),
             (STATUS, 0),
@@ -665,6 +736,48 @@ mod tests {
                 .prepare_flush(BROADCAST + FLUSH, Width::Word, 1, 4, &service)
                 .is_err()
         );
+    }
+    #[test]
+    #[cfg(feature = "std")]
+    #[ignore = "requires unchanged original T8112 PMP via STELA_TEST_PMP_T8112"]
+    fn original_native_quota_seed_and_publisher_share_the_broadcast_full_word() {
+        let code = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();
+        assert_eq!(
+            crate::sha256(&code),
+            "b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c"
+        );
+        for (start, end, hash) in [
+            (
+                0x426c,
+                0x472c,
+                "e4971d2db1643fd5fa9412d278d2dbb1ea177f902bba9ec22d4dc41c0fd62a7b",
+            ),
+            (
+                0x4cbc,
+                0x4ee8,
+                "9d7f54726ce6b42b4f802022a6f3fb0902a2a53cb1f57bdfb028513d67d99ad7",
+            ),
+            (
+                0x33ea8,
+                0x33fd0,
+                "949295e2f93ed5c1f89e3e2712b07ba2a039d29dcb382a94ba003f35fb258601",
+            ),
+        ] {
+            assert_eq!(crate::sha256(&code[start..end]), hash);
+        }
+        assert_eq!(
+            u64::from_le_bytes(code[0x46360..0x46368].try_into().unwrap()),
+            0x200f04000
+        );
+        // Both the initial seed and later programming use AND W12,#0x1ff.
+        for offset in [0x4654, 0x4e60] {
+            assert_eq!(
+                u32::from_le_bytes(code[offset..offset + 4].try_into().unwrap()),
+                0x1200218c
+            );
+        }
+        assert_eq!(0x200f04000 + 0x6000, 0x200000000 + BROADCAST + QUOTAS);
+        assert_eq!(QUOTA_FIELDS, 0x40ff_01ff);
     }
     #[test]
     #[cfg(feature = "std")]
