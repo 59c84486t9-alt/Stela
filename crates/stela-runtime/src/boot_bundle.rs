@@ -176,6 +176,10 @@ pub struct Manifest {
     /// The AMCC CTRR-A region iBoot programs, when the bundle has one.
     #[serde(default)]
     pub read_only_region: Option<Programmed>,
+    /// What iBoot leaves in the cores' lock registers (M4 and later), for
+    /// `machine::Machine::hand_off_core_locks`.
+    #[serde(default)]
+    pub core_locks: Option<crate::machine::ctrr::Handoff>,
 }
 
 /// The firmware framebuffer as the guest sees it.

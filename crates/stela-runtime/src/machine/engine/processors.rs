@@ -40,6 +40,7 @@ use super::{
 };
 use crate::machine::{
     cpu::{Cpu, RESERVATION_GRANULE},
+    ctrr,
     exception::Pstate,
     registers::CpuProfile,
     registers::Lines,
@@ -609,6 +610,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         cpu.amu = old.amu;
         cpu.retired = old.retired;
         cpu.ctrr = old.ctrr;
+        cpu.ctrr_core = ctrr::Core::handed_off(&old.core_locks);
+        cpu.core_locks = old.core_locks;
         cpu.apple.impdef.join(&old.apple.impdef);
         cpu.memory_lock = old.memory_lock;
         self.waiting = None;
@@ -659,10 +662,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Peer::Running | Peer::Parked(_) | Peer::Off => None,
             });
         // Its cluster-scoped implementation-defined registers too
-        // (`impdef::Scope::Cluster`).
+        // (`impdef::Scope::Cluster`). A new cluster's CTRR registers, and
+        // every PE's own, start from what iBoot left (`ctrr::Handoff`).
+        cpu.core_locks = self.cpu.core_locks.clone();
+        cpu.ctrr_core = ctrr::Core::handed_off(&cpu.core_locks);
         if let Some(peer) = shared {
             cpu.ctrr = peer.ctrr.clone();
             cpu.apple.impdef.join(&peer.apple.impdef);
+        } else {
+            cpu.ctrr = alloc::rc::Rc::new(core::cell::RefCell::new(ctrr::Cluster::handed_off(
+                &cpu.core_locks,
+            )));
         }
         cpu.memory_lock = self.cpu.memory_lock;
         let now = self.now();
@@ -1599,6 +1609,51 @@ mod tests {
                 assert_eq!(other.cpu.apple.impdef.read(counter), Ok(0));
             }
         }
+    }
+
+    #[test]
+    fn every_pe_and_new_cluster_starts_from_the_core_lock_handoff() {
+        use super::super::tests::board_on;
+        use crate::machine::Chip;
+        let identities = [0x8000_0000, 0x8001_0100]
+            .into_iter()
+            .map(|mpidr| Identity {
+                midr: 0,
+                mpidr,
+                clock: None,
+                caches: None,
+            })
+            .collect();
+        let mut machine = board_on(Chip::AppleM5, &[], super::super::NoDevices, identities);
+        let handoff = ctrr::Handoff {
+            locked: alloc::vec![ctrr::Locked {
+                region: ctrr::Region::CtxrA,
+                first: 0x100_070a_4000,
+                last: 0x100_0710_bfff,
+            }],
+            legacy_locked: true,
+        };
+        machine.hand_off_core_locks(handoff.clone());
+        assert_eq!(
+            *machine.cpu.ctrr.borrow(),
+            ctrr::Cluster::handed_off(&handoff)
+        );
+        machine.cpu.ctrr_core.el2.windows[0].lower = 0x1000;
+        machine
+            .start(Start {
+                cpu: 1,
+                address: START,
+            })
+            .unwrap();
+        let Peer::Parked(other) = &mut machine.peers[1] else {
+            panic!("the other cluster's PE is parked")
+        };
+        assert!(!alloc::rc::Rc::ptr_eq(&machine.cpu.ctrr, &other.cpu.ctrr));
+        assert_eq!(
+            *other.cpu.ctrr.borrow(),
+            ctrr::Cluster::handed_off(&handoff)
+        );
+        assert_eq!(other.cpu.ctrr_core, ctrr::Core::handed_off(&handoff));
     }
 
     #[test]

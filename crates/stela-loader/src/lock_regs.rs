@@ -48,9 +48,22 @@
 //! "right below the device tree/trustcache so that it can be covered by
 //! CTRR". The bundle programs the run from its first region through
 //! `SPTM-rx`.
+//!
+//! On the M4 and later iBoot also locks the cores' per-cluster CTRR-C/D and
+//! CTXR-A..D copies, and CTRR-A/B's controls, before SPTM starts
+//! ([`core_handoff`]; the contract is in `stela_runtime::machine::ctrr`).
+//! M5 iBoot (`iBoot.j813`) writes each region's per-core and per-cluster
+//! copies together (`0x31588`, `0x316e0`) and locks them (`0x31658`,
+//! `0x317b0`); SPTM 26A434 derives the same six regions from
+//! `/chosen/memory-map` and panics unless the per-cluster copies hold them.
+//! Without a CL4 image iBoot allocates a 16 KiB page, fills it with `wfi`
+//! and publishes it as `CL4-dummypage` (`iBoot.j813` `0x29600..0x29668`),
+//! which SPTM then requires as CTXR-B's region.
 use crate::apple_device_tree::DeviceTree;
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
+use core::ops::Range;
+use stela_runtime::machine::ctrr::{Handoff, Locked, Region};
 
 pub const AMCC: &str = "/chosen/lock-regs/amcc";
 pub const IOA: &str = "/chosen/lock-regs/ioa";
@@ -331,6 +344,73 @@ pub fn ctrr_a(
     })
 }
 
+/// The page iBoot publishes in place of an absent CL4 image.
+pub const CL4_DUMMY_PAGE: &str = "CL4-dummypage";
+pub const CL4_DUMMY_PAGE_BYTES: usize = 0x4000;
+/// `wfi`, the word iBoot fills it with.
+const WFI: u32 = 0xd503_207f;
+
+/// The dummy page's contents.
+pub fn cl4_dummy_page() -> Vec<u8> {
+    WFI.to_le_bytes()
+        .repeat(CL4_DUMMY_PAGE_BYTES / size_of::<u32>())
+}
+
+/// What iBoot leaves in the core lock registers on the M4 and later, from
+/// the placed regions (`region` gives one's `[start, end)`): each region
+/// SPTM 26A434 derives (`0x...bebec..0x...bed5c` in the T8132 build), locked
+/// into the per-cluster copies, CTRR-D only when `kernel_ctrr`
+/// (`/chosen kernel-ctrr-to-be-enabled` is not a present 0), and CTRR-A/B's
+/// controls locked.
+pub fn core_handoff(
+    region: impl Fn(&str) -> Option<Range<u64>>,
+    kernel_ctrr: bool,
+) -> Result<Handoff> {
+    let either = |name: &'static str, fallback: &'static str| {
+        if region(name).is_some() {
+            name
+        } else {
+            fallback
+        }
+    };
+    let span = |first: &str, last: &str| -> Result<(u64, u64)> {
+        let start = region(first)
+            .with_context(|| format!("no region {first}"))?
+            .start;
+        let end = region(last)
+            .with_context(|| format!("no region {last}"))?
+            .end;
+        ensure!(start < end, "{first}..{last} is empty");
+        Ok((start, end - 1))
+    };
+    let secure_kernel = either("CL4-rx", CL4_DUMMY_PAGE);
+    let kernel_text = either("AuxKC-rx", "BootKC-rx");
+    let mut spans = alloc::vec![
+        (
+            Region::CtrrC,
+            span(either("CL4-rx", "DeviceTree"), "SPTM-rx")?
+        ),
+        (Region::CtxrA, span("SPTM-rx", "SPTM-rx")?),
+        (Region::CtxrB, span(secure_kernel, secure_kernel)?),
+        (Region::CtxrC, span("TXM-rx", "TXM-bx")?),
+        (Region::CtxrD, span(kernel_text, "BootKC-bx")?),
+    ];
+    if kernel_ctrr {
+        spans.push((Region::CtrrD, span("TXM-ro", "BootKC-rs")?));
+    }
+    Ok(Handoff {
+        locked: spans
+            .into_iter()
+            .map(|(region, (first, last))| Locked {
+                region,
+                first,
+                last,
+            })
+            .collect(),
+        legacy_locked: true,
+    })
+}
+
 /// What the bundle leaves out of iBoot's lock-register setup.
 pub fn gaps(chip_id: Option<u32>) -> Vec<String> {
     match chip_id.and_then(table) {
@@ -522,6 +602,67 @@ mod tests {
             (region.group, region.base, region.bytes),
             ("amcc-ctrr-a", 0x8_0200_0000, 0x579_0000)
         );
+    }
+
+    #[test]
+    fn the_core_handoff_follows_sptms_region_derivation() {
+        // The layout of the 26A434 J773g qemu-sptm trace.
+        let layout = [
+            ("TXM-ro", 0x100_0193_8000, 0x100_0196_8000),
+            ("TXM-rx", 0x100_0196_8000, 0x100_019b_c000),
+            ("TXM-bx", 0x100_019b_c000, 0x100_019c_4000),
+            ("BootKC-rx", 0x100_019c_c000, 0x100_0548_0000),
+            ("BootKC-bx", 0x100_0548_0000, 0x100_054a_4000),
+            ("BootKC-rs", 0x100_06f0_0000, 0x100_06fb_8000),
+            ("DeviceTree", 0x100_06fb_8000, 0x100_0700_0000),
+            ("SPTM-rx", 0x100_070a_4000, 0x100_0710_c000),
+            (CL4_DUMMY_PAGE, 0x100_0945_0000, 0x100_0945_4000),
+        ];
+        let region = |name: &str| {
+            layout
+                .iter()
+                .find(|(n, ..)| *n == name)
+                .map(|&(_, start, end)| start..end)
+        };
+        let handoff = core_handoff(region, true).unwrap();
+        let bounds = |wanted| {
+            handoff
+                .locked
+                .iter()
+                .find(|locked| locked.region == wanted)
+                .map(|locked| (locked.first, locked.last))
+        };
+        assert_eq!(
+            bounds(Region::CtrrC),
+            Some((0x100_06fb_8000, 0x100_0710_bfff))
+        );
+        assert_eq!(
+            bounds(Region::CtrrD),
+            Some((0x100_0193_8000, 0x100_06fb_7fff))
+        );
+        assert_eq!(
+            bounds(Region::CtxrA),
+            Some((0x100_070a_4000, 0x100_0710_bfff))
+        );
+        assert_eq!(
+            bounds(Region::CtxrB),
+            Some((0x100_0945_0000, 0x100_0945_3fff))
+        );
+        assert_eq!(
+            bounds(Region::CtxrC),
+            Some((0x100_0196_8000, 0x100_019c_3fff))
+        );
+        assert_eq!(
+            bounds(Region::CtxrD),
+            Some((0x100_019c_c000, 0x100_054a_3fff))
+        );
+        assert!(handoff.legacy_locked);
+        // Kernel CTRR off leaves CTRR-D unlocked; a missing region refuses.
+        assert_eq!(core_handoff(region, false).unwrap().locked.len(), 5);
+        assert!(core_handoff(|name| region(name).filter(|_| name != "TXM-rx"), true).is_err());
+        let page = cl4_dummy_page();
+        assert_eq!(page.len(), CL4_DUMMY_PAGE_BYTES);
+        assert_eq!(page[..4], WFI.to_le_bytes());
     }
 
     #[test]

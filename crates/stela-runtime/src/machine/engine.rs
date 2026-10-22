@@ -29,7 +29,7 @@ use super::{
         ASPSR_GUARDED, Cpu, Exception, HCR_AMO, HCR_API, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE,
         HCR_TSC, HCR_VF, HCR_VI, HCR_VSE,
     },
-    debug,
+    ctrr, debug,
     exception::{
         Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, SYNCHRONOUS_EXTERNAL_ABORT, Vector,
         data_abort_iss,
@@ -1817,6 +1817,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// #unsupported-operations).
     pub fn set_strict(&mut self, strict: bool) {
         self.strict = strict;
+    }
+
+    /// What iBoot left in the core lock registers (`machine::ctrr`): every
+    /// cluster and PE takes it now, and again when it starts. The boot
+    /// mount calls this before the first instruction.
+    pub fn hand_off_core_locks(&mut self, handoff: ctrr::Handoff) {
+        let handoff = alloc::rc::Rc::new(handoff);
+        let parked = self.peers.iter_mut().filter_map(|peer| match peer {
+            processors::Peer::Parked(parked) => Some(parked.cpu_mut()),
+            _ => None,
+        });
+        for cpu in core::iter::once(&mut self.cpu).chain(parked) {
+            cpu.ctrr.replace(ctrr::Cluster::handed_off(&handoff));
+            cpu.ctrr_core = ctrr::Core::handed_off(&handoff);
+            cpu.core_locks = handoff.clone();
+        }
+        self.translations_changed();
     }
 
     /// The operations since the last call that were answered degraded, each

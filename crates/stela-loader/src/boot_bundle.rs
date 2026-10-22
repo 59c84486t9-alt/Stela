@@ -30,6 +30,7 @@ use crate::trust_cache;
 use alloc::collections::BTreeMap;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
+use stela_runtime::machine::{ctrr, soc};
 use stela_runtime::sha256;
 
 /// The format `stela.efi` reads (`stela_runtime::boot_bundle`).
@@ -68,7 +69,10 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// Revision 14: retain the unchanged input ADT beside its prepared output so
 /// runtime resource qualification can compare both complete source graphs.
 /// Schema3 consumes this provenance at the reader; revision14 is unchanged.
-pub const REVISION: u32 = 14;
+/// Revision 15: on the M4 and later, place `CL4-dummypage` and state the
+/// core lock registers iBoot leaves (`core_locks`, which `stela.efi` reads
+/// when present).
+pub const REVISION: u32 = 15;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -380,6 +384,9 @@ pub struct Manifest {
     /// The region iBoot programs into the AMCC's CTRR-A lock group, from
     /// the first region through `SPTM-rx` (`lock_regs`).
     pub read_only_region: Option<Programmed>,
+    /// What iBoot leaves in the cores' lock registers on the M4 and later
+    /// (`lock_regs::core_handoff`).
+    pub core_locks: Option<ctrr::Handoff>,
     /// The DeviceTree nodes whose `compatible` names no modeled device and
     /// was removed (`devices`).
     pub hidden_devices: Vec<String>,
@@ -475,6 +482,8 @@ const REGION_ORDER: &[&str] = &[
     "TXM-le",
     "BootKC-rw",
     "BootKC-le",
+    // M4 and later, without a CL4 image (`lock_regs::CL4_DUMMY_PAGE`).
+    lock_regs::CL4_DUMMY_PAGE,
     "RAMDisk",
     "SEPFW",
     "BootArgs",
@@ -585,6 +594,7 @@ const RAMDISK_FILE: &str = "ramdisk.img";
 /// The engine handoff's file-name capacity (`stela-boot` `handoff::MAX_NAME`).
 const MAX_FILE_NAME: usize = 48;
 const BOOT_ARGS_FILE: &str = "bootargs.bin";
+const CL4_DUMMY_PAGE_FILE: &str = "cl4-dummypage.bin";
 
 struct LoadedImage {
     name: &'static str,
@@ -811,6 +821,12 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         ..options.clone()
     };
     let carveouts = reservation.into_regions();
+    // The M4 and later lock their CTRR-C/D and CTXR-A..D copies at handoff.
+    let core_locks_handed_off = inputs
+        .target
+        .chip_id
+        .and_then(soc::chip)
+        .is_some_and(|chip| ctrr::generation(chip) == ctrr::Generation::Ctrr3);
     if let (Some(chip_id), Some(base)) = (inputs.target.chip_id, inputs.dram_base()?) {
         ensure!(
             options.dram_base == base,
@@ -1081,6 +1097,15 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
                     continue;
                 }
             },
+            lock_regs::CL4_DUMMY_PAGE if core_locks_handed_off => Content {
+                name: (*name).into(),
+                file: CL4_DUMMY_PAGE_FILE.into(),
+                file_offset: 0,
+                bytes: lock_regs::CL4_DUMMY_PAGE_BYTES as u64,
+                memory_bytes: lock_regs::CL4_DUMMY_PAGE_BYTES as u64,
+                virtual_address: None,
+            },
+            lock_regs::CL4_DUMMY_PAGE => continue,
             "BootArgs" => Content {
                 name: (*name).into(),
                 file: BOOT_ARGS_FILE.into(),
@@ -1223,6 +1248,21 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     {
         memory_map.set_property(name, value)?;
     }
+    let core_locks = core_locks_handed_off
+        .then(|| {
+            // SPTM programs CTRR-D unless the property is a present 0.
+            let kernel_ctrr = tree
+                .property("/chosen", "kernel-ctrr-to-be-enabled")
+                .is_none_or(|p| p.value.iter().any(|&byte| byte != 0));
+            lock_regs::core_handoff(
+                |name| {
+                    let region = regions.iter().find(|r| r.name == name)?;
+                    Some(region.guest_pa..region.guest_pa + region.memory_bytes)
+                },
+                kernel_ctrr,
+            )
+        })
+        .transpose()?;
     if ram_image {
         // The image keeps the `RAMDisk` region, a name SPTM types (its
         // region table, `sptm.t8112` file offset 0x28a3); XNU also makes
@@ -1324,6 +1364,9 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     if let Some(manifest) = &inputs.boot_manifest {
         files.push((BOOT_MANIFEST_FILE.to_owned(), manifest.bytes.to_vec()));
     }
+    if core_locks_handed_off {
+        files.push((CL4_DUMMY_PAGE_FILE.to_owned(), lock_regs::cl4_dummy_page()));
+    }
     if let Some(sep) = &inputs.sep_firmware {
         files.push((SEP_FILE.to_owned(), sep.bytes.to_vec()));
     }
@@ -1408,6 +1451,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         top_of_kernel_data,
         carveouts,
         read_only_region,
+        core_locks,
         hidden_devices,
         patches,
         placeholders,
@@ -2233,9 +2277,11 @@ mod tests {
         let expected: Vec<_> = REGION_ORDER
             .iter()
             .copied()
-            .filter(|n| *n != "SEPFW")
+            .filter(|n| !["SEPFW", lock_regs::CL4_DUMMY_PAGE].contains(n))
             .collect();
         assert_eq!(names, expected);
+        // The M1 to M3 hand off no core lock registers.
+        assert!(manifest.core_locks.is_none());
         // The original input manifest is retained byte for byte in the
         // read-only boot run, with an exact (not page-rounded) guest length.
         let manifest_region = manifest
@@ -2502,6 +2548,47 @@ mod tests {
             || field.contains("vram")
             || field.contains("CommandLine")));
 
+        // An M4 bundle places iBoot's dummy CL4 page and states the core
+        // lock registers SPTM checks, which the mount's reader takes.
+        let m2 = (inputs.target.clone(), inputs.device_tree.bytes);
+        let m2_manifest = inputs.boot_manifest.take();
+        let mut m4_tree = DeviceTree::parse(inputs.device_tree.bytes)?;
+        m4_tree.ensure_child("/", "arm-io")?;
+        m4_tree.ensure_child("/arm-io", "mcc")?;
+        m4_tree.set_property(
+            "/arm-io/mcc",
+            "dram-base",
+            0x100_0000_0000u64.to_le_bytes().to_vec(),
+        )?;
+        inputs.device_tree.bytes = leak(m4_tree.serialize());
+        inputs.target.chip_id = Some(0x8132);
+        let m4_options = options.placed_at(inputs.dram_base()?);
+        let m4_bundle = prepare(&inputs, &m4_options)?;
+        (inputs.target, inputs.device_tree.bytes) = m2;
+        inputs.boot_manifest = m2_manifest;
+        let m4_manifest = &m4_bundle.manifest;
+        let page = m4_manifest
+            .regions
+            .iter()
+            .find(|r| r.name == lock_regs::CL4_DUMMY_PAGE)
+            .unwrap();
+        assert_eq!(page.memory_bytes, lock_regs::CL4_DUMMY_PAGE_BYTES as u64);
+        let core_locks = m4_manifest.core_locks.as_ref().unwrap();
+        let ctxr_b = core_locks
+            .locked
+            .iter()
+            .find(|locked| locked.region == ctrr::Region::CtxrB)
+            .unwrap();
+        assert_eq!(
+            (ctxr_b.first, ctxr_b.last),
+            (page.guest_pa, page.guest_pa + page.memory_bytes - 1)
+        );
+        // The policy enables kernel CTRR, so CTRR-D is locked too.
+        assert_eq!(core_locks.locked.len(), 6);
+        let consumed =
+            stela_runtime::boot_bundle::Manifest::parse(&serde_json::to_vec(m4_manifest)?)?;
+        assert_eq!(consumed.core_locks.as_ref(), Some(core_locks));
+
         // A RAM disk image root: DiskImages gets the placed region from
         // /chosen, and boot-uuid names the volume.
         const VOLUME: &str = "11111111-2222-3333-4444-555555555555";
@@ -2564,7 +2651,12 @@ mod tests {
         let staged = prepare(&inputs, &options)?;
         inputs.sep_firmware = None;
         let names: Vec<_> = staged.manifest.regions.iter().map(|r| &*r.name).collect();
-        assert_eq!(names, REGION_ORDER);
+        let expected: Vec<_> = REGION_ORDER
+            .iter()
+            .copied()
+            .filter(|n| *n != lock_regs::CL4_DUMMY_PAGE)
+            .collect();
+        assert_eq!(names, expected);
         let sepfw = staged
             .manifest
             .regions

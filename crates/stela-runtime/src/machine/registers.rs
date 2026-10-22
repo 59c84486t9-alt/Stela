@@ -512,6 +512,65 @@ impl Cpu {
         })
     }
 
+    /// An access to a CTRR register (`machine::ctrr`) at EL1 or EL2.
+    fn ctrr_access(&mut self, register: super::ctrr::Register, read: bool, value: u64) -> Outcome {
+        use super::ctrr::{Holder, Register as Ctrr};
+        let el = self.pstate.el;
+        let mut cluster = self.ctrr.borrow_mut();
+        let written = |result: Result<Option<&'static str>, &'static str>| match result {
+            Ok(unmodeled) => Outcome::Written(Changes {
+                translation: true,
+                unmodeled,
+                ..Changes::default()
+            }),
+            Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
+        };
+        let el2_only = matches!(
+            register,
+            Ctrr::A { level: 1, .. } | Ctrr::Legacy { cluster: true, .. }
+        );
+        if el2_only && el != 2 {
+            return Outcome::Undefined;
+        }
+        match register {
+            Ctrr::A { level, field } if read => Outcome::Read(cluster.read(level, field)),
+            Ctrr::A { level, field } => written(cluster.write(level, field, value).map(|()| None)),
+            Ctrr::Legacy {
+                cluster: per_cluster,
+                index,
+            } => {
+                let bank = if per_cluster {
+                    &mut cluster.copies
+                } else {
+                    &mut self.ctrr_core.el1
+                };
+                if read {
+                    Outcome::Read(bank.legacy[index])
+                } else {
+                    written(bank.write_legacy(index, value).map(|()| None))
+                }
+            }
+            Ctrr::Region {
+                view,
+                region,
+                field,
+            } => {
+                let Some(holder) = view.holder(el) else {
+                    return Outcome::Undefined;
+                };
+                let bank = match holder {
+                    Holder::Cluster => &mut cluster.copies,
+                    core => self.ctrr_core.bank(core).expect("a per-core copy"),
+                };
+                if read {
+                    Outcome::Read(bank.read(region, field))
+                } else {
+                    written(bank.write(region, field, value))
+                }
+            }
+        }
+    }
+
     /// MRS or MSR to an encoding without an architectural accessor: Apple's
     /// IMPLEMENTATION DEFINED space, or UNDEFINED. `physical` is the system
     /// counter, for the count alias. `Read` results are not yet written to
@@ -544,22 +603,8 @@ impl Cpu {
         if self.pstate.el == 1 && !self.in_host() && self.hcr(HCR_TIDCP) {
             return Outcome::Trapped(Some(2));
         }
-        if let Some((level, field)) = super::ctrr::owns(encoding) {
-            if level == 1 && self.pstate.el != 2 {
-                return Outcome::Undefined;
-            }
-            let mut cluster = self.ctrr.borrow_mut();
-            return if read {
-                Outcome::Read(cluster.read(level, field))
-            } else {
-                match cluster.write(level, field, value) {
-                    Ok(()) => Outcome::Written(Changes {
-                        translation: true,
-                        ..Changes::default()
-                    }),
-                    Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
-                }
-            };
+        if let Some(register) = super::ctrr::decode(self.registers.chip(), encoding) {
+            return self.ctrr_access(register, read, value);
         }
         if Pmu::owns_on(self.registers.chip(), encoding) {
             let Some(pmu) = self.pmu.as_mut() else {
@@ -1435,9 +1480,103 @@ mod tests {
         }
     }
 
+    #[test]
+    fn m4_ctrr_names_reach_the_vhe_copies_and_iboots_controls() {
+        use super::super::{Chip, ctrr};
+        let crn11 = |crm, op2| Encoding::new(3, 0, 11, crm, op2);
+        let (lower_el1, lower_el12, lower_el2) = (crn11(0, 0), crn11(0, 4), crn11(1, 0));
+        let handoff = ctrr::Handoff {
+            locked: alloc::vec![ctrr::Locked {
+                region: ctrr::Region::CtrrC,
+                first: 0x100_06fb_8000,
+                last: 0x100_0710_bfff,
+            }],
+            legacy_locked: true,
+        };
+        let mut cpu = Cpu::of(Chip::AppleM4, 0, Pstate::reset(2));
+        cpu.ctrr.replace(ctrr::Cluster::handed_off(&handoff));
+        cpu.ctrr_core = ctrr::Core::handed_off(&handoff);
+        let write = |cpu: &mut Cpu, encoding, value| {
+            cpu.state.x[5] = value;
+            cpu.apple_access(msr(5, encoding), 0)
+        };
+        // SPTM's EL1-name write at EL2 lands in EL2's copy, which the kernel
+        // reads by its EL2 name; EL1's copy stays clear.
+        assert!(matches!(
+            write(&mut cpu, lower_el1, 0x100_06fb_8000),
+            Outcome::Written(Changes {
+                translation: true,
+                unmodeled: None,
+                ..
+            })
+        ));
+        assert_eq!(
+            cpu.apple_access(mrs(0, lower_el2), 0),
+            Outcome::Read(0x100_06fb_8000)
+        );
+        assert_eq!(cpu.apple_access(mrs(0, lower_el12), 0), Outcome::Read(0));
+        // iBoot's locked per-cluster copy and CTRR-A/B controls.
+        assert_eq!(
+            cpu.apple_access(mrs(0, crn11(6, 7)), 0),
+            Outcome::Read(0x100_0710_b000)
+        );
+        assert_eq!(
+            cpu.apple_access(mrs(0, crn11(8, 2)), 0),
+            Outcome::Read(ctrr::CTRR_HANDOFF)
+        );
+        let ctrr_a = Encoding::new(3, 4, 15, 2, 5);
+        assert_eq!(
+            cpu.apple_access(mrs(0, ctrr_a), 0),
+            Outcome::Read(ctrr::CTRR_HANDOFF)
+        );
+        assert!(matches!(write(&mut cpu, ctrr_a, 0), Outcome::Refused(_)));
+        // A CTXR enable completes with its effect reported.
+        assert!(matches!(
+            write(&mut cpu, crn11(5, 2), ctrr::CTXR_HANDOFF[0]),
+            Outcome::Written(Changes {
+                unmodeled: Some(_),
+                ..
+            })
+        ));
+        // At EL1 the EL1 name reaches EL1's copy; the EL12, EL2 and
+        // per-cluster names are UNDEFINED.
+        cpu.pstate.el = 1;
+        assert_eq!(cpu.apple_access(mrs(0, lower_el1), 0), Outcome::Read(0));
+        for encoding in [
+            lower_el12,
+            lower_el2,
+            crn11(6, 6),
+            Encoding::new(3, 4, 15, 11, 4),
+        ] {
+            assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Undefined);
+        }
+    }
+
+    #[test]
+    fn every_crn11_encoding_the_m4_to_m6_sptms_and_kernels_access_reaches_ctrr() {
+        use super::super::{Chip, ctrr};
+        for chip in [Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
+            for crm in 0..16 {
+                for op2 in 0..8 {
+                    let encoding = Encoding::new(3, 0, 11, crm, op2);
+                    // CRm 9 up holds TAG_OFFSET_EL2 and the M6 kernel's
+                    // other registers.
+                    if !impdef::consumed(encoding, chip) || crm >= 9 {
+                        continue;
+                    }
+                    assert!(
+                        ctrr::decode(chip, encoding).is_some(),
+                        "{} {encoding:?}",
+                        chip.name()
+                    );
+                }
+            }
+        }
+    }
+
     /// The M3-and-later encodings whose owners are being written outside
     /// `machine::impdef`: the Apple generic timer (`machine::timer`), the
-    /// CRn 11 CTRR, CTXR and tag-offset registers (`machine::ctrr`), and the
+    /// CRn 11 CRm 9 tag-offset registers, and the
     /// M5 kpc state S3_1_C15_C5_1, which `machine::pmu` owns on the M6 only
     /// (mac17g save 0xfffffe000be64104, restore 0xfffffe000beb56b0), and
     /// the M3 SPTMs' SPR_LOCKDOWN_EL1 (`S3_4_C15_C0_6`), which joins
@@ -1472,7 +1611,7 @@ mod tests {
         (crn == 15
             && (TIMER.contains(&(op1, crm, op2))
                 || [KPC, SPR_LOCKDOWN_EL1].contains(&(op1, crm, op2))))
-            || (crn == 11 && op1 == 0 && crm <= 9)
+            || (crn == 11 && op1 == 0 && crm == 9)
     }
 
     /// Every IMPLEMENTATION DEFINED encoding a chip's censused components

@@ -67,6 +67,8 @@ pub struct Entry {
     pub source: source::Intake,
     /// The AMCC CTRR-A region iBoot programs, `(base, bytes)`.
     pub read_only_region: Option<(u64, u64)>,
+    /// What iBoot leaves in the cores' lock registers (M4 and later).
+    pub core_locks: stela_runtime::machine::ctrr::Handoff,
 }
 
 pub(super) fn contents(file: &File) -> &'static [u8] {
@@ -617,6 +619,7 @@ fn load_named<'a>(
         read_only_region: manifest
             .read_only_region
             .map(|region| (region.base, region.bytes)),
+        core_locks: manifest.core_locks.unwrap_or_default(),
     })
 }
 

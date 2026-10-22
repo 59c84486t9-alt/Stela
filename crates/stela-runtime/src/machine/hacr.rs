@@ -230,7 +230,7 @@ fn owners(operation: Operation) -> alloc::vec::Vec<(u8, Trap)> {
         own(13, Unrecovered);
     }
     // EL1's CTRR registers (CRn 11, and the A range in CRn 15).
-    if crn == 11 || super::ctrr::owns(encoding).is_some_and(|(level, _)| level == 0) {
+    if crn == 11 || super::ctrr::in_el1_range(encoding) {
         own(14, El1);
     }
     // IPI_RR_LOCAL, IPI_RR_GLOBAL, IPI_SR and IPI_CR.

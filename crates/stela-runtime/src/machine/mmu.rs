@@ -65,12 +65,13 @@ pub struct Controls {
 }
 
 /// Apple's CTRR as one PE applies it after translation (`machine::ctrr`):
-/// the core group of the regime's privileged level, which binds every
-/// access but EL0's, and a region the memory controller has locked against
-/// writes from any requester. Both work on whole pages of the translation.
+/// the core regions of the regime's privileged level (one on the M1 to M3,
+/// CTRR-C and CTRR-D later), which bind every access but EL0's, and a
+/// region the memory controller has locked against writes from any
+/// requester. All work on whole pages of the translation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Ctrr {
-    pub privileged: Option<CtrrRegion>,
+    pub privileged: [Option<CtrrRegion>; 2],
     /// The locked region's first and last byte.
     pub memory: Option<(u64, u64)>,
 }
@@ -101,10 +102,13 @@ impl Ctrr {
     /// because the fault hardware reports is not documented, and the
     /// rights CTRR removes are cleared so that a later access walks again.
     fn limit(&self, mut translation: Translation, access: Access, requester: Requester) -> Outcome {
-        let privileged = self.privileged.filter(|_| requester.el != 0);
+        let privileged = self
+            .privileged
+            .map(|region| region.filter(|_| requester.el != 0));
         let bounds = privileged
-            .map(|region| (region.first, region.last))
             .into_iter()
+            .flatten()
+            .map(|region| (region.first, region.last))
             .chain(self.memory);
         for region in bounds.clone() {
             let base = translation.physical & !(translation.size - 1);
@@ -121,7 +125,7 @@ impl Ctrr {
         {
             write = Some("write into the memory controller's locked CTRR region");
         }
-        if let Some(region) = privileged {
+        for region in privileged.into_iter().flatten() {
             let bounds = (region.first, region.last);
             if region.write_protect && overlaps(base, translation.size, bounds) {
                 write = Some("write into the CTRR-protected region");

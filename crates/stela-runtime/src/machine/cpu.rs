@@ -253,6 +253,11 @@ pub struct Cpu {
     /// The CTRR registers of this PE's cluster, shared with its other PEs
     /// (`machine::ctrr`).
     pub ctrr: Rc<RefCell<super::ctrr::Cluster>>,
+    /// This PE's own CTRR registers on the M4 and later.
+    pub ctrr_core: super::ctrr::Core,
+    /// What iBoot left in the core lock registers, which every PE and
+    /// cluster starts from.
+    pub core_locks: Rc<super::ctrr::Handoff>,
     /// The region the memory controller has locked against writes, first
     /// and last byte, as the engine last read it from the devices.
     pub memory_lock: Option<(u64, u64)>,
@@ -392,6 +397,8 @@ impl Cpu {
             amu: None,
             retired: 0,
             ctrr: Rc::default(),
+            ctrr_core: super::ctrr::Core::default(),
+            core_locks: Rc::default(),
             memory_lock: None,
             degraded: alloc::collections::BTreeMap::new(),
         }
@@ -808,11 +815,13 @@ impl Cpu {
                 fields: self.apple.sprr_fields,
             },
             ctrr: mmu::Ctrr {
-                privileged: self.ctrr.borrow().levels[match regime {
-                    TranslationRegime::El10 => 0,
-                    TranslationRegime::El20 => 1,
-                }]
-                .region(self.read(sctlr) & mmu::SCTLR_M != 0),
+                privileged: super::ctrr::protection(
+                    self.registers.chip(),
+                    &self.ctrr.borrow(),
+                    &self.ctrr_core,
+                    regime == TranslationRegime::El20,
+                    self.read(sctlr) & mmu::SCTLR_M != 0,
+                ),
                 memory: self.memory_lock,
             },
             stage2: self.stage2(regime),

@@ -2033,6 +2033,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let target = target();
     let speculation = speculation::probe();
     let mut read_only_region = None;
+    let mut core_locks = stela_runtime::machine::ctrr::Handoff::default();
     let mut hidden_devices = Vec::new();
     let mut loaded_tree = None;
     // A bundle's kernel gets a framebuffer the size of the firmware's mode.
@@ -2064,6 +2065,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             loaded.regions, loaded.patches, loaded.kept, loaded.dram_base
         ));
         read_only_region = loaded.read_only_region;
+        core_locks = loaded.core_locks;
         hidden_devices = loaded.hidden_devices;
         loaded_tree = Some(loaded.live_tree);
         crate::status::done("");
@@ -2253,8 +2255,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::fatal("restore preparation failed")
         })
     });
+    let mut machine = Machine::new(cpu, bare, devices, profile, target);
+    machine.hand_off_core_locks(core_locks);
     run_machine(
-        Machine::new(cpu, bare, devices, profile, target),
+        machine,
         &options,
         handoff,
         RunIo {
