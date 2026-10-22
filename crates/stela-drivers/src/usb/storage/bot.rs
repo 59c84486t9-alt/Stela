@@ -951,7 +951,7 @@ mod tests {
             wrapper.bytes_mut().fill(0xa5);
             let mut buffer = dma.allocate(512, 512).unwrap();
             buffer.bytes_mut().fill(0x5a);
-            let controller = super::super::super::xhci::tests::controller_with_unresolved_td(
+            let controller = super::super::super::xhci::model::controller_with_unresolved_td(
                 &mut dma,
                 wrapper.physical(),
                 wrapper.len(),

@@ -162,7 +162,7 @@ mod tests {
             // SAFETY: backing RAM is exclusive and outlives every model/owner.
             let mut dma = unsafe { RegionAllocator::new(base..base + memory.len() as u64 * 8) };
             let foreign = dma.allocate(512, 512).unwrap();
-            let shared = xhci::tests::controller_with_unresolved_td(
+            let shared = xhci::model::controller_with_unresolved_td(
                 &mut dma,
                 foreign.physical(),
                 512,

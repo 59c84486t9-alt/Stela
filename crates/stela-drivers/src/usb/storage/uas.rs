@@ -1670,7 +1670,7 @@ mod tests {
         for speed in [HIGH_SPEED, SUPER_SPEED] {
             let mut memory = vec![0u64; 512 * 1024];
             let (controller, device, hardware, mut dma) =
-                xhci::reset_fixture(&mut memory, speed, 32, 3);
+                xhci::model::reset_fixture(&mut memory, speed, 32, 3);
             hardware.borrow_mut().empty_media = true;
             let binding =
                 Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
@@ -1894,7 +1894,7 @@ mod tests {
         ] {
             let mut memory = vec![0u64; 512 * 1024];
             let (controller, device, hardware, mut dma) =
-                crate::usb::xhci::reset_fixture(&mut memory, speed, 32, 3);
+                crate::usb::xhci::model::reset_fixture(&mut memory, speed, 32, 3);
             let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
             let binding = Binding::new(&device, &interface).unwrap();
             let mut failures = Vec::new();
@@ -1997,8 +1997,12 @@ mod tests {
         use crate::block::BlockDevice;
         for changed in [false, true] {
             let mut memory = vec![0u64; 512 * 1024];
-            let (controller, device, hardware, mut dma) =
-                crate::usb::xhci::reset_fixture(&mut memory, crate::usb::xhci::SUPER_SPEED, 32, 3);
+            let (controller, device, hardware, mut dma) = crate::usb::xhci::model::reset_fixture(
+                &mut memory,
+                crate::usb::xhci::SUPER_SPEED,
+                32,
+                3,
+            );
             let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
             let mut failures = Vec::new();
             let mut disks = unsafe {
@@ -2013,7 +2017,7 @@ mod tests {
             .unwrap();
             struct RebuildFailure<'a> {
                 inner: &'a mut dyn DmaAllocator,
-                hardware: alloc::rc::Rc<RefCell<crate::usb::xhci::ResetHardware>>,
+                hardware: alloc::rc::Rc<RefCell<crate::usb::xhci::model::ResetHardware>>,
             }
             impl DmaAllocator for RebuildFailure<'_> {
                 fn allocate(
@@ -2029,7 +2033,7 @@ mod tests {
                 }
             }
             if changed {
-                hardware.borrow_mut().fault = crate::usb::xhci::ResetFault::Identity;
+                hardware.borrow_mut().fault = crate::usb::xhci::model::ResetFault::Identity;
             }
             let result = if changed {
                 disks[0].reset_and_rebind(&mut dma, &mut failures)

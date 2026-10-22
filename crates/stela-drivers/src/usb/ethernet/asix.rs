@@ -374,6 +374,8 @@ mod tests {
         model::{Hardware, Io},
         *,
     };
+    use crate::usb::ethernet;
+    use crate::usb::xhci::{model, model::*, *};
     use alloc::rc::Rc;
     use core::cell::RefCell;
 
@@ -729,5 +731,431 @@ mod tests {
         }
         assert_eq!(count, 13);
         assert_eq!(identity::IDS.len(), 13);
+    }
+
+    #[test]
+    fn ax88772_native_all_candidates_revisions_split_rx_and_quarantine() {
+        use crate::net::Link;
+        let mut cases = 0;
+        for (vid, pid) in ethernet::asix_legacy_ids() {
+            for code in [0, 0x10, 0x20] {
+                for (speed, packet) in [
+                    (FULL_SPEED, 8u16),
+                    (FULL_SPEED, 16),
+                    (FULL_SPEED, 32),
+                    (FULL_SPEED, 64),
+                    (HIGH_SPEED, 512),
+                ] {
+                    for scenario in 0..6 {
+                        cases += 1;
+                        let mut backing = vec![0u64; 64 * 1024];
+                        let start = backing.as_mut_ptr() as u64;
+                        // SAFETY: backing outlives all modeled DMA objects.
+                        let mut dma = unsafe {
+                            RegionAllocator::new(start..start + backing.len() as u64 * 8)
+                        };
+                        let (mut controller, model) =
+                            unconfigured_cancellation_controller(&mut dma);
+                        controller.set_slot_speed(1, speed);
+                        model.borrow_mut().asix_legacy = Some(ethernet::LegacyModel::new(
+                            code,
+                            if code == 0x10 { 0x003b1861 } else { 0x003b1881 },
+                        ));
+                        let (input, output) = if scenario % 2 == 0 {
+                            (0x82u8, 3u8)
+                        } else {
+                            (0x81, 2)
+                        };
+                        let in_dci = (2 * (input & 15) + 1) as usize;
+                        let out_dci = (2 * output) as usize;
+                        let mut config =
+                            vec![9, 2, 32, 0, 1, 9, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0];
+                        for address in [input, output] {
+                            config.extend_from_slice(&[
+                                7,
+                                5,
+                                address,
+                                2,
+                                packet as u8,
+                                (packet >> 8) as u8,
+                                0,
+                            ]);
+                        }
+                        let mut dev = model::device(vec![config]);
+                        dev.speed = speed;
+                        dev.descriptor[8..10].copy_from_slice(&vid.to_le_bytes());
+                        dev.descriptor[10..12].copy_from_slice(&pid.to_le_bytes());
+                        model::select(&mut dev).unwrap();
+                        if scenario == 4 {
+                            model.borrow_mut().short_control_out = true;
+                        }
+                        if scenario == 5 {
+                            model.borrow_mut().asix_legacy.as_mut().unwrap().phy_address = 3;
+                        }
+                        let shared = Rc::new(RefCell::new(controller));
+                        let mut found = Found::default();
+                        bind(&shared, dev, &mut dma, &mut found);
+                        assert!(found.failures.is_empty(), "{:?}", found.failures);
+                        assert_eq!(model.borrow().configuration_seen_before_endpoints, [9]);
+                        if scenario >= 4 {
+                            assert!(found.vendor_links.is_empty());
+                            assert_eq!(found.vendor_failures.len(), 1);
+                            assert!(model.borrow().active[in_dci].is_none());
+                            continue;
+                        }
+                        assert!(
+                            found.vendor_failures.is_empty(),
+                            "{:?} identity {vid:04x}:{pid:04x} code {code} scenario {scenario}; legacy trace {:?}",
+                            found.vendor_failures,
+                            model.borrow().asix_legacy.as_ref().unwrap().trace
+                        );
+                        let mut link = found.vendor_links.pop().unwrap();
+                        assert_eq!(link.driver(), "usb-asix");
+                        assert_eq!(link.mac().0, [2, 0x27, 0x72, 0x43, 0x54, 0x65]);
+                        for _ in 0..4 {
+                            if link.carrier() {
+                                break;
+                            }
+                        }
+                        if !link.carrier() {
+                            let result = link.receive();
+                            panic!(
+                                "code {code} scenario {scenario} phy {:?} RX {:?}",
+                                model.borrow().asix_legacy.as_ref().unwrap().phy,
+                                result
+                            );
+                        }
+                        let length = 64usize.next_multiple_of(packet as usize) - 4;
+                        for _ in 0..if vid == 0x0b95 && pid == 0x7720 && scenario == 0 {
+                            300
+                        } else {
+                            1
+                        } {
+                            link.transmit(&vec![0x5a; length]).unwrap();
+                        }
+                        let sent = model.borrow().outgoing.last().unwrap().clone();
+                        let n = length.max(60) as u32;
+                        assert_eq!(&sent[..4], &(n | ((!n & 0xffff) << 16)).to_le_bytes());
+                        assert_eq!(&sent[4..4 + length], &vec![0x5a; length]);
+                        assert_eq!(&sent[sent.len() - 4..], &0xffff0000u32.to_le_bytes());
+                        assert_eq!(link.receive().unwrap(), None);
+                        let mut bytes = (1514u32 | ((!1514u32 & 0xffff) << 16))
+                            .to_le_bytes()
+                            .to_vec();
+                        bytes.extend_from_slice(&vec![0x73; 1514]);
+                        model
+                            .borrow_mut()
+                            .incoming_events
+                            .push_back(bytes[..62].to_vec());
+                        assert_eq!(link.receive().unwrap(), None);
+                        model
+                            .borrow_mut()
+                            .incoming_events
+                            .push_back(bytes[62..].to_vec());
+                        assert_eq!(link.receive().unwrap(), Some(vec![0x73; 1514]));
+                        assert_eq!(link.receive().unwrap(), None);
+                        if scenario == 0 {
+                            // Three distinct actual bulk-IN DMA completions: a
+                            // retained low header half must survive a second
+                            // two-byte transfer before the payload arrives.
+                            let header = (60u32 | (0xffc3 << 16)).to_le_bytes();
+                            for chunk in [&header[..2], &header[2..], &[0x53; 60][..]] {
+                                model.borrow_mut().incoming_events.push_back(chunk.to_vec());
+                                let frame = link.receive().unwrap();
+                                if chunk.len() == 60 {
+                                    assert_eq!(frame, Some(vec![0x53; 60]));
+                                } else {
+                                    assert_eq!(frame, None);
+                                }
+                            }
+                            assert_eq!(link.receive().unwrap(), None);
+                        }
+                        match scenario {
+                            0 => {
+                                model.borrow_mut().asix_legacy.as_mut().unwrap().link = false;
+                                assert!(!link.carrier());
+                                assert!(model.borrow().active[in_dci].is_none());
+                                model.borrow_mut().asix_legacy.as_mut().unwrap().link = true;
+                                for _ in 0..4 {
+                                    if link.carrier() {
+                                        break;
+                                    }
+                                }
+                                if !link.carrier() {
+                                    let result = link.receive();
+                                    panic!(
+                                        "code {code} scenario {scenario} phy {:?} RX {:?}",
+                                        model.borrow().asix_legacy.as_ref().unwrap().phy,
+                                        result
+                                    );
+                                }
+                                link.stop().unwrap();
+                                assert_eq!(model.borrow().asix_legacy.as_ref().unwrap().medium, 0);
+                                assert!(link.transmit(&[0; 60]).is_err());
+                            }
+                            1 => {
+                                model.borrow_mut().fail =
+                                    Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));
+                                assert!(link.stop().is_err());
+                                assert!(model.borrow().active[in_dci].is_some());
+                                assert!(link.receive().is_err());
+                            }
+                            2 => {
+                                model.borrow_mut().connected = false;
+                                assert!(!link.carrier());
+                                assert!(link.receive().is_err());
+                                assert!(model.borrow().active[in_dci].is_some());
+                            }
+                            _ => {
+                                model.borrow_mut().halt_transfer = Some(out_dci);
+                                model.borrow_mut().fail = Some((SET_DEQUEUE, CONTEXT_STATE_ERROR));
+                                assert!(link.transmit(&[0x77; 60]).is_err());
+                                let hw = model.borrow();
+                                let at = hw.rings[out_dci] + (hw.indices[out_dci] * TRB) as u64;
+                                // SAFETY: halted TD and DMA buffer remain live.
+                                let (buffer, n) = unsafe {
+                                    (
+                                        (at as *const u64).read_volatile(),
+                                        ((at + 8) as *const u32).read_volatile() as usize & 0x1ffff,
+                                    )
+                                };
+                                drop(hw);
+                                // SAFETY: model performs no DMA; failed cancellation retains ownership.
+                                let before = unsafe {
+                                    core::slice::from_raw_parts(buffer as *const u8, n).to_vec()
+                                };
+                                assert!(link.transmit(&[0x88; 60]).is_err());
+                                assert_eq!(
+                                    unsafe { core::slice::from_raw_parts(buffer as *const u8, n) },
+                                    before
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 1260);
+    }
+
+    #[test]
+    fn ax179_native_all_aliases_and_speeds_use_shared_dma_and_quarantine() {
+        use crate::net::Link;
+        for (vid, pid) in ethernet::asix_ids() {
+            for (speed, packet) in [
+                (FULL_SPEED, 8u16),
+                (FULL_SPEED, 16),
+                (FULL_SPEED, 32),
+                (FULL_SPEED, 64),
+                (HIGH_SPEED, 512),
+                (SUPER_SPEED, 1024),
+                (SUPER_SPEED_PLUS, 1024),
+            ] {
+                for scenario in 0..6 {
+                    let mut backing = vec![0u64; 128 * 1024];
+                    let start = backing.as_mut_ptr() as u64;
+                    // SAFETY: the backing outlives every modeled DMA object.
+                    let mut dma =
+                        unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                    let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+                    controller.set_slot_speed(1, speed);
+                    model.borrow_mut().asix = Some(ethernet::AsixModel::new(
+                        if speed >= SUPER_SPEED {
+                            4
+                        } else if speed == HIGH_SPEED {
+                            2
+                        } else {
+                            0
+                        },
+                        pid & 1 != 0,
+                    ));
+                    let (input, output) = match scenario % 3 {
+                        0 => (0x82u8, 3u8),
+                        1 => (0x81, 2),
+                        _ => (0x84, 5),
+                    };
+                    let in_dci = (2 * (input & 15) + 1) as usize;
+                    let out_dci = (2 * output) as usize;
+                    let irq = if input == 0x81 { 0x83 } else { 0x81 };
+                    let alternate = if scenario == 0 || scenario == 5 { 2 } else { 0 };
+                    let mut config = vec![9, 2, 0, 0, 1, 7, 0, 0x80, 50];
+                    if alternate != 0 {
+                        config.extend_from_slice(&[9, 4, 0, 0, 0, 0xff, 0xff, 0, 0]);
+                    }
+                    config.extend_from_slice(&[9, 4, 0, alternate, 3, 0xff, 0xff, 0, 0]);
+                    for address in [input, output] {
+                        config.extend_from_slice(&[
+                            7,
+                            5,
+                            address,
+                            2,
+                            packet as u8,
+                            (packet >> 8) as u8,
+                            0,
+                        ]);
+                        if speed >= SUPER_SPEED {
+                            config.extend_from_slice(&[6, SS_ENDPOINT_COMPANION, 3, 0, 0, 0]);
+                        }
+                    }
+                    config.extend_from_slice(&[7, 5, irq, 3, 8, 0, 4]);
+                    if speed >= SUPER_SPEED {
+                        config.extend_from_slice(&[6, SS_ENDPOINT_COMPANION, 0, 0, 8, 0]);
+                    }
+                    let total = config.len() as u16;
+                    config[2..4].copy_from_slice(&total.to_le_bytes());
+                    let mut dev = model::device(vec![config]);
+                    dev.speed = speed;
+                    dev.descriptor[8..10].copy_from_slice(&vid.to_le_bytes());
+                    dev.descriptor[10..12].copy_from_slice(&pid.to_le_bytes());
+                    model::select(&mut dev).unwrap();
+                    if scenario == 5 {
+                        controller.set_configuration(1, 7).unwrap();
+                        model.borrow_mut().halt_transfer = Some(1);
+                    }
+                    let shared = Rc::new(RefCell::new(controller));
+                    if scenario == 4 {
+                        model.borrow_mut().short_control_out = true;
+                    }
+                    let mut found = Found::default();
+                    bind(&shared, dev, &mut dma, &mut found);
+                    assert!(found.failures.is_empty(), "{:?}", found.failures);
+                    assert_eq!(model.borrow().configuration_seen_before_endpoints, [7]);
+                    if scenario == 4 || scenario == 5 {
+                        assert!(found.vendor_links.is_empty());
+                        assert_eq!(found.vendor_failures.len(), 1);
+                        assert_eq!(
+                            model.borrow().asix.as_ref().unwrap().trace.len(),
+                            if scenario == 5 { 0 } else { 1 }
+                        );
+                        assert!(model.borrow().active[in_dci].is_none());
+                        continue;
+                    }
+                    assert!(
+                        found.vendor_failures.is_empty(),
+                        "{:?}",
+                        found.vendor_failures
+                    );
+                    assert_eq!(found.vendor_links.len(), 1);
+                    assert_eq!(model.borrow().rings[(2 * (irq & 15) + 1) as usize], 0);
+                    let mut link = found.vendor_links.pop().unwrap();
+                    assert_eq!(link.driver(), "usb-asix");
+                    assert_eq!(link.mac().0, [2, 0x34, 0x56, 0x78, 0x9a, 0xbc]);
+                    assert!(link.firmware.is_none());
+                    if alternate != 0 {
+                        let hw = model.borrow();
+                        let setting = hw
+                            .setup
+                            .iter()
+                            .position(|(request, _)| request[0] == 1 && request[1] == SET_INTERFACE)
+                            .unwrap();
+                        let first_vendor = hw
+                            .setup
+                            .iter()
+                            .position(|(request, _)| request[0] == 0x40)
+                            .unwrap();
+                        assert!(setting < first_vendor);
+                        assert_eq!(hw.setup[setting].0, setup(1, SET_INTERFACE, 2, 0, 0));
+                    }
+                    assert!(link.carrier());
+                    let length = 68usize.next_multiple_of(packet as usize) - 8;
+                    let frames = if vid == 0x0b95 && pid == 0x1790 && scenario == 0 {
+                        300
+                    } else {
+                        1
+                    };
+                    for _ in 0..frames {
+                        link.transmit(&vec![0x5a; length]).unwrap();
+                    }
+                    let sent = model.borrow().outgoing.last().unwrap().clone();
+                    assert_eq!(
+                        u32::from_le_bytes(sent[..4].try_into().unwrap()),
+                        length as u32
+                    );
+                    assert_eq!(
+                        u32::from_le_bytes(sent[4..8].try_into().unwrap()),
+                        0x80008000
+                    );
+                    assert_eq!(&sent[8..], vec![0x5a; length]);
+                    assert_eq!(link.receive().unwrap(), None);
+                    let mut aggregate = Vec::new();
+                    let mut headers = Vec::new();
+                    for value in 0..12 {
+                        aggregate.extend_from_slice(&[0; 2]);
+                        aggregate.extend_from_slice(&vec![value; 1514]);
+                        aggregate.resize(aggregate.len().next_multiple_of(8), 0);
+                        headers.extend_from_slice(&(1516u32 << 16).to_le_bytes());
+                        headers.extend_from_slice(&0x80000000u32.to_le_bytes());
+                    }
+                    let offset = aggregate.len();
+                    aggregate.extend_from_slice(&headers);
+                    aggregate.extend_from_slice(&[0; 4]);
+                    aggregate.extend_from_slice(&((offset as u32) << 16 | 24).to_le_bytes());
+                    model.borrow_mut().incoming_events.push_back(aggregate);
+                    for value in 0..12 {
+                        assert_eq!(link.receive().unwrap(), Some(vec![value; 1514]));
+                    }
+                    assert_eq!(link.receive().unwrap(), None);
+                    match scenario {
+                        0 => {
+                            model
+                                .borrow_mut()
+                                .asix
+                                .as_mut()
+                                .unwrap()
+                                .phy
+                                .insert((0, 0, 0x11), 0);
+                            assert!(!link.carrier());
+                            assert!(model.borrow().active[in_dci].is_none());
+                            model
+                                .borrow_mut()
+                                .asix
+                                .as_mut()
+                                .unwrap()
+                                .phy
+                                .insert((0, 0, 0x11), 0xa400);
+                            assert!(link.carrier());
+                            link.stop().unwrap();
+                            assert!(link.transmit(&[0; 60]).is_err());
+                        }
+                        1 => {
+                            model.borrow_mut().fail = Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));
+                            assert!(link.stop().is_err());
+                            assert!(model.borrow().active[in_dci].is_some());
+                            assert!(link.receive().is_err() && link.transmit(&[0; 60]).is_err());
+                        }
+                        2 => {
+                            model.borrow_mut().connected = false;
+                            assert!(!link.carrier());
+                            assert!(link.receive().is_err() && link.transmit(&[0; 60]).is_err());
+                            assert!(model.borrow().active[in_dci].is_some());
+                        }
+                        _ => {
+                            model.borrow_mut().halt_transfer = Some(out_dci);
+                            model.borrow_mut().fail = Some((SET_DEQUEUE, CONTEXT_STATE_ERROR));
+                            assert!(link.transmit(&[0x77; 60]).is_err());
+                            let hw = model.borrow();
+                            let at = hw.rings[out_dci] + (hw.indices[out_dci] * TRB) as u64;
+                            // SAFETY: halted TD and its DMA buffer remain live.
+                            let (buffer, length) = unsafe {
+                                (
+                                    (at as *const u64).read_volatile(),
+                                    ((at + 8) as *const u32).read_volatile() as usize & 0x1ffff,
+                                )
+                            };
+                            drop(hw);
+                            // SAFETY: the hardware still owns this test sentinel.
+                            let before = unsafe {
+                                core::slice::from_raw_parts(buffer as *const u8, length).to_vec()
+                            };
+                            assert!(link.transmit(&[0x88; 60]).is_err());
+                            assert_eq!(
+                                unsafe { core::slice::from_raw_parts(buffer as *const u8, length) },
+                                before
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

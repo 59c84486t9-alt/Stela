@@ -34,7 +34,7 @@ const ISOCHRONOUS_MULT: u8 = 0x03;
 /// endpoints are skipped, endpoint fields are corrected as Linux corrects
 /// them, a SuperSpeed endpoint without a companion gets the default one,
 /// and the counts and total length describe what remains.
-pub(super) fn sanitize(bytes: &[u8], speed: u8) -> Result<Vec<u8>, &'static str> {
+pub(crate) fn sanitize(bytes: &[u8], speed: u8) -> Result<Vec<u8>, &'static str> {
     if bytes.len() < 9 || bytes[0] != 9 || bytes[1] != CONFIGURATION_DESCRIPTOR || bytes[5] == 0 {
         return Err("invalid USB configuration header/value");
     }
@@ -292,7 +292,7 @@ pub(super) fn active_settings(
 /// No supported function leaves the first descriptor selected only
 /// for unused-interface diagnostics; bind will issue no configuration request.
 #[cfg(test)]
-pub(super) fn select(device: &mut Device) -> Result<(), &'static str> {
+pub(crate) fn select(device: &mut Device) -> Result<(), &'static str> {
     select_with_controller(device, None)
 }
 
@@ -381,6 +381,8 @@ pub(super) fn select_with_controller(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use crate::bus::dma::RegionAllocator;
+    use crate::usb::xhci::model::*;
 
     #[test]
     fn superspeed_companions_associate_only_with_immediately_preceding_endpoint() {
@@ -993,5 +995,125 @@ pub(super) mod tests {
         assert!(selected.endpoints().is_empty());
         assert_eq!(selected.settings(0), vec![(0, 0), (1, 0), (2, 0)]);
         active_settings(&all, &selected.settings(0)).unwrap();
+    }
+
+    fn storage_modes(value: u8, superspeed: bool, bot: bool, uas: bool) -> Vec<u8> {
+        let mut bytes = vec![9, 2, 0, 0, 1, value, 0, 0x80, 50];
+        let packet = if superspeed { 1024u16 } else { 512u16 };
+        for (enabled, alternate, protocol, pipes) in [
+            (bot, 0, 0x50, vec![(0x81u8, 0u8), (2, 0)]),
+            (
+                uas,
+                u8::from(bot),
+                0x62,
+                vec![(3u8, 1u8), (0x84, 2), (0x85, 3), (6, 4)],
+            ),
+        ] {
+            if !enabled {
+                continue;
+            }
+            bytes.extend_from_slice(&[9, 4, 0, alternate, pipes.len() as u8, 8, 6, protocol, 0]);
+            for (address, pipe) in pipes {
+                bytes.extend_from_slice(&[7, 5, address, 2, packet as u8, (packet >> 8) as u8, 0]);
+                if superspeed {
+                    bytes.extend_from_slice(&[
+                        6,
+                        SS_ENDPOINT_COMPANION,
+                        0,
+                        if pipe > 1 { 4 } else { 0 },
+                        0,
+                        0,
+                    ]);
+                }
+                if protocol == 0x62 {
+                    bytes.extend_from_slice(&[4, 0x24, pipe, 0]);
+                }
+            }
+        }
+        let length = bytes.len() as u16;
+        bytes[2..4].copy_from_slice(&length.to_le_bytes());
+        configuration::sanitize(&bytes, SUPER_SPEED).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn storage_selector_uses_actual_stream_policy_before_configuration_and_bot_fallback() {
+        let mut memory = vec![0u64; 128 * 1024];
+        let start = memory.as_mut_ptr() as u64;
+        // SAFETY: backing storage outlives the controller and its modeled DMA.
+        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+        controller.max_primary_streams = 16;
+        controller.slots[1].as_mut().unwrap().speed = SUPER_SPEED;
+        let mut dev = configuration::tests::device(vec![storage_modes(7, true, true, true)]);
+        dev.speed = SUPER_SPEED;
+        for (policy, expected) in [
+            (streams::Policy::Unknown, (0, 0)),
+            (streams::Policy::Broken, (0, 0)),
+            (streams::Policy::Standard, (0, 1)),
+            (streams::Policy::Cadence, (0, 1)),
+        ] {
+            controller.stream_policy = policy;
+            configuration::select_with_controller(&mut dev, Some(&controller)).unwrap();
+            let all = interfaces(&dev.configuration);
+            let Plan::Storage(binding) =
+                configuration::plan_with_controller(&dev, &all[0], &all, Some(&controller))
+                    .unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(binding.setting(), expected);
+            assert_eq!(binding.uas(), expected.1 == 1);
+        }
+        controller.stream_policy = streams::Policy::Standard;
+        controller.max_primary_streams = 0;
+        let all = interfaces(&dev.configuration);
+        let Plan::Storage(binding) =
+            configuration::plan_with_controller(&dev, &all[0], &all, Some(&controller)).unwrap()
+        else {
+            panic!()
+        };
+        assert!(!binding.uas());
+        assert_eq!(model.borrow().configuration_value, 0);
+        assert!(
+            model
+                .borrow()
+                .configuration_seen_before_endpoints
+                .is_empty()
+        );
+        assert!(model.borrow().active.iter().skip(2).all(Option::is_none));
+    }
+
+    #[test]
+    fn storage_configuration_prefers_usable_uas_and_preserves_quirk_bot_fallback() {
+        for superspeed in [false, true] {
+            let mut memory = vec![0u64; 128 * 1024];
+            let start = memory.as_mut_ptr() as u64;
+            // SAFETY: backing storage outlives the controller and its modeled DMA.
+            let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+            let (mut controller, _) = unconfigured_cancellation_controller(&mut dma);
+            let speed = if superspeed { SUPER_SPEED } else { HIGH_SPEED };
+            controller.slots[1].as_mut().unwrap().speed = speed;
+            controller.stream_policy = streams::Policy::Standard;
+            controller.max_primary_streams = 16;
+            for reverse in [false, true] {
+                let mut configs = vec![
+                    storage_modes(7, superspeed, true, false),
+                    storage_modes(9, superspeed, false, true),
+                ];
+                if reverse {
+                    configs.reverse();
+                }
+                let mut dev = configuration::tests::device(configs);
+                dev.speed = speed;
+                configuration::select_with_controller(&mut dev, Some(&controller)).unwrap();
+                assert_eq!(dev.configuration_value(), 9);
+                // This exact source-listed SanDisk enclosure refuses UAS even
+                // on a capable stream host; retain the usable BOT alternative.
+                dev.descriptor[8..12].copy_from_slice(&[0x81, 0x07, 0xe8, 0x55]);
+                configuration::select_with_controller(&mut dev, Some(&controller)).unwrap();
+                assert_eq!(dev.configuration_value(), 7);
+            }
+        }
     }
 }

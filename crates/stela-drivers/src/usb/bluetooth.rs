@@ -420,8 +420,10 @@ impl Assembler {
 mod tests {
     use super::*;
     use crate::usb::xhci::{self, Device};
+    use crate::usb::xhci::{model::*, *};
     use alloc::{collections::VecDeque, rc::Rc};
     use core::cell::Cell;
+    use core::cell::RefCell;
 
     fn device(composite: bool) -> Device {
         let first = if composite { 2 } else { 0 };
@@ -837,5 +839,99 @@ mod tests {
         let mut hci = Hci::from_io(binding, Model::default());
         hci.submit_command(&[3, 0x0c, 0]).unwrap();
         assert_eq!(hci.io.control[0].0, [0x20, 0, 0, 0, 0, 0, 3, 0]);
+    }
+
+    #[test]
+    fn bluetooth_binds_real_xhci_queues_moves_packets_and_stops_on_disconnect() {
+        use crate::usb::bluetooth::{FirmwareStatus, Packet, State};
+        for scenario in 0..3 {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: this boot-lifetime-style allocation outlives every model DMA.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let shared: Shared = Rc::new(RefCell::new(controller));
+            let mut device = Device {
+                vendor_ethernet_revision: None,
+                vendor_ethernet_tcr: None,
+                slot: 1,
+                speed: FULL_SPEED,
+                location: "modeled physical HCI".into(),
+                descriptor: [
+                    18, 1, 0, 2, 0xe0, 1, 1, 64, 0x34, 0x12, 0x78, 0x56, 0, 1, 0, 0, 0, 1,
+                ],
+                configurations: Vec::new(),
+                configuration: vec![
+                    9, 2, 48, 0, 2, 1, 0, 0x80, 50, 9, 4, 0, 0, 3, 0xe0, 1, 1, 0, 7, 5, 0x81, 3,
+                    16, 0, 1, 7, 5, 0x82, 2, 64, 0, 0, 7, 5, 0x02, 2, 64, 0, 0, 9, 4, 1, 0, 0,
+                    0xe0, 1, 1, 0,
+                ],
+                manufacturer: None,
+                product: None,
+                serial: None,
+                language: None,
+            };
+            device.configurations = vec![device.configuration.clone()];
+            let mut found = Found::default();
+            bind(&shared, device, &mut dma, &mut found);
+            assert!(found.failures.is_empty(), "{:?}", found.failures);
+            assert_eq!(found.bluetooth.len(), 1);
+            if scenario == 0 {
+                let count = model.borrow().seen.len();
+                drop(found);
+                assert_eq!(model.borrow().seen.len(), count);
+                continue;
+            }
+            let mut hci = found.bluetooth.pop().unwrap();
+            assert_eq!(hci.firmware_status(), FirmwareStatus::Unverified);
+            hci.submit_command(&[3, 0x0c, 0]).unwrap();
+            assert_eq!(
+                model.borrow().setup.last().unwrap(),
+                &([0x20, 0, 0, 0, 0, 0, 3, 0], vec![3, 0x0c, 0])
+            );
+            assert!(hci.poll().unwrap().is_empty());
+            model
+                .borrow_mut()
+                .incoming_events
+                .push_back(vec![0x0e, 4, 1, 3, 0x0c, 0]);
+            model
+                .borrow_mut()
+                .incoming_acl
+                .push_back(vec![1, 0x20, 2, 0, 0xab, 0xcd]);
+            assert_eq!(
+                hci.poll().unwrap(),
+                vec![
+                    Packet::Event(vec![0x0e, 4, 1, 3, 0x0c, 0]),
+                    Packet::Acl(vec![1, 0x20, 2, 0, 0xab, 0xcd])
+                ]
+            );
+            hci.submit_acl(&[2, 0x20, 1, 0, 0x42]).unwrap();
+            assert_eq!(model.borrow().outgoing, vec![vec![2, 0x20, 1, 0, 0x42]]);
+            assert!(hci.poll().unwrap().is_empty()); // Leaves both IN TDs active.
+            model.borrow_mut().connected = false;
+            if scenario == 2 {
+                model.borrow_mut().fail = Some((STOP_ENDPOINT, 11));
+            }
+            let error = hci.poll().unwrap_err();
+            assert_eq!(hci.state(), State::Failed);
+            if scenario == 1 {
+                assert_eq!(error.cleanup, None);
+                assert_eq!(model.borrow().state(3), 3);
+                assert_eq!(model.borrow().state(5), 3);
+                assert!(model.borrow().active[3].is_none());
+                assert!(model.borrow().active[5].is_none());
+            } else {
+                assert_eq!(error.cleanup, Some(BlockError::Device { status: 11 }));
+                for dci in [3, 5] {
+                    assert_eq!(model.borrow().state(dci), 1);
+                    assert!(model.borrow().active[dci].is_some());
+                    assert!(shared.borrow().endpoint_poisoned(1, dci));
+                }
+                assert!(hci.poll().is_err());
+            }
+            let count = model.borrow().seen.len();
+            drop(hci);
+            assert_eq!(model.borrow().seen.len(), count); // Drop does not reset another device.
+        }
     }
 }

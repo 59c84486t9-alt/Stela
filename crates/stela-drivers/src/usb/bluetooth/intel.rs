@@ -414,6 +414,7 @@ impl<'a, B: Io> Engine<'a, B> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::usb::xhci::{model::*, *};
     use crate::{
         block::BlockError,
         firmware::{Catalog, Provenance, Resource, Target},
@@ -424,6 +425,7 @@ pub(crate) mod tests {
     };
     use alloc::{rc::Rc, vec};
     use core::cell::Cell;
+    use core::cell::RefCell;
     use sha2::{Digest, Sha256};
 
     // Original synthetic bytes exercise structure/protocol only. They contain
@@ -2042,5 +2044,50 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn intel_initializer_uses_actual_xhci_dma_and_reframes_bulk_after_acknowledged_stop() {
+        use crate::usb::bluetooth::{FirmwareStatus, Packet, intel};
+        let mut backing = vec![0u64; 128 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: exclusive model DMA stays live through all host endpoints.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+        let shared: Shared = Rc::new(RefCell::new(controller));
+        let (device, catalog, script) = intel::tests::fixture();
+        let mut found = Found::default();
+        bind(&shared, device, &mut dma, &mut found);
+        assert!(found.failures.is_empty(), "{:?}", found.failures);
+        let mut hci = found.bluetooth.pop().unwrap();
+        model.borrow_mut().script = Some(script);
+        let report = intel::initialize(&mut hci, &catalog).unwrap();
+        assert!(report.after.is_operational());
+        assert!(model.borrow().script.as_ref().unwrap().steps.is_empty());
+        assert_eq!(model.borrow().outgoing.len(), 6);
+        assert!(model.borrow().outgoing.iter().all(|p| p[..2] == [9, 0xfc]));
+        // Entry cancels the idle posted bulk IN via Running Stop -> Stopped
+        // Set Dequeue. Exit follows its completed boot-event TD; no hardware
+        // ownership remains to cancel before restoring ordinary ACL framing.
+        assert_eq!(
+            model
+                .borrow()
+                .seen
+                .iter()
+                .filter(|&&kind| kind == STOP_ENDPOINT)
+                .count(),
+            1
+        );
+        assert_eq!(model.borrow().dequeues.len(), 1);
+        assert_eq!(hci.firmware_status(), FirmwareStatus::Unverified);
+        assert!(hci.poll().unwrap().is_empty());
+        model
+            .borrow_mut()
+            .incoming_acl
+            .push_back(vec![1, 0x20, 2, 0, 0xaa, 0xbb]);
+        assert_eq!(
+            hci.poll().unwrap(),
+            vec![Packet::Acl(vec![1, 0x20, 2, 0, 0xaa, 0xbb])]
+        );
     }
 }

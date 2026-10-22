@@ -586,6 +586,9 @@ impl<C: Control> Chip<C> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::usb::ethernet;
+    use crate::usb::xhci::{model, model::*, *};
+    use alloc::string::String;
     use alloc::{collections::BTreeMap, rc::Rc};
     use core::cell::RefCell;
 
@@ -1019,5 +1022,459 @@ pub(crate) mod tests {
         }
         let path = std::env::var("STELA_RTL8152_ORACLE").expect("path to generated donor trace");
         assert_eq!(actual, std::fs::read_to_string(path).unwrap());
+    }
+
+    #[test]
+    fn rtl8152b_binds_real_xhci_dma_moves_aggregates_wraps_and_quiesces() {
+        use crate::net::Link;
+        for (revision, scenario) in [0x4c00, 0x4c10, 0x4800]
+            .into_iter()
+            .flat_map(|r| (0..4).map(move |s| (r, s)))
+        {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing outlives every controller/device/model DMA object.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            controller.set_slot_speed(1, HIGH_SPEED);
+            model.borrow_mut().ethernet = Some(ethernet::rtl815x::tests::Model::new(revision));
+            let configuration = vec![
+                9, 2, 32, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 0, 2,
+                0, 7, 5, 0x02, 2, 0, 2, 0,
+            ];
+            let mut device = model::device(vec![configuration]);
+            device.speed = HIGH_SPEED;
+            device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x52, 0x81]);
+            controller.preflight_vendor_ethernet(&mut device).unwrap();
+            assert_eq!(device.vendor_ethernet_revision, Some(revision));
+            assert_eq!(
+                device.vendor_ethernet_tcr,
+                Some((u32::from(revision) << 16) | 0x0800)
+            );
+            model::select(&mut device).unwrap();
+            let shared = Rc::new(RefCell::new(controller));
+            let mut found = Found::default();
+            bind(&shared, device, &mut dma, &mut found);
+            assert!(found.failures.is_empty(), "{:?}", found.failures);
+            assert_eq!(found.vendor_links.len(), 1);
+            assert_eq!(model.borrow().configuration_seen_before_endpoints, [7]);
+            let mut link = found.vendor_links.pop().unwrap();
+            assert_eq!(link.mac().0, [2, 0x11, 0x22, 0x33, 0x44, 0x55]);
+            assert!(link.carrier());
+            for value in 0..300 {
+                link.transmit(&[value as u8; 60]).unwrap();
+            }
+            assert_eq!(model.borrow().outgoing.len(), 300);
+            let packet = model.borrow().outgoing[299].clone();
+            assert_eq!(&packet[..8], &[60, 0, 0, 0xc0, 0, 0, 0, 0]);
+            assert_eq!(&packet[8..], &[299u16 as u8; 60]);
+            assert_eq!(link.receive().unwrap(), None);
+            assert!(model.borrow().active[3].is_some());
+            let mut aggregate = vec![0; 176];
+            aggregate[..4].copy_from_slice(&64u32.to_le_bytes());
+            aggregate[24..84].fill(0x5a);
+            aggregate[88..92].copy_from_slice(&64u32.to_le_bytes());
+            aggregate[112..172].fill(0x6a);
+            model.borrow_mut().incoming_events.push_back(aggregate);
+            assert_eq!(link.receive().unwrap(), Some(vec![0x5a; 60]));
+            assert_eq!(link.receive().unwrap(), Some(vec![0x6a; 60]));
+            assert_eq!(link.receive().unwrap(), None);
+            match scenario {
+                0 => {
+                    model.borrow_mut().ethernet.as_mut().unwrap().link = false;
+                    assert!(!link.carrier());
+                    assert!(model.borrow().active[3].is_none());
+                    model.borrow_mut().ethernet.as_mut().unwrap().link = true;
+                    assert!(link.carrier());
+                    link.transmit(&[1; 60]).unwrap();
+                    link.stop().unwrap();
+                    assert!(link.transmit(&[2; 60]).is_err());
+                }
+                1 => {
+                    model.borrow_mut().fail = Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));
+                    assert!(link.stop().is_err());
+                    assert!(model.borrow().active[3].is_some());
+                    assert!(link.receive().is_err());
+                    assert!(link.transmit(&[0; 60]).is_err());
+                }
+                2 => {
+                    model.borrow_mut().connected = false;
+                    assert!(!link.carrier());
+                    assert!(link.receive().is_err());
+                    assert!(link.transmit(&[0; 60]).is_err());
+                    // Disconnect is not proof of DMA quiescence.
+                    assert!(model.borrow().active[3].is_some());
+                }
+                _ => {
+                    model.borrow_mut().halt_transfer = Some(4);
+                    model.borrow_mut().fail = Some((SET_DEQUEUE, CONTEXT_STATE_ERROR));
+                    assert!(link.transmit(&[0x77; 60]).is_err());
+                    let state = model.borrow();
+                    let at = state.rings[4] + (state.indices[4] * TRB) as u64;
+                    // SAFETY: the failed TD remains in the live ring.
+                    let (buffer, bytes) = unsafe {
+                        (
+                            (at as *const u64).read_volatile(),
+                            ((at + 8) as *const u32).read_volatile() as usize & 0x1ffff,
+                        )
+                    };
+                    drop(state);
+                    // SAFETY: model performs no DMA here; hardware still owns
+                    // this sentinel and the next attempt must not mutate it.
+                    let before =
+                        unsafe { core::slice::from_raw_parts(buffer as *const u8, bytes).to_vec() };
+                    assert!(link.transmit(&[0x88; 60]).is_err());
+                    assert_eq!(
+                        unsafe { core::slice::from_raw_parts(buffer as *const u8, bytes) },
+                        before
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rtl815x_firmware_uses_actual_ep0_dma_wrapping_and_poison_guards() {
+        use ethernet::{
+            firmware::{Firmware, tests::synthetic_upload},
+            rtl815x::{Chip, FirmwareModel, Revision},
+        };
+        for revision in [
+            0x5c10, 0x5c20, 0x5c30, 0x6010, 0x6400, 0x7030, 0x7410, 0x7420,
+        ] {
+            let bytes = synthetic_upload(revision);
+            let firmware = Firmware::parse(&bytes, Revision(revision)).unwrap();
+            for fail in [false, true] {
+                let mut backing = vec![0u64; 128 * 1024];
+                let start = backing.as_mut_ptr() as u64;
+                // SAFETY: backing outlives all real control/ring DMA and model access.
+                let mut dma =
+                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+                controller.set_configuration(1, 7).unwrap();
+                model.borrow_mut().ethernet_upload = Some(FirmwareModel::new(revision, &bytes));
+                let shared = Rc::new(RefCell::new(controller));
+                let io = ethernet::HostControl {
+                    controller: shared.clone(),
+                    slot: 1,
+                };
+                let mut chip = Chip::probe(io, Revision(revision)).unwrap();
+                if fail {
+                    model.borrow_mut().silence_transfer = Some(1);
+                    model.borrow_mut().fail = Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));
+                    assert!(chip.upload_firmware(&firmware, false).is_err());
+                    assert!(shared.borrow_mut().endpoint_ready(1, 1).is_err());
+                    let control = shared.borrow().control_bytes(1);
+                    let requests = model.borrow().setup.len();
+                    assert!(chip.upload_firmware(&firmware, false).is_err());
+                    assert_eq!(model.borrow().setup.len(), requests);
+                    assert_eq!(shared.borrow().control_bytes(1), control);
+                } else {
+                    chip.upload_firmware(&firmware, false).unwrap();
+                    assert!(chip.carrier().is_err()); // Upload alone is not initialized PHY/MAC.
+                    let state = model.borrow();
+                    assert_eq!(state.configuration_value, 7);
+                    assert!(state.configuration_seen_before_endpoints.is_empty());
+                    assert!(
+                        state
+                            .setup
+                            .iter()
+                            .any(|(request, data)| request[0] == 0x40 && data.len() > 4)
+                    );
+                    assert!(state.setup.iter().all(|(_, data)| data.len() <= 512));
+                    assert!(state.active[1].is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rtl8153_missing_exact_firmware_never_creates_a_native_link() {
+        for revision in [
+            0x5c10, 0x5c20, 0x5c30, 0x6010, 0x6400, 0x7030, 0x7410, 0x7420,
+        ] {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing remains exclusive/live through all controller DMA.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            controller.set_slot_speed(1, HIGH_SPEED);
+            let config = vec![
+                9, 2, 32, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 0, 2,
+                0, 7, 5, 2, 2, 0, 2, 0,
+            ];
+            let mut dev = model::device(vec![config]);
+            dev.speed = HIGH_SPEED;
+            let is_8156 = ethernet::rtl815x::Revision(revision).is_8156();
+            dev.descriptor[8..14].copy_from_slice(&[
+                0xda,
+                0x0b,
+                if is_8156 { 0x56 } else { 0x53 },
+                0x81,
+                0x00,
+                0x30,
+            ]);
+            dev.vendor_ethernet_revision = Some(revision);
+            model::select(&mut dev).unwrap();
+            let shared = Rc::new(RefCell::new(controller));
+            let mut found = Found::default();
+            bind(&shared, dev, &mut dma, &mut found);
+            assert!(found.vendor_links.is_empty() && found.failures.is_empty());
+            assert_eq!(found.vendor_failures.len(), 1);
+            let ethernet::Error::Firmware { request, .. } = &found.vendor_failures[0].1 else {
+                panic!("{:?}", found.vendor_failures)
+            };
+            assert_eq!(
+                request.name,
+                ethernet::rtl815x::Revision(revision).firmware().unwrap()
+            );
+            assert_eq!(
+                request.hardware,
+                if is_8156 {
+                    "usb:0bda:8156:3000"
+                } else {
+                    "usb:0bda:8153:3000"
+                }
+            );
+            assert_eq!(request.revision, format!("tcr-{revision:04x}"));
+            assert!(model.borrow().active[3].is_none() && model.borrow().outgoing.is_empty());
+        }
+    }
+
+    #[test]
+    fn rtl8153_native_usb2_usb3_binding_uploads_exact_provider_and_retains_owned_receipt() {
+        use crate::{
+            firmware::{Catalog, Provenance, Provider, Resource, Target},
+            net::Link,
+        };
+        use sha2::{Digest, Sha256};
+        struct Recording {
+            catalog: Catalog,
+            requests: RefCell<Vec<(String, String, String)>>,
+        }
+        impl Provider for Recording {
+            fn load(
+                &self,
+                requirement: crate::firmware::Requirement<'_>,
+            ) -> Result<crate::firmware::Image<'_>, crate::firmware::Error> {
+                self.requests.borrow_mut().push((
+                    requirement.name.into(),
+                    requirement.target.hardware.into(),
+                    requirement.target.revision.into(),
+                ));
+                self.catalog.load(requirement)
+            }
+        }
+        let native = [
+            0x5c00, 0x5c10, 0x5c20, 0x5c30, 0x6000, 0x6010, 0x6400, 0x7020, 0x7030, 0x7400, 0x7410,
+            0x7420,
+        ]
+        .into_iter()
+        .flat_map(|revision| {
+            [HIGH_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS].map(|speed| (revision, speed))
+        })
+        .map(|(revision, speed)| {
+            let pid = if ethernet::rtl815x::Revision(revision).is_8156() {
+                0x8156
+            } else {
+                0x8153
+            };
+            (0x0bda, pid, revision, speed, 0x3000u16, None)
+        });
+        let aliases = ethernet::USB_IDS
+            .iter()
+            .copied()
+            .map(|(vid, pid)| (vid, pid, 0x5c10, HIGH_SPEED, 0x3000, None));
+        let dock = [0x3011, 0x3010].into_iter().flat_map(|bcd| {
+            ["000001000000", "000002000000", "000003000000"]
+                .map(|serial| (0x413c, 0xb097, 0x5c10, HIGH_SPEED, bcd, Some(serial)))
+        });
+        for (vid, pid, revision, speed, bcd, serial) in native.chain(aliases).chain(dock) {
+            let image = if matches!(revision, 0x5c00 | 0x6000 | 0x7020 | 0x7400) {
+                Vec::new()
+            } else {
+                ethernet::firmware::tests::synthetic_upload(revision)
+            };
+            let is_8156 = ethernet::rtl815x::Revision(revision).is_8156();
+            let hardware_label = format!("usb:{vid:04x}:{pid:04x}:{bcd:04x}");
+            let name = ethernet::rtl815x::Revision(revision).firmware();
+            let revision_label = format!("tcr-{revision:04x}");
+            let digest: [u8; 32] = Sha256::digest(&image).into();
+            let catalog = if let Some(name) = name {
+                Catalog::from_handoff(vec![Resource {
+                    name,
+                    target: Target {
+                        driver: "usb-rtl815x",
+                        hardware: &hardware_label,
+                        revision: &revision_label,
+                        board: None,
+                    },
+                    provenance: Provenance {
+                        source: "source-model-fixture",
+                        revision: "immutable-test",
+                        member: name,
+                        license: "synthetic",
+                    },
+                    expected_length: image.len(),
+                    expected_sha256: digest,
+                    bytes: image.clone(),
+                }])
+                .unwrap()
+            } else {
+                Catalog::from_handoff(Vec::new()).unwrap()
+            };
+            let provider = Recording {
+                catalog,
+                requests: RefCell::new(Vec::new()),
+            };
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: all DMA objects/model references die before this backing.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            controller.set_slot_speed(1, speed);
+            model.borrow_mut().ethernet_upload =
+                Some(ethernet::rtl815x::FirmwareModel::new(revision, &image));
+            let mut configuration = vec![
+                9, 2, 32, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 0, 2,
+                0, 7, 5, 0x02, 2, 0, 2, 0,
+            ];
+            if speed >= SUPER_SPEED {
+                configuration = vec![
+                    9,
+                    2,
+                    44,
+                    0,
+                    1,
+                    7,
+                    0,
+                    0x80,
+                    50,
+                    9,
+                    4,
+                    0,
+                    0,
+                    2,
+                    0xff,
+                    0,
+                    0,
+                    0,
+                    7,
+                    5,
+                    0x81,
+                    2,
+                    0,
+                    4,
+                    0,
+                    6,
+                    SS_ENDPOINT_COMPANION,
+                    7,
+                    0,
+                    0,
+                    0,
+                    7,
+                    5,
+                    2,
+                    2,
+                    0,
+                    4,
+                    0,
+                    6,
+                    SS_ENDPOINT_COMPANION,
+                    7,
+                    0,
+                    0,
+                    0,
+                ];
+            }
+            let mut device = model::device(vec![configuration]);
+            device.speed = speed;
+            device.descriptor[8..14].copy_from_slice(&[
+                vid as u8,
+                (vid >> 8) as u8,
+                pid as u8,
+                (pid >> 8) as u8,
+                bcd as u8,
+                (bcd >> 8) as u8,
+            ]);
+            device.serial = serial.map(Into::into);
+            controller.preflight_vendor_ethernet(&mut device).unwrap();
+            model::select(&mut device).unwrap();
+            let shared = Rc::new(RefCell::new(controller));
+            let mut found = Found::default();
+            bind_with_provider(&shared, device, &mut dma, &mut found, &provider);
+            assert!(found.failures.is_empty(), "{:?}", found.failures);
+            assert!(
+                found.vendor_failures.is_empty(),
+                "{:?}",
+                found.vendor_failures
+            );
+            assert_eq!(found.vendor_links.len(), 1);
+            assert_eq!(
+                provider.requests.borrow().len(),
+                usize::from(name.is_some())
+            );
+            let bytes = shared
+                .borrow_mut()
+                .control(1, setup(0xc0, 5, 0xd404, 0, 4), &[])
+                .unwrap();
+            let aggregation = u16::from_le_bytes([bytes[2], bytes[3]]) & 0x90;
+            assert_eq!(
+                aggregation,
+                if bcd == 0x3011 && matches!(serial, Some("000001000000" | "000002000000")) {
+                    0x10
+                } else {
+                    0
+                }
+            );
+            let mut link = found.vendor_links.pop().unwrap();
+            if let Some(name) = name {
+                let receipt = link.firmware.as_ref().unwrap();
+                assert_eq!(receipt.request.name, name);
+                assert_eq!(receipt.request.hardware, hardware_label);
+                assert_eq!(receipt.request.revision, revision_label);
+                assert_eq!(receipt.sha256, digest);
+                assert_eq!(receipt.length, image.len());
+                assert_eq!(receipt.source_revision, "immutable-test");
+            } else {
+                assert!(link.firmware.is_none());
+            }
+            drop(provider); // Actual native link must not borrow the image/catalog.
+            assert!(link.carrier());
+            link.transmit(&[0x5a; 1514]).unwrap();
+            assert_eq!(model.borrow().outgoing[0].len(), 1522);
+            assert_eq!(link.receive().unwrap(), None);
+            if is_8156 {
+                let hw = model.borrow();
+                let (_, address, length) = hw.active[3].unwrap();
+                assert_eq!(address & 0xffff, 0);
+                assert_eq!(length, 49152);
+            }
+            let frames = if is_8156 {
+                32
+            } else if speed >= SUPER_SPEED {
+                21
+            } else {
+                1
+            };
+            let frame_size = if frames >= 21 { 1500 } else { 60 };
+            let mut aggregate = Vec::new();
+            for value in 0..frames {
+                let mut packet = vec![0; 24 + frame_size + 4];
+                packet[..4].copy_from_slice(&((frame_size + 4) as u32).to_le_bytes());
+                packet[24..24 + frame_size].fill(value as u8);
+                aggregate.extend(packet);
+                aggregate.resize(aggregate.len().next_multiple_of(8), 0);
+            }
+            if frames >= 21 {
+                assert!(aggregate.len() > 16384);
+            }
+            model.borrow_mut().incoming_events.push_back(aggregate);
+            for value in 0..frames {
+                assert_eq!(link.receive().unwrap(), Some(vec![value as u8; frame_size]));
+            }
+            link.stop().unwrap();
+            assert!(link.transmit(&[0; 60]).is_err());
+        }
     }
 }

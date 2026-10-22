@@ -257,7 +257,7 @@ mod tests {
             // SAFETY: backing remains live and exclusively owns this test DMA.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let buffer = dma.allocate(64, 64).unwrap();
-            let controller = xhci::tests::controller_with_unresolved_td(
+            let controller = xhci::model::controller_with_unresolved_td(
                 &mut dma,
                 buffer.physical(),
                 buffer.len(),

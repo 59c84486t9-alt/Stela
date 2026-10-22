@@ -556,7 +556,7 @@ mod tests {
             let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
             let binding = binding();
             let mut native = Native::new(Bindings::new(&binding).unwrap(), &mut dma).unwrap();
-            let controller = xhci::tests::controller_with_unresolved_td(
+            let controller = xhci::model::controller_with_unresolved_td(
                 &mut dma,
                 native.iso_input.physical(),
                 512,
@@ -595,7 +595,7 @@ mod tests {
         let start = backing.as_mut_ptr() as u64;
         // SAFETY: exclusive synthetic RAM outlives model, rings and class owner.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-        let fixture = xhci::iso_class_fixture(&mut dma, xhci::HIGH_SPEED);
+        let fixture = xhci::model::iso_class_fixture(&mut dma, xhci::HIGH_SPEED);
         let controller = fixture.controller();
         let binding = binding();
         let device = binding.device().clone();
