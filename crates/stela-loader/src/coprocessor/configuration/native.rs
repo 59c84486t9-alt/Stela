@@ -2,7 +2,7 @@
 //!
 //! The boot-policy owner supplies actual hardware classification and entropy
 //! provenance. This proposal cannot certify either input or install a mapping.
-use super::{Action, Configured, Field, Policy, Provenance};
+use super::{Action, Configured, Field, Policy, Provenance, source_record};
 use crate::coprocessor::{HardwareIdentity, Staged};
 use alloc::string::String;
 use anyhow::{Context, Result, ensure};
@@ -95,22 +95,8 @@ impl Staged {
             .as_ref()
             .context("cold slide requires an original patchbay")?;
         let scalar = |tag| -> Result<(&super::Record, u64)> {
-            let record = bay
-                .records
-                .iter()
-                .find(|r| r.tag == tag)
-                .context("cold slide requires an original scalar tag")?;
+            let (record, value) = source_record(self, tag)?;
             ensure!(record.bytes == 8, "cold slide tag is not 64-bit");
-            let offset = usize::try_from(record.image_offset)?;
-            let value = self
-                .bytes()
-                .get(offset..)
-                .and_then(|tail| tail.get(..8))
-                .context("cold slide scalar exceeds owned image")?;
-            ensure!(
-                sha256(value) == record.source_sha256,
-                "cold slide scalar differs from original source"
-            );
             Ok((record, u64::from_le_bytes(value.try_into()?)))
         };
         let (_, chain_starts) = scalar(CHAIN_STARTS)?;

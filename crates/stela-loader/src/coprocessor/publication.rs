@@ -14,6 +14,73 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_runtime::sha256;
 
+/// Actual selected native policy inputs, before packing the wire flag word.
+/// These internal flags are not Mach-O protections. Their other allocation,
+/// isolation and lifecycle effects remain with the corresponding parent owners.
+pub struct NativeFlagsInput {
+    pub internal_segment_flags: u32,
+    pub kernel: bool,
+    pub per_firmware_isolation: u64,
+    pub telemetry_handoff_restricted: u64,
+    pub segment_provenance: Provenance,
+    pub kernel_provenance: Provenance,
+    pub isolation_provenance: Provenance,
+    pub telemetry_provenance: Provenance,
+}
+
+/// A retained derivation, not certification of the caller's selected policy.
+#[derive(Debug, Clone, Serialize)]
+pub struct NativeFlags {
+    raw_flags: u32,
+    internal_segment_flags: u32,
+    kernel: bool,
+    per_firmware_isolation: u64,
+    telemetry_handoff_restricted: u64,
+    segment_provenance: Provenance,
+    kernel_provenance: Provenance,
+    isolation_provenance: Provenance,
+    telemetry_provenance: Provenance,
+}
+impl NativeFlags {
+    /// iBoot1505e8..1506c0. In particular read-only suppresses backup, and
+    /// isolation values compare exactly to one rather than testing nonzero.
+    pub fn derive(input: NativeFlagsInput) -> Result<Self> {
+        for provenance in [
+            &input.segment_provenance,
+            &input.kernel_provenance,
+            &input.isolation_provenance,
+            &input.telemetry_provenance,
+        ] {
+            provenance.validate()?;
+        }
+        let s = input.internal_segment_flags;
+        let read_only = (s >> 1) & 1;
+        let backup = if read_only != 0 { 0 } else { (s >> 4) & 4 };
+        let restricted = s & (1 << 12) != 0
+            && (s & (1 << 13) != 0
+                || input.per_firmware_isolation == 1
+                || input.telemetry_handoff_restricted == 1);
+        Ok(Self {
+            raw_flags: read_only
+                | ((s >> 4) & 2)
+                | backup
+                | (u32::from(input.kernel) << 3)
+                | (u32::from(restricted) << 4),
+            internal_segment_flags: s,
+            kernel: input.kernel,
+            per_firmware_isolation: input.per_firmware_isolation,
+            telemetry_handoff_restricted: input.telemetry_handoff_restricted,
+            segment_provenance: input.segment_provenance,
+            kernel_provenance: input.kernel_provenance,
+            isolation_provenance: input.isolation_provenance,
+            telemetry_provenance: input.telemetry_provenance,
+        })
+    }
+    pub fn raw_flags(&self) -> u32 {
+        self.raw_flags
+    }
+}
+
 pub enum Action {
     /// Deliberate policy decision retained in the proposal, never an implicit
     /// effect of a zero VM size or an unfamiliar segment name.
@@ -238,6 +305,59 @@ pub(super) mod tests {
     };
     use configuration::tests::{config_policy, configured, provenance};
     use publication_root::{configuration, publication};
+
+    fn native_flags(s: u32, isolation: u64, telemetry: u64, kernel: bool) -> NativeFlagsInput {
+        NativeFlagsInput {
+            internal_segment_flags: s,
+            kernel,
+            per_firmware_isolation: isolation,
+            telemetry_handoff_restricted: telemetry,
+            segment_provenance: provenance(),
+            kernel_provenance: provenance(),
+            isolation_provenance: provenance(),
+            telemetry_provenance: provenance(),
+        }
+    }
+
+    #[test]
+    fn native_flags_preserve_independent_omit_backup_and_exact_isolation_conditions() -> Result<()>
+    {
+        // The default native OS_LOG descriptor604 converts to internal121.
+        assert_eq!(
+            NativeFlags::derive(native_flags(0x121, 0, 0, false))?.raw_flags(),
+            2
+        );
+        assert_eq!(
+            NativeFlags::derive(native_flags(0x60, 0, 0, false))?.raw_flags(),
+            6
+        );
+        assert_eq!(
+            NativeFlags::derive(native_flags(0x62, 0, 0, false))?.raw_flags(),
+            3
+        );
+        for (s, isolation, telemetry, expected) in [
+            (0, 1, 1, 0),
+            (0x1000, 0, 0, 0),
+            (0x1000, 2, u64::MAX, 0),
+            (0x1000, 1, 0, 16),
+            (0x1000, 0, 1, 16),
+            (0x3000, 0, 0, 16),
+        ] {
+            assert_eq!(
+                NativeFlags::derive(native_flags(s, isolation, telemetry, false))?.raw_flags(),
+                expected
+            );
+        }
+        let all = NativeFlags::derive(native_flags(u32::MAX, 2, 2, true))?;
+        assert_eq!(all.raw_flags(), 0x1b);
+        let receipt = serde_json::to_value(all)?;
+        assert_eq!(receipt["internal_segment_flags"], u32::MAX);
+        assert_eq!(receipt["per_firmware_isolation"], 2);
+        let mut unknown = native_flags(0x121, 0, 0, false);
+        unknown.isolation_provenance.coordinates.clear();
+        assert!(NativeFlags::derive(unknown).is_err());
+        Ok(())
+    }
 
     pub(in crate::coprocessor) fn publication_policy(
         c: &configuration::Configured,

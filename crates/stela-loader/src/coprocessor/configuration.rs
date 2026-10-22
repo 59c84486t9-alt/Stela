@@ -8,6 +8,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_runtime::sha256;
 
+pub mod entropy;
 pub mod native;
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,6 +40,29 @@ pub struct Patchbay {
     pub bytes: u64,
     pub source_sha256: String,
     pub records: Vec<Record>,
+}
+pub(super) fn source_record(staged: &Staged, tag: u32) -> Result<(&Record, &[u8])> {
+    let bay = staged
+        .plan()
+        .patchbay
+        .as_ref()
+        .context("native policy requires an original patchbay")?;
+    let record = bay
+        .records
+        .iter()
+        .find(|r| r.tag == tag)
+        .context("native policy requires an original patchbay tag")?;
+    let at = usize::try_from(record.image_offset)?;
+    let raw = staged
+        .bytes()
+        .get(at..)
+        .and_then(|tail| tail.get(..record.bytes as usize))
+        .context("native policy record exceeds owned source bytes")?;
+    ensure!(
+        sha256(raw) == record.source_sha256,
+        "native policy record differs from original source"
+    );
+    Ok((record, raw))
 }
 pub(super) fn parse(data: &[u8], plan: &Plan) -> Result<Option<Patchbay>> {
     let mut matches = plan.sections.iter().filter(|s| s.name == "_rtk_patchbay");

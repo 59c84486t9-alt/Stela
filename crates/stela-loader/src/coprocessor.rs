@@ -670,6 +670,17 @@ pub(super) mod tests {
             .iter_mut()
             .find(|f| f.tag == u32::from_be_bytes(*b"SLID"))
             .unwrap() = proposal.field(provenance())?;
+        let entropy = staged.entropy_fields(configuration::entropy::Input {
+            pace: [0xa5; 8],
+            pace_provenance: provenance(),
+            stack_guard: vec![0x55; 8],
+            stack_guard_choice: 0,
+            stack_guard_provenance: provenance(),
+        })?;
+        for field in [entropy.pace, entropy.stack_guard] {
+            let tag = field.tag;
+            *policy.fields.iter_mut().find(|f| f.tag == tag).unwrap() = field;
+        }
         let configured = staged.configure_cold(policy, proposal)?;
         assert_eq!(configured.receipt().fields.len(), 61);
         assert_eq!(
@@ -679,7 +690,7 @@ pub(super) mod tests {
                 .iter()
                 .filter(|f| f.changed)
                 .count(),
-            1
+            3
         );
         assert_ne!(
             configured.receipt().configured_sha256,
@@ -693,6 +704,11 @@ pub(super) mod tests {
             u64::from_le_bytes(configured.bytes()[0x962924..0x96292c].try_into()?),
             0x10123
         );
+        assert_eq!(
+            &configured.bytes()[0x9624d8..0x9624e0],
+            &[0, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55]
+        );
+        assert_eq!(&configured.bytes()[0x9629d7..0x9629df], &[0xa5; 8]);
         for fixup in &configured.plan().chains.pointers {
             let at = fixup.image_offset as usize;
             assert_eq!(&configured.bytes()[at..at + 8], &fixup.raw.to_le_bytes());
