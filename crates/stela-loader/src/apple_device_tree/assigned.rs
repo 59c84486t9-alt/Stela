@@ -72,8 +72,10 @@ pub struct ReferenceField<'a> {
     pub property: &'a str,
     pub encoding: ReferenceEncoding,
 }
-/// Immutable input identity and complete original CPU-node bindings. The
-/// source owner must qualify all topology consumers; arbitrary property bytes
+/// Immutable input identity and actual retained CPU resource bindings. Every
+/// original CPU is independently shape/identity validated before projection;
+/// removed CPUs need no invented executor or lifecycle IDs. The source owner
+/// must still qualify all topology consumers; arbitrary property bytes
 /// are not guessed to be phandles, IDs or CPU masks. This metadata grants no
 /// device/executor authority or completeness credit for unqualified consumers.
 #[derive(Debug)]
@@ -196,7 +198,34 @@ fn shape(node: &Node) -> Result<()> {
         }
     }
     word(node, "cpu-id")?;
-    word(node, "AAPL,phandle")?;
+    ensure!(
+        word(node, "AAPL,phandle")? != 0,
+        "zero original CPU phandle"
+    );
+    for field in [
+        "cluster-id",
+        "die-id",
+        "die-cluster-id",
+        "cluster-core-id",
+        "l2-cache-size",
+    ] {
+        word(node, field)?;
+    }
+    let kind = bytes(node, "cluster-type")?;
+    ensure!(
+        !kind.is_empty() && kind[0] != 0 && kind[1..].iter().all(|v| *v == 0),
+        "invalid original CPU cluster-type"
+    );
+    for field in ["cpu-impl-reg", "acc-impl-reg", "cpm-impl-reg"] {
+        let raw = bytes(node, field)?;
+        ensure!(raw.len() == 16, "CPU {field} is not a base/size pair");
+        let base = u64::from_le_bytes(raw[..8].try_into().unwrap());
+        let size = u64::from_le_bytes(raw[8..].try_into().unwrap());
+        ensure!(
+            base != 0 && size != 0 && base.checked_add(size).is_some(),
+            "invalid original CPU {field} extent"
+        );
+    }
     Ok(())
 }
 
@@ -242,14 +271,27 @@ impl<'p, 's> Projection<'p, 's> {
             word(cpus, "#address-cells")? == 1 && word(cpus, "#size-cells")? == 0,
             "unqualified /cpus address/size encoding"
         );
-        ensure!(
-            cpus.children.len() == source.nodes.len(),
-            "incomplete original CPU binding inventory"
-        );
-        let mut names = BTreeSet::new();
-        let mut slots = BTreeSet::new();
         let mut phandles = BTreeSet::new();
         let mut firmware_ids = BTreeSet::new();
+        let mut affinities = BTreeSet::new();
+        // Source enumeration and native ownership are separate phases. Validate
+        // ALL original nodes, including those that will be removed, without
+        // requiring fabricated resources for an unassigned hardware slot.
+        for node in &cpus.children {
+            shape(node)?;
+            let reg = word(node, "reg")?;
+            ensure!(
+                reg <= 0xffff && affinities.insert(reg),
+                "invalid or duplicate original CPU affinity"
+            );
+            ensure!(
+                phandles.insert(word(node, "AAPL,phandle")?)
+                    && firmware_ids.insert(word(node, "cpu-id")?),
+                "duplicate original CPU phandle/firmware ID"
+            );
+        }
+        let mut names = BTreeSet::new();
+        let mut slots = BTreeSet::new();
         for binding in source.nodes {
             ensure!(
                 !binding.name.contains('/') && !binding.name.is_empty(),
@@ -259,23 +301,9 @@ impl<'p, 's> Projection<'p, 's> {
                 names.insert(binding.name) && slots.insert(binding.slot),
                 "duplicate CPU source binding"
             );
-            let node = cpus
-                .child(binding.name)
+            cpus.child(binding.name)
                 .context("CPU binding has no original node")?;
-            shape(node)?;
-            ensure!(
-                phandles.insert(word(node, "AAPL,phandle")?)
-                    && firmware_ids.insert(word(node, "cpu-id")?),
-                "duplicate original CPU phandle/firmware ID"
-            );
         }
-        // Do not leave another child with the same name hidden behind child().
-        ensure!(
-            cpus.children
-                .iter()
-                .all(|n| n.name().is_some_and(|n| names.contains(n))),
-            "unbound or duplicate original /cpus child"
-        );
         let mut projected = tree.clone();
         let mut selected = Vec::with_capacity(plan.pes().len());
         let mut retained_phandles = BTreeSet::new();
@@ -436,11 +464,18 @@ impl<'p, 's> Projection<'p, 's> {
             Ok(())
         }
         consumers(&tree.root, "/", &locations)?;
-        let removed = source
-            .nodes
+        let removed = cpus
+            .children
             .iter()
-            .filter(|b| !plan.pes().iter().any(|pe| pe.slot == b.slot))
-            .map(|b| format!("{CPUS}/{}", b.name))
+            .filter(|node| {
+                !projected
+                    .node(CPUS)
+                    .unwrap()
+                    .children
+                    .iter()
+                    .any(|selected| selected.name() == node.name())
+            })
+            .map(|node| format!("{CPUS}/{}", node.name().expect("validated original name")))
             .collect();
         let receipt = Receipt {
             plan: plan.identity(),
@@ -849,6 +884,67 @@ mod tests {
         let mut source = f.source();
         source.nodes = &f.bindings[..2];
         assert!(Projection::prepare(&plan, &tree, &source).is_err());
+    }
+    #[test]
+    fn removed_source_cpu_needs_no_native_resource_ids_but_retained_cpu_does() {
+        let f = Fixture::new();
+        let plan = f.plan();
+        let bindings = [f.bindings[0], f.bindings[2]];
+        let mut source = f.source();
+        source.nodes = &bindings;
+        let mut tree = f.tree.clone();
+        let receipt = Projection::prepare(&plan, &tree, &source)
+            .unwrap()
+            .apply(&mut tree)
+            .unwrap();
+        assert_eq!(receipt.removed, vec!["/cpus/cpu1"]);
+        assert_eq!(f.tree.node(CPUS).unwrap().children.len(), 3);
+        for selected in &tree.node(CPUS).unwrap().children {
+            let original = f
+                .tree
+                .node(CPUS)
+                .unwrap()
+                .child(selected.name().unwrap())
+                .unwrap();
+            for property in &original.properties {
+                if property.name() != "state" {
+                    assert_eq!(selected.property(property.name()), Some(property));
+                }
+            }
+        }
+        source.nodes = &bindings[..1];
+        let unchanged = f.tree.clone();
+        assert!(
+            Projection::prepare(&plan, &unchanged, &source)
+                .unwrap_err()
+                .to_string()
+                .contains("missing declared source CPU slot")
+        );
+        assert_eq!(unchanged, f.tree);
+    }
+    #[test]
+    fn unbound_removed_source_shape_identity_and_affinity_are_still_atomic_requirements() {
+        for field in ["state", "AAPL,phandle", "cpu-id", "reg", "cpu-impl-reg"] {
+            let mut f = Fixture::new();
+            let value = match field {
+                "state" => b"disabled\0".to_vec(),
+                "AAPL,phandle" => 100u32.to_le_bytes().to_vec(),
+                "cpu-id" => 40u32.to_le_bytes().to_vec(),
+                "reg" => 0u32.to_le_bytes().to_vec(),
+                _ => vec![1; 15],
+            };
+            f.tree.set_property("/cpus/cpu1", field, value).unwrap();
+            let plan = f.plan();
+            let bindings = [f.bindings[0], f.bindings[2]];
+            let mut source = f.source();
+            source.nodes = &bindings;
+            let original = f.tree.clone();
+            assert!(
+                Projection::prepare(&plan, &original, &source).is_err(),
+                "{field}"
+            );
+            assert_eq!(original, f.tree);
+        }
     }
     #[test]
     fn stale_source_and_roster_fail_before_the_atomic_replacement() {

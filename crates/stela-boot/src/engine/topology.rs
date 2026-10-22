@@ -1,0 +1,1032 @@
+//! Runtime assignment, before firmware publication. Metadata is joined to the
+//! actual BSP observation and a retained resource owner; it is never a stock
+//! SKU count or executor/lifecycle authority. Parent owns RAM/device adoption.
+//!
+//! Original J314s source contract: iBoot file3ab04..3ab7c publishes max/E/P;
+//! mac13j XNU VAfffffe000bda7168 enumerates CPU children, not waiting flags;
+//! AppleInterruptControllerV2 file2822dc4/282375c uses #main-cpus. SPTM
+//! VAfffffff0270ca10c requires the three implementation ranges. Exact source
+//! hashes/coordinates remain in the immutable j314s-single-core-topology audit.
+//! No source hash selects production behavior and no capacity is inferred here.
+use alloc::{format, string::String, vec::Vec};
+use stela_loader::apple_device_tree::{
+    DeviceTree,
+    assigned::{Count, CountField, NodeBinding, Projection, Receipt, SourceBindings},
+};
+use stela_runtime::machine::{
+    CpuProfile,
+    soc::assigned::{
+        AssignedCore, Assignment, BspSource, GuestSlotId, Plan, PlanIdentity, RegisterRange,
+        RetainedResources, RetainedRoster, SourceIdentity,
+    },
+};
+
+use crate::native_smp::{firmware::Capture, topology as native};
+
+/// These count consumers are independently source-qualified for the retained
+/// Apple ARM CPU/AIC schema (original J314s audit). They all use the same Plan.
+/// This deliberately adds no cpu-cluster-count or PMGR hardware-cluster rule.
+pub(crate) const COUNT_FIELDS: [CountField<'static>; 4] = [
+    CountField {
+        path: "/cpus",
+        property: "max_cpus",
+        count: Count::Pes,
+    },
+    CountField {
+        path: "/cpus",
+        property: "e-core-count",
+        count: Count::CoreType(b'E'),
+    },
+    CountField {
+        path: "/cpus",
+        property: "p-core-count",
+        count: Count::CoreType(b'P'),
+    },
+    CountField {
+        path: "/arm-io/aic",
+        property: "#main-cpus",
+        count: Count::Pes,
+    },
+];
+
+/// Retains the actual immutable pre-EBS observation. Only the executing BSP is
+/// started by this adapter. Captured AP observations do not imply AP startup.
+pub(crate) struct BspRoster<'a> {
+    capture: &'a Capture,
+    source: native::Processor,
+    cores: [AssignedCore; 1],
+}
+impl<'a> BspRoster<'a> {
+    /// `capture` must be the actual record already accepted by native_smp's
+    /// reservation/source validation. The supplied owner is the installed BSP
+    /// Host, which the caller must retain through subsequent execution. This
+    /// view does not bind a runtime WorkerOwner, loan a frame or authorize RAM.
+    pub(crate) fn new(
+        capture: &'a Capture,
+        _owner: &super::host::HostOwner,
+        worker: usize,
+    ) -> Result<Self, String> {
+        Self::observed(capture, worker, current_apic()?)
+    }
+    fn observed(capture: &'a Capture, worker: usize, current: u32) -> Result<Self, String> {
+        let processors = capture
+            .processors
+            .get(..capture.processor_count as usize)
+            .ok_or("assigned topology has an invalid captured processor count")?;
+        let selected =
+            native::select(processors).map_err(|e| format!("assigned BSP source roster: {e:?}"))?;
+        if selected.len() != capture.core_count as usize
+            || selected
+                .iter()
+                .enumerate()
+                .any(|(slot, &index)| capture.selected[slot] as usize != index)
+        {
+            return Err(
+                "assigned topology differs from the retained physical-core selection".into(),
+            );
+        }
+        let index = *selected
+            .first()
+            .ok_or("assigned topology has no retained BSP")?;
+        let source = processors[index];
+        if source.flags & native::BSP == 0
+            || !source.available()
+            || source.apic_id != u64::from(current)
+            || !capture.snapshots[0].matches(source)
+        {
+            return Err("assigned topology requires the actual executing captured BSP".into());
+        }
+        Ok(Self {
+            capture,
+            source,
+            cores: [AssignedCore {
+                worker,
+                package: source.location.package,
+                core: source.location.core,
+                apic: current,
+                started: true,
+            }],
+        })
+    }
+    pub(crate) fn source(&self) -> native::Processor {
+        self.source
+    }
+}
+impl RetainedRoster for BspRoster<'_> {
+    fn revision(&self) -> u64 {
+        1
+    }
+    fn cores(&self) -> &[AssignedCore] {
+        // Keep the actual source allocation borrowed for the entire Plan.
+        let _ = self.capture;
+        &self.cores
+    }
+}
+
+fn current_apic() -> Result<u32, String> {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+    // CPUID is unprivileged. Reuse the canonical captured APIC decoder; this
+    // observation establishes current identity, not native capability admission.
+    let mut snapshot = native::Snapshot::default();
+    let maximum = __cpuid(0).eax;
+    let extended = __cpuid(0x8000_0000).eax;
+    for (leaf, subleaf) in [
+        (1, 0),
+        (0xb, 0),
+        (0x1f, 0),
+        (0x8000_0001, 0),
+        (0x8000_001e, 0),
+    ] {
+        if (leaf < 0x8000_0000 && leaf > maximum) || (leaf >= 0x8000_0000 && leaf > extended) {
+            continue;
+        }
+        let value = __cpuid_count(leaf, subleaf);
+        snapshot.records[snapshot.count as usize] = native::Cpuid {
+            leaf,
+            subleaf,
+            eax: value.eax,
+            ebx: value.ebx,
+            ecx: value.ecx,
+            edx: value.edx,
+        };
+        snapshot.count += 1;
+    }
+    snapshot
+        .apic_id()
+        .ok_or("assigned BSP has no actual CPUID APIC identity".into())
+}
+
+/// A source protocol reference, never a DeviceID inferred from its payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Function {
+    pub phandle: u32,
+    pub selector: u32,
+    pub argument: u32,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Join {
+    pub plan: PlanIdentity,
+    pub logical: usize,
+    pub worker: usize,
+    pub apic: u32,
+    pub reg: u32,
+    pub cluster: stela_runtime::machine::soc::assigned::ClusterId,
+    pub cache: stela_runtime::machine::soc::assigned::CacheId,
+    pub interrupt: stela_runtime::machine::soc::assigned::InterruptId,
+    /// Original CPU error input, distinct from the PE/IPI routing owner above.
+    pub error_interrupt_parent: u32,
+    pub error_interrupt: u32,
+    pub start: stela_runtime::machine::soc::assigned::StartId,
+    pub enable_core: Function,
+    pub core_power: stela_runtime::machine::soc::assigned::DomainId,
+    pub cluster_power: stela_runtime::machine::soc::assigned::DomainId,
+    pub cpu_impl: RegisterRange,
+    pub acc_impl: RegisterRange,
+    pub cpm_impl: RegisterRange,
+}
+
+/// Actual one-BSP source owner and immutable ADT. Full source power records
+/// remain retained, independently of the one assigned PE and unknown PS state.
+pub(crate) struct Source<'a> {
+    pub resources: BspSource<'a>,
+    tree: DeviceTree,
+}
+impl<'a> Source<'a> {
+    pub(crate) fn t6000(
+        original: &'a [u8],
+        prepared: &[u8],
+        identity: SourceIdentity,
+        boot_reg: u32,
+    ) -> Result<Self, String> {
+        let tree = DeviceTree::parse(prepared).map_err(|e| format!("assigned source ADT: {e}"))?;
+        let resources = BspSource::t6000(original, prepared, identity, boot_reg)?;
+        Ok(Self { resources, tree })
+    }
+    pub(crate) fn prepare<'s>(
+        &'s self,
+        roster: &'s BspRoster<'_>,
+        profile: CpuProfile,
+    ) -> Result<Prepared<'s>, String> {
+        use sha2::{Digest, Sha256};
+        let resources = self.resources.resources();
+        let slot = resources
+            .slots
+            .first()
+            .ok_or("assigned source has no actual BSP resource")?;
+        let kind = resources
+            .kinds
+            .iter()
+            .find(|kind| Some(kind.id) == slot.kind)
+            .ok_or("assigned source BSP kind is unknown")?;
+        let cluster = resources
+            .clusters
+            .iter()
+            .find(|cluster| cluster.id == slot.cluster)
+            .ok_or("assigned source BSP cluster is unknown")?;
+        let nodes = [NodeBinding {
+            slot: slot.id,
+            name: self.resources.name(),
+            midr: kind.midr,
+            cache: cluster
+                .cache
+                .ok_or("assigned source BSP cache is unknown")?,
+            interrupt: slot
+                .interrupt
+                .ok_or("assigned source BSP interrupt owner is unknown")?,
+            start: slot
+                .start
+                .ok_or("assigned source BSP start owner is unknown")?,
+            core_power: slot
+                .power
+                .ok_or("assigned source BSP power identity is unknown")?,
+            cluster_power: cluster
+                .power
+                .ok_or("assigned source BSP complex power identity is unknown")?,
+        }];
+        let source = SourceBindings {
+            source_set_sha256: resources.profile.input_set_sha256,
+            tree_sha256: Sha256::digest(self.tree.serialize()).into(),
+            nodes: &nodes,
+            counts: &COUNT_FIELDS,
+            references: &[],
+        };
+        prepare(
+            roster,
+            &self.resources,
+            slot.id,
+            &self.tree,
+            &source,
+            profile,
+        )
+    }
+}
+
+/// The Plan, projected ADT and runtime profile are one checked publication cut.
+/// Parent must join its exact physical worker, AIC/start/PMGR and canonical-RAM
+/// owners before copying this tree into guest memory or executing firmware.
+pub(crate) struct Prepared<'a> {
+    pub plan: Plan<'a>,
+    pub tree: DeviceTree,
+    pub profile: CpuProfile,
+    pub receipt: Receipt,
+    pub joins: Vec<Join>,
+}
+impl Prepared<'_> {
+    /// Lookup only; original error/start inputs never manufacture an assigned
+    /// PE. The same retained owner revision must still be current at adoption.
+    pub(crate) fn join(&self, reg: u32) -> Result<&Join, String> {
+        self.plan
+            .revalidate()
+            .map_err(|e| format!("assigned route is stale: {e:?}"))?;
+        self.joins
+            .iter()
+            .find(|join| join.reg == reg)
+            .ok_or_else(|| format!("source PE {reg:#x} is outside the actual assigned plan"))
+    }
+}
+fn word(tree: &DeviceTree, path: &str, field: &str) -> Result<u32, String> {
+    tree.property(path, field)
+        .filter(|p| !p.placeholder)
+        .and_then(|p| p.as_u32())
+        .ok_or_else(|| format!("assigned topology requires complete {path}/{field}"))
+}
+fn matching_count(actual: &CountField<'_>, expected: &CountField<'_>) -> bool {
+    actual.path == expected.path
+        && actual.property == expected.property
+        && match (actual.count, expected.count) {
+            (Count::Pes, Count::Pes) | (Count::Clusters, Count::Clusters) => true,
+            (Count::CoreType(a), Count::CoreType(b)) => a == b,
+            _ => false,
+        }
+}
+
+/// Does not invent an inventory from the loader's synthetic Fixture. The
+/// retained owner must supply actual qualified kinds, slots, cache geometry,
+/// interrupt/start/power identities and whole-consumer capacities. Unknown
+/// ownership or initial state is not supplied by this topology operation.
+pub(crate) fn prepare<'a>(
+    roster: &'a BspRoster<'_>,
+    owner: &'a dyn RetainedResources,
+    slot: GuestSlotId,
+    tree: &DeviceTree,
+    source: &SourceBindings<'_>,
+    profile: CpuProfile,
+) -> Result<Prepared<'a>, String> {
+    prepare_assigned(
+        roster,
+        owner,
+        &[Assignment {
+            worker: roster.cores[0].worker,
+            slot,
+            boot: true,
+        }],
+        tree,
+        source,
+        profile,
+    )
+}
+
+/// Additive owner boundary for actual AP executors. A captured snapshot alone
+/// cannot establish started workers: the caller must retain the real admitted
+/// roster/resources and separately join every native publication/Host owner.
+/// BspSource itself remains one-PE only and cannot supply additional resources.
+pub(crate) fn prepare_assigned<'a>(
+    roster: &'a dyn RetainedRoster,
+    owner: &'a dyn RetainedResources,
+    assignments: &[Assignment],
+    tree: &DeviceTree,
+    source: &SourceBindings<'_>,
+    mut profile: CpuProfile,
+) -> Result<Prepared<'a>, String> {
+    for expected in &COUNT_FIELDS {
+        if source
+            .counts
+            .iter()
+            .filter(|field| matching_count(field, expected))
+            .count()
+            != 1
+        {
+            return Err(format!(
+                "assigned topology requires the same-plan {}/{} count rule",
+                expected.path, expected.property
+            ));
+        }
+    }
+    // The original producer's literal3 does not qualify an absent property's
+    // reduced-cluster consumers. Preserve all PMGR hardware descriptors.
+    if source.counts.iter().any(|field| {
+        field.property == "cpu-cluster-count" && tree.property(field.path, field.property).is_none()
+    }) {
+        return Err("assigned topology cannot add an unqualified cpu-cluster-count".into());
+    }
+    let aic_phandle = word(tree, "/arm-io/aic", "AAPL,phandle")?;
+    let pmgr_phandle = word(tree, "/arm-io/pmgr", "AAPL,phandle")?;
+    let plan = Plan::build(roster, owner, assignments)
+        .map_err(|e| format!("assigned topology requires actual retained resources: {e:?}"))?;
+    if profile.chip != plan.chip() {
+        return Err("assigned runtime profile and resource chip differ".into());
+    }
+    let mut joins = Vec::with_capacity(plan.pes().len());
+    for pe in plan.pes() {
+        let binding: &NodeBinding<'_> = source
+            .nodes
+            .iter()
+            .find(|b| b.slot == pe.slot)
+            .ok_or("assigned PE has no actual source CPU binding")?;
+        let path = format!("/cpus/{}", binding.name);
+        let source_index = tree
+            .node("/cpus")
+            .and_then(|cpus| {
+                cpus.children
+                    .iter()
+                    .position(|node| node.name() == Some(binding.name))
+            })
+            .ok_or("assigned PE has no unique original CPU index")?;
+        if profile.processors.get(source_index) != Some(&pe.identity) {
+            return Err("assigned PE identity differs from the actual source board profile".into());
+        }
+        let parent = word(tree, &path, "interrupt-parent")?;
+        if parent == 0 || parent != aic_phandle {
+            return Err(
+                "assigned CPU error input has a different actual interrupt provider".into(),
+            );
+        }
+        let raw = tree
+            .property(&path, "function-enable_core")
+            .filter(|p| !p.placeholder && p.value.len() == 12)
+            .ok_or("assigned CPU has no complete original enable_core function")?;
+        let cells = raw.value.as_chunks::<4>().0;
+        let function = Function {
+            phandle: u32::from_le_bytes(cells[0]),
+            selector: u32::from_le_bytes(cells[1]),
+            argument: u32::from_le_bytes(cells[2]),
+        };
+        if function.phandle == 0
+            || function.phandle != pmgr_phandle
+            || function.selector != 0x436f7265
+            || !function.argument.is_power_of_two()
+        {
+            return Err("assigned CPU has an empty source start protocol".into());
+        }
+        joins.push(Join {
+            plan: plan.identity(),
+            logical: pe.logical,
+            worker: pe.host.worker,
+            apic: pe.host.apic,
+            reg: pe.reg,
+            cluster: pe.cluster,
+            cache: pe.cache,
+            interrupt: pe.interrupt,
+            error_interrupt_parent: parent,
+            error_interrupt: word(tree, &path, "interrupts")?,
+            start: pe.start,
+            enable_core: function,
+            core_power: pe.core_power,
+            cluster_power: pe.cluster_power,
+            cpu_impl: pe.cpu_impl,
+            acc_impl: pe.acc_impl,
+            cpm_impl: pe.cpm_impl,
+        });
+    }
+    let mut projected = tree.clone();
+    let receipt = Projection::prepare(&plan, &projected, source)
+        .and_then(|projection| projection.apply(&mut projected))
+        .map_err(|e| format!("assigned firmware topology: {e}"))?;
+    profile.processors = plan.pes().iter().map(|pe| pe.identity).collect();
+    plan.revalidate()
+        .map_err(|e| format!("assigned topology became stale: {e:?}"))?;
+    Ok(Prepared {
+        plan,
+        tree: projected,
+        profile,
+        receipt,
+        joins,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use core::cell::Cell;
+    use sha2::{Digest, Sha256};
+    use stela_loader::apple_device_tree::Node;
+    use stela_runtime::machine::{
+        Chip,
+        caches::{Cache, Caches},
+        registers::Identity,
+        soc::assigned::{
+            CacheId, Capacity, CapacityKind, ClusterId, ClusterSlot, CoreKind, DomainId,
+            InterruptId, InterruptTarget, KindId, PeSlot, PowerResource, ResourceProfile,
+            Resources, SharedCache, StartId, StartResource,
+        },
+    };
+    struct Inventory {
+        revision: Cell<u64>,
+        capacities: Vec<Capacity>,
+        kinds: Vec<CoreKind>,
+        slots: Vec<PeSlot>,
+        clusters: Vec<ClusterSlot>,
+        caches: Vec<SharedCache>,
+        interrupts: Vec<InterruptTarget>,
+        starts: Vec<StartResource>,
+        powers: Vec<PowerResource>,
+    }
+    impl RetainedResources for Inventory {
+        fn revision(&self) -> u64 {
+            self.revision.get()
+        }
+        fn resources(&self) -> Resources<'_> {
+            Resources {
+                profile: ResourceProfile {
+                    chip: Chip::AppleM1,
+                    soc: 0x6000,
+                    board: 8,
+                    input_set_sha256: [2; 32],
+                    adapted_set_sha256: None,
+                },
+                register_granule: 0x4000,
+                provenance: "synthetic owner; no Apple hardware authority",
+                capacities: &self.capacities,
+                kinds: &self.kinds,
+                slots: &self.slots,
+                clusters: &self.clusters,
+                caches: &self.caches,
+                interrupts: &self.interrupts,
+                starts: &self.starts,
+                powers: &self.powers,
+            }
+        }
+    }
+    fn domain(device: u16) -> DomainId {
+        DomainId { die: 0, device }
+    }
+    fn range(base: u64) -> RegisterRange {
+        RegisterRange {
+            base,
+            bytes: 0x9008,
+        }
+    }
+    fn capture() -> Capture {
+        let mut capture = Capture {
+            magic: 0,
+            version: 0,
+            processor_count: 0,
+            core_count: 0,
+            enabled_count: 0,
+            processors: [native::Processor::default(); native::MAX_PROCESSORS],
+            selected: [0; native::MAX_CORES],
+            snapshots: [native::Snapshot::default(); native::MAX_CORES],
+        };
+        capture.processor_count = 2;
+        capture.core_count = 2;
+        capture.enabled_count = 2;
+        for index in 0..2 {
+            capture.processors[index] = native::Processor {
+                processor_number: index as u32 + 7,
+                apic_id: 42 + index as u64 * 2,
+                flags: native::ENABLED | native::HEALTHY | if index == 0 { native::BSP } else { 0 },
+                topology_version: 1,
+                location: native::Location {
+                    package: 3,
+                    core: index as u32 + 8,
+                    ..Default::default()
+                },
+                thread: 0,
+            };
+            capture.selected[index] = index as u32;
+            capture.snapshots[index] = native::Snapshot::default();
+            capture.snapshots[index].count = 1;
+            capture.snapshots[index].records[0] = native::Cpuid {
+                leaf: 1,
+                ebx: (42 + index as u32 * 2) << 24,
+                ..Default::default()
+            };
+        }
+        capture
+    }
+    fn fixture() -> (DeviceTree, Inventory, Vec<NodeBinding<'static>>, CpuProfile) {
+        let cache = Cache {
+            bytes: 4 << 20,
+            ways: 16,
+            line: 128,
+        };
+        let capacities = [
+            CapacityKind::KernelCpus,
+            CapacityKind::KernelClusters,
+            CapacityKind::KernelAffinitySpan,
+            CapacityKind::KernelPhysicalCluster,
+            CapacityKind::KernelCpuMask,
+            CapacityKind::MonitorCpus,
+            CapacityKind::PlatformCpus,
+            CapacityKind::PlatformClusters,
+        ]
+        .into_iter()
+        .map(|kind| Capacity {
+            kind,
+            maximum: Some(2),
+            provenance: "explicit synthetic capacity",
+        })
+        .collect();
+        let mut inventory = Inventory {
+            revision: Cell::new(1),
+            capacities,
+            kinds: vec![CoreKind {
+                id: KindId(8),
+                cluster_type: b'E',
+                midr: 0x611f0220,
+                aff2: 0,
+                clock: None,
+                instruction: cache,
+                data: cache,
+            }],
+            slots: vec![],
+            clusters: vec![ClusterSlot {
+                id: ClusterId(3),
+                aff1: 0,
+                firmware_id: 0,
+                die: 0,
+                die_cluster: 0,
+                cache: Some(CacheId(9)),
+                power: Some(domain(100)),
+                acc_impl: Some(range(0x210000000)),
+                cpm_impl: Some(range(0x210010000)),
+            }],
+            caches: vec![SharedCache {
+                id: CacheId(9),
+                cluster: ClusterId(3),
+                geometry: cache,
+            }],
+            interrupts: vec![],
+            starts: vec![],
+            powers: vec![PowerResource {
+                id: domain(100),
+                cores: vec![],
+                clusters: vec![ClusterId(3)],
+            }],
+        };
+        let mut root = Node::named("device-tree").unwrap();
+        let mut cpus = Node::named("cpus").unwrap();
+        cpus.set_property("#address-cells", 1u32.to_le_bytes().to_vec())
+            .unwrap();
+        cpus.set_property("#size-cells", 0u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut bindings = vec![];
+        let mut identities = vec![];
+        for (index, name) in ["cpu-first", "cpu-second"].into_iter().enumerate() {
+            let reg = index as u32;
+            let slot = GuestSlotId(90 + index as u32 * 17);
+            let id = domain(index as u16 + 200);
+            let irq = InterruptId(index as u32 + 600);
+            let start = StartId(index as u32 + 700);
+            let implementation = range(0x210020000 + index as u64 * 0x10000);
+            inventory.slots.push(PeSlot {
+                id: slot,
+                reg,
+                kind: Some(KindId(8)),
+                cluster: ClusterId(3),
+                cluster_core: reg,
+                interrupt: Some(irq),
+                start: Some(start),
+                power: Some(id),
+                cpu_impl: Some(implementation),
+            });
+            inventory.interrupts.push(InterruptTarget { id: irq, reg });
+            inventory.starts.push(StartResource { id: start, reg });
+            inventory.powers.push(PowerResource {
+                id,
+                cores: vec![slot],
+                clusters: vec![],
+            });
+            let mut node = Node::named(name).unwrap();
+            for (key, value) in [
+                ("reg", reg),
+                ("cpu-id", reg + 30),
+                ("AAPL,phandle", reg + 50),
+                ("cluster-id", 0),
+                ("die-id", 0),
+                ("die-cluster-id", 0),
+                ("cluster-core-id", reg),
+                ("l2-cache-size", cache.bytes),
+                ("interrupt-parent", 0x99),
+                ("interrupts", reg + 110),
+            ] {
+                node.set_property(key, value.to_le_bytes().to_vec())
+                    .unwrap();
+            }
+            for (key, value) in [
+                ("state", &b"waiting\0"[..]),
+                ("device_type", &b"cpu\0"[..]),
+                ("compatible", &b"synthetic-cpu\0"[..]),
+                ("cluster-type", &b"E\0"[..]),
+            ] {
+                node.set_property(key, value.to_vec()).unwrap();
+            }
+            for (name, range) in [
+                ("cpu-impl-reg", implementation),
+                ("acc-impl-reg", inventory.clusters[0].acc_impl.unwrap()),
+                ("cpm-impl-reg", inventory.clusters[0].cpm_impl.unwrap()),
+            ] {
+                node.set_property(
+                    name,
+                    [range.base, range.bytes]
+                        .into_iter()
+                        .flat_map(u64::to_le_bytes)
+                        .collect(),
+                )
+                .unwrap();
+            }
+            node.set_property(
+                "function-enable_core",
+                [0x88u32, 0x436f7265, 1 << index]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect(),
+            )
+            .unwrap();
+            cpus.children.push(node);
+            bindings.push(NodeBinding {
+                slot,
+                name,
+                midr: 0x611f0220,
+                cache: CacheId(9),
+                interrupt: irq,
+                start,
+                core_power: id,
+                cluster_power: domain(100),
+            });
+            identities.push(Identity {
+                midr: 0x611f0220,
+                mpidr: 0x80000000 | u64::from(reg),
+                clock: None,
+                caches: Some(Caches::split_unified(cache, cache, cache).unwrap()),
+            });
+        }
+        let mut io = Node::named("arm-io").unwrap();
+        let mut aic = Node::named("aic").unwrap();
+        aic.set_property("#main-cpus", 2u32.to_le_bytes().to_vec())
+            .unwrap();
+        aic.set_property("AAPL,phandle", 0x99u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut pmgr = Node::named("pmgr").unwrap();
+        pmgr.set_property("AAPL,phandle", 0x88u32.to_le_bytes().to_vec())
+            .unwrap();
+        pmgr.set_property(
+            "clusters",
+            [2u32, 4, 4]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect(),
+        )
+        .unwrap();
+        io.children.extend([aic, pmgr]);
+        root.children.extend([cpus, io]);
+        (
+            DeviceTree { root },
+            inventory,
+            bindings,
+            CpuProfile {
+                name: "synthetic source",
+                chip: Chip::AppleM1,
+                counter_frequency: 24000000,
+                fixed: vec![],
+                processors: identities,
+            },
+        )
+    }
+    fn source<'a>(tree: &DeviceTree, nodes: &'a [NodeBinding<'a>]) -> SourceBindings<'a> {
+        SourceBindings {
+            source_set_sha256: [2; 32],
+            tree_sha256: Sha256::digest(tree.serialize()).into(),
+            nodes,
+            counts: &COUNT_FIELDS,
+            references: &[],
+        }
+    }
+    #[test]
+    #[ignore = "requires retained original26A434J314s and prepared bundle DT"]
+    fn original_mode1_factory_projects_actual_live_tree_without_public_pmgr_admission() {
+        use stela_runtime::machine::{adt, soc};
+        let original = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_DT").unwrap()).unwrap();
+        let raw = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_PREPARED_DT").unwrap()).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&original)),
+            "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&raw)),
+            "9acc3e66694a2821356388ee32132064f56aef06c93bcff3d1070721b1111780"
+        );
+        let identity = SourceIdentity {
+            original_tree_sha256: Sha256::digest(&original).into(),
+            profile: soc::assigned::ResourceProfile {
+                chip: Chip::AppleM1,
+                soc: 0x6000,
+                board: 8,
+                input_set_sha256: [3; 32],
+                adapted_set_sha256: None,
+            },
+        };
+        // Stand in only for unrelated live runtime patch bytes. Projection
+        // happens after those patches and binds THIS tree, not the template.
+        let mut live = DeviceTree::parse(&raw).unwrap();
+        live.set_property("/chosen", "random-seed", vec![0x31; 64])
+            .unwrap();
+        let live_bytes = live.serialize();
+        let source = Source::t6000(&original, &live_bytes, identity, 0).unwrap();
+        let pmgr = source.tree.node("/arm-io/pmgr").unwrap().clone();
+        assert!(pmgr.property("compatible").is_none());
+        let cpus = source
+            .tree
+            .node("/cpus")
+            .unwrap()
+            .children
+            .iter()
+            .map(|cpu| soc::Processor {
+                reg: cpu.property("reg").unwrap().as_u32().unwrap(),
+                cluster_type: cpu.property("cluster-type").unwrap().value[0],
+                l2_bytes: cpu.property("l2-cache-size").unwrap().as_u32(),
+            })
+            .collect::<Vec<_>>();
+        let soc_name = &source
+            .tree
+            .property("/product", "product-soc-name")
+            .unwrap()
+            .value;
+        let soc_name = core::str::from_utf8(soc_name)
+            .unwrap()
+            .trim_end_matches('\0');
+        let actual = soc::cpus(0x6000, soc_name, &cpus).unwrap();
+        let profile = CpuProfile {
+            name: "source topology regression",
+            chip: actual.chip,
+            processors: actual.processors,
+            counter_frequency: 24_000_000,
+            fixed: vec![],
+        };
+        let capture = capture();
+        let roster = BspRoster::observed(&capture, 37, 42).unwrap();
+        let prepared = source.prepare(&roster, profile).unwrap();
+        assert_eq!(prepared.plan.pes().len(), 1);
+        assert_eq!(prepared.profile.processors.len(), 1);
+        assert_eq!(prepared.tree.node("/cpus").unwrap().children.len(), 1);
+        assert_eq!(prepared.tree.node("/arm-io/pmgr"), Some(&pmgr));
+        assert_eq!(
+            prepared.tree.property("/chosen", "random-seed"),
+            live.property("/chosen", "random-seed")
+        );
+        for field in &COUNT_FIELDS {
+            assert_eq!(
+                word(&prepared.tree, field.path, field.property),
+                Ok(if field.property == "p-core-count" {
+                    0
+                } else {
+                    1
+                })
+            );
+        }
+        assert_eq!(word(&prepared.tree, "/cpus/cpu0", "AAPL,phandle"), Ok(26));
+        let join = prepared.join(0).unwrap();
+        assert_eq!(
+            (join.worker, join.apic, join.error_interrupt),
+            (37, 42, 110)
+        );
+        assert_eq!(
+            (join.enable_core.phandle, join.enable_core.argument),
+            (0x99, 1)
+        );
+        assert_eq!((join.core_power.device, join.cluster_power.device), (1, 11));
+        assert!(prepared.join(1).is_err());
+        assert!(
+            prepared
+                .tree
+                .property("/cpus", "cpu-cluster-count")
+                .is_none()
+        );
+        assert_eq!(source.resources.graph().domains.len(), 355);
+        assert_eq!(source.resources.graph().registers.len(), 196);
+        let original_root = adt::Node::root(&original).unwrap();
+        assert_eq!(
+            original_root.child("chosen").unwrap().property("chip-id"),
+            Some(&[0; 4][..])
+        );
+        let mut changed = live.clone();
+        changed
+            .set_property("/cpus/cpu0", "interrupts", 111u32.to_le_bytes().to_vec())
+            .unwrap();
+        assert!(Source::t6000(&original, &changed.serialize(), identity, 0).is_err());
+        changed = live.clone();
+        changed
+            .set_property(
+                "/arm-io/pmgr",
+                "acc-harvesting",
+                2u32.to_le_bytes().to_vec(),
+            )
+            .unwrap();
+        assert!(Source::t6000(&original, &changed.serialize(), identity, 0).is_err());
+        changed = live.clone();
+        changed
+            .set_property("/arm-io/pmgr", "power-gates", 197u32.to_le_bytes().to_vec())
+            .unwrap();
+        assert!(Source::t6000(&original, &changed.serialize(), identity, 0).is_err());
+        changed = live.clone();
+        changed
+            .set_property("/cpus/cpu1", "AAPL,phandle", 26u32.to_le_bytes().to_vec())
+            .unwrap();
+        assert!(Source::t6000(&original, &changed.serialize(), identity, 0).is_err());
+    }
+    #[test]
+    fn actual_selected_bsp_only_does_not_start_captured_aps() {
+        let capture = capture();
+        let roster = BspRoster::observed(&capture, 37, 42).unwrap();
+        assert_eq!(roster.cores().len(), 1);
+        assert_eq!(roster.source().processor_number, 7);
+        assert_eq!(
+            roster.cores()[0],
+            AssignedCore {
+                worker: 37,
+                package: 3,
+                core: 8,
+                apic: 42,
+                started: true
+            }
+        );
+        assert!(BspRoster::observed(&capture, 37, 44).is_err());
+        let mut altered = self::capture();
+        altered.selected[0] = 1;
+        assert!(BspRoster::observed(&altered, 37, 42).is_err());
+    }
+    #[test]
+    fn one_plan_projects_the_source_slot_profile_counts_and_exact_owner_joins() {
+        let capture = capture();
+        let roster = BspRoster::observed(&capture, 37, 42).unwrap();
+        let (tree, owner, nodes, profile) = fixture();
+        let original = tree.clone();
+        let selected = nodes[1].slot;
+        let prepared = prepare(
+            &roster,
+            &owner,
+            selected,
+            &tree,
+            &source(&tree, &nodes),
+            profile.clone(),
+        )
+        .unwrap();
+        assert_eq!(tree, original);
+        assert_eq!(prepared.plan.pes().len(), 1);
+        assert_eq!(prepared.profile.processors, [profile.processors[1]]);
+        assert_eq!(prepared.receipt.plan, prepared.plan.identity());
+        assert_eq!(prepared.tree.node("/cpus").unwrap().children.len(), 1);
+        assert!(prepared.tree.node("/cpus/cpu-first").is_none());
+        assert_eq!(word(&prepared.tree, "/cpus/cpu-second", "cpu-id"), Ok(31));
+        for field in &COUNT_FIELDS {
+            assert_eq!(
+                word(&prepared.tree, field.path, field.property),
+                Ok(if field.property == "p-core-count" {
+                    0
+                } else {
+                    1
+                })
+            );
+        }
+        assert_eq!(
+            prepared.tree.property("/arm-io/pmgr", "clusters"),
+            tree.property("/arm-io/pmgr", "clusters")
+        );
+        assert!(
+            prepared
+                .tree
+                .property("/cpus", "cpu-cluster-count")
+                .is_none()
+        );
+        assert!(prepared.join(0).is_err());
+        let join = prepared.join(1).unwrap();
+        assert_eq!(join.plan, prepared.plan.identity());
+        assert_eq!(join.reg, 1);
+        assert_eq!(
+            (join.worker, join.apic, join.error_interrupt),
+            (37, 42, 111)
+        );
+        assert_eq!(
+            (join.start, join.enable_core.argument, join.core_power),
+            (StartId(701), 2, domain(201))
+        );
+        assert_ne!(join.enable_core.argument, u32::from(join.core_power.device));
+        assert_eq!(join.cpu_impl, owner.slots[1].cpu_impl.unwrap());
+        owner.revision.set(2);
+        assert!(prepared.plan.revalidate().is_err());
+        assert!(prepared.join(1).is_err());
+    }
+    #[test]
+    fn missing_owner_capacity_source_counts_or_profile_refuse_before_publication() {
+        let capture = capture();
+        let roster = BspRoster::observed(&capture, 37, 42).unwrap();
+        let (tree, mut owner, nodes, profile) = fixture();
+        let original = tree.clone();
+        owner.capacities[0].maximum = None;
+        assert!(
+            prepare(
+                &roster,
+                &owner,
+                nodes[0].slot,
+                &tree,
+                &source(&tree, &nodes),
+                profile.clone()
+            )
+            .err()
+            .unwrap()
+            .contains("MissingCapacity")
+        );
+        owner.capacities[0].maximum = Some(2);
+        owner.starts.clear();
+        assert!(
+            prepare(
+                &roster,
+                &owner,
+                nodes[0].slot,
+                &tree,
+                &source(&tree, &nodes),
+                profile.clone()
+            )
+            .is_err()
+        );
+        assert_eq!(tree, original);
+        let (tree, owner, nodes, mut profile) = fixture();
+        profile.processors[0].midr ^= 1;
+        assert!(
+            prepare(
+                &roster,
+                &owner,
+                nodes[0].slot,
+                &tree,
+                &source(&tree, &nodes),
+                profile
+            )
+            .err()
+            .unwrap()
+            .contains("source board profile")
+        );
+        let (tree, owner, nodes, profile) = fixture();
+        let mut s = source(&tree, &nodes);
+        s.counts = &COUNT_FIELDS[..3];
+        assert!(
+            prepare(&roster, &owner, nodes[0].slot, &tree, &s, profile.clone())
+                .err()
+                .unwrap()
+                .contains("#main-cpus")
+        );
+        let mut counts = COUNT_FIELDS.to_vec();
+        counts.push(CountField {
+            path: "/cpus",
+            property: "cpu-cluster-count",
+            count: Count::Clusters,
+        });
+        s.counts = &counts;
+        assert!(
+            prepare(&roster, &owner, nodes[0].slot, &tree, &s, profile)
+                .err()
+                .unwrap()
+                .contains("cannot add")
+        );
+    }
+}

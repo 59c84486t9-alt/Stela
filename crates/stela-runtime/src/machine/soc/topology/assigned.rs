@@ -2,6 +2,9 @@
 //! never native execution, CPU-start, PMGR-settlement or backing authority.
 //! Root owners must separately admit the same plan against actual executors and
 //! devices. No source addresses, chip counts or limits are inferred here.
+mod source;
+pub use source::{BspSource, SourceIdentity};
+
 use crate::machine::{
     Chip,
     caches::{Cache, Caches},
