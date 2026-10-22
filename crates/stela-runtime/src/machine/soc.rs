@@ -1925,10 +1925,16 @@ pub struct SpmiController {
 /// `interrupt` is the AP GPIO pin of a target's own GPIO-parented
 /// `interrupts`; an HPM has none of its own and shares its `iicProvider` bus
 /// manager's line, which the dies' open-drain interrupt outputs drive.
-/// `firmware` is the `usbc-fw-personality` of an HPM's image. J473AP names it
-/// only on the flash-updated die (hpm0, `usbc-flash-update`); Stela
-/// provisions every die on one manager with that image, so hpm1 shares it.
-/// `port` is an HPM's connector `port-number`.
+/// `firmware` is the `usbc-fw-personality` of an HPM's image. A DT names it
+/// only on dies the restore updater flashes (`usbc-flash-update`), and the
+/// images name the dies they serve by `rid`: J456AP's hpm0 runs
+/// `HPM,30` (configuration board string "J456P01", rids 0 and 1) and hpm2
+/// `HPM,30-P23` (rids 2 and 3); J180dAP pairs P01, P23, P45 and P67 the
+/// same way. On every registry board an unnamed die has the
+/// `transports-supported` of the named die with the greatest lower `rid` on
+/// its bus manager, and runs that die's image: J473AP's hpm1 runs hpm0's,
+/// and J474sAP's rids 1 to 3 all run rid 0's. `port` is an HPM's connector
+/// `port-number`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct I2cAddress {
     pub address: u8,
@@ -2027,8 +2033,8 @@ fn typec_devices(
                     .filter(|&i| u16::try_from(i).is_ok())
                     .ok_or("I2C interrupt is absent or too large")?;
                 let mut targets = Vec::new();
-                // Each target's phandle and, for an HPM, its provider.
-                let mut links: Vec<(Option<u32>, Option<u32>)> = Vec::new();
+                // Each target's phandle and, for an HPM, its provider and rid.
+                let mut links: Vec<(Option<u32>, Option<u32>, Option<u32>)> = Vec::new();
                 let mut bad = None;
                 let mut first = true;
                 node.visit(&mut |target| {
@@ -2080,12 +2086,16 @@ fn typec_devices(
                         Some(address)
                             if !targets.iter().any(|t: &I2cAddress| t.address == address) =>
                         {
-                            links.push((
-                                target.first_u32("AAPL,phandle"),
+                            let hpm = |name| {
                                 target
                                     .compatible(HPM)
-                                    .then(|| target.first_u32("iicProvider"))
-                                    .flatten(),
+                                    .then(|| target.first_u32(name))
+                                    .flatten()
+                            };
+                            links.push((
+                                target.first_u32("AAPL,phandle"),
+                                hpm("iicProvider"),
+                                hpm("rid"),
                             ));
                             targets.push(I2cAddress {
                                 address,
@@ -2109,27 +2119,31 @@ fn typec_devices(
                 if let Some(error) = bad {
                     return Err(error.into());
                 }
+                // The images the dies name themselves, before partners share.
+                let named: Vec<Option<String>> =
+                    targets.iter().map(|t| t.firmware.clone()).collect();
                 for index in 0..targets.len() {
                     if targets[index].compatible != HPM {
                         continue;
                     }
                     let provider = links[index]
                         .1
-                        .and_then(|p| links.iter().position(|&(phandle, _)| phandle == Some(p)))
+                        .and_then(|p| links.iter().position(|&(phandle, ..)| phandle == Some(p)))
                         .filter(|&p| targets[p].compatible == HPM_MANAGER)
                         .ok_or("HPM has no visible usbc,manager iicProvider")?;
                     if targets[index].interrupt.is_some() || targets[index].port.is_none() {
                         return Err("HPM lacks a port number or names its own interrupt".into());
                     }
                     targets[index].interrupt = targets[provider].interrupt;
-                    let mut images = (0..targets.len())
-                        .filter(|&t| links[t].1 == links[index].1)
-                        .filter_map(|t| targets[t].firmware.clone());
-                    let image = images.next();
-                    if images.any(|other| Some(other) != image) {
-                        return Err("HPMs on one bus manager name different firmware".into());
+                    if named[index].is_some() {
+                        continue;
                     }
-                    targets[index].firmware = image;
+                    let rid = links[index].2.ok_or("HPM has no rid")?;
+                    targets[index].firmware = (0..targets.len())
+                        .filter(|&t| links[t].1 == links[index].1 && named[t].is_some())
+                        .filter_map(|t| Some((links[t].2.filter(|&owner| owner < rid)?, t)))
+                        .max()
+                        .and_then(|(_, t)| named[t].clone());
                 }
                 i2cs.push(I2cController {
                     device: Device {
@@ -7620,14 +7634,15 @@ mod tests {
         use crate::machine::adt::encode;
         let c = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let r = |v: &[u64]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
-        let hpm = |name: &[u8], address: u32, personality: Option<&[u8]>| {
+        let hpm = |name: &[u8], address: u32, rid: u32, personality: Option<&[u8]>| {
             let mut properties = vec![("name", name), ("compatible", b"usbc,cd3217\0".as_slice())];
             let address = c(&[address]);
-            let (provider, port) = (c(&[0x9b]), c(&[1]));
+            let (provider, port, rid) = (c(&[0x9b]), c(&[1]), c(&[rid]));
             properties.extend([
                 ("hpm-iic-addr", address.as_slice()),
                 ("iicProvider", provider.as_slice()),
                 ("port-number", port.as_slice()),
+                ("rid", rid.as_slice()),
             ]);
             properties.extend(personality.map(|p| ("usbc-fw-personality", p)));
             encode(&properties, &[])
@@ -7642,8 +7657,10 @@ mod tests {
                 ("interrupts", &c(&[8, 1])),
             ],
             &[
-                hpm(b"hpm0\0", 0x38, Some(b"HPM,47\0")),
-                hpm(b"hpm1\0", 0x3f, None),
+                hpm(b"hpm0\0", 0x38, 0, Some(b"HPM,47\0")),
+                hpm(b"hpm1\0", 0x3f, 1, None),
+                hpm(b"hpm3\0", 0x3c, 3, None),
+                hpm(b"hpm2\0", 0x3b, 2, Some(b"HPM,47-P23\0")),
             ],
         );
         let gpio = GpioBank {
@@ -7737,13 +7754,13 @@ mod tests {
         let (buses, phys) = place(&io, 0x63, Some(&gpio)).unwrap();
         assert_eq!(buses[0].device.physical, 0x235010000);
         assert_eq!(buses[0].device.irq, 761);
-        // Both dies share the manager's GPIO line and the flash-updated
-        // die's firmware.
-        let hpm = |address, port| I2cAddress {
+        // Every die shares the manager's GPIO line; a die that names no
+        // image runs the one of the flash-updated die below it in rid order.
+        let hpm = |address, port, image: &str| I2cAddress {
             address,
             compatible: HPM.into(),
             interrupt: Some(8),
-            firmware: Some("HPM,47".into()),
+            firmware: Some(image.into()),
             port,
         };
         assert_eq!(
@@ -7756,11 +7773,13 @@ mod tests {
                     firmware: None,
                     port: None,
                 },
-                hpm(0x38, Some(1)),
-                hpm(0x3f, Some(1)),
+                hpm(0x38, Some(1), "HPM,47"),
+                hpm(0x3f, Some(1), "HPM,47"),
+                hpm(0x3c, Some(1), "HPM,47-P23"),
+                hpm(0x3b, Some(1), "HPM,47-P23"),
             ]
         );
-        // A board with these buses carries the one image both dies run.
+        // A board with these buses carries each image its dies run, once.
         let mut with_buses = board(&tree(
             0x8112,
             "Apple M2",
@@ -7769,7 +7788,10 @@ mod tests {
         .unwrap();
         assert!(with_buses.firmware_files().is_empty());
         with_buses.i2cs = buses.clone();
-        assert_eq!(with_buses.firmware_files(), ["USB-C_HPM,47.bin"]);
+        assert_eq!(
+            with_buses.firmware_files(),
+            ["USB-C_HPM,47.bin", "USB-C_HPM,47-P23.bin"]
+        );
         // The manager's line must be a visible AP GPIO pin.
         assert!(place(&io, 0x63, None).is_err());
         assert_eq!(phys[0].usb2, (0x382a90000, 0x4000));
