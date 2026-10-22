@@ -259,48 +259,67 @@ impl Bus {
         device: Box<dyn MmioDevice>,
         bindings: &[(u64, u64, u64)],
     ) -> Result<DeviceId, MapError> {
-        if bindings.is_empty() {
+        self.install_many([device], [bindings]).map(|[id]| id)
+    }
+    /// Publish a complete set of distinct MMIO owners atomically. A failed
+    /// later model/range cannot leave an earlier member installed. This joins
+    /// physical ownership only; it supplies no device state or readiness.
+    pub fn install_many<const N: usize>(
+        &mut self,
+        devices: [Box<dyn MmioDevice>; N],
+        bindings: [&[(u64, u64, u64)]; N],
+    ) -> Result<[DeviceId; N], MapError> {
+        if N == 0 {
             return Err(MapError::Empty);
         }
-        let id = DeviceId(self.devices.len());
+        self.devices
+            .len()
+            .checked_add(N)
+            .ok_or(MapError::Overflow)?;
+        let ids = core::array::from_fn(|index| DeviceId(self.devices.len() + index));
         let mut proposed = Vec::new();
-        proposed
-            .try_reserve_exact(bindings.len())
-            .map_err(|_| MapError::Allocation)?;
-        for &(start, len, device_offset) in bindings {
-            if len == 0 {
+        for (&id, bindings) in ids.iter().zip(bindings) {
+            if bindings.is_empty() {
                 return Err(MapError::Empty);
             }
-            let end = start.checked_add(len).ok_or(MapError::Overflow)?;
-            device_offset.checked_add(len).ok_or(MapError::Overflow)?;
-            let overlaps = |region: &Region| region.start < end && start < region.end;
-            if let Some(region) = self.regions.iter().find(|region| overlaps(region)) {
-                return Err(MapError::Overlap {
-                    existing: region.device,
+            proposed
+                .try_reserve_exact(bindings.len())
+                .map_err(|_| MapError::Allocation)?;
+            for &(start, len, device_offset) in bindings {
+                if len == 0 {
+                    return Err(MapError::Empty);
+                }
+                let end = start.checked_add(len).ok_or(MapError::Overflow)?;
+                device_offset.checked_add(len).ok_or(MapError::Overflow)?;
+                let overlaps = |region: &Region| region.start < end && start < region.end;
+                if let Some(region) = self.regions.iter().find(|region| overlaps(region)) {
+                    return Err(MapError::Overlap {
+                        existing: region.device,
+                    });
+                }
+                if proposed.iter().any(overlaps) {
+                    return Err(MapError::ProposedOverlap);
+                }
+                proposed.push(Region {
+                    start,
+                    end,
+                    device: id,
+                    device_offset,
                 });
             }
-            if proposed.iter().any(overlaps) {
-                return Err(MapError::ProposedOverlap);
-            }
-            proposed.push(Region {
-                start,
-                end,
-                device: id,
-                device_offset,
-            });
         }
         // Both allocations precede publication. Capacity changes on failure do
         // not add observable routes or a device with partially mapped state.
         self.devices
-            .try_reserve(1)
+            .try_reserve(N)
             .map_err(|_| MapError::Allocation)?;
         self.regions
             .try_reserve(proposed.len())
             .map_err(|_| MapError::Allocation)?;
-        self.devices.push(device);
+        self.devices.extend(devices);
         self.regions.extend(proposed);
         self.regions.sort_unstable_by_key(|region| region.start);
-        Ok(id)
+        Ok(ids)
     }
     /// Maps guest PAs `[start, start + len)` to device offsets
     /// `[device_offset, device_offset + len)`.
@@ -569,6 +588,69 @@ mod tests {
             .unwrap();
         assert_eq!(bus.route(0x3004, Width::Word), Ok((added, 12)));
         assert_eq!(bus.route(0x1000, Width::Word), Ok((added, 0)));
+    }
+
+    #[test]
+    fn a_later_owner_failure_leaves_the_whole_installation_unpublished() {
+        let mut bus = Bus::new();
+        let original = bus
+            .install(Box::new(Scratch([7; 16])), &[(0x2000, 16, 0)])
+            .unwrap();
+        for second in [
+            vec![(0x2008, 8, 0)],
+            vec![(0x1004, 8, 0)],
+            vec![(0x3000, 0, 0)],
+            vec![(u64::MAX - 3, 8, 0)],
+            vec![(0x3000, 8, u64::MAX - 3)],
+            vec![],
+        ] {
+            let result = bus.install_many(
+                [Box::new(Scratch([1; 16])), Box::new(Scratch([2; 16]))],
+                [&[(0x1000, 8, 0)], &second],
+            );
+            assert!(result.is_err());
+            assert_eq!(bus.devices.len(), 1);
+            assert_eq!(bus.regions.len(), 1);
+            assert!(bus.route(0x1000, Width::Word).is_err());
+            assert!(bus.route(0x3000, Width::Word).is_err());
+            assert_eq!(bus.route(0x2000, Width::Word), Ok((original, 0)));
+            assert_eq!(bus.device::<Scratch>(original).unwrap().0, [7; 16]);
+        }
+        assert_eq!(bus.install_many::<0>([], []), Err(MapError::Empty));
+        assert!(
+            bus.install_many(
+                [Box::new(Scratch([1; 16])), Box::new(Scratch([2; 16]))],
+                [&[], &[(0x3000, 8, 0)]],
+            )
+            .is_err()
+        );
+        assert_eq!(bus.devices.len(), 1);
+        assert_eq!(bus.regions.len(), 1);
+    }
+
+    #[test]
+    fn one_batch_publishes_distinct_owners_and_their_aliases_with_exact_offsets() {
+        let mut bus = Bus::new();
+        let [first, second] = bus
+            .install_many(
+                [Box::new(Scratch([1; 16])), Box::new(Scratch([2; 16]))],
+                [
+                    &[(0x3000, 8, 8), (0x1000, 8, 0)],
+                    &[(0x2000, 8, 0), (0x4000, 8, 0)],
+                ],
+            )
+            .unwrap();
+        assert_ne!(first, second);
+        assert_eq!(bus.route(0x3004, Width::Word), Ok((first, 12)));
+        assert_eq!(bus.route(0x1004, Width::Word), Ok((first, 4)));
+        assert_eq!(bus.route(0x2004, Width::Word), Ok((second, 4)));
+        assert_eq!(bus.route(0x4004, Width::Word), Ok((second, 4)));
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        bus.write(0x2000, Width::Word, 0x98765432, &mut access)
+            .unwrap();
+        assert_eq!(bus.read(0x4000, Width::Word, &mut access), Ok(0x98765432));
+        assert_eq!(bus.read(0x1000, Width::Word, &mut access), Ok(0x01010101));
     }
 
     #[test]
