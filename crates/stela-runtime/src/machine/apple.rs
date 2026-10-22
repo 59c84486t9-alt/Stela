@@ -1486,12 +1486,9 @@ impl AppleDevices {
     pub fn add_atc_phy(&mut self, placement: &super::soc::TypecPhy) -> Result<(), String> {
         if placement.phandle == 0
             || placement.port == 0
-            || self
-                .phys
-                .iter()
-                .any(|phy| phy.phandle == placement.phandle || phy.port == placement.port)
+            || self.phys.iter().any(|phy| phy.phandle == placement.phandle)
         {
-            return Err("ATC PHY has an invalid/duplicate phandle or connector".into());
+            return Err("ATC PHY has an invalid/duplicate phandle or invalid connector".into());
         }
         let id = self.bus.add(Box::new(AtcPhy::new()));
         let pipe = placement.pipe.map(|pipe| (pipe, atc_phy::PIPE));
@@ -6577,6 +6574,52 @@ mod tests {
         assert_eq!(d.read(0, base + 0x440, 4, 1_915_000), Ok(10));
         d.write(0, supply, 4, 15, 1_915_000).unwrap();
         assert_eq!(d.read(0, base + 0x440, 4, 1_930_000), Ok(15));
+    }
+
+    #[test]
+    fn phy_phandles_distinguish_standalone_views_on_the_same_connector() {
+        let mut devices = AppleDevices::new();
+        let first = add_usb_phy(&mut devices);
+        let mut auxiliary = first.clone();
+        auxiliary.phandle += 1;
+        auxiliary.pipe = None;
+        // Original 26A434 J414s/J416s/J474s have four ATC PHYs: PHY3
+        // repeats port 1, but no USB DRD names its distinct phandle.
+        const OTHER_APERTURE: u64 = 0x1_0000_0000;
+        auxiliary.usb2.0 += OTHER_APERTURE;
+        auxiliary.core.0 += OTHER_APERTURE;
+        auxiliary.events.0 += OTHER_APERTURE;
+        devices.add_atc_phy(&auxiliary).unwrap();
+        assert_eq!(devices.phys.len(), 2);
+        assert!(
+            devices
+                .add_atc_phy(&auxiliary)
+                .unwrap_err()
+                .contains("phandle")
+        );
+        assert_eq!(devices.phys.len(), 2);
+        let dart = devices
+            .add_dart(
+                Range {
+                    physical: 0x382f00000,
+                    bytes: 0x4000,
+                },
+                16,
+                None,
+                None,
+            )
+            .unwrap();
+        let mut placement = usb_placement();
+        placement.phy = auxiliary.phandle;
+        assert!(
+            devices
+                .add_usb(&placement, dart)
+                .unwrap_err()
+                .contains("pipehandler")
+        );
+        placement.phy = first.phandle;
+        devices.add_usb(&placement, dart).unwrap();
+        assert_eq!(devices.usb_masters[0].phy, devices.phys[0].device);
     }
 
     #[test]
