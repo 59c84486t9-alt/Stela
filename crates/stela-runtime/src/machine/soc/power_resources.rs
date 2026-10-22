@@ -18,7 +18,9 @@ pub use clock_role::{ClockRole, PmgrClockProvider};
 
 mod cpu;
 pub use cpu::ProcessorAssociation;
+mod pmp;
 mod records;
+pub use pmp::PmpDomain;
 use records::{Layout, Record};
 mod implicit;
 

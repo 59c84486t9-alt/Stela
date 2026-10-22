@@ -51,6 +51,8 @@ pub(super) struct Location {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Record<'a> {
     pub id: u16,
+    /// Raw PMP source identity; distinct from the canonical 16-bit device ID.
+    pub pmp_source: u8,
     pub parents: [u16; 4],
     pub name: &'a str,
     pub location: Option<Location>,
@@ -124,6 +126,7 @@ impl<'a> Record<'a> {
         };
         Ok(Self {
             id,
+            pmp_source: bytes[3],
             parents,
             name,
             location,
