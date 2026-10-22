@@ -9,6 +9,7 @@ use super::super::{
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
 
+pub mod cache;
 pub mod memory;
 pub mod power;
 pub mod publication;
