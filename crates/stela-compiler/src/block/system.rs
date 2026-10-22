@@ -31,6 +31,10 @@ pub enum SystemOperation {
     /// Apple GXF guarded-level transitions. Only the system-mode profile
     /// produces it.
     Guarded(GuardedOperation),
+    /// Apple WKDMC and WKDMD, which compress and decompress a 16 KiB page
+    /// through translated memory (`crate::wkdm`). Only the system-mode
+    /// profile produces it.
+    Compression(crate::wkdm::Instruction),
     /// An instruction that exists only in Debug state, which a PE without
     /// halting debug never enters: UNDEFINED. Only the system-mode profile
     /// produces it.
@@ -135,6 +139,7 @@ fn serialize_family<S: Serializer>(
         SystemOperation::Register(_) => "system_register",
         SystemOperation::Maintenance(_) => "maintenance",
         SystemOperation::Guarded(_) => "guarded",
+        SystemOperation::Compression(_) => "compression",
         SystemOperation::DebugStateOnly(_) => "debug_state_only",
         SystemOperation::Unprivileged(_) => "unprivileged",
         SystemOperation::Exclusive(_) => "exclusive",
@@ -231,7 +236,7 @@ pub(super) fn decode_el1_system_instruction(
 /// Decode every instruction the system-mode profile hands to the runtime: the
 /// [`decode_el1_system_instruction`] families, SYS/SYSL, and the barriers and
 /// hints that the ordinary decoder does not own (DSB, SSBB/PSSBB, ESB,
-/// TSB and unallocated hints), Apple's SDSB, the Debug-state-only MOVT
+/// TSB and unallocated hints), Apple's SDSB, WKDMC and WKDMD, the Debug-state-only MOVT
 /// GPR/ZT0 forms, and
 /// the FEAT_CPA pointer arithmetic.
 /// YIELD, CSDB, SB and DMB stay ordinary and BTI compiles as NOP; PAuth hints belong to the PAuth
@@ -249,6 +254,8 @@ pub fn decode_system_mode_instruction(
         SystemOperation::Guarded(GuardedOperation::Exit)
     } else if let Some(operation) = decode_sdsb(word) {
         SystemOperation::Synchronization(operation)
+    } else if let Some(instruction) = crate::wkdm::decode(word) {
+        SystemOperation::Compression(instruction)
     } else if let Some(operation) = DebugStateOperation::decode(word) {
         SystemOperation::DebugStateOnly(operation)
     } else if let Some(decoded) = crate::aarch64::exclusive::decode(word) {
@@ -373,6 +380,40 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn system_mode_claims_wkdm_and_the_ordinary_profiles_do_not() {
+        use crate::wkdm::{self, Operation};
+        let pc = GuestAddress(0x1000);
+        for (word, operation) in [
+            (wkdm::COMPRESS_X0_X1, Operation::Compress),
+            (wkdm::DECOMPRESS_X0_X1, Operation::Decompress),
+            (0x0020_0e93, Operation::Decompress),
+        ] {
+            let instruction = decode_system_mode_instruction(pc, word).unwrap().unwrap();
+            assert_eq!(
+                instruction.operation,
+                SystemOperation::Compression(wkdm::decode(word).unwrap())
+            );
+            assert!(matches!(
+                instruction.operation,
+                SystemOperation::Compression(decoded) if decoded.operation == operation
+            ));
+            assert!(decode_system_instruction(pc, word).unwrap().is_none());
+        }
+        for word in [0x0020_07ff, 0x0020_1000] {
+            assert!(
+                !matches!(
+                    decode_system_mode_instruction(pc, word),
+                    Ok(Some(SystemInstruction {
+                        operation: SystemOperation::Compression(_),
+                        ..
+                    }))
+                ),
+                "{word:#x}"
+            );
+        }
     }
 
     #[test]

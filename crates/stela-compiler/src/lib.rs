@@ -17,6 +17,7 @@ pub mod context;
 pub mod extended;
 mod state;
 mod target;
+pub mod wkdm;
 pub mod x86_64;
 
 pub use state::{GuestState, NATIVE_ABI};

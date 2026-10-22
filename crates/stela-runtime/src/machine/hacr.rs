@@ -39,6 +39,8 @@ pub enum Operation {
     SynchronizationBarrier,
     /// An AMX instruction.
     Amx,
+    /// WKDMC or WKDMD.
+    Compression,
 }
 
 impl core::fmt::Display for Operation {
@@ -57,6 +59,7 @@ impl core::fmt::Display for Operation {
             Self::Guarded { enter: false } => f.write_str("GEXIT"),
             Self::SynchronizationBarrier => f.write_str("SDSB"),
             Self::Amx => f.write_str("an AMX instruction"),
+            Self::Compression => f.write_str("WKDMC or WKDMD"),
         }
     }
 }
@@ -179,7 +182,8 @@ fn owners(operation: Operation) -> alloc::vec::Vec<(u8, Trap)> {
         Operation::Guarded { .. } => return alloc::vec![(13, Unrecovered)],
         // TRAP_AMX names AMX; m1n1 observed only register reads.
         Operation::Amx => return alloc::vec![(10, Unrecovered)],
-        Operation::SynchronizationBarrier => return owners,
+        // No m1n1 name covers WKdm, so it traps under no named bit.
+        Operation::SynchronizationBarrier | Operation::Compression => return owners,
     };
     let (op1, crn, crm, op2) = (
         encoding.op1(),
@@ -378,6 +382,11 @@ mod tests {
             refused(INTERNAL, Operation::SynchronizationBarrier, EL1),
             "HACR_EL2 bit 48 on SDSB: trapped operation not recovered"
         );
+        assert_eq!(
+            refused(CUSTOMER, Operation::Compression, EL1),
+            "HACR_EL2 bit 24 on WKDMC or WKDMD: trapped operation not recovered"
+        );
+        assert_eq!(guest(1 << 10, Operation::Compression, EL1), Outcome::Runs);
         // GENTER under TRAP_GXF, and an owned register from EL0 or a
         // guarded level.
         assert_eq!(

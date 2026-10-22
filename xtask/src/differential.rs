@@ -322,6 +322,10 @@ fn oracle_limit(form: &str, state: &GuestState) -> bool {
     // QEMU has no Apple AMX, so AMX words are never differential subjects:
     // `cargo xtask amx-reference` compares the model with the corsix/amx
     // emulator on QEMU instead, and no Apple hardware oracle exists.
+    // Nor has it Apple WKDMC or WKDMD (`0x00200800` to `0x00200fff`), so they
+    // are not differential subjects either: the engine's own tests
+    // (`machine::engine::compression`) cover them, and no hardware oracle
+    // exists for their compressed format.
     (sign_of_nan || estimate) && state.fpcr & FPCR_AH != 0 || tile_slice_load
 }
 

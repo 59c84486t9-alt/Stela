@@ -574,13 +574,14 @@ impl<B: Backend> Dispatcher for Execution<'_, B> {
             ),
             SystemOperation::Maintenance(_)
             | SystemOperation::Guarded(_)
+            | SystemOperation::Compression(_)
             | SystemOperation::DebugStateOnly(_)
             | SystemOperation::Unprivileged(_)
             | SystemOperation::Exclusive(_)
             | SystemOperation::CheckedPointer(_)
             | SystemOperation::TagOffset(_) => Err(Failure::Unsupported(
-                "SYS maintenance, GXF, Debug-state-only, unprivileged, exclusive, CPA and \
-                 ADDG/SUBG forms belong to the system-mode engine",
+                "SYS maintenance, GXF, WKdm, Debug-state-only, unprivileged, exclusive, CPA \
+                 and ADDG/SUBG forms belong to the system-mode engine",
             )),
             SystemOperation::Wait { .. } => Err(Failure::Unsupported(
                 "wait requires the retained hosted wait owner",

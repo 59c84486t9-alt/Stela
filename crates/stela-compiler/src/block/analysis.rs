@@ -150,6 +150,7 @@ pub(super) fn analyze_parsed(parsed: &ParsedBlock) -> BlockAnalysis {
                     | system::SystemOperation::Unprivileged(_)
                     | system::SystemOperation::Exclusive(_)
                     | system::SystemOperation::CheckedPointer(_)
+                    | system::SystemOperation::Compression(_)
             ) {
                 add(SuccessorKind::Fallthrough, value.next_pc);
             }

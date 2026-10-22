@@ -2,6 +2,7 @@
 //! every exit back from native code.
 mod amx;
 mod clock;
+mod compression;
 mod device_access;
 mod device_read;
 mod device_write;
@@ -5075,7 +5076,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(Some(instruction)) => instruction,
             _ => return Err(self.refuse_system(word, "System exit at a word that is not System")),
         };
-        // Apple's GENTER, GEXIT and SDSB (`0x00201460` plus the domain).
+        // Apple's GENTER, GEXIT, SDSB (`0x00201460` plus the domain), WKDMC
+        // and WKDMD.
         let apple = match instruction.operation {
             SystemOperation::Guarded(operation) => Some(hacr::Operation::Guarded {
                 enter: operation == GuardedOperation::Enter,
@@ -5083,6 +5085,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             SystemOperation::Synchronization(_) if word & !3 == 0x0020_1460 => {
                 Some(hacr::Operation::SynchronizationBarrier)
             }
+            SystemOperation::Compression(_) => Some(hacr::Operation::Compression),
             _ => None,
         };
         if let Some(operation) = apple
@@ -5144,6 +5147,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             SystemOperation::Exclusive(Ok(operand)) => self.exclusive(operand),
             SystemOperation::Exclusive(Err(_)) => self.undefined(),
             SystemOperation::CheckedPointer(operand) => self.checked_pointer(operand),
+            SystemOperation::Compression(instruction) => self.compression(word, instruction),
             SystemOperation::Guarded(GuardedOperation::Enter) => {
                 if self.cpu.guarded_enter().is_err() {
                     return self.undefined();
