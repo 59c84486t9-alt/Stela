@@ -53,7 +53,7 @@
 //! DMA buffers live until reboot even on startup/transmit errors. OWN is the
 //! sole ownership transfer; timed-out transmit slots are never overwritten.
 
-use super::{Link, LinkError, MAX_FRAME, MIN_FRAME, Mac};
+use super::{Link, LinkError, MAX_FRAME, MIN_FRAME, Mac, check_frame};
 use crate::{
     Clock, Handoff,
     block::BlockError,
@@ -213,6 +213,8 @@ pub struct Realtek {
     link: RuntimeLink,
     revision: Revision,
     warning: Option<Warning>,
+    /// The PCI function number, which selects per-function OCP state.
+    function: u8,
     pub location: String,
 }
 impl Realtek {
@@ -307,6 +309,7 @@ impl Realtek {
             link: RuntimeLink::default(),
             revision,
             warning,
+            function: function.address.function,
             location: format!(
                 "{} {} XID {:03x}",
                 function.address, revision.name, revision.xid
@@ -325,7 +328,7 @@ impl Realtek {
     }
 
     fn update_link(&mut self) -> Result<bool, LinkError> {
-        let hardware = Hardware::new(&self.device, &self.clock, self.revision, 0);
+        let hardware = Hardware::new(&self.device, &self.clock, self.revision, self.function);
         self.link.update(&hardware).map_err(|error| {
             LinkError::Adapter(format!("{} link configuration: {error}", self.location))
         })
@@ -354,7 +357,7 @@ impl RuntimeLink {
                 .last_phy_poll
                 .is_some_and(|last| hw.timer.now().wrapping_sub(last) < NBASE_LINK_POLL_US)
         {
-            return Ok(self.status.is_some_and(|status| status & 2 != 0));
+            return Ok(self.status.is_some_and(|status| status & LINK_STATUS != 0));
         }
         let observed: Result<u8, BlockError> = if hw.revision.nbase() {
             // genphy_update_link's polled BMCR/BMSR sequence preserves a
@@ -369,21 +372,18 @@ impl RuntimeLink {
                         Ok(value)
                     }
                 };
-                if read(PHY_CONTROL)? & (1 << 9) != 0 {
+                if read(PHY_CONTROL)? & BMCR_RESTART_AUTONEGOTIATION != 0 {
                     return Ok(0);
                 }
-                let previous_up = self.status.is_some_and(|status| status & 2 != 0);
-                let mut status = read(1)?;
-                if !previous_up && status & 4 == 0 {
-                    status = read(1)?;
+                let previous_up = self.status.is_some_and(|status| status & LINK_STATUS != 0);
+                let mut status = read(MII_STATUS)?;
+                if !previous_up && status & BMSR_LINK == 0 {
+                    status = read(MII_STATUS)?;
                 }
                 // This driver always configures autonegotiation: an old
                 // link indication must not outlive a cleared AN-complete bit.
-                Ok(if status & (4 | (1 << 5)) == 4 | (1 << 5) {
-                    2
-                } else {
-                    0
-                })
+                let up = BMSR_LINK | BMSR_AUTONEGOTIATION_COMPLETE;
+                Ok(if status & up == up { LINK_STATUS } else { 0 })
             })()
         } else {
             Ok(hw.registers.read8(PHY_STATUS))
@@ -398,7 +398,7 @@ impl RuntimeLink {
         let result = if status == u8::MAX {
             Err(BlockError::Device { status: 255 })
         } else if self.status != Some(status)
-            && status & 2 != 0
+            && status & LINK_STATUS != 0
             && matches!(hw.revision.version, 34..=36 | 38 | 46 | 51 | 52 | 61 | 63..=66 | 70)
         {
             link_patch(hw, status)
@@ -413,7 +413,7 @@ impl RuntimeLink {
         if hw.revision.nbase() {
             self.last_phy_poll = Some(hw.timer.now());
         }
-        Ok(status & 2 != 0)
+        Ok(status & LINK_STATUS != 0)
     }
 }
 
@@ -539,6 +539,8 @@ fn load_firmware<'a>(
         .transpose()
 }
 
+/// Linux `rtl_link_chg_patch`: per-speed ERI FIFO thresholds and EEE state
+/// at link-up. The donor gives these vendor offsets and values no names.
 fn link_patch<R: Registers, T: Timer>(
     hw: &Hardware<'_, R, T>,
     status: u8,
@@ -610,7 +612,7 @@ fn publish<R: Registers, T: Timer>(
 ) -> Result<(), BlockError> {
     let r = hw.registers;
     let revision = hw.revision;
-    r.write8(CONFIG_LOCK, 0xc0);
+    r.write8(CONFIG_LOCK, CONFIG_UNLOCKED);
     let result = (|| {
         let low = u32::from_le_bytes(mac.0[..4].try_into().expect("MAC low word"));
         let high = u32::from(u16::from_le_bytes([mac.0[4], mac.0[5]]));
@@ -641,33 +643,31 @@ fn publish<R: Registers, T: Timer>(
         r.write32(RX_LOW, rx.descriptors.physical() as u32);
         Ok(())
     })();
-    r.write8(CONFIG_LOCK, 0);
+    r.write8(CONFIG_LOCK, CONFIG_LOCKED);
     result?;
     r.read8(COMMAND);
     fence(Ordering::SeqCst);
     r.write8(COMMAND, ENABLE);
+    // Linux `rtl_init_rxcfg`, per MAC version.
     let rxconfig = match revision.version {
-        2..=17 => (7 << 13) | (7 << 8),
-        25 | 26 | 28 | 31 | 32 | 33 => (1 << 15) | (7 << 8),
-        40 | 42 | 44 | 46 | 51 | 52 => (1 << 15) | (1 << 14) | (7 << 8) | (1 << 11),
-        61 => (8 << 27) | (7 << 8),
-        63..=66 | 70 => (8 << 27) | (7 << 8) | (1 << 11),
-        _ => (1 << 15) | (1 << 14) | (7 << 8),
+        2..=17 => RX_FIFO_THRESHOLD | RX_DMA_BURST,
+        25 | 26 | 28 | 31 | 32 | 33 => RX_128_INTERRUPTS | RX_DMA_BURST,
+        40 | 42 | 44 | 46 | 51 | 52 => {
+            RX_128_INTERRUPTS | RX_MULTI_ENABLE | RX_DMA_BURST | RX_EARLY_OFF
+        }
+        61 => RX_FETCH_8125 | RX_DMA_BURST,
+        63..=66 | 70 => RX_FETCH_8125 | RX_DMA_BURST | RX_EARLY_OFF,
+        _ => RX_128_INTERRUPTS | RX_MULTI_ENABLE | RX_DMA_BURST,
     };
-    // Broadcast, multicast, station only; no promiscuous/errors/runt/VLAN stripping.
-    r.write32(RX_CONFIG, rxconfig | 0x0e);
+    // No promiscuous, error, runt or VLAN-stripping acceptance.
+    r.write32(RX_CONFIG, rxconfig | RX_ACCEPT);
     r.write32(MAR0, u32::MAX);
     r.write32(MAR0 + 4, u32::MAX);
-    r.write32(
-        TX_CONFIG,
-        (7 << 8)
-            | (3 << 24)
-            | if (34..=52).contains(&revision.version) {
-                1 << 7
-            } else {
-                0
-            },
-    );
+    let auto_fifo = match (34..=52).contains(&revision.version) {
+        true => TX_AUTO_FIFO,
+        false => 0,
+    };
+    r.write32(TX_CONFIG, TX_DMA_BURST | TX_INTER_FRAME_GAP | auto_fifo);
     hw.interrupts_off();
     let command = r.read8(COMMAND);
     if command == u8::MAX {
@@ -686,10 +686,12 @@ impl Link for Realtek {
         self.update_link().unwrap_or(false)
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
-        if !(14..=MAX_FRAME).contains(&frame.len()) {
-            return Err(LinkError::Invalid("frame length is outside 14..=1514"));
+        check_frame(frame)?;
+        // Linux stops the queue while the carrier is off; queued descriptors
+        // stay with the controller and leave once the link returns.
+        if !self.update_link()? {
+            return Err(LinkError::NoCarrier);
         }
-        self.update_link()?;
         let clock = self.clock;
         if !clock.wait(100_000, || self.transmit.available()) {
             return Err(LinkError::Adapter(format!(
@@ -718,6 +720,42 @@ mod tests {
     use super::*;
     use alloc::{collections::BTreeMap, rc::Rc};
     use core::cell::{Cell, RefCell};
+
+    #[test]
+    fn transmit_without_carrier_is_refused_and_leaves_the_ring_untouched() {
+        use crate::bus::dma::RegionAllocator;
+        let mut registers = vec![0u32; 64];
+        let mut memory = vec![0u64; 65_536];
+        let start = memory.as_mut_ptr() as u64;
+        // SAFETY: the fixture owns both allocations for the driver's lifetime.
+        let (device, mut dma) = unsafe {
+            (
+                Mmio::new(registers.as_mut_ptr() as u64),
+                RegionAllocator::new(start..start + (memory.len() * 8) as u64),
+            )
+        };
+        let revision = revision::detect(0x0080_0000).unwrap(); // RTL8169S
+        let mut net = Realtek {
+            device,
+            clock: Clock {
+                ticks_per_microsecond: 1,
+            },
+            // Host test memory lies above 4 GiB; the ring's width is not under test.
+            receive: Ring::new(&mut dma, true).unwrap(),
+            transmit: Ring::new(&mut dma, true).unwrap(),
+            mac: Mac([2, 0, 0, 0, 0, 1]),
+            link: RuntimeLink::default(),
+            revision,
+            warning: None,
+            function: 0,
+            location: "model".into(),
+        };
+        net.transmit.initialize(false);
+        let descriptors = net.transmit.descriptors.bytes().to_vec();
+        assert_eq!(net.transmit(&[0; 60]), Err(LinkError::NoCarrier));
+        assert_eq!(net.transmit.descriptors.bytes(), descriptors);
+        assert_eq!(registers[TX_POLL / 4], 0);
+    }
 
     #[derive(Clone, Default)]
     struct Time(Rc<Cell<u64>>);

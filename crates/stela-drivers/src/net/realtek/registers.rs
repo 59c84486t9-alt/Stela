@@ -62,6 +62,29 @@ pub(super) const RX_LOW: usize = 0xe4;
 pub(super) const RX_HIGH: usize = 0xe8;
 pub(super) const EARLY_TX: usize = 0xec;
 pub(super) const MISC: usize = 0xf0;
+/// Cfg9346 unlock and lock values (Linux `Cfg9346_Unlock`, `Cfg9346_Lock`).
+pub(super) const CONFIG_UNLOCKED: u8 = 0xc0;
+pub(super) const CONFIG_LOCKED: u8 = 0;
+/// RxConfig bits (Linux `RxConfigBits` and `rtl_init_rxcfg`).
+pub(super) const RX_FIFO_THRESHOLD: u32 = 7 << 13;
+pub(super) const RX_DMA_BURST: u32 = 7 << 8;
+pub(super) const RX_128_INTERRUPTS: u32 = 1 << 15;
+pub(super) const RX_MULTI_ENABLE: u32 = 1 << 14;
+pub(super) const RX_EARLY_OFF: u32 = 1 << 11;
+pub(super) const RX_FETCH_8125: u32 = 8 << 27;
+/// Accept broadcast, multicast and frames to the station address only.
+pub(super) const RX_ACCEPT: u32 = 0x08 | 0x04 | 0x02;
+/// TxConfig bits (Linux `TX_DMA_BURST`, `InterFrameGap`, `TXCFG_AUTO_FIFO`).
+pub(super) const TX_DMA_BURST: u32 = 7 << 8;
+pub(super) const TX_INTER_FRAME_GAP: u32 = 3 << 24;
+pub(super) const TX_AUTO_FIFO: u32 = 1 << 7;
+/// PHYstatus link bit (Linux `LinkStatus`).
+pub(super) const LINK_STATUS: u8 = 0x02;
+/// Clause 22 BMCR restart and BMSR link/autonegotiation-complete bits.
+pub(super) const MII_STATUS: u16 = 1;
+pub(super) const BMCR_RESTART_AUTONEGOTIATION: u16 = 1 << 9;
+pub(super) const BMSR_LINK: u16 = 1 << 2;
+pub(super) const BMSR_AUTONEGOTIATION_COMPLETE: u16 = 1 << 5;
 pub(super) const RESET: u8 = 0x10;
 pub(super) const ENABLE: u8 = 0x0c;
 pub(super) const POLL_NORMAL: u8 = 0x40;

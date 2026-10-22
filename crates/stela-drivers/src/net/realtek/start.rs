@@ -26,7 +26,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
     }
     pub fn configure_mac(&mut self, script: Option<&Script<'_>>) -> Result<(), Error> {
         let r = self.registers;
-        r.write8(CONFIG_LOCK, 0xc0);
+        r.write8(CONFIG_LOCK, CONFIG_UNLOCKED);
         let result = (|| {
             // Keep ASPM disabled. CLKREQ is disabled before initialization;
             // MAC28's exact DP4 branch re-enables it in PCIe Link Control
@@ -255,7 +255,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             r.write16(RX_MAXIMUM, BUFFER as u16);
             Ok(())
         })();
-        r.write8(CONFIG_LOCK, 0);
+        r.write8(CONFIG_LOCK, CONFIG_LOCKED);
         result
     }
 }
