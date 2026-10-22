@@ -154,9 +154,11 @@ pub(super) fn iommu(
             Some((at, slices))
         }
     };
+    // Every generation's SPTM defaults an absent sid-count to 16 (T6020 VA
+    // 0xfffffff0270d8184..0xfffffff0270d81f8; J414cAP `dart-sio` has none).
     let streams = node
         .first_u32("sid-count")
-        .or_else(|| (profile != Profile::T8110).then_some(16))
+        .or(Some(16))
         .and_then(|count| u16::try_from(count).ok())
         .filter(|&count| count > 0 && usize::from(count) <= profile.stream_limit())
         .ok_or_else(|| format!("{path} sid-count exceeds the selected native DART profile"))?;

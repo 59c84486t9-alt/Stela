@@ -425,19 +425,15 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
         clocks.dedup();
         power.sort_unstable();
         power.dedup();
-        let profile = node
+        let dart = node
             .property("compatible")
-            .and_then(Profile::from_compatible);
-        let owner = if let Some(profile) = profile
-            && path.starts_with("/arm-io/")
-        {
+            .and_then(Profile::from_compatible)
+            .is_some();
+        let owner = if dart && path.starts_with("/arm-io/") {
             let index = darts;
             darts += 1;
-            let default = match profile {
-                Profile::T8020 | Profile::T6000 => 16,
-                Profile::T8110 => 0,
-            };
-            dart_streams.push(node.first_u32("sid-count").unwrap_or(default));
+            // SPTM defaults an absent sid-count to 16 on every generation.
+            dart_streams.push(node.first_u32("sid-count").unwrap_or(16));
             Some(PowerOwner::Dart(index))
         } else if path.starts_with("/arm-io/") && node.compatible(USB_DRD) {
             let index = usbs;
@@ -1336,7 +1332,8 @@ mod tests {
         assert_eq!(owner("/arm-io/unknown"), None);
         assert_eq!(owner("/arm-io/unknown/mapper"), None);
         assert_eq!(owner("/arm-io/modern"), Some(PowerOwner::Dart(1)));
-        assert_eq!(owner("/arm-io/modern/mapper"), None); // sid-count required.
+        // An absent sid-count is 16 streams, so SID 15 is a native mapper.
+        assert_eq!(owner("/arm-io/modern/mapper"), Some(PowerOwner::Dart(1)));
         assert_eq!(owner("/arm-io/phy"), Some(PowerOwner::Phy(0)));
     }
 
