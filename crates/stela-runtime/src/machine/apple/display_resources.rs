@@ -312,7 +312,7 @@ mod tests {
                 aperture_bytes: 0x200000,
                 planes: 4,
                 stride: mcc::PLANE_STRIDE,
-                cache_status: Some(reg(0x10000c, 1, 1)),
+                cache_status: Some(reg(0x1c00, 0x1f, 0)),
                 dram_base: 0x800000000,
                 groups: [
                     Some(LockGroup {

@@ -32,7 +32,7 @@ pub(super) fn devices(ram: Arc<RegisteredSystemRam>) -> Result<AppleDevices, &'s
             aperture_bytes: 0x200000,
             planes: u32::from(mcc::PLANES),
             stride: mcc::PLANE_STRIDE,
-            cache_status: Some(register(0x10000c, 1, 1)),
+            cache_status: Some(register(0x1c00, 0x1f, 0)),
             dram_base: super::source::BASE,
             groups: [
                 Some(LockGroup {

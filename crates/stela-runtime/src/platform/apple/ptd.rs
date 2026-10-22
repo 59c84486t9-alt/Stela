@@ -74,6 +74,16 @@ impl Geometry {
     }
 }
 
+/// A source-qualified `ptd-range` identity. The fourth DT word (the interrupt
+/// resource) must also be retained by the mount; it is not an AIC input number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Range {
+    pub id: u32,
+    pub start: u32,
+    pub count: u32,
+    pub name: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,14 +121,4 @@ mod tests {
             );
         }
     }
-}
-
-/// A source-qualified `ptd-range` identity. The fourth DT word (the interrupt
-/// resource) must also be retained by the mount; it is not an AIC input number.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Range {
-    pub id: u32,
-    pub start: u32,
-    pub count: u32,
-    pub name: String,
 }
