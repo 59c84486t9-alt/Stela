@@ -513,6 +513,8 @@ static void unused_stage_buffer_semantics(void)
             {"i32 7,i32 1,!\"air.read\"","i32 7,i32 1,!\"air.write\"",STELA_AIR_ARGUMENT},
             {"ptr addrspace(2) %unused","ptr addrspace(1) %unused",STELA_AIR_ARGUMENT},
             {"!\"float4\",!\"air.arg_name\",!\"unused\"","!\"unknown\",!\"air.arg_name\",!\"unused\"",STELA_AIR_ARGUMENT},
+            {"!\"air.arg_type_size\",i32 16,!\"air.arg_type_align_size\",i32 16,!\"air.arg_type_name\",!\"float4\",!\"air.arg_name\",!\"unused\"",
+             "!\"air.arg_type_size\",i32 8,!\"air.arg_type_align_size\",i32 16,!\"air.arg_type_name\",!\"float4\",!\"air.arg_name\",!\"unused\"",STELA_AIR_ARGUMENT},
             {"v128:128","v128:256",STELA_AIR_TYPE},
          };
          for(unsigned k=0;k<sizeof(bad)/sizeof(bad[0]);k++) {
