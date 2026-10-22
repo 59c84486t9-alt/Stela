@@ -27,7 +27,7 @@
 #include "amdgpu_irq.h"
 #include "vpe_6_1_fw_if.h"
 
-#define AMDGPU_MAX_VPE_INSTANCES 2
+#include "amdgpu_ip_instance_limits.h"
 
 struct amdgpu_vpe;
 

@@ -26,7 +26,7 @@
 #include "amdgpu_ras.h"
 
 /* max number of IP instances */
-#define AMDGPU_MAX_SDMA_INSTANCES		16
+#include "amdgpu_ip_instance_limits.h"
 
 enum amdgpu_sdma_irq {
 	AMDGPU_SDMA_IRQ_INSTANCE0  = 0,

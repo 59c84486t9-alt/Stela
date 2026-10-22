@@ -19,6 +19,20 @@ stela_apple_source_test = executable(
 )
 test('stela_apple_source_boundary', stela_apple_source_test, suite : 'stela')
 
+# Value normalization owns no LLVM, NIR or driver state.
+stela_metal_threadgroup = static_library(
+  'stela_metal_threadgroup',
+  '../../../../metal/compiler/threadgroup.c',
+  c_args : ['-Wall', '-Wextra', '-Werror', '-Wconversion'],
+)
+stela_metal_threadgroup_test = executable(
+  'stela_metal_threadgroup_test',
+  '../../../../metal/compiler/tests/threadgroup.c',
+  link_with : stela_metal_threadgroup,
+  c_args : ['-Wall', '-Wextra', '-Werror', '-Wconversion'],
+)
+test('stela_metal_threadgroup_values', stela_metal_threadgroup_test, suite : 'stela')
+
 if with_stela_amd_llvm
   stela_amd_llvm_float = static_library(
     'stela_amd_llvm_float',
@@ -52,16 +66,50 @@ if stela_air_llvm != ''
   )
   stela_air = static_library(
     'stela_air_to_nir',
-    'air_to_nir.c',
+    ['air_to_nir.c', 'air_metadata.c'],
     include_directories : [inc_include, inc_src],
     dependencies : [idep_nir, idep_mesautil, stela_air_llvm_dep],
     c_args : ['-Werror'],
   )
+  stela_metal_input = get_option('stela-metal-input-library')
+  if stela_metal_input != ''
+    if host_machine.system() != 'darwin' or not fs.is_absolute(stela_metal_input) or not fs.is_file(stela_metal_input)
+      error('Metal assembly requires a matching Darwin Rust input static library')
+    endif
+    stela_metal_assembly = static_library(
+      'stela_metal_assembly',
+      '../../../../metal/compiler/library_assembly.c',
+      dependencies : [stela_air_llvm_dep],
+      c_args : ['-Wall', '-Wextra', '-Werror', '-Wconversion'],
+    )
+    # Ordinary archive extraction pulls the shared metadata inspector alone;
+    # this local owner does not depend on NIR or any vendor compiler backend.
+    stela_metal_assembly_test = executable(
+      'stela_metal_assembly_test',
+      '../../../../metal/compiler/tests/library_assembly.c',
+      dependencies : [stela_air_llvm_dep, dependency('appleframeworks', modules : ['CoreFoundation'])],
+      link_with : [stela_metal_assembly, stela_air, stela_apple_source],
+      link_args : [stela_metal_input, '-lresolv', '-liconv'],
+      c_args : ['-Wall', '-Wextra', '-Werror', '-Wconversion'],
+      build_rpath : fs.parent(stela_air_llvm),
+    )
+    test('stela_metal_library_assembly', stela_metal_assembly_test, suite : 'stela')
+  endif
   idep_stela_air = declare_dependency(
     link_with : [stela_air],
     include_directories : include_directories('.'),
     dependencies : [idep_nir, idep_mesautil, stela_air_llvm_dep],
   )
+  stela_metal_threadgroup_nir_test = executable(
+    'stela_metal_threadgroup_nir_test',
+    '../../../../metal/compiler/tests/threadgroup_nir.c',
+    include_directories : [inc_include, inc_src],
+    dependencies : [idep_stela_air],
+    link_with : stela_metal_threadgroup,
+    c_args : ['-Wall', '-Wextra', '-Werror', '-Wno-missing-field-initializers'],
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_metal_threadgroup_nir', stela_metal_threadgroup_nir_test, suite : 'stela')
   stela_air_test_dependencies = [idep_stela_air]
   stela_air_test_links = []
   stela_air_test_args = ['-Werror']
@@ -225,6 +273,29 @@ if with_stela_nvidia
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
+  endif
+  if stela_air_llvm != '' and stela_metal_input != ''
+    stela_nv_air = static_library(
+      'stela_nv_air',
+      '../../../../nvidia/stela/hosted/air_compile.c',
+      include_directories : [inc_include, inc_src, include_directories('../nouveau/headers')],
+      dependencies : [idep_stela_air, idep_nak, idep_nir_headers],
+      link_with : [stela_metal_assembly, stela_metal_threadgroup, _libnak_rs],
+      c_args : ['-Werror'],
+    )
+    stela_nv_air_compile_test = executable(
+      'stela_nv_air_compile_test',
+      '../../../../nvidia/stela/tests/air_compile.c',
+      include_directories : [inc_include, inc_src,
+                             include_directories('../nouveau/headers', '../nouveau/headers/nvidia/classes')],
+      dependencies : [idep_stela_air, idep_nak, idep_nir_headers,
+                      dependency('appleframeworks', modules : ['CoreFoundation'])],
+      link_with : [stela_nv_air, stela_nv_compute, stela_apple_source, _libnak_rs],
+      link_args : [stela_metal_input, '-lresolv', '-liconv'],
+      c_args : ['-Werror'],
+      build_rpath : fs.parent(stela_air_llvm),
+    )
+    test('stela_nv_air_owned', stela_nv_air_compile_test, suite : 'stela')
   endif
   stela_nak_probe = executable(
     'stela_nak_probe',
@@ -443,6 +514,37 @@ if with_stela_intel
   )
   test('stela_intel_legacy_compute_program', stela_intel_legacy_compute_program_probe,
        suite : 'stela')
+  if stela_air_llvm != '' and stela_metal_input != ''
+    stela_intel_air = static_library(
+      'stela_intel_air',
+      ['../../../../intel/stela/hosted/air_compile.c',
+       '../../../../intel/stela/hosted/air_validate_elk.c'],
+      include_directories : [inc_include, inc_src, inc_intel],
+      dependencies : [idep_stela_air, idep_intel_compiler_brw,
+                      idep_intel_compiler_elk, idep_intel_compiler_gen,
+                      idep_intel_dev, idep_mesautil],
+      link_with : [stela_metal_assembly, stela_metal_threadgroup],
+      c_args : ['-Werror'],
+    )
+    stela_intel_air_compile_test = executable(
+      'stela_intel_air_compile_test',
+      '../../../../intel/stela/tests/air_compile.c',
+      include_directories : [inc_include, inc_src, inc_intel,
+                             include_directories('../../../../intel/stela/hosted')],
+      dependencies : [idep_stela_air, idep_intel_compiler_brw,
+                      idep_intel_compiler_elk, idep_intel_compiler_gen,
+                      idep_intel_dev, idep_mesautil,
+                      dependency('appleframeworks', modules : ['CoreFoundation'])],
+      link_with : [stela_intel_air, stela_intel_surface,
+                   stela_intel_compute_policy, stela_intel_compute_native,
+                   stela_intel_legacy_compute, stela_intel_gpgpu_native,
+                   libisl, stela_apple_source],
+      link_args : [stela_metal_input, '-lresolv', '-liconv'] + stela_intel_policy_gc,
+      c_args : ['-Werror'],
+      build_rpath : fs.parent(stela_air_llvm),
+    )
+    test('stela_intel_air_owned', stela_intel_air_compile_test, suite : 'stela')
+  endif
   if stela_air_llvm != ''
     stela_intel_fp_controls_probe = executable(
       'stela_intel_fp_controls_probe',
@@ -643,6 +745,30 @@ if with_stela_amd
     c_args : ['-Werror', '-DSTELA_AMD_TEST_LLVM=' + (with_stela_amd_llvm ? '1' : '0')],
   )
   test('stela_amd_compute', stela_amd_compute_probe, suite : 'stela')
+  if stela_air_llvm != '' and stela_metal_input != ''
+    stela_amd_air = static_library(
+      'stela_amd_air',
+      '../../../../amd/stela/air_compile.c',
+      include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+      dependencies : [idep_stela_air, idep_aco, idep_amd_generated_headers] +
+                     (with_stela_amd_llvm ? [dep_llvm] : []),
+      link_with : [stela_metal_assembly, stela_metal_threadgroup, stela_amd_buffer, libamd_compiler_support],
+      c_args : ['-Werror'],
+    )
+    stela_amd_air_compile_test = executable(
+      'stela_amd_air_compile_test',
+      '../../../../amd/tests/air_compile.c',
+      include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+      dependencies : [idep_stela_air, idep_aco, idep_amd_generated_headers,
+                      dependency('appleframeworks', modules : ['CoreFoundation'])] +
+                     (with_stela_amd_llvm ? [dep_llvm] : []),
+      link_with : [stela_amd_air, stela_amd_compute, stela_apple_source],
+      link_args : [stela_metal_input, '-lresolv', '-liconv'],
+      c_args : ['-Werror'],
+      build_rpath : fs.parent(stela_air_llvm),
+    )
+    test('stela_amd_air_owned', stela_amd_air_compile_test, suite : 'stela')
+  endif
   if stela_air_llvm != '' and with_stela_amd_llvm
     stela_amd_air_threadgroup_probe = executable(
       'stela_amd_air_threadgroup_probe',

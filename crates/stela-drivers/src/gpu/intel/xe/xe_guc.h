@@ -11,13 +11,7 @@
 #include "xe_hw_engine_types.h"
 #include "xe_macros.h"
 
-/*
- * GuC version number components are defined to be only 8-bit size,
- * so converting to a 32bit 8.8.8 integer allows simple (and safe)
- * numerical comparisons.
- */
-#define MAKE_GUC_VER(maj, min, pat)	(((maj) << 16) | ((min) << 8) | (pat))
-#define MAKE_GUC_VER_STRUCT(ver)	MAKE_GUC_VER((ver).major, (ver).minor, (ver).patch)
+#include "xe_uc_fw_version.h"
 #define MAKE_GUC_VER_ARGS(ver...) \
 	(BUILD_BUG_ON_ZERO(COUNT_ARGS(ver) < 2 || COUNT_ARGS(ver) > 3) + \
 	 MAKE_GUC_VER(PICK_ARG1(ver), PICK_ARG2(ver), IF_ARGS(PICK_ARG3(ver), 0, PICK_ARG3(ver))))

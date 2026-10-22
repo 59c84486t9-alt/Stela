@@ -24,11 +24,7 @@ struct xe_exec_queue_ops;
 struct xe_migrate;
 struct xe_ring_ops;
 
-enum xe_gt_type {
-	XE_GT_TYPE_UNINITIALIZED,
-	XE_GT_TYPE_MAIN,
-	XE_GT_TYPE_MEDIA,
-};
+#include "xe_gt_type.h"
 
 enum xe_gt_eu_type {
 	XE_GT_EU_TYPE_SIMD8,

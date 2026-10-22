@@ -1623,6 +1623,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "stela-metal-input"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "stela-runtime"
 version = "0.1.0"
 dependencies = [

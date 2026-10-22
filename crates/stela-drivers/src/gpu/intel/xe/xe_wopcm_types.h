@@ -6,7 +6,11 @@
 #ifndef _XE_WOPCM_TYPES_H_
 #define _XE_WOPCM_TYPES_H_
 
+#ifdef STELA_NATIVE
+#include "xe_scalar_types.h"
+#else
 #include <linux/types.h>
+#endif
 
 /**
  * struct xe_wopcm - Overall WOPCM info and WOPCM regions.

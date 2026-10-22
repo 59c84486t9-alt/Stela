@@ -6,13 +6,21 @@
 #ifndef _XE_PAT_H_
 #define _XE_PAT_H_
 
+#ifdef STELA_NATIVE
+#include "xe_scalar_types.h"
+#else
 #include <linux/types.h>
+#endif
 
 struct drm_printer;
 struct xe_device;
 struct xe_gt;
 
+#ifdef STELA_NATIVE
+#define XE_PAT_INVALID_IDX UINT16_MAX
+#else
 #define XE_PAT_INVALID_IDX	U16_MAX
+#endif
 
 /**
  * struct xe_pat_table_entry - The pat_index encoding and other meta information.

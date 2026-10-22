@@ -48,6 +48,9 @@
 #include <linux/vga_switcheroo.h>
 #include <linux/efi.h>
 #include "amdgpu.h"
+#include "amdgpu_apu_flags_core.h"
+#include "amdgpu_discovery_source_core.h"
+#include "../stela/native_bar.h"
 #include "amdgpu_trace.h"
 #include "amdgpu_i2c.h"
 #include "atom.h"
@@ -696,6 +699,22 @@ bool amdgpu_device_supports_smart_shift(struct amdgpu_device *adev)
  * VRAM access helper functions
  */
 
+#include "amdgpu_mm_access_core.h"
+
+static uint32_t amdgpu_mm_access_read32(void *context, uint32_t reg)
+{
+	struct amdgpu_device *adev = context;
+
+	return RREG32_NO_KIQ(reg);
+}
+
+static void amdgpu_mm_access_write32(void *context, uint32_t reg, uint32_t value)
+{
+	struct amdgpu_device *adev = context;
+
+	WREG32_NO_KIQ(reg, value);
+}
+
 /**
  * amdgpu_device_mm_access - access vram by MM_INDEX/MM_DATA
  *
@@ -708,10 +727,10 @@ bool amdgpu_device_supports_smart_shift(struct amdgpu_device *adev)
 void amdgpu_device_mm_access(struct amdgpu_device *adev, loff_t pos,
 			     void *buf, size_t size, bool write)
 {
+	static const struct amdgpu_mm_access_ops ops = {
+		amdgpu_mm_access_read32, amdgpu_mm_access_write32,
+	};
 	unsigned long flags;
-	uint32_t hi = ~0, tmp = 0;
-	uint32_t *data = buf;
-	uint64_t last;
 	int idx;
 
 	if (!drm_dev_enter(adev_to_drm(adev), &idx))
@@ -725,19 +744,7 @@ void amdgpu_device_mm_access(struct amdgpu_device *adev, loff_t pos,
 	}
 
 	spin_lock_irqsave(&adev->mmio_idx_lock, flags);
-	for (last = pos + size; pos < last; pos += 4) {
-		tmp = pos >> 31;
-
-		WREG32_NO_KIQ(mmMM_INDEX, ((uint32_t)pos) | 0x80000000);
-		if (tmp != hi) {
-			WREG32_NO_KIQ(mmMM_INDEX_HI, tmp);
-			hi = tmp;
-		}
-		if (write)
-			WREG32_NO_KIQ(mmMM_DATA, *data++);
-		else
-			*data++ = RREG32_NO_KIQ(mmMM_DATA);
-	}
+	amdgpu_mm_access_core(&ops, adev, pos, buf, size, write);
 
 	spin_unlock_irqrestore(&adev->mmio_idx_lock, flags);
 	drm_dev_exit(idx);
@@ -1559,38 +1566,8 @@ def_value:
 
 static int amdgpu_device_init_apu_flags(struct amdgpu_device *adev)
 {
-	if (!(adev->flags & AMD_IS_APU) ||
-	    adev->asic_type < CHIP_RAVEN)
-		return 0;
-
-	switch (adev->asic_type) {
-	case CHIP_RAVEN:
-		if (adev->pdev->device == 0x15dd)
-			adev->apu_flags |= AMD_APU_IS_RAVEN;
-		if (adev->pdev->device == 0x15d8)
-			adev->apu_flags |= AMD_APU_IS_PICASSO;
-		break;
-	case CHIP_RENOIR:
-		if ((adev->pdev->device == 0x1636) ||
-		    (adev->pdev->device == 0x164c))
-			adev->apu_flags |= AMD_APU_IS_RENOIR;
-		else
-			adev->apu_flags |= AMD_APU_IS_GREEN_SARDINE;
-		break;
-	case CHIP_VANGOGH:
-		adev->apu_flags |= AMD_APU_IS_VANGOGH;
-		break;
-	case CHIP_YELLOW_CARP:
-		break;
-	case CHIP_CYAN_SKILLFISH:
-		if ((adev->pdev->device == 0x13FE) ||
-		    (adev->pdev->device == 0x143F))
-			adev->apu_flags |= AMD_APU_IS_CYAN_SKILLFISH2;
-		break;
-	default:
-		break;
-	}
-
+	adev->apu_flags = amdgpu_initial_apu_flags(adev->flags, adev->asic_type,
+						adev->pdev->device, adev->apu_flags);
 	return 0;
 }
 
@@ -2020,13 +1997,9 @@ static int amdgpu_device_ip_early_init(struct amdgpu_device *adev)
 			return r;
 	}
 
-	switch (adev->asic_type) {
+	switch (amdgpu_initial_ip_path(adev->asic_type)) {
 #ifdef CONFIG_DRM_AMDGPU_SI
-	case CHIP_VERDE:
-	case CHIP_TAHITI:
-	case CHIP_PITCAIRN:
-	case CHIP_OLAND:
-	case CHIP_HAINAN:
+	case AMDGPU_INITIAL_IP_SI:
 		adev->family = AMDGPU_FAMILY_SI;
 		r = si_set_ip_blocks(adev);
 		if (r)
@@ -2034,11 +2007,7 @@ static int amdgpu_device_ip_early_init(struct amdgpu_device *adev)
 		break;
 #endif
 #ifdef CONFIG_DRM_AMDGPU_CIK
-	case CHIP_BONAIRE:
-	case CHIP_HAWAII:
-	case CHIP_KAVERI:
-	case CHIP_KABINI:
-	case CHIP_MULLINS:
+	case AMDGPU_INITIAL_IP_CIK:
 		if (adev->flags & AMD_IS_APU)
 			adev->family = AMDGPU_FAMILY_KV;
 		else
@@ -2049,15 +2018,7 @@ static int amdgpu_device_ip_early_init(struct amdgpu_device *adev)
 			return r;
 		break;
 #endif
-	case CHIP_TOPAZ:
-	case CHIP_TONGA:
-	case CHIP_FIJI:
-	case CHIP_POLARIS10:
-	case CHIP_POLARIS11:
-	case CHIP_POLARIS12:
-	case CHIP_VEGAM:
-	case CHIP_CARRIZO:
-	case CHIP_STONEY:
+	case AMDGPU_INITIAL_IP_VI:
 		if (adev->flags & AMD_IS_APU)
 			adev->family = AMDGPU_FAMILY_CZ;
 		else
@@ -3894,13 +3855,9 @@ int amdgpu_device_init(struct amdgpu_device *adev,
 
 	/* Registers mapping */
 	/* TODO: block userspace mapping of io register */
-	if (adev->asic_type >= CHIP_BONAIRE) {
-		adev->rmmio_base = pci_resource_start(adev->pdev, 5);
-		adev->rmmio_size = pci_resource_len(adev->pdev, 5);
-	} else {
-		adev->rmmio_base = pci_resource_start(adev->pdev, 2);
-		adev->rmmio_size = pci_resource_len(adev->pdev, 2);
-	}
+	i = amdgpu_native_register_bar(adev->asic_type);
+	adev->rmmio_base = pci_resource_start(adev->pdev, i);
+	adev->rmmio_size = pci_resource_len(adev->pdev, i);
 
 	for (i = 0; i < AMD_IP_BLOCK_TYPE_NUM; i++)
 		atomic_set(&adev->pm.pwr_state[i], POWER_STATE_UNKNOWN);

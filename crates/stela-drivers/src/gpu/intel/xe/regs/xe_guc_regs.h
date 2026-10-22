@@ -6,8 +6,15 @@
 #ifndef _XE_GUC_REGS_H_
 #define _XE_GUC_REGS_H_
 
+#ifdef STELA_NATIVE
+#include "../xe_scalar_types.h"
+#ifndef __packed
+#define __packed __attribute__((packed))
+#endif
+#else
 #include <linux/compiler.h>
 #include <linux/types.h>
+#endif
 
 #include "regs/xe_reg_defs.h"
 #include "regs/xe_guc_ct_regs.h"

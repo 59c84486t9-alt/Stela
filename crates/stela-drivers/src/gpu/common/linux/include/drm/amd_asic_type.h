@@ -23,7 +23,11 @@
 #ifndef __AMD_ASIC_TYPE_H__
 #define __AMD_ASIC_TYPE_H__
 
+#ifdef __KERNEL__
 #include <linux/types.h>
+#else
+#include <stdint.h>
+#endif
 
 /*
  * Supported ASIC types
@@ -73,7 +77,11 @@ extern const char *amdgpu_asic_name[];
 
 struct amdgpu_asic_type_quirk {
 	unsigned short device;	/* PCI device ID */
+#ifdef __KERNEL__
 	u8 revision;	/* revision ID */
+#else
+	uint8_t revision;	/* revision ID */
+#endif
 	unsigned short type;	/* real ASIC type */
 };
 #endif /*__AMD_ASIC_TYPE_H__ */

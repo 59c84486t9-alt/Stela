@@ -902,25 +902,11 @@ static u32 amdgpu_virt_init_detect_asic(struct amdgpu_device *adev)
 {
 	uint32_t reg;
 
-	switch (adev->asic_type) {
-	case CHIP_TONGA:
-	case CHIP_FIJI:
-		reg = RREG32(mmBIF_IOV_FUNC_IDENTIFIER);
-		break;
-	case CHIP_VEGA10:
-	case CHIP_VEGA20:
-	case CHIP_NAVI10:
-	case CHIP_NAVI12:
-	case CHIP_SIENNA_CICHLID:
-	case CHIP_ARCTURUS:
-	case CHIP_ALDEBARAN:
-	case CHIP_IP_DISCOVERY:
-		reg = RREG32(mmRCC_IOV_FUNC_IDENTIFIER);
-		break;
-	default: /* other chip doesn't support SRIOV */
-		reg = 0;
-		break;
-	}
+ uint32_t identifier;
+ if (amdgpu_virt_bootstrap_iov_register(adev->asic_type, &identifier))
+  reg = RREG32(identifier);
+ else
+  reg = 0;
 
 	if (reg & 1)
 		adev->virt.caps |= AMDGPU_SRIOV_CAPS_IS_VF;

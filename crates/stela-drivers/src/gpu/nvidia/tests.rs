@@ -184,3 +184,365 @@ fn the_end_of_config_space_accepts_each_natural_width() {
     }
     assert_eq!(config.accesses.borrow().len(), 6);
 }
+
+unsafe extern "C" {
+    fn os_mem_copy(destination: *mut c_void, source: *const c_void, bytes: u32) -> *mut c_void;
+    fn os_mem_set(destination: *mut c_void, value: u8, bytes: u32) -> *mut c_void;
+    fn os_mem_cmp(left: *const u8, right: *const u8, bytes: u32) -> i32;
+    fn os_string_length(string: *const core::ffi::c_char) -> u32;
+}
+
+#[test]
+fn original_memory_primitives_preserve_returns_bytes_and_untouched_spans() {
+    let mut source = [0u8; 4096 + 32];
+    for (index, byte) in source.iter_mut().enumerate() {
+        *byte = (index.wrapping_mul(37) + 0x80) as u8;
+    }
+    for size in [
+        0, 1, 2, 3, 7, 8, 15, 16, 31, 32, 127, 128, 129, 255, 256, 4096,
+    ] {
+        for source_offset in 0..16 {
+            for destination_offset in 0..16 {
+                let mut destination = [0xa5u8; 4096 + 32];
+                // SAFETY: real nonoverlapping CPU arrays cover the complete
+                // ranges; zero-byte calls also use valid array pointers.
+                let pointer = unsafe { destination.as_mut_ptr().add(destination_offset) };
+                let input = unsafe { source.as_ptr().add(source_offset) };
+                assert_eq!(
+                    unsafe { os_mem_copy(pointer.cast(), input.cast(), size as u32) },
+                    pointer.cast()
+                );
+                for (index, &byte) in destination.iter().enumerate() {
+                    let expected = if (destination_offset..destination_offset + size)
+                        .contains(&index)
+                    {
+                        ((source_offset + index - destination_offset).wrapping_mul(37) + 0x80) as u8
+                    } else {
+                        0xa5
+                    };
+                    assert_eq!(
+                        byte, expected,
+                        "copy span: {size}/{source_offset}/{destination_offset}/{index}"
+                    );
+                }
+                // SAFETY: the same full CPU ranges remain readable.
+                assert_eq!(unsafe { os_mem_cmp(pointer, input, size as u32) }, 0);
+            }
+        }
+        for offset in 0..16 {
+            for value in [0, 0x80, 0xff] {
+                let mut destination = [0xa5u8; 4096 + 32];
+                // SAFETY: actual writable CPU array covers this complete span.
+                let pointer = unsafe { destination.as_mut_ptr().add(offset) };
+                assert_eq!(
+                    unsafe { os_mem_set(pointer.cast(), value, size as u32) },
+                    pointer.cast()
+                );
+                for (index, &byte) in destination.iter().enumerate() {
+                    assert_eq!(
+                        byte,
+                        if (offset..offset + size).contains(&index) {
+                            value
+                        } else {
+                            0xa5
+                        }
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn original_compare_uses_unsigned_first_difference_and_exact_requested_length() {
+    for size in [1, 2, 7, 8, 15, 16, 31, 32, 127, 128, 129, 256] {
+        for mismatch in 0..size {
+            for (left_byte, right_byte) in [(0, 0xff), (0x80, 0x7f), (0xff, 1)] {
+                let mut left = [0x6du8; 288];
+                let mut right = left;
+                left[mismatch] = left_byte;
+                right[mismatch] = right_byte;
+                // Differences outside the requested span cannot affect results.
+                left[size] = 0xff;
+                right[size] = 0;
+                let expected = (i32::from(left_byte) - i32::from(right_byte)).signum();
+                // SAFETY: both arrays cover the exact requested CPU byte range.
+                assert_eq!(
+                    unsafe { os_mem_cmp(left.as_ptr(), right.as_ptr(), size as u32) }.signum(),
+                    expected
+                );
+                assert_eq!(
+                    unsafe { os_mem_cmp(right.as_ptr(), left.as_ptr(), size as u32) }.signum(),
+                    -expected
+                );
+                assert_eq!(
+                    unsafe { os_mem_cmp(left.as_ptr(), right.as_ptr(), mismatch as u32) },
+                    0
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn original_string_length_counts_bytes_until_first_nul() {
+    let mut string = [0x80u8; 4096 + 32];
+    for offset in 0..16 {
+        for length in [0, 1, 2, 7, 8, 15, 16, 31, 32, 127, 128, 129, 4096] {
+            string.fill(0x80);
+            string[offset + length] = 0;
+            // SAFETY: readable real CPU array, bounded terminated C string.
+            let pointer = unsafe { string.as_ptr().add(offset) };
+            assert_eq!(unsafe { os_string_length(pointer.cast()) }, length as u32);
+        }
+    }
+}
+
+unsafe extern "C" {
+    fn nvkms_memcpy(destination: *mut c_void, source: *const c_void, bytes: usize) -> *mut c_void;
+    fn nvkms_memmove(destination: *mut c_void, source: *const c_void, bytes: usize) -> *mut c_void;
+    fn nvkms_memset(destination: *mut c_void, value: u8, bytes: usize) -> *mut c_void;
+    fn nvkms_memcmp(left: *const c_void, right: *const c_void, bytes: usize) -> i32;
+    fn nvkms_strlen(string: *const core::ffi::c_char) -> usize;
+    fn nvlink_memcpy(destination: *mut c_void, source: *const c_void, bytes: u64) -> *mut c_void;
+    fn nvlink_memset(destination: *mut c_void, value: i32, bytes: u64) -> *mut c_void;
+    fn nvlink_strlen(string: *const core::ffi::c_char) -> u64;
+    fn nvswitch_os_memcpy(
+        destination: *mut c_void,
+        source: *const c_void,
+        bytes: u64,
+    ) -> *mut c_void;
+    fn nvswitch_os_memset(destination: *mut c_void, value: i32, bytes: u64) -> *mut c_void;
+    fn nvswitch_os_strlen(string: *const core::ffi::c_char) -> u64;
+}
+
+#[test]
+fn original_display_link_and_switch_copy_set_preserve_bytes_returns_and_native_lengths() {
+    let mut source = [0u8; 4096 + 32];
+    for (index, byte) in source.iter_mut().enumerate() {
+        *byte = (index.wrapping_mul(53) + 0x81) as u8;
+    }
+    for size in [0, 1, 2, 7, 8, 15, 16, 31, 32, 127, 128, 129, 4096] {
+        for source_offset in 0..8 {
+            for destination_offset in 0..16 {
+                for variant in 0..3 {
+                    let mut destination = [0xa5u8; 4096 + 32];
+                    // SAFETY: real nonoverlapping CPU arrays cover both spans.
+                    let pointer = unsafe { destination.as_mut_ptr().add(destination_offset) };
+                    let input = unsafe { source.as_ptr().add(source_offset) };
+                    let returned = unsafe {
+                        match variant {
+                            0 => nvkms_memcpy(pointer.cast(), input.cast(), size),
+                            1 => nvlink_memcpy(pointer.cast(), input.cast(), size as u64),
+                            _ => nvswitch_os_memcpy(pointer.cast(), input.cast(), size as u64),
+                        }
+                    };
+                    assert_eq!(returned, pointer.cast());
+                    for (index, &byte) in destination.iter().enumerate() {
+                        let expected =
+                            if (destination_offset..destination_offset + size).contains(&index) {
+                                ((source_offset + index - destination_offset).wrapping_mul(53)
+                                    + 0x81) as u8
+                            } else {
+                                0xa5
+                            };
+                        assert_eq!(byte, expected);
+                    }
+                }
+            }
+        }
+        for offset in 0..16 {
+            for value in [-1i32, 0, 0x80, 0x180, 0x1ff] {
+                for variant in 0..3 {
+                    let mut destination = [0xa5u8; 4096 + 32];
+                    // SAFETY: actual CPU storage covers the complete span.
+                    let pointer = unsafe { destination.as_mut_ptr().add(offset) };
+                    let returned = unsafe {
+                        match variant {
+                            0 => nvkms_memset(pointer.cast(), value as u8, size),
+                            1 => nvlink_memset(pointer.cast(), value, size as u64),
+                            _ => nvswitch_os_memset(pointer.cast(), value, size as u64),
+                        }
+                    };
+                    assert_eq!(returned, pointer.cast());
+                    for (index, &byte) in destination.iter().enumerate() {
+                        assert_eq!(
+                            byte,
+                            if (offset..offset + size).contains(&index) {
+                                value as u8
+                            } else {
+                                0xa5
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn original_display_memmove_handles_both_overlap_directions_and_same_range() {
+    for size in [0, 1, 2, 7, 8, 15, 16, 31, 127, 128, 129, 256, 4096] {
+        for (source_offset, destination_offset) in [(0, 1), (1, 0), (7, 14), (14, 7), (8, 8)] {
+            let mut bytes = [0u8; 4096 + 32];
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte = (index.wrapping_mul(19) + 0x83) as u8;
+            }
+            // SAFETY: one real CPU allocation covers both full possibly
+            // overlapping ranges, which original memmove explicitly permits.
+            let source = unsafe { bytes.as_ptr().add(source_offset) };
+            let destination = unsafe { bytes.as_mut_ptr().add(destination_offset) };
+            assert_eq!(
+                unsafe { nvkms_memmove(destination.cast(), source.cast(), size) },
+                destination.cast()
+            );
+            for (index, &byte) in bytes.iter().enumerate() {
+                let original_index =
+                    if (destination_offset..destination_offset + size).contains(&index) {
+                        source_offset + index - destination_offset
+                    } else {
+                        index
+                    };
+                assert_eq!(byte, (original_index.wrapping_mul(19) + 0x83) as u8);
+            }
+        }
+    }
+}
+
+#[test]
+fn original_display_compare_and_native_length_returns_use_raw_unsigned_bytes() {
+    for size in [1, 2, 7, 8, 15, 16, 31, 127, 128, 129, 256] {
+        for mismatch in 0..size {
+            let mut left = [0x55u8; 288];
+            let mut right = left;
+            left[mismatch] = 0x80;
+            right[mismatch] = 0x7f;
+            left[size] = 0;
+            right[size] = 0xff;
+            // SAFETY: readable actual CPU arrays cover the exact requested spans.
+            unsafe {
+                assert_eq!(
+                    nvkms_memcmp(left.as_ptr().cast(), right.as_ptr().cast(), size).signum(),
+                    1
+                );
+                assert_eq!(
+                    nvkms_memcmp(right.as_ptr().cast(), left.as_ptr().cast(), size).signum(),
+                    -1
+                );
+                assert_eq!(
+                    nvkms_memcmp(left.as_ptr().cast(), right.as_ptr().cast(), mismatch),
+                    0
+                );
+            }
+        }
+    }
+    let mut string = [0x80u8; 4096 + 32];
+    for offset in 0..16 {
+        for length in [0, 1, 7, 8, 15, 16, 31, 127, 128, 129, 4096] {
+            string.fill(0x80);
+            string[offset + length] = 0;
+            // SAFETY: actual readable CPU bytes include their terminating NUL.
+            let pointer = unsafe { string.as_ptr().add(offset) };
+            unsafe {
+                assert_eq!(nvkms_strlen(pointer.cast()), length);
+                assert_eq!(nvlink_strlen(pointer.cast()), length as u64);
+                assert_eq!(nvswitch_os_strlen(pointer.cast()), length as u64);
+            }
+        }
+    }
+}
+
+#[test]
+fn nvlink_c_metadata_retains_full_payload_and_zero_size_ownership() {
+    unsafe extern "C" {
+        fn nvlink_malloc(bytes: u64) -> *mut c_void;
+        fn nvlink_free(pointer: *mut c_void);
+    }
+    let sizes = [0, 1, 7, 8, 15, 16, 17, 4095, 4096, 4097, 65537];
+    let mut pointers = [ptr::null_mut::<c_void>(); 11];
+    for (index, (&bytes, pointer)) in sizes.iter().zip(&mut pointers).enumerate() {
+        // SAFETY: this hosted process has a live common heap and no reentry.
+        *pointer = unsafe { nvlink_malloc(bytes) };
+        assert!(!pointer.is_null());
+        assert_eq!(*pointer as usize % 16, 0);
+        // SAFETY: the checked allocation owns the complete requested payload.
+        unsafe {
+            pointer
+                .cast::<u8>()
+                .write_bytes(index as u8, bytes as usize)
+        };
+    }
+    for (index, (&bytes, &pointer)) in sizes.iter().zip(&pointers).enumerate().rev() {
+        assert!(!pointers[..index].contains(&pointer));
+        // SAFETY: all allocations are still live and held only by this test.
+        let payload = unsafe { core::slice::from_raw_parts(pointer.cast::<u8>(), bytes as usize) };
+        assert!(payload.iter().all(|&byte| byte == index as u8));
+        // SAFETY: free exactly this allocator's original live pointer once.
+        unsafe { nvlink_free(pointer) };
+    }
+    // SAFETY: the original null-free contract is preserved by the common heap.
+    unsafe { nvlink_free(ptr::null_mut()) };
+}
+
+#[test]
+fn nvlink_c_invalid_native_layouts_return_null_before_allocating() {
+    unsafe extern "C" {
+        fn nvlink_malloc(bytes: u64) -> *mut c_void;
+    }
+    for bytes in [u64::MAX, isize::MAX as u64, isize::MAX as u64 - 16] {
+        // SAFETY: a scalar request; checked layouts refuse this before the heap.
+        assert!(unsafe { nvlink_malloc(bytes) }.is_null());
+    }
+}
+
+#[test]
+fn nvkms_c_metadata_zero_flags_and_native_sizes_use_the_real_common_heap() {
+    unsafe extern "C" {
+        fn nvkms_alloc(bytes: u64, zero: u8) -> *mut c_void;
+        fn nvkms_free(pointer: *mut c_void, bytes: u64);
+    }
+    let cases = [(0, 255), (1, 1), (15, 2), (16, 255), (17, 0), (4097, 1)];
+    let mut pointers = [ptr::null_mut::<c_void>(); 6];
+    for (index, (&(bytes, zero), pointer)) in cases.iter().zip(&mut pointers).enumerate() {
+        // SAFETY: ordinary hosted process context, live shared heap, no reentry.
+        *pointer = unsafe { nvkms_alloc(bytes, zero) };
+        assert!(!pointer.is_null());
+        assert_eq!(*pointer as usize % 16, 0);
+        if zero != 0 {
+            // SAFETY: successful allocation initialized the full requested span.
+            let payload =
+                unsafe { core::slice::from_raw_parts(pointer.cast::<u8>(), bytes as usize) };
+            assert!(payload.iter().all(|&byte| byte == 0));
+        }
+        // SAFETY: uniquely owned complete payload, initialized before reading.
+        unsafe {
+            pointer
+                .cast::<u8>()
+                .write_bytes(0x70 + index as u8, bytes as usize)
+        };
+    }
+    for (index, (&(bytes, _), &pointer)) in cases.iter().zip(&pointers).enumerate().rev() {
+        assert!(!pointers[..index].contains(&pointer));
+        // SAFETY: all allocations are still live and exclusively held here.
+        let payload = unsafe { core::slice::from_raw_parts(pointer.cast::<u8>(), bytes as usize) };
+        assert!(payload.iter().all(|&byte| byte == 0x70 + index as u8));
+        // SAFETY: original pointer and exact size, once, after all access stops.
+        unsafe { nvkms_free(pointer, bytes) };
+    }
+    // SAFETY: original NULL-free contract is valid independently of the size.
+    unsafe { nvkms_free(ptr::null_mut(), u64::MAX) };
+}
+
+#[test]
+fn nvkms_c_invalid_layouts_fail_for_every_original_zero_flag_value() {
+    unsafe extern "C" {
+        fn nvkms_alloc(bytes: u64, zero: u8) -> *mut c_void;
+    }
+    for zero in [0, 1, 2, 255] {
+        for bytes in [u64::MAX, isize::MAX as u64, isize::MAX as u64 - 16] {
+            // SAFETY: invalid scalar layouts are rejected before heap access.
+            assert!(unsafe { nvkms_alloc(bytes, zero) }.is_null());
+        }
+    }
+}

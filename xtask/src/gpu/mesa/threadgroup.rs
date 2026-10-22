@@ -32,6 +32,11 @@ pub(super) fn run(
                 .context("missing threadgroup snapshot")
         })
         .collect::<Result<Vec<_>>>()?;
+    result.probes.push(super::library::verify_shared(
+        build,
+        evidence,
+        Path::new(paths[0]),
+    )?);
     let binary = build.join("src/stela/stela_nv_air_threadgroup_probe");
     let artifacts = evidence.join("nv-threadgroup-artifacts");
     fs::create_dir(&artifacts)?;

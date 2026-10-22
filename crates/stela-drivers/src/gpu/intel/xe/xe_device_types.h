@@ -19,6 +19,7 @@
 #include "xe_oa_types.h"
 #include "xe_pagefault_types.h"
 #include "xe_platform_types.h"
+#include "xe_pci_types.h"
 #include "xe_pmu_types.h"
 #include "xe_pt_types.h"
 #include "xe_sriov_pf_types.h"
@@ -69,7 +70,6 @@ enum xe_wedged_mode {
 #define MEDIA_VERx100(xe) ((xe)->info.media_verx100)
 #define IS_DGFX(xe) ((xe)->info.is_dgfx)
 
-#define XE_VRAM_FLAGS_NEED64K		BIT(0)
 
 #define XE_GT0		0
 #define XE_GT1		1

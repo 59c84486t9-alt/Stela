@@ -6,9 +6,15 @@
 #ifndef _XE_PCI_TYPES_H_
 #define _XE_PCI_TYPES_H_
 
+#ifdef STELA_NATIVE
+#include "xe_scalar_types.h"
+#else
 #include <linux/types.h>
+#endif
 
 #include "xe_platform_types.h"
+
+#define XE_VRAM_FLAGS_NEED64K		BIT(0)
 
 struct xe_subplatform_desc {
 	enum xe_subplatform subplatform;

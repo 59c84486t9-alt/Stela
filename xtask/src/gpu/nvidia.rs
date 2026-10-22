@@ -20,6 +20,12 @@ use xz2::{
 };
 
 mod archive;
+mod layout;
+mod lut;
+mod memory;
+mod ordering;
+mod page_geometry;
+mod primitives;
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
 pub enum Target {
@@ -160,6 +166,14 @@ pub fn build(jobs: u16, target: Target) -> Result<()> {
         );
     }
     let evidence = evidence_directory()?;
+    if target == Target::Stela {
+        layout::verify(&toolchain.clang, &source, &evidence.join("record-layout"))?;
+        lut::verify(&toolchain.clang, &source, &evidence.join("lut-layout"))?;
+        memory::verify(&toolchain.clang, &source, &evidence.join("nvkms-memory"))?;
+        primitives::verify(&toolchain.clang, &source, &evidence.join("cpu-primitives"))?;
+        page_geometry::verify(&toolchain.clang, &source, &evidence.join("page-geometry"))?;
+        ordering::verify(&toolchain.clang, &source, &evidence.join("ordering"))?;
+    }
     for (component, subdirectory, reference_artifact) in [
         ("core", "src/nvidia", "nv-kernel.o"),
         ("modeset", "src/nvidia-modeset", "nv-modeset-kernel.o"),

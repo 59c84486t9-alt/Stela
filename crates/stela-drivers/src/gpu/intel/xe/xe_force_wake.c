@@ -13,8 +13,7 @@
 #include "xe_gt_printk.h"
 #include "xe_mmio.h"
 #include "xe_sriov.h"
-
-#define XE_FORCE_WAKE_ACK_TIMEOUT_MS	50
+#include "xe_force_wake_gt.h"
 
 static const char *str_wake_sleep(bool wake)
 {
@@ -33,11 +32,7 @@ static void init_domain(struct xe_force_wake *fw,
 {
 	struct xe_force_wake_domain *domain = &fw->domains[id];
 
-	domain->id = id;
-	domain->reg_ctl = reg;
-	domain->reg_ack = ack;
-	domain->val = FORCEWAKE_MT(FORCEWAKE_KERNEL);
-	domain->mask = FORCEWAKE_MT_MASK(FORCEWAKE_KERNEL);
+	xe_force_wake_domain_init(domain, id, reg, ack);
 
 	mark_domain_initialized(fw, id);
 }
@@ -49,15 +44,8 @@ void xe_force_wake_init_gt(struct xe_gt *gt, struct xe_force_wake *fw)
 	fw->gt = gt;
 	spin_lock_init(&fw->lock);
 
-	if (xe->info.graphics_verx100 >= 1270) {
-		init_domain(fw, XE_FW_DOMAIN_ID_GT,
-			    FORCEWAKE_GT,
-			    FORCEWAKE_ACK_GT_MTL);
-	} else {
-		init_domain(fw, XE_FW_DOMAIN_ID_GT,
-			    FORCEWAKE_GT,
-			    FORCEWAKE_ACK_GT);
-	}
+	init_domain(fw, XE_FW_DOMAIN_ID_GT, FORCEWAKE_GT,
+		    xe_force_wake_gt_ack(xe->info.graphics_verx100));
 }
 
 void xe_force_wake_init_engines(struct xe_gt *gt, struct xe_force_wake *fw)
@@ -98,7 +86,7 @@ static void __domain_ctl(struct xe_gt *gt, struct xe_force_wake_domain *domain, 
 	if (IS_SRIOV_VF(gt_to_xe(gt)))
 		return;
 
-	xe_mmio_write32(&gt->mmio, domain->reg_ctl, domain->mask | (wake ? domain->val : 0));
+	xe_mmio_write32(&gt->mmio, domain->reg_ctl, xe_force_wake_control(domain, wake));
 }
 
 static int __domain_wait(struct xe_gt *gt, struct xe_force_wake_domain *domain, bool wake)
@@ -120,32 +108,30 @@ static int __domain_wait(struct xe_gt *gt, struct xe_force_wake_domain *domain, 
 		xe_gt_err(gt,
 			  "Force wake domain %d: %s. MMIO unreliable (forcewake register returns 0xFFFFFFFF)!\n",
 			  domain->id, str_wake_sleep(wake));
-		ret = -EIO;
 	}
 
-	return ret;
+	return xe_force_wake_wait_status(ret, value);
 }
 
-static void domain_wake(struct xe_gt *gt, struct xe_force_wake_domain *domain)
+static void core_control(void *context, struct xe_force_wake_domain *domain, bool wake)
 {
-	__domain_ctl(gt, domain, true);
+	__domain_ctl(context, domain, wake);
 }
-
-static int domain_wake_wait(struct xe_gt *gt,
-			    struct xe_force_wake_domain *domain)
+static int core_wait(void *context, struct xe_force_wake_domain *domain, bool wake)
 {
-	return __domain_wait(gt, domain, true);
+	return __domain_wait(context, domain, wake);
 }
-
-static void domain_sleep(struct xe_gt *gt, struct xe_force_wake_domain *domain)
+static void core_invariant(void *context, bool condition)
 {
-	__domain_ctl(gt, domain, false);
+	xe_gt_assert((struct xe_gt *)context, condition);
 }
-
-static int domain_sleep_wait(struct xe_gt *gt,
-			     struct xe_force_wake_domain *domain)
+static struct xe_force_wake_core xe_fw_core(struct xe_force_wake *fw)
 {
-	return __domain_wait(gt, domain, false);
+	static const struct xe_force_wake_core_ops ops = {
+		.control = core_control, .wait = core_wait, .invariant = core_invariant,
+	};
+	return (struct xe_force_wake_core){fw->gt, &ops, fw->initialized_domains,
+		&fw->awake_domains, fw->domains};
 }
 
 /**
@@ -174,33 +160,16 @@ unsigned int __must_check xe_force_wake_get(struct xe_force_wake *fw,
 					    enum xe_force_wake_domains domains)
 {
 	struct xe_gt *gt = fw->gt;
-	struct xe_force_wake_domain *domain;
-	unsigned int ref_incr = 0, awake_rqst = 0, awake_failed = 0;
-	unsigned int tmp, ref_rqst;
+	unsigned int ref_incr, awake_failed;
 	unsigned long flags;
 
 	xe_gt_assert(gt, is_power_of_2(domains));
 	xe_gt_assert(gt, domains <= XE_FORCEWAKE_ALL);
 	xe_gt_assert(gt, domains == XE_FORCEWAKE_ALL || fw->initialized_domains & domains);
 
-	ref_rqst = (domains == XE_FORCEWAKE_ALL) ? fw->initialized_domains : domains;
 	spin_lock_irqsave(&fw->lock, flags);
-	for_each_fw_domain_masked(domain, ref_rqst, fw, tmp) {
-		if (!domain->ref++) {
-			awake_rqst |= BIT(domain->id);
-			domain_wake(gt, domain);
-		}
-		ref_incr |= BIT(domain->id);
-	}
-	for_each_fw_domain_masked(domain, awake_rqst, fw, tmp) {
-		if (domain_wake_wait(gt, domain) == 0) {
-			fw->awake_domains |= BIT(domain->id);
-		} else {
-			awake_failed |= BIT(domain->id);
-			--domain->ref;
-		}
-	}
-	ref_incr &= ~awake_failed;
+	struct xe_force_wake_core core = xe_fw_core(fw);
+	ref_incr = xe_force_wake_get_locked(&core, domains, &awake_failed);
 	spin_unlock_irqrestore(&fw->lock, flags);
 
 	xe_gt_WARN(gt, awake_failed, "Forcewake domain%s %#x failed to acknowledge awake request\n",
@@ -225,8 +194,6 @@ unsigned int __must_check xe_force_wake_get(struct xe_force_wake *fw,
 void xe_force_wake_put(struct xe_force_wake *fw, unsigned int fw_ref)
 {
 	struct xe_gt *gt = fw->gt;
-	struct xe_force_wake_domain *domain;
-	unsigned int tmp, sleep = 0;
 	unsigned long flags;
 	int ack_fail = 0;
 
@@ -241,20 +208,8 @@ void xe_force_wake_put(struct xe_force_wake *fw, unsigned int fw_ref)
 		fw_ref = fw->initialized_domains;
 
 	spin_lock_irqsave(&fw->lock, flags);
-	for_each_fw_domain_masked(domain, fw_ref, fw, tmp) {
-		xe_gt_assert(gt, domain->ref);
-
-		if (!--domain->ref) {
-			sleep |= BIT(domain->id);
-			domain_sleep(gt, domain);
-		}
-	}
-	for_each_fw_domain_masked(domain, sleep, fw, tmp) {
-		if (domain_sleep_wait(gt, domain) == 0)
-			fw->awake_domains &= ~BIT(domain->id);
-		else
-			ack_fail |= BIT(domain->id);
-	}
+	struct xe_force_wake_core core = xe_fw_core(fw);
+	ack_fail = (int)xe_force_wake_put_locked(&core, fw_ref);
 	spin_unlock_irqrestore(&fw->lock, flags);
 
 	xe_gt_WARN(gt, ack_fail, "Forcewake domain%s %#x failed to acknowledge sleep request\n",

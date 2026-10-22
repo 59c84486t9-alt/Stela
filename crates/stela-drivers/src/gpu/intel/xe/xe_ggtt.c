@@ -171,13 +171,16 @@ static u64 xelpg_ggtt_pte_flags(struct xe_bo *bo, u16 pat_index)
 	return pte;
 }
 
+#define XE_GGTT_PROBE_ASSERT(context, condition) \
+	xe_tile_assert(((struct xe_ggtt *)(context))->tile, condition)
+#include "xe_ggtt_probe_core.h"
+
 static unsigned int probe_gsm_size(struct pci_dev *pdev)
 {
-	u16 gmch_ctl, ggms;
+	u16 gmch_ctl;
 
 	pci_read_config_word(pdev, SNB_GMCH_CTRL, &gmch_ctl);
-	ggms = (gmch_ctl >> BDW_GMCH_GGMS_SHIFT) & BDW_GMCH_GGMS_MASK;
-	return ggms ? SZ_1M << ggms : 0;
+	return xe_ggtt_probe_gsm_decode(gmch_ctl);
 }
 
 static void ggtt_update_access_counter(struct xe_ggtt *ggtt)
@@ -251,10 +254,7 @@ static void xe_ggtt_set_pte_and_flush(struct xe_ggtt *ggtt, u64 addr, u64 pte)
 
 static u64 xe_ggtt_get_pte(struct xe_ggtt *ggtt, u64 addr)
 {
-	xe_tile_assert(ggtt->tile, !(addr & XE_PTE_MASK));
-	xe_tile_assert(ggtt->tile, addr < ggtt->start + ggtt->size);
-
-	return readq(&ggtt->gsm[addr >> XE_PTE_SHIFT]);
+	return readq(&ggtt->gsm[xe_ggtt_probe_pte_index(ggtt, ggtt->start, ggtt->size, addr)]);
 }
 
 static void xe_ggtt_clear(struct xe_ggtt *ggtt, u64 start, u64 size)
@@ -397,7 +397,7 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 	int err;
 
 	if (!IS_SRIOV_VF(xe)) {
-		if (GRAPHICS_VERx100(xe) >= 1250)
+		if (xe_ggtt_probe_fixed_gsm(GRAPHICS_VERx100(xe)))
 			gsm_size = SZ_8M; /* GGTT is expected to be 4GiB */
 		else
 			gsm_size = probe_gsm_size(pdev);
@@ -405,8 +405,7 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 			xe_tile_err(ggtt->tile, "Hardware reported no preallocated GSM\n");
 			return -ENOMEM;
 		}
-		ggtt_start = wopcm;
-		ggtt_size = (gsm_size / 8) * (u64)XE_PAGE_SIZE - ggtt_start;
+		xe_ggtt_probe_pf_range(gsm_size, wopcm, &ggtt_start, &ggtt_size);
 	} else {
 		ggtt_start = xe_tile_sriov_vf_ggtt_base(ggtt->tile);
 		ggtt_size = xe_tile_sriov_vf_ggtt(ggtt->tile);
@@ -419,12 +418,11 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 		}
 	}
 
-	ggtt->gsm = ggtt->tile->mmio.regs + SZ_8M;
+	ggtt->gsm = ggtt->tile->mmio.regs + xe_ggtt_probe_gsm_offset();
 	if (IS_DGFX(xe) && xe->info.vram_flags & XE_VRAM_FLAGS_NEED64K)
 		ggtt->flags |= XE_GGTT_FLAGS_64K;
 
-	if (ggtt_size + ggtt_start > GUC_GGTT_TOP)
-		ggtt_size = GUC_GGTT_TOP - ggtt_start;
+	xe_ggtt_probe_clamp_range(ggtt_start, &ggtt_size);
 
 	if (GRAPHICS_VERx100(xe) >= 1270)
 		ggtt->pt_ops =

@@ -218,15 +218,16 @@ u32 xe_mmio_rmw32(struct xe_mmio *mmio, struct xe_reg reg, u32 clr, u32 set)
 	return old;
 }
 
+#define XE_MMIO_VERIFY_NAME xe_mmio_verify_core
+#define XE_MMIO_VERIFY_CONTEXT struct xe_mmio
+#define XE_MMIO_VERIFY_WRITE xe_mmio_write32
+#define XE_MMIO_VERIFY_READ xe_mmio_read32
+#include "xe_mmio_verify.h"
+
 int xe_mmio_write32_and_verify(struct xe_mmio *mmio,
 			       struct xe_reg reg, u32 val, u32 mask, u32 eval)
 {
-	u32 reg_val;
-
-	xe_mmio_write32(mmio, reg, val);
-	reg_val = xe_mmio_read32(mmio, reg);
-
-	return (reg_val & mask) != eval ? -EINVAL : 0;
+	return xe_mmio_verify_core(mmio, reg, val, mask, eval);
 }
 
 bool xe_mmio_in_range(const struct xe_mmio *mmio,
@@ -288,58 +289,27 @@ u64 xe_mmio_read64_2x32(struct xe_mmio *mmio, struct xe_reg reg)
 	return (u64)udw << 32 | ldw;
 }
 
-static int __xe_mmio_wait32(struct xe_mmio *mmio, struct xe_reg reg, u32 mask, u32 val,
-			    u32 timeout_us, u32 *out_val, bool atomic, bool expect_match)
-{
-	ktime_t cur = ktime_get_raw();
-	const ktime_t end = ktime_add_us(cur, timeout_us);
-	int ret = -ETIMEDOUT;
-	s64 wait = 10;
-	u32 read;
-	bool check;
-
-	for (;;) {
-		read = xe_mmio_read32(mmio, reg);
-
-		check = (read & mask) == val;
-		if (!expect_match)
-			check = !check;
-
-		if (check) {
-			ret = 0;
-			break;
-		}
-
-		cur = ktime_get_raw();
-		if (!ktime_before(cur, end))
-			break;
-
-		if (ktime_after(ktime_add_us(cur, wait), end))
-			wait = ktime_us_delta(end, cur);
-
-		if (atomic)
-			udelay(wait);
-		else
-			usleep_range(wait, wait << 1);
-		wait <<= 1;
-	}
-
-	if (ret != 0) {
-		read = xe_mmio_read32(mmio, reg);
-
-		check = (read & mask) == val;
-		if (!expect_match)
-			check = !check;
-
-		if (check)
-			ret = 0;
-	}
-
-	if (out_val)
-		*out_val = read;
-
-	return ret;
-}
+#define XE_MMIO_POLL_NAME __xe_mmio_wait32
+#define XE_MMIO_POLL_CONTEXT struct xe_mmio
+#define XE_MMIO_POLL_TIME ktime_t
+#define XE_MMIO_POLL_NOW(mmio) ktime_get_raw()
+#define XE_MMIO_POLL_ADD_US ktime_add_us
+#define XE_MMIO_POLL_READ xe_mmio_read32
+#define XE_MMIO_POLL_BEFORE ktime_before
+#define XE_MMIO_POLL_AFTER ktime_after
+#define XE_MMIO_POLL_DELTA_US ktime_us_delta
+#define XE_MMIO_POLL_DELAY(mmio, wait, atomic) do { if (atomic) udelay(wait); else usleep_range(wait, (wait) << 1); } while (0)
+#include "xe_mmio_poll.h"
+#undef XE_MMIO_POLL_NAME
+#undef XE_MMIO_POLL_CONTEXT
+#undef XE_MMIO_POLL_TIME
+#undef XE_MMIO_POLL_NOW
+#undef XE_MMIO_POLL_ADD_US
+#undef XE_MMIO_POLL_READ
+#undef XE_MMIO_POLL_BEFORE
+#undef XE_MMIO_POLL_AFTER
+#undef XE_MMIO_POLL_DELTA_US
+#undef XE_MMIO_POLL_DELAY
 
 /**
  * xe_mmio_wait32() - Wait for a register to match the desired masked value

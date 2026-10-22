@@ -26,8 +26,7 @@
 
 #include <linux/debugfs.h>
 
-#define DISCOVERY_TMR_SIZE      (10 << 10)
-#define DISCOVERY_TMR_OFFSET    (64 << 10)
+#include "amdgpu_discovery_tmr_limits.h"
 
 struct ip_discovery_top;
 struct drm_printer;

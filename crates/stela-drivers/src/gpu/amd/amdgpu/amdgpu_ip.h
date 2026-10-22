@@ -25,64 +25,11 @@
 #define __AMDGPU_IP_H__
 
 #include "amd_shared.h"
+#include "amdgpu_ip_limits.h"
 
 struct amdgpu_device;
 
-/* Define the HW IP blocks will be used in driver , add more if necessary */
-enum amd_hw_ip_block_type {
-	GC_HWIP = 1,
-	HDP_HWIP,
-	SDMA0_HWIP,
-	SDMA1_HWIP,
-	SDMA2_HWIP,
-	SDMA3_HWIP,
-	SDMA4_HWIP,
-	SDMA5_HWIP,
-	SDMA6_HWIP,
-	SDMA7_HWIP,
-	LSDMA_HWIP,
-	MMHUB_HWIP,
-	ATHUB_HWIP,
-	NBIO_HWIP,
-	MP0_HWIP,
-	MP1_HWIP,
-	UVD_HWIP,
-	VCN_HWIP = UVD_HWIP,
-	JPEG_HWIP = VCN_HWIP,
-	VCN1_HWIP,
-	VCE_HWIP,
-	VPE_HWIP,
-	DF_HWIP,
-	DCE_HWIP,
-	OSSSYS_HWIP,
-	SMUIO_HWIP,
-	PWR_HWIP,
-	NBIF_HWIP,
-	THM_HWIP,
-	CLK_HWIP,
-	UMC_HWIP,
-	RSMU_HWIP,
-	XGMI_HWIP,
-	DCI_HWIP,
-	PCIE_HWIP,
-	ISP_HWIP,
-	ATU_HWIP,
-	AIGC_HWIP,
-	MAX_HWIP
-};
-
-#define HWIP_MAX_INSTANCE 48
-
-#define HW_ID_MAX 300
-#define IP_VERSION_FULL(mj, mn, rv, var, srev) \
-	(((mj) << 24) | ((mn) << 16) | ((rv) << 8) | ((var) << 4) | (srev))
-#define IP_VERSION(mj, mn, rv) IP_VERSION_FULL(mj, mn, rv, 0, 0)
-#define IP_VERSION_MAJ(ver) ((ver) >> 24)
-#define IP_VERSION_MIN(ver) (((ver) >> 16) & 0xFF)
-#define IP_VERSION_REV(ver) (((ver) >> 8) & 0xFF)
-#define IP_VERSION_VARIANT(ver) (((ver) >> 4) & 0xF)
-#define IP_VERSION_SUBREV(ver) ((ver) & 0xF)
-#define IP_VERSION_MAJ_MIN_REV(ver) ((ver) >> 8)
+#include "amdgpu_ip_types.h"
 
 struct amdgpu_ip_map_info {
 	/* Map of logical to actual dev instances/mask */

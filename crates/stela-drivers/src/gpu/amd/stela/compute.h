@@ -54,7 +54,9 @@ struct stela_amd_compute_binding {
  * code is its real, published code allocation/view with sufficient retained
  * prefetch padding and 256-byte program alignment. No allocation, upload,
  * shader replacement, cache flush, device initialization or submission occurs.
- * Missing scratch/descriptor/sampler owners remain explicit refusals.
+ * Zero buffer bindings are valid when the actual argument layout requires no
+ * user address pairs; bindings may then be NULL. Missing required bindings or
+ * scratch/descriptor/sampler owners remain explicit refusals.
  * Output is unchanged on every error.
  */
 enum stela_amd_compute_status

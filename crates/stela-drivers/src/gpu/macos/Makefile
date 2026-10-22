@@ -23,20 +23,29 @@ else
 $(error unsupported kernel architecture $(ARCH))
 endif
 
-OBJECTS := $(BUILD)/memory.o
-DEPENDS := $(OBJECTS:.o=.d)
+OBJECTS := $(BUILD)/memory.o $(BUILD)/task_memory.o
+DEPENDS := $(OBJECTS:.o=.d) $(BUILD)/task-memory-contract.d
 
-.PHONY: all
-all: $(BUILD)/gpu-memory.o
+.PHONY: all contract-tests
+all: $(BUILD)/gpu-memory.o $(BUILD)/task_memory.o
 
 $(BUILD):
 	mkdir -p "$@"
 
-$(BUILD)/memory.o: $(SOURCE)/memory.cpp | $(BUILD)
+$(BUILD)/%.o: $(SOURCE)/%.cpp | $(BUILD)
 	"$(CXX)" $(COMMON) -fapple-kext -fno-exceptions -fno-rtti \
 	    -std=gnu++17 -MD -MP -c "$<" -o "$@"
 
-$(BUILD)/gpu-memory.o: $(OBJECTS)
-	"$(LD)" -r -arch $(ARCH) -o "$@" $(OBJECTS)
+$(BUILD)/gpu-memory.o: $(BUILD)/memory.o
+	"$(LD)" -r -arch $(ARCH) -o "$@" "$<"
+
+# Host-only ownership/error tests. No mocks enter the kernel component.
+contract-tests: $(BUILD)/task-memory-contract
+	"$<"
+
+$(BUILD)/task-memory-contract: $(SOURCE)/tests/task_memory_contract.cpp $(SOURCE)/task_memory.cpp $(SOURCE)/task_memory.h | $(BUILD)
+	"$(CXX)" -std=gnu++17 -isysroot "$(SDKROOT)" -idirafter "$(HEADERS)" \
+	    -O2 -g -Wall -Wextra -Werror -Wconversion -fsanitize=address,undefined \
+	    -fno-omit-frame-pointer -MD -MP "$<" -o "$@"
 
 -include $(DEPENDS)

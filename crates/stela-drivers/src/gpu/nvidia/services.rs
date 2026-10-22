@@ -3,11 +3,11 @@
 //! No global registry, fallback allocator, IRQ-context predicate or DMA identity
 //! conversion is introduced. RM activation still requires its remaining native
 //! services, including its original interrupt-allocation/context contract.
-use super::{allocation::Allocation, memory};
+use super::{allocation::Allocation, firmware::FirmwareBinding, memory, page_geometry};
 use crate::bus::{
     dma::{
         mapping::DmaDomain,
-        memory::{CacheAttribute, MemoryError, PageSource},
+        memory::{CacheAttribute, MemoryError, PageGeometry, PageSource},
     },
     pci::Address,
 };
@@ -32,6 +32,7 @@ pub enum ServiceError {
     InvalidConfiguration,
     AlreadyBound,
     Native(u32),
+    PageGeometry(page_geometry::Error),
 }
 
 /// Retained allocation provenance. DMA uses this actual attached domain and
@@ -51,8 +52,9 @@ pub(super) struct Origin {
 /// process/deferred context. This handle is neither Send nor Sync.
 ///
 /// Keep the source, state and handle alive through all native callers and all
-/// producer allocations/published DMA tokens. Unbind refuses until every such
-/// allocation is freed and every DMA token is retired or quarantined. Therefore
+/// producer allocations/published DMA tokens and firmware tokens. Unbind refuses
+/// until every allocation is freed, every DMA token is retired or quarantined,
+/// and every firmware token is returned. Therefore
 /// no map-capable old handle can legitimately survive a rebind/address reuse.
 /// CPU-only views and consumed quarantine independently retain actual pins/domain
 /// and may survive. Final releases still obey backing/domain/heap context rules.
@@ -61,10 +63,13 @@ pub struct MemoryServices<'a> {
     domain: Arc<dyn DmaDomain>,
     requester: Address,
     page_shift: u8,
+    geometry: PageGeometry,
     address_limit: u64,
     state: *mut c_void,
     allocations: Cell<usize>,
     mappings: Cell<usize>,
+    pub(super) firmware: Option<FirmwareBinding<'a>>,
+    pub(super) firmware_tokens: Cell<usize>,
     _owner: PhantomData<*mut ()>,
     _pin: PhantomPinned,
 }
@@ -87,6 +92,8 @@ impl<'a> MemoryServices<'a> {
     /// `requester`, with `address_limit` from that device's actual DMA policy.
     /// `page_shift` is the real native granule, matching the backend's global
     /// os_page_shift facts before RM runs; it is never a guest granule. The
+    /// actual source must attest the exact installed PageGeometry; an unknown
+    /// source, conflicting maximum or non-base configured shift is refused. The
     /// provider must establish the requested CPU cache policy or refuse it,
     /// without introducing incompatible aliases.
     pub unsafe fn new(
@@ -103,18 +110,30 @@ impl<'a> MemoryServices<'a> {
         {
             return Err(ServiceError::InvalidConfiguration);
         }
+        let geometry =
+            page_geometry::check_source(source, page_shift).map_err(ServiceError::PageGeometry)?;
         Ok(Self {
             source,
             domain,
             requester,
             page_shift,
+            geometry,
             address_limit,
             state: ptr::null_mut(),
             allocations: Cell::new(0),
             mappings: Cell::new(0),
+            firmware: None,
+            firmware_tokens: Cell::new(0),
             _owner: PhantomData,
             _pin: PhantomPinned,
         })
+    }
+
+    /// Attach an immutable firmware provider before pinning/binding. Its actual
+    /// device-family attestation shares this service's requester/reset epoch.
+    pub fn with_firmware(mut self, firmware: FirmwareBinding<'a>) -> Self {
+        self.firmware = Some(firmware);
+        self
     }
 
     /// Bind an initialized native nv_state_t's empty OS/DMA slots. C checks
@@ -154,7 +173,8 @@ impl<'a> MemoryServices<'a> {
     /// # Safety
     /// Hardware is quiescent, all native allocation/mapping/IRQ workers are
     /// stopped and drained, all producer handles freed, every published DMA
-    /// token retired or consumed into canonical quarantine, and no new native
+    /// token retired or consumed into canonical quarantine, all firmware tokens
+    /// returned after their CPU readers stop, and no new native
     /// call can start. Keep this pinned service/state live until this succeeds;
     /// dropping/reusing them while resources remain violates the bind contract.
     /// CPU-only views and consumed quarantine may remain. The real domain
@@ -167,7 +187,10 @@ impl<'a> MemoryServices<'a> {
         if this.state.is_null() {
             return Err(ServiceError::Native(Status::InvalidState as u32));
         }
-        if this.allocations.get() != 0 || this.mappings.get() != 0 {
+        if this.allocations.get() != 0
+            || this.mappings.get() != 0
+            || this.firmware_tokens.get() != 0
+        {
             return Err(ServiceError::Native(Status::InvalidState as u32));
         }
         // SAFETY: the owner excludes callers; C compares exact installed slots.
@@ -263,6 +286,7 @@ unsafe fn allocate_pages(
     if pages.logical_bytes() != bytes
         || pages.bytes() != bytes
         || pages.page_shift() != services.page_shift
+        || !services.geometry.supports(pages.page_shift())
         || pages.cache_attribute() != attribute
     {
         return Err(Status::OperatingSystem);

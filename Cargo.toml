@@ -4,6 +4,7 @@ members = [
     "crates/stela-loader",
     "crates/stela-compiler",
     "crates/stela-drivers",
+    "crates/stela-drivers/src/gpu/metal/input",
     "crates/stela-runtime",
     "xtask",
 ]

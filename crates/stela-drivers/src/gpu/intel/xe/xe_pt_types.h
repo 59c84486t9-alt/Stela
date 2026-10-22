@@ -15,14 +15,7 @@ struct xe_bo;
 struct xe_device;
 struct xe_vma;
 
-enum xe_cache_level {
-	XE_CACHE_NONE,
-	XE_CACHE_WT,
-	XE_CACHE_WB,
-	XE_CACHE_NONE_COMPRESSION, /*UC + COH_NONE + COMPRESSION */
-	XE_CACHE_WB_COMPRESSION,
-	__XE_CACHE_LEVEL_COUNT,
-};
+#include "xe_cache_level.h"
 
 #define XE_VM_MAX_LEVEL 4
 

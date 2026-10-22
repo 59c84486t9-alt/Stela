@@ -22,9 +22,18 @@ GET_COMPILER_TYPE = \
 ALL_SRCS = $(SRCS) $(SRCS_CXX)
 ALL_SRCS += $(NVIDSTRING)
 ifeq ($(TARGET_OS),Stela)
+# Stela's shared compiler_builtins owns standard memory symbols. The original
+# gcc_helper aliases reverse them to os_mem_* (and narrow lengths to NvU32),
+# which would recurse when the actual native OS hooks call the shared runtime.
+ALL_SRCS := $(filter-out arch/nvalloc/unix/src/gcc_helper.c,$(ALL_SRCS))
 ALL_SRCS += ../../stela/pci.c ../../stela/memory.c ../../stela/stela_ram_mapping.c
-ALL_SRCS += ../../stela/stela_pages.c
-CFLAGS += -I ../../stela
+ALL_SRCS += ../../stela/stela_pages.c ../../stela/stela_page_geometry.c
+ALL_SRCS += ../../stela/stela_ordering.c
+ALL_SRCS += ../../stela/stela_mmio.c ../../stela/stela_firmware.c
+ALL_SRCS += ../../stela/stela_primitives.c ../../stela/stela_nvlink_primitives.c
+ALL_SRCS += ../../stela/stela_nvswitch_primitives.c
+ALL_SRCS += ../../stela/stela_nvlink_memory.c
+CFLAGS += -I ../../stela -I $(OUTPUTDIR)
 endif
 
 SRC_COMMON = ../common

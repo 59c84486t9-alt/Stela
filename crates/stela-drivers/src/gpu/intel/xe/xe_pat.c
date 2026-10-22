@@ -20,36 +20,7 @@
 #include "xe_sriov.h"
 #include "xe_wa.h"
 
-#define _PAT_ATS				0x47fc
-#define _PAT_INDEX(index)			_PICK_EVEN_2RANGES(index, 8, \
-								   0x4800, 0x4804, \
-								   0x4848, 0x484c)
-#define _PAT_PTA				0x4820
-
-#define XE2_NO_PROMOTE				REG_BIT(10)
-#define XE2_COMP_EN				REG_BIT(9)
-#define XE2_L3_CLOS				REG_GENMASK(7, 6)
-#define XE2_L3_POLICY				REG_GENMASK(5, 4)
-#define XE2_L4_POLICY				REG_GENMASK(3, 2)
-#define XE2_COH_MODE				REG_GENMASK(1, 0)
-
-#define XELPG_L4_POLICY_MASK			REG_GENMASK(3, 2)
-#define XELPG_PAT_3_UC				REG_FIELD_PREP(XELPG_L4_POLICY_MASK, 3)
-#define XELPG_PAT_1_WT				REG_FIELD_PREP(XELPG_L4_POLICY_MASK, 1)
-#define XELPG_PAT_0_WB				REG_FIELD_PREP(XELPG_L4_POLICY_MASK, 0)
-#define XELPG_INDEX_COH_MODE_MASK		REG_GENMASK(1, 0)
-#define XELPG_3_COH_2W				REG_FIELD_PREP(XELPG_INDEX_COH_MODE_MASK, 3)
-#define XELPG_2_COH_1W				REG_FIELD_PREP(XELPG_INDEX_COH_MODE_MASK, 2)
-#define XELPG_0_COH_NON				REG_FIELD_PREP(XELPG_INDEX_COH_MODE_MASK, 0)
-
-#define XEHPC_CLOS_LEVEL_MASK			REG_GENMASK(3, 2)
-#define XEHPC_PAT_CLOS(x)			REG_FIELD_PREP(XEHPC_CLOS_LEVEL_MASK, x)
-
-#define XELP_MEM_TYPE_MASK			REG_GENMASK(1, 0)
-#define XELP_PAT_WB				REG_FIELD_PREP(XELP_MEM_TYPE_MASK, 3)
-#define XELP_PAT_WT				REG_FIELD_PREP(XELP_MEM_TYPE_MASK, 2)
-#define XELP_PAT_WC				REG_FIELD_PREP(XELP_MEM_TYPE_MASK, 1)
-#define XELP_PAT_UC				REG_FIELD_PREP(XELP_MEM_TYPE_MASK, 0)
+#include "xe_pat_tables.h"
 
 #define PAT_LABEL_LEN 20
 
@@ -91,206 +62,6 @@ struct xe_pat_ops {
 	void (*entry_dump)(struct drm_printer *p, const char *label, u32 pat, bool rsvd);
 };
 
-static const struct xe_pat_table_entry xelp_pat_table[] = {
-	[0] = { XELP_PAT_WB, XE_COH_1WAY },
-	[1] = { XELP_PAT_WC, XE_COH_NONE },
-	[2] = { XELP_PAT_WT, XE_COH_NONE },
-	[3] = { XELP_PAT_UC, XE_COH_NONE },
-};
-
-static const struct xe_pat_table_entry xehpc_pat_table[] = {
-	[0] = { XELP_PAT_UC, XE_COH_NONE },
-	[1] = { XELP_PAT_WC, XE_COH_NONE },
-	[2] = { XELP_PAT_WT, XE_COH_NONE },
-	[3] = { XELP_PAT_WB, XE_COH_1WAY },
-	[4] = { XEHPC_PAT_CLOS(1) | XELP_PAT_WT, XE_COH_NONE },
-	[5] = { XEHPC_PAT_CLOS(1) | XELP_PAT_WB, XE_COH_1WAY },
-	[6] = { XEHPC_PAT_CLOS(2) | XELP_PAT_WT, XE_COH_NONE },
-	[7] = { XEHPC_PAT_CLOS(2) | XELP_PAT_WB, XE_COH_1WAY },
-};
-
-static const struct xe_pat_table_entry xelpg_pat_table[] = {
-	[0] = { XELPG_PAT_0_WB, XE_COH_NONE },
-	[1] = { XELPG_PAT_1_WT, XE_COH_NONE },
-	[2] = { XELPG_PAT_3_UC, XE_COH_NONE },
-	[3] = { XELPG_PAT_0_WB | XELPG_2_COH_1W, XE_COH_1WAY },
-	[4] = { XELPG_PAT_0_WB | XELPG_3_COH_2W, XE_COH_2WAY },
-};
-
-/*
- * The Xe2 table is getting large/complicated so it's easier to review if
- * provided in a form that exactly matches the bspec's formatting.  The meaning
- * of the fields here are:
- *   - no_promote:  0=promotable, 1=no promote
- *   - comp_en:     0=disable, 1=enable
- *   - l3clos:      L3 class of service (0-3)
- *   - l3_policy:   0=WB, 1=XD ("WB - Transient Display"),
- *                  2=XA ("WB - Transient App" for Xe3p), 3=UC
- *   - l4_policy:   0=WB, 1=WT, 3=UC
- *   - coh_mode:    0=no snoop, 2=1-way coherent, 3=2-way coherent
- *
- * Reserved entries should be programmed with the maximum caching, minimum
- * coherency (which matches an all-0's encoding), so we can just omit them
- * in the table.
- *
- * Note: There is an implicit assumption in the driver that compression and
- * coh_1way+ are mutually exclusive for platforms prior to Xe3. Starting
- * with Xe3, compression can be combined with coherency. If using compression
- * with coherency, userptr and imported dma-buf from external device will
- * have uncleared ccs state. See also xe_bo_needs_ccs_pages().
- */
-#define XE2_PAT(no_promote, comp_en, l3clos, l3_policy, l4_policy, __coh_mode) \
-	{ \
-		.value = (no_promote ? XE2_NO_PROMOTE : 0) | \
-			(comp_en ? XE2_COMP_EN : 0) | \
-			REG_FIELD_PREP(XE2_L3_CLOS, l3clos) | \
-			REG_FIELD_PREP(XE2_L3_POLICY, l3_policy) | \
-			REG_FIELD_PREP(XE2_L4_POLICY, l4_policy) | \
-			REG_FIELD_PREP(XE2_COH_MODE, __coh_mode), \
-		.coh_mode = __coh_mode ? __coh_mode : XE_COH_NONE, \
-		.valid = 1 \
-	}
-
-static const struct xe_pat_table_entry xe2_pat_table[] = {
-	[ 0] = XE2_PAT( 0, 0, 0, 0, 3, 0 ),
-	[ 1] = XE2_PAT( 0, 0, 0, 0, 3, 2 ),
-	[ 2] = XE2_PAT( 0, 0, 0, 0, 3, 3 ),
-	[ 3] = XE2_PAT( 0, 0, 0, 3, 3, 0 ),
-	[ 4] = XE2_PAT( 0, 0, 0, 3, 0, 2 ),
-	[ 5] = XE2_PAT( 0, 0, 0, 3, 3, 2 ),
-	[ 6] = XE2_PAT( 1, 0, 0, 1, 3, 0 ),
-	[ 7] = XE2_PAT( 0, 0, 0, 3, 0, 3 ),
-	[ 8] = XE2_PAT( 0, 0, 0, 3, 0, 0 ),
-	[ 9] = XE2_PAT( 0, 1, 0, 0, 3, 0 ),
-	[10] = XE2_PAT( 0, 1, 0, 3, 0, 0 ),
-	[11] = XE2_PAT( 1, 1, 0, 1, 3, 0 ),
-	[12] = XE2_PAT( 0, 1, 0, 3, 3, 0 ),
-	[13] = XE2_PAT( 0, 0, 0, 0, 0, 0 ),
-	[14] = XE2_PAT( 0, 1, 0, 0, 0, 0 ),
-	[15] = XE2_PAT( 1, 1, 0, 1, 1, 0 ),
-	/* 16..19 are reserved; leave set to all 0's */
-	[20] = XE2_PAT( 0, 0, 1, 0, 3, 0 ),
-	[21] = XE2_PAT( 0, 1, 1, 0, 3, 0 ),
-	[22] = XE2_PAT( 0, 0, 1, 0, 3, 2 ),
-	[23] = XE2_PAT( 0, 0, 1, 0, 3, 3 ),
-	[24] = XE2_PAT( 0, 0, 2, 0, 3, 0 ),
-	[25] = XE2_PAT( 0, 1, 2, 0, 3, 0 ),
-	[26] = XE2_PAT( 0, 0, 2, 0, 3, 2 ),
-	[27] = XE2_PAT( 0, 0, 2, 0, 3, 3 ),
-	[28] = XE2_PAT( 0, 0, 3, 0, 3, 0 ),
-	[29] = XE2_PAT( 0, 1, 3, 0, 3, 0 ),
-	[30] = XE2_PAT( 0, 0, 3, 0, 3, 2 ),
-	[31] = XE2_PAT( 0, 0, 3, 0, 3, 3 ),
-};
-
-static const struct xe_pat_table_entry xe3_lpg_pat_table[] = {
-	[ 0] = XE2_PAT( 0, 0, 0, 0, 3, 0 ),
-	[ 1] = XE2_PAT( 0, 0, 0, 0, 3, 2 ),
-	[ 2] = XE2_PAT( 0, 0, 0, 0, 3, 3 ),
-	[ 3] = XE2_PAT( 0, 0, 0, 3, 3, 0 ),
-	[ 4] = XE2_PAT( 0, 0, 0, 3, 0, 2 ),
-	[ 5] = XE2_PAT( 0, 0, 0, 3, 3, 2 ),
-	[ 6] = XE2_PAT( 1, 0, 0, 1, 3, 0 ),
-	[ 7] = XE2_PAT( 0, 0, 0, 3, 0, 3 ),
-	[ 8] = XE2_PAT( 0, 0, 0, 3, 0, 0 ),
-	[ 9] = XE2_PAT( 0, 1, 0, 0, 3, 0 ),
-	[10] = XE2_PAT( 0, 1, 0, 3, 0, 0 ),
-	[11] = XE2_PAT( 1, 1, 0, 1, 3, 0 ),
-	[12] = XE2_PAT( 0, 1, 0, 3, 3, 0 ),
-	[13] = XE2_PAT( 0, 0, 0, 0, 0, 0 ),
-	[14] = XE2_PAT( 0, 1, 0, 0, 0, 0 ),
-	[15] = XE2_PAT( 1, 1, 0, 1, 1, 0 ),
-	[16] = XE2_PAT( 0, 1, 0, 0, 3, 2 ),
-	/* 17..19 are reserved; leave set to all 0's */
-	[20] = XE2_PAT( 0, 0, 1, 0, 3, 0 ),
-	[21] = XE2_PAT( 0, 1, 1, 0, 3, 0 ),
-	[22] = XE2_PAT( 0, 0, 1, 0, 3, 2 ),
-	[23] = XE2_PAT( 0, 0, 1, 0, 3, 3 ),
-	[24] = XE2_PAT( 0, 0, 2, 0, 3, 0 ),
-	[25] = XE2_PAT( 0, 1, 2, 0, 3, 0 ),
-	[26] = XE2_PAT( 0, 0, 2, 0, 3, 2 ),
-	[27] = XE2_PAT( 0, 0, 2, 0, 3, 3 ),
-	[28] = XE2_PAT( 0, 0, 3, 0, 3, 0 ),
-	[29] = XE2_PAT( 0, 1, 3, 0, 3, 0 ),
-	[30] = XE2_PAT( 0, 0, 3, 0, 3, 2 ),
-	[31] = XE2_PAT( 0, 0, 3, 0, 3, 3 ),
-};
-/* Special PAT values programmed outside the main table */
-static const struct xe_pat_table_entry xe2_pat_ats = XE2_PAT( 0, 0, 0, 0, 3, 3 );
-static const struct xe_pat_table_entry xe2_pat_pta = XE2_PAT( 0, 0, 0, 0, 3, 0 );
-
-/*
- * Xe3p_XPC PAT table uses the same layout as Xe2/Xe3, except that there's no
- * option for compression.  Also note that the "L3" and "L4" register fields
- * actually control L2 and L3 cache respectively on this platform.
- */
-#define XE3P_XPC_PAT(no_promote, l3clos, l3_policy, l4_policy, __coh_mode) \
-	XE2_PAT(no_promote, 0, l3clos, l3_policy, l4_policy, __coh_mode)
-
-static const struct xe_pat_table_entry xe3p_xpc_pat_ats = XE3P_XPC_PAT( 0, 0, 0, 0, 3 );
-static const struct xe_pat_table_entry xe3p_xpc_pat_pta = XE3P_XPC_PAT( 0, 0, 0, 0, 0 );
-
-static const struct xe_pat_table_entry xe3p_xpc_pat_table[] = {
-	[ 0] = XE3P_XPC_PAT( 0, 0, 0, 0, 0 ),
-	[ 1] = XE3P_XPC_PAT( 0, 0, 0, 0, 2 ),
-	[ 2] = XE3P_XPC_PAT( 0, 0, 0, 0, 3 ),
-	[ 3] = XE3P_XPC_PAT( 0, 0, 3, 3, 0 ),
-	[ 4] = XE3P_XPC_PAT( 0, 0, 3, 3, 2 ),
-	[ 5] = XE3P_XPC_PAT( 0, 0, 3, 0, 0 ),
-	[ 6] = XE3P_XPC_PAT( 0, 0, 3, 0, 2 ),
-	[ 7] = XE3P_XPC_PAT( 0, 0, 3, 0, 3 ),
-	[ 8] = XE3P_XPC_PAT( 0, 0, 0, 3, 0 ),
-	[ 9] = XE3P_XPC_PAT( 0, 0, 0, 3, 2 ),
-	[10] = XE3P_XPC_PAT( 0, 0, 0, 3, 3 ),
-	/* 11..22 are reserved; leave set to all 0's */
-	[23] = XE3P_XPC_PAT( 0, 1, 0, 0, 0 ),
-	[24] = XE3P_XPC_PAT( 0, 1, 0, 0, 2 ),
-	[25] = XE3P_XPC_PAT( 0, 1, 0, 0, 3 ),
-	[26] = XE3P_XPC_PAT( 0, 2, 0, 0, 0 ),
-	[27] = XE3P_XPC_PAT( 0, 2, 0, 0, 2 ),
-	[28] = XE3P_XPC_PAT( 0, 2, 0, 0, 3 ),
-	[29] = XE3P_XPC_PAT( 0, 3, 0, 0, 0 ),
-	[30] = XE3P_XPC_PAT( 0, 3, 0, 0, 2 ),
-	[31] = XE3P_XPC_PAT( 0, 3, 0, 0, 3 ),
-};
-
-static const struct xe_pat_table_entry xe3p_primary_pat_pta = XE2_PAT(0, 0, 0, 0, 0, 3);
-static const struct xe_pat_table_entry xe3p_media_pat_pta = XE2_PAT(0, 0, 0, 0, 0, 2);
-
-static const struct xe_pat_table_entry xe3p_lpg_pat_table[] = {
-	[ 0] = XE2_PAT( 0, 0, 0, 0, 3, 0 ),
-	[ 1] = XE2_PAT( 0, 0, 0, 0, 3, 2 ),
-	[ 2] = XE2_PAT( 0, 0, 0, 0, 3, 3 ),
-	[ 3] = XE2_PAT( 0, 0, 0, 3, 3, 0 ),
-	[ 4] = XE2_PAT( 0, 0, 0, 3, 0, 2 ),
-	[ 5] = XE2_PAT( 0, 0, 0, 3, 3, 2 ),
-	[ 6] = XE2_PAT( 1, 0, 0, 1, 3, 0 ),
-	[ 7] = XE2_PAT( 0, 0, 0, 3, 0, 3 ),
-	[ 8] = XE2_PAT( 0, 0, 0, 3, 0, 0 ),
-	[ 9] = XE2_PAT( 0, 1, 0, 0, 3, 0 ),
-	[10] = XE2_PAT( 0, 1, 0, 3, 0, 0 ),
-	[11] = XE2_PAT( 1, 1, 0, 1, 3, 0 ),
-	[12] = XE2_PAT( 0, 1, 0, 3, 3, 0 ),
-	[13] = XE2_PAT( 0, 0, 0, 0, 0, 0 ),
-	[14] = XE2_PAT( 0, 1, 0, 0, 0, 0 ),
-	[15] = XE2_PAT( 1, 1, 0, 1, 1, 0 ),
-	[16] = XE2_PAT( 0, 1, 0, 0, 3, 2 ),
-	/* 17 is reserved; leave set to all 0's */
-	[18] = XE2_PAT( 1, 0, 0, 2, 3, 0 ),
-	[19] = XE2_PAT( 1, 0, 0, 2, 3, 2 ),
-	[20] = XE2_PAT( 0, 0, 1, 0, 3, 0 ),
-	[21] = XE2_PAT( 0, 1, 1, 0, 3, 0 ),
-	[22] = XE2_PAT( 0, 0, 1, 0, 3, 2 ),
-	[23] = XE2_PAT( 0, 0, 1, 0, 3, 3 ),
-	[24] = XE2_PAT( 0, 0, 2, 0, 3, 0 ),
-	[25] = XE2_PAT( 0, 1, 2, 0, 3, 0 ),
-	[26] = XE2_PAT( 0, 0, 2, 0, 3, 2 ),
-	[27] = XE2_PAT( 0, 0, 2, 0, 3, 3 ),
-	[28] = XE2_PAT( 0, 0, 3, 0, 3, 0 ),
-	[29] = XE2_PAT( 0, 1, 3, 0, 3, 0 ),
-	[30] = XE2_PAT( 0, 0, 3, 0, 3, 2 ),
-	[31] = XE2_PAT( 0, 0, 3, 0, 3, 3 ),
-};
 
 u16 xe_pat_index_get_coh_mode(struct xe_device *xe, u16 pat_index)
 {
@@ -325,23 +96,17 @@ static const struct xe_pat_table_entry *gt_pta_entry(struct xe_gt *gt)
 	return NULL;
 }
 
+#define XE_PAT_PROGRAM_WRITE(context, reg, value) \
+ xe_mmio_write32(&((struct xe_gt *)(context))->mmio, reg, value)
+#include "xe_pat_program.h"
+
 static void program_pat(struct xe_gt *gt, const struct xe_pat_table_entry table[],
 			int n_entries)
 {
 	struct xe_device *xe = gt_to_xe(gt);
 	const struct xe_pat_table_entry *pta_entry = gt_pta_entry(gt);
 
-	for (int i = 0; i < n_entries; i++) {
-		struct xe_reg reg = XE_REG(_PAT_INDEX(i));
-
-		xe_mmio_write32(&gt->mmio, reg, table[i].value);
-	}
-
-	if (xe->pat.pat_ats)
-		xe_mmio_write32(&gt->mmio, XE_REG(_PAT_ATS), xe->pat.pat_ats->value);
-
-	if (pta_entry)
-		xe_mmio_write32(&gt->mmio, XE_REG(_PAT_PTA), pta_entry->value);
+	xe_pat_program_direct(gt, table, n_entries, xe->pat.pat_ats, pta_entry);
 }
 
 static void program_pat_mcr(struct xe_gt *gt, const struct xe_pat_table_entry table[],
@@ -556,103 +321,37 @@ static const struct xe_pat_ops xe3p_xpc_pat_ops = {
 	.entry_dump = xe3p_xpc_pat_entry_dump,
 };
 
+#define XE_PAT_SELECT_WARN(context, condition) ((void)(context), WARN_ON_ONCE(condition))
+#define XE_PAT_SELECT_MISSING(context, version) \
+ drm_err(&((struct xe_device *)(context))->drm, \
+ "Missing PAT table for platform with graphics version %d.%02d!\n", \
+ (int)((version) / 100), (int)((version) % 100))
+#include "xe_pat_select.h"
+
 void xe_pat_init_early(struct xe_device *xe)
 {
-	xe->pat.idx[XE_CACHE_WB_COMPRESSION] = XE_PAT_INVALID_IDX;
-	xe->pat.idx[XE_CACHE_NONE_COMPRESSION] = XE_PAT_INVALID_IDX;
-	if (GRAPHICS_VERx100(xe) == 3511) {
-		xe->pat.ops = &xe3p_xpc_pat_ops;
-		xe->pat.table = xe3p_xpc_pat_table;
-		xe->pat.pat_ats = &xe3p_xpc_pat_ats;
-		xe->pat.pat_primary_pta = &xe3p_xpc_pat_pta;
-		xe->pat.pat_media_pta = &xe3p_xpc_pat_pta;
-		xe->pat.n_entries = ARRAY_SIZE(xe3p_xpc_pat_table);
-		xe->pat.idx[XE_CACHE_NONE] = 3;
-		xe->pat.idx[XE_CACHE_WT] = 3;	/* N/A (no display); use UC */
-		xe->pat.idx[XE_CACHE_WB] = 2;
-	} else if (GRAPHICS_VER(xe) == 35) {
-		xe->pat.ops = &xe2_pat_ops;
-		xe->pat.table = xe3p_lpg_pat_table;
-		xe->pat.pat_ats = &xe2_pat_ats;
-		if (!IS_DGFX(xe)) {
-			xe->pat.pat_primary_pta = &xe3p_primary_pat_pta;
-			xe->pat.pat_media_pta = &xe3p_media_pat_pta;
-		}
-		xe->pat.n_entries = ARRAY_SIZE(xe3p_lpg_pat_table);
-		xe->pat.idx[XE_CACHE_NONE] = 3;
-		xe->pat.idx[XE_CACHE_WT] = 15;
-		xe->pat.idx[XE_CACHE_WB] = 2;
-		xe->pat.idx[XE_CACHE_NONE_COMPRESSION] = 12;
-		xe->pat.idx[XE_CACHE_WB_COMPRESSION] = 16;
-	} else if (GRAPHICS_VER(xe) == 30 || GRAPHICS_VER(xe) == 20) {
-		xe->pat.ops = &xe2_pat_ops;
-		if (GRAPHICS_VER(xe) == 30) {
-			xe->pat.table = xe3_lpg_pat_table;
-			xe->pat.idx[XE_CACHE_WB_COMPRESSION] = 16;
-		} else {
-			xe->pat.table = xe2_pat_table;
-		}
-		xe->pat.pat_ats = &xe2_pat_ats;
-		if (IS_DGFX(xe)) {
-			xe->pat.pat_primary_pta = &xe2_pat_pta;
-			xe->pat.pat_media_pta = &xe2_pat_pta;
-		}
-
-		/* Wa_16023588340. XXX: Should use XE_WA */
-		if (GRAPHICS_VERx100(xe) == 2001)
-			xe->pat.n_entries = 28; /* Disable CLOS3 */
-		else
-			xe->pat.n_entries = ARRAY_SIZE(xe2_pat_table);
-
-		xe->pat.idx[XE_CACHE_NONE] = 3;
-		xe->pat.idx[XE_CACHE_WT] = 15;
-		xe->pat.idx[XE_CACHE_WB] = 2;
-		xe->pat.idx[XE_CACHE_NONE_COMPRESSION] = 12; /*Applicable on xe2 and beyond */
-	} else if (xe->info.platform == XE_METEORLAKE) {
-		xe->pat.ops = &xelpg_pat_ops;
-		xe->pat.table = xelpg_pat_table;
-		xe->pat.n_entries = ARRAY_SIZE(xelpg_pat_table);
-		xe->pat.idx[XE_CACHE_NONE] = 2;
-		xe->pat.idx[XE_CACHE_WT] = 1;
-		xe->pat.idx[XE_CACHE_WB] = 3;
-	} else if (xe->info.platform == XE_PVC) {
-		xe->pat.ops = &xehpc_pat_ops;
-		xe->pat.table = xehpc_pat_table;
-		xe->pat.n_entries = ARRAY_SIZE(xehpc_pat_table);
-		xe->pat.idx[XE_CACHE_NONE] = 0;
-		xe->pat.idx[XE_CACHE_WT] = 2;
-		xe->pat.idx[XE_CACHE_WB] = 3;
-	} else if (xe->info.platform == XE_DG2) {
-		/*
-		 * Table is the same as previous platforms, but programming
-		 * method has changed.
-		 */
-		xe->pat.ops = &xehp_pat_ops;
-		xe->pat.table = xelp_pat_table;
-		xe->pat.n_entries = ARRAY_SIZE(xelp_pat_table);
-		xe->pat.idx[XE_CACHE_NONE] = 3;
-		xe->pat.idx[XE_CACHE_WT] = 2;
-		xe->pat.idx[XE_CACHE_WB] = 0;
-	} else if (GRAPHICS_VERx100(xe) <= 1210) {
-		WARN_ON_ONCE(!IS_DGFX(xe) && !xe->info.has_llc);
-		xe->pat.ops = &xelp_pat_ops;
-		xe->pat.table = xelp_pat_table;
-		xe->pat.n_entries = ARRAY_SIZE(xelp_pat_table);
-		xe->pat.idx[XE_CACHE_NONE] = 3;
-		xe->pat.idx[XE_CACHE_WT] = 2;
-		xe->pat.idx[XE_CACHE_WB] = 0;
-	} else {
-		/*
-		 * Going forward we expect to need new PAT settings for most
-		 * new platforms; failure to provide a new table can easily
-		 * lead to subtle, hard-to-debug problems.  If none of the
-		 * conditions above match the platform we're running on we'll
-		 * raise an error rather than trying to silently inherit the
-		 * most recent platform's behavior.
-		 */
-		drm_err(&xe->drm, "Missing PAT table for platform with graphics version %d.%02d!\n",
-			GRAPHICS_VER(xe), GRAPHICS_VERx100(xe) % 100);
-	}
+ struct xe_pat_selection selection = {
+  .table = xe->pat.table, .pat_ats = xe->pat.pat_ats,
+  .pat_primary_pta = xe->pat.pat_primary_pta, .pat_media_pta = xe->pat.pat_media_pta,
+  .n_entries = xe->pat.n_entries,
+ };
+ for (int i = 0; i < __XE_CACHE_LEVEL_COUNT; i++) selection.idx[i] = xe->pat.idx[i];
+ (void)xe_pat_select(&selection, xe->info.platform, GRAPHICS_VERx100(xe),
+                     IS_DGFX(xe), xe->info.has_llc, xe);
+ switch (selection.profile) {
+ case XE_PAT_PROFILE_XELP: xe->pat.ops = &xelp_pat_ops; break;
+ case XE_PAT_PROFILE_XEHP: xe->pat.ops = &xehp_pat_ops; break;
+ case XE_PAT_PROFILE_XEHPC: xe->pat.ops = &xehpc_pat_ops; break;
+ case XE_PAT_PROFILE_XELPG: xe->pat.ops = &xelpg_pat_ops; break;
+ case XE_PAT_PROFILE_XE2: xe->pat.ops = &xe2_pat_ops; break;
+ case XE_PAT_PROFILE_XE3P_XPC: xe->pat.ops = &xe3p_xpc_pat_ops; break;
+ default: break; /* Original missing-policy path preserves existing ops. */
+ }
+ xe->pat.table = selection.table; xe->pat.n_entries = selection.n_entries;
+ xe->pat.pat_ats = selection.pat_ats;
+ xe->pat.pat_primary_pta = selection.pat_primary_pta;
+ xe->pat.pat_media_pta = selection.pat_media_pta;
+ for (int i = 0; i < __XE_CACHE_LEVEL_COUNT; i++) xe->pat.idx[i] = selection.idx[i];
 
 	xe_assert(xe, xe->pat.ops->dump);
 	xe_assert(xe, xe->pat.ops->program_graphics);

@@ -256,7 +256,7 @@ impl Realtek {
             .flatten()
             .find(|b| matches!(b, pci::Bar::Memory { .. }));
         let device = map_registers(handoff, bar, 0, 256)?;
-        function.enable();
+        function.enable_polled();
         let txconfig = device.read32(TX_CONFIG);
         let revision = detect_revision(&device, txconfig, |bytes| {
             map_registers(handoff, bar, 0, bytes).map(|_| ())

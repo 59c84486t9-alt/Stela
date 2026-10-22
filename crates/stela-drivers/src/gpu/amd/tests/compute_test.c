@@ -333,6 +333,11 @@ test_compiled_target(enum radeon_family family, unsigned wave, bool llvm_backend
    assert(register_word(words, written, R_00B900_COMPUTE_USER_DATA_0) == result.user_sgprs[0]);
 
    const struct stela_amd_compute_pipeline preserved = result;
+   /* A zero-binding pipeline cannot discard the real shader's address ABI. */
+   assert(stela_amd_build_compute_pipeline(&info, &binary, &code, NULL, 0, &result) != STELA_AMD_COMPUTE_OK);
+   assert(!memcmp(&result, &preserved, sizeof(result)));
+   assert(stela_amd_build_compute_pipeline(&info, &binary, &code, NULL, 1, &result) == STELA_AMD_COMPUTE_INVALID);
+   assert(!memcmp(&result, &preserved, sizeof(result)));
    struct stela_amd_compute_binary wrong_target = binary;
    wrong_target.family = CHIP_UNKNOWN;
    assert(stela_amd_build_compute_pipeline(&info, &wrong_target, &code, &binding, 1, &result) ==

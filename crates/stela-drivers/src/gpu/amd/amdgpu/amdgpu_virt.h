@@ -56,10 +56,7 @@
 #define AMDGPU_RLCG_VFI_STAT__INV_ADDR 0x3
 #define AMDGPU_RLCG_VFI_STAT__ERR      0xFF
 
-/* all asic after AI use this offset */
-#define mmRCC_IOV_FUNC_IDENTIFIER 0xDE5
-/* tonga/fiji use this offset */
-#define mmBIF_IOV_FUNC_IDENTIFIER 0x1503
+#include "amdgpu_virt_bootstrap_core.h"
 
 #define AMDGPU_VF2PF_UPDATE_MAX_RETRY_LIMIT 2
 

@@ -21,11 +21,7 @@ void xe_force_wake_put(struct xe_force_wake *fw, unsigned int fw_ref);
 
 const char *xe_force_wake_domain_to_str(enum xe_force_wake_domain_id id);
 
-#define for_each_fw_domain_masked(domain__, mask__, fw__, tmp__) \
-	for (tmp__ = (mask__); tmp__; tmp__ &= ~BIT(ffs(tmp__) - 1)) \
-		for_each_if(((domain__) = ((fw__)->domains + \
-					 (ffs(tmp__) - 1))) && \
-					 (domain__)->reg_ctl.addr)
+#include "xe_force_wake_core.h"
 
 #define for_each_fw_domain(domain__, fw__, tmp__) \
 	for_each_fw_domain_masked((domain__), (fw__)->initialized_domains, (fw__), (tmp__))

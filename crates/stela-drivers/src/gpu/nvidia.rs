@@ -5,7 +5,10 @@ use core::{ffi::c_void, marker::PhantomData, marker::PhantomPinned, pin::Pin};
 
 pub mod allocation;
 mod dma;
+pub mod firmware;
 mod memory;
+pub mod mmio;
+pub mod page_geometry;
 pub mod services;
 
 const PCI_CONFIG_BYTES: u32 = 4096;

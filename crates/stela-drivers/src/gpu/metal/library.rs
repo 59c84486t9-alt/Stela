@@ -30,6 +30,7 @@ pub enum ErrorKind {
     Hash,
     Bitcode,
     Allocation,
+    ResourceLimit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +154,11 @@ impl<'a> Iterator for Tags<'a> {
 }
 
 impl<'a> Tags<'a> {
+    /// Remaining original tag-stream range, including its ENDT terminator.
+    pub fn range(&self) -> Range<usize> {
+        self.offset..self.offset + self.bytes.len()
+    }
+
     fn checked(data: &'a [u8], offset: usize) -> Result<Self> {
         if !data.ends_with(b"ENDT") {
             return Err(error(offset + data.len(), ErrorKind::Terminator));
@@ -196,6 +202,11 @@ pub struct Library<'a> {
 
 impl<'a> Library<'a> {
     pub fn parse(data: &'a [u8]) -> Result<Self> {
+        Self::parse_bounded(data, usize::MAX)
+    }
+
+    /// Apply the caller's entry budget before allocating the function table.
+    pub fn parse_bounded(data: &'a [u8], max_functions: usize) -> Result<Self> {
         bytes(data, 0, HEADER_BYTES)?;
         if &data[..4] != b"MTLB" {
             return Err(error(0, ErrorKind::Magic));
@@ -237,6 +248,9 @@ impl<'a> Library<'a> {
         let count = u32_at(data, functions_range.start)? as usize;
         if count > functions_range.len().saturating_sub(4) / 8 {
             return Err(error(functions_range.start, ErrorKind::FunctionCount));
+        }
+        if count > max_functions {
+            return Err(error(functions_range.start, ErrorKind::ResourceLimit));
         }
         let mut functions = Vec::new();
         functions
@@ -377,6 +391,11 @@ impl<'a> Function<'a> {
         })
     }
 
+    /// Original wrapped/raw module extent; no payload copy or semantic rewrite.
+    pub fn module_range(&self) -> Range<usize> {
+        self.module_offset..self.module_offset + self.module.len()
+    }
+
     /// Verify the archive's digest before returning the LLVM reader's input.
     pub fn air(&self) -> Result<Air<'a>> {
         if Sha256::digest(self.module).as_slice() != self.digest {
@@ -452,4 +471,5 @@ impl<'a> Air<'a> {
 }
 
 #[cfg(test)]
+#[path = "library/tests.rs"]
 mod tests;

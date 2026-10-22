@@ -136,6 +136,7 @@ impl Drop for Backing {
 
 struct Source {
     shift: Cell<u8>,
+    geometry: PageGeometry,
     base: Cell<u64>,
     stride: Cell<usize>,
     cache_override: Cell<Option<CacheAttribute>>,
@@ -145,8 +146,10 @@ struct Source {
 }
 impl Source {
     fn new(shift: u8) -> Self {
+        page_geometry::tests::initialize_model(shift);
         Self {
             shift: Cell::new(shift),
+            geometry: PageGeometry::base_only(shift).unwrap(),
             base: Cell::new(0x8000_0000),
             stride: Cell::new(2),
             cache_override: Cell::new(None),
@@ -157,6 +160,9 @@ impl Source {
     }
 }
 impl PageSource for Source {
+    fn page_geometry(&self) -> Result<PageGeometry, MemoryError> {
+        Ok(self.geometry)
+    }
     fn allocate(
         &self,
         bytes: usize,
@@ -522,6 +528,12 @@ fn failed_policies_and_provider_results_do_not_publish_ptes() {
 
 #[test]
 fn native_granule_cache_contiguity_and_force32_are_real_checks() {
+    if page_geometry::tests::separate_model_process(
+        "gpu::nvidia::services::tests::native_granule_cache_contiguity_and_force32_are_real_checks",
+        14,
+    ) {
+        return;
+    }
     let source = Source::new(14);
     source.stride.set(1);
     let domain = Domain::new();
@@ -872,6 +884,12 @@ fn binding_checks_original_pci_identity_and_existing_slot_ownership() {
 
 #[test]
 fn native_iova_alignment_and_address_limit_fail_before_publication() {
+    if page_geometry::tests::separate_model_process(
+        "gpu::nvidia::services::tests::native_iova_alignment_and_address_limit_fail_before_publication",
+        14,
+    ) {
+        return;
+    }
     for base in [0x4000_1000, 0x1_0000_0000] {
         let source = Source::new(14);
         let domain = Domain::new();
@@ -1078,4 +1096,50 @@ fn unbound_and_null_original_requests_cannot_reach_a_provider() {
             Status::NotSupported as u32
         );
     }
+}
+
+#[test]
+fn source_geometry_and_configured_native_base_must_match_the_installed_profile() {
+    struct Unknown;
+    impl PageSource for Unknown {
+        fn allocate(
+            &self,
+            _: usize,
+            _: usize,
+            _: CacheAttribute,
+        ) -> Result<PinnedPages, MemoryError> {
+            panic!("unknown geometry must fail before allocation");
+        }
+    }
+    let mut source = Source::new(12);
+    let domain = Domain::new();
+    let requester = Address {
+        segment: 0,
+        bus: 0,
+        device: 0,
+        function: 0,
+    };
+    // SAFETY: isolated CPU-model domain/requester. Each mismatched or unknown
+    // provider must fail before publishing any native state or allocation.
+    unsafe {
+        assert!(matches!(
+            MemoryServices::new(&Unknown, domain.clone(), requester, 12, u64::MAX),
+            Err(ServiceError::PageGeometry(page_geometry::Error::Source(
+                MemoryError::Unavailable
+            )))
+        ));
+        assert!(matches!(
+            MemoryServices::new(&source, domain.clone(), requester, 14, u64::MAX),
+            Err(ServiceError::PageGeometry(page_geometry::Error::Conflict))
+        ));
+        source.geometry = PageGeometry::contiguous(12, 14).unwrap();
+        assert!(matches!(
+            MemoryServices::new(&source, domain.clone(), requester, 12, u64::MAX),
+            Err(ServiceError::PageGeometry(
+                page_geometry::Error::UnsupportedGeometry
+            ))
+        ));
+    }
+    assert_eq!(source.calls.get(), 0);
+    assert!(domain.events().is_empty());
 }

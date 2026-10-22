@@ -6,8 +6,13 @@
 #ifndef _ABI_UC_FW_ABI_H
 #define _ABI_UC_FW_ABI_H
 
+#ifdef STELA_NATIVE
+#include "../xe_scalar_types.h"
+#define __packed __attribute__((packed))
+#else
 #include <linux/build_bug.h>
 #include <linux/types.h>
+#endif
 
 /**
  * DOC: CSS-based Firmware Layout

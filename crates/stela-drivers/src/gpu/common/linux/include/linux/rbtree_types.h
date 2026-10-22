@@ -2,11 +2,18 @@
 #ifndef _LINUX_RBTREE_TYPES_H
 #define _LINUX_RBTREE_TYPES_H
 
+/* Native LLP64 targets must retain every pointer bit in the tagged word. */
+#ifdef STELA_NATIVE
+typedef __UINTPTR_TYPE__ rb_parent_word_t;
+#else
+typedef unsigned long rb_parent_word_t;
+#endif
+
 struct rb_node {
-	unsigned long  __rb_parent_color;
+	rb_parent_word_t __rb_parent_color;
 	struct rb_node *rb_right;
 	struct rb_node *rb_left;
-} __attribute__((aligned(sizeof(long))));
+} __attribute__((aligned(sizeof(rb_parent_word_t))));
 /* The alignment might seem pointless, but allegedly CRIS needs it */
 
 struct rb_node_linked {

@@ -24,6 +24,20 @@
 #ifndef _DISCOVERY_H_
 #define _DISCOVERY_H_
 
+#ifdef __KERNEL__
+#include <linux/types.h>
+#include <linux/stddef.h>
+#else
+#include <stdint.h>
+/* Original public flex-array declarations, with no Linux service shim. */
+#include "../../common/linux/include/uapi/linux/stddef.h"
+#if !defined(__BYTE_ORDER__) || !defined(__ORDER_LITTLE_ENDIAN__) || !defined(__ORDER_BIG_ENDIAN__)
+#error "Discovery format requires compiler byte-order definitions"
+#elif __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__ && __BYTE_ORDER__ != __ORDER_BIG_ENDIAN__
+#error "Discovery format requires an explicit native byte order"
+#endif
+#endif
+
 #define PSP_HEADER_SIZE                 256
 #define BINARY_SIGNATURE                0x28211407
 #define DISCOVERY_TABLE_SIGNATURE       0x53445049
@@ -110,7 +124,8 @@ typedef struct ip
 	uint8_t major;            /* HCID Major */
 	uint8_t minor;            /* HCID Minor */
 	uint8_t revision;         /* HCID Revision */
-#if defined(__BIG_ENDIAN)
+#if (defined(__KERNEL__) && defined(__BIG_ENDIAN)) || \
+    (!defined(__KERNEL__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
 	uint8_t reserved : 4;     /* Placeholder field */
 	uint8_t harvest : 4;      /* Harvest */
 #else
@@ -128,7 +143,8 @@ typedef struct ip_v3
 	uint8_t major;                          /* Hardware ID.major version */
 	uint8_t minor;                          /* Hardware ID.minor version */
 	uint8_t revision;                       /* Hardware ID.revision version */
-#if defined(__BIG_ENDIAN)
+#if (defined(__KERNEL__) && defined(__BIG_ENDIAN)) || \
+    (!defined(__KERNEL__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
 	uint8_t variant : 4;                    /* HW variant */
 	uint8_t sub_revision : 4;               /* HCID Sub-Revision */
 #else
@@ -145,17 +161,19 @@ typedef struct ip_v4 {
 	uint8_t major;                          /* Hardware ID.major version */
 	uint8_t minor;                          /* Hardware ID.minor version */
 	uint8_t revision;                       /* Hardware ID.revision version */
-#if defined(LITTLEENDIAN_CPU)
+#if defined(LITTLEENDIAN_CPU) || \
+    (!defined(__KERNEL__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
 	uint8_t sub_revision : 4;               /* HCID Sub-Revision */
 	uint8_t variant : 4;                    /* HW variant */
-#elif defined(BIGENDIAN_CPU)
+#elif defined(BIGENDIAN_CPU) || \
+      (!defined(__KERNEL__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
 	uint8_t variant : 4;                    /* HW variant */
 	uint8_t sub_revision : 4;               /* HCID Sub-Revision */
 #endif
 	union {
-		DECLARE_FLEX_ARRAY(uint32_t, base_address);	/* 32-bit Base Address list. Corresponds to the num_base_address field*/
-		DECLARE_FLEX_ARRAY(uint64_t, base_address_64);	/* 64-bit Base Address list. Corresponds to the num_base_address field*/
-	} __packed;
+		__DECLARE_FLEX_ARRAY(uint32_t, base_address);	/* 32-bit Base Address list. Corresponds to the num_base_address field*/
+		__DECLARE_FLEX_ARRAY(uint64_t, base_address_64);	/* 64-bit Base Address list. Corresponds to the num_base_address field*/
+	} __attribute__((__packed__));
 } ip_v4;
 
 typedef struct die_header

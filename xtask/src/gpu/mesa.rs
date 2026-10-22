@@ -13,6 +13,7 @@ use std::{
     process::{Command, Stdio},
 };
 
+mod library;
 mod threadgroup;
 
 const LIBRARIES: &[&str] = &[
@@ -120,6 +121,9 @@ fn inspect_archive(path: &Path) -> Result<Value> {
         path.file_name().and_then(|name| name.to_str()),
         Some(
             "libamd_compiler_support.a"
+                | "libstela_amd_air.a"
+                | "libstela_nv_air.a"
+                | "libstela_intel_air.a"
                 | "libintel_dev.a"
                 | "libstela_amd_surface.a"
                 | "libstela_amd_image.a"
@@ -410,6 +414,17 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             "metal/compiler/apple_source.c",
             "metal/compiler/apple_source.h",
             "metal/compiler/apple_source_test.c",
+            "metal/compiler/threadgroup.c",
+            "metal/compiler/threadgroup.h",
+            "metal/compiler/tests/threadgroup.c",
+            "metal/compiler/tests/threadgroup_nir.c",
+            "nvidia/stela/hosted/air_compile.c",
+            "nvidia/stela/hosted/air_compile.h",
+            "nvidia/stela/tests/air_compile.c",
+            "intel/stela/hosted/air_compile.c",
+            "intel/stela/hosted/air_compile.h",
+            "intel/stela/hosted/air_validate_elk.c",
+            "intel/stela/tests/air_compile.c",
             "nvidia/stela/hosted/image.c",
             "nvidia/stela/hosted/image.h",
             "nvidia/stela/tests/image.c",
@@ -439,6 +454,9 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             "amd/stela/image_copy.h",
             "amd/tests/image_copy_test.c",
             "amd/tests/image_fixture.h",
+            "amd/stela/air_compile.c",
+            "amd/stela/air_compile.h",
+            "amd/tests/air_compile.c",
             "amd/stela/compute.c",
             "amd/stela/compute.h",
             "amd/stela/compute_policy.c",
@@ -555,10 +573,37 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
     };
     let build = tools::root().join(".stela/gpu/build").join(cache);
     let evidence = evidence_directory()?;
+    let metal_input = if cfg!(target_os = "macos") && llvm_library.is_some() {
+        Some(library::build_input(&evidence)?)
+    } else {
+        None
+    };
     let input_snapshots = snapshot_air_inputs(air_inputs, &evidence, "air-input")?;
     let threadgroup_snapshots =
         snapshot_air_inputs(threadgroup_inputs, &evidence, "threadgroup-input")?;
     let hash = source_binding(&source)?;
+    // Meson 1.9 validates supplied options against its old cached inventory
+    // before rereading meson.options. Refresh once when upgrading this cache.
+    let cached_options = build.join("meson-info/intro-buildoptions.json");
+    if cached_options.is_file() {
+        let cached: Vec<Value> = serde_json::from_slice(&fs::read(cached_options)?)?;
+        if !cached
+            .iter()
+            .any(|option| option["name"] == "stela-metal-input-library")
+        {
+            run(
+                Command::new(&meson)
+                    .env("PATH", &path)
+                    .env("PYTHONDONTWRITEBYTECODE", "1")
+                    .envs(llvm_config.iter().map(|config| ("LLVM_CONFIG", config)))
+                    .args(["setup", "--reconfigure", "--wrap-mode=nodownload"])
+                    .arg(&build)
+                    .arg(&source),
+                &evidence,
+                "refresh-options",
+            )?;
+        }
+    }
     let mut setup = Command::new(&meson);
     setup
         .current_dir(tools::root())
@@ -607,12 +652,25 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             .as_ref()
             .map_or_else(String::new, |path| path.display().to_string())
     ));
+    setup.arg(format!(
+        "-Dstela-metal-input-library={}",
+        metal_input
+            .as_ref()
+            .map_or_else(String::new, |p| p.display().to_string())
+    ));
     if build.join("meson-private/coredata.dat").is_file() {
         setup.arg("--reconfigure");
     }
     run(&mut setup, &evidence, "setup")?;
     let mut compile = Command::new(&ninja);
     let mut library_paths = LIBRARIES.to_vec();
+    if metal_input.is_some() {
+        library_paths.push("src/stela/libstela_metal_threadgroup.a");
+        library_paths.push("src/stela/libstela_metal_assembly.a");
+        library_paths.push("src/stela/libstela_amd_air.a");
+        library_paths.push("src/stela/libstela_nv_air.a");
+        library_paths.push("src/stela/libstela_intel_air.a");
+    }
     if llvm_sdk.is_some() {
         library_paths.push("src/amd/llvm/libamd_common_llvm.a");
         library_paths.push("src/stela/libstela_amd_llvm_float.a");
@@ -671,7 +729,46 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             compile.arg("src/stela/stela_amd_air_threadgroup_probe");
         }
     }
+    if metal_input.is_some() {
+        compile.args([
+            "src/stela/stela_metal_threadgroup_test",
+            "src/stela/stela_metal_threadgroup_nir_test",
+            "src/stela/stela_metal_assembly_test",
+            "src/stela/stela_amd_air_compile_test",
+            "src/stela/stela_nv_air_compile_test",
+            "src/stela/stela_intel_air_compile_test",
+        ]);
+    }
     run(&mut compile, &evidence, "compile")?;
+    let amd_air_owned = metal_input
+        .as_ref()
+        .map(|_| {
+            library::verify_owned(
+                &build,
+                &evidence,
+                "amd",
+                "aco",
+                164,
+                "owned AMD AIR compiler lifetime, multi-buffer, producer and failure tests passed",
+            )
+        })
+        .transpose()?;
+    let nv_air_owned = metal_input.as_ref().map(|_| library::verify_owned(&build, &evidence, "nv", "nak", 310,
+        "owned NAK compiler/table/QMD/lifetime/failure fixtures passed; no hardware execution")).transpose()?;
+    let metal_assembly = metal_input
+        .as_ref()
+        .map(|input| library::verify(&build, &evidence, input, &gpu))
+        .transpose()?;
+    let intel_air_owned = metal_input.as_ref().map(|_| library::verify_owned(&build, &evidence, "intel", "intel", 757,
+        "owned Intel compiler/RAW/table/plan/lifetime fixtures passed; no hardware execution")).transpose()?;
+    let intel_gen7_shared = metal_input
+        .as_ref()
+        .map(|_| library::verify_gen7_shared(&build, &evidence))
+        .transpose()?;
+    let metal_threadgroup_values = metal_input
+        .as_ref()
+        .map(|_| library::verify_threadgroup_values(&build, &evidence))
+        .transpose()?;
     run(
         &mut Command::new(build.join("src/stela/stela_amd_commands_probe")),
         &evidence,
@@ -940,6 +1037,12 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         "stela_platform_port": false, "hardware_executed": false,
         "metal_frontend": false,
         "source_compiler_boundary": source_compiler_boundary,
+        "metal_library_assembly": metal_assembly,
+        "amd_owned_air_compilation": amd_air_owned,
+        "nvidia_owned_air_compilation": nv_air_owned,
+        "intel_owned_air_compilation": intel_air_owned,
+        "intel_gen7_shared_admission": intel_gen7_shared,
+        "metal_threadgroup_values": metal_threadgroup_values,
         "air_compute_compiler_subset": llvm_library.is_some(),
         "amd_llvm_development_files": llvm_sdk,
         "optional_clrx_disassembler": clrx_disassembler,

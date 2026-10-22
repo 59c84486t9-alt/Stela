@@ -26,8 +26,8 @@ _Static_assert(NV_MEMORY_CACHED == 0 && NV_MEMORY_UNCACHED == 1 &&
  * handles. Calls and final releases are serialized process/deferred operations,
  * never ISR allocation or completion. Stop callers and prove real hardware
  * quiescence before unbind/removal. MemoryServices refuses unbind while any
- * producer allocation or published DMA token remains; keep service/state live
- * until all those handles are freed/retired/quarantined and unbind succeeds.
+ * producer allocation, published DMA token or firmware token remains; keep service/state live
+ * until all those handles are freed/retired/quarantined/put and unbind succeeds.
  * Only CPU views and consumed quarantine may survive. Remaining RM/IRQ services
  * are prerequisites. Bind/unbind below are private helpers of the Rust owner;
  * use MemoryServices methods so their live-resource checks cannot be bypassed.

@@ -2018,7 +2018,7 @@ pub fn attach_with_provider(
         .and_then(|bar| bar.memory())
         .map_or(0, |range| range.end - range.start);
     let registers = registers(handoff, bars[0], 0, bytes)?;
-    function.enable();
+    function.enable_polled();
     let address = function.address;
     let location = format!(
         "xhci {:04x}:{:02x}:{:02x}.{}",

@@ -925,77 +925,29 @@ int xe_guc_post_load_init(struct xe_guc *guc)
 	return xe_guc_submit_enable(guc);
 }
 
-/*
- * Wa_14025883347: Prevent GuC firmware DMA failures during GuC-only reset by ensuring
- * SRAM save/restore operations are complete before reset.
- */
-static void guc_prevent_fw_dma_failure_on_reset(struct xe_guc *guc)
-{
-	struct xe_gt *gt = guc_to_gt(guc);
-	u32 boot_hash_chk, guc_status, sram_status;
-	int ret;
-
-	guc_status = xe_mmio_read32(&gt->mmio, GUC_STATUS);
-	if (guc_status & GS_MIA_IN_RESET)
-		return;
-
-	boot_hash_chk = xe_mmio_read32(&gt->mmio, BOOT_HASH_CHK);
-	if (!(boot_hash_chk & GUC_BOOT_UKERNEL_VALID))
-		return;
-
-	/* Disable idle flow during reset (GuC reset re-enables it automatically) */
-	xe_mmio_rmw32(&gt->mmio, GUC_MAX_IDLE_COUNT, 0, GUC_IDLE_FLOW_DISABLE);
-
-	ret = xe_mmio_wait32(&gt->mmio, GUC_STATUS, GS_UKERNEL_MASK,
-			     FIELD_PREP(GS_UKERNEL_MASK, XE_GUC_LOAD_STATUS_READY),
-			     100000, &guc_status, false);
-	if (ret)
-		xe_gt_warn(gt, "GuC not ready after disabling idle flow (GUC_STATUS: 0x%x)\n",
-			   guc_status);
-
-	ret = xe_mmio_wait32(&gt->mmio, GUC_SRAM_STATUS, GUC_SRAM_HANDLING_MASK,
-			     0, 5000, &sram_status, false);
-	if (ret)
-		xe_gt_warn(gt, "SRAM handling not complete (GUC_SRAM_STATUS: 0x%x)\n",
-			   sram_status);
-}
+#define XE_GUC_RESET_CONTEXT struct xe_guc
+#define XE_GUC_RESET_READ(guc, reg) xe_mmio_read32(&guc_to_gt(guc)->mmio, reg)
+#define XE_GUC_RESET_RMW(guc, reg, clear, set) xe_mmio_rmw32(&guc_to_gt(guc)->mmio, reg, clear, set)
+#define XE_GUC_RESET_WRITE(guc, reg, value) xe_mmio_write32(&guc_to_gt(guc)->mmio, reg, value)
+#define XE_GUC_RESET_WAIT(guc, reg, mask, value, timeout, out, atomic) \
+	xe_mmio_wait32(&guc_to_gt(guc)->mmio, reg, mask, value, timeout, out, atomic)
+#define XE_GUC_RESET_ASSERT_HELD(guc) xe_force_wake_assert_held(gt_to_fw(guc_to_gt(guc)), XE_FW_GT)
+#define XE_GUC_RESET_IS_VF(guc) IS_SRIOV_VF(gt_to_xe(guc_to_gt(guc)))
+#define XE_GUC_RESET_VF_BOOTSTRAP(guc) xe_gt_sriov_vf_bootstrap(guc_to_gt(guc))
+#define XE_GUC_RESET_WA_14025883347(guc) XE_GT_WA(guc_to_gt(guc), 14025883347)
+#define XE_GUC_RESET_WARN_READY(guc, value) \
+	xe_gt_warn(guc_to_gt(guc), "GuC not ready after disabling idle flow (GUC_STATUS: 0x%x)\n", value)
+#define XE_GUC_RESET_WARN_SRAM(guc, value) \
+	xe_gt_warn(guc_to_gt(guc), "SRAM handling not complete (GUC_SRAM_STATUS: 0x%x)\n", value)
+#define XE_GUC_RESET_ERROR_TIMEOUT(guc, value) \
+	xe_gt_err(guc_to_gt(guc), "GuC reset timed out, GDRST=%#x\n", value)
+#define XE_GUC_RESET_ERROR_STATUS(guc, value) \
+	xe_gt_err(guc_to_gt(guc), "GuC status: %#x, MIA core expected to be in reset\n", value)
+#include "xe_guc_reset_core.h"
 
 int xe_guc_reset(struct xe_guc *guc)
 {
-	struct xe_gt *gt = guc_to_gt(guc);
-	struct xe_mmio *mmio = &gt->mmio;
-	u32 guc_status, gdrst;
-	int ret;
-
-	xe_force_wake_assert_held(gt_to_fw(gt), XE_FW_GT);
-
-	if (IS_SRIOV_VF(gt_to_xe(gt)))
-		return xe_gt_sriov_vf_bootstrap(gt);
-
-	if (XE_GT_WA(gt, 14025883347))
-		guc_prevent_fw_dma_failure_on_reset(guc);
-
-	xe_mmio_write32(mmio, GDRST, GRDOM_GUC);
-
-	ret = xe_mmio_wait32(mmio, GDRST, GRDOM_GUC, 0, 5000, &gdrst, false);
-	if (ret) {
-		xe_gt_err(gt, "GuC reset timed out, GDRST=%#x\n", gdrst);
-		goto err_out;
-	}
-
-	guc_status = xe_mmio_read32(mmio, GUC_STATUS);
-	if (!(guc_status & GS_MIA_IN_RESET)) {
-		xe_gt_err(gt, "GuC status: %#x, MIA core expected to be in reset\n",
-			  guc_status);
-		ret = -EIO;
-		goto err_out;
-	}
-
-	return 0;
-
-err_out:
-
-	return ret;
+	return xe_guc_reset_core(guc);
 }
 
 static void guc_prepare_xfer(struct xe_guc *guc)

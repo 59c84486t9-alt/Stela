@@ -724,8 +724,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let cpu = qemu_cpu(
         arguments.cpu.as_deref(),
         arguments.no_la57,
-        usb
-            || system
+        usb || system
             || arguments.native_dma_check
             || arguments.native_dma_isolation_check
             || arguments.native_work_check

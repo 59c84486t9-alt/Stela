@@ -934,3 +934,9 @@ option(
   value : false,
   description : 'Build the retained AMD LLVM backend for Stela compiler targets (requires matching LLVM 23 development files)',
 )
+option(
+  'stela-metal-input-library',
+  type : 'string',
+  value : '',
+  description : 'Matching hosted Rust input static library for the optional Darwin Metal library assembler',
+)

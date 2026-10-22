@@ -6,4 +6,12 @@ mod commands;
 pub use commands::*;
 
 #[cfg(feature = "amd-port")]
+pub mod discovery;
+#[cfg(feature = "amd-port")]
+pub mod native_mmio;
+#[cfg(feature = "amd-port")]
+pub mod pci;
+#[cfg(feature = "amd-port")]
 pub mod vm;
+#[cfg(feature = "amd-port")]
+pub mod vram;

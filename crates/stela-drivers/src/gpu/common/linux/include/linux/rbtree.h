@@ -23,7 +23,7 @@
 #include <linux/stddef.h>
 #include <linux/rcupdate.h>
 
-#define rb_parent(r)   ((struct rb_node *)((r)->__rb_parent_color & ~3))
+#define rb_parent(r)   ((struct rb_node *)((r)->__rb_parent_color & ~(rb_parent_word_t)3))
 
 #define	rb_entry(ptr, type, member) container_of(ptr, type, member)
 
@@ -31,9 +31,9 @@
 
 /* 'empty' nodes are nodes that are known not to be inserted in an rbtree */
 #define RB_EMPTY_NODE(node)  \
-	((node)->__rb_parent_color == (unsigned long)(node))
+	((node)->__rb_parent_color == (rb_parent_word_t)(node))
 #define RB_CLEAR_NODE(node)  \
-	((node)->__rb_parent_color = (unsigned long)(node))
+	((node)->__rb_parent_color = (rb_parent_word_t)(node))
 
 #define RB_EMPTY_LINKED_NODE(lnode)  RB_EMPTY_NODE(&(lnode)->node)
 #define RB_CLEAR_LINKED_NODE(lnode)  ({					\
@@ -92,7 +92,7 @@ extern void rb_replace_node_rcu(struct rb_node *victim, struct rb_node *new,
 static inline void rb_link_node(struct rb_node *node, struct rb_node *parent,
 				struct rb_node **rb_link)
 {
-	node->__rb_parent_color = (unsigned long)parent;
+	node->__rb_parent_color = (rb_parent_word_t)parent;
 	node->rb_left = node->rb_right = NULL;
 
 	*rb_link = node;
@@ -101,7 +101,7 @@ static inline void rb_link_node(struct rb_node *node, struct rb_node *parent,
 static inline void rb_link_node_rcu(struct rb_node *node, struct rb_node *parent,
 				    struct rb_node **rb_link)
 {
-	node->__rb_parent_color = (unsigned long)parent;
+	node->__rb_parent_color = (rb_parent_word_t)parent;
 	node->rb_left = node->rb_right = NULL;
 
 	rcu_assign_pointer(*rb_link, node);

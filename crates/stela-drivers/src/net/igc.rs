@@ -219,7 +219,7 @@ impl Igc {
             unsafe { pci::disable_aspm_l1_2_link(function, handoff) }
         })?;
         let device = registers(handoff, function.bars()[0], 0, REGISTER_BYTES)?;
-        function.enable();
+        function.enable_polled();
         let clock = handoff.clock;
         let mut hardware = hardware::Hardware::new(&device, &clock)?;
         let phy_identity = hardware.initialize()?;

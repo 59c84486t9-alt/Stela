@@ -4,6 +4,7 @@
  */
 
 #include "xe_huc.h"
+#include "xe_huc_role.h"
 
 #include <linux/delay.h>
 
@@ -76,7 +77,7 @@ int xe_huc_init(struct xe_huc *huc)
 	 * no separate GT for media IP, so the HuC was part of the primary
 	 * GT.  Such platforms have graphics versions 12.55 and earlier.
 	 */
-	if (!xe_gt_is_media_type(gt) && GRAPHICS_VERx100(xe) > 1255) {
+	if (xe_huc_role_unsupported(xe_gt_is_media_type(gt), GRAPHICS_VERx100(xe))) {
 		xe_uc_fw_change_status(&huc->fw, XE_UC_FIRMWARE_NOT_SUPPORTED);
 		return 0;
 	}

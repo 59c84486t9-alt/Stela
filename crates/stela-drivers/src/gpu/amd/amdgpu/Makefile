@@ -49,6 +49,8 @@ subdir-ccflags-y += -Wno-override-init
 subdir-ccflags-$(CONFIG_DRM_AMDGPU_WERROR) += -Werror
 
 amdgpu-y := amdgpu_drv.o
+# Pure discovery validation shared with the native attachment path.
+amdgpu-y += ../stela/discovery_binary.o
 
 # add KMS driver
 amdgpu-y += amdgpu_device.o amdgpu_reg_access.o amdgpu_doorbell_mgr.o amdgpu_kms.o \

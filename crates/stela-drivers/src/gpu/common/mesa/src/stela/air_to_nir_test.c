@@ -1759,11 +1759,253 @@ nak_codegen(const char *body, const char *label, bool ieee)
 }
 #endif
 
+static bool
+inspect_entry(const struct stela_air_inspection *info, const struct stela_air_entry *entry, void *data)
+{
+   unsigned *count = data;
+   CHECK(info->air_minor == 8 && info->language_major == 4 && info->language_minor == 0);
+   CHECK(info->denorms_disable && info->fast_math && info->target_bytes == strlen(info->target));
+   CHECK(entry->name_bytes == 6 && !memcmp(entry->name, "kernel", 6) && entry->argument_count == 2);
+   CHECK(entry->reflection_complete);
+   const struct stela_air_argument_info *arg = &entry->arguments[1];
+   CHECK(entry->arguments[0].kind == 2 && entry->arguments[0].components == 1);
+   CHECK(arg->kind == 1 && arg->buffer.argument == 1 && arg->buffer.index == 7 &&
+      arg->buffer.address_space == 1 && arg->buffer.access == STELA_AIR_READ_WRITE &&
+      arg->buffer.type_size == 4 && arg->buffer.type_alignment == 4 && arg->plain_buffer_type);
+   CHECK(arg->primitive == STELA_AIR_UINT && arg->type_components == 1 &&
+      arg->name_bytes == 6 && !memcmp(arg->name, "output", 6) &&
+      arg->type_name_bytes == 4 && !memcmp(arg->type_name, "uint", 4));
+   (*count)++;
+   return true;
+}
+
+struct reflection_expectation {
+   bool complete, used;
+   enum stela_air_primitive primitive;
+   unsigned components;
+};
+static bool
+inspect_reflection(const struct stela_air_inspection *info, const struct stela_air_entry *entry, void *data)
+{
+   (void)info;
+   const struct reflection_expectation *expected = data;
+   CHECK(entry->argument_count == 2);
+   const struct stela_air_argument_info *arg = &entry->arguments[1];
+   CHECK(entry->reflection_complete == expected->complete && arg->used == expected->used &&
+         arg->primitive == expected->primitive && arg->type_components == expected->components);
+   return true;
+}
+static void
+reflection_inspection_case(const char *prefix, const char *body, const char *metadata, const char *extra,
+                           bool complete, bool used, enum stela_air_primitive primitive, unsigned components)
+{
+   struct stela_air_error error;
+   struct reflection_expectation expected = {complete, used, primitive, components};
+   LLVMMemoryBufferRef input = stela_air_test_custom_bitcode(prefix, body, metadata, extra);
+   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8,
+                          inspect_reflection, &expected, &error));
+   CHECK(error.kind == STELA_AIR_OK);
+   LLVMDisposeMemoryBuffer(input);
+}
+static void
+reflection_inspection_tests(void)
+{
+   reflection_inspection_case(stela_air_test_prefix, stela_air_test_store_body, stela_air_test_metadata,
+                              "", true, true, STELA_AIR_UINT, 1);
+   const char *scalars[] = {"char", "uchar", "short", "ushort", "int", "uint", "long", "ulong", "float"};
+   const unsigned scalar_sizes[] = {1,1,2,2,4,4,8,8,4};
+   for (unsigned scalar = 0; scalar < 9; scalar++) {
+      for (unsigned components = 1; components <= 4; components++) {
+         char reflected[96], layout[128];
+         if (components == 1)
+            snprintf(reflected, sizeof(reflected), "!\"%s\", !\"air.arg_name\", !\"output\"", scalars[scalar]);
+         else
+            snprintf(reflected, sizeof(reflected), "!\"%s%u\", !\"air.arg_name\", !\"output\"", scalars[scalar], components);
+         unsigned extent = scalar_sizes[scalar] * (components == 3 ? 4 : components);
+         snprintf(layout, sizeof(layout), "!\"air.arg_type_size\", i32 %u, !\"air.arg_type_align_size\", i32 %u", extent, extent);
+         char *typed = replace_once(stela_air_test_metadata, "!\"uint\", !\"air.arg_name\", !\"output\"", reflected);
+         char *sized = replace_once(typed, "!\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4", layout);
+         reflection_inspection_case(stela_air_test_prefix, stela_air_test_store_body, sized,
+                                    "", true, true, STELA_AIR_CHAR + scalar, components);
+         free(typed); free(sized);
+      }
+   }
+   /* AIR use facts are preserved even for a currently unused formal parameter. */
+   reflection_inspection_case(stela_air_test_prefix, "ret void\n", stela_air_test_metadata,
+                              "", true, false, STELA_AIR_UINT, 1);
+   char *metadata = replace_once(stela_air_test_metadata, "!\"uint\", !\"air.arg_name\", !\"output\"",
+                                 "!\"UnqualifiedStructure\", !\"air.arg_name\", !\"output\"");
+   reflection_inspection_case(stela_air_test_prefix, stela_air_test_store_body, metadata,
+                              "", false, true, STELA_AIR_PRIMITIVE_UNKNOWN, 0);
+   free(metadata);
+   metadata = replace_once(stela_air_test_metadata, ", !\"air.arg_name\", !\"output\"", "");
+   reflection_inspection_case(stela_air_test_prefix, stela_air_test_store_body, metadata,
+                              "", false, true, STELA_AIR_UINT, 1);
+   free(metadata);
+   metadata = replace_once(stela_air_test_metadata, "!\"output\"", "!\"out\\00put\"");
+   reflection_inspection_case(stela_air_test_prefix, stela_air_test_store_body, metadata,
+                              "", false, true, STELA_AIR_UINT, 1);
+   free(metadata);
+   metadata = replace_once(stela_air_test_metadata, "!\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,", "");
+   reflection_inspection_case(stela_air_test_prefix, stela_air_test_store_body, metadata,
+                              "", false, true, STELA_AIR_UINT, 1);
+   free(metadata);
+   /* MSL vector3 has four lanes of storage/alignment; no packed-layout guess. */
+   metadata = replace_once(stela_air_test_metadata, "!\"uint\", !\"air.arg_name\", !\"output\"",
+                                 "!\"uint3\", !\"air.arg_name\", !\"output\"");
+   char *sized = replace_once(metadata, "!\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4",
+                                       "!\"air.arg_type_size\", i32 16, !\"air.arg_type_align_size\", i32 16");
+   reflection_inspection_case(stela_air_test_prefix, stela_air_test_store_body, sized,
+                              "", true, true, STELA_AIR_UINT, 3);
+   char *packed = replace_once(sized, "!\"air.arg_type_size\", i32 16", "!\"air.arg_type_size\", i32 12");
+   reflection_inspection_case(stela_air_test_prefix, stela_air_test_store_body, packed,
+                              "", false, true, STELA_AIR_UINT, 3);
+   free(metadata); free(sized); free(packed);
+   char *prefix = replace_once(stela_air_test_prefix, " %out)", " \"unknown-reflection\" %out)");
+   reflection_inspection_case(prefix, stela_air_test_store_body, stela_air_test_metadata,
+                              "", false, true, STELA_AIR_UINT, 1);
+   free(prefix);
+   prefix = replace_once(stela_air_test_prefix, ") {", ") #0 {");
+   reflection_inspection_case(prefix, stela_air_test_store_body, stela_air_test_metadata,
+                              "attributes #0 = { \"unqualified-annotation\"=\"text\" }\n", false, true, STELA_AIR_UINT, 1);
+   free(prefix);
+   prefix = replace_once(stela_air_test_prefix, ") {", ") !custom !11 {");
+   reflection_inspection_case(prefix, stela_air_test_store_body, stela_air_test_metadata,
+                              "!11 = !{!\"annotation\"}\n", false, true, STELA_AIR_UINT, 1);
+   free(prefix);
+   reflection_inspection_case(stela_air_test_prefix, stela_air_test_store_body, stela_air_test_metadata,
+                              "@unqualified = constant i32 1\n", false, true, STELA_AIR_UINT, 1);
+}
+
+static void
+shared_reflection_case(const char *extra, bool complete)
+{
+   LLVMMemoryBufferRef input = shared_bitcode("ret void\n", false, extra);
+   struct reflection_expectation expected = {complete, false, STELA_AIR_UINT, 1};
+   struct stela_air_error error;
+   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8,
+                          inspect_reflection, &expected, &error));
+   /* A conservative absent-reflection result must not leak its local failure
+    * into otherwise successful original LLVM/module inspection. */
+   CHECK(error.kind == STELA_AIR_OK && !error.detail[0]);
+   if (complete) {
+      struct shared_bindings bindings = {0};
+      nir_shader *nir = shared_translate(input, &test_nir_options, &bindings, 0, &error);
+      CHECK(nir && !nir->info.shared_size && !bindings.shared);
+      check_shared_operations(nir, 0, 0, 0);
+      ralloc_free(nir);
+   }
+   LLVMDisposeMemoryBuffer(input);
+}
+
+static void
+shared_reflection_tests(void)
+{
+   const char *good[] = {
+      "@s = internal addrspace(3) global i8 undef, align 1\n",
+      "@s = internal addrspace(3) global <3 x i16> undef, align 8\n",
+      "@s = internal addrspace(3) global [3 x [4 x <4 x float>]] undef, align 16\n",
+      "@s = internal unnamed_addr addrspace(3) global [32 x i32] undef, align 4\n",
+      "@s = internal addrspace(3) global i64 undef\n", /* Original ABI alignment. */
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(good); i++)
+      shared_reflection_case(good[i], true);
+   const char *bad[] = {
+      "@s = internal addrspace(1) global i32 undef, align 4\n",
+      "@s = internal addrspace(3) constant i32 undef, align 4\n",
+      "@s = external addrspace(3) global i32\n",
+      "@s = internal thread_local addrspace(3) global i32 undef, align 4\n",
+      "@s = internal addrspace(3) externally_initialized global i32 undef, align 4\n",
+      "@s = internal addrspace(3) global i32 0, align 4\n",
+      "@s = internal addrspace(3) global i32 poison, align 4\n",
+      "@s = internal addrspace(3) global i32 undef, section \"unqualified\", align 4\n",
+      "@s = internal addrspace(3) global i32 undef, align 4, !custom !77\n!77 = !{!\"unqualified\"}\n",
+      "@s = internal addrspace(3) global [0 x i32] undef, align 4\n",
+      "@s = internal addrspace(3) global [4294967296 x i32] undef, align 4\n",
+      "@s = internal addrspace(3) global {i32,i32} undef, align 4\n",
+      "@s = internal addrspace(3) global half undef, align 2\n",
+      "@s = internal addrspace(3) global i1 undef, align 1\n",
+      "@s = internal addrspace(3) global <8 x i32> undef, align 32\n",
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(bad); i++)
+      shared_reflection_case(bad[i], false);
+   shared_refusal("ret void\n", bad[8], STELA_AIR_TARGET);
+   /* Recursion/count are bounded before target-layout size/alignment queries. */
+   char nested[1024] = "@s = internal addrspace(3) global ";
+   for (unsigned i = 0; i < 33; i++) strcat(nested, "[1 x ");
+   strcat(nested, "i32");
+   for (unsigned i = 0; i < 33; i++) strcat(nested, "]");
+   strcat(nested, " undef, align 4\n");
+   shared_reflection_case(nested, false);
+   shared_refusal("ret void\n", nested, STELA_AIR_LIMIT);
+   char globals[16384] = {0};
+   size_t used = 0;
+   for (unsigned i = 0; i <= AIR_MAX_ARGUMENTS; i++) {
+      int n = snprintf(globals + used, sizeof(globals) - used,
+                       "@s%u = internal addrspace(3) global i32 undef, align 4\n", i);
+      CHECK(n > 0 && (size_t)n < sizeof(globals) - used); used += (size_t)n;
+   }
+   shared_reflection_case(globals, false);
+   shared_refusal("ret void\n", globals, STELA_AIR_LIMIT);
+   /* Old AIR2.8 unused shared globals still allocate nothing in the executable
+    * path; they cannot gain a new qualified reflection profile by this change. */
+   reflection_inspection_case(stela_air_test_prefix, "ret void\n", stela_air_test_metadata,
+                              good[3], false, false, STELA_AIR_UINT, 1);
+   LLVMMemoryBufferRef input = stela_air_test_bitcode("ret void\n", good[3]);
+   struct shared_bindings bindings = {0}; struct stela_air_error error;
+   nir_shader *nir = shared_translate(input, &test_nir_options, &bindings, 0, &error);
+   CHECK(nir && !nir->info.shared_size); ralloc_free(nir); LLVMDisposeMemoryBuffer(input);
+   puts("AIR static-shared reflection, observational diagnostics, bounds and unused-allocation tests passed");
+}
+
+static void
+inspection_tests(void)
+{
+   struct stela_air_error error;
+   unsigned calls = 0;
+   LLVMMemoryBufferRef input = stela_air_test_bitcode(stela_air_test_store_body, "");
+   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(calls == 1 && error.kind == STELA_AIR_OK);
+   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 0, inspect_entry, &calls, &error));
+   CHECK(error.kind == STELA_AIR_INPUT && calls == 1);
+   LLVMDisposeMemoryBuffer(input);
+   char *metadata = replace_once(stela_air_test_metadata, "!air.kernel = !{!2}", "!air.kernel = !{!2, !2}");
+   input = stela_air_test_custom_bitcode(stela_air_test_prefix, stela_air_test_store_body, metadata, "");
+   calls = 0;
+   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(error.kind == STELA_AIR_METADATA && calls == 0); /* No partial manifest. */
+   LLVMDisposeMemoryBuffer(input); free(metadata);
+   metadata = replace_once(stela_air_test_metadata, "i32 7, i32 1", "i32 128, i32 1");
+   input = stela_air_test_custom_bitcode(stela_air_test_prefix, stela_air_test_store_body, metadata, "");
+   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(error.kind == STELA_AIR_METADATA && calls == 0);
+   LLVMDisposeMemoryBuffer(input); free(metadata);
+   /* Preserve the original integer shape rule: a scalar or uint3 builtin,
+    * never a one-lane LLVM vector masquerading as a scalar argument. */
+   char *prefix = replace_once(stela_air_test_prefix, "i32 %tid", "<1 x i32> %tid");
+   input = stela_air_test_custom_bitcode(prefix, "ret void\n", stela_air_test_metadata, "");
+   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(error.kind == STELA_AIR_ARGUMENT && calls == 0);
+   nir_shader *invalid_shape = translate(input, &test_nir_options, 100, &error);
+   CHECK(!invalid_shape && error.kind == STELA_AIR_ARGUMENT);
+   LLVMDisposeMemoryBuffer(input); free(prefix);
+   /* Inspection is NOT a promise that a body/resource/pipeline can compile. */
+   input = stela_air_test_bitcode("call void @unknown()\nret void\n", "declare void @unknown()\n");
+   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(calls == 1);
+   nir_shader *nir = translate(input, &test_nir_options, 100, &error);
+   CHECK(!nir && error.kind == STELA_AIR_INSTRUCTION);
+   LLVMDisposeMemoryBuffer(input);
+}
+
 int
 main(void)
 {
    glsl_type_singleton_init_or_ref();
    tests();
+   inspection_tests();
+   reflection_inspection_tests();
+   shared_reflection_tests();
 #ifdef STELA_AIR_TEST_NAK
    nak_codegen(stela_air_test_store_body, "integer", false);
    nak_codegen(conditional_body, "nested-conditional", false);

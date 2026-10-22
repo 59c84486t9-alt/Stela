@@ -92,7 +92,7 @@ stela_amd_build_compute_pipeline(const struct radeon_info *info,
                                  struct stela_amd_compute_pipeline *pipeline)
 {
    if (!info || !binary || !binary->shader || !binary->args || !binary->config ||
-       !code || !pipeline || !bindings || !binding_count || binding_count > 8)
+       !code || !pipeline || (binding_count && !bindings) || binding_count > 8)
       return STELA_AMD_COMPUTE_INVALID;
    struct stela_amd_raw_buffer_facts facts;
    enum stela_amd_compute_status status =

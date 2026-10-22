@@ -2,7 +2,13 @@
 //! does not initialize a device, map GPU memory, submit jobs or expose Metal.
 use core::marker::PhantomData;
 
+pub mod activation;
 pub mod ct_storage;
+pub mod firmware;
+pub mod ggtt;
+pub mod guc_reset;
+pub mod pat;
+pub mod wopcm;
 
 /// The actual VM's supported width, supplied by the device/VM owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

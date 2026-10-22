@@ -6,11 +6,6 @@ edition.workspace = true
 # GPL/ISC notices and the Intel shared initialization also retains BSD terms.
 license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later AND BSD-3-Clause-Clear AND ISC"
 
-[dependencies]
-sha2 = { version = "0.10", default-features = false }
-# Fallible native mapping metadata; the maintained owner supports alloc-only UEFI.
-triomphe = { version = "=0.1.16", default-features = false }
-
 [lints]
 workspace = true
 
@@ -23,13 +18,32 @@ ram-disk = []
 nvidia-port = ["dep:cc"]
 # Native Xe command/page-table support; not an initialized Intel GPU driver.
 intel-port = ["dep:cc"]
-# Native CPU page-entry updates; requires the real GPU mapping/GMC owner.
+# Native AMD page-entry and BAR support; requires real mapping/GMC owners.
 amd-port = ["dep:cc"]
 # Hosted AMD encoder build; its C runtime is not yet ported to UEFI.
 amd-commands = []
 # Shared Metal library input validation, independent of a physical GPU backend.
 metal = []
 
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+# Fallible native mapping metadata; the maintained owner supports alloc-only UEFI.
+triomphe = { version = "=0.1.16", default-features = false }
 
 [build-dependencies]
 cc = { version = "1", optional = true }
+
+[[test]]
+name = "nvidia_mmio"
+path = "src/gpu/nvidia/stela/tests/mmio.rs"
+required-features = ["nvidia-port"]
+
+[[test]]
+name = "amd_native_mmio"
+path = "src/gpu/amd/tests/native_mmio.rs"
+required-features = ["amd-port"]
+
+[[test]]
+name = "intel_activation"
+path = "src/gpu/intel/stela/tests/activation.rs"
+required-features = ["intel-port"]

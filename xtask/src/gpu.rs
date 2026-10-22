@@ -4,6 +4,10 @@ use anyhow::Result;
 use clap::{Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+#[cfg(test)]
+mod amd;
+#[cfg(test)]
+mod intel;
 mod macos;
 mod mesa;
 mod nvidia;
@@ -36,8 +40,8 @@ impl AirFpProfile {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Compile the macOS-facing IOKit helper against kernel headers for
-    /// arm64e, arm64 and x86-64; inspect its remaining IOKit service imports.
+    /// Build the IOKit kernel helper and separate user-space Metal library
+    /// objects for arm64e, arm64 and x86-64. No driver is installed or loaded.
     Macos,
     /// Build NVIDIA, AMD and Intel shader compiler libraries for this host
     /// without Vulkan/OpenGL frontends, and run the native codegen probes.

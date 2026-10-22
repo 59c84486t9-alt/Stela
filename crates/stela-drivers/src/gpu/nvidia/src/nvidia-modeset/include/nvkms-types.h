@@ -897,12 +897,36 @@ typedef struct  {
     NvU16 Unused;
 } NVEvoLutEntryRec;
 
+/*
+ * The device addresses LUT slots at 256-byte offsets. Express that serialized
+ * layout independently of CPU alignment: nvInternalAlloc's ordinary metadata
+ * prefix does not promise an over-aligned CPU base. The real LUT surface has
+ * its own RM allocation/mapping and alignment; the temporary CPU shadow is
+ * copied to it by nvUploadDataToLutSurfaceEvo's dword loop.
+ */
+#define NV_EVO_LUT_SLOT_ALIGNMENT 0x100
+#define NV_EVO_LUT_SLOT_BYTES \
+    NV_ALIGN_UP((NV_LUT_VSS_HEADER_SIZE + NV_NUM_EVO_LUT_ENTRIES) * \
+                sizeof(NVEvoLutEntryRec), NV_EVO_LUT_SLOT_ALIGNMENT)
+
 typedef struct {
-    NVEvoLutEntryRec base[NV_LUT_VSS_HEADER_SIZE + NV_NUM_EVO_LUT_ENTRIES];
-    // The output LUT requires 8-bit alignment.
-    NVEvoLutEntryRec output[NV_LUT_VSS_HEADER_SIZE + NV_NUM_EVO_LUT_ENTRIES]
-        __attribute__((aligned(0x100)));
+    union {
+        NVEvoLutEntryRec base[NV_LUT_VSS_HEADER_SIZE + NV_NUM_EVO_LUT_ENTRIES];
+        NvU8 baseSlotStorage[NV_EVO_LUT_SLOT_BYTES];
+    };
+    union {
+        NVEvoLutEntryRec output[NV_LUT_VSS_HEADER_SIZE + NV_NUM_EVO_LUT_ENTRIES];
+        NvU8 outputSlotStorage[NV_EVO_LUT_SLOT_BYTES];
+    };
 } NVEvoLutDataRec;
+
+ct_assert(sizeof(NVEvoLutEntryRec) == 8);
+ct_assert(offsetof(NVEvoLutDataRec, base) == 0);
+ct_assert(offsetof(NVEvoLutDataRec, output) == NV_EVO_LUT_SLOT_BYTES);
+ct_assert((offsetof(NVEvoLutDataRec, output) % NV_EVO_LUT_SLOT_ALIGNMENT) == 0);
+ct_assert(sizeof(NVEvoLutDataRec) == 2 * NV_EVO_LUT_SLOT_BYTES);
+ct_assert(NV_ALIGNOF(NVEvoLutDataRec) <= NV_ALIGNOF(NvU64));
+ct_assert((sizeof(NVEvoLutDataRec) % sizeof(NvU32)) == 0);
 
 typedef struct {
     NvBool rasterLockAcrossProtocolsAllowed :1;

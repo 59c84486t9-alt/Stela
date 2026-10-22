@@ -33,6 +33,10 @@ LD_HAS_FORCE_GROUP_ALLOCATION = \
 # srcs.mk, and the NVIDIA ID string
 ALL_SRCS = $(SRCS) $(SRCS_CXX)
 ALL_SRCS += $(NVIDSTRING)
+ifeq ($(TARGET_OS),Stela)
+ALL_SRCS += ../../stela/stela_nvkms_primitives.c
+ALL_SRCS += ../../stela/stela_nvkms_memory.c
+endif
 
 SRC_COMMON = ../common
 

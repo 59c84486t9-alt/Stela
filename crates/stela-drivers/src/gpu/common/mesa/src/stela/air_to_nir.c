@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#define STELA_AIR_METADATA_INTERNAL
 #include "air_to_nir.h"
 #include "llvm-c/Analysis.h"
 #include "llvm-c/BitReader.h"
@@ -10,9 +11,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#define AIR_MAX_ARGUMENTS 128
-#define AIR_MAX_METADATA_OPERANDS 256
-#define AIR_MAX_BITCODE_BYTES (64u * 1024u * 1024u)
 #define AIR_MAX_BLOCKS 128
 #define AIR_MAX_CONTROL_DEPTH 32
 #define AIR_MAX_MERGE_PHIS 128
@@ -58,6 +56,7 @@ struct translator {
    LLVMContextRef context;
    LLVMModuleRef module;
    LLVMTargetDataRef layout; /* Borrowed from module. */
+   struct stela_air_metadata metadata;
    nir_builder b;
    struct hash_table *values;
    const struct stela_air_options *options;
@@ -101,171 +100,17 @@ diagnostic(LLVMDiagnosticInfoRef info, void *data)
    LLVMDisposeMessage(message);
 }
 
+#define md_string stela_air_md_string
+#define md_uint stela_air_md_uint
 static bool
-md_string(LLVMValueRef value, const char *expected)
+md_node(struct translator *t, LLVMValueRef node, LLVMValueRef *operands, unsigned *count)
 {
-   if (!value || !LLVMIsAMDString(value))
-      return false;
-   unsigned length;
-   const char *string = LLVMGetMDString(value, &length);
-   return length == strlen(expected) && !memcmp(string, expected, length);
+   return stela_air_md_node(&t->metadata, node, operands, count);
 }
-
 static bool
-md_uint(LLVMValueRef value, unsigned *number)
+named_md(struct translator *t, const char *name, LLVMValueRef *operands, unsigned *count)
 {
-   if (!value || !LLVMIsAConstantInt(value) ||
-       LLVMGetIntTypeWidth(LLVMTypeOf(value)) > 32)
-      return false;
-   *number = LLVMConstIntGetZExtValue(value);
-   return true;
-}
-
-static bool
-md_node(struct translator *t, LLVMValueRef node, LLVMValueRef *operands,
-        unsigned *count)
-{
-   if (!node || !LLVMIsAMDNode(node))
-      return fail(t, STELA_AIR_METADATA, "expected AIR metadata node");
-   *count = LLVMGetMDNodeNumOperands(node);
-   if (*count > AIR_MAX_METADATA_OPERANDS)
-      return fail(t, STELA_AIR_LIMIT, "AIR metadata operand budget exceeded");
-   LLVMGetMDNodeOperands(node, operands);
-   return true;
-}
-
-static bool
-named_md(struct translator *t, const char *name, LLVMValueRef *operands,
-         unsigned *count)
-{
-   *count = LLVMGetNamedMetadataNumOperands(t->module, name);
-   if (*count > AIR_MAX_METADATA_OPERANDS)
-      return fail(t, STELA_AIR_LIMIT, "%s metadata budget exceeded", name);
-   LLVMGetNamedMetadataOperands(t->module, name, operands);
-   return true;
-}
-
-static bool
-version_metadata(struct translator *t, const char *name, bool language)
-{
-   LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
-   LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
-   unsigned count, fields_count, major, minor, patch;
-   if (!named_md(t, name, nodes, &count) || count != 1 ||
-       !md_node(t, nodes[0], fields, &fields_count))
-      return fail(t, STELA_AIR_METADATA, "missing or invalid %s", name);
-   unsigned base = language ? 1 : 0;
-   if (fields_count != base + 3 || (language && !md_string(fields[0], "Metal")) ||
-       !md_uint(fields[base], &major) || !md_uint(fields[base + 1], &minor) ||
-       !md_uint(fields[base + 2], &patch) || patch != 0)
-      return fail(t, STELA_AIR_METADATA, "invalid %s", name);
-   bool supported = language ?
-      ((major == 1 && minor >= 1 && minor <= 2) ||
-       (major == 2 && minor <= 4) || (major == 3 && minor <= 2) ||
-       (major == 4 && minor <= 1)) : (major == 2 && (minor == 8 || minor == 9));
-   /* AIR 2.8 has only been observed with Metal 4.0 here. The AIR 2.9
-    * combinations below come from actual independent compiler requests. */
-   if (language && t->air_minor == 8)
-      supported &= major == 4 && minor == 0;
-   if (!supported)
-      return fail(t, STELA_AIR_METADATA, "unsupported %s %u.%u.%u", name, major, minor, patch);
-   if (!language)
-      t->air_minor = minor;
-   else {
-      t->language_major = major;
-      t->language_minor = minor;
-   }
-   return true;
-}
-
-static bool
-module_flags(struct translator *t)
-{
-   /* These are the LLVM IR serialized behavior values, not the smaller C API
-    * LLVMModuleFlagBehavior enum (which does not expose Max in LLVM 23). */
-   enum { IR_FLAG_ERROR = 1, IR_FLAG_MAX = 7 };
-   const char *keys[] = {"wchar_size", "frame-pointer", "air.max_device_buffers",
-      "air.max_constant_buffers", "air.max_threadgroup_buffers", "air.max_textures",
-      "air.max_read_write_textures", "air.max_samplers"};
-   LLVMValueRef flags[AIR_MAX_METADATA_OPERANDS];
-   unsigned count, seen = 0;
-   if (!named_md(t, "llvm.module.flags", flags, &count))
-      return false;
-   for (unsigned i = 0; i < count; i++) {
-      LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
-      unsigned field_count, behavior, value, key;
-      if (!md_node(t, flags[i], fields, &field_count) || field_count != 3 ||
-          !md_uint(fields[0], &behavior) || !md_uint(fields[2], &value))
-         return fail(t, STELA_AIR_METADATA, "unsupported module flag shape");
-      for (key = 0; key < ARRAY_SIZE(keys); key++) {
-         if (md_string(fields[1], keys[key]))
-            break;
-      }
-      if (key == ARRAY_SIZE(keys) || (seen & (1u << key)))
-         return fail(t, STELA_AIR_METADATA, "unsupported/duplicate module flag");
-      seen |= 1u << key;
-      if (behavior != (key == 0 ? IR_FLAG_ERROR : IR_FLAG_MAX) ||
-          (key == 0 && value != 4) || (key == 1 && value > 2) ||
-          (key >= 2 && !value))
-         return fail(t, STELA_AIR_METADATA, "unsupported module flag value: %s", keys[key]);
-      if (key == 2)
-         t->max_device_buffers = value;
-      if (key == 4)
-         t->max_threadgroup_buffers = value;
-   }
-   /* No linking, CPU frame operations or source wchar operations occur in the
-    * implemented compute subset. Other resource kinds remain refused.
-    * Device/threadgroup location bounds are enforced below, never advertised as the
-    * hardware's actual Metal capability or silently removed from the input. */
-   return true;
-}
-
-static bool
-module_metadata(struct translator *t)
-{
-   for (LLVMNamedMDNodeRef node = LLVMGetFirstNamedMetadata(t->module); node;
-        node = LLVMGetNextNamedMetadata(node)) {
-      size_t size;
-      const char *name = LLVMGetNamedMetadataName(node, &size);
-      const char *allowed[] = {"air.version", "air.language_version",
-                              "air.compile_options", "air.kernel", "llvm.ident",
-                              "llvm.module.flags"};
-      bool found = false;
-      for (unsigned i = 0; i < ARRAY_SIZE(allowed); i++)
-         found |= size == strlen(allowed[i]) && !memcmp(name, allowed[i], size);
-      if (!found)
-         return fail(t, STELA_AIR_METADATA, "unsupported module metadata: %.*s",
-                     (int)MIN2(size, 160), name);
-   }
-   if (!version_metadata(t, "air.version", false) ||
-       !version_metadata(t, "air.language_version", true) || !module_flags(t))
-      return false;
-   LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
-   unsigned count;
-   if (!named_md(t, "air.compile_options", nodes, &count))
-      return false;
-   unsigned seen = 0;
-   for (unsigned i = 0; i < count; i++) {
-      LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
-      unsigned fields_count;
-      if (!md_node(t, nodes[i], fields, &fields_count) || fields_count != 1 ||
-          !(md_string(fields[0], "air.compile.denorms_disable") ||
-            md_string(fields[0], "air.compile.fast_math_enable") ||
-            md_string(fields[0], "air.compile.framebuffer_fetch_enable") ||
-            md_string(fields[0], "air.compile.framebuffer_fetch_disable")))
-         return fail(t, STELA_AIR_METADATA, "unsupported AIR compile option");
-      unsigned bit = md_string(fields[0], "air.compile.denorms_disable") ? 1 :
-                     md_string(fields[0], "air.compile.fast_math_enable") ? 2 : 4;
-      if (seen & bit)
-         return fail(t, STELA_AIR_METADATA, "duplicate/conflicting AIR compile option");
-      seen |= bit;
-   }
-   t->denorms_disable = seen & 1;
-   t->fast_math = seen & 2;
-   /* Arithmetic requires an explicit qualified FP policy for this private AIR
-    * option. Exact storage/shared access and integer operations do not depend
-    * on FP denorm mode. */
-   return true;
+   return stela_air_named_md(&t->metadata, name, operands, count);
 }
 
 static bool
@@ -426,127 +271,25 @@ get_value(struct translator *t, LLVMValueRef llvm)
 static bool
 kernel_arguments(struct translator *t, LLVMValueRef fn)
 {
-   LLVMValueRef kernels[AIR_MAX_METADATA_OPERANDS], args_node = NULL;
-   unsigned kernel_count;
-   if (!named_md(t, "air.kernel", kernels, &kernel_count))
+   struct stela_air_kernel kernel;
+   if (!stela_air_metadata_kernel(&t->metadata, fn, &kernel))
       return false;
-   for (unsigned i = 0; i < kernel_count; i++) {
-      LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
-      unsigned count;
-      if (!md_node(t, kernels[i], fields, &count) || count != 3)
-         return fail(t, STELA_AIR_METADATA, "invalid air.kernel descriptor");
-      if (fields[0] == fn) {
-         LLVMValueRef outputs[AIR_MAX_METADATA_OPERANDS];
-         unsigned output_count;
-         if (args_node || !md_node(t, fields[1], outputs, &output_count) || output_count)
-            return fail(t, STELA_AIR_METADATA, "duplicate kernel or nonempty compute outputs");
-         args_node = fields[2];
-      }
-   }
-   if (!args_node)
-      return fail(t, STELA_AIR_METADATA, "entry is not an AIR compute kernel");
-   unsigned argc = LLVMCountParams(fn);
-   if (argc > AIR_MAX_ARGUMENTS)
-      return fail(t, STELA_AIR_LIMIT, "AIR argument budget exceeded");
-   LLVMValueRef args[AIR_MAX_METADATA_OPERANDS];
-   unsigned count;
-   if (!md_node(t, args_node, args, &count) || count != argc)
-      return fail(t, STELA_AIR_METADATA, "AIR argument descriptors do not match parameters");
-   bool used[AIR_MAX_ARGUMENTS] = {false};
-   bool buffer_indices[AIR_MAX_ARGUMENTS] = {false};
-   bool shared_indices[AIR_MAX_ARGUMENTS] = {false};
    bool ssbo_slots[UINT8_MAX + 1] = {false};
-   for (unsigned a = 0; a < argc; a++) {
-      LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
-      unsigned fields_count, index;
-      if (!md_node(t, args[a], fields, &fields_count) || fields_count < 2 ||
-          !md_uint(fields[0], &index) || index >= argc || used[index])
-         return fail(t, STELA_AIR_METADATA, "invalid/duplicate argument index");
-      used[index] = true;
-      LLVMValueRef param = LLVMGetParam(fn, index);
-      unsigned attributes_count = LLVMGetAttributeCountAtIndex(fn, index + 1);
-      if (attributes_count > AIR_MAX_METADATA_OPERANDS)
-         return fail(t, STELA_AIR_LIMIT, "argument attribute budget exceeded");
-      LLVMAttributeRef attributes[AIR_MAX_METADATA_OPERANDS];
-      LLVMGetAttributesAtIndex(fn, index + 1, attributes);
-      const char *abi_attributes[] = {"sret", "byval", "byref", "inalloca",
-         "preallocated", "nest", "swiftself", "swifterror", "elementtype"};
-      for (unsigned attribute = 0; attribute < attributes_count; attribute++) {
-         if (LLVMIsTypeAttribute(attributes[attribute]))
-            return fail(t, STELA_AIR_ARGUMENT, "unsupported typed parameter attribute");
-         if (!LLVMIsEnumAttribute(attributes[attribute]))
-            continue;
-         unsigned kind = LLVMGetEnumAttributeKind(attributes[attribute]);
-         for (unsigned k = 0; k < ARRAY_SIZE(abi_attributes); k++) {
-            if (kind == LLVMGetEnumAttributeKindForName(abi_attributes[k], strlen(abi_attributes[k])))
-               return fail(t, STELA_AIR_ARGUMENT, "unsupported parameter ABI attribute: %s", abi_attributes[k]);
-         }
-      }
-      bool buffer = md_string(fields[1], "air.buffer");
-      bool thread_id = md_string(fields[1], "air.thread_position_in_grid");
-      if (!buffer && !thread_id)
-         return fail(t, STELA_AIR_ARGUMENT, "unsupported AIR argument kind at %u", index);
-      struct stela_air_buffer desc = {.argument = index};
-      bool has_location = false, has_as = false, has_size = false, has_align = false;
-      bool has_name = false, has_type_name = false;
-      for (unsigned f = 2; f < fields_count;) {
-         LLVMValueRef key = fields[f++];
-         if (md_string(key, "air.read") || md_string(key, "air.write") ||
-             md_string(key, "air.read_write")) {
-            if (!buffer || desc.access)
-               return fail(t, STELA_AIR_METADATA, "duplicate/inapplicable buffer access");
-            desc.access = md_string(key, "air.read") ? STELA_AIR_READ :
-                          md_string(key, "air.write") ? STELA_AIR_WRITE : STELA_AIR_READ_WRITE;
-         } else if (md_string(key, "air.location_index")) {
-            unsigned locations;
-            if (!buffer || has_location || f + 2 > fields_count ||
-                !md_uint(fields[f], &desc.index) || !md_uint(fields[f + 1], &locations) ||
-                locations != 1 || desc.index >= AIR_MAX_ARGUMENTS)
-               return fail(t, STELA_AIR_METADATA, "unsupported/duplicate buffer location");
-            has_location = true;
-            f += 2;
-         } else if (md_string(key, "air.address_space")) {
-            if (!buffer || has_as || f == fields_count || !md_uint(fields[f++], &desc.address_space))
-               return fail(t, STELA_AIR_METADATA, "invalid buffer address space");
-            has_as = true;
-         } else if (md_string(key, "air.arg_type_size") || md_string(key, "air.arg_type_align_size")) {
-            bool alignment = md_string(key, "air.arg_type_align_size");
-            bool *present = alignment ? &has_align : &has_size;
-            unsigned *number = alignment ? &desc.type_alignment : &desc.type_size;
-            if (!buffer || *present || f == fields_count || !md_uint(fields[f++], number) ||
-                (alignment && (!*number || (*number & (*number - 1)))))
-               return fail(t, STELA_AIR_METADATA, "invalid argument size/alignment");
-            *present = true;
-         } else if (md_string(key, "air.arg_name") || md_string(key, "air.arg_type_name")) {
-            bool *present = md_string(key, "air.arg_name") ? &has_name : &has_type_name;
-            if (*present || f == fields_count || !fields[f] || !LLVMIsAMDString(fields[f++]))
-               return fail(t, STELA_AIR_METADATA, "invalid argument reflection string");
-            *present = true;
-         } else {
-            return fail(t, STELA_AIR_METADATA, "unsupported argument metadata at %u", index);
-         }
-      }
+   for (unsigned a = 0; a < kernel.count; a++) {
+      const struct stela_air_argument *argument = &kernel.arguments[a];
+      LLVMValueRef param = argument->value;
+      struct stela_air_buffer desc = argument->buffer;
+      unsigned index = desc.argument, components = argument->components;
+      bool buffer = argument->is_buffer;
       nir_def *def;
       unsigned ssbo_slot = 0;
       nir_variable *shared = NULL;
       unsigned shared_size = 0;
       if (buffer) {
-         LLVMTypeRef type = LLVMTypeOf(param);
-         if (!has_location || !has_as || !desc.access ||
-             (desc.address_space != 1 && desc.address_space != 3) ||
-             LLVMGetTypeKind(type) != LLVMPointerTypeKind ||
-             LLVMGetPointerAddressSpace(type) != desc.address_space)
-            return fail(t, STELA_AIR_ARGUMENT, "unsupported buffer %u", index);
          bool threadgroup = desc.address_space == 3;
-         bool *indices = threadgroup ? shared_indices : buffer_indices;
-         unsigned limit = threadgroup ? t->max_threadgroup_buffers : t->max_device_buffers;
-         if (indices[desc.index] || (limit && desc.index >= limit))
-            return fail(t, STELA_AIR_METADATA, "duplicate buffer or location exceeds AIR module limit");
-         indices[desc.index] = true;
          if (threadgroup) {
             struct stela_air_threadgroup_view view = {0};
-            if (!has_size || !has_align || !desc.type_size || !desc.type_alignment ||
-                !t->options->bind_threadgroup ||
+            if (!t->options->bind_threadgroup ||
                 !t->options->bind_threadgroup(&desc, &view, t->options->binding_data) ||
                 view.size < desc.type_size || view.alignment < desc.type_alignment ||
                 view.available_access < STELA_AIR_READ || view.available_access > STELA_AIR_READ_WRITE ||
@@ -572,10 +315,6 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
                return fail(t, STELA_AIR_ARGUMENT, "binding callback refused/invalid buffer %u", index);
          }
       } else {
-         unsigned components, bits;
-         if (!shape(LLVMTypeOf(param), &components, &bits) || bits != 32 ||
-             (components != 1 && components != 3))
-            return fail(t, STELA_AIR_ARGUMENT, "unsupported thread-position type");
          /* Metal's grid starts at zero, with no dispatch-base parameter.
           * Form its ID directly from existing NIR workgroup/local builtins;
           * a generic global-ID lowering may add an OpenCL/Vulkan base input. */
@@ -598,42 +337,6 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
          value->ssbo = true;
          value->ssbo_slot = ssbo_slot;
       }
-   }
-   return true;
-}
-
-static bool
-address_layout(struct translator *t)
-{
-   t->layout = LLVMGetModuleDataLayout(t->module);
-   const char *layout = LLVMGetDataLayoutStr(t->module);
-   if (!layout || !*layout || LLVMByteOrder(t->layout) != LLVMLittleEndian ||
-       LLVMPointerSizeForAS(t->layout, 0) != 8 || LLVMPointerSizeForAS(t->layout, 1) != 8)
-      return fail(t, STELA_AIR_TARGET, "requires explicit little-endian 64-bit AIR layout");
-   /* LLVM's C DataLayout API does not expose pointer-index width. Validate only
-    * that property here; actual allocation sizes/field offsets come from LLVM.
-    * Nonintegral/external-state pointers need a different NIR representation. */
-   for (const char *part = layout; *part;) {
-      const char *end = strchr(part, '-');
-      size_t length = end ? (size_t)(end - part) : strlen(part);
-      if ((length > 3 && !memcmp(part, "ni:", 3)) || (length && *part == 'P'))
-         return fail(t, STELA_AIR_TARGET, "unsupported nonintegral/program address-space layout");
-      if (length && *part == 'p') {
-         unsigned colons = 0;
-         const char *last = NULL;
-         for (size_t i = 0; i < length; i++) {
-            if (part[i] == ':') {
-               colons++;
-               last = part + i + 1;
-            }
-         }
-         if (colons > 4 || (colons == 4 &&
-             ((size_t)(part + length - last) != 2 || memcmp(last, "64", 2))))
-            return fail(t, STELA_AIR_TARGET, "unsupported pointer-index width");
-      }
-      part += length;
-      if (*part)
-         part++;
    }
    return true;
 }
@@ -677,17 +380,7 @@ fixed_storage_type(struct translator *t, LLVMTypeRef type, unsigned depth,
 static bool
 shared_profile(struct translator *t)
 {
-   LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS], fields[AIR_MAX_METADATA_OPERANDS];
-   unsigned count, fields_count;
-   if (t->air_minor != 9 || t->language_major != 4 || t->language_minor != 1 ||
-       strcmp(LLVMGetTarget(t->module), "air64_v29-apple-macosx27.2.0") ||
-       !named_md(t, "llvm.ident", nodes, &count) || count != 1 ||
-       !md_node(t, nodes[0], fields, &fields_count) || fields_count != 1 ||
-       !md_string(fields[0], "Apple metal version 32023.922 (metalfe-32023.922.4)"))
-      return fail(t, STELA_AIR_METADATA, "shared-memory AIR/compiler profile is unqualified");
-   if (LLVMPointerSizeForAS(t->layout, 3) != 8)
-      return fail(t, STELA_AIR_TARGET, "shared-memory AIR pointers require 64-bit layout");
-   return true;
+   return stela_air_metadata_shared_profile(&t->metadata);
 }
 
 static nir_variable *
@@ -717,64 +410,16 @@ shared_resource(struct translator *t, uint64_t size, unsigned alignment)
 }
 
 static bool
-shared_storage_size(struct translator *t, LLVMTypeRef type, unsigned depth,
-                     uint64_t *size)
-{
-   if (depth == 32)
-      return fail(t, STELA_AIR_LIMIT, "shared storage type nesting exceeded");
-   if (LLVMGetTypeKind(type) == LLVMArrayTypeKind) {
-      uint64_t element;
-      if (!shared_storage_size(t, LLVMGetElementType(type), depth + 1, &element))
-         return false;
-      uint64_t length = LLVMGetArrayLength2(type);
-      if (!length || length > UINT32_MAX / element)
-         return fail(t, STELA_AIR_LIMIT, "shared storage array extent exceeded");
-   } else {
-      unsigned components, bits;
-      if (!value_shape(type, &components, &bits) || bits < 8)
-         return fail(t, STELA_AIR_TYPE, "shared globals require fixed integer/FP32 scalar/vector arrays");
-   }
-   /* Aggregate extents were bounded before invoking fixed-size LLVM queries. */
-   *size = LLVMABISizeOfType(t->layout, type);
-   return (*size && *size <= UINT32_MAX) ||
-      fail(t, STELA_AIR_LIMIT, "shared storage allocation size exceeded");
-}
-
-static bool
 shared_global_info(struct translator *t, LLVMValueRef global,
-                    uint64_t *size, unsigned *alignment)
+                   uint64_t *size, unsigned *alignment)
 {
-   const char *section = LLVMGetSection(global);
-   LLVMValueRef initializer = LLVMGetInitializer(global);
-   if (LLVMGetPointerAddressSpace(LLVMTypeOf(global)) != 3 ||
-       LLVMGetLinkage(global) != LLVMInternalLinkage || LLVMIsThreadLocal(global) ||
-       LLVMIsGlobalConstant(global) || LLVMIsExternallyInitialized(global) ||
-       (section && *section) || !initializer || !LLVMIsUndef(initializer) || LLVMIsPoison(initializer))
-      return fail(t, STELA_AIR_TARGET, "unsupported global/shared initializer or storage ABI");
-   LLVMTypeRef type = LLVMGlobalGetValueType(global);
-   if (!shared_storage_size(t, type, 0, size))
-      return false;
-   *alignment = LLVMGetAlignment(global);
-   if (!*alignment)
-      *alignment = LLVMABIAlignmentOfType(t->layout, type);
-   return (*alignment && !(*alignment & (*alignment - 1))) ||
-      fail(t, STELA_AIR_TYPE, "unsupported shared global alignment");
+   return stela_air_metadata_shared_global(&t->metadata, global, size, alignment);
 }
 
 static bool
 shared_globals(struct translator *t)
 {
-   unsigned count = 0;
-   for (LLVMValueRef global = LLVMGetFirstGlobal(t->module); global;
-        global = LLVMGetNextGlobal(global)) {
-      uint64_t size;
-      unsigned alignment;
-      if (++count > AIR_MAX_ARGUMENTS)
-         return fail(t, STELA_AIR_LIMIT, "shared global count exceeded");
-      if (!shared_global_info(t, global, &size, &alignment))
-         return false;
-   }
-   return true;
+   return stela_air_metadata_shared_globals(&t->metadata);
 }
 
 static nir_def *
@@ -1709,7 +1354,18 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
       fail(&t, STELA_AIR_TARGET, "unsupported target/globals/inline assembly");
       goto done;
    }
-   if (!address_layout(&t) || !module_metadata(&t) || !shared_globals(&t))
+   t.metadata = (struct stela_air_metadata){.module = t.module, .error = error};
+   if (!stela_air_metadata_layout(&t.metadata) || !stela_air_metadata_validate(&t.metadata))
+      goto done;
+   t.layout = t.metadata.layout;
+   t.air_minor = t.metadata.air_minor;
+   t.language_major = t.metadata.language_major;
+   t.language_minor = t.metadata.language_minor;
+   t.max_device_buffers = t.metadata.max_device_buffers;
+   t.max_threadgroup_buffers = t.metadata.max_threadgroup_buffers;
+   t.denorms_disable = t.metadata.denorms_disable;
+   t.fast_math = t.metadata.fast_math;
+   if (!shared_globals(&t))
       goto done;
    char target_prefix[40];
    snprintf(target_prefix, sizeof(target_prefix), "air64_v2%u-apple-macosx", t.air_minor);
