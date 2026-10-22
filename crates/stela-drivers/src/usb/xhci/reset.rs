@@ -7,7 +7,6 @@ use super::*;
 pub(super) const DISABLE_SLOT: u32 = 10;
 const PORT_STATUS_CHANGE: u32 = 34;
 const POST_RESET_US: u64 = 50_000;
-const PLS: u32 = 15 << 5;
 pub(super) const EXHAUSTED: &str = "xHCI boot-lifetime non-recycled slot budget exhausted";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

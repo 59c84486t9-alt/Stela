@@ -106,7 +106,24 @@ const PED: u32 = 1 << 1;
 const PR: u32 = 1 << 4;
 const PP: u32 = 1 << 9;
 const PORT_CHANGES: u32 = 0x7f << 17;
+const CSC: u32 = 1 << 17;
+const WRC: u32 = 1 << 19;
 const PRC: u32 = 1 << 21;
+const WPR: u32 = 1 << 31;
+/// PORTSC Port Link State and Port Speed fields (xHCI 5.4.8).
+const PLS_SHIFT: u32 = 5;
+const PLS_FIELD: u32 = 0xf;
+pub(super) const PLS: u32 = PLS_FIELD << PLS_SHIFT;
+const LINK_INACTIVE: u32 = 6;
+const LINK_COMPLIANCE: u32 = 10;
+const PORT_SPEED_SHIFT: u32 = 10;
+const PORT_SPEED_FIELD: u32 = 0xf;
+/// Hub port status and change bits (USB 2.0 11.24.2.7).
+const HUB_PORT_CONNECTION: u16 = 1 << 0;
+const HUB_PORT_ENABLE: u16 = 1 << 1;
+const HUB_PORT_RESET: u16 = 1 << 4;
+const HUB_PORT_LOW_SPEED: u16 = 1 << 9;
+const HUB_PORT_HIGH_SPEED: u16 = 1 << 10;
 /// PORTSC bits a write keeps: power and the wake enables.
 const PORT_KEEP: u32 = PP | 0x7 << 25;
 
@@ -202,6 +219,15 @@ const COMMAND_US: u64 = 5_000_000;
 const CONTROL_US: u64 = 5_000_000;
 const PORT_RESET_US: u64 = 500_000;
 const RESET_RECOVERY_US: u64 = 10_000;
+/// A newly powered port's settle time before its first sample.
+const PORT_POWER_US: u64 = 20_000;
+/// Linux `hub_port_debounce`: a connection counts once it stays the same
+/// for 100 ms, sampled every 25 ms, for at most two seconds.
+const DEBOUNCE_STEP_US: u64 = 25_000;
+const DEBOUNCE_STABLE_US: u64 = 100_000;
+const DEBOUNCE_TIMEOUT_US: u64 = 2_000_000;
+/// Linux `PORT_INIT_TRIES`: resets and enumerations a port gets.
+const PORT_INIT_TRIES: usize = 4;
 const ADDRESS_RECOVERY_US: u64 = 2_000;
 const BIOS_HANDOFF_US: u64 = 1_000_000;
 
@@ -258,6 +284,35 @@ impl Registers for Mmio {
     }
     fn write32(&mut self, offset: usize, value: u32) {
         Mmio::write32(self, offset, value);
+    }
+}
+
+/// Linux `hub_port_debounce`: sample a port until its connection holds
+/// steady and say whether a device is there. `sample` returns the port's
+/// connection and connect change, clearing a change it reports.
+fn debounce(
+    clock: Clock,
+    mut sample: impl FnMut() -> Result<(bool, bool), BlockError>,
+) -> Result<bool, BlockError> {
+    let mut connection = None;
+    let mut stable = 0;
+    let mut total = 0;
+    loop {
+        let (connected, changed) = sample()?;
+        if !changed && connection == Some(connected) {
+            stable += DEBOUNCE_STEP_US;
+            if stable >= DEBOUNCE_STABLE_US {
+                return Ok(connected);
+            }
+        } else {
+            stable = 0;
+            connection = Some(connected);
+        }
+        if total >= DEBOUNCE_TIMEOUT_US {
+            return Err(BlockError::Unsupported("USB port connection never settled"));
+        }
+        clock.delay(DEBOUNCE_STEP_US);
+        total += DEBOUNCE_STEP_US;
     }
 }
 
@@ -1691,22 +1746,60 @@ impl Controller {
         for port in 1..=self.max_ports {
             let location = format!("{} port {port}", self.location);
             crate::working(&location);
-            match self.root_port(port) {
-                Ok(Some(speed)) => {
-                    let attachment = Attachment {
+            let reset = |c: &mut Self| {
+                c.root_port(port).map(|speed| {
+                    speed.map(|speed| Attachment {
                         root_port: port,
                         route: 0,
                         tier: 0,
                         speed,
                         translator: None,
-                    };
-                    self.attach(attachment, location, dma, &mut devices, failures);
-                }
-                Ok(None) => {}
-                Err(error) => failures.push((format!("{location} enable/reset root port"), error)),
-            }
+                    })
+                })
+            };
+            self.connect(location, reset, dma, &mut devices, failures);
         }
         devices
+    }
+
+    /// Linux `hub_port_connect`: reset a port and enumerate its device, up
+    /// to four times; only the last failure is reported.
+    fn connect(
+        &mut self,
+        location: String,
+        mut reset: impl FnMut(&mut Self) -> Result<Option<Attachment>, BlockError>,
+        dma: &mut dyn DmaAllocator,
+        devices: &mut Vec<Device>,
+        failures: &mut Vec<(String, BlockError)>,
+    ) {
+        let mut failure = None;
+        for _ in 0..PORT_INIT_TRIES {
+            let attachment = match reset(self) {
+                Ok(Some(attachment)) => attachment,
+                Ok(None) => return,
+                Err(error) => {
+                    failures.push((format!("{location} enable/reset port"), error));
+                    return;
+                }
+            };
+            match self.identify(attachment, location.clone(), dma) {
+                Ok(device) => {
+                    return self.adopt(device, attachment, location, dma, devices, failures);
+                }
+                Err(error) => failure = Some((attachment, error)),
+            }
+        }
+        if let Some((attachment, (operation, error))) = failure {
+            let at = self.port_offset(attachment.root_port);
+            let portsc = self.registers.read32(at);
+            failures.push((
+                format!(
+                    "{location} speed={} root-portsc={portsc:#010x} {operation}",
+                    attachment.speed
+                ),
+                error,
+            ));
+        }
     }
 
     /// A root port's device speed once the port is enabled, or `None` with
@@ -1715,15 +1808,37 @@ impl Controller {
         let at = self.port_offset(port);
         if self.registers.read32(at) & PP == 0 {
             self.write_port(port, PP);
-            self.clock.delay(20_000);
+            self.clock.delay(PORT_POWER_US);
         }
-        let portsc = self.registers.read32(at);
-        if portsc & CCS == 0 {
+        let clock = self.clock;
+        let connected = debounce(clock, || {
+            let portsc = self.registers.read32(at);
+            if portsc & CSC != 0 {
+                self.write_port(port, CSC);
+            }
+            Ok((portsc & CCS != 0, portsc & CSC != 0))
+        })?;
+        if !connected {
             return Ok(None);
         }
-        // Clear the connect change, so later changes are this driver's.
+        // Clear the remaining changes, so later changes are this driver's.
+        let portsc = self.registers.read32(at);
         self.write_port(port, portsc & PORT_CHANGES);
-        if self.port_major[usize::from(port - 1)] != 3 {
+        let link = portsc >> PLS_SHIFT & PLS_FIELD;
+        if self.port_major[usize::from(port - 1)] == 3
+            && matches!(link, LINK_INACTIVE | LINK_COMPLIANCE)
+        {
+            // Linux `hub_port_reset` warm-resets a SuperSpeed link stuck in
+            // SS.Inactive or Compliance Mode.
+            self.write_port(port, WPR);
+            if !wait(&mut *self.registers, clock, PORT_RESET_US, |r| {
+                r.read32(at) & (WRC | PRC) == WRC | PRC
+            }) {
+                return Err(BlockError::Timeout);
+            }
+            self.write_port(port, WRC | PRC);
+            self.clock.delay(RESET_RECOVERY_US);
+        } else if self.port_major[usize::from(port - 1)] != 3 {
             self.write_port(port, PR);
             let clock = self.clock;
             if !wait(&mut *self.registers, clock, PORT_RESET_US, |r| {
@@ -1745,49 +1860,37 @@ impl Controller {
         if portsc & PED == 0 {
             return Err(BlockError::Unsupported("root port did not enable"));
         }
-        Ok(Some((portsc >> 10 & 0xf) as u8))
+        Ok(Some((portsc >> PORT_SPEED_SHIFT & PORT_SPEED_FIELD) as u8))
     }
 
-    fn attach(
+    /// Choose an enumerated device's configuration and bring up a hub's
+    /// ports; the device joins the inventory either way.
+    fn adopt(
         &mut self,
+        mut device: Device,
         attachment: Attachment,
         location: String,
         dma: &mut dyn DmaAllocator,
         devices: &mut Vec<Device>,
         failures: &mut Vec<(String, BlockError)>,
     ) {
-        match self.identify(attachment, location.clone(), dma) {
-            Ok(mut device) => {
-                if let Err(error) = self.preflight_vendor_ethernet(&mut device) {
-                    failures.push((format!("{location} RTL815x configuration preflight"), error));
-                }
-                if let Err(why) = configuration::select_with_controller(&mut device, Some(self)) {
-                    device.configuration.clear();
-                    failures.push((
-                        format!("{location} {} choose configuration", device.name()),
-                        BlockError::Unsupported(why),
-                    ));
-                } else if device.descriptor[4] == HUB_CLASS
-                    && let Err(error) = self.hub(&device, attachment, dma, devices, failures)
-                {
-                    failures.push((format!("{location} {} enumerate hub", device.name()), error));
-                }
-                // Selection failures still preserve the entire descriptor
-                // inventory for diagnostics and future generic forwarding.
-                devices.push(device);
-            }
-            Err((operation, error)) => {
-                let at = self.port_offset(attachment.root_port);
-                let portsc = self.registers.read32(at);
-                failures.push((
-                    format!(
-                        "{location} speed={} root-portsc={portsc:#010x} {operation}",
-                        attachment.speed
-                    ),
-                    error,
-                ));
-            }
+        if let Err(error) = self.preflight_vendor_ethernet(&mut device) {
+            failures.push((format!("{location} RTL815x configuration preflight"), error));
         }
+        if let Err(why) = configuration::select_with_controller(&mut device, Some(self)) {
+            device.configuration.clear();
+            failures.push((
+                format!("{location} {} choose configuration", device.name()),
+                BlockError::Unsupported(why),
+            ));
+        } else if device.descriptor[4] == HUB_CLASS
+            && let Err(error) = self.hub(&device, attachment, dma, devices, failures)
+        {
+            failures.push((format!("{location} {} enumerate hub", device.name()), error));
+        }
+        // Selection failures still preserve the entire descriptor
+        // inventory for diagnostics and future generic forwarding.
+        devices.push(device);
     }
 
     fn preflight_vendor_ethernet(&mut self, device: &mut Device) -> Result<(), BlockError> {
@@ -2056,28 +2159,25 @@ impl Controller {
                 &[],
             )?;
         }
-        self.clock.delay(power_good_us.max(20_000));
+        self.clock.delay(power_good_us.max(PORT_POWER_US));
         for port in 1..=ports {
             let location = format!("{}.{port}", device.location);
             crate::working(&location);
-            match self.hub_port(slot, port) {
-                Ok(Some(speed)) => {
-                    let translator = match (speed, attachment.speed) {
-                        (LOW_SPEED | FULL_SPEED, HIGH_SPEED) => Some((slot, port)),
-                        _ => attachment.translator,
-                    };
-                    let child = Attachment {
+            let reset = |c: &mut Self| {
+                c.hub_port(slot, port).map(|speed| {
+                    speed.map(|speed| Attachment {
                         root_port: attachment.root_port,
                         route: child_route(attachment.route, attachment.tier, port),
                         tier: attachment.tier + 1,
                         speed,
-                        translator,
-                    };
-                    self.attach(child, location, dma, devices, failures);
-                }
-                Ok(None) => {}
-                Err(error) => failures.push((location, error)),
-            }
+                        translator: match (speed, attachment.speed) {
+                            (LOW_SPEED | FULL_SPEED, HIGH_SPEED) => Some((slot, port)),
+                            _ => attachment.translator,
+                        },
+                    })
+                })
+            };
+            self.connect(location, reset, dma, devices, failures);
         }
         Ok(())
     }
@@ -2105,22 +2205,26 @@ impl Controller {
 
     /// A hub port's device speed once the port is reset and enabled.
     fn hub_port(&mut self, slot: u8, port: u8) -> Result<Option<u8>, BlockError> {
-        let (status, _) = self.hub_port_status(slot, port)?;
-        if status & 1 == 0 {
+        let index = u16::from(port);
+        let clear_connection = setup(
+            TYPE_CLASS | RECIPIENT_OTHER,
+            CLEAR_FEATURE,
+            C_PORT_CONNECTION,
+            index,
+            0,
+        );
+        let clock = self.clock;
+        let connected = debounce(clock, || {
+            let (status, change) = self.hub_port_status(slot, port)?;
+            let changed = change & HUB_PORT_CONNECTION != 0;
+            if changed {
+                self.control(slot, clear_connection, &[])?;
+            }
+            Ok((status & HUB_PORT_CONNECTION != 0, changed))
+        })?;
+        if !connected {
             return Ok(None);
         }
-        let index = u16::from(port);
-        self.control(
-            slot,
-            setup(
-                TYPE_CLASS | RECIPIENT_OTHER,
-                CLEAR_FEATURE,
-                C_PORT_CONNECTION,
-                index,
-                0,
-            ),
-            &[],
-        )?;
         self.control(
             slot,
             setup(
@@ -2135,7 +2239,7 @@ impl Controller {
         let deadline = self.clock.deadline(PORT_RESET_US);
         let status = loop {
             let (status, change) = self.hub_port_status(slot, port)?;
-            if change & 1 << 4 != 0 && status & 1 << 4 == 0 {
+            if change & HUB_PORT_RESET != 0 && status & HUB_PORT_RESET == 0 {
                 break status;
             }
             if deadline.passed() {
@@ -2155,12 +2259,12 @@ impl Controller {
             &[],
         )?;
         self.clock.delay(RESET_RECOVERY_US);
-        if status & 1 << 1 == 0 {
+        if status & HUB_PORT_ENABLE == 0 {
             return Err(BlockError::Unsupported("hub port did not enable"));
         }
-        Ok(Some(if status & 1 << 9 != 0 {
+        Ok(Some(if status & HUB_PORT_LOW_SPEED != 0 {
             LOW_SPEED
-        } else if status & 1 << 10 != 0 {
+        } else if status & HUB_PORT_HIGH_SPEED != 0 {
             HIGH_SPEED
         } else {
             FULL_SPEED
@@ -2526,6 +2630,36 @@ pub(crate) mod tests {
             0x82
         );
         assert!(hub_status_endpoint(&configuration, 2).is_none());
+    }
+
+    #[test]
+    fn port_connections_count_after_a_steady_hundred_milliseconds() {
+        let clock = Clock {
+            ticks_per_microsecond: 0,
+        };
+        // A bounce (connected, changed, gone, back) restarts the window.
+        let samples = [(true, true), (false, true), (true, true), (true, false)];
+        let mut taken = samples
+            .iter()
+            .copied()
+            .chain(core::iter::repeat((true, false)));
+        let mut count = 0;
+        let connected = debounce(clock, || {
+            count += 1;
+            Ok(taken.next().unwrap())
+        });
+        assert_eq!(connected, Ok(true));
+        // Three changing samples, then four steady ones of 25 ms each.
+        assert_eq!(count, 3 + (DEBOUNCE_STABLE_US / DEBOUNCE_STEP_US) as usize);
+        assert_eq!(debounce(clock, || Ok((false, false))), Ok(false));
+        let mut flapping = false;
+        assert_eq!(
+            debounce(clock, || {
+                flapping = !flapping;
+                Ok((flapping, true))
+            }),
+            Err(BlockError::Unsupported("USB port connection never settled"))
+        );
     }
 
     #[test]
