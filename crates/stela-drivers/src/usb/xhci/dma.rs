@@ -120,6 +120,9 @@ mod tests {
         running: bool,
         ac64: bool,
         writes: Vec<(usize, u32)>,
+        size: Option<usize>,
+        /// xECP, in dwords.
+        extended: u32,
     }
     struct RegistersModel(Rc<RefCell<State>>);
     impl Registers for RegistersModel {
@@ -129,7 +132,7 @@ mod tests {
                 0 => 0x0110_0040,
                 HCSPARAMS1 => 1 << 24 | 8,
                 HCSPARAMS2 => 2 << 27,
-                HCCPARAMS1 => u32::from(state.ac64) | 2 << 12,
+                HCCPARAMS1 => u32::from(state.ac64) | 2 << 12 | state.extended << 16,
                 DBOFF => 0x1000,
                 RTSOFF => 0x800,
                 0x44 => {
@@ -157,6 +160,9 @@ mod tests {
                 state.running = value & RUN != 0;
             }
         }
+        fn size(&self) -> Option<usize> {
+            self.0.borrow().size
+        }
     }
 
     struct Allocator<'a> {
@@ -178,6 +184,34 @@ mod tests {
     fn clock() -> Clock {
         Clock {
             ticks_per_microsecond: 1,
+        }
+    }
+
+    #[test]
+    fn register_offsets_outside_the_bar_refuse_the_controller() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: this test retains exclusive live identity-mapped RAM.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        // Doorbells for eight slots end at 0x1024; xECP 0x800 is at 0x2000.
+        for (size, extended, fits) in [
+            (0x1024, 0, true),
+            (0x1020, 0, false),
+            (0x1024, 0x800, false),
+            (0x2004, 0x800, true),
+        ] {
+            let state = Rc::new(RefCell::new(State {
+                ac64: true,
+                size: Some(size),
+                extended,
+                ..State::default()
+            }));
+            let registers = Box::new(RegistersModel(state.clone()));
+            let result = Controller::new(registers, clock(), &mut dma, String::from("bar"));
+            assert_eq!(result.is_ok(), fits, "{size:#x} {extended:#x}");
+            if !fits {
+                assert!(state.borrow().writes.is_empty());
+            }
         }
     }
 

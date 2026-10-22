@@ -89,6 +89,7 @@ const CRCR: usize = 0x18;
 const DCBAAP: usize = 0x30;
 const CONFIG: usize = 0x38;
 const PORTSC: usize = 0x400;
+const PORT_REGISTERS: usize = 0x10;
 // Interrupter 0.
 const IMAN: usize = 0x20;
 const ERSTSZ: usize = 0x28;
@@ -279,14 +280,27 @@ pub trait Registers {
         self.write32(offset, value as u32);
         self.write32(offset + 4, (value >> 32) as u32);
     }
+    /// The bytes of register space from offset 0, when known.
+    fn size(&self) -> Option<usize> {
+        None
+    }
 }
 
-impl Registers for Mmio {
+/// A controller's memory BAR, whose size bounds every offset it reports.
+struct Bar {
+    mmio: Mmio,
+    bytes: usize,
+}
+
+impl Registers for Bar {
     fn read32(&mut self, offset: usize) -> u32 {
-        Mmio::read32(self, offset)
+        self.mmio.read32(offset)
     }
     fn write32(&mut self, offset: usize, value: u32) {
-        Mmio::write32(self, offset, value);
+        self.mmio.write32(offset, value);
+    }
+    fn size(&self) -> Option<usize> {
+        Some(self.bytes)
     }
 }
 
@@ -719,11 +733,35 @@ impl Controller {
                 "xHCI controller without slots or ports",
             ));
         }
+        // Every register the controller reports must lie inside its BAR.
+        let size = registers.size().unwrap_or(usize::MAX);
+        let outside = || BlockError::Unsupported("xHCI register outside its BAR");
+        if operational + PORTSC + PORT_REGISTERS * usize::from(max_ports) > size
+            || runtime + ERDP + 8 > size
+            || doorbells + 4 * (max_slots + 1) > size
+        {
+            return Err(outside());
+        }
         let mut port_major = vec![0u8; usize::from(max_ports)];
         if extended != 0 {
             let mut at = extended;
             loop {
+                if at + 4 > size {
+                    return Err(outside());
+                }
                 let header = registers.read32(at);
+                // Linux `xhci_find_next_ext_cap` stops at an absent device.
+                if header == u32::MAX {
+                    break;
+                }
+                let bytes = match header & 0xff {
+                    LEGACY_SUPPORT => 8,
+                    SUPPORTED_PROTOCOL => 12,
+                    _ => 4,
+                };
+                if at + bytes > size {
+                    return Err(outside());
+                }
                 match header & 0xff {
                     LEGACY_SUPPORT => take_from_firmware(&mut *registers, at, clock),
                     SUPPORTED_PROTOCOL => {
@@ -951,7 +989,7 @@ impl Controller {
     }
 
     fn port_offset(&self, port: u8) -> usize {
-        self.operational + PORTSC + 0x10 * usize::from(port - 1)
+        self.operational + PORTSC + PORT_REGISTERS * usize::from(port - 1)
     }
 
     fn write_port(&mut self, port: u8, bits: u32) {
@@ -2393,7 +2431,10 @@ pub fn attach_with_provider(
     let bytes = bars[0]
         .and_then(|bar| bar.memory())
         .map_or(0, |range| range.end - range.start);
-    let registers = registers(handoff, bars[0], 0, bytes)?;
+    let registers = Bar {
+        mmio: registers(handoff, bars[0], 0, bytes)?,
+        bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
+    };
     function.enable_polled();
     let address = function.address;
     let location = format!(
