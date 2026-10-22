@@ -385,7 +385,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 channel,
                 request: _,
                 response,
+                context,
             } => {
+                // The retained native executor programs legacy associations.
+                // Modern context requires its own actual firmware commands.
+                if context.is_some() {
+                    return Err(Error::Unsupported);
+                }
                 let mut p = s.profile.ok_or(Error::WrongProfile)?;
                 if p.peer != bssid || p.channel != channel || response.aid == 0 {
                     return Err(Error::WrongProfile);
