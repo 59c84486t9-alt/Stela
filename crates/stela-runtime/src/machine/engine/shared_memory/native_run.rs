@@ -52,9 +52,9 @@ impl NativeRun<'_> {
 /// latter cannot be replaced by a parked snapshot or an acknowledgement count.
 pub struct ReturnedRun<'a> {
     run: NativeRun<'a>,
-    observation: Observation,
+    observation: Option<Observation>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Observation {
     pub identity: Identity,
     pub native: Option<NativeExit>,
@@ -64,6 +64,23 @@ pub struct Observation {
     pub settled_pc: u64,
     pub retired: u64,
     pub physical_processor: Option<u32>,
+    pub(super) settlement: Option<Settlement>,
+}
+/// Sealed authority from this exact recovered frame, separate from the public
+/// diagnostic fields. It is consumed once by stopped source settlement.
+#[derive(Debug)]
+pub(super) struct Settlement {
+    pub(super) machine: Arc<()>,
+    pub(super) binding: publication::WorkerBinding,
+    pub(super) generation: u64,
+    pub(super) pc: u64,
+    pub(super) retired: u64,
+    pub(super) terminal: u32,
+    pub(super) fault_word: Option<u32>,
+    pub(super) native: Option<NativeExit>,
+    pub(super) memory_fault: Option<crate::memory::domain::MemoryFault>,
+    pub(super) source_failure: Option<policy::Failure>,
+    pub(super) status: Result<(), MemoryStatus>,
 }
 impl publication::sealed::NativeFrame for NativeRun<'_> {}
 impl<'a> publication::NativeFrame for NativeRun<'a> {
@@ -78,12 +95,13 @@ impl<'a> publication::NativeFrame for NativeRun<'a> {
             settled_pc: *self.pc,
             retired: 0,
             physical_processor: None,
+            settlement: None,
         };
         observation.status = self.enter(host, &mut observation);
         observation.source_failure = self.memory.memory.policy_mut().failure;
         ReturnedRun {
             run: self,
-            observation,
+            observation: Some(observation),
         }
     }
 }
@@ -104,9 +122,17 @@ impl NativeRun<'_> {
         // A service/publication loan outlives both callback finalization and PC
         // settlement. This Host borrow pins the installed arena throughout them.
         let _publication = self.memory.memory.execution_loan()?;
-        let code = host
-            .install(&self.artifact.code)
-            .map_err(|_| MemoryStatus::Unsupported)?;
+        let code = match host.install(&self.artifact.code) {
+            Ok(code) => code,
+            Err(crate::machine::InstallError::Full) => {
+                // This fixed owner has returned/recovered its preceding frame;
+                // no installed pointer escapes a NativeRun. The shared lane
+                // never falls back to legacy cached block addresses.
+                host.discard_code();
+                host.install(&self.artifact.code)
+                    .map_err(|_| MemoryStatus::Unsupported)?
+            }
+        };
         let entry = self
             .memory
             .memory
@@ -385,7 +411,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         &'a mut self,
         bindings: &[publication::WorkerBinding],
     ) -> Result<Cohort<'a, H>, MemoryStatus> {
-        if bindings.len() != self.peers.len() || self.waiting.is_some() {
+        self.native_cohort(bindings, false)
+    }
+
+    pub(super) fn native_cohort<'a>(
+        &'a mut self,
+        bindings: &[publication::WorkerBinding],
+        runnable_only: bool,
+    ) -> Result<Cohort<'a, H>, MemoryStatus> {
+        if bindings.len() != self.peers.len() || (!runnable_only && self.waiting.is_some()) {
             return Err(MemoryStatus::Unsupported);
         }
         let services: Vec<_> = self
@@ -395,7 +429,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .map(|(pe, peer)| {
                 let cpu = match peer {
                     super::super::processors::Peer::Running if pe == self.current => &self.cpu,
-                    super::super::processors::Peer::Parked(parked) if parked.native_ready() => {
+                    super::super::processors::Peer::Parked(parked)
+                        if runnable_only || parked.native_ready() =>
+                    {
                         parked.cpu()
                     }
                     _ => return Err(MemoryStatus::Unsupported),
@@ -420,6 +456,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let mut current = Some(&mut self.cpu);
         let mut frames = Vec::with_capacity(self.peers.len());
         for (pe, peer) in self.peers.iter_mut().enumerate() {
+            if runnable_only && self.processor_power.paused(pe) == Some(true) {
+                continue;
+            }
             let binding = bindings
                 .iter()
                 .find(|binding| binding.pe == pe)
@@ -427,7 +466,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .ok_or(MemoryStatus::Unsupported)?;
             let cpu = match peer {
                 super::super::processors::Peer::Running if pe == self.current => {
+                    if runnable_only && self.waiting.is_some() {
+                        continue;
+                    }
                     current.take().ok_or(MemoryStatus::Domain)?
+                }
+                super::super::processors::Peer::Parked(parked)
+                    if runnable_only && !parked.native_ready() =>
+                {
+                    continue;
                 }
                 super::super::processors::Peer::Parked(parked) if parked.native_ready() => {
                     parked.cpu_mut()
@@ -475,14 +522,62 @@ pub fn recover<'a>(
     returned: publication::NativeReturned<ReturnedRun<'a>>,
 ) -> Result<Observation, RecoveryFailure<'a>> {
     let mut observation = None;
+    let generation = returned.generation();
+    let binding = returned.binding();
     inventory
         .recover(returned, |actual| {
             // PC/retirement were settled through this original loan before the
             // owner's code borrow ended. Preserve terminal failures for BSP handling.
-            if *actual.run.pc != actual.observation.settled_pc {
+            let observed = actual.observation.as_ref().ok_or(MemoryStatus::Domain)?;
+            if *actual.run.pc != observed.settled_pc {
                 return Err(MemoryStatus::Domain);
             }
-            observation = Some(actual.observation.clone());
+            let terminal = u32::from_le_bytes(
+                actual
+                    .run
+                    .artifact
+                    .source
+                    .last_chunk()
+                    .copied()
+                    .ok_or(MemoryStatus::Domain)?,
+            );
+            let fault_word = observed
+                .memory_fault
+                .map(|fault| {
+                    let offset = fault
+                        .pc
+                        .checked_sub(actual.run.artifact.identity.pc)
+                        .ok_or(MemoryStatus::Domain)?;
+                    if !offset.is_multiple_of(4) {
+                        return Err(MemoryStatus::Domain);
+                    }
+                    let offset = usize::try_from(offset).map_err(|_| MemoryStatus::Domain)?;
+                    let word = actual
+                        .run
+                        .artifact
+                        .source
+                        .get(offset..offset.checked_add(4).ok_or(MemoryStatus::Domain)?)
+                        .ok_or(MemoryStatus::Domain)?;
+                    Ok(u32::from_le_bytes(
+                        word.try_into().map_err(|_| MemoryStatus::Domain)?,
+                    ))
+                })
+                .transpose()?;
+            let mut observed = actual.observation.take().ok_or(MemoryStatus::Domain)?;
+            observed.settlement = Some(Settlement {
+                machine: Arc::clone(&actual.run.memory.machine),
+                binding,
+                generation,
+                pc: *actual.run.pc,
+                retired: *actual.run.retired,
+                terminal,
+                fault_word,
+                native: observed.native,
+                memory_fault: observed.memory_fault,
+                source_failure: observed.source_failure,
+                status: observed.status,
+            });
+            observation = Some(observed);
             Ok(())
         })
         .map_err(Box::new)?;

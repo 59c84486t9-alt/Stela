@@ -224,6 +224,36 @@ impl Processor {
             }),
         }
     }
+    pub(crate) fn host_effect(
+        &self,
+        command: publication::HostEffectCommand,
+        sender: &Apic,
+        tsc_hz: u64,
+    ) -> Result<publication::HostEffectReceipt, WithPayload<publication::HostEffectCommand>> {
+        match self.send(Effect { command }, sender, tsc_hz) {
+            Ok(pending) => pending.finish(),
+            Err(command) => Err(WithPayload {
+                error: publication::PublicationError::StopBusy,
+                payload: command.command,
+            }),
+        }
+    }
+}
+struct Effect {
+    command: publication::HostEffectCommand,
+}
+impl Command for Effect {
+    type Output =
+        Result<publication::HostEffectReceipt, WithPayload<publication::HostEffectCommand>>;
+    fn execute(self, host: &mut host::HostOwner, owner: &mut Option<WorkerOwner>) -> Self::Output {
+        match owner {
+            Some(owner) => owner.apply_host_effect(self.command, &mut host.host()),
+            None => Err(WithPayload {
+                error: publication::PublicationError::NotInitialized,
+                payload: self.command,
+            }),
+        }
+    }
 }
 pub(crate) struct NativePending<T: NativeFrame> {
     pending: Pending<Run<T>>,

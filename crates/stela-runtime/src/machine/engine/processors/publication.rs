@@ -5,6 +5,9 @@
 use super::Host;
 use alloc::{sync::Arc, vec::Vec};
 
+mod service;
+pub use service::{HostEffect, HostEffectCommand, HostEffectReceipt, WorkerServices};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerId(pub usize);
 
@@ -32,6 +35,8 @@ pub enum PublicationError {
     StaleStop,
     MissingInvalidation,
     GenerationExhausted,
+    ServiceBusy,
+    StaleService,
 }
 
 #[derive(Debug)]
@@ -58,6 +63,7 @@ struct Slot {
     binding: WorkerBinding,
     frame: Frame,
     stop: Option<(u64, StopPhase)>,
+    services: Option<Arc<service::ServiceIdentity>>,
 }
 
 /// BSP-local publication inventory. Creating it does not assert that an AP is
@@ -232,6 +238,7 @@ impl WorkerPublications {
                         binding,
                         frame: Frame::Unregistered,
                         stop: None,
+                        services: None,
                     })
                     .collect(),
             },
@@ -544,7 +551,16 @@ impl WorkerPublications {
         &mut self,
         held: StoppedWorkers,
     ) -> Result<Vec<WorkerRelease>, WithPayload<StoppedWorkers>> {
-        if let Err(error) = self.check_stop(&held.request, StopPhase::Held) {
+        let check = self
+            .check_stop(&held.request, StopPhase::Held)
+            .and_then(|()| {
+                if self.slots.iter().any(|slot| slot.services.is_some()) {
+                    Err(PublicationError::ServiceBusy)
+                } else {
+                    Ok(())
+                }
+            });
+        if let Err(error) = check {
             return Err(WithPayload {
                 error,
                 payload: held,
@@ -696,6 +712,7 @@ impl WorkerOwner {
                 payload: command,
             });
         }
+        host.memory_barrier();
         host.invalidate_translations();
         self.state = OwnerState::Held {
             generation: command.stop,

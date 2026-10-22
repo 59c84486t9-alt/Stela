@@ -338,7 +338,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// event stream edge, or the local timeout of a WFIT or WFET expired. A
     /// powered-down PE wakes when a device line its CYC_OVRD enables
     /// asserts.
-    fn ready(&mut self, pe: usize, now: u64) -> bool {
+    pub(super) fn ready(&mut self, pe: usize, now: u64) -> bool {
         if self.processor_paused(pe) {
             return false;
         }
@@ -401,7 +401,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Complete the wait the running PE woke from. A WFE or WFET that no
     /// interrupt woke consumes the event register (`Machine::wait`). A PE
     /// that woke from power-down leaves reset instead.
-    fn wake(&mut self) -> Step {
+    pub(super) fn wake(&mut self) -> Step {
         let Some(Wait { kind, down, .. }) = self.waiting.take() else {
             return Ok(());
         };
@@ -425,7 +425,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The earliest counter value at which a waiting PE's timer fires, its
     /// event stream sets its event register, its local timeout expires, or a
     /// device changes state. A powered-down PE has none of its own.
-    fn next_deadline(&mut self, now: u64) -> Option<u64> {
+    pub(super) fn next_deadline(&mut self, now: u64) -> Option<u64> {
         let streams = |cpu: &Cpu, waiting: Option<Wait>| {
             (waiting.map(|wait| wait.kind) == Some(WaitKind::Event))
                 .then(|| timer::next_event(cpu, now))
@@ -471,7 +471,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Run PE `next` in place of the running one, which parks with its state.
-    fn switch_to(&mut self, next: usize) {
+    pub(super) fn switch_to(&mut self, next: usize) {
         let Peer::Parked(incoming) = core::mem::replace(&mut self.peers[next], Peer::Running)
         else {
             unreachable!("only a parked PE is ready to run");

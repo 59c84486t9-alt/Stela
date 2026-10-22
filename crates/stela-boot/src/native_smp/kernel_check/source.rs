@@ -127,12 +127,95 @@ pub(super) fn read_only_alias() -> (u64, u64) {
     )
 }
 
-/// Reuses the actual preceding LDXP reservation after a host-side ABA write.
-pub(super) fn reservation_body(entry: u64) -> Vec<u8> {
-    bytes(alloc::vec![STXP_W7_X4_X5_X6, branch(entry + 4, entry)])
+/// The scheduler executes this source program through ordinary checked blocks,
+/// stopped system services, a real timer FIQ/ERET and a precise data abort.
+pub(super) struct KernelProgram {
+    pub(super) code: Vec<u8>,
+    pub(super) done: u64,
+    pub(super) fault_pc: u64,
+    pub(super) vectors: Vec<(u64, Vec<u8>)>,
 }
-
-/// Independent fresh reservations after the stopped CPU clear checkpoint.
-pub(super) fn reservation_load_body(entry: u64) -> Vec<u8> {
-    bytes(alloc::vec![LDXP_X4_X5_X6, branch(entry + 4, entry)])
+pub(super) fn scheduler_body(entry: u64, spsr: u64) -> KernelProgram {
+    const ELR_EL2: Encoding = Encoding::new(3, 4, 4, 0, 1);
+    const SPSR_EL2: Encoding = Encoding::new(3, 4, 4, 0, 0);
+    const VBAR_EL2: Encoding = Encoding::new(3, 4, 12, 0, 0);
+    const TPIDR_EL1: Encoding = Encoding::new(3, 0, 13, 0, 4);
+    const CNTPCT_EL0: Encoding = Encoding::new(3, 3, 14, 0, 1);
+    const CNTP_CVAL_EL0: Encoding = Encoding::new(3, 3, 14, 2, 2);
+    const CNTP_CTL_EL0: Encoding = Encoding::new(3, 3, 14, 2, 1);
+    const ESR_EL2: Encoding = Encoding::new(3, 4, 5, 2, 0);
+    const FAR_EL2: Encoding = Encoding::new(3, 4, 6, 0, 0);
+    const READ_SYSTEM_REGISTER: u32 = 0xd5200000;
+    const ERET: u32 = 0xd69f03e0;
+    const SEVL: u32 = 0xd50320bf;
+    const WFE: u32 = 0xd503205f;
+    const DSB_SY: u32 = 0xd5033f9f;
+    const DAIFCLR_F: u32 = 0xd50341ff;
+    const ADD_X0_4096: u32 = 0x91400400;
+    const ADD_X20_ONE: u32 = 0x91000694;
+    const ADD_X24_ONE: u32 = 0x91000718;
+    const VECTOR_BASE: u64 = CODE + 0x2000;
+    const SYNC_SPX: u64 = 0x200;
+    const FIQ_SPX: u64 = 0x300;
+    let msr = |encoding: Encoding, register: u32| {
+        WRITE_SYSTEM_REGISTER | (u32::from(encoding.selector()) << SELECTOR_SHIFT) | register
+    };
+    let mrs = |encoding: Encoding, register: u32| {
+        READ_SYSTEM_REGISTER | (u32::from(encoding.selector()) << SELECTOR_SHIFT) | register
+    };
+    let mut words: Vec<_> = atomic_body(entry)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| u32::from_le_bytes(*word))
+        .collect();
+    words.pop(); // continue after the exact atomic body, rather than looping it
+    let resume_constant = words.len();
+    constant(&mut words, 10, 0);
+    words.push(msr(ELR_EL2, 10));
+    control(&mut words, SPSR_EL2, spsr);
+    words.push(ERET);
+    let resume = entry + words.len() as u64 * 4;
+    let mut address = Vec::new();
+    constant(&mut address, 10, resume);
+    words[resume_constant..resume_constant + 4].copy_from_slice(&address);
+    words.extend([STXP_W7_X4_X5_X6, SEVL, WFE]);
+    control(&mut words, TPIDR_EL1, 0x112233);
+    words.push(mrs(TPIDR_EL1, 19));
+    constant(&mut words, 0, DATA + 128);
+    constant(&mut words, 1, 0x1122334455667788);
+    words.extend([STR_X1_X0, DSB_SY]);
+    control(&mut words, VBAR_EL2, VECTOR_BASE);
+    words.extend([mrs(CNTPCT_EL0, 0), ADD_X0_4096, msr(CNTP_CVAL_EL0, 0)]);
+    control(&mut words, CNTP_CTL_EL0, 1);
+    words.extend([DAIFCLR_F, WFI]);
+    let fault_entry = entry + words.len() as u64 * 4;
+    words.extend(
+        permission_body()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .take(6),
+    );
+    let done = entry + words.len() as u64 * 4;
+    words.push(branch(done, done));
+    let mut fiq = Vec::new();
+    control(&mut fiq, CNTP_CTL_EL0, 0);
+    constant(&mut fiq, 10, fault_entry);
+    fiq.extend([msr(ELR_EL2, 10), ADD_X20_ONE, ERET]);
+    let mut abort = alloc::vec![mrs(ESR_EL2, 22), mrs(FAR_EL2, 23), ADD_X24_ONE];
+    abort.push(branch(
+        VECTOR_BASE + SYNC_SPX + abort.len() as u64 * 4,
+        done,
+    ));
+    KernelProgram {
+        code: bytes(words),
+        done,
+        fault_pc: fault_entry + FAULT_OFFSET,
+        vectors: alloc::vec![
+            (VECTOR_BASE + FIQ_SPX, bytes(fiq)),
+            (VECTOR_BASE + SYNC_SPX, bytes(abort))
+        ],
+    }
 }

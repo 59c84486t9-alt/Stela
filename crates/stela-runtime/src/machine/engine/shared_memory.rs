@@ -2,8 +2,11 @@
 //! This is a checked execution service, not an additional VM or RAM image.
 mod controls;
 mod exclusive;
+mod host;
 mod native_run;
 mod policy;
+mod scheduler;
+pub use host::{NativeTransport, ServiceHost, ServiceTransport};
 
 use super::{Devices, Host, Machine, mmu};
 use crate::memory::{RegisteredSystemRam, domain::MemoryThread};

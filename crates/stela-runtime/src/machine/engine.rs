@@ -56,8 +56,9 @@ pub use processors::{
     ProcessorTarget, ProcessorWrite, Processors, SettledProcessorWrite,
 };
 pub use shared_memory::{
-    NativeCohort, NativeRun, NativeRunIdentity, NativeRunObservation, ReturnedRun, SharedMemory,
-    SharedMemoryFailure, SharedMemoryRefusal, dispatch_native_run, recover_native_run,
+    NativeCohort, NativeRun, NativeRunIdentity, NativeRunObservation, NativeTransport, ReturnedRun,
+    ServiceHost, ServiceTransport, SharedMemory, SharedMemoryFailure, SharedMemoryRefusal,
+    dispatch_native_run, recover_native_run,
 };
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
@@ -317,6 +318,18 @@ pub enum InstallError {
 /// The x86 machine beneath the engine: guest RAM, native code, shadow
 /// translation, time and waiting.
 pub trait Host {
+    /// Select the source PE whose stopped services this Host can settle through
+    /// its actual physical owner. Ordinary serial Hosts do not admit this path.
+    fn select_native_service(&mut self, _worker: publication::WorkerId) -> bool {
+        false
+    }
+
+    /// Complete this actual host worker's coherent CPU-memory accesses. This
+    /// is not a device/DMA/controller drain or MCC completion authority.
+    fn memory_barrier(&mut self) {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Source-qualified identity retained by this physical worker's local
     /// Host/GS owner. Serial hosts have no native-worker authority.
     fn native_worker(&self) -> Option<publication::WorkerId> {
