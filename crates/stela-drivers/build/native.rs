@@ -201,20 +201,11 @@ impl Linux {
         drivers: &[&str],
         module: Option<&Module>,
     ) {
-        // As Kbuild builds, the compiler's own headers are the only ones
-        // outside Linux's trees; the host's C library is not Linux's.
-        let output = build
-            .get_compiler()
-            .to_command()
-            .arg("-print-file-name=include")
-            .output()
-            .expect("ask the C compiler for its headers");
-        assert!(output.status.success(), "the C compiler names no headers");
-        let headers = String::from_utf8(output.stdout).expect("UTF-8 compiler header path");
+        // As Kbuild builds, no headers outside Linux's trees: neither the
+        // host's C library nor the compiler's own. Stela's C code gets the C
+        // headers it uses from `compat`, over Linux's types.
         build
             .flag("-nostdinc")
-            .flag("-isystem")
-            .flag(headers.trim())
             .flag("-ivfsoverlay")
             .flag(format!("{COMPAT}/overlay.yaml"))
             .define("__KERNEL__", None);

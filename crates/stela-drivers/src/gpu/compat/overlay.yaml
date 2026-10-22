@@ -7,7 +7,4 @@
 version: 0
 root-relative: overlay-dir
 overlay-relative: true
-roots:
-  - {type: file, name: ../common/linux/include/linux/stddef.h, external-contents: linux/stddef.h} # sha256:be64ec13fdb2d724c1830ebcd04854612ccab9593e2d829011c8352f73a378b2
-  - {type: file, name: ../common/linux/include/linux/types.h, external-contents: linux/types.h} # sha256:b12aab0f1569ba0dd6843839aa15515a414c171d3fedd583c9aa835a81b4561b
-  - {type: file, name: ../common/linux/include/uapi/asm-generic/int-ll64.h, external-contents: uapi/asm-generic/int-ll64.h} # sha256:faca16150492e943a43c83e6b3069531dd498ef15dc612fb2051b88f7da83afc
+roots: []
