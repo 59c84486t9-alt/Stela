@@ -21,6 +21,9 @@ use stela_runtime::machine::{
     },
 };
 
+#[cfg(test)]
+use crate::{boot_native_capture::Capture, boot_native_topology as native};
+#[cfg(not(test))]
 use crate::native_smp::{firmware::Capture, topology as native};
 
 /// These count consumers are independently source-qualified for the retained
@@ -61,6 +64,7 @@ impl<'a> BspRoster<'a> {
     /// reservation/source validation. The supplied owner is the installed BSP
     /// Host, which the caller must retain through subsequent execution. This
     /// view does not bind a runtime WorkerOwner, loan a frame or authorize RAM.
+    #[cfg(not(test))]
     pub(crate) fn new(
         capture: &'a Capture,
         _owner: &super::host::HostOwner,

@@ -26,6 +26,17 @@ mod boot_live_tree;
 #[path = "../../crates/stela-boot/src/native_smp/canonical/bindings.rs"]
 mod boot_native_bindings;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/native_smp/firmware/record.rs"]
+mod boot_native_capture;
+#[cfg(test)]
+#[path = "../../crates/stela-boot/src/native_smp/topology.rs"]
+#[allow(dead_code)] // Includes UEFI capability checks unused by hosted topology tests.
+mod boot_native_topology;
+#[cfg(test)]
+#[path = "../../crates/stela-boot/src/engine/topology.rs"]
+#[allow(dead_code)] // Actual GS-owner constructor is UEFI-only.
+mod boot_topology;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_memory.rs"]
 mod boot_native_memory;
 #[cfg(test)]

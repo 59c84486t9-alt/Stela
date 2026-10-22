@@ -1,6 +1,9 @@
 //! Copy processor identity/capabilities while UEFI MP Services still owns APs.
 //! Every callback returns before ExitBootServices; persistent executors use
 //! Stela's own INIT/SIPI entry, stacks and control memory afterward.
+mod record;
+pub(crate) use record::Capture;
+
 use super::{
     memory_types::amd,
     topology::{self, Cpuid, Location, Msr, Processor, Snapshot},
@@ -33,18 +36,6 @@ const MTRR_VARIABLE_BASE: u32 = 0x200;
 const TSC_ADJUST: u32 = 0x3b;
 const MAX_VARIABLE_MTRRS: usize = 16;
 const CR4_OSXSAVE: u64 = 1 << 18;
-
-#[repr(C)]
-pub(crate) struct Capture {
-    pub magic: u64,
-    pub version: u32,
-    pub processor_count: u32,
-    pub core_count: u32,
-    pub enabled_count: u32,
-    pub processors: [Processor; topology::MAX_PROCESSORS],
-    pub selected: [u32; topology::MAX_CORES],
-    pub snapshots: [Snapshot; topology::MAX_CORES],
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Error {
