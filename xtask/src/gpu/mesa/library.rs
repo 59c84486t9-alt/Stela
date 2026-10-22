@@ -1,6 +1,6 @@
 //! Hosted library ownership uses the canonical parser and shared AIR inspector.
 use super::{run, tools};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use object::{Architecture, Object, ObjectSymbol};
 use serde_json::{Value, json};
 use std::{
@@ -23,6 +23,85 @@ pub(super) fn build_input(evidence: &Path) -> Result<PathBuf> {
     let path = target.join("release/libstela_metal_input.a");
     ensure!(path.is_file(), "missing hosted Metal input archive");
     Ok(path)
+}
+
+/// Shared stage semantics always run; external Apple inputs remain optional,
+/// immutable acceptance inputs rather than embedded source fixtures.
+pub(super) fn verify_render(build: &Path, evidence: &Path, inputs: &[Value]) -> Result<Value> {
+    let binary = build.join("src/stela/stela_air_stage_test");
+    let mut command = Command::new(&binary);
+    if !inputs.is_empty() {
+        ensure!(inputs.len() == 2, "expected two render input snapshots");
+        command
+            .arg("--input")
+            .arg(
+                inputs[0]["snapshot"]["path"]
+                    .as_str()
+                    .context("triangle snapshot")?,
+            )
+            .arg("--texture")
+            .arg(
+                inputs[1]["snapshot"]["path"]
+                    .as_str()
+                    .context("texture snapshot")?,
+            );
+    }
+    run(&mut command, evidence, "air-stage-semantics")?;
+    let output = evidence.join("air-stage-semantics.log");
+    ensure!(
+        std::fs::read_to_string(&output)?.lines().last() == Some("AIR stage semantics passed"),
+        "incomplete shared render semantics fixture"
+    );
+    let nvidia = if inputs.is_empty() {
+        None
+    } else {
+        let binary = build.join("src/stela/stela_nv_air_render_probe");
+        let artifacts = evidence.join("nv-render-artifacts");
+        std::fs::create_dir(&artifacts)?;
+        run(
+            Command::new(&binary)
+                .arg("--input")
+                .arg(
+                    inputs[0]["snapshot"]["path"]
+                        .as_str()
+                        .context("triangle snapshot")?,
+                )
+                .args([
+                    "--vertex",
+                    "vertexShader",
+                    "--fragment",
+                    "fragmentShader",
+                    "--output",
+                ])
+                .arg(&artifacts),
+            evidence,
+            "nv-air-render",
+        )?;
+        let log = evidence.join("nv-air-render.log");
+        let text = std::fs::read_to_string(&log)?;
+        let records = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("STELA_GPU_RENDER_TARGET "))
+            .map(serde_json::from_str::<Value>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ensure!(
+            records.len() == 36,
+            "incomplete NVIDIA VS/FS raster-key fixture"
+        );
+        let mut files = std::fs::read_dir(&artifacts)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        files.sort();
+        ensure!(files.len() == 198, "incomplete NVIDIA render artifacts");
+        Some(
+            json!({"binary":tools::binding(&binary)?,"output":tools::binding(&log)?,
+            "records":records,"artifacts":files.iter().map(|p|tools::binding(p)).collect::<Result<Vec<_>>>()?}),
+        )
+    };
+    Ok(
+        json!({"scope":"Hosted stage semantics and optional unchanged Apple VS/FS original NAK compilation; no runtime pipeline, GPU execution or Metal capability qualification",
+        "binary":tools::binding(&binary)?,"output":tools::binding(&output)?,"nvidia":nvidia}),
+    )
 }
 
 pub(super) fn verify(build: &Path, evidence: &Path, input: &Path, gpu: &Path) -> Result<Value> {

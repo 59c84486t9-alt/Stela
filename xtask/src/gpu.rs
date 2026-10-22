@@ -78,6 +78,10 @@ pub enum Command {
         /// offline shader/packet checking, never GPU execution.
         #[arg(long, num_args = 3, requires = "llvm_library", value_names = ["APPLE", "STATIC", "DYNAMIC"])]
         threadgroup_inputs: Vec<PathBuf>,
+        /// Qualify unchanged triangle VS/FS and sampled-texture AIR inputs.
+        /// Textures currently must refuse explicitly; no GPU work is submitted.
+        #[arg(long, num_args = 2, requires = "llvm_library", value_names = ["TRIANGLE", "TEXTURE"])]
+        render_inputs: Vec<PathBuf>,
     },
     /// Compile NVIDIA's resource-manager and display cores for native Stela
     /// or as Linux reference objects, retaining unresolved platform imports.
@@ -102,6 +106,7 @@ pub fn run(command: Command) -> Result<()> {
             entry,
             air_fp_profile,
             threadgroup_inputs,
+            render_inputs,
         } => mesa::build(mesa::BuildOptions {
             jobs,
             require_all_targets,
@@ -111,6 +116,7 @@ pub fn run(command: Command) -> Result<()> {
             entry: entry.as_deref(),
             fp_profile: air_fp_profile.unwrap_or_default(),
             threadgroup_inputs: &threadgroup_inputs,
+            render_inputs: &render_inputs,
         }),
         Command::Nvidia { jobs, target } => nvidia::build(jobs, target),
     }

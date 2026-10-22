@@ -354,6 +354,7 @@ pub struct BuildOptions<'a> {
     pub entry: Option<&'a str>,
     pub fp_profile: super::AirFpProfile,
     pub threadgroup_inputs: &'a [PathBuf],
+    pub render_inputs: &'a [PathBuf],
 }
 
 pub fn build(options: BuildOptions<'_>) -> Result<()> {
@@ -366,6 +367,7 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         entry,
         fp_profile,
         threadgroup_inputs,
+        render_inputs,
     } = options;
     ensure!(
         air_inputs.is_empty() || (llvm_library.is_some() && entry.is_some()),
@@ -374,6 +376,10 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
     ensure!(
         threadgroup_inputs.is_empty() || (threadgroup_inputs.len() == 3 && llvm_library.is_some()),
         "threadgroup fixtures require exactly three raw inputs and --llvm-library"
+    );
+    ensure!(
+        render_inputs.is_empty() || (render_inputs.len() == 2 && llvm_library.is_some()),
+        "render fixtures require triangle and texture raw inputs and --llvm-library"
     );
     let llvm_library = llvm_library.map(fs::canonicalize).transpose()?;
     let llvm_config = llvm_config.map(fs::canonicalize).transpose()?;
@@ -421,6 +427,7 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             "nvidia/stela/hosted/air_compile.c",
             "nvidia/stela/hosted/air_compile.h",
             "nvidia/stela/tests/air_compile.c",
+            "nvidia/stela/tests/air_render.c",
             "intel/stela/hosted/air_compile.c",
             "intel/stela/hosted/air_compile.h",
             "intel/stela/hosted/air_validate_elk.c",
@@ -581,6 +588,7 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
     let input_snapshots = snapshot_air_inputs(air_inputs, &evidence, "air-input")?;
     let threadgroup_snapshots =
         snapshot_air_inputs(threadgroup_inputs, &evidence, "threadgroup-input")?;
+    let render_snapshots = snapshot_air_inputs(render_inputs, &evidence, "render-input")?;
     let hash = source_binding(&source)?;
     // Meson 1.9 validates supplied options against its old cached inventory
     // before rereading meson.options. Refresh once when upgrading this cache.
@@ -715,6 +723,8 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             "src/stela/stela_air_elk_probe",
             "src/stela/stela_air_aco_probe",
             "src/stela/stela_air_ssbo_test",
+            "src/stela/stela_air_stage_test",
+            "src/stela/stela_nv_air_render_probe",
             "src/stela/stela_nv_compute_probe",
             "src/stela/stela_intel_fp_controls_probe",
             "src/stela/stela_nv_air_threadgroup_probe",
@@ -740,6 +750,10 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         ]);
     }
     run(&mut compile, &evidence, "compile")?;
+    let render = llvm_library
+        .as_ref()
+        .map(|_| library::verify_render(&build, &evidence, &render_snapshots))
+        .transpose()?;
     let amd_air_owned = metal_input
         .as_ref()
         .map(|_| {
@@ -1043,6 +1057,8 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         "intel_owned_air_compilation": intel_air_owned,
         "intel_gen7_shared_admission": intel_gen7_shared,
         "metal_threadgroup_values": metal_threadgroup_values,
+        "air_render_compiler_subset": render,
+        "render_inputs": render_snapshots,
         "air_compute_compiler_subset": llvm_library.is_some(),
         "amd_llvm_development_files": llvm_sdk,
         "optional_clrx_disassembler": clrx_disassembler,

@@ -146,6 +146,26 @@ if stela_air_llvm != ''
     build_rpath : fs.parent(stela_air_llvm),
   )
   test('stela_air_ssbo', stela_air_ssbo_test, suite : 'stela')
+  stela_air_stage_test = executable(
+    'stela_air_stage_test',
+    'air_stage_test.c',
+    include_directories : [inc_include, inc_src],
+    dependencies : [idep_stela_air],
+    c_args : ['-Werror'],
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_stage', stela_air_stage_test, suite : 'stela')
+  if with_stela_nvidia
+    stela_nv_air_render_probe = executable(
+      'stela_nv_air_render_probe',
+      '../../../../nvidia/stela/tests/air_render.c',
+      include_directories : [inc_include, inc_src],
+      dependencies : [idep_stela_air, idep_nak],
+      link_with : [_libnak_rs],
+      c_args : ['-Werror'],
+      build_rpath : fs.parent(stela_air_llvm),
+    )
+  endif
   if with_stela_amd
     if with_stela_amd_llvm
       stela_air_amd_llvm_probe = executable(
