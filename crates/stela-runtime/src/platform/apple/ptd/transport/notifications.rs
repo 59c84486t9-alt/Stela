@@ -4,6 +4,7 @@
 //! AIC numbers or ASC messages. See docs/research/apple-mcc.md.
 use super::{NotificationOwner, Ptd, ROUTES, Range};
 use crate::platform::apple::bus::LifecycleState;
+use crate::platform::apple::ptd::Geometry;
 use alloc::rc::Rc;
 
 /// Original native descriptor geometry, independently cross-checked by the
@@ -11,6 +12,23 @@ use alloc::rc::Rc;
 const LOCAL_ENTRIES: u32 = 384;
 const RTKIT_LOCAL_NAMESPACE: u32 = 0x10000;
 const FIRST_LOCAL_IRQ: u32 = 1;
+
+/// Native implemented entries, independently of the addressable update alias.
+/// T6000 file0x57780 declares 384/16; T8112 file0x355f8 declares 256/16.
+/// Both original test objects register route r on RTKit-local IRQ 1+r.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeProfile {
+    T6000,
+    T8112,
+}
+impl NativeProfile {
+    pub fn entries(self) -> u32 {
+        match self {
+            Self::T6000 => LOCAL_ENTRIES,
+            Self::T8112 => 256,
+        }
+    }
+}
 
 /// A PTD output in the original PMP-local interrupt namespace. A number alone
 /// grants no authority to clear a pending publication or report service ACKs.
@@ -87,6 +105,22 @@ impl LocalNotifications {
 }
 
 impl Ptd {
+    /// Admit the caller's source-qualified native profile on the actual bank.
+    /// An alias can address more update positions than this controller implements;
+    /// that larger extent never creates additional entries or local sources.
+    pub fn initialized_local_profile(
+        profile: NativeProfile,
+        geometry: Geometry,
+        ranges: &[Range],
+        lifecycle: LifecycleState,
+    ) -> Result<(Self, LocalNotifications), &'static str> {
+        let entries = profile.entries();
+        if entries as usize > geometry.entries() {
+            return Err("native PTD implemented entries exceed its physical update alias");
+        }
+        Self::new_local(entries, ranges, lifecycle)
+    }
+
     /// Allocate the qualified native geometry and its actual PMP-local output
     /// owner together, before admitting any source/client. This is explicit
     /// Stela initialization, not retained Apple reset or RTOS-ready state.
@@ -99,6 +133,14 @@ impl Ptd {
         if entries != LOCAL_ENTRIES {
             return Err("PMP-local PTD notification geometry is not qualified");
         }
+        Self::new_local(entries, ranges, lifecycle)
+    }
+
+    fn new_local(
+        entries: u32,
+        ranges: &[Range],
+        lifecycle: LifecycleState,
+    ) -> Result<(Self, LocalNotifications), &'static str> {
         let bank = Self::initialized(entries, ranges, lifecycle, [None; ROUTES])?;
         bank.0.borrow_mut().notification_owner = NotificationOwner::PmpLocal;
         let notifications = LocalNotifications(bank.clone());
@@ -123,6 +165,138 @@ mod tests {
             reset: false,
             retention: true,
         }
+    }
+
+    #[test]
+    fn t8112_implements_256_entries_inside_its_larger_actual_alias() {
+        let geometry = Geometry::new((0x23b3c0000, 0x20000), (0x23b3d0000, 0x4000)).unwrap();
+        assert_eq!(geometry.entries(), 2048);
+        assert_eq!(NativeProfile::T8112.entries(), 256);
+        let ranges = [Range {
+            id: 1,
+            start: 0,
+            count: 256,
+            name: "test".into(),
+        }];
+        let (mut bank, local) =
+            Ptd::initialized_local_profile(NativeProfile::T8112, geometry, &ranges, lifecycle())
+                .unwrap();
+        let mut latch = InterruptLatch::new();
+        write(
+            &mut bank,
+            0x18400 + 31 * 4,
+            Width::Word,
+            15 << 28,
+            0,
+            &mut latch,
+        )
+        .unwrap();
+        write(
+            &mut bank,
+            0x18200 + 7 * 4,
+            Width::Word,
+            1 << 31,
+            0,
+            &mut latch,
+        )
+        .unwrap();
+        write(
+            &mut bank,
+            UPDATE_OFFSET + 255 * 8,
+            Width::Double,
+            73,
+            5,
+            &mut latch,
+        )
+        .unwrap();
+        assert_eq!(local.asserted(), 1 << 15);
+        assert!(latch.take_aic_inputs().is_empty());
+        assert!(
+            write(
+                &mut bank,
+                UPDATE_OFFSET + 256 * 8,
+                Width::Double,
+                74,
+                6,
+                &mut latch
+            )
+            .is_err()
+        );
+        assert_eq!(
+            local
+                .bank()
+                .consume_entry(255, &mut Access::new(0, 7, &mut latch))
+                .unwrap()
+                .value,
+            73
+        );
+        assert_eq!(local.asserted(), 0);
+        let oversized = [Range {
+            count: 257,
+            ..ranges[0].clone()
+        }];
+        assert!(
+            Ptd::initialized_local_profile(NativeProfile::T8112, geometry, &oversized, lifecycle())
+                .is_err()
+        );
+        let short = Geometry::new((0x23b3c0000, 0x20000), (0x23b3d0000, 255 * 8)).unwrap();
+        assert!(
+            Ptd::initialized_local_profile(NativeProfile::T8112, short, &ranges, lifecycle())
+                .is_err()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    #[ignore = "requires original 26A434 T8112 PMP via STELA_TEST_PMP_T8112"]
+    fn original_t8112_native_geometry_and_local_route_keep_the_same_bank() {
+        use sha2::{Digest, Sha256};
+        let data = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&data)),
+            "b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c"
+        );
+        for (start, end, expected) in [
+            (
+                0x4bfd8,
+                0x4bff8,
+                "7a9c6b5f22ae1ac5b045f15140a9517e713571b1032e1c5c29cb419daa869d2c",
+            ),
+            (
+                0x457d8,
+                0x45810,
+                "1e689e3daa7f5c3d24fd6cd4133ce7e83ecc470c1c89dd17952d45ff41f90fc7",
+            ),
+            (
+                0x355f8,
+                0x35608,
+                "731acbf6bab262e48fc73bc42d99f9137b822fef627f200c09235a91ba7193cb",
+            ),
+            (
+                0x1f92c,
+                0x1fb6c,
+                "77d6585ceb801c22e14bda542eb2023c5538944290ef75268bd04ea1aa07bea0",
+            ),
+            (
+                0x80d8,
+                0x8104,
+                "9cae0be36271023e5690bc960c5a05ff8b057886eb533dc09cc3f8b3072e8b22",
+            ),
+        ] {
+            assert_eq!(hex::encode(Sha256::digest(&data[start..end])), expected);
+        }
+        assert_eq!(
+            u32::from_le_bytes(data[0x355f8..0x355fc].try_into().unwrap()),
+            NativeProfile::T8112.entries()
+        );
+        assert_eq!(
+            u32::from_le_bytes(data[0x355fc..0x35600].try_into().unwrap()),
+            16
+        );
+        assert_eq!(
+            u64::from_le_bytes(data[0x457d8..0x457e0].try_into().unwrap()),
+            0x23b3c0000
+        );
     }
 
     fn ranges() -> [Range; 1] {
