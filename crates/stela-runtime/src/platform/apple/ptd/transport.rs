@@ -9,6 +9,7 @@ use alloc::{collections::BTreeSet, rc::Rc, vec, vec::Vec};
 use core::cell::RefCell;
 
 pub mod notifications;
+pub mod status;
 
 const NAME: &str = "ptd";
 const ENTRY_BYTES: u64 = 16;
@@ -438,26 +439,13 @@ impl MmioDevice for Ptd {
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
         let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
         let state = self.0.borrow();
-        state.accessible().map_err(fail)?;
         if width == Width::Double && (IRQ_STATUS..IRQ_ENABLE).contains(&offset) {
-            if !offset.is_multiple_of(8) {
-                return Err(fail("PTD IRQ access is not aligned"));
-            }
-            let index = ((offset - IRQ_STATUS) / 4) as usize;
-            let low = state
-                .pending
-                .get(index)
-                .ok_or_else(|| fail("PTD IRQ read outside its bank"))?
-                .read(u32::MAX.into())
-                .map_err(fail)?;
-            let high = state
-                .pending
-                .get(index + 1)
-                .ok_or_else(|| fail("PTD IRQ read crosses its bank"))?
-                .read(u32::MAX.into())
-                .map_err(fail)?;
-            return Ok(low | high << 32);
+            return state
+                .interrupt_snapshot(offset, status::Width::Double)
+                .map(|snapshot| snapshot.low)
+                .map_err(fail);
         }
+        state.accessible().map_err(fail)?;
         let (role, index, mask) = locate(&state, offset, Some(width)).map_err(fail)?;
         let word = match role {
             Role::Value | Role::Metadata => {
