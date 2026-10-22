@@ -47,6 +47,7 @@ pub mod channel;
 pub mod event;
 pub mod exec;
 pub mod firmware;
+pub mod firmware_image;
 pub mod format;
 pub mod generation;
 pub mod initdata;

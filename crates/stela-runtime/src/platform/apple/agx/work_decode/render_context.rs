@@ -11,7 +11,7 @@ use super::{
 use crate::platform::apple::agx::{channel::Kind, ring::Shared};
 
 mod program;
-pub use program::Program;
+pub use program::{Capture, Program};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum G13XVariant {
