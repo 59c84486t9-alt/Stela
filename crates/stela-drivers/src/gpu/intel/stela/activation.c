@@ -14,7 +14,6 @@
 
 /* Port only scalar/diagnostic spelling. There is no kernel service shim. */
 #include <linux/array_size.h>
-#define __maybe_unused __attribute__((unused))
 #define __diag_push()
 #define __diag_pop()
 #define __diag_ignore_all(a, b)
@@ -35,10 +34,13 @@ struct stela_intel_pci_match {
     const struct xe_device_desc *driver_data;
 };
 #define XE_PCI_ID_TYPE struct stela_intel_pci_match
+#include <drm/intel/pciids.h>
+/* Replace pciids.h's struct pci_device_id rows. */
+#undef INTEL_PCI_DEVICE
+#undef INTEL_VGA_DEVICE
 #define INTEL_PCI_DEVICE(id, info) {.vendor = 0x8086, .device = (id), .driver_data = (info)}
 #define INTEL_VGA_DEVICE(id, info) {.vendor = 0x8086, .device = (id), .class = 0x030000, \
                                    .class_mask = 0xff0000, .driver_data = (info)}
-#include <drm/intel/pciids.h>
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Winitializer-overrides"
 #include "xe_pci_device_info.h"

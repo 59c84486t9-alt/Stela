@@ -1,49 +1,39 @@
 /* SPDX-License-Identifier: MIT */
-#include "pat_donor.h"
-#include "../pat.h"
-#include "regs/xe_reg_defs.h"
-#include <linux/build_bug.h>
-#include <drm/intel/pick.h>
+/* The unchanged xe_pat.c in Stela's environment against the frozen donor
+ * harness; modelled register writes, CPU only. */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#include <linux/array_size.h>
-struct diagnostics {bool warning,missing;};
-#define XE_PAT_SELECT_WARN(context, condition) (((struct diagnostics *)(context))->warning |= !!(condition))
-#define XE_PAT_SELECT_MISSING(context, version) ((void)(version), ((struct diagnostics *)(context))->missing=true)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wmissing-field-initializers"
-#include "xe_pat_select.h"
-#pragma clang diagnostic pop
-static void record(void *context,struct xe_reg reg,u32 value)
-{
- struct stela_pat_trace *out=context;assert(out->count<34);
- out->offset[out->count]=reg.addr;out->value[out->count++]=value;
-}
-#define XE_PAT_PROGRAM_WRITE(context,reg,value) record(context,reg,value)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wsign-conversion"
-#include "xe_pat_program.h"
-#pragma clang diagnostic pop
-static void selected(enum xe_platform platform,uint32_t graphics,bool discrete,bool llc,
-                     struct stela_pat_test_policy *out,struct xe_pat_selection *selection)
-{
- struct diagnostics d={0};
- *selection=(struct xe_pat_selection){.profile=XE_PAT_PROFILE_XE2};
- bool known=xe_pat_select(selection,platform,graphics,discrete,llc,&d);
- assert(known!=d.missing);
- *out=(struct stela_pat_test_policy){.profile=selection->profile,.count=(uint32_t)selection->n_entries,
-  .warning=d.warning,.missing=d.missing};
- memcpy(out->indices,selection->idx,sizeof(out->indices));
- if(selection->n_entries)memcpy(out->entries,selection->table,(size_t)selection->n_entries*sizeof(*selection->table));
- if(selection->pat_ats){out->special|=1;out->ats=*selection->pat_ats;}
- if(selection->pat_primary_pta){out->special|=2;out->primary=*selection->pat_primary_pta;}
- if(selection->pat_media_pta){out->special|=4;out->media=*selection->pat_media_pta;}
-}
-static int check(void *context){return *(int*)context;}
+#include "../pat.c"
+#include "pat_donor.h"
 static struct stela_pat_trace native;
 static void native_write(void *context,uint32_t offset,uint32_t value)
 {(void)context;assert(native.count<34);native.offset[native.count]=offset;native.value[native.count++]=value;}
+static int check(void *context){return *(int*)context;}
+static const struct stela_intel_activation_io trace_io={.write32=native_write};
+static uint32_t profile(const struct xe_pat_ops *ops)
+{
+ const struct xe_pat_ops *profiles[]={&xelp_pat_ops,&xehp_pat_ops,&xehpc_pat_ops,
+  &xelpg_pat_ops,&xe2_pat_ops,&xe3p_xpc_pat_ops};
+ for(uint32_t i=0;i<ARRAY_SIZE(profiles);i++)if(ops==profiles[i])return i+1;
+ assert(0 && "unknown PAT programmer");
+}
+/* Like the donor, start from the XE2 programmer: the missing-table path keeps
+ * whatever ops the device already had. */
+static void selected(struct native_pat *pat,struct stela_pat_test_policy *out)
+{
+ pat->xe.pat.ops=&xe2_pat_ops;
+ pat->gt.xe=&pat->xe;
+ active=pat;xe_pat_init_early(&pat->xe);active=NULL;
+ const struct xe_device *xe=&pat->xe;
+ *out=(struct stela_pat_test_policy){.profile=profile(xe->pat.ops),.count=(uint32_t)xe->pat.n_entries,
+  .warning=pat->warning,.missing=pat->missing};
+ memcpy(out->indices,xe->pat.idx,sizeof(out->indices));
+ if(xe->pat.n_entries)memcpy(out->entries,xe->pat.table,(size_t)xe->pat.n_entries*sizeof(*xe->pat.table));
+ if(xe->pat.pat_ats){out->special|=1;out->ats=*xe->pat.pat_ats;}
+ if(xe->pat.pat_primary_pta){out->special|=2;out->primary=*xe->pat.pat_primary_pta;}
+ if(xe->pat.pat_media_pta){out->special|=4;out->media=*xe->pat.pat_media_pta;}
+}
 int main(void)
 {
  const uint32_t versions[]={0,1100,1200,1210,1211,1250,1255,1260,1270,1271,1274,
@@ -61,15 +51,20 @@ int main(void)
   if(generation>=20 && generation!=20 && generation!=30 && generation!=35 &&
      (p==XE_METEORLAKE || p==XE_PVC || p==XE_DG2)) {++held;continue;}
   struct stela_pat_test_policy expected,actual;
-  struct xe_pat_selection selection;
+  struct stela_intel_pat_result result={0};
+  struct native_pat pat={.xe.info={.platform=(enum xe_platform)p,.graphics_verx100=versions[v],
+   .media_verx100=1200,.is_dgfx=d!=0,.has_llc=llc!=0},
+   .gt={.info.type=XE_GT_TYPE_MAIN,.mmio={&trace_io,NULL}},.result=&result};
   stela_pat_donor_policy((enum xe_platform)p,versions[v],d!=0,llc!=0,&expected);
-  selected((enum xe_platform)p,versions[v],d!=0,llc!=0,&actual,&selection);
+  selected(&pat,&actual);
   assert(!memcmp(&actual,&expected,sizeof(actual)));++cases;
   if(actual.missing)continue;
-  struct stela_pat_trace a,b={0};
+  /* Every selected table through the original direct programmer. */
+  struct stela_pat_trace a;
   stela_pat_donor_program(&expected,&a);
-  xe_pat_program_direct(&b,selection.table,selection.n_entries,selection.pat_ats,selection.pat_primary_pta);
-  assert(!memcmp(&a,&b,sizeof(a)));++traces;
+  native=(struct stela_pat_trace){0};
+  program_pat(&pat.gt,pat.xe.pat.table,pat.xe.pat.n_entries);
+  assert(!memcmp(&a,&native,sizeof(a)));++traces;
   if(versions[v]==2001)assert(actual.count==28);
   if(versions[v]/100==20 || versions[v]/100==30) {
    for(unsigned i=16;i<20;i++) {
@@ -106,6 +101,6 @@ int main(void)
  assert(out.cache_none_compression==UINT16_MAX && out.cache_wb_compression==UINT16_MAX);
  const uint32_t values[]={3,1,2,0};
  for(unsigned i=0;i<4;i++)assert(native.offset[i]==0x4800+4*i && native.value[i]==values[i] && out.entries[i]==values[i]);
- printf("Intel PAT: %u whole original policies, %u full direct/ATS/PTA traces, %u zero-I/O refusals; %u impossible platform/version holds; independent XeLP values/order/cache and modern limits; CPU only\n",cases,traces,refusals,held);
+ printf("Intel PAT: %u unchanged-source/donor policies, %u full direct/ATS/PTA traces, %u zero-I/O refusals; %u impossible platform/version holds; independent XeLP values/order/cache and modern limits; CPU only\n",cases,traces,refusals,held);
  return 0;
 }

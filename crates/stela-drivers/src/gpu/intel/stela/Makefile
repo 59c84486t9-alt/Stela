@@ -12,12 +12,13 @@ AR ?= llvm-ar
 # Xe sources from a staging directory, away from their sibling headers, so the
 # Xe shadow headers in compat/xe resolve first.
 UPSTREAM := $(BUILD)/upstream
-LINUX_INCLUDES := -include $(SOURCE)/../../common/linux/include/linux/kconfig.h \
+LINUX_INCLUDES := -D__KERNEL__ -include $(SOURCE)/../../common/linux/include/linux/kconfig.h \
                   -include $(SOURCE)/compat/linux/compiler_types.h -isystem $(UPSTREAM) \
                   -isystem $(SOURCE)/compat -isystem $(SOURCE)/compat/xe \
                   -isystem $(SOURCE)/../xe -isystem $(SOURCE)/../i915 \
                   -isystem $(SOURCE)/../../common/linux/include \
                   -isystem $(SOURCE)/../../common/linux/include/uapi
+COMPAT_HEADERS := $(wildcard $(SOURCE)/compat/*/*.h)
 CFLAGS := --target=$(TARGET) $(LINUX_INCLUDES) -std=gnu11 -O2 \
           -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only \
           -Wall -Wextra -Werror -Wconversion -Wsign-conversion
@@ -78,13 +79,13 @@ ACTIVATION_HEADERS := $(SOURCE)/activation.h $(wildcard $(SOURCE)/../xe/xe_*core
     $(SOURCE)/../xe/xe_engine_ids.h $(SOURCE)/../xe/xe_force_wake_gt.h $(SOURCE)/wopcm.h $(SOURCE)/pat.h $(SOURCE)/guc_reset.h \
     $(SOURCE)/../xe/regs/*.h) $(SOURCE)/../../common/linux/include/drm/intel/pciids.h
 $(BUILD)/activation.o: $(SOURCE)/activation.c $(ACTIVATION_HEADERS) | $(BUILD)
-	$(CC) $(CFLAGS) -I$(SOURCE)/../../common/linux/include -MD -MP -c "$<" -o "$@"
+	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"
 
 .PHONY: activation test-activation test-activation-donor
 activation: $(BUILD)/activation.o
 
 $(BUILD)/activation-test: $(SOURCE)/tests/activation.c $(SOURCE)/activation.c $(ACTIVATION_HEADERS) $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o $(BUILD)/pat-host.o $(BUILD)/guc_reset-host.o | $(BUILD)
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(SOURCE)/../../common/linux/include "$<" $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o $(BUILD)/pat-host.o $(BUILD)/guc_reset-host.o -lpthread -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) "$<" $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o $(BUILD)/pat-host.o $(BUILD)/guc_reset-host.o -lpthread -o "$@"
 
 test-activation: $(BUILD)/activation-test
 	$(BUILD)/activation-test
@@ -113,7 +114,7 @@ $(BUILD)/activation-donor-test: $(SOURCE)/tests/activation.c $(SOURCE)/activatio
     $(BUILD)/activation-donor-reference.o $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o $(BUILD)/pat-host.o $(BUILD)/guc_reset-host.o \
     $(BUILD)/activation-donor/donor-get.inc $(BUILD)/activation-donor/donor-put.inc
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -DSTELA_DONOR_CHECK \
-	    -isystem $(BUILD)/activation-donor -I$(SOURCE)/../../common/linux/include "$<" \
+	    -isystem $(BUILD)/activation-donor "$<" \
 	    $(BUILD)/activation-donor-reference.o $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o $(BUILD)/pat-host.o $(BUILD)/guc_reset-host.o -lpthread -o "$@"
 test-activation-donor: $(BUILD)/activation-donor-test
 	$(BUILD)/activation-donor-test
@@ -292,7 +293,6 @@ $(BUILD)/firmware-test: $(SOURCE)/tests/firmware.c $(SOURCE)/firmware.c \
 test-firmware: $(BUILD)/firmware-test
 	$(BUILD)/firmware-test
 
-COMPAT_HEADERS := $(wildcard $(SOURCE)/compat/*/*.h)
 WOPCM_HEADERS := $(SOURCE)/wopcm.h $(SOURCE)/activation.h $(SOURCE)/firmware.h $(COMPAT_HEADERS) \
     $(UPSTREAM)/xe_wopcm.c $(SOURCE)/../xe/xe_wopcm.h $(SOURCE)/../xe/xe_wopcm_types.h \
     $(SOURCE)/../xe/xe_uc_fw.h $(SOURCE)/../xe/xe_uc_fw_types.h \
@@ -301,9 +301,9 @@ $(UPSTREAM)/%.c: $(SOURCE)/../xe/%.c
 	mkdir -p "$(UPSTREAM)"
 	cp "$<" "$@"
 $(BUILD)/wopcm.o: $(SOURCE)/wopcm.c $(WOPCM_HEADERS) | $(BUILD)
-	$(CC) $(CFLAGS) -I$(SOURCE)/../../common/linux/include -MD -MP -c "$<" -o "$@"
+	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"
 $(BUILD)/wopcm-host.o: $(SOURCE)/wopcm.c $(WOPCM_HEADERS) | $(BUILD)
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(SOURCE)/../../common/linux/include -MD -MP -c "$<" -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -MD -MP -c "$<" -o "$@"
 $(BUILD)/firmware-host.o: $(SOURCE)/firmware.c $(FIRMWARE_HEADERS) | $(BUILD)
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -MD -MP -c "$<" -o "$@"
 .PHONY: wopcm
@@ -344,7 +344,7 @@ $(BUILD)/wopcm-donor-reference.o: $(SOURCE)/tests/wopcm_donor.c $(SOURCE)/tests/
     $(WOPCM_HEADERS) $(BUILD)/wopcm-donor/donor-wopcm-constants.inc \
     $(BUILD)/wopcm-donor/donor-wopcm-body.inc $(BUILD)/wopcm-donor/donor-verify.inc \
     $(BUILD)/wopcm-donor/donor-huc-role.inc
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(SOURCE)/../../common/linux/include \
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) \
 	    -isystem $(BUILD)/wopcm-donor -c "$<" -o "$@"
 $(BUILD)/wopcm-test: $(SOURCE)/tests/wopcm.c $(SOURCE)/tests/wopcm_donor.h $(SOURCE)/wopcm.c \
     $(WOPCM_HEADERS) $(BUILD)/wopcm-donor-reference.o $(BUILD)/firmware-host.o
@@ -354,12 +354,12 @@ $(BUILD)/wopcm-test: $(SOURCE)/tests/wopcm.c $(SOURCE)/tests/wopcm_donor.h $(SOU
 test-wopcm: $(BUILD)/wopcm-test
 	$(BUILD)/wopcm-test
 $(BUILD)/activation-host.o: $(SOURCE)/activation.c $(ACTIVATION_HEADERS) | $(BUILD)
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(SOURCE)/../../common/linux/include -MD -MP -c "$<" -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -MD -MP -c "$<" -o "$@"
 .PHONY: host-activation
 host-activation: $(HOST_ACTIVATION_OBJECTS)
 $(BUILD)/wopcm-owned-test: $(SOURCE)/tests/wopcm_owned.c $(SOURCE)/activation.c \
     $(ACTIVATION_HEADERS) $(WOPCM_HEADERS) $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o $(BUILD)/pat-host.o $(BUILD)/guc_reset-host.o
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(SOURCE)/../../common/linux/include \
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) \
 	    "$<" $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o $(BUILD)/pat-host.o $(BUILD)/guc_reset-host.o -lpthread -o "$@"
 .PHONY: test-wopcm-owned
 test-wopcm-owned: $(BUILD)/wopcm-owned-test
@@ -469,15 +469,17 @@ $(BUILD)/ggtt-probe-test: $(SOURCE)/tests/ggtt_probe.c $(SOURCE)/tests/ggtt_prob
 test-ggtt-probe: $(BUILD)/ggtt-probe-test
 	$(BUILD)/ggtt-probe-test
 
-PAT_HEADERS := $(SOURCE)/pat.h $(SOURCE)/activation.h $(SOURCE)/../xe/xe_pat.h \
-    $(SOURCE)/../xe/xe_pat_tables.h $(SOURCE)/../xe/xe_pat_select.h \
-    $(SOURCE)/../xe/xe_pat_program.h $(SOURCE)/../xe/xe_cache_level.h \
+PAT_HEADERS := $(SOURCE)/pat.h $(SOURCE)/activation.h $(COMPAT_HEADERS) $(UPSTREAM)/xe_pat.c \
+    $(UPSTREAM)/generated/xe_wa_oob.h $(SOURCE)/../xe/xe_pat.h $(SOURCE)/../xe/xe_cache_level.h \
     $(SOURCE)/../xe/xe_gt_type.h \
     $(SOURCE)/../../common/linux/include/drm/intel/pick.h
+$(UPSTREAM)/generated/xe_wa_oob.h: $(BUILD)/guc-reset/xe_wa_oob.c
+	mkdir -p "$(UPSTREAM)/generated"
+	cp "$(BUILD)/guc-reset/xe_wa_oob.h" "$@"
 $(BUILD)/pat.o: $(SOURCE)/pat.c $(PAT_HEADERS) | $(BUILD)
-	$(CC) $(CFLAGS) -isystem $(BUILD)/pat -I$(SOURCE)/../../common/linux/include -MD -MP -c "$<" -o "$@"
+	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"
 $(BUILD)/pat-host.o: $(SOURCE)/pat.c $(PAT_HEADERS) | $(BUILD)
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/pat -I$(SOURCE)/../../common/linux/include -MD -MP -c "$<" -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -MD -MP -c "$<" -o "$@"
 .PHONY: pat host-pat
 pat: $(BUILD)/pat.o
 host-pat: $(BUILD)/pat-host.o
@@ -494,18 +496,14 @@ $(BUILD)/pat/donor-pat-program.inc: | $(BUILD)
 	mkdir -p "$(BUILD)/pat"
 	git -C "$(SOURCE)" show $(PAT_DONOR_BLOB) | sed -n '/^static void program_pat(/,/^static void program_pat_mcr(/{ /^static void program_pat_mcr(/d; p; }' > "$@"
 PAT_DONOR_HEADERS := $(SOURCE)/tests/pat_donor.h $(PAT_HEADERS) \
-    $(BUILD)/pat/donor-pat-tables.inc $(BUILD)/pat/donor-pat-select.inc $(BUILD)/pat/donor-pat-program.inc $(BUILD)/pat/current-pat-wrapper.inc
+    $(BUILD)/pat/donor-pat-tables.inc $(BUILD)/pat/donor-pat-select.inc $(BUILD)/pat/donor-pat-program.inc
 $(BUILD)/pat-donor.o: $(SOURCE)/tests/pat_donor.c $(PAT_DONOR_HEADERS)
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/pat -I$(SOURCE)/../../common/linux/include -c "$<" -o "$@"
-$(BUILD)/pat-test: $(SOURCE)/tests/pat.c $(PAT_DONOR_HEADERS) $(BUILD)/pat-donor.o $(BUILD)/pat-host.o
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/pat -I$(SOURCE)/../../common/linux/include "$<" $(BUILD)/pat-donor.o $(BUILD)/pat-host.o -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/pat -c "$<" -o "$@"
+$(BUILD)/pat-test: $(SOURCE)/tests/pat.c $(SOURCE)/pat.c $(PAT_DONOR_HEADERS) $(BUILD)/pat-donor.o
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) "$<" $(BUILD)/pat-donor.o -o "$@"
 .PHONY: test-pat
 test-pat: $(BUILD)/pat-test
 	$(BUILD)/pat-test
-
-$(BUILD)/pat/current-pat-wrapper.inc: $(SOURCE)/../xe/xe_pat.c | $(BUILD)
-	mkdir -p "$(BUILD)/pat"
-	sed -n '/^#define XE_PAT_SELECT_WARN(/,/^void xe_pat_init(/{ /^void xe_pat_init(/d; p; }' "$<" > "$@"
 
 # Unmodified original OOB generator and complete output; select its actual reset
 # entry for a compile-time exclusion proof, not a handwritten native WA table.

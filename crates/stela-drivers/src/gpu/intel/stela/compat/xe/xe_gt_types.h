@@ -4,6 +4,7 @@
 #include <linux/container_of.h>
 #include "xe_device_types.h"
 #include "xe_force_wake_types.h"
+#include "xe_gt_type.h"
 #include "xe_uc_fw_types.h"
 #include "xe_wopcm_types.h"
 struct xe_guc {
@@ -19,6 +20,9 @@ struct xe_uc {
 };
 struct xe_gt {
 	struct xe_device *xe;
+	struct {
+		enum xe_gt_type type;
+	} info;
 	struct xe_mmio mmio;
 	struct {
 		struct xe_force_wake fw;

@@ -3,10 +3,13 @@
 #define STELA_DRM_PRINT_H
 #include <linux/compiler.h>
 struct drm_device;
+struct drm_printer;
 enum stela_drm_level { STELA_DRM_ERR, STELA_DRM_NOTICE, STELA_DRM_DBG };
 /* Each translation unit that logs defines this report, which must return. */
 static void stela_drm_printk(const struct drm_device *, enum stela_drm_level,
 			     const char *format, ...) __attribute__((format(printf, 3, 4)));
+static void drm_printf(struct drm_printer *p, const char *f, ...)
+	__attribute__((format(printf, 2, 3)));
 #define drm_err(drm, format, ...) \
 	stela_drm_printk(drm, STELA_DRM_ERR, format, ##__VA_ARGS__)
 #define drm_notice(drm, format, ...) \

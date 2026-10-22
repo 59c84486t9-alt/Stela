@@ -12,4 +12,6 @@ static void stela_linux_warn(const char *file, int line, const char *condition);
 		stela_linux_warn(__FILE__, __LINE__, #condition); \
 	unlikely(__stela_warned); \
 })
+/* Each occurrence is reported: a report may refuse the attempt that raised it. */
+#define WARN_ON_ONCE(condition) WARN_ON(condition)
 #endif

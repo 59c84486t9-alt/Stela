@@ -5,6 +5,7 @@
 #include <linux/align.h>
 #include <linux/minmax.h>
 #include <linux/sizes.h>
+#include <linux/sprintf.h>
 #include "xe_device_types.h"
 #include "xe_gt_types.h"
 #include "xe_macros.h"

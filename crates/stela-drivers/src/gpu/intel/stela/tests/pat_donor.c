@@ -38,14 +38,6 @@ static struct stela_pat_model *active;
 #include "donor-pat-select.inc"
 #undef xe_pat_init_early
 #undef xe_device
-/* Compile the actual retained Linux caller adaptation too, in this scalar
- * context. Its shared tables are byte-identical to the frozen tables above. */
-#define XE_PAT_TABLES_H
-#define xe_device stela_pat_model
-#define xe_pat_init_early current_init
-#include "current-pat-wrapper.inc"
-#undef xe_pat_init_early
-#undef xe_device
 void stela_pat_donor_policy(enum xe_platform platform, uint32_t graphics, bool discrete,
                            bool llc, struct stela_pat_test_policy *out)
 {
@@ -54,15 +46,7 @@ void stela_pat_donor_policy(enum xe_platform platform, uint32_t graphics, bool d
  /* Existing ops are retained in original missing-policy path. No table or
   * programmer is claimed available there; n_entries remains zero. */
  xe.pat.ops=&xe2_pat_ops;
- struct stela_pat_model current=xe;
  active=&xe;donor_init(&xe);
- active=&current;current_init(&current);
- assert(xe.pat.ops==current.pat.ops && xe.pat.table==current.pat.table &&
-  xe.pat.n_entries==current.pat.n_entries && xe.pat.pat_ats==current.pat.pat_ats &&
-  xe.pat.pat_primary_pta==current.pat.pat_primary_pta &&
-  xe.pat.pat_media_pta==current.pat.pat_media_pta &&
-  !memcmp(xe.pat.idx,current.pat.idx,sizeof(xe.pat.idx)) &&
-  xe.warning==current.warning && xe.missing==current.missing);
  *out=(struct stela_pat_test_policy){.profile=xe.pat.ops->id,
   .count=(uint32_t)xe.pat.n_entries,.warning=xe.warning,.missing=xe.missing};
  memcpy(out->indices,xe.pat.idx,sizeof(out->indices));

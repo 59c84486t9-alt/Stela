@@ -2,7 +2,7 @@
 //! compiler, archiver, freestanding flags, and the final library name. Dispatch
 //! headers use Mesa's original XML generator and a selected Python interpreter.
 /// Unchanged Xe sources that Stela's adapters include.
-const UPSTREAM: &[&str] = &["xe_wopcm.c"];
+const UPSTREAM: &[&str] = &["xe_pat.c", "xe_wopcm.c"];
 
 pub fn configure(build: &mut cc::Build) {
     use std::{env, fs, path::PathBuf};
@@ -24,6 +24,7 @@ pub fn configure(build: &mut cc::Build) {
     // with Kbuild's forced includes, from system directories so upstream code
     // keeps Linux's warning profile rather than Stela's.
     build
+        .define("__KERNEL__", None)
         .flag("-include")
         .flag(format!("{linux}/linux/kconfig.h"))
         .flag("-include")
@@ -68,9 +69,6 @@ pub fn configure(build: &mut cc::Build) {
         "xe/xe_gt_type.h",
         "xe/xe_cache_level.h",
         "xe/xe_pat.h",
-        "xe/xe_pat_tables.h",
-        "xe/xe_pat_select.h",
-        "xe/xe_pat_program.h",
         "xe/xe_uc_fw_catalog.h",
         "xe/xe_uc_fw_css.h",
         "xe/xe_uc_fw_cpd.h",
@@ -102,6 +100,8 @@ pub fn configure(build: &mut cc::Build) {
     }
     for header in [
         "linux/kconfig.h",
+        "linux/cleanup.h",
+        "linux/compiler_attributes.h",
         "linux/align.h",
         "linux/array_size.h",
         "linux/container_of.h",
@@ -111,6 +111,9 @@ pub fn configure(build: &mut cc::Build) {
         "kunit/static_stub.h",
         "uapi/asm-generic/errno.h",
         "uapi/asm-generic/errno-base.h",
+        "uapi/asm-generic/ioctl.h",
+        "uapi/drm/drm.h",
+        "uapi/drm/xe_drm.h",
     ] {
         println!("cargo:rerun-if-changed={linux}/{header}");
     }
@@ -129,6 +132,10 @@ pub fn configure(build: &mut cc::Build) {
 fn configure_guc_reset(build: &mut cc::Build, output: &std::path::Path) {
     use std::{env, fs, process::Command};
     let source = "src/gpu/intel/xe";
+    // The unchanged xe_pat.c includes the header as <generated/xe_wa_oob.h>.
+    let generated = output.join("intel-upstream/generated");
+    fs::create_dir_all(&generated).expect("create the generated Xe header directory");
+    let upstream_header = generated.join("xe_wa_oob.h");
     let output = output.join("intel-guc-reset");
     fs::create_dir_all(&output).expect("create GuC reset generation directory");
     let host = env::var("HOST").expect("Cargo supplies host triple");
@@ -159,7 +166,7 @@ fn configure_guc_reset(build: &mut cc::Build, output: &std::path::Path) {
     let result = Command::new(&generator)
         .arg(format!("{source}/xe_wa_oob.rules"))
         .arg(&generated)
-        .arg(output.join("xe_wa_oob.h"))
+        .arg(upstream_header)
         .output()
         .expect("run original GuC WA generator");
     assert!(
