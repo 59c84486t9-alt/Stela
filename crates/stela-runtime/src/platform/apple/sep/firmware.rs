@@ -439,47 +439,50 @@ mod tests {
 
     #[test]
     fn graceful_mode_answers_a_refused_service_request_from_the_dma_step() {
-        let mut fw = SepFirmware::new(
-            entropy(),
-            None,
-            0xa5a5_0004,
-            false,
-            state::Location::Volatile,
-        );
-        booted(&mut fw);
-        deliver(&mut fw, &crate::img4::tests::im4p(b"sepi", b"x"), false).unwrap();
-        map_shared(&mut fw);
-        // A keystore command it does not implement, without its buffers.
-        let request = Frame {
-            service: keystore::ID,
-            tag: 0x01,
-            opcode: 7,
-            parameter: 0,
-            data: 0x80 << 16,
-        };
-        let mut ram = Ram::new(0x4000, 0x4000);
-        let mut outbox = Vec::new();
-        fw.receive(request.mailbox(), &mut outbox).unwrap();
-        assert_eq!(
-            dma(&mut fw, &mut ram, false),
-            Err("SEP keystore command is not implemented")
-        );
-        fw.set_strict(false);
-        fw.receive(request.mailbox(), &mut outbox).unwrap();
-        let mut produced = Vec::new();
-        let mut latch = InterruptLatch::new();
-        let mut access = Access::new(0, 0, &mut latch);
-        let mut port = Port {
-            iommu: &mut Identity { fault: false },
-            stream: 0,
-            memory: &mut ram,
-            access: &mut access,
-        };
-        assert_eq!(
-            fw.dma(&mut port, &mut produced),
-            Err("SEP keystore command is not implemented")
-        );
-        assert_eq!(produced, [keystore::failure(request).mailbox()]);
+        for (tag, reason) in [
+            (0x7f, "SEP keystore command is not implemented"),
+            (
+                0x01,
+                "SEP service request before its OOL buffers are registered",
+            ),
+        ] {
+            let mut fw = SepFirmware::new(
+                entropy(),
+                None,
+                0xa5a5_0004,
+                false,
+                state::Location::Volatile,
+            );
+            booted(&mut fw);
+            deliver(&mut fw, &crate::img4::tests::im4p(b"sepi", b"x"), false).unwrap();
+            map_shared(&mut fw);
+            // Unknown commands refuse before DMA; recognized keybag codecs must
+            // validate their actual buffers before refusing unresolved semantics.
+            let request = Frame {
+                service: keystore::ID,
+                tag,
+                opcode: 7,
+                parameter: 0,
+                data: 0x80 << 16,
+            };
+            let mut ram = Ram::new(0x4000, 0x4000);
+            let mut outbox = Vec::new();
+            fw.receive(request.mailbox(), &mut outbox).unwrap();
+            assert_eq!(dma(&mut fw, &mut ram, false), Err(reason));
+            fw.set_strict(false);
+            fw.receive(request.mailbox(), &mut outbox).unwrap();
+            let mut produced = Vec::new();
+            let mut latch = InterruptLatch::new();
+            let mut access = Access::new(0, 0, &mut latch);
+            let mut port = Port {
+                iommu: &mut Identity { fault: false },
+                stream: 0,
+                memory: &mut ram,
+                access: &mut access,
+            };
+            assert_eq!(fw.dma(&mut port, &mut produced), Err(reason));
+            assert_eq!(produced, [keystore::failure(request).mailbox()]);
+        }
     }
 
     #[test]
