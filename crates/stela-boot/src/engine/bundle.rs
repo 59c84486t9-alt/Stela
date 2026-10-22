@@ -14,6 +14,7 @@
 //! --disk` writes, in the heap. [`upgrade_from_disk`] and
 //! [`recovery_from_disk`] build a staged update's and a recoveryOS's the
 //! same way (`stela_loader::upgrade`, `stela_loader::recovery`).
+pub(crate) mod live_tree;
 use crate::{
     firmware,
     handoff::{File, Region},
@@ -58,6 +59,8 @@ pub struct Entry {
     pub patches: usize,
     pub kept: Vec<String>,
     pub hidden_devices: Vec<String>,
+    /// Actual guest RAM after all fixed-offset runtime patches, not its input file.
+    pub live_tree: live_tree::LiveTree,
     /// The AMCC CTRR-A region iBoot programs, `(base, bytes)`.
     pub read_only_region: Option<(u64, u64)>,
 }
@@ -593,6 +596,7 @@ fn load_named<'a>(
             region.name, region.guest_pa, region.bytes, region.memory_bytes
         ));
     }
+    let live_tree = live_tree::LiveTree::capture(host, &image.regions, image.x0)?;
     Ok(Entry {
         pc: image.entry_pa,
         x0: image.x0,
@@ -601,6 +605,7 @@ fn load_named<'a>(
         patches: image.patches.len(),
         kept: image.kept,
         hidden_devices: manifest.hidden_devices,
+        live_tree,
         read_only_region: manifest
             .read_only_region
             .map(|region| (region.base, region.bytes)),

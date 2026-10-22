@@ -63,7 +63,9 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// auxiliary GPIO wake/restoration ownership remains unqualified.
 /// Revision 13: bind selected external-pipe framebuffer geometry to the
 /// actual GOP framebuffer at load. Schema 2 adds these required named fields.
-pub const REVISION: u32 = 13;
+/// Revision 14: retain the unchanged input ADT beside its prepared output so
+/// runtime resource qualification can compare both complete source graphs.
+pub const REVISION: u32 = 14;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -571,6 +573,8 @@ const SPTM_FILE: &str = "sptm.img";
 const TXM_FILE: &str = "txm.img";
 /// The bundle file holding the prepared DeviceTree.
 pub const DEVICE_TREE_FILE: &str = "devicetree.adt";
+/// Immutable source metadata, verified as a whole file and never loaded as a region.
+pub const ORIGINAL_DEVICE_TREE_FILE: &str = "original-devicetree.adt";
 const TRUST_CACHE_FILE: &str = "trustcache.bin";
 const BOOT_MANIFEST_FILE: &str = "boot-manifest.im4m";
 const SEP_FILE: &str = "sepfw.im4p";
@@ -1307,6 +1311,10 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         (SPTM_FILE.to_owned(), sptm.memory),
         (TXM_FILE.to_owned(), txm.memory),
         (DEVICE_TREE_FILE.to_owned(), device_tree),
+        (
+            ORIGINAL_DEVICE_TREE_FILE.to_owned(),
+            inputs.device_tree.bytes.to_vec(),
+        ),
         (TRUST_CACHE_FILE.to_owned(), trust_cache),
         (BOOT_ARGS_FILE.to_owned(), boot_args_bytes),
     ];
@@ -2151,6 +2159,19 @@ mod tests {
             options.dram_base
         );
         let bundle = prepare(&inputs, &options)?;
+        let original = bundle
+            .files
+            .iter()
+            .find(|(name, _)| name == ORIGINAL_DEVICE_TREE_FILE)
+            .unwrap();
+        assert_eq!(original.1, inputs.device_tree.bytes);
+        assert!(
+            !bundle
+                .manifest
+                .regions
+                .iter()
+                .any(|r| r.file == ORIGINAL_DEVICE_TREE_FILE)
+        );
         // Origin is an independent loader input, not inferred from these
         // fixtures' OS environment or verbose-only command line.
         let origin_options = Options {
@@ -2430,6 +2451,19 @@ mod tests {
         assert_eq!(manifest.revision, REVISION);
         let json = serde_json::to_vec(manifest)?;
         let consumed = stela_runtime::boot_bundle::Manifest::parse(&json)?;
+        let mut changed_source = file(ORIGINAL_DEVICE_TREE_FILE).clone();
+        changed_source[0] ^= 1;
+        assert!(
+            consumed
+                .verify(&|name| {
+                    Some(if name == ORIGINAL_DEVICE_TREE_FILE {
+                        changed_source.as_slice()
+                    } else {
+                        file(name).as_slice()
+                    })
+                })
+                .is_err()
+        );
         let verified = consumed.verify(&|name| Some(file(name).as_slice()))?;
         let span = (manifest.top_of_kernel_data - options.dram_base) as usize;
         let mut ram = vec![0u8; span];

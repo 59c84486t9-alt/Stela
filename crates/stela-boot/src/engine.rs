@@ -2020,6 +2020,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let speculation = speculation::probe();
     let mut read_only_region = None;
     let mut hidden_devices = Vec::new();
+    let mut loaded_tree = None;
     // A bundle's kernel gets a framebuffer the size of the firmware's mode.
     let framebuffer = handoff
         .screen
@@ -2050,6 +2051,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         ));
         read_only_region = loaded.read_only_region;
         hidden_devices = loaded.hidden_devices;
+        loaded_tree = Some(loaded.live_tree);
         crate::status::done("");
         (loaded.pc, loaded.x0)
     } else {
@@ -2071,29 +2073,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         ));
         (options.entry, options.x0)
     };
-    let tree = options.bundle.then(|| match &built {
-        Some(built) => built
-            .iter()
-            .find(|(name, _)| name == "devicetree.adt")
-            .map(|(_, bytes)| bytes.as_slice()),
-        None => handoff.files[..handoff.file_count]
-            .iter()
-            .find(|file| file.name() == "devicetree.adt")
-            .map(|file| {
-                // SAFETY: the loader left every bundle file allocated.
-                unsafe {
-                    core::slice::from_raw_parts(
-                        layout::physical(file.contents.physical) as *const u8,
-                        file.contents.bytes as usize,
-                    )
-                }
-            }),
-    });
-    let tree = match tree {
-        Some(None) => output::fatal("the boot bundle has no devicetree.adt"),
-        Some(Some(tree)) => Some(tree),
-        None => None,
-    };
+    let tree = loaded_tree.as_ref().map(|tree| tree.bytes());
     if tree.is_some() {
         crate::status::begin("Setting up the Mac's hardware");
     }
