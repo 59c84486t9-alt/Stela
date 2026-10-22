@@ -10,7 +10,7 @@
 //!
 //! 26A434 J813AP (M5) kernelcache, AppleSPMI: the handler factory
 //! fffffe0009e3fe18 builds `AppleGen3SPMIHandler` for `gen = 3` and
-//! `AppleGen4SPMIHandler` for `gen = 4`; the J613AP (M4) kernelcache has the
+//! `AppleGen4SPMIHandler` for `gen = 4`; the J613AP (M3) kernelcache has the
 //! same Gen3 handler (`initHandler` fffffe0009d57f48).
 //!
 //! - Gen3 (`initHandler` fffffe0009e385f8) keeps Gen2's bank A and fault

@@ -41,6 +41,16 @@
 //! configured response vector (DT interrupts[0]: Gen1 J314s192, Gen2
 //! J473256), which the driver polls or takes through the AIC line.
 //!
+//! Scalar Register Read/Write and Register0 Write use one request word.
+//! Original 26A434 J613/T8122 `kernelcache.release.mac15g` SHA256
+//! 8210f3645ea16c2481bcaf285ead56eaf2e591bb0d124fe2c01f596c6361ded3
+//! (`isa/apple-soc-facts.json`). `registerReadWriteCommand` at VA9d5c768
+//! validates a five-bit address and one byte, then packs address at 20:16
+//! and the write byte at 31:24 (9d5c9a0..9d5c9f0). Opcodes 0x40/0x60
+//! come from its table at 772ff48. `performPayloadlessTransaction` packs
+//! Register0 Write opcode 0x80 and its seven-bit byte at 31:24
+//! (9d5d07c..9d5d0b4). The normal response FIFO owns the scalar read byte.
+//!
 //! Stela handoff: idle, empty FIFOs, every vector masked and clear, no
 //! faults. The model executes a command when its last payload word arrives.
 //! It has no faults to latch or count, so those registers read zero.
@@ -55,7 +65,7 @@
 //! windows (A+0xb0..0xb8; Gen3 A+0xbc; Gen4 A+0x800..0x810), the Gen3 and
 //! Gen4 arbiter reset (`reg[2]` + 0x20, which the driver pulses only when a
 //! queue reset leaves the FIFOs non-empty, never here), nonzero control on
-//! every generation but Gen2, command types other than the four extended
+//! every generation but Gen2, command types outside the extended/scalar register
 //! forms and request or response overflow refuse.
 mod config;
 pub use config::{Configuration, Profile};
@@ -76,6 +86,11 @@ const NAME: &str = "SPMI";
 const GROUPS: usize = 9;
 const LAST: u32 = 1 << 15;
 const ACK: u32 = 1 << 15;
+const REGISTER_WRITE: u32 = 0x40;
+const REGISTER_READ: u32 = 0x60;
+const REGISTER_ZERO_WRITE: u32 = 0x80;
+const REGISTER_ADDRESS_MASK: u32 = 0x1f;
+const REGISTER_ZERO_DATA_MASK: u8 = 0x7f;
 /// The controller's own response vector.
 pub const RESPONSE_VECTOR: u32 = 0x100;
 
@@ -129,32 +144,80 @@ struct Chunk {
     sid: u8,
     address: u16,
     bytes: usize,
+    /// Scalar writes carry their byte in the request's high byte, not a
+    /// following FIFO word (26A434 mac15g AppleSPMI, VA9d5c9c8/9d5d0a8).
+    inline: Option<u8>,
 }
 
 impl Chunk {
     fn decode(header: u32) -> Result<Self, &'static str> {
         let opcode = header & 0xff;
-        let address = (header >> 16) as u16;
-        let (kind, bytes, long) = match opcode {
-            0x00..=0x0f => (Kind::Write, (opcode & 0xf) + 1, false),
-            0x20..=0x2f => (Kind::Read, (opcode & 0xf) + 1, false),
-            0x30..=0x37 => (Kind::Write, (opcode & 7) + 1, true),
-            0x38..=0x3f => (Kind::Read, (opcode & 7) + 1, true),
-            _ => return Err("SPMI command other than an extended register access"),
-        };
-        if !long && address > 0xff {
-            return Err("SPMI extended access with a 16-bit address");
-        }
         if header & 0x7000 != 0 {
             return Err("SPMI request header reserved bits");
         }
+        let (kind, address, bytes, inline) = match opcode {
+            REGISTER_WRITE | REGISTER_READ => {
+                let address = (header >> 16) & 0xff;
+                if address > REGISTER_ADDRESS_MASK || (opcode == REGISTER_READ && header >> 24 != 0)
+                {
+                    return Err("SPMI scalar register access has reserved address/data bits");
+                }
+                (
+                    if opcode == REGISTER_READ {
+                        Kind::Read
+                    } else {
+                        Kind::Write
+                    },
+                    address as u16,
+                    1,
+                    (opcode == REGISTER_WRITE).then_some((header >> 24) as u8),
+                )
+            }
+            REGISTER_ZERO_WRITE => {
+                let data = (header >> 24) as u8;
+                if header & 0x00ff_0000 != 0 || data & !REGISTER_ZERO_DATA_MASK != 0 {
+                    return Err("SPMI register-zero write has reserved address/data bits");
+                }
+                (Kind::Write, 0, 1, Some(data))
+            }
+            _ => {
+                let address = (header >> 16) as u16;
+                let (kind, bytes, long) = match opcode {
+                    0x00..=0x0f => (Kind::Write, (opcode & 0xf) + 1, false),
+                    0x20..=0x2f => (Kind::Read, (opcode & 0xf) + 1, false),
+                    0x30..=0x37 => (Kind::Write, (opcode & 7) + 1, true),
+                    0x38..=0x3f => (Kind::Read, (opcode & 7) + 1, true),
+                    _ => return Err("SPMI command other than a qualified register access"),
+                };
+                if !long && address > 0xff {
+                    return Err("SPMI extended access with a 16-bit address");
+                }
+                (kind, address, bytes as usize, None)
+            }
+        };
         Ok(Self {
             header,
             kind,
             sid: ((header >> 8) & 0xf) as u8,
             address,
-            bytes: bytes as usize,
+            bytes,
+            inline,
         })
+    }
+    /// The AP matches scalar replies with mask 0xfe0 and register-zero
+    /// replies with mask 0xf80 (26A434 mac15g table VA772ff5c). The low
+    /// bits carry the MIPI command's five-bit address or seven-bit data.
+    fn response_header(&self) -> u32 {
+        let opcode = self.header & 0xff;
+        match opcode {
+            REGISTER_WRITE | REGISTER_READ => {
+                (self.header & 0xf00) | opcode | u32::from(self.address)
+            }
+            REGISTER_ZERO_WRITE => {
+                (self.header & 0xf00) | opcode | u32::from(self.inline.expect("scalar write"))
+            }
+            _ => self.header & 0xfff,
+        }
     }
     fn words(&self) -> usize {
         self.bytes.div_ceil(4)
@@ -284,7 +347,7 @@ impl Spmi {
             Ok(())
         } else {
             let chunk = Chunk::decode(word)?;
-            if chunk.kind == Kind::Write {
+            if chunk.kind == Kind::Write && chunk.inline.is_none() {
                 self.partial = Some((chunk, Vec::with_capacity(chunk.words())));
                 Ok(())
             } else {
@@ -306,14 +369,17 @@ impl Spmi {
             .iter_mut()
             .find(|(id, _)| *id == chunk.sid)
             .map(|(_, slave)| slave);
-        let echo = chunk.header & 0x7fff;
+        let echo = chunk.response_header();
         match chunk.kind {
             Kind::Write => {
-                let bytes: Vec<u8> = payload
-                    .iter()
-                    .flat_map(|word| word.to_le_bytes())
-                    .take(chunk.bytes)
-                    .collect();
+                let bytes: Vec<u8> = match chunk.inline {
+                    Some(byte) => alloc::vec![byte],
+                    None => payload
+                        .iter()
+                        .flat_map(|word| word.to_le_bytes())
+                        .take(chunk.bytes)
+                        .collect(),
+                };
                 let result = match slave {
                     Some(slave) => slave.write(chunk.address, &bytes, now),
                     None => Err(SlaveError::Nack),
@@ -339,7 +405,7 @@ impl Spmi {
                     }
                     Err(SlaveError::Unsupported(reason)) => return Err(reason),
                 };
-                self.responses.push_back((chunk.header & 0xfff) | parity);
+                self.responses.push_back(echo | parity);
                 for word in data.chunks(4) {
                     let mut le = [0u8; 4];
                     le[..word.len()].copy_from_slice(word);
@@ -651,6 +717,155 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires unchanged original 26A434 mac15g kernelcache via STELA_TEST_SPMI_SCALAR_KC"]
+    fn original_ap_scalar_command_encoding_is_source_pinned() {
+        use sha2::Digest;
+        let data = std::fs::read(std::env::var("STELA_TEST_SPMI_SCALAR_KC").unwrap()).unwrap();
+        let digest = sha2::Sha256::digest(&data);
+        assert_eq!(
+            format!("{digest:x}"),
+            "8210f3645ea16c2481bcaf285ead56eaf2e591bb0d124fe2c01f596c6361ded3"
+        );
+        // This pinned decoded fileset's VA/file relation is a research
+        // fixture fact, not a production image-placement assumption.
+        const BASE: u64 = 0xffff_fe00_0700_4000;
+        let word = |va| {
+            let at = (va - BASE) as usize;
+            u32::from_le_bytes(data[at..at + 4].try_into().unwrap())
+        };
+        let table = (0xffff_fe00_0772_ff48 - BASE) as usize;
+        assert_eq!(data[table + 5], REGISTER_WRITE as u8);
+        assert_eq!(data[table + 6], REGISTER_READ as u8);
+        assert_eq!(data[table + 7], REGISTER_ZERO_WRITE as u8);
+        for (va, encoding) in [
+            (0xffff_fe00_09d5_c8a0, 0x7100_7f9f), // CMP address, #31
+            (0xffff_fe00_09d5_c9ac, 0x2a1c_4129), // ORR address, LSL #16
+            (0xffff_fe00_09d5_c9cc, 0x2a16_6129), // ORR write byte, LSL #24
+            (0xffff_fe00_09d5_d0a8, 0x2a08_6128), // ORR Register0 byte, LSL #24
+            (0xffff_fe00_09d5_d0b4, 0x3219_0116), // ORR opcode, #0x80
+        ] {
+            assert_eq!(word(va), encoding, "original producer at {va:#x}");
+        }
+        let masks = 0xffff_fe00_0772_ff5c;
+        assert_eq!(word(masks + 4 * 4), 0xfe0);
+        assert_eq!(word(masks + 4 * 5), 0xfe0);
+        assert_eq!(word(masks + 4 * 6), 0xf80);
+    }
+
+    #[test]
+    fn scalar_register_commands_own_inline_bytes_and_normal_fifo_replies_on_every_generation() {
+        for profile in [Profile::Gen1, Profile::Gen2, Profile::Gen3, Profile::Gen4] {
+            let mut c = configured(profile, 0x100, 256);
+            let mut latch = InterruptLatch::new();
+            let mut access = Access::new(0, 0, &mut latch);
+            let layout = profile.layout();
+            wr(&mut c, &mut access, layout.enable + 8 * 4, 1);
+            // Original AP packet: one word with a five-bit address and
+            // an inline high byte, not a second request FIFO write.
+            let write = 0xa5 << 24 | 0x1f << 16 | LAST | 0xe << 8 | REGISTER_WRITE;
+            wr(&mut c, &mut access, layout.request, write);
+            assert!(c.partial.is_none());
+            assert_eq!(c.responses.len(), 1);
+            assert_eq!(rd(&mut c, &mut access, layout.response), ACK | 0xe5f);
+            assert!(asserted(&c));
+            wr(&mut c, &mut access, layout.pending + 8 * 4, 1);
+            let read = 0x1f << 16 | LAST | 0xe << 8 | REGISTER_READ;
+            wr(&mut c, &mut access, layout.request, read);
+            assert_eq!(c.responses.len(), 2);
+            let reply = rd(&mut c, &mut access, layout.response);
+            assert_eq!(reply & 0xfe0, read & 0xfe0);
+            assert_eq!(reply & (ACK | 1 << 16), ACK | 1 << 16);
+            assert_eq!(rd(&mut c, &mut access, layout.response), 0xa5);
+            // Register0 Write is also payloadless at the controller FIFO,
+            // but it performs a real one-byte write to the slave register.
+            let zero = 0x6d << 24 | LAST | 0xe << 8 | REGISTER_ZERO_WRITE;
+            wr(&mut c, &mut access, layout.request, zero);
+            assert!(c.partial.is_none());
+            assert_eq!(rd(&mut c, &mut access, layout.response), ACK | 0xeed);
+            wr(
+                &mut c,
+                &mut access,
+                layout.request,
+                LAST | 0xe << 8 | REGISTER_READ,
+            );
+            assert_eq!(rd(&mut c, &mut access, layout.response) >> 16, 1);
+            assert_eq!(rd(&mut c, &mut access, layout.response), 0x6d);
+            assert_eq!(c.status(), layout.response_empty | layout.request_empty);
+            // An absent target stays a hardware NACK, never a successful
+            // empty reply that could complete an HPM mailbox transaction.
+            wr(
+                &mut c,
+                &mut access,
+                layout.request,
+                LAST | 0xd << 8 | REGISTER_READ,
+            );
+            assert_eq!(
+                rd(&mut c, &mut access, layout.response) & (ACK | 1 << 16),
+                0
+            );
+            assert_eq!(rd(&mut c, &mut access, layout.response), 0);
+        }
+    }
+
+    #[test]
+    fn scalar_reserved_fields_and_fifo_pressure_refuse_before_slave_or_queue_effects() {
+        let mut c = configured(Profile::Gen3, 0x100, 20);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        for packet in [
+            0x20 << 16 | 0xe << 8 | REGISTER_READ,
+            1 << 24 | 0xe << 8 | REGISTER_READ,
+            0x20 << 16 | 0xe << 8 | REGISTER_WRITE,
+            1 << 16 | 0xe << 8 | REGISTER_ZERO_WRITE,
+            0x80 << 24 | 0xe << 8 | REGISTER_ZERO_WRITE,
+            1 << 12 | 0xe << 8 | REGISTER_WRITE,
+        ] {
+            assert!(
+                c.write(REQUEST, Width::Word, u64::from(packet), &mut access)
+                    .is_err()
+            );
+            assert!(c.partial.is_none());
+            assert!(c.responses.is_empty());
+            assert!(c.pending.iter().all(|&bits| bits == 0));
+        }
+        // Four accepted writes occupy four of five response words.
+        // A read needs two; its rejected header retains the entire prefix.
+        for byte in 1..=4 {
+            wr(
+                &mut c,
+                &mut access,
+                REQUEST,
+                byte << 24 | LAST | 0xe << 8 | REGISTER_ZERO_WRITE,
+            );
+        }
+        let responses = c.responses.clone();
+        let pending = c.pending;
+        assert!(
+            c.write(
+                REQUEST,
+                Width::Word,
+                u64::from(LAST | 0xe << 8 | REGISTER_READ),
+                &mut access
+            )
+            .is_err()
+        );
+        assert_eq!(c.responses, responses);
+        assert_eq!(c.pending, pending);
+        assert!(c.partial.is_none());
+        while !c.responses.is_empty() {
+            rd(&mut c, &mut access, RESPONSE);
+        }
+        wr(
+            &mut c,
+            &mut access,
+            REQUEST,
+            LAST | 0xe << 8 | REGISTER_READ,
+        );
+        assert_eq!(rd(&mut c, &mut access, RESPONSE) >> 16, 1);
+        assert_eq!(rd(&mut c, &mut access, RESPONSE), 4);
+    }
+
+    #[test]
     fn queue_reset_flushes_a_partial_command_and_unknown_commands_refuse() {
         let mut latch = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut latch);
@@ -662,8 +877,8 @@ mod tests {
         wr(&mut c, &mut a, QUEUE_RESET, 1);
         assert_eq!(rd(&mut c, &mut a, QUEUE_RESET), 0);
         assert_eq!(rd(&mut c, &mut a, STATUS), 0x0100_0100);
-        // Register 0 write (0x80) and the sleep command (0x11) are not modeled.
-        for opcode in [0x80, 0x11] {
+        // Payloadless reset/sleep commands have no qualified slave lifecycle.
+        for opcode in [0x10, 0x11] {
             assert!(
                 c.write(
                     REQUEST,
