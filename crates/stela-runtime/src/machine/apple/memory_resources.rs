@@ -12,6 +12,8 @@ use crate::{
 };
 use alloc::vec::Vec;
 
+mod canonical;
+
 /// One prepared software resource with immutable placement and actual shared
 /// controller identity. A caller must still bind canonical RAM, all writers,
 /// execution ownership, DSB retirement and paired PTD reads before mounting it.
@@ -21,6 +23,7 @@ pub struct Prepared {
     router: Router,
     ptd: Ptd,
     descriptor: DirectMemoryCache,
+    ram: Option<alloc::sync::Arc<crate::memory::RegisteredSystemRam>>,
 }
 impl Prepared {
     pub fn new(
@@ -31,20 +34,8 @@ impl Prepared {
         lifecycle: LifecycleState,
         ptd_bindings: [Option<Wire>; 16],
     ) -> Result<Self, &'static str> {
-        descriptor.validate(locks)?;
-        if configuration.dram.len() != descriptor.apertures.len()
-            || descriptor.apertures != locks.apertures
-            || descriptor.ptd.ranges.len() != descriptor.ptd.interrupts.len()
-        {
-            return Err("MCC preparation does not match actual descriptor/configuration ownership");
-        }
-        let controller = Controller::initialized_cacheless(configuration, lifecycle)?;
-        let router = Router::new(
-            locks.layout,
-            programmed,
-            controller,
-            descriptor.apertures.len(),
-        )?;
+        let router =
+            Self::prepare_router(&descriptor, locks, programmed, configuration, lifecycle)?;
         let ptd = Ptd::initialized(
             u32::try_from(descriptor.ptd_entries)
                 .map_err(|_| "PTD entry count exceeds source width")?,
@@ -56,7 +47,63 @@ impl Prepared {
             router,
             ptd,
             descriptor,
+            ram: None,
         })
+    }
+    /// Build one actual local-notification bank, returning its receiver for
+    /// the native PMP owner. No AP interrupt binding or service ACK is inferred.
+    pub fn new_local(
+        descriptor: DirectMemoryCache,
+        locks: &MemoryController,
+        programmed: Option<(u64, u64)>,
+        configuration: Configuration,
+        lifecycle: LifecycleState,
+    ) -> Result<
+        (
+            Self,
+            crate::platform::apple::ptd::transport::notifications::LocalNotifications,
+        ),
+        &'static str,
+    > {
+        let router =
+            Self::prepare_router(&descriptor, locks, programmed, configuration, lifecycle)?;
+        let (ptd, local) = Ptd::initialized_local(
+            u32::try_from(descriptor.ptd_entries)
+                .map_err(|_| "PTD entry count exceeds source width")?,
+            &descriptor.ptd.ranges,
+            lifecycle,
+        )?;
+        Ok((
+            Self {
+                router,
+                ptd,
+                descriptor,
+                ram: None,
+            },
+            local,
+        ))
+    }
+    fn prepare_router(
+        descriptor: &DirectMemoryCache,
+        locks: &MemoryController,
+        programmed: Option<(u64, u64)>,
+        configuration: Configuration,
+        lifecycle: LifecycleState,
+    ) -> Result<Router, &'static str> {
+        descriptor.validate(locks)?;
+        if configuration.dram.len() != descriptor.apertures.len()
+            || descriptor.apertures != locks.apertures
+            || descriptor.ptd.ranges.len() != descriptor.ptd.interrupts.len()
+        {
+            return Err("MCC preparation does not match actual descriptor/configuration ownership");
+        }
+        let controller = Controller::initialized_cacheless(configuration, lifecycle)?;
+        Router::new(
+            locks.layout,
+            programmed,
+            controller,
+            descriptor.apertures.len(),
+        )
     }
     pub fn controller(&self) -> &Controller {
         &self.router.controller
@@ -333,7 +380,7 @@ mod tests {
     };
     use alloc::{boxed::Box, vec};
 
-    fn prepared() -> Prepared {
+    pub(super) fn prepared() -> Prepared {
         let reg = |offset, mask, value| Register {
             offset,
             mask,
@@ -620,6 +667,58 @@ mod tests {
             .write(0x200000688, Width::Word, 1, &mut access)
             .unwrap();
         assert_eq!(board.memory_lock(), Some((0x800004000, 0x800007fff)));
+    }
+
+    #[test]
+    fn local_constructor_returns_the_same_publication_and_notification_owner() {
+        let original = prepared();
+        let lifecycle = original.controller().lifecycle_state();
+        let mut locks = MemoryController {
+            apertures: original.descriptor.apertures.clone(),
+            layout: original.router.lock_layout,
+        };
+        // Router removed this alias from Amcc because the actual MCC
+        // controller owns it. Reconstruct the source descriptor, not that
+        // already-normalized private lock-only view.
+        locks.layout.cache_status = Some(Register {
+            offset: 0x10000c,
+            mask: 1,
+            value: 1,
+        });
+        let (mut owner, local) = Prepared::new_local(
+            original.descriptor,
+            &locks,
+            None,
+            Configuration {
+                dram: vec![[7; 4]; 2],
+                weights: [1; 32],
+            },
+            lifecycle,
+        )
+        .unwrap();
+        assert!(local.owns(owner.publication_bank()));
+        assert_eq!(local.asserted(), 0);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 17, &mut latch);
+        let base = owner.ptd_offset();
+        owner
+            .write(base + 0x18400, Width::Word, 3, &mut access)
+            .unwrap();
+        owner
+            .write(base + 0x18200, Width::Word, 1, &mut access)
+            .unwrap();
+        owner
+            .write(
+                base + ptd::UPDATE_OFFSET,
+                Width::Double,
+                0x1234,
+                &mut access,
+            )
+            .unwrap();
+        assert_eq!(local.asserted(), 1 << 3);
+        assert_eq!(owner.consume_entry(0, &mut access).unwrap()[0], 0x1234);
+        assert_eq!(local.asserted(), 0);
+        assert!(latch.take_aic_inputs().is_empty());
     }
 
     #[test]

@@ -34,6 +34,12 @@ const DRAM_CONFIG: u64 = 0x13cc;
 const MAX_WAYS: u8 = 12;
 const MAX_QUOTA_UNITS: u8 = 48;
 
+/// The original per-channel in-flight status word. This identifies a required
+/// live memory service; it supplies neither a counter value nor completion.
+pub(crate) fn is_drain_word(offset: u64, width: Width) -> bool {
+    width == Width::Word && matches!(role(offset), Ok(Role::Drain))
+}
+
 /// One original register with independently qualified bits. A zero known mask
 /// never creates an observation of healthy/reset/empty hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
