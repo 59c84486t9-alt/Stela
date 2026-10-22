@@ -187,6 +187,12 @@ pub unsafe fn open(
     for (location, error) in &disks.usb_vendor_failures {
         output::arguments(format_args!("USB VENDOR FAILED {location}: {error}\n"));
     }
+    for (address, class, why) in &disks.unsupported {
+        output::arguments(format_args!(
+            "HOST UNSUPPORTED pci={address} class={:02x}{:02x}{:02x}: {why}\n",
+            class[0], class[1], class[2]
+        ));
+    }
     for (location, error) in &disks.device_failures {
         output::arguments(format_args!("STORAGE FAILED {location}: {error}\n"));
     }

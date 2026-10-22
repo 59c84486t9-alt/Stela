@@ -22,10 +22,7 @@ use stela_drivers::{
         dma::RegionAllocator,
         pci::{Bar, Function},
     },
-    input, net,
     probe::probe,
-    storage::{ahci, nvme, virtio},
-    usb::xhci,
 };
 use stela_runtime::pc::{
     acpi,
@@ -111,18 +108,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
         for window in &ecam {
             // SAFETY: the firmware maps configuration space while it runs.
             for mut function in unsafe { Function::enumerate(window) } {
-                let storage = virtio::matches(&function)
-                    || input::virtio::matches(&function)
-                    || net::virtio::matches(&function)
-                    || net::igc::matches(&function)
-                    || net::e1000e::matches(&function)
-                    || net::igb::matches(&function)
-                    || net::realtek::matches(&function)
-                    || stela_drivers::audio::hda::pci::identify(&function).is_ok()
-                    || function.class == nvme::CLASS
-                    || function.class == ahci::CLASS
-                    || function.class == xhci::CLASS;
-                if storage {
+                if stela_drivers::probe::claims(&function) {
                     mapped.extend(function.bars().iter().filter_map(|bar| match bar {
                         Some(bar @ Bar::Memory { .. }) => bar.memory(),
                         _ => None,

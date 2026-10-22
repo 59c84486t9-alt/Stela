@@ -156,6 +156,42 @@ impl Link for Adapter {
     }
 }
 
+/// Whether a driver here may attach `function`, including the HD Audio
+/// check: its memory BARs must be mapped uncached before ExitBootServices.
+pub fn claims(function: &Function) -> bool {
+    virtio::matches(function)
+        || input::virtio::matches(function)
+        || net::virtio::matches(function)
+        || net::igc::matches(function)
+        || net::e1000e::matches(function)
+        || net::igb::matches(function)
+        || realtek::matches(function)
+        || crate::audio::hda::pci::identify(function).is_ok()
+        || function.class == nvme::CLASS
+        || function.class == ahci::CLASS
+        || function.class == xhci::CLASS
+}
+
+/// Why no driver here takes a function of a device class the host needs,
+/// or none for classes outside this crate's scope.
+fn unsupported(class: [u8; 3]) -> Option<&'static str> {
+    match class {
+        [0x01, 0x01, _] => Some("IDE storage controller"),
+        [0x01, 0x04, _] => Some("RAID storage controller (Intel RST/VMD mode)"),
+        [0x01, 0x06, _] => Some("SATA controller without the AHCI interface"),
+        [0x01, 0x08, _] => Some("non-NVMe non-volatile memory controller"),
+        [0x01, ..] => Some("storage controller"),
+        [0x02, 0x00, _] => Some("Ethernet controller"),
+        [0x02, 0x80, _] => Some("network controller (Wi-Fi is not attached yet)"),
+        [0x02, ..] => Some("network controller"),
+        [0x04, 0x03, _] => Some("HD Audio controller (audio is not attached yet)"),
+        [0x0c, 0x03, _] => Some("USB host controller other than xHCI"),
+        [0x0c, 0x0a, _] => Some("USB4/Thunderbolt host (not attached yet)"),
+        [0x0d, 0x11, _] => Some("PCIe Bluetooth controller"),
+        _ => None,
+    }
+}
+
 /// Every block and input device the drivers brought up, and every
 /// controller they could not.
 #[derive(Default)]
@@ -195,6 +231,9 @@ pub struct Disks {
     pub usb_unused: Vec<(String, &'static str)>,
     /// ECAM windows that were not mapped, and so not scanned.
     pub unmapped: Vec<EcamWindow>,
+    /// Storage, network, audio and USB functions no driver here takes, with
+    /// their class and why.
+    pub unsupported: Vec<(Address, [u8; 3], &'static str)>,
 }
 
 impl Disks {
@@ -399,6 +438,9 @@ pub unsafe fn probe_with_provider(
                         .collect()
                 })
             } else {
+                if let Some(why) = unsupported(function.class) {
+                    disks.unsupported.push((address, function.class, why));
+                }
                 continue;
             };
             match result {
@@ -418,6 +460,24 @@ mod tests {
     };
     use alloc::format;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn unclaimed_host_classes_are_reported_and_others_ignored() {
+        assert_eq!(
+            unsupported([0x02, 0x80, 0x00]),
+            Some("network controller (Wi-Fi is not attached yet)")
+        );
+        assert_eq!(
+            unsupported([0x01, 0x04, 0x00]),
+            Some("RAID storage controller (Intel RST/VMD mode)")
+        );
+        assert_eq!(
+            unsupported([0x0c, 0x03, 0x20]),
+            Some("USB host controller other than xHCI")
+        );
+        assert_eq!(unsupported([0x06, 0x04, 0x00]), None); // PCI bridge
+        assert_eq!(unsupported([0x03, 0x00, 0x00]), None); // display: GPU inventory
+    }
 
     #[test]
     fn probe_diagnostics_preserve_exact_firmware_refusals() {
