@@ -4,13 +4,17 @@ use crate::{
     machine::soc::{DirectMemoryCache, MemoryController},
     platform::apple::{
         amcc::{Amcc, Layout, Register},
-        bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
+        bus::{Access, Direction, Lifecycle, MmioDevice, MmioError, Width, refuse},
         interrupt::Wire,
-        mcc::{self, Configuration, Controller},
+        mcc::{Configuration, Controller},
         ptd::{Ptd, transport::notifications::LocalNotifications},
     },
 };
 use alloc::vec::Vec;
+
+// The mount configures these actual resources; it must be able to name their
+// typed configuration, lifecycle and original register/publication geometry.
+pub use crate::platform::apple::{amcc, bus::LifecycleState, mcc, ptd};
 
 mod canonical;
 

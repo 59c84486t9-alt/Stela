@@ -217,6 +217,31 @@ mod tests {
     }
 
     #[test]
+    fn actual_drain_routes_require_a_live_service_before_any_ordinary_read() {
+        use crate::machine::{Devices, apple::AppleDevices, engine::DeviceReadShape};
+        let mut devices = AppleDevices::new();
+        let owner = super::super::tests::prepared()
+            .with_registered_ram(ram())
+            .unwrap();
+        let controller = owner.controller().clone();
+        devices.add_memory_resources(owner).unwrap();
+        let drain = 0x200000000 + mcc::DCS_BASE + 0xa40;
+        assert!(devices.requires_canonical_read(0, drain, DeviceReadShape::Scalar { bytes: 4 }));
+        assert!(devices.requires_canonical_read(0, drain - 4, DeviceReadShape::Pair { bytes: 4 }));
+        for (physical, bytes) in [(drain, 8), (drain + 4, 4), (0x4000, 4)] {
+            assert!(!devices.requires_canonical_read(
+                0,
+                physical,
+                DeviceReadShape::Scalar { bytes }
+            ));
+        }
+        let before = controller.observations();
+        assert!(devices.read(0, drain, 4, 0).is_err());
+        assert_eq!(controller.observations(), before);
+        assert!(devices.pending_service().is_none());
+    }
+
+    #[test]
     fn conflicting_publication_bank_does_not_publish_partial_memory_apertures() {
         use crate::machine::apple::AppleDevices;
         let mut devices = AppleDevices::new();

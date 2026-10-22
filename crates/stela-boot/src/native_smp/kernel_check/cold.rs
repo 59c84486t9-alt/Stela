@@ -2,8 +2,10 @@
 //! No ARM warmup/legacy V1 instruction runs before canonical conversion.
 use super::*;
 use machine::engine::{CanonicalDeviceMemory, ConsumedPair, ConsumedScalar, DeviceReadShape};
+mod mcc;
 const STR_X0_X1: u32 = 0xf9000020;
 const LDR_X6_X1: u32 = 0xf9400026;
+const LDR_W10_X9: u32 = 0xb940012a;
 const LDRSW_X3_X2: u32 = 0xb9800043;
 const LDP_X4_X5_X2_POST16: u32 = 0xa8c11444;
 const LDP_X7_X8_X2_POST16: u32 = 0xa8c12047;
@@ -12,6 +14,8 @@ const BRANCH_SELF: u32 = 0x14000000;
 const VALUE: u64 = 0x1122334455667788;
 struct Device {
     ram: Arc<RegisteredSystemRam>,
+    memory: machine::apple::AppleDevices,
+    drains: usize,
     reads: usize,
     observed_ram: Option<u64>,
 }
@@ -39,17 +43,29 @@ impl Devices for Device {
         Lines::default()
     }
     fn requires_canonical_read(&self, _: usize, physical: u64, _: DeviceReadShape) -> bool {
-        (source::READY..source::READY + 32).contains(&physical)
+        (source::READY..source::READY + 32).contains(&physical) || physical == mcc::DRAIN
     }
     fn read_canonical(
         &mut self,
         pe: usize,
         physical: u64,
         bytes: u8,
-        _: u64,
+        now: u64,
         memory: &mut dyn CanonicalDeviceMemory,
     ) -> Result<ConsumedScalar, DeviceError> {
         self.held(memory)?;
+        if physical == mcc::DRAIN {
+            let mut result = self
+                .memory
+                .read_canonical(pe, physical, bytes, now, memory)?;
+            if result.value != 0 || result.settlement.is_err() || self.drains != 0 {
+                result.settlement = Err(DeviceError::TransferRefused(
+                    "actual MCC fixture drain failed".into(),
+                ));
+            }
+            self.drains += 1;
+            return Ok(result);
+        }
         if (pe, physical, bytes, self.reads) != (0, source::READY, 4, 0) {
             return Err(DeviceError::NoDevice);
         }
@@ -132,6 +148,8 @@ pub(super) unsafe fn check(
     source::constant(&mut words, 0, VALUE);
     source::constant(&mut words, 1, source::DATA);
     words.extend_from_slice(&[STR_X0_X1, LDR_X6_X1, DSB_SY]);
+    source::constant(&mut words, 9, mcc::DRAIN);
+    words.push(LDR_W10_X9);
     source::constant(&mut words, 2, source::READY);
     words.extend_from_slice(&[LDRSW_X3_X2, LDP_X4_X5_X2_POST16, LDP_X7_X8_X2_POST16]);
     let done = source::CODE + words.len() as u64 * 4;
@@ -147,6 +165,8 @@ pub(super) unsafe fn check(
     let before = cpu.state.clone();
     let devices = Device {
         ram: Arc::clone(&ram),
+        memory: mcc::devices(Arc::clone(&ram))?,
+        drains: 0,
         reads: 0,
         observed_ram: None,
     };
@@ -189,6 +209,8 @@ pub(super) unsafe fn check(
     expected.x[6] = VALUE;
     expected.x[7] = 0xcccc;
     expected.x[8] = 0xdddd;
+    expected.x[9] = mcc::DRAIN;
+    expected.x[10] = 0;
     crate::output::arguments(format_args!(
         "NATIVE COLD frame pc={:#x} retired={} pstate={:?} state={:?}\n",
         machine.cpu.pc, machine.cpu.retired, machine.cpu.pstate, machine.cpu.state
@@ -197,6 +219,7 @@ pub(super) unsafe fn check(
         || machine.cpu.pc != done
         || machine.cpu.retired != words.len() as u64 - 1
         || machine.devices.reads != 3
+        || machine.devices.drains != 1
         || machine.devices.observed_ram != Some(VALUE)
         || machine.cpu.pstate != Pstate::reset(2)
     {
@@ -209,7 +232,7 @@ pub(super) unsafe fn check(
         return Err("cold consumed read replayed or resumed after failed settlement");
     }
     crate::output::arguments(format_args!(
-        "CHECK native-cold PASS actual_BSP=1 warmup=none checked_Device_RAM=store+load CPU_DSB=1 consumed_reads=3 scalar_signextend=1 pair_writeback=2 postfailure_retired=1 full_frame=preserved replay=refused; no macOS/SMP/DRAM completion claim\n"
+        "CHECK native-cold PASS actual_BSP=1 warmup=none checked_Device_RAM=store+load CPU_DSB=1 actual_MCC_drain=1 consumed_reads=4 scalar_signextend=1 pair_writeback=2 postfailure_retired=1 full_frame=preserved replay=refused; no macOS/SMP/DRAM completion claim\n"
     ));
     Ok(())
 }

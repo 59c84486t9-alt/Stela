@@ -81,6 +81,7 @@ use crate::system::access::{AccessKind, Encoding};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use stela_drivers::{block::BlockDevice, input::Input, net::Mac};
 
+mod canonical_reads;
 mod display_resources;
 pub mod memory_resources;
 mod service;
@@ -2808,17 +2809,46 @@ impl Devices for AppleDevices {
     }
 
     fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
-        self.publish_rtc_time(now)?;
-        self.settle_lifecycle(cpu, now);
-        let width = width(bytes)?;
-        let mut access = Access::new(cpu, now, &mut self.latch);
-        let value = self
-            .bus
-            .read(physical, width, &mut access)
-            .map_err(describe)?;
-        let reset = reset_reason(&access);
-        self.settle(cpu, now, reset)?;
-        Ok(value)
+        let consumed = self.consume_scalar_read(cpu, physical, bytes, now, None)?;
+        consumed.settlement?;
+        Ok(consumed.value)
+    }
+
+    fn requires_canonical_read(
+        &self,
+        _cpu: usize,
+        physical: u64,
+        shape: super::engine::DeviceReadShape,
+    ) -> bool {
+        self.read_needs_ram(physical, shape)
+    }
+
+    fn read_canonical(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        bytes: u8,
+        now: u64,
+        memory: &mut dyn super::engine::CanonicalDeviceMemory,
+    ) -> Result<super::engine::ConsumedScalar, DeviceError> {
+        self.consume_scalar_read(cpu, physical, bytes, now, Some(memory))
+    }
+
+    fn read_pair_canonical(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        bytes: u8,
+        now: u64,
+        _memory: &mut dyn super::engine::CanonicalDeviceMemory,
+    ) -> Result<ConsumedPair, DeviceError> {
+        // Only the actual Prepared publication/status owner has a qualified
+        // whole-pair read. Never consume two unrelated scalar registers here.
+        self.read_pair(cpu, physical, bytes, now)?.ok_or_else(|| {
+            DeviceError::TransferRefused(
+                "canonical pair has no qualified whole-register owner".into(),
+            )
+        })
     }
 
     fn read_pair(

@@ -29,7 +29,8 @@ const GROUPS: u8 = 32;
 const QUOTA_UNITS: u64 = 0x3f;
 const QUOTA_FIELDS: u64 = 0x017f_003f;
 const DCS_GATING: u64 = 0x10;
-const DCS_DRAIN: u64 = 0xa40;
+/// Per-channel in-flight status, requiring a live native memory service.
+pub const DCS_DRAIN: u64 = 0xa40;
 const DRAM_CONFIG: u64 = 0x13cc;
 const MAX_WAYS: u8 = 12;
 const MAX_QUOTA_UNITS: u8 = 48;
