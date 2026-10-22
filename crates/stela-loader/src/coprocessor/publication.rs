@@ -164,6 +164,7 @@ impl Configured {
     /// Build exact property bytes only after explicit policy for every original
     /// segment. No default flags, PA==DVA assumption, or empty-segment policy.
     pub fn publication_proposal(&self, policy: Policy) -> Result<Proposal> {
+        self.validate_tuning()?;
         let plan = self.plan();
         ensure!(
             label(&policy.allocation_owner)

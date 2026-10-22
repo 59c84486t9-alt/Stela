@@ -11,6 +11,7 @@ use stela_runtime::sha256;
 pub mod entropy;
 pub mod heap;
 pub mod native;
+pub mod tuning;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Provenance {
@@ -166,6 +167,8 @@ pub struct Receipt {
     /// Present only when the independent native version5 bootstrap header and
     /// matching SLID patch have been applied together. This remains byte policy.
     pub cold_slide: Option<native::ColdSlideProposal>,
+    /// Native tuning bytes outside the patchbay, prepared from selected sources.
+    pub tuning: Option<tuning::Receipt>,
     pub configured_sha256: String,
 }
 /// Encoded cold image after a complete caller-supplied patch policy. It has no
@@ -256,6 +259,7 @@ impl Staged {
             patchbay_sha256: bay.source_sha256.clone(),
             fields,
             cold_slide: None,
+            tuning: None,
             configured_sha256: String::new(),
         };
         // No bytes change until every original field and every source claim has
