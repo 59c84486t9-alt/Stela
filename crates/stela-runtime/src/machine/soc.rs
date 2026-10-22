@@ -46,8 +46,10 @@ pub use handoff::{
 };
 #[cfg(test)]
 use power_resources::PMGR_VIRTUAL;
+pub use power_resources::{
+    ClockRole, PmgrClockProvider, PowerOwner, PowerResource, PowerStates, ProcessorAssociation,
+};
 use power_resources::{PMGR_DEVICE, power_states};
-pub use power_resources::{PowerOwner, PowerResource, PowerStates, ProcessorAssociation};
 pub use topology::assigned;
 
 /// One SoC row: ApChipID, `product-soc-name`, chip, the MIDR_EL1 part

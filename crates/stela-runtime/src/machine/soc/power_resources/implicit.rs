@@ -261,7 +261,7 @@ mod tests {
             .map(|(id, resource)| Consumer {
                 id,
                 name: &resource.name,
-                clocks: &resource.clocks,
+                clocks: resource.activated_clocks(),
                 power: &power[id],
                 admission: resource.admission,
                 sinks: LifecycleSinks::default(),
@@ -454,6 +454,7 @@ mod tests {
             },
         ]);
         states.resources.push(super::super::PowerResource {
+            clock_role: crate::machine::soc::ClockRole::Consumer,
             name: "unqualified shared client".into(),
             clocks: vec![alias],
             power: vec![],
@@ -468,7 +469,7 @@ mod tests {
             .map(|(id, resource)| Consumer {
                 id,
                 name: &resource.name,
-                clocks: &resource.clocks,
+                clocks: resource.activated_clocks(),
                 power: &power[id],
                 admission: resource.admission,
                 sinks: LifecycleSinks {

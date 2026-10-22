@@ -2122,7 +2122,7 @@ impl AppleDevices {
             consumers.push(Consumer {
                 id,
                 name: &resource.name,
-                clocks: &resource.clocks,
+                clocks: resource.activated_clocks(),
                 power: &power_requirements[id],
                 admission: resource.admission,
                 sinks: if connected {
@@ -3506,6 +3506,7 @@ mod tests {
             resources: resources
                 .iter()
                 .map(|&(name, physical)| PowerResource {
+                    clock_role: crate::machine::soc::ClockRole::Consumer,
                     name: name.into(),
                     clocks: vec![gate],
                     power: vec![],
@@ -3563,6 +3564,7 @@ mod tests {
                 })
                 .collect(),
             resources: vec![PowerResource {
+                clock_role: crate::machine::soc::ClockRole::Consumer,
                 name: "/arm-io/dart".into(),
                 clocks: ids,
                 power: Vec::new(),
@@ -3616,6 +3618,7 @@ mod tests {
                 .iter()
                 .zip(["uart", "i2c", "spi"])
                 .map(|(&physical, name)| PowerResource {
+                    clock_role: crate::machine::soc::ClockRole::Consumer,
                     name: name.into(),
                     clocks: vec![id],
                     power: vec![],
@@ -3792,6 +3795,7 @@ mod tests {
                 .into_iter()
                 .zip(ids)
                 .map(|(physical, id)| PowerResource {
+                    clock_role: crate::machine::soc::ClockRole::Consumer,
                     name: "/arm-io/repeated".into(),
                     clocks: vec![id],
                     power: vec![],
@@ -3853,6 +3857,7 @@ mod tests {
                 ("/arm-io/checked-native", PowerOwner::Mmio(canonical)),
             ]
             .map(|(name, owner)| PowerResource {
+                clock_role: crate::machine::soc::ClockRole::Consumer,
                 name: name.into(),
                 clocks: vec![gate],
                 power: vec![],
@@ -4204,6 +4209,7 @@ mod tests {
         for retention in [false, true] {
             let (mut d, _, supply, base) = powered_dart_with(retention, 1, |states| {
                 states.resources.push(PowerResource {
+                    clock_role: crate::machine::soc::ClockRole::Consumer,
                     name: "/arm-io/unavailable".into(),
                     clocks: states.resources[0].clocks.clone(),
                     power: vec![],
@@ -4250,6 +4256,7 @@ mod tests {
                 parents: [None; 4],
             }],
             resources: vec![PowerResource {
+                clock_role: crate::machine::soc::ClockRole::Consumer,
                 name: "/arm-io/unavailable".into(),
                 clocks: vec![id],
                 power: vec![],
@@ -4324,6 +4331,7 @@ mod tests {
             states.resources[0].clocks = vec![id(2)];
             for (name, device) in [("controller", 1), ("firmware-endpoint", 3)] {
                 states.resources.push(PowerResource {
+                    clock_role: crate::machine::soc::ClockRole::Consumer,
                     name: name.into(),
                     clocks: vec![],
                     power: vec![id(device)],
@@ -6261,6 +6269,7 @@ mod tests {
                 parents: [None; 4],
             }],
             resources: vec![PowerResource {
+                clock_role: crate::machine::soc::ClockRole::Consumer,
                 name: "/arm-io/atc-phy0".into(),
                 clocks: vec![id],
                 power: vec![],
@@ -6351,6 +6360,7 @@ mod tests {
                 parents: [None; 4],
             }],
             resources: vec![PowerResource {
+                clock_role: crate::machine::soc::ClockRole::Consumer,
                 name: "/arm-io/atc-phy0".into(),
                 clocks: vec![id],
                 power: vec![],
@@ -6466,6 +6476,7 @@ mod tests {
             ],
             resources: vec![
                 PowerResource {
+                    clock_role: crate::machine::soc::ClockRole::Consumer,
                     name: "dart-usb0".into(),
                     clocks: vec![id(0x210)],
                     power: vec![],
@@ -6473,6 +6484,7 @@ mod tests {
                     admission: coverage::Admission::Required,
                 },
                 PowerResource {
+                    clock_role: crate::machine::soc::ClockRole::Consumer,
                     name: "usb-drd0".into(),
                     clocks: vec![id(0x108)],
                     power: vec![],
@@ -6480,6 +6492,7 @@ mod tests {
                     admission: coverage::Admission::Required,
                 },
                 PowerResource {
+                    clock_role: crate::machine::soc::ClockRole::Consumer,
                     name: "usb-drd0/port-hs".into(),
                     clocks: vec![id(0x108)],
                     power: vec![],
@@ -6487,6 +6500,7 @@ mod tests {
                     admission: coverage::Admission::Required,
                 },
                 PowerResource {
+                    clock_role: crate::machine::soc::ClockRole::Consumer,
                     name: "acio0".into(),
                     clocks: vec![id(2)],
                     power: vec![],
@@ -6494,6 +6508,7 @@ mod tests {
                     admission: coverage::Admission::Required,
                 },
                 PowerResource {
+                    clock_role: crate::machine::soc::ClockRole::Consumer,
                     name: "atc-phy0".into(),
                     clocks: vec![],
                     power: vec![],

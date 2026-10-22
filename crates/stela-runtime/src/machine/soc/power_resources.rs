@@ -3,13 +3,18 @@
 //! island. Registerless USB root-port views likewise belong to their USB
 //! controller. Conversely, sharing an iommu-parent does not make a DMA client's
 //! controller part of the DART's physical supply. Hardware resources inherit
-//! their ADT ancestors' gates, including nubs and firmware endpoints.
+//! their ADT ancestors' activated gates, including nubs and firmware endpoints.
+//! Source PMGR provider gate-index metadata remains inventoried separately from
+//! the consumer dependencies its IOService start actually activates.
 use super::{ATC_PHY_LAYOUTS, IOMMU_MAPPER, Node, USB_DRD, name_of, pmgr};
 use crate::platform::apple::{
     dart::Profile,
     pmgr::coverage::{self, Admission, Consumer, Domain, DomainId, LifecycleSinks},
 };
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
+
+mod clock_role;
+pub use clock_role::{ClockRole, PmgrClockProvider};
 
 mod cpu;
 pub use cpu::ProcessorAssociation;
@@ -40,11 +45,24 @@ pub enum PowerOwner {
 pub struct PowerResource {
     pub name: String,
     pub clocks: Vec<DomainId>,
+    /// Source-qualified driver use; provider metadata alone activates no gate.
+    pub clock_role: ClockRole,
     pub power: Vec<DomainId>,
     pub owner: Option<PowerOwner>,
     /// Explicit preparation evidence; defaults to required even without owner
     /// or compatible metadata. Unavailable never grants functional support.
     pub admission: Admission,
+}
+
+impl PowerResource {
+    /// Actual start/lifecycle requirements, retaining passive provider indices
+    /// in clocks for source accounting and later explicit gate operations.
+    pub fn activated_clocks(&self) -> &[DomainId] {
+        match &self.clock_role {
+            ClockRole::Consumer => &self.clocks,
+            ClockRole::PmgrProvider(provider) => provider.ancestors(),
+        }
+    }
 }
 
 /// PMGR blocks, complete original domain graph and all original ADT resources,
@@ -159,6 +177,7 @@ impl PowerStates {
                 .any(|(expected, actual)| {
                     expected.name != actual.name
                         || expected.clocks != actual.clocks
+                        || expected.clock_role != actual.clock_role
                         || expected.power != actual.power
                         || expected.owner != actual.owner
                 })
@@ -305,6 +324,7 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
 }
 
 fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, String> {
+    let provider = clock_role::provider(root)?;
     let ranges = root
         .child("arm-io")
         .and_then(|io| io.ranges())
@@ -353,6 +373,7 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
             path.into()
         },
         clocks: clocks.clone(),
+        clock_role: ClockRole::Consumer,
         power: power.clone(),
         owner: None,
         admission: Admission::Required,
@@ -385,6 +406,11 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
             resources[parent].name.trim_end_matches('/'),
             name_of(&node)
         );
+        let clock_role = provider.as_ref().map_or(ClockRole::Consumer, |provider| {
+            provider.role(&node, &clocks)
+        });
+        let provider_ancestors =
+            matches!(clock_role, ClockRole::PmgrProvider(_)).then(|| clocks.clone());
         clocks.extend(
             gate_ids(&node, &path, "clock-gates")?
                 .into_iter()
@@ -499,6 +525,7 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
         resources.push(PowerResource {
             name: path.clone(),
             clocks: clocks.clone(),
+            clock_role,
             power: power.clone(),
             owner,
             admission: Admission::Required,
@@ -514,7 +541,7 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
             pending.push((
                 index,
                 child,
-                clocks.clone(),
+                provider_ancestors.as_ref().unwrap_or(&clocks).clone(),
                 power.clone(),
                 owner,
                 views.clone(),
@@ -586,7 +613,7 @@ pub(super) fn validate_power_graph(states: &PowerStates) -> Result<(), String> {
         .map(|(id, resource)| Consumer {
             id,
             name: &resource.name,
-            clocks: &resource.clocks,
+            clocks: resource.activated_clocks(),
             power: &power[id],
             sinks: LifecycleSinks::default(),
             admission: resource.admission,
@@ -750,7 +777,7 @@ mod tests {
                 .map(|(id, resource)| Consumer {
                     id,
                     name: &resource.name,
-                    clocks: &resource.clocks,
+                    clocks: resource.activated_clocks(),
                     power: &resource.power,
                     sinks: LifecycleSinks::default(),
                     admission: resource.admission,
@@ -889,7 +916,7 @@ mod tests {
             .map(|(id, resource)| Consumer {
                 id,
                 name: &resource.name,
-                clocks: &resource.clocks,
+                clocks: resource.activated_clocks(),
                 power: &resource.power,
                 sinks: LifecycleSinks::default(),
                 admission: resource.admission,
@@ -1198,7 +1225,7 @@ mod tests {
             .map(|(id, resource)| Consumer {
                 id,
                 name: &resource.name,
-                clocks: &resource.clocks,
+                clocks: resource.activated_clocks(),
                 power: &resource.power,
                 sinks: if matches!(
                     resource.owner,
@@ -1484,7 +1511,7 @@ mod tests {
             .map(|(id, resource)| Consumer {
                 id,
                 name: &resource.name,
-                clocks: &resource.clocks,
+                clocks: resource.activated_clocks(),
                 power: &resource.power,
                 sinks: if matches!(
                     resource.owner,
