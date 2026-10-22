@@ -604,7 +604,8 @@ mod tests {
     fn canonical_states(root: &Node<'_>) -> super::super::PowerStates {
         let io = root.child("arm-io").unwrap();
         let pmgr = io.child("pmgr").unwrap();
-        let table = super::super::decode_domain_table(&pmgr, &|address, bytes| {
+        let dies = super::super::Dies::of(root, &pmgr).unwrap();
+        let table = super::super::decode_domain_table(&pmgr, dies, &|address, bytes| {
             physical(&io, address, bytes).ok()
         })
         .unwrap();

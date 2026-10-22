@@ -4694,8 +4694,14 @@ mod tests {
                 kind: 1,
                 blocks: 0
             }],
-            clock_gates: alloc::vec![125],
-            power_gates: alloc::vec![125],
+            clock_gates: alloc::vec![coverage::DomainId {
+                die: 0,
+                device: 125
+            }],
+            power_gates: alloc::vec![coverage::DomainId {
+                die: 0,
+                device: 125
+            }],
         };
         let mut devices = AppleDevices::new();
         devices

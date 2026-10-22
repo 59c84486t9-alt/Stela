@@ -94,7 +94,8 @@ impl PowerStates {
         // Reconstruct every original domain through the existing reader. The
         // association resolver may trust normalized non-CPU locations only
         // after this equality check, including aliases and parent identities.
-        let table = decode_domain_table(&node, &|address, bytes| {
+        let dies = Dies::of(root, &node)?;
+        let table = decode_domain_table(&node, dies, &|address, bytes| {
             cpu::physical(&io, address, bytes).ok()
         })?;
         if self.domains != table.domains
@@ -102,6 +103,14 @@ impl PowerStates {
             || self.registers != table.registers
         {
             return Err("CPU PMGR canonical inventory differs from the source tree".into());
+        }
+        // Another die's cores power up through that die's PMGR records,
+        // whose CPU owners the association resolver does not model.
+        if dies.count != 1 {
+            return Err(format!(
+                "CPU PMGR associations: {:?}",
+                cpu::CpuAssociationError::UnsupportedDie(dies.count - 1)
+            ));
         }
         let (layout, _) = Layout::select(node.property("ps-regs"), node.property("ps-groups"))
             .map_err(String::from)?;
@@ -295,10 +304,25 @@ impl ResourceInventory<'_> {
     }
 }
 
-/// Current ADT PMGR format uses u16 device/parent IDs. Preserve all bits and
-/// reject wider encodings instead of inventing die routing. The original
-/// physical register address remains the authority for aliases.
-pub(super) fn gate_ids(node: &Node<'_>, path: &str, property: &str) -> Result<Vec<u16>, String> {
+/// Die field of a `clock-gates`/`power-gates` word. 26A434 mac14j
+/// `ApplePMGRFunctionClockGate::callFunction` takes the die as the word's
+/// bits [31:28] (`lsr w22, w20, #28`, KC VA 0xfffffe0009b7e1b0) and the
+/// device as the rest (`and x1, x20, #0xfffffff`, 0xfffffe0009b7e25c);
+/// `ApplePMGRNub::_enableDeviceStatusChangeNotifications` splits it the same
+/// way and passes only `& 0xffff` (0xfffffe0009b8b7d8, 0xfffffe0009b8b82c) to
+/// the per-die `(device, die)` entry points such as `_enableDeviceGated`.
+const GATE_DIE_SHIFT: u32 = 28;
+/// Bits [27:16] reach no 16-bit device record; no qualified meaning.
+const GATE_RESERVED: u32 = 0x0fff_0000;
+
+/// Decode each gate word into its die-qualified device. The record tables
+/// hold die 0's devices; [`decode_domain_table`] places every other die's
+/// copy, so a die without a placed PMGR remains an unknown requirement.
+pub(super) fn gate_ids(
+    node: &Node<'_>,
+    path: &str,
+    property: &str,
+) -> Result<Vec<DomainId>, String> {
     let bytes = node.property(property).unwrap_or_default();
     if !bytes.len().is_multiple_of(4) {
         return Err(format!("{path} {property} contains a partial device ID"));
@@ -308,14 +332,95 @@ pub(super) fn gate_ids(node: &Node<'_>, path: &str, property: &str) -> Result<Ve
         .0
         .iter()
         .map(|word| {
-            u16::try_from(u32::from_le_bytes(*word))
-                .map_err(|_| format!("{path} {property} exceeds PMGR device ID width"))
+            let word = u32::from_le_bytes(*word);
+            if word & GATE_RESERVED != 0 {
+                return Err(format!(
+                    "{path} {property} {word:#x} sets reserved PMGR device ID bits"
+                ));
+            }
+            Ok(DomainId {
+                die: (word >> GATE_DIE_SHIFT) as u8,
+                device: word as u16,
+            })
         })
         .collect()
 }
 
 fn domain_id(device: u16) -> DomainId {
     DomainId { die: 0, device }
+}
+
+/// Default die strides of the PMGR drivers that bind these families when
+/// `/arm-io/pmgr` has no `die-stride`: `AppleT6000PMGR::getDieStride` in
+/// AppleT6001PMGR (26A434 mac13j KC VA 0xfffffe0009f59164) and
+/// `AppleT6020PMGR::getDieStride` in AppleT6021PMGR (mac14j 0xfffffe0009f6ceac)
+/// both return 0x20_0000_0000, and their `getDieOffset(die)` is `die << 37`.
+const DRIVER_DIE_STRIDES: [(&str, u64); 2] = [("pmgr1,t6001", 1 << 37), ("pmgr1,t6021", 1 << 37)];
+
+/// The PMGR instances of a multi-die SoC: die `d`'s power-state registers are
+/// die 0's plus `d * stride` (`ApplePMGR::getDieOffset`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Dies {
+    count: u8,
+    stride: u64,
+}
+
+impl Dies {
+    /// `ApplePMGR::start` (mac14j KC VA 0xfffffe0009b358e4..0xfffffe0009b35934)
+    /// reads `/arm-io/pmgr` `die-stride`, falls back to the driver's virtual
+    /// `getDieStride` when it is absent or zero, and refuses a die count above
+    /// one without a stride. The die count is the CPU dies (`/cpus/*` `die-id`,
+    /// which XNU `ml_parse_cpu_topology` reads), as the `die-count` iBoot sets
+    /// at boot (J180D iBoot file 0x39d88) is not in the firmware tree; a tree
+    /// without CPU nodes is one die.
+    fn of(root: &Node<'_>, pmgr: &Node<'_>) -> Result<Self, String> {
+        let cpus = if name_of(root) == "arm-io" {
+            None
+        } else {
+            root.child("cpus")
+        };
+        let mut highest = 0;
+        for cpu in cpus.and_then(|cpus| cpus.children()).unwrap_or_default() {
+            if let Some(die) = cpu.first_u32("die-id") {
+                highest = highest.max(die);
+            }
+        }
+        let count = highest
+            .checked_add(1)
+            .filter(|&count| count <= 1 << (32 - GATE_DIE_SHIFT))
+            .and_then(|count| u8::try_from(count).ok())
+            .ok_or_else(|| format!("CPU die-id {highest} exceeds the PMGR die field"))?;
+        if count == 1 {
+            return Ok(Self { count, stride: 0 });
+        }
+        let stride = match pmgr.property("die-stride") {
+            Some(bytes) if bytes.len() == 8 => {
+                u64::from_le_bytes(bytes.try_into().expect("eight bytes"))
+            }
+            Some(_) => return Err("/arm-io/pmgr die-stride is not one 64-bit stride".into()),
+            None => 0,
+        };
+        let stride = if stride != 0 {
+            stride
+        } else {
+            DRIVER_DIE_STRIDES
+                .iter()
+                .find(|(family, _)| pmgr.compatible(family))
+                .map(|&(_, stride)| stride)
+                .ok_or_else(|| {
+                    format!("/arm-io/pmgr spans {count} dies without a qualified die-stride")
+                })?
+        };
+        Ok(Self { count, stride })
+    }
+
+    /// Die `die`'s copy of a die-0 physical address.
+    fn place(self, die: u8, address: u64) -> Result<u64, String> {
+        self.stride
+            .checked_mul(u64::from(die))
+            .and_then(|offset| address.checked_add(offset))
+            .ok_or_else(|| format!("/arm-io/pmgr die {die} power state overflows"))
+    }
 }
 
 #[cfg(test)]
@@ -358,14 +463,8 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
     } else {
         ""
     };
-    let clocks = gate_ids(root, path, "clock-gates")?
-        .into_iter()
-        .map(domain_id)
-        .collect::<Vec<_>>();
-    let power = gate_ids(root, path, "power-gates")?
-        .into_iter()
-        .map(domain_id)
-        .collect::<Vec<_>>();
+    let clocks = gate_ids(root, path, "clock-gates")?;
+    let power = gate_ids(root, path, "power-gates")?;
     let mut resources = alloc::vec![PowerResource {
         name: if path.is_empty() {
             "/".into()
@@ -411,16 +510,8 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
         });
         let provider_ancestors =
             matches!(clock_role, ClockRole::PmgrProvider(_)).then(|| clocks.clone());
-        clocks.extend(
-            gate_ids(&node, &path, "clock-gates")?
-                .into_iter()
-                .map(domain_id),
-        );
-        power.extend(
-            gate_ids(&node, &path, "power-gates")?
-                .into_iter()
-                .map(domain_id),
-        );
+        clocks.extend(gate_ids(&node, &path, "clock-gates")?);
+        power.extend(gate_ids(&node, &path, "power-gates")?);
         clocks.sort_unstable();
         clocks.dedup();
         power.sort_unstable();
@@ -587,7 +678,7 @@ pub(super) fn source_power_states(
     node: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<PowerStates, String> {
-    let table = decode_domain_table(node, translate)?;
+    let table = decode_domain_table(node, Dies::of(root, node)?, translate)?;
     let inventory = inventory_with_nodes(root)?;
     let implicit = implicit::resolve(node, &table.domains, &inventory, translate)?;
     let states = PowerStates {
@@ -631,6 +722,7 @@ struct DomainTable {
 /// coverage checks. This table alone never establishes lifecycle admission.
 fn decode_domain_table(
     node: &Node<'_>,
+    dies: Dies,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<DomainTable, String> {
     const PATH: &str = "/arm-io/pmgr";
@@ -698,9 +790,45 @@ fn decode_domain_table(
             parents,
         });
     }
+    // Each further die repeats die 0's records in its own PMGR instance.
+    // `_enableDeviceGated(device, ..., die)` (mac14j KC VA 0xfffffe0009b6990c)
+    // indexes per-die state by `die * 800 + device` and passes its own die to
+    // the parent walk (0xfffffe0009b69ac4), so parents stay on that die.
+    let spans = spans.into_iter().flatten().collect::<Vec<_>>();
+    let mut blocks = spans.clone();
+    let first = domains.len();
+    let first_registers = registers.len();
+    for die in 1..dies.count {
+        for &(base, bytes) in &spans {
+            blocks.push((dies.place(die, base)?, bytes));
+        }
+        for index in 0..first_registers {
+            registers.push(dies.place(die, registers[index])?);
+        }
+        for index in 0..first {
+            let domain = &domains[index];
+            let copy = Domain {
+                name: domain.name.clone(),
+                id: DomainId { die, ..domain.id },
+                address: domain
+                    .address
+                    .map(|address| dies.place(die, address))
+                    .transpose()?,
+                parents: domain
+                    .parents
+                    .map(|parent| parent.map(|parent| DomainId { die, ..parent })),
+            };
+            domains.push(copy);
+        }
+    }
     registers.sort_unstable();
+    if registers.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(format!(
+            "{PATH} die-stride overlaps another die's power states"
+        ));
+    }
     Ok(DomainTable {
-        blocks: spans.into_iter().flatten().collect(),
+        blocks,
         registers,
         domains,
     })
@@ -752,9 +880,10 @@ mod tests {
             let root = Node::root(&bytes).unwrap();
             let io = root.child("arm-io").unwrap();
             let node = io.child("pmgr").unwrap();
-            let states =
-                decode_domain_table(&node, &|address, bytes| io.translate_range(address, bytes))
-                    .unwrap();
+            let states = decode_domain_table(&node, Dies::of(&root, &node).unwrap(), &|a, b| {
+                io.translate_range(a, b)
+            })
+            .unwrap();
             assert_eq!(states.domains.len(), domains);
             assert_eq!(states.registers.len(), registers);
             let coverage = coverage::analyze(&states.domains, &[]).unwrap();
@@ -1580,6 +1709,128 @@ mod tests {
             shared.consumers.len()
         );
     }
+    /// A synthetic SoC with CPUs on `dies` dies, two die-0 records (device 2
+    /// parented by device 1) and one consumer gating device 2 on each die.
+    fn multi_die(dies: u32, compatible: &[u8], stride: Option<u64>) -> Vec<u8> {
+        let devices = [(1u16, 0u8, 0u16), (2, 1, 1)]
+            .into_iter()
+            .flat_map(|(id, index, parent)| {
+                let mut record = [0; PMGR_DEVICE];
+                record[4..6].copy_from_slice(&parent.to_le_bytes());
+                record[10] = index;
+                record[26..28].copy_from_slice(&id.to_le_bytes());
+                record
+            })
+            .collect::<Vec<_>>();
+        let reg = [0x1000u64, 0x1000]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let ps = words(&[0, 0, 0]);
+        let stride = stride.map(u64::to_le_bytes);
+        let mut properties = alloc::vec![
+            ("name", b"pmgr".as_slice()),
+            ("compatible", compatible),
+            ("reg", &reg),
+            ("ps-regs", &ps),
+            ("devices", &devices),
+        ];
+        if let Some(stride) = &stride {
+            properties.push(("die-stride", stride));
+        }
+        let pmgr = encode(&properties, &[]);
+        let gates = words(&[2, 0x1000_0002]);
+        let usb = encode(&[("name", b"usb"), ("clock-gates", &gates)], &[]);
+        let cpus = (0..2)
+            .map(|cpu| {
+                let die = words(&[cpu * (dies - 1)]);
+                encode(&[("name", b"cpu"), ("die-id", &die)], &[])
+            })
+            .collect::<Vec<_>>();
+        encode(
+            &[("name", b"device-tree")],
+            &[encode(&[("name", b"cpus")], &cpus), flat_bus(&[pmgr, usb])],
+        )
+    }
+
+    fn multi_die_states(bytes: &[u8]) -> Result<PowerStates, String> {
+        let root = Node::root(bytes).unwrap();
+        let io = root.child("arm-io").unwrap();
+        decode_power_states(&root, &io.child("pmgr").unwrap(), &|address, bytes| {
+            io.translate_range(address, bytes)
+        })
+    }
+
+    #[test]
+    fn die_qualified_gates_reach_each_dies_strided_pmgr_records() {
+        let id = |die, device| DomainId { die, device };
+        for (compatible, property, stride) in [
+            (&b"pmgr1,t8112"[..], Some(0x40_0000_0000), 0x40_0000_0000),
+            // Without die-stride the bound family driver's stride applies.
+            (b"pmgr1,t6001", None, 1 << 37),
+            (b"pmgr1,t6021", Some(0), 1 << 37),
+        ] {
+            let states = multi_die_states(&multi_die(2, compatible, property)).unwrap();
+            assert_eq!(
+                states.domains.iter().map(|d| d.id).collect::<Vec<_>>(),
+                [id(0, 1), id(0, 2), id(1, 1), id(1, 2)]
+            );
+            assert_eq!(states.domains[2].address, Some(0x1000 + stride));
+            assert_eq!(states.domains[3].address, Some(0x1008 + stride));
+            assert_eq!(states.domains[3].parents[0], Some(id(1, 1)));
+            assert_eq!(
+                states.registers,
+                [0x1000, 0x1008, 0x1000 + stride, 0x1008 + stride]
+            );
+            assert_eq!(states.blocks, [(0x1000, 0xc), (0x1000 + stride, 0xc)]);
+            let usb = states
+                .resources
+                .iter()
+                .find(|resource| resource.name == "/arm-io/usb")
+                .unwrap();
+            assert_eq!(usb.clocks, [id(0, 2), id(1, 2)]);
+            let consumers = [Consumer {
+                id: 0,
+                name: &usb.name,
+                clocks: &usb.clocks,
+                power: &[],
+                sinks: LifecycleSinks::default(),
+                admission: Admission::Required,
+            }];
+            // Each die's request reaches that die's register and its parent.
+            let coverage = coverage::analyze(&states.domains, &consumers).unwrap();
+            assert_eq!(coverage.len(), 4);
+            assert!(coverage.iter().all(|domain| domain.consumers.len() == 1));
+        }
+    }
+
+    #[test]
+    fn unplaced_dies_and_reserved_gate_bits_stay_explicit_requirements() {
+        // A die without a qualified stride has no placed PMGR instance.
+        let error = multi_die_states(&multi_die(2, b"pmgr1,t8112", None)).unwrap_err();
+        assert!(error.contains("without a qualified die-stride"), "{error}");
+        // A one-die SoC places no die-1 records for a die-1 gate.
+        let error = multi_die_states(&multi_die(1, b"pmgr1,t8112", None)).unwrap_err();
+        assert!(error.contains("UnknownRequirement"), "{error}");
+        // A stride inside one die's bank never aliases two dies' registers.
+        let error = multi_die_states(&multi_die(2, b"pmgr1,t8112", Some(8))).unwrap_err();
+        assert!(error.contains("overlaps another die"), "{error}");
+        // The 4-bit die field reaches 16 dies.
+        let error = multi_die_states(&multi_die(17, b"pmgr1,t8112", Some(1))).unwrap_err();
+        assert!(error.contains("exceeds the PMGR die field"), "{error}");
+        let bytes = encode(&[("clock-gates", &words(&[0x0001_0002]))], &[]);
+        assert!(
+            gate_ids(&Node::root(&bytes).unwrap(), "/node", "clock-gates")
+                .unwrap_err()
+                .contains("reserved")
+        );
+        let bytes = encode(&[("clock-gates", &words(&[0xf000_0002]))], &[]);
+        assert_eq!(
+            gate_ids(&Node::root(&bytes).unwrap(), "/node", "clock-gates"),
+            Ok(alloc::vec![DomainId { die: 15, device: 2 }])
+        );
+    }
+
     #[test]
     fn physical_candidates_follow_nested_bus_domains_and_never_alias_protocol_slaves() {
         let reg = [0x100u64, 0x1000]

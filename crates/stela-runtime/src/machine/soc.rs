@@ -26,7 +26,9 @@ use crate::platform::apple::{
     aic::{AIC2_DIE_STRIDE, AIC2_MAX_DIES, AIC3_IRQ_CFG, AIC3_TIMESTAMPS, AicLayout},
     aic1::AIC1_EVENT,
     amcc, ans, asc, atc_phy, bridge, cluster, core_counters, coresight, cpm, cpustart, dart, dcp,
-    dpe, energy, fuse, gpio, i2c, nor, pmu, power, ptd, sart, smc, spi, spmi, wake,
+    dpe, energy, fuse, gpio, i2c, nor,
+    pmgr::coverage::DomainId,
+    pmu, power, ptd, sart, smc, spi, spmi, wake,
 };
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 
@@ -2873,9 +2875,9 @@ pub struct Iommu {
     pub irq: u32,
     pub mappers: Vec<(u32, u32)>,
     pub apf: Option<(u64, usize)>,
-    /// Separate original PMGR clock and power requirements.
-    pub clock_gates: Vec<u16>,
-    pub power_gates: Vec<u16>,
+    /// Separate original die-qualified PMGR clock and power requirements.
+    pub clock_gates: Vec<DomainId>,
+    pub power_gates: Vec<DomainId>,
     /// A retained DART preserves ordinary state while its supply is gated.
     pub retention: bool,
     pub sids: Vec<u32>,
@@ -2939,8 +2941,8 @@ pub struct AnsController {
     pub interrupts: [u16; 4],
     pub completion_irq: u16,
     pub namespaces: Vec<ans::Description>,
-    pub clock_gates: Vec<u32>,
-    pub power_gates: Vec<u32>,
+    pub clock_gates: Vec<DomainId>,
+    pub power_gates: Vec<DomainId>,
 }
 
 /// The SMC's DT placement: `reg[0]` is the ASC wrapper, its four
@@ -3774,11 +3776,13 @@ fn ans_controller(
         completion_irq,
         namespaces,
         clock_gates: node
-            .cells32("clock-gates")
-            .ok_or("ANS2 has no clock-gates")?,
+            .property("clock-gates")
+            .map(|_| power_resources::gate_ids(&node, "/arm-io/ans", "clock-gates"))
+            .ok_or("ANS2 has no clock-gates")??,
         power_gates: node
-            .cells32("power-gates")
-            .ok_or("ANS2 has no power-gates")?,
+            .property("power-gates")
+            .map(|_| power_resources::gate_ids(&node, "/arm-io/ans", "power-gates"))
+            .ok_or("ANS2 has no power-gates")??,
     }))
 }
 
@@ -5666,18 +5670,32 @@ mod tests {
             }
             encode(&props, &[])
         };
-        let gates = [0x212u32, 0x216]
+        // A second die's device carries its die in the word's top nibble.
+        let gates = [0x212u32, 0x1000_0216]
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect::<Vec<_>>();
         let encoded = tree(&gates, true, false);
         let node = Node::root(&encoded).unwrap();
         let dart = iommu(&node, &flat_fixture_extent(&|a| Some(a + 0x2_0000_0000))).unwrap();
-        assert_eq!(dart.power_gates, vec![0x212, 0x216]);
+        assert_eq!(
+            dart.power_gates,
+            [
+                DomainId {
+                    die: 0,
+                    device: 0x212
+                },
+                DomainId {
+                    die: 1,
+                    device: 0x216
+                }
+            ]
+        );
         assert!(dart.retention);
         for encoded in [
             tree(&gates[..3], false, false),
             tree(&u32::MAX.to_le_bytes(), false, false),
+            tree(&0x0001_0212u32.to_le_bytes(), false, false),
             tree(&gates, true, true),
         ] {
             assert!(iommu(&Node::root(&encoded).unwrap(), &flat_fixture_extent(&Some)).is_err());
@@ -6240,7 +6258,13 @@ mod tests {
                 blocks: 32768
             }
         );
-        assert_eq!(placed.clock_gates, [125]);
+        assert_eq!(
+            placed.clock_gates,
+            [DomainId {
+                die: 0,
+                device: 125
+            }]
+        );
         // reg[13] is SPTM's VDMA cache only under nvme-vdma-wa.
         assert_eq!(placed.vdma, None);
         let vdma = flagged(&["nvme-vdma-wa"], 3, 0x8e, 4);
@@ -10054,8 +10078,14 @@ mod tests {
         assert_eq!(placement.geometry.tag_slots(), 253);
         assert_eq!(placement.interrupts, [1070, 1069, 1072, 1071]);
         assert_eq!(placement.completion_irq, 1613);
-        assert_eq!(placement.clock_gates, [481]);
-        assert_eq!(placement.power_gates, [71]);
+        assert_eq!(
+            placement.clock_gates,
+            [DomainId {
+                die: 0,
+                device: 481
+            }]
+        );
+        assert_eq!(placement.power_gates, [DomainId { die: 0, device: 71 }]);
         assert!(placement.sart_exclusive_bounds);
         assert_eq!(placement.vdma, None);
         assert_eq!(placement.sart_idle, placement.nvme.0 + 0x13e8);
