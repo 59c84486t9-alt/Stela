@@ -8,6 +8,7 @@ use crate::{apple_device_tree::DeviceTree, boot_policy::Decision};
 use alloc::{format, string::String, vec, vec::Vec};
 use anyhow::{Result, ensure};
 use serde::Serialize;
+use stela_runtime::machine::soc;
 
 const ROOT: &str = "/";
 const CPUS: &str = "/cpus";
@@ -217,6 +218,57 @@ fn core_counts(
     Ok(())
 }
 
+/// `/cpus/<cpu> l2-cache-size`, which XNU's `ml_parse_cpu_topology` reads
+/// (absent, it records no L2). A template that gives a CPU node one size per
+/// core variant instead (J700AP's P cores: `l2-cache-size-h17p` and
+/// `l2-cache-size-h17a`) takes its SoC's own variant's
+/// (`machine::soc::template_variant`); a node with no size of its SoC's
+/// variant keeps none, reported.
+fn l2_cache_sizes(
+    tree: &mut DeviceTree,
+    chip_id: Option<u32>,
+    decisions: &mut Vec<Decision>,
+    gaps: &mut Vec<String>,
+) -> Result<()> {
+    const SIZE: &str = "l2-cache-size";
+    let Some(cpus) = tree.node(CPUS) else {
+        return Ok(());
+    };
+    let variant = chip_id.and_then(soc::template_variant);
+    let mut sizes = vec![];
+    for cpu in &cpus.children {
+        let per_variant = cpu
+            .properties
+            .iter()
+            .any(|p| p.name().starts_with(SIZE) && p.name().len() > SIZE.len());
+        if cpu.property(SIZE).is_some() || !per_variant {
+            continue;
+        }
+        let name = cpu.name().unwrap_or("?");
+        let chosen = variant.and_then(|variant| {
+            let property = format!("{SIZE}-{variant}");
+            Some((cpu.property(&property)?.value.clone(), property))
+        });
+        match chosen {
+            Some((value, property)) => sizes.push((format!("{CPUS}/{name}"), value, property)),
+            None => gaps.push(format!(
+                "{CPUS}/{name} {SIZE}: the template gives per-variant sizes and none of this \
+                 SoC's variant; XNU records no L2"
+            )),
+        }
+    }
+    for (path, value, property) in sizes {
+        tree.set_property(&path, SIZE, value.clone())?;
+        decisions.push(decision(
+            &path,
+            SIZE,
+            &value,
+            format!("{property}: the SoC's own core variant"),
+        ));
+    }
+    Ok(())
+}
+
 const CHOSEN: &str = "/chosen";
 
 /// The machine's identity rows: iBoot reads the ECID from the chip's fuse
@@ -322,6 +374,7 @@ pub fn apply(tree: &mut DeviceTree, chip_id: Option<u32>) -> Result<(Vec<Decisio
     let mut gaps = vec![];
     platform_name(tree, chip_id, &mut decisions, &mut gaps);
     core_counts(tree, &mut decisions, &mut gaps)?;
+    l2_cache_sizes(tree, chip_id, &mut decisions, &mut gaps)?;
     gaps.extend(unproduced(tree));
     Ok((decisions, gaps))
 }
@@ -453,6 +506,52 @@ mod tests {
         ] {
             assert!(installed_command(Some(command), "-v").is_err());
         }
+        Ok(())
+    }
+
+    /// J700AP's P cores carry only per-variant L2 sizes; the A18 Pro's
+    /// cores are H17P, and another SoC names no variant.
+    #[test]
+    fn per_variant_l2_sizes_take_the_socs_own_variant() -> Result<()> {
+        let template = || -> Result<DeviceTree> {
+            let mut tree = tree();
+            tree.set_property(
+                "/cpus/cpu0",
+                "l2-cache-size",
+                (4u32 << 20).to_le_bytes().to_vec(),
+            )?;
+            tree.set_property(
+                "/cpus/cpu2",
+                "l2-cache-size-h17p",
+                (16u32 << 20).to_le_bytes().to_vec(),
+            )?;
+            tree.set_property(
+                "/cpus/cpu2",
+                "l2-cache-size-h17a",
+                (8u32 << 20).to_le_bytes().to_vec(),
+            )?;
+            Ok(tree)
+        };
+        let mut tree = template()?;
+        let (mut decisions, mut gaps) = (vec![], vec![]);
+        l2_cache_sizes(&mut tree, Some(0x8140), &mut decisions, &mut gaps)?;
+        assert!(gaps.is_empty());
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            tree.property("/cpus/cpu2", "l2-cache-size").unwrap().value,
+            (16u32 << 20).to_le_bytes()
+        );
+        assert_eq!(
+            tree.property("/cpus/cpu0", "l2-cache-size").unwrap().value,
+            (4u32 << 20).to_le_bytes()
+        );
+        assert!(tree.property("/cpus/cpu1", "l2-cache-size").is_none());
+        let mut tree = template()?;
+        let (mut decisions, mut gaps) = (vec![], vec![]);
+        l2_cache_sizes(&mut tree, Some(0x8132), &mut decisions, &mut gaps)?;
+        assert!(decisions.is_empty());
+        assert_eq!(gaps.len(), 1);
+        assert!(tree.property("/cpus/cpu2", "l2-cache-size").is_none());
         Ok(())
     }
 

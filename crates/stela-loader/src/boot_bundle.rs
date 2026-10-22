@@ -74,7 +74,9 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// when present).
 /// Revision 16: on the chips with memory tagging, state TAG_OFFSET_EL2 in
 /// `core_locks`.
-pub const REVISION: u32 = 16;
+/// Revision 17: give a CPU node whose template carries per-variant L2 sizes
+/// its SoC's own `l2-cache-size` (J700AP's P cores).
+pub const REVISION: u32 = 17;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
