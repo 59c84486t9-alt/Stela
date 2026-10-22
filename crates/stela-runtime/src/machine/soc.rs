@@ -1182,7 +1182,7 @@ const ATC_PHY_BASE_VIEWS: usize = 28;
 /// nub. With the node hidden, each of those starts stalled about 30 s and
 /// the xHCI then failed to find its PHY (restore study ru-s17).
 pub const DOCK_PORT: &str = "dock,usb-c";
-/// The SPMI Gen2 controller and the Dialog PMU on it (`spmi`, `pmu`).
+/// The SPMI controllers and the Dialog PMUs on them (`spmi`, `pmu`).
 pub const SPMI: &str = "aapl,spmi";
 pub const PMU: &str = "pmu,spmi";
 /// A NOR partition read by AppleDiagnosticDataAccessReadOnly (kernel file
@@ -1743,12 +1743,13 @@ pub struct SpmiPmu {
 
 pub type SpmiConfiguration = spmi::Configuration;
 
-/// A source-qualified SPMI controller with independent FIFO/vector geometry
-/// and an optional Gen1 fault-counter view.
+/// A source-qualified SPMI controller with independent FIFO/vector geometry.
+/// `bank_c` is `reg[2]`: Gen1's optional fault-counter view or the Gen3 and
+/// Gen4 arbiter bank.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpmiController {
     pub configuration: SpmiConfiguration,
-    pub fault_counters: Option<(u64, u64)>,
+    pub bank_c: Option<(u64, u64)>,
     pub banks: [(u64, u64); 2],
     pub irq: u32,
     pub pmus: Vec<SpmiPmu>,
@@ -2904,6 +2905,8 @@ fn spmi_controllers(
         let profile = match node.first_u32("gen") {
             Some(1) => spmi::Profile::Gen1,
             Some(2) => spmi::Profile::Gen2,
+            Some(3) => spmi::Profile::Gen3,
+            Some(4) => spmi::Profile::Gen4,
             _ => return Err("SPMI controller generation is unqualified".into()),
         };
         let regs = apertures::registers(&node).ok_or("SPMI controller has no reg")?;
@@ -2975,7 +2978,9 @@ fn spmi_controllers(
             },
             _ => return Err("SPMI fault-counter enable is not one full32 word".into()),
         };
-        let fault_counters = if counters && profile == spmi::Profile::Gen1 {
+        let bank_c = if profile.arbiter_bank() {
+            Some(bank(2)?)
+        } else if counters && profile == spmi::Profile::Gen1 {
             let &(offset, bytes) = regs
                 .get(2)
                 .filter(|(_, bytes)| Some(*bytes) == profile.counter_bytes())
@@ -2989,7 +2994,7 @@ fn spmi_controllers(
         } else {
             None
         };
-        let expected = if fault_counters.is_some() { 3 } else { 2 };
+        let expected = if bank_c.is_some() { 3 } else { 2 };
         if regs.len() != expected {
             return Err("SPMI has an unqualified extra register view".into());
         }
@@ -3010,7 +3015,7 @@ fn spmi_controllers(
         }
         controllers.push(SpmiController {
             configuration,
-            fault_counters,
+            bank_c,
             banks: [bank(0)?, bank(1)?],
             irq,
             pmus,
@@ -6397,7 +6402,7 @@ mod tests {
                 assert!(!bases.contains(&base));
                 bases.push(base);
             }
-            let (base, bytes) = controller.fault_counters.unwrap();
+            let (base, bytes) = controller.bank_c.unwrap();
             assert_eq!(bytes, 0x78);
             assert!(!bases.contains(&base));
             bases.push(base);
@@ -6514,6 +6519,74 @@ mod tests {
         let bytes = tree(&[0xf900, 4]);
         let io = Node::root(&bytes).unwrap();
         assert!(spmi_controllers(&io, &flat_fixture_extent(&translate), 0x63).is_err());
+    }
+
+    #[test]
+    fn gen3_and_gen4_spmi_controllers_place_their_arbiter_bank() {
+        use crate::machine::adt::encode;
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let cells = |values: &[u32]| {
+            values
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let pairs = |values: &[(u64, u64)]| {
+            values
+                .iter()
+                .flat_map(|&(a, b)| [a, b])
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        // The J813AP nub-spmi0, trimmed.
+        let tree = |generation: u32, reg: &[(u64, u64)]| {
+            let spmi = encode(
+                &[
+                    ("name", &z("nub-spmi0")),
+                    ("compatible", &z(SPMI)),
+                    ("gen", &cells(&[generation])),
+                    ("queue-depth", &cells(&[256, 256])),
+                    ("AAPL,phandle", &cells(&[0x106])),
+                    ("reg", &pairs(reg)),
+                    ("interrupt-parent", &cells(&[0x106, 0x9c, 0x106])),
+                    (
+                        "interrupts",
+                        &cells(&[0x100, 0x248, 0x119, 0x104, 0x110, 0x111]),
+                    ),
+                ],
+                &[],
+            );
+            encode(&[("name", &z("arm-io"))], &[spmi])
+        };
+        let translate = |offset| Some(0x1_0000_0000 + offset);
+        let banks = [
+            (0x7871_4000, 0x4000),
+            (0x7870_4000, 0x4000),
+            (0x7870_0000, 0x4000),
+        ];
+        for (generation, profile) in [(3, spmi::Profile::Gen3), (4, spmi::Profile::Gen4)] {
+            let bytes = tree(generation, &banks);
+            let io = Node::root(&bytes).unwrap();
+            let [controller] =
+                &spmi_controllers(&io, &flat_fixture_extent(&translate), 0x9c).unwrap()[..]
+            else {
+                panic!("one controller");
+            };
+            assert_eq!(controller.configuration.profile(), profile);
+            assert_eq!(
+                controller.banks,
+                [(0x1_7871_4000, 0x4000), (0x1_7870_4000, 0x4000)]
+            );
+            assert_eq!(controller.bank_c, Some((0x1_7870_0000, 0x4000)));
+            assert_eq!(controller.irq, 0x248);
+            // The handler fails without reg[2].
+            let bytes = tree(generation, &banks[..2]);
+            let io = Node::root(&bytes).unwrap();
+            assert!(spmi_controllers(&io, &flat_fixture_extent(&translate), 0x9c).is_err());
+        }
+        let bytes = tree(5, &banks);
+        let io = Node::root(&bytes).unwrap();
+        assert!(spmi_controllers(&io, &flat_fixture_extent(&translate), 0x9c).is_err());
     }
 
     #[test]

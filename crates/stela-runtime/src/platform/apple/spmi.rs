@@ -1,5 +1,10 @@
-//! Apple SPMI Gen1/Gen2 controller (`aapl,spmi`, source-selected `gen`), a MIPI SPMI bus
+//! Apple SPMI Gen1 to Gen4 controller (`aapl,spmi`, source-selected `gen`), a MIPI SPMI bus
 //! master and the interrupt controller of its slaves.
+//!
+//! The offsets below are Gen1's and Gen2's. Gen3 keeps them with its fault
+//! latches and counters elsewhere in bank B and an arbiter bank in `reg[2]`;
+//! Gen4 moves bank A, the status bits and the fault FIFO and adds a FIFO
+//! depth register. `config` documents both from their handlers.
 //!
 //! Evidence (26A434 KC VAs, unslid): `AppleGen2SPMIHandler::initHandler`
 //! 0xfffffe0009dc757c loads the register offsets; `fifoQueuesEmpty`
@@ -47,8 +52,11 @@
 //! unqualified. Slave autonomous time is independent of controller gating.
 //! Armed autonomous capture through clock/power loss remains an explicit board
 //! requirement; attaching a slave does not claim that wire. The debug queue
-//! windows (A+0xb0..0xb8), command types other than the four
-//! extended forms and request or response overflow refuse.
+//! windows (A+0xb0..0xb8; Gen3 A+0xbc; Gen4 A+0x800..0x810), the Gen3 and
+//! Gen4 arbiter reset (`reg[2]` + 0x20, which the driver pulses only when a
+//! queue reset leaves the FIFOs non-empty, never here), nonzero control on
+//! every generation but Gen2, command types other than the four extended
+//! forms and request or response overflow refuse.
 mod config;
 pub use config::{Configuration, Profile};
 
@@ -61,23 +69,11 @@ use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 pub const BANK_BYTES: u64 = 0x4000;
 /// Bank B's device offset; the placement maps `reg[1]` here.
 pub const BANK_B: u64 = BANK_BYTES;
-/// Internal device offset of the independently mapped Gen1 counter view.
-pub const COUNTERS: u64 = 2 * BANK_BYTES;
+/// The device offset of `reg[2]`: Gen1's independently mapped fault-counter
+/// view, or the Gen3 and Gen4 arbiter bank.
+pub const BANK_C: u64 = 2 * BANK_BYTES;
 const NAME: &str = "SPMI";
-const STATUS: u64 = 0x00;
-const REQUEST: u64 = 0x04;
-const RESPONSE: u64 = 0x08;
-const ENABLE: u64 = 0x20;
-const PENDING: u64 = 0x60;
 const GROUPS: usize = 9;
-const CONTROL: u64 = 0xa0;
-const QUEUE_RESET: u64 = 0xa4;
-const FAULT_LATCHES: u64 = BANK_B + 0x110;
-const FAULT_STATUS: u64 = BANK_B;
-const FAULT_RESPONSE: u64 = BANK_B + 8;
-const RESPONSE_EMPTY: u32 = 1 << 24;
-const RESPONSE_FULL: u32 = 1 << 25;
-const REQUEST_EMPTY: u32 = 1 << 8;
 const LAST: u32 = 1 << 15;
 const ACK: u32 = 1 << 15;
 /// The controller's own response vector.
@@ -248,16 +244,17 @@ impl Spmi {
         }
     }
     fn status(&self) -> u32 {
+        let layout = self.configuration.profile().layout();
         (if self.responses.is_empty() {
-            RESPONSE_EMPTY
+            layout.response_empty
         } else {
             0
         }) | (if self.responses.len() == self.configuration.response_words() {
-            RESPONSE_FULL
+            layout.response_full
         } else {
             0
         }) | if self.partial.is_none() {
-            REQUEST_EMPTY
+            layout.request_empty
         } else {
             0
         }
@@ -413,15 +410,16 @@ impl MmioDevice for Spmi {
                 "SPMI MMIO while the physical clock is stopped is unqualified",
             ));
         }
-        if self.lifecycle.quiesced && offset == RESPONSE {
+        let layout = self.configuration.profile().layout();
+        if self.lifecycle.quiesced && offset == layout.response {
             return Err(err("SPMI response ownership cannot advance while quiesced"));
         }
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(err("SPMI registers require aligned 32-bit accesses"));
         }
         let value = match offset {
-            STATUS => self.status(),
-            RESPONSE => {
+            at if at == layout.status => self.status(),
+            at if at == layout.response => {
                 let word = self
                     .responses
                     .pop_front()
@@ -429,18 +427,22 @@ impl MmioDevice for Spmi {
                 self.update_irq(access);
                 word
             }
-            at if (ENABLE..ENABLE + 4 * GROUPS as u64).contains(&at) => {
-                self.enable[((at - ENABLE) / 4) as usize]
+            at if (layout.enable..layout.enable + 4 * GROUPS as u64).contains(&at) => {
+                self.enable[((at - layout.enable) / 4) as usize]
             }
-            at if (PENDING..PENDING + 4 * GROUPS as u64).contains(&at) => {
-                self.pending[((at - PENDING) / 4) as usize]
+            at if (layout.pending..layout.pending + 4 * GROUPS as u64).contains(&at) => {
+                self.pending[((at - layout.pending) / 4) as usize]
             }
-            CONTROL => self.control,
-            QUEUE_RESET => 0,
-            FAULT_STATUS => RESPONSE_EMPTY,
-            FAULT_RESPONSE => return Err(err("SPMI fault FIFO read while empty")),
-            at if self.configuration.profile() == Profile::Gen2
-                && (FAULT_LATCHES..FAULT_LATCHES + 0x10).contains(&at) =>
+            at if at == layout.control => self.control,
+            at if at == layout.queue_reset => 0,
+            at if Some(at) == layout.depth => self.configuration.depth_register(),
+            at if at == layout.fault_status => layout.fault_empty,
+            at if at == layout.fault_response => {
+                return Err(err("SPMI fault FIFO read while empty"));
+            }
+            at if layout
+                .latches
+                .is_some_and(|(start, end)| (start..end).contains(&at)) =>
             {
                 0
             }
@@ -464,23 +466,25 @@ impl MmioDevice for Spmi {
             return Err(err("SPMI registers require aligned 32-bit accesses"));
         }
         let value = value as u32;
+        let profile = self.configuration.profile();
+        let layout = profile.layout();
         match offset {
-            REQUEST => self.request(value, access.now).map_err(err)?,
-            at if (ENABLE..ENABLE + 4 * GROUPS as u64).contains(&at) => {
-                self.enable[((at - ENABLE) / 4) as usize] = value;
+            at if at == layout.request => self.request(value, access.now).map_err(err)?,
+            at if (layout.enable..layout.enable + 4 * GROUPS as u64).contains(&at) => {
+                self.enable[((at - layout.enable) / 4) as usize] = value;
             }
-            at if (PENDING..PENDING + 4 * GROUPS as u64).contains(&at) => {
-                self.pending[((at - PENDING) / 4) as usize] &= !value;
+            at if (layout.pending..layout.pending + 4 * GROUPS as u64).contains(&at) => {
+                self.pending[((at - layout.pending) / 4) as usize] &= !value;
             }
-            CONTROL => {
-                if self.configuration.profile() == Profile::Gen1 && value != 0 {
-                    return Err(err(
-                        "SPMI Gen1 nonzero control-field effects are unqualified",
-                    ));
+            at if at == layout.control => {
+                // Gen2's driver saves, zeroes and restores control; the
+                // other generations' fields have no recovered effects.
+                if profile != Profile::Gen2 && value != 0 {
+                    return Err(err("SPMI nonzero control-field effects are unqualified"));
                 }
                 self.control = value;
             }
-            QUEUE_RESET => {
+            at if at == layout.queue_reset => {
                 if value != 1 {
                     return Err(err("SPMI queue reset other than bit 0"));
                 }
@@ -488,8 +492,9 @@ impl MmioDevice for Spmi {
                 self.responses.clear();
             }
             // Read-then-write-back acknowledges latched faults; none latch.
-            at if self.configuration.profile() == Profile::Gen2
-                && (FAULT_LATCHES..FAULT_LATCHES + 0x10).contains(&at) =>
+            at if layout
+                .latches
+                .is_some_and(|(start, end)| (start..end).contains(&at)) =>
             {
                 if value != 0 {
                     return Err(err("SPMI fault latch acknowledge of an unlatched fault"));
@@ -532,6 +537,22 @@ impl MmioDevice for Spmi {
 mod tests {
     use super::*;
     use crate::platform::apple::interrupt::InterruptLatch;
+
+    // The Gen1 and Gen2 offsets and status bits.
+    const STATUS: u64 = 0x00;
+    const REQUEST: u64 = 0x04;
+    const RESPONSE: u64 = 0x08;
+    const ENABLE: u64 = 0x20;
+    const PENDING: u64 = 0x60;
+    const CONTROL: u64 = 0xa0;
+    const QUEUE_RESET: u64 = 0xa4;
+    const FAULT_LATCHES: u64 = BANK_B + 0x110;
+    const FAULT_STATUS: u64 = BANK_B;
+    const FAULT_RESPONSE: u64 = BANK_B + 8;
+    const COUNTERS: u64 = BANK_C;
+    const RESPONSE_EMPTY: u32 = 1 << 24;
+    const RESPONSE_FULL: u32 = 1 << 25;
+    const REQUEST_EMPTY: u32 = 1 << 8;
 
     /// A byte register file of 256 registers; address 0xff NACKs.
     struct Bytes([u8; 0x100]);
@@ -1424,5 +1445,66 @@ mod tests {
         assert_eq!(rd(&mut c, &mut a, RESPONSE), 0x8e30);
         assert_eq!(c.configuration.response_vector(), 192);
         assert_eq!(c.configuration.queue_bytes(), [256, 256]);
+    }
+
+    #[test]
+    fn gen3_keeps_the_gen2_queue_bank_and_moves_its_fault_latches_and_counters() {
+        let mut c = configured(Profile::Gen3, 0x100, 256);
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        assert_eq!(rd(&mut c, &mut a, STATUS), RESPONSE_EMPTY | REQUEST_EMPTY);
+        wr(&mut c, &mut a, REQUEST, 0xe << 8 | LAST | 0x30);
+        wr(&mut c, &mut a, REQUEST, 0x7b);
+        assert_eq!(rd(&mut c, &mut a, PENDING + 8 * 4), 1);
+        assert_eq!(rd(&mut c, &mut a, RESPONSE), 0x8e30);
+        // The driver's resetQueue: save control, zero it, reset, restore.
+        wr(&mut c, &mut a, CONTROL, 0);
+        wr(&mut c, &mut a, QUEUE_RESET, 1);
+        assert_eq!(rd(&mut c, &mut a, QUEUE_RESET), 0);
+        assert!(c.write(CONTROL, Width::Word, 1, &mut a).is_err());
+        assert_eq!(rd(&mut c, &mut a, FAULT_STATUS), RESPONSE_EMPTY);
+        for latch in (0x200..0x218).step_by(4) {
+            assert_eq!(rd(&mut c, &mut a, BANK_B + latch), 0);
+            wr(&mut c, &mut a, BANK_B + latch, 0);
+        }
+        assert_eq!(rd(&mut c, &mut a, BANK_B + 0x4d8), 0);
+        // Gen2's latches and counters, the arbiter and the debug windows.
+        for offset in [FAULT_LATCHES, BANK_B + 0x25c, BANK_C + 0x20, 0xbc] {
+            assert!(c.read(offset, Width::Word, &mut a).is_err(), "{offset:#x}");
+        }
+    }
+
+    #[test]
+    fn gen4_moves_the_queue_bank_and_reports_its_fifo_depths() {
+        let mut c = configured(Profile::Gen4, 0x100, 256);
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        let empty = 1 << 30 | 1 << 14;
+        assert_eq!(rd(&mut c, &mut a, 0x200), empty);
+        assert_eq!(rd(&mut c, &mut a, 0x48), 64 << 16 | 64);
+        wr(&mut c, &mut a, 0x400 + 8 * 4, 1);
+        let read = 0x10 << 16 | LAST | 0xe << 8 | 0x38 | 1;
+        wr(&mut c, &mut a, 0x210, read);
+        assert_eq!(rd(&mut c, &mut a, 0x200), 1 << 14);
+        assert!(asserted(&c));
+        assert_eq!(rd(&mut c, &mut a, 0x220) & 0xfff, read & 0xfff);
+        assert_eq!(rd(&mut c, &mut a, 0x220), 0);
+        wr(&mut c, &mut a, 0x600 + 8 * 4, 1);
+        assert!(!asserted(&c));
+        // resetQueue: control A+0 zeroed around the self-clearing A+4 reset.
+        wr(&mut c, &mut a, 0x210, 0xe << 8 | 0x30 | 7);
+        assert_eq!(rd(&mut c, &mut a, 0), 0);
+        wr(&mut c, &mut a, 0, 0);
+        wr(&mut c, &mut a, 4, 1);
+        assert_eq!(rd(&mut c, &mut a, 4), 0);
+        assert_eq!(rd(&mut c, &mut a, 0x200), empty);
+        assert_eq!(rd(&mut c, &mut a, BANK_B + 0x200), 1 << 30);
+        assert!(c.read(BANK_B + 0x220, Width::Word, &mut a).is_err());
+        assert_eq!(rd(&mut c, &mut a, BANK_B + 0x1214), 0);
+        assert_eq!(rd(&mut c, &mut a, BANK_B + 0x1400), 0);
+        // The Gen2 offsets are other registers or none.
+        for offset in [STATUS + 8, CONTROL, BANK_B + 8, BANK_B + 0x400, 0x800] {
+            assert!(c.read(offset, Width::Word, &mut a).is_err(), "{offset:#x}");
+        }
     }
 }

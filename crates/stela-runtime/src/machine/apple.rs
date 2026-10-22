@@ -1277,7 +1277,8 @@ impl AppleDevices {
     }
 
     /// Place a visible SPMI controller and its PMUs. Bank B is the device's
-    /// second 16 KiB. A primary PMU's RTC starts at `wall` when the engine
+    /// second 16 KiB and `reg[2]`, where placed, its third. A primary PMU's
+    /// RTC starts at `wall` when the engine
     /// knows the host's time.
     pub fn add_spmi(
         &mut self,
@@ -1408,10 +1409,10 @@ impl AppleDevices {
                 .map(id, base, bytes, bank as u64 * spmi::BANK_B)
                 .map_err(|e| format!("SPMI bank placement: {e:?}"))?;
         }
-        if let Some((base, bytes)) = placement.fault_counters {
+        if let Some((base, bytes)) = placement.bank_c {
             self.bus
-                .map(id, base, bytes, spmi::COUNTERS)
-                .map_err(|e| format!("SPMI counter placement: {e:?}"))?;
+                .map(id, base, bytes, spmi::BANK_C)
+                .map_err(|e| format!("SPMI reg[2] placement: {e:?}"))?;
         }
         if let Some((clock, profile)) = primary_clock {
             self.smc()
