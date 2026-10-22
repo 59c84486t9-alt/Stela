@@ -25,7 +25,7 @@
  * official pin 1a82fbfda8f321b056eb3568850f9316c5e465c5. The original Linux
  * backend is kmalloc(size, GFP_KERNEL)/kfree(ptr). Only that backend changes:
  * Stela's existing checked common-heap adapter owns both allocation and free.
- * These functions have no atomic-request mode. See NVLINK_MEMORY.md.
+ * These functions have no atomic-request mode. See README.md.
  */
 #include <stddef.h>
 #include "nvlink_os.h"
