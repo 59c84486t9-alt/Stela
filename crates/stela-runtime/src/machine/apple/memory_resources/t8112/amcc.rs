@@ -18,15 +18,15 @@ use crate::{
 use alloc::sync::Arc;
 
 const PLANES: u32 = 4;
-const STRIDE: u64 = 0x40000;
+pub(super) const STRIDE: u64 = 0x40000;
 const APERTURE_BYTES: u64 = 0xf40000;
 const SHARED: (u64, u64) = (0x100000, 0x80000);
-const BROADCAST: u64 = 0xf00000;
+pub(super) const BROADCAST: u64 = 0xf00000;
 const BROADCAST_BYTES: u64 = 0x100000;
-const MMIO_BYTES: u64 = BROADCAST + BROADCAST_BYTES;
+pub(super) const MMIO_BYTES: u64 = BROADCAST + BROADCAST_BYTES;
 const DCS_OFFSET: u64 = 0x1000000;
 const CACHE_STATUS: u64 = 0x424;
-const LOCK_REGISTERS: [u64; 5] = [0x680, 0x684, 0x688, 0x68c, 0x7f0];
+pub(super) const LOCK_REGISTERS: [u64; 5] = [0x680, 0x684, 0x688, 0x68c, 0x7f0];
 
 /// Source placement only; these spans report no installed cache capacity,
 /// allocated ways, resident data, quota grant or completed controller command.
@@ -181,7 +181,7 @@ impl LockResource {
             .validate_current()
             .map_err(|_| "AMCC lost its actual RAM generation/writer hold")
     }
-    fn accessible(&self) -> Result<(), &'static str> {
+    pub(super) fn accessible(&self) -> Result<(), &'static str> {
         let state = self.lifecycle;
         if !state.powered || !state.clocked || state.quiesced || state.reset {
             return Err("T8112 AMCC lock resource is paused by its actual lifecycle owner");
@@ -273,7 +273,7 @@ impl MmioDevice for LockResource {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::tests::{configuration, descriptor, ram_at};
     use super::*;
     use crate::{
@@ -298,7 +298,7 @@ mod tests {
     struct Storage(UnsafeCell<[u8; 0x8000]>);
     // SAFETY: the fixture transfers these stable, disjoint bytes to registration.
     unsafe impl Sync for Storage {}
-    fn ram() -> Arc<RegisteredSystemRam> {
+    pub(in super::super) fn ram() -> Arc<RegisteredSystemRam> {
         let storage = Arc::new(Storage(UnsafeCell::new([0; 0x8000])));
         let range = ReservedSystemRamRange {
             source_pa: RAM,
@@ -309,7 +309,7 @@ mod tests {
         // SAFETY: no PE or independent producer exists; fixture owns all bytes.
         Arc::new(unsafe { fixture(&[range], storage) })
     }
-    fn source() -> MemoryController {
+    pub(in super::super) fn source() -> MemoryController {
         let limit = |offset| Register {
             offset,
             mask: u32::MAX,
@@ -344,7 +344,7 @@ mod tests {
             },
         }
     }
-    fn frontend(ram: Arc<RegisteredSystemRam>) -> Prepared {
+    pub(in super::super) fn frontend(ram: Arc<RegisteredSystemRam>) -> Prepared {
         let mut d = descriptor();
         d.cache.shared = SHARED;
         d.cache.broadcast = BROADCAST;

@@ -32,6 +32,7 @@ const PROFILE: NativeProfile = NativeProfile::T8112;
 const ALIAS_ENTRIES: usize = 2048;
 
 pub mod amcc;
+pub mod cache;
 
 /// One DCS frontend and one publication bank with immutable source placement.
 /// AMCC locks/cache policy remain separately owned; this is no mount-admission
