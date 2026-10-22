@@ -314,8 +314,7 @@ const LOCKDOWN: [u64; 2] = [0x5000, 0x9000];
 /// `MAX_CPU_CLUSTER_PHY_ID`, defaulting to the cluster count less one):
 /// the T6000 configuration covers the M1 Pro, Max and Ultra, T6020 the M2
 /// Pro, Max and Ultra, T6031 the M3 Max and Ultra, T6041 the M4 Pro and
-/// Max. The T8152 has no public configuration, so its boards are not
-/// bounded here. Every 26A434 board DeviceTree fits its chip's
+/// Max. Every 26A434 board DeviceTree fits its chip's
 /// (`topology::KernelLimits`).
 const T8103_LIMITS: KernelLimits = KernelLimits::new(8, 2, 1);
 const T6000_LIMITS: KernelLimits = KernelLimits::new(20, 6, 10);
@@ -336,6 +335,15 @@ const T8142_LIMITS: KernelLimits = KernelLimits::new(10, 2, 1);
 /// 0x58-byte cluster records (`0x...e2c5a0`) that end at it. The same reading
 /// of the T8142's kernel (mac17g) gives XNU's 10/2/1.
 const T8140_LIMITS: KernelLimits = KernelLimits::new(6, 2, 1);
+/// The T8152 has no public configuration either; the same reading of its
+/// 26A434 kernel (kernelcache.release.mac18g, SHA-256 `09746d1f...5b85`)
+/// gives twelve CPUs, two clusters and cluster 1: the CPU limit defaults to
+/// 12 (`0xfffffe000bdf1298`), two `cluster_offsets` entries are filled
+/// (`0xfffffe000bdf1388`), and `topology_info` (`0xfffffe0007eb89a0`)
+/// points at twelve CPU records (`0x...eb8290`) and two cluster records
+/// (`0x...eb88f0`). J873gAP's six E, two P and four M cores fill it, the
+/// M cores in the P cluster (Aff1 1).
+const T8152_LIMITS: KernelLimits = KernelLimits::new(12, 2, 1);
 
 /// The event register offset every 26A434 M3-to-M6 iBoot writes to an
 /// `aic,3` node's `aic-iack-offset` (`mov w8, #0x40000` before the property
@@ -739,7 +747,7 @@ const SOCS: [Soc; 19] = [
         aic: Some(("aic,3", AIC3_EVENT)),
         dram_base: None,
         lockdown: None,
-        limits: None,
+        limits: Some(T8152_LIMITS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
@@ -6833,6 +6841,22 @@ mod tests {
         let seventh = [j700.as_slice(), &[(b'P', 0x102)]].concat();
         assert!(
             cpus(0x8140, "Apple A18 Pro", &layout_of(&seventh))
+                .unwrap_err()
+                .contains("MAX_CPUS")
+        );
+    }
+
+    #[test]
+    fn the_m6_kernel_bounds_its_cpus() {
+        // Twelve PEs at J873gAP's affinities (its 0x102..0x105 are M cores).
+        let mut j873g: Vec<(u8, u32)> = (0..6).map(|core| (b'E', core)).collect();
+        j873g.extend((0..6).map(|core| (b'P', 0x100 + core)));
+        let m6 = cpus(0x8152, "Apple M6", &layout_of(&j873g)).unwrap();
+        assert_eq!(m6.processors.len(), 12);
+        assert_eq!(m6.processors[11].mpidr, 0x8001_0105);
+        j873g.push((b'P', 0x106));
+        assert!(
+            cpus(0x8152, "Apple M6", &layout_of(&j873g))
                 .unwrap_err()
                 .contains("MAX_CPUS")
         );
