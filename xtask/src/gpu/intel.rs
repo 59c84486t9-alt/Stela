@@ -5,6 +5,29 @@ use std::process::Command;
 
 #[test]
 fn firmware_wopcm_gsm_pat_and_guc_reset_match_original_policy_and_register_traces() {
+    run(&[
+        "test-firmware",
+        "test-huc-firmware",
+        "test-wopcm",
+        "test-wopcm-owned",
+        "test-ggtt-probe",
+        "test-pat",
+        "test-guc-reset",
+    ]);
+}
+
+#[test]
+fn original_range_and_tree_algorithms_preserve_native_pointer_width() {
+    run(&[
+        "test-rbtree",
+        "rbtree-abi",
+        "test-drm-mm",
+        "drm-mm-abi",
+        "drm-mm-linux-equivalence",
+    ]);
+}
+
+fn run(targets: &[&str]) {
     let directory = tempfile::tempdir().unwrap();
     let source = tools::root().join("crates/stela-drivers/src/gpu/intel/stela/Makefile");
     let mut command = Command::new(tools::which("make").unwrap());
@@ -18,15 +41,13 @@ fn firmware_wopcm_gsm_pat_and_guc_reset_match_original_policy_and_register_trace
             "HOST_CC={}",
             tools::which("clang").unwrap().display()
         ))
-        .args([
-            "SANITIZE=",
-            "test-firmware",
-            "test-huc-firmware",
-            "test-wopcm",
-            "test-wopcm-owned",
-            "test-ggtt-probe",
-            "test-pat",
-            "test-guc-reset",
-        ]);
+        .arg("SANITIZE=")
+        .arg(format!(
+            "RBTREE_DONOR_SOURCE={}",
+            tools::root()
+                .join("crates/stela-drivers/src/gpu/common/linux/lib/rbtree.c")
+                .display()
+        ))
+        .args(targets);
     capture(&mut command).unwrap();
 }
