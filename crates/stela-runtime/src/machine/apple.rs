@@ -455,9 +455,15 @@ impl Default for AppleDevices {
 }
 
 impl AppleDevices {
-    /// The board's devices; PE numbers are the DeviceTree's cpu numbers, 0
-    /// being the running cpu0.
+    /// The board's devices with PE zero receiving the boot handoff.
     pub fn new() -> Self {
+        Self::for_boot_processor(0)
+    }
+
+    /// The board's existing PE receiving the boot handoff. PE indices retain
+    /// DeviceTree order; the selected index also owns CPU_STS and SoC wake.
+    /// The mount validates it against the same roster passed to the engine.
+    pub fn for_boot_processor(boot_processor: usize) -> Self {
         Self {
             bus: Bus::new(),
             latch: InterruptLatch::new(),
@@ -490,7 +496,7 @@ impl AppleDevices {
             power_devices: Vec::new(),
             power_refusals: Vec::new(),
             power_configured: false,
-            sleep: sleep::SocSleep::default(),
+            sleep: sleep::SocSleep::for_boot_processor(boot_processor),
             rtc_clock: None,
         }
     }
@@ -2612,12 +2618,28 @@ impl AppleDevices {
     /// says where its per-die arrays, timestamp slots and event register
     /// are; an AICv1's are fixed.
     pub fn add_aic(&mut self, physical: u64, nr_irq: u16, layout: AicLayout) -> Result<(), String> {
+        self.add_aic_for_processors(physical, nr_irq, layout, 1)
+    }
+
+    /// Serve the unchanged board PE indices and default AICv2/v3 delivery to
+    /// the selected boot PE. Group-bit affinity still requires its independent
+    /// source-qualified binding; this supplies no guessed target groups.
+    pub fn add_aic_for_processors(
+        &mut self,
+        physical: u64,
+        nr_irq: u16,
+        layout: AicLayout,
+        cpus: usize,
+    ) -> Result<(), String> {
+        if cpus == 0 || cpus > u64::BITS as usize || self.sleep.boot >= cpus {
+            return Err("AIC boot PE is outside the served processor roster".into());
+        }
         if self.aic.is_some() {
             return Err("AIC owner is already bound".into());
         }
         let (model, span, v1): (Box<dyn MmioDevice>, u64, bool) = match layout {
             AicLayout::V1 => {
-                let aic = Aic1::new(nr_irq, 1)
+                let aic = Aic1::new(nr_irq, cpus)
                     .map_err(|error| format!("AIC1 configuration: {error:?}"))?;
                 (Box::new(aic), Aic1::span(), true)
             }
@@ -2638,8 +2660,8 @@ impl AppleDevices {
                     max_irq,
                     irq_config,
                     event_offset: event,
-                    cpus: 1,
-                    default_cpus: 1,
+                    cpus,
+                    default_cpus: 1 << self.sleep.boot,
                     target_groups: [None; 4],
                 };
                 let aic = Aic2::stacked(config, dies)
@@ -5930,6 +5952,78 @@ mod tests {
             devices.add_processor_registers(0, range, ENTRY),
             Err(MapError::Overlap { .. })
         ));
+    }
+
+    #[test]
+    fn cpu_status_initially_runs_only_the_selected_handoff_pe() {
+        const BASE: u64 = 0x2_1005_0000;
+        const ENTRY: u64 = 0x100_0300_c000;
+        for legacy in [false, true] {
+            let mut devices = AppleDevices::for_boot_processor(2);
+            for pe in 0..4 {
+                let range = Range {
+                    physical: BASE + pe as u64 * 0x10_0000,
+                    bytes: 0x9010,
+                };
+                if legacy {
+                    devices
+                        .add_lockdown("cpu-impl-reg", 0x5000, range, Some((pe, ENTRY)))
+                        .unwrap();
+                } else {
+                    devices.add_processor_registers(pe, range, ENTRY).unwrap();
+                }
+                assert_eq!(
+                    devices.read(2, range.physical + lockdown::CPU_STS, 8, 0),
+                    Ok(u64::from(pe == 2))
+                );
+                assert_eq!(devices.locked_reset_vector(pe), Some(ENTRY));
+            }
+            devices.processor_power(2, false);
+            assert_eq!(
+                devices.read(2, BASE + 0x20_0000 + lockdown::CPU_STS, 8, 0),
+                Ok(0)
+            );
+        }
+    }
+
+    #[test]
+    fn aic_default_delivery_uses_the_selected_boot_pe_and_keeps_every_pe_served() {
+        const AIC: u64 = 0x2_3b0c_0000;
+        for (layout, irq_config, event) in [
+            (AicLayout::aic2(0x8000, 0), 0x2000, 0x8000),
+            (AicLayout::aic3(0x40000, 0), 0x10000, 0x40000),
+        ] {
+            let mut devices = AppleDevices::for_boot_processor(2);
+            devices
+                .add_aic_for_processors(AIC, 1152, layout, 4)
+                .unwrap();
+            let software =
+                AIC + irq_config + 4 * u64::from(crate::platform::apple::aic::AIC2_MAX_IRQ);
+            devices.write(2, AIC + 0x14, 4, 1, 0).unwrap();
+            devices.write(2, software, 4, 1 << 7, 0).unwrap();
+            // MASK_CLR follows SW_SET, SW_CLR and MASK_SET, each MAX_IRQ/8 bytes.
+            devices.write(2, software + 3 * 512, 4, 1 << 7, 0).unwrap();
+            for pe in [0, 1, 3] {
+                assert!(!devices.lines(pe, 0).irq);
+                assert_eq!(devices.read(pe, AIC + event, 4, 0), Ok(0));
+            }
+            assert!(devices.lines(2, 0).irq);
+            assert_eq!(devices.read(2, AIC + event, 4, 0), Ok(1 << 16 | 7));
+            assert!(!devices.lines(2, 0).irq);
+        }
+        let mut devices = AppleDevices::for_boot_processor(4);
+        for cpus in [0, 4, 65] {
+            assert!(
+                devices
+                    .add_aic_for_processors(AIC, 1152, AicLayout::aic2(0x8000, 0), cpus)
+                    .is_err()
+            );
+            assert!(devices.aic.is_none());
+            assert!(devices.bus.route(AIC, Width::Word).is_err());
+        }
+        devices
+            .add_aic_for_processors(AIC, 1152, AicLayout::aic2(0x8000, 0), 5)
+            .unwrap();
     }
 
     #[test]

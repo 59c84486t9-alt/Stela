@@ -56,6 +56,27 @@ pub fn pmgr_qualifications(
     Ok(())
 }
 
+/// Paths qualified by immutable source identity and bundle admission. Keeping
+/// CLPC unavailable is a documented degradation, not a successful controller.
+pub fn clpc_absence(
+    hidden: &[String],
+    strict: bool,
+    log: &mut dyn FnMut(fmt::Arguments<'_>),
+) -> Result<(), String> {
+    for (index, path) in hidden.iter().enumerate() {
+        if hidden[..index].contains(path) {
+            continue;
+        }
+        log(format_args!(
+            "UNMODELED CLPC {path}: controller hidden; closed-loop CPU power control unavailable\n"
+        ));
+        if strict {
+            return Err(format!("CLPC {path} has no qualified controller"));
+        }
+    }
+    Ok(())
+}
+
 /// What the host connects to the board.
 pub struct Inputs<'f> {
     /// The region iBoot leaves in each memory-controller lock group.
@@ -123,14 +144,22 @@ pub fn devices<C: ConsoleSink + 'static>(
         )
     };
     let (uart, wdt, aic) = (place(board.uart), place(board.watchdog), board.aic);
-    let mut devices = AppleDevices::new();
+    // Templates with no running node are useful for mount diagnostics. Actual
+    // boot intake independently requires a verified selected handoff PE.
+    let boot = board.boot_processor.as_ref().map_or(0, |boot| boot.cpu);
+    let mut devices = AppleDevices::for_boot_processor(boot);
     devices
         .add_uart(console, &[uart.0], Some(uart.1))
         .map_err(|error| format!("UART placement: {error:?}"))?;
     devices
         .add_watchdog_with_side(wdt.0, board.watchdog_side.as_ref(), Some(wdt.1), now)
         .map_err(|error| format!("watchdog placement: {error:?}"))?;
-    devices.add_aic(aic.physical, aic.inputs, aic.layout)?;
+    devices.add_aic_for_processors(
+        aic.physical,
+        aic.inputs,
+        aic.layout,
+        board.cpus.processors.len(),
+    )?;
     if let Some(gpio) = &board.gpio {
         let selects: Vec<u32> = board.spi_nor.iter().filter_map(|spi| spi.select).collect();
         let interrupts: Vec<u32> = board
@@ -607,6 +636,29 @@ pub fn devices<C: ConsoleSink + 'static>(
 mod tests {
     use super::*;
     use crate::machine::soc::PmgrBank;
+
+    #[test]
+    fn clpc_absence_reports_each_path_once_and_strict_stops_at_the_first() {
+        let paths = [
+            "/arm-io/pmgr/clpc".into(),
+            "/arm-io/pmgr/clpc".into(),
+            "/arm-io/die1/clpc".into(),
+        ];
+        let mut graceful = Vec::new();
+        clpc_absence(&paths, false, &mut |message| {
+            graceful.push(format!("{message}"))
+        })
+        .unwrap();
+        assert_eq!(graceful.len(), 2);
+        assert!(graceful[0].contains("UNMODELED CLPC /arm-io/pmgr/clpc: controller hidden"));
+        let mut strict = Vec::new();
+        assert!(
+            clpc_absence(&paths, true, &mut |message| strict
+                .push(format!("{message}")))
+            .is_err()
+        );
+        assert_eq!(strict, graceful[..1]);
+    }
 
     #[test]
     fn graceful_qualifications_report_each_requirement_once_without_a_model() {

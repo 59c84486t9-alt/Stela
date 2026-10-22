@@ -794,7 +794,7 @@ fn test_profile() -> CpuProfile {
 }
 
 /// The profile of the board the bundle's DeviceTree describes
-/// (`machine::soc::board`), with cpu0 running with EL2 as a VHE host. The
+/// (`machine::soc::board`), with the selected handoff PE running with EL2 as a VHE host. The
 /// ID_AA64* and CTR_EL0 registers advertise what this engine implements,
 /// capped at the chip's features (`machine::identification`); MIDR, MPIDR and
 /// DCZID are the board's own values. Every other identification read refuses.
@@ -1533,6 +1533,8 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let mut core_locks = stela_runtime::machine::ctrr::Handoff::default();
     let mut hidden_devices = Vec::new();
     let mut loaded_tree = None;
+    let mut bundle_boot_processor = None;
+    let mut hidden_clpc = Vec::new();
     // A bundle's kernel gets a framebuffer the size of the firmware's mode.
     let framebuffer = handoff
         .screen
@@ -1564,6 +1566,8 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         read_only_region = loaded.read_only_region;
         core_locks = loaded.core_locks;
         hidden_devices = loaded.hidden_devices;
+        bundle_boot_processor = loaded.boot_processor;
+        hidden_clpc = loaded.hidden_clpc;
         loaded_tree = Some(loaded.live_tree);
         crate::status::done("");
         (loaded.pc, loaded.x0)
@@ -1595,6 +1599,38 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::arguments(format_args!("board refusal: {error}\n"));
             output::fatal("the board could not be modeled")
         })
+    });
+    let boot_processor = match board.as_ref() {
+        Some(board) => {
+            let boot = board
+                .boot_processor
+                .as_ref()
+                .unwrap_or_else(|| output::fatal("the DeviceTree has no running boot PE"));
+            if bundle_boot_processor != Some(boot.cpu) {
+                output::fatal("the board boot PE differs from the verified bundle handoff");
+            }
+            output::arguments(format_args!(
+                "BOOT PE index={} path={} affinity={:#x} cluster={}\n",
+                boot.cpu,
+                boot.path,
+                boot.affinity,
+                char::from(boot.cluster_type),
+            ));
+            boot.cpu
+        }
+        None => {
+            if bundle_boot_processor.is_some() {
+                output::fatal("a selected boot PE requires a live DeviceTree");
+            }
+            0
+        }
+    };
+    mount::clpc_absence(&hidden_clpc, options.strict, &mut |arguments| {
+        output::arguments(arguments)
+    })
+    .unwrap_or_else(|error| {
+        output::arguments(format_args!("board qualification refusal: {error}\n"));
+        output::fatal("strict mode requires qualified CLPC controllers")
     });
     if options.strict
         && let Some(board) = board.as_ref()
@@ -1765,7 +1801,8 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::fatal("restore preparation failed")
         })
     });
-    let mut machine = Machine::new(cpu, bare, devices, profile, target);
+    let mut machine = Machine::new_at(cpu, bare, devices, profile, target, boot_processor)
+        .unwrap_or_else(|error| output::fatal(error));
     machine.hand_off_core_locks(core_locks);
     run_machine(
         machine,

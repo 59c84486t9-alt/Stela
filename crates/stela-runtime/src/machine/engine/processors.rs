@@ -78,12 +78,13 @@ pub(super) struct Parked {
     waiting: Option<Wait>,
 }
 
-/// PE 0 runs; the others are off. A profile without processors has one PE.
-pub(super) fn boot(profile: &CpuProfile) -> Vec<Peer> {
+/// The selected existing PE runs; the others are off. A profile without
+/// processors has one PE. The constructor validates the selected index.
+pub(super) fn boot(profile: &CpuProfile, boot_processor: usize) -> Vec<Peer> {
     let mut peers: Vec<Peer> = (0..profile.processors.len().max(1))
         .map(|_| Peer::Off)
         .collect();
-    peers[0] = Peer::Running;
+    peers[boot_processor] = Peer::Running;
     peers
 }
 
@@ -863,6 +864,68 @@ mod tests {
             mpidr: 0x8000_0000 | cpu << 8,
             clock: None,
             caches: None,
+        }
+    }
+
+    #[test]
+    fn a_nonzero_boot_processor_keeps_resource_indices_and_secondary_reset_state() {
+        let mut prepared = board(&[], Board::default(), alloc::vec![identity(0), identity(1)]);
+        prepared.cpu.state.x[0] = 0x1234_5678;
+        prepared.cpu.state.sp = BASE + 0x400;
+        let state = prepared.cpu.state.clone();
+        let pc = prepared.cpu.pc;
+        let mut machine = Machine::new_at(
+            prepared.cpu,
+            prepared.host,
+            prepared.devices,
+            prepared.profile,
+            prepared.target,
+            1,
+        )
+        .unwrap();
+        assert_eq!(machine.processor(), 1);
+        assert!(matches!(machine.peers[0], Peer::Off));
+        assert!(matches!(machine.peers[1], Peer::Running));
+        assert_eq!(machine.cpu.state, state);
+        assert_eq!(machine.cpu.pc, pc);
+        assert_eq!(machine.cpu.read(Register::MIDR_EL1), identity(1).midr);
+        assert_eq!(machine.cpu.read(Register::MPIDR_EL1), identity(1).mpidr);
+        assert_eq!(machine.profile.processors, [identity(0), identity(1)]);
+        assert!(machine.devices.power.is_empty());
+        machine.devices.starts.push(Start {
+            cpu: 0,
+            address: START,
+        });
+        machine.take_starts().unwrap();
+        assert_eq!(parked(&machine, 0).pc, START);
+        end_slice(&mut machine);
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), 0);
+        assert_eq!(machine.cpu.pc, START);
+        assert_eq!(machine.cpu.read(Register::MPIDR_EL1), identity(0).mpidr);
+        assert_eq!(parked(&machine, 1).state, state);
+        end_slice(&mut machine);
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), 1);
+        assert_eq!(machine.cpu.state, state);
+        assert_eq!(machine.cpu.pc, pc);
+    }
+
+    #[test]
+    fn a_boot_processor_outside_the_profile_is_refused() {
+        for selected in [2, usize::MAX] {
+            let prepared = board(&[], Board::default(), alloc::vec![identity(0), identity(1)]);
+            assert!(
+                Machine::new_at(
+                    prepared.cpu,
+                    prepared.host,
+                    prepared.devices,
+                    prepared.profile,
+                    prepared.target,
+                    selected,
+                )
+                .is_err()
+            );
         }
     }
 

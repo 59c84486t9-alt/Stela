@@ -18,7 +18,7 @@
 //! `ap-wake-sources` names `SMC.CPUWakeupAP`, which the AP must have left
 //! unmasked (`wake`): the power button (`smc`) and the primary PMU's RTC
 //! alarm, whose interrupt the SMC watches while the SoC sleeps (`pmu`). Its
-//! wake sets `MBSW` to the source and releases PE 0, the boot PE, from
+//! wake sets `MBSW` to the source and releases the selected boot PE from
 //! reset at its RVBAR, the warm path XNU resumes on. A sleep with no
 //! modeled source stays asleep; the host's power button reaches the SMC
 //! from the mount.
@@ -37,9 +37,6 @@ use alloc::{
     string::String,
 };
 
-/// The PE the SoC's wake releases.
-const BOOT_PE: usize = 0;
-
 /// One step of the SoC's sleep, for the host's log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerLog {
@@ -52,6 +49,8 @@ pub enum PowerLog {
 }
 
 pub(super) struct SocSleep {
+    /// The same existing PE that received the boot architectural state.
+    pub(super) boot: usize,
     /// The PEs out of reset and not powered down.
     powered: BTreeSet<usize>,
     pub(super) asleep: bool,
@@ -63,11 +62,11 @@ pub(super) struct SocSleep {
     log: VecDeque<PowerLog>,
 }
 
-impl Default for SocSleep {
-    fn default() -> Self {
+impl SocSleep {
+    pub(super) fn for_boot_processor(boot: usize) -> Self {
         Self {
-            // PE 0 runs the boot hand-off.
-            powered: BTreeSet::from([BOOT_PE]),
+            boot,
+            powered: BTreeSet::from([boot]),
             asleep: false,
             wake_masks: None,
             pmu: None,
@@ -178,7 +177,7 @@ impl AppleDevices {
                 return;
             }
         }
-        let Some(address) = self.locked_reset_vector(BOOT_PE) else {
+        let Some(address) = self.locked_reset_vector(self.sleep.boot) else {
             self.halt("the SoC woke, but its boot PE has no RVBAR".into());
             return;
         };
@@ -191,7 +190,7 @@ impl AppleDevices {
         }
         self.sleep.asleep = false;
         self.starts.push(Start {
-            cpu: BOOT_PE,
+            cpu: self.sleep.boot,
             address,
         });
         self.sleep.log.push_back(PowerLog::Wake(name(source)));
@@ -219,9 +218,13 @@ mod tests {
 
     /// A board with an SMC, the AOP wake masks and PE 0's locked RVBAR.
     fn board() -> AppleDevices {
-        let mut devices = AppleDevices::new();
+        board_at(0)
+    }
+
+    fn board_at(boot: usize) -> AppleDevices {
+        let mut devices = AppleDevices::for_boot_processor(boot);
         devices
-            .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
+            .add_aic_for_processors(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0), 4)
             .unwrap();
         devices
             .add_smc(&SmcController {
@@ -245,7 +248,7 @@ mod tests {
             bytes: 0x9010,
         };
         devices
-            .add_lockdown("cpu-impl-reg", 0x5000, range, Some((0, ENTRY)))
+            .add_lockdown("cpu-impl-reg", 0x5000, range, Some((boot, ENTRY)))
             .unwrap();
         devices
     }
@@ -288,6 +291,33 @@ mod tests {
             .receive(read, &mut Vec::new())
             .unwrap();
         devices.read(0, REGION, 8, 0).unwrap()
+    }
+
+    #[test]
+    fn soc_sleep_and_wake_keep_the_nonzero_handoff_pe() {
+        let mut devices = board_at(3);
+        assert!(!devices.processor_running(0));
+        assert!(devices.processor_running(3));
+        unmask_smc_wake(&mut devices);
+        system_event(&mut devices, b"slpa");
+        devices.processor_power(3, false);
+        assert!(devices.asleep());
+        assert_eq!(devices.take_power_log(), Some(PowerLog::Sleep));
+        devices.power_button(true).unwrap();
+        assert!(!devices.asleep());
+        assert_eq!(
+            devices.take_start(),
+            Some(Start {
+                cpu: 3,
+                address: ENTRY
+            })
+        );
+        assert_eq!(devices.take_start(), None);
+        assert_eq!(
+            devices.take_power_log(),
+            Some(PowerLog::Wake("power button"))
+        );
+        assert_eq!(mbsw(&mut devices), 1);
     }
 
     #[test]

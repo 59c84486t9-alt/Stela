@@ -1513,6 +1513,27 @@ impl<H: Host, D: Devices> Machine<H, D> {
             profile.chip,
             "the boot PE is not the profile's chip"
         );
+        Self::new_at(cpu, host, devices, profile, target, 0)
+            .expect("PE zero is present in every CPU profile")
+    }
+
+    /// Start the supplied architectural state on one existing profile PE.
+    /// All other PEs remain held in reset; identities and board resource
+    /// indices retain their original order. This selects no native executor.
+    pub fn new_at(
+        cpu: Cpu,
+        host: H,
+        devices: D,
+        profile: CpuProfile,
+        target: TargetCpu,
+        boot_processor: usize,
+    ) -> Result<Self, &'static str> {
+        if boot_processor >= profile.processors.len().max(1) {
+            return Err("the boot PE is outside the CPU profile");
+        }
+        if cpu.registers.chip() != profile.chip {
+            return Err("the boot PE is not the profile's chip");
+        }
         let admit_table = profile
             .chip
             .admit_table(identification::withheld(profile.chip, &profile.fixed))
@@ -1559,7 +1580,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             admit_table,
             watch: Watch::default(),
             prediction_context: None,
-            current: 0,
+            current: boot_processor,
             waiting: None,
             peers: Vec::new(),
             processor_power,
@@ -1596,10 +1617,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             tags_checked_at: None,
         };
         machine.chain.table = machine.targets.as_ptr() as u64;
-        machine.peers = processors::boot(&machine.profile);
+        machine.peers = processors::boot(&machine.profile, boot_processor);
         machine.load_profile();
         machine.sync_regime();
-        machine
+        Ok(machine)
     }
 
     fn requirement(&self, kind: RequirementKind) -> Requirement {

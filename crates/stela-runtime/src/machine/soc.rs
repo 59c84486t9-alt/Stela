@@ -56,6 +56,8 @@ use storage_topology::{aes_engine, ans_controller, spi_nor};
 mod memory_topology;
 pub use memory_topology::{MemoryCache, MemoryController, PtdBank};
 use memory_topology::{PTD_RANGE, memory_cache, memory_controller, memory_controller_named};
+mod boot_processor;
+pub use boot_processor::BootProcessor;
 mod processor_registers;
 pub use processor_registers::ProcessorRegisters;
 mod power_registers;
@@ -1658,6 +1660,8 @@ pub struct Board {
     /// Explicitly visible T8112 PHYs. Prepared bundles still hide them.
     pub typec_phys: Vec<TypecPhy>,
     pub cpus: Cpus,
+    /// The sole running node, if this is a prepared handoff rather than a template.
+    pub boot_processor: Option<BootProcessor>,
     /// `/arm-io/uart0`, a `uart-1,samsung`.
     pub uart: Device,
     /// `/arm-io/wdt`, a `wdt,s5l8960x`.
@@ -1990,6 +1994,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
             _ => Err("a /cpus node has no reg or an empty cluster-type"),
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let boot_processor = boot_processor::boot_processor(&root, &processors)?;
     let cpus = cpus(chip_id, soc_name, &processors)?;
     let processor_registers = processor_registers::processor_registers(&root)?;
     if processor_registers.len() != cpus.processors.len() {
@@ -2143,6 +2148,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         performance,
         energy,
         cpus,
+        boot_processor,
         uart,
         watchdog,
         watchdog_side,
