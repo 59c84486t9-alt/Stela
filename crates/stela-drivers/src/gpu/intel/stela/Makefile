@@ -7,19 +7,19 @@ CC := clang
 HOST_CC := clang
 AR ?= llvm-ar
 
-# Unchanged Linux sources build against Stela's compat environment first, with
-# Kbuild's forced includes, from system directories so upstream code keeps
-# Linux's warning profile rather than Stela's. Adapters include the unchanged
-# Xe sources from a staging directory, away from their sibling headers, so the
-# Xe shadow headers in compat/xe resolve first.
-UPSTREAM := $(BUILD)/upstream
-LINUX_INCLUDES := -D__KERNEL__ -include $(SOURCE)/../../common/linux/include/linux/kconfig.h \
-                  -include $(SOURCE)/compat/linux/compiler_types.h -isystem $(UPSTREAM) \
-                  -isystem $(SOURCE)/compat -isystem $(SOURCE)/compat/xe \
-                  -isystem $(SOURCE)/../xe -isystem $(SOURCE)/../i915 \
-                  -isystem $(SOURCE)/../../common/linux/include \
-                  -isystem $(SOURCE)/../../common/linux/include/uapi
-COMPAT_HEADERS := $(wildcard $(SOURCE)/compat/*/*.h)
+# Unchanged Linux sources build in Stela's Linux environment, with Kbuild's
+# definition and forced includes, from system directories so upstream code
+# keeps Linux's warning profile rather than Stela's. compat/overlay.yaml puts
+# each shadow in place of the upstream header it replaces, however a source
+# names it. compat/ itself comes last and only adds the asm/ and generated/
+# headers that Linux's arch tree and build supply.
+LINUX := $(abspath $(SOURCE)/../../common/linux/include)
+GENERATED := $(BUILD)/generated-include
+LINUX_INCLUDES := -ivfsoverlay $(SOURCE)/compat/overlay.yaml -D__KERNEL__ \
+                  -include $(LINUX)/linux/kconfig.h -include $(LINUX)/linux/compiler_types.h \
+                  -isystem $(GENERATED) -isystem $(SOURCE)/../xe -isystem $(SOURCE)/../i915 \
+                  -isystem $(LINUX) -isystem $(LINUX)/uapi -isystem $(SOURCE)/compat
+COMPAT_HEADERS := $(SOURCE)/compat/overlay.yaml $(shell find $(SOURCE)/compat -name '*.h')
 CFLAGS := --target=$(TARGET) $(LINUX_INCLUDES) -std=gnu11 -O2 \
           -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only \
           -Wall -Wextra -Werror -Wconversion -Wsign-conversion
@@ -251,7 +251,7 @@ test: $(BUILD)/test-pt-walk $(BUILD)/test-commands $(BUILD)/test-ct $(BUILD)/tes
 -include $(HOST_COMPUTE_OBJECTS:.o=.d)
 
 # Unchanged Linux xe_uc_fw.c selection and CSS/CPD parsing; metadata only, no upload.
-FIRMWARE_HEADERS := $(SOURCE)/firmware.h $(COMPAT_HEADERS) $(UPSTREAM)/xe_uc_fw.c \
+FIRMWARE_HEADERS := $(SOURCE)/firmware.h $(COMPAT_HEADERS) $(SOURCE)/../xe/xe_uc_fw.c \
     $(SOURCE)/../xe/xe_platform_types.h $(SOURCE)/../xe/xe_gt_type.h $(SOURCE)/../xe/xe_huc_role.h \
     $(SOURCE)/../xe/xe_uc_fw.h $(SOURCE)/../xe/xe_uc_fw_types.h $(SOURCE)/../xe/abi/uc_fw_abi.h
 $(BUILD)/firmware.o: $(SOURCE)/firmware.c $(FIRMWARE_HEADERS) | $(BUILD)
@@ -293,12 +293,9 @@ test-firmware: $(BUILD)/firmware-test
 	$(BUILD)/firmware-test
 
 WOPCM_HEADERS := $(SOURCE)/wopcm.h $(SOURCE)/activation.h $(SOURCE)/firmware.h $(COMPAT_HEADERS) \
-    $(UPSTREAM)/xe_wopcm.c $(SOURCE)/../xe/xe_wopcm.h $(SOURCE)/../xe/xe_wopcm_types.h \
+    $(SOURCE)/../xe/xe_wopcm.c $(SOURCE)/../xe/xe_wopcm.h $(SOURCE)/../xe/xe_wopcm_types.h \
     $(SOURCE)/../xe/xe_uc_fw.h $(SOURCE)/../xe/xe_uc_fw_types.h \
     $(SOURCE)/../xe/regs/xe_guc_regs.h $(SOURCE)/../xe/xe_platform_types.h
-$(UPSTREAM)/%.c: $(SOURCE)/../xe/%.c
-	mkdir -p "$(UPSTREAM)"
-	cp "$<" "$@"
 $(BUILD)/wopcm.o: $(SOURCE)/wopcm.c $(WOPCM_HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"
 $(BUILD)/wopcm-host.o: $(SOURCE)/wopcm.c $(WOPCM_HEADERS) | $(BUILD)
@@ -468,12 +465,12 @@ $(BUILD)/ggtt-probe-test: $(SOURCE)/tests/ggtt_probe.c $(SOURCE)/tests/ggtt_prob
 test-ggtt-probe: $(BUILD)/ggtt-probe-test
 	$(BUILD)/ggtt-probe-test
 
-PAT_HEADERS := $(SOURCE)/pat.h $(SOURCE)/activation.h $(COMPAT_HEADERS) $(UPSTREAM)/xe_pat.c \
-    $(UPSTREAM)/generated/xe_wa_oob.h $(SOURCE)/../xe/xe_pat.h $(SOURCE)/../xe/xe_cache_level.h \
+PAT_HEADERS := $(SOURCE)/pat.h $(SOURCE)/activation.h $(COMPAT_HEADERS) $(SOURCE)/../xe/xe_pat.c \
+    $(GENERATED)/generated/xe_wa_oob.h $(SOURCE)/../xe/xe_pat.h $(SOURCE)/../xe/xe_cache_level.h \
     $(SOURCE)/../xe/xe_gt_type.h \
     $(SOURCE)/../../common/linux/include/drm/intel/pick.h
-$(UPSTREAM)/generated/xe_wa_oob.h: $(BUILD)/guc-reset/xe_wa_oob.c
-	mkdir -p "$(UPSTREAM)/generated"
+$(GENERATED)/generated/xe_wa_oob.h: $(BUILD)/guc-reset/xe_wa_oob.c
+	mkdir -p "$(GENERATED)/generated"
 	cp "$(BUILD)/guc-reset/xe_wa_oob.h" "$@"
 $(BUILD)/pat.o: $(SOURCE)/pat.c $(PAT_HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"

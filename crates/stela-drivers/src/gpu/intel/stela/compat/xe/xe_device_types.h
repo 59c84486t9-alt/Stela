@@ -3,7 +3,6 @@
 #define STELA_XE_DEVICE_TYPES_H
 #include <drm/drm_device.h>
 #include <linux/types.h>
-#include "../../activation.h"
 #include "xe_cache_level.h"
 #include "xe_platform_types.h"
 /* Copyright © 2022-2023 Intel Corporation; from xe_device_types.h. */
@@ -12,6 +11,7 @@
 #define GRAPHICS_VERx100(xe) ((xe)->info.graphics_verx100)
 #define MEDIA_VERx100(xe) ((xe)->info.media_verx100)
 /* Register access through the activation owner's mapped BAR. */
+struct stela_intel_activation_io;
 struct xe_mmio {
 	const struct stela_intel_activation_io *io;
 	void *context;

@@ -1,0 +1,50 @@
+# Clang VFS overlay of Stela's shadows: each one replaces the upstream header
+# named here wherever an unchanged source includes it, by any spelling. Each
+# comment records the upstream header the shadow was written against;
+# `cargo xtask gpu shadows` fails when upstream changes, and `--update` records
+# the review. Headers outside this list may only add asm/ and generated/ files.
+version: 0
+root-relative: overlay-dir
+overlay-relative: true
+roots:
+  - {type: file, name: ../../../common/linux/include/drm/drm_device.h, external-contents: drm/drm_device.h} # sha256:e1e5cef551ef6d051856baabf77d241d10899e1c9b85d4f992b554791ebcb50c
+  - {type: file, name: ../../../common/linux/include/drm/drm_managed.h, external-contents: drm/drm_managed.h} # sha256:18c8af7e58168c5e5cb9d3a66ff75975219c8d9895e6946eb38f3951779d3707
+  - {type: file, name: ../../../common/linux/include/drm/drm_print.h, external-contents: drm/drm_print.h} # sha256:00c6b2883e81ed9a986b7226861cef2922473e5e3cb48b0b2c551269d11dcb95
+  - {type: file, name: ../../../common/linux/include/linux/bitfield.h, external-contents: linux/bitfield.h} # sha256:46c21a28fda259f46b3997c36d66ebc6ba4eb8901220bd479ff709d4cc0ae6d5
+  - {type: file, name: ../../../common/linux/include/linux/bitops.h, external-contents: linux/bitops.h} # sha256:fdee528a2e2a17a568d305dd40cfa6f1bea510e155a0ed32df53bfda47a45209
+  - {type: file, name: ../../../common/linux/include/linux/bits.h, external-contents: linux/bits.h} # sha256:fec9de74956535b6664b36ef4e1b0399af0cdc63e50002dbe83c09e1c066825f
+  - {type: file, name: ../../../common/linux/include/linux/bug.h, external-contents: linux/bug.h} # sha256:e63ac1f5d757d6ffc956814f4d5bb96f931207e0c29b8cfaf6cb323d962c1842
+  - {type: file, name: ../../../common/linux/include/linux/build_bug.h, external-contents: linux/build_bug.h} # sha256:b07d5766598af42aa57e398e9ceb89ee8f73da6efac2b81192426ebf43f46ec9
+  - {type: file, name: ../../../common/linux/include/linux/compiler.h, external-contents: linux/compiler.h} # sha256:7eeaa0a6fcc1839428b69ffb78b87d9580a5d2b2c81f0ee6b0797054b2ca72b7
+  - {type: file, name: ../../../common/linux/include/linux/compiler_types.h, external-contents: linux/compiler_types.h} # sha256:879a8d3fe36bcf8b7b4a6de88c17f8297599d9aea5cd9d9336bb87dd4902e535
+  - {type: file, name: ../../../common/linux/include/linux/fault-inject.h, external-contents: linux/fault-inject.h} # sha256:4597a6dec909b5f6868dbdc4ed53c9d44910bec13599fbfdd625142dde2f8c75
+  - {type: file, name: ../../../common/linux/include/linux/firmware.h, external-contents: linux/firmware.h} # sha256:987b248daad80ac79231d4f3aefc607e3c345440b04531a895ef05ac0cb35fa8
+  - {type: file, name: ../../../common/linux/include/linux/iosys-map.h, external-contents: linux/iosys-map.h} # sha256:d2a7b810a8b0853878972dae1f2dcd1b35e936426847d504effe0911c90adf9f
+  - {type: file, name: ../../../common/linux/include/linux/limits.h, external-contents: linux/limits.h} # sha256:0ed7dfdba324e0ce1fc732cd580338a2535727cc6a2103af9fbe027601092e33
+  - {type: file, name: ../../../common/linux/include/linux/log2.h, external-contents: linux/log2.h} # sha256:e0b06d79199b142aed20ed052677f52a6f7e3dc58eeea421ecd677faa83acc0b
+  - {type: file, name: ../../../common/linux/include/linux/math.h, external-contents: linux/math.h} # sha256:e0437f2850ef21b25d7f574830d2213cfc97441883624577d7bf1fd7e61adcf1
+  - {type: file, name: ../../../common/linux/include/linux/minmax.h, external-contents: linux/minmax.h} # sha256:1bf125042d9ef0c1892a99d1db8daf85171dd21e2afbe7f99f60a2df97488aa9
+  - {type: file, name: ../../../common/linux/include/linux/module.h, external-contents: linux/module.h} # sha256:5fc2b60606c87968c5f4c2b1a5a690834206879f40a74d2ac12b59256e3a3ab3
+  - {type: file, name: ../../../common/linux/include/linux/pagewalk.h, external-contents: linux/pagewalk.h} # sha256:ea7d507f5db2f0ca4d48036091d5b9c1144d3b09e4232fc3d817c3b29ee8110f
+  - {type: file, name: ../../../common/linux/include/linux/sprintf.h, external-contents: linux/sprintf.h} # sha256:72a0226d5631211916ccce67a50033e53f0bba043ca39823d4f346179ecff9df
+  - {type: file, name: ../../../common/linux/include/linux/stddef.h, external-contents: linux/stddef.h} # sha256:be64ec13fdb2d724c1830ebcd04854612ccab9593e2d829011c8352f73a378b2
+  - {type: file, name: ../../../common/linux/include/linux/string.h, external-contents: linux/string.h} # sha256:4dbc380b35f81d4e3992abae48fbb23b4f392fd28f633d0d96114be166d5dfd5
+  - {type: file, name: ../../../common/linux/include/linux/types.h, external-contents: linux/types.h} # sha256:b12aab0f1569ba0dd6843839aa15515a414c171d3fedd583c9aa835a81b4561b
+  - {type: file, name: ../../xe/xe_assert.h, external-contents: xe/xe_assert.h} # sha256:10cd759ab558ae11449b4a42e55bf9594334c0ed7f9f804dfb359569f0ecf5d8
+  - {type: file, name: ../../xe/xe_bo.h, external-contents: xe/xe_bo.h} # sha256:c8efbf1ba222730038a007a6eeeff9df1cae6276cd0d0029edb946fa233b60a7
+  - {type: file, name: ../../xe/xe_device.h, external-contents: xe/xe_device.h} # sha256:858cc634609733be5d9fb1d17453ae2268d01c80ff1c004f0b9250c5c41e5340
+  - {type: file, name: ../../xe/xe_device_types.h, external-contents: xe/xe_device_types.h} # sha256:d28975e1225b7ad326ba389e53555a27249f2cbd74e95a30194f77470d194393
+  - {type: file, name: ../../xe/xe_force_wake.h, external-contents: xe/xe_force_wake.h} # sha256:f8d9c3441bbe8035e7ef84c568c08abe55e1194d5bc053354e5e7a3d4aba9d00
+  - {type: file, name: ../../xe/xe_force_wake_types.h, external-contents: xe/xe_force_wake_types.h} # sha256:e1333158937ce2950c8c44086b6d16ba6d069ff1a584f2a0fe9d87d4fca2367f
+  - {type: file, name: ../../xe/xe_gsc_types.h, external-contents: xe/xe_gsc_types.h} # sha256:1c3317df34155a70564b556610a13cd009d8e564e76611bd32ed4986cd231494
+  - {type: file, name: ../../xe/xe_gt.h, external-contents: xe/xe_gt.h} # sha256:f144e52bb1a72ab6333ec0fdeaab97fb849cdd775f10f1bdfad3d307c4ddd661
+  - {type: file, name: ../../xe/xe_gt_mcr.h, external-contents: xe/xe_gt_mcr.h} # sha256:dba88efaa2443d1abebd168afbdbb41e346d0744ec38286ce9117941b770103c
+  - {type: file, name: ../../xe/xe_gt_printk.h, external-contents: xe/xe_gt_printk.h} # sha256:3b92c14fe0f9434973cac9d6d5eab256921d47461c7b308fd6e51fb6ef44952b
+  - {type: file, name: ../../xe/xe_gt_sriov_vf.h, external-contents: xe/xe_gt_sriov_vf.h} # sha256:c450858f2367932f29b4e3e8db3653cfcb5d4c61a4f084022a50d9231d81d0e7
+  - {type: file, name: ../../xe/xe_gt_types.h, external-contents: xe/xe_gt_types.h} # sha256:1cb50d3ca55f3289c2192a0208b25107aa6a2fb84a67dfa4eb9f3c758658bde7
+  - {type: file, name: ../../xe/xe_guc.h, external-contents: xe/xe_guc.h} # sha256:1c9e95ce3d3f67735f608cb1f557b353684ea6c4319b70ecefad15c92152c5a3
+  - {type: file, name: ../../xe/xe_map.h, external-contents: xe/xe_map.h} # sha256:5bfeb909006a56ef54288343eb0ab0972a595740095d526e7e1284f54dc731c5
+  - {type: file, name: ../../xe/xe_mmio.h, external-contents: xe/xe_mmio.h} # sha256:0e898507395b9c6c9131af4777d6e379f9a1752a140fceaec95d19988e0e5c89
+  - {type: file, name: ../../xe/xe_module.h, external-contents: xe/xe_module.h} # sha256:436f198d8aeaee4d909fd4f61c06ae38b3e159655300a21d8d2facc8297cef50
+  - {type: file, name: ../../xe/xe_sriov.h, external-contents: xe/xe_sriov.h} # sha256:ccb4bdd9a471e6556ec19866ee368662c6c552ef8a7fd7da321b7df1f2963cb2
+  - {type: file, name: ../../xe/xe_wa.h, external-contents: xe/xe_wa.h} # sha256:ecc1329a3b568cb864556028509ea4d7b5fbbc5b06acb052413bd0bb62775d69

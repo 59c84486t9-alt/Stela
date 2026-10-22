@@ -1,43 +1,36 @@
 //! Source list for the native Intel support library; the caller owns target,
 //! compiler, archiver, freestanding flags, and the final library name. Dispatch
 //! headers use Mesa's original XML generator and a selected Python interpreter.
-/// Unchanged Xe sources that Stela's adapters include.
-const UPSTREAM: &[&str] = &["xe_pat.c", "xe_uc_fw.c", "xe_wopcm.c"];
-
 pub fn configure(build: &mut cc::Build) {
-    use std::{env, fs, path::PathBuf};
+    use std::{env, path::PathBuf};
 
     let source = "src/gpu/intel";
     let linux = "src/gpu/common/linux/include";
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
-    // Adapters include the unchanged Xe sources from a staging directory, away
-    // from their sibling headers, so the Xe shadow headers in compat/xe resolve
-    // first.
-    let upstream = output.join("intel-upstream");
-    fs::create_dir_all(&upstream).expect("create the unchanged Xe source directory");
-    for name in UPSTREAM {
-        let path = format!("{source}/xe/{name}");
-        println!("cargo:rerun-if-changed={path}");
-        fs::copy(&path, upstream.join(name)).expect("stage an unchanged Xe source");
-    }
-    // Unchanged Linux sources build against Stela's compat environment first,
-    // with Kbuild's forced includes, from system directories so upstream code
-    // keeps Linux's warning profile rather than Stela's.
+    // Unchanged Linux sources build in Stela's Linux environment, with Kbuild's
+    // definition and forced includes, from system directories so upstream code
+    // keeps Linux's warning profile rather than Stela's. compat/overlay.yaml
+    // puts each shadow in place of the upstream header it replaces, however a
+    // source names it. compat/ itself comes last and only adds the asm/ and
+    // generated/ headers that Linux's arch tree and build supply.
+    let overlay = format!("{source}/stela/compat/overlay.yaml");
+    println!("cargo:rerun-if-changed={source}/stela/compat");
     build
+        .flag("-ivfsoverlay")
+        .flag(&overlay)
         .define("__KERNEL__", None)
         .flag("-include")
         .flag(format!("{linux}/linux/kconfig.h"))
         .flag("-include")
-        .flag(format!("{source}/stela/compat/linux/compiler_types.h"))
+        .flag(format!("{linux}/linux/compiler_types.h"))
         .flag("-isystem")
-        .flag(&upstream);
+        .flag(output.join("intel-generated"));
     for directory in [
-        format!("{source}/stela/compat"),
-        format!("{source}/stela/compat/xe"),
         format!("{source}/xe"),
         format!("{source}/i915"),
         linux.into(),
         format!("{linux}/uapi"),
+        format!("{source}/stela/compat"),
     ] {
         build.flag("-isystem").flag(directory);
     }
@@ -130,7 +123,7 @@ fn configure_guc_reset(build: &mut cc::Build, output: &std::path::Path) {
     use std::{env, fs, process::Command};
     let source = "src/gpu/intel/xe";
     // The unchanged xe_pat.c includes the header as <generated/xe_wa_oob.h>.
-    let generated = output.join("intel-upstream/generated");
+    let generated = output.join("intel-generated/generated");
     fs::create_dir_all(&generated).expect("create the generated Xe header directory");
     let upstream_header = generated.join("xe_wa_oob.h");
     let output = output.join("intel-guc-reset");
