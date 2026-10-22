@@ -557,3 +557,4 @@ test-guc-reset: $(BUILD)/guc-reset-test
 
 # Focused retained red-black tree pointer-width proof; no GPU activation.
 include $(SOURCE)/tests/rbtree.mk
+include $(SOURCE)/tests/drm_mm.mk
