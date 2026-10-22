@@ -12,6 +12,8 @@
 //! file0x45e0..0x4664 reads low9 seeds; 0x4e20..0x4e8c writes low9 and
 //! optional bits23:16/30. AP file0x2eff890 masks low7 after a full32 read.
 use super::amcc::{BROADCAST, LOCK_REGISTERS, LockResource, MMIO_BYTES, Placement, STRIDE};
+use crate::platform::apple::pmp::native::cache::publisher;
+mod native;
 use crate::{
     machine::{engine::CanonicalDeviceMemory, soc::MemoryController},
     memory::{CanonicalRamService, RegisteredSystemRam},
@@ -21,6 +23,7 @@ use crate::{
     },
 };
 use alloc::sync::Arc;
+pub use native::QuotaView;
 
 const PLANES: usize = 4;
 const STATUS: u64 = 0x424;
@@ -93,6 +96,8 @@ pub struct EmptyResource {
     selection: ZeroWayConfiguration,
     image: SoftwareImage,
     progress: Progress,
+    quota_identity: publisher::Identity,
+    quota_claimed: bool,
 }
 impl EmptyResource {
     /// Construct before admitting cache clients, with an actually selected
@@ -121,6 +126,8 @@ impl EmptyResource {
             selection,
             image,
             progress: Progress::default(),
+            quota_identity: publisher::Identity::new(),
+            quota_claimed: false,
         })
     }
     pub fn source(&self) -> &MemoryController {
