@@ -196,15 +196,16 @@ const fn cache(bytes: u32, ways: u32) -> Cache {
 ///   M2 Pro and Max (Blizzard and Avalanche: `t8112.dtsi`,
 ///   `t602x-common.dtsi`) and the M3 (Sawtooth and Everest: `t8122.dtsi`).
 /// - Known (published `sysctl hw.perflevel*` of real machines, gist
-///   chockenberry/1d08129bdf41bfb70e98c3a75ce74578): the M4 Max and the M5
-///   report these `l1icachesize` and `l1dcachesize` values per core type,
-///   with the `l2cachesize` values their boards' 26A434 DeviceTrees state.
-/// - Inferred: the M3 Pro and Max, the M4 and M4 Pro, the A18 Pro, the P
-///   cores of the M5 Pro, Max and Ultra, and the M6, whose 26A434
-///   DeviceTrees give their cores the same `apple,sawtooth` and
-///   `apple,everest` compatibles as the M3, M4 Max and M5 cores above.
-///   This inference applies only to the declared E/P descriptors; the
-///   T6050 and M6 M types have no inferred cache geometry.
+///   chockenberry/1d08129bdf41bfb70e98c3a75ce74578): the M4 Max, the M5
+///   and the M5 Pro and Max report these `l1icachesize` and `l1dcachesize`
+///   values per core type, with the `l2cachesize` values their boards'
+///   26A434 DeviceTrees state. The M5 Pro and Max M cores (`perflevel1`,
+///   "Performance") report the E cores' 128 KiB and 64 KiB, with the 8 MiB
+///   their `l2-cache-size` gives.
+/// - Inferred: the M3 Pro and Max, the M4 and M4 Pro, the A18 Pro, the M5
+///   Ultra and the M6, whose 26A434 DeviceTrees give their cores the same
+///   `apple,sawtooth` and `apple,everest` compatibles as the M3, M4 Max and
+///   M5 cores above. The M6 M type has no cache geometry.
 const L1_CACHES: [CoreCaches; 2] = [
     CoreCaches {
         instruction: cache(128 << 10, 8),
@@ -267,9 +268,9 @@ const M6_CORES: [CoreType; 3] = [
 /// `HAS_MCORE`). XNU `osfmk/arm/cpuid.h` gives the Sotra S (H17S) parts,
 /// M 0x64 and P 0x65, and the Sotra C (H17C) parts, 0x68 and 0x69 (m1n1
 /// `src/midr.h` `MIDR_PART_T6050_SOTRA_*` and `MIDR_PART_T6051_SOTRAC_*`),
-/// and `MPIDR_CORETYPE` M is 4. The P cores take the inferred P geometry
-/// ([`L1_CACHES`]); the M cores' level 1 geometry and both types' clocks are
-/// not established.
+/// and `MPIDR_CORETYPE` M is 4. The M cores take the E geometry and
+/// the P cores the P geometry ([`L1_CACHES`]); both types' clocks are not
+/// established.
 const fn sotra_cores(m_part: u16, p_part: u16) -> [CoreType; 2] {
     [
         CoreType {
@@ -277,7 +278,7 @@ const fn sotra_cores(m_part: u16, p_part: u16) -> [CoreType; 2] {
             midr_part: Some(m_part),
             mpidr_aff2: Some(4),
             operating_points: None,
-            caches: None,
+            caches: Some(L1_CACHES[0]),
         },
         CoreType {
             cluster_type: b'P',
@@ -7746,9 +7747,23 @@ mod tests {
         assert_eq!(p_core("Apple M5 Pro", 0x200), (0x611f_0650, 0x8001_0200));
         assert_eq!(p_core("Apple M5 Max", 0x205), (0x611f_0690, 0x8001_0205));
         assert_eq!(p_core("Apple M5 Ultra", 0x1205), (0x611f_0690, 0x8001_1205));
+        // The M cores report the E cores' level 1 caches (`hw.perflevel1`).
+        let m_core = cpus(0x6050, "Apple M5 Pro", &layout_of(&[(b'M', 0)])).unwrap();
         assert_eq!(
-            cpus(0x6050, "Apple M5 Pro", &layout_of(&[(b'M', 0)])),
-            Err("Apple M5 Pro cluster type M has no cache geometry".into())
+            m_core.processors[0],
+            Identity {
+                midr: 0x611f_0640,
+                mpidr: 0x8004_0000,
+                clock: None,
+                caches: Some(
+                    Caches::split_unified(
+                        cache(128 << 10, 8),
+                        cache(64 << 10, 8),
+                        cache(4 << 20, 16)
+                    )
+                    .unwrap()
+                ),
+            }
         );
         assert_eq!(
             cpus(0x6050, "Apple M5", &layout_of(&[(b'P', 0x200)])),
