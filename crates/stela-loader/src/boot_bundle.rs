@@ -76,7 +76,9 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// `core_locks`.
 /// Revision 17: give a CPU node whose template carries per-variant L2 sizes
 /// its SoC's own `l2-cache-size` (J700AP's P cores).
-pub const REVISION: u32 = 17;
+/// Revision 18: reserve and publish every SoC's ordinary fixed carveouts from
+/// its iBoot table, and name each table's special-attribute carveouts.
+pub const REVISION: u32 = 18;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
