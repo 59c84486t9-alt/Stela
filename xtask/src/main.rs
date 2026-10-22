@@ -13,6 +13,10 @@ mod boot_console;
 #[path = "../../crates/stela-boot/src/native_dma/dmar.rs"]
 mod boot_dmar;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/entropy.rs"]
+#[allow(dead_code)] // UEFI-only protocol selection is absent in this hosted harness.
+mod boot_entropy;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_memory.rs"]
 mod boot_native_memory;
 #[cfg(test)]
