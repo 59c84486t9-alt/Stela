@@ -410,8 +410,10 @@ mod tests {
         assert_eq!(snapshot.apic_id(), None);
     }
     fn native_snapshot() -> Snapshot {
-        let mut snapshot = Snapshot::default();
-        snapshot.count = 3;
+        let mut snapshot = Snapshot {
+            count: 3,
+            ..Snapshot::default()
+        };
         snapshot.records[0] = Cpuid {
             leaf: 1,
             ecx: u32::MAX,
