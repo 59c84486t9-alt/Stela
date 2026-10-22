@@ -151,6 +151,42 @@ pub struct He {
     pub ppe: Ppe,
 }
 impl He {
+    /// Normal non-STRICT Linux peer HE verification: mandatory actual1SS
+    /// RX/TX comes before the zero-Basic compatibility case.
+    pub(super) fn peer_meets_basic(&self, required: u16) -> bool {
+        self.mcs_80.rx & 3 != 3
+            && self.mcs_80.tx & 3 != 3
+            && (required == 0 || he_map_meets(required, self.mcs_80))
+    }
+
+    pub(super) fn local_meets_basic(
+        &self,
+        required: u16,
+        source: Option<[McsMaps; 3]>,
+    ) -> Result<bool, Error> {
+        if required == 0 {
+            return Ok(true);
+        }
+        if let Some(source) = source {
+            return Ok(source.into_iter().any(|map| he_map_meets(required, map)));
+        }
+        // A known fitting source slot proves the source helper's early success.
+        // None carries no fact about hidden source struct words: never invent
+        // zero/ffff. If those unknown slots could affect the result, require them.
+        let observed = [Some(self.mcs_80), self.mcs_160, self.mcs_80p80];
+        if observed
+            .into_iter()
+            .flatten()
+            .any(|map| he_map_meets(required, map))
+        {
+            return Ok(true);
+        }
+        if observed.iter().any(Option::is_none) {
+            return Err(Error::Missing("complete local HE source MCS slots"));
+        }
+        Ok(false)
+    }
+
     pub(super) fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let fixed = bytes.get(..17).ok_or(Error::Truncated)?;
         let mac = fixed[..6].try_into().unwrap();
@@ -191,6 +227,17 @@ impl He {
             ppe,
         })
     }
+}
+
+fn he_map_meets(required: u16, map: McsMaps) -> bool {
+    (0..8).all(|n| {
+        let r = (required >> (2 * n)) & 3;
+        r == 3
+            || [map.rx, map.tx].iter().all(|m| {
+                let have = (m >> (2 * n)) & 3;
+                have != 3 && have >= r
+            })
+    })
 }
 
 pub(super) fn he_ppe_len(header: u8) -> usize {
@@ -426,6 +473,104 @@ mod basic_tests {
         assert_eq!(
             format!("{:x}", hash.finalize()),
             "4e172241fdaa7984005b2a209956aafc2dd9c0c0d7b2533adf9bc37ad82f69d6"
+        );
+    }
+}
+
+#[cfg(test)]
+mod he_basic_tests {
+    use super::*;
+    use alloc::format;
+    use sha2::{Digest, Sha256};
+    fn he() -> He {
+        He {
+            mac: [0; 6],
+            phy: [0; 11],
+            mcs_80: McsMaps {
+                rx: 0xfffe,
+                tx: 0xfffe,
+            },
+            mcs_160: None,
+            mcs_80p80: None,
+            ppe: Ppe::new(&[]).unwrap(),
+        }
+    }
+    #[test]
+    fn normal_he_basic_rules_match_complete_unchanged_peer_and_local_helpers() {
+        let mut hash = Sha256::new();
+        let mut cases = 0;
+        let local = he();
+        let mut peer = he();
+        for nss in 0..8 {
+            for req in 0..4 {
+                for rx in 0..4 {
+                    for tx in 0..4 {
+                        for peer_rx in 0..4 {
+                            for peer_tx in 0..4 {
+                                for width in 0..3 {
+                                    for zero in [false, true] {
+                                        let shift = nss * 2;
+                                        let mask = !(3_u16 << shift);
+                                        let basic = mask | (req << shift);
+                                        let mut source = [McsMaps {
+                                            rx: if zero { 0 } else { 0xffff },
+                                            tx: if zero { 0 } else { 0xffff },
+                                        };
+                                            3];
+                                        source[width] = McsMaps {
+                                            rx: mask | (rx << shift),
+                                            tx: mask | (tx << shift),
+                                        };
+                                        peer.mcs_80 = McsMaps {
+                                            rx: (0xfffc & mask) | (peer_rx << shift),
+                                            tx: (0xfffc & mask) | (peer_tx << shift),
+                                        };
+                                        hash.update([
+                                            u8::from(peer.peer_meets_basic(basic)),
+                                            u8::from(
+                                                local
+                                                    .local_meets_basic(basic, Some(source))
+                                                    .unwrap(),
+                                            ),
+                                        ]);
+                                        cases += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for rx in 0..4 {
+            for tx in 0..4 {
+                peer.mcs_80 = McsMaps {
+                    rx: 0xfffc | rx,
+                    tx: 0xfffc | tx,
+                };
+                hash.update([
+                    u8::from(peer.peer_meets_basic(0)),
+                    u8::from(
+                        local
+                            .local_meets_basic(
+                                0,
+                                Some(
+                                    [McsMaps {
+                                        rx: 0xffff,
+                                        tx: 0xffff,
+                                    }; 3],
+                                ),
+                            )
+                            .unwrap(),
+                    ),
+                ]);
+                cases += 1;
+            }
+        }
+        assert_eq!(cases, 49168);
+        assert_eq!(
+            format!("{:x}", hash.finalize()),
+            "01c1fb901513cd4690b019125b5366862b63d3b33dd0bbc9a060792bb5745425"
         );
     }
 }

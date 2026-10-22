@@ -297,7 +297,7 @@ fn generic_missing_ht_vht_wmm_fallback_retains_actual_beacon_but_not_he_eht() {
     }
 }
 #[test]
-fn peer_basic_mcs_requirements_and_response_basic_rates_are_enforced() {
+fn normal_basic_rules_keep_he_eht_and_real_rates_but_not_strict_only_ht_checks() {
     let j = modern_join();
     let b = beacon(&j);
     for kind in 0..4 {
@@ -319,7 +319,7 @@ fn peer_basic_mcs_requirements_and_response_basic_rates_are_enforced() {
             }
             rest = &mut rest[2 + length..];
         }
-        assert!(
+        assert_eq!(
             AssociationContext::build(
                 Ticket {
                     epoch: 1,
@@ -329,7 +329,8 @@ fn peer_basic_mcs_requirements_and_response_basic_rates_are_enforced() {
                 &b,
                 &response_metadata(bytes)
             )
-            .is_err(),
+            .is_ok(),
+            kind == 1,
             "kind{kind}"
         );
     }
@@ -537,4 +538,233 @@ fn malformed_unselected_ml_body_and_fragment_cannot_replace_single_link_operatio
     assert_eq!(c.channel().number, 36);
     assert_eq!(c.definition().center1_mhz, 5210);
     assert_eq!(c.negotiated().peer().unselected_multi_link_elements(), raw);
+}
+
+#[test]
+fn review_source_eht_basic_local_support_does_not_require_peer_common_envelope() {
+    let mutate = |bytes: &mut Vec<u8>, own: bool| {
+        let mut at = 0;
+        while at < bytes.len() {
+            let len = usize::from(bytes[at + 1]);
+            let id = bytes[at];
+            let b = &mut bytes[at + 2..at + 2 + len];
+            if id == 255 && b[0] == 108 {
+                b[12..18].fill(if own { 0x22 } else { 0x12 });
+            }
+            if id == 255 && b[0] == 106 {
+                b[2..6].fill(0x22);
+            }
+            at += 2 + len;
+        }
+    };
+    let mut local = modern_ies(false);
+    mutate(&mut local, true);
+    let mut j = modern_join();
+    j.request =
+        wire::AssociationRequest::new_modern(1, 10, local, Band::Ghz5, Mode::Eht, Width::Mhz80)
+            .unwrap();
+    assert!(
+        j.request
+            .modern()
+            .unwrap()
+            .capabilities()
+            .meets_eht_basic([0x22; 4])
+    );
+    let mut b = beacon(&j);
+    mutate(&mut b.elements, false);
+    let mut elements = modern_ies(true);
+    mutate(&mut elements, false);
+    let peer = phy::Capabilities::parse(Band::Ghz5, phy::Role::AccessPoint, &elements).unwrap();
+    let n = phy::Negotiated::between(
+        j.request.modern().unwrap().capabilities(),
+        &peer,
+        Mode::Eht,
+        Width::Mhz80,
+    )
+    .unwrap();
+    assert!(n.rx_nss > 0 && n.tx_nss > 0);
+    let result = AssociationContext::build(
+        Ticket {
+            epoch: 1,
+            serial: 2,
+        },
+        &j,
+        &b,
+        &response_metadata(elements),
+    );
+    assert!(
+        result.is_ok(),
+        "source local requirement passes; usable asymmetric common envelope is not a second Basic predicate: {result:?}"
+    );
+}
+
+fn edit_elements(mut bytes: &mut [u8], mut edit: impl FnMut(u8, &mut [u8])) {
+    while !bytes.is_empty() {
+        let n = usize::from(bytes[1]);
+        let id = bytes[0];
+        edit(id, &mut bytes[2..2 + n]);
+        bytes = &mut bytes[2 + n..];
+    }
+}
+#[test]
+fn default_ht_vht_basic_claims_remain_raw_without_rejecting_usable_profiles() {
+    for (mode, width) in [(Mode::Ht, Width::Mhz40), (Mode::Vht, Width::Mhz80)] {
+        for basic in [0, 0x5555_u16, 0xffff] {
+            let mut j = modern_join();
+            j.request = wire::AssociationRequest::new_modern(
+                1,
+                10,
+                modern_ies(false),
+                Band::Ghz5,
+                mode,
+                width,
+            )
+            .unwrap();
+            let mut b = beacon(&j);
+            let mut response = modern_ies(true);
+            for bytes in [&mut b.elements, &mut response] {
+                edit_elements(bytes, |id, data| {
+                    if id == 61 {
+                        data[6..16].fill(0xff);
+                    }
+                    if id == 192 {
+                        data[3..5].copy_from_slice(&basic.to_le_bytes());
+                    }
+                });
+            }
+            let c = AssociationContext::build(
+                Ticket {
+                    epoch: 1,
+                    serial: 2,
+                },
+                &j,
+                &b,
+                &response_metadata(response),
+            )
+            .unwrap();
+            assert_eq!(c.negotiated().mode, mode);
+            assert_eq!(c.definition().width, width);
+            assert!(c.negotiated().rx_nss > 0 && c.negotiated().tx_nss > 0);
+            assert_eq!(
+                &c.operations().ht.as_ref().unwrap().basic_mcs[..10],
+                &[0xff; 10]
+            );
+            assert_eq!(c.operations().vht.as_ref().unwrap().basic_mcs, basic);
+        }
+    }
+}
+#[test]
+fn zero_he_basic_compatibility_cannot_invent_streams_or_bypass_peer_one_ss() {
+    let j = modern_join();
+    let b = beacon(&j);
+    let mut response = modern_ies(true);
+    edit_elements(&mut response, |id, data| {
+        if id == 255 && data[0] == 36 {
+            data[5..7].fill(0);
+        }
+    });
+    let c = AssociationContext::build(
+        Ticket {
+            epoch: 1,
+            serial: 2,
+        },
+        &j,
+        &b,
+        &response_metadata(response.clone()),
+    )
+    .unwrap();
+    assert_eq!((c.negotiated().rx_nss, c.negotiated().tx_nss), (1, 1));
+    assert_eq!(c.operations().he.as_ref().unwrap().basic_mcs, 0);
+    for start in [18, 20] {
+        let mut broken = response.clone();
+        edit_elements(&mut broken, |id, data| {
+            if id == 255 && data[0] == 35 {
+                data[start..start + 2].fill(0xff);
+            }
+        });
+        assert!(
+            AssociationContext::build(
+                Ticket {
+                    epoch: 1,
+                    serial: 2
+                },
+                &j,
+                &b,
+                &response_metadata(broken)
+            )
+            .is_err()
+        );
+    }
+}
+#[test]
+fn full_local_he_source_slots_are_explicit_and_preserve_normal_one_width_semantics() {
+    let own = modern_ies(false);
+    let local = phy::Capabilities::parse(Band::Ghz5, phy::Role::Station, &own).unwrap();
+    let he = local.he().unwrap();
+    let m = he.mcs_80;
+    let source = [m, he.mcs_160.unwrap(), phy::McsMaps { rx: 0, tx: 0 }];
+    assert_eq!(he.mcs_80p80, None);
+    assert_eq!(local.local_he_source_maps(), None);
+    let mut j = modern_join();
+    let mut b = beacon(&j);
+    let mut response = modern_ies(true);
+    for bytes in [&mut b.elements, &mut response] {
+        edit_elements(bytes, |id, data| {
+            if id == 255 && data[0] == 35 {
+                data[18..22].copy_from_slice(&[0xf0, 0xff, 0xf0, 0xff]);
+            }
+            if id == 255 && data[0] == 36 {
+                data[5..7].copy_from_slice(&0xfff0_u16.to_le_bytes());
+            }
+        });
+    }
+    let result = AssociationContext::build(
+        Ticket {
+            epoch: 1,
+            serial: 2,
+        },
+        &j,
+        &b,
+        &response_metadata(response.clone()),
+    );
+    assert!(matches!(
+        result,
+        Err(Error::Phy(phy::Error::Missing(
+            "complete local HE source MCS slots"
+        )))
+    ));
+    let local = local.with_local_he_source_maps(source).unwrap();
+    let mut changed = own.clone();
+    edit_elements(&mut changed, |id, b| {
+        if id == 45 {
+            b[0] ^= 1;
+        }
+    });
+    assert!(
+        wire::AssociationRequest::new_modern_with_local(
+            1,
+            10,
+            changed,
+            local.clone(),
+            Mode::Eht,
+            Width::Mhz80
+        )
+        .is_err()
+    );
+    j.request =
+        wire::AssociationRequest::new_modern_with_local(1, 10, own, local, Mode::Eht, Width::Mhz80)
+            .unwrap();
+    let c = AssociationContext::build(
+        Ticket {
+            epoch: 1,
+            serial: 2,
+        },
+        &j,
+        &b,
+        &response_metadata(response),
+    )
+    .unwrap();
+    assert_eq!(c.negotiated().local().local_he_source_maps(), Some(&source));
+    assert_eq!(c.negotiated().local().he().unwrap().mcs_80p80, None);
+    assert_eq!((c.negotiated().rx_nss, c.negotiated().tx_nss), (1, 1));
 }

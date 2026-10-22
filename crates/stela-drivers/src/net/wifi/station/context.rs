@@ -4,7 +4,7 @@
 use super::{
     Error, Join, Ticket,
     operations::{ChannelDefinition, Operations},
-    phy::{Capabilities, McsMaps, Mode, Negotiated, Role},
+    phy::{Capabilities, Negotiated, Role},
     wire::AssociationResponse,
 };
 use crate::net::{
@@ -76,16 +76,7 @@ fn effective(beacon: &Bss, response: &AssociationResponse) -> Result<Vec<u8>, Er
     }
     Ok(out)
 }
-fn basic_maps(required: u16, common: McsMaps) -> bool {
-    (0..8).all(|n| {
-        let r = (required >> (2 * n)) & 3;
-        r == 3
-            || [common.rx, common.tx].iter().all(|m| {
-                let v = (m >> (2 * n)) & 3;
-                v != 3 && v >= r
-            })
-    })
-}
+
 impl AssociationContext {
     pub(super) fn build(
         ticket: Ticket,
@@ -166,40 +157,22 @@ impl AssociationContext {
         if definition.width != selection.width() {
             return Err(Error::Unsupported("selected/advertised width mismatch"));
         }
-        if let Some(ht) = &operations.ht
-            && selection.mode() != Mode::Legacy
-        {
-            let n = negotiated
-                .ht
-                .as_ref()
-                .ok_or(Error::Unsupported("HT basic MCS profile"))?;
-            if ht.basic_mcs[..10]
-                .iter()
-                .zip(n.peer_rx_mcs.iter().zip(&n.local_rx_mcs))
-                .any(|(required, (tx, rx))| required & !(tx & rx) != 0)
-            {
-                return Err(Error::Unsupported("HT basic MCS requirement"));
-            }
-        }
-        if let Some(v) = &operations.vht
-            && let Some(n) = &negotiated.vht
-            && !basic_maps(v.basic_mcs, n.mcs)
-        {
-            return Err(Error::Unsupported("VHT basic MCS requirement"));
-        }
+        // Actual MT7925 uses Linux's normal non-STRICT profile. HT/VHT
+        // operation/basic observations remain retained, but their strict-only
+        // basic-MCS tests do not reject otherwise usable common rates.
         if let Some(he) = &operations.he
-            && let Some(n) = &negotiated.he
-            && !basic_maps(he.basic_mcs, n.mcs_80)
+            && negotiated.he.is_some()
+            && (!peer.meets_peer_he_basic(he.basic_mcs)
+                || !selection
+                    .capabilities()
+                    .meets_local_he_basic(he.basic_mcs)
+                    .map_err(failure)?)
         {
             return Err(Error::Unsupported("HE basic MCS requirement"));
         }
         if let Some(e) = &operations.eht
-            && let Some(n) = &negotiated.eht
-            && (!selection.capabilities().meets_eht_basic(e.basic_mcs)
-                || e.basic_mcs
-                    .iter()
-                    .zip(n.ranges)
-                    .any(|(r, n)| (r & 15) > (n >> 4) || (r >> 4) > (n & 15)))
+            && negotiated.eht.is_some()
+            && !selection.capabilities().meets_eht_basic(e.basic_mcs)
         {
             return Err(Error::Unsupported("EHT basic MCS requirement"));
         }

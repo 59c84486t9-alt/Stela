@@ -175,6 +175,9 @@ pub struct Capabilities {
     wmm: Option<Wmm>,
     // Complete outer ML TLVs and contiguous fragments; unparsed AP facts only.
     unselected_multi_link: Vec<u8>,
+    // Actual local source object words, including untransmitted width slots.
+    // Observations only; the native owner must bind them to its real issuer.
+    local_he_source_maps: Option<[McsMaps; 3]>,
 }
 
 fn insert<'a>(slot: &mut Option<&'a [u8]>, data: &'a [u8]) -> Result<(), Error> {
@@ -286,6 +289,7 @@ impl Capabilities {
             he_6ghz,
             wmm,
             unselected_multi_link,
+            local_he_source_maps: None,
         })
     }
     /// Opaque AP advertisement TLVs, including contiguous full-length ML
@@ -293,6 +297,50 @@ impl Capabilities {
     /// is inferred from these bytes. Local/outgoing ML remains unsupported.
     pub fn unselected_multi_link_elements(&self) -> &[u8] {
         &self.unselected_multi_link
+    }
+    /// Retain actual local source struct slots without inferring hidden words
+    /// from absent wire maps. These are observations, never hardware authority.
+    /// The physical owner must compare them to its genuine source-cap issuer.
+    pub fn with_local_he_source_maps(mut self, maps: [McsMaps; 3]) -> Result<Self, Error> {
+        if self.role != Role::Station {
+            return Err(Error::Invalid("local source maps on AP observation"));
+        }
+        let he = self
+            .he
+            .as_ref()
+            .ok_or(Error::Missing("local HE capability"))?;
+        if he.mcs_80 != maps[0]
+            || he.mcs_160.is_some_and(|m| m != maps[1])
+            || he.mcs_80p80.is_some_and(|m| m != maps[2])
+        {
+            return Err(Error::Incompatible("local source/transmitted HE maps"));
+        }
+        self.local_he_source_maps = Some(maps);
+        Ok(self)
+    }
+    pub fn local_he_source_maps(&self) -> Option<&[McsMaps; 3]> {
+        self.local_he_source_maps.as_ref()
+    }
+    pub(crate) fn matches_wire_capabilities(&self, observed: &Self) -> bool {
+        let mut stripped = self.clone();
+        stripped.local_he_source_maps = None;
+        stripped == *observed
+    }
+    pub fn meets_peer_he_basic(&self, required: u16) -> bool {
+        self.role == Role::AccessPoint
+            && self
+                .he
+                .as_ref()
+                .is_some_and(|he| he.peer_meets_basic(required))
+    }
+    pub fn meets_local_he_basic(&self, required: u16) -> Result<bool, Error> {
+        if self.role != Role::Station {
+            return Err(Error::Invalid("local HE verification role"));
+        }
+        self.he
+            .as_ref()
+            .ok_or(Error::Missing("local HE capability"))?
+            .local_meets_basic(required, self.local_he_source_maps)
     }
     /// Check the AP basic EHT MCS/NSS requirement against every actual local
     /// supported width, including20-only STA mapping. This is metadata

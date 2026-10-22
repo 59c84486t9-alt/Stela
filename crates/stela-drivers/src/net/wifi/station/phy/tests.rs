@@ -633,3 +633,30 @@ fn opaque_multi_link_fragments_cannot_inherit_other_link_ie_fields() {
     }
     assert!(Capabilities::parse(Band::Ghz5, Role::AccessPoint, &too_long).is_err());
 }
+
+#[test]
+fn complete_local_he_source_words_must_match_transmitted_maps_without_gaining_authority() {
+    let (local, ap) = pair(Band::Ghz5, 12, false);
+    let he = local.he().unwrap();
+    let maps = [he.mcs_80, he.mcs_160.unwrap(), McsMaps { rx: 0, tx: 0 }];
+    let complete = local.clone().with_local_he_source_maps(maps).unwrap();
+    assert_eq!(complete.local_he_source_maps(), Some(&maps));
+    assert!(complete.matches_wire_capabilities(&local));
+    let two = pair(Band::Ghz2, 2, false).0;
+    assert_eq!(two.he().unwrap().mcs_160, None);
+    let m = two.he().unwrap().mcs_80;
+    let two = two
+        .with_local_he_source_maps([m, m, McsMaps { rx: 0, tx: 0 }])
+        .unwrap();
+    assert_eq!(two.local_he_source_maps().unwrap()[1], m);
+    assert_eq!(two.he().unwrap().mcs_160, None);
+    assert!(ap.with_local_he_source_maps(maps).is_err());
+    for slot in 0..2 {
+        let mut wrong = maps;
+        wrong[slot].rx ^= 1;
+        assert!(local.clone().with_local_he_source_maps(wrong).is_err());
+    }
+    let no_he = Capabilities::parse(Band::Ghz5, Role::Station, &[1, 3, 0x8c, 0x98, 0xb0]).unwrap();
+    assert!(no_he.clone().with_local_he_source_maps(maps).is_err());
+    assert!(no_he.meets_local_he_basic(0).is_err());
+}

@@ -149,6 +149,32 @@ impl AssociationRequest {
                 _ => Error::Invalid("local modern capabilities"),
             },
         )?;
+        Self::new_modern_with_local(capabilities, listen_interval, bytes, local, mode, width)
+    }
+
+    /// Preserve complete local source-capability observations alongside the
+    /// exact transmitted advertisement. Actual native-owner binding remains
+    /// mandatory; caller-provided source words are not hardware proof.
+    pub fn new_modern_with_local(
+        capabilities: u16,
+        listen_interval: u16,
+        bytes: Vec<u8>,
+        local: phy::Capabilities,
+        mode: phy::Mode,
+        width: phy::Width,
+    ) -> Result<Self, Error> {
+        if mode == phy::Mode::Legacy || local.role() != phy::Role::Station {
+            return Err(Error::Invalid("modern local mode/role"));
+        }
+        let observed = phy::Capabilities::parse(local.band(), phy::Role::Station, &bytes).map_err(
+            |error| match error {
+                phy::Error::Unsupported(effect) => Error::Unsupported(effect),
+                _ => Error::Invalid("local modern capabilities"),
+            },
+        )?;
+        if !local.matches_wire_capabilities(&observed) {
+            return Err(Error::Invalid("local source/advertisement mismatch"));
+        }
         let mut request = Self::parse(capabilities, listen_interval, bytes, true)?;
         request.modern = Some(Arc::new(ModernSelection {
             capabilities: local,
