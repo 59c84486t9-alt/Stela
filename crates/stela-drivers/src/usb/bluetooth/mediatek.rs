@@ -4,6 +4,11 @@
 //! from pinned Linux btmtk.c. The explicit native initializer requires observed
 //! silicon/ROM/flavor, exact Provider input and genuine EP0 WMT events. Image
 //! authenticity, physical/radio qualification and guest services remain separate.
+//! Native attachment must establish that the paired Wi-Fi initial restart has
+//! completed before BT setup, or that Wi-Fi is known not to be operating.
+//! Same-device pairing/order are actual physical-owner inputs, not inferred from
+//! USB IDs. No initializer/media close grants shared CONNV3 reset authority;
+//! automatic shared recovery/retry remains unsupported while siblings may live.
 mod firmware;
 mod identity;
 mod initialize;
@@ -11,6 +16,8 @@ mod wmt;
 pub use firmware::{FirmwareMetadata, Fragment, Patch, Section, SectionMetadata};
 pub use identity::{Chip, Identity, UsbIdentity};
 pub use wmt::{WmtCommandReceipt, WmtEvent};
+
+pub mod media;
 
 use super::{FirmwareReceipt, Hci, Io};
 use alloc::{boxed::Box, vec::Vec};

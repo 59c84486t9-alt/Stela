@@ -19,8 +19,9 @@
 //! observations. Other vendor/format variants remain explicit unsupported paths.
 //! A Bluetooth host stack independently establishes radio services.
 //! A successful USB command submission is not HCI Command Complete/Status.
-//! SCO, USB isochronous/ISO traffic, bulk serialization, hotplug reattachment,
-//! suspend/resume and guest USB forwarding remain unsupported/separate work.
+//! The separate [`mediatek::media`] session adds this PC's initialized MT7925
+//! SCO/interrupt-ISO transport. Generic media, bulk serialization, physical
+//! suspend/resume, hotplug reattachment and guest USB forwarding remain separate.
 //!
 //! Receive requests remain posted while idle; polling never waits for radio
 //! traffic. Incomplete HCI frames have a bounded assembly deadline. Errors close

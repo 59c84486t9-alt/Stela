@@ -10,6 +10,8 @@ use crate::{
 use alloc::vec::Vec;
 use core::sync::atomic::{Ordering, fence};
 
+mod media;
+
 const SEND_US: u64 = 5_000_000;
 
 struct Receive {
@@ -31,6 +33,7 @@ pub struct Host {
     transmit_pending: bool,
     control_pending: bool,
     closed: bool,
+    media: Option<media::Native>,
 }
 
 impl Hci<Host> {
@@ -66,6 +69,7 @@ impl Hci<Host> {
             transmit_pending: false,
             control_pending: false,
             closed: false,
+            media: None,
         };
         Ok(Self::from_io(binding, host))
     }
@@ -199,8 +203,14 @@ impl Io for Host {
         if self.closed {
             return Ok(());
         }
+        let mut failure = if let Some(mut media) = self.media.take() {
+            let failure = media.close(self).err();
+            self.media = Some(media);
+            failure
+        } else {
+            None
+        };
         self.closed = true;
-        let mut failure = None;
         let mut controller = self.controller.borrow_mut();
         for (active, dci) in [
             (self.events.queued.is_some(), self.events.endpoint.dci()),
