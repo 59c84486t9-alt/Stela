@@ -196,6 +196,40 @@ impl<C: 'static> HardwareKey<C> {
         material: &[u8],
         receive: ReplaySeed,
     ) -> Result<KeyIdentity, Error> {
+        self.install_inner(mailbox, index, cipher, material, receive, false)
+    }
+    /// Resume an actually retired, receive-only GTK after an authenticated OS
+    /// key exchange explicitly supplies this same key and its current RSC.
+    /// No transmitting material or automatic reinstallation fallback is allowed.
+    ///
+    /// # Safety
+    /// The caller has authenticated this exact material/index/cipher/BSSID and
+    /// RSC in the current real OS key exchange. The previous GTK's firmware
+    /// installation and all RX/TX/IRQ/deferred users were actually removed and
+    /// drained before rebind. Copied RX counters, a source ACK or a drain alone
+    /// are not authenticated RSC inputs. Preserve this same canonical owner and
+    /// every earlier replay floor through all pending/uncertain outcomes.
+    pub unsafe fn resume_receive_only<W: QueueIo, F: QueueIo, R: QueueIo>(
+        &mut self,
+        mailbox: &mut Mailbox<W, F, R>,
+        index: u8,
+        cipher: Cipher,
+        material: &[u8],
+        receive: ReplaySeed,
+    ) -> Result<KeyIdentity, Error> {
+        // SAFETY: the explicit authenticated continuation contract above is
+        // exactly the canonical resume contract, never inferred by this driver.
+        self.install_inner(mailbox, index, cipher, material, receive, true)
+    }
+    fn install_inner<W: QueueIo, F: QueueIo, R: QueueIo>(
+        &mut self,
+        mailbox: &mut Mailbox<W, F, R>,
+        index: u8,
+        cipher: Cipher,
+        material: &[u8],
+        receive: ReplaySeed,
+        resume: bool,
+    ) -> Result<KeyIdentity, Error> {
         self.check(mailbox)?;
         let state = self.owned_mut();
         if state.phase == Phase::Removed {
@@ -205,15 +239,24 @@ impl<C: 'static> HardwareKey<C> {
             KeyScope::Pairwise(_) => TransmitSeed::FIRMWARE_FRESH,
             KeyScope::Group(_) => TransmitSeed::RECEIVE_ONLY,
         };
-        let ticket =
-            match state
+        let issuance = if resume {
+            // SAFETY: reached only through the explicit unsafe authenticated
+            // resume API; the actual slot/history is the same retained object.
+            unsafe {
+                state
+                    .slot
+                    .begin_receive_only_resume(index, cipher, material, receive, state.scope)
+            }
+        } else {
+            state
                 .slot
                 .begin_install(index, cipher, material, receive, state.scope, transmit)
-            {
-                Ok(ticket) => ticket,
-                Err(security::Error::AlreadyInstalled(key)) => return Ok(key),
-                Err(e) => return Err(Error::Security(e)),
-            };
+        };
+        let ticket = match issuance {
+            Ok(ticket) => ticket,
+            Err(security::Error::AlreadyInstalled(key)) => return Ok(key),
+            Err(e) => return Err(Error::Security(e)),
+        };
         let request = match Request::install(mailbox.identity.chip, state.context, ticket, material)
         {
             Ok(request) => request,

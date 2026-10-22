@@ -387,11 +387,35 @@ fn actual_mt7925_init_scan_secure_client_reconnect_and_stop() {
     driver
         .install_key(true, 0, &[3; 16], ReplaySeed::ZERO)
         .unwrap();
-    driver
-        .install_key(false, 2, &[4; 16], ReplaySeed::ZERO)
-        .unwrap();
+    // Ordinary fresh-key installation cannot silently reset the old GTK.
+    assert!(matches!(
+        driver.install_key(false, 2, &[2; 16], ReplaySeed::ZERO),
+        Err(ClientError::Key(
+            crate::net::wifi::mediatek::mailbox::key::Error::Security(
+                wifi::security::Error::Reinstallation
+            )
+        ))
+    ));
+    // Actual modeled OS exchange authenticates the same AP GTK and RSC0;
+    // previous delivered PN1 remains authoritative in the original slot.
+    unsafe { driver.resume_group_key(2, &[2; 16], ReplaySeed::ZERO) }.unwrap();
     let next = driver.station().association_epoch().unwrap();
     driver.authorize_port(next).unwrap();
+    incoming(&model, &data(true), Some((1, 2, 1)), false);
+    assert!(matches!(
+        driver.poll(41, &Source, &mut Policy(true)),
+        Err(ClientError::Data(station::data::Error::Crypto(
+            wifi::security::Error::Replay
+        )))
+    ));
+    incoming(&model, &data(true), Some((1, 2, 2)), false);
+    assert!(matches!(
+        driver
+            .poll(42, &Source, &mut Policy(true))
+            .unwrap()
+            .as_slice(),
+        [Event::Ingress(station::data::Ingress::Data(_))]
+    ));
     assert!(matches!(
         driver.transmit(
             epoch,
@@ -592,6 +616,104 @@ fn actual_roc_expiring_during_native_packet_preparation_never_publishes() {
     // actual grant and all controller/IRQ resources remain retained.
     assert!(model.response.lock().unwrap().peers.contains_key(&1));
     assert_eq!(model.response.lock().unwrap().roc_channel, Some(36));
+    drop(driver);
+    assert_eq!(model.drops.load(Ordering::Relaxed), 0);
+    assert!(!model.memory.lock().unwrap().mappings.is_empty());
+}
+
+fn retired_group_for_authenticated_resume() -> (
+    Client<Bar, Q, NativeGuard>,
+    Model,
+    wifi::security::KeyIdentity,
+) {
+    let (mut driver, model) = setup();
+    associated(&mut driver, &model, 0);
+    driver
+        .install_key(true, 0, &[1; 16], ReplaySeed::ZERO)
+        .unwrap();
+    let old = driver
+        .install_key(false, 2, &[2; 16], ReplaySeed::ZERO)
+        .unwrap();
+    driver
+        .authorize_port(driver.station().association_epoch().unwrap())
+        .unwrap();
+    incoming(&model, &data(true), Some((1, 2, 7)), false);
+    driver.poll(12, &Source, &mut Policy(true)).unwrap();
+    driver.disconnect().unwrap();
+    unsafe { driver.retire_peer_after_drain() }.unwrap();
+    associated(&mut driver, &model, 30);
+    driver
+        .install_key(true, 0, &[3; 16], ReplaySeed::ZERO)
+        .unwrap();
+    (driver, model, old)
+}
+#[test]
+fn actual_authenticated_gtk_resume_retains_old_identity_history_and_higher_os_rsc() {
+    for rsc in [3, 9] {
+        let (mut driver, model, old) = retired_group_for_authenticated_resume();
+        let seed = ReplaySeed::uniform(wifi::security::PacketNumber::new(rsc).unwrap());
+        let key = unsafe { driver.resume_group_key(2, &[2; 16], seed) }.unwrap();
+        assert_eq!(key.slot(), old.slot());
+        assert_eq!(key.native_epoch(), old.native_epoch());
+        assert_ne!(key.generation(), old.generation());
+        driver
+            .authorize_port(driver.station().association_epoch().unwrap())
+            .unwrap();
+        let floor = rsc.max(7);
+        incoming(&model, &data(true), Some((1, 2, floor)), false);
+        assert!(matches!(
+            driver.poll(41, &Source, &mut Policy(true)),
+            Err(ClientError::Data(station::data::Error::Crypto(
+                wifi::security::Error::Replay
+            )))
+        ));
+        incoming(&model, &data(true), Some((1, 2, floor + 1)), false);
+        assert!(matches!(
+            driver
+                .poll(42, &Source, &mut Policy(true))
+                .unwrap()
+                .as_slice(),
+            [Event::Ingress(station::data::Ingress::Data(_))]
+        ));
+        driver.disconnect().unwrap();
+        unsafe { driver.retire_peer_after_drain() }.unwrap();
+        driver.stop().unwrap();
+        model.response.lock().unwrap().clc_processing = false;
+        model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
+        unsafe { driver.stop_after_quiesce() }.unwrap();
+        drop(driver);
+        assert_eq!(model.drops.load(Ordering::Relaxed), 1);
+    }
+}
+#[test]
+fn uncertain_actual_gtk_resume_never_authorizes_port_or_drops_real_peer_owner() {
+    let (mut driver, model, _) = retired_group_for_authenticated_resume();
+    model.response.lock().unwrap().status = 0xdead;
+    assert!(matches!(
+        unsafe { driver.resume_group_key(2, &[2; 16], ReplaySeed::ZERO) },
+        Err(ClientError::Key(
+            crate::net::wifi::mediatek::mailbox::key::Error::Firmware(0xdead)
+        ))
+    ));
+    assert_eq!(driver.phase(), ClientPhase::Quarantined);
+    assert!(matches!(
+        driver.authorize_port(driver.station().association_epoch().unwrap()),
+        Err(ClientError::WrongPhase)
+    ));
+    assert!(matches!(
+        unsafe { driver.resume_group_key(2, &[2; 16], ReplaySeed::ZERO) },
+        Err(ClientError::WrongPhase)
+    ));
+    // Model processes the actual install before returning its nonzero status;
+    // no RejectedAndEmpty claim can release the programmed GTK or old floors.
+    assert!(
+        model
+            .response
+            .lock()
+            .unwrap()
+            .keys
+            .contains_key(&(profile().interface.broadcast_wcid as u8))
+    );
     drop(driver);
     assert_eq!(model.drops.load(Ordering::Relaxed), 0);
     assert!(!model.memory.lock().unwrap().mappings.is_empty());
