@@ -7,7 +7,8 @@
  * no duplicated hardware constants, Linux service shim or custom allocator. */
 #include "ggtt_probe_defs.h"
 #include "regs/xe_gtt_defs.h"
-#include "xe_wopcm_size.h"
+#include "xe_device_types.h"
+#include "xe_wopcm.h"
 static void invariant(void *context, bool condition)
 {
     (void)context;
@@ -40,7 +41,8 @@ int stela_intel_gsm_geometry(uint32_t platform, uint32_t graphics_verx100, bool 
     if (!gsm_size) return -12; /* Original no-preallocated-GSM refusal. */
     uint64_t offset = xe_ggtt_probe_gsm_offset();
     if (offset > actual_bar_bytes || gsm_size > actual_bar_bytes - offset) return -34;
-    uint64_t wopcm = xe_wopcm_default_size((enum xe_platform)platform, discrete);
+    struct xe_device xe = {.info = {.platform = (enum xe_platform)platform, .is_dgfx = discrete}};
+    uint64_t wopcm = xe_wopcm_size(&xe);
     if ((gsm_size / 8) * (uint64_t)XE_PAGE_SIZE <= wopcm) return -34;
     struct stela_intel_gsm_geometry result = {.gsm_offset = offset, .gsm_bytes = gsm_size};
     xe_ggtt_probe_pf_range(gsm_size, wopcm, &result.ggtt_start, &result.ggtt_bytes);

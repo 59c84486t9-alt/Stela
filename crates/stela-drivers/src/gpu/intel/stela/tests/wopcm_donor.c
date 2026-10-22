@@ -60,6 +60,7 @@ static void donor_warn(struct stela_wopcm_model *model, const char *expression, 
 #include "donor-verify.inc"
 #include "donor-wopcm-constants.inc"
 #define xe_wopcm_init donor_wopcm_init
+#define xe_wopcm_size donor_wopcm_size
 #include "donor-wopcm-body.inc"
 int stela_wopcm_donor(struct stela_wopcm_model *model, struct xe_wopcm *output)
 {

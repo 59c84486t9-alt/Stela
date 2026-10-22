@@ -8,9 +8,13 @@ AR ?= llvm-ar
 
 # Unchanged Linux sources build against Stela's compat environment first, with
 # Kbuild's forced includes, from system directories so upstream code keeps
-# Linux's warning profile rather than Stela's.
+# Linux's warning profile rather than Stela's. Adapters include the unchanged
+# Xe sources from a staging directory, away from their sibling headers, so the
+# Xe shadow headers in compat/xe resolve first.
+UPSTREAM := $(BUILD)/upstream
 LINUX_INCLUDES := -include $(SOURCE)/../../common/linux/include/linux/kconfig.h \
-                  -include $(SOURCE)/compat/linux/compiler_types.h -isystem $(SOURCE)/compat \
+                  -include $(SOURCE)/compat/linux/compiler_types.h -isystem $(UPSTREAM) \
+                  -isystem $(SOURCE)/compat -isystem $(SOURCE)/compat/xe \
                   -isystem $(SOURCE)/../xe -isystem $(SOURCE)/../i915 \
                   -isystem $(SOURCE)/../../common/linux/include \
                   -isystem $(SOURCE)/../../common/linux/include/uapi
@@ -46,6 +50,8 @@ HOST_COMPUTE_OBJECTS := $(addprefix $(BUILD)/host-compute-gen,$(addsuffix .o,$(C
 .SECONDARY: $(COMPUTE_HEADERS)
 OBJECTS += $(BUILD)/compute_dispatch.o $(COMPUTE_OBJECTS)
 OBJECTS += $(BUILD)/activation.o $(BUILD)/firmware.o $(BUILD)/wopcm.o $(BUILD)/ggtt_probe.o $(BUILD)/pat.o $(BUILD)/guc_reset.o
+HOST_ACTIVATION_OBJECTS := $(BUILD)/activation-host.o $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o \
+    $(BUILD)/pat-host.o $(BUILD)/guc_reset-host.o
 PACKER_GENERATIONS := 120 125 200 300 350
 I915_PACKER_GENERATIONS := 60 70 75 80 90 110
 
@@ -286,10 +292,14 @@ $(BUILD)/firmware-test: $(SOURCE)/tests/firmware.c $(SOURCE)/firmware.c \
 test-firmware: $(BUILD)/firmware-test
 	$(BUILD)/firmware-test
 
-WOPCM_HEADERS := $(SOURCE)/wopcm.h $(SOURCE)/activation.h $(SOURCE)/firmware.h \
-    $(SOURCE)/../xe/xe_wopcm_core.h $(SOURCE)/../xe/xe_wopcm_size.h $(SOURCE)/../xe/xe_wopcm_types.h \
-    $(SOURCE)/../xe/xe_huc_role.h $(SOURCE)/../xe/xe_mmio_verify.h \
+COMPAT_HEADERS := $(wildcard $(SOURCE)/compat/*/*.h)
+WOPCM_HEADERS := $(SOURCE)/wopcm.h $(SOURCE)/activation.h $(SOURCE)/firmware.h $(COMPAT_HEADERS) \
+    $(UPSTREAM)/xe_wopcm.c $(SOURCE)/../xe/xe_wopcm.h $(SOURCE)/../xe/xe_wopcm_types.h \
+    $(SOURCE)/../xe/xe_uc_fw.h $(SOURCE)/../xe/xe_uc_fw_types.h \
     $(SOURCE)/../xe/regs/xe_guc_regs.h $(SOURCE)/../xe/xe_platform_types.h
+$(UPSTREAM)/%.c: $(SOURCE)/../xe/%.c
+	mkdir -p "$(UPSTREAM)"
+	cp "$<" "$@"
 $(BUILD)/wopcm.o: $(SOURCE)/wopcm.c $(WOPCM_HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) -I$(SOURCE)/../../common/linux/include -MD -MP -c "$<" -o "$@"
 $(BUILD)/wopcm-host.o: $(SOURCE)/wopcm.c $(WOPCM_HEADERS) | $(BUILD)
@@ -336,17 +346,17 @@ $(BUILD)/wopcm-donor-reference.o: $(SOURCE)/tests/wopcm_donor.c $(SOURCE)/tests/
     $(BUILD)/wopcm-donor/donor-huc-role.inc
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(SOURCE)/../../common/linux/include \
 	    -isystem $(BUILD)/wopcm-donor -c "$<" -o "$@"
-$(BUILD)/wopcm-test: $(SOURCE)/tests/wopcm.c $(SOURCE)/tests/wopcm_donor.h \
-    $(WOPCM_HEADERS) $(BUILD)/wopcm-donor-reference.o
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(SOURCE)/../../common/linux/include \
-	    "$<" $(BUILD)/wopcm-donor-reference.o -lpthread -o "$@"
+$(BUILD)/wopcm-test: $(SOURCE)/tests/wopcm.c $(SOURCE)/tests/wopcm_donor.h $(SOURCE)/wopcm.c \
+    $(WOPCM_HEADERS) $(BUILD)/wopcm-donor-reference.o $(BUILD)/firmware-host.o
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) "$<" $(BUILD)/wopcm-donor-reference.o \
+	    $(BUILD)/firmware-host.o -lpthread -o "$@"
 .PHONY: test-wopcm
 test-wopcm: $(BUILD)/wopcm-test
 	$(BUILD)/wopcm-test
 $(BUILD)/activation-host.o: $(SOURCE)/activation.c $(ACTIVATION_HEADERS) | $(BUILD)
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(SOURCE)/../../common/linux/include -MD -MP -c "$<" -o "$@"
 .PHONY: host-activation
-host-activation: $(BUILD)/activation-host.o $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o $(BUILD)/pat-host.o $(BUILD)/guc_reset-host.o
+host-activation: $(HOST_ACTIVATION_OBJECTS)
 $(BUILD)/wopcm-owned-test: $(SOURCE)/tests/wopcm_owned.c $(SOURCE)/activation.c \
     $(ACTIVATION_HEADERS) $(WOPCM_HEADERS) $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o $(BUILD)/pat-host.o $(BUILD)/guc_reset-host.o
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(SOURCE)/../../common/linux/include \
@@ -397,7 +407,7 @@ GGTT_GMCH_SOURCE := $(SOURCE)/../../common/linux/include/drm/intel/i915_drm.h
 GGTT_PAGE_SOURCE := $(SOURCE)/../xe/xe_bo.h
 GGTT_SIZE_SOURCE := $(SOURCE)/../../common/linux/include/linux/sizes.h
 GGTT_PROBE_HEADERS := $(SOURCE)/ggtt_probe.h $(SOURCE)/../xe/xe_ggtt_probe_core.h \
-    $(SOURCE)/../xe/xe_wopcm_size.h $(SOURCE)/../xe/regs/xe_gtt_defs.h \
+    $(SOURCE)/../xe/xe_wopcm.h $(SOURCE)/compat/xe/xe_device_types.h $(SOURCE)/../xe/regs/xe_gtt_defs.h \
     $(SOURCE)/../xe/xe_platform_types.h $(GGTT_DEFS)
 $(GGTT_DEFS): $(GGTT_GMCH_SOURCE) $(GGTT_PAGE_SOURCE) $(GGTT_SIZE_SOURCE) | $(BUILD)
 	mkdir -p "$(BUILD)/ggtt"
@@ -452,9 +462,9 @@ $(BUILD)/ggtt-donor.o: $(SOURCE)/tests/ggtt_probe_donor.c $(SOURCE)/tests/ggtt_p
     $(BUILD)/ggtt/donor-range-clamp.inc $(BUILD)/ggtt/donor-pte-index.inc
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/ggtt -c "$<" -o "$@"
 $(BUILD)/ggtt-probe-test: $(SOURCE)/tests/ggtt_probe.c $(SOURCE)/tests/ggtt_probe_donor.h \
-    $(GGTT_PROBE_HEADERS) $(BUILD)/ggtt-donor.o $(BUILD)/ggtt_probe-host.o
+    $(GGTT_PROBE_HEADERS) $(BUILD)/ggtt-donor.o $(BUILD)/ggtt_probe-host.o $(HOST_ACTIVATION_OBJECTS)
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/ggtt "$<" \
-	    $(BUILD)/ggtt-donor.o $(BUILD)/ggtt_probe-host.o -o "$@"
+	    $(BUILD)/ggtt-donor.o $(BUILD)/ggtt_probe-host.o $(HOST_ACTIVATION_OBJECTS) -lpthread -o "$@"
 .PHONY: test-ggtt-probe
 test-ggtt-probe: $(BUILD)/ggtt-probe-test
 	$(BUILD)/ggtt-probe-test

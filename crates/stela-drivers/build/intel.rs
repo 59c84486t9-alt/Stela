@@ -1,11 +1,25 @@
 //! Source list for the native Intel support library; the caller owns target,
 //! compiler, archiver, freestanding flags, and the final library name. Dispatch
 //! headers use Mesa's original XML generator and a selected Python interpreter.
+/// Unchanged Xe sources that Stela's adapters include.
+const UPSTREAM: &[&str] = &["xe_wopcm.c"];
+
 pub fn configure(build: &mut cc::Build) {
-    use std::{env, path::PathBuf};
+    use std::{env, fs, path::PathBuf};
 
     let source = "src/gpu/intel";
     let linux = "src/gpu/common/linux/include";
+    let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
+    // Adapters include the unchanged Xe sources from a staging directory, away
+    // from their sibling headers, so the Xe shadow headers in compat/xe resolve
+    // first.
+    let upstream = output.join("intel-upstream");
+    fs::create_dir_all(&upstream).expect("create the unchanged Xe source directory");
+    for name in UPSTREAM {
+        let path = format!("{source}/xe/{name}");
+        println!("cargo:rerun-if-changed={path}");
+        fs::copy(&path, upstream.join(name)).expect("stage an unchanged Xe source");
+    }
     // Unchanged Linux sources build against Stela's compat environment first,
     // with Kbuild's forced includes, from system directories so upstream code
     // keeps Linux's warning profile rather than Stela's.
@@ -13,9 +27,12 @@ pub fn configure(build: &mut cc::Build) {
         .flag("-include")
         .flag(format!("{linux}/linux/kconfig.h"))
         .flag("-include")
-        .flag(format!("{source}/stela/compat/linux/compiler_types.h"));
+        .flag(format!("{source}/stela/compat/linux/compiler_types.h"))
+        .flag("-isystem")
+        .flag(&upstream);
     for directory in [
         format!("{source}/stela/compat"),
+        format!("{source}/stela/compat/xe"),
         format!("{source}/xe"),
         format!("{source}/i915"),
         linux.into(),
@@ -59,12 +76,12 @@ pub fn configure(build: &mut cc::Build) {
         "xe/xe_uc_fw_cpd.h",
         "xe/xe_uc_fw_types.h",
         "xe/xe_uc_fw_version.h",
-        "xe/xe_wopcm_core.h",
-        "xe/xe_wopcm_size.h",
+        "xe/xe_wopcm.h",
+        "xe/xe_uc_fw.h",
+        "xe/xe_macros.h",
         "xe/xe_ggtt_probe_core.h",
         "xe/regs/xe_gtt_defs.h",
         "xe/xe_wopcm_types.h",
-        "xe/xe_mmio_verify.h",
         "xe/xe_huc_role.h",
         "xe/regs/xe_guc_regs.h",
         "xe/xe_force_wake_core.h",
@@ -83,12 +100,24 @@ pub fn configure(build: &mut cc::Build) {
     ] {
         println!("cargo:rerun-if-changed={source}/{path}");
     }
-    println!("cargo:rerun-if-changed={linux}/linux/kconfig.h");
+    for header in [
+        "linux/kconfig.h",
+        "linux/align.h",
+        "linux/array_size.h",
+        "linux/container_of.h",
+        "linux/errno.h",
+        "linux/sizes.h",
+        "linux/stringify.h",
+        "kunit/static_stub.h",
+        "uapi/asm-generic/errno.h",
+        "uapi/asm-generic/errno-base.h",
+    ] {
+        println!("cargo:rerun-if-changed={linux}/{header}");
+    }
     println!("cargo:rerun-if-changed=src/gpu/common/linux/include/drm/intel/pciids.h");
     println!("cargo:rerun-if-changed=src/gpu/common/linux/include/vdso/align.h");
     println!("cargo:rerun-if-changed=src/gpu/common/linux/include/vdso/const.h");
     println!("cargo:rerun-if-env-changed=STELA_GPU_PYTHON");
-    let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
     let python = PathBuf::from(env::var_os("STELA_GPU_PYTHON").unwrap_or_else(|| "python3".into()));
     configure_ggtt(build, &output);
     configure_guc_reset(build, &output);

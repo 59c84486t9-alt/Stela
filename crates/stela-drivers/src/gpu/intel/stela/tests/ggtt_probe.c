@@ -4,7 +4,8 @@
 #include "xe_platform_types.h"
 #include "ggtt_probe_defs.h"
 #include "regs/xe_gtt_defs.h"
-#include "xe_wopcm_size.h"
+#include "xe_device_types.h"
+#include "xe_wopcm.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -28,7 +29,8 @@ int main(void)
                 if (!gsm) { assert(status == -12 && !memcmp(&out, &sentinel, sizeof(out))); continue; }
                 assert(!status && out.gsm_offset == 8 << 20 && out.gsm_bytes == gsm);
                 u64 start, size;
-                stela_gsm_donor_range(gsm, xe_wopcm_default_size((enum xe_platform)p, d != 0), &start, &size);
+                struct xe_device xe = {.info = {.platform = (enum xe_platform)p, .is_dgfx = d != 0}};
+                stela_gsm_donor_range(gsm, xe_wopcm_size(&xe), &start, &size);
                 assert(out.ggtt_start == start && out.ggtt_bytes == size);
                 // Independent hardware field/range oracle, not just donor comparison.
                 assert(gsm == (2u << ((word >> 6 & 3) - 1)) * 1024 * 1024);
