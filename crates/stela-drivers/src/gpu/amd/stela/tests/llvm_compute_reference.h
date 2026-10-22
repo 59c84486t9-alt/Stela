@@ -6,7 +6,7 @@
  * Exact donor from Mesa 31e9a6b2e95e30d84bf3177d1f497d063e59b6b2,
  * src/gallium/drivers/radeonsi/gfx/si_shader.c.
  * Function SHA256 ff8eb230fe15b559ad2a946ced5607e5ec3a694124a26ebf85d8e533b588cea1
- * Compiled only with minimal model containers in air_shared_test.c.
+ * Compiled only with minimal model containers in air_shared.c.
  */
 unsigned si_calculate_needed_lds_size(enum amd_gfx_level gfx_level, struct si_shader *shader)
 {

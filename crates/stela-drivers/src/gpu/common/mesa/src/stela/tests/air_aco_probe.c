@@ -16,7 +16,7 @@
 #endif
 #include "util/ralloc.h"
 #include "util/mesa-blake3.h"
-#include "../../../../amd/tests/air_probe_input.h"
+#include "../../../../../amd/stela/tests/air_probe_input.h"
 #include <inttypes.h>
 
 #define CHECK(condition) do { if (!(condition)) { \

@@ -3,9 +3,9 @@
  * The shader ABI is explicit; no device initialization/execution is claimed.
  */
 #include "air_to_nir.h"
-#include "air_probe_profile.h"
-#include "air_test_fixture.h"
-#include "probe_report.h"
+#include "stela/tests/air_probe_profile.h"
+#include "stela/tests/air_test_fixture.h"
+#include "stela/tests/probe_report.h"
 #include "amd/llvm/ac_llvm_build.h"
 #include "amd/llvm/ac_nir_to_llvm.h"
 #include "amd/llvm/ac_shader_abi.h"
@@ -14,7 +14,7 @@
 #include "amd/common/ac_shader_args.h"
 #include "amd/common/nir/ac_nir.h"
 #include "amd/common/sid.h"
-#include "../stela/llvm_float.h"
+#include "../hosted/llvm_float.h"
 #include "util/mesa-blake3.h"
 #include "util/ralloc.h"
 #include <llvm-c/Analysis.h>

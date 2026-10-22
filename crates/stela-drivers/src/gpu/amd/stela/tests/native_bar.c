@@ -3,7 +3,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#include "../stela/native_bar.h"
+#include "../native_bar.h"
 
 static struct stela_amd_bar_layout layout(uint32_t asic, uint64_t bar_bytes,
                                           uint32_t max_assignment, uint64_t page)

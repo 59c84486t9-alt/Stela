@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Partial captured CPU models plus synthetic VM addresses, never real devices. */
-#include "../stela/image.h"
+#include "../hosted/image.h"
 #include "amd/common/ac_descriptors.h"
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/ac_surface.h"

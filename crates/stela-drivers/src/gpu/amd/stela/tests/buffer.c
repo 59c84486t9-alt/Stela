@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Synthetic device/VM facts for hosted descriptor packing; no GPU is opened. */
-#include "../stela/buffer.h"
+#include "../hosted/buffer.h"
 #include "amd/common/ac_gpu_info.h"
 #include <assert.h>
 #include <stdio.h>

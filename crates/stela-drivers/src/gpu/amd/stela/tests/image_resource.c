@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Retained captured partial CPU models and synthetic VM views only. */
-#include "../stela/image_resource.h"
+#include "../hosted/image_resource.h"
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/sid.h"
 #include "util/u_math.h"

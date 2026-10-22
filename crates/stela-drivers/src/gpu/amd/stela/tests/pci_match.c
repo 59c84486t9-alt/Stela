@@ -4,7 +4,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#include "../stela/pci_match.c"
+#include "../pci_match.c"
 
 static const struct stela_amd_pci_policy defaults = {.discovery = -1, .force_asic_type = -1};
 

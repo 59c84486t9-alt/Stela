@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* CPU-only LLVM attribute/config contract fixtures; no GPU initialization. */
-#include "../stela/llvm_float.h"
+#include "../hosted/llvm_float.h"
 #include "amd/common/ac_binary.h"
 #include "amd/common/sid.h"
 #include "compiler/nir/nir.h"

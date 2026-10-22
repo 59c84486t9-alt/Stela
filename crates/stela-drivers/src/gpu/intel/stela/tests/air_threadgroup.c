@@ -11,7 +11,7 @@
 #include "intel/compiler/brw/brw_eu.h"
 #include "intel/compiler/elk/elk_nir.h"
 #include "intel/dev/intel_debug.h"
-#include "stela/intel_probe.h"
+#include "stela/tests/intel_probe.h"
 #include "threadgroup_bits.h"
 #include "util/mesa-blake3.h"
 #include "util/ralloc.h"

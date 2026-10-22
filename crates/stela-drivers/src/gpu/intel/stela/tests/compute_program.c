@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "../hosted/compute.h"
-#include "stela/intel_probe.h"
+#include "stela/tests/intel_probe.h"
 #include "intel/common/intel_common.h"
 #include "intel/common/intel_compute_slm.h"
 #include "intel/compiler/brw/brw_nir.h"

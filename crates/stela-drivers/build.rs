@@ -45,7 +45,7 @@ fn main() {
             .compile("stela-amd-port");
         // Fixtures for the integration test, which links them itself.
         linux()
-            .file("src/gpu/amd/tests/fixtures.c")
+            .file("src/gpu/amd/stela/tests/fixtures.c")
             .cargo_metadata(false)
             .compile("stela-amd-test-fixtures");
         for path in [
@@ -55,8 +55,8 @@ fn main() {
             "src/gpu/amd/pm/inc",
             "src/gpu/amd/ras/ras_mgr",
             "src/gpu/amd/amdxcp",
-            "src/gpu/amd/tests/fixtures.c",
-            "src/gpu/amd/tests/fixtures.h",
+            "src/gpu/amd/stela/tests/fixtures.c",
+            "src/gpu/amd/stela/tests/fixtures.h",
         ] {
             println!("cargo:rerun-if-changed={path}");
         }

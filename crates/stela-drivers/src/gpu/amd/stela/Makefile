@@ -41,18 +41,18 @@ $(BUILD)/%.o: $(SOURCE)/%.c $(COMPAT_HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"
 $(BUILD)/%-host.o: $(SOURCE)/%.c $(COMPAT_HEADERS) | $(BUILD)
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -MD -MP -c "$<" -o "$@"
-$(BUILD)/fixtures-host.o: $(AMD)/tests/fixtures.c $(COMPAT_HEADERS) | $(BUILD)
+$(BUILD)/fixtures-host.o: $(SOURCE)/tests/fixtures.c $(COMPAT_HEADERS) | $(BUILD)
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -MD -MP -c "$<" -o "$@"
 -include $(wildcard $(BUILD)/*.d)
 
 # Hosted tests over modelled registers, VRAM and firmware; each includes its
 # adapter or links the hosted adapters it calls.
-$(BUILD)/test-pci-match: $(AMD)/tests/pci_match_test.c $(SOURCE)/pci_match.c $(COMPAT_HEADERS) | $(BUILD)
+$(BUILD)/test-pci-match: $(SOURCE)/tests/pci_match.c $(SOURCE)/pci_match.c $(COMPAT_HEADERS) | $(BUILD)
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) "$<" -o "$@"
-$(BUILD)/test-ip-discovery: $(AMD)/tests/ip_discovery_test.c $(BUILD)/ip_discovery-host.o \
+$(BUILD)/test-ip-discovery: $(SOURCE)/tests/ip_discovery.c $(BUILD)/ip_discovery-host.o \
     $(BUILD)/pci_match-host.o $(BUILD)/fixtures-host.o
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) "$<" $(filter %.o,$^) -o "$@"
-$(BUILD)/test-native-bar: $(AMD)/tests/native_bar_test.c $(BUILD)/native_bar-host.o
+$(BUILD)/test-native-bar: $(SOURCE)/tests/native_bar.c $(BUILD)/native_bar-host.o
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) "$<" $(filter %.o,$^) -o "$@"
 $(addprefix test-,$(TESTS)): test-%: $(BUILD)/test-%
 	"$<"

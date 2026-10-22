@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "amdgpu.h"
-#include "../stela/ip_discovery.h"
+#include "../ip_discovery.h"
 #include "fixtures.h"
 
 /* The adapters' heap; amdgpu_discovery itself comes from the linked

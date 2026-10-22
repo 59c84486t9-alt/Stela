@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: MIT */
 /* Hosted ownership/ABI and retained compiler tests only. Target/VM facts and
  * upload addresses are CPU models; no initialized physical GPU is claimed. */
-#include "../stela/air_compile.h"
+#include "../hosted/air_compile.h"
 #include "amd/common/ac_binary.h"
 #include "amd/common/ac_shader_util.h"
 #include "amd/common/sid.h"
 #include "amd/compiler/aco_interface.h"
-#include "stela/air_test_fixture.h"
+#include "stela/tests/air_test_fixture.h"
 #include "util/mesa-blake3.h"
 #include "util/ralloc.h"
 #include <CommonCrypto/CommonDigest.h>

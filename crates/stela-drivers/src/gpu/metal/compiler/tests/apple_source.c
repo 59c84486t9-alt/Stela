@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Configuration and owned-byte boundary tests; no private compiler is loaded. */
-#include "apple_source.h"
+#include "../apple_source.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

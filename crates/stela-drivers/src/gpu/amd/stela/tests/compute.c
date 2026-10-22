@@ -3,8 +3,8 @@
  * compilation, original compiled RadeonSI donors and actual PM4 decoding.
  * No physical device, allocation, mapping or resource residency is created.
  */
-#include "../stela/compute.h"
-#include "../stela/compute_policy.h"
+#include "../hosted/compute.h"
+#include "../hosted/compute_policy.h"
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/ac_binary.h"
 #include "amd/common/ac_shader_util.h"
@@ -17,7 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 #if STELA_AMD_TEST_LLVM
-#include "../stela/llvm_float.h"
+#include "../hosted/llvm_float.h"
 #include "amd/llvm/ac_llvm_build.h"
 #include "amd/llvm/ac_nir_to_llvm.h"
 #include "amd/llvm/ac_shader_abi.h"

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Hosted descriptor CPU models. No initialized GPU or filter execution. */
-#include "../stela/sampler.h"
+#include "../hosted/sampler.h"
 #include "amd/common/ac_descriptors.h"
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/sid.h"

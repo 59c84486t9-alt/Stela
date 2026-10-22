@@ -4,10 +4,10 @@
  * device, allocation, residency, upload, execution or completion is claimed.
  */
 #include "air_to_nir.h"
-#include "air_test_fixture.h"
+#include "stela/tests/air_test_fixture.h"
 #include "air_probe_input.h"
-#include "../stela/compute.h"
-#include "../stela/llvm_compute.h"
+#include "../hosted/compute.h"
+#include "../hosted/llvm_compute.h"
 #include "amd/common/ac_binary.h"
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/ac_shader_util.h"
@@ -18,7 +18,7 @@
 #include <assert.h>
 #include <inttypes.h>
 #if STELA_AMD_TEST_LLVM
-#include "../stela/llvm_float.h"
+#include "../hosted/llvm_float.h"
 #include "amd/llvm/ac_llvm_build.h"
 #include "amd/llvm/ac_nir_to_llvm.h"
 #include "amd/llvm/ac_shader_abi.h"

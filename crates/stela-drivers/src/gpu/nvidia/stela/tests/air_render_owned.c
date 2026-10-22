@@ -5,7 +5,7 @@
 #include <string.h>
 #include <CommonCrypto/CommonDigest.h>
 #include "util/mesa-blake3.h"
-#include "stela/air_test_fixture.h"
+#include "stela/tests/air_test_fixture.h"
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); exit(1); } } while (0)
 

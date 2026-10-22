@@ -2,7 +2,7 @@
 #ifndef STELA_INTEL_AIR_PROBE_INPUT_H
 #define STELA_INTEL_AIR_PROBE_INPUT_H
 
-#include "air_test_fixture.h"
+#include "stela/tests/air_test_fixture.h"
 #include "util/mesa-blake3.h"
 
 /* Raw AIR is already selected by the production archive reader. Preserve the

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* CPU allocation/model checks only; no GPU mapping, upload or cache service. */
-#include "../stela/image_copy.h"
+#include "../hosted/image_copy.h"
 #include "image_fixture.h"
 #include "util/u_math.h"
 #include <stdio.h>

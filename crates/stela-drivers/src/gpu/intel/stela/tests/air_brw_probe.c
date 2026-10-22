@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #include "air_to_nir.h"
-#include "air_probe_profile.h"
+#include "stela/tests/air_probe_profile.h"
 #include "air_probe_input.h"
-#include "stela/intel_probe.h"
-#include "stela/probe_report.h"
+#include "stela/tests/intel_probe.h"
+#include "stela/tests/probe_report.h"
 #include "intel/compiler/intel_gfx_ver_enum.h"
 #include "intel/compiler/brw/brw_compiler.h"
 #include "intel/compiler/brw/brw_nir.h"

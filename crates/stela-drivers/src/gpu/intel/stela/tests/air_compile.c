@@ -6,7 +6,7 @@
 #include "legacy_compute.h"
 #include "surface.h"
 #include "fp_controls.h"
-#include "stela/air_test_fixture.h"
+#include "stela/tests/air_test_fixture.h"
 #include "intel/compiler/brw/brw_nir.h"
 #include "intel/compiler/elk/elk_nir.h"
 #include "intel/common/intel_compute_slm.h"
