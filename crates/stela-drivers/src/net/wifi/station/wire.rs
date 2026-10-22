@@ -110,6 +110,8 @@ fn rsn(mut bytes: &[u8]) -> Result<(Cipher, Cipher), Error> {
     Ok((pairwise, group))
 }
 
+pub(super) mod action;
+
 fn elements(bytes: &[u8]) -> Result<Vec<(u8, &[u8])>, Error> {
     let mut rest = bytes;
     let mut result = Vec::new();

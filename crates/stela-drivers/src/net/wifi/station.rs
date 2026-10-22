@@ -14,7 +14,7 @@
 
 use super::{
     Channel,
-    frame::Mpdu,
+    frame::{DEAUTHENTICATION, DISASSOCIATION, Mpdu, QOS_TIDS, TYPE_SUBTYPE, next_sequence},
     security::{KeyIdentity, KeyScope, KeySlot},
 };
 use crate::net::Mac;
@@ -23,7 +23,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 mod aggregate;
 mod context;
+mod sequence;
 pub use context::{AssociationContext, AssociationIntent};
+pub mod ba;
 pub mod data;
 pub mod operations;
 pub mod phy;
@@ -166,9 +168,12 @@ pub struct Station {
     epoch: u64,
     serial: u32,
     sequence: u16,
+    qos_sequence: [u16; QOS_TIDS],
     now: u64,
     pending: Option<Pending>,
     authorization: Option<(KeyIdentity, KeyIdentity)>,
+    rx_ba: ba::Sessions,
+    tx_ba: ba::tx::Sessions,
 }
 
 impl Station {
@@ -185,9 +190,12 @@ impl Station {
             epoch: 0,
             serial: 0,
             sequence: 0,
+            qos_sequence: [0; 16],
             now: 0,
             pending: None,
             authorization: None,
+            rx_ba: ba::Sessions::new(),
+            tx_ba: ba::tx::Sessions::new(),
         })
     }
 
@@ -239,7 +247,7 @@ impl Station {
             .checked_add(MANAGEMENT_RESPONSE_TIMEOUT_US)
             .ok_or(Error::Overflow)?;
         let ticket = self.ticket()?;
-        self.sequence = (self.sequence + 1) & 0xfff;
+        self.sequence = next_sequence(self.sequence);
         self.phase = phase;
         self.pending = Some(Pending {
             ticket,
@@ -405,7 +413,10 @@ impl Station {
             return Err(Error::Wire(wire::Error::Integrity));
         }
         wire::check_peer(frame, self.local, join.bssid)?;
-        if matches!(frame.header().control & 0x00fc, 0x00a0 | 0x00c0) {
+        if matches!(
+            frame.header().control & TYPE_SUBTYPE,
+            DISASSOCIATION | DEAUTHENTICATION
+        ) {
             let reason = wire::departure(frame)?;
             return self.remove(Some(Failure::PeerDeparture(reason)));
         }
@@ -628,6 +639,10 @@ impl Station {
         self.pending = None;
         self.authorization = None;
         self.phase = if result == Completion::Accepted {
+            // Accepted removal includes every actual BA/reorder/deferred user.
+            self.rx_ba = ba::Sessions::new();
+            self.tx_ba = ba::tx::Sessions::new();
+            self.qos_sequence = [0; 16];
             self.join = None;
             self.selected_beacon = None;
             self.context = None;

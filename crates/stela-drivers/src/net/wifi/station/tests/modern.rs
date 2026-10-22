@@ -2,6 +2,9 @@ use super::*;
 use crate::net::wifi::scan::result::{Bss, Kind};
 use crate::net::wifi::station::phy::{Mode, Width};
 
+mod ba;
+mod sequence;
+
 fn ie(out: &mut Vec<u8>, id: u8, b: &[u8]) {
     out.extend_from_slice(&[id, b.len() as u8]);
     out.extend_from_slice(b);

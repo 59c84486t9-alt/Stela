@@ -19,11 +19,30 @@ const DATA: u16 = 0x0008;
 const CONTROL: u16 = 0x0004;
 const EXTENSION: u16 = 0x000c;
 const QOS: u16 = 0x0080;
-const TO_DS: u16 = 0x0100;
-const FROM_DS: u16 = 0x0200;
+pub(crate) const TO_DS: u16 = 0x0100;
+pub(crate) const FROM_DS: u16 = 0x0200;
 const MORE_FRAGMENTS: u16 = 0x0400;
-const PROTECTED: u16 = 0x4000;
+pub(crate) const PROTECTED: u16 = 0x4000;
 const ORDER: u16 = 0x8000;
+/// Frame Control type and subtype bits, and the complete values compared.
+pub(crate) const TYPE_SUBTYPE: u16 = 0x00fc;
+pub(crate) const BLOCK_ACK_REQUEST: u16 = 0x0084;
+pub(crate) const DISASSOCIATION: u16 = 0x00a0;
+pub(crate) const DEAUTHENTICATION: u16 = 0x00c0;
+pub(crate) const ACTION: u16 = 0x00d0;
+/// Sequence Control's 12-bit sequence number.
+pub(crate) const SEQUENCE_MASK: u16 = 0x0fff;
+/// Largest Block Ack windows (Linux `IEEE80211_MAX_AMPDU_BUF_{EHT,HE,HT}`).
+pub(crate) const MAX_AMPDU_BUF_EHT: u16 = 1024;
+pub(crate) const MAX_AMPDU_BUF_HE: u16 = 256;
+pub(crate) const MAX_AMPDU_BUF_HT: u16 = 64;
+/// QoS TIDs a station tracks sequence numbers for (Linux `IEEE80211_NUM_TIDS`).
+pub(crate) const QOS_TIDS: usize = 16;
+
+/// The sequence number after `sequence`, modulo 4096.
+pub(crate) const fn next_sequence(sequence: u16) -> u16 {
+    sequence.wrapping_add(1) & SEQUENCE_MASK
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {

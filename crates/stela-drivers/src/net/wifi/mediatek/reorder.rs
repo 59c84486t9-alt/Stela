@@ -17,19 +17,15 @@
 //! signed half-range. The caller serializes RX, BAR, timer and teardown; there
 //! is no scheduler, lock or concurrent callback hidden in this queue.
 
+use crate::net::wifi::frame::{MAX_AMPDU_BUF_EHT, SEQUENCE_MASK, next_sequence as next};
 use alloc::vec::Vec;
 
-const SEQUENCE_MASK: u16 = 0x0fff;
 const SEQUENCE_HALF: u16 = 0x0800;
 /// EHT's maximum BA window; negotiation and actual firmware may limit it further.
-pub const MAX_WINDOW: u16 = 1024;
+pub const MAX_WINDOW: u16 = MAX_AMPDU_BUF_EHT;
 
 fn before(a: u16, b: u16) -> bool {
     a.wrapping_sub(b) & SEQUENCE_MASK > SEQUENCE_HALF
-}
-
-fn next(sequence: u16) -> u16 {
-    sequence.wrapping_add(1) & SEQUENCE_MASK
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
