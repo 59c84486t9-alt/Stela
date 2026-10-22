@@ -5,7 +5,7 @@ use crate::{
     memory::{CanonicalRamService, RegisteredSystemRam},
     platform::apple::{
         bus::{Access, Lifecycle, LifecycleState, MmioDevice, MmioError, Width},
-        dcs::native::{ChannelConfiguration, Controller, Request},
+        dcs::native::{CHANNELS, ChannelConfiguration, ChannelProgress, Controller},
     },
 };
 use alloc::{sync::Arc, vec::Vec};
@@ -28,8 +28,8 @@ impl NativeDcs {
             ram,
         })
     }
-    pub fn requests(&self) -> Vec<Request> {
-        self.controller.requests()
+    pub fn progress(&self) -> [ChannelProgress; CHANNELS] {
+        self.controller.progress()
     }
     pub fn requires_ram_access(&self, offset: u64, width: Width) -> bool {
         self.controller.requires_ram_access(offset, width)
@@ -122,7 +122,7 @@ impl MmioDevice for NativeDcs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::dcs::native::{CHANNEL_STRIDE, CHANNELS, Effect};
+    use crate::platform::apple::dcs::native::{CHANNEL_STRIDE, CHANNELS, Effect, Request};
     const CONFIG_EC8: u64 = 0xec8;
     const CONFIG_ED0: u64 = 0xed0;
     const GATING: u64 = 0x18;
@@ -205,7 +205,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(owner.requests().is_empty());
+        assert_eq!(owner.progress(), [ChannelProgress::default(); CHANNELS]);
         assert!(
             NativeDcs::initialized(configuration()[..7].to_vec(), LIVE, Arc::clone(&ram)).is_err()
         );
@@ -261,8 +261,10 @@ mod tests {
                 assert!(owner.read(offset, Width::Word, &mut access).is_err());
             }
         }
-        assert_eq!(owner.requests().len(), CHANNELS);
-        for (channel, request) in owner.requests().into_iter().enumerate() {
+        for (channel, progress) in owner.progress().into_iter().enumerate() {
+            assert_eq!(progress.completed_drains, 1);
+            assert!(progress.pending_configuration.is_none());
+            let request = progress.latest_drain.unwrap();
             assert_eq!(request.channel, channel);
             assert_eq!(request.serial, channel as u64 + 1);
             assert_eq!(
@@ -288,13 +290,13 @@ mod tests {
                     .is_err()
             );
         }
-        assert!(owner.requests().is_empty());
+        assert_eq!(owner.progress(), [ChannelProgress::default(); CHANNELS]);
         owner
             .write(GATING, Width::Word, 0x8899_1100, &mut access)
             .unwrap();
         assert_eq!(
-            alias.requests(),
-            [Request {
+            alias.progress()[0].pending_configuration,
+            Some(Request {
                 serial: 1,
                 channel: 0,
                 at: 77,
@@ -302,7 +304,7 @@ mod tests {
                     offset: GATING,
                     value: 0x8899_1100
                 }
-            }]
+            })
         );
         assert!(alias.read(GATING, Width::Word, &mut access).is_err());
         assert!(
@@ -327,7 +329,16 @@ mod tests {
                     .is_err()
             );
         }
-        assert_eq!(owner.requests().len(), 1);
+        assert_eq!(
+            owner.progress()[0].pending_configuration,
+            alias.progress()[0].pending_configuration
+        );
+        assert!(
+            owner
+                .progress()
+                .iter()
+                .all(|state| state.completed_drains == 0)
+        );
     }
 
     #[test]

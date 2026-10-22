@@ -48,15 +48,24 @@ pub struct Request {
     pub effect: Effect,
 }
 
+/// Fixed-size per-channel progress, not an ever-growing event queue. Completed
+/// drainage is represented by an exact count and latest completion; pending
+/// configuration retains its complete request until an actual backend exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChannelProgress {
+    pub pending_configuration: Option<Request>,
+    pub latest_drain: Option<Request>,
+    pub completed_drains: u64,
+}
+
 struct Channel {
     configuration: ChannelConfiguration,
-    pending: bool,
+    progress: ChannelProgress,
 }
 struct State {
     channels: Vec<Channel>,
     lifecycle: LifecycleState,
     serial: u64,
-    requests: Vec<Request>,
 }
 impl State {
     fn accessible(&self) -> Result<(), &'static str> {
@@ -66,24 +75,29 @@ impl State {
         }
         Ok(())
     }
-    fn record(&mut self, channel: usize, at: u64, effect: Effect) -> Result<(), &'static str> {
+    fn request(
+        &mut self,
+        channel: usize,
+        at: u64,
+        effect: Effect,
+    ) -> Result<Request, &'static str> {
         let serial = self
             .serial
             .checked_add(1)
             .ok_or("DCS request serial exhausted")?;
-        self.requests.push(Request {
+        let request = Request {
             serial,
             channel,
             at,
             effect,
-        });
+        };
         self.serial = serial;
-        Ok(())
+        Ok(request)
     }
 }
 
 /// One actual eight-channel frontend. Clones share control, lifecycle,
-/// pending-effect history; they are not copies.
+/// pending effects and bounded completed progress; they are not copies.
 #[derive(Clone)]
 pub struct Controller {
     state: Rc<RefCell<State>>,
@@ -108,17 +122,17 @@ impl Controller {
                     .into_iter()
                     .map(|configuration| Channel {
                         configuration,
-                        pending: false,
+                        progress: ChannelProgress::default(),
                     })
                     .collect(),
                 lifecycle,
                 serial: 0,
-                requests: Vec::new(),
             })),
         })
     }
-    pub fn requests(&self) -> Vec<Request> {
-        self.state.borrow().requests.clone()
+    pub fn progress(&self) -> [ChannelProgress; CHANNELS] {
+        let state = self.state.borrow();
+        core::array::from_fn(|channel| state.channels[channel].progress)
     }
     pub fn requires_ram_access(&self, offset: u64, width: Width) -> bool {
         locate(offset, width).is_ok_and(|(_, register)| register == DRAIN)
@@ -137,7 +151,11 @@ impl Controller {
             .try_borrow()
             .map_err(|_| "native DCS owner is already borrowed")?;
         state.accessible()?;
-        if state.channels.iter().any(|channel| channel.pending) {
+        if state
+            .channels
+            .iter()
+            .any(|channel| channel.progress.pending_configuration.is_some())
+        {
             return Err(
                 "native DCS drain cannot settle an outstanding channel configuration request",
             );
@@ -155,16 +173,25 @@ impl Controller {
         if value != u64::from(high) << 16 {
             return Err("native DCS flush must retain high16 and clear both low bytes");
         }
-        self.state
+        let mut state = self
+            .state
             .try_borrow_mut()
-            .map_err(|_| "native DCS owner is already borrowed")?
-            .record(
-                channel,
-                at,
-                Effect::Drain {
-                    preserved_high: high,
-                },
-            )
+            .map_err(|_| "native DCS owner is already borrowed")?;
+        let completed = state.channels[channel]
+            .progress
+            .completed_drains
+            .checked_add(1)
+            .ok_or("DCS completed drain count exhausted")?;
+        let request = state.request(
+            channel,
+            at,
+            Effect::Drain {
+                preserved_high: high,
+            },
+        )?;
+        state.channels[channel].progress.latest_drain = Some(request);
+        state.channels[channel].progress.completed_drains = completed;
+        Ok(())
     }
 }
 
@@ -186,7 +213,12 @@ impl Lifecycle for Controller {
         if proposed.reset || !proposed.retention {
             return Err("native DCS destructive reset/power loss is not source-qualified");
         }
-        if state.channels.iter().any(|channel| channel.pending) && proposed != state.lifecycle {
+        if state
+            .channels
+            .iter()
+            .any(|channel| channel.progress.pending_configuration.is_some())
+            && proposed != state.lifecycle
+        {
             return Err(
                 "native DCS lifecycle cannot discard pending channel configuration effects",
             );
@@ -213,7 +245,11 @@ impl MmioDevice for Controller {
             .try_borrow()
             .map_err(|_| fail("native DCS owner is already borrowed"))?;
         state.accessible().map_err(fail)?;
-        if state.channels[channel].pending {
+        if state.channels[channel]
+            .progress
+            .pending_configuration
+            .is_some()
+        {
             return Err(fail(
                 "native DCS configuration has no completed actual backend effect",
             ));
@@ -253,7 +289,11 @@ impl MmioDevice for Controller {
                 "native DCS write has no qualified full32 configuration or memory service",
             ));
         }
-        if state.channels[channel].pending {
+        if state.channels[channel]
+            .progress
+            .pending_configuration
+            .is_some()
+        {
             return Err(fail(
                 "native DCS channel still owns an incomplete configuration effect",
             ));
@@ -268,8 +308,8 @@ impl MmioDevice for Controller {
                 ));
             }
         }
-        state
-            .record(
+        let request = state
+            .request(
                 channel,
                 access.now,
                 Effect::Configuration {
@@ -278,13 +318,56 @@ impl MmioDevice for Controller {
                 },
             )
             .map_err(fail)?;
-        state.channels[channel].pending = true;
+        state.channels[channel].progress.pending_configuration = Some(request);
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_drain_progress_is_bounded_and_exhaustion_preserves_pending_effects() {
+        let live = LifecycleState {
+            powered: true,
+            clocked: true,
+            quiesced: false,
+            reset: false,
+            retention: true,
+        };
+        let owner = Controller::initialized(alloc::vec![ChannelConfiguration { ec8: 1, ed0: 2, gating: 0, drain_high: 0xa123 }; CHANNELS], live).unwrap();
+        for serial in 1..=10000 {
+            owner
+                .record_ram_drain(DRAIN, Width::Word, 0xa1230000, serial)
+                .unwrap();
+        }
+        let progress = owner.progress();
+        assert_eq!(progress.len(), CHANNELS);
+        assert_eq!(progress[0].completed_drains, 10000);
+        assert_eq!(progress[0].latest_drain.unwrap().serial, 10000);
+        assert!(progress[0].pending_configuration.is_none());
+        owner.state.borrow_mut().channels[0]
+            .progress
+            .completed_drains = u64::MAX;
+        let previous = owner.progress();
+        assert!(
+            owner
+                .record_ram_drain(DRAIN, Width::Word, 0xa1230000, 10001)
+                .is_err()
+        );
+        assert_eq!(owner.progress(), previous);
+        assert_eq!(owner.state.borrow().serial, 10000);
+        owner.state.borrow_mut().serial = u64::MAX;
+        let previous = owner.progress();
+        assert!(
+            owner
+                .record_ram_drain(CHANNEL_STRIDE + DRAIN, Width::Word, 0xa1230000, 10002)
+                .is_err()
+        );
+        assert_eq!(owner.progress(), previous);
+    }
+
     #[test]
     #[cfg(feature = "std")]
     #[ignore = "requires original 26A434 J473 KC via STELA_TEST_MCC_J473_KERNELCACHE"]
