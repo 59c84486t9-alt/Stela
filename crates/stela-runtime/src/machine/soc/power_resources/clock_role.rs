@@ -49,9 +49,21 @@ impl ProviderNode<'_> {
     }
 }
 
-/// Actual T6000 IOKit binding: arm-io's function-clock_gate targets this direct
-/// child by phandle and selector cl kG (0x636c6b47). Class matching is structural;
-/// neither a node name nor a matching compatible alone creates provider role.
+/// The 26A434 M1/M2 Pro and Max personalities inherit ApplePMGR::start,
+/// whose superclass start is IOService::start. AppleT600xIO/AppleT602xIO
+/// processDevice delegates to the no-op AppleARMIO method; its separate
+/// enableDeviceClock receiver uses the bound function only when called.
+/// Pinned source slots and function windows are tested below.
+const PROVIDER_BINDINGS: [(&str, &str); 4] = [
+    ("arm-io,t6000", "pmgr1,t6000"),
+    ("arm-io,t6000", "pmgr1,t6001"),
+    ("arm-io,t6020", "pmgr1,t6020"),
+    ("arm-io,t6020", "pmgr1,t6021"),
+];
+
+/// The actual arm-io function-clock_gate must target the direct qualified
+/// controller by phandle and selector clkG. A family match alone grants no
+/// role, and no passive index becomes a successful later gate operation.
 pub(super) fn provider<'a>(root: &Node<'a>) -> Result<Option<ProviderNode<'a>>, String> {
     let io = root
         .child("arm-io")
@@ -59,15 +71,16 @@ pub(super) fn provider<'a>(root: &Node<'a>) -> Result<Option<ProviderNode<'a>>, 
     let Some(io) = io else {
         return Ok(None);
     };
-    if !io.compatible("arm-io,t6000") {
-        return Ok(None);
-    }
     let children = io
         .children()
         .ok_or("clock provider has malformed arm-io children")?;
     let candidates = children
         .iter()
-        .filter(|node| node.compatible("pmgr1,t6000"))
+        .filter(|node| {
+            PROVIDER_BINDINGS
+                .iter()
+                .any(|&(bus, controller)| io.compatible(bus) && node.compatible(controller))
+        })
         .collect::<Vec<_>>();
     if candidates.is_empty() {
         return Ok(None);
@@ -76,14 +89,14 @@ pub(super) fn provider<'a>(root: &Node<'a>) -> Result<Option<ProviderNode<'a>>, 
         return Ok(None);
     };
     let [phandle, selector] = raw.as_chunks::<4>().0 else {
-        return Err("T6000 PMGR clock function binding requires a phandle and selector".into());
+        return Err("PMGR clock function binding requires a phandle and selector".into());
     };
     if raw.len() != 8 {
-        return Err("T6000 PMGR clock function binding has partial cells".into());
+        return Err("PMGR clock function binding has partial cells".into());
     }
     let phandle = u32::from_le_bytes(*phandle);
     if phandle == 0 {
-        return Err("T6000 PMGR clock function has a zero phandle".into());
+        return Err("PMGR clock function has a zero phandle".into());
     }
     if u32::from_le_bytes(*selector) != 0x636c6b47 {
         return Ok(None);
@@ -104,7 +117,7 @@ pub(super) fn provider<'a>(root: &Node<'a>) -> Result<Option<ProviderNode<'a>>, 
         );
     }
     if references > 1 {
-        return Err("T6000 PMGR clock provider phandle is ambiguous".into());
+        return Err("PMGR clock provider phandle is ambiguous".into());
     }
     let mut selected = candidates.into_iter().filter(|node| {
         node.property("AAPL,phandle")
@@ -115,10 +128,10 @@ pub(super) fn provider<'a>(root: &Node<'a>) -> Result<Option<ProviderNode<'a>>, 
         return Ok(None);
     };
     if selected.next().is_some() {
-        return Err("T6000 PMGR clock provider phandle is ambiguous".into());
+        return Err("PMGR clock provider phandle is ambiguous".into());
     }
     super::super::apertures::registers(node)
-        .ok_or("T6000 PMGR clock provider lacks complete actual reg pairs")?;
+        .ok_or("PMGR clock provider lacks complete actual reg pairs")?;
     Ok(Some(ProviderNode {
         registers: node.property("reg").expect("checked reg pairs"),
         phandle,
@@ -202,6 +215,41 @@ mod tests {
             .iter()
             .find(|resource| matches!(resource.clock_role, ClockRole::PmgrProvider(_)))
             .unwrap()
+    }
+
+    #[test]
+    fn each_qualified_provider_pair_requires_its_matching_bus_and_actual_binding() {
+        let binding = words(&[0x99, 0x636c6b47]);
+        for (bus, controller) in PROVIDER_BINDINGS {
+            let mut bytes = tree(Some(&binding), controller, &[], &[], false);
+            let start = bytes
+                .windows(b"arm-io,t6000".len())
+                .position(|raw| raw == b"arm-io,t6000")
+                .unwrap();
+            bytes[start..start + bus.len()].copy_from_slice(bus.as_bytes());
+            let root = Node::root(&bytes).unwrap();
+            let resources = inventory(&root).unwrap();
+            let role = resources
+                .iter()
+                .find(|r| matches!(r.clock_role, ClockRole::PmgrProvider(_)))
+                .unwrap();
+            assert_eq!(
+                role.clocks,
+                [
+                    domain_id(1),
+                    domain_id(197),
+                    domain_id(198),
+                    domain_id(199),
+                    domain_id(200)
+                ]
+            );
+            assert_eq!(role.activated_clocks(), [domain_id(1)]);
+        }
+        for controller in ["pmgr1,t6020", "pmgr1,t6021", "pmgr1,t9999"] {
+            let bytes = tree(Some(&binding), controller, &[], &[], false);
+            let root = Node::root(&bytes).unwrap();
+            assert!(provider(&root).unwrap().is_none());
+        }
     }
 
     #[test]
@@ -404,6 +452,87 @@ mod tests {
     }
     /// Pins the selected constructor/start/super/receiver family, rather than
     /// treating missing numeric DeviceIDs as evidence of a passive provider.
+
+    #[test]
+    #[ignore = "requires pinned 26A434 mac13j and mac14j kernel collections"]
+    fn original_m1_m2_pro_max_provider_start_uses_the_io_service_superclass() {
+        for (variable, hash, windows, pointers) in [
+            (
+                "STELA_TEST_PMGR_M1_KERNELCACHE",
+                "5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90",
+                &[
+                    (
+                        0x2b0c17c,
+                        0xf78,
+                        "54179ac07c9aa7bc3f6ce802913f105ef1b889c3097fb6e428dce34d4788aa90",
+                    ),
+                    (
+                        0x53fc7b4,
+                        0xdc,
+                        "c918c75f21fe4bd8719371229fee5f4adef4eae75ec8a81dbcc9062fa4b7d48f",
+                    ),
+                    (
+                        0x2e3fbd0,
+                        0x20,
+                        "bbbc704f8793362e1e461532fe9b18f6b8d185c42eb25ee58cf1cc72c3bdefc9",
+                    ),
+                    (
+                        0x2e3fbf0,
+                        0xd4,
+                        "a9968f386be6354b23ccaa41a9c4dd3aba13b81da53068a8cb31dfced374d158",
+                    ),
+                ][..],
+                &[
+                    (0x1367620, 0x80113c6802b0c17cu64), // AppleT6000PMGR::start
+                    (0x1369df8, 0x80113c6802b0c17cu64), // AppleT6001PMGR::start
+                    (0x1246900, 0x80113c68053fc7b4u64), // ApplePMGRBase::start
+                ][..],
+            ),
+            (
+                "STELA_TEST_PMGR_M2_KERNELCACHE",
+                "ef4712e54102b35c11665c46fa7543a3fafc0c419723f583cb0ac891016f531a",
+                &[
+                    (
+                        0x2b3111c,
+                        0xf78,
+                        "fbad15dba43654f8d970074d1feeaf07a36d91fc179a70d7d7ad2f42da382e2a",
+                    ),
+                    (
+                        0x5418ce8,
+                        0xdc,
+                        "81bdfdbfb267a7ec5243e59b350b1912a82ffe1c1747d72d86c2eeec4447e1c0",
+                    ),
+                    (
+                        0x2ec4520,
+                        0x20,
+                        "cb1a32f630dc5a6dc2c95cae73121f42b468c071378e625c997803dbc80bc1be",
+                    ),
+                    (
+                        0x2ec4540,
+                        0xd4,
+                        "a9968f386be6354b23ccaa41a9c4dd3aba13b81da53068a8cb31dfced374d158",
+                    ),
+                ][..],
+                &[
+                    (0x1352870, 0x80113c6802b3111cu64), // AppleT6020PMGR::start
+                    (0x1353b48, 0x80113c6802b3111cu64), // AppleT6021PMGR::start
+                    (0x12773e0, 0x80113c6805418ce8u64), // ApplePMGRBase::start
+                ][..],
+            ),
+        ] {
+            let bytes = std::fs::read(std::env::var(variable).unwrap()).unwrap();
+            assert_eq!(crate::sha256(&bytes), hash);
+            for &(offset, length, expected) in windows {
+                assert_eq!(crate::sha256(&bytes[offset..offset + length]), expected);
+            }
+            for &(offset, expected) in pointers {
+                assert_eq!(
+                    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()),
+                    expected
+                );
+            }
+        }
+    }
     #[test]
     #[ignore = "requires unchanged original26A434J314sKernelCollection"]
     fn original_provider_start_and_clock_receiver_source_is_pinned() {

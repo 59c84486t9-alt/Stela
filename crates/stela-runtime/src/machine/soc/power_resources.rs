@@ -6,7 +6,7 @@
 //! their ADT ancestors' activated gates, including nubs and firmware endpoints.
 //! Source PMGR provider gate-index metadata remains inventoried separately from
 //! the consumer dependencies its IOService start actually activates.
-use super::{ATC_PHY_LAYOUTS, IOMMU_MAPPER, Node, USB_DRD, name_of, pmgr};
+use super::{ATC_PHY_LAYOUTS, IOMMU_MAPPER, Node, PMGR2_ARCH, SOCS, USB_DRD, name_of};
 use crate::platform::apple::{
     dart::Profile,
     pmgr::coverage::{self, Admission, Consumer, Domain, DomainId, LifecycleSinks},
@@ -90,7 +90,8 @@ impl PowerStates {
         acc_harvesting: u32,
     ) -> Result<Vec<ProcessorAssociation>, String> {
         let io = root.child("arm-io").ok_or("CPU PMGR requires arm-io")?;
-        let node = io.child("pmgr").ok_or("CPU PMGR requires pmgr")?;
+        let parent = io.child("pmgr").ok_or("CPU PMGR requires pmgr")?;
+        let node = register_node(&io, &parent)?;
         // Reconstruct every original domain through the existing reader. The
         // association resolver may trust normalized non-CPU locations only
         // after this equality check, including aliases and parent identities.
@@ -650,17 +651,31 @@ pub(super) fn power_states(
 ) -> Result<Option<PowerStates>, String> {
     let io = root.child("arm-io");
     let io = io.as_ref().unwrap_or(root);
-    let Some(node) = io
-        .child("pmgr")
-        .filter(|node| pmgr(chip_id).is_some_and(|model| node.compatible(model)))
-    else {
+    let Some(parent) = io.child("pmgr").filter(|node| {
+        SOCS.iter()
+            .any(|soc| soc.chip_id == chip_id && node.compatible(soc.pmgr))
+    }) else {
         return Ok(None);
     };
+    let node = register_node(io, &parent)?;
     decode_power_states(root, &node, translate).map(Some)
 }
 
-/// Normalize firmware records without granting a new SoC's native model.
-/// `power_states` retains the independent complete-PMGR placement gate.
+/// Select the register-bearing implementation of a PMGR interface. On T8152,
+/// `pmgr2,arch` publishes the controller and `pmgr2,t8152` owns the physical
+/// groups and device table (`docs/research/apple-socs.md`, CPU start registers).
+/// Selection grants neither PSD service-gate semantics nor lifecycle coverage.
+pub(super) fn register_node<'a>(io: &Node<'a>, parent: &Node<'a>) -> Result<Node<'a>, String> {
+    if !parent.compatible(PMGR2_ARCH) {
+        return Ok(parent.clone());
+    }
+    io.child("pmgr-child")
+        .filter(|node| node.compatible("pmgr2,t8152"))
+        .ok_or_else(|| "pmgr2,arch has no qualified register-bearing pmgr-child".into())
+}
+
+/// Normalize firmware records while preserving complete graph validation.
+/// Optional CPU/bridge register models are independently qualified.
 fn decode_power_states(
     root: &Node<'_>,
     node: &Node<'_>,
@@ -848,6 +863,29 @@ mod tests {
     use super::*;
     use crate::machine::soc::tests::flat_fixture_extent;
     use crate::machine::{adt::encode, soc::DART};
+
+    #[test]
+    fn generic_pmgr_selects_its_register_implementation_without_borrowing_another_family() {
+        let parent = encode(&[("name", b"pmgr"), ("compatible", b"pmgr2,arch")], &[]);
+        let child = encode(
+            &[("name", b"pmgr-child"), ("compatible", b"pmgr2,t8152")],
+            &[],
+        );
+        let bytes = encode(&[("name", b"arm-io")], &[parent.clone(), child]);
+        let io = Node::root(&bytes).unwrap();
+        let owner = register_node(&io, &io.child("pmgr").unwrap()).unwrap();
+        assert!(owner.compatible("pmgr2,t8152"));
+        assert_eq!(name_of(&owner), "pmgr-child");
+        let wrong = encode(
+            &[("name", b"pmgr-child"), ("compatible", b"pmgr1,t8112")],
+            &[],
+        );
+        for children in [alloc::vec![parent.clone()], alloc::vec![parent, wrong]] {
+            let bytes = encode(&[("name", b"arm-io")], &children);
+            let io = Node::root(&bytes).unwrap();
+            assert!(register_node(&io, &io.child("pmgr").unwrap()).is_err());
+        }
+    }
 
     #[test]
     #[ignore = "requires pinned original 26A434 board DeviceTrees; no Apple image is committed"]

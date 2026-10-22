@@ -149,7 +149,6 @@ mod tests {
         let inventory: serde_json::Value = serde_json::from_slice(&inventory).unwrap();
         let mut boards = [0; 2];
         let mut records = [0; 2];
-        let mut empty = 0;
         for board in inventory["boards"].as_array().unwrap() {
             let member = board["source"]["member"].as_str().unwrap();
             let file = std::path::Path::new(member).file_name().unwrap();
@@ -164,13 +163,10 @@ mod tests {
                 board["source"]["decoded_sha256"].as_str().unwrap()
             );
             let root = Node::root(&bytes).unwrap();
-            let node = root.child("arm-io").unwrap().child("pmgr").unwrap();
-            let Some(devices) = node.property("devices") else {
-                // This original M6 parent is not a v1/v2 empty-state image.
-                assert_eq!(member, "Firmware/all_flash/DeviceTree.j873gap.im4p");
-                empty += 1;
-                continue;
-            };
+            let io = root.child("arm-io").unwrap();
+            let parent = io.child("pmgr").unwrap();
+            let node = super::super::register_node(&io, &parent).unwrap();
+            let devices = node.property("devices").unwrap();
             let (layout, _) =
                 Layout::select(node.property("ps-regs"), node.property("ps-groups")).unwrap();
             let slot = usize::from(layout == Layout::V2);
@@ -182,7 +178,7 @@ mod tests {
                 records[slot] += 1;
             }
         }
-        assert_eq!((boards, records, empty), ([41, 17], [15_656, 8_974], 1));
+        assert_eq!((boards, records), ([41, 18], [15_656, 9_326]));
     }
 
     #[test]

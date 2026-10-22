@@ -16,7 +16,7 @@ const NAME: &str = "cpm-power";
 const RESTORE: u64 = 0x40f8;
 const THROTTLERS: [u64; 4] = [0x250, 0x270, 0x8400, 0x8408];
 const P_THROTTLER: u64 = 0x8b30;
-pub const OFFSET: u64 = 0x40000;
+pub const T8112_OFFSET: u64 = 0x40000;
 #[derive(Debug, Clone)]
 pub struct Cpm {
     performance: bool,

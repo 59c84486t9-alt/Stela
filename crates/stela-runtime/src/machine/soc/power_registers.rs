@@ -52,49 +52,222 @@ pub struct EnergyBank {
     pub cpm: bool,
 }
 
-/// The SoC's CPU start registers, and its CPU clusters and always-on eFuses
-/// where its row describes them, when the DeviceTree shows the SoC's PMGR
-/// ([`pmgr`]) and its `reg` places each cluster's register window and
-/// performance-state table and the eFuse block.
+/// Independently qualified PMGR register families. A missing optional family
+/// does not revoke power-state ownership or another family's register model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PmgrBank {
+    CpuClusters,
+    Bridges,
+    SocPower,
+    SocDpe,
+    WakeMasks,
+    Performance,
+    CpuEnergy,
+    Services,
+}
+
+/// A visible register family whose semantics have not been established.
+/// The mount reports these through its unsupported-operation policy; no register
+/// or lifecycle effect is supplied by retaining this descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PmgrBankRefusal {
+    pub bank: PmgrBank,
+    pub reason: &'static str,
+}
+
+/// Validate advertised legacy record envelopes even when their register model
+/// is unavailable. An unsupported family is not permission to discard malformed
+/// data. The 26A434 v1 driver records are described by the parser below and
+/// `power_resources::records`; v2 performance metadata has a separate envelope.
+fn validate_bank_records(node: &Node<'_>) -> Result<(), String> {
+    for (name, bytes) in [
+        ("devices", PMGR_DEVICE),
+        ("clocks", 24),
+        ("events", 24),
+        ("power-domains", 24),
+        ("hw-dpe-reg", 40),
+        ("perf-regs", 16),
+        ("bridge-counters", 4),
+        ("bridge-counter-configs", 36),
+        ("device-bridges", 76),
+        ("axi2af-axi-config", 4),
+        ("optional-bridge-mask", 4),
+        ("clusters", 4),
+        ("ap-wake-sources", 36),
+    ] {
+        if node
+            .property(name)
+            .is_some_and(|raw| !raw.len().is_multiple_of(bytes))
+        {
+            return Err(format!("/arm-io/pmgr {name} has incomplete records"));
+        }
+    }
+    for name in [
+        "bridge-reg-index",
+        "#bridges",
+        "bridge-settings-version",
+        "bridge-counter-version",
+    ] {
+        if node.property(name).is_some_and(|raw| raw.len() != 4) {
+            return Err(format!("/arm-io/pmgr {name} is not one complete word"));
+        }
+    }
+    if let Some(count) = node.first_u32("#bridges") {
+        for name in ["bridge-counters", "axi2af-axi-config"] {
+            if node
+                .property(name)
+                .is_some_and(|raw| raw.len() / 4 != count as usize)
+            {
+                return Err(format!("/arm-io/pmgr {name} disagrees with #bridges"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The SoC's optional register families, independently of its common
+/// power-state table and CPU-start bank. Driver matching comes from the SoC
+/// row; each family's qualified layout remains a separate requirement.
 pub(super) fn pmgr_registers(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     chip_id: u32,
 ) -> Result<PmgrRegisters, String> {
-    let none = PmgrRegisters {
-        clusters: Vec::new(),
-        aon_fuses: None,
-        wake_masks: None,
-        energy: Vec::new(),
-        performance: Vec::new(),
-        power_banks: Vec::new(),
-        soc_dpe: None,
-        bridges: Vec::new(),
-        cluster_events: Vec::new(),
+    let mut result = PmgrRegisters::default();
+    let Some(soc) = SOCS.iter().find(|soc| soc.chip_id == chip_id) else {
+        return Ok(result);
     };
-    let Some(soc) = SOCS
-        .iter()
-        .find(|soc| soc.chip_id == chip_id && soc.pmgr_modeled())
-    else {
-        return Ok(none);
+    let Some(parent) = io.child("pmgr").filter(|node| node.compatible(soc.pmgr)) else {
+        return Ok(result);
     };
-    let Some(node) = io.child("pmgr").filter(|node| node.compatible(soc.pmgr)) else {
-        return Ok(none);
-    };
-    // Each `reg` entry in guest PA, by index; None outside `/arm-io` ranges.
+    let node = super::power_resources::register_node(io, &parent)?;
+    validate_bank_records(&node)?;
+    // Each source view is checked in full before any optional model is kept.
     let reg: Vec<Option<(u64, u64)>> = apertures::registers(&node)
         .ok_or("PMGR reg has incomplete physical pairs")?
         .into_iter()
-        .map(|(offset, bytes)| {
+        .enumerate()
+        .map(|(index, (offset, bytes))| {
             if bytes == 0 {
                 Ok(None)
             } else {
                 translate(offset, bytes)
                     .map(|physical| Some((physical, bytes)))
-                    .ok_or("PMGR complete reg view is outside its bus domain")
+                    .ok_or_else(|| format!("PMGR reg[{index}] complete view {offset:#x}/{bytes:#x} is outside or ambiguous in its bus domain"))
             }
         })
         .collect::<Result<_, _>>()?;
+    let mut refuse = |bank, reason| result.refusals.push(PmgrBankRefusal { bank, reason });
+    let clusters = soc
+        .clusters
+        .map(|clusters| clusters.to_vec())
+        .unwrap_or_default();
+    if soc.clusters.is_none() && node.property("clusters").is_some() {
+        refuse(
+            PmgrBank::CpuClusters,
+            "CPU cluster register layout is not qualified for this SoC",
+        );
+    }
+    validate_clusters(&reg, &clusters)?;
+    result.clusters = clusters;
+    result.aon_fuses = soc
+        .aon_fuses
+        .map(|index| {
+            reg.get(index)
+                .copied()
+                .flatten()
+                .filter(|&(_, bytes)| bytes == fuse::FUSE_BYTES)
+                .ok_or_else(|| format!("/arm-io/pmgr reg[{index}] is not the eFuse block"))
+        })
+        .transpose()?;
+    if node.property("bridge-reg-index").is_some() && soc.bridge_fields.is_none() {
+        refuse(
+            PmgrBank::Bridges,
+            "bridge register layout is not qualified for this SoC",
+        );
+    } else if node
+        .first_u32("bridge-settings-version")
+        .is_some_and(|v| v != 1)
+        || node
+            .first_u32("bridge-counter-version")
+            .is_some_and(|v| v != 3)
+        || node
+            .property("optional-bridge-mask")
+            .is_some_and(|v| v.iter().any(|&b| b != 0))
+    {
+        refuse(
+            PmgrBank::Bridges,
+            "bridge version or optional-bank selection is not qualified",
+        );
+    } else {
+        result.bridges = place_bridges(&node, &reg, soc.bridge_fields)?;
+    }
+    if result.clusters.is_empty() {
+        result.cluster_events = Vec::new();
+    } else {
+        result.cluster_events = acc_events(&node, result.clusters.len())?;
+    }
+    result.power_banks = place_power_banks(&reg, soc.power_banks)?;
+    if soc.power_banks.is_empty() {
+        refuse(
+            PmgrBank::SocPower,
+            "SoC-specific power register roles are not qualified",
+        );
+    }
+    result.soc_dpe = if let Some(index) = soc.dpe_reg {
+        Some(place_soc_dpe(&node, &reg, index)?)
+    } else {
+        if node.property("soc-dpe").is_some() {
+            refuse(PmgrBank::SocDpe, "SoC DPE register layout is not qualified");
+        }
+        None
+    };
+    // Without the cluster layout, an absolute DPE address cannot be classified
+    // as a CPM accumulator merely because it lies inside a broad reg window.
+    if result.clusters.is_empty() && node.property("hw-dpe-reg").is_some() {
+        refuse(
+            PmgrBank::CpuEnergy,
+            "CPU/CPM energy register ownership is not qualified",
+        );
+    } else {
+        result.energy = energy_banks(&node, &reg, &result.clusters)?;
+    }
+    let unsupported_perf = node.property("perf-groups").is_some()
+        || node.property("perf-regs").is_some_and(|raw| {
+            raw.as_chunks::<16>()
+                .0
+                .iter()
+                .any(|entry| !matches!(entry[12], 0 | 3) || entry[13] > 1 || entry[15] != 0)
+        });
+    if unsupported_perf {
+        refuse(
+            PmgrBank::Performance,
+            "performance counter class, layout or flags are not qualified",
+        );
+    } else {
+        result.performance = performance_banks(&node, &reg)?;
+    }
+    result.wake_masks = if let Some(layout) = soc.wake_masks {
+        Some(wake_bank(&node, &reg, layout)?)
+    } else {
+        if node.property("ap-wake-sources").is_some() {
+            refuse(
+                PmgrBank::WakeMasks,
+                "wake-mask register layout is not qualified",
+            );
+        }
+        None
+    };
+    if parent.compatible(PMGR2_ARCH) {
+        refuse(
+            PmgrBank::Services,
+            "PMGRv2 PSD service-gate command interface is not qualified",
+        );
+    }
+    Ok(result)
+}
+
+fn validate_clusters(reg: &[Option<(u64, u64)>], clusters: &[CpuCluster]) -> Result<(), String> {
     let covered = |start: u64, bytes: u64| {
         reg.iter().flatten().any(|&(base, size)| {
             start
@@ -103,14 +276,10 @@ pub(super) fn pmgr_registers(
                 .is_some_and(|end| end <= size)
         })
     };
-    let clusters = soc
-        .clusters
-        .map(|clusters| clusters.to_vec())
-        .unwrap_or_default();
-    for cluster in &clusters {
+    for cluster in clusters {
         let cpm_base = cluster
             .base
-            .checked_add(cpm::OFFSET)
+            .checked_add(cpm::T8112_OFFSET)
             .ok_or("CPM base overflows")?;
         for offset in cpm::Cpm::new(cluster.counter_map).offsets() {
             if !covered(cpm_base + offset, 8) {
@@ -133,40 +302,7 @@ pub(super) fn pmgr_registers(
             ));
         }
     }
-    let fuses = soc
-        .aon_fuses
-        .map(|index| {
-            reg.get(index)
-                .copied()
-                .flatten()
-                .filter(|&(_, bytes)| bytes == fuse::FUSE_BYTES)
-                .ok_or_else(|| format!("/arm-io/pmgr reg[{index}] is not the eFuse block"))
-        })
-        .transpose()?;
-    let bridges = place_bridges(&node, &reg, soc.bridge_fields)?;
-    let cluster_events = acc_events(&node, clusters.len())?;
-    let power_banks = place_power_banks(&reg, soc.power_banks)?;
-    let soc_dpe = soc
-        .dpe_reg
-        .map(|i| place_soc_dpe(&node, &reg, i))
-        .transpose()?;
-    let energy = energy_banks(&node, &reg, &clusters)?;
-    let performance = performance_banks(&node, &reg)?;
-    let wake_masks = soc
-        .wake_masks
-        .map(|layout| wake_bank(&node, &reg, layout))
-        .transpose()?;
-    Ok(PmgrRegisters {
-        cluster_events,
-        bridges,
-        soc_dpe,
-        power_banks,
-        wake_masks,
-        performance,
-        energy,
-        clusters,
-        aon_fuses: fuses,
-    })
+    Ok(())
 }
 
 /// The CPU start registers' guest PA and the clusters they start, where the
@@ -485,12 +621,11 @@ fn performance_banks(node: &Node<'_>, reg: &[Option<(u64, u64)>]) -> Result<Vec<
             .flatten()
             .ok_or("/arm-io/pmgr perf-regs names an unmapped reg bank")?;
         if count == 0
-            || count > 256
             || !offset.is_multiple_of(4)
             || offset + COUNTER_BASE + u64::from(count) * STRIDE > bytes
         {
             return Err(
-                "/arm-io/pmgr perf-regs counters exceed their reg bank or selector width".into(),
+                "/arm-io/pmgr perf-regs counters are empty or exceed their reg bank".into(),
             );
         }
         base.checked_add(offset + COUNTER_BASE + u64::from(count) * STRIDE)
@@ -617,7 +752,9 @@ fn energy_banks(
 }
 
 /// The PMGR registers the machine models besides its power states.
+#[derive(Default)]
 pub(super) struct PmgrRegisters {
+    pub(super) refusals: Vec<PmgrBankRefusal>,
     pub(super) cluster_events: Vec<Vec<u8>>,
     pub(super) bridges: Vec<BridgeBank>,
     pub(super) soc_dpe: Option<SocDpe>,
@@ -633,6 +770,198 @@ pub(super) struct PmgrRegisters {
 mod tests {
     use super::super::*;
     use super::*;
+
+    #[test]
+    #[ignore = "requires pinned original 26A434 ADTs through STELA_TEST_PMGR_ADTS"]
+    fn original_optional_bank_selection_keeps_source_hashes_and_reports_each_family() {
+        let directory = std::env::var("STELA_TEST_PMGR_ADTS").unwrap();
+        let inventory: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../isa/apple-soc-facts.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut count = 0;
+        let mut geometry_refusals = 0;
+        for board in inventory["boards"].as_array().unwrap() {
+            let member = board["source"]["member"].as_str().unwrap();
+            let bytes = std::fs::read(
+                std::path::Path::new(&directory)
+                    .join(std::path::Path::new(member).file_name().unwrap())
+                    .with_extension("adt"),
+            )
+            .unwrap();
+            assert_eq!(
+                crate::sha256(&bytes),
+                board["source"]["decoded_sha256"].as_str().unwrap()
+            );
+            let root = Node::root(&bytes).unwrap();
+            let io = root.child("arm-io").unwrap();
+            let chip = u32::from_str_radix(
+                board["chip_id"].as_str().unwrap().trim_start_matches("0x"),
+                16,
+            )
+            .unwrap();
+            let parsed = match pmgr_registers(
+                &io,
+                &|address, bytes| io.translate_range(address, bytes),
+                chip,
+            ) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    // The pinned M6 source has overlapping broad/identity bus
+                    // ranges. Keep that unqualified geometry explicit; no range
+                    // ordering or guessed absolute-address escape is admitted.
+                    assert_eq!(chip, 0x8152, "{member}: {error}");
+                    assert!(
+                        error.contains("reg[47]") && error.contains("outside or ambiguous"),
+                        "{error}"
+                    );
+                    println!("{member} chip={chip:#x} geometry-refusal={error}");
+                    geometry_refusals += 1;
+                    count += 1;
+                    continue;
+                }
+            };
+            println!(
+                "{member} chip={chip:#x} clusters={} bridges={} performance={} energy={} refusals={:?}",
+                parsed.clusters.len(),
+                parsed.bridges.len(),
+                parsed.performance.len(),
+                parsed.energy.len(),
+                parsed.refusals
+            );
+            count += 1;
+        }
+        assert_eq!((count, geometry_refusals), (59, 1));
+    }
+
+    fn optional_fixture(performance: &[u8], extra: &[(&str, &[u8])]) -> Vec<u8> {
+        use crate::machine::adt::encode;
+        let reg = [0x1000u64, 0x1000]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let clusters = 0u32.to_le_bytes();
+        let mut properties = alloc::vec![
+            ("name", b"pmgr".as_slice()),
+            ("compatible", b"pmgr1,t8103".as_slice()),
+            ("reg", reg.as_slice()),
+            ("clusters", clusters.as_slice()),
+            ("perf-regs", performance),
+        ];
+        properties.extend_from_slice(extra);
+        encode(&[("name", b"arm-io")], &[encode(&properties, &[])])
+    }
+
+    fn direct_performance_group() -> [u8; 16] {
+        let mut group = [0; 16];
+        group[8..10].copy_from_slice(&4u16.to_le_bytes());
+        group[12] = 3;
+        group[13] = 1;
+        group
+    }
+
+    #[test]
+    fn an_unqualified_optional_bank_preserves_independent_performance_placement() {
+        let group = direct_performance_group();
+        let bytes = optional_fixture(&group, &[("bridge-reg-index", &0u32.to_le_bytes())]);
+        let io = Node::root(&bytes).unwrap();
+        let parsed = pmgr_registers(&io, &|address, _| Some(address), 0x8103).unwrap();
+        assert_eq!(parsed.performance.len(), 1);
+        assert_eq!(parsed.performance[0].physical, 0x1000);
+        assert!(parsed.clusters.is_empty());
+        assert!(parsed.bridges.is_empty());
+        assert!(
+            parsed
+                .refusals
+                .iter()
+                .any(|r| r.bank == PmgrBank::CpuClusters)
+        );
+        assert!(parsed.refusals.iter().any(|r| r.bank == PmgrBank::Bridges));
+        assert!(
+            !parsed
+                .refusals
+                .iter()
+                .any(|r| r.bank == PmgrBank::Performance)
+        );
+    }
+
+    #[test]
+    fn unsupported_performance_semantics_are_named_without_a_register_model() {
+        let mut group = direct_performance_group();
+        group[12] = 1;
+        let bytes = optional_fixture(&group, &[]);
+        let io = Node::root(&bytes).unwrap();
+        let parsed = pmgr_registers(&io, &|address, _| Some(address), 0x8103).unwrap();
+        assert!(parsed.performance.is_empty());
+        assert_eq!(
+            parsed
+                .refusals
+                .iter()
+                .filter(|r| r.bank == PmgrBank::Performance)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn malformed_advertised_records_are_fatal_even_beside_an_unsupported_bank() {
+        for (name, malformed) in [
+            ("hw-dpe-reg", alloc::vec![0; 39]),
+            ("events", alloc::vec![0; 23]),
+            ("bridge-counters", alloc::vec![0; 3]),
+            ("bridge-reg-index", alloc::vec![0; 3]),
+        ] {
+            let mut group = direct_performance_group();
+            group[12] = 1;
+            let bytes = optional_fixture(&group, &[(name, &malformed)]);
+            let io = Node::root(&bytes).unwrap();
+            assert!(
+                pmgr_registers(&io, &|address, _| Some(address), 0x8103).is_err(),
+                "{name}"
+            );
+        }
+        let group = direct_performance_group();
+        let bytes = optional_fixture(&group[..15], &[]);
+        let io = Node::root(&bytes).unwrap();
+        assert!(pmgr_registers(&io, &|address, _| Some(address), 0x8103).is_err());
+    }
+
+    #[test]
+    fn performance_bank_capacity_is_independent_of_byte_sized_source_selectors() {
+        use crate::machine::adt::encode;
+        let mut group = direct_performance_group();
+        group[8..10].copy_from_slice(&306u16.to_le_bytes());
+        let mut source = [0; PMGR_DEVICE];
+        source[0] = 0x20;
+        source[8] = 255;
+        let bytes = encode(
+            &[
+                ("name", b"pmgr"),
+                ("perf-regs", &group),
+                ("devices", &source),
+            ],
+            &[],
+        );
+        let node = Node::root(&bytes).unwrap();
+        let banks = performance_banks(&node, &[Some((0x1000, 0x10000))]).unwrap();
+        assert_eq!(banks[0].selectors, [255]);
+    }
+
+    #[test]
+    fn a_supported_family_with_an_invalid_register_reference_is_not_degraded() {
+        let mut group = direct_performance_group();
+        group[..4].copy_from_slice(&1u32.to_le_bytes());
+        let bytes = optional_fixture(&group, &[]);
+        let io = Node::root(&bytes).unwrap();
+        assert!(pmgr_registers(&io, &|address, _| Some(address), 0x8103).is_err());
+        let bytes = optional_fixture(&direct_performance_group(), &[]);
+        let io = Node::root(&bytes).unwrap();
+        assert!(pmgr_registers(&io, &|_, _| None, 0x8103).is_err());
+    }
 
     #[test]
     fn special_acc_events_use_the_dt_selector_and_cluster_type() {
