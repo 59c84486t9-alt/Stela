@@ -277,6 +277,7 @@ impl FirmwareWork {
         if run.submission != *submission || run.lease != lease {
             return Err("GFX render cancellation differs from its accepted native owner");
         }
+        native.work.cache.check_cancel(lease)?;
         if run
             .prefix
             .as_ref()
@@ -288,23 +289,21 @@ impl FirmwareWork {
         Ok(())
     }
 }
-impl crate::platform::apple::agx::work_decode::render_resources::Access
-    for super::AttachmentAccess<'_, '_, '_>
-{
-    fn check_owner(
+impl FirmwareWork {
+    pub(super) fn check_render_setup_owner(
         &self,
         parameters: &crate::platform::apple::agx::work_decode::render_resources::Parameters,
     ) -> Result<(), &'static str> {
-        self.owner.available()?;
+        self.available()?;
         let (submission, frame, lease, policy) = parameters.identity();
-        let native = self.owner.power.native.borrow();
+        let native = self.power.native.borrow();
         let run = native
             .work
             .render
             .run
             .as_ref()
             .ok_or("GFX render attachment phase has no accepted native owner")?;
-        if policy != self.owner.policy
+        if policy != self.policy
             || run.submission != *submission
             || run.frame != *frame
             || run.lease != lease
@@ -317,6 +316,44 @@ impl crate::platform::apple::agx::work_decode::render_resources::Access
             return Err("GFX render attachment phase differs from its complete native owner");
         }
         Ok(())
+    }
+    pub(super) fn check_render_context_program(
+        &self,
+        program: crate::platform::apple::agx::work_decode::render_context::Program,
+    ) -> Result<(), &'static str> {
+        let native = self.power.native.borrow();
+        let run = native
+            .work
+            .render
+            .run
+            .as_ref()
+            .ok_or("GFX cache selection has no render owner")?;
+        let prefix = run
+            .prefix
+            .as_ref()
+            .ok_or("GFX cache selection precedes qualified common render context")?;
+        if !prefix.matches_program(program)
+            || prefix.committed
+                != crate::platform::apple::agx::work_decode::render_context::native_words(
+                    self.policy,
+                    run.lease.pipe,
+                )
+                .len() as u8
+                    + 2
+        {
+            return Err("GFX cache selection differs from its complete common render context");
+        }
+        Ok(())
+    }
+}
+impl crate::platform::apple::agx::work_decode::render_resources::Access
+    for super::AttachmentAccess<'_, '_, '_>
+{
+    fn check_owner(
+        &self,
+        parameters: &crate::platform::apple::agx::work_decode::render_resources::Parameters,
+    ) -> Result<(), &'static str> {
+        self.owner.check_render_setup_owner(parameters)
     }
 }
 

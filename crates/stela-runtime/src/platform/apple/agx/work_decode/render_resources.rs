@@ -76,6 +76,12 @@ impl Attachments {
             outcome: None,
         })
     }
+    pub(crate) fn held_parameters(&self) -> Result<&Parameters, &'static str> {
+        if !matches!(self.outcome, Some(Outcome::Acquired(_))) {
+            return Err("GFX render cache selection requires held acquired attachments");
+        }
+        Ok(&self.parameters)
+    }
     pub fn result(&self) -> Option<&Outcome> {
         self.outcome.as_ref()
     }

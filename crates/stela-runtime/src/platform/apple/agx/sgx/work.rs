@@ -23,6 +23,7 @@ use crate::platform::dma::{DmaError, Port};
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod cache;
 pub mod render;
 
 const PARAMETER_REGISTERS: [u32; 13] = [
@@ -113,6 +114,8 @@ pub(super) struct Registers {
     parameters: [u64; 13],
     run: Option<Run>,
     render: render::Registers,
+    source_program: Option<crate::platform::apple::agx::work_decode::render_context::Program>,
+    cache: cache::Registers,
 }
 impl fmt::Debug for Registers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -128,7 +131,7 @@ impl fmt::Debug for Registers {
 }
 impl Registers {
     pub(super) fn active(&self) -> bool {
-        self.run.is_some() || self.render.active()
+        self.run.is_some() || self.render.active() || self.cache.active()
     }
 
     fn begin(&mut self, submission: &Submission, lease: Lease) -> Result<(), &'static str> {
@@ -364,6 +367,7 @@ impl FirmwarePower {
                 .map(|word| word.range()),
             );
         }
+        words.extend(cache::native_words());
         let mut targets = Vec::new();
         for (offset, width) in words {
             let physical = self
@@ -558,6 +562,7 @@ impl FirmwareWork {
                 "GFX CL setup cancellation requires its settled pre-trigger resource abort",
             );
         }
+        native.work.cache.check_cancel(lease)?;
         native.work.run = None;
         Ok(())
     }
@@ -856,9 +861,28 @@ mod tests {
         writes: usize,
         fail_write: Option<usize>,
         fail_read: Option<usize>,
+        fail_after_cache_configuration: Option<super::super::FirmwarePower>,
+        calls: usize,
     }
     impl Memory for TraceRam {
         fn read(&mut self, pa: u64, out: &mut [u8]) -> bool {
+            self.calls += 1;
+            if self
+                .fail_after_cache_configuration
+                .as_ref()
+                .is_some_and(|power| {
+                    power
+                        .native
+                        .borrow()
+                        .work
+                        .cache
+                        .first_configuration()
+                        .is_some()
+                })
+            {
+                self.fail_after_cache_configuration = None;
+                return false;
+            }
             if (DATA..DATA + 0x8000).contains(&pa) {
                 let at = self.reads;
                 self.reads += 1;
@@ -870,6 +894,7 @@ mod tests {
             self.ram.read(pa, out)
         }
         fn write(&mut self, pa: u64, data: &[u8]) -> bool {
+            self.calls += 1;
             if (DATA..DATA + 0x8000).contains(&pa) {
                 let at = self.writes;
                 self.writes += 1;
@@ -922,6 +947,8 @@ mod tests {
             writes: 0,
             fail_write: None,
             fail_read: None,
+            fail_after_cache_configuration: None,
+            calls: 0,
         }
     }
     fn io<R>(sgx: &mut Sgx, memory: &mut TraceRam, f: impl FnOnce(&mut Port<'_, '_>) -> R) -> R {
@@ -2395,6 +2422,402 @@ mod tests {
         io(sgx, memory, |port| input.cursor().next(port))
             .unwrap()
             .unwrap()
+    }
+    fn cache_input_snapshot(
+        input: &Submission,
+        units: u32,
+    ) -> crate::platform::apple::agx::work_decode::cache_input::BufferCacheInput {
+        use crate::platform::apple::agx::work_decode::Accepted;
+        let (stream, stamp, cache_at) = match input.command.kind {
+            CommandKind::Cl => (0x1e8, 0x2a8, 0x284),
+            CommandKind::Ta => (0x46c, 0x594, 0x558),
+            _ => (0x14, 0x8f8, 0x8bc),
+        };
+        let base = input.command.va;
+        let mut source = Flat::new(base, 0x1000);
+        source.put_u32(
+            base,
+            match input.command.kind {
+                CommandKind::Cl => 3,
+                CommandKind::Ta => 0,
+                _ => 1,
+            },
+        );
+        source.put_u64(base + 4, input.counter);
+        source.put_u32(base + 12, input.context);
+        source.put_u64(base + stream, input.stream);
+        source.put_u32(base + stream + 8, input.stream_bytes);
+        source.put_u64(base + stamp - 0x10, input.stamp.driver);
+        source.put_u64(base + stamp - 8, input.stamp.firmware);
+        source.put_u32(base + stamp, input.stamp.value);
+        source.put_u32(base + stamp + 4, input.stamp.index);
+        source.put_u64(base + cache_at, 0xffff123400000001);
+        source.put_u32(base + cache_at + 8, units);
+        source.put_u32(base + cache_at + 12, 9);
+        let mut accepted = Accepted::read(&mut source, &generation::G13X, input.command).unwrap();
+        assert_eq!(accepted.submission(), input);
+        accepted.capture_cache_input(&mut source).unwrap().clone()
+    }
+    #[test]
+    fn actual_cache_selector_retains_configuration_across_uat_fault_gates_and_cancel() {
+        use crate::platform::apple::agx::{
+            channel::Record,
+            sgx::{resources::FirmwareResources, work::cache::PreparedResources},
+            work_decode::{
+                cache_pool, cl,
+                render_context::{Context, G13XVariant, Program},
+                render_resources,
+                resources::Pool,
+            },
+        };
+        enum Held {
+            Cl(cl::attachments::Attachments),
+            Render(render_resources::Attachments),
+        }
+        impl Held {
+            fn prepared(&self) -> PreparedResources<'_> {
+                match self {
+                    Self::Cl(a) => PreparedResources::Cl(a),
+                    Self::Render(a) => PreparedResources::Render(a),
+                }
+            }
+            fn advance_abort(
+                &mut self,
+                owner: &FirmwareWork,
+                resources: &crate::platform::apple::agx::sgx::resources::FirmwareResources,
+                port: &mut Port<'_, '_>,
+            ) {
+                match self {
+                    Self::Cl(a) => a
+                        .advance(&mut owner.attachment_access(resources, port).unwrap())
+                        .unwrap(),
+                    Self::Render(a) => a
+                        .advance(&mut owner.attachment_access(resources, port).unwrap())
+                        .unwrap(),
+                }
+            }
+            fn abort(&mut self) {
+                match self {
+                    Self::Cl(a) => a.abort().unwrap(),
+                    Self::Render(a) => a.abort().unwrap(),
+                }
+            }
+        }
+        for family in [&generation::G13G, &generation::G13X, &generation::G14G] {
+            for kind in [CommandKind::Cl, CommandKind::Ta, CommandKind::ThreeD] {
+                for cancel_pending in [false, true] {
+                    let policy = Policy::for_family(family).unwrap();
+                    let mut sgx = gpu(family);
+                    let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+                    let apertures = if policy == Policy::G13X {
+                        alloc::vec![0x200000000, 0x201000000]
+                    } else {
+                        alloc::vec![0x200000000]
+                    };
+                    let mcc = cache_for(apertures.len());
+                    let cache = mcc.firmware_cache(&apertures).unwrap();
+                    let owner = power.firmware_work(region(), cache.clone()).unwrap();
+                    let resources = FirmwareResources::new(power.clone(), region())
+                        .unwrap()
+                        .with_cache(cache_region(policy), cache)
+                        .unwrap();
+                    let mut memory = ram();
+                    mapping(&mut memory.ram, VA + 0x1c000, SGX + 0x1c000, true);
+                    let root = resource_root(&mut memory);
+                    let program = match policy {
+                        Policy::G13G => Program::fixed(policy, *b"b100").unwrap(),
+                        Policy::G14G => Program::fixed(policy, *b"b000").unwrap(),
+                        Policy::G13X => io(&mut sgx, &mut memory, |port| {
+                            Program::g13x(G13XVariant::C000, &root, port)
+                        })
+                        .unwrap(),
+                    };
+                    let mut input = submission();
+                    input.command.kind = kind;
+                    let lease = Lease {
+                        pipe: match kind {
+                            CommandKind::Ta => 0,
+                            CommandKind::ThreeD => 1,
+                            _ => 2,
+                        },
+                        slot: 2,
+                    };
+                    let snapshot = cache_input_snapshot(&input, 256);
+                    let mut buffer_cache = cache_pool::Pool::after_cold_initialization(program);
+                    buffer_cache
+                        .allocate_eligible(&snapshot, lease, 0xa0000000, 0x11223344)
+                        .unwrap();
+                    let frame = if kind == CommandKind::Cl {
+                        setup_with_attachment(&input, &mut sgx, &mut memory)
+                    } else {
+                        let (record, scene_at, context_at, row_at, epoch_at) =
+                            if kind == CommandKind::Ta {
+                                (Record::SetupTa, 0x1c, 0x3c, 0x80, 0x2c)
+                            } else {
+                                (Record::Setup3d, 0x14, 0x54, 0xa0, 0x44)
+                            };
+                        let mut bytes = alloc::vec![0;record.bytes() as usize];
+                        bytes[..4].copy_from_slice(
+                            &(if kind == CommandKind::Ta { 5u32 } else { 7 }).to_le_bytes(),
+                        );
+                        bytes[4..0xc].copy_from_slice(&0x2800u64.to_le_bytes());
+                        bytes[0xc..0x14].copy_from_slice(&0x2a00u64.to_le_bytes());
+                        bytes[scene_at..scene_at + 8].copy_from_slice(&0x2e00u64.to_le_bytes());
+                        bytes[context_at..context_at + 4]
+                            .copy_from_slice(&input.context.to_le_bytes());
+                        bytes[epoch_at..epoch_at + 8].copy_from_slice(&0x2400u64.to_le_bytes());
+                        bytes[row_at..row_at + 8].copy_from_slice(&0x60000000u64.to_le_bytes());
+                        bytes[row_at + 8..row_at + 12].copy_from_slice(&8u32.to_le_bytes());
+                        bytes[row_at + 12] = 5;
+                        bytes[row_at + 14..row_at + 16].copy_from_slice(&7u16.to_le_bytes());
+                        bytes[row_at + 0x100..row_at + 0x104].copy_from_slice(&1u32.to_le_bytes());
+                        assert!(memory.ram.write(DATA + input.stream, &bytes));
+                        memory.ram.put_u64(DATA + 0x2430, 1);
+                        io(&mut sgx, &mut memory, |port| input.cursor().next(port))
+                            .unwrap()
+                            .unwrap()
+                    };
+                    captured_rmw(&owner); // Captured fixture, never a native reset default.
+                    let pool = io(&mut sgx, &mut memory, |port| {
+                        Pool::bind(port, &root, family, 1)
+                    })
+                    .unwrap();
+                    let mut held = if kind == CommandKind::Cl {
+                        let mut parameters =
+                            cl::Parameters::new(&input, &frame, lease, policy).unwrap();
+                        io(&mut sgx, &mut memory, |port| {
+                            parameters.advance(&mut owner.parameter_access(port))
+                        })
+                        .unwrap();
+                        let mut attachments =
+                            cl::attachments::Attachments::new(parameters, pool).unwrap();
+                        io(&mut sgx, &mut memory, |port| {
+                            attachments
+                                .advance(&mut owner.attachment_access(&resources, port).unwrap())
+                        })
+                        .unwrap();
+                        Held::Cl(attachments)
+                    } else {
+                        let mut context = Context::new(&input, &frame, lease, program).unwrap();
+                        io(&mut sgx, &mut memory, |port| {
+                            context.advance(&mut owner.render_context_access(port, program))
+                        })
+                        .unwrap();
+                        let mut parameters = ParameterProgram::new(&input, &frame, lease, policy);
+                        io(&mut sgx, &mut memory, |port| {
+                            parameters.advance(&owner, port)
+                        })
+                        .unwrap();
+                        let parameters = match parameters {
+                            ParameterProgram::Ta(p) => render_resources::Parameters::Ta(p),
+                            ParameterProgram::ThreeD(p) => render_resources::Parameters::ThreeD(p),
+                            _ => unreachable!(),
+                        };
+                        let mut attachments =
+                            render_resources::Attachments::new(parameters, pool).unwrap();
+                        io(&mut sgx, &mut memory, |port| {
+                            attachments
+                                .advance(&mut owner.attachment_access(&resources, port).unwrap())
+                        })
+                        .unwrap();
+                        Held::Render(attachments)
+                    };
+                    // Failure of the first real native UAT target leaves
+                    // the physical configuration and activation unknown.
+                    mapping(&mut memory.ram, VA + 0x10000, 0, false);
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| buffer_cache
+                            .advance_selection(
+                                &mut owner
+                                    .buffer_cache_access(&resources, held.prepared(), port)
+                                    .unwrap()
+                            ))
+                        .is_err()
+                    );
+                    assert_eq!(power.native.borrow().work.cache.first_configuration(), None);
+                    assert_eq!(buffer_cache.activation_mask(lease.pipe), Ok(0));
+                    let mut duplicate_pool = cache_pool::Pool::after_cold_initialization(program);
+                    duplicate_pool
+                        .allocate_eligible(&snapshot, lease, 0xa0000000, 0x11223344)
+                        .unwrap();
+                    let calls = memory.calls;
+                    assert_eq!(
+                        io(&mut sgx, &mut memory, |port| duplicate_pool
+                            .advance_selection(
+                                &mut owner
+                                    .buffer_cache_access(&resources, held.prepared(), port)
+                                    .unwrap()
+                            )),
+                        Err(
+                            "GFX buffer-cache native bank belongs to another initialized private pool"
+                        )
+                    );
+                    assert_eq!(memory.calls, calls);
+                    mapping(&mut memory.ram, VA + 0x10000, SGX + 0x10000, true);
+                    // The real configuration store commits. The next UAT walk
+                    // fails before the selector, even though both words occupy
+                    // one mapped page. No mock native sink supplies success.
+                    memory.fail_after_cache_configuration = Some(power.clone());
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| buffer_cache
+                            .advance_selection(
+                                &mut owner
+                                    .buffer_cache_access(&resources, held.prepared(), port)
+                                    .unwrap()
+                            ))
+                        .is_err()
+                    );
+                    assert_eq!(
+                        power.native.borrow().work.cache.first_configuration(),
+                        Some(256 << 16)
+                    );
+                    if lease.pipe < 2 {
+                        assert_eq!(
+                            power
+                                .native
+                                .borrow()
+                                .work
+                                .cache
+                                .render_selector(usize::from(lease.pipe)),
+                            None
+                        );
+                    } else {
+                        assert_eq!(power.native.borrow().work.resource, 0);
+                    }
+                    assert!(buffer_cache.finish().is_err());
+                    assert!(buffer_cache.abort_pending().is_err());
+                    assert!(power.check_reset().is_err());
+                    // Retained gating performs no further memory accesses.
+                    let active = LifecycleState {
+                        powered: true,
+                        clocked: true,
+                        quiesced: false,
+                        reset: false,
+                        retention: false,
+                    };
+                    let mut latch = InterruptLatch::new();
+                    let mut access = Access::new(0, 0, &mut latch);
+                    sgx.check_lifecycle(LifecycleState {
+                        clocked: false,
+                        ..active
+                    })
+                    .unwrap();
+                    sgx.set_lifecycle(
+                        LifecycleState {
+                            clocked: false,
+                            ..active
+                        },
+                        &mut access,
+                    );
+                    let calls = memory.calls;
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| owner
+                            .buffer_cache_access(&resources, held.prepared(), port)
+                            .and_then(
+                                |mut access| buffer_cache.advance_selection(&mut access)
+                            ))
+                        .is_err()
+                    );
+                    assert_eq!(memory.calls, calls);
+                    sgx.check_lifecycle(active).unwrap();
+                    sgx.set_lifecycle(active, &mut access);
+                    // A later AP edit cannot redirect the accepted descriptor
+                    // or cause the already committed configuration to replay.
+                    power.native.borrow_mut().work.cache.configuration[0] = Some(0xfeed);
+                    memory.ram.put_u64(DATA + input.stream + 0x50, 0xdeadbeef);
+                    if cancel_pending {
+                        held.abort();
+                        let calls = memory.calls;
+                        assert!(
+                            io(&mut sgx, &mut memory, |port| buffer_cache
+                                .advance_selection(
+                                    &mut owner
+                                        .buffer_cache_access(&resources, held.prepared(), port)
+                                        .unwrap()
+                                ))
+                            .is_err()
+                        );
+                        assert_eq!(memory.calls, calls);
+                        io(&mut sgx, &mut memory, |port| {
+                            held.advance_abort(&owner, &resources, port)
+                        });
+                        let aborted =
+                            crate::platform::apple::agx::work_decode::resources::Outcome::Aborted;
+                        let cancellation = match kind {
+                            CommandKind::Cl => owner.cancel_setup(&input, lease, &aborted),
+                            CommandKind::Ta => owner.cancel_ta_parameters(&input, lease, &aborted),
+                            _ => owner.cancel_three_d_parameters(&input, lease, &aborted),
+                        };
+                        assert_eq!(
+                            cancellation,
+                            Err("GFX buffer-cache native drain/abort effects are not qualified")
+                        );
+                        assert!(power.native.borrow().work.cache.active());
+                        assert!(power.check_reset().is_err());
+                        assert!(buffer_cache.active());
+                        continue;
+                    }
+                    io(&mut sgx, &mut memory, |port| {
+                        buffer_cache.advance_selection(
+                            &mut owner
+                                .buffer_cache_access(&resources, held.prepared(), port)
+                                .unwrap(),
+                        )
+                    })
+                    .unwrap();
+                    assert_eq!(
+                        power.native.borrow().work.cache.first_configuration(),
+                        Some(0xfeed)
+                    );
+                    if lease.pipe < 2 {
+                        assert_eq!(
+                            power
+                                .native
+                                .borrow()
+                                .work
+                                .cache
+                                .render_selector(usize::from(lease.pipe)),
+                            Some(0x8fff123400000003)
+                        );
+                    } else {
+                        assert_eq!(power.native.borrow().work.resource, 0x8fff123400000003);
+                        assert!(
+                            io(&mut sgx, &mut memory, |port| owner.write(
+                                port,
+                                Register::Submit,
+                                1
+                            ))
+                            .is_err()
+                        );
+                        assert_eq!(owner.outcome(), Ok(None));
+                    }
+                    let calls = memory.calls;
+                    io(&mut sgx, &mut memory, |port| {
+                        buffer_cache.advance_selection(
+                            &mut owner
+                                .buffer_cache_access(&resources, held.prepared(), port)
+                                .unwrap(),
+                        )
+                    })
+                    .unwrap();
+                    assert_eq!(memory.calls, calls);
+                    assert_eq!(buffer_cache.finish(), Ok(cache_pool::Allocation::Assigned));
+                    let before = alloc::format!("{buffer_cache:?}");
+                    assert_eq!(
+                        io(&mut sgx, &mut memory, |port| buffer_cache
+                            .release_after_native_quiescence(
+                                &mut owner
+                                    .buffer_cache_access(&resources, held.prepared(), port)
+                                    .unwrap(),
+                                lease
+                            )),
+                        Err("GFX buffer-cache physical data/flush completion is not qualified")
+                    );
+                    assert_eq!(alloc::format!("{buffer_cache:?}"), before);
+                    assert!(power.check_reset().is_err());
+                }
+            }
+        }
     }
     #[test]
     fn source_attachment_ownership_settles_real_native_and_ram_faults_before_canceling_setup() {

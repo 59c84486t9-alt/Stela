@@ -15,6 +15,7 @@
 //! architectural effect.
 
 pub mod cache_input;
+pub mod cache_pool;
 pub mod cl;
 pub mod ownership;
 pub mod registers;

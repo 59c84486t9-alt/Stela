@@ -67,6 +67,12 @@ impl Program {
     pub fn policy(self) -> Policy {
         self.policy
     }
+    pub(crate) fn require_cl_parameters(self) -> Result<(), &'static str> {
+        if self.variant == Some(G13XVariant::A000) {
+            return Err("GFX selected a000 CL common-parameter program is not qualified");
+        }
+        Ok(())
+    }
     pub(crate) fn merge_mirror(self) -> bool {
         self.variant == Some(G13XVariant::A000) && self.mode.is_some_and(|(_, _, mode)| mode == 3)
     }
@@ -141,6 +147,7 @@ mod tests {
         assert!(Program::fixed(Policy::G14G, *b"b000").is_ok());
         let selected = Program::g13x(G13XVariant::A000, &root(0x100), &mut mem).unwrap();
         assert!(selected.merge_mirror());
+        assert!(selected.require_cl_parameters().is_err());
         assert_eq!(mem.reads, [(0x100, 8), (0x20d4, 4)]);
         mem.mode = 0;
         assert!(selected.merge_mirror()); // immutable startup copy
@@ -150,6 +157,12 @@ mod tests {
                 .merge_mirror()
         );
         for variant in [G13XVariant::B000, G13XVariant::C000] {
+            assert!(
+                Program::g13x(variant, &root(0x100), &mut mem)
+                    .unwrap()
+                    .require_cl_parameters()
+                    .is_ok()
+            );
             let reads = mem.reads.len();
             assert!(
                 !Program::g13x(variant, &root(u64::MAX), &mut mem)

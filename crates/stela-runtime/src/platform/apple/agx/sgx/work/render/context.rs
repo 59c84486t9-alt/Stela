@@ -22,6 +22,11 @@ pub(super) struct Owner {
     mask: Option<u64>,
     mirror: Option<u64>,
 }
+impl Owner {
+    pub(super) fn matches_program(&self, program: Program) -> bool {
+        self.program == program
+    }
+}
 impl Drop for Owner {
     fn drop(&mut self) {
         self.identity.invalidate();
@@ -29,7 +34,6 @@ impl Drop for Owner {
 }
 #[derive(Debug, Default)]
 pub(super) struct Book {
-    program: Option<Program>,
     // Zero comes from the original loaded __DATA.__zerofill bytes, not a
     // native register reset/readback. Retained gates never reinitialize it.
     pub(super) epochs: [u8; 2],
@@ -103,16 +107,16 @@ impl Access for ContextAccess<'_, '_, '_> {
         if native.work.run.is_some() {
             return Err("GFX common context still belongs to accepted CL work");
         }
-        let registers = &mut native.work.render;
-        if registers
-            .context
-            .program
+        let work = &mut native.work;
+        if work
+            .source_program
             .is_some_and(|program| program != self.program)
         {
             return Err(
                 "GFX retained render context belongs to another initialized firmware program",
             );
         }
+        let registers = &mut work.render;
         if registers.run.is_none() {
             if committed != 0 {
                 return Err("GFX common context lost its committed native owner");
@@ -127,7 +131,7 @@ impl Access for ContextAccess<'_, '_, '_> {
             if committed != 0 {
                 return Err("GFX common context lost its committed native prefix");
             }
-            registers.context.program = Some(self.program);
+            work.source_program = Some(self.program);
             run.prefix = Some(Owner {
                 program: self.program,
                 identity: identity.clone(),
