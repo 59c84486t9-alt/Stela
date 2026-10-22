@@ -5,6 +5,13 @@ use super::*;
 use crate::{discovery, pci};
 
 unsafe extern "C" {
+    fn stela_amd_info_oracle(
+        source: *const u8,
+        bytes: usize,
+        device: u16,
+        revision: u8,
+        out: &mut discovery::Information,
+    );
     fn stela_amd_tmr_fixture(bytes: &mut usize) -> *const u8;
     fn stela_amd_tmr_model_begin(registers: *mut u32, bytes: *const u8, size: usize);
     fn stela_amd_tmr_model_accesses() -> u32;
@@ -129,7 +136,25 @@ pub(super) fn acquire_observed(authority: &Authority) {
     assert_eq!(observed.version(0, instances), None);
     assert_eq!(observed.register_base(u32::MAX, u32::MAX, u32::MAX), None);
     assert!(unsafe { stela_amd_tmr_model_accesses() } > bytes as u32 / 4);
-    drop(observed);
+    let expected_source = observed.source_bytes().as_ptr();
+    let before = observed.counts();
+    let version = observed.version(0, 0);
+    allocation_failure::arm(0);
+    let consumed = observed
+        .into_information()
+        .unwrap_or_else(|_| panic!("information preflight"));
+    assert!(
+        !allocation_failure::disarm(),
+        "information transition allocated"
+    );
+    assert_eq!(consumed.source_bytes().as_ptr(), expected_source);
+    assert_eq!(consumed.identity(), bars.identity());
+    assert_eq!(consumed.preharvest_counts(), before);
+    assert_eq!(consumed.version(0, 0), version);
+    let mut expected = *consumed.information();
+    unsafe { stela_amd_info_oracle(source, bytes, 0xffff, 0x45, &mut expected) };
+    assert_eq!(consumed.information(), &expected);
+    drop(consumed);
     // Each of four fallible production allocations is independently refused.
     // Query/index effects remain real in this model, never falsely rolled back.
     for allocation in 0..4 {

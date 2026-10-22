@@ -288,7 +288,7 @@ ip-uefi: $(OUT_DIR)/discovery_ip_uefi.obj
 	rg 'amdgpu_discovery_binary_(table|validate)' "$<.undefined"
 $(OUT_DIR)/discovery-ip-linux.inc: $(SOURCE)/../amdgpu/amdgpu_discovery.c | $(OUT_DIR)
 	sed -n '/^static void amdgpu_discovery_ip_debug(/,/^static uint32_t amdgpu_discovery_tmr_read32(/{ /^static uint32_t amdgpu_discovery_tmr_read32(/d; p; }' "$<" > "$@"
-	sed -n '/^static int amdgpu_discovery_validate_ip(/,/^static void amdgpu_discovery_read_harvest_bit_per_ip(/{ /^static void amdgpu_discovery_read_harvest_bit_per_ip(/d; p; }' "$<" >> "$@"
+	sed -n '/^static int amdgpu_discovery_validate_ip(struct amdgpu_device \*adev,/,/^}/p' "$<" >> "$@"
 	sed -n '/^static int amdgpu_discovery_reg_base_init(/,/^static void amdgpu_discovery_harvest_ip(/{ /^static void amdgpu_discovery_harvest_ip(/d; p; }' "$<" >> "$@"
 IP_TEST_SOURCES := $(SOURCE)/discovery_ip.c $(SOURCE)/discovery_binary.c \
  $(SOURCE)/../tests/discovery_ip.c $(SOURCE)/../tests/discovery_ip_fixture.c
@@ -350,3 +350,56 @@ file-ram-model: $(OUT_DIR)/file-oracle.o
 $(OUT_DIR)/file-oracle.o: $(FILE_SOURCES) $(FILE_TEST_DEPS)
 	$(CC) $(COMMON) $(CFLAGS) -fwrapv -Dmain=stela_amd_file_test_main \
 	 -I$(OUT_DIR) -c "$(SOURCE)/../tests/discovery_file.c" -o "$@"
+
+INFO_HEADERS := $(SOURCE)/discovery_info.h $(IP_HEADERS) \
+ $(SOURCE)/../amdgpu/amdgpu_discovery_info_core.h \
+ $(SOURCE)/../amdgpu/amdgpu_gfx_config.h $(SOURCE)/../include/amd_harvest_masks.h
+INFO_SOURCES := $(SOURCE)/discovery_info.c $(SOURCE)/discovery_ip.c $(SOURCE)/discovery_binary.c \
+ $(SOURCE)/../tests/discovery_info.c $(SOURCE)/../tests/discovery_info_fixture.c
+INFO_TEST_DEPS := $(INFO_HEADERS) $(SOURCE)/../tests/discovery_info_reference.h $(SOURCE)/../tests/discovery_info_legacy_reference.h \
+ $(SOURCE)/../tests/discovery_binary_test.c $(SOURCE)/../tests/discovery_reference.h \
+ $(OUT_DIR)/info-linux.inc
+.PHONY: info-test info-sanitize info-isp-test info-isp-sanitize info-native info-uefi info-ram-model
+info-test: $(OUT_DIR)/discovery_info_test
+	"$<" $(INFO_INPUTS)
+info-sanitize: $(OUT_DIR)/discovery_info_sanitize
+	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 "$<" $(INFO_INPUTS)
+info-isp-test: $(OUT_DIR)/discovery_info_isp_test
+	"$<" $(INFO_INPUTS)
+info-isp-sanitize: $(OUT_DIR)/discovery_info_isp_sanitize
+	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 "$<" $(INFO_INPUTS)
+info-native: $(OUT_DIR)/discovery_info.o
+	$(NM) -u "$<" >"$<.undefined"
+	! rg -v 'amdgpu_discovery_binary_(table|validate)|mem(cpy|set)|___bzero' "$<.undefined"
+info-uefi: $(OUT_DIR)/discovery_info_uefi.obj
+	$(NM) -u "$<" >"$<.undefined"
+	! rg -v 'amdgpu_discovery_binary_(table|validate)|mem(cpy|set)|___bzero' "$<.undefined"
+$(OUT_DIR)/info-linux.inc: $(SOURCE)/../amdgpu/amdgpu_discovery.c | $(OUT_DIR)
+	sed -n '/^static int amdgpu_discovery_info_table(/,/^static int amdgpu_discovery_verify_npsinfo(/{ /^static int amdgpu_discovery_verify_npsinfo(/d; p; }' "$<" > "$@"
+	sed -n '/^static void amdgpu_discovery_harvest_ip(/,/^union nps_info /{ /^union nps_info /d; p; }' "$<" >> "$@"
+$(OUT_DIR)/discovery_info_test: $(INFO_SOURCES) $(INFO_TEST_DEPS)
+	$(CC) $(COMMON) $(CFLAGS) -fwrapv -Wno-sign-compare -Wno-pointer-sign -I$(OUT_DIR) $(INFO_SOURCES) -o "$@"
+$(OUT_DIR)/discovery_info_sanitize: $(INFO_SOURCES) $(INFO_TEST_DEPS)
+	$(CC) $(COMMON) $(CFLAGS) -O1 -fwrapv -Wno-sign-compare -Wno-pointer-sign -fno-omit-frame-pointer -fsanitize=address,undefined -I$(OUT_DIR) $(INFO_SOURCES) -o "$@"
+$(OUT_DIR)/discovery_info_isp_test: $(INFO_SOURCES) $(INFO_TEST_DEPS)
+	$(CC) $(COMMON) $(CFLAGS) -fwrapv -Wno-sign-compare -Wno-pointer-sign -DCONFIG_DRM_AMD_ISP=1 -I$(OUT_DIR) $(INFO_SOURCES) -o "$@"
+$(OUT_DIR)/discovery_info_isp_sanitize: $(INFO_SOURCES) $(INFO_TEST_DEPS)
+	$(CC) $(COMMON) $(CFLAGS) -O1 -fwrapv -Wno-sign-compare -Wno-pointer-sign -DCONFIG_DRM_AMD_ISP=1 -fno-omit-frame-pointer -fsanitize=address,undefined -I$(OUT_DIR) $(INFO_SOURCES) -o "$@"
+$(OUT_DIR)/discovery_info.o: $(SOURCE)/discovery_info.c $(INFO_HEADERS) | $(OUT_DIR)
+	$(CC) $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
+$(OUT_DIR)/discovery_info_uefi.obj: $(SOURCE)/discovery_info.c $(INFO_HEADERS) | $(OUT_DIR)
+	$(CLANG) --target=x86_64-unknown-windows-gnu $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
+# Frozen whole original consumer, CPU oracle only; never a production provider.
+info-ram-model: $(OUT_DIR)/info-oracle.o $(OUT_DIR)/info-fixture.o
+$(OUT_DIR)/info-oracle.o: $(INFO_SOURCES) $(INFO_TEST_DEPS)
+	$(CC) $(COMMON) $(CFLAGS) -fwrapv -Wno-sign-compare -Wno-pointer-sign -Dmain=stela_amd_info_test_main -I$(OUT_DIR) -c "$(SOURCE)/../tests/discovery_info.c" -o "$@"
+
+.PHONY: info-elf
+info-elf: $(OUT_DIR)/discovery_info_elf.o
+	$(NM) -u "$<" >"$<.undefined"
+	! rg -v 'amdgpu_discovery_binary_(table|validate)|mem(cpy|set)' "$<.undefined"
+$(OUT_DIR)/discovery_info_elf.o: $(SOURCE)/discovery_info.c $(INFO_HEADERS) | $(OUT_DIR)
+	$(CLANG) --target=x86_64-unknown-linux-gnu $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
+
+$(OUT_DIR)/info-fixture.o: $(SOURCE)/../tests/discovery_info_fixture.c $(DISCOVERY_TEST_HEADERS) $(SOURCE)/../tests/discovery_binary_test.c | $(OUT_DIR)
+	$(CC) $(COMMON) $(CFLAGS) -fwrapv -c "$<" -o "$@"

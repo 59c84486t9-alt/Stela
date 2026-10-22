@@ -687,3 +687,315 @@ impl<'provider> FileIp<'_, 'provider> {
         self.data.register_base(hw_ip, instance, segment)
     }
 }
+
+/// Original per-table outcome. Missing offsets are distinct from schema errors;
+/// these errors were nonfatal in original set_ip_blocks and remain observable.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TableInformation {
+    pub status: i32,
+    pub major: u16,
+    pub minor: u16,
+    present: u32,
+}
+impl TableInformation {
+    pub fn present(self) -> bool {
+        self.present != 0
+    }
+}
+/// An original GFX/CU field, supplied only by its actual firmware schema.
+/// These are source facts, not final fuse-checked topology or Metal features.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GfxField {
+    MaxShaderEngines = 0,
+    MaxCuPerSh = 1,
+    MaxShPerSe = 2,
+    MaxBackendsPerSe = 3,
+    MaxTextureChannelCaches = 4,
+    MaxGprs = 5,
+    MaxGsThreads = 6,
+    GsVgtTableDepth = 7,
+    GsPrimBufferDepth = 8,
+    DoubleOffchipLdsBuf = 9,
+    WaveFrontSize = 10,
+    MaxWavesPerSimd = 11,
+    MaxScratchSlotsPerCu = 12,
+    LdsSize = 13,
+    NumScPerSh = 14,
+    NumPackerPerSc = 15,
+    GcNumTcpPerSa = 16,
+    GcNumSdpInterface = 17,
+    GcNumTcps = 18,
+    GcNumTcpPerWpg = 19,
+    GcTcpL1Size = 20,
+    GcNumSqcPerWgp = 21,
+    GcL1InstructionCacheSizePerSqc = 22,
+    GcL1DataCacheSizePerSqc = 23,
+    GcGl1cPerSa = 24,
+    GcGl1cSizePerInstance = 25,
+    GcGl2cPerGpu = 26,
+    GcTcpSizePerCu = 27,
+    GcTcpCacheLineSize = 28,
+    GcInstructionCacheSizePerSqc = 29,
+    GcInstructionCacheLineSize = 30,
+    GcScalarDataCacheSizePerSqc = 31,
+    GcScalarDataCacheLineSize = 32,
+    GcTccSize = 33,
+    GcTccCacheLineSize = 34,
+    GcNumCuPerSqc = 35,
+}
+/// Original harvest/info results. Construction is private to a consuming
+/// source-owned transition; this is never initialized-device/radeon_info state.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Information {
+    counts: IpCounts,
+    harvest_mask: u32,
+    vcn_harvest: u32,
+    jpeg_harvest: u32,
+    isp_harvest: u32,
+    active_umc_mask: u64,
+    mall_size: u64,
+    half_use: u32,
+    codec_disable: [u32; 4],
+    gfx: TableInformation,
+    mall: TableInformation,
+    vcn: TableInformation,
+    gfx_supplied: u64,
+    gfx_values: [u32; 36],
+    isp_build_enabled: u32,
+    harvest_errors: u32,
+    harvest_warnings: u32,
+}
+impl Information {
+    fn empty() -> Self {
+        Self {
+            counts: IpCounts::default(),
+            harvest_mask: 0,
+            vcn_harvest: 0,
+            jpeg_harvest: 0,
+            isp_harvest: 0,
+            active_umc_mask: 0,
+            mall_size: 0,
+            half_use: 0,
+            codec_disable: [0; 4],
+            gfx: TableInformation::default(),
+            mall: TableInformation::default(),
+            vcn: TableInformation::default(),
+            gfx_supplied: 0,
+            gfx_values: [0; 36],
+            isp_build_enabled: 0,
+            harvest_errors: 0,
+            harvest_warnings: 0,
+        }
+    }
+}
+const _: () = assert!(size_of::<TableInformation>() == 12);
+const _: () = assert!(size_of::<Information>() == 288);
+const _: () = assert!(core::mem::offset_of!(Information, active_umc_mask) == 48);
+const _: () = assert!(core::mem::offset_of!(Information, gfx_supplied) == 120);
+const _: () = assert!(core::mem::offset_of!(Information, gfx_values) == 128);
+unsafe extern "C" {
+    fn stela_amd_discovery_info_bytes() -> usize;
+    fn stela_amd_discovery_info_decode(
+        raw: *const u8,
+        bytes: usize,
+        versions: *const u32,
+        version_count: usize,
+        counts: &IpCounts,
+        pci_device: u16,
+        pci_revision: u8,
+        out: &mut Information,
+    ) -> c_int;
+}
+impl Information {
+    pub fn counts(&self) -> IpCounts {
+        self.counts
+    }
+    /// Actual original void-harvest error/warning diagnostic call counts. The
+    /// original caller continued after them; neither count is readiness.
+    pub fn harvest_diagnostics(&self) -> (u32, u32) {
+        (self.harvest_errors, self.harvest_warnings)
+    }
+    pub fn harvest_mask(&self) -> u32 {
+        self.harvest_mask
+    }
+    pub fn vcn_harvest(&self) -> u32 {
+        self.vcn_harvest
+    }
+    pub fn jpeg_harvest(&self) -> u32 {
+        self.jpeg_harvest
+    }
+    /// Some only when this actual build compiled original AMD ISP harvesting.
+    /// This never implies an ISP driver exists or is initialized.
+    pub fn isp_harvest(&self) -> Option<u32> {
+        (self.isp_build_enabled != 0).then_some(self.isp_harvest)
+    }
+    pub fn active_umc_mask(&self) -> u64 {
+        self.active_umc_mask
+    }
+    pub fn gfx_table(&self) -> TableInformation {
+        self.gfx
+    }
+    pub fn mall_table(&self) -> TableInformation {
+        self.mall
+    }
+    pub fn vcn_table(&self) -> TableInformation {
+        self.vcn
+    }
+    pub fn gfx(&self, field: GfxField) -> Option<u32> {
+        let index = field as usize;
+        (self.gfx_supplied & (1u64 << index) != 0).then_some(self.gfx_values[index])
+    }
+    pub fn mall_bytes(&self) -> Option<u64> {
+        (self.mall.present() && self.mall.status == 0).then_some(self.mall_size)
+    }
+    pub fn mall_half_use(&self) -> Option<u32> {
+        (self.mall.present() && self.mall.status == 0 && self.mall.major == 1)
+            .then_some(self.half_use)
+    }
+    pub fn codec_disable(&self, instance: u32) -> Option<u32> {
+        if !self.vcn.present()
+            || self.vcn.status != 0
+            || instance >= u32::from(self.counts.vcn_count)
+        {
+            return None;
+        }
+        self.codec_disable.get(instance as usize).copied()
+    }
+}
+#[derive(Debug)]
+pub enum InformationError {
+    NativeAbi,
+    Preflight(c_int),
+}
+/// Refusal retains the exact prior owner/source. No hardware effects or partial
+/// harvest are published by native preflight; caller may inspect/drop its owner.
+pub struct InformationFailure<T> {
+    pub error: InformationError,
+    pub source: T,
+}
+/// Consumed source and actual original results. No extraction/conversion back to
+/// a pre-harvest source exists, so harvest cannot be reapplied or double-counted.
+pub struct DiscoveredInformation<T> {
+    source: T,
+    information: Information,
+}
+impl<T> DiscoveredInformation<T> {
+    pub fn information(&self) -> &Information {
+        &self.information
+    }
+}
+fn information(data: &IpData<'_>, pci: (u16, u8)) -> Result<Information, InformationError> {
+    // SAFETY: pure compile-time ABI query with no retained pointers/services.
+    if unsafe { stela_amd_discovery_info_bytes() } != size_of::<Information>() {
+        return Err(InformationError::NativeAbi);
+    }
+    let mut result = Information::empty();
+    // SAFETY: same private original source and once-decoded arrays/counts, full
+    // disjoint live owned spans. Real observed PCI data comes from retained
+    // admitted owner, not a copied Identity or caller-provided revision tuple.
+    let status = unsafe {
+        stela_amd_discovery_info_decode(
+            data.source_bytes().as_ptr(),
+            data.source_bytes().len(),
+            data.versions.as_ptr(),
+            data.versions.len(),
+            &data.counts,
+            pci.0,
+            pci.1,
+            &mut result,
+        )
+    };
+    if status != 0 {
+        return Err(InformationError::Preflight(status));
+    }
+    Ok(result)
+}
+impl<'owner> ObservedIp<'owner> {
+    /// Execute original harvest→GFX→MALL→VCN, once, on the privately acquired
+    /// same-device source. Existing pre-harvest getters retain their semantics.
+    #[allow(
+        clippy::result_large_err,
+        reason = "retain exact admitted owner on refusal without allocating"
+    )]
+    pub fn into_information(self) -> Result<DiscoveredInformation<Self>, InformationFailure<Self>> {
+        match information(&self.data, self._owner.pci_device_revision()) {
+            Ok(information) => Ok(DiscoveredInformation {
+                source: self,
+                information,
+            }),
+            Err(error) => Err(InformationFailure {
+                error,
+                source: self,
+            }),
+        }
+    }
+}
+impl<'owner, 'provider> FileIp<'owner, 'provider> {
+    /// Same original consumers on admitted dynamic firmware only; immutable
+    /// canonical Image/provider and exact live BAR/epoch remain retained.
+    #[allow(
+        clippy::result_large_err,
+        reason = "retain exact admitted owner on refusal without allocating"
+    )]
+    pub fn into_information(self) -> Result<DiscoveredInformation<Self>, InformationFailure<Self>> {
+        match information(
+            &self.data,
+            (self._owner.hardware_ids().1, self._owner.revision_ids().0),
+        ) {
+            Ok(information) => Ok(DiscoveredInformation {
+                source: self,
+                information,
+            }),
+            Err(error) => Err(InformationFailure {
+                error,
+                source: self,
+            }),
+        }
+    }
+}
+impl<'owner> DiscoveredInformation<ObservedIp<'owner>> {
+    pub fn source_bytes(&self) -> &[u8] {
+        self.source.data.source_bytes()
+    }
+    pub fn identity(&self) -> Identity {
+        self.source.data.identity()
+    }
+    pub fn preharvest_counts(&self) -> IpCounts {
+        self.source.data.counts()
+    }
+    pub fn version(&self, hw_ip: u32, instance: u32) -> Option<u32> {
+        self.source.data.version(hw_ip, instance)
+    }
+    pub fn register_count(&self, hw_ip: u32, instance: u32) -> Option<u32> {
+        self.source.data.register_count(hw_ip, instance)
+    }
+    pub fn register_base(&self, hw_ip: u32, instance: u32, segment: u32) -> Option<u32> {
+        self.source.data.register_base(hw_ip, instance, segment)
+    }
+}
+impl<'owner, 'provider> DiscoveredInformation<FileIp<'owner, 'provider>> {
+    pub fn source_bytes(&self) -> &[u8] {
+        self.source.data.source_bytes()
+    }
+    pub fn identity(&self) -> Identity {
+        self.source.data.identity()
+    }
+    pub fn preharvest_counts(&self) -> IpCounts {
+        self.source.data.counts()
+    }
+    pub fn version(&self, hw_ip: u32, instance: u32) -> Option<u32> {
+        self.source.data.version(hw_ip, instance)
+    }
+    pub fn register_count(&self, hw_ip: u32, instance: u32) -> Option<u32> {
+        self.source.data.register_count(hw_ip, instance)
+    }
+    pub fn register_base(&self, hw_ip: u32, instance: u32, segment: u32) -> Option<u32> {
+        self.source.data.register_base(hw_ip, instance, segment)
+    }
+    pub fn image(&self) -> crate::firmware::Image<'provider> {
+        self.source.image
+    }
+}

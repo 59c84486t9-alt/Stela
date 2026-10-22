@@ -35,8 +35,7 @@
 #include "amdgpu_ip_instance_limits.h"
 #define AMDGPU_MAX_VCN_ENC_RINGS  (AMDGPU_VCN_MAX_ENC_RINGS * AMDGPU_MAX_VCN_INSTANCES)
 
-#define AMDGPU_VCN_HARVEST_VCN0 (1 << 0)
-#define AMDGPU_VCN_HARVEST_VCN1 (1 << 1)
+#include "../include/amd_harvest_masks.h"
 
 #define VCN_DEC_KMD_CMD 		0x80000000
 #define VCN_DEC_CMD_FENCE		0x00000000

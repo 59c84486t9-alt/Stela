@@ -7,6 +7,13 @@ use sha2::{Digest, Sha256};
 use std::cell::Cell;
 
 unsafe extern "C" {
+    fn stela_amd_info_oracle(
+        source: *const u8,
+        bytes: usize,
+        device: u16,
+        revision: u8,
+        out: &mut discovery::Information,
+    );
     fn stela_amd_file_fixture_declared(source: *const u8, bytes: usize) -> usize;
     fn stela_amd_tmr_fixture(bytes: &mut usize) -> *const u8;
     fn stela_amd_tmr_model_begin(registers: *mut u32, bytes: *const u8, size: usize);
@@ -210,7 +217,7 @@ pub(super) fn selected_files(authority: &Authority) {
     );
     assert_eq!(ip.image().provenance().member, "fixtures/ip-discovery.bin");
     facts(&ip, source_bytes);
-    drop(ip);
+    information(ip, source_bytes);
     // Fresh immutable real inputs exercise original file policy/decoder unchanged.
     let mut real_inputs = 0;
     if let Ok(paths) = std::env::var("STELA_AMD_DISCOVERY_INPUTS") {
@@ -233,6 +240,7 @@ pub(super) fn selected_files(authority: &Authority) {
             facts(&ip, &bytes);
             assert_eq!(ip.image().bytes(), bytes);
             assert_eq!(ip.image().provenance().member, member);
+            information(ip, &bytes);
             real_inputs += 1;
         }
     }
@@ -538,4 +546,34 @@ pub(super) fn selected_files(authority: &Authority) {
     println!(
         "AMD selected-file Rust/C: actual admitted source/provider owners, query-before-load, retained image/provenance, same original facts, static inventory isolation, four Vec OOMs + provider diagnostic OOM, missing owners, pending original failure diagnostics; {real_inputs} unchanged real inputs; CPU only"
     );
+}
+
+fn information(ip: discovery::FileIp<'_, '_>, expected_bytes: &[u8]) {
+    let before = ip.counts();
+    let identity = ip.identity();
+    let hash = ip.image().sha256();
+    let provenance = ip.image().provenance();
+    let source = ip.acquired_bytes().as_ptr();
+    let size = ip.acquired_bytes().len();
+    allocation_failure::arm(0);
+    let consumed = ip
+        .into_information()
+        .unwrap_or_else(|_| panic!("information preflight"));
+    assert!(
+        !allocation_failure::disarm(),
+        "information transition allocated"
+    );
+    assert_eq!(consumed.source_bytes().as_ptr(), source);
+    assert_eq!(
+        &consumed.source_bytes()[..expected_bytes.len()],
+        expected_bytes
+    );
+    assert_eq!(consumed.preharvest_counts(), before);
+    assert_eq!(consumed.identity(), identity);
+    assert_eq!(consumed.image().bytes(), expected_bytes);
+    assert_eq!(consumed.image().sha256(), hash);
+    assert_eq!(consumed.image().provenance(), provenance);
+    let mut expected = *consumed.information();
+    unsafe { stela_amd_info_oracle(source, size, 0xffff, 0x45, &mut expected) };
+    assert_eq!(consumed.information(), &expected);
 }

@@ -225,6 +225,7 @@ impl<'a> AttachedBars<'a> {
             return Err(Error::FirmwareSourceRequired);
         }
         Ok(DynamicHardware {
+            admission,
             window: self.registers()?,
             identity: self.identity,
         })
@@ -469,10 +470,17 @@ impl<'a> AttachedBars<'a> {
 /// mapping owner. No Clone or public constructor; public selection metadata and
 /// arbitrary snapshots cannot create it. The canonical lease/borrow pins epoch.
 pub(super) struct DynamicHardware<'owner> {
+    admission: Admission,
     window: RegisterWindow<'owner>,
     identity: Identity,
 }
 impl<'owner> DynamicHardware<'owner> {
+    pub(super) fn pci_device_revision(&self) -> (u16, u8) {
+        (
+            self.admission.firmware_hardware().1,
+            self.admission.firmware_revision().0,
+        )
+    }
     pub(super) fn window(&self) -> &RegisterWindow<'owner> {
         &self.window
     }
