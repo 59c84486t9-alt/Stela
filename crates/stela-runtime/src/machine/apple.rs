@@ -2576,12 +2576,12 @@ impl AppleDevices {
         Ok(())
     }
 
-    /// The AIC at `physical`, serving this PE. NR_IRQ is the number of
-    /// inputs the board wires (one more than the highest DeviceTree
-    /// `interrupts` value under the AIC), which the model reports in its INFO
-    /// or CAP0 register (m1n1 `aic.c`, Linux `irq-apple-aic.c`). An AICv2's
-    /// or AICv3's `layout` gives its MAX_IRQ and says where its per-die
-    /// arrays, timestamp slots and event register are; an AICv1's are fixed.
+    /// The AIC at `physical`, serving this PE. NR_IRQ is each die's inputs
+    /// (`machine::soc::InterruptController`), which the model reports in its
+    /// INFO or CAP0 register (m1n1 `aic.c`, Linux `irq-apple-aic.c`). An
+    /// AICv2's or AICv3's `layout` gives its MAX_IRQ and populated dies and
+    /// says where its per-die arrays, timestamp slots and event register
+    /// are; an AICv1's are fixed.
     pub fn add_aic(&mut self, physical: u64, nr_irq: u16, layout: AicLayout) -> Result<(), String> {
         if self.aic.is_some() {
             return Err("AIC owner is already bound".into());
@@ -2599,6 +2599,7 @@ impl AppleDevices {
                 event,
                 timestamps,
                 timestamp_base,
+                dies,
             } => {
                 let config = Aic2Config {
                     version,
@@ -2612,8 +2613,8 @@ impl AppleDevices {
                     default_cpus: 1,
                     target_groups: [None; 4],
                 };
-                let aic =
-                    Aic2::new(config).map_err(|error| format!("AIC2 configuration: {error:?}"))?;
+                let aic = Aic2::stacked(config, dies)
+                    .map_err(|error| format!("AIC2 configuration: {error:?}"))?;
                 let span = aic.span();
                 (Box::new(aic), span, false)
             }

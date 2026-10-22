@@ -66,6 +66,26 @@
 //! and `getAICPubStampHiOffset` default to 0x1000, 0x1008 and 0x100c plus
 //! 0x10 per slot), with the same ENABLE, DIE and IRQ fields.
 //!
+//! Both 26A434 drivers number their vectors die by die (`start` of
+//! `AppleInterruptControllerV2` in `kernelcache.release.mac13j` and of
+//! `AppleInterruptControllerV3` in `kernelcache.release.mac15j`): they take
+//! the populated dies from INFO1's LAST_DIE + 1 and MAX_IRQ from INFO3, and
+//! size the vector table at their product, the `_aicNumVectors` `start`
+//! logs; enabling, disabling and acknowledging vector V address die
+//! V / MAX_IRQ, IRQ V % MAX_IRQ, and a vector at or past the product panics
+//! ("Invalid interrupt number"). NR_IRQ, which the `aic,2` driver reads from
+//! INFO1 [10:0] and the `aic,3` driver from CAP0 under the ADT's
+//! `cap0_max_interrupt_umask` (0xffff when absent; MAX_IRQ likewise under
+//! `max_irq_interrupt_umask`), only bounds the mask words `start` sets on
+//! every die, NR_IRQ / 32 rounded up. So a DeviceTree specifier naming the
+//! AIC is a vector: J575d's second-die CLPC line 0x15bf is die 1, IRQ 0x5bf.
+//! Dies sit [`AIC2_DIE_STRIDE`] apart: the `aic,2` driver hard-codes it,
+//! and the `aic,3` driver multiplies the die by the ADT's
+//! `extintrcfg-stride`, `intmaskset-stride`, `intmaskclear-stride` and
+//! `hwintmon-stride` once `extint-baseaddress` is stated, which J575d and
+//! J775d state as 0x4a00 (single-die J613 and J504 state 0, which die 0
+//! never multiplies).
+//!
 //! Inferred, not documented: VER is the controller's generation (2 for
 //! AICv2, 3 for AICv3), below the `aic,3` driver's 0xb topology threshold;
 //! an enabled
@@ -95,6 +115,7 @@
 pub mod layout;
 pub use layout::Aic2Layout;
 
+use super::aic1::AIC1_MAX_IRQ;
 use super::bus::{
     Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
 };
@@ -116,6 +137,12 @@ pub const AIC2_IRQ_CFG: u64 = 0x2000;
 pub const AIC3_IRQ_CFG: u64 = 0x10000;
 /// An AICv2's or AICv3's IRQs per die, which fix its per-die array layout.
 pub const AIC2_MAX_IRQ: u16 = 4096;
+/// The distance between consecutive dies' arrays: the contiguous arrays of
+/// [`AIC2_MAX_IRQ`] IRQs ([`layout::Aic2DieLayout::contiguous`]).
+pub const AIC2_DIE_STRIDE: u64 = 0x4a00;
+/// The most dies the 26A434 drivers accept in INFO3's MAX_DIE (`start`
+/// panics past it: "Unsupported max die count").
+pub const AIC2_MAX_DIES: u8 = 8;
 
 /// An AICv2's first shared timestamp slot (`AppleInterruptControllerV2`).
 pub const AIC2_TIMESTAMPS: u64 = 0x1800;
@@ -153,6 +180,9 @@ pub enum AicLayout {
         event: u64,
         timestamps: u8,
         timestamp_base: u64,
+        /// Populated dies, each with its own arrays [`AIC2_DIE_STRIDE`]
+        /// after the previous die's.
+        dies: u8,
     },
 }
 
@@ -167,6 +197,7 @@ impl AicLayout {
             event,
             timestamps,
             timestamp_base: AIC2_TIMESTAMPS,
+            dies: 1,
         }
     }
     /// An AICv3 whose event register is `event` bytes from its core block,
@@ -179,13 +210,53 @@ impl AicLayout {
             event,
             timestamps,
             timestamp_base: AIC3_TIMESTAMPS,
+            dies: 1,
+        }
+    }
+    /// This layout with `dies` populated dies; an AICv1 has one.
+    pub const fn with_dies(self, dies: u8) -> Self {
+        match self {
+            Self::V1 => Self::V1,
+            Self::V2 {
+                version,
+                irq_config,
+                max_irq,
+                event,
+                timestamps,
+                timestamp_base,
+                dies: _,
+            } => Self::V2 {
+                version,
+                irq_config,
+                max_irq,
+                event,
+                timestamps,
+                timestamp_base,
+                dies,
+            },
+        }
+    }
+    /// The IRQs each die's arrays hold, which split a vector into its die
+    /// and IRQ.
+    pub const fn max_irq(self) -> u16 {
+        match self {
+            Self::V1 => AIC1_MAX_IRQ,
+            Self::V2 { max_irq, .. } => max_irq,
+        }
+    }
+    /// The populated dies.
+    pub const fn dies(self) -> u8 {
+        match self {
+            Self::V1 => 1,
+            Self::V2 { dies, .. } => dies,
         }
     }
 }
 
 /// Hardware facts of one AICv2 instance. NR_IRQ and MAX_IRQ come from the
-/// controller, not the ADT; the board profile must record them from the
-/// real machine (m1n1 prints them as "AIC: AIC2 with 1/1 dies, N/M IRQs").
+/// controller, not the ADT (m1n1 prints them as "AIC: AIC2 with 1/1 dies,
+/// N/M IRQs"); no 26A434 ADT or firmware states NR_IRQ, so a board supplies
+/// the inputs its DeviceTree wires (`machine::soc::board`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Aic2Config {
     /// VERSION's VER field.
@@ -266,14 +337,21 @@ enum Register {
 
 impl Aic2 {
     pub fn new(config: Aic2Config) -> Result<Self, Aic2Error> {
-        let layout = Aic2Layout::single(&config).ok_or(Aic2Error::InvalidConfig(
+        Self::stacked(config, 1)
+    }
+
+    /// An AIC with `dies` populated dies, each die's arrays right after the
+    /// previous die's ([`Aic2Layout::stacked`]) and the event register after
+    /// the last.
+    pub fn stacked(config: Aic2Config, dies: u8) -> Result<Self, Aic2Error> {
+        let layout = Aic2Layout::stacked(&config, dies).ok_or(Aic2Error::InvalidConfig(
             "AIC contiguous register layout overflows",
         ))?;
-        let end = config
-            .irq_config
-            .checked_add(4 * u64::from(config.max_irq))
-            .and_then(|end| end.checked_add(20 * u64::from(config.max_irq / 32)))
-            .ok_or(Aic2Error::InvalidConfig("AIC register extent overflows"))?;
+        let last = layout
+            .dies
+            .last()
+            .ok_or(Aic2Error::InvalidConfig("an AIC has at least one die"))?;
+        let end = last.hardware_state + 4 * u64::from(config.max_irq / 32);
         if config.event_offset < end {
             return Err(Aic2Error::InvalidConfig(
                 "the event register must follow the per-die arrays",
@@ -1349,5 +1427,66 @@ mod tests {
         );
         assert!(v3(CONFIG, 0x40000).is_err());
         assert!(v3(AIC3_IRQ_CFG + 2, 0x40000).is_err());
+    }
+
+    /// An M3 Ultra's AICv3 as the 26A434 driver reads it: CAP0 counts two
+    /// dies (LAST_DIE 1) of NR_IRQ inputs, MAXNUMIRQ 4096 IRQs per die and
+    /// MAX_DIE 2, and die 1's arrays follow die 0's at 0x4a00, so its
+    /// vector 0x15bf is die 1's `MASK_CLR` word at 0x14600 + 0x4a00 + 4 * 45.
+    #[test]
+    fn stacked_dies_follow_one_another_at_the_die_stride() {
+        let config = Aic2Config {
+            version: 3,
+            nr_irq: 0x93f,
+            max_irq: AIC2_MAX_IRQ,
+            irq_config: AIC3_IRQ_CFG,
+            event_offset: 0x40000,
+            timestamps: 16,
+            timestamp_base: AIC3_TIMESTAMPS,
+            cpus: 1,
+            default_cpus: 1,
+            target_groups: [None; 4],
+        };
+        let mut aic = Aic2::stacked(config.clone(), 2).unwrap();
+        let mut latch = InterruptLatch::new();
+        assert_eq!(read(&mut aic, &mut latch, 0, INFO1), 1 << 24 | 0x93f);
+        assert_eq!(read(&mut aic, &mut latch, 0, INFO3), 2 << 24 | 0x1000);
+        let (word, bit) = position(0x5bf);
+        let die1 = AIC3_IRQ_CFG + AIC2_DIE_STRIDE;
+        assert_eq!(die1 + 0x4600, 0x14600 + 0x4a00);
+        write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+        write(&mut aic, &mut latch, die1 + 0x4600 + 4 * word as u64, bit);
+        write(&mut aic, &mut latch, die1 + 4 * 0x5bf, 0);
+        aic.set_input(
+            AicInput::new(1, 0x5bf),
+            true,
+            &mut Access::new(0, 0, &mut latch),
+        )
+        .unwrap();
+        assert_eq!(
+            read(&mut aic, &mut latch, 0, 0x40000),
+            1 << 24 | EVENT_TYPE_IRQ | 0x5bf
+        );
+        // A third die, at 0x19400, is not populated: it has no inputs and
+        // no registers.
+        assert!(
+            aic.set_input(
+                AicInput::new(2, 0),
+                true,
+                &mut Access::new(0, 0, &mut latch)
+            )
+            .is_err()
+        );
+        let mut access = Access::new(0, 0, &mut latch);
+        assert!(
+            aic.read(die1 + AIC2_DIE_STRIDE, Width::Word, &mut access)
+                .is_err()
+        );
+        // The event register must follow the last die's arrays.
+        let crowded = Aic2Config {
+            event_offset: die1 + AIC2_DIE_STRIDE - 4,
+            ..config
+        };
+        assert!(Aic2::stacked(crowded, 2).is_err());
     }
 }

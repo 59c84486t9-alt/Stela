@@ -3,6 +3,8 @@
 //! m1n1 `src/aic.c` reads cap0-offset, maxnumirq-offset,
 //! extintrcfg-stride, intmaskset-stride and intmaskclear-stride from the ADT.
 //! Unestablished banks must not be supplied using guessed offsets.
+#[cfg(doc)]
+use super::{AIC2_DIE_STRIDE, AIC2_MAX_IRQ};
 use super::{Aic2Config, CONFIG, INFO1, INFO3, TIMESTAMP_STRIDE, VERSION};
 use alloc::vec::Vec;
 
@@ -59,15 +61,26 @@ pub struct Aic2Layout {
 }
 
 impl Aic2Layout {
-    pub(super) fn single(config: &Aic2Config) -> Option<Self> {
+    /// `dies` dies at the fixed INFO1 and INFO3, each die's contiguous
+    /// arrays right after the previous die's: [`AIC2_DIE_STRIDE`] apart for
+    /// [`AIC2_MAX_IRQ`] IRQs, as the 26A434 drivers address them. Every die
+    /// is populated (MAX_DIE = LAST_DIE + 1).
+    pub fn stacked(config: &Aic2Config, dies: u8) -> Option<Self> {
+        let first = Aic2DieLayout::contiguous(config.irq_config, config.max_irq)?;
+        let stride = first.hardware_state + 4 * u64::from(config.max_irq / 32) - first.irq_config;
+        let dies = (0..u64::from(dies))
+            .map(|die| {
+                let irq_config = stride
+                    .checked_mul(die)
+                    .and_then(|offset| offset.checked_add(config.irq_config))?;
+                Aic2DieLayout::contiguous(irq_config, config.max_irq)
+            })
+            .collect::<Option<Vec<_>>>()?;
         Some(Self {
             info1: INFO1,
             info3: INFO3,
-            max_dies: 1,
-            dies: alloc::vec![Aic2DieLayout::contiguous(
-                config.irq_config,
-                config.max_irq
-            )?],
+            max_dies: u8::try_from(dies.len()).ok()?,
+            dies,
         })
     }
 

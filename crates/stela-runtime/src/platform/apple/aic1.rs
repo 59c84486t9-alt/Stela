@@ -44,7 +44,9 @@ const IPI_ACK: u64 = 0x200c;
 const IPI_MASK_SET: u64 = 0x2024;
 const IPI_MASK_CLR: u64 = 0x2028;
 const TARGET_CPU: u64 = 0x3000;
-const MAX_IRQ: u16 = 0x400;
+/// The AICv1's IRQs (`AIC_MAX_IRQ`), which fix its array layout.
+pub const AIC1_MAX_IRQ: u16 = 0x400;
+const MAX_IRQ: u16 = AIC1_MAX_IRQ;
 const WORDS: usize = MAX_IRQ as usize / 32;
 const ARRAYS: u64 = TARGET_CPU + 4 * MAX_IRQ as u64;
 /// The end of the documented registers: past `HW_STATE`.
