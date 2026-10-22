@@ -10,7 +10,7 @@ use core::{
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use stela_drivers::bus::dma::memory::{
-    CacheAttribute, MemoryError, PageBacking, PageSource, PinnedPages,
+    CacheAttribute, MemoryError, PageBacking, PageGeometry, PageSource, PinnedPages,
 };
 
 #[cfg(not(test))]
@@ -145,6 +145,15 @@ pub fn verify() -> Result<(), MemoryError> {
 }
 
 impl PageSource for NativeMemory {
+    fn page_geometry(&self) -> Result<PageGeometry, MemoryError> {
+        if self.bytes.load(Ordering::Acquire) == 0 {
+            return Err(MemoryError::Unavailable);
+        }
+        // This allocator records PAGE_SHIFT for every real returned backing.
+        // A large byte capacity/alignment does not establish a larger granule.
+        PageGeometry::base_only(PAGE_SHIFT)
+    }
+
     fn allocate(
         &self,
         bytes: usize,
@@ -264,6 +273,17 @@ mod tests {
     use super::*;
     use core::alloc::Layout;
     #[test]
+    fn unregistered_native_memory_does_not_attest_a_provider() {
+        let source = NativeMemory {
+            cpu: AtomicUsize::new(0),
+            physical: AtomicU64::new(0),
+            bytes: AtomicUsize::new(0),
+            table_offset: AtomicU64::new(0),
+        };
+        assert_eq!(source.page_geometry(), Err(MemoryError::Unavailable));
+    }
+
+    #[test]
     fn actual_heap_pages_stay_pinned_through_cpu_mapping_and_reclaim() {
         let layout = Layout::from_size_align(128 * 4096, 8192).unwrap();
         // SAFETY: this separate RAM allocation is kept alive until every test pin
@@ -276,6 +296,9 @@ mod tests {
             initialize(ram as usize, 0x4000_0000, layout.size(), 0);
         }
         let source = &SOURCE;
+        let geometry = source.page_geometry().unwrap();
+        assert_eq!(geometry, PageGeometry::base_only(PAGE_SHIFT).unwrap());
+        assert!(!geometry.supports(PAGE_SHIFT + 1));
         verify().unwrap();
         assert!(matches!(
             source.allocate(0, 4096, CacheAttribute::WriteBack),
@@ -297,6 +320,7 @@ mod tests {
         assert_eq!(pin.logical_bytes(), 4097);
         assert_eq!(pin.alignment(), 8192);
         assert_eq!(pin.page_shift(), 12);
+        assert!(geometry.supports(pin.page_shift()));
         assert!(matches!(
             pin.cpu_mapping(CacheAttribute::Uncached),
             Err(MemoryError::CacheAttributeUnavailable)
