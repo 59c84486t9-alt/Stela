@@ -63,7 +63,7 @@ impl DeviceTable {
             })
             .transpose()?;
         let mut owned: Vec<[u32; RECORD_BYTES / 4]> = Vec::new();
-        for bytes in records.chunks_exact(RECORD_BYTES) {
+        for bytes in records.as_chunks::<RECORD_BYTES>().0 {
             let record = core::array::from_fn(|i| {
                 u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
             });
@@ -261,7 +261,9 @@ mod tests {
             (370, 10),
         ] {
             let row = raw
-                .chunks_exact(48)
+                .as_chunks::<48>()
+                .0
+                .iter()
                 .find(|row| u16::from_le_bytes(row[26..28].try_into().unwrap()) == id)
                 .unwrap();
             assert_eq!(row[3], source);
