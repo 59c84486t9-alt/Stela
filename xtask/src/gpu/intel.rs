@@ -1,10 +1,10 @@
-//! Compare native firmware preparation with the frozen original Xe helpers.
+//! Run the native Xe firmware, WOPCM, GSM, PAT and GuC reset adapter tests.
 use super::support::capture;
 use crate::tools;
 use std::process::Command;
 
 #[test]
-fn firmware_wopcm_gsm_pat_and_guc_reset_match_original_policy_and_register_traces() {
+fn firmware_wopcm_gsm_pat_and_guc_reset_adapters_pass() {
     run(&[
         "test-firmware",
         "test-huc-firmware",

@@ -10,6 +10,10 @@ struct xe_tile;
 #define XE_BO_FLAG_SYSTEM		BIT(1)
 #define XE_BO_FLAG_GGTT			BIT(5)
 #define XE_BO_FLAG_GGTT_INVALIDATE	BIT(17)
+/* Copyright © 2021 Intel Corporation; the page geometry from xe_bo.h. */
+#define XE_PTE_SHIFT			12
+#define XE_PAGE_SIZE			(1 << XE_PTE_SHIFT)
+#define XE_PTE_MASK			(XE_PAGE_SIZE - 1)
 /* Stela allocates buffer objects through its own owners; this only names one.
  * Each translation unit that creates or places one defines these. */
 struct xe_bo {
@@ -18,4 +22,9 @@ struct xe_bo {
 static struct xe_bo *xe_managed_bo_create_from_data(struct xe_device *xe, struct xe_tile *tile,
 						    const void *data, size_t size, u32 flags);
 static u32 xe_bo_ggtt_addr(struct xe_bo *bo);
+static struct xe_bo *xe_managed_bo_create_pin_map(struct xe_device *xe, struct xe_tile *tile,
+						  size_t size, u32 flags);
+static int xe_managed_bo_reinit_in_vram(struct xe_device *xe, struct xe_tile *tile,
+					struct xe_bo **src);
+static size_t xe_bo_size(struct xe_bo *bo);
 #endif

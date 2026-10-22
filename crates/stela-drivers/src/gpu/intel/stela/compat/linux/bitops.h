@@ -5,6 +5,7 @@
 #define BITS_PER_LONG (8 * (int)sizeof(long))
 #define BIT_MASK(nr) (1UL << ((nr) % BITS_PER_LONG))
 #define BIT_WORD(nr) ((nr) / BITS_PER_LONG)
+#define ffs(x) __builtin_ffs((int)(x))
 /* Non-atomic, as asm-generic/bitops/generic-non-atomic.h. */
 static inline void __set_bit(unsigned long nr, volatile unsigned long *addr)
 {

@@ -51,11 +51,6 @@ static void xe_mmio_write32(struct xe_mmio *mmio, struct xe_reg reg, u32 value)
     ++native->result->writes; /* Exposure begins BEFORE real owner callback. */
     mmio->io->write32(mmio->context, reg.addr, value);
 }
-static void xe_force_wake_assert_held(struct xe_force_wake *fw, enum xe_force_wake_domains domain)
-{
-    if (domain != XE_FW_GT) __builtin_trap();
-    stela_intel_activation_assert_gt(fw->activation);
-}
 /* Diagnostics bits16..24 are xe_wopcm.c's warnings, in source order. */
 static void stela_linux_warn(const char *file, int line, const char *condition)
 {
@@ -110,18 +105,17 @@ static void stela_drm_printk(const struct drm_device *drm, enum stela_drm_level 
 #include "xe_wopcm.c"
 
 int stela_intel_wopcm_prepare(const struct stela_intel_activation_io *io, void *context,
-    struct stela_intel_activation *activation, uint32_t platform, uint32_t graphics_verx100, bool discrete,
+    uint32_t platform, uint32_t graphics_verx100, bool discrete,
     const uint8_t *guc_bytes, size_t guc_size, struct stela_intel_wopcm_result *out)
 {
     if (!out) return -EINVAL;
     *out = (struct stela_intel_wopcm_result){0};
-    if (!io || !io->read32 || !io->write32 || !io->invariant || !guc_bytes || !activation) return -EINVAL;
+    if (!io || !io->read32 || !io->write32 || !io->invariant || !guc_bytes) return -EINVAL;
     struct stela_intel_huc_default huc;
     int status = stela_intel_huc_select_default(platform, graphics_verx100, false, &huc);
     if (status) return status;
     switch (huc.disposition) {
-    case STELA_INTEL_HUC_ABSENT_ROLE:
-    case STELA_INTEL_HUC_ABSENT_CATALOG:
+    case STELA_INTEL_HUC_ABSENT:
         break; /* Linux marks HuC NOT_SUPPORTED: unsupported role or no default path. */
     case STELA_INTEL_HUC_SELECTED:
         return -95; /* Genuine HuC input/availability still required. */
@@ -136,8 +130,9 @@ int stela_intel_wopcm_prepare(const struct stela_intel_activation_io *io, void *
         return -75;
     struct native_wopcm native = {
         .xe.info = {.platform = (enum xe_platform)platform, .is_dgfx = discrete},
+        .xe.tiles[0].xe = &native.xe,
         .gt = {
-            .xe = &native.xe, .mmio = {io, context}, .pm.fw = {activation},
+            .tile = &native.xe.tiles[0], .mmio = {.io = io, .context = context},
             .uc.guc.fw = {.type = XE_UC_FW_TYPE_GUC, .__status = XE_UC_FIRMWARE_AVAILABLE,
                           .ucode_size = metadata.ucode_bytes},
             .uc.huc.fw = {.type = XE_UC_FW_TYPE_HUC, .__status = XE_UC_FIRMWARE_NOT_SUPPORTED},

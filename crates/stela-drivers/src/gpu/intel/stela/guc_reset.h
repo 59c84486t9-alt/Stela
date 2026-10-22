@@ -17,7 +17,5 @@ int stela_intel_activation_guc_reset(struct stela_intel_activation *,
  * failure returns exact observations/writes for permanent owner quarantine.
  * No fallible operation or allocation follows register effects. */
 int stela_intel_guc_reset(const struct stela_intel_activation_io *, void *,
-    struct stela_intel_activation *, const struct stela_intel_activation_facts *,
-    struct stela_intel_guc_reset_result *);
-void stela_intel_activation_assert_gt(struct stela_intel_activation *);
+    const struct stela_intel_activation_facts *, struct stela_intel_guc_reset_result *);
 #endif

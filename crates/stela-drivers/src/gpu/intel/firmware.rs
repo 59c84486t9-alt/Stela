@@ -285,8 +285,7 @@ impl<'provider> GucImage<'_, 'provider> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HucDisposition {
     Selected,
-    AbsentRole,
-    AbsentCatalog,
+    Absent,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
@@ -376,8 +375,7 @@ impl<'device> HucRequest<'device> {
         }
         let disposition = match selection.disposition {
             1 => HucDisposition::Selected,
-            2 => HucDisposition::AbsentRole,
-            3 => HucDisposition::AbsentCatalog,
+            2 => HucDisposition::Absent,
             _ => return Err(Error::InvalidNativeIdentity),
         };
         let name_bytes = if disposition == HucDisposition::Selected {

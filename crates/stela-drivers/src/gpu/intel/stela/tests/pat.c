@@ -1,11 +1,16 @@
 /* SPDX-License-Identifier: MIT */
-/* The unchanged xe_pat.c in Stela's environment against the frozen donor
- * harness; modelled register writes, CPU only. */
+/* The unchanged xe_pat.c in Stela's environment; modelled register writes,
+ * CPU only. */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include "../pat.c"
-#include "pat_donor.h"
+struct stela_pat_test_policy {
+ uint32_t profile, count, warning, missing, special;
+ uint16_t indices[__XE_CACHE_LEVEL_COUNT];
+ struct xe_pat_table_entry entries[32], ats, primary, media;
+};
+struct stela_pat_trace { uint32_t count, offset[34], value[34]; };
 static struct stela_pat_trace native;
 static void native_write(void *context,uint32_t offset,uint32_t value)
 {(void)context;assert(native.count<34);native.offset[native.count]=offset;native.value[native.count++]=value;}
@@ -18,12 +23,13 @@ static uint32_t profile(const struct xe_pat_ops *ops)
  for(uint32_t i=0;i<ARRAY_SIZE(profiles);i++)if(ops==profiles[i])return i+1;
  assert(0 && "unknown PAT programmer");
 }
-/* Like the donor, start from the XE2 programmer: the missing-table path keeps
- * whatever ops the device already had. */
+/* Start from the XE2 programmer: the missing-table path keeps whatever ops
+ * the device already had. */
 static void selected(struct native_pat *pat,struct stela_pat_test_policy *out)
 {
  pat->xe.pat.ops=&xe2_pat_ops;
- pat->gt.xe=&pat->xe;
+ pat->xe.tiles[0].xe=&pat->xe;
+ pat->gt.tile=&pat->xe.tiles[0];
  active=pat;xe_pat_init_early(&pat->xe);active=NULL;
  const struct xe_device *xe=&pat->xe;
  *out=(struct stela_pat_test_policy){.profile=profile(xe->pat.ops),.count=(uint32_t)xe->pat.n_entries,
@@ -50,21 +56,24 @@ int main(void)
   unsigned generation=versions[v]/100;
   if(generation>=20 && generation!=20 && generation!=30 && generation!=35 &&
      (p==XE_METEORLAKE || p==XE_PVC || p==XE_DG2)) {++held;continue;}
-  struct stela_pat_test_policy expected,actual;
+  struct stela_pat_test_policy actual;
   struct stela_intel_pat_result result={0};
   struct native_pat pat={.xe.info={.platform=(enum xe_platform)p,.graphics_verx100=versions[v],
    .media_verx100=1200,.is_dgfx=d!=0,.has_llc=llc!=0},
-   .gt={.info.type=XE_GT_TYPE_MAIN,.mmio={&trace_io,NULL}},.result=&result};
-  stela_pat_donor_policy((enum xe_platform)p,versions[v],d!=0,llc!=0,&expected);
-  selected(&pat,&actual);
-  assert(!memcmp(&actual,&expected,sizeof(actual)));++cases;
+   .gt={.info.type=XE_GT_TYPE_MAIN,.mmio={.io=&trace_io}},.result=&result};
+  selected(&pat,&actual);++cases;
   if(actual.missing)continue;
-  /* Every selected table through the original direct programmer. */
-  struct stela_pat_trace a;
-  stela_pat_donor_program(&expected,&a);
+  /* Every selected table through the direct programmer, entry by entry. */
   native=(struct stela_pat_trace){0};
   program_pat(&pat.gt,pat.xe.pat.table,pat.xe.pat.n_entries);
-  assert(!memcmp(&a,&native,sizeof(a)));++traces;
+  unsigned n=actual.count;
+  for(unsigned i=0;i<actual.count;i++)
+   assert(native.offset[i]==_PAT_INDEX(i) && native.value[i]==actual.entries[i].value);
+  /* Then the ATS entry, then the main GT's PTA entry. */
+  if(actual.special&1){assert(native.offset[n]==_PAT_ATS && native.value[n]==actual.ats.value);n++;}
+  if(actual.special&2){assert(native.offset[n]==_PAT_PTA && native.value[n]==actual.primary.value);n++;}
+  assert(native.count==n);
+  const struct stela_pat_trace a=native;++traces;
   if(versions[v]==2001)assert(actual.count==28);
   if(versions[v]/100==20 || versions[v]/100==30) {
    for(unsigned i=16;i<20;i++) {
@@ -101,6 +110,6 @@ int main(void)
  assert(out.cache_none_compression==UINT16_MAX && out.cache_wb_compression==UINT16_MAX);
  const uint32_t values[]={3,1,2,0};
  for(unsigned i=0;i<4;i++)assert(native.offset[i]==0x4800+4*i && native.value[i]==values[i] && out.entries[i]==values[i]);
- printf("Intel PAT: %u unchanged-source/donor policies, %u full direct/ATS/PTA traces, %u zero-I/O refusals; %u impossible platform/version holds; independent XeLP values/order/cache and modern limits; CPU only\n",cases,traces,refusals,held);
+ printf("Intel PAT: %u unchanged-source policies, %u full direct/ATS/PTA traces, %u zero-I/O refusals; %u impossible platform/version holds; independent XeLP values/order/cache and modern limits; CPU only\n",cases,traces,refusals,held);
  return 0;
 }

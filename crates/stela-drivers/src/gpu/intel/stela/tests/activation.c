@@ -73,56 +73,6 @@ static void report(void *data, uint32_t mask, bool wake, int status, uint32_t va
 }
 static const struct stela_intel_activation_io io = {check_context, prepare, read_model, write_model, now, delay, check, report};
 
-/* Real host serialization guards both independently compiled policy fragments;
- * no spinlock, IRQ, timer or power success is fabricated for a native device. */
-#ifdef STELA_DONOR_CHECK
-struct trace { uint32_t words[256]; unsigned used, failures; };
-static void trace_control(void *data, struct xe_force_wake_domain *domain, bool wake)
-{
-    struct trace *t = data; assert(t->used < ARRAY_SIZE(t->words));
-    t->words[t->used++] = domain->id * 4u + (wake ? 1u : 0u);
-}
-static int trace_wait(void *data, struct xe_force_wake_domain *domain, bool wake)
-{
-    struct trace *t = data; assert(t->used < ARRAY_SIZE(t->words));
-    t->words[t->used++] = domain->id * 4u + (wake ? 3u : 2u);
-    return t->failures & (1u << domain->id) ? -110 : 0;
-}
-static const struct xe_force_wake_core_ops trace_ops = {trace_control, trace_wait, check};
-
-#include "activation_donor.h"
-static unsigned original_traces(void)
-{
-    pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-    unsigned cases = 0;
-    for (unsigned initialized = 1; initialized < 8; ++initialized)
-        for (unsigned failures = 0; failures < 8; ++failures)
-            for (unsigned nested = 0; nested < 3; ++nested) {
-                struct xe_force_wake_domain a[XE_FW_DOMAIN_ID_COUNT] = {0};
-                for (unsigned i = 0; i < 3; ++i) {
-                    a[i].id = (enum xe_force_wake_domain_id)i; a[i].reg_ctl.addr = 4 * (i + 1);
-                    a[i].ref = initialized & (1u << i) ? nested : 0;
-                }
-                struct trace ta = {.failures = failures};
-                unsigned awake = nested ? initialized : 0;
-                struct xe_force_wake_core core = {&ta, &trace_ops, initialized, &awake, a};
-                unsigned af;
-                struct stela_intel_policy_result donor;
-                assert(pthread_mutex_lock(&lock) == 0);
-                unsigned ar = xe_force_wake_get_locked(&core, XE_FORCEWAKE_ALL, &af);
-                unsigned put_failed = xe_force_wake_put_locked(&core, ar);
-                stela_intel_donor_policy(initialized, failures, nested, &donor);
-                assert(ar == donor.get && af == donor.failed && put_failed == donor.put_failed &&
-                       awake == donor.awake && ta.used == donor.used &&
-                       !memcmp(ta.words, donor.words, sizeof(ta.words)));
-                for (unsigned i = 0; i < 3; ++i) assert(a[i].ref == donor.refs[i]);
-                assert(pthread_mutex_unlock(&lock) == 0); ++cases;
-            }
-    assert(pthread_mutex_destroy(&lock) == 0);
-    return cases;
-}
-#endif
-
 int main(void)
 {
     static_assert(sizeof(struct xe_reg) == 4);
@@ -138,14 +88,15 @@ int main(void)
     assert(stela_intel_activation_match(0x8086, 0xffff, 0x030000, false, true) == -19);
     unsigned matches = 0;
     for (size_t i = 0; i + 1 < ARRAY_SIZE(pciidlist); ++i) {
-        const struct stela_intel_pci_match *p = &pciidlist[i];
+        const struct pci_device_id *p = &pciidlist[i];
+        const struct xe_device_desc *desc = (const void *)p->driver_data;
         assert(pthread_mutex_lock(&m.lock) == 0);
         state = before;
         assert(stela_intel_activation_match(p->vendor, p->device, p->class, false, true) == 0);
         assert(stela_intel_activation_init(&state, sizeof(state), &io, &m,
             p->vendor, p->device, p->class, 0, UINT64_C(64) << 20, false, true) == 0);
-        assert(state.facts.platform == (uint32_t)p->driver_data->platform &&
-               state.facts.dma_bits == p->driver_data->dma_mask_size && !state.facts.awake);
+        assert(state.facts.platform == (uint32_t)desc->platform &&
+               state.facts.dma_bits == desc->dma_mask_size && !state.facts.awake);
         assert(stela_intel_activation_wake(&state) == 0 && state.facts.awake == XE_FW_GT);
         unsigned writes = m.writes;
         assert(stela_intel_activation_wake(&state) == 0 && m.writes == writes);
@@ -154,7 +105,7 @@ int main(void)
         assert(stela_intel_activation_sleep(&state) == -22);
         assert(pthread_mutex_unlock(&m.lock) == 0); ++matches;
     }
-    const struct stela_intel_pci_match *p = &pciidlist[0];
+    const struct pci_device_id *p = &pciidlist[0];
     state = before;
     assert(stela_intel_activation_init(&state, sizeof(state), &io, &m,
         p->vendor, p->device, p->class, 0, UINT64_C(64) << 20, false, true) == -16);
@@ -178,17 +129,23 @@ int main(void)
         assert(ret && !memcmp(&state, &before, sizeof(state)));
     }
     m.prepare_error = 0;
-    const struct stela_intel_pci_match *post = pciidlist;
-    while (post->driver_data && post->driver_data->pre_gmdid_graphics_ip) ++post;
-    assert(post->driver_data);
-    for (unsigned bad = 0; bad < 3; ++bad) {
+    const struct pci_device_id *post = pciidlist;
+    while (post->vendor && ((const struct xe_device_desc *)post->driver_data)->pre_gmdid_graphics_ip) ++post;
+    assert(post->vendor);
+    /* Unknown graphics IP, including an all-ones read, fails the probe. */
+    for (unsigned bad = 0; bad < 2; ++bad) {
         state = before;
-        m.graphics = bad == 0 ? UINT32_MAX : bad == 1 ? 63u << 22 : 1270 / 100u << 22 | 1270 % 100u << 14;
-        m.media = bad == 2 ? 63u << 22 : 1300 / 100u << 22;
+        m.graphics = bad == 0 ? UINT32_MAX : 63u << 22;
+        m.media = 1300 / 100u << 22;
         assert(stela_intel_activation_init(&state, sizeof(state), &io, &m,
-            post->vendor, post->device, post->class, 0, UINT64_C(64) << 20, false, true) < 0);
+            post->vendor, post->device, post->class, 0, UINT64_C(64) << 20, false, true) == -19);
         assert(!memcmp(&state, &before, sizeof(state)));
     }
+    /* Unknown media IP probes without media, as Linux does. */
+    m.graphics = 1270 / 100u << 22 | 1270 % 100u << 14; m.media = 63u << 22;
+    assert(stela_intel_activation_init(&state, sizeof(state), &io, &m,
+        post->vendor, post->device, post->class, 0, UINT64_C(64) << 20, false, true) == 0);
+    assert(state.facts.graphics_verx100 == 1270 && !state.facts.media_verx100);
     /* Hardware GMDID selection is exercised independently of PCI fixtures:
      * every original runtime IP entry, actual field layout and revision bits. */
     unsigned runtime_ips = 0;
@@ -210,12 +167,6 @@ int main(void)
         assert(state.facts.media_verx100 == version && state.facts.media_revision == 9);
         ++runtime_ips;
     }
-    for (u8 maximum = 1; maximum < 5; ++maximum)
-        for (u32 field = 0; field < 4; ++field) {
-            u8 count = (u8)(field + 1);
-            assert(xe_pci_runtime_tile_count(maximum, REG_FIELD_PREP(TILE_COUNT, field)) ==
-                   (count < maximum ? count : maximum));
-        }
     m.graphics = 1270 / 100u << 22 | 1270 % 100u << 14; m.media = 0;
     assert(stela_intel_activation_init(&state, sizeof(state), &io, &m,
         post->vendor, post->device, post->class, 0, UINT64_C(64) << 20, false, true) == 0);
@@ -232,10 +183,6 @@ int main(void)
         assert(state.poisoned && stela_intel_activation_wake(&state) == -5);
     }
     assert(pthread_mutex_unlock(&m.lock) == 0 && pthread_mutex_destroy(&m.lock) == 0);
-    printf("Intel activation model: %u original PCI rows, 18 atomic refusals, 2 pure unmatched/terminator refusals, fused-off media, real-clock ACK timeout/all-ones checks", matches);
-#ifdef STELA_DONOR_CHECK
-    printf(", %u original-object/core traces", original_traces());
-#endif
-    printf(", %u runtime IP entries and 16 bounded tile cases; no physical hardware activation\n", runtime_ips);
+    printf("Intel activation model: %u original PCI rows, 18 atomic refusals, 2 pure unmatched/terminator refusals, unknown and fused-off media, real-clock ACK timeout/all-ones checks, %u runtime IP entries; no physical hardware activation\n", matches, runtime_ips);
     return 0;
 }

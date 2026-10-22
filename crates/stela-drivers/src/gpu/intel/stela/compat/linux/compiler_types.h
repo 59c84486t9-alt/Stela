@@ -9,4 +9,8 @@
 #define __force
 #define __kernel
 #define __no_context_analysis
+/* Stela builds unchanged sources as system code, without their warnings. */
+#define __diag_push()
+#define __diag_pop()
+#define __diag_ignore_all(option, comment)
 #endif

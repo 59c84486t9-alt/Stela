@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Stela's environment for the unchanged Linux xe_uc_fw.c, which follows. */
 #include "firmware.h"
+#include "unsupported.h"
 #include <stdarg.h>
 #include <linux/array_size.h>
 #include <linux/firmware.h>
@@ -10,7 +11,6 @@
 #include "xe_force_wake.h"
 #include "xe_gt_printk.h"
 #include "xe_gt_sriov_vf.h"
-#include "xe_huc_role.h"
 #include "xe_map.h"
 #include "xe_mmio.h"
 #include "xe_uc_fw.h"
@@ -32,15 +32,9 @@ static void invariant(bool condition)
 {
     if (!condition) __builtin_trap();
 }
-/* Upstream compares CPD entry names only against literals shorter than the
- * 12-byte name, so the comparison ends inside the entry. */
-static int stela_linux_strcmp(const char *a, const char *b)
-{
-    while (*a && *a == *b) ++a, ++b;
-    return (unsigned char)*a - (unsigned char)*b;
-}
-/* Diagnostics bits name xe_uc_fw.c's parse and version messages. Any other
- * message comes from a lifecycle Stela never enters. */
+/* Diagnostics bits name xe_uc_fw.c's parse and version messages. Debug
+ * messages carry no diagnosis; any other comes from a lifecycle Stela never
+ * enters. */
 static void stela_drm_printk(const struct drm_device *drm, enum stela_drm_level level,
     const char *format, ...)
 {
@@ -60,7 +54,7 @@ static void stela_drm_printk(const struct drm_device *drm, enum stela_drm_level 
     };
     struct native_fw *native =
         container_of(container_of(drm, struct xe_device, drm), struct native_fw, xe);
-    (void)level;
+    if (level == STELA_DRM_DBG) return;
     if (!strcmp(format, "%s firmware %s: invalid size: %zu < %zu\n")) {
         va_list arguments;
         va_start(arguments, format);
@@ -79,34 +73,38 @@ static void stela_drm_printk(const struct drm_device *drm, enum stela_drm_level 
     *native->diagnostics |= messages[index].diagnostic;
 }
 /* Stela selects and parses images only. Requests, BO placement, DMA upload,
- * printers and VF bootstrap belong to other owners; reaching one traps. */
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-parameter"
-static void stela_linux_warn(const char *file, int line, const char *condition) { __builtin_trap(); }
-static bool xe_device_uc_enabled(struct xe_device *xe) { __builtin_trap(); }
-static struct xe_tile *gt_to_tile(struct xe_gt *gt) { __builtin_trap(); }
-static int firmware_request_nowarn(const struct firmware **fw, const char *name,
-    struct device *device) { __builtin_trap(); }
-static void release_firmware(const struct firmware *fw) { __builtin_trap(); }
-static struct xe_bo *xe_managed_bo_create_from_data(struct xe_device *xe, struct xe_tile *tile,
-    const void *data, size_t size, u32 flags) { __builtin_trap(); }
-static u32 xe_bo_ggtt_addr(struct xe_bo *bo) { __builtin_trap(); }
-static int drmm_add_action_or_reset(struct drm_device *dev, drmres_release_t action,
-    void *data) { __builtin_trap(); }
-static void xe_map_memcpy_from(struct xe_device *xe, void *dst, const struct iosys_map *src,
-    size_t src_offset, size_t len) { __builtin_trap(); }
-static void xe_gt_sriov_vf_guc_versions(struct xe_gt *gt, struct xe_uc_fw_version *wanted,
-    struct xe_uc_fw_version *found) { __builtin_trap(); }
-static struct drm_printer xe_gt_info_printer(struct xe_gt *gt) { __builtin_trap(); }
-static void drm_printf(struct drm_printer *p, const char *f, ...) { __builtin_trap(); }
-static void xe_force_wake_assert_held(struct xe_force_wake *fw,
-    enum xe_force_wake_domains domain) { __builtin_trap(); }
-static void xe_mmio_write32(struct xe_mmio *mmio, struct xe_reg reg, u32 val) { __builtin_trap(); }
-static int xe_mmio_wait32(struct xe_mmio *mmio, struct xe_reg reg, u32 mask, u32 val,
-    u32 timeout_us, u32 *out_val, bool atomic) { __builtin_trap(); }
-#pragma clang diagnostic pop
+ * HuC authentication, printers and VF bootstrap belong to other owners. */
+STELA_UNSUPPORTED(void, stela_linux_warn, const char *, int, const char *)
+STELA_UNSUPPORTED(int, firmware_request_nowarn, const struct firmware **, const char *,
+                  struct device *)
+STELA_UNSUPPORTED(void, release_firmware, const struct firmware *)
+STELA_UNSUPPORTED(struct xe_bo *, xe_managed_bo_create_from_data, struct xe_device *,
+                  struct xe_tile *, const void *, size_t, u32)
+STELA_UNSUPPORTED(u32, xe_bo_ggtt_addr, struct xe_bo *)
+STELA_UNSUPPORTED(struct xe_bo *, xe_managed_bo_create_pin_map, struct xe_device *,
+                  struct xe_tile *, size_t, u32)
+STELA_UNSUPPORTED(int, xe_managed_bo_reinit_in_vram, struct xe_device *, struct xe_tile *,
+                  struct xe_bo **)
+STELA_UNSUPPORTED(int, drmm_add_action_or_reset, struct drm_device *, drmres_release_t, void *)
+STELA_UNSUPPORTED(void, xe_map_memcpy_from, struct xe_device *, void *, const struct iosys_map *,
+                  size_t, size_t)
+STELA_UNSUPPORTED(void, xe_gt_sriov_vf_guc_versions, struct xe_gt *, struct xe_uc_fw_version *,
+                  struct xe_uc_fw_version *)
+STELA_UNSUPPORTED(void, drm_printf, struct drm_printer *, const char *, ...)
+STELA_UNSUPPORTED(u32, xe_mmio_read32, struct xe_mmio *, struct xe_reg)
+STELA_UNSUPPORTED(void, xe_mmio_write32, struct xe_mmio *, struct xe_reg, u32)
+STELA_UNSUPPORTED(int, xe_mmio_wait32, struct xe_mmio *, struct xe_reg, u32, u32, u32, u32 *,
+                  bool)
+/* uc_fw_request takes a printer before it decides anything; only a VF
+ * override prints through it, and drm_printf traps. */
+static struct drm_printer xe_gt_info_printer(struct xe_gt *gt)
+{
+    (void)gt;
+    return (struct drm_printer){};
+}
 
 #include "xe_uc_fw.c"
+#include "xe_huc.c"
 
 /* Fills a zeroed native. The firmware lives in the GT member upstream derives
  * its owner from. */
@@ -114,7 +112,8 @@ static struct xe_uc_fw *prepare(struct native_fw *native, uint32_t platform, boo
                                 enum xe_uc_fw_type type, uint32_t *diagnostics)
 {
     native->xe.info.platform = (enum xe_platform)platform;
-    native->gt.xe = &native->xe;
+    native->xe.tiles[0].xe = &native->xe;
+    native->gt.tile = &native->xe.tiles[0];
     native->gt.info.type = media_gt ? XE_GT_TYPE_MEDIA : XE_GT_TYPE_MAIN;
     native->diagnostics = diagnostics;
     struct xe_uc_fw *fw = type == XE_UC_FW_TYPE_GUC ? &native->gt.uc.guc.fw :
@@ -163,22 +162,23 @@ int stela_intel_huc_select_default(uint32_t platform, uint32_t graphics_verx100,
                                  bool media_gt, struct stela_intel_huc_default *out)
 {
     if (!out || !platform || platform > INT32_MAX || !graphics_verx100) return -EINVAL;
-    struct stela_intel_huc_default result = {0};
-    if (xe_huc_role_unsupported(media_gt, graphics_verx100)) {
-        result.disposition = STELA_INTEL_HUC_ABSENT_ROLE;
-    } else {
-        struct native_fw native = {0};
-        uint32_t diagnostics = 0;
-        struct xe_uc_fw *fw = prepare(&native, platform, media_gt, XE_UC_FW_TYPE_HUC, &diagnostics);
-        uc_fw_auto_select(&native.xe, fw);
-        /* Original uc_fw_request: missing default path is NOT_SUPPORTED;
-         * only missing GuC is mandatory -ENOENT. No status is fabricated here. */
-        if (!fw->path) result.disposition = STELA_INTEL_HUC_ABSENT_CATALOG;
-        else {
-            result.disposition = STELA_INTEL_HUC_SELECTED;
-            int status = copy_selection(fw, result.name, result.wanted, &result.full_version);
-            if (status) return status;
-        }
+    struct native_fw native = {0};
+    uint32_t diagnostics = 0;
+    struct xe_uc_fw *fw = prepare(&native, platform, media_gt, XE_UC_FW_TYPE_HUC, &diagnostics);
+    native.xe.info.graphics_verx100 = graphics_verx100;
+    /* Selection requests no image: in execlist mode xe_huc_init stops after
+     * selecting, as Linux does without GuC submission. */
+    native.xe.info.force_execlist = true;
+    int status = xe_huc_init(&native.gt.uc.huc);
+    if (status) return status;
+    /* NOT_SUPPORTED covers both a GT without HuC and a platform without a
+     * default image; execlist mode leaves a selected image DISABLED. */
+    struct stela_intel_huc_default result = {.disposition = STELA_INTEL_HUC_ABSENT};
+    if (fw->status != XE_UC_FIRMWARE_NOT_SUPPORTED) {
+        invariant(fw->status == XE_UC_FIRMWARE_DISABLED && fw->path);
+        result.disposition = STELA_INTEL_HUC_SELECTED;
+        status = copy_selection(fw, result.name, result.wanted, &result.full_version);
+        if (status) return status;
     }
     *out = result;
     return 0;

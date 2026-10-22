@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: MIT */
-#include "ggtt_probe_donor.h"
+/* GSM geometry against the GMCH field layout and GGTT bounds; CPU only. */
+#include "../ggtt_probe.h"
 #include <linux/types.h>
-#include "xe_platform_types.h"
-#include "ggtt_probe_defs.h"
 #include "regs/xe_gtt_defs.h"
 #include "xe_device_types.h"
 #include "xe_wopcm.h"
@@ -21,26 +20,24 @@ int main(void)
     assert(stela_intel_gsm_config(1200, NULL) == -22);
     unsigned comparisons = 0;
     for (unsigned word = 0; word <= UINT16_MAX; ++word) {
-        unsigned gsm = stela_gsm_donor_decode((u16)word);
+        /* GGMS, bits 7:6, selects a 2^GGMS MiB GSM; zero has none. */
+        unsigned ggms = word >> 6 & 3, gsm = ggms ? (1u << ggms) << 20 : 0;
         for (unsigned p = XE_TIGERLAKE; p <= XE_NOVALAKE_P; ++p) {
             for (unsigned d = 0; d <= 1; ++d) {
                 out = sentinel;
                 int status = stela_intel_gsm_geometry(p, 1200, d != 0, 16 << 20, true, (u16)word, &out);
                 if (!gsm) { assert(status == -12 && !memcmp(&out, &sentinel, sizeof(out))); continue; }
                 assert(!status && out.gsm_offset == 8 << 20 && out.gsm_bytes == gsm);
-                u64 start, size;
                 struct xe_device xe = {.info = {.platform = (enum xe_platform)p, .is_dgfx = d != 0}};
-                stela_gsm_donor_range(gsm, xe_wopcm_size(&xe), &start, &size);
+                u64 start = xe_wopcm_size(&xe), size = (u64)gsm * 512 - start;
+                if (start + size > GUC_GGTT_TOP) size = GUC_GGTT_TOP - start;
                 assert(out.ggtt_start == start && out.ggtt_bytes == size);
-                // Independent hardware field/range oracle, not just donor comparison.
-                assert(gsm == (2u << ((word >> 6 & 3) - 1)) * 1024 * 1024);
                 assert(start == (p >= XE_LUNARLAKE ? 8u : d || p == XE_METEORLAKE ? 4u : 2u) * 1024 * 1024);
                 assert(start + size == (gsm == 8 << 20 ? 0xfee00000u : (u64)gsm * 512));
                 const u64 addresses[] = {0, start - 4096, start, start + size - 4096};
                 for (unsigned a = 0; a < sizeof(addresses)/sizeof(*addresses); ++a) {
                     size_t offset = SIZE_MAX;
                     assert(!stela_intel_gsm_pte_offset(&out, addresses[a], &offset));
-                    assert(offset == stela_gsm_donor_index(start, size, addresses[a]) * 8);
                     assert(offset == addresses[a] / 4096 * 8 && offset + 8 <= out.gsm_bytes);
                 }
                 ++comparisons;
@@ -76,6 +73,6 @@ int main(void)
         }
         assert(!memcmp(&out, &sentinel, sizeof(out)));
     }
-    printf("Intel GSM: %u original geometry comparisons, independent field/span/index and output-preserving refusals; CPU-only\n", comparisons);
+    printf("Intel GSM: %u geometry cases, independent field/span/index and output-preserving refusals; CPU-only\n", comparisons);
     return 0;
 }

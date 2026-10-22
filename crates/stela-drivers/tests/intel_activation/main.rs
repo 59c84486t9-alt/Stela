@@ -736,9 +736,9 @@ fn huc_default_absence_never_looks_up_provider(authority: &Authority) {
     }
     use intel::firmware::{Error as FirmwareError, HucDisposition};
     for (index, pci, disposition) in [
-        (0u64, 0xe202, HucDisposition::AbsentRole),
-        (1, 0x56a0, HucDisposition::AbsentCatalog),
-        (2, 0x46d0, HucDisposition::AbsentCatalog),
+        (0u64, 0xe202, HucDisposition::Absent),
+        (1, 0x56a0, HucDisposition::Absent),
+        (2, 0x46d0, HucDisposition::Absent),
     ] {
         let (owner, counts) = owner(0x1b0000000 + index * BYTES as u64, pci);
         let mut device = Device::open(authority, owner, true).unwrap();

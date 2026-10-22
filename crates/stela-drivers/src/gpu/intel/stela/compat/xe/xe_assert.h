@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_XE_ASSERT_H
 #define STELA_XE_ASSERT_H
+#include <linux/cleanup.h>
 #include "xe_device_types.h"
 #include "xe_gt_types.h"
 /* As Linux builds without CONFIG_DRM_XE_DEBUG: type-checked, never evaluated. */

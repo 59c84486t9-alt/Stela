@@ -1,6 +1,21 @@
 /* SPDX-License-Identifier: MIT */
 #include "commands.h"
-#include "xe_ring_emit.h"
+#include "unsupported.h"
+
+#include "xe_ring_ops.c"
+
+/* The packet emitters these primitives call touch no job, queue or context. */
+STELA_UNSUPPORTED(bool, stela_xe_gt_wa, const struct xe_gt *, unsigned int)
+STELA_UNSUPPORTED(bool, xe_exec_queue_is_multi_queue, struct xe_exec_queue *)
+STELA_UNSUPPORTED(u32, xe_lrc_ggtt_addr, struct xe_lrc *)
+STELA_UNSUPPORTED(u32, xe_lrc_seqno_ggtt_addr, struct xe_lrc *)
+STELA_UNSUPPORTED(u32, xe_lrc_start_seqno_ggtt_addr, struct xe_lrc *)
+STELA_UNSUPPORTED(u32, xe_lrc_ctx_timestamp_ggtt_addr, struct xe_lrc *)
+STELA_UNSUPPORTED(u32, xe_lrc_ctx_job_timestamp_ggtt_addr, struct xe_lrc *)
+STELA_UNSUPPORTED(bool, xe_lrc_is_multi_queue, struct xe_lrc *)
+STELA_UNSUPPORTED(void, xe_lrc_write_ring, struct xe_lrc *, const void *, size_t)
+STELA_UNSUPPORTED(bool, xe_sched_job_is_migration, struct xe_exec_queue *)
+STELA_UNSUPPORTED(u32, xe_sched_job_lrc_seqno, struct xe_sched_job *)
 
 #define INVALID_ARGUMENT (-22)
 #define NO_SPACE (-28)

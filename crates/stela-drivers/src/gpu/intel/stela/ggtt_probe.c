@@ -1,28 +1,24 @@
 /* SPDX-License-Identifier: MIT */
+/* Stela's GSM probe: the PF geometry of xe_ggtt_init_early() and the PTE
+ * index of xe_ggtt_get_pte() in Linux's xe_ggtt.c, over its unchanged
+ * register and page definitions. */
 #include "ggtt_probe.h"
+#include <drm/intel/i915_drm.h>
 #include <linux/sizes.h>
-#include <linux/types.h>
-#include "xe_platform_types.h"
-/* Normal Make extracts only original scalar defines from retained headers;
- * no duplicated hardware constants, Linux service shim or custom allocator. */
-#include "ggtt_probe_defs.h"
 #include "regs/xe_gtt_defs.h"
+#include "xe_bo.h"
 #include "xe_device_types.h"
 #include "xe_wopcm.h"
-static void invariant(void *context, bool condition)
+
+/* Graphics 12.50 and later have a fixed 8 MiB GSM for a 4 GiB GGTT. */
+static bool fixed_gsm(uint32_t graphics_verx100)
 {
-    (void)context;
-    if (!condition) __builtin_trap();
+    return graphics_verx100 >= 1250;
 }
-#define XE_GGTT_PROBE_ASSERT(context, condition) invariant(context, condition)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wsign-conversion"
-#include "xe_ggtt_probe_core.h"
-#pragma clang diagnostic pop
 int stela_intel_gsm_config(uint32_t graphics_verx100, uint16_t *offset)
 {
     if (!offset || !graphics_verx100) return -22;
-    if (xe_ggtt_probe_fixed_gsm(graphics_verx100)) return 1;
+    if (fixed_gsm(graphics_verx100)) return 1;
     *offset = SNB_GMCH_CTRL;
     return 0;
 }
@@ -32,22 +28,27 @@ int stela_intel_gsm_geometry(uint32_t platform, uint32_t graphics_verx100, bool 
 {
     if (!out || !platform || platform > INT32_MAX || !graphics_verx100) return -22;
     unsigned int gsm_size;
-    if (xe_ggtt_probe_fixed_gsm(graphics_verx100))
+    if (fixed_gsm(graphics_verx100))
         gsm_size = SZ_8M;
     else {
         if (!config_present) return -95;
-        gsm_size = xe_ggtt_probe_gsm_decode(gmch_control);
+        u16 ggms = (gmch_control >> BDW_GMCH_GGMS_SHIFT) & BDW_GMCH_GGMS_MASK;
+        gsm_size = ggms ? (unsigned int)SZ_1M << ggms : 0;
     }
-    if (!gsm_size) return -12; /* Original no-preallocated-GSM refusal. */
-    uint64_t offset = xe_ggtt_probe_gsm_offset();
+    if (!gsm_size) return -12; /* Linux: no preallocated GSM. */
+    /* The GSM follows the registers in BAR0. */
+    uint64_t offset = SZ_8M;
     if (offset > actual_bar_bytes || gsm_size > actual_bar_bytes - offset) return -34;
     struct xe_device xe = {.info = {.platform = (enum xe_platform)platform, .is_dgfx = discrete}};
     uint64_t wopcm = xe_wopcm_size(&xe);
     if ((gsm_size / 8) * (uint64_t)XE_PAGE_SIZE <= wopcm) return -34;
-    struct stela_intel_gsm_geometry result = {.gsm_offset = offset, .gsm_bytes = gsm_size};
-    xe_ggtt_probe_pf_range(gsm_size, wopcm, &result.ggtt_start, &result.ggtt_bytes);
-    xe_ggtt_probe_clamp_range(result.ggtt_start, &result.ggtt_bytes);
-    *out = result;
+    /* The GGTT starts above WOPCM and ends where the GSM's PTEs or the GuC's
+     * address limit does. */
+    uint64_t start = wopcm, size = (gsm_size / 8) * (uint64_t)XE_PAGE_SIZE - start;
+    if (size + start > GUC_GGTT_TOP) size = GUC_GGTT_TOP - start;
+    *out = (struct stela_intel_gsm_geometry){
+        .gsm_offset = offset, .gsm_bytes = gsm_size, .ggtt_start = start, .ggtt_bytes = size,
+    };
     return 0;
 }
 int stela_intel_gsm_pte_offset(const struct stela_intel_gsm_geometry *geometry,
@@ -59,7 +60,7 @@ int stela_intel_gsm_pte_offset(const struct stela_intel_gsm_geometry *geometry,
         geometry->ggtt_bytes > GUC_GGTT_TOP - geometry->ggtt_start ||
         (address & XE_PTE_MASK) || address >= geometry->ggtt_start + geometry->ggtt_bytes)
         return -22;
-    uint64_t index = xe_ggtt_probe_pte_index(NULL, geometry->ggtt_start, geometry->ggtt_bytes, address);
+    uint64_t index = address >> XE_PTE_SHIFT;
     if (index >= geometry->gsm_bytes / sizeof(uint64_t)) return -34;
     *out = (size_t)index * sizeof(uint64_t);
     return 0;

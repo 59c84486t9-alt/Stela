@@ -28,8 +28,7 @@ _Static_assert(offsetof(struct stela_intel_guc_metadata, diagnostics) == 44, "di
  * No provider lookup/failure, BO or availability state participates here. */
 enum stela_intel_huc_disposition {
     STELA_INTEL_HUC_SELECTED = 1,
-    STELA_INTEL_HUC_ABSENT_ROLE,
-    STELA_INTEL_HUC_ABSENT_CATALOG,
+    STELA_INTEL_HUC_ABSENT,
 };
 struct stela_intel_huc_default {
     uint32_t disposition;

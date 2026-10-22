@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include "pt_walk.h"
 
+#include "xe_pt_walk.c"
+
 #define INTEL_PT_MAX_LEVEL 4U
 #define INTEL_PT_INDEX_BITS 9U
 #define INVALID_ARGUMENT (-22)

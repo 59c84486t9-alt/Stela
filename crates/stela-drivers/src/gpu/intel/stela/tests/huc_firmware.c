@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: MIT */
-/* Original-object metadata tests only. Inputs are synthetic unsigned data. */
+/* The native HuC parser against upstream xe_uc_fw.c run directly on the same
+ * images. Inputs are synthetic unsigned data. */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include "../firmware.c"
-#include "firmware_donor.h"
 
 #define CSS_OFFSET 384u
 #define MANIFEST_OFFSET 160u
@@ -36,12 +36,15 @@ static void cpd(uint8_t bytes[IMAGE_BYTES])
 static void compare(unsigned platform, bool media_gt, const uint8_t *bytes, size_t size)
 {
     assert(size <= IMAGE_BYTES);
-    struct xe_uc_fw fw = {0};
-    stela_intel_fw_donor_select(platform, media_gt ? XE_GT_TYPE_MEDIA : XE_GT_TYPE_MAIN,
-                                XE_UC_FW_TYPE_HUC, &fw);
-    assert(fw.path);
-    uint32_t expected_diagnostics, diagnostics;
-    int expected = stela_intel_fw_donor_huc(&fw, platform, bytes, size, &expected_diagnostics);
+    struct native_fw native = {0};
+    uint32_t expected_diagnostics = 0, diagnostics;
+    struct xe_uc_fw *upstream = prepare(&native, platform, media_gt, XE_UC_FW_TYPE_HUC,
+                                        &expected_diagnostics);
+    uc_fw_auto_select(&native.xe, upstream);
+    assert(upstream->path);
+    int expected = parse_headers(upstream, &(const struct firmware){.size = size, .data = bytes});
+    if (!expected) expected = xe_uc_fw_check_version_requirements(upstream);
+    const struct xe_uc_fw fw = *upstream;
     struct stela_intel_huc_metadata output, before;
     memset(&before, 0xa5, sizeof(before)); output = before;
     int status = stela_intel_huc_parse(platform, 1200, media_gt, bytes, size, &output, &diagnostics);
@@ -53,7 +56,7 @@ static void compare(unsigned platform, bool media_gt, const uint8_t *bytes, size
         return;
     }
     if (status != expected || diagnostics != expected_diagnostics)
-        fprintf(stderr, "HuC case%u platform%u size%zu native%d/%x donor%d/%x\n", cases, platform, size, status, diagnostics, expected, expected_diagnostics);
+        fprintf(stderr, "HuC case%u platform%u size%zu native%d/%x upstream%d/%x\n", cases, platform, size, status, diagnostics, expected, expected_diagnostics);
     assert(status == expected && diagnostics == expected_diagnostics);
     if (status) assert(!memcmp(&before, &output, sizeof(output)));
     else {
@@ -77,9 +80,11 @@ int main(void)
     _Static_assert(sizeof("huc_fw") <= sizeof(((struct gsc_cpd_entry *)0)->name), "CSS literal");
     _Static_assert(sizeof("RBEP.man") <= sizeof(((struct gsc_cpd_entry *)0)->name), "GSC literal");
     for (unsigned platform = 1; platform <= XE_NOVALAKE_P; ++platform) {
-        struct xe_uc_fw fw = {0};
-        stela_intel_fw_donor_select(platform, XE_GT_TYPE_MAIN, XE_UC_FW_TYPE_HUC, &fw);
-        if (!fw.path) continue;
+        struct native_fw native = {0};
+        uint32_t diagnostics = 0;
+        struct xe_uc_fw *fw = prepare(&native, platform, false, XE_UC_FW_TYPE_HUC, &diagnostics);
+        uc_fw_auto_select(&native.xe, fw);
+        if (!fw->path) continue;
         css(bytes, MAKE_GUC_VER(1, 2, 3));
         compare(platform, false, bytes, 400); /* No GuC minimum version leakage. */
         cpd(bytes); compare(platform, true, bytes, IMAGE_BYTES);
@@ -137,17 +142,15 @@ int main(void)
         if (change == 5) entry[0].name[11] = 0xff;
         if (change == 6) entry[0].offset |= GSC_CPD_ENTRY_HUFFMAN_COMP;
         struct native_fw native = {0};
-        uint32_t diagnostics = 0, expected_security = 0, expected_diagnostics;
+        uint32_t diagnostics = 0;
         struct xe_uc_fw *a = prepare(&native, XE_METEORLAKE, false, XE_UC_FW_TYPE_GSC, &diagnostics);
-        struct xe_uc_fw b = *a;
         int status = parse_cpd_header(a, aligned, sizeof(aligned), "RBEP.man", NULL);
-        int expected = stela_intel_fw_donor_cpd(&b, XE_METEORLAKE, aligned, sizeof(aligned), "RBEP.man", NULL,
-                                               &expected_security, &expected_diagnostics);
         uint32_t security = native.gt.uc.gsc.security_version;
-        assert(status == expected && diagnostics == expected_diagnostics &&
-               a->has_gsc_headers == b.has_gsc_headers &&
-               !memcmp(&a->versions.found[0], &b.versions.found[0], sizeof(a->versions.found[0])) &&
-               security == expected_security);
+        /* Only a missing manifest name fails; later entries, bytes after the
+         * NUL and compression bits outside the offset mask do not matter. */
+        bool missing = change >= 1 && change <= 3;
+        assert(status == (missing ? -ENODATA : 0) &&
+               diagnostics == (missing ? STELA_INTEL_HUC_CPD_MISSING_MANIFEST : 0u));
         if (!status) assert(a->versions.found[0].major == 9 && a->versions.found[0].minor == 8 &&
                              a->versions.found[0].patch == 7 && a->versions.found[0].build == 6 && security == 42);
         ++gsc_cases;
@@ -174,6 +177,6 @@ int main(void)
         assert(stela_intel_huc_parse(XE_TIGERLAKE, 1200, false, bytes + 1, 400, &output, &d) == -EINVAL &&
                !d && !memcmp(&output, &before, sizeof(output)));
     }
-    printf("Intel HuC: %u frozen CPD/CSS donor comparisons, 1 misaligned refusal,20 directory cases, %u original GSC build/security/name cases,%u strict wide-arithmetic refusals,7 refusal/overflow cases; host images only, no authentication/BO/WOPCM readiness\n", cases, gsc_cases, checked_arithmetic);
+    printf("Intel HuC: %u CPD/CSS upstream comparisons, 1 misaligned refusal, 20 directory cases, %u original GSC build/security/name cases, %u strict wide-arithmetic refusals, 7 refusal/overflow cases; host images only, no authentication/BO/WOPCM readiness\n", cases, gsc_cases, checked_arithmetic);
     return 0;
 }

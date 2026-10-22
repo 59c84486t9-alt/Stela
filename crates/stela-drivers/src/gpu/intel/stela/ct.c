@@ -1,12 +1,14 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright © 2022 Intel Corporation */
-/* Native mapping adaptation of h2g_write()/g2h_read() in xe_guc_ct.c.
- * Reuses the firmware ABI and shared header encoding. OS BO/PM/fence/reset
- * policy stays with the real owner rather than emulated Linux objects.
+/* Native mapping adaptation of h2g_write()/g2h_read() in xe_guc_ct.c, over
+ * Linux's unchanged firmware ABI and register definitions. OS BO/PM/fence/
+ * reset policy stays with the real owner rather than emulated Linux objects.
  */
 #include "ct.h"
-#include "xe_guc_ct_message.h"
-#include "regs/xe_guc_ct_regs.h"
+#include <linux/bitfield.h>
+#include "abi/guc_communication_ctb_abi.h"
+#include "regs/xe_guc_regs.h"
+#include "regs/xe_regs.h"
 
 enum { DESC_HEAD = 0, DESC_TAIL = 1, DESC_STATUS = 2 };
 enum { INVALID_ARGUMENT = -22, NO_DEVICE = -19, PROTOCOL_ERROR = -71,
@@ -83,8 +85,7 @@ static void device_wmb(struct stela_intel_ct *ct)
     /* Exact xe_device_wmb() ordering: wmb, then VF_CAP_REG write on dGPU. */
     ct->io->order(ct->context, STELA_INTEL_CT_RELEASE);
     if (ct->discrete)
-        ct->io->mmio_write32(ct->context, STELA_INTEL_CT_ROOT_TILE,
-                            XE_GUC_CT_FLUSH_REG_ADDR, 0);
+        ct->io->mmio_write32(ct->context, STELA_INTEL_CT_ROOT_TILE, VF_CAP_REG.addr, 0);
 }
 
 static void publish_tail(struct stela_intel_ct *ct, uint32_t tail)
@@ -94,8 +95,8 @@ static void publish_tail(struct stela_intel_ct *ct, uint32_t tail)
     write32(ct, STELA_INTEL_CT_H2G_DESC, DESC_TAIL, tail);
     /* xe_guc_notify(): 0 to the selected main/media GT notify register. */
     ct->io->mmio_write32(ct->context, STELA_INTEL_CT_GT,
-                        ct->media_gt ? XE_GUC_CT_MEDIA_NOTIFY_REG_ADDR :
-                                       XE_GUC_CT_NOTIFY_REG_ADDR, 0);
+                        ct->media_gt ? MED_GUC_HOST_INTERRUPT.addr :
+                                       GUC_HOST_INTERRUPT.addr, 0);
 }
 
 int stela_intel_ct_send(struct stela_intel_ct *ct, const uint32_t *action,
@@ -129,8 +130,14 @@ int stela_intel_ct_send(struct stela_intel_ct *ct, const uint32_t *action,
         publish_tail(ct, 0);
         return AGAIN;
     }
-    uint32_t cmd[2];
-    xe_guc_ct_message_header(cmd, words, fence, type, action[0]);
+    /* h2g_write(): the CTB header, then the HXG header with the action. */
+    uint32_t cmd[2] = {
+        FIELD_PREP(GUC_CTB_MSG_0_FORMAT, GUC_CTB_FORMAT_HXG) |
+        FIELD_PREP(GUC_CTB_MSG_0_NUM_DWORDS, words) |
+        FIELD_PREP(GUC_CTB_MSG_0_FENCE, fence),
+        FIELD_PREP(GUC_HXG_MSG_0_TYPE, type) |
+        FIELD_PREP(GUC_HXG_EVENT_MSG_0_ACTION | GUC_HXG_EVENT_MSG_0_DATA0, action[0]),
+    };
     ct->io->write(ct->context, STELA_INTEL_CT_H2G_COMMANDS, tail, cmd, 2);
     if (words > 1)
         ct->io->write(ct->context, STELA_INTEL_CT_H2G_COMMANDS, tail + 2, action + 1, words - 1);

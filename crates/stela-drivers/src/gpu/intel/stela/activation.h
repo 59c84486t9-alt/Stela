@@ -66,4 +66,10 @@ int stela_intel_activation_wake(struct stela_intel_activation *);
  * non-retirable state until separately qualified recovery, never fake success.
  */
 int stela_intel_activation_sleep(struct stela_intel_activation *);
+/* Private to the native adapters: Linux's xe_mmio_wait32 contract. Poll with
+ * doubling delays until (read & mask) == value or the timeout passes, then
+ * check once more; *out is the last read. Returns 0 or -ETIMEDOUT. */
+int stela_intel_mmio_wait32(const struct stela_intel_activation_io *, void *,
+    uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeout_us, uint32_t *out,
+    bool atomic);
 #endif

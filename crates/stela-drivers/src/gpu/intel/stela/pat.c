@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Stela's environment for the unchanged Linux xe_pat.c, which follows. */
 #include "pat.h"
+#include "unsupported.h"
 #include <linux/array_size.h>
 #include "xe_device.h"
 #include "xe_force_wake.h"
@@ -42,34 +43,11 @@ static void stela_drm_printk(const struct drm_device *drm, enum stela_drm_level 
 }
 /* Stela programs only XeLP's direct table and never dumps it: admission
  * refuses the multicast profiles before any I/O. */
-static u32 xe_mmio_read32(struct xe_mmio *mmio, struct xe_reg reg)
-{
-    (void)mmio; (void)reg; __builtin_trap();
-}
-static u32 xe_gt_mcr_unicast_read_any(struct xe_gt *gt, struct xe_reg_mcr reg_mcr)
-{
-    (void)gt; (void)reg_mcr; __builtin_trap();
-}
-static void xe_gt_mcr_multicast_write(struct xe_gt *gt, struct xe_reg_mcr reg_mcr, u32 value)
-{
-    (void)gt; (void)reg_mcr; (void)value; __builtin_trap();
-}
-static unsigned int xe_force_wake_get(struct xe_force_wake *fw, unsigned int domains)
-{
-    (void)fw; (void)domains; __builtin_trap();
-}
-static void xe_force_wake_put(struct xe_force_wake *fw, unsigned int fw_ref)
-{
-    (void)fw; (void)fw_ref; __builtin_trap();
-}
-static void drm_printf(struct drm_printer *p, const char *f, ...)
-{
-    (void)p; (void)f; __builtin_trap();
-}
-static int stela_linux_snprintf(char *buf, size_t size, const char *fmt, ...)
-{
-    (void)buf; (void)size; (void)fmt; __builtin_trap();
-}
+STELA_UNSUPPORTED(u32, xe_mmio_read32, struct xe_mmio *, struct xe_reg)
+STELA_UNSUPPORTED(u32, xe_gt_mcr_unicast_read_any, struct xe_gt *, struct xe_reg_mcr)
+STELA_UNSUPPORTED(void, xe_gt_mcr_multicast_write, struct xe_gt *, struct xe_reg_mcr, u32)
+STELA_UNSUPPORTED(void, drm_printf, struct drm_printer *, const char *, ...)
+STELA_UNSUPPORTED(int, stela_linux_snprintf, char *, size_t, const char *, ...)
 
 #include "xe_pat.c"
 
@@ -87,9 +65,10 @@ int stela_intel_pat_program(const struct stela_intel_activation_io *io, void *co
  struct native_pat native = {
   .xe.info = {.platform = (enum xe_platform)facts->platform,
               .graphics_verx100 = facts->graphics_verx100, .media_verx100 = facts->media_verx100,
-              .is_dgfx = facts->discrete != 0, .has_llc = facts->has_llc != 0,
-              .is_sriov_vf = false /* activation admits only physical functions */},
-  .gt = {.xe = &native.xe, .info.type = XE_GT_TYPE_MAIN, .mmio = {io, context}},
+              .is_dgfx = facts->discrete != 0, .has_llc = facts->has_llc != 0},
+  .xe.tiles[0].xe = &native.xe,
+  .gt = {.tile = &native.xe.tiles[0], .info.type = XE_GT_TYPE_MAIN,
+         .mmio = {.io = io, .context = context}},
   .result = &result,
  };
  struct native_pat *idle = NULL;

@@ -14,7 +14,6 @@ pub fn configure(build: &mut cc::Build) {
     // source names it. compat/ itself comes last and only adds the asm/ and
     // generated/ headers that Linux's arch tree and build supply.
     let overlay = format!("{source}/stela/compat/overlay.yaml");
-    println!("cargo:rerun-if-changed={source}/stela/compat");
     build
         .flag("-ivfsoverlay")
         .flag(&overlay)
@@ -35,7 +34,6 @@ pub fn configure(build: &mut cc::Build) {
         build.flag("-isystem").flag(directory);
     }
     build
-        .file(format!("{source}/xe/xe_pt_walk.c"))
         .file(format!("{source}/stela/pt_walk.c"))
         .file(format!("{source}/stela/commands.c"))
         .file(format!("{source}/stela/ct.c"))
@@ -46,87 +44,24 @@ pub fn configure(build: &mut cc::Build) {
         .file(format!("{source}/stela/ggtt_probe.c"))
         .file(format!("{source}/stela/pat.c"))
         .file(format!("{source}/stela/i915_commands.c"));
-    for path in [
-        "stela",
-        "xe/xe_pt_walk.h",
-        "xe/xe_ring_emit.h",
-        "xe/instructions",
-        "xe/xe_guc_ct_message.h",
-        "xe/abi",
-        "xe/regs/xe_guc_ct_regs.h",
-        "xe/xe_pci_device_info.h",
-        "xe/xe_pci_runtime.h",
-        "xe/xe_pci_types.h",
-        "xe/xe_platform_types.h",
-        "xe/xe_engine_ids.h",
-        "xe/xe_gt_type.h",
-        "xe/xe_cache_level.h",
-        "xe/xe_pat.h",
-        "xe/xe_uc_fw_types.h",
-        "xe/xe_wopcm.h",
-        "xe/xe_uc_fw.h",
-        "xe/xe_macros.h",
-        "xe/xe_ggtt_probe_core.h",
-        "xe/regs/xe_gtt_defs.h",
-        "xe/xe_wopcm_types.h",
-        "xe/xe_huc_role.h",
-        "xe/regs/xe_guc_regs.h",
-        "xe/xe_force_wake_core.h",
-        "xe/xe_force_wake_gt.h",
-        "xe/xe_force_wake_domain_types.h",
-        "xe/xe_mmio_poll.h",
-        "xe/xe_guc_reset_core.h",
-        "xe/xe_gen_wa_oob.c",
-        "xe/xe_wa_oob.rules",
-        "xe/regs/xe_gt_regs.h",
-        "xe/regs/xe_regs.h",
-        "xe/regs/xe_reg_defs.h",
-        "xe/regs/xe_reg_type.h",
-        "i915/gt",
-    ] {
+    // The overlay hides shadows from dependency tracking, so the whole Linux
+    // environment and the upstream trees it builds from are inputs.
+    for path in ["stela", "xe", "i915/gt", "../common/linux/include"] {
         println!("cargo:rerun-if-changed={source}/{path}");
     }
-    for header in [
-        "linux/kconfig.h",
-        "linux/cleanup.h",
-        "linux/compiler_attributes.h",
-        "linux/align.h",
-        "linux/array_size.h",
-        "linux/container_of.h",
-        "linux/err.h",
-        "linux/errno.h",
-        "linux/sizes.h",
-        "linux/stringify.h",
-        "kunit/static_stub.h",
-        "uapi/asm-generic/errno.h",
-        "uapi/asm-generic/errno-base.h",
-        "uapi/asm-generic/ioctl.h",
-        "uapi/drm/drm.h",
-        "uapi/drm/xe_drm.h",
-    ] {
-        println!("cargo:rerun-if-changed={linux}/{header}");
-    }
-    println!("cargo:rerun-if-changed=src/gpu/common/linux/include/drm/intel/pciids.h");
-    println!("cargo:rerun-if-changed=src/gpu/common/linux/include/vdso/align.h");
-    println!("cargo:rerun-if-changed=src/gpu/common/linux/include/vdso/const.h");
     println!("cargo:rerun-if-env-changed=STELA_GPU_PYTHON");
     let python = PathBuf::from(env::var_os("STELA_GPU_PYTHON").unwrap_or_else(|| "python3".into()));
-    configure_ggtt(build, &output);
-    configure_guc_reset(build, &output);
+    generate_workarounds(&output);
     configure_dispatch(build, &output, &python);
 }
 
-/// Use the unchanged original host generator and its complete rule input.
-/// The native reset TU verifies that this actual WA excludes its admitted GTs.
-fn configure_guc_reset(build: &mut cc::Build, output: &std::path::Path) {
+/// Xe's workaround table, generated as Kbuild does by Linux's unchanged
+/// generator from its rules, as <generated/xe_wa_oob.h>.
+fn generate_workarounds(output: &std::path::Path) {
     use std::{env, fs, process::Command};
     let source = "src/gpu/intel/xe";
-    // The unchanged xe_pat.c includes the header as <generated/xe_wa_oob.h>.
     let generated = output.join("intel-generated/generated");
     fs::create_dir_all(&generated).expect("create the generated Xe header directory");
-    let upstream_header = generated.join("xe_wa_oob.h");
-    let output = output.join("intel-guc-reset");
-    fs::create_dir_all(&output).expect("create GuC reset generation directory");
     let host = env::var("HOST").expect("Cargo supplies host triple");
     let generator = output.join(if host.contains("windows") {
         "xe_gen_wa_oob.exe"
@@ -145,41 +80,23 @@ fn configure_guc_reset(build: &mut cc::Build, output: &std::path::Path) {
         .arg("-o")
         .arg(&generator)
         .output()
-        .expect("compile original GuC WA generator");
+        .expect("compile Xe's workaround generator");
     assert!(
         result.status.success(),
-        "original GuC WA generator compilation failed: {}",
+        "Xe workaround generator compilation failed: {}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let generated = output.join("xe_wa_oob.c");
     let result = Command::new(&generator)
         .arg(format!("{source}/xe_wa_oob.rules"))
-        .arg(&generated)
-        .arg(upstream_header)
+        .arg(output.join("xe_wa_oob.c"))
+        .arg(generated.join("xe_wa_oob.h"))
         .output()
-        .expect("run original GuC WA generator");
+        .expect("run Xe's workaround generator");
     assert!(
         result.status.success(),
-        "original GuC WA generation failed: {}",
+        "Xe workaround generation failed: {}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let contents = fs::read_to_string(generated).expect("read original GuC WA output");
-    let start = "{ XE_RTP_NAME(\"14025883347\"),";
-    assert_eq!(
-        contents.matches(start).count(),
-        1,
-        "changed original GuC reset WA entry"
-    );
-    let (_, entry) = contents.split_once(start).expect("original reset WA entry");
-    let (entry, _) = entry
-        .split_once(") },")
-        .expect("original reset WA terminator");
-    fs::write(
-        output.join("guc_reset_wa.inc"),
-        format!("{start}{entry}) }},\n"),
-    )
-    .expect("write original reset WA entry");
-    build.flag("-isystem").flag(output);
 }
 
 fn configure_dispatch(build: &mut cc::Build, output: &std::path::Path, python: &std::path::Path) {
@@ -231,50 +148,4 @@ fn configure_dispatch(build: &mut cc::Build, output: &std::path::Path, python: &
         .include(genxml);
     println!("cargo:rerun-if-changed={genxml}");
     println!("cargo:rerun-if-changed=src/gpu/common/mesa/src/util/bitpack_uint.h");
-}
-
-/// Copy only the nine original scalar definitions needed by the native probe.
-/// The full headers require Linux services; no hardware values are mirrored.
-fn configure_ggtt(build: &mut cc::Build, output: &std::path::Path) {
-    use std::fs;
-    let original = "src/gpu/common/linux/include/drm/intel/i915_drm.h";
-    let drm = fs::read_to_string(original).expect("read original Intel GMCH definitions");
-    let mut header = drm
-        .split_once("#ifndef _I915_DRM_H_")
-        .expect("original Intel header guard")
-        .0
-        .to_owned();
-    for (path, names) in [
-        (
-            original,
-            ["SNB_GMCH_CTRL", "BDW_GMCH_GGMS_SHIFT", "BDW_GMCH_GGMS_MASK"],
-        ),
-        (
-            "src/gpu/intel/xe/xe_bo.h",
-            ["XE_PTE_SHIFT", "XE_PAGE_SIZE", "XE_PTE_MASK"],
-        ),
-        (
-            "src/gpu/common/linux/include/linux/sizes.h",
-            ["SZ_1M", "SZ_8M", "SZ_2M"],
-        ),
-    ] {
-        println!("cargo:rerun-if-changed={path}");
-        let source = fs::read_to_string(path).expect("read original GGTT scalar header");
-        for name in names {
-            let mut lines = source.lines().filter(|line| {
-                let mut words = line.split_whitespace();
-                words.next() == Some("#define") && words.next() == Some(name)
-            });
-            header.push_str(lines.next().expect("missing original GGTT scalar define"));
-            header.push('\n');
-            assert!(
-                lines.next().is_none(),
-                "duplicate original GGTT define {name}"
-            );
-        }
-    }
-    let output = output.join("intel-ggtt");
-    fs::create_dir_all(&output).expect("create GGTT scalar output directory");
-    fs::write(output.join("ggtt_probe_defs.h"), header).expect("write original GGTT scalar header");
-    build.flag("-isystem").flag(output);
 }

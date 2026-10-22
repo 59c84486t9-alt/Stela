@@ -87,7 +87,7 @@ int main(void)
         } else if (mode == 1 || mode == 2) {
             m.fail_at = mode;
             assert(stela_intel_activation_wopcm(&s, bytes, sizeof(bytes), &out) == -22 && out.writes == mode);
-            assert(s.poisoned && s.wopcm_uncertain && s.facts.awake && s.domains[XE_FW_DOMAIN_ID_GT].ref);
+            assert(s.poisoned && s.wopcm_uncertain && s.facts.awake && s.gts[0].pm.fw.domains[XE_FW_DOMAIN_ID_GT].ref);
             reads = m.reads; writes = m.writes;
             struct stela_intel_activation_facts facts;
             assert(stela_intel_activation_facts(&s, &facts) == -5);
@@ -114,11 +114,11 @@ int main(void)
             assert(!pthread_mutex_lock(&m.lock));
             assert(!stela_intel_activation_sleep(&s));
         } else if (mode == 6) {
-            unsigned ref = s.domains[XE_FW_DOMAIN_ID_GT].ref;
-            s.domains[XE_FW_DOMAIN_ID_GT].ref = 0;
+            unsigned ref = s.gts[0].pm.fw.domains[XE_FW_DOMAIN_ID_GT].ref;
+            s.gts[0].pm.fw.domains[XE_FW_DOMAIN_ID_GT].ref = 0;
             assert(stela_intel_activation_wopcm(&s, bytes, sizeof(bytes), &out) == -22);
             assert(!m.wopcm_reads && !out.writes); /* awake bit alone cannot grant access */
-            s.domains[XE_FW_DOMAIN_ID_GT].ref = ref; assert(!stela_intel_activation_sleep(&s));
+            s.gts[0].pm.fw.domains[XE_FW_DOMAIN_ID_GT].ref = ref; assert(!stela_intel_activation_sleep(&s));
         } else {
             assert(!stela_intel_activation_wopcm(&s, bytes, sizeof(bytes), &out));
             assert(out.writes == 2 && out.raw_offset == 0x4001 && out.raw_size == 0x7f3001);
@@ -143,9 +143,9 @@ int main(void)
     }
     /* Every actual retained PCI row whose original main-GT default SELECTS
      * HuC must retain that prerequisite, regardless of GuC image validity. */
-    for (unsigned i = 0; pciidlist[i].driver_data; ++i) {
-        const struct stela_intel_pci_match *row = &pciidlist[i];
-        const struct xe_device_desc *desc = row->driver_data;
+    for (unsigned i = 0; pciidlist[i].vendor; ++i) {
+        const struct pci_device_id *row = &pciidlist[i];
+        const struct xe_device_desc *desc = (const void *)row->driver_data;
         if (!desc->pre_gmdid_graphics_ip) continue;
         struct stela_intel_huc_default huc;
         assert(!stela_intel_huc_select_default((u32)desc->platform,

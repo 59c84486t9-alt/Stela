@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_DRM_PRINT_H
 #define STELA_DRM_PRINT_H
+#include <linux/bug.h>
 #include <linux/compiler.h>
 struct drm_device;
 /* Stela formats through no printer object; the type only names one. */
@@ -24,4 +25,5 @@ static void drm_printf(struct drm_printer *p, const char *f, ...)
 	stela_drm_printk(drm, STELA_DRM_INFO, format, ##__VA_ARGS__)
 #define drm_dbg(drm, format, ...) \
 	stela_drm_printk(drm, STELA_DRM_DBG, format, ##__VA_ARGS__)
+#define drm_WARN_ON(drm, condition) WARN_ON(condition)
 #endif
