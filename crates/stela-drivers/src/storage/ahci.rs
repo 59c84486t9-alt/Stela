@@ -96,6 +96,7 @@ pub fn attach(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
 ) -> Result<Vec<AhciDisk>, BlockError> {
+    function.power_up(&handoff.clock)?;
     let bars = function.bars();
     let hba = registers(handoff, bars[5], 0, 0x100)?;
     function.enable_polled();

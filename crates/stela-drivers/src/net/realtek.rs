@@ -250,6 +250,7 @@ impl Realtek {
             // SAFETY: caller grants exclusive PCI segment access and valid ECAM.
             unsafe { pci::disable_aspm_link(function, handoff) }
         })?;
+        function.power_up(&handoff.clock)?;
         let bar = function
             .bars()
             .into_iter()

@@ -4,6 +4,7 @@
 //! use [`Function::enable_polled`]; interrupt-driven ports must arrange
 //! delivery with the mount before enabling their interrupt sources.
 use super::mmio::Mmio;
+use crate::{Clock, block::BlockError};
 use alloc::vec::Vec;
 use core::{fmt, ops::Range};
 
@@ -24,7 +25,28 @@ const COMMAND_MEMORY: u16 = 1 << 1;
 const COMMAND_BUS_MASTER: u16 = 1 << 2;
 const COMMAND_INTX_DISABLE: u16 = 1 << 10;
 const STATUS_CAPABILITIES: u16 = 1 << 4;
+/// Memory BAR type field: 64-bit (PCI 3.0 §6.2.5.1).
+const BAR_MEMORY_64: u32 = 2 << 1;
+const BAR_MEMORY_TYPE: u32 = 3 << 1;
+const BAR_PREFETCHABLE: u32 = 1 << 3;
+const BAR_IO: u32 = 1;
+const BARS: usize = 6;
+/// Capability IDs after this one are not followed (Linux `__pci_find_next_cap_ttl`).
+const CAPABILITY_LIST_END: u8 = 0xff;
+const CAPABILITY_LIMIT: usize = 48;
 
+/// Power Management Control/Status (PCI PM 1.2 §3.2.4).
+const PM_CONTROL: u16 = 4;
+const PM_STATE: u16 = 3;
+const PM_NO_SOFT_RESET: u16 = 1 << 3;
+/// D3hot and D2 exit delays (PCI PM 1.2 Table 5-1; Linux `PCI_PM_D3HOT_WAIT`,
+/// `PCI_PM_D2_DELAY`).
+const D3HOT_DELAY_US: u64 = 10_000;
+const D2_DELAY_US: u64 = 200;
+const D2: u16 = 2;
+const D3HOT: u16 = 3;
+
+pub const CAPABILITY_POWER: u8 = 0x01;
 pub const CAPABILITY_MSI: u8 = 0x05;
 pub const CAPABILITY_VENDOR: u8 = 0x09;
 pub const CAPABILITY_MSIX: u8 = 0x11;
@@ -141,12 +163,19 @@ pub enum Bar {
 }
 
 impl Bar {
+    /// The bytes a memory BAR decodes; none for I/O or a range past 2^64.
     pub fn memory(&self) -> Option<Range<u64>> {
         match *self {
-            Self::Memory { address, size, .. } => Some(address..address + size),
+            Self::Memory { address, size, .. } => Some(address..address.checked_add(size)?),
             Self::Io { .. } => None,
         }
     }
+}
+
+/// The size a BAR decodes: its lowest writable address bit, as Linux
+/// `pci_size` takes it, so read-only upper address bits cannot inflate it.
+fn bar_size(writable: u64) -> u64 {
+    writable.isolate_lowest_one()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,9 +238,10 @@ impl<C: ConfigSpace> Function<C> {
     }
 
     /// Decode and size every BAR of a type 0 header. Decoding is off while
-    /// a BAR holds all ones.
-    pub fn bars(&mut self) -> [Option<Bar>; 6] {
-        let mut bars = [None; 6];
+    /// a BAR holds all ones. A 64-bit BAR in the last slot has no upper
+    /// register and is left out.
+    pub fn bars(&mut self) -> [Option<Bar>; BARS] {
+        let mut bars = [None; BARS];
         if self.header_type() != 0 {
             return bars;
         }
@@ -219,45 +249,35 @@ impl<C: ConfigSpace> Function<C> {
         self.config
             .write16(COMMAND, command & !(COMMAND_IO | COMMAND_MEMORY));
         let mut index = 0;
-        while index < 6 {
+        while index < BARS {
             let offset = BAR0 + 4 * index as u16;
-            let low = self.config.read32(offset);
-            self.config.write32(offset, u32::MAX);
-            let low_mask = self.config.read32(offset);
-            self.config.write32(offset, low);
-            if low & 1 == 1 {
-                let mask = low_mask & !3 | 0xffff_0000;
-                if low_mask & !3 != 0 {
+            let (low, low_mask) = self.size_register(offset);
+            if low & BAR_IO != 0 {
+                let size = bar_size(u64::from(low_mask & !3));
+                if size != 0 {
                     bars[index] = Some(Bar::Io {
                         port: low & !3,
-                        size: (!mask).wrapping_add(1),
+                        size: size as u32,
                     });
                 }
                 index += 1;
                 continue;
             }
-            let wide = (low >> 1) & 3 == 2 && index < 5;
-            let (address, mask) = if wide {
-                let high_offset = offset + 4;
-                let high = self.config.read32(high_offset);
-                self.config.write32(high_offset, u32::MAX);
-                let high_mask = self.config.read32(high_offset);
-                self.config.write32(high_offset, high);
-                (
-                    u64::from(high) << 32 | u64::from(low & !15),
-                    u64::from(high_mask) << 32 | u64::from(low_mask & !15),
-                )
+            let wide = low & BAR_MEMORY_TYPE == BAR_MEMORY_64;
+            if wide && index + 1 == BARS {
+                break;
+            }
+            let (high, high_mask) = if wide {
+                self.size_register(offset + 4)
             } else {
-                (
-                    u64::from(low & !15),
-                    0xffff_ffff_0000_0000 | u64::from(low_mask & !15),
-                )
+                (0, 0)
             };
-            if mask & 0xffff_ffff != 0 || (wide && mask >> 32 != 0) {
+            let size = bar_size(u64::from(high_mask) << 32 | u64::from(low_mask & !15));
+            if size != 0 {
                 bars[index] = Some(Bar::Memory {
-                    address,
-                    size: (!mask).wrapping_add(1),
-                    prefetchable: low & 8 != 0,
+                    address: u64::from(high) << 32 | u64::from(low & !15),
+                    size,
+                    prefetchable: low & BAR_PREFETCHABLE != 0,
                     wide,
                 });
             }
@@ -267,6 +287,54 @@ impl<C: ConfigSpace> Function<C> {
         bars
     }
 
+    /// A BAR register's value and the bits that read back as writable.
+    fn size_register(&mut self, offset: u16) -> (u32, u32) {
+        let value = self.config.read32(offset);
+        self.config.write32(offset, u32::MAX);
+        let mask = self.config.read32(offset);
+        self.config.write32(offset, value);
+        (value, mask)
+    }
+
+    /// Bring the function to D0 as Linux `pci_power_up` does: clear the whole
+    /// PMCSR (PME_Status is write-one-to-clear and stays pending), wait the
+    /// state's exit delay, and restore the BARs a D3hot soft reset cleared.
+    /// Functions without a power management capability are always in D0.
+    pub fn power_up(&mut self, clock: &Clock) -> Result<(), BlockError> {
+        let Some((offset, _)) = self
+            .capabilities()
+            .into_iter()
+            .find(|(_, id)| *id == CAPABILITY_POWER)
+        else {
+            return Ok(());
+        };
+        let control = u16::from(offset) + PM_CONTROL;
+        let value = self.config.read16(control);
+        if value == u16::MAX {
+            return Err(BlockError::Unsupported("PCI function does not answer"));
+        }
+        let state = value & PM_STATE;
+        if state == 0 {
+            return Ok(());
+        }
+        let bars: [u32; BARS] = core::array::from_fn(|i| self.config.read32(BAR0 + 4 * i as u16));
+        self.config.write16(control, 0);
+        clock.delay(match state {
+            D3HOT => D3HOT_DELAY_US,
+            D2 => D2_DELAY_US,
+            _ => 0,
+        });
+        if self.config.read16(control) & PM_STATE != 0 {
+            return Err(BlockError::Unsupported("PCI function did not enter D0"));
+        }
+        if state == D3HOT && value & PM_NO_SOFT_RESET == 0 && self.header_type() == 0 {
+            for (index, bar) in bars.into_iter().enumerate() {
+                self.config.write32(BAR0 + 4 * index as u16, bar);
+            }
+        }
+        Ok(())
+    }
+
     /// Offsets and IDs of the capability list, bounded against loops.
     pub fn capabilities(&self) -> Vec<(u8, u8)> {
         let mut found = Vec::new();
@@ -274,9 +342,13 @@ impl<C: ConfigSpace> Function<C> {
             return found;
         }
         let mut offset = self.config.read8(CAPABILITIES) & !3;
-        while offset >= 0x40 && found.len() < 48 {
+        while offset >= 0x40 && found.len() < CAPABILITY_LIMIT {
             let header = self.config.read16(u16::from(offset));
-            found.push((offset, header as u8));
+            let id = header as u8;
+            if id == CAPABILITY_LIST_END {
+                break;
+            }
+            found.push((offset, id));
             offset = (header >> 8) as u8 & !3;
         }
         found
@@ -569,6 +641,122 @@ mod tests {
         config.words[20] = 0x0086_4005; // MSI points back at MSI-X
         let function = Function::new(Address::default_for_tests(), config).unwrap();
         assert_eq!(function.capabilities().len(), 48);
+    }
+
+    #[test]
+    fn bar_sizes_come_from_the_lowest_writable_address_bit() {
+        let mut config = fake();
+        // BAR0+1: 64-bit 1 MiB whose upper dword is read-only zero; BAR2:
+        // 32-bit range ending at 4 GiB; BAR5: 64-bit type with no upper register.
+        config.words[4] = 0xfe00_0004;
+        config.bar_masks[0] = 0xfff0_0000;
+        config.words[6] = 0xffff_f000;
+        config.bar_masks[2] = 0xffff_f000;
+        config.words[9] = 0xfd00_0004;
+        config.bar_masks[5] = 0xffff_f000;
+        let mut function = Function::new(Address::default_for_tests(), config).unwrap();
+        let bars = function.bars();
+        assert_eq!(
+            bars[0],
+            Some(Bar::Memory {
+                address: 0xfe00_0000,
+                size: 0x10_0000,
+                prefetchable: false,
+                wide: true
+            })
+        );
+        assert_eq!(
+            bars[2].and_then(|bar| bar.memory()),
+            Some(0xffff_f000..0x1_0000_0000)
+        );
+        assert_eq!(bars[5], None);
+        let overflowing = Bar::Memory {
+            address: u64::MAX - 0xfff,
+            size: 0x2000,
+            prefetchable: false,
+            wide: true,
+        };
+        assert_eq!(overflowing.memory(), None);
+    }
+
+    #[test]
+    fn the_capability_walk_stops_at_an_all_ones_id() {
+        let mut config = fake();
+        config.words[16] = 0x0003_50ff; // first capability reads as all ones
+        let function = Function::new(Address::default_for_tests(), config).unwrap();
+        assert!(function.capabilities().is_empty());
+    }
+
+    /// A function whose D3hot exit performs the internal reset that
+    /// No_Soft_Reset clear advertises: its BARs read back as zero.
+    struct SoftReset(Fake);
+
+    impl ConfigSpace for SoftReset {
+        fn read32(&self, offset: u16) -> u32 {
+            self.0.read32(offset)
+        }
+
+        fn write32(&mut self, offset: u16, value: u32) {
+            self.0.write32(offset, value)
+        }
+
+        fn write16(&mut self, offset: u16, value: u16) {
+            let before = self.0.read16(offset);
+            self.0.write16(offset, value);
+            if offset == 0x64 && before & PM_STATE == D3HOT && before & PM_NO_SOFT_RESET == 0 {
+                self.0.words[4..10].fill(0);
+            }
+        }
+    }
+
+    #[test]
+    fn power_up_leaves_d3hot_and_restores_soft_reset_bars() {
+        for no_soft_reset in [0, PM_NO_SOFT_RESET] {
+            let mut config = fake();
+            config.words[20] = 0x0086_6005; // MSI, next capability at 0x60
+            config.words[24] = 0x0003_0001; // power management, end of list
+            config.words[25] = u32::from(D3HOT | no_soft_reset | 1 << 15);
+            config.words[4] = 0xfebf_0000;
+            config.bar_masks[0] = 0xffff_c000;
+            let mut function =
+                Function::new(Address::default_for_tests(), SoftReset(config)).unwrap();
+            let clock = Clock {
+                ticks_per_microsecond: 0,
+            };
+            function.power_up(&clock).unwrap();
+            assert_eq!(function.config().read16(0x64), 0);
+            assert_eq!(function.config().read32(BAR0), 0xfebf_0000);
+        }
+    }
+
+    #[test]
+    fn power_up_reports_a_function_that_stays_in_d3hot() {
+        let mut config = fake();
+        config.words[20] = 0x0086_6005;
+        config.words[24] = 0x0003_0001;
+        config.words[25] = u32::from(D3HOT);
+        struct Stuck(Fake);
+        impl ConfigSpace for Stuck {
+            fn read32(&self, offset: u16) -> u32 {
+                self.0.read32(offset)
+            }
+            fn write32(&mut self, offset: u16, value: u32) {
+                self.0.write32(offset, value)
+            }
+            fn write16(&mut self, offset: u16, value: u16) {
+                if offset != 0x64 {
+                    self.0.write16(offset, value)
+                }
+            }
+        }
+        let mut function = Function::new(Address::default_for_tests(), Stuck(config)).unwrap();
+        let clock = Clock {
+            ticks_per_microsecond: 0,
+        };
+        assert_eq!(
+            function.power_up(&clock),
+            Err(BlockError::Unsupported("PCI function did not enter D0"))
+        );
     }
 
     #[test]

@@ -218,6 +218,7 @@ impl Igc {
             // apply the erratum before BAR probing, decode or bus mastering.
             unsafe { pci::disable_aspm_l1_2_link(function, handoff) }
         })?;
+        function.power_up(&handoff.clock)?;
         let device = registers(handoff, function.bars()[0], 0, REGISTER_BYTES)?;
         function.enable_polled();
         let clock = handoff.clock;

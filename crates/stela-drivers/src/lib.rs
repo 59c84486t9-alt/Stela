@@ -147,9 +147,12 @@ impl Clock {
         unsafe { core::arch::x86_64::_rdtsc() }
     }
 
-    /// Microseconds since an arbitrary origin.
+    /// Microseconds since an arbitrary origin. A zero rate, which test clocks
+    /// use to expire every wait at once, reads as the origin.
     pub fn now_us(&self) -> u64 {
-        Self::ticks() / self.ticks_per_microsecond
+        Self::ticks()
+            .checked_div(self.ticks_per_microsecond)
+            .unwrap_or(0)
     }
 
     /// A deadline `microseconds` from now.

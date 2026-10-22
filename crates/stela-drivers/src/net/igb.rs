@@ -189,6 +189,7 @@ impl Igb {
         }
         let chip = Chip::device(function.device).unwrap();
         let bytes = if chip.modern() { 0x2_0000 } else { 0x1_0000 };
+        function.power_up(&handoff.clock)?;
         let device = mapped_registers(handoff, function.bars()[0], 0, bytes)?;
         let capabilities = PciCapabilities::read(function);
         function.enable_polled();

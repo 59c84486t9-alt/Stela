@@ -56,6 +56,7 @@ pub(crate) struct Modern {
 
 impl Modern {
     pub(crate) fn new(function: &mut Function, handoff: &Handoff) -> Result<Self, BlockError> {
+        function.power_up(&handoff.clock)?;
         let bars = function.bars();
         let mut common = None;
         let mut device = None;

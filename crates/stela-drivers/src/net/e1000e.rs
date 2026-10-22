@@ -405,6 +405,7 @@ impl E1000e {
         // SAFETY: the constructor's caller owns segment configuration and
         // the mapped ECAM handoff. Do this before enabling device decoding.
         unsafe { pci::disable_aspm_link(function, handoff)? };
+        function.power_up(&handoff.clock)?;
         let device = registers(handoff, function.bars()[0], 0, REGISTER_BYTES)?;
         function.enable_polled();
         reset(&device, &handoff.clock)?;

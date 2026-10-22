@@ -2119,6 +2119,7 @@ pub fn attach_with_provider(
 ) -> Result<Found, BlockError> {
     let stream_policy = streams::pci_policy(function)?;
     let dma_profile = dma::Profile::pci(function.vendor, function.device);
+    function.power_up(&handoff.clock)?;
     let bars = function.bars();
     // The capability, operational, runtime and doorbell registers all lie
     // in BAR 0, whatever its size (5.2.1): QEMU's is 16 KiB, a PC's 64 KiB

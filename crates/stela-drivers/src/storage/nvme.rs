@@ -238,6 +238,7 @@ pub fn attach(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
 ) -> Result<Vec<Namespace>, BlockError> {
+    function.power_up(&handoff.clock)?;
     let bars = function.bars();
     let registers = registers(handoff, bars[0], 0, 0x2000)?;
     function.enable_polled();
