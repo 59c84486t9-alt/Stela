@@ -42,8 +42,11 @@ mod gpio_topology;
 pub use gpio_topology::{AuxGpioBank, GpioBank};
 use gpio_topology::{aux_gpio_banks, gpio_bank, gpio_profile};
 mod usb_topology;
-use usb_topology::{ATC_PHY_LAYOUTS, typec_devices, usb_controllers};
-pub use usb_topology::{I2cAddress, I2cController, TypecPhy, UsbController, hpm_firmware_file};
+pub use usb_topology::{
+    I2cAddress, I2cController, TypecPhy, UsbController, atc_phy_compatible, hpm_firmware_file,
+    i2c_compatible, usb_controller_compatible,
+};
+use usb_topology::{typec_devices, usb_controllers};
 mod spmi_topology;
 use spmi_topology::spmi_controllers;
 pub use spmi_topology::{FirmwareMailbox, SpmiConfiguration, SpmiController, SpmiPmu};
@@ -1495,17 +1498,17 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         NVRAM,
         SYSCFG,
         GPIO,
-        I2C,
         HPM_MANAGER,
         HPM,
         DOCK_PORT,
-        USB_DRD,
         SPMI,
         PMU,
         BUTTONS,
         DISPEXT,
     ]
     .contains(&name)
+        || i2c_compatible(name, property("compatible"))
+        || usb_controller_compatible(name, property("compatible"))
         || T6000_EXTERNAL_OUTPUT_ADMITTED && name == DISPEXT_T6000
         || [GPIO_T6000, GPIO_S5L].contains(&name)
             && gpio_profile(&property) == Some(gpio::Profile::S5l8960x)
@@ -1517,7 +1520,7 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         })
         || GPU_ADMITTED && (name == GFX_MAPPER || admitted_gpu(name))
         || AICS.contains(&name)
-        || ATC_PHY_LAYOUTS.iter().any(|&(layout, _)| layout == name)
+        || atc_phy_compatible(name, property("compatible"))
         || SOCS.iter().any(|soc| soc.pmgr == name)
         || name == PMGR2_IMPLEMENTATION
         || ROLE_MODELS.iter().any(|claim| {
@@ -1693,7 +1696,7 @@ pub struct Board {
     /// SEP placement if the input tree explicitly keeps it. Production
     /// `models()` admission remains closed while sepOS boot services refuse.
     pub sep: Option<SepDevice>,
-    /// DWC3 placements of the visible `usb-drd,t8112` nodes, in DeviceTree order.
+    /// DWC3 placements of qualified visible USB DRD families, in DeviceTree order.
     pub usbs: Vec<UsbController>,
     /// `/arm-io/pmgr`'s power-state registers, when the DeviceTree shows the
     /// SoC's PMGR ([`pmgr`]).
@@ -2199,6 +2202,36 @@ mod tests {
                 }),
             })
             .collect()
+    }
+
+    #[test]
+    fn family_models_validate_the_supplied_compatible_property() {
+        for (name, valid, invalid) in [
+            (
+                I2C,
+                b"i2c,t8101\0i2c,s5l8940x\0iic,soft\0".as_slice(),
+                b"i2c,t9999\0i2c,t8101\0".as_slice(),
+            ),
+            (
+                USB_DRD,
+                b"usb-drd,t6020\0usb-drd,t8112\0",
+                b"usb-drd,t9999\0usb-drd,t8112\0",
+            ),
+            (
+                ATC_PHY,
+                b"atc-phy,t6020\0atc-phy,t8112\0",
+                b"atc-phy,t9999\0atc-phy,t8112\0",
+            ),
+        ] {
+            assert!(models(name, |_| None));
+            assert!(models(name, |key| (key == "compatible").then_some(valid)));
+            assert!(!models(name, |key| (key == "compatible").then_some(invalid)));
+            let unknown_fallback = [name.as_bytes(), b"\0unknown\0"].concat();
+            assert!(!models(name, |key| (key == "compatible")
+                .then_some(unknown_fallback.as_slice())));
+        }
+        assert!(!models("i2c,s5l8940x", |_| None));
+        assert!(!models("iic,soft", |_| None));
     }
 
     /// The M4 and later maps fill CTRR-A to D; a template group iBoot leaves

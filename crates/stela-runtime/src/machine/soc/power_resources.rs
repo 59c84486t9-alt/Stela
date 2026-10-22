@@ -6,9 +6,7 @@
 //! their ADT ancestors' activated gates, including nubs and firmware endpoints.
 //! Source PMGR provider gate-index metadata remains inventoried separately from
 //! the consumer dependencies its IOService start actually activates.
-use super::{
-    ATC_PHY_LAYOUTS, IOMMU_MAPPER, Node, PMGR2_ARCH, PMGR2_IMPLEMENTATION, SOCS, USB_DRD, name_of,
-};
+use super::{IOMMU_MAPPER, Node, PMGR2_ARCH, PMGR2_IMPLEMENTATION, SOCS, name_of};
 use crate::platform::apple::{
     dart::Profile,
     pmgr::coverage::{self, Admission, Consumer, Domain, DomainId, LifecycleSinks},
@@ -529,15 +527,11 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
             // SPTM defaults an absent sid-count to 16 on every generation.
             dart_streams.push(node.first_u32("sid-count").unwrap_or(16));
             Some(PowerOwner::Dart(index))
-        } else if path.starts_with("/arm-io/") && node.compatible(USB_DRD) {
+        } else if path.starts_with("/arm-io/") && super::usb_topology::is_usb_controller(&node) {
             let index = usbs;
             usbs += 1;
             Some(PowerOwner::Usb(index))
-        } else if path.starts_with("/arm-io/")
-            && ATC_PHY_LAYOUTS
-                .iter()
-                .any(|(layout, _)| node.compatible(layout))
-        {
+        } else if path.starts_with("/arm-io/") && super::usb_topology::is_typec_phy(&node) {
             let index = phys;
             phys += 1;
             Some(PowerOwner::Phy(index))
@@ -853,6 +847,7 @@ fn decode_domain_table(
 
 #[cfg(test)]
 mod tests {
+    use crate::machine::soc::USB_DRD;
     /// Explicit physical bus for synthetic full-PA fixture records.
     fn flat_bus(children: &[alloc::vec::Vec<u8>]) -> alloc::vec::Vec<u8> {
         let ranges = [0u64, 0, 1u64 << 40]
@@ -865,6 +860,58 @@ mod tests {
     use super::*;
     use crate::machine::soc::tests::flat_fixture_extent;
     use crate::machine::{adt::encode, soc::DART};
+
+    #[test]
+    fn usb_and_phy_resource_owners_require_qualified_complete_lists() {
+        for (compatible, owner) in [
+            (
+                b"usb-drd,t6000\0usb-drd,t8103\0".as_slice(),
+                Some(PowerOwner::Usb(0)),
+            ),
+            (b"usb-drd,t6020\0usb-drd,t8112\0", Some(PowerOwner::Usb(0))),
+            (b"usb-drd,t8122\0", Some(PowerOwner::Usb(0))),
+            (b"atc-phy,t6000\0", Some(PowerOwner::Phy(0))),
+            (b"atc-phy,t6020\0atc-phy,t8112\0", Some(PowerOwner::Phy(0))),
+            (b"usb-drd,t9999\0usb-drd,t8112\0", None),
+            (b"usb-drd,t8112\0usb-drd,t9999\0", None),
+            (b"atc-phy,t9999\0atc-phy,t8112\0", None),
+            (b"atc-phy,t8112\0atc-phy,t9999\0", None),
+        ] {
+            let child = encode(&[("name", b"port"), ("usb-port-number", &words(&[1]))], &[]);
+            let controller = encode(
+                &[
+                    ("name", b"consumer"),
+                    ("compatible", compatible),
+                    ("clock-gates", &words(&[1])),
+                ],
+                &[child],
+            );
+            let bytes = tree(&[(1, Some(0), [0, 0])], &[controller]);
+            let states = power_states(
+                &Node::root(&bytes).unwrap(),
+                &flat_fixture_extent(&Some),
+                0x8112,
+            )
+            .unwrap()
+            .unwrap();
+            let resource = states
+                .resources
+                .iter()
+                .find(|resource| resource.name == "/arm-io/consumer")
+                .unwrap();
+            assert_eq!(resource.owner, owner, "{compatible:?}");
+            assert_eq!(resource.clocks, [domain_id(1)]);
+            if compatible.starts_with(b"usb-drd,") {
+                let child = states
+                    .resources
+                    .iter()
+                    .find(|resource| resource.name == "/arm-io/consumer/port")
+                    .unwrap();
+                assert_eq!(child.owner, owner);
+                assert_eq!(child.clocks, [domain_id(1)]);
+            }
+        }
+    }
 
     #[test]
     fn generic_pmgr_selects_its_register_implementation_without_borrowing_another_family() {
