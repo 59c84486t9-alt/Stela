@@ -438,6 +438,15 @@ pub enum DeviceError {
     TransferRefused(String),
 }
 
+/// A complete device pair read has consumed its input. A subsequent board
+/// service failure cannot turn it into a replayable register refusal: the
+/// engine retires the returned data and then stops at the retained failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumedPair {
+    pub values: [u64; 2],
+    pub settlement: Result<(), DeviceError>,
+}
+
 /// The board's devices on the guest physical bus. `cpu` is the number of the
 /// PE making the access, as [`CpuProfile::processors`] numbers it, and `now`
 /// is the system counter value (24 MHz ticks) of the access.
@@ -449,6 +458,19 @@ pub trait Devices {
     /// Supply that PE's execution PC immediately before its sample trigger.
     fn observe_pc_sample(&mut self, _physical: u64, _pc: u64) {}
     fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError>;
+    /// Optional whole-pair boundary for a device with a qualified consuming
+    /// read protocol. `Ok(None)` has no effects and requests ordinary scalar
+    /// reads. `Err` refuses before consumption; `Ok(Some(..))` must retain the
+    /// data even if forwarding its resulting board effects later fails.
+    fn read_pair(
+        &mut self,
+        _cpu: usize,
+        _physical: u64,
+        _bytes: u8,
+        _now: u64,
+    ) -> Result<Option<ConsumedPair>, DeviceError> {
+        Ok(None)
+    }
     fn write(
         &mut self,
         cpu: usize,
@@ -4467,6 +4489,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Complete one single-register scalar access to a device.
     fn device_access(&mut self, word: u32, address: u64, physical: u64, write: bool) -> Step {
         let pc = self.cpu.pc;
+        let mut settled_failure = None;
         let refuse = |machine: &Self, detail: String| {
             let mut requirement = machine.requirement(RequirementKind::Device {
                 physical,
@@ -4584,25 +4607,52 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let now = self.now();
             match transfer {
                 MemoryTransfer::Load { signed, width } => {
-                    let mut values = [0; 2];
-                    for (value, element) in values.iter_mut().zip(elements) {
-                        let raw = match self.device_read(element, bytes, now) {
-                            Ok(raw) => raw,
-                            Err(error) if self.surveyed(element, bytes, None, &error) => 0,
-                            Err(error) => {
-                                let at = address + (element - physical);
-                                return self.device_failure(error, at, element, None);
-                            }
-                        };
-                        *value = match (bytes, signed) {
+                    self.host.speculation_barrier();
+                    let pair = match self.devices.read_pair(self.current, physical, bytes, now) {
+                        Ok(pair) => pair,
+                        Err(error) => {
+                            self.watch(physical, bytes, None, false);
+                            return self.device_failure(error, address, physical, None);
+                        }
+                    };
+                    let raw_values = if let Some(pair) = pair {
+                        for (element, raw) in elements.into_iter().zip(pair.values) {
+                            self.watch(element, bytes, Some(raw), false);
+                        }
+                        if let Err(error) = pair.settlement {
+                            // Capture the original access PC before committing
+                            // its data, writeback and instruction retirement.
+                            settled_failure = Some(refuse(
+                                self,
+                                format!("consumed device pair: board settlement failed: {error:?}"),
+                            ));
+                        }
+                        pair.values
+                    } else {
+                        let mut raw_values = [0; 2];
+                        for (raw, element) in raw_values.iter_mut().zip(elements) {
+                            *raw = match self.device_read(element, bytes, now) {
+                                Ok(raw) => raw,
+                                Err(error) if self.surveyed(element, bytes, None, &error) => 0,
+                                Err(error) => {
+                                    let at = address + (element - physical);
+                                    return self.device_failure(error, at, element, None);
+                                }
+                            };
+                        }
+                        raw_values
+                    };
+                    let values = raw_values.map(|raw| {
+                        let mut value = match (bytes, signed) {
                             (8, _) => raw,
                             (4, true) => raw as u32 as i32 as i64 as u64,
                             _ => raw & 0xffff_ffff,
                         };
                         if width == Width::W32 {
-                            *value &= 0xffff_ffff;
+                            value &= 0xffff_ffff;
                         }
-                    }
+                        value
+                    });
                     for (register, value) in data.into_iter().zip(values) {
                         self.write_register(register, value);
                     }
@@ -4636,6 +4686,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         self.cpu.pc = pc;
         self.next()?;
+        if let Some(stop) = settled_failure {
+            return Err(stop);
+        }
         match self.devices.take_reset() {
             Some(reason) => Err(Stop::Reset(reason)),
             None => Ok(()),
@@ -5920,9 +5973,24 @@ mod tests {
         reads: Vec<u64>,
         stores: Vec<(u64, u64)>,
         transfers: usize,
+        pair: Option<Result<ConsumedPair, DeviceError>>,
+        pair_reads: usize,
     }
 
     impl Devices for PairFaultDevice {
+        fn read_pair(
+            &mut self,
+            _: usize,
+            _: u64,
+            _: u8,
+            _: u64,
+        ) -> Result<Option<ConsumedPair>, DeviceError> {
+            let Some(pair) = self.pair.clone() else {
+                return Ok(None);
+            };
+            self.pair_reads += 1;
+            pair.map(Some)
+        }
         fn read(&mut self, _: usize, physical: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
             self.reads.push(physical);
             if self.refused == Some(physical) {
@@ -5973,7 +6041,94 @@ mod tests {
             reads: Vec::new(),
             stores: Vec::new(),
             transfers: 0,
+            pair: None,
+            pair_reads: 0,
         }
+    }
+
+    #[test]
+    fn consumed_device_pair_retires_before_reporting_later_board_failure() {
+        const DEVICE: u64 = 0x2_3b3c_0a00;
+        for strict in [false, true] {
+            for survey in [false, true] {
+                for writeback in [false, true] {
+                    let mut devices = pair_fault_device();
+                    devices.pair = Some(Ok(ConsumedPair {
+                        values: [0x1234, 0x5678],
+                        settlement: Err(DeviceError::Refused("retained wire failure".into())),
+                    }));
+                    let mut machine = board(&[], devices, Vec::new());
+                    machine.set_strict(strict);
+                    if survey {
+                        machine.begin_survey();
+                    }
+                    machine.set_watches(&[(DEVICE, 16)]);
+                    machine.cpu.pstate.btype = 1;
+                    machine.write_register(Register::X(1), DEVICE - 16);
+                    machine.write_register(Register::X(8), DEVICE);
+                    machine.write_register(Register::X(9), 0xdead);
+                    let esr = machine.cpu.read(SystemRegister::ESR_EL1);
+                    let elr = machine.cpu.read(SystemRegister::ELR_EL1);
+                    // Original PTD shape: ldp x8, x9, [x8]. Also cover
+                    // pre-indexed ldp x2, x3, [x1, #16]! independently.
+                    let word = if writeback { 0xa9c1_0c22 } else { 0xa940_2508 };
+                    let Err(Stop::Unsupported(requirement)) =
+                        machine.device_access(word, DEVICE, DEVICE, false)
+                    else {
+                        panic!("consumed service failure must stop without an abort or replay");
+                    };
+                    assert_eq!(requirement.pc, BASE);
+                    assert_eq!(requirement.address, Some(DEVICE));
+                    assert!(matches!(requirement.kind, RequirementKind::Device {
+                        physical: DEVICE, write: false, ref detail
+                    } if detail.contains("retained wire failure")));
+                    assert_eq!(machine.cpu.pc, BASE + 4);
+                    assert_eq!(machine.cpu.pstate.btype, 0);
+                    assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), esr);
+                    assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), elr);
+                    let data = if writeback { [2, 3] } else { [8, 9] };
+                    assert_eq!(machine.read_register(Register::X(data[0])), 0x1234);
+                    assert_eq!(machine.read_register(Register::X(data[1])), 0x5678);
+                    assert_eq!(
+                        machine.read_register(Register::X(1)),
+                        if writeback { DEVICE } else { DEVICE - 16 }
+                    );
+                    assert_eq!(machine.devices.pair_reads, 1);
+                    assert!(machine.devices.reads.is_empty());
+                    assert!(machine.devices.stores.is_empty());
+                    assert_eq!(machine.devices.transfers, 0);
+                    assert!(machine.take_survey().is_empty());
+                    let hits = machine.take_watch_hits();
+                    assert_eq!(hits.len(), 2);
+                    for (index, hit) in hits.iter().enumerate() {
+                        assert_eq!(hit.pc, BASE);
+                        assert_eq!(hit.physical, DEVICE + index as u64 * 8);
+                        assert_eq!(hit.value, [0x1234, 0x5678][index]);
+                        assert!(hit.completed && !hit.write);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn whole_device_pair_refusal_precedes_consumption_and_retirement() {
+        const DEVICE: u64 = 0x2_3b3c_0a00;
+        let mut devices = pair_fault_device();
+        devices.pair = Some(Err(DeviceError::Refused("unknown publication".into())));
+        let mut machine = board(&[], devices, Vec::new());
+        machine.set_strict(false);
+        machine.write_register(Register::X(8), DEVICE);
+        machine.write_register(Register::X(9), 0xdead);
+        machine
+            .device_access(0xa940_2508, DEVICE, DEVICE, false)
+            .unwrap();
+        assert_eq!(machine.read_register(Register::X(8)), DEVICE);
+        assert_eq!(machine.read_register(Register::X(9)), 0xdead);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x9600_0010);
+        assert_eq!(machine.devices.pair_reads, 1);
+        assert!(machine.devices.reads.is_empty());
     }
 
     #[test]

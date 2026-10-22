@@ -6,7 +6,7 @@
 pub mod t6000_pmgr;
 
 use super::{
-    engine::{DeviceError, Devices, Memory, Reset, Start, Transition},
+    engine::{ConsumedPair, DeviceError, Devices, Memory, Reset, Start, Transition},
     registers::Lines,
     soc::PowerOwner,
 };
@@ -2821,6 +2821,51 @@ impl Devices for AppleDevices {
         Ok(value)
     }
 
+    fn read_pair(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        bytes: u8,
+        now: u64,
+    ) -> Result<Option<ConsumedPair>, DeviceError> {
+        // Probe without effects: both members must belong to the same actual
+        // joint resource at consecutive offsets, not merely adjacent PAs.
+        let Some(width) = Width::from_bytes(u64::from(bytes)) else {
+            return Ok(None);
+        };
+        let Ok((device, offset)) = self.bus.route(physical, width) else {
+            return Ok(None);
+        };
+        let Some(next) = physical.checked_add(u64::from(bytes)) else {
+            return Ok(None);
+        };
+        let Some(next_offset) = offset.checked_add(u64::from(bytes)) else {
+            return Ok(None);
+        };
+        if self.bus.route(next, width).ok() != Some((device, next_offset)) {
+            return Ok(None);
+        }
+        let Some(entry) = self
+            .bus
+            .device::<memory_resources::Prepared>(device)
+            .and_then(|owner| owner.paired_entry(offset, bytes))
+        else {
+            return Ok(None);
+        };
+        self.publish_rtc_time(now)?;
+        self.settle_lifecycle(cpu, now);
+        let mut access = Access::new(cpu, now, &mut self.latch);
+        let values = self
+            .bus
+            .device::<memory_resources::Prepared>(device)
+            .expect("paired read retains the prepared resource")
+            .consume_entry(entry, &mut access)
+            .map_err(|reason| DeviceError::Refused(reason.into()))?;
+        let reset = reset_reason(&access);
+        let settlement = self.settle(cpu, now, reset);
+        Ok(Some(ConsumedPair { values, settlement }))
+    }
+
     fn write(
         &mut self,
         cpu: usize,
@@ -3016,7 +3061,11 @@ impl Devices for AppleDevices {
 
     fn memory_lock(&self) -> Option<(u64, u64)> {
         let device = self.memory_controller?;
-        self.bus.device::<Amcc>(device)?.locked_region()
+        if let Some(owner) = self.bus.device::<memory_resources::Prepared>(device) {
+            owner.locked_region()
+        } else {
+            self.bus.device::<Amcc>(device)?.locked_region()
+        }
     }
 
     fn dma_deadline(&self) -> Option<u64> {

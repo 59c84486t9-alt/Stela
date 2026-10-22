@@ -90,6 +90,23 @@ impl Prepared {
     fn ptd_offset(&self) -> u64 {
         self.descriptor.apertures.len() as u64 * mcc::APERTURE_BYTES
     }
+    /// A pair is consuming only at a complete publication entry. The update
+    /// alias, scalar halves and unknown tail retain their own MMIO semantics.
+    pub(super) fn paired_entry(&self, offset: u64, bytes: u8) -> Option<u32> {
+        let offset = offset.checked_sub(self.ptd_offset())?;
+        (bytes == 8 && offset.is_multiple_of(16))
+            .then_some(offset / 16)
+            .filter(|&entry| entry < self.descriptor.ptd_entries as u64)
+            .and_then(|entry| u32::try_from(entry).ok())
+    }
+    pub(super) fn consume_entry(
+        &self,
+        entry: u32,
+        access: &mut Access<'_>,
+    ) -> Result<[u64; 2], &'static str> {
+        let entry = self.ptd.consume_entry(entry, access)?;
+        Ok([entry.value, entry.metadata])
+    }
 }
 impl Lifecycle for Prepared {
     fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
@@ -558,5 +575,82 @@ mod tests {
             }
         }
         assert_eq!(owner.locked_region(), Some((0x800004000, 0x800007fff)));
+    }
+
+    #[test]
+    fn paired_read_consumes_only_the_actual_complete_publication_entry() {
+        use crate::machine::Devices;
+        let owner = prepared();
+        let offset = owner.ptd_offset();
+        assert_eq!(owner.paired_entry(offset, 8), Some(0));
+        assert_eq!(owner.paired_entry(offset + 383 * 16, 8), Some(383));
+        for (offset, bytes) in [
+            (offset, 4),
+            (offset + 8, 8),
+            (offset + 384 * 16, 8),
+            (offset + ptd::UPDATE_OFFSET, 8),
+            (0, 8),
+        ] {
+            assert_eq!(owner.paired_entry(offset, bytes), None);
+        }
+        let publication = owner.publication_bank().clone();
+        let bindings = owner.bindings();
+        let mut board = super::super::AppleDevices::new();
+        let id = board.bus.install(Box::new(owner), &bindings).unwrap();
+        board.memory_controller = Some(id);
+        let mut access = Access::new(0, 17, &mut board.latch);
+        board
+            .bus
+            .write(0x28e3d0000, Width::Double, 0x1234, &mut access)
+            .unwrap();
+        // Probing an unrelated width/half must not consume or settle anything.
+        assert_eq!(board.read_pair(0, 0x28e3c0000, 4, 17), Ok(None));
+        assert_eq!(board.read_pair(0, 0x28e3c0008, 8, 17), Ok(None));
+        let pair = board.read_pair(0, 0x28e3c0000, 8, 17).unwrap().unwrap();
+        assert_eq!(pair.values[0], 0x1234);
+        assert!(pair.values[1] & 2 != 0);
+        assert_eq!(pair.settlement, Ok(()));
+        let mut access = Access::new(0, 17, &mut board.latch);
+        let consumed = publication.consume_entry(0, &mut access).unwrap();
+        assert_eq!(consumed.value, 0x1234);
+        assert_eq!(consumed.metadata & 3, 0);
+        // CPU and DMA callers query the very same prepared lock owner.
+        board
+            .bus
+            .write(0x200000688, Width::Word, 1, &mut access)
+            .unwrap();
+        assert_eq!(board.memory_lock(), Some((0x800004000, 0x800007fff)));
+    }
+
+    #[test]
+    fn paired_read_keeps_data_and_pending_service_after_wire_forwarding_refusal() {
+        use crate::{
+            machine::Devices,
+            platform::apple::interrupt::{AicInput, InterruptSink},
+        };
+        let owner = prepared();
+        let publication = owner.publication_bank().clone();
+        let bindings = owner.bindings();
+        let mut board = super::super::AppleDevices::new();
+        board.bus.install(Box::new(owner), &bindings).unwrap();
+        let mut access = Access::new(0, 17, &mut board.latch);
+        board
+            .bus
+            .write(0x28e3d0000, Width::Double, 0x5678, &mut access)
+            .unwrap();
+        // This genuinely queued wire has no AIC receiver. Its failed
+        // forwarding follows consumption and must not erase the read result.
+        board.latch.set_level(Wire::Aic(AicInput::new(0, 3)), true);
+        let pair = board.read_pair(0, 0x28e3c0000, 8, 17).unwrap().unwrap();
+        assert_eq!(pair.values[0], 0x5678);
+        assert!(pair.values[1] & 2 != 0);
+        assert!(pair.settlement.is_err());
+        assert_eq!(board.pending_service().unwrap().committed(), 0);
+        assert_eq!(board.pending_service().unwrap().inputs().len(), 1);
+        let mut access = Access::new(0, 17, &mut board.latch);
+        assert_eq!(
+            publication.consume_entry(0, &mut access).unwrap().metadata & 3,
+            0
+        );
     }
 }
