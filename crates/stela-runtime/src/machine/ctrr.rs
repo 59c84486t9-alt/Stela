@@ -31,9 +31,10 @@
 //! group at boot). The model has region A only: `A_PXN` is taken to forbid
 //! privileged execution outside the region (the KTRR behavior CTRR
 //! succeeds, Siguza "KTRR"; inference), and the B and UXN bits, which no
-//! component sets, refuse. The fault hardware reports is not modeled, so the
-//! walker stops on any such access instead of faulting
-//! (`mmu::Unsupported::Ctrr`); changes after the lock stop as well.
+//! component sets, refuse. A forbidden store or privileged fetch takes a
+//! level-3 Permission fault, as XNU xnu-12377.121.6 `platform_tests.c`'s
+//! `ctrr_test_ro_fault_handler` and `ctrr_test_nx_fault_handler` require.
+//! Changes to the configuration after its lock still refuse.
 //!
 //! # M4 and later: CTRR-C/D and CTXR-A..D (XNU `HAS_CTRR3`)
 //!

@@ -1493,6 +1493,221 @@ mod tests {
     };
     use stela_compiler::aarch64::system::registers::Encoding;
 
+    /// Configure an unlocked authored CTRR region through the existing
+    /// generation's register bank. This is not an original-image SMP test.
+    fn test_ctrr_region(
+        machine: &mut TestMachine,
+        el: u8,
+        first: u64,
+        last: u64,
+        enabled: bool,
+        execute_inside_only: bool,
+    ) {
+        use crate::machine::ctrr::{self, Field, Generation, Region};
+        match ctrr::generation(machine.profile.chip) {
+            Generation::A => {
+                let mut cluster = machine.cpu.ctrr.borrow_mut();
+                let level = usize::from(el == 2);
+                cluster.write(level, Field::Lower, first).unwrap();
+                cluster.write(level, Field::Upper, last).unwrap();
+                let control = if !enabled {
+                    0
+                } else if execute_inside_only {
+                    ctrr::EXECUTE_INSIDE_ONLY
+                } else {
+                    ctrr::WRITE_PROTECT_MMU_OFF | ctrr::WRITE_PROTECT_MMU_ON
+                };
+                cluster.write(level, Field::Control, control).unwrap();
+            }
+            Generation::Ctrr3 => {
+                assert!(
+                    !execute_inside_only,
+                    "CTXR execution fields remain unqualified"
+                );
+                let bank = if el == 2 {
+                    &mut machine.cpu.ctrr_core.el2
+                } else {
+                    &mut machine.cpu.ctrr_core.el1
+                };
+                bank.write(Region::CtrrC, Field::Lower, first).unwrap();
+                bank.write(Region::CtrrC, Field::Upper, last).unwrap();
+                bank.write(
+                    Region::CtrrC,
+                    Field::Control,
+                    if enabled { ctrr::CTRR_ENABLE } else { 0 },
+                )
+                .unwrap();
+            }
+        }
+        machine.translations_changed();
+    }
+
+    /// The alias keeps the original fault VA visibly different from the
+    /// final protected PA. Both regimes use the fixture's 1 GiB block.
+    fn test_ctrr_alias(machine: &mut TestMachine) -> u64 {
+        const ALIAS: u64 = BASE + (1 << 30);
+        normal_memory(machine, false);
+        let slot = 0xf000 + ((ALIAS >> 30) as usize) * 8;
+        let block = BASE | 1 << 10 | 3 << 8 | 1;
+        machine.host.ram[slot..slot + 8].copy_from_slice(&block.to_le_bytes());
+        machine.translations_changed();
+        ALIAS
+    }
+
+    #[test]
+    fn ctrr_store_faults_keep_virtual_far_registers_and_memory_then_allow_retry() {
+        const LDTR_X3_X2: u32 = 0xf840_0843;
+        const STTR_X1_X2: u32 = 0xf800_0841;
+        const AT_S1E1W_X2: u32 = 0xd508_7822;
+        const ERET: u32 = 0xd69f_03e0;
+        const DATA_OFFSET: usize = 0x2080;
+        const INITIAL: u64 = 0x0bad_f00d_0123_4567;
+        const STORED: u64 = 0x7654_3210_5566_7788;
+        for chip in Chip::ALL {
+            for el in [1, 2] {
+                for strict in [false, true] {
+                    let mut machine = machine_on(chip, &[]);
+                    machine.set_strict(strict);
+                    machine.cpu.set_pstate(Pstate {
+                        uao: true,
+                        ..Pstate::reset(el)
+                    });
+                    machine.cpu.registers.set(
+                        Register::HCR_EL2,
+                        0,
+                        if el == 2 { 1 << 34 } else { 0 },
+                    );
+                    let alias = test_ctrr_alias(&mut machine);
+                    let (vbar, esr, far, elr, spsr) = if el == 2 {
+                        (
+                            Register::VBAR_EL2,
+                            Register::ESR_EL2,
+                            Register::FAR_EL2,
+                            Register::ELR_EL2,
+                            Register::SPSR_EL2,
+                        )
+                    } else {
+                        (
+                            Register::VBAR_EL1,
+                            Register::ESR_EL1,
+                            Register::FAR_EL1,
+                            Register::ELR_EL1,
+                            Register::SPSR_EL1,
+                        )
+                    };
+                    machine.cpu.registers.set(vbar, 0, 0x1_0000);
+                    machine.host.ram[DATA_OFFSET..DATA_OFFSET + 8]
+                        .copy_from_slice(&INITIAL.to_le_bytes());
+                    machine.cpu.state.x[1] = STORED;
+                    machine.cpu.state.x[2] = alias + DATA_OFFSET as u64;
+                    machine.cpu.state.x[8] = 0x55aa;
+                    machine.cpu.state.sp = BASE + 0x8000;
+                    machine.cpu.state.nzcv = 0xa000_0000;
+                    test_ctrr_region(&mut machine, el, BASE + 0x2000, BASE + 0x2fff, true, false);
+                    // Ordinary reads remain allowed, and AT ignores CTRR's
+                    // subsequent physical access restriction.
+                    machine.system_instruction(LDTR_X3_X2).unwrap();
+                    assert_eq!(machine.cpu.state.x[3], INITIAL, "{chip:?} EL{el}");
+                    if el == 1 {
+                        machine.system_instruction(AT_S1E1W_X2).unwrap();
+                        let par = machine.cpu.read(Register::PAR_EL1);
+                        assert_eq!(par & 1, 0);
+                        assert_eq!(par & 0x0000_ffff_ffff_f000, BASE + 0x2000);
+                    }
+                    let pc = machine.cpu.pc;
+                    let before = machine.cpu.state.clone();
+                    let pstate = machine.cpu.pstate;
+                    let ram = machine.host.ram.clone();
+                    machine.system_instruction(STTR_X1_X2).unwrap();
+                    assert_eq!(machine.cpu.pc, 0x1_0200, "{chip:?} EL{el}");
+                    assert_eq!(machine.cpu.read(esr), 0x9600_004f, "{chip:?} EL{el}");
+                    assert_eq!(machine.cpu.read(far), alias + DATA_OFFSET as u64);
+                    assert_eq!(machine.cpu.read(elr), pc);
+                    assert_eq!(machine.cpu.read(spsr) & 0xf000_0000, u64::from(before.nzcv));
+                    assert_eq!(machine.cpu.state, before);
+                    assert_eq!(machine.host.ram, ram, "forbidden store changed RAM");
+                    assert!(machine.take_unmodeled().is_empty());
+                    // ERET restores the precise faulting context. Removing
+                    // the protection permits the same instruction to retry.
+                    test_ctrr_region(&mut machine, el, BASE + 0x2000, BASE + 0x2fff, false, false);
+                    machine.system_instruction(ERET).unwrap();
+                    assert_eq!((machine.cpu.pc, machine.cpu.pstate), (pc, pstate));
+                    assert_eq!(machine.cpu.state, before);
+                    machine.system_instruction(STTR_X1_X2).unwrap();
+                    assert_eq!(machine.cpu.pc, pc + 4);
+                    assert_eq!(
+                        machine.host.ram[DATA_OFFSET..DATA_OFFSET + 8],
+                        STORED.to_le_bytes()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ctrr_fetch_faults_report_instruction_permission_and_preserve_faulting_state() {
+        const NOP: u32 = 0xd503_201f;
+        const ERET: u32 = 0xd69f_03e0;
+        // Only legacy CTRR's execution rule is established. M4+ CTXR
+        // execution-context fields remain an explicit separate limitation.
+        for chip in [Chip::AppleM1, Chip::AppleM2, Chip::AppleM3] {
+            for el in [1, 2] {
+                for strict in [false, true] {
+                    let mut machine = machine_on(chip, &[NOP]);
+                    machine.set_strict(strict);
+                    machine.cpu.set_pstate(Pstate::reset(el));
+                    machine.cpu.registers.set(
+                        Register::HCR_EL2,
+                        0,
+                        if el == 2 { 1 << 34 } else { 0 },
+                    );
+                    let alias = test_ctrr_alias(&mut machine);
+                    let (vbar, esr, far, elr) = if el == 2 {
+                        (
+                            Register::VBAR_EL2,
+                            Register::ESR_EL2,
+                            Register::FAR_EL2,
+                            Register::ELR_EL2,
+                        )
+                    } else {
+                        (
+                            Register::VBAR_EL1,
+                            Register::ESR_EL1,
+                            Register::FAR_EL1,
+                            Register::ELR_EL1,
+                        )
+                    };
+                    machine.cpu.registers.set(vbar, 0, 0x1_0000);
+                    machine.cpu.pc = alias;
+                    machine.cpu.state.x[4] = 0x1234;
+                    machine.cpu.state.sp = BASE + 0x8000;
+                    machine.cpu.state.nzcv = 0x6000_0000;
+                    test_ctrr_region(&mut machine, el, BASE + 0x2000, BASE + 0x2fff, true, true);
+                    let before = machine.cpu.state.clone();
+                    let pstate = machine.cpu.pstate;
+                    let ram = machine.host.ram.clone();
+                    machine.step().unwrap();
+                    assert_eq!(machine.cpu.pc, 0x1_0200);
+                    assert_eq!(machine.cpu.read(esr), 0x8600_000f);
+                    assert_eq!(machine.cpu.read(far), alias);
+                    assert_eq!(machine.cpu.read(elr), alias);
+                    assert_eq!(machine.cpu.state, before);
+                    assert_eq!(machine.host.ram, ram);
+                    assert!(
+                        machine.host.installed.is_empty(),
+                        "forbidden fetch compiled code"
+                    );
+                    assert!(machine.take_unmodeled().is_empty());
+                    test_ctrr_region(&mut machine, el, BASE + 0x2000, BASE + 0x2fff, false, true);
+                    machine.system_instruction(ERET).unwrap();
+                    assert_eq!((machine.cpu.pc, machine.cpu.pstate), (alias, pstate));
+                    assert_eq!(machine.cpu.state, before);
+                    assert_eq!(machine.fetch_physical(alias), Ok(BASE));
+                }
+            }
+        }
+    }
+
     #[test]
     fn core_monitor_construction_needs_a_qualified_layout_and_an_explicit_pe_clock() {
         use crate::machine::{Identity, pmu};

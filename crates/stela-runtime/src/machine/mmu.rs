@@ -91,6 +91,10 @@ pub struct CtrrRegion {
 /// The smallest page a CTRR decision covers: a translation whose block
 /// straddles a region boundary is narrowed to it.
 const CTRR_PAGE: u64 = 1 << 12;
+/// XNU xnu-12377.121.6 `osfmk/arm64/platform_tests.c`'s
+/// `ctrr_test_ro_fault_handler` and `ctrr_test_nx_fault_handler` require
+/// FSC_PERMISSION_FAULT_L3, independently of the translation leaf size.
+const CTRR_FAULT_LEVEL: i8 = 3;
 
 fn overlaps(base: u64, bytes: u64, (first, last): (u64, u64)) -> bool {
     base <= last && first <= base + (bytes - 1)
@@ -101,9 +105,10 @@ fn within(base: u64, bytes: u64, (first, last): (u64, u64)) -> bool {
 }
 
 impl Ctrr {
-    /// `translation` limited for `requester`: an access CTRR forbids stops,
-    /// because the fault hardware reports is not documented, and the
-    /// rights CTRR removes are cleared so that a later access walks again.
+    /// Apply physical CTRR protection after successful translation. A denied
+    /// store or privileged fetch reports the level-3 Permission fault XNU
+    /// expects; the caller retains the original virtual fault address. Clear
+    /// removed rights so a cached allowed read cannot admit a later store.
     fn limit(&self, mut translation: Translation, access: Access, requester: Requester) -> Outcome {
         let privileged = self
             .privileged
@@ -120,33 +125,33 @@ impl Ctrr {
             }
         }
         let base = translation.physical & !(translation.size - 1);
-        let mut write = None;
-        let mut execute = None;
+        let mut write = false;
+        let mut execute = false;
         if self
             .memory
             .into_iter()
             .flatten()
             .any(|region| overlaps(base, translation.size, region))
         {
-            write = Some("write into the memory controller's locked CTRR region");
+            write = true;
         }
         for region in privileged.into_iter().flatten() {
             let bounds = (region.first, region.last);
             if region.write_protect && overlaps(base, translation.size, bounds) {
-                write = Some("write into the CTRR-protected region");
+                write = true;
             }
             if region.execute_inside_only && !within(base, translation.size, bounds) {
-                execute = Some("privileged execution outside the CTRR region");
+                execute = true;
             }
         }
-        match (access, write, execute) {
-            (Access::Write, Some(reason), _) | (Access::Execute, _, Some(reason)) => {
-                return Outcome::Unsupported(Unsupported::Ctrr(reason));
-            }
-            _ => {}
+        if matches!(
+            (access, write, execute),
+            (Access::Write, true, _) | (Access::Execute, _, true)
+        ) {
+            return Outcome::Fault(Fault::stage1(FaultKind::Permission, CTRR_FAULT_LEVEL));
         }
-        translation.writable &= write.is_none();
-        translation.executable &= execute.is_none();
+        translation.writable &= !write;
+        translation.executable &= !execute;
         translation.guarded &= translation.executable;
         Outcome::Mapped(translation)
     }
@@ -441,9 +446,6 @@ pub enum Unsupported {
     /// A stage-2 MemAttr field with a reserved encoding: the resulting
     /// attributes are CONSTRAINED UNPREDICTABLE.
     Stage2Attributes { field: u8 },
-    /// An access Apple's CTRR forbids: the fault hardware reports is not
-    /// documented.
-    Ctrr(&'static str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -756,6 +758,104 @@ mod tests {
             Some(1 << 11 | 1 << 9 | 1 << 8 | 0b00_0110 << 1 | 1)
         );
         assert_eq!(par(&Outcome::Unsupported(Unsupported::Stage2)), None);
+    }
+
+    #[test]
+    fn ctrr_permission_faults_preserve_allowed_reads_at_and_physical_boundaries() {
+        let protected = (0x8000_4000, 0x8000_4fff);
+        let mut controls = Controls {
+            ctrr: Ctrr {
+                privileged: [
+                    Some(CtrrRegion {
+                        first: protected.0,
+                        last: protected.1,
+                        write_protect: true,
+                        execute_inside_only: true,
+                    }),
+                    None,
+                ],
+                memory: [None; 4],
+            },
+            ..Controls::default()
+        };
+        let mut tables = Tables::default();
+        let permission = Outcome::Fault(Fault::stage1(FaultKind::Permission, 3));
+        assert_eq!(
+            translate(&controls, protected.0, Access::Write, KERNEL, &mut tables),
+            permission
+        );
+        assert_eq!(
+            translate(
+                &controls,
+                protected.1 + 1,
+                Access::Execute,
+                KERNEL,
+                &mut tables
+            ),
+            permission
+        );
+        let Outcome::Mapped(read) =
+            translate(&controls, protected.0, Access::Read, KERNEL, &mut tables)
+        else {
+            panic!("CTRR must permit reads");
+        };
+        assert!(!read.writable && read.executable);
+        for (address, access) in [
+            (protected.0 - 1, Access::Write),
+            (protected.1 + 1, Access::Write),
+            (protected.0, Access::Execute),
+        ] {
+            assert!(matches!(
+                translate(&controls, address, access, KERNEL, &mut tables),
+                Outcome::Mapped(_)
+            ));
+        }
+        // AT reports the translation tables, not the subsequent physical
+        // core protection. Core CTRR does not restrict an EL0 requester.
+        assert!(matches!(
+            translate_tables(&controls, protected.0, Access::Write, KERNEL, &mut tables),
+            Outcome::Mapped(_)
+        ));
+        let user = Requester { el: 0, ..KERNEL };
+        assert!(matches!(
+            translate(&controls, protected.0, Access::Write, user, &mut tables),
+            Outcome::Mapped(_)
+        ));
+        // Memory-controller locks bind writes from EL0 as well.
+        controls.ctrr.privileged = [None; 2];
+        controls.ctrr.memory[0] = Some(protected);
+        assert_eq!(
+            translate(&controls, protected.0, Access::Write, user, &mut tables),
+            permission
+        );
+        assert!(matches!(
+            translate(&controls, protected.0, Access::Read, user, &mut tables),
+            Outcome::Mapped(_)
+        ));
+    }
+
+    #[test]
+    fn ctrr_checks_the_final_pa_and_does_not_report_a_stage_two_walk_fault() {
+        let (mut controls, mut tables) = two_stages(0x4000_0000);
+        controls.ctrr.memory[0] = Some((0x8000_4000, 0x8000_4fff));
+        let address = 0x4008;
+        let Outcome::Fault(fault) =
+            translate(&controls, address, Access::Write, KERNEL, &mut tables)
+        else {
+            panic!("the final physical CTRR region must deny the store");
+        };
+        assert_eq!((fault.kind, fault.level), (FaultKind::Permission, 3));
+        assert_eq!(fault.data_syndrome(true, false), 0x4f);
+        assert_eq!(fault.instruction_syndrome(), 0x0f);
+        assert!(!fault.to_el2());
+        assert_eq!(fault.hpfar(), None);
+        assert!(matches!(
+            translate_tables(&controls, address, Access::Write, KERNEL, &mut tables),
+            Outcome::Mapped(Translation {
+                physical: 0x8000_4008,
+                ..
+            })
+        ));
     }
 
     #[derive(Default)]
