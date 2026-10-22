@@ -54,6 +54,7 @@ pub mod recovery;
 pub mod root_selection;
 #[cfg(feature = "std")]
 pub mod shared_cache;
+pub mod soc_variant;
 mod thread_state;
 pub mod trust_cache;
 pub mod upgrade;

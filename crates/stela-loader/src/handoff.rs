@@ -164,7 +164,8 @@ fn platform_name(
 /// `/cpus max_cpus`, `e-core-count` and `p-core-count` (iBoot 0x39718..
 /// 0x39774): the SoC's CPU count and each cluster's enabled cores. Every
 /// template CPU is enabled on the emulated chip, so the counts are the
-/// template's CPU nodes by `cluster-type`.
+/// template's CPU nodes by `cluster-type`. A SoC whose own pass already
+/// counted its cores (the T6050's, [`crate::soc_variant`]) keeps its rows.
 fn core_counts(
     tree: &mut DeviceTree,
     decisions: &mut Vec<Decision>,
@@ -173,6 +174,9 @@ fn core_counts(
     let Some(cpus) = tree.node(CPUS) else {
         return Ok(());
     };
+    if cpus.property("max_cpus").is_some() {
+        return Ok(());
+    }
     let (mut total, mut efficiency, mut performance) = (0u32, 0u32, 0u32);
     for cpu in cpus
         .children
@@ -382,13 +386,10 @@ pub fn apply(tree: &mut DeviceTree, chip_id: Option<u32>) -> Result<(Vec<Decisio
 
 /// The template's variant groups: a root `:<group>` node whose `option`
 /// lists variants, each with `:<group>_<variant>_<n>` overlay nodes beside
-/// the properties they override (J700AP's `:j700`, `has_mesa|no_mesa`; the
-/// T6050 boards' `:sotra`, `h17s|h17c|h17cr1|h17cr2|h17d`, whose
-/// `/product` overlays name the SoC). iBoot picks the variant from the chip:
-/// each board's iBoot carries every option of its group (26A434
-/// `iBoot.j714s` and `iBoot.j714c` alike list all five `:sotra` variants).
-/// Which variant the emulated chip is and how iBoot merges an overlay are
-/// not established, so the overlays stay unapplied, reported.
+/// the properties they extend. The T6050 boards' `:sotra` group is merged
+/// by its fused variant before this pass ([`crate::soc_variant`]). Another
+/// group, J700AP's `:j700` (`has_mesa|no_mesa`), names a choice no fuse
+/// model here makes, so its overlays stay unapplied, reported.
 fn template_groups(tree: &DeviceTree) -> Vec<String> {
     let Some(root) = tree.node(ROOT) else {
         return vec![];

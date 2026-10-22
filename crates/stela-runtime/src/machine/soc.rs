@@ -13,8 +13,8 @@
 //! the `machine::Chip` whose CPU profile its cores take; the A18 Pro takes
 //! the M4's (its row gives the evidence). A SoC, cluster type or affinity
 //! without that evidence refuses: the T6050's M cores, whose caches no
-//! source gives, the M6's M cores, and a T6050 DeviceTree whose template
-//! still leaves `product-soc-name` to iBoot.
+//! source gives, the M6's M cores, and a T6050 template whose fused variant
+//! is not merged yet (the boot bundle merges it, `stela_loader::soc_variant`).
 use super::{
     Chip,
     adt::Node,
@@ -501,8 +501,9 @@ const M3_MAX: Soc = Soc {
 /// (T6050). Their DeviceTrees are one template listing both dies' CPUs
 /// (`reg` 0x0 to 0x1205, clusters 0, 1, 2 and 16, 17, 18), without
 /// `product-soc-name`; iBoot picks a `/:sotra` variant (`h17s`, `h17c`,
-/// `h17cr1`, `h17cr2` or `h17d`) and the `/product/:sotra_<variant>_<n>`
-/// overlay names the SoC: Apple M5 Pro for `h17s`, Apple M5 Max for the
+/// `h17cr1`, `h17cr2` or `h17d`) from its fuses, as the boot bundle does
+/// from the board's (`stela_loader::soc_variant`), and the
+/// `/product/:sotra_<variant>_<n>` overlay names the SoC: Apple M5 Pro for `h17s`, Apple M5 Max for the
 /// three `h17c` variants and Apple M5 Ultra for `h17d`. The Pro has the
 /// Sotra S parts and the Max the Sotra C parts; the Ultra's two dies are
 /// inferred to be Max dies, as on the earlier Ultras, since XNU gives the

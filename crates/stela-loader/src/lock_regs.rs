@@ -354,6 +354,60 @@ const T6000_IOA: MemoryController = MemoryController {
 /// The M5 and M6 AMCC: one aperture.
 const M5_AMCC: MemoryController = amcc(&[0x2_2000_0000], 0x14_0000, 4, bit(0x82c), &T6040_AMCC);
 
+/// A T6050 AMCC: one aperture per enabled MCC.
+const fn t6050_amcc(apertures: &'static [u64]) -> MemoryController {
+    amcc(apertures, 0x14_0000, 4, bit(0x82c), &T6040_AMCC)
+}
+
+/// The unbinned Max's AMCC, and one die's IOA.
+const T6050_MAX: MemoryController = t6050_amcc(&[
+    0x22_2000_0000,
+    0x22_2200_0000,
+    0x22_2400_0000,
+    0x22_2600_0000,
+    0x22_2800_0000,
+    0x22_2a00_0000,
+    0x22_2c00_0000,
+    0x22_2e00_0000,
+]);
+const T6050_IOA: MemoryController = ioa(
+    &[
+        0x2_a002_0000,
+        0x2_a802_0000,
+        0x3_8002_0000,
+        0x3_8802_0000,
+        0x4_1602_0000,
+        0x4_8602_0000,
+    ],
+    0x1_0000,
+    &M4_IOA,
+);
+
+/// The T6050's maps by the `/:sotra` variant its fuses select
+/// ([`crate::soc_variant`]). Builder `iBoot.j714s` `0x3cdc8` places an AMCC
+/// aperture at `0x22_2000_0000 + 0x200_0000 * n` for each MCC `n` the MCC
+/// bring-up (`0x7b81c`) enabled, and six IOA apertures per die; the second
+/// die's are `0x40_0000_0000` above the first's (die index shifted to bit
+/// 38). Emulating the builder with each variant's fuses gives these lists.
+#[rustfmt::skip]
+pub const T6050_VARIANTS: [(&str, MemoryController, MemoryController); 5] = [
+    ("h17s", t6050_amcc(&[0x22_2000_0000, 0x22_2200_0000, 0x22_2400_0000, 0x22_2600_0000]), T6050_IOA),
+    ("h17c", T6050_MAX, T6050_IOA),
+    ("h17cr1", t6050_amcc(&[0x22_2000_0000, 0x22_2200_0000, 0x22_2400_0000, 0x22_2600_0000, 0x22_2800_0000, 0x22_2a00_0000]), T6050_IOA),
+    ("h17cr2", t6050_amcc(&[0x22_2000_0000, 0x22_2200_0000, 0x22_2800_0000, 0x22_2a00_0000, 0x22_2c00_0000, 0x22_2e00_0000]), T6050_IOA),
+    (
+        "h17d",
+        t6050_amcc(&[
+            0x22_2000_0000, 0x22_2200_0000, 0x22_2400_0000, 0x22_2600_0000, 0x22_2800_0000, 0x22_2a00_0000, 0x22_2c00_0000, 0x22_2e00_0000,
+            0x62_2000_0000, 0x62_2200_0000, 0x62_2400_0000, 0x62_2600_0000, 0x62_2800_0000, 0x62_2a00_0000, 0x62_2c00_0000, 0x62_2e00_0000,
+        ]),
+        ioa(&[
+            0x2_a002_0000, 0x2_a802_0000, 0x3_8002_0000, 0x3_8802_0000, 0x4_1602_0000, 0x4_8602_0000,
+            0x42_a002_0000, 0x42_a802_0000, 0x43_8002_0000, 0x43_8802_0000, 0x44_1602_0000, 0x44_8602_0000,
+        ], 0x1_0000, &M4_IOA),
+    ),
+];
+
 /// The SoCs one iBoot lock-register description covers.
 pub struct Family {
     pub chips: &'static [u32],
@@ -457,11 +511,7 @@ pub const FAMILIES: [Family; 20] = [
         amcc: M5_AMCC,
         ioa: Some(ioa(&[0x4_0002_0000, 0x4_0802_0000, 0x4_1002_0000, 0x4_1802_0000, 0x4_8e02_0000], 0x4000, &M4_IOA)),
     },
-    Family {
-        chips: &[0x6050],
-        amcc: amcc(&[0x22_2000_0000, 0x22_2200_0000, 0x22_2400_0000, 0x22_2600_0000, 0x22_2800_0000, 0x22_2a00_0000, 0x22_2c00_0000, 0x22_2e00_0000], 0x14_0000, 4, bit(0x82c), &T6040_AMCC),
-        ioa: Some(ioa(&[0x2_a002_0000, 0x2_a802_0000, 0x3_8002_0000, 0x3_8802_0000, 0x4_1602_0000, 0x4_8602_0000], 0x1_0000, &M4_IOA)),
-    },
+    Family { chips: &[0x6050], amcc: T6050_MAX, ioa: Some(T6050_IOA) },
     Family {
         chips: &[0x8152],
         amcc: M5_AMCC,
@@ -475,15 +525,33 @@ fn family(chip_id: u32) -> Option<&'static Family> {
         .find(|family| family.chips.contains(&chip_id))
 }
 
-/// iBoot's AMCC map for the SoC with `chip_id`; `None` for a SoC whose
-/// iBoot has not been read.
-pub fn table(chip_id: u32) -> Option<&'static MemoryController> {
-    family(chip_id).map(|family| &family.amcc)
+/// The maps of a SoC whose iBoot sizes them by the fused `variant`
+/// ([`crate::soc_variant`]).
+fn variant(
+    chip_id: u32,
+    variant: Option<&str>,
+) -> Option<&'static (&'static str, MemoryController, MemoryController)> {
+    (chip_id == crate::soc_variant::CHIP_ID)
+        .then(|| T6050_VARIANTS.iter().find(|row| Some(row.0) == variant))
+        .flatten()
 }
 
-/// iBoot's IOA map for the SoC with `chip_id`, which never reuses the AMCC's.
-pub fn ioa_table(chip_id: u32) -> Option<&'static MemoryController> {
-    family(chip_id)?.ioa.as_ref()
+/// iBoot's AMCC map for the SoC with `chip_id` and, where its fuses size
+/// it, `fused` variant; `None` for a SoC whose iBoot has not been read.
+pub fn table(chip_id: u32, fused: Option<&str>) -> Option<&'static MemoryController> {
+    match variant(chip_id, fused) {
+        Some((_, amcc, _)) => Some(amcc),
+        None => family(chip_id).map(|family| &family.amcc),
+    }
+}
+
+/// iBoot's IOA map for the SoC with `chip_id` and `fused` variant, which
+/// never reuses the AMCC's.
+pub fn ioa_table(chip_id: u32, fused: Option<&str>) -> Option<&'static MemoryController> {
+    match variant(chip_id, fused) {
+        Some((_, _, ioa)) => Some(ioa),
+        None => family(chip_id)?.ioa.as_ref(),
+    }
 }
 
 fn u32_value(value: u32) -> Vec<u8> {
@@ -695,7 +763,7 @@ pub fn core_handoff(
 
 /// What the bundle leaves out of iBoot's lock-register setup.
 pub fn gaps(chip_id: Option<u32>) -> Vec<String> {
-    match chip_id.and_then(table) {
+    match chip_id.and_then(|chip| table(chip, None)) {
         Some(_) => Vec::new(),
         None => alloc::vec![format!(
             "{AMCC}: no iBoot AMCC map for this SoC; SPTM's CTRR lockdown cannot find it"
@@ -768,8 +836,8 @@ pub(crate) mod tests {
     #[test]
     fn publishes_original_t6000_amcc_and_ioa_without_invented_registers() -> Result<()> {
         let mut tree = chosen(true)?;
-        let amcc = table(0x6000).unwrap();
-        let ioa = ioa_table(0x6000).unwrap();
+        let amcc = table(0x6000, None).unwrap();
+        let ioa = ioa_table(0x6000, None).unwrap();
         // Re-publication must remove T8112-only fields, not retain a fake 7f0.
         publish(&mut tree, &T8112)?;
         publish(&mut tree, amcc)?;
@@ -894,7 +962,7 @@ pub(crate) mod tests {
         for family in &crate::carveouts::FAMILIES {
             for &chip in family.chips {
                 assert!(
-                    table(chip).is_some() && gaps(Some(chip)).is_empty(),
+                    table(chip, None).is_some() && gaps(Some(chip)).is_empty(),
                     "{chip:#x}"
                 );
             }
@@ -929,14 +997,14 @@ pub(crate) mod tests {
                 }
             }
         }
-        assert!(ioa_table(0x8112).is_none() && ioa_table(0x8103).is_none());
+        assert!(ioa_table(0x8112, None).is_none() && ioa_table(0x8103, None).is_none());
         for chip in [0x8101, 0xdead] {
-            assert!(table(chip).is_none());
-            assert!(ioa_table(chip).is_none());
+            assert!(table(chip, None).is_none());
+            assert!(ioa_table(chip, None).is_none());
             assert_eq!(gaps(Some(chip)).len(), 1);
         }
         let region = ctrr_a(
-            table(0x6000).unwrap(),
+            table(0x6000, None).unwrap(),
             0x8_0000_0000,
             0x8_0200_0000,
             0x8_0779_0000,
@@ -948,6 +1016,45 @@ pub(crate) mod tests {
         );
     }
 
+    /// Each T6050 variant's maps are the builder's for its fused MCCs and
+    /// dies; without a variant the family row is the unbinned Max's.
+    #[test]
+    fn t6050_maps_follow_the_fused_mccs_and_dies() {
+        use crate::soc_variant::{self, CHIP_ID, Fuses};
+        let max = soc_variant::fuses(CHIP_ID, 0x0a).unwrap();
+        let fuses = [
+            soc_variant::fuses(CHIP_ID, 0x08).unwrap(),
+            max,
+            Fuses {
+                disabled_mccs: 0xff00_0000,
+                ..max
+            },
+            Fuses {
+                disabled_mccs: 0xff00,
+                ..max
+            },
+            soc_variant::fuses(CHIP_ID, 0x12).unwrap(),
+        ];
+        for (fuses, (name, amcc, ioa)) in fuses.into_iter().zip(&T6050_VARIANTS) {
+            let variant = soc_variant::decode(fuses).unwrap();
+            assert_eq!(variant.name, *name);
+            let apertures: Vec<u64> = (0..u64::from(variant.dies))
+                .flat_map(|die| {
+                    (0..8u64)
+                        .filter(move |n| variant.mccs >> n & 1 != 0)
+                        .map(move |n| (die << 38) + 0x22_2000_0000 + n * 0x200_0000)
+                })
+                .collect();
+            assert_eq!(amcc.apertures, apertures);
+            assert_eq!(ioa.apertures.len(), 6 * variant.dies as usize);
+            assert_eq!(ioa.apertures[..6], T6050_IOA.apertures[..]);
+            assert_eq!(table(CHIP_ID, Some(name)), Some(amcc));
+            assert_eq!(ioa_table(CHIP_ID, Some(name)), Some(ioa));
+        }
+        assert_eq!(table(CHIP_ID, None), Some(&T6050_MAX));
+        assert_eq!(table(0x6041, Some("h17s")), table(0x6041, None));
+    }
+
     #[test]
     fn publishes_only_into_the_templates_nodes() -> Result<()> {
         let number = |tree: &DeviceTree, path: &str, name: &str| {
@@ -955,8 +1062,8 @@ pub(crate) mod tests {
         };
         // The M4 Max fills all four AMCC groups; its template has no IOA.
         let mut tree = chosen(false)?;
-        assert!(publish(&mut tree, table(0x6041).unwrap())?);
-        assert!(!publish_ioa(&mut tree, ioa_table(0x6041).unwrap())?);
+        assert!(publish(&mut tree, table(0x6041, None).unwrap())?);
+        assert!(!publish_ioa(&mut tree, ioa_table(0x6041, None).unwrap())?);
         assert!(tree.node(IOA).is_none());
         assert_eq!(number(&tree, AMCC, "aperture-count"), Some(8));
         assert_eq!(number(&tree, AMCC, "cache-status-reg-offset"), Some(0x82c));
@@ -967,8 +1074,8 @@ pub(crate) mod tests {
         assert_eq!(number(&tree, &d, "lock-reg-offset"), Some(0xadc));
         // The M2 Pro describes IOA-B and -C, which its template lacks.
         let mut tree = chosen(true)?;
-        assert!(publish(&mut tree, table(0x6020).unwrap())?);
-        assert!(publish_ioa(&mut tree, ioa_table(0x6020).unwrap())?);
+        assert!(publish(&mut tree, table(0x6020, None).unwrap())?);
+        assert!(publish_ioa(&mut tree, ioa_table(0x6020, None).unwrap())?);
         let a = format!("{IOA}/ioa-ctrr-a");
         assert_eq!(number(&tree, &a, "upper-limit-reg-mask"), Some(0x3fff_ffff));
         assert_eq!(number(&tree, &a, "write-disable-reg-offset"), Some(0x14));

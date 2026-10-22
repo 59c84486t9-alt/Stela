@@ -26,6 +26,7 @@ use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
 use crate::lock_regs::{self, Programmed};
 use crate::nvram;
 use crate::root_selection;
+use crate::soc_variant;
 use crate::trust_cache;
 use alloc::collections::BTreeMap;
 use anyhow::{Context, Result, bail, ensure};
@@ -80,7 +81,9 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// its iBoot table, and name each table's special-attribute carveouts.
 /// Revision 19: publish every SoC's iBoot AMCC and IOA lock-register maps,
 /// into the template's nodes only.
-pub const REVISION: u32 = 19;
+/// Revision 20: select the T6050 variant the board's fuses give, merge its
+/// template overlays, keep its dies' CPUs and size its lock maps by it.
+pub const REVISION: u32 = 20;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -937,6 +940,12 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     }
 
     let mut tree = DeviceTree::parse(inputs.device_tree.bytes)?;
+    // iBoot merges the fused variant's overlays as it loads the tree.
+    let (variant, variant_decisions) =
+        soc_variant::apply(&mut tree, inputs.target.chip_id, inputs.target.board_id)?
+            .map_or((None, vec![]), |(variant, decisions)| {
+                (Some(variant), decisions)
+            });
     let placeholders = resolve_placeholders(&mut tree, options)?;
     let mut unresolved = shape_device_tree(&mut tree, &inputs.target, options)?;
     let (security, policy_unresolved) = boot_policy::apply(
@@ -947,6 +956,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     )?;
     unresolved.extend(policy_unresolved);
     let mut security = security;
+    security.extend(variant_decisions);
     if let Some(root_hash) = &inputs.root_hash {
         if root_hash.volume == boot_policy::SealedVolume::BaseSystem {
             boot_policy::require_image_boot(&options.boot_args)?;
@@ -1013,7 +1023,12 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         aic::publish(&mut tree, chip_id)?;
     }
     let nvram_published = nvram::publish(&mut tree)?;
-    let memory_controller = match inputs.target.chip_id.and_then(lock_regs::table) {
+    let fused = variant.map(|variant| variant.name);
+    let memory_controller = match inputs
+        .target
+        .chip_id
+        .and_then(|chip| lock_regs::table(chip, fused))
+    {
         Some(controller) if lock_regs::publish(&mut tree, controller)? => Some(controller),
         Some(_) => {
             unresolved.push(format!(
@@ -1032,7 +1047,11 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         }
         None => None,
     };
-    if let Some(controller) = inputs.target.chip_id.and_then(lock_regs::ioa_table) {
+    if let Some(controller) = inputs
+        .target
+        .chip_id
+        .and_then(|chip| lock_regs::ioa_table(chip, fused))
+    {
         lock_regs::publish_ioa(&mut tree, controller)?;
     }
     darts::publish(&mut tree)?;

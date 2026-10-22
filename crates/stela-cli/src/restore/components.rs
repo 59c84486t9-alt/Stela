@@ -275,7 +275,8 @@ mod tests {
     /// row's PEs or refuse for a stated gap: J700AP's P cores carry only
     /// per-variant L2 sizes (the bundle resolves them,
     /// `soc::template_variant`), and the T6050 template leaves
-    /// `product-soc-name` to the variant iBoot picks. The registry's cluster
+    /// `product-soc-name` to the variant its fuses pick, which every T6050
+    /// board's profile gives (`stela_loader::soc_variant`). The registry's cluster
     /// aggregate gives each cluster its first PE's type, so J873gAP's M cores
     /// read as P here (`isa/apple-board-interfaces.json` keeps them).
     #[test]
@@ -313,6 +314,11 @@ mod tests {
                 .collect();
             let Some(name) = board["product_soc_name"].as_str() else {
                 assert_eq!(profile.chip_id, 0x6050, "{model}");
+                let fuses = stela_loader::soc_variant::fuses(profile.chip_id, profile.board_id);
+                assert!(
+                    stela_loader::soc_variant::decode(fuses.expect(model)).is_ok(),
+                    "{model}"
+                );
                 continue;
             };
             match soc::cpus(profile.chip_id, name, &processors) {
