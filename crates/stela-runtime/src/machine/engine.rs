@@ -5573,6 +5573,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
             RegisterOutcome::Refused(refusal) => {
                 return self.register_refused(word, access, refusal);
             }
+            RegisterOutcome::View(encoding) => {
+                let access = access.expect("views come from MRS and MSR");
+                return self
+                    .system_access_as(word, access, encoding)
+                    .unwrap_or_else(|| {
+                        Err(Stop::Unsupported(self.register_requirement(
+                            word,
+                            Some(access),
+                            Refusal::Unimplemented,
+                        )))
+                    });
+            }
         }
         self.next()
     }

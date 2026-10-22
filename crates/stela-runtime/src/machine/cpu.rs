@@ -140,6 +140,8 @@ pub struct AppleState {
     pub spr_locked: bool,
     /// CYC_OVRD (`registers::CYC_OVRD`), 0 from reset (inference).
     pub cyc_ovrd: u64,
+    /// The Apple generic timer's own registers (`timer::agt`).
+    pub generic_timer: super::timer::agt::State,
     /// Implementation-defined registers without architectural effect here.
     pub impdef: super::impdef::Registers,
 }
@@ -171,6 +173,7 @@ impl Default for AppleState {
             spr_lockdown: None,
             spr_locked: false,
             cyc_ovrd: 0,
+            generic_timer: super::timer::agt::State::default(),
             impdef: super::impdef::Registers::default(),
         }
     }

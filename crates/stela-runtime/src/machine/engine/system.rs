@@ -1236,9 +1236,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Execute MRS, MSR, SYS or SYSL through the generated accessor for its
     /// encoding. `None` when no architectural accessor matches.
     pub(super) fn system_access(&mut self, word: u32, access: RegisterAccess) -> Option<Step> {
+        self.system_access_as(word, access, access.encoding())
+    }
+
+    /// [`Self::system_access`] through the accessor of `encoding`, for an
+    /// Apple view of an architectural register (`registers::Outcome::View`);
+    /// a trap still reports the encoding `access` names.
+    pub(super) fn system_access_as(
+        &mut self,
+        word: u32,
+        access: RegisterAccess,
+        encoding: Encoding,
+    ) -> Option<Step> {
         let read =
             access.direction() == stela_compiler::aarch64::system::registers::Direction::Read;
-        let (accessor, index) = self.lookup.find(access.encoding(), read)?;
+        let (accessor, index) = self.lookup.find(encoding, read)?;
         let lines = self.lines();
         let now = self.now();
         let mut context = Access {
@@ -2315,6 +2327,80 @@ mod tests {
             .system_instruction(access(true, CNTVCT_EL0, 4))
             .unwrap();
         assert_eq!((machine.cpu.state.x[4], machine.cpu.pstate.el), (77, 0));
+    }
+
+    /// The M3's Apple generic timer: its registers reach the architectural
+    /// timer state with VHE redirection and the architectural traps, which
+    /// report the Apple encoding; AGTCNTRDIR is held, reporting the scaled
+    /// counter it cannot honor. The M2 has none of it.
+    #[test]
+    fn apple_generic_timer_views_the_architectural_timers_from_the_m3_on() {
+        use crate::machine::timer::{ENABLE, ISTATUS, agt};
+        let mut machine = machine_on(Chip::AppleM3, &[]);
+        machine
+            .cpu
+            .registers
+            .set(Register::HCR_EL2, 0, 1 << HCR_TGE);
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+        let run = |machine: &mut TestMachine, el, read, encoding, value| {
+            machine.cpu.set_pstate(Pstate::reset(el));
+            machine.cpu.pc = BASE;
+            machine.cpu.state.x[1] = value;
+            machine
+                .system_instruction(access(read, encoding, 1))
+                .unwrap();
+            machine.cpu.state.x[1]
+        };
+        // The kernel's timer at EL2 is the EL2 virtual timer.
+        machine.host.now = 1000;
+        run(&mut machine, 2, false, agt::AGTCNTV_TVAL_EL0, 50);
+        run(&mut machine, 2, false, agt::AGTCNTV_CTL_EL0, ENABLE);
+        assert_eq!(machine.cpu.read(Register::CNTHV_CVAL_EL2), 1050);
+        assert_eq!(machine.cpu.read(Register::CNTHV_CTL_EL2), ENABLE);
+        machine.host.now = 1050;
+        assert_eq!(
+            run(&mut machine, 2, true, agt::AGTCNTV_CTL_EL0, 0),
+            ENABLE | ISTATUS
+        );
+        assert_eq!(run(&mut machine, 2, true, agt::AGTCNTVCT_EL0, 0), 1050);
+        // KCTL names CNTHCTL_EL2 at EL2, and the EL12 and EL02 forms the
+        // EL1&0 regime's registers.
+        run(&mut machine, 2, false, agt::AGTCNTKCTL_EL1, 0xf);
+        assert_eq!(machine.cpu.read(Register::CNTHCTL_EL2) & 0xf, 0xf);
+        run(&mut machine, 2, false, agt::AGTCNTKCTL_EL12, 0x2);
+        assert_eq!(machine.cpu.read(Register::CNTKCTL_EL1) & 0xf, 0x2);
+        run(&mut machine, 2, false, agt::AGTCNTV_CTL_EL02, ENABLE);
+        assert_eq!(machine.cpu.read(Register::CNTV_CTL_EL0), ENABLE);
+        // EL0 reads of the count trap as CNTVCT_EL0's do, with the Apple
+        // encoding in the syndrome.
+        machine.cpu.registers.set(Register::CNTHCTL_EL2, 0, 0);
+        run(&mut machine, 0, true, agt::AGTCNTVCT_EL0, 0);
+        assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (2, 0x4_0400));
+        let iss = machine.cpu.read(Register::ESR_EL2) & 0x1ff_ffff;
+        assert_eq!(iss >> 10 & 0xf, 15, "CRn of the Apple encoding");
+        // AGTCNTRDIR: per regime, held; the EL12 form is EL2's alone.
+        run(&mut machine, 2, false, agt::AGTCNTRDIR_EL1, 3);
+        run(&mut machine, 2, false, agt::AGTCNTRDIR_EL12, 3);
+        assert!(machine.take_unmodeled().is_empty());
+        run(&mut machine, 2, false, agt::AGTCNTRDIR_EL1, 0);
+        assert_eq!(run(&mut machine, 2, true, agt::AGTCNTRDIR_EL1, 7), 0);
+        assert_eq!(run(&mut machine, 2, true, agt::AGTCNTRDIR_EL12, 7), 3);
+        assert_eq!(machine.take_unmodeled().len(), 1);
+        machine.cpu.registers.set(Register::HCR_EL2, 0, 0);
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        run(&mut machine, 1, true, agt::AGTCNTRDIR_EL12, 0);
+        assert_eq!(
+            (machine.cpu.pc, machine.cpu.read(Register::ESR_EL1) >> 26),
+            (0x1_0200, 0),
+            "UNDEFINED"
+        );
+        let mut m2 = machine_on(Chip::AppleM2, &[]);
+        m2.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        run(&mut m2, 1, true, agt::AGTCNTV_CTL_EL0, 0);
+        assert_eq!(
+            (m2.cpu.pc, m2.cpu.read(Register::ESR_EL1) >> 26),
+            (0x1_0200, 0)
+        );
     }
 
     #[test]

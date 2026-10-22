@@ -5,11 +5,14 @@
 //! count minus CNTVOFF_EL2; the EL2 virtual timer counts without an offset,
 //! because HCR_EL2.E2H is RES1. Apple cores signal the timers as FIQ, and
 //! VM_TMR_FIQ_ENA_EL2 gates the EL1 timers (m1n1 `cpu_regs.h`). The event
-//! streams of CNTHCTL_EL2 and CNTKCTL_EL1 set the event register.
+//! streams of CNTHCTL_EL2 and CNTKCTL_EL1 set the event register. From the
+//! M3 on, the Apple generic timer's registers are views of these ([`agt`]).
 use super::{
     cpu::{Cpu, VM_TIMER_FIQ_PHYSICAL, VM_TIMER_FIQ_VIRTUAL},
     system::Register,
 };
+
+pub mod agt;
 
 pub const ENABLE: u64 = 1;
 pub const IMASK: u64 = 2;

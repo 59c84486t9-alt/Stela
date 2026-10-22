@@ -3,8 +3,9 @@
 //! Architectural System registers and System instructions go through the
 //! generated AARCHMRS accessors (`machine::system`). This module handles the
 //! op0=3 CRn=15 space Apple uses: SPRR, GXF, the Apple PAC controls,
-//! VMSA_LOCK_EL1, the VM timer FIQ enables, AMX, the performance monitor
-//! (`machine::pmu`) and the `machine::impdef` table. Every other encoding in
+//! VMSA_LOCK_EL1, the VM timer FIQ enables, the Apple generic timer
+//! (`machine::timer::agt`), AMX, the performance monitor (`machine::pmu`)
+//! and the `machine::impdef` table. Every other encoding in
 //! that space (CRn 11 and 15) that the chip's censused components access
 //! refuses with its fields; one they never access is UNDEFINED.
 //!
@@ -24,6 +25,7 @@ use super::{
     impdef,
     pmu::Pmu,
     system::{Feature, Register},
+    timer::agt,
 };
 use alloc::vec::Vec;
 use stela_compiler::aarch64::system::registers::{Direction, Encoding, RegisterAccess};
@@ -217,6 +219,10 @@ pub enum Outcome {
     /// An SME access trap (EC 0x1D, SMTC 0) to the given EL.
     SmeTrapped(u8),
     Refused(Refusal),
+    /// A view of the architectural register at this encoding: the engine
+    /// runs its generated accessor, and a trap reports the encoding the
+    /// instruction names.
+    View(Encoding),
 }
 
 /// ISS for EC 0x18 (MSR, MRS or System instruction trap).
@@ -370,6 +376,7 @@ enum Apple {
     VmTimerFiq,
     CountAlias,
     PhysicalCountAlias,
+    GenericTimer(agt::Register),
     /// SPR_LOCKDOWN_EL2 (`false`) and `S3_4_C15_C12_5` (`true`). SPTM 26A434
     /// writes SPR_LOCKDOWN_EL2 once per PE, with every bit except 4, 27 and
     /// 63, after its MMIO lockdown (`__text+0x181a4`), then writes 1 to
@@ -429,6 +436,19 @@ impl Cpu {
                 Err(Outcome::Undefined)
             })
         };
+        if let Some(name) = agt::decode(encoding, self.registers.chip()) {
+            use agt::{Name, Register};
+            return match name {
+                Name::View(architectural) => Some(Err(Outcome::View(architectural))),
+                Name::Redirect { el12: true } => el2(Apple::GenericTimer(Register::Redirect(0))),
+                Name::Redirect { el12: false } => {
+                    Some(Ok(Apple::GenericTimer(Register::Redirect(level))))
+                }
+                Name::NoRedirectControl => {
+                    Some(Ok(Apple::GenericTimer(Register::NoRedirectControl(level))))
+                }
+            };
+        }
         if let Some(register) = super::pointer_keys::Register::decode(encoding) {
             return Some(if at_el2 {
                 Ok(Apple::PointerKey(register))
@@ -736,9 +756,13 @@ impl Cpu {
     }
 
     /// EL0 reaches only SPRR_PERM_EL0 (the user JIT toggle; Sven Peter,
-    /// "Apple Silicon Hardware Secrets") and the counter alias, under the
-    /// same enable as CNTVCT_EL0.
+    /// "Apple Silicon Hardware Secrets"), the counter alias, under the same
+    /// enable as CNTVCT_EL0, and the Apple generic timer's views of EL0
+    /// registers, under their architectural registers' enables.
     fn apple_el0(&mut self, encoding: Encoding, read: bool, value: u64, physical: u64) -> Outcome {
+        if let Some(agt::Name::View(architectural)) = agt::decode(encoding, self.registers.chip()) {
+            return Outcome::View(architectural);
+        }
         if super::pointer_keys::Register::decode(encoding).is_some() {
             return Outcome::Refused(Refusal::UnsupportedSetting(
                 "Apple EL2 PAC key access below EL2 lacks permission qualification",
@@ -906,6 +930,7 @@ impl Apple {
             }
             Self::VmsaLock => apple.vmsa_lock,
             Self::VmTimerFiq => apple.vm_timer_fiq,
+            Self::GenericTimer(register) => apple.generic_timer.read(register),
             Self::CountAlias | Self::PhysicalCountAlias => {
                 unreachable!("the caller completes the count alias")
             }
@@ -1019,6 +1044,9 @@ impl Apple {
                 }
                 apple.vm_timer_fiq = value;
                 changes.interrupts = true;
+            }
+            Self::GenericTimer(register) => {
+                changes.unmodeled = apple.generic_timer.write(register, value);
             }
             Self::SprLockdown(false) => {
                 if apple.spr_locked && apple.spr_lockdown != Some(value) {
