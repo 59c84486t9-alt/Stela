@@ -226,8 +226,10 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// # Safety
     /// The closed synchronous producer-set contract of
     /// `prepare_native_ram_service_parts` remains valid across the pending stop
-    /// and this call. No queued/background producer, direct DMA, firmware/SMI,
-    /// external writer or reentrant device submission is admitted. The same
+    /// and this call. No independently advancing queued/background producer,
+    /// direct DMA, firmware/SMI, external writer or reentrant device submission
+    /// is admitted. Synchronous requests may remain queued only under the
+    /// actual exclusive Devices owner preventing their advancement. The same
     /// controller/request owner must settle its actual effect before returning.
     pub unsafe fn complete_device_read(&mut self) -> Step {
         if let Some(Pending::Terminal(stop)) = &self.pending_device_read {

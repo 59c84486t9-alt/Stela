@@ -59,9 +59,12 @@ impl Prepared {
     /// # Safety
     /// The complete producer set is the actual stopped native workers and
     /// exclusively borrowed synchronous Host/Devices whose transfer completed
-    /// before this borrow. No other host publisher, queued job, firmware or
-    /// asynchronous DMA producer may exist, even if it uses registered writer
-    /// gates. Free gates alone do not establish an empty submission queue.
+    /// before this borrow. Retained synchronous device requests may remain
+    /// queued only when the actual exclusive Devices borrow prevents their
+    /// transfer from advancing or reentering throughout the service. No other
+    /// independently advancing host job, firmware or asynchronous DMA producer
+    /// may publish, even through registered gates. Free gates or transfer(Ok)
+    /// alone do not establish that exclusion or an empty I/O command queue.
     pub unsafe fn read_ram_drain(
         &self,
         offset: u64,
@@ -104,7 +107,8 @@ impl Prepared {
     /// # Safety
     /// The complete closed synchronous producer contract of read_ram_drain
     /// holds for this entire operation. The caller retains all actual native
-    /// workers and excludes external/queued writers through consumption.
+    /// workers and excludes every independently advancing publisher through
+    /// consumption; paused synchronous requests retain their actual owner.
     pub unsafe fn write_ram_drain(
         &self,
         offset: u64,

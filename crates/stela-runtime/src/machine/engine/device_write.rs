@@ -199,8 +199,10 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     ///
     /// # Safety
     /// The complete closed synchronous producer-set contract of the native
-    /// RAM service holds throughout. No queued/async/direct writer or device
-    /// reentrancy is admitted between sequential memory/processor borrows.
+    /// RAM service holds throughout. No independently advancing queued job,
+    /// async/direct writer or device reentrancy is admitted between sequential
+    /// memory/processor borrows. Synchronous device requests may stay queued
+    /// only under the same exclusive owner which prevents their advancement.
     pub unsafe fn complete_device_write(&mut self) -> Step {
         if let Some(Pending::Terminal(stop)) = &self.pending_device_write {
             return Err(stop.clone());

@@ -119,8 +119,12 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// remain valid. All device work is synchronous through Devices::transfer;
     /// asynchronous/direct DMA, firmware/SMI and every other producer outside
     /// the held workers and completed synchronous transfer are excluded. This
-    /// includes queued/background jobs which know this registered RAM's Arc;
-    /// writer gates freeze commits but cannot prove those queues empty. There may be no reentrant monitor/RAM write, CPU settlement or
+    /// includes independently advancing queued/background jobs which know this
+    /// registered RAM's Arc. Paused synchronous device requests may remain
+    /// retained only when the actual exclusive Devices owner excludes their
+    /// advancement through the whole service. Writer gates or transfer(Ok) do
+    /// not establish an empty I/O command queue. There may be no reentrant
+    /// monitor/RAM write, CPU settlement or
     /// interrupt/migration while the returned all-writer gates are held. The
     /// actual prepared controller/request must be retained through its effect,
     /// faults and ACK before finish; unavailable DRAM/gating effects still
