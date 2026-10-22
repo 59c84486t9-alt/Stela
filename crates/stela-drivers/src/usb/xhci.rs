@@ -2383,10 +2383,7 @@ pub fn attach_with_provider(
         dma,
         location,
         firmware,
-        (
-            stream_policy,
-            iso::Policy::pci(function.vendor, function.device),
-        ),
+        stream_policy,
         dma_profile,
     )
 }
@@ -2423,7 +2420,7 @@ pub fn start_with_provider(
         dma,
         location,
         firmware,
-        (streams::Policy::Unknown, iso::Policy::Unknown),
+        streams::Policy::Unknown,
         dma::Profile::SPEC,
     )
 }
@@ -2434,16 +2431,15 @@ fn start_with_policies(
     dma: &mut dyn DmaAllocator,
     location: String,
     firmware: &dyn crate::firmware::Provider,
-    policy: (streams::Policy, iso::Policy),
+    stream_policy: streams::Policy,
     dma_profile: dma::Profile,
 ) -> Result<Found, BlockError> {
     let mut controller =
         Controller::with_dma_profile(registers, clock, dma, location, dma_profile)?;
     // The policy came from this same actual PCI function before BAR access,
     // and applies only to the controller reset just completed above. No public
-    // raw-register caller can supply a guessed PCI identity or enable streams/iso.
-    controller.stream_policy = policy.0;
-    controller.iso_caps.qualify(policy.1);
+    // raw-register caller can supply a guessed PCI identity or enable streams.
+    controller.stream_policy = stream_policy;
     let mut found = Found::default();
     let devices = controller.enumerate(dma, &mut found.failures);
     let shared: Shared = Rc::new(RefCell::new(controller));

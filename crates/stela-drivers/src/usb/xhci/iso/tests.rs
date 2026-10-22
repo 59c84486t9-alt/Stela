@@ -294,11 +294,7 @@ fn controller(
             dma_profile: dma::Profile::SPEC,
             max_primary_streams: 4,
             stream_policy: streams::Policy::Unknown,
-            iso_caps: {
-                let mut caps = Capabilities::new(0x110, 0xb, if cfc { 1 << 11 } else { 0 });
-                caps.qualify(Policy::pci(0x1022, 0x15b6));
-                caps
-            },
+            iso_caps: Capabilities::new(0x110, 0xb, if cfc { 1 << 11 } else { 0 }),
             max_slots: 1,
             max_ports: 1,
             port_major: vec![2],
@@ -330,7 +326,6 @@ fn queued_native_iso_contexts_and_scheduling_complete_actual_dma_for_both_direct
                 let mut dma =
                     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
                 let (mut controller, model) = controller(&mut dma, speed, context_bytes, cfc);
-                controller.qualify_iso_test_model(0x1022, 0x15b6);
                 let endpoints = [endpoint(1, speed), endpoint(0x82, speed)];
                 controller.configure(1, &endpoints, None, &mut dma).unwrap();
                 let out = dma.allocate(4096, 4096).unwrap();
@@ -412,10 +407,6 @@ fn packet_failures_are_terminal_but_invalid_residual_and_transport_faults_retain
             controller.completed_iso(&ticket).unwrap().unwrap().status,
             status
         );
-        if status == IsoStatus::MissedService {
-            assert!(controller.submit_iso(1, 3, buffer.physical(), 128).is_err());
-            controller.cancel(1, 3).unwrap();
-        }
         let ticket = controller.submit_iso(1, 3, buffer.physical(), 128).unwrap();
         model.borrow_mut().complete(3, 0, SUCCESS, 129);
         assert!(controller.completed_iso(&ticket).unwrap().is_err());
@@ -511,9 +502,8 @@ fn occupancy_wrap_schedule_and_descriptor_failures_do_not_overwrite_owned_trbs()
         model.borrow_mut().complete(3, 0, SUCCESS, 0);
         controller.completed_iso(&ticket).unwrap().unwrap();
     }
+    // A late TD is still queued; the controller reports the missed interval.
     model.borrow_mut().mfindex = 1024;
-    assert!(controller.submit_iso(1, 3, buffer.physical(), 16).is_err());
-    controller.cancel(1, 3).unwrap();
     controller.submit_iso(1, 3, buffer.physical(), 16).unwrap();
     assert!(controller.submit(1, 3, buffer.physical(), 16).is_err());
     for speed in [LOW_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS] {
@@ -706,24 +696,11 @@ fn silent_cancellation_and_fatal_controller_status_never_release_queued_buffers(
 }
 
 #[test]
-fn actual_profile_scope_rejects_unknown_raw_and_legacy_controllers() {
-    for vendor in [0, 0x1022, 0x1b36] {
-        for device in [
-            0, 0x15b6, 0x15b7, 0x15b8, 0x43fc, 0x15e0, 0x15e5, 0x43bb, 0x000d,
-        ] {
-            let mut caps = Capabilities::new(0x110, 0, 0);
-            assert!(caps.admit().is_err());
-            caps.qualify(Policy::pci(vendor, device));
-            assert_eq!(
-                caps.admit().is_ok(),
-                vendor == 0x1022 && matches!(device, 0x15b6 | 0x15b7 | 0x15b8 | 0x43fc)
-                    || vendor == 0x1b36 && device == 0x000d
-            );
-        }
+fn any_xhci_1_0_controller_admits_isochronous_transport() {
+    assert!(Capabilities::new(0x96, 0, 0).admit().is_err());
+    for version in [0x100, 0x110, 0x120] {
+        Capabilities::new(version, 0, 0).admit().unwrap();
     }
-    let mut old = Capabilities::new(0x96, 0, 0);
-    old.qualify(Policy::Qemu);
-    assert!(old.admit().is_err());
 }
 
 #[test]
@@ -781,21 +758,17 @@ fn unchanged_linux_iso_context_scheduling_burst_and_terminal_completion() {
                 } else {
                     Some(values[4] as u32)
                 };
-                match schedule(values[0] as u32, caps, values[3] as u32, next) {
-                    Ok((start, field)) => {
-                        assert_eq!(values[7], 1);
-                        assert_eq!(start, values[5] as u32);
-                        assert_eq!(
-                            field,
-                            if values[6] != 0 {
-                                (start / 8) << 20
-                            } else {
-                                SIA
-                            }
-                        );
+                // Linux only logs a start outside the window (values[7]).
+                let (start, field) = schedule(values[0] as u32, caps, values[3] as u32, next);
+                assert_eq!(start, values[5] as u32);
+                assert_eq!(
+                    field,
+                    if values[6] != 0 {
+                        (start / 8) << 20
+                    } else {
+                        SIA
                     }
-                    Err(_) => assert_eq!(values[7], 0),
-                }
+                );
             }
             "C" => {
                 assert_eq!(values.len(), 6);
@@ -837,8 +810,60 @@ fn unchanged_linux_iso_context_scheduling_burst_and_terminal_completion() {
 }
 
 #[test]
+fn ring_xruns_are_ignored_and_missed_service_skips_earlier_tds() {
+    let mut backing = vec![0u64; 32 * 1024];
+    let start = backing.as_mut_ptr() as u64;
+    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 32, true);
+    controller
+        .configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
+        .unwrap();
+    let buffer = dma.allocate(4096, 4096).unwrap();
+    let tickets: Vec<_> = (0..3)
+        .map(|n| {
+            controller
+                .submit_iso(1, 3, buffer.physical() + n * 32, 32)
+                .unwrap()
+        })
+        .collect();
+    for code in [RING_UNDERRUN, RING_OVERRUN] {
+        model.borrow_mut().event(0, code, 3, 0, TRANSFER_EVENT);
+        assert!(controller.completed_iso(&tickets[0]).is_none());
+    }
+    // Without a TD pointer the next event decides how many TDs were missed.
+    model
+        .borrow_mut()
+        .event(0, MISSED_SERVICE, 3, 0, TRANSFER_EVENT);
+    assert!(controller.completed_iso(&tickets[0]).is_none());
+    model.borrow_mut().complete(3, 1, SUCCESS, 0);
+    let missed = IsoCompletion {
+        bytes: 0,
+        status: IsoStatus::MissedService,
+    };
+    assert_eq!(controller.completed_iso(&tickets[0]).unwrap(), Ok(missed));
+    assert_eq!(
+        controller
+            .completed_iso(&tickets[1])
+            .unwrap()
+            .unwrap()
+            .bytes,
+        32
+    );
+    assert!(controller.completed_iso(&tickets[2]).is_none());
+    // An xrun while TDs are being skipped skips exactly one.
+    model
+        .borrow_mut()
+        .event(0, MISSED_SERVICE, 3, 0, TRANSFER_EVENT);
+    model
+        .borrow_mut()
+        .event(0, RING_OVERRUN, 3, 0, TRANSFER_EVENT);
+    assert_eq!(controller.completed_iso(&tickets[2]).unwrap(), Ok(missed));
+    controller.submit_iso(1, 3, buffer.physical(), 32).unwrap();
+}
+
+#[test]
 fn transferless_errors_stalls_and_incompatible_slots_never_release_an_arbitrary_ticket() {
-    for code in [6, 14, 15, 22, 23, 36, 99] {
+    for code in [6, 22, 36, 99] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
@@ -919,9 +944,7 @@ fn unchanged_linux_actual_amd_pci_profiles_and_saved_smbus_do_not_inherit_legacy
         match kind {
             "P" => {
                 assert!(matches!(values[0], 0x15b6 | 0x15b7 | 0x15b8 | 0x43fc));
-                let mut caps = Capabilities::new(values[2] as u16, 0, 0);
-                caps.qualify(Policy::pci(0x1022, values[0] as u16));
-                caps.admit().unwrap();
+                Capabilities::new(values[2] as u16, 0, 0).admit().unwrap();
                 // xHCI>=1.2 permits runtime PM generically; this cold polled
                 // backend does not claim a suspend/runtime-power service.
                 assert_eq!(values[3], if values[2] >= 0x120 { 1 << 33 } else { 0 });

@@ -174,7 +174,6 @@ mod tests {
                 5,
                 halted,
             );
-            shared.borrow_mut().qualify_iso_test_model(0x1022, 0x15b6);
             let mut native = Native {
                 shared: shared.clone(),
                 slot: 1,

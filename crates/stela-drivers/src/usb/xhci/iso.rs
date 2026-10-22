@@ -10,6 +10,8 @@ const BABBLE: u32 = 3;
 const TRANSACTION_ERROR: u32 = 4;
 const BANDWIDTH_OVERRUN: u32 = 18;
 const INCOMPATIBLE_DEVICE: u32 = 22;
+const RING_UNDERRUN: u32 = 14;
+const RING_OVERRUN: u32 = 15;
 const MISSED_SERVICE: u32 = 23;
 const ISO_BUFFER_OVERRUN: u32 = 31;
 const EVENT_DATA: u32 = 1 << 2;
@@ -46,27 +48,9 @@ pub struct IsoTransfer {
     trb: u64,
 }
 
-/// Exact source-audited PCI profiles for this bounded PC cut. No older AMD
-/// quirk predicate is selected from a CPU/chipset family name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Policy {
-    Unknown,
-    Amd(u16),
-    Qemu,
-}
-impl Policy {
-    pub fn pci(vendor: u16, device: u16) -> Self {
-        match (vendor, device) {
-            (0x1022, 0x15b6 | 0x15b7 | 0x15b8 | 0x43fc) => Self::Amd(device),
-            (0x1b36, 0x000d) => Self::Qemu,
-            _ => Self::Unknown,
-        }
-    }
-}
 #[derive(Clone, Copy)]
 pub(super) struct Capabilities {
     version: u16,
-    policy: Policy,
     ist: u32,
     cfc: bool,
 }
@@ -74,22 +58,13 @@ impl Capabilities {
     pub fn new(version: u16, hcs2: u32, hcc1: u32) -> Self {
         Self {
             version,
-            policy: Policy::Unknown,
             ist: (hcs2 & 7) * if hcs2 & 8 != 0 { 8 } else { 1 },
             cfc: hcc1 & (1 << 11) != 0,
         }
     }
-    pub fn qualify(&mut self, policy: Policy) {
-        self.policy = policy;
-    }
     pub fn admit(self) -> Result<(), BlockError> {
-        if self.policy == Policy::Unknown {
-            return Err(BlockError::Unsupported(
-                "isochronous transport requires an audited actual PCI controller profile",
-            ));
-        }
-        // Legacy 0.96 AMD/NEC isoch Link-TRB quirks are outside these actual
-        // PC profiles. Do not silently apply 1.0 TLBPC/FrameID semantics there.
+        // Pre-1.0 hosts need Linux's 0.96 Link-TRB and TLBPC quirks, which
+        // are not implemented; 1.0 FrameID semantics are never applied there.
         if self.version < 0x100 {
             return Err(BlockError::Unsupported(
                 "isochronous transport requires xHCI 1.0 or newer",
@@ -158,11 +133,16 @@ struct Active {
     id: u64,
     trb: u64,
     bytes: usize,
+    /// The terminal status, held until the ticket's owner collects it.
+    done: Option<IsoCompletion>,
 }
 pub(super) struct Queue {
     recipe: Recipe,
     active: Vec<Active>,
     next: Option<u32>,
+    /// Linux `ep->skip`: a missed service interval left earlier TDs without
+    /// their own events.
+    skip: bool,
     recovery: bool,
 }
 impl Queue {
@@ -171,51 +151,112 @@ impl Queue {
             recipe,
             active: Vec::new(),
             next: None,
+            skip: false,
             recovery: false,
         }
     }
     pub fn cancelled(&mut self) {
         self.active.clear();
         self.next = None;
+        self.skip = false;
         self.recovery = false;
+    }
+    fn outstanding(&mut self) -> Option<&mut Active> {
+        self.active.iter_mut().find(|active| active.done.is_none())
+    }
+    /// Apply one transfer event the way Linux `handle_tx_event` does for an
+    /// isochronous ring of single-TRB TDs.
+    fn event(
+        &mut self,
+        code: u32,
+        trb: u64,
+        control: u32,
+        residual: usize,
+    ) -> Result<(), BlockError> {
+        let xrun = matches!(code, RING_UNDERRUN | RING_OVERRUN);
+        if code == MISSED_SERVICE {
+            self.skip = true;
+            // Without a TD pointer the number of missed TDs is unknown; the
+            // next event settles it.
+            if !self
+                .active
+                .iter()
+                .any(|active| active.done.is_none() && active.trb == trb)
+            {
+                return Ok(());
+            }
+        }
+        loop {
+            let skip = self.skip;
+            let Some(td) = self.outstanding() else {
+                self.skip = false;
+                return if xrun {
+                    Ok(())
+                } else {
+                    Err(BlockError::Protocol(
+                        "isochronous event without a queued TD",
+                    ))
+                };
+            };
+            if td.trb == trb {
+                break;
+            }
+            if !skip {
+                // A TD queued after an underrun or overrun has not run yet,
+                // and, as in Linux, a success naming no queued TD is stale.
+                return if xrun || matches!(code, SUCCESS | SHORT_PACKET) {
+                    Ok(())
+                } else {
+                    Err(BlockError::Protocol(
+                        "isochronous event outside the current TD",
+                    ))
+                };
+            }
+            td.done = Some(IsoCompletion {
+                bytes: 0,
+                status: IsoStatus::MissedService,
+            });
+            if self.outstanding().is_none() {
+                self.skip = false;
+                return Ok(());
+            }
+            if xrun {
+                // Where an xrun happened is unknown: skip one TD only.
+                return Ok(());
+            }
+        }
+        self.skip = false;
+        if xrun {
+            return Ok(());
+        }
+        if control & EVENT_DATA != 0 {
+            return Err(BlockError::Device { status: code });
+        }
+        let td = self.outstanding().unwrap();
+        td.done = Some(completion(code, td.bytes, residual)?);
+        Ok(())
     }
 }
 
-fn in_window(frame: u32, start: u32, end: u32) -> bool {
-    if start > end {
-        frame >= start || frame <= end
-    } else {
-        frame >= start && frame <= end
-    }
-}
-fn schedule(
-    mfindex: u32,
-    caps: Capabilities,
-    interval: u32,
-    next: Option<u32>,
-) -> Result<(u32, u32), BlockError> {
+/// Linux `xhci_get_isoc_start_frame` and `xhci_isoc_td_uses_frame_id`: a
+/// new stream starts at the next aligned interval past the scheduling
+/// threshold, and a mid-stream TD keeps its slot even when late; the
+/// controller then reports a missed service interval. The returned field is
+/// the TRB's Frame ID, or SIA where Linux schedules as soon as possible.
+fn schedule(mfindex: u32, caps: Capabilities, interval: u32, next: Option<u32>) -> (u32, u32) {
     let mfindex = mfindex & (MICROFRAMES - 1);
-    let first = next.is_none();
     let start = next.unwrap_or_else(|| {
         (mfindex + caps.ist + CFC_DELAY)
             .next_multiple_of(8)
             .next_multiple_of(interval)
             % MICROFRAMES
     });
-    let current = mfindex / 8;
-    let low = (current + caps.ist.div_ceil(8) + 1) % FRAMES;
-    let high = (current + 895) % FRAMES;
-    if !in_window(start / 8, low, high) {
-        return Err(BlockError::Unsupported(
-            "isochronous service interval missed scheduling window",
-        ));
-    }
-    let field = if caps.cfc || first {
+    let field = if caps.cfc || next.is_none() {
         (start / 8) << 20
     } else {
         SIA
     };
-    Ok((start, field))
+    (start, field)
 }
 fn completion(code: u32, bytes: usize, residual: usize) -> Result<IsoCompletion, BlockError> {
     if residual > bytes {
@@ -248,12 +289,6 @@ fn trb_control(recipe: Recipe, length: usize, frame: u32) -> u32 {
 }
 
 impl Controller {
-    /// Test fixtures supply an explicit observed profile without claiming native
-    /// PCI qualification. This grant is absent from production/raw starts.
-    #[cfg(test)]
-    pub(crate) fn qualify_iso_test_model(&mut self, vendor: u16, device: u16) {
-        self.iso_caps.qualify(Policy::pci(vendor, device));
-    }
     /// Queue one USB2 isochronous service interval. The entire DMA extent must
     /// stay live and unmodified until terminal completion or successful endpoint
     /// cancellation. Buffers must not cross 64 KiB; maximum payload is the actual
@@ -298,8 +333,13 @@ impl Controller {
         {
             return Err(BlockError::Unsupported("isochronous ring is full"));
         }
+        // Like Linux, a stream whose earlier TDs have all completed restarts
+        // at a fresh start frame instead of continuing a stale schedule.
+        if queue.outstanding().is_none() {
+            queue.next = None;
+        }
         let interval = 1 << queue.recipe.exponent;
-        let (start, frame) = schedule(mfindex, caps, interval, queue.next)?;
+        let (start, frame) = schedule(mfindex, caps, interval, queue.next);
         let id = NEXT_TICKET
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
                 old.checked_add(1)
@@ -316,6 +356,7 @@ impl Controller {
             id,
             trb,
             bytes: length,
+            done: None,
         });
         transfer.ring.push(&[(buffer, length as u32, control)]);
         queue.next = Some((start + interval) % MICROFRAMES);
@@ -351,28 +392,36 @@ impl Controller {
                 "stale or foreign isochronous ticket",
             )));
         }
-        // Missed-service and ring-xrun events may legally have no valid TRB
-        // pointer. They cannot complete an arbitrary ticket. Force a bounded
-        // endpoint-wide cancellation, retaining every contributor.
-        let index = self.pending.iter().position(|event| {
+        // Apply this endpoint's events in ring order; any of them may finish
+        // this ticket or earlier ones.
+        while let Some(index) = self.pending.iter().position(|event| {
             event.kind() == TRANSFER_EVENT
                 && event.slot() == ticket.slot
                 && event.endpoint() == ticket.dci
-                && (event.parameter == ticket.trb
-                    || !matches!(event.code(), SUCCESS | SHORT_PACKET))
-        })?;
-        let event = self.pending.remove(index);
-        if event.code() == INCOMPATIBLE_DEVICE {
-            // Incompatible Device requires Disable Slot (Linux handle_tx_event),
-            // not merely Stop/Reset/Set Dequeue. Keep permanent poison until a
-            // separate exclusive slot-retirement service establishes ownership.
+        }) {
+            let event = self.pending.remove(index);
             let endpoint = self.slot(ticket.slot).unwrap().endpoints[usize::from(ticket.dci)]
                 .as_mut()
                 .unwrap();
-            endpoint.poisoned = true;
-            return Some(Err(BlockError::Device {
-                status: INCOMPATIBLE_DEVICE,
-            }));
+            if event.code() == INCOMPATIBLE_DEVICE {
+                // Incompatible Device requires Disable Slot (Linux handle_tx_event),
+                // not merely Stop/Reset/Set Dequeue. Keep permanent poison until a
+                // separate exclusive slot-retirement service establishes ownership.
+                endpoint.poisoned = true;
+                return Some(Err(BlockError::Device {
+                    status: INCOMPATIBLE_DEVICE,
+                }));
+            }
+            let queue = endpoint.iso.as_mut().unwrap();
+            if let Err(error) = queue.event(
+                event.code(),
+                event.parameter,
+                event.control,
+                event.residual(),
+            ) {
+                queue.recovery = true;
+                return Some(Err(error));
+            }
         }
         let queue = self.slot(ticket.slot).unwrap().endpoints[usize::from(ticket.dci)]
             .as_mut()
@@ -385,22 +434,9 @@ impl Controller {
             .iter()
             .position(|active| active.id == ticket.id)
             .unwrap();
-        let result = if event.parameter != ticket.trb || event.control & EVENT_DATA != 0 {
-            Err(BlockError::Device {
-                status: event.code(),
-            })
-        } else {
-            completion(event.code(), queue.active[index].bytes, event.residual())
-        };
-        if result.is_ok() {
-            queue.active.remove(index);
-            // A valid pointer identifies this TD, but other earlier service
-            // intervals may also have been missed without their own events.
-            queue.recovery = event.code() == MISSED_SERVICE;
-        } else {
-            queue.recovery = true;
-        }
-        Some(result)
+        let done = queue.active[index].done?;
+        queue.active.remove(index);
+        Some(Ok(done))
     }
 }
 
