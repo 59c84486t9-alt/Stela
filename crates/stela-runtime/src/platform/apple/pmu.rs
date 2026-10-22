@@ -59,6 +59,7 @@ mod clock;
 mod config;
 mod fault;
 mod firmware;
+mod startup;
 pub use clock::{RtcClock, RtcEpoch};
 pub use config::Configuration;
 pub use firmware::{FirmwareSram, FirmwareStartup};
@@ -150,6 +151,7 @@ pub struct Pmu {
     faults: Option<fault::FaultLog>,
     firmware: Option<firmware::FirmwareMemory>,
     startup: Option<FirmwareStartup>,
+    loader: Option<startup::Loader>,
     /// Bytes of every storage window, in window order.
     storage: Vec<Vec<u8>>,
     alarm_control: u8,
@@ -199,7 +201,20 @@ impl Pmu {
             fault_history,
             firmware,
             startup,
+            native_loader,
         } = config;
+        let loader = native_loader.then(|| {
+            startup::Loader::new(
+                startup.expect("validated native loader profile"),
+                usize::from(
+                    firmware
+                        .as_ref()
+                        .expect("validated native SRAM")
+                        .ports
+                        .bytes,
+                ),
+            )
+        });
         if let Some(rtc) = rtc {
             windows.push(Window {
                 base: rtc.clock_offset,
@@ -222,6 +237,7 @@ impl Pmu {
             faults: fault_history.map(Into::into),
             firmware: firmware.map(Into::into),
             startup,
+            loader,
             storage,
             alarm_control: 0,
             alarm_event: 0,
@@ -314,12 +330,14 @@ impl Pmu {
 
     fn check_firmware_startup(&self, address: u16, bytes: usize) -> Result<(), SlaveError> {
         let end = u64::from(address).saturating_add(bytes.max(1) as u64);
-        if self.startup.is_some_and(|profile| {
-            profile.windows().iter().any(|window| {
-                u64::from(address) < u64::from(window.base) + u64::from(window.bytes)
-                    && u64::from(window.base) < end
+        if self.loader.is_none()
+            && self.startup.is_some_and(|profile| {
+                profile.windows().iter().any(|window| {
+                    u64::from(address) < u64::from(window.base) + u64::from(window.bytes)
+                        && u64::from(window.base) < end
+                })
             })
-        }) {
+        {
             return Err(SlaveError::Unsupported(
                 "PMU firmware startup requires the actual protected-control, execution and completion owner",
             ));
@@ -385,9 +403,24 @@ impl SpmiSlave for Pmu {
     fn read(&mut self, address: u16, data: &mut [u8], now: u64) -> Result<(), SlaveError> {
         self.check_identity(address, data.len())?;
         self.check_firmware_startup(address, data.len())?;
+        if let Some(loader) = &self.loader
+            && loader.claims(address, data.len())
+        {
+            let bytes = loader
+                .read(address, data.len())
+                .map_err(SlaveError::Unsupported)?;
+            self.publish_time(now)?;
+            data.copy_from_slice(&bytes);
+            return Ok(());
+        }
         if let Some(memory) = &self.firmware
             && memory.claims(address, data.len())
         {
+            if let Some(loader) = &self.loader {
+                loader
+                    .check_memory(false)
+                    .map_err(SlaveError::Unsupported)?;
+            }
             let transfer = memory
                 .prepare(address, data.len(), firmware::Direction::Read)
                 .map_err(SlaveError::Unsupported)?;
@@ -438,12 +471,41 @@ impl SpmiSlave for Pmu {
     fn write(&mut self, address: u16, data: &[u8], now: u64) -> Result<(), SlaveError> {
         self.check_identity(address, data.len())?;
         self.check_firmware_startup(address, data.len())?;
+        if let Some(loader) = &self.loader
+            && loader.claims(address, data.len())
+        {
+            let write = loader
+                .prepare(
+                    address,
+                    data,
+                    self.firmware.as_ref().expect("native loader SRAM"),
+                )
+                .map_err(SlaveError::Unsupported)?;
+            self.publish_time(now)?;
+            let stop = matches!(write, startup::Write::Stop);
+            self.loader.as_mut().expect("native loader").commit(write);
+            if stop {
+                self.firmware
+                    .as_mut()
+                    .expect("native loader SRAM")
+                    .forget_address();
+            }
+            return Ok(());
+        }
         if let Some(memory) = &self.firmware
             && memory.claims(address, data.len())
         {
             let address_byte = memory
                 .check_address(address, data)
                 .map_err(SlaveError::Unsupported)?;
+            if let Some(loader) = &self.loader {
+                // The address pair only positions the retained port. Permit
+                // a new readback cursor after sealing while rejecting every
+                // data mutation of the protected image.
+                loader
+                    .check_memory(address_byte.is_none())
+                    .map_err(SlaveError::Unsupported)?;
+            }
             let transfer = if address_byte.is_none() {
                 Some(
                     memory
@@ -459,6 +521,9 @@ impl SpmiSlave for Pmu {
                 memory.address(address, byte);
             }
             if let Some(transfer) = transfer {
+                if let Some(loader) = &mut self.loader {
+                    loader.written(transfer.range.clone());
+                }
                 memory.write(transfer, data);
             }
             return Ok(());

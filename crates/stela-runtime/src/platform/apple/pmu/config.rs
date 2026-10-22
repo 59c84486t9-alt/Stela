@@ -14,6 +14,7 @@ pub struct Configuration {
     pub(super) fault_history: Option<FaultHistory>,
     pub(super) firmware: Option<FirmwareHistory>,
     pub(super) startup: Option<FirmwareStartup>,
+    pub(super) native_loader: bool,
 }
 
 impl Configuration {
@@ -106,6 +107,7 @@ impl Configuration {
             fault_history: None,
             firmware: None,
             startup: None,
+            native_loader: false,
         })
     }
     /// Configure the source's outside-scratch fault log with explicit cold or
@@ -159,6 +161,19 @@ impl Configuration {
             return Err("PMU firmware startup duplicates or overlaps another register owner");
         }
         self.startup = Some(profile);
+        Ok(self)
+    }
+
+    /// Explicitly create a stopped native Stela protected-loader owner over
+    /// this configuration's actual SRAM and known startup routes. This is not
+    /// an Apple reset/handoff observation or firmware execution admission.
+    /// Authentication, service initialization and starting remain explicit
+    /// requirements; the loader cannot manufacture a Ready value.
+    pub fn with_native_firmware_loader(mut self) -> Result<Self, &'static str> {
+        if self.native_loader || self.startup.is_none() || self.firmware.is_none() {
+            return Err("native PMIC loader requires unique startup routes and actual SRAM");
+        }
+        self.native_loader = true;
         Ok(self)
     }
 

@@ -32,8 +32,8 @@ impl FirmwareStartup {
                 }, // stop + metadata
                 Window {
                     base: 0xc804,
-                    bytes: 3,
-                }, // configure + start
+                    bytes: 4,
+                }, // configure + start + source post-upload control
                 Window {
                     base: 0xc813,
                     bytes: 1,
@@ -54,7 +54,7 @@ impl FirmwareStartup {
                 },
                 Window {
                     base: 0x2804,
-                    bytes: 3,
+                    bytes: 4,
                 },
                 Window {
                     base: 0x2814,
@@ -165,7 +165,7 @@ enum Stream {
 
 /// Private prepared effect. Never exposed as an external completion receipt.
 pub(super) struct Transfer {
-    range: Range<usize>,
+    pub(super) range: Range<usize>,
     next: Stream,
 }
 
@@ -184,6 +184,14 @@ impl From<FirmwareHistory> for FirmwareMemory {
     }
 }
 impl FirmwareMemory {
+    pub(super) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(super) fn forget_address(&mut self) {
+        self.stream = Stream::Unaddressed;
+    }
+
     pub fn claims(&self, address: u16, bytes: usize) -> bool {
         let end = u64::from(address).saturating_add(bytes.max(1) as u64);
         self.ports.windows().iter().any(|w| {
