@@ -105,6 +105,11 @@ const ACTLR_EN_TSO: u64 = 1 << 1;
 /// ACTLR_ELx bit 9, which the 26A434 context switch sets to a Rosetta
 /// thread's flag while the `icdsb` boot argument is nonzero.
 const ACTLR_ICDSB: u64 = 1 << 9;
+/// ACTLR_ELx bit 12, "IC IVAU Enable ASID" (Asahi
+/// `hw/cpu/system-registers.md`), which the M3 kernels' CPU initialization
+/// sets with AHCR_EL2 |= 0x1e under a word that is 1 in the image
+/// (kernelcache.release.mac15g 0xfffffe000bcfd13c..0xfffffe000bcfd17c).
+const ACTLR_IC_IVAU_ASID: u64 = 1 << 12;
 
 /// The ACTLR_ELx bits that refuse by name, from XNU `proc_reg.h`: controls
 /// of Apple features this machine's AIDR_EL1 does not advertise
@@ -148,6 +153,11 @@ const ACTLR_REFUSED: [(u64, &str); 3] = [
 ///   consumer, the 26A434 Rosetta runtime, invalidates the code it writes
 ///   with the full DSB ISH, IC IVAU, DSB ISH, ISB sequence (`runtime`
 ///   `__text+0x318`), so no consumer needs a further effect (inference).
+///   Bit 12 is held too: by its name it makes IC IVAU match the current
+///   ASID, which can only narrow what an invalidation removes, and this
+///   machine's IC IVAU removes every translation of the address whatever
+///   the ASID, which Arm always permits, as instruction cache entries may be
+///   invalidated at any time (inference).
 ///   XNU sets EnTSO with bit 4 (EnAPFLG), and with bits 5 and 6 (EnAFP,
 ///   EnPRSV) when AIDR_EL1 bit 23 enables that static branch, before
 ///   returning to EL0 in a translated x86-64 thread. It creates such a
@@ -169,7 +179,10 @@ fn implementation_defined_refusal(register: Register, value: u64) -> Option<&'st
             .iter()
             .find(|(bit, _)| value & bit != 0)
             .map(|&(_, reason)| reason)
-            .or((value & !(ACTLR_EN_TSO | ACTLR_ICDSB) != 0).then_some(UNMODELED)),
+            .or(
+                (value & !(ACTLR_EN_TSO | ACTLR_ICDSB | ACTLR_IC_IVAU_ASID) != 0)
+                    .then_some(UNMODELED),
+            ),
         Register::HACR_EL2 => crate::machine::hacr::unsupported_bits(value),
         _ => None,
     }
@@ -3712,6 +3725,7 @@ mod tests {
         const EN_AFP: u64 = 1 << 5;
         const EN_PRSV: u64 = 1 << 6;
         const ICDSB: u64 = 1 << 9;
+        const IC_IVAU_ASID: u64 = 1 << 12;
         let mut machine = machine(&[]);
         machine.cpu.set_pstate(Pstate::reset(2));
         machine.cpu.registers.set(Register::HCR_EL2, 0, 1 << 34);
@@ -3737,6 +3751,10 @@ mod tests {
         write(&mut machine, ACTLR_EL12, EN_TSO | ICDSB).unwrap();
         assert_eq!(machine.cpu.read(Register::ACTLR_EL2), EN_TSO);
         assert_eq!(read(&mut machine, ACTLR_EL12), EN_TSO | ICDSB);
+        write(&mut machine, ACTLR_EL1, EN_TSO | ICDSB).unwrap();
+        // The M3 CPU initialization's IC IVAU ASID enable is held too.
+        write(&mut machine, ACTLR_EL1, ICDSB | IC_IVAU_ASID).unwrap();
+        assert_eq!(machine.cpu.read(Register::ACTLR_EL2), ICDSB | IC_IVAU_ASID);
         write(&mut machine, ACTLR_EL1, EN_TSO | ICDSB).unwrap();
         // AMAIR holds any value, through the host's AMAIR_EL2 and the
         // guest's AMAIR_EL1, as the hypervisor's save and restore needs.
