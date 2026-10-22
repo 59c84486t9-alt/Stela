@@ -90,6 +90,74 @@ typedef bool (*stela_air_visit_entry)(const struct stela_air_inspection *,
 bool stela_air_inspect(const void *bitcode, size_t size, unsigned max_entries,
                        stela_air_visit_entry visit, void *data,
                        struct stela_air_error *error);
+/* Additive render-only descriptor API. These enums are neither MTLFunctionType
+ * nor MTLB TYPE values. Every string/array is borrowed through callback return.
+ * This validates selected entry ABI/reflection, not body execution or hardware.
+ * Legacy stela_air_inspect continues its original compute-only acceptance. */
+enum stela_air_stage { STELA_AIR_VERTEX = 1, STELA_AIR_FRAGMENT = 2 };
+enum stela_air_stage_semantic {
+   STELA_AIR_STAGE_BUFFER = 1, STELA_AIR_VERTEX_ID, STELA_AIR_POSITION,
+   STELA_AIR_VARYING, STELA_AIR_RENDER_TARGET,
+};
+enum stela_air_interpolation {
+   STELA_AIR_INTERPOLATION_NONE, STELA_AIR_PERSPECTIVE,
+   STELA_AIR_NO_PERSPECTIVE,
+};
+struct stela_air_struct_member {
+   unsigned offset, size;
+   enum stela_air_primitive primitive;
+   unsigned components;
+   const char *name, *type_name;
+   size_t name_bytes, type_name_bytes;
+};
+struct stela_air_stage_io {
+   enum stela_air_stage_semantic semantic;
+   unsigned argument; /* LLVM argument or ordered return leaf, as applicable. */
+   struct stela_air_buffer buffer; /* Only STAGE_BUFFER; AS2 remains readonly. */
+   enum stela_air_primitive primitive;
+   unsigned components;
+   enum stela_air_interpolation interpolation;
+   bool center, used;
+   unsigned location, index; /* RENDER_TARGET attachment / dual-source index. */
+   const char *name, *type_name, *identifier;
+   size_t name_bytes, type_name_bytes, identifier_bytes;
+   unsigned member_count;
+   const struct stela_air_struct_member *members;
+};
+struct stela_air_stage_entry {
+   enum stela_air_stage stage;
+   bool framebuffer_fetch_present, framebuffer_fetch_enabled; /* Compile option, never a fetch operation. */
+   const char *name;
+   size_t name_bytes;
+   unsigned input_count, output_count;
+   const struct stela_air_stage_io *inputs, *outputs;
+};
+typedef bool (*stela_air_visit_stage)(const struct stela_air_inspection *,
+                                     const struct stela_air_stage_entry *, void *);
+bool stela_air_inspect_stage(const void *, size_t, const char *entry,
+                             enum stela_air_stage, stela_air_visit_stage, void *,
+                             struct stela_air_error *);
+
+/* One validated VS/FS varying map. Identifiers borrow from the supplied entry
+ * descriptors; caller must own/copy those strings beyond inspector callbacks.
+ * Location is relative to NIR VARYING_SLOT_VAR0, not a hardware register.
+ * Exact opaque identifier/type matching, bounded by explicit target IO slots;
+ * no source-name/hash exceptions or invented interpolation. Failure preserves
+ * rows/count. Successful rows must remain live through stage translation. These
+ * same-process values require readable UTF-8 identifiers with exact byte extents;
+ * duplicate IDs/locations/types and target slot limits are checked before effects. */
+struct stela_air_varying_slot {
+   const char *identifier;
+   size_t identifier_bytes;
+   enum stela_air_primitive primitive;
+   unsigned components, location;
+};
+bool stela_air_link_stage_io(const struct stela_air_stage_entry *vertex,
+                             const struct stela_air_stage_entry *fragment,
+                             unsigned max_slots, struct stela_air_varying_slot *rows,
+                             unsigned capacity, unsigned *count,
+                             struct stela_air_error *);
+
 /* Compiler implementation only. Ordinary metadata consumers need no LLVM or
  * NIR headers and receive no LLVM objects. Define before the first include. */
 #ifdef STELA_AIR_METADATA_INTERNAL
@@ -102,7 +170,9 @@ struct stela_air_metadata {
    LLVMTargetDataRef layout;
    struct stela_air_error *error;
    unsigned air_minor, language_major, language_minor;
-   unsigned max_device_buffers, max_threadgroup_buffers;
+   unsigned max_device_buffers, max_threadgroup_buffers, max_constant_buffers;
+   bool render; /* Additive decoder mode; legacy compute remains false. */
+   bool framebuffer_fetch_present, framebuffer_fetch_enabled;
    bool denorms_disable, fast_math;
 };
 
@@ -142,6 +212,20 @@ struct stela_air_kernel {
 };
 bool stela_air_metadata_kernel(struct stela_air_metadata *m, LLVMValueRef fn,
                                struct stela_air_kernel *kernel);
+struct stela_air_render {
+   struct stela_air_stage_entry entry;
+   struct stela_air_stage_io inputs[AIR_MAX_ARGUMENTS], outputs[AIR_MAX_ARGUMENTS];
+   struct stela_air_struct_member members[AIR_MAX_ARGUMENTS];
+   unsigned member_count;
+   struct stela_air_kernel arguments;
+};
+bool stela_air_metadata_stage(struct stela_air_metadata *, LLVMValueRef,
+                              enum stela_air_stage, struct stela_air_render *);
+bool stela_air_metadata_stage_map(struct stela_air_metadata *, const struct stela_air_render *,
+                                 const struct stela_air_varying_slot *, unsigned count, unsigned max_slots);
+bool stela_air_metadata_stage_buffer_type(struct stela_air_metadata *,
+                                          const struct stela_air_stage_io *, LLVMTypeRef);
+
 
 #endif
 #ifdef __cplusplus

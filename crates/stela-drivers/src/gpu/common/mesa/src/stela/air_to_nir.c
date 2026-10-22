@@ -35,6 +35,13 @@ struct value {
    unsigned ssbo_slot;
    nir_variable *shared;
    unsigned shared_size;
+   const struct stela_air_stage_io *constant_view; /* Borrowed only during translation. */
+   bool view_root;
+   /* Partial render values have no vector def until every lane is defined.
+    * Missing lanes are tracked symbolically, never replaced with zero/undef. */
+   nir_def *lanes[4];
+   unsigned components, bits, aggregate_count;
+   struct value **elements;
 };
 
 bool
@@ -60,6 +67,9 @@ struct translator {
    nir_builder b;
    struct hash_table *values;
    const struct stela_air_options *options;
+   const struct stela_air_stage_options *stage_options;
+   struct stela_air_render render;
+   nir_variable *outputs[AIR_MAX_ARGUMENTS];
    struct stela_air_error *error;
    unsigned air_minor;
    unsigned language_major, language_minor;
@@ -210,10 +220,11 @@ fp_math_control(LLVMValueRef inst)
 static bool
 put_value(struct translator *t, LLVMValueRef llvm, nir_def *def, unsigned access)
 {
-   struct value *value = ralloc(t->b.shader, struct value);
+   struct value *value = ralloc(t->stage_options ? (void *)t->values : (void *)t->b.shader, struct value);
    if (!value)
       return fail(t, STELA_AIR_ALLOCATION, "AIR value allocation failed");
-   *value = (struct value){.def = def, .access = access};
+   *value = (struct value){.def = def, .access = access,
+      .components = def->num_components, .bits = def->bit_size};
    if (!_mesa_hash_table_insert(t->values, llvm, value))
       return fail(t, STELA_AIR_ALLOCATION, "AIR value map allocation failed");
    return true;
@@ -233,8 +244,10 @@ static nir_def *
 get_value(struct translator *t, LLVMValueRef llvm)
 {
    struct value *value = find_value(t, llvm);
-   if (value)
+   if (value) {
+      if (!value->def) fail(t, STELA_AIR_INSTRUCTION, "undefined/poison/aggregate reaches scalar-vector use");
       return value->def;
+   }
    if (LLVMIsAGlobalVariable(llvm))
       return shared_global(t, llvm);
    unsigned components, bits;
@@ -254,7 +267,8 @@ get_value(struct translator *t, LLVMValueRef llvm)
          return nir_imm_intN_t(&t->b, LLVMConstIntGetZExtValue(encoded), 32);
    }
    if (components > 1 && (LLVMIsAConstantVector(llvm) ||
-                         LLVMIsAConstantDataVector(llvm))) {
+                         LLVMIsAConstantDataVector(llvm) ||
+                         (t->stage_options && (LLVMIsAConstantFP(llvm) || LLVMIsAConstantInt(llvm))))) {
       nir_def *elements[4];
       for (unsigned i = 0; i < components; i++) {
          LLVMValueRef element = LLVMGetAggregateElement(llvm, i);
@@ -452,11 +466,13 @@ gep(struct translator *t, LLVMValueRef inst, const struct value **origin)
    struct value *base = find_value(t, LLVMGetOperand(inst, 0));
    LLVMTypeRef result_type = LLVMTypeOf(inst);
    if (!base || !base->access || LLVMGetTypeKind(result_type) != LLVMPointerTypeKind ||
-       LLVMGetPointerAddressSpace(result_type) != (base->shared ? 3 : 1)) {
+       LLVMGetPointerAddressSpace(result_type) != (base->shared ? 3 : base->constant_view ? 2 : 1)) {
       fail(t, STELA_AIR_MEMORY, "GEP requires a validated buffer/shared pointer");
       return NULL;
    }
    LLVMTypeRef type = LLVMGetGEPSourceElementType(inst);
+   if (base->view_root && !stela_air_metadata_stage_buffer_type(&t->metadata, base->constant_view, type))
+      return NULL;
    unsigned type_budget = 4096;
    if (!fixed_storage_type(t, type, 0, &type_budget))
       return NULL;
@@ -596,6 +612,259 @@ compare(struct translator *t, LLVMValueRef inst, nir_def *a, nir_def *b)
    }
 }
 
+static nir_def *
+value_lane(struct translator *t, struct value *v, unsigned lane)
+{
+   if (!v || lane >= v->components) return NULL;
+   return v->def ? nir_channel(&t->b, v->def, lane) : v->lanes[lane];
+}
+
+static struct value *
+partial_value(struct translator *t, LLVMValueRef llvm)
+{
+   struct value *v = find_value(t, llvm);
+   if (v) return v;
+   unsigned n, bits;
+   if (!value_shape(LLVMTypeOf(llvm), &n, &bits)) {
+      fail(t, STELA_AIR_TYPE, "unsupported partial render value type"); return NULL;
+   }
+   if (LLVMIsUndef(llvm) || LLVMIsPoison(llvm)) {
+      v = rzalloc(t->values, struct value);
+      if (!v) {
+         fail(t, STELA_AIR_ALLOCATION, "partial render value allocation failed"); return NULL;
+      }
+      v->components = n; v->bits = bits;
+      return v;
+   }
+   if (n > 1 && (LLVMIsAConstantVector(llvm) || LLVMIsAConstantDataVector(llvm) ||
+                 LLVMIsAConstantFP(llvm) || LLVMIsAConstantInt(llvm))) {
+      v = rzalloc(t->values, struct value);
+      if (!v) { fail(t, STELA_AIR_ALLOCATION, "partial vector allocation failed"); return NULL; }
+      v->components = n; v->bits = bits;
+      bool complete = true;
+      for (unsigned i = 0; i < n; i++) {
+         LLVMValueRef element = LLVMGetAggregateElement(llvm, i);
+         if (LLVMIsUndef(element) || LLVMIsPoison(element)) complete = false;
+         else if (!(v->lanes[i] = get_value(t, element))) return NULL;
+      }
+      if (complete) v->def = nir_vec(&t->b, v->lanes, n);
+      /* Constants are rematerialized at the actual use. Caching a vector's
+       * branch-local channels under the LLVM constant would violate dominance
+       * at a later use in another region. Instruction defs remain in the map. */
+      return v;
+   }
+   nir_def *def = get_value(t, llvm);
+   if (!def) return NULL;
+   v = rzalloc(t->values, struct value);
+   if (!v) { fail(t, STELA_AIR_ALLOCATION, "constant value wrapper allocation failed"); return NULL; }
+   v->def = def; v->components = n; v->bits = bits;
+   return v;
+}
+
+static bool
+put_lanes(struct translator *t, LLVMValueRef llvm, nir_def **lanes, unsigned n, unsigned bits)
+{
+   struct value *v = rzalloc(t->values, struct value);
+   if (!v) return fail(t, STELA_AIR_ALLOCATION, "render lane allocation failed");
+   v->components = n; v->bits = bits;
+   bool complete = true;
+   for (unsigned i = 0; i < n; i++) { v->lanes[i] = lanes[i]; complete &= lanes[i] != NULL; }
+   if (complete) v->def = nir_vec(&t->b, lanes, n);
+   return _mesa_hash_table_insert(t->values, llvm, v) != NULL ||
+      fail(t, STELA_AIR_ALLOCATION, "render lane map allocation failed");
+}
+
+static struct value *
+aggregate_value(struct translator *t, LLVMValueRef llvm)
+{
+   struct value *v = find_value(t, llvm);
+   if (v) {
+      if (v->aggregate_count) return v;
+      fail(t, STELA_AIR_TYPE, "nonaggregate render value"); return NULL;
+   }
+   LLVMTypeRef type = LLVMTypeOf(llvm);
+   if (LLVMGetTypeKind(type) != LLVMStructTypeKind || LLVMIsOpaqueStruct(type) ||
+       !LLVMIsPackedStruct(type) || !LLVMCountStructElementTypes(type) ||
+       LLVMCountStructElementTypes(type) > AIR_MAX_ARGUMENTS ||
+       (!LLVMIsUndef(llvm) && !LLVMIsPoison(llvm))) {
+      fail(t, STELA_AIR_TYPE, "unsupported/forward render aggregate"); return NULL;
+   }
+   unsigned count = LLVMCountStructElementTypes(type);
+   for (unsigned i = 0; i < count; i++) {
+      unsigned n, bits;
+      if (!float_shape(LLVMStructGetTypeAtIndex(type, i), &n, &bits)) {
+         fail(t, STELA_AIR_TYPE, "aggregate requires flat FP32 scalar/vector leaves"); return NULL;
+      }
+   }
+   v = rzalloc(t->values, struct value);
+   if (!v || !(v->elements = rzalloc_array(t->values, struct value *, count)) ||
+       !_mesa_hash_table_insert(t->values, llvm, v)) {
+      fail(t, STELA_AIR_ALLOCATION, "aggregate value allocation failed"); return NULL;
+   }
+   v->aggregate_count = count;
+   return v;
+}
+
+static bool
+stage_value_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
+{
+   if (op == LLVMInsertValue || op == LLVMExtractValue) {
+      if (LLVMGetNumIndices(inst) != 1)
+         return fail(t, STELA_AIR_INSTRUCTION, "nested aggregate indexing unsupported");
+      struct value *a = aggregate_value(t, LLVMGetOperand(inst, 0));
+      unsigned index = LLVMGetIndices(inst)[0];
+      if (!a || index >= a->aggregate_count)
+         return fail(t, STELA_AIR_INSTRUCTION, "invalid aggregate leaf index");
+      if (op == LLVMExtractValue) {
+         struct value *leaf = a->elements[index];
+         return (leaf && leaf->def && put_value(t, inst, leaf->def, 0)) ||
+            fail(t, STELA_AIR_INSTRUCTION, "undefined/poison aggregate leaf escapes");
+      }
+      struct value *leaf = partial_value(t, LLVMGetOperand(inst, 1));
+      if (!leaf) return false;
+      struct value *v = rzalloc(t->values, struct value);
+      if (!v || !(v->elements = ralloc_array(t->values, struct value *, a->aggregate_count)))
+         return fail(t, STELA_AIR_ALLOCATION, "aggregate insertion allocation failed");
+      v->aggregate_count = a->aggregate_count;
+      memcpy(v->elements, a->elements, a->aggregate_count * sizeof(*v->elements));
+      v->elements[index] = leaf;
+      return _mesa_hash_table_insert(t->values, inst, v) != NULL ||
+         fail(t, STELA_AIR_ALLOCATION, "aggregate insertion map failed");
+   }
+   struct value *a = partial_value(t, LLVMGetOperand(inst, 0));
+   if (!a) return false;
+   if (op == LLVMExtractElement || op == LLVMInsertElement) {
+      LLVMValueRef index = LLVMGetOperand(inst, op == LLVMInsertElement ? 2 : 1);
+      if (!LLVMIsAConstantInt(index) || LLVMConstIntGetZExtValue(index) >= a->components)
+         return fail(t, STELA_AIR_INSTRUCTION, "invalid/dynamic render vector index");
+      unsigned channel = LLVMConstIntGetZExtValue(index);
+      if (op == LLVMExtractElement) {
+         nir_def *lane = value_lane(t, a, channel);
+         return (lane && put_value(t, inst, lane, 0)) ||
+            fail(t, STELA_AIR_INSTRUCTION, "undefined/poison extracted lane escapes");
+      }
+      nir_def *lane = get_value(t, LLVMGetOperand(inst, 1));
+      if (!lane) return false;
+      nir_def *lanes[4];
+      for (unsigned i = 0; i < a->components; i++)
+         lanes[i] = i == channel ? lane : value_lane(t, a, i);
+      return put_lanes(t, inst, lanes, a->components, a->bits);
+   }
+   struct value *b = partial_value(t, LLVMGetOperand(inst, 1));
+   unsigned n = LLVMGetNumMaskElements(inst);
+   if (!b || a->components != b->components || a->bits != b->bits || !n || n > 4)
+      return fail(t, STELA_AIR_TYPE, "unsupported render shuffle shape");
+   nir_def *lanes[4] = {0};
+   for (unsigned i = 0; i < n; i++) {
+      int mask = LLVMGetMaskValue(inst, i);
+      if (mask < 0) continue; /* Undefined result lane stays symbolic. */
+      unsigned channel = (unsigned)mask;
+      if (channel >= a->components + b->components)
+         return fail(t, STELA_AIR_INSTRUCTION, "invalid render shuffle selector");
+      lanes[i] = channel < a->components ? value_lane(t, a, channel) : value_lane(t, b, channel - a->components);
+   }
+   return put_lanes(t, inst, lanes, n, a->bits);
+}
+
+static unsigned
+stage_location(struct translator *t, const struct stela_air_stage_io *io)
+{
+   if (io->semantic == STELA_AIR_POSITION) return VARYING_SLOT_POS;
+   if (io->semantic == STELA_AIR_RENDER_TARGET) return FRAG_RESULT_DATA0;
+   for (unsigned i = 0; i < t->stage_options->varying_count; i++) {
+      const struct stela_air_varying_slot *v = &t->stage_options->varyings[i];
+      if (v->identifier_bytes == io->identifier_bytes && !memcmp(v->identifier, io->identifier, io->identifier_bytes))
+         return VARYING_SLOT_VAR0 + v->location;
+   }
+   UNREACHABLE("stage map validated before emission");
+}
+
+static nir_variable *
+stage_variable(struct translator *t, const struct stela_air_stage_io *io, bool output)
+{
+   char name[4097];
+   const char *source = io->name ? io->name : "air.output";
+   size_t n = io->name ? io->name_bytes : strlen(source);
+   memcpy(name, source, n); name[n] = 0;
+   nir_variable *var = nir_variable_create(t->b.shader, output ? nir_var_shader_out : nir_var_shader_in,
+      glsl_vector_type(GLSL_TYPE_FLOAT, io->components), name);
+   if (!var) { fail(t, STELA_AIR_ALLOCATION, "render IO variable allocation failed"); return NULL; }
+   var->data.location = stage_location(t, io);
+   if (!output) var->data.interpolation = io->interpolation == STELA_AIR_PERSPECTIVE ?
+      INTERP_MODE_SMOOTH : INTERP_MODE_NOPERSPECTIVE;
+   return var;
+}
+
+static bool
+stage_arguments(struct translator *t, LLVMValueRef fn)
+{
+   bool slots[UINT8_MAX + 1] = {0};
+   for (unsigned i = 0; i < t->render.entry.input_count; i++) {
+      const struct stela_air_stage_io *io = &t->render.inputs[i];
+      LLVMValueRef param = LLVMGetParam(fn, io->argument);
+      nir_def *def;
+      unsigned slot = 0;
+      if (io->semantic == STELA_AIR_STAGE_BUFFER) {
+         if (t->options->bind_ssbo) {
+            if (!t->options->bind_ssbo(&io->buffer, &slot, t->options->binding_data) ||
+                slot >= t->options->ssbo_count || slots[slot])
+               return fail(t, STELA_AIR_ARGUMENT, "invalid constant-buffer SSBO binding");
+            slots[slot] = true; def = nir_imm_int64(&t->b, 0);
+         } else {
+            if (!t->options->bind_buffer ||
+                !(def = t->options->bind_buffer(&t->b, &io->buffer, t->options->binding_data)) ||
+                def->num_components != 1 || def->bit_size != 64)
+               return fail(t, STELA_AIR_ARGUMENT, "invalid/unbound readonly constant view");
+         }
+      } else if (io->semantic == STELA_AIR_VERTEX_ID) {
+         /* Metal vertex_id includes the base vertex; this is NIR's vertex_id,
+          * not vertex_id_zero_base. Actual draw arguments belong to runtime. */
+         def = nir_load_vertex_id(&t->b);
+      } else if (io->semantic == STELA_AIR_POSITION) {
+         t->b.shader->info.fs.origin_upper_left = true;
+         t->b.shader->info.fs.pixel_center_integer = false;
+         if (!io->used) continue;
+         def = nir_load_frag_coord(&t->b);
+      } else {
+         nir_variable *var = stage_variable(t, io, false);
+         if (!var) return false;
+         def = nir_load_var(&t->b, var);
+      }
+      if (!put_value(t, param, def, io->buffer.access)) return false;
+      if (io->semantic == STELA_AIR_STAGE_BUFFER) {
+         struct value *v = find_value(t, param);
+         v->constant_view = io; v->view_root = true;
+         v->ssbo = t->options->bind_ssbo != NULL; v->ssbo_slot = slot;
+      }
+   }
+   for (unsigned i = 0; i < t->render.entry.output_count; i++) {
+      if (!(t->outputs[i] = stage_variable(t, &t->render.outputs[i], true))) return false;
+   }
+   return true;
+}
+
+static bool
+stage_return(struct translator *t, LLVMValueRef inst)
+{
+   if (LLVMGetNumOperands(inst) != 1) return fail(t, STELA_AIR_TYPE, "render entry requires its real return value");
+   LLVMValueRef returned = LLVMGetOperand(inst, 0);
+   struct value *aggregate = NULL;
+   if (LLVMGetTypeKind(LLVMTypeOf(returned)) == LLVMStructTypeKind) {
+      aggregate = aggregate_value(t, returned);
+      if (!aggregate || aggregate->aggregate_count != t->render.entry.output_count)
+         return fail(t, STELA_AIR_TYPE, "render output aggregate mismatch");
+   }
+   nir_def *values[AIR_MAX_ARGUMENTS];
+   for (unsigned i = 0; i < t->render.entry.output_count; i++) {
+      values[i] = aggregate ? (aggregate->elements[i] ? aggregate->elements[i]->def : NULL) : get_value(t, returned);
+      if (!values[i]) return fail(t, STELA_AIR_INSTRUCTION, "undefined/poison render output leaf/lane");
+   }
+   /* Validate ALL leaves before emitting any output effect. */
+   for (unsigned i = 0; i < t->render.entry.output_count; i++)
+      nir_store_var(&t->b, t->outputs[i], values[i], BITFIELD_MASK(values[i]->num_components));
+   return true;
+}
+
 static bool
 instruction(struct translator *t, LLVMValueRef inst)
 {
@@ -603,7 +872,10 @@ instruction(struct translator *t, LLVMValueRef inst)
    t->b.fp_math_ctrl = fp_math_control(inst);
    unsigned components = 0, bits = 0;
    if (op == LLVMRet)
-      return LLVMGetNumOperands(inst) == 0 || fail(t, STELA_AIR_TYPE, "compute kernel return value");
+      return t->stage_options ? stage_return(t, inst) : LLVMGetNumOperands(inst) == 0 || fail(t, STELA_AIR_TYPE, "compute kernel return value");
+   if (t->stage_options && (op == LLVMInsertValue || op == LLVMExtractValue || op == LLVMShuffleVector ||
+                            op == LLVMExtractElement || op == LLVMInsertElement))
+      return stage_value_instruction(t, inst, op);
    if (op != LLVMStore && op != LLVMGetElementPtr && op != LLVMBitCast && op != LLVMCall &&
        !value_shape(LLVMTypeOf(inst), &components, &bits))
       return fail(t, STELA_AIR_TYPE, "unsupported AIR instruction result type (opcode %u)", op);
@@ -617,6 +889,7 @@ instruction(struct translator *t, LLVMValueRef inst)
       value->ssbo_slot = origin->ssbo_slot;
       value->shared = origin->shared;
       value->shared_size = origin->shared_size;
+      value->constant_view = origin->constant_view;
       return true;
    }
    if (op == LLVMBitCast) {
@@ -624,7 +897,8 @@ instruction(struct translator *t, LLVMValueRef inst)
       LLVMTypeRef source = LLVMTypeOf(LLVMGetOperand(inst, 0));
       if (LLVMGetTypeKind(source) == LLVMPointerTypeKind &&
           LLVMGetTypeKind(LLVMTypeOf(inst)) == LLVMPointerTypeKind &&
-          (LLVMGetPointerAddressSpace(source) == 1 || LLVMGetPointerAddressSpace(source) == 3) &&
+          (LLVMGetPointerAddressSpace(source) == 1 || LLVMGetPointerAddressSpace(source) == 3 ||
+           (t->stage_options && LLVMGetPointerAddressSpace(source) == 2)) &&
           LLVMGetPointerAddressSpace(LLVMTypeOf(inst)) == LLVMGetPointerAddressSpace(source)) {
          const struct value *origin = find_value(t, LLVMGetOperand(inst, 0));
          if (!origin || !origin->access || !put_value(t, inst, origin->def, origin->access))
@@ -634,6 +908,8 @@ instruction(struct translator *t, LLVMValueRef inst)
          value->ssbo_slot = origin->ssbo_slot;
          value->shared = origin->shared;
          value->shared_size = origin->shared_size;
+         value->constant_view = origin->constant_view;
+         value->view_root = origin->view_root;
          return true;
       }
       bool fp_pair = (float_shape(source, &src_components, &src_bits) &&
@@ -682,16 +958,50 @@ instruction(struct translator *t, LLVMValueRef inst)
       const char *unsigned_name = "air.convert.f.f32.u.i32";
       bool signed_conversion = name_length == strlen(signed_name) && !memcmp(name, signed_name, name_length);
       bool unsigned_conversion = name_length == strlen(unsigned_name) && !memcmp(name, unsigned_name, name_length);
+      unsigned conversion_components = 1;
+      if (t->stage_options && !signed_conversion && !unsigned_conversion) {
+         for (unsigned n = 2; n <= 4; n++) {
+            char expected[64];
+            snprintf(expected, sizeof(expected), "air.convert.f.v%uf32.u.v%ui32", n, n);
+            if (name_length == strlen(expected) && !memcmp(name, expected, name_length)) {
+               unsigned_conversion = true; conversion_components = n; break;
+            }
+         }
+      }
       if (!signed_conversion && !unsigned_conversion)
          return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR function/intrinsic call");
       if (!LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee) ||
           LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
           LLVMGetInstructionCallConv(inst) != LLVMCCallConv || LLVMGetNumArgOperands(inst) != 1 ||
           LLVMCountParams(callee) != 1 || LLVMIsFunctionVarArg(LLVMGlobalGetValueType(callee)) ||
-          LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMFloatTypeKind ||
-          LLVMGetTypeKind(LLVMTypeOf(LLVMGetOperand(inst, 0))) != LLVMIntegerTypeKind ||
-          LLVMGetIntTypeWidth(LLVMTypeOf(LLVMGetOperand(inst, 0))) != 32)
+          (t->stage_options && (LLVMGetNumOperandBundles(inst) ||
+           LLVMGetCalledFunctionType(inst) != LLVMGlobalGetValueType(callee))) ||
+          (conversion_components == 1 ?
+             (LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMFloatTypeKind ||
+              LLVMGetTypeKind(LLVMTypeOf(LLVMGetOperand(inst, 0))) != LLVMIntegerTypeKind ||
+              LLVMGetIntTypeWidth(LLVMTypeOf(LLVMGetOperand(inst, 0))) != 32) :
+             (LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMVectorTypeKind ||
+              LLVMGetVectorSize(LLVMTypeOf(inst)) != conversion_components ||
+              LLVMGetTypeKind(LLVMGetElementType(LLVMTypeOf(inst))) != LLVMFloatTypeKind ||
+              LLVMGetTypeKind(LLVMTypeOf(LLVMGetOperand(inst, 0))) != LLVMVectorTypeKind ||
+              LLVMGetVectorSize(LLVMTypeOf(LLVMGetOperand(inst, 0))) != conversion_components ||
+              LLVMGetTypeKind(LLVMGetElementType(LLVMTypeOf(LLVMGetOperand(inst, 0)))) != LLVMIntegerTypeKind ||
+              LLVMGetIntTypeWidth(LLVMGetElementType(LLVMTypeOf(LLVMGetOperand(inst, 0)))) != 32)))
          return fail(t, STELA_AIR_TYPE, "unsupported AIR integer-to-FP conversion signature");
+      if (t->stage_options) {
+         unsigned strict = LLVMGetEnumAttributeKindForName("strictfp", strlen("strictfp"));
+         if (strict && (LLVMGetEnumAttributeAtIndex(callee, LLVMAttributeFunctionIndex, strict) ||
+                        LLVMGetCallSiteEnumAttribute(inst, LLVMAttributeFunctionIndex, strict)))
+            return fail(t, STELA_AIR_TYPE, "strict conversion environment is unsupported");
+         const char *environment[] = {"denormal-fp-math", "denormal-fp-math-f32", "rounding-math"};
+         for (unsigned i = 0; i < ARRAY_SIZE(environment); i++) {
+            if (LLVMGetStringAttributeAtIndex(callee, LLVMAttributeFunctionIndex,
+                                              environment[i], strlen(environment[i])) ||
+                LLVMGetCallSiteStringAttribute(inst, LLVMAttributeFunctionIndex,
+                                               environment[i], strlen(environment[i])))
+               return fail(t, STELA_AIR_TYPE, "conversion environment override is unsupported");
+         }
+      }
       if (t->options->fp_profile != STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41)
          return fail(t, STELA_AIR_METADATA, "AIR conversion intrinsic requires qualified compiler profile");
       if (!fp_environment(t))
@@ -705,7 +1015,9 @@ instruction(struct translator *t, LLVMValueRef inst)
        * route this through a target arithmetic negate that can canonicalize. */
       return value && put_value(t, inst, nir_ixor(&t->b, value, nir_imm_int(&t->b, INT32_MIN)), 0);
    }
-   if (op == LLVMFAdd || op == LLVMFSub || op == LLVMFMul || op == LLVMFCmp ||
+   if (t->stage_options && op == LLVMFDiv && LLVMGetFastMathFlags(inst) != LLVMFastMathAll)
+      return fail(t, STELA_AIR_INSTRUCTION, "precise/partially relaxed render FP division is unqualified");
+   if (op == LLVMFAdd || op == LLVMFSub || op == LLVMFMul || (t->stage_options && op == LLVMFDiv) || op == LLVMFCmp ||
        op == LLVMSIToFP || op == LLVMUIToFP) {
       if (!fp_environment(t))
          return false;
@@ -728,6 +1040,8 @@ instruction(struct translator *t, LLVMValueRef inst)
          value = nir_fsub(&t->b, a, b);
       else if (op == LLVMFMul)
          value = nir_fmul(&t->b, a, b);
+      else if (op == LLVMFDiv)
+         value = nir_fdiv(&t->b, a, b);
       else {
          const nir_shader_compiler_options *options = t->b.shader->options;
          /* Match the original frontend/NIR option contract. Some backends
@@ -795,6 +1109,9 @@ instruction(struct translator *t, LLVMValueRef inst)
          return fail(t, STELA_AIR_TYPE, "unsupported store type");
       if (bits == 1)
          return fail(t, STELA_AIR_MEMORY, "sub-byte memory access unsupported");
+      if (address->view_root && op == LLVMLoad &&
+          !stela_air_metadata_stage_buffer_type(&t->metadata, address->constant_view, LLVMTypeOf(inst)))
+         return false;
       unsigned alignment = LLVMGetAlignment(inst);
       if (!alignment)
          return fail(t, STELA_AIR_MEMORY, "memory access lacks explicit alignment");
@@ -1283,22 +1600,29 @@ emit_region(struct translator *t, struct air_block *block, LLVMBasicBlockRef pre
    return fail(t, STELA_AIR_CONTROL_FLOW, "missing AIR region exit");
 }
 
-nir_shader *
-stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
+static nir_shader *
+translate(const void *bitcode, size_t size, const char *entry,
                  const nir_shader_compiler_options *nir_options,
                  const struct stela_air_options *options,
-                 struct stela_air_error *error)
+                 struct stela_air_error *error, const struct stela_air_stage_options *stage)
 {
    struct stela_air_error local_error = {0};
    if (!error)
       error = &local_error;
    *error = (struct stela_air_error){0};
-   struct translator t = {.options = options, .error = error};
+   struct translator t = {.options = options, .error = error, .stage_options = stage};
    if (!bitcode || size < 4 || size > AIR_MAX_BITCODE_BYTES ||
        memcmp(bitcode, "BC\xc0\xde", 4) || !entry || !*entry || !nir_options ||
-       !options || !options->max_instructions || !options->workgroup_size[0] ||
-       !options->workgroup_size[1] || !options->workgroup_size[2]) {
+       !options || !options->max_instructions || (!stage && (!options->workgroup_size[0] ||
+       !options->workgroup_size[1] || !options->workgroup_size[2]))) {
       fail(&t, STELA_AIR_INPUT, "invalid AIR bitcode/options");
+      return NULL;
+   }
+   if (stage && ((stage->stage != STELA_AIR_VERTEX && stage->stage != STELA_AIR_FRAGMENT) ||
+       options->workgroup_size[0] || options->workgroup_size[1] || options->workgroup_size[2] ||
+       options->max_threadgroup_bytes || options->bind_threadgroup ||
+       stage->max_varying_slots > VARYING_SLOT_MAX - VARYING_SLOT_VAR0)) {
+      fail(&t, STELA_AIR_INPUT, "render options must not supply compute/shared specializations");
       return NULL;
    }
    for (unsigned i = 0; i < 3; i++) {
@@ -1354,7 +1678,7 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
       fail(&t, STELA_AIR_TARGET, "unsupported target/globals/inline assembly");
       goto done;
    }
-   t.metadata = (struct stela_air_metadata){.module = t.module, .error = error};
+   t.metadata = (struct stela_air_metadata){.module = t.module, .error = error, .render = stage != NULL};
    if (!stela_air_metadata_layout(&t.metadata) || !stela_air_metadata_validate(&t.metadata))
       goto done;
    t.layout = t.metadata.layout;
@@ -1375,15 +1699,20 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
    }
    LLVMValueRef fn = LLVMGetNamedFunction(t.module, entry);
    if (!fn || LLVMIsDeclaration(fn) || LLVMGetFunctionCallConv(fn) != LLVMCCallConv ||
-       LLVMGetTypeKind(LLVMGetReturnType(LLVMGlobalGetValueType(fn))) != LLVMVoidTypeKind ||
+       (!stage && LLVMGetTypeKind(LLVMGetReturnType(LLVMGlobalGetValueType(fn))) != LLVMVoidTypeKind) ||
        LLVMIsFunctionVarArg(LLVMGlobalGetValueType(fn))) {
       fail(&t, STELA_AIR_ARGUMENT, "entry must be a defined nonvariadic void C-convention kernel");
       goto done;
    }
+   if (stage && (!stela_air_metadata_stage(&t.metadata, fn, stage->stage, &t.render) ||
+                 !stela_air_metadata_stage_map(&t.metadata, &t.render, stage->varyings,
+                                               stage->varying_count, stage->max_varying_slots)))
+      goto done;
    if (!cfg_prepare(&t, fn))
       goto done;
    t.entry = fn;
-   t.b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, nir_options, "%s", entry);
+   t.b = nir_builder_init_simple_shader(stage ? (stage->stage == STELA_AIR_VERTEX ?
+      MESA_SHADER_VERTEX : MESA_SHADER_FRAGMENT) : MESA_SHADER_COMPUTE, nir_options, "%s", entry);
    t.b.fp_math_ctrl = nir_fp_no_fast_math;
    if (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT && !fp_environment(&t))
       goto done;
@@ -1391,7 +1720,7 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
       t.b.shader->info.workgroup_size[i] = options->workgroup_size[i];
    t.b.shader->info.num_ssbos = options->ssbo_count;
    t.values = _mesa_pointer_hash_table_create(t.b.shader);
-   if (!t.values || !kernel_arguments(&t, fn)) {
+   if (!t.values || !(stage ? stage_arguments(&t, fn) : kernel_arguments(&t, fn))) {
       fail(&t, STELA_AIR_ALLOCATION, "AIR shader/value map allocation failed");
       goto done;
    }
@@ -1416,9 +1745,13 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
       }
       nir_lower_explicit_io(t.b.shader, nir_var_mem_shared, nir_address_format_32bit_offset);
    }
-   if (t.shared_resources || t.shared_barriers)
+   if (stage || t.shared_resources || t.shared_barriers)
       nir_shader_gather_info(t.b.shader, nir_shader_get_entrypoint(t.b.shader));
-   nir_validate_shader(t.b.shader, "AIR bounded compute translation");
+   nir_validate_shader(t.b.shader, stage ? "AIR bounded render translation" : "AIR bounded compute translation");
+   /* The lowering map is compiler scratch, not shader state. Drop LLVM keys
+    * and render descriptor/lane wrappers before their input/stack owners end. */
+   ralloc_free(t.values);
+   t.values = NULL;
    result = t.b.shader;
    t.b.shader = NULL;
    error->instruction = 0;
@@ -1429,4 +1762,24 @@ done:
       LLVMDisposeModule(t.module);
    LLVMContextDispose(t.context);
    return result;
+}
+
+nir_shader *
+stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
+                  const nir_shader_compiler_options *nir_options,
+                  const struct stela_air_options *options, struct stela_air_error *error)
+{
+   return translate(bitcode, size, entry, nir_options, options, error, NULL);
+}
+
+nir_shader *
+stela_air_stage_to_nir(const void *bitcode, size_t size, const char *entry,
+                        const nir_shader_compiler_options *nir_options,
+                        const struct stela_air_stage_options *options, struct stela_air_error *error)
+{
+   if (!options) {
+      if (error) *error = (struct stela_air_error){.kind = STELA_AIR_INPUT};
+      return NULL;
+   }
+   return translate(bitcode, size, entry, nir_options, &options->resources, error, options);
 }

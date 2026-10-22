@@ -95,6 +95,27 @@ struct stela_air_options {
    unsigned max_threadgroup_bytes;
 };
 
+/* Additive VS/FS frontend. No runtime/Metal pipeline is constructed. resources
+ * supplies the same actual AS2-readonly view/bounds and FP contract as compute;
+ * workgroup_size/max_threadgroup_bytes/bind_threadgroup must be zero/NULL here.
+ * AS2 and AS1 are not interchangeable permissions/address spaces. All declared
+ * varying identifiers/types must match the explicit shared VS/FS map. Target
+ * IO limits are real caller facts, not inferred Metal family advertisement.
+ * Returned NIR owns variables/names; no descriptor/map/input pointer survives.
+ * Original NIR stage IO lowering belongs to the actual vendor compiler owner.
+ * As with the compute entrypoint, nir_options must outlive the returned shader;
+ * the owned vendor compiler wrapper must retain a stable qualified options copy. */
+struct stela_air_stage_options {
+   enum stela_air_stage stage;
+   struct stela_air_options resources;
+   const struct stela_air_varying_slot *varyings;
+   unsigned varying_count, max_varying_slots;
+};
+nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
+                                  const nir_shader_compiler_options *,
+                                  const struct stela_air_stage_options *,
+                                  struct stela_air_error *);
+
 /* Input is the hash-checked raw AIR bitcode selected by the archive reader.
  * Success transfers ownership of a real NIR shader to the caller (ralloc_free).
  * Failure returns NULL, destroys partial NIR, and reports an explicit error.

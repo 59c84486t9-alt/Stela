@@ -226,6 +226,8 @@ module_flags(struct stela_air_metadata *t)
          t->max_device_buffers = value;
       if (key == 4)
          t->max_threadgroup_buffers = value;
+      if (key == 3)
+         t->max_constant_buffers = value;
    }
    /* No linking, CPU frame operations or source wchar operations occur in the
     * implemented compute subset. Other resource kinds remain refused.
@@ -244,7 +246,9 @@ stela_air_metadata_validate(struct stela_air_metadata *t)
       const char *allowed[] = {"air.version", "air.language_version",
                               "air.compile_options", "air.kernel", "llvm.ident",
                               "llvm.module.flags"};
-      bool found = false;
+      bool found = t->render &&
+         ((size == 10 && !memcmp(name, "air.vertex", size)) ||
+          (size == 12 && !memcmp(name, "air.fragment", size)));
       for (unsigned i = 0; i < ARRAY_SIZE(allowed); i++)
          found |= size == strlen(allowed[i]) && !memcmp(name, allowed[i], size);
       if (!found)
@@ -273,6 +277,10 @@ stela_air_metadata_validate(struct stela_air_metadata *t)
       if (seen & bit)
          return fail(t, STELA_AIR_METADATA, "duplicate/conflicting AIR compile option");
       seen |= bit;
+      if (bit == 4) {
+         t->framebuffer_fetch_present = true;
+         t->framebuffer_fetch_enabled = stela_air_md_string(fields[0], "air.compile.framebuffer_fetch_enable");
+      }
    }
    t->denorms_disable = seen & 1;
    t->fast_math = seen & 2;
@@ -419,33 +427,163 @@ complete_reflection(struct stela_air_metadata *m, LLVMValueRef fn,
    return true;
 }
 
-bool
-stela_air_metadata_kernel(struct stela_air_metadata *t, LLVMValueRef fn,
-                           struct stela_air_kernel *kernel)
+/* UTF-8 scalar validation is bounded by the explicit metadata string length.
+ * No locale-dependent normalization: opaque linkage bytes compare exactly. */
+static bool
+stage_text(const char *s, size_t n)
 {
-   if (!fn || LLVMIsDeclaration(fn) || LLVMGetFunctionCallConv(fn) != LLVMCCallConv ||
-       LLVMGetTypeKind(LLVMGetReturnType(LLVMGlobalGetValueType(fn))) != LLVMVoidTypeKind ||
-       LLVMIsFunctionVarArg(LLVMGlobalGetValueType(fn)))
-      return fail(t, STELA_AIR_ARGUMENT, "entry must be a defined nonvariadic void C-convention kernel");
-   LLVMValueRef kernels[AIR_MAX_METADATA_OPERANDS], args_node = NULL;
-   unsigned kernel_count;
-   if (!stela_air_named_md(t, "air.kernel", kernels, &kernel_count))
-      return false;
-   for (unsigned i = 0; i < kernel_count; i++) {
-      LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
-      unsigned count;
-      if (!stela_air_md_node(t, kernels[i], fields, &count) || count != 3)
-         return fail(t, STELA_AIR_METADATA, "invalid air.kernel descriptor");
-      if (fields[0] == fn) {
-         LLVMValueRef outputs[AIR_MAX_METADATA_OPERANDS];
-         unsigned output_count;
-         if (args_node || !stela_air_md_node(t, fields[1], outputs, &output_count) || output_count)
-            return fail(t, STELA_AIR_METADATA, "duplicate kernel or nonempty compute outputs");
-         args_node = fields[2];
+   if (!s || !n || n > 4096) return false;
+   for (size_t i = 0; i < n;) {
+      unsigned a = (unsigned char)s[i++], value, count, minimum;
+      if (!a) return false;
+      if (a < 0x80) continue;
+      if (a >= 0xc2 && a <= 0xdf) { value = a & 31; count = 1; minimum = 0x80; }
+      else if (a >= 0xe0 && a <= 0xef) { value = a & 15; count = 2; minimum = 0x800; }
+      else if (a >= 0xf0 && a <= 0xf4) { value = a & 7; count = 3; minimum = 0x10000; }
+      else return false;
+      if (count > n - i) return false;
+      while (count--) {
+         unsigned b = (unsigned char)s[i++];
+         if ((b & 0xc0) != 0x80) return false;
+         value = (value << 6) | (b & 63);
       }
+      if (value < minimum || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) return false;
    }
-   if (!args_node)
-      return fail(t, STELA_AIR_METADATA, "entry is not an AIR compute kernel");
+   return true;
+}
+
+static bool
+metadata_text(struct stela_air_metadata *m, LLVMValueRef v, const char **s, size_t *n)
+{
+   if (!v || !LLVMIsAMDString(v)) return fail(m, STELA_AIR_METADATA, "expected stage metadata string");
+   unsigned bytes;
+   *s = LLVMGetMDString(v, &bytes); *n = bytes;
+   return stage_text(*s, *n) || fail(m, STELA_AIR_METADATA, "invalid stage metadata text");
+}
+
+static unsigned
+primitive_bytes(enum stela_air_primitive p)
+{
+   return p == STELA_AIR_CHAR || p == STELA_AIR_UCHAR ? 1 :
+          p == STELA_AIR_SHORT || p == STELA_AIR_USHORT ? 2 :
+          p == STELA_AIR_INT || p == STELA_AIR_UINT || p == STELA_AIR_FLOAT ? 4 :
+          p == STELA_AIR_LONG || p == STELA_AIR_ULONG ? 8 : 0;
+}
+
+static bool
+stage_type_matches(LLVMTypeRef type, enum stela_air_primitive p, unsigned n)
+{
+   if (!n || n > 4) return false;
+   if (n > 1) {
+      if (LLVMGetTypeKind(type) != LLVMVectorTypeKind || LLVMGetVectorSize(type) != n) return false;
+      type = LLVMGetElementType(type);
+   }
+   return p == STELA_AIR_FLOAT ? LLVMGetTypeKind(type) == LLVMFloatTypeKind :
+      primitive_bytes(p) && LLVMGetTypeKind(type) == LLVMIntegerTypeKind &&
+      LLVMGetIntTypeWidth(type) == primitive_bytes(p) * 8;
+}
+
+/* These types are fixed, sized builtin leaves selected from validated metadata.
+ * Never ask DataLayout to size an unvalidated source/scalable/opaque type. */
+static bool
+stage_primitive_layout(struct stela_air_metadata *m, enum stela_air_primitive p,
+                       unsigned components, unsigned size, unsigned alignment)
+{
+   unsigned bytes = primitive_bytes(p);
+   if (!bytes || !components || components > 4)
+      return fail(m, STELA_AIR_TYPE, "unsupported reflected primitive storage");
+   LLVMContextRef context = LLVMGetModuleContext(m->module);
+   LLVMTypeRef type = p == STELA_AIR_FLOAT ? LLVMFloatTypeInContext(context) :
+      LLVMIntTypeInContext(context, bytes * 8);
+   if (components > 1) type = LLVMVectorType(type, components);
+   return (LLVMABISizeOfType(m->layout, type) == size &&
+           LLVMABIAlignmentOfType(m->layout, type) == alignment) ||
+      fail(m, STELA_AIR_TYPE, "reflected primitive storage differs from IR DataLayout");
+}
+
+static bool
+stage_struct(struct stela_air_metadata *m, struct stela_air_render *r,
+              struct stela_air_stage_io *io, LLVMValueRef node)
+{
+   if (!node) {
+      unsigned bytes = primitive_bytes(io->primitive) * (io->components == 3 ? 4 : io->components);
+      if (!bytes || bytes != io->buffer.type_size || bytes != io->buffer.type_alignment)
+         return fail(m, STELA_AIR_ARGUMENT, "constant buffer reflection requires exact primitive or understood structure");
+      return stage_primitive_layout(m, io->primitive, io->components,
+                                    io->buffer.type_size, io->buffer.type_alignment);
+   }
+   if (io->primitive != STELA_AIR_PRIMITIVE_UNKNOWN)
+      return fail(m, STELA_AIR_METADATA, "primitive buffer has structure metadata");
+   LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+   unsigned count;
+   if (!stela_air_md_node(m, node, fields, &count) || !count || count % 5 ||
+       count / 5 > AIR_MAX_ARGUMENTS - r->member_count)
+      return fail(m, STELA_AIR_LIMIT, "structure reflection member budget/shape exceeded");
+   io->members = &r->members[r->member_count];
+   unsigned end = 0, align = 1;
+   for (unsigned i = 0; i < count; i += 5) {
+      struct stela_air_struct_member *member = &r->members[r->member_count++];
+      unsigned flags;
+      if (!stela_air_md_uint(fields[i], &member->offset) ||
+          !stela_air_md_uint(fields[i + 1], &member->size) ||
+          !stela_air_md_uint(fields[i + 2], &flags) || flags ||
+          !metadata_text(m, fields[i + 3], &member->type_name, &member->type_name_bytes) ||
+          !metadata_text(m, fields[i + 4], &member->name, &member->name_bytes))
+         return fail(m, STELA_AIR_METADATA, "unsupported structure reflection member");
+      member->primitive = primitive_type(fields[i + 3], &member->components);
+      unsigned bytes = primitive_bytes(member->primitive) * (member->components == 3 ? 4 : member->components);
+      if (!bytes || member->size != bytes || member->offset < end || member->offset % bytes ||
+          member->offset > io->buffer.type_size || bytes > io->buffer.type_size - member->offset)
+         return fail(m, STELA_AIR_TYPE, "structure reflection layout is inconsistent");
+      if (!stage_primitive_layout(m, member->primitive, member->components, bytes, bytes))
+         return false;
+      unsigned expected = (end + bytes - 1) & ~(bytes - 1);
+      if (expected != member->offset)
+         return fail(m, STELA_AIR_TYPE, "unsupported explicit structure padding");
+      end = member->offset + bytes;
+      if (bytes > align) align = bytes;
+      io->member_count++;
+   }
+   return (io->buffer.type_alignment == align &&
+           ((end + align - 1) & ~(align - 1)) == io->buffer.type_size) ||
+      fail(m, STELA_AIR_TYPE, "structure reflection extent/alignment mismatch");
+}
+
+bool
+stela_air_metadata_stage_buffer_type(struct stela_air_metadata *m,
+                                     const struct stela_air_stage_io *io, LLVMTypeRef type)
+{
+   if (!io->member_count) {
+      if (!stage_type_matches(type, io->primitive, io->components))
+         return fail(m, STELA_AIR_TYPE, "constant view source type differs from reflection");
+      return (LLVMABISizeOfType(m->layout, type) == io->buffer.type_size &&
+              LLVMABIAlignmentOfType(m->layout, type) == io->buffer.type_alignment) ||
+         fail(m, STELA_AIR_TYPE, "constant-view IR allocation differs from reflection");
+   }
+   /* Every leaf is checked before ANY fixed-size DataLayout query; opaque,
+    * scalable, target-extension, nested and unsized storage are refused. */
+   if (LLVMGetTypeKind(type) != LLVMStructTypeKind || LLVMIsOpaqueStruct(type) ||
+       LLVMIsPackedStruct(type) || LLVMCountStructElementTypes(type) != io->member_count)
+      return fail(m, STELA_AIR_TYPE, "unsupported constant-view structure type");
+   for (unsigned i = 0; i < io->member_count; i++) {
+      const struct stela_air_struct_member *a = &io->members[i];
+      if (!stage_type_matches(LLVMStructGetTypeAtIndex(type, i), a->primitive, a->components))
+         return fail(m, STELA_AIR_TYPE, "constant-view member type differs from reflection");
+   }
+   if (LLVMABISizeOfType(m->layout, type) != io->buffer.type_size ||
+       LLVMABIAlignmentOfType(m->layout, type) != io->buffer.type_alignment)
+      return fail(m, STELA_AIR_TYPE, "constant-view IR allocation differs from reflection");
+   for (unsigned i = 0; i < io->member_count; i++) {
+      if (LLVMOffsetOfElement(m->layout, type, i) != io->members[i].offset)
+         return fail(m, STELA_AIR_TYPE, "constant-view IR member offset differs from reflection");
+   }
+   return true;
+}
+
+static bool
+metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef args_node,
+                   struct stela_air_kernel *kernel, struct stela_air_render *render)
+{
    unsigned argc = LLVMCountParams(fn);
    if (argc > AIR_MAX_ARGUMENTS)
       return fail(t, STELA_AIR_LIMIT, "AIR argument budget exceeded");
@@ -484,16 +622,36 @@ stela_air_metadata_kernel(struct stela_air_metadata *t, LLVMValueRef fn,
       }
       bool buffer = stela_air_md_string(fields[1], "air.buffer");
       bool thread_id = stela_air_md_string(fields[1], "air.thread_position_in_grid");
-      if (!buffer && !thread_id)
+      bool vertex_id = render && render->entry.stage == STELA_AIR_VERTEX &&
+                       stela_air_md_string(fields[1], "air.vertex_id");
+      bool position = render && render->entry.stage == STELA_AIR_FRAGMENT &&
+                      stela_air_md_string(fields[1], "air.position");
+      bool varying = render && render->entry.stage == STELA_AIR_FRAGMENT &&
+                     stela_air_md_string(fields[1], "air.fragment_input");
+      if ((render && thread_id) || (!buffer && !thread_id && !vertex_id && !position && !varying))
          return fail(t, STELA_AIR_ARGUMENT, "unsupported AIR argument kind at %u", index);
       struct stela_air_buffer desc = {.argument = index};
+      struct stela_air_stage_io *io = render ? &render->inputs[a] : NULL;
+      if (io) {
+         *io = (struct stela_air_stage_io){.argument = index,
+            .semantic = buffer ? STELA_AIR_STAGE_BUFFER : vertex_id ? STELA_AIR_VERTEX_ID :
+                        position ? STELA_AIR_POSITION : STELA_AIR_VARYING};
+      }
+      unsigned first_field = 2;
+      if (varying) {
+         if (fields_count < 3 || !metadata_text(t, fields[2], &io->identifier, &io->identifier_bytes))
+            return fail(t, STELA_AIR_METADATA, "missing fragment linkage identifier");
+         first_field++;
+      }
+      bool unused = false;
+      LLVMValueRef struct_info = NULL;
       bool has_location = false, has_as = false, has_size = false, has_align = false;
       bool has_name = false, has_type_name = false;
       enum stela_air_primitive primitive = STELA_AIR_PRIMITIVE_UNKNOWN;
       unsigned type_components = 0;
       const char *name = NULL, *type_name = NULL;
       unsigned name_bytes = 0, type_name_bytes = 0;
-      for (unsigned f = 2; f < fields_count;) {
+      for (unsigned f = first_field; f < fields_count;) {
          LLVMValueRef key = fields[f++];
          if (stela_air_md_string(key, "air.read") || stela_air_md_string(key, "air.write") ||
              stela_air_md_string(key, "air.read_write")) {
@@ -533,6 +691,21 @@ stela_air_metadata_kernel(struct stela_air_metadata *t, LLVMValueRef fn,
             }
             f++;
             *present = true;
+         } else if (io && stela_air_md_string(key, "air.struct_type_info")) {
+            if (!buffer || struct_info || f == fields_count)
+               return fail(t, STELA_AIR_METADATA, "invalid structure reflection");
+            struct_info = fields[f++];
+         } else if (io && (position || varying) && stela_air_md_string(key, "air.center")) {
+            if (io->center) return fail(t, STELA_AIR_METADATA, "duplicate sampling qualifier");
+            io->center = true;
+         } else if (io && (position || varying) &&
+                    (stela_air_md_string(key, "air.perspective") || stela_air_md_string(key, "air.no_perspective"))) {
+            if (io->interpolation) return fail(t, STELA_AIR_METADATA, "duplicate interpolation qualifier");
+            io->interpolation = stela_air_md_string(key, "air.perspective") ?
+               STELA_AIR_PERSPECTIVE : STELA_AIR_NO_PERSPECTIVE;
+         } else if (io && (position || varying) && stela_air_md_string(key, "air.arg_unused")) {
+            if (unused) return fail(t, STELA_AIR_METADATA, "duplicate unused qualifier");
+            unused = true;
          } else {
             return fail(t, STELA_AIR_METADATA, "unsupported argument metadata at %u", index);
          }
@@ -541,18 +714,27 @@ stela_air_metadata_kernel(struct stela_air_metadata *t, LLVMValueRef fn,
       if (buffer) {
          LLVMTypeRef type = LLVMTypeOf(param);
          if (!has_location || !has_as || !desc.access ||
-             (desc.address_space != 1 && desc.address_space != 3) ||
+             (render ? desc.address_space != 2 : (desc.address_space != 1 && desc.address_space != 3)) ||
              LLVMGetTypeKind(type) != LLVMPointerTypeKind ||
              LLVMGetPointerAddressSpace(type) != desc.address_space)
             return fail(t, STELA_AIR_ARGUMENT, "unsupported buffer %u", index);
          bool shared = desc.address_space == 3;
          bool *indices = shared ? shared_indices : buffer_indices;
-         unsigned limit = shared ? t->max_threadgroup_buffers : t->max_device_buffers;
+         unsigned limit = shared ? t->max_threadgroup_buffers : render ? t->max_constant_buffers : t->max_device_buffers;
          if (indices[desc.index] || (limit && desc.index >= limit))
             return fail(t, STELA_AIR_METADATA, "duplicate buffer or location exceeds AIR module limit");
          indices[desc.index] = true;
+         if (render && (desc.access != STELA_AIR_READ || !has_size || !has_align ||
+                        !desc.type_size || !desc.type_alignment))
+            return fail(t, STELA_AIR_ARGUMENT, "render constant view must be reflected and readonly");
          if (shared && (!has_size || !has_align || !desc.type_size || !desc.type_alignment))
             return fail(t, STELA_AIR_ARGUMENT, "invalid/unbound threadgroup buffer %u", index);
+      } else if (position || varying) {
+         if (!io->center || !io->interpolation || primitive != STELA_AIR_FLOAT ||
+             !stage_type_matches(LLVMTypeOf(param), primitive, type_components) ||
+             (position && (type_components != 4 || io->interpolation != STELA_AIR_NO_PERSPECTIVE)))
+            return fail(t, STELA_AIR_ARGUMENT, "unsupported fragment input type/interpolation");
+         components = type_components;
       } else {
          LLVMTypeRef type = LLVMTypeOf(param);
          components = 1;
@@ -566,6 +748,18 @@ stela_air_metadata_kernel(struct stela_air_metadata *t, LLVMValueRef fn,
              (components != 1 && components != 3))
             return fail(t, STELA_AIR_ARGUMENT, "unsupported thread-position type");
       }
+      if (io) {
+         io->buffer = desc; io->primitive = primitive; io->components = type_components;
+         io->name = name; io->name_bytes = name_bytes;
+         io->type_name = type_name; io->type_name_bytes = type_name_bytes;
+         io->used = LLVMGetFirstUse(param) != NULL;
+         if (unused && io->used)
+            return fail(t, STELA_AIR_METADATA, "used fragment input marked unused");
+         if (vertex_id && (primitive != STELA_AIR_UINT || type_components != 1 || components != 1))
+            return fail(t, STELA_AIR_ARGUMENT, "vertex ID must be uint");
+         if (buffer && !stage_struct(t, render, io, struct_info))
+            return false;
+      }
       kernel->arguments[a] = (struct stela_air_argument) {
          .value = param, .buffer = desc, .is_buffer = buffer, .components = components,
          .plain_buffer_type = primitive != STELA_AIR_PRIMITIVE_UNKNOWN,
@@ -574,6 +768,245 @@ stela_air_metadata_kernel(struct stela_air_metadata *t, LLVMValueRef fn,
       };
    }
    kernel->count = argc;
+   return true;
+}
+
+bool
+stela_air_metadata_kernel(struct stela_air_metadata *t, LLVMValueRef fn,
+                           struct stela_air_kernel *kernel)
+{
+   if (!fn || LLVMIsDeclaration(fn) || LLVMGetFunctionCallConv(fn) != LLVMCCallConv ||
+       LLVMGetTypeKind(LLVMGetReturnType(LLVMGlobalGetValueType(fn))) != LLVMVoidTypeKind ||
+       LLVMIsFunctionVarArg(LLVMGlobalGetValueType(fn)))
+      return fail(t, STELA_AIR_ARGUMENT, "entry must be a defined nonvariadic void C-convention kernel");
+   LLVMValueRef kernels[AIR_MAX_METADATA_OPERANDS], args_node = NULL;
+   unsigned kernel_count;
+   if (!stela_air_named_md(t, "air.kernel", kernels, &kernel_count))
+      return false;
+   for (unsigned i = 0; i < kernel_count; i++) {
+      LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+      unsigned count;
+      if (!stela_air_md_node(t, kernels[i], fields, &count) || count != 3)
+         return fail(t, STELA_AIR_METADATA, "invalid air.kernel descriptor");
+      if (fields[0] == fn) {
+         LLVMValueRef outputs[AIR_MAX_METADATA_OPERANDS];
+         unsigned output_count;
+         if (args_node || !stela_air_md_node(t, fields[1], outputs, &output_count) || output_count)
+            return fail(t, STELA_AIR_METADATA, "duplicate kernel or nonempty compute outputs");
+         args_node = fields[2];
+      }
+   }
+   if (!args_node)
+      return fail(t, STELA_AIR_METADATA, "entry is not an AIR compute kernel");
+   return metadata_arguments(t, fn, args_node, kernel, NULL);
+}
+
+bool
+stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
+                         enum stela_air_stage stage, struct stela_air_render *r)
+{
+   if (!m->render || (stage != STELA_AIR_VERTEX && stage != STELA_AIR_FRAGMENT) ||
+       !fn || !LLVMIsAFunction(fn) || LLVMIsDeclaration(fn) ||
+       LLVMGetFunctionCallConv(fn) != LLVMCCallConv || LLVMIsFunctionVarArg(LLVMGlobalGetValueType(fn)))
+      return fail(m, STELA_AIR_ARGUMENT, "invalid render entry/stage ABI");
+   if (!stela_air_metadata_shared_profile(m)) return false;
+   if (LLVMPointerSizeForAS(m->layout, 2) != 8)
+      return fail(m, STELA_AIR_TARGET, "render constant pointers require 64-bit layout");
+   if (LLVMGetFirstGlobal(m->module))
+      return fail(m, STELA_AIR_TARGET, "render globals/sampler storage are unsupported");
+   *r = (struct stela_air_render){0};
+   r->entry.stage = stage;
+   r->entry.framebuffer_fetch_present = m->framebuffer_fetch_present;
+   r->entry.framebuffer_fetch_enabled = m->framebuffer_fetch_enabled;
+   r->entry.name = LLVMGetValueName2(fn, &r->entry.name_bytes);
+   if (!stage_text(r->entry.name, r->entry.name_bytes))
+      return fail(m, STELA_AIR_METADATA, "invalid render entry name");
+   LLVMValueRef args = NULL, outputs = NULL;
+   const char *lists[] = {"air.vertex", "air.fragment", "air.kernel"};
+   for (unsigned list = 0; list < ARRAY_SIZE(lists); list++) {
+      LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
+      unsigned count;
+      if (!stela_air_named_md(m, lists[list], nodes, &count)) return false;
+      for (unsigned i = 0; i < count; i++) {
+         LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+         unsigned fields_count;
+         if (!stela_air_md_node(m, nodes[i], fields, &fields_count) || fields_count != 3 ||
+             !fields[0] || !LLVMIsAFunction(fields[0]))
+            return fail(m, STELA_AIR_METADATA, "invalid stage manifest descriptor");
+         if (fields[0] != fn) continue;
+         if (args || list + 1 != (unsigned)stage)
+            return fail(m, STELA_AIR_METADATA, "duplicate or mismatched selected render stage");
+         outputs = fields[1]; args = fields[2];
+      }
+   }
+   if (!args || !metadata_arguments(m, fn, args, &r->arguments, r))
+      return fail(m, STELA_AIR_METADATA, "selected entry is not a supported render stage");
+   r->entry.input_count = r->arguments.count;
+   r->entry.inputs = r->inputs; r->entry.outputs = r->outputs;
+   unsigned builtin_mask = 0;
+   for (unsigned i = 0; i < r->entry.input_count; i++) {
+      struct stela_air_stage_io *io = &r->inputs[i];
+      if (!stage_text(io->name, io->name_bytes) || !stage_text(io->type_name, io->type_name_bytes))
+         return fail(m, STELA_AIR_METADATA, "missing/invalid stage argument name/type");
+      if (io->semantic == STELA_AIR_VERTEX_ID || io->semantic == STELA_AIR_POSITION) {
+         unsigned bit = 1u << io->semantic;
+         if (builtin_mask & bit) return fail(m, STELA_AIR_METADATA, "duplicate render builtin argument");
+         builtin_mask |= bit;
+      }
+      if (io->semantic == STELA_AIR_VARYING) {
+         for (unsigned j = 0; j < i; j++) {
+            if (r->inputs[j].semantic == STELA_AIR_VARYING &&
+                io->identifier_bytes == r->inputs[j].identifier_bytes &&
+                !memcmp(io->identifier, r->inputs[j].identifier, io->identifier_bytes))
+               return fail(m, STELA_AIR_METADATA, "duplicate fragment linkage identifier");
+         }
+      }
+   }
+   LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
+   unsigned count;
+   if (!stela_air_md_node(m, outputs, nodes, &count) || !count || count > AIR_MAX_ARGUMENTS)
+      return fail(m, STELA_AIR_LIMIT, "render output budget/shape exceeded");
+   LLVMTypeRef result = LLVMGetReturnType(LLVMGlobalGetValueType(fn));
+   bool aggregate = LLVMGetTypeKind(result) == LLVMStructTypeKind;
+   if (aggregate && (LLVMIsOpaqueStruct(result) || !LLVMIsPackedStruct(result) ||
+                     LLVMCountStructElementTypes(result) != count))
+      return fail(m, STELA_AIR_TYPE, "render return must match ordered packed output leaves");
+   if (!aggregate && count != 1)
+      return fail(m, STELA_AIR_TYPE, "render return/output count mismatch");
+   unsigned positions = 0;
+   for (unsigned i = 0; i < count; i++) {
+      struct stela_air_stage_io *io = &r->outputs[i];
+      io->argument = i;
+      LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+      unsigned n;
+      if (!stela_air_md_node(m, nodes[i], fields, &n) || n < 3)
+         return fail(m, STELA_AIR_METADATA, "invalid stage output descriptor");
+      unsigned f = 1;
+      if (stage == STELA_AIR_VERTEX && stela_air_md_string(fields[0], "air.position")) {
+         io->semantic = STELA_AIR_POSITION; positions++;
+      } else if (stage == STELA_AIR_VERTEX && stela_air_md_string(fields[0], "air.vertex_output")) {
+         io->semantic = STELA_AIR_VARYING;
+         if (!metadata_text(m, fields[f++], &io->identifier, &io->identifier_bytes)) return false;
+      } else if (stage == STELA_AIR_FRAGMENT && stela_air_md_string(fields[0], "air.render_target")) {
+         io->semantic = STELA_AIR_RENDER_TARGET;
+         if (count != 1 || n < 5 || !stela_air_md_uint(fields[f++], &io->location) || io->location ||
+             !stela_air_md_uint(fields[f++], &io->index) || io->index)
+            return fail(m, STELA_AIR_ARGUMENT, "unsupported attachment/dual-source output");
+      } else return fail(m, STELA_AIR_METADATA, "unsupported stage output semantic");
+      for (; f < n;) {
+         LLVMValueRef key = fields[f++];
+         if (stela_air_md_string(key, "air.arg_type_name")) {
+            if (io->type_name || f == n ||
+                !metadata_text(m, fields[f], &io->type_name, &io->type_name_bytes))
+               return fail(m, STELA_AIR_METADATA, "invalid output type name");
+            io->primitive = primitive_type(fields[f++], &io->components);
+         } else if (stela_air_md_string(key, "air.arg_name")) {
+            if (io->name || f == n || !metadata_text(m, fields[f++], &io->name, &io->name_bytes))
+               return fail(m, STELA_AIR_METADATA, "invalid output name");
+         } else return fail(m, STELA_AIR_METADATA, "unsupported output metadata");
+      }
+      LLVMTypeRef leaf = aggregate ? LLVMStructGetTypeAtIndex(result, i) : result;
+      if (io->primitive != STELA_AIR_FLOAT || !stage_type_matches(leaf, io->primitive, io->components) ||
+          (io->semantic == STELA_AIR_POSITION && io->components != 4))
+         return fail(m, STELA_AIR_TYPE, "unsupported render output type");
+      for (unsigned j = 0; j < i; j++) {
+         if (io->semantic == STELA_AIR_VARYING && r->outputs[j].semantic == STELA_AIR_VARYING &&
+             io->identifier_bytes == r->outputs[j].identifier_bytes &&
+             !memcmp(io->identifier, r->outputs[j].identifier, io->identifier_bytes))
+            return fail(m, STELA_AIR_METADATA, "duplicate vertex linkage identifier");
+      }
+   }
+   if (stage == STELA_AIR_VERTEX && positions != 1)
+      return fail(m, STELA_AIR_METADATA, "vertex entry requires exactly one position output");
+   r->entry.output_count = count;
+   return true;
+}
+
+bool
+stela_air_metadata_stage_map(struct stela_air_metadata *m, const struct stela_air_render *r,
+                             const struct stela_air_varying_slot *rows, unsigned count, unsigned max_slots)
+{
+   if (!max_slots || max_slots > 32 || count > max_slots || (count && !rows))
+      return fail(m, STELA_AIR_INPUT, "invalid explicit render varying map/budget");
+   for (unsigned i = 0; i < count; i++) {
+      const struct stela_air_varying_slot *v = &rows[i];
+      if (!stage_text(v->identifier, v->identifier_bytes) || v->location >= max_slots ||
+          v->primitive != STELA_AIR_FLOAT || !v->components || v->components > 4)
+         return fail(m, STELA_AIR_ARGUMENT, "invalid explicit varying map identifier/type/location");
+      for (unsigned j = 0; j < i; j++) {
+         if (v->location == rows[j].location || (v->identifier_bytes == rows[j].identifier_bytes &&
+             !memcmp(v->identifier, rows[j].identifier, v->identifier_bytes)))
+            return fail(m, STELA_AIR_ARGUMENT, "duplicate varying map identifier/location");
+      }
+   }
+   for (unsigned direction = 0; direction < 2; direction++) {
+      const struct stela_air_stage_io *io = direction ? r->entry.outputs : r->entry.inputs;
+      unsigned n = direction ? r->entry.output_count : r->entry.input_count;
+      for (unsigned i = 0; i < n; i++) {
+         if (io[i].semantic != STELA_AIR_VARYING) continue;
+         unsigned j;
+         for (j = 0; j < count; j++) {
+            if (rows[j].identifier_bytes == io[i].identifier_bytes &&
+                !memcmp(rows[j].identifier, io[i].identifier, io[i].identifier_bytes)) break;
+         }
+         if (j == count || rows[j].primitive != io[i].primitive || rows[j].components != io[i].components)
+            return fail(m, STELA_AIR_ARGUMENT, "selected stage linkage missing/type mismatch");
+      }
+   }
+   return true;
+}
+
+bool
+stela_air_link_stage_io(const struct stela_air_stage_entry *vs,
+                        const struct stela_air_stage_entry *fs, unsigned max_slots,
+                        struct stela_air_varying_slot *rows, unsigned capacity,
+                        unsigned *count, struct stela_air_error *error)
+{
+   struct stela_air_error local = {0};
+   if (!error) error = &local;
+   *error = (struct stela_air_error){0};
+   struct stela_air_metadata m = {.error = error};
+   if (!vs || !fs || vs->stage != STELA_AIR_VERTEX || fs->stage != STELA_AIR_FRAGMENT ||
+       !max_slots || max_slots > 32 || capacity > AIR_MAX_ARGUMENTS || !count ||
+       !rows || vs->output_count > AIR_MAX_ARGUMENTS || fs->input_count > AIR_MAX_ARGUMENTS ||
+       (vs->output_count && !vs->outputs) || (fs->input_count && !fs->inputs))
+      return fail(&m, STELA_AIR_INPUT, "invalid bounded stage linkage input");
+   struct stela_air_varying_slot result[AIR_MAX_ARGUMENTS];
+   unsigned n = 0;
+   for (unsigned i = 0; i < vs->output_count; i++) {
+      const struct stela_air_stage_io *v = &vs->outputs[i];
+      if (v->semantic != STELA_AIR_VARYING) continue;
+      if (!stage_text(v->identifier, v->identifier_bytes) || v->primitive != STELA_AIR_FLOAT ||
+          !v->components || v->components > 4 || n == max_slots || n == capacity)
+         return fail(&m, STELA_AIR_LIMIT, "vertex varying type/identifier/slot limit");
+      for (unsigned j = 0; j < n; j++) {
+         if (v->identifier_bytes == result[j].identifier_bytes &&
+             !memcmp(v->identifier, result[j].identifier, v->identifier_bytes))
+            return fail(&m, STELA_AIR_METADATA, "duplicate vertex varying map identifier");
+      }
+      result[n] = (struct stela_air_varying_slot){v->identifier,v->identifier_bytes,v->primitive,v->components,n};
+      n++;
+   }
+   for (unsigned i = 0; i < fs->input_count; i++) {
+      const struct stela_air_stage_io *f = &fs->inputs[i];
+      if (f->semantic != STELA_AIR_VARYING) continue;
+      unsigned j;
+      for (j = 0; j < n; j++) {
+         if (f->identifier_bytes == result[j].identifier_bytes &&
+             stage_text(f->identifier, f->identifier_bytes) &&
+             !memcmp(f->identifier, result[j].identifier, f->identifier_bytes)) break;
+      }
+      if (j == n || f->primitive != result[j].primitive || f->components != result[j].components ||
+          !f->center || !f->interpolation)
+         return fail(&m, STELA_AIR_METADATA, "fragment varying missing/mismatched in vertex map");
+      for (unsigned k = 0; k < i; k++) {
+         const struct stela_air_stage_io *previous = &fs->inputs[k];
+         if (previous->semantic == STELA_AIR_VARYING && previous->identifier_bytes == f->identifier_bytes &&
+             !memcmp(previous->identifier, f->identifier, f->identifier_bytes))
+            return fail(&m, STELA_AIR_METADATA, "duplicate fragment varying map identifier");
+      }
+   }
+   memcpy(rows, result, n * sizeof(*rows)); *count = n;
    return true;
 }
 
@@ -588,19 +1021,20 @@ inspection_diagnostic(LLVMDiagnosticInfoRef info, void *data)
    LLVMDisposeMessage(message);
 }
 
-bool
-stela_air_inspect(const void *bitcode, size_t size, unsigned max_entries,
-                   stela_air_visit_entry visit, void *data,
-                   struct stela_air_error *error)
+static bool
+inspect(const void *bitcode, size_t size, unsigned max_entries,
+         stela_air_visit_entry visit, void *data, struct stela_air_error *error,
+         const char *render_name, enum stela_air_stage stage, stela_air_visit_stage render_visit)
 {
    struct stela_air_error local = {0};
    if (!error)
       error = &local;
    *error = (struct stela_air_error){0};
-   struct stela_air_metadata m = {.error = error};
+   struct stela_air_metadata m = {.error = error, .render = render_name != NULL};
    if (!bitcode || size < 4 || size > AIR_MAX_BITCODE_BYTES ||
        memcmp(bitcode, "BC\xc0\xde", 4) || !max_entries ||
-       max_entries > AIR_MAX_METADATA_OPERANDS || !visit)
+       max_entries > AIR_MAX_METADATA_OPERANDS || (!render_name && !visit) ||
+       (render_name && (!render_visit || !stage_text(render_name, strlen(render_name)))))
       return fail(&m, STELA_AIR_INPUT, "invalid AIR inspection input/budget");
    unsigned major, minor, patch;
    LLVMGetVersion(&major, &minor, &patch);
@@ -649,6 +1083,16 @@ stela_air_inspect(const void *bitcode, size_t size, unsigned max_entries,
    snprintf(prefix, sizeof(prefix), "air64_v2%u-apple-macosx", m.air_minor);
    if (strncmp(target, prefix, strlen(prefix))) {
       fail(&m, STELA_AIR_TARGET, "AIR version and target triple disagree");
+      goto done;
+   }
+   if (render_name) {
+      struct stela_air_render render;
+      if (!stela_air_metadata_stage(&m, LLVMGetNamedFunction(m.module, render_name), stage, &render)) goto done;
+      struct stela_air_inspection info = {.target = target, .target_bytes = strlen(target),
+         .air_minor = m.air_minor, .language_major = m.language_major, .language_minor = m.language_minor,
+         .denorms_disable = m.denorms_disable, .fast_math = m.fast_math};
+      success = render_visit(&info, &render.entry, data);
+      if (!success) fail(&m, STELA_AIR_LIMIT, "AIR stage receiver refused entry");
       goto done;
    }
    LLVMValueRef kernels[AIR_MAX_METADATA_OPERANDS];
@@ -724,4 +1168,23 @@ done:
       LLVMDisposeModule(m.module);
    LLVMContextDispose(context);
    return success;
+}
+
+bool
+stela_air_inspect(const void *bitcode, size_t size, unsigned max_entries,
+                   stela_air_visit_entry visit, void *data, struct stela_air_error *error)
+{
+   return inspect(bitcode, size, max_entries, visit, data, error, NULL, 0, NULL);
+}
+
+bool
+stela_air_inspect_stage(const void *bitcode, size_t size, const char *entry,
+                         enum stela_air_stage stage, stela_air_visit_stage visit,
+                         void *data, struct stela_air_error *error)
+{
+   if (!entry || (stage != STELA_AIR_VERTEX && stage != STELA_AIR_FRAGMENT)) {
+      if (error) *error = (struct stela_air_error){.kind = STELA_AIR_INPUT};
+      return false;
+   }
+   return inspect(bitcode, size, AIR_MAX_METADATA_OPERANDS, NULL, data, error, entry, stage, visit);
 }
