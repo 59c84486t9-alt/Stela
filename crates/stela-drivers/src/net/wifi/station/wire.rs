@@ -143,8 +143,12 @@ impl AssociationRequest {
         if mode == phy::Mode::Legacy {
             return Err(Error::Invalid("modern mode selection"));
         }
-        let local = phy::Capabilities::parse(band, phy::Role::Station, &bytes)
-            .map_err(|_| Error::Invalid("local modern capabilities"))?;
+        let local = phy::Capabilities::parse(band, phy::Role::Station, &bytes).map_err(
+            |error| match error {
+                phy::Error::Unsupported(effect) => Error::Unsupported(effect),
+                _ => Error::Invalid("local modern capabilities"),
+            },
+        )?;
         let mut request = Self::parse(capabilities, listen_interval, bytes, true)?;
         request.modern = Some(Arc::new(ModernSelection {
             capabilities: local,

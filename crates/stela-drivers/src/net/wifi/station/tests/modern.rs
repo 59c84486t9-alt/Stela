@@ -459,3 +459,82 @@ fn basic_eht_local_rx_tx_orientation_is_not_selected_common_orientation() {
         assert_eq!(result.is_ok(), accepted, "basic {basic:#x}: {result:?}");
     }
 }
+
+#[test]
+fn unselected_ap_mlo_never_changes_single_link_context_bssid_or_outgoing_request() {
+    let j = modern_join();
+    let mut b = beacon(&j);
+    let baseline = AssociationContext::build(
+        Ticket {
+            epoch: 1,
+            serial: 2,
+        },
+        &j,
+        &b,
+        &response_metadata(modern_ies(true)),
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    extension(&mut raw, 107, &[0, 0, 7, 2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+    b.elements.extend_from_slice(&raw);
+    let mut response = modern_ies(true);
+    response.extend_from_slice(&raw);
+    let c = AssociationContext::build(
+        Ticket {
+            epoch: 1,
+            serial: 2,
+        },
+        &j,
+        &b,
+        &response_metadata(response),
+    )
+    .unwrap();
+    assert_eq!(c.intent(), AssociationIntent::SingleLink);
+    assert_eq!(c.bssid(), AP);
+    assert_eq!(c.definition(), baseline.definition());
+    assert_eq!(c.negotiated().eht, baseline.negotiated().eht);
+    assert_eq!(c.negotiated().peer().unselected_multi_link_elements(), raw);
+    assert!(
+        j.request
+            .modern()
+            .unwrap()
+            .capabilities()
+            .unselected_multi_link_elements()
+            .is_empty()
+    );
+    assert_eq!(j.request.elements(), modern_ies(false));
+    let mut requested = modern_ies(false);
+    requested.extend_from_slice(&raw);
+    assert!(matches!(
+        wire::AssociationRequest::new_modern(1, 10, requested, Band::Ghz5, Mode::Eht, Width::Mhz80),
+        Err(wire::Error::Unsupported(_))
+    ));
+}
+#[test]
+fn malformed_unselected_ml_body_and_fragment_cannot_replace_single_link_operation() {
+    let j = modern_join();
+    let mut b = beacon(&j);
+    let mut response = modern_ies(true);
+    let mut body = vec![0; 254];
+    body[..3].copy_from_slice(&[7, 0, 255]);
+    let mut raw = Vec::new();
+    extension(&mut raw, 107, &body);
+    ie(&mut raw, 242, &[61, 2, 149, 3, 192, 3, 3, 155, 171]);
+    b.elements.extend_from_slice(&raw);
+    response.extend_from_slice(&raw);
+    let c = AssociationContext::build(
+        Ticket {
+            epoch: 1,
+            serial: 2,
+        },
+        &j,
+        &b,
+        &response_metadata(response),
+    )
+    .unwrap();
+    assert_eq!(c.intent(), AssociationIntent::SingleLink);
+    assert_eq!(c.bssid(), AP);
+    assert_eq!(c.channel().number, 36);
+    assert_eq!(c.definition().center1_mhz, 5210);
+    assert_eq!(c.negotiated().peer().unselected_multi_link_elements(), raw);
+}

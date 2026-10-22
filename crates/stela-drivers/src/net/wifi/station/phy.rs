@@ -9,6 +9,7 @@
 //! remain restricted until their modern configuration/data paths consume this.
 
 use crate::net::wifi::Band;
+use alloc::vec::Vec;
 
 mod caps;
 mod negotiate;
@@ -172,6 +173,8 @@ pub struct Capabilities {
     eht: Option<Eht>,
     he_6ghz: Option<u16>,
     wmm: Option<Wmm>,
+    // Complete outer ML TLVs and contiguous fragments; unparsed AP facts only.
+    unselected_multi_link: Vec<u8>,
 }
 
 fn insert<'a>(slot: &mut Option<&'a [u8]>, data: &'a [u8]) -> Result<(), Error> {
@@ -188,12 +191,23 @@ impl Capabilities {
         }
         let (mut rates_ie, mut ext_rates, mut ht, mut vht, mut he, mut eht, mut he6, mut wmm) =
             (None, None, None, None, None, None, None, None);
+        let mut unselected_multi_link = Vec::new();
+        let mut ml_fragment = false;
         let mut rest = bytes;
         while !rest.is_empty() {
             let header = rest.get(..2).ok_or(Error::Truncated)?;
             let data = rest
                 .get(2..2 + usize::from(header[1]))
                 .ok_or(Error::Truncated)?;
+            let mle = header[0] == 255 && data.first() == Some(&107);
+            let fragment = header[0] == 242 && ml_fragment;
+            if role == Role::AccessPoint && (mle || fragment) {
+                // Follow the non-MLD Linux path: no common/per-STA field or
+                // profile is interpreted. Preserve even malformed/unknown
+                // bodies as opaque facts, never MLD permission.
+                unselected_multi_link.extend_from_slice(&rest[..2 + data.len()]);
+            }
+            ml_fragment = (mle || fragment) && data.len() == 255;
             match header[0] {
                 1 => {
                     if data.is_empty() || data.len() > 8 {
@@ -214,7 +228,10 @@ impl Capabilities {
                     Some(35) => insert(&mut he, &data[1..])?,
                     Some(59) => insert(&mut he6, &data[1..])?,
                     Some(108) => insert(&mut eht, &data[1..])?,
-                    Some(107) => return Err(Error::Unsupported("multi-link capability")),
+                    Some(107) if role == Role::Station => {
+                        return Err(Error::Unsupported("requested multi-link capability"));
+                    }
+                    Some(107) => (),
                     None => return Err(Error::Truncated),
                     _ => (),
                 },
@@ -268,7 +285,14 @@ impl Capabilities {
             eht,
             he_6ghz,
             wmm,
+            unselected_multi_link,
         })
+    }
+    /// Opaque AP advertisement TLVs, including contiguous full-length ML
+    /// fragments. No MLD MAC, link/profile, capability or structural validity
+    /// is inferred from these bytes. Local/outgoing ML remains unsupported.
+    pub fn unselected_multi_link_elements(&self) -> &[u8] {
+        &self.unselected_multi_link
     }
     /// Check the AP basic EHT MCS/NSS requirement against every actual local
     /// supported width, including20-only STA mapping. This is metadata

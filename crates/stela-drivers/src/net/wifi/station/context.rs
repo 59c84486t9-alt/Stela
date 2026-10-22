@@ -16,6 +16,13 @@ use crate::net::{
 };
 use alloc::vec::Vec;
 
+/// Explicit actual request/resource mode. No MLD constructor or authority is
+/// available; advertising ML or EHT cannot create a multi-link association.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssociationIntent {
+    SingleLink,
+}
+
 #[derive(Debug)]
 pub struct AssociationContext {
     ticket: Ticket,
@@ -207,6 +214,9 @@ impl AssociationContext {
             dtim_period,
             dtim_count,
         })
+    }
+    pub fn intent(&self) -> AssociationIntent {
+        AssociationIntent::SingleLink
     }
     pub fn ticket(&self) -> Ticket {
         self.ticket

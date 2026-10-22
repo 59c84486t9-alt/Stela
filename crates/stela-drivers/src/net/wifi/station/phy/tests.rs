@@ -566,3 +566,70 @@ fn basic_eht_twenty_only_mapping_and_unsupported_width_skip_use_actual_local_uni
     let no_eht = Capabilities::parse(Band::Ghz5, Role::Station, &[1, 3, 0x8c, 0x98, 0xb0]).unwrap();
     assert!(!no_eht.meets_eht_basic([0; 4]));
 }
+
+#[test]
+fn ap_multi_link_is_bounded_opaque_observation_not_requested_local_capability() {
+    let (local, peer) = pair(Band::Ghz5, 12, false);
+    let baseline = Negotiated::between(&local, &peer, Mode::Eht, Width::Mhz160).unwrap();
+    // Basic common info carries an MLD MAC different from any selected BSSID.
+    for body in [
+        &[0, 0, 7, 2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee][..],
+        &[][..],
+        &[0][..],
+        &[0, 0, 255][..],
+        &[7, 0][..],
+        &[0x10, 0, 8, 2, 1, 2, 3, 4, 5, 0][..],
+    ] {
+        let mut ap = modern_ies(Band::Ghz5, Role::AccessPoint, 12, false);
+        let mut raw = Vec::new();
+        extension(&mut raw, 107, body);
+        ap.extend_from_slice(&raw);
+        let observed = Capabilities::parse(Band::Ghz5, Role::AccessPoint, &ap).unwrap();
+        assert_eq!(observed.unselected_multi_link_elements(), raw);
+        let n = Negotiated::between(&local, &observed, Mode::Eht, Width::Mhz160).unwrap();
+        assert_eq!(n.ht, baseline.ht);
+        assert_eq!(n.vht, baseline.vht);
+        assert_eq!(n.he, baseline.he);
+        assert_eq!(n.eht, baseline.eht);
+        assert_eq!(n.wmm, baseline.wmm);
+        assert_eq!(
+            (n.mode, n.width, n.rx_nss, n.tx_nss),
+            (
+                baseline.mode,
+                baseline.width,
+                baseline.rx_nss,
+                baseline.tx_nss
+            )
+        );
+        let mut sta = modern_ies(Band::Ghz5, Role::Station, 12, false);
+        sta.extend_from_slice(&raw);
+        assert!(matches!(
+            Capabilities::parse(Band::Ghz5, Role::Station, &sta),
+            Err(Error::Unsupported(_))
+        ));
+    }
+}
+#[test]
+fn opaque_multi_link_fragments_cannot_inherit_other_link_ie_fields() {
+    let mut ap = modern_ies(Band::Ghz5, Role::AccessPoint, 12, false);
+    let mut body = vec![0; 254];
+    body[..9].copy_from_slice(&[0, 0, 7, 2, 1, 2, 3, 4, 5]);
+    let mut raw = Vec::new();
+    extension(&mut raw, 107, &body);
+    // A profile/fragment containing IE-looking channel/rate bytes remains raw.
+    ie(&mut raw, 242, &[61, 2, 149, 3, 1, 1, 0xff]);
+    ap.extend_from_slice(&raw);
+    let cap = Capabilities::parse(Band::Ghz5, Role::AccessPoint, &ap).unwrap();
+    assert_eq!(cap.unselected_multi_link_elements(), raw);
+    assert_eq!(cap.rates().supported, 0xff);
+    let mut truncated = ap.clone();
+    truncated.pop();
+    assert!(Capabilities::parse(Band::Ghz5, Role::AccessPoint, &truncated).is_err());
+    ap.extend_from_slice(&[255, 0]);
+    assert!(Capabilities::parse(Band::Ghz5, Role::AccessPoint, &ap).is_err());
+    let mut too_long = modern_ies(Band::Ghz5, Role::AccessPoint, 12, false);
+    while too_long.len() <= 2300 {
+        too_long.extend_from_slice(&raw);
+    }
+    assert!(Capabilities::parse(Band::Ghz5, Role::AccessPoint, &too_long).is_err());
+}

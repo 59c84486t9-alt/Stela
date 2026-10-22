@@ -2,7 +2,10 @@
 // Adapted from pinned Linux mac80211/util.c, wireless/chan.c and IEEE headers.
 // Copyright 2009 Johannes Berg; 2013-2014 Intel Mobile Communications GmbH;
 // 2018-2026 Intel Corporation. Full source notices in THIRD_PARTY.md.
-//! Actual single-link BSS operation observations, never radio/TX authority.
+//! Actual single-link AP BSS operation observations, never radio/TX authority.
+//! Unselected AP Multi-Link IEs do not select another link's operation. Their
+//! opaque bytes remain in peer Capabilities and the original beacon/response;
+//! this parser never parses local/outgoing association intent.
 
 use super::phy::{Error, Mode, Negotiated, Width};
 use crate::net::wifi::{Band, Channel};
@@ -224,7 +227,7 @@ impl Operations {
                 255 => match data.first() {
                     Some(36) => once(&mut out.he, HeOperation::parse(&data[1..])?)?,
                     Some(106) => once(&mut out.eht, EhtOperation::parse(&data[1..])?)?,
-                    Some(107) => return Err(Error::Unsupported("multi-link operation")),
+                    Some(107) => (), // Opaque unselected AP advertisement, no inherited profile.
                     None => return Err(Error::Truncated),
                     _ => (),
                 },

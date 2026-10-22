@@ -22,7 +22,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 mod context;
-pub use context::AssociationContext;
+pub use context::{AssociationContext, AssociationIntent};
 pub mod data;
 pub mod operations;
 pub mod phy;
