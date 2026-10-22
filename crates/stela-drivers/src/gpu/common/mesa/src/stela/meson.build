@@ -194,6 +194,30 @@ if stela_air_llvm != ''
       build_rpath : fs.parent(stela_air_llvm),
     )
     test('stela_air_aco', stela_air_aco_probe, suite : 'stela')
+    # Original legacy-VS, NGG and PS lowerings for the offline render probe.
+    stela_amd_render_lowering = static_library(
+      'stela_amd_render_lowering',
+      files('../amd/common/nir/ac_nir_cull.c', '../amd/common/nir/ac_nir_lower_legacy_vs.c',
+            '../amd/common/nir/ac_nir_lower_ngg.c', '../amd/common/nir/ac_nir_lower_ps_early.c',
+            '../amd/common/nir/ac_nir_lower_ps_late.c', '../amd/common/nir/ac_nir_lower_resinfo.c',
+            '../amd/common/nir/ac_nir_prerast_utils.c'),
+      include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+      dependencies : [idep_nir_headers, idep_mesautil, idep_amd_generated_headers],
+      c_args : [no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+    # Needs unchanged Apple VS/FS inputs; `cargo xtask gpu compilers` runs it
+    # when they are supplied.
+    stela_amd_air_render_probe = executable(
+      'stela_amd_air_render_probe',
+      '../../../../amd/tests/air_render.c',
+      include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+      dependencies : [idep_stela_air, idep_aco, idep_amd_generated_headers] +
+                     (with_stela_amd_llvm ? [dep_llvm] : []),
+      link_with : [stela_amd_render_lowering, libamd_compiler_support],
+      c_args : ['-Werror'],
+      build_rpath : fs.parent(stela_air_llvm),
+    )
   endif
   if with_stela_intel
     stela_intel_air_render_probe = executable(

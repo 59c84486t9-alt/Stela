@@ -200,8 +200,34 @@ pub(super) fn verify(build: &Path, evidence: &Path, inputs: &[Value]) -> Result<
             "artifacts":files.iter().map(|p|tools::binding(p)).collect::<Result<Vec<_>>>()?}),
         )
     };
+    let amd = if inputs.is_empty() {
+        None
+    } else {
+        let binary = build.join("src/stela/stela_amd_air_render_probe");
+        run(
+            Command::new(&binary)
+                .arg("--input")
+                .arg(
+                    inputs[0]["snapshot"]["path"]
+                        .as_str()
+                        .context("triangle snapshot")?,
+                )
+                .args(["--vs", "vertexShader", "--fs", "fragmentShader"]),
+            evidence,
+            "amd-air-render",
+        )?;
+        let log = evidence.join("amd-air-render.log");
+        let text = std::fs::read_to_string(&log)?;
+        let summary = text
+            .lines()
+            .find(|line| line.starts_with("AMD render compiler fixtures="))
+            .context("incomplete AMD VS/FS compiler fixture")?;
+        Some(
+            json!({"binary":tools::binding(&binary)?,"output":tools::binding(&log)?,"summary":summary}),
+        )
+    };
     Ok(
-        json!({"scope":"Hosted stage semantics and optional unchanged Apple VS/FS original NAK/Intel compilation; no runtime pipeline, GPU execution or Metal capability qualification",
-        "binary":tools::binding(&binary)?,"output":tools::binding(&output)?,"nvidia":nvidia,"intel":intel}),
+        json!({"scope":"Hosted stage semantics and optional unchanged Apple VS/FS original NAK/Intel/ACO compilation; no runtime pipeline, GPU execution or Metal capability qualification",
+        "binary":tools::binding(&binary)?,"output":tools::binding(&output)?,"nvidia":nvidia,"intel":intel,"amd":amd}),
     )
 }
