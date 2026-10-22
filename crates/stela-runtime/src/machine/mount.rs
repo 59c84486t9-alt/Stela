@@ -182,6 +182,27 @@ pub fn devices<C: ConsoleSink + 'static>(
             .add_lockdown(block.name, block.control, range, rvbar)
             .map_err(|error| format!("{} placement: {error:?}", block.name))?;
     }
+    if let Some(entry) = reset {
+        for block in &board.processor_registers {
+            if board
+                .lockdown
+                .iter()
+                .any(|legacy| legacy.cpu == Some(block.cpu))
+            {
+                continue;
+            }
+            devices
+                .add_processor_registers(
+                    block.cpu,
+                    Range {
+                        physical: block.physical,
+                        bytes: block.bytes,
+                    },
+                    entry,
+                )
+                .map_err(|error| format!("PE startup register placement: {error:?}"))?;
+        }
+    }
     for block in &board.counters {
         devices
             .add_core_counters(block.cpu, block.physical, block.layout)

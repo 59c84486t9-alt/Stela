@@ -53,6 +53,8 @@ use storage_topology::{aes_engine, ans_controller, spi_nor};
 mod memory_topology;
 pub use memory_topology::{MemoryCache, MemoryController, PtdBank};
 use memory_topology::{PTD_RANGE, memory_cache, memory_controller, memory_controller_named};
+mod processor_registers;
+pub use processor_registers::ProcessorRegisters;
 mod power_registers;
 pub use power_registers::{BridgeBank, EnergyBank, PerfBank, PowerBank, SocDpe, WakeBank};
 use power_registers::{PmgrRegisters, cpu_start, pmgr_registers};
@@ -1673,6 +1675,8 @@ pub struct Board {
     /// Every PE's `cpu-impl-reg` and every cluster's `cpm-impl-reg`, once
     /// each, on a SoC whose lockdown offsets are known; none otherwise.
     pub lockdown: Vec<LockdownBlock>,
+    /// Each PE's original implementation block, independent of legacy lockdown.
+    pub processor_registers: Vec<ProcessorRegisters>,
     /// Every PE's CLPC sampler counters in its `cpu-impl-reg`, on a SoC
     /// whose counters are known.
     pub counters: Vec<CounterBlock>,
@@ -1991,6 +1995,10 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let cpus = cpus(chip_id, soc_name, &processors)?;
+    let processor_registers = processor_registers::processor_registers(&root)?;
+    if processor_registers.len() != cpus.processors.len() {
+        return Err("CPU register roster differs from processor topology".into());
+    }
     let mut counters = Vec::new();
     if let Some(layout) = core_counters::layout(chip_id) {
         let end = layout
@@ -2133,6 +2141,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         watchdog,
         watchdog_side,
         lockdown,
+        processor_registers,
         counters,
         coresight,
         memory_controller,

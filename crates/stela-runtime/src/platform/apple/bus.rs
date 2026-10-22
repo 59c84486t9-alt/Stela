@@ -212,6 +212,8 @@ pub struct DeviceId(usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapError {
     Empty,
+    /// A model requires naturally aligned physical register words.
+    Unaligned,
     Overflow,
     Overlap {
         existing: DeviceId,

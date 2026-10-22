@@ -850,6 +850,48 @@ impl AppleDevices {
         Ok(())
     }
 
+    /// PE startup words when its original block has no legacy PIO lock pair.
+    /// Publish its reset-vector binding only after all three words are mapped.
+    pub fn add_processor_registers(
+        &mut self,
+        cpu: usize,
+        range: Range,
+        entry: u64,
+    ) -> Result<(), MapError> {
+        if let Some(existing) = self.reset_vectors.get(cpu).copied().flatten() {
+            return Err(MapError::Overlap { existing });
+        }
+        if !range.physical.is_multiple_of(lockdown::WORD_BYTES) {
+            return Err(MapError::Unaligned);
+        }
+        range
+            .physical
+            .checked_add(range.bytes)
+            .ok_or(MapError::Overflow)?;
+        let mut model = Lockdown::processor(entry);
+        model.set_running(self.processor_running(cpu));
+        let mut bindings = Vec::new();
+        for offset in lockdown::PE_WORDS {
+            if offset
+                .checked_add(lockdown::WORD_BYTES)
+                .is_none_or(|end| end > range.bytes)
+            {
+                return Err(MapError::Overflow);
+            }
+            let physical = range
+                .physical
+                .checked_add(offset)
+                .ok_or(MapError::Overflow)?;
+            bindings.push((physical, lockdown::WORD_BYTES, offset));
+        }
+        let device = self.bus.install(Box::new(model), &bindings)?;
+        if self.reset_vectors.len() <= cpu {
+            self.reset_vectors.resize(cpu + 1, None);
+        }
+        self.reset_vectors[cpu] = Some(device);
+        Ok(())
+    }
+
     /// The PMGR's CPU start registers for `clusters` clusters at `physical`,
     /// releasing the PEs with these MPIDR_EL1 values, in PE order, at the
     /// RVBARs of their `cpu-impl-reg` blocks.
@@ -5857,6 +5899,93 @@ mod tests {
         assert_eq!(devices.reset_vector(3), Some(0x8_0300_c000));
         // A core the board does not have refuses.
         assert!(devices.write(0, START + 0xc, 4, 1 << 2, 0).is_err());
+    }
+
+    #[test]
+    fn processor_startup_words_bind_once_without_legacy_lockdown() {
+        const BASE: u64 = 0x2_1005_0000;
+        const ENTRY: u64 = 0x100_0300_c000;
+        let mut devices = AppleDevices::new();
+        let range = Range {
+            physical: BASE,
+            bytes: 0x9008,
+        };
+        devices.add_processor_registers(0, range, ENTRY).unwrap();
+        assert_eq!(devices.read(0, BASE, 8, 0), Ok(ENTRY | 1));
+        assert_eq!(devices.read(0, BASE + lockdown::CPU_STS, 8, 0), Ok(1));
+        devices.set_processor_running(0, false);
+        assert_eq!(devices.read(0, BASE + lockdown::CPU_STS, 8, 0), Ok(0));
+        assert_eq!(devices.locked_reset_vector(0), Some(ENTRY));
+        devices
+            .write(0, BASE + lockdown::CORE_THRTL_CFG2, 8, 0xb2 << 56, 0)
+            .unwrap();
+        assert_eq!(
+            devices.read(0, BASE + lockdown::CORE_THRTL_CFG2, 8, 0),
+            Ok(0xb2 << 56)
+        );
+        for offset in [0x5000, 0x5008, 0x9000, 0x9008] {
+            assert!(devices.bus.route(BASE + offset, Width::Double).is_err());
+        }
+        assert!(matches!(
+            devices.add_processor_registers(0, range, ENTRY),
+            Err(MapError::Overlap { .. })
+        ));
+    }
+
+    #[test]
+    fn processor_startup_word_installation_is_atomic_for_every_conflict() {
+        const BASE: u64 = 0x2_1005_0000;
+        let range = Range {
+            physical: BASE,
+            bytes: 0x9008,
+        };
+        for conflict in lockdown::PE_WORDS {
+            let mut devices = AppleDevices::new();
+            let foreign = devices.bus.add(Box::new(CheckedPowerBank {
+                reject: true,
+                committed: Vec::new(),
+            }));
+            devices.bus.map(foreign, BASE + conflict, 8, 0).unwrap();
+            assert!(
+                devices
+                    .add_processor_registers(2, range, 0x100_0300_c000)
+                    .is_err()
+            );
+            assert!(devices.reset_vectors.is_empty());
+            assert_eq!(
+                devices.bus.route(BASE + conflict, Width::Double),
+                Ok((foreign, 0))
+            );
+            for offset in lockdown::PE_WORDS
+                .into_iter()
+                .filter(|offset| *offset != conflict)
+            {
+                assert!(devices.bus.route(BASE + offset, Width::Double).is_err());
+            }
+        }
+        let mut devices = AppleDevices::new();
+        for bad in [
+            Range {
+                physical: BASE + 1,
+                bytes: 0x9008,
+            },
+            Range {
+                physical: BASE,
+                bytes: lockdown::CORE_THRTL_CFG2 + 4,
+            },
+            Range {
+                physical: u64::MAX - 7,
+                bytes: 0x9008,
+            },
+        ] {
+            assert!(
+                devices
+                    .add_processor_registers(0, bad, 0x100_0300_c000)
+                    .is_err()
+            );
+            assert!(devices.reset_vectors.is_empty());
+            assert!(devices.bus.route(BASE, Width::Double).is_err());
+        }
     }
 
     #[test]
