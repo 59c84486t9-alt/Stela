@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "amd/compiler/aco_interface.h"
 #include "probe_report.h"
+#include "targets/amd.h"
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/nir/ac_nir.h"
 #if AMD_LLVM_AVAILABLE
@@ -35,22 +36,28 @@ capture_binary(void **private, const struct ac_shader_config *config,
    }
 }
 
-/* Synthetic compile targets only: no physical device is initialized. */
-static int
-compile_store(enum radeon_family family, bool has_graphics, unsigned wave_size)
+static struct radeon_info
+model(enum radeon_family family)
 {
-   enum amd_gfx_level gfx_level = ac_get_gfx_level(family);
-   char target[64];
-   snprintf(target, sizeof(target), "%s.wave%u", ac_get_family_name(family), wave_size);
    struct radeon_info gpu = {
-      .gfx_level = gfx_level,
+      .gfx_level = ac_get_gfx_level(family),
       .family = family,
-      .has_graphics = has_graphics,
+      .has_graphics = stela_amd_has_graphics(family),
    };
    ac_fill_compiler_info(&gpu, NULL, false);
+   return gpu;
+}
+
+/* Synthetic compile targets only: no physical device is initialized. */
+static int
+compile_store(enum radeon_family family, unsigned wave_size)
+{
+   enum amd_gfx_level gfx_level = ac_get_gfx_level(family);
+   char target[32];
+   stela_amd_target_name(target, family, wave_size);
+   struct radeon_info gpu = model(family);
    if (!aco_is_gpu_supported(&gpu)) {
-      probe_unsupported("aco", target, has_graphics ?
-                        "compiler-gfx-level-unsupported" : "requires-cdna-compiler-backend");
+      record_held(target, stela_amd_aco_refusal(family));
       return 0;
    }
    nir_shader_compiler_options nir_options;
@@ -87,7 +94,8 @@ compile_store(enum radeon_family family, bool has_graphics, unsigned wave_size)
    printf("%s, wave%u: %u dwords, %u executable bytes\n",
           ac_get_family_name(family), wave_size, result.code_dw, result.exec_size);
    if (result.code_dw && result.exec_size) {
-      probe_compiled("aco", target, result.exec_size);
+      record_compiled(target, result.exec_size);
+      record_end();
    }
    return result.code_dw == 0 || result.exec_size == 0;
 }
@@ -98,24 +106,19 @@ main(void)
 #if AMD_LLVM_AVAILABLE
    ac_init_llvm_once();
 #endif
-   const struct {
-      enum radeon_family family;
-      bool has_graphics;
-   } targets[] = {
-      {CHIP_TAHITI, true}, {CHIP_BONAIRE, true}, {CHIP_KABINI, true}, {CHIP_KAVERI, true},
-      {CHIP_POLARIS10, true}, {CHIP_CARRIZO, true}, {CHIP_STONEY, true},
-      {CHIP_VEGA10, true}, {CHIP_RAVEN, true}, {CHIP_RENOIR, true},
-      {CHIP_NAVI10, true}, {CHIP_NAVI21, true}, {CHIP_REMBRANDT, true},
-      {CHIP_NAVI31, true}, {CHIP_PHOENIX, true}, {CHIP_STRIX_HALO, true},
-      {CHIP_GFX1170, true}, {CHIP_GFX1201, true}, {CHIP_GFX1210, true},
-      {CHIP_MI100, false}, {CHIP_MI200, false}, {CHIP_GFX940, false},
-   };
+   /* The upstream compiler alone: every family Mesa's table names from GFX6. */
+   for (enum radeon_family family = STELA_AMD_FIRST_FAMILY; family < CHIP_LAST; family++) {
+      for (unsigned wave = 64; wave >= stela_amd_min_wave(family); wave /= 2) {
+         char target[32];
+         stela_amd_target_name(target, family, wave);
+         record_expect(target, stela_amd_aco_hold(family));
+      }
+   }
    glsl_type_singleton_init_or_ref();
    int result = 0;
-   for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
-      result |= compile_store(targets[i].family, targets[i].has_graphics, 64);
-      if (ac_get_gfx_level(targets[i].family) >= GFX10)
-         result |= compile_store(targets[i].family, targets[i].has_graphics, 32);
+   for (enum radeon_family family = STELA_AMD_FIRST_FAMILY; family < CHIP_LAST; family++) {
+      for (unsigned wave = 64; wave >= stela_amd_min_wave(family); wave /= 2)
+         result |= compile_store(family, wave);
    }
    glsl_type_singleton_decref();
    return result;

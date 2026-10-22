@@ -1,15 +1,12 @@
 /* SPDX-License-Identifier: MIT */
 #include "air_to_nir.h"
-#include "stela/tests/air_probe_profile.h"
 #include "air_probe_input.h"
 #include "stela/tests/intel_probe.h"
-#include "stela/tests/probe_report.h"
-#include "intel/compiler/intel_gfx_ver_enum.h"
+#include "stela/tests/targets/intel.h"
 #include "intel/compiler/brw/brw_compiler.h"
 #include "intel/compiler/brw/brw_nir.h"
 #include "intel/dev/intel_device_info.h"
 #include "util/ralloc.h"
-#include "util/blake3/blake3.h"
 #include <stdarg.h>
 
 #define CHECK(condition) do { if (!(condition)) { \
@@ -25,22 +22,6 @@ compiler_log(void *data, unsigned *id, const char *format, ...)
    va_start(arguments, format);
    vfprintf(stderr, format, arguments);
    va_end(arguments);
-}
-
-static void
-digest(const void *bytes, size_t size, char out[2 * BLAKE3_OUT_LEN + 1])
-{
-   blake3_hasher hasher;
-   uint8_t hash[BLAKE3_OUT_LEN];
-   blake3_hasher_init(&hasher);
-   blake3_hasher_update(&hasher, bytes, size);
-   blake3_hasher_finalize(&hasher, hash, sizeof(hash));
-   static const char hex[] = "0123456789abcdef";
-   for (unsigned i = 0; i < sizeof(hash); ++i) {
-      out[2 * i] = hex[hash[i] >> 4];
-      out[2 * i + 1] = hex[hash[i] & 15];
-   }
-   out[2 * BLAKE3_OUT_LEN] = 0;
 }
 
 static nir_def *
@@ -59,19 +40,17 @@ bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
 }
 
 static int
-compile_air(const char *platform, LLVMMemoryBufferRef input, const char *entry, bool fixture,
+compile_air(const char *platform, const struct intel_device_info *device,
+            LLVMMemoryBufferRef input, const char *entry, bool fixture,
             enum stela_air_fp_profile fp_profile)
 {
-   struct intel_device_info device;
-   int pci_id = intel_device_name_to_pci_device_id(platform);
-   CHECK(pci_id >= 0 && intel_get_device_info_for_build(pci_id, &device));
-   if (device.ver == 35) {
-      CHECK(gfx_ver_from_devinfo(&device) == XE3P);
-      probe_unsupported("air-brw", platform, "requires-dispatch-packing-qualification");
+   const char *hold = stela_intel_hold(device);
+   if (hold) {
+      record_held(platform, hold);
       return 0;
    }
    void *context = ralloc_context(NULL);
-   struct brw_compiler *compiler = brw_compiler_create(context, &device);
+   struct brw_compiler *compiler = brw_compiler_create(context, device);
    CHECK(compiler);
    compiler->shader_debug_log = compiler_log;
    compiler->shader_perf_log = compiler_log;
@@ -93,8 +72,8 @@ compile_air(const char *platform, LLVMMemoryBufferRef input, const char *entry, 
    }
    CHECK(nir->info.workgroup_size[0] == 32 && nir->info.workgroup_size[1] == 1 &&
          nir->info.workgroup_size[2] == 1);
-   printf("STELA_AIR_ENVIRONMENT {\"backend\":\"air-brw\",\"target\":\"%s\",\"fp_profile\":%u,\"nir_float_controls\":%u}\n",
-          platform, (unsigned)fp_profile, nir->info.float_controls_execution_mode);
+   stela_air_probe_environment_record(platform, fp_profile,
+                                      nir->info.float_controls_execution_mode);
    const struct brw_nir_compiler_opts compiler_options = {0};
    brw_preprocess_nir(compiler, nir, &compiler_options);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
@@ -102,16 +81,16 @@ compile_air(const char *platform, LLVMMemoryBufferRef input, const char *entry, 
    struct brw_cs_prog_data data = {0};
    nir->info.min_subgroup_size = 16;
    nir->info.max_subgroup_size = 16;
-   brw_nir_lower_cs_intrinsics(nir, &device, &data);
+   brw_nir_lower_cs_intrinsics(nir, device, &data);
    /* Follow Iris's existing pre-12.5 subgroup payload contract rather than
     * inventing a thread-ID substitute. Runtime dispatch must supply this
     * per-thread push value; offline compilation does not provide it. */
-   if (brw_nir_lower_cs_subgroup_id(nir, &device, 0)) {
+   if (brw_nir_lower_cs_subgroup_id(nir, device, 0)) {
       data.base.push_sizes[0] = 4;
-      brw_cs_fill_push_const_info(&device, &data, 0);
+      brw_cs_fill_push_const_info(device, &data, 0);
       data.base.push_sizes[0] = REG_SIZE;
    } else {
-      brw_cs_fill_push_const_info(&device, &data, -1);
+      brw_cs_fill_push_const_info(device, &data, -1);
    }
    nir_validate_shader(nir, "Stela AIR to BRW offline compile fixture");
    struct brw_compile_cs_params parameters = {
@@ -121,28 +100,35 @@ compile_air(const char *platform, LLVMMemoryBufferRef input, const char *entry, 
    int failed = !code || !data.base.program_size || parameters.base.error_str;
    unsigned sends = 0;
    if (!failed)
-      failed = !validate_intel_code(&device, context, code, data.base.program_size, platform, &sends);
+      failed = !validate_intel_code(device, context, code, data.base.program_size, platform, &sends);
    if (failed)
       fprintf(stderr, "%s AIR codegen failed: %s\n", platform,
               parameters.base.error_str ? parameters.base.error_str : "no valid code");
    else {
-      char input_hash[2 * BLAKE3_OUT_LEN + 1], code_hash[2 * BLAKE3_OUT_LEN + 1];
-      digest(LLVMGetBufferStart(input), LLVMGetBufferSize(input), input_hash);
-      digest(code, data.base.program_size, code_hash);
-      probe_compiled("air-brw", platform, data.base.program_size);
-      printf("STELA_AIR_INTEL_OUTPUT {\"target\":\"%s\",\"pci_id\":%u,\"entry\":\"%s\","
-             "\"input_blake3\":\"%s\",\"code_blake3\":\"%s\","
-             "\"input_kind\":\"%s\",\"input_bytes\":%zu,\"buffer_argument\":%u,\"buffer_access\":\"read_write\","
-             "\"buffer_type_bytes\":4,\"buffer_alignment\":4,\"max_instructions\":100,"
-             "\"workgroup\":[32,1,1],\"buffer_index\":7,\"fixture_va\":1048576,"
-             "\"ssbo_count\":0,\"subgroup\":16,\"per_thread_push_bytes\":%u,"
-             "\"cross_thread_push_bytes\":%u}\n",
-             platform, pci_id, entry, input_hash, code_hash,
-             fixture ? "source_fixture" : "raw_input", LLVMGetBufferSize(input),
-             bindings[1], data.push.per_thread.size,
-             data.push.cross_thread.size);
+      const uint32_t workgroup[] = {32, 1, 1};
+      record_compiled(platform, data.base.program_size);
+      record_object("facts");
+      record_uint("pci_id", device->pci_device_id);
+      record_str("entry", entry);
+      record_blake3("input_blake3", LLVMGetBufferStart(input), LLVMGetBufferSize(input));
+      record_blake3("code_blake3", code, data.base.program_size);
+      record_str("input_kind", fixture ? "source_fixture" : "raw_input");
+      record_uint("input_bytes", LLVMGetBufferSize(input));
+      record_uint("buffer_argument", bindings[1]);
+      record_str("buffer_access", "read_write");
+      record_uint("buffer_type_bytes", 4);
+      record_uint("buffer_alignment", 4);
+      record_uint("max_instructions", 100);
+      record_uints("workgroup", workgroup, ARRAY_SIZE(workgroup));
+      record_uint("buffer_index", 7);
+      record_uint("fixture_va", 0x100000);
+      record_uint("ssbo_count", 0);
+      record_uint("subgroup", 16);
+      record_uint("per_thread_push_bytes", data.push.per_thread.size);
+      record_uint("cross_thread_push_bytes", data.push.cross_thread.size);
+      record_end();
       printf("AIR bitcode->NIR->BRW %s PCI %04x: %u bytes, %u sends, validated\n",
-             platform, pci_id, data.base.program_size, sends);
+             platform, device->pci_device_id, data.base.program_size, sends);
    }
    ralloc_free(nir);
    ralloc_free(context);
@@ -155,24 +141,28 @@ main(int argc, char **argv)
    /* This fixture tests the retained BRW global-address path. Older ELK's
     * SSBO resource model needs a deliberate binding/lowering contract first.
     */
-   const char *platforms[] = {
-      "skl", "bxt", "kbl", "glk", "icl", "ehl", "tgl", "rkl", "dg1",
-      "adl", "dg2", "mtl", "arl", "lnl", "bmg", "ptl", "nvl-u", "nvl",
-   };
    const char *entry = "kernel";
    enum stela_air_fp_profile fp_profile;
    if (!stela_air_probe_profile(&argc, argv, &fp_profile))
       return 2;
-   stela_air_probe_profile_receipt(fp_profile);
+   stela_air_probe_profile_record(fp_profile);
    LLVMMemoryBufferRef input = stela_intel_air_probe_input(argc, argv, &entry);
    if (!input) {
       fprintf(stderr, "usage: %s [--input RAW_AIR_BITCODE --entry IDENTIFIER [--fp-profile NAME]] (4 bytes..16 MiB)\n", argv[0]);
       return 2;
    }
+   struct intel_device_info device;
+   const char *platform;
+   STELA_INTEL_FOREACH_TARGET(platform, device) {
+      if (!stela_intel_elk(&device))
+         record_expect(platform, stela_intel_hold(&device));
+   }
    glsl_type_singleton_init_or_ref();
    int result = 0;
-   for (unsigned i = 0; i < ARRAY_SIZE(platforms); ++i)
-      result |= compile_air(platforms[i], input, entry, argc == 1, fp_profile);
+   STELA_INTEL_FOREACH_TARGET(platform, device) {
+      if (!stela_intel_elk(&device))
+         result |= compile_air(platform, &device, input, entry, argc == 1, fp_profile);
+   }
    LLVMDisposeMemoryBuffer(input);
    glsl_type_singleton_decref();
    return result;

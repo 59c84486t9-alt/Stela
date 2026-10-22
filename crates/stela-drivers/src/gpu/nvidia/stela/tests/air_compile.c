@@ -3,6 +3,8 @@
  * resource owners are synthetic test models, never hardware qualification. */
 #include "../hosted/air_compile.h"
 #include "stela/tests/air_test_fixture.h"
+#include "stela/tests/targets/nvidia.h"
+#include "stela/tests/threadgroup_record.h"
 #include "nouveau/compiler/nak_private.h"
 #include "nouveau/headers/drf.h"
 #include "clc5c0.h"
@@ -160,20 +162,19 @@ static LLVMMemoryBufferRef multibuffer(unsigned count)
    return stela_air_test_custom_bitcode(prefix, body, metadata, "");
 }
 
-static struct nv_device_info model(unsigned sm, unsigned cls)
+static const struct {unsigned sm, cls;} nv_targets[] = {STELA_NV_TARGETS(STELA_NV_TARGET)};
+/* A fixture's compile target: "<fixture>/sm<N>". */
+static void owned_target(char name[64], const char *fixture, unsigned sm)
 {
-    struct nv_device_info device = {.sm = (uint8_t)sm, .cls_compute = (uint16_t)cls};
-    const uint16_t sizes[] = {0, 8, 16, 32, 64, 100, 132, 164, 196, 228};
-    if (sm == 75) {
-        device.max_warps_per_mp = 32; device.sm_smem_size_count = 2;
-        device.sm_smem_sizes_kB[0] = 32; device.sm_smem_sizes_kB[1] = 64;
-    } else {
-        device.max_warps_per_mp = sm == 86 || sm == 87 || sm == 89 || sm == 120 ? 48 : 64;
-        device.sm_smem_size_count = sm == 80 || sm == 87 ? 8 : sm >= 90 && sm < 120 ? 10 : 6;
-        memcpy(device.sm_smem_sizes_kB, sizes, device.sm_smem_size_count * sizeof(sizes[0]));
-    }
-    device.max_smem_per_wg_kB = device.sm_smem_sizes_kB[device.sm_smem_size_count - 1];
-    return device;
+    snprintf(name, 64, "%s/sm%u", fixture, sm);
+}
+static void expect_owned(const char *fixture, unsigned sm)
+{
+    char target[64]; owned_target(target, fixture, sm); record_expect(target, NULL);
+}
+static void expect_targets(const char *fixture)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(nv_targets); i++) expect_owned(fixture, nv_targets[i].sm);
 }
 static struct nak_compiler *compiler(const struct nv_device_info *device)
 {
@@ -338,7 +339,7 @@ static void specialize(nir_shader *shader, const uint8_t *table, unsigned count,
 }
 static void validate(const struct nv_device_info *device, const struct nak_compiler *nak,
     const struct stela_metal_assembly *library, struct stela_nv_air_compilation *owner,
-    const char *label, bool semantic)
+    const char *fixture, bool semantic)
 {
     const struct nak_shader_bin *bin = stela_nv_air_binary(owner);
     const struct stela_nv_air_provenance *p = stela_nv_air_provenance(owner);
@@ -382,21 +383,28 @@ static void validate(const struct nv_device_info *device, const struct nak_compi
         !memcmp(&original_bin->info, &bin->info, sizeof(bin->info)));
     nak_shader_bin_destroy(original_bin); ralloc_free(nir);
     qmd(device, owner, count, table_bytes);
-    char digest[BLAKE3_HEX_LEN]; _mesa_blake3_format(digest, hash);
-    printf("owned-air-nak input=%s sm=%u buffers=%u cbuf=%u table_bytes=%u code_bytes=%u code_blake3=%s gprs=%u shared=%u barriers=%u scratch=%u stack=%u\n",
-        label, device->sm, count, p->options.argument_cbuf, table_bytes, bin->code_size, digest, bin->info.num_gprs,
-        bin->info.cs.smem_size, bin->info.num_control_barriers, bin->info.slm_size, bin->info.crs_size);
+    char target[64]; owned_target(target, fixture, device->sm);
+    record_compiled(target, bin->code_size);
+    record_object("facts");
+    record_uint("buffers", count);
+    record_uint("cbuf", p->options.argument_cbuf);
+    record_uint("table_bytes", table_bytes);
+    record_blake3("code_blake3", bin->code, bin->code_size);
+    record_uint("gprs", bin->info.num_gprs);
+    record_uint("barriers", bin->info.num_control_barriers);
+    record_uint("scratch", bin->info.slm_size);
+    record_uint("stack", bin->info.crs_size);
+    record_threadgroup(&p->threadgroup, bin->info.cs.smem_size);
+    record_end();
 }
-static void targets(struct stela_metal_assembly *library, enum stela_air_fp_profile fp, const char *label, bool semantic)
+static void targets(struct stela_metal_assembly *library, enum stela_air_fp_profile fp, const char *fixture, bool semantic)
 {
-    const struct {unsigned sm, cls;} targets[] = {{75,TURING_COMPUTE_A},{80,AMPERE_COMPUTE_A},{86,AMPERE_COMPUTE_B},
-        {87,AMPERE_COMPUTE_B},{89,ADA_COMPUTE_A},{90,HOPPER_COMPUTE_A},{100,BLACKWELL_COMPUTE_A},
-        {104,BLACKWELL_COMPUTE_A},{120,BLACKWELL_COMPUTE_B}};
-    for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
-        struct nv_device_info device = model(targets[i].sm, targets[i].cls); struct nak_compiler *nak = compiler(&device);
+    expect_targets(fixture);
+    for (unsigned i = 0; i < ARRAY_SIZE(nv_targets); i++) {
+        struct nv_device_info device = stela_nv_target_device(nv_targets[i].sm, nv_targets[i].cls); struct nak_compiler *nak = compiler(&device);
         struct stela_nv_air_options opts = options(); opts.fp_profile = fp;
         struct stela_nv_air_compilation *owner = compile(&device, nak, library, 0, &opts, STELA_NV_AIR_OK);
-        validate(&device, nak, library, owner, label, semantic); nak_compiler_destroy(nak);
+        validate(&device, nak, library, owner, fixture, semantic); nak_compiler_destroy(nak);
         nir_validate_shader((nir_shader *)stela_nv_air_nir(owner), "owned options after compiler destruction"); destroy(&owner);
     }
 }
@@ -430,7 +438,7 @@ static void pack_failures(struct stela_nv_air_compilation *owner, const struct n
 }
 static void selected_and_binding_tests(void)
 {
-    struct nv_device_info device=model(89,ADA_COMPUTE_A); struct nak_compiler *nak=compiler(&device);
+    struct nv_device_info device=stela_nv_target_device(89, ADA_COMPUTE_A); struct nak_compiler *nak=compiler(&device);
     struct stela_nv_air_options opts=options();
     const char *metadata="}\n!air.version = !{!0}\n!air.language_version = !{!1}\n"
         "!air.kernel = !{!2,!7}\n!0 = !{i32 2, i32 8, i32 0}\n"
@@ -448,7 +456,7 @@ static void selected_and_binding_tests(void)
     CHECK(p->selected_entry==1&&!strcmp(p->name,"other")&&p->input.entry_count==2&&
         p->arguments[1].buffer.index==13&&p->arguments[1].buffer.access==STELA_AIR_WRITE&&
         !p->arguments[0].name&&!p->arguments[0].name_bytes);
-    validate(&device,nak,library,owner,"selected-second-entry",false);
+    expect_owned("selected-second-entry",device.sm);validate(&device,nak,library,owner,"selected-second-entry",false);
     unsigned stores=0;
     nir_foreach_function_impl(impl,(nir_shader *)stela_nv_air_nir(owner)) {
         nir_foreach_block(block,impl) {
@@ -472,6 +480,7 @@ static void selected_and_binding_tests(void)
     owner=compile(&device,nak,library,0,&opts,STELA_NV_AIR_OK);
     opts.argument_cbuf=7;
     struct stela_nv_air_compilation *other=compile(&device,nak,library,0,&opts,STELA_NV_AIR_OK);
+    expect_owned("slot-seven-3d",device.sm);expect_owned("slot-zero-after-other-owner-destroy",device.sm);
     validate(&device,nak,library,other,"slot-seven-3d",true); destroy(&other);
     validate(&device,nak,library,owner,"slot-zero-after-other-owner-destroy",true);
     uint32_t count,extent;const struct stela_nv_air_binding *map=stela_nv_air_bindings(owner,&count,&extent);CHECK(count==2);
@@ -497,7 +506,7 @@ static void original_tests(void)
     LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_test_store_body, "");
     struct stela_metal_assembly *library = fixture(air); LLVMDisposeMemoryBuffer(air);
     targets(library, STELA_AIR_FP_IEEE_DEFAULT, "original-integer", false);
-    struct nv_device_info device = model(89, ADA_COMPUTE_A); struct nak_compiler *nak = compiler(&device);
+    struct nv_device_info device = stela_nv_target_device(89, ADA_COMPUTE_A); struct nak_compiler *nak = compiler(&device);
     struct stela_nv_air_options opts=options();
     CHECK(!nak->nir_options.cb_data);
     unsigned before_callback_refusal=allocations;
@@ -517,7 +526,8 @@ static void original_tests(void)
     destroy(&owner);
     for(unsigned buffers=0;buffers<=31;buffers++) {
         air=multibuffer(buffers); library=fixture(air); LLVMDisposeMemoryBuffer(air);
-        targets(library,STELA_AIR_FP_IEEE_DEFAULT,"generic-buffer-indices",true); stela_metal_assembly_destroy(&library);
+        char fixture_name[32]; snprintf(fixture_name,sizeof(fixture_name),"buffers-%u",buffers);
+        targets(library,STELA_AIR_FP_IEEE_DEFAULT,fixture_name,true); stela_metal_assembly_destroy(&library);
     }
     air=stela_air_test_bitcode("ret void\n", ""); library=fixture(air); LLVMDisposeMemoryBuffer(air);
     targets(library,STELA_AIR_FP_IEEE_DEFAULT,"unused-buffer-no-effects",true); stela_metal_assembly_destroy(&library);
@@ -546,7 +556,7 @@ static void original_tests(void)
     CHECK(stela_nv_air_compile(NULL,nak,library,0,&opts,&owner,&error)==STELA_NV_AIR_INVALID&&owner==retained);
     destroy(&owner);
     bad=opts;bad.record_assembly=0;owner=compile(&device,nak,library,0,&bad,STELA_NV_AIR_OK);
-    CHECK(!stela_nv_air_binary(owner)->asm_str);validate(&device,nak,library,owner,"without-assembly-text",false);destroy(&owner);
+    CHECK(!stela_nv_air_binary(owner)->asm_str);expect_owned("without-assembly-text",device.sm);validate(&device,nak,library,owner,"without-assembly-text",false);destroy(&owner);
 #ifdef STELA_NV_AIR_ALLOC_TEST
     allocations=0; owner=compile(&device,nak,library,0,&opts,STELA_NV_AIR_OK); CHECK(allocations==2); destroy(&owner);
     for(unsigned fail=1;fail<=2;fail++) { allocations=0;fail_allocation=fail;CHECK(!compile(&device,nak,library,0,&opts,STELA_NV_AIR_ALLOCATION)&&!live_allocations); }
@@ -577,7 +587,6 @@ static void original_tests(void)
     CHECK(!compile(&device,nak,library,0,&opts,STELA_NV_AIR_UNSUPPORTED));
     nak_compiler_destroy(nak); stela_metal_assembly_destroy(&library);
     CHECK(!stela_nv_air_binary(NULL)&&!stela_nv_air_nir(NULL)&&!stela_nv_air_provenance(NULL));
-    puts("owned NAK compiler/table/QMD/lifetime/failure fixtures passed; no hardware execution");
 }
 static struct bytes read_file(const char *path)
 {
@@ -606,10 +615,10 @@ static void source_input(int argc,char **argv)
     struct stela_metal_assembly_options assembly_options=stela_metal_assembly_default_options();
     struct stela_metal_assembly_error error;struct stela_metal_assembly *library=NULL;
     CHECK(stela_metal_assemble_source(&assembly_options,&config,&request,&compiled,&library,&error)==STELA_METAL_ASSEMBLY_OK);
-    struct nv_device_info device=model(89,ADA_COMPUTE_A);struct nak_compiler *nak=compiler(&device);
+    struct nv_device_info device=stela_nv_target_device(89, ADA_COMPUTE_A);struct nak_compiler *nak=compiler(&device);
     struct stela_nv_air_options opts=options();opts.fp_profile=STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
     struct stela_nv_air_compilation *owner=compile(&device,nak,library,0,&opts,STELA_NV_AIR_OK);
-    validate(&device,nak,library,owner,"original-source-owner",false);
+    expect_owned("original-source-owner",device.sm);validate(&device,nak,library,owner,"original-source-owner",false);
     free(air.data);free(source.data);stela_metal_assembly_destroy(&library);nak_compiler_destroy(nak);
     const struct stela_nv_air_provenance *p=stela_nv_air_provenance(owner);
     CHECK(p->library_flags==STELA_METAL_LIBRARY_SOURCE_COMPILED&&p->compiler_profile==config.profile&&
@@ -639,11 +648,9 @@ static void threadgroup_input(int argc,char **argv)
     CHECK(stela_air_inspect(air.data,air.size,256,inspect,&f,&air_error)&&f.found);
     struct bytes bytes=archive(air.data,air.size,f.name,f.air,f.major,f.minor,f.osmajor,f.osminor);
     struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);free(air.data);
-    const struct {unsigned sm,cls;} targets[]={{75,TURING_COMPUTE_A},{80,AMPERE_COMPUTE_A},{86,AMPERE_COMPUTE_B},
-        {87,AMPERE_COMPUTE_B},{89,ADA_COMPUTE_A},{90,HOPPER_COMPUTE_A},{100,BLACKWELL_COMPUTE_A},
-        {104,BLACKWELL_COMPUTE_A},{120,BLACKWELL_COMPUTE_B}};
-    for(unsigned i=0;i<ARRAY_SIZE(targets);i++) {
-        struct nv_device_info device=model(targets[i].sm,targets[i].cls);struct nak_compiler *nak=compiler(&device);
+    expect_targets("threadgroup");
+    for(unsigned i=0;i<ARRAY_SIZE(nv_targets);i++) {
+        struct nv_device_info device=stela_nv_target_device(nv_targets[i].sm, nv_targets[i].cls);struct nak_compiler *nak=compiler(&device);
         struct stela_nv_air_options opts=options();opts.workgroup_size[0]=(uint32_t)workgroup;
         struct stela_nv_air_compilation *owner=NULL;struct stela_nv_air_error error;
         CHECK(stela_nv_air_compile_specialized(&device,nak,library,0,&opts,&request,&owner,&error)==STELA_NV_AIR_OK&&owner);
@@ -679,11 +686,7 @@ static void threadgroup_input(int argc,char **argv)
         memset(rows,0,sizeof(rows));
         CHECK(p->threadgroup.bindings[0].bytes&&p->threadgroup.bindings[0].alignment>=16);
         memcpy(rows,saved,sizeof(rows));CHECK(stela_metal_threadgroup_matches(&p->threadgroup,&request));
-        validate(&device,nak,library,owner,"dispatch-threadgroup-specialization",false);
-        printf("owned-threadgroup-nak sm=%u count=%u total_shared=%u",device.sm,p->threadgroup.count,stela_nv_air_binary(owner)->info.cs.smem_size);
-        for(unsigned r=0;r<p->threadgroup.count;r++)printf(" row=%u:%u:%llu:%u",p->threadgroup.bindings[r].buffer.argument,
-            p->threadgroup.bindings[r].buffer.index,(unsigned long long)p->threadgroup.bindings[r].bytes,p->threadgroup.bindings[r].alignment);
-        puts("");
+        validate(&device,nak,library,owner,"threadgroup",false);
         nak_compiler_destroy(nak);nir_validate_shader((nir_shader *)stela_nv_air_nir(owner),"dynamic options after compiler destruction");
         CHECK(stela_metal_threadgroup_matches(&p->threadgroup,&request));destroy(&owner);
     }
@@ -696,15 +699,16 @@ static void shared_refusal(int argc,char **argv)
     CHECK(stela_air_inspect(air.data,air.size,256,inspect,&f,&inspect_error)&&f.found);
     struct bytes bytes=archive(air.data,air.size,f.name,f.air,f.major,f.minor,f.osmajor,f.osminor);
     struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);free(air.data);
-    const struct {unsigned sm,cls;} targets[]={{75,TURING_COMPUTE_A},{80,AMPERE_COMPUTE_A},{86,AMPERE_COMPUTE_B},
-        {87,AMPERE_COMPUTE_B},{89,ADA_COMPUTE_A},{90,HOPPER_COMPUTE_A},{100,BLACKWELL_COMPUTE_A},
-        {104,BLACKWELL_COMPUTE_A},{120,BLACKWELL_COMPUTE_B}};
-    for(unsigned i=0;i<ARRAY_SIZE(targets);i++) {
-        struct nv_device_info device=model(targets[i].sm,targets[i].cls);struct nak_compiler *nak=compiler(&device);
+    for(unsigned i=0;i<ARRAY_SIZE(nv_targets);i++) {
+        char target[64];owned_target(target,"shared-refusal",nv_targets[i].sm);
+        record_expect_refusal(target,STELA_REFUSAL_DYNAMIC_THREADGROUP);
+    }
+    for(unsigned i=0;i<ARRAY_SIZE(nv_targets);i++) {
+        struct nv_device_info device=stela_nv_target_device(nv_targets[i].sm, nv_targets[i].cls);struct nak_compiler *nak=compiler(&device);
         struct stela_nv_air_options opts=options();struct stela_nv_air_compilation *owner=NULL;struct stela_nv_air_error error;
         CHECK(stela_nv_air_compile(&device,nak,library,0,&opts,&owner,&error)==STELA_NV_AIR_UNSUPPORTED&&
             !owner&&error.status==STELA_NV_AIR_UNSUPPORTED&&error.air.kind==STELA_AIR_OK&&strstr(error.detail,"binding specialization"));
-        printf("owned-air-nak entry=%s sm=%u shared_refusal=dynamic-specialization-unavailable\n",f.name,device.sm);
+        char target[64];owned_target(target,"shared-refusal",device.sm);record_refused(target,STELA_REFUSAL_DYNAMIC_THREADGROUP);
         nak_compiler_destroy(nak);
     }
     stela_metal_assembly_destroy(&library);

@@ -1,8 +1,15 @@
 //! Native host compiler builds. Device access and Metal are separate ports.
+//!
+//! Meson defines what is built and run: every target in
+//! `common/mesa/src/stela/meson.build` and every test in its suite `stela`;
+//! the tests in its other suites also take this task's inputs. Probes report
+//! through typed records (`record.rs`), so this task lists no targets or counts.
 use super::support::{capture, evidence_directory, source_binding, tool};
 use crate::tools;
 use anyhow::{Context, Result, ensure};
+use meson::Build;
 use object::{Object, ObjectSymbol, read::archive::ArchiveFile};
+use record::{Origin, Outcome, Record, Report};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
@@ -11,50 +18,14 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::SystemTime,
 };
 
 mod library;
+mod meson;
+mod record;
 mod render;
 mod threadgroup;
-
-const LIBRARIES: &[&str] = &[
-    "src/stela/libstela_apple_source.a",
-    "src/compiler/nir/libnir.a",
-    "src/nouveau/compiler/libnak.a",
-    "src/nouveau/compiler/libnak_rs.a",
-    "src/stela/libstela_nak_layout.a",
-    "src/nouveau/nil/libnil.a",
-    "src/stela/libstela_nv_compute.a",
-    "src/stela/libstela_nv_image.a",
-    "src/stela/libstela_nv_sampler.a",
-    "src/amd/compiler/libaco.a",
-    "src/amd/common/libamd_common.a",
-    "src/stela/libstela_amd_commands.a",
-    "src/stela/libstela_amd_buffer.a",
-    "src/stela/libstela_amd_sampler.a",
-    "src/stela/libstela_amd_image.a",
-    "src/amd/addrlib/libaddrlib.a",
-    "src/stela/libstela_amd_compute.a",
-    "src/stela/libstela_intel_surface.a",
-    "src/stela/libstela_intel_image_copy.a",
-    "src/stela/libstela_intel_sampler.a",
-    "src/stela/libstela_intel_compute_native.a",
-    "src/stela/libstela_intel_compute_policy.a",
-    "src/stela/libstela_intel_gpgpu_native.a",
-    "src/stela/libstela_intel_legacy_compute.a",
-    "src/intel/dev/libintel_dev.a",
-    "src/intel/compiler/gen/libintel_compiler_gen.a",
-    "src/intel/compiler/brw/libintel_compiler.a",
-    "src/intel/compiler/elk/libintel_compiler_elk.a",
-    "src/intel/compiler/jay/libintel_compiler_jay.a",
-];
-
-const PROBES: &[(&str, &str)] = &[
-    ("nak-codegen", "src/stela/stela_nak_probe"),
-    ("aco-codegen", "src/stela/stela_aco_probe"),
-    ("brw-codegen", "src/stela/stela_brw_probe"),
-    ("elk-codegen", "src/stela/stela_elk_probe"),
-];
 
 fn run(command: &mut Command, evidence: &Path, stage: &str) -> Result<()> {
     let path = evidence.join(format!("{stage}.log"));
@@ -79,7 +50,71 @@ fn run(command: &mut Command, evidence: &Path, stage: &str) -> Result<()> {
     Ok(())
 }
 
-fn inspect_archive(path: &Path) -> Result<Value> {
+/// Every probe run with its checked records, and the targets they held.
+#[derive(Default)]
+struct Probes {
+    runs: Vec<Value>,
+    unsupported: Vec<Value>,
+    compiled: usize,
+    refused: usize,
+}
+
+impl Probes {
+    /// Runs a probe and checks its outcomes against the expectations it made.
+    fn run(&mut self, command: &mut Command, evidence: &Path, stage: &str) -> Result<Report> {
+        let binary = PathBuf::from(command.get_program());
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        run(command, evidence, stage)?;
+        let log = evidence.join(format!("{stage}.log"));
+        let report = Report::parse(&fs::read_to_string(&log)?)
+            .with_context(|| format!("{stage}: invalid records in {}", log.display()))?;
+        self.compiled += report.count(Outcome::Compiled);
+        self.refused += report.count(Outcome::Refused);
+        for record in report.held() {
+            let Record::Held { target, reason } = record else {
+                unreachable!("held records only");
+            };
+            self.unsupported
+                .push(json!({"stage": stage, "target": target, "reason": reason}));
+        }
+        self.runs.push(json!({
+            "stage": stage, "args": args, "binary": tools::binding(&binary)?,
+            "output": tools::binding(&log)?, "records": &report, "hardware_executed": false,
+        }));
+        Ok(report)
+    }
+}
+
+/// Binds the files a probe wrote into `directory`, which must be exactly the
+/// artifacts it recorded.
+fn artifacts(directory: &Path, report: &Report) -> Result<Vec<Value>> {
+    let mut names = BTreeSet::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        ensure!(entry.file_type()?.is_file(), "non-file artifact");
+        names.insert(
+            entry
+                .file_name()
+                .into_string()
+                .ok()
+                .context("artifact name")?,
+        );
+    }
+    ensure!(
+        !names.is_empty() && names == report.artifacts,
+        "{} differs from the recorded artifacts",
+        directory.display()
+    );
+    names
+        .iter()
+        .map(|name| tools::binding(&directory.join(name)))
+        .collect()
+}
+
+fn inspect_archive(path: &Path, stela_library: bool) -> Result<Value> {
     let data = fs::read(path)?;
     let archive = ArchiveFile::parse(&*data)?;
     let mut formats = BTreeSet::new();
@@ -100,54 +135,42 @@ fn inspect_archive(path: &Path) -> Result<Value> {
         for symbol in object.symbols().filter(|symbol| symbol.is_undefined()) {
             let name = symbol.name()?;
             if !name.is_empty() {
-                undefined.insert(name.to_owned());
+                undefined.insert(name.trim_start_matches('_').to_owned());
             }
         }
         count += 1;
     }
     ensure!(count > 0, "{} contains no objects", path.display());
-    // Stela's capability/format libraries must remain independent of Linux
-    // device access. Inspect actual objects rather than only Meson options.
-    // Upstream archives keep device queries Stela never calls; libdrm is
-    // headers only, so a live call into it cannot link.
-    if matches!(
-        path.file_name().and_then(|name| name.to_str()),
-        Some(
-            "libstela_amd_air.a"
-                | "libstela_nv_air.a"
-                | "libstela_intel_air.a"
-                | "libstela_amd_image.a"
-                | "libstela_intel_surface.a"
-                | "libstela_intel_image_copy.a"
-                | "libstela_nv_sampler.a"
-        )
-    ) {
-        for name in &undefined {
-            let name = name.trim_start_matches('_');
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("archive name")?;
+    // The libraries Stela's Meson definition builds must remain independent
+    // of Linux device access. Inspect actual objects rather than only Meson
+    // options. Upstream
+    // archives keep device queries Stela never calls; libdrm is headers
+    // only, so a live call into it cannot link.
+    if stela_library {
+        for symbol in &undefined {
             ensure!(
-                !name.starts_with("drm") && name != "ioctl",
-                "{} depends on device I/O through {name}",
-                path.display()
+                !symbol.starts_with("drm") && symbol != "ioctl",
+                "{name} depends on device I/O through {symbol}"
             );
         }
     }
-    if path.file_name().and_then(|name| name.to_str()) == Some("libaddrlib.a") {
+    if name == "libaddrlib.a" {
         ensure!(
-            !undefined
-                .iter()
-                .any(|name| name.trim_start_matches('_') == "umoddi3"),
+            !undefined.contains("umoddi3"),
             "the public Addrlib host build must not import Apple's private compiler helper"
         );
     }
-    if path.file_name().and_then(|name| name.to_str()) == Some("libstela_apple_source.a") {
-        for name in &undefined {
-            let name = name.trim_start_matches('_');
+    if name == "libstela_apple_source.a" {
+        for symbol in &undefined {
             ensure!(
-                !name.starts_with("LLVM")
-                    && !name.starts_with("MTL")
-                    && !name.starts_with("IOService")
-                    && !name.starts_with("IOConnect"),
-                "the hosted source adapter must not import host LLVM or GPU object APIs: {name}"
+                !["LLVM", "MTL", "IOService", "IOConnect"]
+                    .iter()
+                    .any(|prefix| symbol.starts_with(prefix)),
+                "the hosted source adapter must not import host LLVM or GPU object APIs: {symbol}"
             );
         }
     }
@@ -186,126 +209,81 @@ fn snapshot_air_inputs(inputs: &[PathBuf], evidence: &Path, prefix: &str) -> Res
         .collect()
 }
 
-fn parse_targets(log: &str, backend: &str) -> Result<Vec<Value>> {
-    let mut targets = Vec::new();
-    let mut names = BTreeSet::new();
-    for line in log.lines() {
-        let Some(record) = line.strip_prefix("STELA_GPU_TARGET ") else {
-            continue;
-        };
-        let record: Value = serde_json::from_str(record)?;
-        ensure!(
-            record["backend"] == backend,
-            "wrong backend in codegen record"
-        );
-        let name = record["target"]
+/// The path and size of an input snapshot.
+fn snapshot(input: &Value) -> Result<(&str, u64)> {
+    Ok((
+        input["snapshot"]["path"]
             .as_str()
-            .context("codegen record has no target")?;
-        ensure!(
-            !name.is_empty() && names.insert(name.to_owned()),
-            "empty or repeated codegen target"
-        );
-        match record["state"].as_str() {
-            Some("compiled") => ensure!(
-                record["bytes"].as_u64().is_some_and(|bytes| bytes > 0),
-                "compiled target has no emitted code"
-            ),
-            Some("unsupported") => ensure!(
-                record["reason"]
-                    .as_str()
-                    .is_some_and(|reason| !reason.is_empty()),
-                "unsupported target has no reason"
-            ),
-            _ => anyhow::bail!("unknown codegen target state"),
-        }
-        targets.push(record);
-    }
-    ensure!(
-        targets.iter().any(|record| record["state"] == "compiled"),
-        "codegen probe emitted no compiled targets"
-    );
-    Ok(targets)
+            .context("missing AIR snapshot path")?,
+        input["snapshot"]["bytes"]
+            .as_u64()
+            .context("missing AIR snapshot size")?,
+    ))
 }
 
-fn parse_original_input(log: &str, entry: &str, bytes: u64) -> Result<Value> {
-    let records = log
-        .lines()
-        .filter_map(|line| line.strip_prefix("STELA_AIR_INPUT "))
-        .map(serde_json::from_str::<Value>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+/// Checks that a probe compiled the named unchanged input file.
+fn check_input(report: &Report, entry: &str, bytes: u64) -> Result<String> {
+    let (origin, actual, blake3, actual_entry) = report.input()?;
     ensure!(
-        records.len() == 1,
-        "probe must identify exactly one raw AIR input"
-    );
-    let record = &records[0];
-    ensure!(
-        record["origin"] == "raw_input_file"
-            && record["entry"] == entry
-            && record["bytes"] == bytes,
+        origin == Origin::RawInputFile && actual == bytes && actual_entry == entry,
         "probe did not compile the requested raw AIR input/entry"
     );
     ensure!(
-        record["blake3"].as_str().is_some_and(|hash| {
-            hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-        }),
+        blake3.len() == 64 && blake3.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "probe did not hash its actual AIR input"
     );
-    Ok(records.into_iter().next().expect("one record"))
+    Ok(blake3.to_owned())
 }
 
-fn parse_air_profile(log: &str, expected: super::AirFpProfile) -> Result<Value> {
-    let records = log
-        .lines()
-        .filter_map(|line| line.strip_prefix("STELA_AIR_PROFILE "))
-        .map(serde_json::from_str::<Value>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    ensure!(
-        records.len() == 1,
-        "probe must identify exactly one selected AIR floating-point profile"
-    );
-    let record = &records[0];
-    ensure!(
-        record["name"] == expected.name() && record["kind"] == expected.kind(),
-        "probe did not use the requested AIR floating-point profile"
-    );
-    Ok(records.into_iter().next().expect("one record"))
-}
-
-fn parse_air_environments(
-    log: &str,
-    backend: &str,
-    profile: super::AirFpProfile,
-    targets: &[Value],
-) -> Result<Vec<Value>> {
-    let records = log
-        .lines()
-        .filter_map(|line| line.strip_prefix("STELA_AIR_ENVIRONMENT "))
-        .map(serde_json::from_str::<Value>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let compiled: BTreeSet<_> = targets
-        .iter()
-        .filter(|target| target["state"] == "compiled")
-        .filter_map(|target| target["target"].as_str())
-        .collect();
-    let mut seen = BTreeSet::new();
-    for record in &records {
-        let target = record["target"].as_str().context("missing AIR target")?;
+/// Compiles each raw AIR input through every probe in suite
+/// `stela-air-input`. All read the same bytes and request the same controls.
+fn compile_air_inputs(
+    stela: &Build,
+    probes: &mut Probes,
+    evidence: &Path,
+    inputs: &[Value],
+    entry: Option<&str>,
+    fp_profile: super::AirFpProfile,
+) -> Result<()> {
+    for (index, input) in inputs.iter().enumerate() {
+        let (path, bytes) = snapshot(input)?;
+        let entry = entry.context("raw AIR requires an entry point")?;
+        let mut digest = None;
+        let mut float_controls = None;
+        for test in stela.suite("stela-air-input") {
+            let stage = format!("original-{index}-{}", test.name);
+            let mut command = test.command([
+                "--input",
+                path,
+                "--entry",
+                entry,
+                "--fp-profile",
+                fp_profile.name(),
+            ]);
+            let report = probes.run(&mut command, evidence, &stage)?;
+            let blake3 = check_input(&report, entry, bytes)?;
+            ensure!(
+                *digest.get_or_insert_with(|| blake3.clone()) == blake3,
+                "vendor probes read different AIR bytes"
+            );
+            ensure!(
+                report.profile()? == (fp_profile.name(), fp_profile.kind()),
+                "probe did not use the requested AIR floating-point profile"
+            );
+            for mode in report.environments(fp_profile.kind())?.into_values() {
+                ensure!(
+                    *float_controls.get_or_insert(mode) == mode,
+                    "vendor probes requested different AIR float controls"
+                );
+            }
+        }
+        ensure!(digest.is_some(), "Meson defines no stela-air-input probes");
         ensure!(
-            record["backend"] == backend
-                && record["fp_profile"] == profile.kind()
-                && record["nir_float_controls"]
-                    .as_u64()
-                    .is_some_and(|mode| u32::try_from(mode).is_ok())
-                && compiled.contains(target)
-                && seen.insert(target),
-            "invalid or duplicate AIR environment for compiled target"
+            tools::binding(Path::new(path))? == input["snapshot"],
+            "AIR snapshot changed during compilation"
         );
     }
-    ensure!(
-        seen == compiled,
-        "compiled AIR target omitted its environment"
-    );
-    Ok(records)
+    Ok(())
 }
 
 fn llvm_development_files(config: &Path, library: &Path) -> Result<Value> {
@@ -333,6 +311,22 @@ fn llvm_development_files(config: &Path, library: &Path) -> Result<Value> {
         "headers": headers, "headers_sha256": source_binding(&headers)?,
         "shared_library": shared, "rtti": rtti.trim() == "YES",
     }))
+}
+
+/// Binds the build's sources outside the Mesa tree, which must not have
+/// changed since `started`.
+fn bind_external(paths: &[PathBuf], started: SystemTime) -> Result<Vec<Value>> {
+    paths
+        .iter()
+        .map(|path| {
+            ensure!(
+                fs::metadata(path)?.modified()? <= started,
+                "{} changed during the build",
+                path.display()
+            );
+            tools::binding(path)
+        })
+        .collect()
 }
 
 pub struct BuildOptions<'a> {
@@ -371,6 +365,7 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         render_inputs.is_empty() || (render_inputs.len() == 2 && llvm_library.is_some()),
         "render fixtures require triangle and texture raw inputs and --llvm-library"
     );
+    let started = SystemTime::now();
     let llvm_library = llvm_library.map(fs::canonicalize).transpose()?;
     let llvm_config = llvm_config.map(fs::canonicalize).transpose()?;
     let llvm_sdk = llvm_config
@@ -405,164 +400,6 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
     let path = env::join_paths(paths)?;
     let gpu = tools::root().join("crates/stela-drivers/src/gpu");
     let source = gpu.join("common/mesa");
-    let external_inputs = || -> Result<Vec<Value>> {
-        let mut paths = vec![
-            "metal/compiler/apple_source.c",
-            "metal/compiler/apple_source.h",
-            "metal/compiler/tests/apple_source.c",
-            "metal/compiler/threadgroup.c",
-            "metal/compiler/threadgroup.h",
-            "metal/compiler/tests/threadgroup.c",
-            "metal/compiler/tests/threadgroup_nir.c",
-            "nvidia/stela/hosted/air_compile.c",
-            "nvidia/stela/hosted/air_compile.h",
-            "nvidia/stela/tests/air_compile.c",
-            "nvidia/stela/tests/air_render.c",
-            "nvidia/stela/hosted/render_compile.c",
-            "nvidia/stela/hosted/render_compile.h",
-            "nvidia/stela/tests/air_render_owned.c",
-            "intel/stela/hosted/air_compile.c",
-            "intel/stela/hosted/air_compile.h",
-            "intel/stela/hosted/air_validate_elk.c",
-            "intel/stela/hosted/air_graphics.c",
-            "intel/stela/hosted/air_graphics.h",
-            "intel/stela/tests/air_graphics.c",
-            "intel/stela/tests/air_compile.c",
-            "intel/stela/tests/air_render.c",
-            "intel/stela/tests/air_render_elk.c",
-            "amd/stela/tests/air_render.c",
-            "nvidia/stela/hosted/image.c",
-            "nvidia/stela/hosted/image.h",
-            "nvidia/stela/tests/image.c",
-            "nvidia/stela/hosted/copy.c",
-            "nvidia/stela/hosted/copy.h",
-            "nvidia/stela/tests/copy.c",
-            "nvidia/stela/hosted/nak_layout.c",
-            "nvidia/stela/hosted/sampler.c",
-            "nvidia/stela/hosted/sampler.h",
-            "nvidia/stela/tests/sampler.c",
-            "nvidia/stela/tests/sampler_cases.h",
-            "nvidia/stela/tests/sampler_expected.h",
-            "amd/stela/hosted/buffer.c",
-            "amd/stela/hosted/buffer.h",
-            "amd/stela/tests/buffer.c",
-            "amd/stela/hosted/sampler.c",
-            "amd/stela/hosted/sampler.h",
-            "amd/stela/tests/sampler.c",
-            "amd/stela/tests/sampler_policy_reference.h",
-            "amd/stela/tests/surface.c",
-            "amd/stela/hosted/image.c",
-            "amd/stela/hosted/image.h",
-            "amd/stela/hosted/image_resource.c",
-            "amd/stela/hosted/image_resource.h",
-            "amd/stela/tests/image_resource.c",
-            "amd/stela/tests/image.c",
-            "amd/stela/hosted/image_copy.c",
-            "amd/stela/hosted/image_copy.h",
-            "amd/stela/tests/image_copy.c",
-            "amd/stela/tests/image_fixture.h",
-            "amd/stela/hosted/air_compile.c",
-            "amd/stela/hosted/air_compile.h",
-            "amd/stela/tests/air_compile.c",
-            "amd/stela/hosted/compute.c",
-            "amd/stela/hosted/compute.h",
-            "amd/stela/hosted/compute_policy.c",
-            "amd/stela/hosted/compute_policy.h",
-            "amd/stela/hosted/llvm_compute.c",
-            "amd/stela/hosted/llvm_compute.h",
-            "amd/stela/tests/compute.c",
-            "amd/stela/tests/compute_policy_reference.h",
-            "intel/stela/hosted/surface.c",
-            "intel/stela/hosted/surface.h",
-            "intel/stela/tests/surface.c",
-            "intel/stela/hosted/image.c",
-            "intel/stela/hosted/image.h",
-            "intel/stela/tests/image.c",
-            "intel/stela/hosted/image_copy.c",
-            "intel/stela/hosted/image_copy.h",
-            "intel/stela/tests/image_copy.c",
-            "intel/stela/hosted/sampler.c",
-            "intel/stela/hosted/sampler.h",
-            "intel/stela/hosted/sampler_internal.h",
-            "intel/stela/hosted/sampler_pack.h",
-            "intel/stela/hosted/sampler80.c",
-            "intel/stela/hosted/sampler90.c",
-            "intel/stela/hosted/sampler110.c",
-            "intel/stela/hosted/sampler120.c",
-            "intel/stela/hosted/sampler125.c",
-            "intel/stela/hosted/sampler200.c",
-            "intel/stela/hosted/sampler300.c",
-            "intel/stela/hosted/sampler350.c",
-            "intel/stela/tests/sampler.c",
-            "intel/stela/commands.h",
-            "intel/stela/compute_dispatch.c",
-            "intel/stela/compute_dispatch.h",
-            "intel/stela/compute_dispatch_internal.h",
-            "intel/stela/genxml_native.h",
-            "intel/stela/dispatch/compute_pack.h",
-            "intel/stela/dispatch/compute125.c",
-            "intel/stela/dispatch/compute200.c",
-            "intel/stela/dispatch/compute300.c",
-            "intel/stela/dispatch/compute350.c",
-            "intel/stela/hosted/compute.c",
-            "intel/stela/hosted/compute.h",
-            "intel/stela/hosted/fp_controls.h",
-            "intel/stela/tests/compute_program.c",
-            "intel/stela/dispatch.c",
-            "intel/stela/dispatch.h",
-            "intel/stela/dispatch_internal.h",
-            "intel/stela/dispatch/pack.h",
-            "intel/stela/dispatch/gen70.c",
-            "intel/stela/dispatch/gen75.c",
-            "intel/stela/dispatch/gen80.c",
-            "intel/stela/dispatch/gen90.c",
-            "intel/stela/dispatch/gen110.c",
-            "intel/stela/dispatch/gen120.c",
-            "intel/stela/hosted/legacy_compute.c",
-            "intel/stela/hosted/legacy_compute.h",
-            "intel/stela/hosted/legacy_compute_internal.h",
-            "intel/stela/hosted/legacy_compute_pack.h",
-            "intel/stela/hosted/legacy70.c",
-            "intel/stela/hosted/legacy75.c",
-            "intel/stela/hosted/legacy80.c",
-            "intel/stela/hosted/legacy90.c",
-            "intel/stela/hosted/legacy110.c",
-            "intel/stela/hosted/legacy120.c",
-            "intel/stela/tests/legacy_compute_program.c",
-            "intel/stela/tests/legacy_elk_validate.c",
-            "intel/stela/tests/legacy_elk_validate.h",
-        ];
-        if llvm_library.is_some() {
-            paths.extend([
-                "intel/stela/tests/air_brw_probe.c",
-                "intel/stela/tests/air_elk_probe.c",
-                "intel/stela/tests/air_probe_input.h",
-                "intel/stela/tests/fp_controls.c",
-                "intel/stela/tests/fp_controls_elk.c",
-                "intel/stela/tests/fp_controls_elk.h",
-                "intel/stela/tests/air_threadgroup.c",
-                "intel/stela/tests/air_threadgroup_elk.c",
-                "intel/stela/tests/air_threadgroup_elk.h",
-                "nvidia/stela/tests/air_threadgroup.c",
-                "amd/stela/tests/air_probe_input.h",
-            ]);
-        }
-        if llvm_sdk.is_some() {
-            paths.extend([
-                "amd/stela/tests/air_llvm_probe.c",
-                "amd/stela/hosted/llvm_float.c",
-                "amd/stela/hosted/llvm_float.h",
-                "amd/stela/tests/llvm_float.c",
-                "amd/stela/tests/air_shared.c",
-                "amd/stela/tests/llvm_compute_reference.h",
-            ]);
-        }
-        paths
-            .iter()
-            .map(|name| tools::binding(&gpu.join(name)))
-            .collect()
-    };
-    let external_sources = external_inputs()?;
     let cache = if let Some(sdk) = &llvm_sdk {
         format!(
             "mesa-host-llvm-{}-{}",
@@ -668,356 +505,46 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         setup.arg("--reconfigure");
     }
     run(&mut setup, &evidence, "setup")?;
+    let stela = Build::load(&build, &source.join("src/stela/meson.build"))?;
     let mut compile = Command::new(&ninja);
-    let mut library_paths = LIBRARIES.to_vec();
-    if metal_input.is_some() {
-        library_paths.push("src/stela/libstela_metal_threadgroup.a");
-        library_paths.push("src/stela/libstela_metal_assembly.a");
-        library_paths.push("src/stela/libstela_amd_air.a");
-        library_paths.push("src/stela/libstela_nv_air.a");
-        library_paths.push("src/stela/libstela_intel_air.a");
-    }
-    if llvm_sdk.is_some() {
-        library_paths.push("src/amd/llvm/libamd_common_llvm.a");
-        library_paths.push("src/stela/libstela_amd_llvm_float.a");
-    }
     compile
         .env("PATH", &path)
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg("-C")
         .arg(&build)
         .arg(format!("-j{jobs}"))
-        .args(&library_paths)
-        .args(PROBES.iter().map(|(_, binary)| binary));
-    compile.args([
-        "src/stela/stela_apple_source_test",
-        "src/stela/stela_nv_image_probe",
-        "src/stela/stela_nv_image_copy_probe",
-        "src/stela/stela_nv_sampler_probe",
-        "src/stela/stela_amd_commands_probe",
-        "src/stela/stela_amd_buffer_probe",
-        "src/stela/stela_amd_sampler_probe",
-        "src/stela/stela_amd_surface_probe",
-        "src/stela/stela_amd_image_probe",
-        "src/stela/stela_amd_image_resource_probe",
-        "src/stela/stela_amd_image_copy_probe",
-        "src/stela/stela_amd_compute_probe",
-        "src/stela/stela_intel_surface_probe",
-        "src/stela/stela_intel_image_probe",
-        "src/stela/stela_intel_image_copy_probe",
-        "src/stela/stela_intel_sampler_probe",
-        "src/stela/stela_intel_compute_program_probe",
-        "src/stela/stela_intel_legacy_compute_program_probe",
-    ]);
-    if llvm_library.is_some() {
-        compile.args([
-            "src/stela/stela_air_test",
-            "src/stela/stela_air_brw_probe",
-            "src/stela/stela_air_elk_probe",
-            "src/stela/stela_air_aco_probe",
-            "src/stela/stela_air_ssbo_test",
-            "src/stela/stela_air_stage_test",
-            "src/stela/stela_nv_air_render_probe",
-            "src/stela/stela_intel_air_render_probe",
-            "src/stela/stela_amd_air_render_probe",
-            "src/stela/stela_nv_compute_probe",
-            "src/stela/stela_intel_fp_controls_probe",
-            "src/stela/stela_nv_air_threadgroup_probe",
-            "src/stela/stela_intel_air_threadgroup_probe",
-        ]);
-        if !input_snapshots.is_empty() {
-            compile.arg("src/stela/stela_air_input_nak_probe");
-        }
-        if llvm_sdk.is_some() {
-            compile.arg("src/stela/stela_air_amd_llvm_probe");
-            compile.arg("src/stela/stela_amd_llvm_float_probe");
-            compile.arg("src/stela/stela_amd_air_threadgroup_probe");
-        }
-    }
-    if metal_input.is_some() {
-        compile.args([
-            "src/stela/stela_metal_threadgroup_test",
-            "src/stela/stela_metal_threadgroup_nir_test",
-            "src/stela/stela_metal_assembly_test",
-            "src/stela/stela_amd_air_compile_test",
-            "src/stela/stela_nv_air_compile_test",
-            "src/stela/stela_nv_air_render_owned",
-            "src/stela/stela_nv_air_render_owned_alloc",
-            "src/stela/stela_intel_air_compile_test",
-            "src/stela/stela_intel_air_graphics_test",
-            "src/stela/stela_intel_air_graphics_test_alloc",
-        ]);
-    }
+        .args(stela.outputs());
     run(&mut compile, &evidence, "compile")?;
-    let render = llvm_library
-        .as_ref()
-        .map(|_| render::verify(&build, &evidence, &render_snapshots))
-        .transpose()?;
-    let amd_air_owned = metal_input
-        .as_ref()
-        .map(|_| {
-            library::verify_owned(
-                &build,
-                &evidence,
-                "amd",
-                "aco",
-                164,
-                "owned AMD AIR compiler lifetime, multi-buffer, producer and failure tests passed",
-            )
-        })
-        .transpose()?;
-    let nv_air_owned = metal_input.as_ref().map(|_| library::verify_owned(&build, &evidence, "nv", "nak", 310,
-        "owned NAK compiler/table/QMD/lifetime/failure fixtures passed; no hardware execution")).transpose()?;
-    let nv_render_owned = metal_input
-        .as_ref()
-        .map(|_| render::verify_nv_owned(&build, &evidence, &render_snapshots))
-        .transpose()?;
-    let intel_graphics_owned = match metal_input {
-        Some(_) => render::verify_intel_owned(&build, &evidence, &render_snapshots)?,
-        None => None,
-    };
-    let metal_assembly = metal_input
-        .as_ref()
-        .map(|input| library::verify(&build, &evidence, input, &gpu))
-        .transpose()?;
-    let intel_air_owned = metal_input.as_ref().map(|_| library::verify_owned(&build, &evidence, "intel", "intel", 757,
-        "owned Intel compiler/RAW/table/plan/lifetime fixtures passed; no hardware execution")).transpose()?;
-    let intel_gen7_shared = metal_input
-        .as_ref()
-        .map(|_| library::verify_gen7_shared(&build, &evidence))
-        .transpose()?;
-    let metal_threadgroup_values = metal_input
-        .as_ref()
-        .map(|_| library::verify_threadgroup_values(&build, &evidence))
-        .transpose()?;
-    run(
-        &mut Command::new(build.join("src/stela/stela_amd_commands_probe")),
+    let inputs = stela.inputs(&ninja, &gpu, &source)?;
+    let external_sources = bind_external(&inputs.external, started)?;
+    if metal_input.is_some() {
+        library::check_boundaries(&stela)?;
+    }
+    let mut probes = Probes::default();
+    for test in stela.suite("stela") {
+        probes.run(&mut test.command::<_, &str>([]), &evidence, &test.name)?;
+    }
+    compile_air_inputs(
+        &stela,
+        &mut probes,
         &evidence,
-        "amd-commands",
+        &input_snapshots,
+        entry,
+        fp_profile,
     )?;
-    let source_boundary = build.join("src/stela/stela_apple_source_test");
-    run(
-        &mut Command::new(&source_boundary),
-        &evidence,
-        "apple-source-boundary",
-    )?;
-    let source_compiler_boundary = json!({
-        "binary": tools::binding(&source_boundary)?,
-        "output": tools::binding(&evidence.join("apple-source-boundary.log"))?,
-        "private_compiler_executed": false, "hardware_executed": false,
-    });
-    let mut resource_probes = Vec::new();
-    let mut resource_stages = vec![
-        "nv_image",
-        "nv_image_copy",
-        "nv_sampler",
-        "amd_buffer",
-        "amd_sampler",
-        "amd_surface",
-        "amd_image",
-        "amd_image_resource",
-        "amd_image_copy",
-        "amd_compute",
-        "intel_surface",
-        "intel_image",
-        "intel_image_copy",
-        "intel_sampler",
-        "intel_compute_program",
-        "intel_legacy_compute_program",
-    ];
-    if llvm_sdk.is_some() {
-        resource_stages.push("amd_llvm_float");
-    }
-    if llvm_library.is_some() {
-        resource_stages.push("intel_fp_controls");
-    }
-    for stage in resource_stages {
-        let binary = build.join(format!("src/stela/stela_{stage}_probe"));
-        run(&mut Command::new(&binary), &evidence, stage)?;
-        resource_probes.push(json!({
-            "stage": stage,
-            "binary": tools::binding(&binary)?,
-            "output": tools::binding(&evidence.join(format!("{stage}.log")))?,
-            "hardware_executed": false,
-        }));
-    }
-    let mut probes = Vec::new();
-    let mut unsupported = Vec::new();
-    let mut compiled = 0;
-    for (stage, binary) in PROBES {
-        let mut probe = Command::new(build.join(binary));
-        run(&mut probe, &evidence, stage)?;
-        let log = evidence.join(format!("{stage}.log"));
-        let backend = stage
-            .strip_suffix("-codegen")
-            .context("invalid probe stage")?;
-        let targets = parse_targets(&fs::read_to_string(&log)?, backend)?;
-        for target in &targets {
-            if target["state"] == "compiled" {
-                compiled += 1;
-            } else {
-                unsupported.push(target.clone());
-            }
-        }
-        probes.push(json!({
-            "stage": stage,
-            "output": tools::binding(&evidence.join(format!("{stage}.log")))?,
-            "binary": tools::binding(&build.join(binary))?,
-            "targets": targets,
-        }));
-    }
-    let mut air_probes = Vec::new();
-    let compiler_unsupported = unsupported.len();
-    let mut air_compiled = 0;
-    if let Some(library) = &llvm_library {
-        let mut air_targets = vec![
-            ("air-nak", "src/stela/stela_air_test"),
-            ("air-brw", "src/stela/stela_air_brw_probe"),
-            ("air-elk", "src/stela/stela_air_elk_probe"),
-            ("air-aco", "src/stela/stela_air_aco_probe"),
-        ];
-        if llvm_sdk.is_some() {
-            air_targets.push(("air-amd-llvm", "src/stela/stela_air_amd_llvm_probe"));
-        }
-        for (backend, binary) in air_targets {
-            run(&mut Command::new(build.join(binary)), &evidence, backend)?;
-            let log = evidence.join(format!("{backend}.log"));
-            let targets = parse_targets(&fs::read_to_string(&log)?, backend)?;
-            air_compiled += targets
-                .iter()
-                .filter(|record| record["state"] == "compiled")
-                .count();
-            unsupported.extend(
-                targets
-                    .iter()
-                    .filter(|record| record["state"] == "unsupported")
-                    .cloned(),
-            );
-            air_probes.push(json!({
-                "stage": backend,
-                "binary": tools::binding(&build.join(binary))?,
-                "output": tools::binding(&log)?,
-                "targets": targets,
-            }));
-        }
-        // Bind the actual development-host compiler binary, not just its path.
-        air_probes.push(json!({"llvm_library": tools::binding(library)?}));
-        let binary = build.join("src/stela/stela_air_ssbo_test");
-        run(&mut Command::new(&binary), &evidence, "air-ssbo")?;
-        air_probes.push(json!({
-            "stage": "air-ssbo-semantics-and-bounds",
-            "binary": tools::binding(&binary)?,
-            "output": tools::binding(&evidence.join("air-ssbo.log"))?,
-            "hardware_executed": false,
-        }));
-        let binary = build.join("src/stela/stela_nv_compute_probe");
-        run(&mut Command::new(&binary), &evidence, "nvidia-compute")?;
-        air_probes.push(json!({
-            "stage": "nvidia-compute-descriptor-and-launch",
-            "binary": tools::binding(&binary)?,
-            "output": tools::binding(&evidence.join("nvidia-compute.log"))?,
-            "hardware_executed": false,
-        }));
-    }
-    let mut original_input_probes = Vec::new();
-    let mut original_unsupported = Vec::new();
-    let mut original_compiled = 0;
-    for (index, input) in input_snapshots.iter().enumerate() {
-        let path = input["snapshot"]["path"]
-            .as_str()
-            .context("missing raw AIR snapshot path")?;
-        let entry = entry.context("raw AIR requires an entry point")?;
-        let bytes = input["snapshot"]["bytes"]
-            .as_u64()
-            .context("missing AIR size")?;
-        let mut input_digest = None;
-        let mut input_float_controls = None;
-        let mut backends = vec![
-            ("air-nak", "src/stela/stela_air_input_nak_probe"),
-            ("air-aco", "src/stela/stela_air_aco_probe"),
-            ("air-brw", "src/stela/stela_air_brw_probe"),
-            ("air-elk", "src/stela/stela_air_elk_probe"),
-        ];
-        if llvm_sdk.is_some() {
-            backends.push(("air-amd-llvm", "src/stela/stela_air_amd_llvm_probe"));
-        }
-        for (backend, binary) in backends {
-            let stage = format!("original-{index}-{backend}");
-            let binary = build.join(binary);
-            let mut probe = Command::new(&binary);
-            probe.args([
-                "--input",
-                path,
-                "--entry",
-                entry,
-                "--fp-profile",
-                fp_profile.name(),
-            ]);
-            run(&mut probe, &evidence, &stage)?;
-            let log = evidence.join(format!("{stage}.log"));
-            let output = fs::read_to_string(&log)?;
-            let provenance = parse_original_input(&output, entry, bytes)?;
-            let profile = parse_air_profile(&output, fp_profile)?;
-            if let Some(previous) = &input_digest {
-                ensure!(
-                    previous == &provenance["blake3"],
-                    "vendor probes read different AIR bytes"
-                );
-            } else {
-                input_digest = Some(provenance["blake3"].clone());
-            }
-            let targets = parse_targets(&output, backend)?;
-            let environments = parse_air_environments(&output, backend, fp_profile, &targets)?;
-            for environment in &environments {
-                let mode = environment["nir_float_controls"]
-                    .as_u64()
-                    .expect("validated float controls");
-                if let Some(previous) = input_float_controls {
-                    ensure!(
-                        previous == mode,
-                        "vendor probes requested different AIR float controls"
-                    );
-                } else {
-                    input_float_controls = Some(mode);
-                }
-            }
-            original_compiled += targets.iter().filter(|t| t["state"] == "compiled").count();
-            original_unsupported.extend(
-                targets
-                    .iter()
-                    .filter(|t| t["state"] == "unsupported")
-                    .cloned(),
-            );
-            original_input_probes.push(json!({
-                "input_index": index, "entry": entry, "stage": backend,
-                "binary": tools::binding(&binary)?, "output": tools::binding(&log)?,
-                "targets": targets, "hardware_executed": false,
-                "provenance": provenance,
-                "fp_profile": profile,
-                "nir_environments": environments,
-            }));
-        }
-        ensure!(
-            tools::binding(Path::new(path))? == input["snapshot"],
-            "AIR snapshot changed during compilation"
-        );
-    }
-    let threadgroups = threadgroup::run(
-        &build,
-        &evidence,
-        &threadgroup_snapshots,
-        llvm_sdk.is_some(),
-    )?;
-    let libraries = library_paths
+    let render = render::verify(&stela, &mut probes, &evidence, &render_snapshots)?;
+    let threadgroup = threadgroup::verify(&stela, &mut probes, &evidence, &threadgroup_snapshots)?;
+    let libraries = inputs
+        .archives
         .iter()
-        .map(|name| inspect_archive(&build.join(name)))
+        .map(|archive| inspect_archive(archive, stela.builds(archive)))
         .collect::<Result<Vec<_>>>()?;
     ensure!(
         source_binding(&source)? == hash,
         "compiler source changed during the build; rerun against a stable tree"
     );
     ensure!(
-        external_inputs()? == external_sources,
+        bind_external(&inputs.external, started)? == external_sources,
         "external GPU source changed during the build"
     );
     if let Some(config) = &llvm_config {
@@ -1048,73 +575,59 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         .iter()
         .map(|path| tools::binding(path))
         .collect::<Result<Vec<_>>>()?;
+    let metal_input = metal_input
+        .as_ref()
+        .map(|library| -> Result<Value> {
+            Ok(json!({
+                "library": tools::binding(library)?,
+                "sources_sha256": source_binding(&gpu.join("metal/input"))?,
+            }))
+        })
+        .transpose()?;
     let receipt = json!({
-        "schema": 2, "stage": "native-host-shader-compiler-build",
+        "schema": 3, "stage": "native-host-shader-compiler-build",
         "stela_platform_port": false, "hardware_executed": false,
         "metal_frontend": false,
-        "source_compiler_boundary": source_compiler_boundary,
-        "metal_library_assembly": metal_assembly,
-        "amd_owned_air_compilation": amd_air_owned,
-        "nvidia_owned_air_compilation": nv_air_owned,
-        "nvidia_owned_render_compilation": nv_render_owned,
-        "intel_owned_graphics_compilation": intel_graphics_owned,
-        "intel_owned_air_compilation": intel_air_owned,
-        "intel_gen7_shared_admission": intel_gen7_shared,
-        "metal_threadgroup_values": metal_threadgroup_values,
-        "air_render_compiler_subset": render,
-        "render_inputs": render_snapshots,
-        "air_compute_compiler_subset": llvm_library.is_some(),
-        "amd_llvm_development_files": llvm_sdk,
-        "optional_clrx_disassembler": clrx_disassembler,
-        "air_codegen_probes": air_probes,
         "source_tree_sha256": hash,
-        "stderr_logs": stderr_logs,
-        "external_probe_sources": external_sources,
-        "resource_probes": resource_probes,
-        "original_air_inputs": input_snapshots,
-        "threadgroup_inputs": threadgroup_snapshots,
-        "threadgroup_probes": threadgroups.probes,
-        "unsupported_threadgroup_targets": threadgroups.unsupported,
+        "external_sources": external_sources,
+        "metal_input": metal_input,
+        "amd_llvm_development_files": llvm_sdk,
+        "llvm_library": llvm_library.as_deref().map(tools::binding).transpose()?,
+        "optional_clrx_disassembler": clrx_disassembler,
         "air_fp_profile": fp_profile.name(),
-        "original_air_probes": original_input_probes,
-        "unsupported_input_targets": original_unsupported,
+        "original_air_inputs": input_snapshots,
+        "render_inputs": render_snapshots,
+        "render_artifacts": render,
+        "threadgroup_inputs": threadgroup_snapshots,
+        "threadgroup_artifacts": threadgroup,
+        "probes": probes.runs,
+        "unsupported_targets": probes.unsupported,
+        "stderr_logs": stderr_logs,
         "origin": serde_json::from_slice::<Value>(&fs::read(gpu.join("sources.json"))?)?,
         "host": {"os": env::consts::OS, "arch": env::consts::ARCH},
         "meson": capture(Command::new(&meson).arg("--version"))?,
         "setup": format!("{setup:?}"), "compile": format!("{compile:?}"),
         "libraries": libraries,
-        "amd_command_probe": {
-            "binary": tools::binding(&build.join("src/stela/stela_amd_commands_probe"))?,
-            "output": tools::binding(&evidence.join("amd-commands.log"))?,
-            "hardware_executed": false,
-        },
-        "codegen_probes": probes,
-        "unsupported_fixture_targets": unsupported,
     });
     File::create_new(evidence.join("compilers.json"))?
         .write_all(&serde_json::to_vec_pretty(&receipt)?)?;
     println!(
-        "Native compiler fixtures: {compiled} compiled, {compiler_unsupported} unsupported; AIR fixtures: {air_compiled} compiled, {} unsupported.",
-        unsupported.len() - compiler_unsupported
+        "Compiler fixtures: {} compiled, {} refused by design, {} unsupported; no GPU execution.",
+        probes.compiled,
+        probes.refused,
+        probes.unsupported.len()
     );
-    for target in &unsupported {
+    for target in &probes.unsupported {
+        let field = |key| target[key].as_str().unwrap_or_default();
         println!(
-            "  unsupported {}/{}: {}",
-            target["backend"], target["target"], target["reason"]
-        );
-    }
-    if !input_snapshots.is_empty() {
-        println!(
-            "Unchanged raw AIR inputs: {} files, {original_compiled} compiled target fixtures, {} unsupported; no GPU execution.",
-            input_snapshots.len(),
-            original_unsupported.len()
+            "  unsupported {}: {}: {}",
+            field("stage"),
+            field("target"),
+            field("reason")
         );
     }
     ensure!(
-        !require_all_targets
-            || (unsupported.is_empty()
-                && original_unsupported.is_empty()
-                && threadgroups.unsupported.is_empty()),
+        !require_all_targets || probes.unsupported.is_empty(),
         "some compiler fixture targets remain unsupported; see {}",
         evidence.join("compilers.json").display()
     );
@@ -1129,14 +642,49 @@ mod tests {
     #[test]
     fn diagnostics_cannot_split_a_structured_probe_record() {
         let evidence = tempfile::tempdir().unwrap();
-        let mut command = Command::new("sh");
-        command.args(["-c", r#"printf '%s' 'STELA_AIR_PROFILE {"name":"ieee",'; printf 'compiler diagnostic\n' >&2; printf '"kind":0}\n'"#]);
-        run(&mut command, evidence.path(), "streams").unwrap();
-        let stdout = fs::read_to_string(evidence.path().join("streams.log")).unwrap();
-        assert!(parse_air_profile(&stdout, super::super::AirFpProfile::Ieee).is_ok());
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", r#"printf '%s' 'STELA_RECORD {"kind":"air_profile","name":"ieee",'; printf 'compiler diagnostic\n' >&2; printf '"fp_profile":0}\n'"#]);
+        let mut probes = Probes::default();
+        let report = probes
+            .run(&mut command, evidence.path(), "streams")
+            .unwrap();
+        assert_eq!(report.profile().unwrap(), ("ieee", 0));
         assert_eq!(
             fs::read_to_string(evidence.path().join("streams.stderr.log")).unwrap(),
             "compiler diagnostic\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_runs_collect_held_targets_and_fail_on_unexpected_outcomes() {
+        let evidence = tempfile::tempdir().unwrap();
+        let mut probes = Probes::default();
+        let script = |records: &str| {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", &format!("printf '%s\\n' {records}")]);
+            command
+        };
+        let expect =
+            r#"'STELA_RECORD {"kind":"expect","target":"nvl","outcome":"held","reason":"gen35"}'"#;
+        let held = r#"'STELA_RECORD {"kind":"held","target":"nvl","reason":"gen35"}'"#;
+        probes
+            .run(
+                &mut script(&format!("{expect} {held}")),
+                evidence.path(),
+                "held",
+            )
+            .unwrap();
+        assert_eq!(probes.unsupported.len(), 1);
+        assert!(
+            probes
+                .run(&mut script(expect), evidence.path(), "missing")
+                .is_err()
+        );
+        assert!(
+            probes
+                .run(&mut script(held), evidence.path(), "unexpected")
+                .is_err()
         );
     }
 
@@ -1169,78 +717,48 @@ mod tests {
 
     #[test]
     fn original_air_evidence_cannot_substitute_a_source_fixture() {
-        let record = format!(
-            "STELA_AIR_INPUT {}\n",
-            json!({"origin":"raw_input_file", "entry":"kernel", "bytes":4, "blake3":"0".repeat(64)})
-        );
-        assert!(parse_original_input(&record, "kernel", 4).is_ok());
-        assert!(parse_original_input("STELA_GPU_TARGET {}", "kernel", 4).is_err());
-        assert!(
-            parse_original_input(
-                &record.replace("raw_input_file", "original_fixture"),
-                "kernel",
-                4
+        let record = |origin: &str, entry: &str| {
+            Report::parse(&format!(
+                "STELA_RECORD {}\n",
+                json!({"kind": "air_input", "origin": origin, "entry": entry,
+                       "bytes": 4, "blake3": "0".repeat(64)})
+            ))
+            .unwrap()
+        };
+        assert!(check_input(&record("raw_input_file", "kernel"), "kernel", 4).is_ok());
+        assert!(check_input(&record("original_fixture", "kernel"), "kernel", 4).is_err());
+        assert!(check_input(&record("raw_input_file", "other"), "kernel", 4).is_err());
+        assert!(check_input(&record("raw_input_file", "kernel"), "kernel", 5).is_err());
+        assert!(check_input(&Report::default(), "kernel", 4).is_err());
+    }
+
+    #[test]
+    fn artifact_directories_hold_exactly_the_recorded_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let report = |names: &[&str]| {
+            Report::parse(
+                &names
+                    .iter()
+                    .map(|name| {
+                        format!(
+                            "STELA_RECORD {}\n",
+                            json!({"kind": "artifact", "path": name})
+                        )
+                    })
+                    .collect::<String>(),
             )
-            .is_err()
+            .unwrap()
+        };
+        assert!(artifacts(temp.path(), &report(&[])).is_err());
+        fs::write(temp.path().join("sm75.code"), b"x").unwrap();
+        assert_eq!(
+            artifacts(temp.path(), &report(&["sm75.code"]))
+                .unwrap()
+                .len(),
+            1
         );
-        assert!(parse_original_input(&record, "another_entry", 4).is_err());
-        assert!(parse_original_input(&record, "kernel", 5).is_err());
-        assert!(parse_original_input(&format!("{record}{record}"), "kernel", 4).is_err());
-    }
-
-    #[test]
-    fn air_profile_evidence_cannot_substitute_or_omit_the_selected_environment() {
-        use super::super::AirFpProfile;
-        for profile in [AirFpProfile::Ieee, AirFpProfile::Apple32023Air29Msl41] {
-            let record = format!(
-                "STELA_AIR_PROFILE {}\n",
-                json!({"name":profile.name(), "kind":profile.kind()})
-            );
-            assert!(parse_air_profile(&record, profile).is_ok());
-            assert!(parse_air_profile("", profile).is_err());
-            assert!(parse_air_profile(&format!("{record}{record}"), profile).is_err());
-            assert!(
-                parse_air_profile(&record.replace(profile.name(), "inferred"), profile).is_err()
-            );
-        }
-        let ieee = "STELA_AIR_PROFILE {\"name\":\"ieee\",\"kind\":0}\n";
-        assert!(parse_air_profile(ieee, AirFpProfile::Apple32023Air29Msl41).is_err());
-        assert!(parse_air_profile(&ieee.replace(":0", ":1"), AirFpProfile::Ieee).is_err());
-    }
-
-    #[test]
-    fn every_compiled_air_target_reports_its_actual_requested_controls() {
-        use super::super::AirFpProfile;
-        let targets = [
-            json!({"target":"sm75", "state":"compiled"}),
-            json!({"target":"future", "state":"unsupported"}),
-        ];
-        let record = "STELA_AIR_ENVIRONMENT {\"backend\":\"air-nak\",\"target\":\"sm75\",\"fp_profile\":0,\"nir_float_controls\":0}\n";
-        let parse =
-            |text: &str| parse_air_environments(text, "air-nak", AirFpProfile::Ieee, &targets);
-        assert_eq!(parse(record).unwrap().len(), 1);
-        assert!(parse("").is_err());
-        assert!(parse(&format!("{record}{record}")).is_err());
-        assert!(parse(&record.replace("sm75", "future")).is_err());
-        assert!(parse(&record.replace("air-nak", "air-aco")).is_err());
-        assert!(parse(&record.replace("\"fp_profile\":0", "\"fp_profile\":1")).is_err());
-        assert!(
-            parse(&record.replace("\"nir_float_controls\":0", "\"nir_float_controls\":-1"))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn codegen_evidence_keeps_unsupported_targets_distinct_from_emitted_code() {
-        let good = "STELA_GPU_TARGET {\"backend\":\"brw\",\"target\":\"skl\",\"state\":\"compiled\",\"bytes\":112}\n";
-        let unsupported = "STELA_GPU_TARGET {\"backend\":\"brw\",\"target\":\"nvl\",\"state\":\"unsupported\",\"reason\":\"dispatch-qualification\"}\n";
-        let records =
-            parse_targets(&format!("compiler diagnostics\n{good}{unsupported}"), "brw").unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[1]["state"], "unsupported");
-        assert!(parse_targets(unsupported, "brw").is_err());
-        assert!(parse_targets(&format!("{good}{good}"), "brw").is_err());
-        assert!(parse_targets(&good.replace("112", "0"), "brw").is_err());
-        assert!(parse_targets(good, "aco").is_err());
+        assert!(artifacts(temp.path(), &report(&["sm75.code", "sm80.code"])).is_err());
+        fs::write(temp.path().join("stray"), b"x").unwrap();
+        assert!(artifacts(temp.path(), &report(&["sm75.code"])).is_err());
     }
 }

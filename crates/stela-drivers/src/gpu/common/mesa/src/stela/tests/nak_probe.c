@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "compiler/nir/nir_builder.h"
 #include "probe_report.h"
+#include "targets/nvidia.h"
 #include "nouveau/compiler/nak.h"
 #include "nouveau/headers/nv_device_info.h"
 #include "util/ralloc.h"
@@ -50,8 +51,9 @@ compile_store(unsigned sm)
       result = 1;
    } else {
       char target[16];
-      snprintf(target, sizeof(target), "sm%u", sm);
-      probe_compiled("nak", target, bin->code_size);
+      stela_nv_target_name(target, sm);
+      record_compiled(target, bin->code_size);
+      record_end();
       printf("SM%u: %u bytes, %u instructions\n", sm, bin->code_size,
              bin->info.num_instrs);
       if (bin->asm_str)
@@ -67,11 +69,15 @@ compile_store(unsigned sm)
 int
 main(void)
 {
-   const unsigned models[] = {75, 80, 86, 89, 90, 100, 120};
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++) {
+      char target[16];
+      stela_nv_target_name(target, stela_nv_sms[i]);
+      record_expect(target, NULL);
+   }
    glsl_type_singleton_init_or_ref();
    int result = 0;
-   for (unsigned i = 0; i < ARRAY_SIZE(models); i++)
-      result |= compile_store(models[i]);
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++)
+      result |= compile_store(stela_nv_sms[i]);
    glsl_type_singleton_decref();
    return result;
 }

@@ -49,9 +49,8 @@ void stela_intel_elk_fp_control_stats(const struct elk_compiler *compiler, const
                 stats->preserve += immediate == 0x80;
             }
             ++stats->writes;
-            printf("STELA_INTEL_FP_CONTROL {\"target\":\"%s\",\"instruction\":%u,"
-                   "\"op\":\"%s\",\"immediate\":%u,\"exec_size\":1,"
-                   "\"thread_control\":%u,\"swsb_regdist\":0}\n", target, ordinal,
+            printf("%s CR0 write at instruction %u: %s 0x%x, exec size 1, "
+                   "thread control %u\n", target, ordinal,
                    op == ELK_OPCODE_AND ? "and" : "or", immediate,
                    (unsigned)elk_inst_thread_control(device, &inst));
         }

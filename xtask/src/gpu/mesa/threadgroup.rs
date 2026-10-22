@@ -1,67 +1,137 @@
-//! Explicit offline fixture specializations, not a production Metal parser.
-use super::{parse_original_input, run as run_stage, tools};
+//! Threadgroup fixtures: the original Apple two-entry module, then LLVM
+//! static and dynamic WG64 modules. Offline compilation, never GPU execution.
+use super::{Probes, artifacts, check_input, meson::Build, run, snapshot, tools};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, fs, path::Path, process::Command};
+use std::{fs, path::Path};
 
-#[derive(Default)]
-pub(super) struct Evidence {
-    pub probes: Vec<Value>,
-    pub unsupported: Vec<Value>,
-}
-
-pub(super) fn run(
-    build: &Path,
+pub(super) fn verify(
+    stela: &Build,
+    probes: &mut Probes,
     evidence: &Path,
     inputs: &[Value],
-    amd_llvm: bool,
-) -> Result<Evidence> {
-    let mut result = Evidence::default();
+) -> Result<Option<Value>> {
     if inputs.is_empty() {
-        return Ok(result);
+        return Ok(None);
     }
     ensure!(
         inputs.len() == 3,
         "threadgroup fixtures need exactly three inputs"
     );
-    let paths = inputs
-        .iter()
-        .map(|input| {
-            input["snapshot"]["path"]
-                .as_str()
-                .context("missing threadgroup snapshot")
-        })
-        .collect::<Result<Vec<_>>>()?;
-    result.probes.push(super::library::verify_shared(
-        build,
+    let snapshots = inputs.iter().map(snapshot).collect::<Result<Vec<_>>>()?;
+    let paths = snapshots.iter().map(|(path, _)| *path).collect::<Vec<_>>();
+    let apple = paths[0];
+    run(
+        stela
+            .command("stela_metal_assembly_test")?
+            .args(["--archive-pair", apple])
+            .args([
+                "stela_threadgroup_static",
+                "stela_threadgroup_dynamic",
+                "9",
+                "4",
+                "1",
+                "27",
+                "2",
+                "complete",
+            ]),
         evidence,
-        Path::new(paths[0]),
-    )?);
-    let binary = build.join("src/stela/stela_nv_air_threadgroup_probe");
-    let artifacts = evidence.join("nv-threadgroup-artifacts");
-    fs::create_dir(&artifacts)?;
-    run_stage(
-        Command::new(&binary).args(&paths).arg(&artifacts),
+        "metal-shared-assembly",
+    )?;
+    // Export the semantic fixture through its actual LLVM producer, rather than
+    // maintaining a second bitcode fixture or interpreting the source ourselves.
+    let mixed = evidence.join("multiple-threadgroups.bc");
+    run(
+        stela
+            .command("stela_metal_threadgroup_nir_test")?
+            .arg("--export")
+            .arg(&mixed),
+        evidence,
+        "metal-threadgroup-export",
+    )?;
+    let mixed = mixed.to_str().context("export path")?;
+    for test in stela.suite("stela-owned-air") {
+        let name = &test.name;
+        probes.run(
+            &mut test.command(["--input", apple, "stela_threadgroup_static"]),
+            evidence,
+            &format!("{name}-static"),
+        )?;
+        probes.run(
+            &mut test.command(["--shared-refusal", apple, "stela_threadgroup_dynamic"]),
+            evidence,
+            &format!("{name}-dynamic-refusal"),
+        )?;
+        // Each specialization's rows, whose total shared bytes (with
+        // alignment) every compiled target must report.
+        for (fixture, input, entry, workgroup, rows, total) in [
+            (
+                "128",
+                apple,
+                "stela_threadgroup_dynamic",
+                "32",
+                &["3:128"][..],
+                128,
+            ),
+            (
+                "256",
+                apple,
+                "stela_threadgroup_dynamic",
+                "32",
+                &["3:256"],
+                256,
+            ),
+            (
+                "512",
+                apple,
+                "stela_threadgroup_dynamic",
+                "32",
+                &["3:512"],
+                512,
+            ),
+            (
+                "mixed",
+                mixed,
+                "kernel",
+                "64",
+                &["3:256", "11:16", "7:128"],
+                403,
+            ),
+        ] {
+            let report = probes.run(
+                &mut test.command(
+                    ["--threadgroup", input, entry, workgroup]
+                        .into_iter()
+                        .chain(rows.iter().copied()),
+                ),
+                evidence,
+                &format!("{name}-threadgroup-{fixture}"),
+            )?;
+            for (target, facts) in report.compiled() {
+                ensure!(
+                    facts
+                        .as_ref()
+                        .and_then(|facts| facts["total_shared"].as_u64())
+                        == Some(total),
+                    "{name} {fixture}/{target} does not share {total} bytes"
+                );
+            }
+        }
+    }
+
+    let nv_artifacts = evidence.join("nv-threadgroup-artifacts");
+    fs::create_dir(&nv_artifacts)?;
+    let report = probes.run(
+        stela
+            .command("stela_nv_air_threadgroup_probe")?
+            .args(&paths)
+            .arg(&nv_artifacts),
         evidence,
         "nv-threadgroup",
     )?;
-    let mut files = fs::read_dir(&artifacts)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<std::io::Result<Vec<_>>>()?;
-    files.sort();
-    // Four shaders * nine targets, each with actual NIR/code/ASM/QMD/push bytes.
-    ensure!(
-        files.len() == 180,
-        "incomplete NVIDIA threadgroup artifact set"
-    );
-    result.probes.push(json!({
-        "backend": "nv-threadgroup", "binary": tools::binding(&binary)?,
-        "output": tools::binding(&evidence.join("nv-threadgroup.log"))?,
-        "artifacts": files.iter().map(|file| tools::binding(file)).collect::<Result<Vec<_>>>()?,
-        "hardware_executed": false,
-    }));
-    let binary = build.join("src/stela/stela_intel_air_threadgroup_probe");
-    for (name, index, entry, threads, shared, dynamic) in [
+    let nvidia = artifacts(&nv_artifacts, &report)?;
+
+    for (fixture, index, entry, workgroup, shared, dynamic) in [
         (
             "apple-static",
             0,
@@ -81,121 +151,40 @@ pub(super) fn run(
         ("llvm-static", 1, "kernel", "64", "256", "none"),
         ("llvm-dynamic", 2, "kernel", "64", "256", "7"),
     ] {
-        let stage = format!("intel-threadgroup-{name}");
-        run_stage(
-            Command::new(&binary).args([
+        let report = probes.run(
+            stela.command("stela_intel_air_threadgroup_probe")?.args([
                 "--input",
                 paths[index],
                 "--entry",
                 entry,
                 "--workgroup",
-                threads,
+                workgroup,
                 "--shared",
                 shared,
                 "--threadgroup-index",
                 dynamic,
             ]),
             evidence,
-            &stage,
+            &format!("intel-threadgroup-{fixture}"),
         )?;
-        let log = evidence.join(format!("{stage}.log"));
-        let output = fs::read_to_string(&log)?;
-        let provenance = parse_original_input(
-            &output,
-            entry,
-            inputs[index]["snapshot"]["bytes"]
-                .as_u64()
-                .context("missing threadgroup input size")?,
-        )?;
-        let mut targets = Vec::new();
-        let mut names = BTreeSet::new();
-        let mut holds = Vec::new();
-        for line in output.lines() {
-            if let Some(raw) = line.strip_prefix("STELA_INTEL_THREADGROUP_OUTPUT ") {
-                let record: Value = serde_json::from_str(raw)?;
-                ensure!(
-                    record["entry"] == entry
-                        && record["hardware_executed"] == false
-                        && record["code_bytes"].as_u64().is_some_and(|size| size > 0)
-                        && names.insert(
-                            record["target"]
-                                .as_str()
-                                .context("missing Intel target")?
-                                .to_owned()
-                        ),
-                    "invalid Intel threadgroup output"
-                );
-                targets.push(record);
-            } else if let Some(raw) = line.strip_prefix("STELA_INTEL_THREADGROUP_UNSUPPORTED ") {
-                let record: Value = serde_json::from_str(raw)?;
-                ensure!(
-                    record["target"] == "nvl"
-                        && record["entry"] == entry
-                        && record["reason"] == "gfx35-dispatch-lane-mask-unqualified"
-                        && record["hardware_executed"] == false,
-                    "invalid Intel threadgroup hold"
-                );
-                holds.push(record);
-            }
-        }
-        ensure!(
-            targets.len() == 22 && holds.len() == 1,
-            "incomplete Intel threadgroup target set"
-        );
-        result.unsupported.extend(holds);
-        result.probes.push(json!({
-            "backend": "intel-threadgroup", "fixture": name, "input_index": index,
-            "entry": entry, "workgroup": threads, "shared_bytes": shared,
-            "dynamic_index": dynamic, "binary": tools::binding(&binary)?,
-            "output": tools::binding(&log)?, "provenance": provenance,
-            "targets": targets, "hardware_executed": false,
-        }));
+        check_input(&report, entry, snapshots[index].1)?;
     }
-    if amd_llvm {
-        let binary = build.join("src/stela/stela_amd_air_threadgroup_probe");
-        run_stage(
-            Command::new(&binary).args(&paths),
+
+    // The AMD shared-memory probe needs the retained LLVM backend.
+    if stela.defines("stela_amd_air_threadgroup_probe") {
+        probes.run(
+            stela
+                .command("stela_amd_air_threadgroup_probe")?
+                .args(&paths),
             evidence,
             "amd-threadgroup",
         )?;
-        let log = evidence.join("amd-threadgroup.log");
-        let output = fs::read_to_string(&log)?;
-        let mut targets = Vec::new();
-        for line in output.lines() {
-            if let Some(raw) = line.strip_prefix("STELA_AMD_SHARED ") {
-                let record: Value = serde_json::from_str(raw)?;
-                ensure!(
-                    record["physical_gpu_execution"] == false
-                        && record["code_bytes"].as_u64().is_some_and(|size| size > 0)
-                        && matches!(
-                            record["instruction_view"].as_str(),
-                            Some("binary-disassembly" | "original-aco-hardware-ir")
-                        ),
-                    "invalid AMD shared-memory compiler record"
-                );
-                targets.push(record);
-            }
-        }
-        ensure!(
-            targets.len() == 133,
-            "incomplete AMD threadgroup target set"
-        );
-        result.probes.push(json!({
-            "backend": "amd-threadgroup", "binary": tools::binding(&binary)?,
-            "output": tools::binding(&log)?, "targets": targets,
-            "hardware_executed": false,
-        }));
     }
-    for input in inputs {
-        let path = Path::new(
-            input["snapshot"]["path"]
-                .as_str()
-                .context("missing threadgroup input")?,
-        );
+    for (input, (path, _)) in inputs.iter().zip(&snapshots) {
         ensure!(
-            tools::binding(path)? == input["snapshot"],
+            tools::binding(Path::new(path))? == input["snapshot"],
             "threadgroup snapshot changed during compilation"
         );
     }
-    Ok(result)
+    Ok(Some(json!({"nvidia": nvidia})))
 }

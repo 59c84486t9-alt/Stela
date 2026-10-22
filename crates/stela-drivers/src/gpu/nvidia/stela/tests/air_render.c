@@ -2,10 +2,9 @@
 /* Hosted compiler-only qualification. No graphics pipeline, device or draw. */
 #include "air_to_nir.h"
 #include "nouveau/compiler/nak.h"
-#include "nouveau/headers/nv_device_info.h"
-#include "util/mesa-blake3.h"
+#include "stela/tests/air_probe.h"
+#include "stela/tests/targets/nvidia.h"
 #include "util/ralloc.h"
-#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,12 +45,6 @@ struct capture {
     void *code;
     char *assembly;
 };
-static void digest(const void *data, size_t size)
-{
-    blake3_hash hash;
-    _mesa_blake3_compute(data, size, hash);
-    for (unsigned i = 0; i < sizeof(hash); ++i) printf("%02x", hash[i]);
-}
 static bool same_buffer(const struct stela_air_buffer *a, const struct stela_air_buffer *b)
 {
     return a->argument == b->argument && a->index == b->index && a->address_space == b->address_space &&
@@ -199,15 +192,23 @@ static struct capture compile(nir_shader *nir, struct nak_compiler *compiler,
 }
 static void drop_capture(struct capture *capture)
 { free(capture->code); free(capture->assembly); *capture = (struct capture){0}; }
-static void write_artifact(const struct run *run, unsigned sm, unsigned samples,
-    const char *stage, const char *suffix, const void *bytes, size_t size)
+/* A compile target: "sm<N>-samples<N>-<stage>", also its artifacts' stem. */
+static void target_name(char name[64], unsigned sm, unsigned samples, const char *stage)
+{
+    snprintf(name, 64, "sm%u-samples%u-%s", sm, samples, stage);
+}
+static void write_artifact(const struct run *run, const char *target,
+    const char *suffix, const void *bytes, size_t size)
 {
     if (!run->output) return;
-    char path[1024];
-    int n = snprintf(path, sizeof(path), "%s/sm%u-samples%u-%s.%s", run->output, sm, samples, stage, suffix);
+    char name[128], path[1024];
+    int n = snprintf(name, sizeof(name), "%s.%s", target, suffix);
+    CHECK(n > 0 && (size_t)n < sizeof(name));
+    n = snprintf(path, sizeof(path), "%s/%s", run->output, name);
     CHECK(n > 0 && (size_t)n < sizeof(path));
     FILE *stream = fopen(path, "wb"); CHECK(stream);
     CHECK(fwrite(bytes, 1, size, stream) == size && !fclose(stream));
+    record_artifact(name);
 }
 static bool model_key(const struct raster_model *model, struct nak_fs_key *key)
 {
@@ -248,21 +249,11 @@ static void frontend_refusals(struct run *run, const nir_shader_compiler_options
 static void compile_target(struct run *run, const struct stela_air_stage_entry *fs,
                              unsigned sm, const struct raster_model *model)
 {
-    /* These are compiler model facts, never discovered hardware/provenance.
-     * nak_compiler_create consumes exactly sm and max_warps_per_mp. */
-    CHECK(sm <= UINT8_MAX);
-    const struct nv_device_info device = {.sm = (uint8_t)sm,
-        .max_warps_per_mp = sm == 75 ? 32u : (sm == 86 || sm == 87 || sm == 89 || sm == 120 ? 48u : 64u)};
+    /* These are compiler model facts, never discovered hardware/provenance. */
+    const struct nv_device_info device = stela_nv_compiler_device(sm);
     const struct nak_constant_offset_info layout = nak_const_offsets_base;
     CHECK(TABLE_CB != layout.sample_info_cb && TABLE_CB != layout.printf_cb);
     struct nak_fs_key key; CHECK(model_key(model, &key));
-    printf("STELA_RENDER_MODEL {\"sm\":%u,\"max_warps_per_mp\":%u,\"samples\":%u,\"sample_shading\":%s,"
-        "\"depth_feedback\":false,\"conservative_underestimate\":false,\"fp_profile\":1,\"max_instructions\":10000,"
-        "\"max_varying_slots\":32,\"sample_info_cb\":%u,\"sample_locations_offset\":%u,\"sample_masks_offset\":%u,"
-        "\"printf_cb\":%u,\"printf_buffer_offset\":%u,\"argument_cbuf\":%u,\"table_bytes\":%u}\n",
-        sm, device.max_warps_per_mp, model->samples, model->sample_shading ? "true" : "false",
-        layout.sample_info_cb, layout.sample_locations_offset, layout.sample_masks_offset,
-        layout.printf_cb, layout.printf_buffer_offset, TABLE_CB, TABLE_BYTES);
     struct nak_compiler *compiler = nak_compiler_create(&device); CHECK(compiler);
     const nir_shader_compiler_options *options = nak_nir_options(compiler); CHECK(options && !options->cb_data);
     if (sm == 75 && model->samples == 1) frontend_refusals(run, options);
@@ -297,23 +288,40 @@ static void compile_target(struct run *run, const struct stela_air_stage_entry *
         if (stage) CHECK(!actual.info.fs.writes_depth && !actual.info.fs.reads_sample_mask &&
                          !actual.info.fs.uses_sample_shading); /* Original shader-info bit describes shader builtins,
                           * not the separate forced-sample raster key (from_nir.rs). */
-        const char *name = stage ? "fs" : "vs";
-        write_artifact(run, sm, model->samples, name, "code", actual.code, actual.code_size);
-        write_artifact(run, sm, model->samples, name, "info", &actual.info, sizeof(actual.info));
-        write_artifact(run, sm, model->samples, name, "hdr", actual.info.hdr, sizeof(actual.info.hdr));
-        write_artifact(run, sm, model->samples, name, "asm", actual.assembly, strlen(actual.assembly));
-        if (stage) write_artifact(run, sm, model->samples, name, "fs-key", &key, sizeof(key));
+        char target[64]; target_name(target, sm, model->samples, stage ? "fs" : "vs");
+        write_artifact(run, target, "code", actual.code, actual.code_size);
+        write_artifact(run, target, "info", &actual.info, sizeof(actual.info));
+        write_artifact(run, target, "hdr", actual.info.hdr, sizeof(actual.info.hdr));
+        write_artifact(run, target, "asm", actual.assembly, strlen(actual.assembly));
+        if (stage) write_artifact(run, target, "fs-key", &key, sizeof(key));
         else {
-            write_artifact(run, sm, model->samples, name, "model-table", original_table, sizeof(original_table));
-            write_artifact(run, sm, model->samples, name, "alternate-model-table", changed_table, sizeof(changed_table));
+            write_artifact(run, target, "model-table", original_table, sizeof(original_table));
+            write_artifact(run, target, "alternate-model-table", changed_table, sizeof(changed_table));
         }
-        printf("STELA_GPU_RENDER_TARGET {\"backend\":\"air-nak-render-probe\",\"sm\":%u,\"stage\":\"%s\","
-            "\"entry\":\"%s\",\"samples\":%u,\"sample_shading\":%s,\"fs_key_passed\":%s,\"argument_cbuf\":%u,\"row_bytes\":%u,"
-            "\"bytes\":%u,\"instructions\":%u,\"code_blake3\":\"", sm, name, entry->name,
-            model->samples, model->sample_shading ? "true" : "false", stage ? "true" : "false", TABLE_CB, ROW_BYTES,
-            actual.code_size, actual.info.num_instrs);
-        digest(actual.code, actual.code_size); printf("\",\"info_blake3\":\""); digest(&actual.info, sizeof(actual.info));
-        printf("\",\"hdr_blake3\":\""); digest(actual.info.hdr, sizeof(actual.info.hdr)); puts("\"}");
+        record_compiled(target, actual.code_size);
+        record_object("facts");
+        record_str("entry", entry->name);
+        record_uint("max_warps_per_mp", device.max_warps_per_mp);
+        record_bool("sample_shading", model->sample_shading);
+        record_bool("depth_feedback", model->depth_feedback);
+        record_bool("conservative_underestimate", model->conservative_underestimate);
+        record_bool("fs_key_passed", stage);
+        record_uint("fp_profile", STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41);
+        record_uint("max_instructions", 10000);
+        record_uint("max_varying_slots", 32);
+        record_uint("sample_info_cb", layout.sample_info_cb);
+        record_uint("sample_locations_offset", layout.sample_locations_offset);
+        record_uint("sample_masks_offset", layout.sample_masks_offset);
+        record_uint("printf_cb", layout.printf_cb);
+        record_uint("printf_buffer_offset", layout.printf_buffer_offset);
+        record_uint("argument_cbuf", TABLE_CB);
+        record_uint("row_bytes", ROW_BYTES);
+        record_uint("table_bytes", TABLE_BYTES);
+        record_uint("instructions", actual.info.num_instrs);
+        record_blake3("code_blake3", actual.code, actual.code_size);
+        record_blake3("info_blake3", &actual.info, sizeof(actual.info));
+        record_blake3("hdr_blake3", actual.info.hdr, sizeof(actual.info.hdr));
+        record_end();
         drop_capture(&actual); drop_capture(&expected);
     }
     nak_compiler_destroy(compiler);
@@ -364,12 +372,23 @@ static bool fragment(const struct stela_air_inspection *inspection,
           run->bindings[1].buffer.type_size == 8 && run->bindings[1].buffer.type_alignment == 8);
     for (unsigned i = 0; i < run->binding_count; ++i) {
         const struct binding *b = &run->bindings[i];
-        printf("STELA_RENDER_BINDING {\"slot\":%u,\"argument\":%u,\"metal_index\":%u,\"address_space\":%u,"
-            "\"required_access\":%u,\"available_access\":%u,\"type_stride\":%u,\"logical_elements\":%u,"
-            "\"buffer_size\":%" PRIu64 ",\"offset\":%" PRIu64 ",\"view_size\":%" PRIu64 ",\"alignment\":%u,"
-            "\"allocation_address_model\":\"0x%" PRIx64 "\"}\n", i, b->buffer.argument, b->buffer.index,
-            b->buffer.address_space, b->view.access, b->view.available_access, b->buffer.type_size, b->logical_elements,
-            b->view.buffer_size, b->view.offset, b->view.size, b->view.alignment, b->allocation_address);
+        record_begin("evidence");
+        record_str("topic", "render-binding");
+        record_object("facts");
+        record_uint("slot", i);
+        record_uint("argument", b->buffer.argument);
+        record_uint("metal_index", b->buffer.index);
+        record_uint("address_space", b->buffer.address_space);
+        record_uint("required_access", b->view.access);
+        record_uint("available_access", b->view.available_access);
+        record_uint("type_stride", b->buffer.type_size);
+        record_uint("logical_elements", b->logical_elements);
+        record_uint("buffer_size", b->view.buffer_size);
+        record_uint("offset", b->view.offset);
+        record_uint("view_size", b->view.size);
+        record_uint("alignment", b->view.alignment);
+        record_uint("allocation_address_model", b->allocation_address);
+        record_end();
     }
     uint8_t table[TABLE_BYTES], changed[TABLE_BYTES]; CHECK(pack_table(run, run->bindings, 2, table));
     binding_refusals(run);
@@ -378,11 +397,22 @@ static bool fragment(const struct stela_air_inspection *inspection,
     struct raster_model models[] = {{.samples = 1}, {.samples = 4, .sample_shading = true}};
     struct nak_fs_key untouched; memset(&untouched, 0xa5, sizeof(untouched)); uint8_t before[sizeof(untouched)]; memcpy(before, &untouched, sizeof(before));
     struct raster_model bad = {.samples = 1, .sample_shading = true}; CHECK(!model_key(&bad, &untouched) && !memcmp(&untouched, before, sizeof(before)));
-    const unsigned targets[] = {75, 80, 86, 87, 89, 90, 100, 104, 120};
-    for (unsigned i = 0; i < sizeof(targets) / sizeof(targets[0]); ++i)
-        for (unsigned m = 0; m < sizeof(models) / sizeof(models[0]); ++m) compile_target(run, fs, targets[i], &models[m]);
-    CHECK(run->backend_calls == 72 && run->callbacks == 36 && run->binding_attempts == 38);
-    puts("STELA_RENDER_LIMIT compiler-only; full original code/info/hdr/assembly recaptured after original bin destruction; model views/keys are not a graphics PSO or runtime resource owner");
+    for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); ++i) {
+        for (unsigned m = 0; m < ARRAY_SIZE(models); ++m) {
+            char target[64];
+            target_name(target, stela_nv_sms[i], models[m].samples, "vs"); record_expect(target, NULL);
+            target_name(target, stela_nv_sms[i], models[m].samples, "fs"); record_expect(target, NULL);
+        }
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); ++i)
+        for (unsigned m = 0; m < ARRAY_SIZE(models); ++m) compile_target(run, fs, stela_nv_sms[i], &models[m]);
+    /* Each model compiles both stages twice and binds the vertex buffers once;
+     * the two failed view refusals each attempted one binding. */
+    const unsigned models_compiled = ARRAY_SIZE(stela_nv_sms) * ARRAY_SIZE(models);
+    CHECK(run->backend_calls == 4 * models_compiled && run->callbacks == MAX_BINDINGS * models_compiled &&
+          run->binding_attempts == MAX_BINDINGS * models_compiled + 2);
+    puts("Compiler only: full original code/info/hdr/assembly recaptured after original bin destruction; "
+         "model views/keys are not a graphics PSO or runtime resource owner");
     return true;
 }
 static bool vertex(const struct stela_air_inspection *inspection,
@@ -421,7 +451,9 @@ int main(int argc, char **argv)
     CHECK(size > 0 && size <= 64 * 1024 * 1024 && !fseek(stream, 0, SEEK_SET));
     void *bytes = malloc((size_t)size); CHECK(bytes && fread(bytes, 1, (size_t)size, stream) == (size_t)size && !fclose(stream));
     run.bytes = bytes; run.size = (size_t)size;
-    printf("STELA_AIR_RENDER_INPUT {\"bytes\":%zu,\"blake3\":\"", run.size); digest(bytes, run.size); puts("\"}");
+    char input_hash[BLAKE3_HEX_LEN]; stela_digest(bytes, run.size, input_hash);
+    stela_air_probe_input_record(true, run.size, input_hash, run.vertex);
+    record_object("facts"); record_str("fragment_entry", run.fragment); record_end();
     glsl_type_singleton_init_or_ref(); struct stela_air_error error;
     bool success = stela_air_inspect_stage(bytes, run.size, run.vertex, STELA_AIR_VERTEX, vertex, &run, &error);
     if (!success) fprintf(stderr, "stage inspection failed: %u %s\n", error.kind, error.detail);

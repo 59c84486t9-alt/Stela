@@ -194,14 +194,14 @@ static void formats_follow_real_isl(const struct isl_device *dev)
 
 int main(void)
 {
-    const char *platforms[] = {
-        "brw", "g4x", "ilk", "snb", "ivb", "byt", "hsw", "bdw", "chv",
-        "skl", "bxt", "icl", "tgl", "dg1", "dg2", "mtl", "lnl", "bmg", "ptl", "nvl",
-    };
-    for (unsigned i = 0; i < sizeof(platforms) / sizeof(platforms[0]); ++i) {
+    /* Every platform Mesa names that ISL supports, from Gen4. */
+    const char *platform;
+    for (unsigned i = 0; (platform = intel_platform_name_by_index(i)); ++i) {
         struct intel_device_info info;
-        int pci = intel_device_name_to_pci_device_id(platforms[i]);
+        int pci = intel_device_name_to_pci_device_id(platform);
         assert(pci >= 0 && intel_get_device_info_for_build(pci, &info));
+        if (info.ver < 4)
+            continue;
         struct isl_device dev = {0};
         isl_device_init(&dev, &info);
         exact_views_and_original_isl(&dev);
@@ -209,7 +209,7 @@ int main(void)
         canonical_and_maximum_boundaries(&dev);
         uninitialized_or_unsupported_devices_fail(&dev);
         formats_follow_real_isl(&dev);
-        printf("Hosted Intel ISL %s: exact RAW views, bounds, canonical VAs and format queries passed\n", platforms[i]);
+        printf("Hosted Intel ISL %s: exact RAW views, bounds, canonical VAs and format queries passed\n", platform);
     }
     return 0;
 }

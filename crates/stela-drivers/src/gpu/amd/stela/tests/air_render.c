@@ -18,9 +18,8 @@
 #include "amd/compiler/aco_interface.h"
 #include "amdgfxregs.h"
 #include "vulkan/radv_constants.h"
-#include "util/mesa-blake3.h"
+#include "stela/tests/targets/amd.h"
 #include "util/ralloc.h"
-#include <inttypes.h>
 #if AMD_LLVM_AVAILABLE
 #include "amd/llvm/ac_llvm_util.h"
 #endif
@@ -46,8 +45,14 @@ struct abi {
    unsigned param_exports;
    enum amd_gfx_level gfx;
 };
+/* The modeled raster ABI of one compiled stage. */
+struct abi_facts {
+   unsigned hw_stage, lds_bytes, spi_ps_input, resource_count, attribute_ring_loads;
+   unsigned wgp_mode, nir_float_controls, cb_shader_mask;
+};
 struct captured {
    struct ac_shader_config config;
+   struct abi_facts abi;
    uint32_t *code;
    unsigned code_dw, executable_bytes;
    char *assembly;
@@ -58,8 +63,14 @@ struct input {
    const char *vs_name, *fs_name;
    const struct stela_air_stage_entry *vertex;
    char hash[BLAKE3_HEX_LEN];
-   unsigned compiled, held;
 };
+/* A compile target: "<family>.wave<N>-<stage>", also its artifact's stem. */
+static void
+target_name(char name[48], enum radeon_family family, unsigned wave, unsigned stage)
+{
+   stela_amd_target_name(name, family, wave);
+   strcat(name, stage == STELA_AIR_VERTEX ? "-vertex" : "-fragment");
+}
 static void
 add(struct abi *a, enum ac_arg_regfile file, unsigned size, struct ac_arg *arg)
 {
@@ -394,7 +405,12 @@ resource_negatives(const struct input *input, const struct stela_air_varying_slo
       CHECK(!s && error.kind != STELA_AIR_OK);
       cases++;
    }
-   printf("STELA_RENDER_RESOURCE_REFUSALS cases=%u metadata-slot-budget-map\n", cases);
+   record_begin("evidence");
+   record_str("topic", "render-resource-refusals");
+   record_object("facts");
+   record_uint("cases", cases);
+   record_str("scope", "metadata-slot-budget-map");
+   record_end();
 }
 static void
 readonly_bounds(nir_shader *s, unsigned resources)
@@ -418,7 +434,7 @@ readonly_bounds(nir_shader *s, unsigned resources)
          sizes++;
    }
    CHECK(loads && sizes >= resources);
-   printf("STELA_RENDER_READONLY_BOUNDS guarded_loads=%u dynamic_descriptor_sizes=%u\n", loads, sizes);
+   printf("read-only bounds: %u guarded loads, %u dynamic descriptor sizes\n", loads, sizes);
 }
 static unsigned
 pixel_input_mask(nir_shader *s)
@@ -556,14 +572,11 @@ compile_one(struct input *input, const struct stela_air_stage_entry *entry,
       CHECK(abi.bindings && (profile.gfx_level < GFX11 || abi.attribute_loads));
    if (stage == STELA_AIR_FRAGMENT)
       CHECK(result.config.spi_ps_input_ena == mask && result.config.spi_ps_input_addr == mask);
-   printf("STELA_RENDER_ABI "
-          "{\"target\":\"%s\",\"stage\":%u,\"wave\":%u,\"hw_stage\":%u,\"sgprs\":%u,\"vgprs\":%u,\"lds_"
-          "bytes\":%u,\"spi_ps_input\":%u,\"resource_count\":%u,\"attribute_ring_loads\":%u,\"wgp_mode\":%u,"
-          "\"nir_float_controls\":%u,\"raw_float_mode\":%u,\"cb_shader_mask\":%u}\n",
-          ac_get_family_name(family), stage, wave, hw, result.config.num_sgprs, result.config.num_vgprs,
-          s->info.shared_size, mask, abi.resource_count, abi.attribute_loads, co.wgp_mode,
-          s->info.float_controls_execution_mode, result.config.float_mode,
-          stage == STELA_AIR_FRAGMENT ? ac_get_cb_shader_mask(formats.normal) : 0);
+   result.abi = (struct abi_facts){
+      .hw_stage = hw, .lds_bytes = s->info.shared_size, .spi_ps_input = mask,
+      .resource_count = abi.resource_count, .attribute_ring_loads = abi.attribute_loads,
+      .wgp_mode = co.wgp_mode, .nir_float_controls = s->info.float_controls_execution_mode,
+      .cb_shader_mask = stage == STELA_AIR_FRAGMENT ? ac_get_cb_shader_mask(formats.normal) : 0};
    ralloc_free(s);
    return result;
 }
@@ -587,19 +600,21 @@ config_words(const struct ac_shader_config *c, uint32_t words[14])
    memcpy(words, values, sizeof(values));
 }
 static void
-write_binary(const struct captured *binary, enum radeon_family family, unsigned stage, unsigned wave)
+write_binary(const struct captured *binary, const char *target)
 {
    const char *directory = getenv("STELA_RENDER_BINARY_DIR");
    if (!directory)
       return;
-   char path[4096];
-   int n = snprintf(path, sizeof(path), "%s/%s-stage%u-wave%u.bin", directory, ac_get_family_name(family),
-                    stage, wave);
+   char name[64], path[4096];
+   int n = snprintf(name, sizeof(name), "%s.bin", target);
+   CHECK(n > 0 && (unsigned)n < sizeof(name));
+   n = snprintf(path, sizeof(path), "%s/%s", directory, name);
    CHECK(n > 0 && (unsigned)n < sizeof(path));
    FILE *file = fopen(path, "wb");
    CHECK(file);
    CHECK(fwrite(binary->code, 4, binary->code_dw, file) == binary->code_dw);
    CHECK(fclose(file) == 0);
+   record_artifact(name);
 }
 static void
 dispose(struct captured *c)
@@ -608,18 +623,34 @@ dispose(struct captured *c)
    free(c->assembly);
    memset(c, 0, sizeof(*c));
 }
+/* The manifest's render targets: every stage of every family and wave. */
 static void
-compiler_holds(struct input *input)
+expect_targets(void)
 {
-   const enum radeon_family held[] = {CHIP_MI100, CHIP_MI200, CHIP_GFX940, CHIP_GFX1210};
-   for (unsigned i = 0; i < ARRAY_SIZE(held); i++) {
-      const enum amd_gfx_level gfx = ac_get_gfx_level(held[i]);
-      const bool graphics = gfx != GFX9;
-      const struct radeon_info profile = {.family = held[i], .gfx_level = gfx, .has_graphics = graphics};
-      CHECK(!aco_is_gpu_supported(&profile));
-      printf("STELA_RENDER_HOLD target=%s reason=%s\n", ac_get_family_name(held[i]),
-             graphics ? "original-ACO-generation-refusal" : "original-no-graphics-profile");
-      input->held++;
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+      const enum radeon_family family = stela_amd_targets[i];
+      for (unsigned wave = 64; wave >= stela_amd_min_wave(family); wave /= 2) {
+         for (unsigned stage = STELA_AIR_VERTEX; stage <= STELA_AIR_FRAGMENT; stage++) {
+            char target[48];
+            target_name(target, family, wave, stage);
+            record_expect(target, stela_amd_aco_hold(family));
+         }
+      }
+   }
+}
+/* Original ACO refuses the held families before any stage compiles. */
+static void
+held(enum radeon_family family)
+{
+   const struct radeon_info profile = {.family = family, .gfx_level = ac_get_gfx_level(family),
+                                       .has_graphics = stela_amd_has_graphics(family)};
+   CHECK(!aco_is_gpu_supported(&profile));
+   for (unsigned wave = 64; wave >= stela_amd_min_wave(family); wave /= 2) {
+      for (unsigned stage = STELA_AIR_VERTEX; stage <= STELA_AIR_FRAGMENT; stage++) {
+         char target[48];
+         target_name(target, family, wave, stage);
+         record_held(target, stela_amd_aco_hold(family));
+      }
    }
 }
 static bool
@@ -633,52 +664,50 @@ fragment(const struct stela_air_inspection *inspection, const struct stela_air_s
    CHECK(stela_air_link_stage_io(input->vertex, fs, PARAM_LIMIT, map, PARAM_LIMIT, &count, &error));
    CHECK(count == 1);
    resource_negatives(input, map, count);
-   const enum radeon_family families[] = {CHIP_TAHITI,  CHIP_BONAIRE,   CHIP_CARRIZO, CHIP_RAVEN,
-                                          CHIP_NAVI10,  CHIP_REMBRANDT, CHIP_NAVI31,  CHIP_STRIX1,
-                                          CHIP_GFX1170, CHIP_GFX1201};
-   for (unsigned f = 0; f < ARRAY_SIZE(families); f++)
-      for (unsigned wave = 32; wave <= 64; wave += 32) {
-         if (wave == 32 && ac_get_gfx_level(families[f]) < GFX10)
-            continue;
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+      const enum radeon_family family = stela_amd_targets[i];
+      if (stela_amd_aco_hold(family)) {
+         held(family);
+         continue;
+      }
+      for (unsigned wave = 64; wave >= stela_amd_min_wave(family); wave /= 2) {
          for (unsigned stage = STELA_AIR_VERTEX; stage <= STELA_AIR_FRAGMENT; stage++) {
-            struct captured a = compile_one(input, stage == STELA_AIR_VERTEX ? input->vertex : fs, map, count,
-                                            families[f], wave, stage);
-            struct captured b = compile_one(input, stage == STELA_AIR_VERTEX ? input->vertex : fs, map, count,
-                                            families[f], wave, stage);
+            const struct stela_air_stage_entry *entry = stage == STELA_AIR_VERTEX ? input->vertex : fs;
+            struct captured a = compile_one(input, entry, map, count, family, wave, stage);
+            struct captured b = compile_one(input, entry, map, count, family, wave, stage);
             CHECK(a.code_dw == b.code_dw && a.executable_bytes == b.executable_bytes &&
                   !memcmp(a.code, b.code, (size_t)a.code_dw * 4));
             uint32_t ca[14], cb[14];
             config_words(&a.config, ca);
             config_words(&b.config, cb);
-            CHECK(!memcmp(ca, cb, sizeof(ca)));
+            CHECK(!memcmp(ca, cb, sizeof(ca)) && !memcmp(&a.abi, &b.abi, sizeof(a.abi)));
             CHECK(a.assembly && b.assembly && !strcmp(a.assembly, b.assembly));
-            write_binary(&a, families[f], stage, wave);
-            blake3_hash hash;
-            char hex[BLAKE3_HEX_LEN];
-            _mesa_blake3_compute(a.code, (size_t)a.code_dw * 4, hash);
-            _mesa_blake3_format(hex, hash);
-            blake3_hash config_hash;
-            char config_hex[BLAKE3_HEX_LEN];
-            _mesa_blake3_compute(ca, sizeof(ca), config_hash);
-            _mesa_blake3_format(config_hex, config_hash);
-            printf("STELA_RENDER_CONFIG {\"target\":\"%s\",\"stage\":%u,\"wave\":%u,\"words\":[",
-                   ac_get_family_name(families[f]), stage, wave);
-            for (unsigned word = 0; word < ARRAY_SIZE(ca); word++)
-               printf("%s%u", word ? "," : "", ca[word]);
-            printf("],\"blake3\":\"%s\"}\n", config_hex);
-            printf("STELA_RENDER_BINARY "
-                   "{\"profile\":\"modeled-original-Mesa-family\",\"input_blake3\":\"%s\",\"target\":\"%s\","
-                   "\"wave\":%u,\"stage\":%u,\"code_bytes\":%u,\"executable_bytes\":%u,\"code_blake3\":\"%"
-                   "s\"}\n",
-                   input->hash, ac_get_family_name(families[f]), wave, stage, a.code_dw * 4,
-                   a.executable_bytes, hex);
-            if (a.assembly)
-               printf("%s\n", a.assembly);
-            input->compiled++;
+            char target[48];
+            target_name(target, family, wave, stage);
+            write_binary(&a, target);
+            record_compiled(target, a.code_dw * 4);
+            record_object("facts");
+            record_str("profile", "modeled-original-Mesa-family");
+            record_str("input_blake3", input->hash);
+            record_uint("executable_bytes", a.executable_bytes);
+            record_blake3("code_blake3", a.code, (size_t)a.code_dw * 4);
+            record_uints("config_words", ca, ARRAY_SIZE(ca));
+            record_blake3("config_blake3", ca, sizeof(ca));
+            record_uint("hw_stage", a.abi.hw_stage);
+            record_uint("lds_bytes", a.abi.lds_bytes);
+            record_uint("spi_ps_input", a.abi.spi_ps_input);
+            record_uint("resource_count", a.abi.resource_count);
+            record_uint("attribute_ring_loads", a.abi.attribute_ring_loads);
+            record_uint("wgp_mode", a.abi.wgp_mode);
+            record_uint("nir_float_controls", a.abi.nir_float_controls);
+            record_uint("cb_shader_mask", a.abi.cb_shader_mask);
+            record_end();
+            printf("%s\n", a.assembly);
             dispose(&a);
             dispose(&b);
          }
       }
+   }
    return true;
 }
 static bool
@@ -711,21 +740,27 @@ main(int argc, char **argv)
                          .size = LLVMGetBufferSize(buffer),
                          .vs_name = argv[4],
                          .fs_name = argv[6]};
-   blake3_hash hash;
-   _mesa_blake3_compute(input.bytes, input.size, hash);
-   _mesa_blake3_format(input.hash, hash);
    const unsigned no_workgroup[3] = {0};
    CHECK(input_receipt_options(buffer, input.vs_name, true, input.hash, no_workgroup, 10000));
    CHECK(input_receipt_options(buffer, input.fs_name, true, input.hash, no_workgroup, 10000));
-   printf("STELA_RENDER_PIPELINE "
-          "{\"primitive\":\"triangle\",\"samples\":1,\"color0\":\"RGBA32_FLOAT\",\"depth\":false,\"blend\":"
-          "false,\"streamout\":false,\"culling\":false,\"queries\":false,\"resource_abi\":\"dynamic-RAW-"
-          "descriptor-SGPR-quartets\",\"fp_profile\":\"apple-32023.922-air2.9-msl4.1\"}\n");
+   record_begin("evidence");
+   record_str("topic", "render-pipeline");
+   record_object("facts");
+   record_str("primitive", "triangle");
+   record_uint("samples", 1);
+   record_str("color0", "RGBA32_FLOAT");
+   record_bool("depth", false);
+   record_bool("blend", false);
+   record_bool("streamout", false);
+   record_bool("culling", false);
+   record_bool("queries", false);
+   record_str("resource_abi", "dynamic-RAW-descriptor-SGPR-quartets");
+   record_str("fp_profile", "apple-32023.922-air2.9-msl4.1");
+   record_end();
+   expect_targets();
    struct stela_air_error error;
    CHECK(stela_air_inspect_stage(input.bytes, input.size, input.vs_name, STELA_AIR_VERTEX, vertex, &input,
                                  &error));
-   compiler_holds(&input);
-   printf("AMD render compiler fixtures=%u holds=%u (no GPU/Metal execution)\n", input.compiled, input.held);
    LLVMDisposeMemoryBuffer(buffer);
    glsl_type_singleton_decref();
    return 0;

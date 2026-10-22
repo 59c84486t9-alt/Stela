@@ -10,7 +10,8 @@
 #include "intel/compiler/elk/elk_nir.h"
 #include "intel/dev/intel_debug.h"
 #include "util/ralloc.h"
-#include "util/mesa-blake3.h"
+#include "stela/tests/air_probe.h"
+#include "stela/tests/targets/intel.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -47,22 +48,26 @@ static void compiler_log(void *data, unsigned *id, const char *format, ...)
     va_list arguments; va_start(arguments, format); vfprintf(stderr, format, arguments); va_end(arguments);
 }
 
-static void hash(const void *data, size_t bytes, char text[65])
+
+/* A compile target: "<platform>-<stage>", also its artifacts' stem. */
+static void target_name(char name[64], const char *platform, unsigned stage)
 {
-    uint8_t value[32]; _mesa_blake3_compute(data, bytes, value);
-    for (unsigned i = 0; i < sizeof(value); i++) snprintf(text + 2 * i, 3, "%02x", value[i]);
+    snprintf(name, 64, "%s-%s", platform, stage ? "fragment" : "vertex");
 }
 
-static void save(const char *target, unsigned stage, const char *kind, const void *data, size_t size)
+static void save(const char *platform, unsigned stage, const char *kind, const void *data, size_t size)
 {
     const char *directory = getenv("STELA_RENDER_EVIDENCE");
     if (!directory) return;
-    char path[4096];
-    int n = snprintf(path, sizeof(path), "%s/%s-%s.%s", directory, target,
-        stage ? "fragment" : "vertex", kind);
+    char target[64], name[128], path[4096];
+    target_name(target, platform, stage);
+    int n = snprintf(name, sizeof(name), "%s.%s", target, kind);
+    CHECK(n > 0 && (size_t)n < sizeof(name));
+    n = snprintf(path, sizeof(path), "%s/%s", directory, name);
     CHECK(n > 0 && (size_t)n < sizeof(path));
     FILE *file = fopen(path, "wb"); CHECK(file);
     CHECK((!size || fwrite(data, 1, size, file) == size) && !fclose(file));
+    record_artifact(name);
 }
 
 static bool bind_ssbo(const struct stela_air_buffer *b, unsigned *slot, void *data)
@@ -360,24 +365,26 @@ static void metadata_hash(const struct compiled *c, bool legacy, unsigned stage,
 {
     if (legacy) {
         const struct elk_stage_prog_data *d = stage ? &c->fs.elk.base : &c->vs.elk.base.base;
-        hash(stage ? (const void *)&c->fs.elk : (const void *)&c->vs.elk,
+        stela_digest(stage ? (const void *)&c->fs.elk : (const void *)&c->vs.elk,
              stage ? sizeof(c->fs.elk) : sizeof(c->vs.elk), out[0]);
-        hash(d->param, d->nr_params * sizeof(*d->param), out[1]);
-        hash(d->relocs, d->num_relocs * sizeof(*d->relocs), out[2]);
+        stela_digest(d->param, d->nr_params * sizeof(*d->param), out[1]);
+        stela_digest(d->relocs, d->num_relocs * sizeof(*d->relocs), out[2]);
     } else {
         const struct brw_stage_prog_data *d = stage ? &c->fs.brw.base : &c->vs.brw.base.base;
-        hash(stage ? (const void *)&c->fs.brw : (const void *)&c->vs.brw,
+        stela_digest(stage ? (const void *)&c->fs.brw : (const void *)&c->vs.brw,
              stage ? sizeof(c->fs.brw) : sizeof(c->vs.brw), out[0]);
-        hash(NULL, 0, out[1]); hash(d->relocs, d->num_relocs * sizeof(*d->relocs), out[2]);
+        stela_digest(NULL, 0, out[1]); stela_digest(d->relocs, d->num_relocs * sizeof(*d->relocs), out[2]);
     }
 }
 
-static void target(const struct input *input, const char *name, bool legacy)
+static void target(const struct input *input, const char *name, const struct intel_device_info *device)
 {
-    struct intel_device_info dev; int pci = intel_device_name_to_pci_device_id(name);
-    CHECK(pci >= 0 && intel_get_device_info_for_build(pci, &dev));
-    if (dev.ver >= 35) {
-        printf("STELA_RENDER_HOLD {\"target\":\"%s\",\"reason\":\"Gen35-dispatch-execution-policy-unqualified\"}\n", name);
+    const struct intel_device_info dev = *device; const int pci = dev.pci_device_id;
+    const bool legacy = stela_intel_elk(&dev);
+    if (stela_intel_hold(&dev)) {
+        for (unsigned i = 0; i < 2; i++) {
+            char held[64]; target_name(held, name, i); record_held(held, stela_intel_hold(&dev));
+        }
         return;
     }
     void *compiler_context = ralloc_context(NULL); CHECK(compiler_context);
@@ -395,7 +402,7 @@ static void target(const struct input *input, const char *name, bool legacy)
     for (unsigned i = 0; i < 2; i++) {
         unsigned bytes = legacy ? (i ? a.fs.elk.base.program_size : a.vs.elk.base.base.program_size) :
             (i ? a.fs.brw.base.program_size : a.vs.brw.base.base.program_size);
-        hash(a.code[i], bytes, retained[i]);
+        stela_digest(a.code[i], bytes, retained[i]);
         metadata_hash(&a, legacy, i, metadata[i]);
         save(name, i, "code", a.code[i], bytes);
         unsigned constants, constant_offset, relocs, params = 0, urb_read;
@@ -422,29 +429,46 @@ static void target(const struct input *input, const char *name, bool legacy)
                 i ? sizeof(normalized.fs.brw) : sizeof(normalized.vs.brw));
         }
         save(name, i, "constants", constants ? (const uint8_t *)a.code[i] + constant_offset : NULL, constants);
-        printf("STELA_RENDER_COMPILED {\"backend\":\"%s\",\"target\":\"%s\",\"pci_model\":%d,"
-            "\"verx10\":%u,\"stage\":\"%s\",\"bytes\":%u,\"blake3\":\"%s\","
-            "\"samples\":1,\"color_regions\":1,\"vue_layout\":\"fixed-original\","
-            "\"ssbo_count\":%u,\"params\":%u,\"relocs\":%u,\"constant_bytes\":%u,"
-            "\"push_%s\":%u,\"fp_controls\":%u,\"whole_recapture_equal\":true,\"hardware_executed\":false}\n",
-            legacy ? "elk" : "brw", name, pci, dev.verx10, i ? "fragment" : "vertex", bytes,
-            retained[i], i ? 0 : 2, params, relocs, constants, legacy ? "registers" : "bytes", urb_read,
-            a.nir[i]->info.float_controls_execution_mode);
+        char stage_target[64]; target_name(stage_target, name, i);
+        record_compiled(stage_target, bytes);
+        record_object("facts");
+        record_str("backend", legacy ? "elk" : "brw");
+        record_uint("pci_model", pci);
+        record_uint("verx10", dev.verx10);
+        record_str("code_blake3", retained[i]);
+        record_uint("samples", 1);
+        record_uint("color_regions", 1);
+        record_str("vue_layout", "fixed-original");
+        record_uint("ssbo_count", i ? 0 : 2);
+        record_uint("params", params);
+        record_uint("relocs", relocs);
+        record_uint("constant_bytes", constants);
+        record_uint(legacy ? "push_registers" : "push_bytes", urb_read);
+        record_uint("fp_controls", a.nir[i]->info.float_controls_execution_mode);
+        record_bool("whole_recapture_equal", true);
+        record_end();
     }
     const struct intel_vue_map *vue = legacy ? &a.vs.elk.base.vue_map : &a.vs.brw.base.vue_map;
     CHECK(legacy ? a.vs.elk.uses_vertexid && a.vs.elk.uses_firstvertex :
                    a.vs.brw.uses_vertexid && a.vs.brw.uses_firstvertex);
-    printf("STELA_RENDER_LINK {\"target\":\"%s\",\"vue_slots\":%d,\"position_slot\":%d,"
-        "\"varying0_slot\":%d,\"barycentric_modes\":%u,\"vertex_id_includes_base\":true,"
-        "\"whole_original_progdata_retained\":true}\n", name, vue->num_slots,
-        vue->varying_to_slot[VARYING_SLOT_POS], vue->varying_to_slot[VARYING_SLOT_VAR0],
-        legacy ? a.fs.elk.barycentric_interp_modes : a.fs.brw.barycentric_interp_modes);
+    record_begin("evidence");
+    record_str("topic", "vue-link");
+    record_object("facts");
+    record_str("platform", name);
+    record_int("vue_slots", vue->num_slots);
+    record_int("position_slot", vue->varying_to_slot[VARYING_SLOT_POS]);
+    record_int("varying0_slot", vue->varying_to_slot[VARYING_SLOT_VAR0]);
+    record_uint("barycentric_modes",
+                legacy ? a.fs.elk.barycentric_interp_modes : a.fs.brw.barycentric_interp_modes);
+    record_bool("vertex_id_includes_base", true);
+    record_bool("whole_original_progdata_retained", true);
+    record_end();
     /* One sibling output survives independent NIR/context disposal. */
     destroy(&b);
     for (unsigned i = 0; i < 2; i++) {
         unsigned bytes = legacy ? (i ? a.fs.elk.base.program_size : a.vs.elk.base.base.program_size) :
             (i ? a.fs.brw.base.program_size : a.vs.brw.base.base.program_size);
-        char after[65]; hash(a.code[i], bytes, after); CHECK(!strcmp(after, retained[i]));
+        char after[65]; stela_digest(a.code[i], bytes, after); CHECK(!strcmp(after, retained[i]));
         char after_metadata[3][65]; metadata_hash(&a, legacy, i, after_metadata);
         CHECK(!memcmp(metadata[i], after_metadata, sizeof(after_metadata)));
     }
@@ -488,9 +512,9 @@ int main(int argc, char **argv)
         return 2;
     }
     struct input input = read_input(argv[1], argv[2], argv[3]);
-    char original[65]; hash(input.bytes, input.size, original);
-    printf("STELA_RENDER_INPUT {\"bytes\":%zu,\"blake3\":\"%s\",\"vertex\":\"%s\",\"fragment\":\"%s\"}\n",
-        input.size, original, input.vertex, input.fragment);
+    char original[65]; stela_digest(input.bytes, input.size, original);
+    stela_air_probe_input_record(true, input.size, original, input.vertex);
+    record_object("facts"); record_str("fragment_entry", input.fragment); record_end();
     process_intel_debug_variable(); glsl_type_singleton_init_or_ref();
     const char *isa_path = getenv("STELA_RENDER_DISASSEMBLY");
     if (isa_path) { disassembly = fopen(isa_path, "w"); CHECK(disassembly); }
@@ -500,17 +524,25 @@ int main(int argc, char **argv)
         struct stela_air_error error; unsigned callbacks = 0;
         CHECK(!stela_air_inspect_stage(refused.bytes, refused.size, refused.fragment, STELA_AIR_FRAGMENT,
             unexpected_stage, &callbacks, &error) && !callbacks && error.kind != STELA_AIR_OK);
-        char digest[65]; hash(refused.bytes, refused.size, digest);
-        printf("STELA_RENDER_REFUSAL {\"bytes\":%zu,\"blake3\":\"%s\",\"entry\":\"%s\","
-            "\"metadata_error\":%u,\"callbacks\":0}\n", refused.size, digest, refused.fragment, error.kind);
+        record_begin("evidence");
+        record_str("topic", "refused-input");
+        record_object("facts");
+        record_uint("bytes", refused.size);
+        record_blake3("blake3", refused.bytes, refused.size);
+        record_str("entry", refused.fragment);
+        record_uint("metadata_error", error.kind);
+        record_uint("callbacks", 0);
+        record_end();
         free(refused.bytes);
     }
-    const char *modern[] = {"skl", "bxt", "kbl", "glk", "icl", "ehl", "tgl", "rkl", "dg1",
-        "adl", "dg2", "mtl", "arl", "lnl", "bmg", "ptl", "nvl-u", "nvl"};
-    const char *legacy[] = {"ivb", "byt", "hsw", "bdw", "chv"};
-    for (unsigned i = 0; i < ARRAY_SIZE(modern); i++) target(&input, modern[i], false);
-    for (unsigned i = 0; i < ARRAY_SIZE(legacy); i++) target(&input, legacy[i], true);
-    char after[65]; hash(input.bytes, input.size, after); CHECK(!strcmp(after, original));
+    struct intel_device_info device; const char *platform;
+    STELA_INTEL_FOREACH_TARGET(platform, device) {
+        for (unsigned i = 0; i < 2; i++) {
+            char name[64]; target_name(name, platform, i); record_expect(name, stela_intel_hold(&device));
+        }
+    }
+    STELA_INTEL_FOREACH_TARGET(platform, device) target(&input, platform, &device);
+    char after[65]; stela_digest(input.bytes, input.size, after); CHECK(!strcmp(after, original));
     if (disassembly) CHECK(!fclose(disassembly));
     glsl_type_singleton_decref(); free(input.bytes); return 0;
 }

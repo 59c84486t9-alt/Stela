@@ -3,9 +3,9 @@
  * CPU compilation only: no initialized GPU, mappings or submission are claimed.
  */
 #include "air_to_nir.h"
-#include "air_probe_profile.h"
+#include "air_probe.h"
 #include "air_test_fixture.h"
-#include "probe_report.h"
+#include "targets/amd.h"
 #include "amd/compiler/aco_interface.h"
 #include "amd/common/ac_binary.h"
 #include "amd/common/ac_gpu_info.h"
@@ -15,9 +15,7 @@
 #include "amd/llvm/ac_llvm_util.h"
 #endif
 #include "util/ralloc.h"
-#include "util/mesa-blake3.h"
 #include "../../../../../amd/stela/tests/air_probe_input.h"
-#include <inttypes.h>
 
 #define CHECK(condition) do { if (!(condition)) { \
    fprintf(stderr, "%s:%u: %s\n", __func__, __LINE__, #condition); exit(1); \
@@ -65,11 +63,8 @@ capture_binary(void **private, const struct ac_shader_config *config,
    binary->code_dw = code_dw;
    binary->exec_size = exec_size;
    binary->config = *config;
-   blake3_hash hash;
-   _mesa_blake3_compute(code, (size_t)code_dw * sizeof(*code), hash);
-   _mesa_blake3_format(binary->code_blake3, hash);
-   _mesa_blake3_compute(code, exec_size, hash);
-   _mesa_blake3_format(binary->executable_blake3, hash);
+   stela_digest(code, (size_t)code_dw * sizeof(*code), binary->code_blake3);
+   stela_digest(code, exec_size, binary->executable_blake3);
 
    if (assembly && assembly_size) {
       if (!assembly[assembly_size - 1])
@@ -101,19 +96,27 @@ compute_args(struct binding *binding, const struct radeon_info *gpu)
    }
 }
 
-static bool
-compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_hash,
-               enum radeon_family family, bool graphics, unsigned wave, bool file,
-               enum stela_air_fp_profile fp_profile)
+static struct radeon_info
+model(enum radeon_family family)
 {
    struct radeon_info gpu = {
-      .gfx_level = ac_get_gfx_level(family), .family = family, .has_graphics = graphics,
+      .gfx_level = ac_get_gfx_level(family), .family = family,
+      .has_graphics = stela_amd_has_graphics(family),
    };
    ac_fill_compiler_info(&gpu, NULL, false);
-   char target[64];
-   snprintf(target, sizeof(target), "%s.wave%u", ac_get_family_name(family), wave);
+   return gpu;
+}
+
+static bool
+compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_hash,
+               enum radeon_family family, unsigned wave, bool file,
+               enum stela_air_fp_profile fp_profile)
+{
+   struct radeon_info gpu = model(family);
+   char target[32];
+   stela_amd_target_name(target, family, wave);
    if (!aco_is_gpu_supported(&gpu)) {
-      probe_unsupported("air-aco", target, graphics ? "compiler-gfx-level-unsupported" : "requires-cdna-compiler-backend");
+      record_held(target, stela_amd_aco_refusal(family));
       return true;
    }
    nir_shader_compiler_options nir_options;
@@ -132,8 +135,7 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
       return false;
    }
    CHECK(binding.count == 1 && error.kind == STELA_AIR_OK);
-   printf("STELA_AIR_ENVIRONMENT {\"backend\":\"air-aco\",\"target\":\"%s\",\"fp_profile\":%u,\"nir_float_controls\":%u}\n",
-          target, (unsigned)fp_profile, shader->info.float_controls_execution_mode);
+   stela_air_probe_environment_record(target, fp_profile, shader->info.float_controls_execution_mode);
    unsigned loads = 0, stores = 0;
    nir_foreach_function_impl(impl, shader) {
       nir_foreach_block(block, impl) {
@@ -154,9 +156,6 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
       }
    }
    CHECK(file ? loads + stores > 0 : loads == 1 && stores == 1);
-   printf("STELA_AIR_MEMORY {\"backend\":\"aco\",\"input_blake3\":\"%s\","
-          "\"target\":\"%s\",\"global_loads\":%u,\"global_stores\":%u}\n",
-          input_hash, target, loads, stores);
    CHECK(shader->info.workgroup_size[0] == 32 && shader->info.workgroup_size[1] == 1 &&
          shader->info.workgroup_size[2] == 1);
    /* Reuse AMD's generation-specific system-value lowering rather than
@@ -196,17 +195,26 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
    printf("AIR kernel %s: user-sgpr=0:1 buffer[7], sgprs=%u vgprs=%u scratch=%u bytes=%u\n",
           target, binary.config.num_sgprs, binary.config.num_vgprs,
           binary.config.scratch_bytes_per_wave, binary.exec_size);
-   probe_compiled("air-aco", target, binary.exec_size);
-   printf("STELA_AIR_BINARY {\"backend\":\"aco\",\"input_blake3\":\"%s\",\"entry\":", input_hash);
-   json_string(entry);
-   printf(",\"target\":\"%s\",\"wave_size\":%u,\"workgroup_size\":[32,1,1],"
-          "\"code_bytes\":%zu,\"executable_bytes\":%u,\"code_blake3\":\"%s\","
-          "\"executable_blake3\":\"%s\",\"buffer_argument\":%u,\"metal_buffer_index\":7,"
-          "\"buffer_abi\":\"device_va_user_sgpr0_1\",\"aco_codegen_flags\":%" PRIu64 ","
-          "\"aco_optimisations_disabled_option\":%s,\"scratch_bytes_per_wave\":%u}\n",
-          target, wave, (size_t)binary.code_dw * 4, binary.exec_size, binary.code_blake3,
-          binary.executable_blake3, binding.argument, aco_get_codegen_flags(),
-          options.optimisations_disabled ? "true" : "false", binary.config.scratch_bytes_per_wave);
+   const uint32_t workgroup_size[] = {32, 1, 1};
+   record_compiled(target, binary.exec_size);
+   record_object("facts");
+   record_str("input_blake3", input_hash);
+   record_str("entry", entry);
+   record_uint("wave_size", wave);
+   record_uints("workgroup_size", workgroup_size, ARRAY_SIZE(workgroup_size));
+   record_uint("global_loads", loads);
+   record_uint("global_stores", stores);
+   record_uint("code_bytes", (uint64_t)binary.code_dw * 4);
+   record_uint("executable_bytes", binary.exec_size);
+   record_str("code_blake3", binary.code_blake3);
+   record_str("executable_blake3", binary.executable_blake3);
+   record_uint("buffer_argument", binding.argument);
+   record_uint("metal_buffer_index", 7);
+   record_str("buffer_abi", "device_va_user_sgpr0_1");
+   record_uint("aco_codegen_flags", aco_get_codegen_flags());
+   record_bool("aco_optimisations_disabled_option", options.optimisations_disabled);
+   record_uint("scratch_bytes_per_wave", binary.config.scratch_bytes_per_wave);
+   record_end();
 
    return true;
 }
@@ -217,19 +225,12 @@ main(int argc, char **argv)
 #if AMD_LLVM_AVAILABLE
    ac_init_llvm_once();
 #endif
-   const struct { enum radeon_family family; bool graphics; } targets[] = {
-      {CHIP_TAHITI, true}, {CHIP_BONAIRE, true}, {CHIP_CARRIZO, true},
-      {CHIP_RAVEN, true}, {CHIP_NAVI10, true}, {CHIP_REMBRANDT, true},
-      {CHIP_NAVI31, true}, {CHIP_STRIX1, true}, {CHIP_GFX1170, true},
-      {CHIP_GFX1201, true}, {CHIP_GFX1210, true},
-      {CHIP_MI100, false}, {CHIP_MI200, false}, {CHIP_GFX940, false},
-   };
    const char *entry = "kernel";
    bool file = false;
    enum stela_air_fp_profile fp_profile;
    if (!stela_air_probe_profile(&argc, argv, &fp_profile))
       return 2;
-   stela_air_probe_profile_receipt(fp_profile);
+   stela_air_probe_profile_record(fp_profile);
    LLVMMemoryBufferRef input;
    if (argc == 1) {
       input = stela_air_test_bitcode(stela_air_test_store_body, "");
@@ -249,13 +250,20 @@ main(int argc, char **argv)
       LLVMDisposeMemoryBuffer(input);
       return 1;
    }
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+      const enum radeon_family family = stela_amd_targets[i];
+      for (unsigned wave = 64; wave >= stela_amd_min_wave(family); wave /= 2) {
+         char target[32];
+         stela_amd_target_name(target, family, wave);
+         record_expect(target, stela_amd_aco_hold(family));
+      }
+   }
    glsl_type_singleton_init_or_ref();
-
    bool ok = true;
-   for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
-      ok &= compile_target(input, entry, input_hash, targets[i].family, targets[i].graphics, 64, file, fp_profile);
-      if (ac_get_gfx_level(targets[i].family) >= GFX10)
-         ok &= compile_target(input, entry, input_hash, targets[i].family, targets[i].graphics, 32, file, fp_profile);
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+      const enum radeon_family family = stela_amd_targets[i];
+      for (unsigned wave = 64; wave >= stela_amd_min_wave(family); wave /= 2)
+         ok &= compile_target(input, entry, input_hash, family, wave, file, fp_profile);
    }
    LLVMDisposeMemoryBuffer(input);
    glsl_type_singleton_decref();

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "../hosted/image_copy.h"
 #include "intel/dev/intel_device_info.h"
+#include "stela/tests/targets/intel.h"
 #include <assert.h>
 #include <limits.h>
 #include <stdio.h>
@@ -257,15 +258,12 @@ static void unsupported_tilings(const struct isl_device *dev)
 
 int main(void)
 {
-    const char *platforms[] = {"ivb", "byt", "hsw", "bdw", "chv", "skl", "bxt", "icl", "tgl",
-        "dg1", "dg2", "mtl", "arl", "lnl", "bmg", "ptl", "nvl-u", "nvl"};
     const enum isl_tiling tilings[] = {ISL_TILING_LINEAR, ISL_TILING_X, ISL_TILING_Y0, ISL_TILING_4};
     const enum isl_format formats[] = {ISL_FORMAT_R8_UNORM, ISL_FORMAT_R16_UNORM,
         ISL_FORMAT_R8G8B8A8_UNORM, ISL_FORMAT_R16G16B16A16_FLOAT, ISL_FORMAT_R32G32B32A32_FLOAT};
-    for (unsigned p = 0; p < ARRAY_SIZE(platforms); ++p) {
-        struct intel_device_info info;
-        int pci = intel_device_name_to_pci_device_id(platforms[p]);
-        assert(pci >= 0 && intel_get_device_info_for_build(pci, &info));
+    const char *platform;
+    struct intel_device_info info;
+    STELA_INTEL_FOREACH_TARGET(platform, info) {
         struct isl_device dev = {0}; isl_device_init(&dev, &info); dev.requires_padding = true;
         for (unsigned t = 0; t < ARRAY_SIZE(tilings); ++t)
         for (unsigned f = 0; f < ARRAY_SIZE(formats); ++f) {
@@ -277,8 +275,6 @@ int main(void)
             all_rectangles(&dev, &d, &s); invalid_copies(&dev, &d); ++admitted_layouts;
         }
         unsupported_tilings(&dev);
-        printf("STELA_INTEL_IMAGE_COPY target=%s pci=0x%x verx10=%u layouts=%u copies=%u refusals=%u hardware_execution=false\n",
-               platforms[p], pci, info.verx10, admitted_layouts, copies, refusals);
     }
     printf("Hosted Intel image CPU copy: %u layouts, %u independent full-span copies, %u refusals passed\n",
         admitted_layouts, copies, refusals);

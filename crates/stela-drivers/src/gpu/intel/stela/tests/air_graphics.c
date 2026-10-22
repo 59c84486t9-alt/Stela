@@ -5,6 +5,8 @@
  * source-request provenance. Device profiles/placements are CPU-only models.
  */
 #include "../hosted/air_graphics.h"
+#include "stela/tests/probe_report.h"
+#include "stela/tests/targets/intel.h"
 #include "util/ralloc.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <stdarg.h>
@@ -237,10 +239,9 @@ static void whole_span(const struct brw_compiler *brw, const struct elk_compiler
 }
 
 static void target(const struct bytes *raw, const char *vs, const char *fs, const char *name,
-    bool legacy, const char *directory)
+    const struct intel_device_info *model, const char *directory)
 {
-    struct intel_device_info device; int pci = intel_device_name_to_pci_device_id(name);
-    CHECK(pci >= 0 && intel_get_device_info_for_build(pci,&device));
+    const struct intel_device_info device = *model; const bool legacy = stela_intel_elk(&device);
     void *context = ralloc_context(NULL); CHECK(context);
     struct brw_compiler *brw = legacy ? NULL : brw_compiler_create(context,&device);
     struct elk_compiler *elk = legacy ? elk_compiler_create(context,&device) : NULL;
@@ -250,10 +251,10 @@ static void target(const struct bytes *raw, const char *vs, const char *fs, cons
     struct stela_metal_assembly *v = stage(raw,vs,STELA_AIR_VERTEX), *f = stage(raw,fs,STELA_AIR_FRAGMENT);
     struct stela_intel_graphics_compilation *output = NULL;
     struct stela_intel_graphics_options o = options(); struct stela_intel_graphics_error error;
-    if (device.ver >= 35) {
+    if (stela_intel_hold(&device)) {
         CHECK(stela_intel_graphics_compile(brw,elk,NULL,&v,&f,&o,&output,&error) == STELA_INTEL_GRAPHICS_UNSUPPORTED);
         CHECK(v && f && !output); stela_metal_assembly_destroy(&v); stela_metal_assembly_destroy(&f); ralloc_free(context);
-        printf("STELA_GRAPHICS_HOLD %s Gen35\n",name); return;
+        record_held(name,stela_intel_hold(&device)); return;
     }
     failures(brw,elk,&v,&f);
 #ifdef STELA_INTEL_GRAPHICS_ALLOCATION_TEST
@@ -288,9 +289,18 @@ static void target(const struct bytes *raw, const char *vs, const char *fs, cons
      * result's bytes, metadata, NIR options or canonical input identities. */
     ralloc_free(context); compare(output,directory,name);
     CHECK(!strcmp((const char *)p->vertex->identity->name,vs) && !strcmp((const char *)p->fragment->identity->name,fs));
+    /* The package equals the render probe's original code, metadata and
+     * identities after its compiler is gone. */
+    const struct stela_intel_graphics_stage_binary *vertex = stela_intel_graphics_binary(output,STELA_AIR_VERTEX);
+    const struct stela_intel_graphics_stage_binary *fragment = stela_intel_graphics_binary(output,STELA_AIR_FRAGMENT);
+    record_compiled(name,(uint64_t)vertex->code_bytes + fragment->code_bytes);
+    record_object("facts");
+    record_str("backend",legacy ? "elk" : "brw");
+    record_uint("vertex_code_bytes",vertex->code_bytes);
+    record_uint("fragment_code_bytes",fragment->code_bytes);
+    record_end();
     stela_intel_graphics_destroy(&output); CHECK(!output && !live_allocations && !live_contexts);
     stela_intel_graphics_destroy(&output);
-    printf("STELA_GRAPHICS_OWNED %s %s original-code-metadata-identity-lifetime\n",legacy ? "elk" : "brw",name);
 }
 int main(int argc, char **argv)
 {
@@ -300,10 +310,8 @@ int main(int argc, char **argv)
     struct bytes raw = {.data = malloc((size_t)size), .size = (size_t)size}; CHECK(raw.data);
     CHECK(fread(raw.data,1,raw.size,file) == raw.size && !fclose(file));
     process_intel_debug_variable(); glsl_type_singleton_init_or_ref();
-    const char *modern[] = {"skl","bxt","kbl","glk","icl","ehl","tgl","rkl","dg1","adl",
-        "dg2","mtl","arl","lnl","bmg","ptl","nvl-u","nvl"};
-    const char *legacy[] = {"ivb","byt","hsw","bdw","chv"};
-    for (unsigned i = 0; i < ARRAY_SIZE(modern); i++) target(&raw,argv[2],argv[3],modern[i],false,argv[4]);
-    for (unsigned i = 0; i < ARRAY_SIZE(legacy); i++) target(&raw,argv[2],argv[3],legacy[i],true,argv[4]);
+    struct intel_device_info device; const char *platform;
+    STELA_INTEL_FOREACH_TARGET(platform,device) record_expect(platform,stela_intel_hold(&device));
+    STELA_INTEL_FOREACH_TARGET(platform,device) target(&raw,argv[2],argv[3],platform,&device,argv[4]);
     glsl_type_singleton_decref(); free(raw.data); return 0;
 }

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "../hosted/sampler.h"
 #include "intel/dev/intel_device_info.h"
+#include "stela/tests/targets/intel.h"
 #include "sampler_bits.h" /* Unchanged original gen_bits_header.py output. */
 #include <assert.h>
 #include <float.h>
@@ -216,34 +217,25 @@ static void invalid_states(const struct isl_device *dev)
     assert(four_aligned[0] == 0xa5a5a5a5 && four_aligned[5] == 0xa5a5a5a5);
 }
 
-static void old_generation_holds(void)
+static void old_generation_hold(const struct isl_device *dev)
 {
-    const char *old[] = {"ivb", "byt", "hsw"};
-    for (unsigned i = 0; i < ARRAY_SIZE(old); ++i) {
-        struct intel_device_info info;
-        int pci = intel_device_name_to_pci_device_id(old[i]);
-        assert(pci >= 0 && intel_get_device_info_for_build(pci, &info));
-        struct isl_device dev = {0}; isl_device_init(&dev, &info); dev.requires_padding = true;
-        struct stela_intel_image_desc img = image(); struct pipe_sampler_state s = sampler();
-        uint32_t out[4] = {1,2,3,4}, before[4]; memcpy(before, out, sizeof(out));
-        assert(stela_intel_sampler_state(&dev, &img, &s, out, sizeof(out)) == -95);
-        assert(memcmp(out, before, sizeof(out)) == 0); ++refusals;
-    }
+    struct stela_intel_image_desc img = image(); struct pipe_sampler_state s = sampler();
+    uint32_t out[4] = {1,2,3,4}, before[4]; memcpy(before, out, sizeof(out));
+    assert(stela_intel_sampler_state(dev, &img, &s, out, sizeof(out)) == -95);
+    assert(memcmp(out, before, sizeof(out)) == 0); ++refusals;
 }
 
 int main(void)
 {
-    old_generation_holds();
-    const char *platforms[] = {"bdw", "chv", "skl", "bxt", "icl", "tgl", "dg1", "dg2",
-        "mtl", "arl", "lnl", "bmg", "ptl", "nvl-u", "nvl"};
-    for (unsigned p = 0; p < ARRAY_SIZE(platforms); ++p) {
-        struct intel_device_info info;
-        int pci = intel_device_name_to_pci_device_id(platforms[p]);
-        assert(pci >= 0 && intel_get_device_info_for_build(pci, &info));
+    const char *platform;
+    struct intel_device_info info;
+    STELA_INTEL_FOREACH_TARGET(platform, info) {
         struct isl_device dev = {0}; isl_device_init(&dev, &info); dev.requires_padding = true;
+        if (info.ver < 8) {
+            old_generation_hold(&dev);
+            continue;
+        }
         state_matrix(&dev); invalid_states(&dev);
-        printf("STELA_INTEL_SAMPLER target=%s pci=0x%x verx10=%u states=%u refusals=%u hardware_execution=false\n",
-               platforms[p], pci, info.verx10, states, refusals);
     }
     printf("Hosted Intel original Iris sampler: %u independent packet comparisons and %u refusals passed\n",
            states, refusals);

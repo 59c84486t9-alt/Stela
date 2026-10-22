@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "../hosted/image.h"
 #include "intel/dev/intel_device_info.h"
+#include "stela/tests/targets/intel.h"
 #include "image_bits.h" /* Original gen_bits_header.py output, test-only. */
 #include <assert.h>
 #include <stdio.h>
@@ -376,19 +377,14 @@ static void device_refusals(void)
 int main(void)
 {
     device_refusals();
-    const char *platforms[] = {"ivb", "byt", "hsw", "bdw", "chv", "skl", "bxt",
-        "icl", "tgl", "dg1", "dg2", "mtl", "arl", "lnl", "bmg", "ptl", "nvl-u", "nvl"};
-    for (unsigned p = 0; p < ARRAY_SIZE(platforms); ++p) {
-        struct intel_device_info info;
-        int pci = intel_device_name_to_pci_device_id(platforms[p]);
-        assert(pci >= 0 && intel_get_device_info_for_build(pci, &info));
+    const char *platform;
+    struct intel_device_info info;
+    STELA_INTEL_FOREACH_TARGET(platform, info) {
         struct isl_device dev = {0}; isl_device_init(&dev, &info);
         /* Original ANV policy without its real scratch-page mapping. */
         dev.requires_padding = true;
         layout_matrix(&dev); explicit_tilings(&dev); invalid_layouts(&dev);
         invalid_views(&dev); dimensional_edges(&dev);
-        printf("STELA_INTEL_IMAGE target=%s pci=0x%x verx10=%u layouts=%u states=%u refusals=%u hardware_execution=false\n",
-               platforms[p], pci, info.verx10, layouts, states, refusals);
     }
     printf("Hosted Intel image original ISL layout/state and independent bounds: %u layouts, %u states, %u refusals passed\n",
            layouts, states, refusals);

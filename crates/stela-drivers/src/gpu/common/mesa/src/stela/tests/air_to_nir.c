@@ -4,14 +4,14 @@
 #include "llvm-c/Core.h"
 #include "llvm-c/IRReader.h"
 #include "util/ralloc.h"
-#include "util/blake3/blake3.h"
-#include "probe_report.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef STELA_AIR_TEST_NAK
 #include "nouveau/compiler/nak.h"
 #include "nouveau/headers/nv_device_info.h"
+#include "probe_report.h"
+#include "targets/nvidia.h"
 #endif
 
 #define CHECK(condition) do { if (!(condition)) { \
@@ -1655,25 +1655,8 @@ tests(void)
 
 #ifdef STELA_AIR_TEST_NAK
 static void
-digest(const void *bytes, size_t size, char out[2 * BLAKE3_OUT_LEN + 1])
-{
-   blake3_hasher hasher;
-   uint8_t hash[BLAKE3_OUT_LEN];
-   blake3_hasher_init(&hasher);
-   blake3_hasher_update(&hasher, bytes, size);
-   blake3_hasher_finalize(&hasher, hash, sizeof(hash));
-   static const char hex[] = "0123456789abcdef";
-   for (unsigned i = 0; i < sizeof(hash); i++) {
-      out[2 * i] = hex[hash[i] >> 4];
-      out[2 * i + 1] = hex[hash[i] & 15];
-   }
-   out[2 * BLAKE3_OUT_LEN] = 0;
-}
-
-static void
 nak_shared_codegen(bool dynamic)
 {
-   const unsigned targets[] = {75,80,86,87,89,90,100,104,120};
    char extra[512];
    snprintf(extra, sizeof(extra), "%s%s", dynamic ? "" : shared_global_declaration, shared_declaration);
    char *body = NULL;
@@ -1683,8 +1666,8 @@ nak_shared_codegen(bool dynamic)
       free(first);
    }
    LLVMMemoryBufferRef input = shared_bitcode(dynamic ? body : shared_body, dynamic, extra);
-   for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
-      const struct nv_device_info dev = {.sm = targets[i], .max_warps_per_mp = 32};
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++) {
+      const struct nv_device_info dev = {.sm = stela_nv_sms[i], .max_warps_per_mp = 32};
       struct nak_compiler *compiler = nak_compiler_create(&dev);
       CHECK(compiler);
       struct shared_bindings bindings = {.view = {256,4,STELA_AIR_READ_WRITE}};
@@ -1699,7 +1682,7 @@ nak_shared_codegen(bool dynamic)
       CHECK(bin->asm_str && strstr(bin->asm_str, "st.shared") &&
             strstr(bin->asm_str, "ld.shared") && strstr(bin->asm_str, "bar.sync"));
       printf("AIR shared-%s-workgroup64->LLVM->NIR->NAK SM%u: %u bytes, %u instructions, shared256, barriers1\n",
-         dynamic ? "dynamic" : "static", targets[i], bin->code_size, bin->info.num_instrs);
+         dynamic ? "dynamic" : "static", stela_nv_sms[i], bin->code_size, bin->info.num_instrs);
       puts(bin->asm_str);
       nak_shader_bin_destroy(bin); ralloc_free(nir); nak_compiler_destroy(compiler);
    }
@@ -1708,13 +1691,27 @@ nak_shared_codegen(bool dynamic)
 }
 
 static void
+nak_target_name(char name[32], unsigned sm, const char *label)
+{
+   if (!strcmp(label, "integer"))
+      snprintf(name, 32, "sm%u", sm);
+   else
+      snprintf(name, 32, "sm%u.%s", sm, label);
+}
+
+static void
 nak_codegen(const char *body, const char *label, bool ieee)
 {
-   const unsigned targets[] = {75, 80, 86, 87, 89, 90, 100, 104, 120};
+   char target[32];
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++) {
+      nak_target_name(target, stela_nv_sms[i], label);
+      record_expect(target, NULL);
+   }
    LLVMMemoryBufferRef input = ieee ? ieee_bitcode(stela_air_test_prefix, body) :
                                     stela_air_test_bitcode(body, "");
-   for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
-      const struct nv_device_info dev = {.sm = targets[i], .max_warps_per_mp = 32};
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++) {
+      const unsigned sm = stela_nv_sms[i];
+      const struct nv_device_info dev = {.sm = sm, .max_warps_per_mp = 32};
       struct nak_compiler *compiler = nak_compiler_create(&dev);
       CHECK(compiler);
       struct stela_air_error error;
@@ -1727,20 +1724,19 @@ nak_codegen(const char *body, const char *label, bool ieee)
        * lowering. Calling that phase twice is invalid for real control flow. */
       struct nak_shader_bin *bin = nak_compile_shader(nir, true, compiler, 0, NULL, false);
       CHECK(bin && bin->code && bin->code_size && bin->info.num_instrs > 2);
-      CHECK(bin->info.sm == targets[i] && bin->info.stage == MESA_SHADER_COMPUTE);
-      char target[64], input_hash[2 * BLAKE3_OUT_LEN + 1], code_hash[2 * BLAKE3_OUT_LEN + 1];
-      if (!strcmp(label, "integer"))
-         snprintf(target, sizeof(target), "sm%u", targets[i]);
-      else
-         snprintf(target, sizeof(target), "sm%u.%s", targets[i], label);
-      digest(LLVMGetBufferStart(input), LLVMGetBufferSize(input), input_hash);
-      digest(bin->code, bin->code_size, code_hash);
-      probe_compiled("air-nak", target, bin->code_size);
-      printf("STELA_AIR_NVIDIA_OUTPUT {\"target\":\"%s\",\"entry\":\"kernel\","
-             "\"input_blake3\":\"%s\",\"code_blake3\":\"%s\",\"workgroup\":[32,1,1],"
-             "\"buffer_index\":7,\"fixture_va\":1048576,\"hardware_executed\":false}\n",
-             target, input_hash, code_hash);
-      printf("AIR %s->LLVM->NIR->NAK SM%u: %u bytes, %u instructions\n", label, targets[i], bin->code_size, bin->info.num_instrs);
+      CHECK(bin->info.sm == sm && bin->info.stage == MESA_SHADER_COMPUTE);
+      nak_target_name(target, sm, label);
+      const uint32_t workgroup[] = {32, 1, 1};
+      record_compiled(target, bin->code_size);
+      record_object("facts");
+      record_str("entry", "kernel");
+      record_blake3("input_blake3", LLVMGetBufferStart(input), LLVMGetBufferSize(input));
+      record_blake3("code_blake3", bin->code, bin->code_size);
+      record_uints("workgroup", workgroup, ARRAY_SIZE(workgroup));
+      record_uint("buffer_index", 7);
+      record_uint("fixture_va", 0x100000);
+      record_end();
+      printf("AIR %s->LLVM->NIR->NAK SM%u: %u bytes, %u instructions\n", label, sm, bin->code_size, bin->info.num_instrs);
       if (bin->asm_str)
          puts(bin->asm_str);
       nak_shader_bin_destroy(bin);

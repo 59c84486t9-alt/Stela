@@ -12,8 +12,8 @@
 #include "intel/compiler/elk/elk_nir.h"
 #include "intel/dev/intel_debug.h"
 #include "stela/tests/intel_probe.h"
+#include "stela/tests/targets/intel.h"
 #include "threadgroup_bits.h"
-#include "util/mesa-blake3.h"
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdarg.h>
@@ -286,29 +286,58 @@ static void check_plan(const struct brw_compiler *brw, const struct elk_compiler
     }
     assert(native_slm == encoded && native_barrier == 1);
     assert(words[0] == UINT32_C(0xa5a5a5a5) && words[commands.used] == UINT32_C(0xa5a5a5a5));
-    blake3_hash digest; char hex[BLAKE3_OUT_LEN * 2 + 1];
-    _mesa_blake3_compute(code, bytes, digest); _mesa_blake3_format(hex, digest);
-    printf("STELA_INTEL_THREADGROUP_OUTPUT {\"target\":\"%s\",\"entry\":\"%s\",\"pci_id\":%u,"
-           "\"workgroup\":%u,\"shared_bytes\":%u,\"slm_limit\":%u,\"allocated_slm\":%u,"
-           "\"slm_encoding\":%u,\"preferred_slm_encoding\":%u,\"barrier_encoding\":%u,"
-           "\"simd\":%u,\"threads\":%u,\"curbe_bytes\":%u,\"ssbo_count\":1,"
-           "\"metal_buffer_index\":7,\"dynamic_threadgroup_index\":%d,\"extra_variable_slm\":0,"
-           "\"shared_loads\":%u,\"shared_stores\":%u,\"fences\":%u,\"barriers\":%u,"
-           "\"waits\":%u,\"code_bytes\":%u,\"code_blake3\":\"%s\",\"hardware_executed\":false}\n",
-           target, entry, dev->pci_device_id, specialization->workgroup, shared,
-           intel_device_info_get_max_slm_size(dev), allocated, native_slm, preferred, native_barrier,
-           dispatch.simd_size, dispatch.threads, push_bytes,
-           specialization->dynamic_index == UINT32_MAX ? -1 : (int)specialization->dynamic_index,
-           stats->loads, stats->stores, stats->fences,
-           stats->barriers, stats->waits, bytes, hex);
+    record_compiled(target, bytes);
+    record_object("facts");
+    record_str("entry", entry);
+    record_uint("pci_id", dev->pci_device_id);
+    record_uint("workgroup", specialization->workgroup);
+    record_uint("shared_bytes", shared);
+    record_uint("slm_limit", intel_device_info_get_max_slm_size(dev));
+    record_uint("allocated_slm", allocated);
+    record_uint("slm_encoding", native_slm);
+    record_uint("preferred_slm_encoding", preferred);
+    record_uint("barrier_encoding", native_barrier);
+    record_uint("simd", dispatch.simd_size);
+    record_uint("threads", dispatch.threads);
+    record_uint("curbe_bytes", push_bytes);
+    record_uint("ssbo_count", 1);
+    record_uint("metal_buffer_index", 7);
+    record_int("dynamic_threadgroup_index",
+               specialization->dynamic_index == UINT32_MAX ? -1 : (int)specialization->dynamic_index);
+    record_uint("extra_variable_slm", 0);
+    record_uint("shared_loads", stats->loads);
+    record_uint("shared_stores", stats->stores);
+    record_uint("fences", stats->fences);
+    record_uint("barriers", stats->barriers);
+    record_uint("waits", stats->waits);
+    record_blake3("code_blake3", code, bytes);
+    record_end();
 }
 
-static void compile(const char *target, bool use_elk, LLVMMemoryBufferRef input,
+/* Exercise the producer's actual Gen35 refusal before any compilation; no
+ * shader metadata is represented as a compiled Gen35 program. */
+static void held(const char *target, const struct intel_device_info *dev)
+{
+    struct isl_device isl = {0}; isl_device_init(&isl, dev);
+    void *context = ralloc_context(NULL);
+    struct brw_compiler *compiler = brw_compiler_create(context, dev);
+    const struct brw_cs_prog_data uncompiled = {0};
+    const struct shader_info shader = {.stage = MESA_SHADER_COMPUTE};
+    const struct stela_intel_compute_placement placement = {0};
+    const uint32_t groups[] = {1, 1, 1};
+    struct stela_intel_compute_plan plan, before;
+    memset(&before, 0xa5, sizeof(before)); plan = before;
+    assert(stela_intel_compute_plan(compiler, &isl, &uncompiled, &shader,
+                                    &placement, groups, 0, &plan) == -95);
+    assert(!memcmp(&plan, &before, sizeof(plan)));
+    ralloc_free(context);
+    record_held(target, stela_intel_hold(dev));
+}
+
+static void compile(const char *target, const struct intel_device_info *device, LLVMMemoryBufferRef input,
                      const char *entry, const struct binding *specialization)
 {
-    struct intel_device_info dev;
-    int pci = intel_device_name_to_pci_device_id(target);
-    assert(pci >= 0 && intel_get_device_info_for_build(pci, &dev));
+    const struct intel_device_info dev = *device; const bool use_elk = stela_intel_elk(&dev);
     struct isl_device isl = {0}; isl_device_init(&isl, &dev);
     void *context = ralloc_context(NULL);
     struct brw_compiler *brw = use_elk ? NULL : brw_compiler_create(context, &dev);
@@ -385,30 +414,13 @@ int main(int argc, char **argv)
     const char *entry = NULL;
     LLVMMemoryBufferRef input = stela_intel_air_probe_input(5, argv, &entry);
     if (!input) return 2;
+    struct intel_device_info device; const char *platform;
+    STELA_INTEL_FOREACH_TARGET(platform, device) record_expect(platform, stela_intel_hold(&device));
     process_intel_debug_variable(); glsl_type_singleton_init_or_ref();
-    const char *targets[] = {"ivb", "byt", "hsw", "bdw", "chv", "skl", "bxt", "kbl", "glk",
-        "icl", "ehl", "tgl", "rkl", "dg1", "adl", "dg2", "mtl", "arl", "lnl", "bmg", "ptl", "nvl-u"};
-    for (unsigned i = 0; i < ARRAY_SIZE(targets); ++i) compile(targets[i], i < 5, input, entry, &b);
-    /* Exercise the producer's actual Gen35 refusal before any compilation;
-     * no shader metadata below is represented as a compiled Gen35 program. */
-    struct intel_device_info held;
-    int pci = intel_device_name_to_pci_device_id("nvl");
-    assert(pci >= 0 && intel_get_device_info_for_build(pci, &held) && held.verx10 == 350);
-    struct isl_device held_isl = {0}; isl_device_init(&held_isl, &held);
-    void *context = ralloc_context(NULL);
-    struct brw_compiler *compiler = brw_compiler_create(context, &held);
-    const struct brw_cs_prog_data uncompiled = {0};
-    const struct shader_info shader = {.stage = MESA_SHADER_COMPUTE};
-    const struct stela_intel_compute_placement placement = {0};
-    const uint32_t groups[] = {1, 1, 1};
-    struct stela_intel_compute_plan plan, before;
-    memset(&before, 0xa5, sizeof(before)); plan = before;
-    assert(stela_intel_compute_plan(compiler, &held_isl, &uncompiled, &shader,
-                                    &placement, groups, 0, &plan) == -95);
-    assert(!memcmp(&plan, &before, sizeof(plan)));
-    ralloc_free(context);
-    printf("STELA_INTEL_THREADGROUP_UNSUPPORTED {\"target\":\"nvl\",\"entry\":\"%s\","
-           "\"reason\":\"gfx35-dispatch-lane-mask-unqualified\",\"hardware_executed\":false}\n", entry);
+    STELA_INTEL_FOREACH_TARGET(platform, device) {
+        if (stela_intel_hold(&device)) held(platform, &device);
+        else compile(platform, &device, input, entry, &b);
+    }
     glsl_type_singleton_decref(); LLVMDisposeMemoryBuffer(input);
     return 0;
 }

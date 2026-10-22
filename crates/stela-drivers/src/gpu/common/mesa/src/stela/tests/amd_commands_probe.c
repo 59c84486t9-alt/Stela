@@ -3,6 +3,7 @@
 #include "amd/common/ac_cmdbuf.h"
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/sid.h"
+#include "targets/amd.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -334,28 +335,15 @@ check_preamble_and_limits(void)
 int
 main(void)
 {
-   const struct {
-      enum amd_gfx_level level;
-      enum radeon_family family;
-      bool graphics;
-   } targets[] = {
-      {GFX6, CHIP_TAHITI, true}, {GFX7, CHIP_BONAIRE, true},
-      {GFX8, CHIP_CARRIZO, true}, {GFX9, CHIP_RAVEN, true},
-      {GFX9, CHIP_MI100, false}, {GFX9, CHIP_MI200, false}, {GFX9, CHIP_GFX940, false},
-      {GFX10, CHIP_NAVI10, true}, {GFX10_3, CHIP_REMBRANDT, true},
-      {GFX11, CHIP_NAVI31, true}, {GFX11_5, CHIP_STRIX1, true},
-      {GFX11_7, CHIP_GFX1170, true}, {GFX12, CHIP_GFX1200, true},
-      {GFX12_1, CHIP_GFX1210, true},
-   };
    const uint32_t masks[] = {0x00f3, UINT32_MAX};
-   for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+      const enum radeon_family family = stela_amd_targets[i];
+      const enum amd_gfx_level level = ac_get_gfx_level(family);
+      const bool graphics = stela_amd_has_graphics(family);
       for (unsigned m = 0; m < ARRAY_SIZE(masks); m++) {
-         if (!check_target(targets[i].level, targets[i].family, targets[i].graphics,
-                           false, masks[m]))
+         if (!check_target(level, family, graphics, false, masks[m]))
             return 1;
-         if (targets[i].level >= GFX11 &&
-             !check_target(targets[i].level, targets[i].family, targets[i].graphics,
-                           true, masks[m]))
+         if (level >= GFX11 && !check_target(level, family, graphics, true, masks[m]))
             return 1;
       }
    }

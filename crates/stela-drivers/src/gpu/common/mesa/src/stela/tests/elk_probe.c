@@ -6,6 +6,7 @@
 #include "intel/dev/intel_device_info.h"
 #include "intel/dev/intel_debug.h"
 #include "probe_report.h"
+#include "targets/intel.h"
 #include "util/ralloc.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -52,14 +53,11 @@ compiler_log(void *data, unsigned *id, const char *format, ...)
 }
 
 static int
-compile_store(const char *platform)
+compile_store(const char *platform, const struct intel_device_info *device)
 {
-   struct intel_device_info device;
-   int pci_id = intel_device_name_to_pci_device_id(platform);
-   if (pci_id < 0 || !intel_get_device_info_for_build(pci_id, &device))
-      return 1;
+   const int pci_id = device->pci_device_id;
    void *context = ralloc_context(NULL);
-   struct elk_compiler *compiler = elk_compiler_create(context, &device);
+   struct elk_compiler *compiler = elk_compiler_create(context, device);
    compiler->shader_debug_log = compiler_log;
    compiler->shader_perf_log = compiler_log;
    nir_builder b = nir_builder_init_simple_shader(
@@ -80,7 +78,7 @@ compile_store(const char *platform)
    struct elk_cs_prog_data data = {0};
    b.shader->info.min_subgroup_size = 16;
    b.shader->info.max_subgroup_size = 16;
-   elk_nir_lower_cs_intrinsics(b.shader, &device, &data);
+   elk_nir_lower_cs_intrinsics(b.shader, device, &data);
    nir_validate_shader(b.shader, "Stela ELK codegen probe");
    struct elk_compile_cs_params parameters = {
       .base = {.mem_ctx = context, .nir = b.shader},
@@ -93,7 +91,8 @@ compile_store(const char *platform)
    if (valid)
       valid = validate_code(&compiler->isa, code, data.base.program_size, &sends);
    if (valid) {
-      probe_compiled("elk", platform, data.base.program_size);
+      record_compiled(platform, data.base.program_size);
+      record_end();
       printf("%s, PCI %04x: %u bytes, %u sends, validated\n", platform,
              pci_id, data.base.program_size, sends);
    } else {
@@ -108,12 +107,19 @@ compile_store(const char *platform)
 int
 main(void)
 {
-   const char *platforms[] = {"ivb", "byt", "hsw", "bdw", "chv"};
+   const char *platform;
+   struct intel_device_info device;
+   STELA_INTEL_FOREACH_TARGET(platform, device) {
+      if (stela_intel_elk(&device))
+         record_expect(platform, NULL);
+   }
    process_intel_debug_variable();
    glsl_type_singleton_init_or_ref();
    int failed = 0;
-   for (unsigned i = 0; i < ARRAY_SIZE(platforms); i++)
-      failed |= compile_store(platforms[i]);
+   STELA_INTEL_FOREACH_TARGET(platform, device) {
+      if (stela_intel_elk(&device))
+         failed |= compile_store(platform, &device);
+   }
    glsl_type_singleton_decref();
    return failed;
 }

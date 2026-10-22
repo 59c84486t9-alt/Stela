@@ -16,33 +16,12 @@
 #include "clc6c0qmd.h"
 #include "clcbc0qmd.h"
 #include "clcdc0qmd.h"
+#include "targets/nvidia.h"
 #include "util/ralloc.h"
 
 #define CHECK(condition) do { if (!(condition)) { \
    fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #condition); exit(1); \
 } } while (0)
-
-/* Static compiler targets only. These mirror the existing Nouveau occupancy
- * table; production must use discovered physical-device capabilities instead.
- */
-static struct nv_device_info
-fixture_device(unsigned sm, unsigned cls)
-{
-   struct nv_device_info dev = {.sm = sm, .cls_compute = cls};
-   const uint16_t ampere[] = {0, 8, 16, 32, 64, 100, 132, 164, 196, 228};
-   if (sm == 75) {
-      dev.max_warps_per_mp = 32;
-      dev.sm_smem_size_count = 2;
-      dev.sm_smem_sizes_kB[0] = 32;
-      dev.sm_smem_sizes_kB[1] = 64;
-   } else {
-      dev.max_warps_per_mp = sm == 86 || sm == 87 || sm == 89 || sm == 120 ? 48 : 64;
-      dev.sm_smem_size_count = sm == 80 || sm == 87 ? 8 : sm >= 90 && sm < 120 ? 10 : 6;
-      memcpy(dev.sm_smem_sizes_kB, ampere, dev.sm_smem_size_count * sizeof(ampere[0]));
-   }
-   dev.max_smem_per_wg_kB = dev.sm_smem_sizes_kB[dev.sm_smem_size_count - 1];
-   return dev;
-}
 
 static nir_def *
 bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
@@ -228,7 +207,7 @@ refusals(const struct nv_device_info *dev, const struct nak_shader_bin *shader,
 static void
 compile_and_encode(LLVMMemoryBufferRef bitcode, unsigned sm, unsigned cls)
 {
-   struct nv_device_info dev = fixture_device(sm, cls);
+   struct nv_device_info dev = stela_nv_target_device(sm, cls);
    struct nak_compiler *compiler = nak_compiler_create(&dev);
    CHECK(compiler);
    const struct stela_air_options options = {
@@ -273,15 +252,11 @@ main(void)
 {
    glsl_type_singleton_init_or_ref();
    LLVMMemoryBufferRef bitcode = stela_air_test_bitcode(stela_air_test_store_body, "");
-   compile_and_encode(bitcode, 75, TURING_COMPUTE_A);
-   compile_and_encode(bitcode, 80, AMPERE_COMPUTE_A);
-   compile_and_encode(bitcode, 86, AMPERE_COMPUTE_B);
-   compile_and_encode(bitcode, 87, AMPERE_COMPUTE_B);
-   compile_and_encode(bitcode, 89, ADA_COMPUTE_A);
-   compile_and_encode(bitcode, 90, HOPPER_COMPUTE_A);
-   compile_and_encode(bitcode, 100, BLACKWELL_COMPUTE_A);
-   compile_and_encode(bitcode, 104, BLACKWELL_COMPUTE_A);
-   compile_and_encode(bitcode, 120, BLACKWELL_COMPUTE_B);
+   static const struct {
+      unsigned sm, compute_class;
+   } targets[] = {STELA_NV_TARGETS(STELA_NV_TARGET)};
+   for (unsigned i = 0; i < ARRAY_SIZE(targets); i++)
+      compile_and_encode(bitcode, targets[i].sm, targets[i].compute_class);
    LLVMDisposeMemoryBuffer(bitcode);
    glsl_type_singleton_decref();
    return 0;

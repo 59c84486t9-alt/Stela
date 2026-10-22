@@ -2170,6 +2170,7 @@ dependencies = [
  "libc",
  "object",
  "plist",
+ "serde",
  "serde_json",
  "sha1",
  "sha2",

@@ -1,11 +1,12 @@
 /* SPDX-License-Identifier: MIT */
-/* Offline AIR -> shared NIR -> retained Mesa AMD LLVM compiler.
- * The shader ABI is explicit; no device initialization/execution is claimed.
+/* Offline AIR -> shared NIR -> retained Mesa AMD LLVM compiler, for the
+ * families original ACO refuses. The shader ABI is explicit; no device
+ * initialization/execution is claimed.
  */
 #include "air_to_nir.h"
-#include "stela/tests/air_probe_profile.h"
+#include "stela/tests/air_probe.h"
 #include "stela/tests/air_test_fixture.h"
-#include "stela/tests/probe_report.h"
+#include "stela/tests/targets/amd.h"
 #include "amd/llvm/ac_llvm_build.h"
 #include "amd/llvm/ac_nir_to_llvm.h"
 #include "amd/llvm/ac_shader_abi.h"
@@ -15,7 +16,6 @@
 #include "amd/common/nir/ac_nir.h"
 #include "amd/common/sid.h"
 #include "../hosted/llvm_float.h"
-#include "util/mesa-blake3.h"
 #include "util/ralloc.h"
 #include <llvm-c/Analysis.h>
 #include <llvm-c/Disassembler.h>
@@ -31,6 +31,12 @@ struct binding {
    struct ac_arg buffer;
    unsigned count;
    unsigned argument;
+};
+
+/* Global accesses the shared NIR keeps, reported with the emitted code. */
+struct memory {
+   unsigned loads;
+   unsigned stores;
 };
 
 static nir_def *
@@ -71,19 +77,12 @@ verify_module(LLVMModuleRef module)
    return ok;
 }
 
-static void
-hash_bytes(const void *data, size_t size, char text[BLAKE3_HEX_LEN])
-{
-   blake3_hash hash;
-   _mesa_blake3_compute(data, size, hash);
-   _mesa_blake3_format(text, hash);
-}
-
 static bool
 inspect_binary(const char *elf, size_t size, const char *target,
-                const char *processor, const char *input_hash, const char *entry,
-                unsigned argument, const struct ac_compiler_info *info,
-                const char *triple, const nir_shader *shader)
+               const char *processor, const char *input_hash, const char *entry,
+               unsigned argument, const struct memory *memory_access,
+               const struct ac_compiler_info *info, const char *triple,
+               const nir_shader *shader)
 {
    /* Validate the emitted container independently of target-machine creation.
     * e_machine=224 is the ELF AMDGPU identifier, not an instruction encoding. */
@@ -106,7 +105,7 @@ inspect_binary(const char *elf, size_t size, const char *target,
    size_t text_size = 0;
    bool config_found = false;
    struct ac_shader_config config = {0};
-   char code_hash[BLAKE3_HEX_LEN] = {0}, elf_hash[BLAKE3_HEX_LEN];
+   char code_hash[BLAKE3_HEX_LEN] = {0};
    while (section && !LLVMObjectFileIsSectionIteratorAtEnd(binary, section)) {
       LLVMRelocationIteratorRef relocation = LLVMGetRelocations(section);
       CHECK(!relocation || LLVMIsRelocationIteratorAtEnd(section, relocation));
@@ -119,7 +118,7 @@ inspect_binary(const char *elf, size_t size, const char *target,
          CHECK(text_size && text_size <= size);
          const char *contents = LLVMGetSectionContents(section);
          CHECK(contents);
-         hash_bytes(contents, text_size, code_hash);
+         stela_digest(contents, text_size, code_hash);
          LLVMDisasmContextRef disasm =
             LLVMCreateDisasmCPU(triple, processor, NULL, 0, NULL, NULL);
          CHECK(disasm);
@@ -152,28 +151,43 @@ inspect_binary(const char *elf, size_t size, const char *target,
    CHECK(stela_amd_llvm_restore_float_controls(shader, &config) == STELA_AMD_LLVM_FLOAT_OK);
    if (section)
       LLVMDisposeSectionIterator(section);
-   hash_bytes(elf, size, elf_hash);
-   probe_compiled("air-amd-llvm", target, text_size);
-   printf("STELA_AIR_BINARY {\"backend\":\"amd-llvm\",\"entry\":");
-   json_string(entry);
-   printf(",\"target\":\"%s\","
-          "\"processor\":\"%s\",\"wave_size\":64,\"workgroup_size\":[32,1,1],"
-          "\"input_blake3\":\"%s\",\"elf_bytes\":%zu,\"elf_blake3\":\"%s\","
-          "\"code_bytes\":%zu,\"code_blake3\":\"%s\",\"elf_machine\":224,"
-          "\"elf_flags\":%u,\"buffer_argument\":%u,\"metal_buffer_index\":7,"
-          "\"buffer_abi\":\"device_va_integer_user_sgpr0_1\","
-          "\"calling_convention\":\"amdgpu_cs\",\"llvm_ir_verified\":true,"
-          "\"dispatch_config_finalized\":false,"
-          "\"config_parser\":\"ac_parse_llvm_binary_config\",\"sgprs\":%u,\"vgprs\":%u,"
-          "\"scratch_bytes_per_wave\":%u,\"spilled_sgprs\":%u,\"spilled_vgprs\":%u,"
-          "\"rsrc1\":%u,\"rsrc2\":%u,\"rsrc3\":%u,\"float_mode\":%u,"
-          "\"nir_float_controls\":%u,\"raw_float_mode\":%u,\"parsed_float_mode\":%u,"
-          "\"float_controls_finalizer\":\"stela_amd_llvm_restore_float_controls\"}\n",
-          target, processor, input_hash, size, elf_hash, text_size, code_hash, flags, argument,
-          config.num_sgprs, config.num_vgprs, config.scratch_bytes_per_wave,
-          config.spilled_sgprs, config.spilled_vgprs, config.rsrc1, config.rsrc2,
-          config.rsrc3, config.float_mode, shader->info.float_controls_execution_mode,
-          G_00B848_FLOAT_MODE(config.rsrc1), parsed_float_mode);
+   const uint32_t workgroup[] = {32, 1, 1};
+   record_compiled(target, text_size);
+   record_object("facts");
+   record_str("entry", entry);
+   record_str("processor", processor);
+   record_uint("wave_size", 64);
+   record_uints("workgroup_size", workgroup, ARRAY_SIZE(workgroup));
+   record_str("input_blake3", input_hash);
+   record_uint("global_loads", memory_access->loads);
+   record_uint("global_stores", memory_access->stores);
+   record_uint("elf_bytes", size);
+   record_blake3("elf_blake3", elf, size);
+   record_uint("code_bytes", text_size);
+   record_str("code_blake3", code_hash);
+   record_uint("elf_machine", 224);
+   record_uint("elf_flags", flags);
+   record_uint("buffer_argument", argument);
+   record_uint("metal_buffer_index", 7);
+   record_str("buffer_abi", "device_va_integer_user_sgpr0_1");
+   record_str("calling_convention", "amdgpu_cs");
+   record_bool("llvm_ir_verified", true);
+   record_bool("dispatch_config_finalized", false);
+   record_str("config_parser", "ac_parse_llvm_binary_config");
+   record_uint("sgprs", config.num_sgprs);
+   record_uint("vgprs", config.num_vgprs);
+   record_uint("scratch_bytes_per_wave", config.scratch_bytes_per_wave);
+   record_uint("spilled_sgprs", config.spilled_sgprs);
+   record_uint("spilled_vgprs", config.spilled_vgprs);
+   record_uint("rsrc1", config.rsrc1);
+   record_uint("rsrc2", config.rsrc2);
+   record_uint("rsrc3", config.rsrc3);
+   record_uint("float_mode", config.float_mode);
+   record_uint("nir_float_controls", shader->info.float_controls_execution_mode);
+   record_uint("raw_float_mode", G_00B848_FLOAT_MODE(config.rsrc1));
+   record_uint("parsed_float_mode", parsed_float_mode);
+   record_str("float_controls_finalizer", "stela_amd_llvm_restore_float_controls");
+   record_end();
    LLVMDisposeBinary(binary);
    LLVMDisposeMemoryBuffer(memory);
    return true;
@@ -181,14 +195,14 @@ inspect_binary(const char *elf, size_t size, const char *target,
 
 static bool
 compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_hash,
-                enum radeon_family family, bool file,
-                enum stela_air_fp_profile fp_profile)
+               enum radeon_family family, bool file,
+               enum stela_air_fp_profile fp_profile)
 {
-   char target[64];
-   snprintf(target, sizeof(target), "%s.wave64", ac_get_family_name(family));
+   char target[32];
+   stela_amd_target_name(target, family, 64);
    const char *processor = ac_get_llvm_processor_name(family);
    if (!*processor) {
-      probe_unsupported("air-amd-llvm", target, "retained-llvm-processor-name-unavailable");
+      record_held(target, STELA_HOLD_AMD_LLVM_PROCESSOR);
       return true;
    }
    struct radeon_info gpu = {.gfx_level = ac_get_gfx_level(family), .family = family};
@@ -218,9 +232,9 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
       return false;
    }
    CHECK(binding.count == 1 && error.kind == STELA_AIR_OK);
-   printf("STELA_AIR_ENVIRONMENT {\"backend\":\"air-amd-llvm\",\"target\":\"%s\",\"fp_profile\":%u,\"nir_float_controls\":%u}\n",
-          target, (unsigned)fp_profile, shader->info.float_controls_execution_mode);
-   unsigned loads = 0, stores = 0;
+   stela_air_probe_environment_record(target, fp_profile,
+                                      shader->info.float_controls_execution_mode);
+   struct memory memory = {0};
    nir_foreach_function_impl(impl, shader) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
@@ -229,20 +243,17 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
             nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
             if (intrinsic->intrinsic == nir_intrinsic_load_global) {
                CHECK(!nir_src_is_const(intrinsic->src[0]));
-               loads++;
+               memory.loads++;
             } else if (intrinsic->intrinsic == nir_intrinsic_store_global) {
                CHECK(!nir_src_is_const(intrinsic->src[1]));
                if (!file)
                   CHECK(!nir_src_is_const(intrinsic->src[0]));
-               stores++;
+               memory.stores++;
             }
          }
       }
    }
-   CHECK(file ? loads + stores > 0 : loads == 1 && stores == 1);
-   printf("STELA_AIR_MEMORY {\"backend\":\"amd-llvm\",\"input_blake3\":\"%s\","
-          "\"target\":\"%s\",\"global_loads\":%u,\"global_stores\":%u}\n",
-          input_hash, target, loads, stores);
+   CHECK(file ? memory.loads + memory.stores > 0 : memory.loads == 1 && memory.stores == 1);
    const ac_nir_lower_intrinsics_to_args_options args_options = {
       .gfx_level = gpu.gfx_level, .hw_stage = AC_HW_COMPUTE_SHADER,
       .wave_size = 64, .workgroup_size = 32,
@@ -289,7 +300,8 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
       compiler.beo = ac_create_backend_optimizer(compiler.tm);
       ok = ac_compile_module_to_elf(compiler.beo, llvm.module, &elf, &elf_size) &&
            inspect_binary(elf, elf_size, target, processor, input_hash, entry,
-                           binding.argument, &gpu.compiler_info, LLVMGetTarget(llvm.module), shader);
+                          binding.argument, &memory, &gpu.compiler_info,
+                          LLVMGetTarget(llvm.module), shader);
    }
    free(elf);
    ralloc_free(shader);
@@ -308,7 +320,7 @@ main(int argc, char **argv)
    enum stela_air_fp_profile fp_profile;
    if (!stela_air_probe_profile(&argc, argv, &fp_profile))
       return 2;
-   stela_air_probe_profile_receipt(fp_profile);
+   stela_air_probe_profile_record(fp_profile);
    LLVMMemoryBufferRef input;
    if (argc == 1) {
       input = stela_air_test_bitcode(stela_air_test_store_body, "");
@@ -328,12 +340,20 @@ main(int argc, char **argv)
       LLVMDisposeMemoryBuffer(input);
       return 1;
    }
+   char target[32];
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+      if (stela_amd_aco_hold(stela_amd_targets[i])) {
+         stela_amd_target_name(target, stela_amd_targets[i], 64);
+         record_expect(target, stela_amd_llvm_hold(stela_amd_targets[i]));
+      }
+   }
    ac_init_llvm_once();
    glsl_type_singleton_init_or_ref();
    bool ok = true;
-   const enum radeon_family targets[] = {CHIP_MI100, CHIP_MI200, CHIP_GFX940, CHIP_GFX1210};
-   for (unsigned i = 0; i < ARRAY_SIZE(targets); i++)
-      ok &= compile_target(input, entry, input_hash, targets[i], file, fp_profile);
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+      if (stela_amd_aco_hold(stela_amd_targets[i]))
+         ok &= compile_target(input, entry, input_hash, stela_amd_targets[i], file, fp_profile);
+   }
    LLVMDisposeMemoryBuffer(input);
    glsl_type_singleton_decref();
    return !ok;

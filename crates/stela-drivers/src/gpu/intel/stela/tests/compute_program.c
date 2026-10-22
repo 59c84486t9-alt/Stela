@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "../hosted/compute.h"
 #include "stela/tests/intel_probe.h"
+#include "stela/tests/targets/intel.h"
 #include "intel/common/intel_common.h"
 #include "intel/common/intel_compute_slm.h"
 #include "intel/compiler/brw/brw_nir.h"
@@ -176,11 +177,15 @@ static void compile_program(const char *platform, bool barrier)
 
 int main(void)
 {
-    const char *platforms[] = {"dg2", "mtl", "arl", "lnl", "bmg", "ptl", "nvl-u"};
     glsl_type_singleton_init_or_ref();
-    for (unsigned i = 0; i < ARRAY_SIZE(platforms); ++i) {
-        compile_program(platforms[i], false);
-        compile_program(platforms[i], true);
+    /* The COMPUTE_WALKER producer owns Gfx12.5 onward, except held platforms. */
+    const char *platform;
+    struct intel_device_info info;
+    STELA_INTEL_FOREACH_TARGET(platform, info) {
+        if (info.verx10 < 125 || stela_intel_hold(&info))
+            continue;
+        compile_program(platform, false);
+        compile_program(platform, true);
     }
     glsl_type_singleton_decref();
     return 0;

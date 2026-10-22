@@ -16,6 +16,8 @@
 #include "clc6c0qmd.h"
 #include "clcbc0qmd.h"
 #include "clcdc0qmd.h"
+#include "stela/tests/probe_report.h"
+#include "stela/tests/targets/nvidia.h"
 #include "util/ralloc.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,25 +33,6 @@ struct fixture {
     bool dynamic;
     unsigned device_calls, shared_calls;
 };
-
-/* Same static target facts as existing nvidia_compute_probe.c and the original
- * Nouveau occupancy table. These CPU fixtures never discover/create a device.
- */
-static struct nv_device_info fixture_device(unsigned sm, unsigned cls)
-{
-    struct nv_device_info dev = {.sm = sm, .cls_compute = cls};
-    const uint16_t ampere[] = {0, 8, 16, 32, 64, 100, 132, 164, 196, 228};
-    if (sm == 75) {
-        dev.max_warps_per_mp = 32; dev.sm_smem_size_count = 2;
-        dev.sm_smem_sizes_kB[0] = 32; dev.sm_smem_sizes_kB[1] = 64;
-    } else {
-        dev.max_warps_per_mp = sm == 86 || sm == 87 || sm == 89 || sm == 120 ? 48 : 64;
-        dev.sm_smem_size_count = sm == 80 || sm == 87 ? 8 : sm >= 90 && sm < 120 ? 10 : 6;
-        memcpy(dev.sm_smem_sizes_kB, ampere, dev.sm_smem_size_count * sizeof(ampere[0]));
-    }
-    dev.max_smem_per_wg_kB = dev.sm_smem_sizes_kB[dev.sm_smem_size_count - 1];
-    return dev;
-}
 
 static nir_def *bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
 {
@@ -203,24 +186,35 @@ static void shared_limits(const struct nv_device_info *dev, const struct nak_sha
     }
 }
 
-static FILE *artifact(const char *directory, const char *name, unsigned sm, const char *extension)
+/* A compile target: "<fixture>-sm<N>", also its artifacts' stem. */
+static void target_name(char name[64], const struct fixture *fixture, unsigned sm)
 {
-    char path[1024];
-    const int bytes = snprintf(path, sizeof(path), "%s/%s-sm%u.%s", directory, name, sm, extension);
-    CHECK(bytes > 0 && (size_t)bytes < sizeof(path));
-    FILE *file = fopen(path, "wbx"); CHECK(file); return file;
+    snprintf(name, 64, "%s-sm%u", fixture->name, sm);
 }
 
-static void bytes_artifact(const char *directory, const char *name, unsigned sm,
+static FILE *artifact(const char *directory, const char *target, const char *extension)
+{
+    char name[128], path[1024];
+    int bytes = snprintf(name, sizeof(name), "%s.%s", target, extension);
+    CHECK(bytes > 0 && (size_t)bytes < sizeof(name));
+    bytes = snprintf(path, sizeof(path), "%s/%s", directory, name);
+    CHECK(bytes > 0 && (size_t)bytes < sizeof(path));
+    FILE *file = fopen(path, "wbx"); CHECK(file);
+    record_artifact(name);
+    return file;
+}
+
+static void bytes_artifact(const char *directory, const char *target,
                             const char *extension, const void *bytes, size_t size)
 {
-    FILE *file = artifact(directory, name, sm, extension);
+    FILE *file = artifact(directory, target, extension);
     CHECK(fwrite(bytes, 1, size, file) == size && fclose(file) == 0);
 }
 
 static void compile_fixture(struct fixture *fixture, unsigned sm, unsigned cls, const char *directory)
 {
-    const struct nv_device_info dev = fixture_device(sm, cls);
+    const struct nv_device_info dev = stela_nv_target_device(sm, cls);
+    char target[64]; target_name(target, fixture, sm);
     struct nak_compiler *compiler = nak_compiler_create(&dev); CHECK(compiler);
     const struct stela_air_options options = {
         .workgroup_size = {fixture->threads, 1, 1}, .max_instructions = fixture->budget,
@@ -235,7 +229,7 @@ static void compile_fixture(struct fixture *fixture, unsigned sm, unsigned cls, 
     if (!nir) fprintf(stderr, "%s SM%u: AIR error%u %s\n", fixture->name, sm, error.kind, error.detail);
     CHECK(nir && fixture->device_calls == 1 && fixture->shared_calls == (fixture->dynamic ? 1u : 0u));
     validate_nir(nir, fixture);
-    FILE *file = artifact(directory, fixture->name, sm, "nir");
+    FILE *file = artifact(directory, target, "nir");
     nir_print_shader(nir, file); CHECK(fclose(file) == 0);
     nak_preprocess_nir(nir, compiler);
     struct nak_shader_bin *shader = nak_compile_shader(nir, true, compiler, 0, NULL, false);
@@ -256,15 +250,25 @@ static void compile_fixture(struct fixture *fixture, unsigned sm, unsigned cls, 
     CHECK(stela_nv_compute_encode(&dev, shader, &dispatch, &encoded, &encode_error));
     validate_qmd(&dev, &shader->info, &dispatch, &encoded);
     shared_limits(&dev, shader, &dispatch);
-    bytes_artifact(directory, fixture->name, sm, "code", shader->code, shader->code_size);
-    bytes_artifact(directory, fixture->name, sm, "asm", shader->asm_str, strlen(shader->asm_str));
-    bytes_artifact(directory, fixture->name, sm, "qmd", encoded.qmd, encoded.qmd_size_B);
-    bytes_artifact(directory, fixture->name, sm, "push", encoded.push, encoded.push_dw * sizeof(uint32_t));
+    bytes_artifact(directory, target, "code", shader->code, shader->code_size);
+    bytes_artifact(directory, target, "asm", shader->asm_str, strlen(shader->asm_str));
+    bytes_artifact(directory, target, "qmd", encoded.qmd, encoded.qmd_size_B);
+    bytes_artifact(directory, target, "push", encoded.push, encoded.push_dw * sizeof(uint32_t));
     const struct decoded_shared decoded = decode_shared(&dev, &encoded);
-    printf("%s SM%u class%04x WG%u: NIR/NAK shared%u, CTAbarriers%u, QMD shared%u barriers%u config%u/%u/%u, code%uB QMD%uB launch%uDW; hardware_executed=false\n",
-        fixture->name, sm, cls, fixture->threads, fixture->shared, shader->info.num_control_barriers,
-        decoded.bytes, decoded.barriers, decoded.minimum, decoded.target, decoded.maximum,
-        shader->code_size, encoded.qmd_size_B, encoded.push_dw);
+    record_compiled(target, shader->code_size);
+    record_object("facts");
+    record_str("entry", fixture->entry);
+    record_uint("compute_class", cls);
+    record_uint("workgroup", fixture->threads);
+    record_uint("shared", fixture->shared);
+    record_uint("cta_barriers", shader->info.num_control_barriers);
+    record_uint("qmd_shared", decoded.bytes);
+    record_uint("qmd_barriers", decoded.barriers);
+    const uint32_t config[] = {decoded.minimum, decoded.target, decoded.maximum};
+    record_uints("shared_config", config, ARRAY_SIZE(config));
+    record_uint("qmd_bytes", encoded.qmd_size_B);
+    record_uint("launch_dwords", encoded.push_dw);
+    record_end();
     nak_shader_bin_destroy(shader); ralloc_free(nir); nak_compiler_destroy(compiler);
 }
 
@@ -286,9 +290,12 @@ int main(int argc, char **argv)
         {.name = "synthetic-dynamic", .entry = "kernel", .input = inputs[2],
          .threads = 64, .shared = 256, .device_argument = 1, .shared_argument = 2, .shared_index = 7, .budget = 1000, .dynamic = true},
     };
-    const unsigned targets[][2] = {{75, TURING_COMPUTE_A}, {80, AMPERE_COMPUTE_A},
-        {86, AMPERE_COMPUTE_B}, {87, AMPERE_COMPUTE_B}, {89, ADA_COMPUTE_A}, {90, HOPPER_COMPUTE_A},
-        {100, BLACKWELL_COMPUTE_A}, {104, BLACKWELL_COMPUTE_A}, {120, BLACKWELL_COMPUTE_B}};
+    const unsigned targets[][2] = {STELA_NV_TARGETS(STELA_NV_TARGET)};
+    for (unsigned f = 0; f < ARRAY_SIZE(fixtures); f++) {
+        for (unsigned t = 0; t < ARRAY_SIZE(targets); t++) {
+            char target[64]; target_name(target, &fixtures[f], targets[t][0]); record_expect(target, NULL);
+        }
+    }
     glsl_type_singleton_init_or_ref();
     for (unsigned f = 0; f < ARRAY_SIZE(fixtures); f++)
         for (unsigned t = 0; t < ARRAY_SIZE(targets); t++)

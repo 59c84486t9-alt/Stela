@@ -2,7 +2,7 @@
 #include "compiler/nir/nir_builder.h"
 #include "intel_probe.h"
 #include "probe_report.h"
-#include "intel/compiler/intel_gfx_ver_enum.h"
+#include "targets/intel.h"
 #include "intel/compiler/brw/brw_compiler.h"
 #include "intel/compiler/brw/brw_nir.h"
 #include "intel/compiler/gen/gen.h"
@@ -22,24 +22,17 @@ compiler_log(void *data, unsigned *id, const char *format, ...)
 
 /* Static compile targets never open a device or initialize physical hardware. */
 static int
-compile_store(const char *platform)
+compile_store(const char *platform, const struct intel_device_info *device)
 {
-   struct intel_device_info device;
-   int pci_id = intel_device_name_to_pci_device_id(platform);
-   if (pci_id < 0 || !intel_get_device_info_for_build(pci_id, &device))
-      return 1;
-   if (device.ver == 35) {
-      /* The imported backend explicitly requires dispatch qualification on
-       * this generation. Preserve that gate; an ISA table is not proof of
-       * shader execution support.
-       */
-      if (gfx_ver_from_devinfo(&device) != XE3P)
-         return 1;
-      probe_unsupported("brw", platform, "requires-dispatch-packing-qualification");
+   const int pci_id = device->pci_device_id;
+   const char *hold = stela_intel_hold(device);
+   if (hold) {
+      /* An ISA table is not proof of shader execution support. */
+      record_held(platform, hold);
       return 0;
    }
    void *context = ralloc_context(NULL);
-   struct brw_compiler *compiler = brw_compiler_create(context, &device);
+   struct brw_compiler *compiler = brw_compiler_create(context, device);
    compiler->shader_debug_log = compiler_log;
    compiler->shader_perf_log = compiler_log;
    nir_builder b = nir_builder_init_simple_shader(
@@ -58,7 +51,7 @@ compile_store(const char *platform)
    struct brw_cs_prog_data data = {0};
    b.shader->info.min_subgroup_size = 16;
    b.shader->info.max_subgroup_size = 16;
-   brw_nir_lower_cs_intrinsics(b.shader, &device, &data);
+   brw_nir_lower_cs_intrinsics(b.shader, device, &data);
    nir_validate_shader(b.shader, "Stela BRW codegen probe");
    struct brw_compile_cs_params parameters = {
       .base = {
@@ -72,15 +65,16 @@ compile_store(const char *platform)
    int failed = !code || !data.base.program_size || parameters.base.error_str;
    unsigned sends = 0;
    if (!failed)
-      failed = !validate_intel_code(&device, context, code,
+      failed = !validate_intel_code(device, context, code,
                                     data.base.program_size, platform, &sends);
    if (failed)
       fprintf(stderr, "%s codegen failed: %s\n", platform,
               parameters.base.error_str ? parameters.base.error_str : "no code");
    else {
-      probe_compiled("brw", platform, data.base.program_size);
+      record_compiled(platform, data.base.program_size);
+      record_end();
       printf("%s, PCI %04x, ver %u.%u: %u bytes, %u sends, validated\n",
-             platform, pci_id, device.ver, device.verx10 % 10,
+             platform, pci_id, device->ver, device->verx10 % 10,
              data.base.program_size, sends);
    }
    ralloc_free(b.shader);
@@ -91,19 +85,22 @@ compile_store(const char *platform)
 int
 main(void)
 {
-   struct intel_device_info unsupported;
-   if (intel_get_device_info_for_build(0, &unsupported)) {
+   struct intel_device_info device;
+   if (intel_get_device_info_for_build(0, &device)) {
       fprintf(stderr, "an unknown PCI ID was accepted as a compile target\n");
       return 1;
    }
-   const char *platforms[] = {
-      "skl", "bxt", "kbl", "glk", "icl", "ehl", "tgl", "rkl", "dg1",
-      "adl", "dg2", "mtl", "arl", "lnl", "bmg", "ptl", "nvl-u", "nvl",
-   };
+   const char *platform;
+   STELA_INTEL_FOREACH_TARGET(platform, device) {
+      if (!stela_intel_elk(&device))
+         record_expect(platform, stela_intel_hold(&device));
+   }
    glsl_type_singleton_init_or_ref();
    int result = 0;
-   for (unsigned i = 0; i < ARRAY_SIZE(platforms); i++)
-      result |= compile_store(platforms[i]);
+   STELA_INTEL_FOREACH_TARGET(platform, device) {
+      if (!stela_intel_elk(&device))
+         result |= compile_store(platform, &device);
+   }
    glsl_type_singleton_decref();
    return result;
 }

@@ -7,7 +7,8 @@
 #include "amd/common/sid.h"
 #include "amd/compiler/aco_interface.h"
 #include "stela/tests/air_test_fixture.h"
-#include "util/mesa-blake3.h"
+#include "stela/tests/targets/amd.h"
+#include "stela/tests/threadgroup_record.h"
 #include "util/ralloc.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <assert.h>
@@ -207,8 +208,19 @@ register_word(const uint32_t *words, unsigned count, unsigned reg)
    return 0;
 }
 
+/* A fixture's compile target: "<fixture>/<family>.wave<N>". */
+static void owned_target(char name[64], const char *fixture, enum radeon_family family, unsigned wave)
+{
+   snprintf(name, 64, "%s/%s.wave%u", fixture, ac_get_family_name(family), wave);
+}
+static void expect_owned(const char *fixture, enum radeon_family family, unsigned wave)
+{
+   char target[64];
+   owned_target(target, fixture, family, wave);
+   record_expect(target, stela_amd_aco_hold(family));
+}
 static void validate_result(const struct radeon_info *info, struct stela_amd_air_compilation *owner,
-                            const char *label)
+                            const char *fixture)
 {
    const struct stela_amd_compute_binary *binary = stela_amd_air_binary(owner);
    const struct stela_amd_air_provenance *p = stela_amd_air_provenance(owner);
@@ -318,12 +330,20 @@ static void validate_result(const struct radeon_info *info, struct stela_amd_air
       CHECK(stela_amd_build_compute_pipeline(info, &wrong_lds, &code, runtime, count, &pipeline) == STELA_AMD_COMPUTE_UNSUPPORTED &&
          !memcmp(&pipeline, &preserved, sizeof(pipeline)));
    }
-   blake3_hash hash; char code_hash[BLAKE3_HEX_LEN];
-   _mesa_blake3_compute(stela_amd_air_code(owner), binary->code_bytes, hash); _mesa_blake3_format(code_hash, hash);
-   printf("owned-air-aco input=%s target=%s.wave%u buffers=%u code_bytes=%u executable_bytes=%u code_blake3=%s "
-          "sgprs=%u vgprs=%u lds=%u scratch=%u float_mode=%u\n", label, ac_get_family_name(info->family),
-      binary->wave_size, count, binary->code_bytes, binary->executable_bytes, code_hash, binary->config->num_sgprs,
-      binary->config->num_vgprs, binary->config->lds_size, binary->config->scratch_bytes_per_wave, binary->config->float_mode);
+   char target[64];
+   owned_target(target, fixture, info->family, binary->wave_size);
+   record_compiled(target, binary->code_bytes);
+   record_object("facts");
+   record_uint("buffers", count);
+   record_uint("executable_bytes", binary->executable_bytes);
+   record_blake3("code_blake3", stela_amd_air_code(owner), binary->code_bytes);
+   record_uint("sgprs", binary->config->num_sgprs);
+   record_uint("vgprs", binary->config->num_vgprs);
+   record_uint("lds", binary->config->lds_size);
+   record_uint("scratch", binary->config->scratch_bytes_per_wave);
+   record_uint("float_mode", binary->config->float_mode);
+   record_threadgroup(&p->threadgroup, binary->shader->info.shared_size);
+   record_end();
 }
 
 static void text_append(char *text, size_t capacity, const char *format, ...)
@@ -412,16 +432,28 @@ static void failures(struct stela_metal_assembly *library, const struct radeon_i
    CHECK(stela_amd_air_compile(info, library, 0, &valid, &owner, &error) == STELA_AMD_AIR_INVALID && owner == same);
    destroy(&owner);
 }
-static void targets(struct stela_metal_assembly *library, enum stela_air_fp_profile profile, const char *label)
+/* Every manifest target; the owned compiler refuses the families ACO holds. */
+static void targets(struct stela_metal_assembly *library, enum stela_air_fp_profile profile, const char *fixture)
 {
-   const enum radeon_family families[] = {CHIP_TAHITI, CHIP_BONAIRE, CHIP_CARRIZO, CHIP_RAVEN,
-      CHIP_NAVI10, CHIP_REMBRANDT, CHIP_NAVI31, CHIP_STRIX1, CHIP_GFX1170, CHIP_GFX1201};
-   for (unsigned i = 0; i < ARRAY_SIZE(families); i++) {
-      struct radeon_info info = model(families[i], true);
-      for (unsigned wave = info.gfx_level < GFX10 ? 64 : 32; wave <= 64; wave *= 2) {
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+      const enum radeon_family family = stela_amd_targets[i];
+      for (unsigned wave = 64; wave >= stela_amd_min_wave(family); wave /= 2)
+         expect_owned(fixture, family, wave);
+   }
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+      const enum radeon_family family = stela_amd_targets[i];
+      struct radeon_info info = model(family, stela_amd_has_graphics(family));
+      for (unsigned wave = 64; wave >= stela_amd_min_wave(family); wave /= 2) {
          struct stela_amd_air_options opts = options(wave); opts.fp_profile = profile;
+         if (stela_amd_aco_hold(family)) {
+            char target[64];
+            owned_target(target, fixture, family, wave);
+            CHECK(!compile(&info, library, &opts, STELA_AMD_AIR_UNSUPPORTED));
+            record_held(target, stela_amd_aco_hold(family));
+            continue;
+         }
          struct stela_amd_air_compilation *owner = compile(&info, library, &opts, STELA_AMD_AIR_OK);
-         validate_result(&info, owner, label); destroy(&owner);
+         validate_result(&info, owner, fixture); destroy(&owner);
       }
    }
 }
@@ -435,6 +467,7 @@ static void original_tests(void)
    failures(library, &info);
    struct stela_amd_air_options three_d = options(32);
    three_d.workgroup_size[0] = 4; three_d.workgroup_size[1] = 2; three_d.workgroup_size[2] = 3;
+   expect_owned("3d-workgroup", info.family, 32);
    struct stela_amd_air_compilation *specialized = compile(&info, library, &three_d, STELA_AMD_AIR_OK);
    const struct stela_amd_air_provenance *specialization = stela_amd_air_provenance(specialized);
    CHECK(!memcmp(&specialization->options, &three_d, sizeof(three_d)));
@@ -442,6 +475,9 @@ static void original_tests(void)
       CHECK(stela_amd_air_binary(specialized)->shader->info.workgroup_size[axis] == three_d.workgroup_size[axis]);
    validate_result(&info, specialized, "3d-workgroup"); destroy(&specialized);
    struct stela_amd_air_options opts = options(64);
+   expect_owned("eight-buffer", info.family, 64);
+   expect_owned("after-other-owner-destroy", info.family, 64);
+   expect_owned("selected-second-entry", info.family, 64);
    struct stela_amd_air_compilation *owner = compile(&info, library, &opts, STELA_AMD_AIR_OK);
    const struct stela_metal_library_manifest *m = stela_metal_assembly_manifest(library);
    const struct stela_amd_air_provenance *p = stela_amd_air_provenance(owner);
@@ -520,7 +556,9 @@ static void original_tests(void)
    CHECK(!compile(&info, library, &opts, STELA_AMD_AIR_UNSUPPORTED)); stela_metal_assembly_destroy(&library);
    for (unsigned n = 0; n <= 8; n++) {
       air = multibuffer(n); library = fixture(air); LLVMDisposeMemoryBuffer(air);
-      targets(library, STELA_AIR_FP_IEEE_DEFAULT, "generic-buffer-indices");
+      char fixture[32];
+      snprintf(fixture, sizeof(fixture), "buffers-%u", n);
+      targets(library, STELA_AIR_FP_IEEE_DEFAULT, fixture);
       stela_metal_assembly_destroy(&library);
    }
 #ifdef STELA_AMD_AIR_ALLOC_TEST
@@ -536,7 +574,6 @@ static void original_tests(void)
 #endif
    CHECK(!stela_amd_air_binary(NULL) && !stela_amd_air_code(NULL) && !stela_amd_air_provenance(NULL));
    count = UINT32_MAX; CHECK(!stela_amd_air_bindings(NULL, &count) && !count);
-   puts("owned AMD AIR compiler lifetime, multi-buffer, producer and failure tests passed");
 }
 
 static struct bytes read_file(const char *path)
@@ -580,6 +617,7 @@ static void source_input(int argc, char **argv)
    CHECK(stela_metal_assemble_source(&assembly_options, &config, &request, &compiled, &library, &error) == STELA_METAL_ASSEMBLY_OK);
    struct radeon_info info = model(CHIP_NAVI31, true); struct stela_amd_air_options opts = options(32);
    opts.fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
+   expect_owned("original-source-owner", info.family, 32);
    struct stela_amd_air_compilation *owner = compile(&info, library, &opts, STELA_AMD_AIR_OK);
    free(air.data); free(source.data); stela_metal_assembly_destroy(&library);
    const struct stela_amd_air_provenance *p = stela_amd_air_provenance(owner);
@@ -610,51 +648,59 @@ static void threadgroup_input(int argc,char **argv)
     CHECK(stela_air_inspect(air.data,air.size,256,facts,&f,&air_error)&&f.found);
     struct bytes bytes=archive(air.data,air.size,f.name,f.air_minor,f.major,f.minor,f.os_major,f.os_minor);
     struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);free(air.data);
-    const enum radeon_family families[]={CHIP_TAHITI,CHIP_BONAIRE,CHIP_CARRIZO,CHIP_RAVEN,
-        CHIP_NAVI10,CHIP_REMBRANDT,CHIP_NAVI31,CHIP_STRIX1,CHIP_GFX1170,CHIP_GFX1201};
-    for(unsigned i=0;i<ARRAY_SIZE(families);i++) {
-        struct radeon_info info=model(families[i],true);
-        for(unsigned wave=info.gfx_level<GFX10?64:32;wave<=64;wave*=2) {
-            struct stela_amd_air_options opts=options(wave);opts.workgroup_size[0]=(uint32_t)workgroup;
-            struct stela_amd_air_compilation *owner=NULL;struct stela_amd_air_error error;
-            CHECK(stela_amd_air_compile_specialized(&info,library,0,&opts,&request,&owner,&error)==STELA_AMD_AIR_OK&&owner);
-            const struct stela_amd_air_provenance *p=stela_amd_air_provenance(owner);
-        if(i==0) {
-            struct stela_metal_threadgroup_request bad_request=request;
-            struct stela_amd_air_compilation *failed=NULL;
-            bad_request.size--;
-            CHECK(stela_amd_air_compile_specialized(&info,library,0,&opts,&bad_request,&failed,&error)==STELA_AMD_AIR_INVALID&&!failed);
-            bad_request=request;bad_request.count=0;
-            CHECK(stela_amd_air_compile_specialized(&info,library,0,&opts,&bad_request,&failed,&error)==STELA_AMD_AIR_UNSUPPORTED&&!failed);
-            bad_request=request;
-            struct stela_metal_threadgroup_request_row bad_rows[AIR_MAX_ARGUMENTS];memcpy(bad_rows,rows,sizeof(rows));
-            bad_request.rows=bad_rows;bad_rows[0].bytes=0;
-            CHECK(stela_amd_air_compile_specialized(&info,library,0,&opts,&bad_request,&failed,&error)==STELA_AMD_AIR_UNSUPPORTED&&!failed);
-            bad_rows[0].bytes=UINT64_C(0x100000000);
-            CHECK(stela_amd_air_compile_specialized(&info,library,0,&opts,&bad_request,&failed,&error)==STELA_AMD_AIR_LIMIT&&!failed);
-#ifdef STELA_AMD_AIR_ALLOC_TEST
-            unsigned baseline=live_allocations;
-            bad_request=request;
-            for(unsigned fail=1;fail<=(3);fail++) {
-                allocations=0;fail_allocation=fail;
-                CHECK(stela_amd_air_compile_specialized(&info,library,0,&opts,&bad_request,&failed,&error)==STELA_AMD_AIR_ALLOCATION&&!failed&&live_allocations==baseline);
+    for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+        const enum radeon_family family = stela_amd_targets[i];
+        for (unsigned wave = 64; wave >= stela_amd_min_wave(family); wave /= 2)
+            expect_owned("threadgroup", family, wave);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+        const enum radeon_family family = stela_amd_targets[i];
+        struct radeon_info info = model(family, stela_amd_has_graphics(family));
+        for (unsigned wave = 64; wave >= stela_amd_min_wave(family); wave /= 2) {
+            struct stela_amd_air_options opts = options(wave); opts.workgroup_size[0] = (uint32_t)workgroup;
+            struct stela_amd_air_compilation *owner = NULL; struct stela_amd_air_error error;
+            const enum stela_amd_air_status status =
+                stela_amd_air_compile_specialized(&info, library, 0, &opts, &request, &owner, &error);
+            if (stela_amd_aco_hold(family)) {
+                char target[64];
+                owned_target(target, "threadgroup", family, wave);
+                CHECK(status == STELA_AMD_AIR_UNSUPPORTED && !owner);
+                record_held(target, stela_amd_aco_hold(family));
+                continue;
             }
-            fail_allocation=0;
+            CHECK(status == STELA_AMD_AIR_OK && owner);
+            const struct stela_amd_air_provenance *p = stela_amd_air_provenance(owner);
+            if (i == 0) {
+                struct stela_metal_threadgroup_request bad_request = request;
+                struct stela_amd_air_compilation *failed = NULL;
+                bad_request.size--;
+                CHECK(stela_amd_air_compile_specialized(&info, library, 0, &opts, &bad_request, &failed, &error) == STELA_AMD_AIR_INVALID && !failed);
+                bad_request = request; bad_request.count = 0;
+                CHECK(stela_amd_air_compile_specialized(&info, library, 0, &opts, &bad_request, &failed, &error) == STELA_AMD_AIR_UNSUPPORTED && !failed);
+                bad_request = request;
+                struct stela_metal_threadgroup_request_row bad_rows[AIR_MAX_ARGUMENTS]; memcpy(bad_rows, rows, sizeof(rows));
+                bad_request.rows = bad_rows; bad_rows[0].bytes = 0;
+                CHECK(stela_amd_air_compile_specialized(&info, library, 0, &opts, &bad_request, &failed, &error) == STELA_AMD_AIR_UNSUPPORTED && !failed);
+                bad_rows[0].bytes = UINT64_C(0x100000000);
+                CHECK(stela_amd_air_compile_specialized(&info, library, 0, &opts, &bad_request, &failed, &error) == STELA_AMD_AIR_LIMIT && !failed);
+#ifdef STELA_AMD_AIR_ALLOC_TEST
+                unsigned baseline = live_allocations;
+                bad_request = request;
+                for (unsigned fail = 1; fail <= 3; fail++) {
+                    allocations = 0; fail_allocation = fail;
+                    CHECK(stela_amd_air_compile_specialized(&info, library, 0, &opts, &bad_request, &failed, &error) == STELA_AMD_AIR_ALLOCATION && !failed && live_allocations == baseline);
+                }
+                fail_allocation = 0;
 #endif
-        }
-        CHECK(p->threadgroup.count==request.count&&stela_metal_threadgroup_matches(&p->threadgroup,&request));
-        struct stela_metal_threadgroup_request_row saved[AIR_MAX_ARGUMENTS];memcpy(saved,rows,sizeof(rows));
-        rows[0].bytes+=16;CHECK(!stela_metal_threadgroup_matches(&p->threadgroup,&request));
-        memset(rows,0,sizeof(rows));
-        CHECK(p->threadgroup.bindings[0].bytes&&p->threadgroup.bindings[0].alignment>=16);
-        memcpy(rows,saved,sizeof(rows));CHECK(stela_metal_threadgroup_matches(&p->threadgroup,&request));
-        validate_result(&info,owner,"dispatch-threadgroup-specialization");
-        printf("owned-threadgroup-aco target=%s.wave%u count=%u total_shared=%u",ac_get_family_name(info.family),wave,
-            p->threadgroup.count,stela_amd_air_binary(owner)->shader->info.shared_size);
-        for(unsigned r=0;r<p->threadgroup.count;r++)printf(" row=%u:%u:%llu:%u",p->threadgroup.bindings[r].buffer.argument,
-            p->threadgroup.bindings[r].buffer.index,(unsigned long long)p->threadgroup.bindings[r].bytes,p->threadgroup.bindings[r].alignment);
-        puts("");
-        CHECK(stela_metal_threadgroup_matches(&p->threadgroup,&request));destroy(&owner);
+            }
+            CHECK(p->threadgroup.count == request.count && stela_metal_threadgroup_matches(&p->threadgroup, &request));
+            struct stela_metal_threadgroup_request_row saved[AIR_MAX_ARGUMENTS]; memcpy(saved, rows, sizeof(rows));
+            rows[0].bytes += 16; CHECK(!stela_metal_threadgroup_matches(&p->threadgroup, &request));
+            memset(rows, 0, sizeof(rows));
+            CHECK(p->threadgroup.bindings[0].bytes && p->threadgroup.bindings[0].alignment >= 16);
+            memcpy(rows, saved, sizeof(rows)); CHECK(stela_metal_threadgroup_matches(&p->threadgroup, &request));
+            validate_result(&info, owner, "threadgroup");
+            CHECK(stela_metal_threadgroup_matches(&p->threadgroup, &request)); destroy(&owner);
         }
     }
     stela_metal_assembly_destroy(&library);
@@ -667,14 +713,17 @@ static void shared_refusal(int argc, char **argv)
    struct bytes bytes = archive(air.data, air.size, f.name, f.air_minor, f.major, f.minor, f.os_major, f.os_minor);
    struct stela_metal_assembly_options opts = stela_metal_assembly_default_options();
    struct stela_metal_assembly_error error; struct stela_metal_assembly *library = NULL;
+   char target[64];
+   owned_target(target, "shared-refusal", CHIP_NAVI31, 32);
+   record_expect_refusal(target, STELA_REFUSAL_DYNAMIC_THREADGROUP);
    enum stela_metal_assembly_status status = stela_metal_assemble_archive(&opts, bytes.data, bytes.size, &library, &error);
    if (status == STELA_METAL_ASSEMBLY_OK) {
       struct radeon_info info = model(CHIP_NAVI31, true); struct stela_amd_air_options compile_options = options(32);
       CHECK(!compile(&info, library, &compile_options, STELA_AMD_AIR_UNSUPPORTED));
-      puts("shared input explicitly refused: dynamic AS3 dispatch specialization unavailable");
+      record_refused(target, STELA_REFUSAL_DYNAMIC_THREADGROUP);
    } else {
       CHECK(status == STELA_METAL_ASSEMBLY_REFLECTION && !library);
-      puts("shared input explicitly refused: canonical reflection incomplete");
+      record_refused(target, "canonical-reflection-incomplete");
    }
    stela_metal_assembly_destroy(&library); free(bytes.data); free(air.data);
 }

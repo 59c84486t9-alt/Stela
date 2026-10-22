@@ -4,7 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <CommonCrypto/CommonDigest.h>
-#include "util/mesa-blake3.h"
+#include "stela/tests/probe_report.h"
+#include "stela/tests/targets/nvidia.h"
 #include "stela/tests/air_test_fixture.h"
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); exit(1); } } while (0)
@@ -220,19 +221,22 @@ static void assemble_pair(const struct bytes input[2], struct stela_metal_assemb
         CHECK(!stela_metal_assembly_manifest(sources[s]));
     }
 }
-static void digest(const void *data, size_t size)
+/* The render probe's target and artifact naming, which the owned outputs match. */
+static void target_name(char name[64], unsigned sm, unsigned samples, const char *stage)
 {
-    blake3_hash hash; _mesa_blake3_compute(data, size, hash);
-    for (unsigned i = 0; i < sizeof(hash); ++i) printf("%02x", hash[i]);
+    snprintf(name, 64, "sm%u-samples%u-%s", sm, samples, stage);
 }
-static void artifact(const char *directory, unsigned sm, unsigned samples, const char *stage,
-    const char *suffix, const void *data, size_t bytes)
+static void artifact(const char *directory, const char *target, const char *suffix,
+    const void *data, size_t bytes)
 {
     if (!directory) return;
-    char path[1024]; int count = snprintf(path, sizeof(path), "%s/sm%u-samples%u-%s.%s", directory, sm, samples, stage, suffix);
+    char name[128], path[1024]; int count = snprintf(name, sizeof(name), "%s.%s", target, suffix);
+    CHECK(count > 0 && (size_t)count < sizeof(name));
+    count = snprintf(path, sizeof(path), "%s/%s", directory, name);
     CHECK(count > 0 && (size_t)count < sizeof(path));
     FILE *file = fopen(path, "wb"); CHECK(file);
     CHECK(fwrite(data, 1, bytes, file) == bytes && !fclose(file));
+    record_artifact(name);
 }
 static struct stela_nv_render_options render_options(unsigned samples)
 {
@@ -426,15 +430,19 @@ static void packing(const struct stela_nv_render_compilation *result, const stru
 }
 static void owned_tests(const struct bytes *raw, const char *vertex, const char *fragment, const char *output)
 {
-    static const uint8_t sms[] = {75, 80, 86, 87, 89, 90, 100, 104, 120};
-    unsigned outputs = 0;
-    for (unsigned target = 0; target < ARRAY_SIZE(sms); ++target) for (unsigned profile = 0; profile < 2; ++profile) {
-        const unsigned sm = sms[target], samples = profile ? 4u : 1u;
+    for (unsigned target = 0; target < ARRAY_SIZE(stela_nv_sms); ++target) for (unsigned profile = 0; profile < 2; ++profile) {
+        for (unsigned s = 0; s < 2; ++s) {
+            char name[64]; target_name(name, stela_nv_sms[target], profile ? 4u : 1u, s ? "fs" : "vs");
+            record_expect(name, NULL);
+        }
+    }
+    for (unsigned target = 0; target < ARRAY_SIZE(stela_nv_sms); ++target) for (unsigned profile = 0; profile < 2; ++profile) {
+        const unsigned sm = stela_nv_sms[target], samples = profile ? 4u : 1u;
         /* Explicit CPU compiler/class models, never detected GPU facts. No
          * production SM->class inference: every original compiler receives this
          * same actual record, and layout policy independently receives class. */
-        const struct nv_device_info device = {.sm = (uint8_t)sm, .cls_eng3d = TURING_A,
-            .max_warps_per_mp = sm == 75 ? 32 : (sm == 86 || sm == 87 || sm == 89 || sm == 120 ? 48 : 64)};
+        struct nv_device_info device = stela_nv_compiler_device(sm);
+        device.cls_eng3d = TURING_A;
         struct nak_compiler *compiler = nak_compiler_create(&device); CHECK(compiler);
         struct stela_nv_render_options options = render_options(samples);
         struct bytes input[2] = {archive(raw->data, raw->count, vertex, 0), archive(raw->data, raw->count, fragment, 1)};
@@ -461,16 +469,18 @@ static void owned_tests(const struct bytes *raw, const char *vertex, const char 
             CHECK(!memcmp(image->bytes, bin->info.hdr, 128));
             CHECK(!memcmp((const char *)image->bytes + image->code_offset, bin->code, bin->code_size));
             CHECK(stela_nv_render_nir(result, kind)->options == stela_nv_render_nir_options(result));
-            const char *label = s ? "fs" : "vs";
-            artifact(output, sm, samples, label, "code", bin->code, bin->code_size);
-            artifact(output, sm, samples, label, "info", &bin->info, sizeof(bin->info));
-            artifact(output, sm, samples, label, "hdr", bin->info.hdr, sizeof(bin->info.hdr));
-            artifact(output, sm, samples, label, "asm", bin->asm_str, strlen(bin->asm_str));
-            printf("OWNED_RENDER sm%u samples%u %s code=", sm, samples, label); digest(bin->code, bin->code_size);
-            printf(" info="); digest(&bin->info, sizeof(bin->info));
-            printf(" hdr="); digest(bin->info.hdr, sizeof(bin->info.hdr));
-            printf(" asm="); digest(bin->asm_str, strlen(bin->asm_str)); putchar('\n');
-            ++outputs;
+            char name[64]; target_name(name, sm, samples, s ? "fs" : "vs");
+            artifact(output, name, "code", bin->code, bin->code_size);
+            artifact(output, name, "info", &bin->info, sizeof(bin->info));
+            artifact(output, name, "hdr", bin->info.hdr, sizeof(bin->info.hdr));
+            artifact(output, name, "asm", bin->asm_str, strlen(bin->asm_str));
+            record_compiled(name, bin->code_size);
+            record_object("facts");
+            record_blake3("code_blake3", bin->code, bin->code_size);
+            record_blake3("info_blake3", &bin->info, sizeof(bin->info));
+            record_blake3("hdr_blake3", bin->info.hdr, sizeof(bin->info.hdr));
+            record_blake3("asm_blake3", bin->asm_str, strlen(bin->asm_str));
+            record_end();
         }
         packing(result, &device);
         stela_nv_render_destroy(&result); CHECK(!result);
@@ -478,7 +488,6 @@ static void owned_tests(const struct bytes *raw, const char *vertex, const char 
         CHECK(!live_allocations);
 #endif
     }
-    printf("owned_outputs=%u\n", outputs);
 }
 int main(int argc, char **argv)
 {

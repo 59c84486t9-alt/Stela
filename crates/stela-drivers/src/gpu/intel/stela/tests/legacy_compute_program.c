@@ -6,6 +6,7 @@
 #include "intel/common/intel_compute_slm.h"
 #include "intel/dev/intel_debug.h"
 #include "stela/tests/intel_probe.h"
+#include "stela/tests/targets/intel.h"
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdarg.h>
@@ -282,16 +283,19 @@ static void elk(const char *platform, unsigned mode, unsigned width)
 
 int main(void)
 {
-    const char *brw_platforms[] = {"skl", "bxt", "kbl", "glk", "icl", "ehl", "tgl", "rkl", "dg1", "adl"};
-    const char *elk_platforms[] = {"ivb", "byt", "hsw", "bdw", "chv"};
     process_intel_debug_variable();
     glsl_type_singleton_init_or_ref();
-    for (unsigned i = 0; i < ARRAY_SIZE(brw_platforms); ++i)
-        for (unsigned mode = 0; mode < 3; ++mode)
-            for (unsigned width = 8; width <= 32; width *= 2) brw(brw_platforms[i], mode, width);
-    for (unsigned i = 0; i < ARRAY_SIZE(elk_platforms); ++i)
-        for (unsigned mode = 0; mode < 2; ++mode)
-            for (unsigned width = 8; width <= 32; width *= 2) elk(elk_platforms[i], mode, width);
+    /* The legacy producer owns every platform before Gfx12.5's COMPUTE_WALKER. */
+    const char *platform;
+    struct intel_device_info info;
+    STELA_INTEL_FOREACH_TARGET(platform, info) {
+        if (info.verx10 >= 125)
+            continue;
+        const bool use_elk = stela_intel_elk(&info);
+        for (unsigned mode = 0; mode < (use_elk ? 2 : 3); ++mode)
+            for (unsigned width = 8; width <= 32; width *= 2)
+                (use_elk ? elk : brw)(platform, mode, width);
+    }
     glsl_type_singleton_decref();
     return 0;
 }

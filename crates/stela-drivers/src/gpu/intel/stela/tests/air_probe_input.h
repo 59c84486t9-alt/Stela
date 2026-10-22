@@ -2,17 +2,30 @@
 #ifndef STELA_INTEL_AIR_PROBE_INPUT_H
 #define STELA_INTEL_AIR_PROBE_INPUT_H
 
+#include "stela/tests/air_probe.h"
 #include "stela/tests/air_test_fixture.h"
-#include "util/mesa-blake3.h"
+
+static inline void
+stela_intel_air_probe_input_record(bool file, const void *bytes, size_t size, const char *entry)
+{
+   char hex[BLAKE3_HEX_LEN];
+   stela_digest(bytes, size, hex);
+   stela_air_probe_input_record(file, size, hex, entry);
+   record_end();
+}
 
 /* Raw AIR is already selected by the production archive reader. Preserve the
  * original bounded bytes; never rewrite metadata or unwrap another container.
- * Bound entry names to identifiers so output records stay unambiguous JSON. */
+ * Bound entry names to identifiers, as the production entry lookup does. */
 static inline LLVMMemoryBufferRef
 stela_intel_air_probe_input(int argc, char **argv, const char **entry)
 {
-   if (argc == 1)
-      return stela_air_test_bitcode(stela_air_test_store_body, "");
+   if (argc == 1) {
+      LLVMMemoryBufferRef fixture = stela_air_test_bitcode(stela_air_test_store_body, "");
+      stela_intel_air_probe_input_record(false, LLVMGetBufferStart(fixture),
+                                         LLVMGetBufferSize(fixture), *entry);
+      return fixture;
+   }
    if (argc != 5 || strcmp(argv[1], "--input") || strcmp(argv[3], "--entry"))
       return NULL;
    *entry = argv[4];
@@ -40,14 +53,8 @@ stela_intel_air_probe_input(int argc, char **argv, const char **entry)
    fclose(file);
    LLVMMemoryBufferRef input = valid ?
       LLVMCreateMemoryBufferWithMemoryRangeCopy(bytes, size, "unaltered-air-input") : NULL;
-   if (input) {
-      blake3_hash hash;
-      char hex[BLAKE3_OUT_LEN * 2 + 1];
-      _mesa_blake3_compute(bytes, size, hash);
-      _mesa_blake3_format(hex, hash);
-      printf("STELA_AIR_INPUT {\"origin\":\"raw_input_file\",\"bytes\":%zu,"
-             "\"blake3\":\"%s\",\"entry\":\"%s\"}\n", size, hex, *entry);
-   }
+   if (input)
+      stela_intel_air_probe_input_record(true, bytes, size, *entry);
    free(bytes);
    return input;
 }

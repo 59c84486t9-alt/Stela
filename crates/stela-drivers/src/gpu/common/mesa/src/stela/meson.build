@@ -5,6 +5,11 @@
 # Resolve matching Apple LLVM functions dynamically; never link host LLVM here.
 # Stela links unchanged upstream sources and archives whose unused functions
 # reach device and OS services it does not provide; the linker drops them.
+#
+# `cargo xtask gpu compilers` builds every target defined here and runs every
+# test in suite 'stela'. Tests also in 'stela-air-input' compile a raw AIR
+# input given as --input FILE --entry NAME --fp-profile NAME; tests in
+# 'stela-owned-air' accept the owned compilers' threadgroup input modes.
 stela_sections = cc.get_supported_arguments(['-ffunction-sections', '/Gy'])
 stela_dead_strip = cpp.get_supported_link_arguments(
   ['-Wl,-dead_strip', '-Wl,--gc-sections', '/OPT:REF'])
@@ -148,6 +153,8 @@ if stela_air_llvm != ''
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
+    test('stela_air_input_nak', stela_air_input_nak_probe,
+         suite : ['stela', 'stela-air-input'])
   endif
   stela_air_test = executable(
     'stela_air_test',
@@ -204,7 +211,8 @@ if stela_air_llvm != ''
         c_args : ['-Werror'],
         build_rpath : fs.parent(stela_air_llvm),
       )
-      test('stela_air_amd_llvm', stela_air_amd_llvm_probe, suite : 'stela')
+      test('stela_air_amd_llvm', stela_air_amd_llvm_probe,
+           suite : ['stela', 'stela-air-input'])
     endif
     stela_air_aco_probe = executable(
       'stela_air_aco_probe',
@@ -217,7 +225,7 @@ if stela_air_llvm != ''
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
-    test('stela_air_aco', stela_air_aco_probe, suite : 'stela')
+    test('stela_air_aco', stela_air_aco_probe, suite : ['stela', 'stela-air-input'])
     # Original legacy-VS, NGG and PS lowerings for the offline render probe.
     stela_amd_render_lowering = static_library(
       'stela_amd_render_lowering',
@@ -265,7 +273,7 @@ if stela_air_llvm != ''
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
-    test('stela_air_brw', stela_air_brw_probe, suite : 'stela')
+    test('stela_air_brw', stela_air_brw_probe, suite : ['stela', 'stela-air-input'])
     stela_air_elk_probe = executable(
       'stela_air_elk_probe',
       '../../../../intel/stela/tests/air_elk_probe.c',
@@ -276,7 +284,7 @@ if stela_air_llvm != ''
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
-    test('stela_air_elk', stela_air_elk_probe, suite : 'stela')
+    test('stela_air_elk', stela_air_elk_probe, suite : ['stela', 'stela-air-input'])
   endif
 endif
 
@@ -376,7 +384,8 @@ if with_stela_nvidia
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
-    test('stela_nv_air_owned', stela_nv_air_compile_test, suite : 'stela')
+    test('stela_nv_air_owned', stela_nv_air_compile_test,
+         suite : ['stela', 'stela-owned-air'])
     # The test includes render_compile.c itself so it can feed synthetic NIR to
     # the private upload-image path; the second variant denies its allocations.
     foreach variant : [['', []], ['_alloc', ['-DSTELA_NV_RENDER_ALLOC_TEST']]]
@@ -638,7 +647,10 @@ if with_stela_intel
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
-    test('stela_intel_air_owned', stela_intel_air_compile_test, suite : 'stela')
+    test('stela_intel_air_owned', stela_intel_air_compile_test,
+         suite : ['stela', 'stela-owned-air'])
+    test('stela_intel_air_gen7_shared', stela_intel_air_compile_test,
+         args : ['--gen7-shared'], suite : 'stela')
     # Needs the unchanged Apple triangle and the Intel render probe's
     # artifacts; `cargo xtask gpu compilers` runs both variants with them.
     # The test includes air_graphics.c itself; the second variant denies its
@@ -864,7 +876,8 @@ if with_stela_amd
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
     )
-    test('stela_amd_air_owned', stela_amd_air_compile_test, suite : 'stela')
+    test('stela_amd_air_owned', stela_amd_air_compile_test,
+         suite : ['stela', 'stela-owned-air'])
   endif
   if stela_air_llvm != '' and with_stela_amd_llvm
     stela_amd_air_threadgroup_probe = executable(

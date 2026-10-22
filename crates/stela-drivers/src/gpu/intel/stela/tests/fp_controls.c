@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "air_to_nir.h"
 #include "air_probe_input.h"
-#include "stela/tests/air_probe_profile.h"
+#include "stela/tests/air_probe.h"
 #include "../hosted/compute.h"
 #include "../hosted/legacy_compute.h"
 #include "../hosted/fp_controls.h"
@@ -11,7 +11,7 @@
 #include "intel/compiler/elk/elk_nir.h"
 #include "intel/dev/intel_debug.h"
 #include "stela/tests/intel_probe.h"
-#include "util/blake3/blake3.h"
+#include "stela/tests/targets/intel.h"
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdarg.h>
@@ -22,18 +22,6 @@ static void compiler_log(void *data, unsigned *id, const char *format, ...)
 {
     (void)data; (void)id;
     va_list args; va_start(args, format); vfprintf(stderr, format, args); va_end(args);
-}
-
-static void hash(const void *bytes, size_t count, char output[65])
-{
-    blake3_hasher hasher; uint8_t digest[32];
-    blake3_hasher_init(&hasher); blake3_hasher_update(&hasher, bytes, count);
-    blake3_hasher_finalize(&hasher, digest, sizeof(digest));
-    static const char hex[] = "0123456789abcdef";
-    for (unsigned i = 0; i < 32; ++i) {
-        output[2 * i] = hex[digest[i] >> 4]; output[2 * i + 1] = hex[digest[i] & 15];
-    }
-    output[64] = 0;
 }
 
 static uint32_t controls(bool ftz)
@@ -134,9 +122,8 @@ static void check_isa(const struct intel_device_info *device, void *context,
                     preserve += immediate == 0x80;
                 }
                 ++writes;
-                printf("STELA_INTEL_FP_CONTROL {\"target\":\"%s\",\"instruction\":%d,"
-                       "\"op\":\"%s\",\"immediate\":%u,\"exec_size\":%u,"
-                       "\"thread_control\":%u,\"swsb_regdist\":%u}\n", target, i,
+                printf("%s CR0 write at instruction %d: %s 0x%x, exec size %u, "
+                       "thread control %u, SWSB regdist %u\n", target, i,
                        inst->opcode == GEN_OP_AND ? "and" : "or", immediate,
                        inst->exec_size, inst->thread_control, inst->swsb.regdist);
             }
@@ -154,16 +141,22 @@ static void check_isa(const struct intel_device_info *device, void *context,
     }
     assert(stats.clear && stats.writes && stats.floating && (ftz ? !stats.preserve : stats.preserve));
     assert(device->ver < 12 || stats.swsb_syncs);
-    char input_hash[65] = {0}, code_hash[65];
-    if (input) hash(LLVMGetBufferStart(input), LLVMGetBufferSize(input), input_hash);
-    hash(code, bytes, code_hash);
-    printf("STELA_INTEL_FP_OUTPUT {\"target\":\"%s\",\"pci_id\":%u,\"nir_float_controls\":%u,"
-           "\"fp32_ftz\":%u,\"rte\":true,\"cr0_writes\":%u,\"fp_arithmetic\":%u,"
-           "\"conversions\":%u,\"swsb_syncs\":%u,\"code_bytes\":%u,\"code_blake3\":\"%s\","
-           "\"input_kind\":\"%s\",\"input_blake3\":\"%s\",\"entry\":\"%s\","
-           "\"hardware_executed\":false}\n", target, device->pci_device_id, nir_mode,
-           ftz, stats.writes, stats.floating, stats.conversions, stats.swsb_syncs, bytes, code_hash,
-           input ? "raw_input" : "direct_nir_fixture", input_hash, entry);
+    record_compiled(target, bytes);
+    record_object("facts");
+    record_uint("pci_id", device->pci_device_id);
+    record_uint("nir_float_controls", nir_mode);
+    record_bool("fp32_ftz", ftz);
+    record_bool("rte", true);
+    record_uint("cr0_writes", stats.writes);
+    record_uint("fp_arithmetic", stats.floating);
+    record_uint("conversions", stats.conversions);
+    record_uint("swsb_syncs", stats.swsb_syncs);
+    record_blake3("code_blake3", code, bytes);
+    record_str("input_kind", input ? "raw_input" : "direct_nir_fixture");
+    if (input)
+        record_blake3("input_blake3", LLVMGetBufferStart(input), LLVMGetBufferSize(input));
+    record_str("entry", entry);
+    record_end();
 }
 
 static void check_plan(const struct brw_compiler *brw, const struct elk_compiler *elk,
@@ -231,16 +224,38 @@ static void check_plan(const struct brw_compiler *brw, const struct elk_compiler
     }
 }
 
-static void compile(const char *target, bool use_elk, bool ftz, LLVMMemoryBufferRef input,
-                     const char *entry, enum stela_air_fp_profile profile)
+static void target_name(char name[32], const char *platform, bool ftz)
 {
-    struct intel_device_info device;
-    int pci = intel_device_name_to_pci_device_id(target);
-    assert(pci >= 0 && intel_get_device_info_for_build(pci, &device));
-    struct isl_device isl = {0}; isl_device_init(&isl, &device);
+    snprintf(name, 32, "%s.%s", platform, ftz ? "ftz" : "preserve");
+}
+
+/* Stela's FP32 policy refuses denorm preservation before Gen8. */
+static void expect(const char *platform, const struct intel_device_info *device, bool ftz)
+{
+    char target[32];
+    target_name(target, platform, ftz);
+    if (device->ver == 7 && !ftz)
+        record_expect_refusal(target, STELA_REFUSAL_INTEL_GEN7_FP32_PRESERVE);
+    else
+        record_expect(target, stela_intel_hold(device));
+}
+
+static void compile(const char *platform, const struct intel_device_info *device, bool ftz,
+                    LLVMMemoryBufferRef input, const char *entry,
+                    enum stela_air_fp_profile profile)
+{
+    char target[32];
+    target_name(target, platform, ftz);
+    const char *hold = stela_intel_hold(device);
+    if (hold) {
+        record_held(target, hold);
+        return;
+    }
+    struct isl_device isl = {0}; isl_device_init(&isl, device);
     void *context = ralloc_context(NULL);
-    struct brw_compiler *brw = use_elk ? NULL : brw_compiler_create(context, &device);
-    struct elk_compiler *elk = use_elk ? elk_compiler_create(context, &device) : NULL;
+    const bool use_elk = stela_intel_elk(device);
+    struct brw_compiler *brw = use_elk ? NULL : brw_compiler_create(context, device);
+    struct elk_compiler *elk = use_elk ? elk_compiler_create(context, device) : NULL;
     if (brw) brw->shader_debug_log = brw->shader_perf_log = compiler_log;
     if (elk) elk->shader_debug_log = elk->shader_perf_log = compiler_log;
     const nir_shader_compiler_options *options = brw ? &brw->nir_options[MESA_SHADER_COMPUTE] :
@@ -254,14 +269,10 @@ static void compile(const char *target, bool use_elk, bool ftz, LLVMMemoryBuffer
     const nir_lower_compute_system_values_options sys = {.has_base_workgroup_id = false};
     NIR_PASS(_, nir, nir_lower_compute_system_values, &sys);
     nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
-    int fp_status = stela_intel_fp_controls(&device, &nir->info);
+    int fp_status = stela_intel_fp_controls(device, &nir->info);
     if (fp_status) {
-        assert(fp_status == -95 && device.ver == 7 && !ftz &&
-               nir->info.float_controls_execution_mode == controls(false));
-        printf("STELA_INTEL_FP_UNSUPPORTED {\"target\":\"%s\",\"pci_id\":%u,"
-               "\"nir_float_controls\":%u,\"reason\":\"fp32-preserve-requires-gen8\","
-               "\"hardware_executed\":false}\n", target, device.pci_device_id,
-               nir->info.float_controls_execution_mode);
+        assert(fp_status == -95 && nir->info.float_controls_execution_mode == controls(false));
+        record_refused(target, STELA_REFUSAL_INTEL_GEN7_FP32_PRESERVE);
         ralloc_free(nir); ralloc_free(context);
         return;
     }
@@ -270,12 +281,12 @@ static void compile(const char *target, bool use_elk, bool ftz, LLVMMemoryBuffer
     const unsigned *code;
     if (brw) {
         struct brw_cs_prog_key key = {0};
-        brw_nir_lower_cs_intrinsics(nir, &device, &brw_data);
-        if (brw_nir_lower_cs_subgroup_id(nir, &device, 0)) {
+        brw_nir_lower_cs_intrinsics(nir, device, &brw_data);
+        if (brw_nir_lower_cs_subgroup_id(nir, device, 0)) {
             brw_data.base.push_sizes[0] = 4;
-            brw_cs_fill_push_const_info(&device, &brw_data, 0);
+            brw_cs_fill_push_const_info(device, &brw_data, 0);
             brw_data.base.push_sizes[0] = align(4, REG_SIZE);
-        } else brw_cs_fill_push_const_info(&device, &brw_data, -1);
+        } else brw_cs_fill_push_const_info(device, &brw_data, -1);
         nir_validate_shader(nir, "FP32 controls original BRW compile");
         struct brw_compile_cs_params p = {.base = {.mem_ctx = context, .nir = nir,
             .key = &key.base, .prog_data = &brw_data.base}};
@@ -283,10 +294,10 @@ static void compile(const char *target, bool use_elk, bool ftz, LLVMMemoryBuffer
         if (!code) fprintf(stderr, "%s: %s\n", target, p.base.error_str);
         assert(code && !p.base.error_str);
         unsigned sends;
-        assert(validate_intel_code(&device, context, code, brw_data.base.program_size, target, &sends));
+        assert(validate_intel_code(device, context, code, brw_data.base.program_size, target, &sends));
     } else {
         struct elk_cs_prog_key key = {0};
-        elk_nir_lower_cs_intrinsics(nir, &device, &elk_data);
+        elk_nir_lower_cs_intrinsics(nir, device, &elk_data);
         nir_validate_shader(nir, "FP32 controls original ELK compile");
         struct elk_compile_cs_params p = {.base = {.mem_ctx = context, .nir = nir},
             .key = &key, .prog_data = &elk_data};
@@ -296,17 +307,15 @@ static void compile(const char *target, bool use_elk, bool ftz, LLVMMemoryBuffer
         assert(stela_legacy_elk_code_valid(elk, code, elk_data.base.program_size));
     }
     assert(nir->info.float_controls_execution_mode == controls(ftz));
-    assert(nir->info.bit_sizes_float == 32 && stela_intel_fp_controls(&device, &nir->info) == 0);
+    assert(nir->info.bit_sizes_float == 32 && stela_intel_fp_controls(device, &nir->info) == 0);
     check_plan(brw, elk, &isl, &brw_data, &elk_data, &nir->info);
-    check_isa(&device, context, elk, code, brw ? brw_data.base.program_size : elk_data.base.program_size,
+    check_isa(device, context, elk, code, brw ? brw_data.base.program_size : elk_data.base.program_size,
               target, ftz, nir->info.float_controls_execution_mode, input, entry);
     ralloc_free(nir); ralloc_free(context);
 }
 
 int main(int argc, char **argv)
 {
-    const char *targets[] = {"ivb", "byt", "hsw", "bdw", "chv", "skl", "bxt", "kbl", "glk",
-        "icl", "ehl", "tgl", "rkl", "dg1", "adl", "dg2", "mtl", "arl", "lnl", "bmg", "ptl", "nvl-u"};
     enum stela_air_fp_profile profile;
     if (!stela_air_probe_profile(&argc, argv, &profile)) return 2;
     const char *entry = "kernel";
@@ -314,18 +323,25 @@ int main(int argc, char **argv)
     if (argc > 1) {
         input = stela_intel_air_probe_input(argc, argv, &entry);
         if (!input) return 2;
-        stela_air_probe_profile_receipt(profile);
+        stela_air_probe_profile_record(profile);
     } else if (profile != STELA_AIR_FP_IEEE_DEFAULT) {
         return 2;
     }
+    /* An input requests one FP32 mode through its profile; the direct NIR
+     * fixture covers both. */
+    const unsigned first = input ? profile == STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41 : 0;
+    const unsigned last = input ? first : 1;
+    struct intel_device_info device;
+    const char *platform;
+    STELA_INTEL_FOREACH_TARGET(platform, device) {
+        for (unsigned ftz = first; ftz <= last; ++ftz)
+            expect(platform, &device, ftz);
+    }
     process_intel_debug_variable(); glsl_type_singleton_init_or_ref();
-    for (unsigned i = 0; i < ARRAY_SIZE(targets); ++i)
-        if (input)
-            compile(targets[i], i < 5, profile == STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
-                    input, entry, profile);
-        else
-            for (unsigned ftz = 0; ftz < 2; ++ftz)
-                compile(targets[i], i < 5, ftz, NULL, "direct_nir_fixture", profile);
+    STELA_INTEL_FOREACH_TARGET(platform, device) {
+        for (unsigned ftz = first; ftz <= last; ++ftz)
+            compile(platform, &device, ftz, input, input ? entry : "direct_nir_fixture", profile);
+    }
     if (input) LLVMDisposeMemoryBuffer(input);
     glsl_type_singleton_decref();
     return 0;

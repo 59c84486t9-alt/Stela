@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 /* Offline, original-input compiler qualification. No device is opened. */
 #include "air_to_nir.h"
-#include "air_probe_profile.h"
+#include "air_probe.h"
+#include "air_test_fixture.h"
+#include "targets/nvidia.h"
 #include "nouveau/compiler/nak.h"
-#include "nouveau/headers/nv_device_info.h"
-#include "util/mesa-blake3.h"
 #include "util/ralloc.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,18 +27,11 @@ bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
 }
 
 static void
-print_digest(const void *data, size_t size)
+compile_input(const void *input, size_t size, const char *entry, const char *input_hash,
+              unsigned sm, enum stela_air_fp_profile fp_profile)
 {
-   blake3_hash digest;
-   _mesa_blake3_compute(data, size, digest);
-   for (unsigned i = 0; i < sizeof(digest); i++)
-      printf("%02x", digest[i]);
-}
-
-static void
-compile_input(const void *input, size_t size, const char *entry, unsigned sm,
-              enum stela_air_fp_profile fp_profile)
-{
+   char target[16];
+   stela_nv_target_name(target, sm);
    const struct nv_device_info device = {.sm = sm, .max_warps_per_mp = 32};
    struct nak_compiler *compiler = nak_compiler_create(&device);
    CHECK(compiler);
@@ -53,79 +46,95 @@ compile_input(const void *input, size_t size, const char *entry, unsigned sm,
    if (!nir)
       fprintf(stderr, "AIR input refused (%u): %s\n", error.kind, error.detail);
    CHECK(nir && bindings == 1);
-   printf("STELA_AIR_ENVIRONMENT {\"backend\":\"air-nak\",\"target\":\"sm%u\",\"fp_profile\":%u,\"nir_float_controls\":%u}\n",
-          sm, (unsigned)fp_profile, nir->info.float_controls_execution_mode);
+   stela_air_probe_environment_record(target, fp_profile, nir->info.float_controls_execution_mode);
    nir_validate_shader(nir, "original AIR input");
    nak_preprocess_nir(nir, compiler);
    /* nak_compile_shader runs the retained postprocessing itself. */
    struct nak_shader_bin *bin = nak_compile_shader(nir, true, compiler, 0, NULL, false);
    CHECK(bin && bin->code && bin->code_size && bin->info.num_instrs > 2 &&
          bin->info.sm == sm && bin->info.stage == MESA_SHADER_COMPUTE);
-   printf("STELA_GPU_TARGET {\"backend\":\"air-nak\",\"target\":\"sm%u\","
-          "\"state\":\"compiled\",\"input_kind\":\"raw_input\",\"entry\":\"%s\","
-          "\"workgroup\":[32,1,1],\"buffer_index\":7,\"max_instructions\":256,"
-          "\"binding\":\"fixture-global64\",\"fixture_va\":1048576,"
-          "\"bytes\":%u,\"instructions\":%u,\"input_bytes\":%zu,\"input_blake3\":\"",
-          sm, entry, bin->code_size, bin->info.num_instrs, size);
-   print_digest(input, size);
-   printf("\",\"code_blake3\":\"");
-   print_digest(bin->code, bin->code_size);
-   puts("\"}");
+   char code_hash[BLAKE3_HEX_LEN];
+   stela_digest(bin->code, bin->code_size, code_hash);
+   const uint32_t workgroup[] = {32, 1, 1};
+   record_compiled(target, bin->code_size);
+   record_object("facts");
+   record_str("entry", entry);
+   record_uints("workgroup", workgroup, ARRAY_SIZE(workgroup));
+   record_uint("buffer_index", 7);
+   record_uint("max_instructions", 256);
+   record_str("binding", "fixture-global64");
+   record_uint("fixture_va", 0x100000);
+   record_uint("instructions", bin->info.num_instrs);
+   record_str("input_blake3", input_hash);
+   record_str("code_blake3", code_hash);
+   record_end();
    nak_shader_bin_destroy(bin);
    ralloc_free(nir);
    nak_compiler_destroy(compiler);
 }
 
+/* Bound before allocation, and retain the exact bytes without reassembly,
+ * metadata edits or optimization through a different LLVM module. */
+static void *
+read_input(const char *path, size_t *size)
+{
+   FILE *stream = fopen(path, "rb");
+   CHECK(stream && !fseek(stream, 0, SEEK_END));
+   long length = ftell(stream);
+   CHECK(length > 0 && length <= 64 * 1024 * 1024 && !fseek(stream, 0, SEEK_SET));
+   void *bytes = malloc(length);
+   CHECK(bytes && fread(bytes, 1, length, stream) == (size_t)length);
+   CHECK(fgetc(stream) == EOF && !ferror(stream));
+   CHECK(!fclose(stream));
+   *size = (size_t)length;
+   return bytes;
+}
+
 int
 main(int argc, char **argv)
 {
-   const char *entry = NULL, *files[32];
-   unsigned file_count = 0;
    enum stela_air_fp_profile fp_profile;
    if (!stela_air_probe_profile(&argc, argv, &fp_profile))
       goto usage;
-   for (int i = 1; i < argc; i++) {
-      if (!strcmp(argv[i], "--entry") && !entry && i + 1 < argc)
-         entry = argv[++i];
-      else if (!strcmp(argv[i], "--input") && file_count < ARRAY_SIZE(files) && i + 1 < argc)
-         files[file_count++] = argv[++i];
-      else
+   const bool file = argc > 1;
+   const char *entry = "kernel";
+   if (file) {
+      if (argc != 5 || strcmp(argv[1], "--input") || strcmp(argv[3], "--entry"))
+         goto usage;
+      entry = argv[4];
+      if (!*entry || strlen(entry) > 255)
          goto usage;
    }
-   if (!entry || !*entry || strlen(entry) > 255 || !file_count)
-      goto usage;
-   /* Keep the receipt's identifier unambiguous without introducing a separate
-    * escaping format. This offline fixture CLI accepts ordinary LLVM names. */
-   for (const char *c = entry; *c; c++) {
-      if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
-            (*c >= '0' && *c <= '9') || *c == '_' || *c == '.' || *c == '$'))
-         goto usage;
+   stela_air_probe_profile_record(fp_profile);
+   size_t size;
+   void *bytes;
+   LLVMMemoryBufferRef fixture = NULL;
+   if (file) {
+      bytes = read_input(argv[2], &size);
+   } else {
+      fixture = stela_air_test_bitcode(stela_air_test_store_body, "");
+      bytes = (void *)LLVMGetBufferStart(fixture);
+      size = LLVMGetBufferSize(fixture);
    }
-   stela_air_probe_profile_receipt(fp_profile);
+   char input_hash[BLAKE3_HEX_LEN];
+   stela_digest(bytes, size, input_hash);
+   stela_air_probe_input_record(file, size, input_hash, entry);
+   record_end();
+   char target[16];
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++) {
+      stela_nv_target_name(target, stela_nv_sms[i]);
+      record_expect(target, NULL);
+   }
    glsl_type_singleton_init_or_ref();
-   for (unsigned file = 0; file < file_count; file++) {
-      /* Bound before allocation, and retain the exact bytes without reassembly,
-       * metadata edits or optimization through a different LLVM module. */
-      FILE *stream = fopen(files[file], "rb");
-      CHECK(stream && !fseek(stream, 0, SEEK_END));
-      long length = ftell(stream);
-      CHECK(length > 0 && length <= 64 * 1024 * 1024 && !fseek(stream, 0, SEEK_SET));
-      void *bytes = malloc(length);
-      CHECK(bytes && fread(bytes, 1, length, stream) == (size_t)length);
-      CHECK(fgetc(stream) == EOF && !ferror(stream));
-      CHECK(!fclose(stream));
-      printf("STELA_AIR_INPUT {\"origin\":\"raw_input_file\",\"bytes\":%ld,"
-             "\"entry\":\"%s\",\"blake3\":\"", length, entry);
-      print_digest(bytes, length);
-      puts("\"}");
-      const unsigned targets[] = {75, 80, 86, 87, 89, 90, 100, 104, 120};
-      for (unsigned i = 0; i < ARRAY_SIZE(targets); i++)
-         compile_input(bytes, length, entry, targets[i], fp_profile);
-      free(bytes);
-   }
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++)
+      compile_input(bytes, size, entry, input_hash, stela_nv_sms[i], fp_profile);
    glsl_type_singleton_decref();
+   if (fixture)
+      LLVMDisposeMemoryBuffer(fixture);
+   else
+      free(bytes);
    return 0;
 usage:
-      fprintf(stderr, "usage: %s --entry NAME --input raw-original.bc [--input ... up to 32 files] [--fp-profile NAME]\n", argv[0]);
-      return 2;
+   fprintf(stderr, "usage: %s [--input raw-original.bc --entry NAME [--fp-profile NAME]]\n", argv[0]);
+   return 2;
 }

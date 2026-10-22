@@ -5,31 +5,14 @@
 /* Shared hosted AMD compiler-test input handling. Not a production loader or
  * hostile-input sandbox; the production AIR reader owns wrapper/archive choice.
  */
+#include "stela/tests/air_probe.h"
 #include "util/macros.h"
-#include "util/mesa-blake3.h"
 #include <llvm-c/BitReader.h>
 #include <llvm-c/Core.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* Receipt strings come from verified-but-untrusted IR/CLI bytes. Encode them
- * without allowing metadata or entry names to inject extra JSON records. */
-static void
-json_string(const char *text)
-{
-   putchar('"');
-   for (const unsigned char *c = (const unsigned char *)text; *c; c++) {
-      if (*c == '"' || *c == '\\')
-         printf("\\%c", *c);
-      else if (*c < 32 || *c >= 127)
-         printf("\\u%04x", *c);
-      else
-         putchar(*c);
-   }
-   putchar('"');
-}
 
 static LLVMMemoryBufferRef
 read_raw_input(const char *path)
@@ -69,9 +52,7 @@ input_receipt_options(LLVMMemoryBufferRef input, const char *entry, bool file,
                       char input_hash[BLAKE3_HEX_LEN], const unsigned workgroup[3],
                       unsigned instruction_budget)
 {
-   blake3_hash hash;
-   _mesa_blake3_compute(LLVMGetBufferStart(input), LLVMGetBufferSize(input), hash);
-   _mesa_blake3_format(input_hash, hash);
+   stela_digest(LLVMGetBufferStart(input), LLVMGetBufferSize(input), input_hash);
    LLVMContextRef context = LLVMContextCreate();
    LLVMModuleRef module = NULL;
    if (LLVMParseBitcodeInContext2(context, input, &module)) {
@@ -93,25 +74,23 @@ input_receipt_options(LLVMMemoryBufferRef input, const char *entry, bool file,
    }
    unsigned major, minor, patch;
    LLVMGetVersion(&major, &minor, &patch);
-   printf("STELA_AIR_INPUT {\"origin\":\"%s\",\"bytes\":%zu,\"blake3\":\"%s\",\"entry\":",
-          file ? "raw_input_file" : "original_fixture", LLVMGetBufferSize(input), input_hash);
-   json_string(entry);
-   printf(",\"workgroup_size\":[%u,%u,%u],\"instruction_budget\":%u,\"llvm_version\":[%u,%u,%u],\"target\":",
-          workgroup[0], workgroup[1], workgroup[2], instruction_budget, major, minor, patch);
-   json_string(LLVMGetTarget(module));
-   printf(",\"mesa_version\":");
-   json_string(PACKAGE_VERSION);
+   const uint32_t llvm_version[] = {major, minor, patch};
+   /* Names and metadata are verified-but-untrusted bytes; records escape them. */
+   stela_air_probe_input_record(file, LLVMGetBufferSize(input), input_hash, entry);
+   record_object("facts");
+   record_uints("workgroup_size", workgroup, 3);
+   record_uint("instruction_budget", instruction_budget);
+   record_uints("llvm_version", llvm_version, ARRAY_SIZE(llvm_version));
+   record_str("target", LLVMGetTarget(module));
+   record_str("mesa_version", PACKAGE_VERSION);
+   record_object("metadata");
    for (unsigned i = 0; i < ARRAY_SIZE(metadata); i++) {
-      putchar(',');
-      json_string(metadata[i]);
-      printf(":[");
+      record_array(metadata[i]);
       LLVMValueRef nodes[256];
       unsigned count = LLVMGetNamedMetadataNumOperands(module, metadata[i]);
       LLVMGetNamedMetadataOperands(module, metadata[i], nodes);
       for (unsigned n = 0; n < count; n++) {
          char *text = LLVMPrintValueToString(nodes[n]);
-         if (n)
-            putchar(',');
          /* LLVM's standalone metadata printer prefixes its process-local
           * object address. Keep the complete metadata expression, excluding
           * that diagnostic decoration so receipts reproduce across runs. */
@@ -121,12 +100,12 @@ input_receipt_options(LLVMMemoryBufferRef input, const char *entry, bool file,
             if (end && !strncmp(end, "> = ", 4))
                expression = end + 4;
          }
-         json_string(expression);
+         record_item(expression);
          LLVMDisposeMessage(text);
       }
-      putchar(']');
+      record_close();
    }
-   printf("}\n");
+   record_end();
    LLVMDisposeModule(module);
    LLVMContextDispose(context);
    return true;

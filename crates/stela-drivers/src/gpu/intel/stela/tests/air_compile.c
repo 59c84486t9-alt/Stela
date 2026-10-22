@@ -7,6 +7,8 @@
 #include "surface.h"
 #include "fp_controls.h"
 #include "stela/tests/air_test_fixture.h"
+#include "stela/tests/targets/intel.h"
+#include "stela/tests/threadgroup_record.h"
 #include "intel/compiler/brw/brw_nir.h"
 #include "intel/compiler/elk/elk_nir.h"
 #include "intel/common/intel_compute_slm.h"
@@ -179,6 +181,7 @@ static LLVMMemoryBufferRef multibuffer(unsigned count)
 
 
 struct context {
+    const char *name;
     struct intel_device_info device;
     struct isl_device isl;
     void *memory;
@@ -194,7 +197,7 @@ static void logger(void *data,unsigned *id,const char *format,...)
 }
 static void context(struct context *c,const char *target)
 {
-    memset(c,0,sizeof(*c));int pci=intel_device_name_to_pci_device_id(target);
+    memset(c,0,sizeof(*c));c->name=target;int pci=intel_device_name_to_pci_device_id(target);
     CHECK(pci>=0&&intel_get_device_info_for_build(pci,&c->device));
     c->memory=ralloc_context(NULL);CHECK(c->memory);isl_device_init(&c->isl,&c->device);
     if(c->device.ver<=8) { c->elk=elk_compiler_create(c->memory,&c->device);CHECK(c->elk);
@@ -310,7 +313,16 @@ static void raw_states(struct context *c,const struct stela_intel_air_compilatio
     }
     for(unsigned i=0;i<count;i++)CHECK(table[map[i].slot]==0x10000+i*limits.gpu_state_alignment);
 }
-static void validate(struct context *c,struct stela_metal_assembly *library,struct stela_intel_air_compilation *owner,const char *label)
+/* A fixture's compile target: "<fixture>/<platform>". */
+static void owned_target(char name[64],const char *fixture,const char *platform)
+{
+    snprintf(name,64,"%s/%s",fixture,platform);
+}
+static void expect_owned(const char *fixture,const char *platform)
+{
+    char target[64];owned_target(target,fixture,platform);record_expect(target,NULL);
+}
+static void validate(struct context *c,struct stela_metal_assembly *library,struct stela_intel_air_compilation *owner,const char *fixture)
 {
     const struct stela_intel_air_binary *bin=stela_intel_air_binary(owner);
     const struct stela_intel_air_provenance *p=stela_intel_air_provenance(owner);unsigned count;
@@ -356,24 +368,42 @@ static void validate(struct context *c,struct stela_metal_assembly *library,stru
     }
     CHECK(bytes==bin->code_bytes&&!memcmp(code,bin->code,bytes));ralloc_free(nir);ralloc_free(memory);
     raw_states(c,owner);int plan_status=plan(c,owner,count);
-    blake3_hash hash;char hex[BLAKE3_HEX_LEN];_mesa_blake3_compute(bin->code,bin->code_bytes,hash);_mesa_blake3_format(hex,hash);
-    printf("owned-air-intel input=%s pci=%04x ver=%u backend=%u buffers=%u code_bytes=%u executable_bytes=%u code_blake3=%s plan=%d subgroup=%u\n",
-        label,c->device.pci_device_id,c->device.verx10,bin->backend,count,bin->code_bytes,bin->executable_bytes,hex,plan_status,p->options.subgroup_size);
+    char target[64];owned_target(target,fixture,c->name);
+    record_compiled(target,bin->code_bytes);
+    record_object("facts");
+    record_uint("pci_id",c->device.pci_device_id);
+    record_uint("verx10",c->device.verx10);
+    record_uint("backend",bin->backend);
+    record_uint("buffers",count);
+    record_uint("executable_bytes",bin->executable_bytes);
+    record_blake3("code_blake3",bin->code,bin->code_bytes);
+    record_int("plan",plan_status);
+    record_uint("subgroup",p->options.subgroup_size);
+    record_threadgroup(&p->threadgroup,stela_intel_air_nir(owner)->info.shared_size);
+    record_end();
 }
-static void targets(struct stela_metal_assembly *library,enum stela_air_fp_profile fp,const char *label,unsigned subgroup)
+/* Every manifest target. Gen7 refuses FP32 denorm preservation, which an
+ * unchanged input may request. */
+static void targets(struct stela_metal_assembly *library,enum stela_air_fp_profile fp,const char *fixture,unsigned subgroup)
 {
-    const char *names[]={"ivb","byt","hsw","bdw","chv","skl","bxt","kbl","glk","icl","ehl","tgl","rkl","dg1","adl","dg2","mtl","arl","lnl","bmg","ptl","nvl-u","nvl"};
-    for(unsigned i=0;i<ARRAY_SIZE(names);i++) {
-        struct context c;context(&c,names[i]);struct stela_intel_air_options opts=options();opts.fp_profile=fp;opts.subgroup_size=subgroup;
+    struct intel_device_info device;const char *name;
+    STELA_INTEL_FOREACH_TARGET(name,device) {
+        char target[64];owned_target(target,fixture,name);
+        if(device.ver==7)record_expect_unless_refused(target,STELA_REFUSAL_INTEL_GEN7_FP32_PRESERVE);
+        else record_expect(target,stela_intel_hold(&device));
+    }
+    STELA_INTEL_FOREACH_TARGET(name,device) {
+        struct context c;context(&c,name);struct stela_intel_air_options opts=options();opts.fp_profile=fp;opts.subgroup_size=subgroup;
         struct stela_intel_air_compilation *owner=NULL;struct stela_intel_air_error error;
         enum stela_intel_air_status status=stela_intel_air_compile(c.brw,c.elk,NULL,library,0,&opts,&owner,&error);
+        char target[64];owned_target(target,fixture,name);
         if(status==STELA_INTEL_AIR_UNSUPPORTED&&c.device.ver==35) {
-            CHECK(strstr(error.detail,"Gen35"));printf("owned-air-intel input=%s pci=%04x hold=Gen35-compiler-dispatch\n",label,c.device.pci_device_id);
+            CHECK(strstr(error.detail,"Gen35"));record_held(target,STELA_HOLD_INTEL_GEN35);
         } else if(status==STELA_INTEL_AIR_UNSUPPORTED&&c.device.ver<8) {
-            CHECK(strstr(error.detail,"FP controls"));printf("owned-air-intel input=%s pci=%04x hold=FP32-preserve\n",label,c.device.pci_device_id);
+            CHECK(strstr(error.detail,"FP controls"));record_refused(target,STELA_REFUSAL_INTEL_GEN7_FP32_PRESERVE);
         } else {
-            if(status)fprintf(stderr,"%s status%u: %s AIR%u %s\n",names[i],status,error.detail,error.air.kind,error.air.detail);
-            CHECK(status==STELA_INTEL_AIR_OK&&owner);validate(&c,library,owner,label);
+            if(status)fprintf(stderr,"%s status%u: %s AIR%u %s\n",name,status,error.detail,error.air.kind,error.air.detail);
+            CHECK(status==STELA_INTEL_AIR_OK&&owner);validate(&c,library,owner,fixture);
             const struct stela_intel_air_binary *retained=stela_intel_air_binary(owner);
             blake3_hash before,after;_mesa_blake3_compute(retained->code,retained->code_bytes,before);
             ralloc_free(c.memory);c.memory=NULL;
@@ -423,10 +453,11 @@ static void selected_tests(void)
             nir_intrinsic_instr *intr=nir_instr_as_intrinsic(instr);
             if(intr->intrinsic==nir_intrinsic_store_ssbo){CHECK(nir_src_is_const(intr->src[0])&&nir_src_as_uint(intr->src[0])==99);stores++;}
         }
-    CHECK(stores==1);validate(&c,library,owner,"selected-second-entry");
+    CHECK(stores==1);expect_owned("selected-second-entry",c.name);validate(&c,library,owner,"selected-second-entry");
     air=multibuffer(3);struct stela_metal_assembly *second_library=fixture(air);LLVMDisposeMemoryBuffer(air);
     opts.workgroup_size[0]=4;opts.workgroup_size[1]=2;opts.workgroup_size[2]=2;
     struct stela_intel_air_compilation *second=compile(&c,second_library,0,&opts,STELA_INTEL_AIR_OK);
+    expect_owned("coexisting-3d",c.name);expect_owned("after-other-owner-destroy",c.name);
     validate(&c,second_library,second,"coexisting-3d");destroy(&second);stela_metal_assembly_destroy(&second_library);
     validate(&c,library,owner,"after-other-owner-destroy");
     stela_metal_assembly_destroy(&library);ralloc_free(c.memory);
@@ -475,7 +506,7 @@ static void invalid_capture_tests(void)
         for(bad_capture=0;bad_capture<12;bad_capture++)CHECK(!compile(&c,library,0,&opts,STELA_INTEL_AIR_BACKEND));
         stela_metal_assembly_destroy(&library);ralloc_free(c.memory);
     }
-    puts("24 malformed original compiler outputs refused atomically; no successful fake program");
+    puts("malformed original compiler outputs refused atomically; no successful fake program");
 }
 #endif
 static void original_tests(void)
@@ -485,7 +516,8 @@ static void original_tests(void)
     targets(library,STELA_AIR_FP_IEEE_DEFAULT,"original-integer",0);stela_metal_assembly_destroy(&library);
     for(unsigned count=0;count<=31;count++) {
         air=multibuffer(count);library=fixture(air);LLVMDisposeMemoryBuffer(air);
-        targets(library,STELA_AIR_FP_IEEE_DEFAULT,"generic-buffer-indices",0);stela_metal_assembly_destroy(&library);
+        char fixture_name[32];snprintf(fixture_name,sizeof(fixture_name),"buffers-%u",count);
+        targets(library,STELA_AIR_FP_IEEE_DEFAULT,fixture_name,0);stela_metal_assembly_destroy(&library);
     }
     air=stela_air_test_bitcode("ret void\n","");library=fixture(air);LLVMDisposeMemoryBuffer(air);
     targets(library,STELA_AIR_FP_IEEE_DEFAULT,"unused-buffer-no-effects",0);stela_metal_assembly_destroy(&library);
@@ -526,7 +558,8 @@ static void original_tests(void)
         actual_options->cb_data=NULL;
         for(unsigned width=8;width<=32;width*=2) {
             opts.subgroup_size=width;owner=compile(&c,library,0,&opts,STELA_INTEL_AIR_OK);
-            validate(&c,library,owner,"explicit-subgroup");destroy(&owner);
+            char fixture_name[32];snprintf(fixture_name,sizeof(fixture_name),"subgroup-%u",width);
+            expect_owned(fixture_name,c.name);validate(&c,library,owner,fixture_name);destroy(&owner);
         }
         opts=options();owner=compile(&c,library,0,&opts,STELA_INTEL_AIR_OK);
         struct stela_intel_air_compilation *preserved=owner;struct stela_intel_air_error error;
@@ -564,7 +597,6 @@ static void original_tests(void)
     library=assemble(&shared);free(shared.data);LLVMDisposeMemoryBuffer(air);
     CHECK(!compile(&c,library,0,&opts,STELA_INTEL_AIR_UNSUPPORTED));
     stela_metal_assembly_destroy(&library);ralloc_free(c.memory);
-    puts("owned Intel compiler/RAW/table/plan/lifetime fixtures passed; no hardware execution");
 }
 static void source_input(int argc,char **argv)
 {
@@ -582,7 +614,7 @@ static void source_input(int argc,char **argv)
     struct context c;context(&c,"skl");
     struct stela_intel_air_options opts=options();opts.fp_profile=STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
     struct stela_intel_air_compilation *owner=compile(&c,library,0,&opts,STELA_INTEL_AIR_OK);
-    validate(&c,library,owner,"original-source-owner");
+    expect_owned("original-source-owner",c.name);validate(&c,library,owner,"original-source-owner");
     free(air.data);free(source.data);stela_metal_assembly_destroy(&library);ralloc_free(c.memory);
     const struct stela_intel_air_provenance *p=stela_intel_air_provenance(owner);
     CHECK(p->library_flags==STELA_METAL_LIBRARY_SOURCE_COMPILED&&p->compiler_profile==config.profile&&
@@ -612,20 +644,28 @@ static void threadgroup_input(int argc,char **argv)
     CHECK(stela_air_inspect(air.data,air.size,256,inspect,&f,&air_error)&&f.found);
     struct bytes bytes=archive(air.data,air.size,f.name,f.air,f.major,f.minor,f.osmajor,f.osminor);
     struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);free(air.data);
-    const char *names[]={"ivb","byt","hsw","bdw","chv","skl","bxt","kbl","glk","icl","ehl","tgl","rkl","dg1","adl","dg2","mtl","arl","lnl","bmg","ptl","nvl-u","nvl"};
-    for(unsigned i=0;i<ARRAY_SIZE(names);i++) {
-        struct context c;context(&c,names[i]);struct stela_intel_air_options opts=options();opts.workgroup_size[0]=(uint32_t)workgroup;
+    /* Gen7.0 refuses byte or misaligned shared access, which an input may use. */
+    struct intel_device_info device;const char *name;
+    STELA_INTEL_FOREACH_TARGET(name,device) {
+        char target[64];owned_target(target,"threadgroup",name);
+        if(device.verx10==70)record_expect_unless_refused(target,STELA_REFUSAL_INTEL_GEN7_BYTE_SHARED);
+        else record_expect(target,stela_intel_hold(&device));
+    }
+    unsigned invalid_requests_checked[2]={0};
+    STELA_INTEL_FOREACH_TARGET(name,device) {
+        char target[64];owned_target(target,"threadgroup",name);
+        struct context c;context(&c,name);struct stela_intel_air_options opts=options();opts.workgroup_size[0]=(uint32_t)workgroup;
         struct stela_intel_air_compilation *owner=NULL;struct stela_intel_air_error error;
         enum stela_intel_air_status status=stela_intel_air_compile_specialized(c.brw,c.elk,NULL,library,0,&opts,&request,&owner,&error);
-        if(c.device.ver==35){CHECK(status==STELA_INTEL_AIR_UNSUPPORTED&&!owner&&strstr(error.detail,"Gen35"));ralloc_free(c.memory);continue;}
+        if(c.device.ver==35){CHECK(status==STELA_INTEL_AIR_UNSUPPORTED&&!owner&&strstr(error.detail,"Gen35"));record_held(target,STELA_HOLD_INTEL_GEN35);ralloc_free(c.memory);continue;}
         if(status==STELA_INTEL_AIR_UNSUPPORTED&&c.device.verx10==70&&strstr(error.detail,"byte-scattered")) {
-            CHECK(!owner&&error.air.kind==STELA_AIR_OK);printf("owned-threadgroup-intel pci=%04x hold=Gen7-shared-byte-scattered\n",c.device.pci_device_id);
+            CHECK(!owner&&error.air.kind==STELA_AIR_OK);record_refused(target,STELA_REFUSAL_INTEL_GEN7_BYTE_SHARED);
             ralloc_free(c.memory);continue;
         }
-        if(status)fprintf(stderr,"dynamic %s: status%u %s AIR%u %s\n",names[i],status,error.detail,error.air.kind,error.air.detail);
+        if(status)fprintf(stderr,"dynamic %s: status%u %s AIR%u %s\n",name,status,error.detail,error.air.kind,error.air.detail);
         CHECK(status==STELA_INTEL_AIR_OK&&owner);
         const struct stela_intel_air_provenance *p=stela_intel_air_provenance(owner);
-        if(i==0||i==5) {
+        if(!invalid_requests_checked[c.elk!=NULL]++) {
             struct stela_metal_threadgroup_request bad_request=request;
             struct stela_intel_air_compilation *failed=NULL;
             bad_request.size--;
@@ -656,12 +696,7 @@ static void threadgroup_input(int argc,char **argv)
         memset(rows,0,sizeof(rows));
         CHECK(p->threadgroup.bindings[0].bytes&&p->threadgroup.bindings[0].alignment>=16);
         memcpy(rows,saved,sizeof(rows));CHECK(stela_metal_threadgroup_matches(&p->threadgroup,&request));
-        validate(&c,library,owner,"dispatch-threadgroup-specialization");
-        printf("owned-threadgroup-intel pci=%04x count=%u total_shared=%u",c.device.pci_device_id,p->threadgroup.count,
-            stela_intel_air_nir(owner)->info.shared_size);
-        for(unsigned r=0;r<p->threadgroup.count;r++)printf(" row=%u:%u:%llu:%u",p->threadgroup.bindings[r].buffer.argument,
-            p->threadgroup.bindings[r].buffer.index,(unsigned long long)p->threadgroup.bindings[r].bytes,p->threadgroup.bindings[r].alignment);
-        puts("");
+        validate(&c,library,owner,"threadgroup");
         ralloc_free(c.memory);nir_validate_shader((nir_shader *)stela_intel_air_nir(owner),"dynamic result after compiler destruction");
         CHECK(stela_metal_threadgroup_matches(&p->threadgroup,&request));destroy(&owner);
     }
@@ -674,16 +709,20 @@ static void shared_refusal(int argc,char **argv)
     CHECK(stela_air_inspect(air.data,air.size,256,inspect,&f,&inspect_error)&&f.found);
     struct bytes bytes=archive(air.data,air.size,f.name,f.air,f.major,f.minor,f.osmajor,f.osminor);
     struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);free(air.data);
-    const char *names[]={"ivb","byt","hsw","bdw","chv","skl","bxt","kbl","glk","icl","ehl","tgl","rkl","dg1","adl","dg2","mtl","arl","lnl","bmg","ptl","nvl-u","nvl"};
-    for(unsigned i=0;i<ARRAY_SIZE(names);i++) {
-        struct context c;context(&c,names[i]);struct stela_intel_air_options opts=options();
+    struct intel_device_info device;const char *name;
+    STELA_INTEL_FOREACH_TARGET(name,device) {
+        char target[64];owned_target(target,"shared-refusal",name);
+        if(stela_intel_hold(&device))record_expect(target,stela_intel_hold(&device));
+        else record_expect_refusal(target,STELA_REFUSAL_DYNAMIC_THREADGROUP);
+    }
+    STELA_INTEL_FOREACH_TARGET(name,device) {
+        struct context c;context(&c,name);struct stela_intel_air_options opts=options();
         struct stela_intel_air_compilation *owner=NULL;struct stela_intel_air_error error;
         CHECK(stela_intel_air_compile(c.brw,c.elk,NULL,library,0,&opts,&owner,&error)==STELA_INTEL_AIR_UNSUPPORTED&&
             !owner&&error.status==STELA_INTEL_AIR_UNSUPPORTED&&error.air.kind==STELA_AIR_OK);
-        if(c.device.ver==35)CHECK(strstr(error.detail,"Gen35"));
-        else CHECK(strstr(error.detail,"binding specialization"));
-        printf("owned-air-intel entry=%s pci=%04x shared_refusal=%s\n",f.name,c.device.pci_device_id,
-            c.device.ver==35?"Gen35-compiler-dispatch-hold":"dynamic-specialization-unavailable");
+        char target[64];owned_target(target,"shared-refusal",name);
+        if(c.device.ver==35){CHECK(strstr(error.detail,"Gen35"));record_held(target,STELA_HOLD_INTEL_GEN35);}
+        else{CHECK(strstr(error.detail,"binding specialization"));record_refused(target,STELA_REFUSAL_DYNAMIC_THREADGROUP);}
         ralloc_free(c.memory);
     }
     stela_metal_assembly_destroy(&library);
@@ -712,24 +751,35 @@ static LLVMMemoryBufferRef gen7_shared_fixture(unsigned mode)
 }
 static void gen7_shared_admission(void)
 {
-    process_intel_debug_variable();const char *names[]={"ivb","byt","hsw","bdw","chv"};
-    for(unsigned mode=0;mode<3;mode++) {
+    /* Byte, aligned32 and misaligned32 shared access; Gen7.0 admits aligned32. */
+    static const char *const modes[]={"gen7-shared-byte","gen7-shared-aligned32","gen7-shared-misaligned32"};
+    struct intel_device_info device;const char *name;
+    for(unsigned mode=0;mode<ARRAY_SIZE(modes);mode++) {
+        STELA_INTEL_FOREACH_TARGET(name,device) {
+            if(!stela_intel_elk(&device))continue;
+            char target[64];owned_target(target,modes[mode],name);
+            if(device.verx10==70&&mode!=1)record_expect_refusal(target,STELA_REFUSAL_INTEL_GEN7_BYTE_SHARED);
+            else record_expect(target,NULL);
+        }
+    }
+    for(unsigned mode=0;mode<ARRAY_SIZE(modes);mode++) {
         LLVMMemoryBufferRef air=gen7_shared_fixture(mode);
         struct bytes bytes=archive(LLVMGetBufferStart(air),LLVMGetBufferSize(air),"kernel",9,4,1,27,2);
         struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);LLVMDisposeMemoryBuffer(air);
-        for(unsigned i=0;i<ARRAY_SIZE(names);i++) {
-            struct context c;context(&c,names[i]);struct stela_intel_air_options opts=options();
+        STELA_INTEL_FOREACH_TARGET(name,device) {
+            if(!stela_intel_elk(&device))continue;
+            struct context c;context(&c,name);struct stela_intel_air_options opts=options();
             struct stela_intel_air_compilation *owner=NULL;struct stela_intel_air_error error;
             enum stela_intel_air_status status=stela_intel_air_compile(c.brw,c.elk,NULL,library,0,&opts,&owner,&error);
-            if(c.device.verx10==70&&mode!=1) {
-                CHECK(status==STELA_INTEL_AIR_UNSUPPORTED&&!owner&&error.status==status&&error.air.kind==STELA_AIR_OK&&strstr(error.detail,"byte-scattered"));
-                printf("guard pci=%04x mode=%u typed_refusal_before_elk_compile=1\n",c.device.pci_device_id,mode);
-            } else {CHECK(status==STELA_INTEL_AIR_OK&&owner);validate(&c,library,owner,"root-static-shared-guard");destroy(&owner);}
+            if(status==STELA_INTEL_AIR_UNSUPPORTED&&strstr(error.detail,"byte-scattered")) {
+                CHECK(!owner&&error.status==status&&error.air.kind==STELA_AIR_OK);
+                char target[64];owned_target(target,modes[mode],name);
+                record_refused(target,STELA_REFUSAL_INTEL_GEN7_BYTE_SHARED);
+            } else {CHECK(status==STELA_INTEL_AIR_OK&&owner);validate(&c,library,owner,modes[mode]);destroy(&owner);}
             ralloc_free(c.memory);
         }
         stela_metal_assembly_destroy(&library);
     }
-    puts("root-compatible Gen7 byte/misaligned32 refusal; aligned32 and Gen75+ original code/progdata/ISA/plan pass");
 }
 
 int main(int argc,char **argv)

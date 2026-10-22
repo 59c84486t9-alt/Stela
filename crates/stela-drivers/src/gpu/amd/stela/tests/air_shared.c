@@ -6,6 +6,7 @@
 #include "air_to_nir.h"
 #include "stela/tests/air_test_fixture.h"
 #include "air_probe_input.h"
+#include "stela/tests/targets/amd.h"
 #include "../hosted/compute.h"
 #include "../hosted/llvm_compute.h"
 #include "amd/common/ac_binary.h"
@@ -15,8 +16,6 @@
 #include "amd/common/sid.h"
 #include "amd/compiler/aco_interface.h"
 #include "util/ralloc.h"
-#include <assert.h>
-#include <inttypes.h>
 #if STELA_AMD_TEST_LLVM
 #include "../hosted/llvm_float.h"
 #include "amd/llvm/ac_llvm_build.h"
@@ -30,20 +29,6 @@
 #define CHECK(x) do { if (!(x)) { \
    fprintf(stderr, "%s:%u: %s\n", __func__, __LINE__, #x); exit(1); \
 } } while (0)
-
-/* Original donor's field-only containers, not a synthetic production device. */
-struct si_screen { struct radeon_info info; };
-struct si_shader_selector { struct si_screen *screen; mesa_shader_stage stage; };
-struct si_shader {
-   bool is_gs_copy_shader;
-   struct si_shader_selector *selector;
-   struct { struct { bool as_ngg; } ge; } key;
-   struct { struct { unsigned esgs_lds_size, ngg_out_lds_size; } info; } ngg;
-   struct { unsigned esgs_lds_size; } gs_info;
-   struct { unsigned shared_size; } info;
-};
-unsigned si_calculate_needed_lds_size(enum amd_gfx_level gfx_level, struct si_shader *shader);
-#include "llvm_compute_reference.h"
 
 static struct radeon_info
 model(enum radeon_family family, bool graphics)
@@ -63,20 +48,18 @@ model(enum radeon_family family, bool graphics)
 static void
 test_finalizer(const struct radeon_info *info)
 {
-   struct si_screen screen = {.info = *info};
-   struct si_shader_selector selector = {.screen = &screen, .stage = MESA_SHADER_COMPUTE};
-   struct si_shader donor = {.selector = &selector};
    const unsigned grain = ac_shader_get_lds_alloc_granularity(info->gfx_level);
    const unsigned limit = info->compiler_info.lds_size_per_workgroup;
    const unsigned sizes[] = {0, 1, grain - 1, grain, grain + 1, limit};
    nir_shader shader = {.info = {.stage = MESA_SHADER_COMPUTE}};
    for (unsigned i = 0; i < ARRAY_SIZE(sizes); i++) {
-      shader.info.shared_size = donor.info.shared_size = sizes[i];
+      shader.info.shared_size = sizes[i];
       struct ac_shader_config config;
       memset(&config, 0xa5, sizeof(config));
       config.lds_size = 0;
       struct ac_shader_config expected = config;
-      expected.lds_size = si_calculate_needed_lds_size(info->gfx_level, &donor);
+      /* Compute LDS is exactly the shader's shared size. */
+      expected.lds_size = sizes[i];
       CHECK(stela_amd_llvm_finalize_compute_lds(&info->compiler_info, &shader, &config) ==
             STELA_AMD_LLVM_COMPUTE_OK);
       CHECK(!memcmp(&expected, &config, sizeof(config)));
@@ -133,7 +116,7 @@ test_finalizer(const struct radeon_info *info)
 
 struct fixture {
    LLVMMemoryBufferRef input;
-   const char *entry;
+   const char *name, *entry;
    unsigned workgroup, shared_bytes, shared_index;
    bool dynamic;
    enum { FIXED, ALLOCATION_GRAIN, TARGET_LIMIT } specialization;
@@ -206,14 +189,6 @@ struct compiled {
 };
 
 static void
-hash_bytes(const void *data, size_t size, char result[BLAKE3_HEX_LEN])
-{
-   blake3_hash hash;
-   _mesa_blake3_compute(data, size, hash);
-   _mesa_blake3_format(result, hash);
-}
-
-static void
 observe_assembly(struct compiled *result, const char *text)
 {
    result->shared_reads += strstr(text, "ds_read") != NULL || strstr(text, "ds_load") != NULL;
@@ -237,7 +212,7 @@ capture(void **private, const struct ac_shader_config *config,
    result->parsed_lds = config->lds_size;
    result->executable_bytes = exec_size;
    result->code_bytes = code_dw * 4;
-   hash_bytes(code, exec_size, result->hash);
+   stela_digest(code, exec_size, result->hash);
    char *text = malloc((size_t)assembly_size + 1);
    CHECK(text);
    memcpy(text, assembly, assembly_size);
@@ -298,7 +273,7 @@ compile_llvm(nir_shader *shader, const struct ac_shader_args *args,
       if (name && !strcmp(name, ".text")) {
          CHECK(!result->executable_bytes && data && size && size <= UINT32_MAX && size <= elf_size);
          result->code_bytes = result->executable_bytes = size;
-         hash_bytes(data, size, result->hash);
+         stela_digest(data, size, result->hash);
          LLVMDisasmContextRef disasm = LLVMCreateDisasmCPU(LLVMGetTarget(llvm.module),
             ac_get_llvm_processor_name(info->family), NULL, 0, NULL, NULL);
          CHECK(disasm);
@@ -361,10 +336,10 @@ register_word(const uint32_t *words, unsigned count, unsigned reg)
 }
 
 static void
-compile_target(const struct fixture *fixture, enum radeon_family family,
+compile_target(const struct fixture *fixture, const char *target, enum radeon_family family,
                 unsigned wave, bool llvm_backend)
 {
-   struct radeon_info info = model(family, !llvm_backend);
+   struct radeon_info info = model(family, stela_amd_has_graphics(family));
    struct fixture specialized = *fixture;
    if (fixture->specialization == ALLOCATION_GRAIN)
       specialized.shared_bytes = ac_shader_get_lds_alloc_granularity(info.gfx_level);
@@ -372,7 +347,7 @@ compile_target(const struct fixture *fixture, enum radeon_family family,
       specialized.shared_bytes = info.compiler_info.lds_size_per_workgroup;
    fixture = &specialized;
    if (!llvm_backend && !aco_is_gpu_supported(&info)) {
-      printf("AMD shared explicit unsupported ACO %s\n", ac_get_family_name(family));
+      record_held(target, stela_amd_aco_refusal(family));
       return;
    }
    test_finalizer(&info);
@@ -504,30 +479,31 @@ compile_target(const struct fixture *fixture, enum radeon_family family,
    CHECK(stela_amd_compute_pipeline(&info, &pipeline, words, ARRAY_SIZE(words), &count) ==
          STELA_AMD_COMMAND_OK);
    CHECK(register_word(words, count, R_00B84C_COMPUTE_PGM_RSRC2) == pipeline.rsrc2);
-   printf("STELA_AMD_SHARED {\"backend\":\"%s\",\"target\":\"%s\",\"wave\":%u,\"entry\":",
-          llvm_backend ? "llvm" : "aco", ac_get_family_name(family), wave);
-   json_string(fixture->entry);
-   char shared_index[16] = "null";
+   record_compiled(target, compiled.executable_bytes);
+   record_object("facts");
+   record_str("backend", llvm_backend ? "llvm" : "aco");
+   record_str("input_blake3", fixture->hash);
+   record_str("code_blake3", compiled.hash);
+   record_uint("workgroup", fixture->workgroup);
+   record_uint("shared_bytes", fixture->shared_bytes);
    if (fixture->dynamic)
-      snprintf(shared_index, sizeof(shared_index), "%u", fixture->shared_index);
-   printf(",\"input_blake3\":\"%s\",\"code_blake3\":\"%s\",\"code_bytes\":%u,"
-          "\"workgroup\":%u,\"shared_bytes\":%u,\"dynamic\":%s,\"metal_as3_index\":%s,"
-          "\"shared_specialization\":%u,"
-          "\"parsed_lds_bytes\":%u,\"final_lds_bytes\":%u,\"raw_rsrc2\":%u,"
-          "\"pm4_rsrc2\":%u,\"encoded_lds_blocks\":%u,\"lds_allocation_grain\":%u,"
-          "\"nir_shared_loads\":%u,\"nir_shared_stores\":%u,\"nir_barriers\":%u,"
-          "\"instruction_view\":\"%s\",\"instruction_shared_reads\":%u,"
-          "\"instruction_shared_writes\":%u,\"instruction_barriers\":%u,"
-          "\"instruction_waits\":%u,\"physical_gpu_execution\":false}\n",
-          fixture->hash, compiled.hash, compiled.executable_bytes, fixture->workgroup,
-          fixture->shared_bytes, fixture->dynamic ? "true" : "false", shared_index,
-          fixture->specialization,
-          compiled.parsed_lds, compiled.config.lds_size, compiled.config.rsrc2, pipeline.rsrc2,
-          encoded, ac_shader_get_lds_alloc_granularity(info.gfx_level),
-          shared_loads, shared_stores, barriers,
-          compiled.binary_disassembled ? "binary-disassembly" : "original-aco-hardware-ir",
-          compiled.shared_reads, compiled.shared_writes,
-          compiled.barriers, compiled.waits);
+      record_uint("metal_as3_index", fixture->shared_index);
+   record_uint("parsed_lds_bytes", compiled.parsed_lds);
+   record_uint("final_lds_bytes", compiled.config.lds_size);
+   record_uint("raw_rsrc2", compiled.config.rsrc2);
+   record_uint("pm4_rsrc2", pipeline.rsrc2);
+   record_uint("encoded_lds_blocks", encoded);
+   record_uint("lds_allocation_grain", ac_shader_get_lds_alloc_granularity(info.gfx_level));
+   record_uint("nir_shared_loads", shared_loads);
+   record_uint("nir_shared_stores", shared_stores);
+   record_uint("nir_barriers", barriers);
+   record_str("instruction_view", compiled.binary_disassembled ? "binary-disassembly" :
+                                                                 "original-aco-hardware-ir");
+   record_uint("instruction_shared_reads", compiled.shared_reads);
+   record_uint("instruction_shared_writes", compiled.shared_writes);
+   record_uint("instruction_barriers", compiled.barriers);
+   record_uint("instruction_waits", compiled.waits);
+   record_end();
    ralloc_free(shader);
 }
 
@@ -545,22 +521,20 @@ main(int argc, char **argv)
 #endif
    glsl_type_singleton_init_or_ref();
    struct fixture fixtures[] = {
-      {.entry = "stela_threadgroup_static", .workgroup = 32, .shared_bytes = 128},
-      {.entry = "stela_threadgroup_dynamic", .workgroup = 32, .shared_bytes = 128,
-       .dynamic = true, .shared_index = 3},
-      {.entry = "kernel", .workgroup = 64, .shared_bytes = 256},
-      {.entry = "kernel", .workgroup = 64, .shared_bytes = 256, .dynamic = true, .shared_index = 7},
-      {.entry = "kernel", .workgroup = 32}, /* Original no-shared AIR fixture. */
-      {.entry = "kernel", .workgroup = 64, .dynamic = true, .shared_index = 7,
-       .specialization = ALLOCATION_GRAIN},
-      {.entry = "kernel", .workgroup = 64, .dynamic = true, .shared_index = 7,
-       .specialization = TARGET_LIMIT},
+      {.name = "original-static", .entry = "stela_threadgroup_static", .workgroup = 32,
+       .shared_bytes = 128},
+      {.name = "original-dynamic", .entry = "stela_threadgroup_dynamic", .workgroup = 32,
+       .shared_bytes = 128, .dynamic = true, .shared_index = 3},
+      {.name = "static-wg64", .entry = "kernel", .workgroup = 64, .shared_bytes = 256},
+      {.name = "dynamic-wg64", .entry = "kernel", .workgroup = 64, .shared_bytes = 256,
+       .dynamic = true, .shared_index = 7},
+      /* Original no-shared AIR fixture. */
+      {.name = "no-shared", .entry = "kernel", .workgroup = 32},
+      {.name = "dynamic-grain", .entry = "kernel", .workgroup = 64, .dynamic = true,
+       .shared_index = 7, .specialization = ALLOCATION_GRAIN},
+      {.name = "dynamic-limit", .entry = "kernel", .workgroup = 64, .dynamic = true,
+       .shared_index = 7, .specialization = TARGET_LIMIT},
    };
-   const enum radeon_family targets[] = {
-      CHIP_TAHITI, CHIP_BONAIRE, CHIP_CARRIZO, CHIP_RAVEN, CHIP_NAVI10,
-      CHIP_REMBRANDT, CHIP_NAVI31, CHIP_STRIX1, CHIP_GFX1170, CHIP_GFX1201,
-   };
-   unsigned outputs = 0;
    for (unsigned i = 0; i < ARRAY_SIZE(fixtures); i++) {
       struct fixture *fixture = &fixtures[i];
       fixture->input = i == 4 ? stela_air_test_bitcode(stela_air_test_store_body, "") :
@@ -569,24 +543,30 @@ main(int argc, char **argv)
       const unsigned workgroup[3] = {fixture->workgroup, 1, 1};
       CHECK(input_receipt_options(fixture->input, fixture->entry, i != 4,
                                    fixture->hash, workgroup, 256));
-      for (unsigned j = 0; j < ARRAY_SIZE(targets); j++) {
-         compile_target(fixture, targets[j], 64, false);
-         outputs++;
-         if (ac_get_gfx_level(targets[j]) >= GFX10) {
-            compile_target(fixture, targets[j], 32, false);
-            outputs++;
+      /* ACO compiles every family it supports; the retained LLVM backend
+       * compiles the families ACO holds, at wave64. The first pass records
+       * expectations. */
+      for (unsigned pass = 0; pass < 2; pass++) {
+         for (unsigned j = 0; j < ARRAY_SIZE(stela_amd_targets); j++) {
+            const enum radeon_family family = stela_amd_targets[j];
+            const bool llvm = stela_amd_aco_hold(family);
+            const char *hold = llvm ? stela_amd_llvm_hold(family) : NULL;
+            const unsigned min_wave = llvm ? 64 : stela_amd_min_wave(family);
+            for (unsigned wave = 64; wave >= min_wave; wave /= 2) {
+               char name[32], target[64];
+               stela_amd_target_name(name, family, wave);
+               snprintf(target, sizeof(target), "%s/%s", fixture->name, name);
+               if (!pass)
+                  record_expect(target, hold);
+               else if (hold)
+                  record_held(target, hold);
+               else
+                  compile_target(fixture, target, family, wave, llvm);
+            }
          }
       }
-#if STELA_AMD_TEST_LLVM
-      const enum radeon_family cdna[] = {CHIP_MI100, CHIP_MI200, CHIP_GFX940};
-      for (unsigned j = 0; j < ARRAY_SIZE(cdna); j++) {
-         compile_target(fixture, cdna[j], 64, true);
-         outputs++;
-      }
-#endif
       LLVMDisposeMemoryBuffer(fixture->input);
    }
    glsl_type_singleton_decref();
-   printf("AMD shared: %u real AIR/NIR compiler configs -> original LDS policy -> decoded PM4; CPU models only\n", outputs);
    return 0;
 }
