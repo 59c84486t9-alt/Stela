@@ -839,7 +839,7 @@ mod tests {
         },
     };
     use stela_drivers::{
-        block::{BlockError, RamDisk},
+        block::{BlockError, RamDisk, Sense},
         usb::storage::Data,
     };
 
@@ -1245,7 +1245,11 @@ mod tests {
         ));
         assert_eq!(
             second.command(&[0x04, 0, 0, 0, 0, 0], Data::None),
-            Err(BlockError::Device { status: 0x05_2000 })
+            Err(BlockError::Sense(Sense {
+                key: Sense::ILLEGAL_REQUEST,
+                asc: 0x20,
+                ascq: 0
+            }))
         );
         // The device still answers after the failed command.
         let mut block = [0u8; 512];
