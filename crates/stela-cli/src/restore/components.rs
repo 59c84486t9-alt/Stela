@@ -270,6 +270,66 @@ mod tests {
         assert_eq!(Profile::of(SYNTHETIC.0).unwrap().board_id, SYNTHETIC.2);
     }
 
+    /// Every registry board is a selectable profile: its model resolves, its
+    /// ApChipID has a SoC row and CPU profile, and its `/cpus` bind to that
+    /// row's PEs or refuse for a stated gap: J700AP's P cores carry only
+    /// per-variant L2 sizes (the bundle resolves them,
+    /// `soc::template_variant`), and the T6050 template leaves
+    /// `product-soc-name` to the variant iBoot picks. The registry's cluster
+    /// aggregate gives each cluster its first PE's type, so J873gAP's M cores
+    /// read as P here (`isa/apple-board-interfaces.json` keeps them).
+    #[test]
+    fn every_registry_board_resolves_to_a_soc_row() {
+        use stela_runtime::machine::soc;
+        let registry: serde_json::Value = serde_json::from_str(REGISTRY).unwrap();
+        let boards = registry["boards"].as_array().unwrap();
+        assert_eq!(boards.len(), 59);
+        let mut bound = 0;
+        for board in boards {
+            let model = board["product_type"].as_str().unwrap();
+            let profile = Profile::of(model).unwrap();
+            assert_eq!(
+                profile.device_class,
+                board["device_class"].as_str().unwrap()
+            );
+            let chip = soc::chip(profile.chip_id).unwrap_or_else(|| panic!("{model}"));
+            let processors: Vec<soc::Processor> = board["clusters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|cluster| {
+                    let kind = cluster["cluster_type"].as_str().unwrap().as_bytes()[0];
+                    let l2 = cluster["l2_cache_size"].as_u64().map(|b| b as u32);
+                    cluster["reg"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(move |reg| soc::Processor {
+                            cluster_type: kind,
+                            reg: hex(reg.as_str().unwrap()).unwrap(),
+                            l2_bytes: l2,
+                        })
+                })
+                .collect();
+            let Some(name) = board["product_soc_name"].as_str() else {
+                assert_eq!(profile.chip_id, 0x6050, "{model}");
+                continue;
+            };
+            match soc::cpus(profile.chip_id, name, &processors) {
+                Ok(cpus) => {
+                    assert_eq!(cpus.chip, chip, "{model}");
+                    bound += 1;
+                }
+                Err(reason) => {
+                    assert_eq!(profile.chip_id, 0x8140, "{model}: {reason}");
+                    assert!(reason.contains("no l2-cache-size"), "{model}: {reason}");
+                    assert!(soc::template_variant(0x8140).is_some());
+                }
+            }
+        }
+        assert_eq!(bound, 59 - 7 - 1);
+    }
+
     #[test]
     fn identities_are_chosen_by_board_and_restore_behavior() {
         let manifest = manifest();
