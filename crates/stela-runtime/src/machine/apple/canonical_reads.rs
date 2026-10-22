@@ -15,8 +15,7 @@ impl AppleDevices {
                 .route(physical, width)
                 .ok()
                 .is_some_and(|(device, offset)| {
-                    self.bus
-                        .device::<memory_resources::Prepared>(device)
+                    memory_resources::resource_for(&self.bus, device)
                         .is_some_and(|owner| owner.requires_ram_read(offset, width))
                 })
         };
@@ -53,15 +52,13 @@ impl AppleDevices {
                 .bus
                 .route(physical, width)
                 .expect("exclusive board borrow retains the classified prepared route");
-            let owner = self
-                .bus
-                .device::<memory_resources::Prepared>(device)
+            let owner = memory_resources::resource_for(&self.bus, device)
                 .expect("exclusive board borrow retains the classified prepared owner");
             // SAFETY: only the engine's held native/all-writer service can
             // implement this sealed interface. Its consuming continuation
             // requires the closed synchronous producer set; this path performs
             // no RAM copy, new submission or native resume while it is held.
-            // Prepared also checks this exact RAM identity and generation.
+            // Each resource also checks this exact RAM identity and generation.
             unsafe { owner.read_ram_drain(offset, width, memory.memory()) }
                 .map_err(|reason| DeviceError::TransferRefused(reason.into()))
         } else {

@@ -1,0 +1,91 @@
+//! Borrowed dispatch to the actual placed memory resource, never copied state.
+use super::{Prepared, t8112};
+use crate::{
+    memory::CanonicalRamService,
+    platform::apple::bus::{Access, Bus, DeviceId, Width},
+};
+
+pub(in crate::machine::apple) enum Resource<'a> {
+    Direct(&'a Prepared),
+    T8112(&'a t8112::Prepared),
+}
+pub(in crate::machine::apple) fn resource_for(bus: &Bus, device: DeviceId) -> Option<Resource<'_>> {
+    bus.device::<Prepared>(device)
+        .map(Resource::Direct)
+        .or_else(|| bus.device::<t8112::Prepared>(device).map(Resource::T8112))
+}
+impl Resource<'_> {
+    pub(in crate::machine::apple) fn requires_ram_read(&self, offset: u64, width: Width) -> bool {
+        match self {
+            Self::Direct(owner) => owner.requires_ram_read(offset, width),
+            Self::T8112(owner) => owner.requires_ram_read(offset, width),
+        }
+    }
+    /// # Safety
+    /// The complete live canonical owner/closed producer contract of the
+    /// selected resource's read_ram_drain holds throughout this operation.
+    pub(in crate::machine::apple) unsafe fn read_ram_drain(
+        &self,
+        offset: u64,
+        width: Width,
+        memory: &CanonicalRamService<'_>,
+    ) -> Result<u64, &'static str> {
+        match self {
+            Self::Direct(owner) => unsafe { owner.read_ram_drain(offset, width, memory) },
+            Self::T8112(owner) => unsafe { owner.read_ram_drain(offset, width, memory) },
+        }
+    }
+    /// # Safety
+    /// The selected resource's same complete live ownership contract holds
+    /// through consumption; no device transfer or worker can advance meanwhile.
+    pub(in crate::machine::apple) unsafe fn write_ram_drain(
+        &self,
+        offset: u64,
+        width: Width,
+        value: u64,
+        now: u64,
+        memory: &CanonicalRamService<'_>,
+    ) -> Result<(), &'static str> {
+        match self {
+            Self::Direct(owner) => unsafe {
+                owner.write_ram_drain(offset, width, value, now, memory)
+            },
+            Self::T8112(owner) => unsafe {
+                owner.write_ram_drain(offset, width, value, now, memory)
+            },
+        }
+    }
+    pub(in crate::machine::apple) fn supports_pair(&self, offset: u64, bytes: u8) -> bool {
+        match self {
+            Self::Direct(owner) => owner.supports_pair(offset, bytes),
+            Self::T8112(owner) => owner.supports_pair(offset, bytes),
+        }
+    }
+    pub(in crate::machine::apple) fn read_pair_values(
+        &self,
+        offset: u64,
+        bytes: u8,
+        access: &mut Access<'_>,
+    ) -> Result<[u64; 2], &'static str> {
+        match self {
+            Self::Direct(owner) => owner.read_pair_values(offset, bytes, access),
+            Self::T8112(owner) => owner.read_pair_values(offset, bytes, access),
+        }
+    }
+    pub(in crate::machine::apple) fn publication_binding(&self) -> (u64, u64, u64) {
+        match self {
+            Self::Direct(owner) => owner.publication_binding(),
+            Self::T8112(owner) => owner.publication_binding(),
+        }
+    }
+    pub(in crate::machine::apple) fn display_publication_view(
+        &self,
+        physical: u64,
+        bytes: u64,
+    ) -> Result<(u64, u64, u64), &'static str> {
+        match self {
+            Self::Direct(owner) => owner.display_publication_view(physical, bytes),
+            Self::T8112(owner) => owner.display_publication_view(physical, bytes),
+        }
+    }
+}

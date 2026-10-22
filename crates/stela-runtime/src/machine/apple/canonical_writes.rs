@@ -48,9 +48,7 @@ impl AppleDevices {
                     .as_mut()
                     .expect("canonical write requires its live service");
                 let (device, offset) = self.bus.route(physical, width).map_err(describe)?;
-                let owner = self
-                    .bus
-                    .device::<memory_resources::Prepared>(device)
+                let owner = memory_resources::resource_for(&self.bus, device)
                     .expect("exclusive board borrow retains the classified prepared owner");
                 // SAFETY: the sealed consuming owner retains the whole stopped
                 // native cohort and closed synchronous RAM producer set. No RAM

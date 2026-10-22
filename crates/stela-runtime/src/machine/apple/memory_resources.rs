@@ -18,6 +18,9 @@ pub use crate::platform::apple::{amcc, bus::LifecycleState, mcc, ptd};
 
 mod canonical;
 pub mod dcs;
+mod resource;
+pub(super) use resource::resource_for;
+pub mod t8112;
 
 /// One prepared software resource with immutable placement and actual shared
 /// controller identity. A caller must still bind canonical RAM, all writers,
