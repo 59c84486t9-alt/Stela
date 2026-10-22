@@ -4,7 +4,8 @@
 //! The shipped DeviceTree lists the domains in `/arm-io/pmgr` `perf-domains`,
 //! 28-byte entries whose byte 0 numbers the domain's table, byte 2 is 1 for a
 //! CPU cluster, and bytes 12..28 name it (J473AP: `SOC` 0, `ECPU` 1, `DCS` 2,
-//! `PCPU` 5, `ANE` 8, `DISP` 11). It ships tables for only some of them;
+//! `PCPU` 5, `ANE` 8, `DISP` 11; the T6050's M clusters are `MCPU0` 22 and
+//! `MCPU1` 23, its cluster type M). It ships tables for only some of them;
 //! 26A434 J473AP `ApplePMGR::initDriver` looks up `voltage-states<table>` for
 //! every domain and panics on one it lacks ("voltage-states1 not found").
 //!
@@ -74,6 +75,8 @@ fn cluster(domain: &str, chip_id: u32) -> Result<Option<Vec<u8>>> {
         (b'E', suffix)
     } else if let Some(suffix) = domain.strip_prefix("PCPU") {
         (b'P', suffix)
+    } else if let Some(suffix) = domain.strip_prefix("MCPU") {
+        (b'M', suffix)
     } else {
         anyhow::bail!("CPU domain {domain} names no cluster type");
     };
@@ -235,7 +238,10 @@ mod tests {
             cluster("ECPU", 0x6000).unwrap()
         );
         assert!(cluster("PCPU1", 0x8122).unwrap().is_none());
-        for invalid in ["PCPU-1", "PCPU1x", "PCPU１", "PCPU ", "MCPU", ""] {
+        // The T6050's M clusters (MCPU0 table 22, MCPU1 table 23 beside
+        // PCPU 5 in J714sAP's perf-domains) have no operating points.
+        assert!(cluster("MCPU0", 0x6050).unwrap().is_none());
+        for invalid in ["PCPU-1", "PCPU1x", "PCPU１", "PCPU ", "XCPU", ""] {
             assert!(cluster(invalid, 0x6000).is_err(), "{invalid}");
         }
     }
