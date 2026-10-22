@@ -1,6 +1,10 @@
 //! Verified selected-bundle provenance, distinct from its post-load live ADT.
 //! No hash chooses a source family, creates hardware ownership or authenticates
 //! an Apple container/signature. The actual resource factory checks geometry.
+#[path = "source/clpc.rs"]
+mod clpc;
+#[path = "source/cpus.rs"]
+mod cpus;
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 use sha2::{Digest, Sha256};
 use stela_loader::{apple_device_tree::DeviceTree, boot_bundle::ORIGINAL_DEVICE_TREE_FILE};
@@ -23,6 +27,8 @@ pub(crate) struct Intake {
     tree_source: usize,
     soc: u32,
     board: u32,
+    cpus: cpus::Prepared,
+    hidden_clpc: Vec<String>,
 }
 
 fn digest(value: &str) -> Result<[u8; 32], String> {
@@ -70,8 +76,12 @@ impl Intake {
     ) -> Result<Self, String> {
         let manifest = verified.manifest;
         let target = manifest.target.as_ref().ok_or(
-            "selected Apple bundle requires target/source provenance; reprepare with schema3",
+            "selected Apple bundle requires target/source provenance; reprepare with schema4",
         )?;
+        let boot_cpu = manifest
+            .boot_cpu
+            .as_ref()
+            .ok_or("selected Apple bundle requires boot_cpu provenance; reprepare with schema4")?;
         if [
             &target.product_type,
             &target.device_class,
@@ -104,7 +114,7 @@ impl Intake {
             .iter()
             .find(|file| file.name == ORIGINAL_DEVICE_TREE_FILE)
             .ok_or(
-                "selected bundle lacks unchanged original-devicetree.adt; reprepare with schema3",
+                "selected bundle lacks unchanged original-devicetree.adt; reprepare with schema4",
             )?;
         if manifest
             .regions
@@ -127,7 +137,8 @@ impl Intake {
         {
             return Err("original DeviceTree differs from its verified whole-file identity".into());
         }
-        DeviceTree::parse(original).map_err(|e| format!("original source ADT: {e}"))?;
+        let original_tree =
+            DeviceTree::parse(original).map_err(|e| format!("original source ADT: {e}"))?;
         let mut selected = None;
         if manifest.sources.is_empty() {
             return Err("selected bundle has no original input source identities".into());
@@ -161,15 +172,6 @@ impl Intake {
         kept.try_reserve_exact(original.len())
             .map_err(|_| "original DeviceTree source allocation failed")?;
         kept.extend_from_slice(original);
-        let intake = Self {
-            original: kept,
-            original_sha256,
-            manifest_sha256: Sha256::digest(json).into(),
-            manifest: manifest.clone(),
-            tree_source,
-            soc,
-            board,
-        };
         let mut regions = manifest
             .regions
             .iter()
@@ -190,12 +192,35 @@ impl Intake {
         let prepared = file
             .get(start..end)
             .ok_or("prepared ADT range is outside verified file")?;
+        let prepared_tree =
+            DeviceTree::parse(prepared).map_err(|e| format!("prepared selected ADT: {e}"))?;
+        let cpus = cpus::Prepared::verify(&original_tree, &prepared_tree, boot_cpu)?;
+        let hidden_clpc = clpc::verify(&original_tree, &prepared_tree, &manifest.hidden_devices)?;
+        let intake = Self {
+            original: kept,
+            original_sha256,
+            manifest_sha256: Sha256::digest(json).into(),
+            manifest: manifest.clone(),
+            tree_source,
+            soc,
+            board,
+            cpus,
+            hidden_clpc,
+        };
         intake.validate_live(prepared)?;
         Ok(intake)
     }
 
     pub(crate) fn original(&self) -> &[u8] {
         &self.original
+    }
+    /// Logical PE in the verified prepared CPU order, independently derived
+    /// from the selected original identity rather than its source index.
+    pub(crate) fn boot_processor(&self) -> usize {
+        self.cpus.processor()
+    }
+    pub(crate) fn hidden_clpc(&self) -> &[String] {
+        &self.hidden_clpc
     }
     pub(crate) fn selected(&self) -> &Target {
         self.manifest
@@ -238,14 +263,15 @@ impl Intake {
             original_tree_sha256: self.original_sha256,
         })
     }
-    /// Only checks selected identity here. CPU/PMGR topology and source-state
-    /// qualification remain the resource factory's independent full contract.
+    /// Recheck selected identity and the entire verified prepared CPU sequence
+    /// after runtime patches. PMGR/resource qualification remains independent.
     pub(super) fn validate_live(&self, bytes: &[u8]) -> Result<(), String> {
         let tree = DeviceTree::parse(bytes).map_err(|e| format!("live selected ADT: {e}"))?;
         if word(&tree, "chip-id")? != self.soc || word(&tree, "board-id")? != self.board {
             return Err("live DeviceTree differs from selected restore chip/board identity".into());
         }
-        Ok(())
+        self.cpus.validate_live(&tree)?;
+        clpc::validate_live(&tree, &self.hidden_clpc)
     }
 }
 
@@ -265,11 +291,34 @@ mod tests {
             .unwrap();
         tree.set_property("/chosen", "board-id", board.to_le_bytes().to_vec())
             .unwrap();
+        tree.ensure_child("/", "cpus").unwrap();
+        for (name, affinity, kind) in [("cpu0", 0u32, b'E'), ("cpu4", 0x100, b'P')] {
+            tree.ensure_child("/cpus", name).unwrap();
+            let path = format!("/cpus/{name}");
+            for (key, value) in [
+                ("reg", affinity.to_le_bytes().to_vec()),
+                ("cluster-type", vec![kind, 0]),
+                (
+                    "state",
+                    if chip != 0 && kind == b'P' {
+                        b"running\0".to_vec()
+                    } else {
+                        b"waiting\0".to_vec()
+                    },
+                ),
+            ] {
+                tree.set_property(&path, key, value).unwrap();
+            }
+        }
         tree.serialize()
     }
     fn fixture(original: &[u8], prepared: &[u8]) -> Value {
         json!({
-            "schema_version": 3,
+            "schema_version": 4,
+            "boot_cpu": {
+                "path": "/cpus/cpu4", "affinity": 0x100, "cluster_type": 80,
+                "original_index": 1, "selection": "first-performance"
+            },
             "target": {
                 "product_type": "declared-test", "device_class": "declared-test",
                 "product_version": "test", "product_build": "test", "variant": "test",
@@ -318,6 +367,7 @@ mod tests {
         let raw = serde_json::to_vec(&json).unwrap();
         let source = intake_raw(&raw, &original, &prepared).unwrap();
         assert_eq!(source.original(), original);
+        assert_eq!(source.boot_processor(), 1);
         assert_eq!(source.selected().chip_id, Some(0x6000));
         assert_eq!(source.selected().board_id, Some(8));
         assert_eq!(source.sources().len(), 1);
@@ -357,7 +407,7 @@ mod tests {
         let original = tree(0, 0);
         let prepared = tree(0x6000, 8);
         let base = fixture(&original, &prepared);
-        for missing in ["target", "sources"] {
+        for missing in ["target", "sources", "boot_cpu"] {
             let mut changed = base.clone();
             changed.as_object_mut().unwrap().remove(missing);
             assert!(intake(&changed, &original, &prepared).is_err());
@@ -367,9 +417,11 @@ mod tests {
             changed["target"].as_object_mut().unwrap().remove(missing);
             assert!(intake(&changed, &original, &prepared).is_err());
         }
-        let mut old = base.clone();
-        old["schema_version"] = json!(2);
-        assert!(intake(&old, &original, &prepared).is_err());
+        for schema in 0..4 {
+            let mut old = base.clone();
+            old["schema_version"] = json!(schema);
+            assert!(intake(&old, &original, &prepared).is_err());
+        }
         let mut missing = base.clone();
         missing["files"].as_array_mut().unwrap().remove(0);
         assert!(intake(&missing, &original, &prepared).is_err());
@@ -385,6 +437,145 @@ mod tests {
         let region = repeated["regions"][0].clone();
         repeated["regions"].as_array_mut().unwrap().push(region);
         assert!(intake(&repeated, &original, &prepared).is_err());
+    }
+
+    #[test]
+    fn verified_boot_cpu_record_binds_source_identity_and_retained_runtime_position() {
+        let original = tree(0, 0);
+        let prepared = tree(0x6000, 8);
+        let base = fixture(&original, &prepared);
+        for (field, value) in [
+            ("path", json!("/cpus/cpu0")),
+            ("affinity", json!(0)),
+            ("cluster_type", json!(b'E')),
+            ("original_index", json!(0)),
+            ("selection", json!("unknown")),
+        ] {
+            let mut changed = base.clone();
+            changed["boot_cpu"][field] = value;
+            assert!(intake(&changed, &original, &prepared).is_err(), "{field}");
+        }
+        let mut retained = DeviceTree::parse(&prepared).unwrap();
+        retained.node_mut("/cpus").unwrap().children.remove(0);
+        let retained = retained.serialize();
+        let source = intake(&fixture(&original, &retained), &original, &retained).unwrap();
+        assert_eq!(
+            source.manifest().boot_cpu.as_ref().unwrap().original_index,
+            1
+        );
+        assert_eq!(source.boot_processor(), 0);
+        assert!(source.validate_live(&retained).is_ok());
+        assert!(source.validate_live(&prepared).is_err());
+        let mut live = DeviceTree::parse(&retained).unwrap();
+        live.set_property("/cpus/cpu4", "state", b"waiting\0".to_vec())
+            .unwrap();
+        assert!(source.validate_live(&live.serialize()).is_err());
+    }
+
+    #[test]
+    fn hidden_clpc_is_bound_to_verified_source_prepared_ledger_and_live_absence() {
+        let mut original = DeviceTree::parse(&tree(0, 0)).unwrap();
+        original.ensure_child("/", "counter-control").unwrap();
+        original
+            .set_property("/counter-control", "compatible", b"clpc,t8112\0".to_vec())
+            .unwrap();
+        let original = original.serialize();
+        let mut prepared = DeviceTree::parse(&tree(0x6000, 8)).unwrap();
+        prepared.ensure_child("/", "counter-control").unwrap();
+        let prepared = prepared.serialize();
+        let mut json = fixture(&original, &prepared);
+        assert!(intake(&json, &original, &prepared).is_err());
+        json["hidden_devices"] = json!(["/counter-control"]);
+        let source = intake(&json, &original, &prepared).unwrap();
+        assert_eq!(source.hidden_clpc(), ["/counter-control"]);
+        let mut live = DeviceTree::parse(&prepared).unwrap();
+        live.set_property("/counter-control", "compatible", b"clpc,t8112\0".to_vec())
+            .unwrap();
+        assert!(source.validate_live(&live.serialize()).is_err());
+        json["hidden_devices"] = json!(["/counter-control", "/counter-control"]);
+        assert!(intake(&json, &original, &prepared).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires the pinned 26A434 original ADTs in STELA_TEST_CPU_DT_DIR"]
+    fn every_original_board_cpu_and_clpc_contract_survives_verified_intake() {
+        let directory = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap());
+        let facts: Value =
+            serde_json::from_str(include_str!("../../../../../isa/apple-soc-facts.json")).unwrap();
+        let boards = facts["boards"].as_array().unwrap();
+        assert_eq!(boards.len(), 59);
+        for board in boards {
+            let device = board["device_class"].as_str().unwrap();
+            let original =
+                std::fs::read(directory.join(format!("DeviceTree.{device}.adt"))).unwrap();
+            assert_eq!(
+                stela_runtime::sha256(&original),
+                board["source"]["decoded_sha256"].as_str().unwrap(),
+                "{device}"
+            );
+            let number = |field: &str| {
+                u32::from_str_radix(board[field].as_str().unwrap().trim_start_matches("0x"), 16)
+                    .unwrap()
+            };
+            let (soc, board_id) = (number("chip_id"), number("board_id"));
+            let source_tree = DeviceTree::parse(&original).unwrap();
+            let mut prepared = source_tree.clone();
+            stela_loader::soc_variant::apply(&mut prepared, Some(soc), Some(board_id)).unwrap();
+            let cpus = &prepared.node("/cpus").unwrap().children;
+            let selected = cpus
+                .iter()
+                .position(|node| node.property("cluster-type").unwrap().value == b"P\0")
+                .unwrap();
+            let node = &cpus[selected];
+            let name = node.name().unwrap().to_owned();
+            let affinity = node.property("reg").unwrap().as_u32().unwrap();
+            let original_index = source_tree
+                .node("/cpus")
+                .unwrap()
+                .children
+                .iter()
+                .position(|node| node.name() == Some(&name))
+                .unwrap();
+            let names = cpus
+                .iter()
+                .map(|node| node.name().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            for (index, name) in names.iter().enumerate() {
+                prepared
+                    .set_property(
+                        &format!("/cpus/{name}"),
+                        "state",
+                        if index == selected {
+                            b"running\0".to_vec()
+                        } else {
+                            b"waiting\0".to_vec()
+                        },
+                    )
+                    .unwrap();
+            }
+            prepared
+                .set_property("/chosen", "chip-id", soc.to_le_bytes().to_vec())
+                .unwrap();
+            prepared
+                .set_property("/chosen", "board-id", board_id.to_le_bytes().to_vec())
+                .unwrap();
+            let hidden = stela_loader::devices::hide_unmodeled(&mut prepared);
+            let prepared = prepared.serialize();
+            let mut json = fixture(&original, &prepared);
+            json["target"]["chip_id"] = json!(soc);
+            json["target"]["board_id"] = json!(board_id);
+            json["boot_cpu"] = json!({"path": format!("/cpus/{name}"), "affinity": affinity, "cluster_type": b'P', "original_index": original_index, "selection": "first-performance"});
+            json["hidden_devices"] = json!(hidden);
+            json["regions"][0]["memory_bytes"] = json!(prepared.len());
+            let source = intake(&json, &original, &prepared)
+                .unwrap_or_else(|error| panic!("{device}: {error}"));
+            assert_eq!(source.boot_processor(), selected, "{device}");
+            assert_eq!(source.hidden_clpc(), ["/arm-io/pmgr/clpc"], "{device}");
+            source.validate_live(&prepared).unwrap();
+        }
+        std::println!(
+            "qualified schema4 CPU and hidden-CLPC intake on 59 pinned original board ADTs"
+        );
     }
 
     #[test]

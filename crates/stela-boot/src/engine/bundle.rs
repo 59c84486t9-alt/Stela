@@ -55,6 +55,10 @@ const CPUID_RDSEED: u32 = 1 << 18;
 pub struct Entry {
     pub pc: u64,
     pub x0: u64,
+    /// Verified selected PE in prepared/live ADT order, never source index.
+    pub boot_processor: Option<usize>,
+    /// Retained original CLPC class paths with verified hidden admission.
+    pub hidden_clpc: Vec<String>,
     pub dram_base: u64,
     pub regions: usize,
     pub patches: usize,
@@ -609,6 +613,8 @@ fn load_named<'a>(
     Ok(Entry {
         pc: image.entry_pa,
         x0: image.x0,
+        boot_processor: Some(source.boot_processor()),
+        hidden_clpc: source.hidden_clpc().to_vec(),
         dram_base,
         regions: image.regions.len(),
         patches: image.patches.len(),

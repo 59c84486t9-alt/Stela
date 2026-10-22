@@ -17,9 +17,9 @@ use alloc::{
 use core::fmt;
 use serde::Deserialize;
 
-/// Schema3 binds the original ADT and selected target/source provenance at the
-/// boot mount; schema2 did not require or interpret those metadata fields.
-pub const SCHEMA_VERSION: u32 = 3;
+/// Schema4 binds the selected boot CPU to the original and prepared ADTs.
+/// Older readers started PE0 even when preparation selected another PE.
+pub const SCHEMA_VERSION: u32 = 4;
 pub const MANIFEST_FILE: &str = "bundle.json";
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 /// Guest DRAM is backed by 2 MiB host frames.
@@ -151,6 +151,25 @@ pub struct Source {
     pub decoded_sha256: String,
 }
 
+/// Preparation policy, distinct from the selected CPU's source identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BootCpuSelection {
+    FirstPerformance,
+    Explicit,
+}
+
+/// Original CPU identity selected by preparation. `original_index` is source
+/// provenance, never a prepared or runtime logical PE index.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct BootCpu {
+    pub path: String,
+    pub affinity: u32,
+    pub cluster_type: u8,
+    pub original_index: usize,
+    pub selection: BootCpuSelection,
+}
+
 /// The fields of `bundle.json` the mount uses; others are ignored.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
@@ -162,6 +181,10 @@ pub struct Manifest {
     #[serde(default)]
     pub sources: Vec<Source>,
     pub options: Options,
+    /// Authored diagnostics may omit this; genuine Apple intake requires and
+    /// verifies it against immutable source and prepared/live CPU identities.
+    #[serde(default)]
+    pub boot_cpu: Option<BootCpu>,
     pub files: Vec<File>,
     pub regions: Vec<Region>,
     pub entry: Entry,
@@ -641,7 +664,7 @@ mod tests {
         let sha = crate::sha256;
         format!(
             r#"{{
-  "schema_version": 3, "unknown_field": true,
+  "schema_version": 4, "unknown_field": true,
   "options": {{"dram_base": {BASE}, "dram_size": 1073741824, "phys_base": {BASE}}},
   "files": [
     {{"name": "kernel.img", "bytes": {kb}, "sha256": "{ks}"}},
@@ -700,14 +723,14 @@ mod tests {
                 .hidden_devices
                 .is_empty()
         );
-        let supplied = json.replacen("\"schema_version\": 3", "\"hidden_devices\": [\"/arm-io/ave\", \"/ secure-root-prefix\"], \"schema_version\": 3", 1);
+        let supplied = json.replacen("\"schema_version\": 4", "\"hidden_devices\": [\"/arm-io/ave\", \"/ secure-root-prefix\"], \"schema_version\": 4", 1);
         assert_eq!(
             Manifest::parse(supplied.as_bytes()).unwrap().hidden_devices,
             ["/arm-io/ave", "/ secure-root-prefix"]
         );
         let malformed = json.replacen(
-            "\"schema_version\": 3",
-            "\"hidden_devices\": [17], \"schema_version\": 3",
+            "\"schema_version\": 4",
+            "\"hidden_devices\": [17], \"schema_version\": 4",
             1,
         );
         assert!(Manifest::parse(malformed.as_bytes()).is_err());
@@ -753,6 +776,65 @@ mod tests {
             typed.replace("\"decoded_bytes\":32", "\"decoded_bytes\":-1"),
         ] {
             assert!(Manifest::parse(wrong.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn boot_cpu_schema4_preserves_typed_source_identity_and_rejects_ambiguity() {
+        let json = manifest_json(&[1; 32], &[2; 32]);
+        assert!(Manifest::parse(json.as_bytes()).unwrap().boot_cpu.is_none());
+        let record = r#"{"path":"/cpus/cpu4","affinity":256,"cluster_type":80,"original_index":4,"selection":"first-performance"}"#;
+        let with_cpu = json.replacen(
+            "\"schema_version\"",
+            &format!("\"boot_cpu\":{record},\"schema_version\""),
+            1,
+        );
+        let selected = Manifest::parse(with_cpu.as_bytes())
+            .unwrap()
+            .boot_cpu
+            .unwrap();
+        assert_eq!(selected.path, "/cpus/cpu4");
+        assert_eq!(selected.affinity, 256);
+        assert_eq!(selected.cluster_type, b'P');
+        assert_eq!(selected.original_index, 4);
+        assert_eq!(selected.selection, BootCpuSelection::FirstPerformance);
+        let explicit = with_cpu.replace("first-performance", "explicit");
+        assert_eq!(
+            Manifest::parse(explicit.as_bytes())
+                .unwrap()
+                .boot_cpu
+                .unwrap()
+                .selection,
+            BootCpuSelection::Explicit
+        );
+        for wrong in [
+            with_cpu.replace("first-performance", "cpu0"),
+            with_cpu.replace("\"affinity\":256", "\"affinity\":4294967296"),
+            with_cpu.replace("\"cluster_type\":80", "\"cluster_type\":256"),
+            with_cpu.replace("\"original_index\":4", "\"original_index\":-1"),
+            with_cpu.replace(
+                "\"original_index\":4",
+                "\"original_index\":4,\"original_index\":4",
+            ),
+            with_cpu.replacen(
+                "\"schema_version\"",
+                &format!("\"boot_cpu\":{record},\"schema_version\""),
+                1,
+            ),
+        ] {
+            assert!(Manifest::parse(wrong.as_bytes()).is_err());
+        }
+        for old in 0..4 {
+            assert!(
+                Manifest::parse(
+                    json.replace(
+                        "\"schema_version\": 4",
+                        &format!("\"schema_version\": {old}")
+                    )
+                    .as_bytes()
+                )
+                .is_err()
+            );
         }
     }
 
@@ -974,7 +1056,7 @@ mod tests {
         assert!(Manifest::parse(unsafe_name.as_bytes()).is_err());
         assert!(
             Manifest::parse(
-                json.replace("\"schema_version\": 3", "\"schema_version\": 2")
+                json.replace("\"schema_version\": 4", "\"schema_version\": 2")
                     .as_bytes()
             )
             .is_err()
