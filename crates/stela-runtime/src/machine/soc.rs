@@ -8,10 +8,13 @@
 //! the MIDR_EL1 part number of each cluster type (m1n1 `src/midr.h`
 //! `MIDR_PART_<soc>_<core>`; for the Ultras, the parts of the Max dies they
 //! join, and for the second M3 Max and the M3 Ultra an inference stated at
-//! their rows). A SoC row names the `machine::Chip` whose CPU profile its
-//! cores take; the A18 Pro takes the M4's (its row gives the evidence). A
-//! SoC, cluster type or affinity without that evidence refuses: the T6050
-//! (no `product-soc-name`) and its M cores.
+//! their rows). ApChipID 0x6050 has three rows, the M5 Pro, Max and Ultra,
+//! which its boards' DeviceTree template names per variant. A SoC row names
+//! the `machine::Chip` whose CPU profile its cores take; the A18 Pro takes
+//! the M4's (its row gives the evidence). A SoC, cluster type or affinity
+//! without that evidence refuses: the T6050's M cores, whose caches no
+//! source gives, the M6's M cores, and a T6050 DeviceTree whose template
+//! still leaves `product-soc-name` to iBoot.
 use super::{
     Chip,
     adt::Node,
@@ -189,11 +192,12 @@ const fn cache(bytes: u32, ways: u32) -> Cache {
 ///   chockenberry/1d08129bdf41bfb70e98c3a75ce74578): the M4 Max and the M5
 ///   report these `l1icachesize` and `l1dcachesize` values per core type,
 ///   with the `l2cachesize` values their boards' 26A434 DeviceTrees state.
-/// - Inferred: the M3 Pro and Max, the M4 and M4 Pro, the A18 Pro and the
-///   M6, whose 26A434 DeviceTrees give their cores the same `apple,sawtooth`
-///   and `apple,everest` compatibles as the M3, M4 Max and M5 cores above.
-///   This inference applies only to the declared E/P descriptors; the M6
-///   M type has no inferred cache geometry.
+/// - Inferred: the M3 Pro and Max, the M4 and M4 Pro, the A18 Pro, the P
+///   cores of the M5 Pro, Max and Ultra, and the M6, whose 26A434
+///   DeviceTrees give their cores the same `apple,sawtooth` and
+///   `apple,everest` compatibles as the M3, M4 Max and M5 cores above.
+///   This inference applies only to the declared E/P descriptors; the
+///   T6050 and M6 M types have no inferred cache geometry.
 const L1_CACHES: [CoreCaches; 2] = [
     CoreCaches {
         instruction: cache(128 << 10, 8),
@@ -250,6 +254,33 @@ const M6_CORES: [CoreType; 3] = [
         caches: None,
     },
 ];
+
+/// The T6050's core types: M cores (`cluster-type` M, `apple,sawtooth`) and
+/// P cores (`apple,everest`), no E cores (XNU `board_config.h` T6050
+/// `HAS_MCORE`). XNU `osfmk/arm/cpuid.h` gives the Sotra S (H17S) parts,
+/// M 0x64 and P 0x65, and the Sotra C (H17C) parts, 0x68 and 0x69 (m1n1
+/// `src/midr.h` `MIDR_PART_T6050_SOTRA_*` and `MIDR_PART_T6051_SOTRAC_*`),
+/// and `MPIDR_CORETYPE` M is 4. The P cores take the inferred P geometry
+/// ([`L1_CACHES`]); the M cores' level 1 geometry and both types' clocks are
+/// not established.
+const fn sotra_cores(m_part: u16, p_part: u16) -> [CoreType; 2] {
+    [
+        CoreType {
+            cluster_type: b'M',
+            midr_part: Some(m_part),
+            mpidr_aff2: Some(4),
+            operating_points: None,
+            caches: None,
+        },
+        CoreType {
+            cluster_type: b'P',
+            midr_part: Some(p_part),
+            mpidr_aff2: Some(1),
+            operating_points: None,
+            caches: Some(L1_CACHES[1]),
+        },
+    ]
+}
 
 /// One CPU cluster's PMGR registers (`platform::apple::cluster`): their
 /// base, the performance-state slots the boot firmware fills and the DVMR
@@ -314,8 +345,10 @@ const LOCKDOWN: [u64; 2] = [0x5000, 0x9000];
 /// `MAX_CPU_CLUSTER_PHY_ID`, defaulting to the cluster count less one):
 /// the T6000 configuration covers the M1 Pro, Max and Ultra, T6020 the M2
 /// Pro, Max and Ultra, T6031 the M3 Max and Ultra, T6041 the M4 Pro and
-/// Max. Every 26A434 board DeviceTree fits its chip's
-/// (`topology::KernelLimits`).
+/// Max, T6050 the M5 Pro, Max and Ultra. Each Ultra boots its Max's 26A434
+/// kernel, and each of those kernels' `topology_info` arrays hold exactly
+/// these CPUs and clusters (`docs/research/cpu-topology.md`). Every 26A434
+/// board DeviceTree fits its chip's (`topology::KernelLimits`).
 const T8103_LIMITS: KernelLimits = KernelLimits::new(8, 2, 1);
 const T6000_LIMITS: KernelLimits = KernelLimits::new(20, 6, 10);
 const T8112_LIMITS: KernelLimits = KernelLimits::new(8, 2, 1);
@@ -325,6 +358,7 @@ const T6030_LIMITS: KernelLimits = KernelLimits::new(12, 2, 1);
 const T6031_LIMITS: KernelLimits = KernelLimits::new(32, 6, 10);
 const T8132_LIMITS: KernelLimits = KernelLimits::new(10, 2, 1);
 const T6041_LIMITS: KernelLimits = KernelLimits::new(16, 3, 2);
+const T6050_LIMITS: KernelLimits = KernelLimits::new(36, 6, 18);
 const T8142_LIMITS: KernelLimits = KernelLimits::new(10, 2, 1);
 /// The T8140 has no public configuration; its 26A434 kernel's
 /// (kernelcache.release.mac17p, SHA-256 `12ee4fc6...1d45`) compiles six CPUs,
@@ -348,8 +382,8 @@ const T8152_LIMITS: KernelLimits = KernelLimits::new(12, 2, 1);
 /// The event register offset every 26A434 M3-to-M6 iBoot writes to an
 /// `aic,3` node's `aic-iack-offset` (`mov w8, #0x40000` before the property
 /// name): J613 0x3c0f8, J514s 0x3b800, J514c 0x3e2a4, J773g 0x3a610, J614s
-/// 0x3c6e4, J614c 0x3c604, J700 0x3ce90, J813 0x3e79c and J873g 0x3cd14
-/// in the decoded `iBoot.<board>.RELEASE.im4p` payloads, where J473's writes
+/// 0x3c6e4, J614c 0x3c604, J700 0x3ce90, J813 0x3e79c, J714s 0x40f40 and
+/// J873g 0x3cd14 in the decoded `iBoot.<board>.RELEASE.im4p` payloads, where J473's writes
 /// the 0x8000 of `t8112.dtsi` (0x39a88).
 const AIC3_EVENT: u64 = 0x40000;
 
@@ -454,7 +488,42 @@ const M3_MAX: Soc = Soc {
     bridge_fields: None,
 };
 
-const SOCS: [Soc; 19] = [
+/// The M5 Pro, Max and Ultra share ApChipID 0x6050: every 26A434 build
+/// identity of their boards (J714s/c, J716s/c, J775c/d, J873s) names it, as
+/// does one `sptm.t6050`, one kernel (`mac17j`) and one XNU configuration
+/// (T6050). Their DeviceTrees are one template listing both dies' CPUs
+/// (`reg` 0x0 to 0x1205, clusters 0, 1, 2 and 16, 17, 18), without
+/// `product-soc-name`; iBoot picks a `/:sotra` variant (`h17s`, `h17c`,
+/// `h17cr1`, `h17cr2` or `h17d`) and the `/product/:sotra_<variant>_<n>`
+/// overlay names the SoC: Apple M5 Pro for `h17s`, Apple M5 Max for the
+/// three `h17c` variants and Apple M5 Ultra for `h17d`. The Pro has the
+/// Sotra S parts and the Max the Sotra C parts; the Ultra's two dies are
+/// inferred to be Max dies, as on the earlier Ultras, since XNU gives the
+/// Sotra C parts the subfamily it gives the Max and Ultra dies
+/// (`osfmk/arm/cpuid.c` `CPUSUBFAMILY_ARM_HC_HD`) and names no other Sotra
+/// part. m1n1's T6051 label for the Max (`src/soc.h`) matches no 26A434
+/// ApChipID. m1n1 `smp.c` gives the T6050 the T6031's CPU start offset.
+const M5_PRO: Soc = Soc {
+    chip_id: 0x6050,
+    name: "Apple M5 Pro",
+    pmgr: "pmgr1,t6050",
+    chip: Chip::AppleM5,
+    cores: &sotra_cores(0x064, 0x065),
+    aic: Some(("aic,3", AIC3_EVENT)),
+    dram_base: None,
+    lockdown: None,
+    limits: Some(T6050_LIMITS),
+    memory_cache: None,
+    clusters: None,
+    aon_fuses: None,
+    cpu_start: Some(CPU_START_T6031),
+    wake_masks: None,
+    power_banks: &[],
+    dpe_reg: None,
+    bridge_fields: None,
+};
+
+const SOCS: [Soc; 22] = [
     Soc {
         chip_id: 0x8103,
         name: "Apple M1",
@@ -738,6 +807,17 @@ const SOCS: [Soc; 19] = [
         dpe_reg: None,
         bridge_fields: None,
     },
+    M5_PRO,
+    Soc {
+        name: "Apple M5 Max",
+        cores: &sotra_cores(0x068, 0x069),
+        ..M5_PRO
+    },
+    Soc {
+        name: "Apple M5 Ultra",
+        cores: &sotra_cores(0x068, 0x069),
+        ..M5_PRO
+    },
     Soc {
         chip_id: 0x8152,
         name: "Apple M6",
@@ -778,7 +858,22 @@ pub struct Cpus {
 /// The `aic` node's `compatible` and its event register's offset from its
 /// `reg` on the SoC with `chip_id`, where established.
 pub fn aic(chip_id: u32) -> Option<(&'static str, u64)> {
-    SOCS.iter().find(|soc| soc.chip_id == chip_id)?.aic
+    chip_row(chip_id)?.aic
+}
+
+/// A row of `chip_id`, for the facts every row of an ApChipID shares: all
+/// but the `product-soc-name` and the core types.
+fn chip_row(chip_id: u32) -> Option<&'static Soc> {
+    SOCS.iter().find(|soc| soc.chip_id == chip_id)
+}
+
+/// The row of `chip_id` when it is the ApChipID's only one. The T6050's
+/// rows differ in name and parts, so its chip ID alone selects none; its
+/// DeviceTree's `product-soc-name` does ([`cpus`]).
+fn only_row(chip_id: u32) -> Option<&'static Soc> {
+    let mut rows = SOCS.iter().filter(|soc| soc.chip_id == chip_id);
+    let row = rows.next()?;
+    rows.next().is_none().then_some(row)
 }
 
 /// Each cluster type's operating points in MHz, lowest first, as
@@ -792,15 +887,16 @@ pub fn operating_points(chip_id: u32) -> Option<Vec<(u8, &'static [u32])>> {
     (!points.is_empty()).then_some(points)
 }
 
-/// The observed core types and their configured or unknown CPU requirements.
-/// The number of types does not define the number of physical clusters.
+/// The observed core types and their configured or unknown CPU requirements,
+/// for an ApChipID with one row ([`only_row`]). The number of types does not
+/// define the number of physical clusters.
 pub fn core_types(chip_id: u32) -> Option<&'static [CoreType]> {
-    Some(SOCS.iter().find(|soc| soc.chip_id == chip_id)?.cores)
+    Some(only_row(chip_id)?.cores)
 }
 
 /// The CPU of the SoC with `chip_id`, for the SoCs with a row.
 pub fn chip(chip_id: u32) -> Option<Chip> {
-    Some(SOCS.iter().find(|soc| soc.chip_id == chip_id)?.chip)
+    Some(chip_row(chip_id)?.chip)
 }
 
 /// The label of the SoC's own core variant in a DeviceTree template that
@@ -816,9 +912,10 @@ pub fn template_variant(chip_id: u32) -> Option<&'static str> {
     }
 }
 
-/// The `product-soc-name` of the SoC with `chip_id`, for the SoCs with a row.
+/// The `product-soc-name` of the SoC with `chip_id`, for an ApChipID with one
+/// row ([`only_row`]).
 pub fn name(chip_id: u32) -> Option<&'static str> {
-    Some(SOCS.iter().find(|soc| soc.chip_id == chip_id)?.name)
+    Some(only_row(chip_id)?.name)
 }
 
 /// The MIDR_EL1 part number of `cluster_type`'s cores on the SoC with
@@ -842,8 +939,7 @@ pub fn level1_caches(chip_id: u32, cluster_type: u8) -> Option<(Cache, Cache)> {
 
 /// The guest DRAM base of the SoC with `chip_id`.
 pub fn dram_base(chip_id: u32) -> Result<u64, String> {
-    SOCS.iter()
-        .find(|soc| soc.chip_id == chip_id)
+    chip_row(chip_id)
         .and_then(|soc| soc.dram_base)
         .ok_or_else(|| format!("ApChipID {chip_id:#x} has no public DRAM base"))
 }
@@ -896,23 +992,27 @@ pub struct Processor {
 /// MT are 0 for a multiprocessor without multithreading (inferred). On the
 /// two-die boards the second die's clusters are Aff1 8 and up (its `reg`
 /// 0x800 to 0xaff), with the same Aff2 for its P cores (Linux `t6002.dtsi` and
-/// `t6022.dtsi`: `cpu@800`, `cpu@10900`). A `reg` beyond Aff1's sixteen
-/// clusters has no public MPIDR mapping and refuses.
-/// The `reg` bits a `/cpus` node may set: Aff1's sixteen clusters, two dies
-/// of eight, and Aff0's cores.
-const MPIDR_CLUSTER_CORE: u32 = 0xfff;
+/// `t6022.dtsi`: `cpu@800`, `cpu@10900`), and on the T6050 Aff1 16 to 18
+/// (its template's `reg` 0x1000 to 0x1205; XNU's T6050
+/// `MAX_CPU_CLUSTER_PHY_ID` is 18). Each chip's kernel limits bound the
+/// cluster numbers further. A `reg` beyond Aff1 and Aff0 refuses.
+/// The `reg` bits a `/cpus` node may set: Aff1 and Aff0.
+const MPIDR_CLUSTER_CORE: u32 = 0xffff;
 
 pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cpus, String> {
-    let soc = SOCS
-        .iter()
-        .find(|soc| soc.chip_id == chip_id)
-        .ok_or_else(|| format!("ApChipID {chip_id:#x} ({soc_name}) has no public MIDR part"))?;
-    if soc.name != soc_name {
+    let rows: Vec<&Soc> = SOCS.iter().filter(|soc| soc.chip_id == chip_id).collect();
+    if rows.is_empty() {
         return Err(format!(
-            "ApChipID {chip_id:#x} is {}, but the DeviceTree names {soc_name}",
-            soc.name
+            "ApChipID {chip_id:#x} ({soc_name}) has no public MIDR part"
         ));
     }
+    let Some(soc) = rows.iter().find(|soc| soc.name == soc_name) else {
+        let names: Vec<&str> = rows.iter().map(|soc| soc.name).collect();
+        return Err(format!(
+            "ApChipID {chip_id:#x} is {}, but the DeviceTree names {soc_name}",
+            names.join(" or ")
+        ));
+    };
     if processors.is_empty() {
         return Err("the DeviceTree has no /cpus nodes".into());
     }
@@ -1098,8 +1198,7 @@ pub const IOMMU_MAPPER: &str = "iommu-mapper";
 /// eFuses, energy, performance counters, wake masks, voltage, DPE and
 /// fabric bridges.
 pub fn pmgr(chip_id: u32) -> Option<&'static str> {
-    SOCS.iter()
-        .find(|soc| soc.chip_id == chip_id)
+    chip_row(chip_id)
         .filter(|soc| soc.pmgr_modeled())
         .map(|soc| soc.pmgr)
 }
@@ -6796,13 +6895,27 @@ mod tests {
         assert_eq!(dram_base(0x8112), Ok(0x8_0000_0000));
         assert_eq!(dram_base(0x6021), Ok(0x100_0000_0000));
         assert!(dram_base(0x8132).is_err());
-        // Every ApChipID appears once.
+        // Every ApChipID and name pair appears once, and the rows of one
+        // ApChipID share its chip-level facts.
         for (index, soc) in SOCS.iter().enumerate() {
-            assert!(
-                SOCS[index + 1..]
-                    .iter()
-                    .all(|other| other.chip_id != soc.chip_id)
-            );
+            for other in SOCS[index + 1..]
+                .iter()
+                .filter(|o| o.chip_id == soc.chip_id)
+            {
+                assert_ne!(other.name, soc.name);
+                assert_eq!(
+                    (other.chip, other.pmgr, other.aic, other.dram_base),
+                    (soc.chip, soc.pmgr, soc.aic, soc.dram_base)
+                );
+                assert_eq!(
+                    (other.lockdown, other.limits, other.cpu_start),
+                    (soc.lockdown, soc.limits, soc.cpu_start)
+                );
+                assert_eq!(
+                    (other.memory_cache, other.clusters, other.aon_fuses),
+                    (soc.memory_cache, soc.clusters, soc.aon_fuses)
+                );
+            }
         }
     }
 
@@ -6846,6 +6959,54 @@ mod tests {
         );
     }
 
+    /// ApChipID 0x6050's rows follow the `product-soc-name` its template
+    /// gives each variant: the Pro's Sotra S parts, the Max's and the
+    /// Ultra's Sotra C parts, the second die at Aff1 16 to 18. The M cores
+    /// refuse for their unestablished caches; the chip ID alone names no row.
+    #[test]
+    fn the_t6050_rows_follow_the_template_soc_name() {
+        use super::super::{identification, timer::agt};
+        assert_eq!(chip(0x6050), Some(Chip::AppleM5));
+        assert!(agt::present(Chip::AppleM5) && identification::memory_tagging(Chip::AppleM5));
+        assert!(name(0x6050).is_none() && core_types(0x6050).is_none());
+        assert_eq!(midr_part(0x6050, b'P'), None);
+        let p_core = |soc: &str, reg: u32| {
+            let cpus = cpus(0x6050, soc, &layout_of(&[(b'P', reg)])).unwrap();
+            assert_eq!(cpus.chip, Chip::AppleM5);
+            (cpus.processors[0].midr, cpus.processors[0].mpidr)
+        };
+        assert_eq!(p_core("Apple M5 Pro", 0x200), (0x611f_0650, 0x8001_0200));
+        assert_eq!(p_core("Apple M5 Max", 0x205), (0x611f_0690, 0x8001_0205));
+        assert_eq!(p_core("Apple M5 Ultra", 0x1205), (0x611f_0690, 0x8001_1205));
+        assert_eq!(
+            cpus(0x6050, "Apple M5 Pro", &layout_of(&[(b'M', 0)])),
+            Err("Apple M5 Pro cluster type M has no cache geometry".into())
+        );
+        assert_eq!(
+            cpus(0x6050, "Apple M5", &layout_of(&[(b'P', 0x200)])),
+            Err(
+                "ApChipID 0x6050 is Apple M5 Pro or Apple M5 Max or Apple M5 Ultra, but the \
+                 DeviceTree names Apple M5"
+                    .into()
+            )
+        );
+        // The template's 36 PEs fill the kernel's slots; a 37th refuses.
+        let mut template = Vec::new();
+        for die in [0, 0x1000] {
+            for (kind, cluster) in [(b'M', 0), (b'M', 0x100), (b'P', 0x200)] {
+                template.extend((0..6).map(|core| (kind, die | cluster | core)));
+            }
+        }
+        assert_eq!(T6050_LIMITS.check(&layout_of(&template)), Ok(()));
+        template.push((b'P', 0x1206));
+        assert!(
+            T6050_LIMITS
+                .check(&layout_of(&template))
+                .unwrap_err()
+                .contains("MAX_CPUS")
+        );
+    }
+
     #[test]
     fn the_m6_kernel_bounds_its_cpus() {
         // Twelve PEs at J873gAP's affinities (its 0x102..0x105 are M cores).
@@ -6877,8 +7038,8 @@ mod tests {
         assert_eq!(ultra.processors[1].midr, 0x611f_0390);
         // A SoC without a row.
         assert_eq!(
-            cpus(0x6050, "Apple M5 Max", &one),
-            Err("ApChipID 0x6050 (Apple M5 Max) has no public MIDR part".into())
+            cpus(0x8101, "Apple A14", &one),
+            Err("ApChipID 0x8101 (Apple A14) has no public MIDR part".into())
         );
         assert!(cpus(0x8112, "Apple M2 Pro", &one).is_err());
         assert!(cpus(0x8112, "Apple M2", &[]).is_err());
@@ -9259,15 +9420,14 @@ mod tests {
     #[test]
     fn mpidr_composition_preserves_ep_identities_and_rejects_unknown_coordinates() {
         for soc in SOCS {
-            for (kind, aff2) in [(b'E', 0u64), (b'P', 1)] {
-                let core = soc
-                    .cores
-                    .iter()
-                    .find(|core| core.cluster_type == kind)
-                    .unwrap();
+            for (kind, aff2) in [(b'E', 0u64), (b'P', 1), (b'M', 4)] {
+                // The T6050 has no E cores and the earlier SoCs no M cores.
+                let Some(core) = soc.cores.iter().find(|core| core.cluster_type == kind) else {
+                    continue;
+                };
                 // Include both dies, sparse cores and the upper declared
                 // affinity boundary; this field does not define core count.
-                for reg in [0, 3, 0x100, 0x105, 0x800, 0x905, 0xfff] {
+                for reg in [0, 3, 0x100, 0x105, 0x800, 0x905, 0x1205, 0xffff] {
                     assert_eq!(
                         core.mpidr(reg),
                         Some(0x8000_0000 | aff2 << 16 | u64::from(reg))
@@ -9280,7 +9440,7 @@ mod tests {
             .iter()
             .find(|core| core.cluster_type == b'M')
             .unwrap();
-        for bit in 12..32 {
+        for bit in 16..32 {
             assert_eq!(m_core.mpidr(0x102 | 1 << bit), None);
         }
         assert_eq!(

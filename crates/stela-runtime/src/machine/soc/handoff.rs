@@ -3,7 +3,7 @@
 //! iBoot's place.
 //!
 //! Every fact was read from the 26A434 `Firmware/all_flash/LLB.<board>` and
-//! `iBoot.<board>` RELEASE payloads of one board per SoC row ([`Evidence`];
+//! `iBoot.<board>` RELEASE payloads of one board per ApChipID ([`Evidence`];
 //! offsets are payload file offsets, the payload running at
 //! 0x9_0000_0000 + offset):
 //!
@@ -161,8 +161,8 @@ const LPDDR5: &str = "LPDDR5";
 const N3_UNTRACED: &str = "iBoot's choice between the T8122 temp-sensor and temp-sensor-n3 \
     tables is not traced";
 
-/// The rows, one per `machine::soc` SoC row.
-const HANDOFFS: [Handoff; 19] = [
+/// The rows, one per ApChipID of the `machine::soc` SoC rows.
+const HANDOFFS: [Handoff; 20] = [
     row(
         0x8103,
         LPDDR4,
@@ -272,6 +272,12 @@ const HANDOFFS: [Handoff; 19] = [
         ("j704", 0x2ce2f8, 0x12d394, 0x6d374),
     ),
     row(
+        0x6050,
+        LPDDR5,
+        Ok(None),
+        ("j714s", 0x2fcbc8, 0x179654, 0x7cdd4),
+    ),
+    row(
         0x8152,
         LPDDR5,
         Ok(None),
@@ -307,6 +313,6 @@ mod tests {
         assert_eq!(handoff(0x8112).unwrap().pmp_variant, Ok(Some("-a0")));
         assert_eq!(handoff(0x8103).unwrap().dram_type, LPDDR4);
         assert!(handoff(0x8122).unwrap().pmp_variant.is_err());
-        assert!(handoff(0x6050).is_none());
+        assert!(handoff(0x8101).is_none());
     }
 }

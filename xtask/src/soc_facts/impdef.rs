@@ -131,7 +131,7 @@ mod tests {
                 ["S1_0_C11_C0_0", "write", 1, null, "0x0", "0x0"],
             ]}],
             "monitors": [{"chip_ids": ["0x8103"], "impdef": []}],
-            "kernels": [{"chip_ids": ["0x8103", "0x6050"], "impdef": [
+            "kernels": [{"chip_ids": ["0x8103", "0x8101"], "impdef": [
                 ["S3_7_C15_C1_1", "read", 2, "com.apple.kernel", "0x0", "0x0"],
             ]}],
             "collections": [{"chip_ids": ["0x8112"], "impdef": [
@@ -146,7 +146,7 @@ mod tests {
             consumed[Chip::AppleM2 as usize],
             BTreeSet::from([hid0, collection])
         );
-        // A chip without a row (0x6050) adds nothing; the M1 has the kernel's.
+        // A chip without a row (0x8101) adds nothing; the M1 has the kernel's.
         assert_eq!(consumed[Chip::AppleM1 as usize], BTreeSet::from([energy]));
         assert!(consumed[Chip::AppleM5 as usize].is_empty());
     }

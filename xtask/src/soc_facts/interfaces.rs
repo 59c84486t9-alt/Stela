@@ -499,7 +499,7 @@ mod tests {
         assert_eq!(binding["processors"][0]["cluster_type"], "P");
         assert_eq!(binding["processors"][1]["cluster_type"], "M");
         assert_eq!(
-            cpu_binding(&bytes, 0x6050).unwrap()["status"],
+            cpu_binding(&bytes, 0x8101).unwrap()["status"],
             "unconfigured"
         );
     }

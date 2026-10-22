@@ -160,7 +160,7 @@ pub enum Chip {
     /// T8132, T6040, T6041, and the A18 Pro's T8140, whose Apple clang
     /// `-mcpu=apple-a18` export is the M4's (`machine::soc` gives the rest).
     AppleM4,
-    /// T8142.
+    /// T8142 and the T6050 (M5 Pro, Max and Ultra), which XNU builds alike.
     AppleM5,
     /// T8152.
     AppleM6,

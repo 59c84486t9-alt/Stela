@@ -422,7 +422,7 @@ mod tests {
         for chip_id in [0x8103, 0x8122, 0x6041, 0x8152] {
             assert_eq!(for_chip(chip_id), [PANIC]);
         }
-        assert!(for_chip(0x6050).is_empty());
+        assert!(for_chip(0x8101).is_empty());
         // It meets SPTM's I/O range rules and leaves physBase where it was.
         assert!(PANIC.bytes.is_multiple_of(PAGE_BYTES) && PANIC.bytes / PAGE_BYTES < 0x10000);
         assert_eq!(
@@ -544,7 +544,7 @@ mod tests {
                 .iter()
                 .any(|g| g.contains("no /pram node"))
         );
-        let unknown = gaps(&bare, Some(0x6050));
+        let unknown = gaps(&bare, Some(0x8101));
         assert!(unknown.iter().any(|g| g.contains("no hand-off facts")));
         Ok(())
     }

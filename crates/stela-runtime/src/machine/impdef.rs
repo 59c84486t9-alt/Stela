@@ -297,6 +297,17 @@ encodings! {
     SW_TRACE_DATA = 5, 11, 6;
     AON_COUNTER_4 = 7, 8, 3;
     AON_SELECT_4 = 7, 9, 3;
+    // The T6050's sixth to tenth core counters.
+    AON_COUNTER_5 = 7, 10, 3;
+    AON_SELECT_5 = 7, 11, 3;
+    AON_COUNTER_6 = 7, 12, 3;
+    AON_SELECT_6 = 7, 13, 3;
+    AON_COUNTER_7 = 7, 14, 3;
+    AON_SELECT_7 = 7, 15, 3;
+    AON_COUNTER_8 = 7, 14, 0;
+    AON_COUNTER_9 = 7, 14, 1;
+    AON_SELECT_8 = 7, 15, 0;
+    AON_SELECT_9 = 7, 15, 1;
     CLUSTER_COUNTER_C0_6 = 7, 0, 6;
     CLUSTER_COUNTER_C2_6 = 7, 2, 6;
     CLUSTER_COUNTER_C4_6 = 7, 4, 6;
@@ -729,7 +740,8 @@ const SPTM_TUNING_SELECT_EVIDENCE: &str = "no public name; the 26A434 T8122 SPTM
 const MEM_STALL_WIDE_SELECT_EVIDENCE: &str = "no public name; the 26A434 CoreMemStallSampler of \
     AppleT6000CLPCv3, AppleT6020CLPC and every M3-and-later CLPC (S3_1_C15_C2_3; \
     kernelcache.release.mac14j 0xfffffe0009efa63c) and of the Ultras' AppleT6002CLPC and \
-    AppleT6022CLPC (S3_1_C15_C3_3; mac14j 0xfffffe0009f7dab0) writes two more 32-bit selectors \
+    AppleT6022CLPC and the T6050's AppleT6050dCLPC (S3_1_C15_C3_3; mac14j 0xfffffe0009f7dab0, \
+    mac17j 0xfffffe0009cef4b8) writes two more 32-bit selectors \
     into it, with the read-modify-write AppleT8112CLPC uses for S3_1_C15_C0_3 and C1_3, and 0 \
     to stop them. The events are not documented: the selectors are held and starting the \
     counters is reported once";
@@ -737,7 +749,7 @@ const MEM_STALL_WIDE_SELECT_EVIDENCE: &str = "no public name; the 26A434 CoreMem
 const MEM_STALL_WIDE_COUNTER_EVIDENCE: &str = "no public name; the same samplers read it as a \
     48-bit count after S3_1_C15_C8_3 to C11_3 and clear its overflow bit 47 by writing 0 \
     (C12_3 and C13_3: mac14j 0xfffffe0009efa7b0; C14_3 and C15_3: mac14j \
-    0xfffffe0009f7c420). It counts only under its selectors, whose counting is not modeled, so \
+    0xfffffe0009f7c420, mac17j 0xfffffe0009cede28). It counts only under its selectors, whose counting is not modeled, so \
     it holds what software wrote, 0 from reset (inference)";
 
 const ACTLR_EL12_EVIDENCE: &str = "m1n1 cpu_regs.h names it ACTLR_EL12; the 26A434 T8103 \
@@ -860,13 +872,24 @@ const AON_FIFTH_EVIDENCE: &str = "no public name; the CorePerfSampler of AppleT6
     modeled, so the selector is stored and the counter holds what software wrote, 0 from reset \
     (inference)";
 
+const AON_TENTH_EVIDENCE: &str = "no public name; AppleT6050CLPC's CorePerfSampler selects \
+    ten core counters: enableCore writes 0x8000, 0x8100, 0x8300, 0x8700, 0x8200, 0x9000, 0x9100, \
+    0x9200, 0x9300 and 0x9400 to S3_7_C15_C1_3, C3_3, C5_3, C7_3, C9_3, C11_3, C13_3, C15_3, \
+    C15_0 and C15_1 before setting S3_7_C15_C5_0 (kernelcache.release.mac17j \
+    0xfffffe0009c08318..0xfffffe0009c0836c), and sample reads S3_7_C15_C10_3, C12_3, C14_3, \
+    C14_0 and C14_1 after C0_3 to C8_3 as wrapping 32-bit counts (0xfffffe0009bff598.. \
+    0xfffffe0009bff5f8); other PEs read the ninth and tenth through cpu-impl-reg + 0x3fc0 and \
+    0x3fc8 (platform::apple::core_counters). The selectors act and the counters count only \
+    under S3_7_C15_C5_0, whose counting is not modeled, so the selectors are stored and the \
+    counters hold what software wrote, 0 from reset (inference)";
+
 const CLUSTER_COUNTER_LATER_EVIDENCE: &str = "no public name; the M3-and-later \
     ClusterPerfSampler::sample reads it with the PE's own cluster's S3_7_C15_C*_2 counters as \
     a 48-bit delta and writes 0 when its bit 47 overflowed, as AppleT8112CLPC does \
     (AppleT8122CLPC kernelcache.release.mac15g 0xfffffe0009ec7eac: C4_6 0xfffffe0009ec8010, \
     C14_2 0xfffffe0009ec8064, C0_6 0xfffffe0009ec8084, C2_6 0xfffffe0009ec80a0, the clear \
-    0xfffffe0009ec8280; C6_6 in AppleT6041CLPC mac16j 0xfffffe0009fb7a08 and AppleT8152CLPC \
-    mac18g 0xfffffe0009fc92e0). The emulated die's bus interface carries no traffic, so it never \
+    0xfffffe0009ec8280; C6_6 in AppleT6041CLPC mac16j 0xfffffe0009fb7a08, AppleT6050CLPC \
+    mac17j 0xfffffe0009c3a4f8 and AppleT8152CLPC mac18g 0xfffffe0009fc92e0). The emulated die's bus interface carries no traffic, so it never \
     counts: it holds what software writes, 0 from reset (inference). One per cluster";
 
 const PL2_ERROR_STATUS: &str = "26A434 XNU's peh.c names it in its \"PL2 %s error: ... \
@@ -1555,6 +1578,66 @@ pub const TABLE: &[Entry] = &[
         Class::Counter,
         AON_FIFTH_EVIDENCE,
     ),
+    entry(
+        AON_SELECT_5,
+        "S3_7_C15_C11_3 (unnamed)",
+        Class::Storage,
+        AON_TENTH_EVIDENCE,
+    ),
+    entry(
+        AON_SELECT_6,
+        "S3_7_C15_C13_3 (unnamed)",
+        Class::Storage,
+        AON_TENTH_EVIDENCE,
+    ),
+    entry(
+        AON_SELECT_7,
+        "S3_7_C15_C15_3 (unnamed)",
+        Class::Storage,
+        AON_TENTH_EVIDENCE,
+    ),
+    entry(
+        AON_SELECT_8,
+        "S3_7_C15_C15_0 (unnamed)",
+        Class::Storage,
+        AON_TENTH_EVIDENCE,
+    ),
+    entry(
+        AON_SELECT_9,
+        "S3_7_C15_C15_1 (unnamed)",
+        Class::Storage,
+        AON_TENTH_EVIDENCE,
+    ),
+    entry(
+        AON_COUNTER_5,
+        "S3_7_C15_C10_3 (unnamed)",
+        Class::Counter,
+        AON_TENTH_EVIDENCE,
+    ),
+    entry(
+        AON_COUNTER_6,
+        "S3_7_C15_C12_3 (unnamed)",
+        Class::Counter,
+        AON_TENTH_EVIDENCE,
+    ),
+    entry(
+        AON_COUNTER_7,
+        "S3_7_C15_C14_3 (unnamed)",
+        Class::Counter,
+        AON_TENTH_EVIDENCE,
+    ),
+    entry(
+        AON_COUNTER_8,
+        "S3_7_C15_C14_0 (unnamed)",
+        Class::Counter,
+        AON_TENTH_EVIDENCE,
+    ),
+    entry(
+        AON_COUNTER_9,
+        "S3_7_C15_C14_1 (unnamed)",
+        Class::Counter,
+        AON_TENTH_EVIDENCE,
+    ),
     cluster_counter(CLUSTER_COUNTER_C0_6, "S3_7_C15_C0_6 (unnamed)"),
     cluster_counter(CLUSTER_COUNTER_C2_6, "S3_7_C15_C2_6 (unnamed)"),
     cluster_counter(CLUSTER_COUNTER_C4_6, "S3_7_C15_C4_6 (unnamed)"),
@@ -2203,7 +2286,8 @@ mod tests {
             (INIT_C0_7, &[Chip::AppleM6]),
             (PL2_ERR_STS, &[Chip::AppleM5, Chip::AppleM6]),
             (IRG_KEY_4, &[Chip::AppleM6]),
-            (CLUSTER_COUNTER_C6_6, &[Chip::AppleM4, Chip::AppleM6]),
+            (CLUSTER_COUNTER_C6_6, &Chip::ALL[3..]),
+            (AON_COUNTER_9, &[Chip::AppleM5]),
             (PROD_TRACE_BASE_0, &Chip::ALL[2..]),
             (SW_TRACE_DATA, &Chip::ALL[3..]),
         ] {
