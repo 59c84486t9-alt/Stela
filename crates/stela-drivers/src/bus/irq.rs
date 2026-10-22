@@ -3,6 +3,7 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::{
     marker::PhantomData,
+    mem::ManuallyDrop,
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
@@ -148,7 +149,10 @@ pub trait Handler: Send + Sync {
 /// `program` installs exactly the supplied typed route while masked;
 /// `unmask` enables only this route. Errors must never free hardware-reachable
 /// state. These process/deferred methods and final Drop are never ISR-safe.
-pub unsafe trait Source: Send {
+/// A source may be genuinely CPU-affine and !Send. Only its checked owning
+/// CPU's process registration accesses or finally releases it; IRQ dispatch
+/// sees the separately retained Send+Sync handler only.
+pub unsafe trait Source {
     fn mask(&mut self) -> Result<(), IrqError>;
     fn quiesce(&mut self) -> Result<(), IrqError>;
     fn route(&self) -> RouteRequest;
@@ -202,6 +206,37 @@ struct Slot {
     state: AtomicU8,
     inflight: AtomicUsize,
     handled: AtomicU64,
+}
+
+/// Admission owns these bytes from its first instruction. Every early error
+/// retains them observably without allocating or releasing on an unknown CPU.
+struct Pending<'a, P: Platform> {
+    registry: &'a Registry<P>,
+    source: ManuallyDrop<Box<dyn Source>>,
+    handler: ManuallyDrop<Arc<dyn Handler>>,
+    published: bool,
+}
+impl<P: Platform> Pending<'_, P> {
+    fn into_slot(mut self) -> Slot {
+        self.published = true;
+        // SAFETY: this consumes the unique unpublished owners exactly once.
+        Slot {
+            source: core::cell::UnsafeCell::new(unsafe { ManuallyDrop::take(&mut self.source) }),
+            handler: unsafe { ManuallyDrop::take(&mut self.handler) },
+            state: AtomicU8::new(ARMING),
+            inflight: AtomicUsize::new(0),
+            handled: AtomicU64::new(0),
+        }
+    }
+}
+impl<P: Platform> Drop for Pending<'_, P> {
+    fn drop(&mut self) {
+        if !self.published {
+            self.registry.count_quarantine();
+            // The real Box/Arc allocations remain retained. No source access
+            // or final Drop is qualified by a failed admission/CPU check.
+        }
+    }
 }
 
 impl<P: Platform + 'static> IrqController for Registry<P> {
@@ -258,11 +293,22 @@ impl<P: Platform> Registry<P> {
 
     /// Publish the retained handler before enabling the actual source. Any
     /// uncertain arming failure retains source/handler and quarantines vector.
+    /// Every pre-publication error also retains both owners observably; this
+    /// includes WrongCpu, target/route failure and exhausted vector inventory.
     pub fn request(
         &'static self,
         source: Box<dyn Source>,
         handler: Arc<dyn Handler>,
     ) -> Result<Registration<'static, P>, IrqError> {
+        // Retain both actual owners even if CPU qualification fails before
+        // publication. This consuming API cannot return a failed source to
+        // its original CPU, and must never run a !Send source's Drop here.
+        let pending = Pending {
+            registry: self,
+            source: ManuallyDrop::new(source),
+            handler: ManuallyDrop::new(handler),
+            published: false,
+        };
         self.platform.check_cpu()?;
         let guard = self.lock();
         let index = self
@@ -275,20 +321,14 @@ impl<P: Platform> Registry<P> {
         if target.vector != vector || target.destination == 255 {
             return Err(IrqError::Route);
         }
-        let route = match source.route() {
+        let route = match pending.source.route() {
             RouteRequest::Msi => Route::Msi(MsiMessage {
                 address: 0xfee00000 | u64::from(target.destination) << 12,
                 data: u32::from(vector),
             }),
             RouteRequest::Line(line) => Route::Line { target, line },
         };
-        let slot = NonNull::from(Box::leak(Box::new(Slot {
-            handler,
-            source: core::cell::UnsafeCell::new(source),
-            state: AtomicU8::new(ARMING),
-            inflight: AtomicUsize::new(0),
-            handled: AtomicU64::new(0),
-        })));
+        let slot = NonNull::from(Box::leak(Box::new(pending.into_slot())));
         self.slots[index].store(slot.as_ptr(), Ordering::Release);
         drop(guard);
         // SAFETY: the process owner is unique; dispatch never accesses source.
@@ -330,12 +370,16 @@ impl<P: Platform> Registry<P> {
             .state
             .swap(QUARANTINED, Ordering::AcqRel);
         if previous != QUARANTINED {
-            let _ = self
-                .quarantined
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                    Some(count.saturating_add(1))
-                });
+            self.count_quarantine();
         }
+    }
+
+    fn count_quarantine(&self) {
+        let _ = self
+            .quarantined
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                Some(count.saturating_add(1))
+            });
     }
 
     /// Called by the existing IDT dispatcher with local IRQs off. Returns
@@ -451,6 +495,7 @@ impl<P: Platform> Registration<'_, P> {
         // the callback lifetime has ended as well as before hardware draining.
         // SAFETY: actual source stop, CPU pending and in-flight callbacks have drained.
         unsafe { source.synchronize() }?;
+        self.registry.platform.check_cpu()?;
         let guard = self.registry.lock();
         if slot.inflight.load(Ordering::Acquire) != 0
             || self.registry.platform.pending(self.vector)?
@@ -498,6 +543,10 @@ mod tests {
         pending: AtomicBool,
         fail_pending: AtomicBool,
         fail_mask: AtomicBool,
+        wrong_cpu: AtomicBool,
+        fail_target: AtomicBool,
+        invalid_target: AtomicBool,
+        migrate_on_sync: AtomicBool,
         admit_irq: AtomicBool,
         callbacks: AtomicUsize,
         eois: AtomicUsize,
@@ -514,6 +563,10 @@ mod tests {
                 pending: AtomicBool::new(false),
                 fail_pending: AtomicBool::new(false),
                 fail_mask: AtomicBool::new(false),
+                wrong_cpu: AtomicBool::new(false),
+                fail_target: AtomicBool::new(false),
+                invalid_target: AtomicBool::new(false),
+                migrate_on_sync: AtomicBool::new(false),
                 admit_irq: AtomicBool::new(true),
                 callbacks: AtomicUsize::new(0),
                 eois: AtomicUsize::new(0),
@@ -525,11 +578,17 @@ mod tests {
             })
         }
     }
-    struct ModelPlatform(Arc<Model>);
+    struct ModelPlatform(Arc<Model>, Option<std::thread::ThreadId>);
     // SAFETY: synchronous explicit IRQ/controller model; no physical accesses.
     unsafe impl Platform for ModelPlatform {
         fn check_cpu(&self) -> Result<(), IrqError> {
-            Ok(())
+            if self.0.wrong_cpu.load(Ordering::Relaxed)
+                || self.1.is_some_and(|id| id != std::thread::current().id())
+            {
+                Err(IrqError::WrongCpu)
+            } else {
+                Ok(())
+            }
         }
         fn save_and_disable(&self) -> u64 {
             0
@@ -538,9 +597,16 @@ mod tests {
             assert_eq!(saved, 0);
         }
         fn target(&self, vector: u8) -> Result<Target, IrqError> {
+            if self.0.fail_target.load(Ordering::Relaxed) {
+                return Err(IrqError::Route);
+            }
             self.0.vector.store(vector, Ordering::Relaxed);
             Ok(Target {
-                destination: 0,
+                destination: if self.0.invalid_target.load(Ordering::Relaxed) {
+                    255
+                } else {
+                    0
+                },
                 vector,
             })
         }
@@ -629,7 +695,7 @@ mod tests {
         }
     }
     fn registry(model: Arc<Model>) -> &'static Registry<ModelPlatform> {
-        let registry = Box::leak(Box::new(Registry::new(ModelPlatform(model.clone()))));
+        let registry = Box::leak(Box::new(Registry::new(ModelPlatform(model.clone(), None))));
         model.registry.store(registry, Ordering::Relaxed);
         registry
     }
@@ -643,6 +709,154 @@ mod tests {
                 Arc::new(ModelHandler(model.clone())),
             )
             .unwrap()
+    }
+
+    // Rc/Cell plus a real creating thread identity make this owner genuinely
+    // !Send; no unsafe Send/Sync implementation or integer ownership erasure.
+    struct LocalSource {
+        inner: ModelSource,
+        token: std::rc::Rc<core::cell::Cell<usize>>,
+        owner: std::thread::ThreadId,
+    }
+    // SAFETY: explicit same-CPU source model; the registry is the only owner
+    // and must retain it on every unqualified admission/retirement path.
+    unsafe impl Source for LocalSource {
+        fn mask(&mut self) -> Result<(), IrqError> {
+            self.inner.mask()
+        }
+        fn quiesce(&mut self) -> Result<(), IrqError> {
+            self.inner.quiesce()
+        }
+        fn route(&self) -> RouteRequest {
+            self.inner.route()
+        }
+        unsafe fn program(&mut self, route: Route) -> Result<(), IrqError> {
+            unsafe { self.inner.program(route) }
+        }
+        unsafe fn unmask(&mut self) -> Result<(), IrqError> {
+            unsafe { self.inner.unmask() }
+        }
+        unsafe fn synchronize(&mut self) -> Result<(), IrqError> {
+            unsafe { self.inner.synchronize() }?;
+            if self.inner.0.migrate_on_sync.load(Ordering::Relaxed) {
+                self.inner.0.wrong_cpu.store(true, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+    }
+    impl Drop for LocalSource {
+        fn drop(&mut self) {
+            assert_eq!(self.owner, std::thread::current().id());
+            assert!(!self.inner.0.wrong_cpu.load(Ordering::Relaxed));
+            assert_eq!(
+                self.inner.0.handler_drops.load(Ordering::Relaxed),
+                0,
+                "source must release while its callback owner remains retained"
+            );
+            self.token.set(self.token.get() + 1);
+        }
+    }
+    fn local_source(
+        model: &Arc<Model>,
+        token: std::rc::Rc<core::cell::Cell<usize>>,
+    ) -> Box<dyn Source> {
+        Box::new(LocalSource {
+            inner: ModelSource(model.clone()),
+            token,
+            owner: std::thread::current().id(),
+        })
+    }
+    #[test]
+    fn genuinely_local_source_releases_before_handler_only_on_qualified_cpu() {
+        let model = Model::new();
+        let registry = registry(model.clone());
+        let token = std::rc::Rc::new(core::cell::Cell::new(0));
+        let mut registration = registry
+            .request(
+                local_source(&model, token.clone()),
+                Arc::new(ModelHandler(model.clone())),
+            )
+            .unwrap();
+        model.migrate_on_sync.store(true, Ordering::Relaxed);
+        assert_eq!(registration.retire(), Err(IrqError::WrongCpu));
+        assert_eq!(token.get(), 0);
+        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+        model.migrate_on_sync.store(false, Ordering::Relaxed);
+        model.wrong_cpu.store(false, Ordering::Relaxed);
+        registration.retire().unwrap();
+        assert_eq!(token.get(), 1);
+        assert_eq!(model.source_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn all_early_admission_errors_retain_affine_source_and_callback_owner() {
+        for case in 0..4 {
+            let model = Model::new();
+            let registry = registry(model.clone());
+            let mut occupied = alloc::vec::Vec::new();
+            if case == 3 {
+                for _ in 0..VECTOR_COUNT {
+                    occupied.push(request(registry, &model));
+                }
+            }
+            model.wrong_cpu.store(case == 0, Ordering::Relaxed);
+            model.fail_target.store(case == 1, Ordering::Relaxed);
+            model.invalid_target.store(case == 2, Ordering::Relaxed);
+            let token = std::rc::Rc::new(core::cell::Cell::new(0));
+            let result = registry.request(
+                local_source(&model, token.clone()),
+                Arc::new(ModelHandler(model.clone())),
+            );
+            assert!(matches!(
+                result,
+                Err(IrqError::WrongCpu | IrqError::Route | IrqError::Exhausted)
+            ));
+            assert_eq!(token.get(), 0);
+            assert_eq!(std::rc::Rc::strong_count(&token), 2);
+            assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+            assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+            assert_eq!(registry.quarantine_count(), 1);
+            model.wrong_cpu.store(false, Ordering::Relaxed);
+            for mut registered in occupied {
+                registered.retire().unwrap();
+            }
+        }
+    }
+    #[test]
+    fn actual_foreign_thread_admission_and_abandoned_migration_never_drop_local_owner() {
+        let model = Model::new();
+        let registry = Box::leak(Box::new(Registry::new(ModelPlatform(
+            model.clone(),
+            Some(std::thread::current().id()),
+        ))));
+        let registry: &'static Registry<ModelPlatform> = registry;
+        let other = model.clone();
+        std::thread::spawn(move || {
+            let token = std::rc::Rc::new(core::cell::Cell::new(0));
+            let result = registry.request(
+                local_source(&other, token.clone()),
+                Arc::new(ModelHandler(other.clone())),
+            );
+            assert!(matches!(result, Err(IrqError::WrongCpu)));
+            assert_eq!(token.get(), 0);
+            assert_eq!(std::rc::Rc::strong_count(&token), 2);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(registry.quarantine_count(), 1);
+        let token = std::rc::Rc::new(core::cell::Cell::new(0));
+        let registration = registry
+            .request(
+                local_source(&model, token.clone()),
+                Arc::new(ModelHandler(model.clone())),
+            )
+            .unwrap();
+        model.wrong_cpu.store(true, Ordering::Relaxed);
+        drop(registration);
+        assert_eq!(registry.quarantine_count(), 2);
+        assert_eq!(token.get(), 0);
+        assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
     }
 
     #[test]
