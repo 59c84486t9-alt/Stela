@@ -529,6 +529,10 @@ struct Slot {
     /// The slot context as software last set it.
     context: [u32; 4],
     endpoints: [Option<Transfer>; 32],
+    /// Nonstream rings owned exclusively after successful endpoint retirement.
+    /// Preserve the acknowledged producer pointer/cycle rather than restarting
+    /// at an old TRB address or recycling the caller's backing DMA arena.
+    retired_rings: [Option<Ring>; 32],
     control: DmaBuffer,
     speed: u8,
     /// None after an unresolved SET_CONFIGURATION; Some(0) is Address state.
@@ -924,6 +928,7 @@ impl Controller {
             _output: output,
             context: slot_context,
             endpoints,
+            retired_rings: Default::default(),
             control,
             speed: attachment.speed,
             current_configuration: Some(0),
@@ -1276,19 +1281,48 @@ impl Controller {
             )?)
         };
         let mut rings = Vec::new();
+        rings
+            .try_reserve_exact(endpoints.len())
+            .map_err(|_| BlockError::NoDmaMemory)?;
         for endpoint in endpoints {
-            let ring = Ring::with_profile(dma, self.dma_profile)?;
-            let stream = if stream_endpoints.contains(&endpoint.address) {
-                Some(streams::Streams::new(
-                    dma,
-                    layout.unwrap(),
-                    self.dma_profile,
-                    self.stream_policy == streams::Policy::Cadence,
-                )?)
-            } else {
-                None
+            let allocation = (|| {
+                let streamed = stream_endpoints.contains(&endpoint.address);
+                let stream = if streamed {
+                    Some(streams::Streams::new(
+                        dma,
+                        layout.unwrap(),
+                        self.dma_profile,
+                        self.stream_policy == streams::Policy::Cadence,
+                    )?)
+                } else {
+                    None
+                };
+                let retained = if streamed {
+                    None
+                } else {
+                    self.slot(slot)?.retired_rings[usize::from(endpoint.dci())].take()
+                };
+                let ring = match retained {
+                    Some(ring) => ring,
+                    None => Ring::with_profile(dma, self.dma_profile)?,
+                };
+                Ok((ring, stream))
+            })();
+            match allocation {
+                Ok(pair) => rings.push(pair),
+                Err(error) => {
+                    // No input context or doorbell has been published. Keep
+                    // both reclaimed and newly allocated ordinary rings if a
+                    // subsequent allocation fails; a retry must not consume
+                    // another slice of the boot-lived DMA reservation.
+                    for (prior, (ring, stream)) in endpoints.iter().zip(rings) {
+                        if stream.is_none() {
+                            self.slot(slot)?.retired_rings[usize::from(prior.dci())] = Some(ring);
+                        }
+                    }
+                    return Err(error);
+                }
             };
-            rings.push((ring, stream));
         }
         self.clear_input(slot)?;
         let context = self.context();

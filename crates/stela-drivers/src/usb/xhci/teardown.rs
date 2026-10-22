@@ -11,8 +11,11 @@ impl Controller {
     /// DCIs are validated before any mutation. Every old TD requires successful
     /// Stop/Reset/Set Dequeue + drain, followed by Configure Endpoint Drop ACK.
     /// Any uncertain step retains and poisons every selected endpoint. Success
-    /// permits DMA reuse; old ring allocations remain boot-lived and are never
-    /// handed to a replacement endpoint, preventing late-address aliasing.
+    /// permits DMA reuse. After the primary event ring has been drained and old
+    /// endpoint events removed, retain the actual nonstream ring for this DCI.
+    /// A replacement starts at its acknowledged producer pointer/cycle, without
+    /// resetting the allocator, zeroing a live ring or replaying a ticket.
+    /// Streams retain their separate allocation/retirement policy.
     pub fn deconfigure(&mut self, slot: u8, endpoints: &[Endpoint]) -> Result<(), BlockError> {
         self.live_slot(slot)?;
         self.ready()?;
@@ -78,7 +81,17 @@ impl Controller {
         let state = self.slot(slot)?;
         state.context = input.1;
         for endpoint in endpoints {
-            state.endpoints[usize::from(endpoint.dci())] = None;
+            let dci = usize::from(endpoint.dci());
+            let transfer = state.endpoints[dci].take().unwrap();
+            if transfer.streams.is_none() {
+                // xHCI 1.2b 4.6.9 orders stopped-transfer events before Stop
+                // completion; 4.6.10 retires cached TDs. After Drop completion
+                // (4.6.6), the shared primary ring and selected pending events
+                // have both been drained above. Linux xhci_check_bandwidth
+                // likewise frees dropped rings only after this command result.
+                // No class can enqueue on the removed endpoint in this epoch.
+                state.retired_rings[dci] = Some(transfer.ring);
+            }
         }
         Ok(())
     }

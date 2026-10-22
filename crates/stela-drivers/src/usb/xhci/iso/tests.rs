@@ -104,7 +104,7 @@ impl Hardware {
                 SET_DEQUEUE => {
                     let endpoint = self.output + u64::from(dci) * self.context_bytes as u64;
                     assert_eq!(Self::word(endpoint) & 7, ENDPOINT_STOPPED);
-                    let base = Self::long(endpoint + 8) & !15;
+                    let base = Self::long(endpoint + 8) & !((RING_TRBS * TRB) as u64 - 1);
                     self.cursors.insert(
                         dci,
                         (
@@ -130,10 +130,12 @@ impl Hardware {
     fn transfer(&mut self, dci: u8) {
         let ep = self.output + u64::from(dci) * self.context_bytes as u64;
         let initial = Self::long(ep + 8);
-        let cursor = self
-            .cursors
-            .entry(dci)
-            .or_insert((initial & !15, 0, initial as u32 & 1));
+        let base = initial & !((RING_TRBS * TRB) as u64 - 1);
+        let cursor = self.cursors.entry(dci).or_insert((
+            base,
+            ((initial & !15) - base) as usize / TRB,
+            initial as u32 & 1,
+        ));
         let trb = cursor.0 + (cursor.1 * TRB) as u64;
         let control = Self::word(trb + 12);
         let bytes = (Self::word(trb + 8) & 0x1ffff) as usize;
@@ -274,6 +276,7 @@ fn controller(
         _output: output,
         context: [u32::from(speed) << 20 | 1 << 27, 1 << 16, 0, 0],
         endpoints: Default::default(),
+        retired_rings: Default::default(),
         control: dma.allocate(CONTROL_BYTES, CONTROL_BYTES).unwrap(),
         speed,
         current_configuration: Some(1),
@@ -525,7 +528,7 @@ fn occupancy_wrap_schedule_and_descriptor_failures_do_not_overwrite_owned_trbs()
 }
 
 #[test]
-fn acknowledged_endpoint_drop_allows_fresh_rings_and_failure_quarantines_every_selected_owner() {
+fn acknowledged_endpoint_drop_retains_rings_and_failure_quarantines_every_selected_owner() {
     for failure in [
         None,
         Some(CONFIGURE_ENDPOINT),
@@ -563,6 +566,8 @@ fn acknowledged_endpoint_drop_allows_fresh_rings_and_failure_quarantines_every_s
             let slot = controller.slot(1).unwrap();
             assert!(slot.endpoints[2].as_ref().unwrap().poisoned);
             assert!(slot.endpoints[5].as_ref().unwrap().poisoned);
+            assert!(slot.retired_rings[2].is_none());
+            assert!(slot.retired_rings[5].is_none());
             assert!(!slot.endpoints[7].as_ref().unwrap().poisoned);
             assert!(controller.submit_iso(1, 2, buffer.physical(), 32).is_err());
             assert!(
@@ -578,7 +583,7 @@ fn acknowledged_endpoint_drop_allows_fresh_rings_and_failure_quarantines_every_s
             controller
                 .configure(1, &endpoints[..2], None, &mut dma)
                 .unwrap();
-            assert_ne!(
+            assert_eq!(
                 old_ring,
                 controller.slot(1).unwrap().endpoints[2]
                     .as_ref()
@@ -601,6 +606,8 @@ fn acknowledged_endpoint_drop_allows_fresh_rings_and_failure_quarantines_every_s
         }
     }
 }
+
+mod reuse;
 
 #[test]
 fn invalid_descriptor_route_teardown_and_submission_have_no_dma_publication() {

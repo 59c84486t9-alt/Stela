@@ -735,6 +735,7 @@ mod tests {
             _output: output,
             context: [u32::from(SUPER_SPEED) << 20 | 1 << 27, 1 << 16, 0, 0],
             endpoints: Default::default(),
+            retired_rings: Default::default(),
             control: dma.allocate(CONTROL_BYTES, CONTROL_BYTES).unwrap(),
             speed: SUPER_SPEED,
             current_configuration: Some(1),
