@@ -1,9 +1,7 @@
-/*
- * Copyright © 2017 Intel Corporation
- * SPDX-License-Identifier: MIT
- * Field policy adapted from retained iris_store_cs_state(),
- * iris_upload_gpgpu_walker() and crocus_upload_compute_state(). Actual bit
- * packing remains entirely in the original hosted XML-generated packers.
+/* SPDX-License-Identifier: MIT */
+/* One generation's legacy compute packets: Stela's field values, the ones
+ * Iris and Crocus also program, packed entirely by Mesa's unchanged
+ * XML-generated packers.
  */
 #include "legacy_compute_internal.h"
 #define __gen_address_type uint64_t

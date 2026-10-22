@@ -1,8 +1,7 @@
-/*
- * Copyright © 2017 Intel Corporation
- * SPDX-License-Identifier: MIT
- * Subgroup payload/state policy adapted from retained Iris/Crocus. Original
- * compiler dispatch, push-size and Intel SLM policy functions are called.
+/* SPDX-License-Identifier: MIT */
+/* Stela's legacy compute payload and state policy, over Mesa's unchanged
+ * compiler dispatch, push-size and Intel SLM helpers. It programs the values
+ * the hardware requires, as Iris and Crocus do.
  */
 #include "legacy_compute_internal.h"
 #include "fp_controls.h"
