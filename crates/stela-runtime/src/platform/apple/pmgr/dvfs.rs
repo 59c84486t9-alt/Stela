@@ -2,9 +2,12 @@
 //!
 //! 26A434 t8112pmp SHA256 b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //! vtable VM1043b58, methods1008310..100844c, hardware rows10462d8 and
-//! domain rows1046428. Native1017a50 issues a request;1017370 waits for actual
-//! hardware BUSY clearance before publishing settled state. A physical PMGR
-//! domain's ACTIVE value and DPE sample registers establish no DVFS progress.
+//! domain rows1046428. Native1017a50 issues a request;1017370 requires the
+//! controller's interrupt-pending method (+0x68, full status == 1), then ACKs
+//! via +0x60 before publishing settled state. BUSY polling (+0x48) occurs at
+//! initialization1016df0 and an optional pre-request path1017a08, not as that
+//! IRQ completion predicate. A physical PMGR domain's ACTIVE value and DPE
+//! sample registers establish no DVFS progress.
 //!
 //! These immutable descriptors decode supplied observations and describe the
 //! original driver's physical operations. They neither execute those operations
