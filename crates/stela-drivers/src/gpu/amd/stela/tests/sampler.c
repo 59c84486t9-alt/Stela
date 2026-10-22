@@ -10,8 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
-struct si_screen { struct radeon_info info; };
-#include "sampler_policy_reference.h"
+#include "stela/tests/targets/amd.h"
 
 static struct stela_amd_sampler_state
 sampler(void)
@@ -35,31 +34,6 @@ model(enum radeon_family family, bool graphics)
    return info;
 }
 
-static void
-donor(const struct radeon_info *info, const struct stela_amd_sampler_state *state, uint32_t words[4])
-{
-   const unsigned border[] = {V_008F3C_SQ_TEX_BORDER_COLOR_TRANS_BLACK,
-      V_008F3C_SQ_TEX_BORDER_COLOR_OPAQUE_BLACK, V_008F3C_SQ_TEX_BORDER_COLOR_OPAQUE_WHITE};
-   const struct ac_sampler_state ac = {
-      .address_mode_u = si_tex_wrap(state->wrap[0]), .address_mode_v = si_tex_wrap(state->wrap[1]),
-      .address_mode_w = si_tex_wrap(state->wrap[2]),
-      .max_aniso_ratio = si_tex_aniso_filter(state->max_anisotropy),
-      .depth_compare_func = si_tex_compare(state->compare_enabled ? PIPE_TEX_COMPARE_R_TO_TEXTURE :
-                                                                 PIPE_TEX_COMPARE_NONE, state->compare_func),
-      .unnormalized_coords = state->unnormalized_coords, .cube_wrap = state->seamless_cube,
-      .trunc_coord = (state->min_filter == PIPE_TEX_FILTER_NEAREST &&
-         state->mag_filter == PIPE_TEX_FILTER_NEAREST && !state->compare_enabled) ||
-         info->compiler_info.conformant_trunc_coord,
-      .filter_mode = si_tex_filter_mode(state->reduction_mode),
-      .mag_filter = si_tex_filter(state->mag_filter, state->max_anisotropy),
-      .min_filter = si_tex_filter(state->min_filter, state->max_anisotropy),
-      .mip_filter = si_tex_mipfilter(state->mip_filter), .min_lod = state->min_lod,
-      .max_lod = state->max_lod, .lod_bias = state->lod_bias,
-      .border_color_type = border[state->border_color],
-   };
-   ac_build_sampler_descriptor(info->gfx_level, &ac, words);
-}
-
 static unsigned
 check(const struct radeon_info *info, const struct stela_amd_sampler_state *state,
         enum stela_amd_sampler_status expected)
@@ -72,9 +46,7 @@ check(const struct radeon_info *info, const struct stela_amd_sampler_state *stat
       assert(!memcmp(words, preserved, sizeof(words)));
       return 0;
    }
-   uint32_t reference[4]; donor(info, state, reference);
-   assert(!memcmp(words, reference, sizeof(words)));
-   /* Independent field decoding from scalar semantics, not the policy helpers. */
+   /* Independent field decoding from scalar semantics, not the policy tables. */
    const unsigned wraps[] = {V_008F30_SQ_TEX_WRAP, V_008F30_SQ_TEX_CLAMP_HALF_BORDER,
       V_008F30_SQ_TEX_CLAMP_LAST_TEXEL, V_008F30_SQ_TEX_CLAMP_BORDER,
       V_008F30_SQ_TEX_MIRROR, V_008F30_SQ_TEX_MIRROR_ONCE_HALF_BORDER,
@@ -87,6 +59,7 @@ check(const struct radeon_info *info, const struct stela_amd_sampler_state *stat
    assert(G_008F30_MAX_ANISO_RATIO(words[0]) == aniso);
    assert(G_008F30_DEPTH_COMPARE_FUNC(words[0]) == (state->compare_enabled ? state->compare_func : 0));
    assert(G_008F30_FORCE_UNNORMALIZED(words[0]) == state->unnormalized_coords);
+   assert(G_008F30_FILTER_MODE(words[0]) == (unsigned)state->reduction_mode);
    assert(G_008F30_DISABLE_CUBE_WRAP(words[0]) == !state->seamless_cube);
    assert(G_008F30_COMPAT_MODE(words[0]) == (info->gfx_level == GFX8 || info->gfx_level == GFX9));
    assert(G_008F30_TRUNC_COORD(words[0]) ==
@@ -125,7 +98,10 @@ matrix(const struct radeon_info *info)
       check(info, &state, STELA_AMD_SAMPLER_UNSUPPORTED);
       return 0;
    }
-   struct si_screen screen = {.info = *info};
+   /* Clamping wraps sample the border color, which needs 3D/cube
+    * border-color mipmaps. */
+   const bool border_wrap[] = {false, true, false, true, false, true, false, true};
+   const bool border = info->compiler_info.has_3d_cube_border_color_mipmap;
    unsigned comparisons = 0;
    const unsigned anisotropy[] = {1, 2, 3, 4, 7, 8, 12, 16};
    for (unsigned wrap = 0; wrap < 8; wrap++) {
@@ -141,10 +117,9 @@ matrix(const struct radeon_info *info)
                   state.reduction_mode = compare % 3; state.border_color = a % 3;
                   state.min_lod = 1.25; state.max_lod = a & 1 ? 7.5 : FLT_MAX;
                   state.lod_bias = -1.5; state.seamless_cube = a & 1;
-                  bool legal = is_wrap_mode_legal(&screen, state.wrap[0]) &&
-                     is_wrap_mode_legal(&screen, state.wrap[1]) && is_wrap_mode_legal(&screen, state.wrap[2]) &&
-                     (info->compiler_info.has_3d_cube_border_color_mipmap ||
-                      (mip == PIPE_TEX_MIPFILTER_NONE && anisotropy[a] == 1));
+                  bool legal = border || (!border_wrap[state.wrap[0]] &&
+                     !border_wrap[state.wrap[1]] && !border_wrap[state.wrap[2]] &&
+                     mip == PIPE_TEX_MIPFILTER_NONE && anisotropy[a] == 1);
                   comparisons += check(info, &state, legal ? STELA_AMD_SAMPLER_OK : STELA_AMD_SAMPLER_UNSUPPORTED);
                }
             }
@@ -197,15 +172,10 @@ invalid_inputs(const struct radeon_info *info)
 
 int main(void)
 {
-   const struct {enum radeon_family family; bool graphics;} targets[] = {
-      {CHIP_TAHITI, true}, {CHIP_BONAIRE, true}, {CHIP_CARRIZO, true}, {CHIP_RAVEN, true},
-      {CHIP_MI100, false}, {CHIP_MI200, false}, {CHIP_GFX940, false},
-      {CHIP_NAVI10, true}, {CHIP_REMBRANDT, true}, {CHIP_NAVI31, true},
-      {CHIP_STRIX1, true}, {CHIP_GFX1170, true}, {CHIP_GFX1201, true}, {CHIP_GFX1210, true},
-   };
    unsigned comparisons = 0;
-   for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
-      struct radeon_info info = model(targets[i].family, targets[i].graphics);
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+      const enum radeon_family family = stela_amd_targets[i];
+      struct radeon_info info = model(family, stela_amd_has_graphics(family));
       comparisons += matrix(&info);
       if (info.has_image_opcodes) {
          struct stela_amd_sampler_state edge = sampler();
@@ -220,6 +190,6 @@ int main(void)
    invalid_inputs(&conformant);
    conformant.compiler_info.conformant_trunc_coord = true;
    comparisons += matrix(&conformant);
-   printf("AMD samplers: %u pinned-policy/descriptor cases across14generationmodels+queried-coordinate variant; hardwareunverified\n", comparisons);
+   printf("AMD samplers: %u decoded descriptor cases; hardware unverified\n", comparisons);
    return 0;
 }

@@ -40,10 +40,9 @@ take_arg(const struct ac_shader_args *args, struct ac_arg arg,
    return true;
 }
 
-/* Same VMEM categories as si_shader_variant_info.c for the supported global
- * integer-buffer path. Refuse unowned resource classes instead of assuming
- * their cache, descriptor or MEM_ORDERED policy. The original pure policy still
- * retains and tests both VMEM categories independently against its donor.
+/* VMEM categories of the supported global integer-buffer path. Refuse
+ * unowned resource classes instead of assuming their cache, descriptor or
+ * MEM_ORDERED policy; the resource-word policy still takes both categories.
  */
 static bool
 shader_usage(const nir_shader *shader, struct stela_amd_compute_policy *state)

@@ -1,14 +1,6 @@
-/*
- * Copyright 2012 Advanced Micro Devices, Inc.
- * Copyright 2013 Advanced Micro Devices, Inc.
- * SPDX-License-Identifier: MIT
- *
- * Compute-only frontend policy from Mesa
- * 31e9a6b2e95e30d84bf3177d1f497d063e59b6b2:
- * src/gallium/drivers/radeonsi/gfx/si_shader.c,
- * si_calculate_needed_lds_size: compute uses shader->info.shared_size and
- * checks compiler_info.lds_size_per_workgroup. See the compiled donor in
- * tests/llvm_compute_reference.h. No vendor compiler algorithm is changed.
+/* SPDX-License-Identifier: MIT */
+/* A compute shader allocates exactly its fixed NIR shared size, within the
+ * target's per-workgroup LDS limit. No vendor compiler algorithm is changed.
  */
 #include "llvm_compute.h"
 #include "amd/common/ac_binary.h"

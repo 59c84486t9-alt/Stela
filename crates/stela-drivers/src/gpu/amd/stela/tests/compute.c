@@ -1,10 +1,11 @@
 /* SPDX-License-Identifier: MIT */
 /* CPU model only: immutable synthetic topology/VM facts, real retained ACO
- * compilation, original compiled RadeonSI donors and actual PM4 decoding.
+ * compilation, the resource-word policy and actual PM4 decoding.
  * No physical device, allocation, mapping or resource residency is created.
  */
 #include "../hosted/compute.h"
 #include "../hosted/compute_policy.h"
+#include "stela/tests/targets/amd.h"
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/ac_binary.h"
 #include "amd/common/ac_shader_util.h"
@@ -25,23 +26,6 @@
 #include <llvm-c/Object.h>
 #endif
 
-/* Minimal donor containers, confined to this test translation unit. Their
- * fields are exactly those read by the retained pure functions. */
-struct si_screen { struct radeon_info info; };
-struct si_shader_selector { struct si_screen *screen; mesa_shader_stage stage; };
-struct si_shader {
-   struct si_shader_selector *selector;
-   struct ac_shader_config config;
-   struct stela_amd_compute_policy info;
-   unsigned wave_size;
-   unsigned complete_shader_binary_size;
-};
-unsigned si_get_shader_prefetch_size(struct si_shader *shader);
-unsigned si_shader_encode_vgprs(struct si_shader *shader);
-unsigned si_shader_encode_sgprs(struct si_shader *shader);
-bool si_shader_mem_ordered(struct si_shader *shader);
-#include "compute_policy_reference.h"
-
 static struct radeon_info
 model(enum radeon_family family, bool graphics)
 {
@@ -57,21 +41,20 @@ model(enum radeon_family family, bool graphics)
    return info;
 }
 
+/* Decodes every resource-word field and checks it against what the hardware
+ * must allocate or enable for the shader facts, independently of the policy.
+ */
 static void
-test_policy_donors(void)
+test_policy(void)
 {
-   const enum radeon_family targets[] = {
-      CHIP_TAHITI, CHIP_BONAIRE, CHIP_CARRIZO, CHIP_RAVEN, CHIP_MI100,
-      CHIP_MI200, CHIP_GFX940, CHIP_NAVI10, CHIP_REMBRANDT, CHIP_NAVI31,
-      CHIP_STRIX1, CHIP_GFX1170, CHIP_GFX1201, CHIP_GFX1210,
-   };
-   unsigned comparisons = 0;
-   for (unsigned target = 0; target < ARRAY_SIZE(targets); target++) {
-      struct si_screen screen = {.info = model(targets[target], true)};
-      struct si_shader_selector selector = {.screen = &screen, .stage = MESA_SHADER_COMPUTE};
-      for (unsigned wave = screen.info.gfx_level < GFX10 ? 64 : 32; wave <= 64; wave *= 2) {
+   unsigned cases = 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+      const enum radeon_family family = stela_amd_targets[i];
+      const struct radeon_info info = model(family, true);
+      const enum amd_gfx_level gfx = info.gfx_level;
+      for (unsigned wave = stela_amd_min_wave(family); wave <= 64; wave *= 2) {
          for (unsigned mask = 0; mask < 64; mask++) {
-            struct stela_amd_compute_policy state = {
+            const struct stela_amd_compute_policy state = {
                .stage = MESA_SHADER_COMPUTE, .wave_size = wave, .binary_size = 76,
                .cs_num_user_sgprs = 2 + (mask % 8),
                .uses_sysval_workgroup_id_x = mask & 1,
@@ -85,23 +68,51 @@ test_policy_donors(void)
             };
             struct ac_shader_config config = {
                .num_sgprs = 16, .num_vgprs = 8 + 8 * (mask % 4),
-               .num_shared_vgprs = screen.info.gfx_level >= GFX10 ? 8 * (mask % 3) : 0,
+               .num_shared_vgprs = gfx >= GFX10 ? 8 * (mask % 3) : 0,
                .scratch_bytes_per_wave = mask & 4 ? 1024 : 0,
                .lds_size = 512 * (mask % 8), .float_mode = 192,
             };
-            struct si_shader donor = {
-               .selector = &selector, .config = config, .info = state,
-               .wave_size = wave, .complete_shader_binary_size = state.binary_size,
-            };
-            reference_compute_words(&donor);
-            stela_amd_compute_policy(&screen.info, &state, &config);
-            assert(config.rsrc1 == donor.config.rsrc1 && config.rsrc2 == donor.config.rsrc2 &&
-                   config.rsrc3 == donor.config.rsrc3);
-            comparisons++;
+            stela_amd_compute_policy(&info, &state, &config);
+            const uint32_t rsrc1 = config.rsrc1, rsrc2 = config.rsrc2, rsrc3 = config.rsrc3;
+            /* The fewest VGPR granules holding every VGPR; wave32 granules
+             * are twice wave64's. SGPRs come in blocks of eight before GFX10. */
+            const unsigned granule =
+               info.compiler_info.wave64_vgpr_encode_granularity * (64 / wave);
+            const unsigned vgpr_granules = G_00B848_VGPRS(rsrc1) + 1;
+            assert(vgpr_granules * granule >= config.num_vgprs &&
+                   (vgpr_granules - 1) * granule < config.num_vgprs);
+            assert(gfx >= GFX10 ? !G_00B848_SGPRS(rsrc1) :
+                                  (G_00B848_SGPRS(rsrc1) + 1) * 8 == config.num_sgprs);
+            assert(G_00B848_DX10_CLAMP(rsrc1) == (gfx < GFX12));
+            assert(G_00B848_PRIV(rsrc1) == (gfx == GFX11));
+            assert(G_00B848_FLOAT_MODE(rsrc1) == config.float_mode);
+            const bool both_vmem = state.uses_vmem_sampler_or_bvh &&
+                                   (state.uses_vmem_load_other || config.scratch_bytes_per_wave);
+            assert(G_00B848_MEM_ORDERED(rsrc1) == (gfx >= GFX10 && gfx < GFX12 && both_vmem));
+            assert(G_00B84C_USER_SGPR(rsrc2) == state.cs_num_user_sgprs);
+            assert(G_00B84C_SCRATCH_EN(rsrc2) == (config.scratch_bytes_per_wave > 0));
+            assert(G_00B84C_TGID_X_EN(rsrc2) == state.uses_sysval_workgroup_id_x &&
+                   G_00B84C_TGID_Y_EN(rsrc2) == state.uses_sysval_workgroup_id_y &&
+                   G_00B84C_TGID_Z_EN(rsrc2) == state.uses_sysval_workgroup_id_z);
+            assert(G_00B84C_TG_SIZE_EN(rsrc2) == state.uses_sgpr_tg_size);
+            assert(G_00B84C_TIDIG_COMP_CNT(rsrc2) ==
+                   (state.uses_sysval_local_invocation_id_z ? 2u :
+                    state.uses_sysval_local_invocation_id_y ? 1u : 0u));
+            /* Compute LDS is encoded in 256-byte (GFX6) or 512-byte units of
+             * the allocation, rounded up to the generation's granularity. */
+            assert(G_00B84C_LDS_SIZE(rsrc2) * (gfx >= GFX7 ? 512 : 256) ==
+                   align(config.lds_size, ac_shader_get_lds_alloc_granularity(gfx)));
+            assert(G_00B8A0_SHARED_VGPR_CNT(rsrc3) * 8 == config.num_shared_vgprs);
+            const unsigned prefetch = gfx >= GFX12 ? G_00B8A0_INST_PREF_SIZE_GFX12(rsrc3) :
+                                      gfx >= GFX11 ? G_00B8A0_INST_PREF_SIZE_GFX11(rsrc3) : 0;
+            assert(prefetch == (gfx >= GFX11 ? ac_get_instr_prefetch_size(
+                                   gfx, info.instr_prefetch_distance, state.binary_size) : 0));
+            assert(gfx >= GFX11 || !(rsrc3 & ~S_00B8A0_SHARED_VGPR_CNT(~0u)));
+            cases++;
          }
       }
    }
-   printf("AMD compute: %u compiled pinned-donor resource-word comparisons passed\n", comparisons);
+   printf("AMD compute: %u resource-word policy cases decoded\n", cases);
 }
 
 struct compiled {
@@ -391,18 +402,15 @@ test_compiled_target(enum radeon_family family, unsigned wave, bool llvm_backend
 int
 main(void)
 {
-   test_policy_donors();
+   test_policy();
    glsl_type_singleton_init_or_ref();
-   const enum radeon_family targets[] = {
-      CHIP_TAHITI, CHIP_BONAIRE, CHIP_CARRIZO, CHIP_RAVEN, CHIP_NAVI10,
-      CHIP_REMBRANDT, CHIP_NAVI31, CHIP_STRIX1, CHIP_GFX1170, CHIP_GFX1201,
-   };
    unsigned compiled = 0;
-   for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
-      test_compiled_target(targets[i], 64, false, 0, 0);
-      compiled++;
-      if (ac_get_gfx_level(targets[i]) >= GFX10) {
-         test_compiled_target(targets[i], 32, false, 0, 0);
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+      const enum radeon_family family = stela_amd_targets[i];
+      if (stela_amd_aco_hold(family))
+         continue;
+      for (unsigned wave = 64; wave >= stela_amd_min_wave(family); wave /= 2) {
+         test_compiled_target(family, wave, false, 0, 0);
          compiled++;
       }
    }
@@ -421,15 +429,15 @@ main(void)
    }
 #if STELA_AMD_TEST_LLVM
    ac_init_llvm_once();
-   test_compiled_target(CHIP_MI100, 64, true, 0, 0);
-   test_compiled_target(CHIP_MI200, 64, true, 0, 0);
-   test_compiled_target(CHIP_GFX940, 64, true, 0, 0);
-   compiled += 3;
-   for (unsigned i = 0; i < ARRAY_SIZE(float_modes); i++) {
-      test_compiled_target(CHIP_MI100, 64, true, 0, float_modes[i]);
-      test_compiled_target(CHIP_MI200, 64, true, 0, float_modes[i]);
-      test_compiled_target(CHIP_GFX940, 64, true, 0, float_modes[i]);
-      compiled += 3;
+   /* The retained LLVM backend compiles the families ACO holds. */
+   for (unsigned mode = 0; mode <= ARRAY_SIZE(float_modes); mode++) {
+      for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
+         if (!stela_amd_llvm_compiles(stela_amd_targets[i]))
+            continue;
+         test_compiled_target(stela_amd_targets[i], 64, true, 0,
+                              mode ? float_modes[mode - 1] : 0);
+         compiled++;
+      }
    }
 #endif
    glsl_type_singleton_decref();

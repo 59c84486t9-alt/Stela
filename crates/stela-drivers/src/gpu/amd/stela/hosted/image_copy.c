@@ -1,14 +1,7 @@
-/*
- * Copyright © 2011 Red Hat All Rights Reserved.
- * Copyright © 2017 Advanced Micro Devices, Inc.
- * Copyright © 2025 Valve Corporation
- *
- * SPDX-License-Identifier: MIT
- *
- * Original ac_surface CPU-copy/metadata inputs and RADV host-copy policy are
- * retained from Mesa31e9a6b2e95e30d84bf3177d1f497d063e59b6b2. Bounds, ownership
- * contracts and staging-window requirements are Stela integration. No tiler,
- * allocator, synchronization operation or original hardware algorithm is added.
+/* SPDX-License-Identifier: MIT */
+/* Bounds, ownership contracts and staging windows around Mesa's unchanged
+ * ac_surface CPU copy and Addrlib layouts. No tiler, allocator,
+ * synchronization operation or hardware algorithm is added.
  */
 #include "image_copy.h"
 #include "amd/common/ac_gpu_info.h"

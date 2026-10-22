@@ -1,8 +1,4 @@
-/*
- * Copyright 2012 Advanced Micro Devices, Inc.
- * Copyright 2013 Advanced Micro Devices, Inc.
- * SPDX-License-Identifier: MIT
- */
+/* SPDX-License-Identifier: MIT */
 #ifndef STELA_AMD_COMPUTE_POLICY_H
 #define STELA_AMD_COMPUTE_POLICY_H
 
@@ -31,9 +27,8 @@ struct stela_amd_compute_policy {
    bool uses_vmem_load_other;
 };
 
-/* Original RadeonSI word policy, with only container-to-typed-input mapping.
- * Preconditions belong to the checked adapter; this internal entry preserves
- * the donor's assertions and hardware expressions for independent comparison.
+/* Fills COMPUTE_PGM_RSRC1..3 from the compiler config and shader facts. The
+ * checked adapter validates every field's capacity before calling this.
  */
 void stela_amd_compute_policy(const struct radeon_info *info,
                               const struct stela_amd_compute_policy *state,

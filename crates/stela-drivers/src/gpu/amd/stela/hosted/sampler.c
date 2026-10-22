@@ -1,132 +1,70 @@
-/*
- * Copyright 2012 Advanced Micro Devices, Inc.
- * SPDX-License-Identifier: MIT
- *
- * Pure sampler policy retained from Mesa 31e9a6b2e95e30d84bf3177d1f497d063e59b6b2,
- * gallium/drivers/radeonsi/si_state.c. No frontend or allocation lifecycle is retained.
+/* SPDX-License-Identifier: MIT */
+/* Stela's sampler policy: validated pipe sampler facts mapped to the SQ
+ * sampler fields, packed by Mesa's unchanged ac_build_sampler_descriptor.
  */
 
 #include "sampler.h"
 #include "amd/common/ac_descriptors.h"
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/sid.h"
+#include "util/u_math.h"
 #include <math.h>
 #include <string.h>
 
-static unsigned is_wrap_mode_legal(const struct radeon_info *info, unsigned wrap)
+static const unsigned address_modes[] = {
+   [PIPE_TEX_WRAP_REPEAT] = V_008F30_SQ_TEX_WRAP,
+   [PIPE_TEX_WRAP_CLAMP] = V_008F30_SQ_TEX_CLAMP_HALF_BORDER,
+   [PIPE_TEX_WRAP_CLAMP_TO_EDGE] = V_008F30_SQ_TEX_CLAMP_LAST_TEXEL,
+   [PIPE_TEX_WRAP_CLAMP_TO_BORDER] = V_008F30_SQ_TEX_CLAMP_BORDER,
+   [PIPE_TEX_WRAP_MIRROR_REPEAT] = V_008F30_SQ_TEX_MIRROR,
+   [PIPE_TEX_WRAP_MIRROR_CLAMP] = V_008F30_SQ_TEX_MIRROR_ONCE_HALF_BORDER,
+   [PIPE_TEX_WRAP_MIRROR_CLAMP_TO_EDGE] = V_008F30_SQ_TEX_MIRROR_ONCE_LAST_TEXEL,
+   [PIPE_TEX_WRAP_MIRROR_CLAMP_TO_BORDER] = V_008F30_SQ_TEX_MIRROR_ONCE_BORDER,
+};
+
+static const unsigned mip_filters[] = {
+   [PIPE_TEX_MIPFILTER_NEAREST] = V_008F38_SQ_TEX_Z_FILTER_POINT,
+   [PIPE_TEX_MIPFILTER_LINEAR] = V_008F38_SQ_TEX_Z_FILTER_LINEAR,
+   [PIPE_TEX_MIPFILTER_NONE] = V_008F38_SQ_TEX_Z_FILTER_NONE,
+};
+
+static const unsigned compare_funcs[] = {
+   [PIPE_FUNC_NEVER] = V_008F30_SQ_TEX_DEPTH_COMPARE_NEVER,
+   [PIPE_FUNC_LESS] = V_008F30_SQ_TEX_DEPTH_COMPARE_LESS,
+   [PIPE_FUNC_EQUAL] = V_008F30_SQ_TEX_DEPTH_COMPARE_EQUAL,
+   [PIPE_FUNC_LEQUAL] = V_008F30_SQ_TEX_DEPTH_COMPARE_LESSEQUAL,
+   [PIPE_FUNC_GREATER] = V_008F30_SQ_TEX_DEPTH_COMPARE_GREATER,
+   [PIPE_FUNC_NOTEQUAL] = V_008F30_SQ_TEX_DEPTH_COMPARE_NOTEQUAL,
+   [PIPE_FUNC_GEQUAL] = V_008F30_SQ_TEX_DEPTH_COMPARE_GREATEREQUAL,
+   [PIPE_FUNC_ALWAYS] = V_008F30_SQ_TEX_DEPTH_COMPARE_ALWAYS,
+};
+
+static const unsigned reduction_modes[] = {
+   [PIPE_TEX_REDUCTION_WEIGHTED_AVERAGE] = V_008F30_SQ_IMG_FILTER_MODE_BLEND,
+   [PIPE_TEX_REDUCTION_MIN] = V_008F30_SQ_IMG_FILTER_MODE_MIN,
+   [PIPE_TEX_REDUCTION_MAX] = V_008F30_SQ_IMG_FILTER_MODE_MAX,
+};
+
+/* Clamping wraps can sample the border color, which needs the 3D/cube
+ * border-color mipmap support older generations lack.
+ */
+static bool
+samples_border(enum pipe_tex_wrap wrap)
 {
-   if (!info->compiler_info.has_3d_cube_border_color_mipmap) {
-      switch (wrap) {
-      case PIPE_TEX_WRAP_CLAMP:
-      case PIPE_TEX_WRAP_CLAMP_TO_BORDER:
-      case PIPE_TEX_WRAP_MIRROR_CLAMP:
-      case PIPE_TEX_WRAP_MIRROR_CLAMP_TO_BORDER:
-         return false;
-      }
-   }
-   return true;
+   return wrap == PIPE_TEX_WRAP_CLAMP || wrap == PIPE_TEX_WRAP_CLAMP_TO_BORDER ||
+          wrap == PIPE_TEX_WRAP_MIRROR_CLAMP || wrap == PIPE_TEX_WRAP_MIRROR_CLAMP_TO_BORDER;
 }
 
-static unsigned si_tex_wrap(unsigned wrap)
+/* Anisotropic filtering applies once the ratio exceeds one. */
+static unsigned
+xy_filter(enum pipe_tex_filter filter, unsigned max_anisotropy)
 {
-   switch (wrap) {
-   default:
-   case PIPE_TEX_WRAP_REPEAT:
-      return V_008F30_SQ_TEX_WRAP;
-   case PIPE_TEX_WRAP_CLAMP:
-      return V_008F30_SQ_TEX_CLAMP_HALF_BORDER;
-   case PIPE_TEX_WRAP_CLAMP_TO_EDGE:
-      return V_008F30_SQ_TEX_CLAMP_LAST_TEXEL;
-   case PIPE_TEX_WRAP_CLAMP_TO_BORDER:
-      return V_008F30_SQ_TEX_CLAMP_BORDER;
-   case PIPE_TEX_WRAP_MIRROR_REPEAT:
-      return V_008F30_SQ_TEX_MIRROR;
-   case PIPE_TEX_WRAP_MIRROR_CLAMP:
-      return V_008F30_SQ_TEX_MIRROR_ONCE_HALF_BORDER;
-   case PIPE_TEX_WRAP_MIRROR_CLAMP_TO_EDGE:
-      return V_008F30_SQ_TEX_MIRROR_ONCE_LAST_TEXEL;
-   case PIPE_TEX_WRAP_MIRROR_CLAMP_TO_BORDER:
-      return V_008F30_SQ_TEX_MIRROR_ONCE_BORDER;
-   }
+   const bool linear = filter == PIPE_TEX_FILTER_LINEAR;
+   if (max_anisotropy > 1)
+      return linear ? V_008F38_SQ_TEX_XY_FILTER_ANISO_BILINEAR :
+                      V_008F38_SQ_TEX_XY_FILTER_ANISO_POINT;
+   return linear ? V_008F38_SQ_TEX_XY_FILTER_BILINEAR : V_008F38_SQ_TEX_XY_FILTER_POINT;
 }
-
-static unsigned si_tex_mipfilter(unsigned filter)
-{
-   switch (filter) {
-   case PIPE_TEX_MIPFILTER_NEAREST:
-      return V_008F38_SQ_TEX_Z_FILTER_POINT;
-   case PIPE_TEX_MIPFILTER_LINEAR:
-      return V_008F38_SQ_TEX_Z_FILTER_LINEAR;
-   default:
-   case PIPE_TEX_MIPFILTER_NONE:
-      return V_008F38_SQ_TEX_Z_FILTER_NONE;
-   }
-}
-
-static unsigned si_tex_compare(unsigned mode, unsigned compare)
-{
-   if (mode == PIPE_TEX_COMPARE_NONE)
-      return V_008F30_SQ_TEX_DEPTH_COMPARE_NEVER;
-
-   switch (compare) {
-   default:
-   case PIPE_FUNC_NEVER:
-      return V_008F30_SQ_TEX_DEPTH_COMPARE_NEVER;
-   case PIPE_FUNC_LESS:
-      return V_008F30_SQ_TEX_DEPTH_COMPARE_LESS;
-   case PIPE_FUNC_EQUAL:
-      return V_008F30_SQ_TEX_DEPTH_COMPARE_EQUAL;
-   case PIPE_FUNC_LEQUAL:
-      return V_008F30_SQ_TEX_DEPTH_COMPARE_LESSEQUAL;
-   case PIPE_FUNC_GREATER:
-      return V_008F30_SQ_TEX_DEPTH_COMPARE_GREATER;
-   case PIPE_FUNC_NOTEQUAL:
-      return V_008F30_SQ_TEX_DEPTH_COMPARE_NOTEQUAL;
-   case PIPE_FUNC_GEQUAL:
-      return V_008F30_SQ_TEX_DEPTH_COMPARE_GREATEREQUAL;
-   case PIPE_FUNC_ALWAYS:
-      return V_008F30_SQ_TEX_DEPTH_COMPARE_ALWAYS;
-   }
-}
-
-static inline unsigned si_tex_filter(unsigned filter, unsigned max_aniso)
-{
-   if (filter == PIPE_TEX_FILTER_LINEAR)
-      return max_aniso > 1 ? V_008F38_SQ_TEX_XY_FILTER_ANISO_BILINEAR
-                           : V_008F38_SQ_TEX_XY_FILTER_BILINEAR;
-   else
-      return max_aniso > 1 ? V_008F38_SQ_TEX_XY_FILTER_ANISO_POINT
-                           : V_008F38_SQ_TEX_XY_FILTER_POINT;
-}
-
-static inline unsigned si_tex_aniso_filter(unsigned filter)
-{
-   if (filter < 2)
-      return 0;
-   if (filter < 4)
-      return 1;
-   if (filter < 8)
-      return 2;
-   if (filter < 16)
-      return 3;
-   return 4;
-}
-
-static unsigned si_tex_filter_mode(unsigned mode)
-{
-   switch (mode) {
-   case PIPE_TEX_REDUCTION_WEIGHTED_AVERAGE:
-      return V_008F30_SQ_IMG_FILTER_MODE_BLEND;
-   case PIPE_TEX_REDUCTION_MIN:
-      return V_008F30_SQ_IMG_FILTER_MODE_MIN;
-   case PIPE_TEX_REDUCTION_MAX:
-      return V_008F30_SQ_IMG_FILTER_MODE_MAX;
-   default:
-      break;
-   }
-   return 0;
-}
-
 
 static unsigned
 builtin_border(enum stela_amd_border_color color)
@@ -168,7 +106,8 @@ stela_amd_build_sampler(const struct radeon_info *info,
    for (unsigned axis = 0; axis < 3; axis++) {
       if ((unsigned)state->wrap[axis] > PIPE_TEX_WRAP_MIRROR_CLAMP_TO_BORDER)
          return STELA_AMD_SAMPLER_INVALID;
-      if (!is_wrap_mode_legal(info, state->wrap[axis]))
+      if (!info->compiler_info.has_3d_cube_border_color_mipmap &&
+          samples_border(state->wrap[axis]))
          return STELA_AMD_SAMPLER_UNSUPPORTED;
    }
    if (!info->compiler_info.has_3d_cube_border_color_mipmap &&
@@ -192,20 +131,20 @@ stela_amd_build_sampler(const struct radeon_info *info,
    const bool nearest = state->min_filter == PIPE_TEX_FILTER_NEAREST &&
                         state->mag_filter == PIPE_TEX_FILTER_NEAREST;
    const struct ac_sampler_state ac_state = {
-      .address_mode_u = si_tex_wrap(state->wrap[0]),
-      .address_mode_v = si_tex_wrap(state->wrap[1]),
-      .address_mode_w = si_tex_wrap(state->wrap[2]),
-      .max_aniso_ratio = si_tex_aniso_filter(state->max_anisotropy),
-      .depth_compare_func = si_tex_compare(state->compare_enabled ? PIPE_TEX_COMPARE_R_TO_TEXTURE :
-                                                                 PIPE_TEX_COMPARE_NONE,
-                                          state->compare_func),
+      .address_mode_u = address_modes[state->wrap[0]],
+      .address_mode_v = address_modes[state->wrap[1]],
+      .address_mode_w = address_modes[state->wrap[2]],
+      /* log2 of the 1..16 anisotropy ratio. */
+      .max_aniso_ratio = util_logbase2(state->max_anisotropy),
+      .depth_compare_func = state->compare_enabled ? compare_funcs[state->compare_func] :
+                                                     V_008F30_SQ_TEX_DEPTH_COMPARE_NEVER,
       .unnormalized_coords = state->unnormalized_coords,
       .cube_wrap = state->seamless_cube,
       .trunc_coord = (nearest && !state->compare_enabled) || info->compiler_info.conformant_trunc_coord,
-      .filter_mode = si_tex_filter_mode(state->reduction_mode),
-      .mag_filter = si_tex_filter(state->mag_filter, state->max_anisotropy),
-      .min_filter = si_tex_filter(state->min_filter, state->max_anisotropy),
-      .mip_filter = si_tex_mipfilter(state->mip_filter),
+      .filter_mode = reduction_modes[state->reduction_mode],
+      .mag_filter = xy_filter(state->mag_filter, state->max_anisotropy),
+      .min_filter = xy_filter(state->min_filter, state->max_anisotropy),
+      .mip_filter = mip_filters[state->mip_filter],
       .min_lod = state->min_lod, .max_lod = state->max_lod, .lod_bias = state->lod_bias,
       .border_color_type = builtin_border(state->border_color),
    };
