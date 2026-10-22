@@ -4,6 +4,28 @@ use super::*;
 use crate::memory::{CanonicalRamService, RegisteredSystemRam};
 use alloc::sync::Arc;
 
+impl super::super::AppleDevices {
+    /// Publish one prepared MCC/AMCC/PTD owner at its complete physical map.
+    /// This is placement only: native execution must separately admit the
+    /// registered RAM, stopped-worker reads, PMP services and source policy.
+    /// A failed placement leaves the bus and its existing lock owner intact.
+    pub fn add_memory_resources(&mut self, owner: Prepared) -> Result<(), alloc::string::String> {
+        if self.memory_controller.is_some() {
+            return Err("memory controller already has an actual owner".into());
+        }
+        if owner.ram.is_none() {
+            return Err("prepared memory placement requires its canonical RAM association".into());
+        }
+        let bindings = owner.bindings();
+        let device = self
+            .bus
+            .install(alloc::boxed::Box::new(owner), &bindings)
+            .map_err(|error| alloc::format!("joint memory resource placement: {error:?}"))?;
+        self.memory_controller = Some(device);
+        Ok(())
+    }
+}
+
 impl Prepared {
     /// Retain the actual canonical guest reservations before publishing this
     /// resource. Registration's all-writer contract excludes raw/unjoined DMA;
@@ -154,5 +176,66 @@ mod tests {
             .unwrap();
         let memory = ram.try_service().unwrap().unwrap();
         assert!(read(&owner, mcc::DCS_BASE + 0xa40, Width::Word, &memory).is_err());
+    }
+
+    #[test]
+    fn placement_requires_registered_ram_and_keeps_one_complete_owner() {
+        use crate::machine::{Devices, apple::AppleDevices};
+        let mut devices = AppleDevices::new();
+        assert!(
+            devices
+                .add_memory_resources(super::super::tests::prepared())
+                .is_err()
+        );
+        assert!(devices.memory_controller.is_none());
+        let owner = super::super::tests::prepared()
+            .with_registered_ram(ram())
+            .unwrap();
+        let bindings = owner.bindings();
+        devices.add_memory_resources(owner).unwrap();
+        let id = devices.memory_controller.unwrap();
+        for (physical, bytes, offset) in bindings {
+            assert_eq!(devices.bus.route(physical, Width::Word), Ok((id, offset)));
+            assert_eq!(
+                devices.bus.route(physical + bytes - 4, Width::Word),
+                Ok((id, offset + bytes - 4))
+            );
+        }
+        assert_eq!(devices.memory_lock(), None);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        devices
+            .bus
+            .write(0x200000688, Width::Word, 1, &mut access)
+            .unwrap();
+        assert_eq!(devices.memory_lock(), Some((0x800004000, 0x800007fff)));
+        let owner = super::super::tests::prepared()
+            .with_registered_ram(ram())
+            .unwrap();
+        assert!(devices.add_memory_resources(owner).is_err());
+        assert_eq!(devices.memory_controller, Some(id));
+    }
+
+    #[test]
+    fn conflicting_publication_bank_does_not_publish_partial_memory_apertures() {
+        use crate::machine::apple::AppleDevices;
+        let mut devices = AppleDevices::new();
+        let owner = super::super::tests::prepared()
+            .with_registered_ram(ram())
+            .unwrap();
+        let bindings = owner.bindings();
+        let publication = owner.publication_bank().clone();
+        let (physical, bytes, offset) = owner.publication_binding();
+        let id = devices
+            .bus
+            .install(alloc::boxed::Box::new(publication), &[(physical, bytes, 0)])
+            .unwrap();
+        assert!(devices.add_memory_resources(owner).is_err());
+        assert!(devices.memory_controller.is_none());
+        assert_eq!(devices.bus.route(physical, Width::Word), Ok((id, 0)));
+        for &(physical, _, _) in &bindings[..bindings.len() - 1] {
+            assert!(devices.bus.route(physical, Width::Word).is_err());
+        }
+        assert_ne!(offset, 0);
     }
 }
