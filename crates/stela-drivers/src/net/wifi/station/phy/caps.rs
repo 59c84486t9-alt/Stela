@@ -242,6 +242,34 @@ impl Eht {
         &self.source_mcs_union
     }
 
+    // Exact pinned mlme.c get_eht_cap_mcs_nss/verify_sta_eht_mcs_support:
+    // requirements apply to every locally supported bandwidth, independently
+    // of the selected association width. Unsupported widths return0xff.
+    pub(super) fn meets_basic(&self, he: &He, required: [u8; 4]) -> bool {
+        let raw = self.source_mcs_union.bytes();
+        for (group, required) in required.into_iter().enumerate() {
+            for width in 0..3 {
+                let index = group.saturating_sub(1);
+                let have = if he.phy[0] & 0x1e == 0 {
+                    raw[group] //20-only STA has four distinct MCS ranges.
+                } else {
+                    match width {
+                        0 => raw[index],
+                        1 if he.phy[0] & 0x18 == 0 => 0xff,
+                        1 => raw[3 + index],
+                        2 if self.phy[0] & 2 == 0 => 0xff,
+                        2 => raw[6 + index],
+                        _ => unreachable!(),
+                    }
+                };
+                if (required & 15) > (have & 15) || (required >> 4) > (have >> 4) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     pub(super) fn parse(bytes: &[u8], he: &He, role: Role) -> Result<Self, Error> {
         let fixed = bytes.get(..11).ok_or(Error::Truncated)?;
         let mac = fixed[..2].try_into().unwrap();
@@ -322,4 +350,82 @@ fn validate_eht_nss(bytes: &[u8]) -> Result<(), Error> {
         return Err(Error::Invalid("EHT NSS exceeds eight"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod basic_tests {
+    use super::*;
+    use alloc::format;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn all_local_width_basic_requirements_match_full_unchanged_linux_helpers() {
+        let mut hash = Sha256::new();
+        let mut cases = 0;
+        for flags in (0..32).step_by(2) {
+            for wide in [false, true] {
+                let mut he = He {
+                    mac: [0; 6],
+                    phy: [0; 11],
+                    mcs_80: McsMaps { rx: 0, tx: 0 },
+                    mcs_160: None,
+                    mcs_80p80: None,
+                    ppe: Ppe::new(&[]).unwrap(),
+                };
+                he.phy[0] = flags;
+                // Direct source-struct fixture, never an admitted advertisement,
+                // current association or physical local-capability claim.
+                let mut eht = Eht {
+                    mac: [0; 2],
+                    phy: [0; 9],
+                    mcs: EhtMcs {
+                        only_20: None,
+                        bw80: None,
+                        bw160: None,
+                        bw320: None,
+                    },
+                    ppe: Ppe::new(&[]).unwrap(),
+                    source_mcs_union: EhtMcsUnion {
+                        bytes: [0x88; 9],
+                        wire_len: 9,
+                    },
+                };
+                eht.phy[0] = if wide { 2 } else { 0 };
+                for group in 0_usize..4 {
+                    for bw in 0..3 {
+                        for have in 0..9 {
+                            for required in 0..9 {
+                                for direction in 0..2 {
+                                    eht.source_mcs_union.bytes.fill(0x88);
+                                    let idx = if flags & 0x1e == 0 {
+                                        group
+                                    } else {
+                                        bw * 3 + group.saturating_sub(1)
+                                    };
+                                    eht.source_mcs_union.bytes[idx] = if direction == 0 {
+                                        have | 0x80
+                                    } else {
+                                        8 | (have << 4)
+                                    };
+                                    let mut basic = [0; 4];
+                                    basic[group] = if direction == 0 {
+                                        required
+                                    } else {
+                                        required << 4
+                                    };
+                                    hash.update([u8::from(eht.meets_basic(&he, basic))]);
+                                    cases += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 62208);
+        assert_eq!(
+            format!("{:x}", hash.finalize()),
+            "4e172241fdaa7984005b2a209956aafc2dd9c0c0d7b2533adf9bc37ad82f69d6"
+        );
+    }
 }

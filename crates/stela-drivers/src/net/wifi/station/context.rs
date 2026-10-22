@@ -188,10 +188,11 @@ impl AssociationContext {
         }
         if let Some(e) = &operations.eht
             && let Some(n) = &negotiated.eht
-            && e.basic_mcs
-                .iter()
-                .zip(n.ranges)
-                .any(|(r, n)| (r & 15) > (n & 15) || (r >> 4) > (n >> 4))
+            && (!selection.capabilities().meets_eht_basic(e.basic_mcs)
+                || e.basic_mcs
+                    .iter()
+                    .zip(n.ranges)
+                    .any(|(r, n)| (r & 15) > (n >> 4) || (r >> 4) > (n & 15)))
         {
             return Err(Error::Unsupported("EHT basic MCS requirement"));
         }

@@ -375,3 +375,87 @@ fn final_vht_operation_uses_actual_source_capability_width_not_raw_segments_alon
         .is_err()
     );
 }
+
+#[test]
+fn review_eht_basic_mcs_cannot_ignore_advertised_wider_local_map() {
+    let mut local = modern_ies(false);
+    let mutate = |bytes: &mut Vec<u8>, own: bool| {
+        let mut at = 0;
+        while at < bytes.len() {
+            let len = usize::from(bytes[at + 1]);
+            let id = bytes[at];
+            let b = &mut bytes[at + 2..at + 2 + len];
+            if id == 255 && b[0] == 108 {
+                b[12..15].fill(0x22);
+                b[15..18].fill(if own { 0x11 } else { 0x22 });
+            }
+            if id == 255 && b[0] == 106 {
+                b[2..6].fill(0x22);
+            }
+            at += 2 + len;
+        }
+    };
+    mutate(&mut local, true);
+    let mut j = modern_join();
+    j.request =
+        wire::AssociationRequest::new_modern(1, 10, local, Band::Ghz5, Mode::Eht, Width::Mhz80)
+            .unwrap();
+    let mut b = beacon(&j);
+    mutate(&mut b.elements, false);
+    let mut elements = modern_ies(true);
+    mutate(&mut elements, false);
+    let result = AssociationContext::build(
+        Ticket {
+            epoch: 1,
+            serial: 2,
+        },
+        &j,
+        &b,
+        &response_metadata(elements),
+    );
+    assert!(
+        result.is_err(),
+        "local advertised160 map fails actual EHT basic2NSS even when selected80 passes, got {result:?}"
+    );
+}
+
+#[test]
+fn basic_eht_local_rx_tx_orientation_is_not_selected_common_orientation() {
+    fn maps(bytes: &mut [u8], cap: u8, basic: u8) {
+        let mut at = 0;
+        while at < bytes.len() {
+            let n = usize::from(bytes[at + 1]);
+            let id = bytes[at];
+            let b = &mut bytes[at + 2..at + 2 + n];
+            if id == 255 && b[0] == 108 {
+                b[12..].fill(cap);
+            }
+            if id == 255 && b[0] == 106 {
+                b[2..6].fill(basic);
+            }
+            at += 2 + n;
+        }
+    }
+    let mut own = modern_ies(false);
+    maps(&mut own, 0x12, 0);
+    let mut j = modern_join();
+    j.request =
+        wire::AssociationRequest::new_modern(1, 10, own, Band::Ghz5, Mode::Eht, Width::Mhz80)
+            .unwrap();
+    for (basic, accepted) in [(0x12, true), (0x21, false)] {
+        let mut beacon = beacon(&j);
+        maps(&mut beacon.elements, 0x22, basic);
+        let mut response = modern_ies(true);
+        maps(&mut response, 0x22, basic);
+        let result = AssociationContext::build(
+            Ticket {
+                epoch: 1,
+                serial: 2,
+            },
+            &j,
+            &beacon,
+            &response_metadata(response),
+        );
+        assert_eq!(result.is_ok(), accepted, "basic {basic:#x}: {result:?}");
+    }
+}

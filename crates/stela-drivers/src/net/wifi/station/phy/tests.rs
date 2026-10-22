@@ -547,3 +547,22 @@ fn complete_unchanged_linux_eht_station_union_oracle() {
         "f1aa36b6d5c91454e1be078fdf8a7557367687f48448b669742387785110f5aa"
     );
 }
+
+#[test]
+fn basic_eht_twenty_only_mapping_and_unsupported_width_skip_use_actual_local_union() {
+    let mut local = pair(Band::Ghz5, 0, false).0;
+    let mut bytes = eht(0, Role::Station, false);
+    bytes[11..].copy_from_slice(&[0x12, 0x23, 0x34, 0x45]);
+    local.eht = Some(Eht::parse(&bytes, local.he().unwrap(), Role::Station).unwrap());
+    assert!(local.meets_eht_basic([0x12, 0x23, 0x34, 0x45]));
+    assert!(!local.meets_eht_basic([0x13, 0x23, 0x34, 0x45]));
+    assert!(!local.meets_eht_basic([0x12, 0x33, 0x34, 0x45]));
+    let local = pair(Band::Ghz5, 4, false).0;
+    assert_eq!(
+        &local.eht().unwrap().source_mcs_union().bytes()[3..],
+        &[0; 6]
+    );
+    assert!(local.meets_eht_basic([0x22, 0x22, 0x22, 0x11])); //Absent widths are0xff, not required zero-NSS maps.
+    let no_eht = Capabilities::parse(Band::Ghz5, Role::Station, &[1, 3, 0x8c, 0x98, 0xb0]).unwrap();
+    assert!(!no_eht.meets_eht_basic([0; 4]));
+}

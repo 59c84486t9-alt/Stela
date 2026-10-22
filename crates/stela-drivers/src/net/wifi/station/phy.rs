@@ -270,6 +270,15 @@ impl Capabilities {
             wmm,
         })
     }
+    /// Check the AP basic EHT MCS/NSS requirement against every actual local
+    /// supported width, including20-only STA mapping. This is metadata
+    /// validation only, not regulatory, association or publication authority.
+    pub fn meets_eht_basic(&self, required: [u8; 4]) -> bool {
+        self.he
+            .as_ref()
+            .zip(self.eht.as_ref())
+            .is_some_and(|(he, eht)| eht.meets_basic(he, required))
+    }
     pub const fn band(&self) -> Band {
         self.band
     }
