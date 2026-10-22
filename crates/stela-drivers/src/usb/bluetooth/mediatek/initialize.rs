@@ -8,7 +8,10 @@ use super::{
 };
 use crate::{
     firmware::{Provider, Requirement},
-    usb::bluetooth::{ErrorKind, Packet, State},
+    usb::bluetooth::{
+        ErrorKind, Packet, State,
+        command::{self, Response},
+    },
 };
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 const LEGACY_ID: u32 = 0x80000008;
@@ -109,26 +112,27 @@ impl<B: Io> Engine<'_, B> {
         Ok(())
     }
     fn auxiliary_event(&mut self, event: Vec<u8>) -> Result<()> {
-        let (opcode, status, credits) = match event.as_slice() {
-            [0x0e, _, credits, lo, hi, status, ..] if event.len() >= 6 => {
-                (u16::from_le_bytes([*lo, *hi]), *status, *credits)
+        let (status, credits) = match command::response(&event, wmt::OPCODE) {
+            Ok(Response::Complete { credits, returned }) => (returned[0], credits),
+            Ok(Response::Status { credits, status }) => (status, credits),
+            Ok(Response::Credits(credits)) => {
+                self.credits = credits;
+                return Ok(());
             }
-            [0x0f, 4, status, credits, lo, hi] => {
-                (u16::from_le_bytes([*lo, *hi]), *status, *credits)
-            }
-            _ => {
+            Ok(Response::Other) => {
                 return Err(Error::protocol(
                     "unexpected interrupt event during WMT",
                     &event,
                 ));
             }
+            Err(_) => {
+                return Err(Error::protocol(
+                    "stale interrupt HCI completion during WMT",
+                    &event,
+                ));
+            }
         };
-        if opcode != wmt::OPCODE {
-            return Err(Error::protocol(
-                "stale interrupt HCI completion during WMT",
-                &event,
-            ));
-        }
+        let opcode = wmt::OPCODE;
         self.credits = credits;
         if self.attempt.auxiliary_hci_events.len() >= MAX_AUXILIARY {
             return Err(Error::protocol("excess WMT auxiliary HCI events", &event));
@@ -217,63 +221,55 @@ impl<B: Io> Engine<'_, B> {
             crate::waiting();
             core::hint::spin_loop();
         }
-        let [lo, hi] = opcode.to_le_bytes();
-        self.hci.submit_command(&[lo, hi, 0])?;
+        let packet = command::packet(opcode, &[]).map_err(|why| Error::protocol(why, &[]))?;
+        self.hci.submit_command(&packet)?;
         self.credits -= 1;
         loop {
             self.poll()?;
             while let Some(e) = self.pending.pop_front() {
-                if e.len() >= 5 && e[0] == 0x0e {
-                    let actual = u16::from_le_bytes([e[3], e[4]]);
-                    if actual == wmt::OPCODE {
-                        self.auxiliary_event(e)?;
-                        continue;
-                    }
-                    if actual != opcode || e.len() < 6 {
-                        return Err(Error::protocol("matching complete HCI response", &e));
-                    }
-                    if opcode == RESET {
-                        self.attempt.reset_completion = Some(e.clone());
-                    }
-                    if self.hci.io.now_us() >= deadline {
-                        return Err(Error::protocol("HCI completion after command deadline", &e));
-                    }
-                    if e[5] != 0 {
-                        return Err(Error::Controller {
-                            opcode,
-                            status: e[5],
-                            parameters: e[5..].to_vec(),
-                        });
-                    }
-                    self.credits = e[2];
-                    if self.credits == 0 {
-                        return Err(Error::protocol("HCI completion supplies no credits", &e));
-                    }
-                    return Ok(e[5..].to_vec());
-                }
-                if e.len() == 6 && e[0] == 0x0f {
-                    let actual = u16::from_le_bytes([e[4], e[5]]);
-                    if actual == wmt::OPCODE {
-                        self.auxiliary_event(e)?;
-                        continue;
-                    }
-                    if actual != opcode {
-                        return Err(Error::protocol("matching HCI command status", &e));
-                    }
-                    if e[2] != 0 {
-                        return Err(Error::Controller {
-                            opcode,
-                            status: e[2],
-                            parameters: e[2..].to_vec(),
-                        });
-                    }
-                    self.credits = e[3];
-                    if self.credits == 0 {
-                        return Err(Error::protocol("HCI status supplies no credits", &e));
-                    }
+                // WMT's own completions arrive on this pipe as auxiliary evidence.
+                if command::response(&e, wmt::OPCODE)
+                    .is_ok_and(|r| matches!(r, Response::Complete { .. } | Response::Status { .. }))
+                {
+                    self.auxiliary_event(e)?;
                     continue;
                 }
-                return Err(Error::protocol("unexpected HCI initialization event", &e));
+                match command::response(&e, opcode).map_err(|why| Error::protocol(why, &e))? {
+                    Response::Credits(credits) => self.credits = credits,
+                    Response::Complete { credits, returned } => {
+                        if opcode == RESET {
+                            self.attempt.reset_completion = Some(e.clone());
+                        }
+                        if self.hci.io.now_us() >= deadline {
+                            return Err(Error::protocol(
+                                "HCI completion after command deadline",
+                                &e,
+                            ));
+                        }
+                        self.credits = credits;
+                        if returned[0] != 0 {
+                            return Err(Error::Controller {
+                                opcode,
+                                status: returned[0],
+                                parameters: returned.to_vec(),
+                            });
+                        }
+                        return Ok(returned.to_vec());
+                    }
+                    Response::Status { credits, status } => {
+                        self.credits = credits;
+                        if status != 0 {
+                            return Err(Error::Controller {
+                                opcode,
+                                status,
+                                parameters: e[2..].to_vec(),
+                            });
+                        }
+                    }
+                    Response::Other => {
+                        return Err(Error::protocol("unexpected HCI initialization event", &e));
+                    }
+                }
             }
             if self.hci.io.now_us() >= deadline {
                 return Err(Error::Timeout("genuine HCI completion"));

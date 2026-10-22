@@ -580,7 +580,18 @@ mod tests {
                 continue;
             }
             let e = result.unwrap_err();
-            let (_, a) = attempt(&e);
+            let (error, a) = attempt(&e);
+            if fault == 1 {
+                // A completion may grant no credits; without a later grant
+                // the next command never goes out.
+                assert!(matches!(
+                    error,
+                    Error::Timeout("genuine HCI command credits")
+                ));
+                assert_eq!(trace.borrow().commands, 5);
+                assert_eq!(hci.state(), State::Closed);
+                continue;
+            }
             assert!(a.firmware.is_some());
             assert!(a.download.is_empty());
             assert_eq!(trace.borrow().commands, 5);

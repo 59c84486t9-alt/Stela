@@ -7,7 +7,10 @@ use super::{
     Identity, LocalVersion, OwnedReport, Patch, Project, Result, UsbIdentity, V2Patch,
 };
 use crate::firmware::{ErrorKind as ResourceErrorKind, Provider, Requirement};
-use crate::usb::bluetooth::{FirmwareReceipt, Hci, Io, Packet, State};
+use crate::usb::bluetooth::{
+    FirmwareReceipt, Hci, Io, Packet, State,
+    command::{self, Response},
+};
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 const READ_VERSION: u16 = 0x1001;
 const READ_ADDRESS: u16 = 0x1009;
@@ -32,6 +35,7 @@ pub(super) fn run<B: Io>(hci: &mut Hci<B>, provider: &dyn Provider) -> Result<Ow
         pending: VecDeque::new(),
         deadline,
         attempt: Attempt::default(),
+        credits: 1,
     };
     match engine.run(usb, provider) {
         Ok(r) => Ok(r),
@@ -57,6 +61,8 @@ struct Engine<'a, B: Io> {
     pending: VecDeque<Vec<u8>>,
     deadline: u64,
     attempt: Attempt,
+    /// HCI commands the controller will take now (one after reset).
+    credits: u8,
 }
 impl<B: Io> Engine<'_, B> {
     fn command(&mut self, opcode: u16, parameters: &[u8]) -> Result<Vec<u8>> {
@@ -66,21 +72,19 @@ impl<B: Io> Engine<'_, B> {
         if self.hci.io.now_us() >= self.deadline {
             return Err(Error::Timeout("complete initialization attempt"));
         }
-        if parameters.len() > 255 {
-            return Err(Error::protocol(
-                "command parameters exceed HCI limit",
-                parameters,
-            ));
-        }
-        let mut command = opcode.to_le_bytes().to_vec();
-        command.push(parameters.len() as u8);
-        command.extend_from_slice(parameters);
-        self.hci.submit_command(&command)?;
+        let packet =
+            command::packet(opcode, parameters).map_err(|why| Error::protocol(why, parameters))?;
         let deadline = core::cmp::min(
             self.deadline,
             self.hci.io.now_us().saturating_add(COMMAND_US),
         );
+        let mut sent = false;
         loop {
+            if !sent && self.credits > 0 {
+                self.hci.submit_command(&packet)?;
+                self.credits -= 1;
+                sent = true;
+            }
             for packet in self.hci.poll()? {
                 match packet {
                     Packet::Event(e) => self.pending.push_back(e),
@@ -93,46 +97,43 @@ impl<B: Io> Engine<'_, B> {
                 return Err(Error::protocol("excess initialization events", &[]));
             }
             while let Some(e) = self.pending.pop_front() {
-                match e[0] {
-                    0x0e if e.len() >= 6 => {
-                        if u16::from_le_bytes([e[3], e[4]]) != opcode {
-                            return Err(Error::protocol("wrong completion opcode", &e));
-                        }
-                        if e[5] != 0 {
+                match command::response(&e, opcode).map_err(|why| Error::protocol(why, &e))? {
+                    Response::Credits(credits) => self.credits = credits,
+                    Response::Complete { .. } | Response::Status { .. } if !sent => {
+                        return Err(Error::protocol("command event before its command", &e));
+                    }
+                    Response::Complete { credits, returned } => {
+                        self.credits = credits;
+                        if returned[0] != 0 {
                             return Err(Error::Controller {
                                 opcode,
-                                status: e[5],
-                                parameters: e[5..].to_vec(),
+                                status: returned[0],
+                                parameters: returned.to_vec(),
                             });
                         }
-                        if e[2] == 0 {
-                            return Err(Error::protocol(
-                                "completion supplies no command credits",
-                                &e,
-                            ));
-                        }
-                        return Ok(e[5..].to_vec());
+                        return Ok(returned.to_vec());
                     }
-                    0x0f if e.len() == 6 => {
-                        if u16::from_le_bytes([e[4], e[5]]) != opcode {
-                            return Err(Error::protocol("wrong command status opcode", &e));
-                        }
-                        if e[2] != 0 {
+                    Response::Status { credits, status } => {
+                        self.credits = credits;
+                        if status != 0 {
                             return Err(Error::Controller {
                                 opcode,
-                                status: e[2],
+                                status,
                                 parameters: e[2..].to_vec(),
                             });
                         }
-                        if e[3] == 0 {
-                            return Err(Error::protocol("command status supplies no credits", &e));
-                        }
                     }
-                    _ => return Err(Error::protocol("unexpected initialization event", &e)),
+                    Response::Other => {
+                        return Err(Error::protocol("unexpected initialization event", &e));
+                    }
                 }
             }
             if self.hci.io.now_us() >= deadline {
-                return Err(Error::Timeout("genuine command completion"));
+                return Err(Error::Timeout(if sent {
+                    "genuine command completion"
+                } else {
+                    "genuine HCI command credits"
+                }));
             }
             crate::waiting();
             core::hint::spin_loop();

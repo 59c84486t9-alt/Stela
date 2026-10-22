@@ -35,7 +35,10 @@ pub use platform::{DsbrCapture, DsbrCaptureObservation, DsbrInput, DsbrReport, P
 pub use report::{OwnedFirmwareEvidence, OwnedReport};
 pub use tlv::{InheritedField, TlvIdentity};
 
-use super::{Hci, Io, Packet, State};
+use super::{
+    Hci, Io, Packet, State,
+    command::{self, Response},
+};
 use crate::firmware::{Image, Provider, Requirement};
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::fmt;
@@ -222,6 +225,8 @@ struct Engine<'a, B: Io> {
     allow_secure: bool,
     allow_boot: bool,
     dsbr: DsbrInput,
+    /// HCI commands the controller will take now (one after reset).
+    credits: u8,
 }
 impl<'a, B: Io> Engine<'a, B> {
     fn new(hci: &'a mut Hci<B>, dsbr: DsbrInput) -> Self {
@@ -233,19 +238,14 @@ impl<'a, B: Io> Engine<'a, B> {
             allow_secure: false,
             allow_boot: false,
             dsbr,
+            credits: 1,
         }
     }
     fn now(&self) -> u64 {
         self.hci.io.now_us()
     }
     fn submit(&mut self, opcode: u16, parameters: &[u8]) -> Result<()> {
-        if parameters.len() > 255 {
-            return Err(Error::Protocol("command parameters exceed HCI maximum"));
-        }
-        let mut packet = Vec::with_capacity(3 + parameters.len());
-        packet.extend_from_slice(&opcode.to_le_bytes());
-        packet.push(parameters.len() as u8);
-        packet.extend_from_slice(parameters);
+        let packet = command::packet(opcode, parameters).map_err(Error::Protocol)?;
         self.hci.submit_command(&packet)?;
         Ok(())
     }
@@ -289,43 +289,48 @@ impl<'a, B: Io> Engine<'a, B> {
         if !self.events.is_empty() {
             return Err(Error::Protocol("stale command response"));
         }
-        self.submit(opcode, parameters)?;
         let deadline = self.now().saturating_add(COMMAND_US);
+        let mut sent = false;
         loop {
+            if !sent && self.credits > 0 {
+                self.submit(opcode, parameters)?;
+                self.credits -= 1;
+                sent = true;
+            }
             self.pump()?;
-            if let Some(event) = self.events.pop_front() {
-                match event[0] {
-                    0x0e if event.len() >= 6 => {
-                        if u16::from_le_bytes([event[3], event[4]]) != opcode {
-                            return Err(Error::Protocol("wrong command completion opcode"));
-                        }
-                        if event[5] != 0 {
+            while let Some(event) = self.events.pop_front() {
+                match command::response(&event, opcode).map_err(Error::Protocol)? {
+                    Response::Credits(credits) => self.credits = credits,
+                    Response::Complete { .. } | Response::Status { .. } if !sent => {
+                        return Err(Error::Protocol("command event before its command"));
+                    }
+                    Response::Complete { credits, returned } => {
+                        self.credits = credits;
+                        if returned[0] != 0 {
                             return Err(Error::Controller {
                                 opcode,
-                                status: event[5],
+                                status: returned[0],
                             });
                         }
-                        if event[2] == 0 {
-                            return Err(Error::Protocol("no command credits after completion"));
-                        }
-                        return Ok(event[5..].to_vec());
+                        return Ok(returned.to_vec());
                     }
-                    0x0f if event.len() == 6 => {
-                        if u16::from_le_bytes([event[4], event[5]]) != opcode {
-                            return Err(Error::Protocol("wrong command status opcode"));
-                        }
-                        if event[2] != 0 {
-                            return Err(Error::Controller {
-                                opcode,
-                                status: event[2],
-                            });
+                    Response::Status { credits, status } => {
+                        self.credits = credits;
+                        if status != 0 {
+                            return Err(Error::Controller { opcode, status });
                         }
                     }
-                    _ => return Err(Error::Protocol("unexpected/malformed command event")),
+                    Response::Other => {
+                        return Err(Error::Protocol("unexpected/malformed command event"));
+                    }
                 }
             }
             if self.now() >= deadline {
-                return Err(Error::Timeout("command completion"));
+                return Err(Error::Timeout(if sent {
+                    "command completion"
+                } else {
+                    "HCI command credits"
+                }));
             }
             crate::waiting();
             core::hint::spin_loop();

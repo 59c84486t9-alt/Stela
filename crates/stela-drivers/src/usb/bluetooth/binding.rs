@@ -1,6 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// Endpoint discovery follows Linux drivers/bluetooth/btusb.c btusb_probe at
-// a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
+// SPDX-License-Identifier: MIT
 //! The legacy USB Bluetooth HCI interface and its endpoints. Endpoint numbers
 //! are discovered, never assumed from the specification's suggested addresses.
 use super::super::xhci::{Device, Endpoint, FULL_SPEED, HIGH_SPEED, Interface};

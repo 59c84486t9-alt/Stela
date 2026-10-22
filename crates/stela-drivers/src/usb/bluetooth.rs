@@ -28,6 +28,7 @@
 //! the transport; failed hardware cancellation retains DMA ownership and prevents
 //! reuse. There is deliberately no generic method to mark firmware "ready".
 mod binding;
+mod command;
 mod firmware;
 mod host;
 mod initialization;
