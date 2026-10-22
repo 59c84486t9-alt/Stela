@@ -38,12 +38,29 @@
 //! of its entry point (`b` to the code that looks the PE up by MPIDR). So a
 //! block given the boot hand-off's entry point reads it locked, a write
 //! that keeps it completes and one that changes it stops.
+//!
+//! A PE's block also holds two words XNU names (`xnu-12377.121.6`
+//! `pexpert/pexpert/arm64/apple_arm64_regs.h`):
+//!
+//! - `CPU_STS` at +0x100, whose `cpuRunSt` bits 7:0 read 0 once the core is
+//!   off. XNU's `cpu_exit_wait` polls it until 0 on every non-quiescing
+//!   processor exit and panics after 10 s ("CPUn failed to shut down"),
+//!   and m1n1's `smp_stop_secondaries` polls the same byte. A core out of
+//!   reset and not powered down reads [`CPU_STS_RUNNING`], a nonzero state
+//!   whose encoding is not public (inference: both consumers test only for
+//!   0). Writes stop.
+//! - `CORE_THRTL_CFG2` at +0x218, whose `c1pptThrtlRate` (bits 63:56) XNU
+//!   sets to 0xb2 on cold boot on throttle-tunable MIDRs
+//!   (`osfmk/arm/machine_routines_apple.c`), as the T6020 and M3 SPTMs do
+//!   with read-modify-write (sptm.t6020 file 0xbb0b8..0xbb0c4). The
+//!   emulated core has no power throttling, so the word holds what software
+//!   writes, 0 from reset (inference).
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 
 /// CONTROL and MASK.
 pub const BYTES: u64 = 16;
-/// The RVBAR of a PE's block.
-pub const RVBAR_BYTES: u64 = 8;
+/// Each word of a PE's block ([`PE_WORDS`]).
+pub const WORD_BYTES: u64 = 8;
 const LOCK: u64 = 1;
 /// The per-PE groups XNU's `CPU_PIO_RO_CTL_VAL` leaves writable.
 pub const CPU_PIO_DBG_WRAP: u64 = 1 << 49;
@@ -57,6 +74,13 @@ pub const ACC_PIO_TRACE_CTL: u64 = 1 << 53;
 pub const ACC_PIO_TRC_UT_CTL: u64 = 1 << 55;
 const RVBAR: u64 = 0;
 const RVBAR_ADDRESS: u64 = 0x0000_ffff_ffff_f000;
+/// XNU's `CPU_PIO_CPU_STS_OFFSET` and `CORE_THRTL_CFG2_OFFSET`.
+pub const CPU_STS: u64 = 0x100;
+pub const CORE_THRTL_CFG2: u64 = 0x218;
+/// The 64-bit words of a PE's block besides the lockdown pair.
+pub const PE_WORDS: [u64; 3] = [RVBAR, CPU_STS, CORE_THRTL_CFG2];
+/// `cpuRunSt` of a core out of reset (any nonzero state; see the module).
+pub const CPU_STS_RUNNING: u64 = 1;
 
 /// The lockdown pair of one implementation block, with CONTROL at
 /// `control` bytes from the block's start.
@@ -66,7 +90,15 @@ pub struct Lockdown {
     control: u64,
     lock: u64,
     mask: u64,
-    rvbar: Option<u64>,
+    pe: Option<Pe>,
+}
+
+/// The words of a PE's block.
+#[derive(Debug, Clone, Copy)]
+struct Pe {
+    rvbar: u64,
+    running: bool,
+    throttle: u64,
 }
 
 impl Lockdown {
@@ -76,19 +108,31 @@ impl Lockdown {
             control,
             lock: 0,
             mask: 0,
-            rvbar: None,
+            pe: None,
         }
     }
 
-    /// A PE's block, whose RVBAR the boot firmware locked on `entry`.
+    /// A PE's block, whose RVBAR the boot firmware locked on `entry`; the
+    /// PE is held in reset until [`Lockdown::set_running`].
     pub fn with_reset_vector(mut self, entry: u64) -> Self {
-        self.rvbar = Some(entry & RVBAR_ADDRESS | LOCK);
+        self.pe = Some(Pe {
+            rvbar: entry & RVBAR_ADDRESS | LOCK,
+            running: false,
+            throttle: 0,
+        });
         self
     }
 
     /// Where the PE leaves reset, for a PE's block.
     pub fn reset_address(&self) -> Option<u64> {
-        Some(self.rvbar? & RVBAR_ADDRESS)
+        Some(self.pe?.rvbar & RVBAR_ADDRESS)
+    }
+
+    /// The PE left reset (`true`) or powered down, for a PE's block.
+    pub fn set_running(&mut self, running: bool) {
+        if let Some(pe) = self.pe.as_mut() {
+            pe.running = running;
+        }
     }
 
     /// Whether CONTROL bit 0 has applied the lock.
@@ -116,11 +160,13 @@ impl MmioDevice for Lockdown {
     }
 
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        if let Some(rvbar) = self
-            .rvbar
-            .filter(|_| offset == RVBAR && width == Width::Double)
-        {
-            return Ok(rvbar);
+        if let Some(pe) = self.pe.filter(|_| width == Width::Double) {
+            match offset {
+                RVBAR => return Ok(pe.rvbar),
+                CPU_STS => return Ok(if pe.running { CPU_STS_RUNNING } else { 0 }),
+                CORE_THRTL_CFG2 => return Ok(pe.throttle),
+                _ => {}
+            }
         }
         Ok(if self.register(offset, width, Direction::Read)? {
             self.mask
@@ -137,15 +183,17 @@ impl MmioDevice for Lockdown {
         _: &mut Access<'_>,
     ) -> Result<(), MmioError> {
         let refused = |reason| refuse(self.name, offset, width, Direction::Write, reason);
-        if let Some(rvbar) = self
-            .rvbar
-            .filter(|_| offset == RVBAR && width == Width::Double)
-        {
-            return if value == rvbar {
-                Ok(())
-            } else {
-                Err(refused("RVBAR change after the boot firmware locked it"))
-            };
+        if let Some(pe) = self.pe.as_mut().filter(|_| width == Width::Double) {
+            match offset {
+                RVBAR if value == pe.rvbar => return Ok(()),
+                RVBAR => return Err(refused("RVBAR change after the boot firmware locked it")),
+                CPU_STS => return Err(refused("write of the PE run-state status CPU_STS")),
+                CORE_THRTL_CFG2 => {
+                    pe.throttle = value;
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
         let is_mask = self.register(offset, width, Direction::Write)?;
         let current = if is_mask { self.mask } else { self.lock };
@@ -220,5 +268,38 @@ mod tests {
                 .is_err()
         );
         assert!(block.read(0, Width::Word, &mut access).is_err());
+    }
+
+    #[test]
+    fn a_pes_run_state_follows_its_power_and_its_throttle_word_holds() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut block = Lockdown::new("cpu-impl-reg", 0x5000).with_reset_vector(0x8_0300_c000);
+        let sts = |block: &mut Lockdown, access: &mut Access<'_>| {
+            block.read(CPU_STS, Width::Double, access).unwrap() & 0xff
+        };
+        assert_eq!(sts(&mut block, &mut access), 0);
+        block.set_running(true);
+        assert_ne!(sts(&mut block, &mut access), 0);
+        // XNU's cpu_exit_wait sees the core off once it powers down.
+        block.set_running(false);
+        assert_eq!(sts(&mut block, &mut access), 0);
+        assert!(block.write(CPU_STS, Width::Double, 0, &mut access).is_err());
+        // The SPTMs' and XNU's c1pptThrtlRate read-modify-write.
+        let value = block
+            .read(CORE_THRTL_CFG2, Width::Double, &mut access)
+            .unwrap();
+        let rate = value & !(0xff << 56) | 0xb2 << 56;
+        block
+            .write(CORE_THRTL_CFG2, Width::Double, rate, &mut access)
+            .unwrap();
+        assert_eq!(
+            block.read(CORE_THRTL_CFG2, Width::Double, &mut access),
+            Ok(rate)
+        );
+        // A cluster's block has neither word.
+        let mut cluster = Lockdown::new("cpm-impl-reg", 0x9000);
+        cluster.set_running(true);
+        assert!(cluster.read(CPU_STS, Width::Double, &mut access).is_err());
     }
 }

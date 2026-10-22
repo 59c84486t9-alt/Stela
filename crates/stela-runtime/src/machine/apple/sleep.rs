@@ -104,9 +104,15 @@ impl AppleDevices {
         }
     }
 
+    /// Whether PE `cpu` is out of reset and not powered down.
+    pub(super) fn processor_running(&self, cpu: usize) -> bool {
+        self.sleep.powered.contains(&cpu)
+    }
+
     /// PE `cpu` powered down or up (`Devices::processor_power`); the last
     /// one down after `slpa` puts the SoC to sleep.
     pub(super) fn processor_powered(&mut self, cpu: usize, on: bool) {
+        self.set_processor_running(cpu, on);
         if on {
             self.sleep.powered.insert(cpu);
             return;

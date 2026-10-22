@@ -803,7 +803,8 @@ impl AppleDevices {
 
     /// The lockdown registers of a CPU implementation block named `name`,
     /// with CONTROL at `control`, at `range`; a PE's `cpu-impl-reg` also
-    /// holds that PE's RVBAR, which the boot firmware locked on `reset`.
+    /// holds that PE's RVBAR, which the boot firmware locked on `reset`, its
+    /// run state CPU_STS and CORE_THRTL_CFG2.
     /// Only those registers are mapped: the block also holds the PE's or
     /// cluster's energy accumulators (`platform::apple::energy`).
     pub fn add_lockdown(
@@ -827,9 +828,16 @@ impl AppleDevices {
             lockdown::BYTES,
             control,
         )];
-        if let Some((_, entry)) = reset {
+        if let Some((pe, entry)) = reset {
             model = model.with_reset_vector(entry);
-            bindings.push((range.physical, lockdown::RVBAR_BYTES, 0));
+            model.set_running(self.processor_running(pe));
+            for offset in lockdown::PE_WORDS {
+                let start = range
+                    .physical
+                    .checked_add(offset)
+                    .ok_or(MapError::Overflow)?;
+                bindings.push((start, lockdown::WORD_BYTES, offset));
+            }
         }
         // Publish the reset-vector owner only after every actual bank fits.
         let device = self.bus.install(Box::new(model), &bindings)?;
@@ -887,6 +895,15 @@ impl AppleDevices {
         }
         self.core_counters[cpu] = Some(device);
         Ok(())
+    }
+
+    /// PE `cpu`'s `cpu-impl-reg` CPU_STS follows its power.
+    fn set_processor_running(&mut self, cpu: usize, running: bool) {
+        if let Some(block) = self.reset_vectors.get(cpu).copied().flatten()
+            && let Some(lockdown) = self.bus.device_mut::<Lockdown>(block)
+        {
+            lockdown.set_running(running);
+        }
     }
 
     /// The reset address in PE `cpu`'s `cpu-impl-reg` RVBAR.
@@ -5704,9 +5721,19 @@ mod tests {
         assert_eq!(devices.read(0, cpu + 0x5008, 8, 0), Ok(0));
         assert_eq!(devices.read(0, cpm + 0x9000, 8, 0), Ok(0));
         assert_eq!(devices.read(0, cpu + 0x9008, 8, 0), Ok(0));
+        // The boot PE runs: XNU's cpu_exit_wait polls CPU_STS until 0, which
+        // the PE's power-down gives it.
+        assert_ne!(devices.read(0, cpu + lockdown::CPU_STS, 8, 0), Ok(0));
+        devices.processor_power(0, false);
+        assert_eq!(devices.read(0, cpu + lockdown::CPU_STS, 8, 0), Ok(0));
+        assert_eq!(
+            devices.read(0, cpu + lockdown::CORE_THRTL_CFG2, 8, 0),
+            Ok(0)
+        );
         // The rest of each block reaches no model.
-        assert!(devices.read(0, cpu + 0x100, 8, 0).is_err());
+        assert!(devices.read(0, cpu + 0x108, 8, 0).is_err());
         assert!(devices.read(0, cpm, 8, 0).is_err());
+        assert!(devices.read(0, cpm + lockdown::CPU_STS, 8, 0).is_err());
     }
 
     #[test]
