@@ -1928,6 +1928,22 @@ mod tests {
         assert_eq!(field(chip, ID_AA64MMFR2_EL1, 32), 1);
     }
 
+    /// ID_AA64MMFR2_EL1.VARange (bits 19:16) is 0 on every chip and host
+    /// target: development kernels assert it (XNU `vm_sanitize.c`, under
+    /// MACH_ASSERT; darwin-vm issue 14), and no chip has FEAT_LVA.
+    #[test]
+    fn every_chip_keeps_varange_0() {
+        for chip in Chip::ALL {
+            for target in [TargetCpu::Baseline, TargetCpu::detect()] {
+                let mmfr2 = derive(chip, target, true, Speculation::NONE)
+                    .into_iter()
+                    .find(|(register, _)| *register == ID_AA64MMFR2_EL1)
+                    .map_or(0, |(_, value)| value);
+                assert_eq!(mmfr2 >> 16 & 0xf, 0, "{chip:?} {target:?}");
+            }
+        }
+    }
+
     #[test]
     fn the_sme_chips_advertise_streaming_sve_and_sme_by_feature() {
         let value = |chip, register| {
