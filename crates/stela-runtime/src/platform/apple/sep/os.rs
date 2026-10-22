@@ -237,7 +237,15 @@ impl SepOs {
         let result = match frame.service {
             xart::MASTER_ID | xart::SLAVE_ID => services.xart.request(frame, &mut payload, entropy),
             keystore::ID => services.keystore.request(frame, &mut payload),
-            boot_policy::ID => services.boot_policy.request(frame, &mut payload),
+            boot_policy::ID => services
+                .xart
+                .policy_store_mut()
+                .map_err(|reason| Refusal::answered(reason, boot_policy::not_supported(frame)))
+                .and_then(|store| {
+                    services
+                        .boot_policy
+                        .request(frame, &mut payload, store, entropy)
+                }),
             _ => Err(Refusal::unanswerable(
                 "SEP application service has no native handler",
             )),
@@ -997,6 +1005,116 @@ mod tests {
         // The negotiated version, 2, follows the header and result.
         assert_eq!(ram.bytes[0x8000 + 80..0x8000 + 88], 2u64.to_le_bytes());
         assert!(os.keystore().unwrap().environment().is_none());
+    }
+
+    #[test]
+    fn recovery_policy_nonce_commands_use_the_registered_buffers_and_shared_store() {
+        let mut os = SepOs::new(None).with_services(store(), false).unwrap();
+        map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
+        register(&mut os, boot_policy::ID, 0x1c000, 0x14000);
+        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x30000);
+        let mut proposed = Vec::new();
+        for (command, length, expected) in [
+            (8u32, 0x124, 32),
+            (13, 32, 80),
+            (9, 0x124, 32),
+            (16, 32, 80),
+        ] {
+            ram.bytes[..0x124].fill(0);
+            ram.bytes[..4].copy_from_slice(b"hcPB");
+            ram.bytes[4..8].copy_from_slice(&command.to_le_bytes());
+            let request = Frame {
+                service: boot_policy::ID,
+                tag: 2,
+                opcode: 0,
+                parameter: 0,
+                data: length,
+            };
+            assert!(reply(&mut os, request).unwrap().is_empty());
+            assert_eq!(
+                dma(&mut os, &mut ram).unwrap(),
+                [Frame {
+                    data: expected,
+                    ..request
+                }]
+            );
+            assert_eq!(&ram.bytes[0x1c000..0x1c004], b"hrPB");
+            assert_eq!(&ram.bytes[0x1c004..0x1c008], &[0; 4]);
+            if command == 13 {
+                proposed = ram.bytes[0x1c020..0x1c050].to_vec();
+            }
+            if command == 16 {
+                assert_eq!(ram.bytes[0x1c020..0x1c050], proposed);
+            }
+        }
+        assert!(
+            os.services
+                .as_mut()
+                .unwrap()
+                .xart
+                .policy_store_mut()
+                .unwrap()
+                .policy_nonce(super::super::store::PolicyNonce::Recovery)
+                .unwrap()
+                .is_some()
+        );
+        // Shutdown ownership applies to BootPolicy too; no late nonce work
+        // can bypass xART's frozen state through the shared backend.
+        let services = os.services.as_mut().unwrap();
+        let mut unused = UnusedPayload;
+        services
+            .xart
+            .request(
+                xart::XartMessage {
+                    service: xart::SLAVE_ID,
+                    tag: 1,
+                    op: 13,
+                    length: 0,
+                    flags: 0,
+                    slot: 0,
+                    reserved: 0,
+                }
+                .frame(),
+                &mut unused,
+                &mut counter(),
+            )
+            .unwrap();
+        assert!(services.xart.policy_store_mut().is_err());
+        os.set_strict(false);
+        ram.bytes[..0x124].fill(0);
+        ram.bytes[..4].copy_from_slice(b"hcPB");
+        ram.bytes[4..8].copy_from_slice(&8u32.to_le_bytes());
+        let request = Frame {
+            service: boot_policy::ID,
+            tag: 2,
+            opcode: 0,
+            parameter: 0,
+            data: 0x124,
+        };
+        reply(&mut os, request).unwrap();
+        let (result, outbox) = dma_step(&mut os, &mut ram);
+        assert!(result.is_err());
+        assert_eq!(
+            outbox,
+            [Frame {
+                data: 32,
+                ..request
+            }]
+        );
+        assert_eq!(
+            &ram.bytes[0x1c004..0x1c008],
+            &boot_policy::NOT_SUPPORTED.to_le_bytes()
+        );
+    }
+
+    struct UnusedPayload;
+    impl Payload for UnusedPayload {
+        fn input(&mut self, _: &mut [u8]) -> Result<(), &'static str> {
+            panic!("no input expected")
+        }
+        fn output(&mut self, _: &[u8]) -> Result<(), &'static str> {
+            panic!("no output expected")
+        }
     }
 
     #[test]

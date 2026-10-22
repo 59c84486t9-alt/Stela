@@ -254,6 +254,15 @@ impl Xart {
         &mut self.store
     }
 
+    /// BootPolicy shares this anti-replay owner; an AP unmount or EACS
+    /// transition freezes policy nonce mutation as well as xART requests.
+    pub(super) fn policy_store_mut(
+        &mut self,
+    ) -> Result<&mut Nonces<Box<dyn Backend>>, &'static str> {
+        self.live()?;
+        Ok(&mut self.store)
+    }
+
     fn live(&self) -> Result<(), &'static str> {
         match self.frozen {
             Some(reason) => Err(reason),

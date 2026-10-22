@@ -26,16 +26,19 @@
 //! `bootpolicy_get_current_os_type`, +0x3670..+0x369c) is a bare header
 //! answered by exactly 36 bytes with the type in byte 32 ([`BootOs`]).
 //!
-//! The SEP model is not told which OS the boot chain started, so it
-//! answers the OS type only when that is supplied. Every other command
-//! (LocalPolicy creation and update, nonces, tags) needs the policy signing
-//! and AP verification contract in docs/research/sep.md and refuses. Its
-//! failure answer is the not-supported reply, never a fabricated policy. A
-//! frame or header outside the envelope is answered with a transport
-//! failure.
+//! RecoveryOS policy nonce commands have the recovered zero-body request
+//! and digest reply shapes ([`nonces`]). They bind to the same durable store
+//! as xART. The SEP answers the current OS type only when the boot chain
+//! supplies it. LocalPolicy signing, authenticated/owner-bearing bodies,
+//! macOS/remote nonce transactions and tags remain explicit refusals; a
+//! successful nonce transaction does not establish policy authentication.
+//! A frame or header outside the envelope gets a transport failure.
+mod nonces;
 use super::{
+    Entropy,
     endpoint::Service,
     message::Frame,
+    store::{Backend, Nonces},
     transaction::{Answer, Payload, Refusal},
 };
 
@@ -106,7 +109,7 @@ fn delivered(frame: Frame, bytes: usize) -> Frame {
 }
 
 /// The not-supported answer: a bare reply header with result 255.
-fn not_supported(frame: Frame) -> Answer {
+pub(super) fn not_supported(frame: Frame) -> Answer {
     Answer {
         frame: delivered(frame, HEADER_BYTES),
         output: reply_header(NOT_SUPPORTED).to_vec(),
@@ -115,19 +118,31 @@ fn not_supported(frame: Frame) -> Answer {
 
 pub struct BootPolicy {
     boot_os: Option<BootOs>,
+    recovery_nonce: nonces::RecoveryNonce,
 }
 
 impl BootPolicy {
     /// `boot_os` is the OS the boot chain started, when the machine
     /// supplies it.
     pub fn new(boot_os: Option<BootOs>) -> Self {
-        Self { boot_os }
+        Self {
+            boot_os,
+            recovery_nonce: nonces::RecoveryNonce::default(),
+        }
     }
 
-    /// Answer one AP command: read its header and write the reply.
-    pub fn request(&mut self, frame: Frame, payload: &mut dyn Payload) -> Result<Frame, Refusal> {
+    /// Read one AP command and write its reply using the same machine store
+    /// as xART. A durable or uncertain mutation is never automatically retried
+    /// and cannot receive a failure acknowledgement.
+    pub fn request<B: Backend>(
+        &mut self,
+        frame: Frame,
+        payload: &mut dyn Payload,
+        store: &mut Nonces<B>,
+        entropy: &mut dyn Entropy,
+    ) -> Result<Frame, Refusal> {
         let transport = |reason| Refusal::answered(reason, Answer::frame(transport_failure(frame)));
-        if frame.tag != TAG || frame.opcode != 0 || frame.parameter != 0 {
+        if frame.service != ID || frame.tag != TAG || frame.opcode != 0 || frame.parameter != 0 {
             return Err(transport(
                 "SEP BootPolicy frame is not the kernel's tag-2 command",
             ));
@@ -147,6 +162,11 @@ impl BootPolicy {
             ));
         }
         let unsupported = |reason| Refusal::answered(reason, not_supported(frame));
+        if nonces::accepts(word(4)) {
+            return self
+                .recovery_nonce
+                .request(word(4), frame, payload, store, entropy);
+        }
         if word(4) != CURRENT_OS_TYPE || length != HEADER_BYTES {
             return Err(unsupported("SEP BootPolicy command is not implemented"));
         }
@@ -209,7 +229,17 @@ mod tests {
             input,
             output: Vec::new(),
         };
-        (policy.request(frame, &mut buffers), buffers.output)
+        let roots = super::super::keys::Roots::provisioned([1; 32], [2; 32], 0x1234).unwrap();
+        let mut store =
+            Nonces::provision(&roots, super::super::store::Volatile::default()).unwrap();
+        let mut entropy = |bytes: &mut [u8]| {
+            bytes.fill(1);
+            Ok(())
+        };
+        (
+            policy.request(frame, &mut buffers, &mut store, &mut entropy),
+            buffers.output,
+        )
     }
 
     #[test]
@@ -263,11 +293,14 @@ mod tests {
         reserved[20] = 1;
         let mut tagged = frame(32);
         tagged.tag = 3;
+        let mut foreign = frame(32);
+        foreign.service = ID + 1;
         for (frame, input) in [
             (frame(31), command(CURRENT_OS_TYPE, 0)),
             (frame(32), bad_magic),
             (frame(32), reserved),
             (tagged, command(CURRENT_OS_TYPE, 0)),
+            (foreign, command(CURRENT_OS_TYPE, 0)),
             (frame(32), Vec::new()),
         ] {
             let (reply, _) = ask(&mut policy, frame, input);

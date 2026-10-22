@@ -22,10 +22,10 @@
 //! The raw nonces are durable in the anti-replay store ([`super::store`]); the
 //! proposed, not-yet-committed nonce of an in-progress update lives here in
 //! RAM and is discarded by `reset` or a power cycle. These are the recovered
-//! BootPolicy semantics; the `pnon` OOL request/reply **body** that carries
-//! them is not recovered (its static recovery was stopped by a safety check,
-//! docs/research/sep.md), so `--sep-observe` logs that wire while this module
-//! supplies the state it will bind to.
+//! nonce lifecycle used by the native trust policy. The recovered empty-body
+//! recoveryOS commands bind it through `boot_policy::nonces`; authenticated
+//! owner-bearing bodies and macOS policy signing remain unbound to the wire.
+//! `--sep-observe` can retain their requests without inventing authorization.
 use super::{
     Entropy,
     keys::Roots,

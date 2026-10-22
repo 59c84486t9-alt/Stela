@@ -156,6 +156,13 @@ impl<B: Backend> Nonces<B> {
             .ok_or("SEP nonce store commit outcome is uncertain; reopen required")
     }
 
+    /// The currently authenticated durable revision. A pending policy update
+    /// uses it to refuse a commit after another service changed or erased the
+    /// store. Poisoned state cannot authorize a new transaction.
+    pub(super) fn generation(&self) -> Result<u64, &'static str> {
+        Ok(self.state()?.generation)
+    }
+
     fn update(&mut self, mut next: State) -> Result<(), &'static str> {
         let expected = self.state()?.generation;
         next.generation = expected
