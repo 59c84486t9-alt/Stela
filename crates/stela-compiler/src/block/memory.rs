@@ -350,6 +350,77 @@ mod tests {
         }
     }
     #[test]
+    fn shared_literal_forms_use_the_checked_scalar_service_and_exact_source_map() {
+        use crate::context::memory::{
+            SpAlignmentRequirement, flags, host_caps, profile_requirements,
+        };
+        const RET: u32 = 0xd65f03c0;
+        for form in [0x18000000u32, 0x58000000, 0x98000000] {
+            for destination in [0, 10, 30, 31] {
+                for specialization in [
+                    CheckedMemoryProfile::SpAlignmentEnabled,
+                    CheckedMemoryProfile::SpAlignmentDisabled,
+                ] {
+                    for target in [TargetCpu::X86_64_V2, TargetCpu::AtomicLoad16] {
+                        let word = form | (8 << 5) | destination;
+                        let source: Vec<_> =
+                            [word, RET].into_iter().flat_map(u32::to_le_bytes).collect();
+                        let plan = crate::block::CompilationPlan::new(
+                            &source,
+                            GuestAddress(0x1000),
+                            crate::block::BlockProfile::SystemModeSharedV1(specialization),
+                            target,
+                        )
+                        .unwrap();
+                        let required = plan.memory_requirements().unwrap();
+                        assert_eq!(
+                            required.required_flags
+                                & (flags::TAG_CHECKED | flags::WRITE | flags::ASIMD),
+                            0
+                        );
+                        assert_eq!(required.required_sp_alignment, SpAlignmentRequirement::Any);
+                        assert_eq!(
+                            required.required_host_caps,
+                            if target.supports(TargetCpu::AtomicLoad16) {
+                                host_caps::ATOMIC_LOAD16
+                            } else {
+                                host_caps::CX16
+                            }
+                        );
+                        assert_eq!(
+                            required.required_profile
+                                & (profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD
+                                    | profile_requirements::M0_DEVICE_RAM_READ64),
+                            0
+                        );
+                        let emitted = plan.compile().unwrap();
+                        assert!(emitted.fault_recovery.is_empty());
+                        assert_eq!(
+                            emitted
+                                .native
+                                .source_map
+                                .iter()
+                                .map(|(pc, _)| pc.0)
+                                .collect::<Vec<_>>(),
+                            [0x1000, 0x1004]
+                        );
+                        // Exact guest address is materialized, never host RIP.
+                        let mut constant = alloc::vec![0x48, 0xb8];
+                        constant.extend(0x1020u64.to_le_bytes());
+                        assert!(
+                            emitted
+                                .native
+                                .x86_64_code
+                                .windows(constant.len())
+                                .any(|window| window == constant)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn m0_staged_read_never_combines_with_process_helpers() {
         let source = 0xf940_0000u32.to_le_bytes();
         let selected = crate::block::BlockProfile::CheckedMemoryPauthClockThread(

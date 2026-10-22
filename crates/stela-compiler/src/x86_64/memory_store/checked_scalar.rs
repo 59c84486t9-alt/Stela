@@ -72,6 +72,14 @@ impl Operand {
         operation: &Operation,
         profile: CheckedMemoryProfile,
     ) -> Option<Self> {
+        if matches!(operation, Operation::Literal(_)) {
+            // Literal PC arithmetic has no register base, SP check, writeback
+            // or tag check. Keep the legacy staged read64 specialization closed.
+            if profile == CheckedMemoryProfile::M0DeviceRamRead64Staged {
+                return None;
+            }
+            return Self::literal_load(operation, profile, false);
+        }
         let operand = match *operation {
             Operation::Memory {
                 transfer,
@@ -180,32 +188,8 @@ impl Operand {
     /// The checked scalar adapter with the staged M0 capability. Literal
     /// operands are already lifted by the decoder.
     pub(crate) fn from_m0_scalar_load(operation: &Operation) -> Option<Self> {
-        if let Operation::Literal(operand) = *operation {
-            let literal::Transfer::Integer {
-                destination,
-                width,
-                signed,
-            } = operand.transfer
-            else {
-                return None;
-            };
-            let bytes = match (width, signed) {
-                (Width::W32, false) | (Width::X64, true) => 4,
-                (Width::X64, false) => DOUBLEWORD_BYTES,
-                _ => return None,
-            };
-            return data_register(destination).then_some(Self {
-                profile: CheckedMemoryProfile::SpAlignmentDisabled,
-                transfer: MemoryTransfer::Load { signed, width },
-                bytes,
-                data: destination,
-                base: Register::Zero,
-                address: Address::Literal {
-                    address: operand.address,
-                },
-                unprivileged: false,
-                m0_scalar: true,
-            });
+        if matches!(operation, Operation::Literal(_)) {
+            return Self::literal_load(operation, CheckedMemoryProfile::SpAlignmentDisabled, true);
         }
         let mut operand =
             Self::from_operation(operation, CheckedMemoryProfile::SpAlignmentDisabled)?;
@@ -214,6 +198,42 @@ impl Operand {
         }
         operand.m0_scalar = true;
         Some(operand)
+    }
+    /// The one typed integer literal adapter for checked and staged profiles.
+    /// Exact source address/width/extension were lifted by the shared decoder.
+    fn literal_load(
+        operation: &Operation,
+        profile: CheckedMemoryProfile,
+        m0_scalar: bool,
+    ) -> Option<Self> {
+        let Operation::Literal(operand) = *operation else {
+            return None;
+        };
+        let literal::Transfer::Integer {
+            destination,
+            width,
+            signed,
+        } = operand.transfer
+        else {
+            return None;
+        };
+        let bytes = match (width, signed) {
+            (Width::W32, false) | (Width::X64, true) => 4,
+            (Width::X64, false) => DOUBLEWORD_BYTES,
+            _ => return None,
+        };
+        data_register(destination).then_some(Self {
+            profile,
+            transfer: MemoryTransfer::Load { signed, width },
+            bytes,
+            data: destination,
+            base: Register::Zero,
+            address: Address::Literal {
+                address: operand.address,
+            },
+            unprivileged: false,
+            m0_scalar,
+        })
     }
     /// The scalar store operand; unprivileged and literal forms are excluded.
     pub(crate) fn from_m0_scalar_store(operation: &Operation) -> Option<Self> {
@@ -296,7 +316,11 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     let tag_checked = operand.tag_checked();
     MemoryRequirements {
         required_pointer_arithmetic: None,
-        required_address_checks: operand.profile.address_requirements(operand.unprivileged),
+        required_address_checks: if matches!(operand.address, Address::Literal { .. }) {
+            Default::default()
+        } else {
+            operand.profile.address_requirements(operand.unprivileged)
+        },
         required_flags: if write { flags::WRITE } else { 0 }
             | if tag_checked { flags::TAG_CHECKED } else { 0 },
         // Any dynamic multibyte read may cross the enclosing aligned8 while
@@ -408,4 +432,91 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
     }
     code.extend(ADD_RSP);
     address::return_if_failed(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{GuestAddress, Lifter, aarch64::Decoder};
+    const IMM19_MASK: u32 = (1 << 19) - 1;
+    fn source(form: u32, immediate: i32, destination: u32) -> u32 {
+        form | ((immediate as u32 & IMM19_MASK) << 5) | destination
+    }
+    #[test]
+    fn checked_integer_literal_roles_width_extension_and_wrapping_source_pc_are_exact() {
+        for (form, bytes, width, signed) in [
+            (0x18000000, 4, Width::W32, false),
+            (0x58000000, 8, Width::X64, false),
+            (0x98000000, 4, Width::X64, true),
+        ] {
+            for pc in [0, 0x1004, u64::MAX - 3] {
+                for immediate in [-262144, -1, 0, 1, 262143] {
+                    for destination in [0, 10, 30, 31] {
+                        let instruction = Decoder
+                            .lift(GuestAddress(pc), source(form, immediate, destination))
+                            .unwrap();
+                        for profile in [
+                            CheckedMemoryProfile::SpAlignmentEnabled,
+                            CheckedMemoryProfile::SpAlignmentDisabled,
+                        ] {
+                            let operand =
+                                Operand::from_operation(&instruction.operation, profile).unwrap();
+                            assert_eq!(operand.bytes, bytes);
+                            assert_eq!(operand.transfer, MemoryTransfer::Load { signed, width });
+                            assert_eq!(
+                                operand.address,
+                                Address::Literal {
+                                    address: pc.wrapping_add_signed(i64::from(immediate) * 4)
+                                }
+                            );
+                            assert_eq!(operand.base, Register::Zero);
+                            assert_eq!(
+                                operand.data,
+                                if destination == 31 {
+                                    Register::Zero
+                                } else {
+                                    Register::X(destination as u8)
+                                }
+                            );
+                            assert!(!operand.tag_checked());
+                            assert!(!operand.writeback());
+                            assert!(!operand.m0_scalar);
+                            let required = requirements(&operand);
+                            assert_eq!(required.required_flags, 0);
+                            assert_eq!(required.required_sp_alignment, SpAlignmentRequirement::Any);
+                            assert_eq!(required.required_host_caps, host_caps::ATOMIC_LOAD16);
+                            let staged =
+                                Operand::from_m0_scalar_load(&instruction.operation).unwrap();
+                            assert!(staged.m0_scalar);
+                            assert_ne!(
+                                requirements(&staged).required_profile,
+                                required.required_profile
+                            );
+                        }
+                        assert!(
+                            Operand::from_operation(
+                                &instruction.operation,
+                                CheckedMemoryProfile::M0DeviceRamRead64Staged
+                            )
+                            .is_none()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn checked_literal_adapter_never_admits_simd_prefetch_or_reserved_encodings() {
+        for word in [0x1c000000, 0x5c000000, 0x9c000000, 0xdc000000, 0xd8000000] {
+            if let Ok(instruction) = Decoder.lift(GuestAddress(0x1000), word) {
+                assert!(
+                    Operand::from_operation(
+                        &instruction.operation,
+                        CheckedMemoryProfile::SpAlignmentDisabled
+                    )
+                    .is_none()
+                );
+            }
+        }
+    }
 }

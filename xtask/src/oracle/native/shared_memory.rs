@@ -18,6 +18,22 @@ use stela_runtime::{
     },
 };
 
+fn admitted(operation: &Operation) -> bool {
+    match operation {
+        Operation::Atomic(_) => true,
+        Operation::Ordered(ordered::Operand::Transfer {
+            feature: ordered::Feature::Lor,
+            ..
+        }) => false,
+        Operation::Ordered(_) => true,
+        Operation::Literal(stela_compiler::aarch64::literal::Operand {
+            transfer: stela_compiler::aarch64::literal::Transfer::Integer { .. },
+            ..
+        }) => true,
+        _ => false,
+    }
+}
+
 pub(super) fn prepare(words: &[u32]) -> Result<Option<CheckedMemoryBlock>> {
     for (index, word) in words.iter().enumerate() {
         let instruction = match Decoder.lift(
@@ -27,14 +43,8 @@ pub(super) fn prepare(words: &[u32]) -> Result<Option<CheckedMemoryBlock>> {
             Ok(instruction) => instruction,
             Err(_) => return Ok(None),
         };
-        match instruction.operation {
-            Operation::Atomic(_) => {}
-            Operation::Ordered(ordered::Operand::Transfer {
-                feature: ordered::Feature::Lor,
-                ..
-            }) => return Ok(None),
-            Operation::Ordered(_) => {}
-            _ => return Ok(None),
+        if !admitted(&instruction.operation) {
+            return Ok(None);
         }
     }
     let source: Vec<u8> = words
@@ -174,4 +184,36 @@ pub(super) fn run(
         thread.registers,
         CODE_PAGE + (case.steps * INSTRUCTION_BYTES) as u64,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn checked_oracle_admits_exact_integer_literal_classes_without_simd_or_prefetch() {
+        for form in [0x18000000u32, 0x58000000, 0x98000000] {
+            for register in [0, 10, 30, 31] {
+                let instruction = Decoder
+                    .lift(GuestAddress(CODE_PAGE), form | (4 << 5) | register)
+                    .unwrap();
+                assert!(admitted(&instruction.operation));
+            }
+        }
+        for word in [
+            0x1c000000u32,
+            0x5c000000,
+            0x9c000000,
+            0xdc000000,
+            0xd8000000,
+            0xf9400000,
+            0xd503201f,
+        ] {
+            if let Ok(instruction) = Decoder.lift(GuestAddress(CODE_PAGE), word) {
+                assert!(
+                    !admitted(&instruction.operation),
+                    "unexpected class {word:#x}"
+                );
+            }
+        }
+    }
 }

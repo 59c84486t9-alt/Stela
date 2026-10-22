@@ -514,7 +514,7 @@ mod tests {
         ) -> Result<Observation> {
             let mut thread = crate::blocks::ThreadState {
                 registers: state.clone(),
-                pc: PC,
+                pc: block.identity.entry,
             };
             // SAFETY: closed immutable baseline EL0 fixture, no debug/IRQ state or
             // external writers; every byte access uses the retained shared domain.
@@ -606,6 +606,97 @@ mod tests {
         state.x[0] = address;
         state.x[30] = 0x9000;
         state
+    }
+
+    #[test]
+    fn native_checked_literals_preserve_all_state_memory_and_precise_fault_prefix() {
+        const RAW: u64 = 0xfedcba9887654321;
+        const ADD_X9_ONE: u32 = 0x91000529;
+        const ADD_X8_ONE: u32 = 0x91000508;
+        for (form, bytes, signed) in [
+            (0x18000000u32, 4usize, false),
+            (0x58000000, 8, false),
+            (0x98000000, 4, true),
+        ] {
+            for destination in [0usize, 10, 30, 31] {
+                for entry in [PC, GuestAddress(DATA + 0x1000)] {
+                    for address in [DATA, ALIAS, ALIAS + 0x3000, DATA + 124, DATA + 128] {
+                        let domain = domain();
+                        let mut worker = Worker::new(&domain);
+                        let mut initial = state(DATA);
+                        initial.x[1] = RAW;
+                        worker.run(&block(&[STR, RET]), &mut initial).unwrap();
+                        let before_memory = worker.snapshot();
+                        let mut registers = state(DATA);
+                        let mut expected = registers.clone();
+                        let literal_pc = entry.0 + 4;
+                        let displacement = (address as i64 - literal_pc as i64) / 4;
+                        let literal =
+                            form | ((displacement as u32 & 0x7ffff) << 5) | destination as u32;
+                        let body = CheckedMemoryBlock::compile(
+                            ASID,
+                            entry,
+                            [ADD_X9_ONE, literal, ADD_X8_ONE, RET]
+                                .into_iter()
+                                .flat_map(u32::to_le_bytes)
+                                .collect(),
+                            CheckedMemoryProfile::SpAlignmentDisabled,
+                            TargetCpu::detect(),
+                        )
+                        .unwrap();
+                        let observed = worker.run(&body, &mut registers).unwrap();
+                        expected.x[9] = expected.x[9].wrapping_add(1);
+                        if address == DATA
+                            || address == ALIAS
+                            || address == DATA + 124 && bytes == 4
+                        {
+                            assert!(observed.fault.is_none());
+                            let value = if address == DATA + 124 {
+                                0
+                            } else if bytes == 8 {
+                                RAW
+                            } else if signed {
+                                RAW as u32 as i32 as i64 as u64
+                            } else {
+                                u64::from(RAW as u32)
+                            };
+                            if destination < 31 {
+                                expected.x[destination] = value;
+                            }
+                            expected.x[8] = expected.x[8].wrapping_add(1);
+                            assert_eq!(observed.exit.next_pc, expected.x[30]);
+                        } else {
+                            let fault = observed.fault.unwrap();
+                            assert_eq!(
+                                (fault.pc, fault.address, fault.completed_bytes),
+                                (
+                                    literal_pc,
+                                    if address == DATA + 124 {
+                                        DATA + 128
+                                    } else {
+                                        address
+                                    },
+                                    if address == DATA + 124 { 4 } else { 0 }
+                                )
+                            );
+                            assert_eq!(
+                                fault.status,
+                                if (DATA + 124..=DATA + 128).contains(&address) {
+                                    MemoryStatus::Translation
+                                } else {
+                                    MemoryStatus::Permission
+                                }
+                            );
+                        }
+                        assert_eq!(
+                            registers, expected,
+                            "form={form:#x} rt={destination} entry={entry:?} address={address:#x}"
+                        );
+                        assert_eq!(worker.snapshot(), before_memory);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

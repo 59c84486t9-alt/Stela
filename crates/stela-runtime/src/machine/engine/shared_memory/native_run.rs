@@ -933,6 +933,7 @@ mod read_continuation_tests {
                 Some((2, DEVICE + 8)),
             ), // LDPSW X0,X1,[X2],#8
             (0xf8636820, DEVICE, 0x8877665544332211, None, None),          // LDR X0,[X1,X3]
+            (0x583e0000, DEVICE, 0x8877665544332211, None, None),          // LDR X0,literal(Device)
         ] {
             let (mut machine, _) = pending_at(word, false, base);
             let mut expected = machine.cpu.state.clone();
