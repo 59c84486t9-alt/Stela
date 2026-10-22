@@ -50,6 +50,11 @@
 //! writes,
 //! physical fault production and reset semantics remain unsupported. A log
 //! inside scratch shares its canonical bytes and source zero-clear behavior.
+//! The off-to-wake source (`info-off2wake_source`, on Chapel, Baku and
+//! Woodcote) is a second such owner: `_readOff2WakeSource` (mac15s 26A434 VA
+//! 0xfffffe0009d57ea0) reads its byte-counted extent and, when asked to
+//! clear, writes the same bytes back (`..d57f30..d57f68`), the fault log's
+//! snapshot acknowledgement ([`Retained`], `with_wake_source_history`).
 //! The legacy scratchpad is 0x100 bytes, the boot keys'
 //! extent rounded to the 256-byte page at whose end the RTC block begins
 //! (inferred). The upcount follows the system counter and refuses writes;
@@ -231,6 +236,16 @@ impl Rtc {
     }
 }
 
+/// An outside-scratch retained-history owner, whose initial bytes the
+/// placement must supply explicitly ([`Configuration::with_retained`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retained {
+    /// `info-fault_log`.
+    FaultLog,
+    /// `info-off2wake_source`.
+    WakeSource,
+}
+
 /// Host wall time at a system counter value, for the RTC's initial offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WallClock {
@@ -252,7 +267,8 @@ impl Interrupt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Byte {
     Storage,
-    Fault(u16),
+    /// A byte of the retained-history owner at this index.
+    History(usize, u16),
     Upcount(u16),
     AlarmControl,
     AlarmEvent,
@@ -268,7 +284,8 @@ pub struct Pmu {
     clock: RtcClock,
     monitor: u8,
     identity: Option<Window>,
-    faults: Option<fault::FaultLog>,
+    /// The outside-scratch fault log and off-to-wake source, where declared.
+    histories: Vec<fault::FaultLog>,
     firmware: Option<firmware::FirmwareMemory>,
     startup: Option<FirmwareStartup>,
     loader: Option<startup::Loader>,
@@ -319,6 +336,7 @@ impl Pmu {
             monitor,
             identity,
             fault_history,
+            wake_source,
             firmware,
             startup,
             native_loader,
@@ -360,7 +378,11 @@ impl Pmu {
             clock,
             monitor,
             identity,
-            faults: fault_history.map(Into::into),
+            histories: fault_history
+                .into_iter()
+                .chain(wake_source)
+                .map(Into::into)
+                .collect(),
             firmware: firmware.map(Into::into),
             startup,
             loader,
@@ -408,10 +430,13 @@ impl Pmu {
     }
 
     fn cell(&self, address: u16) -> Option<Byte> {
-        if let Some(faults) = &self.faults
-            && faults.window.contains(address)
+        if let Some((index, history)) = self
+            .histories
+            .iter()
+            .enumerate()
+            .find(|(_, history)| history.window.contains(address))
         {
-            return Some(Byte::Fault(address - faults.window.base));
+            return Some(Byte::History(index, address - history.window.base));
         }
         if let Some(rtc) = self.rtc {
             if address.wrapping_sub(rtc.upcount) < UPCOUNT_BYTES {
@@ -588,12 +613,13 @@ impl SpmiSlave for Pmu {
             .map(|a| self.cell(a).map(|cell| (a, cell)))
             .collect::<Option<_>>()
             .ok_or(SlaveError::Nack)?;
-        if cells.iter().any(|(_, cell)| matches!(cell, Byte::Fault(_))) {
-            self.faults
-                .as_ref()
-                .expect("fault owner")
-                .check_read()
-                .map_err(SlaveError::Unsupported)?;
+        for (index, history) in self.histories.iter().enumerate() {
+            if cells
+                .iter()
+                .any(|(_, cell)| matches!(cell, Byte::History(owner, _) if *owner == index))
+            {
+                history.check_read().map_err(SlaveError::Unsupported)?;
+            }
         }
         self.publish_time(now)?;
         // One sample serves every upcount byte of the access.
@@ -610,15 +636,15 @@ impl SpmiSlave for Pmu {
         for ((at, cell), out) in cells.into_iter().zip(data.iter_mut()) {
             *out = match cell {
                 Byte::Storage | Byte::IrqMask => *self.byte(at),
-                Byte::Fault(offset) => self.faults.as_ref().expect("fault owner").byte(offset),
+                Byte::History(index, offset) => self.histories[index].byte(offset),
                 Byte::Upcount(i) => raw[usize::from(i)],
                 Byte::AlarmControl => self.alarm_control,
                 Byte::AlarmEvent => self.alarm_event,
                 Byte::AlarmShared => self.alarm_control | self.alarm_event,
             };
         }
-        if let Some(faults) = &mut self.faults {
-            faults.capture(address, data.len());
+        for history in &mut self.histories {
+            history.capture(address, data.len());
         }
         Ok(())
     }
@@ -693,11 +719,18 @@ impl SpmiSlave for Pmu {
         {
             return Err(SlaveError::Nack);
         }
-        let acknowledge_faults = cells.iter().any(|(_, cell)| matches!(cell, Byte::Fault(_)));
-        if acknowledge_faults {
-            self.faults
-                .as_ref()
-                .expect("fault owner")
+        let mut owners = cells.iter().filter_map(|(_, cell)| match cell {
+            Byte::History(index, _) => Some(*index),
+            _ => None,
+        });
+        let acknowledged = owners.next();
+        if let Some(index) = acknowledged {
+            if owners.any(|other| other != index) {
+                return Err(SlaveError::Unsupported(
+                    "PMU acknowledge spanning two retained-history owners is unqualified",
+                ));
+            }
+            self.histories[index]
                 .check_acknowledge(address, data)
                 .map_err(SlaveError::Unsupported)?;
         }
@@ -741,15 +774,12 @@ impl SpmiSlave for Pmu {
                     self.alarm_event &= !(value & events);
                     programmed = true;
                 }
-                Byte::Fault(_) => {} // One complete snapshot is acknowledged below.
+                Byte::History(..) => {} // One complete snapshot is acknowledged below.
                 Byte::Upcount(_) => unreachable!(),
             }
         }
-        if acknowledge_faults {
-            self.faults
-                .as_mut()
-                .expect("fault owner")
-                .acknowledge(address, data.len());
+        if let Some(index) = acknowledged {
+            self.histories[index].acknowledge(address, data.len());
         }
         if programmed {
             self.armed = self.alarm_time().is_some_and(|time| time > now);

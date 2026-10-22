@@ -182,6 +182,96 @@ mod tests {
     }
 
     #[test]
+    fn off_to_wake_source_is_a_second_independent_snapshot_owner() {
+        // J514sAP Chapel: fault log <0x2200 7>, off-to-wake source <0x281c 2>.
+        let log = Window {
+            base: 0x2200,
+            bytes: 7,
+        };
+        let wake = Window {
+            base: 0x281c,
+            bytes: 2,
+        };
+        let base = || {
+            Configuration::new(
+                alloc::vec![Window {
+                    base: 0x8000,
+                    bytes: 0x2800
+                }],
+                None,
+                0,
+            )
+            .unwrap()
+            .with_fault_history(log, alloc::vec![0x11; 7])
+            .unwrap()
+        };
+        for (window, bytes) in [
+            (log, 7),
+            (
+                Window {
+                    base: 0x2206,
+                    bytes: 2,
+                },
+                2,
+            ),
+            (
+                Window {
+                    base: 0x9000,
+                    bytes: 2,
+                },
+                2,
+            ),
+            (
+                Window {
+                    base: 0x281c,
+                    bytes: 0,
+                },
+                0,
+            ),
+        ] {
+            assert!(
+                base()
+                    .with_wake_source_history(window, alloc::vec![0; bytes])
+                    .is_err()
+            );
+        }
+        assert!(
+            base()
+                .with_wake_source_history(wake, alloc::vec![0; 1])
+                .is_err()
+        );
+        let config = base()
+            .with_wake_source_history(wake, alloc::vec![0x04, 0x80])
+            .unwrap();
+        assert!(
+            config
+                .clone()
+                .with_wake_source_history(wake, alloc::vec![0; 2])
+                .is_err()
+        );
+        let mut pmu = Pmu::configured(config, None).unwrap();
+        // An acknowledgement needs its own owner's captured snapshot.
+        let mut log_bytes = [0; 7];
+        pmu.read(0x2200, &mut log_bytes, 0).unwrap();
+        assert!(matches!(
+            pmu.write(0x281c, &[0x04, 0x80], 0),
+            Err(SlaveError::Unsupported(_))
+        ));
+        let mut source = [0; 2];
+        pmu.read(0x281c, &mut source, 0).unwrap();
+        assert_eq!(source, [0x04, 0x80]);
+        // `_readOff2WakeSource` writes back what it read.
+        pmu.write(0x281c, &source, 0).unwrap();
+        pmu.read(0x281c, &mut source, 0).unwrap();
+        assert_eq!(source, [0, 0]);
+        pmu.read(0x2200, &mut log_bytes, 0).unwrap();
+        assert_eq!(log_bytes, [0x11; 7]);
+        pmu.write(0x2200, &log_bytes, 0).unwrap();
+        pmu.read(0x2200, &mut log_bytes, 0).unwrap();
+        assert_eq!(log_bytes, [0; 7]);
+    }
+
+    #[test]
     fn fault_snapshot_acknowledgement_preserves_canonical_shadow_and_supports_exact_retries() {
         let initial = alloc::vec![0x19, 0x80, 0, 0x41, 0, 0, 0, 0x10, 0, 1];
         let mut pmu = with_fault_history(initial.clone());
@@ -476,7 +566,7 @@ mod tests {
         let owner = Rc::new(RefCell::new(Pmu::configured(configuration, None).unwrap()));
         let pending = || {
             let owner = owner.borrow();
-            let fault = owner.faults.as_ref().unwrap();
+            let fault = &owner.histories[0];
             (0..10).map(|offset| fault.byte(offset)).collect::<Vec<_>>()
         };
         let mut controller = Spmi::with_configuration(

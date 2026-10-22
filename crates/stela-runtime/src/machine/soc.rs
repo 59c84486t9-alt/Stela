@@ -2079,8 +2079,21 @@ pub struct SpmiPmu {
     pub identity: Option<pmu::Window>,
     /// Outside-scratch log, requiring explicit cold/retained history at placement.
     pub fault_log: Option<pmu::Window>,
+    /// Outside-scratch off-to-wake source, likewise.
+    pub wake_source: Option<pmu::Window>,
     pub windows: Vec<pmu::Window>,
     pub rtc: Option<pmu::Rtc>,
+}
+
+impl SpmiPmu {
+    /// The retained-history owners whose initial bytes placement supplies.
+    pub fn retained(&self) -> impl Iterator<Item = (pmu::Retained, pmu::Window)> + use<> {
+        let fault = self.fault_log.map(|log| (pmu::Retained::FaultLog, log));
+        let wake = self
+            .wake_source
+            .map(|source| (pmu::Retained::WakeSource, source));
+        fault.into_iter().chain(wake)
+    }
 }
 
 pub type SpmiConfiguration = spmi::Configuration;
@@ -3447,32 +3460,32 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
     let mut windows = Vec::new();
     windows.extend(scratch);
     windows.extend(pair("info-fault_shadow")?);
-    let fault_log = match pair("info-fault_log")? {
-        None => None,
-        Some(log) => {
-            let end = u32::from(log.base) + u32::from(log.bytes);
-            if log.bytes == 0 || log.bytes > u16::from(u8::MAX) || end > 0x10000 {
-                return Err(
-                    "PMU fault-log count or extent exceeds the qualified byte-count resource"
-                        .into(),
-                );
-            }
-            if let Some(scratch) = scratch {
-                let scratch_end = u32::from(scratch.base) + u32::from(scratch.bytes);
-                let overlaps = u32::from(log.base) < scratch_end && u32::from(scratch.base) < end;
-                if overlaps {
-                    if log.base < scratch.base || end > scratch_end {
-                        return Err("PMU fault log partially aliases scratch storage".into());
-                    }
-                    None // Same canonical scratch owner; original zero-clear form.
-                } else {
-                    Some(log)
-                }
-            } else {
-                Some(log)
-            }
+    // A byte-counted history (`_readFaultLog`, `_readOff2WakeSource`) is its
+    // own retained owner outside scratch, and scratch storage inside it.
+    let retained = |name: &str| -> Result<Option<pmu::Window>, String> {
+        let Some(log) = pair(name)? else {
+            return Ok(None);
+        };
+        let end = u32::from(log.base) + u32::from(log.bytes);
+        if log.bytes == 0 || log.bytes > u16::from(u8::MAX) || end > 0x10000 {
+            return Err(format!(
+                "PMU {name} count or extent exceeds the qualified byte-count resource"
+            ));
         }
+        let Some(scratch) = scratch else {
+            return Ok(Some(log));
+        };
+        let scratch_end = u32::from(scratch.base) + u32::from(scratch.bytes);
+        if u32::from(log.base) < scratch_end && u32::from(scratch.base) < end {
+            if log.base < scratch.base || end > scratch_end {
+                return Err(format!("PMU {name} partially aliases scratch storage"));
+            }
+            return Ok(None); // Same canonical scratch owner; original zero-clear form.
+        }
+        Ok(Some(log))
     };
+    let fault_log = retained("info-fault_log")?;
+    let wake_source = retained("info-off2wake_source")?;
     if let Some(base) = single("info-leg_scrpad")? {
         windows.push(pmu::Window {
             base,
@@ -3599,19 +3612,7 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
     let identity = pair("info-id")?;
     let mut configuration =
         pmu::Configuration::new(windows.clone(), rtc, alarm_monitor).map_err(String::from)?;
-    if let Some(log) = fault_log {
-        // Validate geometry only. This temporary value never becomes a PMU;
-        // actual placement separately requires explicit resource history.
-        configuration = configuration
-            .with_fault_history(log, alloc::vec![0; usize::from(log.bytes)])
-            .map_err(String::from)?;
-    }
-    if let Some(identity) = identity {
-        configuration
-            .with_unqualified_identity(identity)
-            .map_err(String::from)?;
-    }
-    Ok(SpmiPmu {
+    let pmu = SpmiPmu {
         sid,
         primary,
         interrupt,
@@ -3619,9 +3620,23 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
         rtc_helper,
         identity,
         fault_log,
+        wake_source,
         windows,
         rtc,
-    })
+    };
+    for (kind, window) in pmu.retained() {
+        // Validate geometry only. This temporary value never becomes a PMU;
+        // actual placement separately requires explicit resource history.
+        configuration = configuration
+            .with_retained(kind, window, alloc::vec![0; usize::from(window.bytes)])
+            .map_err(String::from)?;
+    }
+    if let Some(identity) = identity {
+        configuration
+            .with_unqualified_identity(identity)
+            .map_err(String::from)?;
+    }
+    Ok(pmu)
 }
 
 fn cells_of(value: &[u8]) -> Option<[u32; 4]> {
@@ -6884,9 +6899,9 @@ mod tests {
             let history = controller
                 .pmus
                 .iter()
-                .filter_map(|pmu| {
-                    pmu.fault_log
-                        .map(|log| (pmu.sid, vec![0; usize::from(log.bytes)]))
+                .flat_map(|pmu| {
+                    pmu.retained()
+                        .map(|(kind, window)| (pmu.sid, kind, vec![0; usize::from(window.bytes)]))
                 })
                 .collect::<Vec<_>>();
             devices
@@ -7035,6 +7050,142 @@ mod tests {
         assert_eq!((rtc.event_mask, rtc.interrupt_mask), (0x1, 0x1));
         // A clock offset that is not six bytes refuses.
         let bytes = tree(&[0xf900, 4]);
+        let io = Node::root(&bytes).unwrap();
+        assert!(spmi_controllers(&io, &flat_fixture_extent(&translate), 0x63).is_err());
+    }
+
+    #[test]
+    fn chapel_places_a_shared_alarm_byte_and_explicit_off_to_wake_history() {
+        use crate::machine::adt::encode;
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let cells = |values: &[u32]| {
+            values
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let pairs = |values: &[(u64, u64)]| {
+            values
+                .iter()
+                .flat_map(|&(a, b)| [a, b])
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        // The J514sAP nub-spmi0 Chapel primary and Spitfire, trimmed.
+        let tree = |wake: &[u32]| {
+            let chapel = encode(
+                &[
+                    ("name", &z("spmi-chapelL1")),
+                    ("compatible", b"pmu,spmi\0pmu,chapel\0"),
+                    ("reg", &cells(&[0xb, 3, 0, 4, 0, 0])),
+                    ("info-scrpad", &cells(&[0x8000, 0x2800])),
+                    ("info-scrpad_socd", &cells(&[0x8b00, 0x1800])),
+                    ("info-fault_shadow", &cells(&[0x867b, 0x10])),
+                    ("info-leg_scrpad", &cells(&[0xf800])),
+                    ("info-fault_log", &cells(&[0x2200, 7])),
+                    ("info-off2wake_source", &cells(wake)),
+                    ("info-pm_setting", &cells(&[0x2001])),
+                    ("info-rtc", &cells(&[0x2002])),
+                    ("info-clock_offset", &cells(&[0x2100, 6])),
+                    ("info-rtc_alarm_ctrl", &cells(&[0x2000])),
+                    ("info-rtc_alarm_ctrl_en_mask", &cells(&[0x40])),
+                    ("info-rtc_alarm_monitor_mask", &cells(&[1])),
+                    ("info-rtc_alarm_offset", &cells(&[0x2008])),
+                    ("info-rtc_alarm_event", &cells(&[0x2000])),
+                    ("info-rtc_alarm_event_mask", &cells(&[2])),
+                    ("info-rtc_irq_mask_offset", &cells(&[0x200e])),
+                    ("info-rtc_alarm_mask", &cells(&[1])),
+                    ("info-id", &cells(&[0, 10])),
+                    ("is-primary", &cells(&[1])),
+                    ("interrupt-parent", &cells(&[0x141])),
+                    ("interrupts", &cells(&[2])),
+                ],
+                &[],
+            );
+            let spitfire = encode(
+                &[
+                    ("name", &z("spmi-spitfireE1")),
+                    ("compatible", b"pmu,spmi\0pmu,spitfire\0"),
+                    ("reg", &cells(&[0x9, 3, 0, 4, 0, 0])),
+                    ("info-fault_log", &cells(&[0x1000, 4])),
+                    ("info-id", &cells(&[0, 10])),
+                ],
+                &[],
+            );
+            let spmi = encode(
+                &[
+                    ("name", &z("nub-spmi0")),
+                    ("compatible", &z(SPMI)),
+                    ("gen", &cells(&[2])),
+                    ("queue-depth", &cells(&[256, 256])),
+                    ("AAPL,phandle", &cells(&[0x141])),
+                    (
+                        "reg",
+                        &pairs(&[(0x3d71_4000, 0x4000), (0x3d70_4000, 0x4000)]),
+                    ),
+                    ("interrupt-parent", &cells(&[0x141, 0x63, 0x141])),
+                    ("interrupts", &cells(&[0x100, 0x180, 0x119, 0x104])),
+                ],
+                &[chapel, spitfire],
+            );
+            encode(&[("name", &z("arm-io"))], &[spmi])
+        };
+        let translate = |offset| Some(0x2_0000_0000 + offset);
+        let bytes = tree(&[0x281c, 2]);
+        let io = Node::root(&bytes).unwrap();
+        let [controller] =
+            &spmi_controllers(&io, &flat_fixture_extent(&translate), 0x63).unwrap()[..]
+        else {
+            panic!("one controller");
+        };
+        let [chapel, spitfire] = &controller.pmus[..] else {
+            panic!("two PMUs");
+        };
+        assert!(chapel.rtc.unwrap().shares_event());
+        let window = |base, bytes| pmu::Window { base, bytes };
+        assert_eq!(
+            chapel.retained().collect::<Vec<_>>(),
+            [
+                (pmu::Retained::FaultLog, window(0x2200, 7)),
+                (pmu::Retained::WakeSource, window(0x281c, 2)),
+            ]
+        );
+        assert_eq!(spitfire.retained().count(), 1);
+        let cold = |pmus: &[SpmiPmu]| {
+            pmus.iter()
+                .flat_map(|pmu| {
+                    pmu.retained()
+                        .map(|(kind, window)| (pmu.sid, kind, vec![0; usize::from(window.bytes)]))
+                })
+                .collect::<Vec<_>>()
+        };
+        let epoch = pmu::RtcEpoch {
+            counter: 0,
+            ticks: 0,
+        };
+        let mut history = cold(&controller.pmus);
+        let mut devices = crate::machine::apple::AppleDevices::new();
+        assert!(
+            devices
+                .add_spmi_with_resources(controller, None, epoch, &history[..2])
+                .is_err()
+        );
+        history[1].2.pop();
+        assert!(
+            devices
+                .add_spmi_with_resources(controller, None, epoch, &history)
+                .is_err()
+        );
+        let history = cold(&controller.pmus);
+        devices
+            .add_spmi_with_resources(controller, None, epoch, &history)
+            .unwrap();
+        // Inside scratch it is scratch storage; a partial alias refuses.
+        let bytes = tree(&[0x8100, 2]);
+        let io = Node::root(&bytes).unwrap();
+        let controllers = spmi_controllers(&io, &flat_fixture_extent(&translate), 0x63).unwrap();
+        assert_eq!(controllers[0].pmus[0].wake_source, None);
+        let bytes = tree(&[0x7fff, 2]);
         let io = Node::root(&bytes).unwrap();
         assert!(spmi_controllers(&io, &flat_fixture_extent(&translate), 0x63).is_err());
     }

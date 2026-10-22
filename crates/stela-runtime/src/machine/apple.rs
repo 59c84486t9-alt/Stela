@@ -1316,40 +1316,36 @@ impl AppleDevices {
         self.add_spmi_with_resources(placement, wall, epoch, &[])
     }
 
-    /// Every outside-scratch log requires explicitly declared initial history.
-    /// SIDs are local to this controller; entries are complete and unique.
+    /// Every outside-scratch fault log and off-to-wake source requires
+    /// explicitly declared initial history. SIDs are local to this
+    /// controller; entries are complete and unique.
     pub fn add_spmi_with_resources(
         &mut self,
         placement: &super::soc::SpmiController,
         wall: Option<pmu::WallClock>,
         epoch: pmu::RtcEpoch,
-        fault_history: &[(u8, Vec<u8>)],
+        history: &[(u8, pmu::Retained, Vec<u8>)],
     ) -> Result<(), String> {
-        for (index, (sid, bytes)) in fault_history.iter().enumerate() {
-            if fault_history[..index]
+        for (index, (sid, kind, bytes)) in history.iter().enumerate() {
+            if history[..index]
                 .iter()
-                .any(|(previous, _)| previous == sid)
+                .any(|(previous, other, _)| previous == sid && other == kind)
             {
-                return Err("duplicate PMU fault-history owner".into());
+                return Err("duplicate PMU retained-history owner".into());
             }
-            let log = placement
+            let (_, window) = placement
                 .pmus
                 .iter()
-                .find(|pmu| pmu.sid == *sid)
-                .and_then(|pmu| pmu.fault_log)
-                .ok_or("fault history has no matching outside-scratch PMU log")?;
-            if bytes.len() != usize::from(log.bytes) {
-                return Err("PMU initial fault history is incomplete".into());
+                .filter(|pmu| pmu.sid == *sid)
+                .flat_map(|pmu| pmu.retained())
+                .find(|(owner, _)| owner == kind)
+                .ok_or("retained history has no matching outside-scratch PMU owner")?;
+            if bytes.len() != usize::from(window.bytes) {
+                return Err("PMU initial retained history is incomplete".into());
             }
         }
-        if placement
-            .pmus
-            .iter()
-            .filter(|pmu| pmu.fault_log.is_some())
-            .count()
-            != fault_history.len()
-        {
-            return Err("PMU outside-scratch logs require explicit initial history".into());
+        if placement.pmus.iter().flat_map(|pmu| pmu.retained()).count() != history.len() {
+            return Err("PMU outside-scratch histories require explicit initial bytes".into());
         }
         let irq = u16::try_from(placement.irq).map_err(|_| "SPMI AIC line above 65535")?;
         let mut controller =
@@ -1364,14 +1360,13 @@ impl AppleDevices {
             let mut configuration =
                 pmu::Configuration::new(pmu.windows.clone(), pmu.rtc, pmu.alarm_monitor)
                     .map_err(String::from)?;
-            if let Some(log) = pmu.fault_log {
-                let history = &fault_history
+            for (kind, window) in pmu.retained() {
+                let (_, _, bytes) = history
                     .iter()
-                    .find(|(sid, _)| *sid == pmu.sid)
-                    .expect("all fault owners preflighted")
-                    .1;
+                    .find(|(sid, owner, _)| *sid == pmu.sid && *owner == kind)
+                    .expect("all retained owners preflighted");
                 configuration = configuration
-                    .with_fault_history(log, history.clone())
+                    .with_retained(kind, window, bytes.clone())
                     .map_err(String::from)?;
             }
             if let Some(identity) = pmu.identity {

@@ -1015,15 +1015,16 @@ fn devices<'f>(
     }
     for spmi in board.map_or(&[][..], |board| &board.spmis) {
         // A newly created Stela PMIC starts with its own oscillator origin
-        // and no pending native fault events. These are explicit cold
-        // resource inputs, not Apple persistent/reset-state measurements.
+        // and no pending native fault or off-to-wake events. These are explicit
+        // cold resource inputs, not Apple persistent/reset-state measurements.
         // Retained PMIC resources must instead supply their actual history.
         let history = spmi
             .pmus
             .iter()
-            .filter_map(|pmu| {
-                pmu.fault_log
-                    .map(|log| (pmu.sid, alloc::vec![0; usize::from(log.bytes)]))
+            .flat_map(|pmu| {
+                pmu.retained().map(|(kind, window)| {
+                    (pmu.sid, kind, alloc::vec![0; usize::from(window.bytes)])
+                })
             })
             .collect::<alloc::vec::Vec<_>>();
         devices.add_spmi_with_resources(

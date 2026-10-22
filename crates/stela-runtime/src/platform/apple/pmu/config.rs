@@ -1,7 +1,7 @@
 //! Validated byte-resource ownership for the source-qualified RTC interface.
 use super::fault::FaultHistory;
 use super::firmware::FirmwareHistory;
-use super::{ClockOffset, FirmwareSram, FirmwareStartup, PmicEpoch, Rtc, Window};
+use super::{ClockOffset, FirmwareSram, FirmwareStartup, PmicEpoch, Retained, Rtc, Window};
 use alloc::vec::Vec;
 
 /// An explicit PMU register resource configuration, independent of its SID or SKU.
@@ -12,6 +12,7 @@ pub struct Configuration {
     pub(super) monitor: u8,
     pub(super) identity: Option<Window>,
     pub(super) fault_history: Option<FaultHistory>,
+    pub(super) wake_source: Option<FaultHistory>,
     pub(super) firmware: Option<FirmwareHistory>,
     pub(super) startup: Option<FirmwareStartup>,
     pub(super) native_loader: bool,
@@ -98,6 +99,7 @@ impl Configuration {
             monitor,
             identity: None,
             fault_history: None,
+            wake_source: None,
             firmware: None,
             startup: None,
             native_loader: false,
@@ -117,6 +119,36 @@ impl Configuration {
             return Err("PMU fault log duplicates or overlaps another register owner");
         }
         self.fault_history = Some(history);
+        Ok(self)
+    }
+
+    /// Configure either retained-history owner.
+    pub fn with_retained(
+        self,
+        kind: Retained,
+        window: Window,
+        initial: Vec<u8>,
+    ) -> Result<Self, &'static str> {
+        match kind {
+            Retained::FaultLog => self.with_fault_history(window, initial),
+            Retained::WakeSource => self.with_wake_source_history(window, initial),
+        }
+    }
+
+    /// Configure the source's outside-scratch off-to-wake source
+    /// (`info-off2wake_source`) with explicit cold or retained history.
+    /// `_readOff2WakeSource` reads and acknowledges it exactly as
+    /// `_readFaultLog` does its log (see `fault`); no wake producer is inferred.
+    pub fn with_wake_source_history(
+        mut self,
+        window: Window,
+        initial: Vec<u8>,
+    ) -> Result<Self, &'static str> {
+        let history = FaultHistory::new(window, initial)?;
+        if self.wake_source.is_some() || self.occupied().any(|other| overlaps(window, other)) {
+            return Err("PMU off-to-wake source duplicates or overlaps another register owner");
+        }
+        self.wake_source = Some(history);
         Ok(self)
     }
 
@@ -190,6 +222,7 @@ impl Configuration {
             .chain(self.identity)
             .chain(self.rtc.into_iter().flat_map(|rtc| rtc.windows()))
             .chain(self.fault_history.iter().map(|history| history.window))
+            .chain(self.wake_source.iter().map(|history| history.window))
             .chain(
                 self.firmware
                     .iter()
