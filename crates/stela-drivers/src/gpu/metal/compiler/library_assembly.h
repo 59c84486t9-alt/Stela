@@ -63,10 +63,37 @@ enum stela_metal_assembly_status stela_metal_assemble_source(
    const struct stela_msl_request *request, const struct stela_msl_output *compiled,
    struct stela_metal_assembly **output, struct stela_metal_assembly_error *error);
 
+/* Selected-stage compiler input, not a complete public Metal library. This
+ * additive owner mode cannot be consumed through assembly_manifest (returns
+ * NULL). TYPE is the actual canonical vertex0/fragment1 value, never kernel2.
+ * identity has no compute reflection/ENTRY flags; reflection is the actual
+ * deep-owned stage descriptor. provenance retains original input, target and
+ * qualified source-request/build facts, with entries=NULL/entry_count=0 because
+ * this view selects one stage rather than claiming a complete library manifest.
+ * archive_index is UINT32_MAX for source; pointers are same-process immutable
+ * borrows until owner destruction, never an IPC format or resource authority. */
+struct stela_metal_stage_view {
+   uint32_t size, abi, archive_index, reserved;
+   const struct stela_metal_library_manifest *provenance;
+   const struct stela_metal_function_record *identity;
+   const struct stela_air_stage_entry *reflection;
+};
+enum stela_metal_assembly_status stela_metal_assemble_selected_stage_archive(
+   const struct stela_metal_assembly_options *, const void *, size_t,
+   uint32_t archive_index, enum stela_air_stage expected_stage,
+   struct stela_metal_assembly **, struct stela_metal_assembly_error *);
+enum stela_metal_assembly_status stela_metal_assemble_selected_stage_source(
+   const struct stela_metal_assembly_options *, const struct stela_msl_apple_config *,
+   const struct stela_msl_request *, const struct stela_msl_output *,
+   const char *entry_name, size_t entry_name_bytes, enum stela_air_stage,
+   struct stela_metal_assembly **, struct stela_metal_assembly_error *);
+const struct stela_metal_stage_view *stela_metal_assembly_stage(
+   const struct stela_metal_assembly *);
+
 /* Views are immutable and valid only while this unique owner is retained. They
  * can be passed to the real same-CPU library constructor, which makes its own
  * owned snapshot. Serialize destruction with ALL borrowed accesses. No pointer
- * in these views may be serialized into IPC. NULL owner yields NULL manifest. */
+ * in these views may be serialized into IPC. NULL or selected-stage owner yields NULL compute manifest. */
 const struct stela_metal_library_manifest *stela_metal_assembly_manifest(
    const struct stela_metal_assembly *owner);
 enum stela_metal_assembly_status stela_metal_assembly_original(

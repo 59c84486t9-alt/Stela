@@ -273,7 +273,8 @@ static bool inspect(struct visit_context *context, uint64_t offset, uint64_t siz
    return true;
 }
 static struct stela_metal_assembly *open_input(const struct stela_metal_assembly_options *options,
-   uint32_t kind, const void *bytes, size_t count, struct stela_metal_assembly_error *error)
+   uint32_t kind, const void *bytes, size_t count, unsigned selected_capacity,
+   struct stela_metal_assembly_error *error)
 {
    struct stela_metal_input *input = NULL;
    struct stela_metal_input_limits limits = {.size=sizeof(limits),.abi=STELA_METAL_INPUT_ABI,
@@ -286,7 +287,8 @@ static struct stela_metal_assembly *open_input(const struct stela_metal_assembly
    if (stela_metal_input_info(input,&info,&input_status)) {
       input_error(error,&input_status); stela_metal_input_destroy(&input); return NULL;
    }
-   unsigned capacity = kind == STELA_METAL_INPUT_MTLB ? info.entry_count : options->max_entries;
+   unsigned capacity = selected_capacity ? selected_capacity :
+      kind == STELA_METAL_INPUT_MTLB ? info.entry_count : options->max_entries;
    size_t base = sizeof(struct stela_metal_assembly)+capacity*(sizeof(struct stela_metal_function_record)+sizeof(void *));
    if (!capacity || base > options->max_metadata_bytes) {
       report(error,STELA_METAL_ASSEMBLY_LIMIT,"No compute entries or retained owner budget exceeded");
@@ -352,7 +354,7 @@ enum stela_metal_assembly_status stela_metal_assemble_archive(
    if (!error) error = &local;
    reset_error(error);
    if (!valid_options(options,output,error)) return error->status;
-   struct stela_metal_assembly *owner = open_input(options,STELA_METAL_INPUT_MTLB,bytes,count,error);
+   struct stela_metal_assembly *owner = open_input(options,STELA_METAL_INPUT_MTLB,bytes,count,0,error);
    if (!owner) return error->status;
    const struct stela_metal_input_info *info = &owner->manifest.input;
    if (info->platform != 0x8001 || info->target_os != 0x81 || info->format_major != 2 || info->library_kind) {
@@ -427,6 +429,24 @@ enum stela_metal_assembly_status stela_metal_assemble_archive(
 fail:
    stela_metal_assembly_destroy(&owner); return error->status;
 }
+static enum stela_metal_assembly_status
+validate_source(const struct stela_msl_apple_config *config,
+                const struct stela_msl_request *request, const struct stela_msl_output *compiled,
+                uint8_t source_hash[32], struct stela_metal_assembly_error *error)
+{
+   struct stela_msl_error source_error;
+   if (stela_msl_apple_validate_request(config,request,&source_error) != STELA_MSL_OK)
+      return report(error,STELA_METAL_ASSEMBLY_SOURCE,"%s",source_error.detail);
+   if (!compiled || !compiled->air || compiled->air_bytes < 4 || compiled->air_bytes > config->max_air_bytes ||
+       !nonzero(compiled->build.gpucompiler_uuid,16) || !nonzero(compiled->build.implementation_uuid,16) ||
+       !nonzero(compiled->build.llvm_uuid,16) || !nonzero(compiled->build.lazy_library_sha256,32) ||
+       !nonzero(compiled->build.metal_stdlib_sha256,32) || !nonzero(compiled->build.metal_types_sha256,32))
+      return report(error,STELA_METAL_ASSEMBLY_SOURCE,"Successful trusted compiler output/build identity required");
+   hash(request->source,request->source_bytes,source_hash);
+   if (memcmp(source_hash,compiled->source_sha256,32))
+      return report(error,STELA_METAL_ASSEMBLY_SOURCE,"Source request/output digest mismatch");
+   return STELA_METAL_ASSEMBLY_OK;
+}
 enum stela_metal_assembly_status stela_metal_assemble_source(
    const struct stela_metal_assembly_options *options, const struct stela_msl_apple_config *config,
    const struct stela_msl_request *request, const struct stela_msl_output *compiled,
@@ -436,18 +456,9 @@ enum stela_metal_assembly_status stela_metal_assemble_source(
    if (!error) error = &local;
    reset_error(error);
    if (!valid_options(options,output,error)) return error->status;
-   struct stela_msl_error source_error;
-   if (stela_msl_apple_validate_request(config,request,&source_error) != STELA_MSL_OK)
-      return report(error,STELA_METAL_ASSEMBLY_SOURCE,"%s",source_error.detail);
-   if (!compiled || !compiled->air || compiled->air_bytes < 4 || compiled->air_bytes > config->max_air_bytes ||
-       !nonzero(compiled->build.gpucompiler_uuid,16) || !nonzero(compiled->build.implementation_uuid,16) ||
-       !nonzero(compiled->build.llvm_uuid,16) || !nonzero(compiled->build.lazy_library_sha256,32) ||
-       !nonzero(compiled->build.metal_stdlib_sha256,32) || !nonzero(compiled->build.metal_types_sha256,32))
-      return report(error,STELA_METAL_ASSEMBLY_SOURCE,"Successful trusted compiler output/build identity required");
-   uint8_t source_hash[32]; hash(request->source,request->source_bytes,source_hash);
-   if (memcmp(source_hash,compiled->source_sha256,32))
-      return report(error,STELA_METAL_ASSEMBLY_SOURCE,"Source request/output digest mismatch");
-   struct stela_metal_assembly *owner = open_input(options,STELA_METAL_INPUT_RAW_AIR,compiled->air,compiled->air_bytes,error);
+   uint8_t source_hash[32];
+   if (validate_source(config,request,compiled,source_hash,error)) return error->status;
+   struct stela_metal_assembly *owner = open_input(options,STELA_METAL_INPUT_RAW_AIR,compiled->air,compiled->air_bytes,0,error);
    if (!owner) return error->status;
    if (memcmp(owner->manifest.input.original_sha256,compiled->air_sha256,32)) {
       report(error,STELA_METAL_ASSEMBLY_SOURCE,"Original compiler output digest mismatch"); goto fail;
@@ -474,9 +485,244 @@ enum stela_metal_assembly_status stela_metal_assemble_source(
 fail:
    stela_metal_assembly_destroy(&owner); return error->status;
 }
+/* One selected stage uses the same canonical owner and normal libc metadata
+ * block as compute. No public library manifest or compute flags are invented. */
+struct stage_storage {
+   struct stela_metal_stage_view view;
+   struct stela_air_stage_entry reflection;
+};
+struct stage_context {
+   struct visit_context common;
+   const char *name;
+   size_t name_bytes;
+   enum stela_air_stage stage;
+   uint32_t archive_index;
+};
+static bool valid_stage(enum stela_air_stage stage)
+{
+   return stage == STELA_AIR_VERTEX || stage == STELA_AIR_FRAGMENT;
+}
+static bool stage_copy(const struct stela_air_inspection *info,
+                       const struct stela_air_stage_entry *entry, void *data)
+{
+   struct stage_context *context = data;
+   struct visit_context *common = &context->common;
+   struct stela_metal_assembly *owner = common->owner;
+   struct stela_metal_function_record *record = owner->records;
+   if (entry->stage != context->stage || entry->name_bytes != context->name_bytes ||
+       memcmp(entry->name,context->name,context->name_bytes) ||
+       !entry->name_bytes || !text(entry->name,entry->name_bytes)) {
+      report(common->error,STELA_METAL_ASSEMBLY_IDENTITY,"Selected stage name/type differs from requested entry"); return false;
+   }
+   if (context->archive_index != UINT32_MAX &&
+       (record->entry.air_major != 2 || record->entry.air_minor != info->air_minor ||
+        record->entry.language_major != info->language_major ||
+        record->entry.language_minor != info->language_minor)) {
+      report(common->error,STELA_METAL_ASSEMBLY_IDENTITY,"MTLB VERS differs from selected AIR stage"); return false;
+   }
+   if (!module_identity(common,info)) return false;
+   if (entry->input_count > AIR_MAX_ARGUMENTS || entry->output_count > AIR_MAX_ARGUMENTS) {
+      report(common->error,STELA_METAL_ASSEMBLY_LIMIT,"Stage input/output budget exceeded"); return false;
+   }
+   size_t size = sizeof(struct stage_storage) +
+      (entry->input_count+entry->output_count)*sizeof(struct stela_air_stage_io)+entry->name_bytes+1;
+   unsigned members = 0;
+   for (unsigned d = 0; d < 2; d++) {
+      const struct stela_air_stage_io *rows = d ? entry->outputs : entry->inputs;
+      unsigned count = d ? entry->output_count : entry->input_count;
+      for (unsigned i = 0; i < count; i++) {
+         const struct stela_air_stage_io *io = &rows[i];
+         if (io->member_count > AIR_MAX_ARGUMENTS-members) {
+            report(common->error,STELA_METAL_ASSEMBLY_LIMIT,"Stage structure member budget exceeded"); return false;
+         }
+         members += io->member_count;
+         const char *strings[] = {io->name,io->type_name,io->identifier};
+         size_t lengths[] = {io->name_bytes,io->type_name_bytes,io->identifier_bytes};
+         for (unsigned t = 0; t < 3; t++) {
+            if (!text(strings[t],lengths[t])) {
+               report(common->error,STELA_METAL_ASSEMBLY_REFLECTION,"Invalid stage reflection text"); return false;
+            }
+            if (strings[t]) size += lengths[t]+1;
+         }
+         for (unsigned m = 0; m < io->member_count; m++) {
+            const struct stela_air_struct_member *a = &io->members[m];
+            if (!text(a->name,a->name_bytes) || !text(a->type_name,a->type_name_bytes)) {
+               report(common->error,STELA_METAL_ASSEMBLY_REFLECTION,"Invalid stage member text"); return false;
+            }
+            if (a->name) size += a->name_bytes+1;
+            if (a->type_name) size += a->type_name_bytes+1;
+         }
+      }
+   }
+   /* Counts/strings are bounded before additions and before allocation. */
+   size += members*sizeof(struct stela_air_struct_member);
+   if (!charge(owner,size,common->error)) return false;
+   struct stage_storage *storage = malloc(size);
+   if (!storage) {
+      report(common->error,STELA_METAL_ASSEMBLY_ALLOCATION,"Stage reflection copy allocation failed"); return false;
+   }
+   owner->blocks[0] = storage;
+   struct stela_air_stage_io *inputs = (void *)(storage+1), *outputs = inputs+entry->input_count;
+   struct stela_air_struct_member *member = (void *)(outputs+entry->output_count);
+   char *cursor = (char *)(member+members);
+   storage->reflection = *entry;
+   storage->reflection.inputs = inputs; storage->reflection.outputs = outputs;
+   storage->reflection.name = copy_text(&cursor,entry->name,entry->name_bytes);
+   for (unsigned d = 0; d < 2; d++) {
+      const struct stela_air_stage_io *rows = d ? entry->outputs : entry->inputs;
+      struct stela_air_stage_io *out = d ? outputs : inputs;
+      unsigned count = d ? entry->output_count : entry->input_count;
+      for (unsigned i = 0; i < count; i++) {
+         out[i] = rows[i];
+         out[i].name = copy_text(&cursor,rows[i].name,rows[i].name_bytes);
+         out[i].type_name = copy_text(&cursor,rows[i].type_name,rows[i].type_name_bytes);
+         out[i].identifier = copy_text(&cursor,rows[i].identifier,rows[i].identifier_bytes);
+         out[i].members = rows[i].member_count ? member : NULL;
+         for (unsigned m = 0; m < rows[i].member_count; m++, member++) {
+            *member = rows[i].members[m];
+            member->name = copy_text(&cursor,member->name,member->name_bytes);
+            member->type_name = copy_text(&cursor,member->type_name,member->type_name_bytes);
+         }
+      }
+   }
+   record->size = sizeof(*record); record->abi = STELA_METAL_LIBRARY_ABI;
+   record->name = (const uint8_t *)storage->reflection.name; record->name_bytes = entry->name_bytes;
+   /* No compute argument records or reflection-readiness flags on stage input. */
+   if (context->archive_index == UINT32_MAX) {
+      record->entry = (struct stela_metal_input_entry) {
+         .size=sizeof(record->entry),.abi=STELA_METAL_INPUT_ABI,
+         .kind=entry->stage == STELA_AIR_VERTEX ? 0 : 1,
+         .air_major=2,.air_minor=info->air_minor,.language_major=info->language_major,
+         .language_minor=info->language_minor,.module_bytes=owner->original.length,
+      };
+      memcpy(record->entry.module_sha256,owner->manifest.input.original_sha256,32);
+   }
+   storage->view = (struct stela_metal_stage_view) {
+      .size=sizeof(storage->view),.abi=STELA_METAL_ASSEMBLY_ABI,
+      .archive_index=context->archive_index,.provenance=&owner->manifest,
+      .identity=record,.reflection=&storage->reflection,
+   };
+   return true;
+}
+static bool inspect_stage(struct stage_context *context)
+{
+   struct stela_air_error error;
+   struct visit_context *common = &context->common;
+   if (!stela_air_inspect_stage(common->raw.bytes,(size_t)common->raw.length,
+                                context->name,context->stage,stage_copy,context,&error)) {
+      if (!common->error->status) {
+         common->error->air_kind=error.kind; common->error->air_instruction=error.instruction;
+         report(common->error,STELA_METAL_ASSEMBLY_AIR,"%s",error.detail);
+      }
+      return false;
+   }
+   return true;
+}
+static bool stage_raw(struct stage_context *context, uint32_t index)
+{
+   struct visit_context *common = &context->common;
+   struct stela_metal_assembly *owner = common->owner;
+   struct stela_metal_input_error input_status;
+   common->raw = (struct stela_metal_input_view){.size=sizeof(common->raw),.abi=STELA_METAL_INPUT_ABI};
+   if (stela_metal_input_air(owner->input,index,&common->raw,&input_status)) {
+      input_error(common->error,&input_status); return false;
+   }
+   struct stela_metal_function_record *record = owner->records;
+   if (!span(common->raw.original_offset,common->raw.length,owner->original.length) ||
+       common->raw.bytes != owner->original.bytes+common->raw.original_offset ||
+       (index != UINT32_MAX && owner->manifest.input.kind == STELA_METAL_INPUT_MTLB &&
+        (common->raw.original_offset < record->entry.module_offset ||
+         common->raw.length > record->entry.module_bytes ||
+         common->raw.original_offset-record->entry.module_offset > record->entry.module_bytes-common->raw.length))) {
+      report(common->error,STELA_METAL_ASSEMBLY_IDENTITY,"Selected stage AIR is outside its canonical original module"); return false;
+   }
+   record->air_offset=common->raw.original_offset; record->air_bytes=common->raw.length;
+   hash(common->raw.bytes,(size_t)common->raw.length,record->air_sha256);
+   return true;
+}
+enum stela_metal_assembly_status stela_metal_assemble_selected_stage_archive(
+   const struct stela_metal_assembly_options *options, const void *bytes, size_t count,
+   uint32_t index, enum stela_air_stage stage,
+   struct stela_metal_assembly **output, struct stela_metal_assembly_error *error)
+{
+   struct stela_metal_assembly_error local;
+   if (!error) error=&local;
+   reset_error(error);
+   if (!valid_options(options,output,error)) return error->status;
+   if (!valid_stage(stage)) return report(error,STELA_METAL_ASSEMBLY_INPUT,"Requires vertex or fragment selection");
+   struct stela_metal_assembly *owner = open_input(options,STELA_METAL_INPUT_MTLB,bytes,count,1,error);
+   if (!owner) return error->status;
+   owner->manifest.entries=NULL; /* Prevent accidental legacy compute use. */
+   const struct stela_metal_input_info *info=&owner->manifest.input;
+   if (info->platform != 0x8001 || info->target_os != 0x81 || info->format_major != 2 || info->library_kind) {
+      report(error,STELA_METAL_ASSEMBLY_CONTAINER,"Requires an observed macOS MTLB2 executable header"); goto fail;
+   }
+   struct stela_metal_function_record *record=owner->records;
+   record->entry=(struct stela_metal_input_entry){.size=sizeof(record->entry),.abi=STELA_METAL_INPUT_ABI};
+   struct stela_metal_input_view name={.size=sizeof(name),.abi=STELA_METAL_INPUT_ABI};
+   struct stela_metal_input_entry_metadata metadata={.size=sizeof(metadata),.abi=STELA_METAL_INPUT_ABI};
+   struct stela_metal_input_error input_status;
+   if (stela_metal_input_entry(owner->input,index,&record->entry,&input_status) ||
+       stela_metal_input_name(owner->input,index,&name,&input_status) ||
+       stela_metal_input_entry_metadata(owner->input,index,&metadata,&input_status)) {
+      input_error(error,&input_status); goto fail;
+   }
+   if (metadata.function_tags != 6 || metadata.public_tags || metadata.private_tags || metadata.header_tags) {
+      report(error,STELA_METAL_ASSEMBLY_REFLECTION,"Unqualified selected stage MTLB metadata"); goto fail;
+   }
+   if (record->entry.kind != (stage == STELA_AIR_VERTEX ? 0u : 1u) ||
+       !name.length || !text((const char *)name.bytes,(size_t)name.length)) {
+      report(error,STELA_METAL_ASSEMBLY_IDENTITY,"MTLB selected stage type/name mismatch"); goto fail;
+   }
+   char entry[STRING_LIMIT+1]; memcpy(entry,name.bytes,(size_t)name.length); entry[name.length]=0;
+   struct stage_context context={.common={.owner=owner,.error=error},.name=entry,
+      .name_bytes=(size_t)name.length,.stage=stage,.archive_index=index};
+   if (!stage_raw(&context,index) || !inspect_stage(&context)) goto fail;
+   *output=owner; return STELA_METAL_ASSEMBLY_OK;
+fail:
+   stela_metal_assembly_destroy(&owner); return error->status;
+}
+enum stela_metal_assembly_status stela_metal_assemble_selected_stage_source(
+   const struct stela_metal_assembly_options *options, const struct stela_msl_apple_config *config,
+   const struct stela_msl_request *request, const struct stela_msl_output *compiled,
+   const char *name, size_t name_bytes, enum stela_air_stage stage,
+   struct stela_metal_assembly **output, struct stela_metal_assembly_error *error)
+{
+   struct stela_metal_assembly_error local;
+   if (!error) error=&local;
+   reset_error(error);
+   if (!valid_options(options,output,error)) return error->status;
+   if (!valid_stage(stage) || !name_bytes || !text(name,name_bytes))
+      return report(error,STELA_METAL_ASSEMBLY_INPUT,"Requires an exact vertex/fragment name and stage");
+   uint8_t source_hash[32];
+   if (validate_source(config,request,compiled,source_hash,error)) return error->status;
+   struct stela_metal_assembly *owner=open_input(options,STELA_METAL_INPUT_RAW_AIR,compiled->air,compiled->air_bytes,1,error);
+   if (!owner) return error->status;
+   owner->manifest.entries=NULL;
+   if (memcmp(owner->manifest.input.original_sha256,compiled->air_sha256,32)) {
+      report(error,STELA_METAL_ASSEMBLY_SOURCE,"Original compiler output digest mismatch"); goto fail;
+   }
+   owner->manifest.flags=STELA_METAL_LIBRARY_SOURCE_COMPILED;
+   owner->manifest.compiler_profile=config->profile; owner->manifest.request_language=request->language_version;
+   owner->manifest.request_fast_math=request->fast_math;
+   memcpy(owner->manifest.source_sha256,source_hash,32); owner->manifest.build=compiled->build;
+   char entry[STRING_LIMIT+1]; memcpy(entry,name,name_bytes); entry[name_bytes]=0;
+   struct stage_context context={.common={.owner=owner,.error=error,.request=request},
+      .name=entry,.name_bytes=name_bytes,.stage=stage,.archive_index=UINT32_MAX};
+   if (!stage_raw(&context,0) || !inspect_stage(&context)) goto fail;
+   *output=owner; return STELA_METAL_ASSEMBLY_OK;
+fail:
+   stela_metal_assembly_destroy(&owner); return error->status;
+}
+const struct stela_metal_stage_view *stela_metal_assembly_stage(const struct stela_metal_assembly *owner)
+{
+   if (!owner || owner->manifest.entries || !owner->blocks || !owner->blocks[0]) return NULL;
+   return &((const struct stage_storage *)owner->blocks[0])->view;
+}
+
 const struct stela_metal_library_manifest *stela_metal_assembly_manifest(const struct stela_metal_assembly *owner)
 {
-   return owner ? &owner->manifest : NULL;
+   return owner && owner->manifest.entries ? &owner->manifest : NULL;
 }
 enum stela_metal_assembly_status stela_metal_assembly_original(
    const struct stela_metal_assembly *owner, struct stela_metal_input_view *view,

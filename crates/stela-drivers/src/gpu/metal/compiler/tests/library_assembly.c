@@ -475,11 +475,220 @@ static void original_source(int argc, char **argv)
       m->entry_count,m->compiler_profile,(unsigned long long)m->input.original_bytes);
    for (unsigned i = 0; i < 32; i++) printf("%02x",m->input.original_sha256[i]); puts(""); destroy(&owner);
 }
+static const char stage_fixture[] =
+ "target datalayout = \"e-p:64:64-i32:32-i64:64-f32:32-v128:128-n8:16:32\"\n"
+ "target triple = \"air64_v29-apple-macosx27.2.0\"\n"
+ "%Input = type { <4 x float> }\n"
+ "define <{<4 x float>,<4 x float>}> @test_vertex(i32 %id, ptr addrspace(2) %buffer) {\n"
+ " %index = zext i32 %id to i64\n"
+ " %p = getelementptr %Input, ptr addrspace(2) %buffer, i64 %index, i32 0\n"
+ " %position = load <4 x float>, ptr addrspace(2) %p, align 16\n"
+ " %a = insertvalue <{<4 x float>,<4 x float>}> undef, <4 x float> %position, 0\n"
+ " %b = insertvalue <{<4 x float>,<4 x float>}> %a, <4 x float> <float 1.0,float 0.5,float 0.25,float 0.0>, 1\n"
+ " ret <{<4 x float>,<4 x float>}> %b\n}\n"
+ "define <4 x float> @test_fragment(<4 x float> %position, <4 x float> %color) { ret <4 x float> %color }\n"
+ "!air.vertex = !{!0}\n!air.fragment = !{!10}\n"
+ "!air.version = !{!20}\n!air.language_version = !{!21}\n!llvm.ident = !{!22}\n"
+ "!air.compile_options = !{!23,!24,!25}\n"
+ "!0 = !{ptr @test_vertex,!1,!4}\n!1 = !{!2,!3}\n"
+ "!2 = !{!\"air.position\",!\"air.arg_type_name\",!\"float4\",!\"air.arg_name\",!\"pos\"}\n"
+ "!3 = !{!\"air.vertex_output\",!\"test.opaque.link\",!\"air.arg_type_name\",!\"float4\",!\"air.arg_name\",!\"colour\"}\n"
+ "!4 = !{!5,!6}\n!5 = !{i32 0,!\"air.vertex_id\",!\"air.arg_type_name\",!\"uint\",!\"air.arg_name\",!\"id\"}\n"
+ "!6 = !{i32 1,!\"air.buffer\",!\"air.location_index\",i32 0,i32 1,!\"air.read\",!\"air.address_space\",i32 2,"
+ "!\"air.struct_type_info\",!7,!\"air.arg_type_size\",i32 16,!\"air.arg_type_align_size\",i32 16,!\"air.arg_type_name\",!\"Input\",!\"air.arg_name\",!\"vertices\"}\n"
+ "!7 = !{i32 0,i32 16,i32 0,!\"float4\",!\"position\"}\n"
+ "!10 = !{ptr @test_fragment,!11,!13}\n!11 = !{!12}\n!12 = !{!\"air.render_target\",i32 0,i32 0,!\"air.arg_type_name\",!\"float4\"}\n"
+ "!13 = !{!14,!15}\n"
+ "!14 = !{i32 0,!\"air.position\",!\"air.center\",!\"air.no_perspective\",!\"air.arg_type_name\",!\"float4\",!\"air.arg_name\",!\"position\",!\"air.arg_unused\"}\n"
+ "!15 = !{i32 1,!\"air.fragment_input\",!\"test.opaque.link\",!\"air.center\",!\"air.perspective\",!\"air.arg_type_name\",!\"float4\",!\"air.arg_name\",!\"color\"}\n"
+ "!20 = !{i32 2,i32 9,i32 0}\n!21 = !{!\"Metal\",i32 4,i32 1,i32 0}\n"
+ "!22 = !{!\"Apple metal version 32023.922 (metalfe-32023.922.4)\"}\n"
+ "!23 = !{!\"air.compile.denorms_disable\"}\n!24 = !{!\"air.compile.fast_math_enable\"}\n!25 = !{!\"air.compile.framebuffer_fetch_enable\"}\n";
+
+static void check_stage(struct stela_metal_assembly *owner, enum stela_air_stage stage,
+                         uint32_t archive_index, const char *name)
+{
+   CHECK(owner && !stela_metal_assembly_manifest(owner));
+   const struct stela_metal_stage_view *v=stela_metal_assembly_stage(owner);
+   CHECK(v && v->size==sizeof(*v) && v->abi==1 && v->archive_index==archive_index && !v->reserved);
+   const struct stela_metal_function_record *r=v->identity;
+   CHECK(r && r->size==sizeof(*r) && r->abi==1 && !r->flags && !r->argument_count && !r->arguments);
+   CHECK(r->entry.kind==(stage==STELA_AIR_VERTEX?0u:1u) && r->entry.air_minor==9 && r->entry.language_major==4 && r->entry.language_minor==1);
+   CHECK(r->name_bytes==strlen(name) && !memcmp(r->name,name,r->name_bytes));
+   CHECK(v->reflection->stage==stage && v->reflection->name==(const char *)r->name);
+   CHECK(v->reflection->input_count==2 || v->reflection->input_count==3);
+   CHECK(v->reflection->output_count==(stage==STELA_AIR_VERTEX?2u:1u));
+   CHECK(v->reflection->framebuffer_fetch_present && v->reflection->framebuffer_fetch_enabled);
+   const struct stela_metal_library_manifest *m=v->provenance;
+   CHECK(m && !m->entries && !m->entry_count && m->target_bytes==strlen("air64_v29-apple-macosx27.2.0") &&
+      !memcmp(m->target,"air64_v29-apple-macosx27.2.0",m->target_bytes));
+   struct stela_metal_input_view original={.size=sizeof(original),.abi=1};
+   CHECK(!stela_metal_assembly_original(owner,&original,NULL));
+   CHECK(r->air_offset<=original.length && r->air_bytes<=original.length-r->air_offset);
+   uint8_t hash[32]; digest(original.bytes,original.length,hash);CHECK(!memcmp(hash,m->input.original_sha256,32));
+   digest(original.bytes+r->air_offset,r->air_bytes,hash);CHECK(!memcmp(hash,r->air_sha256,32));
+   digest(original.bytes+r->entry.module_offset,r->entry.module_bytes,hash);CHECK(!memcmp(hash,r->entry.module_sha256,32));
+   if(stage==STELA_AIR_VERTEX) {
+      const struct stela_air_stage_io *buffer=&v->reflection->inputs[1];
+      CHECK(buffer->semantic==STELA_AIR_STAGE_BUFFER && buffer->buffer.address_space==2 && buffer->buffer.access==STELA_AIR_READ);
+      CHECK(buffer->member_count && buffer->members && buffer->members[0].name && buffer->members[0].type_name);
+      CHECK(buffer->members[0].name_bytes==strlen(buffer->members[0].name));
+      CHECK(v->reflection->outputs[1].identifier && v->reflection->outputs[1].identifier_bytes);
+   } else CHECK(v->reflection->inputs[1].identifier && v->reflection->inputs[1].identifier_bytes);
+}
+static struct stela_metal_assembly *stage_archive(const struct bytes *input, unsigned index,
+   enum stela_air_stage stage, enum stela_metal_assembly_status expected)
+{
+   struct stela_metal_assembly_options options=stela_metal_assembly_default_options();
+   struct stela_metal_assembly_error error;struct stela_metal_assembly *owner=NULL;
+   enum stela_metal_assembly_status status=stela_metal_assemble_selected_stage_archive(&options,input->data,input->count,index,stage,&owner,&error);
+   if(status!=expected)fprintf(stderr,"Stage archive expected%u got%u: %s\n",expected,status,error.detail);
+   CHECK(status==expected && (!!owner)==(status==STELA_METAL_ASSEMBLY_OK));
+   return owner;
+}
+static void stage_archive_tests(LLVMMemoryBufferRef module, const char *vertex, const char *fragment)
+{
+   size_t baseline_live=live_allocations; (void)baseline_live;
+   struct specification specs[2];
+   const char *names[]={vertex,fragment};
+   for(unsigned i=0;i<2;i++) specs[i]=(struct specification){.name=names[i],.kind=(uint8_t)i,.air_minor=9,
+      .language_major=4,.language_minor=1,.module=LLVMGetBufferStart(module),.module_bytes=LLVMGetBufferSize(module)};
+   struct bytes input=archive(specs,2,27,2);
+   struct stela_metal_assembly *owners[2]={NULL,NULL};
+   for(unsigned i=0;i<2;i++) {
+      enum stela_air_stage stage=i?STELA_AIR_FRAGMENT:STELA_AIR_VERTEX;
+      allocation_attempts=0;owners[i]=stage_archive(&input,i,stage,STELA_METAL_ASSEMBLY_OK);
+      size_t attempts=allocation_attempts;check_stage(owners[i],stage,i,names[i]);
+#ifdef STELA_ASSEMBLY_ALLOC_TEST
+      CHECK(attempts>=5);
+      size_t live_before=live_allocations;
+      for(size_t fail=1;fail<=attempts;fail++) {
+         allocation_attempts=0;fail_allocation=fail;
+         CHECK(!stage_archive(&input,i,stage,STELA_METAL_ASSEMBLY_ALLOCATION));CHECK(live_allocations==live_before);
+      }
+      fail_allocation=0;
+#else
+      (void)attempts;
+#endif
+      struct stela_metal_assembly_options options=stela_metal_assembly_default_options();
+      struct stela_metal_assembly_error error;
+      struct stela_metal_assembly *existing=owners[i];
+      CHECK(stela_metal_assemble_selected_stage_archive(&options,input.data,input.count,i,stage,&owners[i],&error)==STELA_METAL_ASSEMBLY_INPUT && owners[i]==existing);
+      CHECK(!stage_archive(&input,i,i?STELA_AIR_VERTEX:STELA_AIR_FRAGMENT,STELA_METAL_ASSEMBLY_IDENTITY));
+   }
+   memset(input.data,0,input.count);free(input.data);
+   for(unsigned i=0;i<2;i++) {check_stage(owners[i],i?STELA_AIR_FRAGMENT:STELA_AIR_VERTEX,i,names[i]);stela_metal_assembly_destroy(&owners[i]);stela_metal_assembly_destroy(&owners[i]);}
+   for(unsigned bad=0;bad<8;bad++) {
+      struct specification wrong=specs[0];unsigned major=27,minor=2;
+      if(bad==0)wrong.kind=2;
+      if(bad==1)wrong.name="absent_stage";
+      if(bad==2)wrong.air_minor=8;
+      if(bad==3)wrong.wrong_hash=true;
+      if(bad==4)wrong.function_tag="CNST";
+      if(bad==5)wrong.public_tag="ARGR";
+      if(bad==6)minor=3;
+      if(bad==7)wrong.header_tag="ARGR";
+      input=archive(&wrong,1,(uint16_t)major,(uint16_t)minor);
+      enum stela_metal_assembly_status expected=bad==1?STELA_METAL_ASSEMBLY_AIR:bad==3?STELA_METAL_ASSEMBLY_CONTAINER:
+         bad==4||bad==5||bad==7?STELA_METAL_ASSEMBLY_REFLECTION:STELA_METAL_ASSEMBLY_IDENTITY;
+      CHECK(!stage_archive(&input,0,STELA_AIR_VERTEX,expected));free(input.data);
+#ifdef STELA_ASSEMBLY_ALLOC_TEST
+      CHECK(live_allocations==baseline_live);
+#endif
+   }
+   input=archive(specs,2,27,2);
+   struct stela_metal_assembly_options options=stela_metal_assembly_default_options();
+   struct stela_metal_assembly_error error;struct stela_metal_assembly *none=NULL;
+   options.max_entries=1;allocation_attempts=0;
+   CHECK(stela_metal_assemble_selected_stage_archive(&options,input.data,input.count,0,STELA_AIR_VERTEX,&none,&error)==STELA_METAL_ASSEMBLY_LIMIT && !none);
+   CHECK(!allocation_attempts);
+   options=stela_metal_assembly_default_options();options.max_metadata_bytes=1;
+   CHECK(stela_metal_assemble_selected_stage_archive(&options,input.data,input.count,0,STELA_AIR_VERTEX,&none,&error)==STELA_METAL_ASSEMBLY_LIMIT && !none);
+   free(input.data);
+   puts("selected-stage archive: trueTYPE0/1 ownedIO/members/provenance, lifetimes, identity/reflection/budget/OOM refusals passed");
+}
+static void stage_unit_tests(void)
+{
+   LLVMMemoryBufferRef module=stela_air_test_custom_bitcode("",stage_fixture,"","");
+   stage_archive_tests(module,"test_vertex","test_fragment");LLVMDisposeMemoryBuffer(module);
+   CHECK(!stela_metal_assembly_stage(NULL));
+}
+static void stage_original_source(int argc,char **argv)
+{
+   CHECK(argc==5);
+   struct bytes source=read_file(argv[2],64u*1024u*1024u),air=read_file(argv[3],64u*1024u*1024u),identity=read_file(argv[4],208);
+   CHECK(identity.count==208);
+   struct stela_msl_output compiled={.air=air.data,.air_bytes=air.count};
+   memcpy(compiled.source_sha256,identity.data,32);memcpy(compiled.air_sha256,identity.data+32,32);memcpy(&compiled.build,identity.data+64,144);free(identity.data);
+   struct stela_msl_request request={.source=source.data,.source_bytes=source.count,.language_version=0x40001,.fast_math=true,.target_triple="air64_v29-apple-macosx27.2.0"};
+   struct stela_msl_apple_config config=stela_msl_apple_default_config();
+   struct stela_metal_assembly_options options=stela_metal_assembly_default_options();
+   struct stela_metal_assembly_error error;struct stela_metal_assembly *owners[2]={NULL,NULL};
+   const struct stela_msl_build_identity expected_build=compiled.build;
+   uint8_t expected_source[32];memcpy(expected_source,compiled.source_sha256,32);
+   const char *names[]={"vertexShader","fragmentShader"};
+   for(unsigned i=0;i<2;i++) {
+      enum stela_air_stage stage=i?STELA_AIR_FRAGMENT:STELA_AIR_VERTEX;
+      allocation_attempts=0;
+      CHECK(!stela_metal_assemble_selected_stage_source(&options,&config,&request,&compiled,names[i],strlen(names[i]),stage,&owners[i],&error));
+      size_t attempts=allocation_attempts;
+      check_stage(owners[i],stage,UINT32_MAX,names[i]);
+      const struct stela_metal_library_manifest *p=stela_metal_assembly_stage(owners[i])->provenance;
+      CHECK(p->flags==STELA_METAL_LIBRARY_SOURCE_COMPILED && p->compiler_profile==1 && p->request_language==0x40001 && p->request_fast_math==1 &&
+         !memcmp(p->source_sha256,compiled.source_sha256,32) && !memcmp(&p->build,&compiled.build,sizeof(p->build)));
+#ifdef STELA_ASSEMBLY_ALLOC_TEST
+      size_t live_before=live_allocations;
+      for(size_t fail=1;fail<=attempts;fail++) {
+         allocation_attempts=0;fail_allocation=fail;struct stela_metal_assembly *none=NULL;
+         CHECK(stela_metal_assemble_selected_stage_source(&options,&config,&request,&compiled,names[i],strlen(names[i]),stage,&none,&error)==STELA_METAL_ASSEMBLY_ALLOCATION && !none && live_allocations==live_before);
+      }
+      fail_allocation=0;
+#else
+      (void)attempts;
+#endif
+      for(unsigned bad=0;bad<5;bad++) {
+         struct stela_metal_assembly *none=NULL;struct stela_msl_output wrong=compiled;
+         struct stela_msl_request req=request;
+         if(bad==0)wrong.air_sha256[0]^=1;
+         if(bad==1)wrong.source_sha256[0]^=1;
+         if(bad==2)memset(wrong.build.llvm_uuid,0,16);
+         if(bad==3)req.target_triple="air64_v29-apple-macosx27.3.0";
+         if(bad==4)req.fast_math=false;
+         CHECK(stela_metal_assemble_selected_stage_source(&options,&config,&req,&wrong,names[i],strlen(names[i]),stage,&none,&error)==STELA_METAL_ASSEMBLY_SOURCE && !none);
+      }
+   }
+   for(unsigned bad=0;bad<4;bad++) {
+      struct stela_metal_assembly *none=NULL;
+      const char *name=bad==0?"absent_stage":bad==1?"bad\xffname":"vertexShader";
+      size_t length=bad==2?0:strlen(name);
+      enum stela_air_stage stage=bad==3?0:STELA_AIR_VERTEX;
+      enum stela_metal_assembly_status expected=bad==0?STELA_METAL_ASSEMBLY_AIR:STELA_METAL_ASSEMBLY_INPUT;
+      CHECK(stela_metal_assemble_selected_stage_source(&options,&config,&request,&compiled,name,length,stage,&none,&error)==expected && !none);
+   }
+   /* Preserve the exact captured module under a synthetic MTLB framing too. */
+   LLVMMemoryBufferRef raw=LLVMCreateMemoryBufferWithMemoryRangeCopy((const char *)air.data,air.count,"unchanged-original-triangle");
+   stage_archive_tests(raw,names[0],names[1]);LLVMDisposeMemoryBuffer(raw);
+   memset(source.data,0,source.count);free(source.data);memset(air.data,0,air.count);free(air.data);
+   memset(&compiled,0,sizeof(compiled));memset(&request,0,sizeof(request));
+   for(unsigned i=0;i<2;i++) {
+      check_stage(owners[i],i?STELA_AIR_FRAGMENT:STELA_AIR_VERTEX,UINT32_MAX,names[i]);
+      const struct stela_metal_library_manifest *p=stela_metal_assembly_stage(owners[i])->provenance;
+      CHECK(!memcmp(&p->build,&expected_build,sizeof(expected_build)) && !memcmp(p->source_sha256,expected_source,32));
+      stela_metal_assembly_destroy(&owners[i]);stela_metal_assembly_destroy(&owners[i]);
+   }
+#ifdef STELA_ASSEMBLY_ALLOC_TEST
+   CHECK(!live_allocations);
+#endif
+   puts("selected-stage original Apple triangle source: exact trustedreceipt/source/AIR/build/request copied, caller storage destroyed");
+}
+
 int main(int argc, char **argv)
 {
    unit_tests();
+   stage_unit_tests();
    if (argc > 1 && !strcmp(argv[1],"--archive")) original_archive(argc,argv);
    else if (argc > 1 && !strcmp(argv[1],"--source")) original_source(argc,argv);
+   else if (argc > 1 && !strcmp(argv[1],"--stage-source")) stage_original_source(argc,argv);
    else if (argc > 1 && !strcmp(argv[1],"--archive-pair")) original_archive_pair(argc,argv);
    else CHECK(argc == 1);
    return 0;
