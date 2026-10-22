@@ -5,6 +5,18 @@ pub(super) mod system;
 
 use stela_compiler::TargetCpu;
 
+/// Only coherent registered RAM, not an external MMIO bus. The caller has
+/// checked x86 and holds the actual machine's Device-RAM serializer. Like the
+/// existing staged M0 RAM recipes, keep compiler memory effects on each MFENCE.
+pub(super) fn device_ram_fence() {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: MFENCE is available on the admitted x86-64-v2/SSE2 target. No
+    // guest pointer, register or architectural state is substituted here.
+    unsafe {
+        core::arch::asm!("mfence", options(nostack, preserves_flags));
+    }
+}
+
 const BYTE_BYTES: usize = 1;
 const HALFWORD_BYTES: usize = 2;
 const WORD_BYTES: usize = 4;

@@ -35,7 +35,7 @@ const TTBR0_EL2: Encoding = Encoding::new(3, 4, 2, 0, 0);
 const TCR_EL2: Encoding = Encoding::new(3, 4, 2, 0, 2);
 const MAIR_EL2: Encoding = Encoding::new(3, 4, 10, 2, 0);
 const SCTLR_EL2: Encoding = Encoding::new(3, 4, 1, 0, 0);
-fn constant(words: &mut Vec<u32>, register: u32, value: u64) {
+pub(super) fn constant(words: &mut Vec<u32>, register: u32, value: u64) {
     for half in 0..4 {
         let opcode = if half == 0 { MOVZ64 } else { MOVK64 };
         words.push(

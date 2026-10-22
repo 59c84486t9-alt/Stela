@@ -110,6 +110,12 @@ pub struct DataPart {
 /// Effective CPU controls belong to the per-thread policy, not each ISA family.
 /// Policy callbacks must not reenter or retire this domain while an access is active.
 pub trait DataPolicy {
+    /// Request the machine's actual Device-RAM serializer and native full
+    /// fences around each callback. This strengthens ordering only; it grants
+    /// no translation, physical memory, instruction or MMIO admission.
+    fn device_ram_ordering(&self) -> bool {
+        false
+    }
     fn validate_instructions(
         &self,
         required: stela_compiler::context::memory::InstructionRequirements,
@@ -926,6 +932,36 @@ impl<P: DataPolicy> MemoryThread<P> {
     }
 
     unsafe fn transfer(
+        &mut self,
+        view: &mut MemoryContextView,
+        request: &MemoryRequest,
+    ) -> Result<(), (MemoryStatus, u64)> {
+        if self.policy.device_ram_ordering() {
+            if !cfg!(target_arch = "x86_64") {
+                return Err((MemoryStatus::Unsupported, request.address));
+            }
+            self.domain
+                .check_execution()
+                .map_err(|status| (status, request.address))?;
+            // Same physical machine owner as every existing staged Device-RAM
+            // transaction. Retain it across actual transfer/fault prefix; never
+            // copy an ordering receipt or replace the checked policy/ABI.
+            let system = Arc::clone(&self.domain.system);
+            let _order = system
+                .device_ram_order
+                .try_lock()
+                .map_err(|_| (MemoryStatus::Domain, request.address))?;
+            access::device_ram_fence();
+            // SAFETY: unchanged exact private staging and retained invocation.
+            let result = unsafe { self.transfer_unordered(view, request) };
+            access::device_ram_fence();
+            return result;
+        }
+        // SAFETY: unchanged invocation; normal policies do not take Device locks.
+        unsafe { self.transfer_unordered(view, request) }
+    }
+
+    unsafe fn transfer_unordered(
         &mut self,
         view: &mut MemoryContextView,
         request: &MemoryRequest,

@@ -12,6 +12,7 @@ use super::{Devices, Host, Machine, mmu};
 use crate::memory::{RegisteredSystemRam, domain::MemoryThread};
 use alloc::{sync::Arc, vec::Vec};
 use controls::Controls;
+pub(in crate::machine::engine) use native_run::RecoveredRead;
 pub use native_run::{
     Cohort as NativeCohort, Identity as NativeRunIdentity, NativeRun,
     Observation as NativeRunObservation, ReturnedRun, dispatch as dispatch_native_run,
@@ -51,6 +52,75 @@ impl SharedMemory {
     pub fn event_endpoint(&self) -> &crate::system::events::EventEndpoint {
         &self.event
     }
+    pub(in crate::machine::engine) fn current_read_source(
+        &self,
+        cpu: &crate::machine::Cpu,
+        profile: &crate::machine::CpuProfile,
+        missing: &[crate::machine::system::Register],
+        recovered: &RecoveredRead,
+        held: &crate::memory::CanonicalRamService<'_>,
+    ) -> Result<(), MemoryStatus> {
+        let (binding, _, pc, _) = recovered.source();
+        let (word, _, _, _, _) = recovered.access().ok_or(MemoryStatus::Unsupported)?;
+        let controls_hash = recovered.controls().ok_or(MemoryStatus::Unsupported)?;
+        if binding.pe != self.pe
+            || !recovered.machine_matches(&self.machine)
+            || !held.belongs_to(&self.ram)
+        {
+            return Err(MemoryStatus::Domain);
+        }
+        held.validate_current()?;
+        let controls = Controls::capture(cpu, profile.name, missing)?;
+        if controls.identity() != controls_hash {
+            return Err(MemoryStatus::Unsupported);
+        }
+        let mut actual = [0; 4];
+        self.fetch(&controls, pc, &mut actual)?;
+        if u32::from_le_bytes(actual) != word {
+            return Err(MemoryStatus::Unsupported);
+        }
+        Ok(())
+    }
+
+    pub(in crate::machine::engine) fn current_device_read(
+        &self,
+        cpu: &crate::machine::Cpu,
+        profile: &crate::machine::CpuProfile,
+        missing: &[crate::machine::system::Register],
+        request: crate::memory::domain::DataRequest,
+        quantity_bytes: u8,
+        physical: u64,
+    ) -> Result<(), MemoryStatus> {
+        use crate::memory::{
+            backing::AccessKind,
+            domain::{DataPart, DataPolicy},
+        };
+        let controls = Controls::capture(cpu, profile.name, missing)?;
+        let mut policy = Policy::new(controls, Arc::clone(&self.ram));
+        policy.validate_data_request(request)?;
+        let width = usize::from(quantity_bytes);
+        for offset in (0..request.bytes).step_by(width) {
+            policy.failure = None;
+            let address = request.address + offset as u64;
+            let result = policy.translate_part(
+                request,
+                DataPart {
+                    address,
+                    bytes: width,
+                    kind: AccessKind::Read,
+                },
+            );
+            if result != Err((MemoryStatus::Unsupported, address))
+                || !matches!(policy.failure,
+                Some(policy::Failure::DeviceRead { physical: reached, bytes, .. })
+                if reached == physical + offset as u64 && bytes == width)
+            {
+                return Err(MemoryStatus::Unsupported);
+            }
+        }
+        Ok(())
+    }
+
     fn fetch(&self, controls: &Controls, pc: u64, output: &mut [u8]) -> Result<(), MemoryStatus> {
         let mut tables = policy::Tables::new(&self.ram);
         let outcome = mmu::translate(
@@ -66,8 +136,13 @@ impl SharedMemory {
         let mmu::Outcome::Mapped(mapped) = outcome else {
             return Err(MemoryStatus::Unsupported);
         };
+        let cold_fetch = controls.cold_m0()
+            && matches!(
+                mapped.attributes,
+                mmu::attributes::NORMAL_WRITE_THROUGH | mmu::attributes::NORMAL_NON_CACHEABLE
+            );
         if mapped.memory != mmu::MemoryType::Normal
-            || !mmu::attributes::write_back(mapped.attributes)
+            || !cold_fetch && !mmu::attributes::write_back(mapped.attributes)
             || output.len() as u64 > mapped.size - (mapped.physical & (mapped.size - 1))
         {
             return Err(MemoryStatus::Unsupported);

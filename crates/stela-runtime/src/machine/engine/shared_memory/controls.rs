@@ -68,8 +68,11 @@ impl Controls {
             .map_err(|_| MemoryStatus::Unsupported)?;
         let translation = cpu.controls(cpu.regime());
         let requester = cpu.requester();
+        let cold_m0 = requester.el == 2
+            && matches!(translation.regime, mmu::Regime::El2 | mmu::Regime::El20)
+            && translation.sctlr & SCTLR_M == 0;
         if requester.el > 2
-            || translation.sctlr & (SCTLR_M | SCTLR_C) != SCTLR_M | SCTLR_C
+            || !cold_m0 && translation.sctlr & (SCTLR_M | SCTLR_C) != SCTLR_M | SCTLR_C
             || translation.sctlr & SCTLR_NAA != 0
             || translation.sctlr
                 & if requester.el == 0 {
@@ -98,6 +101,15 @@ impl Controls {
             },
             identification,
         })
+    }
+
+    pub(super) fn cold_m0(&self) -> bool {
+        self.requester.el == 2
+            && matches!(
+                self.translation.regime,
+                mmu::Regime::El2 | mmu::Regime::El20
+            )
+            && self.translation.sctlr & SCTLR_M == 0
     }
 
     pub(super) fn identity(&self) -> alloc::string::String {

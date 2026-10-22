@@ -267,13 +267,13 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::machine::engine::shared_memory) mod tests {
     use super::*;
     use crate::machine::{
         engine::NoDevices,
         engine::publication::{WorkerBinding, WorkerOwner, WorkerPublications},
     };
-    struct Local;
+    pub(in crate::machine::engine::shared_memory) struct Local;
     impl Host for Local {
         fn native_worker(&self) -> Option<WorkerId> {
             Some(WorkerId(17))
@@ -304,7 +304,9 @@ mod tests {
             unreachable!()
         }
     }
-    struct OneWorker(Option<WorkerOwner>);
+    pub(in crate::machine::engine::shared_memory) struct OneWorker(
+        pub(in crate::machine::engine::shared_memory) Option<WorkerOwner>,
+    );
     impl OneWorker {
         fn owner(&mut self) -> &mut WorkerOwner {
             self.0.as_mut().unwrap()

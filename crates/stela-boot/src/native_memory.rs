@@ -68,6 +68,27 @@ pub unsafe fn initialize(cpu: usize, physical: u64, bytes: usize, table_offset: 
     SOURCE.bytes.store(bytes, Ordering::Release);
 }
 
+/// Qualify an existing loader reservation through the SAME current mapping
+/// and vendor-specific effective-memory-type decoder used by native pages.
+/// This does not allocate/copy RAM or authorize a new physical alias.
+///
+/// # Safety
+/// The exact reservation/CPU mapping is retained for the boot lifetime; root,
+/// cache controls and physical ownership cannot change during this check.
+#[cfg(not(test))]
+pub(crate) unsafe fn qualify_reserved_writeback(
+    cpu: u64,
+    physical: u64,
+    bytes: usize,
+) -> Result<(), MemoryError> {
+    cache::verify_writeback(
+        cpu,
+        physical,
+        bytes,
+        SOURCE.table_offset.load(Ordering::Acquire),
+    )
+}
+
 /// Exercise the actual registered mapping and allocator, including retained
 /// CPU lifetime and zeroed page-tail access. Called by the mount's host check.
 pub fn verify() -> Result<(), MemoryError> {

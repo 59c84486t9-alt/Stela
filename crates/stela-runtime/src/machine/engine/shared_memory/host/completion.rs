@@ -104,8 +104,10 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// # Safety
     /// The registered reservation and full shared native execution contract
     /// remain valid. All device work is synchronous through Devices::transfer;
-    /// asynchronous/direct DMA, firmware/SMI and other unregistered writers are
-    /// excluded. There may be no reentrant monitor/RAM write, CPU settlement or
+    /// asynchronous/direct DMA, firmware/SMI and every other producer outside
+    /// the held workers and completed synchronous transfer are excluded. This
+    /// includes queued/background jobs which know this registered RAM's Arc;
+    /// writer gates freeze commits but cannot prove those queues empty. There may be no reentrant monitor/RAM write, CPU settlement or
     /// interrupt/migration while the returned all-writer gates are held. The
     /// actual prepared controller/request must be retained through its effect,
     /// faults and ACK before finish; unavailable DRAM/gating effects still
@@ -181,28 +183,55 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         let unavailable = self.unsupported(RequirementKind::Native(
             "canonical RAM service is busy or failed before controller effect",
         ));
-        let ServiceHost {
-            local,
-            transport,
-            ram,
-            services,
-            selected,
-        } = &mut self.host;
-        let memory = ram
-            .try_service()
-            .map_err(|_| unavailable.clone())?
-            .ok_or(unavailable)?;
-        Ok((
-            &mut self.devices,
-            HeldRamService {
-                ram: Some(memory),
-                local,
-                transport,
-                inventory: self.native_publication.as_mut().expect("held inventory"),
-                sessions: services,
-                selected,
-                held: Some(held),
-            },
-        ))
+        let service = self
+            .host
+            .borrow_ram_service(
+                self.native_publication.as_mut().expect("held inventory"),
+                held,
+            )
+            .map_err(|_| unavailable)?;
+        Ok((&mut self.devices, service))
+    }
+}
+
+impl<H: Host, T: NativeTransport> ServiceHost<H, T> {
+    /// Consume the SAME actual stopped token; never close/reopen a generation
+    /// between recovering a source frame and performing its device service.
+    pub(in crate::machine::engine) fn borrow_ram_service<'a>(
+        &'a mut self,
+        inventory: &'a mut publication::WorkerPublications,
+        held: publication::StoppedWorkers,
+    ) -> Result<HeldRamService<'a, H, T>, stela_compiler::context::memory::MemoryStatus> {
+        use stela_compiler::context::memory::MemoryStatus;
+        inventory
+            .require_all_held(&held)
+            .map_err(|_| MemoryStatus::Domain)?;
+        let memory = self.ram.try_service()?.ok_or(MemoryStatus::Domain)?;
+        let mut service = HeldRamService {
+            ram: Some(memory),
+            local: &mut self.local,
+            transport: &mut self.transport,
+            inventory,
+            sessions: &mut self.services,
+            selected: &mut self.selected,
+            held: Some(held),
+        };
+        service.fence_cpu_memory();
+        Ok(service)
+    }
+}
+
+impl<H: Host, T: NativeTransport> crate::machine::engine::device_read::sealed::Sealed
+    for HeldRamService<'_, H, T>
+{
+}
+impl<H: Host, T: NativeTransport> crate::machine::engine::CanonicalDeviceMemory
+    for HeldRamService<'_, H, T>
+{
+    fn memory(&self) -> &CanonicalRamService<'_> {
+        HeldRamService::memory(self)
+    }
+    fn fence_cpu_memory(&mut self) {
+        HeldRamService::fence_cpu_memory(self);
     }
 }

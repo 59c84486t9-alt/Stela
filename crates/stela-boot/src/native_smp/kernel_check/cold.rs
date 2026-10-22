@@ -1,0 +1,215 @@
+//! Actual cold checked entry and consuming device reads on one physical BSP.
+//! No ARM warmup/legacy V1 instruction runs before canonical conversion.
+use super::*;
+use machine::engine::{CanonicalDeviceMemory, ConsumedPair, ConsumedScalar, DeviceReadShape};
+const STR_X0_X1: u32 = 0xf9000020;
+const LDR_X6_X1: u32 = 0xf9400026;
+const LDRSW_X3_X2: u32 = 0xb9800043;
+const LDP_X4_X5_X2_POST16: u32 = 0xa8c11444;
+const LDP_X7_X8_X2_POST16: u32 = 0xa8c12047;
+const DSB_SY: u32 = 0xd5033f9f;
+const BRANCH_SELF: u32 = 0x14000000;
+const VALUE: u64 = 0x1122334455667788;
+struct Device {
+    ram: Arc<RegisteredSystemRam>,
+    reads: usize,
+    observed_ram: Option<u64>,
+}
+impl Device {
+    fn held(&self, memory: &mut dyn CanonicalDeviceMemory) -> Result<(), DeviceError> {
+        memory.fence_cpu_memory();
+        if !memory.memory().belongs_to(&self.ram) || memory.memory().validate_current().is_err() {
+            return Err(DeviceError::TransferRefused(
+                "cold fixture lost actual canonical owner".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+impl Devices for Device {
+    fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+        Err(DeviceError::TransferRefused(
+            "cold fixture rejects raw read".into(),
+        ))
+    }
+    fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+        Err(DeviceError::NoDevice)
+    }
+    fn lines(&mut self, _: usize, _: u64) -> Lines {
+        Lines::default()
+    }
+    fn requires_canonical_read(&self, _: usize, physical: u64, _: DeviceReadShape) -> bool {
+        (source::READY..source::READY + 32).contains(&physical)
+    }
+    fn read_canonical(
+        &mut self,
+        pe: usize,
+        physical: u64,
+        bytes: u8,
+        _: u64,
+        memory: &mut dyn CanonicalDeviceMemory,
+    ) -> Result<ConsumedScalar, DeviceError> {
+        self.held(memory)?;
+        if (pe, physical, bytes, self.reads) != (0, source::READY, 4, 0) {
+            return Err(DeviceError::NoDevice);
+        }
+        self.reads += 1;
+        Ok(ConsumedScalar {
+            value: 0x80000001,
+            settlement: Ok(()),
+        })
+    }
+    fn read_pair_canonical(
+        &mut self,
+        pe: usize,
+        physical: u64,
+        bytes: u8,
+        _: u64,
+        memory: &mut dyn CanonicalDeviceMemory,
+    ) -> Result<ConsumedPair, DeviceError> {
+        self.held(memory)?;
+        if pe != 0
+            || bytes != 8
+            || !((self.reads == 1 && physical == source::READY)
+                || (self.reads == 2 && physical == source::READY + 16))
+        {
+            return Err(DeviceError::NoDevice);
+        }
+        // Exact native scalar observation under the same all-writer guard,
+        // before the deliberately failed final board settlement poisons it.
+        let mut bytes = [0; 8];
+        // SAFETY: private output, actual canonical RAM, all frames held and no
+        // external producer. This read grants no new writer/device authority.
+        unsafe { self.ram.read_physical(source::DATA, &mut bytes) }
+            .map_err(|_| DeviceError::TransferRefused("cold RAM observation refused".into()))?;
+        self.observed_ram = Some(u64::from_le_bytes(bytes));
+        self.reads += 1;
+        Ok(if self.reads == 2 {
+            ConsumedPair {
+                values: [0xaaaa, 0xbbbb],
+                settlement: Ok(()),
+            }
+        } else {
+            ConsumedPair {
+                values: [0xcccc, 0xdddd],
+                settlement: Err(DeviceError::TransferRefused(
+                    "bounded post-consume settlement fault".into(),
+                )),
+            }
+        })
+    }
+}
+/// # Safety
+/// Same pinned one-BSP physical resources and closed synchronous source owner
+/// as the outer kernel check. The caller terminates after this fault fixture.
+pub(super) unsafe fn check(
+    handoff: &'static Handoff,
+    capture: &'static Capture,
+    executors: &Executors,
+    owner: &mut host::HostOwner,
+    sender: &Apic,
+) -> Result<(), &'static str> {
+    let reservation = handoff.guest[..handoff.guest_count]
+        .iter()
+        .find(|region| region.bytes >= source::BYTES as u64)
+        .ok_or("cold fixture has no actual loader RAM reservation")?;
+    let range = host::RamRange {
+        guest: source::BASE,
+        host: reservation.physical,
+        bytes: source::BYTES as u64,
+    };
+    // SAFETY: bounded loader-owned scratch reservation, before registration or
+    // any guest frame/publisher; this check does not enter original macOS.
+    unsafe {
+        core::ptr::write_bytes(
+            crate::layout::physical(range.host) as *mut u8,
+            0,
+            source::BYTES,
+        )
+    };
+    let ram = unsafe { super::super::canonical::reserve(handoff, &[range]) }?;
+    let mut words = Vec::new();
+    source::constant(&mut words, 0, VALUE);
+    source::constant(&mut words, 1, source::DATA);
+    words.extend_from_slice(&[STR_X0_X1, LDR_X6_X1, DSB_SY]);
+    source::constant(&mut words, 2, source::READY);
+    words.extend_from_slice(&[LDRSW_X3_X2, LDP_X4_X5_X2_POST16, LDP_X7_X8_X2_POST16]);
+    let done = source::CODE + words.len() as u64 * 4;
+    words.push(BRANCH_SELF);
+    let code: Vec<_> = words.iter().copied().flat_map(u32::to_le_bytes).collect();
+    // SAFETY: before first guest entry, actual fixture owns the whole RAM.
+    unsafe { ram.publish_physical(source::CODE, &code) }
+        .map_err(|_| "cold source publication refused")?;
+    let mut cpu = Cpu::of(Chip::AppleM1, source::CODE, Pstate::reset(2));
+    for (index, vector) in cpu.state.v.iter_mut().enumerate() {
+        *vector = [0x10203040 + index as u64, !(index as u64)];
+    }
+    let before = cpu.state.clone();
+    let devices = Device {
+        ram: Arc::clone(&ram),
+        reads: 0,
+        observed_ram: None,
+    };
+    // SAFETY: true one-PE diagnostic interface and same actual BSP allocation.
+    // All bytes/providers are closed and synchronous; no original guest/DMA.
+    let mut machine = unsafe {
+        super::super::canonical::prepare(
+            handoff,
+            capture,
+            executors,
+            sender,
+            owner,
+            Arc::clone(&ram),
+            cpu,
+            devices,
+            profile(1)?,
+        )
+    }?;
+    crate::output::arguments(format_args!(
+        "NATIVE COLD source pc={:#x} bytes={code:02x?} warmup=none profile=SystemModeSharedV1\n",
+        source::CODE
+    ));
+    // SAFETY: same real one-BSP mount adapter, closed providers and source
+    // identity. Its consumed terminal error must retain the final read prefix.
+    let stopped = unsafe { super::super::canonical::run_slice(&mut machine, 16) };
+    if !matches!(stopped, Stop::Unsupported(_)) || machine.devices.reads != 3 {
+        crate::output::arguments(format_args!(
+            "NATIVE COLD unexpected {stopped:?} reads={}\n",
+            machine.devices.reads
+        ));
+        return Err("cold source did not reach expected post-consume settlement failure");
+    }
+    let mut expected = before;
+    expected.x[0] = VALUE;
+    expected.x[1] = source::DATA;
+    expected.x[2] = source::READY + 32;
+    expected.x[3] = 0xffffffff80000001;
+    expected.x[4] = 0xaaaa;
+    expected.x[5] = 0xbbbb;
+    expected.x[6] = VALUE;
+    expected.x[7] = 0xcccc;
+    expected.x[8] = 0xdddd;
+    crate::output::arguments(format_args!(
+        "NATIVE COLD frame pc={:#x} retired={} pstate={:?} state={:?}\n",
+        machine.cpu.pc, machine.cpu.retired, machine.cpu.pstate, machine.cpu.state
+    ));
+    if machine.cpu.state != expected
+        || machine.cpu.pc != done
+        || machine.cpu.retired != words.len() as u64 - 1
+        || machine.devices.reads != 3
+        || machine.devices.observed_ram != Some(VALUE)
+        || machine.cpu.pstate != Pstate::reset(2)
+    {
+        return Err("cold complete frame/data/writeback/retirement mismatch");
+    }
+    if unsafe { machine.complete_device_read() }.is_ok()
+        || machine.devices.reads != 3
+        || unsafe { machine.native_round() }.is_ok()
+    {
+        return Err("cold consumed read replayed or resumed after failed settlement");
+    }
+    crate::output::arguments(format_args!(
+        "CHECK native-cold PASS actual_BSP=1 warmup=none checked_Device_RAM=store+load CPU_DSB=1 consumed_reads=3 scalar_signextend=1 pair_writeback=2 postfailure_retired=1 full_frame=preserved replay=refused; no macOS/SMP/DRAM completion claim\n"
+    ));
+    Ok(())
+}

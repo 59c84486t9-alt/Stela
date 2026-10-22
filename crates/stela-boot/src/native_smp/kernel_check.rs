@@ -1,4 +1,5 @@
 //! A bounded real translated ARM kernel cohort, never original-macOS SMP credit.
+mod cold;
 mod source;
 use super::{executor::Executors, firmware::Capture};
 use crate::{apic::Apic, engine::host, handoff::Handoff};
@@ -153,6 +154,10 @@ pub(crate) unsafe fn check(
     sender: &Apic,
 ) -> Result<(), &'static str> {
     let cores = handoff.native_resources.cores as usize;
+    if cores == 1 {
+        // SAFETY: same retained bootstrap/physical-owner fixture contract.
+        return unsafe { cold::check(handoff, capture, executors, host_owner, sender) };
+    }
     let ram = reservation()?;
     let bsp = capture.processors[capture.selected[0] as usize];
     host_owner.bind_worker(WorkerId(0), bsp.apic_id as u32)?;

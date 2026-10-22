@@ -3250,6 +3250,15 @@ fn finish<H: Host>(
                 0x13,
             )
         }
+        Stop::DeviceRead(request) => {
+            output::arguments(format_args!(
+                "STOP canonical read requires its live continuation: {request:?}\n"
+            ));
+            stop_here(
+                "the canonical device read was not consumed by its qualified scheduler",
+                0x13,
+            )
+        }
         Stop::Breakpoint(pc) => {
             output::arguments(format_args!("STOP breakpoint pc={pc:#x}\n"));
             stop_here(&format!("Stela's breakpoint at {pc:#x}"), 0x16)

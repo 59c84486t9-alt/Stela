@@ -98,7 +98,10 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             .release(&mut self.host.local, inventory, held);
     }
 
-    fn native_source_pe(&mut self, binding: publication::WorkerBinding) -> Step {
+    pub(in crate::machine::engine) fn native_source_pe(
+        &mut self,
+        binding: publication::WorkerBinding,
+    ) -> Step {
         if !self.host.select_native_service(binding.worker) {
             return Err(self.unsupported(RequirementKind::Native(
                 "source PE has no held physical Host service owner",
@@ -129,6 +132,9 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// refusals until their actual platform owners join this candidate. Calling
     /// this method does not enable production SMP or qualify original macOS.
     pub unsafe fn native_round(&mut self) -> Result<usize, Stop> {
+        if let Some(pending) = &self.pending_device_read {
+            return Err(pending.stop());
+        }
         let bindings: Vec<_> = self
             .native_publication
             .as_ref()
@@ -212,6 +218,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 .transport
                 .fail_stopped("native transport returned an incomplete actual cohort");
         }
+        let mut pending_read = None;
         let mut seen = Vec::with_capacity(reports.len());
         for mut report in reports {
             let Some(settlement) = report.settlement.take() else {
@@ -225,13 +232,29 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                     .fail_stopped("native source report has duplicate/wrong PE authority");
             }
             seen.push(settlement.binding.pe);
-            self.settle_native_source(settlement)?;
+            if matches!(
+                settlement.source_failure,
+                Some(policy::Failure::DeviceRead { .. })
+            ) {
+                self.validate_native_source(&settlement)?;
+                if pending_read.is_some() {
+                    return Err(self.unsupported(RequirementKind::Native(
+                        "multiple concurrent device-read continuations are not yet admitted",
+                    )));
+                }
+                pending_read = Some(settlement.into_read());
+            } else {
+                self.settle_native_source(settlement)?;
+            }
+        }
+        if let Some(read) = pending_read {
+            return Err(self.queue_device_read(read, held));
         }
         self.release_native_services(held);
         Ok(expected.len())
     }
 
-    fn settle_native_source(&mut self, settlement: native_run::Settlement) -> Step {
+    fn validate_native_source(&mut self, settlement: &native_run::Settlement) -> Step {
         if !Arc::ptr_eq(&settlement.machine, &self.native_memory_identity)
             || self.native_publication.as_ref().is_none_or(|inventory| {
                 inventory
@@ -257,6 +280,11 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         self.statistics.blocks += 1;
         self.cpu.pstate.btype = 0;
         self.sync_monitor();
+        Ok(())
+    }
+
+    fn settle_native_source(&mut self, settlement: native_run::Settlement) -> Step {
+        self.validate_native_source(&settlement)?;
         if let Some(fault) = settlement.memory_fault {
             return match settlement.source_failure {
                 Some(policy::Failure::Fault {

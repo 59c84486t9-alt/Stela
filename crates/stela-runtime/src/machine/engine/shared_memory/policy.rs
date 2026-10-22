@@ -10,6 +10,15 @@ use stela_compiler::context::memory::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
+    /// A reached, aligned Device read translated successfully but has no RAM
+    /// backing. No device callback/effect has run; only a true recovered frame
+    /// may turn this diagnostic into a stopped consuming continuation.
+    DeviceRead {
+        request: DataRequest,
+        address: u64,
+        physical: u64,
+        bytes: usize,
+    },
     Fault {
         request: DataRequest,
         address: u64,
@@ -87,6 +96,9 @@ fn shape(request: DataRequest) -> mmu::alignment::Shape {
     }
 }
 impl DataPolicy for Policy {
+    fn device_ram_ordering(&self) -> bool {
+        self.controls.cold_m0()
+    }
     fn validate_instructions(&self, required: InstructionRequirements) -> Result<(), MemoryStatus> {
         self.controls.instructions(required)
     }
@@ -103,7 +115,15 @@ impl DataPolicy for Policy {
         &self,
         _class: MemoryOperationClass,
     ) -> Result<(), MemoryStatus> {
-        Ok(())
+        // Cold Device-nGnRnE ordinary RAM is qualified separately. Do not
+        // infer LSE/LLSC/ordered Device behavior from the normal-WB lane.
+        if self.controls.cold_m0() && _class != MemoryOperationClass::Exclusive {
+            Err(MemoryStatus::Unsupported)
+        } else {
+            // CLREX has no data-memory type. Exclusive transfers still refuse
+            // in validate_data_request before any Device-RAM access.
+            Ok(())
+        }
     }
     fn validate_sp_alignment(&self, required: SpAlignmentRequirement) -> Result<(), MemoryStatus> {
         if required == SpAlignmentRequirement::Any || required == self.controls.sp.sp_requirement()
@@ -124,6 +144,9 @@ impl DataPolicy for Policy {
             || request.bytes > 16
             || request.operation == DataOperation::AllocationTag
         {
+            return Err(MemoryStatus::Unsupported);
+        }
+        if self.controls.cold_m0() && request.operation != DataOperation::Ordinary {
             return Err(MemoryStatus::Unsupported);
         }
         let shape = shape(request);
@@ -204,9 +227,28 @@ impl DataPolicy for Policy {
                 part.address,
             ));
         }
-        if translated.memory != mmu::MemoryType::Normal
-            || translated.attributes == mmu::attributes::TAGGED
-            || !mmu::attributes::write_back(translated.attributes)
+        if translated.memory == mmu::MemoryType::Device
+            && request.operation == DataOperation::Ordinary
+            && request.flags & flags::WRITE == 0
+            && self.ram.check_physical(translated.physical, part.bytes)
+                == Err(MemoryStatus::Translation)
+        {
+            self.failure.get_or_insert(Failure::DeviceRead {
+                request,
+                address: part.address,
+                physical: translated.physical,
+                bytes: part.bytes,
+            });
+            return Err((MemoryStatus::Unsupported, part.address));
+        }
+        let cold_device = self.controls.cold_m0()
+            && request.operation == DataOperation::Ordinary
+            && translated.memory == mmu::MemoryType::Device
+            && translated.attributes == mmu::attributes::DEVICE_NGNRNE;
+        if !cold_device
+            && (translated.memory != mmu::MemoryType::Normal
+                || translated.attributes == mmu::attributes::TAGGED
+                || !mmu::attributes::write_back(translated.attributes))
             || !matches!(
                 translated.shareability,
                 mmu::attributes::INNER_SHAREABLE | mmu::attributes::OUTER_SHAREABLE
@@ -323,6 +365,109 @@ pub(super) mod tests {
         cpu.registers.set_raw(Register::MAIR_EL1, 0, 0xff);
         (cpu, profile, missing, ram)
     }
+    fn cold_policy() -> Policy {
+        let (mut cpu, profile, missing, ram) = fixture();
+        cpu.pstate = crate::machine::exception::Pstate::reset(2);
+        cpu.registers.set_raw(Register::SCTLR_EL2, 0, 0);
+        Policy::new(
+            Controls::capture(&cpu, profile.name, &missing).unwrap(),
+            ram,
+        )
+    }
+    #[test]
+    fn cold_el2_m0_uses_real_device_attributes_and_checked_native_ram_parts() {
+        use stela_compiler::context::memory::{MemoryRequest, MemoryRequirements};
+        let policy = cold_policy();
+        assert!(policy.controls.cold_m0());
+        let ram = Arc::clone(&policy.ram);
+        let mut thread = ram.domain().thread(policy);
+        for (index, bytes) in [1usize, 2, 4, 8].into_iter().enumerate() {
+            let address = DATA + index as u64 * 16;
+            let expected = 0x8967452301efcdabu64.to_le_bytes();
+            let mut staging = expected;
+            let request = MemoryRequest {
+                address,
+                data: staging.as_mut_ptr(),
+                bytes: bytes as u32,
+                flags: flags::WRITE,
+                pc: 0x18000,
+            };
+            let entry = thread.prepare(MemoryRequirements::default()).unwrap();
+            let result =
+                unsafe { entry.with_checked_view(|view| (view.callback)(view, &request)) }.unwrap();
+            assert_eq!(result, MemoryStatus::Success as u32);
+            staging.fill(0xa5);
+            let request = MemoryRequest {
+                flags: 0,
+                ..request
+            };
+            let entry = thread.prepare(MemoryRequirements::default()).unwrap();
+            let result =
+                unsafe { entry.with_checked_view(|view| (view.callback)(view, &request)) }.unwrap();
+            assert_eq!(result, MemoryStatus::Success as u32);
+            assert_eq!(&staging[..bytes], &expected[..bytes]);
+            assert!(staging[bytes..].iter().all(|byte| *byte == 0xa5));
+            let mut around = [0xa5; 16];
+            unsafe { ram.read_physical(address, &mut around) }.unwrap();
+            assert_eq!(&around[..bytes], &expected[..bytes]);
+            assert!(around[bytes..].iter().all(|byte| *byte == 0));
+        }
+        for class in [MemoryOperationClass::Atomic, MemoryOperationClass::Ordered] {
+            assert_eq!(
+                thread.policy_mut().validate_operation_execution(class),
+                Err(MemoryStatus::Unsupported)
+            );
+        }
+        let unaligned = request(DATA + 1, 0);
+        assert_eq!(
+            thread.policy_mut().validate_data_request(unaligned),
+            Err(MemoryStatus::Unsupported)
+        );
+        assert!(matches!(
+            thread
+                .policy_mut()
+                .translate_part(request(DATA + 1, 0), part(DATA + 1, AccessKind::Read)),
+            Err((MemoryStatus::Alignment, _))
+        ));
+    }
+    #[test]
+    fn cold_device_window_records_unexecuted_read_without_staging_or_ram_effect() {
+        use stela_compiler::context::memory::{MemoryRequest, MemoryRequirements};
+        let policy = cold_policy();
+        let ram = Arc::clone(&policy.ram);
+        let mut thread = ram.domain().thread(policy);
+        let mut staging = [0xa5; 8];
+        let request = MemoryRequest {
+            address: 0x90000,
+            data: staging.as_mut_ptr(),
+            bytes: 4,
+            flags: 0,
+            pc: 0x18000,
+        };
+        let entry = thread.prepare(MemoryRequirements::default()).unwrap();
+        let (status, completed, pc) = unsafe {
+            entry.with_checked_view(|view| {
+                let status = (view.callback)(view, &request);
+                (status, view.completed_bytes, view.fault_pc)
+            })
+        }
+        .unwrap();
+        assert_eq!(
+            (status, completed, pc),
+            (MemoryStatus::Unsupported as u32, 0, request.pc)
+        );
+        assert_eq!(staging, [0xa5; 8]);
+        assert!(matches!(
+            thread.policy_mut().failure,
+            Some(Failure::DeviceRead {
+                address: 0x90000,
+                physical: 0x90000,
+                bytes: 4,
+                ..
+            })
+        ));
+    }
+
     fn policy() -> Policy {
         let (cpu, profile, missing, ram) = fixture();
         Policy::new(

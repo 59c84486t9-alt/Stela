@@ -2,10 +2,12 @@
 //! every exit back from native code.
 mod amx;
 mod clock;
+mod device_read;
 mod exclusive;
 mod hosted;
 mod pointer;
 mod prepare;
+pub use device_read::{CanonicalDeviceMemory, ConsumedScalar, DeviceReadRequest, DeviceReadShape};
 mod processors;
 mod scalable;
 mod shared_memory;
@@ -495,6 +497,43 @@ pub trait Devices {
     /// Supply that PE's execution PC immediately before its sample trigger.
     fn observe_pc_sample(&mut self, _physical: u64, _pc: u64) {}
     fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError>;
+    /// Effect-free classification only; this grants no memory authority. A
+    /// canonical-required read must never execute through the raw/serial hook.
+    fn requires_canonical_read(
+        &self,
+        _cpu: usize,
+        _physical: u64,
+        _shape: DeviceReadShape,
+    ) -> bool {
+        false
+    }
+    /// Refuse before consumption, or return the actual consumed scalar and any
+    /// later settlement failure while the same live canonical guard is held.
+    fn read_canonical(
+        &mut self,
+        _cpu: usize,
+        _physical: u64,
+        _bytes: u8,
+        _now: u64,
+        _memory: &mut dyn CanonicalDeviceMemory,
+    ) -> Result<ConsumedScalar, DeviceError> {
+        Err(DeviceError::TransferRefused(
+            "canonical device scalar read has no live backend".into(),
+        ))
+    }
+    /// The consuming pair counterpart; no ordinary-read fallback is permitted.
+    fn read_pair_canonical(
+        &mut self,
+        _cpu: usize,
+        _physical: u64,
+        _bytes: u8,
+        _now: u64,
+        _memory: &mut dyn CanonicalDeviceMemory,
+    ) -> Result<ConsumedPair, DeviceError> {
+        Err(DeviceError::TransferRefused(
+            "canonical device pair read has no live backend".into(),
+        ))
+    }
     /// Optional whole-pair boundary for a device with a qualified consuming
     /// read protocol. `Ok(None)` has no effects and requests ordinary scalar
     /// reads. `Err` refuses before consumption; `Ok(Some(..))` must retain the
@@ -828,6 +867,8 @@ pub enum Stop {
     /// A device carried out the guest's reset or power-off request.
     Reset(Reset),
     Unsupported(Requirement),
+    /// An unexecuted device read retained by the actual canonical scheduler.
+    DeviceRead(DeviceReadRequest),
     /// The running PE reached a host breakpoint (`Machine::set_breakpoints`)
     /// at this PC, before executing its instruction.
     Breakpoint(u64),
@@ -1329,6 +1370,7 @@ pub struct Machine<H: Host, D: Devices> {
     native_publication: Option<processors::publication::WorkerPublications>,
     /// Identity of this Machine's persistent checked PE memory/event owners.
     native_memory_identity: Arc<()>,
+    pending_device_read: Option<device_read::Pending>,
     /// Host breakpoints, ascending (`set_breakpoints`).
     breakpoints: Vec<u64>,
     /// Host trace points, ascending (`set_traces`), and the hits not yet
@@ -1470,6 +1512,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             processor_power,
             native_publication: None,
             native_memory_identity: Arc::new(()),
+            pending_device_read: None,
             breakpoints: Vec::new(),
             traces: Vec::new(),
             trace_hits: Vec::new(),
@@ -1773,6 +1816,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// A device read by the running PE, watched.
     fn device_read(&mut self, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
+        if self.devices.requires_canonical_read(
+            self.current,
+            physical,
+            DeviceReadShape::Scalar { bytes },
+        ) {
+            return Err(DeviceError::TransferRefused(
+                "canonical device read requires its actual recovered-frame memory continuation"
+                    .into(),
+            ));
+        }
         self.host.speculation_barrier();
         if let Some(cpu) = self.devices.pc_sample_target(physical, bytes) {
             let pc = self.processor_pc(cpu).ok_or_else(|| {
@@ -2395,6 +2448,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Run until a stop. `budget` limits executed blocks (0 = unlimited).
     pub fn run(&mut self, budget: u64) -> Stop {
+        if let Some(pending) = &self.pending_device_read {
+            return pending.stop();
+        }
         if self.cpu.has_canonical_memory() || self.peers.iter().any(|peer|
             matches!(peer, processors::Peer::Parked(parked) if parked.cpu().has_canonical_memory())) {
             return self.unsupported(RequirementKind::Native(
@@ -4675,6 +4731,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let now = self.now();
             match transfer {
                 MemoryTransfer::Load { signed, width } => {
+                    if self.devices.requires_canonical_read(
+                        self.current,
+                        physical,
+                        DeviceReadShape::Pair { bytes },
+                    ) {
+                        return self.device_failure(DeviceError::TransferRefused(
+                            "canonical device pair requires its actual recovered-frame memory continuation".into(),
+                        ), address, physical, None);
+                    }
                     self.host.speculation_barrier();
                     let pair = match self.devices.read_pair(self.current, physical, bytes, now) {
                         Ok(pair) => pair,
