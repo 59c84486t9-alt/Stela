@@ -7,6 +7,9 @@ use std::process::ExitCode;
 #[cfg(test)]
 extern crate alloc;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/engine/bundle/source.rs"]
+mod boot_bundle_source;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/engine/console_lines.rs"]
 mod boot_console;
 #[cfg(test)]

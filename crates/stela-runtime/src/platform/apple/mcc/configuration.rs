@@ -142,7 +142,7 @@ mod tests {
             (request.previous.value, request.written, request.at),
             (0, 0, 17)
         );
-        assert_eq!(request.previous.known, u32::MAX.into());
+        assert_eq!(request.previous.known, u64::from(u32::MAX));
         assert_eq!(
             bus.read(address + DCS_STRIDE, Width::Word, &mut access),
             Ok(0)
