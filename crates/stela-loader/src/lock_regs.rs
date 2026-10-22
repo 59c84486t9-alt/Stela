@@ -25,9 +25,9 @@
 //! apertures, four planes each, and four single-plane IOA apertures. The MCC
 //! count selector `0x514ac` indexes `0x1dfff0` by chip ID minus `0x6000`;
 //! IOA selector `0x38220` indexes `0x1d8f24`, with addresses at `0x1d3110`.
-//! The AMCC cache-status offset is `0x10000c`, not inside the first plane
-//! stride. It also publishes master-lock `(0x1c00, 0x1f, 0)`. IOA publishes
-//! broadcast `(0, 1, 1)`; neither is a cache-status substitute. CTRR-A has no
+//! The AMCC broadcast offset is `0x10000c`, outside the first plane
+//! stride, and cache-status is `(0x1c00, 0x1f, 0)`. It has no master-lock.
+//! IOA publishes master-lock `(0, 1, 1)` and no broadcast. CTRR-A has no
 //! write-disable register on either controller, and IOA has no lock register.
 //! The builder also contains IOA-B, but the original J314s DeviceTree has no
 //! such node: publisher `0x137aa4` uses existing-child lookup `0xe0840`, then
@@ -309,39 +309,24 @@ const T8112: MemoryController = amcc(&[0x2_0000_0000], 0xf4_0000, 4, bit(0x424),
 
 // J314s builder 0x385e4..0x38a6c: one die, four MCCs (not T6001/2's
 // eight), each a 2 MiB lock aperture in its 16 MiB MCC register window.
-// iBoot's own name for the 0x10000c register is broadcast and for
-// (0x1c00, 0x1f, 0) cache-status (specials table 0x1c83f8, indexed by kind
-// minus 0xc0; the builder stores kind 0xc0 at 0x3862c and 0xc1 at 0x38660),
-// as the other M1 rows publish them. This row keeps the labels the runtime's
-// joint MCC/AMCC router (`stela_runtime::machine::apple::memory_resources`)
-// is qualified against until that model is requalified.
-const T6000: MemoryController = MemoryController {
-    apertures: &[0x2_0000_0000, 0x2_0100_0000, 0x2_0200_0000, 0x2_0300_0000],
-    aperture_size: 0x20_0000,
-    plane_count: 4,
-    plane_stride: 0x4_0000,
-    cache_status: Some(bit(0x10_000c)),
-    master_lock: Some(Register {
-        offset: 0x1c00,
-        mask: 0x1f,
-        value: Some(0),
-    }),
-    broadcast: None,
-    groups: &M1_AMCC,
-};
+// Kind 0xc0 is broadcast at 0x10000c (0x3862c), kind 0xc1 cache-status
+// at 0x1c00 with mask 0x1f/value 0 (0x38660), as on the other M1 parts.
+const T6000: MemoryController = m1_amcc(
+    &[0x2_0000_0000, 0x2_0100_0000, 0x2_0200_0000, 0x2_0300_0000],
+    0x20_0000,
+);
 
 // J314s builder 0x38aa4..0x38d10. A single plane needs no stride. The
 // original template exposes only IOA-A. iBoot names the (0, 1, 1) register
-// master-lock (kind 0xc2, builder 0x38ae4); the row keeps the label it was
-// published under, which nothing consumes.
+// master-lock (kind 0xc2, builder 0x38ae4), not broadcast.
 const T6000_IOA: MemoryController = MemoryController {
     apertures: &[0x2_8200_0000, 0x3_0400_0000, 0x3_8300_0000, 0x4_0200_0000],
     aperture_size: 0x4000,
     plane_count: 1,
     plane_stride: 0,
     cache_status: None,
-    master_lock: None,
-    broadcast: Some(bit(0)),
+    master_lock: Some(bit(0)),
+    broadcast: None,
     groups: &[LockGroup::new(
         "ioa-ctrr-a",
         PROGRAMMED,
@@ -880,20 +865,28 @@ pub(crate) mod tests {
             (AMCC, "aperture-size", 0x20_0000),
             (AMCC, "plane-count", 4),
             (AMCC, "plane-stride", 0x4_0000),
-            (AMCC, "cache-status-reg-offset", 0x10_000c),
-            (AMCC, "cache-status-reg-mask", 1),
-            (AMCC, "cache-status-reg-value", 1),
-            (AMCC, "master-lock-reg-offset", 0x1c00),
-            (AMCC, "master-lock-reg-mask", 0x1f),
-            (AMCC, "master-lock-reg-value", 0),
+            (AMCC, "broadcast-reg-offset", 0x10_000c),
+            (AMCC, "broadcast-reg-mask", 1),
+            (AMCC, "broadcast-reg-value", 1),
+            (AMCC, "cache-status-reg-offset", 0x1c00),
+            (AMCC, "cache-status-reg-mask", 0x1f),
+            (AMCC, "cache-status-reg-value", 0),
             (IOA, "aperture-size", 0x4000),
             (IOA, "plane-count", 1),
             (IOA, "plane-stride", 0),
-            (IOA, "broadcast-reg-offset", 0),
-            (IOA, "broadcast-reg-mask", 1),
-            (IOA, "broadcast-reg-value", 1),
+            (IOA, "master-lock-reg-offset", 0),
+            (IOA, "master-lock-reg-mask", 1),
+            (IOA, "master-lock-reg-value", 1),
         ] {
             assert_eq!(number(path, name), Some(expected), "{path}/{name}");
+        }
+        for (path, absent) in [(AMCC, "master-lock"), (IOA, "broadcast")] {
+            for suffix in ["offset", "mask", "value"] {
+                assert!(
+                    tree.property(path, &format!("{absent}-reg-{suffix}"))
+                        .is_none()
+                );
+            }
         }
         for (path, lower, upper, enable, lock, property_count) in [
             (

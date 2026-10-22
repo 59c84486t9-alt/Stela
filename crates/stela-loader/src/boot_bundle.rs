@@ -89,7 +89,9 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// requested length, as iBoot does, while zero-padding shorter values.
 /// Revision 23: retire unused SPMI bus compatibles after target and
 /// platform-function admission, preserving their original metadata.
-pub const REVISION: u32 = 23;
+/// Revision 24: publish T6000's original AMCC broadcast/cache-status and
+/// IOA master-lock labels, matching the jointly routed memory owner.
+pub const REVISION: u32 = 24;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
