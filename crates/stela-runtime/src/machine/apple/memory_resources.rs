@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 pub use crate::platform::apple::{amcc, bus::LifecycleState, mcc, ptd};
 
 mod canonical;
+pub mod dcs;
 
 /// One prepared software resource with immutable placement and actual shared
 /// controller identity. A caller must still bind canonical RAM, all writers,

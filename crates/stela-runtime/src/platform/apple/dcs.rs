@@ -6,6 +6,8 @@
 //! not qualify initialization of either profile.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 
+pub mod native;
+
 /// An old standalone placement has no qualified resource owner. Keep its
 /// constructor signature so callers fail before adding/mapping a partial bank.
 #[derive(Debug, Clone)]
