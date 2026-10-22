@@ -8808,11 +8808,7 @@ mod tests {
         );
         routed[0] = good;
         routed[0].profile = dart::Profile::T8110;
-        assert!(
-            place(&routed)
-                .unwrap_err()
-                .contains("unqualified for this generation")
-        );
+        assert_eq!(place(&routed).unwrap().stream, 5);
         // Admitted only with its distinguishing `role = SEP`; the nub is kept
         // as a modeled child, and neither is a bare flat-list compatible.
         let sep_role = |key: &str| (key == "role").then_some(b"SEP\0".as_slice());

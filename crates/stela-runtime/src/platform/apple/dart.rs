@@ -76,40 +76,56 @@ impl Profile {
         }
     }
 
+    /// Validate a DART's `remap` (source, target) pairs as every
+    /// generation's 26A434 SPTM does (T8103 VA 0xfffffff0270e4858, T8112 VA
+    /// 0xfffffff0270d976c..0xfffffff0270d9a68): no source remapped twice or
+    /// to itself, no target that is itself remapped, every SID in range.
+    pub fn validate_remaps(self, streams: usize, remaps: &[(u8, u8)]) -> Result<(), &'static str> {
+        if streams == 0 || streams > self.stream_limit() {
+            return Err("DART stream count is outside the selected native profile");
+        }
+        for (index, &(source, target)) in remaps.iter().enumerate() {
+            if usize::from(source) >= streams
+                || usize::from(target) >= streams
+                || source == target
+                || remaps[..index].iter().any(|&(s, _)| s == source)
+                || remaps.iter().any(|&(s, _)| s == target)
+            {
+                return Err("DART remaps chain, repeat or exceed the native profile");
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve an OS mapper context to the incoming stream declared by DT.
-    /// T6000 SPTM programs the source->context table before enabling DMA;
-    /// mapper entry points reject remapped sources. This is a board route
-    /// declaration, not an observation of a physical bus transaction.
+    /// Several sources may share a target (J473AP `dart-dcp`: 6 and 7 to 5).
+    /// Every generation's SPTM programs the
+    /// routes before enabling DMA and its mapper entry points reject remapped
+    /// sources. Sources sharing a context reach the same tables, so the
+    /// endpoint uses the lowest. This is a board route declaration, not an
+    /// observation of a physical bus transaction.
     pub fn mapper_input_stream(
         self,
         streams: usize,
         context: usize,
         remaps: &[(u8, u8)],
     ) -> Result<usize, &'static str> {
-        if streams == 0 || streams > self.stream_limit() || context >= streams {
+        if context >= streams {
             return Err("DART mapper context is outside the native profile");
         }
-        if !remaps.is_empty() && self != Self::T6000 {
-            return Err("DART mapper remap routing is unqualified for this generation");
-        }
-        for (index, &(source, target)) in remaps.iter().enumerate() {
-            if usize::from(source) >= streams
-                || usize::from(target) >= streams
-                || source == target
-                || remaps[..index]
-                    .iter()
-                    .any(|&(s, t)| [source, target].contains(&s) || [source, target].contains(&t))
-            {
-                return Err("DART mapper remaps overlap or exceed the native profile");
-            }
-            if usize::from(source) == context {
-                return Err("DART mapper names an incoming remapped source instead of its context");
-            }
+        self.validate_remaps(streams, remaps)?;
+        if remaps
+            .iter()
+            .any(|&(source, _)| usize::from(source) == context)
+        {
+            return Err("DART mapper names an incoming remapped source instead of its context");
         }
         Ok(remaps
             .iter()
-            .find(|&&(_, target)| usize::from(target) == context)
-            .map_or(context, |&(source, _)| usize::from(source)))
+            .filter(|&&(_, target)| usize::from(target) == context)
+            .map(|&(source, _)| usize::from(source))
+            .min()
+            .unwrap_or(context))
     }
 }
 
@@ -531,27 +547,28 @@ mod tests {
 
     #[test]
     fn mapper_context_and_declared_incoming_stream_remain_distinct() {
-        assert_eq!(Profile::T6000.mapper_input_stream(16, 0, &[(5, 0)]), Ok(5));
-        assert_eq!(Profile::T6000.mapper_input_stream(16, 4, &[]), Ok(4));
-        for (streams, context, remaps) in [
-            (0, 0, vec![]),
-            (17, 0, vec![]),
-            (16, 16, vec![]),
-            (16, 5, vec![(5, 0)]),
-            (16, 0, vec![(5, 0), (6, 0)]),
-            (16, 0, vec![(5, 0), (0, 1)]),
-            (16, 0, vec![(5, 16)]),
-            (16, 0, vec![(5, 5)]),
-        ] {
-            assert!(
-                Profile::T6000
-                    .mapper_input_stream(streams, context, &remaps)
-                    .is_err()
-            );
-        }
-        for profile in [Profile::T8020, Profile::T8110] {
-            assert!(profile.mapper_input_stream(16, 0, &[(5, 0)]).is_err());
-            assert_eq!(profile.mapper_input_stream(16, 0, &[]), Ok(0));
+        for profile in [Profile::T8020, Profile::T6000, Profile::T8110] {
+            assert_eq!(profile.mapper_input_stream(16, 0, &[(5, 0)]), Ok(5));
+            assert_eq!(profile.mapper_input_stream(16, 4, &[]), Ok(4));
+            assert_eq!(profile.mapper_input_stream(16, 1, &[(5, 0)]), Ok(1));
+            assert_eq!(profile.mapper_input_stream(16, 5, &[(7, 5), (6, 5)]), Ok(6));
+            for (streams, context, remaps) in [
+                (0, 0, vec![]),
+                (profile.stream_limit() + 1, 0, vec![]),
+                (16, 16, vec![]),
+                (16, 5, vec![(5, 0)]),
+                (16, 0, vec![(5, 0), (5, 1)]),
+                (16, 0, vec![(5, 0), (0, 1)]),
+                (16, 0, vec![(0, 1), (5, 0)]),
+                (16, 0, vec![(5, 16)]),
+                (16, 0, vec![(5, 5)]),
+            ] {
+                assert!(
+                    profile
+                        .mapper_input_stream(streams, context, &remaps)
+                        .is_err()
+                );
+            }
         }
     }
 

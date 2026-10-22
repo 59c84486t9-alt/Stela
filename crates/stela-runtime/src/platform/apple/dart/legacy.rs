@@ -3,12 +3,13 @@
 //! Linux v6.17 apple-dart.c and io-pgtable-dart.c define the separate old
 //! register layout and APPLE_DART/APPLE_DART2 entries. m1n1's dart8020.py
 //! independently identifies the stream remap bytes and CONFIG lock. Original
-//! 26A434 T8103 SPTM verifies the identity remap words (file 0xd851c) and
-//! gates CONFIG lock15 on PARAMS2 bit1 (0xd8454); the original mac13g kernel
+//! 26A434 T8103 SPTM compares the remap words with the DT routes, or with
+//! identity when there are none (VA 0xfffffff0270dc51c..0xfffffff0270dc594),
+//! and gates CONFIG lock15 on PARAMS2 bit1 (0xd8454); the original mac13g kernel
 //! checks page shift and region/bypass capabilities at VA9dc20b4, and decodes
 //! a fault's SID from bits27:24 at VA9dc09e8 (full VAs start fffffe000).
 //!
-//! Original T6000 SPTM programs source->context bytes at80..8c before
+//! Original T6000 SPTM, like T8103's, programs source->context bytes at80..8c before
 //! enabling streams (VA270bce64..bcecc); mapper entry270be1e0..be22c
 //! rejects remapped sources. DMA therefore remaps the incoming SID once,
 //! before context enable/TCR/TTBR. Remapped-fault SID provenance remains
@@ -280,11 +281,7 @@ impl Dart {
                 "DART incoming stream is outside the native profile",
             ));
         }
-        let sid = self.remap[input_sid];
-        if self.profile != Profile::T6000 && usize::from(sid) != input_sid {
-            return Err(DmaError::Unsupported("legacy DART stream remapping"));
-        }
-        let sid = usize::from(sid);
+        let sid = usize::from(self.remap[input_sid]);
         if sid >= self.streams {
             return Err(DmaError::Unsupported(
                 "DART remap target is outside the native profile",
@@ -474,12 +471,9 @@ impl Iommu for Dart {
         debug_assert!(last >= iova && last / self.page() == iova / self.page());
         let result = self.walk(memory, stream, iova, last, write);
         if let Err(DmaError::Fault(code)) = result {
-            if self.profile == Profile::T6000
-                && stream < self.streams
-                && usize::from(self.remap[stream]) != stream
-            {
+            if stream < self.streams && usize::from(self.remap[stream]) != stream {
                 return Err(DmaError::Unsupported(
-                    "T6000 remapped fault source-versus-context SID provenance",
+                    "legacy DART remapped fault source-versus-context SID provenance",
                 ));
             }
             if self.error & FLAG == 0 {
@@ -632,14 +626,13 @@ impl MmioDevice for Dart {
                     return Err(fail("legacy DART remap lock coverage is not specified"));
                 }
                 let sid = (offset - REMAP) as usize;
-                if self.profile == Profile::T6000
-                    && value
-                        .to_le_bytes()
-                        .iter()
-                        .any(|&sid| usize::from(sid) >= self.streams)
+                if value
+                    .to_le_bytes()
+                    .iter()
+                    .any(|&sid| usize::from(sid) >= self.streams)
                 {
                     return Err(fail(
-                        "T6000 DART remap target is outside the native profile",
+                        "legacy DART remap target is outside the native profile",
                     ));
                 }
                 self.remap[sid..sid + 4].copy_from_slice(&value.to_le_bytes());
@@ -817,7 +810,7 @@ mod tests {
         assert_eq!(
             port.write(IOVA + PAGE - 2, &[1, 2, 3, 4]),
             Err(DmaError::Unsupported(
-                "T6000 remapped fault source-versus-context SID provenance"
+                "legacy DART remapped fault source-versus-context SID provenance"
             ))
         );
         let mut bytes = [0; 2];
@@ -867,7 +860,7 @@ mod tests {
             assert_eq!(
                 port.write(IOVA + PAGE - 2, &[0x21, 0x43, 0x65, 0x87]),
                 Err(DmaError::Unsupported(
-                    "T6000 remapped fault source-versus-context SID provenance"
+                    "legacy DART remapped fault source-versus-context SID provenance"
                 ))
             );
             let mut bytes = [0; 2];
@@ -1346,7 +1339,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_contexts_capture_and_nonidentity_routing_refuse_without_fabricating_effects() {
+    fn unknown_contexts_and_capture_refuse_without_fabricating_effects() {
         let (mut model, mut ram, mut sink) = setup(Profile::T8020);
         let mut a = Access::new(0, 0, &mut sink);
         assert!(
@@ -1366,12 +1359,15 @@ mod tests {
         ] {
             assert!(model.read(offset, width, &mut a).is_err());
         }
+        // M1 routes an incoming stream like T6000: SID 0 takes context 1.
+        let direct = model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a);
+        assert!(direct.is_ok());
         model
-            .write(REMAP, Width::Word, 0x0302_0000, &mut a)
+            .write(REMAP, Width::Word, 0x0302_0101, &mut a)
             .unwrap();
         assert_eq!(
-            model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a),
-            Err(DmaError::Unsupported("legacy DART stream remapping"))
+            model.translate(&mut ram, 0, IOVA, IOVA, false, &mut a),
+            direct
         );
         let mut filtered = Dart::new(Profile::T6000, 16, None).with_apf(1);
         filtered.write(ENABLED, Width::Word, 1, &mut a).unwrap();

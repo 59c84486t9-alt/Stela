@@ -229,25 +229,16 @@ pub(super) fn iommu(
     if !remap_bytes.len().is_multiple_of(4) {
         return Err(format!("{path} remap is not padded byte pairs"));
     }
-    let mut remap = Vec::new();
-    for pair in remap_bytes.as_chunks::<2>().0 {
-        let (source, target) = (pair[0], pair[1]);
-        if source == 0 && target == 0 {
-            continue;
-        }
-        if u16::from(source) >= streams
-            || u16::from(target) >= streams
-            || source == target
-            || remap
-                .iter()
-                .any(|&(s, t)| [source, target].contains(&s) || [source, target].contains(&t))
-        {
-            return Err(format!(
-                "{path} has overlapping or out-of-range remap entries"
-            ));
-        }
-        remap.push((source, target));
-    }
+    let remap = remap_bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .filter(|pair| **pair != [0, 0])
+        .map(|pair| (pair[0], pair[1]))
+        .collect::<Vec<_>>();
+    profile
+        .validate_remaps(usize::from(streams), &remap)
+        .map_err(|reason| format!("{path} {reason}"))?;
     let vm_base = match node.property("vm-base") {
         None => 0,
         Some(bytes) if profile != Profile::T8110 => u64::from(u32::from_le_bytes(
@@ -262,7 +253,7 @@ pub(super) fn iommu(
     if mappers.iter().any(|&(_, sid)| sid >= u32::from(streams)) {
         return Err(format!("{path} mapper SID exceeds its native DART profile"));
     }
-    if !remap.is_empty() && profile == Profile::T6000 {
+    if !remap.is_empty() {
         for &(_, context) in &mappers {
             profile
                 .mapper_input_stream(usize::from(streams), context as usize, &remap)
@@ -405,9 +396,6 @@ pub(super) fn legacy_requirements<'a>(
             return Err("has incomplete padded legacy remap entries");
         }
         if bytes.iter().any(|&byte| byte != 0) {
-            if profile != Profile::T6000 {
-                return Err("requires unsupported legacy SID remap routing");
-            }
             if descriptors
                 .as_chunks::<12>()
                 .0
@@ -424,9 +412,7 @@ pub(super) fn legacy_requirements<'a>(
                     remaps.push((pair[0], pair[1]));
                 }
             }
-            // A nonzero padded record leaves at least one pair. Choosing its
-            // target validates every pair, including chains and duplicate SIDs.
-            profile.mapper_input_stream(streams as usize, usize::from(remaps[0].1), &remaps)?;
+            profile.validate_remaps(streams as usize, &remaps)?;
         }
     }
     if property("vm-base").is_some_and(|bytes| bytes.len() != 4) {
@@ -537,7 +523,6 @@ mod tests {
                 vec![("reg", bytes64(&[0x382f00000, 0x8000]))],
                 "register geometry",
             ),
-            (vec![("remap", vec![0, 1, 0, 0])], "SID remap routing"),
             (
                 vec![("remap", vec![0, 0])],
                 "incomplete padded legacy remap",
@@ -654,19 +639,23 @@ mod tests {
                 .contains("multi-instance DMA remap")
         );
         assert!(!super::super::models("dart,t6000", |key| node.property(key)));
-        for remap in [[5, 0, 0, 0], [0, 1, 1, 0], [5, 0, 5, 1]] {
-            let bytes = legacy(
-                b"dart,t6000\0",
-                one,
-                &[0x89304000, 0x4000],
-                &[("remap", &remap)],
-                &[],
-            );
-            let node = Node::root(&bytes).unwrap();
-            assert_eq!(
-                iommu(&node, &flat_fixture_extent(&Some)).is_ok(),
-                remap == [5, 0, 0, 0]
-            );
+        // M1 (`dart,t8020`) SPTM checks the same remap bytes (T8103 VA
+        // 0xfffffff0270dc51c..0xfffffff0270dc564).
+        for compatible in [b"dart,t8020\0", b"dart,t6000\0"] {
+            for remap in [[5, 0, 6, 0], [5, 0, 0, 0], [0, 1, 1, 0], [5, 0, 5, 1]] {
+                let bytes = legacy(
+                    compatible,
+                    one,
+                    &[0x89304000, 0x4000],
+                    &[("remap", &remap)],
+                    &[],
+                );
+                let node = Node::root(&bytes).unwrap();
+                assert_eq!(
+                    iommu(&node, &flat_fixture_extent(&Some)).is_ok(),
+                    remap[1] == 0 && remap[3] == 0
+                );
+            }
         }
     }
 

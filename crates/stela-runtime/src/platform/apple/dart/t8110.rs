@@ -29,7 +29,7 @@
 //! - ENABLE_STREAMS and DISABLE_STREAMS (0xc00, 0xc20): bitmaps setting and
 //!   clearing which streams may access memory at all.
 //! - Per stream, TCR (0x1000 + 4 × SID: TRANSLATE_ENABLE 0, BYPASS_DART 1,
-//!   BYPASS_DAPF 2, FOUR_LEVEL 3, REMAP_EN 7, REMAP [11:8]) and one TTBR
+//!   BYPASS_DAPF 2, FOUR_LEVEL 3, REMAP_EN 7, REMAP [15:8]) and one TTBR
 //!   (0x1400 + 4 × SID: VALID 0, the table's address >> 14 from bit 2).
 //! - Tables of 2048 eight-byte entries in 16 KiB pages: a TTBR's table maps
 //!   IOVA [35:25] to tables that map [24:14] to pages, unless FOUR_LEVEL adds
@@ -99,8 +99,20 @@
 //! beside bits 4 and 5, write and read protect. Inferred: an access outside
 //! a page's bounds reports bit 29 after the entry's NO_READ/NO_WRITE
 //! checks, and bit 29 masks and signals like CODE. The identification
-//! fields not listed above (PARAMS2 bit 4, PARAMS4 NUM_CLIENTS) read 0; FOUR_LEVEL
-//! and REMAP_EN are refused until their behavior is known.
+//! fields not listed above (PARAMS2 bit 4, PARAMS4 NUM_CLIENTS) read 0;
+//! FOUR_LEVEL is refused until its behavior is known.
+//!
+//! Stream remapping: the 26A434 J473AP SPTM reads the DeviceTree `remap`
+//! as (source, target) byte pairs, skipping zero pairs, and gives each
+//! source a TCR of REMAP_EN with the target in [15:8], keeping the rest
+//! (VA 0xfffffff0270d976c..0xfffffff0270d973c); it requires the target
+//! to be a configured stream that is not itself remapped (0xfffffff0270ce044),
+//! the source to neither translate nor bypass, and its TTBR invalid
+//! (0xfffffff0270ce8a0..0xfffffff0270ce96c). An incoming remapped stream
+//! therefore takes the target's context: Stela routes it once, then applies
+//! the target's enable, TCR and TTBR, as the legacy T6000 model does. Which
+//! SID a remapped stream's fault records is not recovered, so such a fault
+//! refuses instead of inventing ERROR's STREAM field.
 //!
 //! Full family evidence, capability gates and qualification gaps are in
 //! `docs/research/dart-iommu.md`. The paired SMMU view exposes the capture
@@ -212,7 +224,8 @@ const TCR_BYPASS_DART: u32 = 1 << 1;
 const TCR_BYPASS_DAPF: u32 = 1 << 2;
 const TCR_FOUR_LEVEL: u32 = 1 << 3;
 const TCR_REMAP_ENABLE: u32 = 1 << 7;
-const TCR_REMAP: u32 = 0xf << 8;
+const TCR_REMAP_SHIFT: u32 = 8;
+const TCR_REMAP: u32 = 0xff << TCR_REMAP_SHIFT;
 const TCR_KNOWN: u32 = TCR_TRANSLATE
     | TCR_BYPASS_DART
     | TCR_BYPASS_DAPF
@@ -452,6 +465,26 @@ impl Dart {
         slice.register(offset % SLICE)
     }
 
+    /// The context an incoming stream takes: its remap target, if enabled.
+    fn context(&self, sid: usize) -> Result<usize, DmaError> {
+        let tcr = self.tcr[sid];
+        if tcr & TCR_REMAP_ENABLE == 0 {
+            return Ok(sid);
+        }
+        if tcr & (TCR_TRANSLATE | TCR_BYPASS_DART) != 0 || self.ttbr[sid] & TTBR_VALID != 0 {
+            return Err(DmaError::Unsupported(
+                "DART remapped stream with its own translation, bypass or table",
+            ));
+        }
+        let target = ((tcr & TCR_REMAP) >> TCR_REMAP_SHIFT) as usize;
+        if target >= self.streams || self.tcr[target] & TCR_REMAP_ENABLE != 0 {
+            return Err(DmaError::Unsupported(
+                "DART remap target is outside the profile or itself remapped",
+            ));
+        }
+        Ok(target)
+    }
+
     fn stream_enabled(&self, sid: usize) -> bool {
         self.enabled[sid / 32] >> (sid % 32) & 1 != 0
     }
@@ -481,6 +514,7 @@ impl Dart {
                 "DART incoming stream is outside the native profile",
             ));
         }
+        let sid = self.context(sid)?;
         if !self.stream_enabled(sid) {
             return Err(fault(Fault::NoTtbr));
         }
@@ -489,9 +523,6 @@ impl Dart {
             return Err(DmaError::Unsupported(
                 "DART simultaneous translation and bypass",
             ));
-        }
-        if tcr & TCR_REMAP_ENABLE != 0 {
-            return Err(DmaError::Unsupported("DART stream remapping"));
         }
         if self.apf.is_some() && tcr & TCR_BYPASS_DAPF == 0 {
             return Err(DmaError::Unsupported("DART address permission filtering"));
@@ -594,6 +625,11 @@ impl Iommu for Dart {
         debug_assert!(last >= iova && last >> PAGE_SHIFT == iova >> PAGE_SHIFT);
         let result = self.walk(memory, sid, iova, last, write);
         if let Err(DmaError::Fault(code)) = result {
+            if self.tcr[sid] & TCR_REMAP_ENABLE != 0 {
+                return Err(DmaError::Unsupported(
+                    "DART remapped fault source-versus-context SID provenance",
+                ));
+            }
             self.report(sid, iova, code, write, access);
         }
         result
@@ -1196,6 +1232,53 @@ mod tests {
     }
 
     #[test]
+    fn a_remapped_stream_takes_its_target_context() {
+        let (mut dart, mut ram, mut sink) = setup();
+        let mut a = Access::new(0, 0, &mut sink);
+        let remap = |target: u32| TCR_REMAP_ENABLE | target << TCR_REMAP_SHIFT;
+        dart.write(TCR, Width::Word, u64::from(remap(1)), &mut a)
+            .unwrap();
+        assert_eq!(
+            dart.translate(&mut ram, 0, 0x200_4010, 0x200_4013, false, &mut a),
+            Ok(FRAME + 0x10)
+        );
+        // A fault's recorded SID is unrecovered for a remapped source.
+        assert_eq!(
+            dart.translate(&mut ram, 0, 0x200_4010, 0x200_4013, true, &mut a),
+            Err(DmaError::Unsupported(
+                "DART remapped fault source-versus-context SID provenance"
+            ))
+        );
+        assert_eq!(dart.read(ERROR, Width::Word, &mut a), Ok(0));
+        // The context's own enable gates the routed stream.
+        dart.write(DISABLE_STREAMS, Width::Word, 1 << 1, &mut a)
+            .unwrap();
+        assert!(matches!(
+            dart.translate(&mut ram, 0, 0x200_4010, 0x200_4013, false, &mut a),
+            Err(DmaError::Unsupported(_))
+        ));
+        dart.write(ENABLE_STREAMS, Width::Word, 1 << 1, &mut a)
+            .unwrap();
+        for (source_tcr, target) in [
+            (remap(1) | TCR_BYPASS_DART, 1),
+            (remap(3), 3),
+            (remap(16), 16),
+        ] {
+            dart.write(TCR, Width::Word, u64::from(source_tcr), &mut a)
+                .unwrap();
+            dart.write(TCR + 12, Width::Word, u64::from(remap(1)), &mut a)
+                .unwrap();
+            assert!(
+                matches!(
+                    dart.translate(&mut ram, 0, 0x200_4010, 0x200_4013, false, &mut a),
+                    Err(DmaError::Unsupported(_))
+                ),
+                "target {target}"
+            );
+        }
+    }
+
+    #[test]
     fn unimplemented_and_invalid_translation_modes_never_bypass_permissions() {
         let (mut dart, mut ram, mut sink) = setup();
         let mut a = Access::new(0, 0, &mut sink);
@@ -1206,7 +1289,7 @@ mod tests {
             ),
             (
                 TCR_TRANSLATE | TCR_REMAP_ENABLE | 3 << 8,
-                "DART stream remapping",
+                "DART remapped stream with its own translation, bypass or table",
             ),
             (TCR_TRANSLATE | TCR_FOUR_LEVEL, "four-level DART tables"),
         ] {
