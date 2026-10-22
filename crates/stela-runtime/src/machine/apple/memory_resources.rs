@@ -295,11 +295,14 @@ impl Router {
         controller: Controller,
         apertures: usize,
     ) -> Result<Self, &'static str> {
+        // J314s 26A434 iBoot builder0x38660 declares the actual plane
+        // way-command word as cache-status (mask0x1f, disabled value0).
+        // Builder0x3862c separately names +0x10000c as broadcast control.
         if layout.cache_status
             != Some(Register {
-                offset: 0x10000c,
-                mask: 1,
-                value: 1,
+                offset: 0x1c00,
+                mask: 0x1f,
+                value: 0,
             })
         {
             return Err("joint MCC/AMCC cache-status descriptor is not source-qualified");
@@ -312,10 +315,9 @@ impl Router {
         {
             return Err("joint MCC/AMCC geometry has no original direct-controller contract");
         }
-        // DT cache-status offset0x10000c aliases the original MCC broadcast
-        // selector. Do not retain Amcc's separate default cache_disabled bit.
-        // The source-consumer-derived Stela read aliases use this same
-        // actual selector. Retained physical alias observations stay separate.
+        // The MCC owns every plane's actual way-command backing. Remove
+        // Amcc's independent disabled bit: source cache-status reads must
+        // observe that same command image, not a copied healthy value.
         layout.cache_status = None;
         let locks = Amcc::new(layout, apertures, programmed, None)?;
         let mut views = Vec::new();
@@ -467,7 +469,7 @@ mod tests {
                 aperture_bytes: 0x200000,
                 planes: 4,
                 stride: mcc::PLANE_STRIDE,
-                cache_status: Some(reg(0x10000c, 1, 1)),
+                cache_status: Some(reg(0x1c00, 0x1f, 0)),
                 dram_base: 0x800000000,
                 groups: [
                     Some(LockGroup {
@@ -764,9 +766,9 @@ mod tests {
         // controller owns it. Reconstruct the source descriptor, not that
         // already-normalized private lock-only view.
         locks.layout.cache_status = Some(Register {
-            offset: 0x10000c,
-            mask: 1,
-            value: 1,
+            offset: 0x1c00,
+            mask: 0x1f,
+            value: 0,
         });
         let (mut owner, local) = Prepared::new_local(
             original.descriptor,
@@ -879,5 +881,52 @@ mod tests {
             board.read_pair(0, status, 8, 17).unwrap().unwrap().values,
             [0x0000000200000000, 2]
         );
+    }
+
+    #[test]
+    fn original_cache_status_reads_the_same_actual_per_plane_way_commands() {
+        let mut owner = prepared();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 3, &mut latch);
+        for aperture in 0..2 {
+            let base = aperture * mcc::APERTURE_BYTES;
+            for plane in 0..u64::from(mcc::PLANES) {
+                let status = base + plane * mcc::PLANE_STRIDE + 0x1c00;
+                assert_eq!(owner.read(status, Width::Word, &mut access), Ok(0));
+                owner.write(status, Width::Word, 0, &mut access).unwrap();
+                assert_eq!(owner.read(status, Width::Word, &mut access), Ok(0));
+                assert!(owner.write(status, Width::Word, 1, &mut access).is_err());
+                assert_eq!(owner.read(status, Width::Word, &mut access), Ok(0));
+            }
+            // Changing broadcast selects scope; it cannot invent powered
+            // ways or change the separate original cache-status word.
+            owner
+                .write(base + 0x10000c, Width::Word, 1, &mut access)
+                .unwrap();
+            assert_eq!(owner.read(base + 0x1c00, Width::Word, &mut access), Ok(0));
+        }
+        let original = prepared();
+        let mut layout = original.router.lock_layout;
+        for invalid in [
+            Register {
+                offset: 0x10000c,
+                mask: 1,
+                value: 1,
+            },
+            Register {
+                offset: 0x1c00,
+                mask: 1,
+                value: 0,
+            },
+            Register {
+                offset: 0x1c00,
+                mask: 0x1f,
+                value: 1,
+            },
+        ] {
+            layout.cache_status = Some(invalid);
+            let controller = original.controller().clone();
+            assert!(Router::new(layout, [None; 4], controller, 2).is_err());
+        }
     }
 }
