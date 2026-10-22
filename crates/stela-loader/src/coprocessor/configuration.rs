@@ -8,6 +8,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_runtime::sha256;
 
+pub mod arguments;
 pub mod entropy;
 pub mod finalization;
 pub mod heap;

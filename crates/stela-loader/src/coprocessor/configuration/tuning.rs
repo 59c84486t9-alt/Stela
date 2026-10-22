@@ -545,6 +545,13 @@ mod tests {
             let mut policy = config_policy(p.plan()); // Mechanism test, not complete native cold policy.
             let image_bytes = p.plan().image_bytes;
             let s = p.stage(0x9000_0000, image_bytes)?;
+            let embedded = s.embedded_arguments(claim(0x153288, 0x214))?;
+            assert_eq!(embedded.native_length, 0);
+            *policy
+                .fields
+                .iter_mut()
+                .find(|f| f.tag == u32::from_be_bytes(*b"bArg"))
+                .unwrap() = embedded.field;
             let slide = s.cold_slide_proposal(
                 crate::coprocessor::configuration::native::tests::slide_input(0x40, 0),
             )?;
@@ -633,6 +640,18 @@ mod tests {
             );
             assert!(c.receipt().finalization.as_ref().unwrap().writes.is_empty());
             c.publication_proposal(publication)?;
+            assert!(c.bytes()[0x9624e8..0x9628e8].iter().all(|&b| b == 0));
+            let argument = c
+                .receipt()
+                .fields
+                .iter()
+                .find(|f| f.tag == u32::from_be_bytes(*b"bArg"))
+                .unwrap();
+            assert!(matches!(
+                argument.decision,
+                crate::coprocessor::configuration::Decision::Preserve
+            ));
+            assert!(!argument.changed);
             let tuned = &c.bytes()[0x962c2a..0x962c2a + 0x1e8];
             assert_eq!(&tuned[..8], &[1, 3, 24, 21, 0xff, 0xff, 0xff, 0xff]);
             assert!(tuned[8 + 21 * 20..].iter().all(|&b| b == 0));
