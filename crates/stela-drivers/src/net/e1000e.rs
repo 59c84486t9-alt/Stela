@@ -375,13 +375,6 @@ fn phy_hung(device: &impl Registers, clock: &impl Timer) -> bool {
     hung
 }
 
-/// Point the controller's base and length registers at `ring`.
-fn program(device: &Mmio, ring: &Ring, low: usize, high: usize, length: usize) {
-    device.write32(low, ring.base() as u32);
-    device.write32(high, (ring.base() >> 32) as u32);
-    device.write32(length, Ring::bytes());
-}
-
 /// The 82574L owns these buffers until reboot. Polling never waits for a
 /// cable to be connected; [`Link::carrier`] reports autonegotiation's result.
 pub struct E1000e {
@@ -537,8 +530,9 @@ impl E1000e {
         }
         device.write32(RFCTL, device.read32(RFCTL) & !RFCTL_EXTEN);
         device.write32(RXCSUM, 0);
-        program(device, &self.receive, RDBAL, RDBAH, RDLEN);
-        program(device, &self.transmit, TDBAL, TDBAH, TDLEN);
+        let write = |offset, value| device.write32(offset, value);
+        self.receive.program(write, RDBAL, RDBAH, RDLEN);
+        self.transmit.program(write, TDBAL, TDBAH, TDLEN);
         device.write32(RDH, 0);
         device.write32(RDT, 0);
         device.write32(TDH, 0);

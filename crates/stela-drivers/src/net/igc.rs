@@ -8,12 +8,20 @@
 //! reset/MDIO/semaphore exchanges fail before any new DMA ring is published.
 mod hardware;
 
-use super::{Link, LinkError, MAX_FRAME, Mac};
+use super::{
+    Link, LinkError, MAX_FRAME, Mac,
+    advanced::{
+        self, QUEUE_ENABLE, QUEUE_WAIT_US, RX_DD, RX_EOP, RXDCTL_THRESHOLDS, SRRCTL_ONE_BUFFER,
+        TXDCTL_THRESHOLDS, TransmitQueue, transmitted,
+    },
+    check_frame,
+    ring::{DESCRIPTOR, DESCRIPTORS, Ring},
+};
 use crate::{
     Clock, Handoff,
     block::BlockError,
     bus::{
-        dma::{DmaAllocator, DmaBuffer},
+        dma::DmaAllocator,
         mmio::Mmio,
         pci::{self, Function},
     },
@@ -62,37 +70,14 @@ const TCTL_PSP: u32 = 1 << 3;
 const TCTL_CT: u32 = 0xff << 4;
 const TCTL_RTLC: u32 = 1 << 24;
 const COLLISION_THRESHOLD: u32 = 15 << 4;
-/// Packet buffer size in 1 KiB units, and one buffer per advanced descriptor.
-const SRRCTL_BSIZEPKT: u32 = (BUFFER >> 10) as u32;
-const SRRCTL_DESCTYPE_ADV_ONEBUF: u32 = 1 << 25;
-const QUEUE_ENABLE: u32 = 1 << 25;
-/// Prefetch 8, host 8 and write back every receive descriptor at once;
-/// transmit descriptors are written back on their RS bit.
-const RXDCTL_THRESHOLDS: u32 = 8 | 8 << 8 | 1 << 16;
-const TXDCTL_THRESHOLDS: u32 = 8 | 1 << 8;
-
-const RX_DD: u32 = 1 << 0;
-const RX_EOP: u32 = 1 << 1;
 const RX_RXE: u32 = 1 << 31;
-const TX_DD: u32 = 1 << 0;
-const TX_DTYP_DATA: u32 = 0x3 << 20;
-const TX_EOP: u32 = 1 << 24;
-const TX_IFCS: u32 = 1 << 25;
-const TX_RS: u32 = 1 << 27;
-const TX_DEXT: u32 = 1 << 29;
-const TX_PAYLEN_SHIFT: u32 = 14;
-
-/// Descriptors per ring: a multiple of eight, so the ring length is a
-/// multiple of 128 bytes.
-const DESCRIPTORS: usize = 32;
-const DESCRIPTOR: usize = 16;
-const BUFFER: usize = 2048;
-const ETHERNET_HEADER: usize = 14;
-/// igc_xmit_frame: TCTL.PSP still requires at least17 DMA bytes.
+/// igc_xmit_frame: TCTL.PSP still requires at least 17 DMA bytes.
 const MIN_TRANSMIT: usize = 17;
-const _: () = assert!((DESCRIPTORS * DESCRIPTOR).is_multiple_of(128) && BUFFER >= MAX_FRAME);
-const QUEUE_ENABLE_US: u64 = 20_000;
-const TRANSMIT_WAIT_US: u64 = 100_000;
+const TRANSMIT_QUEUE: TransmitQueue = TransmitQueue {
+    head: TDH,
+    tail: TDT,
+    control: TXDCTL,
+};
 
 pub fn matches(function: &Function) -> bool {
     function.vendor == VENDOR && DEVICES.contains(&function.device) && function.class == [2, 0, 0]
@@ -121,16 +106,6 @@ fn station(low: u32, high: u32) -> Option<Mac> {
     Some(Mac([a, b, c, d, e, f])).filter(|mac| mac.0 != [0; 6] && mac.0[0] & 1 == 0)
 }
 
-/// An advanced data descriptor's command word and status for one frame in
-/// one buffer.
-fn transmit_words(length: usize) -> (u32, u32) {
-    let length = length as u32;
-    (
-        TX_DTYP_DATA | TX_DEXT | TX_IFCS | TX_EOP | TX_RS | length,
-        length << TX_PAYLEN_SHIFT,
-    )
-}
-
 /// A written-back receive descriptor's frame length, if the descriptor is
 /// done; `Some(None)` for a frame to drop: one with errors, or one longer
 /// than a buffer (long packets are off, so it cannot fit).
@@ -143,51 +118,14 @@ fn received(status: u32, length: u16) -> Option<Option<usize>> {
     Some(good.then_some(length))
 }
 
-/// A descriptor ring and one buffer per descriptor.
-struct Ring {
-    descriptors: DmaBuffer,
-    buffers: DmaBuffer,
-}
-
-impl Ring {
-    fn new(dma: &mut dyn DmaAllocator) -> Result<Self, BlockError> {
-        Ok(Self {
-            descriptors: dma.allocate(DESCRIPTORS * DESCRIPTOR, 4096)?,
-            buffers: dma.allocate(DESCRIPTORS * BUFFER, 4096)?,
-        })
-    }
-
-    fn buffer_address(&self, index: usize) -> u64 {
-        self.buffers.physical() + (index * BUFFER) as u64
-    }
-
-    fn buffer(&mut self, index: usize) -> &mut [u8] {
-        &mut self.buffers.bytes_mut()[index * BUFFER..(index + 1) * BUFFER]
-    }
-
-    /// Point the controller's base, length, head and tail registers at the
-    /// ring.
-    fn program(&self, device: &Mmio, base_low: usize, base_high: usize, length: usize) {
-        let address = self.descriptors.physical();
-        device.write32(length, (DESCRIPTORS * DESCRIPTOR) as u32);
-        device.write32(base_high, (address >> 32) as u32);
-        device.write32(base_low, address as u32);
-    }
-}
-
 pub struct Igc {
     device: Mmio,
     receive: Ring,
     transmit: Ring,
-    /// The next receive descriptor the controller fills.
-    received: usize,
     /// Discard the rest of a split/oversized frame through its actual EOP.
     discarding: bool,
     /// An absent/failed MMIO function requires a fresh attachment.
     faulted: bool,
-    /// The next free transmit descriptor, and the oldest one in flight.
-    tail: usize,
-    clean: usize,
     mac: Mac,
     clock: Clock,
     pub location: String,
@@ -231,11 +169,8 @@ impl Igc {
             device,
             receive: Ring::new(dma)?,
             transmit: Ring::new(dma)?,
-            received: 0,
             discarding: false,
             faulted: false,
-            tail: 0,
-            clean: 0,
             mac,
             clock,
             location: format!("{}", function.address),
@@ -249,12 +184,17 @@ impl Igc {
     fn start_receive(&mut self) -> Result<(), BlockError> {
         let device = &self.device;
         device.write32(RCTL, 0);
-        self.receive.program(device, RDBAL, RDBAH, RDLEN);
-        device.write32(SRRCTL, SRRCTL_BSIZEPKT | SRRCTL_DESCTYPE_ADV_ONEBUF);
+        self.receive.program(
+            |offset, value| device.write32(offset, value),
+            RDBAL,
+            RDBAH,
+            RDLEN,
+        );
+        device.write32(SRRCTL, SRRCTL_ONE_BUFFER);
         device.write32(RDH, 0);
         device.write32(RDT, 0);
         device.write32(RXDCTL, RXDCTL_THRESHOLDS | QUEUE_ENABLE);
-        if !self.clock.wait(QUEUE_ENABLE_US, || {
+        if !self.clock.wait(QUEUE_WAIT_US, || {
             let value = device.read32(RXDCTL);
             value != u32::MAX && value & QUEUE_ENABLE != 0
         }) {
@@ -263,7 +203,7 @@ impl Igc {
             ));
         }
         for index in 0..DESCRIPTORS {
-            self.offer_receive(index);
+            advanced::offer_receive(&mut self.receive, index);
         }
         // Head equal to tail is an empty ring: the controller owns every
         // descriptor but the one before the head.
@@ -278,11 +218,16 @@ impl Igc {
 
     fn start_transmit(&mut self) -> Result<(), BlockError> {
         let device = &self.device;
-        self.transmit.program(device, TDBAL, TDBAH, TDLEN);
+        self.transmit.program(
+            |offset, value| device.write32(offset, value),
+            TDBAL,
+            TDBAH,
+            TDLEN,
+        );
         device.write32(TDT, 0);
         device.write32(TDH, 0);
         device.write32(TXDCTL, TXDCTL_THRESHOLDS | QUEUE_ENABLE);
-        if !self.clock.wait(QUEUE_ENABLE_US, || {
+        if !self.clock.wait(QUEUE_WAIT_US, || {
             let value = device.read32(TXDCTL);
             value != u32::MAX && value & QUEUE_ENABLE != 0
         }) {
@@ -302,36 +247,26 @@ impl Igc {
         Ok(())
     }
 
-    /// Hand receive descriptor `index` its buffer; the zero header address
-    /// also clears the previous write-back's status.
-    fn offer_receive(&mut self, index: usize) {
-        let address = self.receive.buffer_address(index);
-        let base = index * DESCRIPTOR;
-        self.receive.descriptors.write(base, address);
-        self.receive.descriptors.write(base + 8, 0u64);
-    }
-
-    /// Retire transmit descriptors the controller has written back.
-    fn reclaim(&mut self) -> bool {
-        while self.clean != self.tail {
-            let status: u32 = self.transmit.descriptors.read(self.clean * DESCRIPTOR + 12);
-            if status & TX_DD == 0 {
-                break;
-            }
-            self.clean = (self.clean + 1) % DESCRIPTORS;
+    /// Report a lost function, and discard the transmit work a lost link
+    /// strands (Linux `igc_watchdog_task` resets for it). Returns the carrier.
+    fn watchdog(&mut self) -> Result<bool, LinkError> {
+        let status = self.device.read32(STATUS);
+        self.faulted |= status == u32::MAX;
+        if !self.faulted && status & STATUS_LU == 0 && self.transmit.pending() {
+            let device = self.device;
+            self.faulted = !TRANSMIT_QUEUE.flush(
+                &mut self.transmit,
+                self.clock,
+                |offset| device.read32(offset),
+                |offset, value| device.write32(offset, value),
+            );
         }
-        (self.tail + 1) % DESCRIPTORS != self.clean
-    }
-
-    fn healthy(&mut self) -> Result<(), LinkError> {
-        self.faulted |= self.device.read32(STATUS) == u32::MAX;
-        if self.faulted {
-            Err(LinkError::Adapter(format!(
+        match self.faulted {
+            true => Err(LinkError::Adapter(format!(
                 "Intel I225/I226 {} lost register access; reinitialization required",
                 self.location
-            )))
-        } else {
-            Ok(())
+            ))),
+            false => Ok(status & STATUS_LU != 0),
         }
     }
 }
@@ -342,47 +277,29 @@ impl Link for Igc {
     }
 
     fn carrier(&mut self) -> bool {
-        let status = self.device.read32(STATUS);
-        self.faulted |= status == u32::MAX;
-        !self.faulted && status & STATUS_LU != 0
+        self.watchdog().unwrap_or(false)
     }
 
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
-        self.healthy()?;
-        if !(ETHERNET_HEADER..=MAX_FRAME).contains(&frame.len()) {
-            return Err(LinkError::Invalid("invalid Ethernet frame length"));
+        check_frame(frame)?;
+        if !self.watchdog()? {
+            return Err(LinkError::NoCarrier);
         }
-        if !self.reclaim() {
-            let clock = self.clock;
-            if !clock.wait(TRANSMIT_WAIT_US, || self.reclaim()) {
-                return Err(LinkError::Adapter(format!(
-                    "Intel I225/I226 {} transmit ring stalled",
-                    self.location
-                )));
-            }
+        if !self.transmit.free(self.clock, transmitted) {
+            return Err(LinkError::Adapter(format!(
+                "Intel I225/I226 {} transmit ring stalled",
+                self.location
+            )));
         }
-        let index = self.tail;
-        let length = frame.len().max(MIN_TRANSMIT);
-        let buffer = self.transmit.buffer(index);
-        buffer[..length].fill(0);
-        buffer[..frame.len()].copy_from_slice(frame);
-        let (command, status) = transmit_words(length);
-        let base = index * DESCRIPTOR;
-        let address = self.transmit.buffer_address(index);
-        let descriptors = &mut self.transmit.descriptors;
-        descriptors.write(base, address);
-        descriptors.write(base + 8, command);
-        descriptors.write(base + 12, status);
-        self.tail = (index + 1) % DESCRIPTORS;
-        fence(Ordering::SeqCst);
-        self.device.write32(TDT, self.tail as u32);
+        advanced::queue_frame(&mut self.transmit, frame, frame.len().max(MIN_TRANSMIT));
+        self.device.write32(TDT, self.transmit.next as u32);
         Ok(())
     }
 
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
-        self.healthy()?;
+        self.watchdog()?;
         loop {
-            let index = self.received;
+            let index = self.receive.next;
             let base = index * DESCRIPTOR;
             fence(Ordering::SeqCst);
             let status: u32 = self.receive.descriptors.read(base + 8);
@@ -395,8 +312,8 @@ impl Link for Igc {
             let frame = frame
                 .filter(|_| !discarded)
                 .map(|length| self.receive.buffer(index)[..length].to_vec());
-            self.offer_receive(index);
-            self.received = (index + 1) % DESCRIPTORS;
+            advanced::offer_receive(&mut self.receive, index);
+            self.receive.advance();
             fence(Ordering::SeqCst);
             self.device.write32(RDT, index as u32);
             if frame.is_some() {
@@ -410,6 +327,66 @@ impl Link for Igc {
 mod tests {
     use super::*;
 
+    /// An I225 over modeled registers and DMA memory, both rings started
+    /// and the link up.
+    struct Fixture {
+        net: Igc,
+        registers: Vec<u32>,
+        _backing: Vec<u64>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            use crate::bus::dma::RegionAllocator;
+            let mut backing = vec![0u64; 256 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing remains live until all modeled DMA buffers drop.
+            let mut dma =
+                unsafe { RegionAllocator::new(start..start + (backing.len() * 8) as u64) };
+            let mut registers = vec![0u32; REGISTER_BYTES as usize / 4];
+            // SAFETY: the vector is this fixture's exclusive live MMIO model.
+            let device = unsafe { Mmio::new(registers.as_mut_ptr() as u64) };
+            let mut net = Igc {
+                device,
+                receive: Ring::new(&mut dma).unwrap(),
+                transmit: Ring::new(&mut dma).unwrap(),
+                discarding: false,
+                faulted: false,
+                mac: Mac([2, 0, 0, 0, 0, 1]),
+                clock: Clock {
+                    ticks_per_microsecond: 1,
+                },
+                location: "model".into(),
+                phy_identity: 0x67c9dc01,
+            };
+            net.start_receive().unwrap();
+            net.start_transmit().unwrap();
+            registers[STATUS / 4] = STATUS_LU;
+            Self {
+                net,
+                registers,
+                _backing: backing,
+            }
+        }
+    }
+
+    #[test]
+    fn link_loss_discards_queued_transmit_work_and_refuses_new_frames() {
+        let mut fixture = Fixture::new();
+        for _ in 0..3 {
+            fixture.net.transmit(&[1; 60]).unwrap();
+        }
+        assert_eq!(fixture.registers[TDT / 4], 3);
+        fixture.registers[STATUS / 4] = 0;
+        assert_eq!(fixture.net.transmit(&[1; 60]), Err(LinkError::NoCarrier));
+        assert!(!fixture.net.transmit.pending());
+        assert_eq!(fixture.registers[TDT / 4], 0);
+        assert_ne!(fixture.registers[TXDCTL / 4] & QUEUE_ENABLE, 0);
+        fixture.registers[STATUS / 4] = STATUS_LU;
+        fixture.net.transmit(&[2; 60]).unwrap();
+        assert_eq!(fixture.registers[TDT / 4], 1);
+    }
+
     #[test]
     fn the_station_address_is_receive_address_zero_when_valid() {
         let mac = station(0x7856_3412, RAH_AV | 0xbc9a);
@@ -421,10 +398,10 @@ mod tests {
 
     #[test]
     fn a_frame_is_one_advanced_data_descriptor_with_its_crc_inserted() {
-        let (command, status) = transmit_words(60);
+        let (command, status) = advanced::transmit_words(60);
         assert_eq!(command, 0x2b30_003c);
         assert_eq!(status, 60 << 14);
-        assert_eq!(status & TX_DD, 0);
+        assert_eq!(status & 1, 0); // DD clear until the controller writes back
     }
 
     #[test]
@@ -467,32 +444,8 @@ mod tests {
 
     #[test]
     fn packet_rings_wrap_and_fragment_tails_are_not_delivered_as_frames() {
-        use crate::bus::dma::RegionAllocator;
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing remains live until all modeled DMA buffers drop.
-        let mut dma = unsafe { RegionAllocator::new(start..start + (backing.len() * 8) as u64) };
-        let mut registers = vec![0u32; REGISTER_BYTES as usize / 4];
-        // SAFETY: the vector is this fixture's exclusive live MMIO model.
-        let device = unsafe { Mmio::new(registers.as_mut_ptr() as u64) };
-        let mut net = Igc {
-            device,
-            receive: Ring::new(&mut dma).unwrap(),
-            transmit: Ring::new(&mut dma).unwrap(),
-            received: 0,
-            discarding: false,
-            faulted: false,
-            tail: 0,
-            clean: 0,
-            mac: Mac([2, 0, 0, 0, 0, 1]),
-            clock: Clock {
-                ticks_per_microsecond: 1,
-            },
-            location: "model".into(),
-            phy_identity: 0x67c9dc01,
-        };
-        net.start_receive().unwrap();
-        net.start_transmit().unwrap();
+        let mut fixture = Fixture::new();
+        let (net, registers) = (&mut fixture.net, &mut fixture.registers);
         assert_ne!(registers[RCTL / 4] & RCTL_MPE, 0);
         for sequence in 0..(DESCRIPTORS * 3) {
             let frame = vec![sequence as u8; 60 + sequence % 128];
@@ -501,16 +454,16 @@ mod tests {
             assert_eq!(&net.transmit.buffer(index)[..frame.len()], frame);
             assert_eq!(
                 net.transmit.descriptors.read::<u64>(index * DESCRIPTOR),
-                net.transmit.buffer_address(index)
+                net.transmit.address(index)
             );
             assert_eq!(
                 net.transmit.descriptors.read::<u32>(index * DESCRIPTOR + 8),
-                transmit_words(frame.len()).0
+                advanced::transmit_words(frame.len()).0
             );
             // Actual modeled hardware writes completion into the same TD.
             net.transmit
                 .descriptors
-                .write(index * DESCRIPTOR + 12, TX_DD);
+                .write(index * DESCRIPTOR + 12, 1u32); // DD
             net.receive.buffer(index)[..frame.len()].copy_from_slice(&frame);
             net.receive
                 .descriptors
@@ -531,7 +484,7 @@ mod tests {
                 .write(index * DESCRIPTOR + 12, 60u16);
         }
         assert_eq!(net.receive().unwrap(), Some(vec![2; 60]));
-        assert_eq!(net.received, 3);
+        assert_eq!(net.receive.next, 3);
         registers[STATUS / 4] = u32::MAX;
         assert!(!net.carrier());
         registers[STATUS / 4] = STATUS_LU;
@@ -545,31 +498,8 @@ mod tests {
 
     #[test]
     fn short_transmits_publish_the_psp_minimum_with_zeroed_padding_and_reject_bad_headers() {
-        use crate::bus::dma::RegionAllocator;
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing remains live until all modeled DMA buffers drop.
-        let mut dma = unsafe { RegionAllocator::new(start..start + (backing.len() * 8) as u64) };
-        let mut registers = vec![0u32; REGISTER_BYTES as usize / 4];
-        // SAFETY: the vector is this fixture's exclusive live MMIO model.
-        let device = unsafe { Mmio::new(registers.as_mut_ptr() as u64) };
-        let mut net = Igc {
-            device,
-            receive: Ring::new(&mut dma).unwrap(),
-            transmit: Ring::new(&mut dma).unwrap(),
-            received: 0,
-            discarding: false,
-            faulted: false,
-            tail: 0,
-            clean: 0,
-            mac: Mac([2, 0, 0, 0, 0, 1]),
-            clock: Clock {
-                ticks_per_microsecond: 1,
-            },
-            location: "model".into(),
-            phy_identity: 0x67c9dc01,
-        };
-        net.start_transmit().unwrap();
+        let mut fixture = Fixture::new();
+        let net = &mut fixture.net;
         // Reuse every ring buffer after nonzero old packets have occupied it.
         for sequence in 0..(DESCRIPTORS * 2) {
             let index = sequence % DESCRIPTORS;
@@ -585,24 +515,24 @@ mod tests {
             );
             assert_eq!(
                 net.transmit.descriptors.read::<u32>(index * DESCRIPTOR + 8),
-                transmit_words(17).0
+                advanced::transmit_words(17).0
             );
             assert_eq!(
                 net.transmit
                     .descriptors
                     .read::<u32>(index * DESCRIPTOR + 12),
-                17 << TX_PAYLEN_SHIFT
+                advanced::transmit_words(17).1
             );
             net.transmit
                 .descriptors
-                .write(index * DESCRIPTOR + 12, TX_DD);
+                .write(index * DESCRIPTOR + 12, 1u32); // DD
         }
-        let tail = net.tail;
+        let tail = net.transmit.next;
         let before = net.transmit.buffer(tail).to_vec();
         let descriptors = net.transmit.descriptors.bytes().to_vec();
         for length in 0..14 {
             assert!(net.transmit(&vec![0; length]).is_err());
-            assert_eq!(net.tail, tail);
+            assert_eq!(net.transmit.next, tail);
             assert_eq!(net.transmit.buffer(tail), before);
             assert_eq!(net.transmit.descriptors.bytes(), descriptors);
         }

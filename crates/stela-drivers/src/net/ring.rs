@@ -56,6 +56,19 @@ impl Ring {
         (DESCRIPTORS * DESCRIPTOR) as u32
     }
 
+    /// Point a controller's base and length registers at the descriptors.
+    pub(crate) fn program(
+        &self,
+        write: impl Fn(usize, u32),
+        low: usize,
+        high: usize,
+        length: usize,
+    ) {
+        write(length, Self::bytes());
+        write(high, (self.base() >> 32) as u32);
+        write(low, self.base() as u32);
+    }
+
     pub(crate) fn address(&self, index: usize) -> u64 {
         self.buffers.physical() + (index * BUFFER) as u64
     }

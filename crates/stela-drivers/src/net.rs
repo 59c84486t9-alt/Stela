@@ -7,6 +7,7 @@
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 
+mod advanced;
 pub mod e1000e;
 pub mod igb;
 pub mod igc;
