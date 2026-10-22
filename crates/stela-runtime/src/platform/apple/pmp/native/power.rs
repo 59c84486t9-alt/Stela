@@ -57,10 +57,9 @@ impl DeviceTable {
         );
         let die_offset = die_offset
             .map(|bytes| {
-                bytes
-                    .try_into()
-                    .map(u32::from_le_bytes)
-                    .map_err(|_| "PMP soc-device-die-offset must be one complete 32-bit source word")
+                bytes.try_into().map(u32::from_le_bytes).map_err(
+                    |_| "PMP soc-device-die-offset must be one complete 32-bit source word",
+                )
             })
             .transpose()?;
         let mut owned: Vec<[u32; RECORD_BYTES / 4]> = Vec::new();
