@@ -152,7 +152,7 @@ fn real_selected_family_width_nss_aggregation_and_edca_reach_typed_output() {
     let n = Negotiated::between(&local, &peer, Mode::Eht, Width::Mhz320).unwrap();
     assert_eq!((n.rx_nss, n.tx_nss, n.max_tx_amsdu), (2, 2, 7991));
     assert_eq!(n.legacy.supported, 0);
-    assert_eq!(n.peer_ampdu_exponent, 1);
+    assert_eq!(n.peer_ampdu_base_exponent, 1);
     assert_eq!(n.peer_mpdu_spacing, 2);
 }
 
@@ -248,6 +248,48 @@ fn ht_asymmetric_stbc_stream_limits_and_mcs32_width_have_actual_effect() {
     );
     local.ht.as_mut().unwrap().tx_params = 0;
     assert!(Negotiated::between(&local, &peer, Mode::Ht, Width::Mhz40).is_err());
+}
+
+#[test]
+fn selected_vht_width_matches_final_source_intersection_without_limiting_he_eht() {
+    for (own_width, peer_width, expected_160) in
+        [(4, 8, false), (8, 4, true), (4, 4, true), (8, 8, true)]
+    {
+        let (mut local, mut peer) = pair(Band::Ghz5, 12, false);
+        local.vht.as_mut().unwrap().capability =
+            (local.vht().unwrap().capability & !0xc) | own_width;
+        peer.vht.as_mut().unwrap().capability =
+            (peer.vht().unwrap().capability & !0xc) | peer_width;
+        assert_eq!(
+            Negotiated::between(&local, &peer, Mode::Vht, Width::Mhz160).is_ok(),
+            expected_160
+        );
+        assert_eq!(
+            Negotiated::between(&local, &peer, Mode::Vht, Width::Mhz80P80).is_ok(),
+            own_width == 8 && peer_width == 8
+        );
+        assert!(Negotiated::between(&local, &peer, Mode::Vht, Width::Mhz80).is_ok());
+        // A lower-family VHT restriction cannot disable actual HE/EHT160.
+        assert!(Negotiated::between(&local, &peer, Mode::He, Width::Mhz160).is_ok());
+        assert!(Negotiated::between(&local, &peer, Mode::Eht, Width::Mhz160).is_ok());
+    }
+}
+
+#[test]
+fn base_af_scalar_never_claims_he_eht_extensions_while_raw_effects_are_preserved() {
+    let (local, mut peer) = pair(Band::Ghz5, 12, false);
+    let before = Negotiated::between(&local, &peer, Mode::Eht, Width::Mhz160).unwrap();
+    peer.he.as_mut().unwrap().mac[3] |= 0x18;
+    peer.eht.as_mut().unwrap().mac[1] |= 1;
+    let after = Negotiated::between(&local, &peer, Mode::Eht, Width::Mhz160).unwrap();
+    assert_eq!(
+        after.peer_ampdu_base_exponent,
+        before.peer_ampdu_base_exponent
+    );
+    assert_eq!(after.peer_ampdu_base_exponent, 3);
+    assert_eq!(after.peer().he().unwrap().mac[3] & 0x18, 0x18);
+    assert_eq!(after.he.as_ref().unwrap().mac[3] & 0x18, 0x18);
+    assert_eq!(after.peer().eht().unwrap().mac[1] & 1, 1);
 }
 
 #[test]

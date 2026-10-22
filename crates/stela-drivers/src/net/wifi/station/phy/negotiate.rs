@@ -9,7 +9,8 @@ pub struct NegotiatedHt {
     /// Peer RX bounded by local TX; matches Linux's link_sta HT RX mask.
     pub peer_rx_mcs: [u8; 10],
     pub local_rx_mcs: [u8; 10],
-    pub peer_ampdu_exponent: u8,
+    /// HT base AF bits; not a complete HE/EHT aggregate byte exponent.
+    pub peer_ampdu_base_exponent: u8,
     pub peer_mpdu_spacing: u8,
     pub peer_tx_params: u8,
 }
@@ -50,7 +51,7 @@ impl NegotiatedHt {
             capability,
             peer_rx_mcs: ht_rx(local, peer),
             local_rx_mcs: ht_rx(peer, local),
-            peer_ampdu_exponent: peer.ampdu_exponent,
+            peer_ampdu_base_exponent: peer.ampdu_exponent,
             peer_mpdu_spacing: peer.mpdu_spacing,
             peer_tx_params: peer.tx_params,
         }
@@ -210,7 +211,10 @@ pub struct Negotiated {
     /// Direction from the local station's point of view, no default on empty maps.
     pub rx_nss: u8,
     pub tx_nss: u8,
-    pub peer_ampdu_exponent: u8,
+    /// Source STA_PHY AF encoding from HT/VHT/HE6. This is only the base:
+    /// actual HE MAC3/EHT MAC1 extension effects must also be consumed from
+    /// retained peer capabilities by their firmware TLVs/aggregate executor.
+    pub peer_ampdu_base_exponent: u8,
     pub peer_mpdu_spacing: u8,
     pub max_tx_amsdu: u16,
     pub max_rx_amsdu: u16,
@@ -355,6 +359,15 @@ impl Negotiated {
         } else {
             None
         };
+        if mode == Mode::Vht {
+            let capability = vht.as_ref().ok_or(Error::Missing("VHT"))?.capability;
+            let common_width = capability & 0xc;
+            if (width == Width::Mhz160 && common_width == 0)
+                || (width == Width::Mhz80P80 && common_width != 8)
+            {
+                return Err(Error::Incompatible("final common VHT width"));
+            }
+        }
         let he = if matches!(mode, Mode::He | Mode::Eht) {
             local
                 .he
@@ -425,7 +438,8 @@ impl Negotiated {
         if tx_nss == 0 || rx_nss == 0 {
             return Err(Error::Incompatible("no common directional MCS/NSS"));
         }
-        let (peer_ampdu_exponent, peer_mpdu_spacing, max_tx_amsdu) = aggregate_limits(peer, mode);
+        let (peer_ampdu_base_exponent, peer_mpdu_spacing, max_tx_amsdu) =
+            aggregate_limits(peer, mode);
         let (_, _, max_rx_amsdu) = aggregate_limits(local, mode);
         Ok(Self {
             local: local.clone(),
@@ -444,7 +458,7 @@ impl Negotiated {
             wmm,
             rx_nss,
             tx_nss,
-            peer_ampdu_exponent,
+            peer_ampdu_base_exponent,
             peer_mpdu_spacing,
             max_tx_amsdu,
             max_rx_amsdu,
