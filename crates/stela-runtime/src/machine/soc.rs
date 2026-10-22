@@ -98,7 +98,8 @@ pub use handoff::{
 use power_resources::PMGR_VIRTUAL;
 use power_resources::power_states;
 pub use power_resources::{
-    ClockRole, PmgrClockProvider, PowerOwner, PowerResource, PowerStates, ProcessorAssociation,
+    ClockRole, PmgrClockProvider, PmpDomain, PowerOwner, PowerResource, PowerStates,
+    ProcessorAssociation,
 };
 pub use topology::{KernelLimits, assigned};
 
