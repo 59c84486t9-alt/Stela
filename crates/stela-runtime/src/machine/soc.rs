@@ -26,6 +26,8 @@ use crate::platform::apple::{
 };
 use alloc::{format, string::String, vec::Vec};
 
+pub mod t6000_pmgr;
+
 mod dart_topology;
 #[cfg(test)]
 use dart_topology::iommu;

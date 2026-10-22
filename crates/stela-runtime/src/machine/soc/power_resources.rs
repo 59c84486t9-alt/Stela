@@ -545,6 +545,18 @@ fn decode_power_states(
     node: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
 ) -> Result<PowerStates, String> {
+    let states = source_power_states(root, node, translate)?;
+    validate_power_graph(&states)?;
+    Ok(states)
+}
+
+/// Complete original metadata, without granting lifecycle coverage. Private
+/// resource preparation retains any independent graph requirement explicitly.
+pub(super) fn source_power_states(
+    root: &Node<'_>,
+    node: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+) -> Result<PowerStates, String> {
     let table = decode_domain_table(node, translate)?;
     let inventory = inventory_with_nodes(root)?;
     let implicit = implicit::resolve(node, &table.domains, &inventory, translate)?;
@@ -555,6 +567,10 @@ fn decode_power_states(
         resources: inventory.resources,
         implicit,
     };
+    Ok(states)
+}
+
+pub(super) fn validate_power_graph(states: &PowerStates) -> Result<(), String> {
     let power = states.power_requirements()?;
     let consumers = states
         .resources
@@ -572,7 +588,7 @@ fn decode_power_states(
     // Validate the entire graph even when a broken record is unreferenced.
     coverage::analyze(&states.domains, &consumers)
         .map_err(|error| format!("PMGR coverage: {error:?}"))?;
-    Ok(states)
+    Ok(())
 }
 
 struct DomainTable {

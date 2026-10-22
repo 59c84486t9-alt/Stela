@@ -310,15 +310,7 @@ impl Bus {
         }
         let end = start.checked_add(len).ok_or(MapError::Overflow)?;
         device_offset.checked_add(len).ok_or(MapError::Overflow)?;
-        let index = self.regions.partition_point(|region| region.start < start);
-        let overlaps = |region: &Region| region.start < end && start < region.end;
-        for neighbor in [index.checked_sub(1), Some(index)].into_iter().flatten() {
-            if let Some(region) = self.regions.get(neighbor).filter(|region| overlaps(region)) {
-                return Err(MapError::Overlap {
-                    existing: region.device,
-                });
-            }
-        }
+        let index = self.free_index(start, end)?;
         self.regions.insert(
             index,
             Region {
@@ -330,6 +322,29 @@ impl Bus {
         );
         Ok(())
     }
+    /// Pure whole-range preflight for a new explicitly owned resource. It
+    /// reserves nothing and publishes no model or aperture. Callers retain
+    /// exclusive Bus access through their complete batch publication.
+    pub fn check_free(&self, start: u64, len: u64) -> Result<(), MapError> {
+        if len == 0 {
+            return Err(MapError::Empty);
+        }
+        let end = start.checked_add(len).ok_or(MapError::Overflow)?;
+        self.free_index(start, end).map(|_| ())
+    }
+    fn free_index(&self, start: u64, end: u64) -> Result<usize, MapError> {
+        let index = self.regions.partition_point(|region| region.start < start);
+        let overlaps = |region: &Region| region.start < end && start < region.end;
+        for neighbor in [index.checked_sub(1), Some(index)].into_iter().flatten() {
+            if let Some(region) = self.regions.get(neighbor).filter(|region| overlaps(region)) {
+                return Err(MapError::Overlap {
+                    existing: region.device,
+                });
+            }
+        }
+        Ok(index)
+    }
+
     /// Maps the parts of guest PAs `[start, start + len)` that no device
     /// owns yet, each at its own offset from `device_offset`: a window whose
     /// span the DeviceTree shares with smaller register banks (the `sgx`
@@ -568,6 +583,35 @@ mod tests {
             bus.map_gaps(other, 0x1400, 0x100, 0),
             Err(MapError::Overlap { .. })
         ));
+    }
+
+    #[test]
+    fn whole_range_preflight_sees_interior_owners_and_publishes_nothing() {
+        let mut bus = Bus::new();
+        let bank = bus.add(Box::new(Scratch([7; 16])));
+        bus.map(bank, 0x1800, 16, 0).unwrap();
+        assert_eq!(
+            bus.check_free(0x1000, 0x1000),
+            Err(MapError::Overlap { existing: bank })
+        );
+        assert_eq!(
+            bus.check_free(0x1801, 1),
+            Err(MapError::Overlap { existing: bank })
+        );
+        assert_eq!(bus.check_free(0x17f0, 16), Ok(()));
+        assert_eq!(bus.check_free(0x1810, 16), Ok(()));
+        assert_eq!(bus.check_free(0, 0), Err(MapError::Empty));
+        assert_eq!(bus.check_free(u64::MAX, 2), Err(MapError::Overflow));
+        assert_eq!(bus.regions.len(), 1);
+        assert_eq!(bus.devices.len(), 1);
+        assert_eq!(bus.device::<Scratch>(bank).unwrap().0, [7; 16]);
+        // A successful preflight is not a reservation; actual map follows
+        // the same checked overlap path under exclusive mutable Bus access.
+        bus.map(bank, 0x1810, 16, 0).unwrap();
+        assert_eq!(
+            bus.check_free(0x1810, 16),
+            Err(MapError::Overlap { existing: bank })
+        );
     }
 
     #[test]
