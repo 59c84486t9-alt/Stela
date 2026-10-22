@@ -47,7 +47,7 @@ pub const ECM: u8 = 6;
 pub const NCM: u8 = 0x0d;
 /// Class requests and notifications address the communications interface.
 const CLASS_INTERFACE: u8 = TYPE_CLASS | RECIPIENT_INTERFACE;
-const DATA_CLASS: u8 = 10;
+pub(crate) const DATA_CLASS: u8 = 10;
 const CS_INTERFACE: u8 = 0x24;
 const UNION: u8 = 0x06;
 const ETHERNET: u8 = 0x0f;

@@ -81,6 +81,8 @@ pub struct Progress {
     pub playback_frames: u64,
     pub capture_frames: u64,
     pub feedback_updates: u64,
+    /// Packets whose data a USB error lost; the stream keeps running.
+    pub packet_errors: u64,
     pub queued_playback: usize,
     pub queued_capture: usize,
     pub playback_drained: bool,
@@ -504,16 +506,20 @@ impl<T: Transport> AudioDevice<T> {
         }
         Ok(())
     }
-    fn packet(completion: Completion, expected: usize, input: bool) -> Result<usize, Error> {
-        match completion.status {
-            PacketStatus::Success | PacketStatus::Short => {}
-            PacketStatus::MissedService => {
-                return Err(Error::Packet("missed USB audio service interval"));
-            }
-            PacketStatus::Transaction => return Err(Error::Packet("USB audio transaction error")),
-            PacketStatus::Babble => return Err(Error::Packet("USB audio babble")),
-            PacketStatus::Bandwidth => return Err(Error::Packet("USB audio bandwidth error")),
-            PacketStatus::BufferOverrun => return Err(Error::Packet("USB audio buffer overrun")),
+    /// Like snd-usb-audio, a packet error loses only that packet: playback
+    /// counts it as sent, while capture and feedback take no bytes from it.
+    fn packet(
+        progress: &mut Progress,
+        completion: Completion,
+        expected: usize,
+        input: bool,
+    ) -> Result<usize, Error> {
+        if !matches!(
+            completion.status,
+            PacketStatus::Success | PacketStatus::Short
+        ) {
+            progress.packet_errors += 1;
+            return Ok(if input { 0 } else { expected });
         }
         if completion.bytes > expected || (!input && completion.bytes != expected) {
             return Err(Error::Packet("USB audio packet length"));
@@ -527,7 +533,7 @@ impl<T: Transport> AudioDevice<T> {
             let Some(result) = self.transport.completed(ticket) else {
                 break;
             };
-            let bytes = Self::packet(result?, packet.bytes, true)?;
+            let bytes = Self::packet(&mut self.progress, result?, packet.bytes, true)?;
             packet.ticket = None;
             self.feedback.order.pop_front();
             if bytes == 0 || packet.buffer.bytes()[..bytes].iter().all(|byte| *byte == 0) {
@@ -546,7 +552,7 @@ impl<T: Transport> AudioDevice<T> {
                 let Some(result) = self.transport.completed(ticket) else {
                     break;
                 };
-                let bytes = Self::packet(result?, packet.bytes, true)?;
+                let bytes = Self::packet(&mut self.progress, result?, packet.bytes, true)?;
                 packet.ticket = None;
                 self.input.order.pop_front();
                 if !bytes.is_multiple_of(c.format.frame_bytes()) {
@@ -583,7 +589,7 @@ impl<T: Transport> AudioDevice<T> {
                 let Some(result) = self.transport.completed(ticket) else {
                     break;
                 };
-                let bytes = Self::packet(result?, packet.bytes, false)?;
+                let bytes = Self::packet(&mut self.progress, result?, packet.bytes, false)?;
                 packet.ticket = None;
                 self.output.order.pop_front();
                 self.progress.playback_frames += (bytes / p.format.frame_bytes()) as u64;

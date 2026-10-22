@@ -203,6 +203,15 @@ pub(super) fn plan(
     plan_with_controller(device, interface, all, None)
 }
 
+/// Whether a driver binds through this interface. CDC data and audio streaming
+/// interfaces belong to the communications or audio control interface that
+/// claims them.
+pub(super) fn primary(interface: &Interface) -> bool {
+    interface.alternate == 0
+        && interface.class != cdc::DATA_CLASS
+        && !(interface.class == audio::CLASS && interface.subclass == audio::STREAMING_SUBCLASS)
+}
+
 pub(super) fn plan_with_controller(
     device: &Device,
     interface: &Interface,
@@ -210,11 +219,9 @@ pub(super) fn plan_with_controller(
     controller: Option<&Controller>,
 ) -> Result<Plan, &'static str> {
     let binding = match interface.class {
-        audio::CLASS if audio::supported_identity(&device.descriptor, device.speed) => {
-            audio::plan(interface, all, &device.configuration, device.speed)
-                .map(Plan::Audio)
-                .map_err(|_| "unsupported or malformed UAC2 function descriptors")
-        }
+        audio::CLASS => audio::plan(interface, all, &device.configuration, device.speed)
+            .map(Plan::Audio)
+            .map_err(|_| "unsupported or malformed UAC2 function descriptors"),
         storage::CLASS => storage::plan(device, interface, all, controller),
         hid::CLASS => hid::plan(interface),
         cdc::COMMUNICATIONS => cdc::plan(interface, all),
@@ -307,7 +314,7 @@ pub(super) fn select_with_controller(
         let mut cdc = false;
         let mut endpoints = Vec::new();
         let mut claimed = Vec::new();
-        for interface in all.iter().filter(|i| i.alternate == 0 && i.class != 10) {
+        for interface in all.iter().filter(|i| primary(i)) {
             if device.descriptor[4] == HUB_CLASS && interface.class == HUB_CLASS {
                 if interface.endpoints.len() == 1
                     && interface.endpoints[0].kind() == 3
@@ -973,13 +980,11 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn pc_uac2_selection_keeps_zero_bandwidth_until_explicit_pcm_start() {
+    fn uac2_selection_keeps_zero_bandwidth_until_explicit_pcm_start() {
         let configuration = audio::test_configuration();
         sanitize(&configuration, HIGH_SPEED).unwrap();
         let mut device = device(vec![configuration]);
         device.speed = 3;
-        device.descriptor[2..7].copy_from_slice(&[0, 2, 0xef, 2, 1]);
-        device.descriptor[8..14].copy_from_slice(&[5, 11, 0xe1, 0x1b, 2, 0]);
         select(&mut device).unwrap();
         let all = interfaces(&device.configuration);
         let selected = plan(&device, &all[0], &all).unwrap();
@@ -987,7 +992,5 @@ pub(super) mod tests {
         assert!(selected.endpoints().is_empty());
         assert_eq!(selected.settings(0), vec![(0, 0), (1, 0), (2, 0)]);
         active_settings(&all, &selected.settings(0)).unwrap();
-        device.descriptor[12] = 3;
-        assert!(plan(&device, &all[0], &all).is_err());
     }
 }

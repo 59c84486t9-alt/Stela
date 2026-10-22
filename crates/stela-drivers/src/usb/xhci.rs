@@ -2474,8 +2474,7 @@ fn bind_with_provider(
     let mut endpoints = Vec::new();
     let mut plans = Vec::new();
     let mut selected_settings = Vec::new();
-    // CDC data interfaces belong to their communications interface.
-    for interface in all.iter().filter(|i| i.alternate == 0 && i.class != 10) {
+    for interface in all.iter().filter(|i| configuration::primary(i)) {
         let plan =
             configuration::plan_with_controller(&device, interface, &all, Some(&shared.borrow()));
         match plan {

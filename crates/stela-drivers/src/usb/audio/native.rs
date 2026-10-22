@@ -137,11 +137,6 @@ impl UsbAudio {
         binding: Binding,
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, BlockError> {
-        if !super::supported_identity(&device.descriptor, device.speed) {
-            return Err(BlockError::Unsupported(
-                "unsupported native USB audio identity",
-            ));
-        }
         let native = Native {
             shared,
             slot: device.slot,

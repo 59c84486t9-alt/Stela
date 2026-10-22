@@ -74,13 +74,6 @@ fn runtime_descriptors_select_graph_and_pcm_not_product_nodes() {
     c[n + 3] = 1;
     let a = interfaces(&c);
     assert!(Binding::parse(&a[0], &a, &c, 3).is_err());
-    let mut descriptor = [0; 18];
-    descriptor[2..7].copy_from_slice(&[0, 2, 0xef, 2, 1]);
-    descriptor[8..14].copy_from_slice(&[5, 11, 0xe1, 0x1b, 2, 0]);
-    assert!(supported_identity(&descriptor, 3));
-    assert!(!supported_identity(&descriptor, 4));
-    descriptor[12] = 3;
-    assert!(!supported_identity(&descriptor, 3));
 }
 
 #[derive(Default)]
@@ -292,14 +285,13 @@ fn duplex_capture_uses_actual_packet_bytes_and_shared_clock_is_not_retuned() {
     });
 }
 #[test]
-fn terminal_packet_failure_stops_all_and_failed_cancel_keeps_dma_quarantined() {
+fn packet_errors_lose_one_packet_and_failed_cancel_keeps_dma_quarantined() {
     run(|a| {
         a.start_capture(1, 48000).unwrap();
         a.transport.packet_fault = Some(PacketStatus::MissedService);
-        assert_eq!(
-            a.poll(),
-            Err(Error::Packet("missed USB audio service interval"))
-        );
+        a.poll().unwrap();
+        assert_eq!(a.progress().packet_errors, 1);
+        a.shutdown().unwrap();
         assert!(a.transport.pending.is_empty());
         a.start_capture(1, 48000).unwrap();
         a.transport.transport_fault = true;

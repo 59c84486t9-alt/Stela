@@ -5,9 +5,8 @@
 //! Copyright (c) 2010 Daniel Mack. See stela-drivers/THIRD_PARTY.md.
 //! Control/rate/feedback sequencing adapts Linux sound/usb/{clock,format,
 //! endpoint,pcm,mixer}.c at a804c5742bff224d4cb4d25dd383554d598be32b.
-//! No codec node, interface, clock, alternate, channel or sample rate is inferred
-//! from the product name. The supported ASUS/Realtek USB2 identity selects the
-//! standard UAC2 parser; its actual descriptors must satisfy that contract.
+//! Like snd-usb-audio, any UAC2 audio control interface binds by class; its
+//! descriptors alone decide clocks, alternates, channels and sample rates.
 use super::xhci::{Endpoint, Interface};
 use crate::{audio::Direction, block::BlockError};
 
@@ -84,18 +83,6 @@ pub trait Transport: Control {
         bytes: usize,
     ) -> Result<Self::Ticket, BlockError>;
     fn completed(&mut self, ticket: &Self::Ticket) -> Option<Result<Completion, BlockError>>;
-}
-
-/// This PC's source-selected standard USB2 profile. The Linux donor has no
-/// 0b05:1be1-specific audio/implicit-feedback quirk: class descriptors decide
-/// behavior. The bcdDevice bound records the saved inventory, not a new quirk.
-pub fn supported_identity(descriptor: &[u8; 18], speed: u8) -> bool {
-    u16::from_le_bytes([descriptor[8], descriptor[9]]) == 0x0b05
-        && u16::from_le_bytes([descriptor[10], descriptor[11]]) == 0x1be1
-        && u16::from_le_bytes([descriptor[12], descriptor[13]]) == 2
-        && u16::from_le_bytes([descriptor[2], descriptor[3]]) == 0x0200
-        && descriptor[4..7] == [0xef, 2, 1]
-        && speed == 3
 }
 
 pub(super) fn plan(
