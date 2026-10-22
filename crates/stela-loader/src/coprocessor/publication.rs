@@ -81,6 +81,7 @@ impl NativeFlags {
     }
 }
 
+#[derive(Clone)]
 pub enum Action {
     /// Deliberate policy decision retained in the proposal, never an implicit
     /// effect of a zero VM size or an unfamiliar segment name.
@@ -90,11 +91,13 @@ pub enum Action {
         raw_flags: u32,
     },
 }
+#[derive(Clone)]
 pub struct SegmentPolicy {
     pub name: String,
     pub action: Action,
     pub provenance: Provenance,
 }
+#[derive(Clone)]
 pub struct Policy {
     pub allocation_owner: String,
     pub mapping_owner: String,
@@ -164,6 +167,12 @@ impl Configured {
     /// Build exact property bytes only after explicit policy for every original
     /// segment. No default flags, PA==DVA assumption, or empty-segment policy.
     pub fn publication_proposal(&self, policy: Policy) -> Result<Proposal> {
+        let proposal = self.publication_preview(policy)?;
+        self.validate_finalization(&proposal)?;
+        Ok(proposal)
+    }
+
+    pub(in crate::coprocessor) fn publication_preview(&self, policy: Policy) -> Result<Proposal> {
         self.validate_tuning()?;
         let plan = self.plan();
         ensure!(

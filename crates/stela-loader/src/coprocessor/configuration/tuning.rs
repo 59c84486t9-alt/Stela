@@ -542,9 +542,17 @@ mod tests {
                 },
                 Limits::default(),
             )?;
-            let policy = config_policy(p.plan()); // Mechanism test, not complete native cold policy.
+            let mut policy = config_policy(p.plan()); // Mechanism test, not complete native cold policy.
             let image_bytes = p.plan().image_bytes;
             let s = p.stage(0x9000_0000, image_bytes)?;
+            let slide = s.cold_slide_proposal(
+                crate::coprocessor::configuration::native::tests::slide_input(0x40, 0),
+            )?;
+            *policy
+                .fields
+                .iter_mut()
+                .find(|f| f.tag == u32::from_be_bytes(*b"SLID"))
+                .unwrap() = slide.field(claim(0x1538a4, 0x15c))?;
             let original_chains = s
                 .plan()
                 .chains
@@ -588,7 +596,43 @@ mod tests {
             })?;
             assert_eq!(proposal.receipt().entries, 21);
             assert_eq!(proposal.receipt().capacity, 24);
-            let c = s.configure(policy)?.apply_tuning(proposal)?;
+            let c = s.configure_cold(policy, slide)?.apply_tuning(proposal)?;
+            let publication = crate::coprocessor::publication::Policy {
+                allocation_owner: "synthetic original-fixture allocation".into(),
+                mapping_owner: "synthetic original-fixture remap".into(),
+                configured_sha256: c.receipt().configured_sha256.clone(),
+                segments: c
+                    .plan()
+                    .segments
+                    .iter()
+                    .map(|s| crate::coprocessor::publication::SegmentPolicy {
+                        name: s.segment.name.clone(),
+                        action: if s.segment.vm_size == 0 {
+                            crate::coprocessor::publication::Action::Omit
+                        } else {
+                            crate::coprocessor::publication::Action::Publish {
+                                iop_remap: s.segment.vm_address,
+                                raw_flags: if s.segment.name == "__OS_LOG" { 2 } else { 0 },
+                            }
+                        },
+                        provenance: claim(0x10e568, 0x20c),
+                    })
+                    .collect(),
+            };
+            // Real source flags and metadata; mapping coordinates remain a fixture.
+            let (c, publication) = c.finalize_cold_mappings(
+                publication,
+                crate::coprocessor::configuration::finalization::Input {
+                    descriptor_flags: iboot[0x196298 + 0x265],
+                    provenance: claim(0x196298, 0x268),
+                },
+            )?;
+            assert_eq!(
+                c.receipt().finalization.as_ref().unwrap().metadata_records,
+                [0x1244]
+            );
+            assert!(c.receipt().finalization.as_ref().unwrap().writes.is_empty());
+            c.publication_proposal(publication)?;
             let tuned = &c.bytes()[0x962c2a..0x962c2a + 0x1e8];
             assert_eq!(&tuned[..8], &[1, 3, 24, 21, 0xff, 0xff, 0xff, 0xff]);
             assert!(tuned[8 + 21 * 20..].iter().all(|&b| b == 0));

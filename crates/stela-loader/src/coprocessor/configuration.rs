@@ -9,6 +9,7 @@ use serde::Serialize;
 use stela_runtime::sha256;
 
 pub mod entropy;
+pub mod finalization;
 pub mod heap;
 pub mod native;
 pub mod tuning;
@@ -169,6 +170,7 @@ pub struct Receipt {
     pub cold_slide: Option<native::ColdSlideProposal>,
     /// Native tuning bytes outside the patchbay, prepared from selected sources.
     pub tuning: Option<tuning::Receipt>,
+    pub finalization: Option<finalization::Receipt>,
     pub configured_sha256: String,
 }
 /// Encoded cold image after a complete caller-supplied patch policy. It has no
@@ -260,6 +262,7 @@ impl Staged {
             fields,
             cold_slide: None,
             tuning: None,
+            finalization: None,
             configured_sha256: String::new(),
         };
         // No bytes change until every original field and every source claim has

@@ -51,6 +51,9 @@ pub struct ColdSlideProposal {
     header_source_sha256: String,
 }
 impl ColdSlideProposal {
+    pub(super) fn header_image_offset(&self) -> u64 {
+        self.header_image_offset
+    }
     pub fn original_control(&self) -> u64 {
         self.original_control
     }
@@ -320,6 +323,13 @@ pub(in crate::coprocessor) mod tests {
                 *iop_remap = segment.segment.vm_address + proposal.remap_slide();
             }
         }
+        let (configured, publication) = configured.finalize_cold_mappings(
+            publication,
+            configuration::finalization::Input {
+                descriptor_flags: 0,
+                provenance: provenance(),
+            },
+        )?;
         let mapped = configured.publication_proposal(publication)?;
         assert_eq!(mapped.entry.physical, 0x80000000);
         assert_eq!(mapped.entry.linked_virtual, 0);
