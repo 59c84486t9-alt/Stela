@@ -18,6 +18,7 @@ pub mod hacr;
 pub mod identification;
 pub mod impdef;
 pub mod mmu;
+pub mod mount;
 pub mod pmu;
 pub mod pointer_keys;
 pub mod registers;

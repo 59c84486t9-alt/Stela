@@ -27,7 +27,6 @@ mod topology;
 pub(crate) mod translations;
 
 use crate::{
-    console,
     handoff::{Handoff, MAGIC},
     layout, output,
 };
@@ -49,13 +48,13 @@ use stela_loader::{
     handoff::BootCommand as FirmwareBootCommand,
     installed, recovery,
 };
-use stela_runtime::machine::apple::{RtcEpoch, WallClock};
+use stela_runtime::machine::apple::WallClock;
 use stela_runtime::machine::{
     Chip, Cpu, CpuProfile, Event, Host, Machine, PeerState, Stop, Transition,
-    apple::memory_resources::amcc,
     apple::{AicInput, AicLayout, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
     identification::Speculation,
+    mount,
     registers::encodings::DCZID_EL0,
     soc,
     system::Register,
@@ -866,578 +865,46 @@ const J473_AIC_EVENT: u64 = 0x8000;
 /// The J473AP ADT `aic` `#shared-timestamps`.
 const J473_AIC_TIMESTAMPS: u8 = 16;
 
-/// The modeled board devices: the console UART, the watchdog and the AIC2,
-/// placed as the board's DeviceTree places them (`machine::soc::board`).
-/// `aic-timebase` has no public register description and no model, so its
-/// accesses stop explicitly.
-/// What is plugged into the board's USB-C connectors: a restore host on the
-/// first, and on the last the native hub with the keyboard and pointer and
-/// the `usb` disks and Ethernet adapter.
-struct Cables {
-    restore: bool,
-    input: bool,
-    usb: stela_runtime::machine::apple::UsbCables,
-    /// The firmware's GOP mode, for the DCP display coprocessor's scanout.
-    screen: Option<console::Framebuffer>,
-}
-
-/// The system counter at placement and the host's wall time at it.
-struct Clock {
-    now: u64,
-    wall: Option<WallClock>,
-}
-
-/// The host disks the board's devices keep: the internal SSD's backing
-/// (`--storage`) and the SEP's state on the machine-state partition
-/// (`--nor`).
-struct Disks {
-    backing: Option<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
-    sep_state: Option<stela_runtime::machine::apple::sep_state::Location>,
-    /// Advertise and log the SEP `sks`/`pnon`/`scrd` services (`--sep-observe`).
-    sep_observe: bool,
-    /// Record the GFX firmware work commands and derive their fields
-    /// (`--agx-observe`); each is still refused by name.
-    agx_observe: bool,
-}
-
-/// The regions iBoot leaves in the memory controller's lock groups:
-/// CTRR-A over the bundle's read-only run, and CTRR-C and CTRR-D over the
-/// cores' regions of those names, which SPTM requires the AMCC's to match
-/// before it locks them (`amcc`). CTRR-B stays unprogrammed.
-fn memory_locks(
-    read_only_region: Option<(u64, u64)>,
-    core_locks: &stela_runtime::machine::ctrr::Handoff,
-) -> amcc::Programmed {
-    let mut programmed = amcc::ctrr_a(read_only_region);
-    for locked in &core_locks.locked {
-        let group = match locked.region {
-            stela_runtime::machine::ctrr::Region::CtrrC => 2,
-            stela_runtime::machine::ctrr::Region::CtrrD => 3,
-            _ => continue,
-        };
-        programmed[group] = Some((locked.first, locked.last + 1 - locked.first));
-    }
-    programmed
-}
-
-/// The board's devices. `reset` is the entry point a boot bundle hands off
-/// to, on which boot firmware locks every PE's RVBAR. `programmed` is the
-/// region iBoot leaves in each memory-controller lock group
-/// ([`memory_locks`]).
-fn devices<'f>(
+/// The board's devices ([`mount::devices`]), or without a DeviceTree (the
+/// test kernel) the J473AP console UART, watchdog and AIC2.
+fn devices(
     board: Option<&soc::Board>,
-    programmed: amcc::Programmed,
-    reset: Option<u64>,
-    clock: Clock,
-    disks: Disks,
-    mut cables: Cables,
-    firmware: &dyn Fn(&str) -> Option<&'f [u8]>,
+    inputs: mount::Inputs<'_>,
 ) -> Result<(AppleDevices, Option<stela_runtime::machine::apple::UsbId>), String> {
-    let fixed = |(offset, bytes, irq): (u64, u64, u32)| soc::Device {
-        physical: ARM_IO + offset,
-        bytes,
-        irq,
-    };
-    let (uart, wdt, aic) = match board {
-        Some(board) => (board.uart, board.watchdog, board.aic),
-        None => (
-            fixed(J473_UART),
-            fixed(J473_WDT),
-            soc::InterruptController {
-                physical: ARM_IO + J473_AIC.0,
-                inputs: J473_AIC.1,
-                layout: AicLayout::aic2(J473_AIC_EVENT, J473_AIC_TIMESTAMPS),
-            },
-        ),
-    };
-    let place = |device: soc::Device| {
+    if let Some(board) = board {
+        return mount::devices(board, GuestConsole::default(), inputs, &mut |arguments| {
+            output::arguments(arguments)
+        });
+    }
+    if inputs.backing.is_some() {
+        return Err("--storage was supplied but this DeviceTree exposes no modeled ANS2".into());
+    }
+    if inputs.restore {
+        return Err("restore study requires a DT-placed USB device".into());
+    }
+    let place = |(offset, bytes, irq): (u64, u64, u32)| {
         (
             Range {
-                physical: device.physical,
-                bytes: device.bytes,
+                physical: ARM_IO + offset,
+                bytes,
             },
-            AicInput::new(0, device.irq as u16),
+            AicInput::new(0, irq as u16),
         )
     };
-    let (uart, wdt) = (place(uart), place(wdt));
+    let (uart, wdt) = (place(J473_UART), place(J473_WDT));
     let mut devices = AppleDevices::new();
     devices
         .add_uart(GuestConsole::default(), &[uart.0], Some(uart.1))
         .map_err(|error| alloc::format!("UART placement: {error:?}"))?;
     devices
-        .add_watchdog_with_side(
-            wdt.0,
-            board.and_then(|b| b.watchdog_side.as_ref()),
-            Some(wdt.1),
-            clock.now,
-        )
+        .add_watchdog_with_side(wdt.0, None, Some(wdt.1), inputs.now)
         .map_err(|error| alloc::format!("watchdog placement: {error:?}"))?;
-    devices.add_aic(aic.physical, aic.inputs, aic.layout)?;
-    if let Some(board) = board
-        && let Some(gpio) = &board.gpio
-    {
-        let selects: Vec<u32> = board.spi_nor.iter().filter_map(|spi| spi.select).collect();
-        let interrupts: Vec<u32> = board
-            .i2cs
-            .iter()
-            .flat_map(|controller| &controller.targets)
-            .filter_map(|target| target.interrupt)
-            .collect();
-        devices.add_gpio(gpio, &selects, &interrupts)?;
-    }
-    for aux in board.map_or(&[][..], |board| &board.aux_gpios) {
-        devices.add_aux_gpio(aux)?;
-    }
-    if let Some(spi) = board.and_then(|board| board.spi_nor.as_ref()) {
-        devices.add_spi_nor(spi)?;
-    }
-    let Disks {
-        backing,
-        sep_state,
-        sep_observe,
-        agx_observe,
-    } = disks;
-    match (board.and_then(|b| b.ans.as_ref()), backing) {
-        (Some(ans), Some(backing)) => devices.add_ans(ans, backing)?,
-        (Some(_), None) => return Err("a visible ANS2 requires --storage SERIAL:GUID".into()),
-        (None, Some(_)) => {
-            return Err(
-                "--storage was supplied but this DeviceTree exposes no modeled ANS2".into(),
-            );
-        }
-        (None, None) => (),
-    }
-    if let Some(smc) = board.and_then(|b| b.smc.as_ref()) {
-        devices.add_smc(smc)?;
-    }
-    if let Some(pmp) = board.and_then(|b| b.pmp.as_ref()) {
-        devices.add_pmp(pmp)?;
-    }
-    for spmi in board.map_or(&[][..], |board| &board.spmis) {
-        // A newly created Stela PMIC starts with its own oscillator origin
-        // and no pending native fault or off-to-wake events. These are explicit
-        // cold resource inputs, not Apple persistent/reset-state measurements.
-        // Retained PMIC resources must instead supply their actual history.
-        let history = spmi
-            .pmus
-            .iter()
-            .flat_map(|pmu| {
-                pmu.retained().map(|(kind, window)| {
-                    (pmu.sid, kind, alloc::vec![0; usize::from(window.bytes)])
-                })
-            })
-            .collect::<alloc::vec::Vec<_>>();
-        devices.add_spmi_with_resources(
-            spmi,
-            clock.wall,
-            RtcEpoch {
-                counter: clock.now,
-                ticks: 0,
-            },
-            &history,
-        )?;
-    }
-    for component in board.map_or(&[][..], |board| &board.coresight) {
-        devices
-            .add_coresight_lock(component.physical)
-            .map_err(|error| alloc::format!("CoreSight lock placement: {error:?}"))?;
-        if let Some(physical) = component.pc_sampler() {
-            devices
-                .add_coresight_sampler(component.cpu, physical)
-                .map_err(|error| alloc::format!("UTTDBG sampler placement: {error:?}"))?;
-        }
-    }
-    for block in board.map_or(&[][..], |board| &board.lockdown) {
-        let range = Range {
-            physical: block.physical,
-            bytes: block.bytes,
-        };
-        let rvbar = block.cpu.zip(reset);
-        devices
-            .add_lockdown(block.name, block.control, range, rvbar)
-            .map_err(|error| alloc::format!("{} placement: {error:?}", block.name))?;
-    }
-    for block in board.map_or(&[][..], |board| &board.counters) {
-        devices
-            .add_core_counters(block.cpu, block.physical, block.layout)
-            .map_err(|error| alloc::format!("sampler counter placement: {error:?}"))?;
-    }
-    if let Some(board) = board {
-        let mpidrs: Vec<u64> = board.cpus.processors.iter().map(|pe| pe.mpidr).collect();
-        devices.add_fast_ipi(&mpidrs);
-        if let Some((physical, clusters)) = board.cpu_start {
-            devices.add_cpu_start(physical, clusters, &mpidrs)?;
-        }
-    }
-    for controller in board.map_or(&[][..], |board| &board.i2cs) {
-        devices.add_i2c(controller, firmware)?;
-    }
-    for phy in board.map_or(&[][..], |board| &board.typec_phys) {
-        devices
-            .add_atc_phy(phy)
-            .map_err(|error| alloc::format!("ATC PHY placement: {error:?}"))?;
-    }
-    let mut darts = Vec::new();
-    for dart in board.map_or(&[][..], |board| &board.darts) {
-        let ranges: Vec<_> = dart
-            .instances
-            .iter()
-            .map(|instance| Range {
-                physical: instance.physical,
-                bytes: instance.bytes,
-            })
-            .collect();
-        let irq = AicInput::new(0, dart.irq as u16);
-        let placed = devices
-            .add_dart_group_for_profile(
-                dart.profile,
-                &ranges,
-                usize::from(dart.streams),
-                Some(irq),
-                dart.apf,
-            )
-            .map_err(|error| alloc::format!("DART placement: {error}"))?;
-        if let Some((physical, bytes)) = dart.smmu {
-            devices
-                .add_dart_smmu(placed[0], Range { physical, bytes })
-                .map_err(|error| alloc::format!("DART SMMU placement: {error:?}"))?;
-        }
-        darts.push(placed);
-    }
-    // The dcpext display coprocessor and its register apertures, presenting
-    // to the GOP framebuffer, mastering through its DART and reading swap
-    // surfaces through the display pipe's; it needs a scanout, so it is
-    // placed only when the firmware gave Stela a mode.
-    let native_dart = |group: usize, instance: usize| {
-        let mounted = darts
-            .get(group)
-            .ok_or("native DMA route names an unmounted DART group")?;
-        let declared = board
-            .and_then(|board| board.darts.get(group))
-            .ok_or("native DMA route has no declared DART group")?;
-        if mounted.len() != declared.instances.len() {
-            return Err("native DMA mounted DART group differs from its complete declaration");
-        }
-        mounted
-            .get(instance)
-            .copied()
-            .ok_or("native DMA route names an unmounted DART instance")
-    };
-    if let Some(dcp) = board.and_then(|board| board.dcp.as_ref()) {
-        for route in &dcp.surface_routes {
-            devices.validate_native_dart(
-                "DCP declared surface mapper",
-                native_dart(route.iommu, route.instance)?,
-                route.stream as usize,
-            )?;
-        }
-        let screen = cables
-            .screen
-            .ok_or("visible external DCP requires one actual GOP scanout")?;
-        let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
-        let range = |(physical, bytes): (u64, u64)| Range { physical, bytes };
-        devices.add_dcpext(
-            range(dcp.wrapper),
-            dcp.interrupts,
-            dcp.quiesced,
-            dcp.role,
-            dcp.identity,
-            alloc::boxed::Box::new(display::GopScanout::new(screen)),
-            (native_dart(dcp.iommu, dcp.instance)?, dcp.stream as usize),
-            dcp.window,
-            match (
-                dcp.surface,
-                dcp.surface_instance,
-                dcp.surface_routes.first(),
-            ) {
-                (Some((iommu, stream)), Some(instance), Some(primary))
-                    if (primary.iommu, primary.instance, primary.stream)
-                        == (iommu, instance, stream) =>
-                {
-                    Some((native_dart(iommu, instance)?, stream as usize))
-                }
-                (None, None, None) => None,
-                _ => return Err("DCP surface DMA owner metadata is incomplete".into()),
-            },
-        )?;
-        let regions: Vec<(&'static str, Range)> = dcp
-            .regions
-            .iter()
-            .map(|&(name, reg)| (name, range(reg)))
-            .collect();
-        let mut display_darts = Vec::new();
-        for group in
-            core::iter::once(dcp.iommu).chain(dcp.surface_routes.iter().map(|route| route.iommu))
-        {
-            let instances = darts.get(group).ok_or("display DART group is missing")?;
-            for instance in 0..instances.len() {
-                let owner = native_dart(group, instance)?;
-                if !display_darts.contains(&owner) {
-                    display_darts.push(owner);
-                }
-            }
-        }
-        devices.add_display_with_darts(&regions, dcp.role, &display_darts)?;
-    }
-    if let Some(sep) = board.and_then(|board| board.sep) {
-        use stela_runtime::machine::apple::AscLines;
-        let group = darts.get(sep.iommu).ok_or("SEP DART group is missing")?;
-        let [dart] = group.as_slice() else {
-            return Err("SEP DMA owner requires explicit multiple-TRAD selection".into());
-        };
-        if sep.instance != 0 {
-            return Err("SEP selected TRAD is outside its sole-owner group".into());
-        }
-        let ranges = sep
-            .ranges
-            .map(|(physical, bytes)| Range { physical, bytes });
-        let lines = AscLines::from_interrupts(sep.irqs.map(|irq| AicInput::new(0, irq as u16)));
-        let ecid = sep
-            .ecid
-            .ok_or("SEP needs /chosen unique-chip-id (the machine ECID); none in the tree")?;
-        let state = match sep_state {
-            Some(location) => {
-                output::arguments(format_args!("SEP state on the machine-state partition\n"));
-                location
-            }
-            None => {
-                // Without `--nor` no host partition holds it: the roots
-                // and anti-replay store last this power cycle.
-                output::arguments(format_args!(
-                    "SEP state volatile: nonces end at power-off\n"
-                ));
-                stela_runtime::machine::apple::sep_state::Location::Volatile
-            }
-        };
-        devices.add_sep(
-            ranges,
-            lines,
-            (*dart, sep.stream as usize),
-            alloc::boxed::Box::new(bundle::entropy),
-            stela_runtime::machine::apple::SepProvisioning {
-                security: sep.security,
-                ecid,
-                observe: sep_observe,
-                state,
-            },
-        )?;
-    }
-    let mut restore_usb = None;
-    let usbs = board.map_or(0, |board| board.usbs.len());
-    for (index, usb) in board.iter().flat_map(|board| &board.usbs).enumerate() {
-        // The controller's stream translates through the group's first TRAD
-        // instance, as SEP and AES masters do; per-instance selection is the
-        // bus master's contract (`soc::Iommu`).
-        let group = darts.get(usb.iommu).ok_or("USB DART group is missing")?;
-        for (instance, _) in group.iter().enumerate() {
-            devices.validate_native_dart(
-                "USB declared bank",
-                native_dart(usb.iommu, instance)?,
-                usb.stream as usize,
-            )?;
-        }
-        let id = devices.add_usb(usb, native_dart(usb.iommu, 0)?)?;
-        // The native keyboard and pointer plug into the last connector
-        // (J473AP usb-drd1), the Mac being the downstream-facing port.
-        let hub = cables.input || !cables.usb.disks.is_empty() || cables.usb.network.is_some();
-        if hub && index + 1 == usbs && index != 0 {
-            let disks = cables.usb.disks.len();
-            let network = cables.usb.network;
-            devices.attach_input(usb.port, core::mem::take(&mut cables.usb))?;
-            output::arguments(format_args!(
-                "INPUT attached to USB-C port {} with {disks} USB disks, network={network:?}\n",
-                usb.port
-            ));
-        }
-        // The first controller (J473AP usb-drd0, the back-left connector) is
-        // the one a restore host or the native client uses; the others are
-        // left uncabled.
-        if index != 0 {
-            continue;
-        }
-        if cables.restore {
-            // A restore host is cabled to this connector from power-on: it
-            // is the USB host and sources VBUS, so the Mac is a USB2 device.
-            // The connector's HPM die and controller observe the same cable.
-            use stela_runtime::machine::apple::typec::{
-                Attached, DataRole, Orientation, Usb2Speed,
-            };
-            let host = Attached {
-                orientation: Orientation::Normal,
-                role: DataRole::Ufp,
-                source: false,
-                vbus: true,
-                speed: Usb2Speed::High,
-            };
-            devices.set_connection(usb.port, Some(host))?;
-            restore_usb = Some(id);
-        } else {
-            devices.usb_client(id)?.query_type()?;
-        }
-    }
-    if let Some(aes) = board.and_then(|board| board.aes) {
-        let ranges: Vec<Range> = aes
-            .ranges
-            .into_iter()
-            .chain(aes.dkey)
-            .map(|(physical, bytes)| Range { physical, bytes })
-            .collect();
-        // No per-installation UID1 key is provisioned yet: the engine
-        // reports every hardware key disabled.
-        devices.add_aes(
-            &ranges,
-            aes.config,
-            Some(AicInput::new(0, aes.irq as u16)),
-            (native_dart(aes.iommu, aes.instance)?, aes.stream as usize),
-            None,
-        )?;
-    }
-    if let Some(states) = board.and_then(|board| board.power_states.as_ref()) {
-        let blocks: Vec<Range> = states
-            .blocks
-            .iter()
-            .map(|&(physical, bytes)| Range { physical, bytes })
-            .collect();
-        devices.add_power_states(&blocks, &states.registers)?;
-        output::arguments(format_args!(
-            "DEVICES pmgr power-states={} blocks={}\n",
-            states.registers.len(),
-            blocks.len()
-        ));
-    }
-    for bank in board.map_or(&[][..], |b| &b.bridges) {
-        devices.add_bridge(
-            bank.physical,
-            &bank.fields,
-            bank.header,
-            &bank.configs,
-            bank.axi,
-        )?;
-    }
-    if let Some(bank) = board.and_then(|b| b.soc_dpe.as_ref()) {
-        devices.add_soc_dpe(bank.physical, &bank.samples)?;
-    }
-    for bank in board.map_or(&[][..], |board| &board.power_banks) {
-        devices.add_soc_power(bank.physical, bank.kind)?;
-    }
-    if let Some(bank) = board.and_then(|board| board.wake_masks.as_ref()) {
-        devices.add_wake_masks(bank.physical, bank.valid, bank.smc_wake)?;
-    }
-    for bank in board.map_or(&[][..], |board| &board.performance) {
-        devices.add_performance_counters(bank.physical, &bank.selectors)?;
-    }
-    for bank in board.map_or(&[][..], |board| &board.energy) {
-        devices.add_cpu_energy(bank.physical, bank.cpm)?;
-    }
-    for (index, cluster) in board
-        .map_or(&[][..], |board| &board.clusters)
-        .iter()
-        .enumerate()
-    {
-        let events = board
-            .and_then(|b| b.cluster_events.get(index))
-            .ok_or("CPU cluster has no DT event selection")?;
-        // The board validated each CPM word against the translated DT reg.
-        devices.add_cpm_power(cluster.base + 0x40000, cluster.counter_map)?;
-        devices.add_cpu_cluster(
-            cluster.base,
-            cluster.dvmr,
-            cluster.pstates,
-            cluster.counter_capacity,
-            cluster.counter_map,
-            events,
-        )?;
-    }
-    if let Some((physical, _)) = board.and_then(|board| board.aon_fuses) {
-        devices.add_aon_fuses(physical)?;
-    }
-    let memory_controller = board.and_then(|board| board.memory_controller.as_ref());
-    let memory_cache = board.and_then(|board| board.memory_cache.as_ref());
-    if let Some(controller) = memory_controller {
-        let mut programmed = programmed;
-        for (region, group) in programmed.iter_mut().zip(controller.layout.groups) {
-            if group.is_none() {
-                *region = None;
-            }
-        }
-        devices.add_memory_controller(
-            &controller.apertures,
-            controller.layout,
-            programmed,
-            memory_cache.map(|mcc| mcc.cache),
-        )?;
-    }
-    if let Some(controller) = board.and_then(|board| board.io_access_controller.as_ref()) {
-        devices.add_io_access_controller(
-            &controller.apertures,
-            controller.layout,
-            amcc::ctrr_a(programmed[0]),
-        )?;
-    }
-    if let Some(mcc) = memory_cache {
-        let (physical, bytes, channels) = mcc.channels;
-        devices.add_memory_channels(
-            Range { physical, bytes },
-            channels,
-            mcc.ptd.physical,
-            &mcc.ptd.ranges,
-        )?;
-        output::arguments(format_args!(
-            "DEVICES mcc cache={}MiB ways={} dcs-channels={channels} ptd={:#x} ptd-ranges={}\n",
-            mcc.cache.bytes >> 20,
-            mcc.cache.ways,
-            mcc.ptd.physical,
-            mcc.ptd.ranges.len()
-        ));
-    }
-    output::arguments(format_args!(
-        "DEVICES uart={:#x}+{:#x} irq={} wdt={:#x}+{:#x} irq={} aic={:#x} nr_irq={} \
-         lockdown-blocks={} amcc-apertures={} darts={} aes={} aic-timebase=unplaced\n",
-        uart.0.physical,
-        uart.0.bytes,
-        uart.1.irq,
-        wdt.0.physical,
-        wdt.0.bytes,
-        wdt.1.irq,
-        aic.physical,
-        aic.inputs,
-        board.map_or(0, |board| board.lockdown.len()),
-        memory_controller.map_or(0, |controller| controller.apertures.len()),
-        darts.len(),
-        board.and_then(|board| board.aes).is_some()
-    ));
-    // Last: the `sgx` window spans other banks (gfx-asc, a PMGR fabric
-    // bridge) and owns only the bytes they leave.
-    if let Some(gfx) = board.and_then(|b| b.gfx.as_ref()) {
-        devices.add_gfx(gfx, agx_observe)?;
-    }
-    // Finalize only after every native constructor, including SGX's final
-    // overlapping-window placement, has registered its actual banks.
-    if let Some(board) = board {
-        if let Some(states) = board.power_states.as_ref() {
-            let retention = board
-                .darts
-                .iter()
-                .map(|dart| dart.retention)
-                .collect::<Vec<_>>();
-            devices.connect_power_resources(states, &darts, &retention)?;
-            output::arguments(format_args!(
-                "DEVICES pmgr lifecycle-refusals={} resources={}\n",
-                devices.power_refusals().len(),
-                states.resources.len()
-            ));
-        } else if board
-            .darts
-            .iter()
-            .any(|dart| !dart.clock_gates.is_empty() || !dart.power_gates.is_empty())
-        {
-            return Err("DART resource gates require a modeled PMGR".into());
-        }
-    }
-    if cables.restore && restore_usb.is_none() {
-        return Err("restore study requires a DT-placed USB device".into());
-    }
-    Ok((devices, restore_usb))
+    devices.add_aic(
+        ARM_IO + J473_AIC.0,
+        J473_AIC.1,
+        AicLayout::aic2(J473_AIC_EVENT, J473_AIC_TIMESTAMPS),
+    )?;
+    Ok((devices, None))
 }
 
 static EVENTS: AtomicU64 = AtomicU64::new(0);
@@ -2191,34 +1658,36 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 .map(bundle::contents),
         }
     };
+    let scanout = handoff.screen.map(|screen| {
+        let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
+        alloc::boxed::Box::new(display::GopScanout::new(screen))
+            as alloc::boxed::Box<dyn stela_runtime::machine::apple::Scanout>
+    });
     let (devices, restore_usb) = match devices(
         board.as_ref(),
-        memory_locks(read_only_region, &core_locks),
-        reset,
-        Clock {
+        mount::Inputs {
+            programmed: mount::memory_locks(read_only_region, &core_locks),
+            reset,
             now,
             wall: handoff.wall_seconds.map(|seconds| WallClock {
                 // The firmware's time, carried forward to the counter's `now`.
                 unix_seconds: seconds + (host::rdtsc() - handoff.wall_tsc) / handoff.tsc_hz,
                 counter: now,
             }),
-        },
-        Disks {
             backing,
             sep_state,
             sep_observe: options.sep_observe,
             agx_observe: options.agx_observe,
-        },
-        Cables {
+            entropy: alloc::boxed::Box::new(bundle::entropy),
             restore: options.restore || options.install.is_some(),
             input: options.input,
             usb: stela_runtime::machine::apple::UsbCables {
                 disks: usb_disks,
                 network: guest_network.as_ref().map(network::GuestNetwork::mac),
             },
-            screen: handoff.screen,
+            scanout,
+            firmware: &firmware,
         },
-        &firmware,
     ) {
         Ok(devices) => devices,
         Err(error) => {
