@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn mounted_gpio_refusal_keeps_real_aic_delivery_owned() {
         use crate::platform::apple::{
-            aic::{AIC2_IRQ_CFG, Aic2, Aic2Config},
+            aic::{AIC2_IRQ_CFG, AIC2_TIMESTAMPS, Aic2, Aic2Config},
             bus::Bus,
         };
         let net = Net::new();
@@ -720,6 +720,7 @@ mod tests {
             irq_config: AIC2_IRQ_CFG,
             event_offset: 0x4000,
             timestamps: 0,
+            timestamp_base: AIC2_TIMESTAMPS,
             cpus: 1,
             default_cpus: 1,
             target_groups: [None; 4],

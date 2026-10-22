@@ -3,7 +3,7 @@
 //! m1n1 `src/aic.c` reads cap0-offset, maxnumirq-offset,
 //! extintrcfg-stride, intmaskset-stride and intmaskclear-stride from the ADT.
 //! Unestablished banks must not be supplied using guessed offsets.
-use super::{Aic2Config, CONFIG, INFO1, INFO3, TIMESTAMP_STRIDE, TIMESTAMPS, VERSION};
+use super::{Aic2Config, CONFIG, INFO1, INFO3, TIMESTAMP_STRIDE, VERSION};
 use alloc::vec::Vec;
 
 /// Absolute offsets of one die's independent register arrays. The caller
@@ -91,7 +91,7 @@ impl Aic2Layout {
             let bytes = TIMESTAMP_STRIDE
                 .checked_mul(config.timestamps as u64)
                 .ok_or("AIC timestamp register extent overflows")?;
-            ranges.push((TIMESTAMPS, bytes));
+            ranges.push((config.timestamp_base, bytes));
         }
         let bits_bytes = 4 * u64::from(config.max_irq / 32);
         for die in &self.dies {

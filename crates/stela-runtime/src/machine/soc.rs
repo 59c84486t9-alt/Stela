@@ -19,7 +19,7 @@ use super::{
 };
 use crate::platform::apple::{
     aes, agx,
-    aic::{AIC3_IRQ_CFG, AicLayout},
+    aic::{AIC3_IRQ_CFG, AIC3_TIMESTAMPS, AicLayout},
     aic1::AIC1_EVENT,
     amcc, ans, asc, atc_phy, bridge, cluster, core_counters, coresight, cpm, cpustart, dart, dcp,
     dpe, energy, fuse, gpio, i2c, nor, pmu, power, ptd, sart, smc, spi, spmi, wake,
@@ -56,10 +56,12 @@ pub use topology::{KernelLimits, assigned};
 /// number of each `cluster-type`, and the `aic` node's `compatible` with the
 /// offset of its event register from its `reg`: for the M1's `aic,1` the
 /// event register in its core block (Linux `AIC_EVENT`, 0x2004), and for an
-/// `aic,2` or `aic,3` the separate block Linux `arch/arm64/boot/dts/apple`
-/// places (0x8000 in `t8112.dtsi`, 0xc000 in `t600x-die0.dtsi` and
-/// `t602x-die0.dtsi`, 0x40000 in `t8122.dtsi`). The SoCs whose AIC no public
-/// DeviceTree places have none. `dram_base` is where the
+/// `aic,2` or `aic,3` the separate block whose offset iBoot writes to the
+/// ADT's `aic-iack-offset`, as Linux `arch/arm64/boot/dts/apple` places it
+/// (0x8000 in `t8112.dtsi`, 0xc000 in `t600x-die0.dtsi` and
+/// `t602x-die0.dtsi`, 0x40000 in `t8122.dtsi`, `t6030.dtsi`,
+/// `t6031-die0.dtsi` and `t8132.dtsi`) and [`AIC3_EVENT`] states for the
+/// later SoCs. `dram_base` is where the
 /// SoC places DRAM (the `memory@` node of Linux `t8103-jxxx.dtsi`,
 /// `t8112-jxxx.dtsi`, `t600x-j314-j316.dtsi` and `t600x-j375.dtsi`, which the
 /// t602x boards include); the SoCs without a public memory node have none,
@@ -325,6 +327,14 @@ const T8132_LIMITS: KernelLimits = KernelLimits::new(10, 2, 1);
 const T6041_LIMITS: KernelLimits = KernelLimits::new(16, 3, 2);
 const T8142_LIMITS: KernelLimits = KernelLimits::new(10, 2, 1);
 
+/// The event register offset every 26A434 M3-to-M6 iBoot writes to an
+/// `aic,3` node's `aic-iack-offset` (`mov w8, #0x40000` before the property
+/// name): J613 0x3c0f8, J514s 0x3b800, J514c 0x3e2a4, J773g 0x3a610, J614s
+/// 0x3c6e4, J614c 0x3c604, J813 0x3e79c and J873g 0x3cd14 in the decoded
+/// `iBoot.<board>.RELEASE.im4p` payloads, where J473's writes the 0x8000 of
+/// `t8112.dtsi` (0x39a88).
+const AIC3_EVENT: u64 = 0x40000;
+
 /// The CPU start registers' offsets from `/arm-io/pmgr` `reg[0]`, m1n1
 /// `src/smp.c` `CPU_START_OFF_*` and the chips its `smp_init` gives each.
 const CPU_START_T8103: u64 = 0x54000;
@@ -404,7 +414,7 @@ const M3_MAX: Soc = Soc {
     pmgr: "pmgr1,t6031",
     chip: Chip::AppleM3,
     cores: &ep_cores(0x048, 0x049, None),
-    aic: None,
+    aic: Some(("aic,3", AIC3_EVENT)),
     dram_base: None,
     lockdown: Some(LOCKDOWN),
     limits: Some(T6031_LIMITS),
@@ -548,7 +558,7 @@ const SOCS: [Soc; 18] = [
         pmgr: "pmgr1,t8122",
         chip: Chip::AppleM3,
         cores: &ep_cores(0x042, 0x043, None),
-        aic: Some(("aic,3", 0x40000)),
+        aic: Some(("aic,3", AIC3_EVENT)),
         dram_base: None,
         lockdown: Some(LOCKDOWN),
         limits: Some(T8122_LIMITS),
@@ -567,7 +577,7 @@ const SOCS: [Soc; 18] = [
         pmgr: "pmgr1,t6030",
         chip: Chip::AppleM3,
         cores: &ep_cores(0x044, 0x045, None),
-        aic: None,
+        aic: Some(("aic,3", AIC3_EVENT)),
         dram_base: None,
         lockdown: Some(LOCKDOWN),
         limits: Some(T6030_LIMITS),
@@ -602,7 +612,7 @@ const SOCS: [Soc; 18] = [
         pmgr: "pmgr1,t8132",
         chip: Chip::AppleM4,
         cores: &ep_cores(0x052, 0x053, None),
-        aic: None,
+        aic: Some(("aic,3", AIC3_EVENT)),
         dram_base: None,
         lockdown: None,
         limits: Some(T8132_LIMITS),
@@ -621,7 +631,7 @@ const SOCS: [Soc; 18] = [
         pmgr: "pmgr1,t6041",
         chip: Chip::AppleM4,
         cores: &ep_cores(0x054, 0x055, None),
-        aic: None,
+        aic: Some(("aic,3", AIC3_EVENT)),
         dram_base: None,
         lockdown: None,
         limits: Some(T6041_LIMITS),
@@ -640,7 +650,7 @@ const SOCS: [Soc; 18] = [
         pmgr: "pmgr1,t6041",
         chip: Chip::AppleM4,
         cores: &ep_cores(0x058, 0x059, None),
-        aic: None,
+        aic: Some(("aic,3", AIC3_EVENT)),
         dram_base: None,
         lockdown: None,
         limits: Some(T6041_LIMITS),
@@ -659,7 +669,7 @@ const SOCS: [Soc; 18] = [
         pmgr: "pmgr1,t8142",
         chip: Chip::AppleM5,
         cores: &ep_cores(0x062, 0x063, None),
-        aic: None,
+        aic: Some(("aic,3", AIC3_EVENT)),
         dram_base: None,
         lockdown: None,
         limits: Some(T8142_LIMITS),
@@ -678,7 +688,7 @@ const SOCS: [Soc; 18] = [
         pmgr: "pmgr2,arch",
         chip: Chip::AppleM6,
         cores: &M6_CORES,
-        aic: None,
+        aic: Some(("aic,3", AIC3_EVENT)),
         dram_base: None,
         lockdown: None,
         limits: None,
@@ -702,7 +712,7 @@ pub struct Cpus {
     /// The PEs in `/cpus` order.
     pub processors: Vec<Identity>,
     /// The `aic` node's `compatible` and its event register's offset from its
-    /// `reg`, on a SoC whose AIC a public DeviceTree places.
+    /// `reg`, on a SoC whose event register offset is established.
     pub aic: Option<(&'static str, u64)>,
     /// The SoC's lockdown CONTROL offsets in `cpu-impl-reg` and
     /// `cpm-impl-reg`, where known.
@@ -710,7 +720,7 @@ pub struct Cpus {
 }
 
 /// The `aic` node's `compatible` and its event register's offset from its
-/// `reg` on the SoC with `chip_id`, when a public DeviceTree places it.
+/// `reg` on the SoC with `chip_id`, where established.
 pub fn aic(chip_id: u32) -> Option<(&'static str, u64)> {
     SOCS.iter().find(|soc| soc.chip_id == chip_id)?.aic
 }
@@ -952,29 +962,36 @@ pub struct InterruptController {
     pub layout: AicLayout,
 }
 
-/// The register offsets an `aic,3` node states, as m1n1 `aic.c` reads them,
-/// and the AICv2 layout they must match (Linux `aic3_info` hard-codes them
-/// for the M3 through the M5).
-const AIC3_OFFSETS: [(&str, u32); 5] = [
+/// The register offsets and masks an `aic,3` node states, as m1n1 `aic.c`
+/// and the 26A434 `AppleInterruptControllerV3` (`OverrideRegMap`) read them,
+/// and the modeled layout they must match: the AICv2's registers with its
+/// arrays at 0x10000 (Linux `aic3_info`) and its timestamp slots at 0x1000
+/// ([`AIC3_TIMESTAMPS`]).
+const AIC3_OFFSETS: [(&str, u32); 10] = [
     ("rev-offset", 0),
     ("cap0-offset", 0x4),
     ("maxnumirq-offset", 0xc),
     ("aicglbcfg-offset", 0x14),
     ("extint-baseaddress", AIC3_IRQ_CFG as u32),
+    ("pubstampcfg0-offset", AIC3_TIMESTAMPS as u32),
+    ("pubstamplo0-offset", AIC3_TIMESTAMPS as u32 + 8),
+    ("pubstampdhi-offset", AIC3_TIMESTAMPS as u32 + 0xc),
+    ("pubstampstride-mask", 0x10),
+    ("pubstampdcfg0en-mask", 1 << 31),
 ];
 
 /// The layout of an `/arm-io/aic` node compatible with `version` whose event
 /// register is `event` bytes from its `reg`: the AICv1's, the AICv2's, or the
-/// AICv3's once its stated offsets match the modeled layout.
+/// AICv3's once its stated offsets match the modeled layout. An `aic,3`
+/// with `max-extint-num` selects the driver's doubled array layout
+/// (`getAICIntMaskSetOffset`), which is not modeled.
 fn aic_layout(aic: &Node<'_>, version: &str, event: u64) -> Result<AicLayout, String> {
+    let timestamps = aic.first_u32("#shared-timestamps").unwrap_or(0);
+    let timestamps = u8::try_from(timestamps)
+        .map_err(|_| format!("/arm-io/aic has {timestamps} shared timestamps"))?;
     match version {
         "aic,1" => return Ok(AicLayout::V1),
-        "aic,2" => {
-            let timestamps = aic.first_u32("#shared-timestamps").unwrap_or(0);
-            let timestamps = u8::try_from(timestamps)
-                .map_err(|_| format!("/arm-io/aic has {timestamps} shared timestamps"))?;
-            return Ok(AicLayout::aic2(event, timestamps));
-        }
+        "aic,2" => return Ok(AicLayout::aic2(event, timestamps)),
         _ => {}
     }
     for (name, expected) in AIC3_OFFSETS {
@@ -987,7 +1004,10 @@ fn aic_layout(aic: &Node<'_>, version: &str, event: u64) -> Result<AicLayout, St
             ));
         }
     }
-    Ok(AicLayout::aic3(event))
+    if aic.property("max-extint-num").is_some() {
+        return Err("/arm-io/aic max-extint-num selects an unmodeled array layout".into());
+    }
+    Ok(AicLayout::aic3(event, timestamps))
 }
 
 /// The `compatible` of the S5L UART the engine models (`platform::apple::uart`).
@@ -6514,7 +6534,10 @@ mod tests {
         // J604AP (Mac16,1): six M4 E cores and four P cores.
         let layout = [(b'E', 0), (b'E', 5), (b'P', 0x100), (b'P', 0x103)];
         let found = cpus(0x8132, "Apple M4", &layout_of(&layout)).unwrap();
-        assert_eq!((found.chip, found.aic), (Chip::AppleM4, None));
+        assert_eq!(
+            (found.chip, found.aic),
+            (Chip::AppleM4, Some(("aic,3", AIC3_EVENT)))
+        );
         let identities = found.processors;
         assert_eq!(identities[1].midr, 0x611f_0520);
         assert_eq!(
@@ -8165,7 +8188,7 @@ mod tests {
         let found = board(&tree_with(0x8122, "Apple M3", M3, &AIC3_OFFSETS)).unwrap();
         assert_eq!(
             (found.cpus.chip, found.aic.layout),
-            (Chip::AppleM3, AicLayout::aic3(0x40000))
+            (Chip::AppleM3, AicLayout::aic3(0x40000, 0))
         );
         assert_eq!(
             board(&tree_with(0x8122, "Apple M3", M3, &AIC3_OFFSETS[1..])),
@@ -8177,11 +8200,23 @@ mod tests {
             board(&tree_with(0x8122, "Apple M3", M3, &moved)),
             Err("/arm-io/aic extint-baseaddress is 0x20000, not the modeled 0x10000".into())
         );
-        // The M4's AICv3 event register has no public placement.
+        let mut doubled = AIC3_OFFSETS.to_vec();
+        doubled.push(("max-extint-num", 0x2000));
         assert_eq!(
-            board(&tree_with(0x8132, "Apple M4", M3, &AIC3_OFFSETS)),
-            Err("the SoC's AIC event register offset is unknown".into())
+            board(&tree_with(0x8122, "Apple M3", M3, &doubled)),
+            Err("/arm-io/aic max-extint-num selects an unmodeled array layout".into())
         );
+        // iBoot places every later AICv3's event register at +0x40000 too.
+        for (chip_id, name, chip) in [
+            (0x8132, "Apple M4", Chip::AppleM4),
+            (0x8142, "Apple M5", Chip::AppleM5),
+        ] {
+            let found = board(&tree_with(chip_id, name, M3, &AIC3_OFFSETS)).unwrap();
+            assert_eq!(
+                (found.cpus.chip, found.aic.layout),
+                (chip, AicLayout::aic3(AIC3_EVENT, 0))
+            );
+        }
     }
     #[test]
     fn sep_placement_uses_the_native_nub_and_is_admitted_by_its_sep_role() {

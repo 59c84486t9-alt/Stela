@@ -2572,9 +2572,8 @@ impl AppleDevices {
     /// inputs the board wires (one more than the highest DeviceTree
     /// `interrupts` value under the AIC), which the model reports in its INFO
     /// or CAP0 register (m1n1 `aic.c`, Linux `irq-apple-aic.c`). An AICv2's
-    /// MAX_IRQ rounds it up to a whole 32-bit mask word and its `layout`
-    /// says where its per-die arrays and event register are; an AICv1's are
-    /// fixed.
+    /// or AICv3's `layout` gives its MAX_IRQ and says where its per-die
+    /// arrays, timestamp slots and event register are; an AICv1's are fixed.
     pub fn add_aic(&mut self, physical: u64, nr_irq: u16, layout: AicLayout) -> Result<(), String> {
         if self.aic.is_some() {
             return Err("AIC owner is already bound".into());
@@ -2591,12 +2590,14 @@ impl AppleDevices {
                 max_irq,
                 event,
                 timestamps,
+                timestamp_base,
             } => {
                 let config = Aic2Config {
                     version,
                     timestamps: usize::from(timestamps),
+                    timestamp_base,
                     nr_irq,
-                    max_irq: max_irq.unwrap_or(nr_irq.div_ceil(32) * 32),
+                    max_irq,
                     irq_config,
                     event_offset: event,
                     cpus: 1,

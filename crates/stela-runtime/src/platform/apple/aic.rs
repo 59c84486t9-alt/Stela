@@ -50,9 +50,25 @@
 //! AICs report a revision below 0xb (inference); what each chip reports is
 //! not public.
 //!
+//! Below that revision the `aic,3` driver, one build on every 26A434 M3 to M6
+//! kernel (J613, J514s, J514c, J773g, J873g), hard-codes the per-die arrays
+//! as the AICv2's 4096-IRQ layout moved to `extint-baseaddress`: IRQ_CFG at
+//! +0, `MASK_SET` at +0x4400, `MASK_CLR` at +0x4600 and `HW_STATE` at
+//! +0x4800, with a die stride of 0x4a00 unless the ADT states one
+//! (`getAICExtIntrCfgOffset`, `getAICIntMaskSetOffset`,
+//! `getAICIntMaskClrOffset`, `getAICHwIntMonOffset`). Only an ADT
+//! `max-extint-num`, which no 26A434 Mac DeviceTree has, selects a doubled
+//! layout (+0x8800, +0x8c00, +0x9000), which is not modeled. So an AICv3's
+//! MAX_IRQ is [`AIC2_MAX_IRQ`] too: `startInterruptTimestamping` splits an
+//! IRQ number into its die by INFO3's MAX_IRQ. Its shared timestamps are the
+//! AICv2's slots at the ADT's `pubstampcfg0-offset` 0x1000
+//! ([`AIC3_TIMESTAMPS`]; `getAICPubStampCfgOffset`, `getAICPubStampLoOffset`
+//! and `getAICPubStampHiOffset` default to 0x1000, 0x1008 and 0x100c plus
+//! 0x10 per slot), with the same ENABLE, DIE and IRQ fields.
+//!
 //! Inferred, not documented: VER is the controller's generation (2 for
 //! AICv2, 3 for AICv3), below the `aic,3` driver's 0xb topology threshold;
-//! an AICv3's MAX_IRQ is NR_IRQ rounded up to a mask word; an enabled
+//! an enabled
 //! timestamp slot latches the system counter at each rising edge of its
 //! hardware input, and a slot reads 0 until it first latches; the reset state masks every IRQ with zero
 //! configuration; `SET`/`CLR` reads return the current bits; IRQs with TARGET 0
@@ -98,11 +114,14 @@ const CONFIG: u64 = 0x0014;
 pub const AIC2_IRQ_CFG: u64 = 0x2000;
 /// Where AICv3's per-die arrays start (Linux `AIC3_IRQ_CFG`).
 pub const AIC3_IRQ_CFG: u64 = 0x10000;
-/// An AICv2's IRQs per die, which fix its per-die array layout.
+/// An AICv2's or AICv3's IRQs per die, which fix its per-die array layout.
 pub const AIC2_MAX_IRQ: u16 = 4096;
 
-/// The first shared timestamp slot and the distance between slots.
-const TIMESTAMPS: u64 = 0x1800;
+/// An AICv2's first shared timestamp slot (`AppleInterruptControllerV2`).
+pub const AIC2_TIMESTAMPS: u64 = 0x1800;
+/// An AICv3's first shared timestamp slot (ADT `pubstampcfg0-offset`).
+pub const AIC3_TIMESTAMPS: u64 = 0x1000;
+/// The distance between shared timestamp slots.
 const TIMESTAMP_STRIDE: u64 = 0x10;
 const TIMESTAMP_LOW: u64 = 0x8;
 const TIMESTAMP_HIGH: u64 = 0xc;
@@ -120,18 +139,20 @@ const TARGET_GROUPS: usize = 4;
 /// Which AIC a board has: an AICv1 (`aic1`), whose event register is in its
 /// core block, or an AICv2 or AICv3 of generation `version` with its per-die
 /// arrays at `irq_config` ([`AIC2_IRQ_CFG`] or [`AIC3_IRQ_CFG`]) sized for
-/// `max_irq` IRQs (NR_IRQ rounded up to a mask word when `None`), its event
+/// `max_irq` IRQs ([`AIC2_MAX_IRQ`] for both), its event
 /// register `event` bytes from the core block and `timestamps` shared
-/// timestamp slots.
+/// timestamp slots from `timestamp_base` ([`AIC2_TIMESTAMPS`] or
+/// [`AIC3_TIMESTAMPS`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AicLayout {
     V1,
     V2 {
         version: u8,
         irq_config: u64,
-        max_irq: Option<u16>,
+        max_irq: u16,
         event: u64,
         timestamps: u8,
+        timestamp_base: u64,
     },
 }
 
@@ -142,19 +163,22 @@ impl AicLayout {
         Self::V2 {
             version: 2,
             irq_config: AIC2_IRQ_CFG,
-            max_irq: Some(AIC2_MAX_IRQ),
+            max_irq: AIC2_MAX_IRQ,
             event,
             timestamps,
+            timestamp_base: AIC2_TIMESTAMPS,
         }
     }
-    /// An AICv3 whose event register is `event` bytes from its core block.
-    pub const fn aic3(event: u64) -> Self {
+    /// An AICv3 whose event register is `event` bytes from its core block,
+    /// with `timestamps` shared timestamp slots.
+    pub const fn aic3(event: u64, timestamps: u8) -> Self {
         Self::V2 {
             version: 3,
             irq_config: AIC3_IRQ_CFG,
-            max_irq: None,
+            max_irq: AIC2_MAX_IRQ,
             event,
-            timestamps: 0,
+            timestamps,
+            timestamp_base: AIC3_TIMESTAMPS,
         }
     }
 }
@@ -177,6 +201,9 @@ pub struct Aic2Config {
     pub event_offset: u64,
     /// Shared timestamp slots (ADT `#shared-timestamps`).
     pub timestamps: usize,
+    /// Offset of the first timestamp slot: [`AIC2_TIMESTAMPS`] or
+    /// [`AIC3_TIMESTAMPS`].
+    pub timestamp_base: u64,
     pub cpus: usize,
     /// CPUs that receive IRQs whose TARGET is 0, as a bit mask.
     pub default_cpus: u64,
@@ -283,7 +310,7 @@ impl Aic2 {
         if config.timestamps != 0
             && TIMESTAMP_STRIDE
                 .checked_mul(config.timestamps as u64)
-                .and_then(|bytes| TIMESTAMPS.checked_add(bytes))
+                .and_then(|bytes| config.timestamp_base.checked_add(bytes))
                 .is_none_or(|end| end > config.irq_config)
         {
             return invalid("the timestamp slots must end before the IRQ_CFG array");
@@ -459,10 +486,11 @@ impl Aic2 {
             offset if offset == self.config.event_offset => return Some(Register::Event),
             _ => {}
         }
-        if (TIMESTAMPS..TIMESTAMPS + TIMESTAMP_STRIDE * self.timestamps.len() as u64)
+        let timestamps = self.config.timestamp_base;
+        if (timestamps..timestamps + TIMESTAMP_STRIDE * self.timestamps.len() as u64)
             .contains(&offset)
         {
-            let slot = ((offset - TIMESTAMPS) / TIMESTAMP_STRIDE) as usize;
+            let slot = ((offset - timestamps) / TIMESTAMP_STRIDE) as usize;
             return match offset % TIMESTAMP_STRIDE {
                 0 => Some(Register::TimestampConfig(slot)),
                 TIMESTAMP_LOW => Some(Register::TimestampLow(slot)),
@@ -724,6 +752,7 @@ mod tests {
             irq_config: IRQ_CFG,
             event_offset: EVENT,
             timestamps: 16,
+            timestamp_base: AIC2_TIMESTAMPS,
             cpus,
             default_cpus: 1,
             target_groups: [Some(0b0001), Some(0b0010), None, None],
@@ -753,12 +782,12 @@ mod tests {
         write(
             &mut aic,
             &mut latch,
-            TIMESTAMPS,
+            AIC2_TIMESTAMPS,
             TIMESTAMP_ENABLE | u32::from(UART.irq),
         );
         aic.set_input(UART, true, &mut Access::new(0, 123, &mut latch))
             .unwrap();
-        write(&mut aic, &mut latch, TIMESTAMPS, 0);
+        write(&mut aic, &mut latch, AIC2_TIMESTAMPS, 0);
         let active = aic.lifecycle;
         let paused = LifecycleState {
             clocked: false,
@@ -866,7 +895,7 @@ mod tests {
             assert!(aic.enabled);
         }
         write(&mut aic, &mut latch, CONFIG, 0);
-        write(&mut aic, &mut latch, TIMESTAMPS, TIMESTAMP_ENABLE | 5);
+        write(&mut aic, &mut latch, AIC2_TIMESTAMPS, TIMESTAMP_ENABLE | 5);
         assert!(
             aic.check_lifecycle(LifecycleState {
                 clocked: false,
@@ -939,6 +968,7 @@ mod tests {
             irq_config: AIC2_IRQ_CFG,
             event_offset: 0x8000,
             timestamps: 16,
+            timestamp_base: AIC2_TIMESTAMPS,
             cpus: 1,
             default_cpus: 1,
             target_groups: [None; 4],
@@ -1112,6 +1142,7 @@ mod tests {
             irq_config: IRQ_CFG,
             event_offset: EVENT,
             timestamps: 16,
+            timestamp_base: AIC2_TIMESTAMPS,
             cpus: 2,
             default_cpus: 1,
             target_groups: [Some(1), Some(2), None, None],
@@ -1146,7 +1177,7 @@ mod tests {
         write(
             &mut aic,
             &mut latch,
-            TIMESTAMPS,
+            AIC2_TIMESTAMPS,
             TIMESTAMP_ENABLE | 1 << 24 | 32,
         );
         let input = AicInput::new(1, 32);
@@ -1157,11 +1188,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read(&mut aic, &mut latch, 0, TIMESTAMPS + TIMESTAMP_LOW),
+            read(&mut aic, &mut latch, 0, AIC2_TIMESTAMPS + TIMESTAMP_LOW),
             0x9abc_def0
         );
         assert_eq!(
-            read(&mut aic, &mut latch, 0, TIMESTAMPS + TIMESTAMP_HIGH),
+            read(&mut aic, &mut latch, 0, AIC2_TIMESTAMPS + TIMESTAMP_HIGH),
             0x1234_5678
         );
         assert_eq!(read(&mut aic, &mut latch, 0, first.hardware_state + 4), 0);
@@ -1245,7 +1276,7 @@ mod tests {
                 ..layout.clone()
             },
             Aic2Layout {
-                info1: TIMESTAMPS,
+                info1: AIC2_TIMESTAMPS,
                 ..layout.clone()
             },
             Aic2Layout {
@@ -1266,19 +1297,20 @@ mod tests {
         assert!(Aic2DieLayout::contiguous(u64::MAX - 3, 64).is_none());
     }
 
-    /// AICv3 (Linux `aic3_info`, `t8122.dtsi`): the same registers with the
-    /// per-die arrays at 0x10000 and, on T8122, the event register at
-    /// +0x40000.
+    /// AICv3 as the 26A434 `aic,3` driver addresses it: the AICv2's
+    /// 4096-IRQ arrays at 0x10000, `MASK_CLR` at 0x14600, the event register
+    /// at the +0x40000 iBoot publishes and the timestamp slots at 0x1000.
     #[test]
     fn aic3_moves_the_per_die_arrays() {
         let v3 = |irq_config, event_offset| {
             Aic2::new(Aic2Config {
                 version: 3,
                 nr_irq: NR_IRQ,
-                max_irq: MAX_IRQ,
+                max_irq: AIC2_MAX_IRQ,
                 irq_config,
                 event_offset,
-                timestamps: 0,
+                timestamps: 16,
+                timestamp_base: AIC3_TIMESTAMPS,
                 cpus: 1,
                 default_cpus: 1,
                 target_groups: [None; 4],
@@ -1287,21 +1319,29 @@ mod tests {
         let mut aic = v3(AIC3_IRQ_CFG, 0x40000).unwrap();
         assert_eq!(aic.span(), 0x40004);
         let mut latch = InterruptLatch::new();
-        let mask_clear = AIC3_IRQ_CFG + 4 * u64::from(MAX_IRQ) + 3 * 4 * u64::from(MAX_IRQ / 32);
         write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
-        write(&mut aic, &mut latch, mask_clear, 1 << 3);
+        write(&mut aic, &mut latch, 0x14600, 1 << 3);
         write(&mut aic, &mut latch, AIC3_IRQ_CFG + 4 * 3, 0);
+        write(&mut aic, &mut latch, AIC3_TIMESTAMPS, TIMESTAMP_ENABLE | 3);
         aic.set_input(
             AicInput::new(0, 3),
             true,
-            &mut Access::new(0, 0, &mut latch),
+            &mut Access::new(0, 77, &mut latch),
         )
         .unwrap();
         assert_eq!(read(&mut aic, &mut latch, 0, 0x40000), 1 << 16 | 3);
+        assert_eq!(
+            read(&mut aic, &mut latch, 0, AIC3_TIMESTAMPS + TIMESTAMP_LOW),
+            77
+        );
         let mut access = Access::new(0, 0, &mut latch);
         assert!(
             aic.read(AIC2_IRQ_CFG, Width::Word, &mut access).is_err(),
             "AICv2's array offset is unallocated"
+        );
+        assert!(
+            aic.read(AIC2_TIMESTAMPS, Width::Word, &mut access).is_err(),
+            "AICv2's timestamp offset is unallocated"
         );
         assert!(
             v3(AIC3_IRQ_CFG, EVENT).is_err(),

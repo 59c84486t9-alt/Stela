@@ -7,7 +7,8 @@
 //! `aic-ext-intr-cfg` are optional. m1n1 `aic.c` reads the same property from
 //! the ADT iBoot leaves for an `aic,2` or `aic,3`. The IPSW template has none,
 //! so Stela publishes the event offset of the SoC's row in `machine::soc`,
-//! which Linux's DeviceTrees place as the AIC's second `reg`.
+//! the value each board's iBoot writes there (and Linux's DeviceTrees place
+//! as the AIC's second `reg`).
 use crate::apple_device_tree::DeviceTree;
 use anyhow::{Result, ensure};
 use stela_runtime::machine::soc;
