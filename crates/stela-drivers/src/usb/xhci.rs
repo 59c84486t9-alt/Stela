@@ -80,6 +80,7 @@ mod lifecycle;
 pub(crate) mod model;
 mod power;
 mod quirks;
+pub mod renesas;
 mod reset;
 mod ring;
 mod streams;
@@ -854,6 +855,8 @@ pub struct Found {
     /// Descriptor inventory of all addressed devices, including hubs and devices
     /// without a supported class driver. Hardware state belongs to Controller.
     pub devices: Vec<Device>,
+    /// Resident or uploaded Renesas firmware, bound to the actual PCI revision.
+    pub controller_firmware: Option<renesas::Receipt>,
 }
 
 /// Starts the controller at `function`, enumerates its devices and binds
@@ -874,10 +877,24 @@ pub fn attach_with_provider(
     dma: &mut dyn DmaAllocator,
     firmware: &dyn crate::firmware::Provider,
 ) -> Result<Found, BlockError> {
+    attach_with_firmware_diagnostics(function, handoff, dma, firmware)
+        .map_err(renesas::Error::transport)
+}
+
+/// Attach with the original exact-target firmware and controller errors. The
+/// compatibility entry point retains its BlockError signature; callers that
+/// need provider diagnostics can use this additive boundary directly.
+pub fn attach_with_firmware_diagnostics(
+    function: &mut Function,
+    handoff: &Handoff,
+    dma: &mut dyn DmaAllocator,
+    firmware: &dyn crate::firmware::Provider,
+) -> Result<Found, renesas::Error> {
     let stream_policy = streams::pci_policy(function)?;
     let dma_profile = dma::Profile::pci(function.vendor, function.device);
     let quirks = quirks::Profile::pci(function)?;
     function.power_up(&handoff.clock)?;
+    let controller_firmware = renesas::prepare(function, handoff.clock, firmware)?;
     let bars = function.bars();
     // The capability, operational, runtime and doorbell registers all lie
     // in BAR 0, whatever its size (5.2.1): QEMU's is 16 KiB, a PC's 64 KiB
@@ -895,7 +912,7 @@ pub fn attach_with_provider(
         "xhci {:04x}:{:02x}:{:02x}.{}",
         address.segment, address.bus, address.device, address.function
     );
-    start_with_policies(
+    let mut found = start_with_policies(
         Box::new(registers),
         handoff.clock,
         dma,
@@ -907,7 +924,9 @@ pub fn attach_with_provider(
             quirks,
         },
         || quirks::after_reset(function, handoff.clock),
-    )
+    )?;
+    found.controller_firmware = controller_firmware;
+    Ok(found)
 }
 
 /// Starts the controller behind `registers`, enumerates its devices and

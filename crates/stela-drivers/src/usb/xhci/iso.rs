@@ -202,6 +202,9 @@ impl Queue {
             recovery: false,
         }
     }
+    pub(super) fn requires_cancellation(&self) -> bool {
+        self.recovery
+    }
     pub fn cancelled(&mut self) {
         self.active.clear();
         self.next = None;
