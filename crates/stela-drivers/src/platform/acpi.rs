@@ -201,11 +201,19 @@ pub enum Mode {
     Hardware,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HardwareState {
+    InterpreterOnly,
+    ActivationFailed,
+    Enabled,
+}
+
 /// The single ACPICA instance. This BSP-owned facade is neither Send nor Sync;
 /// the provider synchronizes asynchronous ACPICA callbacks separately.
 /// Handles borrow it, and cannot survive termination.
 pub struct Session {
     active: bool,
+    hardware: Cell<HardwareState>,
     ec_global_locks: Cell<usize>,
     notifications: RefCell<Vec<*mut NotifyContext>>,
     _local: PhantomData<*mut ()>,
@@ -250,6 +258,11 @@ impl Session {
         }
         Ok(Self {
             active: true,
+            hardware: Cell::new(if mode == Mode::Hardware {
+                HardwareState::Enabled
+            } else {
+                HardwareState::InterpreterOnly
+            }),
             ec_global_locks: Cell::new(0),
             notifications: RefCell::new(Vec::new()),
             _local: PhantomData,
@@ -261,9 +274,25 @@ impl Session {
     /// retrying. The provider's original capability attestation must still hold.
     pub fn enable_hardware(&mut self) -> Result<(), Error> {
         let guard = self.guard()?;
+        match self.hardware.get() {
+            HardwareState::Enabled => return guard.check(),
+            HardwareState::ActivationFailed => return Err(SUPPORT),
+            HardwareState::InterpreterOnly => {}
+        }
+        // C marks activation attempted before enabling hardware. That flag is
+        // deliberately not a success witness: even a partial attempt requires
+        // global shutdown before retry. Publish success only after both checks.
+        self.hardware.set(HardwareState::ActivationFailed);
         // SAFETY: the live session owns ACPICA and the native provider.
         checked(unsafe { stela_acpi_enable_hardware() })?;
-        guard.check()
+        guard.check()?;
+        self.hardware.set(HardwareState::Enabled);
+        Ok(())
+    }
+    /// True only after this provider's actual C activation succeeded, while its
+    /// original namespace remains valid. No caller can manufacture this witness.
+    pub fn hardware_enabled(&self) -> bool {
+        self.active && self.hardware.get() == HardwareState::Enabled && self.namespace_available()
     }
     /// Real ACPICA/FACS arbitration for an EC whose observed `_GLK` requires it.
     /// The EC retains this owner and its namespace lease through byte access.
@@ -359,6 +388,7 @@ impl Session {
             return Err(SUPPORT);
         }
         self.active = false;
+        self.hardware.set(HardwareState::ActivationFailed);
         // SAFETY: this session owns the globally reserved instance.
         let result = checked(unsafe { stela_acpi_stop() });
         if result.is_ok() {
@@ -561,6 +591,10 @@ impl Arguments {
     }
 }
 impl<'a> Handle<'a> {
+    /// Read the owning provider's successful activation and namespace witness.
+    pub fn hardware_active(self) -> bool {
+        self.session.hardware_enabled()
+    }
     /// Resolve a retained namespace handle to its actual absolute ACPI path.
     pub fn path(self) -> Result<String, Error> {
         let guard = self.session.guard()?;
@@ -769,6 +803,17 @@ impl Notification<'_> {
     pub fn remove(mut self) -> Result<(), Error> {
         self.close()
     }
+    // Test an actual ACPICA removal error after another native actor removed
+    // the registration. The Rust owner deliberately remains outstanding.
+    #[cfg(test)]
+    pub(crate) fn remove_from_core_without_retiring_for_test(&self) -> Result<(), Error> {
+        let guard = self.handle.session.guard()?;
+        // SAFETY: the actual live node and callback belong to this registration.
+        checked(unsafe { acpi_remove_notify_handler(self.handle.raw, 2, notify_trampoline) })?;
+        // SAFETY: test process context; drain the real provider work queue.
+        unsafe { acpi_os_wait_events_complete() };
+        guard.check()
+    }
     fn close(&mut self) -> Result<(), Error> {
         let Some(context) = self.context.take() else {
             return Ok(());
@@ -885,7 +930,7 @@ unsafe fn read_value<'a>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     include!("acpi/battery_tests.rs");
     extern crate std;
     use super::*;
@@ -899,7 +944,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    static TEST_SERIAL: Mutex<()> = Mutex::new(());
+    pub(crate) static TEST_SERIAL: Mutex<()> = Mutex::new(());
 
     struct Semaphore {
         units: AtomicU32,
@@ -1344,6 +1389,96 @@ mod tests {
         )
     }
 
+    /// Reuse the actual ACPICA fixture with a reduced-hardware FADT. Hardware
+    /// mode then genuinely executes C activation and AML _INI without inventing
+    /// legacy SCI/PM hardware. Extra AML methods are part of the real DSDT.
+    pub(crate) fn reduced_hardware_fixture(extra_aml: &[u8]) -> Services {
+        let mut dsdt = include_bytes!("acpi/fixtures/namespace.aml").to_vec();
+        dsdt.extend_from_slice(extra_aml);
+        let length = dsdt.len() as u32;
+        dsdt[4..8].copy_from_slice(&length.to_le_bytes());
+        checksum(&mut dsdt, 9);
+        let (mut services, _) = fixture_dsdt(dsdt);
+        // SAFETY: fixture owns this unpublished provider; ACPICA has not started.
+        let provider = unsafe { &mut *services.context.cast::<TestPlatform>() };
+        let fadt = &mut provider
+            .tables
+            .iter_mut()
+            .find(|(p, _)| *p == 0x3000)
+            .unwrap()
+            .1;
+        fadt[112..116].copy_from_slice(&(1u32 << 20).to_le_bytes());
+        checksum(fadt, 9);
+        services.capabilities = FULL_CAPABILITIES;
+        services
+    }
+
+    #[test]
+    fn failed_actual_hardware_activation_never_publishes_success_or_retries() {
+        let _serial = TEST_SERIAL.lock().unwrap();
+        let (mut provider, counts) = fixture();
+        // The real legacy-hardware C path is entered; the existing provider
+        // rejects actual legacy PM I/O. C has already marked its attempt, which
+        // must never be interpreted as successful activation by Rust clients.
+        provider.capabilities = FULL_CAPABILITIES;
+        // SAFETY: actual test provider owns all services; singleton serialized.
+        let mut session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+        assert!(session.enable_hardware().is_err());
+        assert!(!session.hardware_enabled());
+        assert!(!session.root().hardware_active());
+        let writes = counts.port_writes.load(Ordering::SeqCst);
+        assert_eq!(session.enable_hardware(), Err(SUPPORT));
+        assert_eq!(counts.port_writes.load(Ordering::SeqCst), writes);
+        session.shutdown().unwrap();
+        assert!(counts.destroyed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn successful_hardware_witness_is_revoked_by_actual_namespace_unload() {
+        let _serial = TEST_SERIAL.lock().unwrap();
+        // SAFETY: reduced-hardware provider enters actual C activation without
+        // inventing legacy hardware; singleton serialized for this whole test.
+        let mut session =
+            unsafe { Session::start(reduced_hardware_fixture(&[]), Mode::Hardware) }.unwrap();
+        assert!(session.hardware_enabled());
+        let root = session.root();
+        assert!(root.hardware_active());
+        // A minimal SSDT: Scope (\_SB) { Device (DYN1) { Name (TEST, 42) } }.
+        // Keep these actual table bytes alive until ACPICA terminates.
+        let mut ssdt = table(b"SSDT", 36, 2);
+        ssdt.extend_from_slice(&[0x10, 20, b'\\', b'_', b'S', b'B', b'_', 0x5b, 0x82, 12]);
+        ssdt.extend_from_slice(b"DYN1");
+        ssdt.push(0x08);
+        ssdt.extend_from_slice(b"TEST");
+        ssdt.extend_from_slice(&[0x0a, 42]);
+        let length = ssdt.len() as u32;
+        ssdt[4..8].copy_from_slice(&length.to_le_bytes());
+        checksum(&mut ssdt, 9);
+        unsafe extern "C" {
+            fn acpi_load_table(table: *mut c_void, index: *mut u32) -> Status;
+            fn acpi_unload_parent_table(handle: *mut c_void) -> Status;
+        }
+        let mut index = 0;
+        // SAFETY: actual complete owned SSDT, retained through global teardown.
+        assert_eq!(
+            unsafe { acpi_load_table(ssdt.as_mut_ptr().cast(), &mut index) },
+            0
+        );
+        let dynamic = session.handle("\\_SB.DYN1").unwrap();
+        assert_eq!(
+            dynamic.evaluate(Some("TEST"), &[]).unwrap(),
+            Some(Value::Integer(42))
+        );
+        // SAFETY: supported native unload from process context; real provider
+        // quiesces callbacks before C deletes the loaded SSDT namespace nodes.
+        assert_eq!(unsafe { acpi_unload_parent_table(dynamic.raw) }, 0);
+        assert!(!session.namespace_available());
+        assert!(!session.hardware_enabled());
+        assert!(!root.hardware_active());
+        assert_eq!(session.enable_hardware(), Err(SUPPORT));
+        session.shutdown().unwrap();
+    }
+
     #[test]
     fn actual_acpica_abi_namespace_dsm_regions_failures_notify_and_cleanup() {
         let _serial = TEST_SERIAL.lock().unwrap();
@@ -1456,7 +1591,12 @@ mod tests {
         assert_eq!(counts.port_writes.load(Ordering::SeqCst), 0);
         let (provider, counts) = fixture();
         let mut session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+        assert!(!session.hardware_enabled());
+        assert!(!session.root().hardware_active());
         assert_eq!(session.enable_hardware(), Err(SUPPORT));
+        assert!(!session.hardware_enabled());
+        assert_eq!(session.enable_hardware(), Err(SUPPORT));
+        assert!(!session.root().hardware_active());
         assert_eq!(counts.port_writes.load(Ordering::SeqCst), 0);
         assert_eq!(session.devices("PNP0CA0").unwrap().len(), 1);
         assert_eq!(session.devices("STLA0002").unwrap().len(), 1);

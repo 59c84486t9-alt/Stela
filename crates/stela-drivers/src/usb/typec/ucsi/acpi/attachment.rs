@@ -68,6 +68,7 @@ pub enum Error {
     MappingMismatch,
     ResourcesChanged,
     Inactive,
+    NotificationRemovalUncertain(acpi::Error),
 }
 impl From<acpi::Error> for Error {
     fn from(value: acpi::Error) -> Self {
@@ -153,6 +154,8 @@ pub fn discover(session: &Session) -> Result<Vec<Result<Device<'_>, Error>>, Err
 
 pub struct Aml<'a> {
     handle: Handle<'a>,
+    #[cfg(test)]
+    peer: Option<Box<dyn Dsm>>,
 }
 impl Dsm for Aml<'_> {
     fn evaluate(
@@ -161,6 +164,10 @@ impl Dsm for Aml<'_> {
         revision: u64,
         function: u64,
     ) -> Result<(), TransportError> {
+        #[cfg(test)]
+        if let Some(peer) = self.peer.as_mut() {
+            return peer.evaluate(uuid, revision, function);
+        }
         if uuid != DSM_UUID || revision != 1 {
             return Err(TransportError::Unavailable);
         }
@@ -181,6 +188,9 @@ pub enum State {
     Running,
     Suspended,
     Faulted,
+    /// Notify removal did not complete; original resource owners are retained
+    /// permanently rather than treating a consumed registration as an ACK.
+    Quarantined,
     Retired,
 }
 
@@ -196,6 +206,7 @@ pub struct ServiceReport {
 pub struct Attachment<'a, M: Mapping, D: Dependency<'a>, C: Timer> {
     device: Device<'a>,
     notification: Option<Notification<'a>>,
+    removal_error: Option<acpi::Error>,
     pending: Arc<AtomicBool>,
     controller: Controller<Mailbox<Aml<'a>>, C>,
     mapping: Option<M>,
@@ -211,6 +222,20 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Attachment<'a, M, D, C> {
         dependencies: Vec<D>,
         timer: C,
     ) -> Result<Self, Error> {
+        let aml = Aml {
+            handle: device.handle,
+            #[cfg(test)]
+            peer: None,
+        };
+        Self::bind_with_aml(device, mapping, dependencies, timer, aml)
+    }
+    fn bind_with_aml(
+        device: Device<'a>,
+        mapping: M,
+        dependencies: Vec<D>,
+        timer: C,
+        aml: Aml<'a>,
+    ) -> Result<Self, Error> {
         if mapping.resource() != device.resource {
             return Err(Error::MappingMismatch);
         }
@@ -221,21 +246,14 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Attachment<'a, M, D, C> {
         }
         // SAFETY: Mapping's unsafe contract owns this exact firmware resource;
         // equality above binds it to the real namespace _CRS and retains it.
-        let mailbox = unsafe {
-            Mailbox::new(
-                mapping.base(),
-                device.resource.bytes,
-                Aml {
-                    handle: device.handle,
-                },
-            )
-        }
-        .map_err(|error| {
-            Error::Ucsi(UcsiError::Transport {
-                phase: super::super::Phase::Version,
-                error,
-            })
-        })?;
+        let mailbox = unsafe { Mailbox::new(mapping.base(), device.resource.bytes, aml) }.map_err(
+            |error| {
+                Error::Ucsi(UcsiError::Transport {
+                    phase: super::super::Phase::Version,
+                    error,
+                })
+            },
+        )?;
         let controller = Controller::new(mailbox, timer)?;
         let pending = Arc::new(AtomicBool::new(false));
         let target = pending.clone();
@@ -247,6 +265,7 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Attachment<'a, M, D, C> {
         Ok(Self {
             device,
             notification: Some(notification),
+            removal_error: None,
             pending,
             controller,
             mapping: Some(mapping),
@@ -370,6 +389,9 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Attachment<'a, M, D, C> {
     /// remove/drain the ACPICA callback, then release CPU/dependency leases.
     /// On any error resources stay retained, so platform services must remain up.
     pub fn detach(&mut self) -> Result<(), Error> {
+        if let Some(error) = self.removal_error {
+            return Err(Error::NotificationRemovalUncertain(error));
+        }
         if self.state == State::Retired {
             return Ok(());
         }
@@ -383,12 +405,25 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Attachment<'a, M, D, C> {
             self.controller.suspend()?;
             self.state = State::Suspended;
         }
-        if let Some(notification) = self.notification.take() {
-            notification.remove()?;
-        }
+        self.remove_notification()?;
         self.state = State::Retired;
         drop(self.mapping.take());
         drop(self.dependencies.take());
+        Ok(())
+    }
+    fn remove_notification(&mut self) -> Result<(), Error> {
+        if let Some(error) = self.removal_error {
+            return Err(Error::NotificationRemovalUncertain(error));
+        }
+        if let Some(notification) = self.notification.take()
+            && let Err(error) = notification.remove()
+        {
+            // Notification consumes its local owner on error and Session keeps
+            // callback storage. Absence of that owner is never proof of drain.
+            self.removal_error = Some(error);
+            self.state = State::Quarantined;
+            return Err(Error::NotificationRemovalUncertain(error));
+        }
         Ok(())
     }
 }
@@ -396,7 +431,7 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Drop for Attachment<'a, M, D, 
     fn drop(&mut self) {
         // Removal drains callbacks; their closure owns only the atomic, never
         // mailbox memory. No blocking firmware command is issued from Drop.
-        drop(self.notification.take());
+        let _ = self.remove_notification();
         if !matches!(self.state, State::Bound | State::Suspended | State::Retired) {
             // Uncertain firmware state cannot authorize resource retirement.
             // Explicit detach while AML services are live is the normal path.
@@ -409,3 +444,6 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Drop for Attachment<'a, M, D, 
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
