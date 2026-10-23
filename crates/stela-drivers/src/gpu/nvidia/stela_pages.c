@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "services.h"
+#include "stela_services.h"
 
 NV_STATUS stela_nvidia_bind_memory(nv_state_t *nv, void *services,
                                    NvU32 domain, NvU8 bus, NvU8 slot, NvU8 function)

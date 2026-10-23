@@ -14,7 +14,7 @@ use crate::bus::{
 use alloc::sync::Arc;
 use core::{cell::Cell, ffi::c_void, marker::PhantomData, marker::PhantomPinned, pin::Pin, ptr};
 
-/// Native vendor status ABI, checked against nvstatus.h by stela/services.h.
+/// Native vendor status ABI, checked against nvstatus.h by stela_services.h.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Status {

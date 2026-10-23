@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 /* nvlink_malloc and nvlink_free, as nvlink_os.h declares them, over Stela's
- * checked global-heap boundary (memory.h). They have no atomic mode. */
+ * checked global-heap boundary (stela_memory.h). They have no atomic mode. */
 #include <stddef.h>
 #include "nvlink_os.h"
-#include "memory.h"
+#include "stela_memory.h"
 
 void *nvlink_malloc(NvLength size)
 {

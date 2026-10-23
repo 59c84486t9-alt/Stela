@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_NVIDIA_DEVICE_H
 #define STELA_NVIDIA_DEVICE_H
-#include "services.h"
+#include "stela_services.h"
 #include "os-interface.h"
 #include <stddef.h>
 /* Private same-CPU input ABI. Physical spans come only from retained canonical

@@ -6,7 +6,7 @@
  */
 #include "nvkms-utils.c"
 #include "nvkms-lut.h"
-#include "memory.h"
+#include "stela_memory.h"
 
 void stela_nvkms_test_heap_initialize(void);
 size_t stela_nvkms_test_heap_live(void);

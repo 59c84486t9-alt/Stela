@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 /* Original C records and private input ABI; compile-only layout arrays on every
  * native target. Host main uses only bounded CPU config, never RM/hardware. */
-#include "../device.h"
-#include "../pci.h"
+#include "../stela_device.h"
+#include "../stela_pci.h"
 const NvU64 stela_nvidia_device_layout[] = {
     sizeof(struct stela_nvidia_device_bar), _Alignof(struct stela_nvidia_device_bar),
     offsetof(struct stela_nvidia_device_bar, bytes), offsetof(struct stela_nvidia_device_bar, index),

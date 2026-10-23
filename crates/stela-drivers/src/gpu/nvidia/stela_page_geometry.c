@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "page_geometry.h"
+#include "stela_page_geometry.h"
 
 /* Actual original os-interface.h data types. No guessed platform defaults;
  * native owner publication is a prerequisite for every original RM accessor.

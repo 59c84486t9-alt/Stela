@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "os-interface.h"
-#include "mmio.h"
+#include "stela_mmio.h"
 
 /* Original vendor declarations stay unchanged. Only the native Stela build
  * selects these hooks; Linux's reference implementation remains separate. */

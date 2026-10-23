@@ -11,7 +11,7 @@ void stela_nvkms_observed_free(void *pointer, size_t size);
 #define nvkms_free stela_nvkms_observed_free
 #include "nvkms-utils.c"
 #undef nvkms_free
-#include "memory.h"
+#include "stela_memory.h"
 
 void stela_nvkms_test_heap_initialize(void);
 size_t stela_nvkms_test_heap_live(void);

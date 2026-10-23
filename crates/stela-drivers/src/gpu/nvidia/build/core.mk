@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Stela's archive of NVIDIA's unchanged resource manager; see common.mk.
-STELA_SRCS := $(addprefix $(STELA)/,pci.c memory.c stela_ram_mapping.c stela_pages.c \
+STELA_SRCS := $(addprefix $(STELA)/,stela_pci.c stela_memory.c stela_ram_mapping.c stela_pages.c \
     stela_page_geometry.c stela_ordering.c stela_device.c stela_mmio.c stela_firmware.c \
     stela_primitives.c stela_nvlink_primitives.c stela_nvswitch_primitives.c \
     stela_nvlink_memory.c)

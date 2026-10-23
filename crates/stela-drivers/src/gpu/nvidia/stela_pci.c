@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include <stddef.h>
 #include "os-interface.h"
-#include "pci.h"
+#include "stela_pci.h"
 
 /* Use the vendor's actual declarations and status definitions. Device discovery,
  * reset and removal are separate lifecycle work, not successful no-op hooks.

@@ -2,7 +2,7 @@
 #ifndef STELA_NVIDIA_FIRMWARE_H
 #define STELA_NVIDIA_FIRMWARE_H
 
-#include "services.h"
+#include "stela_services.h"
 
 /* Native same-CPU ABI, borrowing immutable canonical catalog bytes. The pinned
  * MemoryServices owner supplies the actual device's observed architecture and

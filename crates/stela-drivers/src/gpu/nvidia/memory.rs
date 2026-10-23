@@ -18,7 +18,7 @@ struct Header {
 
 pub(super) const ALIGNMENT: usize = align_of::<Header>();
 
-// Internal result tags mirror stela/memory.h, not NVIDIA's status namespace.
+// Internal result tags mirror stela_memory.h, not NVIDIA's status namespace.
 #[repr(u32)]
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum AllocationStatus {

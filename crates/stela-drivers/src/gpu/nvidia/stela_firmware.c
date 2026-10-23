@@ -3,7 +3,7 @@
 /* Same original package-name policy as kernel-open/nvidia/nv.c at the retained
  * NVIDIA pin. version.h is generated from the existing vendor version.mk. */
 #define NV_FIRMWARE_FOR_NAME(name) "nvidia/" NVIDIA_VERSION "/" name ".bin"
-#include "firmware.h"
+#include "stela_firmware.h"
 /* Original optional log tables use intentional zero-filled partial initializers. */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"

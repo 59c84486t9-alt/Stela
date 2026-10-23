@@ -8,7 +8,7 @@
 #define NV_KERNEL_INTERFACE_LAYER
 #endif
 #include "nv.h"
-#include "mapping.h"
+#include "stela_mapping.h"
 
 /* These are the original vendor declarations. The native RAM view token
  * replaces Linux's vmap bookkeeping and independently owns the actual CPU pin.

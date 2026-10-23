@@ -8,7 +8,7 @@
  */
 #include <stddef.h>
 #include "nv.h"
-#include "pci.h"
+#include "stela_pci.h"
 #include "libelf.h"
 
 #define STELA_NVIDIA_RECORD_LAYOUT(M) \

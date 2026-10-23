@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Original global-data ABI plus unchanged original accessor bodies, linked in
  * a fresh hosted process. No actual RAM/cache/physical support is attested. */
-#include "../page_geometry.h"
+#include "../stela_page_geometry.h"
 #include "page_geometry_accessors.h"
 #include <assert.h>
 #include <stdio.h>

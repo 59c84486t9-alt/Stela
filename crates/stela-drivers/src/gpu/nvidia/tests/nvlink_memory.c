@@ -5,7 +5,7 @@
  */
 #include <stddef.h>
 #include "nvlink_os.h"
-#include "memory.h"
+#include "stela_memory.h"
 
 static NvU64 observed_size;
 static NvU32 allocations;

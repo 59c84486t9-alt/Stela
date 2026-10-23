@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include <stddef.h>
 #include "os-interface.h"
-#include "memory.h"
+#include "stela_memory.h"
 
 /* Match the original RM declarations and status values. Invalid/overflowing
  * native layouts and exhausted shared heaps cannot produce a usable pointer.

@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "device.h"
+#include "stela_device.h"
 
 NV_STATUS stela_nvidia_prepare_device(nv_state_t *nv, void *handle,
     const struct stela_nvidia_device_identity *id,
