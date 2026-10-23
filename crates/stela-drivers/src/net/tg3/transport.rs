@@ -70,6 +70,7 @@ pub struct Hardware<R: Registers, D: Delay> {
     failure: Option<Error>,
     cleanup_failure: Option<Error>,
     stopped: bool,
+    core_reset_complete: bool,
 }
 impl<R: Registers, D: Delay> Drop for Hardware<R, D> {
     fn drop(&mut self) {
@@ -89,6 +90,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             failure: None,
             cleanup_failure: None,
             stopped: false,
+            core_reset_complete: false,
         }
     }
     pub fn identity(&self) -> Option<Identity> {
@@ -542,3 +544,5 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
 
 #[cfg(test)]
 mod tests;
+
+mod reset;

@@ -6,7 +6,7 @@
 //! Broadcom Tigon3 hardware transport for the named BCM5720/5761/5762 cohort.
 //!
 //! This module is a source-only partial backend: it does not expose an attach
-//! constructor or implement `Link`. Cold PCI/reset/PHY calibration, packet ring
+//! constructor or implement `Link`. Full cold initialization/PHY calibration, packet ring
 //! publication and retirement are not yet composed. These real register
 //! transports must not be advertised as a functioning Ethernet adapter.
 //!

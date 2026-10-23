@@ -34,6 +34,9 @@ struct Model {
     io_count: usize,
     fail_at: Option<usize>,
     dropped: usize,
+    no_nvram_grant: bool,
+    reset_pending: bool,
+    reset_firmware_ack: bool,
 }
 impl Model {
     fn event(&mut self, event: Event) -> Result<(), Error> {
@@ -89,6 +92,9 @@ unsafe impl Registers for Reg {
     }
     fn read32(&mut self, at: u32) -> Result<u32, Error> {
         let mut m = self.0.borrow_mut();
+        if m.reset_pending && m.config.get(&4).copied().unwrap_or(0) & 2 == 0 {
+            return Err(Error::Access); // Core reset temporarily removed MMIO decode.
+        }
         let value = if at == MEM_DATA {
             let window = *m.mac.get(&MEM_BASE).unwrap_or(&0);
             *m.sram.get(&window).unwrap_or(&0)
@@ -128,6 +134,17 @@ unsafe impl Registers for Reg {
         } else if at == MAC_MI_COM {
             m.command = value;
             m.busy_reads = 1;
+        } else if at == 0x7020 && value == 2 {
+            let grant = if m.no_nvram_grant { 0 } else { 0x200 };
+            m.mac.insert(at, value | grant);
+        } else if at == 0x6804 && value & 1 != 0 {
+            m.reset_pending = true;
+            let command = m.config.get(&4).copied().unwrap_or(0);
+            m.config.insert(4, command & !2);
+            if m.reset_firmware_ack {
+                m.sram.insert(FIRMWARE_MBOX, !FIRMWARE_MAGIC);
+            }
+            m.mac.insert(MEMARB_MODE, 0);
         } else if m.stuck_stop != Some(at) {
             m.mac.insert(at, value);
         }
@@ -562,4 +579,107 @@ fn unchanged_linux_ape_mdio_sram_transport() {
         cases += 1;
     }
     assert_eq!(cases, 50);
+}
+
+fn reset_model(asic: Asic) -> (Hardware<Reg, Timer>, Rc<RefCell<Model>>) {
+    let (hardware, m) = identified(asic, 0);
+    m.borrow_mut().config.insert(4, 0x0010_0016); // Capabilities, MWI, bus master, memory.
+    m.borrow_mut().config.insert(0x34, 0x40);
+    m.borrow_mut().config.insert(0x40, 0x10);
+    m.borrow_mut().config.insert(0x48, 0x0810);
+    m.borrow_mut().reset_firmware_ack = true;
+    (hardware, m)
+}
+
+#[test]
+fn unmanaged_core_reset_uses_config_while_mmio_decode_is_gone() {
+    for asic in [Asic::Bcm5761, Asic::Bcm5720, Asic::Bcm5762] {
+        let (mut hardware, m) = reset_model(asic);
+        hardware.reset_unmanaged_core().unwrap();
+        assert!(hardware.core_reset_completed());
+        assert_eq!(m.borrow().config[&4] & 0xffff, 2); // No unsolicited bus mastering/MWI.
+        assert_eq!(m.borrow().config[&0x48] & 0xffff, 0); // Relaxed/no-snoop disabled.
+        let m = m.borrow();
+        let reset = m
+            .trace
+            .iter()
+            .position(|e| *e == Event::Write(0x6804, 0x2000_0001))
+            .unwrap();
+        assert_eq!(
+            &m.trace[reset + 1..reset + 4],
+            &[
+                Event::Delay(120),
+                Event::Config(4, 0x0010_0000),
+                Event::Delay(120)
+            ]
+        );
+        assert!(m.trace.contains(&Event::Write(MAC_MI_MODE, 0x8000)));
+        match asic {
+            Asic::Bcm5761 => assert!(m.trace.contains(&Event::Write(0x7c00, 1 << 25))),
+            Asic::Bcm5720 => assert!(m.trace.contains(&Event::Write(0x3624, 1 << 31))),
+            Asic::Bcm5762 => assert!(m.trace.contains(&Event::Write(0x3628, 1 << 13))),
+        }
+    }
+}
+
+#[test]
+fn management_ownership_refuses_before_engines_or_reset_are_touched() {
+    for ape in [true, false] {
+        let (mut hardware, m) = reset_model(Asic::Bcm5761);
+        if ape {
+            m.borrow_mut().ape.insert(0x4000, 0x4150_4521);
+        } else {
+            m.borrow_mut().sram.insert(0xb54, FIRMWARE_MAGIC);
+            m.borrow_mut().sram.insert(0xb58, 0x80);
+        }
+        assert_eq!(
+            hardware.reset_unmanaged_core(),
+            Err(Error::UnsupportedManaged)
+        );
+        assert!(!hardware.core_reset_completed());
+        assert!(
+            !m.borrow()
+                .trace
+                .iter()
+                .any(|e| matches!(e, Event::Write(0x6804, _) | Event::Write(MAC_RX_MODE, _)))
+        );
+    }
+}
+
+#[test]
+fn nvram_and_firmware_timeouts_never_produce_reset_completion() {
+    let (mut hardware, m) = reset_model(Asic::Bcm5720);
+    m.borrow_mut().no_nvram_grant = true;
+    assert_eq!(hardware.reset_unmanaged_core(), Err(Error::NvramTimeout));
+    assert!(!hardware.core_reset_completed());
+    assert!(!m.borrow().reset_pending);
+    assert!(m.borrow().trace.contains(&Event::Write(0x7020, 0x20)));
+    let (mut hardware, m) = reset_model(Asic::Bcm5762);
+    m.borrow_mut().reset_firmware_ack = false;
+    assert_eq!(hardware.reset_unmanaged_core(), Err(Error::FirmwareTimeout));
+    assert!(!hardware.core_reset_completed());
+    drop(hardware);
+    assert_eq!(m.borrow().dropped, 0);
+}
+
+#[test]
+fn every_core_reset_access_fault_retains_the_actual_epoch() {
+    let (mut hardware, m) = reset_model(Asic::Bcm5720);
+    let before = m.borrow().io_count;
+    hardware.reset_unmanaged_core().unwrap();
+    let count = m.borrow().io_count - before;
+    for fail in 1..=count {
+        let (mut hardware, m) = reset_model(Asic::Bcm5720);
+        let before = m.borrow().io_count;
+        m.borrow_mut().fail_at = Some(before + fail);
+        assert_eq!(
+            hardware.reset_unmanaged_core(),
+            Err(Error::Access),
+            "reset I/O {fail}"
+        );
+        assert!(!hardware.core_reset_completed());
+        assert_eq!(hardware.read_phy(2), Err(Error::Poisoned));
+        drop(hardware);
+        assert_eq!(m.borrow().dropped, 0);
+    }
 }
