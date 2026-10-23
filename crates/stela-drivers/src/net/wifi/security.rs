@@ -194,7 +194,9 @@ pub enum Error {
 }
 
 /// Authenticated initial receive counters from the actual key exchange or
-/// device handoff. Queue0..15 correspond to TIDs; queue16 is non-QoS.
+/// device handoff. Queues 0..15 correspond to TIDs; non-QoS data shares queue 0.
+/// Queue 16 is reserved by the source for protected management, still unsupported
+/// by this data-only authorization boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReplaySeed([u64; 17]);
 
@@ -258,7 +260,8 @@ enum State {
     Quarantined,
 }
 
-/// Serialized key slot and its per-TID replay state (queue16 is non-QoS).
+/// Serialized key slot and source receive replay queues. Non-QoS data shares
+/// TID0; queue 16 is the separate source protected-management counter.
 /// Keep this object for the lifetime of the physical slot; recreating it while
 /// old RX/completions can still arrive would invalidate generation isolation.
 #[derive(Debug)]
@@ -424,7 +427,7 @@ impl KeySlot {
     /// consume its PN only after framing, key and integrity checks succeed.
     pub fn authorize<'a>(&mut self, mpdu: &'a Mpdu) -> Result<AuthenticatedData<'a>, Error> {
         let checked = self.checked_mpdu(mpdu, false, None)?;
-        self.commit_receive(mpdu.header().tid.map_or(16, usize::from), checked.pn)?;
+        self.commit_receive(data_replay_queue(mpdu), checked.pn)?;
         Ok(checked)
     }
 
@@ -501,6 +504,12 @@ impl KeySlot {
         self.rx_pn[queue] = pn.0;
         Ok(())
     }
+}
+
+/// mac80211 ieee80211_parse_qos and mt76_check_ccmp_pn agree: ordinary
+/// non-QoS data uses security index 0, independently of sequence queue 16.
+fn data_replay_queue(mpdu: &Mpdu) -> usize {
+    mpdu.header().tid.map_or(0, usize::from)
 }
 
 fn valid_receive_observations(mpdu: &Mpdu) -> bool {
@@ -605,6 +614,46 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn mixed_qos_and_nonqos_replay_matches_full_source_counter_effects() {
+        let mut slot = slot(7);
+        let key = install(&mut slot);
+        let maximum = (1_u64 << 48) - 1;
+        let values = [0, 1, 2, 17, 18, maximum - 1, maximum];
+        let mut hash = Sha256::new();
+        let mut count = 0;
+        // Actual complete mt76 helper trace: both arrival orders, all TIDs,
+        // non-QoS aliasing, authenticated floors, exhaustion and all 17 counters.
+        // Pure canonical replay model; no physical integrity/ACK is inferred.
+        for first in 0..17 {
+            for second in 0..17 {
+                for seed in [0, 1, 17, maximum] {
+                    for a in values {
+                        for b in values {
+                            slot.rx_pn = [seed; 17];
+                            for (kind, pn) in [(first, a), (second, b)] {
+                                let mpdu = packet(key, pn, (kind != 16).then_some(kind));
+                                let result = slot.authorize(&mpdu);
+                                assert!(result.is_ok() || matches!(result, Err(Error::Replay)));
+                                let accepted = u8::from(result.is_ok());
+                                hash.update([accepted, accepted]);
+                            }
+                            for pn in slot.rx_pn {
+                                hash.update(&pn.to_be_bytes()[2..]);
+                            }
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(count, 56_644);
+        assert_eq!(
+            alloc::format!("{:x}", hash.finalize()),
+            "b5505742f235fb8a9c1af36ce9e9f9ae40590f1bc336719f7d39e35bc9b4f7a5"
+        );
     }
 
     #[test]
@@ -787,10 +836,10 @@ mod tests {
     }
 
     #[test]
-    fn replay_is_per_tid_and_non_qos_and_zero_is_not_new() {
+    fn replay_is_per_tid_with_non_qos_aliasing_tid_zero() {
         let mut slot = slot(1);
         let key = install(&mut slot);
-        for tid in (0..16).map(Some).chain([None]) {
+        for tid in (0..16).map(Some) {
             assert!(matches!(
                 slot.authorize(&packet(key, 0, tid)),
                 Err(Error::Replay)
@@ -804,6 +853,16 @@ mod tests {
             }
             assert!(slot.authorize(&packet(key, 6, tid)).is_ok());
         }
+        assert!(matches!(
+            slot.authorize(&packet(key, 6, None)),
+            Err(Error::Replay)
+        ));
+        assert!(slot.authorize(&packet(key, 7, None)).is_ok());
+        assert!(matches!(
+            slot.authorize(&packet(key, 7, Some(0))),
+            Err(Error::Replay)
+        ));
+        assert_eq!(slot.rx_pn[16], 0);
     }
 
     #[test]
@@ -975,13 +1034,25 @@ mod tests {
         slot.complete_install(ticket, InstallOutcome::Accepted)
             .unwrap();
         let key = slot.installed().unwrap();
-        for tid in (0..16).map(Some).chain([None]) {
+        for tid in (0..16).map(Some) {
             assert!(matches!(
                 slot.authorize(&packet(key, 100, tid)),
                 Err(Error::Replay)
             ));
             assert!(slot.authorize(&packet(key, 101, tid)).is_ok());
         }
+        for pn in [100, 101] {
+            assert!(matches!(
+                slot.authorize(&packet(key, pn, None)),
+                Err(Error::Replay)
+            ));
+        }
+        assert!(slot.authorize(&packet(key, 102, None)).is_ok());
+        assert!(matches!(
+            slot.authorize(&packet(key, 102, Some(0))),
+            Err(Error::Replay)
+        ));
+        assert_eq!(slot.rx_pn[16], 100);
     }
 
     #[test]

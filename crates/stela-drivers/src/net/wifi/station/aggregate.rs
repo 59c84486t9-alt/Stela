@@ -434,7 +434,14 @@ mod tests {
             slot.retire_after_drain();
         }
         // The OS supplies each queue's RSC from its authenticated key exchange.
-        let rsc = core::array::from_fn(|queue| PacketNumber::new(20 + queue as u64).unwrap());
+        let rsc = core::array::from_fn(|queue| {
+            PacketNumber::new(match queue {
+                0 => 36,
+                16 => 900,
+                _ => 20 + queue as u64,
+            })
+            .unwrap()
+        });
         let t = slot
             .begin_install(
                 1,
@@ -450,15 +457,14 @@ mod tests {
         let (s, c) = current(true); // New actual association context, sameAP.
         for queue in 0..17 {
             let tid = (queue < 16).then_some(queue as u8);
-            let f = frame(
-                Some(next),
-                Some(20 + queue),
-                tid,
-                1,
-                false,
-                Mac([0xff; 6]),
-                1,
-            );
+            // TID0 has advanced from its authenticated floor 36 to 37 before
+            // non-QoS arrives. Management floor 900 must not govern data.
+            let floor = match queue {
+                0 => 36,
+                16 => 37,
+                _ => 20 + queue,
+            };
+            let f = frame(Some(next), Some(floor), tid, 1, false, Mac([0xff; 6]), 1);
             let (old, _) = owned(&c, vec![f], Shape::WholeMpdu);
             assert!(matches!(
                 s.receive_ordered_group(&old, Some(&mut slot)),
@@ -466,7 +472,7 @@ mod tests {
             ));
             let f = frame(
                 Some(next),
-                Some(21 + queue),
+                Some(floor + 1),
                 tid,
                 2,
                 false,

@@ -840,6 +840,67 @@ pub(super) mod tests {
         }
     }
 
+    #[test]
+    fn actual_mixed_qos_and_nonqos_share_original_key_counter_zero() {
+        let (mut driver, model, _authority, _state) = secure_modern();
+        // Real native DMA key binding and complete-owned single-parent replay
+        // gate, with distinct source sequence queues and one shared PN domain.
+        for group in [false, true] {
+            for (step, kind, pn, accepted) in [
+                (0, None, 10, true),
+                (1, Some(0), 10, false),
+                (2, Some(0), 11, true),
+                (3, None, 11, false),
+                (4, Some(1), 1, true),
+                (5, None, 12, true),
+            ] {
+                let mut packet = data(group);
+                packet[22..24].copy_from_slice(
+                    &((step + 1u16 + if group { 6 } else { 0 }) << 4).to_le_bytes(),
+                );
+                if let Some(tid) = kind {
+                    packet[0] |= 0x80;
+                    packet.splice(24..24, [tid, 0]);
+                }
+                incoming(
+                    &model,
+                    &packet,
+                    Some((1, if group { 2 } else { 0 }, pn)),
+                    false,
+                );
+                let result = driver.poll(
+                    1_000_000 + 110 + u64::from(step) + if group { 6 } else { 0 },
+                    &Source,
+                    &mut Policy(true),
+                );
+                if accepted {
+                    assert!(matches!(
+                        result.unwrap().as_slice(),
+                        [Event::Ingress(station::data::Ingress::Data(_))]
+                    ));
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(ClientError::Aggregate(
+                            wifi::security::aggregate::Error::Security(
+                                wifi::security::Error::Replay
+                            )
+                        ))
+                    ));
+                }
+            }
+        }
+        driver.disconnect().unwrap();
+        unsafe { driver.retire_peer_after_drain() }.unwrap();
+        driver.stop().unwrap();
+        model.response.lock().unwrap().clc_processing = false;
+        model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
+        unsafe { driver.stop_after_quiesce() }.unwrap();
+        drop(driver);
+        assert_eq!(model.drops.load(Ordering::Relaxed), 1);
+        assert!(model.memory.lock().unwrap().mappings.is_empty());
+    }
+
     fn split_bytes(format: u8, pn: Option<u64>, source: u8) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(&LOCAL.0);

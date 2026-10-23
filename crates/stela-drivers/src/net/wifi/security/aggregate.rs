@@ -261,7 +261,7 @@ impl<'a, C> Candidate<'a, C> {
             spans.push((checked.start, checked.end));
         }
         self.payloads(&spans)?;
-        slot.commit_receive(head.header().tid.map_or(16, usize::from), first.pn)?;
+        slot.commit_receive(super::data_replay_queue(head), first.pn)?;
         Ok(ReceivedGroup {
             group: self.group,
             spans,
