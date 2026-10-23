@@ -321,11 +321,12 @@ impl<B: Backend> Owner<B> {
                 self.config.generic.periods(),
             )?;
             self.metrics[g][k] = d.value as u32;
-            self.rates[g][k] = if d.micros == 0 {
-                0
-            } else {
-                ((d.value.wrapping_mul(1_000_000) / d.micros) >> 20) as u32
-            };
+            self.rates[g][k] = (d
+                .value
+                .wrapping_mul(1_000_000)
+                .checked_div(d.micros)
+                .unwrap_or(0)
+                >> 20) as u32;
         } else if k == 2 && configured(&self.config.references, g, k) {
             self.metrics[g][k] = self.metrics[g][0].wrapping_add(self.metrics[g][1]);
             self.rates[g][k] = self.rates[g][0].wrapping_add(self.rates[g][1]);

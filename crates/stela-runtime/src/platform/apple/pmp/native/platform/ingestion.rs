@@ -994,11 +994,7 @@ impl<B: Backend> Owner<B> {
                     self.frequency[i][0],
                     periods,
                 );
-                (if d.ticks == 0 {
-                    0
-                } else {
-                    d.value.wrapping_mul(100) / d.ticks
-                }) as u32
+                d.value.wrapping_mul(100).checked_div(d.ticks).unwrap_or(0) as u32
             };
             let e = if row.references[1].kind == 0 {
                 if b.context.evaluated == 1 { 100 } else { 0 }
@@ -1084,11 +1080,7 @@ impl<B: Backend> Owner<B> {
                 break;
             }
             let d = arithmetic::scaled(index, r, self.integer[i], periods)?;
-            self.integer_rates[i] = if d.micros == 0 {
-                0
-            } else {
-                (d.value / d.micros) as u32
-            };
+            self.integer_rates[i] = d.value.checked_div(d.micros).unwrap_or(0) as u32;
         }
         for g in 0..2 {
             let mut any = false;
@@ -1104,22 +1096,22 @@ impl<B: Backend> Owner<B> {
                 }
                 let d = arithmetic::scaled(index, r, self.base[g * 3 + k], periods)?;
                 self.metrics[g][k] = d.value as u32;
-                let rate = if d.micros == 0 {
-                    0
-                } else {
-                    (d.value.wrapping_mul(1_000_000) / d.micros) >> 20
-                } as u32;
+                let rate = (d
+                    .value
+                    .wrapping_mul(1_000_000)
+                    .checked_div(d.micros)
+                    .unwrap_or(0)
+                    >> 20) as u32;
                 self.rates[g][k] = rate;
                 self.stats[g][k].record(rate >> 10);
                 any = true;
             }
         }
         if self.config.has_ratio {
-            self.ratio = if self.metrics[0][2] == 0 {
-                0
-            } else {
-                self.metrics[1][2].wrapping_mul(100) / self.metrics[0][2]
-            };
+            self.ratio = self.metrics[1][2]
+                .wrapping_mul(100)
+                .checked_div(self.metrics[0][2])
+                .unwrap_or(0);
         }
         let mut written = 0;
         for i in 0..2 {
