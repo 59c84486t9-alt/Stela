@@ -103,11 +103,14 @@ static void check_state(const struct isl_device *dev, const struct stela_intel_i
     assert(READ(RAddressMagFilterRoundingEnable) == s->mag_img_filter);
     assert(!READ(BorderColorPointer) && !READ(ShadowFunction));
     assert(!READ(SamplerDisable) && !READ(NonnormalizedCoordinateEnable));
-    assert(!READ(CubeSurfaceControlMode) && !READ(MaximumAnisotropy) && !READ(AnisotropicAlgorithm));
+    assert(!READ(CubeSurfaceControlMode) && !READ(MaximumAnisotropy) &&
+        !READ(AnisotropicAlgorithm));
     if (dev->info->ver > 8) assert(!READ(ReductionType) && !READ(ReductionTypeEnable));
     /* Independently reconstruct the entire packet; all unrequested fields and
      * reserved bits stay zero. No helper or producer bytes form the oracle. */
-    PUT(MinModeFilter, s->min_img_filter); PUT(MagModeFilter, effective_mag); PUT(MipModeFilter, mip);
+    PUT(MinModeFilter, s->min_img_filter);
+    PUT(MagModeFilter, effective_mag);
+    PUT(MipModeFilter, mip);
     PUT(TCXAddressControlMode, wrap(s->wrap_s)); PUT(TCYAddressControlMode, wrap(s->wrap_t));
     PUT(TCZAddressControlMode, wrap(s->wrap_r)); PUT(MinLOD, quantize(effective_min, 0, 14));
     PUT(MaxLOD, quantize(s->max_lod, 0, 14)); PUT(TextureLODBias, quantize(s->lod_bias, -16, 15));
@@ -142,7 +145,10 @@ static void state_matrix(const struct isl_device *dev)
         struct pipe_sampler_state s = sampler();
         s.wrap_s = modes[x]; s.wrap_t = modes[y]; s.wrap_r = modes[z];
         s.min_img_filter = filters & 1; s.mag_img_filter = filters >> 1;
-        s.min_mip_filter = mip; s.min_lod = lod[l][0]; s.max_lod = lod[l][1]; s.lod_bias = lod[l][2];
+        s.min_mip_filter = mip;
+        s.min_lod = lod[l][0];
+        s.max_lod = lod[l][1];
+        s.lod_bias = lod[l][2];
         s.max_anisotropy = (x + y + z) & 1; /* 0/1 both mean no anisotropy. */
         check_state(dev, &img, &s);
     }
@@ -237,7 +243,8 @@ int main(void)
         }
         state_matrix(&dev); invalid_states(&dev);
     }
-    printf("Hosted Intel original Iris sampler: %u independent packet comparisons and %u refusals passed\n",
-           states, refusals);
+    printf("Hosted Intel original Iris sampler: %u independent packet comparisons and %u refusals "
+           "passed\n",
+        states, refusals);
     return 0;
 }

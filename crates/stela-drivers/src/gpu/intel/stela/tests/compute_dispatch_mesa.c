@@ -27,8 +27,10 @@ int main(void)
     for (unsigned i = 0; i < 10000; ++i) {
         struct stela_intel_compute_dispatch dispatch = {
             .gfx_verx10 = GFX_VERx10,
-            .local_size = {1 + random_u32(&random) % 32, 1 + random_u32(&random) % 8, 1 + random_u32(&random) % 4},
-            .simd_size = GFX_VERx10 == 125 ? 8u << (random_u32(&random) % 3) : 16u << (random_u32(&random) % 2),
+            .local_size = {1 + random_u32(&random) % 32, 1 + random_u32(&random) % 8,
+                1 + random_u32(&random) % 4},
+            .simd_size = GFX_VERx10 == 125 ? 8u << (random_u32(&random) % 3) :
+                                             16u << (random_u32(&random) % 2),
             .groups = {random_u32(&random) | 1, random_u32(&random) | 1, random_u32(&random) | 1},
             .kernel_offset = random_u32(&random) & ~63u,
             .binding_table_offset = random_u32(&random) & 0x1fffe0,
@@ -37,7 +39,8 @@ int main(void)
             .sampler_count = random_u32(&random) % 5,
             .uses_sampler = 1,
             .slm_encoding = random_u32(&random) % (GFX_VERx10 == 125 ? 8 : 15),
-            .preferred_slm_encoding = GFX_VERx10 == 125 ? 8 + random_u32(&random) % 8 : random_u32(&random) % 11,
+            .preferred_slm_encoding = GFX_VERx10 == 125 ? 8 + random_u32(&random) % 8 :
+                                                          random_u32(&random) % 11,
             .barrier_encoding = random_u32(&random) % 8,
             .thread_group_dispatch_size = random_u32(&random) % 4,
             .walk_order = random_u32(&random) % 6,
@@ -56,7 +59,8 @@ int main(void)
 #endif
         uint32_t count = dispatch.local_size[0] * dispatch.local_size[1] * dispatch.local_size[2];
         dispatch.threads = (count + dispatch.simd_size - 1) / dispatch.simd_size;
-        dispatch.right_mask = UINT32_MAX >> (32 - (count - (dispatch.threads - 1) * dispatch.simd_size));
+        dispatch.right_mask = UINT32_MAX >>
+            (32 - (count - (dispatch.threads - 1) * dispatch.simd_size));
         uint32_t actual[44], expected[44];
         memset(actual, 0xa5, sizeof(actual)); memset(expected, 0xa5, sizeof(expected));
         struct stela_intel_commands commands = {actual, 44, 1, 48};
@@ -103,6 +107,7 @@ int main(void)
         assert(commands.used == 1 + GENX(COMPUTE_WALKER_length));
         assert(!memcmp(actual, expected, sizeof(actual)));
     }
-    printf("Native COMPUTE_WALKER vs hosted Mesa GFX_VERx10=%d: 10000 packets passed\n", GFX_VERx10);
+    printf("Native COMPUTE_WALKER vs hosted Mesa GFX_VERx10=%d: 10000 packets passed\n",
+        GFX_VERx10);
     return 0;
 }

@@ -61,8 +61,10 @@ static void check(const struct intel_device_info *device, struct intel_cs_dispat
 {
     assert(plan->dispatch.gfx_verx10 == device->verx10);
     assert(plan->dispatch.simd_size == info.simd_size && plan->dispatch.threads == info.threads);
-    assert(plan->dispatch.right_mask == info.right_mask && plan->dispatch.group_size == info.group_size);
-    assert(plan->dispatch.groups[0] == 19 && plan->dispatch.groups[1] == 23 && plan->dispatch.groups[2] == 29);
+    assert(plan->dispatch.right_mask == info.right_mask &&
+           plan->dispatch.group_size == info.group_size);
+    assert(plan->dispatch.groups[0] == 19 && plan->dispatch.groups[1] == 23 &&
+           plan->dispatch.groups[2] == 29);
     assert(plan->curbe_bytes == (subgroup ? align(32 * info.threads, 64) : 64));
     for (unsigned i = 0; i < ARRAY_SIZE(plan->curbe); ++i) {
         unsigned expected = i * 4 < plan->curbe_bytes ? 0x5a5a5a5a : 0;
@@ -83,7 +85,8 @@ static void check(const struct intel_device_info *device, struct intel_cs_dispat
     assert(plan->binding_table_entries == 1 && plan->cs_stall_before_vfe);
     assert(plan->vfe_words == (device->ver == 7 ? 8 : 9));
     unsigned vfe_thread_word = device->ver == 7 ? 2 : 3;
-    assert((plan->vfe[vfe_thread_word] >> 16) == device->max_cs_threads * device->subslice_total - 1);
+    assert((plan->vfe[vfe_thread_word] >> 16) ==
+           device->max_cs_threads * device->subslice_total - 1);
     unsigned curbe_word = device->ver == 7 ? 4 : 5;
     assert((plan->vfe[curbe_word] & 65535) == (subgroup ? align(info.threads, 2) : 0));
     assert(plan->curbe_load[2] == plan->curbe_bytes && plan->curbe_load[3] == 0x4000);
@@ -136,7 +139,8 @@ static void brw(const char *platform, unsigned mode, unsigned width)
     const uint32_t groups[] = {19, 23, 29};
     struct stela_intel_legacy_plan plan, before;
     for (unsigned variable = 0; variable <= 4096; variable += 1024) {
-        assert(stela_intel_legacy_brw_plan(compiler, &isl, &data, &nir->info, &p, groups, variable, &plan) == 0);
+        assert(stela_intel_legacy_brw_plan(compiler, &isl, &data, &nir->info, &p, groups, variable,
+                                           &plan) == 0);
         struct intel_cs_dispatch_info dispatch = brw_cs_get_dispatch_info(&device, &data, NULL);
         check(&device, dispatch, subgroup, data.base.total_shared + variable, data.uses_barrier,
               p.code_offset + brw_cs_prog_data_prog_offset(&data, dispatch.simd_size), &plan);
@@ -163,7 +167,8 @@ static void brw(const char *platform, unsigned mode, unsigned width)
         case 15: bad.code_offset = (UINT64_C(1) << 48) - 64; break;
         }
         plan = before;
-        assert(stela_intel_legacy_brw_plan(compiler, &isl, &data, &nir->info, &bad, groups, 0, &plan) == -22);
+        assert(stela_intel_legacy_brw_plan(compiler, &isl, &data, &nir->info, &bad, groups, 0,
+                                           &plan) == -22);
         assert(!memcmp(&plan, &before, sizeof(plan)));
     }
     const struct {size_t offset; uint32_t value; int status;} cases[] = {
@@ -179,7 +184,8 @@ static void brw(const char *platform, unsigned mode, unsigned width)
         struct brw_cs_prog_data bad = data;
         memcpy((char *)&bad + cases[i].offset, &cases[i].value, 4);
         plan = before;
-        assert(stela_intel_legacy_brw_plan(compiler, &isl, &bad, &nir->info, &p, groups, 0, &plan) == cases[i].status);
+        assert(stela_intel_legacy_brw_plan(compiler, &isl, &bad, &nir->info, &p, groups, 0,
+                                           &plan) == cases[i].status);
         assert(!memcmp(&plan, &before, sizeof(plan)));
     }
     for (unsigned i = 0; i < 5; ++i) {
@@ -192,7 +198,8 @@ static void brw(const char *platform, unsigned mode, unsigned width)
         case 4: bad_info.images_used[0] = 1; break;
         }
         plan = before;
-        assert(stela_intel_legacy_brw_plan(compiler, &isl, &data, &bad_info, &p, groups, 0, &plan) == (i == 3 ? -22 : -95));
+        assert(stela_intel_legacy_brw_plan(compiler, &isl, &data, &bad_info, &p, groups, 0,
+                                           &plan) == (i == 3 ? -22 : -95));
         assert(!memcmp(&plan, &before, sizeof(plan)));
     }
     /* Deliberately invalid metadata/placement pair: the whole table, not just
@@ -209,15 +216,20 @@ static void brw(const char *platform, unsigned mode, unsigned width)
     struct brw_cs_prog_data bad = data;
     bad.push.cross_thread.size = 32;
     plan = before;
-    assert(stela_intel_legacy_brw_plan(compiler, &isl, &bad, &nir->info, &p, groups, 0, &plan) == -95);
+    assert(stela_intel_legacy_brw_plan(compiler, &isl, &bad, &nir->info, &p, groups, 0, &plan) ==
+           -95);
     assert(!memcmp(&plan, &before, sizeof(plan)));
     bad = data; bad.base.total_scratch = 1024;
-    assert(stela_intel_legacy_brw_plan(compiler, &isl, &bad, &nir->info, &p, groups, 0, &plan) == -22);
+    assert(stela_intel_legacy_brw_plan(compiler, &isl, &bad, &nir->info, &p, groups, 0, &plan) ==
+           -22);
     bad = data; bad.uses_sampler = true;
-    assert(stela_intel_legacy_brw_plan(compiler, &isl, &bad, &nir->info, &p, groups, 0, &plan) == -95);
-    assert(stela_intel_legacy_brw_plan(compiler, &isl, &data, &nir->info, &p, groups, UINT32_MAX, &plan) == -22);
+    assert(stela_intel_legacy_brw_plan(compiler, &isl, &bad, &nir->info, &p, groups, 0, &plan) ==
+           -95);
+    assert(stela_intel_legacy_brw_plan(compiler, &isl, &data, &nir->info, &p, groups, UINT32_MAX,
+                                       &plan) == -22);
     assert(!memcmp(&plan, &before, sizeof(plan)));
-    printf("Real BRW legacy %s mode=%u SIMD%u: code=%uB subgroup_push=%u, five plans/checked packets\n",
+    printf("Real BRW legacy %s mode=%u SIMD%u: code=%uB subgroup_push=%u, five plans/checked "
+           "packets\n",
            platform, mode, width, data.base.program_size, subgroup);
     ralloc_free(nir); ralloc_free(context);
 }
@@ -271,10 +283,13 @@ static void elk(const char *platform, unsigned mode, unsigned width)
     bad = data; bad.base.param = &bad_param;
     assert(stela_intel_legacy_elk_plan(compiler, &isl, &bad, &nir->info, &p, groups, &plan) == -95);
     const uint32_t zero_group[] = {1, 0, 1};
-    assert(stela_intel_legacy_elk_plan(compiler, &isl, &data, &nir->info, &p, zero_group, &plan) == -22);
+    assert(stela_intel_legacy_elk_plan(compiler, &isl, &data, &nir->info, &p, zero_group, &plan) ==
+           -22);
     struct stela_intel_legacy_placement bad_placement = p;
-    bad_placement.code_offset = device.ver == 7 ? (UINT64_C(1) << 32) - 64 : (UINT64_C(1) << 48) - 64;
-    assert(stela_intel_legacy_elk_plan(compiler, &isl, &data, &nir->info, &bad_placement, groups, &plan) == -22);
+    bad_placement.code_offset = device.ver == 7 ? (UINT64_C(1) << 32) - 64 :
+                                                  (UINT64_C(1) << 48) - 64;
+    assert(stela_intel_legacy_elk_plan(compiler, &isl, &data, &nir->info, &bad_placement, groups,
+                                       &plan) == -22);
     assert(!memcmp(&plan, &before, sizeof(plan)));
     printf("Real ELK legacy %s mode=%u SIMD%u: code=%uB actual subgroup push, checked packets\n",
            platform, mode, width, data.base.program_size);

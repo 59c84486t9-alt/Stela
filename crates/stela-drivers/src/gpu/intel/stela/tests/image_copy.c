@@ -106,7 +106,8 @@ static void one_rectangle(const struct isl_device *dev, const struct stela_intel
     memcpy(expected_lin, lin, linear_size);
     for (unsigned row = 0; row < r.height; ++row)
         for (unsigned byte = 0; byte < q.row_bytes; ++byte)
-            expected_img[image_offset + coordinate(s, &r, byte, row)] = lin[linear_offset + row * pitch + byte];
+            expected_img[image_offset + coordinate(s, &r, byte, row)] =
+                lin[linear_offset + row * pitch + byte];
     image.access = STELA_INTEL_BUFFER_WRITE; linear.access = STELA_INTEL_BUFFER_READ;
     assert(stela_intel_image_copy(dev, d, &r, pitch, &image, &linear,
         STELA_INTEL_CPU_COPY_NO_BIT6, STELA_INTEL_IMAGE_UPLOAD) == 0);
@@ -121,7 +122,8 @@ static void one_rectangle(const struct isl_device *dev, const struct stela_intel
     memset(lin, 0x5a, linear_size); memset(expected_lin, 0x5a, linear_size);
     for (unsigned row = 0; row < r.height; ++row)
         for (unsigned byte = 0; byte < q.row_bytes; ++byte)
-            expected_lin[linear_offset + row * pitch + byte] = img[image_offset + coordinate(s, &r, byte, row)];
+            expected_lin[linear_offset + row * pitch + byte] =
+                img[image_offset + coordinate(s, &r, byte, row)];
     image.access = STELA_INTEL_BUFFER_READ; linear.access = STELA_INTEL_BUFFER_WRITE;
     assert(stela_intel_image_copy(dev, d, &r, pitch, &image, &linear,
         STELA_INTEL_CPU_COPY_NO_BIT6, STELA_INTEL_IMAGE_READBACK) == 0);
@@ -197,7 +199,8 @@ static void invalid_copies(const struct isl_device *dev, const struct stela_inte
         case 30: i.offset = UINT64_MAX; break;
         }
         assert(stela_intel_image_copy(dev, d, &r, pitch, &i, &l, swizzle, direction) < 0);
-        assert(memcmp(img, before_img, image_size) == 0 && memcmp(lin, before_lin, linear_size) == 0);
+        assert(memcmp(img, before_img, image_size) == 0 &&
+            memcmp(lin, before_lin, linear_size) == 0);
         ++refusals;
     }
     /* Query failures are atomic too, with arithmetic checked before ISL. */
@@ -223,7 +226,8 @@ static void invalid_copies(const struct isl_device *dev, const struct stela_inte
         assert(memcmp(&out, &before, sizeof(out)) == 0); ++refusals;
         assert(stela_intel_image_copy(dev, d, &bad, p, &image, &linear,
             STELA_INTEL_CPU_COPY_NO_BIT6, STELA_INTEL_IMAGE_UPLOAD) == -22);
-        assert(memcmp(img, before_img, image_size) == 0 && memcmp(lin, before_lin, linear_size) == 0);
+        assert(memcmp(img, before_img, image_size) == 0 &&
+            memcmp(lin, before_lin, linear_size) == 0);
     }
     assert(stela_intel_image_copy_query(NULL, d, &r, pitch, &out) == -22);
     assert(stela_intel_image_copy_query(dev, NULL, &r, pitch, &out) == -22);
@@ -258,7 +262,8 @@ static void unsupported_tilings(const struct isl_device *dev)
 
 int main(void)
 {
-    const enum isl_tiling tilings[] = {ISL_TILING_LINEAR, ISL_TILING_X, ISL_TILING_Y0, ISL_TILING_4};
+    const enum isl_tiling tilings[] = {
+        ISL_TILING_LINEAR, ISL_TILING_X, ISL_TILING_Y0, ISL_TILING_4};
     const enum isl_format formats[] = {ISL_FORMAT_R8_UNORM, ISL_FORMAT_R16_UNORM,
         ISL_FORMAT_R8G8B8A8_UNORM, ISL_FORMAT_R16G16B16A16_FLOAT, ISL_FORMAT_R32G32B32A32_FLOAT};
     const char *platform;
@@ -276,7 +281,8 @@ int main(void)
         }
         unsupported_tilings(&dev);
     }
-    printf("Hosted Intel image CPU copy: %u layouts, %u independent full-span copies, %u refusals passed\n",
+    printf("Hosted Intel image CPU copy: %u layouts, %u independent full-span copies, %u refusals "
+           "passed\n",
         admitted_layouts, copies, refusals);
     return 0;
 }

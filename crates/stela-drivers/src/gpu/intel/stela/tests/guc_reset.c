@@ -82,7 +82,9 @@ int main(void)
         case 7: f.awake = 0; break;
         default: f.graphics_verx100 = 2004; break;
         }
-        struct stela_intel_guc_reset_result before; memset(&before, 0xa5, sizeof(before)); out = before;
+        struct stela_intel_guc_reset_result before;
+        memset(&before, 0xa5, sizeof(before));
+        out = before;
         m = (struct model){.clear_after = 1, .mia_reset = true};
         assert(stela_intel_guc_reset(&io, &m, &f, &out) == -95);
         assert(!m.reads && !m.writes && !memcmp(&out, &before, sizeof(out)));
@@ -95,6 +97,8 @@ int main(void)
     missing.delay_us = NULL;
     assert(stela_intel_guc_reset(&missing, &m, &xelp, &out) == -22 && !m.writes);
     assert(stela_intel_guc_reset(&io, &m, NULL, &out) == -22 && !m.writes);
-    printf("Intel GuC reset: completed, timed-out and not-in-reset handshakes, %u zero-I/O refusals; modelled registers only\n", refusals);
+    printf("Intel GuC reset: completed, timed-out and not-in-reset handshakes, %u zero-I/O "
+           "refusals; modelled registers only\n",
+           refusals);
     return 0;
 }

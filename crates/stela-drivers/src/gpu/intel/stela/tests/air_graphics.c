@@ -16,7 +16,13 @@
 #ifdef NDEBUG
 #error "Graphics owner qualification requires assertions"
 #endif
-#define CHECK(x) do { if (!(x)) { fprintf(stderr,"%s:%d: %s\n",__func__,__LINE__,#x); abort(); } } while (0)
+#define CHECK(x) \
+    do { \
+        if (!(x)) { \
+            fprintf(stderr, "%s:%d: %s\n", __func__, __LINE__, #x); \
+            abort(); \
+        } \
+    } while (0)
 
 static unsigned live_allocations, live_contexts;
 #ifdef STELA_INTEL_GRAPHICS_ALLOCATION_TEST
@@ -83,7 +89,8 @@ static void tag(struct bytes *b, const char name[4], const void *data, size_t by
     uint8_t length[2]; CHECK(bytes <= UINT16_MAX); little(length, bytes, 2);
     append(b, name, 4); append(b, length, 2); append(b, data, bytes);
 }
-static struct bytes archive(const void *air, size_t bytes, const char *entry, enum stela_air_stage role)
+static struct bytes archive(const void *air, size_t bytes, const char *entry,
+    enum stela_air_stage role)
 {
     CHECK(bytes <= AIR_MAX_BITCODE_BYTES);
     struct bytes record = {0};
@@ -101,14 +108,19 @@ static struct bytes archive(const void *air, size_t bytes, const char *entry, en
     little(header + 4, 0x8001, 2); little(header + 6, 2, 2); little(header + 8, 9, 2);
     header[11] = 0x81; little(header + 12, 27, 2); little(header + 14, 2, 2);
     size_t start = 92 + record.size;
-    little(header + 16, start + bytes, 8); little(header + 24, 88, 8); little(header + 32, record.size, 8);
+    little(header + 16, start + bytes, 8);
+    little(header + 24, 88, 8);
+    little(header + 32, record.size, 8);
     little(header + 40, start, 8); little(header + 56, start, 8);
     little(header + 72, start, 8); little(header + 80, bytes, 8);
     struct bytes result = {0}; append(&result, header, sizeof(header)); little(prefix, 1, 4);
-    append(&result, prefix, 4); append(&result, record.data, record.size); append(&result, air, bytes);
+    append(&result, prefix, 4);
+    append(&result, record.data, record.size);
+    append(&result, air, bytes);
     free(record.data); return result;
 }
-static struct stela_metal_assembly *stage(const struct bytes *raw, const char *entry, enum stela_air_stage role)
+static struct stela_metal_assembly *stage(const struct bytes *raw, const char *entry,
+    enum stela_air_stage role)
 {
     struct bytes framed = archive(raw->data, raw->size, entry, role);
     struct stela_metal_assembly_options options = stela_metal_assembly_default_options();
@@ -118,16 +130,23 @@ static struct stela_metal_assembly *stage(const struct bytes *raw, const char *e
     if (status) fprintf(stderr,"Selected stage: %u %s\n",status,error.detail);
     CHECK(status == STELA_METAL_ASSEMBLY_OK && owner && !stela_metal_assembly_manifest(owner));
     const struct stela_metal_stage_view *view = stela_metal_assembly_stage(owner);
-    CHECK(view && view->reflection->stage == role && !view->provenance->entries && !view->provenance->entry_count);
+    CHECK(view && view->reflection->stage == role && !view->provenance->entries &&
+        !view->provenance->entry_count);
     memset(framed.data, 0xa5, framed.size); free(framed.data);
-    CHECK(view->identity->name_bytes == strlen(entry) && !strcmp((const char *)view->identity->name, entry));
+    CHECK(view->identity->name_bytes == strlen(entry) &&
+        !strcmp((const char *)view->identity->name, entry));
     return owner;
 }
 static struct stela_intel_graphics_options options(void)
 {
-    return (struct stela_intel_graphics_options){.size = sizeof(struct stela_intel_graphics_options),
-        .abi = STELA_INTEL_GRAPHICS_ABI, .max_instructions = 10000, .max_code_bytes = 1024 * 1024,
-        .max_varying_slots = 16, .color_regions = 1, .samples = 1,
+    return (struct stela_intel_graphics_options){
+        .size = sizeof(struct stela_intel_graphics_options),
+        .abi = STELA_INTEL_GRAPHICS_ABI,
+        .max_instructions = 10000,
+        .max_code_bytes = 1024 * 1024,
+        .max_varying_slots = 16,
+        .color_regions = 1,
+        .samples = 1,
         .vertex_fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
         .fragment_fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41};
 }
@@ -164,17 +183,23 @@ static void compare(const struct stela_intel_graphics_compilation *owner, const 
             struct elk_stage_prog_data *d = i ? &fs.base : &vs.base.base;
             golden(directory,target,i,"params",d->param,d->nr_params*sizeof(*d->param));
             golden(directory,target,i,"relocs",d->relocs,d->num_relocs*sizeof(*d->relocs));
-            constants = d->const_data_size; offset = d->const_data_offset; d->param = NULL; d->relocs = NULL;
-            golden(directory,target,i,"progdata",i ? (void *)&fs : (void *)&vs,i ? sizeof(fs) : sizeof(vs));
+            constants = d->const_data_size;
+            offset = d->const_data_offset;
+            d->param = NULL;
+            d->relocs = NULL;
+            golden(directory, target, i, "progdata", i ? (void *)&fs : (void *)&vs,
+                i ? sizeof(fs) : sizeof(vs));
         } else {
             struct brw_vs_prog_data vs = {0}; struct brw_fs_prog_data fs = {0};
             if (i) fs = *b->brw_fs; else vs = *b->brw_vs;
             struct brw_stage_prog_data *d = i ? &fs.base : &vs.base.base;
             golden(directory,target,i,"relocs",d->relocs,d->num_relocs*sizeof(*d->relocs));
             constants = d->const_data_size; offset = d->const_data_offset; d->relocs = NULL;
-            golden(directory,target,i,"progdata",i ? (void *)&fs : (void *)&vs,i ? sizeof(fs) : sizeof(vs));
+            golden(directory, target, i, "progdata", i ? (void *)&fs : (void *)&vs,
+                i ? sizeof(fs) : sizeof(vs));
         }
-        golden(directory,target,i,"constants",constants ? (const uint8_t *)b->code + offset : NULL,constants);
+        golden(directory, target, i, "constants",
+            constants ? (const uint8_t *)b->code + offset : NULL, constants);
     }
 }
 static void failures(const struct brw_compiler *brw, const struct elk_compiler *elk,
@@ -184,9 +209,13 @@ static void failures(const struct brw_compiler *brw, const struct elk_compiler *
     struct stela_intel_graphics_compilation *output = NULL;
     struct stela_intel_graphics_error error;
     struct stela_intel_graphics_options o = options();
-    CHECK(stela_intel_graphics_compile(brw,elk,NULL,v,v,&o,&output,&error) == STELA_INTEL_GRAPHICS_INVALID);
-    CHECK(stela_intel_graphics_compile(brw,elk,NULL,v,f,&o,(struct stela_intel_graphics_compilation **)v,&error) == STELA_INTEL_GRAPHICS_INVALID);
-    CHECK(stela_intel_graphics_compile(brw,elk,NULL,f,v,&o,&output,&error) == STELA_INTEL_GRAPHICS_INVALID);
+    CHECK(stela_intel_graphics_compile(brw, elk, NULL, v, v, &o, &output, &error) ==
+        STELA_INTEL_GRAPHICS_INVALID);
+    CHECK(stela_intel_graphics_compile(brw, elk, NULL, v, f, &o,
+              (struct stela_intel_graphics_compilation **)v,
+              &error) == STELA_INTEL_GRAPHICS_INVALID);
+    CHECK(stela_intel_graphics_compile(brw, elk, NULL, f, v, &o, &output, &error) ==
+        STELA_INTEL_GRAPHICS_INVALID);
     for (unsigned i = 0; i < 5; i++) {
         o = options();
         if (i == 0) o.samples = 2;
@@ -194,8 +223,10 @@ static void failures(const struct brw_compiler *brw, const struct elk_compiler *
         if (i == 2) o.vertex_fp_profile = (enum stela_air_fp_profile)99;
         if (i == 3) o.max_instructions = 0;
         if (i == 4) o.max_code_bytes = 1;
-        enum stela_intel_graphics_status status = stela_intel_graphics_compile(brw,elk,NULL,v,f,&o,&output,&error);
-        CHECK(status != STELA_INTEL_GRAPHICS_OK && error.status == status && !output && *v == vertex && *f == fragment);
+        enum stela_intel_graphics_status status = stela_intel_graphics_compile(brw, elk, NULL, v, f,
+            &o, &output, &error);
+        CHECK(status != STELA_INTEL_GRAPHICS_OK && error.status == status && !output &&
+            *v == vertex && *f == fragment);
     }
     CHECK(!output && *v == vertex && *f == fragment);
 }
@@ -203,13 +234,15 @@ static void failures(const struct brw_compiler *brw, const struct elk_compiler *
 static bool validate_span(const struct brw_compiler *brw, const struct elk_compiler *elk,
     void *context, const void *code, unsigned bytes, unsigned alignment)
 {
-    return elk ? stela_intel_graphics_validate_elk(elk,code,bytes,alignment) :
-        stela_intel_graphics_validate_brw(brw->devinfo,context,code,bytes,alignment) == STELA_INTEL_GRAPHICS_OK;
+    return elk ? stela_intel_graphics_validate_elk(elk, code, bytes, alignment) :
+                 stela_intel_graphics_validate_brw(brw->devinfo, context, code, bytes, alignment) ==
+            STELA_INTEL_GRAPHICS_OK;
 }
 static void whole_span(const struct brw_compiler *brw, const struct elk_compiler *elk,
     const struct stela_intel_graphics_compilation *owner)
 {
-    const struct stela_intel_graphics_stage_binary *vertex = stela_intel_graphics_binary(owner,STELA_AIR_VERTEX);
+    const struct stela_intel_graphics_stage_binary *vertex = stela_intel_graphics_binary(owner,
+        STELA_AIR_VERTEX);
     unsigned size = vertex->executable_bytes;
     CHECK(size && size == vertex->code_bytes && !(size & 15) && size <= (UINT32_MAX - 128) / 2);
     void *context = ralloc_context(NULL); CHECK(context);
@@ -248,12 +281,17 @@ static void target(const struct bytes *raw, const char *vs, const char *fs, cons
     CHECK(brw || elk);
     if (brw) brw->shader_debug_log = brw->shader_perf_log = compiler_log;
     else elk->shader_debug_log = elk->shader_perf_log = compiler_log;
-    struct stela_metal_assembly *v = stage(raw,vs,STELA_AIR_VERTEX), *f = stage(raw,fs,STELA_AIR_FRAGMENT);
+    struct stela_metal_assembly *v = stage(raw, vs, STELA_AIR_VERTEX),
+                                *f = stage(raw, fs, STELA_AIR_FRAGMENT);
     struct stela_intel_graphics_compilation *output = NULL;
     struct stela_intel_graphics_options o = options(); struct stela_intel_graphics_error error;
     if (stela_intel_hold(&device)) {
-        CHECK(stela_intel_graphics_compile(brw,elk,NULL,&v,&f,&o,&output,&error) == STELA_INTEL_GRAPHICS_UNSUPPORTED);
-        CHECK(v && f && !output); stela_metal_assembly_destroy(&v); stela_metal_assembly_destroy(&f); ralloc_free(context);
+        CHECK(stela_intel_graphics_compile(brw, elk, NULL, &v, &f, &o, &output, &error) ==
+            STELA_INTEL_GRAPHICS_UNSUPPORTED);
+        CHECK(v && f && !output);
+        stela_metal_assembly_destroy(&v);
+        stela_metal_assembly_destroy(&f);
+        ralloc_free(context);
         record_held(name,stela_intel_hold(&device)); return;
     }
     failures(brw,elk,&v,&f);
@@ -261,38 +299,48 @@ static void target(const struct bytes *raw, const char *vs, const char *fs, cons
     bool success = false;
     for (unsigned n = 1; n <= 32; n++) {
         allocations = 0; fail_allocation = n;
-        enum stela_intel_graphics_status status = stela_intel_graphics_compile(brw,elk,NULL,&v,&f,&o,&output,&error);
+        enum stela_intel_graphics_status status = stela_intel_graphics_compile(brw, elk, NULL, &v,
+            &f, &o, &output, &error);
         if (!status) { success = true; break; }
         CHECK(v && f && !output && !live_allocations && !live_contexts);
     }
     fail_allocation = 0; CHECK(success);
 #else
-    CHECK(stela_intel_graphics_compile(brw,elk,NULL,&v,&f,&o,&output,&error) == STELA_INTEL_GRAPHICS_OK);
+    CHECK(stela_intel_graphics_compile(brw, elk, NULL, &v, &f, &o, &output, &error) ==
+        STELA_INTEL_GRAPHICS_OK);
 #endif
     CHECK(output && !v && !f);
     const struct stela_intel_graphics_provenance *p = stela_intel_graphics_provenance(output);
-    CHECK(p && p->vertex->reflection->stage == STELA_AIR_VERTEX && p->fragment->reflection->stage == STELA_AIR_FRAGMENT);
+    CHECK(p && p->vertex->reflection->stage == STELA_AIR_VERTEX &&
+        p->fragment->reflection->stage == STELA_AIR_FRAGMENT);
     CHECK(!p->vertex->provenance->entries && !p->fragment->provenance->entries);
-    CHECK(memcmp(p->vertex->provenance->input.original_sha256,p->fragment->provenance->input.original_sha256,32));
+    CHECK(memcmp(p->vertex->provenance->input.original_sha256,
+        p->fragment->provenance->input.original_sha256, 32));
     CHECK(!memcmp(p->vertex->identity->air_sha256,p->fragment->identity->air_sha256,32));
     compare(output,directory,name);
     whole_span(brw,elk,output);
     for (unsigned i = 0; i < 2; i++) {
         uint32_t count; enum stela_air_stage role = i ? STELA_AIR_FRAGMENT : STELA_AIR_VERTEX;
-        const struct stela_intel_graphics_binding *bindings = stela_intel_graphics_bindings(output,role,&count);
+        const struct stela_intel_graphics_binding *bindings = stela_intel_graphics_bindings(output,
+            role, &count);
         CHECK(bindings && count == (i ? 0u : 2u));
-        for (unsigned j = 0; j < count; j++) CHECK(bindings[j].used && bindings[j].table_entry &&
-            bindings[j].buffer.access == STELA_AIR_READ && bindings[j].buffer.address_space == 2 && bindings[j].bti == j);
+        for (unsigned j = 0; j < count; j++)
+            CHECK(bindings[j].used && bindings[j].table_entry &&
+                bindings[j].buffer.access == STELA_AIR_READ &&
+                bindings[j].buffer.address_space == 2 && bindings[j].bti == j);
         CHECK(stela_intel_graphics_nir(output,role));
     }
     /* Original compiler context/options/callback payload no longer own the
      * result's bytes, metadata, NIR options or canonical input identities. */
     ralloc_free(context); compare(output,directory,name);
-    CHECK(!strcmp((const char *)p->vertex->identity->name,vs) && !strcmp((const char *)p->fragment->identity->name,fs));
+    CHECK(!strcmp((const char *)p->vertex->identity->name, vs) &&
+        !strcmp((const char *)p->fragment->identity->name, fs));
     /* The package equals the render probe's original code, metadata and
      * identities after its compiler is gone. */
-    const struct stela_intel_graphics_stage_binary *vertex = stela_intel_graphics_binary(output,STELA_AIR_VERTEX);
-    const struct stela_intel_graphics_stage_binary *fragment = stela_intel_graphics_binary(output,STELA_AIR_FRAGMENT);
+    const struct stela_intel_graphics_stage_binary *vertex = stela_intel_graphics_binary(output,
+        STELA_AIR_VERTEX);
+    const struct stela_intel_graphics_stage_binary *fragment = stela_intel_graphics_binary(output,
+        STELA_AIR_FRAGMENT);
     record_compiled(name,(uint64_t)vertex->code_bytes + fragment->code_bytes);
     record_object("facts");
     record_str("backend",legacy ? "elk" : "brw");
@@ -306,12 +354,14 @@ int main(int argc, char **argv)
 {
     CHECK(argc == 5); /* Actual rawAIR,VSentry,FSentry, immutable original05c output directory. */
     FILE *file = fopen(argv[1],"rb"); CHECK(file && !fseek(file,0,SEEK_END));
-    long size = ftell(file); CHECK(size >= 4 && size <= AIR_MAX_BITCODE_BYTES && !fseek(file,0,SEEK_SET));
+    long size = ftell(file);
+    CHECK(size >= 4 && size <= AIR_MAX_BITCODE_BYTES && !fseek(file, 0, SEEK_SET));
     struct bytes raw = {.data = malloc((size_t)size), .size = (size_t)size}; CHECK(raw.data);
     CHECK(fread(raw.data,1,raw.size,file) == raw.size && !fclose(file));
     process_intel_debug_variable(); glsl_type_singleton_init_or_ref();
     struct intel_device_info device; const char *platform;
     STELA_INTEL_FOREACH_TARGET(platform,device) record_expect(platform,stela_intel_hold(&device));
-    STELA_INTEL_FOREACH_TARGET(platform,device) target(&raw,argv[2],argv[3],platform,&device,argv[4]);
+    STELA_INTEL_FOREACH_TARGET(platform, device)
+    target(&raw, argv[2], argv[3], platform, &device, argv[4]);
     glsl_type_singleton_decref(); free(raw.data); return 0;
 }

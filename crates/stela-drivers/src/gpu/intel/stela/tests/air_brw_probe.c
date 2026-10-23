@@ -100,7 +100,8 @@ compile_air(const char *platform, const struct intel_device_info *device,
    int failed = !code || !data.base.program_size || parameters.base.error_str;
    unsigned sends = 0;
    if (!failed)
-      failed = !validate_intel_code(device, context, code, data.base.program_size, platform, &sends);
+      failed = !validate_intel_code(device, context, code, data.base.program_size, platform,
+                                    &sends);
    if (failed)
       fprintf(stderr, "%s AIR codegen failed: %s\n", platform,
               parameters.base.error_str ? parameters.base.error_str : "no valid code");
@@ -148,7 +149,10 @@ main(int argc, char **argv)
    stela_air_probe_profile_record(fp_profile);
    LLVMMemoryBufferRef input = stela_intel_air_probe_input(argc, argv, &entry);
    if (!input) {
-      fprintf(stderr, "usage: %s [--input RAW_AIR_BITCODE --entry IDENTIFIER [--fp-profile NAME]] (4 bytes..16 MiB)\n", argv[0]);
+      fprintf(stderr,
+              "usage: %s [--input RAW_AIR_BITCODE --entry IDENTIFIER [--fp-profile NAME]] (4 "
+              "bytes..16 MiB)\n",
+              argv[0]);
       return 2;
    }
    struct intel_device_info device;

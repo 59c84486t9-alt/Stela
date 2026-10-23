@@ -56,9 +56,14 @@ static void delay(void *data, uint32_t minimum, uint32_t maximum, bool atomic)
 static void check(void *data, bool condition) { (void)data; assert(condition); }
 static void report(void *data, uint32_t mask, bool wake, int status, uint32_t value)
 {
-    (void)wake; (void)status; (void)value; assert(mask == XE_FW_GT); ++((struct model *)data)->reports;
+    (void)wake;
+    (void)status;
+    (void)value;
+    assert(mask == XE_FW_GT);
+    ++((struct model *)data)->reports;
 }
-static const struct stela_intel_activation_io io = {check_context, prepare, read_model, write_model, now, delay, check, report};
+static const struct stela_intel_activation_io io = {
+    check_context, prepare, read_model, write_model, now, delay, check, report};
 
 int main(void)
 {
@@ -117,7 +122,9 @@ int main(void)
     }
     m.prepare_error = 0;
     const struct pci_device_id *post = pciidlist;
-    while (post->vendor && ((const struct xe_device_desc *)post->driver_data)->pre_gmdid_graphics_ip) ++post;
+    while (post->vendor &&
+        ((const struct xe_device_desc *)post->driver_data)->pre_gmdid_graphics_ip)
+        ++post;
     assert(post->vendor);
     /* Unknown graphics IP, including an all-ones read, fails the probe. */
     for (unsigned bad = 0; bad < 2; ++bad) {
@@ -169,6 +176,9 @@ int main(void)
         if (bad < 2) assert(now(&m) - start >= INT64_C(50000000));
         assert(state.poisoned && stela_intel_activation_wake(&state) == -5);
     }
-    printf("Intel activation model: %u original PCI rows, 18 atomic refusals, 2 pure unmatched/terminator refusals, unknown and fused-off media, real-clock ACK timeout/all-ones checks, %u runtime IP entries; no physical hardware activation\n", matches, runtime_ips);
+    printf("Intel activation model: %u original PCI rows, 18 atomic refusals, 2 pure "
+           "unmatched/terminator refusals, unknown and fused-off media, real-clock ACK "
+           "timeout/all-ones checks, %u runtime IP entries; no physical hardware activation\n",
+        matches, runtime_ips);
     return 0;
 }

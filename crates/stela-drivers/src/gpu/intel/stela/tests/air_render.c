@@ -20,7 +20,13 @@
 #ifdef NDEBUG
 #error "Render qualification requires original compiler assertions"
 #endif
-#define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __func__, __LINE__, #x); abort(); } } while (0)
+#define CHECK(x) \
+    do { \
+        if (!(x)) { \
+            fprintf(stderr, "%s:%d: %s\n", __func__, __LINE__, #x); \
+            abort(); \
+        } \
+    } while (0)
 
 struct input { void *bytes; size_t size; const char *vertex, *fragment; };
 struct binding { unsigned seen, reject; };
@@ -45,7 +51,10 @@ static FILE *disassembly;
 static void compiler_log(void *data, unsigned *id, const char *format, ...)
 {
     (void)data; (void)id;
-    va_list arguments; va_start(arguments, format); vfprintf(stderr, format, arguments); va_end(arguments);
+    va_list arguments;
+    va_start(arguments, format);
+    vfprintf(stderr, format, arguments);
+    va_end(arguments);
 }
 
 
@@ -55,7 +64,8 @@ static void target_name(char name[64], const char *platform, unsigned stage)
     snprintf(name, 64, "%s-%s", platform, stage ? "fragment" : "vertex");
 }
 
-static void save(const char *platform, unsigned stage, const char *kind, const void *data, size_t size)
+static void save(const char *platform, unsigned stage, const char *kind, const void *data,
+    size_t size)
 {
     const char *directory = getenv("STELA_RENDER_EVIDENCE");
     if (!directory) return;
@@ -142,7 +152,8 @@ static void lower_pair(struct pair *p, unsigned reject)
     }
     if (!ok) fprintf(stderr, "AIR stage refusal: %u %s\n", error.kind, error.detail);
     CHECK(ok && p->linked && !p->vertex && p->nir[0] && p->nir[1]);
-    CHECK(p->nir[0]->info.stage == MESA_SHADER_VERTEX && p->nir[1]->info.stage == MESA_SHADER_FRAGMENT);
+    CHECK(p->nir[0]->info.stage == MESA_SHADER_VERTEX &&
+        p->nir[1]->info.stage == MESA_SHADER_FRAGMENT);
     CHECK(p->nir[0]->info.num_ssbos == 2 && !p->nir[1]->info.num_ssbos);
     CHECK(p->nir[0]->info.outputs_written & VARYING_BIT_POS);
     CHECK(p->nir[1]->info.outputs_written == BITFIELD64_BIT(FRAG_RESULT_DATA0));
@@ -156,8 +167,9 @@ static void lower_pair(struct pair *p, unsigned reject)
             }
             if (instr->type != nir_instr_type_intrinsic) continue;
             const nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
-            CHECK(in->intrinsic != nir_intrinsic_load_global && in->intrinsic != nir_intrinsic_store_global &&
-                  in->intrinsic != nir_intrinsic_store_ssbo);
+            CHECK(in->intrinsic != nir_intrinsic_load_global &&
+                in->intrinsic != nir_intrinsic_store_global &&
+                in->intrinsic != nir_intrinsic_store_ssbo);
             if (in->intrinsic == nir_intrinsic_load_ssbo) {
                 CHECK(nir_src_is_const(in->src[0]) && nir_src_as_uint(in->src[0]) < 2);
                 dynamic_offsets += !nir_src_is_const(in->src[1]);
@@ -170,11 +182,13 @@ static void lower_pair(struct pair *p, unsigned reject)
     unsigned interpolated = 0;
     nir_foreach_shader_in_variable(var, p->nir[1]) {
         if (var->data.location < VARYING_SLOT_VAR0) continue;
-        CHECK(var->data.interpolation == INTERP_MODE_SMOOTH && !var->data.sample && !var->data.centroid);
+        CHECK(var->data.interpolation == INTERP_MODE_SMOOTH && !var->data.sample &&
+            !var->data.centroid);
         interpolated++;
     }
     CHECK(interpolated == p->linked);
-    for (unsigned i = 0; i < 2; i++) nir_validate_shader(p->nir[i], "linked original AIR render stage");
+    for (unsigned i = 0; i < 2; i++)
+        nir_validate_shader(p->nir[i], "linked original AIR render stage");
 }
 
 static void validate(const struct intel_device_info *dev, const struct elk_compiler *elk,
@@ -210,7 +224,8 @@ static void validate(const struct intel_device_info *dev, const struct elk_compi
     }
     CHECK(end > 0);
     while (end < decoded.num_insts && decoded.insts[end].opcode == GEN_OP_NOP) end++;
-    unsigned real_bytes = (unsigned)layouts[end - 1].offset + (layouts[end - 1].was_compacted ? 8 : 16);
+    unsigned real_bytes = (unsigned)layouts[end - 1].offset +
+        (layouts[end - 1].was_compacted ? 8 : 16);
     for (unsigned i = real_bytes; i < bytes; i++) CHECK(!((const uint8_t *)code)[i]);
     gen_validate_params validation = {.devinfo = dev, .mem_ctx = context,
         .insts = decoded.insts, .num_insts = end};
@@ -227,7 +242,8 @@ static void validate(const struct intel_device_info *dev, const struct elk_compi
         CHECK(gen_print(&print));
     }
     gen_inst invalid = decoded.insts[0]; invalid.exec_size = 0;
-    gen_validate_params negative = {.devinfo = dev, .mem_ctx = context, .insts = &invalid, .num_insts = 1};
+    gen_validate_params negative = {
+        .devinfo = dev, .mem_ctx = context, .insts = &invalid, .num_insts = 1};
     CHECK(!gen_validate(&negative));
 }
 
@@ -280,7 +296,8 @@ static void compile_pair(const struct input *input, const struct brw_compiler *b
         out->code[0] = elk_compile_vs(elk, &vp); CHECK(out->code[0] && !vp.base.error_str);
         struct elk_fs_prog_key fk = {.input_slots_valid = out->vs.elk.base.vue_map.slots_valid,
             .nr_color_regions = 1, .color_outputs_valid = 1, .ignore_sample_mask_out = true};
-        out->fs.elk.base.param = ralloc_array(out->context, uint32_t, 0); CHECK(out->fs.elk.base.param);
+        out->fs.elk.base.param = ralloc_array(out->context, uint32_t, 0);
+        CHECK(out->fs.elk.base.param);
         struct elk_compile_fs_params fp = {.base = {.mem_ctx = out->context, .nir = p.nir[1]},
             .key = &fk, .prog_data = &out->fs.elk, .vue_map = &out->vs.elk.base.vue_map,
             .allow_spilling = true, .max_polygons = 1};
@@ -289,13 +306,17 @@ static void compile_pair(const struct input *input, const struct brw_compiler *b
     const struct intel_vue_map *vue = brw ? &out->vs.brw.base.vue_map : &out->vs.elk.base.vue_map;
     CHECK(vue->slots_valid & VARYING_BIT_POS);
     CHECK(vue->slots_valid & BITFIELD64_BIT(VARYING_SLOT_VAR0));
-    CHECK(vue->varying_to_slot[VARYING_SLOT_POS] >= 0 && vue->varying_to_slot[VARYING_SLOT_VAR0] >= 0);
+    CHECK(vue->varying_to_slot[VARYING_SLOT_POS] >= 0 &&
+        vue->varying_to_slot[VARYING_SLOT_VAR0] >= 0);
     for (unsigned i = 0; i < 2; i++) {
-        unsigned bytes = brw ? (i ? out->fs.brw.base.program_size : out->vs.brw.base.base.program_size) :
+        unsigned bytes = brw ?
+            (i ? out->fs.brw.base.program_size : out->vs.brw.base.base.program_size) :
             (i ? out->fs.elk.base.program_size : out->vs.elk.base.base.program_size);
-        unsigned constants = brw ? (i ? out->fs.brw.base.const_data_size : out->vs.brw.base.base.const_data_size) :
+        unsigned constants = brw ?
+            (i ? out->fs.brw.base.const_data_size : out->vs.brw.base.base.const_data_size) :
             (i ? out->fs.elk.base.const_data_size : out->vs.elk.base.base.const_data_size);
-        unsigned offset = brw ? (i ? out->fs.brw.base.const_data_offset : out->vs.brw.base.base.const_data_offset) :
+        unsigned offset = brw ?
+            (i ? out->fs.brw.base.const_data_offset : out->vs.brw.base.base.const_data_offset) :
             (i ? out->fs.elk.base.const_data_offset : out->vs.elk.base.base.const_data_offset);
         CHECK(offset <= bytes && (!constants || (offset && constants <= bytes - offset)));
         unsigned executable = constants ? offset : bytes;
@@ -315,8 +336,10 @@ static void compile_pair(const struct input *input, const struct brw_compiler *b
             for (unsigned j = 0; j < n; j++) {
                 unsigned stop = j + 1 < n ? starts[j + 1] : executable;
                 CHECK(starts[j] < stop && stop <= executable && !(starts[j] & 63));
-                if (disassembly) fprintf(disassembly, "FRAGMENT kernel%u byte_offset%u\n", j, starts[j]);
-                validate(dev, elk, out->context, (const uint8_t *)out->code[i] + starts[j], stop - starts[j]);
+                if (disassembly)
+                    fprintf(disassembly, "FRAGMENT kernel%u byte_offset%u\n", j, starts[j]);
+                validate(dev, elk, out->context, (const uint8_t *)out->code[i] + starts[j],
+                    stop - starts[j]);
             }
         }
     }
@@ -335,7 +358,8 @@ static void compare(struct compiled *a, struct compiled *b, bool elk)
             struct elk_stage_prog_data *x = i ? &a->fs.elk.base : &a->vs.elk.base.base;
             struct elk_stage_prog_data *y = i ? &b->fs.elk.base : &b->vs.elk.base.base;
             CHECK(x->num_relocs == y->num_relocs && x->nr_params == y->nr_params);
-            if (x->num_relocs) CHECK(!memcmp(x->relocs, y->relocs, x->num_relocs * sizeof(*x->relocs)));
+            if (x->num_relocs)
+                CHECK(!memcmp(x->relocs, y->relocs, x->num_relocs * sizeof(*x->relocs)));
             if (x->nr_params) CHECK(!memcmp(x->param, y->param, x->nr_params * sizeof(*x->param)));
             x->relocs = y->relocs = NULL; x->param = y->param = NULL;
             bytes = x->program_size;
@@ -346,7 +370,8 @@ static void compare(struct compiled *a, struct compiled *b, bool elk)
             struct brw_stage_prog_data *x = i ? &a->fs.brw.base : &a->vs.brw.base.base;
             struct brw_stage_prog_data *y = i ? &b->fs.brw.base : &b->vs.brw.base.base;
             CHECK(x->num_relocs == y->num_relocs);
-            if (x->num_relocs) CHECK(!memcmp(x->relocs, y->relocs, x->num_relocs * sizeof(*x->relocs)));
+            if (x->num_relocs)
+                CHECK(!memcmp(x->relocs, y->relocs, x->num_relocs * sizeof(*x->relocs)));
             x->relocs = y->relocs = NULL; bytes = x->program_size;
             CHECK(!memcmp(i ? (void *)&a->fs.brw : (void *)&a->vs.brw,
                           i ? (void *)&b->fs.brw : (void *)&b->vs.brw,
@@ -358,7 +383,10 @@ static void compare(struct compiled *a, struct compiled *b, bool elk)
 
 static void destroy(struct compiled *c)
 {
-    ralloc_free(c->nir[0]); ralloc_free(c->nir[1]); ralloc_free(c->context); *c = (struct compiled){0};
+    ralloc_free(c->nir[0]);
+    ralloc_free(c->nir[1]);
+    ralloc_free(c->context);
+    *c = (struct compiled){0};
 }
 
 static void metadata_hash(const struct compiled *c, bool legacy, unsigned stage, char out[3][65])
@@ -373,11 +401,13 @@ static void metadata_hash(const struct compiled *c, bool legacy, unsigned stage,
         const struct brw_stage_prog_data *d = stage ? &c->fs.brw.base : &c->vs.brw.base.base;
         stela_digest(stage ? (const void *)&c->fs.brw : (const void *)&c->vs.brw,
              stage ? sizeof(c->fs.brw) : sizeof(c->vs.brw), out[0]);
-        stela_digest(NULL, 0, out[1]); stela_digest(d->relocs, d->num_relocs * sizeof(*d->relocs), out[2]);
+        stela_digest(NULL, 0, out[1]);
+        stela_digest(d->relocs, d->num_relocs * sizeof(*d->relocs), out[2]);
     }
 }
 
-static void target(const struct input *input, const char *name, const struct intel_device_info *device)
+static void target(const struct input *input, const char *name,
+    const struct intel_device_info *device)
 {
     const struct intel_device_info dev = *device; const int pci = dev.pci_device_id;
     const bool legacy = stela_intel_elk(&dev);
@@ -394,13 +424,16 @@ static void target(const struct input *input, const char *name, const struct int
     if (brw) brw->shader_debug_log = brw->shader_perf_log = compiler_log;
     else elk->shader_debug_log = elk->shader_perf_log = compiler_log;
     struct compiled a = {0}, b = {0};
-    if (disassembly) fprintf(disassembly, "TARGET %s PCI-model%04x ver%u RECAPTURE A\n", name, pci, dev.verx10);
+    if (disassembly)
+        fprintf(disassembly, "TARGET %s PCI-model%04x ver%u RECAPTURE A\n", name, pci, dev.verx10);
     compile_pair(input, brw, elk, &a);
-    if (disassembly) fprintf(disassembly, "TARGET %s PCI-model%04x ver%u RECAPTURE B\n", name, pci, dev.verx10);
+    if (disassembly)
+        fprintf(disassembly, "TARGET %s PCI-model%04x ver%u RECAPTURE B\n", name, pci, dev.verx10);
     compile_pair(input, brw, elk, &b); compare(&a, &b, legacy);
     char retained[2][65], metadata[2][3][65];
     for (unsigned i = 0; i < 2; i++) {
-        unsigned bytes = legacy ? (i ? a.fs.elk.base.program_size : a.vs.elk.base.base.program_size) :
+        unsigned bytes = legacy ?
+            (i ? a.fs.elk.base.program_size : a.vs.elk.base.base.program_size) :
             (i ? a.fs.brw.base.program_size : a.vs.brw.base.base.program_size);
         stela_digest(a.code[i], bytes, retained[i]);
         metadata_hash(&a, legacy, i, metadata[i]);
@@ -413,8 +446,11 @@ static void target(const struct input *input, const char *name, const struct int
             save(name, i, "relocs", d->relocs, relocs * sizeof(*d->relocs));
             save(name, i, "params", d->param, params * sizeof(*d->param));
             struct compiled normalized = a;
-            if (i) { normalized.fs.elk.base.param = NULL; normalized.fs.elk.base.relocs = NULL; }
-            else { normalized.vs.elk.base.base.param = NULL; normalized.vs.elk.base.base.relocs = NULL; }
+            if (i) { normalized.fs.elk.base.param = NULL; normalized.fs.elk.base.relocs = NULL;
+            } else {
+                normalized.vs.elk.base.base.param = NULL;
+                normalized.vs.elk.base.base.relocs = NULL;
+            }
             save(name, i, "progdata", i ? (void *)&normalized.fs.elk : (void *)&normalized.vs.elk,
                 i ? sizeof(normalized.fs.elk) : sizeof(normalized.vs.elk));
         } else {
@@ -424,11 +460,13 @@ static void target(const struct input *input, const char *name, const struct int
             for (unsigned j = 0; j < ARRAY_SIZE(d->push_sizes); j++) urb_read += d->push_sizes[j];
             save(name, i, "relocs", d->relocs, relocs * sizeof(*d->relocs));
             struct compiled normalized = a;
-            if (i) normalized.fs.brw.base.relocs = NULL; else normalized.vs.brw.base.base.relocs = NULL;
+            if (i) normalized.fs.brw.base.relocs = NULL;
+            else normalized.vs.brw.base.base.relocs = NULL;
             save(name, i, "progdata", i ? (void *)&normalized.fs.brw : (void *)&normalized.vs.brw,
                 i ? sizeof(normalized.fs.brw) : sizeof(normalized.vs.brw));
         }
-        save(name, i, "constants", constants ? (const uint8_t *)a.code[i] + constant_offset : NULL, constants);
+        save(name, i, "constants", constants ? (const uint8_t *)a.code[i] + constant_offset : NULL,
+            constants);
         char stage_target[64]; target_name(stage_target, name, i);
         record_compiled(stage_target, bytes);
         record_object("facts");
@@ -466,7 +504,8 @@ static void target(const struct input *input, const char *name, const struct int
     /* One sibling output survives independent NIR/context disposal. */
     destroy(&b);
     for (unsigned i = 0; i < 2; i++) {
-        unsigned bytes = legacy ? (i ? a.fs.elk.base.program_size : a.vs.elk.base.base.program_size) :
+        unsigned bytes = legacy ?
+            (i ? a.fs.elk.base.program_size : a.vs.elk.base.base.program_size) :
             (i ? a.fs.brw.base.program_size : a.vs.brw.base.base.program_size);
         char after[65]; stela_digest(a.code[i], bytes, after); CHECK(!strcmp(after, retained[i]));
         char after_metadata[3][65]; metadata_hash(&a, legacy, i, after_metadata);
@@ -498,7 +537,8 @@ static void inspect_refusals(const struct input *input)
 static struct input read_input(const char *path, const char *vertex_name, const char *fragment_name)
 {
     FILE *file = fopen(path, "rb"); CHECK(file && !fseek(file, 0, SEEK_END));
-    long size = ftell(file); CHECK(size >= 4 && size <= 16 * 1024 * 1024 && !fseek(file, 0, SEEK_SET));
+    long size = ftell(file);
+    CHECK(size >= 4 && size <= 16 * 1024 * 1024 && !fseek(file, 0, SEEK_SET));
     struct input input = {.bytes = malloc((size_t)size), .size = (size_t)size,
         .vertex = vertex_name, .fragment = fragment_name}; CHECK(input.bytes);
     CHECK(fread(input.bytes, 1, input.size, file) == input.size && !fclose(file));
@@ -508,7 +548,9 @@ static struct input read_input(const char *path, const char *vertex_name, const 
 int main(int argc, char **argv)
 {
     if (argc != 4 && argc != 6) {
-        fprintf(stderr, "usage: %s RAW_AIR VERTEX_ENTRY FRAGMENT_ENTRY [REFUSED_RAW REFUSED_FRAGMENT_ENTRY]\n", argv[0]);
+        fprintf(stderr,
+            "usage: %s RAW_AIR VERTEX_ENTRY FRAGMENT_ENTRY [REFUSED_RAW REFUSED_FRAGMENT_ENTRY]\n",
+            argv[0]);
         return 2;
     }
     struct input input = read_input(argv[1], argv[2], argv[3]);
@@ -522,8 +564,9 @@ int main(int argc, char **argv)
     if (argc == 6) {
         struct input refused = read_input(argv[4], NULL, argv[5]);
         struct stela_air_error error; unsigned callbacks = 0;
-        CHECK(!stela_air_inspect_stage(refused.bytes, refused.size, refused.fragment, STELA_AIR_FRAGMENT,
-            unexpected_stage, &callbacks, &error) && !callbacks && error.kind != STELA_AIR_OK);
+        CHECK(!stela_air_inspect_stage(refused.bytes, refused.size, refused.fragment,
+                  STELA_AIR_FRAGMENT, unexpected_stage, &callbacks, &error) &&
+            !callbacks && error.kind != STELA_AIR_OK);
         record_begin("evidence");
         record_str("topic", "refused-input");
         record_object("facts");
@@ -538,7 +581,9 @@ int main(int argc, char **argv)
     struct intel_device_info device; const char *platform;
     STELA_INTEL_FOREACH_TARGET(platform, device) {
         for (unsigned i = 0; i < 2; i++) {
-            char name[64]; target_name(name, platform, i); record_expect(name, stela_intel_hold(&device));
+            char name[64];
+            target_name(name, platform, i);
+            record_expect(name, stela_intel_hold(&device));
         }
     }
     STELA_INTEL_FOREACH_TARGET(platform, device) target(&input, platform, &device);

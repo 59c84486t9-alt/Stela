@@ -10,7 +10,8 @@ struct stela_intel_shared_stats {
     unsigned first_load, first_store, first_fence, first_barrier, first_wait;
 };
 
-static inline void stela_intel_shared_order(struct stela_intel_shared_stats *stats, unsigned ordinal)
+static inline void stela_intel_shared_order(struct stela_intel_shared_stats *stats,
+    unsigned ordinal)
 {
     assert(ordinal);
     if (stats->stores && !stats->first_store) stats->first_store = ordinal;

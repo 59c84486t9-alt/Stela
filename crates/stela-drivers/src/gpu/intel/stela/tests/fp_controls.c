@@ -69,11 +69,13 @@ static nir_shader *input_shader(const nir_shader_compiler_options *options,
     nir_def *offset = nir_ishl_imm(&b,
         nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0), 5);
     nir_def *a = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0), offset, .align_mul = 4);
-    nir_def *v = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0), nir_iadd_imm(&b, offset, 4), .align_mul = 4);
+    nir_def *v = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0), nir_iadd_imm(&b, offset, 4),
+        .align_mul = 4);
     nir_def *values[] = {nir_fadd(&b, a, v), nir_fsub(&b, a, v), nir_fmul(&b, a, v),
                          nir_i2f32(&b, a), nir_u2f32(&b, v), nir_b2i32(&b, nir_flt(&b, a, v))};
     for (unsigned i = 0; i < ARRAY_SIZE(values); ++i)
-        nir_store_ssbo(&b, values[i], nir_imm_int(&b, 0), nir_iadd_imm(&b, offset, 8 + 4 * i), .align_mul = 4);
+        nir_store_ssbo(&b, values[i], nir_imm_int(&b, 0), nir_iadd_imm(&b, offset, 8 + 4 * i),
+            .align_mul = 4);
     return b.shader;
 }
 
@@ -137,9 +139,11 @@ static void check_isa(const struct intel_device_info *device, void *context,
                 floating += arithmetic; conversions += conversion;
             }
         }
-        stats = (struct stela_intel_fp_stats){writes, clear, preserve, floating, conversions, syncs};
+        stats = (struct stela_intel_fp_stats){
+            writes, clear, preserve, floating, conversions, syncs};
     }
-    assert(stats.clear && stats.writes && stats.floating && (ftz ? !stats.preserve : stats.preserve));
+    assert(stats.clear && stats.writes && stats.floating &&
+        (ftz ? !stats.preserve : stats.preserve));
     assert(device->ver < 12 || stats.swsb_syncs);
     record_compiled(target, bytes);
     record_object("facts");
@@ -166,10 +170,15 @@ static void check_plan(const struct brw_compiler *brw, const struct elk_compiler
     unsigned bytes = brw ? brw_data->base.program_size : elk_data->base.program_size;
     const uint32_t groups[] = {1, 1, 1};
     struct stela_intel_legacy_placement placement = {
-        .code_offset = 0x1000, .code_span = bytes,
-        .binding_table_offset = 0x2000, .binding_table_entries = info->num_ssbos,
+        .code_offset = 0x1000,
+        .code_span = bytes,
+        .binding_table_offset = 0x2000,
+        .binding_table_entries = info->num_ssbos,
         .binding_table_span = (uint64_t)info->num_ssbos * 4,
-        .curbe_offset = 0x4000, .curbe_span = 2048, .descriptor_offset = 0x5000, .descriptor_span = 32,
+        .curbe_offset = 0x4000,
+        .curbe_span = 2048,
+        .descriptor_offset = 0x5000,
+        .descriptor_span = 32,
     };
     struct stela_intel_compute_placement modern_placement = {
         .code_offset = placement.code_offset, .code_span = placement.code_span,
@@ -180,11 +189,14 @@ static void check_plan(const struct brw_compiler *brw, const struct elk_compiler
     struct stela_intel_legacy_plan legacy, legacy_before;
     struct stela_intel_compute_plan modern, modern_before;
     if (isl->info->verx10 >= 125)
-        assert(stela_intel_compute_plan(brw, isl, brw_data, info, &modern_placement, groups, 0, &modern) == 0);
+        assert(stela_intel_compute_plan(brw, isl, brw_data, info, &modern_placement, groups, 0,
+                   &modern) == 0);
     else if (brw)
-        assert(stela_intel_legacy_brw_plan(brw, isl, brw_data, info, &placement, groups, 0, &legacy) == 0);
+        assert(stela_intel_legacy_brw_plan(brw, isl, brw_data, info, &placement, groups, 0,
+                   &legacy) == 0);
     else
-        assert(stela_intel_legacy_elk_plan(elk, isl, elk_data, info, &placement, groups, &legacy) == 0);
+        assert(stela_intel_legacy_elk_plan(elk, isl, elk_data, info, &placement, groups, &legacy) ==
+            0);
     memset(&legacy_before, 0xa5, sizeof(legacy_before));
     memset(&modern_before, 0xa5, sizeof(modern_before));
     const uint32_t rejected[] = {0, FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP32,
@@ -207,10 +219,13 @@ static void check_plan(const struct brw_compiler *brw, const struct elk_compiler
         }
         modern = modern_before; legacy = legacy_before;
         int status = isl->info->verx10 >= 125 ?
-            stela_intel_compute_plan(brw, isl, brw_data, &bad, &modern_placement, groups, 0, &modern) : brw ?
+            stela_intel_compute_plan(brw, isl, brw_data, &bad, &modern_placement, groups, 0,
+                &modern) :
+            brw ?
             stela_intel_legacy_brw_plan(brw, isl, brw_data, &bad, &placement, groups, 0, &legacy) :
             stela_intel_legacy_elk_plan(elk, isl, elk_data, &bad, &placement, groups, &legacy);
-        assert(status == (i == ARRAY_SIZE(rejected) + 2 || i == ARRAY_SIZE(rejected) + 3 ? -22 : -95));
+        assert(status ==
+            (i == ARRAY_SIZE(rejected) + 2 || i == ARRAY_SIZE(rejected) + 3 ? -22 : -95));
         assert(!memcmp(&modern, &modern_before, sizeof(modern)));
         assert(!memcmp(&legacy, &legacy_before, sizeof(legacy)));
     }
@@ -259,7 +274,7 @@ static void compile(const char *platform, const struct intel_device_info *device
     if (brw) brw->shader_debug_log = brw->shader_perf_log = compiler_log;
     if (elk) elk->shader_debug_log = elk->shader_perf_log = compiler_log;
     const nir_shader_compiler_options *options = brw ? &brw->nir_options[MESA_SHADER_COMPUTE] :
-                                                                     elk->nir_options[MESA_SHADER_COMPUTE];
+                                                       elk->nir_options[MESA_SHADER_COMPUTE];
     nir_shader *nir = input_shader(options, input, entry, profile, ftz);
     if (brw) {
         const struct brw_nir_compiler_opts opts = {0}; brw_preprocess_nir(brw, nir, &opts);
@@ -294,7 +309,8 @@ static void compile(const char *platform, const struct intel_device_info *device
         if (!code) fprintf(stderr, "%s: %s\n", target, p.base.error_str);
         assert(code && !p.base.error_str);
         unsigned sends;
-        assert(validate_intel_code(device, context, code, brw_data.base.program_size, target, &sends));
+        assert(validate_intel_code(device, context, code, brw_data.base.program_size, target,
+            &sends));
     } else {
         struct elk_cs_prog_key key = {0};
         elk_nir_lower_cs_intrinsics(nir, device, &elk_data);
@@ -309,8 +325,9 @@ static void compile(const char *platform, const struct intel_device_info *device
     assert(nir->info.float_controls_execution_mode == controls(ftz));
     assert(nir->info.bit_sizes_float == 32 && stela_intel_fp_controls(device, &nir->info) == 0);
     check_plan(brw, elk, &isl, &brw_data, &elk_data, &nir->info);
-    check_isa(device, context, elk, code, brw ? brw_data.base.program_size : elk_data.base.program_size,
-              target, ftz, nir->info.float_controls_execution_mode, input, entry);
+    check_isa(device, context, elk, code,
+        brw ? brw_data.base.program_size : elk_data.base.program_size, target, ftz,
+        nir->info.float_controls_execution_mode, input, entry);
     ralloc_free(nir); ralloc_free(context);
 }
 

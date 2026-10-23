@@ -212,9 +212,15 @@ static void check_plan(const struct brw_compiler *brw, const struct elk_compiler
     assert(allocated >= shared && allocated <= intel_device_info_get_max_slm_size(dev));
     const uint32_t groups[] = {3, 5, 7};
     const struct stela_intel_legacy_placement legacy_placement = {
-        .code_offset = 0x1000, .code_span = bytes,
-        .binding_table_offset = 0x2000, .binding_table_span = 4, .binding_table_entries = 1,
-        .curbe_offset = 0x4000, .curbe_span = 2048, .descriptor_offset = 0x5000, .descriptor_span = 32,
+        .code_offset = 0x1000,
+        .code_span = bytes,
+        .binding_table_offset = 0x2000,
+        .binding_table_span = 4,
+        .binding_table_entries = 1,
+        .curbe_offset = 0x4000,
+        .curbe_span = 2048,
+        .descriptor_offset = 0x5000,
+        .descriptor_span = 32,
     };
     uint32_t words[44]; memset(words, 0xa5, sizeof(words));
     struct stela_intel_commands commands = {words, ARRAY_SIZE(words), 1, 48};
@@ -244,27 +250,35 @@ static void check_plan(const struct brw_compiler *brw, const struct elk_compiler
                                 INTERFACE_DESCRIPTOR_DATA_NumberOfBarriers_bits(dev));
         assert(field(words, base + INTERFACE_DESCRIPTOR_DATA_PreferredSLMAllocationSize_start(dev),
                      INTERFACE_DESCRIPTOR_DATA_PreferredSLMAllocationSize_bits(dev)) == preferred);
-        assert(field(words, base + INTERFACE_DESCRIPTOR_DATA_NumberofThreadsinGPGPUThreadGroup_start(dev),
-                     INTERFACE_DESCRIPTOR_DATA_NumberofThreadsinGPGPUThreadGroup_bits(dev)) == dispatch.threads);
+        assert(field(words,
+                   base + INTERFACE_DESCRIPTOR_DATA_NumberofThreadsinGPGPUThreadGroup_start(dev),
+                   INTERFACE_DESCRIPTOR_DATA_NumberofThreadsinGPGPUThreadGroup_bits(dev)) ==
+            dispatch.threads);
         memset(&before, 0xa5, sizeof(before)); plan = before;
         for (unsigned i = 0; i < 2; ++i) {
             struct brw_cs_prog_data bad = *bd;
             bad.base.total_shared = i ? UINT32_MAX : intel_device_info_get_max_slm_size(dev) + 1;
-            assert(stela_intel_compute_plan(brw, isl, &bad, shader, &placement, groups, 0, &plan) != 0);
+            assert(stela_intel_compute_plan(brw, isl, &bad, shader, &placement, groups, 0, &plan) !=
+                0);
             assert(!memcmp(&plan, &before, sizeof(plan)));
         }
     } else {
         struct stela_intel_legacy_plan plan, before;
-        assert((brw ? stela_intel_legacy_brw_plan(brw, isl, bd, shader, &legacy_placement, groups, 0, &plan) :
-                      stela_intel_legacy_elk_plan(elk, isl, ed, shader, &legacy_placement, groups, &plan)) == 0);
+        assert((brw ? stela_intel_legacy_brw_plan(brw, isl, bd, shader, &legacy_placement, groups,
+                          0, &plan) :
+                      stela_intel_legacy_elk_plan(elk, isl, ed, shader, &legacy_placement, groups,
+                          &plan)) == 0);
         assert(plan.slm_bytes_per_group == allocated);
         push_bytes = plan.curbe_bytes;
-        native_slm = field(plan.descriptor, INTERFACE_DESCRIPTOR_DATA_SharedLocalMemorySize_start(dev),
-                            INTERFACE_DESCRIPTOR_DATA_SharedLocalMemorySize_bits(dev));
+        native_slm = field(plan.descriptor,
+            INTERFACE_DESCRIPTOR_DATA_SharedLocalMemorySize_start(dev),
+            INTERFACE_DESCRIPTOR_DATA_SharedLocalMemorySize_bits(dev));
         native_barrier = field(plan.descriptor, INTERFACE_DESCRIPTOR_DATA_BarrierEnable_start(dev),
                                 INTERFACE_DESCRIPTOR_DATA_BarrierEnable_bits(dev));
-        assert(field(plan.descriptor, INTERFACE_DESCRIPTOR_DATA_NumberofThreadsinGPGPUThreadGroup_start(dev),
-                     INTERFACE_DESCRIPTOR_DATA_NumberofThreadsinGPGPUThreadGroup_bits(dev)) == dispatch.threads);
+        assert(field(plan.descriptor,
+                   INTERFACE_DESCRIPTOR_DATA_NumberofThreadsinGPGPUThreadGroup_start(dev),
+                   INTERFACE_DESCRIPTOR_DATA_NumberofThreadsinGPGPUThreadGroup_bits(dev)) ==
+            dispatch.threads);
         assert(stela_intel_gpgpu_dispatch(&commands, &plan.dispatch) == 0 &&
                commands.used == 1 + plan.walker_words &&
                !memcmp(words + 1, plan.walker, plan.walker_words * 4));
@@ -276,10 +290,12 @@ static void check_plan(const struct brw_compiler *brw, const struct elk_compiler
             unsigned rejected = i ? UINT32_MAX : intel_device_info_get_max_slm_size(dev) + 1;
             if (brw) {
                 struct brw_cs_prog_data bad = *bd; bad.base.total_shared = rejected;
-                status = stela_intel_legacy_brw_plan(brw, isl, &bad, shader, &legacy_placement, groups, 0, &plan);
+                status = stela_intel_legacy_brw_plan(brw, isl, &bad, shader, &legacy_placement,
+                    groups, 0, &plan);
             } else {
                 struct elk_cs_prog_data bad = *ed; bad.base.total_shared = rejected;
-                status = stela_intel_legacy_elk_plan(elk, isl, &bad, shader, &legacy_placement, groups, &plan);
+                status = stela_intel_legacy_elk_plan(elk, isl, &bad, shader, &legacy_placement,
+                    groups, &plan);
             }
             assert(status != 0 && !memcmp(&plan, &before, sizeof(plan)));
         }
@@ -303,7 +319,7 @@ static void check_plan(const struct brw_compiler *brw, const struct elk_compiler
     record_uint("ssbo_count", 1);
     record_uint("metal_buffer_index", 7);
     record_int("dynamic_threadgroup_index",
-               specialization->dynamic_index == UINT32_MAX ? -1 : (int)specialization->dynamic_index);
+        specialization->dynamic_index == UINT32_MAX ? -1 : (int)specialization->dynamic_index);
     record_uint("extra_variable_slm", 0);
     record_uint("shared_loads", stats->loads);
     record_uint("shared_stores", stats->stores);
@@ -334,8 +350,8 @@ static void held(const char *target, const struct intel_device_info *dev)
     record_held(target, stela_intel_hold(dev));
 }
 
-static void compile(const char *target, const struct intel_device_info *device, LLVMMemoryBufferRef input,
-                     const char *entry, const struct binding *specialization)
+static void compile(const char *target, const struct intel_device_info *device,
+    LLVMMemoryBufferRef input, const char *entry, const struct binding *specialization)
 {
     const struct intel_device_info dev = *device; const bool use_elk = stela_intel_elk(&dev);
     struct isl_device isl = {0}; isl_device_init(&isl, &dev);
@@ -345,7 +361,7 @@ static void compile(const char *target, const struct intel_device_info *device, 
     if (brw) brw->shader_debug_log = brw->shader_perf_log = compiler_log;
     if (elk) elk->shader_debug_log = elk->shader_perf_log = compiler_log;
     const nir_shader_compiler_options *options = brw ? &brw->nir_options[MESA_SHADER_COMPUTE] :
-                                                                     elk->nir_options[MESA_SHADER_COMPUTE];
+                                                       elk->nir_options[MESA_SHADER_COMPUTE];
     nir_shader *nir = input_shader(options, input, entry, specialization,
                                    intel_device_info_get_max_slm_size(&dev));
     if (brw) {
@@ -382,12 +398,14 @@ static void compile(const char *target, const struct intel_device_info *device, 
             .key = &key, .prog_data = &ed};
         code = elk_compile_cs(elk, &p);
         if (!code) fprintf(stderr, "%s: %s\n", target, p.base.error_str);
-        assert(code && !p.base.error_str && stela_legacy_elk_code_valid(elk, code, ed.base.program_size));
+        assert(code && !p.base.error_str &&
+            stela_legacy_elk_code_valid(elk, code, ed.base.program_size));
     }
     struct stela_intel_shared_stats stats = {0};
     if (elk) stela_intel_elk_shared_stats(elk, code, ed.base.program_size, &stats);
     else brw_stats(&dev, context, code, bd.base.program_size, &stats);
-    assert(stats.loads && stats.stores && stats.fences && stats.barriers && stats.waits == stats.barriers);
+    assert(stats.loads && stats.stores && stats.fences && stats.barriers &&
+        stats.waits == stats.barriers);
     assert(stats.barriers == 1 && stats.first_store < stats.first_fence &&
            stats.first_fence < stats.first_barrier && stats.first_barrier < stats.first_wait &&
            stats.first_wait < stats.first_load);

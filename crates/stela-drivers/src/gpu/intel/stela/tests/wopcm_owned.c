@@ -47,7 +47,8 @@ static void report_model(void *context, u32 domains, bool wake, int status, u32 
 {
     (void)wake; (void)value; assert(!check(context) && domains == 1 && !status);
 }
-static const struct stela_intel_activation_io io = {check, prepare_model, read_model, write_model, now, delay, invariant_model, report_model};
+static const struct stela_intel_activation_io io = {
+    check, prepare_model, read_model, write_model, now, delay, invariant_model, report_model};
 static void initialize_id(struct model *m, struct stela_intel_activation *s, u32 device)
 {
     m->locked = true;
@@ -78,8 +79,10 @@ int main(void)
             assert(!stela_intel_activation_sleep(&s));
         } else if (mode == 1 || mode == 2) {
             m.fail_at = mode;
-            assert(stela_intel_activation_wopcm(&s, bytes, sizeof(bytes), &out) == -22 && out.writes == mode);
-            assert(s.poisoned && s.wopcm_uncertain && s.facts.awake && s.gts[0].pm.fw.domains[XE_FW_DOMAIN_ID_GT].ref);
+            assert(stela_intel_activation_wopcm(&s, bytes, sizeof(bytes), &out) == -22 &&
+                out.writes == mode);
+            assert(s.poisoned && s.wopcm_uncertain && s.facts.awake &&
+                s.gts[0].pm.fw.domains[XE_FW_DOMAIN_ID_GT].ref);
             reads = m.reads; writes = m.writes;
             struct stela_intel_activation_facts facts;
             assert(stela_intel_activation_facts(&s, &facts) == -5);
@@ -91,7 +94,8 @@ int main(void)
         } else if (mode == 3) {
             m.offset = 0x4001; m.size = 0x100001;
             assert(!stela_intel_activation_wopcm(&s, bytes, sizeof(bytes), &out));
-            assert(!out.writes && !m.wopcm_writes && out.guc_base == 0x4000 && out.guc_bytes == 0x100000);
+            assert(!out.writes && !m.wopcm_writes && out.guc_base == 0x4000 &&
+                out.guc_bytes == 0x100000);
             assert(m.wopcm_reads == 2 && out.total_bytes == 0x800000);
             assert(!stela_intel_activation_sleep(&s));
         } else if (mode == 4) {
@@ -110,7 +114,8 @@ int main(void)
             s.gts[0].pm.fw.domains[XE_FW_DOMAIN_ID_GT].ref = 0;
             assert(stela_intel_activation_wopcm(&s, bytes, sizeof(bytes), &out) == -22);
             assert(!m.wopcm_reads && !out.writes); /* awake bit alone cannot grant access */
-            s.gts[0].pm.fw.domains[XE_FW_DOMAIN_ID_GT].ref = ref; assert(!stela_intel_activation_sleep(&s));
+            s.gts[0].pm.fw.domains[XE_FW_DOMAIN_ID_GT].ref = ref;
+            assert(!stela_intel_activation_sleep(&s));
         } else {
             assert(!stela_intel_activation_wopcm(&s, bytes, sizeof(bytes), &out));
             assert(out.writes == 2 && out.raw_offset == 0x4001 && out.raw_size == 0x7f3001);
@@ -149,6 +154,9 @@ int main(void)
         assert(!out.writes && !m.wopcm_reads && !m.wopcm_writes);
         assert(!stela_intel_activation_sleep(&s)); finish(&m); ++selected_refused;
     }
-    printf("Intel owned WOPCM: %u actual-state/role/context/length/ref/write-failure/poison RAM cases; %u DG2/ADL-N admitted, %u selected-HuC PCI rows refused; no hardware/authentication\n", cases, catalog_admitted, selected_refused);
+    printf("Intel owned WOPCM: %u actual-state/role/context/length/ref/write-failure/poison RAM "
+           "cases; %u DG2/ADL-N admitted, %u selected-HuC PCI rows refused; no "
+           "hardware/authentication\n",
+        cases, catalog_admitted, selected_refused);
     return 0;
 }

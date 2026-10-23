@@ -118,7 +118,8 @@ compile_air(const char *platform, const struct intel_device_info *device,
    /* Dynamic view-size query, load, store, and EOT must survive compilation. */
    valid = valid && sends >= 4;
    if (valid) {
-      CHECK(data.base.nr_params && data.base.param[data.base.nr_params - 1] == ELK_PARAM_BUILTIN_SUBGROUP_ID);
+      CHECK(data.base.nr_params &&
+            data.base.param[data.base.nr_params - 1] == ELK_PARAM_BUILTIN_SUBGROUP_ID);
       const uint32_t workgroup[] = {32, 1, 1};
       record_compiled(platform, data.base.program_size);
       record_object("facts");
@@ -161,7 +162,10 @@ int main(int argc, char **argv)
    stela_air_probe_profile_record(fp_profile);
    LLVMMemoryBufferRef input = stela_intel_air_probe_input(argc, argv, &entry);
    if (!input) {
-      fprintf(stderr, "usage: %s [--input RAW_AIR_BITCODE --entry IDENTIFIER [--fp-profile NAME]] (4 bytes..16 MiB)\n", argv[0]);
+      fprintf(stderr,
+              "usage: %s [--input RAW_AIR_BITCODE --entry IDENTIFIER [--fp-profile NAME]] (4 "
+              "bytes..16 MiB)\n",
+              argv[0]);
       return 2;
    }
    struct intel_device_info device;

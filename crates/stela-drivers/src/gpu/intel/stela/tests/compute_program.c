@@ -31,7 +31,8 @@ static void check_plan(const struct brw_compiler *compiler, const struct isl_dev
     };
     for (uint32_t variable_slm = 0; variable_slm <= 4096; variable_slm += 1024) {
         struct stela_intel_compute_plan plan;
-        assert(stela_intel_compute_plan(compiler, isl, program, shader, &placement, groups, variable_slm, &plan) == 0);
+        assert(stela_intel_compute_plan(compiler, isl, program, shader, &placement, groups,
+                   variable_slm, &plan) == 0);
         struct intel_cs_dispatch_info info = brw_cs_get_dispatch_info(device, program, NULL);
         uint32_t slm = program->base.total_shared + variable_slm;
         assert(plan.dispatch.gfx_verx10 == device->verx10);
@@ -39,26 +40,33 @@ static void check_plan(const struct brw_compiler *compiler, const struct isl_dev
         assert(!memcmp(plan.dispatch.groups, groups, sizeof(groups)));
         assert(plan.dispatch.simd_size == info.simd_size && plan.dispatch.threads == info.threads);
         assert(plan.dispatch.right_mask == info.right_mask);
-        assert(plan.dispatch.kernel_offset == placement.code_offset + brw_cs_prog_data_prog_offset(program, info.simd_size));
+        assert(plan.dispatch.kernel_offset ==
+            placement.code_offset + brw_cs_prog_data_prog_offset(program, info.simd_size));
         assert(plan.dispatch.binding_table_offset == placement.binding_table_offset);
         assert(!plan.dispatch.binding_table_entry_count && !plan.dispatch.sampler_count);
         assert(plan.dispatch.slm_encoding == intel_compute_slm_encode_size(device->ver, slm));
-        assert(plan.dispatch.preferred_slm_encoding == intel_compute_preferred_slm_calc_encode_size(device, slm, info.group_size, info.simd_size));
+        assert(plan.dispatch.preferred_slm_encoding ==
+            intel_compute_preferred_slm_calc_encode_size(device, slm, info.group_size,
+                info.simd_size));
         assert(plan.dispatch.barrier_encoding == program->uses_barrier);
-        assert(plan.dispatch.thread_group_dispatch_size == (uint32_t)intel_compute_threads_group_dispatch_size(info.threads));
-        assert(plan.dispatch.register_blocks == (device->ver >= 30 ? ptl_register_blocks(program->base.grf_used) : 0));
+        assert(plan.dispatch.thread_group_dispatch_size ==
+            (uint32_t)intel_compute_threads_group_dispatch_size(info.threads));
+        assert(plan.dispatch.register_blocks ==
+            (device->ver >= 30 ? ptl_register_blocks(program->base.grf_used) : 0));
         assert(plan.dispatch.generate_local_id == program->generate_local_id);
         assert(plan.dispatch.walk_order == (uint32_t)program->walk_order);
         assert(plan.dispatch.post_sync_mocs == isl_mocs(isl, 0, false));
         assert(!plan.dispatch.push_bytes && !brw_cs_push_const_total_size(program, info.threads));
         assert(plan.requirements.scratch_bytes_per_thread == program->base.total_scratch);
-        assert(plan.requirements.slm_bytes_per_group == intel_compute_slm_calculate_size(device->ver, slm));
-        assert(plan.requirements.cfe_max_threads == device->max_cs_threads * device->subslice_total);
+        assert(plan.requirements.slm_bytes_per_group ==
+            intel_compute_slm_calculate_size(device->ver, slm));
+        assert(plan.requirements.cfe_max_threads ==
+            device->max_cs_threads * device->subslice_total);
         assert(plan.requirements.binding_table_entries == 1);
         assert(plan.requirements.apply_async_thread_limits == (device->verx10 < 300));
         uint8_t pixel, z_pass, np_z;
-        intel_compute_engine_async_threads_limit(device, info.threads, slm != 0 || program->uses_barrier,
-                                                 program->uses_fence, &pixel, &z_pass, &np_z);
+        intel_compute_engine_async_threads_limit(device, info.threads,
+            slm != 0 || program->uses_barrier, program->uses_fence, &pixel, &z_pass, &np_z);
         assert(plan.requirements.pixel_async_thread_limit == pixel);
         assert(plan.requirements.z_pass_async_thread_limit == z_pass);
         assert(plan.requirements.np_z_async_throttle == np_z);
@@ -86,7 +94,8 @@ static void check_plan(const struct brw_compiler *compiler, const struct isl_dev
         struct brw_cs_prog_data bad = *program;
         memcpy((char *)&bad + cases[i].offset, &cases[i].value, 4);
         plan = before;
-        assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) == cases[i].status);
+        assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0,
+                   &plan) == cases[i].status);
         assert(!memcmp(&plan, &before, sizeof(plan)));
     }
     for (unsigned i = 0; i < 9; ++i) {
@@ -103,27 +112,36 @@ static void check_plan(const struct brw_compiler *compiler, const struct isl_dev
         case 8: bad.binding_table_entries = UINT32_MAX; break;
         }
         plan = before;
-        assert(stela_intel_compute_plan(compiler, isl, program, shader, &bad, groups, 0, &plan) == -22);
+        assert(stela_intel_compute_plan(compiler, isl, program, shader, &bad, groups, 0, &plan) ==
+            -22);
         assert(!memcmp(&plan, &before, sizeof(plan)));
     }
     struct brw_cs_prog_data bad = *program;
     bad.uses_sampler = true;
-    assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) == -95);
+    assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) ==
+        -95);
     bad = *program; bad.uses_btd_stack_ids = true;
-    assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) == -95);
+    assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) ==
+        -95);
     bad = *program; bad.base.push_sizes[0] = 32;
-    assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) == -95);
+    assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) ==
+        -95);
     bad = *program;
     unsigned selected = brw_cs_get_dispatch_info(device, program, NULL).simd_size / 16;
     bad.prog_offset[selected] = 1;
-    assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) == -22);
-    assert(stela_intel_compute_plan(compiler, isl, program, shader, &placement, groups, UINT32_MAX, &plan) == -22);
+    assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) ==
+        -22);
+    assert(stela_intel_compute_plan(compiler, isl, program, shader, &placement, groups, UINT32_MAX,
+               &plan) == -22);
     struct intel_device_info held = *device; held.verx10 = 350; held.ver = 35;
     struct isl_device held_isl = *isl; held_isl.info = &held;
     struct brw_compiler held_compiler = *compiler; held_compiler.devinfo = &held;
-    assert(stela_intel_compute_plan(&held_compiler, &held_isl, program, shader, &placement, groups, 0, &plan) == -95);
-    assert(stela_intel_compute_plan(&held_compiler, isl, program, shader, &placement, groups, 0, &plan) == -22);
-    assert(stela_intel_compute_plan(NULL, isl, program, shader, &placement, groups, 0, &plan) == -22);
+    assert(stela_intel_compute_plan(&held_compiler, &held_isl, program, shader, &placement, groups,
+               0, &plan) == -95);
+    assert(stela_intel_compute_plan(&held_compiler, isl, program, shader, &placement, groups, 0,
+               &plan) == -22);
+    assert(stela_intel_compute_plan(NULL, isl, program, shader, &placement, groups, 0, &plan) ==
+        -22);
 }
 
 static void compile_program(const char *platform, bool barrier)
@@ -143,7 +161,8 @@ static void compile_program(const char *platform, bool barrier)
     b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
     /* Compile fixture VA only. No production resource mapping is established. */
     nir_def *address = nir_iadd(&b, nir_imm_int64(&b, 0x100000),
-        nir_ishl_imm(&b, nir_u2u64(&b, nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0)), 2));
+        nir_ishl_imm(&b, nir_u2u64(&b, nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0)),
+            2));
     nir_def *input = nir_load_global(&b, 1, 32, address, .align_mul = 4);
     if (barrier)
         nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_WORKGROUP,

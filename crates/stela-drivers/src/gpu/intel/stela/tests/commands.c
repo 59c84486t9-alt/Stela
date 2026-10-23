@@ -9,7 +9,8 @@ static void exact_command_stream(void)
     uint32_t words[16] = {0};
     struct stela_intel_commands commands = {words, 16, 0, 48};
     assert(stela_intel_batch_start(&commands, UINT64_C(0x123456780004), true) == 0);
-    assert(stela_intel_store_qword(&commands, UINT64_C(0xabc00008), UINT64_C(0x1122334455667788)) == 0);
+    assert(stela_intel_store_qword(&commands, UINT64_C(0xabc00008), UINT64_C(0x1122334455667788)) ==
+        0);
     assert(stela_intel_user_interrupt(&commands) == 0);
     assert(stela_intel_batch_end(&commands) == 0);
     static const uint32_t expected[] = {

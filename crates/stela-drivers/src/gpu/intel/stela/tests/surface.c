@@ -95,7 +95,12 @@ static void invalid_views_leave_output_unchanged(const struct isl_device *dev)
         case 15:
             view.gpu_base = UINT64_C(1) << (view.address_bits - (view.address_bits == 32 ? 0 : 1));
             break;
-        case 16: view.bytes = 1; view.offset = 0; view.buffer_bytes = 1; view.mapped_bytes = 7; break;
+        case 16:
+            view.bytes = 1;
+            view.offset = 0;
+            view.buffer_bytes = 1;
+            view.mapped_bytes = 7;
+            break;
         case 17:
             view.offset = 0; view.bytes = dev->max_buffer_size - 1;
             view.buffer_bytes = view.bytes; view.mapped_bytes = view.bytes + 16;
@@ -209,7 +214,9 @@ int main(void)
         canonical_and_maximum_boundaries(&dev);
         uninitialized_or_unsupported_devices_fail(&dev);
         formats_follow_real_isl(&dev);
-        printf("Hosted Intel ISL %s: exact RAW views, bounds, canonical VAs and format queries passed\n", platform);
+        printf("Hosted Intel ISL %s: exact RAW views, bounds, canonical VAs and format queries "
+               "passed\n",
+            platform);
     }
     return 0;
 }

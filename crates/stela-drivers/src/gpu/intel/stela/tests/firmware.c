@@ -34,10 +34,13 @@ int main(void)
         uint32_t diagnostics = 0;
         const struct xe_uc_fw fw =
             selected(platform, XE_GT_TYPE_MAIN, XE_UC_FW_TYPE_GUC, &diagnostics);
-        struct stela_intel_guc_selection output, before; memset(&before, 0xa5, sizeof(before)); output = before;
+        struct stela_intel_guc_selection output, before;
+        memset(&before, 0xa5, sizeof(before));
+        output = before;
         int status = stela_intel_guc_select(platform, &output);
         if (!fw.path) {
-            assert(status == (platform ? -ENOENT : -EINVAL) && !memcmp(&output, &before, sizeof(output)));
+            assert(status == (platform ? -ENOENT : -EINVAL) &&
+                   !memcmp(&output, &before, sizeof(output)));
             continue;
         }
         assert(status == 0 && !strcmp((const char *)output.name, fw.path) &&
@@ -55,7 +58,8 @@ int main(void)
             const struct xe_uc_fw fw = selected(platform, gt, XE_UC_FW_TYPE_HUC, &diagnostics);
             for (unsigned i = 0; i < ARRAY_SIZE(gfx); ++i) {
                 struct stela_intel_huc_default out;
-                assert(!stela_intel_huc_select_default(platform, gfx[i], gt == XE_GT_TYPE_MEDIA, &out));
+                assert(!stela_intel_huc_select_default(platform, gfx[i], gt == XE_GT_TYPE_MEDIA,
+                                                       &out));
                 bool huc_gt = gt == XE_GT_TYPE_MEDIA || gfx[i] <= 1255;
                 if (huc_gt && fw.path) {
                     assert(out.disposition == STELA_INTEL_HUC_SELECTED);
@@ -72,9 +76,14 @@ int main(void)
             }
         }
     for (unsigned invalid = 0; invalid < 3; ++invalid) {
-        struct stela_intel_huc_default out, before; memset(&before, 0xa5, sizeof(before)); out = before;
-        assert(stela_intel_huc_select_default(invalid == 0 ? 0 : invalid == 1 ? UINT32_MAX : XE_DG2,
-            invalid == 2 ? 0 : 1255, false, &out) == -EINVAL && !memcmp(&out, &before, sizeof(out)));
+        struct stela_intel_huc_default out, before;
+        memset(&before, 0xa5, sizeof(before));
+        out = before;
+        assert(stela_intel_huc_select_default(invalid == 0 ? 0 :
+                                              invalid == 1 ? UINT32_MAX :
+                                                             XE_DG2,
+                                              invalid == 2 ? 0 : 1255, false, &out) == -EINVAL &&
+               !memcmp(&out, &before, sizeof(out)));
     }
     assert(stela_intel_huc_select_default(XE_DG2, 1255, false, NULL) == -EINVAL);
     /* A 128-byte CSS header, 16 bytes of ucode and a 256-byte RSA key, from an
@@ -83,7 +92,9 @@ int main(void)
     struct uc_css_header css = header(MAKE_GUC_VER(70, 44, 1));
     memcpy(bytes, &css, sizeof(css));
     for (size_t size = 0; size <= 400; ++size) {
-        struct stela_intel_guc_metadata out, before; memset(&before, 0xa5, sizeof(before)); out = before;
+        struct stela_intel_guc_metadata out, before;
+        memset(&before, 0xa5, sizeof(before));
+        out = before;
         uint32_t diagnostics = 0;
         int status = stela_intel_guc_parse(XE_TIGERLAKE, bytes, size, &out, &diagnostics);
         if (size < sizeof(css))
@@ -109,7 +120,9 @@ int main(void)
     };
     for (size_t i = 0; i < ARRAY_SIZE(releases); ++i) {
         css = header(releases[i].release); memcpy(bytes, &css, sizeof(css));
-        struct stela_intel_guc_metadata out, before; memset(&before, 0xa5, sizeof(before)); out = before;
+        struct stela_intel_guc_metadata out, before;
+        memset(&before, 0xa5, sizeof(before));
+        out = before;
         uint32_t diagnostics = 0;
         int status = stela_intel_guc_parse(XE_TIGERLAKE, bytes, 400, &out, &diagnostics);
         assert(status == releases[i].status && diagnostics == releases[i].diagnostics);
@@ -121,12 +134,18 @@ int main(void)
         css = header(MAKE_GUC_VER(70, 44, 1));
         if (bad == 0) css.header_size_dw = 0;
         if (bad == 1) css.size_dw = css.header_size_dw - 1;
-        if (bad == 2) { css.rsa_info.key_size_dw = UINT32_C(0x40000000); css.header_size_dw = css.rsa_info.key_size_dw + 32 + 64 + 1; css.size_dw = css.header_size_dw; }
+        if (bad == 2) {
+            css.rsa_info.key_size_dw = UINT32_C(0x40000000);
+            css.header_size_dw = css.rsa_info.key_size_dw + 32 + 64 + 1;
+            css.size_dw = css.header_size_dw;
+        }
         if (bad == 3) css.size_dw = css.header_size_dw + UINT32_C(0x40000000);
         if (bad == 4) css.rsa_info.modulus_size_dw = UINT32_MAX;
         if (bad == 5) css.size_dw = css.header_size_dw + (UINT32_MAX - 128) / 4 + 1;
         memcpy(bytes, &css, sizeof(css));
-        struct stela_intel_guc_metadata out, before; memset(&before, 0xa5, sizeof(before)); out = before;
+        struct stela_intel_guc_metadata out, before;
+        memset(&before, 0xa5, sizeof(before));
+        out = before;
         uint32_t d = 0;
         assert(stela_intel_guc_parse(XE_TIGERLAKE, bytes, 400, &out, &d) == -75 &&
                d == STELA_INTEL_GUC_UNREPRESENTABLE && !memcmp(&out, &before, sizeof(out)));
@@ -140,9 +159,14 @@ int main(void)
     struct stela_intel_guc_selection unavailable;
     assert(stela_intel_guc_select(XE_PVC, &unavailable) == -ENOENT);
     for (unsigned platform = XE_NOVALAKE_S; platform <= XE_NOVALAKE_P; ++platform) {
-        struct stela_intel_guc_selection out, before; memset(&before, 0xa5, sizeof(before)); out = before;
-        assert(stela_intel_guc_select(platform, &out) == -ENOENT && !memcmp(&out, &before, sizeof(out)));
+        struct stela_intel_guc_selection out, before;
+        memset(&before, 0xa5, sizeof(before));
+        out = before;
+        assert(stela_intel_guc_select(platform, &out) == -ENOENT &&
+               !memcmp(&out, &before, sizeof(out)));
     }
-    printf("Intel GuC metadata: %u GuC selections, %u HuC role/catalog cases, %u parser cases, %u version cases, 6 overflow refusals; no firmware authentication/upload\n", guc_entries, huc_defaults, parsers, versions);
+    printf("Intel GuC metadata: %u GuC selections, %u HuC role/catalog cases, %u parser cases, %u "
+           "version cases, 6 overflow refusals; no firmware authentication/upload\n",
+           guc_entries, huc_defaults, parsers, versions);
     return 0;
 }

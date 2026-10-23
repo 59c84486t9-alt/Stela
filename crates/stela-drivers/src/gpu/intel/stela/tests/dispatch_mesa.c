@@ -54,6 +54,7 @@ int main(void)
         assert(commands.used == GENX(GPGPU_WALKER_length) + GENX(MEDIA_STATE_FLUSH_length));
         assert(memcmp(actual, expected, sizeof(actual)) == 0);
     }
-    printf("Native GPGPU dispatch vs hosted Mesa GFX_VERx10=%d: 10000 streams passed\n", GFX_VERx10);
+    printf("Native GPGPU dispatch vs hosted Mesa GFX_VERx10=%d: 10000 streams passed\n",
+        GFX_VERx10);
     return 0;
 }

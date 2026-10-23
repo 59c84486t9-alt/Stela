@@ -18,7 +18,8 @@ static void generation_and_security_matrix(void)
                                                     secure != 0, no_preempt != 0) == 0);
                 if (i < 3) {
                     assert(commands.used == 2);
-                    assert(words[0] == (secure ? (i == 0 ? 0x18800080u : 0x18800000u) : headers[i]));
+                    assert(words[0] ==
+                           (secure ? (i == 0 ? 0x18800080u : 0x18800000u) : headers[i]));
                     assert(words[1] == (uint32_t)address);
                 } else {
                     assert(commands.used == (no_preempt ? 4u : 6u));

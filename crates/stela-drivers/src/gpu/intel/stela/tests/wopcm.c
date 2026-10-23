@@ -64,7 +64,8 @@ static int run(struct model initial, struct xe_wopcm *out)
 int main(void)
 {
     unsigned traces = 0;
-    const u32 sizes[] = {0, 128, 129, 4095, 4096, 16383, 16384, 16385, 65536, 2*1024*1024, 8*1024*1024};
+    const u32 sizes[] = {
+        0, 128, 129, 4095, 4096, 16383, 16384, 16385, 65536, 2 * 1024 * 1024, 8 * 1024 * 1024};
     for (unsigned platform = 1; platform <= XE_NOVALAKE_P; ++platform)
         for (unsigned dgfx = 0; dgfx < 2; ++dgfx)
             for (unsigned huc = 0; huc < 2; ++huc)
@@ -72,10 +73,13 @@ int main(void)
                     for (unsigned fail = 0; fail < 3; ++fail)
                         for (unsigned i = 0; i < sizeof(sizes)/sizeof(sizes[0]); ++i) {
                             struct model input = {.platform = (enum xe_platform)platform,
-                                .discrete = dgfx != 0, .huc_available = huc != 0,
-                                .guc_fw_size = sizes[i], .huc_fw_size = huc ? sizes[1 + (i+4)%10] : 0,
+                                .discrete = dgfx != 0,
+                                .huc_available = huc != 0,
+                                .guc_fw_size = sizes[i],
+                                .huc_fw_size = huc ? sizes[1 + (i + 4) % 10] : 0,
                                 .reg_offset = 0x10000 | (lock & 1),
-                                .reg_size = 0x100000 | (lock >> 1), .fail_write = fail};
+                                .reg_size = 0x100000 | (lock >> 1),
+                                .fail_write = fail};
                             struct xe_wopcm result; (void)run(input, &result); ++traces;
                         }
     /* Expected sizes, layouts and limits. */
@@ -93,11 +97,17 @@ int main(void)
     ++input.guc_fw_size; assert(run(input, &result) == -E2BIG);
     input.guc_fw_size = 128; input.huc_available = true; input.huc_fw_size = 128;
     assert(run(input, &result) == -E2BIG); /* exact16KiB HuC reserve no longer fits */
-    input.huc_available = false; input.huc_fw_size = 0; input.reg_offset = 0x800001; input.reg_size = 0x1001;
+    input.huc_available = false;
+    input.huc_fw_size = 0;
+    input.reg_offset = 0x800001;
+    input.reg_size = 0x1001;
     assert(run(input, &result) == -E2BIG);
     input.platform = XE_NOVALAKE_P;
     input.reg_size = 0x10001;
-    assert(run(input, &result) == 0 && result.size == 0x1000000); /* source retained, not native admission */
-    printf("Intel WOPCM: %u unchanged-source register sequences, independent reserve/layout/generation bounds; no hardware readback/upload\n", traces);
+    assert(run(input, &result) == 0 &&
+        result.size == 0x1000000); /* source retained, not native admission */
+    printf("Intel WOPCM: %u unchanged-source register sequences, independent "
+           "reserve/layout/generation bounds; no hardware readback/upload\n",
+        traces);
     return 0;
 }

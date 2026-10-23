@@ -44,16 +44,20 @@ static void compare(unsigned platform, bool media_gt, const uint8_t *bytes, size
     leave(0);
     struct stela_intel_huc_metadata output, before;
     memset(&before, 0xa5, sizeof(before)); output = before;
-    int status = stela_intel_huc_parse(platform, 1200, media_gt, bytes, size, &output, &diagnostics);
-    if (status == -75 && expected == -EPROTO && expected_diagnostics == STELA_INTEL_GUC_HEADER_SIZE) {
+    int status = stela_intel_huc_parse(platform, 1200, media_gt, bytes, size, &output,
+                                       &diagnostics);
+    if (status == -75 && expected == -EPROTO &&
+        expected_diagnostics == STELA_INTEL_GUC_HEADER_SIZE) {
         /* Deliberate wide-arithmetic preflight before original unsigned CSS
          * subtraction: rejected invalid directory-as-CSS, never success. */
-        assert(diagnostics == STELA_INTEL_GUC_UNREPRESENTABLE && !memcmp(&output, &before, sizeof(output)));
+        assert(diagnostics == STELA_INTEL_GUC_UNREPRESENTABLE &&
+               !memcmp(&output, &before, sizeof(output)));
         ++checked_arithmetic;
         return;
     }
     if (status != expected || diagnostics != expected_diagnostics)
-        printf("HuC case%u platform%u size%zu native%d/%x upstream%d/%x\n", cases, platform, size, status, diagnostics, expected, expected_diagnostics);
+        printf("HuC case%u platform%u size%zu native%d/%x upstream%d/%x\n", cases, platform, size,
+               status, diagnostics, expected, expected_diagnostics);
     assert(status == expected && diagnostics == expected_diagnostics);
     if (status) assert(!memcmp(&before, &output, sizeof(output)));
     else {
@@ -63,7 +67,8 @@ static void compare(unsigned platform, bool media_gt, const uint8_t *bytes, size
         assert(output.ucode_bytes == fw.ucode_size && output.rsa_bytes == fw.rsa_size &&
                output.upload_bytes == sizeof(struct uc_css_header) + fw.ucode_size &&
                output.css_offset == fw.css_offset &&
-               output.format == (fw.has_gsc_headers ? STELA_INTEL_HUC_CPD_CSS : STELA_INTEL_HUC_CSS));
+               output.format ==
+                   (fw.has_gsc_headers ? STELA_INTEL_HUC_CPD_CSS : STELA_INTEL_HUC_CSS));
     }
     assert(!fw.bo && fw.status == XE_UC_FIRMWARE_UNINITIALIZED);
     ++cases;
@@ -106,16 +111,27 @@ int main(void)
         case 7: entry[0].name[1] = 0; break;
         case 8: entry[0].offset = 0; break;
         case 9: entry[0].offset = GSC_CPD_ENTRY_OFFSET_MASK; break;
-        case 10: entry[0].offset |= GSC_CPD_ENTRY_HUFFMAN_COMP; break; /* Original mask, not decompression. */
+        case 10:
+            entry[0].offset |= GSC_CPD_ENTRY_HUFFMAN_COMP;
+            break; /* Original mask, not decompression. */
         case 11: entry[1].offset = IMAGE_BYTES + 1; break;
         case 12: entry[1].offset = IMAGE_BYTES; break;
         case 13: entry[1].offset = 0; break;
         case 14: memset(entry[1].name, 0xff, sizeof(entry[1].name)); break;
         case 15: entry[1].name[sizeof("huc_fw") - 1] = 'x'; break;
         case 16: h->num_of_entries = 3; entry[2] = entry[0]; entry[2].offset = IMAGE_BYTES; break;
-        case 17: entry[0].name[11] = 0xff; entry[1].name[11] = 0xff; break; /* trailing bytes after NUL */
-        case 18: memmove(bytes + CSS_OFFSET - 1, bytes + CSS_OFFSET, 400); entry[1].offset = CSS_OFFSET - 1; break;
-        case 19: memmove(bytes + sizeof(*h) + 1, entry, 2 * sizeof(*entry)); ++h->header_length; break;
+        case 17:
+            entry[0].name[11] = 0xff;
+            entry[1].name[11] = 0xff;
+            break; /* trailing bytes after NUL */
+        case 18:
+            memmove(bytes + CSS_OFFSET - 1, bytes + CSS_OFFSET, 400);
+            entry[1].offset = CSS_OFFSET - 1;
+            break;
+        case 19:
+            memmove(bytes + sizeof(*h) + 1, entry, 2 * sizeof(*entry));
+            ++h->header_length;
+            break;
         }
         compare(XE_TIGERLAKE, false, bytes, IMAGE_BYTES);
     }
@@ -124,7 +140,8 @@ int main(void)
     cpd(bytes); struct stela_intel_huc_metadata output; uint32_t d;
     assert(!stela_intel_huc_parse(XE_TIGERLAKE, 1200, false, bytes, IMAGE_BYTES, &output, &d));
     assert(output.release[0] == 1 && output.release[1] == 2 && output.release[2] == 3 &&
-           output.css_offset == CSS_OFFSET && output.upload_bytes == 144 && output.rsa_bytes == 256 && !d);
+           output.css_offset == CSS_OFFSET && output.upload_bytes == 144 &&
+           output.rsa_bytes == 256 && !d);
     /* GSC original parser caller still sees manifest release/build/security
      * through the mandatory real adapter. No fake GSC object is constructed. */
     unsigned gsc_cases = 0;
@@ -136,7 +153,11 @@ int main(void)
         if (change == 1) memset(entry[0].name, 0xff, sizeof(entry[0].name));
         if (change == 2) entry[0].name[sizeof("RBEP.man") - 1] = 'x';
         if (change == 3) entry[0].name[2] = 0;
-        if (change == 4) { h->num_of_entries = 3; entry[2] = entry[0]; entry[2].offset = IMAGE_BYTES; }
+        if (change == 4) {
+            h->num_of_entries = 3;
+            entry[2] = entry[0];
+            entry[2].offset = IMAGE_BYTES;
+        }
         if (change == 5) entry[0].name[11] = 0xff;
         if (change == 6) entry[0].offset |= GSC_CPD_ENTRY_HUFFMAN_COMP;
         uint32_t diagnostics = 0;
@@ -148,8 +169,10 @@ int main(void)
         bool missing = change >= 1 && change <= 3;
         assert(status == (missing ? -ENODATA : 0) &&
                diagnostics == (missing ? STELA_INTEL_HUC_CPD_MISSING_MANIFEST : 0u));
-        if (!status) assert(a->versions.found[0].major == 9 && a->versions.found[0].minor == 8 &&
-                             a->versions.found[0].patch == 7 && a->versions.found[0].build == 6 && security == 42);
+        if (!status)
+            assert(a->versions.found[0].major == 9 && a->versions.found[0].minor == 8 &&
+                   a->versions.found[0].patch == 7 && a->versions.found[0].build == 6 &&
+                   security == 42);
         leave(0);
         ++gsc_cases;
     }
@@ -172,9 +195,13 @@ int main(void)
     {
         struct stela_intel_huc_metadata before;
         memset(&before, 0xa5, sizeof(before)); output = before;
-        assert(stela_intel_huc_parse(XE_TIGERLAKE, 1200, false, bytes + 1, 400, &output, &d) == -EINVAL &&
+        assert(stela_intel_huc_parse(XE_TIGERLAKE, 1200, false, bytes + 1, 400, &output, &d) ==
+                   -EINVAL &&
                !d && !memcmp(&output, &before, sizeof(output)));
     }
-    printf("Intel HuC: %u CPD/CSS upstream comparisons, 1 misaligned refusal, 20 directory cases, %u original GSC build/security/name cases, %u strict wide-arithmetic refusals, 7 refusal/overflow cases; host images only, no authentication/BO/WOPCM readiness\n", cases, gsc_cases, checked_arithmetic);
+    printf("Intel HuC: %u CPD/CSS upstream comparisons, 1 misaligned refusal, 20 directory cases, "
+           "%u original GSC build/security/name cases, %u strict wide-arithmetic refusals, 7 "
+           "refusal/overflow cases; host images only, no authentication/BO/WOPCM readiness\n",
+           cases, gsc_cases, checked_arithmetic);
     return 0;
 }

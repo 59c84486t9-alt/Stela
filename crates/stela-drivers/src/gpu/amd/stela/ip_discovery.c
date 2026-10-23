@@ -330,7 +330,8 @@ uint32_t stela_amd_discovery_version(const struct stela_amd_discovery *state, ui
 int stela_amd_discovery_registers(const struct stela_amd_discovery *state, uint32_t hw_ip,
                                   uint32_t instance, uint32_t segment, uint32_t *base)
 {
-   if (hw_ip >= MAX_HWIP || instance >= HWIP_MAX_INSTANCE || !state->adev.reg_offset[hw_ip][instance])
+   if (hw_ip >= MAX_HWIP || instance >= HWIP_MAX_INSTANCE ||
+       !state->adev.reg_offset[hw_ip][instance])
       return -1;
    /* reg_offset points at the base addresses of a packed ip_v4 entry, which
     * reg_base_init converted to 32-bit values in place. */

@@ -66,11 +66,19 @@ static bool original_layout(const struct isl_device *dev, const struct stela_int
                              struct isl_surf *surf)
 {
     const struct isl_surf_init_info info = {
-        .dim = d->dim, .format = d->format, .width = d->width, .height = d->height,
-        .depth = d->depth, .levels = d->levels, .array_len = d->array_len, .samples = d->samples,
-        .usage = d->usage | ISL_SURF_USAGE_DISABLE_AUX_BIT, .tiling_flags = d->tiling_flags,
+        .dim = d->dim,
+        .format = d->format,
+        .width = d->width,
+        .height = d->height,
+        .depth = d->depth,
+        .levels = d->levels,
+        .array_len = d->array_len,
+        .samples = d->samples,
+        .usage = d->usage | ISL_SURF_USAGE_DISABLE_AUX_BIT,
+        .tiling_flags = d->tiling_flags,
         .min_alignment_B = MAX2(d->min_alignment_B,
-            (d->usage & ISL_SURF_USAGE_STORAGE_BIT) ? isl_format_get_layout(d->format)->bpb / 8u : 1u),
+            (d->usage & ISL_SURF_USAGE_STORAGE_BIT) ? isl_format_get_layout(d->format)->bpb / 8u :
+                                                      1u),
         .row_pitch_B = d->row_pitch_B,
     };
     memset(surf, 0, sizeof(*surf));
@@ -118,7 +126,8 @@ static void check_state(const struct isl_device *dev, const struct stela_intel_i
         map.external = external;
         uint32_t actual[32], original[32];
         memset(actual, 0xa5, sizeof(actual)); memset(original, 0xa5, sizeof(original));
-        assert(stela_intel_image_state(dev, d, &view, &map, actual, sizeof(actual)) == dev->ss.size);
+        assert(stela_intel_image_state(dev, d, &view, &map, actual, sizeof(actual)) ==
+            dev->ss.size);
         struct isl_view ov = {.usage = view.usage, .format = d->format,
             .base_level = view.base_level, .levels = view.levels,
             .base_array_layer = view.base_array_layer, .array_len = view.array_len,
@@ -167,7 +176,9 @@ static void layout_matrix(const struct isl_device *dev)
                 struct isl_surf surf = {0}, original;
                 struct stela_intel_format_support fs;
                 assert(stela_intel_query_format(dev, d.format, &fs) == 0);
-                bool supported = r == 0 ? fs.sampling : r == 1 ? fs.rendering : fs.typed_read && fs.typed_write;
+                bool supported = r == 0 ? fs.sampling :
+                    r == 1              ? fs.rendering :
+                                          fs.typed_read && fs.typed_write;
                 int result = stela_intel_image_layout(dev, &d, &surf);
                 if (!supported) {
                     assert(result == -95); ++refusals; continue;
@@ -272,7 +283,9 @@ static void invalid_views(const struct isl_device *dev)
         case 13: m.gpu_base = UINT64_MAX - 16; break;
         case 14: m.gpu_base++; break;
         case 15: m.address_bits = 64; break;
-        case 16: m.gpu_base = UINT64_C(1) << (m.address_bits - (m.address_bits == 32 ? 0 : 1)); break;
+        case 16:
+            m.gpu_base = UINT64_C(1) << (m.address_bits - (m.address_bits == 32 ? 0 : 1));
+            break;
         case 17: m.backing = 0; break;
         case 18: v.usage = ISL_SURF_USAGE_TEXTURE_BIT | ISL_SURF_USAGE_RENDER_TARGET_BIT; break;
         case 19: v.usage = ISL_SURF_USAGE_STORAGE_BIT; break;
@@ -386,7 +399,8 @@ int main(void)
         layout_matrix(&dev); explicit_tilings(&dev); invalid_layouts(&dev);
         invalid_views(&dev); dimensional_edges(&dev);
     }
-    printf("Hosted Intel image original ISL layout/state and independent bounds: %u layouts, %u states, %u refusals passed\n",
-           layouts, states, refusals);
+    printf("Hosted Intel image original ISL layout/state and independent bounds: %u layouts, %u "
+           "states, %u refusals passed\n",
+        layouts, states, refusals);
     return 0;
 }
