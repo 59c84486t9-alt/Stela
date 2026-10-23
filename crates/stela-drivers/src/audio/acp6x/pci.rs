@@ -59,6 +59,8 @@ impl NativeRegisters {
             if address == 0
                 || !address.is_multiple_of(4096)
                 || size < REGION_BYTES as u64
+                || !size.is_power_of_two()
+                || !address.is_multiple_of(size)
                 || address.checked_add(size).is_none()
                 || span.start() != address
                 || span.bytes() != size
@@ -284,7 +286,7 @@ mod tests {
         function: 5,
     };
     const BASE: u64 = 0x1_d000_0000;
-    const BYTES: usize = 0x11000;
+    const BYTES: usize = 0x20000;
     struct ResourceOwner;
     // SAFETY: isolated model reservation; symbolic BAR labels are never physical
     // pointers and its actual CPU storage is retained by the mapping platform.
