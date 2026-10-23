@@ -145,6 +145,28 @@ pub struct Captured {
     chunks: Vec<u128>,
     at: u64,
 }
+/// Retained identity of an actual manager capture. This contains no selected
+/// bits or completion claim. It lets a source callback revalidate its same
+/// capture after Busy without cloning the pending observation or resurveying.
+pub struct CaptureIdentity {
+    owner: Rc<()>,
+    generation: u64,
+    start: u32,
+    count: u32,
+}
+/// Read-only retained storage when the source skips bulk consumption. Initial
+/// software bytes remain marked Frame::copied=false; this is not a copy receipt
+/// or evidence of counter events, arrival, source eligibility or completion.
+pub struct Retained {
+    owner: Rc<()>,
+    generation: u64,
+    layout: Layout,
+}
+impl Retained {
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+}
 impl Captured {
     /// Pure selection from this retained observation, not arrival authority.
     pub fn bits(&self, start: u32, count: u32) -> Result<u128, Error> {
@@ -284,6 +306,64 @@ impl Frames {
     pub fn layout(&self, ordinal: u32) -> Option<Layout> {
         self.slices.get(ordinal as usize).map(|slice| slice.layout)
     }
+    pub fn capture_identity(&self, captured: &Captured) -> Result<CaptureIdentity, Error> {
+        self.validate_capture(captured)?;
+        Ok(CaptureIdentity {
+            owner: self.identity.clone(),
+            generation: captured.generation,
+            start: captured.start,
+            count: captured.count,
+        })
+    }
+    pub fn validate_capture(&self, captured: &Captured) -> Result<(), Error> {
+        self.check_capture(
+            &captured.owner,
+            captured.generation,
+            captured.start,
+            captured.count,
+        )
+    }
+    pub fn validate_capture_identity(&self, captured: &CaptureIdentity) -> Result<(), Error> {
+        self.check_capture(
+            &captured.owner,
+            captured.generation,
+            captured.start,
+            captured.count,
+        )
+    }
+    fn check_capture(
+        &self,
+        owner: &Rc<()>,
+        generation: u64,
+        start: u32,
+        count: u32,
+    ) -> Result<(), Error> {
+        self.claim.check()?;
+        if !Rc::ptr_eq(owner, &self.identity)
+            || generation != self.progress.captures
+            || start != self.claim.range.start
+            || count != self.claim.range.count
+        {
+            return Err("PMP counter transfer requires the latest same-owner pending capture");
+        }
+        Ok(())
+    }
+    pub fn retain_cells(&self, ordinal: u32) -> Result<Retained, Error> {
+        self.claim.check()?;
+        let slice = self
+            .slices
+            .get(ordinal as usize)
+            .ok_or("PMP counter ordinal is absent")?;
+        self.storage(&self.identity, slice.generation, slice.layout)?;
+        Ok(Retained {
+            owner: self.identity.clone(),
+            generation: slice.generation,
+            layout: slice.layout,
+        })
+    }
+    pub fn retained_cells(&self, retained: &Retained) -> Result<&[Frame], Error> {
+        self.storage(&retained.owner, retained.generation, retained.layout)
+    }
     pub fn notifications(&self) -> &LocalNotifications {
         &self.claim.local
     }
@@ -392,11 +472,7 @@ impl Frames {
         Ok(entry)
     }
     fn captured_slice(&self, captured: &Captured, ordinal: u32) -> Result<&Slice, Error> {
-        if !Rc::ptr_eq(&captured.owner, &self.identity)
-            || captured.generation != self.progress.captures
-        {
-            return Err("PMP counter transfer requires the latest same-owner pending capture");
-        }
+        self.validate_capture(captured)?;
         self.slices
             .get(ordinal as usize)
             .ok_or("PMP counter ordinal is absent")
@@ -520,18 +596,25 @@ impl Frames {
         })
     }
     pub fn cells(&self, copied: &Copied) -> Result<&[Frame], Error> {
+        self.storage(&copied.owner, copied.generation, copied.layout)
+    }
+    fn storage(&self, owner: &Rc<()>, generation: u64, layout: Layout) -> Result<&[Frame], Error> {
         self.claim.check()?;
-        if !Rc::ptr_eq(&self.identity, &copied.owner) {
-            return Err("PMP counter cells require the latest same-owner completed copy");
+        if !Rc::ptr_eq(&self.identity, owner) {
+            return Err("PMP counter storage requires the same-owner unchanged buffer");
         }
-        let index = copied.layout.ordinal as usize;
-        let slice = &self.slices[index];
-        if copied.generation != slice.generation
+        let index = layout.ordinal as usize;
+        let slice = self
+            .slices
+            .get(index)
+            .ok_or("PMP counter ordinal is absent")?;
+        if generation != slice.generation
+            || layout != slice.layout
             || self.pending.as_ref().is_some_and(|pending| {
                 pending.slice == index && pending.destination == Destination::Buffer
             })
         {
-            return Err("PMP counter cells require the latest same-owner completed copy");
+            return Err("PMP counter storage requires the same-owner unchanged buffer");
         }
         Ok(&self.frames[slice.offset..slice.offset + slice.layout.count as usize])
     }
@@ -614,6 +697,78 @@ mod tests {
                 &mut Access::new(0, at, latch),
             )
             .unwrap();
+    }
+    #[test]
+    fn retained_software_cells_and_capture_identity_grant_no_consumption_or_arrival() {
+        let local = local();
+        let mut frames = frames(&local, &[0, 14, 0, 0, 1, 1, 1, 1], &[0xa5; 144]);
+        let view = frames.retain_cells(1).unwrap();
+        let before = frames.progress();
+        assert!(
+            frames
+                .retained_cells(&view)
+                .unwrap()
+                .iter()
+                .all(|f| !f.copied && f.value == 0 && f.metadata == 0xa5 << 56)
+        );
+        assert_eq!(frames.progress(), before);
+        let mut latch = InterruptLatch::new();
+        let captured = frames
+            .capture_pending(&Access::new(0, 1, &mut latch))
+            .unwrap();
+        let identity = frames.capture_identity(&captured).unwrap();
+        frames.validate_capture_identity(&identity).unwrap();
+        let foreign = super::tests::frames(&local, &[0, 14, 0, 0, 1, 1, 1, 1], &[0; 144]);
+        assert!(foreign.retained_cells(&view).is_err());
+        assert!(foreign.validate_capture_identity(&identity).is_err());
+        assert!(foreign.capture_identity(&captured).is_err());
+        frames
+            .capture_pending(&Access::new(0, 2, &mut latch))
+            .unwrap();
+        assert!(frames.validate_capture_identity(&identity).is_err());
+        assert!(frames.validate_capture(&captured).is_err());
+        assert!(frames.retained_cells(&view).is_ok());
+        assert_eq!(frames.progress().completed_copies, 0);
+        assert_eq!(frames.progress().consumed, 0);
+        frames.claim.alive.set(false);
+        assert!(frames.retained_cells(&view).is_err());
+        assert!(frames.retain_cells(1).is_err());
+    }
+    #[test]
+    fn retained_cells_survive_source_discard_and_refuse_a_later_partial_buffer_copy() {
+        let local = local();
+        let mut frames = frames(&local, &[0, 14, 0, 0, 1, 1, 1, 1], &[0; 144]);
+        let mut latch = InterruptLatch::new();
+        publish(&local, 16, 7, 1, &mut latch);
+        let captured = frames
+            .capture_pending(&Access::new(0, 2, &mut latch))
+            .unwrap();
+        frames.begin_copy(&captured, 1, 1).unwrap();
+        let copied = drain(&mut frames, &mut latch);
+        let view = frames.retain_cells(1).unwrap();
+        assert_eq!(frames.retained_cells(&view).unwrap()[0].value, 7);
+        publish(&local, 16, 9, 3, &mut latch);
+        let captured = frames
+            .capture_pending(&Access::new(0, 4, &mut latch))
+            .unwrap();
+        frames.begin_discard(&captured, 1, 1).unwrap();
+        assert_eq!(frames.retained_cells(&view).unwrap()[0].value, 7);
+        while frames.step(&mut Access::new(0, 5, &mut latch)).unwrap() != CopyStep::Complete {}
+        frames.finish_discard().unwrap();
+        assert_eq!(frames.retained_cells(&view).unwrap()[0].value, 7);
+        assert_eq!(frames.cells(&copied).unwrap()[0].value, 7);
+        assert_eq!(frames.progress().completed_copies, 1);
+        assert_eq!(frames.progress().completed_discards, 1);
+        publish(&local, 17, 11, 6, &mut latch);
+        let captured = frames
+            .capture_pending(&Access::new(0, 7, &mut latch))
+            .unwrap();
+        frames.begin_copy(&captured, 1, 2).unwrap();
+        assert!(frames.retained_cells(&view).is_err());
+        assert!(frames.retain_cells(1).is_err());
+        drain(&mut frames, &mut latch);
+        let view = frames.retain_cells(1).unwrap();
+        assert_eq!(frames.retained_cells(&view).unwrap()[1].value, 11);
     }
     fn drain(frames: &mut Frames, latch: &mut InterruptLatch) -> Copied {
         while frames.step(&mut Access::new(0, 99, latch)).unwrap() != CopyStep::Complete {}
