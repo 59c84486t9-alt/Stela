@@ -33,6 +33,7 @@ pub(super) struct Ring {
     pub(super) buffer: DmaBuffer,
     pub(super) index: usize,
     pub(super) cycle: bool,
+    pub(super) normal: transfer::Queue,
 }
 
 impl Ring {
@@ -56,6 +57,7 @@ impl Ring {
             buffer,
             index: 0,
             cycle: true,
+            normal: transfer::Queue::default(),
         })
     }
 

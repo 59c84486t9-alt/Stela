@@ -1,0 +1,545 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//! Ordinary bulk/interrupt TD submission, exact completion identity and DMA
+//! retirement. Linux xhci-ring.c (Copyright (C) 2008 Intel Corp., Sarah Sharp)
+//! supplies the completion-accounting reference; this is native Rust state.
+use super::*;
+
+/// Generation-bound identity of one ordinary bulk/interrupt TD. A dropped
+/// ticket leaves DMA owned until completion or acknowledged cancellation.
+#[derive(Debug)]
+pub struct TransferTicket {
+    id: u64,
+    slot: u8,
+    dci: u8,
+    trb: u64,
+}
+
+impl TransferTicket {
+    pub(in crate::usb::xhci) fn hardware_slot(&self) -> u8 {
+        self.slot
+    }
+}
+
+impl Controller {
+    /// Queues an ordinary TD and returns its ring address. This legacy API
+    /// requires the caller to forget the address after completion/cancellation;
+    /// it cannot distinguish that address from a later TD after ring wrap.
+    /// New asynchronous consumers should use [`Self::submit_ticket`].
+    pub fn submit(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        buffer: u64,
+        length: usize,
+    ) -> Result<u64, BlockError> {
+        self.submit_ticket(slot, dci, buffer, length)
+            .map(|ticket| ticket.trb)
+    }
+
+    /// Publishes a bulk/interrupt TD with an exact, nonwrapping identity.
+    /// Each TD fits a single TRB and a single 64 KiB DMA boundary.
+    pub fn submit_ticket(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        buffer: u64,
+        length: usize,
+    ) -> Result<TransferTicket, BlockError> {
+        self.endpoint_ready(slot, dci)?;
+        if dci == 1 {
+            return Err(BlockError::Unsupported(
+                "control endpoint requires control transfer",
+            ));
+        }
+        if length > MAX_TD || (buffer % MAX_TD as u64) as usize + length > MAX_TD {
+            return Err(BlockError::Unsupported("TD crosses a 64 KiB boundary"));
+        }
+        self.dma_profile.check(buffer, length)?;
+        let transfer = self.slot(slot)?.endpoints[usize::from(dci)]
+            .as_mut()
+            .unwrap();
+        if transfer.iso.is_some() {
+            return Err(BlockError::Unsupported(
+                "isochronous endpoint requires submit_iso",
+            ));
+        }
+        if transfer.streams.is_some() {
+            return Err(BlockError::Unsupported(
+                "stream ID required for this endpoint",
+            ));
+        }
+        let trb = transfer.ring.address();
+        let id = transfer.ring.normal.reserve(trb, length)?;
+        let direction = if transfer.is_in { ISP } else { 0 };
+        transfer
+            .ring
+            .push(&[(buffer, length as u32, NORMAL << 10 | IOC | direction)]);
+        transfer.in_flight += 1;
+        self.doorbell(slot, dci);
+        Ok(TransferTicket { id, slot, dci, trb })
+    }
+
+    /// Polls a legacy ring address, checking the original submitted length.
+    /// The caller must discard this address after completion or cancellation.
+    pub fn completed(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        trb: u64,
+        length: usize,
+    ) -> Option<Result<usize, BlockError>> {
+        if let Err(error) = self.endpoint_ready(slot, dci) {
+            return Some(Err(error));
+        }
+        let endpoint = self.slot(slot).unwrap().endpoints[usize::from(dci)]
+            .as_ref()
+            .unwrap();
+        if endpoint.iso.is_some() || endpoint.streams.is_some() || dci == 1 {
+            return Some(Err(BlockError::Unsupported(
+                "endpoint requires its typed completion API",
+            )));
+        }
+        let queue = &self.slot(slot).unwrap().endpoints[usize::from(dci)]
+            .as_ref()
+            .unwrap()
+            .ring
+            .normal;
+        let id = match queue.identity(trb, length) {
+            Ok(Some(id)) => id,
+            Ok(None) => return None,
+            Err(error) => return Some(Err(error)),
+        };
+        self.completed_ticket(&TransferTicket { id, slot, dci, trb })
+    }
+
+    /// Polls an exact submitted TD. Only a valid terminal success/short event
+    /// releases that buffer. Errors retain records until acknowledged cancel.
+    /// Stale/foreign tickets cannot consume a later generation's completion.
+    pub fn completed_ticket(
+        &mut self,
+        ticket: &TransferTicket,
+    ) -> Option<Result<usize, BlockError>> {
+        if let Err(error) = self.endpoint_ready(ticket.hardware_slot(), ticket.dci) {
+            return Some(Err(error));
+        }
+        let transfer = self.slot(ticket.slot).unwrap().endpoints[usize::from(ticket.dci)]
+            .as_ref()
+            .unwrap();
+        if !transfer.ring.normal.contains(ticket.id, ticket.trb) {
+            return Some(Err(BlockError::Unsupported(
+                "stale or foreign xHCI transfer ticket",
+            )));
+        }
+        while let Some(event) = self.take(|e| {
+            e.kind() == TRANSFER_EVENT && e.slot() == ticket.slot && e.endpoint() == ticket.dci
+        }) {
+            let endpoint = self.slot(ticket.slot).unwrap().endpoints[usize::from(ticket.dci)]
+                .as_mut()
+                .unwrap();
+            if event.code() == INCOMPATIBLE_DEVICE {
+                // Incompatible Device requires slot retirement, not merely an
+                // endpoint dequeue. Do not allow endpoint cancellation to revive it.
+                endpoint.poisoned = true;
+                return Some(Err(BlockError::Device {
+                    status: event.code(),
+                }));
+            }
+            if let Err(error) = endpoint.ring.normal.event(event) {
+                return Some(Err(error));
+            }
+        }
+        let endpoint = self.slot(ticket.slot).unwrap().endpoints[usize::from(ticket.dci)]
+            .as_mut()
+            .unwrap();
+        let done = endpoint.ring.normal.completed(ticket.id);
+        if done.as_ref().is_some_and(Result::is_ok) {
+            endpoint.in_flight -= 1;
+        }
+        done
+    }
+
+    /// One TD, waited for.
+    pub fn transfer(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        buffer: u64,
+        length: usize,
+        microseconds: u64,
+    ) -> Result<usize, BlockError> {
+        let ticket = self.submit_ticket(slot, dci, buffer, length)?;
+        let deadline = self.clock.deadline(microseconds);
+        loop {
+            if let Some(result) = self.completed_ticket(&ticket) {
+                return result;
+            }
+            if deadline.passed() {
+                self.cancel(slot, dci)?;
+                return Err(BlockError::Timeout);
+            }
+            crate::waiting();
+            core::hint::spin_loop();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::dma::RegionAllocator;
+    use crate::usb::xhci::model::*;
+    #[test]
+    fn exact_ticket_rejects_foreign_retired_and_reused_addresses() {
+        let mut backing = vec![0u64; 256 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: one allocator supplies disjoint retained controller/data DMA.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut first, one) = cancellation_controller(&mut dma);
+        let (mut second, two) = cancellation_controller(&mut dma);
+        let buffer = dma.allocate(64, 64).unwrap();
+        let old = first.submit_ticket(1, 3, buffer.physical(), 64).unwrap();
+        let foreign = second.submit_ticket(1, 3, buffer.physical(), 64).unwrap();
+        two.borrow_mut()
+            .event(foreign.trb, SUCCESS, TRANSFER_EVENT, 3, 0);
+        assert!(matches!(second.completed_ticket(&old), Some(Err(_))));
+        assert_eq!(second.completed_ticket(&foreign), Some(Ok(64)));
+        one.borrow_mut()
+            .event(old.trb, SUCCESS, TRANSFER_EVENT, 3, 0);
+        assert_eq!(first.completed_ticket(&old), Some(Ok(64)));
+        // Real producer wrap, not a fabricated new pointer/generation.
+        for _ in 1..RING_TRBS - 1 {
+            let ticket = first.submit_ticket(1, 3, buffer.physical(), 64).unwrap();
+            one.borrow_mut()
+                .event(ticket.trb, SUCCESS, TRANSFER_EVENT, 3, 0);
+            assert_eq!(first.completed_ticket(&ticket), Some(Ok(64)));
+        }
+        let fresh = first.submit_ticket(1, 3, buffer.physical(), 64).unwrap();
+        assert_eq!(old.trb, fresh.trb);
+        one.borrow_mut()
+            .event(fresh.trb, SHORT_PACKET, TRANSFER_EVENT, 3, 17);
+        assert!(matches!(first.completed_ticket(&old), Some(Err(_))));
+        assert_eq!(first.completed_ticket(&fresh), Some(Ok(47)));
+    }
+
+    #[test]
+    fn out_of_order_polling_cannot_overwrite_an_unconsumed_ring_entry() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives all actual descriptor/context accesses.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let buffer = dma.allocate(64, 64).unwrap();
+        let held = controller
+            .submit_ticket(1, 3, buffer.physical(), 64)
+            .unwrap();
+        model
+            .borrow_mut()
+            .event(held.trb, SUCCESS, TRANSFER_EVENT, 3, 0);
+        for _ in 1..RING_TRBS - 1 {
+            let ticket = controller
+                .submit_ticket(1, 3, buffer.physical(), 64)
+                .unwrap();
+            model
+                .borrow_mut()
+                .event(ticket.trb, SUCCESS, TRANSFER_EVENT, 3, 0);
+            assert_eq!(controller.completed_ticket(&ticket), Some(Ok(64)));
+        }
+        let before = controller.slots[1].as_ref().unwrap().endpoints[3]
+            .as_ref()
+            .unwrap()
+            .ring
+            .buffer
+            .bytes()
+            .to_vec();
+        assert_eq!(
+            controller
+                .submit_ticket(1, 3, buffer.physical(), 64)
+                .unwrap_err(),
+            BlockError::Unsupported("xHCI transfer ring full")
+        );
+        assert_eq!(
+            controller.slots[1].as_ref().unwrap().endpoints[3]
+                .as_ref()
+                .unwrap()
+                .ring
+                .buffer
+                .bytes(),
+            before
+        );
+        assert_eq!(controller.completed_ticket(&held), Some(Ok(64)));
+        assert!(
+            controller
+                .submit_ticket(1, 3, buffer.physical(), 64)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn caller_length_cannot_consume_or_change_the_submitted_completion() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: test allocations remain live until all completion checks finish.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let buffer = dma.allocate(64, 64).unwrap();
+        let trb = controller.submit(1, 3, buffer.physical(), 64).unwrap();
+        model
+            .borrow_mut()
+            .event(trb, SHORT_PACKET, TRANSFER_EVENT, 3, 12);
+        assert!(matches!(controller.completed(1, 3, trb, 128), Some(Err(_))));
+        assert_eq!(controller.completed(1, 3, trb, 64), Some(Ok(52)));
+        assert_eq!(controller.completed(1, 3, trb, 64), None);
+    }
+
+    #[test]
+    fn malformed_and_error_events_retain_records_until_real_cancel_ack() {
+        for (code, residual, parameter_offset, event_data) in [
+            (SUCCESS, 65, 0, false),
+            (SUCCESS, 0, 8, false),
+            (SUCCESS, 0, 0, true),
+            (26, 0, 0, false),
+            (27, 0, 0, false),
+            (28, 0, 0, false),
+            (STALL, 0, 0, false),
+        ] {
+            let mut backing = vec![0u64; 64 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: retained backing includes model event ring and data.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = cancellation_controller(&mut dma);
+            let buffer = dma.allocate(64, 64).unwrap();
+            let ticket = controller
+                .submit_ticket(1, 3, buffer.physical(), 64)
+                .unwrap();
+            {
+                let mut hardware = model.borrow_mut();
+                let at = hardware.events + ((hardware.event_index % RING_TRBS) * TRB) as u64;
+                hardware.event(
+                    ticket.trb + parameter_offset,
+                    code,
+                    TRANSFER_EVENT,
+                    3,
+                    residual,
+                );
+                if event_data {
+                    // SAFETY: fault injection changes only the emitted event's ED flag.
+                    unsafe {
+                        let p = (at + 12) as *mut u32;
+                        p.write_volatile(p.read_volatile() | EVENT_DATA);
+                    }
+                }
+            }
+            assert!(matches!(controller.completed_ticket(&ticket), Some(Err(_))));
+            assert!(matches!(controller.completed_ticket(&ticket), Some(Err(_))));
+            let endpoint = controller.slots[1].as_ref().unwrap().endpoints[3]
+                .as_ref()
+                .unwrap();
+            assert_eq!(endpoint.in_flight, 1);
+            assert!(endpoint.ring.normal.contains(ticket.id, ticket.trb));
+            assert!(
+                controller
+                    .submit_ticket(1, 3, buffer.physical(), 64)
+                    .is_err()
+            );
+            controller.cancel(1, 3).unwrap();
+            assert!(model.borrow().active[3].is_none());
+            assert!(matches!(controller.completed_ticket(&ticket), Some(Err(_))));
+            assert!(
+                controller
+                    .submit_ticket(1, 3, buffer.physical(), 64)
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn actual_dma_payload_and_success_residual_complete_once() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: one retained range contains every actual DMA allocation.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let mut buffer = dma.allocate(64, 64).unwrap();
+        buffer.bytes_mut().fill(0xa5);
+        model.borrow_mut().incoming_events.push_back(vec![9, 8, 7]);
+        let ticket = controller
+            .submit_ticket(1, 3, buffer.physical(), 64)
+            .unwrap();
+        assert_eq!(controller.completed_ticket(&ticket), Some(Ok(3)));
+        assert_eq!(&buffer.bytes()[..4], &[9, 8, 7, 0xa5]);
+        assert!(matches!(controller.completed_ticket(&ticket), Some(Err(_))));
+        let ticket = controller
+            .submit_ticket(1, 3, buffer.physical(), 64)
+            .unwrap();
+        model
+            .borrow_mut()
+            .event(ticket.trb, SUCCESS, TRANSFER_EVENT, 3, 7);
+        assert_eq!(controller.completed_ticket(&ticket), Some(Ok(57)));
+    }
+
+    #[test]
+    fn ordinary_submit_cannot_publish_normal_trbs_on_ep0() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing retained throughout the refused submission.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let buffer = dma.allocate(64, 64).unwrap();
+        let before = controller.slots[1].as_ref().unwrap().endpoints[1]
+            .as_ref()
+            .unwrap()
+            .ring
+            .buffer
+            .bytes()
+            .to_vec();
+        let setup = model.borrow().setup.len();
+        assert!(
+            controller
+                .submit_ticket(1, 1, buffer.physical(), 64)
+                .is_err()
+        );
+        assert_eq!(model.borrow().setup.len(), setup);
+        assert_eq!(
+            controller.slots[1].as_ref().unwrap().endpoints[1]
+                .as_ref()
+                .unwrap()
+                .ring
+                .buffer
+                .bytes(),
+            before
+        );
+    }
+    #[test]
+    #[ignore = "requires STELA_XHCI_COMPLETION_ORACLE pinned unchanged Linux trace"]
+    fn unchanged_linux_one_trb_completion_accounting() {
+        extern crate std;
+        let path = std::env::var("STELA_XHCI_COMPLETION_ORACLE").unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut count = 0;
+        for line in text.lines() {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 5);
+            assert_eq!(fields[0], "B");
+            let code: u32 = fields[1].parse().unwrap();
+            let length: usize = fields[2].parse().unwrap();
+            let residual: usize = fields[3].parse().unwrap();
+            let actual: usize = fields[4].parse().unwrap();
+            let mut queue = Queue::default();
+            let id = queue.reserve(0x1000, length).unwrap();
+            queue
+                .event(Event {
+                    parameter: 0x1000,
+                    status: code << 24 | residual as u32,
+                    control: TRANSFER_EVENT << 10,
+                })
+                .unwrap();
+            assert_eq!(queue.completed(id), Some(Ok(actual)));
+            count += 1;
+        }
+        assert_eq!(count, 140464);
+    }
+    #[test]
+    fn malformed_control_status_never_acknowledges_or_reuses_dma_without_cancel() {
+        struct Empty;
+        impl Registers for Empty {
+            fn read32(&mut self, _: usize) -> u32 {
+                panic!("temporary register owner used");
+            }
+            fn write32(&mut self, _: usize, _: u32) {
+                panic!("temporary register owner used");
+            }
+        }
+        struct Corrupt {
+            inner: Box<dyn Registers>,
+            model: Rc<RefCell<CancelModel>>,
+            fault: u8,
+        }
+        impl Registers for Corrupt {
+            fn read32(&mut self, at: usize) -> u32 {
+                self.inner.read32(at)
+            }
+            fn write32(&mut self, at: usize, value: u32) {
+                self.inner.write32(at, value);
+                if at == 0x1004 && value == 1 {
+                    let model = self.model.borrow();
+                    let event = model.events + (((model.event_index - 1) % RING_TRBS) * TRB) as u64;
+                    // SAFETY: corrupt only the real Status event just written
+                    // to this test's live event DMA by the underlying model.
+                    unsafe {
+                        match self.fault {
+                            0 => {
+                                let p = (event + 12) as *mut u32;
+                                p.write_volatile(p.read_volatile() | EVENT_DATA);
+                            }
+                            1 => ((event + 8) as *mut u32).write_volatile(SUCCESS << 24 | 1),
+                            2 => {
+                                let p = event as *mut u64;
+                                p.write_volatile(p.read_volatile() + 8);
+                            }
+                            _ => ((event + 8) as *mut u32).write_volatile(SHORT_PACKET << 24),
+                        }
+                    }
+                }
+            }
+        }
+        for fault in 0..4 {
+            let mut backing = vec![0u64; 64 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: retained exclusive DMA for underlying and fault model.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = cancellation_controller(&mut dma);
+            let inner = core::mem::replace(&mut controller.registers, Box::new(Empty));
+            controller.registers = Box::new(Corrupt {
+                inner,
+                model: model.clone(),
+                fault,
+            });
+            assert_eq!(
+                controller.control(1, setup(0x80, GET_STATUS, 0, 0, 2), &[]),
+                Err(BlockError::Unsupported(
+                    "invalid xHCI control transfer event"
+                ))
+            );
+            assert_eq!(model.borrow().seen, vec![STOP_ENDPOINT, SET_DEQUEUE]);
+            assert!(model.borrow().active[1].is_none());
+            assert!(controller.endpoint_ready(1, 1).is_ok());
+        }
+    }
+
+    #[test]
+    fn incompatible_device_event_requires_slot_retirement() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: no allocation is released after uncertain slot ownership.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let buffer = dma.allocate(64, 64).unwrap();
+        let ticket = controller
+            .submit_ticket(1, 3, buffer.physical(), 64)
+            .unwrap();
+        model
+            .borrow_mut()
+            .event(ticket.trb, INCOMPATIBLE_DEVICE, TRANSFER_EVENT, 3, 0);
+        assert_eq!(
+            controller.completed_ticket(&ticket),
+            Some(Err(BlockError::Device {
+                status: INCOMPATIBLE_DEVICE
+            }))
+        );
+        assert!(controller.cancel(1, 3).is_err());
+        assert!(
+            controller.slots[1].as_ref().unwrap().endpoints[3]
+                .as_ref()
+                .unwrap()
+                .ring
+                .normal
+                .contains(ticket.id, ticket.trb)
+        );
+        assert!(
+            controller
+                .submit_ticket(1, 3, buffer.physical(), 64)
+                .is_err()
+        );
+        assert!(model.borrow().seen.is_empty());
+    }
+}

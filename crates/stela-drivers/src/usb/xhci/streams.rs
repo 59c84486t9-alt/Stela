@@ -11,6 +11,7 @@ const PRIMARY_TRANSFER_RING: u64 = 1 << 1;
 const LINEAR_STREAM_ARRAY: u32 = 1 << 15;
 const STREAM_CONTEXT_BYTES: usize = 16;
 const EVENT_DATA: u32 = 1 << 2;
+const INCOMPATIBLE_DEVICE: u32 = 22;
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 
 /// Immutable qualification for this controller's current reset/ownership
@@ -82,6 +83,12 @@ pub struct StreamTransfer {
     stream: u16,
     trb: u64,
     length: usize,
+}
+
+impl StreamTransfer {
+    pub(super) fn hardware_slot(&self) -> u8 {
+        self.slot
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -368,7 +375,7 @@ impl Controller {
         &mut self,
         ticket: &StreamTransfer,
     ) -> Option<Result<usize, BlockError>> {
-        if let Err(error) = self.endpoint_ready(ticket.slot, ticket.dci) {
+        if let Err(error) = self.endpoint_ready(ticket.hardware_slot(), ticket.dci) {
             return Some(Err(error));
         }
         let checked = (|| {
@@ -403,6 +410,12 @@ impl Controller {
             .as_mut()
             .unwrap();
         let streams = endpoint.streams.as_mut().unwrap();
+        if event.code() == INCOMPATIBLE_DEVICE {
+            endpoint.poisoned = true;
+            return Some(Err(BlockError::Device {
+                status: event.code(),
+            }));
+        }
         if event.control & EVENT_DATA != 0 || event.residual() > ticket.length {
             endpoint.poisoned = true;
             return Some(Err(BlockError::Unsupported(

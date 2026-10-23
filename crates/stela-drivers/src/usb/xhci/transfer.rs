@@ -1,6 +1,12 @@
 //! Control, bulk and interrupt transfers on retained rings, and the
 //! cancellation that must be acknowledged before a buffer is reused.
 use super::*;
+mod ordinary;
+mod queue;
+pub use ordinary::TransferTicket;
+const INCOMPATIBLE_DEVICE: u32 = 22;
+const EVENT_DATA: u32 = 1 << 2;
+pub(super) use queue::Queue;
 
 impl Controller {
     /// Recovers a halted endpoint: Reset Endpoint, then its dequeue pointer
@@ -191,6 +197,7 @@ impl Controller {
         self.doorbell(slot, 1);
         let status_address = *addresses.last().unwrap();
         let mut received = length;
+        let mut short_seen = false;
         loop {
             let event = self.wait_event(CONTROL_US, |e| {
                 e.kind() == TRANSFER_EVENT && e.slot() == slot && e.endpoint() == 1
@@ -205,12 +212,39 @@ impl Controller {
                     return Err(error);
                 }
             };
+            // An event must name this TD's actual Setup/Data/Status TRB.
+            // Event Data is never submitted by this control path. Only Data
+            // short packets may precede the final zero-length Status ACK.
+            let data_address = (length > 0).then(|| addresses[1]);
+            let valid = event.control & EVENT_DATA == 0
+                && addresses.contains(&event.parameter)
+                && match event.code() {
+                    SUCCESS => event.parameter == status_address && event.residual() == 0,
+                    SHORT_PACKET => {
+                        data_address == Some(event.parameter)
+                            && event.residual() <= length
+                            && !short_seen
+                    }
+                    _ => true,
+                };
+            if !valid {
+                self.cancel_inner(slot, 1)?;
+                return Err(BlockError::Unsupported(
+                    "invalid xHCI control transfer event",
+                ));
+            }
             match event.code() {
-                SUCCESS if event.parameter == status_address => break,
-                SUCCESS => {}
-                SHORT_PACKET => received = length.saturating_sub(event.residual()),
+                SUCCESS => break,
+                SHORT_PACKET => {
+                    short_seen = true;
+                    received = length - event.residual();
+                }
                 status => {
-                    self.cancel_inner(slot, 1)?;
+                    if status == INCOMPATIBLE_DEVICE {
+                        self.slot(slot)?.endpoints[1].as_mut().unwrap().poisoned = true;
+                    } else {
+                        self.cancel_inner(slot, 1)?;
+                    }
                     return Err(BlockError::Device { status });
                 }
             }
@@ -274,121 +308,6 @@ impl Controller {
             .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
             .collect();
         Some(String::from(text.trim()))
-    }
-
-    /// Queues one TD of `length` bytes at `buffer` on endpoint `dci` and
-    /// rings its doorbell; the TRB's address names its completion.
-    pub fn submit(
-        &mut self,
-        slot: u8,
-        dci: u8,
-        buffer: u64,
-        length: usize,
-    ) -> Result<u64, BlockError> {
-        self.endpoint_ready(slot, dci)?;
-        if length > MAX_TD || (buffer % MAX_TD as u64) as usize + length > MAX_TD {
-            return Err(BlockError::Unsupported("TD crosses a 64 KiB boundary"));
-        }
-        self.dma_profile.check(buffer, length)?;
-        let address = {
-            let state = self.slot(slot)?;
-            let transfer = state.endpoints[usize::from(dci)]
-                .as_mut()
-                .ok_or(BlockError::Unsupported("xHCI endpoint not configured"))?;
-            if transfer.poisoned {
-                return Err(BlockError::Unsupported("xHCI endpoint cancellation failed"));
-            }
-            if transfer.iso.is_some() {
-                return Err(BlockError::Unsupported(
-                    "isochronous endpoint requires submit_iso",
-                ));
-            }
-            if transfer.streams.is_some() {
-                return Err(BlockError::Unsupported(
-                    "stream ID required for this endpoint",
-                ));
-            }
-            // One TRB per TD; the Link TRB and the one gap that keeps a full
-            // ring from looking empty stay free.
-            if transfer.in_flight >= RING_TRBS - 2 {
-                return Err(BlockError::Unsupported("xHCI transfer ring full"));
-            }
-            transfer.in_flight += 1;
-            let direction = if transfer.is_in { ISP } else { 0 };
-            transfer
-                .ring
-                .push(&[(buffer, length as u32, NORMAL << 10 | IOC | direction)])[0]
-        };
-        self.doorbell(slot, dci);
-        Ok(address)
-    }
-
-    /// The completion of the TD at `trb` once it has one: the bytes moved,
-    /// or the failure. A STALL leaves the endpoint halted for [`Self::clear`].
-    pub fn completed(
-        &mut self,
-        slot: u8,
-        dci: u8,
-        trb: u64,
-        length: usize,
-    ) -> Option<Result<usize, BlockError>> {
-        if let Err(error) = self.endpoint_ready(slot, dci) {
-            return Some(Err(error));
-        }
-        if self
-            .slot(slot)
-            .ok()
-            .and_then(|slot| slot.endpoints[usize::from(dci)].as_ref())
-            .is_some_and(|endpoint| endpoint.iso.is_some())
-        {
-            return Some(Err(BlockError::Unsupported(
-                "isochronous endpoint requires completed_iso",
-            )));
-        }
-        let event = self.take(|e| {
-            e.kind() == TRANSFER_EVENT
-                && e.slot() == slot
-                && e.endpoint() == dci
-                && e.parameter == trb
-        });
-        let Some(event) = event else {
-            return self.error.map(|status| Err(BlockError::Device { status }));
-        };
-        if let Some(transfer) = self
-            .slot(slot)
-            .ok()
-            .and_then(|slot| slot.endpoints[usize::from(dci)].as_mut())
-        {
-            transfer.in_flight = transfer.in_flight.saturating_sub(1);
-        }
-        Some(match event.code() {
-            SUCCESS | SHORT_PACKET => Ok(length.saturating_sub(event.residual())),
-            status => Err(BlockError::Device { status }),
-        })
-    }
-
-    /// One TD, waited for.
-    pub fn transfer(
-        &mut self,
-        slot: u8,
-        dci: u8,
-        buffer: u64,
-        length: usize,
-        microseconds: u64,
-    ) -> Result<usize, BlockError> {
-        let trb = self.submit(slot, dci, buffer, length)?;
-        let deadline = self.clock.deadline(microseconds);
-        loop {
-            if let Some(result) = self.completed(slot, dci, trb, length) {
-                return result;
-            }
-            if deadline.passed() {
-                self.cancel(slot, dci)?;
-                return Err(BlockError::Timeout);
-            }
-            crate::waiting();
-            core::hint::spin_loop();
-        }
     }
 
     /// Current connection of the slot's root port. Downstream hub-port loss
@@ -494,6 +413,7 @@ impl Controller {
         if let Some(iso) = &mut endpoint.iso {
             iso.cancelled();
         }
+        endpoint.ring.normal.cancelled();
         endpoint.poisoned = false;
         endpoint.in_flight = 0;
         Ok(())
