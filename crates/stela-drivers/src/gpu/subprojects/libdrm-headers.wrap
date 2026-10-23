@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# libdrm as Mesa's own wrap pins it; packagefiles/libdrm-headers builds only
+# its headers.
 [wrap-file]
 directory = libdrm-2.4.133
 source_url = https://dri.freedesktop.org/libdrm/libdrm-2.4.133.tar.xz
