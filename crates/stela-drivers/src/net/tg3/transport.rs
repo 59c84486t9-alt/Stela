@@ -510,7 +510,14 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
     /// A failure is sticky, retains the real owner, and never clears status RAM.
     pub fn stop_engines(&mut self) -> Result<(), Error> {
         self.check()?;
-        let result = (|| {
+        let result = self.stop_engines_inner();
+        if result.is_ok() {
+            self.stopped = true;
+        }
+        self.record(result)
+    }
+    pub(super) fn stop_engines_inner(&mut self) -> Result<(), Error> {
+        (|| {
             let host = Self::checked(self.regs().config_read32(MISC_HOST_CTRL)?)?;
             self.flush(u32::from(MISC_HOST_CTRL), host | MASK_PCI_INT)?;
             // The declared transport is single-vector/polled; cold attachment
@@ -534,15 +541,18 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             self.write(FTQ_RESET, 0)?;
             self.read(FTQ_RESET)?;
             Ok(())
-        })();
-        if result.is_ok() {
-            self.stopped = true;
-        }
-        self.record(result)
+        })()
+    }
+    pub(super) fn release_registers(&mut self) -> R {
+        self.registers.take().expect("retained hardware registers")
     }
 }
 
 #[cfg(test)]
 mod tests;
 
+pub(super) mod board;
+mod packet_hw;
+mod phy;
+mod regs;
 mod reset;

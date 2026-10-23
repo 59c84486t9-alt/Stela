@@ -1,0 +1,246 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2001-2004 David S. Miller
+// Copyright (C) 2001-2003 Jeff Garzik
+// Copyright (C) 2004 Sun Microsystems Inc.
+// Copyright (C) 2005-2018 Broadcom
+//! Signed board settings, VMain selection and read-only BCM5720 NVRAM.
+use super::{regs::*, *};
+use crate::net::Mac;
+
+#[derive(Clone, Copy)]
+pub(in crate::net::tg3) struct Board {
+    pub mac: Mac,
+    pub local: u32,
+    pub led: u32,
+    pub apd: bool,
+    pub capacitive: bool,
+}
+impl<R: Registers, D: Delay> Hardware<R, D> {
+    /// Only actual matching copper BCM5720 silicon is a packet candidate.
+    pub(super) fn packet_identity(&mut self) -> Result<Identity, Error> {
+        let id = self.identify()?;
+        if id.asic != Asic::Bcm5720 {
+            return Err(Error::UnsupportedRevision);
+        }
+        // Upper bits identify the ASIC, lower 12 retain revision/metal. The
+        // 5720 donor has only A0-specific init deltas; no extrapolated IDs.
+        if id.chip_revision & 0xfff != 0 {
+            return Err(Error::UnsupportedRevision);
+        }
+        self.unmanaged()?;
+        self.read_phy_identity()?;
+        Ok(id)
+    }
+    pub(super) fn board(&mut self) -> Result<Board, Error> {
+        self.unmanaged()?;
+        let config = self.sram(NIC_SRAM_DATA_CFG, None)?;
+        if config & NIC_SRAM_DATA_CFG_PHY_TYPE_MASK == NIC_SRAM_DATA_CFG_PHY_TYPE_FIBER {
+            return Err(Error::UnsupportedMedia);
+        }
+        let version = self.sram(NIC_SRAM_DATA_VER, None)? >> NIC_SRAM_DATA_VER_SHIFT;
+        let cfg2 = if version > 0 && version < 0x100 {
+            self.sram(NIC_SRAM_DATA_CFG_2, None)?
+        } else {
+            0
+        };
+        let mut local = GRC_LCLCTRL_INT_ON_ATTN | GRC_LCLCTRL_AUTO_SEEPROM;
+        if config & NIC_SRAM_DATA_CFG_EEPROM_WP != 0 {
+            // LOM GPIO settings are bootcode-owned and must be preserved.
+            local |= self.read(GRC_LOCAL_CTRL)?
+                & (GRC_LCLCTRL_GPIO_OE0
+                    | GRC_LCLCTRL_GPIO_OE1
+                    | GRC_LCLCTRL_GPIO_OE2
+                    | GRC_LCLCTRL_GPIO_OUTPUT0
+                    | GRC_LCLCTRL_GPIO_OUTPUT1
+                    | GRC_LCLCTRL_GPIO_OUTPUT2);
+            local |= GRC_LCLCTRL_GPIO_OE1 | GRC_LCLCTRL_GPIO_OUTPUT1;
+        } else {
+            // tg3_pwrsrc_switch_to_vmain: actual internal port, not BDF.
+            self.lock(7)?;
+            let result = (|| {
+                let shift = TG3_APE_GPIO_MSG_SHIFT + 4 * u32::from(self.identity.unwrap().function);
+                let status = self.read(TG3_CPMU_DRV_STATUS)?;
+                self.flush(TG3_CPMU_DRV_STATUS, (status & !(3 << shift)) | (1 << shift))?;
+                self.flush(GRC_LOCAL_CTRL, local)?;
+                self.delay.delay_us(100);
+                Ok(())
+            })();
+            let release = self.unlock(7);
+            self.combine(result, release)?;
+        }
+        self.flush(
+            GRC_EEPROM_ADDR,
+            EEPROM_ADDR_FSM_RESET | (EEPROM_DEFAULT_CLOCK_PERIOD << EEPROM_ADDR_CLKPERD_SHIFT),
+        )?;
+        self.delay.delay_us(1000);
+        let saved_local = self.read(GRC_LOCAL_CTRL)?;
+        self.flush(GRC_LOCAL_CTRL, saved_local | GRC_LCLCTRL_AUTO_SEEPROM)?;
+        self.delay.delay_us(100);
+        // Decode the actual pinstrap, including Atmel non-power-of-two pages.
+        // No unrecognized NVM is treated as a functional firmware source.
+        let nvcfg = self.nvram_configuration()?;
+        let vendor = nvcfg & NVRAM_CFG1_5752VENDOR_MASK;
+        let eeprom = matches!(vendor, FLASH_5720_EEPROM_HD | FLASH_5720_EEPROM_LD);
+        let atmel = matches!(
+            vendor,
+            FLASH_5720VENDOR_M_ATMEL_DB011D
+                | FLASH_5720VENDOR_M_ATMEL_DB021D
+                | FLASH_5720VENDOR_M_ATMEL_DB041D
+                | FLASH_5720VENDOR_M_ATMEL_DB081D
+                | FLASH_5720VENDOR_A_ATMEL_DB011B
+                | FLASH_5720VENDOR_A_ATMEL_DB021B
+                | FLASH_5720VENDOR_A_ATMEL_DB041B
+                | FLASH_5720VENDOR_A_ATMEL_DB011D
+                | FLASH_5720VENDOR_A_ATMEL_DB021D
+                | FLASH_5720VENDOR_A_ATMEL_DB041D
+                | FLASH_5720VENDOR_A_ATMEL_DB081D
+                | FLASH_5720VENDOR_ATMEL_45USPT
+        );
+        let st = matches!(
+            vendor,
+            FLASH_5720VENDOR_M_ST_M25PE10
+                | FLASH_5720VENDOR_M_ST_M25PE20
+                | FLASH_5720VENDOR_M_ST_M25PE40
+                | FLASH_5720VENDOR_M_ST_M25PE80
+                | FLASH_5720VENDOR_M_ST_M45PE10
+                | FLASH_5720VENDOR_M_ST_M45PE20
+                | FLASH_5720VENDOR_M_ST_M45PE40
+                | FLASH_5720VENDOR_M_ST_M45PE80
+                | FLASH_5720VENDOR_A_ST_M25PE10
+                | FLASH_5720VENDOR_A_ST_M25PE20
+                | FLASH_5720VENDOR_A_ST_M25PE40
+                | FLASH_5720VENDOR_A_ST_M25PE80
+                | FLASH_5720VENDOR_A_ST_M45PE10
+                | FLASH_5720VENDOR_A_ST_M45PE20
+                | FLASH_5720VENDOR_A_ST_M45PE40
+                | FLASH_5720VENDOR_A_ST_M45PE80
+                | FLASH_5720VENDOR_ST_25USPT
+                | FLASH_5720VENDOR_ST_45USPT
+        );
+        if !(eeprom || atmel || st) {
+            return Err(Error::UnsupportedBoard);
+        }
+        let page = if eeprom {
+            0
+        } else {
+            match nvcfg & NVRAM_CFG1_5752PAGE_SIZE_MASK {
+                FLASH_5752PAGE_SIZE_256 => 256,
+                FLASH_5752PAGE_SIZE_512 => 512,
+                FLASH_5752PAGE_SIZE_1K => 1024,
+                FLASH_5752PAGE_SIZE_2K => 2048,
+                FLASH_5752PAGE_SIZE_4K => 4096,
+                FLASH_5752PAGE_SIZE_264 => 264,
+                FLASH_5752PAGE_SIZE_528 => 528,
+                _ => return Err(Error::UnsupportedBoard),
+            }
+        };
+        let high = self.sram(NIC_SRAM_MAC_ADDR_HIGH_MBOX, None)?;
+        let low = self.sram(NIC_SRAM_MAC_ADDR_LOW_MBOX, None)?;
+        let mut mac = decode_mac(high, low);
+        if high >> 16 != 0x484b || !valid_mac(mac) {
+            let function = self.identity.unwrap().function;
+            let offset = 0x7c
+                + if function & 1 != 0 { 0x50 } else { 0 }
+                + if function > 1 { 0x18c } else { 0 };
+            let high = self.nvram_word(offset, atmel && matches!(page, 264 | 528), page)?;
+            let low = self.nvram_word(offset + 4, atmel && matches!(page, 264 | 528), page)?;
+            mac = decode_mac(high, low);
+        }
+        if !valid_mac(mac) || mac == Mac([0, 0x10, 0x18, 0, 0, 0]) {
+            return Err(Error::InvalidMac);
+        }
+        let led = match cfg2 & (NIC_SRAM_DATA_CFG_LED_MODE_MASK | SHASTA_EXT_LED_MODE_MASK) {
+            NIC_SRAM_DATA_CFG_LED_MODE_PHY_1 => LED_CTRL_MODE_PHY_1,
+            NIC_SRAM_DATA_CFG_LED_MODE_PHY_2 => LED_CTRL_MODE_PHY_2,
+            NIC_SRAM_DATA_CFG_LED_MODE_MAC => LED_CTRL_MODE_MAC,
+            SHASTA_EXT_LED_SHARED => {
+                LED_CTRL_MODE_SHARED
+                    | LED_CTRL_MODE_PHY_1
+                    | LED_CTRL_MODE_PHY_2
+                    | LED_CTRL_BLINK_RATE_OVERRIDE
+                    | LED_CTRL_BLINK_RATE_MASK
+            }
+            SHASTA_EXT_LED_MAC => LED_CTRL_MODE_SHASTA_MAC,
+            SHASTA_EXT_LED_COMBO => LED_CTRL_MODE_COMBO | LED_CTRL_MODE_PHY_1 | LED_CTRL_MODE_PHY_2,
+            _ => return Err(Error::UnsupportedBoard),
+        };
+        Ok(Board {
+            mac,
+            local,
+            led,
+            apd: cfg2 & NIC_SRAM_DATA_CFG_2_APD_EN != 0,
+            capacitive: cfg2 & (1 << 17) != 0,
+        })
+    }
+    fn nvram_configuration(&mut self) -> Result<u32, Error> {
+        self.nvram_lock()?;
+        let result = (|| {
+            let access = self.read(NVRAM_ACCESS)?;
+            self.flush(NVRAM_ACCESS, access | ACCESS_ENABLE)?;
+            let config = self.read(NVRAM_CFG1)?;
+            if matches!(
+                config & NVRAM_CFG1_5752VENDOR_MASK,
+                FLASH_5720_EEPROM_HD | FLASH_5720_EEPROM_LD
+            ) {
+                self.flush(NVRAM_CFG1, config & !NVRAM_CFG1_COMPAT_BYPASS)?;
+            }
+            Ok(config)
+        })();
+        let disable = (|| {
+            let access = self.read(NVRAM_ACCESS)?;
+            self.flush(NVRAM_ACCESS, access & !ACCESS_ENABLE)
+        })();
+        let result = self.combine(result, disable);
+        let release = self.flush(NVRAM_SWARB, SWARB_REQ_CLR1);
+        self.combine(result, release)
+    }
+    fn nvram_word(&mut self, offset: u32, translate: bool, page: u32) -> Result<u32, Error> {
+        let address = if translate {
+            ((offset / page) << 9) + offset % page
+        } else {
+            offset
+        };
+        if address > NVRAM_ADDR_MSK || offset & 3 != 0 {
+            return Err(Error::Bounds);
+        }
+        self.nvram_lock()?;
+        let result = (|| {
+            let access = self.read(NVRAM_ACCESS)?;
+            self.flush(NVRAM_ACCESS, access | ACCESS_ENABLE)?;
+            self.write(NVRAM_ADDR, address)?;
+            self.write(
+                NVRAM_CMD,
+                NVRAM_CMD_RD | NVRAM_CMD_GO | NVRAM_CMD_FIRST | NVRAM_CMD_LAST | NVRAM_CMD_DONE,
+            )?;
+            for _ in 0..10_000 {
+                self.delay.delay_us(10);
+                if self.read(NVRAM_CMD)? & NVRAM_CMD_DONE != 0 {
+                    self.delay.delay_us(10);
+                    // All-ones is legal NVRAM data; access errors remain errors.
+                    return self.regs().read32(NVRAM_RDDATA);
+                }
+            }
+            Err(Error::NvramTimeout)
+        })();
+        let disable = (|| {
+            let access = self.read(NVRAM_ACCESS)?;
+            self.flush(NVRAM_ACCESS, access & !ACCESS_ENABLE)
+        })();
+        let result = self.combine(result, disable);
+        let release = self.flush(NVRAM_SWARB, SWARB_REQ_CLR1);
+        self.combine(result, release)
+    }
+}
+fn decode_mac(high: u32, low: u32) -> Mac {
+    Mac([
+        (high >> 8) as u8,
+        high as u8,
+        (low >> 24) as u8,
+        (low >> 16) as u8,
+        (low >> 8) as u8,
+        low as u8,
+    ])
+}
+fn valid_mac(mac: Mac) -> bool {
+    mac.0 != [0; 6] && !mac.is_multicast()
+}

@@ -5,10 +5,10 @@
 // Copyright (C) 2005-2018 Broadcom
 //! Broadcom Tigon3 hardware transport for the named BCM5720/5761/5762 cohort.
 //!
-//! This module is a source-only partial backend: it does not expose an attach
-//! constructor or implement `Link`. Full cold initialization/PHY calibration, packet ring
-//! publication and retirement are not yet composed. These real register
-//! transports must not be advertised as a functioning Ethernet adapter.
+//! `Packet::attach` composes one polled BCM5720 A0 unmanaged copper queue
+//! with requester-domain DMA and explicit retirement. It is source-only until
+//! the model/oracle and Rust gates run. BCM5761/5762 remain transport-only;
+//! managed/SerDes and all other ASIC/revision profiles explicitly refuse.
 //!
 //! All named chips have an APE window. MDIO takes the actual per-function APE
 //! PHY grant, even when management firmware is not running. Linux's ignored
@@ -18,7 +18,9 @@
 pub mod io;
 mod transport;
 
+pub use packet::Packet;
 pub use transport::Hardware;
+mod packet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -41,6 +43,13 @@ pub enum Error {
     Poisoned,
     NotIdentified,
     Stopped,
+    PhyResetTimeout,
+    UnsupportedBoard,
+    InvalidMac,
+    RingCorrupt,
+    RingFull,
+    Dma(crate::bus::dma::mapping::DmaError),
+    Memory(crate::bus::dma::memory::MemoryError),
 }
 
 /// Actual serialized PCI/MAC/APE register ownership.
@@ -85,4 +94,15 @@ pub fn candidate(vendor: u16, device: u16, class: [u8; 3]) -> bool {
     vendor == 0x14e4
         && class == [2, 0, 0]
         && matches!(device, 0x165f | 0x1680 | 0x1681 | 0x1688 | 0x1689 | 0x1687)
+}
+
+impl From<crate::bus::dma::mapping::DmaError> for Error {
+    fn from(error: crate::bus::dma::mapping::DmaError) -> Self {
+        Self::Dma(error)
+    }
+}
+impl From<crate::bus::dma::memory::MemoryError> for Error {
+    fn from(error: crate::bus::dma::memory::MemoryError) -> Self {
+        Self::Memory(error)
+    }
 }

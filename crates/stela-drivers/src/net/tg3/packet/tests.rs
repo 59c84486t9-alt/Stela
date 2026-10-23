@@ -1,0 +1,994 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//! Independent device peer with separate device-visible RAM and nonidentity
+//! IOVAs. All tests are authored UNRUN until the coordinator obtains a lease.
+extern crate std;
+use super::*;
+use crate::bus::dma::{
+    mapping::{Direction, DmaError, DomainMapping},
+    memory::{CacheAttribute, CpuMapping, PageBacking, PinnedPages},
+    pages::DmaPages,
+};
+use alloc::{
+    alloc::{alloc_zeroed, dealloc},
+    boxed::Box,
+    collections::BTreeMap,
+    vec,
+};
+use core::{
+    alloc::Layout,
+    cell::Cell,
+    ops::Range,
+    ptr::NonNull,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+use std::sync::Mutex;
+
+struct Ram {
+    address: NonNull<u8>,
+    physical: Vec<u64>,
+    layout: Layout,
+    drops: Arc<AtomicUsize>,
+}
+// SAFETY: symbolic test-only RAM, serialized raw accesses and stable backing.
+unsafe impl Send for Ram {}
+// SAFETY: symbolic test-only RAM; no native DMA or safe references alias it.
+unsafe impl Sync for Ram {}
+// SAFETY: exact page aligned allocation and immutable retained symbolic labels.
+unsafe impl PageBacking for Ram {
+    fn cpu_base(&self) -> NonNull<u8> {
+        self.address
+    }
+    fn physical_pages(&self) -> &[u64] {
+        &self.physical
+    }
+    fn page_shift(&self) -> u8 {
+        12
+    }
+    fn cache_attribute(&self) -> CacheAttribute {
+        CacheAttribute::WriteBack
+    }
+}
+impl Drop for Ram {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+        unsafe { dealloc(self.address.as_ptr(), self.layout) };
+    }
+}
+struct Pages {
+    next: Cell<u64>,
+    drops: Arc<AtomicUsize>,
+    allocated: Cell<usize>,
+    fail_after: Option<usize>,
+}
+impl PageSource for Pages {
+    fn allocate(
+        &self,
+        bytes: usize,
+        alignment: usize,
+        cache: CacheAttribute,
+    ) -> Result<PinnedPages, MemoryError> {
+        assert_eq!(cache, CacheAttribute::WriteBack);
+        let count = self.allocated.get();
+        if self.fail_after == Some(count) {
+            return Err(MemoryError::OutOfMemory);
+        }
+        self.allocated.set(count + 1);
+        let bytes = bytes.div_ceil(4096) * 4096;
+        let layout = Layout::from_size_align(bytes, alignment).unwrap();
+        let address =
+            NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(MemoryError::OutOfMemory)?;
+        let base = self.next.get();
+        self.next.set(base + bytes as u64);
+        PinnedPages::new(
+            Box::new(Ram {
+                address,
+                physical: (0..bytes / 4096).map(|i| base + i as u64 * 4096).collect(),
+                layout,
+                drops: self.drops.clone(),
+            }),
+            bytes,
+            alignment,
+        )
+    }
+}
+struct Map {
+    cpu: CpuMapping,
+    device: Vec<u8>,
+    visible: Vec<bool>,
+}
+struct Domain {
+    peer: Arc<Mutex<Device>>,
+    maps: Mutex<BTreeMap<u64, Map>>,
+    next: AtomicUsize,
+    posted: Mutex<Vec<(u64, Vec<u8>)>>,
+    completions: Mutex<Vec<Range<u64>>>,
+    fail_drain: AtomicBool,
+    fail_unmap: AtomicBool,
+    fail_sync: AtomicBool,
+    incoherent: AtomicBool,
+    defer: AtomicBool,
+    drains: AtomicUsize,
+    drained: AtomicBool,
+}
+impl Domain {
+    fn new(peer: Arc<Mutex<Device>>) -> Self {
+        Self {
+            peer,
+            maps: Mutex::new(BTreeMap::new()),
+            next: AtomicUsize::new(0),
+            posted: Mutex::new(Vec::new()),
+            completions: Mutex::new(Vec::new()),
+            fail_drain: AtomicBool::new(false),
+            fail_unmap: AtomicBool::new(false),
+            fail_sync: AtomicBool::new(false),
+            incoherent: AtomicBool::new(false),
+            defer: AtomicBool::new(false),
+            drains: AtomicUsize::new(0),
+            drained: AtomicBool::new(false),
+        }
+    }
+    fn visible(&self, at: u64, bytes: usize) -> Vec<u8> {
+        let mut maps = self.maps.lock().unwrap();
+        let (&base, map) = maps.range_mut(..=at).next_back().unwrap();
+        let start = (at - base) as usize;
+        assert!(
+            start + bytes <= map.device.len(),
+            "device read outside IOVA"
+        );
+        assert!(
+            map.visible[start..start + bytes].iter().all(|v| *v),
+            "missing sync_for_device"
+        );
+        map.visible[start..start + bytes].fill(false);
+        map.device[start..start + bytes].to_vec()
+    }
+    fn read32(&self, at: u64) -> u32 {
+        u32::from_le_bytes(self.visible(at, 4).try_into().unwrap())
+    }
+    fn store(&self, at: u64, bytes: &[u8]) {
+        let maps = self.maps.lock().unwrap();
+        let (&base, map) = maps.range(..=at).next_back().unwrap();
+        let address = map.cpu.address((at - base) as usize, bytes.len()).unwrap();
+        for (i, b) in bytes.iter().enumerate() {
+            unsafe { address.as_ptr().add(i).write_volatile(*b) };
+        }
+    }
+    fn write(&self, at: u64, bytes: &[u8]) {
+        if self.defer.load(Ordering::Relaxed) {
+            self.posted.lock().unwrap().push((at, bytes.to_vec()));
+        } else {
+            self.store(at, bytes);
+        }
+    }
+    fn put32(&self, at: u64, word: u32) {
+        self.write(at, &word.to_le_bytes());
+    }
+    fn complete(&self, at: u64, bytes: usize) {
+        self.completions.lock().unwrap().push(at..at + bytes as u64);
+    }
+    fn require_stopped(&self) {
+        let peer = self.peer.lock().unwrap();
+        assert_eq!(peer.config[&4] & 4, 0, "real Command.BM still enabled");
+        assert!(
+            peer.command_clear_observed,
+            "real BM clear readback missing"
+        );
+        for at in [
+            0x468, 0x2c00, 0x2000, 0x2400, 0x2800, 0x3000, 0x1400, 0x1800, 0xc00, 0x4800, 0x1000,
+            0x1c00, 0x45c, 0x3c00, 0x4c00,
+        ] {
+            assert_eq!(
+                peer.mac.get(&at).copied().unwrap_or(0) & 2,
+                0,
+                "live engine {at:x}"
+            );
+        }
+    }
+}
+// SAFETY: independently authored synchronous symbolic remapper; no native use.
+unsafe impl DmaDomain for Domain {
+    unsafe fn map(
+        &self,
+        pages: &DmaPages,
+        _: Direction,
+        limit: u64,
+    ) -> Result<DomainMapping, DmaError> {
+        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        let address = 0x2_0000_0000 + id as u64 * 0x100_0000;
+        assert!(address + pages.bytes() as u64 <= limit);
+        assert_ne!(address, pages.as_single().unwrap().physical_pages()[0]);
+        let cpu = pages
+            .as_single()
+            .unwrap()
+            .cpu_mapping(CacheAttribute::WriteBack)
+            .unwrap();
+        self.maps.lock().unwrap().insert(
+            address,
+            Map {
+                cpu,
+                device: vec![0xa5; pages.bytes()],
+                visible: vec![false; pages.bytes()],
+            },
+        );
+        Ok(DomainMapping {
+            id: id as u64,
+            address,
+            bytes: pages.bytes(),
+        })
+    }
+    unsafe fn unmap(&self, mapping: DomainMapping) -> Result<(), DmaError> {
+        self.require_stopped();
+        assert!(self.drained.load(Ordering::Relaxed));
+        assert!(self.posted.lock().unwrap().is_empty());
+        if self.fail_unmap.load(Ordering::Relaxed) {
+            return Err(DmaError::InvalidationFailed);
+        }
+        assert!(self.maps.lock().unwrap().remove(&mapping.address).is_some());
+        Ok(())
+    }
+    unsafe fn sync_for_device(
+        &self,
+        mapping: DomainMapping,
+        range: Range<usize>,
+        _: Direction,
+    ) -> Result<(), DmaError> {
+        if self.fail_sync.load(Ordering::Relaxed) {
+            return Err(DmaError::VisibilityFailed);
+        }
+        let mut maps = self.maps.lock().unwrap();
+        let map = maps.get_mut(&mapping.address).unwrap();
+        let start = mapping.address + range.start as u64;
+        let end = mapping.address + range.end as u64;
+        self.completions
+            .lock()
+            .unwrap()
+            .retain(|r| r.end <= start || r.start >= end);
+        let source = map.cpu.address(range.start, range.len()).unwrap();
+        for (i, offset) in range.clone().enumerate() {
+            map.device[offset] = unsafe { source.as_ptr().add(i).read_volatile() };
+            map.visible[offset] = true;
+        }
+        Ok(())
+    }
+    unsafe fn sync_for_cpu(
+        &self,
+        mapping: DomainMapping,
+        range: Range<usize>,
+        _: Direction,
+    ) -> Result<(), DmaError> {
+        if self.drained.load(Ordering::Relaxed) {
+            self.require_stopped();
+            return Ok(());
+        }
+        let at = mapping.address + range.start as u64;
+        let end = mapping.address + range.end as u64;
+        assert!(
+            self.completions
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.start <= at && r.end >= end),
+            "CPU access without device completion"
+        );
+        assert!(
+            self.posted
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(p, b)| *p + b.len() as u64 <= at || *p >= end),
+            "CPU access before delayed packet write completion"
+        );
+        Ok(())
+    }
+    unsafe fn read_coherent_u32(
+        &self,
+        mapping: DomainMapping,
+        offset: usize,
+        _: Direction,
+    ) -> Result<u32, DmaError> {
+        if self.incoherent.load(Ordering::Relaxed) {
+            return Err(DmaError::CoherenceUnavailable);
+        }
+        let maps = self.maps.lock().unwrap();
+        let map = maps.get(&mapping.address).unwrap();
+        let pointer = map.cpu.address(offset, 4).unwrap();
+        Ok(u32::from_le(unsafe {
+            pointer.as_ptr().cast::<u32>().read_volatile()
+        }))
+    }
+    unsafe fn drain_posted_writes(&self) -> Result<(), DmaError> {
+        self.require_stopped();
+        if self.fail_drain.load(Ordering::Relaxed) {
+            return Err(DmaError::DrainUnavailable);
+        }
+        for (at, bytes) in self.posted.lock().unwrap().drain(..) {
+            self.store(at, &bytes);
+        }
+        self.drains.fetch_add(1, Ordering::Relaxed);
+        self.drained.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+}
+#[derive(Default)]
+struct Device {
+    config: BTreeMap<u16, u32>,
+    mac: BTreeMap<u32, u32>,
+    sram: BTreeMap<u32, u32>,
+    phy: BTreeMap<u8, u16>,
+    ape: BTreeMap<u32, u32>,
+    nvram: BTreeMap<u32, u32>,
+    auxiliary: BTreeMap<u16, u16>,
+    aux_select: u16,
+    dsp: BTreeMap<u16, u16>,
+    dsp_select: u16,
+    command: Option<u32>,
+    busy: bool,
+    tx: usize,
+    rx: usize,
+    ret: usize,
+    sent: Vec<Vec<u8>>,
+    access: Vec<(bool, u32, u32)>,
+    reset_ack: bool,
+    phy_stuck: bool,
+    nvram_stuck: bool,
+    stop_stuck: Option<u32>,
+    hold_tx: bool,
+    command_clear_observed: bool,
+    drops: usize,
+    ignore_master_clear: bool,
+}
+impl Device {
+    fn new() -> Self {
+        let mut p = Self {
+            reset_ack: true,
+            ..Self::default()
+        };
+        for (at, value) in [
+            (0, 0x165f_14e4),
+            (4, 0x0010_0002),
+            (8, 0x0200_0000),
+            (0x34, 0x40),
+            (0x40, 0x10),
+            (0x48, 0x0810),
+            (0x68, 0xf000_0000),
+            (0xf4, 0x0572_0000),
+        ] {
+            p.config.insert(at, value);
+        }
+        // Signed board, copper, NIC, ST serial flash 256-byte page.
+        for (at, value) in [
+            (0xb54, 0x4b65_7654),
+            (0xb58, 0),
+            (0xb5c, 0x0001_0000),
+            (0xd38, 0),
+            (0xe00, 0x362c),
+            (0xc14, 0x484b_0211),
+            (0xc18, 0x2233_4455),
+        ] {
+            p.sram.insert(at, value);
+        }
+        p.mac.insert(0x7014, 0x0200_0000);
+        let id = 0x5c0d_8b62u32;
+        p.phy.insert(2, (id >> 10) as u16);
+        p.phy
+            .insert(3, (((id >> 16) & 0xfc00) | (id & 0x3ff)) as u16);
+        p.phy.insert(1, 0x24);
+        p.phy.insert(0x19, 0x700);
+        p
+    }
+    fn phy_read(&self, at: u8) -> u16 {
+        match at {
+            0x18 => self.auxiliary.get(&self.aux_select).copied().unwrap_or(0),
+            0x15 => self.dsp.get(&self.dsp_select).copied().unwrap_or(0),
+            _ => self.phy.get(&at).copied().unwrap_or(0),
+        }
+    }
+    fn phy_write(&mut self, at: u8, value: u16) {
+        match at {
+            0 if value & 0x8000 != 0 => {
+                self.phy.insert(0, if self.phy_stuck { value } else { 0 });
+            }
+            0x18 if value & 0x8007 == 7 => {
+                self.aux_select = (value >> 12) & 7;
+            }
+            0x18 => {
+                self.auxiliary.insert(value & 7, value & !0x8007);
+            }
+            0x17 => self.dsp_select = value,
+            0x15 => {
+                self.dsp.insert(self.dsp_select, value);
+            }
+            _ => {
+                self.phy.insert(at, value);
+            }
+        }
+    }
+    fn read(&mut self, at: u32) -> Result<u32, Error> {
+        if self.config[&4] & 2 == 0 {
+            return Err(Error::Access);
+        }
+        let value = match at {
+            0x84 => self
+                .sram
+                .get(&self.mac.get(&0x7c).copied().unwrap_or(0))
+                .copied()
+                .unwrap_or(0),
+            0x44c => {
+                if self.busy {
+                    self.busy = false;
+                    self.command.unwrap()
+                } else if let Some(command) = self.command {
+                    let at = ((command >> 16) & 31) as u8;
+                    let value = if command & 0x0800_0000 != 0 {
+                        self.phy_read(at)
+                    } else {
+                        self.phy_write(at, command as u16);
+                        command as u16
+                    };
+                    self.command = None;
+                    let reply = (command & !0x2000_ffff) | u32::from(value);
+                    self.mac.insert(0x44c, reply);
+                    reply
+                } else {
+                    self.mac.get(&at).copied().unwrap_or(0)
+                }
+            }
+            _ => self.mac.get(&at).copied().unwrap_or(0),
+        };
+        self.access.push((false, at, value));
+        Ok(value)
+    }
+    fn status(&self) -> u64 {
+        (u64::from(self.mac[&0x3c38]) << 32) | u64::from(self.mac[&0x3c3c])
+    }
+    fn transmit(&mut self, tail: usize, domain: &Domain) {
+        if self.tx == tail {
+            return;
+        }
+        assert_ne!(self.config[&4] & 4, 0);
+        if self.hold_tx {
+            return;
+        }
+        let base = (u64::from(self.sram[&0x100]) << 32) | u64::from(self.sram[&0x104]);
+        assert_eq!(self.sram[&0x108], 512 << 16);
+        for _ in 0..512 {
+            if self.tx == tail {
+                return;
+            }
+            let at = base + (self.tx * 16) as u64;
+            let address = (u64::from(domain.read32(at)) << 32) | u64::from(domain.read32(at + 4));
+            let command = domain.read32(at + 8);
+            assert_eq!(command & 0xffff, 0x84);
+            assert_eq!(domain.read32(at + 12), 0);
+            let length = (command >> 16) as usize;
+            assert!((60..=1514).contains(&length));
+            self.sent.push(domain.visible(address, length));
+            domain.complete(address, 4096);
+            self.tx = (self.tx + 1) & 511;
+            domain.put32(
+                self.status() + 16,
+                ((self.tx as u32) << 16) | self.ret as u32,
+            );
+        }
+        panic!("unbounded TX walk")
+    }
+    fn receive(&mut self, frame: &[u8], errors: u32, domain: &Domain) {
+        assert_eq!(self.mac[&0x2458], (2048 << 16) | (1536 << 2));
+        let tail = self.mac[&0x26c] as usize;
+        assert_ne!(self.rx, tail);
+        let base = (u64::from(self.mac[&0x2450]) << 32) | u64::from(self.mac[&0x2454]);
+        let at = base + (self.rx * 32) as u64;
+        let address = (u64::from(domain.read32(at)) << 32) | u64::from(domain.read32(at + 4));
+        assert_eq!(domain.read32(at + 8), 1536);
+        assert_eq!(domain.read32(at + 12), 4);
+        let opaque = domain.read32(at + 28);
+        assert_eq!(opaque, 0x10000 | self.rx as u32);
+        domain.visible(address, 4096); // device receives only offered, visible page.
+        let returns = (u64::from(self.sram[&0x200]) << 32) | u64::from(self.sram[&0x204]);
+        assert_eq!(self.sram[&0x208], 4096 << 16);
+        let returned = returns + (self.ret * 32) as u64;
+        domain.write(address, frame);
+        domain.write(address + frame.len() as u64, &[0xde, 0xad, 0xbe, 0xef]);
+        domain.complete(address, 4096);
+        domain.put32(returned + 8, frame.len() as u32 + 4);
+        domain.put32(returned + 12, if errors != 0 { 0x404 } else { 4 });
+        domain.put32(returned + 20, errors);
+        domain.put32(returned + 28, opaque);
+        self.rx = (self.rx + 1) & 2047;
+        self.ret = (self.ret + 1) & 4095;
+        domain.put32(
+            self.status() + 16,
+            ((self.tx as u32) << 16) | self.ret as u32,
+        );
+    }
+}
+struct Reg {
+    peer: Arc<Mutex<Device>>,
+    domain: Arc<Domain>,
+}
+impl Drop for Reg {
+    fn drop(&mut self) {
+        self.peer.lock().unwrap().drops += 1;
+    }
+}
+struct Timer;
+impl Delay for Timer {
+    fn delay_us(&mut self, _: u64) {}
+}
+// SAFETY: isolated symbolic device only, deliberately no native authority.
+unsafe impl Registers for Reg {
+    fn function_number(&self) -> u8 {
+        3
+    } // Deliberately differs from internal port 0.
+    fn config_read32(&mut self, at: u16) -> Result<u32, Error> {
+        let mut p = self.peer.lock().unwrap();
+        let value = p.config.get(&at).copied().unwrap_or(0);
+        if at == 4 && value & 4 == 0 {
+            p.command_clear_observed = true;
+        }
+        p.access.push((false, 0x10000 + u32::from(at), value));
+        Ok(value)
+    }
+    fn config_write32(&mut self, at: u16, value: u32) -> Result<(), Error> {
+        self.peer.lock().unwrap().config.insert(at, value);
+        Ok(())
+    }
+    fn config_write16(&mut self, at: u16, value: u16) -> Result<(), Error> {
+        let mut p = self.peer.lock().unwrap();
+        let shift = (at & 2) * 8;
+        let word = p.config.get(&(at & !3)).copied().unwrap_or(0);
+        if at == 4 && word & 4 != 0 && value & 4 == 0 && p.ignore_master_clear {
+            return Ok(());
+        }
+        if at == 4 && value & 4 != 0 {
+            self.domain.drained.store(false, Ordering::Relaxed);
+        }
+        p.config.insert(
+            at & !3,
+            (word & !(0xffff << shift)) | (u32::from(value) << shift),
+        );
+        if at == 4 {
+            p.command_clear_observed = false;
+        }
+        p.access
+            .push((true, 0x10000 + u32::from(at), u32::from(value)));
+        Ok(())
+    }
+    fn read32(&mut self, at: u32) -> Result<u32, Error> {
+        self.peer.lock().unwrap().read(at)
+    }
+    fn write32(&mut self, at: u32, value: u32) -> Result<(), Error> {
+        let mut p = self.peer.lock().unwrap();
+        if p.config[&4] & 2 == 0 {
+            return Err(Error::Access);
+        }
+        p.access.push((true, at, value));
+        match at {
+            0x84 => {
+                let at = p.mac.get(&0x7c).copied().unwrap_or(0);
+                p.sram.insert(at, value);
+            }
+            0x404 => {
+                let old = p.mac.get(&at).copied().unwrap_or(0);
+                p.mac.insert(at, old & !value);
+            }
+            0x44c => {
+                let expected_phy = ((p.sram[&0xe00] >> 30) + 1) & 31;
+                assert_eq!(
+                    (value >> 21) & 31,
+                    expected_phy,
+                    "MDIO must address the actual internal port"
+                );
+                p.command = Some(value);
+                p.busy = true;
+            }
+            0x7020 if value == 2 => {
+                p.mac.insert(at, 0x202);
+            }
+            0x7000 => {
+                let address = p.mac.get(&0x700c).copied().unwrap_or(0);
+                let data = p.nvram.get(&address).copied().unwrap_or(u32::MAX);
+                p.mac.insert(0x7010, data);
+                let stuck = p.nvram_stuck;
+                p.mac.insert(at, if stuck { value & !8 } else { value | 8 });
+            }
+            0x6804 if value & 1 != 0 => {
+                if p.reset_ack {
+                    p.sram.insert(0xb50, !0x4b65_7654u32);
+                }
+                p.tx = 0;
+                p.rx = 0;
+                p.ret = 0;
+                // No MMIO operation is allowed until config decode restored.
+                let command = p.config[&4];
+                p.config.insert(4, command & !2);
+            }
+            0x304 => {
+                p.mac.insert(at, value);
+                p.transmit(value as usize, &self.domain);
+            }
+            _ if p.stop_stuck == Some(at) && value & 2 == 0 => {}
+            _ => {
+                p.mac.insert(at, value);
+            }
+        }
+        Ok(())
+    }
+    fn ape_read32(&mut self, at: u32) -> Result<u32, Error> {
+        Ok(self.peer.lock().unwrap().ape.get(&at).copied().unwrap_or(0))
+    }
+    fn ape_write32(&mut self, at: u32, value: u32) -> Result<(), Error> {
+        let mut p = self.peer.lock().unwrap();
+        if (0x8400..0x8420).contains(&at) {
+            p.ape.insert(at + 0x20, value);
+        } else {
+            p.ape.insert(at, 0);
+        }
+        Ok(())
+    }
+}
+fn parts() -> (Hardware<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {
+    let peer = Arc::new(Mutex::new(Device::new()));
+    let domain = Arc::new(Domain::new(peer.clone()));
+    let pages = Pages {
+        next: Cell::new(0x3000_0000),
+        drops: Arc::new(AtomicUsize::new(0)),
+        allocated: Cell::new(0),
+        fail_after: None,
+    };
+    (
+        Hardware::new(
+            Reg {
+                peer: peer.clone(),
+                domain: domain.clone(),
+            },
+            Timer,
+        ),
+        pages,
+        domain,
+        peer,
+    )
+}
+fn attach() -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {
+    let (hardware, pages, domain, peer) = parts();
+    let packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
+        Ok(packet) => packet,
+        Err((e, _)) => panic!("attach: {e:?}"),
+    };
+    (packet, pages, domain, peer)
+}
+
+#[test]
+fn actual_nonidentity_rings_transfer_frames_pad_strip_fcs_and_retire() {
+    let (mut packet, pages, domain, peer) = attach();
+    assert_eq!(packet.mac(), Mac([2, 0x11, 0x22, 0x33, 0x44, 0x55]));
+    assert!(packet.carrier());
+    let short = vec![0x53; 14];
+    packet.transmit(&short).unwrap();
+    assert_eq!(
+        peer.lock().unwrap().sent[0],
+        [&short[..], &[0; 46]].concat()
+    );
+    let frame = vec![0x86; 1514];
+    peer.lock().unwrap().receive(&frame, 0, &domain);
+    assert_eq!(packet.receive().unwrap(), Some(frame));
+    assert_eq!(packet.receive().unwrap(), None);
+    let registers = match packet.retire() {
+        Ok(r) => r,
+        Err((e, _)) => panic!("retire {e:?}"),
+    };
+    assert!(domain.maps.lock().unwrap().is_empty());
+    assert_eq!(pages.drops.load(Ordering::Relaxed), 6);
+    drop(registers);
+    assert_eq!(peer.lock().unwrap().drops, 1);
+}
+#[test]
+fn wraps_actual_tx_and_rx_producer_return_indices() {
+    let (mut packet, _, domain, peer) = attach();
+    for value in 0..4100u32 {
+        let mut frame = vec![0x2a; 60];
+        frame[14..18].copy_from_slice(&value.to_le_bytes());
+        packet.transmit(&frame).unwrap();
+        peer.lock().unwrap().receive(&frame, 0, &domain);
+        assert_eq!(packet.receive().unwrap(), Some(frame));
+    }
+    assert_eq!(peer.lock().unwrap().sent.len(), 4100);
+    assert!(packet.retire().is_ok());
+}
+#[test]
+fn only_real_completed_tx_slots_can_be_reused_and_full_is_recoverable() {
+    let (mut packet, _, domain, peer) = attach();
+    peer.lock().unwrap().hold_tx = true;
+    for _ in 0..511 {
+        packet.transmit(&[0xa5; 60]).unwrap();
+    }
+    assert!(packet.transmit(&[0xb6; 60]).is_err());
+    assert_eq!(packet.failure(), None);
+    {
+        let mut p = peer.lock().unwrap();
+        p.hold_tx = false;
+        p.transmit(511, &domain);
+    }
+    packet.transmit(&[0xb6; 60]).unwrap();
+    assert_eq!(peer.lock().unwrap().sent.len(), 512);
+    assert!(packet.retire().is_ok());
+}
+#[test]
+fn carrier_comes_from_phy_status_and_negotiated_mode() {
+    let (mut packet, _, _, peer) = attach();
+    peer.lock().unwrap().phy.insert(1, 0);
+    assert!(!packet.carrier());
+    assert_eq!(packet.transmit(&[0; 60]), Err(LinkError::NoCarrier));
+    for (aux, port) in [(0x200, 4), (0x500, 4), (0x700, 8)] {
+        let mut p = peer.lock().unwrap();
+        p.phy.insert(1, 0x24);
+        p.phy.insert(0x19, aux);
+        drop(p);
+        assert!(packet.carrier());
+        assert_eq!(peer.lock().unwrap().mac[&0x400] & 12, port);
+    }
+    peer.lock().unwrap().phy.insert(0x19, 0x600);
+    assert!(!packet.carrier());
+    assert!(packet.retire().is_ok());
+}
+#[test]
+fn corrupted_rx_is_dropped_and_invalid_opaque_poison_retains_owners() {
+    let (mut packet, pages, domain, peer) = attach();
+    peer.lock().unwrap().receive(&[0x12; 60], 0x10000, &domain);
+    assert_eq!(packet.receive().unwrap(), None);
+    peer.lock().unwrap().receive(&[0x34; 60], 0, &domain);
+    let returns = {
+        let p = peer.lock().unwrap();
+        (u64::from(p.sram[&0x200]) << 32) | u64::from(p.sram[&0x204])
+    };
+    domain.store(returns + 32 + 28, &0x20001u32.to_le_bytes());
+    assert!(packet.receive().is_err());
+    assert_eq!(packet.failure(), Some(Error::RingCorrupt));
+    drop(packet);
+    assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
+    assert_eq!(peer.lock().unwrap().drops, 0);
+    assert_eq!(domain.maps.lock().unwrap().len(), 6);
+}
+#[test]
+fn late_payload_writes_drain_before_unmap_and_failure_keeps_exact_epoch() {
+    let (packet, pages, domain, peer) = attach();
+    domain.defer.store(true, Ordering::Relaxed);
+    peer.lock().unwrap().receive(&[0x7b; 60], 0, &domain);
+    assert!(!domain.posted.lock().unwrap().is_empty());
+    domain.fail_drain.store(true, Ordering::Relaxed);
+    let mut packet = match packet.retire() {
+        Err((Error::Dma(DmaError::DrainUnavailable), p)) => p,
+        _ => panic!("drain must refuse"),
+    };
+    assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
+    assert_eq!(domain.maps.lock().unwrap().len(), 6);
+    assert!(packet.transmit(&[0; 60]).is_err());
+    domain.fail_drain.store(false, Ordering::Relaxed);
+    domain.fail_unmap.store(true, Ordering::Relaxed);
+    let packet = match packet.retire() {
+        Err((Error::Dma(DmaError::InvalidationFailed), p)) => p,
+        _ => panic!("unmap must refuse"),
+    };
+    assert!(domain.posted.lock().unwrap().is_empty());
+    assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
+    domain.fail_unmap.store(false, Ordering::Relaxed);
+    assert!(packet.retire().is_ok());
+    assert_eq!(pages.drops.load(Ordering::Relaxed), 6);
+}
+#[test]
+fn failed_real_engine_stop_never_drains_or_unmaps() {
+    let (packet, pages, domain, peer) = attach();
+    peer.lock().unwrap().stop_stuck = Some(0x4800);
+    let packet = match packet.retire() {
+        Err((Error::StopTimeout(0x4800), p)) => p,
+        _ => panic!("live engine must refuse"),
+    };
+    assert_eq!(domain.drains.load(Ordering::Relaxed), 0);
+    assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
+    peer.lock().unwrap().stop_stuck = None;
+    assert!(packet.retire().is_ok());
+}
+#[test]
+fn reset_phy_nvm_and_coherence_failures_never_advertise_attachment() {
+    for fault in 0..4 {
+        let (hardware, pages, domain, peer) = parts();
+        {
+            let mut p = peer.lock().unwrap();
+            match fault {
+                0 => p.reset_ack = false,
+                1 => p.phy_stuck = true,
+                2 => {
+                    p.sram.insert(0xc14, 0);
+                    p.nvram_stuck = true;
+                }
+                _ => domain.incoherent.store(true, Ordering::Relaxed),
+            }
+        }
+        let (error, mut packet) = match unsafe { Packet::attach(hardware, &pages, domain.clone()) }
+        {
+            Err(failed) => failed,
+            Ok(_) => panic!("fault admitted"),
+        };
+        assert_eq!(
+            error,
+            match fault {
+                0 => Error::FirmwareTimeout,
+                1 => Error::PhyResetTimeout,
+                2 => Error::NvramTimeout,
+                _ => Error::Dma(DmaError::CoherenceUnavailable),
+            }
+        );
+        assert!(!packet.carrier());
+        assert!(packet.transmit(&[0; 60]).is_err());
+        drop(packet);
+        assert_eq!(peer.lock().unwrap().drops, 0);
+    }
+}
+#[test]
+fn nvm_fallback_uses_actual_internal_port_and_exact_read_protocol() {
+    let (hardware, pages, domain, peer) = parts();
+    {
+        let mut p = peer.lock().unwrap();
+        p.sram.insert(0xc14, 0);
+        p.sram.insert(0xe00, 0x8000_362c);
+        // Internal port 2: MAC location 0x7c+0x18c, not BDF function 3.
+        p.nvram.insert(0x208, 0x0212);
+        p.nvram.insert(0x20c, 0x3456_789a);
+    }
+    let packet = match unsafe { Packet::attach(hardware, &pages, domain) } {
+        Ok(p) => p,
+        Err((e, _)) => panic!("{e:?}"),
+    };
+    assert_eq!(packet.mac(), Mac([2, 0x12, 0x34, 0x56, 0x78, 0x9a]));
+    let p = peer.lock().unwrap();
+    assert!(p.access.contains(&(true, 0x7000, 0x198)));
+    assert!(p.access.contains(&(true, 0x700c, 0x208)));
+    drop(p);
+    assert!(packet.retire().is_ok());
+}
+#[test]
+fn live_status_with_future_completion_cannot_retire_unsubmitted_buffer() {
+    let (mut packet, _, domain, peer) = attach();
+    let status = peer.lock().unwrap().status();
+    domain.store(status + 16, &0x0001_0000u32.to_le_bytes());
+    assert!(packet.receive().is_err());
+    assert_eq!(packet.failure(), Some(Error::RingCorrupt));
+    assert!(packet.retire().is_ok());
+}
+
+#[test]
+fn link_loss_discards_old_tx_only_after_real_drain_and_rebuilds_actual_rings() {
+    let (mut packet, _, domain, peer) = attach();
+    assert!(packet.carrier());
+    peer.lock().unwrap().hold_tx = true;
+    packet.transmit(&[0x11; 60]).unwrap();
+    peer.lock().unwrap().phy.insert(1, 0);
+    assert!(!packet.carrier());
+    assert_eq!(domain.drains.load(Ordering::Relaxed), 1);
+    assert_eq!(packet.tx_producer, 0);
+    {
+        let mut p = peer.lock().unwrap();
+        p.phy.insert(1, 0x24);
+        p.hold_tx = false;
+    }
+    packet.transmit(&[0x22; 60]).unwrap();
+    assert_eq!(peer.lock().unwrap().sent, vec![vec![0x22; 60]]);
+    peer.lock().unwrap().receive(&[0x33; 60], 0, &domain);
+    assert_eq!(packet.receive().unwrap(), Some(vec![0x33; 60]));
+    assert!(packet.retire().is_ok());
+}
+#[test]
+fn ignored_actual_bus_master_clear_does_not_authorize_drain_or_unmap() {
+    let (packet, pages, domain, peer) = attach();
+    peer.lock().unwrap().ignore_master_clear = true;
+    let packet = match packet.retire() {
+        Err((Error::ConfigDidNotLatch, packet)) => packet,
+        _ => panic!("ignored Command.BM clear must refuse"),
+    };
+    assert_eq!(domain.drains.load(Ordering::Relaxed), 0);
+    assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
+    peer.lock().unwrap().ignore_master_clear = false;
+    assert!(packet.retire().is_ok());
+}
+#[test]
+fn visibility_failure_after_attachment_poison_retains_for_real_retirement() {
+    let (mut packet, pages, domain, _) = attach();
+    domain.fail_sync.store(true, Ordering::Relaxed);
+    assert!(packet.transmit(&[0x5a; 60]).is_err());
+    assert_eq!(
+        packet.failure(),
+        Some(Error::Dma(DmaError::VisibilityFailed))
+    );
+    assert_eq!(packet.tx_producer, 0);
+    assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
+    domain.fail_sync.store(false, Ordering::Relaxed);
+    assert!(packet.retire().is_ok());
+}
+#[test]
+fn peer_reads_published_device_snapshot_instead_of_unsynchronized_cpu_bytes() {
+    let (_hardware, pages, domain, _) = parts();
+    let pins = pages
+        .allocate(4096, 4096, CacheAttribute::WriteBack)
+        .unwrap();
+    let cpu = pins.cpu_mapping(CacheAttribute::WriteBack).unwrap();
+    let mapping = crate::bus::dma::mapping::DmaMapping::map(
+        domain.clone(),
+        pins,
+        Direction::Bidirectional,
+        u64::MAX,
+    )
+    .unwrap();
+    let pointer = cpu.address(0, 4).unwrap();
+    unsafe {
+        pointer
+            .as_ptr()
+            .cast::<u32>()
+            .write_volatile(0x11223344u32.to_le());
+    }
+    mapping.sync_for_device(0..4).unwrap();
+    unsafe {
+        pointer
+            .as_ptr()
+            .cast::<u32>()
+            .write_volatile(0xaabbccddu32.to_le());
+    }
+    assert_eq!(domain.read32(mapping.address().unwrap()), 0x11223344);
+    // This unpublished standalone model allocation is deliberately quarantined
+    // on drop; it never impersonates a native completed mapping.
+}
+#[test]
+fn peer_refuses_cpu_ownership_before_delayed_dma_payload_completion() {
+    let (_packet, _, domain, peer) = attach();
+    domain.defer.store(true, Ordering::Relaxed);
+    peer.lock().unwrap().receive(&[0x43; 60], 0, &domain);
+    let (mapping, bytes) = {
+        let maps = domain.maps.lock().unwrap();
+        let (&address, map) = maps.iter().last().unwrap();
+        (
+            DomainMapping {
+                id: 6,
+                address,
+                bytes: map.device.len(),
+            },
+            map.device.len(),
+        )
+    };
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: intentional negative model control, no native use. There is
+        // no completion visibility yet and the peer must reject this call.
+        let _ =
+            unsafe { domain.sync_for_cpu(mapping, 0..bytes.min(4096), Direction::Bidirectional) };
+    }));
+    assert!(refused.is_err());
+}
+#[test]
+fn peer_rejects_drain_without_actual_engine_stop_and_bus_master_clear() {
+    let (_packet, _, domain, _) = attach();
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: intentional rejected symbolic negative control only.
+        let _ = unsafe { domain.drain_posted_writes() };
+    }));
+    assert!(refused.is_err());
+}
+
+#[test]
+fn partial_page_allocation_keeps_every_mapping_handle_for_explicit_retirement() {
+    for allocated in 0..6 {
+        let (hardware, mut pages, domain, peer) = parts();
+        pages.fail_after = Some(allocated);
+        let packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
+            Err((Error::Memory(MemoryError::OutOfMemory), packet)) => packet,
+            _ => panic!("allocation failure must be returned"),
+        };
+        assert_eq!(domain.maps.lock().unwrap().len(), allocated);
+        assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
+        let registers = match packet.retire() {
+            Ok(r) => r,
+            Err((e, _)) => panic!("{e:?}"),
+        };
+        assert_eq!(pages.drops.load(Ordering::Relaxed), allocated);
+        assert!(domain.maps.lock().unwrap().is_empty());
+        drop(registers);
+        assert_eq!(peer.lock().unwrap().drops, 1);
+    }
+}

@@ -67,7 +67,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         }
         Err(Error::UnsupportedPcie)
     }
-    fn unmanaged(&mut self) -> Result<(), Error> {
+    pub(super) fn unmanaged(&mut self) -> Result<(), Error> {
         // The managed APE/ASF handshake is deliberately not inferred from an
         // absent NCSI feature bit or from firmware which has not finished boot.
         if self.ape_read(APE_SIGNATURE)? == APE_SIGNATURE_MAGIC
@@ -86,7 +86,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         }
         Ok(())
     }
-    fn nvram_lock(&mut self) -> Result<(), Error> {
+    pub(super) fn nvram_lock(&mut self) -> Result<(), Error> {
         self.write(NVRAM_SWARB, SWARB_REQUEST)?;
         let result = (|| {
             for _ in 0..8000 {

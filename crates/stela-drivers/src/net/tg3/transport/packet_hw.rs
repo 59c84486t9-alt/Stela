@@ -1,0 +1,334 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2001-2004 David S. Miller
+// Copyright (C) 2001-2003 Jeff Garzik
+// Copyright (C) 2004 Sun Microsystems Inc.
+// Copyright (C) 2005-2018 Broadcom
+//! One BCM5720 A0 host-send/standard-receive/return queue, polled status DMA.
+use super::{board::Board, phy::Speed, regs::*, *};
+
+impl<R: Registers, D: Delay> Hardware<R, D> {
+    pub(in crate::net::tg3) fn packet_prepare(&mut self) -> Result<Board, Error> {
+        self.packet_identity()?;
+        // Reject inherited requester DMA before allocating or publishing RAM.
+        if self.regs().config_read32(4)? & 4 != 0 {
+            return Err(Error::UnsupportedBoard);
+        }
+        self.board()
+    }
+    pub(in crate::net::tg3) fn packet_reset(&mut self, board: Board) -> Result<(), Error> {
+        // PHY/config access is legal in the stopped packet epoch. No packet
+        // engine is enabled by reopening this serialized register transport.
+        self.stopped = false;
+        self.initialize_phy(board)?;
+        self.reset_unmanaged_core()?;
+        // Re-observe actual post-bootcode signed board identity; never retain a
+        // guessed MAC/management setting across reset.
+        let observed = self.board()?;
+        if observed.mac != board.mac
+            || observed.apd != board.apd
+            || observed.capacitive != board.capacitive
+            || observed.local != board.local
+            || observed.led != board.led
+        {
+            return Err(Error::UnsupportedBoard);
+        }
+        Ok(())
+    }
+    fn ring_info(&mut self, at: u32, address: u64, count: u32) -> Result<(), Error> {
+        self.sram(at, Some((address >> 32) as u32))?;
+        self.sram(at + 4, Some(address as u32))?;
+        self.sram(at + 8, Some(count << 16))?;
+        Ok(())
+    }
+    pub(in crate::net::tg3) fn packet_start(
+        &mut self,
+        board: Board,
+        addresses: [u64; 4],
+    ) -> Result<(), Error> {
+        if !self.core_reset_completed() {
+            return Err(Error::Poisoned);
+        }
+        let [tx, rx, returns, status] = addresses;
+        let dma = self.read(TG3PCI_DMA_RW_CTRL)? & !DMA_RWCTRL_DIS_CACHE_ALIGNMENT;
+        self.flush(TG3PCI_DMA_RW_CTRL, dma | DMA_RWCTRL_DIS_CACHE_ALIGNMENT)?;
+        self.flush(
+            GRC_MODE,
+            GRC_MODE_WSWAP_DATA
+                | GRC_MODE_BSWAP_DATA
+                | GRC_MODE_WSWAP_NONFRM_DATA
+                | GRC_MODE_HOST_SENDBDS
+                | GRC_MODE_NO_TX_PHDR_CSUM
+                | GRC_MODE_IRQ_ON_MAC_ATTN
+                | GRC_MODE_HOST_STACKUP
+                | GRC_MODE_IRQ_ON_FLOW_ATTN,
+        )?;
+        let misc = self.read(GRC_MISC_CFG)?;
+        self.flush(
+            GRC_MISC_CFG,
+            (misc & !0xff) | (65 << GRC_MISC_CFG_PRESCALAR_SHIFT),
+        )?;
+        for (at, value) in [
+            (BUFMGR_MB_RDMA_LOW_WATER, DEFAULT_MB_RDMA_LOW_WATER_5705),
+            (BUFMGR_MB_MACRX_LOW_WATER, DEFAULT_MB_MACRX_LOW_WATER_57765),
+            (BUFMGR_MB_HIGH_WATER, DEFAULT_MB_HIGH_WATER_57765),
+            (BUFMGR_DMA_LOW_WATER, DEFAULT_DMA_LOW_WATER),
+            (BUFMGR_DMA_HIGH_WATER, DEFAULT_DMA_HIGH_WATER),
+        ] {
+            self.write(at, value)?;
+        }
+        self.flush(
+            BUFMGR_MODE,
+            BUFMGR_MODE_ENABLE | BUFMGR_MODE_ATTN_ENABLE | BUFMGR_MODE_MBLOW_ATTN_ENAB,
+        )?;
+        let mut enabled = false;
+        for _ in 0..2000 {
+            if self.read(BUFMGR_MODE)? & BUFMGR_MODE_ENABLE != 0 {
+                enabled = true;
+                break;
+            }
+            self.delay.delay_us(10);
+        }
+        if !enabled {
+            return Err(Error::ConfigDidNotLatch);
+        }
+        self.write(RCVBDI_STD_THRESH, 64)?; // min(128/2, (2048-1)/8).
+        self.write(STD_REPLENISH_LWM, TG3_SRAM_RX_STD_BDCACHE_SIZE_5700)?;
+        self.write(RCVBDI_JUMBO_THRESH, 12)?; // disabled jumbo ring, donor default pending=100.
+        self.write(JMB_REPLENISH_LWM, TG3_SRAM_RX_JMB_BDCACHE_SIZE_5700)?;
+        self.write(RCVDBDI_STD_BD, (rx >> 32) as u32)?;
+        self.write(RCVDBDI_STD_BD + 4, rx as u32)?;
+        self.write(RCVDBDI_STD_BD + 8, (2048 << 16) | (1536 << 2))?;
+        self.write(RCVDBDI_JUMBO_BD + 8, BDINFO_FLAGS_DISABLED)?;
+        self.rx_producer(2047)?;
+        self.flush(TG3_RX_JMB_PROD_IDX_REG, 0)?;
+        for index in 1..4 {
+            self.sram(
+                NIC_SRAM_SEND_RCB + index * 16 + 8,
+                Some(BDINFO_FLAGS_DISABLED),
+            )?;
+        }
+        for index in 1..17 {
+            self.sram(
+                NIC_SRAM_RCV_RET_RCB + index * 16 + 8,
+                Some(BDINFO_FLAGS_DISABLED),
+            )?;
+        }
+        self.flush(MAILBOX_INTERRUPT, 1)?;
+        self.tx_producer(0)?;
+        self.rx_consumer(0)?;
+        self.write(HOSTCC_STATUS_BLK_HOST_ADDR, (status >> 32) as u32)?;
+        self.write(HOSTCC_STATUS_BLK_HOST_ADDR + 4, status as u32)?;
+        self.ring_info(NIC_SRAM_SEND_RCB, tx, 512)?;
+        self.ring_info(NIC_SRAM_RCV_RET_RCB, returns, 4096)?;
+        let mac = board.mac.0;
+        let high = u32::from(mac[0]) << 8 | u32::from(mac[1]);
+        let low = u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
+        for index in 0..4 {
+            self.write(MAC_ADDR_0_HIGH + index * 8, high)?;
+            self.write(MAC_ADDR_0_LOW + index * 8, low)?;
+        }
+        self.write(
+            MAC_TX_BACKOFF_SEED,
+            mac.iter().map(|b| u32::from(*b)).sum::<u32>() & 0x3ff,
+        )?;
+        self.write(MAC_RX_MTU_SIZE, 1522)?;
+        let lengths =
+            self.read(MAC_TX_LENGTHS)? & (TX_LENGTHS_JMB_FRM_LEN_MSK | TX_LENGTHS_CNT_DWN_VAL_MSK);
+        self.write(
+            MAC_TX_LENGTHS,
+            lengths
+                | (2 << TX_LENGTHS_IPG_CRS_SHIFT)
+                | (6 << TX_LENGTHS_IPG_SHIFT)
+                | (32 << TX_LENGTHS_SLOT_TIME_SHIFT),
+        )?;
+        self.write(MAC_RCV_RULE_CFG, RCV_RULE_CFG_DEFAULT_CLASS)?;
+        self.write(RCVLPC_CONFIG, 0x0181)?;
+        let corruption = self.read(TG3_LSO_RD_DMA_CRPTEN_CTRL)?;
+        self.write(
+            TG3_LSO_RD_DMA_CRPTEN_CTRL,
+            corruption
+                | TG3_LSO_RD_DMA_CRPTEN_CTRL_BLEN_BD_4K
+                | TG3_LSO_RD_DMA_CRPTEN_CTRL_BLEN_LSO_4K,
+        )?;
+        let statistics = self.read(RCVLPC_STATS_ENABLE)?;
+        self.write(RCVLPC_STATS_ENABLE, statistics & !RCVLPC_STATSENAB_DACK_FIX)?;
+        self.write(RCVLPC_STATSCTRL, RCVLPC_STATSCTRL_ENABLE)?;
+        self.write(SNDDATAI_STATSENAB, 0xff_ffff)?;
+        self.write(
+            SNDDATAI_STATSCTRL,
+            SNDDATAI_SCTRL_ENABLE | SNDDATAI_SCTRL_FASTUPD,
+        )?;
+        self.stop_block(HOSTCC_MODE)?;
+        // Interrupts stay masked. Time and max-frame coalescing cause genuine
+        // status DMA even when the caller hasn't requested a NOW update yet.
+        for (at, value) in [
+            (HOSTCC_RXCOL_TICKS, 1),
+            (HOSTCC_TXCOL_TICKS, 1),
+            (HOSTCC_RXMAX_FRAMES, 1),
+            (HOSTCC_TXMAX_FRAMES, 1),
+            (HOSTCC_RXCOAL_MAXF_INT, 1),
+            (HOSTCC_TXCOAL_MAXF_INT, 1),
+        ] {
+            self.write(at, value)?;
+        }
+        let command = Self::checked(self.regs().config_read32(4)?)? as u16;
+        self.regs().config_write16(4, (command | 0x0406) & !0x10)?;
+        if self.regs().config_read32(4)? as u16 != (command | 0x0406) & !0x10 {
+            return Err(Error::ConfigDidNotLatch);
+        }
+        self.flush(
+            HOSTCC_MODE,
+            HOSTCC_MODE_ENABLE | HOSTCC_MODE_32BYTE | HOSTCC_MODE_ATTN,
+        )?;
+        self.write(RCVCC_MODE, RCVCC_MODE_ENABLE | RCVCC_MODE_ATTN_ENABLE)?;
+        self.write(RCVLPC_MODE, RCVLPC_MODE_ENABLE)?;
+        self.flush(
+            MAC_MODE,
+            MAC_MODE_PORT_MODE_GMII
+                | MAC_MODE_TXSTAT_ENABLE
+                | MAC_MODE_RXSTAT_ENABLE
+                | MAC_MODE_TDE_ENABLE
+                | MAC_MODE_RDE_ENABLE
+                | MAC_MODE_FHDE_ENABLE
+                | MAC_MODE_RXSTAT_CLEAR
+                | MAC_MODE_TXSTAT_CLEAR,
+        )?;
+        self.delay.delay_us(40);
+        self.flush(GRC_LOCAL_CTRL, board.local)?;
+        self.delay.delay_us(100);
+        self.flush(
+            WDMAC_MODE,
+            WDMAC_MODE_ENABLE
+                | WDMAC_MODE_TGTABORT_ENAB
+                | WDMAC_MODE_MSTABORT_ENAB
+                | WDMAC_MODE_PARITYERR_ENAB
+                | WDMAC_MODE_ADDROFLOW_ENAB
+                | WDMAC_MODE_FIFOOFLOW_ENAB
+                | WDMAC_MODE_FIFOURUN_ENAB
+                | WDMAC_MODE_FIFOOREAD_ENAB
+                | WDMAC_MODE_LNGREAD_ENAB
+                | WDMAC_MODE_STATUS_TAG_FIX,
+        )?;
+        self.delay.delay_us(40);
+        let rdma = self.read(RDMAC_MODE)? & RDMAC_MODE_H2BNC_VLAN_DET;
+        self.flush(
+            RDMAC_MODE,
+            rdma | RDMAC_MODE_ENABLE
+                | RDMAC_MODE_TGTABORT_ENAB
+                | RDMAC_MODE_MSTABORT_ENAB
+                | RDMAC_MODE_PARITYERR_ENAB
+                | RDMAC_MODE_ADDROFLOW_ENAB
+                | RDMAC_MODE_FIFOOFLOW_ENAB
+                | RDMAC_MODE_FIFOURUN_ENAB
+                | RDMAC_MODE_FIFOOREAD_ENAB
+                | RDMAC_MODE_LNGREAD_ENAB
+                | RDMAC_MODE_FIFO_LONG_BURST
+                | RDMAC_MODE_IPV6_LSO_EN,
+        )?;
+        self.delay.delay_us(40);
+        // Observe the actual residual channel lengths before applying 5720's
+        // documented workaround; no synthetic normal-channel assumption.
+        for index in 0..TG3_NUM_RDMA_CHANNELS {
+            if self.read(TG3_RDMA_LENGTH + index * 4)? > 9000 {
+                let value = self.read(TG3_LSO_RD_DMA_CRPTEN_CTRL)?;
+                self.write(
+                    TG3_LSO_RD_DMA_CRPTEN_CTRL,
+                    value | TG3_LSO_RD_DMA_TX_LENGTH_WA_5720,
+                )?;
+                break;
+            }
+        }
+        for (at, value) in [
+            (RCVDCC_MODE, RCVDCC_MODE_ENABLE | RCVDCC_MODE_ATTN_ENABLE),
+            (SNDDATAC_MODE, SNDDATAC_MODE_ENABLE),
+            (SNDBDC_MODE, SNDBDC_MODE_ENABLE | SNDBDC_MODE_ATTN_ENABLE),
+            (RCVBDI_MODE, RCVBDI_MODE_ENABLE | RCVBDI_MODE_RCB_ATTN_ENAB),
+            (
+                RCVDBDI_MODE,
+                RCVDBDI_MODE_ENABLE | RCVDBDI_MODE_INV_RING_SZ | RCVDBDI_MODE_LRG_RING_SZ,
+            ),
+            (SNDDATAI_MODE, SNDDATAI_MODE_ENABLE),
+            (SNDBDI_MODE, SNDBDI_MODE_ENABLE | SNDBDI_MODE_ATTN_ENABLE),
+            (SNDBDS_MODE, SNDBDS_MODE_ENABLE | SNDBDS_MODE_ATTN_ENABLE),
+        ] {
+            self.flush(at, value)?;
+        }
+        let tx_mode = self.read(MAC_TX_MODE)? & (TX_MODE_JMB_FRM_LEN | TX_MODE_CNT_DN_MODE);
+        self.flush(
+            MAC_TX_MODE,
+            tx_mode | TX_MODE_ENABLE | TX_MODE_MBUF_LOCKUP_FIX,
+        )?;
+        self.delay.delay_us(100);
+        self.flush(
+            MAC_RX_MODE,
+            RX_MODE_ENABLE | RX_MODE_IPV6_CSUM_ENABLE | RX_MODE_KEEP_VLAN_TAG,
+        )?;
+        self.delay.delay_us(10);
+        self.write(MAC_LED_CTRL, board.led)?;
+        self.write(MAC_MI_STAT, MAC_MI_STAT_LNKSTAT_ATTN_ENAB)?;
+        self.flush(MAC_LOW_WMARK_MAX_RX_FRAME, 2)?;
+        // No multicast/VLAN/checksum offload is relied upon by the software.
+        // Accept broadcast, own unicast and multicast as a raw Ethernet link.
+        for at in [
+            MAC_HASH_REG_0,
+            MAC_HASH_REG_1,
+            MAC_HASH_REG_2,
+            MAC_HASH_REG_3,
+        ] {
+            self.write(at, u32::MAX)?;
+        }
+        self.write(MAC_RCV_RULE_0, 0xc200_0000 & RCV_RULE_DISABLE_MASK)?;
+        self.write(MAC_RCV_VALUE_0, u32::MAX & RCV_RULE_DISABLE_MASK)?;
+        self.write(MAC_RCV_RULE_1, 0x8600_0004 & RCV_RULE_DISABLE_MASK)?;
+        self.write(MAC_RCV_VALUE_1, u32::MAX & RCV_RULE_DISABLE_MASK)?;
+        for index in 4..8 {
+            self.write(MAC_RCV_RULE_0 + index * 8, 0)?;
+            self.write(MAC_RCV_VALUE_0 + index * 8, 0)?;
+        }
+        self.initialize_phy(board)?;
+        self.stopped = false;
+        Ok(())
+    }
+    pub(in crate::net::tg3) fn packet_carrier(&mut self) -> Result<bool, Error> {
+        self.copper_carrier()
+            .map(|speed: Option<Speed>| speed.is_some())
+    }
+    pub(in crate::net::tg3) fn request_status(&mut self) -> Result<(), Error> {
+        self.flush(
+            HOSTCC_MODE,
+            HOSTCC_MODE_ENABLE
+                | HOSTCC_MODE_32BYTE
+                | HOSTCC_MODE_ATTN
+                | HOSTCC_MODE_NOW
+                | HOSTCC_MODE_NOINT_ON_NOW,
+        )
+    }
+    pub(in crate::net::tg3) fn tx_producer(&mut self, index: usize) -> Result<(), Error> {
+        self.flush(MAILBOX_SNDHOST_PROD_IDX_0 + 4, index as u32)
+    }
+    pub(in crate::net::tg3) fn rx_producer(&mut self, index: usize) -> Result<(), Error> {
+        self.flush(TG3_RX_STD_PROD_IDX_REG, index as u32)
+    }
+    pub(in crate::net::tg3) fn rx_consumer(&mut self, index: usize) -> Result<(), Error> {
+        self.flush(MAILBOX_RCVRET_CON_IDX_0 + 4, index as u32)
+    }
+    pub(in crate::net::tg3) fn packet_stop(&mut self) -> Result<(), Error> {
+        // A poisoned submission epoch cannot use normal helpers, but genuine
+        // stop accesses remain legal for containment. Failure never retires.
+        // Re-observe every engine even after a partially failed core reset;
+        // an old stopped bit cannot certify bootcode's subsequent effects.
+        self.stop_engines_inner()?;
+        self.stopped = true;
+        let command = Self::checked(self.regs().config_read32(4)?)? as u16;
+        self.regs().config_write16(4, command & !4)?;
+        if self.regs().config_read32(4)? & 4 != 0 {
+            return Err(Error::ConfigDidNotLatch);
+        }
+        if self.failure.is_some() || self.cleanup_failure.is_some() {
+            // Stop/BME containment cannot retroactively acknowledge an
+            // uncertain reset/firmware/APE ownership operation.
+            return Err(Error::Poisoned);
+        }
+        Ok(())
+    }
+}
