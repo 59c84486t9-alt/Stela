@@ -369,7 +369,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         self.write_checked(CONTROL, 1)?;
         self.soft_reset()?;
         self.write_checked(P::CLOCK, 3)?;
-        self.write_checked(ATU_CONTROL, 0)?;
+        self.write_checked(PAGE_BASE, 0)?;
         self.registers.set_bus_master(false)?;
         // Admit the actual completion service while the reset-acknowledged
         // engine is quiet, before exposing even the first capture mapping.
@@ -421,8 +421,15 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         // Source allocates 32K but permits a smaller runtime ring. Own the
         // complete rounded page range without mapping a partial final page.
         let allocation_bytes = bytes.next_multiple_of(PAGE_BYTES);
-        self.write_checked(ATU_CONTROL, 0)?;
-        self.registers.set_bus_master(false)?;
+        if self.capture.is_some() {
+            // PTE cache invalidation has no source completion handshake.
+            // Reset the actual function before replacing any published lease,
+            // then reestablish generation-specific clocks/IRQs and exclusion.
+            self.initialize_inner()?;
+        } else {
+            self.write_checked(PAGE_BASE, 0)?;
+            self.registers.set_bus_master(false)?;
+        }
         self.release_capture()?;
         let geometry = source.page_geometry().map_err(Error::Memory)?;
         if geometry.base_shift() != 12 {
@@ -485,7 +492,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         let allocation_bytes = capture.dma.bytes();
         let period_bytes = capture.period_bytes;
         let bytes = period_bytes * 4;
-        self.write_checked(PAGE_BASE, P::SRAM_TABLE | PTE_VALID)?;
+        self.write_checked(PAGE_BASE, P::SRAM_TABLE | GROUP_ENABLE)?;
         self.write_checked(PAGE_SIZE, 2)?;
         for page in 0..allocation_bytes / PAGE_BYTES {
             let address = base + (page * PAGE_BYTES) as u64;
@@ -500,7 +507,10 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         self.write_checked(RING_SIZE, bytes as u32)?;
         self.write_checked(WATERMARK, period_bytes as u32)?;
         fence(Ordering::Release);
-        self.write_checked(ATU_CONTROL, 1)?;
+        // Source: flush ATU cache after PTE update. There is no documented
+        // sticky readback or ACK latency. This request neither disables DMA nor
+        // proves host IOTLB invalidation/payload completion or releases a pin.
+        self.registers.write32(ATU_CONTROL, ATU_CACHE_INVALIDATE);
         Ok(())
     }
     fn ring_authority(&mut self) -> Result<(), Error> {
@@ -512,9 +522,8 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
             capture.period_bytes,
         );
         for (offset, expected) in [
-            (PAGE_BASE, P::SRAM_TABLE | PTE_VALID),
+            (PAGE_BASE, P::SRAM_TABLE | GROUP_ENABLE),
             (PAGE_SIZE, 2),
-            (ATU_CONTROL, 1),
             (RING_ADDRESS, PDM_WINDOW),
             (RING_SIZE, (period * 4) as u32),
             (WATERMARK, period as u32),
@@ -728,7 +737,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
     /// the latest ring after wraps. A running cyclic producer never grants the
     /// canonical DMA domain's required CPU ownership; copying while running
     /// refuses before touching the destination. No CPU/physical/IOVA alias is
-    /// inferred. Renoir additionally completes the actual retained domain's
+    /// inferred. Every admitted profile completes the actual retained domain's
     /// translated payload write drain before CPU cache synchronization. On a
     /// mapping error the destination may be partly modified.
     pub fn copy_stopped_ring(
@@ -825,7 +834,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         self.stop_inner()?;
         self.disable_interrupts()?;
         self.soft_reset()?;
-        self.write_checked(ATU_CONTROL, 0)?;
+        self.write_checked(PAGE_BASE, 0)?;
         self.registers.set_bus_master(false)?;
         self.drain_stopped_domain()?;
         self.write_checked(P::CLOCK, 0)?;
@@ -913,7 +922,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         self.stop_inner()?;
         self.disable_interrupts()?;
         self.soft_reset()?;
-        self.write_checked(ATU_CONTROL, 0)?;
+        self.write_checked(PAGE_BASE, 0)?;
         self.registers.set_bus_master(false)?;
         self.release_capture()?;
         self.write_checked(P::CLOCK, 0)?;
@@ -939,9 +948,10 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
             self.drain_stopped_domain()?;
         }
         if let Some(capture) = self.capture.as_mut() {
-            // SAFETY: callers first prove actual whole-function reset, or
-            // stopped DMA plus disabled ATU and PCI bus mastering. No IRQ/work
-            // submissions exist. Failure retains this exact lease for retry.
+            // SAFETY: callers first acknowledge actual whole-function reset,
+            // disabled address group1 and PCI BME, then same-domain payload
+            // completion. No IRQ/work submissions exist. Cache-command readback
+            // supplies none of this proof. Failure retains this exact lease.
             unsafe { capture.dma.unmap() }.map_err(Error::Dma)?;
         }
         self.capture = None;

@@ -30,7 +30,7 @@ impl Profile for YellowCarp {
     const IRQ_STATUS: usize = IRQ_STATUS;
     const SRAM_TABLE: u32 = SRAM_TABLE;
     const ERROR_ENABLE: u32 = 0;
-    const REQUIRE_DRAIN: bool = false;
+    const REQUIRE_DRAIN: bool = true;
     const PERIOD_DELIVERY: bool = false;
     fn supported(identity: Identity) -> bool {
         identity.supported()
@@ -99,6 +99,8 @@ impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, YellowCarp> {
     /// `domain` is the actual isolated domain attached to this PCI requester.
     /// Registers and DMA RAM stay mapped while retained, including after errors
     /// or drop; release ownership only after acknowledged shutdown/reset.
+    /// `domain` must provide actual posted-payload completion after engine stop;
+    /// missing completion refuses before any capture mapping is published.
     /// Native PCI interrupt delivery must be contained (the supplied adapter
     /// requires INTx disabled and MSI/MSI-X disabled). This backend polls W1C
     /// status rather than registering an interrupt handler.
@@ -230,6 +232,10 @@ mod tests {
         cursor: usize,
         frames: u64,
         translation: Option<Translation>,
+        atu_readback: u32,
+        atu_reads: usize,
+        resets: usize,
+        published_reset: Option<usize>,
         maps: usize,
         unmaps: usize,
         cpu_syncs: usize,
@@ -241,6 +247,11 @@ mod tests {
         power_never: bool,
         unmap_fail: bool,
         sync_fail: bool,
+        drain_fail: bool,
+        drain_unavailable: bool,
+        drains: usize,
+        defer_payload: bool,
+        posted: Vec<(usize, i32)>,
         lost_read: Option<usize>,
         fail_after_write: Option<usize>,
         ignore_write: Option<usize>,
@@ -269,6 +280,10 @@ mod tests {
                 cursor: 0,
                 frames: 0,
                 translation: None,
+                atu_readback: 0,
+                atu_reads: 0,
+                resets: 0,
+                published_reset: None,
                 maps: 0,
                 unmaps: 0,
                 cpu_syncs: 0,
@@ -280,6 +295,11 @@ mod tests {
                 power_never: false,
                 unmap_fail: false,
                 sync_fail: false,
+                drain_fail: false,
+                drain_unavailable: false,
+                drains: 0,
+                defer_payload: false,
+                posted: Vec::new(),
                 lost_read: None,
                 fail_after_write: None,
                 ignore_write: None,
@@ -292,6 +312,10 @@ mod tests {
             }
         }
         fn read(&mut self, offset: usize) -> u32 {
+            if offset == 0xc40 {
+                self.atu_reads += 1;
+                return self.atu_readback;
+            }
             let value = if self.lost_read == Some(offset) {
                 self.lost_read = None;
                 u32::MAX
@@ -336,12 +360,26 @@ mod tests {
                         0
                     };
                     if value == 0 && !self.reset_never {
-                        for register in [0x2c04, 0x2c08, 0xc40, 0x1a04] {
+                        self.resets += 1;
+                        for register in [0x2c04, 0x2c08, 0x1a04] {
                             self.words[register / 4] = 0;
                         }
                         self.cursor = 0;
                         self.count = 0;
                     }
+                }
+                0xc40 => {
+                    assert_eq!(
+                        value, 1,
+                        "cache command zero is not a DMA-disable operation"
+                    );
+                    // A self-clearing model is an adversarial allowed response,
+                    // not a claim that physical hardware guarantees self-clear.
+                    self.words[offset / 4] = 0;
+                }
+                0x10004 if value & 0x8000_0000 != 0 => {
+                    self.published_reset = Some(self.resets);
+                    self.words[offset / 4] = value;
                 }
                 0x1a0c => self.words[offset / 4] &= !value, // Real W1C semantics.
                 0x2c08 => {
@@ -387,7 +425,6 @@ mod tests {
             assert!(self.device_owns);
             assert_eq!(self.words[0xc00 / 4], 2);
             assert_eq!(self.words[0xc04 / 4], 0x8380_0000);
-            assert_eq!(self.words[0xc40 / 4], 1);
             assert_eq!(self.words[0x2c0c / 4], 0x0400_0000);
             let ring = self.words[0x2c10 / 4] as usize;
             let period = self.words[0x2c20 / 4] as usize;
@@ -410,14 +447,18 @@ mod tests {
                     );
                     let pointer = translation.cpu.address(mapped, 4).unwrap();
                     let sample = sample(self.frames, channel);
-                    // SAFETY: this synchronous model owns DMA while active;
-                    // actual retained CPU RAM is reached through its domain.
-                    unsafe { pointer.as_ptr().cast::<i32>().write_volatile(sample) };
+                    if self.defer_payload {
+                        self.posted.push((mapped, sample));
+                    } else {
+                        // SAFETY: this synchronous model owns DMA while active;
+                        // actual retained CPU RAM is reached through its domain.
+                        unsafe { pointer.as_ptr().cast::<i32>().write_volatile(sample) };
+                    }
                 }
                 self.frames += 1;
                 self.count = self.count.wrapping_add(8);
                 self.cursor = (self.cursor + 8) % ring;
-                if self.cursor.is_multiple_of(period) {
+                if self.cursor.is_multiple_of(period) && !self.defer_payload {
                     self.words[0x1a0c / 4] |= 1 << 16;
                 }
             }
@@ -467,6 +508,7 @@ mod tests {
             }
             let mut device = self.0.lock().unwrap();
             assert!(device.translation.is_none());
+            device.published_reset = None;
             device.maps += 1;
             let token = DomainMapping {
                 id: device.maps as u64,
@@ -488,8 +530,18 @@ mod tests {
             let mut device = self.0.lock().unwrap();
             assert_eq!(device.words[0x2c08 / 4], 0);
             assert!(!device.master);
-            assert_eq!(device.words[0xc40 / 4], 0);
+            assert_eq!(device.words[0xc04 / 4] & 0x8000_0000, 0);
+            if let Some(published) = device.published_reset {
+                assert!(
+                    device.resets > published,
+                    "published IOVA released without a fresh actual reset"
+                );
+            }
             assert_eq!(device.translation.as_ref().unwrap().token, token);
+            assert!(
+                device.posted.is_empty(),
+                "unmap before actual payload drain"
+            );
             if device.unmap_fail {
                 return Err(DmaError::InvalidationFailed);
             }
@@ -530,8 +582,33 @@ mod tests {
             if device.sync_fail {
                 return Err(DmaError::VisibilityFailed);
             }
+            assert!(
+                device.posted.is_empty(),
+                "CPU handoff before actual payload drain"
+            );
             device.cpu_syncs += 1;
             device.device_owns = false;
+            Ok(())
+        }
+        unsafe fn drain_posted_writes(&self) -> Result<(), DmaError> {
+            let mut device = self.0.lock().unwrap();
+            assert_eq!(device.words[0x2c08 / 4], 0);
+            assert_eq!(device.words[0x2c04 / 4], 0);
+            if device.drain_unavailable {
+                return Err(DmaError::DrainUnavailable);
+            }
+            if device.drain_fail {
+                return Err(DmaError::InvalidationFailed);
+            }
+            device.drains += 1;
+            let pending = core::mem::take(&mut device.posted);
+            for (offset, sample) in pending {
+                let translation = device.translation.as_ref().unwrap();
+                let pointer = translation.cpu.address(offset, 4).unwrap();
+                // SAFETY: this independent fabric completion finishes its
+                // queued writes into the exact retained domain mapping.
+                unsafe { pointer.as_ptr().cast::<i32>().write_volatile(sample) };
+            }
             Ok(())
         }
     }
@@ -1129,5 +1206,154 @@ mod tests {
         // No fake reset/unmap is supplied for this deliberately quarantined DMA.
         device.lock().unwrap().advance(64);
         assert_eq!(device.lock().unwrap().unmaps, 0);
+    }
+    // Source-only P1 regression models. Cache-command readback is deliberately
+    // unspecified; its self-clearing fixture behavior is not physical evidence.
+    #[test]
+    fn atu_cache_command_has_no_sticky_enable_or_completion_readback() {
+        for readback in [0, 1, 0x1234_5678, u32::MAX] {
+            let (mut controller, device, source) = fixture(0x60);
+            device.lock().unwrap().atu_readback = readback;
+            controller.initialize().unwrap();
+            controller
+                .prepare_capture(&source, CAPTURE_FORMAT, 4096)
+                .unwrap();
+            controller.start().unwrap();
+            device.lock().unwrap().advance(512);
+            assert!(controller.position().unwrap().period_pending);
+            controller.stop().unwrap();
+            let old = controller.capture.as_ref().unwrap().dma.address().unwrap();
+            let before = device.lock().unwrap().resets;
+            controller
+                .prepare_capture(&source, CAPTURE_FORMAT, 8192)
+                .unwrap();
+            assert!(
+                device.lock().unwrap().resets > before,
+                "replacement needs an actual reset, not a cache request"
+            );
+            assert_eq!(device.lock().unwrap().unmaps, 1);
+            assert_eq!(
+                controller.capture.as_ref().unwrap().dma.address().unwrap(),
+                old
+            );
+            controller.start().unwrap();
+            device.lock().unwrap().advance(1024);
+            controller.stop().unwrap();
+            controller.shutdown().unwrap();
+            let model = device.lock().unwrap();
+            assert_eq!(model.atu_reads, 0);
+            assert!(
+                model
+                    .writes
+                    .iter()
+                    .filter(|(offset, _)| *offset == 0xc40)
+                    .all(|(_, value)| *value == 1)
+            );
+            assert_eq!(model.unmaps, 2);
+            assert_eq!(source.drops.load(Ordering::Relaxed), 2);
+        }
+    }
+    #[test]
+    fn failed_real_group_disable_keeps_the_original_published_iova_and_pins() {
+        let (mut controller, device, source) = ready(0x60, 4096);
+        controller.start().unwrap();
+        device.lock().unwrap().advance(32);
+        let address = controller.capture.as_ref().unwrap().dma.address().unwrap();
+        device.lock().unwrap().ignore_write = Some(0xc04);
+        assert_eq!(controller.shutdown(), Err(Error::RegisterRejected(0xc04)));
+        assert_eq!(
+            controller.capture.as_ref().unwrap().dma.address().unwrap(),
+            address
+        );
+        assert_eq!(device.lock().unwrap().unmaps, 0);
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+        assert_eq!(device.lock().unwrap().atu_reads, 0);
+        device.lock().unwrap().ignore_write = None;
+        controller.shutdown().unwrap();
+        assert_eq!(source.drops.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn replacing_a_published_ring_cannot_retire_it_after_a_failed_actual_reset() {
+        let (mut controller, device, source) = ready(0x60, 4096);
+        controller.start().unwrap();
+        device.lock().unwrap().advance(32);
+        controller.stop().unwrap();
+        let address = controller.capture.as_ref().unwrap().dma.address().unwrap();
+        device.lock().unwrap().reset_never = true;
+        assert_eq!(
+            controller.prepare_capture(&source, CAPTURE_FORMAT, 8192),
+            Err(Error::Timeout(Phase::ResetClear))
+        );
+        assert_eq!(
+            controller.capture.as_ref().unwrap().dma.address().unwrap(),
+            address
+        );
+        assert_eq!(device.lock().unwrap().unmaps, 0);
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+        device.lock().unwrap().reset_never = false;
+        controller.shutdown().unwrap();
+        assert_eq!(source.drops.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn cache_invalidation_never_completes_posted_payload_or_releases_faulted_dma() {
+        let (mut controller, device, source) = ready(0x60, 4096);
+        controller.start().unwrap();
+        {
+            let mut model = device.lock().unwrap();
+            model.defer_payload = true;
+            model.advance(512);
+            let drains = model.drains;
+            model.write(0xc40, 1);
+            assert_eq!(model.posted.len(), 1024);
+            assert_eq!(model.drains, drains);
+            model.drain_fail = true;
+        }
+        assert_eq!(controller.position().unwrap().bytes, 4096);
+        let address = controller.capture.as_ref().unwrap().dma.address().unwrap();
+        assert_eq!(
+            controller.shutdown(),
+            Err(Error::Dma(DmaError::InvalidationFailed))
+        );
+        assert_eq!(
+            controller.capture.as_ref().unwrap().dma.address().unwrap(),
+            address
+        );
+        assert_eq!(device.lock().unwrap().unmaps, 0);
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+        {
+            let mut model = device.lock().unwrap();
+            let drains = model.drains;
+            model.write(0xc40, 1);
+            assert_eq!(model.posted.len(), 1024);
+            assert_eq!(model.drains, drains);
+            model.drain_fail = false;
+            model.drain_unavailable = true;
+        }
+        assert_eq!(
+            controller.initialize(),
+            Err(Error::Dma(DmaError::DrainUnavailable))
+        );
+        assert_eq!(device.lock().unwrap().posted.len(), 1024);
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+        device.lock().unwrap().drain_unavailable = false;
+        controller.shutdown().unwrap();
+        assert!(device.lock().unwrap().posted.is_empty());
+        assert_eq!(source.drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn missing_actual_yellow_carp_payload_drain_refuses_before_first_mapping() {
+        let (mut controller, device, source) = fixture(0x60);
+        device.lock().unwrap().drain_unavailable = true;
+        assert_eq!(
+            controller.initialize(),
+            Err(Error::Dma(DmaError::DrainUnavailable))
+        );
+        assert_eq!(device.lock().unwrap().maps, 0);
+        assert_eq!(device.lock().unwrap().unmaps, 0);
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+        device.lock().unwrap().drain_unavailable = false;
+        controller.initialize().unwrap();
+        controller.shutdown().unwrap();
     }
 }

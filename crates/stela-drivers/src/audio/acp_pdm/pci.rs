@@ -134,6 +134,7 @@ impl<P: Profile> NativeRegisters<P> {
             || self.master != Some(false)
             || self.read32(DMA_ENABLE) != 0
             || self.read32(PDM_ENABLE) != 0
+            || self.read32(PAGE_BASE) & GROUP_ENABLE != 0
             || self.read32(CONTROL) != 0
         {
             return Err(self);

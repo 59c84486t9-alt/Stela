@@ -189,6 +189,15 @@ mod tests {
             Ok(_) => panic!("active PDM released"),
         };
         registers.write32(0x2c04, 0);
+        registers.write32(0xc04, 0x8205_0000);
+        let mut registers = match registers.into_stopped_resources() {
+            Err(retained) => retained,
+            Ok(_) => panic!("enabled address group released"),
+        };
+        registers.write32(0xc04, 0);
+        // This raw UC RAM fixture supplies unspecified command readback. It is
+        // deliberately not evidence for a cache ACK or a hardware value.
+        registers.write32(0xc40, u32::MAX);
         let (function, mapping) = match registers.into_stopped_resources() {
             Ok(owners) => owners,
             Err(_) => panic!("stopped owners lost"),

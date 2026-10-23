@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Register facts common to the pinned Renoir/Yellow Carp direct PDM blocks.
-//! Copyright (C) 2020, 2021 Advanced Micro Devices, Inc.
+//! Copyright (C) 2020, 2021, 2023 Advanced Micro Devices, Inc.
 use super::{Error, Identity};
 // BAR-relative offsets. The source's 0x1240000 is a register namespace base,
 // not the PCI BAR or the host DMA address.
 pub(in crate::audio) const PAGE_SIZE: usize = 0x0c00;
 pub(in crate::audio) const PAGE_BASE: usize = 0x0c04;
+// Source SOF calls bit0 ACP_ATU_CACHE_INVALID: a command, not an enable latch.
 pub(in crate::audio) const ATU_CONTROL: usize = 0x0c40;
+pub(in crate::audio) const ATU_CACHE_INVALIDATE: u32 = 1;
+pub(in crate::audio) const GROUP_ENABLE: u32 = 1 << 31;
 pub(in crate::audio) const RESET: usize = 0x1000;
 pub(in crate::audio) const CONTROL: usize = 0x1004;
 pub(in crate::audio) const PDM_ENABLE: usize = 0x2c04;

@@ -256,6 +256,10 @@ mod tests {
         cursor: usize,
         frames: u64,
         translation: Option<Translation>,
+        atu_readback: u32,
+        atu_reads: usize,
+        resets: usize,
+        published_reset: Option<usize>,
         maps: usize,
         unmaps: usize,
         cpu_syncs: usize,
@@ -304,6 +308,10 @@ mod tests {
                 cursor: 0,
                 frames: 0,
                 translation: None,
+                atu_readback: 0,
+                atu_reads: 0,
+                resets: 0,
+                published_reset: None,
                 maps: 0,
                 unmaps: 0,
                 cpu_syncs: 0,
@@ -345,6 +353,10 @@ mod tests {
                 ),
                 "ACP6x-only read {offset:x}"
             );
+            if offset == 0xc40 {
+                self.atu_reads += 1;
+                return self.atu_readback;
+            }
             let value = if self.lost_read == Some(offset) {
                 self.lost_read = None;
                 u32::MAX
@@ -404,12 +416,26 @@ mod tests {
                         0
                     };
                     if value == 0 && !self.reset_never {
-                        for register in [0x2c04, 0x2c08, 0xc40] {
+                        self.resets += 1;
+                        for register in [0x2c04, 0x2c08] {
                             self.words[register / 4] = 0;
                         }
                         self.cursor = 0;
                         self.count = 0;
                     }
+                }
+                0xc40 => {
+                    assert_eq!(
+                        value, 1,
+                        "cache command zero is not a DMA-disable operation"
+                    );
+                    // A self-clearing model is an adversarial allowed response,
+                    // not a claim that physical hardware guarantees self-clear.
+                    self.words[offset / 4] = 0;
+                }
+                0x10004 if value & 0x8000_0000 != 0 => {
+                    self.published_reset = Some(self.resets);
+                    self.words[offset / 4] = value;
                 }
                 0x1808 => self.words[offset / 4] &= !value, // Real W1C semantics.
                 0x2c08 => {
@@ -458,7 +484,6 @@ mod tests {
             assert!(self.device_owns);
             assert_eq!(self.words[0xc00 / 4], 2);
             assert_eq!(self.words[0xc04 / 4], 0x8205_0000);
-            assert_eq!(self.words[0xc40 / 4], 1);
             assert_eq!(self.words[0x2c0c / 4], 0x0400_0000);
             let ring = self.words[0x2c10 / 4] as usize;
             let period = self.words[0x2c20 / 4] as usize;
@@ -548,6 +573,7 @@ mod tests {
             }
             let mut device = self.0.lock().unwrap();
             assert!(device.translation.is_none());
+            device.published_reset = None;
             device.maps += 1;
             let token = DomainMapping {
                 id: device.maps as u64,
@@ -569,7 +595,13 @@ mod tests {
             let mut device = self.0.lock().unwrap();
             assert_eq!(device.words[0x2c08 / 4], 0);
             assert!(!device.master);
-            assert_eq!(device.words[0xc40 / 4], 0);
+            assert_eq!(device.words[0xc04 / 4] & 0x8000_0000, 0);
+            if let Some(published) = device.published_reset {
+                assert!(
+                    device.resets > published,
+                    "published IOVA released without a fresh actual reset"
+                );
+            }
             assert_eq!(device.translation.as_ref().unwrap().token, token);
             assert!(
                 device.posted.is_empty(),
@@ -1027,7 +1059,7 @@ mod tests {
             controller.suspend_held_d0(power_gate).unwrap();
             assert_eq!(controller.state(), State::Suspended);
             let model = device.lock().unwrap();
-            for offset in [0x2c04, 0x2c08, 0xc40, 0x1800, 0x1424, 0x1004] {
+            for offset in [0x2c04, 0x2c08, 0xc04, 0x1800, 0x1424, 0x1004] {
                 assert_eq!(model.words[offset / 4], 0);
             }
             assert!(!model.master);
@@ -1976,5 +2008,138 @@ mod tests {
         // No fake reset/unmap is supplied for this deliberately quarantined DMA.
         device.lock().unwrap().advance(64);
         assert_eq!(device.lock().unwrap().unmaps, 0);
+    }
+    // Source-only P1 regression models. Cache-command readback is deliberately
+    // unspecified; its self-clearing fixture behavior is not physical evidence.
+    #[test]
+    fn atu_cache_command_has_no_sticky_enable_or_completion_readback() {
+        for readback in [0, 1, 0x1234_5678, u32::MAX] {
+            let (mut controller, device, source) = fixture(1);
+            device.lock().unwrap().atu_readback = readback;
+            controller.initialize().unwrap();
+            controller
+                .prepare_capture(&source, CAPTURE_FORMAT, 4096)
+                .unwrap();
+            controller.start().unwrap();
+            device.lock().unwrap().advance(512);
+            assert!(controller.position().unwrap().period_pending);
+            controller.stop().unwrap();
+            let old = controller.capture.as_ref().unwrap().dma.address().unwrap();
+            let before = device.lock().unwrap().resets;
+            controller
+                .prepare_capture(&source, CAPTURE_FORMAT, 8192)
+                .unwrap();
+            assert!(
+                device.lock().unwrap().resets > before,
+                "replacement needs an actual reset, not a cache request"
+            );
+            assert_eq!(device.lock().unwrap().unmaps, 1);
+            assert_eq!(
+                controller.capture.as_ref().unwrap().dma.address().unwrap(),
+                old
+            );
+            controller.start().unwrap();
+            device.lock().unwrap().advance(1024);
+            controller.stop().unwrap();
+            controller.shutdown().unwrap();
+            let model = device.lock().unwrap();
+            assert_eq!(model.atu_reads, 0);
+            assert!(
+                model
+                    .writes
+                    .iter()
+                    .filter(|(offset, _)| *offset == 0xc40)
+                    .all(|(_, value)| *value == 1)
+            );
+            assert_eq!(model.unmaps, 2);
+            assert_eq!(source.drops.load(Ordering::Relaxed), 2);
+        }
+    }
+    #[test]
+    fn failed_real_group_disable_keeps_the_original_published_iova_and_pins() {
+        let (mut controller, device, source) = ready(1, 4096);
+        controller.start().unwrap();
+        device.lock().unwrap().advance(32);
+        let address = controller.capture.as_ref().unwrap().dma.address().unwrap();
+        device.lock().unwrap().ignore_write = Some(0xc04);
+        assert_eq!(controller.shutdown(), Err(Error::RegisterRejected(0xc04)));
+        assert_eq!(
+            controller.capture.as_ref().unwrap().dma.address().unwrap(),
+            address
+        );
+        assert_eq!(device.lock().unwrap().unmaps, 0);
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+        assert_eq!(device.lock().unwrap().atu_reads, 0);
+        device.lock().unwrap().ignore_write = None;
+        controller.shutdown().unwrap();
+        assert_eq!(source.drops.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn replacing_a_published_ring_cannot_retire_it_after_a_failed_actual_reset() {
+        let (mut controller, device, source) = ready(1, 4096);
+        controller.start().unwrap();
+        device.lock().unwrap().advance(32);
+        controller.stop().unwrap();
+        let address = controller.capture.as_ref().unwrap().dma.address().unwrap();
+        device.lock().unwrap().reset_never = true;
+        assert_eq!(
+            controller.prepare_capture(&source, CAPTURE_FORMAT, 8192),
+            Err(Error::Timeout(Phase::ResetClear))
+        );
+        assert_eq!(
+            controller.capture.as_ref().unwrap().dma.address().unwrap(),
+            address
+        );
+        assert_eq!(device.lock().unwrap().unmaps, 0);
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+        device.lock().unwrap().reset_never = false;
+        controller.shutdown().unwrap();
+        assert_eq!(source.drops.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn cache_invalidation_never_completes_posted_payload_or_releases_faulted_dma() {
+        let (mut controller, device, source) = ready(1, 4096);
+        controller.start().unwrap();
+        {
+            let mut model = device.lock().unwrap();
+            model.defer_payload = true;
+            model.advance(512);
+            let drains = model.drains;
+            model.write(0xc40, 1);
+            assert_eq!(model.posted.len(), 1024);
+            assert_eq!(model.drains, drains);
+            model.drain_fail = true;
+        }
+        assert_eq!(controller.position().unwrap().bytes, 4096);
+        let address = controller.capture.as_ref().unwrap().dma.address().unwrap();
+        assert_eq!(
+            controller.shutdown(),
+            Err(Error::Dma(DmaError::InvalidationFailed))
+        );
+        assert_eq!(
+            controller.capture.as_ref().unwrap().dma.address().unwrap(),
+            address
+        );
+        assert_eq!(device.lock().unwrap().unmaps, 0);
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+        {
+            let mut model = device.lock().unwrap();
+            let drains = model.drains;
+            model.write(0xc40, 1);
+            assert_eq!(model.posted.len(), 1024);
+            assert_eq!(model.drains, drains);
+            model.drain_fail = false;
+            model.drain_unavailable = true;
+        }
+        assert_eq!(
+            controller.initialize(),
+            Err(Error::Dma(DmaError::DrainUnavailable))
+        );
+        assert_eq!(device.lock().unwrap().posted.len(), 1024);
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+        device.lock().unwrap().drain_unavailable = false;
+        controller.shutdown().unwrap();
+        assert!(device.lock().unwrap().posted.is_empty());
+        assert_eq!(source.drops.load(Ordering::Relaxed), 1);
     }
 }
