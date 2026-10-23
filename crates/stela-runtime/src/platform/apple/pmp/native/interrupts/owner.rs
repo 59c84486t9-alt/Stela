@@ -218,18 +218,18 @@ impl Signals<'_> {
         enable: bool,
         access: &mut Access<'_>,
     ) -> Result<bool, Error> {
-        if let Some(done) = &self.core.nested_done {
-            if (self.generation, step) <= (done.generation, done.step) {
-                return if (self.generation, step, source, enable)
-                    == (done.generation, done.step, done.source, done.enable)
-                {
-                    Ok(done.previous)
-                } else {
-                    Err(Error::Refused(
-                        "native callback signal cursor is stale or changed",
-                    ))
-                };
-            }
+        if let Some(done) = &self.core.nested_done
+            && (self.generation, step) <= (done.generation, done.step)
+        {
+            return if (self.generation, step, source, enable)
+                == (done.generation, done.step, done.source, done.enable)
+            {
+                Ok(done.previous)
+            } else {
+                Err(Error::Refused(
+                    "native callback signal cursor is stale or changed",
+                ))
+            };
         }
         if let Some(work) = &self.core.nested {
             if (

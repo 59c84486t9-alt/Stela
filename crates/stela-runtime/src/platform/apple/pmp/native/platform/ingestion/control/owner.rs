@@ -9,7 +9,7 @@ use super::{
 };
 use crate::platform::apple::bus::Access;
 use crate::platform::apple::ptd::transport::notifications::LocalNotifications;
-use alloc::{collections::VecDeque, rc::Rc, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, rc::Rc, vec::Vec};
 use core::cell::Cell;
 
 /// Retained identity of the actual101cff0 context allocation. Cloning carries
@@ -41,7 +41,7 @@ impl AuxiliaryBinding {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Signature {
-    Tail(Call, u32),
+    Tail(Box<Call>, u32),
     Transition {
         slot: usize,
         mode: u32,
@@ -245,12 +245,11 @@ impl Owner {
             Ok(false) => {}
         }
         if self.pending.is_none() {
-            if let Some((last, step)) = &self.last_transition {
-                if (request.serial(), request.operation(), source_step)
+            if let Some((last, step)) = &self.last_transition
+                && (request.serial(), request.operation(), source_step)
                     <= (last.serial(), last.operation(), *step)
-                {
-                    return Completion::Refused("auxiliary configuration source cursor is stale");
-                }
+            {
+                return Completion::Refused("auxiliary configuration source cursor is stale");
             }
             if let Err(error) = self.begin(
                 caller,
@@ -299,18 +298,17 @@ impl Owner {
                 .map_err(Error::Contract)?;
             let capture = frames.capture_identity(captured).map_err(Error::Contract)?;
             let caller = Caller::Tail(request.clone());
-            let signature = Signature::Tail(call.clone(), *activation);
+            let signature = Signature::Tail(Box::new(call.clone()), *activation);
             if self.resume(&caller, &signature, resources)? {
                 return Ok(true);
             }
-            if let Some(last) = &self.last_tail {
-                if !Rc::ptr_eq(&last.owner, &request.owner)
-                    || (request.serial, request.cursor) <= (last.serial, last.cursor)
-                {
-                    return Err(Error::Contract(
-                        "auxiliary ingestion caller is foreign or stale",
-                    ));
-                }
+            if let Some(last) = &self.last_tail
+                && (!Rc::ptr_eq(&last.owner, &request.owner)
+                    || (request.serial, request.cursor) <= (last.serial, last.cursor))
+            {
+                return Err(Error::Contract(
+                    "auxiliary ingestion caller is foreign or stale",
+                ));
             }
             // This is a read-only view, never another bulk copy or consume.
             let retained = frames
@@ -352,6 +350,9 @@ impl Owner {
     /// step distinguishes the activation path's reset/restore invocations;
     /// it is an operation cursor, never a native address or completion flag.
     /// Modes0/1/2 change only the actual source software/controller effects.
+    // Keep source operands separate from the retained caller cursor and actual
+    // resource/access owners so this boundary mirrors one source invocation.
+    #[allow(clippy::too_many_arguments)]
     pub fn transition(
         &mut self,
         request: &super::super::super::owner::Request,
@@ -377,14 +378,13 @@ impl Owner {
             if self.resume(&caller, &signature, resources)? {
                 return Ok(true);
             }
-            if let Some((last, step)) = &self.last_transition {
-                if (request.serial(), request.operation(), source_step)
+            if let Some((last, step)) = &self.last_transition
+                && (request.serial(), request.operation(), source_step)
                     <= (last.serial(), last.operation(), *step)
-                {
-                    return Err(Error::Contract(
-                        "auxiliary lifecycle transition is stale or already retired",
-                    ));
-                }
+            {
+                return Err(Error::Contract(
+                    "auxiliary lifecycle transition is stale or already retired",
+                ));
             }
             self.begin(
                 caller,
@@ -429,15 +429,15 @@ impl Owner {
                     "auxiliary retained source operation cannot be replaced",
                 ));
             }
-        } else if let Some(done) = &self.completed {
-            if done.caller.same(caller) {
-                if &done.signature != signature {
-                    return Err(Error::Contract(
-                        "auxiliary retired operation changed its operands",
-                    ));
-                }
-                return Ok(true);
+        } else if let Some(done) = &self.completed
+            && done.caller.same(caller)
+        {
+            if &done.signature != signature {
+                return Err(Error::Contract(
+                    "auxiliary retired operation changed its operands",
+                ));
             }
+            return Ok(true);
         }
         Ok(false)
     }
