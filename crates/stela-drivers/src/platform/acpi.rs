@@ -5,7 +5,7 @@
 //! See [`Services`] and `acpi/README.md` before installing a provider.
 use alloc::{boxed::Box, ffi::CString, string::String, vec::Vec};
 use core::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ffi::{CStr, c_char, c_void},
     marker::PhantomData,
     ptr,
@@ -160,6 +160,8 @@ unsafe extern "C" {
     fn acpi_get_name(handle: *mut c_void, kind: u32, buffer: *mut RawBuffer) -> Status;
     fn acpi_get_handle(parent: *mut c_void, path: *const c_char, out: *mut *mut c_void) -> Status;
     fn acpi_os_free(pointer: *mut c_void);
+    fn acpi_acquire_global_lock(timeout_ms: u16, token: *mut u32) -> Status;
+    fn acpi_release_global_lock(token: u32) -> Status;
     fn acpi_install_notify_handler(
         handle: *mut c_void,
         kind: u32,
@@ -204,6 +206,7 @@ pub enum Mode {
 /// Handles borrow it, and cannot survive termination.
 pub struct Session {
     active: bool,
+    ec_global_locks: Cell<usize>,
     notifications: RefCell<Vec<*mut NotifyContext>>,
     _local: PhantomData<*mut ()>,
 }
@@ -247,6 +250,7 @@ impl Session {
         }
         Ok(Self {
             active: true,
+            ec_global_locks: Cell::new(0),
             notifications: RefCell::new(Vec::new()),
             _local: PhantomData,
         })
@@ -261,6 +265,15 @@ impl Session {
         checked(unsafe { stela_acpi_enable_hardware() })?;
         guard.check()
     }
+    /// Real ACPICA/FACS arbitration for an EC whose observed `_GLK` requires it.
+    /// The EC retains this owner and its namespace lease through byte access.
+    pub fn ec_global_lock(&self) -> EcGlobalLock<'_> {
+        EcGlobalLock {
+            session: self,
+            held: None,
+        }
+    }
+
     pub fn root(&self) -> Handle<'_> {
         Handle {
             session: self,
@@ -340,6 +353,11 @@ impl Session {
         if !self.active {
             return Ok(());
         }
+        if self.ec_global_locks.get() != 0 {
+            // An unreleased FACS/global mutex still references this core. Keep
+            // the reservation and complete native provider alive permanently.
+            return Err(SUPPORT);
+        }
         self.active = false;
         // SAFETY: this session owns the globally reserved instance.
         let result = checked(unsafe { stela_acpi_stop() });
@@ -389,6 +407,67 @@ impl Drop for NamespaceGuard<'_> {
         // SAFETY: this guard entered the namespace lease that it now leaves.
         unsafe {
             stela_acpi_guard_leave(self.raw);
+        }
+    }
+}
+
+/// An EC firmware lock, backed by ACPICA's actual global-lock API.
+/// Failed release retains its token/namespace lease; it never retries implicitly.
+pub struct EcGlobalLock<'a> {
+    session: &'a Session,
+    held: Option<(u32, NamespaceGuard<'a>)>,
+}
+
+impl super::ec::FirmwareLock for EcGlobalLock<'_> {
+    fn acquire(&mut self, timeout_us: u64) -> Result<(), super::ec::LockError> {
+        if self.held.is_some() {
+            return Err(super::ec::LockError);
+        }
+        // ACPICA uses milliseconds; 0xffff means forever and is not bounded.
+        let milliseconds = timeout_us.div_ceil(1_000);
+        if milliseconds == 0 || milliseconds >= u64::from(u16::MAX) {
+            return Err(super::ec::LockError);
+        }
+        let guard = self.session.guard().map_err(|_| super::ec::LockError)?;
+        let mut token = 0;
+        // SAFETY: the session and actual namespace read lease retain ACPICA;
+        // only the real API creates this FACS/global-mutex ownership token.
+        checked(unsafe { acpi_acquire_global_lock(milliseconds as u16, &mut token) })
+            .map_err(|_| super::ec::LockError)?;
+        self.held = Some((token, guard));
+        // Native service callbacks can nest; count the current ownership after
+        // the real acquisition instead of overwriting a pre-call snapshot.
+        let count = self
+            .session
+            .ec_global_locks
+            .get()
+            .checked_add(1)
+            .ok_or(super::ec::LockError)?;
+        self.session.ec_global_locks.set(count);
+        Ok(())
+    }
+
+    fn release(&mut self) -> Result<(), super::ec::LockError> {
+        let Some((token, _guard)) = self.held.as_ref() else {
+            return Err(super::ec::LockError);
+        };
+        // SAFETY: token belongs to this live session and is still acquired.
+        // Cleanup remains necessary even if namespace admission was invalidated.
+        checked(unsafe { acpi_release_global_lock(*token) }).map_err(|_| super::ec::LockError)?;
+        self.held = None;
+        self.session
+            .ec_global_locks
+            .set(self.session.ec_global_locks.get() - 1);
+        Ok(())
+    }
+}
+
+impl Drop for EcGlobalLock<'_> {
+    fn drop(&mut self) {
+        if let Some((_token, guard)) = self.held.take() {
+            // An uncertain/unreleased firmware lock cannot silently free its
+            // namespace owner. Ec reports and quarantines release failures.
+            core::mem::forget(guard);
         }
     }
 }
@@ -1260,6 +1339,18 @@ mod tests {
     #[test]
     fn actual_acpica_abi_namespace_dsm_regions_failures_notify_and_cleanup() {
         let _serial = TEST_SERIAL.lock().unwrap();
+        if std::env::var_os("STELA_ACPI_EC_LOCK_CHILD").is_some() {
+            use super::super::ec::FirmwareLock;
+            let (provider, counts) = fixture();
+            let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+            let mut lock = session.ec_global_lock();
+            lock.acquire(1_000).unwrap();
+            drop(lock); // an unreleased owner must never permit core destruction
+            assert_eq!(session.shutdown(), Err(SUPPORT));
+            assert!(!counts.destroyed.load(Ordering::SeqCst));
+            assert!(counts.allocations.load(Ordering::SeqCst) > 0);
+            return;
+        }
         if std::env::var_os("STELA_ACPI_QUARANTINE_CHILD").is_some() {
             unsafe extern "C" fn reject_quiescence(_: *mut c_void) -> Status {
                 SUPPORT.0
@@ -1362,6 +1453,18 @@ mod tests {
         assert_eq!(session.devices("PNP0CA0").unwrap().len(), 1);
         assert_eq!(session.devices("STLA0002").unwrap().len(), 1);
         assert!(session.devices("NONE0001").unwrap().is_empty());
+        {
+            use super::super::ec::FirmwareLock;
+            let mut lock = session.ec_global_lock();
+            assert!(lock.acquire(0).is_err());
+            assert!(lock.acquire(u64::from(u16::MAX) * 1_000).is_err());
+            lock.acquire(1_000).unwrap();
+            assert!(lock.acquire(1_000).is_err());
+            lock.release().unwrap();
+            assert!(lock.release().is_err());
+            lock.acquire(1_000).unwrap();
+            lock.release().unwrap();
+        }
         let ucsi = session.handle("\\_SB.UCSI").unwrap();
         assert_eq!(ucsi.path().unwrap(), "\\_SB_.UCSI");
         assert_eq!(
@@ -1508,6 +1611,13 @@ mod tests {
         assert!(
             status.success(),
             "failed quiescence must retain all callback-owned state"
+        );
+        let lock_child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "platform::acpi::tests::actual_acpica_abi_namespace_dsm_regions_failures_notify_and_cleanup"])
+            .env("STELA_ACPI_EC_LOCK_CHILD", "1").status().unwrap();
+        assert!(
+            lock_child.success(),
+            "unreleased EC firmware owner must quarantine ACPICA"
         );
         // Reopening proves successful cleanup releases the singleton reservation.
         let (provider, counts) = fixture();

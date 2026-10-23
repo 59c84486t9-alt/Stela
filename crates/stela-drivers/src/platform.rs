@@ -2,4 +2,5 @@
 
 #[cfg(feature = "native-acpi")]
 pub mod acpi;
+pub mod ec;
 pub mod work;
