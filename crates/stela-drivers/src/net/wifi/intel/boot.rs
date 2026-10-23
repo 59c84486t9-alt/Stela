@@ -37,10 +37,11 @@ use core::{
 mod ax200;
 mod hcmd;
 pub use ax200::{
-    Ax200BoardPolicy, Ax200BoardPolicyError, Ax200BoardPolicyPhase, Ax200Mcc, Ax200MccError,
-    Ax200MccPhase, Ax200ScanConfiguration, Ax200ScanConfigurationError,
-    Ax200ScanConfigurationPhase, Ax200Setup, Ax200SetupError, Ax200SetupOptions, Ax200SetupPhase,
-    BoardCommand, BoardCommandKind, SetupDecisions,
+    Ax200BoardPolicy, Ax200BoardPolicyError, Ax200BoardPolicyPhase, Ax200Country,
+    Ax200CountryError, Ax200CountryPhase, Ax200Mcc, Ax200MccError, Ax200MccPhase,
+    Ax200ScanConfiguration, Ax200ScanConfigurationError, Ax200ScanConfigurationPhase, Ax200Setup,
+    Ax200SetupError, Ax200SetupOptions, Ax200SetupPhase, BoardCommand, BoardCommandKind, CountryIo,
+    CountryIoError, SelectedCountry, SetupDecisions,
 };
 mod lari;
 pub use lari::{LariError, LariPhase, LariRadio};
@@ -5528,6 +5529,7 @@ mod tests {
     // Kept with the original boot peripheral model: these cases exercise the
     // same physical-owner/DMA epoch through post-LARI command retirement.
     mod ax200_board_tests;
+    mod ax200_country_tests;
     mod ax200_scan_tests;
     mod ax200_tests;
 }

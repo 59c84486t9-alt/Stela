@@ -15,6 +15,10 @@ mod board_policy;
 pub use board_policy::{
     Ax200BoardPolicy, Ax200BoardPolicyError, Ax200BoardPolicyPhase, BoardCommand, BoardCommandKind,
 };
+mod country;
+pub use country::{
+    Ax200Country, Ax200CountryError, Ax200CountryPhase, CountryIo, CountryIoError, SelectedCountry,
+};
 mod mcc;
 mod scan_configuration;
 pub use mcc::{Ax200Mcc, Ax200MccError, Ax200MccPhase};
