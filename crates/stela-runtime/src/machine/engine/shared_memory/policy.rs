@@ -644,6 +644,13 @@ pub(super) mod tests {
             let second_policy = Policy::new(first_policy.controls.clone(), Arc::clone(&ram));
             let mut first = ram.domain().thread(first_policy);
             let mut second = ram.domain().thread(second_policy);
+            let events = crate::system::events::EventDomain::new();
+            let first_endpoint = events.register(false, None).unwrap();
+            let second_endpoint = events.register(false, None).unwrap();
+            first.bind_events(&first_endpoint.producer()).unwrap();
+            second.bind_events(&second_endpoint.producer()).unwrap();
+            first.check_event_endpoint(&first_endpoint).unwrap();
+            second.check_event_endpoint(&second_endpoint).unwrap();
             unsafe { ram.publish_physical(DATA, &5u64.to_le_bytes()) }.unwrap();
             let mut load = ExclusiveData::default();
             assert_eq!(
