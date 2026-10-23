@@ -51,7 +51,7 @@ compile_store(unsigned sm)
       result = 1;
    } else {
       char target[16];
-      stela_nv_target_name(target, sm);
+      stela_nvidia_target_name(target, sm);
       record_compiled(target, bin->code_size);
       record_end();
       printf("SM%u: %u bytes, %u instructions\n", sm, bin->code_size,
@@ -69,15 +69,15 @@ compile_store(unsigned sm)
 int
 main(void)
 {
-   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++) {
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nvidia_sms); i++) {
       char target[16];
-      stela_nv_target_name(target, stela_nv_sms[i]);
+      stela_nvidia_target_name(target, stela_nvidia_sms[i]);
       record_expect(target, NULL);
    }
    glsl_type_singleton_init_or_ref();
    int result = 0;
-   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++)
-      result |= compile_store(stela_nv_sms[i]);
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nvidia_sms); i++)
+      result |= compile_store(stela_nvidia_sms[i]);
    glsl_type_singleton_decref();
    return result;
 }

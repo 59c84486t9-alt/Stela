@@ -30,7 +30,7 @@ pub(super) fn verify(
     fs::create_dir(&nv_artifacts)?;
     let report = probes.run(
         stela
-            .command("stela_nv_air_render_probe")?
+            .command("stela_nvidia_air_render_test")?
             .args(["--input", triangle])
             .args(stages)
             .arg("--output")
@@ -45,7 +45,7 @@ pub(super) fn verify(
     fs::create_dir(&intel_artifacts)?;
     let report = probes.run(
         stela
-            .command("stela_intel_air_render_probe")?
+            .command("stela_intel_air_render_test")?
             .args([
                 triangle,
                 "vertexShader",
@@ -65,7 +65,7 @@ pub(super) fn verify(
     );
 
     probes.run(
-        stela.command("stela_amd_air_render_probe")?.args([
+        stela.command("stela_amd_air_render_test")?.args([
             "--input",
             triangle,
             "--vs",
@@ -82,7 +82,7 @@ pub(super) fn verify(
     fs::create_dir(&owned_artifacts)?;
     let report = probes.run(
         stela
-            .command("stela_nv_air_render_owned")?
+            .command("stela_nvidia_air_render_owned_test")?
             .args(["--input", triangle])
             .args(stages)
             .arg("--output")

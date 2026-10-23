@@ -10,7 +10,7 @@
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); exit(1); } } while (0)
 
-#ifdef STELA_NV_RENDER_ALLOC_TEST
+#ifdef STELA_NVIDIA_RENDER_ALLOC_TEST
 static size_t allocation_attempts, fail_allocation, live_allocations;
 static void *owner_calloc(size_t count, size_t bytes)
 {
@@ -30,7 +30,7 @@ static void owner_free(void *pointer)
 /* Actual production TU, not an exported raw-NIR or fault-injection API. This
  * permits original synthetic NIR to qualify private CPU image formation. */
 #include "../hosted/render_compile.c"
-#ifdef STELA_NV_RENDER_ALLOC_TEST
+#ifdef STELA_NVIDIA_RENDER_ALLOC_TEST
 #undef calloc
 #undef free
 #endif
@@ -124,8 +124,8 @@ static void constant_image_tests(void)
         stage.bin = nak_compile_shader(b.shader, true, compiler, 0, NULL, false);
         CHECK(stage.bin && stage.bin->code && stage.bin->code_size && stage.bin->asm_str);
         CHECK(validate_resources(&stage, true, true, &lower));
-        CHECK(make_upload(&stage, &device, 3, 65536) == STELA_NV_RENDER_OK);
-        const struct stela_nv_render_upload *image = &stage.upload;
+        CHECK(make_upload(&stage, &device, 3, 65536) == STELA_NVIDIA_RENDER_OK);
+        const struct stela_nvidia_render_upload *image = &stage.upload;
         const uint32_t header = t == 2 ? 128u : 80u, prefix = t == 2 ? 0u : 48u;
         const uint32_t alignment = t == 2 ? 64u : 256u;
         /* Original preprocess folds a fully direct constant load and drops
@@ -145,22 +145,22 @@ static void constant_image_tests(void)
             else if (logical_bytes && byte >= data_offset && byte - data_offset < logical_bytes) expected = ((const uint8_t *)b.shader->constant_data)[byte - data_offset];
             CHECK(((const uint8_t *)image->bytes)[byte] == expected);
         }
-#ifdef STELA_NV_RENDER_ALLOC_TEST
+#ifdef STELA_NVIDIA_RENDER_ALLOC_TEST
         owner_free((void *)stage.upload.bytes);
 #else
         free((void *)stage.upload.bytes);
 #endif
-        stage.upload = (struct stela_nv_render_upload){0};
-        if (logical_bytes) CHECK(make_upload(&stage, &device, 3, 114) == STELA_NV_RENDER_LIMIT && !stage.upload.bytes);
+        stage.upload = (struct stela_nvidia_render_upload){0};
+        if (logical_bytes) CHECK(make_upload(&stage, &device, 3, 114) == STELA_NVIDIA_RENDER_LIMIT && !stage.upload.bytes);
         /* Invalid metadata is a CPU bounds refusal, not a fabricated valid bin. */
         struct nak_shader_bin *actual = stage.bin;
         struct nak_shader_bin overflow = *actual; overflow.code_size = UINT32_MAX;
         stage.bin = &overflow;
-        CHECK(make_upload(&stage, &device, 3, 65536) == STELA_NV_RENDER_LIMIT && !stage.upload.bytes);
+        CHECK(make_upload(&stage, &device, 3, 65536) == STELA_NVIDIA_RENDER_LIMIT && !stage.upload.bytes);
         stage.bin = actual;
-#ifdef STELA_NV_RENDER_ALLOC_TEST
+#ifdef STELA_NVIDIA_RENDER_ALLOC_TEST
         allocation_attempts = 0; fail_allocation = 1;
-        CHECK(make_upload(&stage, &device, 3, 65536) == STELA_NV_RENDER_ALLOCATION && !stage.upload.bytes);
+        CHECK(make_upload(&stage, &device, 3, 65536) == STELA_NVIDIA_RENDER_ALLOCATION && !stage.upload.bytes);
         CHECK(allocation_attempts == 1 && !live_allocations); fail_allocation = 0;
 #endif
         nak_shader_bin_destroy(stage.bin); ralloc_free(b.shader); nak_compiler_destroy(compiler);
@@ -238,10 +238,10 @@ static void artifact(const char *directory, const char *target, const char *suff
     CHECK(fwrite(data, 1, bytes, file) == bytes && !fclose(file));
     record_artifact(name);
 }
-static struct stela_nv_render_options render_options(unsigned samples)
+static struct stela_nvidia_render_options render_options(unsigned samples)
 {
-    return (struct stela_nv_render_options){.size = sizeof(struct stela_nv_render_options),
-        .abi = STELA_NV_RENDER_ABI, .max_instructions = 10000, .max_code_bytes = 1024 * 1024,
+    return (struct stela_nvidia_render_options){.size = sizeof(struct stela_nvidia_render_options),
+        .abi = STELA_NVIDIA_RENDER_ABI, .max_instructions = 10000, .max_code_bytes = 1024 * 1024,
         .max_constant_bytes = 65536, .max_varying_slots = 32, .argument_cbuf = {2, 2},
         .constant_data_cbuf = {3, 3}, .record_assembly = 1,
         .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
@@ -305,20 +305,20 @@ static void unused_owner_tests(void)
         struct stela_metal_assembly *sources[2]; assemble_pair(input, sources);
         const struct nv_device_info device = {.sm = 75, .max_warps_per_mp = 32, .cls_eng3d = TURING_A};
         struct nak_compiler *compiler = nak_compiler_create(&device); CHECK(compiler);
-        struct stela_nv_render_options options = render_options(1);
-        struct stela_nv_render_compilation *result = NULL; struct stela_nv_render_error error;
-        enum stela_nv_render_status status = stela_nv_render_compile(&device, compiler, &sources[0], &sources[1], &options, &result, &error);
+        struct stela_nvidia_render_options options = render_options(1);
+        struct stela_nvidia_render_compilation *result = NULL; struct stela_nvidia_render_error error;
+        enum stela_nvidia_render_status status = stela_nvidia_render_compile(&device, compiler, &sources[0], &sources[1], &options, &result, &error);
         if (status) fprintf(stderr, "unused stage: %u %s\n", status, error.detail);
         CHECK(!status && result && !sources[0] && !sources[1]);
-        const struct stela_metal_stage_view *source = stela_nv_render_source(result, STELA_AIR_VERTEX);
+        const struct stela_metal_stage_view *source = stela_nvidia_render_source(result, STELA_AIR_VERTEX);
         CHECK(source->reflection->input_count == 3 && !source->reflection->inputs[2].used);
-        uint32_t count, bytes; stela_nv_render_bindings(result, STELA_AIR_VERTEX, &count, &bytes);
+        uint32_t count, bytes; stela_nvidia_render_bindings(result, STELA_AIR_VERTEX, &count, &bytes);
         CHECK(count == (all_unused ? 0u : 1u) && bytes == (all_unused ? 0u : 64u));
-        stela_nv_render_bindings(result, STELA_AIR_FRAGMENT, &count, &bytes); CHECK(!count && !bytes);
-        if (all_unused) CHECK(!stela_nv_render_pack_arguments(result, STELA_AIR_VERTEX, &device, 49, NULL, 0, NULL, 0));
-        stela_nv_render_destroy(&result); nak_compiler_destroy(compiler);
+        stela_nvidia_render_bindings(result, STELA_AIR_FRAGMENT, &count, &bytes); CHECK(!count && !bytes);
+        if (all_unused) CHECK(!stela_nvidia_render_pack_arguments(result, STELA_AIR_VERTEX, &device, 49, NULL, 0, NULL, 0));
+        stela_nvidia_render_destroy(&result); nak_compiler_destroy(compiler);
         for (unsigned i = 0; i < 2; ++i) free(input[i].data);
-#ifdef STELA_NV_RENDER_ALLOC_TEST
+#ifdef STELA_NVIDIA_RENDER_ALLOC_TEST
         CHECK(!live_allocations);
 #endif
     }
@@ -326,71 +326,71 @@ static void unused_owner_tests(void)
 }
 
 static void expect_failure(const struct nv_device_info *device, struct nak_compiler *compiler,
-    struct stela_metal_assembly *sources[2], const struct stela_nv_render_options *options,
-    enum stela_nv_render_status expected)
+    struct stela_metal_assembly *sources[2], const struct stela_nvidia_render_options *options,
+    enum stela_nvidia_render_status expected)
 {
     struct stela_metal_assembly *before[2] = {sources[0], sources[1]};
-    struct stela_nv_render_compilation *result = NULL; struct stela_nv_render_error error;
-    enum stela_nv_render_status status = stela_nv_render_compile(device, compiler,
+    struct stela_nvidia_render_compilation *result = NULL; struct stela_nvidia_render_error error;
+    enum stela_nvidia_render_status status = stela_nvidia_render_compile(device, compiler,
         &sources[0], &sources[1], options, &result, &error);
     if (status != expected) fprintf(stderr, "expected %u got %u: %s\n", expected, status, error.detail);
     CHECK(status == expected && !result && sources[0] == before[0] && sources[1] == before[1]);
 }
 static void refusals(const struct nv_device_info *device, struct nak_compiler *compiler,
-    struct stela_metal_assembly *sources[2], const struct stela_nv_render_options *options)
+    struct stela_metal_assembly *sources[2], const struct stela_nvidia_render_options *options)
 {
-    struct stela_nv_render_options bad = *options;
+    struct stela_nvidia_render_options bad = *options;
     bad.argument_cbuf[0] = nak_const_offsets_base.sample_info_cb;
-    expect_failure(device, compiler, sources, &bad, STELA_NV_RENDER_UNSUPPORTED);
+    expect_failure(device, compiler, sources, &bad, STELA_NVIDIA_RENDER_UNSUPPORTED);
     bad = *options; bad.fs_key.force_sample_shading = !bad.fs_key.force_sample_shading;
-    expect_failure(device, compiler, sources, &bad, STELA_NV_RENDER_UNSUPPORTED);
+    expect_failure(device, compiler, sources, &bad, STELA_NVIDIA_RENDER_UNSUPPORTED);
     bad = *options; bad.max_varying_slots = 0;
-    expect_failure(device, compiler, sources, &bad, STELA_NV_RENDER_LIMIT);
+    expect_failure(device, compiler, sources, &bad, STELA_NVIDIA_RENDER_LIMIT);
     struct nv_device_info wrong = *device; wrong.sm++;
-    expect_failure(&wrong, compiler, sources, options, STELA_NV_RENDER_DEVICE);
+    expect_failure(&wrong, compiler, sources, options, STELA_NVIDIA_RENDER_DEVICE);
     const void *saved = compiler->nir_options.cb_data; unsigned borrowed = 1;
     compiler->nir_options.cb_data = &borrowed;
-#ifdef STELA_NV_RENDER_ALLOC_TEST
+#ifdef STELA_NVIDIA_RENDER_ALLOC_TEST
     allocation_attempts = 0;
 #endif
-    expect_failure(device, compiler, sources, options, STELA_NV_RENDER_UNSUPPORTED);
-#ifdef STELA_NV_RENDER_ALLOC_TEST
+    expect_failure(device, compiler, sources, options, STELA_NVIDIA_RENDER_UNSUPPORTED);
+#ifdef STELA_NVIDIA_RENDER_ALLOC_TEST
     CHECK(!allocation_attempts);
 #endif
     compiler->nir_options.cb_data = saved;
     struct stela_metal_assembly *aliases[2] = {sources[0], sources[0]};
-    expect_failure(device, compiler, aliases, options, STELA_NV_RENDER_INVALID);
+    expect_failure(device, compiler, aliases, options, STELA_NVIDIA_RENDER_INVALID);
     struct stela_metal_assembly *swapped[2] = {sources[1], sources[0]};
-    expect_failure(device, compiler, swapped, options, STELA_NV_RENDER_INVALID);
-    struct stela_nv_render_compilation *empty = NULL;
-    CHECK(stela_nv_render_compile(device, compiler, &sources[0], &sources[0], options, &empty, NULL) == STELA_NV_RENDER_INVALID && !empty);
+    expect_failure(device, compiler, swapped, options, STELA_NVIDIA_RENDER_INVALID);
+    struct stela_nvidia_render_compilation *empty = NULL;
+    CHECK(stela_nvidia_render_compile(device, compiler, &sources[0], &sources[0], options, &empty, NULL) == STELA_NVIDIA_RENDER_INVALID && !empty);
     struct stela_metal_assembly *first = sources[0];
-    CHECK(stela_nv_render_compile(device, compiler, &sources[0], &sources[1], options,
-        (struct stela_nv_render_compilation **)(void *)&sources[0], NULL) == STELA_NV_RENDER_INVALID && sources[0] == first);
+    CHECK(stela_nvidia_render_compile(device, compiler, &sources[0], &sources[1], options,
+        (struct stela_nvidia_render_compilation **)(void *)&sources[0], NULL) == STELA_NVIDIA_RENDER_INVALID && sources[0] == first);
     bad = *options; bad.max_code_bytes = 1;
-    expect_failure(device, compiler, sources, &bad, STELA_NV_RENDER_LIMIT);
-#ifdef STELA_NV_RENDER_ALLOC_TEST
+    expect_failure(device, compiler, sources, &bad, STELA_NVIDIA_RENDER_LIMIT);
+#ifdef STELA_NVIDIA_RENDER_ALLOC_TEST
     CHECK(!live_allocations);
     for (unsigned failure = 1; failure <= 3; ++failure) {
         allocation_attempts = 0; fail_allocation = failure;
-        expect_failure(device, compiler, sources, options, STELA_NV_RENDER_ALLOCATION);
+        expect_failure(device, compiler, sources, options, STELA_NVIDIA_RENDER_ALLOCATION);
         CHECK(allocation_attempts == failure && !live_allocations);
     }
     fail_allocation = 0;
 #endif
 }
-static void packing(const struct stela_nv_render_compilation *result, const struct nv_device_info *device)
+static void packing(const struct stela_nvidia_render_compilation *result, const struct nv_device_info *device)
 {
     uint32_t count, bytes;
-    const struct stela_nv_render_binding *map = stela_nv_render_bindings(result, STELA_AIR_VERTEX, &count, &bytes);
+    const struct stela_nvidia_render_binding *map = stela_nvidia_render_bindings(result, STELA_AIR_VERTEX, &count, &bytes);
     CHECK(count == 2 && bytes == 64); /* This actual unchanged triangle only. */
-    struct stela_nv_air_buffer_view views[2];
-    for (unsigned i = 0; i < count; ++i) views[i] = (struct stela_nv_air_buffer_view){.device = device,
+    struct stela_nvidia_air_buffer_view views[2];
+    for (unsigned i = 0; i < count; ++i) views[i] = (struct stela_nvidia_air_buffer_view){.device = device,
         .owner = &views[i], .argument = map[i].buffer.argument, .index = map[i].buffer.index,
         .available_access = STELA_AIR_READ, .allocation_va = UINT64_C(0x123400000) + 4096u * i,
         .allocation_bytes = 4096, .offset = 16, .bytes = i ? 8 : 96};
     uint8_t output[64], before[64]; memset(output, 0xa5, sizeof(output));
-    CHECK(stela_nv_render_pack_arguments(result, STELA_AIR_VERTEX, device, 49, views, count, output, sizeof(output)) == STELA_NV_RENDER_OK);
+    CHECK(stela_nvidia_render_pack_arguments(result, STELA_AIR_VERTEX, device, 49, views, count, output, sizeof(output)) == STELA_NVIDIA_RENDER_OK);
     for (unsigned i = 0; i < count; ++i) {
         uint8_t expected[16] = {0}; little(expected, views[i].allocation_va + views[i].offset, 8);
         little(expected + 8, views[i].bytes, 4); CHECK(!memcmp(output + map[i].cbuf_offset, expected, 16));
@@ -398,11 +398,11 @@ static void packing(const struct stela_nv_render_compilation *result, const stru
     for (unsigned i = 32; i < sizeof(output); ++i) CHECK(!output[i]);
     /* A reflected32B stride does not forbid a1B view or a partial last element. */
     views[0].bytes = 1;
-    CHECK(stela_nv_render_pack_arguments(result, STELA_AIR_VERTEX, device, 49, views, count, output, sizeof(output)) == STELA_NV_RENDER_OK);
+    CHECK(stela_nvidia_render_pack_arguments(result, STELA_AIR_VERTEX, device, 49, views, count, output, sizeof(output)) == STELA_NVIDIA_RENDER_OK);
     CHECK(output[8] == 1);
     views[0].bytes = 33;
-    CHECK(stela_nv_render_pack_arguments(result, STELA_AIR_VERTEX, device, 49, views, count, output, sizeof(output)) == STELA_NV_RENDER_OK);
-    struct stela_nv_air_buffer_view saved = views[0];
+    CHECK(stela_nvidia_render_pack_arguments(result, STELA_AIR_VERTEX, device, 49, views, count, output, sizeof(output)) == STELA_NVIDIA_RENDER_OK);
+    struct stela_nvidia_air_buffer_view saved = views[0];
     for (unsigned failure = 0; failure < 8; ++failure) {
         views[0] = saved;
         switch (failure) {
@@ -416,51 +416,51 @@ static void packing(const struct stela_nv_render_compilation *result, const stru
         case 7: views[0].allocation_va = UINT64_C(1) << 49; break;
         }
         memset(output, 0xa5, sizeof(output)); memcpy(before, output, sizeof(output));
-        CHECK(stela_nv_render_pack_arguments(result, STELA_AIR_VERTEX, device, 49, views, count, output, sizeof(output)) == STELA_NV_RENDER_BINDING);
+        CHECK(stela_nvidia_render_pack_arguments(result, STELA_AIR_VERTEX, device, 49, views, count, output, sizeof(output)) == STELA_NVIDIA_RENDER_BINDING);
         CHECK(!memcmp(output, before, sizeof(output)));
     }
     views[0] = saved;
-    struct stela_nv_air_buffer_view permuted[2] = {views[1], views[0]};
-    CHECK(stela_nv_render_pack_arguments(result, STELA_AIR_VERTEX, device, 49, views, 2, output, sizeof(output)) == STELA_NV_RENDER_OK);
+    struct stela_nvidia_air_buffer_view permuted[2] = {views[1], views[0]};
+    CHECK(stela_nvidia_render_pack_arguments(result, STELA_AIR_VERTEX, device, 49, views, 2, output, sizeof(output)) == STELA_NVIDIA_RENDER_OK);
     memcpy(before, output, sizeof(output));
-    CHECK(stela_nv_render_pack_arguments(result, STELA_AIR_VERTEX, device, 49, permuted, 2, output, sizeof(output)) == STELA_NV_RENDER_OK);
+    CHECK(stela_nvidia_render_pack_arguments(result, STELA_AIR_VERTEX, device, 49, permuted, 2, output, sizeof(output)) == STELA_NVIDIA_RENDER_OK);
     CHECK(!memcmp(before, output, sizeof(output)));
-    CHECK(stela_nv_render_pack_arguments(result, STELA_AIR_FRAGMENT, device, 49, NULL, 0, NULL, 0) == STELA_NV_RENDER_OK);
-    stela_nv_render_bindings(result, STELA_AIR_FRAGMENT, &count, &bytes); CHECK(!count && !bytes);
+    CHECK(stela_nvidia_render_pack_arguments(result, STELA_AIR_FRAGMENT, device, 49, NULL, 0, NULL, 0) == STELA_NVIDIA_RENDER_OK);
+    stela_nvidia_render_bindings(result, STELA_AIR_FRAGMENT, &count, &bytes); CHECK(!count && !bytes);
 }
 static void owned_tests(const struct bytes *raw, const char *vertex, const char *fragment, const char *output)
 {
-    for (unsigned target = 0; target < ARRAY_SIZE(stela_nv_sms); ++target) for (unsigned profile = 0; profile < 2; ++profile) {
+    for (unsigned target = 0; target < ARRAY_SIZE(stela_nvidia_sms); ++target) for (unsigned profile = 0; profile < 2; ++profile) {
         for (unsigned s = 0; s < 2; ++s) {
-            char name[64]; target_name(name, stela_nv_sms[target], profile ? 4u : 1u, s ? "fs" : "vs");
+            char name[64]; target_name(name, stela_nvidia_sms[target], profile ? 4u : 1u, s ? "fs" : "vs");
             record_expect(name, NULL);
         }
     }
-    for (unsigned target = 0; target < ARRAY_SIZE(stela_nv_sms); ++target) for (unsigned profile = 0; profile < 2; ++profile) {
-        const unsigned sm = stela_nv_sms[target], samples = profile ? 4u : 1u;
+    for (unsigned target = 0; target < ARRAY_SIZE(stela_nvidia_sms); ++target) for (unsigned profile = 0; profile < 2; ++profile) {
+        const unsigned sm = stela_nvidia_sms[target], samples = profile ? 4u : 1u;
         /* Explicit CPU compiler/class models, never detected GPU facts. No
          * production SM->class inference: every original compiler receives this
          * same actual record, and layout policy independently receives class. */
-        struct nv_device_info device = stela_nv_compiler_device(sm);
+        struct nv_device_info device = stela_nvidia_compiler_device(sm);
         device.cls_eng3d = TURING_A;
         struct nak_compiler *compiler = nak_compiler_create(&device); CHECK(compiler);
-        struct stela_nv_render_options options = render_options(samples);
+        struct stela_nvidia_render_options options = render_options(samples);
         struct bytes input[2] = {archive(raw->data, raw->count, vertex, 0), archive(raw->data, raw->count, fragment, 1)};
         struct stela_metal_assembly *sources[2]; assemble_pair(input, sources);
         if (!target && !profile) refusals(&device, compiler, sources, &options);
-        struct stela_nv_render_compilation *result = NULL; struct stela_nv_render_error error;
-        enum stela_nv_render_status status = stela_nv_render_compile(&device, compiler, &sources[0], &sources[1], &options, &result, &error);
+        struct stela_nvidia_render_compilation *result = NULL; struct stela_nvidia_render_error error;
+        enum stela_nvidia_render_status status = stela_nvidia_render_compile(&device, compiler, &sources[0], &sources[1], &options, &result, &error);
         if (status) fprintf(stderr, "sm%u samples%u: %u %s\n", sm, samples, status, error.detail);
         CHECK(!status && result && !sources[0] && !sources[1]);
         nak_compiler_destroy(compiler); /* No original compiler pointer retained. */
         for (unsigned s = 0; s < 2; ++s) { memset(input[s].data, 0xa5, input[s].count); free(input[s].data); }
-        CHECK(!stela_nv_render_nir_options(result)->cb_data);
-        CHECK(stela_nv_render_provenance(result)->options.raster_samples == samples);
+        CHECK(!stela_nvidia_render_nir_options(result)->cb_data);
+        CHECK(stela_nvidia_render_provenance(result)->options.raster_samples == samples);
         for (unsigned s = 0; s < 2; ++s) {
             enum stela_air_stage kind = s ? STELA_AIR_FRAGMENT : STELA_AIR_VERTEX;
-            const struct stela_metal_stage_view *source = stela_nv_render_source(result, kind);
-            const struct nak_shader_bin *bin = stela_nv_render_binary(result, kind);
-            const struct stela_nv_render_upload *image = stela_nv_render_upload(result, kind);
+            const struct stela_metal_stage_view *source = stela_nvidia_render_source(result, kind);
+            const struct nak_shader_bin *bin = stela_nvidia_render_binary(result, kind);
+            const struct stela_nvidia_render_upload *image = stela_nvidia_render_upload(result, kind);
             CHECK(source && source->identity->entry.kind == s && source->reflection->stage == kind);
             CHECK(!strcmp(source->reflection->name, s ? fragment : vertex));
             CHECK(bin && bin->asm_str && bin->code_size && bin->info.sm == sm);
@@ -468,7 +468,7 @@ static void owned_tests(const struct bytes *raw, const char *vertex, const char 
             CHECK(image->size == 128 + bin->code_size && !image->data_size && !image->data_offset);
             CHECK(!memcmp(image->bytes, bin->info.hdr, 128));
             CHECK(!memcmp((const char *)image->bytes + image->code_offset, bin->code, bin->code_size));
-            CHECK(stela_nv_render_nir(result, kind)->options == stela_nv_render_nir_options(result));
+            CHECK(stela_nvidia_render_nir(result, kind)->options == stela_nvidia_render_nir_options(result));
             char name[64]; target_name(name, sm, samples, s ? "fs" : "vs");
             artifact(output, name, "code", bin->code, bin->code_size);
             artifact(output, name, "info", &bin->info, sizeof(bin->info));
@@ -483,8 +483,8 @@ static void owned_tests(const struct bytes *raw, const char *vertex, const char 
             record_end();
         }
         packing(result, &device);
-        stela_nv_render_destroy(&result); CHECK(!result);
-#ifdef STELA_NV_RENDER_ALLOC_TEST
+        stela_nvidia_render_destroy(&result); CHECK(!result);
+#ifdef STELA_NVIDIA_RENDER_ALLOC_TEST
         CHECK(!live_allocations);
 #endif
     }

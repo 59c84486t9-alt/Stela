@@ -13,7 +13,7 @@ static bool integer_border(VkBorderColor color)
            color == VK_BORDER_COLOR_INT_OPAQUE_WHITE || color == VK_BORDER_COLOR_INT_CUSTOM_EXT;
 }
 
-static int check_border(const struct stela_nv_sampler_state *state)
+static int check_border(const struct stela_nvidia_sampler_state *state)
 {
     switch (state->border_color) {
     case VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK:
@@ -84,12 +84,12 @@ static uint32_t fixed_lod(float lod)
 /* TEXSAMP for a validated state in the supported subset: the standard border
  * colors' sRGB bytes are 0 or 255, and their payload words are stored as
  * given. */
-static struct stela_nv_sampler_header pack(const struct nv_device_info *device,
-                                           const struct stela_nv_sampler_state *state)
+static struct stela_nvidia_sampler_header pack(const struct nv_device_info *device,
+                                           const struct stela_nvidia_sampler_state *state)
 {
     const bool linear_min = state->min_filter == VK_FILTER_LINEAR;
     const uint32_t srgb_border = state->border_color == VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE ? 255 : 0;
-    struct stela_nv_sampler_header header = {.bits = {
+    struct stela_nvidia_sampler_header header = {.bits = {
         NVVAL(NV9097, TEXSAMP0, ADDRESS_U, address_mode(state->address_mode_u)) |
             NVVAL(NV9097, TEXSAMP0, ADDRESS_V, address_mode(state->address_mode_v)) |
             NVVAL(NV9097, TEXSAMP0, ADDRESS_P, address_mode(state->address_mode_w)) |
@@ -121,17 +121,17 @@ static struct stela_nv_sampler_header pack(const struct nv_device_info *device,
     return header;
 }
 
-int stela_nv_sampler_encode(const struct stela_nv_image *image,
-                            const struct stela_nv_sampler_state *input, struct stela_nv_sampler *out)
+int stela_nvidia_sampler_encode(const struct stela_nvidia_image *image,
+                            const struct stela_nvidia_sampler_state *input, struct stela_nvidia_sampler *out)
 {
     if (!image || !image->owner || !input || !out) return -22;
-    const struct stela_nv_sampler_state state = *input;
-    struct stela_nv_image rebuilt;
-    int err = stela_nv_image_init(image->device, image->owner, &image->request, &rebuilt);
+    const struct stela_nvidia_sampler_state state = *input;
+    struct stela_nvidia_image rebuilt;
+    int err = stela_nvidia_image_init(image->device, image->owner, &image->request, &rebuilt);
     if (err) return err;
     if (image->cls_eng3d != rebuilt.cls_eng3d || image->device_type != rebuilt.device_type)
         return -22;
-    if (!(rebuilt.request.usage & STELA_NV_IMAGE_TEXTURE)) return -95;
+    if (!(rebuilt.request.usage & STELA_NVIDIA_IMAGE_TEXTURE)) return -95;
     if ((unsigned)state.mag_filter > VK_FILTER_LINEAR ||
         (unsigned)state.min_filter > VK_FILTER_LINEAR ||
         (unsigned)state.mipmap_mode > VK_SAMPLER_MIPMAP_MODE_LINEAR ||
@@ -159,7 +159,7 @@ int stela_nv_sampler_encode(const struct stela_nv_image *image,
         !nil_format_supports_filtering(rebuilt.device, rebuilt.request.format))
         return -95;
 
-    const struct stela_nv_sampler sampler = {
+    const struct stela_nvidia_sampler sampler = {
         .device = rebuilt.device, .image_owner = rebuilt.owner,
         .header = pack(rebuilt.device, &state),
     };

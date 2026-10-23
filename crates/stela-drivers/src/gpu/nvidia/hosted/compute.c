@@ -36,7 +36,7 @@ struct qmd_limits {
 };
 
 static bool
-reject(enum stela_nv_compute_error *error, enum stela_nv_compute_error kind)
+reject(enum stela_nvidia_compute_error *error, enum stela_nvidia_compute_error kind)
 {
    if (error)
       *error = kind;
@@ -109,28 +109,28 @@ overlap(uint64_t a, uint64_t a_size, uint64_t b, uint64_t b_size)
 }
 
 bool
-stela_nv_compute_encode(const struct nv_device_info *dev,
+stela_nvidia_compute_encode(const struct nv_device_info *dev,
                         const struct nak_shader_bin *shader,
-                        const struct stela_nv_compute_dispatch *dispatch,
-                        struct stela_nv_compute_encoded *encoded,
-                        enum stela_nv_compute_error *error)
+                        const struct stela_nvidia_compute_dispatch *dispatch,
+                        struct stela_nvidia_compute_encoded *encoded,
+                        enum stela_nvidia_compute_error *error)
 {
    if (error)
-      *error = STELA_NV_COMPUTE_OK;
+      *error = STELA_NVIDIA_COMPUTE_OK;
    if (!dev || !shader || !dispatch || !encoded)
-      return reject(error, STELA_NV_COMPUTE_INPUT);
+      return reject(error, STELA_NVIDIA_COMPUTE_INPUT);
    struct qmd_limits limits;
    if (!device_limits(dev, &limits) || !dev->max_warps_per_mp || dev->max_warps_per_mp > 64 ||
        !dev->sm_smem_size_count || dev->sm_smem_size_count > ARRAY_SIZE(dev->sm_smem_sizes_kB))
-      return reject(error, STELA_NV_COMPUTE_DEVICE);
+      return reject(error, STELA_NVIDIA_COMPUTE_DEVICE);
    const struct nak_shader_info *info = &shader->info;
    if (!shader->code || !shader->code_size || info->stage != MESA_SHADER_COMPUTE ||
        info->sm != dev->sm || !info->num_gprs || !info->max_warps_per_sm ||
        info->max_warps_per_sm > dev->max_warps_per_mp ||
        info->num_control_barriers > MW_MASK(NVC3C0_QMDV02_02_BARRIER_COUNT))
-      return reject(error, STELA_NV_COMPUTE_SHADER);
+      return reject(error, STELA_NVIDIA_COMPUTE_SHADER);
    if (info->slm_size || info->crs_size)
-      return reject(error, STELA_NV_COMPUTE_SCRATCH_UNSUPPORTED);
+      return reject(error, STELA_NVIDIA_COMPUTE_SCRATCH_UNSUPPORTED);
 
    const struct nak_qmd_info *qmd = &dispatch->qmd;
    if (!info->cs.local_size[0] || info->cs.local_size[0] > MAX_LOCAL_XY ||
@@ -139,10 +139,10 @@ stela_nv_compute_encode(const struct nv_device_info *dev,
        !qmd->global_size[0] || qmd->global_size[0] > MAX_GROUP_X ||
        !qmd->global_size[1] || qmd->global_size[1] > MAX_GROUP_YZ ||
        !qmd->global_size[2] || qmd->global_size[2] > MAX_GROUP_YZ)
-      return reject(error, STELA_NV_COMPUTE_GEOMETRY);
+      return reject(error, STELA_NVIDIA_COMPUTE_GEOMETRY);
    uint64_t threads = (uint64_t)info->cs.local_size[0] * info->cs.local_size[1] * info->cs.local_size[2];
    if (threads > MAX_THREADS || (threads + NAK_SUBGROUP_SIZE - 1) / NAK_SUBGROUP_SIZE > info->max_warps_per_sm)
-      return reject(error, STELA_NV_COMPUTE_GEOMETRY);
+      return reject(error, STELA_NVIDIA_COMPUTE_GEOMETRY);
 
    /* nak_fill_qmd derives an occupancy carveout from this exact ordered table.
     * Validate each precondition that would otherwise assert/index/panic. */
@@ -150,7 +150,7 @@ stela_nv_compute_encode(const struct nv_device_info *dev,
       unsigned size = dev->sm_smem_sizes_kB[i];
       if (size % 4 || size / 4 + 1 > limits.smem_config_mask ||
           (i && size <= dev->sm_smem_sizes_kB[i - 1]))
-         return reject(error, STELA_NV_COMPUTE_SHARED_MEMORY);
+         return reject(error, STELA_NVIDIA_COMPUTE_SHARED_MEMORY);
    }
    unsigned max_smem_kB = dev->sm_smem_sizes_kB[dev->sm_smem_size_count - 1];
    uint64_t rounded_smem = ((uint64_t)qmd->smem_size + 255) & ~UINT64_C(255);
@@ -158,36 +158,36 @@ stela_nv_compute_encode(const struct nv_device_info *dev,
        qmd->smem_size < info->cs.smem_size ||
        rounded_smem > (uint32_t)dev->max_smem_per_wg_kB * 1024 ||
        (rounded_smem >> limits.smem_shift) > limits.smem_mask)
-      return reject(error, STELA_NV_COMPUTE_SHARED_MEMORY);
+      return reject(error, STELA_NVIDIA_COMPUTE_SHARED_MEMORY);
 
    unsigned va_bits = dispatch->va_bits;
    if (!va_bits || va_bits > limits.program_bits)
-      return reject(error, STELA_NV_COMPUTE_ADDRESS);
+      return reject(error, STELA_NVIDIA_COMPUTE_ADDRESS);
    uint32_t qmd_size_B = nak_qmd_size_B(dev);
    unsigned qmd_bits = DRF_BITS(NVA0C0_SEND_PCAS_A_QMD_ADDRESS_SHIFTED8) + 8;
    if (!address_range(qmd->addr, shader->code_size, va_bits, CODE_ALIGNMENT) ||
        !address_range(dispatch->qmd_addr, qmd_size_B, MIN2(va_bits, qmd_bits), NAK_QMD_ALIGN_B) ||
        overlap(qmd->addr, shader->code_size, dispatch->qmd_addr, qmd_size_B))
-      return reject(error, STELA_NV_COMPUTE_ADDRESS);
+      return reject(error, STELA_NVIDIA_COMPUTE_ADDRESS);
 
    if (qmd->num_cbufs > ARRAY_SIZE(qmd->cbufs))
-      return reject(error, STELA_NV_COMPUTE_CONSTANT_BUFFER);
+      return reject(error, STELA_NVIDIA_COMPUTE_CONSTANT_BUFFER);
    unsigned cbuf_mask = 0;
    for (unsigned i = 0; i < qmd->num_cbufs; i++) {
       const struct nak_qmd_cbuf *cb = &qmd->cbufs[i];
       if (cb->index >= ARRAY_SIZE(qmd->cbufs) || cbuf_mask & (1u << cb->index) ||
           !cb->size || cb->size > MAX_CBUF_BYTES || cb->size % CBUF_ALIGNMENT)
-         return reject(error, STELA_NV_COMPUTE_CONSTANT_BUFFER);
+         return reject(error, STELA_NVIDIA_COMPUTE_CONSTANT_BUFFER);
       cbuf_mask |= 1u << cb->index;
       struct nak_qmd_cbuf_desc_layout layout = nak_get_qmd_cbuf_desc_layout(dev, cb->index);
       unsigned bits = layout.addr_shift + layout.addr_lo_end - layout.addr_lo_start +
                       layout.addr_hi_end - layout.addr_hi_start;
       if (!address_range(cb->addr, cb->size, MIN2(va_bits, bits), CBUF_ALIGNMENT) ||
           overlap(cb->addr, cb->size, dispatch->qmd_addr, qmd_size_B))
-         return reject(error, STELA_NV_COMPUTE_ADDRESS);
+         return reject(error, STELA_NVIDIA_COMPUTE_ADDRESS);
    }
 
-   struct stela_nv_compute_encoded result = {0};
+   struct stela_nvidia_compute_encoded result = {0};
    result.qmd_size_B = qmd_size_B;
    nak_fill_qmd(dev, info, qmd, result.qmd, qmd_size_B);
 

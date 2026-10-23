@@ -250,7 +250,7 @@ static void compile_target(struct run *run, const struct stela_air_stage_entry *
                              unsigned sm, const struct raster_model *model)
 {
     /* These are compiler model facts, never discovered hardware/provenance. */
-    const struct nv_device_info device = stela_nv_compiler_device(sm);
+    const struct nv_device_info device = stela_nvidia_compiler_device(sm);
     const struct nak_constant_offset_info layout = nak_const_offsets_base;
     CHECK(TABLE_CB != layout.sample_info_cb && TABLE_CB != layout.printf_cb);
     struct nak_fs_key key; CHECK(model_key(model, &key));
@@ -397,18 +397,18 @@ static bool fragment(const struct stela_air_inspection *inspection,
     struct raster_model models[] = {{.samples = 1}, {.samples = 4, .sample_shading = true}};
     struct nak_fs_key untouched; memset(&untouched, 0xa5, sizeof(untouched)); uint8_t before[sizeof(untouched)]; memcpy(before, &untouched, sizeof(before));
     struct raster_model bad = {.samples = 1, .sample_shading = true}; CHECK(!model_key(&bad, &untouched) && !memcmp(&untouched, before, sizeof(before)));
-    for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); ++i) {
+    for (unsigned i = 0; i < ARRAY_SIZE(stela_nvidia_sms); ++i) {
         for (unsigned m = 0; m < ARRAY_SIZE(models); ++m) {
             char target[64];
-            target_name(target, stela_nv_sms[i], models[m].samples, "vs"); record_expect(target, NULL);
-            target_name(target, stela_nv_sms[i], models[m].samples, "fs"); record_expect(target, NULL);
+            target_name(target, stela_nvidia_sms[i], models[m].samples, "vs"); record_expect(target, NULL);
+            target_name(target, stela_nvidia_sms[i], models[m].samples, "fs"); record_expect(target, NULL);
         }
     }
-    for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); ++i)
-        for (unsigned m = 0; m < ARRAY_SIZE(models); ++m) compile_target(run, fs, stela_nv_sms[i], &models[m]);
+    for (unsigned i = 0; i < ARRAY_SIZE(stela_nvidia_sms); ++i)
+        for (unsigned m = 0; m < ARRAY_SIZE(models); ++m) compile_target(run, fs, stela_nvidia_sms[i], &models[m]);
     /* Each model compiles both stages twice and binds the vertex buffers once;
      * the two failed view refusals each attempted one binding. */
-    const unsigned models_compiled = ARRAY_SIZE(stela_nv_sms) * ARRAY_SIZE(models);
+    const unsigned models_compiled = ARRAY_SIZE(stela_nvidia_sms) * ARRAY_SIZE(models);
     CHECK(run->backend_calls == 4 * models_compiled && run->callbacks == MAX_BINDINGS * models_compiled &&
           run->binding_attempts == MAX_BINDINGS * models_compiled + 2);
     puts("Compiler only: full original code/info/hdr/assembly recaptured after original bin destruction; "

@@ -31,7 +31,7 @@ compile_input(const void *input, size_t size, const char *entry, const char *inp
               unsigned sm, enum stela_air_fp_profile fp_profile)
 {
    char target[16];
-   stela_nv_target_name(target, sm);
+   stela_nvidia_target_name(target, sm);
    const struct nv_device_info device = {.sm = sm, .max_warps_per_mp = 32};
    struct nak_compiler *compiler = nak_compiler_create(&device);
    CHECK(compiler);
@@ -121,13 +121,13 @@ main(int argc, char **argv)
    stela_air_probe_input_record(file, size, input_hash, entry);
    record_end();
    char target[16];
-   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++) {
-      stela_nv_target_name(target, stela_nv_sms[i]);
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nvidia_sms); i++) {
+      stela_nvidia_target_name(target, stela_nvidia_sms[i]);
       record_expect(target, NULL);
    }
    glsl_type_singleton_init_or_ref();
-   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++)
-      compile_input(bytes, size, entry, input_hash, stela_nv_sms[i], fp_profile);
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nvidia_sms); i++)
+      compile_input(bytes, size, entry, input_hash, stela_nvidia_sms[i], fp_profile);
    glsl_type_singleton_decref();
    if (fixture)
       LLVMDisposeMemoryBuffer(fixture);

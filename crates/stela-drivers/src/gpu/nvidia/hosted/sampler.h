@@ -6,7 +6,7 @@
 #include "vulkan/vulkan_core.h"
 
 /* Vulkan sampler values; no Vulkan object, frontend or runtime is used. */
-struct stela_nv_sampler_state {
+struct stela_nvidia_sampler_state {
     VkSamplerCreateFlags flags;
     VkFilter mag_filter;
     VkFilter min_filter;
@@ -30,14 +30,14 @@ struct stela_nv_sampler_state {
 };
 
 /* The 32-byte TEXSAMP sampler header. */
-struct stela_nv_sampler_header {
+struct stela_nvidia_sampler_header {
     uint32_t bits[8];
 };
 
-struct stela_nv_sampler {
+struct stela_nvidia_sampler {
     const struct nv_device_info *device;
     const void *image_owner;
-    struct stela_nv_sampler_header header;
+    struct stela_nvidia_sampler_header header;
 };
 
 /* Hosted internal same-process value encoder, packing TEXSAMP fields as NVK
@@ -67,6 +67,6 @@ struct stela_nv_sampler {
  * image-view/sampler/table indices, upload/cache ordering and removal handling.
  * Bind only to the validated image format and honor its image-view/mip limits.
  */
-int stela_nv_sampler_encode(const struct stela_nv_image *,
-                            const struct stela_nv_sampler_state *, struct stela_nv_sampler *);
+int stela_nvidia_sampler_encode(const struct stela_nvidia_image *,
+                            const struct stela_nvidia_sampler_state *, struct stela_nvidia_sampler *);
 #endif

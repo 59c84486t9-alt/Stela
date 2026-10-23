@@ -11,19 +11,19 @@
  * windows, submit on the correct queue and report completion/faults. These
  * packets are not a complete initialization or submission stream.
  */
-enum stela_nv_compute_error {
-   STELA_NV_COMPUTE_OK,
-   STELA_NV_COMPUTE_INPUT,
-   STELA_NV_COMPUTE_DEVICE,
-   STELA_NV_COMPUTE_SHADER,
-   STELA_NV_COMPUTE_GEOMETRY,
-   STELA_NV_COMPUTE_SHARED_MEMORY,
-   STELA_NV_COMPUTE_SCRATCH_UNSUPPORTED,
-   STELA_NV_COMPUTE_ADDRESS,
-   STELA_NV_COMPUTE_CONSTANT_BUFFER,
+enum stela_nvidia_compute_error {
+   STELA_NVIDIA_COMPUTE_OK,
+   STELA_NVIDIA_COMPUTE_INPUT,
+   STELA_NVIDIA_COMPUTE_DEVICE,
+   STELA_NVIDIA_COMPUTE_SHADER,
+   STELA_NVIDIA_COMPUTE_GEOMETRY,
+   STELA_NVIDIA_COMPUTE_SHARED_MEMORY,
+   STELA_NVIDIA_COMPUTE_SCRATCH_UNSUPPORTED,
+   STELA_NVIDIA_COMPUTE_ADDRESS,
+   STELA_NVIDIA_COMPUTE_CONSTANT_BUFFER,
 };
 
-struct stela_nv_compute_dispatch {
+struct stela_nvidia_compute_dispatch {
    /* Real executable GPU VA, total shared memory, group counts and cbufs.
     * cbuf indices/layout must match the compiler/frontend binding ABI. */
    struct nak_qmd_info qmd;
@@ -31,11 +31,11 @@ struct stela_nv_compute_dispatch {
    unsigned va_bits; /* Actual usable unsigned GPU VM width from the backend. */
 };
 
-#define STELA_NV_COMPUTE_MAX_PUSH_DW 4
-struct stela_nv_compute_encoded {
+#define STELA_NVIDIA_COMPUTE_MAX_PUSH_DW 4
+struct stela_nvidia_compute_encoded {
    uint32_t qmd[NAK_MAX_QMD_DWORDS];
    uint32_t qmd_size_B;
-   uint32_t push[STELA_NV_COMPUTE_MAX_PUSH_DW];
+   uint32_t push[STELA_NVIDIA_COMPUTE_MAX_PUSH_DW];
    uint32_t push_dw;
 };
 
@@ -45,9 +45,9 @@ struct stela_nv_compute_encoded {
  * and unsupported targets before calling the original assert-bearing encoder.
  * All outputs remain unchanged on failure; error may be NULL.
  */
-bool stela_nv_compute_encode(const struct nv_device_info *dev,
+bool stela_nvidia_compute_encode(const struct nv_device_info *dev,
                              const struct nak_shader_bin *shader,
-                             const struct stela_nv_compute_dispatch *dispatch,
-                             struct stela_nv_compute_encoded *encoded,
-                             enum stela_nv_compute_error *error);
+                             const struct stela_nvidia_compute_dispatch *dispatch,
+                             struct stela_nvidia_compute_encoded *encoded,
+                             enum stela_nvidia_compute_error *error);
 #endif

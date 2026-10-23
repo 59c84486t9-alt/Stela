@@ -85,7 +85,7 @@ static void validate_nir(nir_shader *nir, const struct fixture *fixture)
 struct decoded_shared { uint32_t bytes, barriers, minimum, target, maximum; };
 
 static struct decoded_shared decode_shared(const struct nv_device_info *dev,
-                                            const struct stela_nv_compute_encoded *encoded)
+                                            const struct stela_nvidia_compute_encoded *encoded)
 {
 #define DECODE(NV, QMD, SHARED) (struct decoded_shared){ \
     .bytes = NVVAL_MW_GET(encoded->qmd, NV, QMD, SHARED), \
@@ -114,8 +114,8 @@ static uint32_t smem_config(const struct nv_device_info *dev, uint64_t bytes)
 }
 
 static void validate_qmd(const struct nv_device_info *dev, const struct nak_shader_info *info,
-                          const struct stela_nv_compute_dispatch *dispatch,
-                          const struct stela_nv_compute_encoded *encoded)
+                          const struct stela_nvidia_compute_dispatch *dispatch,
+                          const struct stela_nvidia_compute_encoded *encoded)
 {
     const struct decoded_shared state = decode_shared(dev, encoded);
     const uint32_t rounded = (dispatch->qmd.smem_size + 255u) & ~255u;
@@ -153,35 +153,35 @@ static void validate_qmd(const struct nv_device_info *dev, const struct nak_shad
 }
 
 static void refusal(const struct nv_device_info *dev, const struct nak_shader_bin *shader,
-                     const struct stela_nv_compute_dispatch *dispatch, enum stela_nv_compute_error expected)
+                     const struct stela_nvidia_compute_dispatch *dispatch, enum stela_nvidia_compute_error expected)
 {
-    struct stela_nv_compute_encoded out, before;
+    struct stela_nvidia_compute_encoded out, before;
     memset(&out, 0xa7, sizeof(out)); memcpy(&before, &out, sizeof(out));
-    enum stela_nv_compute_error error;
-    CHECK(!stela_nv_compute_encode(dev, shader, dispatch, &out, &error));
+    enum stela_nvidia_compute_error error;
+    CHECK(!stela_nvidia_compute_encode(dev, shader, dispatch, &out, &error));
     CHECK(error == expected && !memcmp(&out, &before, sizeof(out)));
 }
 
 static void shared_limits(const struct nv_device_info *dev, const struct nak_shader_bin *shader,
-                           const struct stela_nv_compute_dispatch *dispatch)
+                           const struct stela_nvidia_compute_dispatch *dispatch)
 {
-    struct stela_nv_compute_dispatch test = *dispatch;
+    struct stela_nvidia_compute_dispatch test = *dispatch;
     test.qmd.smem_size = shader->info.cs.smem_size - 1;
-    refusal(dev, shader, &test, STELA_NV_COMPUTE_SHARED_MEMORY);
+    refusal(dev, shader, &test, STELA_NVIDIA_COMPUTE_SHARED_MEMORY);
     test.qmd.smem_size = dev->max_smem_per_wg_kB * 1024 + 1;
-    refusal(dev, shader, &test, STELA_NV_COMPUTE_SHARED_MEMORY);
+    refusal(dev, shader, &test, STELA_NVIDIA_COMPUTE_SHARED_MEMORY);
     test.qmd.smem_size = UINT32_MAX;
-    refusal(dev, shader, &test, STELA_NV_COMPUTE_SHARED_MEMORY);
+    refusal(dev, shader, &test, STELA_NVIDIA_COMPUTE_SHARED_MEMORY);
     struct nak_shader_bin too_many = *shader;
     too_many.info.num_control_barriers = DRF_MASK(DRF_MW(NVC3C0_QMDV02_02_BARRIER_COUNT)) + 1;
-    refusal(dev, &too_many, dispatch, STELA_NV_COMPUTE_SHADER);
+    refusal(dev, &too_many, dispatch, STELA_NVIDIA_COMPUTE_SHADER);
     const uint32_t reservations[] = {shader->info.cs.smem_size, shader->info.cs.smem_size + 1,
         257, dev->max_smem_per_wg_kB * 1024 - 1, dev->max_smem_per_wg_kB * 1024};
     for (unsigned i = 0; i < ARRAY_SIZE(reservations); i++) {
         test.qmd.smem_size = reservations[i];
-        struct stela_nv_compute_encoded out;
-        enum stela_nv_compute_error error;
-        CHECK(stela_nv_compute_encode(dev, shader, &test, &out, &error));
+        struct stela_nvidia_compute_encoded out;
+        enum stela_nvidia_compute_error error;
+        CHECK(stela_nvidia_compute_encode(dev, shader, &test, &out, &error));
         validate_qmd(dev, &shader->info, &test, &out);
     }
 }
@@ -213,7 +213,7 @@ static void bytes_artifact(const char *directory, const char *target,
 
 static void compile_fixture(struct fixture *fixture, unsigned sm, unsigned cls, const char *directory)
 {
-    const struct nv_device_info dev = stela_nv_target_device(sm, cls);
+    const struct nv_device_info dev = stela_nvidia_target_device(sm, cls);
     char target[64]; target_name(target, fixture, sm);
     struct nak_compiler *compiler = nak_compiler_create(&dev); CHECK(compiler);
     const struct stela_air_options options = {
@@ -239,15 +239,15 @@ static void compile_fixture(struct fixture *fixture, unsigned sm, unsigned cls, 
     const unsigned barriers = fixture->threads > NAK_SUBGROUP_SIZE ? 1 : 0;
     CHECK(shader->info.num_control_barriers == barriers);
     CHECK((strstr(shader->asm_str, "bar.sync") != NULL) == (barriers != 0));
-    struct stela_nv_compute_dispatch dispatch = {
+    struct stela_nvidia_compute_dispatch dispatch = {
         .qmd = {.addr = 0x200000, .smem_size = shader->info.cs.smem_size, .global_size = {7, 5, 3},
                 .num_cbufs = 2, .cbufs = {{.index = 0, .size = 256, .addr = 0x400000},
                                         {.index = 7, .size = 64, .addr = 0x500000}}},
         .qmd_addr = 0x300000, .va_bits = sm >= 90 ? 57 : 49,
     };
-    struct stela_nv_compute_encoded encoded;
-    enum stela_nv_compute_error encode_error;
-    CHECK(stela_nv_compute_encode(&dev, shader, &dispatch, &encoded, &encode_error));
+    struct stela_nvidia_compute_encoded encoded;
+    enum stela_nvidia_compute_error encode_error;
+    CHECK(stela_nvidia_compute_encode(&dev, shader, &dispatch, &encoded, &encode_error));
     validate_qmd(&dev, &shader->info, &dispatch, &encoded);
     shared_limits(&dev, shader, &dispatch);
     bytes_artifact(directory, target, "code", shader->code, shader->code_size);
@@ -290,7 +290,7 @@ int main(int argc, char **argv)
         {.name = "synthetic-dynamic", .entry = "kernel", .input = inputs[2],
          .threads = 64, .shared = 256, .device_argument = 1, .shared_argument = 2, .shared_index = 7, .budget = 1000, .dynamic = true},
     };
-    const unsigned targets[][2] = {STELA_NV_TARGETS(STELA_NV_TARGET)};
+    const unsigned targets[][2] = {STELA_NVIDIA_TARGETS(STELA_NVIDIA_TARGET)};
     for (unsigned f = 0; f < ARRAY_SIZE(fixtures); f++) {
         for (unsigned t = 0; t < ARRAY_SIZE(targets); t++) {
             char target[64]; target_name(target, &fixtures[f], targets[t][0]); record_expect(target, NULL);

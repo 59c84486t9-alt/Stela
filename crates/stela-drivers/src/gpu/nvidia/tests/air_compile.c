@@ -33,18 +33,18 @@
 #endif
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __func__, __LINE__, #x); abort(); } } while (0)
 static unsigned allocations, fail_allocation, live_allocations;
-void *stela_nv_air_test_malloc(size_t);
-void *stela_nv_air_test_calloc(size_t, size_t);
-void stela_nv_air_test_free(void *);
-void *stela_nv_air_test_malloc(size_t bytes) {
+void *stela_nvidia_air_test_malloc(size_t);
+void *stela_nvidia_air_test_calloc(size_t, size_t);
+void stela_nvidia_air_test_free(void *);
+void *stela_nvidia_air_test_malloc(size_t bytes) {
     if (++allocations == fail_allocation) return NULL;
     void *p = malloc(bytes); if (p) live_allocations++; return p;
 }
-void *stela_nv_air_test_calloc(size_t count, size_t bytes) {
+void *stela_nvidia_air_test_calloc(size_t count, size_t bytes) {
     if (++allocations == fail_allocation) return NULL;
     void *p = calloc(count, bytes); if (p) live_allocations++; return p;
 }
-void stela_nv_air_test_free(void *p) {
+void stela_nvidia_air_test_free(void *p) {
     if (p) { CHECK(live_allocations); live_allocations--; } free(p);
 }
 struct bytes { uint8_t *data; size_t size; };
@@ -162,7 +162,7 @@ static LLVMMemoryBufferRef multibuffer(unsigned count)
    return stela_air_test_custom_bitcode(prefix, body, metadata, "");
 }
 
-static const struct {unsigned sm, cls;} nv_targets[] = {STELA_NV_TARGETS(STELA_NV_TARGET)};
+static const struct {unsigned sm, cls;} nv_targets[] = {STELA_NVIDIA_TARGETS(STELA_NVIDIA_TARGET)};
 /* A fixture's compile target: "<fixture>/sm<N>". */
 static void owned_target(char name[64], const char *fixture, unsigned sm)
 {
@@ -180,34 +180,34 @@ static struct nak_compiler *compiler(const struct nv_device_info *device)
 {
     struct nak_compiler *nak = nak_compiler_create(device); CHECK(nak); return nak;
 }
-static struct stela_nv_air_options options(void)
+static struct stela_nvidia_air_options options(void)
 {
-    return (struct stela_nv_air_options) {.size = sizeof(struct stela_nv_air_options), .abi = STELA_NV_AIR_ABI,
+    return (struct stela_nvidia_air_options) {.size = sizeof(struct stela_nvidia_air_options), .abi = STELA_NVIDIA_AIR_ABI,
         .workgroup_size = {32, 1, 1}, .max_instructions = 4096, .max_code_bytes = 1024 * 1024,
         .argument_cbuf = 1, .record_assembly = 1};
 }
-static struct stela_nv_air_compilation *compile(const struct nv_device_info *device,
+static struct stela_nvidia_air_compilation *compile(const struct nv_device_info *device,
     const struct nak_compiler *nak, struct stela_metal_assembly *library, uint32_t selected,
-    const struct stela_nv_air_options *opts, enum stela_nv_air_status expected)
+    const struct stela_nvidia_air_options *opts, enum stela_nvidia_air_status expected)
 {
-    struct stela_nv_air_compilation *owner = NULL; struct stela_nv_air_error error;
-#ifdef STELA_NV_AIR_ALLOC_TEST
+    struct stela_nvidia_air_compilation *owner = NULL; struct stela_nvidia_air_error error;
+#ifdef STELA_NVIDIA_AIR_ALLOC_TEST
     unsigned baseline = live_allocations;
 #endif
-    enum stela_nv_air_status status = stela_nv_air_compile(device, nak, library, selected, opts, &owner, &error);
+    enum stela_nvidia_air_status status = stela_nvidia_air_compile(device, nak, library, selected, opts, &owner, &error);
     if (status != expected) fprintf(stderr, "SM%u status%u expected%u: %s (AIR%u %s)\n",
         device->sm, status, expected, error.detail, error.air.kind, error.air.detail);
-    CHECK(status == expected && error.status == status && (owner != NULL) == (status == STELA_NV_AIR_OK));
-#ifdef STELA_NV_AIR_ALLOC_TEST
-    if (status != STELA_NV_AIR_OK) CHECK(live_allocations == baseline);
+    CHECK(status == expected && error.status == status && (owner != NULL) == (status == STELA_NVIDIA_AIR_OK));
+#ifdef STELA_NVIDIA_AIR_ALLOC_TEST
+    if (status != STELA_NVIDIA_AIR_OK) CHECK(live_allocations == baseline);
 #endif
     return owner;
 }
-static void destroy(struct stela_nv_air_compilation **owner)
+static void destroy(struct stela_nvidia_air_compilation **owner)
 {
-    stela_nv_air_destroy(owner); CHECK(!*owner); stela_nv_air_destroy(owner); stela_nv_air_destroy(NULL);
+    stela_nvidia_air_destroy(owner); CHECK(!*owner); stela_nvidia_air_destroy(owner); stela_nvidia_air_destroy(NULL);
 }
-struct reference {const struct stela_nv_air_provenance *p;};
+struct reference {const struct stela_nvidia_air_provenance *p;};
 static bool reference_threadgroup(const struct stela_air_buffer *buffer,
     struct stela_air_threadgroup_view *view,void *data)
 {
@@ -250,19 +250,19 @@ static uint64_t bits(const uint32_t *words, unsigned start, unsigned end)
     for (unsigned i = start; i < end; i++) value |= (uint64_t)((words[i / 32] >> (i % 32)) & 1) << (i - start);
     return value;
 }
-static void qmd(const struct nv_device_info *device, const struct stela_nv_air_compilation *owner,
+static void qmd(const struct nv_device_info *device, const struct stela_nvidia_air_compilation *owner,
     uint32_t count, uint32_t table_bytes)
 {
-    const struct nak_shader_bin *bin = stela_nv_air_binary(owner);
-    const struct stela_nv_air_provenance *p = stela_nv_air_provenance(owner);
-    struct stela_nv_compute_dispatch dispatch = {.qmd = {.addr = 0x800000, .smem_size = bin->info.cs.smem_size,
+    const struct nak_shader_bin *bin = stela_nvidia_air_binary(owner);
+    const struct stela_nvidia_air_provenance *p = stela_nvidia_air_provenance(owner);
+    struct stela_nvidia_compute_dispatch dispatch = {.qmd = {.addr = 0x800000, .smem_size = bin->info.cs.smem_size,
         .global_size = {1, 2, 3}, .num_cbufs = count ? 1 : 0}, .qmd_addr = 0x900000, .va_bits = 40};
     if (count) dispatch.qmd.cbufs[0] = (struct nak_qmd_cbuf) {.index = p->options.argument_cbuf,
         .size = table_bytes, .addr = 0x400000};
-    struct stela_nv_compute_encoded encoded; enum stela_nv_compute_error error;
-    bool valid = stela_nv_compute_encode(device, bin, &dispatch, &encoded, &error);
-    if (bin->info.slm_size || bin->info.crs_size) { CHECK(!valid && error == STELA_NV_COMPUTE_SCRATCH_UNSUPPORTED); return; }
-    CHECK(valid && error == STELA_NV_COMPUTE_OK && encoded.push_dw == 3);
+    struct stela_nvidia_compute_encoded encoded; enum stela_nvidia_compute_error error;
+    bool valid = stela_nvidia_compute_encode(device, bin, &dispatch, &encoded, &error);
+    if (bin->info.slm_size || bin->info.crs_size) { CHECK(!valid && error == STELA_NVIDIA_COMPUTE_SCRATCH_UNSUPPORTED); return; }
+    CHECK(valid && error == STELA_NVIDIA_COMPUTE_OK && encoded.push_dw == 3);
     uint32_t original[NAK_MAX_QMD_DWORDS] = {0}; nak_fill_qmd(device, &bin->info, &dispatch.qmd, original, encoded.qmd_size_B);
     CHECK(!memcmp(original, encoded.qmd, encoded.qmd_size_B));
     uint32_t shared, barriers;
@@ -338,31 +338,31 @@ static void specialize(nir_shader *shader, const uint8_t *table, unsigned count,
     for (unsigned i = 0; i < count; i++) CHECK(loads[i] == 1 && stores[i] == 1);
 }
 static void validate(const struct nv_device_info *device, const struct nak_compiler *nak,
-    const struct stela_metal_assembly *library, struct stela_nv_air_compilation *owner,
+    const struct stela_metal_assembly *library, struct stela_nvidia_air_compilation *owner,
     const char *fixture, bool semantic)
 {
-    const struct nak_shader_bin *bin = stela_nv_air_binary(owner);
-    const struct stela_nv_air_provenance *p = stela_nv_air_provenance(owner);
-    uint32_t count, table_bytes; const struct stela_nv_air_binding *map = stela_nv_air_bindings(owner, &count, &table_bytes);
-    CHECK(bin && p && map && bin->code && bin->code_size && stela_nv_air_nir(owner)->options);
+    const struct nak_shader_bin *bin = stela_nvidia_air_binary(owner);
+    const struct stela_nvidia_air_provenance *p = stela_nvidia_air_provenance(owner);
+    uint32_t count, table_bytes; const struct stela_nvidia_air_binding *map = stela_nvidia_air_bindings(owner, &count, &table_bytes);
+    CHECK(bin && p && map && bin->code && bin->code_size && stela_nvidia_air_nir(owner)->options);
     CHECK(table_bytes == ((count * 8 + 63) & ~63u));
-    struct stela_nv_air_buffer_view views[AIR_MAX_ARGUMENTS]; uint64_t addresses[AIR_MAX_ARGUMENTS];
+    struct stela_nvidia_air_buffer_view views[AIR_MAX_ARGUMENTS]; uint64_t addresses[AIR_MAX_ARGUMENTS];
     for (unsigned i = 0; i < count; i++) {
         unsigned reverse = count - 1 - i;
         CHECK(map[i].cbuf_offset == i * 8);
-        views[reverse] = (struct stela_nv_air_buffer_view) {.device = device, .owner = &views[reverse],
+        views[reverse] = (struct stela_nvidia_air_buffer_view) {.device = device, .owner = &views[reverse],
             .argument = map[i].buffer.argument, .index = map[i].buffer.index, .available_access = STELA_AIR_READ_WRITE,
             .allocation_va = UINT64_C(0x100000) + i * 4096u, .allocation_bytes = 4096, .offset = 256, .bytes = 2048};
         addresses[i] = views[reverse].allocation_va + views[reverse].offset;
     }
     uint8_t table[2 * AIR_MAX_ARGUMENTS * 8], second[sizeof(table)]; memset(table, 0xa5, sizeof(table));
-    CHECK(stela_nv_air_pack_arguments(owner, device, 40, views, count, table, sizeof(table)) == STELA_NV_AIR_OK);
+    CHECK(stela_nvidia_air_pack_arguments(owner, device, 40, views, count, table, sizeof(table)) == STELA_NVIDIA_AIR_OK);
     for (unsigned i = 0; i < count; i++) CHECK(get64(table + i * 8) == addresses[i]);
     for (unsigned i = count * 8; i < table_bytes; i++) CHECK(table[i] == 0);
     for (unsigned i = table_bytes; i < sizeof(table); i++) CHECK(table[i] == 0xa5);
     blake3_hash hash, after; _mesa_blake3_compute(bin->code, bin->code_size, hash);
     for (unsigned i = 0; i < count; i++) views[i].allocation_va += 0x1000000;
-    CHECK(stela_nv_air_pack_arguments(owner, device, 40, views, count, second, sizeof(second)) == STELA_NV_AIR_OK);
+    CHECK(stela_nvidia_air_pack_arguments(owner, device, 40, views, count, second, sizeof(second)) == STELA_NVIDIA_AIR_OK);
     for (unsigned i = 0; i < count; i++) CHECK(get64(second + i * 8) == addresses[i] + 0x1000000);
     _mesa_blake3_compute(bin->code, bin->code_size, after); CHECK(!memcmp(hash, after, sizeof(hash)));
     struct stela_metal_input_view original = {.size = sizeof(original), .abi = STELA_METAL_INPUT_ABI};
@@ -375,7 +375,7 @@ static void validate(const struct nv_device_info *device, const struct nak_compi
         .max_threadgroup_bytes = MIN2((unsigned)device->max_smem_per_wg_kB * 1024, UINT16_MAX)};
     struct stela_air_error error;
     nir_shader *nir = stela_air_to_nir(original.bytes + p->air_offset, (size_t)p->air_bytes, p->name,
-        stela_nv_air_nir(owner)->options, &opts, &error); CHECK(nir);
+        stela_nvidia_air_nir(owner)->options, &opts, &error); CHECK(nir);
     if (semantic) { nir_shader *copy = nir_shader_clone(NULL, nir); CHECK(copy); specialize(copy, table, count, addresses); ralloc_free(copy); }
     nak_preprocess_nir(nir, nak);
     struct nak_shader_bin *original_bin = nak_compile_shader(nir, true, nak, 0, NULL, false);
@@ -401,22 +401,22 @@ static void targets(struct stela_metal_assembly *library, enum stela_air_fp_prof
 {
     expect_targets(fixture);
     for (unsigned i = 0; i < ARRAY_SIZE(nv_targets); i++) {
-        struct nv_device_info device = stela_nv_target_device(nv_targets[i].sm, nv_targets[i].cls); struct nak_compiler *nak = compiler(&device);
-        struct stela_nv_air_options opts = options(); opts.fp_profile = fp;
-        struct stela_nv_air_compilation *owner = compile(&device, nak, library, 0, &opts, STELA_NV_AIR_OK);
+        struct nv_device_info device = stela_nvidia_target_device(nv_targets[i].sm, nv_targets[i].cls); struct nak_compiler *nak = compiler(&device);
+        struct stela_nvidia_air_options opts = options(); opts.fp_profile = fp;
+        struct stela_nvidia_air_compilation *owner = compile(&device, nak, library, 0, &opts, STELA_NVIDIA_AIR_OK);
         validate(&device, nak, library, owner, fixture, semantic); nak_compiler_destroy(nak);
-        nir_validate_shader((nir_shader *)stela_nv_air_nir(owner), "owned options after compiler destruction"); destroy(&owner);
+        nir_validate_shader((nir_shader *)stela_nvidia_air_nir(owner), "owned options after compiler destruction"); destroy(&owner);
     }
 }
-static void pack_failures(struct stela_nv_air_compilation *owner, const struct nv_device_info *device)
+static void pack_failures(struct stela_nvidia_air_compilation *owner, const struct nv_device_info *device)
 {
-    uint32_t count, table_bytes; const struct stela_nv_air_binding *map = stela_nv_air_bindings(owner, &count, &table_bytes);
+    uint32_t count, table_bytes; const struct stela_nvidia_air_binding *map = stela_nvidia_air_bindings(owner, &count, &table_bytes);
     CHECK(count == 1);
-    struct stela_nv_air_buffer_view good = {.device=device,.owner=&good,.argument=map[0].buffer.argument,.index=map[0].buffer.index,
+    struct stela_nvidia_air_buffer_view good = {.device=device,.owner=&good,.argument=map[0].buffer.argument,.index=map[0].buffer.index,
         .available_access=STELA_AIR_READ_WRITE,.allocation_va=0x100000,.allocation_bytes=4096,.offset=256,.bytes=2048};
     uint8_t output[2048], expected[sizeof(output)]; memset(expected, 0xa5, sizeof(expected));
     for (unsigned i = 0; i < 14; i++) {
-        struct stela_nv_air_buffer_view bad = good;
+        struct stela_nvidia_air_buffer_view bad = good;
         switch(i) {
         case 0: bad.argument++; break; case 1: bad.index++; break; case 2: bad.device=NULL; break;
         case 3: bad.owner=NULL; break; case 4: bad.available_access=STELA_AIR_READ; break;
@@ -426,20 +426,20 @@ static void pack_failures(struct stela_nv_air_compilation *owner, const struct n
         case 12: bad.allocation_va=(UINT64_C(1)<<40)-2048; break; case 13: bad.bytes=1; break;
         }
         memcpy(output, expected, sizeof(output));
-        CHECK(stela_nv_air_pack_arguments(owner, device, 40, &bad, 1, output, sizeof(output)) == STELA_NV_AIR_BINDING &&
+        CHECK(stela_nvidia_air_pack_arguments(owner, device, 40, &bad, 1, output, sizeof(output)) == STELA_NVIDIA_AIR_BINDING &&
             !memcmp(output, expected, sizeof(output)));
     }
     memcpy(output, expected, sizeof(output));
-    CHECK(stela_nv_air_pack_arguments(owner, device, 40, &good, 1, output, table_bytes-1) == STELA_NV_AIR_BINDING &&
+    CHECK(stela_nvidia_air_pack_arguments(owner, device, 40, &good, 1, output, table_bytes-1) == STELA_NVIDIA_AIR_BINDING &&
         !memcmp(output, expected, sizeof(output)));
-    CHECK(stela_nv_air_pack_arguments(owner, device, 40, &good, 0, output, sizeof(output)) == STELA_NV_AIR_BINDING);
-    CHECK(stela_nv_air_pack_arguments(owner, device, 0, &good, 1, output, sizeof(output)) == STELA_NV_AIR_INVALID);
-    CHECK(stela_nv_air_pack_arguments(owner, device, 64, &good, 1, output, sizeof(output)) == STELA_NV_AIR_INVALID);
+    CHECK(stela_nvidia_air_pack_arguments(owner, device, 40, &good, 0, output, sizeof(output)) == STELA_NVIDIA_AIR_BINDING);
+    CHECK(stela_nvidia_air_pack_arguments(owner, device, 0, &good, 1, output, sizeof(output)) == STELA_NVIDIA_AIR_INVALID);
+    CHECK(stela_nvidia_air_pack_arguments(owner, device, 64, &good, 1, output, sizeof(output)) == STELA_NVIDIA_AIR_INVALID);
 }
 static void selected_and_binding_tests(void)
 {
-    struct nv_device_info device=stela_nv_target_device(89, ADA_COMPUTE_A); struct nak_compiler *nak=compiler(&device);
-    struct stela_nv_air_options opts=options();
+    struct nv_device_info device=stela_nvidia_target_device(89, ADA_COMPUTE_A); struct nak_compiler *nak=compiler(&device);
+    struct stela_nvidia_air_options opts=options();
     const char *metadata="}\n!air.version = !{!0}\n!air.language_version = !{!1}\n"
         "!air.kernel = !{!2,!7}\n!0 = !{i32 2, i32 8, i32 0}\n"
         "!1 = !{!\"Metal\", i32 4, i32 0, i32 0}\n!2 = !{ptr @kernel, !3, !4}\n"
@@ -451,14 +451,14 @@ static void selected_and_binding_tests(void)
         "store i32 11, ptr addrspace(1) %out, align 4\nret void\n",metadata,
         "define void @other(i32 %tid, ptr addrspace(1) %out) {\nstore i32 99, ptr addrspace(1) %out, align 4\nret void\n}\n");
     struct stela_metal_assembly *library=two_entries(air); LLVMDisposeMemoryBuffer(air);
-    struct stela_nv_air_compilation *owner=compile(&device,nak,library,1,&opts,STELA_NV_AIR_OK);
-    const struct stela_nv_air_provenance *p=stela_nv_air_provenance(owner);
+    struct stela_nvidia_air_compilation *owner=compile(&device,nak,library,1,&opts,STELA_NVIDIA_AIR_OK);
+    const struct stela_nvidia_air_provenance *p=stela_nvidia_air_provenance(owner);
     CHECK(p->selected_entry==1&&!strcmp(p->name,"other")&&p->input.entry_count==2&&
         p->arguments[1].buffer.index==13&&p->arguments[1].buffer.access==STELA_AIR_WRITE&&
         !p->arguments[0].name&&!p->arguments[0].name_bytes);
     expect_owned("selected-second-entry",device.sm);validate(&device,nak,library,owner,"selected-second-entry",false);
     unsigned stores=0;
-    nir_foreach_function_impl(impl,(nir_shader *)stela_nv_air_nir(owner)) {
+    nir_foreach_function_impl(impl,(nir_shader *)stela_nvidia_air_nir(owner)) {
         nir_foreach_block(block,impl) {
             nir_foreach_instr(instr,block) {
                 if(instr->type!=nir_instr_type_intrinsic)continue;
@@ -477,27 +477,27 @@ static void selected_and_binding_tests(void)
     /* Distinct compiled owners coexist, with independently stable NIR options.
      * Both extreme legal cbuf slots and genuine3D specialization reach QMD. */
     opts.argument_cbuf=0; opts.workgroup_size[0]=4;opts.workgroup_size[1]=2;opts.workgroup_size[2]=2;
-    owner=compile(&device,nak,library,0,&opts,STELA_NV_AIR_OK);
+    owner=compile(&device,nak,library,0,&opts,STELA_NVIDIA_AIR_OK);
     opts.argument_cbuf=7;
-    struct stela_nv_air_compilation *other=compile(&device,nak,library,0,&opts,STELA_NV_AIR_OK);
+    struct stela_nvidia_air_compilation *other=compile(&device,nak,library,0,&opts,STELA_NVIDIA_AIR_OK);
     expect_owned("slot-seven-3d",device.sm);expect_owned("slot-zero-after-other-owner-destroy",device.sm);
     validate(&device,nak,library,other,"slot-seven-3d",true); destroy(&other);
     validate(&device,nak,library,owner,"slot-zero-after-other-owner-destroy",true);
-    uint32_t count,extent;const struct stela_nv_air_binding *map=stela_nv_air_bindings(owner,&count,&extent);CHECK(count==2);
-    struct stela_nv_air_buffer_view views[2];
-    for(unsigned i=0;i<2;i++) views[i]=(struct stela_nv_air_buffer_view){.device=&device,.owner=&views[i],
+    uint32_t count,extent;const struct stela_nvidia_air_binding *map=stela_nvidia_air_bindings(owner,&count,&extent);CHECK(count==2);
+    struct stela_nvidia_air_buffer_view views[2];
+    for(unsigned i=0;i<2;i++) views[i]=(struct stela_nvidia_air_buffer_view){.device=&device,.owner=&views[i],
         .argument=map[i].buffer.argument,.index=map[i].buffer.index,.available_access=STELA_AIR_READ_WRITE,
         .allocation_va=0x100000,.allocation_bytes=4096,.bytes=4096};
     uint8_t table[64],expected[64];memset(expected,0xa5,sizeof(expected));memcpy(table,expected,sizeof(table));
     views[1].argument=views[0].argument;views[1].index=views[0].index;
-    CHECK(stela_nv_air_pack_arguments(owner,&device,40,views,2,table,sizeof(table))==STELA_NV_AIR_BINDING&&!memcmp(table,expected,sizeof(table)));
+    CHECK(stela_nvidia_air_pack_arguments(owner,&device,40,views,2,table,sizeof(table))==STELA_NVIDIA_AIR_BINDING&&!memcmp(table,expected,sizeof(table)));
     views[1].argument=map[1].buffer.argument;views[1].index=map[1].buffer.index;
     /* Resource aliasing is permitted by this plain-buffer ABI; it is not
      * interpreted as a duplicate metadata key or a new ownership guarantee. */
-    CHECK(stela_nv_air_pack_arguments(owner,&device,40,views,2,table,sizeof(table))==STELA_NV_AIR_OK&&get64(table)==get64(table+8));
+    CHECK(stela_nvidia_air_pack_arguments(owner,&device,40,views,2,table,sizeof(table))==STELA_NVIDIA_AIR_OK&&get64(table)==get64(table+8));
     struct nv_device_info mismatch=device;mismatch.cls_compute=AMPERE_COMPUTE_B;
     memcpy(table,expected,sizeof(table));
-    CHECK(stela_nv_air_pack_arguments(owner,&mismatch,40,views,2,table,sizeof(table))==STELA_NV_AIR_DEVICE&&!memcmp(table,expected,sizeof(table)));
+    CHECK(stela_nvidia_air_pack_arguments(owner,&mismatch,40,views,2,table,sizeof(table))==STELA_NVIDIA_AIR_DEVICE&&!memcmp(table,expected,sizeof(table)));
     destroy(&owner);stela_metal_assembly_destroy(&library);nak_compiler_destroy(nak);
 }
 static void original_tests(void)
@@ -506,23 +506,23 @@ static void original_tests(void)
     LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_test_store_body, "");
     struct stela_metal_assembly *library = fixture(air); LLVMDisposeMemoryBuffer(air);
     targets(library, STELA_AIR_FP_IEEE_DEFAULT, "original-integer", false);
-    struct nv_device_info device = stela_nv_target_device(89, ADA_COMPUTE_A); struct nak_compiler *nak = compiler(&device);
-    struct stela_nv_air_options opts=options();
+    struct nv_device_info device = stela_nvidia_target_device(89, ADA_COMPUTE_A); struct nak_compiler *nak = compiler(&device);
+    struct stela_nvidia_air_options opts=options();
     CHECK(!nak->nir_options.cb_data);
     unsigned before_callback_refusal=allocations;
     nak->nir_options.cb_data=&device;
-    CHECK(!compile(&device,nak,library,0,&opts,STELA_NV_AIR_UNSUPPORTED)&&allocations==before_callback_refusal);
+    CHECK(!compile(&device,nak,library,0,&opts,STELA_NVIDIA_AIR_UNSUPPORTED)&&allocations==before_callback_refusal);
     nak->nir_options.cb_data=NULL;
-    struct stela_nv_air_compilation *owner=compile(&device,nak,library,0,&opts,STELA_NV_AIR_OK);
+    struct stela_nvidia_air_compilation *owner=compile(&device,nak,library,0,&opts,STELA_NVIDIA_AIR_OK);
     pack_failures(owner,&device);
-    const struct stela_nv_air_provenance *p=stela_nv_air_provenance(owner);
+    const struct stela_nvidia_air_provenance *p=stela_nvidia_air_provenance(owner);
     const struct stela_metal_library_manifest *m=stela_metal_assembly_manifest(library);
     CHECK(!memcmp(&p->input,&m->input,sizeof(p->input)) && !memcmp(&p->entry,&m->entries[0].entry,sizeof(p->entry)) &&
         !memcmp(p->air_sha256,m->entries[0].air_sha256,32) && p->air_offset==m->entries[0].air_offset &&
         p->arguments[1].name!=m->entries[0].arguments[1].name && !strcmp(p->arguments[1].name,m->entries[0].arguments[1].name));
     stela_metal_assembly_destroy(&library); nak_compiler_destroy(nak);
     CHECK(!strcmp(p->name,"kernel") && !strcmp(p->arguments[1].type_name,"uint"));
-    nir_validate_shader((nir_shader *)stela_nv_air_nir(owner),"after all input/compiler storage destruction");
+    nir_validate_shader((nir_shader *)stela_nvidia_air_nir(owner),"after all input/compiler storage destruction");
     destroy(&owner);
     for(unsigned buffers=0;buffers<=31;buffers++) {
         air=multibuffer(buffers); library=fixture(air); LLVMDisposeMemoryBuffer(air);
@@ -532,40 +532,40 @@ static void original_tests(void)
     air=stela_air_test_bitcode("ret void\n", ""); library=fixture(air); LLVMDisposeMemoryBuffer(air);
     targets(library,STELA_AIR_FP_IEEE_DEFAULT,"unused-buffer-no-effects",true); stela_metal_assembly_destroy(&library);
     air=stela_air_test_bitcode(stela_air_test_store_body, ""); library=fixture(air); LLVMDisposeMemoryBuffer(air); nak=compiler(&device);
-    struct stela_nv_air_options bad=opts; bad.max_code_bytes=4; CHECK(!compile(&device,nak,library,0,&bad,STELA_NV_AIR_LIMIT));
-    bad=opts; bad.max_instructions=1; CHECK(!compile(&device,nak,library,0,&bad,STELA_NV_AIR_FRONTEND));
-    bad=opts; bad.argument_cbuf=8; CHECK(!compile(&device,nak,library,0,&bad,STELA_NV_AIR_UNSUPPORTED));
-    bad=opts; bad.workgroup_size[2]=65; CHECK(!compile(&device,nak,library,0,&bad,STELA_NV_AIR_UNSUPPORTED));
-    bad=opts; bad.fp_profile=(enum stela_air_fp_profile)99; CHECK(!compile(&device,nak,library,0,&bad,STELA_NV_AIR_UNSUPPORTED));
-    struct nv_device_info mismatch=device; mismatch.sm=86; CHECK(!compile(&mismatch,nak,library,0,&opts,STELA_NV_AIR_DEVICE));
-    mismatch=device; mismatch.max_warps_per_mp--; CHECK(!compile(&mismatch,nak,library,0,&opts,STELA_NV_AIR_DEVICE));
-    CHECK(!compile(&device,nak,library,1,&opts,STELA_NV_AIR_INVALID));
-    bad=opts;bad.size--;CHECK(!compile(&device,nak,library,0,&bad,STELA_NV_AIR_INVALID));
-    bad=opts;bad.abi++;CHECK(!compile(&device,nak,library,0,&bad,STELA_NV_AIR_INVALID));
-    bad=opts;bad.max_code_bytes=0;CHECK(!compile(&device,nak,library,0,&bad,STELA_NV_AIR_LIMIT));
-    bad=opts;bad.max_code_bytes=UINT32_MAX;CHECK(!compile(&device,nak,library,0,&bad,STELA_NV_AIR_LIMIT));
-    bad=opts;bad.record_assembly=2;CHECK(!compile(&device,nak,library,0,&bad,STELA_NV_AIR_UNSUPPORTED));
-    bad=opts;bad.workgroup_size[0]=0;CHECK(!compile(&device,nak,library,0,&bad,STELA_NV_AIR_UNSUPPORTED));
-    bad=opts;bad.workgroup_size[0]=1024;bad.workgroup_size[1]=2;CHECK(!compile(&device,nak,library,0,&bad,STELA_NV_AIR_UNSUPPORTED));
-    mismatch=device;mismatch.sm_smem_size_count=0;CHECK(!compile(&mismatch,nak,library,0,&opts,STELA_NV_AIR_DEVICE));
-    mismatch=device;mismatch.sm_smem_sizes_kB[1]++;CHECK(!compile(&mismatch,nak,library,0,&opts,STELA_NV_AIR_DEVICE));
-    mismatch=device;mismatch.sm_smem_sizes_kB[1]=mismatch.sm_smem_sizes_kB[0];CHECK(!compile(&mismatch,nak,library,0,&opts,STELA_NV_AIR_DEVICE));
-    owner=compile(&device,nak,library,0,&opts,STELA_NV_AIR_OK);
-    struct stela_nv_air_compilation *retained=owner;struct stela_nv_air_error error;
-    CHECK(stela_nv_air_compile(&device,nak,library,0,&opts,&owner,&error)==STELA_NV_AIR_INVALID&&owner==retained);
-    CHECK(stela_nv_air_compile(NULL,nak,library,0,&opts,&owner,&error)==STELA_NV_AIR_INVALID&&owner==retained);
+    struct stela_nvidia_air_options bad=opts; bad.max_code_bytes=4; CHECK(!compile(&device,nak,library,0,&bad,STELA_NVIDIA_AIR_LIMIT));
+    bad=opts; bad.max_instructions=1; CHECK(!compile(&device,nak,library,0,&bad,STELA_NVIDIA_AIR_FRONTEND));
+    bad=opts; bad.argument_cbuf=8; CHECK(!compile(&device,nak,library,0,&bad,STELA_NVIDIA_AIR_UNSUPPORTED));
+    bad=opts; bad.workgroup_size[2]=65; CHECK(!compile(&device,nak,library,0,&bad,STELA_NVIDIA_AIR_UNSUPPORTED));
+    bad=opts; bad.fp_profile=(enum stela_air_fp_profile)99; CHECK(!compile(&device,nak,library,0,&bad,STELA_NVIDIA_AIR_UNSUPPORTED));
+    struct nv_device_info mismatch=device; mismatch.sm=86; CHECK(!compile(&mismatch,nak,library,0,&opts,STELA_NVIDIA_AIR_DEVICE));
+    mismatch=device; mismatch.max_warps_per_mp--; CHECK(!compile(&mismatch,nak,library,0,&opts,STELA_NVIDIA_AIR_DEVICE));
+    CHECK(!compile(&device,nak,library,1,&opts,STELA_NVIDIA_AIR_INVALID));
+    bad=opts;bad.size--;CHECK(!compile(&device,nak,library,0,&bad,STELA_NVIDIA_AIR_INVALID));
+    bad=opts;bad.abi++;CHECK(!compile(&device,nak,library,0,&bad,STELA_NVIDIA_AIR_INVALID));
+    bad=opts;bad.max_code_bytes=0;CHECK(!compile(&device,nak,library,0,&bad,STELA_NVIDIA_AIR_LIMIT));
+    bad=opts;bad.max_code_bytes=UINT32_MAX;CHECK(!compile(&device,nak,library,0,&bad,STELA_NVIDIA_AIR_LIMIT));
+    bad=opts;bad.record_assembly=2;CHECK(!compile(&device,nak,library,0,&bad,STELA_NVIDIA_AIR_UNSUPPORTED));
+    bad=opts;bad.workgroup_size[0]=0;CHECK(!compile(&device,nak,library,0,&bad,STELA_NVIDIA_AIR_UNSUPPORTED));
+    bad=opts;bad.workgroup_size[0]=1024;bad.workgroup_size[1]=2;CHECK(!compile(&device,nak,library,0,&bad,STELA_NVIDIA_AIR_UNSUPPORTED));
+    mismatch=device;mismatch.sm_smem_size_count=0;CHECK(!compile(&mismatch,nak,library,0,&opts,STELA_NVIDIA_AIR_DEVICE));
+    mismatch=device;mismatch.sm_smem_sizes_kB[1]++;CHECK(!compile(&mismatch,nak,library,0,&opts,STELA_NVIDIA_AIR_DEVICE));
+    mismatch=device;mismatch.sm_smem_sizes_kB[1]=mismatch.sm_smem_sizes_kB[0];CHECK(!compile(&mismatch,nak,library,0,&opts,STELA_NVIDIA_AIR_DEVICE));
+    owner=compile(&device,nak,library,0,&opts,STELA_NVIDIA_AIR_OK);
+    struct stela_nvidia_air_compilation *retained=owner;struct stela_nvidia_air_error error;
+    CHECK(stela_nvidia_air_compile(&device,nak,library,0,&opts,&owner,&error)==STELA_NVIDIA_AIR_INVALID&&owner==retained);
+    CHECK(stela_nvidia_air_compile(NULL,nak,library,0,&opts,&owner,&error)==STELA_NVIDIA_AIR_INVALID&&owner==retained);
     destroy(&owner);
-    bad=opts;bad.record_assembly=0;owner=compile(&device,nak,library,0,&bad,STELA_NV_AIR_OK);
-    CHECK(!stela_nv_air_binary(owner)->asm_str);expect_owned("without-assembly-text",device.sm);validate(&device,nak,library,owner,"without-assembly-text",false);destroy(&owner);
-#ifdef STELA_NV_AIR_ALLOC_TEST
-    allocations=0; owner=compile(&device,nak,library,0,&opts,STELA_NV_AIR_OK); CHECK(allocations==2); destroy(&owner);
-    for(unsigned fail=1;fail<=2;fail++) { allocations=0;fail_allocation=fail;CHECK(!compile(&device,nak,library,0,&opts,STELA_NV_AIR_ALLOCATION)&&!live_allocations); }
+    bad=opts;bad.record_assembly=0;owner=compile(&device,nak,library,0,&bad,STELA_NVIDIA_AIR_OK);
+    CHECK(!stela_nvidia_air_binary(owner)->asm_str);expect_owned("without-assembly-text",device.sm);validate(&device,nak,library,owner,"without-assembly-text",false);destroy(&owner);
+#ifdef STELA_NVIDIA_AIR_ALLOC_TEST
+    allocations=0; owner=compile(&device,nak,library,0,&opts,STELA_NVIDIA_AIR_OK); CHECK(allocations==2); destroy(&owner);
+    for(unsigned fail=1;fail<=2;fail++) { allocations=0;fail_allocation=fail;CHECK(!compile(&device,nak,library,0,&opts,STELA_NVIDIA_AIR_ALLOCATION)&&!live_allocations); }
     fail_allocation=0;
 #endif
     stela_metal_assembly_destroy(&library);
     air=stela_air_test_bitcode("call void @unsupported()\nret void\n","declare void @unsupported()\n");
     library=fixture(air);LLVMDisposeMemoryBuffer(air);
-    CHECK(!compile(&device,nak,library,0,&opts,STELA_NV_AIR_FRONTEND));
+    CHECK(!compile(&device,nak,library,0,&opts,STELA_NVIDIA_AIR_FRONTEND));
     stela_metal_assembly_destroy(&library);
     /* Complete dynamic AS3 reflection reaches this owner's explicit missing
      * dispatch-specialization refusal, rather than the canonical inspector's
@@ -584,9 +584,9 @@ static void original_tests(void)
         " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"scratch\"}\n","");
     struct bytes shared=archive(LLVMGetBufferStart(air),LLVMGetBufferSize(air),"kernel",9,4,1,27,2);
     library=assemble(&shared);free(shared.data);LLVMDisposeMemoryBuffer(air);
-    CHECK(!compile(&device,nak,library,0,&opts,STELA_NV_AIR_UNSUPPORTED));
+    CHECK(!compile(&device,nak,library,0,&opts,STELA_NVIDIA_AIR_UNSUPPORTED));
     nak_compiler_destroy(nak); stela_metal_assembly_destroy(&library);
-    CHECK(!stela_nv_air_binary(NULL)&&!stela_nv_air_nir(NULL)&&!stela_nv_air_provenance(NULL));
+    CHECK(!stela_nvidia_air_binary(NULL)&&!stela_nvidia_air_nir(NULL)&&!stela_nvidia_air_provenance(NULL));
 }
 static struct bytes read_file(const char *path)
 {
@@ -615,17 +615,17 @@ static void source_input(int argc,char **argv)
     struct stela_metal_assembly_options assembly_options=stela_metal_assembly_default_options();
     struct stela_metal_assembly_error error;struct stela_metal_assembly *library=NULL;
     CHECK(stela_metal_assemble_source(&assembly_options,&config,&request,&compiled,&library,&error)==STELA_METAL_ASSEMBLY_OK);
-    struct nv_device_info device=stela_nv_target_device(89, ADA_COMPUTE_A);struct nak_compiler *nak=compiler(&device);
-    struct stela_nv_air_options opts=options();opts.fp_profile=STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
-    struct stela_nv_air_compilation *owner=compile(&device,nak,library,0,&opts,STELA_NV_AIR_OK);
+    struct nv_device_info device=stela_nvidia_target_device(89, ADA_COMPUTE_A);struct nak_compiler *nak=compiler(&device);
+    struct stela_nvidia_air_options opts=options();opts.fp_profile=STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
+    struct stela_nvidia_air_compilation *owner=compile(&device,nak,library,0,&opts,STELA_NVIDIA_AIR_OK);
     expect_owned("original-source-owner",device.sm);validate(&device,nak,library,owner,"original-source-owner",false);
     free(air.data);free(source.data);stela_metal_assembly_destroy(&library);nak_compiler_destroy(nak);
-    const struct stela_nv_air_provenance *p=stela_nv_air_provenance(owner);
+    const struct stela_nvidia_air_provenance *p=stela_nvidia_air_provenance(owner);
     CHECK(p->library_flags==STELA_METAL_LIBRARY_SOURCE_COMPILED&&p->compiler_profile==config.profile&&
         p->request_language==0x40001&&p->request_fast_math==1&&
         !memcmp(p->source_sha256,identity.data,32)&&!memcmp(p->input.original_sha256,identity.data+32,32)&&
         !memcmp(&p->build,identity.data+64,sizeof(p->build)));
-    free(identity.data);nir_validate_shader((nir_shader *)stela_nv_air_nir(owner),"source owner after input/compiler destruction");destroy(&owner);
+    free(identity.data);nir_validate_shader((nir_shader *)stela_nvidia_air_nir(owner),"source owner after input/compiler destruction");destroy(&owner);
 }
 static void requested_threadgroups(int argc,char **argv,struct stela_metal_threadgroup_request_row *rows)
 {
@@ -650,32 +650,32 @@ static void threadgroup_input(int argc,char **argv)
     struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);free(air.data);
     expect_targets("threadgroup");
     for(unsigned i=0;i<ARRAY_SIZE(nv_targets);i++) {
-        struct nv_device_info device=stela_nv_target_device(nv_targets[i].sm, nv_targets[i].cls);struct nak_compiler *nak=compiler(&device);
-        struct stela_nv_air_options opts=options();opts.workgroup_size[0]=(uint32_t)workgroup;
-        struct stela_nv_air_compilation *owner=NULL;struct stela_nv_air_error error;
-        CHECK(stela_nv_air_compile_specialized(&device,nak,library,0,&opts,&request,&owner,&error)==STELA_NV_AIR_OK&&owner);
-        const struct stela_nv_air_provenance *p=stela_nv_air_provenance(owner);
+        struct nv_device_info device=stela_nvidia_target_device(nv_targets[i].sm, nv_targets[i].cls);struct nak_compiler *nak=compiler(&device);
+        struct stela_nvidia_air_options opts=options();opts.workgroup_size[0]=(uint32_t)workgroup;
+        struct stela_nvidia_air_compilation *owner=NULL;struct stela_nvidia_air_error error;
+        CHECK(stela_nvidia_air_compile_specialized(&device,nak,library,0,&opts,&request,&owner,&error)==STELA_NVIDIA_AIR_OK&&owner);
+        const struct stela_nvidia_air_provenance *p=stela_nvidia_air_provenance(owner);
         if(i==0) {
             struct stela_metal_threadgroup_request bad_request=request;
-            struct stela_nv_air_compilation *failed=NULL;
+            struct stela_nvidia_air_compilation *failed=NULL;
             bad_request.size--;
-            CHECK(stela_nv_air_compile_specialized(&device,nak,library,0,&opts,&bad_request,&failed,&error)==STELA_NV_AIR_INVALID&&!failed);
+            CHECK(stela_nvidia_air_compile_specialized(&device,nak,library,0,&opts,&bad_request,&failed,&error)==STELA_NVIDIA_AIR_INVALID&&!failed);
             bad_request=request;bad_request.count=0;
-            CHECK(stela_nv_air_compile_specialized(&device,nak,library,0,&opts,&bad_request,&failed,&error)==STELA_NV_AIR_UNSUPPORTED&&!failed);
+            CHECK(stela_nvidia_air_compile_specialized(&device,nak,library,0,&opts,&bad_request,&failed,&error)==STELA_NVIDIA_AIR_UNSUPPORTED&&!failed);
             bad_request=request;
             struct stela_metal_threadgroup_request_row bad_rows[AIR_MAX_ARGUMENTS];memcpy(bad_rows,rows,sizeof(rows));
             bad_request.rows=bad_rows;bad_rows[0].bytes=0;
-            CHECK(stela_nv_air_compile_specialized(&device,nak,library,0,&opts,&bad_request,&failed,&error)==STELA_NV_AIR_UNSUPPORTED&&!failed);
+            CHECK(stela_nvidia_air_compile_specialized(&device,nak,library,0,&opts,&bad_request,&failed,&error)==STELA_NVIDIA_AIR_UNSUPPORTED&&!failed);
             bad_rows[0].bytes=UINT64_C(0x100000000);
-            CHECK(stela_nv_air_compile_specialized(&device,nak,library,0,&opts,&bad_request,&failed,&error)==STELA_NV_AIR_LIMIT&&!failed);
+            CHECK(stela_nvidia_air_compile_specialized(&device,nak,library,0,&opts,&bad_request,&failed,&error)==STELA_NVIDIA_AIR_LIMIT&&!failed);
             bad_rows[0].bytes=65536;
-            CHECK(stela_nv_air_compile_specialized(&device,nak,library,0,&opts,&bad_request,&failed,&error)==STELA_NV_AIR_LIMIT&&!failed); /* Before original u16 try_into(). */
-#ifdef STELA_NV_AIR_ALLOC_TEST
+            CHECK(stela_nvidia_air_compile_specialized(&device,nak,library,0,&opts,&bad_request,&failed,&error)==STELA_NVIDIA_AIR_LIMIT&&!failed); /* Before original u16 try_into(). */
+#ifdef STELA_NVIDIA_AIR_ALLOC_TEST
             unsigned baseline=live_allocations;
             bad_request=request;
             for(unsigned fail=1;fail<=(2);fail++) {
                 allocations=0;fail_allocation=fail;
-                CHECK(stela_nv_air_compile_specialized(&device,nak,library,0,&opts,&bad_request,&failed,&error)==STELA_NV_AIR_ALLOCATION&&!failed&&live_allocations==baseline);
+                CHECK(stela_nvidia_air_compile_specialized(&device,nak,library,0,&opts,&bad_request,&failed,&error)==STELA_NVIDIA_AIR_ALLOCATION&&!failed&&live_allocations==baseline);
             }
             fail_allocation=0;
 #endif
@@ -687,7 +687,7 @@ static void threadgroup_input(int argc,char **argv)
         CHECK(p->threadgroup.bindings[0].bytes&&p->threadgroup.bindings[0].alignment>=16);
         memcpy(rows,saved,sizeof(rows));CHECK(stela_metal_threadgroup_matches(&p->threadgroup,&request));
         validate(&device,nak,library,owner,"threadgroup",false);
-        nak_compiler_destroy(nak);nir_validate_shader((nir_shader *)stela_nv_air_nir(owner),"dynamic options after compiler destruction");
+        nak_compiler_destroy(nak);nir_validate_shader((nir_shader *)stela_nvidia_air_nir(owner),"dynamic options after compiler destruction");
         CHECK(stela_metal_threadgroup_matches(&p->threadgroup,&request));destroy(&owner);
     }
     stela_metal_assembly_destroy(&library);
@@ -704,10 +704,10 @@ static void shared_refusal(int argc,char **argv)
         record_expect_refusal(target,STELA_REFUSAL_DYNAMIC_THREADGROUP);
     }
     for(unsigned i=0;i<ARRAY_SIZE(nv_targets);i++) {
-        struct nv_device_info device=stela_nv_target_device(nv_targets[i].sm, nv_targets[i].cls);struct nak_compiler *nak=compiler(&device);
-        struct stela_nv_air_options opts=options();struct stela_nv_air_compilation *owner=NULL;struct stela_nv_air_error error;
-        CHECK(stela_nv_air_compile(&device,nak,library,0,&opts,&owner,&error)==STELA_NV_AIR_UNSUPPORTED&&
-            !owner&&error.status==STELA_NV_AIR_UNSUPPORTED&&error.air.kind==STELA_AIR_OK&&strstr(error.detail,"binding specialization"));
+        struct nv_device_info device=stela_nvidia_target_device(nv_targets[i].sm, nv_targets[i].cls);struct nak_compiler *nak=compiler(&device);
+        struct stela_nvidia_air_options opts=options();struct stela_nvidia_air_compilation *owner=NULL;struct stela_nvidia_air_error error;
+        CHECK(stela_nvidia_air_compile(&device,nak,library,0,&opts,&owner,&error)==STELA_NVIDIA_AIR_UNSUPPORTED&&
+            !owner&&error.status==STELA_NVIDIA_AIR_UNSUPPORTED&&error.air.kind==STELA_AIR_OK&&strstr(error.detail,"binding specialization"));
         char target[64];owned_target(target,"shared-refusal",device.sm);record_refused(target,STELA_REFUSAL_DYNAMIC_THREADGROUP);
         nak_compiler_destroy(nak);
     }
@@ -728,7 +728,7 @@ int main(int argc,char **argv)
         targets(library,argc==5?(enum stela_air_fp_profile)strtoul(argv[4],NULL,10):STELA_AIR_FP_IEEE_DEFAULT,"unchanged-original-file",false);
         stela_metal_assembly_destroy(&library);
     }
-#ifdef STELA_NV_AIR_ALLOC_TEST
+#ifdef STELA_NVIDIA_AIR_ALLOC_TEST
     CHECK(!live_allocations);
 #endif
     return 0;

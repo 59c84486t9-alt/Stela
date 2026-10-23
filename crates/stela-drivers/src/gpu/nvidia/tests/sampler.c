@@ -14,21 +14,21 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
-#define SAMPLER_CASE_STATE struct stela_nv_sampler_state
+#define SAMPLER_CASE_STATE struct stela_nvidia_sampler_state
 #include "sampler_cases.h"
 #undef SAMPLER_CASE_STATE
 #include "sampler_expected.h"
 
 static const unsigned owner = 1;
 
-static struct stela_nv_image make_image(const struct nv_device_info *dev, enum pipe_format format)
+static struct stela_nvidia_image make_image(const struct nv_device_info *dev, enum pipe_format format)
 {
-    const struct stela_nv_image_request req = {
+    const struct stela_nvidia_image_request req = {
         .format = format, .width = 129, .height = 87, .layers = 3, .levels = 8,
-        .usage = STELA_NV_IMAGE_TEXTURE,
+        .usage = STELA_NVIDIA_IMAGE_TEXTURE,
     };
-    struct stela_nv_image image;
-    assert(stela_nv_image_init(dev, &owner, &req, &image) == 0);
+    struct stela_nvidia_image image;
+    assert(stela_nvidia_image_init(dev, &owner, &req, &image) == 0);
     return image;
 }
 
@@ -38,7 +38,7 @@ static bool integer_color(VkBorderColor color)
 }
 
 /* Fields decoded independently of the expected words. */
-static void decoded_fields(const struct stela_nv_sampler_state *state, const uint32_t *bits)
+static void decoded_fields(const struct stela_nvidia_sampler_state *state, const uint32_t *bits)
 {
     assert(!NVVAL_GET_X(bits[0], NV9097_TEXSAMP0_DEPTH_COMPARE));
     const uint32_t mag = state->mag_filter == VK_FILTER_LINEAR ?
@@ -60,18 +60,18 @@ static bool supported_case(unsigned index)
 
 static void paired_formats(const struct nv_device_info *dev, enum pipe_format format)
 {
-    struct stela_nv_image image = make_image(dev, format);
-    for (unsigned i = 0; i < STELA_NV_SAMPLER_CASES; i++) {
-        struct stela_nv_sampler_state state = sampler_case(i);
+    struct stela_nvidia_image image = make_image(dev, format);
+    for (unsigned i = 0; i < STELA_NVIDIA_SAMPLER_CASES; i++) {
+        struct stela_nvidia_sampler_state state = sampler_case(i);
         state.image_view_is_srgb = util_format_is_srgb(format);
-        struct stela_nv_sampler actual, before;
+        struct stela_nvidia_sampler actual, before;
         memset(&actual, 0xa5, sizeof(actual)); memcpy(&before, &actual, sizeof(actual));
         const bool filtering = state.mag_filter == VK_FILTER_LINEAR || state.min_filter == VK_FILTER_LINEAR ||
                                state.mipmap_mode == VK_SAMPLER_MIPMAP_MODE_LINEAR || state.anisotropy_enable;
         const bool numeric_match = integer_color(state.border_color) == util_format_is_pure_integer(format);
         const int expected = !supported_case(i) ? -95 : !numeric_match ? -22 :
                              filtering && !nil_format_supports_filtering(dev, format) ? -95 : 0;
-        const int error = stela_nv_sampler_encode(&image, &state, &actual);
+        const int error = stela_nvidia_sampler_encode(&image, &state, &actual);
         assert(error == expected);
         if (error) {
             assert(memcmp(&actual, &before, sizeof(actual)) == 0);
@@ -81,10 +81,10 @@ static void paired_formats(const struct nv_device_info *dev, enum pipe_format fo
                           sizeof(actual.header.bits)) == 0);
             decoded_fields(&state, actual.header.bits);
             /* Caller-written layout metadata is never used for format policy. */
-            struct stela_nv_image candidate = image;
+            struct stela_nvidia_image candidate = image;
             memset(&candidate.layout, 0xff, sizeof(candidate.layout));
-            struct stela_nv_sampler guarded;
-            assert(stela_nv_sampler_encode(&candidate, &state, &guarded) == 0);
+            struct stela_nvidia_sampler guarded;
+            assert(stela_nvidia_sampler_encode(&candidate, &state, &guarded) == 0);
             assert(memcmp(guarded.header.bits, actual.header.bits, sizeof(actual.header.bits)) == 0);
         }
     }
@@ -92,11 +92,11 @@ static void paired_formats(const struct nv_device_info *dev, enum pipe_format fo
 
 static void invalid_states_are_atomic(const struct nv_device_info *dev)
 {
-    const struct stela_nv_image image = make_image(dev, PIPE_FORMAT_R8G8B8A8_UNORM);
+    const struct stela_nvidia_image image = make_image(dev, PIPE_FORMAT_R8G8B8A8_UNORM);
     for (unsigned fault = 0; fault < 37; fault++) {
-        struct stela_nv_image candidate = image;
-        struct stela_nv_sampler_state state = sampler_case(0);
-        struct stela_nv_sampler out, before;
+        struct stela_nvidia_image candidate = image;
+        struct stela_nvidia_sampler_state state = sampler_case(0);
+        struct stela_nvidia_sampler out, before;
         memset(&out, 0xa5, sizeof(out)); memcpy(&before, &out, sizeof(out));
         int expected = -22;
         switch (fault) {
@@ -129,7 +129,7 @@ static void invalid_states_are_atomic(const struct nv_device_info *dev)
         case 26: candidate.owner = NULL; break;
         case 27: candidate.cls_eng3d++; break;
         case 28: candidate.device_type = NV_DEVICE_TYPE_SOC; break;
-        case 29: candidate.request.usage = STELA_NV_IMAGE_STORAGE; expected = -95; break;
+        case 29: candidate.request.usage = STELA_NVIDIA_IMAGE_STORAGE; expected = -95; break;
         case 30: state.flags = VK_SAMPLER_CREATE_NON_SEAMLESS_CUBE_MAP_BIT_EXT; expected = -95; break;
         case 31: state.border_color_component_mapping.r = VK_COMPONENT_SWIZZLE_R; expected = -95; break;
         case 32: state.compare_enable = true; expected = -95; break;
@@ -138,25 +138,25 @@ static void invalid_states_are_atomic(const struct nv_device_info *dev)
         case 35: candidate.request.format = PIPE_FORMAT_COUNT; break;
         case 36: state.border_color = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK; break;
         }
-        assert(stela_nv_sampler_encode(&candidate, &state, &out) == expected);
+        assert(stela_nvidia_sampler_encode(&candidate, &state, &out) == expected);
         assert(memcmp(&out, &before, sizeof(out)) == 0);
     }
-    struct stela_nv_sampler_state state = sampler_case(0);
-    struct stela_nv_sampler out;
-    assert(stela_nv_sampler_encode(NULL, &state, &out) == -22);
-    assert(stela_nv_sampler_encode(&image, NULL, &out) == -22);
-    assert(stela_nv_sampler_encode(&image, &state, NULL) == -22);
+    struct stela_nvidia_sampler_state state = sampler_case(0);
+    struct stela_nvidia_sampler out;
+    assert(stela_nvidia_sampler_encode(NULL, &state, &out) == -22);
+    assert(stela_nvidia_sampler_encode(&image, NULL, &out) == -22);
+    assert(stela_nvidia_sampler_encode(&image, &state, NULL) == -22);
 }
 
 static void standard_borders_and_integer_filtering(const struct nv_device_info *dev, enum pipe_format format)
 {
-    const struct stela_nv_image image = make_image(dev, format);
+    const struct stela_nvidia_image image = make_image(dev, format);
     const VkBorderColor colors[] = {VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
         VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK, VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
         VK_BORDER_COLOR_INT_TRANSPARENT_BLACK, VK_BORDER_COLOR_INT_OPAQUE_BLACK, VK_BORDER_COLOR_INT_OPAQUE_WHITE};
     const bool image_integer = util_format_is_pure_integer(format);
     for (unsigned color = 0; color < ARRAY_SIZE(colors); color++) {
-        struct stela_nv_sampler_state state = sampler_case(0);
+        struct stela_nvidia_sampler_state state = sampler_case(0);
         state.border_color = colors[color];
         state.image_view_is_srgb = util_format_is_srgb(format);
         const bool integer = color >= 3;
@@ -167,9 +167,9 @@ static void standard_borders_and_integer_filtering(const struct nv_device_info *
             if (integer) state.border_color_value.uint32[c] = value;
             else state.border_color_value.float32[c] = (float)value;
         }
-        struct stela_nv_sampler out, before;
+        struct stela_nvidia_sampler out, before;
         memset(&out, 0xa5, sizeof(out)); memcpy(&before, &out, sizeof(out));
-        const int error = stela_nv_sampler_encode(&image, &state, &out);
+        const int error = stela_nvidia_sampler_encode(&image, &state, &out);
         assert(error == (integer == image_integer ? 0 : -22));
         if (error) {
             assert(memcmp(&out, &before, sizeof(out)) == 0);
@@ -180,20 +180,20 @@ static void standard_borders_and_integer_filtering(const struct nv_device_info *
         assert(memcmp(&out.header.bits[4], state.border_color_value.uint32, 16) == 0);
         if (integer) {
             for (unsigned filtering = 0; filtering < 4; filtering++) {
-                struct stela_nv_sampler_state filtered = state;
+                struct stela_nvidia_sampler_state filtered = state;
                 if (filtering == 0) filtered.mag_filter = VK_FILTER_LINEAR;
                 if (filtering == 1) filtered.min_filter = VK_FILTER_LINEAR;
                 if (filtering == 2) filtered.mipmap_mode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
                 if (filtering == 3) { filtered.anisotropy_enable = true; filtered.max_anisotropy = 2.0f; }
-                struct stela_nv_sampler unchanged;
+                struct stela_nvidia_sampler unchanged;
                 memcpy(&unchanged, &out, sizeof(out));
-                assert(stela_nv_sampler_encode(&image, &filtered, &out) == -95);
+                assert(stela_nvidia_sampler_encode(&image, &filtered, &out) == -95);
                 assert(memcmp(&out, &unchanged, sizeof(out)) == 0);
             }
             state.border_color_value.uint32[0] = UINT32_MAX;
-            struct stela_nv_sampler unchanged;
+            struct stela_nvidia_sampler unchanged;
             memcpy(&unchanged, &out, sizeof(out));
-            assert(stela_nv_sampler_encode(&image, &state, &out) == -22);
+            assert(stela_nvidia_sampler_encode(&image, &state, &out) == -22);
             assert(memcmp(&out, &unchanged, sizeof(out)) == 0);
         }
     }

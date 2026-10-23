@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define STELA_NV_TARGETS(X)          \
+#define STELA_NVIDIA_TARGETS(X)          \
    X(75, TURING_COMPUTE_A)           \
    X(80, AMPERE_COMPUTE_A)           \
    X(86, AMPERE_COMPUTE_B)           \
@@ -20,19 +20,19 @@
    X(104, BLACKWELL_COMPUTE_A)       \
    X(120, BLACKWELL_COMPUTE_B)
 
-/* Expand STELA_NV_TARGETS(STELA_NV_TARGET) where the class headers are
- * included; stela_nv_sms lists the models alone.
+/* Expand STELA_NVIDIA_TARGETS(STELA_NVIDIA_TARGET) where the class headers are
+ * included; stela_nvidia_sms lists the models alone.
  */
-#define STELA_NV_TARGET(sm, compute_class) {sm, compute_class},
-#define STELA_NV_SM(sm, compute_class) sm,
-static const unsigned stela_nv_sms[] = {STELA_NV_TARGETS(STELA_NV_SM)};
+#define STELA_NVIDIA_TARGET(sm, compute_class) {sm, compute_class},
+#define STELA_NVIDIA_SM(sm, compute_class) sm,
+static const unsigned stela_nvidia_sms[] = {STELA_NVIDIA_TARGETS(STELA_NVIDIA_SM)};
 
 /* Occupancy and shared-memory carveouts from each architecture's tuning
  * guide, as Nouveau's device table records them for these SM models. NAK
  * itself reads only the SM and occupancy.
  */
 static inline struct nv_device_info
-stela_nv_compiler_device(unsigned sm)
+stela_nvidia_compiler_device(unsigned sm)
 {
    static const uint16_t carveouts_kB[] = {0, 8, 16, 32, 64, 100, 132, 164, 196, 228};
    struct nv_device_info device = {.sm = (uint8_t)sm};
@@ -53,15 +53,15 @@ stela_nv_compiler_device(unsigned sm)
 
 /* The compiler model with its compute class, for launch descriptors. */
 static inline struct nv_device_info
-stela_nv_target_device(unsigned sm, unsigned compute_class)
+stela_nvidia_target_device(unsigned sm, unsigned compute_class)
 {
-   struct nv_device_info device = stela_nv_compiler_device(sm);
+   struct nv_device_info device = stela_nvidia_compiler_device(sm);
    device.cls_compute = (uint16_t)compute_class;
    return device;
 }
 
 static inline void
-stela_nv_target_name(char name[16], unsigned sm)
+stela_nvidia_target_name(char name[16], unsigned sm)
 {
    snprintf(name, 16, "sm%u", sm);
 }

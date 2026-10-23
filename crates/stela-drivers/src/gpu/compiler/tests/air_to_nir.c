@@ -1666,8 +1666,8 @@ nak_shared_codegen(bool dynamic)
       free(first);
    }
    LLVMMemoryBufferRef input = shared_bitcode(dynamic ? body : shared_body, dynamic, extra);
-   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++) {
-      const struct nv_device_info dev = {.sm = stela_nv_sms[i], .max_warps_per_mp = 32};
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nvidia_sms); i++) {
+      const struct nv_device_info dev = {.sm = stela_nvidia_sms[i], .max_warps_per_mp = 32};
       struct nak_compiler *compiler = nak_compiler_create(&dev);
       CHECK(compiler);
       struct shared_bindings bindings = {.view = {256,4,STELA_AIR_READ_WRITE}};
@@ -1682,7 +1682,7 @@ nak_shared_codegen(bool dynamic)
       CHECK(bin->asm_str && strstr(bin->asm_str, "st.shared") &&
             strstr(bin->asm_str, "ld.shared") && strstr(bin->asm_str, "bar.sync"));
       printf("AIR shared-%s-workgroup64->LLVM->NIR->NAK SM%u: %u bytes, %u instructions, shared256, barriers1\n",
-         dynamic ? "dynamic" : "static", stela_nv_sms[i], bin->code_size, bin->info.num_instrs);
+         dynamic ? "dynamic" : "static", stela_nvidia_sms[i], bin->code_size, bin->info.num_instrs);
       puts(bin->asm_str);
       nak_shader_bin_destroy(bin); ralloc_free(nir); nak_compiler_destroy(compiler);
    }
@@ -1703,14 +1703,14 @@ static void
 nak_codegen(const char *body, const char *label, bool ieee)
 {
    char target[32];
-   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++) {
-      nak_target_name(target, stela_nv_sms[i], label);
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nvidia_sms); i++) {
+      nak_target_name(target, stela_nvidia_sms[i], label);
       record_expect(target, NULL);
    }
    LLVMMemoryBufferRef input = ieee ? ieee_bitcode(stela_air_test_prefix, body) :
                                     stela_air_test_bitcode(body, "");
-   for (unsigned i = 0; i < ARRAY_SIZE(stela_nv_sms); i++) {
-      const unsigned sm = stela_nv_sms[i];
+   for (unsigned i = 0; i < ARRAY_SIZE(stela_nvidia_sms); i++) {
+      const unsigned sm = stela_nvidia_sms[i];
       const struct nv_device_info dev = {.sm = sm, .max_warps_per_mp = 32};
       struct nak_compiler *compiler = nak_compiler_create(&dev);
       CHECK(compiler);

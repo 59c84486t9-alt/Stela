@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "copy.h"
+#include "image_copy.h"
 #include <stddef.h>
 
 static bool cpu_span(const void *pointer, size_t bytes)
@@ -8,28 +8,28 @@ static bool cpu_span(const void *pointer, size_t bytes)
            bytes - 1 <= UINTPTR_MAX - (uintptr_t)pointer;
 }
 
-static int copy_region(const struct stela_nv_image *image,
-                        const struct stela_nv_image_cpu_view *input_mapping,
-                        const struct stela_nv_image_region *input_region,
-                        const struct stela_nv_linear_image *input_linear, bool upload)
+static int copy_region(const struct stela_nvidia_image *image,
+                        const struct stela_nvidia_image_cpu_view *input_mapping,
+                        const struct stela_nvidia_image_region *input_region,
+                        const struct stela_nvidia_linear_image *input_linear, bool upload)
 {
     if (!image || !input_mapping || !input_region || !input_linear || !image->owner ||
         input_mapping->device != image->device || input_mapping->owner != image->owner)
         return -22;
-    const struct stela_nv_image_cpu_view mapping = *input_mapping;
-    const struct stela_nv_image_region region = *input_region;
-    const struct stela_nv_linear_image linear = *input_linear;
+    const struct stela_nvidia_image_cpu_view mapping = *input_mapping;
+    const struct stela_nvidia_image_region region = *input_region;
+    const struct stela_nvidia_linear_image linear = *input_linear;
 
     /* As with TIC formation, never trust caller-written NIL layout fields.
      * Reuse the same bounded request validation and original NIL layout path.
      */
-    struct stela_nv_image rebuilt;
-    int err = stela_nv_image_init(image->device, image->owner, &image->request, &rebuilt);
+    struct stela_nvidia_image rebuilt;
+    int err = stela_nvidia_image_init(image->device, image->owner, &image->request, &rebuilt);
     if (err) return err;
     const struct nil_image *layout = &rebuilt.layout;
     if (image->cls_eng3d != rebuilt.cls_eng3d || image->device_type != rebuilt.device_type ||
-        !mapping.access || (mapping.access & ~(STELA_NV_CPU_READ | STELA_NV_CPU_WRITE)) ||
-        !(mapping.access & (upload ? STELA_NV_CPU_WRITE : STELA_NV_CPU_READ)) ||
+        !mapping.access || (mapping.access & ~(STELA_NVIDIA_CPU_READ | STELA_NVIDIA_CPU_WRITE)) ||
+        !(mapping.access & (upload ? STELA_NVIDIA_CPU_WRITE : STELA_NVIDIA_CPU_READ)) ||
         !cpu_span(mapping.pointer, mapping.bytes) ||
         mapping.image_offset > mapping.bytes ||
         layout->size_B > mapping.bytes - mapping.image_offset ||
@@ -100,18 +100,18 @@ static int copy_region(const struct stela_nv_image *image,
     return 0;
 }
 
-int stela_nv_image_upload(const struct stela_nv_image *image,
-                          const struct stela_nv_image_cpu_view *mapping,
-                          const struct stela_nv_image_region *region,
-                          const struct stela_nv_linear_image *linear)
+int stela_nvidia_image_upload(const struct stela_nvidia_image *image,
+                          const struct stela_nvidia_image_cpu_view *mapping,
+                          const struct stela_nvidia_image_region *region,
+                          const struct stela_nvidia_linear_image *linear)
 {
     return copy_region(image, mapping, region, linear, true);
 }
 
-int stela_nv_image_download(const struct stela_nv_image *image,
-                            const struct stela_nv_image_cpu_view *mapping,
-                            const struct stela_nv_image_region *region,
-                            const struct stela_nv_linear_image *linear)
+int stela_nvidia_image_download(const struct stela_nvidia_image *image,
+                            const struct stela_nvidia_image_cpu_view *mapping,
+                            const struct stela_nvidia_image_region *region,
+                            const struct stela_nvidia_linear_image *linear)
 {
     return copy_region(image, mapping, region, linear, false);
 }

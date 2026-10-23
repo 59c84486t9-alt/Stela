@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef STELA_NV_SAMPLER_CASES_H
-#define STELA_NV_SAMPLER_CASES_H
+#ifndef STELA_NVIDIA_SAMPLER_CASES_H
+#define STELA_NVIDIA_SAMPLER_CASES_H
 /* Test values only; sampler_expected.h holds NVK's headers for them. */
-#define STELA_NV_SAMPLER_CASES 42
+#define STELA_NVIDIA_SAMPLER_CASES 42
 static SAMPLER_CASE_STATE sampler_case(unsigned index)
 {
     SAMPLER_CASE_STATE state = {

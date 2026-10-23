@@ -27,14 +27,14 @@ static int check_device(const struct nv_device_info *dev)
 }
 
 static int make_layout(const struct nv_device_info *dev,
-                       const struct stela_nv_image_request *req, struct nil_image *out)
+                       const struct stela_nvidia_image_request *req, struct nil_image *out)
 {
     int err = check_device(dev);
     if (err) return err;
     if (!req || !req->width || req->width > 16384 ||
         !req->height || req->height > 16384 || !req->layers || req->layers > 2048 ||
         !req->levels || req->levels > 15 || !req->usage ||
-        (req->usage & ~(STELA_NV_IMAGE_TEXTURE | STELA_NV_IMAGE_STORAGE)) ||
+        (req->usage & ~(STELA_NVIDIA_IMAGE_TEXTURE | STELA_NVIDIA_IMAGE_STORAGE)) ||
         (unsigned)req->format >= PIPE_FORMAT_COUNT)
         return -22;
     uint32_t largest = MAX2(req->width, req->height);
@@ -52,7 +52,7 @@ static int make_layout(const struct nv_device_info *dev,
         fmt->block.bits < 8 || fmt->block.bits > 128 ||
         (fmt->block.bits & (fmt->block.bits - 1)) ||
         !nil_format_supports_texturing(dev, req->format) ||
-        ((req->usage & STELA_NV_IMAGE_STORAGE) &&
+        ((req->usage & STELA_NVIDIA_IMAGE_STORAGE) &&
          !nil_format_supports_storage(dev, req->format)))
         return -95;
 
@@ -66,11 +66,11 @@ static int make_layout(const struct nv_device_info *dev,
     return nil_image_init(dev, out, &info) ? 0 : -95;
 }
 
-int stela_nv_image_init(const struct nv_device_info *dev, const void *owner,
-                        const struct stela_nv_image_request *request, struct stela_nv_image *out)
+int stela_nvidia_image_init(const struct nv_device_info *dev, const void *owner,
+                        const struct stela_nvidia_image_request *request, struct stela_nvidia_image *out)
 {
     if (!owner || !out || !request) return -22;
-    struct stela_nv_image image = {.device = dev, .owner = owner, .request = *request};
+    struct stela_nvidia_image image = {.device = dev, .owner = owner, .request = *request};
     int err = make_layout(dev, &image.request, &image.layout);
     if (err) return err;
     image.cls_eng3d = dev->cls_eng3d;
@@ -79,15 +79,15 @@ int stela_nv_image_init(const struct nv_device_info *dev, const void *owner,
     return 0;
 }
 
-int stela_nv_image_descriptor(const struct stela_nv_image *image,
-                              const struct stela_nv_image_binding *binding,
-                              const struct stela_nv_image_view *input, struct nil_descriptor *out)
+int stela_nvidia_image_descriptor(const struct stela_nvidia_image *image,
+                              const struct stela_nvidia_image_binding *binding,
+                              const struct stela_nvidia_image_view *input, struct nil_descriptor *out)
 {
     if (!image || !binding || !input || !out || !image->owner ||
         binding->device != image->device || binding->owner != image->owner)
         return -22;
-    const struct stela_nv_image_binding map = *binding;
-    const struct stela_nv_image_view view = *input;
+    const struct stela_nvidia_image_binding map = *binding;
+    const struct stela_nvidia_image_view view = *input;
     struct nil_image layout;
     int err = make_layout(image->device, &image->request, &layout);
     if (err) return err;
@@ -98,14 +98,14 @@ int stela_nv_image_descriptor(const struct stela_nv_image *image,
         !view.layers || view.base_layer >= layout.extent_px.array_len ||
         view.layers > layout.extent_px.array_len - view.base_layer ||
         (!view.array && view.layers != 1) ||
-        (view.usage != STELA_NV_IMAGE_TEXTURE && view.usage != STELA_NV_IMAGE_STORAGE) ||
+        (view.usage != STELA_NVIDIA_IMAGE_TEXTURE && view.usage != STELA_NVIDIA_IMAGE_STORAGE) ||
         (view.usage & ~image->request.usage) ||
         !map.available_usage ||
-        (map.available_usage & ~(STELA_NV_IMAGE_TEXTURE | STELA_NV_IMAGE_STORAGE)) ||
+        (map.available_usage & ~(STELA_NVIDIA_IMAGE_TEXTURE | STELA_NVIDIA_IMAGE_STORAGE)) ||
         (view.usage & ~map.available_usage) ||
         !isfinite(view.min_lod_clamp) || view.min_lod_clamp < 0.0f ||
         view.min_lod_clamp > (float)(view.base_level + view.levels - 1) ||
-        (view.filtered && (view.usage != STELA_NV_IMAGE_TEXTURE ||
+        (view.filtered && (view.usage != STELA_NVIDIA_IMAGE_TEXTURE ||
                           !nil_format_supports_filtering(image->device, image->request.format))))
         return -22;
     for (unsigned i = 0; i < 4; i++)
@@ -127,7 +127,7 @@ int stela_nv_image_descriptor(const struct stela_nv_image *image,
 
     const struct nil_view nil_view = {
         .view_type = view.array ? NIL_VIEW_TYPE_2D_ARRAY : NIL_VIEW_TYPE_2D,
-        .access = view.usage == STELA_NV_IMAGE_STORAGE ? NIL_VIEW_ACCESS_STORAGE : NIL_VIEW_ACCESS_TEXTURE,
+        .access = view.usage == STELA_NVIDIA_IMAGE_STORAGE ? NIL_VIEW_ACCESS_STORAGE : NIL_VIEW_ACCESS_TEXTURE,
         .format = layout.format, .base_level = view.base_level, .num_levels = view.levels,
         .base_array_layer = view.base_layer, .array_len = view.layers,
         .swizzle = {view.swizzle[0], view.swizzle[1], view.swizzle[2], view.swizzle[3]},

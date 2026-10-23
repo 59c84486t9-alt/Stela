@@ -9,32 +9,32 @@
 extern "C" {
 #endif
 
-#define STELA_NV_AIR_ABI 1u
-#define STELA_NV_AIR_ROW_BYTES 8u
-#define STELA_NV_AIR_CBUF_ALIGNMENT 64u
+#define STELA_NVIDIA_AIR_ABI 1u
+#define STELA_NVIDIA_AIR_ROW_BYTES 8u
+#define STELA_NVIDIA_AIR_CBUF_ALIGNMENT 64u
 
-enum stela_nv_air_status {
-    STELA_NV_AIR_OK,
-    STELA_NV_AIR_INVALID,
-    STELA_NV_AIR_UNSUPPORTED,
-    STELA_NV_AIR_DEVICE,
-    STELA_NV_AIR_LIMIT,
-    STELA_NV_AIR_ALLOCATION,
-    STELA_NV_AIR_FRONTEND,
-    STELA_NV_AIR_BACKEND,
-    STELA_NV_AIR_BINDING,
+enum stela_nvidia_air_status {
+    STELA_NVIDIA_AIR_OK,
+    STELA_NVIDIA_AIR_INVALID,
+    STELA_NVIDIA_AIR_UNSUPPORTED,
+    STELA_NVIDIA_AIR_DEVICE,
+    STELA_NVIDIA_AIR_LIMIT,
+    STELA_NVIDIA_AIR_ALLOCATION,
+    STELA_NVIDIA_AIR_FRONTEND,
+    STELA_NVIDIA_AIR_BACKEND,
+    STELA_NVIDIA_AIR_BINDING,
 };
-struct stela_nv_air_options {
+struct stela_nvidia_air_options {
     uint32_t size, abi, workgroup_size[3], max_instructions, max_code_bytes;
     uint32_t argument_cbuf, record_assembly;
     enum stela_air_fp_profile fp_profile;
 };
-struct stela_nv_air_error {
-    enum stela_nv_air_status status;
+struct stela_nvidia_air_error {
+    enum stela_nvidia_air_status status;
     struct stela_air_error air;
     char detail[256];
 };
-struct stela_nv_air_binding {
+struct stela_nvidia_air_binding {
     /* Only original LLVM-used AS1 parameters require rows; every parameter's
      * complete reflection still appears in provenance.arguments. */
     struct stela_air_buffer buffer;
@@ -46,7 +46,7 @@ struct stela_nv_air_binding {
  * nothing. The nondefault FP profile needs air_to_nir.h's independent build
  * qualification. The actual NAK options, layouts, device facts and debug flags
  * join source/workgroup/profile/bindings in the compiled specialization key. */
-struct stela_nv_air_provenance {
+struct stela_nvidia_air_provenance {
     struct stela_metal_input_info input;
     struct stela_metal_input_entry entry;
     uint32_t selected_entry, entry_flags, library_flags, compiler_profile;
@@ -56,13 +56,13 @@ struct stela_nv_air_provenance {
     struct stela_msl_build_identity build;
     const char *name, *target;
     const struct stela_air_argument_info *arguments;
-    struct stela_nv_air_options options;
+    struct stela_nvidia_air_options options;
     struct nv_device_info device;
     struct nak_constant_offset_info base_layout, graphics_layout;
     uint64_t nak_debug_flags;
     struct stela_metal_threadgroup_specialization threadgroup;
 };
-struct stela_nv_air_compilation;
+struct stela_nvidia_air_compilation;
 
 /* Hosted same-CPU compiler only. Device and compiler MUST be the matching real
  * initialized context from the retained Mesa build, not test topology or an
@@ -91,16 +91,16 @@ struct stela_nv_air_compilation;
  * Backend shared totals include these rows plus static layout, never expose
  * them as Metal staticThreadgroupMemoryLength or add dynamic bytes twice.
  * stela_metal_threadgroup_matches checks values only, not resource ownership. */
-enum stela_nv_air_status stela_nv_air_compile_specialized(const struct nv_device_info *,
+enum stela_nvidia_air_status stela_nvidia_air_compile_specialized(const struct nv_device_info *,
     const struct nak_compiler *, const struct stela_metal_assembly *, uint32_t selected_entry,
-    const struct stela_nv_air_options *, const struct stela_metal_threadgroup_request *,
-    struct stela_nv_air_compilation **,
-    struct stela_nv_air_error *);
+    const struct stela_nvidia_air_options *, const struct stela_metal_threadgroup_request *,
+    struct stela_nvidia_air_compilation **,
+    struct stela_nvidia_air_error *);
 
-enum stela_nv_air_status stela_nv_air_compile(const struct nv_device_info *,
+enum stela_nvidia_air_status stela_nvidia_air_compile(const struct nv_device_info *,
     const struct nak_compiler *, const struct stela_metal_assembly *, uint32_t selected_entry,
-    const struct stela_nv_air_options *, struct stela_nv_air_compilation **,
-    struct stela_nv_air_error *);
+    const struct stela_nvidia_air_options *, struct stela_nvidia_air_compilation **,
+    struct stela_nvidia_air_error *);
 
 /* Actual live GPU view, not an allocator or proof created by these fields.
  * Match the live device pointer supplied to pack_arguments and retain a real
@@ -108,7 +108,7 @@ enum stela_nv_air_status stela_nv_air_compile(const struct nv_device_info *,
  * owner cookie or PCI tuple authenticates permissions, residency or device/VM
  * epoch. The actual dispatch service establishes those preconditions. Views may
  * alias when permitted by their genuine source/runtime contract. */
-struct stela_nv_air_buffer_view {
+struct stela_nvidia_air_buffer_view {
     const struct nv_device_info *device;
     const void *owner;
     uint32_t argument, index, available_access;
@@ -120,20 +120,20 @@ struct stela_nv_air_buffer_view {
  * separate writable normal CPU span, never a cast GPU VA/MMIO mapping; retain
  * actual CPU ownership/cache coherency. A successful image must be uploaded to
  * a real64B-aligned cbuf allocation of table_bytes, bound at argument_cbuf via
- * the existing stela_nv_compute_encode. It neither pins views nor supplies
+ * the existing stela_nvidia_compute_encode. It neither pins views nor supplies
  * visibility/order/fences. No allocations occur in this function. Zero-buffer
  * code has table_bytes0 and needs no cbuf/view/output. All storage is disjoint
  * and serialized against mutation/destruction; errors preserve output bytes. */
-enum stela_nv_air_status stela_nv_air_pack_arguments(const struct stela_nv_air_compilation *,
-    const struct nv_device_info *, unsigned va_bits, const struct stela_nv_air_buffer_view *,
+enum stela_nvidia_air_status stela_nvidia_air_pack_arguments(const struct stela_nvidia_air_compilation *,
+    const struct nv_device_info *, unsigned va_bits, const struct stela_nvidia_air_buffer_view *,
     uint32_t view_count, void *output, size_t output_bytes);
 
-const struct nak_shader_bin *stela_nv_air_binary(const struct stela_nv_air_compilation *);
-const nir_shader *stela_nv_air_nir(const struct stela_nv_air_compilation *);
-const struct stela_nv_air_provenance *stela_nv_air_provenance(const struct stela_nv_air_compilation *);
-const struct stela_nv_air_binding *stela_nv_air_bindings(const struct stela_nv_air_compilation *,
+const struct nak_shader_bin *stela_nvidia_air_binary(const struct stela_nvidia_air_compilation *);
+const nir_shader *stela_nvidia_air_nir(const struct stela_nvidia_air_compilation *);
+const struct stela_nvidia_air_provenance *stela_nvidia_air_provenance(const struct stela_nvidia_air_compilation *);
+const struct stela_nvidia_air_binding *stela_nvidia_air_bindings(const struct stela_nvidia_air_compilation *,
     uint32_t *count, uint32_t *table_bytes);
-void stela_nv_air_destroy(struct stela_nv_air_compilation **);
+void stela_nvidia_air_destroy(struct stela_nvidia_air_compilation **);
 #ifdef __cplusplus
 }
 #endif

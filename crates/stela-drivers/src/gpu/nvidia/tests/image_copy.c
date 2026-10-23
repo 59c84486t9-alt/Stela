@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "../hosted/copy.h"
+#include "../hosted/image_copy.h"
 #include "nouveau/headers/nvidia/classes/clb097.h"
 #include "nouveau/headers/nvidia/classes/clb197.h"
 #include "nouveau/headers/nvidia/classes/clc097.h"
@@ -17,14 +17,14 @@
 static const unsigned owner = 1, foreign_owner = 2;
 enum { GUARD = 32, IMAGE_OFFSET = 37 };
 
-static struct stela_nv_image make_image(const struct nv_device_info *dev, enum pipe_format format)
+static struct stela_nvidia_image make_image(const struct nv_device_info *dev, enum pipe_format format)
 {
-    const struct stela_nv_image_request req = {
+    const struct stela_nvidia_image_request req = {
         .format = format, .width = 129, .height = 87, .layers = 3, .levels = 8,
-        .usage = STELA_NV_IMAGE_TEXTURE,
+        .usage = STELA_NVIDIA_IMAGE_TEXTURE,
     };
-    struct stela_nv_image image;
-    assert(stela_nv_image_init(dev, &owner, &req, &image) == 0);
+    struct stela_nvidia_image image;
+    assert(stela_nvidia_image_init(dev, &owner, &req, &image) == 0);
     return image;
 }
 
@@ -61,11 +61,11 @@ static size_t tiled_byte(const struct nil_image *image, unsigned level, unsigned
 static void coordinate_and_original_copy(const struct nv_device_info *dev, enum pipe_format format,
                                          unsigned level, unsigned layer, bool partial)
 {
-    struct stela_nv_image image = make_image(dev, format);
+    struct stela_nvidia_image image = make_image(dev, format);
     const struct nil_image original_layout = image.layout;
     struct nil_Extent4D_Pixels level_px = nil_image_level_extent_px(&image.layout, level);
     const size_t element_bytes = util_format_get_blocksize(format);
-    struct stela_nv_image_region region = {
+    struct stela_nvidia_image_region region = {
         .level = level, .layer = layer, .width = level_px.width, .height = level_px.height,
     };
     if (partial && level_px.width > 2 && level_px.height > 2) {
@@ -103,15 +103,15 @@ static void coordinate_and_original_copy(const struct nv_device_info *dev, enum 
         }
     }
     memcpy(linear_before, linear, linear_bytes + 2 * GUARD);
-    const struct stela_nv_image_cpu_view map = {
+    const struct stela_nvidia_image_cpu_view map = {
         .device = dev, .owner = &owner, .pointer = tiled + GUARD,
         .bytes = tiled_bytes, .image_offset = IMAGE_OFFSET,
-        .access = STELA_NV_CPU_READ | STELA_NV_CPU_WRITE,
+        .access = STELA_NVIDIA_CPU_READ | STELA_NVIDIA_CPU_WRITE,
     };
-    struct stela_nv_linear_image src = {linear + GUARD, linear_bytes, stride};
+    struct stela_nvidia_linear_image src = {linear + GUARD, linear_bytes, stride};
     /* Mutated NIL metadata cannot change the validated production copy. */
     memset(&image.layout, 0xff, sizeof(image.layout));
-    assert(stela_nv_image_upload(&image, &map, &region, &src) == 0);
+    assert(stela_nvidia_image_upload(&image, &map, &region, &src) == 0);
     assert(memcmp(tiled, expected, tiled_bytes + 2 * GUARD) == 0);
     assert(memcmp(linear, linear_before, linear_bytes + 2 * GUARD) == 0);
     image.layout = original_layout;
@@ -133,9 +133,9 @@ static void coordinate_and_original_copy(const struct nv_device_info *dev, enum 
     assert(memcmp(tiled, reference, tiled_bytes + 2 * GUARD) == 0);
 
     /* Download from independent coordinate-produced bytes, not upload output. */
-    struct stela_nv_image_cpu_view read_map = map; read_map.pointer = expected + GUARD;
-    const struct stela_nv_linear_image dst = {download + GUARD, linear_bytes, stride};
-    assert(stela_nv_image_download(&image, &read_map, &region, &dst) == 0);
+    struct stela_nvidia_image_cpu_view read_map = map; read_map.pointer = expected + GUARD;
+    const struct stela_nvidia_linear_image dst = {download + GUARD, linear_bytes, stride};
+    assert(stela_nvidia_image_download(&image, &read_map, &region, &dst) == 0);
     assert(memcmp(download, download_expected, linear_bytes + 2 * GUARD) == 0);
     assert(memcmp(expected, tiled, tiled_bytes + 2 * GUARD) == 0);
     free(tiled); free(expected); free(reference); free(linear); free(linear_before);
@@ -144,7 +144,7 @@ static void coordinate_and_original_copy(const struct nv_device_info *dev, enum 
 
 static void invalid_copies_are_atomic(const struct nv_device_info *dev)
 {
-    const struct stela_nv_image image = make_image(dev, PIPE_FORMAT_R8G8B8A8_UNORM);
+    const struct stela_nvidia_image image = make_image(dev, PIPE_FORMAT_R8G8B8A8_UNORM);
     const size_t tiled_bytes = IMAGE_OFFSET + image.layout.size_B;
     uint8_t *tiled = malloc(tiled_bytes), *before = malloc(tiled_bytes);
     uint8_t linear[256], linear_before[256];
@@ -154,15 +154,15 @@ static void invalid_copies_are_atomic(const struct nv_device_info *dev)
     for (unsigned direction = 0; direction < 2; ++direction) {
         for (unsigned fault = 0; fault < 32; ++fault) {
             const struct nv_device_info foreign_device = *dev;
-            struct stela_nv_image candidate = image;
-            struct stela_nv_image_cpu_view map = {
+            struct stela_nvidia_image candidate = image;
+            struct stela_nvidia_image_cpu_view map = {
                 .device = dev, .owner = &owner, .pointer = tiled, .bytes = tiled_bytes,
-                .image_offset = IMAGE_OFFSET, .access = STELA_NV_CPU_READ | STELA_NV_CPU_WRITE,
+                .image_offset = IMAGE_OFFSET, .access = STELA_NVIDIA_CPU_READ | STELA_NVIDIA_CPU_WRITE,
             };
-            struct stela_nv_image_region region = {
+            struct stela_nvidia_image_region region = {
                 .level = 1, .layer = 2, .x = 1, .y = 2, .width = 7, .height = 3,
             };
-            struct stela_nv_linear_image host = {linear, sizeof(linear), 37};
+            struct stela_nvidia_linear_image host = {linear, sizeof(linear), 37};
             switch (fault) {
             case 0: map.owner = &foreign_owner; break;
             case 1: map.device = &foreign_device; break;
@@ -173,7 +173,7 @@ static void invalid_copies_are_atomic(const struct nv_device_info *dev)
             case 6: map.bytes = SIZE_MAX; break;
             case 7: map.access = 0; break;
             case 8: map.access = 4; break;
-            case 9: map.access = direction ? STELA_NV_CPU_WRITE : STELA_NV_CPU_READ; break;
+            case 9: map.access = direction ? STELA_NVIDIA_CPU_WRITE : STELA_NVIDIA_CPU_READ; break;
             case 10: region.level = image.request.levels; break;
             case 11: region.layer = image.request.layers; break;
             case 12: region.width = 0; break;
@@ -197,8 +197,8 @@ static void invalid_copies_are_atomic(const struct nv_device_info *dev)
             case 30: candidate.owner = NULL; break;
             case 31: region.height = 1; host.row_stride = SIZE_MAX; break;
             }
-            int error = direction ? stela_nv_image_download(&candidate, &map, &region, &host) :
-                                    stela_nv_image_upload(&candidate, &map, &region, &host);
+            int error = direction ? stela_nvidia_image_download(&candidate, &map, &region, &host) :
+                                    stela_nvidia_image_upload(&candidate, &map, &region, &host);
             assert(error == -22);
             assert(memcmp(tiled, before, tiled_bytes) == 0);
             assert(memcmp(linear, linear_before, sizeof(linear)) == 0);
@@ -210,20 +210,20 @@ static void invalid_copies_are_atomic(const struct nv_device_info *dev)
     uint8_t *alias = malloc(alias_bytes), *alias_before = malloc(alias_bytes);
     assert(alias && alias_before);
     memset(alias, 0xa6, alias_bytes); memcpy(alias_before, alias, alias_bytes);
-    const struct stela_nv_image_cpu_view map = {
+    const struct stela_nvidia_image_cpu_view map = {
         .device = dev, .owner = &owner, .pointer = alias + 64, .bytes = image.layout.size_B,
-        .access = STELA_NV_CPU_READ | STELA_NV_CPU_WRITE,
+        .access = STELA_NVIDIA_CPU_READ | STELA_NVIDIA_CPU_WRITE,
     };
-    const struct stela_nv_image_region region = {.width = 1, .height = 2};
-    const struct stela_nv_linear_image host = {alias, 128, 64};
-    assert(stela_nv_image_upload(&image, &map, &region, &host) == -22);
-    assert(stela_nv_image_download(&image, &map, &region, &host) == -22);
+    const struct stela_nvidia_image_region region = {.width = 1, .height = 2};
+    const struct stela_nvidia_linear_image host = {alias, 128, 64};
+    assert(stela_nvidia_image_upload(&image, &map, &region, &host) == -22);
+    assert(stela_nvidia_image_download(&image, &map, &region, &host) == -22);
     assert(memcmp(alias, alias_before, alias_bytes) == 0);
     assert(memcmp(tiled, before, tiled_bytes) == 0);
-    assert(stela_nv_image_upload(NULL, &map, &region, &host) == -22);
-    assert(stela_nv_image_upload(&image, NULL, &region, &host) == -22);
-    assert(stela_nv_image_download(&image, &map, NULL, &host) == -22);
-    assert(stela_nv_image_download(&image, &map, &region, NULL) == -22);
+    assert(stela_nvidia_image_upload(NULL, &map, &region, &host) == -22);
+    assert(stela_nvidia_image_upload(&image, NULL, &region, &host) == -22);
+    assert(stela_nvidia_image_download(&image, &map, NULL, &host) == -22);
+    assert(stela_nvidia_image_download(&image, &map, &region, NULL) == -22);
     free(tiled); free(before); free(alias); free(alias_before);
 }
 

@@ -45,8 +45,8 @@ field(const uint32_t *words, unsigned start, unsigned end)
 
 static void
 validate_qmd(const struct nv_device_info *dev, const struct nak_shader_info *info,
-             const struct stela_nv_compute_dispatch *dispatch,
-             const struct stela_nv_compute_encoded *encoded)
+             const struct stela_nvidia_compute_dispatch *dispatch,
+             const struct stela_nvidia_compute_encoded *encoded)
 {
    CHECK(encoded->qmd_size_B == nak_qmd_size_B(dev));
    CHECK(encoded->qmd_size_B == (dev->sm >= 90 ? 384 : 256));
@@ -99,10 +99,10 @@ validate_qmd(const struct nv_device_info *dev, const struct nak_shader_info *inf
 
 static void
 validate_push(const struct nv_device_info *dev,
-              const struct stela_nv_compute_dispatch *dispatch,
-              const struct stela_nv_compute_encoded *encoded)
+              const struct stela_nvidia_compute_dispatch *dispatch,
+              const struct stela_nvidia_compute_encoded *encoded)
 {
-   CHECK(encoded->push_dw >= 3 && encoded->push_dw <= STELA_NV_COMPUTE_MAX_PUSH_DW);
+   CHECK(encoded->push_dw >= 3 && encoded->push_dw <= STELA_NVIDIA_COMPUTE_MAX_PUSH_DW);
    unsigned at = 0, methods = 0;
    while (at < encoded->push_dw) {
       uint32_t header = encoded->push[at++];
@@ -136,78 +136,78 @@ validate_push(const struct nv_device_info *dev,
 
 static void
 refusal(const struct nv_device_info *dev, const struct nak_shader_bin *shader,
-         const struct stela_nv_compute_dispatch *dispatch,
-         enum stela_nv_compute_error expected)
+         const struct stela_nvidia_compute_dispatch *dispatch,
+         enum stela_nvidia_compute_error expected)
 {
-   struct stela_nv_compute_encoded sentinel, encoded;
+   struct stela_nvidia_compute_encoded sentinel, encoded;
    memset(&sentinel, 0xa7, sizeof(sentinel));
    encoded = sentinel;
-   enum stela_nv_compute_error error;
-   CHECK(!stela_nv_compute_encode(dev, shader, dispatch, &encoded, &error));
+   enum stela_nvidia_compute_error error;
+   CHECK(!stela_nvidia_compute_encode(dev, shader, dispatch, &encoded, &error));
    CHECK(error == expected && !memcmp(&encoded, &sentinel, sizeof(encoded)));
 }
 
 static void
 refusals(const struct nv_device_info *dev, const struct nak_shader_bin *shader,
-          const struct stela_nv_compute_dispatch *dispatch)
+          const struct stela_nvidia_compute_dispatch *dispatch)
 {
    struct nv_device_info bad_dev = *dev;
    bad_dev.cls_compute = 0xffff;
-   refusal(&bad_dev, shader, dispatch, STELA_NV_COMPUTE_DEVICE);
+   refusal(&bad_dev, shader, dispatch, STELA_NVIDIA_COMPUTE_DEVICE);
    bad_dev = *dev;
    bad_dev.sm_smem_size_count = ARRAY_SIZE(bad_dev.sm_smem_sizes_kB) + 1;
-   refusal(&bad_dev, shader, dispatch, STELA_NV_COMPUTE_DEVICE);
+   refusal(&bad_dev, shader, dispatch, STELA_NVIDIA_COMPUTE_DEVICE);
    bad_dev = *dev;
    bad_dev.sm_smem_sizes_kB[1] = 3;
-   refusal(&bad_dev, shader, dispatch, STELA_NV_COMPUTE_SHARED_MEMORY);
+   refusal(&bad_dev, shader, dispatch, STELA_NVIDIA_COMPUTE_SHARED_MEMORY);
    struct nak_shader_bin bad_shader = *shader;
    bad_shader.info.sm++;
-   refusal(dev, &bad_shader, dispatch, STELA_NV_COMPUTE_SHADER);
+   refusal(dev, &bad_shader, dispatch, STELA_NVIDIA_COMPUTE_SHADER);
    bad_shader = *shader;
    bad_shader.info.cs.local_size[0] = 0;
-   refusal(dev, &bad_shader, dispatch, STELA_NV_COMPUTE_GEOMETRY);
+   refusal(dev, &bad_shader, dispatch, STELA_NVIDIA_COMPUTE_GEOMETRY);
    bad_shader = *shader;
    bad_shader.info.slm_size = 16;
-   refusal(dev, &bad_shader, dispatch, STELA_NV_COMPUTE_SCRATCH_UNSUPPORTED);
+   refusal(dev, &bad_shader, dispatch, STELA_NVIDIA_COMPUTE_SCRATCH_UNSUPPORTED);
    bad_shader = *shader;
    bad_shader.info.crs_size = 512;
-   refusal(dev, &bad_shader, dispatch, STELA_NV_COMPUTE_SCRATCH_UNSUPPORTED);
-   struct stela_nv_compute_dispatch bad = *dispatch;
+   refusal(dev, &bad_shader, dispatch, STELA_NVIDIA_COMPUTE_SCRATCH_UNSUPPORTED);
+   struct stela_nvidia_compute_dispatch bad = *dispatch;
    bad.qmd_addr++;
-   refusal(dev, shader, &bad, STELA_NV_COMPUTE_ADDRESS);
+   refusal(dev, shader, &bad, STELA_NVIDIA_COMPUTE_ADDRESS);
    bad = *dispatch;
    bad.qmd_addr = UINT64_C(1) << 40;
-   refusal(dev, shader, &bad, STELA_NV_COMPUTE_ADDRESS);
+   refusal(dev, shader, &bad, STELA_NVIDIA_COMPUTE_ADDRESS);
    bad = *dispatch;
    bad.qmd.addr = UINT64_C(1) << bad.va_bits;
-   refusal(dev, shader, &bad, STELA_NV_COMPUTE_ADDRESS);
+   refusal(dev, shader, &bad, STELA_NVIDIA_COMPUTE_ADDRESS);
    bad = *dispatch;
    bad.qmd.addr = bad.qmd_addr;
-   refusal(dev, shader, &bad, STELA_NV_COMPUTE_ADDRESS);
+   refusal(dev, shader, &bad, STELA_NVIDIA_COMPUTE_ADDRESS);
    bad = *dispatch;
    bad.qmd.smem_size = UINT32_MAX;
-   refusal(dev, shader, &bad, STELA_NV_COMPUTE_SHARED_MEMORY);
+   refusal(dev, shader, &bad, STELA_NVIDIA_COMPUTE_SHARED_MEMORY);
    bad = *dispatch;
    bad.qmd.global_size[1] = 65536;
-   refusal(dev, shader, &bad, STELA_NV_COMPUTE_GEOMETRY);
+   refusal(dev, shader, &bad, STELA_NVIDIA_COMPUTE_GEOMETRY);
    bad = *dispatch;
    bad.qmd.num_cbufs = 9;
-   refusal(dev, shader, &bad, STELA_NV_COMPUTE_CONSTANT_BUFFER);
+   refusal(dev, shader, &bad, STELA_NVIDIA_COMPUTE_CONSTANT_BUFFER);
    bad = *dispatch;
    bad.qmd.cbufs[1].index = bad.qmd.cbufs[0].index;
-   refusal(dev, shader, &bad, STELA_NV_COMPUTE_CONSTANT_BUFFER);
+   refusal(dev, shader, &bad, STELA_NVIDIA_COMPUTE_CONSTANT_BUFFER);
    bad = *dispatch;
    bad.qmd.cbufs[1].size = 17;
-   refusal(dev, shader, &bad, STELA_NV_COMPUTE_CONSTANT_BUFFER);
+   refusal(dev, shader, &bad, STELA_NVIDIA_COMPUTE_CONSTANT_BUFFER);
    bad = *dispatch;
    bad.qmd.cbufs[1].addr = UINT64_MAX;
-   refusal(dev, shader, &bad, STELA_NV_COMPUTE_ADDRESS);
+   refusal(dev, shader, &bad, STELA_NVIDIA_COMPUTE_ADDRESS);
 }
 
 static void
 compile_and_encode(LLVMMemoryBufferRef bitcode, unsigned sm, unsigned cls)
 {
-   struct nv_device_info dev = stela_nv_target_device(sm, cls);
+   struct nv_device_info dev = stela_nvidia_target_device(sm, cls);
    struct nak_compiler *compiler = nak_compiler_create(&dev);
    CHECK(compiler);
    const struct stela_air_options options = {
@@ -221,24 +221,24 @@ compile_and_encode(LLVMMemoryBufferRef bitcode, unsigned sm, unsigned cls)
    /* nak_compile_shader runs the retained postprocessing itself. */
    struct nak_shader_bin *shader = nak_compile_shader(nir, true, compiler, 0, NULL, false);
    CHECK(shader && shader->code && shader->code_size && shader->info.num_instrs > 2);
-   struct stela_nv_compute_dispatch dispatch = {
+   struct stela_nvidia_compute_dispatch dispatch = {
       .qmd = {
          .addr = 0x200000, .smem_size = 1024, .global_size = {7, 5, 3}, .num_cbufs = 2,
          .cbufs = {{.index = 0, .size = 256, .addr = 0x400000}, {.index = 7, .size = 64, .addr = 0x500000}},
       },
       .qmd_addr = 0x300000, .va_bits = sm >= 90 ? 57 : 49,
    };
-   struct stela_nv_compute_encoded encoded;
-   enum stela_nv_compute_error error;
-   CHECK(stela_nv_compute_encode(&dev, shader, &dispatch, &encoded, &error));
-   CHECK(error == STELA_NV_COMPUTE_OK);
+   struct stela_nvidia_compute_encoded encoded;
+   enum stela_nvidia_compute_error error;
+   CHECK(stela_nvidia_compute_encode(&dev, shader, &dispatch, &encoded, &error));
+   CHECK(error == STELA_NVIDIA_COMPUTE_OK);
    validate_qmd(&dev, &shader->info, &dispatch, &encoded);
    validate_push(&dev, &dispatch, &encoded);
    refusals(&dev, shader, &dispatch);
    /* Exercise high program/CB address bits independently of QMD's 40-bit VA. */
    dispatch.qmd.addr = UINT64_C(1) << (dispatch.va_bits - 1);
    dispatch.qmd.cbufs[0].addr = (UINT64_C(1) << (dispatch.va_bits - 1)) + 0x100000;
-   CHECK(stela_nv_compute_encode(&dev, shader, &dispatch, &encoded, &error));
+   CHECK(stela_nvidia_compute_encode(&dev, shader, &dispatch, &encoded, &error));
    validate_qmd(&dev, &shader->info, &dispatch, &encoded);
    printf("AIR->NAK->QMD SM%u class%04x: %u code bytes, %u QMD bytes, %u launch dwords; decoded/validated, no submission\n",
           sm, cls, shader->code_size, encoded.qmd_size_B, encoded.push_dw);
@@ -254,7 +254,7 @@ main(void)
    LLVMMemoryBufferRef bitcode = stela_air_test_bitcode(stela_air_test_store_body, "");
    static const struct {
       unsigned sm, compute_class;
-   } targets[] = {STELA_NV_TARGETS(STELA_NV_TARGET)};
+   } targets[] = {STELA_NVIDIA_TARGETS(STELA_NVIDIA_TARGET)};
    for (unsigned i = 0; i < ARRAY_SIZE(targets); i++)
       compile_and_encode(bitcode, targets[i].sm, targets[i].compute_class);
    LLVMDisposeMemoryBuffer(bitcode);

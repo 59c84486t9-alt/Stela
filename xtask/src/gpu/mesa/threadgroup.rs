@@ -23,7 +23,7 @@ pub(super) fn verify(
     let apple = paths[0];
     run(
         stela
-            .command("stela_metal_assembly_test")?
+            .command("stela_library_assembly_test")?
             .args(["--archive-pair", apple])
             .args([
                 "stela_threadgroup_static",
@@ -43,7 +43,7 @@ pub(super) fn verify(
     let mixed = evidence.join("multiple-threadgroups.bc");
     run(
         stela
-            .command("stela_metal_threadgroup_nir_test")?
+            .command("stela_threadgroup_nir_test")?
             .arg("--export")
             .arg(&mixed),
         evidence,
@@ -123,7 +123,7 @@ pub(super) fn verify(
     fs::create_dir(&nv_artifacts)?;
     let report = probes.run(
         stela
-            .command("stela_nv_air_threadgroup_probe")?
+            .command("stela_nvidia_air_threadgroup_test")?
             .args(&paths)
             .arg(&nv_artifacts),
         evidence,
@@ -152,7 +152,7 @@ pub(super) fn verify(
         ("llvm-dynamic", 2, "kernel", "64", "256", "7"),
     ] {
         let report = probes.run(
-            stela.command("stela_intel_air_threadgroup_probe")?.args([
+            stela.command("stela_intel_air_threadgroup_test")?.args([
                 "--input",
                 paths[index],
                 "--entry",
@@ -171,10 +171,10 @@ pub(super) fn verify(
     }
 
     // The AMD shared-memory probe needs the retained LLVM backend.
-    if stela.defines("stela_amd_air_threadgroup_probe") {
+    if stela.defines("stela_amd_air_threadgroup_test") {
         probes.run(
             stela
-                .command("stela_amd_air_threadgroup_probe")?
+                .command("stela_amd_air_threadgroup_test")?
                 .args(&paths),
             evidence,
             "amd-threadgroup",

@@ -8,18 +8,18 @@
  * this interface must not be linked into the freestanding physical backend.
  * Native process pointers below never cross the translated guest/native ABI.
  */
-enum stela_nv_image_usage {
-    STELA_NV_IMAGE_TEXTURE = 1,
-    STELA_NV_IMAGE_STORAGE = 2,
+enum stela_nvidia_image_usage {
+    STELA_NVIDIA_IMAGE_TEXTURE = 1,
+    STELA_NVIDIA_IMAGE_STORAGE = 2,
 };
 
-struct stela_nv_image_request {
+struct stela_nvidia_image_request {
     enum pipe_format format;
     uint32_t width, height, layers, levels;
     uint32_t usage;
 };
 
-struct stela_nv_image {
+struct stela_nvidia_image {
     /* Read-only after successful init. Caller owns this storage, the actual
      * device facts and a distinct owner key for this resource lifetime. Keep
      * them alive and immutable through all calls. Serialize mutation/teardown.
@@ -27,7 +27,7 @@ struct stela_nv_image {
      */
     const struct nv_device_info *device;
     const void *owner;
-    struct stela_nv_image_request request;
+    struct stela_nvidia_image_request request;
     uint16_t cls_eng3d;
     enum nv_device_type device_type;
     /* Original layout metadata for the memory owner: size includes tile/mip
@@ -37,7 +37,7 @@ struct stela_nv_image {
     struct nil_image layout;
 };
 
-struct stela_nv_image_binding {
+struct stela_nvidia_image_binding {
     const struct nv_device_info *device;
     const void *owner;
     uint64_t gpu_base;
@@ -48,7 +48,7 @@ struct stela_nv_image_binding {
     uint8_t pte_kind; /* Actual uncompressed GPU mapping kind */
 };
 
-struct stela_nv_image_view {
+struct stela_nvidia_image_view {
     uint32_t base_level, levels, base_layer, layers;
     enum pipe_swizzle swizzle[4];
     uint32_t usage; /* Exactly TEXTURE or STORAGE */
@@ -65,8 +65,8 @@ struct stela_nv_image_view {
  * Returns 0, -22 invalid input or -95 unsupported device/format. On failure the
  * output remains unchanged. No GPU allocation, residency or submission occurs.
  */
-int stela_nv_image_init(const struct nv_device_info *, const void *owner,
-                        const struct stela_nv_image_request *, struct stela_nv_image *);
+int stela_nvidia_image_init(const struct nv_device_info *, const void *owner,
+                        const struct stela_nvidia_image_request *, struct stela_nvidia_image *);
 
 /* Rebuilds the original layout from the validated request; mutable caller NIL
  * fields can never reach its assert-bearing descriptor encoder. Binding must
@@ -79,7 +79,7 @@ int stela_nv_image_init(const struct nv_device_info *, const void *owner,
  * sampler/shader ABI. Copy only state bytes plus retained resource references
  * across the native boundary; CPU pointers are not handles for another CPU ABI.
  */
-int stela_nv_image_descriptor(const struct stela_nv_image *,
-                              const struct stela_nv_image_binding *,
-                              const struct stela_nv_image_view *, struct nil_descriptor *);
+int stela_nvidia_image_descriptor(const struct stela_nvidia_image *,
+                              const struct stela_nvidia_image_binding *,
+                              const struct stela_nvidia_image_view *, struct nil_descriptor *);
 #endif

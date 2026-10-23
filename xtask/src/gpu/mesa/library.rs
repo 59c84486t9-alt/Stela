@@ -38,7 +38,7 @@ fn symbols(path: &Path) -> Result<(Architecture, Vec<String>)> {
 /// The Metal library assembler links no NIR and threadgroup value
 /// normalization no LLVM or NIR: they own no compiler state.
 pub(super) fn check_boundaries(stela: &Build) -> Result<()> {
-    let (architecture, assembler) = symbols(&stela.executable("stela_metal_assembly_test")?)?;
+    let (architecture, assembler) = symbols(&stela.executable("stela_library_assembly_test")?)?;
     let host = match env::consts::ARCH {
         "x86_64" => Architecture::X86_64,
         "aarch64" => Architecture::Aarch64,
@@ -51,7 +51,7 @@ pub(super) fn check_boundaries(stela: &Build) -> Result<()> {
             .any(|s| s == "_stela_air_to_nir" || s.starts_with("_nir_")),
         "local Metal library owner unexpectedly links NIR",
     );
-    let (_, values) = symbols(&stela.executable("stela_metal_threadgroup_test")?)?;
+    let (_, values) = symbols(&stela.executable("stela_threadgroup_test")?)?;
     ensure!(
         !values
             .iter()
