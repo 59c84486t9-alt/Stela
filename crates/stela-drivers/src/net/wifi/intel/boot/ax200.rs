@@ -253,14 +253,16 @@ impl<Q: BootIo, B: BiosIo> Ax200Setup<'_, Q, B> {
         }
         if let Some(ticket) = self.ticket.as_ref() {
             let command = &self.commands[self.next - 1];
-            match self
-                .lari
-                .radio
-                .initialized
-                .boot
-                .poll_command(ticket)
-                .map_err(Ax200SetupError::Boot)?
+            let progress = self.lari.radio.initialized.boot.poll_command(ticket);
+            if matches!(progress, Err(Error::CommandReclaim(_)))
+                && self.deadline.as_ref().is_some_and(crate::Deadline::passed)
             {
+                // CPU handoff can fail after actual RX completion. A deadline
+                // ends retries but retains the exact ticket/response and DMA;
+                // it is never a reclamation or stopped-requester proof.
+                return Err(Ax200SetupError::Deadline(command.kind()));
+            }
+            match progress.map_err(Ax200SetupError::Boot)? {
                 CommandProgress::Pending => {
                     if self.deadline.as_ref().is_some_and(crate::Deadline::passed) {
                         return Err(Ax200SetupError::Deadline(command.kind()));

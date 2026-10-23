@@ -241,7 +241,7 @@ fn exercise_setup(actual: bool) {
 
 #[test]
 fn thermal_power_errors_remain_sticky_and_uncertain_dma_keeps_both_owners() {
-    for case in 0..6 {
+    for case in 0..7 {
         let bytes = setup_bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
         let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -264,7 +264,7 @@ fn thermal_power_errors_remain_sticky_and_uncertain_dma_keeps_both_owners() {
         let mut options = Ax200SetupOptions::new(Clock {
             ticks_per_microsecond: 1_000_000,
         });
-        if case == 3 {
+        if case == 3 || case == 6 {
             options.clock.ticks_per_microsecond = 1;
             options.command_timeout_us = 1;
         }
@@ -326,6 +326,34 @@ fn thermal_power_errors_remain_sticky_and_uncertain_dma_keeps_both_owners() {
                 s.fail = Some(s.ops.len() + 1);
                 drop(s);
                 assert!(setup.stop().is_err());
+            }
+            6 => {
+                result.unwrap();
+                complete(
+                    &setup.lari.radio.initialized.boot,
+                    &domain,
+                    entry,
+                    entry + 1,
+                    &command_packet(
+                        super::super::super::command::Id {
+                            group: 4,
+                            opcode: 4,
+                            version: 0,
+                        },
+                        sequence,
+                        &[],
+                    ),
+                );
+                let mut r = domain.records.lock().unwrap();
+                r.cpu_sync_fail = Some(r.cpu_syncs + 1);
+                drop(r);
+                options.clock.delay(20);
+                assert_eq!(
+                    unsafe { setup.advance(&source) },
+                    Err(Ax200SetupError::Deadline(Kind::TemperatureThresholds))
+                );
+                assert!(!setup.thermal_command_acknowledged());
+                assert!(setup.responses().is_empty());
             }
             _ => unreachable!(),
         }
