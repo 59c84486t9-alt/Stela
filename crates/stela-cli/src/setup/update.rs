@@ -133,12 +133,11 @@ pub(super) fn store_version(esp: &Path, image: &[u8]) -> Result<String> {
 }
 
 pub(super) fn check_firmware_support(esp: &Path, image: &[u8]) -> Result<()> {
-    ensure!(
-        !esp.join(stela_loader::host_firmware::MANIFEST_PATH)
-            .try_exists()?
-            || stela_loader::host_firmware::supports_mount(image),
-        "stela.efi cannot load installed host firmware; keep a firmware-capable Stela version"
-    );
+    stela_loader::host_firmware::check_installed_mount(
+        &esp.join(stela_loader::host_firmware::DIRECTORY),
+        image,
+    )
+    .context("stela.efi cannot load installed host firmware; keep a compatible Stela version")?;
     Ok(())
 }
 

@@ -74,6 +74,23 @@ fn resolve_optional(root: &Path, relative: &str) -> Result<Option<PathBuf>, Erro
     Ok(Some(directory))
 }
 
+/// Validate an installed manifest against a candidate EFI before activation.
+/// Absence is optional; malformed or unreadable present metadata is an error.
+/// Payload integrity remains the package reader and boot mount's responsibility.
+pub fn check_installed_mount(directory: &Path, image: &[u8]) -> Result<(), Error> {
+    match fs::symlink_metadata(directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io(error)),
+        Ok(metadata) if metadata.is_dir() && !metadata.is_symlink() => {}
+        Ok(_) => return Err(fail("host firmware package must be a real directory")),
+    }
+    let Some(path) = resolve_optional(directory, "manifest.json")? else {
+        return Ok(());
+    };
+    let bytes = read_bounded(&path, None, MAX_MANIFEST_BYTES)?;
+    Manifest::parse(&bytes)?.check_mount(image)
+}
+
 pub(super) const NOTICE_MARKER: &str = "stela-notice-v1:";
 const NOTICE_INDEX: &str = "provenance.json";
 
@@ -258,6 +275,15 @@ impl Package {
     /// `source` contains manifest.json and its relative members. No download or
     /// license inference is performed. The caller supplies an authorized package.
     pub fn read(source: &Path) -> Result<Self, Error> {
+        Self::read_inner(source, None)
+    }
+
+    /// Check the target mount's bounds before reading any image payload.
+    pub fn read_for_mount(source: &Path, image: &[u8]) -> Result<Self, Error> {
+        Self::read_inner(source, Some(image))
+    }
+
+    fn read_inner(source: &Path, mount_image: Option<&[u8]>) -> Result<Self, Error> {
         let metadata = fs::symlink_metadata(source).map_err(io)?;
         if !metadata.is_dir() || metadata.is_symlink() {
             return Err(fail("host firmware package must be a real directory"));
@@ -269,6 +295,9 @@ impl Package {
             MAX_MANIFEST_BYTES,
         )?;
         let parsed = Manifest::parse(&manifest)?;
+        if let Some(image) = mount_image {
+            parsed.check_mount(image)?;
+        }
         let mut files = Vec::with_capacity(parsed.images.len());
         for image in &parsed.images {
             let bytes = read_bounded(
@@ -331,6 +360,10 @@ impl Package {
 
     pub fn inventory(&self) -> (usize, usize) {
         (self.files.len(), self.files.iter().map(Vec::len).sum())
+    }
+
+    pub fn check_mount(&self, image: &[u8]) -> Result<(), Error> {
+        Manifest::parse(&self.manifest)?.check_mount(image)
     }
 
     /// Prepare immutable object names and publish only after all files are

@@ -11,18 +11,71 @@ use serde::{
 use stela_drivers::firmware::{Catalog, Provenance, Resource, Target};
 
 /// Native host capability, independent of the guest bundle/options schema.
-pub const MOUNT_CAPABILITY: [u8; 21] = *b"STELA-HOST-FIRMWARE\0\x01";
+/// Revision 1 permits 16 MiB per image, revision 2 permits 64 MiB. Both keep
+/// schema 1, 64 images and 64 MiB aggregate; changing these requires a revision.
+pub const MOUNT_CAPABILITY: [u8; 21] = *b"STELA-HOST-FIRMWARE\0\x02";
 pub fn supports_mount(image: &[u8]) -> bool {
-    image
-        .windows(MOUNT_CAPABILITY.len())
-        .any(|window| window == MOUNT_CAPABILITY)
+    MountLimits::from_image(image).is_some()
+}
+
+/// Bounds advertised by an EFI image, independent of manifest schema 1.
+#[derive(Clone, Copy, Debug)]
+pub struct MountLimits {
+    max_image_bytes: usize,
+}
+
+impl MountLimits {
+    pub fn from_image(image: &[u8]) -> Option<Self> {
+        let mut revision = 0;
+        for marker in image.windows(MOUNT_CAPABILITY.len()) {
+            if marker[..20] != MOUNT_CAPABILITY[..20] {
+                continue;
+            }
+            match marker[20] {
+                1 | 2 => revision = revision.max(marker[20]),
+                // Never interpret an unknown mount contract as an older one.
+                _ => return None,
+            }
+        }
+        match revision {
+            1 => Some(Self {
+                max_image_bytes: 16 * 1024 * 1024,
+            }),
+            2 => Some(Self {
+                max_image_bytes: MAX_IMAGE_BYTES,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Check metadata before payload allocation, download or publication.
+    pub fn check_lengths(&self, lengths: impl IntoIterator<Item = usize>) -> Result<(), Error> {
+        let mut count = 0usize;
+        let mut total = 0usize;
+        for length in lengths {
+            if length == 0 || length > self.max_image_bytes {
+                return Err(Error(format!(
+                    "stela.efi host firmware image limit is {} bytes; update Stela before installing this package",
+                    self.max_image_bytes
+                )));
+            }
+            count += 1;
+            total = total
+                .checked_add(length)
+                .ok_or_else(|| fail("host firmware total overflows its budget"))?;
+            if count > MAX_IMAGES || total > MAX_TOTAL_BYTES {
+                return Err(fail("host firmware resources exceed the mount budget"));
+            }
+        }
+        Ok(())
+    }
 }
 
 pub const MANIFEST_PATH: &str = "EFI/stela/firmware/manifest.json";
 pub const DIRECTORY: &str = "EFI/stela/firmware";
 pub const MAX_MANIFEST_BYTES: usize = 128 * 1024;
 pub const MAX_IMAGES: usize = 64;
-pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_LABEL_BYTES: usize = 256;
 pub const MAX_PATH_BYTES: usize = 240;
@@ -141,7 +194,7 @@ impl<'a> Manifest<'a> {
                 return Err(fail("invalid host firmware board or source member"));
             }
             if image.length == 0 || image.length > MAX_IMAGE_BYTES {
-                return Err(fail("host firmware image exceeds the nonzero 16 MiB limit"));
+                return Err(fail("host firmware image exceeds the nonzero 64 MiB limit"));
             }
             total = total
                 .checked_add(image.length)
@@ -162,6 +215,12 @@ impl<'a> Manifest<'a> {
 
     pub fn total_bytes(&self) -> usize {
         self.images.iter().map(|image| image.length).sum()
+    }
+
+    pub fn check_mount(&self, image: &[u8]) -> Result<(), Error> {
+        MountLimits::from_image(image)
+            .ok_or_else(|| fail("stela.efi has no supported host firmware mount capability"))?
+            .check_lengths(self.images.iter().map(|image| image.length))
     }
 
     /// Build metadata in the active allocator; permanent pages are never copied.
@@ -289,7 +348,7 @@ pub fn storage_path(path: &str) -> bool {
 #[cfg(feature = "std")]
 mod package;
 #[cfg(feature = "std")]
-pub use package::Package;
+pub use package::{Package, check_installed_mount};
 
 #[cfg(test)]
 mod tests {
@@ -306,6 +365,80 @@ mod tests {
     }
     fn manifest(images: Vec<Value>) -> Vec<u8> {
         serde_json::to_vec(&json!({"schema":1,"images":images})).unwrap()
+    }
+
+    #[test]
+    fn mount_revision_checks_each_image_without_downgrading_unknown_contracts() {
+        let mut legacy = MOUNT_CAPABILITY;
+        legacy[20] = 1;
+        let mut unknown = MOUNT_CAPABILITY;
+        unknown[20] = 3;
+        let current = MountLimits::from_image(&MOUNT_CAPABILITY).unwrap();
+        let old = MountLimits::from_image(&legacy).unwrap();
+        assert!(old.check_lengths([16 * 1024 * 1024]).is_ok());
+        assert!(old.check_lengths([16 * 1024 * 1024 + 1]).is_err());
+        assert!(current.check_lengths([MAX_IMAGE_BYTES]).is_ok());
+        assert!(current.check_lengths([MAX_IMAGE_BYTES, 1]).is_err());
+        assert!(current.check_lengths([0]).is_err());
+        assert!(current.check_lengths([1; MAX_IMAGES + 1]).is_err());
+        // Exact measured GB203 lengths, metadata only; no firmware is embedded.
+        let lengths = [63_571_696, 200_812, 199_820];
+        assert!(current.check_lengths(lengths).is_ok());
+        assert!(old.check_lengths(lengths).is_err());
+        assert!(current.check_lengths([63_571_696, 200_812, 199_820, 3_136_536]).is_ok());
+        assert!(current.check_lengths([63_571_696, 200_812, 199_820, 3_136_537]).is_err());
+        for length in [16 * 1024 * 1024, 16 * 1024 * 1024 + 1, MAX_IMAGE_BYTES] {
+            let mut item = image();
+            item["length"] = json!(length);
+            let bytes = manifest(vec![item]);
+            let parsed = Manifest::parse(&bytes).unwrap();
+            assert!(parsed.check_mount(&MOUNT_CAPABILITY).is_ok());
+            assert_eq!(parsed.check_mount(&legacy).is_ok(), length <= 16 * 1024 * 1024);
+        }
+        assert!(!supports_mount(b""));
+        assert!(!supports_mount(&MOUNT_CAPABILITY[..20]));
+        assert!(!supports_mount(&unknown));
+        let mut mixed = legacy.to_vec();
+        mixed.extend_from_slice(&MOUNT_CAPABILITY);
+        assert!(MountLimits::from_image(&mixed).unwrap().check_lengths(lengths).is_ok());
+        mixed.extend_from_slice(&unknown);
+        assert!(!supports_mount(&mixed));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn installed_mount_checks_bounded_metadata_before_efi_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("firmware");
+        assert!(check_installed_mount(&directory, b"legacy-no-mount").is_ok());
+        std::fs::create_dir(&directory).unwrap();
+        assert!(check_installed_mount(&directory, b"legacy-no-mount").is_ok());
+        let mut item = image();
+        item["length"] = json!(63_571_696);
+        std::fs::write(directory.join("manifest.json"), manifest(vec![item])).unwrap();
+        let mut legacy = MOUNT_CAPABILITY;
+        legacy[20] = 1;
+        assert!(check_installed_mount(&directory, &legacy).is_err());
+        let error = Package::read_for_mount(&directory, &legacy).err().unwrap();
+        assert!(error.to_string().contains("image limit"));
+        // A compatible mount proceeds to the absent payload and refuses it.
+        let error = Package::read_for_mount(&directory, &MOUNT_CAPABILITY).err().unwrap();
+        assert!(error.to_string().contains("missing host firmware package file"));
+        assert!(check_installed_mount(&directory, &MOUNT_CAPABILITY).is_ok());
+        assert!(check_installed_mount(&directory, b"legacy-no-mount").is_err());
+        for bytes in [b"{}".to_vec(), vec![b' '; MAX_MANIFEST_BYTES + 1]] {
+            std::fs::write(directory.join("manifest.json"), bytes).unwrap();
+            assert!(check_installed_mount(&directory, &MOUNT_CAPABILITY).is_err());
+        }
+        #[cfg(unix)]
+        {
+            let path = directory.join("manifest.json");
+            std::fs::remove_file(&path).unwrap();
+            let external = root.path().join("external.json");
+            std::fs::write(&external, manifest(vec![image()])).unwrap();
+            std::os::unix::fs::symlink(&external, &path).unwrap();
+            assert!(check_installed_mount(&directory, &MOUNT_CAPABILITY).is_err());
+        }
     }
 
     #[test]

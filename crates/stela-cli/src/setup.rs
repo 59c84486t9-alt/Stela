@@ -1138,10 +1138,9 @@ impl Setup {
         if let Some(inventory) = &self.host_firmware_requirements {
             let record = read_record(environment, &self.usb)?;
             check_installed_efi(environment, &record)?;
+            let mount_image = fs::read(record.esp.join(LOADER_PATH))?;
             ensure!(
-                stela_loader::host_firmware::supports_mount(&fs::read(
-                    record.esp.join(LOADER_PATH)
-                )?),
+                stela_loader::host_firmware::supports_mount(&mount_image),
                 "installed stela.efi predates host firmware resources; run stela setup --update-stela first"
             );
             let cache = self
@@ -1153,18 +1152,18 @@ impl Setup {
                 &record.esp.join(stela_loader::host_firmware::DIRECTORY),
                 &cache,
                 self.dry_run,
+                &mount_image,
             );
         }
         if let Some(source) = &self.host_firmware {
             let record = read_record(environment, &self.usb)?;
             check_installed_efi(environment, &record)?;
+            let mount_image = fs::read(record.esp.join(LOADER_PATH))?;
             ensure!(
-                stela_loader::host_firmware::supports_mount(&fs::read(
-                    record.esp.join(LOADER_PATH)
-                )?),
+                stela_loader::host_firmware::supports_mount(&mount_image),
                 "installed stela.efi predates host firmware resources; run stela setup --update-stela first"
             );
-            let package = stela_loader::host_firmware::Package::read(source)?;
+            let package = stela_loader::host_firmware::Package::read_for_mount(source, &mount_image)?;
             let (images, bytes) = package.inventory();
             let destination = record.esp.join(stela_loader::host_firmware::DIRECTORY);
             let mut report = format!(
@@ -1879,6 +1878,7 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         )?,
     };
     let efi_image = read_efi(environment, &efi_path)?;
+    update::check_firmware_support(&esp, &efi_image)?;
     // The bundle is prepared on this computer before the USB changes, which
     // also measures it for the space check.
     let (product_version, build, prepared) =
@@ -5035,7 +5035,9 @@ mod tests {
         assert_eq!(snapshot(&f.esp), before);
         let capable = f._dir.path().join("firmware-capable.efi");
         let mut image = efi_image(b"observed-firmware-capable");
-        image.extend_from_slice(&stela_loader::host_firmware::MOUNT_CAPABILITY);
+        let mut legacy_marker = stela_loader::host_firmware::MOUNT_CAPABILITY;
+        legacy_marker[20] = 1;
+        image.extend_from_slice(&legacy_marker);
         fs::write(&capable, image).unwrap();
         rerun(&f, |c| {
             c.update_stela = true;
@@ -5065,6 +5067,95 @@ mod tests {
     }
 
     #[test]
+    fn large_firmware_refuses_legacy_install_update_rollback_and_reinstall_before_writes() {
+        use sha2::{Digest, Sha256};
+        use stela_loader::host_firmware::{DIRECTORY, MOUNT_CAPABILITY, Package};
+        let f = fixture(64 * GIB, false);
+        setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+        let legacy = f._dir.path().join("firmware-v1.efi");
+        let mut marker = MOUNT_CAPABILITY;
+        marker[20] = 1;
+        let mut image = efi_image(b"firmware-v1");
+        image.extend_from_slice(&marker);
+        fs::write(&legacy, image).unwrap();
+        rerun(&f, |c| {
+            c.update_stela = true;
+            c.efi = Some(legacy.clone());
+        }).unwrap();
+        let source = f._dir.path().join("large-package");
+        fs::create_dir(&source).unwrap();
+        let bytes = vec![0x5a; 16 * 1024 * 1024 + 1];
+        fs::write(source.join("data.bin"), &bytes).unwrap();
+        fs::write(source.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
+            "schema":1,"images":[{"name":"fixture/large.bin","path":"data.bin",
+            "length":bytes.len(),"sha256":hex::encode(Sha256::digest(&bytes)),
+            "target":{"driver":"fixture","hardware":"synthetic","revision":"v1","board":null},
+            "provenance":{"source":"synthetic","revision":"v1","member":"fixture/large.bin","license":"CC0-1.0"}}]
+        })).unwrap()).unwrap();
+        drop(bytes);
+        let before = snapshot(&f.esp);
+        for dry in [true, false] {
+            let error = rerun(&f, |c| {
+                c.host_firmware = Some(source.clone());
+                c.dry_run = dry;
+            }).unwrap_err();
+            assert!(error.to_string().contains("image limit"), "{error:#}");
+            assert_eq!(snapshot(&f.esp), before);
+        }
+        let current = f._dir.path().join("firmware-v2.efi");
+        let mut image = efi_image(b"firmware-v2");
+        image.extend_from_slice(&MOUNT_CAPABILITY);
+        fs::write(&current, image).unwrap();
+        rerun(&f, |c| {
+            c.update_stela = true;
+            c.efi = Some(current.clone());
+        }).unwrap();
+        rerun(&f, |c| c.host_firmware = Some(source.clone())).unwrap();
+        let loaded = Package::read(&f.esp.join(DIRECTORY)).unwrap();
+        assert_eq!(loaded.inventory(), (1, 16 * 1024 * 1024 + 1));
+        assert!(loaded.check_mount(&fs::read(&current).unwrap()).is_ok());
+        assert!(loaded.check_mount(&fs::read(&legacy).unwrap()).is_err());
+        let before = snapshot(&f.esp);
+        let error = rerun(&f, |c| c.rollback = true).unwrap_err();
+        assert!(error.to_string().contains("cannot load installed host firmware"), "{error:#}");
+        assert_eq!(snapshot(&f.esp), before);
+        let error = rerun(&f, |c| {
+            c.update_stela = true;
+            c.efi = Some(legacy.clone());
+        }).unwrap_err();
+        assert!(error.to_string().contains("cannot load installed host firmware"), "{error:#}");
+        assert_eq!(snapshot(&f.esp), before);
+
+        // Uninstall retains independently managed host firmware. A new setup
+        // must check it during planning, even when there is no setup record.
+        let firmware_before = snapshot(&f.esp.join(DIRECTORY));
+        rerun(&f, |c| c.uninstall = true).unwrap();
+        assert!(!f.esp.join(RECORD).exists());
+        assert_eq!(snapshot(&f.esp.join(DIRECTORY)), firmware_before);
+        let before = snapshot(&f.esp);
+        for candidate in [&legacy, &f.efi] {
+            for dry in [true, false] {
+                let mut reinstall = command(&f, &f.esp);
+                reinstall.efi = Some(candidate.clone());
+                reinstall.dry_run = dry;
+                let error = setup(&environment(&f.host), reinstall).unwrap_err();
+                assert!(error.to_string().contains("cannot load installed host firmware"), "{error:#}");
+                assert_eq!(snapshot(&f.esp), before);
+            }
+        }
+        let mut reinstall = command(&f, &f.esp);
+        reinstall.efi = Some(current.clone());
+        reinstall.dry_run = true;
+        setup(&environment(&f.host), reinstall).unwrap();
+        assert_eq!(snapshot(&f.esp), before);
+        let mut reinstall = command(&f, &f.esp);
+        reinstall.efi = Some(current);
+        setup(&environment(&f.host), reinstall).unwrap();
+        assert!(record(&f).complete);
+        assert_eq!(snapshot(&f.esp.join(DIRECTORY)), firmware_before);
+    }
+
+    #[test]
     fn host_firmware_action_validates_dry_run_and_publishes_separately_from_guest_bundles() {
         let f = fixture(64 * GIB, false);
         setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
@@ -5090,7 +5181,9 @@ mod tests {
         assert_eq!(snapshot(&f.esp), old);
         let aware = f._dir.path().join("firmware-aware.efi");
         let mut image = efi_image(b"firmware-aware");
-        image.extend_from_slice(&stela_loader::host_firmware::MOUNT_CAPABILITY);
+        let mut legacy_marker = stela_loader::host_firmware::MOUNT_CAPABILITY;
+        legacy_marker[20] = 1;
+        image.extend_from_slice(&legacy_marker);
         fs::write(&aware, image).unwrap();
         rerun(&f, |c| {
             c.update_stela = true;

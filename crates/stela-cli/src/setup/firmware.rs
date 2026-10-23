@@ -99,9 +99,17 @@ pub(super) fn provision(
     destination: &Path,
     cache: &Path,
     dry_run: bool,
+    mount_image: &[u8],
 ) -> Result<String> {
     let inventory = read_inventory(inventory)?;
     let plan = Plan::select(&inventory)?;
+    host_firmware::MountLimits::from_image(mount_image)
+        .context("stela.efi has no supported host firmware mount capability")?
+        .check_lengths(
+            plan.selections()
+                .iter()
+                .map(|selection| selection.recipe.image.length),
+        )?;
     let previous = destination.join("manifest.json");
     if previous.try_exists()? {
         let mut bytes = Vec::new();
@@ -154,6 +162,7 @@ pub(super) fn provision(
         cached(&client, cache, artifact)
             .map_err(|e| host_firmware::Error(format!("firmware provisioning: {e:#}")))
     })?;
+    package.check_mount(mount_image)?;
     package.publish(destination)?;
     report.push_str("Published pinned firmware and accompanying redistribution notices.\n");
     Ok(report)
@@ -193,7 +202,13 @@ mod tests {
         fs::write(&inventory, br#"{"schema":1,"complete":true,"requirements":[{"name":"rtl_nic/rtl8168d-1.fw","target":{"driver":"realtek","hardware":"10ec:8168","revision":"xid-281","board":null},"minimum_bytes":4}]}"#).unwrap();
         let cache = dir.path().join("cache");
         let destination = dir.path().join("destination");
-        let text = provision(&inventory, &destination, &cache, true).unwrap();
+        let text = provision(
+            &inventory,
+            &destination,
+            &cache,
+            true,
+            &host_firmware::MOUNT_CAPABILITY,
+        ).unwrap();
         assert!(text.contains("1492 bytes"));
         assert!(!cache.exists());
         assert!(!destination.exists());
@@ -202,7 +217,13 @@ mod tests {
             br#"{"schema":1,"complete":false,"requirements":[]}"#,
         )
         .unwrap();
-        assert!(provision(&inventory, &destination, &cache, true).is_err());
+        assert!(provision(
+            &inventory,
+            &destination,
+            &cache,
+            true,
+            &host_firmware::MOUNT_CAPABILITY,
+        ).is_err());
     }
 
     #[test]
@@ -284,7 +305,13 @@ mod tests {
         .unwrap();
         let destination = output.join("firmware");
         let cache = output.join("cache");
-        let report = provision(&inventory, &destination, &cache, false).unwrap();
+        let report = provision(
+            &inventory,
+            &destination,
+            &cache,
+            false,
+            &host_firmware::MOUNT_CAPABILITY,
+        ).unwrap();
         fs::write(output.join("provisioning.txt"), report).unwrap();
         let manifest_bytes = fs::read(destination.join("manifest.json")).unwrap();
         let manifest = host_firmware::Manifest::parse(&manifest_bytes).unwrap();
@@ -325,7 +352,13 @@ mod tests {
                 .inventory(),
             (8, 22876)
         );
-        let again = provision(&inventory, &destination, &cache, false).unwrap();
+        let again = provision(
+            &inventory,
+            &destination,
+            &cache,
+            false,
+            &host_firmware::MOUNT_CAPABILITY,
+        ).unwrap();
         assert!(again.contains("Published pinned firmware"));
         assert_eq!(
             fs::read(destination.join("manifest.json")).unwrap(),

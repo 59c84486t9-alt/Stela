@@ -704,7 +704,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         fs::write(&source, bytes)?;
         fs::write(volume.join("EFI/stela/stela.cfg"), &options)?;
         if let Some(directory) = &arguments.host_firmware {
-            let package = stela_loader::host_firmware::Package::read(directory)?;
+            let package = stela_loader::host_firmware::Package::read_for_mount(
+                directory,
+                &fs::read(&image)?,
+            )?;
             package.publish(&volume.join(stela_loader::host_firmware::DIRECTORY))?;
         }
         if let Some(bundle) = &arguments.bundle {
