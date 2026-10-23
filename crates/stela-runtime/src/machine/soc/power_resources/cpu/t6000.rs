@@ -6,6 +6,15 @@
 use super::*;
 use alloc::vec;
 
+// Pinned mac13j kernel topology capacities, not observed SKU counts.
+const T6000_KERNEL_MAX_CPUS: usize = 20;
+const T6000_KERNEL_MAX_CLUSTERS: usize = 6;
+const T6000_KERNEL_MAX_PHYSICAL_CLUSTER: u32 = 10;
+const AFFINITY_PART_MASK: u32 = 0xff;
+const CLUSTER_SHIFT: u32 = 8;
+const MPIDR_RES1: u64 = 1 << 31;
+const ENABLE_CORE_SELECTOR: u32 = 0x436f_7265;
+
 pub(super) const EVIDENCE: &str = "26A434 mac13j SHA256 5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90; mode1 complex2b16e08/core2b190e4/skip2b19918, enable2b2dcb0; cpu/t6000-core-membership-r1 source receipt";
 
 pub(super) fn resolve(
@@ -43,21 +52,23 @@ pub(super) fn resolve(
         return Err(Error::Topology("T6000 CPU address cells"));
     }
     let nodes = cpus.children().ok_or(Error::Malformed("CPU children"))?;
-    if nodes.is_empty() || nodes.len() != processors.len() || nodes.len() > 20 {
+    if nodes.is_empty() || nodes.len() != processors.len() || nodes.len() > T6000_KERNEL_MAX_CPUS {
         return Err(Error::Topology("T6000 complete original CPU envelope"));
     }
     let mut members: Vec<Vec<usize>> = Vec::new();
     for (pe, (node, identity)) in nodes.iter().zip(processors).enumerate() {
         let reg = word(required(node, "reg")?)?;
-        let aff1 = (reg >> 8) as usize;
-        if reg & !0xffff != 0 || aff1 > 10 {
+        let aff1 = (reg >> CLUSTER_SHIFT) as usize;
+        if u64::from(reg) & !PHYSICAL_AFFINITY != 0
+            || reg >> CLUSTER_SHIFT > T6000_KERNEL_MAX_PHYSICAL_CLUSTER
+        {
             return Err(Error::Topology("T6000 physical affinity"));
         }
         if members.len() == aff1 {
             members.push(Vec::new());
         }
         if let Some(last) = nodes[..pe].last()
-            && word(required(last, "reg")?)? >> 8 > reg >> 8
+            && word(required(last, "reg")?)? >> CLUSTER_SHIFT > reg >> CLUSTER_SHIFT
         {
             return Err(Error::Topology("T6000 reordered source cluster"));
         }
@@ -66,7 +77,7 @@ pub(super) fn resolve(
         };
         // Mode1 counters enumerate source records. Holes/reordered clusters
         // cannot inherit a dense ordinal/Aff0 or original enable-mask join.
-        if (reg & 255) as usize != cluster.len() {
+        if (reg & AFFINITY_PART_MASK) as usize != cluster.len() {
             return Err(Error::Topology("T6000 cluster/core source order"));
         }
         let kind = required(node, "cluster-type")?;
@@ -84,22 +95,22 @@ pub(super) fn resolve(
             || word(required(node, "cluster-id")?)? as usize != aff1
             || word(required(node, "die-id")?)? != 0
             || word(required(node, "die-cluster-id")?)? as usize != aff1
-            || word(required(node, "cluster-core-id")?)? != reg & 255
-            || identity.mpidr != (0x8000_0000 | (aff2 << 16) | u64::from(reg))
+            || word(required(node, "cluster-core-id")?)? != reg & AFFINITY_PART_MASK
+            || identity.mpidr != (MPIDR_RES1 | (aff2 << CORETYPE_SHIFT) | u64::from(reg))
         {
             return Err(Error::Topology("T6000 source/profile coordinate mismatch"));
         }
         let enable = required(node, "function-enable_core")?;
         if enable.len() != 12
             || word(&enable[..4])? != word(required(&pmgr, "AAPL,phandle")?)?
-            || word(&enable[4..8])? != 0x436f7265
+            || word(&enable[4..8])? != ENABLE_CORE_SELECTOR
             || word(&enable[8..])? != 1u32 << pe
         {
             return Err(Error::Topology("T6000 original enable_core global ordinal"));
         }
         cluster.push(pe);
     }
-    if members.len() > 6 {
+    if members.len() > T6000_KERNEL_MAX_CLUSTERS {
         return Err(Error::Topology("T6000 kernel cluster capacity"));
     }
     let descriptors = required(&pmgr, "perf-domains")?;
@@ -233,6 +244,40 @@ pub(super) fn resolve(
         }
     }
     Ok(output)
+}
+
+fn source_address(io: &Node<'_>, pmgr: &Node<'_>, group: usize, index: u32) -> Result<u64, Error> {
+    let groups = required(pmgr, "ps-regs")?;
+    let registers = required(pmgr, "reg")?;
+    if !groups.len().is_multiple_of(12) || !registers.len().is_multiple_of(16) || index >= 32 {
+        return Err(Error::Malformed("T6000 PS location cells"));
+    }
+    let group = groups
+        .as_chunks::<12>()
+        .0
+        .get(group)
+        .ok_or(Error::UnqualifiedGeometry("T6000 PS group"))?;
+    let reg = word(&group[..4])? as usize;
+    let offset = u64::from(word(&group[4..8])?) + u64::from(index) * PS_STRIDE;
+    if word(&group[8..])? & (1u32 << index) == 0 {
+        return Err(Error::UnqualifiedGeometry("T6000 PS mask"));
+    }
+    let range = registers
+        .as_chunks::<16>()
+        .0
+        .get(reg)
+        .ok_or(Error::UnqualifiedGeometry("T6000 PS register"))?;
+    let base = u64::from_le_bytes(range[..8].try_into().unwrap());
+    let bytes = u64::from_le_bytes(range[8..].try_into().unwrap());
+    if offset.checked_add(PS_STRIDE).is_none_or(|end| end > bytes) {
+        return Err(Error::UnqualifiedGeometry("T6000 PS extent"));
+    }
+    physical(
+        io,
+        base.checked_add(offset)
+            .ok_or(Error::UnqualifiedGeometry("T6000 PS wraps"))?,
+        PS_STRIDE,
+    )
 }
 
 #[cfg(test)]
@@ -465,38 +510,4 @@ mod tests {
         changed[2].mpidr ^= 1 << 16;
         assert!(resolve_authored(&bytes, &changed, 1).is_err());
     }
-}
-
-fn source_address(io: &Node<'_>, pmgr: &Node<'_>, group: usize, index: u32) -> Result<u64, Error> {
-    let groups = required(pmgr, "ps-regs")?;
-    let registers = required(pmgr, "reg")?;
-    if !groups.len().is_multiple_of(12) || !registers.len().is_multiple_of(16) || index >= 32 {
-        return Err(Error::Malformed("T6000 PS location cells"));
-    }
-    let group = groups
-        .as_chunks::<12>()
-        .0
-        .get(group)
-        .ok_or(Error::UnqualifiedGeometry("T6000 PS group"))?;
-    let reg = word(&group[..4])? as usize;
-    let offset = u64::from(word(&group[4..8])?) + u64::from(index) * 8;
-    if word(&group[8..])? & (1u32 << index) == 0 {
-        return Err(Error::UnqualifiedGeometry("T6000 PS mask"));
-    }
-    let range = registers
-        .as_chunks::<16>()
-        .0
-        .get(reg)
-        .ok_or(Error::UnqualifiedGeometry("T6000 PS register"))?;
-    let base = u64::from_le_bytes(range[..8].try_into().unwrap());
-    let bytes = u64::from_le_bytes(range[8..].try_into().unwrap());
-    if offset.checked_add(8).is_none_or(|end| end > bytes) {
-        return Err(Error::UnqualifiedGeometry("T6000 PS extent"));
-    }
-    physical(
-        io,
-        base.checked_add(offset)
-            .ok_or(Error::UnqualifiedGeometry("T6000 PS wraps"))?,
-        8,
-    )
 }

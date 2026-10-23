@@ -75,11 +75,11 @@ impl<'a> BspSource<'a> {
         }
         let full_clusters = processors
             .iter()
-            .map(|cpu| cpu.reg >> 8)
+            .map(|cpu| cpu.reg >> CLUSTER_SHIFT)
             .collect::<BTreeSet<_>>();
         let selected_clusters = processors[..count]
             .iter()
-            .map(|cpu| cpu.reg >> 8)
+            .map(|cpu| cpu.reg >> CLUSTER_SHIFT)
             .collect::<BTreeSet<_>>();
         if full_clusters != selected_clusters {
             return Err("assigned T6000 prefix must retain every original complex".into());
@@ -127,7 +127,7 @@ impl<'a> BspSource<'a> {
                 ways: ((encoded >> 3) & 0x3ff) as u32 + 1,
                 bytes: word(node, "l2-cache-size")?,
             };
-            let cluster = (cpu.reg >> 8) as usize;
+            let cluster = (cpu.reg >> CLUSTER_SHIFT) as usize;
             if geometry.len() == cluster {
                 geometry.push((pe, acc, cpm, cpu_impl.bytes, cache));
             } else {
@@ -165,7 +165,7 @@ impl<'a> BspSource<'a> {
             let node = &all[first];
             result.clusters.push(ClusterSlot {
                 id,
-                aff1: (processors[first].reg >> 8) as u8,
+                aff1: (processors[first].reg >> CLUSTER_SHIFT) as u8,
                 firmware_id: word(node, "cluster-id")?,
                 die: word(node, "die-id")?,
                 die_cluster: word(node, "die-cluster-id")?,
@@ -184,7 +184,7 @@ impl<'a> BspSource<'a> {
                 cores: vec![],
                 clusters: vec![id],
             });
-            if cluster == (boot_reg >> 8) as usize {
+            if cluster == (boot_reg >> CLUSTER_SHIFT) as usize {
                 result.cluster_address = owner.address;
             }
         }
@@ -205,7 +205,7 @@ impl<'a> BspSource<'a> {
                 id: kind_id,
                 cluster_type: cpu.cluster_type,
                 midr: identity.midr,
-                aff2: (identity.mpidr >> 16 & 7) as u8,
+                aff2: (identity.mpidr >> CORETYPE_SHIFT & u64::from(CORETYPE_MASK)) as u8,
                 clock: identity.clock,
                 instruction,
                 data,
@@ -214,7 +214,7 @@ impl<'a> BspSource<'a> {
                 id,
                 reg: cpu.reg,
                 kind: Some(kind_id),
-                cluster: ClusterId(cpu.reg >> 8),
+                cluster: ClusterId(cpu.reg >> CLUSTER_SHIFT),
                 cluster_core: word(node, "cluster-core-id")?,
                 interrupt: Some(InterruptId(pe as u32)),
                 start: Some(StartId(pe as u32)),
