@@ -7,6 +7,7 @@
 //! Exact fresh static evidence: memory/native-interrupts-r1. Firmware is never
 //! executed. Required actual device/line/callback owners have no defaults.
 mod auxiliary;
+pub mod device;
 mod owner;
 
 use super::platform::owner::Completion;
