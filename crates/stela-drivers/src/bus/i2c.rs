@@ -10,12 +10,15 @@
 //!
 //! The platform owner must discover and power the controller, provide exclusive
 //! register ownership, and supply board-correct clock counts. This module does
-//! not discover ACPI peripherals, program Intel LPSS power/clock gates, implement
-//! AMD MP2, or recover a physically stuck bus through GPIOs. All those paths
-//! remain separate requirements. Interrupts and DMA requests stay disabled.
+//! not discover ACPI peripherals, program Intel LPSS power/clock gates, or
+//! recover a physically stuck bus through GPIOs. Those paths remain separate
+//! requirements. DesignWare interrupts and DMA requests stay disabled.
+//! [`amd_mp2`] supplies a separate explicitly owned firmware-mailbox backend;
+//! its individual commands do not claim combined repeated-START semantics.
 use crate::Clock;
 use core::fmt;
 
+pub mod amd_mp2;
 mod designware;
 
 pub use designware::{Config, DesignWare, MmioRegisters, Registers, Speed, Timing};
