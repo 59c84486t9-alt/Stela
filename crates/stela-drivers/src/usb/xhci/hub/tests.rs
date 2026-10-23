@@ -1540,3 +1540,112 @@ fn retained_hub_status_uses_same_reserved_field_contract_as_cold_enumeration() {
         }
     }
 }
+
+#[test]
+fn usb2_multi_tt_validates_the_acknowledged_original_alternate_before_powering_children() {
+    let setting = |endpoints: &[[u8; 7]]| {
+        let mut bytes = vec![9, 4, 0, 1, endpoints.len() as u8, HUB_CLASS, 0, 2, 0];
+        for endpoint in endpoints {
+            bytes.extend_from_slice(endpoint);
+        }
+        bytes
+    };
+    let valid = [7, 5, 0x82, 3, 2, 0, 8];
+    let mut duplicate_interface = setting(&[valid]);
+    duplicate_interface.extend_from_slice(&setting(&[valid]));
+    let mut wrong_count = setting(&[valid]);
+    wrong_count[4] = 2;
+    let variants = [
+        ("missing", Vec::new(), false),
+        ("empty", setting(&[]), false),
+        ("wrong declared count", wrong_count, false),
+        ("undersized", setting(&[[7, 5, 0x82, 3, 1, 0, 8]]), false),
+        ("bulk", setting(&[[7, 5, 0x82, 2, 0, 2, 0]]), false),
+        ("OUT", setting(&[[7, 5, 2, 3, 2, 0, 8]]), false),
+        ("endpoint zero", setting(&[[7, 5, 0x80, 3, 2, 0, 8]]), false),
+        (
+            "invalid interval",
+            setting(&[[7, 5, 0x82, 3, 2, 0, 0]]),
+            false,
+        ),
+        ("duplicate endpoint", setting(&[valid, valid]), false),
+        ("duplicate interface", duplicate_interface, false),
+        ("valid distinct endpoint", setting(&[valid]), true),
+    ];
+    for context in [32, 64] {
+        for (case, alternate, usable) in &variants {
+            // Alt0 is valid in every case. The model acknowledges interface-zero
+            // alt1 even when the device's own original descriptors are bad.
+            let mut configuration = vec![
+                9, 2, 0, 0, 1, 1, 0, 0xc0, 0, 9, 4, 0, 0, 1, HUB_CLASS, 0, 1, 0, 7, 5, 0x81, 3, 2,
+                0, 8,
+            ];
+            configuration.extend_from_slice(alternate);
+            let length = configuration.len() as u16;
+            configuration[2..4].copy_from_slice(&length.to_le_bytes());
+            let mut hub = Node::hub(HIGH_SPEED, 8);
+            hub.multi_tt = true;
+            hub.configuration_override = Some(configuration);
+            for port in &mut hub.ports.as_mut().unwrap()[1..] {
+                port.status = 0;
+                port.change = 0;
+            }
+            let nodes = BTreeMap::from([(0, hub), (1, Node::leaf(HIGH_SPEED))]);
+            let mut backing = vec![0u64; 256 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: descriptors and ACK faults cannot outlive fixture DMA.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut c, model) = controller(&mut dma, context, nodes);
+            let mut failures = Vec::new();
+            let devices = c.enumerate(&mut dma, &mut failures);
+            let hardware = model.borrow();
+            let selected = setup(RECIPIENT_INTERFACE, SET_INTERFACE, 1, 0, 0);
+            assert!(
+                hardware
+                    .requests
+                    .iter()
+                    .any(|(_, _, request)| *request == selected),
+                "{case}: selection was not reached"
+            );
+            if *usable {
+                assert!(failures.is_empty(), "{case}: {failures:?}");
+                assert_eq!(devices.len(), 2);
+                let state = c.slots[1].as_ref().unwrap();
+                assert!(
+                    state.endpoints[5]
+                        .as_ref()
+                        .is_some_and(|endpoint| endpoint.enabled)
+                );
+                assert!(
+                    state.endpoints[3].is_none(),
+                    "alt0 endpoint must stay inactive"
+                );
+                assert_ne!(state.context[0] & (1 << 25), 0);
+            } else {
+                assert_eq!(failures.len(), 1, "{case}: {failures:?}");
+                assert_eq!(devices.len(), 1, "{case}: a child was published");
+                assert!(
+                    !hardware
+                        .requests
+                        .iter()
+                        .any(|(_, _, request)| request[0] == 0x23
+                            && request[1] == SET_FEATURE
+                            && request[2] == PORT_POWER as u8),
+                    "{case}: downstream power published"
+                );
+                assert!(
+                    !hardware
+                        .commands
+                        .iter()
+                        .any(|(kind, _)| *kind == CONFIGURE_ENDPOINT),
+                    "{case}: malformed setting configured"
+                );
+                assert_eq!(
+                    c.slots[1].as_ref().unwrap().context[0] & (1 << 25),
+                    0,
+                    "unconfigured MTT must not be committed"
+                );
+            }
+        }
+    }
+}

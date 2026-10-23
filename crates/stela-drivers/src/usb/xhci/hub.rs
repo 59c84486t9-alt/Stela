@@ -36,6 +36,73 @@ pub(super) fn status_endpoint(device: &Device, interface: &Interface) -> Option<
     .then_some(endpoint)
 }
 
+/// Check the original bytes of the setting actually selected by interface-zero
+/// SET_INTERFACE. Sanitization must not hide duplicate interfaces/endpoints or
+/// manufacture a usable status endpoint for the acknowledged setting.
+pub(super) fn usb2_status_endpoint(
+    configuration: &[u8],
+    speed: u8,
+    alternate: u8,
+    ports: u8,
+) -> Result<Endpoint, BlockError> {
+    if !(1..=MAX_HUB_PORTS).contains(&ports) {
+        return Err(BlockError::Unsupported(
+            "USB2 hub selected bitmap port count is invalid",
+        ));
+    }
+    let mut at = 0;
+    while at < configuration.len() {
+        let length = usize::from(configuration[at]);
+        if length < 2 || length > configuration.len() - at {
+            return Err(BlockError::Unsupported(
+                "USB2 hub original configuration is malformed",
+            ));
+        }
+        let bytes = &configuration[at..at + length];
+        if bytes[1] == INTERFACE_DESCRIPTOR
+            && length >= 9
+            && bytes[2] == 0
+            && bytes[3] == alternate
+            && bytes[4] != 1
+        {
+            return Err(BlockError::Unsupported(
+                "USB2 hub selected interface must declare one status endpoint",
+            ));
+        }
+        at += length;
+    }
+    let all = interfaces(configuration);
+    let mut selected = all
+        .iter()
+        .filter(|interface| interface.number == 0 && interface.alternate == alternate);
+    let interface = selected.next().ok_or(BlockError::Unsupported(
+        "USB2 hub selected status interface absent",
+    ))?;
+    if selected.next().is_some()
+        || interface.class != HUB_CLASS
+        || interface.subclass != 0
+        || interface.endpoints.len() != 1
+    {
+        return Err(BlockError::Unsupported(
+            "USB2 hub selected status interface is ambiguous or malformed",
+        ));
+    }
+    let endpoint = interface.endpoints[0];
+    if !matches!(speed, FULL_SPEED | HIGH_SPEED)
+        || endpoint.kind() != 3
+        || !endpoint.is_in()
+        || endpoint.address & 0x0f == 0
+        || endpoint.address & 0x70 != 0
+        || usize::from(endpoint.max_packet & 0x7ff) < usize::from(ports + 1).div_ceil(8)
+    {
+        return Err(BlockError::Unsupported(
+            "USB2 hub selected status endpoint is not a usable bitmap interrupt IN",
+        ));
+    }
+    endpoint::Context::new(&endpoint, speed)?;
+    Ok(endpoint)
+}
+
 /// One shared validator for cold and retained external hub status reads.
 /// A lifecycle bitmap never authorizes accepting reserved port-state fields.
 pub(super) fn validate_port_status(bytes: &[u8], speed: u8) -> Result<(), BlockError> {

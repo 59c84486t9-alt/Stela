@@ -61,6 +61,7 @@ pub(in super::super) struct Node {
     pub ports: Option<Vec<PortModel>>,
     pub bos: Option<Vec<u8>>,
     pub descriptor: Option<Vec<u8>>,
+    pub configuration_override: Option<Vec<u8>>,
     pub configured: bool,
     pub multi_tt: bool,
     active_alternate: u8,
@@ -89,6 +90,7 @@ impl Node {
             ),
             bos: None,
             descriptor: None,
+            configuration_override: None,
             configured: false,
             multi_tt: false,
             active_alternate: 0,
@@ -109,6 +111,7 @@ impl Node {
             ports: None,
             bos: None,
             descriptor: None,
+            configuration_override: None,
             configured: false,
             multi_tt: false,
             active_alternate: 0,
@@ -147,6 +150,9 @@ impl Node {
         out
     }
     pub fn configuration(&self) -> Vec<u8> {
+        if let Some(configuration) = &self.configuration_override {
+            return configuration.clone();
+        }
         let hub = self.ports.is_some();
         let mut out = vec![
             9,

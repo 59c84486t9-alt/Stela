@@ -582,8 +582,16 @@ impl Controller {
             }
             bytes
         };
-        let endpoint = hub_status_endpoint(&device.configuration, 0)
-            .ok_or(BlockError::Unsupported("USB2 hub has no status endpoint"))?;
+        let original = device
+            .configurations
+            .iter()
+            .find(|configuration| {
+                configuration.get(5).copied() == Some(device.configuration_value())
+            })
+            .ok_or(BlockError::Unsupported(
+                "USB2 hub selected original configuration absent",
+            ))?;
+        let endpoint = hub::usb2_status_endpoint(original, device.speed, 0, bytes[2])?;
         let descriptor = hub::descriptor::Usb2Descriptor::new(&bytes, &endpoint)?;
         let ports = descriptor.ports;
         let tt_think = if attachment.speed == HIGH_SPEED {
@@ -614,10 +622,11 @@ impl Controller {
                 )
                 .is_ok();
         let alternate = if multi { MULTI_TT_ALTERNATE } else { 0 };
-        let endpoints: Vec<Endpoint> = hub_status_endpoint(&device.configuration, alternate)
-            .into_iter()
-            .collect();
-        self.configure(slot, &endpoints, Some((ports, tt_think, multi)), dma)?;
+        // SET_INTERFACE success is physical authority for this setting. If its
+        // original descriptor cannot supply a complete status bitmap, refuse
+        // before Configure Endpoint, downstream power or child publication.
+        let endpoint = hub::usb2_status_endpoint(original, device.speed, alternate, ports)?;
+        self.configure(slot, &[endpoint], Some((ports, tt_think, multi)), dma)?;
         let mut powered_ports = Vec::new();
         for port in 1..=ports {
             if let Err(error) = self.reserve_port_current(slot, port) {
