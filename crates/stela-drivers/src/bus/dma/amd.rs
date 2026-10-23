@@ -3,3 +3,4 @@
 pub mod format;
 pub mod ivrs;
 pub mod memory;
+pub mod tables;
