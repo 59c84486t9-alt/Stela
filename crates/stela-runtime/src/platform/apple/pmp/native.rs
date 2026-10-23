@@ -17,6 +17,7 @@ pub mod power;
 pub mod publication;
 pub mod registry;
 pub mod reporting;
+pub mod trace;
 mod transport;
 pub use publication::Target as PublicationTarget;
 
