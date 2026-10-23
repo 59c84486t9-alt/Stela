@@ -170,26 +170,42 @@ struct Mapping {
     length: u8,
     writable: bool,
 }
-pub struct Smbus<B, C> {
+pub struct Smbus<B, C, T> {
     bus: B,
     companion: C,
+    timer: T,
+    reset_delay_us: u64,
     address: smbus::Address,
     mapping: [Option<Mapping>; 8],
     next: usize,
     version: Option<u8>,
     state: State,
 }
-impl<B: smbus::Bus, C: Companion> Smbus<B, C> {
-    pub fn new(bus: B, address: smbus::Address, companion: C) -> Self {
-        Self {
+impl<B: smbus::Bus, C: Companion, T: i2c::Timer> Smbus<B, C, T> {
+    /// `reset_delay_us` is the actual platform-qualified companion firmware
+    /// settling time (Linux default100ms). It runs before every mode/version
+    /// read, independently of the controller's later F01 settling interval.
+    pub fn new(
+        bus: B,
+        address: smbus::Address,
+        companion: C,
+        timer: T,
+        reset_delay_us: u64,
+    ) -> Result<Self, Error> {
+        if reset_delay_us == 0 {
+            return Err(Error::InvalidConfiguration);
+        }
+        Ok(Self {
             bus,
             companion,
+            timer,
+            reset_delay_us,
             address,
             mapping: [None; 8],
             next: 0,
             version: None,
             state: State::Fresh,
-        }
+        })
     }
     pub fn version(&self) -> Option<u8> {
         self.version
@@ -199,6 +215,10 @@ impl<B: smbus::Bus, C: Companion> Smbus<B, C> {
         self.next = 0;
         self.version = None;
         self.companion.reset_for_smbus().map_err(Error::Companion)?;
+        let start = self.timer.now_us();
+        while self.timer.now_us().wrapping_sub(start) < self.reset_delay_us {
+            self.timer.relax();
+        }
         // Reading this byte actually switches the device into SMBus mode.
         let mut version = 0;
         self.bus
@@ -266,7 +286,7 @@ impl<B: smbus::Bus, C: Companion> Smbus<B, C> {
         result
     }
 }
-impl<B: smbus::Bus, C: Companion> Transport for Smbus<B, C> {
+impl<B: smbus::Bus, C: Companion, T: i2c::Timer> Transport for Smbus<B, C, T> {
     fn activate(&mut self) -> Result<(), Error> {
         if !matches!(self.state, State::Fresh | State::Stopped) {
             return Err(if self.state == State::Faulted {

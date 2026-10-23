@@ -7,6 +7,10 @@ use transport::{Companion, CompanionError, I2c, Smbus};
 
 struct Hardware {
     memory: Vec<u8>,
+    time: Rc<Cell<u64>>,
+    reset_at: u64,
+    minimum_settle_us: u64,
+    version_attempts: usize,
     page: u8,
     maps: [Option<(u16, u8, bool)>; 8],
     writes: Vec<(u16, Vec<u8>)>,
@@ -33,6 +37,10 @@ impl Hardware {
     fn new() -> Self {
         let mut h = Self {
             memory: vec![0; 65536],
+            time: Rc::new(Cell::new(0)),
+            reset_at: 0,
+            minimum_settle_us: 100_000,
+            version_attempts: 0,
             page: 0,
             maps: [None; 8],
             writes: Vec::new(),
@@ -68,6 +76,7 @@ impl Hardware {
     }
     fn reset(&mut self) {
         self.reset_count += 1;
+        self.reset_at = self.time.get();
         self.page = 0;
         self.maps = [None; 8];
         self.memory[0x40] = 0x27; // charger, no-sleep and stale reserved sleep
@@ -192,6 +201,10 @@ impl smbus::Bus for SmbusBus {
                 command: 0xfd,
                 data,
             } => {
+                h.version_attempts += 1;
+                if h.time.get().wrapping_sub(h.reset_at) < h.minimum_settle_us {
+                    return Err(smb_error());
+                }
                 *data = h.version;
                 h.smbus_mode = true;
             }
@@ -295,12 +308,15 @@ fn hardware() -> Rc<RefCell<Hardware>> {
 fn i2c_transport(h: &Rc<RefCell<Hardware>>) -> I2c<I2cBus> {
     I2c::new(I2cBus(h.clone()), i2c::Address::SevenBit(0x2c)).unwrap()
 }
-fn smb_transport(h: &Rc<RefCell<Hardware>>) -> Smbus<SmbusBus, Ps2> {
+fn smb_transport(h: &Rc<RefCell<Hardware>>) -> Smbus<SmbusBus, Ps2, Time> {
     Smbus::new(
         SmbusBus(h.clone()),
         smbus::Address::new(0x2c).unwrap(),
         Ps2(h.clone()),
+        Time(h.borrow().time.clone()),
+        100_000,
     )
+    .unwrap()
 }
 
 #[test]
@@ -470,7 +486,7 @@ fn control_device(h: &Rc<RefCell<Hardware>>) -> Device<I2c<I2cBus>, Attn, Time> 
     Device::new(
         i2c_transport(h),
         Attn(h.clone()),
-        Time(Rc::new(Cell::new(0))),
+        Time(h.borrow().time.clone()),
         Configuration::default(),
     )
     .unwrap()
@@ -516,7 +532,7 @@ fn f01_adjustable_power_registers_skip_lts_and_preserve_unrelated_bits() {
     let mut d = Device::new(
         i2c_transport(&h),
         Attn(h.clone()),
-        Time(Rc::new(Cell::new(0))),
+        Time(h.borrow().time.clone()),
         config,
     )
     .unwrap();
@@ -538,7 +554,7 @@ fn f01_can_run_over_actual_smbus_mapping_and_restores_ps2_on_stop() {
     let mut d = Device::new(
         smb_transport(&h),
         Attn(h.clone()),
-        Time(Rc::new(Cell::new(0))),
+        Time(h.borrow().time.clone()),
         Configuration::default(),
     )
     .unwrap();
@@ -629,7 +645,7 @@ fn pdt_duplicate_irq_overflow_and_missing_power_capability_fail_before_ready() {
     let mut d = Device::new(
         i2c_transport(&h),
         Attn(h.clone()),
-        Time(Rc::new(Cell::new(0))),
+        Time(h.borrow().time.clone()),
         config,
     )
     .unwrap();
@@ -673,4 +689,46 @@ fn i2c_function_streaming_windows_use_one_complete_burst_without_page_splits() {
     assert_eq!(h.borrow().transactions, before + 1);
     assert_eq!(h.borrow().page, 0x12);
     assert_eq!(output, payload);
+}
+
+#[test]
+fn smbus_waits_for_firmware_after_each_actual_companion_reset_before_mode_read() {
+    let h = hardware();
+    h.borrow().time.set(u64::MAX - 50_000); // settling handles clock wrap
+    let mut bus = smb_transport(&h);
+    bus.activate().unwrap();
+    assert_eq!(h.borrow().version_attempts, 1);
+    assert_eq!(
+        h.borrow().time.get().wrapping_sub(h.borrow().reset_at),
+        100_000
+    );
+    bus.reset(0x30).unwrap();
+    assert_eq!(h.borrow().version_attempts, 2);
+    assert_eq!(
+        h.borrow().time.get().wrapping_sub(h.borrow().reset_at),
+        100_000
+    );
+    bus.deactivate().unwrap();
+    bus.activate().unwrap();
+    assert_eq!(h.borrow().version_attempts, 3);
+    assert_eq!(
+        h.borrow().time.get().wrapping_sub(h.borrow().reset_at),
+        100_000
+    );
+
+    // A genuinely inadequate platform interval receives the peripheral's real
+    // NACK and faults. The mode read is never retried to conceal this failure.
+    let h = hardware();
+    let mut bus = Smbus::new(
+        SmbusBus(h.clone()),
+        smbus::Address::new(0x2c).unwrap(),
+        Ps2(h.clone()),
+        Time(h.borrow().time.clone()),
+        1,
+    )
+    .unwrap();
+    assert!(matches!(bus.activate(), Err(Error::Smbus(_))));
+    assert_eq!(h.borrow().version_attempts, 1);
+    assert_eq!(bus.activate(), Err(Error::NeedsReset));
+    assert_eq!(h.borrow().version_attempts, 1);
 }
