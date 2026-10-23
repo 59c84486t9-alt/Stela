@@ -8893,12 +8893,14 @@ mod tests {
                         .power_map,
                     0x89
                 );
+                controller.stop(out).unwrap();
                 let before = access_counts(&model);
                 assert_eq!(controller.start(out), Err(Error::UnsupportedTopology));
                 assert_eq!(access_counts(&model), before);
                 model.borrow_mut().pin_senses.insert(0x0a, 0x8000_0042);
                 assert!(controller.poll_pin_sense(&graph, 0x0a).unwrap().present);
                 assert_eq!(model.borrow().idt83_power_map, 0x88);
+                controller.start(out).unwrap();
                 assert_eq!(model.borrow().route_controls[&(1, 0xf15)], 0xa5);
                 controller.stop(mic).unwrap();
                 let mut samples = [0; 256];
