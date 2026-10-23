@@ -236,6 +236,21 @@ fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() 
         let mut memory = vec![0u64; 1024 * 1024];
         let (mut host, old, hardware, state, mut dma) =
             fixture_with_leaf(&mut memory, speed, true, Node::bot_disk(speed));
+        if speed >= SUPER_SPEED {
+            // Seed actual acknowledged function options in both configured
+            // devices. Suspend must clear them through each native EP0 ring.
+            for device in &old {
+                host.controller
+                    .borrow_mut()
+                    .control(device.slot, setup(1, SET_FEATURE, 0, 0x0300, 0), &[])
+                    .unwrap();
+            }
+            assert!(hardware.borrow().nodes.values().all(|node| {
+                node.functions.len() == 1
+                    && node.functions[&0].low_power
+                    && node.functions[&0].remote_wake
+            }));
+        }
         let removed = host.suspend();
         assert!(
             removed.added.failures.is_empty(),
@@ -244,6 +259,13 @@ fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() 
         );
         assert_eq!(removed.removed.len(), old.len());
         assert_eq!(state.borrow().save, 1);
+        if speed >= SUPER_SPEED {
+            assert!(hardware.borrow().nodes.values().all(|node| {
+                node.functions.len() == 1
+                    && !node.functions[&0].low_power
+                    && !node.functions[&0].remote_wake
+            }));
+        }
         assert_eq!(
             hardware.borrow().root_status.unwrap() & PLS,
             U3 << PLS_SHIFT
@@ -455,4 +477,60 @@ fn suspend_preflight_failure_preserves_live_raw_consumer() {
     assert!(unchanged.removed.is_empty());
     assert!(host.sleep.awake());
     assert!(consumer.submit().is_ok());
+}
+
+#[test]
+fn superspeed_function_suspend_stall_is_reported_and_quarantines_original_consumers() {
+    let mut memory = vec![0u64; 512 * 1024];
+    let (mut host, devices, hardware, state, mut dma) = fixture(&mut memory, SUPER_SPEED, false);
+    let mut consumer = RawConsumer::retain(&host, &devices[0], &mut dma);
+    host.controller
+        .borrow_mut()
+        .control(consumer.slot, setup(1, SET_FEATURE, 0, 0x0300, 0), &[])
+        .unwrap();
+    let disable = setup(1, SET_FEATURE, 0, 0, 0);
+    hardware.borrow_mut().effect_fail = Some((consumer.slot, disable));
+    let before = hardware.borrow().commands.len();
+    let removed = host.suspend();
+    assert_eq!(removed.removed.len(), devices.len());
+    assert!(
+        removed
+            .added
+            .failures
+            .iter()
+            .any(|(_, error)| matches!(error, BlockError::Device { status: 6 }))
+    );
+    assert!(
+        hardware
+            .borrow()
+            .requests
+            .iter()
+            .any(|(slot, _, request)| *slot == consumer.slot && *request == disable)
+    );
+    assert_eq!(state.borrow().save, 0);
+    assert!(matches!(host.sleep, Sleep::Failed));
+    assert!(matches!(
+        host.controller.borrow().hardware,
+        hardware::State::Running
+    ));
+    assert!(
+        hardware.borrow().commands[before..]
+            .iter()
+            .all(|(kind, _)| *kind != reset::DISABLE_SLOT)
+    );
+    assert_eq!(
+        host.controller.borrow().slots[usize::from(consumer.slot)]
+            .as_ref()
+            .unwrap()
+            .endpoints[usize::from(consumer.endpoint.dci())]
+        .as_ref()
+        .unwrap()
+        .in_flight,
+        1
+    );
+    consumer.assert_fenced(&hardware);
+    let refused = host.resume(&mut dma, &crate::firmware::HandoffProvider::new(None));
+    assert!(!refused.added.failures.is_empty());
+    assert!(refused.added.devices.is_empty());
+    assert_eq!(state.borrow().restore, 0);
 }

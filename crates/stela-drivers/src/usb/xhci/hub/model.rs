@@ -57,6 +57,15 @@ impl PortModel {
         }
     }
 }
+/// USB 3.0 Table 9-8 FUNCTION_SUSPEND options, retained per configured
+/// interface. Pinned Linux ch9.h puts LP/RW in wIndex bits 8/9; hub.c's
+/// usb_disable_remote_wakeup sends both clear through SET_FEATURE, not CLEAR.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in super::super) struct FunctionSuspend {
+    pub low_power: bool,
+    pub remote_wake: bool,
+}
+
 #[derive(Clone)]
 pub(in super::super) struct Node {
     pub speed: u8,
@@ -65,6 +74,7 @@ pub(in super::super) struct Node {
     pub descriptor: Option<Vec<u8>>,
     pub configuration_override: Option<Vec<u8>>,
     pub configured: bool,
+    pub functions: BTreeMap<u8, FunctionSuspend>,
     pub multi_tt: bool,
     active_alternate: u8,
     pub depth: Option<u16>,
@@ -95,6 +105,7 @@ impl Node {
             descriptor: None,
             configuration_override: None,
             configured: false,
+            functions: BTreeMap::new(),
             multi_tt: false,
             active_alternate: 0,
             depth: None,
@@ -117,6 +128,7 @@ impl Node {
             descriptor: None,
             configuration_override: None,
             configured: false,
+            functions: BTreeMap::new(),
             multi_tt: false,
             active_alternate: 0,
             depth: None,
@@ -531,6 +543,7 @@ impl Hardware {
             .expect("no fixture at published child route");
         let value = u16::from_le_bytes([request[2], request[3]]);
         let index = u16::from_le_bytes([request[4], request[5]]);
+        let length = u16::from_le_bytes([request[6], request[7]]);
         match (request[0], request[1]) {
             (0xa1, 0xfe) if node.bot.is_some() => {
                 assert_eq!(request, setup(0xa1, 0xfe, 0, 0, 1));
@@ -539,6 +552,25 @@ impl Hardware {
             (0x21, 0xff) if node.bot.is_some() => {
                 assert_eq!(request, setup(0x21, 0xff, 0, 0, 0));
                 node.bot.as_mut().unwrap().reset();
+                Ok(Vec::new())
+            }
+            (RECIPIENT_INTERFACE, SET_FEATURE) => {
+                // Strict peer: only actual configured SuperSpeed interfaces,
+                // selector zero, no data, and the two defined option bits.
+                // A malformed request must STALL without changing any function.
+                if node.speed < SUPER_SPEED
+                    || !node.configured
+                    || value != 0
+                    || length != 0
+                    || index & 0xfc00 != 0
+                {
+                    return Err(6);
+                }
+                let function = node.functions.get_mut(&(index as u8)).ok_or(6u32)?;
+                *function = FunctionSuspend {
+                    low_power: index & 0x0100 != 0,
+                    remote_wake: index & 0x0200 != 0,
+                };
                 Ok(Vec::new())
             }
             (0x80, GET_STATUS) => Ok(vec![
@@ -599,6 +631,18 @@ impl Hardware {
                     return Err(6);
                 }
                 node.configured = value != 0;
+                // Acknowledged SET_CONFIGURATION selects the actual descriptor
+                // interfaces and resets each function's options. Alternate
+                // settings do not create additional functions.
+                node.functions.clear();
+                if node.configured && node.speed >= SUPER_SPEED {
+                    for interface in interfaces(&node.configuration()) {
+                        if interface.alternate == 0 {
+                            node.functions
+                                .insert(interface.number, FunctionSuspend::default());
+                        }
+                    }
+                }
                 Ok(Vec::new())
             }
             (0x20, 12) => {
@@ -968,6 +1012,108 @@ impl Registers for RegistersModel {
             state.command();
         } else if (0x1004..0x1084).contains(&at) {
             state.transfer(((at - 0x1000) / 4) as u8, (value & 255) as u8);
+        }
+    }
+}
+
+#[cfg(test)]
+mod function_suspend_tests {
+    use super::*;
+
+    fn peer(speed: u8) -> Hardware {
+        let mut hardware = Hardware::new(64, BTreeMap::from([(0, Node::leaf(speed))]));
+        hardware.routes.insert(1, 0);
+        hardware
+    }
+
+    #[test]
+    fn function_suspend_requires_configured_superspeed_interface_and_preserves_other_functions() {
+        let mut hardware = peer(SUPER_SPEED);
+        let configuration = vec![
+            9, 2, 36, 0, 2, 1, 0, 0x80, 0, 9, 4, 0, 0, 0, 0xff, 0, 0, 0, 9, 4, 7, 0, 0, 0xff, 0, 0,
+            0, 9, 4, 7, 1, 0, 0xff, 0, 0, 0,
+        ];
+        hardware.nodes.get_mut(&0).unwrap().configuration_override = Some(configuration);
+        assert_eq!(
+            hardware.request(1, setup(1, SET_FEATURE, 0, 0x0307, 0)),
+            Err(6)
+        );
+        assert!(hardware.nodes[&0].functions.is_empty());
+        hardware
+            .request(1, setup(0, SET_CONFIGURATION, 1, 0, 0))
+            .unwrap();
+        assert_eq!(hardware.nodes[&0].functions.len(), 2);
+        for (options, expected) in [
+            (
+                0x0300,
+                FunctionSuspend {
+                    low_power: true,
+                    remote_wake: true,
+                },
+            ),
+            (
+                0x0100,
+                FunctionSuspend {
+                    low_power: true,
+                    remote_wake: false,
+                },
+            ),
+            (
+                0x0200,
+                FunctionSuspend {
+                    low_power: false,
+                    remote_wake: true,
+                },
+            ),
+            (0, FunctionSuspend::default()),
+        ] {
+            hardware
+                .request(1, setup(1, SET_FEATURE, 0, options | 7, 0))
+                .unwrap();
+            assert_eq!(hardware.nodes[&0].functions[&7], expected);
+            assert_eq!(hardware.nodes[&0].functions[&0], FunctionSuspend::default());
+        }
+        hardware
+            .request(1, setup(1, SET_FEATURE, 0, 0x0307, 0))
+            .unwrap();
+        hardware
+            .request(1, setup(0, SET_CONFIGURATION, 1, 0, 0))
+            .unwrap();
+        assert_eq!(hardware.nodes[&0].functions[&7], FunctionSuspend::default());
+        hardware
+            .request(1, setup(0, SET_CONFIGURATION, 0, 0, 0))
+            .unwrap();
+        assert!(hardware.nodes[&0].functions.is_empty());
+        assert_eq!(hardware.request(1, setup(1, SET_FEATURE, 0, 7, 0)), Err(6));
+    }
+
+    #[test]
+    fn invalid_function_suspend_requests_stall_without_mutating_configured_state() {
+        for speed in [HIGH_SPEED, SUPER_SPEED] {
+            let mut hardware = peer(speed);
+            hardware
+                .request(1, setup(0, SET_CONFIGURATION, 1, 0, 0))
+                .unwrap();
+            if speed >= SUPER_SPEED {
+                hardware
+                    .request(1, setup(1, SET_FEATURE, 0, 0x0300, 0))
+                    .unwrap();
+            }
+            let before = hardware.nodes[&0].functions.clone();
+            let mut invalid = vec![
+                setup(1, SET_FEATURE, 1, 0, 0),
+                setup(1, SET_FEATURE, 0, 1, 0),
+                setup(1, SET_FEATURE, 0, 0x0400, 0),
+                setup(1, SET_FEATURE, 0, 0, 1),
+                setup(1, CLEAR_FEATURE, 0, 0, 0),
+            ];
+            if speed < SUPER_SPEED {
+                invalid.push(setup(1, SET_FEATURE, 0, 0, 0));
+            }
+            for request in invalid {
+                assert_eq!(hardware.request(1, request), Err(6), "{request:?}");
+                assert_eq!(hardware.nodes[&0].functions, before);
+            }
         }
     }
 }
