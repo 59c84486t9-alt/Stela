@@ -507,6 +507,16 @@ fn qemu_cpu(requested: Option<&str>, no_la57: bool, system: bool) -> String {
     }
 }
 
+/// QEMU MTTCG runs one host thread per virtual CPU. Instruction counting
+/// requires its single-thread engine (QEMU devel/tcg-icount.html).
+fn qemu_accelerator(icount: Option<u8>) -> &'static str {
+    if icount.is_some() {
+        "tcg,thread=single"
+    } else {
+        "tcg,thread=multi"
+    }
+}
+
 fn launch(arguments: Run) -> Result<ExitCode> {
     let limit = if arguments.usb_image.is_some() || arguments.bundle.is_some() {
         MAX_LONG_TIMEOUT_SECONDS
@@ -762,7 +772,13 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .arg(format!(
             "q35,smm=off,sata=off,usb=off,smbus=off,hpet=off,i8042={keyboard},vmport=off"
         ))
-        .args(["-accel", "tcg,thread=single", "-cpu", &cpu, "-smp"])
+        .args([
+            "-accel",
+            qemu_accelerator(arguments.icount),
+            "-cpu",
+            &cpu,
+            "-smp",
+        ])
         .arg(format!(
             "cpus={},sockets=1,cores={},threads={}",
             u32::from(arguments.host_cores) * u32::from(arguments.host_threads),
@@ -1196,6 +1212,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "no_la57": arguments.no_la57,
         "qemu_host_cores": arguments.host_cores,
         "qemu_host_threads": arguments.host_threads,
+        "qemu_accelerator": qemu_accelerator(arguments.icount),
         "native_dma": native_dma,
         "native_work": native_work,
         "native_irq_work": native_irq_work,
@@ -1605,6 +1622,14 @@ fn native_level_verified(serial: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actual_parallel_cpu_execution_is_default_and_icount_keeps_its_required_mode() {
+        assert_eq!(qemu_accelerator(None), "tcg,thread=multi");
+        for shift in 0..=10 {
+            assert_eq!(qemu_accelerator(Some(shift)), "tcg,thread=single");
+        }
+    }
 
     #[test]
     fn cpu_selection_records_an_explicit_model_and_keeps_baseline_overrides() {
