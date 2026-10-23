@@ -68,6 +68,9 @@ struct Slot {
     frame: Frame,
     stop: Option<(u64, StopPhase)>,
     services: Option<Arc<service::ServiceIdentity>>,
+    // At most one closed allocation for this fixed physical owner. It grants
+    // no service/stop authority and is reusable only after unique ownership.
+    closed_services: Option<Arc<service::ServiceIdentity>>,
 }
 
 /// BSP-local publication inventory. Creating it does not assert that an AP is
@@ -252,6 +255,7 @@ impl WorkerPublications {
                         frame: Frame::Unregistered,
                         stop: None,
                         services: None,
+                        closed_services: None,
                     })
                     .collect(),
             },

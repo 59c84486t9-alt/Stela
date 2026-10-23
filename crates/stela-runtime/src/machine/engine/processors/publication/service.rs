@@ -24,6 +24,20 @@ pub(super) struct ServiceIdentity {
     open: AtomicBool,
     completed: AtomicU64,
 }
+impl ServiceIdentity {
+    fn reopen(mut closed: Arc<Self>) -> Option<Arc<Self>> {
+        // A stale command/receipt or even a Weak observer must keep its old
+        // identity permanently separate. Only an unaliased closed allocation
+        // can become the next session; pointer equality alone is insufficient.
+        let identity = Arc::get_mut(&mut closed)?;
+        if *identity.open.get_mut() {
+            return None;
+        }
+        *identity.completed.get_mut() = 0;
+        *identity.open.get_mut() = true;
+        Some(closed)
+    }
+}
 
 /// A linear service session for one worker in one actual stopped cohort.
 /// Dropping it cannot release that cohort. Only one effect may be outstanding;
@@ -137,10 +151,16 @@ impl WorkerPublications {
         if slot.services.is_some() {
             return Err(PublicationError::ServiceBusy);
         }
-        let session = Arc::new(ServiceIdentity {
-            open: AtomicBool::new(true),
-            completed: AtomicU64::new(0),
-        });
+        let session = slot
+            .closed_services
+            .take()
+            .and_then(ServiceIdentity::reopen)
+            .unwrap_or_else(|| {
+                Arc::new(ServiceIdentity {
+                    open: AtomicBool::new(true),
+                    completed: AtomicU64::new(0),
+                })
+            });
         slot.services = Some(Arc::clone(&session));
         Ok(WorkerServices {
             identity: Arc::clone(&self.identity),
@@ -180,6 +200,10 @@ impl WorkerPublications {
             Ok(index) => {
                 services.session.open.store(false, Ordering::Release);
                 self.slots[index].services = None;
+                // Consume the actual completed session, after all existing
+                // generation/pending/receipt checks. The next open must prove
+                // that no reference to this closed identity survives.
+                self.slots[index].closed_services = Some(services.session);
                 Ok(())
             }
             Err(error) => Err(WithPayload {
@@ -518,6 +542,167 @@ mod tests {
         inventory.close_services(first).unwrap();
         inventory.close_services(second).unwrap();
         assert!(inventory.release(held).is_ok());
+    }
+
+    #[test]
+    fn closed_unique_session_reopens_with_fresh_sequence_without_growing_the_slot() {
+        let (mut inventory, mut owners, mut hosts, held) = held();
+        let mut services = inventory.open_services(&held, 0).unwrap();
+        let allocation = Arc::as_ptr(&services.session);
+        for _ in 0..32 {
+            assert_eq!(Arc::as_ptr(&services.session), allocation);
+            assert_eq!(services.issued, 0);
+            assert_eq!(services.session.completed.load(Ordering::Acquire), 0);
+            let command = services.command(HostEffect::ArmTimer(Some(123))).unwrap();
+            assert_eq!(command.sequence(), 1);
+            services
+                .accept(owners[0].apply_host_effect(command, &mut hosts[0]).unwrap())
+                .unwrap();
+            inventory.close_services(services).unwrap();
+            let slot = &inventory.slots[0];
+            assert!(slot.services.is_none());
+            let closed = slot.closed_services.as_ref().unwrap();
+            assert!(!closed.open.load(Ordering::Acquire));
+            assert_eq!(Arc::strong_count(closed), 1);
+            assert_eq!(Arc::weak_count(closed), 0);
+            services = inventory.open_services(&held, 0).unwrap();
+        }
+        inventory.close_services(services).unwrap();
+        assert_eq!(
+            hosts[0]
+                .effects
+                .iter()
+                .filter(|effect| **effect == "timer")
+                .count(),
+            32
+        );
+        assert!(inventory.release(held).is_ok());
+    }
+
+    #[test]
+    fn closed_session_with_weak_observer_keeps_its_identity_separate() {
+        let (mut inventory, _, _, held) = held();
+        let services = inventory.open_services(&held, 0).unwrap();
+        let observer = Arc::downgrade(&services.session);
+        inventory.close_services(services).unwrap();
+        assert_eq!(observer.strong_count(), 1); // only the closed slot
+        let reopened = inventory.open_services(&held, 0).unwrap();
+        assert_ne!(observer.as_ptr(), Arc::as_ptr(&reopened.session));
+        assert!(observer.upgrade().is_none());
+        inventory.close_services(reopened).unwrap();
+    }
+
+    #[test]
+    fn retained_stale_command_cannot_alias_or_replay_a_reopened_session() {
+        let (mut inventory, mut owners, mut hosts, held) = held();
+        let mut services = inventory.open_services(&held, 0).unwrap();
+        let command = services.command(HostEffect::DiscardCode).unwrap();
+        // Retain an adversarial historical command reference. Production
+        // commands are non-Clone; even a future alias must prevent recycling.
+        let stale = HostEffectCommand {
+            identity: Arc::clone(&command.identity),
+            session: Arc::clone(&command.session),
+            binding: command.binding,
+            stop: command.stop,
+            sequence: command.sequence,
+            effect: HostEffect::DiscardCode,
+        };
+        services
+            .accept(owners[0].apply_host_effect(command, &mut hosts[0]).unwrap())
+            .unwrap();
+        inventory.close_services(services).unwrap();
+        let reopened = inventory.open_services(&held, 0).unwrap();
+        assert!(!Arc::ptr_eq(&reopened.session, &stale.session));
+        let before = hosts[0].effects.clone();
+        assert_eq!(
+            owners[0]
+                .apply_host_effect(stale, &mut hosts[0])
+                .unwrap_err()
+                .error,
+            PublicationError::StaleService
+        );
+        assert_eq!(hosts[0].effects, before);
+        inventory.close_services(reopened).unwrap();
+    }
+
+    #[test]
+    fn refused_close_keeps_pending_authority_and_cannot_populate_reuse_slot() {
+        let (mut inventory, mut owners, mut hosts, held) = held();
+        let mut services = inventory.open_services(&held, 1).unwrap();
+        let allocation = Arc::as_ptr(&services.session);
+        let command = services.command(HostEffect::MemoryBarrier).unwrap();
+        let refused = inventory.close_services(services).unwrap_err();
+        assert_eq!(refused.error, PublicationError::ServiceBusy);
+        assert!(inventory.slots[1].closed_services.is_none());
+        assert!(matches!(
+            inventory.open_services(&held, 1),
+            Err(PublicationError::ServiceBusy)
+        ));
+        let mut services = refused.payload;
+        assert_eq!(Arc::as_ptr(&services.session), allocation);
+        services
+            .accept(owners[1].apply_host_effect(command, &mut hosts[1]).unwrap())
+            .unwrap();
+        inventory.close_services(services).unwrap();
+        let reopened = inventory.open_services(&held, 1).unwrap();
+        assert_eq!(Arc::as_ptr(&reopened.session), allocation);
+        inventory.close_services(reopened).unwrap();
+    }
+
+    #[test]
+    fn unique_closed_allocation_can_serve_a_new_actual_stop_generation() {
+        let (mut inventory, mut owners, mut hosts, stopped) = held();
+        let services = inventory.open_services(&stopped, 0).unwrap();
+        let generation = services.stop;
+        let allocation = Arc::as_ptr(&services.session);
+        inventory.close_services(services).unwrap();
+        for release in inventory.release(stopped).unwrap() {
+            let pe = release.binding().pe;
+            inventory
+                .accept_release(owners[pe].release(release).unwrap())
+                .unwrap();
+        }
+        let request = inventory.request_stop(&[0, 1]).unwrap();
+        for command in inventory.native_stop_commands(&request).unwrap() {
+            let pe = command.binding().pe;
+            inventory
+                .accept_invalidation(owners[pe].invalidate(command, &mut hosts[pe]).unwrap())
+                .unwrap();
+        }
+        let stopped = inventory.hold_stop(request).unwrap();
+        let mut reopened = inventory.open_services(&stopped, 0).unwrap();
+        assert!(reopened.stop > generation);
+        assert_eq!(Arc::as_ptr(&reopened.session), allocation);
+        let command = reopened.command(HostEffect::ArmTimer(None)).unwrap();
+        assert_eq!(command.generation(), reopened.stop);
+        assert_eq!(command.sequence(), 1);
+        reopened
+            .accept(owners[0].apply_host_effect(command, &mut hosts[0]).unwrap())
+            .unwrap();
+        inventory.close_services(reopened).unwrap();
+    }
+
+    #[test]
+    fn replacement_inventory_starts_empty_and_refuses_an_old_inventory_hold() {
+        let (mut inventory, _, _, stopped) = held();
+        let services = inventory.open_services(&stopped, 0).unwrap();
+        let retired = Arc::clone(&services.session);
+        inventory.close_services(services).unwrap();
+        let (mut replacement, _, _, replacement_stop) = held();
+        assert!(
+            replacement
+                .slots
+                .iter()
+                .all(|slot| slot.closed_services.is_none())
+        );
+        assert!(matches!(
+            replacement.open_services(&stopped, 0),
+            Err(PublicationError::WrongInventory)
+        ));
+        let reopened = replacement.open_services(&replacement_stop, 0).unwrap();
+        assert!(!Arc::ptr_eq(&retired, &reopened.session));
+        assert!(!retired.open.load(Ordering::Acquire));
+        replacement.close_services(reopened).unwrap();
     }
     #[test]
     fn dropping_session_never_grants_stopped_worker_release() {
