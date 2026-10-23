@@ -3034,7 +3034,9 @@ mod tests {
     fn first_hci_visibility() -> usize {
         let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
         transport.start(&provider).unwrap();
-        d.lock().unwrap().domain.0.lock().unwrap().syncs + 1
+        let first = d.lock().unwrap().domain.0.lock().unwrap().syncs + 1;
+        transport.close().unwrap();
+        first
     }
     #[test]
     fn active_hci_budget_stops_after_11s_visibility_or_sleep_before_head_and_doorbell() {
