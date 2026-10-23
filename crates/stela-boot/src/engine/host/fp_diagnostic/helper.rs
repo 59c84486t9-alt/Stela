@@ -1,6 +1,6 @@
 //! Real translated-access helper return and abandonment on owned ARM tables.
-use super::{Image, Probe, RETURN_RAX, RETURN_RDX, pointer, same_legacy, stela_native_fp_probe};
 use super::super::{BareHost, RamRange, load_root, native_return, state};
+use super::{Image, Probe, RETURN_RAX, RETURN_RDX, pointer, same_legacy, stela_native_fp_probe};
 use alloc::vec::Vec;
 use core::{arch::global_asm, mem, mem::offset_of, ptr};
 use stela_compiler::{GuestState, block::BlockExit, context::ExecutionContext};
@@ -35,51 +35,94 @@ struct GuestScope {
 }
 impl GuestScope {
     fn new() -> Result<Self, &'static str> {
-        if state().native || state().recorded.is_some() || state().regime.is_some()
-            || state().current != usize::MAX || state().registered_ram.is_some()
-            || state().legacy_translations_dirty || state().tag_checks != [false; 2]
-        { return Err("helper FP diagnostic requires fresh actual startup ownership"); }
-        let pages = crate::native_memory::SOURCE.allocate(5 * PAGE, PAGE, CacheAttribute::WriteBack)
+        if state().native
+            || state().recorded.is_some()
+            || state().regime.is_some()
+            || state().current != usize::MAX
+            || state().registered_ram.is_some()
+            || state().legacy_translations_dirty
+            || state().tag_checks != [false; 2]
+        {
+            return Err("helper FP diagnostic requires fresh actual startup ownership");
+        }
+        let pages = crate::native_memory::SOURCE
+            .allocate(5 * PAGE, PAGE, CacheAttribute::WriteBack)
             .map_err(|_| "helper FP private page reservation unavailable")?;
-        if pages.page_shift() != 12 || pages.physical_pages().len() != 5
-            || !pages.physical_pages().windows(2).all(|pair| pair[0].checked_add(PAGE as u64) == Some(pair[1]))
-        { return Err("helper FP private page geometry differs"); }
-        let mapping = pages.cpu_mapping(CacheAttribute::WriteBack)
+        if pages.page_shift() != 12
+            || pages.physical_pages().len() != 5
+            || !pages
+                .physical_pages()
+                .windows(2)
+                .all(|pair| pair[0].checked_add(PAGE as u64) == Some(pair[1]))
+        {
+            return Err("helper FP private page geometry differs");
+        }
+        let mapping = pages
+            .cpu_mapping(CacheAttribute::WriteBack)
             .map_err(|_| "helper FP private CPU mapping unavailable")?;
         // Four genuinely owned ARM 4KiB tables followed by one data page.
         // Software walks read them through this same actual RAM reservation.
         for level in 0..3 {
-            let table = mapping.address(level * PAGE, 8).map_err(|_| "helper FP table bounds")?;
+            let table = mapping
+                .address(level * PAGE, 8)
+                .map_err(|_| "helper FP table bounds")?;
             // SAFETY: exclusive aligned zeroed private pinned page; no other
             // CPU/guest/DMA has access to this authored fixture reservation.
-            unsafe { table.cast::<u64>().as_ptr().write_volatile(TABLE_BASE + (level as u64 + 1) * PAGE as u64 | 3); }
+            unsafe {
+                table
+                    .cast::<u64>()
+                    .as_ptr()
+                    .write_volatile((TABLE_BASE + (level as u64 + 1) * PAGE as u64) | 3);
+            }
         }
-        let leaf = mapping.address(3 * PAGE + (MAPPED as usize / PAGE) * 8, 8)
+        let leaf = mapping
+            .address(3 * PAGE + (MAPPED as usize / PAGE) * 8, 8)
             .map_err(|_| "helper FP leaf bounds")?;
-        let data = mapping.address(4 * PAGE, 8).map_err(|_| "helper FP data bounds")?;
+        let data = mapping
+            .address(4 * PAGE, 8)
+            .map_err(|_| "helper FP data bounds")?;
         // SAFETY: same uniquely owned table/data pages; valid privileged RW,
         // AF-set normal-WB leaf, with both execute-never bits set.
         unsafe {
-            leaf.cast::<u64>().as_ptr().write_volatile(DATA_PHYSICAL | 3 | (1 << 10) | (3 << 8) | (1 << 53) | (1 << 54));
+            leaf.cast::<u64>()
+                .as_ptr()
+                .write_volatile(DATA_PHYSICAL | 3 | (1 << 10) | (3 << 8) | (1 << 53) | (1 << 54));
             data.cast::<u64>().as_ptr().write_volatile(VALUE);
         }
         let mut ram = Vec::new();
-        ram.try_reserve_exact(1).map_err(|_| "helper FP RAM metadata unavailable")?;
-        ram.push(RamRange { guest: TABLE_BASE, host: pages.physical_pages()[0], bytes: (5 * PAGE) as u64 });
+        ram.try_reserve_exact(1)
+            .map_err(|_| "helper FP RAM metadata unavailable")?;
+        ram.push(RamRange {
+            guest: TABLE_BASE,
+            host: pages.physical_pages()[0],
+            bytes: (5 * PAGE) as u64,
+        });
         let original_ram = mem::replace(&mut state().ram, ram);
         let original_tlb = mem::take(&mut state().tlb);
-        Ok(Self { _pages: pages, mapping, original_ram: Some(original_ram), original_tlb: Some(original_tlb) })
+        Ok(Self {
+            _pages: pages,
+            mapping,
+            original_ram: Some(original_ram),
+            original_tlb: Some(original_tlb),
+        })
     }
     fn regime(&self) -> Regime {
         Regime {
             controls: mmu::Controls {
                 sctlr: mmu::SCTLR_M | (1 << 2) | (1 << 12),
                 tcr: 16 | (16 << 16) | (2 << 30) | (5 << 32),
-                ttbr0: TABLE_BASE, mair: 0xff,
+                ttbr0: TABLE_BASE,
+                mair: 0xff,
                 ..mmu::Controls::default()
             },
-            requester: mmu::Requester { el: 1, pan: false, unprivileged: false, guarded: false },
-            watch: Watch::default(), tag_checks: [false; 2],
+            requester: mmu::Requester {
+                el: 1,
+                pan: false,
+                unprivileged: false,
+                guarded: false,
+            },
+            watch: Watch::default(),
+            tag_checks: [false; 2],
         }
     }
 }
@@ -87,14 +130,23 @@ impl Drop for GuestScope {
     fn drop(&mut self) {
         // No allocation or pin release can bypass a live native/helper frame.
         // A failure here is terminal, retaining this stack and backing.
-        assert!(!state().native && super::super::local::native_frames_idle(), "helper FP private RAM still has a live frame");
+        assert!(
+            !state().native && super::super::local::native_frames_idle(),
+            "helper FP private RAM still has a live frame"
+        );
         let state = state();
         state.reset_shadow();
         load_root(state.host_root);
         state.current = usize::MAX;
         state.regime = None;
-        state.ram = self.original_ram.take().expect("actual original RAM retained");
-        state.tlb = self.original_tlb.take().expect("actual original TLB retained");
+        state.ram = self
+            .original_ram
+            .take()
+            .expect("actual original RAM retained");
+        state.tlb = self
+            .original_tlb
+            .take()
+            .expect("actual original TLB retained");
     }
 }
 
@@ -333,18 +385,27 @@ unsafe extern "C" {
 pub(super) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
     let scope = GuestScope::new()?;
     let source = ptr::addr_of!(stela_helper_fp_body) as usize;
-    let bytes = (ptr::addr_of!(stela_helper_fp_body_end) as usize).checked_sub(source)
-        .filter(|&bytes| bytes != 0 && bytes < 4096).ok_or("helper FP source extent differs")?;
-    let return_offset = (ptr::addr_of!(stela_helper_fp_return) as usize).checked_sub(source)
-        .filter(|&offset| offset < bytes).ok_or("helper FP source return differs")?;
+    let bytes = (ptr::addr_of!(stela_helper_fp_body_end) as usize)
+        .checked_sub(source)
+        .filter(|&bytes| bytes != 0 && bytes < 4096)
+        .ok_or("helper FP source extent differs")?;
+    let return_offset = (ptr::addr_of!(stela_helper_fp_return) as usize)
+        .checked_sub(source)
+        .filter(|&offset| offset < bytes)
+        .ok_or("helper FP source return differs")?;
     // SAFETY: source symbols delimit the exact baseline authored body and its
     // position-independent literals; original guest inputs are untouched.
-    let code = host.install(unsafe { core::slice::from_raw_parts(source as *const u8, bytes) })
+    let code = host
+        .install(unsafe { core::slice::from_raw_parts(source as *const u8, bytes) })
         .map_err(|_| "helper FP code arena full")?;
     let copied_address = |label: *const u8| -> Result<u64, &'static str> {
-        let offset = (label as usize).checked_sub(source).filter(|&offset| offset < bytes)
+        let offset = (label as usize)
+            .checked_sub(source)
+            .filter(|&offset| offset < bytes)
             .ok_or("helper FP source label outside body")?;
-        code.0.checked_add(offset).map(|address| address as u64)
+        code.0
+            .checked_add(offset)
+            .map(|address| address as u64)
             .ok_or("helper FP installed label overflow")
     };
     let expected_fip = copied_address(ptr::addr_of!(stela_helper_fp_divide))?;
@@ -356,8 +417,11 @@ pub(super) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
             let calls = state().helper_calls;
             let fills = state().helper_fills;
             let mut observed = Observation {
-                expected: Image([0; 512]), returned: Image([0; 512]),
-                expected_registers: [0; 16], returned_registers: [0; 16], fp_errors: u64::MAX,
+                expected: Image([0; 512]),
+                returned: Image([0; 512]),
+                expected_registers: [0; 16],
+                returned_registers: [0; 16],
+                fp_errors: u64::MAX,
             };
             let mut guest = GuestState::default();
             guest.x[1] = ptr::from_mut(&mut observed) as u64;
@@ -366,8 +430,13 @@ pub(super) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
             let mut expected = guest.clone();
             let mut context = ExecutionContext::default();
             let mut probe = Probe {
-                original: Image([0; 512]), expected: Image([0; 512]), returned: Image([0; 512]),
-                result_rax: 0, result_rdx: 0, gpr_errors: u64::MAX, fp_errors: u64::MAX,
+                original: Image([0; 512]),
+                expected: Image([0; 512]),
+                returned: Image([0; 512]),
+                result_rax: 0,
+                result_rdx: 0,
+                gpr_errors: u64::MAX,
+                fp_errors: u64::MAX,
             };
             if state().native || state().recorded.is_some() {
                 return Err("helper FP entered with preceding live native frame");
@@ -377,38 +446,71 @@ pub(super) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
             // SAFETY: sealed current actual Host, private pinned ARM tables/data,
             // caller/probe/frame/context and exact installed code remain owned
             // through the true helper/return/recovery. No synthetic TLB fill.
-            unsafe { stela_native_fp_probe(&mut probe, code.0, &mut guest, &mut context, context_abi); }
-            let result = native_return(code, BlockExit { next_pc: probe.result_rax, kind: probe.result_rdx }, entered);
+            unsafe {
+                stela_native_fp_probe(&mut probe, code.0, &mut guest, &mut context, context_abi);
+            }
+            let result = native_return(
+                code,
+                BlockExit {
+                    next_pc: probe.result_rax,
+                    kind: probe.result_rdx,
+                },
+                entered,
+            );
             let fip = pointer(&observed.expected, 8);
             let fdp = pointer(&observed.expected, 16);
             let fop = u16::from_le_bytes([observed.expected.0[6], observed.expected.0[7]]) & 0x7ff;
             crate::output::arguments(format_args!(
                 "NATIVE HELPER FP context={context_abi} va={address:#x} caller_fp={:#x} helper_fp={:#x} fip={fip:#x} fdp={fdp:#x} fop={fop:#x} calls_before={calls} calls_after={} fills_before={fills} fills_after={}\n",
-                probe.fp_errors, observed.fp_errors, state().helper_calls, state().helper_fills,
+                probe.fp_errors,
+                observed.fp_errors,
+                state().helper_calls,
+                state().helper_fills,
             ));
-            if probe.gpr_errors != 0 || probe.fp_errors != 0 || !same_legacy(&probe.expected, &probe.returned)
-                || state().helper_calls != calls + 1 || state().helper_fills != fills + 1
-            { return Err("helper FP original caller or actual walk differs"); }
-            if fip != expected_fip || fdp != expected_fdp || fop != 0x435
-            { return Err("helper FP actual guest register seed differs"); }
+            if probe.gpr_errors != 0
+                || probe.fp_errors != 0
+                || !same_legacy(&probe.expected, &probe.returned)
+                || state().helper_calls != calls + 1
+                || state().helper_fills != fills + 1
+            {
+                return Err("helper FP original caller or actual walk differs");
+            }
+            if fip != expected_fip || fdp != expected_fdp || fop != 0x435 {
+                return Err("helper FP actual guest register seed differs");
+            }
             if address == MAPPED {
                 expected.reserved = RETURNED;
                 expected.x[0] = VALUE;
-                let data = scope.mapping.address(4 * PAGE, 8).map_err(|_| "helper FP data mapping differs")?;
-                if result != (NativeExit::Exit { next_pc: RETURN_RAX, kind: RETURN_RDX })
-                    || observed.fp_errors != 0 || !same_legacy(&observed.expected, &observed.returned)
+                let data = scope
+                    .mapping
+                    .address(4 * PAGE, 8)
+                    .map_err(|_| "helper FP data mapping differs")?;
+                if result
+                    != (NativeExit::Exit {
+                        next_pc: RETURN_RAX,
+                        kind: RETURN_RDX,
+                    })
+                    || observed.fp_errors != 0
+                    || !same_legacy(&observed.expected, &observed.returned)
                     || observed.returned_registers[0] != data.as_ptr() as u64
                     || observed.expected_registers[1..] != observed.returned_registers[1..]
-                { return Err("helper FP real mapped return or full Saved ABI differs"); }
+                {
+                    return Err("helper FP real mapped return or full Saved ABI differs");
+                }
             } else {
                 expected.reserved = STARTED;
                 if !matches!(result, NativeExit::Fault(fault) if fault.offset == return_offset
                     && fault.cause == FaultCause::NonCanonical && fault.address == MISSING && !fault.write
                     && fault.registers == observed.expected_registers)
-                    || observed.returned_registers != [0; 16] || observed.fp_errors != u64::MAX
-                { return Err("helper FP missing mapping did not abandon exact actual frame"); }
+                    || observed.returned_registers != [0; 16]
+                    || observed.fp_errors != u64::MAX
+                {
+                    return Err("helper FP missing mapping did not abandon exact actual frame");
+                }
             }
-            if guest != expected { return Err("helper FP private source execution marker/state differs"); }
+            if guest != expected {
+                return Err("helper FP private source execution marker/state differs");
+            }
         }
     }
     // Retire every actual translation while its real pages/mapping stay owned.
