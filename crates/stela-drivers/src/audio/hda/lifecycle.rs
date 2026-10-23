@@ -50,6 +50,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         self.conexant_codecs.clear();
         self.sigmatel_codecs.clear();
+        self.cirrus_codecs.clear();
         self.command_poisoned = false;
         self.routing_failed = false;
         self.lifecycle_failed = false;

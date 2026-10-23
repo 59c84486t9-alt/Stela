@@ -269,6 +269,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.sigmatel_guard(graph)?;
         self.require_routing_stopped()?;
         if self.manages_sigmatel_codec(graph.address)
+            || self.manages_cirrus_codec(graph.address)
             || self.manages_conexant_codec(graph.address)
             || self
                 .routes

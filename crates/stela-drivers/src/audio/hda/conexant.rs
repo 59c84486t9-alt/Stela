@@ -131,6 +131,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.conexant_guard(graph)?;
         self.require_routing_stopped()?;
         if self.manages_sigmatel_codec(graph.address)
+            || self.manages_cirrus_codec(graph.address)
             || self
                 .routes
                 .iter()

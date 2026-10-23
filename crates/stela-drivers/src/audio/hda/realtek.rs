@@ -141,6 +141,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(Error::NeedsReset);
         }
         self.require_routing_stopped()?;
+        if self.manages_cirrus_codec(graph.address)
+            || self.manages_conexant_codec(graph.address)
+            || self.manages_sigmatel_codec(graph.address)
+        {
+            return Err(Error::RouteInUse);
+        }
         if self
             .routes
             .iter()

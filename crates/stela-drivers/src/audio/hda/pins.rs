@@ -208,6 +208,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.manages_sigmatel_codec(graph.address) {
             return self.poll_sigmatel_pin_sense(graph, pin);
         }
+        if self.manages_cirrus_codec(graph.address) {
+            return self.poll_cirrus_pin_sense(graph, pin);
+        }
         self.poll_pin_sense_policy(graph, pin, true)
     }
     pub(super) fn poll_pin_sense_policy(

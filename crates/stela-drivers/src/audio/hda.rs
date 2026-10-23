@@ -20,7 +20,9 @@ use crate::bus::{
     i2c::Timer,
 };
 
+mod cirrus;
 mod codec;
+pub use cirrus::{CirrusCoefficient, CirrusReport};
 mod conexant;
 pub use conexant::{
     ConexantEapdMode, ConexantHeadsetInitialization, ConexantHeadsetKind, ConexantHeadsetReport,
@@ -145,6 +147,7 @@ pub struct Controller<R, T> {
     codec_controls: Vec<(StreamId, u8, u8)>,
     conexant_codecs: Vec<conexant::State>,
     sigmatel_codecs: Vec<sigmatel::State>,
+    cirrus_codecs: Vec<cirrus::State>,
     routing_failed: bool,
     token: ControllerToken,
     lifecycle_failed: bool,
@@ -249,6 +252,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             codec_controls: Vec::new(),
             conexant_codecs: Vec::new(),
             sigmatel_codecs: Vec::new(),
+            cirrus_codecs: Vec::new(),
             routing_failed: false,
         };
         if let Err(error) = controller.initialize() {
@@ -535,6 +539,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             if let Err(fault) = self.shutdown_sigmatel_codecs() {
                 error.get_or_insert(fault);
             }
+            if let Err(fault) = self.shutdown_cirrus_codecs() {
+                error.get_or_insert(fault);
+            }
             error
         } else {
             None
@@ -728,6 +735,13 @@ mod tests {
         idt83_amplifier_reply: u32,
         idt83_power_map: u32,
         idt83_map_requires_d0: bool,
+        cirrus_model: bool,
+        cirrus_errata_stage: u8,
+        cirrus_errata_powered: [bool; 2],
+        cirrus_errata_complete: bool,
+        cirrus_errata_invalid: bool,
+        cirrus_early_coefficient_reads: usize,
+        adc_amp_index_zero: Vec<u8>,
         power_ready: BTreeMap<u8, u64>,
         power_delay: u64,
         power_stuck: bool,
@@ -837,6 +851,13 @@ mod tests {
                 idt83_amplifier_reply: 0,
                 idt83_power_map: 0,
                 idt83_map_requires_d0: false,
+                cirrus_model: false,
+                cirrus_errata_stage: 0,
+                cirrus_errata_powered: [false; 2],
+                cirrus_errata_complete: false,
+                cirrus_errata_invalid: false,
+                cirrus_early_coefficient_reads: 0,
+                adc_amp_index_zero: Vec::new(),
                 power_ready: BTreeMap::new(),
                 power_delay: 12,
                 power_stuck: false,
@@ -1051,6 +1072,9 @@ mod tests {
                 let output = value & (1 << 15) != 0;
                 assert_eq!(value & (1 << 14) != 0, !output);
                 let index = ((value >> 8) & 15) as u8;
+                if !output && self.adc_amp_index_zero.contains(&node) && index != 0 {
+                    return 0;
+                }
                 let mut gain = if output && self.outputs_without_hardware_mute.contains(&node) {
                     value as u8 & 0x7f
                 } else {
@@ -1074,6 +1098,9 @@ mod tests {
                 let value = command as u16;
                 let output = value & (1 << 15) != 0;
                 let channel = u8::from(value & (1 << 13) == 0);
+                if !output && self.adc_amp_index_zero.contains(&node) && value & 15 != 0 {
+                    return u32::MAX;
+                }
                 if self.reject_amplifier_channel == Some((node, channel)) {
                     return u32::MAX;
                 }
@@ -1112,6 +1139,56 @@ mod tests {
                     ));
                     if !self.reject_coefficient_write && self.reject_coefficient_node != Some(node)
                     {
+                        if self.cirrus_model && node == 0x11 {
+                            let index = *self.coefficient_indexes.get(&node).unwrap_or(&0);
+                            let value = command as u16;
+                            let processing = self.route_controls.get(&(node, 0xf03)) == Some(&1);
+                            let valid = if index == 8 && value == 0x9999 && processing {
+                                self.cirrus_errata_stage = 1;
+                                self.cirrus_errata_complete = false;
+                                self.cirrus_errata_powered = [false; 2];
+                                true
+                            } else {
+                                match (self.cirrus_errata_stage, index, value) {
+                                    (1, 0x17, 0xa412) if processing => {
+                                        self.cirrus_errata_stage = 2;
+                                        true
+                                    }
+                                    (2, 1, 9) if processing => {
+                                        self.cirrus_errata_stage = 3;
+                                        true
+                                    }
+                                    (3, 0x17, 0x2412)
+                                        if processing
+                                            && self.cirrus_errata_powered == [true; 2]
+                                            && [7, 8].iter().all(|node| {
+                                                self.power_ready.get(node).is_some_and(|ready| {
+                                                    self.clock.now_us() >= *ready
+                                                })
+                                            }) =>
+                                    {
+                                        self.cirrus_errata_stage = 4;
+                                        true
+                                    }
+                                    (4, 8, 0) if processing => {
+                                        self.cirrus_errata_stage = 5;
+                                        true
+                                    }
+                                    (5, 1, 8) if processing => {
+                                        self.cirrus_errata_stage = 6;
+                                        true
+                                    }
+                                    (_, 1..=4, _) if processing && self.cirrus_errata_complete => {
+                                        true
+                                    }
+                                    _ => false,
+                                }
+                            };
+                            if !valid {
+                                self.cirrus_errata_invalid = true;
+                                return u32::MAX;
+                            }
+                        }
                         self.coefficients.insert(
                             (node, *self.coefficient_indexes.get(&node).unwrap_or(&0)),
                             command as u16,
@@ -1122,10 +1199,19 @@ mod tests {
                         {
                             self.depop_started_at = Some(self.clock.now_us());
                         }
+                        if self.cirrus_model
+                            && node == 0x11
+                            && self.coefficients.get(&(node, 3)).copied().unwrap_or(0) & 0x400 == 0
+                        {
+                            *self.coefficient_indexes.entry(node).or_default() += 1;
+                        }
                     }
                     return 0;
                 }
                 12 => {
+                    if self.cirrus_model && node == 0x11 && !self.cirrus_errata_complete {
+                        self.cirrus_early_coefficient_reads += 1;
+                    }
                     if let Some(value) = self.coefficient_read_fault
                         && self
                             .coefficient_fault_node
@@ -1157,12 +1243,17 @@ mod tests {
                             }
                         }
                     }
-                    return u32::from(
-                        *self
-                            .coefficients
-                            .get(&(node, *self.coefficient_indexes.get(&node).unwrap_or(&0)))
-                            .unwrap_or(&0),
-                    );
+                    let value = *self
+                        .coefficients
+                        .get(&(node, *self.coefficient_indexes.get(&node).unwrap_or(&0)))
+                        .unwrap_or(&0);
+                    if self.cirrus_model
+                        && node == 0x11
+                        && self.coefficients.get(&(node, 3)).copied().unwrap_or(0) & 0x400 == 0
+                    {
+                        *self.coefficient_indexes.entry(node).or_default() += 1;
+                    }
+                    return u32::from(value);
                 }
                 _ => (),
             }
@@ -1172,6 +1263,9 @@ mod tests {
                     self.idt83_amplifier_reply
                 }
                 0x705 => {
+                    if self.cirrus_model && self.cirrus_errata_stage == 3 && matches!(node, 7 | 8) {
+                        self.cirrus_errata_powered[usize::from(node - 7)] = true;
+                    }
                     self.power_ready
                         .insert(node, self.clock.now_us() + self.power_delay);
                     0
@@ -1187,7 +1281,10 @@ mod tests {
                         0
                     }
                 }
-                0x701 | 0x707 | 0x70c | 0x70f | 0x715 | 0x716 | 0x717 | 0x7e7 | 0x7ec => {
+                0x701 | 0x703 | 0x707 | 0x70c | 0x70f | 0x715 | 0x716 | 0x717 | 0x7e7 | 0x7ec => {
+                    if self.cirrus_model && node == 0x11 && verb == 0x703 && command as u8 == 0 {
+                        self.cirrus_errata_complete = self.cirrus_errata_stage == 6;
+                    }
                     *self
                         .route_control_writes
                         .entry((node, verb + 0x800))
@@ -1207,7 +1304,7 @@ mod tests {
                     }
                     0
                 }
-                0xf01 | 0xf07 | 0xf0c | 0xf0f | 0xf15 | 0xf16 | 0xf17 | 0xfec => {
+                0xf01 | 0xf03 | 0xf07 | 0xf0c | 0xf0f | 0xf15 | 0xf16 | 0xf17 | 0xfec => {
                     if self.conexant_headset_model
                         && node == 0x19
                         && verb == 0xf07
@@ -8560,6 +8657,491 @@ mod tests {
                 controller.reinitialize().unwrap();
                 assert!(controller.routes.is_empty());
                 assert!(controller.sigmatel_codecs.is_empty());
+            }
+        }
+    }
+    mod cirrus {
+        use super::*;
+        fn device(id: u32, shared: u8) -> Rc<RefCell<Model>> {
+            let model = analog_model();
+            let mut m = model.borrow_mut();
+            m.parameters.insert((0, 0), id);
+            m.parameters.insert((1, 4), (2 << 16) | 20);
+            for node in 2..=0x15 {
+                m.parameters.insert((node, 9), 0xf << 20);
+            }
+            m.parameters.insert((2, 9), 1 | (1 << 2) | (1 << 10));
+            m.parameters.insert((2, 0x0f), 1);
+            for node in [5, 6] {
+                m.parameters
+                    .insert((node, 9), (1 << 20) | 1 | (1 << 1) | (1 << 8));
+                m.parameters.insert((node, 0x0e), 2);
+                m.connection_words.insert((node, 0), 0x0c | (0x0d << 8));
+            }
+            m.adc_amp_index_zero = vec![5, 6];
+            for (node, kind) in [(7, 1 << 20), (8, 0)] {
+                m.parameters
+                    .insert((node, 9), kind | 1 | (1 << 9) | (1 << 10));
+                m.parameters.insert((node, 0x0f), 1);
+            }
+            m.parameters
+                .insert((9, 9), (4 << 20) | 1 | (1 << 2) | (1 << 8));
+            m.parameters.insert((9, 0x0c), 0x1f | (1 << 16));
+            m.parameters.insert((9, 0x0e), 1);
+            m.connection_words.insert((9, 0), 2);
+            m.pin_defaults.insert(9, 0x0221_0010);
+            m.pin_senses.insert(9, 0x8000_0042);
+            m.route_controls.insert((9, 0xf0c), 5);
+            for node in [0x0c, 0x0d] {
+                m.parameters.insert((node, 9), (4 << 20) | 1 | (1 << 1));
+                m.parameters.insert((node, 0x0c), 0x20 | 0x3700 | 7);
+                m.pin_defaults.insert(node, 0x03a1_0020);
+                m.pin_senses.insert(node, 0x8000_005a);
+            }
+            for (index, node) in [0x0e, 0x12, 0x15].into_iter().enumerate() {
+                m.parameters.insert((node, 9), (4 << 20) | 1 | (1 << 9));
+                m.parameters
+                    .insert((node, 0x0c), if node == 0x15 { 0x10 } else { 0x20 });
+                m.pin_defaults.insert(
+                    node,
+                    if shared & (1 << index) == 0 {
+                        0x4000_0100
+                    } else if node == 0x15 {
+                        0x014b_1180
+                    } else {
+                        0x90a6_0150
+                    },
+                );
+            }
+            m.parameters.insert(
+                (0x11, 9),
+                (0xf << 20) | (1 << 6) | if id == 0x1013_4207 { 1 << 10 } else { 0 },
+            );
+            m.parameters.insert((0x11, 0x10), 25 << 8);
+            m.parameters.insert((0x11, 0x0f), 0); // Inherits actual AFG D0.
+            m.cirrus_model = true;
+            drop(m);
+            model
+        }
+        fn playback() -> PinOptions {
+            PinOptions::Playback {
+                headphone: true,
+                eapd: Some(true),
+            }
+        }
+        fn capture() -> PinOptions {
+            PinOptions::Capture {
+                vref: Vref::EightyPercent,
+            }
+        }
+        #[test]
+        fn cs4206_and_4207_source_errata_shared_pin_coefficients_adc_index_and_real_duplex_pcm() {
+            for id in [0x1013_4206, 0x1013_4207] {
+                for shared in 0..8 {
+                    let mut fixture = Fixture::new();
+                    let model = device(id, shared);
+                    let mut controller = create(&model, &mut fixture, config()).unwrap();
+                    let graph = controller.enumerate_codec(0).unwrap();
+                    let report = controller.initialize_cirrus_codec(&graph).unwrap();
+                    assert_eq!(report.codec_id, id);
+                    assert_eq!(report.revision_id, 0x0010_0100);
+                    assert_eq!(report.subsystem_id, 0x1043_8693);
+                    assert_eq!(report.errata_coefficients_acknowledged, 6);
+                    let beep = 7
+                        | if shared & 1 != 0 { 8 } else { 0 }
+                        | if shared & 2 != 0 { 16 } else { 0 };
+                    let spdif = 10 | if shared & 4 != 0 { 0x4000 } else { 0 };
+                    assert_eq!(
+                        report.coefficients,
+                        vec![
+                            CirrusCoefficient {
+                                index: 3,
+                                value: 0x146a
+                            },
+                            CirrusCoefficient {
+                                index: 2,
+                                value: 0x000a
+                            },
+                            CirrusCoefficient {
+                                index: 4,
+                                value: beep
+                            },
+                            CirrusCoefficient {
+                                index: 1,
+                                value: spdif
+                            }
+                        ]
+                    );
+                    {
+                        let m = model.borrow();
+                        assert!(m.cirrus_errata_complete && !m.cirrus_errata_invalid);
+                        assert_eq!(m.cirrus_early_coefficient_reads, 0);
+                        let effects: Vec<_> = m
+                            .coefficient_events
+                            .iter()
+                            .map(|(node, index, value, _)| (*node, *index, *value))
+                            .collect();
+                        assert_eq!(
+                            &effects[..6],
+                            &[
+                                (0x11, 8, 0x9999),
+                                (0x11, 0x17, 0xa412),
+                                (0x11, 1, 9),
+                                (0x11, 0x17, 0x2412),
+                                (0x11, 8, 0),
+                                (0x11, 1, 8)
+                            ]
+                        );
+                        assert_eq!(m.cirrus_errata_powered, [true; 2]);
+                        assert_eq!(m.route_controls[&(0x11, 0xf03)], 1);
+                        assert!(!m.commands.iter().any(|command| matches!(
+                            (command >> 8) & 0xfff,
+                            0x715 | 0x716 | 0x717 | 0x7e7
+                        ))); // No inferred OEM GPIO.
+                        if id == 0x1013_4207 {
+                            assert!(m.power_ready.contains_key(&0x11));
+                        }
+                    }
+                    let before = access_counts(&model);
+                    assert_eq!(
+                        controller.initialize_cirrus_codec(&graph),
+                        Err(Error::RouteInUse)
+                    );
+                    assert_eq!(access_counts(&model), before);
+                    let output = graph.analog_route(Direction::Playback, 9, 2).unwrap();
+                    let input = graph.analog_route(Direction::Capture, 0x0d, 5).unwrap();
+                    let out = controller
+                        .allocate_stream(
+                            Direction::Playback,
+                            stereo(),
+                            128,
+                            2,
+                            &mut fixture.allocator,
+                        )
+                        .unwrap();
+                    let mic = controller
+                        .allocate_stream(
+                            Direction::Capture,
+                            stereo(),
+                            128,
+                            2,
+                            &mut fixture.allocator,
+                        )
+                        .unwrap();
+                    controller
+                        .configure_analog_route(&graph, &output, out, 0, playback())
+                        .unwrap();
+                    controller
+                        .configure_analog_route(&graph, &input, mic, 0, capture())
+                        .unwrap();
+                    assert_eq!(model.borrow().route_controls[&(5, 0xf01)], 1); // Actual connection1.
+                    for channel in 0..2 {
+                        assert_eq!(model.borrow().amplifiers[&(5, false, 0, channel)], 0x1f);
+                        assert!(
+                            !model
+                                .borrow()
+                                .amplifiers
+                                .contains_key(&(5, false, 1, channel))
+                        );
+                    }
+                    assert_eq!(model.borrow().route_controls[&(9, 0xf0c)], 7); // Ordinary explicit EAPD.
+                    assert!(controller.poll_pin_sense(&graph, 9).unwrap().present);
+                    assert_eq!(model.borrow().sense_triggers, vec![9]); // Cirrus permits source trigger.
+                    controller.write_pcm(out, 0, &[0x42; 256]).unwrap();
+                    controller.fill_capture(mic, 0xa5).unwrap();
+                    controller.start(out).unwrap();
+                    controller.start(mic).unwrap();
+                    model.borrow_mut().dma_step_bytes = 128;
+                    advance(&model, 8);
+                    assert!(controller.status(out).unwrap().period_completed);
+                    assert!(controller.status(mic).unwrap().period_completed);
+                    controller.stop(mic).unwrap();
+                    let mut samples = [0; 256];
+                    controller.read_pcm(mic, 0, &mut samples).unwrap();
+                    assert_eq!(samples, core::array::from_fn(|index| index as u8));
+                    controller.shutdown().unwrap();
+                    let m = model.borrow();
+                    assert!(m.playback.len() >= 256 && m.playback.iter().all(|byte| *byte == 0x42));
+                    for pin in [9, 0x0c, 0x0d, 0x0e, 0x12, 0x15] {
+                        assert_eq!(m.route_controls[&(pin, 0xf07)], 0);
+                    }
+                }
+            }
+        }
+        #[test]
+        fn cirrus_unknown_layout_missing_processing_digital_power_or_shared_pin_refuses_before_effects()
+         {
+            for fault in 0..8 {
+                let mut fixture = Fixture::new();
+                let model = device(0x1013_4206, 7);
+                {
+                    let mut m = model.borrow_mut();
+                    match fault {
+                        0 => {
+                            m.parameters.insert((0, 0), 0x1013_4208);
+                        }
+                        1 => {
+                            m.parameters.insert((0x11, 9), 0xf << 20);
+                        }
+                        2 => {
+                            m.parameters.insert((0x11, 0x10), 23 << 8);
+                        }
+                        3 => {
+                            m.parameters.insert((7, 9), (1 << 20) | 1 | (1 << 9));
+                        }
+                        4 => {
+                            m.parameters.insert((8, 0x0f), 8);
+                        }
+                        5 => {
+                            m.parameters.insert((0x12, 9), (4 << 20) | 1);
+                        }
+                        6 => {
+                            m.pin_defaults.insert(0x15, u32::MAX);
+                        }
+                        _ => {
+                            m.parameters.insert((0x11, 0x10), u32::MAX);
+                        }
+                    }
+                }
+                let mut controller = create(&model, &mut fixture, config()).unwrap();
+                let graph = controller.enumerate_codec(0).unwrap();
+                let before = model.borrow().commands.len();
+                assert!(controller.initialize_cirrus_codec(&graph).is_err());
+                assert!(controller.cirrus_codecs.is_empty());
+                assert!(!controller.routing_failed);
+                assert!(
+                    model.borrow().commands[before..]
+                        .iter()
+                        .all(|command| command & (1 << 19) != 0)
+                );
+            }
+        }
+        #[test]
+        fn cirrus_errata_processing_index_final_coefficient_and_lost_ack_failures_retain_owner() {
+            for fault in 0..7 {
+                let mut fixture = Fixture::new();
+                let model = device(0x1013_4207, 7);
+                let mut controller = create(&model, &mut fixture, config()).unwrap();
+                let graph = controller.enumerate_codec(0).unwrap();
+                {
+                    let mut m = model.borrow_mut();
+                    match fault {
+                        0 => m.power_error = true,
+                        1 => {
+                            m.reject_route_control = Some(0xf03);
+                            m.reject_route_after_write = true;
+                        }
+                        2 => m.drop_reply_command = Some((0x11 << 20) | 0x49999),
+                        3 => m.drop_reply_command = Some((7 << 20) | 0x70500),
+                        4 => m.coefficient_index_failed = true,
+                        5 => {
+                            m.coefficient_read_fault = Some(u32::MAX);
+                            m.coefficient_fault_after_write = true;
+                            m.coefficient_fault_node = Some(0x11);
+                            m.coefficient_fault_write_threshold = 8;
+                        }
+                        _ => m.drop_reply_command = Some((0x11 << 20) | 0x4001f), // Final DMIC/beep RMW effect.
+                    }
+                }
+                assert!(controller.initialize_cirrus_codec(&graph).is_err());
+                assert!(controller.routing_failed);
+                assert_eq!(controller.cirrus_codecs.len(), 1);
+                if fault == 2 {
+                    assert_eq!(model.borrow().coefficients[&(0x11, 8)], 0x9999);
+                }
+                if fault == 6 {
+                    assert_eq!(model.borrow().coefficients[&(0x11, 4)], 0x1f);
+                }
+                let before = access_counts(&model);
+                assert_eq!(
+                    controller.initialize_cirrus_codec(&graph),
+                    Err(Error::NeedsReset)
+                );
+                assert_eq!(access_counts(&model), before);
+                {
+                    let mut m = model.borrow_mut();
+                    m.power_error = false;
+                    m.reject_route_control = None;
+                    m.drop_reply_command = None;
+                    m.coefficient_index_failed = false;
+                    m.coefficient_read_fault = None;
+                }
+                controller.reinitialize().unwrap();
+                assert!(controller.cirrus_codecs.is_empty());
+                assert_eq!(
+                    controller.initialize_cirrus_codec(&graph),
+                    Err(Error::InvalidCodecGraph)
+                );
+            }
+        }
+        #[test]
+        fn cirrus_live_default_processing_coefficient_and_identity_loss_quarantine_existing_routes()
+        {
+            for fault in 0..5 {
+                let mut fixture = Fixture::new();
+                let model = device(0x1013_4206, 7);
+                let mut controller = create(&model, &mut fixture, config()).unwrap();
+                let graph = controller.enumerate_codec(0).unwrap();
+                controller.initialize_cirrus_codec(&graph).unwrap();
+                let route = graph.analog_route(Direction::Playback, 9, 2).unwrap();
+                let stream = controller
+                    .allocate_stream(
+                        Direction::Playback,
+                        stereo(),
+                        128,
+                        2,
+                        &mut fixture.allocator,
+                    )
+                    .unwrap();
+                controller
+                    .configure_cirrus_route(&graph, &route, stream, 0, playback())
+                    .unwrap();
+                {
+                    let mut m = model.borrow_mut();
+                    match fault {
+                        0 => {
+                            m.pin_defaults.insert(0x12, 0x4000_0100);
+                        }
+                        1 => {
+                            m.parameters.insert((0x11, 0x10), 24 << 8);
+                        }
+                        2 => {
+                            m.coefficients.insert((0x11, 3), 0x106a);
+                        }
+                        3 => {
+                            m.route_controls.insert((0x11, 0xf03), 0);
+                        }
+                        _ => {
+                            m.parameters.insert((0, 2), 0x0010_0200);
+                        }
+                    }
+                }
+                assert!(controller.poll_pin_sense(&graph, 9).is_err());
+                let before = access_counts(&model);
+                assert_eq!(controller.start(stream), Err(Error::NeedsReset));
+                assert_eq!(access_counts(&model), before);
+                let before = model.borrow().commands.len();
+                assert_eq!(controller.shutdown(), Err(Error::NeedsReset));
+                assert_eq!(model.borrow().commands.len(), before);
+                assert!(controller.stopped);
+                assert_eq!(controller.routes.len(), 1);
+                controller.reinitialize().unwrap();
+                assert!(controller.cirrus_codecs.is_empty());
+                assert!(controller.routes.is_empty());
+            }
+        }
+        #[test]
+        fn cirrus_shutdown_awaits_actual_stream_stop_and_quiet_failure_still_retires_dma() {
+            for stream_failure in [false, true] {
+                let mut fixture = Fixture::new();
+                let model = device(0x1013_4207, 0);
+                let mut controller = create(&model, &mut fixture, config()).unwrap();
+                let graph = controller.enumerate_codec(0).unwrap();
+                controller.initialize_cirrus_codec(&graph).unwrap();
+                let route = graph.analog_route(Direction::Playback, 9, 2).unwrap();
+                let stream = controller
+                    .allocate_stream(
+                        Direction::Playback,
+                        stereo(),
+                        128,
+                        2,
+                        &mut fixture.allocator,
+                    )
+                    .unwrap();
+                controller
+                    .configure_cirrus_route(&graph, &route, stream, 0, playback())
+                    .unwrap();
+                controller.start(stream).unwrap();
+                {
+                    let mut m = model.borrow_mut();
+                    if stream_failure {
+                        m.stream_stop_stuck = true;
+                    } else {
+                        m.reject_route_control = Some(0xf07);
+                    }
+                }
+                let before = model.borrow().commands.len();
+                assert!(controller.shutdown().is_err());
+                if stream_failure {
+                    assert_eq!(model.borrow().commands.len(), before);
+                    assert!(!controller.stopped);
+                } else {
+                    assert!(controller.stopped);
+                    assert_eq!(model.borrow().get(CORBCTL, 1) & 2, 0);
+                    assert_eq!(model.borrow().get(RIRBCTL, 1) & 2, 0);
+                }
+                assert_eq!(controller.cirrus_codecs.len(), 1);
+                {
+                    let mut m = model.borrow_mut();
+                    m.stream_stop_stuck = false;
+                    m.reject_route_control = None;
+                }
+                controller.reinitialize().unwrap();
+                assert!(controller.cirrus_codecs.is_empty());
+            }
+        }
+        #[test]
+        fn cirrus_and_other_vendor_backends_cannot_replace_a_retained_codec_address() {
+            for (initial, target) in [(0, 1), (0, 2), (0, 3), (1, 0), (2, 0)] {
+                let mut fixture = Fixture::new();
+                let model = device(0x1013_4206, 0);
+                if initial != 0 {
+                    let mut m = model.borrow_mut();
+                    m.cirrus_model = false;
+                    m.parameters.insert(
+                        (0, 0),
+                        if initial == 1 {
+                            0x14f1_5069
+                        } else {
+                            0x8384_7690
+                        },
+                    );
+                    if initial == 2 {
+                        m.parameters.insert((7, 9), (3 << 20) | 1 | (1 << 8));
+                        m.parameters.insert((7, 0x0e), 1);
+                        m.connection_words.insert((7, 0), 2);
+                        m.parameters.insert((8, 9), (4 << 20) | 1);
+                        m.parameters.insert((8, 0x0c), 0x10 | (1 << 16));
+                    }
+                }
+                let mut controller = create(&model, &mut fixture, config()).unwrap();
+                let graph = controller.enumerate_codec(0).unwrap();
+                match initial {
+                    0 => {
+                        controller.initialize_cirrus_codec(&graph).unwrap();
+                    }
+                    1 => {
+                        controller.initialize_conexant_codec(&graph).unwrap();
+                    }
+                    _ => {
+                        controller.initialize_sigmatel_codec(&graph).unwrap();
+                    }
+                }
+                model.borrow_mut().parameters.insert(
+                    (0, 0),
+                    match target {
+                        0 => 0x1013_4206,
+                        1 => 0x14f1_5069,
+                        2 => 0x8384_7690,
+                        _ => 0x10ec_0892,
+                    },
+                );
+                let new_graph = controller.enumerate_codec(0).unwrap();
+                let before = access_counts(&model);
+                let result = match target {
+                    0 => controller.initialize_cirrus_codec(&new_graph).map(|_| ()),
+                    1 => controller.initialize_conexant_codec(&new_graph).map(|_| ()),
+                    2 => controller.initialize_sigmatel_codec(&new_graph).map(|_| ()),
+                    _ => controller.initialize_realtek_common(&new_graph).map(|_| ()),
+                };
+                assert_eq!(result, Err(Error::RouteInUse));
+                assert_eq!(access_counts(&model), before);
+                assert_eq!(
+                    controller.cirrus_codecs.len()
+                        + controller.sigmatel_codecs.len()
+                        + controller.conexant_codecs.len(),
+                    1
+                );
             }
         }
     }
