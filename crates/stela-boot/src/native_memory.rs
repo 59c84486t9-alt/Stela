@@ -34,6 +34,8 @@ pub static SOURCE: NativeMemory = NativeMemory {
     physical: AtomicU64::new(0),
     bytes: AtomicUsize::new(0),
     table_offset: AtomicU64::new(0),
+    generation: AtomicU64::new(0),
+    catalogs: AtomicUsize::new(0),
 };
 
 pub struct NativeMemory {
@@ -41,6 +43,8 @@ pub struct NativeMemory {
     physical: AtomicU64,
     bytes: AtomicUsize,
     table_offset: AtomicU64,
+    generation: AtomicU64,
+    catalogs: AtomicUsize,
 }
 
 /// Register the existing heap's true CPU/physical mapping once in each phase.
@@ -52,12 +56,21 @@ pub struct NativeMemory {
 /// valid and compatible across every root change until the final allocation
 /// release. There are no allocations from a previous registered heap still
 /// alive, nor concurrent users of this registration. Only process/deferred
-/// context may allocate or perform the last release, including Arc/lease Drop.
+/// context may register/retire a Linux page catalog; every catalog must be
+/// retired first. A quarantined catalog forbids retargeting this source.
+/// Only process/deferred context may allocate or perform the last release,
+/// including Arc/lease Drop.
 /// Adding `table_offset` to each current CR3-reachable table PA must yield a
 /// readable retained mapping of that complete page (zero for identity, the
 /// explicit physmap offset in the engine). Root changes, migration and cache
 /// policy changes are excluded during allocation/cache qualification.
 pub unsafe fn initialize(cpu: usize, physical: u64, bytes: usize, table_offset: u64) {
+    assert_eq!(SOURCE.catalogs.load(Ordering::Acquire), 0);
+    let generation = SOURCE
+        .generation
+        .load(Ordering::Relaxed)
+        .checked_add(1)
+        .expect("native memory generation exhausted");
     assert!(cpu != 0 && cpu.is_multiple_of(PAGE));
     assert!(physical.is_multiple_of(PAGE as u64));
     assert!(bytes != 0 && bytes.is_multiple_of(PAGE));
@@ -67,6 +80,88 @@ pub unsafe fn initialize(cpu: usize, physical: u64, bytes: usize, table_offset: 
     SOURCE.physical.store(physical, Ordering::Relaxed);
     SOURCE.table_offset.store(table_offset, Ordering::Relaxed);
     SOURCE.bytes.store(bytes, Ordering::Release);
+    SOURCE.generation.store(generation, Ordering::Release);
+}
+
+/// Retains this native source generation while Linux descriptors can refer to
+/// it. Registration does not import ordinary heap bytes as Linux payload pages.
+#[cfg(not(test))]
+pub struct LinuxPages {
+    generation: u64,
+}
+
+#[cfg(not(test))]
+impl Drop for LinuxPages {
+    fn drop(&mut self) {
+        let previous = SOURCE.catalogs.fetch_sub(1, Ordering::AcqRel);
+        assert!(previous != 0);
+    }
+}
+
+// SAFETY: initialize owns the exact native heap and retained WB mapping. The
+// catalog count prevents generation retargeting; each allocation goes through
+// the same real zeroed PageSource and retains its backing until quiescent Drop.
+// Preflight refuses unsupported flags and contexts before any heap/cache work.
+#[cfg(not(test))]
+unsafe impl stela_drivers::gpu::linux::pages::Provider for LinuxPages {
+    fn validate(
+        &self,
+        request: stela_drivers::gpu::linux::pages::Request,
+    ) -> Result<(), MemoryError> {
+        if SOURCE.generation.load(Ordering::Acquire) != self.generation
+            || request.atomic
+            || !request.basic_ram()
+            || !request.may_block()
+        {
+            return Err(MemoryError::Unavailable);
+        }
+        request.bytes().ok_or(MemoryError::InvalidSize)?;
+        Ok(())
+    }
+
+    fn allocate(
+        &self,
+        request: stela_drivers::gpu::linux::pages::Request,
+    ) -> Result<PinnedPages, MemoryError> {
+        self.validate(request)?;
+        let bytes = request.bytes().ok_or(MemoryError::InvalidSize)?;
+        SOURCE.allocate(bytes, bytes, CacheAttribute::WriteBack)
+    }
+}
+
+/// Bind the actual registered heap to Linux's native page service.
+///
+/// # Safety
+/// Process/deferred context excludes migration, root/cache writers and native
+/// IRQ/reentry for registration, use and retirement. The registered heap and
+/// mapping remain owned through every pin and any quarantined catalog. The
+/// caller retires the catalog before switching allocator/source generations.
+#[cfg(not(test))]
+pub unsafe fn linux_pages() -> Result<
+    stela_drivers::gpu::linux::pages::Catalog<LinuxPages>,
+    stela_drivers::gpu::linux::pages::Error,
+> {
+    use stela_drivers::gpu::linux::pages::{Catalog, Error, Reservation};
+    let generation = SOURCE.generation.load(Ordering::Acquire);
+    let bytes = SOURCE.bytes.load(Ordering::Acquire);
+    if generation == 0 || bytes == 0 {
+        return Err(Error::InvalidReservation);
+    }
+    let cpu = NonNull::new(SOURCE.cpu.load(Ordering::Relaxed) as *mut u8)
+        .ok_or(Error::InvalidReservation)?;
+    let physical = SOURCE.physical.load(Ordering::Relaxed);
+    // SAFETY: the live native registration proves this exact retained mapping.
+    let reservation = unsafe { Reservation::new(physical, cpu, bytes / PAGE)? };
+    SOURCE
+        .catalogs
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            count.checked_add(1)
+        })
+        .map_err(|_| Error::OutOfMemory)?;
+    let provider = LinuxPages { generation };
+    // SAFETY: inherited exclusive context/mapping contract; provider owns the
+    // source-generation count through success, failure and quarantine.
+    unsafe { Catalog::register(provider, reservation) }
 }
 
 /// Qualify an existing loader reservation through the SAME current mapping
@@ -94,6 +189,14 @@ pub(crate) unsafe fn qualify_reserved_writeback(
 /// CPU lifetime and zeroed page-tail access. Called by the mount's host check.
 pub fn verify() -> Result<(), MemoryError> {
     let before = ALLOCATOR.usage().live;
+    #[cfg(not(test))]
+    {
+        // SAFETY: the existing native diagnostic runs in the registered
+        // process/deferred context, with root/cache writers excluded.
+        let mut catalog = unsafe { linux_pages() }.map_err(|_| MemoryError::Unavailable)?;
+        catalog.verify().map_err(|_| MemoryError::InvalidPageList)?;
+        catalog.try_retire().map_err(|_| MemoryError::Unavailable)?;
+    }
     if !matches!(
         SOURCE.allocate(PAGE, PAGE, CacheAttribute::WriteCombining),
         Err(MemoryError::CacheAttributeUnavailable)
@@ -482,6 +585,8 @@ mod tests {
             physical: AtomicU64::new(0),
             bytes: AtomicUsize::new(0),
             table_offset: AtomicU64::new(0),
+            generation: AtomicU64::new(0),
+            catalogs: AtomicUsize::new(0),
         };
         assert_eq!(source.page_geometry(), Err(MemoryError::Unavailable));
     }

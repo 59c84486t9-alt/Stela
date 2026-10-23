@@ -1165,7 +1165,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     if options.native_memory_check {
         match crate::native_memory::verify() {
             Ok(()) => output::arguments(format_args!(
-                "CHECK native-memory PASS WB native pages: zero/read/write, CPU pin lifetime/reclaim, cache/alignment/bounds refusal\n"
+                "CHECK native-memory PASS WB native pages: zero/read/write, CPU pin lifetime/reclaim, cache/alignment/bounds refusal; Linux PFN/refcount/compound/split/retirement\n"
             )),
             Err(error) => {
                 output::arguments(format_args!("CHECK native-memory FAIL {error:?}\n"));

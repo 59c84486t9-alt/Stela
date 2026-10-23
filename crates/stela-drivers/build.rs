@@ -10,7 +10,7 @@ mod amd_commands;
 #[cfg(feature = "intel-port")]
 #[path = "build/intel.rs"]
 mod intel;
-#[cfg(any(feature = "nvidia-port", feature = "intel-port", feature = "amd-port"))]
+#[cfg(any(feature = "nvidia-port", feature = "linux-kernel"))]
 #[path = "build/native.rs"]
 mod native;
 #[cfg(feature = "nvidia-port")]
@@ -23,9 +23,9 @@ fn main() {
     // Active ports declare their native source inputs below. Without this
     // baseline Cargo watches every vendored file even when no C port is used.
     println!("cargo:rerun-if-changed=build.rs");
-    #[cfg(any(feature = "amd-port", feature = "intel-port"))]
+    #[cfg(feature = "linux-kernel")]
     let (linux, mut tests) = (native::Linux::new(), native::Tests::default());
-    #[cfg(any(feature = "amd-port", feature = "intel-port"))]
+    #[cfg(feature = "linux-kernel")]
     linux.tests(&mut tests);
     #[cfg(feature = "amd-port")]
     amd::port(&linux, &mut tests);
@@ -35,6 +35,6 @@ fn main() {
     nvidia::port();
     #[cfg(feature = "intel-port")]
     intel::port(&linux, &mut tests);
-    #[cfg(any(feature = "amd-port", feature = "intel-port"))]
+    #[cfg(feature = "linux-kernel")]
     tests.write();
 }

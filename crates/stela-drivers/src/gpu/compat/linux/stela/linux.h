@@ -45,6 +45,9 @@ struct stela_linux_owner {
 extern const struct stela_linux_owner stela_linux_bare;
 
 void stela_linux_enter(const struct stela_linux_owner *owner);
+/* One acquisition attempt; false leaves an already-running owner untouched.
+ * This is also safe when a platform callback tries to retire another owner. */
+bool stela_linux_try_enter(const struct stela_linux_owner *owner);
 void stela_linux_exit(void);
 /* Checked quiescence in the serialized context, not a native IRQ witness. */
 bool stela_linux_quiescent(void);

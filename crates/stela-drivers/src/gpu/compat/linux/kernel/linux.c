@@ -7,6 +7,7 @@
 #include <linux/preempt.h>
 #include <linux/thread_info.h>
 #include <stela/linux.h>
+#include <stela/page.h>
 
 static const struct stela_linux_services no_services;
 const struct stela_linux_owner stela_linux_bare = {.services = &no_services};
@@ -18,15 +19,24 @@ static unsigned long irq_flags = ARCH_IRQ_ENABLED;
 /* Linux headers keep actual nested atomic/read-side state here. */
 struct thread_info stela_thread_info;
 
-void stela_linux_enter(const struct stela_linux_owner *next)
+bool stela_linux_try_enter(const struct stela_linux_owner *next)
 {
 	if (!next || !next->services)
 		__builtin_trap();
-	while (__atomic_exchange_n(&running, true, __ATOMIC_ACQUIRE))
-		cpu_relax();
+	bool expected = false;
+	if (!__atomic_compare_exchange_n(&running, &expected, true, false,
+					__ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+		return false;
 	if (owner || preempt_count() || irq_flags != ARCH_IRQ_ENABLED)
 		__builtin_trap();
 	owner = next;
+	return true;
+}
+
+void stela_linux_enter(const struct stela_linux_owner *next)
+{
+	while (!stela_linux_try_enter(next))
+		cpu_relax();
 }
 
 void stela_linux_exit(void)
@@ -34,6 +44,7 @@ void stela_linux_exit(void)
 	if (!stela_linux_quiescent())
 		__builtin_trap();
 	stela_linux_rcu_finish();
+	stela_linux_pages_finish();
 	if (!stela_linux_quiescent())
 		__builtin_trap();
 	owner = NULL;

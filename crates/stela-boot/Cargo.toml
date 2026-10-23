@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 uefi = { version = "0.41", default-features = false, features = ["alloc"] }
-stela-drivers = { path = "../stela-drivers" }
+stela-drivers = { path = "../stela-drivers", features = ["linux-kernel"] }
 stela-runtime = { path = "../stela-runtime", default-features = false }
 stela-loader = { path = "../stela-loader", default-features = false }
 stela-compiler = { path = "../stela-compiler", default-features = false }

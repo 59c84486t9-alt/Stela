@@ -15,12 +15,22 @@ pub const NATIVE_TARGET: &str = "x86_64-pc-cygwin";
 const WARNINGS: [&str; 4] = ["-Wall", "-Wextra", "-Wconversion", "-Wsign-conversion"];
 
 /// The upstream sources: submodules that `cargo xtask gpu fetch` checks out.
+#[cfg(feature = "linux-kernel")]
 pub const LINUX: &str = "../../third_party/linux";
+#[cfg(feature = "intel-port")]
 pub const MESA: &str = "../../third_party/mesa";
+#[cfg(feature = "nvidia-port")]
 pub const NVIDIA: &str = "../../third_party/nvidia";
 
 pub fn require_sources() {
-    for source in [LINUX, MESA, NVIDIA] {
+    for source in [
+        #[cfg(feature = "linux-kernel")]
+        LINUX,
+        #[cfg(feature = "intel-port")]
+        MESA,
+        #[cfg(feature = "nvidia-port")]
+        NVIDIA,
+    ] {
         assert!(
             Path::new(source).join(".git").exists(),
             "{source} is missing; run `cargo xtask gpu fetch`"
@@ -206,6 +216,7 @@ impl Linux {
         for (name, source, define) in [
             ("linux_drm_formats", "drm.c", "STELA_LINUX_DRM_FORMAT_TEST"),
             ("linux_rcu", "rcu.c", "STELA_LINUX_RCU_TEST"),
+            ("linux_pages", "page.c", "STELA_LINUX_PAGE_TEST"),
         ] {
             let mut build = build.clone();
             build.define(define, None);

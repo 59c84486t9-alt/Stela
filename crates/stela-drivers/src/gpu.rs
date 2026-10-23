@@ -17,11 +17,11 @@ pub mod metal;
 #[cfg(any(feature = "amd-commands", feature = "amd-port"))]
 pub mod amd;
 
-#[cfg(any(feature = "amd-port", feature = "intel-port"))]
-mod linux;
+#[cfg(feature = "linux-kernel")]
+pub mod linux;
 
 /// The native ports' hosted C test programs, which `build.rs` compiles.
-#[cfg(all(test, any(feature = "amd-port", feature = "intel-port")))]
+#[cfg(all(test, feature = "linux-kernel"))]
 mod c_tests {
     extern crate std;
 

@@ -13,14 +13,16 @@ workspace = true
 [features]
 # Native x86 ACPICA interpreter; builds freestanding C with clang.
 native-acpi = []
+# Common native Linux kernel services; selecting this attaches no GPU.
+linux-kernel = ["dep:cc"]
 # `block::RamDisk`, the in-memory disk the runtime's tests run models on.
 ram-disk = []
 # Build the implemented native NVIDIA OS hooks, not a complete GPU driver.
 nvidia-port = ["dep:cc"]
 # Native Xe command/page-table support; not an initialized Intel GPU driver.
-intel-port = ["dep:cc"]
+intel-port = ["linux-kernel"]
 # Native AMD page-entry and BAR support; requires real mapping/GMC owners.
-amd-port = ["dep:cc"]
+amd-port = ["linux-kernel"]
 # Hosted AMD encoder build; its C runtime is not yet ported to UEFI.
 amd-commands = ["dep:cc"]
 # Shared Metal library input validation, independent of a physical GPU backend.

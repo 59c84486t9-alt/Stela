@@ -4,6 +4,8 @@
 use alloc::alloc::{alloc_zeroed, dealloc};
 use core::{alloc::Layout, ffi::c_void, ptr};
 
+pub mod pages;
+
 #[unsafe(no_mangle)]
 extern "C" fn stela_linux_heap_alloc(size: usize, align: usize) -> *mut c_void {
     match Layout::from_size_align(size, align) {

@@ -3,8 +3,8 @@
 #define _ASM_STELA_PAGE_H
 /* x86-64's 4 KiB base page and its page table entry types, from
  * arch/x86/include/asm/pgtable_64_types.h. Stela's memory owners, not a
- * kernel direct map, hold memory, so the arch translates no addresses
- * between pages, frames and kernel virtual addresses, and Linux code edits
+ * kernel direct map, hold memory. The checked page catalog translates only
+ * its live grants between pages, frames and CPU addresses; Linux code edits
  * no CPU page tables. */
 #include <linux/const.h>
 #include <linux/pfn.h>
@@ -38,8 +38,9 @@ extern void *__phys_to_virt(phys_addr_t);
 #define __pa(x)		__phys_addr((unsigned long)(x))
 #define __va(x)		__phys_to_virt((phys_addr_t)(x))
 
-/* Nor does Stela keep an array of struct page: the platform describes each
- * frame. */
+/* The registered reservation has one actual C struct-page array in PFN order.
+ * These checked conversions accept only live page payloads, never arbitrary
+ * heap, metadata or borrowed addresses. */
 struct page *pfn_to_page(unsigned long pfn);
 unsigned long page_to_pfn(const struct page *page);
 #define pfn_to_page pfn_to_page

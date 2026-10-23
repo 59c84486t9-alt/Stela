@@ -455,7 +455,7 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
         Ok(()) => machine.record(
             "native-memory",
             Verdict::Pass,
-            String::from("WB native pages: zero/read/write, CPU pin lifetime/reclaim, cache/alignment/bounds refusal"),
+            String::from("WB native pages: zero/read/write, CPU pin lifetime/reclaim, cache/alignment/bounds refusal; Linux PFN/refcount/compound/split/retirement"),
         ),
         Err(error) => machine.record("native-memory", Verdict::Fail, format!("{error:?}")),
     }
