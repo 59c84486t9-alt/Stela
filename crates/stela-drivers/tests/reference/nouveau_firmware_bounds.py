@@ -113,8 +113,17 @@ def main():
     }
     retained_status = ("source_identity_checked_execution_unrun"
                        if boot is not None else "not_requested")
+    prepared_entries = ["nouveau_firmware_authored"]
+    if boot is not None:
+        prepared_entries.append("nouveau_firmware_retained")
     receipt = {
         "scope": "Source preparation only; bounded actual helper tests, no full driver",
+        "selection": "retained" if boot is not None else "authored",
+        "prepared_test_entries": prepared_entries,
+        "executed_test_count": 0,
+        "generator": {"path": str(Path(__file__).resolve().relative_to(repository)),
+                      "sha256": sha256(Path(__file__).read_bytes())},
+        "source_roots": {"linux": str(linux), "patched": str(patched)},
         "upstream_linux": "cc9de5d4b5ab6459f5774946aa3195ad51236fa8",
         "patched_sources": PATCHED,
         "declaration_sources": DECLARATIONS,
@@ -145,6 +154,7 @@ def main():
         (output / "nouveau_firmware_real_boot.inc").write_text(firmware)
     (output / "source-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps({"output": str(output), "retained_input": retained_status,
+                      "prepared_test_entries": prepared_entries, "executed_test_count": 0,
                       "compiled": False, "executed": False}))
 
 

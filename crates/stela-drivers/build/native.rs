@@ -232,6 +232,7 @@ impl Linux {
     }
 
     pub fn tests(&self, tests: &mut Tests) {
+        super::nouveau_firmware::tests(self, tests);
         let Some(mut build) = hosted() else {
             return;
         };

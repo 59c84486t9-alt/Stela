@@ -13,11 +13,14 @@ mod intel;
 #[cfg(any(feature = "nvidia-port", feature = "linux-kernel"))]
 #[path = "build/native.rs"]
 mod native;
+#[path = "build/nouveau_firmware.rs"]
+mod nouveau_firmware;
 #[cfg(feature = "nvidia-port")]
 #[path = "build/nvidia.rs"]
 mod nvidia;
 
 fn main() {
+    nouveau_firmware::validate();
     #[cfg(feature = "native-acpi")]
     acpi::build();
     // Active ports declare their native source inputs below. Without this
