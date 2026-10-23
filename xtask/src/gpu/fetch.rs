@@ -21,6 +21,9 @@ use std::{
 /// git directory.
 const STATE: &str = "stela-series";
 
+/// The committer of the series commits `checkout` applies.
+const COMMITTER_EMAIL: &str = "stela@localhost";
+
 struct Submodule {
     name: String,
     /// The checkout, relative to the repository root.
@@ -108,6 +111,35 @@ impl Submodule {
 
     fn record(&self, series: &str) -> Result<()> {
         fs::write(self.state_path()?, format!("{series} {}\n", self.head()?))?;
+        Ok(())
+    }
+
+    /// Whether the checkout already holds the pinned commit.
+    fn has_pin(&self) -> Result<bool> {
+        Ok(self
+            .git()
+            .args(["cat-file", "-e", &format!("{}^{{commit}}", self.pin)])
+            .stderr(Stdio::null())
+            .status()?
+            .success())
+    }
+
+    /// Refuses a gitlink that names a commit `checkout` made by applying the
+    /// series: no clone can fetch it. Committing the superproject with `-a` or
+    /// an explicit `git add` of a patched submodule records one.
+    fn ensure_upstream_pin(&self) -> Result<()> {
+        let committer = capture(
+            self.git()
+                .args(["log", "-1", "--format=%ce", &self.pin, "--"]),
+        )?;
+        ensure!(
+            committer.trim() != COMMITTER_EMAIL,
+            "{} pins {}, a local commit of Stela's patch series; restore its upstream pin \
+             with `git update-index --cacheinfo 160000,<pin>,{}`",
+            self.path,
+            self.pin,
+            self.path
+        );
         Ok(())
     }
 
@@ -211,13 +243,7 @@ fn checkout(submodule: &Submodule) -> Result<()> {
         }
         None => exec(submodule.git().args(["sparse-checkout", "disable"]))?,
     }
-    if !submodule
-        .git()
-        .args(["cat-file", "-e", &format!("{}^{{commit}}", submodule.pin)])
-        .stderr(Stdio::null())
-        .status()?
-        .success()
-    {
+    if !submodule.has_pin()? {
         exec(submodule.git().args([
             "fetch",
             "-q",
@@ -227,6 +253,7 @@ fn checkout(submodule: &Submodule) -> Result<()> {
             &submodule.pin,
         ]))?;
     }
+    submodule.ensure_upstream_pin()?;
     exec(
         submodule
             .git()
@@ -242,7 +269,8 @@ fn checkout(submodule: &Submodule) -> Result<()> {
         exec(
             submodule
                 .git()
-                .args(["-c", "user.name=Stela", "-c", "user.email=stela@localhost"])
+                .args(["-c", "user.name=Stela", "-c"])
+                .arg(format!("user.email={COMMITTER_EMAIL}"))
                 .args(["am", "-q", "--3way", "--committer-date-is-author-date"])
                 .args(&patches),
         )
@@ -258,6 +286,9 @@ pub fn fetch(force: bool) -> Result<()> {
         if !submodule.directory().join(".git").exists() {
             initialize(&submodule)?;
             continue;
+        }
+        if submodule.has_pin()? {
+            submodule.ensure_upstream_pin()?;
         }
         let unexported = submodule.unexported()?;
         if !unexported && submodule.state()? == Some((submodule.series()?, submodule.head()?)) {
