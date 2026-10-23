@@ -10,6 +10,7 @@ use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
 
 pub mod cache;
+pub mod counters;
 pub mod memory;
 pub mod power;
 pub mod publication;
@@ -217,6 +218,7 @@ pub struct Owner<B> {
     service_alive: Rc<Cell<bool>>,
     memory_claimed: bool,
     registry_claimed: bool,
+    counter_frames_claimed: bool,
 }
 impl<B: Resources> Owner<B> {
     /// `selected_ids` is the original pm-ptd-ranges array, not range ordinals or
@@ -278,6 +280,7 @@ impl<B: Resources> Owner<B> {
             service_alive: Rc::new(Cell::new(true)),
             memory_claimed: false,
             registry_claimed: false,
+            counter_frames_claimed: false,
         })
     }
     /// The original class1 callback/mutex slot belongs to this actual native
@@ -309,6 +312,27 @@ impl<B: Resources> Owner<B> {
     }
     pub fn notifications(&self) -> &LocalNotifications {
         &self.local
+    }
+    /// One retained frame-buffer owner for this actual SOC-DEV-PKT range.
+    /// No startup, counter producer, event completion or ACK is supplied.
+    pub fn claim_counter_frames(&mut self) -> Result<counters::Claim, Error> {
+        if self.counter_frames_claimed {
+            return Err(Error::Contract(
+                "PMP counter frame owner is already admitted",
+            ));
+        }
+        let range = self.ranges[9]
+            .as_ref()
+            .ok_or(Error::Contract(
+                "PMP counter frames require the actual selected SOC-DEV-PKT range",
+            ))?
+            .clone();
+        self.counter_frames_claimed = true;
+        Ok(counters::Claim::new(
+            self.local.clone(),
+            range,
+            self.service_alive.clone(),
+        ))
     }
     pub fn resources(&self) -> &B {
         &self.resources
@@ -926,6 +950,8 @@ mod tests {
         assert!(owner.claim_memory_services().is_err());
         let registry = owner.claim_registry_services().unwrap();
         assert!(owner.claim_registry_services().is_err());
+        let counter_frames = owner.claim_counter_frames().unwrap();
+        assert!(owner.claim_counter_frames().is_err());
         let mut latch = InterruptLatch::new();
         owner.begin_startup().unwrap();
         step(&mut owner, &mut latch, 1).unwrap();
@@ -946,6 +972,7 @@ mod tests {
         assert_eq!(owner.phase(), Phase::Dormant);
         assert!(memory.check().is_ok());
         assert!(registry.check().is_ok());
+        assert!(counter_frames.check().is_ok());
         assert_eq!(local.bank().requests().len(), requests);
         assert_eq!(local.bank().requests(), prefix);
         assert!(
@@ -975,6 +1002,7 @@ mod tests {
         drop(owner);
         assert!(memory.check().is_err());
         assert!(registry.check().is_err());
+        assert!(counter_frames.check().is_err());
         drop(memory);
         assert!(Owner::initialized(local, IDS, Backend::new()).is_err());
     }

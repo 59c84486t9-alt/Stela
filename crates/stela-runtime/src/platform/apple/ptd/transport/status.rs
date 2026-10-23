@@ -39,6 +39,12 @@ pub struct Snapshot {
 }
 
 impl Ptd {
+    /// Original T8112 PMP VA1012e40..1012fa8 reads naturally aligned status
+    /// words/doubles/quads covering a range, then shifts and masks its bits.
+    /// This is a nondestructive observation of at most128 actual entries.
+    pub fn pending_range(&self, start: u32, count: u32) -> Result<Snapshot, &'static str> {
+        self.0.borrow().pending_range(start, count)
+    }
     /// Snapshot one naturally aligned, complete status span. `offset` is relative
     /// to the whole PTD device and must select actual status words, never entries,
     /// holes, routes or write aliases. Nothing is consumed or acknowledged.
@@ -48,6 +54,44 @@ impl Ptd {
 }
 
 impl State {
+    fn pending_range(&self, start: u32, count: u32) -> Result<Snapshot, &'static str> {
+        let end = start.checked_add(count).ok_or("PTD pending range wraps")?;
+        if count > 128 || end as usize > self.values.len() {
+            return Err("PTD pending range exceeds its actual bank or128-bit result");
+        }
+        if count == 0 {
+            return Ok(Snapshot { low: 0, high: 0 });
+        }
+        let mut word = start / 32;
+        let last = (end - 1) / 32;
+        let mut bits = 0u128;
+        while word <= last {
+            let remaining = last + 1 - word;
+            let width = if remaining >= 4 && word.is_multiple_of(4) {
+                Width::Quad
+            } else if remaining >= 2 && word.is_multiple_of(2) {
+                Width::Double
+            } else {
+                Width::Word
+            };
+            let raw = self.interrupt_snapshot(IRQ_STATUS + u64::from(word) * 4, width)?;
+            let raw = u128::from(raw.low) | u128::from(raw.high) << 64;
+            let first = word * 32;
+            bits |= if first < start {
+                raw >> (start - first)
+            } else {
+                raw.checked_shl(first - start).unwrap_or(0)
+            };
+            word += width.words() as u32;
+        }
+        if count < 128 {
+            bits &= (1u128 << count) - 1;
+        }
+        Ok(Snapshot {
+            low: bits as u64,
+            high: (bits >> 64) as u64,
+        })
+    }
     pub(super) fn interrupt_snapshot(
         &self,
         offset: u64,
@@ -139,6 +183,54 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn pending_ranges_shift_and_mask_real_words_without_consumption() {
+        let (mut bank, _) = Ptd::initialized_local(384, &ranges(384), lifecycle()).unwrap();
+        let mut latch = InterruptLatch::new();
+        let entries = [
+            0, 15, 16, 31, 32, 63, 64, 79, 80, 127, 128, 143, 207, 208, 383,
+        ];
+        for entry in entries {
+            bank.write(
+                UPDATE_OFFSET + u64::from(entry) * 8,
+                BusWidth::Double,
+                u64::from(entry),
+                &mut Access::new(0, 17, &mut latch),
+            )
+            .unwrap();
+        }
+        let history = bank.requests();
+        for (start, count) in [
+            (16, 112),
+            (80, 128),
+            (127, 1),
+            (128, 16),
+            (256, 128),
+            (384, 0),
+        ] {
+            let expected = entries
+                .iter()
+                .filter(|entry| **entry >= start && **entry < start + count)
+                .fold(0u128, |mask, entry| mask | (1u128 << (entry - start)));
+            let snapshot = bank.pending_range(start, count).unwrap();
+            assert_eq!(
+                u128::from(snapshot.low) | u128::from(snapshot.high) << 64,
+                expected
+            );
+        }
+        for (start, count) in [(0, 129), (300, 128), (385, 0), (u32::MAX, 2)] {
+            assert!(bank.pending_range(start, count).is_err());
+        }
+        assert_eq!(bank.requests(), history);
+        for entry in entries {
+            assert_eq!(
+                bank.consume_entry(entry, &mut Access::new(0, 18, &mut latch))
+                    .unwrap()
+                    .metadata,
+                17 << 10 | 2
+            );
+        }
+    }
     #[test]
     fn stable_little_endian_snapshots_preserve_existing_scalar_reads() {
         let mut bank = observed(384, &observations());
