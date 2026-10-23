@@ -180,6 +180,27 @@ impl<T: Transport> AudioDevice<T> {
         }
         Ok(())
     }
+    fn powered_clock(&mut self, format: &Format, rate: u32) -> Result<StreamClock, Error> {
+        if format.power_domain.is_none() {
+            return self.clock(format, rate);
+        }
+        if self.binding.basic_profile.is_some() && rate != super::badd::RATE {
+            return Err(Error::RateUnsupported);
+        }
+        let active = self.playback.is_some() || self.capture.is_some();
+        // Full UAC3 clock entities may share the stream's power domain. Their
+        // controls are usable only after actual D0 recovery, before any DMA.
+        if let Err(error) = self.prepare_power() {
+            return self.fail(error);
+        }
+        match self.clock(format, rate) {
+            Ok(clock) => Ok(clock),
+            // These are request/clock-sharing refusals before any rate write.
+            // An existing healthy session must survive an invalid new request.
+            Err(error @ (Error::Busy | Error::RateUnsupported)) if active => Err(error),
+            Err(error) => self.fail(error),
+        }
+    }
     fn clock(&mut self, format: &Format, rate: u32) -> Result<StreamClock, Error> {
         if self.binding.basic_profile.is_some() {
             if rate != super::badd::RATE {
@@ -300,7 +321,7 @@ impl<T: Transport> AudioDevice<T> {
             }
         }
         self.transport.preflight(&endpoints)?;
-        let clock = self.clock(&format, rate)?;
+        let clock = self.powered_clock(&format, rate)?;
         let result = (|| {
             if let Sync::Implicit {
                 interface,
@@ -431,7 +452,7 @@ impl<T: Transport> AudioDevice<T> {
             return Err(Error::Busy);
         }
         self.transport.preflight(&[format.data])?;
-        let clock = self.clock(&format, rate)?;
+        let clock = self.powered_clock(&format, rate)?;
         // Beyond preflight, an unsuccessful live power observation invalidates
         // the session's authority even if it does not acquire a new domain.
         *effects_attempted = true;
@@ -879,6 +900,7 @@ pub(crate) mod tests {
     mod badd;
     mod mixer;
     mod uac1;
+    mod uac3;
     use crate::usb::audio::*;
     use crate::{
         bus::dma::RegionAllocator,

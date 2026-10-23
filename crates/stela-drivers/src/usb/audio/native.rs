@@ -2,7 +2,7 @@
 //! Native xHCI adapter. Each direction reserves a monotonic private ring arena.
 //! Controller retains and reactivates the same owned rings only after acknowledged
 //! stop/dequeue/drop and event retirement. The class never resets its allocator.
-use super::{AudioDevice, Binding, Completion, Control, PacketStatus, Transport};
+use super::{AudioDevice, Completion, Control, PacketStatus, Plan, Transport};
 use crate::{
     audio::Direction,
     block::BlockError,
@@ -10,6 +10,23 @@ use crate::{
     usb::xhci::{Device, Endpoint, IsoStatus, IsoTransfer, Shared},
 };
 use alloc::vec::Vec;
+
+struct DiscoveryControl<'a> {
+    shared: &'a Shared,
+    slot: u8,
+}
+impl Control for DiscoveryControl<'_> {
+    fn control(&mut self, r: [u8; 8], out: &[u8]) -> Result<Vec<u8>, BlockError> {
+        self.shared.borrow_mut().control(self.slot, r, out)
+    }
+    fn now_us(&self) -> u64 {
+        self.shared.borrow().clock.now_us()
+    }
+    fn relax(&mut self) {
+        crate::waiting();
+        core::hint::spin_loop();
+    }
+}
 
 struct Arena {
     _memory: DmaBuffer,
@@ -134,9 +151,18 @@ impl UsbAudio {
     pub(crate) fn attach(
         shared: Shared,
         device: &Device,
-        binding: Binding,
+        plan: Plan,
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, BlockError> {
+        let binding = plan
+            .discover(&mut DiscoveryControl {
+                shared: &shared,
+                slot: device.slot,
+            })
+            .map_err(|error| match error {
+                super::Error::Transport(e) => e,
+                _ => BlockError::Unsupported("USB audio high-capability discovery failed"),
+            })?;
         let native = Native {
             shared,
             slot: device.slot,

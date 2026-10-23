@@ -140,8 +140,8 @@ pub(crate) fn bind_with_provider(
 
 /// What a class driver will use of an interface.
 pub enum Plan {
-    /// UAC2 function, initially at zero-bandwidth streaming alternates.
-    Audio(audio::Binding),
+    /// Audio function plan, initially at zero-bandwidth streaming alternates.
+    Audio(audio::Plan),
     /// Bulk IN, bulk OUT.
     Storage(storage::Binding),
     /// The interrupt IN endpoint.

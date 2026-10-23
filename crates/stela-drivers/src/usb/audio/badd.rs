@@ -121,6 +121,7 @@ fn format(i: &Interface, speed: u8) -> Result<Format, Error> {
         Sync::Synchronous
     };
     Ok(Format {
+        cluster_id: None,
         power_domain: Some(PowerDomain {
             id: if direction == Direction::Playback {
                 10
@@ -352,6 +353,8 @@ pub(super) fn binding(
         }
     }
     Ok(Binding {
+        clusters: Vec::new(),
+        entity_clusters: Vec::new(),
         basic_profile: Some(profile),
         graph: graph(profile, control.number, playback, capture)?,
         formats,

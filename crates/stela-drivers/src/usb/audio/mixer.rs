@@ -28,7 +28,7 @@ pub(super) fn parse(d: &[u8], protocol: u8) -> Result<Entity, Error> {
         for selector in 1..=4 {
             super::control::access(u32::from(controls), selector)?;
         }
-        Some(controls)
+        Some(u32::from(controls))
     } else {
         None
     };

@@ -379,6 +379,7 @@ fn format(
     let max_bytes = super::descriptors::capacity(data, speed)?;
     let service_microframes = super::descriptors::service_interval(data, speed)?;
     Ok(Format {
+        cluster_id: None,
         power_domain: None,
         endpoint_rates: Some(EndpointRates {
             ranges,
@@ -507,6 +508,8 @@ pub(super) fn binding(
         }
     }
     Ok(Binding {
+        clusters: Vec::new(),
+        entity_clusters: Vec::new(),
         basic_profile: None,
         graph,
         formats,

@@ -64,14 +64,23 @@ impl PowerDomain {
             0
         };
         let start = io.now_us();
-        let mut spins = 0u32;
-        while io.now_us().wrapping_sub(start) < delay {
+        let mut previous = start;
+        let mut stalled = 0u32;
+        while previous.wrapping_sub(start) < delay {
             io.relax();
-            spins += 1;
-            // A broken/stopped platform clock must not hang driver teardown.
-            if spins == 10_000_000 {
-                return Err(Error::Transport(BlockError::Timeout));
+            let current = io.now_us();
+            // Bound a stopped timer, not the duration of a valid recovery.
+            // Descriptor recovery may be seconds; a fast CPU can perform many
+            // polls per microsecond without violating that recovery interval.
+            if current == previous {
+                stalled += 1;
+                if stalled == 10_000_000 {
+                    return Err(Error::Transport(BlockError::Timeout));
+                }
+            } else {
+                stalled = 0;
             }
+            previous = current;
         }
         if self.current(io, interface)? != state {
             return Err(Error::ControlReadback);
@@ -89,5 +98,60 @@ impl PowerDomain {
     }
     pub(super) fn idle<C: Control>(self, io: &mut C, interface: u8) -> Result<(), Error> {
         self.set(io, interface, D1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec::Vec;
+    struct FastPoll {
+        cycles: u64,
+        state: u8,
+        stopped: bool,
+    }
+    impl Control for FastPoll {
+        fn now_us(&self) -> u64 {
+            self.cycles / 40
+        }
+        fn relax(&mut self) {
+            if !self.stopped {
+                self.cycles += 1;
+            }
+        }
+        fn control(&mut self, r: [u8; 8], out: &[u8]) -> Result<Vec<u8>, BlockError> {
+            assert_eq!(r, setup(r[0], 1, 2 << 8, 10 << 8, 1));
+            if r[0] == 0x21 {
+                self.state = out[0];
+                Ok(Vec::new())
+            } else {
+                Ok(alloc::vec![self.state])
+            }
+        }
+    }
+    #[test]
+    fn progressing_recovery_timer_is_not_limited_by_cpu_poll_count() {
+        let domain = PowerDomain {
+            id: 10,
+            recovery_d1: 600,
+            recovery_d2: 6000,
+        };
+        let mut io = FastPoll {
+            cycles: 0,
+            state: 2,
+            stopped: false,
+        };
+        domain.awake(&mut io, 0).unwrap();
+        assert_eq!(io.now_us(), 300_000);
+        assert_eq!(io.cycles, 12_000_000);
+        let mut io = FastPoll {
+            cycles: 0,
+            state: 2,
+            stopped: true,
+        };
+        assert_eq!(
+            domain.awake(&mut io, 0),
+            Err(Error::Transport(BlockError::Timeout))
+        );
     }
 }

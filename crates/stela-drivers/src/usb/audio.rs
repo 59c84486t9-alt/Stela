@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! USB Audio Class 1/2 PCM and UAC3 BADD profiles, on native isochronous transport.
+//! USB Audio Class 1/2/3 PCM and UAC3 BADD, on native isochronous transport.
 //! Mixer adaptation retains Copyright (c) 2002 Takashi Iwai; original audio.c
 //! contributions by Alan Cox and Thomas Sailer. UAC2 layout reference retains
 //! Copyright (c) 2010 Daniel Mack. See audio/THIRD_PARTY.md.
@@ -8,10 +8,15 @@
 //! Like snd-usb-audio, standard UAC1/UAC2 control interfaces bind by class; their
 //! descriptors alone decide clocks, alternates, channels and sample rates. UAC3
 //! BADD uses its owning standardized profile and actual endpoint/power controls.
+//! Full UAC3 resolves actual high-capability cluster replies before publication.
 use super::xhci::{Endpoint, Interface};
 use crate::{audio::Direction, block::BlockError};
 
 mod badd;
+mod plan;
+mod uac3;
+pub use plan::Plan;
+pub use uac3::{ChannelInformation, Cluster};
 mod uac1;
 pub use badd::BasicProfile;
 mod power;
@@ -102,8 +107,8 @@ pub(super) fn plan(
     all: &[Interface],
     configuration: &[u8],
     speed: u8,
-) -> Result<Binding, Error> {
-    Binding::parse(interface, all, configuration, speed)
+) -> Result<Plan, Error> {
+    Plan::parse(interface, all, configuration, speed)
 }
 
 pub use stream::{AudioDevice, Progress};

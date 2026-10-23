@@ -58,7 +58,7 @@ pub enum Entity {
         /// Flattened input/output crosspoints, MSB-first as specified by USB audio.
         matrix: Vec<u8>,
         /// UAC2 unit event controls; UAC1 has no such field.
-        unit_controls: Option<u8>,
+        unit_controls: Option<u32>,
     },
     Feature {
         id: u8,
@@ -200,6 +200,8 @@ pub enum Sync {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Format {
+    /// Actual UAC3 high-capability cluster ID; maps are retained in Binding.
+    pub cluster_id: Option<u16>,
     /// UAC3 power ownership, awakened before alternate selection and DMA.
     pub power_domain: Option<super::PowerDomain>,
     /// UAC1 endpoint-owned frequencies; UAC2 uses its real clock graph.
@@ -234,6 +236,8 @@ impl Format {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Binding {
+    pub clusters: Vec<super::Cluster>,
+    pub entity_clusters: Vec<(u8, u16)>,
     /// BADD declares fixed topology; other protocols discover their graph.
     pub basic_profile: Option<super::BasicProfile>,
     pub graph: Graph,
@@ -618,6 +622,7 @@ fn format(
     }
     let fill_max = endpoint[0][3] & 0x80 != 0;
     Ok(Format {
+        cluster_id: None,
         power_domain: None,
         endpoint_rates: None,
         interface: interface.number,
@@ -762,6 +767,8 @@ impl Binding {
             }
         }
         Ok(Self {
+            clusters: Vec::new(),
+            entity_clusters: Vec::new(),
             basic_profile: None,
             graph,
             formats,
