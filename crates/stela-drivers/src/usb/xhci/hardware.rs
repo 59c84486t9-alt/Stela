@@ -459,6 +459,89 @@ mod tests {
     }
 
     #[test]
+    fn actual_zhaoxin_9202_suspend_refuses_before_mutation_and_9203_keeps_saved_context() {
+        use crate::bus::pci::{Address, ConfigSpace};
+        struct Pci(u16);
+        impl ConfigSpace for Pci {
+            fn read32(&self, at: u16) -> u32 {
+                match at {
+                    0 => u32::from(self.0) << 16 | 0x1d17,
+                    8 => 0x0c03_3001,
+                    _ => 0,
+                }
+            }
+            fn write32(&mut self, _: u16, _: u32) {
+                panic!("PCI quirk admission must not mutate configuration");
+            }
+        }
+        for device in [0x9202, 0x9203] {
+            let mut function = Function::new(
+                Address {
+                    segment: 0,
+                    bus: 0,
+                    device: 1,
+                    function: 0,
+                },
+                Pci(device),
+            )
+            .unwrap();
+            let quirks = quirks::Profile::pci(&mut function).unwrap();
+            let mut backing = vec![0u64; 32 * 1024];
+            let base = backing.as_mut_ptr() as u64;
+            let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+            let model = Rc::new(RefCell::new(Model::new()));
+            let mut c = Controller::with_hardware_profile(
+                Box::new(Access(model.clone())),
+                Clock {
+                    ticks_per_microsecond: 1,
+                },
+                &mut dma,
+                "Zhaoxin controller model".into(),
+                Policy {
+                    dma: dma::Profile::pci(function.vendor, function.device),
+                    quirks,
+                    ..Default::default()
+                },
+                || Ok(()),
+            )
+            .unwrap();
+            if device == 0x9202 {
+                let registers = model.borrow().words.clone();
+                let writes = model.borrow().writes.len();
+                let commands = c.commands.buffer.bytes().to_vec();
+                let events = c.events.bytes().to_vec();
+                let dcbaa = c.dcbaa.bytes().to_vec();
+                assert_eq!(
+                    c.suspend_controller(),
+                    Err(BlockError::Unsupported(
+                        "controller suspend requires reset and device republication on resume"
+                    ))
+                );
+                assert!(matches!(c.hardware, State::Running));
+                assert!(!model.borrow().saved);
+                assert_eq!(model.borrow().words, registers);
+                assert_eq!(model.borrow().writes.len(), writes);
+                assert_eq!(c.commands.buffer.bytes(), commands);
+                assert_eq!(c.events.bytes(), events);
+                assert_eq!(c.dcbaa.bytes(), dcbaa);
+                // A refused suspend minted no saved-state proof. Resume cannot
+                // restore old identities, nor clear unresolved command poison.
+                c.command_poisoned = true;
+                assert!(c.resume_controller().is_err());
+                assert!(c.command_poisoned);
+                assert!(c.ready().is_err());
+                assert_eq!(model.borrow().writes.len(), writes);
+            } else {
+                c.suspend_controller().unwrap();
+                assert!(model.borrow().saved);
+                assert!(matches!(c.hardware, State::Suspended(_)));
+                c.resume_controller().unwrap();
+                assert!(matches!(c.hardware, State::Running));
+            }
+        }
+    }
+
+    #[test]
     fn failed_save_restore_and_removed_hardware_never_resume_traffic() {
         for save in [true, false] {
             let mut backing = vec![0u64; 32 * 1024];

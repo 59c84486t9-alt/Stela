@@ -49,7 +49,13 @@ impl Profile {
             suspend_delay: vendor == 0x1022 && matches!(device, 0x145c | 0x15e0 | 0x15e1 | 0x43bb),
             reset_on_resume: matches!(
                 (vendor, device),
-                (0x1022, 0x15e5) | (0x1912, 0x0015) | (0x1b21, 0x3042) | (0x1b6f, 0x7023 | 0x7052)
+                (0x1022, 0x15e5)
+                    | (0x1912, 0x0015)
+                    | (0x1b21, 0x3042)
+                    | (0x1b6f, 0x7023 | 0x7052)
+                    // Both Zhaoxin IDs need ring overfetch, but only 9202
+                    // requires fresh controller state after resume (xhci-pci.c).
+                    | (0x1d17, 0x9202)
             ) || vendor == 0x1106,
             renesas_stale_high: vendor == 0x1912 && matches!(device, 0x0014 | 0x0015),
         }
