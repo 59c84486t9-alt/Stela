@@ -90,38 +90,21 @@ impl Descriptor {
             .ok_or("T6000 source optional bridge bitmap is missing")?
             .to_vec();
         tunables::Selection::new(tuning, &optional).map_err(String::from)?;
-        let headers = node
-            .property("bridge-counters")
-            .ok_or("T6000 bridge headers are missing")?;
-        let configs = node
-            .property("bridge-counter-configs")
-            .ok_or("T6000 bridge configs are missing")?;
-        let dependencies = node
-            .property("device-bridges")
-            .ok_or("T6000 bridge dependencies are missing")?;
-        let axi = node.property("axi2af-axi-config");
-        if headers.len() != t6000::BRIDGE_COUNT * 4
-            || !configs.len().is_multiple_of(36)
-            || !dependencies.len().is_multiple_of(76)
-            || axi.is_some_and(|v| v.len() != t6000::BRIDGE_COUNT * 4)
-        {
-            return Err("T6000 bridge descriptors have partial rows or wrong counts".into());
+        // These two original tables are mandatory on this private source
+        // path; the public optional parser may admit absent empty tables.
+        for property in ["bridge-counter-configs", "device-bridges"] {
+            if node.property(property).is_none() {
+                return Err(format!("T6000 bridge table {property} is missing"));
+            }
         }
+        let records = power_resources::bridges::Records::new(&node, t6000::BRIDGE_COUNT)?;
         let mut bridges = Vec::new();
         for id in 0..t6000::BRIDGE_COUNT {
             let view = layout.bridge(id).map_err(String::from)?;
-            let header: [u8; 4] = headers[id * 4..id * 4 + 4].try_into().unwrap();
-            let first = usize::from(header[2]);
-            let end = first + usize::from(header[3]);
-            let selected = configs
-                .as_chunks::<36>()
-                .0
-                .get(first..end)
-                .ok_or("T6000 bridge header exceeds actual configurations")?
-                .to_vec();
-            let axi = axi.map(|bytes| bytes[id * 4..id * 4 + 4].try_into().unwrap());
+            let record = records.record(id).expect("validated T6000 bridge ordinal");
             let model =
-                Bridge::t6000(tuning, id, header, &selected, axi, &[]).map_err(String::from)?;
+                Bridge::t6000(tuning, id, record.header, &record.configs, record.axi, &[])
+                    .map_err(String::from)?;
             for (offset, bytes) in model.spans() {
                 if offset.checked_add(bytes).is_none_or(|end| end > view.bytes)
                     || view.physical.checked_add(offset + bytes).is_none()
@@ -129,27 +112,13 @@ impl Descriptor {
                     return Err("T6000 bridge word exceeds its actual source aperture".into());
                 }
             }
-            let mut devices = Vec::new();
-            for row in dependencies.as_chunks::<76>().0 {
-                for (slot, &parent) in row[4..].iter().enumerate() {
-                    if slot != 0 && parent == 0 {
-                        break;
-                    }
-                    if usize::from(parent) >= t6000::BRIDGE_COUNT {
-                        return Err("T6000 dependency names an absent bridge".into());
-                    }
-                    if usize::from(parent) == id && !devices.contains(&row[3]) {
-                        devices.push(row[3]);
-                    }
-                }
-            }
             bridges.push(BridgeDescriptor {
                 id,
                 view,
-                header,
-                configs: selected,
-                axi,
-                devices,
+                header: record.header,
+                configs: record.configs,
+                axi: record.axi,
+                devices: record.devices,
             });
         }
         let power = power_resources::source_power_states(&root, &node, &translate)?;

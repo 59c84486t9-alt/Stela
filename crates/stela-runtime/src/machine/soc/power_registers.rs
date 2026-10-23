@@ -134,6 +134,14 @@ fn validate_bank_records(node: &Node<'_>) -> Result<(), String> {
             }
         }
     }
+    if node.first_u32("bridge-settings-version") == Some(1)
+        && node.first_u32("bridge-counter-version") == Some(3)
+    {
+        let count = node
+            .first_u32("#bridges")
+            .ok_or("PMGR has no bridge count for its known source table")?;
+        super::power_resources::bridges::Records::new(node, count as usize)?;
+    }
     Ok(())
 }
 
@@ -414,20 +422,7 @@ fn place_bridges(
     {
         return Err("unsupported bridge count or configuration version".into());
     }
-    let headers = node
-        .property("bridge-counters")
-        .ok_or("PMGR has no bridge counter headers")?;
-    let configs = node.property("bridge-counter-configs").unwrap_or_default();
-    let dependencies = node.property("device-bridges").unwrap_or_default();
-    let axi = node.property("axi2af-axi-config");
-    if headers.len() != count * 4
-        || !configs.len().is_multiple_of(36)
-        || !dependencies.len().is_multiple_of(76)
-        || axi.is_some_and(|a| a.len() != count * 4)
-    {
-        return Err("PMGR bridge properties have partial records or wrong counts".into());
-    }
-    let all_configs = configs.as_chunks::<36>().0;
+    let records = super::power_resources::bridges::Records::new(node, count)?;
     let mut banks = Vec::new();
     let optional = node.first_u32("optional-bridge-mask").unwrap_or(0);
     if optional != 0 {
@@ -442,15 +437,9 @@ fn place_bridges(
             .copied()
             .flatten()
             .ok_or("bridge names an unmapped DT reg window")?;
-        let header: [u8; 4] = headers[id * 4..id * 4 + 4].try_into().expect("header");
-        let start = usize::from(header[2]);
-        let end = start + usize::from(header[3]);
-        let selected = all_configs
-            .get(start..end)
-            .ok_or("bridge counter header exceeds configuration records")?
-            .to_vec();
-        let axi = axi.map(|a| a[id * 4..id * 4 + 4].try_into().expect("4 bytes"));
-        let model = bridge::Bridge::new(tunables, header, &selected, axi).map_err(String::from)?;
+        let record = records.record(id).expect("validated bridge ordinal");
+        let model = bridge::Bridge::new(tunables, record.header, &record.configs, record.axi)
+            .map_err(String::from)?;
         for (o, n) in model.spans() {
             if o.checked_add(n).is_none_or(|end| end > bytes)
                 || physical.checked_add(o + n).is_none()
@@ -458,29 +447,13 @@ fn place_bridges(
                 return Err("bridge configuration lies outside its DT range".into());
             }
         }
-        let mut devices = Vec::new();
-        for entry in dependencies.as_chunks::<76>().0 {
-            // The first slot may be bridge0; subsequent zero slots terminate
-            // the list. Names and device IDs never choose a hardware base.
-            for (slot, &bridge) in entry[4..].iter().enumerate() {
-                if slot != 0 && bridge == 0 {
-                    break;
-                }
-                if usize::from(bridge) >= count {
-                    return Err("device-bridges names an absent bridge".into());
-                }
-                if usize::from(bridge) == id && !devices.contains(&entry[3]) {
-                    devices.push(entry[3]);
-                }
-            }
-        }
         banks.push(BridgeBank {
             physical,
             fields: tunables.to_vec(),
-            header,
-            configs: selected,
-            axi,
-            devices,
+            header: record.header,
+            configs: record.configs,
+            axi: record.axi,
+            devices: record.devices,
         });
     }
     Ok(banks)
@@ -902,6 +875,43 @@ mod tests {
     }
 
     #[test]
+    fn known_bridge_references_are_validated_even_when_native_layout_is_unqualified() {
+        let one = 1u32.to_le_bytes();
+        let three = 3u32.to_le_bytes();
+        let index = 0u32.to_le_bytes();
+        let group = direct_performance_group();
+        let mut dependency = [0; 76];
+        dependency[4] = 1; // Outside the one-bank source table.
+        for (header, dependencies, valid) in [
+            ([0, 0, 0, 0], &[][..], true),
+            ([0, 0, 0, 1], &[][..], false),
+            ([0, 0, 0, 0], &dependency[..], false),
+        ] {
+            let bytes = optional_fixture(
+                &group,
+                &[
+                    ("bridge-reg-index", &index),
+                    ("#bridges", &one),
+                    ("bridge-settings-version", &one),
+                    ("bridge-counter-version", &three),
+                    ("bridge-counters", &header),
+                    ("device-bridges", dependencies),
+                ],
+            );
+            let io = Node::root(&bytes).unwrap();
+            let result = pmgr_registers(&io, &|address, _| Some(address), 0x8103);
+            if valid {
+                let parsed = result.unwrap();
+                assert!(parsed.bridges.is_empty());
+                assert!(parsed.refusals.iter().any(|r| r.bank == PmgrBank::Bridges));
+                assert_eq!(parsed.performance.len(), 1);
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+
+    #[test]
     fn unsupported_performance_semantics_are_named_without_a_register_model() {
         let mut group = direct_performance_group();
         group[12] = 1;
@@ -925,6 +935,7 @@ mod tests {
             ("hw-dpe-reg", alloc::vec![0; 39]),
             ("events", alloc::vec![0; 23]),
             ("bridge-counters", alloc::vec![0; 3]),
+            ("device-bridges", alloc::vec![0; 75]),
             ("bridge-reg-index", alloc::vec![0; 3]),
         ] {
             let mut group = direct_performance_group();

@@ -13,6 +13,7 @@ use crate::platform::apple::{
 };
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 
+pub(super) mod bridges;
 mod clock_role;
 pub use clock_role::{ClockRole, PmgrClockProvider};
 
