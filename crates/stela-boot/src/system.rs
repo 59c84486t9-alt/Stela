@@ -727,12 +727,36 @@ fn load(
         layout::image() + (crate::engine::entry as *const () as u64 - image.start as u64);
 
     crate::status::done("");
-    let mut history = [0; crate::status::HISTORY_BYTES];
-    let history_bytes = crate::status::history(&mut history);
+    // SAFETY: the fresh immutable MP observation is retained LOADER_DATA. Identity
+    // mappings and the calibrated local APIC remain valid across EBS.
+    let capture =
+        unsafe { &*(native_processors.physical as *const crate::native_smp::firmware::Capture) };
+    let sender = crate::apic::Apic::new(apic_base, apic);
+    crate::status::begin("Taking control of the other processors");
     crate::output::leave_boot_services();
     // SAFETY: no protocol or pool allocation outlives this call; every page
     // Stela keeps is LOADER_DATA or LOADER_CODE.
     let map = unsafe { boot::exit_boot_services(None) };
+    // Stop every enabled firmware AP before offering its former code/data to
+    // guest RAM, including workers that will later receive their owned SIPI.
+    // The BSP alone sends ICR commands, with firmware IRQ handlers excluded.
+    unsafe { asm!("cli", options(nomem, nostack)) };
+    let deliveries = match unsafe {
+        crate::native_smp::executor::quiesce_firmware_aps(capture, &sender, tsc_hz)
+    } {
+        Ok(deliveries) => deliveries,
+        Err(error) => {
+            output::arguments(format_args!("NATIVE FIRMWARE INIT refused: {error:?}\n"));
+            output::fatal("firmware processor handoff refused before memory reuse");
+        }
+    };
+    output::arguments(format_args!(
+        "NATIVE FIRMWARE INIT deliveries={deliveries}; delivery only, no execution acknowledgement\n"
+    ));
+    crate::status::done("directed INIT delivery complete");
+    // Keep this post-EBS boundary when the relocated engine replays status.
+    let mut history = [0; crate::status::HISTORY_BYTES];
+    let history_bytes = crate::status::history(&mut history);
     let mut guest = [Region::default(); MAX_GUEST_RANGES];
     let mut count = 0;
     for entry in map.entries() {
