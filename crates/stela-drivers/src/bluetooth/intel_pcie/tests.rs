@@ -67,6 +67,9 @@ struct Model {
     reset_stages: VecDeque<u32>,
     deferred_events: Vec<Vec<u8>>,
     event_cursor: u16,
+    rx_before_reset: Option<Vec<u8>>,
+    delay_hci_events: bool,
+    delayed_events: Vec<Vec<u8>>,
 }
 impl Model {
     fn new(device: u16) -> Self {
@@ -127,6 +130,9 @@ impl Model {
             reset_stages: VecDeque::new(),
             deferred_events: Vec::new(),
             event_cursor: 0,
+            rx_before_reset: None,
+            delay_hci_events: false,
+            delayed_events: Vec::new(),
         }
     }
     fn reg(&self, o: usize) -> u32 {
@@ -332,6 +338,10 @@ impl Model {
                             0
                         };
                         if matches!(opcode, 0xfc01 | 0x0c03) && !self.silence_reset {
+                            if let Some(event) = self.rx_before_reset.take() {
+                                self.receive(self.event_cursor, 4, &event, &[0xb6]);
+                                self.event_cursor = (self.event_cursor + 1) % 64;
+                            }
                             self.boot_count += 1;
                             self.posted.clear();
                             self.regs.insert(
@@ -351,6 +361,8 @@ impl Model {
                             if opcode == 0xfc01 {
                                 self.event_cursor = 0;
                                 self.deferred_events = events;
+                            } else if self.delay_hci_events {
+                                self.delayed_events = events;
                             } else {
                                 for event in events {
                                     self.receive(self.event_cursor, 4, &event, &[0xa5]);
@@ -386,6 +398,13 @@ unsafe impl Platform for ModelPlatform {
     }
     fn read32(&mut self, o: usize) -> Result<u32> {
         let mut m = self.0.borrow_mut();
+        if o == FH_CAUSE && m.reg(FH_CAUSE) == 0 && !m.delayed_events.is_empty() {
+            for event in core::mem::take(&mut m.delayed_events) {
+                let tag = m.event_cursor;
+                m.receive(tag, 4, &event, &[0xb6]);
+                m.event_cursor = (tag + 1) % 64;
+            }
+        }
         if m.read_error == Some(o) {
             m.read_error = None;
             return Err(Error::Mmio("model register read fault"));
@@ -1346,6 +1365,86 @@ fn pcie_firmware_faults_keep_native_transcript_and_uncertain_cleanup_ownership()
             assert_eq!(t.retired, !cleanup_fails);
             let writes = m.borrow().writes.len();
             assert!(t.send(Kind::Command, &[5, 0xfc, 1, 0xff]).is_err());
+            assert!(t.poll().is_err());
+            assert_eq!(m.borrow().writes.len(), writes);
+            drop(t);
+            assert_eq!(m.borrow().dropped, usize::from(!cleanup_fails));
+        }
+    }
+}
+
+#[test]
+fn firmware_error_drains_complete_native_packets_queued_before_send_or_poll_failure() {
+    use crate::{
+        bluetooth::intel::{self, TransportIdentity},
+        firmware::{Catalog, Provenance, Resource},
+    };
+    use sha2::{Digest, Sha256};
+    for reset_fault in [false, true] {
+        for cleanup_fails in [false, true] {
+            let mut backing = vec![0u64; 1024 * 1024];
+            let mut dma = allocator(&mut backing);
+            let (mut t, m) = transport(0xa876, &mut dma);
+            t.start().unwrap();
+            let version = firmware_tlv(0, 1);
+            let before = intel::TlvIdentity::parse_transport(
+                TransportIdentity::Pcie(t.identity()),
+                &version,
+            )
+            .unwrap();
+            let hardware = before.hardware_label();
+            let revision = before.revision_label();
+            let name = before.filename("sfi");
+            let image = intel::tests::combined_image();
+            let catalog = Catalog::from_handoff(vec![Resource {
+                name: &name,
+                target: before.target(&hardware, &revision),
+                provenance: Provenance {
+                    source: "Stela synthetic PCIe fault model",
+                    revision: "1",
+                    member: "synthetic",
+                    license: "MIT",
+                },
+                expected_length: image.len(),
+                expected_sha256: Sha256::digest(&image).into(),
+                bytes: image.clone(),
+            }])
+            .unwrap();
+            let original = vec![0xff, 2, 0x97, 0x48];
+            let mut h = m.borrow_mut();
+            if reset_fault {
+                h.hci_script.push_back((
+                    firmware_command(0xfc05, &[0xff]),
+                    vec![firmware_complete(0xfc05, &version)],
+                ));
+                append_firmware_upload(&mut h, 0, &image);
+                h.reset_stages.push_back(ROM);
+                h.rx_before_reset = Some(original.clone());
+            } else {
+                h.delay_hci_events = true;
+                // send receives only the TX acknowledgment. Native events()
+                // subsequently polls a valid frame followed by malformed HCI.
+                h.hci_script.push_back((
+                    firmware_command(0xfc05, &[0xff]),
+                    vec![original.clone(), vec![0xff, 99]],
+                ));
+            }
+            h.stop_ack = !cleanup_fails;
+            drop(h);
+            let error = firmware::initialize(&mut t, &catalog, intel::PlatformInputs::default())
+                .unwrap_err();
+            let packet = error
+                .received
+                .iter()
+                .find(|p| p.bytes == original)
+                .expect("complete pre-fault PCIe packet omitted");
+            assert!(packet.diagnostic);
+            assert_eq!(packet.padding, [0xb6]);
+            assert_eq!(packet.receive_header[2], 1);
+            assert_eq!(packet.completion >> 31, 1);
+            assert!(t.received.is_empty());
+            assert_eq!(t.retired, !cleanup_fails);
+            let writes = m.borrow().writes.len();
             assert!(t.poll().is_err());
             assert_eq!(m.borrow().writes.len(), writes);
             drop(t);

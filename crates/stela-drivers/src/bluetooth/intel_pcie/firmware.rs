@@ -38,7 +38,13 @@ pub fn initialize<P: Platform>(
         received: Vec::new(),
         received_bytes: 0,
     };
-    match intel::initialize_with_platform(&mut io, provider, platform) {
+    let result = intel::initialize_with_platform(&mut io, provider, platform);
+    // send/poll/D0 service can receive complete packets and then fault before
+    // returning its ordinary batch. Closing/resetting does not erase that queue.
+    // Transfer it on every exit, including a failed physical cleanup.
+    let pending: Vec<_> = io.transport.received.drain(..).collect();
+    io.retain(&pending);
+    match result {
         Ok(report) => Ok(Report {
             initialization: report.into(),
             received: io.received,
@@ -54,6 +60,15 @@ struct Native<'a, P: Platform> {
     received: Vec<Packet>,
     received_bytes: usize,
 }
+impl<P: Platform> Native<'_, P> {
+    fn retain(&mut self, packets: &[Packet]) {
+        self.received_bytes += packets
+            .iter()
+            .map(|packet| packet.bytes.len() + packet.padding.len() + 12)
+            .sum::<usize>();
+        self.received.extend(packets.iter().cloned());
+    }
+}
 impl<P: Platform> intel::CommandIo for Native<'_, P> {
     fn identity(&self) -> Result<intel::TransportIdentity, intel::Error> {
         self.transport.active()?;
@@ -68,11 +83,7 @@ impl<P: Platform> intel::CommandIo for Native<'_, P> {
     }
     fn events(&mut self) -> Result<Vec<Vec<u8>>, intel::Error> {
         let packets = self.transport.poll()?;
-        self.received_bytes += packets
-            .iter()
-            .map(|packet| packet.bytes.len() + packet.padding.len() + 12)
-            .sum::<usize>();
-        self.received.extend(packets.iter().cloned());
+        self.retain(&packets);
         // Retain the complete final batch too. The underlying transport caps a
         // batch at128x4KiB, so a refused transcript remains finitely bounded.
         if self.received_bytes > 16 * 1024 * 1024 {
