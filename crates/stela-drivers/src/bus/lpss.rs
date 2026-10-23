@@ -3,7 +3,7 @@
 // intel-lpss-pci.c at a804c5742bff224d4cb4d25dd383554d598be32b.
 // Copyright (C) 2015 Intel Corporation.
 // Authors: Andy Shevchenko, Mika Westerberg, Heikki Krogerus, Jarkko Nikula.
-//! Owned Sunrisepoint I²C platform resources. SPI/UART/iDMA and platform PM
+//! Owned PCI LPSS I²C platform resources. SPI/UART/iDMA and platform PM
 //! are separate implementations. The explicit owner composes private resource
 //! initialization with the shared DesignWare PIO engine and held-D0 lifetime.
 use super::{
@@ -48,38 +48,106 @@ pub struct Identity {
     pub subsystem_vendor: u16,
     pub subsystem_device: u16,
 }
-/// One exact source-selected I²C profile. These defaults are not board SCL
+/// Exact source clock/property group. Names follow the donor's info
+/// structures; later chips can select an earlier group's actual properties.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProfileKind {
+    Sunrisepoint,
+    CannonLake,
+    Broxton,
+    ApolloLake,
+    GeminiLake,
+    ElkhartLake,
+}
+/// One exact source-selected I²C profile. These properties are not board SCL
 /// counts or authority to ignore an overlapping firmware resource reservation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Profile {
     device: u16,
+    kind: ProfileKind,
 }
 impl Profile {
     pub fn select(identity: Identity) -> Result<Self, Error> {
-        if identity.vendor != 0x8086
-            || !matches!(identity.device, 0x9d60..=0x9d65 | 0xa160..=0xa162)
-        {
+        if identity.vendor != 0x8086 {
             return Err(Error::Unsupported);
         }
+        let kind = match identity.device {
+            0x02c5 | 0x02c6 | 0x02e8 | 0x02e9 | 0x02ea | 0x02eb | 0x06e8 | 0x06e9 | 0x06ea
+            | 0x06eb | 0x9dc5 | 0x9dc6 | 0x9de8 | 0x9de9 | 0x9dea | 0x9deb | 0xa368 | 0xa369
+            | 0xa36a | 0xa36b => ProfileKind::CannonLake,
+            0x0aac | 0x0aae | 0x0ab0 | 0x0ab2 | 0x0ab4 | 0x0ab6 | 0x0ab8 | 0x0aba | 0x1aac
+            | 0x1aae | 0x1ab0 | 0x1ab2 | 0x1ab4 | 0x1ab6 | 0x1ab8 | 0x1aba | 0x34c5 | 0x34c6
+            | 0x34e8 | 0x34e9 | 0x34ea | 0x34eb | 0x43ad | 0x43ae | 0x43d8 | 0x43e8 | 0x43e9
+            | 0x43ea | 0x43eb | 0x4dc5 | 0x4dc6 | 0x4de8 | 0x4de9 | 0x4dea | 0x4deb | 0x51c5
+            | 0x51c6 | 0x51d8 | 0x51d9 | 0x51e8 | 0x51e9 | 0x51ea | 0x51eb | 0x54c5 | 0x54c6
+            | 0x54e8 | 0x54e9 | 0x54ea | 0x54eb | 0x7750 | 0x7751 | 0x7778 | 0x7779 | 0x777a
+            | 0x777b | 0x7a4c | 0x7a4d | 0x7a4e | 0x7a4f | 0x7a7c | 0x7a7d | 0x7acc | 0x7acd
+            | 0x7ace | 0x7acf | 0x7afc | 0x7afd | 0x7e50 | 0x7e51 | 0x7e78 | 0x7e79 | 0x7e7a
+            | 0x7e7b | 0x7f4c | 0x7f4d | 0x7f4e | 0x7f4f | 0x7f7a | 0x7f7b | 0x98c5 | 0x98c6
+            | 0x98e8 | 0x98e9 | 0x98ea | 0x98eb => ProfileKind::Broxton,
+            0x31ac | 0x31ae | 0x31b0 | 0x31b2 | 0x31b4 | 0x31b6 | 0x31b8 | 0x31ba => {
+                ProfileKind::GeminiLake
+            }
+            0x4b44 | 0x4b45 | 0x4b4b | 0x4b4c | 0x4b78 | 0x4b79 | 0x4b7a | 0x4b7b | 0x4d50
+            | 0x4d51 | 0x4d78 | 0x4d79 | 0x4d7a | 0x4d7b | 0x6e4c | 0x6e4d | 0x6e4e | 0x6e4f
+            | 0x6e7a | 0x6e7b | 0xa850 | 0xa851 | 0xa878 | 0xa879 | 0xa87a | 0xa87b | 0xd350
+            | 0xd351 | 0xd378 | 0xd379 | 0xd37a | 0xd37b | 0xe350 | 0xe351 | 0xe378 | 0xe379
+            | 0xe37a | 0xe37b | 0xe450 | 0xe451 | 0xe478 | 0xe479 | 0xe47a | 0xe47b => {
+                ProfileKind::ElkhartLake
+            }
+            0x5aac | 0x5aae | 0x5ab0 | 0x5ab2 | 0x5ab4 | 0x5ab6 | 0x5ab8 | 0x5aba => {
+                ProfileKind::ApolloLake
+            }
+            0x9d60 | 0x9d61 | 0x9d62 | 0x9d63 | 0x9d64 | 0x9d65 | 0xa0c5 | 0xa0c6 | 0xa0d8
+            | 0xa0d9 | 0xa0e8 | 0xa0e9 | 0xa0ea | 0xa0eb | 0xa160 | 0xa161 | 0xa162 | 0xa2e0
+            | 0xa2e1 | 0xa2e2 | 0xa2e3 | 0xa3e0 | 0xa3e1 | 0xa3e2 | 0xa3e3 => {
+                ProfileKind::Sunrisepoint
+            }
+            _ => return Err(Error::Unsupported),
+        };
         Ok(Self {
             device: identity.device,
+            kind,
         })
     }
     pub fn device(self) -> u16 {
         self.device
     }
     pub fn input_clock_hz(self) -> u32 {
-        120_000_000
+        match self.kind {
+            ProfileKind::Sunrisepoint => 120_000_000,
+            ProfileKind::CannonLake => 216_000_000,
+            ProfileKind::Broxton | ProfileKind::ApolloLake | ProfileKind::GeminiLake => 133_000_000,
+            ProfileKind::ElkhartLake => 100_000_000,
+        }
     }
     pub fn source_sda_hold_ns(self) -> u32 {
-        230
+        match self.kind {
+            ProfileKind::Sunrisepoint | ProfileKind::CannonLake => 230,
+            ProfileKind::Broxton | ProfileKind::ElkhartLake => 42,
+            ProfileKind::ApolloLake => 207,
+            ProfileKind::GeminiLake => 313,
+        }
+    }
+    pub fn source_sda_fall_ns(self) -> Option<u32> {
+        match self.kind {
+            ProfileKind::Sunrisepoint | ProfileKind::CannonLake => None,
+            _ => Some(171),
+        }
+    }
+    pub fn source_scl_fall_ns(self) -> Option<u32> {
+        match self.kind {
+            ProfileKind::Sunrisepoint | ProfileKind::CannonLake => None,
+            ProfileKind::GeminiLake => Some(290),
+            _ => Some(208),
+        }
     }
 }
 /// Actual retained function/root/reset and UC register authority.
 ///
 /// # Safety
 /// The provider owns the same actual powered D0 physical function, complete
-/// BAR and configuration/reset epoch. Firmware, AML/SMM, IRQs and other CPUs
+/// BAR and configuration/reset epoch. Firmware, AML/SMM, shared PUNIT/semaphore users, IRQs and other CPUs
 /// cannot access/revoke it. Prior engines, posted DMA, callbacks and work are
 /// stopped/drained; bus mastering and interrupts remain disabled. All addresses
 /// and identity are observations from those retained resources. Leaking this
@@ -116,7 +184,10 @@ impl NativeRegisters {
     /// Mapping is this stopped function's actual exclusive BAR0 reservation at
     /// the same retained root/firmware epoch, powered D0. It cannot be revoked
     /// through aliases. The original stopped producer's drainage contract holds.
-    /// No implicit identity mapping or firmware-conflict override is permitted.
+    /// Power/clock and firmware/PUNIT exclusions are boot-lifetime or retained
+    /// in the consumed resources' actual backings, including quarantine. A
+    /// borrowed external guard that can end first is insufficient. No implicit
+    /// identity mapping or firmware-conflict override is permitted.
     pub unsafe fn claim(
         mut requester: StoppedRequester,
         mapping: Mapping,
@@ -455,7 +526,7 @@ mod tests {
             let mut h = self.hardware.borrow_mut();
             assert!(offset < PRIVATE && offset.is_multiple_of(4));
             h.words[offset / 4] = value;
-            if matches!(offset, 0x30 | 0x88) {
+            if matches!(offset, 0x30 | 0x88 | 0xcc) {
                 assert_eq!(value, 0, "PIO never publishes IRQ/DMA");
             }
             if offset == 0x10 {
@@ -839,6 +910,7 @@ mod tests {
             [0x80, 0x55, (1 << 8) | (1 << 10), (1 << 8) | (1 << 9)]
         );
         assert_eq!(h.borrow().words[0x30 / 4], 0);
+        assert_eq!(h.borrow().words[0xcc / 4], 0);
         assert_eq!(h.borrow().words[0x88 / 4], 0);
         assert_eq!(drops.get(), 0);
         let (retired, _) = bus.shutdown().unwrap();
@@ -874,6 +946,64 @@ mod tests {
             );
         }
     }
+    #[test]
+    #[ignore = "requires fresh unchanged pinned LPSS PCI/property trace"]
+    fn unchanged_source_all_pci_i2c_profiles_and_property_groups() {
+        extern crate std;
+        let trace = std::fs::read_to_string(
+            std::env::var("STELA_LPSS_PROFILE_ORACLE").expect("source profile trace path"),
+        )
+        .unwrap();
+        let mut expected = Vec::new();
+        for line in trace.lines() {
+            let values: Vec<u32> = line
+                .split(',')
+                .map(|value| value.parse().unwrap())
+                .collect();
+            assert_eq!(values.len(), 5);
+            let device = u16::try_from(values[0]).unwrap();
+            assert!(
+                !expected.contains(&device),
+                "donor profile ID is not unique"
+            );
+            expected.push(device);
+            let profile = Profile::select(Identity {
+                vendor: 0x8086,
+                device,
+                subsystem_vendor: 0,
+                subsystem_device: 0,
+            })
+            .unwrap();
+            assert_eq!(profile.input_clock_hz(), values[1]);
+            assert_eq!(profile.source_sda_hold_ns(), values[2]);
+            assert_eq!(profile.source_sda_fall_ns().unwrap_or(u32::MAX), values[3]);
+            assert_eq!(profile.source_scl_fall_ns().unwrap_or(u32::MAX), values[4]);
+            // Execute private native reset/remap for every actual source profile,
+            // with an actual high remap address independent of CPU storage.
+            let (registers, _, _) = model(device, 0x1_2345_0000, 0);
+            let owner = Controller::initialize(registers).unwrap();
+            assert_eq!(owner.profile(), profile);
+            // SAFETY: isolated register model, no child or DMA publication.
+            drop(unsafe { owner.retire() }.unwrap().registers);
+        }
+        assert_eq!(expected.len(), 190);
+        expected.sort_unstable();
+        for device in 0..=u16::MAX {
+            for vendor in [0x8086, 0x1022, 0xffff] {
+                let identity = Identity {
+                    vendor,
+                    device,
+                    subsystem_vendor: 0,
+                    subsystem_device: 0,
+                };
+                assert_eq!(
+                    Profile::select(identity).is_ok(),
+                    vendor == 0x8086 && expected.binary_search(&device).is_ok()
+                );
+            }
+        }
+    }
+
     #[test]
     #[ignore = "requires fresh unchanged pinned LPSS source trace"]
     fn unchanged_source_reset_remap_effects() {

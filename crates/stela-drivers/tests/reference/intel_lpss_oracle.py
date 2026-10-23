@@ -34,6 +34,70 @@ def function(source, marker):
     return source[start:end]
 
 
+def profile_oracle(source, out, cc):
+    # Compile the complete unchanged declarations (all properties, info groups
+    # and PCI rows). Substitute only kernel POD/property/table services; no
+    # device or property result is generated from the Rust implementation.
+    start = source.index("static const struct property_entry spt_spi_properties[]")
+    table = source.index("static const struct pci_device_id intel_lpss_pci_ids[]", start)
+    end = source.index("\n};", table) + len("\n};")
+    declarations = source[start:end]
+    prefix = r"""
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+typedef uintptr_t kernel_ulong_t;
+struct property_entry {const char *name;uint32_t value;};
+struct software_node {const struct property_entry *properties;};
+struct intel_lpss_platform_info {uint32_t clk_rate;const char *clk_con_id;const struct software_node *swnode;};
+struct pci_device_id {unsigned vendor,device;kernel_ulong_t driver_data;};
+#define PROPERTY_ENTRY_U32(name,value) {name,value}
+#define PROPERTY_ENTRY_BOOL(name) {name,1}
+#define PCI_VDEVICE(vend,id) .vendor=0x8086,.device=id
+/* Non-I2C SSP type metadata is never selected or executed by this oracle. */
+#define LPSS_SPT_SSP 1
+#define LPSS_BXT_SSP 2
+#define LPSS_CNL_SSP 3
+"""
+    suffix = r"""
+static uint32_t property(const struct intel_lpss_platform_info *info,const char *name) {
+    for(const struct property_entry *p=info->swnode->properties;p->name;++p)
+        if(!strcmp(p->name,name))return p->value;
+    return UINT32_MAX;
+}
+int main(void) {
+    for(const struct pci_device_id *id=intel_lpss_pci_ids;id->device;++id) {
+        const struct intel_lpss_platform_info *info=(const void *)id->driver_data;
+        if(info!=&spt_i2c_info && info!=&cnl_i2c_info && info!=&bxt_i2c_info &&
+           info!=&apl_i2c_info && info!=&glk_i2c_info && info!=&ehl_i2c_info)continue;
+        printf("%u,%u,%u,%u,%u\n",id->device,info->clk_rate,
+            property(info,"i2c-sda-hold-time-ns"),
+            property(info,"i2c-sda-falling-time-ns"),
+            property(info,"i2c-scl-falling-time-ns"));
+    }
+    return 0;
+}
+"""
+    path = out / "profile-oracle.c"
+    path.write_text(prefix + declarations + suffix)
+    command = [cc, "-std=gnu11", "-O1", "-g", "-fsanitize=address,undefined",
+               "-fno-sanitize-recover=all", str(path), "-o", str(out / "profile-oracle")]
+    (out / "profile-compiler-command.json").write_text(json.dumps(command) + "\n")
+    compiled = subprocess.run(command, capture_output=True, timeout=120)
+    (out / "profile-compiler-stdout.txt").write_bytes(compiled.stdout)
+    (out / "profile-compiler-stderr.txt").write_bytes(compiled.stderr)
+    compiled.check_returncode()
+    run = subprocess.run([str((out / "profile-oracle").resolve())], capture_output=True, timeout=60)
+    (out / "profiles.csv").write_bytes(run.stdout)
+    (out / "profile-stderr.txt").write_bytes(run.stderr)
+    run.check_returncode()
+    count = len(run.stdout.splitlines())
+    if count != 190:
+        raise SystemExit(f"unexpected actual-source PCI I2C count: {count}")
+    return {"declarations_sha256": hashlib.sha256(declarations.encode()).hexdigest(),
+            "profiles": count, "trace_sha256": hashlib.sha256(run.stdout).hexdigest()}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--linux", type=Path, required=True)
@@ -124,9 +188,10 @@ int main(void) {
     receipt = {"pin": PIN, "source": SOURCE, "source_sha256": SHA256, "donors": DONORS,
                "functions": {marker: hashlib.sha256(body.encode()).hexdigest() for marker, body in zip(markers, bodies)},
                "cases": len(run.stdout.splitlines()), "trace_sha256": hashlib.sha256(run.stdout).hexdigest(),
-               "oracle_limits": ["Only the four unchanged private reset/remap helpers; source I2C/UART/SPI type, optional IDMA and old reset/base variation",
+               "oracle_limits": ["Four unchanged private reset/remap helpers; source I2C/UART/SPI type, optional IDMA and old reset/base variation; complete unchanged PCI properties/info/table declarations report all190 exact I2C profiles",
                                  "MMIO/structure services substituted; no PCI, AML, IRQ, child clock/timing, power, DMA, physical or lifecycle qualification",
                                  "Native source scope may admit only I2C; no UART/SPI implementation credit from these donor cases"]}
+    receipt["pci_profiles"] = profile_oracle(sources["drivers/mfd/intel-lpss-pci.c"].decode(), args.out, args.cc)
     (args.out / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt, indent=2))
 

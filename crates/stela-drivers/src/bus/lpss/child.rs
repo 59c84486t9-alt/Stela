@@ -45,8 +45,10 @@ impl<R: ChildAccess> Controller<R> {
     /// # Safety
     /// Timing counts are genuine firmware/board-derived values for this exact
     /// source profile's input clock, rise/fall/hold wiring and power epoch.
-    /// Neither this default clock nor the 230ns source property authorizes
-    /// guessed SCL counts. This owner is the sole child; no iDMA/IRQ is enabled.
+    /// Neither this source clock nor its hold/falling properties authorize
+    /// guessed SCL counts. SDA_HOLD must include actual RX hold requirements
+    /// as well as TX hold; source nanoseconds alone are not that register.
+    /// This owner is the sole child; no iDMA/IRQ is enabled.
     pub unsafe fn into_i2c<T: Timer + 'static>(
         self,
         timer: T,

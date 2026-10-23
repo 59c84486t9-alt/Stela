@@ -39,6 +39,7 @@ const RXFLR: usize = 0x78;
 const SDA_HOLD: usize = 0x7c;
 const TX_ABRT_SOURCE: usize = 0x80;
 const DMA_CR: usize = 0x88;
+const SMBUS_INTR_MASK: usize = 0xcc;
 const ENABLE_STATUS: usize = 0x9c;
 const COMP_PARAM_1: usize = 0xf4;
 const COMP_VERSION: usize = 0xf8;
@@ -210,6 +211,7 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
             });
         }
         controller.registers.write32(INTR_MASK, 0);
+        controller.registers.write32(SMBUS_INTR_MASK, 0);
         controller.registers.write32(DMA_CR, 0);
         controller.registers.write32(CON, control);
         controller.registers.write32(RX_TL, 0);
@@ -297,6 +299,9 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
         });
         if disabled {
             self.registers.write32(INTR_MASK, 0);
+            // Firmware may leave IC_SMBUS enabled independently of the
+            // ordinary interrupt mask. No SMBus interrupt is serviced here.
+            self.registers.write32(SMBUS_INTR_MASK, 0);
             self.registers.write32(DMA_CR, 0);
             self.registers.read32(CLR_INTR);
             disabled = !self.expired(start, self.config.recovery_timeout_us);
@@ -997,6 +1002,7 @@ mod tests {
             );
             assert_eq!(state.words[TAR / 4], 0x2c);
             assert_eq!(state.words[INTR_MASK / 4], 0);
+            assert_eq!(state.words[SMBUS_INTR_MASK / 4], 0);
             assert_eq!(state.words[DMA_CR / 4], 0);
         }
     }
