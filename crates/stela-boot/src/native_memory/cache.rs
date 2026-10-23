@@ -107,24 +107,21 @@ impl Policy {
         if self.default_kind == WRITE_BACK {
             return Ok(());
         }
-        let mut wb: Vec<_> = self
-            .variables
-            .iter()
-            .filter(|entry| entry.kind == WRITE_BACK)
-            .map(|entry| entry.range.clone())
-            .collect();
-        wb.sort_unstable_by_key(|range| range.start);
+        // Extend through every interval touching the covered prefix. This
+        // handles unsorted overlaps without an infallible scratch allocation;
+        // each pass consumes at least one of the bounded MTRR endpoints.
         let mut cursor = start;
-        for range in wb {
-            if range.start <= cursor && cursor < range.end {
-                cursor = range.end;
-            }
+        while cursor < end {
+            cursor = self
+                .variables
+                .iter()
+                .filter(|entry| entry.kind == WRITE_BACK && entry.range.start <= cursor)
+                .map(|entry| entry.range.end)
+                .filter(|next| *next > cursor)
+                .max()
+                .ok_or(MemoryError::CacheAttributeUnavailable)?;
         }
-        if cursor >= end {
-            Ok(())
-        } else {
-            Err(MemoryError::CacheAttributeUnavailable)
-        }
+        Ok(())
     }
 }
 
@@ -205,7 +202,11 @@ pub(crate) fn verify_writeback(
         },
     )?;
     let mut variables = Vec::new();
-    for index in 0..(msr(CAP) as u8) {
+    let count = msr(CAP) as u8;
+    variables
+        .try_reserve_exact(usize::from(count))
+        .map_err(|_| MemoryError::OutOfMemory)?;
+    for index in 0..count {
         let base = msr(VARIABLE_BASE + 2 * u32::from(index));
         let mask = msr(VARIABLE_BASE + 2 * u32::from(index) + 1);
         if mask & VALID == 0 {
@@ -408,5 +409,38 @@ mod tests {
         assert!(policy.writeback(0, 4096).is_err());
         assert!(policy.writeback(u64::MAX - 4095, 8192).is_err());
         assert!(policy.writeback(1 << 48, 4096).is_err());
+    }
+
+    #[test]
+    fn unsorted_wb_coverage_and_gaps_require_no_allocation() {
+        use super::super::tests::allocation_failure;
+        let mut policy = Policy {
+            enabled: true,
+            caches_enabled: true,
+            default_kind: 0,
+            physical_bits: 48,
+            variables: [
+                0x203000..0x205000,
+                0x201000..0x204000,
+                0x205000..0x206000,
+                0x200000..0x202000,
+            ]
+            .into_iter()
+            .map(|range| Variable {
+                range,
+                kind: WRITE_BACK,
+            })
+            .collect(),
+        };
+        allocation_failure::arm(0);
+        let covered = policy.writeback(0x200000, 0x6000);
+        let gap = policy.writeback(0x200000, 0x7000);
+        policy.variables[1].kind = 0;
+        let conflict = policy.writeback(0x200000, 0x6000);
+        let observation = allocation_failure::disarm();
+        assert_eq!(covered, Ok(()));
+        assert_eq!(gap, Err(MemoryError::CacheAttributeUnavailable));
+        assert_eq!(conflict, Err(MemoryError::CacheAttributeUnavailable));
+        assert_eq!(observation.attempts, 0);
     }
 }

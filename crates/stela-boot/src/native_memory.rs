@@ -187,43 +187,51 @@ impl PageSource for NativeMemory {
         if ((cpu as u64) ^ physical_base) & (layout.align() as u64 - 1) != 0 {
             return Err(MemoryError::InvalidAlignment);
         }
-        // SAFETY: initialize registered the live heap; this service's users
-        // exclude IRQ allocation/final release, as does the mount allocator.
+        // SAFETY: initialize registered the live heap. Pin/cache operations
+        // remain in process/deferred context even though the raw heap is IRQ-safe.
         let pointer = NonNull::new(unsafe { ALLOCATOR.alloc_zeroed(layout) })
             .ok_or(MemoryError::OutOfMemory)?;
+        // Own the payload before any validation or metadata allocation can fail.
+        let mut backing = HeapAllocation {
+            pointer,
+            layout,
+            pages: Vec::new(),
+        };
         let start = pointer.as_ptr() as usize;
         let offset = start
             .checked_sub(cpu)
             .filter(|offset| offset.checked_add(bytes).is_some_and(|end| end <= capacity));
         let Some(offset) = offset else {
-            // SAFETY: this exact heap allocation was not published.
-            unsafe { ALLOCATOR.dealloc(pointer.as_ptr(), layout) };
             return Err(MemoryError::OutsideReservation);
         };
         let physical = physical_base + offset as u64;
         #[cfg(not(test))]
-        if let Err(error) = cache::verify_writeback(
+        cache::verify_writeback(
             start as u64,
             physical,
             bytes,
             self.table_offset.load(Ordering::Relaxed),
-        ) {
-            // SAFETY: unpublished allocation, with its exact original layout.
-            unsafe { ALLOCATOR.dealloc(pointer.as_ptr(), layout) };
-            return Err(error);
-        }
-        let pages: Vec<u64> = (0..bytes / PAGE)
-            .map(|index| physical + (index * PAGE) as u64)
-            .collect();
-        PinnedPages::new(
-            Box::new(HeapAllocation {
-                pointer,
-                layout,
-                pages,
-            }),
-            logical_bytes,
-            layout.align(),
-        )
+        )?;
+        backing
+            .pages
+            .try_reserve_exact(bytes / PAGE)
+            .map_err(|_| MemoryError::OutOfMemory)?;
+        backing
+            .pages
+            .extend((0..bytes / PAGE).map(|index| physical + (index * PAGE) as u64));
+        // The stable Box constructor aborts on OOM. Reserve its exact nonzero
+        // storage fallibly before transferring this unique payload owner.
+        // SAFETY: a valid nonzero layout for a fully initialized backing.
+        let storage = NonNull::new(unsafe { alloc::alloc::alloc(Layout::new::<HeapAllocation>()) })
+            .ok_or(MemoryError::OutOfMemory)?
+            .cast::<HeapAllocation>();
+        // SAFETY: fresh aligned global allocation, initialized once. Box takes
+        // that exact allocation/layout and owns the backing on every later path.
+        let backing = unsafe {
+            storage.as_ptr().write(backing);
+            Box::from_raw(storage.as_ptr())
+        };
+        PinnedPages::new(backing, logical_bytes, layout.align())
     }
 }
 
@@ -273,6 +281,200 @@ impl Drop for HeapAllocation {
 mod tests {
     use super::*;
     use core::alloc::Layout;
+
+    // Only the hosted test executable uses this allocator. Each armed window
+    // is thread-local and contains no harness/assertion work. The production
+    // provider has no fault hook or alternate allocation path.
+    pub(super) mod allocation_failure {
+        use std::{
+            alloc::{GlobalAlloc, Layout, System},
+            cell::Cell,
+        };
+
+        #[derive(Clone, Copy, Default)]
+        pub struct Observation {
+            active: bool,
+            remaining: Option<usize>,
+            pub attempts: usize,
+            pub denied: usize,
+            pointers: [usize; 8],
+            pub overflow: bool,
+        }
+
+        std::thread_local! {
+            static STATE: Cell<Observation> = const { Cell::new(Observation {
+                active: false, remaining: None, attempts: 0, denied: 0,
+                pointers: [0; 8], overflow: false,
+            }) };
+        }
+
+        pub struct Allocator;
+        // SAFETY: all storage uses System with unchanged layouts. An armed
+        // request may return null as GlobalAlloc permits; successful pointer
+        // provenance and deallocation are unchanged.
+        unsafe impl GlobalAlloc for Allocator {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                let deny = STATE
+                    .try_with(|state| {
+                        let mut value = state.get();
+                        if !value.active {
+                            return false;
+                        }
+                        value.attempts += 1;
+                        let denied = value.remaining == Some(0);
+                        value.remaining = value.remaining.and_then(|left| left.checked_sub(1));
+                        value.denied += usize::from(denied);
+                        state.set(value);
+                        denied
+                    })
+                    .unwrap_or(false);
+                if deny {
+                    return core::ptr::null_mut();
+                }
+                // SAFETY: original caller's valid allocation layout.
+                let pointer = unsafe { System.alloc(layout) };
+                if !pointer.is_null() {
+                    let _ = STATE.try_with(|state| {
+                        let mut value = state.get();
+                        if value.active {
+                            if let Some(slot) = value.pointers.iter_mut().find(|slot| **slot == 0) {
+                                *slot = pointer as usize;
+                            } else {
+                                value.overflow = true;
+                            }
+                            state.set(value);
+                        }
+                    });
+                }
+                pointer
+            }
+
+            unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+                let _ = STATE.try_with(|state| {
+                    let mut value = state.get();
+                    if value.active {
+                        if let Some(slot) = value
+                            .pointers
+                            .iter_mut()
+                            .find(|slot| **slot == pointer as usize)
+                        {
+                            *slot = 0;
+                        }
+                        state.set(value);
+                    }
+                });
+                // SAFETY: original successful System allocation and layout.
+                unsafe { System.dealloc(pointer, layout) };
+            }
+        }
+
+        pub fn arm(successes: usize) {
+            STATE.with(|state| {
+                state.set(Observation {
+                    active: true,
+                    remaining: Some(successes),
+                    ..Observation::default()
+                });
+            });
+        }
+
+        pub fn disarm() -> Observation {
+            STATE.with(|state| state.replace(Observation::default()))
+        }
+
+        impl Observation {
+            pub fn outstanding(self) -> usize {
+                self.pointers
+                    .iter()
+                    .filter(|pointer| **pointer != 0)
+                    .count()
+            }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: allocation_failure::Allocator = allocation_failure::Allocator;
+
+    fn metadata_failures_reclaim_payload(source: &NativeMemory) {
+        let before = ALLOCATOR.usage().live;
+        // Fail each real allocation in turn: page vector, unique backing box,
+        // then shared owner. No application-visible pin exists on these paths.
+        for index in 0..3 {
+            allocation_failure::arm(index);
+            let result = source.allocate(PAGE + 1, PAGE, CacheAttribute::WriteBack);
+            let observation = allocation_failure::disarm();
+            assert!(matches!(result, Err(MemoryError::OutOfMemory)));
+            assert_eq!(observation.attempts, index + 1);
+            assert_eq!(observation.denied, 1);
+            assert_eq!(observation.outstanding(), 0);
+            assert!(!observation.overflow);
+            assert_eq!(ALLOCATOR.usage().live, before);
+        }
+        let pin = source
+            .allocate(PAGE, PAGE, CacheAttribute::WriteBack)
+            .unwrap();
+        allocation_failure::arm(0);
+        let cloned = pin.clone();
+        let mapping = cloned.cpu_mapping(CacheAttribute::WriteBack);
+        drop(cloned);
+        drop(pin);
+        let observation = allocation_failure::disarm();
+        assert_eq!(observation.attempts, 0);
+        assert_eq!(ALLOCATOR.usage().live, before + PAGE);
+        drop(mapping.unwrap());
+        assert_eq!(ALLOCATOR.usage().live, before);
+    }
+
+    #[test]
+    fn unsorted_pin_metadata_failures_drop_the_consumed_backing() {
+        use std::sync::Arc;
+        #[repr(align(4096))]
+        struct Buffer([u8; 3 * PAGE]);
+        struct Backing {
+            buffer: Box<Buffer>,
+            pages: [u64; 3],
+            drops: Arc<AtomicUsize>,
+        }
+        impl Drop for Backing {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        // SAFETY: hosted ownership fixture with an aligned zeroed CPU buffer.
+        // Physical labels model three distinct pages and are never dereferenced.
+        unsafe impl PageBacking for Backing {
+            fn cpu_base(&self) -> NonNull<u8> {
+                NonNull::from(&self.buffer.0[0])
+            }
+            fn physical_pages(&self) -> &[u64] {
+                &self.pages
+            }
+            fn page_shift(&self) -> u8 {
+                PAGE_SHIFT
+            }
+            fn cache_attribute(&self) -> CacheAttribute {
+                CacheAttribute::WriteBack
+            }
+        }
+        for index in 0..2 {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let backing = Box::new(Backing {
+                buffer: Box::new(Buffer([0; 3 * PAGE])),
+                pages: [0x1000, 0x3000, 0x2000],
+                drops: drops.clone(),
+            });
+            allocation_failure::arm(index);
+            let result = PinnedPages::new(backing, 3 * PAGE, PAGE);
+            let observation = allocation_failure::disarm();
+            assert!(matches!(result, Err(MemoryError::OutOfMemory)));
+            assert_eq!(observation.attempts, index + 1);
+            assert_eq!(observation.denied, 1);
+            assert_eq!(observation.outstanding(), 0);
+            assert!(!observation.overflow);
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+        }
+    }
+
     #[test]
     fn unregistered_native_memory_does_not_attest_a_provider() {
         let source = NativeMemory {
@@ -297,6 +499,12 @@ mod tests {
             initialize(ram as usize, 0x4000_0000, layout.size(), 0);
         }
         let source = &SOURCE;
+        assert!(matches!(
+            source.allocate(layout.size(), PAGE, CacheAttribute::WriteBack),
+            Err(MemoryError::OutOfMemory)
+        ));
+        assert_eq!(ALLOCATOR.usage().live, 0);
+        metadata_failures_reclaim_payload(source);
         let geometry = source.page_geometry().unwrap();
         assert_eq!(geometry, PageGeometry::base_only(PAGE_SHIFT).unwrap());
         assert!(!geometry.supports(PAGE_SHIFT + 1));

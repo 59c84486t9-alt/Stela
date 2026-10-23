@@ -1,7 +1,8 @@
 //! Owned native RAM pins and CPU mappings. Device addresses come from a DMA
 //! domain, never from the CPU address or this allocation's physical page list.
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, vec::Vec};
 use core::{ops::Range, ptr::NonNull};
+use triomphe::Arc;
 
 /// The CPU mapping's actual cache policy. RAM and VRAM are not interchangeable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,7 +123,7 @@ pub unsafe trait PageBacking: Send + Sync {
 /// A retained pin on a real allocation. Cloning a pin never allocates new pages.
 #[derive(Clone)]
 pub struct PinnedPages {
-    backing: Arc<dyn PageBacking>,
+    backing: Arc<Box<dyn PageBacking>>,
     logical_bytes: usize,
     bytes: usize,
     alignment: usize,
@@ -130,7 +131,8 @@ pub struct PinnedPages {
 
 impl PinnedPages {
     /// Accept an actual platform reservation. Validation does not manufacture
-    /// physical addresses or change the established cache policy.
+    /// physical addresses or change the established cache policy. Scratch and
+    /// shared-owner allocation are fallible; any error releases the backing.
     pub fn new(
         backing: Box<dyn PageBacking>,
         logical_bytes: usize,
@@ -160,7 +162,11 @@ impl PinnedPages {
         let duplicate = if pages.is_sorted() {
             pages.windows(2).any(|pair| pair[0] == pair[1])
         } else {
-            let mut sorted = pages.to_vec();
+            let mut sorted = Vec::new();
+            sorted
+                .try_reserve_exact(pages.len())
+                .map_err(|_| MemoryError::OutOfMemory)?;
+            sorted.extend_from_slice(pages);
             sorted.sort_unstable();
             sorted.windows(2).any(|pair| pair[0] == pair[1])
         };
@@ -174,7 +180,7 @@ impl PinnedPages {
             return Err(MemoryError::InvalidPageList);
         }
         Ok(Self {
-            backing: Arc::from(backing),
+            backing: Arc::try_new(backing).map_err(|_| MemoryError::OutOfMemory)?,
             logical_bytes,
             bytes,
             alignment,
@@ -315,6 +321,32 @@ mod tests {
             CacheAttribute::WriteBack
         }
     }
+
+    #[test]
+    fn page_inventory_validation_accepts_order_without_accepting_aliases() {
+        for pages in [[0x10000, 0x11000], [0x11000, 0x10000]] {
+            let pin = PinnedPages::new(
+                Box::new(Backing {
+                    buffer: Box::new(Buffer([0; 8192])),
+                    pages,
+                }),
+                8192,
+                4096,
+            )
+            .unwrap();
+            assert_eq!(pin.physical_pages(), pages);
+        }
+        let result = PinnedPages::new(
+            Box::new(Backing {
+                buffer: Box::new(Buffer([0; 8192])),
+                pages: [0x10000; 2],
+            }),
+            8192,
+            4096,
+        );
+        assert!(matches!(result, Err(MemoryError::InvalidPageList)));
+    }
+
     struct LegacySource;
     impl PageSource for LegacySource {
         fn allocate(
