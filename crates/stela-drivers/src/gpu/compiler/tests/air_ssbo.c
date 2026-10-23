@@ -9,6 +9,13 @@
 
 static const nir_shader_compiler_options nir_options = {0};
 
+/* Residual control flow is an oracle limitation, not a finite store trace. */
+static bool
+finite_effect_body(nir_function_impl *impl)
+{
+   return impl->structured && exec_list_length(&impl->body) == 1;
+}
+
 static bool
 bind_ssbo(const struct stela_air_buffer *buffer, unsigned *slot, void *data)
 {
@@ -75,6 +82,7 @@ check_accesses(nir_shader *nir, unsigned loads, unsigned stores,
 {
    unsigned actual_loads = 0, actual_stores = 0;
    nir_foreach_function_impl(impl, nir) {
+      CHECK(finite_effect_body(impl));
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
             if (instr->type != nir_instr_type_intrinsic)
@@ -94,6 +102,39 @@ check_accesses(nir_shader *nir, unsigned loads, unsigned stores,
       }
    }
    CHECK(actual_loads == loads && actual_stores == stores);
+}
+
+static void
+finite_effect_oracle_contract(void)
+{
+   const char *bodies[] = {
+      "store i32 123, ptr addrspace(1) %out, align 4\nret void\n",
+      "entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %write, label %done\n"
+      "write:\nstore i32 123, ptr addrspace(1) %out, align 4\nbr label %done\n"
+      "done:\nret void\n",
+      "entry:\nbr label %loop\nloop:\n"
+      "store i32 123, ptr addrspace(1) %out, align 4\nbr label %loop\n",
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(bodies); i++) {
+      nir_shader *nir = translate(bodies[i], 2);
+      set_size(nir, 64);
+      unsigned stores = 0;
+      nir_foreach_function_impl(impl, nir) {
+         CHECK(finite_effect_body(impl) == (i == 0));
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type == nir_instr_type_intrinsic)
+                  stores += nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_store_ssbo;
+            }
+         }
+      }
+      /* All three have the same lexical store count. Only the first has a
+       * single finite trace: the others condition or repeat that effect. */
+      CHECK(stores == 1);
+      if (!i)
+         check_accesses(nir, 0, 1, 0, 123);
+      ralloc_free(nir);
+   }
 }
 
 static void
@@ -148,6 +189,7 @@ conditional_accesses(void)
          set_size(nir, sizes[i]);
          unsigned stores = 0;
          nir_foreach_function_impl(impl, nir) {
+            CHECK(finite_effect_body(impl));
             nir_foreach_block(block, impl) {
                CHECK(nir_block_get_following_if(block) == NULL);
                nir_foreach_instr(instr, block) {
@@ -232,8 +274,7 @@ loop_guarded_phis(void)
             values[expected++] = 0;
          }
          nir_foreach_function_impl(impl, nir) {
-            nir_foreach_cf_node(node, &impl->body)
-               CHECK(node->type != nir_cf_node_loop);
+            CHECK(finite_effect_body(impl));
             nir_foreach_block(block, impl) {
                CHECK(nir_block_get_following_if(block) == NULL);
                nir_foreach_instr(instr, block) {
@@ -371,6 +412,7 @@ main(void)
    glsl_type_singleton_init_or_ref();
    view_validation();
    binding_refusals();
+   finite_effect_oracle_contract();
    conditional_accesses();
    loop_guarded_phis();
    store_case(0, 64, true);

@@ -36,6 +36,14 @@ static const nir_shader_compiler_options extended_compare_options = {
    .has_fneo_fcmpu = true, .has_ford_funord = true,
 };
 
+/* A lexical store list is an execution trace only after every region folds.
+ * In particular, one store in a nonterminating loop is not one finite effect. */
+static bool
+finite_effect_body(nir_function_impl *impl)
+{
+   return impl->structured && exec_list_length(&impl->body) == 1;
+}
+
 static nir_shader *
 translate_profile(LLVMMemoryBufferRef input, const nir_shader_compiler_options *nir_options,
                   unsigned budget, enum stela_air_fp_profile profile, struct stela_air_error *error)
@@ -89,6 +97,7 @@ constant_store_options(LLVMMemoryBufferRef input, const nir_shader_compiler_opti
    nir_opt_dce(nir);
    unsigned stores = 0;
    nir_foreach_function_impl(impl, nir) {
+      CHECK(finite_effect_body(impl));
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
             if (instr->type != nir_instr_type_intrinsic)
@@ -331,8 +340,7 @@ check_stores(nir_shader *nir, const uint64_t *addresses, const uint32_t *values,
 {
    unsigned stores = 0;
    nir_foreach_function_impl(impl, nir) {
-      nir_foreach_cf_node(node, &impl->body)
-         CHECK(node->type != nir_cf_node_loop);
+      CHECK(finite_effect_body(impl));
       nir_foreach_block(block, impl) {
          CHECK(nir_block_get_following_if(block) == NULL);
          nir_foreach_instr(instr, block) {
@@ -437,6 +445,7 @@ conditional_semantics(void)
       unsigned load_count = 0, store_count = 0;
       nir_def *loaded = NULL;
       nir_foreach_function_impl(impl, nir) {
+         CHECK(finite_effect_body(impl));
          nir_foreach_block(block, impl) {
             CHECK(nir_block_get_following_if(block) == NULL);
             nir_foreach_instr(instr, block) {
@@ -845,7 +854,8 @@ cfg_limits_and_refusals(void)
       "store i32 5, ptr addrspace(1) %out, align 4\nbr label %loop\n");
    unsigned loops = 0, stores = 0;
    nir_foreach_function_impl(impl, nir) {
-      nir_foreach_cf_node(node, &impl->body)
+      CHECK(!finite_effect_body(impl)); /* Must never pass a finite trace check. */
+      foreach_list_typed(nir_cf_node, node, node, &impl->body)
          loops += node->type == nir_cf_node_loop;
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {

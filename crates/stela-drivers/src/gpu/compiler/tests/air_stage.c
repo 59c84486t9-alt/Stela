@@ -38,6 +38,9 @@ static const char fixture[] =
  "!22 = !{!\"Apple metal version 32023.922 (metalfe-32023.922.4)\"}\n"
  "!23 = !{!\"air.compile.denorms_disable\"}\n!24 = !{!\"air.compile.fast_math_enable\"}\n!25 = !{!\"air.compile.framebuffer_fetch_enable\"}\n";
 static const nir_shader_compiler_options nir_options = {0};
+/* Lexical outputs are a finite trace only after all control flow specializes. */
+static bool finite_effect_body(nir_function_impl *impl)
+{ return impl->structured && exec_list_length(&impl->body)==1; }
 struct snapshot {
    struct stela_air_stage_entry entry;
    struct stela_air_stage_io inputs[AIR_MAX_ARGUMENTS], outputs[AIR_MAX_ARGUMENTS];
@@ -155,6 +158,7 @@ static void specialize(nir_shader *nir,unsigned vertex,const uint32_t *words,uns
 static void outputs(nir_shader *nir,const uint32_t *position,const uint32_t *color)
 {
    unsigned stores=0;
+   nir_foreach_function_impl(impl,nir) CHECK(finite_effect_body(impl));
    nir_foreach_function_impl(impl,nir) nir_foreach_block(block,impl) nir_foreach_instr(instr,block) {
       if(instr->type!=nir_instr_type_intrinsic)continue;
       nir_intrinsic_instr *i=nir_instr_as_intrinsic(instr);
@@ -476,6 +480,28 @@ arithmetic_and_lane_semantics(void)
       outputs(nir, NULL, result); ralloc_free(nir);
    }
    LLVMDisposeMemoryBuffer(raw);
+   /* One lexical output can sit behind a nonterminating path. The old output
+    * count/value check alone accepted this unspecialized shader as finite. */
+   const char *guarded_return = "{\n %a = extractelement <4 x float> %color, i32 0\n"
+      " %condition = fcmp oeq float %a, 1.0\n br i1 %condition, label %spin, label %done\n"
+      "spin:\n br label %spin\ndone:\n ret <4 x float> <float 11.0,float 12.0,float 13.0,float 14.0>\n}";
+   text = fragment_body(guarded_return, ""); raw = bitcode(text); free(text);
+   nir_shader *guarded = translate(raw, "test_fragment", &o);
+   unsigned output_stores = 0;
+   nir_foreach_function_impl(impl, guarded) {
+      CHECK(!finite_effect_body(impl));
+      nir_foreach_block(block, impl) nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic)
+            output_stores += nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_store_deref;
+      }
+   }
+   CHECK(output_stores == 1);
+   uint32_t terminating_input[4] = {0}, terminating_output[4];
+   for (unsigned lane = 0; lane < 4; lane++)
+      terminating_output[lane] = bits(11.f + lane);
+   specialize(guarded, 0, terminating_input, 16, 0, 0, true);
+   outputs(guarded, NULL, terminating_output);
+   ralloc_free(guarded); LLVMDisposeMemoryBuffer(raw);
    text = fragment_body("{\n %bad = shufflevector <4 x float> poison, <4 x float> %color, <4 x i32> <i32 0,i32 5,i32 6,i32 7>\n ret <4 x float> %bad\n}", "");
    refusal(text, "test_fragment", STELA_AIR_FRAGMENT, &o, STELA_AIR_INSTRUCTION); free(text);
    puts("Stage FP32 fastdivision rounding/FTZ/zero and uint2/3/4conversion boundaries; both conditional PHI paths, masked/escaping poison passed");
