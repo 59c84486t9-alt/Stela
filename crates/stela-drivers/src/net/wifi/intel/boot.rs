@@ -5293,7 +5293,7 @@ mod tests {
             );
             assert_eq!(lari.platform_reads().len(), 3); // actual GLAI, GeneralCfg, WBEM
             let mut copied = lari.plan().unwrap().clone();
-            let copied_inputs = copied.inputs().to_owned();
+            let copied_inputs = *copied.inputs();
             copied = super::super::radio::lari::Plan::prepare(
                 &lari.radio.initialized.boot.firmware,
                 0,
