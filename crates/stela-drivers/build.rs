@@ -25,6 +25,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     #[cfg(any(feature = "amd-port", feature = "intel-port"))]
     let (linux, mut tests) = (native::Linux::new(), native::Tests::default());
+    #[cfg(any(feature = "amd-port", feature = "intel-port"))]
+    linux.tests(&mut tests);
     #[cfg(feature = "amd-port")]
     amd::port(&linux, &mut tests);
     #[cfg(feature = "amd-commands")]
