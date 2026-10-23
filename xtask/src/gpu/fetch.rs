@@ -264,28 +264,27 @@ fn checkout(submodule: &Submodule) -> Result<()> {
             &submodule.pin,
         ]))?;
     }
-    submodule.ensure_upstream_pin()?;
     exec(
         submodule
             .git()
-            .args(["checkout", "-q", "-B", "stela", &submodule.pin]),
-    )?;
-    exec(
-        submodule
-            .git()
-            .args(["reset", "-q", "--hard", &submodule.pin]),
+            .args(["checkout", "-q", "-f", "-B", "stela", &submodule.pin]),
     )?;
     let patches = submodule.patches()?;
     if !patches.is_empty() {
-        exec(
+        let applied = exec(
             submodule
                 .git()
                 .args(["-c", "user.name=Stela", "-c"])
                 .arg(format!("user.email={COMMITTER_EMAIL}"))
                 .args(["am", "-q", "--3way", "--committer-date-is-author-date"])
                 .args(&patches),
-        )
-        .with_context(|| format!("third_party/patches/{} no longer applies", submodule.name))?;
+        );
+        if applied.is_err() {
+            // Leave the checkout at its pin, with no `am` left to block the next.
+            exec(submodule.git().args(["am", "--abort"]))?;
+        }
+        applied
+            .with_context(|| format!("third_party/patches/{} no longer applies", submodule.name))?;
     }
     submodule.record(&submodule.series()?)
 }
