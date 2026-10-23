@@ -473,10 +473,13 @@ mod tests {
     unsafe impl DmaDomain for Domain {
         unsafe fn map(
             &self,
-            pages: &PinnedPages,
+            pages: &crate::bus::dma::DmaPages,
             direction: Direction,
             limit: u64,
         ) -> core::result::Result<DomainMapping, DmaError> {
+            // This coherent CPU-view model deliberately admits one retained
+            // allocation; scatter mappings have no fabricated contiguous view.
+            let pages = pages.as_single().ok_or(DmaError::MappingFailed)?;
             assert_eq!(direction, Direction::Bidirectional);
             assert!(pages.physical_pages()[0] >= 0x1_0000_0000);
             assert!(
