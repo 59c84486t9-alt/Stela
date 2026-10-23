@@ -15,6 +15,7 @@ pub(crate) mod host;
 mod input;
 pub(crate) mod install;
 pub(crate) mod interrupts;
+pub(crate) mod xstate;
 mod network;
 pub(crate) mod nor;
 pub(crate) mod power;

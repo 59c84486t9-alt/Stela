@@ -19,6 +19,8 @@ pub(crate) struct Local {
     handler: extern "sysv64" fn(&mut super::super::interrupts::Frame),
     state: UnsafeCell<Option<State>>,
     interrupted: AtomicBool,
+    xstate: super::super::xstate::EntryAbi,
+    xstate_active: UnsafeCell<[u64; 2]>,
     doorbells: AtomicU64,
     worker: UnsafeCell<Option<stela_runtime::machine::engine::publication::WorkerId>>,
     declarations: UnsafeCell<Option<stela_runtime::NativeCpuOwner>>,
@@ -32,6 +34,8 @@ impl Local {
             handler: super::super::interrupts::interrupt,
             state: UnsafeCell::new(None),
             interrupted: AtomicBool::new(false),
+            xstate: super::super::xstate::EntryAbi::EMPTY,
+            xstate_active: UnsafeCell::new([0; 2]),
             doorbells: AtomicU64::new(0),
             worker: UnsafeCell::new(None),
             declarations: UnsafeCell::new(None),
@@ -137,6 +141,35 @@ impl Owner {
 const _: () = assert!(core::mem::offset_of!(Local, this) == 0);
 pub(super) const RECOVERY_RSP_OFFSET: usize = core::mem::offset_of!(Local, recovery_rsp);
 pub(crate) const HANDLER_OFFSET: usize = core::mem::offset_of!(Local, handler);
+pub(crate) const XSTATE_IMAGE_BYTES_OFFSET: usize = core::mem::offset_of!(Local, xstate)
+    + core::mem::offset_of!(super::super::xstate::EntryAbi, image_bytes);
+pub(crate) const XSTATE_SUPPORTED_MASK_OFFSET: usize = core::mem::offset_of!(Local, xstate)
+    + core::mem::offset_of!(super::super::xstate::EntryAbi, supported_mask);
+pub(crate) const XSTATE_AVAILABLE_OFFSET: usize = core::mem::offset_of!(Local, xstate)
+    + core::mem::offset_of!(super::super::xstate::EntryAbi, xsave_available);
+pub(crate) const XSTATE_MSR_FLAGS_OFFSET: usize = core::mem::offset_of!(Local, xstate)
+    + core::mem::offset_of!(super::super::xstate::EntryAbi, msr_flags);
+pub(crate) const XSTATE_ACTIVE_OFFSET: usize = core::mem::offset_of!(Local, xstate_active);
+
+/// Install only an actual destination capture before making this Local/IDT
+/// active. A caller-supplied mask/size cannot create this contract.
+///
+/// # Safety
+/// The actual descriptor owner retains `owner` and the permanently pinned
+/// normal/fatal IST allocations while any vector can enter this Local. It
+/// checked each real stack's frame/image/handler budget and all-root mappings.
+/// No returning same-IST nested entry is admitted. This does not enable state.
+pub(crate) unsafe fn configure_xstate(
+    local: &mut Local,
+    owner: &super::super::xstate::XstateOwner,
+) -> Result<(), super::super::xstate::LayoutError> {
+    if !local.this.is_null() || local.xstate.image_bytes != 0 {
+        return Err(super::super::xstate::LayoutError::AlreadyInstalled);
+    }
+    owner.check()?;
+    local.xstate = *owner.abi();
+    Ok(())
+}
 
 unsafe fn set_base(base: u64) {
     // SAFETY: the executor owns this processor's GS, and its descriptor/IST
@@ -159,6 +192,7 @@ pub(crate) unsafe fn activate(
         local.this.is_null(),
         "host processor local record already active"
     );
+    assert!(local.xstate.image_bytes != 0, "processor xstate descriptor owner absent");
     local.handler = handler;
     local.this = local;
     // SAFETY: the descriptor owner pins this private record for the CPU lifetime.
