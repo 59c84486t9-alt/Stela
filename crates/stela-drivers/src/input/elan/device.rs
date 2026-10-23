@@ -120,9 +120,6 @@ impl<B: Bus, I: Interrupt, T: Timer> I2cDevice<B, I, T> {
         } else {
             raw_pattern[1]
         };
-        if pattern > 1 {
-            return Err(ErrorKind::UnsupportedPattern(pattern));
-        }
         let sample = self.value(SAMPLE_OR_IC_TYPE)?;
         let ic_type = if pattern == 0 {
             u16::from(self.value(IAP_VERSION_OR_LEGACY_IC)?[0])
@@ -170,7 +167,12 @@ impl<B: Bus, I: Interrupt, T: Timer> I2cDevice<B, I, T> {
         }
         let mut resolutions = [0; 2];
         for (output, raw) in resolutions.iter_mut().zip(raw_resolution) {
-            let dpi = i32::from(raw as i8) * 10 + 790;
+            let value = i32::from(raw as i8);
+            let dpi = if pattern <= 1 {
+                value * 10 + 790
+            } else {
+                (value + 3) * 100
+            };
             if dpi <= 0 {
                 return Err(ErrorKind::InvalidGeometry);
             }
@@ -239,8 +241,20 @@ impl<B: Bus, I: Interrupt, T: Timer> I2cDevice<B, I, T> {
             if !self.interrupt.asserted().map_err(ErrorKind::Interrupt)? {
                 return Ok(None);
             }
-            let mut raw = [0; 34];
-            self.raw(&mut raw)?;
+            let length = self
+                .capabilities
+                .as_ref()
+                .ok_or(ErrorKind::NotReady)?
+                .report_length();
+            let raw = if length == report::STANDARD_REPORT_BYTES {
+                let mut bytes = [0; report::STANDARD_REPORT_BYTES];
+                self.raw(&mut bytes)?;
+                Packet::Standard(bytes)
+            } else {
+                let mut bytes = [0; report::EXTENDED_REPORT_BYTES];
+                self.raw(&mut bytes)?;
+                Packet::Extended(bytes)
+            };
             report::decode(raw, self.capabilities.as_ref().ok_or(ErrorKind::NotReady)?).map(Some)
         })();
         self.quarantine(result)

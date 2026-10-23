@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Native ELAN proprietary I2C touchpads, ordinary pattern0/1 reports.
+//! Native ELAN proprietary I2C touchpads, ordinary and extended I2C reports.
 //! The platform supplies exclusive powered I2C ownership and an actual IRQ pin;
 //! CPU interrupt delivery stays masked while the physical pin is polled.
-//! Firmware flashing, SMBus, high-precision patterns, GPIO/rail sequencing and
+//! Firmware flashing, SMBus, GPIO/rail sequencing and
 //! guest contact/trackpoint routing remain separate requirements.
 //! Pinned donor sources and retained copyrights are in input/THIRD_PARTY.md.
 pub use super::hid_i2c::{Interrupt, InterruptError};
 use crate::bus::i2c::{self, Address, Bus, Timer};
 mod device;
 mod report;
-pub use report::{Absolute, Contact, Frame, Trackpoint};
+pub use report::{Absolute, Contact, Frame, Packet, Trackpoint};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -30,7 +30,6 @@ pub enum ErrorKind {
     Bus(i2c::Error),
     Interrupt(InterruptError),
     ResetResponse([u8; 2]),
-    UnsupportedPattern(u8),
     FirmwareMode(u16),
     InvalidGeometry,
     ReportId(u8),
@@ -80,6 +79,12 @@ pub struct Capabilities {
     pub resolution_per_mm: (u32, u32),
     pub pressure_adjustment: u8,
     pub quick_wakeup: bool,
+}
+impl Capabilities {
+    /// Actual full report transfer size selected by the firmware pattern.
+    pub fn report_length(&self) -> usize {
+        if self.pattern <= 1 { 34 } else { 39 }
+    }
 }
 pub struct I2cDevice<B, I, T> {
     bus: B,

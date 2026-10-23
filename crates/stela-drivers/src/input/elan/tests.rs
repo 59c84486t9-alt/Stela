@@ -12,7 +12,7 @@ use core::cell::{Cell, RefCell};
 struct Hardware {
     address: Address,
     registers: BTreeMap<u16, Vec<u8>>,
-    reports: VecDeque<[u8; 34]>,
+    reports: VecDeque<Vec<u8>>,
     time: Rc<Cell<u64>>,
     reset_at: u64,
     ack: bool,
@@ -160,9 +160,13 @@ impl Bus for Wire {
                     output.copy_from_slice(&h.reset_response);
                     h.ack = false;
                 } else {
-                    assert_eq!(output.len(), 34);
+                    assert!(matches!(output.len(), 34 | 39));
                     assert!(h.awake && h.absolute);
-                    output.copy_from_slice(&h.reports.pop_front().unwrap_or([0; 34]));
+                    output.copy_from_slice(
+                        &h.reports
+                            .pop_front()
+                            .unwrap_or_else(|| vec![0; output.len()]),
+                    );
                 }
                 if h.fail_read == Some(h.reads.len()) {
                     return Err(bus_error());
@@ -283,11 +287,11 @@ fn elan_compressed_slots_all_buttons_hover_pressure_and_raw_bytes_are_exact() {
             for buttons in 0..8 {
                 for hover in [false, true] {
                     let raw = absolute(bitmap, buttons, 245, hover);
-                    h.borrow_mut().reports.push_back(raw);
+                    h.borrow_mut().reports.push_back(raw.to_vec());
                     let Frame::Absolute(frame) = d.poll().unwrap().unwrap() else {
                         panic!("wrong report");
                     };
-                    assert_eq!(frame.raw, raw);
+                    assert_eq!(frame.raw.as_bytes(), raw);
                     assert_eq!(frame.buttons, buttons);
                     assert_eq!(frame.hover, hover);
                     for slot in 0..5 {
@@ -329,11 +333,11 @@ fn elan_trackpoint_real_format_and_motion_limits_preserve_both_report_ids() {
                     value ^ 0x55,
                     value ^ 0xaa,
                 ]);
-                h.borrow_mut().reports.push_back(raw);
+                h.borrow_mut().reports.push_back(raw.to_vec());
                 let Frame::Trackpoint(frame) = d.poll().unwrap().unwrap() else {
                     panic!("wrong report");
                 };
-                assert_eq!(frame.raw, raw);
+                assert_eq!(frame.raw.as_bytes(), raw);
                 assert_eq!(frame.buttons, value & 7);
                 assert_eq!(
                     frame.motion,
@@ -424,15 +428,7 @@ fn elan_quick_and_normal_resume_preserve_identity_real_power_bits_and_stopped_st
     assert_eq!(d.capabilities().unwrap().product_id, 0x42);
 }
 #[test]
-fn elan_unsupported_patterns_bootloader_geometry_and_reports_fail_explicitly() {
-    let h = hardware(2, 0x42, 8);
-    let mut d = device(&h);
-    assert_eq!(
-        d.initialize().unwrap_err().kind,
-        ErrorKind::UnsupportedPattern(2)
-    );
-    assert!(d.capabilities().is_none());
-    assert_eq!(h.borrow().writes.len(), 1);
+fn elan_bootloader_geometry_and_reports_fail_explicitly() {
     for (reg, value, error) in [
         (0x310, vec![0, 0], ErrorKind::FirmwareMode(0)),
         (0x105, vec![0, 1], ErrorKind::InvalidGeometry),
@@ -459,7 +455,7 @@ fn elan_unsupported_patterns_bootloader_geometry_and_reports_fail_explicitly() {
         d.initialize().unwrap();
         let mut report = [0; 34];
         report[2] = id;
-        h.borrow_mut().reports.push_back(report);
+        h.borrow_mut().reports.push_back(report.to_vec());
         let error = d.poll().unwrap_err();
         assert_eq!(
             error.kind,
@@ -477,7 +473,9 @@ fn elan_unsupported_patterns_bootloader_geometry_and_reports_fail_explicitly() {
         .insert(0x106, 100u16.to_le_bytes().to_vec());
     let mut d = device(&h);
     d.initialize().unwrap();
-    h.borrow_mut().reports.push_back(absolute(2, 0, 0, false));
+    h.borrow_mut()
+        .reports
+        .push_back(absolute(2, 0, 0, false).to_vec());
     assert_eq!(
         d.poll().unwrap_err().kind,
         ErrorKind::Coordinate {
@@ -523,7 +521,9 @@ fn elan_late_mutable_and_report_effects_quarantine_without_automatic_replay() {
     let h = hardware(0, 0x42, 8);
     let mut d = device(&h);
     d.initialize().unwrap();
-    h.borrow_mut().reports.push_back(absolute(31, 7, 255, true));
+    h.borrow_mut()
+        .reports
+        .push_back(absolute(31, 7, 255, true).to_vec());
     let fail = h.borrow().reads.len() + 1;
     h.borrow_mut().fail_read = Some(fail);
     assert!(matches!(d.poll().unwrap_err().kind, ErrorKind::Bus(_)));
@@ -607,7 +607,7 @@ fn elan_pressure_width_nibbles_coordinate_limits_and_wide_areas_are_not_truncate
     for value in 0u8..=255 {
         let mut raw = absolute(1, 0, value, false);
         raw[7] = value;
-        h.borrow_mut().reports.push_back(raw);
+        h.borrow_mut().reports.push_back(raw.to_vec());
         let Frame::Absolute(frame) = d.poll().unwrap().unwrap() else {
             panic!("wrong report");
         };
@@ -638,7 +638,7 @@ fn elan_pressure_width_nibbles_coordinate_limits_and_wide_areas_are_not_truncate
                 255,
                 255,
             ]);
-            h.borrow_mut().reports.push_back(raw);
+            h.borrow_mut().reports.push_back(raw.to_vec());
             let Frame::Absolute(frame) = d.poll().unwrap().unwrap() else {
                 panic!("wrong report");
             };
@@ -695,7 +695,7 @@ fn elan_resume_reset_and_source_quick_wake_have_distinct_real_queue_effects() {
         let mut d = device(&h);
         d.initialize().unwrap();
         let pending = absolute(17, 5, 123, false);
-        h.borrow_mut().reports.push_back(pending);
+        h.borrow_mut().reports.push_back(pending.to_vec());
         d.sleep().unwrap();
         assert_eq!(d.poll().unwrap_err().kind, ErrorKind::NotReady);
         assert_eq!(h.borrow().reports.len(), 1);
@@ -704,9 +704,12 @@ fn elan_resume_reset_and_source_quick_wake_have_distinct_real_queue_effects() {
             let Frame::Absolute(frame) = d.poll().unwrap().unwrap() else {
                 panic!("wrong report");
             };
-            assert_eq!(frame.raw, pending);
+            assert_eq!(frame.raw.as_bytes(), pending);
         } else {
             assert!(d.poll().unwrap().is_none());
         }
     }
 }
+
+#[path = "high_precision_tests.rs"]
+mod high_precision_tests;
