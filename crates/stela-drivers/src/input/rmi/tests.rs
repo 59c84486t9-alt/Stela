@@ -15,6 +15,8 @@ struct Hardware {
     page: u8,
     maps: [Option<(u16, u8, bool)>; 8],
     writes: Vec<(u16, Vec<u8>)>,
+    written_at: Vec<(u16, u64)>,
+    fail_address: Option<u16>,
     transactions: usize,
     page_changes: usize,
     map_writes: usize,
@@ -46,6 +48,8 @@ impl Hardware {
             page: 0,
             maps: [None; 8],
             writes: Vec::new(),
+            written_at: Vec::new(),
+            fail_address: None,
             transactions: 0,
             page_changes: 0,
             map_writes: 0,
@@ -105,6 +109,7 @@ impl Hardware {
     }
     fn write(&mut self, address: u16, bytes: &[u8]) -> bool {
         self.writes.push((address, bytes.to_vec()));
+        self.written_at.push((address, self.time.get()));
         if address == 0x30 && bytes == [1] {
             self.reset();
         } else {
@@ -121,7 +126,11 @@ impl Hardware {
                 }
             }
         }
-        core::mem::take(&mut self.fail_after_write)
+        let address_failure = self.fail_address == Some(address);
+        if address_failure {
+            self.fail_address = None;
+        }
+        core::mem::take(&mut self.fail_after_write) || address_failure
     }
     fn begin(&mut self) {
         self.transactions += 1;
@@ -743,3 +752,5 @@ fn smbus_waits_for_firmware_after_each_actual_companion_reset_before_mode_read()
 }
 
 mod f12_tests;
+
+mod f11_tests;

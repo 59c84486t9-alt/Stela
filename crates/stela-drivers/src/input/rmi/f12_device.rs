@@ -72,6 +72,10 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
             outcome.error = Some(error);
             return outcome;
         }
+        if !self.f11.is_empty() {
+            outcome.error = Some(Error::InputConsumerActive);
+            return outcome;
+        }
         if self.f12.is_empty() {
             outcome.error = Some(Error::MissingFunction(0x12));
             return outcome;

@@ -9,8 +9,11 @@ use crate::bus::{i2c, smbus};
 use alloc::vec::Vec;
 
 pub mod descriptor;
+pub mod f11;
+mod f11_device;
 pub mod f12;
 mod f12_device;
+mod input_device;
 pub mod transport;
 use transport::{Transport, buffer};
 
@@ -25,6 +28,8 @@ const NOSLEEP: u8 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    UnsupportedFormat { function: u8, format: u8 },
+    UnsupportedF11Extension { query: u8, flags: u8 },
     InputConsumerActive,
     RegisterDescriptor,
     MissingRegister(u16),
@@ -177,6 +182,19 @@ pub struct F12Poll {
     pub error: Option<Error>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FunctionReport {
+    F11(f11::Frame),
+    F12(f12::Frame),
+}
+#[must_use = "inspect errors and all completed function reports"]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputPoll {
+    pub control: Option<AttentionReport>,
+    pub reports: Vec<FunctionReport>,
+    pub error: Option<Error>,
+}
+
 pub struct Device<X, A, T> {
     transport: X,
     attention: A,
@@ -190,6 +208,7 @@ pub struct Device<X, A, T> {
     awake_control: u8,
     quarantine: Quarantine,
     f12: Vec<f12::Engine>,
+    f11: Vec<f11::Engine>,
 }
 impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
     pub fn new(
@@ -214,6 +233,7 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
             awake_control: 0,
             quarantine: Quarantine::NotAttempted,
             f12: Vec::new(),
+            f11: Vec::new(),
         })
     }
     pub fn control_state(&self) -> ControlState {
@@ -347,6 +367,7 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
         let result = self.initialize_inner();
         self.fault(result)?;
         self.f12.clear();
+        self.f11.clear();
         self.state = ControlState::Configured;
         Ok(())
     }
@@ -452,7 +473,7 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
     /// returned exact status bytes; this substrate does not fabricate events.
     pub fn poll_control(&mut self) -> Result<Option<AttentionReport>, Error> {
         self.configured()?;
-        if !self.f12.is_empty() {
+        if !self.f12.is_empty() || !self.f11.is_empty() {
             return Err(Error::InputConsumerActive);
         }
         self.poll_attention()
@@ -501,6 +522,9 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
             let f01 = self.f01.ok_or(Error::MissingF01)?;
             self.write_control(f01, self.awake_control)?;
             self.check_status(f01)?;
+            for engine in &self.f11 {
+                engine.resume(&mut self.transport, &self.timer)?;
+            }
             Ok(())
         })();
         self.fault(result)?;

@@ -1,7 +1,7 @@
 //! Stateful F12 packet-register windows and exact input/IRQ effects.
 use super::*;
 
-fn install_f12(h: &Rc<RefCell<Hardware>>, page: u16) {
+pub(super) fn install_f12(h: &Rc<RefCell<Hardware>>, page: u16) {
     let base = page << 8;
     let mut h = h.borrow_mut();
     h.memory[usize::from(base + 0xe9)..usize::from(base + 0xef)]
