@@ -6,6 +6,7 @@
 use crate::bytes::le32;
 const MAX_RAW_BYTES: usize = 4096;
 pub mod power_tables;
+pub mod service;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Size {

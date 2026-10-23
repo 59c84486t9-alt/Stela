@@ -35,6 +35,8 @@ use core::{
     sync::atomic::{Ordering, fence},
 };
 mod hcmd;
+mod lari;
+pub use lari::{LariError, LariPhase, LariRadio};
 mod radio;
 mod recycle;
 mod rx;
@@ -5063,6 +5065,402 @@ mod tests {
             assert_eq!(domain.records.lock().unwrap().maps, 0);
             assert!(state.lock().unwrap().ops.is_empty());
             assert_eq!(drops.load(Ordering::Relaxed), 1);
+        }
+    }
+    struct RadioBios {
+        drops: Arc<AtomicUsize>,
+        unavailable: bool,
+        absent: bool,
+    }
+    impl Drop for RadioBios {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    // SAFETY: this peripheral model executes exact namespace reads for the
+    // same modeled function; production service attachment remains external.
+    unsafe impl super::super::radio::bios::service::BiosIo for RadioBios {
+        fn evaluate(
+            &mut self,
+            request: super::super::radio::bios::service::Request,
+        ) -> Result<
+            super::super::radio::bios::service::Object,
+            super::super::radio::bios::service::IoError,
+        > {
+            use super::super::radio::bios::service::{IoError, Object, Request};
+            if self.unavailable {
+                return Err(IoError::Unavailable);
+            }
+            if self.absent {
+                return Err(IoError::NotFound);
+            }
+            assert_eq!(request, Request::Glai);
+            Ok(Object::Package(vec![
+                Object::Integer(0),
+                Object::Package(vec![Object::Integer(7), Object::Integer(1)]),
+            ]))
+        }
+        fn variable(
+            &mut self,
+            variable: super::super::platform::Variable,
+        ) -> Result<Vec<u8>, super::super::radio::bios::service::IoError> {
+            use super::super::platform::Variable;
+            if self.absent {
+                return Err(super::super::radio::bios::service::IoError::NotFound);
+            }
+            Ok(match variable {
+                Variable::GeneralConfiguration => {
+                    let mut raw = vec![4];
+                    for i in 0..32u32 {
+                        raw.extend(if i == 0 { u32::MAX } else { i }.to_le_bytes());
+                    }
+                    raw
+                }
+                Variable::Wbem => vec![0, 3, 0, 0, 0],
+                _ => panic!("unrequested source"),
+            })
+        }
+    }
+    fn lari_bytes(ax210: bool, schema: u8) -> Vec<u8> {
+        let mut bytes = radio_bytes(ax210);
+        let mut at = 88;
+        while at < bytes.len() {
+            let kind = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+            if kind == 48 {
+                bytes.splice(at + 8 + len..at + 8 + len, [1, 12, schema, 0, 8, 12, 1, 0]);
+                bytes[at + 4..at + 8].copy_from_slice(&((len + 8) as u32).to_le_bytes());
+                break;
+            }
+            at += 8 + len.next_multiple_of(4);
+        }
+        bytes
+    }
+    fn drive_cold_prefix<'a>(
+        init: UnifiedNvm<'a, Model>,
+        source: &Source,
+        domain: &Domain,
+    ) -> (ColdRadio<'a, Model>, u16, u16) {
+        let expected = super::super::radio::InitialPlan::prepare(
+            &init.boot.firmware,
+            init.boot.profile.family(),
+            &init.receipt().unwrap().information,
+        )
+        .unwrap();
+        let mut radio = init.begin_radio().unwrap_or_else(|_| panic!("actual NVM"));
+        unsafe { radio.advance(source) }.unwrap();
+        for (i, command) in expected.commands().iter().enumerate() {
+            let mut id = command.id();
+            if id.group == 0 {
+                id.group = 1;
+            }
+            complete(
+                &radio.initialized.boot,
+                domain,
+                5 + i as u16,
+                6 + i as u16,
+                &command_packet(id, 3 + i as u16, &[]),
+            );
+            unsafe { radio.advance(source) }.unwrap();
+        }
+        assert_eq!(radio.phase(), ColdRadioPhase::PlatformConfigurationRequired);
+        let count = expected.commands().len() as u16;
+        (radio, 3 + count, 5 + count)
+    }
+    #[test]
+    fn lari_actual_bios_source_commands_and_dma_retirement_both_families() {
+        for ax210 in [false, true] {
+            let profile = if ax210 { ax210_profile() } else { profile() };
+            let bytes = lari_bytes(ax210, if ax210 { 12 } else { 6 });
+            let catalog = catalog_for(&profile, profile.family().firmware_name(), &bytes);
+            let empty = resources::Catalog::from_handoff(vec![]).unwrap();
+            let source = Source::default();
+            let domain = Arc::new(Domain::default());
+            let state = if ax210 {
+                ax210_state()
+            } else {
+                Arc::new(Mutex::new(ModelState::default()))
+            };
+            let drops = Arc::new(AtomicUsize::new(0));
+            let bios_drops = Arc::new(AtomicUsize::new(0));
+            let boot = if ax210 {
+                let (observation, step_catalog) = step_fixture();
+                start_ax210(
+                    &catalog,
+                    super::super::platform::load_step(observation, &step_catalog).unwrap(),
+                    &source,
+                    &domain,
+                    &state,
+                    &drops,
+                )
+            } else {
+                start(&catalog, &source, &domain, &state, &drops)
+            };
+            let boot = command_ready(boot, &empty, &source, &domain, &state);
+            let init = drive_nvm(boot, &source, &domain, &state);
+            let cold = init.begin_radio().unwrap_or_else(|_| panic!("actual NVM"));
+            let before = state.lock().unwrap().ops.len();
+            let rejected = unsafe {
+                cold.begin_lari(RadioBios {
+                    drops: bios_drops.clone(),
+                    unavailable: false,
+                    absent: false,
+                })
+            }
+            .err()
+            .unwrap();
+            assert_eq!(state.lock().unwrap().ops.len(), before);
+            assert_eq!(bios_drops.load(Ordering::Relaxed), 0);
+            let (mut cold, bios) = *rejected;
+            // Resume the original owner, without copying its initialization.
+            let expected = super::super::radio::InitialPlan::prepare(
+                &cold.initialized.boot.firmware,
+                profile.family(),
+                &cold.initialized_nvm().information,
+            )
+            .unwrap();
+            unsafe { cold.advance(&source) }.unwrap();
+            for (i, command) in expected.commands().iter().enumerate() {
+                let mut id = command.id();
+                if id.group == 0 {
+                    id.group = 1;
+                }
+                complete(
+                    &cold.initialized.boot,
+                    &domain,
+                    5 + i as u16,
+                    6 + i as u16,
+                    &command_packet(id, 3 + i as u16, &[]),
+                );
+                unsafe { cold.advance(&source) }.unwrap();
+            }
+            let mut lari =
+                unsafe { cold.begin_lari(bios) }.unwrap_or_else(|_| panic!("real prefix"));
+            assert_eq!(
+                unsafe { lari.advance(&source) }.unwrap(),
+                LariPhase::Waiting { command: 8 }
+            );
+            let commands: Vec<_> = lari
+                .plan()
+                .unwrap()
+                .commands()
+                .map(|(id, b)| (id, b.to_vec()))
+                .collect();
+            assert_eq!(
+                commands.iter().map(|(id, _)| id.opcode).collect::<Vec<_>>(),
+                [8, 1]
+            );
+            assert_eq!(lari.platform_reads().len(), 3); // actual GLAI, GeneralCfg, WBEM
+            let mut copied = lari.plan().unwrap().clone();
+            let copied_inputs = copied.inputs().to_owned();
+            copied = super::super::radio::lari::Plan::prepare(
+                &lari.radio.initialized.boot.firmware,
+                0,
+                copied_inputs,
+            )
+            .unwrap();
+            assert_eq!(copied.commands().count(), 2); // no owner/advancement authority
+            let base = expected.commands().len() as u16;
+            for (i, (id, payload)) in commands.iter().enumerate() {
+                let sequence = 3 + base + i as u16;
+                let boot = &lari.radio.initialized.boot;
+                let descriptor = device_read(
+                    &domain,
+                    boot.command.region().address,
+                    usize::from(sequence) * 256,
+                    256,
+                );
+                let first = u64::from_le_bytes(descriptor[4..12].try_into().unwrap());
+                let encoded =
+                    super::super::command::Command::encode(*id, 0, sequence, payload).unwrap();
+                let mut emitted = device_read(&domain, first, 0, encoded.bytes().len().min(20));
+                if encoded.bytes().len() > 20 {
+                    let rest = u64::from_le_bytes(descriptor[14..22].try_into().unwrap());
+                    emitted.extend(device_read(&domain, rest, 0, encoded.bytes().len() - 20));
+                }
+                assert_eq!(emitted, encoded.bytes());
+                let bell = state.lock().unwrap().registers[&0x460];
+                assert_eq!(
+                    unsafe { lari.advance(&source) }.unwrap(),
+                    LariPhase::Waiting { command: id.opcode }
+                );
+                assert_eq!(state.lock().unwrap().registers[&0x460], bell);
+                complete(
+                    &lari.radio.initialized.boot,
+                    &domain,
+                    5 + base + i as u16,
+                    6 + base + i as u16,
+                    &command_packet(*id, sequence, &[0xa5 + i as u8]),
+                );
+                if i == 0 {
+                    let mut r = domain.records.lock().unwrap();
+                    r.cpu_sync_fail = Some(r.cpu_syncs + 1);
+                    drop(r);
+                    assert!(matches!(
+                        unsafe { lari.advance(&source) },
+                        Err(LariError::Boot(Error::CommandReclaim(_)))
+                    ));
+                    assert_eq!(lari.phase(), LariPhase::Waiting { command: 8 });
+                    assert_eq!(state.lock().unwrap().registers[&0x460], bell);
+                    domain.records.lock().unwrap().cpu_sync_fail = None;
+                }
+                assert_eq!(
+                    unsafe { lari.advance(&source) }.unwrap(),
+                    if i == 0 {
+                        LariPhase::Waiting { command: 1 }
+                    } else {
+                        LariPhase::RxQueueConfigurationRequired
+                    }
+                );
+            }
+            assert_eq!(
+                lari.responses()
+                    .iter()
+                    .map(|r| r.raw.as_slice())
+                    .collect::<Vec<_>>(),
+                [&[0xa5][..], &[0xa6][..]]
+            );
+            let ops = state.lock().unwrap().ops.len();
+            assert_eq!(
+                unsafe { lari.advance(&source) }.unwrap(),
+                LariPhase::RxQueueConfigurationRequired
+            );
+            assert_eq!(state.lock().unwrap().ops.len(), ops);
+            assert_eq!(bios_drops.load(Ordering::Relaxed), 0);
+            lari.stop().unwrap();
+            drop(lari);
+            assert!(domain.records.lock().unwrap().live.is_empty());
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+            assert_eq!(bios_drops.load(Ordering::Relaxed), 1);
+        }
+    }
+    #[test]
+    fn lari_schema_missing_services_rfkill_and_uncertain_command_keep_original_owner() {
+        for case in 0..7 {
+            let bytes = lari_bytes(false, if case == 0 { 99 } else { 6 });
+            let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
+            let empty = resources::Catalog::from_handoff(vec![]).unwrap();
+            let source = Source::default();
+            let domain = Arc::new(Domain::default());
+            let state = Arc::new(Mutex::new(ModelState::default()));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let bios_drops = Arc::new(AtomicUsize::new(0));
+            let boot = start(&catalog, &source, &domain, &state, &drops);
+            let boot = command_ready(boot, &empty, &source, &domain, &state);
+            let init = drive_nvm(boot, &source, &domain, &state);
+            let (cold, sequence, entry) = drive_cold_prefix(init, &source, &domain);
+            let mut lari = unsafe {
+                cold.begin_lari(RadioBios {
+                    drops: bios_drops.clone(),
+                    unavailable: case == 1,
+                    absent: case == 6,
+                })
+            }
+            .unwrap_or_else(|_| panic!("prefix"));
+            let ops = state.lock().unwrap().ops.len();
+            let allocations = source.calls.load(Ordering::Relaxed);
+            if case == 2 {
+                *state.lock().unwrap().registers.get_mut(&0x24).unwrap() &= !0x08000000;
+            }
+            if case == 4 {
+                let mut r = domain.records.lock().unwrap();
+                r.sync_fail = Some(r.syncs + 2);
+            }
+            let result = unsafe { lari.advance(&source) };
+            match case {
+                0 => {
+                    assert_eq!(
+                        result,
+                        Err(LariError::Plan(super::super::radio::lari::Error::Version(
+                            99
+                        )))
+                    );
+                    assert!(lari.platform_reads().is_empty());
+                }
+                1 => {
+                    use super::super::radio::bios::service::{
+                        Error as BiosError, IoError, Request,
+                    };
+                    assert_eq!(
+                        result,
+                        Err(LariError::Platform(BiosError::IncompleteAcpi(
+                            Request::Glai,
+                            IoError::Unavailable
+                        )))
+                    );
+                }
+                2 => assert_eq!(result, Err(LariError::Boot(Error::RfKilled))),
+                3 => {
+                    result.unwrap();
+                    complete(
+                        &lari.radio.initialized.boot,
+                        &domain,
+                        entry,
+                        entry + 1,
+                        &command_packet(
+                            super::super::command::Id {
+                                group: 12,
+                                opcode: 1,
+                                version: 0,
+                            },
+                            sequence,
+                            &[],
+                        ),
+                    );
+                    assert_eq!(
+                        unsafe { lari.advance(&source) },
+                        Err(LariError::Boot(Error::InitializationResponse {
+                            group: 12,
+                            command: 1
+                        }))
+                    );
+                }
+                4 => {
+                    assert!(matches!(result, Err(LariError::Boot(Error::Dma(_)))));
+                }
+                5 => {
+                    result.unwrap();
+                }
+                6 => {
+                    assert_eq!(result, Ok(LariPhase::RxQueueConfigurationRequired));
+                    assert_eq!(lari.plan().unwrap().commands().count(), 0);
+                    assert!(lari.responses().is_empty());
+                    assert_eq!(state.lock().unwrap().ops.len(), ops);
+                    assert_eq!(source.calls.load(Ordering::Relaxed), allocations);
+                }
+                _ => unreachable!(),
+            }
+            if case <= 1 {
+                assert_eq!(state.lock().unwrap().ops.len(), ops);
+                assert_eq!(source.calls.load(Ordering::Relaxed), allocations);
+            }
+            if case == 4 || case == 5 {
+                if case == 5 {
+                    let mut s = state.lock().unwrap();
+                    s.fail = Some(s.ops.len() + 1);
+                    drop(s);
+                    assert!(lari.stop().is_err());
+                }
+                let live = domain.records.lock().unwrap().live.len();
+                assert!(live > 0);
+                drop(lari);
+                assert_eq!(bios_drops.load(Ordering::Relaxed), 0);
+                assert_eq!(drops.load(Ordering::Relaxed), 0);
+                assert_eq!(domain.records.lock().unwrap().live.len(), live);
+            } else {
+                assert_eq!(
+                    lari.phase(),
+                    if case == 6 {
+                        LariPhase::RxQueueConfigurationRequired
+                    } else {
+                        LariPhase::Failed
+                    }
+                );
+                lari.stop().unwrap();
+                drop(lari);
+                assert_eq!(bios_drops.load(Ordering::Relaxed), 1);
+                assert_eq!(drops.load(Ordering::Relaxed), 1);
+            }
         }
     }
 }
