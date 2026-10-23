@@ -444,6 +444,13 @@ impl super::ec::FirmwareLock for EcGlobalLock<'_> {
             .checked_add(1)
             .ok_or(super::ec::LockError)?;
         self.session.ec_global_locks.set(count);
+        if self.held.as_ref().unwrap().1.check().is_err() {
+            // A native callback may have invalidated namespace admission while
+            // acquisition waited. Release actual firmware ownership, never
+            // authorize EC I/O from the stale namespace observation.
+            self.release()?;
+            return Err(super::ec::LockError);
+        }
         Ok(())
     }
 

@@ -25,6 +25,8 @@ struct Peripheral {
     bad_ack: bool,
     fail_access: Option<usize>,
     accesses: usize,
+    effect_failure: Option<usize>,
+    access_times: Vec<u64>,
 }
 impl Peripheral {
     fn access(&mut self) -> Result<(), IoError> {
@@ -33,6 +35,7 @@ impl Peripheral {
             "register transaction outside firmware arbitration"
         );
         self.accesses += 1;
+        self.access_times.push(self.time.get());
         if self.fail_access == Some(self.accesses) {
             return Err(IoError);
         }
@@ -98,6 +101,9 @@ impl Peripheral {
                 self.freeze = true;
             }
         }
+        if self.effect_failure == Some(self.accesses) {
+            return Err(IoError);
+        }
         Ok(())
     }
 }
@@ -114,6 +120,9 @@ impl Registers for Model {
         m.access()?;
         assert_ne!(m.status & OBF, 0);
         m.status &= !OBF;
+        if m.effect_failure == Some(m.accesses) {
+            return Err(IoError);
+        }
         Ok(m.output)
     }
     fn command(&mut self, value: u8) -> Result<(), IoError> {
@@ -179,6 +188,8 @@ fn model(burst: bool) -> (Controller, Rc<RefCell<Peripheral>>) {
         bad_ack: false,
         fail_access: None,
         accesses: 0,
+        effect_failure: None,
+        access_times: Vec::new(),
     }));
     let config = Config {
         timeout_us: 100,
@@ -369,4 +380,55 @@ fn failed_burst_disable_keeps_original_error_and_never_claims_reuse() {
         assert_eq!(ec.read(0).unwrap_err().kind, ErrorKind::NeedsReset);
         assert_eq!(m.borrow().accesses, count);
     }
+}
+
+#[test]
+fn inherited_input_completion_is_not_mistaken_for_our_response() {
+    let (mut ec, m) = model(false);
+    // A pre-handoff firmware query is still in IBF and emits a byte later.
+    // Exclusive ownership prevents new competing producers, not this old byte.
+    m.borrow_mut().status = IBF;
+    m.borrow_mut().queries.push_back(0x99);
+    m.borrow_mut().pending = Some((3, true, QUERY));
+    let error = ec.read(7).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Busy);
+    assert!(!error.published);
+    assert!(m.borrow().commands.is_empty());
+    assert_eq!(m.borrow().output, 0x99);
+    assert_ne!(m.borrow().status & OBF, 0);
+    assert!(!ec.needs_reset());
+}
+
+#[test]
+fn effect_then_error_keeps_guard_before_burst_cleanup_accesses() {
+    // Exercise every command/input/output data access from a successful burst
+    // region, with an error returned only AFTER that register's hardware effect.
+    let (mut baseline, m) = model(true);
+    baseline.config.polling_guard_us = 10;
+    baseline.config.timeout_us = 500;
+    baseline.read_region(0, 16).unwrap();
+    let count = m.borrow().accesses;
+    let mut effect_failures = 0;
+    for failure in 1..=count {
+        let (mut ec, m) = model(true);
+        ec.config.polling_guard_us = 10;
+        ec.config.timeout_us = 500;
+        m.borrow_mut().effect_failure = Some(failure);
+        // Status reads do not inject an effect-then-error failure.
+        if let Err(error) = ec.read_region(0, 16) {
+            effect_failures += 1;
+            assert_eq!(error.kind, ErrorKind::Io);
+            assert!(ec.needs_reset());
+            let times = &m.borrow().access_times;
+            if let Some(next) = times.get(failure) {
+                assert!(
+                    *next - times[failure - 1] >= 10,
+                    "recovery accessed registers before guard after effect at {failure}"
+                );
+            }
+            assert!(!m.borrow().locked);
+        }
+    }
+    // Burst command/ACK, two READ command/address/data triples, disable command.
+    assert_eq!(effect_failures, 9);
 }

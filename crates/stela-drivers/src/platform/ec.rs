@@ -277,19 +277,19 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
         // Mark before writing: a fallible provider can report an uncertain write.
         self.published = true;
         let result = self.registers.command(command);
-        self.io(result)?;
         self.last_access = Some(self.timer.now_us());
+        self.io(result)?;
         for &byte in input {
             self.wait(start, IBF, 0, Phase::Input)?;
             let result = self.registers.write_data(byte);
-            self.io(result)?;
             self.last_access = Some(self.timer.now_us());
+            self.io(result)?;
         }
         for byte in &mut *output {
             self.wait(start, OBF, OBF, Phase::Output)?;
             let result = self.registers.read_data();
-            *byte = self.io(result)?;
             self.last_access = Some(self.timer.now_us());
+            *byte = self.io(result)?;
         }
         if output.is_empty() {
             self.wait(start, IBF, 0, Phase::Completion)?;
@@ -310,8 +310,9 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
             .map_err(|_| self.error(ErrorKind::FirmwareLock))?;
         let start = self.timer.now_us();
         let result = (|| {
-            let status = self.registers.status();
-            self.status = self.io(status)?;
+            self.wait(start, IBF, 0, Phase::Command)?;
+            // Recheck after IBF drains: an inherited command can produce OBF
+            // while we waited. Its response is not data from our new request.
             // Do not discard another transaction's pending output or burst.
             if self.status & (OBF | BURST) != 0 {
                 return Err(self.error(ErrorKind::Busy));
