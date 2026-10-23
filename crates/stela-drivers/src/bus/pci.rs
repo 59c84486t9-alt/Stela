@@ -10,6 +10,7 @@ use core::{fmt, ops::Range};
 
 mod aspm;
 pub mod msi;
+pub mod msix;
 pub use aspm::{disable_aspm_l1_2_link, disable_aspm_link};
 
 const VENDOR: u16 = 0x00;
