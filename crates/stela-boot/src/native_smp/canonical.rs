@@ -121,6 +121,49 @@ pub(crate) unsafe fn prepare<'a, D: Devices>(
     assignments: &[WorkerBinding],
     processor_power: &[stela_runtime::machine::engine::ProcessorBinding],
 ) -> Result<CanonicalMachine<'a, D>, &'static str> {
+    // SAFETY: forwarded unchanged cold construction contract; diagnostic
+    // callers retain any already prepared CPU lock state.
+    unsafe {
+        prepare_with_locks(
+            handoff,
+            capture,
+            executors,
+            sender,
+            owner,
+            ram,
+            cpu,
+            devices,
+            profile,
+            boot_processor,
+            assignments,
+            processor_power,
+            None,
+        )
+    }
+}
+
+/// Cold construction with the actual iBoot core-lock handoff. Initial CTRR,
+/// lock state and source translation controls settle before native owners or
+/// any frame loans are published. `None` preserves an already prepared Cpu.
+///
+/// # Safety
+/// The complete cold ownership and producer contract of `prepare` applies.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn prepare_with_locks<'a, D: Devices>(
+    handoff: &'static Handoff,
+    capture: &'static Capture,
+    executors: &'a Executors,
+    sender: &'a Apic,
+    owner: &'a mut host::HostOwner,
+    ram: Arc<RegisteredSystemRam>,
+    cpu: Cpu,
+    devices: D,
+    profile: CpuProfile,
+    boot_processor: usize,
+    assignments: &[WorkerBinding],
+    processor_power: &[stela_runtime::machine::engine::ProcessorBinding],
+    core_locks: Option<stela_runtime::machine::ctrr::Handoff>,
+) -> Result<CanonicalMachine<'a, D>, &'static str> {
     let cores = handoff.native_resources.cores as usize;
     if cores == 0
         || cores > capture.core_count as usize
@@ -153,6 +196,9 @@ pub(crate) unsafe fn prepare<'a, D: Devices>(
     let transport = FixedWorkers::new(executors, sender, handoff.tsc_hz, Arc::clone(&ram));
     let host = ServiceHost::new(owner.host(), transport, Arc::clone(&ram));
     let mut machine = Machine::new_at(cpu, host, devices, profile, ram.target(), boot_processor)?;
+    if let Some(core_locks) = core_locks {
+        machine.hand_off_core_locks(core_locks);
+    }
     machine
         .install_shared_memory_for_active_processors(ram, &EventDomain::new())
         .map_err(|_| "cold source controls/canonical CPU ownership refused before entry")?;

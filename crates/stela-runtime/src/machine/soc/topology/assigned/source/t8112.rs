@@ -636,7 +636,26 @@ mod tests {
             assert_eq!(plan.pes().len(), count);
             assert_eq!(plan.pes()[0].reg, 0x100);
             assert_eq!(plan.pes()[0].core_power.device, 5);
-            assert_eq!(resources.clusters.len(), if count == 1 { 1 } else { 2 });
+            let mut completed = BTreeSet::new();
+            let mut previous = None;
+            for pe in plan.pes() {
+                if previous != Some(pe.cluster) {
+                    assert!(!completed.contains(&pe.cluster));
+                    if let Some(cluster) = previous {
+                        completed.insert(cluster);
+                    }
+                    previous = Some(pe.cluster);
+                }
+            }
+            assert_eq!(
+                resources
+                    .slots
+                    .iter()
+                    .map(|slot| slot.reg)
+                    .collect::<Vec<_>>(),
+                [0x100, 0x101, 0x102, 0x103, 0, 1, 2, 3][..count]
+            );
+            assert_eq!(resources.clusters.len(), if count <= 4 { 1 } else { 2 });
             assert_eq!(
                 resources
                     .powers

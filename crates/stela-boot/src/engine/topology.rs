@@ -16,8 +16,8 @@ use stela_loader::apple_device_tree::{
 use stela_runtime::machine::{
     CpuProfile,
     soc::assigned::{
-        AssignedCore, Assignment, BspSource, GuestSlotId, Plan, PlanIdentity, RegisterRange,
-        RetainedResources, RetainedRoster, SourceIdentity,
+        AssignedCore, Assignment, BspSource, Plan, PlanIdentity, RegisterRange, RetainedResources,
+        RetainedRoster, SourceIdentity,
     },
 };
 
@@ -29,6 +29,8 @@ use crate::native_smp::{firmware::Capture, topology as native};
 use crate::{
     boot_live_tree::LiveTree, boot_native_capture::Capture, boot_native_topology as native,
 };
+#[cfg(test)]
+use stela_runtime::machine::soc::assigned::GuestSlotId;
 
 /// These count consumers are independently source-qualified for the retained
 /// Apple ARM CPU/AIC schema (original J314s audit). They all use the same Plan.
@@ -60,6 +62,7 @@ pub(crate) const COUNT_FIELDS: [CountField<'static>; 4] = [
 /// started by this adapter. Captured AP observations do not imply AP startup.
 pub(crate) struct BspRoster<'a> {
     capture: &'a Capture,
+    #[cfg(test)]
     source: native::Processor,
     cores: [AssignedCore; 1],
 }
@@ -106,6 +109,7 @@ impl<'a> BspRoster<'a> {
         }
         Ok(Self {
             capture,
+            #[cfg(test)]
             source,
             cores: [AssignedCore {
                 worker,
@@ -116,6 +120,7 @@ impl<'a> BspRoster<'a> {
             }],
         })
     }
+    #[cfg(test)]
     pub(crate) fn source(&self) -> native::Processor {
         self.source
     }
@@ -450,6 +455,7 @@ fn matching_count(actual: &CountField<'_>, expected: &CountField<'_>) -> bool {
 /// retained owner must supply actual qualified kinds, slots, cache geometry,
 /// interrupt/start/power identities and whole-consumer capacities. Unknown
 /// ownership or initial state is not supplied by this topology operation.
+#[cfg(test)]
 pub(crate) fn prepare<'a>(
     roster: &'a BspRoster<'_>,
     owner: &'a dyn RetainedResources,
@@ -1021,7 +1027,7 @@ mod tests {
         let source = Source::t8112(&original, &live, identity, 0x100).unwrap();
         let capture = capture();
         let roster = BspRoster::observed(&capture, 0, 42).unwrap();
-        let prepared = source.prepare(&roster, profile).unwrap();
+        let prepared = source.prepare(&roster, profile.clone()).unwrap();
         assert_eq!(prepared.plan.pes().len(), 1);
         assert_eq!(prepared.profile.processors.len(), 1);
         let join = prepared.join(0x100).unwrap();
@@ -1040,6 +1046,50 @@ mod tests {
             tree.node("/arm-io/pmgr")
         );
         assert_eq!(source.resources.source(), original);
+        // Construction fixture only: exercise the actual selected-source to
+        // loader cache-interval/watchdog/profile projection boundary at every
+        // admitted cardinality. This does not create an actual AP executor.
+        struct Roster(Vec<AssignedCore>);
+        impl RetainedRoster for Roster {
+            fn revision(&self) -> u64 {
+                1
+            }
+            fn cores(&self) -> &[AssignedCore] {
+                &self.0
+            }
+        }
+        for count in 1..=8 {
+            let roster = Roster(
+                (0..count)
+                    .map(|worker| AssignedCore {
+                        worker,
+                        package: 0,
+                        core: worker as u32,
+                        apic: 42 + worker as u32,
+                        started: true,
+                    })
+                    .collect(),
+            );
+            let selected =
+                Source::t8112_assigned(&original, &live, identity, 0x100, count).unwrap();
+            let prepared = selected.prepare(&roster, profile.clone()).unwrap();
+            let board = soc::board(&prepared.tree.serialize()).unwrap();
+            assert_eq!(board.boot_processor.unwrap().cpu, 0);
+            assert_eq!(board.cpus.processors, prepared.profile.processors);
+            assert_eq!(prepared.worker_bindings().unwrap().len(), count);
+            assert_eq!(
+                prepared
+                    .tree
+                    .node("/cpus")
+                    .unwrap()
+                    .children
+                    .iter()
+                    .map(|node| node.property("reg").unwrap().as_u32().unwrap())
+                    .collect::<Vec<_>>(),
+                [0x100, 0x101, 0x102, 0x103, 0, 1, 2, 3][..count]
+            );
+            assert_eq!(prepared.receipt.cpu_ids.len(), count);
+        }
         let override_live = captured_live_tree(tree, "-v acc-harvesting=0");
         assert!(
             Source::t8112(&original, &override_live, identity, 0x100)

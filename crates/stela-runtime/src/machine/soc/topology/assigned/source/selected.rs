@@ -7,7 +7,9 @@ use super::*;
 impl<'a> BspSource<'a> {
     /// Construct metadata for `count` actual assigned workers, BSP first. The
     /// caller must retain a started physical roster and join native authority.
-    /// Selection keeps the source boot PE, then other PEs in source order.
+    /// Selection keeps the source boot PE first and each complex contiguous
+    /// for XNU's L2-sharing interval consumer, preserving source order within
+    /// each complex after the boot member.
     /// No running state, power ACK, interrupt or executor is manufactured here.
     pub fn t8112_assigned(
         original: &'a [u8],
@@ -31,10 +33,16 @@ impl<'a> BspSource<'a> {
             return Err("assigned T8112 worker count exceeds the qualified source envelope".into());
         }
         let mut regs = vec![boot_reg];
-        for node in &nodes {
-            let reg = word(node, "reg")?;
-            if reg != boot_reg && regs.len() < count {
-                regs.push(reg);
+        let boot_complex = boot_reg >> 8;
+        for same_complex in [true, false] {
+            for node in &nodes {
+                let reg = word(node, "reg")?;
+                if reg != boot_reg
+                    && (reg >> 8 == boot_complex) == same_complex
+                    && regs.len() < count
+                {
+                    regs.push(reg);
+                }
             }
         }
         let mut result = Self::t8112(original, prepared, identity, boot_reg, acc_harvesting)?;
