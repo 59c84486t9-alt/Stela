@@ -512,9 +512,7 @@ impl<'a> Iterator for DeviceEntries<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemoryScope {
-    All {
-        segment: u16,
-    },
+    AllDevices,
     Device(RequesterId),
     Range {
         first: RequesterId,
@@ -543,33 +541,41 @@ impl<'a> Ivmd<'a> {
         self.raw[1]
     }
 
-    pub fn segment(self) -> u16 {
-        // Pinned AMD driver's private header, not older ACPICA's reserved u64.
-        read16(self.raw, 8)
+    /// Defined only for per-device/range records. AMD 48882 rev 3.11 Table 112
+    /// reserves this field for type 20; its scope is all devices in the system.
+    pub fn segment(self) -> Option<u16> {
+        match self.raw[0] {
+            0x20 => None,
+            0x21 | 0x22 => Some(read16(self.raw, 8)),
+            _ => unreachable!("validated IVMD type"),
+        }
     }
 
+    /// Raw field: reserved for type 20, requester ID for type 21, range start
+    /// for type 22. Reserved bytes do not narrow the reported scope.
     pub fn device_id(self) -> u16 {
         read16(self.raw, 4)
     }
 
+    /// Raw field: reserved for types 20/21, inclusive range end for type 22.
     pub fn auxiliary(self) -> u16 {
         read16(self.raw, 6)
     }
 
     pub fn scope(self) -> MemoryScope {
-        let first = RequesterId {
-            segment: self.segment(),
-            device_id: self.device_id(),
-        };
         match self.raw[0] {
-            0x20 => MemoryScope::All {
-                segment: self.segment(),
-            },
-            0x21 => MemoryScope::Device(first),
+            0x20 => MemoryScope::AllDevices,
+            0x21 => MemoryScope::Device(RequesterId {
+                segment: read16(self.raw, 8),
+                device_id: self.device_id(),
+            }),
             0x22 => MemoryScope::Range {
-                first,
+                first: RequesterId {
+                    segment: read16(self.raw, 8),
+                    device_id: self.device_id(),
+                },
                 last: RequesterId {
-                    segment: self.segment(),
+                    segment: read16(self.raw, 8),
                     device_id: self.auxiliary(),
                 },
             },
@@ -1125,7 +1131,64 @@ mod tests {
     }
 
     #[test]
-    fn memory_policy_keeps_private_segment_flags_and_unrounded_addresses() {
+    fn global_memory_scope_ignores_reserved_ids_and_neighboring_segments() {
+        for segment in [0, 0xffff] {
+            let before = hardware(0x10, segment, 8, &[]);
+            let after = hardware(0x10, segment ^ 0xffff, 8, &[]);
+            for (device, auxiliary, reserved_segment) in
+                [(0, 0, 0), (0xffff, 0, 0x1234), (0xaffe, 0x8123, 0xfedc)]
+            {
+                for flags in [0, 0x0f] {
+                    let mut global = vec![0; IVMD_HEADER];
+                    global[0] = 0x20;
+                    global[1] = flags;
+                    put16(&mut global, 2, IVMD_HEADER as u16);
+                    put16(&mut global, 4, device);
+                    put16(&mut global, 6, auxiliary);
+                    put16(&mut global, 8, reserved_segment);
+                    global[10..16].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+                    put64(&mut global, 16, 0x12345);
+                    put64(&mut global, 24, 0x1000);
+                    for descriptions in [
+                        [global.as_slice(), before.as_slice(), after.as_slice()],
+                        [before.as_slice(), global.as_slice(), after.as_slice()],
+                        [before.as_slice(), after.as_slice(), global.as_slice()],
+                    ] {
+                        let raw = table(&descriptions);
+                        let original = raw.clone();
+                        let parsed = Ivrs::parse(&raw, 2).unwrap();
+                        assert_eq!(parsed.units().len(), 2);
+                        let mut definitions = parsed.memory_definitions();
+                        let memory = definitions.next().unwrap();
+                        assert!(definitions.next().is_none());
+                        assert_eq!(memory.segment(), None);
+                        assert_eq!(memory.scope(), MemoryScope::AllDevices);
+                        assert_eq!(
+                            (memory.device_id(), memory.auxiliary()),
+                            (device, auxiliary)
+                        );
+                        assert_eq!(memory.raw(), global);
+                        assert_eq!(memory.raw().as_ptr(), raw[memory.offset()..].as_ptr());
+                        // Preserve context for later live-policy admission;
+                        // neither neighboring segment narrows raw type-20 scope.
+                        let mut offset = TABLE_HEADER;
+                        for (block, expected) in parsed.blocks().zip(descriptions) {
+                            let (bytes, actual_offset) = match block {
+                                Block::Hardware(unit) => (unit.raw(), unit.offset()),
+                                Block::Memory(item) => (item.raw(), item.offset()),
+                            };
+                            assert_eq!((bytes, actual_offset), (expected, offset));
+                            offset += expected.len();
+                        }
+                        assert_eq!(raw, original);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn memory_policy_keeps_type_specific_scope_flags_and_unrounded_addresses() {
         let mut blocks = Vec::new();
         for kind in [0x20, 0x21, 0x22] {
             let mut block = vec![0; IVMD_HEADER];
@@ -1145,7 +1208,7 @@ mod tests {
             .memory_definitions()
             .collect();
         assert_eq!(memory.len(), 3);
-        for item in &memory {
+        for (index, item) in memory.iter().enumerate() {
             assert_eq!(
                 (
                     item.flags(),
@@ -1154,10 +1217,16 @@ mod tests {
                     item.length(),
                     item.end()
                 ),
-                (0x0f, 0xfedc, 0x12345, 0x23456, 0x3579b)
+                (
+                    0x0f,
+                    (index != 0).then_some(0xfedc),
+                    0x12345,
+                    0x23456,
+                    0x3579b
+                )
             );
         }
-        assert_eq!(memory[0].scope(), MemoryScope::All { segment: 0xfedc });
+        assert_eq!(memory[0].scope(), MemoryScope::AllDevices);
         assert_eq!(
             memory[1].scope(),
             MemoryScope::Device(RequesterId {
