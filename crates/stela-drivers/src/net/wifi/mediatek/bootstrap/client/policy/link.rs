@@ -1286,7 +1286,7 @@ mod tests {
         link.state().source.1.store(true, Ordering::Relaxed);
         let head = model.queues[&0xd4300].lock().unwrap().head;
         let submission = link.transmit(&eth(0x800)).unwrap_err();
-        assert!(!format!("{submission}").contains("ProtocolVersion"));
+        assert!(!format!("{submission:?}").contains("ProtocolVersion"));
         assert_eq!(model.queues[&0xd4300].lock().unwrap().head, head);
         let original = deferred_message(&link);
         assert!(original.contains("ProtocolVersion"));
