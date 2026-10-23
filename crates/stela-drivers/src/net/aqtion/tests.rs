@@ -1756,3 +1756,472 @@ fn native_refused_d3_requires_fresh_d0_acknowledgement_before_restart() {
     assert_eq!(net.power, PciPower::D0);
     net.retire().unwrap();
 }
+
+// Authored unchanged-source comparison and parser checks: UNRUN. This peer is
+// deliberately independent of the firmware/DMA model above.
+mod registers_oracle {
+    use super::super::registers as f;
+    use super::*;
+    use alloc::collections::BTreeSet;
+
+    const INITIAL: &[u32] = &[0, 0xa5c3_5a3c, 0x5a3c_a5c3];
+    const RINGS: &[u32] = &[0, 7, 31];
+    const FILTERS: &[u32] = &[0, 16, 32];
+    const TCS: &[u32] = &[0, 1, 3];
+    const SCALAR: &[u32] = &[0];
+    const BIT: &[u32] = &[0, 1];
+    const WORD: &[u32] = &[0, 0x1234_5678, u32::MAX];
+    const TAIL: &[u32] = &[0, 63, 8191];
+    const CASE_COUNT: usize = 600;
+
+    #[derive(Clone, Copy)]
+    enum Access {
+        Bits,
+        Word,
+        Get(u32), // Independent declared result bound, not derived from Field.
+    }
+    struct RegisterCase {
+        name: &'static str,
+        field: Field,
+        indexes: &'static [u32],
+        values: &'static [u32],
+        access: Access,
+    }
+    // Actual production constants only. Input domains are explicit donor-width
+    // encodings, independent of Field addresses/masks/shifts. No expected result
+    // or address is calculated from this table: those come from original Linux.
+    const FIELDS: &[RegisterCase] = &[
+        RegisterCase {
+            name: "hw_atl_rdm_rx_desc_en_set",
+            field: f::RDM_RX_DESC_EN_SET,
+            indexes: RINGS,
+            values: BIT,
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_reg_rx_dma_desc_base_addresslswset",
+            field: f::REG_RX_DMA_DESC_BASE_ADDRESSLSWSET,
+            indexes: RINGS,
+            values: WORD,
+            access: Access::Word,
+        },
+        RegisterCase {
+            name: "hw_atl_reg_rx_dma_desc_base_addressmswset",
+            field: f::REG_RX_DMA_DESC_BASE_ADDRESSMSWSET,
+            indexes: RINGS,
+            values: WORD,
+            access: Access::Word,
+        },
+        RegisterCase {
+            name: "hw_atl_rdm_rx_desc_len_set",
+            field: f::RDM_RX_DESC_LEN_SET,
+            indexes: RINGS,
+            values: &[0, 1, 1023],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_rdm_rx_desc_data_buff_size_set",
+            field: f::RDM_RX_DESC_DATA_BUFF_SIZE_SET,
+            indexes: RINGS,
+            values: &[0, 1, 31],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_rdm_rx_desc_head_buff_size_set",
+            field: f::RDM_RX_DESC_HEAD_BUFF_SIZE_SET,
+            indexes: RINGS,
+            values: &[0, 1, 31],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_rdm_rx_desc_head_splitting_set",
+            field: f::RDM_RX_DESC_HEAD_SPLITTING_SET,
+            indexes: RINGS,
+            values: BIT,
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_reg_rx_dma_desc_tail_ptr_set",
+            field: f::RX_TAIL,
+            indexes: RINGS,
+            values: TAIL,
+            access: Access::Word,
+        },
+        RegisterCase {
+            name: "hw_atl_tdm_tx_desc_en_set",
+            field: f::TDM_TX_DESC_EN_SET,
+            indexes: RINGS,
+            values: BIT,
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_reg_tx_dma_desc_base_addresslswset",
+            field: f::REG_TX_DMA_DESC_BASE_ADDRESSLSWSET,
+            indexes: RINGS,
+            values: WORD,
+            access: Access::Word,
+        },
+        RegisterCase {
+            name: "hw_atl_reg_tx_dma_desc_base_addressmswset",
+            field: f::REG_TX_DMA_DESC_BASE_ADDRESSMSWSET,
+            indexes: RINGS,
+            values: WORD,
+            access: Access::Word,
+        },
+        RegisterCase {
+            name: "hw_atl_tdm_tx_desc_len_set",
+            field: f::TDM_TX_DESC_LEN_SET,
+            indexes: RINGS,
+            values: &[0, 1, 1023],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_tdm_tx_desc_head_ptr_get",
+            field: f::TX_HEAD,
+            indexes: RINGS,
+            values: SCALAR,
+            access: Access::Get(8191),
+        },
+        RegisterCase {
+            name: "hw_atl_reg_tx_dma_desc_tail_ptr_set",
+            field: f::TX_TAIL,
+            indexes: RINGS,
+            values: TAIL,
+            access: Access::Word,
+        },
+        RegisterCase {
+            name: "hw_atl_rpfl2_uc_flr_en_set",
+            field: f::RPFL2_UC_FLR_EN_SET,
+            indexes: FILTERS,
+            values: BIT,
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_rpfl2unicast_flr_act_set",
+            field: f::RPFL2UNICAST_FLR_ACT_SET,
+            indexes: FILTERS,
+            values: &[0, 1, 7],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_rpfl2unicast_dest_addresslsw_set",
+            field: f::RPFL2UNICAST_DEST_ADDRESSLSW_SET,
+            indexes: FILTERS,
+            values: WORD,
+            access: Access::Word,
+        },
+        RegisterCase {
+            name: "hw_atl_rpfl2unicast_dest_addressmsw_set",
+            field: f::RPFL2UNICAST_DEST_ADDRESSMSW_SET,
+            indexes: FILTERS,
+            values: &[0, 1, 65535],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_rpb_rx_pkt_buff_size_per_tc_set",
+            field: f::RPB_RX_PKT_BUFF_SIZE_PER_TC_SET,
+            indexes: TCS,
+            values: &[0, 1, 511],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_rpb_rx_buff_hi_threshold_per_tc_set",
+            field: f::RPB_RX_BUFF_HI_THRESHOLD_PER_TC_SET,
+            indexes: TCS,
+            values: &[0, 1, 16383],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_tpb_tx_pkt_buff_size_per_tc_set",
+            field: f::TPB_TX_PKT_BUFF_SIZE_PER_TC_SET,
+            indexes: TCS,
+            values: &[0, 1, 255],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_tpb_tx_buff_hi_threshold_per_tc_set",
+            field: f::TPB_TX_BUFF_HI_THRESHOLD_PER_TC_SET,
+            indexes: TCS,
+            values: &[0, 1, 8191],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl_rdm_rx_dma_desc_cache_init_done_get",
+            field: f::RDM_RX_DMA_DESC_CACHE_INIT_DONE_GET,
+            indexes: SCALAR,
+            values: SCALAR,
+            access: Access::Get(1),
+        },
+        RegisterCase {
+            name: "hw_atl2_rpfl2_uc_flr_tag_set",
+            field: f::ATL2_RPFL2_UC_FLR_TAG_SET,
+            indexes: FILTERS,
+            values: &[0, 1, 63],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl2_rpfl2_bc_flr_tag_set",
+            field: f::ATL2_RPFL2_BC_FLR_TAG_SET,
+            indexes: SCALAR,
+            values: &[0, 1, 63],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl2_rpf_rss_hash_type_set",
+            field: f::ATL2_RPF_RSS_HASH_TYPE_SET,
+            indexes: SCALAR,
+            values: &[0, 1, 511],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl2_rpf_act_rslvr_section_en_set",
+            field: f::ATL2_RPF_ACT_RSLVR_SECTION_EN_SET,
+            indexes: SCALAR,
+            values: &[0, 1, 65535],
+            access: Access::Bits,
+        },
+        RegisterCase {
+            name: "hw_atl2_rpf_act_rslvr_section_en_get",
+            field: f::ATL2_RPF_ACT_RSLVR_SECTION_EN_GET,
+            indexes: SCALAR,
+            values: SCALAR,
+            access: Access::Get(65535),
+        },
+    ];
+
+    #[derive(Debug)]
+    struct Row {
+        case: usize,
+        index: u32,
+        initial: u32,
+        value: u32,
+        address: u32,
+        word: u32,
+        result: u32,
+    }
+    type ParseResult<T> = core::result::Result<T, &'static str>;
+
+    fn parse_row(line: &str) -> ParseResult<Row> {
+        let columns: Vec<_> = line.split(' ').collect();
+        if columns.len() != 9 {
+            return Err("column count");
+        }
+        let case = FIELDS
+            .iter()
+            .position(|s| s.name == columns[0])
+            .ok_or("unknown helper")?;
+        let mut numbers = [0u32; 8];
+        for (number, column) in numbers.iter_mut().zip(&columns[1..]) {
+            if column.is_empty() || !column.bytes().all(|c| c.is_ascii_digit()) {
+                return Err("non-decimal column");
+            }
+            *number = column.parse().map_err(|_| "u32 overflow")?;
+        }
+        let [index, initial, value, address, word, result, reads, writes] = numbers;
+        let spec = &FIELDS[case];
+        if !spec.indexes.contains(&index)
+            || !INITIAL.contains(&initial)
+            || !spec.values.contains(&value)
+        {
+            return Err("input outside declared cases");
+        }
+        if address >= 0x10000 || !address.is_multiple_of(4) {
+            return Err("register outside aligned BAR");
+        }
+        match spec.access {
+            Access::Get(max) => {
+                if reads != 1 || writes != 0 || word != initial || result > max {
+                    return Err("invalid getter trace");
+                }
+            }
+            Access::Word => {
+                if reads != 0 || writes != 1 || result != 0 {
+                    return Err("invalid full-word setter trace");
+                }
+            }
+            Access::Bits => {
+                if reads != 1 || writes > 1 || result != 0 || (writes == 0) != (word == initial) {
+                    return Err("invalid RMW setter trace");
+                }
+            }
+        }
+        Ok(Row {
+            case,
+            index,
+            initial,
+            value,
+            address,
+            word,
+            result,
+        })
+    }
+
+    fn parse_trace(text: &str) -> ParseResult<Vec<Row>> {
+        let text = text.strip_suffix('\n').ok_or("missing final newline")?;
+        let lines: Vec<_> = text.split('\n').collect();
+        if lines.len() != CASE_COUNT + 2
+            || lines[0] != "AQTION_REGISTERS_V1 600"
+            || lines[CASE_COUNT + 1] != "END 600"
+        {
+            return Err("trace framing/count");
+        }
+        if FIELDS.len() != 28 {
+            return Err("helper inventory");
+        }
+        let mut remaining = BTreeSet::new();
+        let mut names = BTreeSet::new();
+        for (case, spec) in FIELDS.iter().enumerate() {
+            if !names.insert(spec.name) {
+                return Err("duplicate helper inventory");
+            }
+            for &index in spec.indexes {
+                for &initial in INITIAL {
+                    for &value in spec.values {
+                        if !remaining.insert((case, index, initial, value)) {
+                            return Err("duplicate input inventory");
+                        }
+                    }
+                }
+            }
+        }
+        if remaining.len() != CASE_COUNT {
+            return Err("case inventory");
+        }
+        let mut rows = Vec::with_capacity(CASE_COUNT);
+        for line in &lines[1..=CASE_COUNT] {
+            let row = parse_row(line)?;
+            if !remaining.remove(&(row.case, row.index, row.initial, row.value)) {
+                return Err("duplicate or unexpected case");
+            }
+            rows.push(row);
+        }
+        if !remaining.is_empty() {
+            return Err("missing cases");
+        }
+        Ok(rows)
+    }
+
+    struct RegisterPeer {
+        address: usize,
+        word: Cell<u32>,
+        reads: Cell<u32>,
+        writes: Cell<u32>,
+    }
+    // SAFETY: isolated synchronous scalar test state, no physical MMIO/DMA. Each
+    // callback checks the exact donor-observed address and retains the raw word.
+    unsafe impl Registers for RegisterPeer {
+        fn read(&self, offset: usize) -> Result<u32> {
+            assert_eq!(offset, self.address, "donor read address");
+            assert_eq!(self.writes.get(), 0, "unexpected read after write");
+            self.reads.set(self.reads.get() + 1);
+            Ok(self.word.get())
+        }
+        fn write(&self, offset: usize, value: u32) -> Result<()> {
+            assert_eq!(offset, self.address, "donor write address");
+            self.writes.set(self.writes.get() + 1);
+            self.word.set(value);
+            Ok(())
+        }
+    }
+    struct NoDelay;
+    impl Timer for NoDelay {
+        fn delay(&self, _: u64) {
+            panic!("LLH field operations must not delay")
+        }
+    }
+
+    #[test]
+    #[ignore = "UNRUN: set STELA_AQTION_REGISTERS_ORACLE to the unchanged Linux trace.txt"]
+    fn unchanged_linux_aqtion_registers() {
+        let path = std::env::var_os("STELA_AQTION_REGISTERS_ORACLE")
+            .expect("set STELA_AQTION_REGISTERS_ORACLE");
+        assert!(
+            std::fs::metadata(&path).unwrap().len() <= 256_000,
+            "oversized trace"
+        );
+        let text = std::fs::read_to_string(path).unwrap();
+        let rows = parse_trace(&text).expect("complete, strictly framed Linux trace");
+        assert_eq!(rows.len(), CASE_COUNT);
+        for row in rows {
+            let spec = &FIELDS[row.case];
+            let hw = Hardware {
+                registers: RegisterPeer {
+                    address: row.address as usize,
+                    word: Cell::new(row.initial),
+                    reads: Cell::new(0),
+                    writes: Cell::new(0),
+                },
+                timer: NoDelay,
+            };
+            match spec.access {
+                Access::Get(_) => assert_eq!(
+                    hw.get(spec.field, row.index as usize).unwrap(),
+                    row.result,
+                    "getter {} index {} initial {:08x}",
+                    spec.name,
+                    row.index,
+                    row.initial
+                ),
+                Access::Bits | Access::Word => {
+                    hw.set(spec.field, row.index as usize, row.value).unwrap()
+                }
+            }
+            assert_eq!(hw.registers.word.get(), row.word, "raw final word: {row:?}");
+            let (reads, writes) = (hw.registers.reads.get(), hw.registers.writes.get());
+            assert!(reads + writes > 0, "empty Rust trace: {row:?}");
+            // Linux may suppress unchanged RMW writes, while Hardware::set writes
+            // unconditionally. Check Rust's own access shape, not equal counts.
+            match spec.access {
+                Access::Get(_) => assert_eq!((reads, writes), (1, 0)),
+                Access::Word => assert_eq!((reads, writes), (0, 1)),
+                Access::Bits => assert_eq!((reads, writes), (1, 1)),
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_aqtion_register_oracle_rows_and_incomplete_coverage() {
+        const VALID: &str = "hw_atl_rdm_rx_desc_en_set 0 0 0 23304 0 0 1 0";
+        assert_eq!(parse_row(VALID).unwrap().address, 23304);
+        for bad in [
+            "", // Empty and non-decimal/trailing columns.
+            "unknown 0 0 0 23304 0 0 1 0",
+            "hw_atl_rdm_rx_desc_en_set 0 0 0 23304 0 0 1",
+            "hw_atl_rdm_rx_desc_en_set 0 0 0 23304 0 0 1 0 junk",
+            "hw_atl_rdm_rx_desc_en_set +0 0 0 23304 0 0 1 0",
+            "hw_atl_rdm_rx_desc_en_set 0 0x0 0 23304 0 0 1 0",
+            "hw_atl_rdm_rx_desc_en_set 0 0 0 4294967296 0 0 1 0",
+            "hw_atl_rdm_rx_desc_en_set 32 0 0 23304 0 0 1 0",
+            "hw_atl_rdm_rx_desc_en_set 0 4294967295 0 23304 0 0 1 0",
+            "hw_atl_rdm_rx_desc_en_set 0 0 2 23304 0 0 1 0",
+            "hw_atl_rdm_rx_desc_en_set 0 0 0 65536 0 0 1 0",
+            "hw_atl_rdm_rx_desc_en_set 0 0 0 23305 0 0 1 0",
+            "hw_atl_rdm_rx_desc_en_set 0 0 0 23304 0 0 0 0",
+            "hw_atl_rdm_rx_desc_en_set 0 0 0 23304 0 0 1 2",
+            "hw_atl_rdm_rx_desc_en_set 0 0 0 23304 0 1 1 0",
+            "hw_atl_rdm_rx_desc_en_set 0 0 0 23304 1 0 1 0",
+            "hw_atl_tdm_tx_desc_head_ptr_get 0 0 0 31756 0 8192 1 0",
+        ] {
+            assert!(parse_row(bad).is_err(), "accepted malformed row: {bad}");
+        }
+        let repeated = core::iter::repeat_n(VALID, CASE_COUNT)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let duplicate = format!("AQTION_REGISTERS_V1 600\n{repeated}\nEND 600\n");
+        assert_eq!(
+            parse_trace(&duplicate).unwrap_err(),
+            "duplicate or unexpected case"
+        );
+        let missing = format!("AQTION_REGISTERS_V1 600\n{VALID}\nEND 600\n");
+        assert_eq!(parse_trace(&missing).unwrap_err(), "trace framing/count");
+        assert_eq!(
+            parse_trace(&(duplicate.clone() + "junk\n")).unwrap_err(),
+            "trace framing/count"
+        );
+        assert_eq!(
+            parse_trace(duplicate.trim_end_matches('\n')).unwrap_err(),
+            "missing final newline"
+        );
+        assert!(parse_trace("").is_err());
+    }
+}
