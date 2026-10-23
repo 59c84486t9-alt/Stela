@@ -35,3 +35,25 @@ pub(super) fn status_endpoint(device: &Device, interface: &Interface) -> Option<
         && endpoint::Context::new(&endpoint, device.speed).is_ok())
     .then_some(endpoint)
 }
+
+/// One shared validator for cold and retained external hub status reads.
+/// A lifecycle bitmap never authorizes accepting reserved port-state fields.
+pub(super) fn validate_port_status(bytes: &[u8], speed: u8) -> Result<(), BlockError> {
+    if matches!(speed, SUPER_SPEED | SUPER_SPEED_PLUS) {
+        superspeed::Port::decode(bytes, false)?;
+    } else {
+        if bytes.len() != 4 {
+            return Err(BlockError::Unsupported("short USB2 hub port status"));
+        }
+        let status = u16::from_le_bytes([bytes[0], bytes[1]]);
+        let change = u16::from_le_bytes([bytes[2], bytes[3]]);
+        if status & !0x1f3f != 0
+            || status & (HUB_PORT_LOW_SPEED | HUB_PORT_HIGH_SPEED)
+                == HUB_PORT_LOW_SPEED | HUB_PORT_HIGH_SPEED
+            || change & !0x3f != 0
+        {
+            return Err(BlockError::Unsupported("reserved USB2 hub port status"));
+        }
+    }
+    Ok(())
+}

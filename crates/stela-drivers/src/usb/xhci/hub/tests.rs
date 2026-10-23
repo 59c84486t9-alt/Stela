@@ -1505,3 +1505,35 @@ fn usb2_hub_reads_complete_variable_bitmaps_and_refuses_malformed_descriptors() 
         assert!(!model.borrow().requests.iter().any(|(_, _, q)| q[0] == 0x23));
     }
 }
+
+#[test]
+fn retained_hub_status_uses_same_reserved_field_contract_as_cold_enumeration() {
+    for speed in [HIGH_SPEED, SUPER_SPEED] {
+        let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, Node::leaf(speed))]);
+        let mut backing = vec![0u64; 256 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: raw status replies target only the retained hub EP0 DMA.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut c, model) = controller(&mut dma, 32, nodes);
+        let mut failures = Vec::new();
+        c.enumerate(&mut dma, &mut failures);
+        assert!(failures.is_empty());
+        let original = model.borrow().nodes[&0].ports.as_ref().unwrap()[0].status;
+        for (extra_status, change) in if speed == SUPER_SPEED {
+            [(1 << 2, 0), (1 << 10, 0), (11 << 5, 0), (0, 1 << 1)]
+        } else {
+            [(1 << 6, 0), (1 << 7, 0), (3 << 9, 0), (0, 1 << 6)]
+        } {
+            {
+                let mut hardware = model.borrow_mut();
+                let port = &mut hardware.nodes.get_mut(&0).unwrap().ports.as_mut().unwrap()[0];
+                port.status = original | extra_status;
+                port.change = change;
+            }
+            assert!(
+                c.hub_port_status(1, 1).is_err(),
+                "speed={speed}, status={extra_status}, change={change}"
+            );
+        }
+    }
+}

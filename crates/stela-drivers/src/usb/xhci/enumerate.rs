@@ -679,16 +679,7 @@ impl Controller {
         if status.len() != 4 {
             return Err(BlockError::Unsupported("short hub port status"));
         }
-        let port_status = u16::from_le_bytes([status[0], status[1]]);
-        let change = u16::from_le_bytes([status[2], status[3]]);
-        if self.slot(slot)?.attachment.speed < SUPER_SPEED
-            && (port_status & !0x1f3f != 0
-                || port_status & (HUB_PORT_LOW_SPEED | HUB_PORT_HIGH_SPEED)
-                    == HUB_PORT_LOW_SPEED | HUB_PORT_HIGH_SPEED
-                || change & !0x3f != 0)
-        {
-            return Err(BlockError::Unsupported("reserved USB2 hub port status"));
-        }
+        hub::validate_port_status(&status, self.slot(slot)?.attachment.speed)?;
         Ok((
             u16::from_le_bytes([status[0], status[1]]),
             u16::from_le_bytes([status[2], status[3]]),
