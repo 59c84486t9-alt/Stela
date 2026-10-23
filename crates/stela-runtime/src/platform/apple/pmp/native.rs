@@ -12,6 +12,7 @@ use core::cell::Cell;
 pub mod cache;
 pub mod counters;
 pub mod memory;
+pub mod platform;
 pub mod power;
 pub mod publication;
 pub mod registry;
