@@ -215,7 +215,7 @@ pub(super) fn discover_retained(
     let bot = Bot::native(
         Native {
             controller,
-            slot: device.slot,
+            id: device.id,
             endpoints,
         },
         device,

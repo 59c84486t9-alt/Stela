@@ -44,24 +44,29 @@ pub(super) trait Io {
 
 pub(super) struct Native {
     pub controller: Shared,
-    pub slot: u8,
+    pub id: super::super::xhci::SlotId,
     pub endpoints: [Endpoint; 2],
 }
 impl Io for Native {
     fn ready(&mut self) -> Result<(), BlockError> {
         let mut controller = self.controller.borrow_mut();
+        let mut device = controller.device(self.id)?;
         for dci in [1, self.endpoints[0].dci(), self.endpoints[1].dci()] {
-            controller.endpoint_ready(self.slot, dci)?;
+            device.endpoint_ready(dci)?;
         }
         Ok(())
     }
     fn control(&mut self, request: [u8; 8]) -> Result<Vec<u8>, BlockError> {
         self.controller
             .borrow_mut()
-            .control(self.slot, request, &[])
+            .device(self.id)?
+            .control(request, &[])
     }
     fn clear(&mut self, endpoint: Endpoint) -> Result<(), BlockError> {
-        self.controller.borrow_mut().clear(self.slot, &endpoint)
+        self.controller
+            .borrow_mut()
+            .device(self.id)?
+            .clear(&endpoint)
     }
     fn bulk(
         &mut self,
@@ -69,9 +74,12 @@ impl Io for Native {
         buffer: u64,
         length: usize,
     ) -> Result<usize, BlockError> {
-        self.controller
-            .borrow_mut()
-            .transfer(self.slot, endpoint.dci(), buffer, length, COMMAND_US)
+        self.controller.borrow_mut().device(self.id)?.transfer(
+            endpoint.dci(),
+            buffer,
+            length,
+            COMMAND_US,
+        )
     }
     fn delay(&self, micros: u64) {
         let clock = self.controller.borrow().clock;
@@ -427,10 +435,10 @@ impl Bot<Native> {
     }
     pub fn quarantine(&mut self) {
         self.poisoned = true;
-        self.io
-            .controller
-            .borrow_mut()
-            .quarantine_slot(self.io.slot);
+        let mut controller = self.io.controller.borrow_mut();
+        if let Ok(mut device) = controller.device(self.io.id) {
+            device.quarantine();
+        }
     }
     pub fn reset_and_rebind(
         &mut self,
@@ -464,7 +472,7 @@ impl Bot<Native> {
                 .borrow_mut()
                 .reset_and_identify(old, &self.endpoints, dma)?
         };
-        let slot = fresh.slot;
+        let id = fresh.id;
         let result = (|| {
             if fresh.descriptor != old.descriptor
                 || fresh.configurations != old.configurations
@@ -491,7 +499,8 @@ impl Bot<Native> {
                 .ok_or_else(|| fail("USB reset lost the selected BOT alternate"))?;
             controller
                 .borrow_mut()
-                .set_configuration(slot, fresh.configuration_value())
+                .device(id)
+                .and_then(|mut device| device.set_configuration(fresh.configuration_value()))
                 .map_err(|e| {
                     (
                         alloc::string::String::from("BOT reset restore configuration"),
@@ -501,17 +510,19 @@ impl Bot<Native> {
             if setting.alternate != 0 {
                 controller
                     .borrow_mut()
-                    .control(
-                        slot,
-                        setup(
-                            1,
-                            super::super::xhci::SET_INTERFACE,
-                            u16::from(setting.alternate),
-                            u16::from(setting.number),
-                            0,
-                        ),
-                        &[],
-                    )
+                    .device(id)
+                    .and_then(|mut device| {
+                        device.control(
+                            setup(
+                                1,
+                                super::super::xhci::SET_INTERFACE,
+                                u16::from(setting.alternate),
+                                u16::from(setting.number),
+                                0,
+                            ),
+                            &[],
+                        )
+                    })
                     .map_err(|e| {
                         (
                             alloc::string::String::from("BOT reset restore alternate"),
@@ -521,7 +532,8 @@ impl Bot<Native> {
             }
             controller
                 .borrow_mut()
-                .configure(slot, &self.endpoints, None, dma)
+                .device(id)
+                .and_then(|mut device| device.configure(&self.endpoints, None, dma))
                 .map_err(|e| {
                     (
                         alloc::string::String::from("BOT reset reconstruct endpoints"),
@@ -531,7 +543,7 @@ impl Bot<Native> {
             Self::native(
                 Native {
                     controller: controller.clone(),
-                    slot,
+                    id,
                     endpoints: self.endpoints,
                 },
                 &fresh,
@@ -545,8 +557,10 @@ impl Bot<Native> {
                 )
             })
         })();
-        if result.is_err() {
-            controller.borrow_mut().quarantine_slot(slot);
+        if result.is_err()
+            && let Ok(mut device) = controller.borrow_mut().device(id)
+        {
+            device.quarantine();
         }
         result
     }
@@ -1250,10 +1264,11 @@ mod tests {
                 dci,
                 halted,
             );
+            let id = controller.borrow().test_device_id(1).unwrap();
             let mut bot = Bot {
                 io: Native {
                     controller,
-                    slot: 1,
+                    id,
                     endpoints: endpoints(),
                 },
                 interface: 3,

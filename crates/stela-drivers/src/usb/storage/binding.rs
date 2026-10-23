@@ -117,8 +117,7 @@ pub(in crate::usb) fn discover(
             endpoints,
         } => {
             if interface.alternate != 0 {
-                controller.borrow_mut().control(
-                    device.slot,
+                controller.borrow_mut().device(device.id)?.control(
                     setup(
                         0x01,
                         crate::usb::xhci::SET_INTERFACE,
