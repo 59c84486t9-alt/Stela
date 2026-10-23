@@ -204,6 +204,17 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// pins receive SET_PIN_SENSE before GET_PIN_SENSE, as in jack.c. No power,
     /// amp, pin-enable or GPIO control is changed; configure power separately.
     pub fn poll_pin_sense(&mut self, graph: &CodecGraph, pin: u8) -> Result<PinSense, Error> {
+        if self.manages_sigmatel_codec(graph.address) {
+            return self.poll_sigmatel_pin_sense(graph, pin);
+        }
+        self.poll_pin_sense_policy(graph, pin, true)
+    }
+    pub(super) fn poll_pin_sense_policy(
+        &mut self,
+        graph: &CodecGraph,
+        pin: u8,
+        allow_trigger: bool,
+    ) -> Result<PinSense, Error> {
         if graph.token != self.token {
             return Err(Error::InvalidCodecGraph);
         }
@@ -219,7 +230,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         {
             return Err(Error::UnsupportedTopology);
         }
-        if caps & TRIGGER != 0 {
+        if allow_trigger && caps & TRIGGER != 0 {
             self.verb(Verb::short(graph.address, pin, 0x709, 0)?)?;
         }
         let raw = self.verb(Verb::short(graph.address, pin, 0xf09, 0)?)?;

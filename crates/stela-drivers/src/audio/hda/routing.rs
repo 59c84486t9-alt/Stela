@@ -565,6 +565,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<(), Error> {
+        if self.manages_sigmatel_codec(graph.address) {
+            return self.configure_sigmatel_route(graph, route, id, channel, options);
+        }
         if self.manages_conexant_codec(graph.address) {
             return self.configure_conexant_route(graph, route, id, channel, options);
         }

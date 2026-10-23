@@ -19,7 +19,6 @@ use alloc::vec::Vec;
 mod headset;
 pub use headset::{ConexantHeadsetInitialization, ConexantHeadsetKind, ConexantHeadsetReport};
 
-const GET_PARAMETER: u16 = 0xf00;
 const GET_EAPD: u16 = 0xf0c;
 const SET_EAPD: u16 = 0x70c;
 const PIN_EAPD: u32 = 1 << 16;
@@ -50,6 +49,7 @@ pub(super) struct State {
     pins: Vec<u8>,
     active: bool,
     retired: bool,
+    authority_lost: bool,
     headset: Option<headset::State>,
 }
 fn route_policy(id: u32) -> Result<RoutePolicy, Error> {
@@ -82,9 +82,6 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .iter()
             .any(|state| state.address == address)
     }
-    fn conexant_parameter(&mut self, codec: u8, node: u8, parameter: u8) -> Result<u32, Error> {
-        self.verb(Verb::short(codec, node, GET_PARAMETER, parameter)?)
-    }
     fn conexant_guard(&self, graph: &CodecGraph) -> Result<(), Error> {
         if graph.token != self.token {
             return Err(Error::InvalidCodecGraph);
@@ -99,79 +96,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn conexant_identity(&mut self, graph: &CodecGraph) -> Result<(u8, u32, Vec<u8>), Error> {
-        let vendor = self.conexant_parameter(graph.address, 0, 0)?;
-        let revision = self.conexant_parameter(graph.address, 0, 2)?;
-        if vendor != graph.vendor_id || revision != graph.revision_id || revision == u32::MAX {
-            return Err(Error::InvalidCodecGraph);
-        }
-        profile(vendor)?;
-        let groups: Vec<_> = graph
-            .groups
+        let live = self.validate_live_analog_codec(graph)?;
+        let pins: Vec<_> = live
+            .pins
             .iter()
-            .filter(|g| g.function_type & 255 == 1)
+            .filter_map(|(node, caps)| (caps & PIN_EAPD != 0).then_some(*node))
             .collect();
-        if groups.len() != 1 {
+        if pins.len() > 4 {
             return Err(Error::UnsupportedTopology);
         }
-        let group = groups[0];
-        let roots = self.conexant_parameter(graph.address, 0, 4)?;
-        let root_first = (roots >> 16) & 255;
-        let root_end = root_first + (roots & 255);
-        if root_first == 0
-            || root_end > 128
-            || !(root_first..root_end).contains(&u32::from(group.node))
-            || self.conexant_parameter(graph.address, group.node, 5)? != group.function_type
-        {
-            return Err(Error::InvalidCodecGraph);
-        }
-        let power = self.conexant_parameter(graph.address, group.node, 0x0f)?;
-        if power == u32::MAX || power & 1 == 0 || group.power_states != Some(power) {
-            return Err(Error::InvalidCodecGraph);
-        }
-        let nodes = self.conexant_parameter(graph.address, group.node, 4)?;
-        let first = (nodes >> 16) & 255;
-        let end = first + (nodes & 255);
-        if first <= u32::from(group.node)
-            || nodes & 255 == 0
-            || end > 128
-            || group.widgets.len() != (nodes & 255) as usize
-        {
-            return Err(Error::InvalidCodecGraph);
-        }
-        let mut pins = Vec::new();
-        for node in first..end {
-            let node = node as u8;
-            let caps = self.conexant_parameter(graph.address, node, 9)?;
-            let cached = group
-                .widgets
-                .iter()
-                .find(|w| w.node == node)
-                .ok_or(Error::InvalidCodecGraph)?;
-            if caps == u32::MAX || cached.capabilities != caps {
-                return Err(Error::InvalidCodecGraph);
-            }
-            if (caps >> 20) & 15 != 4 {
-                continue;
-            }
-            let pin = self.conexant_parameter(graph.address, node, 0x0c)?;
-            if pin == u32::MAX {
-                return Err(Error::InvalidCodecGraph);
-            }
-            if cached.kind != WidgetKind::Pin || cached.pin_capabilities != Some(pin) {
-                return Err(Error::InvalidCodecGraph);
-            }
-            if pin & PIN_EAPD != 0 {
-                if pins.len() == 4 {
-                    return Err(Error::UnsupportedTopology);
-                }
-                pins.push(node);
-            }
-        }
-        let subsystem = self.verb(Verb::short(graph.address, group.node, 0xf20, 0)?)?;
-        if subsystem == u32::MAX {
-            return Err(Error::InvalidCodecGraph);
-        }
-        Ok((group.node, subsystem, pins))
+        Ok((live.group, live.subsystem, pins))
     }
     fn conexant_eapd(&mut self, codec: u8, pin: u8, enabled: bool) -> Result<u8, Error> {
         // Match cx_auto_turn_eapd exactly, including its whole control value.
@@ -196,10 +130,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     fn initialize_conexant_common(&mut self, graph: &CodecGraph) -> Result<ConexantReport, Error> {
         self.conexant_guard(graph)?;
         self.require_routing_stopped()?;
-        if self
-            .routes
-            .iter()
-            .any(|(_, r)| r.codec_address() == graph.address)
+        if self.manages_sigmatel_codec(graph.address)
+            || self
+                .routes
+                .iter()
+                .any(|(_, r)| r.codec_address() == graph.address)
             || self
                 .codec_controls
                 .iter()
@@ -228,6 +163,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             pins: pins.clone(),
             active: false,
             retired: false,
+            authority_lost: false,
             headset: None,
         });
         let result = (|| {
@@ -285,6 +221,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             // already configured routes uncertain too. Retain their resources
             // and prevent any later start until actual reset.
             self.routing_failed = true;
+            if let Some(owned) = self
+                .conexant_codecs
+                .iter_mut()
+                .find(|owned| owned.address == graph.address)
+            {
+                owned.authority_lost = true;
+            }
             return Err(error);
         }
         Ok(state)
@@ -374,14 +317,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         let state = self.conexant_active(graph)?;
         let result = (|| {
-            let node = if widget.capabilities & (1 << 3) != 0 {
-                converter
-            } else {
-                state.group
-            };
-            if self.conexant_parameter(graph.address, node, 0x12)? != caps {
-                return Err(Error::InvalidCodecGraph);
-            }
+            self.validate_live_output_amplifier(graph.address, state.group, widget)?;
             self.minimum_gain_mute(graph.address, widget, muted)
         })();
         if result.is_err() {
@@ -398,7 +334,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             if state.retired {
                 continue;
             }
-            if self.stopped || self.command_poisoned {
+            if state.authority_lost || self.stopped || self.command_poisoned {
                 return Err(Error::NeedsReset);
             }
             for pin in state.pins {

@@ -363,6 +363,108 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 }
 
+/// Revalidated standard analog authority shared by vendor backends. This
+/// preserves the observed pin inventory without inferring electrical policy.
+pub(super) struct LiveAnalogCodec {
+    pub group: u8,
+    pub subsystem: u32,
+    pub pins: Vec<(u8, u32)>,
+}
+impl<R: Registers, T: Timer> Controller<R, T> {
+    pub(super) fn validate_live_output_amplifier(
+        &mut self,
+        address: u8,
+        group: u8,
+        widget: &Widget,
+    ) -> Result<u32, Error> {
+        if widget.capabilities & WCAP_OUT_AMP == 0 || widget.output_amplifier.is_none() {
+            return Err(Error::UnsupportedTopology);
+        }
+        let node = if widget.capabilities & WCAP_AMP_OVERRIDE != 0 {
+            widget.node
+        } else {
+            group
+        };
+        let caps = self.parameter(address, node, PAR_AMP_OUT)?;
+        if caps == u32::MAX || widget.output_amplifier != Some(caps) {
+            return Err(Error::InvalidCodecGraph);
+        }
+        Ok(caps)
+    }
+    pub(super) fn validate_live_analog_codec(
+        &mut self,
+        graph: &CodecGraph,
+    ) -> Result<LiveAnalogCodec, Error> {
+        if graph.token != self.token {
+            return Err(Error::InvalidCodecGraph);
+        }
+        let vendor = self.parameter(graph.address, 0, PAR_VENDOR)?;
+        let revision = self.parameter(graph.address, 0, PAR_REVISION)?;
+        if vendor == 0
+            || vendor == u32::MAX
+            || vendor != graph.vendor_id
+            || revision != graph.revision_id
+            || revision == u32::MAX
+        {
+            return Err(Error::InvalidCodecGraph);
+        }
+        let groups: Vec<_> = graph
+            .groups
+            .iter()
+            .filter(|group| group.function_type & 255 == 1)
+            .collect();
+        let [group] = groups.as_slice() else {
+            return Err(Error::UnsupportedTopology);
+        };
+        let roots = node_range(self.parameter(graph.address, 0, PAR_NODE_COUNT)?)?;
+        if !roots.contains(&group.node)
+            || self.parameter(graph.address, group.node, PAR_FUNCTION)? != group.function_type
+        {
+            return Err(Error::InvalidCodecGraph);
+        }
+        let power = self.parameter(graph.address, group.node, PAR_POWER)?;
+        if power == u32::MAX || power & 1 == 0 || group.power_states != Some(power) {
+            return Err(Error::InvalidCodecGraph);
+        }
+        let nodes = node_range(self.parameter(graph.address, group.node, PAR_NODE_COUNT)?)?;
+        if nodes.start <= group.node || group.widgets.len() != usize::from(nodes.end - nodes.start)
+        {
+            return Err(Error::InvalidCodecGraph);
+        }
+        let mut pins = Vec::new();
+        for node in nodes {
+            let caps = self.parameter(graph.address, node, PAR_WIDGET)?;
+            let cached = group
+                .widgets
+                .iter()
+                .find(|widget| widget.node == node)
+                .ok_or(Error::InvalidCodecGraph)?;
+            if caps == u32::MAX
+                || cached.capabilities != caps
+                || cached.kind != WidgetKind::from_capabilities(caps)
+            {
+                return Err(Error::InvalidCodecGraph);
+            }
+            if cached.kind == WidgetKind::Pin {
+                let pin = self.parameter(graph.address, node, PAR_PIN)?;
+                if pin == u32::MAX || cached.pin_capabilities != Some(pin) {
+                    return Err(Error::InvalidCodecGraph);
+                }
+                pins.push((node, pin));
+            }
+        }
+        let subsystem = self.verb(Verb::short(graph.address, group.node, 0xf20, 0)?)?;
+        if subsystem == u32::MAX {
+            return Err(Error::InvalidCodecGraph);
+        }
+        Ok(LiveAnalogCodec {
+            group: group.node,
+            subsystem,
+            pins,
+        })
+    }
+}
+
 fn node_range(value: u32) -> Result<core::ops::Range<u8>, Error> {
     let start = ((value >> 16) & 0xff) as u8;
     let count = (value & 0xff) as u8;
