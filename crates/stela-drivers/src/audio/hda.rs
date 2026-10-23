@@ -8921,6 +8921,57 @@ mod tests {
             }
         }
         #[test]
+        fn idt73_unclaimed_gpio_inputs_and_controls_can_change_during_pcm_and_quiet_preserves_them()
+        {
+            let mut fixture = Fixture::new();
+            let model = idt73_device(0x111d_76c2);
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let graph = controller.enumerate_codec(0).unwrap();
+            controller.initialize_sigmatel_codec(&graph).unwrap();
+            let route = graph.analog_route(Direction::Playback, 0x0a, 2).unwrap();
+            let stream = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            controller
+                .configure_analog_route(&graph, &route, stream, 0, idt83_playback())
+                .unwrap();
+            controller.write_pcm(stream, 0, &[0xc7; 256]).unwrap();
+            controller.start(stream).unwrap();
+            {
+                let mut m = model.borrow_mut();
+                // Owned bit0 remains valid; input bit1 and other controls
+                // change independently after the source startup snapshot.
+                m.route_controls.insert((1, 0xf15), 0xa7);
+                m.route_controls.insert((1, 0xf16), 0xdb);
+                m.route_controls.insert((1, 0xf17), 0x7d);
+                m.dma_step_bytes = 128;
+            }
+            assert!(controller.poll_pin_sense(&graph, 0x0a).unwrap().present);
+            assert_eq!(
+                controller
+                    .refresh_idt73_power_map(&graph)
+                    .unwrap()
+                    .power_map,
+                0x88
+            );
+            assert!(!controller.routing_failed);
+            advance(&model, 8);
+            assert!(controller.status(stream).unwrap().period_completed);
+            assert_eq!(model.borrow().route_controls[&(1, 0xf15)], 0xa7);
+            controller.shutdown().unwrap();
+            let m = model.borrow();
+            assert_eq!(m.route_controls[&(1, 0xf15)], 0xa6);
+            assert_eq!(m.route_controls[&(1, 0xf16)], 0xdb);
+            assert_eq!(m.route_controls[&(1, 0xf17)], 0x7d);
+            assert!(m.playback.len() >= 256 && m.playback.iter().all(|byte| *byte == 0xc7));
+        }
+        #[test]
         fn idt73_missing_source_gpio_knob_or_eighth_port_refuses_before_effects() {
             for fault in 0..8 {
                 let mut fixture = Fixture::new();

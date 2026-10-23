@@ -88,7 +88,15 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 allowed,
             )?,
         };
-        if Some(actual) != state.gpio {
+        let expected = state.gpio.ok_or(Error::NeedsReset)?;
+        // Only source-owned GPIO0 is an authority invariant. Other GPIO
+        // inputs/owners may change; quiet must preserve their fresh values.
+        if ((actual.data ^ expected.data)
+            | (actual.mask ^ expected.mask)
+            | (actual.direction ^ expected.direction))
+            & EAPD
+            != 0
+        {
             return Err(Error::RouteRejected);
         }
         Ok(actual)
