@@ -147,6 +147,9 @@ impl CheckedMemoryBlock {
                 ) || matches!(
                     instruction.operation,
                     Operation::Exclusive(_)
+                        // The checked emitter chooses the architecturally
+                        // permitted ignored hint, with no guest memory access.
+                        | Operation::Prefetch(_)
                         | Operation::Atomic(_)
                         | Operation::Ordered(_)
                         | Operation::Literal(_)
@@ -655,6 +658,69 @@ mod tests {
             self.memory.read_scalar(DATA, 8, 0, PC.0).unwrap() as u64
         }
     }
+    #[test]
+    fn checked_prefetch_preserves_state_and_memory_for_unmapped_and_tagged_addresses() {
+        let domain = domain();
+        let mut worker = Worker::qualified(&domain, 2, 2, false);
+        let writer = block(&[STR, RET]);
+        for offset in (0..128).step_by(8) {
+            let mut state = GuestState::default();
+            state.x[0] = DATA + offset;
+            state.x[1] = offset ^ 0xabad_cafe_0123_4567;
+            assert!(worker.run(&writer, &mut state).unwrap().fault.is_none());
+        }
+        let contents = worker.snapshot();
+        for hint in 0..32 {
+            let mut words = vec![
+                0xf980_0000 | (12 << 5) | hint, // unsigned, original base
+                0xf9bf_fc00 | (31 << 5) | hint, // unsigned maximum, SP
+                0xf890_0000 | (31 << 5) | hint, // unscaled -256, SP
+                0xd8ff_ffe0 | hint,             // literal -4
+            ];
+            if hint < 24 {
+                for option in [2, 3, 6, 7] {
+                    for shift in [0, 1 << 12] {
+                        words.push(
+                            0xf8a0_0800 | (2 << 16) | (option << 13) | shift | (12 << 5) | hint,
+                        );
+                    }
+                }
+            }
+            for word in words {
+                let body = block(&[word, RET]);
+                for address in [
+                    0,
+                    DATA + 1,
+                    u64::MAX,
+                    0xab00_0000_0000_4001,
+                    0x0001_0000_0000_0001,
+                ] {
+                    let mut state = GuestState {
+                        sp: address | 1,
+                        nzcv: 0xa000_0000,
+                        fpcr: 0x0040_0000,
+                        fpsr: 0x0800_009f,
+                        ..GuestState::default()
+                    };
+                    state.x =
+                        core::array::from_fn(|i| (i as u64).wrapping_mul(0x0101_0101_0101_0101));
+                    state.x[12] = address;
+                    state.x[2] = u64::MAX - 7;
+                    state.v = core::array::from_fn(|i| [u64::MAX - i as u64, 0xabad_cafe]);
+                    let expected = state.clone();
+                    let observed = worker.run(&body, &mut state).unwrap();
+                    assert!(
+                        observed.fault.is_none(),
+                        "word={word:08x} address={address:016x}"
+                    );
+                    assert_eq!(observed.exit.next_pc, expected.x[30]);
+                    assert_eq!(state, expected);
+                    assert_eq!(worker.snapshot(), contents);
+                }
+            }
+        }
+    }
+
     #[test]
     fn checked_low128_structure_entry_preserves_ordered_fault_prefix_and_writeback() {
         use crate::system::{

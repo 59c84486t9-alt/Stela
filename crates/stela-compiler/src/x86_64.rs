@@ -11,6 +11,8 @@ use alloc::vec::Vec;
 
 pub struct Emitter;
 
+pub(crate) const NOP: u8 = 0x90;
+
 /// Check semantic host requirements before either leaf or block emission.
 pub(crate) fn validate_target(
     instruction: &Instruction,
@@ -1232,7 +1234,7 @@ pub(crate) fn emit_instruction(
         Operation::CheckedPointer(_) => {
             unreachable!("CPA arithmetic requires checked context emitter")
         }
-        Operation::Nop => code.push(0x90),
+        Operation::Nop => code.push(NOP),
         Operation::MoveWide {
             width,
             kind,

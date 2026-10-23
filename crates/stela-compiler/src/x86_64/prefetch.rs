@@ -1,12 +1,11 @@
 //! PRFM as SSE PREFETCH hints.
-use super::{load, offset};
+use super::{NOP, load, offset};
 use crate::aarch64::{
     prefetch::{Address, Hint, Operand},
     register_offset::IndexExtend,
 };
 use alloc::vec::Vec;
 
-const NOP: u8 = 0x90;
 const MOVABS_RAX: &[u8] = &[0x48, 0xb8];
 const MOV_ECX_STATE: &[u8] = &[0x8b, 0x8f];
 const MOVSXD_RCX_STATE: &[u8] = &[0x48, 0x63, 0x8f];

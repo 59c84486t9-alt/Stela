@@ -29,7 +29,9 @@ fn admitted(operation: &Operation) -> bool {
             ..
         }) => false,
         Operation::Ordered(_) => true,
-        Operation::Literal(_) | Operation::Simd(simd::Operand::StructureMemory(_)) => true,
+        Operation::Literal(_)
+        | Operation::Prefetch(_)
+        | Operation::Simd(simd::Operand::StructureMemory(_)) => true,
         _ => false,
     }
 }
@@ -441,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_oracle_admits_exact_integer_and_simd_literals_without_prefetch() {
+    fn checked_oracle_admits_exact_integer_and_simd_literals() {
         for form in [
             0x18000000u32,
             0x58000000,
@@ -457,12 +459,131 @@ mod tests {
                 assert!(admitted(&instruction.operation));
             }
         }
-        for word in [0xdc000000u32, 0xd8000000, 0xf9400000, 0xd503201f] {
+        for word in [0xdc000000u32, 0xf9400000, 0xd503201f] {
             if let Ok(instruction) = Decoder.lift(GuestAddress(CODE_PAGE), word) {
                 assert!(
                     !admitted(&instruction.operation),
                     "unexpected class {word:#x}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn checked_oracle_admits_all_four_canonical_prefetch_forms() {
+        let registry: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../isa/apple-silicon-reviewed-forms.json"
+        ))
+        .unwrap();
+        let mut forms = Vec::new();
+        for form in registry["forms"].as_array().unwrap() {
+            let id = form["id"].as_str().unwrap();
+            if !id.starts_with("PRFM_") && !id.starts_with("PRFUM_") {
+                continue;
+            }
+            forms.push(id);
+            for sample in form["smoke_samples"].as_array().unwrap() {
+                let word = u32::from_str_radix(
+                    sample["word"].as_str().unwrap().trim_start_matches("0x"),
+                    16,
+                )
+                .unwrap();
+                let instruction = Decoder.lift(GuestAddress(CODE_PAGE), word).unwrap();
+                assert!(matches!(instruction.operation, Operation::Prefetch(_)));
+                assert!(admitted(&instruction.operation), "{id} {word:08x}");
+            }
+        }
+        forms.sort_unstable();
+        assert_eq!(
+            forms,
+            [
+                "PRFM_P_ldst_pos",
+                "PRFM_P_ldst_regoff",
+                "PRFM_P_loadlit",
+                "PRFUM_P_ldst_unscaled",
+            ]
+        );
+    }
+
+    #[test]
+    fn checked_prefetch_native_preserves_full_state_and_ram_for_invalid_addresses_and_sp() {
+        // Both SP-alignment checks are enabled by this fixture. A prefetch
+        // must nevertheless ignore misaligned SP and inaccessible addresses.
+        // Exercise all address classes, signed/scaled index extension, XZR,
+        // immediate boundaries and load/instruction/store/unallocated hints.
+        let forms = [
+            0xf980_0020, // PRFM [X1]
+            0xf9bf_fc20, // PRFM [X1, #32760]
+            0xf980_03e0, // PRFM [SP]
+            0xf890_03e0, // PRFUM [SP, #-256]
+            0xf88f_f020, // PRFUM [X1, #255]
+            0xf8a2_4820, // PRFM [X1, W2, UXTW]
+            0xf8a2_5820, // PRFM [X1, W2, UXTW #3]
+            0xf8a2_c820, // PRFM [X1, W2, SXTW]
+            0xf8a2_d820, // PRFM [X1, W2, SXTW #3]
+            0xf8a2_6820, // PRFM [X1, X2]
+            0xf8a2_7820, // PRFM [X1, X2, LSL #3]
+            0xf8a2_e820, // PRFM [X1, X2, SXTX]
+            0xf8a2_fbe0, // PRFM [SP, X2, SXTX #3]
+            0xf8bf_6be0, // PRFM [SP, XZR]
+            0xd880_0000, // PRFM literal, minimum imm19
+            0xd87f_ffe0, // PRFM literal, maximum imm19
+        ];
+        let addresses = [
+            0,
+            1,
+            15,
+            DATA_WINDOW + 3,
+            DATA_WINDOW + DATA_BYTES as u64,
+            0x0000_8000_0000_0001,
+            0xff00_0000_0000_0001,
+            u64::MAX,
+        ];
+        for form in forms {
+            for hint in [0, 1, 8, 16, 23, 24, 31] {
+                let word = form | hint;
+                // Register Rt=11xxx selects RPRFM, not an unallocated PRFM
+                // hint. Its metadata class stays outside this admission.
+                if form & 0xffe0_0c00 == 0xf8a0_0800 && hint >= 24 {
+                    assert!(Decoder.lift(GuestAddress(CODE_PAGE), word).is_err());
+                    continue;
+                }
+                let mut translation = Translation::checked_shared(&[word])
+                    .unwrap()
+                    .expect("typed checked prefetch admitted");
+                for address in addresses {
+                    let mut state = GuestState {
+                        x: core::array::from_fn(|index| {
+                            0x1234_5678_9abc_def0u64.wrapping_add(index as u64)
+                        }),
+                        sp: address,
+                        nzcv: 0xb000_0000,
+                        reserved: 0,
+                        v: core::array::from_fn(|index| [index as u64, !(index as u64)]),
+                        fpcr: 0x0140_0000,
+                        fpsr: 0x0800_009f,
+                    };
+                    state.x[1] = address;
+                    state.x[2] = address.rotate_left(17);
+                    let case = Case {
+                        code: vec![word],
+                        steps: 1,
+                        state,
+                        data: (0..DATA_BYTES).map(|index| index as u8).collect(),
+                        scalable: None,
+                        el: 0,
+                        hypervisor: None,
+                        pauth: false,
+                    };
+                    // SAFETY: this exact typed checked body routes all effects
+                    // through the retained domain; invalid VAs are source
+                    // operands, never host pointers or direct-RAM addresses.
+                    let native = unsafe { translation.run(&case) }.unwrap();
+                    assert_eq!(native.state, case.state, "{word:08x} {address:016x}");
+                    assert_eq!(native.data, case.data);
+                    assert_eq!(native.next_pc, CODE_PAGE + 4);
+                    assert!(native.exception.is_none());
+                }
             }
         }
     }
