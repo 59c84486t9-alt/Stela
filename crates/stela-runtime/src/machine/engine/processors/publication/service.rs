@@ -77,19 +77,28 @@ impl WorkerPublications {
         &self,
         members: &[usize],
     ) -> Result<(), PublicationError> {
-        if members.is_empty()
-            || self.slots.len() != members.len()
+        self.require_held_roster(members.iter().copied())
+    }
+    /// Borrow either source PE numbers or the existing held binding slice;
+    /// membership validation never needs a temporary owning allocation.
+    fn require_held_roster(
+        &self,
+        members: impl ExactSizeIterator<Item = usize> + Clone,
+    ) -> Result<(), PublicationError> {
+        let count = members.len();
+        if count == 0
+            || self.slots.len() != count
             || self
                 .slots
                 .iter()
-                .any(|slot| !members.contains(&slot.binding.pe))
+                .any(|slot| !members.clone().any(|pe| pe == slot.binding.pe))
             || members
-                .iter()
+                .clone()
                 .enumerate()
-                .any(|(i, pe)| members[..i].contains(pe))
+                .any(|(i, pe)| members.clone().take(i).any(|before| before == pe))
         {
             return Err(PublicationError::ProcessorCount {
-                expected: members.len(),
+                expected: count,
                 actual: self.slots.len(),
             });
         }
@@ -113,13 +122,7 @@ impl WorkerPublications {
         held: &StoppedWorkers,
     ) -> Result<(), PublicationError> {
         self.check_stop(&held.request, StopPhase::Held)?;
-        let members: Vec<_> = held
-            .request
-            .members
-            .iter()
-            .map(|binding| binding.pe)
-            .collect();
-        self.require_held_members(&members)
+        self.require_held_roster(held.request.members.iter().map(|binding| binding.pe))
     }
     pub(in crate::machine::engine) fn require_recovered(
         &self,
@@ -435,6 +438,134 @@ mod tests {
         let held = inventory.hold_stop(request).unwrap();
         (inventory, owners, hosts, held)
     }
+    #[test]
+    fn complete_held_roster_accepts_permutations_and_rejects_missing_or_duplicate_members() {
+        let (inventory, _, _, mut stopped) = held();
+        assert_eq!(inventory.require_all_held(&stopped), Ok(()));
+        stopped.request.members.reverse();
+        assert_eq!(inventory.require_all_held(&stopped), Ok(()));
+        assert_eq!(inventory.require_held_members(&[1, 0]), Ok(()));
+
+        // Start with actual owner-fenced receipts, then corrupt only the test
+        // token. Its repeated member must not stand in for the omitted owner.
+        stopped.request.members[1] = stopped.request.members[0];
+        assert_eq!(
+            inventory.require_all_held(&stopped),
+            Err(PublicationError::ProcessorCount {
+                expected: 2,
+                actual: 2,
+            })
+        );
+        stopped.request.members.pop();
+        assert_eq!(
+            inventory.require_all_held(&stopped),
+            Err(PublicationError::ProcessorCount {
+                expected: 1,
+                actual: 2,
+            })
+        );
+        stopped.request.members.clear();
+        assert_eq!(
+            inventory.require_all_held(&stopped),
+            Err(PublicationError::ProcessorCount {
+                expected: 0,
+                actual: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn held_roster_checks_inventory_binding_and_generation_before_membership() {
+        let (inventory, _, _, mut stopped) = held();
+        let (foreign, _, _, _) = held();
+        stopped.request.members.pop();
+        assert_eq!(
+            foreign.require_all_held(&stopped),
+            Err(PublicationError::WrongInventory)
+        );
+        let worker = stopped.request.members[0].worker;
+        stopped.request.members[0].worker = WorkerId(worker.0 + 1);
+        assert_eq!(
+            inventory.require_all_held(&stopped),
+            Err(PublicationError::StaleStop)
+        );
+        stopped.request.members[0].worker = worker;
+        stopped.request.generation += 1;
+        assert_eq!(
+            inventory.require_all_held(&stopped),
+            Err(PublicationError::StaleStop)
+        );
+    }
+
+    #[test]
+    fn held_roster_requires_each_actual_frame_and_completed_hold() {
+        let (mut inventory, _, _, stopped) = held();
+        inventory.slots[1].frame = Frame::InFlight(stopped.request.generation);
+        assert_eq!(
+            inventory.require_all_held(&stopped),
+            Err(PublicationError::InFlight)
+        );
+        assert_eq!(
+            inventory.require_held_members(&[0, 1]),
+            Err(PublicationError::InFlight)
+        );
+        inventory.slots[1].frame = Frame::Recovered(None);
+        for phase in [
+            None,
+            Some(StopPhase::Requested),
+            Some(StopPhase::Invalidated),
+        ] {
+            inventory.slots[1].stop = phase.map(|phase| (stopped.request.generation, phase));
+            assert_eq!(
+                inventory.require_all_held(&stopped),
+                Err(PublicationError::StaleStop)
+            );
+            assert_eq!(
+                inventory.require_held_members(&[0, 1]),
+                Err(PublicationError::MissingInvalidation)
+            );
+        }
+        inventory.slots[1].stop = Some((stopped.request.generation + 1, StopPhase::Held));
+        assert_eq!(
+            inventory.require_all_held(&stopped),
+            Err(PublicationError::StaleStop)
+        );
+        assert_eq!(
+            inventory.require_held_members(&[0, 1]),
+            Err(PublicationError::StaleStop)
+        );
+        inventory.slots[1].stop = Some((stopped.request.generation, StopPhase::Held));
+        assert_eq!(inventory.require_all_held(&stopped), Ok(()));
+    }
+
+    #[test]
+    fn held_roster_membership_error_precedes_frame_state_error() {
+        let (mut inventory, _, _, mut stopped) = held();
+        inventory.slots[1].frame = Frame::InFlight(stopped.request.generation);
+        assert_eq!(
+            inventory.require_held_members(&[0, 0]),
+            Err(PublicationError::ProcessorCount {
+                expected: 2,
+                actual: 2,
+            })
+        );
+        // check_stop observes only the token's first owner; whole membership
+        // still rejects the partial token before checking an omitted frame.
+        stopped.request.members.pop();
+        assert_eq!(
+            inventory.require_all_held(&stopped),
+            Err(PublicationError::ProcessorCount {
+                expected: 1,
+                actual: 2,
+            })
+        );
+        stopped.request.members[0].pe = usize::MAX;
+        assert_eq!(
+            inventory.require_all_held(&stopped),
+            Err(PublicationError::UnknownPe(usize::MAX))
+        );
+    }
+
     #[test]
     fn sparse_leaf_roster_hold_does_not_authorize_whole_processor_write() {
         let binding = WorkerBinding {
