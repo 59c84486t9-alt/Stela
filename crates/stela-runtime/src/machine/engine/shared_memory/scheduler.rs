@@ -181,19 +181,31 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// refusals until their actual platform owners join this candidate. Calling
     /// this method does not enable production SMP or qualify original macOS.
     pub unsafe fn native_round(&mut self) -> Result<usize, Stop> {
+        let mut scratch = core::mem::take(&mut self.host.round_scratch);
+        // SAFETY: this wrapper forwards the caller's full native-round contract.
+        // Restore only cleared plain metadata on every ordinary Result return;
+        // actual loans, receipts and holds keep their existing linear protocol.
+        let result = unsafe { self.native_round_with_scratch(&mut scratch) };
+        scratch.clear();
+        self.host.round_scratch = scratch;
+        result
+    }
+
+    unsafe fn native_round_with_scratch(
+        &mut self,
+        scratch: &mut super::host::RoundScratch,
+    ) -> Result<usize, Stop> {
         // A recovered bus continuation has already entered its instruction.
         // Newly installed host points apply to future entries; they cannot
         // revoke this retained generation or replay its possible effects.
         if let Some(pending) = self.pending_native_device_access() {
             return Err(pending);
         }
-        let bindings: Vec<_> = self
-            .native_publication
-            .as_ref()
-            .map(|inventory| inventory.bindings().collect())
-            .ok_or_else(|| {
-                self.unsupported(RequirementKind::Native("native workers are not bound"))
-            })?;
+        let Some(inventory) = self.native_publication.as_ref() else {
+            return Err(self.unsupported(RequirementKind::Native("native workers are not bound")));
+        };
+        let bindings = &mut scratch.bindings;
+        bindings.extend(inventory.bindings());
         if bindings.len() != self.peers.len()
             || self.peers.iter().enumerate().any(|(pe, peer)| {
                 let cpu = match peer {
@@ -224,7 +236,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             })?;
         self.native_source_pe(current)?;
         self.take_starts()?;
-        for binding in &bindings {
+        for binding in bindings.iter() {
             if matches!(self.peers[binding.pe], Peer::Off) {
                 continue;
             }
@@ -285,13 +297,10 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         let preparation_pc = self.cpu.pc;
         let preparation_el = self.cpu.pstate.el;
         let cohort = self
-            .native_cohort(&bindings, true)
+            .native_cohort(bindings, true)
             .map_err(|failure| failure.into_stop(preparation_pc, preparation_el))?;
-        let expected: Vec<_> = cohort
-            .frames
-            .iter()
-            .map(|frame| frame.identity().pe)
-            .collect();
+        let expected = &mut scratch.expected;
+        expected.extend(cohort.frames.iter().map(|frame| frame.identity().pe));
         let (reports, held) = {
             let host = cohort.host;
             host.transport
@@ -304,7 +313,8 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 .fail_stopped("native transport returned an incomplete actual cohort");
         }
         let mut pending_accesses = Vec::new();
-        let mut seen = Vec::with_capacity(reports.len());
+        let seen = &mut scratch.seen;
+        seen.reserve(reports.len());
         for mut report in reports {
             let Some(settlement) = report.settlement.take() else {
                 self.host

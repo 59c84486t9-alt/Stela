@@ -22,6 +22,22 @@ pub trait ServiceTransport {
     fn fail_stopped(&mut self, reason: &'static str) -> !;
 }
 
+/// Empty allocation storage only; entries are rebuilt from actual inventory
+/// and recovered frames within each round. No entry carries owner authority.
+#[derive(Default)]
+pub(super) struct RoundScratch {
+    pub(super) bindings: Vec<publication::WorkerBinding>,
+    pub(super) expected: Vec<usize>,
+    pub(super) seen: Vec<usize>,
+}
+impl RoundScratch {
+    pub(super) fn clear(&mut self) {
+        self.bindings.clear();
+        self.expected.clear();
+        self.seen.clear();
+    }
+}
+
 /// The one existing Machine Host interface, with scoped physical-owner routing.
 /// Canonical RAM access stays on its retained all-writer owner. The local Host
 /// remains the BSP's actual Host, including native entry and diagnostic reports.
@@ -31,6 +47,7 @@ pub struct ServiceHost<H, T> {
     ram: Arc<RegisteredSystemRam>,
     services: Vec<WorkerServices>,
     selected: Option<usize>,
+    pub(super) round_scratch: RoundScratch,
     pub(super) retained_hold: Option<publication::StoppedWorkers>,
 }
 /// Existing fixed-owner execution/stop transport, retaining the actual frame
@@ -95,6 +112,7 @@ impl<H: Host, T: ServiceTransport> ServiceHost<H, T> {
             ram,
             services: Vec::new(),
             selected: None,
+            round_scratch: RoundScratch::default(),
             retained_hold: None,
         }
     }
@@ -768,6 +786,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         let (_, _, _, ram) = super::super::policy::tests::fixture();
         let mut host = ServiceHost::new(Local, RosterTransport(Vec::new()), ram);
         let mut allocation = None;
+        let mut metadata_allocation = None;
         // Change both actual source membership and owner order between fully
         // closed inventories. The BSP's worker 17 belongs to nonzero PE 7.
         for members in [[7, 2, 11], [11, 7, 2], [9, 3, 7]] {
@@ -805,6 +824,15 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             }
             let held = inventory.hold_stop(request).unwrap();
             inventory.require_all_held(&held).unwrap();
+            let mut scratch = core::mem::take(&mut host.round_scratch);
+            assert_empty_scratch(&scratch);
+            scratch.bindings.extend(inventory.bindings());
+            assert_eq!(scratch.bindings, bindings);
+            // These plain lists model only exact roster metadata. The actual
+            // owner commands and receipts below remain linear and unchanged.
+            scratch
+                .expected
+                .extend(scratch.bindings.iter().map(|binding| binding.pe));
             let mut services = host.take_empty_service_buffer();
             services.reserve(bindings.len());
             for binding in inventory.bindings().collect::<Vec<_>>() {
@@ -826,7 +854,17 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             for binding in &bindings {
                 assert!(host.select_native_service(binding.worker));
                 host.memory_barrier();
+                scratch.seen.push(binding.pe);
             }
+            assert_eq!(scratch.seen, scratch.expected);
+            let current_metadata = scratch_storage(&scratch);
+            if let Some(previous) = metadata_allocation {
+                assert_eq!(current_metadata, previous);
+            }
+            metadata_allocation = Some(current_metadata);
+            scratch.clear();
+            host.round_scratch = scratch;
+            assert_empty_scratch(&host.round_scratch);
             let mut services = host.end_services();
             for session in services.drain(..) {
                 inventory.close_services(session).unwrap();
@@ -1027,6 +1065,107 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         let owners = machine.bind_native_workers(&[binding]).unwrap();
         machine.initialize_native_transport(owners);
         machine
+    }
+
+    fn scratch_storage(scratch: &RoundScratch) -> [(usize, usize); 3] {
+        [
+            (
+                scratch.bindings.as_ptr() as usize,
+                scratch.bindings.capacity(),
+            ),
+            (
+                scratch.expected.as_ptr() as usize,
+                scratch.expected.capacity(),
+            ),
+            (scratch.seen.as_ptr() as usize, scratch.seen.capacity()),
+        ]
+    }
+
+    fn assert_empty_scratch(scratch: &RoundScratch) {
+        assert!(scratch.bindings.is_empty());
+        assert!(scratch.expected.is_empty());
+        assert!(scratch.seen.is_empty());
+    }
+
+    #[test]
+    fn native_round_scratch_survives_breakpoint_and_ordinary_early_refusals() {
+        let mut machine = branch_source_machine();
+        let pc = machine.cpu.pc;
+        machine.set_breakpoints(&[pc]);
+        // SAFETY: the actual closed one-worker model excludes external writers.
+        assert_eq!(unsafe { machine.native_round() }, Err(Stop::Breakpoint(pc)));
+        let roster_len = machine
+            .native_publication
+            .as_ref()
+            .unwrap()
+            .bindings()
+            .count();
+        machine.host.round_scratch.expected.reserve(roster_len);
+        machine.host.round_scratch.seen.reserve(roster_len);
+        let allocation = scratch_storage(&machine.host.round_scratch);
+        assert!(
+            allocation
+                .iter()
+                .all(|(_, capacity)| *capacity >= roster_len)
+        );
+        for _ in 0..8 {
+            // Every call opens/closes actual generation-bound sessions, then
+            // releases the owner before the next breakpoint entry.
+            assert_eq!(unsafe { machine.native_round() }, Err(Stop::Breakpoint(pc)));
+            assert_empty_scratch(&machine.host.round_scratch);
+            assert_eq!(scratch_storage(&machine.host.round_scratch), allocation);
+            assert!(machine.host.services.is_empty());
+        }
+        // A prior roster is never a substitute for the actual current binding.
+        let inventory = machine.native_publication.take().unwrap();
+        assert!(matches!(
+            unsafe { machine.native_round() },
+            Err(Stop::Unsupported(_))
+        ));
+        assert_empty_scratch(&machine.host.round_scratch);
+        assert_eq!(scratch_storage(&machine.host.round_scratch), allocation);
+        machine.native_publication = Some(inventory);
+        // Refuse before obtaining a stop when actual canonical ownership is
+        // absent; retain capacity even though this round did collect bindings.
+        let memory = machine.cpu.canonical_memory.take().unwrap();
+        assert!(matches!(
+            unsafe { machine.native_round() },
+            Err(Stop::Unsupported(_))
+        ));
+        assert_empty_scratch(&machine.host.round_scratch);
+        assert_eq!(scratch_storage(&machine.host.round_scratch), allocation);
+        machine.cpu.canonical_memory = Some(memory);
+        machine.set_breakpoints(&[]);
+        let before = (
+            machine.cpu.state.clone(),
+            machine.cpu.pc,
+            machine.cpu.retired,
+        );
+        // The genuine native admission refusal retains the held owner/session.
+        // It still restores empty metadata instead of caching that authority.
+        assert!(matches!(
+            unsafe { machine.native_round() },
+            Err(Stop::Unsupported(_))
+        ));
+        assert_empty_scratch(&machine.host.round_scratch);
+        assert_eq!(scratch_storage(&machine.host.round_scratch), allocation);
+        assert_eq!(
+            (
+                machine.cpu.state.clone(),
+                machine.cpu.pc,
+                machine.cpu.retired
+            ),
+            before
+        );
+        assert_eq!(machine.host.services.len(), 1);
+        assert!(
+            machine
+                .native_publication
+                .as_ref()
+                .unwrap()
+                .require_stopped(1, &[0])
+                .is_ok()
+        );
     }
 
     #[test]
