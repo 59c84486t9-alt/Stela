@@ -84,6 +84,13 @@ pub enum Phase {
     DmaStart,
     DmaStop,
 }
+#[derive(Clone, Copy)]
+struct Deadline {
+    phase: Phase,
+    start: u64,
+    timeout: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Ownership,
@@ -234,21 +241,58 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(())
     }
+    fn deadline(&self, phase: Phase, timeout: u64) -> Deadline {
+        Deadline {
+            phase,
+            start: self.timer.now_us(),
+            timeout,
+        }
+    }
+    fn check_deadline(&self, deadline: Deadline) -> Result<(), Error> {
+        if self.timer.now_us().wrapping_sub(deadline.start) >= deadline.timeout {
+            return Err(Error::Timeout(deadline.phase));
+        }
+        Ok(())
+    }
+    fn phase_read(&mut self, offset: usize, deadline: Deadline) -> Result<u32, Error> {
+        self.check_deadline(deadline)?;
+        // A failed actual access takes priority over the clock observed after
+        // that access; a successful late ready value never grants completion.
+        let value = self.read(offset)?;
+        self.check_deadline(deadline)?;
+        Ok(value)
+    }
+    fn phase_write(&mut self, offset: usize, value: u32, deadline: Deadline) -> Result<(), Error> {
+        self.check_deadline(deadline)?;
+        self.registers.write32(offset, value);
+        self.check_deadline(deadline)
+    }
+    fn phase_expect(&mut self, offset: usize, value: u32, deadline: Deadline) -> Result<(), Error> {
+        self.check_deadline(deadline)?;
+        let observed = self.read(offset)?;
+        if observed != value {
+            return Err(Error::RegisterRejected(offset));
+        }
+        self.check_deadline(deadline)
+    }
+    fn phase_checked_write(
+        &mut self,
+        offset: usize,
+        value: u32,
+        deadline: Deadline,
+    ) -> Result<(), Error> {
+        self.phase_write(offset, value, deadline)?;
+        self.phase_expect(offset, value, deadline)
+    }
     fn wait(
         &mut self,
         offset: usize,
-        mask: u32,
-        expected: u32,
-        phase: Phase,
-        timeout: u64,
+        deadline: Deadline,
+        ready: impl Fn(u32) -> bool,
     ) -> Result<(), Error> {
-        let start = self.timer.now_us();
         loop {
-            if self.read(offset)? & mask == expected {
+            if ready(self.phase_read(offset, deadline)?) {
                 return Ok(());
-            }
-            if self.timer.now_us().wrapping_sub(start) >= timeout {
-                return Err(Error::Timeout(phase));
             }
             self.timer.relax();
         }
@@ -286,25 +330,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         result
     }
     fn soft_reset(&mut self) -> Result<(), Error> {
-        self.registers.write32(RESET, 1);
+        let assert = self.deadline(Phase::ResetAssert, POWER_TIMEOUT_US);
+        self.phase_write(RESET, 1, assert)?;
         // The source accepts either bit of 0x10001, not bit16 alone. Require
         // its actual observed handshake and a bounded complete clear.
-        let start = self.timer.now_us();
-        loop {
-            if self.read(RESET)? & RESET_ACK != 0 {
-                break;
-            }
-            if self.timer.now_us().wrapping_sub(start) >= POWER_TIMEOUT_US {
-                return Err(Error::Timeout(Phase::ResetAssert));
-            }
-            self.timer.relax();
-        }
-        self.registers.write32(RESET, 0);
-        self.wait(RESET, u32::MAX, 0, Phase::ResetClear, POWER_TIMEOUT_US)?;
-        if self.read(DMA_ENABLE)? != 0 || self.read(PDM_ENABLE)? != 0 {
-            return Err(Error::RegisterRejected(DMA_ENABLE));
-        }
-        Ok(())
+        self.wait(RESET, assert, |value| value & RESET_ACK != 0)?;
+        let clear = self.deadline(Phase::ResetClear, POWER_TIMEOUT_US);
+        self.phase_write(RESET, 0, clear)?;
+        self.wait(RESET, clear, |value| value == 0)?;
+        self.phase_expect(DMA_ENABLE, 0, clear)?;
+        self.phase_expect(PDM_ENABLE, 0, clear)
     }
     /// Initialize or recover a fault through an actual whole-function reset.
     /// Existing capture ownership survives any failed handshake. A successful
@@ -321,12 +356,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn initialize_inner(&mut self) -> Result<(), Error> {
-        let power = self.read(POWER_STATUS)?;
+        let deadline = self.deadline(Phase::PowerOn, POWER_TIMEOUT_US);
+        let power = self.phase_read(POWER_STATUS, deadline)?;
         if power != 0 {
             if power & 3 != 1 {
-                self.registers.write32(POWER_CONTROL, 1);
+                self.phase_write(POWER_CONTROL, 1, deadline)?;
             }
-            self.wait(POWER_STATUS, u32::MAX, 0, Phase::PowerOn, POWER_TIMEOUT_US)?;
+            self.wait(POWER_STATUS, deadline, |value| value == 0)?;
         }
         self.write_checked(CONTROL, 1)?;
         self.soft_reset()?;
@@ -477,6 +513,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 return Err(Error::AuthorityChanged);
             }
         }
+        if self.state == State::Running {
+            for (offset, expected) in [(CHANNELS, 0), (DECIMATION, 2), (PDM_CLOCK, 7)] {
+                if self.read(offset)? != expected {
+                    return Err(Error::AuthorityChanged);
+                }
+            }
+            if self.read(MISC)? & GAIN_MASK != u32::from(self.config.gain) << 3 {
+                return Err(Error::AuthorityChanged);
+            }
+        }
         Ok(())
     }
     fn byte_count(&mut self) -> Result<u64, Error> {
@@ -520,22 +566,20 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.registers.write32(IRQ_STATUS, PERIOD_IRQ);
         let irq = self.read(IRQ_CONTROL)?;
         self.write_checked(IRQ_CONTROL, irq | PERIOD_IRQ)?;
-        self.write_checked(PDM_CLOCK, 7)?;
-        let misc = self.read(MISC)? & !GAIN_MASK | (u32::from(self.config.gain) << 3);
-        self.write_checked(MISC, misc)?;
+        let deadline = self.deadline(Phase::DmaStart, DMA_TIMEOUT_US);
+        self.phase_checked_write(PDM_CLOCK, 7, deadline)?;
+        let misc =
+            self.phase_read(MISC, deadline)? & !GAIN_MASK | (u32::from(self.config.gain) << 3);
+        self.phase_checked_write(MISC, misc, deadline)?;
         fence(Ordering::Release);
-        self.write_checked(PDM_ENABLE, 1)?;
+        self.phase_checked_write(PDM_ENABLE, 1, deadline)?;
         // The status bit may become set immediately, so an exact readback of
         // request1 is invalid. Acknowledgement is the separate active bit.
+        self.check_deadline(deadline)?;
         self.registers.set_bus_master(true)?;
-        self.registers.write32(DMA_ENABLE, DMA_REQUEST);
-        self.wait(
-            DMA_ENABLE,
-            DMA_ACTIVE,
-            DMA_ACTIVE,
-            Phase::DmaStart,
-            DMA_TIMEOUT_US,
-        )?;
+        self.check_deadline(deadline)?;
+        self.phase_write(DMA_ENABLE, DMA_REQUEST, deadline)?;
+        self.wait(DMA_ENABLE, deadline, |value| value & DMA_ACTIVE != 0)?;
         self.state = State::Running;
         Ok(())
     }
@@ -638,28 +682,21 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     fn stop_inner(&mut self) -> Result<(), Error> {
         self.pci_authority()?;
-        if self.read(DMA_ENABLE)? & (DMA_REQUEST | DMA_ACTIVE) != 0 {
-            self.registers.write32(DMA_ENABLE, DMA_ACTIVE);
-            self.wait(
-                DMA_ENABLE,
-                DMA_REQUEST | DMA_ACTIVE,
-                0,
-                Phase::DmaStop,
-                DMA_TIMEOUT_US,
-            )?;
+        let deadline = self.deadline(Phase::DmaStop, DMA_TIMEOUT_US);
+        if self.phase_read(DMA_ENABLE, deadline)? & (DMA_REQUEST | DMA_ACTIVE) != 0 {
+            self.phase_write(DMA_ENABLE, DMA_ACTIVE, deadline)?;
+            self.wait(DMA_ENABLE, deadline, |value| {
+                value & (DMA_REQUEST | DMA_ACTIVE) == 0
+            })?;
         }
-        self.write_checked(PDM_ENABLE, 0)?;
-        self.registers.write32(FIFO_FLUSH, 1);
-        let irq = self.read(IRQ_CONTROL)?;
-        self.write_checked(IRQ_CONTROL, irq & !PERIOD_IRQ)?;
-        Ok(())
+        self.phase_checked_write(PDM_ENABLE, 0, deadline)?;
+        self.phase_write(FIFO_FLUSH, 1, deadline)?;
+        let irq = self.phase_read(IRQ_CONTROL, deadline)?;
+        self.phase_checked_write(IRQ_CONTROL, irq & !PERIOD_IRQ, deadline)
     }
     pub fn stop(&mut self) -> Result<(), Error> {
         self.usable()?;
-        if !matches!(
-            self.state,
-            State::Running | State::Stopped | State::Prepared
-        ) {
+        if !matches!(self.state, State::Running | State::Stopped) {
             return Err(Error::NotPrepared);
         }
         let result = self.ring_authority().and_then(|()| self.stop_inner());
@@ -841,6 +878,9 @@ mod tests {
         rollover: bool,
         unstable: bool,
         writes: Vec<(usize, u32)>,
+        clock: Arc<AtomicU64>,
+        jump_write: Option<(usize, u32, u64)>,
+        jump_read: Option<(usize, u32, u64)>,
     }
     impl Device {
         fn new(revision: u8) -> Self {
@@ -876,27 +916,36 @@ mod tests {
                 rollover: false,
                 unstable: false,
                 writes: Vec::new(),
+                clock: Arc::new(AtomicU64::new(0)),
+                jump_write: None,
+                jump_read: None,
             }
         }
         fn read(&mut self, offset: usize) -> u32 {
-            if self.lost_read == Some(offset) {
+            let value = if self.lost_read == Some(offset) {
                 self.lost_read = None;
-                return u32::MAX;
-            }
-            if offset == 0x2c18 {
+                u32::MAX
+            } else if offset == 0x2c18 {
                 if self.unstable {
                     self.count = self.count.wrapping_add(1u64 << 32);
                 }
-                return (self.count >> 32) as u32;
-            }
-            if offset == 0x2c1c {
+                (self.count >> 32) as u32
+            } else if offset == 0x2c1c {
                 if self.rollover {
                     self.rollover = false;
                     self.count += 8;
                 }
-                return self.count as u32;
+                self.count as u32
+            } else {
+                self.words[offset / 4]
+            };
+            if let Some((at, ready, elapsed)) = self.jump_read {
+                if at == offset && ready == value {
+                    self.jump_read = None;
+                    self.clock.fetch_add(elapsed, Ordering::Relaxed);
+                }
             }
-            self.words[offset / 4]
+            value
         }
         fn write(&mut self, offset: usize, value: u32) {
             self.writes.push((offset, value));
@@ -949,6 +998,12 @@ mod tests {
                     assert_eq!(self.words[0x2c04 / 4], 0);
                 }
                 _ => self.words[offset / 4] = value,
+            }
+            if let Some((at, request, elapsed)) = self.jump_write {
+                if at == offset && request == value {
+                    self.jump_write = None;
+                    self.clock.fetch_add(elapsed, Ordering::Relaxed);
+                }
             }
             if self.fail_after_write == Some(offset) {
                 self.fail_after_write = None;
@@ -1107,7 +1162,7 @@ mod tests {
             Ok(())
         }
     }
-    struct Time(AtomicU64);
+    struct Time(Arc<AtomicU64>);
     impl Timer for Time {
         fn now_us(&self) -> u64 {
             self.0.load(Ordering::Relaxed)
@@ -1129,12 +1184,13 @@ mod tests {
     }
     fn fixture(revision: u8) -> (Controller<Model, Time>, Arc<Mutex<Device>>, Source) {
         let device = Arc::new(Mutex::new(Device::new(revision)));
+        let clock = device.lock().unwrap().clock.clone();
         // SAFETY: this isolated model supplies every source/ownership boundary;
         // the modeled domain is tied to exactly this modeled PCI function.
         let controller = unsafe {
             Controller::claim(
                 Model(device.clone()),
-                Time(AtomicU64::new(0)),
+                Time(clock),
                 config(),
                 Arc::new(Domain(device.clone())),
             )
@@ -1176,6 +1232,8 @@ mod tests {
                         .write_volatile(0xa5)
                 };
             }
+            assert_eq!(controller.stop(), Err(Error::NotPrepared));
+            assert_eq!(controller.state(), State::Prepared);
             controller.start().unwrap();
             assert_eq!(device.lock().unwrap().words[0x2c5c / 4], 0x6018);
             let mut untouched = [0xa5; 16];
@@ -1265,7 +1323,7 @@ mod tests {
                 unsafe {
                     Controller::claim(
                         Model(device.clone()),
-                        Time(AtomicU64::new(0)),
+                        Time(Arc::new(AtomicU64::new(0))),
                         cfg,
                         Arc::new(Domain(device.clone())),
                     )
@@ -1428,7 +1486,7 @@ mod tests {
 
     #[test]
     fn live_map_pin_clock_and_identity_loss_quarantine_old_pcm_and_shutdown_is_safe() {
-        for fault in [0, 1, 2, 3, 4] {
+        for fault in 0..9 {
             let (mut controller, device, source) = ready(0x60, 4096);
             controller.start().unwrap();
             {
@@ -1438,7 +1496,11 @@ mod tests {
                     1 => model.words[0x1440 / 4] = 5,
                     2 => model.words[0x102c / 4] = 0,
                     3 => model.identity.device ^= 1,
-                    _ => model.words[0x1a0c / 4] |= 1 << 29,
+                    4 => model.words[0x1a0c / 4] |= 1 << 29,
+                    5 => model.words[0x2c28 / 4] = 1,
+                    6 => model.words[0x2c2c / 4] = 3,
+                    7 => model.words[0x2c60 / 4] = 0,
+                    _ => model.words[0x2c5c / 4] ^= 1 << 3,
                 }
             }
             assert!(controller.position().is_err());
@@ -1490,6 +1552,193 @@ mod tests {
             controller.shutdown().unwrap();
             assert_eq!(source.drops.load(Ordering::Relaxed), 2);
         }
+    }
+
+    #[test]
+    fn power_clock_and_actual_iova_limit_failures_do_not_publish_dma() {
+        let (mut controller, device, source) = fixture(0x60);
+        device.lock().unwrap().power_never = true;
+        assert_eq!(controller.initialize(), Err(Error::Timeout(Phase::PowerOn)));
+        assert_eq!(device.lock().unwrap().maps, 0);
+        device.lock().unwrap().power_never = false;
+        device.lock().unwrap().ignore_write = Some(0x102c);
+        assert_eq!(controller.initialize(), Err(Error::RegisterRejected(CLOCK)));
+        device.lock().unwrap().ignore_write = None;
+        controller.initialize().unwrap();
+        // Narrow the platform ceiling before allocating anything. The real
+        // model domain refuses its high IOVA; no PA fallback is permitted.
+        controller.config.dma_address_bits = 32;
+        assert_eq!(
+            controller.prepare_capture(&source, CAPTURE_FORMAT, 4096),
+            Err(Error::Dma(DmaError::AddressLimit))
+        );
+        assert_eq!(source.drops.load(Ordering::Relaxed), 1);
+        assert_eq!(device.lock().unwrap().maps, 0);
+        assert!(controller.capture.is_none());
+        assert!(
+            !device
+                .lock()
+                .unwrap()
+                .writes
+                .iter()
+                .any(|(offset, _)| *offset == 0x10000)
+        );
+        controller.shutdown().unwrap();
+    }
+
+    #[test]
+    fn successful_but_late_power_and_reset_accesses_do_not_advance_initialization() {
+        // Both a successful request effect and its successful ready read must
+        // fit the phase budget. The clock advances inside that actual access.
+        for write in [false, true] {
+            for (offset, request, ready, phase) in [
+                (0x1024, 1, 0, Phase::PowerOn),
+                (0x1000, 1, 0x10001, Phase::ResetAssert),
+                (0x1000, 0, 0, Phase::ResetClear),
+            ] {
+                let (mut controller, device, source) = fixture(0x60);
+                {
+                    let mut model = device.lock().unwrap();
+                    if write {
+                        model.jump_write = Some((offset, request, 501));
+                    } else {
+                        model.jump_read = Some((
+                            if phase == Phase::PowerOn {
+                                0x1028
+                            } else {
+                                offset
+                            },
+                            ready,
+                            501,
+                        ));
+                    }
+                }
+                assert_eq!(controller.initialize(), Err(Error::Timeout(phase)));
+                assert_eq!(controller.state(), State::Faulted);
+                assert_eq!(device.lock().unwrap().maps, 0);
+                assert!(
+                    !device
+                        .lock()
+                        .unwrap()
+                        .writes
+                        .iter()
+                        .any(|(at, _)| *at == 0x102c)
+                );
+                if phase == Phase::PowerOn {
+                    assert!(
+                        !device
+                            .lock()
+                            .unwrap()
+                            .writes
+                            .iter()
+                            .any(|(at, _)| *at == 0x1004)
+                    );
+                }
+                controller.initialize().unwrap();
+                controller
+                    .prepare_capture(&source, CAPTURE_FORMAT, 4096)
+                    .unwrap();
+                controller.start().unwrap();
+                device.lock().unwrap().advance(16);
+                controller.shutdown().unwrap();
+                assert_eq!(source.drops.load(Ordering::Relaxed), 1);
+            }
+        }
+        // An already-on first read is still a physical phase access.
+        let (mut controller, device, _) = fixture(0x60);
+        {
+            let mut model = device.lock().unwrap();
+            model.words[0x1028 / 4] = 0;
+            model.jump_read = Some((0x1028, 0, 501));
+        }
+        assert_eq!(controller.initialize(), Err(Error::Timeout(Phase::PowerOn)));
+        assert!(device.lock().unwrap().writes.is_empty());
+        controller.shutdown().unwrap();
+    }
+
+    #[test]
+    fn successful_but_late_dma_and_reset_completion_retains_pins_until_fresh_recovery() {
+        for write in [false, true] {
+            for phase in [
+                Phase::DmaStart,
+                Phase::DmaStop,
+                Phase::ResetAssert,
+                Phase::ResetClear,
+            ] {
+                let (mut controller, device, source) = ready(0x60, 4096);
+                if phase != Phase::DmaStart {
+                    controller.start().unwrap();
+                    device.lock().unwrap().advance(32);
+                }
+                let (offset, request, ready, budget) = match phase {
+                    Phase::DmaStart => (0x2c08, 1, 2, 100_001),
+                    Phase::DmaStop => (0x2c08, 2, 0, 100_001),
+                    Phase::ResetAssert => (0x1000, 1, 0x10001, 501),
+                    Phase::ResetClear => (0x1000, 0, 0, 501),
+                    _ => unreachable!(),
+                };
+                {
+                    let mut model = device.lock().unwrap();
+                    if write {
+                        model.jump_write = Some((offset, request, budget));
+                    } else {
+                        model.jump_read = Some((offset, ready, budget));
+                    }
+                }
+                let result = match phase {
+                    Phase::DmaStart => controller.start(),
+                    Phase::DmaStop => controller.stop(),
+                    _ => controller.shutdown(),
+                };
+                assert_eq!(result, Err(Error::Timeout(phase)));
+                assert_eq!(controller.state(), State::Faulted);
+                assert_eq!(controller.start(), Err(Error::NeedsReset));
+                assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+                assert_eq!(device.lock().unwrap().unmaps, 0);
+                assert!(controller.capture.is_some());
+                if phase == Phase::DmaStop {
+                    // A late actual stop must not silently advance to PDM/FIFO
+                    // quiet or unmap within the failed operation.
+                    assert_eq!(device.lock().unwrap().words[0x2c04 / 4], 1);
+                }
+                controller.shutdown().unwrap();
+                assert_eq!(source.drops.load(Ordering::Relaxed), 1);
+            }
+        }
+        // A successful late PDM clock effect cannot enable BME or submit DMA.
+        let (mut controller, device, source) = ready(0x60, 4096);
+        device.lock().unwrap().jump_write = Some((0x2c60, 7, 100_001));
+        assert_eq!(controller.start(), Err(Error::Timeout(Phase::DmaStart)));
+        assert!(!device.lock().unwrap().master);
+        assert!(
+            !device
+                .lock()
+                .unwrap()
+                .writes
+                .iter()
+                .any(|(at, value)| *at == 0x2c08 && *value == 1)
+        );
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+        controller.shutdown().unwrap();
+        assert_eq!(source.drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn native_read_failure_has_priority_over_clock_expiry_after_that_access() {
+        let (mut controller, device, source) = ready(0x60, 4096);
+        {
+            let mut model = device.lock().unwrap();
+            model.fail_after_write = Some(0x2c08);
+            model.jump_read = Some((0x2c08, u32::MAX, 100_001));
+        }
+        assert_eq!(
+            controller.start(),
+            Err(Error::RegisterUnavailable(DMA_ENABLE))
+        );
+        assert_eq!(controller.state(), State::Faulted);
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+        controller.shutdown().unwrap();
+        assert_eq!(source.drops.load(Ordering::Relaxed), 1);
     }
 
     #[test]
