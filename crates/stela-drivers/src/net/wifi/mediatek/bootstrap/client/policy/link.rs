@@ -84,6 +84,13 @@ struct State<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> {
     pending: Option<PendingEvents>,
     released: Option<IntoIter<Released<PacketOwner<C>>>>,
     epoch: Option<u64>,
+    // One original recoverable RX error deferred by successful packet I/O.
+    // The next packet I/O reports it before polling or publishing again.
+    deferred_error: Option<LinkControlError>,
+}
+struct ServiceFailure {
+    error: LinkControlError,
+    soft_rx: bool,
 }
 /// Owns the exact existing native client and allocation provider. It has no raw
 /// mutable-client escape: controls, timers, packets and revocation serialize on
@@ -142,6 +149,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 pending: None,
                 released: None,
                 epoch: None,
+                deferred_error: None,
             })),
         })
     }
@@ -162,13 +170,22 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
             .clock
             .now_us()
     }
-    fn up(s: &State<I, Q, C, S>) -> bool {
+    fn active(s: &State<I, Q, C, S>) -> bool {
         let c = s.client.client.state();
         !s.client.revoked
             && c.phase == Phase::Associated
             && c.controller.phase() == ControllerPhase::StartFacts
+            && c.controller
+                .state()
+                .data_tx
+                .as_ref()
+                .is_some_and(|queue| !queue.is_poisoned())
             && c.profile
                 .is_some_and(|p| matches!(p.channel.band, Band::Ghz2 | Band::Ghz5))
+    }
+    fn up(s: &State<I, Q, C, S>) -> bool {
+        let c = s.client.client.state();
+        Self::active(s)
             && c.station.port_open(
                 c.ptk.as_ref().map(HardwareKey::slot),
                 c.gtk.as_ref().map(HardwareKey::slot),
@@ -264,11 +281,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     /// frontend queues retain their batch and apply backpressure without making
     /// a fabricated completion or discarding control-port/event bytes.
     pub fn service(&mut self) -> Result<LinkProgress, LinkControlError> {
+        self.service_inner().map_err(|failure| failure.error)
+    }
+    fn service_inner(&mut self) -> Result<LinkProgress, ServiceFailure> {
         let now = self.now();
         let s = self.state_mut();
         Self::reconcile(s);
         Self::drain(s);
         let mut failure = None;
+        let mut soft_rx = false;
         if s.pending.is_none()
             && s.notices.len() < NOTICES
             && matches!(
@@ -291,7 +312,22 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                     });
                 }
                 Ok(_) => {}
-                Err(error) => failure = Some(error),
+                Err(error) => {
+                    // Only rejected receive content may be deferred by packet
+                    // I/O. Native transport/ownership errors stay synchronous.
+                    soft_rx = matches!(
+                        &error,
+                        PolicyError::Client(
+                            Error::WrongProfile
+                                | Error::Rx(_)
+                                | Error::Frame(_)
+                                | Error::Data(_)
+                                | Error::Aggregate(_)
+                                | Error::IncompleteParent
+                        )
+                    );
+                    failure = Some(error);
+                }
             }
         }
         // A rejected receive frame must not starve timeouts or actual completed
@@ -309,6 +345,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         if matches!(s.client.phase(), Phase::Joining | Phase::Associated)
             && let Err(error) = s.client.poll_station(timer_now, &s.source)
         {
+            soft_rx = false;
             failure.get_or_insert(error);
         }
         if s.released.is_none()
@@ -321,6 +358,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 Ok(released) if !released.is_empty() => s.released = Some(released.into_iter()),
                 Ok(_) => {}
                 Err(error) => {
+                    soft_rx = false;
                     failure.get_or_insert(error);
                 }
             }
@@ -328,9 +366,28 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Self::reconcile(s);
         Self::drain(s);
         if let Some(error) = failure {
-            return Err(error.into());
+            return Err(ServiceFailure {
+                error: error.into(),
+                soft_rx,
+            });
         }
         Ok(Self::progress(s))
+    }
+    // An error-only call starts no new poll and performs no packet publication.
+    // Thus repeated bad RX can alternate useful packet I/O and the exact error,
+    // without overwriting/coalescing errors or an ambiguous post-publication Err.
+    fn service_for_io(&mut self) -> Result<Option<LinkControlError>, LinkControlError> {
+        if let Some(error) = self.state_mut().deferred_error.take() {
+            return Err(error);
+        }
+        match self.service_inner() {
+            Ok(_) => Ok(None),
+            Err(ServiceFailure {
+                error,
+                soft_rx: true,
+            }) => Ok(Some(error)),
+            Err(failure) => Err(failure.error),
+        }
     }
     pub fn begin_scan(
         &mut self,
@@ -400,22 +457,31 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         ethernet: &[u8],
         key: Option<KeyIdentity>,
     ) -> Result<Receipt, LinkControlError> {
-        if self.service()?.backpressured {
-            return Err(LinkControlError::Backpressure);
-        }
+        let failure = self.service_for_io()?;
         let s = self.state_mut();
+        // EAPOL may precede controlled-port/data carrier, but it still needs
+        // the actual current association and a live native controller.
+        if !Self::active(s) {
+            return Err(failure.unwrap_or(LinkControlError::WrongPhase));
+        }
+        if Self::progress(s).backpressured {
+            return Err(failure.unwrap_or(LinkControlError::Backpressure));
+        }
         let epoch = s
             .client
             .station()
             .association_epoch()
             .ok_or(LinkControlError::WrongPhase)?;
-        Ok(s.client.transmit(
+        let result = s.client.transmit(
             epoch,
             ethernet,
             key.map_or(TxClass::ControlPortPlaintext, TxClass::ControlPortProtected),
             None,
             &s.source,
-        )?)
+        );
+        s.deferred_error = failure;
+        Self::reconcile(s);
+        Ok(result?)
     }
     pub fn disconnect(&mut self) -> Result<(), LinkControlError> {
         let s = self.state_mut();
@@ -462,17 +528,19 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> Link for Managed
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         crate::net::check_frame(frame)?;
-        let progress = self
-            .service()
+        let failure = self
+            .service_for_io()
             .map_err(|e| LinkError::Adapter(format!("{e}")))?;
         let s = self.state_mut();
         if !Self::up(s) {
-            return Err(LinkError::NoCarrier);
+            return Err(
+                failure.map_or(LinkError::NoCarrier, |e| LinkError::Adapter(format!("{e}")))
+            );
         }
-        if progress.backpressured {
+        if Self::progress(s).backpressured {
             return Err(LinkError::Adapter(format!(
                 "{}",
-                LinkControlError::Backpressure
+                failure.unwrap_or(LinkControlError::Backpressure)
             )));
         }
         let epoch = s
@@ -480,19 +548,30 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> Link for Managed
             .station()
             .association_epoch()
             .ok_or(LinkError::NoCarrier)?;
-        s.client
-            .transmit(epoch, frame, TxClass::Data, None, &s.source)
+        let result = s
+            .client
+            .transmit(epoch, frame, TxClass::Data, None, &s.source);
+        s.deferred_error = failure;
+        Self::reconcile(s);
+        result
             .map(|_| ())
             .map_err(|e| LinkError::Adapter(format!("MT7925 managed link: {e:?}")))
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
-        self.service()
+        let failure = self
+            .service_for_io()
             .map_err(|e| LinkError::Adapter(format!("{e}")))?;
         let s = self.state_mut();
-        while let Some(packet) = s.data.pop_front() {
-            if Some(packet.association) == s.client.station().association_epoch() {
-                return Ok(Some(packet.bytes));
+        if Self::up(s) {
+            while let Some(packet) = s.data.pop_front() {
+                if Some(packet.association) == s.client.station().association_epoch() {
+                    s.deferred_error = failure;
+                    return Ok(Some(packet.bytes));
+                }
             }
+        }
+        if let Some(error) = failure {
+            return Err(LinkError::Adapter(format!("{error}")));
         }
         Ok(None)
     }
@@ -1032,5 +1111,335 @@ mod tests {
         drop(link);
         assert_eq!(provider.load(Ordering::Relaxed), 1);
         assert_eq!(model.drops.load(Ordering::Relaxed), 1);
+    }
+    fn queued_data(link: &mut TestLink, model: &Model, pn: u64, marker: u8) {
+        let mut bytes = data(false);
+        *bytes.last_mut().unwrap() = marker;
+        incoming(model, &bytes, Some((1, 0, pn)), false);
+        link.service().unwrap();
+    }
+    fn rejected_rx(model: &Model, protocol_version: bool) {
+        if protocol_version {
+            incoming(model, &response(0xb1, &[0, 0, 2, 0, 0, 0]), None, false);
+        } else {
+            let mut raw = incoming_bytes(&data(false), Some((1, 0, 100)), false);
+            raw[7] |= 2; // actual descriptor cipher mismatch, before replay admission
+            device_receive(&model.queues[&0xd4520], &raw, true, 0);
+        }
+    }
+    fn deferred_message(link: &TestLink) -> std::string::String {
+        format!(
+            "{}",
+            link.state()
+                .deferred_error
+                .as_ref()
+                .expect("original deferred RX error")
+        )
+    }
+    #[test]
+    fn queued_valid_receive_alternates_exact_original_error_under_repeated_bad_rx() {
+        let (mut link, model, join, bss, provider) = setup_link();
+        associate(&mut link, &model, join, bss);
+        secure(&mut link);
+        drop(drain_notices(&mut link));
+        for n in 1..=3 {
+            queued_data(&mut link, &model, u64::from(n), n);
+        }
+        assert_eq!(link.queues().data_frames, 3);
+        for n in 1..=3 {
+            rejected_rx(&model, n % 2 == 0);
+            let received = link.receive().unwrap().unwrap();
+            assert_eq!(received.last(), Some(&n));
+            assert_eq!(link.queues().data_frames, usize::from(3 - n));
+            let original = deferred_message(&link);
+            assert!(if n % 2 == 0 {
+                original.contains("ProtocolVersion")
+            } else {
+                original.contains("WrongProfile")
+            });
+            let head = model.queues[&0xd4520].lock().unwrap().head;
+            let syncs = model.memory.lock().unwrap().syncs.len();
+            assert_eq!(link.receive(), Err(LinkError::Adapter(original)));
+            // Error-only return did not consume/refill RX, service timers or
+            // retire/publish a packet; the next frame will service afresh.
+            assert_eq!(model.queues[&0xd4520].lock().unwrap().head, head);
+            assert_eq!(model.memory.lock().unwrap().syncs.len(), syncs);
+            assert!(link.state().deferred_error.is_none());
+            assert!(link.carrier());
+        }
+        assert!(link.receive().unwrap().is_none());
+        stop(&mut link, &model);
+        drop(link);
+        assert_eq!(provider.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn shared_deferred_error_survives_explicit_service_and_prevents_next_tx_publication() {
+        let (mut link, model, join, bss, provider) = setup_link();
+        associate(&mut link, &model, join, bss);
+        let ptk = secure(&mut link);
+        drop(drain_notices(&mut link));
+        queued_data(&mut link, &model, 1, 0x41);
+        queued_data(&mut link, &model, 2, 0x42);
+        rejected_rx(&model, false);
+        assert_eq!(link.receive().unwrap().unwrap().last(), Some(&0x41));
+        let original = deferred_message(&link);
+        rejected_rx(&model, true);
+        let explicit = link.service().unwrap_err();
+        assert!(format!("{explicit}").contains("ProtocolVersion"));
+        assert_eq!(deferred_message(&link), original);
+        rejected_rx(&model, true);
+        let tx = model.queues[&0xd4300].lock().unwrap().head;
+        let rx = model.queues[&0xd4520].lock().unwrap().head;
+        assert_eq!(
+            link.transmit(&eth(0x800)),
+            Err(LinkError::Adapter(original))
+        );
+        assert_eq!(model.queues[&0xd4300].lock().unwrap().head, tx);
+        assert_eq!(model.queues[&0xd4520].lock().unwrap().head, rx);
+        assert!(link.state().deferred_error.is_none());
+        // The still-pending bad RX cannot starve genuine control publication.
+        let receipt = link.send_control(&control(), Some(ptk)).unwrap();
+        let deferred = deferred_message(&link);
+        assert!(deferred.contains("ProtocolVersion"));
+        let frames = finish_tx(&model);
+        assert_eq!(frames.len(), 1);
+        assert_ne!(frames[0][1] & 0x40, 0);
+        link.service().unwrap(); // real TX retirement does not consume the error
+        assert_eq!(deferred_message(&link), deferred);
+        assert_eq!(link.receive(), Err(LinkError::Adapter(deferred)));
+        assert_eq!(link.receive().unwrap().unwrap().last(), Some(&0x42));
+        let notices = drain_notices(&mut link);
+        assert_eq!(
+            notices
+                .into_iter()
+                .filter(|n| matches!(&n.event,LinkEvent::Released(r) if r.receipt==receipt))
+                .count(),
+            1
+        );
+        stop(&mut link, &model);
+        drop(link);
+        assert_eq!(provider.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn outbound_data_and_prekey_eapol_alternate_real_single_publication_and_error() {
+        for control_port in [false, true] {
+            let (mut link, model, join, bss, provider) = setup_link();
+            associate(&mut link, &model, join, bss);
+            if !control_port {
+                secure(&mut link);
+            }
+            drop(drain_notices(&mut link));
+            for _ in 0..3 {
+                assert_eq!(link.carrier(), !control_port);
+                rejected_rx(&model, true);
+                let receipt = if control_port {
+                    Some(link.send_control(&control(), None).unwrap())
+                } else {
+                    link.transmit(&eth(0x800)).unwrap();
+                    None
+                };
+                let original = deferred_message(&link);
+                assert!(original.contains("ProtocolVersion"));
+                let head = model.queues[&0xd4300].lock().unwrap().head;
+                if control_port {
+                    assert_eq!(
+                        format!("{}", link.send_control(&control(), None).unwrap_err()),
+                        original
+                    );
+                } else {
+                    assert_eq!(
+                        link.transmit(&eth(0x800)),
+                        Err(LinkError::Adapter(original))
+                    );
+                }
+                assert_eq!(model.queues[&0xd4300].lock().unwrap().head, head);
+                let frames = finish_tx(&model);
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0][1] & 0x40 == 0, control_port);
+                link.service().unwrap();
+                let notices = drain_notices(&mut link);
+                let released: Vec<_> = notices
+                    .into_iter()
+                    .filter_map(|n| match n.event {
+                        LinkEvent::Released(r) => Some(r),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(released.len(), 1);
+                if let Some(receipt) = receipt {
+                    assert_eq!(released[0].receipt, receipt);
+                    assert!(released[0].context.key().is_none());
+                }
+            }
+            stop(&mut link, &model);
+            drop(link);
+            assert_eq!(provider.load(Ordering::Relaxed), 1);
+        }
+    }
+    #[test]
+    fn soft_rx_followed_by_native_submission_failure_reports_both_without_fake_tx() {
+        let (mut link, model, join, bss, provider) = setup_link();
+        associate(&mut link, &model, join, bss);
+        secure(&mut link);
+        drop(drain_notices(&mut link));
+        rejected_rx(&model, true);
+        link.state().source.1.store(true, Ordering::Relaxed);
+        let head = model.queues[&0xd4300].lock().unwrap().head;
+        let submission = link.transmit(&eth(0x800)).unwrap_err();
+        assert!(!format!("{submission}").contains("ProtocolVersion"));
+        assert_eq!(model.queues[&0xd4300].lock().unwrap().head, head);
+        let original = deferred_message(&link);
+        assert!(original.contains("ProtocolVersion"));
+        link.state().source.1.store(false, Ordering::Relaxed);
+        assert_eq!(link.receive(), Err(LinkError::Adapter(original)));
+        assert_eq!(model.queues[&0xd4300].lock().unwrap().head, head);
+        link.transmit(&eth(0x800)).unwrap();
+        assert_eq!(finish_tx(&model).len(), 1);
+        link.service().unwrap();
+        stop(&mut link, &model);
+        drop(link);
+        assert_eq!(provider.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn deferred_error_cannot_bypass_fresh_native_hard_failure_for_any_packet_io() {
+        for operation in 0..3 {
+            let (mut link, model, join, bss, provider) = setup_link();
+            associate(&mut link, &model, join, bss);
+            secure(&mut link);
+            drop(drain_notices(&mut link));
+            queued_data(&mut link, &model, 1, 0x51);
+            queued_data(&mut link, &model, 2, 0x52);
+            rejected_rx(&model, true);
+            assert_eq!(link.receive().unwrap().unwrap().last(), Some(&0x51));
+            let original = deferred_message(&link);
+            model.queues[&0xd4520].lock().unwrap().fail_publish = true;
+            incoming(&model, &data(false), Some((1, 0, 3)), false);
+            let tx = model.queues[&0xd4300].lock().unwrap().head;
+            let deferred = match operation {
+                0 => link.receive().map(|_| ()),
+                1 => link.transmit(&eth(0x800)),
+                _ => link
+                    .send_control(&control(), None)
+                    .map(|_| ())
+                    .map_err(|e| LinkError::Adapter(format!("{e}"))),
+            };
+            assert_eq!(deferred, Err(LinkError::Adapter(original)));
+            assert!(link.carrier());
+            assert_eq!(link.queues().data_frames, 1);
+            // Next possible delivery/submission must observe the real failing
+            // RX DDONE refill, close carrier and discard held data first.
+            let result = match operation {
+                0 => link.receive().map(|_| ()),
+                1 => link.transmit(&eth(0x800)),
+                _ => link
+                    .send_control(&control(), None)
+                    .map(|_| ())
+                    .map_err(|e| LinkError::Adapter(format!("{e}"))),
+            };
+            assert!(result.is_err());
+            assert_eq!(
+                link.state().client.client.state().controller.phase(),
+                ControllerPhase::Quarantined
+            );
+            assert!(!link.carrier());
+            assert_eq!(link.queues().data_frames, 0);
+            assert_eq!(model.queues[&0xd4300].lock().unwrap().head, tx);
+            drop(link);
+            assert_eq!(provider.load(Ordering::Relaxed), 0);
+            assert_eq!(model.drops.load(Ordering::Relaxed), 0);
+        }
+    }
+    #[test]
+    fn revocation_and_new_association_never_deliver_held_old_epoch_data() {
+        for revoke in [false, true] {
+            let (mut link, model, join, bss, provider) = setup_link();
+            associate(&mut link, &model, join, bss);
+            secure(&mut link);
+            drop(drain_notices(&mut link));
+            let old_epoch = link.station().association_epoch().unwrap();
+            queued_data(&mut link, &model, 1, 0x61);
+            queued_data(&mut link, &model, 2, 0x62);
+            rejected_rx(&model, true);
+            assert_eq!(link.receive().unwrap().unwrap().last(), Some(&0x61));
+            let original = deferred_message(&link);
+            if revoke {
+                link.revoke().unwrap();
+            } else {
+                link.disconnect().unwrap();
+            }
+            assert!(!link.carrier());
+            assert_eq!(link.queues().data_frames, 0);
+            // SAFETY: actual model peer/key removal and all old users drained.
+            unsafe { link.retire_peer_after_drain() }.unwrap();
+            if revoke {
+                assert_eq!(
+                    format!("{}", link.send_control(&control(), None).unwrap_err()),
+                    original
+                );
+                assert!(link.transmit(&eth(0x800)).is_err());
+                assert!(!matches!(link.receive(), Ok(Some(_))));
+                model.response.lock().unwrap().clc_processing = false;
+                model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
+                // SAFETY: independent whole-controller/radio/DMA/IRQ model fence.
+                unsafe { link.stop_after_quiesce() }.unwrap();
+            } else {
+                let (join, bss) = modern_inputs(&link.state().client.client);
+                associate(&mut link, &model, join, bss);
+                secure(&mut link);
+                assert_ne!(link.station().association_epoch(), Some(old_epoch));
+                assert_eq!(deferred_message(&link), original);
+                assert_eq!(link.receive(), Err(LinkError::Adapter(original)));
+                assert!(link.receive().unwrap().is_none());
+                queued_data(&mut link, &model, 1, 0x63);
+                assert_eq!(link.receive().unwrap().unwrap().last(), Some(&0x63));
+                stop(&mut link, &model);
+            }
+            drop(link);
+            assert_eq!(provider.load(Ordering::Relaxed), 1);
+            assert_eq!(model.drops.load(Ordering::Relaxed), 1);
+        }
+    }
+    #[test]
+    fn soft_rx_plus_real_tx_retirement_poison_is_never_deferred_as_packet_rejection() {
+        for operation in 0..3 {
+            let (mut link, model, join, bss, provider) = setup_link();
+            associate(&mut link, &model, join, bss);
+            secure(&mut link);
+            drop(drain_notices(&mut link));
+            queued_data(&mut link, &model, 1, 0x71);
+            assert!(link.carrier());
+            rejected_rx(&model, true);
+            model.queues[&0xd4300].lock().unwrap().invalid_index = true;
+            let head = model.queues[&0xd4300].lock().unwrap().head;
+            let result = match operation {
+                0 => link.receive().map(|_| ()),
+                1 => link.transmit(&eth(0x800)),
+                _ => link
+                    .send_control(&control(), None)
+                    .map(|_| ())
+                    .map_err(|e| LinkError::Adapter(format!("{e}"))),
+            };
+            // Preserve the original first RX diagnostic, but a later native
+            // retirement failure makes the whole service failure immediate.
+            assert!(
+                matches!(result,Err(LinkError::Adapter(ref e)) if e.contains("ProtocolVersion"))
+            );
+            assert!(link.state().deferred_error.is_none());
+            let c = link.state().client.client.state();
+            assert!(c.controller.state().data_tx.as_ref().unwrap().is_poisoned());
+            assert_eq!(c.phase, Phase::Associated);
+            assert_eq!(c.controller.phase(), ControllerPhase::StartFacts);
+            assert_eq!(link.station().phase(), station::Phase::Associated);
+            assert!(!link.carrier());
+            assert_eq!(link.queues().data_frames, 0);
+            assert_eq!(model.queues[&0xd4300].lock().unwrap().head, head);
+            assert!(link.transmit(&eth(0x800)).is_err());
+            assert!(link.send_control(&control(), None).is_err());
+            assert!(!matches!(link.receive(), Ok(Some(_))));
+            assert_eq!(model.queues[&0xd4300].lock().unwrap().head, head);
+            drop(link);
+            assert_eq!(provider.load(Ordering::Relaxed), 0);
+            assert_eq!(model.drops.load(Ordering::Relaxed), 0);
+        }
     }
 }
