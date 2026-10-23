@@ -38,8 +38,7 @@ pub const STREAM_LINES: usize = 40;
 /// lines start there too.
 const TEXT_INDENT: &str = "         ";
 
-/// Text formatted on the stack: a tick may interrupt the heap's holder, so
-/// drawing the running step allocates nothing.
+/// Text formatted on the stack: drawing a timer tick allocates nothing.
 #[derive(Default)]
 struct Short {
     bytes: [u8; 32],

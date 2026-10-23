@@ -5,6 +5,7 @@
 use super::diagnostic::{self, Edu, EduSource};
 use alloc::{boxed::Box, format, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::{
+    alloc::{GlobalAlloc, Layout},
     arch::{asm, naked_asm},
     ffi::c_void,
     ops::Range,
@@ -27,6 +28,7 @@ const BAD_ADMISSION: u64 = 8;
 const BAD_INLINE: u64 = 16;
 const BAD_WORKER: u64 = 32;
 const BAD_ASYNC_STATE: u64 = 64;
+const BAD_IRQ_HEAP: u64 = 128;
 struct BspCpu;
 // SAFETY: actual source-bound one-BSP fixture. Genuine registered dispatch
 // brackets depth from unchanged IDT entry, including its real saved Frame.rsp.
@@ -96,6 +98,9 @@ impl Handler for WorkHandler {
         // Reuse the existing actual cause/W1C/readback handler. Registry emits
         // EOI after this whole callback and its genuine context scope finish.
         let disposition = self.events.edu.handle();
+        if !heap_probe(0) {
+            self.events.bad(BAD_IRQ_HEAP);
+        }
         if self.queue.current_id() != Err(WorkError::InterruptContext) {
             self.events.bad(BAD_ISR_ID);
         }
@@ -199,6 +204,51 @@ fn stack_pointer() -> usize {
     }
     sp
 }
+fn interrupt_flags() -> u64 {
+    let flags;
+    unsafe {
+        asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags));
+    }
+    flags
+}
+
+// Exercise both free-list and small-cache allocations in the real ISR and
+// foreground. No infallible allocation, formatting or failure report runs here.
+// Volatile accesses require the memory work even in optimized EFI builds.
+fn heap_probe(expected_if: u64) -> bool {
+    if interrupt_flags() & IF != expected_if {
+        return false;
+    }
+    for (size, alignment) in [(257, 64), (31, 16)] {
+        let Ok(layout) = Layout::from_size_align(size, alignment) else {
+            return false;
+        };
+        let before = crate::ALLOCATOR.usage().live;
+        // SAFETY: valid nonzero layout; this function retains exclusive
+        // ownership of the allocation until its matching deallocation.
+        let block = unsafe { crate::ALLOCATOR.alloc_zeroed(layout) };
+        if block.is_null() {
+            return false;
+        }
+        let mut valid =
+            (block as usize).is_multiple_of(alignment) && interrupt_flags() & IF == expected_if;
+        for offset in 0..size {
+            unsafe {
+                valid &= block.add(offset).read_volatile() == 0;
+                block.add(offset).write_volatile(0xa5);
+            }
+        }
+        for offset in 0..size {
+            valid &= unsafe { block.add(offset).read_volatile() } == 0xa5;
+        }
+        unsafe { crate::ALLOCATOR.dealloc(block, layout) };
+        valid &= crate::ALLOCATOR.usage().live == before && interrupt_flags() & IF == expected_if;
+        if !valid {
+            return false;
+        }
+    }
+    true
+}
 unsafe fn events<'a>(ctx: *mut c_void) -> &'a Events {
     unsafe { &*ctx.cast::<Events>() }
 }
@@ -237,6 +287,9 @@ const _: () = {
 };
 unsafe extern "C" fn foreground(ctx: *mut c_void) {
     let state = unsafe { events(ctx) };
+    if !heap_probe(IF) {
+        state.bad(BAD_IRQ_HEAP);
+    }
     match unsafe { state.queue() }.current_id() {
         Ok(id) => state.foreground.store(id.get(), Ordering::Release),
         Err(_) => {
@@ -379,7 +432,7 @@ pub(crate) fn run(
         ));
     }
     Ok(format!(
-        "EDU vector={vector:#x} actual_cause=0x1 IRQ_depth=real interrupted_SP=owned-foreground ISR_SP=separate-IST current_id=IRQ-refused enqueue=owned/noninline worker=owned-distinct-context async_FXSAVE=unchanged mask+hardware+IRR/ISR+inflight+work=drained late_delivery=absent stack_leases=4-released BSP_device_owner=!Send interrupted_rsp={:#x} isr_rsp={:#x} worker_rsp={:#x}",
+        "EDU vector={vector:#x} actual_cause=0x1 IRQ_depth=real interrupted_SP=owned-foreground ISR_SP=separate-IST current_id=IRQ-refused enqueue=owned/noninline worker=owned-distinct-context async_FXSAVE=unchanged heap=aligned-zeroed-read-write-reclaimed heap_IF=off/on-preserved mask+hardware+IRR/ISR+inflight+work=drained late_delivery=absent stack_leases=4-released BSP_device_owner=!Send interrupted_rsp={:#x} isr_rsp={:#x} worker_rsp={:#x}",
         events.interrupted_rsp.load(Ordering::Acquire),
         events.isr_rsp.load(Ordering::Acquire),
         events.worker_rsp.load(Ordering::Acquire)

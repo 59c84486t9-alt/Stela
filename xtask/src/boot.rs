@@ -1497,6 +1497,8 @@ fn native_irq_work_verified(serial: &str) -> bool {
                 "enqueue=owned/noninline",
                 "worker=owned-distinct-context",
                 "async_FXSAVE=unchanged",
+                "heap=aligned-zeroed-read-write-reclaimed",
+                "heap_IF=off/on-preserved",
                 "mask+hardware+IRR/ISR+inflight+work=drained",
                 "late_delivery=absent",
                 "stack_leases=4-released",
@@ -1731,7 +1733,7 @@ mod tests {
     #[test]
     fn native_irq_work_requires_actual_irq_and_async_state_proof_exclusively() {
         use clap::Parser;
-        let full = "CHECK native-irq-work PASS roundtrip=verified teardown=IOTLB+TE-off-ack actual_cause=0x1 IRQ_depth=real interrupted_SP=owned-foreground ISR_SP=separate-IST current_id=IRQ-refused enqueue=owned/noninline worker=owned-distinct-context async_FXSAVE=unchanged mask+hardware+IRR/ISR+inflight+work=drained late_delivery=absent stack_leases=4-released BSP_device_owner=!Send";
+        let full = "CHECK native-irq-work PASS roundtrip=verified teardown=IOTLB+TE-off-ack actual_cause=0x1 IRQ_depth=real interrupted_SP=owned-foreground ISR_SP=separate-IST current_id=IRQ-refused enqueue=owned/noninline worker=owned-distinct-context async_FXSAVE=unchanged heap=aligned-zeroed-read-write-reclaimed heap_IF=off/on-preserved mask+hardware+IRR/ISR+inflight+work=drained late_delivery=absent stack_leases=4-released BSP_device_owner=!Send";
         assert!(native_irq_work_verified(full));
         for marker in [
             "IRQ_depth=real",
@@ -1739,6 +1741,8 @@ mod tests {
             "current_id=IRQ-refused",
             "worker=owned-distinct-context",
             "async_FXSAVE=unchanged",
+            "heap=aligned-zeroed-read-write-reclaimed",
+            "heap_IF=off/on-preserved",
             "mask+hardware+IRR/ISR+inflight+work=drained",
             "BSP_device_owner=!Send",
         ] {
