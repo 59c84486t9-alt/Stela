@@ -769,7 +769,8 @@ impl Differential {
                 serde_json::json!({
                     "kind": "checked-memory-oracle-input", "seed": self.seed,
                     "states": self.states, "fields": self.fields, "form": self.form,
-                    "profile": self.profile, "target": self.target.map(|target| target.id()),
+                    "profile": self.profile, "target": crate::oracle::native::target().id(),
+                    "compiler_source_sha256": stela_compiler::SOURCE_SHA256,
                     "scope": "EL0 LE nonstreaming ASIMD A=0 untagged Normal WB; structure fault assigned lanes/store-prefix are oracle-limited; all other state compares"
                 })
             )?;
@@ -1678,6 +1679,50 @@ mod tests {
             }),
             spsr: None,
         }
+    }
+
+    #[test]
+    fn retained_fault_frames_reconstruct_both_complete_data_windows() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut report = Report {
+            checked_faults: Some(file.reopen().unwrap()),
+            ..Report::default()
+        };
+        let case = Case {
+            code: vec![0x4c00_0044],
+            steps: 1,
+            state: GuestState::default(),
+            data: vec![0xa5; DATA_BYTES].into(),
+            scalable: None,
+            el: 0,
+            hypervisor: None,
+            pauth: false,
+        };
+        let mut original = frame(case.state.clone(), case.data.clone());
+        let mut native = original.clone();
+        original.data[DATA_BYTES - 3] = 0x31;
+        native.data[DATA_BYTES - 2] = 0x42;
+        retain_structure_fault(&mut report, 7, "fixture", &case, &original, &native, true).unwrap();
+        let record: Value =
+            serde_json::from_str(&std::fs::read_to_string(file.path()).unwrap()).unwrap();
+        let initial = record["initial_data_hex"].as_str().unwrap();
+        let initial: Vec<_> = initial
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        assert_eq!(initial.as_slice(), case.data.as_ref());
+        let mut originals = initial.clone();
+        let mut natives = initial;
+        for change in record["changed_bytes_original_native"].as_array().unwrap() {
+            let index = change[0].as_u64().unwrap() as usize;
+            originals[index] = change[1].as_u64().unwrap() as u8;
+            natives[index] = change[2].as_u64().unwrap() as u8;
+        }
+        assert_eq!(originals.as_slice(), original.data.as_ref());
+        assert_eq!(natives.as_slice(), native.data.as_ref());
+        assert_eq!(record["case"], 7);
+        assert_eq!(record["kind"], "oracle-limited-structure-fault");
     }
 
     #[test]
