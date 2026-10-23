@@ -514,6 +514,19 @@ mod tests {
         }
     }
     #[test]
+    fn adjacent_revisions_and_out_of_range_ids_do_not_inherit_bridge_quirks() {
+        let old = Flags::from_id(0x04ce, 0x0002, 0x026b, true).unwrap();
+        let next = Flags::from_id(0x04ce, 0x0002, 0x026c, true).unwrap();
+        let outside = Flags::from_id(0x04ce, 0x0002, 0x026d, true).unwrap();
+        assert!(old.ignore_tag());
+        assert!(!next.ignore_tag());
+        assert_eq!(old.capacity(100), Some(99));
+        assert_eq!(next.capacity(100), Some(99));
+        assert_eq!(outside.capacity(100), Some(100));
+        assert!(Flags::from_id(0xe5b7, 0x0811, 0x0100, true).is_err());
+        assert!(Flags::from_id(0xe5b7, 0x0811, 0x0101, true).is_ok());
+    }
+    #[test]
     fn policy_is_applied_to_real_transfers_and_raw_commands() {
         let f = Flags(
             BULK32
