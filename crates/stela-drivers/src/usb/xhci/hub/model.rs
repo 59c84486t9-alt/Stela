@@ -277,6 +277,10 @@ fn write32(at: u64, value: u32) {
 pub(super) struct Hardware {
     pub nodes: BTreeMap<u32, Node>,
     pub requests: Vec<(u8, u32, [u8; 8])>,
+    pub request_times: Vec<u64>,
+    pub effect_fail: Option<(u8, [u8; 8])>,
+    pub effect_silence: Option<(u8, [u8; 8])>,
+    pub root_loss_after: Option<[u8; 8]>,
     pub contexts: Vec<(u8, u32, [u32; 4])>,
     pub commands: Vec<(u32, u8)>,
     pub fail: Option<(u32, u8)>,
@@ -306,6 +310,10 @@ impl Hardware {
         Self {
             nodes,
             requests: Vec::new(),
+            request_times: Vec::new(),
+            effect_fail: None,
+            effect_silence: None,
+            root_loss_after: None,
             contexts: Vec::new(),
             commands: Vec::new(),
             fail: None,
@@ -464,6 +472,12 @@ impl Hardware {
     fn request(&mut self, slot: u8, request: [u8; 8]) -> Result<Vec<u8>, u32> {
         let route = self.routes[&slot];
         self.requests.push((slot, route, request));
+        self.request_times.push(
+            Clock {
+                ticks_per_microsecond: 1,
+            }
+            .now_us(),
+        );
         let node = self
             .nodes
             .get_mut(&route)
@@ -498,8 +512,8 @@ impl Hardware {
                 Ok(bytes)
             }
             (0x20, CLEAR_FEATURE) => {
-                assert_eq!(value, 0);
-                node.hub_change &= !1;
+                assert!(value <= 1);
+                node.hub_change &= !(1 << value);
                 Ok(Vec::new())
             }
             (0x80, GET_DESCRIPTOR) => match (value >> 8) as u8 {
@@ -651,6 +665,10 @@ impl Hardware {
         }
     }
     fn transfer(&mut self, slot: u8, dci: u8) {
+        // A doorbell restarts an acknowledged stopped ring. A completed TD
+        // leaves it Running, so recovery must Stop EP0 again before Disable.
+        let output = self.outputs[&slot] + u64::from(dci) * self.context_bytes as u64;
+        write32(output, read32(output) & !7 | ENDPOINT_RUNNING);
         if dci == 1 {
             let cursor = self.endpoints.get_mut(&(slot, dci)).unwrap();
             let (_, parameter, _, setup_control) = cursor.next();
@@ -665,7 +683,20 @@ impl Hardware {
             }
             let (status, _, _, control) = cursor.next();
             assert_eq!(control >> 10 & 0x3f, STATUS);
-            match self.request(slot, request) {
+            let mut reply = self.request(slot, request);
+            if self.root_loss_after == Some(request) {
+                self.root_status = Some(PP);
+                self.root_loss_after = None;
+            }
+            if self.effect_fail == Some((slot, request)) {
+                self.effect_fail = None;
+                reply = Err(6);
+            }
+            if self.effect_silence == Some((slot, request)) {
+                self.effect_silence = None;
+                return;
+            }
+            match reply {
                 Ok(mut reply) => {
                     if request[0] == 0
                         && request[1] == SET_CONFIGURATION

@@ -3,6 +3,20 @@
 //! port_event, hub_port_connect and usb_disconnect. No published ID is recycled.
 use super::*;
 
+mod recovery;
+
+/// Private proof retained only after complete subtree transfer quiescence.
+/// This never restores public access to the old hardware slot.
+pub(super) struct Recovery {
+    slot: u8,
+    port: Option<u8>,
+}
+impl Recovery {
+    pub(super) fn slot(&self) -> u8 {
+        self.slot
+    }
+}
+
 /// One poll's actual topology changes. Removed descriptors name permanently
 /// invalidated old owners; they do not assert that failed hardware DMA stopped.
 /// Added class owners come from fresh physical enumeration and normal binding.
@@ -21,6 +35,7 @@ struct Hub {
     bitmap: DmaBuffer,
     pending: Option<u64>,
     retired: bool,
+    recovery: Option<Recovery>,
 }
 
 /// Retains the controller even when no leaf class currently owns it. Call
@@ -111,6 +126,7 @@ impl Host {
                     bitmap,
                     pending: None,
                     retired: false,
+                    recovery: None,
                 })
             })();
             match result {
@@ -141,13 +157,24 @@ impl Host {
             }
         }
         for index in 0..self.hubs.len() {
+            if self.hubs[index].recovery.is_some() {
+                if let Err(error) = self.recover_hub(index, dma, &mut changes) {
+                    changes.added.failures.push((
+                        format!("{} hub recovery", self.hubs[index].device.location),
+                        error,
+                    ));
+                }
+                continue;
+            }
             if self.hubs[index].retired {
                 continue;
             }
             if let Err(error) = self.hub(index, dma, &mut changes) {
                 let slot = self.hubs[index].device.slot;
                 let location = self.hubs[index].device.location.clone();
-                let _ = self.retire(slot, &mut changes);
+                if self.hubs[index].recovery.is_none() {
+                    let _ = self.retire(slot, &mut changes);
+                }
                 changes
                     .added
                     .failures
@@ -330,12 +357,37 @@ impl Host {
                 return Ok(());
             }
         };
+        // A notification schedules actual status reads; it never authorizes
+        // recovering or acknowledging a condition that was not observed.
+        {
+            let slot = self.hubs[index].device.slot;
+            let status = self.controller.borrow_mut().control(
+                slot,
+                setup(0xa0, GET_STATUS, 0, 0, 4),
+                &[],
+            )?;
+            if status.len() != 4 {
+                return Err(BlockError::Unsupported("short USB hub lifecycle status"));
+            }
+            let actual = u16::from_le_bytes([status[0], status[1]]);
+            let change = u16::from_le_bytes([status[2], status[3]]);
+            if actual & !3 != 0 || change & !3 != 0 {
+                return Err(BlockError::Unsupported("reserved USB hub lifecycle status"));
+            }
+            if actual != 0 || change & 2 != 0 {
+                self.start_recovery(index, None, changes)?;
+                return self.recover_hub(index, dma, changes);
+            }
+        }
         // Bitmap is notification only: actual status and power authority decide.
         {
             let mut c = self.controller.borrow_mut();
             c.observe_current_ancestors(self.hubs[index].device.slot, true)?;
         }
         for port in 1..=self.hubs[index].ports {
+            if self.hubs[index].retired {
+                break;
+            }
             if bits & (1 << port) != 0
                 && let Err(error) = self.hub_port(index, port, dma, changes)
             {
@@ -344,6 +396,9 @@ impl Host {
                     error,
                 ));
             }
+        }
+        if self.hubs[index].retired {
+            return Ok(());
         }
         let owner = &mut self.hubs[index];
         let length = usize::from(owner.ports + 1).div_ceil(8);
@@ -376,11 +431,14 @@ impl Host {
                 c.power.port_owner(Some((slot, port)), attachment.root_port),
             )
         };
-        let reconnect = change & (1 | 8) != 0
+        if change & 8 != 0 || status & 8 != 0 {
+            self.start_recovery(index, Some(port), changes)?;
+            return self.recover_hub(index, dma, changes);
+        }
+        let reconnect = change & 1 != 0
             || status & 1 == 0
             || owner.is_none()
             || status & 2 == 0
-            || status & 8 != 0
             || status & if ss { 1 << 9 } else { 1 << 8 } == 0
             || ss && matches!(status >> 5 & 15, 3 | 6 | 10);
         if reconnect && let Some(owner) = owner {
@@ -401,15 +459,8 @@ impl Host {
                 )?;
             }
         }
-        if change & 8 != 0 {
-            return Err(BlockError::Unsupported(
-                "USB hub port over-current requires recovery",
-            ));
-        }
-        if status & 8 != 0 || status & if ss { 1 << 9 } else { 1 << 8 } == 0 {
-            return Err(BlockError::Unsupported(
-                "USB hub port power absent or over-current",
-            ));
+        if status & if ss { 1 << 9 } else { 1 << 8 } == 0 {
+            return Err(BlockError::Unsupported("USB hub port power absent"));
         }
         if ss && status >> 5 & 15 == 3 {
             return Err(BlockError::Unsupported(
@@ -452,6 +503,15 @@ impl Host {
     }
 
     fn retire(&mut self, ancestor: u8, changes: &mut Changes) -> Result<(), BlockError> {
+        self.retire_except(ancestor, None, changes)
+    }
+
+    fn retire_except(
+        &mut self,
+        ancestor: u8,
+        keep: Option<u8>,
+        changes: &mut Changes,
+    ) -> Result<(), BlockError> {
         let mut c = self.controller.borrow_mut();
         let mut slots: Vec<_> = (1..c.slots.len())
             .filter(|slot| c.power.belongs_to(*slot as u8, ancestor))
@@ -463,6 +523,9 @@ impl Host {
         for hub in &mut self.hubs {
             if slots.contains(&hub.device.slot) {
                 hub.retired = true;
+                if Some(hub.device.slot) != keep {
+                    hub.recovery = None;
+                }
             }
         }
         let mut retained = Vec::new();
@@ -502,7 +565,9 @@ impl Host {
             )
         });
         for slot in slots {
-            if c.slot_ownership[usize::from(slot)] == reset::Ownership::Enabled {
+            if Some(slot) != keep
+                && c.slot_ownership[usize::from(slot)] == reset::Ownership::Enabled
+            {
                 c.disable_slot(slot, reset::Ownership::Retired)
                     .map_err(|(_, error)| error)?;
             }

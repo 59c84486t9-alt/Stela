@@ -14,6 +14,10 @@ impl Controller {
     /// outstanding TD; its normal completion/cancellation must still be awaited.
     pub fn endpoint_ready(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
         self.live_slot(slot)?;
+        self.endpoint_ready_inner(slot, dci)
+    }
+
+    fn endpoint_ready_inner(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
         self.ready()?;
         let state = self.slot(slot)?;
         if dci != 1 && !state.current_configuration.is_some_and(|value| value != 0) {
@@ -92,13 +96,56 @@ impl Controller {
         result
     }
 
+    /// Only the topology owner can mint this capability, after every old alias
+    /// is fenced and every descendant/status TD is actually retired. No public
+    /// slot API can obtain access merely by naming this still-enabled EP0.
+    pub(super) fn recovery_control(
+        &mut self,
+        owner: &lifecycle::Recovery,
+        request: [u8; 8],
+    ) -> Result<Vec<u8>, BlockError> {
+        let slot = owner.slot();
+        let status = request == setup(0x80, GET_STATUS, 0, 0, 2)
+            || request == setup(0xa0, GET_STATUS, 0, 0, 4);
+        let hub_ack = request == setup(0x20, CLEAR_FEATURE, 0, 0, 0)
+            || request == setup(0x20, CLEAR_FEATURE, 1, 0, 0);
+        let port = request[4];
+        let port_request = port != 0
+            && self
+                .power
+                .hub_ports(slot)
+                .is_some_and(|ports| port <= ports)
+            && (request == setup(0xa3, GET_STATUS, 0, u16::from(port), 4)
+                || request == setup(0x23, CLEAR_FEATURE, 19, u16::from(port), 0)
+                || request == setup(0x23, SET_FEATURE, PORT_POWER, u16::from(port), 0));
+        if !(status || hub_ack || port_request)
+            || self.slot_ownership.get(usize::from(slot)) != Some(&reset::Ownership::Enabled)
+            || !self.slot(slot)?.retiring
+            || (1..self.slots.len()).any(|id| {
+                id != usize::from(slot)
+                    && self.power.belongs_to(id as u8, slot)
+                    && self.slot_ownership[id] == reset::Ownership::Enabled
+            })
+        {
+            return Err(BlockError::Unsupported(
+                "invalid quiesced USB hub control authority",
+            ));
+        }
+        if request == setup(0x23, SET_FEATURE, PORT_POWER, u16::from(port), 0) {
+            // Preserve all old downstream grants. Only an already reserved
+            // physical port may be repowered before the upstream reset ACK.
+            self.power.recovery_power(slot, port)?;
+        }
+        self.control_transfer(slot, request, &[])
+    }
+
     fn control_transfer(
         &mut self,
         slot: u8,
         request: [u8; 8],
         out: &[u8],
     ) -> Result<Vec<u8>, BlockError> {
-        self.endpoint_ready(slot, 1)?;
+        self.endpoint_ready_inner(slot, 1)?;
         let length = usize::from(u16::from_le_bytes([request[6], request[7]]));
         let is_in = request[0] & 0x80 != 0;
         if length > CONTROL_BYTES || (!is_in && out.len() != length) {
@@ -154,7 +201,7 @@ impl Controller {
                     // A missing transfer completion leaves EP0 Running, not
                     // Halted. Only acknowledged Stop/Set Dequeue permits reuse;
                     // failed cancellation is reported and retains poison.
-                    self.cancel(slot, 1)?;
+                    self.cancel_inner(slot, 1)?;
                     return Err(error);
                 }
             };
@@ -163,7 +210,7 @@ impl Controller {
                 SUCCESS => {}
                 SHORT_PACKET => received = length.saturating_sub(event.residual()),
                 status => {
-                    self.recover(slot, 1)?;
+                    self.cancel_inner(slot, 1)?;
                     return Err(BlockError::Device { status });
                 }
             }

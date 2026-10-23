@@ -565,3 +565,350 @@ fn runtime_usb2_initial_ped_zero_is_baselined_from_reset_ack_without_churning_id
         );
     }
 }
+
+#[test]
+fn runtime_hub_recovery_acknowledges_cools_rechecks_and_publishes_fresh_subtree() {
+    for speed in [HIGH_SPEED, SUPER_SPEED] {
+        for port_oc in [false, true] {
+            for context in [32, 64] {
+                let nodes = BTreeMap::from([
+                    (0, Node::hub(speed, 2)),
+                    (1, unbound_leaf(speed)),
+                    (2, unbound_leaf(speed)),
+                ]);
+                let mut backing = vec![0u64; 1024 * 1024];
+                let start = backing.as_mut_ptr() as u64;
+                // SAFETY: every retired and newly enumerated slot retains its RAM.
+                let mut dma =
+                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let (mut c, model) = controller(&mut dma, context, nodes);
+                model.borrow_mut().root_status = Some(PP | CCS | PED | u32::from(speed) << 10);
+                let mut failures = Vec::new();
+                let devices = c.enumerate(&mut dma, &mut failures);
+                assert!(failures.is_empty(), "{failures:?}");
+                let root = devices
+                    .iter()
+                    .find(|d| d.descriptor[4] == HUB_CLASS)
+                    .unwrap()
+                    .slot;
+                let shared = Rc::new(RefCell::new(c));
+                let mut host = Host::new(shared.clone(), &devices, &mut dma, &mut failures);
+                runtime_poll(&mut host, &mut dma);
+                let begin = model.borrow().requests.len();
+                {
+                    let mut m = model.borrow_mut();
+                    let hub = m.nodes.get_mut(&0).unwrap();
+                    if port_oc {
+                        hub.ports.as_mut().unwrap()[0].change = 8;
+                    } else {
+                        hub.hub_change = 2;
+                    }
+                }
+                let changes = runtime_poll(&mut host, &mut dma);
+                assert!(
+                    changes.added.failures.is_empty(),
+                    "{:?}",
+                    changes.added.failures
+                );
+                assert_eq!(changes.removed.len(), 3);
+                assert_eq!(changes.added.devices.len(), 3);
+                for old in &devices {
+                    assert!(
+                        changes
+                            .added
+                            .devices
+                            .iter()
+                            .all(|fresh| fresh.slot != old.slot)
+                    );
+                    let before = (model.borrow().mmio_reads, model.borrow().mmio_writes);
+                    assert!(
+                        shared
+                            .borrow_mut()
+                            .control(old.slot, setup(0x80, GET_STATUS, 0, 0, 2), &[])
+                            .is_err()
+                    );
+                    assert_eq!(
+                        (model.borrow().mmio_reads, model.borrow().mmio_writes),
+                        before
+                    );
+                    assert!(!shared.borrow().power.retained(old.slot));
+                }
+                let m = model.borrow();
+                let ack_request = if port_oc {
+                    setup(0x23, CLEAR_FEATURE, 19, 1, 0)
+                } else {
+                    setup(0x20, CLEAR_FEATURE, 1, 0, 0)
+                };
+                let ack = (begin..m.requests.len())
+                    .find(|&i| m.requests[i].0 == root && m.requests[i].2 == ack_request)
+                    .unwrap();
+                let power = (ack + 1..m.requests.len())
+                    .find(|&i| {
+                        m.requests[i].0 == root
+                            && m.requests[i].2 == setup(0x23, SET_FEATURE, PORT_POWER, 1, 0)
+                    })
+                    .unwrap();
+                assert!(
+                    m.request_times[power] - m.request_times[ack]
+                        >= if port_oc { 100_000 } else { 500_000 }
+                );
+                let last_power = (power..m.requests.len())
+                    .rfind(|&i| m.requests[i].0 == root && m.requests[i].2[1] == SET_FEATURE)
+                    .unwrap();
+                let recheck = (last_power + 1..m.requests.len())
+                    .find(|&i| {
+                        m.requests[i].0 == root
+                            && m.requests[i].2 == setup(0xa0, GET_STATUS, 0, 0, 4)
+                    })
+                    .unwrap();
+                assert!(m.request_times[recheck] - m.request_times[last_power] >= 510_000);
+                drop(m);
+                let stable = runtime_poll(&mut host, &mut dma);
+                assert!(stable.removed.is_empty());
+                assert!(stable.added.devices.is_empty());
+                assert!(
+                    stable.added.failures.is_empty(),
+                    "{:?}",
+                    stable.added.failures
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn runtime_persistent_hub_power_fault_keeps_public_aliases_fenced_until_actual_restoration() {
+    for local_loss in [false, true] {
+        let speed = SUPER_SPEED;
+        let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, unbound_leaf(speed))]);
+        let mut backing = vec![0u64; 1024 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: the old bitmap, EP0 and class DMA survive every recovery retry.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut c, model) = controller(&mut dma, 64, nodes);
+        model.borrow_mut().root_status = Some(PP | CCS | PED | u32::from(speed) << 10);
+        let mut failures = Vec::new();
+        let devices = c.enumerate(&mut dma, &mut failures);
+        let shared = Rc::new(RefCell::new(c));
+        let mut host = Host::new(shared.clone(), &devices, &mut dma, &mut failures);
+        runtime_poll(&mut host, &mut dma);
+        {
+            let mut m = model.borrow_mut();
+            let hub = m.nodes.get_mut(&0).unwrap();
+            hub.hub_status = if local_loss { 1 } else { 2 };
+            hub.hub_change = hub.hub_status;
+        }
+        for iteration in 0..3 {
+            let changed = runtime_poll(&mut host, &mut dma);
+            assert_eq!(changed.removed.len(), if iteration == 0 { 2 } else { 0 });
+            assert!(changed.added.devices.is_empty());
+            assert!(!changed.added.failures.is_empty());
+            for old in &devices {
+                assert!(shared.borrow_mut().live_slot(old.slot).is_err());
+                assert!(shared.borrow().power.retained(old.slot));
+            }
+        }
+        {
+            let mut m = model.borrow_mut();
+            let hub = m.nodes.get_mut(&0).unwrap();
+            hub.hub_status = 0;
+            hub.hub_change = if local_loss { 1 } else { 2 };
+        }
+        let restored = runtime_poll(&mut host, &mut dma);
+        assert!(
+            restored.added.failures.is_empty(),
+            "{:?}",
+            restored.added.failures
+        );
+        assert_eq!(restored.added.devices.len(), 2);
+        assert!(
+            devices
+                .iter()
+                .all(|old| shared.borrow_mut().live_slot(old.slot).is_err())
+        );
+    }
+}
+
+#[test]
+fn runtime_hub_recovery_uncertain_ack_stop_or_disable_never_authorizes_fresh_address() {
+    for fault in 0..9 {
+        let speed = SUPER_SPEED;
+        let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, unbound_leaf(speed))]);
+        let mut backing = vec![0u64; 1024 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: all potentially active DMA stays allocated after every fault.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut c, model) = controller(&mut dma, 64, nodes);
+        model.borrow_mut().root_status = Some(PP | CCS | PED | u32::from(speed) << 10);
+        let mut failures = Vec::new();
+        let devices = c.enumerate(&mut dma, &mut failures);
+        let hub = devices
+            .iter()
+            .find(|d| d.descriptor[4] == HUB_CLASS)
+            .unwrap()
+            .slot;
+        let child = devices.iter().find(|d| d.slot != hub).unwrap().slot;
+        let shared = Rc::new(RefCell::new(c));
+        let mut host = Host::new(shared.clone(), &devices, &mut dma, &mut failures);
+        runtime_poll(&mut host, &mut dma);
+        let first = model.borrow().requests.len();
+        {
+            let mut m = model.borrow_mut();
+            m.nodes.get_mut(&0).unwrap().hub_change = 2;
+            match fault {
+                0 => m.fail = Some((STOP_ENDPOINT, child)),
+                1 => m.fail = Some((reset::DISABLE_SLOT, child)),
+                2 => m.effect_fail = Some((hub, setup(0x20, CLEAR_FEATURE, 1, 0, 0))),
+                3 => m.effect_fail = Some((hub, setup(0x23, SET_FEATURE, PORT_POWER, 1, 0))),
+                4 => m.root_loss_after = Some(setup(0x20, CLEAR_FEATURE, 1, 0, 0)),
+                5 => m.root_loss_after = Some(setup(0x23, SET_FEATURE, PORT_POWER, 1, 0)),
+                6 => m.fail = Some((reset::DISABLE_SLOT, hub)),
+                7 => m.effect_silence = Some((hub, setup(0x20, CLEAR_FEATURE, 1, 0, 0))),
+                8 => m.effect_silence = Some((hub, setup(0x23, SET_FEATURE, PORT_POWER, 1, 0))),
+                _ => unreachable!(),
+            }
+        }
+        let stopped = runtime_poll(&mut host, &mut dma);
+        assert_eq!(stopped.removed.len(), 2);
+        assert!(stopped.added.devices.is_empty());
+        assert!(!stopped.added.failures.is_empty());
+        assert!(
+            devices
+                .iter()
+                .all(|old| shared.borrow().power.retained(old.slot))
+        );
+        assert_eq!(
+            model
+                .borrow()
+                .commands
+                .iter()
+                .filter(|(kind, _)| *kind == ADDRESS_DEVICE)
+                .count(),
+            2
+        );
+        if fault <= 2 || fault == 4 || fault == 7 {
+            assert!(
+                model.borrow().requests[first..]
+                    .iter()
+                    .all(|(_, _, request)| *request != setup(0x23, SET_FEATURE, PORT_POWER, 1, 0))
+            );
+        }
+        for old in &devices {
+            let before = (model.borrow().mmio_reads, model.borrow().mmio_writes);
+            assert!(
+                shared
+                    .borrow_mut()
+                    .control(old.slot, setup(0x80, GET_STATUS, 0, 0, 2), &[])
+                    .is_err()
+            );
+            assert_eq!(
+                (model.borrow().mmio_reads, model.borrow().mmio_writes),
+                before
+            );
+        }
+        // An acknowledged request error after its physical effect still does
+        // not count as success. Only a later complete observed recovery does.
+        if matches!(fault, 2 | 3 | 7 | 8) {
+            let retried = runtime_poll(&mut host, &mut dma);
+            assert!(
+                retried.added.failures.is_empty(),
+                "{:?}",
+                retried.added.failures
+            );
+            assert_eq!(retried.added.devices.len(), 2);
+        }
+    }
+}
+
+#[test]
+fn runtime_nested_hub_recovery_preserves_unaffected_upstream_sibling() {
+    for speed in [HIGH_SPEED, SUPER_SPEED] {
+        let nodes = BTreeMap::from([
+            (0, Node::hub(speed, 2)),
+            (1, Node::hub(speed, 1)),
+            (0x11, unbound_leaf(speed)),
+            (2, unbound_leaf(speed)),
+        ]);
+        let mut backing = vec![0u64; 1024 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: nested and sibling contexts retain separate DMA throughout.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut c, model) = controller(&mut dma, 64, nodes);
+        model.borrow_mut().root_status = Some(PP | CCS | PED | u32::from(speed) << 10);
+        let mut failures = Vec::new();
+        let devices = c.enumerate(&mut dma, &mut failures);
+        assert!(failures.is_empty(), "{failures:?}");
+        let sibling = devices
+            .iter()
+            .find(|d| d.location.ends_with(".2"))
+            .unwrap()
+            .slot;
+        let shared = Rc::new(RefCell::new(c));
+        let mut host = Host::new(shared.clone(), &devices, &mut dma, &mut failures);
+        runtime_poll(&mut host, &mut dma);
+        model.borrow_mut().nodes.get_mut(&1).unwrap().hub_change = 2;
+        let changed = runtime_poll(&mut host, &mut dma);
+        assert!(
+            changed.added.failures.is_empty(),
+            "{:?}",
+            changed.added.failures
+        );
+        assert_eq!(changed.removed.len(), 2);
+        assert_eq!(changed.added.devices.len(), 2);
+        assert!(changed.removed.iter().all(|old| old.slot != sibling));
+        assert!(
+            shared
+                .borrow_mut()
+                .control(sibling, setup(0x80, GET_STATUS, 0, 0, 2), &[])
+                .is_ok()
+        );
+        assert!(runtime_poll(&mut host, &mut dma).added.devices.is_empty());
+    }
+}
+
+#[test]
+fn runtime_hub_recovery_repower_never_expands_the_reserved_current_contract() {
+    let mut hub = Node::hub(SUPER_SPEED, 7);
+    hub.self_powered = false;
+    hub.max_power = 112;
+    hub.controller_current = 20;
+    let mut nodes = BTreeMap::from([(0, hub)]);
+    for port in 1..=7 {
+        nodes.insert(port, unbound_leaf(SUPER_SPEED));
+    }
+    let mut backing = vec![0u64; 1024 * 1024];
+    let start = backing.as_mut_ptr() as u64;
+    // SAFETY: budget refusal and persistent OC retain every original allocation.
+    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let (mut c, model) = controller(&mut dma, 64, nodes);
+    model.borrow_mut().root_status = Some(PP | CCS | PED | u32::from(SUPER_SPEED) << 10);
+    let mut failures = Vec::new();
+    let devices = c.enumerate(&mut dma, &mut failures);
+    assert_eq!(devices.len(), 6);
+    assert_eq!(failures.len(), 2);
+    let shared = Rc::new(RefCell::new(c));
+    let original = shared.borrow().power.snapshot(1);
+    let mut host = Host::new(shared.clone(), &devices, &mut dma, &mut failures);
+    runtime_poll(&mut host, &mut dma);
+    let begin = model.borrow().requests.len();
+    {
+        let mut m = model.borrow_mut();
+        m.nodes.get_mut(&0).unwrap().hub_status = 2;
+        m.nodes.get_mut(&0).unwrap().hub_change = 2;
+    }
+    for _ in 0..2 {
+        let changed = runtime_poll(&mut host, &mut dma);
+        assert!(changed.added.devices.is_empty());
+        assert!(!changed.added.failures.is_empty());
+        assert_eq!(shared.borrow().power.snapshot(1), original);
+    }
+    let m = model.borrow();
+    let repowered: Vec<_> = m.requests[begin..]
+        .iter()
+        .filter(|(slot, _, q)| {
+            *slot == 1 && q[0] == 0x23 && q[1] == SET_FEATURE && q[2] == PORT_POWER as u8
+        })
+        .map(|(_, _, q)| q[4])
+        .collect();
+    assert_eq!(repowered, [1, 2, 3, 4, 5, 1, 2, 3, 4, 5]);
+}

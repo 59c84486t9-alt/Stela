@@ -296,7 +296,22 @@ impl Ledger {
         }
         Ok(())
     }
-    fn hub_is_self_powered(&self, slot: u8) -> Result<bool, BlockError> {
+    pub(super) fn recovery_power(&self, slot: u8, port: u8) -> Result<(), BlockError> {
+        if self.powered_ports(slot)? & (1 << port) == 0 {
+            return Err(BlockError::Unsupported(
+                "USB recovery port has no current reservation",
+            ));
+        }
+        self.check()
+    }
+    pub(super) fn powered_ports(&self, slot: u8) -> Result<u32, BlockError> {
+        self.grant(slot)?
+            .hub
+            .as_ref()
+            .map(|hub| hub.powered)
+            .ok_or(BlockError::Unsupported("USB hub power contract absent"))
+    }
+    pub(super) fn hub_is_self_powered(&self, slot: u8) -> Result<bool, BlockError> {
         self.grant(slot)?
             .hub
             .as_ref()
