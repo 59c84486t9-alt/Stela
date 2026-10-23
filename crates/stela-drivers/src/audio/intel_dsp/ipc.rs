@@ -58,7 +58,7 @@ pub(super) fn firmware_payload(bytes: &[u8]) -> Result<&[u8], Error> {
     } else {
         bytes
     };
-    if payload.len() < 4096 || !payload.len().is_multiple_of(4096) {
+    if payload.len() < 4096 {
         return Err(Error::FirmwareImage);
     }
     // Signed Intel image validation belongs to the ROM/CSE. No synthetic
@@ -104,7 +104,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             3_000_000,
             Phase::Firmware,
         )?;
-        if notification & !BUSY != 0x70000000 {
+        // IPC3 commands live in SRAM, not in the CNL doorbell. Only the
+        // documented panic magic gives the lower doorbell bits meaning here.
+        if notification & 0x0ffff000 == 0x0dead000 {
             return Err(Error::FirmwarePanic(notification));
         }
         let mut ready = [0u8; 108];

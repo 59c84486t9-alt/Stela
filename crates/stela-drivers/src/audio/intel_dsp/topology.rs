@@ -730,13 +730,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             put(&mut message, 8, host);
             self.exchange(&message, &mut [0; 12])?;
             self.stream_run(false, false, false)?;
+            self.complete_stopped_dma()?;
             self.state = State::Stopped;
             Ok(())
         })();
         self.finish(result)
     }
-    /// CPU copies are accepted only after actual DSP pause and SD_RUN clear,
-    /// with device-domain cache ownership transferred back to the CPU.
+    /// CPU copies require DSP pause, all SD_RUN bits clear, acknowledged native
+    /// BME containment and original-domain payload completion before CPU sync.
     pub fn read_capture(&mut self, offset: usize, bytes: &mut [u8]) -> Result<(), Error> {
         self.guard(&[State::Stopped])?;
         self.pcm
@@ -761,7 +762,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             if notification & BUSY != 0 {
                 return Err(Error::FirmwarePanic(notification));
             }
-            let position = self.read(Bar::Hda, stream_base(index) + 4)? as usize;
+            // Default cAVS decoupled VC0 host position is the vendor DPIB
+            // register; SD_LPIB tracks the independent link DMA position.
+            let position =
+                self.read(Bar::Hda, DPIB_BASE + usize::from(index) * DPIB_STRIDE)? as usize;
             if position >= bytes {
                 return Err(Error::Buffer);
             }

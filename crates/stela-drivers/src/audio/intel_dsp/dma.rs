@@ -91,18 +91,18 @@ impl Stream {
         tag: u8,
         direction: Direction,
     ) -> Result<Self, Error> {
-        let bytes = bytes
+        let capacity = bytes
             .checked_add(4095)
             .map(|n| n & !4095)
             .filter(|n| *n >= 4096 && *n <= 16 * 1024 * 1024)
             .ok_or(Error::Buffer)?;
-        if tag == 0 || tag > 15 || index > 29 {
+        if bytes < 4096 || tag == 0 || tag > 15 || index > 29 {
             return Err(Error::Buffer);
         }
         let data = Buffer::allocate(
             source,
             domain.clone(),
-            bytes,
+            capacity,
             limit,
             match direction {
                 Direction::Playback => DmaDirection::ToDevice,
@@ -126,8 +126,21 @@ impl Stream {
         // The domain supplies one contiguous IOVA even over scattered pins.
         // Two 128-byte-aligned segments meet LVI>=1 without a physical-contiguity
         // or identity-map assumption. cAVS2.5 has no 4K BDLE split quirk.
-        stream.descriptors(bytes / 2)?;
+        // Allocations round to pages; the ROM transfer length does not. Keep
+        // both BDLE starts 128-byte aligned, with an exact final partial BDLE.
+        let first = (bytes / 2) & !127;
+        stream.descriptor(0, 0, first)?;
+        stream.descriptor(1, first, bytes - first)?;
+        stream.entries = 2;
         Ok(stream)
+    }
+    fn descriptor(&self, index: usize, offset: usize, bytes: usize) -> Result<(), Error> {
+        let base = self.data.address()?;
+        let mut entry = [0u8; 16];
+        entry[..8].copy_from_slice(&(base + offset as u64).to_le_bytes());
+        entry[8..12].copy_from_slice(&(bytes as u32).to_le_bytes());
+        entry[12..].copy_from_slice(&1u32.to_le_bytes());
+        self.bdl.copy_to(index * 16, &entry)
     }
     pub fn descriptors(&mut self, period: usize) -> Result<(), Error> {
         if self.running
@@ -139,13 +152,8 @@ impl Stream {
         {
             return Err(Error::Buffer);
         }
-        let base = self.data.address()?;
         for index in 0..self.bytes / period {
-            let mut entry = [0u8; 16];
-            entry[..8].copy_from_slice(&(base + (index * period) as u64).to_le_bytes());
-            entry[8..12].copy_from_slice(&(period as u32).to_le_bytes());
-            entry[12..].copy_from_slice(&1u32.to_le_bytes());
-            self.bdl.copy_to(index * 16, &entry)?;
+            self.descriptor(index, index * period, period)?;
         }
         self.entries = (self.bytes / period) as u16;
         Ok(())
@@ -189,13 +197,20 @@ impl Stream {
         fence(Ordering::Release);
         Ok(())
     }
-    fn stopped(&mut self) -> Result<(), Error> {
+    fn stopped(&mut self) {
+        // RUN clear stops new host-stream requests, but previously posted RAM
+        // writes can still be in flight. Keep device ownership until drain.
         self.running = false;
-        // SAFETY: observed SD_RUN clear precedes this cache ownership transfer.
-        // The DSP may not use host data independently of this HDA stream.
-        if self.data.dma.address().is_ok() {
-            unsafe {
+    }
+    unsafe fn complete_stopped(&mut self) -> Result<(), Error> {
+        // SAFETY: caller verified every host stream stopped and the actual
+        // requester BME clear/readback, then drained this original domain.
+        unsafe {
+            if self.data.dma.address().is_ok() {
                 self.data.dma.sync_for_cpu(0..self.bytes)?;
+            }
+            if self.bdl.dma.address().is_ok() {
+                self.bdl.dma.sync_for_cpu(0..4096)?;
             }
         }
         self.cpu_owned = true;
@@ -223,6 +238,41 @@ impl Stream {
     }
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
+    pub(super) fn complete_stopped_dma(&mut self) -> Result<(), Error> {
+        // Check the actual complete requester, including ICCmax and loader,
+        // rather than trusting one stream's software running flag. Firmware
+        // remains alive for pause/restart, but cannot initiate translated DMA
+        // once the original requester is genuinely contained.
+        for index in 0..self.input_streams + self.output_streams {
+            if self.registers.read8(Bar::Hda, stream_base(index))? & RUN != 0 {
+                return Err(Error::Busy);
+            }
+        }
+        if self.registers.read8(Bar::Hda, CORBCTL)? & 2 != 0
+            || self.registers.read8(Bar::Hda, RIRBCTL)? & 2 != 0
+        {
+            return Err(Error::Busy);
+        }
+        self.registers.set_bus_master(false)?;
+        self.dma_contained = true;
+        // Drain every retained domain before any CPU ownership transfer.
+        // Distinct streams may hold distinct domains for this same requester.
+        for stream in [&self.pcm, &self.boot, &self.iccmax].into_iter().flatten() {
+            // SAFETY: every host engine/submission path is stopped, native
+            // mastering is acknowledged contained, and all original owners
+            // remain retained. This is payload completion, not cache sync.
+            unsafe { stream.domain.drain_posted_writes()? };
+        }
+        for stream in [&mut self.pcm, &mut self.boot, &mut self.iccmax]
+            .into_iter()
+            .flatten()
+        {
+            // SAFETY: its own original domain completed above, with no
+            // subsequent bus-master enable or stream submission.
+            unsafe { stream.complete_stopped()? };
+        }
+        Ok(())
+    }
     fn stream_mut(&mut self, loader: bool, iccmax: bool) -> Result<&mut Stream, Error> {
         if loader {
             if iccmax {
@@ -360,6 +410,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             }
             stream.index
         };
+        if run && self.dma_contained {
+            // Publication above relinquished CPU ownership before an actual
+            // BME enable can make any device request possible again.
+            self.dma_contained = false;
+            self.registers.set_bus_master(true)?;
+        }
         let base = stream_base(index);
         let start = self.timer.now_us();
         let before = self.registers.read8(Bar::Hda, base)?;
@@ -376,7 +432,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             Phase::StreamRun,
         )?;
         if !run {
-            self.stream_mut(loader, iccmax)?.stopped()?;
+            self.stream_mut(loader, iccmax)?.stopped();
         }
         Ok(())
     }

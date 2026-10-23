@@ -20,6 +20,8 @@ pub enum Bar {
 pub unsafe trait Registers {
     fn identity(&mut self) -> Result<Identity, Error>;
     fn bytes(&self, bar: Bar) -> usize;
+    /// Clear/set the actual requester Command.BM and verify its posted native
+    /// readback. A failed or ambiguous write must retain the complete owner.
     fn set_bus_master(&mut self, enabled: bool) -> Result<(), Error>;
     fn misc_clock_gate(&mut self, enabled: bool) -> Result<(), Error>;
     fn hold_d0(&mut self) -> Result<(), Error>;
@@ -30,6 +32,8 @@ pub unsafe trait Registers {
     fn write16(&mut self, bar: Bar, offset: usize, value: u16) -> Result<(), Error>;
     fn write32(&mut self, bar: Bar, offset: usize, value: u32) -> Result<(), Error>;
 }
+pub(super) const DPIB_BASE: usize = 0x1084;
+pub(super) const DPIB_STRIDE: usize = 0x20;
 pub(super) const GCAP: usize = 0;
 pub(super) const GCTL: usize = 8;
 pub(super) const INTCTL: usize = 0x20;

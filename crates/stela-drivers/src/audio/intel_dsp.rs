@@ -158,6 +158,7 @@ pub struct Controller<R, T> {
     graph: Option<topology::Installed>,
     saved_em2: Option<u32>,
     saved_guard: Option<u8>,
+    dma_contained: bool,
 }
 
 impl<R: Registers, T: Timer> Controller<R, T> {
@@ -198,6 +199,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             graph: None,
             saved_em2: None,
             saved_guard: None,
+            dma_contained: true,
         })
     }
     pub fn state(&self) -> State {
@@ -350,6 +352,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.registers.hold_d0()?;
             self.update(Bar::Hda, EM2, L1SEN, 0)?;
             self.saved_guard = Some(self.registers.read8(Bar::Hda, LTRP)? & 0x3f);
+            self.dma_contained = false;
             self.registers.set_bus_master(true)?;
             self.state = State::Ready;
             Ok(())
@@ -450,6 +453,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             )?;
             self.stream_run(true, false, false)?;
             self.stream_run(true, true, false)?;
+            self.complete_stopped_dma()?;
             self.clear_loader_registers()?;
             let report = self.firmware_ready(image.sha256())?;
             self.state = State::Firmware;
@@ -521,7 +525,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     return Err(Error::Rejected(Bar::Hda, self.pp + PPCTL));
                 }
             }
-            self.registers.set_bus_master(false)?;
+            self.complete_stopped_dma()?;
             for stream in [&mut self.pcm, &mut self.boot, &mut self.iccmax]
                 .into_iter()
                 .flatten()
@@ -622,7 +626,7 @@ mod tests {
             let base = self.next.fetch_add(0x100000, Ordering::Relaxed);
             PinnedPages::new(
                 Box::new(Backing {
-                    ram: Box::new(UnsafeCell::new(Ram([0; 16384]))),
+                    ram: Box::new(UnsafeCell::new(Ram([0xa7; 16384]))),
                     physical: (0..bytes / 4096)
                         .map(|page| base + page as u64 * 0x3000)
                         .collect(),
@@ -661,6 +665,11 @@ mod tests {
         unmaps: usize,
         drained: usize,
         writes: Vec<(Bar, usize, u32)>,
+        pending_payload: Vec<(u64, u8)>,
+        ownership_trace: Vec<&'static str>,
+        master_failure: Option<(bool, bool)>,
+        expected_firmware: Vec<u8>,
+        firmware_doorbell: u32,
     }
     impl Model {
         fn new() -> Self {
@@ -685,6 +694,11 @@ mod tests {
                 unmaps: 0,
                 drained: 0,
                 writes: Vec::new(),
+                pending_payload: Vec::new(),
+                ownership_trace: Vec::new(),
+                master_failure: None,
+                expected_firmware: vec![0x5a; 4096],
+                firmware_doorbell: BUSY,
             };
             model.hda[..2].copy_from_slice(&0x1101u16.to_le_bytes());
             model.hda[0x14..0x16].copy_from_slice(&0x1000u16.to_le_bytes());
@@ -779,7 +793,7 @@ mod tests {
                 ipc::put(&mut windows, at + 20, offset);
             }
             self.dsp[0x81000 + 108..0x81000 + 172].copy_from_slice(&windows);
-            self.store(Bar::Dsp, IPC_NOTIFY, BUSY | 0x70000000);
+            self.store(Bar::Dsp, IPC_NOTIFY, self.firmware_doorbell);
         }
         fn write32(&mut self, bar: Bar, offset: usize, value: u32) {
             self.writes.push((bar, offset, value));
@@ -798,7 +812,7 @@ mod tests {
                     self.store(bar, offset, 0);
                 } else {
                     assert_eq!(value, BUSY);
-                    assert!(self.firmware && self.master);
+                    assert!(self.firmware);
                     let cmd = self.load(Bar::Dsp, 0x83004);
                     self.commands.push(cmd);
                     if self.stall_reply {
@@ -849,6 +863,20 @@ mod tests {
                     assert!(self.rom && self.held_d0 && self.master);
                     assert_ne!(self.load(Bar::Hda, 0x1004) & (1 << 1), 0);
                     let chunks = self.stream_chunks(1);
+                    let first_iova = chunks[0].0;
+                    let capacity = (self.expected_firmware.len() + 4095) & !4095;
+                    let padding = capacity - self.expected_firmware.len();
+                    if padding != 0 {
+                        let pointer = self.translate(
+                            first_iova + self.expected_firmware.len() as u64,
+                            padding,
+                            false,
+                        );
+                        // SAFETY: retained model allocation beyond logical CBL.
+                        let tail =
+                            unsafe { core::slice::from_raw_parts(pointer.as_ptr(), padding) };
+                        assert!(tail.iter().all(|byte| *byte == 0xa7));
+                    }
                     let mut payload = Vec::new();
                     for (address, bytes) in chunks {
                         let pointer = self.translate(address, bytes, false);
@@ -859,7 +887,11 @@ mod tests {
                             ));
                         }
                     }
-                    assert_eq!(payload, vec![0x5a; 4096]);
+                    assert_eq!(payload, self.expected_firmware);
+                    assert_eq!(
+                        self.load(Bar::Hda, 0x1110) as usize,
+                        self.expected_firmware.len()
+                    );
                     self.ready();
                 }
             } else {
@@ -880,14 +912,19 @@ mod tests {
                     }
                     offset -= count;
                 }
-                let pointer = self.translate(address.unwrap(), 1, true);
-                unsafe {
-                    pointer.as_ptr().write((self.produced % 251) as u8);
-                }
+                let address = address.unwrap();
+                // Resolve actual BDL/domain ownership at issue time. Keep the
+                // payload in the modeled remapper/root fabric after RUN clear.
+                let _ = self.translate(address, 1, true);
+                self.pending_payload
+                    .push((address, (self.produced % 251) as u8));
                 self.produced += 1;
                 self.cursor = (self.cursor + 1) % ring;
             }
-            self.store(Bar::Hda, 0x84, self.cursor as u32);
+            // Deliberately distinct link position: VC0 host capture must use
+            // vendor DPIB and must not accidentally pass through SD_LPIB.
+            self.store(Bar::Hda, 0x84, 37);
+            self.store(Bar::Hda, 0x1084, self.cursor as u32);
             self.hda[0x83] |= 4;
         }
     }
@@ -906,7 +943,20 @@ mod tests {
             self.0.lock().unwrap().bytes(bar).len()
         }
         fn set_bus_master(&mut self, value: bool) -> Result<(), Error> {
-            self.0.lock().unwrap().master = value;
+            let mut model = self.0.lock().unwrap();
+            if let Some((wanted, after_effect)) = model.master_failure {
+                if wanted == value {
+                    if after_effect {
+                        model.master = value;
+                    }
+                    model.ownership_trace.push("master-failed");
+                    return Err(Error::Authority);
+                }
+            }
+            model.master = value;
+            model
+                .ownership_trace
+                .push(if value { "master-on" } else { "master-off" });
             Ok(())
         }
         fn misc_clock_gate(&mut self, value: bool) -> Result<(), Error> {
@@ -984,6 +1034,8 @@ mod tests {
             if model.fail_unmap == Some(token.id) {
                 return Err(DmaError::InvalidationFailed);
             }
+            assert!(model.pending_payload.is_empty());
+            assert!(!model.master);
             let index = model
                 .translations
                 .iter()
@@ -1000,6 +1052,7 @@ mod tests {
             direction: DmaDirection,
         ) -> Result<(), DmaError> {
             let mut model = self.0.lock().unwrap();
+            model.ownership_trace.push("sync-device");
             let map = model
                 .translations
                 .iter_mut()
@@ -1017,14 +1070,20 @@ mod tests {
             direction: DmaDirection,
         ) -> Result<(), DmaError> {
             let mut model = self.0.lock().unwrap();
-            assert_eq!(
-                model.hda[if direction == DmaDirection::FromDevice {
-                    0x80
-                } else {
-                    0xa0
-                }] & RUN,
-                0
+            assert_eq!(model.hda[0x80] & RUN, 0);
+            assert_eq!(model.hda[0xa0] & RUN, 0);
+            assert!(!model.master);
+            assert!(
+                model.pending_payload.is_empty(),
+                "cache sync is not payload completion"
             );
+            assert!(
+                model
+                    .ownership_trace
+                    .last()
+                    .is_some_and(|event| matches!(*event, "drain" | "sync-cpu"))
+            );
+            model.ownership_trace.push("sync-cpu");
             let map = model
                 .translations
                 .iter_mut()
@@ -1038,10 +1097,19 @@ mod tests {
         unsafe fn drain_posted_writes(&self) -> Result<(), DmaError> {
             let mut model = self.0.lock().unwrap();
             assert!(!model.master);
-            assert_eq!(model.load(Bar::Dsp, ADSPCS) & 0x0f000000, 0);
+            assert_eq!(model.hda[0x80] & RUN, 0);
+            assert_eq!(model.hda[0xa0] & RUN, 0);
             if model.fail_drain {
                 return Err(DmaError::DrainUnavailable);
             }
+            let pending = core::mem::take(&mut model.pending_payload);
+            for (address, value) in pending {
+                let pointer = model.translate(address, 1, true);
+                // SAFETY: exact retained model RAM pin resolved by original
+                // token/IOVA; this isolated drain completes issued writes.
+                unsafe { pointer.as_ptr().write(value) };
+            }
+            model.ownership_trace.push("drain");
             model.drained += 1;
             Ok(())
         }
@@ -1055,8 +1123,7 @@ mod tests {
             self.0.fetch_add(10, Ordering::Relaxed);
         }
     }
-    fn firmware() -> Catalog {
-        let bytes = vec![0x5a; 4096];
+    fn firmware(bytes: Vec<u8>) -> Catalog {
         Catalog::from_handoff(vec![Resource {
             name: "sof-tgl.ri",
             target: target(),
@@ -1086,7 +1153,21 @@ mod tests {
         Source,
         Arc<dyn DmaDomain>,
     ) {
-        let model = Arc::new(Mutex::new(Model::new()));
+        fixture_image(vec![0x5a; 4096], BUSY | 0x70000000)
+    }
+    fn fixture_image(
+        bytes: Vec<u8>,
+        doorbell: u32,
+    ) -> (
+        Controller<Regs, Time>,
+        Arc<Mutex<Model>>,
+        Source,
+        Arc<dyn DmaDomain>,
+    ) {
+        let mut state = Model::new();
+        state.expected_firmware = ipc::firmware_payload(&bytes).unwrap().to_vec();
+        state.firmware_doorbell = doorbell;
+        let model = Arc::new(Mutex::new(state));
         let domain = Arc::new(Domain(model.clone()));
         let source = Source {
             drops: Arc::new(AtomicUsize::new(0)),
@@ -1103,7 +1184,7 @@ mod tests {
             Err((error, _, _)) => panic!("claim {error:?}"),
         };
         controller.initialize().unwrap();
-        let catalog = firmware();
+        let catalog = firmware(bytes);
         let image = catalog
             .load(Requirement {
                 name: "sof-tgl.ri",
@@ -1192,6 +1273,266 @@ mod tests {
         model.lock().unwrap().fail_unmap = None;
         controller.shutdown().unwrap();
         assert_eq!(source.drops.load(Ordering::Relaxed), 4);
+    }
+    #[test]
+    fn mailbox_ready_accepts_busy_only_and_nonpanic_doorbell_payloads() {
+        for lower in [0, 0x12345678, 0x70000000, 0x0deac123] {
+            let (mut controller, model, _, _) = fixture_image(vec![0x5a; 4096], BUSY | lower);
+            assert_eq!(controller.firmware_report().unwrap().abi, 0x03017001);
+            assert_eq!(model.lock().unwrap().load(Bar::Dsp, IPC_NOTIFY) & BUSY, 0);
+            controller.shutdown().unwrap();
+        }
+    }
+    #[test]
+    fn ready_rejects_genuine_panic_and_bad_mailbox_header_abi_or_windows_before_ack() {
+        for defect in 0..5 {
+            let (mut controller, model, _, _) = fixture();
+            let before;
+            {
+                let mut state = model.lock().unwrap();
+                state.ready();
+                match defect {
+                    0 => state.store(Bar::Dsp, IPC_NOTIFY, BUSY | 0x0dead006),
+                    1 => state.store(Bar::Dsp, READY_MAILBOX, 104),
+                    2 => state.store(Bar::Dsp, READY_MAILBOX + 4, 0x60000000),
+                    3 => state.store(Bar::Dsp, READY_MAILBOX + 64, 0x04000000),
+                    4 => state.store(Bar::Dsp, READY_MAILBOX + 108 + 40 + 20, 0x3000),
+                    _ => unreachable!(),
+                }
+                before = state.writes.len();
+            }
+            let error = controller.firmware_ready([0; 32]).unwrap_err();
+            match defect {
+                0 => assert_eq!(error, Error::FirmwarePanic(BUSY | 0x0dead006)),
+                3 => assert_eq!(error, Error::FirmwareAbi(0x04000000)),
+                _ => assert_eq!(error, Error::Mailbox),
+            }
+            assert_eq!(model.lock().unwrap().writes.len(), before);
+            controller.shutdown().unwrap();
+        }
+    }
+    #[test]
+    fn exact_non_page_firmware_payload_bdl_cbl_and_spib_exclude_poison_padding() {
+        for length in [4097, 4223, 8193] {
+            let payload = (0..length).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+            let mut bytes = vec![0; 32];
+            ipc::put(&mut bytes, 0, 0x6e614d58);
+            ipc::put(&mut bytes, 4, 32);
+            ipc::put(&mut bytes, 8, 16);
+            ipc::put(&mut bytes, 12, 1 << 24);
+            bytes.extend_from_slice(&payload);
+            assert_eq!(ipc::firmware_payload(&bytes).unwrap(), payload);
+            let (mut controller, model, source, _) = fixture_image(bytes, BUSY);
+            // The independent peer already read actual BDLEs and checked the
+            // exact full payload, CBL, SPIB and untouched allocation padding.
+            assert_eq!(model.lock().unwrap().expected_firmware, payload);
+            controller.shutdown().unwrap();
+            assert_eq!(source.drops.load(Ordering::Relaxed), 4);
+        }
+    }
+    #[test]
+    fn pending_dma_survives_run_clear_and_failed_drain_without_cpu_ownership() {
+        let (mut controller, model, source, domain) = fixture();
+        controller
+            .install_dmic(topology::tests::topology())
+            .unwrap();
+        controller
+            .prepare_capture(&source, domain, 8192, 4096)
+            .unwrap();
+        controller.start_capture().unwrap();
+        {
+            let mut state = model.lock().unwrap();
+            state.advance(273);
+            assert_eq!(state.pending_payload.len(), 273);
+            state.fail_drain = true;
+        }
+        assert_eq!(
+            controller.stop_capture(),
+            Err(Error::Dma(DmaError::DrainUnavailable))
+        );
+        assert_eq!(controller.state(), State::Faulted);
+        assert!(!controller.pcm.as_ref().unwrap().cpu_owned);
+        assert_eq!(
+            controller.read_capture(0, &mut [0; 1]),
+            Err(Error::NeedsReset)
+        );
+        {
+            let state = model.lock().unwrap();
+            assert_eq!(state.hda[0x80] & RUN, 0);
+            assert!(!state.master);
+            assert_eq!(state.pending_payload.len(), 273);
+            let map = state
+                .translations
+                .iter()
+                .find(|t| t.direction == DmaDirection::FromDevice && t.token.bytes == 8192)
+                .unwrap();
+            let pointer = map.cpu.address(0, 1).unwrap();
+            // SAFETY: stopped isolated model, pending writes are still in its
+            // fabric queue rather than this retained CPU RAM allocation.
+            assert_eq!(unsafe { pointer.as_ptr().read() }, 0xa7);
+            assert_eq!(state.unmaps, 0);
+        }
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+        model.lock().unwrap().fail_drain = false;
+        controller.shutdown().unwrap();
+        assert!(model.lock().unwrap().pending_payload.is_empty());
+        assert_eq!(source.drops.load(Ordering::Relaxed), 6);
+    }
+    #[test]
+    fn failed_or_ambiguous_bme_containment_retains_pins_and_blocks_cpu_handoff() {
+        for after_effect in [false, true] {
+            let (mut controller, model, source, domain) = fixture();
+            controller
+                .install_dmic(topology::tests::topology())
+                .unwrap();
+            controller
+                .prepare_capture(&source, domain, 8192, 4096)
+                .unwrap();
+            controller.start_capture().unwrap();
+            let drains = model.lock().unwrap().drained;
+            {
+                let mut state = model.lock().unwrap();
+                state.advance(64);
+                state.master_failure = Some((false, after_effect));
+            }
+            assert_eq!(controller.stop_capture(), Err(Error::Authority));
+            assert!(!controller.pcm.as_ref().unwrap().cpu_owned);
+            assert_eq!(
+                controller.read_capture(0, &mut [0; 1]),
+                Err(Error::NeedsReset)
+            );
+            assert_eq!(model.lock().unwrap().drained, drains);
+            assert_eq!(model.lock().unwrap().pending_payload.len(), 64);
+            assert_eq!(model.lock().unwrap().unmaps, 0);
+            assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+            model.lock().unwrap().master_failure = None;
+            controller.shutdown().unwrap();
+            assert_eq!(source.drops.load(Ordering::Relaxed), 6);
+        }
+    }
+    #[test]
+    fn paused_capture_republishes_before_bme_restore_and_observes_dpib() {
+        let (mut controller, model, source, domain) = fixture();
+        controller
+            .install_dmic(topology::tests::topology())
+            .unwrap();
+        controller
+            .prepare_capture(&source, domain, 8192, 4096)
+            .unwrap();
+        controller.start_capture().unwrap();
+        model.lock().unwrap().advance(137);
+        assert_eq!(controller.capture_position().unwrap(), 137);
+        assert_eq!(model.lock().unwrap().load(Bar::Hda, 0x84), 37);
+        controller.stop_capture().unwrap();
+        assert!(!model.lock().unwrap().master);
+        let mut captured = [0; 137];
+        controller.read_capture(0, &mut captured).unwrap();
+        let expected: [u8; 137] = core::array::from_fn(|i| i as u8);
+        assert_eq!(captured, expected);
+        model.lock().unwrap().ownership_trace.clear();
+        controller.start_capture().unwrap();
+        assert_eq!(
+            &model.lock().unwrap().ownership_trace[..3],
+            &["sync-device", "sync-device", "master-on"]
+        );
+        model.lock().unwrap().advance(41);
+        assert_eq!(controller.capture_position().unwrap(), 178);
+        controller.stop_capture().unwrap();
+        controller.shutdown().unwrap();
+    }
+    #[test]
+    fn failed_or_ambiguous_bme_restore_keeps_republished_buffers_device_owned() {
+        for after_effect in [false, true] {
+            let (mut controller, model, source, domain) = fixture();
+            controller
+                .install_dmic(topology::tests::topology())
+                .unwrap();
+            controller
+                .prepare_capture(&source, domain, 8192, 4096)
+                .unwrap();
+            controller.start_capture().unwrap();
+            model.lock().unwrap().advance(31);
+            controller.stop_capture().unwrap();
+            {
+                let mut state = model.lock().unwrap();
+                state.ownership_trace.clear();
+                state.master_failure = Some((true, after_effect));
+            }
+            assert_eq!(controller.start_capture(), Err(Error::Authority));
+            assert_eq!(
+                &model.lock().unwrap().ownership_trace[..3],
+                &["sync-device", "sync-device", "master-failed"]
+            );
+            assert!(!controller.pcm.as_ref().unwrap().cpu_owned);
+            assert_eq!(
+                controller.read_capture(0, &mut [0; 1]),
+                Err(Error::NeedsReset)
+            );
+            assert_eq!(model.lock().unwrap().unmaps, 0);
+            assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+            model.lock().unwrap().master_failure = None;
+            controller.shutdown().unwrap();
+            assert_eq!(source.drops.load(Ordering::Relaxed), 6);
+        }
+    }
+    #[test]
+    fn completion_checks_other_host_streams_and_both_command_rings() {
+        for offset in [0xa0, CORBCTL, RIRBCTL] {
+            let (mut controller, model, source, domain) = fixture();
+            controller
+                .install_dmic(topology::tests::topology())
+                .unwrap();
+            controller
+                .prepare_capture(&source, domain, 8192, 4096)
+                .unwrap();
+            controller.start_capture().unwrap();
+            let drains = model.lock().unwrap().drained;
+            {
+                let mut state = model.lock().unwrap();
+                state.advance(53);
+                state.hda[offset] |= 2;
+            }
+            assert_eq!(controller.stop_capture(), Err(Error::Busy));
+            assert!(!controller.pcm.as_ref().unwrap().cpu_owned);
+            assert_eq!(model.lock().unwrap().drained, drains);
+            assert_eq!(model.lock().unwrap().pending_payload.len(), 53);
+            assert_eq!(model.lock().unwrap().unmaps, 0);
+            model.lock().unwrap().hda[offset] &= !2;
+            controller.shutdown().unwrap();
+            assert_eq!(source.drops.load(Ordering::Relaxed), 6);
+        }
+    }
+    #[test]
+    fn capture_dpib_bounds_stream_fault_and_run_checks_remain_enforced() {
+        for defect in 0..3 {
+            let (mut controller, model, source, domain) = fixture();
+            controller
+                .install_dmic(topology::tests::topology())
+                .unwrap();
+            controller
+                .prepare_capture(&source, domain, 8192, 4096)
+                .unwrap();
+            controller.start_capture().unwrap();
+            {
+                let mut state = model.lock().unwrap();
+                state.advance(71);
+                match defect {
+                    0 => state.store(Bar::Hda, 0x1084, 8192),
+                    1 => state.hda[0x83] |= FIFO_ERROR,
+                    2 => state.hda[0x80] &= !RUN,
+                    _ => unreachable!(),
+                }
+            }
+            let result = controller.capture_position();
+            match defect {
+                0 => assert_eq!(result, Err(Error::Buffer)),
+                1 => assert_eq!(result, Err(Error::StreamFault(4 | FIFO_ERROR))),
+                2 => assert_eq!(result, Err(Error::Rejected(Bar::Hda, 0x80))),
+                _ => unreachable!(),
+            }
+            assert_eq!(controller.state(), State::Faulted);
+            controller.shutdown().unwrap();
+        }
     }
     #[test]
     fn original_firmware_payload_extent_and_unknown_cavs_clock_modes_are_explicit() {
