@@ -2,6 +2,8 @@
 //! replace the firmware's once boot services end.
 use core::arch::{asm, naked_asm};
 
+mod controls;
+
 pub const PAGE: usize = 4096;
 const ENTRIES: usize = 512;
 pub const LARGE_PAGE: usize = PAGE * ENTRIES;
@@ -14,10 +16,6 @@ const DEVICE: u64 = PRESENT | WRITABLE | UNCACHED | NX;
 pub const NX: u64 = 1 << 63;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 
-const CR0_MONITOR_FPU: u64 = 1 << 1;
-const CR0_EMULATE_FPU: u64 = 1 << 2;
-const CR0_TASK_SWITCHED: u64 = 1 << 3;
-const CR0_WRITE_PROTECT: u64 = 1 << 16;
 const CR4_PAE: u64 = 1 << 5;
 const CR4_GLOBAL: u64 = 1 << 7;
 const CR4_OSFXSR: u64 = 1 << 9;
@@ -273,7 +271,7 @@ pub unsafe fn take_over() -> Result<(), &'static str> {
         };
         asm!("lidt [{}]", in(reg) &descriptor, options(readonly, nostack, preserves_flags));
     }
-    cr0 = (cr0 | CR0_MONITOR_FPU | CR0_WRITE_PROTECT) & !(CR0_EMULATE_FPU | CR0_TASK_SWITCHED);
+    cr0 = controls::native_cr0(cr0);
     cr4 = (cr4 | CR4_PAE | CR4_OSFXSR | CR4_OSXMMEXCPT) & !(CR4_GLOBAL | CR4_PCID);
     let efer = (u64::from(low) | (u64::from(high) << 32)) | EFER_NX_ENABLE;
     // SAFETY: NX is enabled before tables that use it are loaded; clearing

@@ -27,7 +27,7 @@ use uefi::{
 
 const MAGIC: u64 = 0x5354_4c53_4d50_3031;
 const VERSION: u32 = 2;
-const EFER: u32 = 0xc000_0080;
+pub(super) const EFER: u32 = 0xc000_0080;
 const PAT: u32 = 0x277;
 const APIC_BASE: u32 = 0x1b;
 const MTRR_CAP: u32 = 0xfe;

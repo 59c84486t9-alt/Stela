@@ -44,6 +44,9 @@ mod boot_native_memory;
 #[allow(dead_code)] // Includes UEFI capability checks unused by hosted topology tests.
 mod boot_native_topology;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/paging/controls.rs"]
+mod boot_paging_controls;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/engine/host/ram.rs"]
 mod boot_ram;
 #[cfg(test)]
