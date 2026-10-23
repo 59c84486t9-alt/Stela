@@ -1463,7 +1463,7 @@ cfg_emit(struct translator *t)
       struct air_block *block = t->work[i];
       for (LLVMValueRef inst = LLVMGetFirstInstruction(block->llvm);
            inst && LLVMGetInstructionOpcode(inst) == LLVMPHI; inst = LLVMGetNextInstruction(inst)) {
-         nir_phi_instr *phi = nir_instr_as_phi(find_value(t, inst)->def->parent_instr);
+         nir_phi_instr *phi = nir_instr_as_phi(nir_def_instr(find_value(t, inst)->def));
          unsigned sources = 0;
          for (unsigned s = 0; s < LLVMCountIncoming(inst); s++) {
             struct air_block *pred = cfg_block(t, LLVMGetIncomingBlock(inst, s));
