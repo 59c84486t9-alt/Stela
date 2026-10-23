@@ -8,6 +8,9 @@ use alloc::vec::Vec;
 /// Exclusive transport ownership includes the page/map state. No mutable bus
 /// escape is provided: another owner must not invalidate the device's cache.
 pub trait Transport {
+    /// Maximum complete read this transport can perform at this starting
+    /// register. Function engines must validate packet sizes before enabling IRQs.
+    fn maximum_read(&self, address: u16) -> usize;
     fn activate(&mut self) -> Result<(), Error>;
     fn read(&mut self, address: u16, output: &mut [u8]) -> Result<(), Error>;
     fn write(&mut self, address: u16, data: &[u8]) -> Result<(), Error>;
@@ -85,6 +88,9 @@ impl<B: i2c::Bus> I2c<B> {
     }
 }
 impl<B: i2c::Bus> Transport for I2c<B> {
+    fn maximum_read(&self, address: u16) -> usize {
+        if address as u8 == 0xff { 0 } else { 65535 }
+    }
     fn activate(&mut self) -> Result<(), Error> {
         if !matches!(self.state, State::Fresh | State::Stopped) {
             return Err(if self.state == State::Faulted {
@@ -287,6 +293,9 @@ impl<B: smbus::Bus, C: Companion, T: i2c::Timer> Smbus<B, C, T> {
     }
 }
 impl<B: smbus::Bus, C: Companion, T: i2c::Timer> Transport for Smbus<B, C, T> {
+    fn maximum_read(&self, address: u16) -> usize {
+        65536 - usize::from(address)
+    }
     fn activate(&mut self) -> Result<(), Error> {
         if !matches!(self.state, State::Fresh | State::Stopped) {
             return Err(if self.state == State::Faulted {

@@ -1,12 +1,13 @@
 //! Independent register peripheral with I2C page latch, SMBus mapping RAM,
 //! PS/2 companion effects, F01 reset/configuration and IRQ read-to-clear.
 use super::*;
-use alloc::{rc::Rc, vec};
+use alloc::{collections::BTreeMap, rc::Rc, vec};
 use core::cell::{Cell, RefCell};
 use transport::{Companion, CompanionError, I2c, Smbus};
 
 struct Hardware {
     memory: Vec<u8>,
+    windows: BTreeMap<(u16, usize), Vec<u8>>,
     time: Rc<Cell<u64>>,
     reset_at: u64,
     minimum_settle_us: u64,
@@ -37,6 +38,7 @@ impl Hardware {
     fn new() -> Self {
         let mut h = Self {
             memory: vec![0; 65536],
+            windows: BTreeMap::new(),
             time: Rc::new(Cell::new(0)),
             reset_at: 0,
             minimum_settle_us: 100_000,
@@ -89,9 +91,13 @@ impl Hardware {
     }
     fn read(&mut self, address: u16, output: &mut [u8]) -> bool {
         self.reads += 1;
-        output.copy_from_slice(
-            &self.memory[usize::from(address)..usize::from(address) + output.len()],
-        );
+        if let Some(bytes) = self.windows.get(&(address, output.len())) {
+            output.copy_from_slice(bytes);
+        } else {
+            output.copy_from_slice(
+                &self.memory[usize::from(address)..usize::from(address) + output.len()],
+            );
+        }
         if address == 0x81 {
             self.memory[0x81] = 0;
         }
@@ -104,6 +110,9 @@ impl Hardware {
         } else {
             self.memory[usize::from(address)..usize::from(address) + bytes.len()]
                 .copy_from_slice(bytes);
+            if let Some(window) = self.windows.get_mut(&(address, bytes.len())) {
+                window.copy_from_slice(bytes);
+            }
             if address == 0x40 && bytes[0] & CONFIGURED != 0 {
                 if self.ignore_configured {
                     self.memory[0x40] &= !CONFIGURED;
@@ -732,3 +741,5 @@ fn smbus_waits_for_firmware_after_each_actual_companion_reset_before_mode_read()
     assert_eq!(bus.activate(), Err(Error::NeedsReset));
     assert_eq!(h.borrow().version_attempts, 1);
 }
+
+mod f12_tests;

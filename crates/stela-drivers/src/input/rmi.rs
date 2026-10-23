@@ -8,6 +8,9 @@
 use crate::bus::{i2c, smbus};
 use alloc::vec::Vec;
 
+pub mod descriptor;
+pub mod f12;
+mod f12_device;
 pub mod transport;
 use transport::{Transport, buffer};
 
@@ -22,6 +25,10 @@ const NOSLEEP: u8 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    InputConsumerActive,
+    RegisterDescriptor,
+    MissingRegister(u16),
+    MissingFunction(u8),
     InvalidAddress,
     InvalidConfiguration,
     AddressRange { address: u16, length: usize },
@@ -42,6 +49,7 @@ pub enum Error {
     DeviceStatus(u8),
     ConfigurationRejected,
     UnsupportedPowerControl,
+    UnsupportedControl(u16),
     IdentityChanged,
     UnexpectedReset,
 }
@@ -161,6 +169,14 @@ pub struct AttentionReport {
     pub interrupts: Vec<u8>,
 }
 
+#[must_use = "inspect errors and any completed frames"]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct F12Poll {
+    pub control: Option<AttentionReport>,
+    pub frames: Vec<f12::Frame>,
+    pub error: Option<Error>,
+}
+
 pub struct Device<X, A, T> {
     transport: X,
     attention: A,
@@ -173,6 +189,7 @@ pub struct Device<X, A, T> {
     irq_mask: Vec<u8>,
     awake_control: u8,
     quarantine: Quarantine,
+    f12: Vec<f12::Engine>,
 }
 impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
     pub fn new(
@@ -196,6 +213,7 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
             irq_mask: Vec::new(),
             awake_control: 0,
             quarantine: Quarantine::NotAttempted,
+            f12: Vec::new(),
         })
     }
     pub fn control_state(&self) -> ControlState {
@@ -328,6 +346,7 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
         }
         let result = self.initialize_inner();
         self.fault(result)?;
+        self.f12.clear();
         self.state = ControlState::Configured;
         Ok(())
     }
@@ -432,6 +451,13 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
     /// Service actual peripheral attention. Unknown-function bits remain in the
     /// returned exact status bytes; this substrate does not fabricate events.
     pub fn poll_control(&mut self) -> Result<Option<AttentionReport>, Error> {
+        self.configured()?;
+        if !self.f12.is_empty() {
+            return Err(Error::InputConsumerActive);
+        }
+        self.poll_attention()
+    }
+    fn poll_attention(&mut self) -> Result<Option<AttentionReport>, Error> {
         self.configured()?;
         let result = (|| {
             if !self.attention.pending().map_err(Error::Attention)? {
