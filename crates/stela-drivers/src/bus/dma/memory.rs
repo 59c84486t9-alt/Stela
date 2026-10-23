@@ -100,6 +100,27 @@ pub trait PageSource {
         alignment: usize,
         attribute: CacheAttribute,
     ) -> Result<PinnedPages, MemoryError>;
+
+    /// Allocate with every byte of every returned native page below this
+    /// exclusive physical end, including the complete rounded payload tail.
+    /// CPU addresses, logical length and a DMA/IOVA limit cannot stand in for
+    /// this physical constraint. All ordinary ownership/cache/alignment rules
+    /// still apply. No additional RAM or DMA authority is acquired.
+    ///
+    /// Providers must select from their actual eligible free memory, rather
+    /// than repeatedly allocating and discarding unsuitable pins. An admitted
+    /// reservation with no eligible capacity returns `OutOfMemory`; a provider
+    /// without constrained selection returns `Unavailable`, without trying an
+    /// ordinary allocation or inferring support from one successful result.
+    fn allocate_below(
+        &self,
+        _bytes: usize,
+        _alignment: usize,
+        _attribute: CacheAttribute,
+        _physical_end_exclusive: u64,
+    ) -> Result<PinnedPages, MemoryError> {
+        Err(MemoryError::Unavailable)
+    }
 }
 
 /// The unique owner of an allocation and its established CPU mapping.
@@ -396,6 +417,49 @@ mod tests {
         assert_eq!(pages.alignment(), 8192);
         assert_eq!(pages.page_shift(), 12);
         assert_eq!(source.page_geometry(), Err(MemoryError::Unavailable));
+    }
+
+    #[test]
+    fn constrained_support_is_not_inferred_or_implemented_by_trial_allocation() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        struct Source(AtomicUsize);
+        impl PageSource for Source {
+            fn page_geometry(&self) -> Result<PageGeometry, MemoryError> {
+                PageGeometry::base_only(12)
+            }
+            fn allocate(
+                &self,
+                _: usize,
+                _: usize,
+                _: CacheAttribute,
+            ) -> Result<PinnedPages, MemoryError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Err(MemoryError::OutOfMemory)
+            }
+        }
+        let owner = Source(AtomicUsize::new(0));
+        let source: &dyn PageSource = &owner;
+        for end in [0, 1, 1 << 32, u64::MAX] {
+            assert!(matches!(
+                source.allocate_below(4096, 4096, CacheAttribute::WriteBack, end),
+                Err(MemoryError::Unavailable)
+            ));
+        }
+        assert_eq!(owner.0.load(Ordering::Relaxed), 0);
+        let attested: &dyn PageSource = &AttestedSource;
+        let ordinary = attested
+            .allocate(4096, 4096, CacheAttribute::WriteBack)
+            .unwrap();
+        assert!(
+            ordinary
+                .physical_pages()
+                .iter()
+                .all(|pa| *pa + 4096 <= 0x20000)
+        );
+        assert!(matches!(
+            attested.allocate_below(4096, 4096, CacheAttribute::WriteBack, 0x20000),
+            Err(MemoryError::Unavailable)
+        ));
     }
 
     #[test]

@@ -267,6 +267,28 @@ impl PageSource for NativeMemory {
         alignment: usize,
         attribute: CacheAttribute,
     ) -> Result<PinnedPages, MemoryError> {
+        self.allocate_native(bytes, alignment, attribute, None)
+    }
+
+    fn allocate_below(
+        &self,
+        bytes: usize,
+        alignment: usize,
+        attribute: CacheAttribute,
+        physical_end_exclusive: u64,
+    ) -> Result<PinnedPages, MemoryError> {
+        self.allocate_native(bytes, alignment, attribute, Some(physical_end_exclusive))
+    }
+}
+
+impl NativeMemory {
+    fn allocate_native(
+        &self,
+        bytes: usize,
+        alignment: usize,
+        attribute: CacheAttribute,
+        physical_end_exclusive: Option<u64>,
+    ) -> Result<PinnedPages, MemoryError> {
         if attribute != CacheAttribute::WriteBack {
             return Err(MemoryError::CacheAttributeUnavailable);
         }
@@ -293,10 +315,34 @@ impl PageSource for NativeMemory {
         if ((cpu as u64) ^ physical_base) & (layout.align() as u64 - 1) != 0 {
             return Err(MemoryError::InvalidAlignment);
         }
-        // SAFETY: initialize registered the live heap. Pin/cache operations
-        // remain in process/deferred context even though the raw heap is IRQ-safe.
-        let pointer = NonNull::new(unsafe { ALLOCATOR.alloc_zeroed(layout) })
-            .ok_or(MemoryError::OutOfMemory)?;
+        // The physical ceiling is translated through this ACTUAL retained
+        // linear mapping, not pointer identity. Keep only complete payloads;
+        // the rounded native tail participates even for a one-byte request.
+        let allowed = if let Some(end) = physical_end_exclusive {
+            let available = end.saturating_sub(physical_base).min(capacity as u64);
+            if available < bytes as u64 {
+                return Err(MemoryError::OutOfMemory);
+            }
+            let available = usize::try_from(available).map_err(|_| MemoryError::InvalidSize)?;
+            Some(
+                cpu..cpu
+                    .checked_add(available)
+                    .ok_or(MemoryError::OutsideReservation)?,
+            )
+        } else {
+            None
+        };
+        // SAFETY: initialize registered the same live heap and qualified CPU/PA
+        // relation. Pin/cache work remains process/deferred context. Both paths
+        // use the canonical allocator and publish only zeroed exclusive pages.
+        let pointer = NonNull::new(unsafe {
+            if let Some(allowed) = allowed {
+                ALLOCATOR.alloc_pages_zeroed_in(layout, allowed)
+            } else {
+                ALLOCATOR.alloc_zeroed(layout)
+            }
+        })
+        .ok_or(MemoryError::OutOfMemory)?;
         // Own the payload before any validation or metadata allocation can fail.
         let mut backing = HeapAllocation {
             pointer,
@@ -310,7 +356,15 @@ impl PageSource for NativeMemory {
         let Some(offset) = offset else {
             return Err(MemoryError::OutsideReservation);
         };
-        let physical = physical_base + offset as u64;
+        let physical = physical_base
+            .checked_add(offset as u64)
+            .ok_or(MemoryError::InvalidPageList)?;
+        let physical_end = physical
+            .checked_add(bytes as u64)
+            .ok_or(MemoryError::InvalidPageList)?;
+        if physical_end_exclusive.is_some_and(|end| physical_end > end) {
+            return Err(MemoryError::OutsideReservation);
+        }
         #[cfg(not(test))]
         cache::verify_writeback(
             start as u64,
@@ -502,33 +556,46 @@ mod tests {
     static GLOBAL: allocation_failure::Allocator = allocation_failure::Allocator;
 
     fn metadata_failures_reclaim_payload(source: &NativeMemory) {
-        let before = ALLOCATOR.usage().live;
-        // Fail each real allocation in turn: page vector, unique backing box,
-        // then shared owner. No application-visible pin exists on these paths.
-        for index in 0..3 {
-            allocation_failure::arm(index);
-            let result = source.allocate(PAGE + 1, PAGE, CacheAttribute::WriteBack);
+        for constrained in [false, true] {
+            let allocate = |bytes| {
+                if constrained {
+                    source.allocate_below(
+                        bytes,
+                        PAGE,
+                        CacheAttribute::WriteBack,
+                        source.physical.load(Ordering::Acquire)
+                            + source.bytes.load(Ordering::Acquire) as u64,
+                    )
+                } else {
+                    source.allocate(bytes, PAGE, CacheAttribute::WriteBack)
+                }
+            };
+            let before = ALLOCATOR.usage().live;
+            // Fail each real allocation in turn: page vector, unique backing box,
+            // then shared owner. No application-visible pin exists on these paths.
+            for index in 0..3 {
+                allocation_failure::arm(index);
+                let result = allocate(PAGE + 1);
+                let observation = allocation_failure::disarm();
+                assert!(matches!(result, Err(MemoryError::OutOfMemory)));
+                assert_eq!(observation.attempts, index + 1);
+                assert_eq!(observation.denied, 1);
+                assert_eq!(observation.outstanding(), 0);
+                assert!(!observation.overflow);
+                assert_eq!(ALLOCATOR.usage().live, before);
+            }
+            let pin = allocate(PAGE).unwrap();
+            allocation_failure::arm(0);
+            let cloned = pin.clone();
+            let mapping = cloned.cpu_mapping(CacheAttribute::WriteBack);
+            drop(cloned);
+            drop(pin);
             let observation = allocation_failure::disarm();
-            assert!(matches!(result, Err(MemoryError::OutOfMemory)));
-            assert_eq!(observation.attempts, index + 1);
-            assert_eq!(observation.denied, 1);
-            assert_eq!(observation.outstanding(), 0);
-            assert!(!observation.overflow);
+            assert_eq!(observation.attempts, 0);
+            assert_eq!(ALLOCATOR.usage().live, before + PAGE);
+            drop(mapping.unwrap());
             assert_eq!(ALLOCATOR.usage().live, before);
         }
-        let pin = source
-            .allocate(PAGE, PAGE, CacheAttribute::WriteBack)
-            .unwrap();
-        allocation_failure::arm(0);
-        let cloned = pin.clone();
-        let mapping = cloned.cpu_mapping(CacheAttribute::WriteBack);
-        drop(cloned);
-        drop(pin);
-        let observation = allocation_failure::disarm();
-        assert_eq!(observation.attempts, 0);
-        assert_eq!(ALLOCATOR.usage().live, before + PAGE);
-        drop(mapping.unwrap());
-        assert_eq!(ALLOCATOR.usage().live, before);
     }
 
     fn scatter_metadata_failures_reclaim_every_original_pin(source: &NativeMemory) {
@@ -640,6 +707,190 @@ mod tests {
             catalogs: AtomicUsize::new(0),
         };
         assert_eq!(source.page_geometry(), Err(MemoryError::Unavailable));
+        assert!(matches!(
+            source.allocate_below(PAGE, PAGE, CacheAttribute::WriteBack, u64::MAX),
+            Err(MemoryError::Unavailable)
+        ));
+    }
+
+    fn constrained_pages_match_actual_mapping(source: &NativeMemory) {
+        let before = ALLOCATOR.usage();
+        let seed = source
+            .allocate(PAGE, PAGE, CacheAttribute::WriteBack)
+            .unwrap();
+        let first_physical = seed.physical_pages()[0];
+        let first_cpu = seed
+            .cpu_mapping(CacheAttribute::WriteBack)
+            .unwrap()
+            .address(0, PAGE)
+            .unwrap()
+            .as_ptr();
+        drop(seed);
+        let ceiling = first_physical + PAGE as u64;
+        for end in [
+            0,
+            source.physical.load(Ordering::Acquire),
+            first_physical,
+            ceiling - 1,
+        ] {
+            // An empty/too-short physical interval must not allocate metadata or
+            // leave heap publication behind, even with global allocation denied.
+            allocation_failure::arm(0);
+            let result = source.allocate_below(PAGE, PAGE, CacheAttribute::WriteBack, end);
+            let observation = allocation_failure::disarm();
+            assert!(matches!(result, Err(MemoryError::OutOfMemory)));
+            assert_eq!(observation.attempts, 0);
+            assert_eq!(ALLOCATOR.usage().live, before.live);
+            assert_eq!(ALLOCATOR.usage().carved, before.carved);
+            assert_eq!(ALLOCATOR.usage().largest, before.largest);
+        }
+        // The bound includes the rounded native tail, not only logical bytes.
+        assert!(matches!(
+            source.allocate_below(1, PAGE, CacheAttribute::WriteBack, first_physical + 1),
+            Err(MemoryError::OutOfMemory)
+        ));
+        let pin = source
+            .allocate_below(1, PAGE, CacheAttribute::WriteBack, ceiling)
+            .unwrap();
+        assert_eq!(pin.logical_bytes(), 1);
+        assert_eq!(pin.bytes(), PAGE);
+        assert_eq!(pin.physical_pages(), [first_physical]);
+        assert_ne!(
+            first_physical, first_cpu as u64,
+            "hosted mapping is deliberately non-identity"
+        );
+        let tail = pin
+            .cpu_mapping_range(CacheAttribute::WriteBack, 1..PAGE)
+            .unwrap();
+        let pointer = tail.address(0, PAGE - 1).unwrap().as_ptr();
+        assert_eq!(pointer as usize, first_cpu as usize + 1);
+        // SAFETY: the exclusive fixture mapping owns the entire native tail.
+        assert!(
+            unsafe { core::slice::from_raw_parts(pointer, PAGE - 1) }
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        drop(pin);
+        assert_eq!(ALLOCATOR.usage().live, before.live + PAGE);
+        // SAFETY: this CPU mapping retains the actual original RAM pin.
+        unsafe { pointer.add(PAGE - 2).write_volatile(0xd3) };
+        drop(tail);
+        assert_eq!(ALLOCATOR.usage().live, before.live);
+        let next = source
+            .allocate_below(PAGE, PAGE, CacheAttribute::WriteBack, ceiling)
+            .unwrap();
+        let mapping = next.cpu_mapping(CacheAttribute::WriteBack).unwrap();
+        let reused = mapping.address(0, PAGE).unwrap().as_ptr();
+        assert_eq!(reused, first_cpu);
+        // SAFETY: this fresh mapping owns the exclusive payload cleared on reuse.
+        assert_eq!(unsafe { reused.add(PAGE - 1).read_volatile() }, 0);
+        drop(next);
+        drop(mapping);
+        assert_eq!(ALLOCATOR.usage().live, before.live);
+        assert_eq!(ALLOCATOR.usage().carved, before.carved);
+        assert_eq!(ALLOCATOR.usage().largest, before.largest);
+        // An earlier free hole cannot fit two complete pages plus the real
+        // header. Select the later eligible extent, retaining its actual PA.
+        let a = source
+            .allocate(PAGE, PAGE, CacheAttribute::WriteBack)
+            .unwrap();
+        let b = source
+            .allocate(PAGE, PAGE, CacheAttribute::WriteBack)
+            .unwrap();
+        let c = source
+            .allocate(2 * PAGE, PAGE, CacheAttribute::WriteBack)
+            .unwrap();
+        let selected_physical = c.physical_pages()[0];
+        let b_mapping = b.cpu_mapping(CacheAttribute::WriteBack).unwrap();
+        let b_pointer = b_mapping.address(0, PAGE).unwrap().as_ptr();
+        // SAFETY: b_mapping owns this isolated test payload exclusively.
+        unsafe { b_pointer.write_bytes(0x49, PAGE) };
+        drop(a);
+        drop(c);
+        let selected = source
+            .allocate_below(
+                2 * PAGE,
+                PAGE,
+                CacheAttribute::WriteBack,
+                selected_physical + 2 * PAGE as u64,
+            )
+            .unwrap();
+        assert_eq!(
+            selected.physical_pages(),
+            [selected_physical, selected_physical + PAGE as u64]
+        );
+        // SAFETY: the retained CPU view still owns b throughout selection.
+        assert!(
+            unsafe { core::slice::from_raw_parts(b_pointer, PAGE) }
+                .iter()
+                .all(|byte| *byte == 0x49)
+        );
+        drop(selected);
+        drop(b);
+        drop(b_mapping);
+        assert_eq!(ALLOCATOR.usage().live, before.live);
+        assert_eq!(ALLOCATOR.usage().carved, before.carved);
+        assert_eq!(ALLOCATOR.usage().largest, before.largest);
+        assert!(matches!(
+            source.allocate_below(0, PAGE, CacheAttribute::WriteBack, ceiling),
+            Err(MemoryError::InvalidSize)
+        ));
+        assert!(matches!(
+            source.allocate_below(PAGE, 3, CacheAttribute::WriteBack, ceiling),
+            Err(MemoryError::InvalidAlignment)
+        ));
+        assert!(matches!(
+            source.allocate_below(PAGE, PAGE, CacheAttribute::Uncached, ceiling),
+            Err(MemoryError::CacheAttributeUnavailable)
+        ));
+    }
+
+    fn constrained_source_placement(source: &NativeMemory, ram: *mut u8, bytes: usize) {
+        let original = source.physical.load(Ordering::Acquire);
+        let before = ALLOCATOR.usage().live;
+        let boundary = 1u64 << 32; // An address-space test boundary, not a device ID.
+        // SAFETY: no pin/catalog is live; these are explicit hosted PA labels
+        // for the SAME actual RAM and CPU mapping, not hardware qualification.
+        unsafe { initialize(ram as usize, boundary - 4 * PAGE as u64, bytes, 0) };
+        let pages = source
+            .allocate_below(3 * PAGE, PAGE, CacheAttribute::WriteBack, boundary)
+            .unwrap();
+        assert_eq!(
+            pages.physical_pages(),
+            [
+                boundary - 3 * PAGE as u64,
+                boundary - 2 * PAGE as u64,
+                boundary - PAGE as u64
+            ]
+        );
+        assert_eq!(pages.physical_pages()[2] + PAGE as u64, boundary);
+        drop(pages);
+        assert_eq!(ALLOCATOR.usage().live, before);
+        // Rounded four-page payload cannot fit below the boundary once the
+        // real canonical allocation header/alignment are accounted for.
+        assert!(matches!(
+            source.allocate_below(3 * PAGE + 1, PAGE, CacheAttribute::WriteBack, boundary),
+            Err(MemoryError::OutOfMemory)
+        ));
+        assert_eq!(ALLOCATOR.usage().live, before);
+        // SAFETY: no live payload remains; move only the symbolic PA relation.
+        unsafe { initialize(ram as usize, boundary + PAGE as u64, bytes, 0) };
+        allocation_failure::arm(0);
+        let result = source.allocate_below(PAGE, PAGE, CacheAttribute::WriteBack, boundary);
+        let observation = allocation_failure::disarm();
+        assert!(matches!(result, Err(MemoryError::OutOfMemory)));
+        assert_eq!(observation.attempts, 0);
+        assert_eq!(ALLOCATOR.usage().live, before);
+        // Ordinary allocation still uses the admitted above-bound reservation;
+        // a failed constrained request does not disable or retarget it.
+        let ordinary = source
+            .allocate(PAGE, PAGE, CacheAttribute::WriteBack)
+            .unwrap();
+        assert!(ordinary.physical_pages()[0] > boundary);
+        drop(ordinary);
+        // SAFETY: all test consumers stopped; restore the original relation.
+        unsafe { initialize(ram as usize, original, bytes, 0) };
+        assert_eq!(ALLOCATOR.usage().live, before);
     }
 
     #[test]
@@ -662,6 +913,8 @@ mod tests {
         assert_eq!(ALLOCATOR.usage().live, 0);
         metadata_failures_reclaim_payload(source);
         scatter_metadata_failures_reclaim_every_original_pin(source);
+        constrained_pages_match_actual_mapping(source);
+        constrained_source_placement(source, ram, layout.size());
         let geometry = source.page_geometry().unwrap();
         assert_eq!(geometry, PageGeometry::base_only(PAGE_SHIFT).unwrap());
         assert!(!geometry.supports(PAGE_SHIFT + 1));
@@ -850,6 +1103,10 @@ mod tests {
         unsafe { initialize(ram as usize, 0x4000_0000 + PAGE as u64, layout.size(), 0) };
         assert!(matches!(
             source.allocate(4 * PAGE, 4 * PAGE, CacheAttribute::WriteBack),
+            Err(MemoryError::InvalidAlignment)
+        ));
+        assert!(matches!(
+            source.allocate_below(4 * PAGE, 4 * PAGE, CacheAttribute::WriteBack, u64::MAX),
             Err(MemoryError::InvalidAlignment)
         ));
         assert_eq!(ALLOCATOR.usage().live, before);

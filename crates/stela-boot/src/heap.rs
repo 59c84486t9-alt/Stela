@@ -10,10 +10,12 @@ use core::{
     alloc::{GlobalAlloc, Layout},
     cell::UnsafeCell,
     marker::PhantomData,
+    ops::Range,
     ptr,
     sync::atomic::{AtomicBool, Ordering},
 };
 const WORD: usize = core::mem::align_of::<usize>();
+const PAGE_BYTES: usize = 4096;
 #[repr(C)]
 struct Free {
     bytes: usize,
@@ -127,6 +129,48 @@ impl Heap {
         state.total = bytes;
     }
 
+    /// Select whole, zeroed pages inside a CPU interval from this same heap.
+    /// No reservation or CPU-to-physical relationship is inferred here.
+    /// Invalid geometry and exhaustion change no free-list bytes/accounting.
+    /// Returned pointers use ordinary `GlobalAlloc::dealloc` and their original
+    /// layout; page alignment excludes the small-object size-class route.
+    ///
+    /// # Safety
+    /// The caller obeys the initialized heap's allocation/exclusion contract,
+    /// retains its actual RAM/mapping/root epoch, and owns the returned payload
+    /// exclusively until exact-layout deallocation. `allowed` constrains payload
+    /// bytes only; the canonical allocation header remains private heap metadata.
+    pub unsafe fn alloc_pages_zeroed_in(&self, layout: Layout, allowed: Range<usize>) -> *mut u8 {
+        if layout.size() == 0
+            || !layout.size().is_multiple_of(PAGE_BYTES)
+            || layout.align() < PAGE_BYTES
+            || allowed
+                .end
+                .checked_sub(allowed.start)
+                .is_none_or(|bytes| bytes < layout.size())
+        {
+            return ptr::null_mut();
+        }
+        let guard = self.lock();
+        // SAFETY: actual acquire/release exclusion, as for ordinary allocation.
+        let state = unsafe { &mut *self.state.get() };
+        if !state.ready {
+            return ptr::null_mut();
+        }
+        // SAFETY: lock held; selection changes nothing until a complete fit.
+        let block = unsafe { carve_within(state, layout.size(), layout.align(), allowed) };
+        if !block.is_null() {
+            state.live += layout.size();
+        }
+        // No metadata/state borrow survives zeroing or a possible IRQ restore.
+        drop(guard);
+        if !block.is_null() {
+            // SAFETY: the selected full payload is exclusively owned and live.
+            unsafe { block.write_bytes(0, layout.size()) };
+        }
+        block
+    }
+
     /// Whether more than three quarters of the heap is allocated.
     pub fn low(&self) -> bool {
         let _guard = self.lock();
@@ -237,7 +281,6 @@ unsafe impl GlobalAlloc for Heap {
 /// # Safety
 /// The heap's lock is held and `state` is initialized.
 unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
-    let minimum = core::mem::size_of::<Free>();
     let header = core::mem::size_of::<Header>();
     let alignment = alignment.max(WORD);
     let mut link = &mut state.first as *mut *mut Free;
@@ -253,55 +296,123 @@ unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
         let Some(user) = base.checked_add(header).and_then(|v| aligned(v, alignment)) else {
             return ptr::null_mut();
         };
-        let Some(mut used_end) = user.checked_add(size.max(1)).and_then(|v| aligned(v, WORD))
-        else {
+        let Some(used_end) = user.checked_add(size.max(1)).and_then(|v| aligned(v, WORD)) else {
             return ptr::null_mut();
         };
         if used_end > end {
             link = unsafe { &mut (*node).next };
             continue;
         }
-        let header_base = user - header;
-        let prefix = header_base - base;
-        let allocated_base = if prefix >= minimum { header_base } else { base };
-        if end - used_end < minimum {
-            used_end = end;
+        // SAFETY: the original selection proved a complete aligned fit.
+        return unsafe { publish_carve(state, link, node, end, user, used_end) };
+    }
+}
+
+/// Page selection over the same address-ordered free extents. All candidate
+/// arithmetic precedes publication, including skipped fragmented extents.
+///
+/// # Safety
+/// Heap lock held; nonzero page-sized payload and at least page alignment.
+unsafe fn carve_within(
+    state: &mut State,
+    size: usize,
+    alignment: usize,
+    allowed: Range<usize>,
+) -> *mut u8 {
+    let header = core::mem::size_of::<Header>();
+    let mut link = &mut state.first as *mut *mut Free;
+    loop {
+        // SAFETY: the lock protects the original live free-list links.
+        let node = unsafe { *link };
+        if node.is_null() {
+            return ptr::null_mut();
         }
-        let next = unsafe { (*node).next };
-        let suffix = if used_end < end {
-            let suffix = used_end as *mut Free;
-            unsafe {
-                suffix.write(Free {
-                    bytes: end - used_end,
-                    next,
-                });
-            }
-            suffix
-        } else {
-            next
+        let base = node as usize;
+        let Some(end) = base.checked_add(unsafe { (*node).bytes }) else {
+            return ptr::null_mut();
         };
-        if prefix >= minimum {
-            unsafe {
-                node.write(Free {
-                    bytes: prefix,
-                    next: suffix,
-                });
-            }
-        } else {
-            unsafe {
-                *link = suffix;
-            }
+        let Some(user) = base
+            .checked_add(header)
+            .map(|start| start.max(allowed.start))
+            .and_then(|start| aligned(start, alignment))
+        else {
+            return ptr::null_mut();
+        };
+        let Some(used_end) = user.checked_add(size) else {
+            return ptr::null_mut();
+        };
+        if used_end > allowed.end {
+            // Later free extents cannot start at a smaller CPU address.
+            return ptr::null_mut();
         }
+        if used_end > end {
+            link = unsafe { &mut (*node).next };
+            continue;
+        }
+        // Page-sized/aligned requests already end on WORD alignment.
+        // SAFETY: complete payload/header fit, actual locked free-list owner.
+        return unsafe { publish_carve(state, link, node, end, user, used_end) };
+    }
+}
+
+/// Publish one fully checked selection. Ordinary and constrained allocations
+/// share exactly this header, split and accounting operation.
+///
+/// # Safety
+/// Heap lock held. `link` names `node` in the actual free list; `end` is that
+/// node's end, and aligned `[user, used_end)` plus the preceding Header fit
+/// inside it. No pointer or state reference escapes the owning exclusion.
+#[inline(always)]
+unsafe fn publish_carve(
+    state: &mut State,
+    link: *mut *mut Free,
+    node: *mut Free,
+    end: usize,
+    user: usize,
+    mut used_end: usize,
+) -> *mut u8 {
+    let base = node as usize;
+    let minimum = core::mem::size_of::<Free>();
+    let header_base = user - core::mem::size_of::<Header>();
+    let prefix = header_base - base;
+    let allocated_base = if prefix >= minimum { header_base } else { base };
+    if end - used_end < minimum {
+        used_end = end;
+    }
+    let next = unsafe { (*node).next };
+    let suffix = if used_end < end {
+        let suffix = used_end as *mut Free;
         unsafe {
-            (header_base as *mut Header).write(Header {
-                base: allocated_base,
-                bytes: used_end - allocated_base,
+            suffix.write(Free {
+                bytes: end - used_end,
+                next,
             });
         }
-        state.carved += used_end - allocated_base;
-        state.peak = state.peak.max(state.carved);
-        return user as *mut u8;
+        suffix
+    } else {
+        next
+    };
+    if prefix >= minimum {
+        unsafe {
+            node.write(Free {
+                bytes: prefix,
+                next: suffix,
+            });
+        }
+    } else {
+        unsafe {
+            *link = suffix;
+        }
     }
+    unsafe {
+        (header_base as *mut Header).write(Header {
+            base: allocated_base,
+            bytes: used_end - allocated_base,
+        });
+    }
+    state.carved += used_end - allocated_base;
+    state.peak = state.peak.max(state.carved);
+    user as *mut u8
 }
 
 /// Return the extent of a block `carve` made to the free list, coalescing it
@@ -418,6 +529,158 @@ mod tests {
             heap.dealloc(b, layout);
         }
         assert_eq!(heap.usage().live, 0);
+    }
+
+    #[test]
+    fn constrained_pages_use_real_cpu_interval_and_exact_payload_end() {
+        let heap = Heap::new();
+        let mut ram = backing();
+        let base = ram.0.as_mut_ptr() as usize;
+        let page = Layout::from_size_align(PAGE_BYTES, PAGE_BYTES).unwrap();
+        // SAFETY: this dedicated real RAM stays live through exact deallocation.
+        unsafe {
+            assert!(
+                heap.alloc_pages_zeroed_in(page, base..base + ram.0.len())
+                    .is_null()
+            );
+            heap.initialize(base as *mut u8, ram.0.len());
+            let window = base + 7 * PAGE_BYTES..base + 8 * PAGE_BYTES;
+            let block = heap.alloc_pages_zeroed_in(page, window.clone());
+            assert_eq!(block as usize, window.start);
+            assert_eq!(block as usize + page.size(), window.end);
+            assert!(
+                core::slice::from_raw_parts(block, page.size())
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
+            block.write_bytes(0xa5, page.size());
+            assert_eq!(heap.usage().live, page.size());
+            heap.dealloc(block, page);
+            let again = heap.alloc_pages_zeroed_in(page, window);
+            assert_eq!(again, block);
+            assert!(
+                core::slice::from_raw_parts(again, page.size())
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
+            heap.dealloc(again, page);
+        }
+        let usage = heap.usage();
+        assert_eq!(usage.live, 0);
+        assert_eq!(usage.carved, 0);
+        assert_eq!(usage.largest, ram.0.len());
+    }
+
+    #[test]
+    fn constrained_failure_preserves_all_free_bytes_and_accounting() {
+        let heap = Heap::new();
+        let mut ram = backing();
+        let base = ram.0.as_mut_ptr() as usize;
+        // SAFETY: fresh exclusive model RAM; no users before initialization.
+        unsafe { heap.initialize(base as *mut u8, ram.0.len()) };
+        let page = Layout::from_size_align(PAGE_BYTES, PAGE_BYTES).unwrap();
+        let end = base + ram.0.len();
+        for (layout, allowed) in [
+            (page, base..base),
+            (page, end..base),
+            (page, base..base + PAGE_BYTES), // no space for canonical Header
+            (page, base + PAGE_BYTES..base + 2 * PAGE_BYTES - 1),
+            (page, base + PAGE_BYTES + 1..base + 2 * PAGE_BYTES),
+            (page, end..end + PAGE_BYTES),
+            (Layout::from_size_align(0, PAGE_BYTES).unwrap(), base..end),
+            (
+                Layout::from_size_align(PAGE_BYTES - 1, PAGE_BYTES).unwrap(),
+                base..end,
+            ),
+            (Layout::from_size_align(PAGE_BYTES, 16).unwrap(), base..end),
+        ] {
+            let image = ram.0.to_vec();
+            let before = heap.usage();
+            // SAFETY: valid layout, retained real heap, no other consumers.
+            let block = unsafe { heap.alloc_pages_zeroed_in(layout, allowed) };
+            assert!(block.is_null());
+            assert_eq!(ram.0.as_slice(), image.as_slice());
+            let after = heap.usage();
+            assert_eq!(
+                (after.live, after.carved, after.peak, after.largest),
+                (before.live, before.carved, before.peak, before.largest)
+            );
+        }
+    }
+
+    #[test]
+    fn fragmented_selection_skips_earlier_extents_and_preserves_other_owners() {
+        let heap = Heap::new();
+        let mut ram = backing();
+        let base = ram.0.as_mut_ptr() as usize;
+        let page = Layout::from_size_align(PAGE_BYTES, PAGE_BYTES).unwrap();
+        let small = Layout::from_size_align(17, 16).unwrap();
+        // SAFETY: each raw payload is retained until its exact deallocation;
+        // no slice or device alias exists while the heap mutates its metadata.
+        unsafe {
+            heap.initialize(base as *mut u8, ram.0.len());
+            let a = heap.alloc(page);
+            let b = heap.alloc(page);
+            let c = heap.alloc(page);
+            assert!(!a.is_null() && !b.is_null() && !c.is_null());
+            b.write_bytes(0x39, page.size());
+            heap.dealloc(a, page);
+            heap.dealloc(c, page);
+            // An earlier free extent is large enough but outside this request.
+            let chosen = heap.alloc_pages_zeroed_in(page, c as usize..c as usize + PAGE_BYTES);
+            assert_eq!(chosen, c);
+            let metadata = heap.alloc(small);
+            assert!(!metadata.is_null());
+            metadata.write_bytes(0x6e, small.size());
+            assert!(
+                core::slice::from_raw_parts(b, page.size())
+                    .iter()
+                    .all(|byte| *byte == 0x39)
+            );
+            heap.dealloc(chosen, page);
+            assert!(
+                core::slice::from_raw_parts(metadata, small.size())
+                    .iter()
+                    .all(|byte| *byte == 0x6e)
+            );
+            heap.dealloc(metadata, small);
+            heap.dealloc(b, page);
+        }
+        // The ordinary small-object cache retains its own block, as before.
+        assert_eq!(heap.usage().live, 0);
+        assert!(heap.usage().carved < 2 * PAGE_BYTES);
+    }
+
+    #[test]
+    fn constrained_alignment_and_ordinary_pages_coalesce_together() {
+        let heap = Heap::new();
+        let mut ram = backing();
+        let base = ram.0.as_mut_ptr() as usize;
+        let ordinary = Layout::from_size_align(PAGE_BYTES, PAGE_BYTES).unwrap();
+        // SAFETY: exclusive fixed test RAM and stopped payload consumers.
+        unsafe {
+            heap.initialize(base as *mut u8, ram.0.len());
+            for alignment in [PAGE_BYTES, 2 * PAGE_BYTES, 4 * PAGE_BYTES, 8 * PAGE_BYTES] {
+                let layout = Layout::from_size_align(3 * PAGE_BYTES, alignment).unwrap();
+                let other = heap.alloc(ordinary);
+                assert!(!other.is_null());
+                other.write_bytes(0x7c, ordinary.size());
+                let block =
+                    heap.alloc_pages_zeroed_in(layout, base + PAGE_BYTES + 7..base + ram.0.len());
+                assert!(!block.is_null() && (block as usize).is_multiple_of(alignment));
+                assert!(block as usize + layout.size() <= base + ram.0.len());
+                assert!(
+                    core::slice::from_raw_parts(other, ordinary.size())
+                        .iter()
+                        .all(|byte| *byte == 0x7c)
+                );
+                heap.dealloc(other, ordinary);
+                heap.dealloc(block, layout);
+                assert_eq!(heap.usage().live, 0);
+                assert_eq!(heap.usage().carved, 0);
+                assert_eq!(heap.usage().largest, ram.0.len());
+            }
+        }
     }
 
     #[test]
