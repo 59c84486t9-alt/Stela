@@ -1,6 +1,6 @@
 [submodule "linux"]
 	path = third_party/linux
-	url = https://github.com/torvalds/linux.git
+	url = https://github.com/gregkh/linux.git
 	shallow = true
 [submodule "mesa"]
 	path = third_party/mesa
