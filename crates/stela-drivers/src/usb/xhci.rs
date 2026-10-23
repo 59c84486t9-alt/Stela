@@ -91,7 +91,7 @@ pub use bind::Plan;
 use bind::bind_with_provider;
 pub use descriptor::{Device, Endpoint, Interface, SuperSpeedCompanion, interfaces};
 pub use identity::{DeviceAccess, SlotId};
-pub use iso::{IsoCompletion, IsoStatus, IsoTransfer};
+pub use iso::{IsoCompletion, IsoSchedule, IsoStatus, IsoTransfer};
 pub use lifecycle::{Changes, Host};
 use ring::{Event, Ring};
 pub use streams::StreamTransfer;

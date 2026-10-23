@@ -326,6 +326,21 @@ impl DeviceAccess<'_> {
         self.controller.submit_iso(slot, dci, buffer, length)
     }
 
+    /// Submit a scheduling request for this exact addressed generation. The
+    /// request carries no hardware authority; controller admission follows
+    /// identity validation and precedes DMA publication.
+    pub fn submit_iso_scheduled(
+        &mut self,
+        dci: u8,
+        buffer: u64,
+        length: usize,
+        schedule: IsoSchedule,
+    ) -> Result<IsoTransfer, BlockError> {
+        let slot = self.slot()?;
+        self.controller
+            .submit_iso_scheduled(slot, dci, buffer, length, schedule)
+    }
+
     pub fn completed_iso(
         &mut self,
         ticket: &IsoTransfer,

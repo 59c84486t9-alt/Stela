@@ -19,7 +19,22 @@ const SIA: u32 = 1 << 31;
 const FRAMES: u32 = 2048;
 const MICROFRAMES: u32 = FRAMES * 8;
 const CFC_DELAY: u32 = 10;
+// Linux xhci_get_isoc_start_frame, xHCI 4.11.2.5: less than half
+// the 2048-frame counter period, so modulo targets have one future meaning.
+const LAST_SCHEDULE_FRAME: u32 = 895;
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
+
+/// Scheduling request, never a controller clock or ownership credential.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IsoSchedule {
+    /// Preserve the native scheduler's existing aligned-start/continuation policy.
+    Asap,
+    /// Request the next occurrence of this 14-bit MFINDEX value. The actual
+    /// controller's IST, bounded future window, endpoint interval and queued
+    /// continuation must permit it. A new stream must begin on a frame boundary:
+    /// an Isoch TRB encodes Frame ID, not an arbitrary microframe phase.
+    AtMicroframe(u16),
+}
 
 /// A terminal packet status. Every variant is a completed service interval;
 /// transport errors are returned separately and do not release DMA ownership.
@@ -46,9 +61,16 @@ pub struct IsoTransfer {
     slot: u8,
     dci: u8,
     trb: u64,
+    schedule: IsoSchedule,
 }
 
 impl IsoTransfer {
+    /// The selected wire schedule. This is diagnostic data: Frame ID requests
+    /// can complete with MissedService, and SIA does not promise an exact time.
+    pub fn schedule(&self) -> IsoSchedule {
+        self.schedule
+    }
+
     pub(super) fn hardware_slot(&self) -> u8 {
         self.slot
     }
@@ -308,6 +330,53 @@ fn schedule(mfindex: u32, caps: Capabilities, interval: u32, next: Option<u32>) 
     };
     (start, field)
 }
+
+/// Explicit requests use Linux's valid Frame-ID window plus its conservative
+/// IST+10 microframe submission margin. Linux merely diagnoses late mid-stream
+/// requests; this optional API refuses those before publishing anything. ASAP
+/// keeps the original late-TD/MissedService behavior in `schedule` above.
+fn requested_schedule(
+    mfindex: u32,
+    caps: Capabilities,
+    interval: u32,
+    next: Option<u32>,
+    requested: u16,
+) -> Result<(u32, u32), BlockError> {
+    let start = u32::from(requested);
+    let now = mfindex & (MICROFRAMES - 1);
+    if start >= MICROFRAMES || !start.is_multiple_of(interval) {
+        return Err(BlockError::Unsupported(
+            "isochronous request is outside MFINDEX or endpoint interval",
+        ));
+    }
+    if let Some(next) = next {
+        if start != next {
+            return Err(BlockError::Unsupported(
+                "isochronous request is not the queued continuation",
+            ));
+        }
+        if !caps.cfc {
+            return Err(BlockError::Unsupported(
+                "explicit isochronous continuation requires contiguous Frame ID capability",
+            ));
+        }
+    } else if !start.is_multiple_of(8) {
+        return Err(BlockError::Unsupported(
+            "first isochronous microframe phase cannot be encoded by Frame ID",
+        ));
+    }
+    let distance = (start + MICROFRAMES - now) % MICROFRAMES;
+    let frame_distance = (start / 8 + FRAMES - now / 8) % FRAMES;
+    if distance < caps.ist + CFC_DELAY
+        || frame_distance < caps.ist.div_ceil(8) + 1
+        || frame_distance > LAST_SCHEDULE_FRAME
+    {
+        return Err(BlockError::Unsupported(
+            "isochronous request is outside the controller scheduling window",
+        ));
+    }
+    Ok((start, (start / 8) << 20))
+}
 fn completion(code: u32, bytes: usize, residual: usize) -> Result<IsoCompletion, BlockError> {
     if residual > bytes {
         return Err(BlockError::Unsupported(
@@ -364,6 +433,22 @@ impl Controller {
         buffer: u64,
         length: usize,
     ) -> Result<IsoTransfer, BlockError> {
+        self.submit_iso_scheduled(slot, dci, buffer, length, IsoSchedule::Asap)
+    }
+
+    /// Queue with an optional caller-selected service interval. An explicit
+    /// request is validated against the actual controller and retained queue
+    /// before allocating a ticket, publishing a TRB or ringing a doorbell.
+    /// It cannot create a gap, reorder outstanding TDs or select an ambiguous
+    /// counter epoch. DMA ownership and terminal completion follow `submit_iso`.
+    pub fn submit_iso_scheduled(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        buffer: u64,
+        length: usize,
+        requested: IsoSchedule,
+    ) -> Result<IsoTransfer, BlockError> {
         self.endpoint_ready(slot, dci)?;
         self.iso_caps.admit()?;
         self.dma_profile.check(buffer, length)?;
@@ -398,11 +483,19 @@ impl Controller {
         }
         // Like Linux, a stream whose earlier TDs have all completed restarts
         // at a fresh start frame instead of continuing a stale schedule.
-        if queue.outstanding().is_none() {
-            queue.next = None;
-        }
+        let next = queue
+            .active
+            .iter()
+            .any(|active| active.done.is_none())
+            .then_some(queue.next)
+            .flatten();
         let interval = 1 << queue.recipe.exponent;
-        let (start, frame) = schedule(mfindex, caps, interval, queue.next);
+        let (start, frame) = match requested {
+            IsoSchedule::Asap => schedule(mfindex, caps, interval, next),
+            IsoSchedule::AtMicroframe(start) => {
+                requested_schedule(mfindex, caps, interval, next, start)?
+            }
+        };
         let id = NEXT_TICKET
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
                 old.checked_add(1)
@@ -424,7 +517,17 @@ impl Controller {
         transfer.ring.push(&[(buffer, length as u32, control)]);
         queue.next = Some((start + interval) % MICROFRAMES);
         self.doorbell(slot, dci);
-        Ok(IsoTransfer { id, slot, dci, trb })
+        Ok(IsoTransfer {
+            id,
+            slot,
+            dci,
+            trb,
+            schedule: if frame & SIA != 0 {
+                IsoSchedule::Asap
+            } else {
+                IsoSchedule::AtMicroframe(start as u16)
+            },
+        })
     }
 
     /// Poll an exact service interval. Ok (including packet-error statuses) is
@@ -532,6 +635,7 @@ pub(super) mod tests {
         silent: Option<u32>,
         fatal: bool,
         output_bytes: Vec<u8>,
+        serviced: BTreeMap<u8, u32>,
     }
     impl Hardware {
         fn word(address: u64) -> u32 {
@@ -716,6 +820,26 @@ pub(super) mod tests {
             }
             self.event(td.trb, code, dci, residual, TRANSFER_EVENT);
         }
+
+        /// Independent device peer: service a retained Frame-ID TD only when
+        /// the modeled controller clock reaches its encoded frame and the
+        /// endpoint context's actual interval selects this microframe. No
+        /// production scheduling helper or software queue metadata is used.
+        fn service_at(&mut self, dci: u8, microframe: u32, code: u32) {
+            self.mfindex = microframe;
+            let td = &self.active.iter().find(|(ep, _)| *ep == dci).unwrap().1;
+            assert_eq!(td.control & SIA, 0);
+            assert_eq!((td.control >> 20) & 0x7ff, microframe / 8);
+            let ep = self.output + u64::from(dci) * self.context_bytes as u64;
+            let interval = 1 << (Self::word(ep) >> 16 & 0xff);
+            let expected = self
+                .serviced
+                .get(&dci)
+                .map_or(microframe / 8 * 8, |last| (last + interval) & 0x3fff);
+            assert_eq!(microframe, expected);
+            self.serviced.insert(dci, microframe);
+            self.complete(dci, 0, code, 0);
+        }
     }
     struct Model(Rc<RefCell<Hardware>>);
     impl Registers for Model {
@@ -775,6 +899,7 @@ pub(super) mod tests {
             silent: None,
             fatal: false,
             output_bytes: Vec::new(),
+            serviced: BTreeMap::new(),
         }));
         let mut slots = vec![None];
         slots.push(Some(Slot {
@@ -836,6 +961,308 @@ pub(super) mod tests {
             },
             model,
         )
+    }
+
+    fn assert_schedule_refused(
+        controller: &mut Controller,
+        model: &Rc<RefCell<Hardware>>,
+        buffer: u64,
+        requested: u16,
+    ) {
+        let transfer = controller.slot(1).unwrap().endpoints[3].as_ref().unwrap();
+        let bytes = transfer.ring.buffer.bytes().to_vec();
+        let cursor = transfer.ring.address();
+        let queue = transfer.iso.as_ref().unwrap();
+        let next = queue.next;
+        let active: Vec<_> = queue
+            .active
+            .iter()
+            .map(|td| (td.id, td.trb, td.bytes, td.done))
+            .collect();
+        let device_count = model.borrow().active.len();
+        let commands = model.borrow().seen.clone();
+        let device_cursors = model.borrow().cursors.clone();
+        assert!(
+            controller
+                .submit_iso_scheduled(1, 3, buffer, 32, IsoSchedule::AtMicroframe(requested))
+                .is_err()
+        );
+        let transfer = controller.slot(1).unwrap().endpoints[3].as_ref().unwrap();
+        assert_eq!(transfer.ring.buffer.bytes(), bytes);
+        assert_eq!(transfer.ring.address(), cursor);
+        let queue = transfer.iso.as_ref().unwrap();
+        assert_eq!(queue.next, next);
+        assert_eq!(
+            queue
+                .active
+                .iter()
+                .map(|td| (td.id, td.trb, td.bytes, td.done))
+                .collect::<Vec<_>>(),
+            active
+        );
+        assert_eq!(model.borrow().active.len(), device_count);
+        assert_eq!(model.borrow().seen, commands);
+        assert_eq!(model.borrow().cursors, device_cursors);
+    }
+
+    #[test]
+    fn explicit_iso_wrap_and_subframe_continuations_service_actual_dma_in_order() {
+        for context_bytes in [32, 64] {
+            let mut backing = vec![0u64; 32 * 1024];
+            let base = backing.as_mut_ptr() as u64;
+            let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+            let (mut c, model) = controller(&mut dma, HIGH_SPEED, context_bytes, true);
+            c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
+                .unwrap();
+            let mut buffer = dma.allocate(4096, 4096).unwrap();
+            buffer.bytes_mut().fill(0xa7);
+            model.borrow_mut().mfindex = 16_300;
+            let id = c.test_device_id(1).unwrap();
+            let mut tickets = Vec::new();
+            for n in 0..16u16 {
+                let target = (16_376 + n) & 0x3fff;
+                let ticket = c
+                    .device(id)
+                    .unwrap()
+                    .submit_iso_scheduled(
+                        3,
+                        buffer.physical() + u64::from(n) * 32,
+                        32,
+                        IsoSchedule::AtMicroframe(target),
+                    )
+                    .unwrap();
+                assert_eq!(ticket.schedule(), IsoSchedule::AtMicroframe(target));
+                tickets.push(ticket);
+            }
+            assert!(buffer.bytes().iter().all(|byte| *byte == 0xa7));
+            assert_eq!(model.borrow().active.len(), 16);
+            for (n, ticket) in tickets.iter().enumerate() {
+                assert!(c.completed_iso(ticket).is_none());
+                let target = (16_376 + n as u32) & 0x3fff;
+                model.borrow_mut().service_at(3, target, SUCCESS);
+                assert_eq!(c.completed_iso(ticket).unwrap().unwrap().bytes, 32);
+                assert_eq!(&buffer.bytes()[n * 32..(n + 1) * 32], &[0x5a; 32]);
+                assert!(c.completed_iso(ticket).unwrap().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_iso_refuses_bad_windows_phases_alignment_and_queue_gaps_without_effects() {
+        let mut backing = vec![0u64; 32 * 1024];
+        let base = backing.as_mut_ptr() as u64;
+        let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+        let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, true);
+        c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
+            .unwrap();
+        let buffer = dma.allocate(4096, 4096).unwrap();
+        // Real IST=24; at MFINDEX=16368 target 16 has only 32 microframes
+        // of notice. Target 33 has an unencodable initial subframe phase.
+        for target in [0x4000, u16::MAX, 0x3fe0, 16, 33] {
+            assert_schedule_refused(&mut c, &model, buffer.physical(), target);
+        }
+        model.borrow_mut().mfindex = 0;
+        for target in [0, 8, 32, 896 * 8, 1024 * 8, 2047 * 8] {
+            assert_schedule_refused(&mut c, &model, buffer.physical(), target);
+        }
+        // Inclusive final frame of the donor's window, still within one
+        // unambiguous future half-cycle. The actual encoded Frame ID is 895.
+        let ticket = c
+            .submit_iso_scheduled(
+                1,
+                3,
+                buffer.physical(),
+                32,
+                IsoSchedule::AtMicroframe(895 * 8),
+            )
+            .unwrap();
+        assert_eq!(model.borrow().active[0].1.control >> 20 & 0x7ff, 895);
+        for target in [895 * 8, 895 * 8 + 2, 896 * 8] {
+            assert_schedule_refused(&mut c, &model, buffer.physical(), target);
+        }
+        c.cancel(1, 3).unwrap();
+        assert!(c.completed_iso(&ticket).unwrap().is_err());
+
+        // Full-speed bInterval=2 means an actual 16-microframe interval.
+        let (mut c, model) = controller(&mut dma, FULL_SPEED, 32, true);
+        let mut ep = endpoint(0x81, FULL_SPEED);
+        ep.interval = 2;
+        c.configure(1, &[ep], None, &mut dma).unwrap();
+        assert_schedule_refused(&mut c, &model, buffer.physical(), 40);
+        let ticket = c
+            .submit_iso_scheduled(1, 3, buffer.physical(), 32, IsoSchedule::AtMicroframe(48))
+            .unwrap();
+        assert_eq!(ticket.schedule(), IsoSchedule::AtMicroframe(48));
+        assert_schedule_refused(&mut c, &model, buffer.physical(), 80);
+        let next = c
+            .submit_iso_scheduled(
+                1,
+                3,
+                buffer.physical() + 32,
+                32,
+                IsoSchedule::AtMicroframe(64),
+            )
+            .unwrap();
+        assert_eq!(next.schedule(), IsoSchedule::AtMicroframe(64));
+        model.borrow_mut().service_at(3, 48, SUCCESS);
+        model.borrow_mut().service_at(3, 64, SUCCESS);
+        c.completed_iso(&ticket).unwrap().unwrap();
+        c.completed_iso(&next).unwrap().unwrap();
+    }
+
+    #[test]
+    fn explicit_iso_uses_each_actual_ist_encoding_and_supported_endpoint_interval() {
+        for ist in 0..16 {
+            for exponent in 0..=12 {
+                let mut backing = vec![0u64; 32 * 1024];
+                let base = backing.as_mut_ptr() as u64;
+                let mut dma =
+                    unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+                let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, true);
+                c.iso_caps = Capabilities::new(0x110, ist, 1 << 11);
+                let mut ep = endpoint(0x81, HIGH_SPEED);
+                ep.interval = exponent + 1;
+                c.configure(1, &[ep], None, &mut dma).unwrap();
+                let buffer = dma.allocate(4096, 4096).unwrap();
+                model.borrow_mut().mfindex = 0;
+                if exponent == 0 {
+                    // Independently enumerated last too-close full frame for
+                    // each raw HCSParams2 IST nibble, including frame units.
+                    let too_close = [8, 8, 8, 8, 8, 8, 8, 16, 8, 16, 24, 32, 40, 48, 56, 64];
+                    assert_schedule_refused(
+                        &mut c,
+                        &model,
+                        buffer.physical(),
+                        too_close[ist as usize],
+                    );
+                }
+                let first = c
+                    .submit_iso_scheduled(
+                        1,
+                        3,
+                        buffer.physical(),
+                        32,
+                        IsoSchedule::AtMicroframe(4096),
+                    )
+                    .unwrap();
+                // Advance the actual peer clock, retaining the first TD, so
+                // even the longest admitted interval fits the future window.
+                model.borrow_mut().mfindex = 3840;
+                let next = 4096 + (1 << exponent);
+                let second = c
+                    .submit_iso_scheduled(
+                        1,
+                        3,
+                        buffer.physical() + 32,
+                        32,
+                        IsoSchedule::AtMicroframe(next),
+                    )
+                    .unwrap();
+                model.borrow_mut().service_at(3, 4096, SUCCESS);
+                model.borrow_mut().service_at(3, u32::from(next), SUCCESS);
+                assert_eq!(c.completed_iso(&first).unwrap().unwrap().bytes, 32);
+                assert_eq!(c.completed_iso(&second).unwrap().unwrap().bytes, 32);
+                assert_eq!(&buffer.bytes()[..64], &[0x5a; 64]);
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_iso_requires_actual_cfc_for_continuation_and_preserves_asap_fallback() {
+        let mut backing = vec![0u64; 32 * 1024];
+        let base = backing.as_mut_ptr() as u64;
+        let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+        let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, false);
+        c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
+            .unwrap();
+        let buffer = dma.allocate(4096, 4096).unwrap();
+        c.submit_iso_scheduled(1, 3, buffer.physical(), 32, IsoSchedule::AtMicroframe(32))
+            .unwrap();
+        assert_schedule_refused(&mut c, &model, buffer.physical(), 33);
+        let next = c.submit_iso(1, 3, buffer.physical() + 32, 32).unwrap();
+        assert_eq!(next.schedule(), IsoSchedule::Asap);
+        assert_ne!(model.borrow().active[1].1.control & SIA, 0);
+    }
+
+    #[test]
+    fn explicit_iso_late_continuation_refuses_but_asap_retains_missed_service_semantics() {
+        let mut backing = vec![0u64; 32 * 1024];
+        let base = backing.as_mut_ptr() as u64;
+        let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+        let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, true);
+        c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
+            .unwrap();
+        let buffer = dma.allocate(4096, 4096).unwrap();
+        let first = c
+            .submit_iso_scheduled(1, 3, buffer.physical(), 32, IsoSchedule::AtMicroframe(32))
+            .unwrap();
+        let second = c
+            .submit_iso_scheduled(
+                1,
+                3,
+                buffer.physical() + 32,
+                32,
+                IsoSchedule::AtMicroframe(33),
+            )
+            .unwrap();
+        model.borrow_mut().complete(3, 0, MISSED_SERVICE, 32);
+        assert_eq!(
+            c.completed_iso(&first).unwrap().unwrap().status,
+            IsoStatus::MissedService
+        );
+        model.borrow_mut().mfindex = 40;
+        assert_schedule_refused(&mut c, &model, buffer.physical(), 34);
+        let late = c.submit_iso(1, 3, buffer.physical() + 64, 32).unwrap();
+        assert_eq!(late.schedule(), IsoSchedule::AtMicroframe(34));
+        for ticket in [&second, &late] {
+            model.borrow_mut().complete(3, 0, MISSED_SERVICE, 32);
+            assert_eq!(
+                c.completed_iso(ticket).unwrap().unwrap().status,
+                IsoStatus::MissedService
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_iso_stale_identity_refuses_before_ring_or_device_access() {
+        let mut backing = vec![0u64; 32 * 1024];
+        let base = backing.as_mut_ptr() as u64;
+        let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+        let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, true);
+        c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
+            .unwrap();
+        let buffer = dma.allocate(4096, 4096).unwrap();
+        let old = c.test_device_id(1).unwrap();
+        c.slot(1).unwrap().generation = identity::next_generation().unwrap();
+        let bytes = c.slot(1).unwrap().endpoints[3]
+            .as_ref()
+            .unwrap()
+            .ring
+            .buffer
+            .bytes()
+            .to_vec();
+        let commands = model.borrow().seen.clone();
+        assert!(
+            c.device(old)
+                .and_then(|mut device| device.submit_iso_scheduled(
+                    3,
+                    buffer.physical(),
+                    32,
+                    IsoSchedule::AtMicroframe(32),
+                ))
+                .is_err()
+        );
+        assert_eq!(model.borrow().seen, commands);
+        assert!(model.borrow().active.is_empty());
+        assert_eq!(
+            c.slot(1).unwrap().endpoints[3]
+                .as_ref()
+                .unwrap()
+                .ring
+                .buffer
+                .bytes(),
+            bytes
+        );
     }
 
     #[test]
