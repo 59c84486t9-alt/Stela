@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2024 Intel Corporation
+pub(super) const FUNC: usize = 0x24;
+pub(super) const HW_REV: usize = 0x28;
+pub(super) const RF_ID: usize = 0x9c;
+pub(super) const BOOT: usize = 0x108;
+pub(super) const CI_LOW: usize = 0x118;
+pub(super) const CI_HIGH: usize = 0x11c;
+pub(super) const IMAGE: usize = 0x12c;
+pub(super) const SLEEP: usize = 0x114;
+pub(super) const MAILBOX_STATUS: usize = 0x180;
+pub(super) const MAILBOX: [usize; 4] = [0x170, 0x174, 0x178, 0x17c];
+pub(super) const DOORBELL: usize = 0x460;
+pub(super) const FH_CAUSE: usize = 0x2800;
+pub(super) const FH_MASK: usize = 0x2804;
+pub(super) const HW_CAUSE: usize = 0x2808;
+pub(super) const HW_MASK: usize = 0x280c;
+pub(super) const AUTOMASK: usize = 0x2810;
+pub(super) const IVAR: usize = 0x2880;
+pub(super) const ENABLE: u32 = 1;
+pub(super) const MAC_INIT: u32 = 1 << 6;
+pub(super) const FUNC_INIT: u32 = 1 << 7;
+pub(super) const MASTER_STOPPED: u32 = 1 << 28;
+pub(super) const MASTER_DISCONNECT: u32 = 1 << 29;
+pub(super) const RESET: u32 = 1 << 31;
+pub(super) const ROM: u32 = 1;
+pub(super) const IML: u32 = 2;
+pub(super) const OP: u32 = 4;
+pub(super) const LOCKDOWN: u32 = (1 << 10) | (1 << 11);
+pub(super) const WARNING: u32 = 1 << 12;
+pub(super) const ABORT: u32 = 1 << 13;
+pub(super) const HALTED: u32 = 1 << 14;
+pub(super) const D3: u32 = 1 << 24;
+pub(super) const HW_ENABLED: u32 = 1 | (1 << 3) | (1 << 5);
+pub(super) const FH_ENABLED: u32 = 3;
+pub(super) const RX_DB: u32 = 513 << 16;

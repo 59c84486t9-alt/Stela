@@ -37,6 +37,7 @@ use core::{
 
 pub mod audio;
 pub mod block;
+pub mod bluetooth;
 pub mod bus;
 mod bytes;
 pub mod firmware;
