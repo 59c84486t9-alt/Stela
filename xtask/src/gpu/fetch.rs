@@ -234,9 +234,11 @@ fn initialize(submodule: &Submodule) -> Result<()> {
     exec(git(root).args(["submodule", "absorbgitdirs", "--", &submodule.path]))
 }
 
-/// Checks out the pin with its sparse scope and applies the series.
+/// Checks out the pin with its sparse scope and applies the series, fetching
+/// from the URL `.gitmodules` names now.
 fn checkout(submodule: &Submodule) -> Result<()> {
     println!("GPU source {}: {}", submodule.name, submodule.pin);
+    exec(git(tools::root()).args(["submodule", "sync", "-q", "--", &submodule.path]))?;
     match submodule.sparse()? {
         Some(patterns) => {
             let mut sparse = submodule
