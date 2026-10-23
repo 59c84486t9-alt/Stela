@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "air_to_nir.h"
-#include "stela/tests/targets/intel.h"
+#include "compiler/tests/targets/intel.h"
 #include "air_probe_input.h"
 #include "intel/compiler/elk/elk_compiler.h"
 #include "intel/compiler/elk/elk_nir.h"

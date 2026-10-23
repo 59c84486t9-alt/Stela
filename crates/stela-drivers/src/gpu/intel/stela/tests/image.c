@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "../hosted/image.h"
 #include "intel/dev/intel_device_info.h"
-#include "stela/tests/targets/intel.h"
+#include "compiler/tests/targets/intel.h"
 #include "image_bits.h" /* Original gen_bits_header.py output, test-only. */
 #include <assert.h>
 #include <stdio.h>

@@ -5,7 +5,7 @@
  */
 #include "../hosted/compute.h"
 #include "../hosted/compute_policy.h"
-#include "stela/tests/targets/amd.h"
+#include "compiler/tests/targets/amd.h"
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/ac_binary.h"
 #include "amd/common/ac_shader_util.h"

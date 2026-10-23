@@ -4,7 +4,7 @@
  * unchanged nvkms-lut.c for the actual upload loop, with dead-code removal.
  * The two metadata hook definitions below exist only in this test process.
  */
-#include "../../src/nvidia-modeset/src/nvkms-utils.c"
+#include "nvkms-utils.c"
 #include "nvkms-lut.h"
 #include "memory.h"
 

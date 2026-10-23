@@ -2,8 +2,8 @@
 /* Hosted compiler-only qualification. No graphics pipeline, device or draw. */
 #include "air_to_nir.h"
 #include "nouveau/compiler/nak.h"
-#include "stela/tests/air_probe.h"
-#include "stela/tests/targets/nvidia.h"
+#include "compiler/tests/air_probe.h"
+#include "compiler/tests/targets/nvidia.h"
 #include "util/ralloc.h"
 #include <stdio.h>
 #include <stdlib.h>

@@ -1,0 +1,3 @@
+# The C API declarations of Stela's AIR frontend; no LLVM implementation.
+/llvm/include/llvm-c/
+/llvm/LICENSE.TXT

@@ -1,7 +1,7 @@
 //! Exercise the actual C adapter's allocator-refusal ABI in a separate process.
 #[cfg(test)]
 use super::capture;
-use super::{lut, tools};
+use super::{Sources, lut, tools};
 use anyhow::Result;
 use serde_json::json;
 #[cfg(test)]
@@ -12,7 +12,7 @@ use std::{fs, path::Path};
 #[test]
 fn nvlink_preserves_full_lengths_and_refuses_common_heap_failures() {
     let output = tempfile::tempdir().unwrap();
-    let source = tools::root().join("crates/stela-drivers/src/gpu/nvidia");
+    let source = Sources::new();
     let binary = output.path().join("nvlink-memory");
     let mut compiler = Command::new(tools::which("clang").unwrap());
     compiler.args(["-std=gnu11", "-DNV_BSD", "-Wall", "-Wextra", "-Werror"]);
@@ -36,7 +36,7 @@ fn nvlink_preserves_full_lengths_and_refuses_common_heap_failures() {
 
 /// Replay the original realloc and real common-heap failure boundary separately
 /// from the test runner's allocator. No fixture provider enters native archives.
-pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
+pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()> {
     fs::create_dir_all(output)?;
     let flags = lut::flags(clang, source, output)?;
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
@@ -80,7 +80,7 @@ fn nvkms_original_realloc_preserves_ownership_on_heap_denial() {
     let output = tempfile::tempdir().unwrap();
     verify(
         &tools::which("clang").unwrap(),
-        &tools::root().join("crates/stela-drivers/src/gpu/nvidia"),
+        &Sources::new(),
         output.path(),
     )
     .unwrap();

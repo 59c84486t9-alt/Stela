@@ -1,0 +1,215 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 00:00:00 +0000
+Subject: [PATCH] meson: build Stela's shader compiler libraries without API
+ drivers
+
+---
+ meson.build                         | 14 +++++++++++---
+ meson.options                       |  7 +++++++
+ src/amd/meson.build                 |  2 +-
+ src/compiler/meson.build            |  2 +-
+ src/meson.build                     |  2 +-
+ src/nouveau/compiler/meson.build    | 12 ++++++++++--
+ src/nouveau/compiler/nak_bindings.h |  2 ++
+ src/nouveau/headers/meson.build     |  2 +-
+ src/nouveau/meson.build             |  8 +++++---
+ 9 files changed, 39 insertions(+), 12 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index a864ed0b23cdb0c4853e68432cdfdb6fcdd519c2..8b09d58a5b6e0ab2f78e7592c6f238584a94d5b9 100644
+--- a/meson.build
++++ b/meson.build
+@@ -39,6 +39,12 @@ sizeof_pointer = cc.sizeof('void*').to_string()
+ 
+ null_dep = dependency('', required : false)
+ 
++stela_compilers = get_option('stela-compilers')
++with_stela_nvidia = stela_compilers.contains('nvidia')
++with_stela_amd = stela_compilers.contains('amd')
++with_stela_intel = stela_compilers.contains('intel')
++with_stela_compilers = stela_compilers.length() > 0
++
+ if get_option('layout') != 'mirror'
+   error('`mirror` is the only build directory layout supported')
+ endif
+@@ -382,6 +388,7 @@ with_intel_vk_rt = get_option('intel-rt') \
+   .allowed()
+ 
+ with_any_intel = [
++  with_stela_intel,
+   with_gallium_crocus,
+   with_gallium_i915,
+   with_gallium_iris,
+@@ -389,7 +396,7 @@ with_any_intel = [
+   with_intel_tools,
+   with_intel_vk,
+ ].contains(true)
+-with_any_nouveau = with_gallium_nouveau or with_nouveau_vk
++with_any_nouveau = with_gallium_nouveau or with_nouveau_vk or with_stela_nvidia
+ 
+ # needed in the loader
+ if with_nouveau_vk
+@@ -863,7 +870,7 @@ if with_gallium_rusticl
+ endif
+ 
+ with_virtgpu_kumquat = get_option('virtgpu_kumquat') and with_gfxstream_vk
+-if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or with_virtgpu_kumquat or with_panfrost_rust
++if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or with_virtgpu_kumquat or with_panfrost_rust or with_stela_nvidia
+   # rust.bindgen() does not pass `--rust-target` to bindgen until 1.7.0.
+   if meson.version().version_compare('< 1.7.0')
+     error('Mesa Rust support requires Meson 1.7.0 or newer')
+@@ -993,6 +1000,7 @@ if with_gallium_rusticl or with_microsoft_clc
+ endif
+ 
+ with_gfx_compute = [
++  with_stela_compilers,
+   with_any_opengl,
+   with_any_vk,
+   with_clc,
+@@ -1897,7 +1905,7 @@ _drm_ver = '2.4.109'
+ 
+ _libdrm_checks = [
+   ['intel', with_gallium_i915],
+-  ['amdgpu', (with_amd_vk and not with_platform_windows) or with_gallium_radeonsi],
++  ['amdgpu', (with_amd_vk and not with_platform_windows) or with_gallium_radeonsi or with_stela_amd],
+ ]
+ 
+ # Loop over the enables versions and get the highest libdrm requirement for all
+diff --git a/meson.options b/meson.options
+index 93a60e3047b91efb89394fddacacf927009f26d6..2785291069565dbf9e238676f14c3367de0f0b41 100644
+--- a/meson.options
++++ b/meson.options
+@@ -915,3 +915,10 @@ option(
+   value : false,
+   description : 'Build panfrost Rust components.'
+ )
++option(
++  'stela-compilers',
++  type : 'array',
++  choices : ['nvidia', 'amd', 'intel'],
++  value : [],
++  description : 'Build native shader compiler libraries without graphics API frontends or device I/O',
++)
+diff --git a/src/amd/meson.build b/src/amd/meson.build
+index 92fe3d19053aedd0513ad762c7adf14cfbd39983..175e113905831eb006820edd5be696d238b7b778 100644
+--- a/src/amd/meson.build
++++ b/src/amd/meson.build
+@@ -7,7 +7,7 @@ if with_tools.contains('drm-shim')
+   subdir('drm-shim')
+ endif
+ 
+-if with_amd_vk or with_gallium_radeonsi
++if with_amd_vk or with_gallium_radeonsi or with_stela_amd
+   subdir('addrlib')
+   subdir('common')
+   if amd_with_llvm
+diff --git a/src/compiler/meson.build b/src/compiler/meson.build
+index 68f083273dfbbb1739b6d1c131b7606e8b6f3878..35e9d0d3b9aeb0a2ac71e5c2f0f2dc210768460e 100644
+--- a/src/compiler/meson.build
++++ b/src/compiler/meson.build
+@@ -73,6 +73,6 @@ if with_gallium
+ endif
+ subdir('isaspec')
+ 
+-if with_nouveau_vk or with_tools.contains('etnaviv') or with_panfrost_rust
++if with_nouveau_vk or with_tools.contains('etnaviv') or with_panfrost_rust or with_stela_nvidia
+   subdir('rust')
+ endif
+diff --git a/src/meson.build b/src/meson.build
+index c36f44b1397846860b3101f4512c44a0158ce4fa..d759a2877c5948ddaf36251ae7922f2ee947e479 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -83,7 +83,7 @@ endif
+ if with_vdrm
+   subdir('virtio/vdrm')
+ endif
+-if with_gallium_radeonsi or with_amd_vk or with_gallium_r300 or with_gallium_r600
++if with_gallium_radeonsi or with_amd_vk or with_gallium_r300 or with_gallium_r600 or with_stela_amd
+   subdir('amd')
+ endif
+ if with_any_broadcom
+diff --git a/src/nouveau/compiler/meson.build b/src/nouveau/compiler/meson.build
+index df192993e9e33e6cef9120aed38f46917771c367..e8ae18724513b9fbd790da5eaf60d52fe9c3d350 100644
+--- a/src/nouveau/compiler/meson.build
++++ b/src/nouveau/compiler/meson.build
+@@ -40,11 +40,20 @@ libnak_deps = [
+   idep_nil_h,
+ ]
+ 
++nak_bindgen_args = []
++nak_platform_deps = []
++if with_stela_nvidia
++  nak_bindgen_args += '-DSTELA_COMPILERS'
++else
++  nak_platform_deps += [dep_libdrm, idep_nouveau_ws]
++endif
++
+ _nak_bindings_rs = rust.bindgen(
+   input : ['nak_bindings.h'],
+   output : 'nak_bindings.rs',
+   c_args : [
+     pre_args,
++    nak_bindgen_args,
+   ],
+   args : [
+     bindgen_output_args,
+@@ -66,8 +75,7 @@ _nak_bindings_rs = rust.bindgen(
+     '--with-derive-default',
+   ],
+   dependencies : [
+-    dep_libdrm,
+-    idep_nouveau_ws,
++    nak_platform_deps,
+     libnak_deps,
+   ],
+ )
+diff --git a/src/nouveau/compiler/nak_bindings.h b/src/nouveau/compiler/nak_bindings.h
+index e766da19f9872923fe845de07d9648199856a29f..e3ffa21e0c2c72170b974a1164153b4a521f5907 100644
+--- a/src/nouveau/compiler/nak_bindings.h
++++ b/src/nouveau/compiler/nak_bindings.h
+@@ -5,6 +5,7 @@
+ 
+ #include "nak_private.h"
+ 
++#ifndef STELA_COMPILERS
+ #include "nouveau_bo.h"
+ #include "nouveau_context.h"
+ #include "nouveau_device.h"
+@@ -18,3 +19,4 @@
+ enum ENUM_PACKED drm_rs_ioctls {
+    DRM_RS_IOCTL(NOUVEAU_EXEC),
+ };
++#endif
+diff --git a/src/nouveau/headers/meson.build b/src/nouveau/headers/meson.build
+index b3a0273874659ac618f4efeb634f08c2e4b91126..b7d3d539392bffddb2dda2a7dca0b433f8a5c386 100644
+--- a/src/nouveau/headers/meson.build
++++ b/src/nouveau/headers/meson.build
+@@ -133,7 +133,7 @@ nouveau_util_py = files('util.py')
+ nouveau_util_py_path = meson.current_source_dir()
+ 
+ # Only generate Rust bindings for NVK
+-if with_nouveau_vk
++if with_nouveau_vk or with_stela_nvidia
+   cl_rs_generated = []
+   foreach cl : nv_classes
+     cl_rs_generated += custom_target(
+diff --git a/src/nouveau/meson.build b/src/nouveau/meson.build
+index de6d45806b727781a2b855f82c06c9a1545f1279..b971fde3c5ce51e41a9da073021b43731a7f4242 100644
+--- a/src/nouveau/meson.build
++++ b/src/nouveau/meson.build
+@@ -2,9 +2,11 @@
+ # SPDX-License-Identifier: MIT
+ 
+ subdir('headers')
+-subdir('drm')
+-subdir('winsys')
+-if with_nouveau_vk
++if not with_stela_nvidia
++  subdir('drm')
++  subdir('winsys')
++endif
++if with_nouveau_vk or with_stela_nvidia
+   subdir('rust')
+   subdir('nil')
+   subdir('compiler')

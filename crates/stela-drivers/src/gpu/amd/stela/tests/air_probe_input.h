@@ -5,7 +5,7 @@
 /* Shared hosted AMD compiler-test input handling. Not a production loader or
  * hostile-input sandbox; the production AIR reader owns wrapper/archive choice.
  */
-#include "stela/tests/air_probe.h"
+#include "compiler/tests/air_probe.h"
 #include "util/macros.h"
 #include <llvm-c/BitReader.h>
 #include <llvm-c/Core.h>

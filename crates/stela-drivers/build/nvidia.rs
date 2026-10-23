@@ -4,7 +4,9 @@ use super::native;
 use std::fs;
 
 pub fn port() {
-    let source = "src/gpu/nvidia";
+    native::require_sources();
+    let source = native::NVIDIA;
+    let port = "src/gpu/nvidia/stela";
     let version_mk = format!("{source}/version.mk");
     let version = fs::read_to_string(&version_mk).expect("read NVIDIA version.mk");
     let version = version
@@ -29,10 +31,10 @@ pub fn port() {
     build
         .define("NV_BSD", None)
         .include(&generated)
-        .include(format!("{source}/stela"))
+        .include(port)
         // FreeBSD headers NVIDIA's interface layer includes, where none exist.
         .flag("-idirafter")
-        .flag(format!("{source}/stela/compat"));
+        .flag(format!("{port}/compat"));
     for directory in [
         "src/common/sdk/nvidia/inc",
         "src/nvidia/arch/nvalloc/unix/include",
@@ -42,6 +44,7 @@ pub fn port() {
         "src/common/inc/swref",
         "src/common/uproc/os/common/include",
         "src/common/nvlink/interface",
+        "src/common/nvswitch/interface",
         "src/common/unix/common/inc",
         "src/nvidia-modeset/os-interface/include",
         "src/nvidia-modeset/kapi/interface",
@@ -52,6 +55,6 @@ pub fn port() {
         println!("cargo:rerun-if-changed={source}/{directory}");
     }
     build
-        .files(native::sources(&format!("{source}/stela")))
+        .files(native::sources(port))
         .compile("stela-nvidia-port");
 }

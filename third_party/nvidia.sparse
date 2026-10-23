@@ -1,0 +1,10 @@
+# The resource-manager and display cores with their dependencies. The Linux
+# module adapters are not used; Stela supplies its own platform port.
+/*
+!/.github/
+!/kernel-open/
+!/nouveau/
+!/CODE_OF_CONDUCT.md
+!/CONTRIBUTING.md
+!/SECURITY.md
+!/Makefile

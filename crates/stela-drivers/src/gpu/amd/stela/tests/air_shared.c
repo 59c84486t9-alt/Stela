@@ -4,9 +4,9 @@
  * device, allocation, residency, upload, execution or completion is claimed.
  */
 #include "air_to_nir.h"
-#include "stela/tests/air_test_fixture.h"
+#include "compiler/tests/air_test_fixture.h"
 #include "air_probe_input.h"
-#include "stela/tests/targets/amd.h"
+#include "compiler/tests/targets/amd.h"
 #include "../hosted/compute.h"
 #include "../hosted/llvm_compute.h"
 #include "amd/common/ac_binary.h"

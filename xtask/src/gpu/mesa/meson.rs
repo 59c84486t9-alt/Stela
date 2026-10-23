@@ -1,5 +1,5 @@
 //! The Stela compiler build as Meson configured it: the targets
-//! `src/stela/meson.build` defines, its tests and the files they read.
+//! `gpu/compiler/meson.build` defines, its tests and the files they read.
 use super::capture;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -46,8 +46,9 @@ pub(super) struct Build {
     tests: Vec<Test>,
 }
 
-/// The files a build read: its archives, and its sources and headers under
-/// `gpu` outside the Mesa tree `source`, which is bound separately.
+/// The files a build read: its archives, and its sources and headers in
+/// Stela's tree `gpu`. The Mesa submodule and the downloaded wraps in
+/// `gpu/subprojects` are bound as trees.
 pub(super) struct Inputs {
     pub archives: Vec<PathBuf>,
     pub external: Vec<PathBuf>,
@@ -122,13 +123,13 @@ impl Build {
         self.tests.iter().filter(move |test| {
             test.suite
                 .iter()
-                .any(|suite| suite.strip_prefix("mesa:") == Some(name))
+                .any(|suite| suite.strip_prefix("stela-gpu:") == Some(name))
         })
     }
 
     /// Asks ninja which archives and files the built outputs read: the
     /// transitive inputs of each output, and the headers each object included.
-    pub fn inputs(&self, ninja: &Path, gpu: &Path, source: &Path) -> Result<Inputs> {
+    pub fn inputs(&self, ninja: &Path, gpu: &Path) -> Result<Inputs> {
         let tool = |name: &str, args: Vec<&OsStr>| {
             capture(
                 Command::new(ninja)
@@ -144,7 +145,7 @@ impl Build {
         let deps = tool("deps", objects.iter().map(OsStr::new).collect())?;
         let headers = deps.lines().filter_map(|line| line.strip_prefix("    "));
         let gpu = fs::canonicalize(gpu)?;
-        let source = fs::canonicalize(source)?;
+        let subprojects = gpu.join("subprojects");
         let mut archives = BTreeSet::new();
         let mut external = BTreeSet::new();
         for file in files.into_iter().chain(headers) {
@@ -152,10 +153,9 @@ impl Build {
                 archives.insert(self.directory.join(file));
                 continue;
             }
-            // Upstream files link into their pinned checkouts, outside `gpu`.
             let path = fs::canonicalize(self.directory.join(file))
                 .with_context(|| format!("ninja names a missing input {file}"))?;
-            if path.starts_with(&gpu) && !path.starts_with(&source) {
+            if path.starts_with(&gpu) && !path.starts_with(&subprojects) {
                 external.insert(path);
             }
         }
@@ -198,9 +198,9 @@ mod tests {
         fs::write(
             info.join("intro-tests.json"),
             json!([
-                test("plain", &["mesa:stela"]),
-                test("input", &["mesa:stela", "mesa:stela-air-input"]),
-                test("upstream", &["mesa:intel"]),
+                test("plain", &["stela-gpu:stela"]),
+                test("input", &["stela-gpu:stela", "stela-gpu:stela-air-input"]),
+                test("upstream", &["mesa:stela"]),
             ])
             .to_string(),
         )

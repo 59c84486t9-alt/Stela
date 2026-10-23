@@ -1,0 +1,6 @@
+# Downloads, promoted wraps and Meson's cache are not sources.
+/*
+!/.gitignore
+!/mesa
+!/libdrm-headers.wrap
+!/packagefiles/

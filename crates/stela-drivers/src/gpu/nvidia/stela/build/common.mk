@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: MIT
 # Shared by core.mk and modeset.mk, which `cargo xtask gpu nvidia` reads after
-# NVIDIA's unchanged component Makefile. NVIDIA's own rules compile every
-# object; these add Stela's port sources and archive the COFF objects for the
-# UEFI link instead of NVIDIA's ELF partial link.
+# NVIDIA's unchanged component Makefile, with STELA naming this port's
+# directory. NVIDIA's own rules compile every object; these add Stela's port
+# sources and archive the COFF objects for the UEFI link instead of NVIDIA's
+# ELF partial link.
 $(foreach src,$(STELA_SRCS),$(eval $(call DEFINE_OBJECT_RULE,TARGET,$(src))))
 STELA_PORT_OBJS := $(call BUILD_OBJECT_LIST,$(STELA_SRCS))
-$(STELA_PORT_OBJS): CFLAGS += -I ../../stela -idirafter ../../stela/compat -I $(OUTPUTDIR)
+$(STELA_PORT_OBJS): CFLAGS += -I $(STELA) -idirafter $(STELA)/compat -I $(OUTPUTDIR)
 # The port names its firmware directory by version.mk's generated header.
 $(STELA_PORT_OBJS): $(OUTPUTDIR)/version.h
 

@@ -4,7 +4,7 @@
 
 #include "compute.h"
 #include "../../../metal/compiler/library_assembly.h"
-#include "stela/air_to_nir.h"
+#include "compiler/air_to_nir.h"
 #include "../../../metal/compiler/threadgroup.h"
 #include "amd/common/ac_gpu_info.h"
 

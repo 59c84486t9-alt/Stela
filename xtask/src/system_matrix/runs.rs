@@ -97,8 +97,10 @@ fn digest_trees(source_root: &Path, trees: &[&str]) -> Result<String> {
             {
                 continue;
             }
+            // A link, such as the GPU build's Mesa subproject, is digested
+            // by its target's name; the tree it names is not followed.
             let path = entry.path();
-            if path.is_dir() {
+            if entry.file_type()?.is_dir() {
                 walk(&path, files)?;
             } else {
                 files.push(path);
@@ -114,7 +116,11 @@ fn digest_trees(source_root: &Path, trees: &[&str]) -> Result<String> {
     let mut listing = String::new();
     for file in files {
         let relative = file.strip_prefix(source_root)?.display().to_string();
-        listing.push_str(&format!("{relative}\0{}\n", sha256(&fs::read(&file)?)));
+        let contents = match fs::read_link(&file) {
+            Ok(target) => [b"link\0", target.as_os_str().as_encoded_bytes()].concat(),
+            Err(_) => fs::read(&file)?,
+        };
+        listing.push_str(&format!("{relative}\0{}\n", sha256(&contents)));
     }
     Ok(sha256(listing.as_bytes()))
 }
@@ -241,6 +247,25 @@ mod tests {
         fs::write(driver.join(".wraplock"), b"")?;
         assert_eq!(before, digest_trees(temporary.path(), &["drivers"])?);
         fs::write(driver.join("shader.c"), "unsigned shader = 1;\n")?;
+        assert_ne!(before, digest_trees(temporary.path(), &["drivers"])?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_link_is_digested_by_its_target_name_not_followed() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let upstream = temporary.path().join("upstream");
+        let link = temporary.path().join("drivers/subproject");
+        fs::create_dir_all(temporary.path().join("drivers"))?;
+        fs::create_dir(&upstream)?;
+        // A dangling link inside the linked tree is never read.
+        std::os::unix::fs::symlink("missing", upstream.join("dangling"))?;
+        std::os::unix::fs::symlink("../upstream", &link)?;
+        let before = digest_trees(temporary.path(), &["drivers"])?;
+        fs::write(upstream.join("source.c"), "unsigned upstream;\n")?;
+        assert_eq!(before, digest_trees(temporary.path(), &["drivers"])?);
+        fs::remove_file(&link)?;
+        std::os::unix::fs::symlink("../elsewhere", &link)?;
         assert_ne!(before, digest_trees(temporary.path(), &["drivers"])?);
         Ok(())
     }

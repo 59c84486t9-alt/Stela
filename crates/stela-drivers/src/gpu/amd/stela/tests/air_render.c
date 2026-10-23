@@ -18,7 +18,7 @@
 #include "amd/compiler/aco_interface.h"
 #include "amdgfxregs.h"
 #include "vulkan/radv_constants.h"
-#include "stela/tests/targets/amd.h"
+#include "compiler/tests/targets/amd.h"
 #include "util/ralloc.h"
 #if AMD_LLVM_AVAILABLE
 #include "amd/llvm/ac_llvm_util.h"

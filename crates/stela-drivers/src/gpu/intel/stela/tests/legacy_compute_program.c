@@ -5,8 +5,8 @@
 #include "legacy_elk_validate.h"
 #include "intel/common/intel_compute_slm.h"
 #include "intel/dev/intel_debug.h"
-#include "stela/tests/intel_probe.h"
-#include "stela/tests/targets/intel.h"
+#include "compiler/tests/intel_probe.h"
+#include "compiler/tests/targets/intel.h"
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdarg.h>

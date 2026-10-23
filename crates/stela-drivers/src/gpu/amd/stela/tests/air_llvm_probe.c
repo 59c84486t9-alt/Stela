@@ -4,9 +4,9 @@
  * initialization/execution is claimed.
  */
 #include "air_to_nir.h"
-#include "stela/tests/air_probe.h"
-#include "stela/tests/air_test_fixture.h"
-#include "stela/tests/targets/amd.h"
+#include "compiler/tests/air_probe.h"
+#include "compiler/tests/air_test_fixture.h"
+#include "compiler/tests/targets/amd.h"
 #include "amd/llvm/ac_llvm_build.h"
 #include "amd/llvm/ac_nir_to_llvm.h"
 #include "amd/llvm/ac_shader_abi.h"

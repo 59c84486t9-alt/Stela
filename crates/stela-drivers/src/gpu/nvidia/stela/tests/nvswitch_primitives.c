@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* CPU-only original-hook fixture. The optional renamed-provider object observes
  * ABI forwarding without pretending a short buffer covers a huge byte range. */
-#include "../../src/common/nvswitch/interface/export_nvswitch.h"
+#include "export_nvswitch.h"
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>

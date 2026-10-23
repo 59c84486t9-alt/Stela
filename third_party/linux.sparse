@@ -1,0 +1,20 @@
+# Selected GPU drivers, shared DRM helpers and kernel headers; not a buildable
+# kernel tree. netfilter's headers differ only in case, which a
+# case-insensitive file system cannot check out.
+/drivers/gpu/drm/amd/
+/drivers/gpu/drm/i915/
+/drivers/gpu/drm/xe/
+/drivers/gpu/drm/display/
+/drivers/gpu/drm/ttm/
+/drivers/gpu/drm/scheduler/
+/drivers/gpu/drm/drm_mm.c
+/lib/rbtree.c
+/include/
+!/include/**/netfilter/
+!/include/**/netfilter_ipv4/
+!/include/**/netfilter_ipv6/
+/arch/x86/include/
+/LICENSES/
+/COPYING
+/README
+/Makefile

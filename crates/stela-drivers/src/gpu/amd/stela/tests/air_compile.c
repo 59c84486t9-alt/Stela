@@ -6,9 +6,9 @@
 #include "amd/common/ac_shader_util.h"
 #include "amd/common/sid.h"
 #include "amd/compiler/aco_interface.h"
-#include "stela/tests/air_test_fixture.h"
-#include "stela/tests/targets/amd.h"
-#include "stela/tests/threadgroup_record.h"
+#include "compiler/tests/air_test_fixture.h"
+#include "compiler/tests/targets/amd.h"
+#include "compiler/tests/threadgroup_record.h"
 #include "util/ralloc.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <assert.h>

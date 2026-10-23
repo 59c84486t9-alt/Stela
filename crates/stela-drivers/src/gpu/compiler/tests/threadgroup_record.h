@@ -2,7 +2,7 @@
 #ifndef STELA_THREADGROUP_RECORD_H
 #define STELA_THREADGROUP_RECORD_H
 /* Threadgroup facts of an owned compile result, in an open record. */
-#include "../../../../../metal/compiler/threadgroup.h"
+#include "../../metal/compiler/threadgroup.h"
 #include "probe_report.h"
 
 /* An owned compiler refuses dynamic threadgroup lengths without a dispatch

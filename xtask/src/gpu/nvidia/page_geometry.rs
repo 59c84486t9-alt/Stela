@@ -1,10 +1,10 @@
 //! Original RM page accessors over the actual one-time native publisher.
-use super::{capture, tools};
+use super::{Sources, capture, tools};
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 use std::{fs, path::Path, process::Command};
 
-pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
+pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()> {
     fs::create_dir_all(output)?;
     let original = source.join("src/nvidia/arch/nvalloc/unix/src/os.c");
     let text = fs::read_to_string(&original)?;
@@ -113,7 +113,7 @@ fn original_page_accessors_publish_only_supported_native_geometry() {
     let output = tempfile::tempdir().unwrap();
     verify(
         &tools::which("clang").unwrap(),
-        &tools::root().join("crates/stela-drivers/src/gpu/nvidia"),
+        &Sources::new(),
         output.path(),
     )
     .unwrap();

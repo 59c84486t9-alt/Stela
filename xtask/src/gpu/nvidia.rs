@@ -1,6 +1,8 @@
 //! Reproducible compilation of the vendor cores without installing Linux
 //! modules. The unresolved symbol list is the platform port's work inventory.
-use super::support::{NATIVE_TARGET, capture, evidence_directory, source_binding};
+use super::support::{
+    NATIVE_TARGET, build_directory, capture, evidence_directory, gpu, source_binding, third_party,
+};
 use crate::tools;
 use anyhow::{Context, Result, bail, ensure};
 use clap::ValueEnum;
@@ -128,17 +130,51 @@ fn inspect(path: &Path) -> Result<(u64, String, BTreeSet<String>)> {
     ))
 }
 
+/// NVIDIA's open modules (`third_party/nvidia`) and Stela's port of them
+/// (`gpu/nvidia`, whose C is in `stela/`), named together as one tree.
+pub(super) struct Sources {
+    upstream: PathBuf,
+    port: PathBuf,
+}
+
+impl Sources {
+    pub(super) fn new() -> Self {
+        Self {
+            upstream: third_party("nvidia"),
+            port: gpu().join("nvidia"),
+        }
+    }
+
+    /// `stela/...` is the port's C; every other path is NVIDIA's.
+    pub(super) fn join(&self, path: &str) -> PathBuf {
+        if path == "stela" || path.starts_with("stela/") {
+            self.port.join(path)
+        } else {
+            self.upstream.join(path)
+        }
+    }
+
+    /// Binds both trees as checked out.
+    fn binding(&self) -> Result<String> {
+        let identity = format!(
+            "{}\0{}",
+            source_binding(&self.upstream)?,
+            source_binding(&self.port)?
+        );
+        Ok(format!("{:x}", Sha256::digest(identity.as_bytes())))
+    }
+}
+
 /// NVIDIA's FreeBSD interface layer includes a few FreeBSD kernel headers;
 /// Stela's stand-ins apply only where the compiler's own system has none.
-fn freebsd_headers(command: &mut Command, source: &Path) {
+fn freebsd_headers(command: &mut Command, source: &Sources) {
     command.arg("-idirafter").arg(source.join("stela/compat"));
 }
 
 pub fn build(jobs: u16, target: Target) -> Result<()> {
     let toolchain = Toolchain::discover()?;
-    let gpu = tools::root().join("crates/stela-drivers/src/gpu");
-    let source = gpu.join("nvidia");
-    let source_hash = source_binding(&source)?;
+    let source = Sources::new();
+    let source_hash = source.binding()?;
     let compiler = capture(Command::new(&toolchain.clang).arg("--version"))?;
     let compilerxx = capture(Command::new(&toolchain.clangxx).arg("--version"))?;
     let linker = capture(Command::new(&toolchain.linker).arg("--version"))?;
@@ -150,14 +186,14 @@ pub fn build(jobs: u16, target: Target) -> Result<()> {
         target.profile()
     );
     let build_key = format!("{:x}", Sha256::digest(identity.as_bytes()));
-    let build = tools::root()
-        .join(".stela/gpu/build/nvidia")
+    let build = build_directory("nvidia")
         .join(target.profile())
         .join(&build_key);
     // The retained makefiles do not support whitespace in paths. Do not
     // silently split a compiler or output path into shell arguments.
     for path in [
-        &source,
+        &source.upstream,
+        &source.port,
         &build,
         &toolchain.clang,
         &toolchain.clangxx,
@@ -187,6 +223,7 @@ pub fn build(jobs: u16, target: Target) -> Result<()> {
         let output = build.join(component);
         fs::create_dir_all(&output)?;
         let source_directory = source.join(subdirectory);
+        let port = source.join("stela");
         if component == "modeset" {
             prepare_shaders(&source_directory, &output)?;
         }
@@ -208,6 +245,7 @@ pub fn build(jobs: u16, target: Target) -> Result<()> {
             .arg(format!("DATE=echo source-{source_hash}"))
             .arg(format!("OUTPUTDIR={}", output.display()))
             .arg(format!("OUTPUTDIR_ABSOLUTE={}", output.display()))
+            .arg(format!("STELA={}", port.display()))
             .env_remove("MAKEFLAGS")
             .env_remove("CFLAGS")
             .env_remove("CXXFLAGS")
@@ -221,7 +259,7 @@ pub fn build(jobs: u16, target: Target) -> Result<()> {
             // port does. The fragment archives COFF objects for the UEFI link.
             Target::Stela => command
                 .args(["-f", "Makefile", "-f"])
-                .arg(source.join("stela/build").join(format!("{component}.mk")))
+                .arg(port.join("build").join(format!("{component}.mk")))
                 .args(["stela-archive", "TARGET_OS=FreeBSD"])
                 .arg(format!(
                     "EXTRA_CFLAGS=--target={NATIVE_TARGET} -mno-incremental-linker-compatible"
@@ -265,7 +303,7 @@ pub fn build(jobs: u16, target: Target) -> Result<()> {
             }
         };
         ensure!(
-            source_binding(&source)? == source_hash,
+            source.binding()? == source_hash,
             "NVIDIA source changed during the build; rerun against a stable tree"
         );
         let receipt = json!({
@@ -276,7 +314,7 @@ pub fn build(jobs: u16, target: Target) -> Result<()> {
             },
             "stela_platform_port": false, "hardware_executed": false,
             "limits": "Core compilation only; not a complete OS-service port, final linked driver, GPU initialization or Metal execution. Archive imports conservatively include every retained member, before reachability analysis.",
-            "origin": serde_json::from_slice::<serde_json::Value>(&fs::read(gpu.join("sources.json"))?)?,
+            "origin": super::fetch::origins()?,
             "source_tree_sha256": source_hash,
             "command": format!("{command:?}"),
             "compiler": compiler, "compilerxx": compilerxx, "linker": linker, "archiver": archiver,
@@ -315,7 +353,7 @@ mod tests {
     #[test]
     fn vendor_types_preserve_flags_and_host_addresses_on_both_abis() {
         let tools = Toolchain::discover().unwrap();
-        let source = tools::root().join("crates/stela-drivers/src/gpu/nvidia");
+        let source = Sources::new();
         for (target, os) in [
             (NATIVE_TARGET, "-DNV_BSD"),
             ("x86_64-unknown-linux-gnu", "-DNV_LINUX"),

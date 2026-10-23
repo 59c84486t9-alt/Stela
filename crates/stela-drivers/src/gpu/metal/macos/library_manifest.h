@@ -3,7 +3,7 @@
 #define STELA_METAL_LIBRARY_MANIFEST_H
 #include "../input/input.h"
 #include "../compiler/apple_source.h"
-#include "../../common/mesa/src/stela/air_metadata.h"
+#include "../../compiler/air_metadata.h"
 
 #define STELA_METAL_LIBRARY_ABI 1u
 #define STELA_METAL_ENTRY_NO_CONSTANTS 1u

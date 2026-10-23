@@ -1,5 +1,5 @@
 //! Actual NVKMS types and original CPU upload over the maintained common heap.
-use super::{NATIVE_TARGET, capture, layout, tools};
+use super::{NATIVE_TARGET, Sources, capture, layout, tools};
 use anyhow::{Context, Result, ensure};
 use object::{Architecture, Object};
 use serde_json::json;
@@ -11,7 +11,7 @@ pub(super) struct Flags {
     cxx: Vec<String>,
 }
 
-pub(super) fn flags(clang: &Path, source: &Path, output: &Path) -> Result<Flags> {
+pub(super) fn flags(clang: &Path, source: &Sources, output: &Path) -> Result<Flags> {
     let makefile = output.join("flags.mk");
     // Let the retained Makefile and its ordinary shell expand each argument.
     // No second flag parser or copied vendor build configuration is needed.
@@ -55,7 +55,7 @@ pub(super) fn flags(clang: &Path, source: &Path, output: &Path) -> Result<Flags>
     Ok(Flags { common, c, cxx })
 }
 
-pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
+pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()> {
     fs::create_dir_all(output)?;
     let flags = flags(clang, source, output)?;
     let fixture = source.join("stela/tests/lut_layout.c");
@@ -132,7 +132,7 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 pub(super) fn cpu_model(
     clang: &Path,
-    source: &Path,
+    source: &Sources,
     output: &Path,
     flags: &Flags,
     sources: &[(&str, &[&str])],
@@ -173,6 +173,9 @@ pub(super) fn cpu_model(
             .arg(source.join("stela"))
             .arg("-idirafter")
             .arg(source.join("stela/compat"))
+            // The fixtures include the original NVKMS sources they model.
+            .arg("-iquote")
+            .arg(source.join("src/nvidia-modeset/src"))
             .args(*extra)
             .arg("-c")
             .arg(source.join(file))
@@ -215,7 +218,7 @@ pub(super) fn cpu_model(
     Ok(
         json!({"binary":tools::binding(&binary)?,"heap":tools::binding(&heap)?,
         "shared_heap_source":tools::binding(&tools::root().join("crates/stela-boot/src/heap.rs"))?,
-        "metadata_adapter":tools::binding(&source.join("memory.rs"))?,
+        "metadata_adapter":tools::binding(&source.port.join("memory.rs"))?,
         "fixture_sources":sources.iter().map(|(file,_)| tools::binding(&source.join(file))).collect::<Result<Vec<_>>>()?,
         "excluded_only_for_host_CPU_fixture":excluded,"commands":commands,"executed":true}),
     )
@@ -229,7 +232,7 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
         verify(
             &tools::which("clang").unwrap(),
-            &tools::root().join("crates/stela-drivers/src/gpu/nvidia"),
+            &Sources::new(),
             output.path(),
         )
         .unwrap();

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "air_to_nir.h"
 #include "air_probe_input.h"
-#include "stela/tests/air_probe.h"
+#include "compiler/tests/air_probe.h"
 #include "../hosted/compute.h"
 #include "../hosted/legacy_compute.h"
 #include "../hosted/fp_controls.h"
@@ -10,8 +10,8 @@
 #include "intel/compiler/brw/brw_nir.h"
 #include "intel/compiler/elk/elk_nir.h"
 #include "intel/dev/intel_debug.h"
-#include "stela/tests/intel_probe.h"
-#include "stela/tests/targets/intel.h"
+#include "compiler/tests/intel_probe.h"
+#include "compiler/tests/targets/intel.h"
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdarg.h>

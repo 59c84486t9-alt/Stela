@@ -1,0 +1,17 @@
+[submodule "linux"]
+	path = third_party/linux
+	url = https://github.com/torvalds/linux.git
+	shallow = true
+[submodule "mesa"]
+	path = third_party/mesa
+	url = https://gitlab.freedesktop.org/mesa/mesa.git
+	shallow = true
+	ignore = all
+[submodule "nvidia"]
+	path = third_party/nvidia
+	url = https://github.com/NVIDIA/open-gpu-kernel-modules.git
+	shallow = true
+[submodule "llvm"]
+	path = third_party/llvm
+	url = https://github.com/llvm/llvm-project.git
+	shallow = true

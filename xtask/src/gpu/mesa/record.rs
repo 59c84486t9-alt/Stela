@@ -1,5 +1,5 @@
 //! Typed probe records: the one machine-readable output of Stela's compiler
-//! probes, written by `common/mesa/src/stela/tests/probe_report.h`.
+//! probes, written by `gpu/compiler/tests/probe_report.h`.
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

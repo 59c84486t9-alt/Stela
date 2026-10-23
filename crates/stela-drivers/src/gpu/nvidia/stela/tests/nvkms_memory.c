@@ -9,7 +9,7 @@
 #include "nvidia-modeset-os-interface.h"
 void stela_nvkms_observed_free(void *pointer, size_t size);
 #define nvkms_free stela_nvkms_observed_free
-#include "../../src/nvidia-modeset/src/nvkms-utils.c"
+#include "nvkms-utils.c"
 #undef nvkms_free
 #include "memory.h"
 

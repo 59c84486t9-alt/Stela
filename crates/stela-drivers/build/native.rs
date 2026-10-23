@@ -14,12 +14,18 @@ pub const NATIVE_TARGET: &str = "x86_64-pc-cygwin";
 /// include directories and keeps its own warning profile.
 const WARNINGS: [&str; 4] = ["-Wall", "-Wextra", "-Wconversion", "-Wsign-conversion"];
 
-/// Upstream GPU sources are linked into `src/gpu` by `cargo xtask gpu fetch`.
+/// The upstream sources: submodules that `cargo xtask gpu fetch` checks out.
+pub const LINUX: &str = "../../third_party/linux";
+pub const MESA: &str = "../../third_party/mesa";
+pub const NVIDIA: &str = "../../third_party/nvidia";
+
 pub fn require_sources() {
-    assert!(
-        Path::new("src/gpu/common/linux/include").is_dir(),
-        "the upstream GPU sources are missing; run `cargo xtask gpu fetch`"
-    );
+    for source in [LINUX, MESA, NVIDIA] {
+        assert!(
+            Path::new(source).join(".git").exists(),
+            "{source} is missing; run `cargo xtask gpu fetch`"
+        );
+    }
 }
 
 /// The port's sources compiled for Cargo's target, freestanding as the mount
@@ -135,10 +141,10 @@ pub struct Linux {
     pub hosted: Vec<PathBuf>,
 }
 
-const GPU: &str = "src/gpu";
+const DRM: &str = "../../third_party/linux/drivers/gpu/drm";
 const COMPAT: &str = "src/gpu/compat";
-const INCLUDE: &str = "src/gpu/common/linux/include";
-const X86_UAPI: &str = "src/gpu/common/linux/arch/x86/include/uapi";
+const INCLUDE: &str = "../../third_party/linux/include";
+const X86_UAPI: &str = "../../third_party/linux/arch/x86/include/uapi";
 
 impl Linux {
     pub fn new() -> Self {
@@ -190,10 +196,10 @@ impl Linux {
     /// Kbuild's definitions, flags and forced includes, and system include
     /// directories so upstream code keeps Linux's warning profile rather than
     /// Stela's. `generated` holds headers a driver's build generates and
-    /// `drivers` its upstream directories. Stela's arch headers in
-    /// `compat/asm` and the generated wrappers stand for Linux's arch tree
-    /// ahead of its `include` tree, and the x86 uapi headers and their
-    /// wrappers ahead of `include/uapi`.
+    /// `drivers` its directories below Linux's `drivers/gpu/drm`. Stela's
+    /// arch headers in `compat/asm` and the generated wrappers stand for
+    /// Linux's arch tree ahead of its `include` tree, and the x86 uapi
+    /// headers and their wrappers ahead of `include/uapi`.
     pub fn apply(
         &self,
         build: &mut cc::Build,
@@ -229,7 +235,7 @@ impl Linux {
         }
         let drivers = drivers
             .iter()
-            .map(|driver| PathBuf::from(format!("{GPU}/{driver}")))
+            .map(|driver| PathBuf::from(format!("{DRM}/{driver}")))
             .collect::<Vec<_>>();
         // Cargo sees no included header, so every source tree the
         // environment builds from is an input.

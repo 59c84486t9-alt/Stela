@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_NVIDIA_RENDER_COMPILE_H
 #define STELA_NVIDIA_RENDER_COMPILE_H
-#include "stela/air_to_nir.h"
+#include "compiler/air_to_nir.h"
 #include "nouveau/compiler/nak.h"
 #include "nouveau/headers/nv_device_info.h"
 #ifdef __cplusplus

@@ -1,11 +1,11 @@
 //! Inspect the actual original ordering hook; this never executes a fence.
-use super::{NATIVE_TARGET, capture, tools};
+use super::{NATIVE_TARGET, Sources, capture, tools};
 use anyhow::{Context, Result, ensure};
 use object::{Architecture, Object, ObjectSection, ObjectSymbol};
 use serde_json::json;
 use std::{fs, path::Path, process::Command};
 
-pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
+pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()> {
     fs::create_dir_all(output)?;
     let objdump = tools::which("llvm-objdump")
         .or_else(crate::dit::toolchain_objdump)
@@ -119,7 +119,7 @@ fn original_ordering_hook_keeps_sfence_and_memory_clobber_across_native_abis() {
     let output = tempfile::tempdir().unwrap();
     verify(
         &tools::which("clang").unwrap(),
-        &tools::root().join("crates/stela-drivers/src/gpu/nvidia"),
+        &Sources::new(),
         output.path(),
     )
     .unwrap();

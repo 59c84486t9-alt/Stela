@@ -37,20 +37,21 @@ impl AirFpProfile {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Check out each pinned upstream GPU source under `.tools/gpu/src`,
-    /// apply Stela's patch series and link the imported files into `gpu/`.
+    /// Check out each upstream submodule in `third_party/` at its pinned
+    /// commit, sparsely where it has a pattern file, with Stela's patch series.
     Fetch {
-        /// Discard commits and edits in a checkout that were never exported.
+        /// Discard commits and edits in a submodule that were never exported.
         #[arg(long)]
         force: bool,
     },
-    /// Write each upstream checkout's commits back to its patch series.
+    /// Write each submodule's commits since its pin to its patch series.
     Export,
     /// Build the IOKit kernel helper and separate user-space Metal library
     /// objects for arm64e, arm64 and x86-64. No driver is installed or loaded.
     Macos,
     /// Build NVIDIA, AMD and Intel shader compiler libraries for this host
-    /// without Vulkan/OpenGL frontends, and run the native codegen probes.
+    /// without Vulkan/OpenGL frontends, with Stela's compiler targets, and run
+    /// their Meson tests.
     Compilers {
         /// Maximum parallel native compiler processes.
         #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..))]
@@ -59,8 +60,8 @@ pub enum Command {
         /// This still does not establish physical GPU or Metal support.
         #[arg(long)]
         require_all_targets: bool,
-        /// Also compile the shared AIR frontend and its vendor codegen probes
-        /// against this native LLVM 23 shared library. No GPU work is submitted.
+        /// Also compile the shared AIR frontend and its tests against this
+        /// native LLVM 23 shared library. No GPU work is submitted.
         #[arg(long)]
         llvm_library: Option<PathBuf>,
         /// Enable the retained AMD LLVM backend using matching LLVM 23
@@ -68,7 +69,8 @@ pub enum Command {
         #[arg(long, requires = "llvm_library")]
         llvm_config: Option<PathBuf>,
         /// Also compile these unchanged raw AIR bitcode inputs through each
-        /// vendor probe. Repeat for multiple inputs; no GPU work is submitted.
+        /// vendor compiler test. Repeat for multiple inputs; no GPU work is
+        /// submitted.
         #[arg(long, requires_all = ["llvm_library", "entry"])]
         air_input: Vec<PathBuf>,
         /// Exact entry point in every supplied raw AIR input.

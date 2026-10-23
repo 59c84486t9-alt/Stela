@@ -9,7 +9,8 @@ use std::{
 };
 
 const SOURCE: &str = "src/gpu/intel";
-const GENXML: &str = "src/gpu/common/mesa/src/intel/genxml";
+const XE_DRIVER: &str = "../../third_party/linux/drivers/gpu/drm/xe";
+const GENXML: &str = "../../third_party/mesa/src/intel/genxml";
 const LEGACY: &str = "GPGPU_WALKER,MEDIA_STATE_FLUSH";
 const COMPUTE: &str = "COMPUTE_WALKER,COMPUTE_WALKER_BODY,INTERFACE_DESCRIPTOR_DATA,POSTSYNC_DATA,PREF_SLM_ALLOCATION_SIZE";
 
@@ -82,16 +83,16 @@ impl Builds {
     fn new(linux: &Linux, base: &cc::Build, generated: &Path, dispatch: &Path) -> Self {
         let stela = format!("{SOURCE}/stela");
         let mut xe = base.clone();
-        linux.apply(&mut xe, Some(generated), &["intel/xe"], Some(&XE));
+        linux.apply(&mut xe, Some(generated), &["xe"], Some(&XE));
         xe.include(&stela);
         let mut i915 = base.clone();
-        linux.apply(&mut i915, None, &["intel/i915"], Some(&I915));
+        linux.apply(&mut i915, None, &["i915"], Some(&I915));
         i915.define("I915", None).include(&stela);
         let mut encoders = base.clone();
         encoders
             .include(dispatch)
             .include(&stela)
-            .include("src/gpu/common/mesa/src")
+            .include(format!("{}/src", native::MESA))
             .include(GENXML);
         Self { xe, i915, encoders }
     }
@@ -150,9 +151,13 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
     }
     // Mesa's headers keep their own warning profile, as Linux's do.
     let mut mesa = base;
+    let (include, src) = (
+        format!("{}/include", native::MESA),
+        format!("{}/src", native::MESA),
+    );
     for directory in [
-        Path::new("src/gpu/common/mesa/include"),
-        Path::new("src/gpu/common/mesa/src"),
+        Path::new(&include),
+        Path::new(&src),
         Path::new(GENXML),
         &genxml,
     ] {
@@ -182,7 +187,7 @@ fn python() -> PathBuf {
 /// Xe's workaround table, generated as Kbuild does by Linux's unchanged
 /// generator from its rules, as <generated/xe_wa_oob.h>.
 fn workarounds(generated: &Path) {
-    let source = format!("{SOURCE}/xe");
+    let source = XE_DRIVER;
     let output = generated.join("generated");
     fs::create_dir_all(&output).expect("create the generated Xe header directory");
     let host = env::var("HOST").expect("Cargo supplies HOST");

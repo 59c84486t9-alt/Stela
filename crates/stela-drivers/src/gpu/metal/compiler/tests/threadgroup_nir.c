@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 /* Original LLVM fixtures and existing NIR optimization; no GPU interpreter. */
 #include "../threadgroup.h"
-#include "stela/air_to_nir.h"
-#include "stela/tests/air_test_fixture.h"
+#include "compiler/air_to_nir.h"
+#include "compiler/tests/air_test_fixture.h"
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdio.h>

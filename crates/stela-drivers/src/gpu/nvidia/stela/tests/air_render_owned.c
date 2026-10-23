@@ -4,9 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <CommonCrypto/CommonDigest.h>
-#include "stela/tests/probe_report.h"
-#include "stela/tests/targets/nvidia.h"
-#include "stela/tests/air_test_fixture.h"
+#include "compiler/tests/probe_report.h"
+#include "compiler/tests/targets/nvidia.h"
+#include "compiler/tests/air_test_fixture.h"
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); exit(1); } } while (0)
 

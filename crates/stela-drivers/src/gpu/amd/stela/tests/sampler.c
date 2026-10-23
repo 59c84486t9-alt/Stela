@@ -10,7 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "stela/tests/targets/amd.h"
+#include "compiler/tests/targets/amd.h"
 
 static struct stela_amd_sampler_state
 sampler(void)

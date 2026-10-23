@@ -5,7 +5,7 @@
 #error "This ownership test requires active assertions"
 #endif
 #include "../input.h"
-#include "../../../common/mesa/src/stela/air_metadata.h"
+#include "../../../compiler/air_metadata.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>

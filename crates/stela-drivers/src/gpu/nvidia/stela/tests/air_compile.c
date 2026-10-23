@@ -2,9 +2,9 @@
 /* Hosted CPU compilation/table/QMD fixtures only. Device topology, GPU VAs and
  * resource owners are synthetic test models, never hardware qualification. */
 #include "../hosted/air_compile.h"
-#include "stela/tests/air_test_fixture.h"
-#include "stela/tests/targets/nvidia.h"
-#include "stela/tests/threadgroup_record.h"
+#include "compiler/tests/air_test_fixture.h"
+#include "compiler/tests/targets/nvidia.h"
+#include "compiler/tests/threadgroup_record.h"
 #include "nouveau/compiler/nak_private.h"
 #include "nouveau/headers/drf.h"
 #include "clc5c0.h"

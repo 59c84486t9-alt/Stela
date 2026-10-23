@@ -27,7 +27,7 @@
  * owns these standard functions; no NvU32 length intermediate is introduced.
  */
 #include "stela_primitives.h"
-#include "../src/common/nvswitch/interface/export_nvswitch.h"
+#include "export_nvswitch.h"
 
 NvLength
 nvswitch_os_strlen

@@ -1,5 +1,5 @@
 //! Hosted library ownership uses the canonical parser and shared AIR inspector.
-use super::{meson::Build, run, tools};
+use super::{build_directory, meson::Build, run, tools};
 use anyhow::{Result, ensure};
 use object::{Architecture, Object, ObjectSymbol};
 use std::{
@@ -9,7 +9,7 @@ use std::{
 };
 
 pub(super) fn build_input(evidence: &Path) -> Result<PathBuf> {
-    let target = tools::root().join(".stela/gpu/build/metal-input");
+    let target = build_directory("metal-input");
     run(
         Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
             .current_dir(tools::root())

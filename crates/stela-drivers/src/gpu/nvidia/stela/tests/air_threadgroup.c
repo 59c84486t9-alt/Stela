@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "air_to_nir.h"
-#include "stela/nvidia_compute.h"
+#include "compiler/nvidia_compute.h"
 #include "llvm-c/Core.h"
 #include "nouveau/headers/drf.h"
 #include "cl906f.h"
@@ -16,8 +16,8 @@
 #include "clc6c0qmd.h"
 #include "clcbc0qmd.h"
 #include "clcdc0qmd.h"
-#include "stela/tests/probe_report.h"
-#include "stela/tests/targets/nvidia.h"
+#include "compiler/tests/probe_report.h"
+#include "compiler/tests/targets/nvidia.h"
 #include "util/ralloc.h"
 #include <stdio.h>
 #include <stdlib.h>

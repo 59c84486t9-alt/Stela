@@ -1,4 +1,4 @@
-//! Build evidence shared by the native GPU tasks.
+//! Source locations and build evidence shared by the native GPU tasks.
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 use std::{
@@ -12,6 +12,21 @@ use std::{
 /// The C target of the native GPU code, as `stela-drivers/build/native.rs`
 /// compiles it: LP64 COFF with the UEFI Win64 calling convention.
 pub const NATIVE_TARGET: &str = "x86_64-pc-cygwin";
+
+/// Stela's GPU sources.
+pub fn gpu() -> PathBuf {
+    crate::tools::root().join("crates/stela-drivers/src/gpu")
+}
+
+/// An upstream source: the submodule `third_party/<name>`.
+pub fn third_party(name: &str) -> PathBuf {
+    crate::tools::root().join("third_party").join(name)
+}
+
+/// A build tree under Cargo's target directory.
+pub fn build_directory(name: &str) -> PathBuf {
+    crate::tools::root().join("target/gpu").join(name)
+}
 
 pub fn capture(command: &mut Command) -> Result<String> {
     let output = command
@@ -46,9 +61,10 @@ pub fn evidence_directory() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Bind the actual fork through its links, including patches, local edits
-/// and downloaded build dependencies.
-/// Ignored caches and generated Python bytecode are not source inputs.
+/// Bind a source tree as checked out, with Stela's patches, local edits and
+/// downloaded build dependencies. A link is bound by its target, as Git
+/// records it. Repository metadata, ignored caches and generated Python
+/// bytecode are not source inputs.
 pub fn source_binding(root: &Path) -> Result<String> {
     fn collect(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
         for entry in fs::read_dir(root)? {
@@ -60,11 +76,10 @@ pub fn source_binding(root: &Path) -> Result<String> {
             {
                 continue;
             }
-            // Upstream files are links into their pinned checkouts.
-            let metadata = fs::metadata(entry.path())?;
-            if metadata.is_dir() {
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
                 collect(&entry.path(), paths)?;
-            } else if metadata.is_file() {
+            } else if kind.is_file() || kind.is_symlink() {
                 paths.push(entry.path());
             }
         }
@@ -78,15 +93,20 @@ pub fn source_binding(root: &Path) -> Result<String> {
         let name = path.strip_prefix(root)?.to_string_lossy();
         digest.update((name.len() as u64).to_le_bytes());
         digest.update(name.as_bytes());
-        let mut input = File::open(path)?;
         let mut file_hash = Sha256::new();
-        let mut buffer = [0; 64 * 1024];
-        loop {
-            let n = input.read(&mut buffer)?;
-            if n == 0 {
-                break;
+        if fs::symlink_metadata(&path)?.is_symlink() {
+            file_hash.update(b"link\0");
+            file_hash.update(fs::read_link(&path)?.as_os_str().as_encoded_bytes());
+        } else {
+            let mut input = File::open(path)?;
+            let mut buffer = [0; 64 * 1024];
+            loop {
+                let n = input.read(&mut buffer)?;
+                if n == 0 {
+                    break;
+                }
+                file_hash.update(&buffer[..n]);
             }
-            file_hash.update(&buffer[..n]);
         }
         digest.update(file_hash.finalize());
     }

@@ -1,5 +1,5 @@
 //! Compare actual compiled vendor records across the core and OS-hook ABIs.
-use super::{NATIVE_TARGET, capture, tools};
+use super::{NATIVE_TARGET, Sources, capture, tools};
 use anyhow::{Context, Result, ensure};
 use object::{Architecture, Object, ObjectSection, ObjectSymbol};
 use serde_json::json;
@@ -29,7 +29,7 @@ pub(super) fn constants(object: &object::File<'_>, name: &str, count: usize) -> 
         .collect())
 }
 
-pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
+pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()> {
     fs::create_dir_all(output)?;
     let fixture = source.join("stela/tests/record_layout.c");
     let text = fs::read_to_string(&fixture)?;
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn actual_core_and_os_hook_records_match_on_all_build_abis() {
         let compiler = tools::which("clang").unwrap();
-        let source = tools::root().join("crates/stela-drivers/src/gpu/nvidia");
+        let source = Sources::new();
         let directory = tempfile::tempdir().unwrap();
         verify(&compiler, &source, directory.path()).unwrap();
     }

@@ -1,6 +1,7 @@
 //! Build only the native AMD command encoder with Mesa's original Meson targets
-//! and generators. No prebuilt archive, compiler backend, Vulkan runtime, kernel
-//! device initialization or network download is used by this hook.
+//! and generators, through Stela's Meson project in `src/gpu`. No prebuilt
+//! archive, compiler backend, Vulkan runtime, kernel device initialization or
+//! network download is used by this hook.
 use std::{env, ffi::OsString, path::PathBuf, process::Command};
 
 pub fn build() {
@@ -20,13 +21,14 @@ pub fn build() {
     );
     let manifest =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo supplies manifest"));
-    let source = manifest.join("src/gpu/common/mesa");
+    let project = manifest.join("src/gpu");
+    let source = manifest.join("../../third_party/mesa");
     assert!(
         source.join("meson.build").is_file(),
-        "the upstream GPU sources are missing; run `cargo xtask gpu fetch`"
+        "third_party/mesa is missing; run `cargo xtask gpu fetch`"
     );
-    let build = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"))
-        .join("mesa-amd-commands");
+    let build =
+        PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR")).join("amd-commands");
     let local = manifest.join("../../.tools/gpu/generators/bin");
     let mut paths = env::split_paths(&env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
     if local.is_dir() {
@@ -48,33 +50,21 @@ pub fn build() {
     }
     setup.args([
         "--wrap-mode=nodownload",
-        "-Dstela-compilers=amd",
-        "-Dplatforms=[]",
-        "-Dgallium-drivers=[]",
-        "-Dvulkan-drivers=[]",
-        "-Dopengl=false",
-        "-Dgles1=disabled",
-        "-Dgles2=disabled",
-        "-Degl=disabled",
-        "-Dgbm=disabled",
-        "-Dglx=disabled",
-        "-Dllvm=disabled",
-        "-Dvideo-codecs=",
-        "-Dbuild-tests=false",
+        "-Dcompilers=amd",
         "-Dbuildtype=debugoptimized",
         "-Db_ndebug=false",
         "-Db_lto=false",
         "-Db_sanitize=none",
     ]);
-    setup.arg(&build).arg(&source);
+    setup.arg(&build).arg(&project);
     run(&mut setup);
     let mut compile = Command::new(ninja);
     compile
         .env("PATH", &path)
         .env("PYTHONDONTWRITEBYTECODE", "1");
     compile.arg("-C").arg(&build).args([
-        "src/stela/libstela_amd_commands.a",
-        "src/amd/common/libamd_common.a",
+        "compiler/libstela_amd_commands.a",
+        "subprojects/mesa/src/amd/common/libamd_common.a",
     ]);
     if let Some(jobs) = env::var_os("NUM_JOBS") {
         compile.arg("-j").arg(jobs);
@@ -82,11 +72,11 @@ pub fn build() {
     run(&mut compile);
     println!(
         "cargo:rustc-link-search=native={}",
-        build.join("src/stela").display()
+        build.join("compiler").display()
     );
     println!(
         "cargo:rustc-link-search=native={}",
-        build.join("src/amd/common").display()
+        build.join("subprojects/mesa/src/amd/common").display()
     );
     println!("cargo:rustc-link-lib=static=stela_amd_commands");
     // Mesa's whole common archive: the linker keeps only the command encoders
@@ -97,8 +87,8 @@ pub fn build() {
         .file(manifest.join("src/gpu/amd/stela/tests/commands_fixture.c"))
         .include(source.join("include"))
         .include(source.join("src"))
-        .include(build.join("src"))
-        .include(build.join("src/amd/common"))
+        .include(build.join("subprojects/mesa/src"))
+        .include(build.join("subprojects/mesa/src/amd/common"))
         .std("c11")
         .warnings_into_errors(true)
         .cargo_metadata(false)
@@ -109,6 +99,14 @@ pub fn build() {
     );
     println!("cargo:rerun-if-changed=src/gpu/amd/stela/tests/commands_fixture.c");
     println!("cargo:rerun-if-changed={}", source.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        project.join("meson.build").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        project.join("compiler").display()
+    );
     for name in [
         "CC", "CXX", "AR", "CFLAGS", "CPPFLAGS", "CXXFLAGS", "LDFLAGS", "PATH",
     ] {

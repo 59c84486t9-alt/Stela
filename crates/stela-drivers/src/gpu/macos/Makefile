@@ -3,7 +3,7 @@
 # service supplies lifecycle and module metadata and links this object.
 SOURCE := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 ARCH ?= arm64e
-BUILD ?= $(abspath $(SOURCE)/../../../../..)/.stela/gpu/build/macos/$(ARCH)
+BUILD ?= $(abspath $(SOURCE)/../../../../..)/target/gpu/macos/$(ARCH)
 SDKROOT ?= $(shell xcrun --sdk macosx --show-sdk-path)
 HEADERS := $(SDKROOT)/System/Library/Frameworks/Kernel.framework/Headers
 CC := $(shell xcrun --sdk macosx --find clang)

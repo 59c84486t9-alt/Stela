@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "../hosted/image_copy.h"
 #include "intel/dev/intel_device_info.h"
-#include "stela/tests/targets/intel.h"
+#include "compiler/tests/targets/intel.h"
 #include <assert.h>
 #include <limits.h>
 #include <stdio.h>

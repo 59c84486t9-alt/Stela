@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 00:00:00 +0000
+Subject: [PATCH] meson: let a parent project build Mesa as a subproject
+
+Mesa's compiler bindings found bindgen's wrapper header relative to Mesa's own build directory, while bindgen names it from the top build directory where it runs, and amd/common reused the project-wide c_args variable for its own arguments, which a parent project reads.
+---
+ src/amd/common/meson.build    | 6 +++---
+ src/compiler/rust/meson.build | 5 ++---
+ 2 files changed, 5 insertions(+), 6 deletions(-)
+
+diff --git a/src/amd/common/meson.build b/src/amd/common/meson.build
+index d0ff6c730c3196f9f3dba00362e3ea5c327df7ab..4606c7b7a23d85019c5951da91cb1207379a43da 100644
+--- a/src/amd/common/meson.build
++++ b/src/amd/common/meson.build
+@@ -205,9 +205,9 @@ if not with_platform_windows
+ endif
+ 
+ link_with = [ libamdgpu_addrlib ]
+-c_args = ['-DADDR_FASTCALL=']
++amd_common_c_args = ['-DADDR_FASTCALL=']
+ if with_amdgpu_virtio
+-  c_args += ['-DHAVE_AMDGPU_VIRTIO', '-DENABLE_DRM_AMDGPU']
++  amd_common_c_args += ['-DHAVE_AMDGPU_VIRTIO', '-DENABLE_DRM_AMDGPU']
+   amd_common_files += files(
+     'virtio/amdgpu_virtio.c',
+     'virtio/amdgpu_virtio_bo.c',
+@@ -241,7 +241,7 @@ libamd_common = static_library(
+   ],
+   link_with: [ link_with ],
+   gnu_symbol_visibility : 'hidden',
+-  c_args : c_args
++  c_args : amd_common_c_args
+ )
+ 
+ executable(
+diff --git a/src/compiler/rust/meson.build b/src/compiler/rust/meson.build
+index e1bfc800a8a48de7160d52439131ab93e327ddea..254d4306b5cba8c31d1517bcc50a4a901b75de1d 100644
+--- a/src/compiler/rust/meson.build
++++ b/src/compiler/rust/meson.build
+@@ -118,11 +118,10 @@ _libcompiler_bindings = static_library(
+   'compiler_bindings',
+   ['bindings.h', _compiler_bindings_rs[1]],
+   gnu_symbol_visibility : 'hidden',
+-  include_directories : [
+-    fs.relative_to(meson.project_build_root(), meson.current_source_dir()),
+-  ],
+   c_args : [
+     pre_args,
++    # bindgen names the header from the top build directory, where it runs.
++    '-I' + meson.global_build_root(),
+     cc.get_supported_arguments('-Wno-missing-prototypes'),
+   ],
+   dependencies : [

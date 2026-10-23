@@ -5,8 +5,8 @@
  * source-request provenance. Device profiles/placements are CPU-only models.
  */
 #include "../hosted/air_graphics.h"
-#include "stela/tests/probe_report.h"
-#include "stela/tests/targets/intel.h"
+#include "compiler/tests/probe_report.h"
+#include "compiler/tests/targets/intel.h"
 #include "util/ralloc.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <stdarg.h>

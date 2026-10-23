@@ -10,8 +10,8 @@
 #include "intel/compiler/elk/elk_nir.h"
 #include "intel/dev/intel_debug.h"
 #include "util/ralloc.h"
-#include "stela/tests/air_probe.h"
-#include "stela/tests/targets/intel.h"
+#include "compiler/tests/air_probe.h"
+#include "compiler/tests/targets/intel.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>

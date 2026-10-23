@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "../hosted/sampler.h"
 #include "intel/dev/intel_device_info.h"
-#include "stela/tests/targets/intel.h"
+#include "compiler/tests/targets/intel.h"
 #include "sampler_bits.h" /* Unchanged original gen_bits_header.py output. */
 #include <assert.h>
 #include <float.h>

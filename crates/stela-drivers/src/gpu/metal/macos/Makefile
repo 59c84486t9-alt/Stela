@@ -2,7 +2,7 @@
 # User-space Metal library objects. No device/plugin registration or kernel code.
 SOURCE := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 ARCH ?= arm64
-BUILD ?= $(abspath $(SOURCE)/../../../../../..)/.stela/gpu/build/metal/$(ARCH)
+BUILD ?= $(abspath $(SOURCE)/../../../../../..)/target/gpu/metal/$(ARCH)
 SDKROOT ?= $(shell xcrun --sdk macosx --show-sdk-path)
 CC := $(shell xcrun --sdk macosx --find clang)
 

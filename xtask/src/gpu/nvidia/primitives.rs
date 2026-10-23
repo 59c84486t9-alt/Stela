@@ -1,10 +1,10 @@
 //! Original CPU wrappers and separate full-width observation providers.
-use super::{capture, tools};
+use super::{Sources, capture, tools};
 use anyhow::Result;
 use serde_json::json;
 use std::{fs, path::Path, process::Command};
 
-pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
+pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()> {
     fs::create_dir_all(output)?;
     let adapter = source.join("stela/stela_nvswitch_primitives.c");
     let fixture = source.join("stela/tests/nvswitch_primitives.c");
@@ -39,6 +39,7 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
                     "src/nvidia/inc/kernel",
                     "src/common/inc",
                     "src/common/nvlink/interface",
+                    "src/common/nvswitch/interface",
                     "src/common/unix/common/inc",
                 ] {
                     command.arg("-I").arg(source.join(include));
@@ -97,7 +98,7 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
         verify(
             &tools::which("clang").unwrap(),
-            &tools::root().join("crates/stela-drivers/src/gpu/nvidia"),
+            &Sources::new(),
             output.path(),
         )
         .unwrap();

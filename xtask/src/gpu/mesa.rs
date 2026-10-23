@@ -1,10 +1,12 @@
 //! Native host compiler builds. Device access and Metal are separate ports.
 //!
 //! Meson defines what is built and run: every target in
-//! `common/mesa/src/stela/meson.build` and every test in its suite `stela`;
-//! the tests in its other suites also take this task's inputs. Probes report
-//! through typed records (`record.rs`), so this task lists no targets or counts.
-use super::support::{capture, evidence_directory, source_binding, tool};
+//! `gpu/compiler/meson.build` and every test in its suite `stela`; the tests
+//! in its other suites also take this task's inputs. Probes report through
+//! typed records (`record.rs`), so this task lists no targets or counts.
+use super::support::{
+    build_directory, capture, evidence_directory, gpu, source_binding, third_party, tool,
+};
 use crate::tools;
 use anyhow::{Context, Result, ensure};
 use meson::Build;
@@ -313,8 +315,8 @@ fn llvm_development_files(config: &Path, library: &Path) -> Result<Value> {
     }))
 }
 
-/// Binds the build's sources outside the Mesa tree, which must not have
-/// changed since `started`.
+/// Binds the build's sources in Stela's tree, which must not have changed
+/// since `started`.
 fn bind_external(paths: &[PathBuf], started: SystemTime) -> Result<Vec<Value>> {
     paths
         .iter()
@@ -398,11 +400,11 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         .chain(env::split_paths(&env::var_os("PATH").unwrap_or_default()))
         .collect::<Vec<_>>();
     let path = env::join_paths(paths)?;
-    let gpu = tools::root().join("crates/stela-drivers/src/gpu");
-    let source = gpu.join("common/mesa");
+    let gpu = gpu();
+    let source = third_party("mesa");
     let cache = if let Some(sdk) = &llvm_sdk {
         format!(
-            "mesa-host-llvm-{}-{}",
+            "compilers-llvm-{}-{}",
             &sdk["headers_sha256"]
                 .as_str()
                 .context("missing LLVM header hash")?[..16],
@@ -411,9 +413,9 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
                 .context("missing LLVM library hash")?[..16]
         )
     } else {
-        "mesa-host".to_owned()
+        "compilers".to_owned()
     };
-    let build = tools::root().join(".stela/gpu/build").join(cache);
+    let build = build_directory(&cache);
     let evidence = evidence_directory()?;
     let metal_input = if cfg!(target_os = "macos") && llvm_library.is_some() {
         Some(library::build_input(&evidence)?)
@@ -425,78 +427,33 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         snapshot_air_inputs(threadgroup_inputs, &evidence, "threadgroup-input")?;
     let render_snapshots = snapshot_air_inputs(render_inputs, &evidence, "render-input")?;
     let hash = source_binding(&source)?;
-    // Meson 1.9 validates supplied options against its old cached inventory
-    // before rereading meson.options. Refresh once when upgrading this cache.
-    let cached_options = build.join("meson-info/intro-buildoptions.json");
-    if cached_options.is_file() {
-        let cached: Vec<Value> = serde_json::from_slice(&fs::read(cached_options)?)?;
-        if !cached
-            .iter()
-            .any(|option| option["name"] == "stela-metal-input-library")
-        {
-            run(
-                Command::new(&meson)
-                    .env("PATH", &path)
-                    .env("PYTHONDONTWRITEBYTECODE", "1")
-                    .envs(llvm_config.iter().map(|config| ("LLVM_CONFIG", config)))
-                    .args(["setup", "--reconfigure", "--wrap-mode=nodownload"])
-                    .arg(&build)
-                    .arg(&source),
-                &evidence,
-                "refresh-options",
-            )?;
-        }
-    }
     let mut setup = Command::new(&meson);
     setup
         .current_dir(tools::root())
         .env("PATH", &path)
         .env("PYTHONDONTWRITEBYTECODE", "1")
-        .args(["setup", "--wrap-mode=nodownload"])
+        // Meson downloads the wraps the build names into gpu/subprojects.
+        .arg("setup")
         .arg(&build)
-        .arg(&source)
-        .args([
-            "-Dstela-compilers=nvidia,amd,intel",
-            "-Dplatforms=[]",
-            "-Dgallium-drivers=[]",
-            "-Dvulkan-drivers=[]",
-            "-Dopengl=false",
-            "-Dgles1=disabled",
-            "-Dgles2=disabled",
-            "-Degl=disabled",
-            "-Dgbm=disabled",
-            "-Dglx=disabled",
-            "-Dvideo-codecs=",
-            "-Dbuild-tests=false",
-            "-Dintel-elk=true",
-        ]);
+        .arg(&gpu);
     if let Some(config) = &llvm_config {
-        setup
-            .env("LLVM_CONFIG", config)
-            .arg("-Dstela-amd-llvm=true");
+        setup.env("LLVM_CONFIG", config).arg("-Damd-llvm=true");
     }
-    setup.args([
-        if llvm_sdk.is_some() {
-            "-Dllvm=enabled"
-        } else {
-            "-Dllvm=disabled"
-        },
-        "-Dshared-llvm=enabled",
-        "-Ddraw-use-llvm=false",
+    setup.arg(
         if llvm_sdk.as_ref().is_some_and(|sdk| sdk["rtti"] == false) {
             "-Dcpp_rtti=false"
         } else {
             "-Dcpp_rtti=true"
         },
-    ]);
+    );
     setup.arg(format!(
-        "-Dstela-air-llvm-library={}",
+        "-Dair-llvm-library={}",
         llvm_library
             .as_ref()
             .map_or_else(String::new, |path| path.display().to_string())
     ));
     setup.arg(format!(
-        "-Dstela-metal-input-library={}",
+        "-Dmetal-input-library={}",
         metal_input
             .as_ref()
             .map_or_else(String::new, |p| p.display().to_string())
@@ -505,7 +462,10 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         setup.arg("--reconfigure");
     }
     run(&mut setup, &evidence, "setup")?;
-    let stela = Build::load(&build, &source.join("src/stela/meson.build"))?;
+    // The wraps Meson downloaded, which setup may just have fetched.
+    let subprojects = gpu.join("subprojects");
+    let wraps = source_binding(&subprojects)?;
+    let stela = Build::load(&build, &gpu.join("compiler/meson.build"))?;
     let mut compile = Command::new(&ninja);
     compile
         .env("PATH", &path)
@@ -515,7 +475,7 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         .arg(format!("-j{jobs}"))
         .args(stela.outputs());
     run(&mut compile, &evidence, "compile")?;
-    let inputs = stela.inputs(&ninja, &gpu, &source)?;
+    let inputs = stela.inputs(&ninja, &gpu)?;
     let external_sources = bind_external(&inputs.external, started)?;
     if metal_input.is_some() {
         library::check_boundaries(&stela)?;
@@ -540,7 +500,7 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         .map(|archive| inspect_archive(archive, stela.builds(archive)))
         .collect::<Result<Vec<_>>>()?;
     ensure!(
-        source_binding(&source)? == hash,
+        source_binding(&source)? == hash && source_binding(&subprojects)? == wraps,
         "compiler source changed during the build; rerun against a stable tree"
     );
     ensure!(
@@ -589,6 +549,7 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         "stela_platform_port": false, "hardware_executed": false,
         "metal_frontend": false,
         "source_tree_sha256": hash,
+        "subprojects_sha256": wraps,
         "external_sources": external_sources,
         "metal_input": metal_input,
         "amd_llvm_development_files": llvm_sdk,
@@ -603,7 +564,7 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         "probes": probes.runs,
         "unsupported_targets": probes.unsupported,
         "stderr_logs": stderr_logs,
-        "origin": serde_json::from_slice::<Value>(&fs::read(gpu.join("sources.json"))?)?,
+        "origin": super::fetch::origins()?,
         "host": {"os": env::consts::OS, "arch": env::consts::ARCH},
         "meson": capture(Command::new(&meson).arg("--version"))?,
         "setup": format!("{setup:?}"), "compile": format!("{compile:?}"),

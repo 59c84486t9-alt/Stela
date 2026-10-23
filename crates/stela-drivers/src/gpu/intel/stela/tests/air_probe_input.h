@@ -2,8 +2,8 @@
 #ifndef STELA_INTEL_AIR_PROBE_INPUT_H
 #define STELA_INTEL_AIR_PROBE_INPUT_H
 
-#include "stela/tests/air_probe.h"
-#include "stela/tests/air_test_fixture.h"
+#include "compiler/tests/air_probe.h"
+#include "compiler/tests/air_test_fixture.h"
 
 static inline void
 stela_intel_air_probe_input_record(bool file, const void *bytes, size_t size, const char *entry)
