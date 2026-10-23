@@ -243,7 +243,7 @@ fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() 
             .iter()
             .filter(|device| device.descriptor[4] != HUB_CLASS)
         {
-            bind(&host.controller, device.clone(), &mut dma, &mut original);
+            crate::usb::xhci::bind::bind(&host.controller, device.clone(), &mut dma, &mut original);
         }
         assert!(original.failures.is_empty(), "{:?}", original.failures);
         assert_eq!(original.storage.len(), 1);
