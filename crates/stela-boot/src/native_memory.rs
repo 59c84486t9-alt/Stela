@@ -154,7 +154,7 @@ pub unsafe fn linux_pages() -> Result<
     let reservation = unsafe { Reservation::new(physical, cpu, bytes / PAGE)? };
     SOURCE
         .catalogs
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
             count.checked_add(1)
         })
         .map_err(|_| Error::OutOfMemory)?;
