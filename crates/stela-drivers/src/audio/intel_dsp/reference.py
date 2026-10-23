@@ -7,12 +7,15 @@ and its register macros are extracted verbatim after whole-file hash checks.
 This bounded oracle does not emulate SOF firmware, ROM, PCM or physical audio.
 """
 import argparse
+from datetime import datetime, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
+import shutil
+import signal
 import subprocess
-import tempfile
 
 PIN = "a804c5742bff224d4cb4d25dd383554d598be32b"
 DONORS = {
@@ -21,8 +24,78 @@ DONORS = {
 }
 
 
-def donor(git_dir, name):
-    data = subprocess.check_output(["git", f"--git-dir={git_dir}", "show", f"{PIN}:{name}"])
+def digest(path):
+    hasher = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+class Evidence:
+    """Fresh retained artifacts; never replace an earlier source/run receipt."""
+
+    def __init__(self, output):
+        if output.exists():
+            raise SystemExit(f"refusing existing trace: {output}")
+        self.root = output.parent / (output.name + ".evidence")
+        self.root.mkdir(parents=True, exist_ok=False)
+        self.environment = dict(os.environ)
+        self.environment.update(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0", LC_ALL="C")
+        self.record = {
+            "schema": 1,
+            "pin": PIN,
+            "status": "running",
+            "started_utc": datetime.now(timezone.utc).isoformat(),
+            "harness_sha256": digest(Path(__file__)),
+            "commands": [],
+            # Selected effective settings, deliberately not a full environment.
+            "environment": {key: self.environment.get(key) for key in (
+                "PATH", "CC", "GIT_NO_LAZY_FETCH", "GIT_TERMINAL_PROMPT", "LC_ALL"
+            )},
+            "limits": "Original CNL host-done body only; no ROM/firmware/PCM/native DMA proof",
+        }
+        self.save()
+
+    def save(self):
+        (self.root / "receipt.json").write_text(json.dumps(self.record, indent=2) + "\n")
+
+    def command(self, name, arguments, timeout):
+        item = {"name": name, "argv": arguments, "timeout_seconds": timeout}
+        self.record["commands"].append(item)
+        self.save()
+        stdout = self.root / (name + ".stdout")
+        stderr = self.root / (name + ".stderr")
+        # File-backed output cannot fill a pipe. Kill only this command's own
+        # process group on timeout, including compiler descendants.
+        with stdout.open("xb") as out, stderr.open("xb") as err:
+            process = subprocess.Popen(arguments, stdout=out, stderr=err,
+                                       env=self.environment, start_new_session=True)
+            try:
+                item["returncode"] = process.wait(timeout=timeout)
+            except BaseException as error:
+                item["timed_out"] = isinstance(error, subprocess.TimeoutExpired)
+                item["interruption"] = type(error).__name__
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                item["returncode"] = process.wait()
+                if item["timed_out"]:
+                    raise RuntimeError(f"{name} timed out after {timeout}s") from None
+                raise
+            finally:
+                item["stdout_sha256"] = digest(stdout)
+                item["stderr_sha256"] = digest(stderr)
+                self.save()
+        if item["returncode"]:
+            raise RuntimeError(f"{name} failed ({item['returncode']}); see {stderr}")
+        return stdout.read_bytes()
+
+
+def donor(evidence, git_dir, name, index):
+    data = evidence.command(f"donor-{index}",
+                            ["git", f"--git-dir={git_dir}", "show", f"{PIN}:{name}"], 30)
     if hashlib.sha256(data).hexdigest() != DONORS[name]:
         raise SystemExit(f"donor hash mismatch: {name}")
     return data.decode()
@@ -34,19 +107,19 @@ def function(source, name):
         raise SystemExit(f"missing original function {name}")
     depth = 1
     end = match.end()
-    while depth:
+    while depth and end < len(source):
         depth += (source[end] == "{") - (source[end] == "}")
         end += 1
+    if depth:
+        raise SystemExit(f"unterminated original function {name}")
     return source[match.start():end]
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--linux-git-dir", required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
-    source = donor(args.linux_git_dir, "sound/soc/sof/intel/cnl.c")
-    header = donor(args.linux_git_dir, "sound/soc/sof/intel/hda.h")
+def generate(evidence, args):
+    source = donor(evidence, args.linux_git_dir, "sound/soc/sof/intel/cnl.c", 0)
+    header = donor(evidence, args.linux_git_dir, "sound/soc/sof/intel/hda.h", 1)
+    evidence.record["verified_donors"] = DONORS
+    evidence.save()
     names = ["CNL_DSP_IPC_BASE", "CNL_DSP_REG_HIPCTDR", "CNL_DSP_REG_HIPCTDA", "CNL_DSP_REG_HIPCTDR_BUSY", "CNL_DSP_REG_HIPCTDA_DONE"]
     macros = []
     for name in names:
@@ -75,13 +148,46 @@ int main(void) {
     return 0;
 }
 """
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="intel-sof-reference-", dir=args.output.parent) as scratch:
-        c_file = Path(scratch) / "original.c"
-        binary = Path(scratch) / "original"
-        c_file.write_text(program)
-        subprocess.run([os.environ.get("CC", "clang"), "-std=c11", "-Wall", "-Wextra", "-Werror", str(c_file), "-o", str(binary)], check=True)
-        args.output.write_bytes(subprocess.check_output([str(binary)]))
+    c_file = evidence.root / "original.c"
+    binary = evidence.root / "original"
+    c_file.write_text(program)
+    evidence.record["generated_c_sha256"] = digest(c_file)
+    compiler = shutil.which(os.environ.get("CC", "clang"))
+    if compiler is None:
+        raise RuntimeError("selected C compiler not found")
+    evidence.record["compiler"] = {"path": str(Path(compiler).resolve()),
+                                   "sha256": digest(Path(compiler))}
+    evidence.save()
+    evidence.command("compile", [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
+                                 str(c_file), "-o", str(binary)], 120)
+    # Persist the executable's identity before executing it, including on failure.
+    evidence.record["executable_sha256"] = digest(binary)
+    evidence.save()
+    trace = evidence.command("execute", [str(binary)], 10)
+    if not re.fullmatch(rb"[0-9a-f]+ [0-9a-f]{8}\n[0-9a-f]+ [0-9a-f]{8}\n", trace):
+        raise RuntimeError("original C body returned a malformed two-write trace")
+    with args.output.open("xb") as output:
+        output.write(trace)
+    evidence.record["trace_sha256"] = digest(args.output)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--linux-git-dir", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    args.output = args.output.resolve()
+    evidence = Evidence(args.output)
+    try:
+        generate(evidence, args)
+        evidence.record["status"] = "passed"
+    except BaseException as error:
+        evidence.record["status"] = "failed"
+        evidence.record["error"] = str(error)
+        raise
+    finally:
+        evidence.record["finished_utc"] = datetime.now(timezone.utc).isoformat()
+        evidence.save()
 
 
 if __name__ == "__main__":
