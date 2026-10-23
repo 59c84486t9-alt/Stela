@@ -362,6 +362,8 @@ struct Transfer {
 struct Slot {
     generation: u64,
     consumer: identity::Consumer,
+    /// Consumer traffic is fenced while private lifecycle operations run.
+    suspended: bool,
     attachment: Attachment,
     retiring: bool,
     input: DmaBuffer,

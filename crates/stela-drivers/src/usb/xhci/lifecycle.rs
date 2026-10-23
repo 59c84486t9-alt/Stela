@@ -3,15 +3,21 @@
 //! port_event, hub_port_connect and usb_disconnect. No published ID is recycled.
 use super::*;
 
+#[cfg(test)]
+mod downstream_tests;
 mod recovery;
 
 /// Private proof retained only after complete subtree transfer quiescence.
 /// This never restores public access to the old hardware slot.
 pub(super) struct Recovery {
     slot: u8,
+    id: SlotId,
     port: Option<u8>,
 }
 impl Recovery {
+    pub(super) fn id(&self) -> SlotId {
+        self.id
+    }
     pub(super) fn slot(&self) -> u8 {
         self.slot
     }
@@ -107,7 +113,7 @@ impl Host {
         for device in devices.iter().filter(|d| d.descriptor[4] == HUB_CLASS) {
             let result = (|| {
                 let mut c = self.controller.borrow_mut();
-                c.live_slot(device.slot)?;
+                c.validate_id(device.id)?;
                 let ports = c
                     .power
                     .hub_ports(device.slot)
@@ -195,7 +201,11 @@ impl Host {
             if let Err(error) = self.hub(index, dma, &mut changes) {
                 let slot = self.hubs[index].device.slot;
                 let location = self.hubs[index].device.location.clone();
-                if self.hubs[index].recovery.is_none() {
+                let current = self
+                    .controller
+                    .borrow()
+                    .known_id(self.hubs[index].device.id);
+                if self.hubs[index].recovery.is_none() && current {
                     let _ = self.retire(slot, &mut changes);
                 }
                 changes
@@ -348,7 +358,7 @@ impl Host {
         let bits = {
             let owner = &mut self.hubs[index];
             let mut c = self.controller.borrow_mut();
-            c.live_slot(owner.device.slot)?;
+            c.validate_id(owner.device.id)?;
             let length = usize::from(owner.ports + 1).div_ceil(8);
             if let Some(ticket) = owner.pending {
                 let Some(result) =
@@ -463,7 +473,7 @@ impl Host {
             || owner.is_none()
             || status & 2 == 0
             || status & if ss { 1 << 9 } else { 1 << 8 } == 0
-            || ss && matches!(status >> 5 & 15, 3 | 6 | 10);
+            || ss && (change & (1 << 7) != 0 || matches!(status >> 5 & 15, 3 | 6 | 10));
         if reconnect && let Some(owner) = owner {
             self.retire(owner, changes)?;
         }
@@ -540,9 +550,20 @@ impl Host {
             .filter(|slot| c.power.belongs_to(*slot as u8, ancestor))
             .map(|slot| slot as u8)
             .collect();
+        // Fence every generation before the first Stop, but keep physical
+        // parents internally live for descendant TT-buffer retirement.
         for &slot in &slots {
-            c.quarantine_slot(slot);
+            if let Some(state) = c.slots[usize::from(slot)].as_mut() {
+                state.suspended = true;
+            }
         }
+        slots.sort_by_key(|slot| {
+            core::cmp::Reverse(
+                c.slots[usize::from(*slot)]
+                    .as_ref()
+                    .map_or(0, |state| state.attachment.tier),
+            )
+        });
         for hub in &mut self.hubs {
             if slots.contains(&hub.device.slot) {
                 hub.retired = true;
@@ -577,16 +598,14 @@ impl Host {
                 }
             }
         }
+        // From here no private child cancellation needs a live parent. Failed
+        // contributors remain quarantined with every original allocation.
+        for &slot in &slots {
+            c.quarantine_slot(slot);
+        }
         if let Some(error) = failure {
             return Err(error);
         }
-        slots.sort_by_key(|slot| {
-            core::cmp::Reverse(
-                c.slots[usize::from(*slot)]
-                    .as_ref()
-                    .map_or(0, |state| state.attachment.tier),
-            )
-        });
         for slot in slots {
             if Some(slot) != keep
                 && c.slot_ownership[usize::from(slot)] == reset::Ownership::Enabled

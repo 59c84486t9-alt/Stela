@@ -50,6 +50,11 @@ impl SlotId {
 }
 
 impl Controller {
+    #[cfg(test)]
+    pub(crate) fn test_device_id(&self, slot: u8) -> Result<SlotId, BlockError> {
+        self.device_id(slot)
+    }
+
     pub(super) fn device_id(&self, slot: u8) -> Result<SlotId, BlockError> {
         self.live_slot(slot)?;
         let state = self.slots[usize::from(slot)].as_ref().unwrap();
@@ -69,7 +74,36 @@ impl Controller {
                 "xHCI device generation is permanently retired",
             ));
         }
+        if self.slots[usize::from(id.slot)].as_ref().unwrap().suspended {
+            return Err(BlockError::Unsupported(
+                "USB consumer is fenced for device lifecycle",
+            ));
+        }
         Ok(id.slot)
+    }
+
+    pub(super) fn known_id(&self, id: SlotId) -> bool {
+        self.slots
+            .get(usize::from(id.slot))
+            .and_then(Option::as_ref)
+            .is_some_and(|state| state.generation == id.generation)
+    }
+
+    /// The private hub recovery capability deliberately retains a quarantined
+    /// generation. It never grants ordinary class access or matches a reuse.
+    pub(super) fn validate_recovery_id(&self, id: SlotId) -> Result<(), BlockError> {
+        if self.slot_ownership.get(usize::from(id.slot)) != Some(&reset::Ownership::Enabled)
+            || self
+                .slots
+                .get(usize::from(id.slot))
+                .and_then(Option::as_ref)
+                .is_none_or(|state| state.generation != id.generation || !state.retiring)
+        {
+            return Err(BlockError::Unsupported(
+                "USB recovery generation is permanently retired",
+            ));
+        }
+        Ok(())
     }
 
     /// Borrow operations for this exact device. Validation is pure and occurs

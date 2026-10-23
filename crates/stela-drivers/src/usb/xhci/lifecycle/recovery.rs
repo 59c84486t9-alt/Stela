@@ -21,7 +21,11 @@ impl Host {
         // the entire hub, including otherwise healthy siblings, before doing it.
         self.retire_except(slot, Some(slot), changes)?;
         self.hubs[index].pending = None;
-        self.hubs[index].recovery = Some(Recovery { slot, port });
+        self.hubs[index].recovery = Some(Recovery {
+            slot,
+            id: self.hubs[index].device.id,
+            port,
+        });
         Ok(())
     }
 
@@ -34,6 +38,7 @@ impl Host {
         let hub = &mut self.hubs[index];
         let owner = hub.recovery.as_mut().unwrap();
         let mut c = self.controller.borrow_mut();
+        c.validate_recovery_id(owner.id())?;
         // Reobserve the actual root and every unaffected physical ancestor
         // before each batch of private EP0 effects, including after cooldown.
         c.observe_current_ancestors(owner.slot, false)?;

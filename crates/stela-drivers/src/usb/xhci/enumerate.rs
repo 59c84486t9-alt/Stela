@@ -110,6 +110,7 @@ impl Controller {
         self.slots[usize::from(slot)] = Some(Slot {
             generation: during("allocate device generation", identity::next_generation())?,
             consumer: identity::Consumer::Unclaimed,
+            suspended: false,
             attachment,
             retiring: true,
             input,

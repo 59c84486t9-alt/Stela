@@ -81,8 +81,9 @@ impl Controller {
     /// # Safety
     /// The caller exclusively owns this complete device and has permanently
     /// invalidated all class aliases. Endpoints must be the complete current
-    /// configured DCI set. This bounded service supports root attachments only;
-    /// it does not authorize resetting a hub or another interface's device.
+    /// configured DCI set. This service supports one physical leaf, including
+    /// a downstream hub port; it never authorizes resetting a hub subtree or
+    /// another interface's device.
     pub(crate) unsafe fn reset_and_identify(
         &mut self,
         device: &Device,
@@ -90,11 +91,30 @@ impl Controller {
         dma: &mut dyn DmaAllocator,
     ) -> Result<Device, (String, BlockError)> {
         during(
-            "reset exclusive root device preflight",
+            "reset exclusive device preflight",
             self.reset_preflight(device, endpoints),
         )?;
         let slot = device.slot;
         let attachment = self.slot(slot).unwrap().attachment;
+        // Reobserve root and every actual ancestor before invalidating the
+        // leaf. A failed shared supply cannot authorize private class recovery.
+        during(
+            "observe reset device physical ancestry",
+            self.observe_current_ancestors(slot, true),
+        )?;
+        let parent = attachment
+            .parent
+            .map(|(slot, port)| {
+                let speed = self.slot(slot)?.attachment.speed;
+                let ssp = if speed >= SUPER_SPEED {
+                    self.hub_ssp(slot)?
+                } else {
+                    None
+                };
+                Ok::<_, BlockError>((slot, port, speed, ssp))
+            })
+            .transpose()
+            .map_err(|error| ("retain reset parent protocol".into(), error))?;
         self.slot(slot).unwrap().retiring = true;
         let mut failed = None;
         for dci in 1..32 {
@@ -112,10 +132,37 @@ impl Controller {
         // acknowledged Stop/Reset/SetDequeue and drains every stream's events.
         self.disable_slot(slot, Ownership::Retired)
             .map_err(|(operation, error)| (operation.into(), error))?;
-        during(
-            "acknowledge physical root-port reset",
-            self.reset_root_device(attachment),
-        )?;
+        if let Some((parent, port, speed, ssp)) = parent {
+            during(
+                "observe downstream reset parent",
+                self.observe_current_ancestors(parent, true),
+            )?;
+            let actual = during(
+                "acknowledge physical downstream-port reset",
+                if speed >= SUPER_SPEED {
+                    self.superspeed_port(parent, port, ssp.as_ref())
+                } else {
+                    self.hub_port(parent, port)
+                },
+            )?;
+            during(
+                "observe downstream reset completion ancestry",
+                self.observe_current_ancestors(parent, true),
+            )?;
+            if actual != Some(attachment.speed) {
+                return Err((
+                    "acknowledge downstream reset identity".into(),
+                    BlockError::Unsupported(
+                        "USB downstream reset lost the original speed or connection",
+                    ),
+                ));
+            }
+        } else {
+            during(
+                "acknowledge physical root-port reset",
+                self.reset_root_device(attachment),
+            )?;
+        }
         let result = self.identify(attachment, device.location.clone(), dma);
         if result.is_err() {
             // A failed fresh enumeration may already have acknowledged Address
@@ -174,15 +221,28 @@ impl Controller {
         }
         let slot = self.slots[usize::from(device.slot)].as_ref().unwrap();
         let a = slot.attachment;
-        if a.tier != 0
-            || a.route != 0
-            || a.translator.is_some()
+        let malformed_path = match a.parent {
+            None => a.tier != 0 || a.route != 0 || a.translator.is_some(),
+            Some((parent, port)) => {
+                a.tier == 0
+                    || a.tier > MAX_TIERS
+                    || a.route == 0
+                    || port == 0
+                    || self.live_slot(parent).is_err()
+                    || self
+                        .power
+                        .hub_ports(parent)
+                        .is_none_or(|ports| port > ports)
+            }
+        };
+        if malformed_path
+            || device.descriptor[4] == HUB_CLASS
             || a.root_port == 0
             || a.root_port > self.max_ports
             || a.speed != device.speed
         {
             return Err(BlockError::Unsupported(
-                "USB reset currently requires the original root attachment",
+                "USB reset requires the original exclusive leaf attachment",
             ));
         }
         if self.slots.iter().enumerate().any(|(id, candidate)| {
@@ -192,10 +252,19 @@ impl Controller {
                 // do not infer that resetting this port cannot affect it.
                 && candidate
                     .as_ref()
-                    .is_none_or(|other| other.attachment.root_port == a.root_port)
+                    .is_none_or(|other| match a.parent {
+                        None => other.attachment.root_port == a.root_port,
+                        Some(parent) => other.attachment.parent == Some(parent)
+                            || self.power.belongs_to(id as u8, device.slot),
+                    })
         }) {
             return Err(BlockError::Unsupported(
-                "USB reset root port has another unretired slot owner",
+                "USB reset physical port has another unretired slot owner",
+            ));
+        }
+        if self.power.port_owner(a.parent, a.root_port) != Some(device.slot) {
+            return Err(BlockError::Unsupported(
+                "USB reset leaf lacks retained physical port ownership",
             ));
         }
         if slot.current_configuration != Some(device.configuration_value())
@@ -1366,6 +1435,7 @@ pub(crate) mod tests {
                 controller.slots[usize::from(other)] = Some(Slot {
                     generation: 0,
                     consumer: identity::Consumer::Unclaimed,
+                    suspended: false,
                     attachment: Attachment {
                         route: 1,
                         tier: 1,

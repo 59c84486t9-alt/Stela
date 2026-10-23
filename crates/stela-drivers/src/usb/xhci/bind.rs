@@ -21,6 +21,13 @@ pub(crate) fn bind_with_provider(
     found: &mut Found,
     firmware: &dyn crate::firmware::Provider,
 ) {
+    if device.slot != device.id.hardware_slot() {
+        found.failures.push((
+            device.location.clone(),
+            BlockError::Unsupported("USB bind descriptor slot identity mismatch"),
+        ));
+        return;
+    }
     let all = interfaces(&device.configuration);
     let mut endpoints = Vec::new();
     let mut plans = Vec::new();
