@@ -1115,12 +1115,17 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         output::fatal("engine handoff has the wrong magic");
     }
     layout::set(handoff.placement);
-    // SAFETY: the window heap is reserved for this allocator and still unused.
-    unsafe { crate::ALLOCATOR.initialize(layout::heap() as *mut u8, handoff.heap.bytes as usize) };
-    // SAFETY: this phase owns the reserved heap and its shared-window WB map.
+    // Use the retained physmap directly: its CPU and physical bases have the
+    // same alignment phase. A separately placed heap alias cannot in general
+    // satisfy higher-order CPU/physical page alignment simultaneously.
+    let heap = layout::physical(handoff.heap.physical);
+    // SAFETY: this reserved heap is unused and its RW+NX physmap is shared by
+    // every native root for the complete engine lifetime.
+    unsafe { crate::ALLOCATOR.initialize(heap as *mut u8, handoff.heap.bytes as usize) };
+    // SAFETY: this phase owns that exact reserved heap and retained WB mapping.
     unsafe {
         crate::native_memory::initialize(
-            layout::heap() as usize,
+            heap as usize,
             handoff.heap.physical,
             handoff.heap.bytes as usize,
             layout::physical(0),
@@ -1173,6 +1178,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         output::fatal("native bootstrap check needs an explicit physical-core count");
     }
     if options.native_memory_check {
+        output::arguments(format_args!(
+            "CHECK native-memory heap cpu={heap:#x} physical={:#x} bytes={:#x}\n",
+            handoff.heap.physical, handoff.heap.bytes,
+        ));
         match crate::native_memory::verify() {
             Ok(()) => output::arguments(format_args!(
                 "CHECK native-memory PASS WB native pages: zero/read/write, CPU pin lifetime/reclaim, cache/alignment/bounds refusal; Linux PFN/refcount/compound/split/retirement\n"

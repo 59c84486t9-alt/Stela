@@ -194,7 +194,10 @@ pub fn verify() -> Result<(), MemoryError> {
         // SAFETY: the existing native diagnostic runs in the registered
         // process/deferred context, with root/cache writers excluded.
         let mut catalog = unsafe { linux_pages() }.map_err(|_| MemoryError::Unavailable)?;
-        catalog.verify().map_err(|_| MemoryError::InvalidPageList)?;
+        catalog.verify().map_err(|error| {
+            crate::output::arguments(format_args!("CHECK Linux page catalog FAIL {error:?}\n"));
+            MemoryError::InvalidPageList
+        })?;
         catalog.try_retire().map_err(|_| MemoryError::Unavailable)?;
     }
     if !matches!(
@@ -641,7 +644,7 @@ mod tests {
 
     #[test]
     fn actual_heap_pages_stay_pinned_through_cpu_mapping_and_reclaim() {
-        let layout = Layout::from_size_align(128 * 4096, 8192).unwrap();
+        let layout = Layout::from_size_align(128 * PAGE, 128 * PAGE).unwrap();
         // SAFETY: this separate RAM allocation is kept alive until every test pin
         // ends. Its PA relation is a model; privileged CPU mappings run in QEMU.
         let ram = unsafe { std::alloc::alloc_zeroed(layout) };
@@ -839,6 +842,45 @@ mod tests {
         drop(second_mapping);
         drop(second);
         assert_eq!(ALLOCATOR.usage().live, before);
+        // A separately placed CPU alias can disagree with the physical
+        // alignment phase even though both bases are page-aligned. Moving an
+        // allocation within that alias cannot repair it.
+        // SAFETY: all prior pins/catalogs are retired; the changed PA relation
+        // is a hosted model and will be refused before payload allocation.
+        unsafe { initialize(ram as usize, 0x4000_0000 + PAGE as u64, layout.size(), 0) };
+        assert!(matches!(
+            source.allocate(4 * PAGE, 4 * PAGE, CacheAttribute::WriteBack),
+            Err(MemoryError::InvalidAlignment)
+        ));
+        assert_eq!(ALLOCATOR.usage().live, before);
+        // A physmap-style congruent alias supports every order fitting this
+        // reservation, with actual zeroed data and exact final reclamation.
+        // SAFETY: no live allocation remains; restore the retained model mapping.
+        unsafe { initialize(ram as usize, 0x4000_0000, layout.size(), 0) };
+        for order in 0..7 {
+            let bytes = PAGE << order;
+            let pin = source
+                .allocate(bytes, bytes, CacheAttribute::WriteBack)
+                .unwrap();
+            let mapping = pin.cpu_mapping(CacheAttribute::WriteBack).unwrap();
+            let pointer = mapping.address(0, bytes).unwrap().as_ptr();
+            assert!((pointer as usize).is_multiple_of(bytes));
+            assert!(pin.physical_pages()[0].is_multiple_of(bytes as u64));
+            assert_eq!(
+                pin.physical_pages()[0],
+                0x4000_0000 + (pointer as usize - ram as usize) as u64
+            );
+            // SAFETY: the CPU mapping owns this complete exclusive test extent.
+            assert!(
+                unsafe { core::slice::from_raw_parts(pointer, bytes) }
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
+            drop(pin);
+            assert_eq!(ALLOCATOR.usage().live, before + bytes);
+            drop(mapping);
+            assert_eq!(ALLOCATOR.usage().live, before);
+        }
         // SAFETY: no allocation remains from the test RAM.
         unsafe { std::alloc::dealloc(ram, layout) };
     }

@@ -538,6 +538,17 @@ fn load(
     };
     let sizes = Sizes::for_host(free_ram()?, guest);
     let heap = allocate(sizes.heap)?;
+    // The engine allocator uses this existing physmap directly. Prove the
+    // complete firmware reservation is covered before publishing the handoff.
+    if !ram.iter().any(|&(start, end)| {
+        start as u64 <= heap.physical
+            && heap
+                .physical
+                .checked_add(heap.bytes)
+                .is_some_and(|top| top <= end as u64)
+    }) {
+        return Err("engine heap is outside the retained RAM physmap");
+    }
     let mut native_resources = NativeResources {
         cores: cores as u32,
         stacks: allocate(STACK_BYTES * cores as u64)?,
@@ -624,14 +635,6 @@ fn load(
         )?;
     }
     let data = PRESENT | WRITABLE | NX;
-    tables::map_range(
-        &mut frames,
-        root,
-        layout::heap(),
-        heap.physical,
-        heap.bytes,
-        data,
-    )?;
     for slot in 0..cores {
         tables::map_range(
             &mut frames,

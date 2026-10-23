@@ -24,8 +24,6 @@ const PML4_ENTRY: u64 = 1 << 39;
 
 /// The engine's copy of this image, at the window's start.
 const IMAGE: u64 = 0;
-/// The engine heap.
-const HEAP: u64 = 0x1_0000_0000;
 /// The engine stack; the page below it stays unmapped as a guard.
 const STACK: u64 = 0x2_0000_0000;
 /// Native code, executable and not writable here; written through the
@@ -92,10 +90,6 @@ pub fn window() -> u64 {
 
 pub fn image() -> u64 {
     window() + IMAGE
-}
-
-pub fn heap() -> u64 {
-    window() + HEAP
 }
 
 pub fn stack() -> u64 {
