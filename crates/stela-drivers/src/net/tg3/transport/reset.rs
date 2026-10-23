@@ -31,6 +31,7 @@ const APE_READY: u32 = 0x100;
 const SRAM_DATA_SIGNATURE: u32 = 0xb54;
 const SRAM_DATA_CONFIG: u32 = 0xb58;
 const ASF_ENABLE: u32 = 0x80;
+const APE_ENABLE: u32 = 0x0020_0000;
 const MAC_DATA_SWAP: u32 = 0x34;
 const RESET_PCIE_CLOCK: u32 = 1 << 29;
 const CORE_RESET: u32 = 1;
@@ -75,7 +76,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             return Err(Error::UnsupportedManaged);
         }
         if self.sram(SRAM_DATA_SIGNATURE, None)? == FIRMWARE_MAGIC
-            && self.sram(SRAM_DATA_CONFIG, None)? & ASF_ENABLE != 0
+            && self.sram(SRAM_DATA_CONFIG, None)? & (ASF_ENABLE | APE_ENABLE) != 0
         {
             return Err(Error::UnsupportedManaged);
         }

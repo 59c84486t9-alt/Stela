@@ -634,13 +634,13 @@ fn unmanaged_core_reset_uses_config_while_mmio_decode_is_gone() {
 
 #[test]
 fn management_ownership_refuses_before_engines_or_reset_are_touched() {
-    for ape in [true, false] {
+    for managed in [0, 0x80, 0x0020_0000] {
         let (mut hardware, m) = reset_model(Asic::Bcm5761);
-        if ape {
+        if managed == 0 {
             m.borrow_mut().ape.insert(0x4000, 0x4150_4521);
         } else {
             m.borrow_mut().sram.insert(0xb54, FIRMWARE_MAGIC);
-            m.borrow_mut().sram.insert(0xb58, 0x80);
+            m.borrow_mut().sram.insert(0xb58, managed);
         }
         assert_eq!(
             hardware.reset_unmanaged_core(),
