@@ -1606,6 +1606,7 @@ mod tests {
         let chip = Chip::new(false, true);
         let mut host = make_host(&chip, false).unwrap();
         let mut card = host.poll().unwrap().unwrap();
+        let setup_clock = host.inner.borrow().clock;
         host.inner.borrow_mut().clock = Clock {
             ticks_per_microsecond: 100,
         };
@@ -1613,6 +1614,10 @@ mod tests {
         assert_eq!(card.flush(), Err(BlockError::Timeout));
         stale(&mut card, &chip);
         chip.borrow_mut().card.nonready = false;
+        // The shortened real-TSC budget belongs only to the failed readiness
+        // phase. Fresh positive identification uses its original setup clock,
+        // including when the shared gate schedules many other hardware models.
+        host.inner.borrow_mut().clock = setup_clock;
         let mut card = host.poll().unwrap().unwrap();
         inject(&host, &chip, Fault::MissingEnd);
         chip.borrow_mut().delay_on = Some(DelayPoint::Completion);
