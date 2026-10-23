@@ -326,6 +326,20 @@ impl DeviceAccess<'_> {
         self.controller.submit_iso(slot, dci, buffer, length)
     }
 
+    /// Preflight scheduling requests for this exact addressed generation.
+    /// Returned values reserve nothing and every submission revalidates native
+    /// identity, endpoint state, controller time and scheduling constraints.
+    pub fn iso_schedule_list(
+        &mut self,
+        dci: u8,
+        schedule: IsoSchedule,
+        packet_count: usize,
+    ) -> Result<Vec<IsoSchedule>, BlockError> {
+        let slot = self.slot()?;
+        self.controller
+            .iso_schedule_list(slot, dci, schedule, packet_count)
+    }
+
     /// Submit a scheduling request for this exact addressed generation. The
     /// request carries no hardware authority; controller admission follows
     /// identity validation and precedes DMA publication.
