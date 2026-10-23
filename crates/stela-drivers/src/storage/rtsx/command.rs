@@ -291,7 +291,7 @@ impl Engine {
             Response::None => SD_RSP_TYPE_R0,
             Response::Long => SD_RSP_TYPE_R2,
             Response::Ocr => SD_RSP_TYPE_R3,
-            Response::Busy => SD_RSP_TYPE_R1b,
+            Response::Busy => SD_RSP_TYPE_R1B,
             _ => SD_RSP_TYPE_R1,
         };
         self.wr(budget, SD_CFG2, 0xff, config)?;

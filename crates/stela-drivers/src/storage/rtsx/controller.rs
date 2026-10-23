@@ -432,7 +432,7 @@ impl Engine {
         self.write_reg_before(
             CARD_PWR_CTL,
             SD_POWER_MASK | PMOS_STRG_MASK,
-            SD_POWER_OFF | PMOS_STRG_400mA,
+            SD_POWER_OFF | PMOS_STRG_400MA,
             Some(budget),
         )?;
         self.write_reg_before(PWR_GATE_CTRL, LDO3318_PWR_MASK, 0, Some(budget))?;
