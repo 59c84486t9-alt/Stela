@@ -14,7 +14,8 @@ impl<X: Transport, A: Attention, T: Timer> Device<X, A, T> {
             outcome.error = Some(error);
             return outcome;
         }
-        let count = self.f11.len() + self.f12.len() + self.f1a.len() + self.f03.len();
+        let count =
+            self.f11.len() + self.f12.len() + self.f1a.len() + self.f03.len() + self.f30.len();
         if count == 0 {
             outcome.error = Some(Error::NotActive);
             return outcome;
@@ -80,6 +81,18 @@ impl<X: Transport, A: Attention, T: Timer> Device<X, A, T> {
                     continue;
                 }
                 engine.read(&mut self.transport).map(FunctionReport::F03)
+            } else if let Some(engine) = self
+                .f30
+                .iter()
+                .find(|engine| engine.capabilities.function == *function)
+            {
+                let active = (function.interrupt_start
+                    ..function.interrupt_start + u16::from(function.interrupt_count))
+                    .any(|bit| control.interrupts[usize::from(bit / 8)] & (1 << (bit % 8)) != 0);
+                if !active {
+                    continue;
+                }
+                engine.read(&mut self.transport).map(FunctionReport::F30)
             } else {
                 continue;
             };

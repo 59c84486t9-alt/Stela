@@ -72,7 +72,11 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
             outcome.error = Some(error);
             return outcome;
         }
-        if !self.f11.is_empty() || !self.f1a.is_empty() || !self.f03.is_empty() {
+        if !self.f11.is_empty()
+            || !self.f1a.is_empty()
+            || !self.f03.is_empty()
+            || !self.f30.is_empty()
+        {
             outcome.error = Some(Error::InputConsumerActive);
             return outcome;
         }
