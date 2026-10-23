@@ -8,7 +8,7 @@ use crate::{
     block::{BlockDevice, BlockError, Identity},
     bus::{
         dma::{DmaAllocator, DmaBuffer},
-        pci::Function,
+        pci::{ConfigSpace, Function},
     },
     registers as mapped_registers,
 };

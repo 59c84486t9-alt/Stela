@@ -136,7 +136,7 @@ impl Host {
         };
         engine.rca = card.rca;
         let id = NEXT_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map_err(|_| BlockError::Unsupported("RTSX card identity exhausted"))?;
         let published = Card {
             inner: self.inner.clone(),
