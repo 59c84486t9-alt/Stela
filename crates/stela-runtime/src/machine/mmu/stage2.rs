@@ -6,7 +6,7 @@
 use super::{
     Access, Alignment, Fault, FaultKind, MemoryType, Outcome, SecondStage, Stage2, TableMemory,
     Unsupported,
-    alignment::{self, Shape},
+    alignment::MemoryCheck,
     attributes,
     geometry::{self, Geometry},
 };
@@ -137,7 +137,7 @@ pub fn translate(
     purpose: Purpose,
     el0: bool,
     input: Option<Input>,
-    shape: Option<Shape>,
+    shape: Option<MemoryCheck>,
     memory: &mut dyn TableMemory,
 ) -> Result<Output, Stop> {
     let walk = purpose == Purpose::Walk;
@@ -224,7 +224,7 @@ pub fn translate(
     };
     let device = attributes::memory_type(own) == MemoryType::Device;
     let alignment = Alignment { device };
-    if shape.is_some_and(|shape| alignment::after_translation(alignment, ipa, shape)) {
+    if shape.is_some_and(|shape| shape.faults(alignment)) {
         return Err(fault(FaultKind::Alignment, level));
     }
     let permitted = match purpose {

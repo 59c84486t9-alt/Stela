@@ -192,11 +192,12 @@ impl DataPolicy for Policy {
                 },
             ));
         }
-        // The initial system cohort admits naturally aligned quantities. This
-        // refuses before any walk/effect: a split part must not replace the
-        // original address in Device alignment-fault prioritization. It is an
-        // implementation boundary, never a fabricated guest alignment abort.
-        if !shape.aligned(request.address) {
+        // Ordinary Normal-WB transfers use Mem's exact SCA/byte decomposition.
+        // Keep the separate cold Device and nonordinary alignment cohorts
+        // explicit; their admission is not inferred from ordinary RAM support.
+        if !shape.aligned(request.address)
+            && (request.operation != DataOperation::Ordinary || self.controls.cold_m0())
+        {
             return Err(self.unsupported(request, request.address, Refusal::UnalignedQuantity));
         }
         Ok(())
@@ -215,12 +216,24 @@ impl DataPolicy for Policy {
             ram: &self.ram,
             failure: None,
         };
-        let outcome = mmu::translate_checked(
+        // Match Arm Mem, including its ASIMD-pair alignment override. All
+        // other pieces retain the original instruction's alignment result;
+        // DEVPAGE2 takes FAULT when a later byte reaches Device memory.
+        let alignment = if request.operation == DataOperation::Ordinary
+            && request.bytes == 32
+            && request.flags & (flags::ASIMD | flags::PAIR) == (flags::ASIMD | flags::PAIR)
+            && request.address.is_multiple_of(8)
+        {
+            mmu::alignment::MemoryCheck::aligned()
+        } else {
+            mmu::alignment::MemoryCheck::new(shape(request), request.address)
+        };
+        let outcome = mmu::translate_checked_part(
             &self.controls.translation,
             part.address,
             access,
             self.controls.requester,
-            shape(request),
+            alignment,
             &mut tables,
         );
         if let Some(status) = tables.failure {
@@ -438,6 +451,182 @@ pub(super) mod tests {
         let mut actual = [0; 32];
         unsafe { ram.read_physical(DATA, &mut actual) }.unwrap();
         assert_eq!(actual, bytes);
+    }
+
+    fn ordinary_policy() -> Policy {
+        let (mut cpu, profile, missing, ram) = fixture();
+        cpu.registers.set_raw(Register::CPACR_EL1, 0, 3 << 20);
+        cpu.registers.set_raw(Register::CPTR_EL2, 0, 3 << 20);
+        Policy::new(
+            Controls::capture(&cpu, profile.name, &missing).unwrap(),
+            ram,
+        )
+    }
+    fn ordinary_transfer(
+        thread: &mut crate::memory::domain::MemoryThread<Policy>,
+        address: u64,
+        bytes: &mut [u8],
+        flags: u32,
+    ) -> (MemoryStatus, u64, u64) {
+        use stela_compiler::context::memory::{MemoryRequest, MemoryRequirements};
+        let request = MemoryRequest {
+            address,
+            data: bytes.as_mut_ptr(),
+            bytes: bytes.len() as u32,
+            flags,
+            pc: 0x18000,
+        };
+        let entry = thread.prepare(MemoryRequirements::default()).unwrap();
+        unsafe {
+            entry.with_checked_view(|view| {
+                let code = (view.callback)(view, &request);
+                (
+                    MemoryStatus::from_code(code).unwrap(),
+                    view.completed_bytes,
+                    view.fault_address,
+                )
+            })
+        }
+        .unwrap()
+    }
+    #[test]
+    fn ordinary_unaligned_scalar_and_simd_parts_preserve_exact_registered_ram_bytes() {
+        for (bytes, flags) in [
+            (1, 0),
+            (2, 0),
+            (4, 0),
+            (8, 0),
+            (16, flags::ASIMD),
+            (32, flags::ASIMD | flags::PAIR),
+        ] {
+            for residue in 0..16 {
+                let policy = ordinary_policy();
+                let ram = Arc::clone(&policy.ram);
+                unsafe { ram.publish_physical(DATA, &[0x5a; 64]) }.unwrap();
+                let mut thread = ram.domain().thread(policy);
+                let address = 0x4010 + residue;
+                let mut expected: Vec<_> = (0..bytes).map(|i| i as u8 + 1).collect();
+                assert_eq!(
+                    ordinary_transfer(&mut thread, address, &mut expected, flags | flags::WRITE).0,
+                    MemoryStatus::Success,
+                    "width={bytes} residue={residue}"
+                );
+                let mut actual = [0; 64];
+                unsafe { ram.read_physical(DATA, &mut actual) }.unwrap();
+                assert_eq!(
+                    &actual[16 + residue as usize..16 + residue as usize + bytes],
+                    &expected
+                );
+                assert!(actual[..16 + residue as usize].iter().all(|b| *b == 0x5a));
+                assert!(
+                    actual[16 + residue as usize + bytes..]
+                        .iter()
+                        .all(|b| *b == 0x5a)
+                );
+                let mut read = alloc::vec![0xa5; bytes];
+                let result = ordinary_transfer(&mut thread, address, &mut read, flags);
+                // Baseline deliberately lacks AtomicLoad16. A scalar quantity
+                // spanning host8 within source SCA16 must not silently tear.
+                let needs_atomic16 = bytes <= 8
+                    && residue as usize + bytes <= 16
+                    && residue as usize % 8 + bytes > 8;
+                if needs_atomic16 {
+                    assert_eq!((result.0, result.1), (MemoryStatus::Unsupported, 0));
+                    assert!(read.iter().all(|b| *b == 0xa5));
+                } else {
+                    assert_eq!((result.0, result.1), (MemoryStatus::Success, bytes as u64));
+                    assert_eq!(read, expected);
+                }
+            }
+        }
+    }
+    #[test]
+    fn unaligned_page_faults_preserve_only_the_architectural_mem_prefix() {
+        for (address, bytes, flags, prefix) in [
+            (0x4ffd, 8, 0, 3),
+            (0x4ff8, 32, flags::ASIMD | flags::PAIR, 8),
+        ] {
+            for descriptor in [0, (DESCRIPTOR + PAGE as u64) | (2 << 6)] {
+                let policy = ordinary_policy();
+                let ram = Arc::clone(&policy.ram);
+                unsafe { ram.publish_physical(LEAF + 8, &descriptor.to_le_bytes()) }.unwrap();
+                let mut thread = ram.domain().thread(policy);
+                let mut data = alloc::vec![0x39; bytes];
+                let result =
+                    ordinary_transfer(&mut thread, address, &mut data, flags | flags::WRITE);
+                let status = if descriptor == 0 {
+                    MemoryStatus::Translation
+                } else {
+                    MemoryStatus::Permission
+                };
+                assert_eq!(result, (status, prefix, 0x5000));
+                let mut actual = [0; 32];
+                unsafe { ram.read_physical(DATA + PAGE as u64 - prefix, &mut actual) }.unwrap();
+                assert!(actual[..prefix as usize].iter().all(|b| *b == 0x39));
+                assert!(actual[prefix as usize..].iter().all(|b| *b == 0));
+            }
+        }
+    }
+    #[test]
+    fn original_alignment_is_checked_once_and_retained_before_device_permissions() {
+        let mut policy = ordinary_policy();
+        let ram = Arc::clone(&policy.ram);
+        policy.controls.translation.sctlr |= mmu::alignment::SCTLR_A;
+        policy.controls.translation.ttbr0 = 0x999000;
+        let pair = DataRequest {
+            bytes: 32,
+            flags: flags::ASIMD | flags::PAIR,
+            ..request(0x4008, 0)
+        };
+        assert_eq!(
+            policy.validate_data_request(pair),
+            Err(MemoryStatus::Alignment)
+        );
+        // Restoring a valid walk leaves a genuinely aligned pair legal even
+        // when its later eight-byte pieces are not whole-Q aligned.
+        policy.failure = None;
+        policy.controls.translation.ttbr0 = BASE;
+        let mut thread = ram.domain().thread(policy);
+        assert_eq!(
+            ordinary_transfer(
+                &mut thread,
+                0x4000,
+                &mut [0x79; 32],
+                flags::WRITE | flags::ASIMD | flags::PAIR
+            )
+            .0,
+            MemoryStatus::Success
+        );
+
+        let mut policy = ordinary_policy();
+        let ram = Arc::clone(&policy.ram);
+        // AttrIndx1 remains Device-nGnRnE; AP is read-only. A later page's
+        // Device alignment must win before that permission fault, even though
+        // its individual reached byte at 0x5000 is naturally aligned.
+        let device_readonly = (DESCRIPTOR + PAGE as u64) | (1 << 2) | (2 << 6);
+        unsafe { ram.publish_physical(LEAF + 8, &device_readonly.to_le_bytes()) }.unwrap();
+        policy.controls.translation.mair = 0xff;
+        let mut thread = ram.domain().thread(policy);
+        assert_eq!(
+            ordinary_transfer(&mut thread, 0x4ffd, &mut [0x51; 8], flags::WRITE),
+            (MemoryStatus::Alignment, 3, 0x5000)
+        );
+        assert!(matches!(
+            thread.policy_mut().failure,
+            Some(Failure::Fault {
+                request: DataRequest {
+                    address: 0x4ffd,
+                    bytes: 8,
+                    ..
+                },
+                address: 0x5000,
+                fault: mmu::Fault {
+                    kind: mmu::FaultKind::Alignment,
+                    ..
+                },
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -786,17 +975,8 @@ pub(super) mod tests {
         ));
         policy.failure = None;
         policy.controls.translation.sctlr &= !mmu::alignment::SCTLR_A;
-        assert_eq!(
-            policy.validate_data_request(unaligned),
-            Err(MemoryStatus::Unsupported)
-        );
-        assert!(matches!(
-            policy.failure,
-            Some(Failure::Unsupported {
-                reason: Refusal::UnalignedQuantity,
-                ..
-            })
-        ));
+        assert_eq!(policy.validate_data_request(unaligned), Ok(()));
+        assert_eq!(policy.failure, None);
         policy.failure = None;
         let request = request(0x4000, 0);
         assert_eq!(

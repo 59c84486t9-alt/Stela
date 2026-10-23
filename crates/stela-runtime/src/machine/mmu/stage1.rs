@@ -4,7 +4,7 @@
 use super::{
     Access, Alignment, Controls, Fault, FaultKind, MemoryType, Outcome, PHYSICAL_ADDRESS_BITS,
     Regime, Requester, SCTLR_M, SCTLR_WXN, TableMemory, Translation, Unsupported,
-    alignment::{self, Shape},
+    alignment::MemoryCheck,
     attributes,
     geometry::{self, Geometry},
     permits, sprr,
@@ -179,7 +179,7 @@ fn disabled(
     controls: &Controls,
     address: u64,
     access: Access,
-    shape: Option<Shape>,
+    shape: Option<MemoryCheck>,
 ) -> (Outcome, u8) {
     let upper = two_ranges(controls.regime) && address & (1 << 55) != 0;
     let ignored = range(controls, upper, access).top_byte_ignored;
@@ -225,9 +225,7 @@ fn disabled(
         size: 1 << 12,
         alignment: stage_alignment(attributes),
     };
-    if shape
-        .is_some_and(|shape| alignment::after_translation(translation.alignment, address, shape))
-    {
+    if shape.is_some_and(|shape| shape.faults(translation.alignment)) {
         return (fault(FaultKind::Alignment, 0), 0);
     }
     (Outcome::Mapped(translation), shareability)
@@ -276,7 +274,7 @@ pub fn walk(
     address: u64,
     access: Access,
     requester: Requester,
-    shape: Option<Shape>,
+    shape: Option<MemoryCheck>,
     memory: &mut dyn TableMemory,
 ) -> (Outcome, u8) {
     if controls.sctlr & SCTLR_M == 0 || default_cacheable(controls) {
@@ -300,7 +298,7 @@ fn walk_enabled(
     address: u64,
     access: Access,
     requester: Requester,
-    shape: Option<Shape>,
+    shape: Option<MemoryCheck>,
     memory: &mut dyn TableMemory,
     shareability_field: &mut u8,
 ) -> Outcome {
@@ -372,7 +370,7 @@ fn walk_enabled(
             attributes::of_descriptor(controls.mair, descriptor, controls.xs, controls.tagged);
         let field = (descriptor >> SHAREABILITY_SHIFT) as u8 & 3;
         let alignment = stage_alignment(attributes);
-        if shape.is_some_and(|shape| alignment::after_translation(alignment, address, shape)) {
+        if shape.is_some_and(|shape| shape.faults(alignment)) {
             return fault(FaultKind::Alignment, level);
         }
         let rights = if controls.sprr.enabled() {

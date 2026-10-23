@@ -559,7 +559,7 @@ fn first_stage(
     address: u64,
     access: Access,
     requester: Requester,
-    shape: Option<alignment::Shape>,
+    shape: Option<alignment::MemoryCheck>,
     memory: &mut dyn TableMemory,
 ) -> (Outcome, u8) {
     let Some(stage2) = stage2 else {
@@ -631,7 +631,36 @@ pub fn translate_checked(
     if alignment::before_translation(controls.sctlr, address, shape) {
         return Outcome::Fault(Fault::stage1(FaultKind::Alignment, 0));
     }
-    let outcome = full(controls, address, access, requester, Some(shape), memory);
+    translate_checked_part(
+        controls,
+        address,
+        access,
+        requester,
+        alignment::MemoryCheck::new(shape, address),
+        memory,
+    )
+}
+
+/// Translate one reached MemSingle part after the caller checked the original
+/// Mem access's SCTLR alignment rules. Preserve Mem's actual `aligned` value
+/// through both stages, ahead of their permission checks; splitting must not
+/// reinterpret this part as a new whole instruction.
+pub fn translate_checked_part(
+    controls: &Controls,
+    address: u64,
+    access: Access,
+    requester: Requester,
+    alignment: alignment::MemoryCheck,
+    memory: &mut dyn TableMemory,
+) -> Outcome {
+    let outcome = full(
+        controls,
+        address,
+        access,
+        requester,
+        Some(alignment),
+        memory,
+    );
     limited(controls, access, requester, outcome)
 }
 
@@ -640,7 +669,7 @@ fn full(
     address: u64,
     access: Access,
     requester: Requester,
-    shape: Option<alignment::Shape>,
+    shape: Option<alignment::MemoryCheck>,
     memory: &mut dyn TableMemory,
 ) -> Outcome {
     let stage2 = match second_stage(controls) {

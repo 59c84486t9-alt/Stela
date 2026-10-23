@@ -60,6 +60,33 @@ impl Shape {
     }
 }
 
+/// The `aligned` value computed by Arm Mem and retained by each MemSingle.
+/// It describes the original access, not a fresh instruction at a split address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryCheck {
+    aligned: bool,
+    zero: bool,
+}
+impl MemoryCheck {
+    pub fn new(shape: Shape, address: u64) -> Self {
+        Self {
+            aligned: shape.aligned(address),
+            zero: shape.kind == Kind::Zero,
+        }
+    }
+    /// Mem's 32-byte ASIMD pair at an eight-byte-aligned address explicitly
+    /// becomes four aligned eight-byte accesses (FEAT_LS64WB is disabled).
+    pub fn aligned() -> Self {
+        Self {
+            aligned: true,
+            zero: false,
+        }
+    }
+    pub fn faults(self, memory: Alignment) -> bool {
+        memory.device && (self.zero || !self.aligned)
+    }
+}
+
 /// Whether `bytes` at `address` stay inside one naturally aligned
 /// `quantity` (pseudocode AllInAlignedQuantity).
 fn within(address: u64, bytes: u64, quantity: u64) -> bool {
