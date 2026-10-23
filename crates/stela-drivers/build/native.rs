@@ -327,6 +327,9 @@ fn linux_archive(
     upstream_build
         .remove_flag("-Wconversion")
         .remove_flag("-Wsign-conversion")
+        // Linux scripts/Makefile.warn disables this outside W=3; unchanged
+        // SG helpers deliberately compare signed counts with unsigned bounds.
+        .flag("-Wno-sign-compare")
         .files(upstream);
     let objects = upstream_build.compile_intermediates();
     let mut combined = build.clone();
