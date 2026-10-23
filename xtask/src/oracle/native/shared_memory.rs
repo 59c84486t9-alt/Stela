@@ -234,7 +234,10 @@ pub(super) fn run(
         // SAFETY: exact fixture contract described above, ordinary authority.
         unsafe { body.run(&controls, &system, &mut memory, &event, &mut thread) }?
     };
-    let exception = observed.fault.map(translation_fault).transpose()?;
+    let exception = observed
+        .fault
+        .map(|fault| translation_fault(fault, case))
+        .transpose()?;
     // Like the existing leaf lane, the closing RET is harness machinery; compare
     // the source prefix's next PC, not its synthetic terminal's X30 target.
     Ok((
@@ -253,6 +256,7 @@ pub(super) fn run(
 /// have ISV=0, and a failed checked entry retains its exact source PC and FAR.
 fn translation_fault(
     fault: stela_runtime::memory::domain::MemoryFault,
+    case: &Case,
 ) -> Result<super::super::Exception> {
     use stela_compiler::context::memory::{FaultAccess, MemoryStatus};
     ensure!(
@@ -263,11 +267,31 @@ fn translation_fault(
         fault.address == DATA_WINDOW + DATA_BYTES as u64,
         "checked oracle fault outside qualified window boundary: {fault:?}"
     );
-    let write = match fault.access {
-        FaultAccess::Read => false,
-        FaultAccess::Write => true,
-        _ => anyhow::bail!("unqualified checked oracle fault direction: {fault:?}"),
+    let word = fault
+        .pc
+        .checked_sub(CODE_PAGE)
+        .filter(|offset| offset.is_multiple_of(INSTRUCTION_BYTES as u64))
+        .and_then(|offset| usize::try_from(offset / INSTRUCTION_BYTES as u64).ok())
+        .filter(|index| *index < case.steps)
+        .and_then(|index| case.code.get(index))
+        .context("checked fault PC outside original source")?;
+    let operand = match Decoder
+        .lift(GuestAddress(fault.pc), *word)
+        .map(|instruction| instruction.operation)
+    {
+        Ok(Operation::Simd(simd::Operand::StructureMemory(operand))) => operand,
+        _ => anyhow::bail!("checked fault has no qualified structured source: {word:08x}"),
     };
+    let write = operand.direction == simd::structure_memory::Direction::Store;
+    let expected_access = if write {
+        FaultAccess::Write
+    } else {
+        FaultAccess::Read
+    };
+    ensure!(
+        fault.access == FaultAccess::OriginalSource || fault.access == expected_access,
+        "checked fault direction contradicts original typed source: {fault:?}"
+    );
     // EC=Data Abort from lower EL; IL=1; DFSC=Translation fault, level 3.
     const EL0_DATA_ABORT: u64 = (0x24 << 26) | (1 << 25);
     const WRITE: u64 = 1 << 6;
@@ -320,40 +344,100 @@ mod tests {
     }
 
     #[test]
-    fn checked_fault_adapter_refuses_unqualified_status_or_address() {
+    fn checked_fault_adapter_resolves_original_source_and_refuses_mismatches() {
         use stela_compiler::context::memory::{FaultAccess, MemoryStatus};
+        let mut case = Case {
+            code: vec![0x4c40_0044],
+            steps: 1,
+            state: GuestState::default(),
+            data: vec![0; DATA_BYTES].into(),
+            scalable: None,
+            el: 0,
+            hypervisor: None,
+            pauth: false,
+        };
         let fault = stela_runtime::memory::domain::MemoryFault {
             status: MemoryStatus::Translation,
-            access: FaultAccess::Read,
+            access: FaultAccess::OriginalSource,
             address: DATA_WINDOW + DATA_BYTES as u64,
             pc: CODE_PAGE,
             completed_bytes: 0,
         };
-        let read = translation_fault(fault).unwrap();
-        assert_eq!(read.syndrome, 0x9200_0007);
-        let write = translation_fault(stela_runtime::memory::domain::MemoryFault {
-            access: FaultAccess::Write,
-            ..fault
-        })
-        .unwrap();
-        assert_eq!(write.syndrome, 0x9200_0047);
+        assert_eq!(
+            translation_fault(fault, &case).unwrap().syndrome,
+            0x9200_0007
+        );
+        assert!(
+            translation_fault(
+                stela_runtime::memory::domain::MemoryFault {
+                    access: FaultAccess::Write,
+                    ..fault
+                },
+                &case
+            )
+            .is_err()
+        );
+        case.code[0] = 0x4c00_0044;
+        assert_eq!(
+            translation_fault(fault, &case).unwrap().syndrome,
+            0x9200_0047
+        );
+        assert_eq!(
+            translation_fault(
+                stela_runtime::memory::domain::MemoryFault {
+                    access: FaultAccess::Write,
+                    ..fault
+                },
+                &case
+            )
+            .unwrap()
+            .syndrome,
+            0x9200_0047
+        );
+        assert!(
+            translation_fault(
+                stela_runtime::memory::domain::MemoryFault {
+                    access: FaultAccess::Read,
+                    ..fault
+                },
+                &case
+            )
+            .is_err()
+        );
         for status in [
             MemoryStatus::Permission,
             MemoryStatus::Alignment,
             MemoryStatus::Unsupported,
         ] {
             assert!(
-                translation_fault(stela_runtime::memory::domain::MemoryFault { status, ..fault })
-                    .is_err()
+                translation_fault(
+                    stela_runtime::memory::domain::MemoryFault { status, ..fault },
+                    &case
+                )
+                .is_err()
             );
         }
         assert!(
-            translation_fault(stela_runtime::memory::domain::MemoryFault {
-                address: fault.address - 1,
-                ..fault
-            })
+            translation_fault(
+                stela_runtime::memory::domain::MemoryFault {
+                    address: fault.address - 1,
+                    ..fault
+                },
+                &case
+            )
             .is_err()
         );
+        for pc in [CODE_PAGE - 4, CODE_PAGE + 1, CODE_PAGE + 4] {
+            assert!(
+                translation_fault(
+                    stela_runtime::memory::domain::MemoryFault { pc, ..fault },
+                    &case
+                )
+                .is_err()
+            );
+        }
+        case.code[0] = 0xf940_0044;
+        assert!(translation_fault(fault, &case).is_err());
     }
 
     #[test]
