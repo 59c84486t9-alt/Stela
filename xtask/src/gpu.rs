@@ -9,6 +9,7 @@ mod macos;
 mod mesa;
 mod nvidia;
 mod support;
+mod toolchain;
 
 /// An explicit input-owner qualification, never a physical GPU capability.
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -37,8 +38,9 @@ impl AirFpProfile {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Check out each upstream submodule in `third_party/` at its pinned
-    /// commit, sparsely where it has a pattern file, with Stela's patch series.
+    /// Install the pinned build tools under `.tools/gpu`, then check out each
+    /// upstream submodule in `third_party/` at its pinned commit, sparsely
+    /// where it has a pattern file, with Stela's patch series.
     Fetch {
         /// Discard commits and edits in a submodule that were never exported.
         #[arg(long)]

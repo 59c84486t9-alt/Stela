@@ -282,6 +282,7 @@ fn checkout(submodule: &Submodule) -> Result<()> {
 /// Checks out every submodule at its pin with Stela's series, then downloads
 /// the compiler build's own wraps, which the Cargo build never downloads.
 pub fn fetch(force: bool) -> Result<()> {
+    super::toolchain::install()?;
     for submodule in submodules()? {
         if !submodule.directory().join(".git").exists() {
             initialize(&submodule)?;
