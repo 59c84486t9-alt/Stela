@@ -103,6 +103,12 @@ mod tests {
     use super::*;
     #[test]
     fn exact_exception_error_slots_and_mode_gates_follow_cpu_frames() {
+        assert_eq!(core::mem::size_of::<Record>(), 40);
+        assert_eq!(core::mem::offset_of!(Record, vector), 4);
+        assert_eq!(core::mem::offset_of!(Record, mode), 8);
+        assert_eq!(core::mem::offset_of!(Record, error), 16);
+        assert_eq!(core::mem::offset_of!(Record, pc), 24);
+        assert_eq!(core::mem::offset_of!(Record, address), 32);
         let errors = [8, 10, 11, 12, 13, 14, 17, 21, 29, 30];
         for vector in 0..EXCEPTIONS as u32 {
             let fault = decode(32, vector, 0x45, 0x12345, 0x23456).unwrap();
@@ -162,30 +168,5 @@ mod tests {
         );
         record.seal.store(2, Ordering::Release);
         assert!(unsafe { read(&record) }.is_err());
-    }
-    #[test]
-    fn actual_owned_image_and_record_leave_an_independent_low_stack() {
-        use super::super::*;
-        assert_eq!(core::mem::size_of::<Record>(), 40);
-        assert_eq!(core::mem::offset_of!(Record, vector), 4);
-        assert_eq!(core::mem::offset_of!(Record, mode), 8);
-        assert_eq!(core::mem::offset_of!(Record, error), 16);
-        assert_eq!(core::mem::offset_of!(Record, pc), 24);
-        assert_eq!(core::mem::offset_of!(Record, address), 32);
-        let image = offset(&raw const stela_ap_end);
-        assert!(image + STACK_BYTES <= PAGE as usize);
-        for (table, bytes) in [
-            (offset(&raw const stela_ap_stubs32), EXCEPTIONS * STUB_BYTES),
-            (offset(&raw const stela_ap_stubs64), EXCEPTIONS * STUB_BYTES),
-            (offset(&raw const stela_ap_idt32), EXCEPTIONS * 8),
-            (offset(&raw const stela_ap_idt64), EXCEPTIONS * 16),
-            (
-                offset(&raw const stela_ap_fault_record),
-                core::mem::size_of::<Record>(),
-            ),
-        ] {
-            assert!(table + bytes <= image);
-        }
-        assert!(offset(&raw const stela_ap_fault_record).is_multiple_of(8));
     }
 }

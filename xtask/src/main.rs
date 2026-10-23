@@ -29,6 +29,10 @@ mod boot_native_bindings;
 #[path = "../../crates/stela-boot/src/native_smp/firmware/record.rs"]
 mod boot_native_capture;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/native_smp/bootstrap/early.rs"]
+#[allow(dead_code)] // Record/gate tests run hosted; actual assembly is inspected in UEFI.
+mod boot_native_early;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_memory.rs"]
 mod boot_native_memory;
 #[cfg(test)]

@@ -451,3 +451,27 @@ pub(crate) unsafe fn prepare(
 pub(crate) unsafe fn failure(mapped: *const u8) -> Result<Option<EarlyFault>, &'static str> {
     unsafe { early::read(mapped.add(offset(&raw const stela_ap_fault_record)).cast()) }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn actual_owned_image_and_record_leave_an_independent_low_stack() {
+        use super::*;
+        use early::{EXCEPTIONS, Record, STACK_BYTES, STUB_BYTES};
+        let image = offset(&raw const stela_ap_end);
+        assert!(image + STACK_BYTES <= PAGE as usize);
+        for (table, bytes) in [
+            (offset(&raw const stela_ap_stubs32), EXCEPTIONS * STUB_BYTES),
+            (offset(&raw const stela_ap_stubs64), EXCEPTIONS * STUB_BYTES),
+            (offset(&raw const stela_ap_idt32), EXCEPTIONS * 8),
+            (offset(&raw const stela_ap_idt64), EXCEPTIONS * 16),
+            (
+                offset(&raw const stela_ap_fault_record),
+                core::mem::size_of::<Record>(),
+            ),
+        ] {
+            assert!(table + bytes <= image);
+        }
+        assert!(offset(&raw const stela_ap_fault_record).is_multiple_of(8));
+    }
+}
