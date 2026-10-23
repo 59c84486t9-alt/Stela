@@ -97,7 +97,10 @@ impl Host {
         ) {
             return Err(BlockError::Unsupported("UAS device speed"));
         }
-        if controller.borrow_mut().current_configuration(device.slot)?
+        if controller
+            .borrow_mut()
+            .device(device.id)?
+            .current_configuration()?
             != Some(binding.configuration_value())
         {
             return Err(BlockError::Unsupported(
@@ -105,8 +108,7 @@ impl Host {
             ));
         }
         if binding.alternate() != 0 {
-            controller.borrow_mut().control(
-                device.slot,
+            controller.borrow_mut().device(device.id)?.control(
                 super::setup(
                     0x01,
                     super::super::xhci::SET_INTERFACE,
@@ -121,23 +123,28 @@ impl Host {
         let streams = if matches!(device.speed, SUPER_SPEED | SUPER_SPEED_PLUS) {
             // This is the real allocation/configuration ACK, not a capability
             // advertisement or a caller-supplied claim that streams exist.
-            Some(controller.borrow_mut().configure_streams(
-                device.slot,
-                &endpoints,
-                &binding.stream_endpoints(),
-                REQUESTED_STREAMS,
-                dma,
-            )?)
+            Some(
+                controller
+                    .borrow_mut()
+                    .device(device.id)?
+                    .configure_streams(
+                        &endpoints,
+                        &binding.stream_endpoints(),
+                        REQUESTED_STREAMS,
+                        dma,
+                    )?,
+            )
         } else {
             controller
                 .borrow_mut()
-                .configure(device.slot, &endpoints, None, dma)?;
+                .device(device.id)?
+                .configure(&endpoints, None, dma)?;
             None
         };
         let engine = Engine::new(
             Native {
                 controller,
-                slot: device.slot,
+                id: device.id,
                 endpoints,
                 streams,
             },
@@ -184,7 +191,7 @@ impl Host {
                 dma,
             )?
         };
-        let slot = fresh.slot;
+        let id = fresh.id;
         let result = (|| {
             if fresh.descriptor != self.device.descriptor
                 || fresh.configurations != self.device.configurations
@@ -209,7 +216,8 @@ impl Host {
             let binding = Binding::new(&fresh, &interface).map_err(fail)?;
             controller
                 .borrow_mut()
-                .set_configuration(slot, fresh.configuration_value())
+                .device(id)
+                .and_then(|mut device| device.set_configuration(fresh.configuration_value()))
                 .map_err(|error| {
                     (
                         alloc::string::String::from("UAS reset restore configuration"),
@@ -225,8 +233,10 @@ impl Host {
                 )
             })
         })();
-        if result.is_err() {
-            controller.borrow_mut().quarantine_slot(slot);
+        if result.is_err()
+            && let Ok(mut device) = controller.borrow_mut().device(id)
+        {
+            device.quarantine();
         }
         result
     }
@@ -238,11 +248,10 @@ impl Host {
     }
     pub(super) fn quarantine(&mut self) {
         self.engine.poisoned = true;
-        self.engine
-            .io
-            .controller
-            .borrow_mut()
-            .quarantine_slot(self.engine.io.slot);
+        let mut controller = self.engine.io.controller.borrow_mut();
+        if let Ok(mut device) = controller.device(self.engine.io.id) {
+            device.quarantine();
+        }
     }
 
     /// Execute a CDB against an actual eight-byte SCSI LUN address. A check
@@ -357,7 +366,7 @@ trait Io {
 }
 struct Native {
     controller: Shared,
-    slot: u8,
+    id: super::super::xhci::SlotId,
     endpoints: [Endpoint; 4],
     streams: Option<u16>,
 }
@@ -369,9 +378,10 @@ impl Io for Native {
     type Ticket = NativeTicket;
     fn ready(&mut self) -> Result<(), BlockError> {
         let mut controller = self.controller.borrow_mut();
-        controller.endpoint_ready(self.slot, 1)?;
+        let mut device = controller.device(self.id)?;
+        device.endpoint_ready(1)?;
         for endpoint in self.endpoints {
-            controller.endpoint_ready(self.slot, endpoint.dci())?;
+            device.endpoint_ready(endpoint.dci())?;
         }
         Ok(())
     }
@@ -387,29 +397,35 @@ impl Io for Native {
     ) -> Result<NativeTicket, BlockError> {
         let dci = self.endpoints[pipe.index()].dci();
         let mut controller = self.controller.borrow_mut();
+        let mut device = controller.device(self.id)?;
         if self.streams.is_some() && pipe != Pipe::Command {
-            controller
-                .submit_stream(self.slot, dci, tag, address, length)
+            device
+                .submit_stream(dci, tag, address, length)
                 .map(NativeTicket::Stream)
         } else {
-            controller
-                .submit(self.slot, dci, address, length)
+            device
+                .submit(dci, address, length)
                 .map(|trb| NativeTicket::Ordinary { pipe, trb, length })
         }
     }
     fn completed(&mut self, ticket: &NativeTicket) -> Option<Result<usize, BlockError>> {
         let mut controller = self.controller.borrow_mut();
+        let mut device = match controller.device(self.id) {
+            Ok(device) => device,
+            Err(error) => return Some(Err(error)),
+        };
         match ticket {
-            NativeTicket::Stream(ticket) => controller.completed_stream(ticket),
+            NativeTicket::Stream(ticket) => device.completed_stream(ticket),
             NativeTicket::Ordinary { pipe, trb, length } => {
-                controller.completed(self.slot, self.endpoints[pipe.index()].dci(), *trb, *length)
+                device.completed(self.endpoints[pipe.index()].dci(), *trb, *length)
             }
         }
     }
     fn cancel(&mut self, pipe: Pipe) -> Result<(), BlockError> {
         self.controller
             .borrow_mut()
-            .cancel(self.slot, self.endpoints[pipe.index()].dci())
+            .device(self.id)?
+            .cancel(self.endpoints[pipe.index()].dci())
     }
     fn now(&self) -> u64 {
         self.controller.borrow().clock.now_us()
@@ -1726,6 +1742,39 @@ mod tests {
         state.borrow_mut().streams = Some(0);
         assert!(Engine::new(io, &mut dma).is_err());
         assert!(state.borrow().events.is_empty());
+    }
+
+    #[test]
+    fn native_uas_admission_rejects_foreign_generation_before_configuration_or_dma() {
+        use crate::usb::xhci::{self, HIGH_SPEED, SUPER_SPEED};
+        for speed in [HIGH_SPEED, SUPER_SPEED] {
+            let mut first_memory = vec![0u64; 512 * 1024];
+            let mut second_memory = vec![0u64; 512 * 1024];
+            let (first, first_device, first_hardware, mut first_dma) =
+                xhci::model::reset_fixture(&mut first_memory, speed, 32, 3);
+            let (_second, second_device, second_hardware, _second_dma) =
+                xhci::model::reset_fixture(&mut second_memory, speed, 32, 3);
+            assert_eq!(first_device.slot, second_device.slot);
+            assert_ne!(first_device.id, second_device.id);
+            let binding = Binding::new(
+                &second_device,
+                &xhci::interfaces(&second_device.configuration)[0],
+            )
+            .unwrap();
+            let first_accesses = first_hardware.borrow().accesses;
+            let second_accesses = second_hardware.borrow().accesses;
+            let remaining = first_dma.remaining();
+            // Deliberately mismatch the actual enumerated identity and host.
+            // Generation validation must refuse before the unsafe ownership
+            // promise could publish class effects on this unrelated attachment.
+            assert!(
+                unsafe { Host::new(first.clone(), &second_device, binding, &mut first_dma) }
+                    .is_err()
+            );
+            assert_eq!(first_hardware.borrow().accesses, first_accesses);
+            assert_eq!(second_hardware.borrow().accesses, second_accesses);
+            assert_eq!(first_dma.remaining(), remaining);
+        }
     }
 
     #[test]
