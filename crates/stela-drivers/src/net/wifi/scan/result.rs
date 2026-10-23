@@ -30,7 +30,7 @@ pub struct Bss {
     pub timestamp: u64,
     pub beacon_interval: u16,
     pub capabilities: u16,
-    /// Corrected operating channel from DS/HT IEs when resolvable/permitted.
+    /// Corrected operating channel from DS/HT or 6GHz HE Operation IEs when permitted.
     pub channel: Channel,
     /// Actual receive radio/vector facts; may be a neighboring channel.
     pub observed: RadioStatus,
@@ -59,7 +59,25 @@ pub(super) fn elements(mut bytes: &[u8]) -> Result<Vec<(u8, &[u8])>, Error> {
     Ok(output)
 }
 
-fn advertised_channel(parsed: &[(u8, &[u8])]) -> Option<u16> {
+fn advertised_channel(parsed: &[(u8, &[u8])], band: Band) -> Option<u16> {
+    if band == Band::Ghz6 {
+        // cfg80211 ignores DS/HT on this band and uses the first HE Operation
+        // extension only after its complete optional-field size is validated.
+        const VHT_INFORMATION: u32 = 0x0000_4000;
+        const COHOSTED_BSSID: u32 = 0x0000_8000;
+        const SIX_GHZ_INFORMATION: u32 = 0x0002_0000;
+        let data = parsed
+            .iter()
+            .find_map(|(id, data)| (*id == 255 && data.first() == Some(&36)).then_some(*data))?;
+        let parameters = u32::from_le_bytes(data.get(1..5)?.try_into().unwrap());
+        let optional = 7
+            + 3 * usize::from(parameters & VHT_INFORMATION != 0)
+            + usize::from(parameters & COHOSTED_BSSID != 0);
+        if parameters & SIX_GHZ_INFORMATION == 0 || data.len() < optional + 5 {
+            return None;
+        }
+        return Some(u16::from(data[optional]));
+    }
     let first = |id| {
         parsed
             .iter()
@@ -103,11 +121,15 @@ pub(super) fn parse(
     };
     match kind {
         Kind::Beacon if header.receiver != Mac::BROADCAST => return Err(Error::WrongPeer),
-        Kind::ProbeResponse if header.receiver != local => return Err(Error::WrongPeer),
+        Kind::ProbeResponse
+            if header.receiver != local
+                && !(frame.radio.band == Band::Ghz6 && header.receiver == Mac::BROADCAST) =>
+        {
+            // mac80211 accepts unsolicited broadcast probe responses on 6GHz;
+            // other bands still need the separately unimplemented OCE flag.
+            return Err(Error::WrongPeer);
+        }
         _ => (),
-    }
-    if frame.radio.band == Band::Ghz6 {
-        return Err(Error::Unsupported("6GHz/RNR scan result"));
     }
     let observed = Channel {
         band: frame.radio.band,
@@ -145,7 +167,7 @@ pub(super) fn parse(
     }
     // cfg80211_get_ies_channel_number prefers the first DS element if its
     // length is exactly one, then the first complete 22-byte HT operation.
-    let advertised = advertised_channel(&parsed);
+    let advertised = advertised_channel(&parsed, observed.band);
     let channel = if let Some(number) = advertised {
         match policy.lookup_channel(observed.band, number) {
             Some(channel)
@@ -156,7 +178,9 @@ pub(super) fn parse(
                 channel
             }
             Some(_) => return Err(Error::Regulatory),
-            None if observed.band == Band::Ghz2 => return Err(Error::Regulatory),
+            None if matches!(observed.band, Band::Ghz2 | Band::Ghz6) => {
+                return Err(Error::Regulatory);
+            }
             // Linux ignores unknown advertised channels on 5GHz only.
             None => observed,
         }
@@ -192,7 +216,7 @@ mod tests {
     #[test]
     fn channel_element_precedence_matches_full_unchanged_linux_oracle() {
         let mut hash = Sha256::new();
-        for _band in [Band::Ghz2, Band::Ghz5] {
+        for band in [Band::Ghz2, Band::Ghz5] {
             for variant in 0..8 {
                 for value in 0..=u8::MAX {
                     let mut ies = Vec::new();
@@ -231,7 +255,7 @@ mod tests {
                             },
                         );
                     }
-                    let channel = advertised_channel(&elements(&ies).unwrap())
+                    let channel = advertised_channel(&elements(&ies).unwrap(), band)
                         .map_or(-1, |value| value as i16);
                     hash.update(channel.to_le_bytes());
                 }
@@ -246,6 +270,74 @@ mod tests {
                 0x83, 0x04, 0x03, 0x37, 0x73, 0xf7, 0xc4, 0x19, 0x42, 0xd7, 0x93, 0x7e, 0x7e, 0x53,
                 0x16, 0x6a, 0xa1, 0x7c, 0x47, 0x89, 0x48, 0xc0, 0xf9, 0x4d, 0x6c, 0xbc, 0xca, 0x46,
                 0x42, 0x55, 0xa3, 0xd9,
+            ]
+        );
+    }
+
+    fn he_case(flags: u32, variant: usize, primary: u8) -> Vec<u8> {
+        let parameters = (u32::from(flags & 1 != 0) * 0x4000)
+            | (u32::from(flags & 2 != 0) * 0x8000)
+            | (u32::from(flags & 4 != 0) * 0x20000);
+        let mut data = vec![36];
+        data.extend_from_slice(&parameters.to_le_bytes());
+        data.extend_from_slice(&[0; 2]);
+        if flags & 1 != 0 {
+            data.extend_from_slice(&[0; 3]);
+        }
+        if flags & 2 != 0 {
+            data.push(0);
+        }
+        if flags & 4 != 0 {
+            data.extend_from_slice(&[primary, 0, 0, 0, 0]);
+        }
+        if variant == 1 {
+            data.pop();
+        }
+        if variant == 2 {
+            data.push(0xa5);
+        }
+        let mut ies = Vec::new();
+        if matches!(variant, 3 | 5) {
+            let length = if variant == 3 { 5 } else { 6 };
+            ies.extend_from_slice(&[255, length as u8]);
+            ies.extend_from_slice(&data[..length]);
+        }
+        if variant == 4 {
+            ies.extend_from_slice(&[3, 1, primary ^ 0x5a, 61, 22, primary ^ 0x33]);
+            ies.extend_from_slice(&[0; 21]);
+        }
+        if variant == 6 {
+            data[1..5].copy_from_slice(&(parameters & !0x20000).to_le_bytes());
+        }
+        if variant == 7 {
+            ies.extend_from_slice(&[255, 1, 35]);
+        }
+        ies.extend_from_slice(&[255, data.len() as u8]);
+        ies.extend_from_slice(&data);
+        ies
+    }
+
+    #[test]
+    fn unchanged_six_ghz_channel_selector_checks_all_optional_lengths_and_precedence() {
+        let mut hash = Sha256::new();
+        for flags in 0..8 {
+            for variant in 0..8 {
+                for primary in 0..=255 {
+                    let bytes = he_case(flags, variant, primary);
+                    let parsed = elements(&bytes).unwrap();
+                    let actual = advertised_channel(&parsed, Band::Ghz6).unwrap_or(u16::MAX);
+                    hash.update(actual.to_le_bytes());
+                }
+            }
+        }
+        // Fresh unchanged full cfg80211 selector + HE size/offset helpers,
+        // 16,384 cases under ASan/UBSan; receipt under .stela/oracle/scan6-channel.
+        assert_eq!(
+            <[u8; 32]>::from(hash.finalize()),
+            [
+                0xca, 0x76, 0xe9, 0x00, 0x4c, 0xb0, 0x91, 0x77, 0xf3, 0x33, 0xae, 0x08, 0xb8, 0x0a,
+                0x5d, 0x6c, 0x0f, 0x05, 0x41, 0xdd, 0x18, 0xea, 0xd9, 0x4a, 0xf1, 0x21, 0xac, 0xf9,
+                0x8a, 0x12, 0x54, 0x3f
             ]
         );
     }

@@ -64,8 +64,11 @@ impl Request {
         if channels.is_empty() || channels.len() > MAX_CHANNELS {
             return Err(Error::Invalid("explicit scan channel count"));
         }
-        if channels.iter().any(|channel| channel.band == Band::Ghz6) {
-            return Err(Error::Unsupported("6GHz/RNR scanning"));
+        // Explicit passive listening needs no RNR-derived probe target or
+        // permission to initiate radiation. Active 6GHz probing still needs
+        // its own source-qualified RNR/short-SSID/PSC request model.
+        if !ssids.is_empty() && channels.iter().any(|channel| channel.band == Band::Ghz6) {
+            return Err(Error::Unsupported("active 6GHz/RNR scanning"));
         }
         if channels
             .iter()
@@ -422,20 +425,33 @@ mod tests {
         number: 36,
         frequency_mhz: 5180,
     };
+    const SIX1: Channel = Channel {
+        band: Band::Ghz6,
+        number: 1,
+        frequency_mhz: 5955,
+    };
+    const SIX5: Channel = Channel {
+        band: Band::Ghz6,
+        number: 5,
+        frequency_mhz: 5975,
+    };
     struct TestPolicy {
         receive: bool,
         probe: bool,
         deny_six: bool,
+        deny_six_ghz_five: bool,
     }
     impl Policy for TestPolicy {
         fn allow_receive(&mut self, channel: Channel) -> bool {
-            self.receive && !(self.deny_six && channel == CH6)
+            self.receive
+                && !(self.deny_six && channel == CH6)
+                && !(self.deny_six_ghz_five && channel == SIX5)
         }
         fn allow_probe(&mut self, _: Channel) -> bool {
             self.probe
         }
         fn lookup_channel(&mut self, band: Band, number: u16) -> Option<Channel> {
-            [CH1, CH6, CH36]
+            [CH1, CH6, CH36, SIX1, SIX5]
                 .into_iter()
                 .find(|channel| channel.band == band && channel.number == number)
         }
@@ -445,6 +461,7 @@ mod tests {
             receive: true,
             probe: true,
             deny_six: false,
+            deny_six_ghz_five: false,
         }
     }
     fn request() -> Request {
@@ -486,6 +503,104 @@ mod tests {
             SecurityStatus::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn six_ghz_passive_scan_preserves_policy_and_he_operating_channel() {
+        let mut policy = policy();
+        policy.probe = false;
+        let passive = Request::new(vec![SIX1], vec![], vec![]).unwrap();
+        let mut scanner = Scanner::new(LOCAL).unwrap();
+        let ticket = scanner.begin(passive, 100, 1000, &mut policy).unwrap();
+        scanner
+            .validate_submission(ticket, 100, &mut policy)
+            .unwrap();
+        scanner.submitted(ticket).unwrap();
+        // The first DS claim is deliberately from the wrong band. 6GHz uses
+        // the complete HE Operation extension's primary channel instead.
+        let mut ies = vec![3, 1, 6, 255, 12, 36, 0, 0, 2, 0, 0, 0, 5, 0, 5, 0, 6];
+        let result = scanner
+            .observe(
+                ticket,
+                &frame(0x80, Mac::BROADCAST, &ies, SIX1),
+                &mut policy,
+            )
+            .unwrap();
+        assert_eq!(result.channel, SIX5);
+        assert_eq!(result.observed.channel, SIX1.number);
+        assert_eq!(result.signal_dbm, None);
+        assert_eq!(
+            scanner
+                .observe(
+                    ticket,
+                    &frame(0x50, Mac::BROADCAST, &ies, SIX1),
+                    &mut policy
+                )
+                .unwrap()
+                .kind,
+            result::Kind::ProbeResponse
+        );
+        assert_eq!(
+            scanner
+                .observe(
+                    ticket,
+                    &frame(0x50, Mac([2, 9, 9, 9, 9, 9]), &ies, SIX1),
+                    &mut policy
+                )
+                .unwrap_err(),
+            Error::WrongPeer
+        );
+        policy.deny_six_ghz_five = true;
+        assert_eq!(
+            scanner
+                .observe(
+                    ticket,
+                    &frame(0x80, Mac::BROADCAST, &ies, SIX1),
+                    &mut policy
+                )
+                .unwrap_err(),
+            Error::Regulatory
+        );
+        policy.deny_six_ghz_five = false;
+        // An advertised unknown 6GHz channel cannot fall back to observed RX.
+        ies[12] = 233;
+        assert_eq!(
+            scanner
+                .observe(
+                    ticket,
+                    &frame(0x80, Mac::BROADCAST, &ies, SIX1),
+                    &mut policy
+                )
+                .unwrap_err(),
+            Error::Regulatory
+        );
+        // Incomplete optional fields carry no corrected channel, matching
+        // cfg80211; the actual admitted receive observation stays available.
+        let partial = [255, 7, 36, 0, 0, 2, 0, 0, 0];
+        assert_eq!(
+            scanner
+                .observe(
+                    ticket,
+                    &frame(0x80, Mac::BROADCAST, &partial, SIX1),
+                    &mut policy
+                )
+                .unwrap()
+                .channel,
+            SIX1
+        );
+        policy.receive = false;
+        assert_eq!(
+            scanner
+                .observe(ticket, &frame(0x80, Mac::BROADCAST, &[], SIX1), &mut policy)
+                .unwrap_err(),
+            Error::Regulatory
+        );
+        for channels in [vec![SIX1], vec![CH1, SIX1]] {
+            assert!(matches!(
+                Request::new(channels, vec![vec![]], vec![]),
+                Err(Error::Unsupported(_))
+            ));
+        }
     }
 
     #[test]

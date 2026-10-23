@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Pinned complete MT7925 source request/capability helpers under sanitizers.
-Usage: mt7925_client_oracle.py MT76_DIRECTORY FRESH_OUTPUT_DIRECTORY [--modern | --local KERNEL_HEADERS]
+Usage: mt7925_client_oracle.py MT76_DIRECTORY FRESH_OUTPUT_DIRECTORY [--modern | --local KERNEL_HEADERS | --scan6]
 Default models non-MLO station legacy20. --modern builds complete modern peer,
 BSS, EDCA, BA and puncture writers; the Rust runner supplies typed contexts over
 stdin and records modern-run.json with exact executed counts and hashes.
@@ -10,6 +10,7 @@ No firmware ACK, physical authority, encryption or radio execution is establishe
 """
 from pathlib import Path
 import re,hashlib,json,subprocess,sys
+scan6=len(sys.argv)>3 and sys.argv[3]=="--scan6"
 source,out=map(Path,sys.argv[1:3]);modern=len(sys.argv)>3 and sys.argv[3]=="--modern";local=len(sys.argv)>3 and sys.argv[3]=="--local";out.mkdir(parents=True,exist_ok=False)
 hashes={'mt792x_mac.c':'472d899597f5da141a9fba4d9d38d202cd8ac13ba53677e2e527f0b4e1884a45','mt76_connac_mcu.c':'52472fd20bc0a1d744f3eee7a28b7205609e160c479a9da1ec5afa4528e389ec','mt76_connac_mcu.h':'2448b6c145f17397a717965eadf50c591934902f0b09684d37a8b0ae290b31ed','mt76_connac.h':'fef14ff63ab1a098b8fe90b5c2e28811cf7fcaf78a7bf5753818b05acf2414b0','mt7925/mcu.c':'cca76caa6429584b0b37f2772f5132e754a9e26b71660fb0e362ead4ee01dde6','mt7925/mcu.h':'35855f4cdc673a7562241afd618fdd73fc181d210127e3ca2f762f3199cbc772','mt7925/main.c':'93023cfa7f7bc57efcf64b2a4fe55d932a60c0128942ff911b2e0d792a0de588','mt7925/mt7925.h':'b6fec2103954269927b44b095944120dd22a5a0503fa8930e49a8ecc044844dc'}
 t={}
@@ -216,6 +217,26 @@ struct ieee80211_vif v={0};struct mt792x_sta sta={.vif=&v.drv_priv[0]};struct mt
 for(int i=0;i<22;i++)for(int unicast=0;unicast<2;unicast++){struct mt76_wcid*w=mt792x_rx_get_wcid(&d,i,unicast);u16 idx=w?w->idx:65535;output(&idx,2);}
 return 0;}
 '''
+if scan6:
+ main=r'''
+int main(void) {
+ struct mt792x_dev d={0};struct mt76_phy m={.dev=&d.mt76};d.phy=(struct mt792x_phy){.dev=&d,.mt76=&m};
+ const unsigned sizes[]={0,4,200,296,297,300,384};unsigned index=0;
+ for(unsigned mask=1;mask<8;mask++)for(unsigned n=0;n<ARRAY_SIZE(sizes);n++,index++) {
+  struct ieee80211_vif v={.type=NL80211_IFTYPE_STATION};v.drv_priv[0].phy=&d.phy;
+  struct mt76_vif_link *r=&v.drv_priv[0].bss_conf.mt76;r->band_idx=255;r->scan_seq_num=index%127;
+  struct ieee80211_channel ch[3]={{.band=0,.hw_value=1,.center_freq=2412},{.band=1,.hw_value=36,.center_freq=5180},{.band=3,.hw_value=1,.center_freq=5955}};
+  struct ieee80211_channel *channels[3];unsigned count=0;
+  for(unsigned band=0;band<3;band++)if(mask&(1U<<band))channels[count++]=&ch[band];
+  u8 ies[384];memset(ies,0x5a,sizeof(ies));unsigned at=0;
+  while(at<sizes[n]){unsigned len=sizes[n]-at;if(len>257)len=257;ies[at]=221;ies[at+1]=len-2;at+=len;}
+  struct ieee80211_scan_request scan={.req={.n_channels=count,.channels=channels}};memset(scan.req.bssid,255,6);
+  for(unsigned band=0;band<3;band++)if(mask&(1U<<band)){unsigned b=band==2?3:band;scan.ies.ies[b]=ies;scan.ies.len[b]=sizes[n];}
+  m.state=0;if(mt7925_mcu_hw_scan(&m,&v,&scan))abort();
+ }
+ return 0;
+}
+'''
 if modern or local:
  from mt7925_modern_fixture import extend
  pre,parts,helpers,main=extend(pre,parts,helpers,main,function,layout)
@@ -228,8 +249,9 @@ pre=pre.replace('typedef uint16_t __le16;','typedef uint16_t __le16;')
 unit=out/'client.c';unit.write_text(pre+'\n#define HT_MCS_MASK_NUM 10\n'+''.join(parts)+helpers+main)
 exe=out/'client';subprocess.run(['cc','-std=gnu11','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all',str(unit),'-o',str(exe)],check=True)
 b=b'' if modern else subprocess.run([str(exe.resolve())],stdout=subprocess.PIPE,check=True).stdout
-if not modern:(out/'client.trace').write_bytes(b)
-manifest={'linux_commit':'a804c5742bff224d4cb4d25dd383554d598be32b','sources':hashes,'profile':'local-capabilities' if local else 'modern-stdin' if modern else 'legacy20','cases':80 if local else None if modern else 128,'requests':None if modern or local else 1792,'trace_sha256':None if modern else hashlib.sha256(b).hexdigest()}
+if not modern:(out/('scan6.trace' if scan6 else 'client.trace')).write_bytes(b)
+manifest={'linux_commit':'a804c5742bff224d4cb4d25dd383554d598be32b','sources':hashes,'profile':'scan6-passive' if scan6 else 'local-capabilities' if local else 'modern-stdin' if modern else 'legacy20','cases':49 if scan6 else 80 if local else None if modern else 128,'requests':49 if scan6 else None if modern or local else 1792,'trace_sha256':None if modern else hashlib.sha256(b).hexdigest()}
+if scan6:manifest.update(helpers_sha256={n:hashlib.sha256(function(f,n).encode()).hexdigest() for f,n in [(c3,'mt7925_mcu_hw_scan'),(c3,'mt7925_mcu_build_scan_ie_tlv'),(h,'mt76_connac_mcu_add_tlv')]},oracle_limit=['The upstream unpacked scan_ie_tlv has 2-byte alignment; odd-length IEs followed by another band trigger UBSan in the full unchanged helper. Matrix uses aligned sizes or an odd size exhausted before a second TLV; separate Rust tests retain odd mixed-band cases.'])
 if local:manifest.update(be_control_cases=180,full_local_he_struct_slots=3)
 if modern:manifest['execution_record']='modern-run.json (created by the Rust runner after actual stdin execution)'
 (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');print(manifest['trace_sha256'])

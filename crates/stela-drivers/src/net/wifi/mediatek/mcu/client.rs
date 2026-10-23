@@ -407,31 +407,42 @@ pub fn scan(
     channels[4] = 4;
     channels[5] = request.channels().len() as u8;
     for (i, ch) in request.channels().iter().enumerate() {
-        if ch.band == Band::Ghz6 || ch.number > 255 {
+        if ch.number > 255 {
             return Err(Error::InvalidChannel);
         }
-        channels[8 + i * 2] = if ch.band == Band::Ghz2 { 1 } else { 2 };
+        channels[8 + i * 2] = match ch.band {
+            Band::Ghz2 => 1,
+            Band::Ghz5 => 2,
+            Band::Ghz6 => 3,
+        };
         channels[9 + i * 2] = ch.number as u8;
     }
     tlv(&mut out, 14, 12);
+    let mut ie_count = 0;
     if !request.extra_elements().is_empty() {
-        for band in [Band::Ghz2, Band::Ghz5] {
+        // Full source helper shares this budget between all selected bands;
+        // it stops, rather than emitting an over-budget later band.
+        let mut remaining = 8 + 600;
+        for band in [Band::Ghz2, Band::Ghz5, Band::Ghz6] {
             if request.channels().iter().any(|ch| ch.band == band) {
-                let ie = tlv(&mut out, 13, 8 + request.extra_elements().len());
+                let length = 8 + request.extra_elements().len();
+                if length > remaining {
+                    break;
+                }
+                let ie = tlv(&mut out, 13, length);
                 put16(ie, 4, request.extra_elements().len() as u16);
-                ie[6] = if band == Band::Ghz2 { 1 } else { 2 };
+                ie[6] = match band {
+                    Band::Ghz2 => 1,
+                    Band::Ghz5 => 2,
+                    Band::Ghz6 => 3,
+                };
                 ie[8..].copy_from_slice(request.extra_elements());
+                ie_count += 1;
+                remaining -= length;
             }
         }
     }
-    let count = 5 + if request.extra_elements().is_empty() {
-        0
-    } else {
-        [Band::Ghz2, Band::Ghz5]
-            .into_iter()
-            .filter(|b| request.channels().iter().any(|ch| ch.band == *b))
-            .count()
-    };
+    let count = 5 + ie_count;
     put16(&mut out, 2, count as u16);
     Ok(super::init::Request::scan(out, false))
 }
@@ -464,6 +475,123 @@ pub fn scan_done(payload: &[u8]) -> Result<bool, Error> {
 mod tests {
     extern crate std;
     use super::*;
+    fn scan_elements(length: usize) -> Vec<u8> {
+        let mut bytes = vec![0x5a; length];
+        let mut at = 0;
+        while at < length {
+            let size = (length - at).min(257);
+            bytes[at] = 221;
+            bytes[at + 1] = (size - 2) as u8;
+            at += size;
+        }
+        bytes
+    }
+    fn scan_channels(mask: u8) -> Vec<Channel> {
+        [
+            Channel {
+                band: Band::Ghz2,
+                number: 1,
+                frequency_mhz: 2412,
+            },
+            Channel {
+                band: Band::Ghz5,
+                number: 36,
+                frequency_mhz: 5180,
+            },
+            Channel {
+                band: Band::Ghz6,
+                number: 1,
+                frequency_mhz: 5955,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, c)| (mask & (1 << i) != 0).then_some(c))
+        .collect()
+    }
+    fn scan_context() -> Context {
+        Context {
+            bss_index: 0,
+            omac_index: 0,
+            band_index: 255,
+            wmm_index: 0,
+            link_index: 0,
+            broadcast_wcid: 19,
+            address: Mac([2; 6]),
+        }
+    }
+    #[test]
+    fn odd_scan_elements_keep_byte_layout_and_shared_band_budget() {
+        for length in [3, 199, 295, 297, 383] {
+            let request = crate::net::wifi::scan::Request::new(
+                scan_channels(7),
+                vec![],
+                scan_elements(length),
+            )
+            .unwrap();
+            let encoded = scan(scan_context(), 1, &request).unwrap();
+            let mut rest = &encoded.body()[4..];
+            let mut ie_bytes = Vec::new();
+            while !rest.is_empty() {
+                let size = u16::from_le_bytes(rest[2..4].try_into().unwrap()) as usize;
+                if rest[..2] == 13u16.to_le_bytes() {
+                    ie_bytes.push(rest[..size].to_vec());
+                }
+                rest = &rest[size..];
+            }
+            // Independent byte-level expectation: consecutive 8-byte IE
+            // headers plus payload fit in the source's 608-byte total budget.
+            let expected = (608 / (length + 8)).min(3);
+            assert_eq!(ie_bytes.len(), expected);
+            assert!(ie_bytes.iter().map(Vec::len).sum::<usize>() <= 608);
+            assert_eq!(
+                u16::from_le_bytes(encoded.body()[2..4].try_into().unwrap()) as usize,
+                5 + expected
+            );
+            for (index, bytes) in ie_bytes.iter().enumerate() {
+                assert_eq!(&bytes[..2], &13u16.to_le_bytes());
+                assert_eq!(&bytes[2..4], &((length + 8) as u16).to_le_bytes());
+                assert_eq!(&bytes[4..6], &(length as u16).to_le_bytes());
+                assert_eq!(bytes[6], index as u8 + 1);
+                assert_eq!(bytes[7], 0);
+                assert_eq!(&bytes[8..], request.extra_elements());
+            }
+        }
+    }
+    #[test]
+    fn unchanged_full_scan_helper_matches_three_bands_and_total_ie_budget() {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        let mut case = 0;
+        for mask in 1..8 {
+            for length in [0, 4, 200, 296, 297, 300, 384] {
+                let request = crate::net::wifi::scan::Request::new(
+                    scan_channels(mask),
+                    vec![],
+                    scan_elements(length),
+                )
+                .unwrap();
+                let encoded = scan(scan_context(), (case % 127 + 1) as u8, &request).unwrap();
+                hash.update([0x16]);
+                hash.update((encoded.body().len() as u16).to_le_bytes());
+                hash.update(encoded.body());
+                case += 1;
+            }
+        }
+        assert_eq!(case, 49);
+        // Full unchanged mt7925_mcu_hw_scan/build_scan_ie_tlv bodies, source
+        // layouts and TLV appender under ASan/UBSan. Odd subsequent IE alignment
+        // is an explicit donor oracle limit; the independent test retains it.
+        assert_eq!(
+            <[u8; 32]>::from(hash.finalize()),
+            [
+                0x0f, 0xea, 0x6a, 0xda, 0xf0, 0xfa, 0xe0, 0x04, 0xa7, 0xde, 0xaa, 0xad, 0x2f, 0x26,
+                0xd0, 0x3e, 0x7f, 0x28, 0x3e, 0x6c, 0xaa, 0x52, 0x65, 0x1b, 0x1a, 0xf6, 0x19, 0xcf,
+                0xfe, 0x25, 0xce, 0x3a
+            ]
+        );
+    }
+
     #[test]
     #[ignore = "requires fresh unchanged full MT7925 client source helpers"]
     fn unchanged_full_client_helpers_match_selected_legacy_requests_and_wcid() {

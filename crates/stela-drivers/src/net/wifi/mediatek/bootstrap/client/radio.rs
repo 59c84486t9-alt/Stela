@@ -244,3 +244,149 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::*;
+    use super::*;
+    use crate::net::Mac;
+    use crate::net::wifi::mediatek::bootstrap::tests::NativeFixture;
+    use crate::net::wifi::mediatek::mailbox::clc::remaining::tests::caps;
+    use crate::net::wifi::mediatek::ring::rx::tests::device_receive;
+    use crate::net::wifi::mediatek::ring::tests::Source;
+    use crate::net::wifi::{Band, Channel};
+
+    const SIX: Channel = Channel {
+        band: Band::Ghz6,
+        number: 1,
+        frequency_mhz: 5955,
+    };
+    struct PassivePolicy {
+        receive: bool,
+    }
+    impl scan::Policy for PassivePolicy {
+        fn allow_receive(&mut self, channel: Channel) -> bool {
+            self.receive && channel == SIX
+        }
+        fn allow_probe(&mut self, _: Channel) -> bool {
+            panic!("passive scan must not request probe authority")
+        }
+        fn lookup_channel(&mut self, band: Band, number: u16) -> Option<Channel> {
+            (band == SIX.band && number == SIX.number).then_some(SIX)
+        }
+    }
+    impl station::RegulatoryPolicy for PassivePolicy {
+        fn allow_management_tx(&mut self, _: Channel) -> bool {
+            false
+        }
+        fn allow_data_tx(&mut self, _: Channel) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn actual_mt7925_six_ghz_passive_scan_uses_programmed_policy_and_owned_dma() {
+        let mut f = NativeFixture::new(Chip::Mt7925);
+        f.model.lock().unwrap().capability_payload = Some(caps(Chip::Mt7925, [true; 3]));
+        f.install().unwrap();
+        f.boot(Chip::Mt7925);
+        f.policy_bands(Chip::Mt7925, [true; 3]);
+        // SAFETY: this fixture owns the real modeled controller, programmed
+        // policy and firmware. No unrelated/caller-copied receipt enables it.
+        unsafe { f.controller.initialize_mac() }.unwrap();
+        // SAFETY: source-qualified modeled 5GHz initial radio ownership; the
+        // hardware scan command will select the independently programmed 6GHz.
+        unsafe { f.controller.start(Band::Ghz5, 36, 5180) }.unwrap();
+        // SAFETY: exact fixture-owned interface and controller resource.
+        let interface = unsafe { f.controller.register_interface(profile().interface) }.unwrap();
+        f.model.lock().unwrap().client_execution = true;
+        let NativeFixture {
+            controller,
+            model: response_model,
+            bar,
+            queues,
+            memory,
+            drops,
+            ..
+        } = f;
+        let model = Model {
+            response: response_model,
+            bar,
+            queues,
+            memory,
+            drops,
+        };
+        // SAFETY: the just-registered matching interface and native controller.
+        let mut driver = unsafe { Client::new(controller, interface) }.unwrap();
+        let before = model.response.lock().unwrap().client_commands.len();
+        let request = scan::Request::new(vec![SIX], vec![], vec![]).unwrap();
+        assert!(matches!(
+            driver.begin_scan(request, 0, 1_000_000, &mut PassivePolicy { receive: false }),
+            Err(Error::Scan(scan::Error::Regulatory))
+        ));
+        assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
+        assert_eq!(driver.phase(), Phase::Idle);
+        let request = scan::Request::new(vec![SIX], vec![], vec![]).unwrap();
+        driver
+            .begin_scan(request, 0, 1_000_000, &mut PassivePolicy { receive: true })
+            .unwrap();
+        let commands = model.response.lock().unwrap().client_commands.clone();
+        let scan_body = &commands.last().unwrap()[48..];
+        // No probe generation, and the actual channel list uses band code 3.
+        assert_eq!(scan_body[8..10], [0, 0]);
+        let mut rest = &scan_body[4..];
+        let mut channels = None;
+        while !rest.is_empty() {
+            let length = u16::from_le_bytes(rest[2..4].try_into().unwrap()) as usize;
+            if rest[..2] == 12u16.to_le_bytes() {
+                channels = Some(rest[4..length].to_vec());
+            }
+            rest = &rest[length..];
+        }
+        assert_eq!(&channels.unwrap()[4..6], &[3, 1]);
+        let mut beacon = response(
+            0x80,
+            &[
+                0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0x11, 0, 0, 1, b'x', 255, 12, 36, 0, 0, 2, 0, 0, 0,
+                1, 0, 1, 0, 6,
+            ],
+        );
+        beacon[4..10].copy_from_slice(&Mac::BROADCAST.0);
+        let mut raw = incoming_bytes(&beacon, None, false);
+        raw[12..16].copy_from_slice(&(181u32 << 8).to_le_bytes());
+        device_receive(&model.queues[&0xd4520], &raw, true, 0);
+        // A real 6GHz AP may publish unsolicited broadcast probe responses;
+        // source mac80211 accepts these without OCE or probe-TX permission.
+        beacon[..2].copy_from_slice(&0x50u16.to_le_bytes());
+        let mut probe = incoming_bytes(&beacon, None, false);
+        probe[12..16].copy_from_slice(&(181u32 << 8).to_le_bytes());
+        device_receive(&model.queues[&0xd4520], &probe, true, 0);
+        let events = driver
+            .poll(1, &Source, &mut PassivePolicy { receive: true })
+            .unwrap();
+        assert!(matches!(events.as_slice(), [Event::Bss(bss)]
+            if bss.channel == SIX && bss.observed.band == Band::Ghz6));
+        // The native poll intentionally consumes one data-ring frame per call.
+        let events = driver
+            .poll(2, &Source, &mut PassivePolicy { receive: true })
+            .unwrap();
+        assert!(matches!(events.as_slice(), [Event::Bss(probe)]
+            if probe.channel == SIX && probe.kind == scan::result::Kind::ProbeResponse));
+        assert_eq!(driver.phase(), Phase::Scanning);
+        let mut done = vec![0; 52];
+        done[..4].copy_from_slice(&(7u32 << 27).to_le_bytes());
+        done[36] = 14;
+        done[38] = 6;
+        done[50] = 4;
+        device_receive(&model.queues[&0xd4500], &done, true, 0);
+        driver
+            .poll(3, &Source, &mut PassivePolicy { receive: true })
+            .unwrap();
+        assert_eq!(driver.phase(), Phase::ScanCompleted);
+        // SAFETY: all actual modeled scan receive descriptors/notifications
+        // were consumed; no real external DMA/IRQ user exists in this fixture.
+        unsafe { driver.retire_scan_after_drain() }.unwrap();
+        assert_eq!(driver.phase(), Phase::Idle);
+        driver.stop().unwrap();
+    }
+}

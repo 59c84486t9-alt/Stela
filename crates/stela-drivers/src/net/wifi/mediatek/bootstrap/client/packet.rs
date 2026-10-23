@@ -291,6 +291,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let band = match d.channel.band {
             rx::Band::Ghz2 => wifi::Band::Ghz2,
             rx::Band::Ghz5 => wifi::Band::Ghz5,
+            rx::Band::Ghz6 if s.phase == Phase::Scanning => wifi::Band::Ghz6,
             rx::Band::Ghz6 => return Err(Error::Unsupported),
         };
         let channel = policy
