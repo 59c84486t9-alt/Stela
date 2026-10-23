@@ -286,9 +286,8 @@ fn bind<'a>(session: &'a Session, peer: Rc<RefCell<Peer>>) -> Bound<'a> {
     Attachment::bind_with_aml(device, mapping, dependencies, Time::default(), aml).unwrap()
 }
 
-// Encode three ordinary AML methods in Scope (\_SB.UCSI), each containing
-// Store (Arg0, NAME). They mutate the actual _STA/_CRS/_DEP namespace objects;
-// no test-side Device fields are overwritten to simulate revalidation.
+// Encode ordinary AML methods which mutate the actual _STA/_CRS/_DEP namespace
+// objects; no test-side Device fields are overwritten to simulate revalidation.
 fn namespace_mutators() -> Vec<u8> {
     let mut body = b"\\._SB_UCSI".to_vec(); // RootChar, DualNamePrefix, two NameSegs
     for (method, name) in [(b"SSTA", b"_STA"), (b"SCRS", b"_CRS"), (b"SDEP", b"_DEP")] {
@@ -302,6 +301,25 @@ fn namespace_mutators() -> Vec<u8> {
     assert!(body.len() + 1 < 64);
     let mut result = vec![0x10, (body.len() + 1) as u8]; // ScopeOp, PkgLength
     result.extend_from_slice(&body);
+    // _DEP requires namespace-name references, as in Package () { EC00 }.
+    // An external Argument::Reference is imported by ACPICA as RefOf; storing
+    // that argument into _DEP cannot turn it into the required name reference.
+    // Keep these packages in AML so CDEP/RDEP change/restore genuine nodes:
+    // Method (CDEP, 0) { Store (Package () { \_SB.HIDE }, _DEP) }
+    // Method (RDEP, 0) { Store (Package () { \_SB.EC00 }, _DEP) }
+    let mut named_dependencies = b"\\._SB_UCSI".to_vec();
+    for (method, target) in [(b"CDEP", b"\\._SB_HIDE"), (b"RDEP", b"\\._SB_EC00")] {
+        let mut terms = method.to_vec();
+        terms.extend_from_slice(&[0, 0x70]); // zero arguments, StoreOp
+        terms.extend_from_slice(&[0x12, 12, 1]); // PackageOp, PkgLength, one element
+        terms.extend_from_slice(target);
+        terms.extend_from_slice(b"_DEP");
+        named_dependencies.extend_from_slice(&[0x14, (terms.len() + 1) as u8]);
+        named_dependencies.extend_from_slice(&terms);
+    }
+    assert!(named_dependencies.len() + 1 < 64);
+    result.extend_from_slice(&[0x10, (named_dependencies.len() + 1) as u8]);
+    result.extend_from_slice(&named_dependencies);
     // Scope (\_SB.EC00): an actual EmbeddedControl region and READ method.
     // OperationRegion (ECMD, EmbeddedControl, 0, 16)
     let mut ec = b"\\._SB_EC00".to_vec();
@@ -412,6 +430,12 @@ fn actual_resource_and_dependency_changes_refuse_commands_and_retirement() {
     let peer = Peer::new();
     let mut attachment = bind(&session, peer.clone());
     let handle = session.handle("\\_SB.UCSI").unwrap();
+    let ec = session.handle("\\_SB.EC00").unwrap();
+    assert_eq!(attachment.device.dependencies(), &[ec]);
+    assert_eq!(
+        handle.evaluate(Some("_DEP"), &[]).unwrap(),
+        Some(Value::Package(vec![Value::Reference(ec)]))
+    );
     handle
         .evaluate(Some("SSTA"), &[Argument::Integer(0)])
         .unwrap();
@@ -429,18 +453,35 @@ fn actual_resource_and_dependency_changes_refuse_commands_and_retirement() {
     handle
         .evaluate(Some("SDEP"), &[Argument::Package(&[])])
         .unwrap();
+    assert_eq!(
+        handle.evaluate(Some("_DEP"), &[]).unwrap(),
+        Some(Value::Package(vec![]))
+    );
     assert_eq!(attachment.detach(), Err(Error::ResourcesChanged));
     assert_eq!(peer.borrow().controls.len(), before);
     assert_eq!(peer.borrow().mapping_drops, 0);
     assert_eq!(peer.borrow().dependency_drops, 0);
-    let ec = session.handle("\\_SB.EC00").unwrap();
-    handle
-        .evaluate(
-            Some("SDEP"),
-            &[Argument::Package(&[Argument::Reference(ec)])],
-        )
-        .unwrap();
+    // A different well-formed firmware dependency must also refuse retirement;
+    // a valid namespace reference alone supplies no replacement native owner.
+    handle.evaluate(Some("CDEP"), &[]).unwrap();
+    assert_eq!(
+        handle.evaluate(Some("_DEP"), &[]).unwrap(),
+        Some(Value::Package(vec![Value::Reference(
+            session.handle("\\_SB.HIDE").unwrap()
+        )]))
+    );
+    assert_eq!(attachment.detach(), Err(Error::ResourcesChanged));
+    assert_eq!(peer.borrow().controls.len(), before);
+    assert_eq!(peer.borrow().mapping_drops, 0);
+    assert_eq!(peer.borrow().dependency_drops, 0);
+    handle.evaluate(Some("RDEP"), &[]).unwrap();
+    assert_eq!(
+        handle.evaluate(Some("_DEP"), &[]).unwrap(),
+        Some(Value::Package(vec![Value::Reference(ec)]))
+    );
     attachment.detach().unwrap();
+    assert_eq!(peer.borrow().mapping_drops, 1);
+    assert_eq!(peer.borrow().dependency_drops, 1);
     drop(attachment);
     session.shutdown().unwrap();
 }
