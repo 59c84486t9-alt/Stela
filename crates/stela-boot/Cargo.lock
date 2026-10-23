@@ -17,6 +17,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures",
+ "zeroize",
 ]
 
 [[package]]
@@ -345,8 +346,10 @@ dependencies = [
 name = "stela-drivers"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "cc",
  "sha2",
+ "subtle",
  "triomphe",
  "zeroize",
 ]
