@@ -85,6 +85,7 @@ mod canonical_reads;
 mod canonical_writes;
 mod display_resources;
 pub mod memory_resources;
+mod processor_power;
 mod service;
 mod sleep;
 mod t8112_memory;
@@ -164,6 +165,7 @@ pub struct AppleDevices {
     power_devices: Vec<PowerDevice>,
     power_refusals: Vec<(u64, String)>,
     power_configured: bool,
+    processor_power: Option<processor_power::AssignedPower>,
     /// The SoC's sleep and wake (`sleep`).
     sleep: sleep::SocSleep,
     rtc_clock: Option<pmu::RtcClock>,
@@ -500,6 +502,7 @@ impl AppleDevices {
             power_devices: Vec::new(),
             power_refusals: Vec::new(),
             power_configured: false,
+            processor_power: None,
             sleep: sleep::SocSleep::for_boot_processor(boot_processor),
             rtc_clock: None,
         }
@@ -3011,6 +3014,11 @@ impl Devices for AppleDevices {
         now: u64,
         owners: &mut dyn super::engine::CanonicalDeviceWrite,
     ) -> Result<super::engine::ConsumedWrite, DeviceError> {
+        if let Some(completed) =
+            self.consume_processor_power_write(cpu, physical, bytes, value, now, owners)?
+        {
+            return Ok(completed);
+        }
         use super::engine::CanonicalDeviceMemory;
         let mut memory = owners.memory()?;
         memory.fence_cpu_memory();

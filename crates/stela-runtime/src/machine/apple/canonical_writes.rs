@@ -13,6 +13,7 @@ impl AppleDevices {
         now: u64,
         mut memory: Option<&mut dyn CanonicalDeviceMemory>,
     ) -> Result<ConsumedWrite, DeviceError> {
+        self.check_raw_processor_power_write(physical, bytes, value)?;
         let width = width(bytes)?;
         let canonical = self.read_needs_ram(physical, DeviceReadShape::Scalar { bytes })
             || self.empty_cache_flush_needs_ram(physical, width);
