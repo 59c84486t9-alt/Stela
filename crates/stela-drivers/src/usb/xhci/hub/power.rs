@@ -395,4 +395,53 @@ mod tests {
             assert_eq!(hardware.nodes[&0].ports.as_ref().unwrap()[0].change, 0);
         }
     }
+
+    #[test]
+    #[ignore = "set STELA_XHCI_HUB_POWER_ORACLE to the unchanged pinned helper trace"]
+    fn unchanged_linux_hub_suspend_status_and_link_requests() {
+        extern crate std;
+        let path = std::env::var("STELA_XHCI_HUB_POWER_ORACLE").unwrap();
+        let trace = std::fs::read_to_string(path).unwrap();
+        let mut statuses = 0;
+        let mut links = 0;
+        let mut timing = 0;
+        for line in trace.lines() {
+            let mut fields = line.split_whitespace();
+            let tag = fields.next().unwrap();
+            let values: Vec<u16> = fields.map(|field| field.parse().unwrap()).collect();
+            match tag {
+                "S" => {
+                    let [ss, status, expected] = values.as_slice() else {
+                        panic!("bad status row");
+                    };
+                    assert_eq!(
+                        u16::from(
+                            State {
+                                status: *status,
+                                change: 0
+                            }
+                            .suspended(*ss != 0)
+                        ),
+                        *expected
+                    );
+                    statuses += 1;
+                }
+                "L" => {
+                    let [port, suspend, feature, index] = values.as_slice() else {
+                        panic!("bad request row");
+                    };
+                    let request = link_request(*port as u8, true, *suspend != 0);
+                    assert_eq!(u16::from_le_bytes([request[2], request[3]]), *feature);
+                    assert_eq!(u16::from_le_bytes([request[4], request[5]]), *index);
+                    links += 1;
+                }
+                "T" => {
+                    assert_eq!(values, [RESUME_SIGNAL_US as u16 / 1000]);
+                    timing += 1;
+                }
+                _ => panic!("unknown oracle row"),
+            }
+        }
+        assert_eq!((statuses, links, timing), (131072, 30, 1));
+    }
 }
