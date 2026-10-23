@@ -142,6 +142,10 @@ pub struct Run {
     /// inventory; the mount independently selects/qualifies native workers.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=64))]
     host_cores: u16,
+    /// Firmware-visible SMT threads per core. Native execution independently
+    /// selects one qualified thread per physical core.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..))]
+    host_threads: u16,
     /// Guest machine memory for QEMU; defaults to 1G, 8G for system mode
     /// and 12G with a boot bundle.
     #[arg(long)]
@@ -760,8 +764,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         ))
         .args(["-accel", "tcg,thread=single", "-cpu", &cpu, "-smp"])
         .arg(format!(
-            "cpus={0},sockets=1,cores={0},threads=1",
-            arguments.host_cores
+            "cpus={},sockets=1,cores={},threads={}",
+            u32::from(arguments.host_cores) * u32::from(arguments.host_threads),
+            arguments.host_cores,
+            arguments.host_threads
         ))
         .args(
             arguments
@@ -1189,6 +1195,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "usb_image": arguments.usb_image,
         "no_la57": arguments.no_la57,
         "qemu_host_cores": arguments.host_cores,
+        "qemu_host_threads": arguments.host_threads,
         "native_dma": native_dma,
         "native_work": native_work,
         "native_irq_work": native_irq_work,
@@ -1734,7 +1741,23 @@ mod tests {
             panic!("boot run")
         };
         assert_eq!(run.host_cores, 2);
+        assert_eq!(run.host_threads, 1);
         assert!(run.append.is_none());
+        let parsed = crate::Cli::try_parse_from(prefix.into_iter().chain([
+            "--host-cores",
+            "8",
+            "--host-threads",
+            "2",
+        ]))
+        .unwrap();
+        let crate::Task::Boot(Command::Run(run)) = parsed.task else {
+            panic!("boot run")
+        };
+        assert_eq!((run.host_cores, run.host_threads), (8, 2));
+        assert!(run.append.is_none());
+        assert!(
+            crate::Cli::try_parse_from(prefix.into_iter().chain(["--host-threads", "0",])).is_err()
+        );
         for invalid in ["0", "65", "-1", "two"] {
             assert!(
                 crate::Cli::try_parse_from(prefix.into_iter().chain(["--host-cores", invalid]))
