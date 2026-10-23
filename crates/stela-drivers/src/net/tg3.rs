@@ -1,0 +1,81 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2001-2004 David S. Miller
+// Copyright (C) 2001-2003 Jeff Garzik
+// Copyright (C) 2004 Sun Microsystems Inc.
+// Copyright (C) 2005-2018 Broadcom
+//! Broadcom Tigon3 hardware transport for the named BCM5720/5761/5762 cohort.
+//!
+//! This module is a source-only partial backend: it does not expose an attach
+//! constructor or implement `Link`. Cold PCI/reset/PHY calibration, packet ring
+//! publication and retirement are not yet composed. These real register
+//! transports must not be advertised as a functioning Ethernet adapter.
+//!
+//! All named chips have an APE window. MDIO takes the actual per-function APE
+//! PHY grant, even when management firmware is not running. Linux's ignored
+//! lock failures, firmware timeout fallback and silent stop timeout are
+//! deliberately errors here. An uncertain operation poisons and retains the
+//! actual register owner, never permitting a new epoch by object reconstruction.
+pub mod io;
+mod transport;
+
+pub use transport::Hardware;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    Access,
+    Removed,
+    Bounds,
+    UnsupportedDevice,
+    UnsupportedRevision,
+    UnsupportedMedia,
+    ApeTimeout,
+    MdioTimeout,
+    MdioReadFailed,
+    FirmwareTimeout,
+    StopTimeout(u32),
+    Poisoned,
+    NotIdentified,
+    Stopped,
+}
+
+/// Actual serialized PCI/MAC/APE register ownership.
+///
+/// # Safety
+/// Implementors retain one real exclusively reserved PCI function, its actual
+/// configuration mapping, and its UC MAC BAR0 and APE BAR2 mappings. Reads and
+/// writes are ordered native little-endian device accesses with complete bounds
+/// checks and errors on removal. Config writes use actual required widths;
+/// there are no other firmware/SMM/driver/IRQ users. MMIO must remain powered
+/// and mapped until the owner is explicitly retired. A caller-supplied identity,
+/// address cast, unrelated retention token or mock cannot grant native authority.
+pub unsafe trait Registers {
+    fn function_number(&self) -> u8;
+    fn config_read32(&mut self, at: u16) -> Result<u32, Error>;
+    fn read32(&mut self, at: u32) -> Result<u32, Error>;
+    fn write32(&mut self, at: u32, value: u32) -> Result<(), Error>;
+    fn ape_read32(&mut self, at: u32) -> Result<u32, Error>;
+    fn ape_write32(&mut self, at: u32, value: u32) -> Result<(), Error>;
+}
+
+pub trait Delay {
+    fn delay_us(&mut self, microseconds: u64);
+}
+impl Delay for crate::Clock {
+    fn delay_us(&mut self, microseconds: u64) {
+        self.delay(microseconds);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asic {
+    Bcm5761,
+    Bcm5720,
+    Bcm5762,
+}
+
+/// Source PCI table membership is only a probe candidate, never an attach grant.
+pub fn candidate(vendor: u16, device: u16, class: [u8; 3]) -> bool {
+    vendor == 0x14e4
+        && class == [2, 0, 0]
+        && matches!(device, 0x165f | 0x1680 | 0x1681 | 0x1688 | 0x1689 | 0x1687)
+}
