@@ -281,6 +281,30 @@ impl RtKit {
         })
     }
 
+    /// Join actual native resources after the cold ASC and DART have both
+    /// been placed, before the AP begins enumeration. A previously queued
+    /// HELLO remains the same message; the session is never restarted/replaced.
+    pub fn attach_cold_system_endpoints(
+        &mut self,
+        system: SystemEndpoints,
+    ) -> Result<(), &'static str> {
+        if !matches!(self.stage, Stage::Hello | Stage::Quiesced)
+            || self.cpu_stopped
+            || self.crashlog
+            || self.endpoints.values().any(|(_, enabled)| *enabled)
+            || self.endpoints.contains_key(&KDEBUG)
+            || self.endpoints.contains_key(&IOREPORTING)
+        {
+            return Err("RTKit native system owners must join once before enumeration");
+        }
+        for (number, endpoint) in [(KDEBUG, system.trace), (IOREPORTING, system.reporting)] {
+            if let Some(endpoint) = endpoint {
+                self.endpoints.insert(number, (endpoint, false));
+            }
+        }
+        Ok(())
+    }
+
     /// The boot chain hands the coprocessor off quiesced (DT `quiesced`).
     pub fn quiesced(mut self) -> Self {
         self.quiesced = true;
@@ -627,6 +651,65 @@ mod tests {
         rtkit.start(&mut outbox).unwrap();
         assert_eq!(outbox, vec![management(HELLO, 12 | 12 << 16)]);
         rtkit
+    }
+
+    #[test]
+    fn cold_system_binding_keeps_the_started_session_and_precedes_roll_call() {
+        let mut kit = RtKit::new(Vec::new(), Management::Ordinary).unwrap();
+        let mut initial = Vec::new();
+        kit.start(&mut initial).unwrap();
+        kit.attach_cold_system_endpoints(SystemEndpoints {
+            trace: Some(Box::new(Complement)),
+            reporting: Some(Box::new(Complement)),
+        })
+        .unwrap();
+        assert_eq!(initial, vec![management(HELLO, VERSION | VERSION << 16)]);
+        assert_eq!(
+            mgmt(&mut kit, HELLO_REPLY, VERSION | VERSION << 16).unwrap(),
+            vec![management(
+                ROLL_CALL,
+                ROLL_CALL_LAST | 3 | 1 << KDEBUG | 1 << IOREPORTING,
+            )]
+        );
+        mgmt(&mut kit, ROLL_CALL, ROLL_CALL_LAST).unwrap();
+        assert!(
+            kit.attach_cold_system_endpoints(SystemEndpoints::default())
+                .is_err()
+        );
+        assert!(step(&mut kit, IOREPORTING, 7).is_err());
+    }
+
+    #[test]
+    fn late_or_duplicate_native_binding_refuses_before_changing_the_endpoint_map() {
+        let mut kit = RtKit::new(Vec::new(), Management::Enumeration).unwrap();
+        let mut initial = Vec::new();
+        kit.start(&mut initial).unwrap();
+        mgmt(&mut kit, HELLO_REPLY, VERSION | VERSION << 16).unwrap();
+        assert!(
+            kit.attach_cold_system_endpoints(SystemEndpoints {
+                trace: Some(Box::new(Complement)),
+                reporting: Some(Box::new(Complement)),
+            })
+            .is_err()
+        );
+        assert_eq!(kit.bitmap(0), 3);
+        let mut kit = RtKit::with_system_endpoints(
+            Vec::new(),
+            Management::Ordinary,
+            SystemEndpoints {
+                trace: Some(Box::new(Complement)),
+                reporting: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            kit.attach_cold_system_endpoints(SystemEndpoints {
+                trace: None,
+                reporting: Some(Box::new(Complement)),
+            })
+            .is_err()
+        );
+        assert_eq!(kit.bitmap(0), 3 | 1 << KDEBUG);
     }
 
     #[test]
