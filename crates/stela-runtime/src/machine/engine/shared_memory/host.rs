@@ -39,6 +39,9 @@ pub struct ServiceHost<H, T> {
 /// Every submitted frame must be joined and actually recovered before return,
 /// including error paths. Stop/release operate on all actual assigned owners;
 /// a missing native return or effect must fail stopped without freeing loans.
+/// `hold_all` must consume each actual owner's `WorkerOwner::invalidate`
+/// receipt, including its CPU memory barrier, before returning the held cohort.
+/// Opening source-service sessions does not issue another owner fence.
 pub unsafe trait NativeTransport: ServiceTransport {
     fn initialize(
         &mut self,

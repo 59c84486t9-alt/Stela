@@ -78,18 +78,11 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 .transport
                 .fail_stopped("native source Host sessions already active");
         }
-        // Device DMA may read a source PE's last stores before borrowing an
-        // all-writer RAM service. Fence the ACTUAL physical owners now, after
-        // their recovered frames/held publications and before any device work.
-        // A BSP-only fence cannot retire another worker's store buffer.
-        for binding in bindings {
-            if !self.host.select_native_service(binding.worker) {
-                self.host
-                    .transport
-                    .fail_stopped("native DMA visibility lacks an actual held Host owner");
-            }
-            self.host.memory_barrier();
-        }
+        // Each actual owner fenced its last stores in WorkerOwner::invalidate
+        // before publishing the receipt consumed by hold_all. No guest or
+        // device work occurs while these software sessions open. Keep that
+        // completed fence instead of sending another command to every owner.
+        // Later source/controller writes still use their own checked fences.
         Ok(held)
     }
 
