@@ -218,6 +218,11 @@ pub(super) fn plan_with_controller(
     all: &[Interface],
     controller: Option<&Controller>,
 ) -> Result<Plan, &'static str> {
+    if bluetooth::ath3k::is_candidate(device) && interface.number == 0 {
+        return bluetooth::ath3k::Binding::new(device, interface)
+            .map(Plan::BluetoothBootloader)
+            .and_then(|binding| supported(binding, device.speed));
+    }
     let binding = match interface.class {
         audio::CLASS => audio::plan(interface, all, &device.configuration, device.speed)
             .map(Plan::Audio)

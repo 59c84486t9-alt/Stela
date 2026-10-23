@@ -782,6 +782,8 @@ pub struct Found {
     pub links: Vec<cdc::UsbNet>,
     /// Raw physical HCI transports; vendor firmware initialization is unverified.
     pub bluetooth: Vec<bluetooth::UsbHci>,
+    /// Retained pre-HCI upload evidence; never promoted to HCI without rebind.
+    pub bootloaders: Vec<bluetooth::ath3k::UsbBootloader>,
     /// Devices or interfaces no driver here takes, and why.
     pub unused: Vec<(String, &'static str)>,
     pub failures: Vec<(String, BlockError)>,

@@ -213,6 +213,8 @@ pub struct Disks {
     /// USB HCI transports with retained device-specific initialization results.
     /// Historical evidence does not establish radio or guest readiness.
     pub bluetooth: Vec<UsbHci>,
+    /// Raw firmware uploaders awaiting actual USB removal/fresh enumeration.
+    pub bluetooth_bootloaders: Vec<crate::usb::bluetooth::ath3k::UsbBootloader>,
     /// Exact pre-EBS board-variable observation, including unavailable diagnostics.
     pub bluetooth_platform: crate::usb::bluetooth::intel::DsbrCapture,
     /// Network adapters, as raw Ethernet links.
@@ -336,6 +338,7 @@ pub unsafe fn probe_with_provider(
                         disks.usb_devices.extend(found.devices);
                         disks.usb_storage.extend(found.storage);
                         disks.audio.extend(found.audio);
+                        disks.bluetooth_bootloaders.extend(found.bootloaders);
                         for mut device in found.bluetooth {
                             // The retained result owns its evidence/errors;
                             // no catalog borrow or firmware bytes escape.

@@ -119,6 +119,14 @@ pub(crate) fn bind_with_provider(
             }
             Plan::Audio(binding) => audio::UsbAudio::attach(shared.clone(), &device, binding, dma)
                 .map(|owner| found.audio.push(owner)),
+            Plan::BluetoothBootloader(binding) => {
+                bluetooth::ath3k::UsbBootloader::attach(shared.clone(), binding, dma).map(
+                    |mut owner| {
+                        let _ = owner.initialize_with_provider(firmware);
+                        found.bootloaders.push(owner);
+                    },
+                )
+            }
             Plan::Bluetooth(binding) => {
                 bluetooth::UsbHci::attach(shared.clone(), &device, binding, dma)
                     .map(|transport| found.bluetooth.push(transport))
@@ -144,6 +152,8 @@ pub enum Plan {
     VendorEthernet(ethernet::Binding),
     /// Legacy Bluetooth HCI interrupt and bulk endpoints.
     Bluetooth(bluetooth::Binding),
+    /// Pre-HCI raw firmware downloader, terminal until real reenumeration.
+    BluetoothBootloader(bluetooth::ath3k::Binding),
 }
 
 impl Plan {
@@ -164,6 +174,7 @@ impl Plan {
             Self::Ethernet(binding) => binding.endpoints(),
             Self::VendorEthernet(binding) => binding.endpoints(),
             Self::Bluetooth(binding) => binding.endpoints(),
+            Self::BluetoothBootloader(binding) => binding.endpoints(),
         }
     }
 }

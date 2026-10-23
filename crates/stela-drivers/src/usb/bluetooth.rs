@@ -37,6 +37,7 @@
 //! traffic. Incomplete HCI frames have a bounded assembly deadline. Errors close
 //! the transport; failed hardware cancellation retains DMA ownership and prevents
 //! reuse. There is deliberately no generic method to mark firmware "ready".
+pub mod ath3k;
 mod binding;
 pub mod broadcom;
 mod command;
