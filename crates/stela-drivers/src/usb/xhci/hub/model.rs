@@ -394,6 +394,7 @@ impl Hardware {
                 ADDRESS_DEVICE | CONFIGURE_ENDPOINT | EVALUATE_CONTEXT => {
                     let output = read64(self.register64(0x40 + DCBAAP) + u64::from(slot) * 8);
                     self.outputs.insert(slot, output);
+                    let previous_address = read32(output + 12) & 0x7f;
                     let add = read32(parameter + 4);
                     if kind == CONFIGURE_ENDPOINT {
                         let drop = read32(parameter);
@@ -430,6 +431,15 @@ impl Hardware {
                                 .insert((slot, dci as u8), Cursor::new(read64(target + 8)));
                         }
                     }
+                    // Hardware owns the USB address field across Configure
+                    // Endpoint/Evaluate Context; input context zero is not a
+                    // request to clear the address assigned by Address Device.
+                    let address = if kind == ADDRESS_DEVICE {
+                        u32::from(slot) + 32
+                    } else {
+                        previous_address
+                    };
+                    write32(output + 12, read32(output + 12) & !0x7f | address);
                     let words = [
                         read32(output),
                         read32(output + 4),
@@ -558,6 +568,13 @@ impl Hardware {
                     (0..5).filter(|tier| route >> (tier * 4) & 15 != 0).count() as u16
                 );
                 node.depth = Some(value);
+                Ok(Vec::new())
+            }
+            (0x23, 8) => {
+                assert!(node.configured && node.speed == HIGH_SPEED);
+                assert!((1..=node.ports.as_ref().unwrap().len() as u16).contains(&index));
+                assert!(matches!(value >> 11 & 3, 0 | 2));
+                assert_ne!(value >> 4 & 0x7f, 0);
                 Ok(Vec::new())
             }
             (0x23, SET_FEATURE | CLEAR_FEATURE) | (0xa3, GET_STATUS) => {

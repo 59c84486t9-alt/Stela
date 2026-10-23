@@ -14,6 +14,7 @@ mod runtime_tests;
 mod superspeed;
 #[cfg(test)]
 mod tests;
+mod tt;
 mod usb2;
 
 pub(super) fn status_endpoint(device: &Device, interface: &Interface) -> Option<Endpoint> {
