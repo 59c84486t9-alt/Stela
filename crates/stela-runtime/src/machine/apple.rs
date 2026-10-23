@@ -104,7 +104,7 @@ pub use crate::platform::apple::{
     dcp::Log as DisplayLog,
     interrupt::AicInput,
     nor,
-    pmp::native::services::Clock as NativePmpClock,
+    pmp::native::{self as native_pmp, services::Clock as NativePmpClock},
     scanout::{
         ChannelMasks as ScanoutMasks, Mode as ScanoutMode, PixelFormat as ScanoutFormat, Scanout,
     },
