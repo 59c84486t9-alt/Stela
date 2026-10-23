@@ -7,13 +7,13 @@ use super::*;
 
 pub(super) mod descriptor;
 #[cfg(test)]
-mod model;
+pub(super) mod model;
 mod power;
 #[cfg(test)]
 mod runtime_tests;
 mod superspeed;
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 mod tt;
 mod usb2;
 

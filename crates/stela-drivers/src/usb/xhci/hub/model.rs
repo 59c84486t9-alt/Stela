@@ -3,7 +3,7 @@ use super::*;
 use alloc::collections::{BTreeMap, VecDeque};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Fault {
+pub(in super::super) enum Fault {
     None,
     Power,
     PowerAbsent,
@@ -31,7 +31,7 @@ pub(super) enum Fault {
     ResetRecoveryLoss,
 }
 #[derive(Clone)]
-pub(super) struct PortModel {
+pub(in super::super) struct PortModel {
     pub fault: Fault,
     pub child_speed: u8,
     pub status: u16,
@@ -56,7 +56,7 @@ impl PortModel {
     }
 }
 #[derive(Clone)]
-pub(super) struct Node {
+pub(in super::super) struct Node {
     pub speed: u8,
     pub ports: Option<Vec<PortModel>>,
     pub bos: Option<Vec<u8>>,
@@ -280,7 +280,7 @@ fn write32(at: u64, value: u32) {
     // SAFETY: caller has the fixture's device-side ownership of this DMA.
     unsafe { (at as *mut u32).write_volatile(value) }
 }
-pub(super) struct Hardware {
+pub(in super::super) struct Hardware {
     pub nodes: BTreeMap<u32, Node>,
     pub requests: Vec<(u8, u32, [u8; 8])>,
     pub request_times: Vec<u64>,
@@ -850,7 +850,7 @@ impl Hardware {
         }
     }
 }
-pub(super) struct RegistersModel(pub Rc<RefCell<Hardware>>);
+pub(in super::super) struct RegistersModel(pub Rc<RefCell<Hardware>>);
 impl Registers for RegistersModel {
     fn read32(&mut self, at: usize) -> u32 {
         let mut state = self.0.borrow_mut();
