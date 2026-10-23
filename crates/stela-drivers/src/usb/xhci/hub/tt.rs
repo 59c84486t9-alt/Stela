@@ -19,7 +19,15 @@ impl Controller {
     /// STALL, then calls this after Stop/Reset/Set Dequeue and before unpoison.
     /// A failed clear preserves that owner's poison and retained DMA.
     pub(in super::super) fn clear_hub_tt(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
-        self.live_slot(slot)?;
+        self.ready()?;
+        if self.slot_ownership.get(usize::from(slot)) != Some(&reset::Ownership::Enabled) {
+            return Err(BlockError::Unsupported(
+                "USB2 TT clear child slot is not hardware-enabled",
+            ));
+        }
+        // Private cancellation may already have quarantined this child. No
+        // child transfer is published here, so its retiring bit is allowed;
+        // the TT hub itself must still be live for its actual EP0 request.
         let attachment = self.slot(slot)?.attachment;
         let Some((hub, port)) = attachment.translator else {
             return Ok(());
