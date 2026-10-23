@@ -196,6 +196,7 @@ impl Configuration {
 enum Op {
     Effect(Effect),
     ZeroCounter(u32, MetricKind),
+    AssociateGroup(u32),
     RegistrationDone,
     Dispatch,
     TraceRead,
@@ -237,6 +238,7 @@ pub struct Owner<B: Backend> {
     backend: B,
     config: Configuration,
     counters: [[Counter; 2]; 32],
+    associations: [Option<u32>; 32],
     initialized: bool,
     registration_flag: bool,
     active: Option<u32>,
@@ -260,6 +262,7 @@ impl<B: Backend> Owner<B> {
             counters: core::array::from_fn(|_| {
                 core::array::from_fn(|_| Counter(Rc::new(Cell::new(0))))
             }),
+            associations: [None; 32],
             initialized: false,
             registration_flag: true,
             active: None,
@@ -301,6 +304,15 @@ impl<B: Backend> Owner<B> {
             .get(group as usize)
             .ok_or(Error::Contract("MC metric group exceeds source32 slots"))?[kind.index()]
         .clone())
+    }
+    /// Source1004204 row+30 registration metadata. It becomes present only
+    /// after both actual metric registrations for that group retire, and grants
+    /// no event, arrival, readiness or completion authority.
+    pub fn group_association(&self, group: u32) -> Result<Option<u32>, Error> {
+        self.associations
+            .get(group as usize)
+            .copied()
+            .ok_or(Error::Contract("MC metric group exceeds source32 slots"))
     }
     /// Source W32 increments have already been derived from actual sole Samples
     /// by the service; only this source software accumulation occurs here.
@@ -398,6 +410,7 @@ impl<B: Backend> Owner<B> {
                         counter,
                     }));
                 }
+                ops.push(Op::AssociateGroup(group));
             }
         }
         ops.push(Op::RegistrationDone);
@@ -631,6 +644,7 @@ impl<B: Backend> Owner<B> {
                 Op::ZeroCounter(group, kind) => {
                     self.counters[*group as usize][kind.index()].0.set(0)
                 }
+                Op::AssociateGroup(group) => self.associations[*group as usize] = Some(*group),
                 Op::RegistrationDone => self.registration_flag = false,
                 Op::Dispatch => {
                     self.work_pending = false;
@@ -803,6 +817,7 @@ mod tests {
         notifications: u32,
         wait: bool,
         refuse_init: bool,
+        refuse_metric: Option<(u32, MetricKind)>,
     }
     impl Sink {
         fn new() -> Self {
@@ -816,12 +831,19 @@ mod tests {
                 notifications: 0,
                 wait: false,
                 refuse_init: false,
+                refuse_metric: None,
             }
         }
     }
     impl Backend for Sink {
         fn effect(&mut self, r: &Request, e: &Effect, _: &mut Access<'_>) -> Completion<()> {
             self.effects.push((r.clone(), e.clone()));
+            if let Effect::RegisterMetric { group, kind, .. } = e
+                && self.refuse_metric == Some((*group, *kind))
+            {
+                self.refuse_metric = None;
+                return Completion::Refused("authored unavailable metric destination");
+            }
             if matches!(e, Effect::InitializeQueue { .. }) && self.refuse_init {
                 self.refuse_init = false;
                 return Completion::Refused("authored missing native queue resource");
@@ -883,6 +905,9 @@ mod tests {
         o.begin_register(5).unwrap();
         until(&mut o, &s, Progress::Registered);
         assert!(o.registered());
+        assert_eq!(o.group_association(0), Ok(Some(0)));
+        assert_eq!(o.group_association(1), Ok(None));
+        assert_eq!(o.group_association(2), Ok(Some(2)));
         let bindings: Vec<_> = o
             .backend
             .effects
@@ -933,6 +958,31 @@ mod tests {
         until(&mut o, &s, Progress::Registered);
         assert_eq!(o.backend.effects.len(), n);
         assert!(o.begin_register(1).is_err());
+    }
+    #[test]
+    fn group_association_requires_both_registrations_and_preserves_prior_prefix() {
+        let (mut o, s) = initialized();
+        o.backend.refuse_metric = Some((1, MetricKind::Misses));
+        o.begin_register(3).unwrap();
+        assert_eq!(o.group_association(0), Ok(None));
+        step(&mut o, &s).unwrap(); // Group0 Hits retires.
+        assert_eq!(o.group_association(0), Ok(None));
+        step(&mut o, &s).unwrap(); // Group0 Misses retires.
+        assert_eq!(o.group_association(0), Ok(None));
+        step(&mut o, &s).unwrap(); // Associate0, then Group1 Hits.
+        assert_eq!(o.group_association(0), Ok(Some(0)));
+        assert_eq!(o.group_association(1), Ok(None));
+        assert!(matches!(step(&mut o, &s), Err(Error::Backend(_))));
+        assert_eq!(o.group_association(0), Ok(Some(0)));
+        assert_eq!(o.group_association(1), Ok(None));
+        assert!(!o.registered());
+        let refused = o.backend.effects.last().unwrap().0.clone();
+        step(&mut o, &s).unwrap();
+        assert!(refused.same_operation(&o.backend.effects.last().unwrap().0));
+        assert_eq!(o.group_association(1), Ok(None));
+        assert_eq!(step(&mut o, &s), Ok(Progress::Registered));
+        assert_eq!(o.group_association(1), Ok(Some(1)));
+        assert!(o.group_association(32).is_err());
     }
     #[test]
     fn schedule_deduplicates_without_inline_callback_and_fast_cleanup_notifies() {
@@ -1218,6 +1268,7 @@ mod original_tests {
             (0x1007dfc, 0xf9400000),
             (0x1004170, 0x394f1268),
             (0x10041d0, 0x52800043),
+            (0x1004204, 0xb8396918),
             (0x10302f4, 0xd5033bbf),
             (0x10302f8, 0x39000409),
             (0x102ff10, 0x3900077f),
