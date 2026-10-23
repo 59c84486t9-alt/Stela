@@ -2,3 +2,4 @@
 //! ownership of a remapper, requester, physical page or hardware completion.
 pub mod format;
 pub mod ivrs;
+pub mod memory;
