@@ -145,8 +145,11 @@ impl StoppedRequester {
     /// mapping/root epoch for one DMA domain. No new function or access path is
     /// manufactured. A private flag forbids a second safe split. Any failure
     /// returns the same original stopped owner.
-    /// The driver must not reset, remove or reassign this epoch while the DMA
-    /// binding survives; retaining a mapping cannot itself stop config resets.
+    /// The sole original owner must not reset, remove or reassign in a way
+    /// invalidating the retained resource/routing/coherency/translation epoch.
+    /// Only a specifically qualified bounded reset preserving those owners and
+    /// ATS/NoSnoop policy is admissible. Reset supplies neither stopped/drained
+    /// proof nor remapper completion; retaining a mapping cannot enforce it.
     pub fn into_dma_binding(mut self) -> Result<(Self, RequesterBinding), (ClaimError, Self)> {
         if self.dma_bound {
             return Err((ClaimError::AlreadyBound, self));
