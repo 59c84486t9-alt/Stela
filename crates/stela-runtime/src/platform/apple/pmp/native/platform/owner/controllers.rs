@@ -1101,71 +1101,79 @@ mod tests {
     #[test]
     fn provider_cache_rejects_unbound_and_other_recipient_masks_even_on_same_ptd() {
         use crate::platform::apple::pmp::native;
+        use core::cell::Cell;
         use native::platform::counter_cache::Cache;
-        let (fixture, _, _, _) = cache_fixture();
+        use native::platform::counter_cache::Claim;
+        let (fixture, _, actual_cache, actual_manager) = cache_fixture();
         let selected = [1, 2, 3, 4, 5, 6, 7, 8, 0, 10, 11, 12, 13, 14, 0];
-        let make = || {
+        assert!(matches!(
             native::Owner::initialized(
                 fixture.notifications().clone(),
                 selected,
                 MissingNativeResources,
+            ),
+            Err(native::Error::Contract(
+                "PTD actual bank already admitted its native PMP recipient"
+            ))
+        ));
+        let local = fixture.notifications().clone();
+        let ranges = local.bank().ranges();
+        let recipient = Rc::new(());
+        let alive = Rc::new(Cell::new(true));
+        // Explicit hostile test-only claims through native-private constructors.
+        // A second real NativeOwner cannot be admitted on this PTD.
+        let claim = |identity: Rc<()>| {
+            Claim::new(
+                identity,
+                local.clone(),
+                core::array::from_fn(|i| ranges.iter().find(|r| r.id == i as u32 + 5).cloned()),
+                alive.clone(),
             )
-            .unwrap()
         };
-        // Same PTD object deliberately; native recipient identity must also match.
-        let mut native = make();
-        let mut foreign = make();
         let bound = Manager::initialized_for_native(
             configuration(&[], &[], &[]),
             Device(Rc::new(RefCell::new(DeviceState::default()))),
             Queries(Rc::new(RefCell::new(QueryState::default()))),
-            native.claim_manager_read_masks().unwrap(),
+            ManagerClaim::new(recipient.clone(), local.clone(), alive.clone()),
         )
         .unwrap();
         let top = || core::array::from_fn(|_| alloc::vec![0; 8]);
-        assert!(
-            Cache::initialized(
-                foreign.claim_provider_frames().unwrap(),
-                &[[1; 4]],
-                bound.read_masks(),
-                top()
-            )
-            .is_err()
-        );
-        // Rejection must not claim or mutate the same source storage.
+        assert!(matches!(
+            Cache::initialized(claim(Rc::new(())), &[[1; 4]], bound.read_masks(), top()),
+            Err("provider cache and manager G540 have different native recipients")
+        ));
         assert_eq!(bound.scratch(), [0; 32]);
-        assert!(
-            Cache::initialized(
-                native.claim_provider_frames().unwrap(),
-                &[[1; 4]],
-                bound.read_masks(),
-                top()
-            )
-            .is_ok()
-        );
-        let mut unbound_native = make();
+        let accepted = Cache::initialized(
+            claim(recipient.clone()),
+            &[[1; 4]],
+            bound.read_masks(),
+            top(),
+        )
+        .unwrap();
+        assert_eq!(accepted.consumed(), 0);
         let (unbound, _, _) = manager(configuration(&[], &[], &[]));
-        assert!(
-            Cache::initialized(
-                unbound_native.claim_provider_frames().unwrap(),
-                &[[1; 4]],
-                unbound.read_masks(),
-                top()
-            )
-            .is_err()
-        );
+        assert!(matches!(
+            Cache::initialized(claim(recipient), &[[1; 4]], unbound.read_masks(), top()),
+            Err("provider cache requires a native-bound manager G540")
+        ));
+        assert_eq!(actual_cache.consumed(), 0);
+        assert_eq!(actual_manager.scratch(), [0; 32]);
     }
     #[test]
     fn provider_cache_refuses_another_native_capture_on_the_same_actual_ptd() {
         use crate::platform::apple::pmp::native;
         use native::{counters::Frames, power::DeviceTable};
         let (native, mut own_frames, mut cache, mut manager) = cache_fixture();
-        let mut foreign = native::Owner::initialized(
-            native.notifications().clone(),
-            [1, 2, 3, 4, 5, 6, 7, 8, 0, 10, 11, 12, 13, 14, 0],
-            MissingNativeResources,
-        )
-        .unwrap();
+        assert!(matches!(
+            native::Owner::initialized(
+                native.notifications().clone(),
+                [1, 2, 3, 4, 5, 6, 7, 8, 0, 10, 11, 12, 13, 14, 0],
+                MissingNativeResources,
+            ),
+            Err(native::Error::Contract(
+                "PTD actual bank already admitted its native PMP recipient"
+            ))
+        ));
         let profile = native::platform::authored_profile();
         let raw: Vec<u8> = profile
             .descriptors()
@@ -1173,9 +1181,20 @@ mod tests {
             .flat_map(|d| d.raw_soc_device().iter().flat_map(|w| w.to_le_bytes()))
             .collect();
         let table = DeviceTable::from_properties(&raw, &0x3fff0u64.to_le_bytes(), None).unwrap();
-        let mut foreign_frames =
-            Frames::initialized(foreign.claim_counter_frames().unwrap(), &table, &[0; 144])
-                .unwrap();
+        // Explicit hostile test-only claim: no second native recipient exists.
+        // Same physical PTD, but a fresh foreign liveness Rc must be rejected.
+        let foreign_claim = native::counters::Claim::new(
+            native.notifications().clone(),
+            native
+                .notifications()
+                .bank()
+                .ranges()
+                .into_iter()
+                .find(|r| r.id == 10)
+                .unwrap(),
+            Rc::new(core::cell::Cell::new(true)),
+        );
+        let mut foreign_frames = Frames::initialized(foreign_claim, &table, &[0; 144]).unwrap();
         assert!(
             native
                 .notifications()
@@ -1190,20 +1209,19 @@ mod tests {
         let mut irq = InterruptLatch::default();
         let mut access = Access::new(0, 25, &mut irq);
         let foreign_capture = foreign_frames.capture_pending(&access).unwrap();
-        assert!(
-            cache
-                .bind_capture(&foreign_frames, &foreign_capture)
-                .is_err()
+        assert_eq!(
+            cache.bind_capture(&foreign_frames, &foreign_capture),
+            Err("PMP frames belong to a different actual native recipient")
         );
         let own_capture = own_frames.capture_pending(&access).unwrap();
         cache.bind_capture(&own_frames, &own_capture).unwrap();
         assert!(matches!(
             cache.read(&foreign_frames, &foreign_capture, 2, 0, &mut access),
-            Completion::Refused(_)
+            Completion::Refused("PMP frames belong to a different actual native recipient")
         ));
         assert!(matches!(
             cache.read_bound(&foreign_frames, 2, 0, &mut access),
-            Completion::Refused(_)
+            Completion::Refused("PMP frames belong to a different actual native recipient")
         ));
         assert_eq!(cache.consumed(), 0);
         assert_eq!(manager.scratch(), [0; 32]);
