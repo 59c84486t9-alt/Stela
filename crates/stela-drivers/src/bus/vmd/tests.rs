@@ -12,6 +12,7 @@ struct Model {
     child: BTreeMap<usize, u8>,
     table: BTreeMap<u64, u32>,
     writes: Vec<(u8, usize, u8, u32)>,
+    parent_reads: Arc<std::sync::Mutex<Vec<(u16, u8)>>>,
     fail_table: bool,
     drops: Arc<AtomicUsize>,
 }
@@ -28,6 +29,7 @@ impl Model {
             child: BTreeMap::new(),
             table: BTreeMap::new(),
             writes: Vec::new(),
+            parent_reads: Arc::new(std::sync::Mutex::new(Vec::new())),
             fail_table: false,
             drops: Arc::new(AtomicUsize::new(0)),
         };
@@ -69,6 +71,7 @@ impl Drop for Model {
 // SAFETY: this is an isolated stateful model, never physical hardware authority.
 unsafe impl Registers for Model {
     fn parent_read(&mut self, offset: u16, width: u8) -> Result<u32, Error> {
+        self.parent_reads.lock().unwrap().push((offset, width));
         let mut value = 0;
         for i in 0..usize::from(width) {
             value |= u32::from(self.parent[usize::from(offset) + i]) << (i * 8);
@@ -163,6 +166,129 @@ fn shadow_zero_is_a_real_translation_except_for_bios_info() {
         host.windows()[1].translate(0x1000_2000, 16),
         Err(Error::Address)
     );
+}
+
+fn shadow_capability(model: &mut Model, offset: u16, length: u8, next: u8) {
+    model.set(6, 2, 0x10);
+    model.set(0x34, 1, u32::from(offset));
+    model.set(
+        usize::from(offset),
+        2,
+        u32::from(VENDOR_CAPABILITY) | u32::from(next) << 8,
+    );
+    model.set(usize::from(offset) + 2, 1, u32::from(length));
+    model.set(usize::from(offset) + 4, 4, SHADOW_SIGNATURE);
+    if usize::from(offset) + 24 <= 256 {
+        model.set(usize::from(offset) + 8, 4, 0x1000_0000);
+        model.set(usize::from(offset) + 12, 4, 0);
+        model.set(usize::from(offset) + 16, 4, 0x2000_0000);
+        model.set(usize::from(offset) + 20, 4, 0);
+    }
+}
+
+#[test]
+fn vendor_shadow_requires_its_complete_declared_payload() {
+    for offset in [0x80, 0xe8] {
+        let mut model = Model::new(0x201d);
+        shadow_capability(&mut model, offset, 24, 0);
+        let host = start(model);
+        assert_eq!(host.windows()[0].bus_start, 0x1000_0000);
+        assert_eq!(host.windows()[1].bus_start, 0x2000_2000);
+    }
+    for length in 3..8 {
+        let mut model = Model::new(0x201d);
+        shadow_capability(&mut model, 0x80, length, 0);
+        let reads = model.parent_reads.clone();
+        let host = start(model);
+        // Valid short vendor data never advertises a complete SHDW signature.
+        // Poison bytes beyond its Length must not become window translations.
+        assert_eq!(host.windows()[0].bus_start, 0x8000_0000);
+        assert_eq!(host.windows()[1].bus_start, 0x9000_2000);
+        assert!(
+            reads
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(offset, _)| !(0x84..0x98).contains(offset))
+        );
+    }
+    for length in (0..3).chain(8..24) {
+        let mut model = Model::new(0x201d);
+        shadow_capability(&mut model, 0x80, length, 0);
+        let reads = model.parent_reads.clone();
+        assert!(matches!(
+            Host::initialize(model),
+            Err((Error::Capability, None))
+        ));
+        assert!(
+            reads
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(offset, _)| !(0x88..0x98).contains(offset))
+        );
+    }
+    let mut model = Model::new(0x201d);
+    shadow_capability(&mut model, 0xec, 24, 0);
+    let reads = model.parent_reads.clone();
+    assert!(matches!(
+        Host::initialize(model),
+        Err((Error::Capability, None))
+    ));
+    assert!(
+        !reads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(offset, _)| *offset >= 0xf0)
+    );
+}
+
+#[test]
+fn vendor_shadow_cannot_hide_overlapping_or_cyclic_capability_links() {
+    for next in [0x80, 0x84, 0x88, 0x94] {
+        let mut model = Model::new(0x201d);
+        shadow_capability(&mut model, 0x80, 24, next);
+        let reads = model.parent_reads.clone();
+        assert!(matches!(
+            Host::initialize(model),
+            Err((Error::Capability, None))
+        ));
+        assert!(
+            reads
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(offset, _)| !(0x88..0x98).contains(offset))
+        );
+    }
+    for next in [0x80u8, 0x88] {
+        let mut model = Model::new(0x201d);
+        shadow_capability(&mut model, 0x80, 24, 0xb0);
+        model.set(0xb0, 2, 1 | u32::from(next) << 8);
+        let reads = model.parent_reads.clone();
+        assert!(matches!(
+            Host::initialize(model),
+            Err((Error::Capability, None))
+        ));
+        assert!(
+            reads
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(offset, _)| !(0x88..0x98).contains(offset))
+        );
+    }
+    let mut model = Model::new(0x201d);
+    shadow_capability(&mut model, 0x80, 24, 0xa0);
+    model.set(0xa0, 2, 1);
+    let mut host = start(model);
+    assert_eq!(host.windows()[0].bus_start, 0x1000_0000);
+    // The valid trailing PM header is actually traversed before addresses.
+    let reads = host.io().parent_reads.lock().unwrap();
+    let pm = reads.iter().position(|read| *read == (0xa0, 2)).unwrap();
+    let address = reads.iter().position(|read| *read == (0x88, 4)).unwrap();
+    assert!(pm < address);
 }
 
 #[test]

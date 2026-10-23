@@ -26,6 +26,10 @@ const MEMORY: u16 = 2;
 const BUS_MASTER: u16 = 4;
 const INTX_DISABLE: u16 = 1 << 10;
 const MSI_BYPASS: u16 = 2;
+const VENDOR_CAPABILITY: u8 = 9;
+const VENDOR_HEADER_BYTES: u16 = 3;
+const SHADOW_SIGNATURE_BYTES: u16 = 8;
+const SHADOW_CAPABILITY_BYTES: u16 = 24;
 const SHADOW_SIGNATURE: u32 = 0x5348_4457;
 const BUS_BYTES: u64 = 1 << 20;
 static NEXT_DOMAIN: AtomicU32 = AtomicU32::new(0x1_0000);
@@ -128,6 +132,9 @@ impl Window {
 /// config writes. No config access occurs from IRQ context or outside the sole
 /// mutable host owner; this exclusion serializes the entire CFGBAR, not each
 /// child separately. A failed effect must retain the original owners.
+/// The original stopped-requester owner qualifies the complete standard
+/// capability framing before native attachment; vendor Length fields still
+/// bound every vendor-specific read performed here.
 pub unsafe trait Registers {
     fn parent_read(&mut self, offset: u16, width: u8) -> Result<u32, Error>;
     fn parent_write(&mut self, offset: u16, width: u8, value: u32) -> Result<(), Error>;
@@ -355,33 +362,73 @@ impl<R: Registers> Host<R> {
             return Ok([None; 2]);
         }
         let mut offset = self.io().parent_read(0x34, 1)? as u16;
-        let mut visited = [false; 256];
+        let mut occupied = [false; 256];
+        let mut first_vendor = true;
+        let mut selected = None;
         while offset != 0 {
-            if !(0x40..=0xfc).contains(&offset) || offset & 3 != 0 || visited[usize::from(offset)] {
+            if !(0x40..=0xfc).contains(&offset) || offset & 3 != 0 || occupied[usize::from(offset)]
+            {
                 return Err(Error::Capability);
             }
-            visited[usize::from(offset)] = true;
             let header = self.io().parent_read(offset, 2)?;
-            if header as u8 == 9 {
-                if offset > 0xe8 {
+            if header == u32::from(u16::MAX) {
+                return Err(Error::ReadFailed);
+            }
+            let vendor = header as u8 == VENDOR_CAPABILITY;
+            let bytes = if vendor {
+                let bytes = self.io().parent_read(offset + 2, 1)? as u16;
+                if bytes < VENDOR_HEADER_BYTES {
                     return Err(Error::Capability);
                 }
-                if self.io().parent_read(offset + 4, 4)? == SHADOW_SIGNATURE {
-                    let mut values = [None; 2];
-                    for (i, value) in values.iter_mut().enumerate() {
-                        let base = offset + 8 + i as u16 * 8;
-                        *value = Some(
-                            u64::from(self.io().parent_read(base, 4)?)
-                                | u64::from(self.io().parent_read(base + 4, 4)?) << 32,
-                        );
-                    }
-                    return Ok(values);
-                }
-                return Ok([None; 2]);
+                bytes
+            } else {
+                // Native stopped-requester admission checks the other complete
+                // capability bodies. Retain their headers here so a later
+                // vendor extent cannot hide a previously traversed link.
+                2
+            };
+            let end = offset
+                .checked_add(bytes)
+                .filter(|end| *end <= 256)
+                .ok_or(Error::Capability)?;
+            let span = &mut occupied[usize::from(offset)..usize::from(end)];
+            if span.iter().any(|used| *used) {
+                return Err(Error::Capability);
             }
-            offset = (header >> 8) as u16;
+            span.fill(true);
+            let next = (header >> 8) as u16;
+            if next != 0 && (offset..end).contains(&next) {
+                return Err(Error::Capability);
+            }
+            if vendor && first_vendor {
+                first_vendor = false;
+                // Match the donor's first vendor capability, without reading
+                // a signature outside its advertised payload.
+                if bytes >= SHADOW_SIGNATURE_BYTES
+                    && self.io().parent_read(offset + 4, 4)? == SHADOW_SIGNATURE
+                {
+                    if bytes < SHADOW_CAPABILITY_BYTES {
+                        return Err(Error::Capability);
+                    }
+                    selected = Some(offset);
+                }
+            }
+            offset = next;
         }
-        Ok([None; 2])
+        // Follow the complete list before consuming addresses: a later link
+        // back into the SHDW body must not turn register bytes into windows.
+        let Some(offset) = selected else {
+            return Ok([None; 2]);
+        };
+        let mut values = [None; 2];
+        for (i, value) in values.iter_mut().enumerate() {
+            let base = offset + 8 + i as u16 * 8;
+            *value = Some(
+                u64::from(self.io().parent_read(base, 4)?)
+                    | u64::from(self.io().parent_read(base + 4, 4)?) << 32,
+            );
+        }
+        Ok(values)
     }
     pub fn domain(&self) -> u32 {
         self.domain
