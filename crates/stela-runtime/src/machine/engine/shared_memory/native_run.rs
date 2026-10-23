@@ -46,6 +46,17 @@ pub struct ArtifactCacheStats {
     pub entries: usize,
 }
 
+/// Every input to the immutable per-word admission decision. The table's
+/// private lookup data is derived solely from its chip and withheld features;
+/// the profile chip independently selects access checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AdmissionPolicy {
+    profile_chip: crate::machine::Chip,
+    table_chip: crate::machine::Chip,
+    withheld: u64,
+    asimd: bool,
+}
+
 /// Source-independent identity, captured anew while the actual PE is owned.
 /// The cache itself lives in exactly that PE's canonical-memory owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +65,7 @@ struct ArtifactKey {
     pc: u64,
     worker: publication::WorkerId,
     profile: &'static str,
+    admission: AdmissionPolicy,
     controls_sha256: Arc<str>,
     compiler_source_sha256: &'static str,
     abi: &'static str,
@@ -564,6 +576,12 @@ fn prepare<'a>(
         pc,
         worker: binding.worker,
         profile: cpu_profile.name,
+        admission: AdmissionPolicy {
+            profile_chip: cpu_profile.chip,
+            table_chip: admit.chip(),
+            withheld: admit.withheld(),
+            asimd,
+        },
         controls_sha256: controls.shared_identity(),
         compiler_source_sha256: stela_compiler::SOURCE_SHA256,
         abi: profile.abi(),
@@ -599,13 +617,12 @@ fn prepare<'a>(
         let mut staging = [0; super::super::MAX_BLOCK_BYTES as usize];
         let input = staging.get_mut(..bytes).ok_or(MemoryStatus::Domain)?;
         memory.fetch(&controls, pc, input)?;
-        (input == artifact.source.as_slice()
-            && input
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .all(|raw| admitted(u32::from_le_bytes(*raw))))
-        .then_some(artifact)
+        // The immutable artifact was admitted in full before construction.
+        // Exact bytes and the fresh key above bind every pure decoder input:
+        // both actual chips, withheld features and effective ASIMD permission.
+        // Reuse only that decoder result; the source walk, BTYPE entry check,
+        // current controls and physical execution authority remain separate.
+        (input == artifact.source.as_slice()).then_some(artifact)
     } else {
         None
     };
@@ -1242,6 +1259,104 @@ mod artifact_tests {
             &changed.source[changed_offset..changed_offset + 4],
             &0x91000400u32.to_le_bytes()
         );
+    }
+
+    #[test]
+    fn unchanged_source_requires_both_actual_chip_policies_and_withheld_features() {
+        let (mut machine, _) = fixture();
+        let first = prepare_artifact(&mut machine, BINDING).unwrap();
+        let chip = machine.profile.chip;
+        let table = Arc::clone(&machine.admit_table);
+        machine.profile.chip = crate::machine::Chip::AppleM2;
+        let profile = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(!Arc::ptr_eq(&first, &profile));
+        assert_ne!(
+            first.key.admission.profile_chip,
+            profile.key.admission.profile_chip
+        );
+        assert_eq!(
+            first.identity.controls_sha256,
+            profile.identity.controls_sha256
+        );
+        assert_eq!(first.source, profile.source);
+        machine.profile.chip = chip;
+        machine.admit_table = Arc::new(
+            crate::machine::Chip::AppleM2
+                .admit_table(table.withheld())
+                .unwrap(),
+        );
+        let table_chip = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(!Arc::ptr_eq(&first, &table_chip));
+        assert_ne!(
+            first.key.admission.table_chip,
+            table_chip.key.admission.table_chip
+        );
+        assert_eq!(first.source, table_chip.source);
+        let withheld = table.withheld() ^ (1 << crate::machine::system::Feature::FEAT_WFxT as u64);
+        machine.admit_table = Arc::new(table.chip().admit_table(withheld).unwrap());
+        let features = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(!Arc::ptr_eq(&first, &features));
+        assert_ne!(
+            first.key.admission.withheld,
+            features.key.admission.withheld
+        );
+        assert_eq!(first.source, features.source);
+        machine.admit_table = table;
+        assert!(Arc::ptr_eq(
+            &first,
+            &prepare_artifact(&mut machine, BINDING).unwrap()
+        ));
+    }
+
+    #[test]
+    fn unchanged_fp_source_cannot_reuse_admission_after_permission_is_revoked() {
+        let (mut machine, ram) = fixture();
+        machine
+            .cpu
+            .registers
+            .set_raw(Register::CPACR_EL1, 0, 3 << 20);
+        machine
+            .cpu
+            .registers
+            .set_raw(Register::CPTR_EL2, 0, 3 << 20);
+        let words = [0x91000400u32, 0x9e670000, 0x14000000]; // ADD; FMOV D0,X0; B .
+        let source: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        unsafe { ram.publish_physical(DATA, &source) }.unwrap();
+        let enabled = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(enabled.key.admission.asimd);
+        assert_eq!(enabled.source, source);
+        assert!(Arc::ptr_eq(
+            &enabled,
+            &prepare_artifact(&mut machine, BINDING).unwrap()
+        ));
+        machine.cpu.registers.set_raw(Register::CPTR_EL2, 0, 0);
+        let denied = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(!denied.key.admission.asimd);
+        assert!(!Arc::ptr_eq(&enabled, &denied));
+        // The changed policy stops before the unadmitted later FP instruction,
+        // retaining only the real GPR prefix despite unchanged canonical bytes.
+        assert_eq!(denied.source, source[..4]);
+    }
+
+    #[test]
+    fn changed_later_source_is_readmitted_before_any_cached_decoder_proof_is_reused() {
+        let (mut machine, ram) = fixture();
+        let source: Vec<_> = [0x91000400u32, 0x91000421, 0x14000000]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        unsafe { ram.publish_physical(DATA, &source) }.unwrap();
+        let first = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(Arc::ptr_eq(
+            &first,
+            &prepare_artifact(&mut machine, BINDING).unwrap()
+        ));
+        // An unallocated nonzero top-level group is denied by AdmitTable,
+        // rather than being mistaken for the existing artifact's admitted word.
+        unsafe { ram.publish_physical(DATA + 4, &0x02000000u32.to_le_bytes()) }.unwrap();
+        let changed = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(!Arc::ptr_eq(&first, &changed));
+        assert_eq!(changed.source, source[..4]);
     }
     #[test]
     fn new_host_points_cut_a_warm_artifact_before_the_observed_instruction() {

@@ -123,6 +123,11 @@ impl AdmitTable {
     const SHIFT: u32 = 21;
     const PREFIXES: usize = 1 << (32 - Self::SHIFT);
 
+    /// The actual immutable chip policy used to construct this table.
+    pub fn chip(&self) -> Chip {
+        self.chip
+    }
+
     /// [`Chip::admit`] of the table's chip, where the forms of the features
     /// its PE withholds are absent too.
     pub fn admit(&self, word: u32) -> u32 {
@@ -459,6 +464,7 @@ mod tests {
     fn the_admit_table_answers_as_the_full_search() {
         for chip in Chip::ALL {
             let table = chip.admit_table(0).unwrap();
+            assert_eq!(table.chip(), chip);
             for group in forms::ABSENT {
                 for form in group.forms {
                     for word in [form.value, form.value | !group.mask] {
