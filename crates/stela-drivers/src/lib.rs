@@ -29,15 +29,6 @@
 #[macro_use]
 extern crate alloc;
 
-// The same platform allocator used by the GPU Linux API, compiled once even
-// when GPU and non-GPU ports are selected together.
-#[cfg(all(
-    feature = "linux-i801",
-    not(any(feature = "amd-port", feature = "intel-port"))
-))]
-#[path = "gpu/linux.rs"]
-mod linux_heap;
-
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     ops::Range,
