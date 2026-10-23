@@ -21,6 +21,26 @@ pub(super) struct NativePmpServices {
 }
 
 impl AppleDevices {
+    /// Optional system endpoints must not advertise an AP-buffer protocol
+    /// whose source DART filter cannot yet perform its memory effects. The
+    /// existing application endpoint remains independently usable.
+    pub fn native_pmp_system_endpoint_refusal(
+        board: &Board,
+    ) -> Result<Option<&'static str>, String> {
+        let pmp = board
+            .pmp
+            .as_ref()
+            .ok_or("native PMP descriptor is missing")?;
+        let route = pmp.dma_route(&board.darts)?;
+        let dart = board
+            .darts
+            .get(route.iommu)
+            .ok_or("native PMP DART is missing")?;
+        Ok(dart.apf.is_some().then_some(
+            "PMP reporting/trace endpoints unavailable: active DART address permission filtering is unqualified; no AP buffer service is advertised",
+        ))
+    }
+
     /// Join before the first guest instruction, after every actual device is
     /// placed and before RTKit enumeration. Retains the existing ASC session.
     ///
@@ -36,6 +56,9 @@ impl AppleDevices {
         configuration: ExplicitRuntimeConfiguration,
         clock: Clock,
     ) -> Result<(), String> {
+        if let Some(reason) = Self::native_pmp_system_endpoint_refusal(board)? {
+            return Err(reason.into());
+        }
         if self.native_pmp_services.is_some() || self.native_pmp_dma.is_some() {
             return Err("native PMP services are already bound".into());
         }

@@ -1898,44 +1898,53 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         && let (Some(board), Some(intake), Some(tree)) =
             (board.as_ref(), loaded_source.as_ref(), tree)
     {
-        use stela_runtime::machine::apple::{
-            ExplicitRuntimeConfiguration, NativePmpClock, SourceProvenance,
-        };
-        let pmp = board
-            .pmp
-            .as_ref()
-            .unwrap_or_else(|| output::fatal("native memory's PMP descriptor is missing"));
-        let source = SourceProvenance::from_trees(intake.original(), tree, pmp)
+        let refusal = AppleDevices::native_pmp_system_endpoint_refusal(board)
             .unwrap_or_else(|error| output::fatal(&error));
-        let observation = native_processors
-            .expect("validated native roster")
-            .snapshots[0]
-            .get(1, 0)
-            .unwrap_or_else(|| {
-                output::fatal("native PMP has no actual admitted CPUID leaf1 observation")
-            });
-        let configuration = ExplicitRuntimeConfiguration::from_observed_cpuid(
-            source,
-            observation.ebx,
-            observation.edx,
-        )
-        .unwrap_or_else(|error| output::fatal(&error));
-        // This is the native Stela Host's actual configured counter source,
-        // with an explicit software offset0, not an Apple frequency observation.
-        let clock = NativePmpClock::new(host::fresh_counter, host::COUNTER_HZ as u32, 0)
-            .unwrap_or_else(|error| output::fatal(error));
-        // SAFETY: cold before first guest/frame publication; same canonical
-        // RAM, parked real APs and exclusive closed devices. Every later
-        // transfer runs under actual held/fenced canonical worker sessions.
-        unsafe {
-            devices.bind_native_pmp_services(
-                board,
-                alloc::sync::Arc::clone(&canonical_ram),
-                configuration,
-                clock,
+        if let Some(reason) = refusal {
+            output::arguments(format_args!("UNMODELED {reason}\n"));
+            if options.strict {
+                output::fatal(reason);
+            }
+        } else {
+            use stela_runtime::machine::apple::{
+                ExplicitRuntimeConfiguration, NativePmpClock, SourceProvenance,
+            };
+            let pmp = board
+                .pmp
+                .as_ref()
+                .unwrap_or_else(|| output::fatal("native memory's PMP descriptor is missing"));
+            let source = SourceProvenance::from_trees(intake.original(), tree, pmp)
+                .unwrap_or_else(|error| output::fatal(&error));
+            let observation = native_processors
+                .expect("validated native roster")
+                .snapshots[0]
+                .get(1, 0)
+                .unwrap_or_else(|| {
+                    output::fatal("native PMP has no actual admitted CPUID leaf1 observation")
+                });
+            let configuration = ExplicitRuntimeConfiguration::from_observed_cpuid(
+                source,
+                observation.ebx,
+                observation.edx,
             )
+            .unwrap_or_else(|error| output::fatal(&error));
+            // This is the native Stela Host's actual configured counter source,
+            // with an explicit software offset0, not an Apple frequency observation.
+            let clock = NativePmpClock::new(host::fresh_counter, host::COUNTER_HZ as u32, 0)
+                .unwrap_or_else(|error| output::fatal(error));
+            // SAFETY: cold before first guest/frame publication; same canonical
+            // RAM, parked real APs and exclusive closed devices. Every later
+            // transfer runs under actual held/fenced canonical worker sessions.
+            unsafe {
+                devices.bind_native_pmp_services(
+                    board,
+                    alloc::sync::Arc::clone(&canonical_ram),
+                    configuration,
+                    clock,
+                )
+            }
+            .unwrap_or_else(|error| output::fatal(&error));
         }
-        .unwrap_or_else(|error| output::fatal(&error));
     }
     let processor_power = match (&topology_source, &assigned, &loaded_source) {
         (Some(source), Some(assigned), Some(intake)) => {
