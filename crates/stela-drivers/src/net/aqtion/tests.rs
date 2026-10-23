@@ -2144,6 +2144,7 @@ mod registers_oracle {
                     writes: Cell::new(0),
                 },
                 timer: NoDelay,
+                reset_ownership: Cell::new(firmware::ResetOwnership::default()),
             };
             match spec.access {
                 Access::Get(_) => assert_eq!(
