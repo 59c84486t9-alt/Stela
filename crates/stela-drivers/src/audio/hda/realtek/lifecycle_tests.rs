@@ -456,7 +456,19 @@ mod realtek_owned_models {
             controller
                 .configure_realtek_route(&graph, &route, stream, 0, playback())
                 .unwrap();
-            assert_eq!(model.borrow().route_controls[&(0x14, 0xf01)], 0);
+            assert_eq!(route.nodes(), &[0x14, 0x0c, 2]);
+            // The donor's sole observed connection needs no selector write.
+            // Read the actual peer through CORB/RIRB rather than assuming a
+            // successful GET inserted an entry in its sparse write map.
+            assert_eq!(
+                controller
+                    .verb(Verb::short(graph.address, 0x14, 0xf01, 0).unwrap())
+                    .unwrap(),
+                0
+            );
+            assert!(!model.borrow().command_times.iter().any(|(command, _)| {
+                (command >> 20) & 127 == 0x14 && (command >> 8) & 0xfff == 0x701
+            }));
             controller.shutdown().unwrap();
             assert_eq!(model.borrow().route_controls[&(0x14, 0xf0c)], 0);
             controller.reinitialize().unwrap();
@@ -533,6 +545,11 @@ mod realtek_owned_models {
                 realtek_headphone_model(id, true)
             };
             model.borrow_mut().coefficients.insert((0x20, 0), zero);
+            if matches!(id, 0x10ec_0255 | 0x10ec_0256 | 0x10ec_0257) {
+                // Force the real startup clear and preserve unrelated bits.
+                // ALC257 later skips the shutdown set, as in alc256_shutup.
+                model.borrow_mut().coefficients.insert((0x20, 0x46), 0xb5a5);
+            }
             let mut controller = create(&model, &mut fixture, config()).unwrap();
             let graph = controller.enumerate_codec(0).unwrap();
             let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
@@ -573,6 +590,16 @@ mod realtek_owned_models {
                 controller.stop(capture).unwrap();
                 controller.stop(out).unwrap();
             }
+            let pull_writes_before_shutdown = model
+                .borrow()
+                .coefficient_events
+                .iter()
+                .filter(|(node, index, _, _)| *node == 0x20 && *index == 0x46)
+                .count();
+            if matches!(id, 0x10ec_0255 | 0x10ec_0256 | 0x10ec_0257) {
+                assert_eq!(model.borrow().coefficients[&(0x20, 0x46)], 0x85a5);
+                assert_eq!(pull_writes_before_shutdown, 1);
+            }
             let shutdown_start = model.borrow().clock.now_us();
             controller.shutdown().unwrap();
             let elapsed = model.borrow().clock.now_us().wrapping_sub(shutdown_start);
@@ -593,14 +620,21 @@ mod realtek_owned_models {
                     0x24
                 }
             );
-            if matches!(id, 0x10ec_0255 | 0x10ec_0256) {
+            if matches!(id, 0x10ec_0255 | 0x10ec_0256 | 0x10ec_0257) {
+                let retained = model.borrow();
                 assert_eq!(
-                    model.borrow().coefficients[&(0x20, 0x46)] & (3 << 12),
-                    3 << 12
+                    retained.coefficients[&(0x20, 0x46)],
+                    if id == 0x10ec_0257 { 0x85a5 } else { 0xb5a5 }
                 );
-            }
-            if id == 0x10ec_0257 {
-                assert_eq!(model.borrow().coefficients[&(0x20, 0x46)] & (3 << 12), 0);
+                let pull_writes_after_shutdown = retained
+                    .coefficient_events
+                    .iter()
+                    .filter(|(node, index, _, _)| *node == 0x20 && *index == 0x46)
+                    .count();
+                assert_eq!(
+                    pull_writes_after_shutdown - pull_writes_before_shutdown,
+                    usize::from(id != 0x10ec_0257)
+                );
             }
             controller.reinitialize().unwrap();
             assert!(controller.realtek_codecs.is_empty());

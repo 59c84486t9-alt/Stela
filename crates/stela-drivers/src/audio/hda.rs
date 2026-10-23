@@ -3876,8 +3876,15 @@ mod tests {
                         ),
                         Err(Error::RouteInUse)
                     );
+                    // A pin is not a converter, even while its controls are
+                    // reserved. Check that typed refusal separately from a
+                    // genuine attempt to reuse the primary route's owned DAC.
                     assert_eq!(
                         controller.bind_converter(&graph, 0x16, second_stream, 0),
+                        Err(Error::UnsupportedTopology)
+                    );
+                    assert_eq!(
+                        controller.bind_converter(&graph, route.converter(), second_stream, 0),
                         Err(Error::RouteInUse)
                     );
                     assert_eq!(access_counts(&model), before);

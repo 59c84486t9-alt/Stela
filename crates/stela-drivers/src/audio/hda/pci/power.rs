@@ -704,7 +704,22 @@ mod tests {
             assert_eq!(c.start(playback), Err(Error::InvalidStream));
             assert_eq!(c.start(capture), Err(Error::InvalidStream));
             assert_eq!(state.borrow().config16(0x54), 0x8000);
-            assert_eq!(state.borrow().config[30], 0xf91f_7255);
+            // Linux's ICH6 profile has no SCH/PCH NoSnoop operation. Its
+            // retained word must survive without a write; every other exact
+            // profile in this matrix selects SCH/PCH snooping after D0.
+            let expected_devc = if device == 0x2668 {
+                0xf91f_7a55
+            } else {
+                0xf91f_7255
+            };
+            assert_eq!(state.borrow().config[30], expected_devc);
+            let snoop_writes = state
+                .borrow()
+                .events
+                .iter()
+                .filter(|event| event.pci && event.offset == 0x78)
+                .count();
+            assert_eq!(snoop_writes, if device == 0x2668 { 0 } else { 2 });
             assert_eq!(state.borrow().config[4], 0xfebf_0000);
             assert_eq!(state.borrow().config[5], 0x1234_0000);
             assert!(clock.now_us() >= 20_000);
