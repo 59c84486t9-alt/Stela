@@ -17,6 +17,7 @@
 //! queue draining before evaluation and the post-dispatch100fb50..100fd30 vote,
 //! pending-work, trace-publication, scheduling and timing-accounting stages.
 //! Completing this component does not admit that parent cycle or an MC ACK.
+pub mod amcc;
 pub mod ingestion;
 mod interpolation;
 pub mod owner;
