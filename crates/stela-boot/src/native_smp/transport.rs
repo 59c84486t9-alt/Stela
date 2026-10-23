@@ -28,6 +28,7 @@ pub(crate) struct FixedWorkers<'a> {
     tsc_hz: u64,
     ram: Arc<RegisteredSystemRam>,
     // Diagnostics retain identities, never execution authority or live loans.
+    trace_artifacts: bool,
     recent_artifacts: Vec<NativeRunIdentity>,
     next_artifact_slot: usize,
     recovered_rounds: u64,
@@ -39,6 +40,7 @@ impl<'a> FixedWorkers<'a> {
         sender: &'a Apic,
         tsc_hz: u64,
         ram: Arc<RegisteredSystemRam>,
+        trace_artifacts: bool,
     ) -> Self {
         Self {
             bsp: None,
@@ -46,6 +48,7 @@ impl<'a> FixedWorkers<'a> {
             sender,
             tsc_hz,
             ram,
+            trace_artifacts,
             recent_artifacts: Vec::new(),
             next_artifact_slot: 0,
             recovered_rounds: 0,
@@ -160,7 +163,10 @@ unsafe impl NativeTransport for FixedWorkers<'_> {
         let mut bsp = None;
         for frame in frames {
             let identity = frame.identity();
-            if !self.recent_artifacts.contains(identity) {
+            // Artifact provenance stays attached to every run/cache entry.
+            // Full identity formatting and the diagnostic ring scan are opt-in,
+            // so warm dispatch does not pay for serial tracing.
+            if self.trace_artifacts && !self.recent_artifacts.contains(identity) {
                 crate::output::arguments(format_args!("NATIVE SCHEDULER artifact {identity:?}\n"));
                 if self.recent_artifacts.len() == RECENT_ARTIFACT_DIAGNOSTICS {
                     self.recent_artifacts[self.next_artifact_slot] = identity.clone();

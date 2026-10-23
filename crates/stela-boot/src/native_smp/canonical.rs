@@ -137,6 +137,7 @@ pub(crate) unsafe fn prepare<'a, D: Devices>(
             boot_processor,
             assignments,
             processor_power,
+            false,
             None,
         )
     }
@@ -162,6 +163,7 @@ pub(crate) unsafe fn prepare_with_locks<'a, D: Devices>(
     boot_processor: usize,
     assignments: &[WorkerBinding],
     processor_power: &[stela_runtime::machine::engine::ProcessorBinding],
+    trace_artifacts: bool,
     core_locks: Option<stela_runtime::machine::ctrr::Handoff>,
 ) -> Result<CanonicalMachine<'a, D>, &'static str> {
     let cores = handoff.native_resources.cores as usize;
@@ -193,7 +195,13 @@ pub(crate) unsafe fn prepare_with_locks<'a, D: Devices>(
     // SAFETY: actual registered owner, pristine GS-local dispatch; every later
     // access goes through this same canonical RAM, never old raw V1 stores.
     unsafe { owner.register_system_ram(Arc::clone(&ram)) }?;
-    let transport = FixedWorkers::new(executors, sender, handoff.tsc_hz, Arc::clone(&ram));
+    let transport = FixedWorkers::new(
+        executors,
+        sender,
+        handoff.tsc_hz,
+        Arc::clone(&ram),
+        trace_artifacts,
+    );
     let host = ServiceHost::new(owner.host(), transport, Arc::clone(&ram));
     let mut machine = Machine::new_at(cpu, host, devices, profile, ram.target(), boot_processor)?;
     if let Some(core_locks) = core_locks {

@@ -166,6 +166,9 @@ struct Options {
     native_bootstrap_check: bool,
     /// Bounded actual checked-memory kernel execution on the selected cores.
     native_shared_check: bool,
+    /// Emit full artifact identities (`--native-artifacts`); cold/warm dispatch
+    /// otherwise retains provenance without serial formatting or ring scans.
+    native_artifacts: bool,
     /// The user opted in to Apple's signing server (`--tss`, `stela setup
     /// --tss`): the restore host may send this machine's ECID and component
     /// hashes to gs.apple.com for the recoveryOS LocalPolicy, over the host
@@ -301,6 +304,7 @@ impl Options {
             native_cores: crate::native_smp::requested(text)?,
             native_bootstrap_check: false,
             native_shared_check: false,
+            native_artifacts: false,
             tss: false,
             ecid: None,
             network_check: None,
@@ -322,6 +326,10 @@ impl Options {
             return Err("system options must start with --system");
         }
         while let Some(name) = words.next() {
+            if name == "--native-artifacts" {
+                options.native_artifacts = true;
+                continue;
+            }
             if name == "--monitor-trace" {
                 options.monitor_trace = true;
                 continue;
@@ -2079,6 +2087,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             boot_processor,
             &worker_bindings,
             &processor_power,
+            options.native_artifacts,
             Some(core_locks),
         )
     }
