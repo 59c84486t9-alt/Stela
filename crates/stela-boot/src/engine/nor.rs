@@ -85,12 +85,12 @@ impl HostNor {
         )
     }
 
-    /// Store the sectors the guest changed and the pending output. A failed
+    /// Store the sectors the guest changed. Diagnostic log flushing has its
+    /// own wall-time cadence in the outer run loop. A failed
     /// store stops the machine: NVRAM the guest believes committed must not
     /// be lost silently.
     pub fn poll(&mut self, devices: &mut AppleDevices) {
         self.store_sectors(devices);
-        output::flush_log();
     }
 
     fn store_sectors(&mut self, devices: &mut AppleDevices) {

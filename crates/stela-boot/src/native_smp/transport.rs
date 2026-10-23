@@ -19,7 +19,6 @@ use stela_runtime::memory::RegisteredSystemRam;
 /// Bounded recent identities suppress loop diagnostics without retaining code,
 /// frames or execution authority. Eviction only permits a diagnostic to repeat.
 const RECENT_ARTIFACT_DIAGNOSTICS: usize = 256;
-const PROGRESS_ROUNDS: u64 = 1024;
 
 pub(crate) struct FixedWorkers<'a> {
     bsp: Option<WorkerOwner>,
@@ -32,6 +31,7 @@ pub(crate) struct FixedWorkers<'a> {
     recent_artifacts: Vec<NativeRunIdentity>,
     next_artifact_slot: usize,
     recovered_rounds: u64,
+    progress_reported: u64,
     reported_services: Vec<(publication::WorkerBinding, &'static str)>,
 }
 impl<'a> FixedWorkers<'a> {
@@ -52,6 +52,7 @@ impl<'a> FixedWorkers<'a> {
             recent_artifacts: Vec::new(),
             next_artifact_slot: 0,
             recovered_rounds: 0,
+            progress_reported: crate::engine::host::rdtsc(),
             reported_services: Vec::new(),
         }
     }
@@ -216,7 +217,9 @@ unsafe impl NativeTransport for FixedWorkers<'_> {
             );
         }
         self.recovered_rounds = self.recovered_rounds.saturating_add(1);
-        if self.recovered_rounds.is_multiple_of(PROGRESS_ROUNDS) {
+        let now = crate::engine::host::rdtsc();
+        if now.wrapping_sub(self.progress_reported) >= self.tsc_hz {
+            self.progress_reported = now;
             for report in &reports {
                 crate::output::arguments(format_args!(
                     "NATIVE PROGRESS recovered_rounds={} pe={} pc={:#x} instructions={} status={:?} compiled={} reused={} cache_bytes={} cache_entries={}\n",

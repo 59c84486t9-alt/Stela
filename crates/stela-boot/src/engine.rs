@@ -2132,7 +2132,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         |machine, limit| {
             // SAFETY: the same fixed workers and canonical producer set stay
             // retained; an unsupported native service returns without fallback.
-            unsafe { crate::native_smp::canonical::run_slice(machine, limit) }
+            unsafe {
+                crate::native_smp::canonical::run_slice_for(
+                    machine,
+                    limit,
+                    handoff.tsc_hz / WAIT_POLLS_PER_SECOND,
+                )
+            }
         },
     )
 }
@@ -2272,9 +2278,14 @@ fn run<H: Host>(
         machine.statistics.compiled_instructions,
         machine.statistics.stored,
     );
-    // The PE's call chain at each slice end since the last heartbeat, and
-    // how many of those were at EL0.
-    let mut samples: Vec<[u64; CHAIN]> = Vec::new();
+    // At most one call-chain sample per second, bounded by the heartbeat
+    // interval. Host-service yields can be much more frequent than sampling.
+    let mut samples: Vec<[u64; CHAIN]> = Vec::with_capacity(BEAT_SECONDS as usize);
+    let mut sampled = beat.0;
+    let mut log_flushed = beat.0;
+    let mut serviced = beat.0;
+    let mut service_gap = 0;
+    let mut service_boundaries = 0u64;
     let mut user = 0;
     let mut beats = 0u64;
     let mut exits = ExitsSeen::default();
@@ -2289,6 +2300,10 @@ fn run<H: Host>(
             budget.min(slice)
         };
         let stop = execute(machine, limit);
+        let service_now = host::rdtsc();
+        service_gap = service_gap.max(service_now.wrapping_sub(serviced));
+        serviced = service_now;
+        service_boundaries = service_boundaries.saturating_add(1);
         let lines = GUEST_LINES
             .0
             .try_borrow_mut()
@@ -2400,19 +2415,35 @@ fn run<H: Host>(
         }
         machine.exclude_host_time(|devices| host_power.poll(devices));
 
-        let sliced = waiting || matches!(stop, Stop::Budget) && limit != budget;
+        // A wall-time service yield may precede even the final block limit.
+        // Only the actual executed count can establish budget completion.
+        let budget_reached = budget != 0 && machine.statistics.blocks >= budget;
+        let sliced = waiting || matches!(stop, Stop::Budget) && !budget_reached;
         if sliced {
             machine.exclude_host_time(|devices| host_erase.poll(devices));
         } else {
             machine.exclude_host_time(|devices| host_erase.finish(devices));
         }
         let now = host::rdtsc();
+        // Keep diagnostic flash writes independent of the UI/input cadence.
+        // Guest NOR sector commits still happen at every service boundary.
+        if now.wrapping_sub(log_flushed) >= tsc_hz {
+            machine.exclude_host_time(|_| output::flush_log());
+            log_flushed = host::rdtsc();
+        }
         if !sliced {
+            output::arguments(format_args!(
+                "HOST SERVICE boundaries={service_boundaries} maximum_gap_us={}\n",
+                u128::from(service_gap) * 1_000_000 / u128::from(tsc_hz),
+            ));
             return stop;
         }
-        let (pc, frame) = (machine.cpu.pc, machine.cpu.state.x[29]);
-        samples.push(call_chain(machine, pc, frame));
-        user += u32::from(machine.cpu.pstate.el == 0);
+        if now.wrapping_sub(sampled) >= tsc_hz && samples.len() < BEAT_SECONDS as usize {
+            let (pc, frame) = (machine.cpu.pc, machine.cpu.state.x[29]);
+            samples.push(call_chain(machine, pc, frame));
+            user += u32::from(machine.cpu.pstate.el == 0);
+            sampled = now;
+        }
         if now - beat.0 >= BEAT_SECONDS * tsc_hz {
             let (native, blocks) = (host::native_ticks(), machine.statistics.blocks);
             let elapsed = now - beat.0;
@@ -2461,6 +2492,22 @@ fn run<H: Host>(
                 shadow.shadow_bytes >> 20,
                 shadow.exhausted,
             ));
+            output::arguments(format_args!(
+                "REGISTERS pe={} pc={:#x} x19={:#x} x20={:#x} x21={:#x} x22={:#x} x23={:#x} lr={:#x}\n",
+                machine.processor(),
+                cpu.pc,
+                cpu.state.x[19],
+                cpu.state.x[20],
+                cpu.state.x[21],
+                cpu.state.x[22],
+                cpu.state.x[23],
+                cpu.state.x[30],
+            ));
+            output::arguments(format_args!(
+                "HOST SERVICE boundaries={service_boundaries} maximum_gap_us={}\n",
+                u128::from(service_gap) * 1_000_000 / u128::from(tsc_hz),
+            ));
+            service_gap = 0;
             beat = (now, native, blocks, compiled, chained, events);
             translation = translation_report(machine, translation, compiled - beat_compiled);
             exits.report(machine);
@@ -2562,7 +2609,7 @@ fn suspension_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
     }
 }
 
-/// The share of the heartbeat's slice-end samples at EL0 and the call
+/// The share of the heartbeat's time-spaced samples at EL0 and the call
 /// chains they found most often, which show where a guest without output
 /// spends its time.
 fn sample_report(samples: &mut Vec<[u64; CHAIN]>, user: u32) {
