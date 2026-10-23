@@ -72,11 +72,13 @@ class ProcessControls(unittest.TestCase):
             reference.function("static void selected(void) {", "selected")
 
     def test_actual_harness_signals_reap_command_and_kill_its_descendants(self):
-        for cancellation in (signal.SIGTERM, signal.SIGINT):
-            with self.subTest(signal=cancellation):
-                output = self.output.parent / f"signal-{cancellation}.txt"
-                ready = self.output.parent / f"ready-{cancellation}.txt"
-                gate = self.output.parent / f"gate-{cancellation}.txt"
+        for cancellation, spawning in ((signal.SIGTERM, False), (signal.SIGINT, False),
+                                       (signal.SIGTERM, True)):
+            with self.subTest(signal=cancellation, during_spawn=spawning):
+                tag = f"{cancellation}-{spawning}"
+                output = self.output.parent / f"signal-{tag}.txt"
+                ready = self.output.parent / f"ready-{tag}.txt"
+                gate = self.output.parent / f"gate-{tag}.txt"
                 # The inherited file lock stays held until both the direct
                 # command and its forked descendant close their descriptors.
                 command = (
@@ -98,12 +100,33 @@ class ProcessControls(unittest.TestCase):
                     f"    evidence.command('descendants', [sys.executable, '-c', {command!r}], 20)\n"
                     "reference.generate = controlled\n"
                     f"sys.argv = ['reference', '--linux-git-dir', 'unused', '--output', {str(output)!r}]\n"
-                    "reference.main()\n"
                 )
+                if spawning:
+                    # Deliver SIGTERM after the real child exists, but before
+                    # its Popen call returns ownership to Evidence.command.
+                    helper += (
+                        "import os, signal, time\n"
+                        "from pathlib import Path\n"
+                        "original_popen = reference.subprocess.Popen\n"
+                        "def interrupted_spawn(*args, **kwargs):\n"
+                        "    child = original_popen(*args, **kwargs)\n"
+                        "    deadline = time.monotonic() + 5\n"
+                        f"    while not Path({str(ready)!r}).exists():\n"
+                        "        if time.monotonic() >= deadline:\n"
+                        "            os.killpg(child.pid, signal.SIGKILL)\n"
+                        "            child.wait()\n"
+                        "            raise RuntimeError('spawn readiness timed out')\n"
+                        "        time.sleep(0.01)\n"
+                        "    os.kill(os.getpid(), signal.SIGTERM)\n"
+                        "    return child\n"
+                        "reference.subprocess.Popen = interrupted_spawn\n"
+                    )
+                helper += "reference.main()\n"
                 harness = subprocess.Popen([sys.executable, "-c", helper],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     start_new_session=True)
                 command_pid = None
+                cleaned = False
                 try:
                     deadline = time.monotonic() + 5
                     while time.monotonic() < deadline:
@@ -113,7 +136,8 @@ class ProcessControls(unittest.TestCase):
                         self.assertIsNone(harness.poll(), "harness exited before readiness")
                         time.sleep(0.01)
                     self.assertIsNotNone(command_pid, "command failed to become ready")
-                    os.kill(harness.pid, cancellation)
+                    if not spawning:
+                        os.kill(harness.pid, cancellation)
                     self.assertNotEqual(harness.wait(timeout=5), 0)
                     receipt = json.loads((output.parent / (output.name + ".evidence") / "receipt.json").read_text())
                     self.assertEqual(receipt["status"], "failed")
@@ -131,8 +155,11 @@ class ProcessControls(unittest.TestCase):
                                     self.fail("descendant retained its inherited lock after cancellation")
                                 time.sleep(0.01)
                     self.assertFalse(output.exists())
+                    cleaned = True
                 finally:
-                    if command_pid is not None:
+                    # A successful control proved both original owners retired;
+                    # never signal their now-stale numeric process-group ID.
+                    if not cleaned and harness.poll() is None and command_pid is not None:
                         try:
                             os.killpg(command_pid, signal.SIGKILL)
                         except ProcessLookupError:

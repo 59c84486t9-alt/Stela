@@ -16,6 +16,7 @@ import re
 import shutil
 import signal
 import subprocess
+import time
 
 PIN = "a804c5742bff224d4cb4d25dd383554d598be32b"
 DONORS = {
@@ -41,6 +42,7 @@ class Evidence:
         self.root = output.parent / (output.name + ".evidence")
         self.root.mkdir(parents=True, exist_ok=False)
         self.environment = dict(os.environ)
+        self.cancellation = None
         self.environment.update(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0", LC_ALL="C")
         self.record = {
             "schema": 1,
@@ -60,7 +62,12 @@ class Evidence:
     def save(self):
         (self.root / "receipt.json").write_text(json.dumps(self.record, indent=2) + "\n")
 
+    def check_cancelled(self):
+        if self.cancellation is not None:
+            raise InterruptedError(f"harness interrupted by signal {self.cancellation}")
+
     def command(self, name, arguments, timeout):
+        self.check_cancelled()
         item = {"name": name, "argv": arguments, "timeout_seconds": timeout}
         self.record["commands"].append(item)
         self.save()
@@ -72,14 +79,29 @@ class Evidence:
             process = subprocess.Popen(arguments, stdout=out, stderr=err,
                                        env=self.environment, start_new_session=True)
             try:
-                item["returncode"] = process.wait(timeout=timeout)
+                deadline = time.monotonic() + timeout
+                while True:
+                    # Signal handlers only record cancellation, including
+                    # throughout Popen. Deliver it after owning the child and
+                    # before a wait can reap it. No asynchronous exception can
+                    # orphan a half-created child or signal a retired PGID.
+                    self.check_cancelled()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(arguments, timeout)
+                    try:
+                        item["returncode"] = process.wait(timeout=min(remaining, 0.05))
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
             except BaseException as error:
                 item["timed_out"] = isinstance(error, subprocess.TimeoutExpired)
                 item["interruption"] = type(error).__name__
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if process.returncode is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 item["returncode"] = process.wait()
                 if item["timed_out"]:
                     raise RuntimeError(f"{name} timed out after {timeout}s") from None
@@ -90,6 +112,7 @@ class Evidence:
                 self.save()
         if item["returncode"]:
             raise RuntimeError(f"{name} failed ({item['returncode']}); see {stderr}")
+        self.check_cancelled()
         return stdout.read_bytes()
 
 
@@ -179,11 +202,13 @@ def main():
     args.output = args.output.resolve()
     evidence = Evidence(args.output)
     def interrupted(signum, _frame):
-        raise InterruptedError(f"harness interrupted by signal {signum}")
+        evidence.cancellation = signum
 
     previous_term = signal.signal(signal.SIGTERM, interrupted)
+    previous_int = signal.signal(signal.SIGINT, interrupted)
     try:
         generate(evidence, args)
+        evidence.check_cancelled()
         evidence.record["status"] = "passed"
     except BaseException as error:
         evidence.record["status"] = "failed"
@@ -195,6 +220,7 @@ def main():
             evidence.save()
         finally:
             signal.signal(signal.SIGTERM, previous_term)
+            signal.signal(signal.SIGINT, previous_int)
 
 
 if __name__ == "__main__":
