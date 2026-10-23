@@ -2,7 +2,9 @@
 //! registry. Numeric MCFG geometry is checked here; actual device/resource and
 //! configuration-writer exclusion come from the producer's attachment grant.
 use super::{Address, ConfigSpace, EcamWindow, msi::MsiConfigSpace};
-use crate::bus::mmio::owned::{CacheAttribute, Error as MappingError, Mapping, Protection};
+use crate::bus::mmio::owned::{
+    CacheAttribute, Error as MappingError, Mapping, MappingView, Protection,
+};
 use core::{mem::size_of, ptr::NonNull};
 
 const FUNCTION_BYTES: usize = 4096;
@@ -28,6 +30,26 @@ pub struct OwnedConfig {
     address: Address,
     window: EcamWindow,
     mapping: Mapping,
+}
+
+/// Opaque pin on this exact configuration mapping and native root/resource
+/// epoch. It exposes no pointer or second configuration access path. Holding
+/// it prevents mapping retirement; dropping it establishes no DMA completion.
+/// The original driver's sole config owner must still honor the attachment's
+/// reset/removal/assignment exclusion for every retained DMA binding lifetime.
+pub struct ConfigRetention {
+    view: MappingView,
+}
+impl ConfigRetention {
+    /// Refuse an original mapping that was dropped, quarantined or retired.
+    pub fn check_live(&self) -> Result<(), MappingError> {
+        self.view.address(0, FUNCTION_BYTES).map(|_| ())
+    }
+
+    /// Compare actual retained authorities, never caller-supplied numeric IDs.
+    pub fn matches_mapping(&self, mapping: &Mapping) -> Result<bool, MappingError> {
+        mapping.shares_authority(&self.view)
+    }
 }
 
 impl OwnedConfig {
@@ -122,6 +144,12 @@ impl OwnedConfig {
 
     pub fn window(&self) -> EcamWindow {
         self.window
+    }
+
+    pub(super) fn retain_epoch(&self) -> Result<ConfigRetention, MappingError> {
+        Ok(ConfigRetention {
+            view: self.mapping.view(0..FUNCTION_BYTES)?,
+        })
     }
 
     /// Transfer the original mapping back to its retirement owner. The unsafe

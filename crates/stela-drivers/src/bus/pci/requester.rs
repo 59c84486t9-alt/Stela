@@ -8,7 +8,11 @@
 //! Retained stopped PCI endpoints. A claim grants neither alias isolation nor
 //! a remapping-unit takeover. Actual engine/IRQ/work drainage and physical
 //! function identity are unsafe producer obligations, not config-bit inferences.
-use super::{Address, ConfigSpace, Function, owned::OwnedConfig};
+use super::{
+    Address, ConfigSpace, Function,
+    owned::{ConfigRetention, OwnedConfig},
+};
+use crate::bus::mmio::owned::{Error as MappingError, Mapping};
 
 const COMMAND: u16 = 4;
 const STATUS: u16 = 6;
@@ -34,6 +38,8 @@ pub enum FunctionRole {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClaimError {
+    Mapping(MappingError),
+    AlreadyBound,
     IdentityChanged,
     ReadFailed { offset: u16 },
     Active { offset: u16 },
@@ -50,6 +56,32 @@ pub enum ClaimError {
 pub struct StoppedRequester {
     function: Function<OwnedConfig>,
     address: Address,
+    dma_bound: bool,
+}
+
+/// Non-cloneable binding derived from the original validated stopped function.
+/// It retains its exact native epoch but supplies no second config writer, new
+/// coherency/alias proof, or observation of current endpoint quiescence. The
+/// original unsafe stopped/attachment grant persists until explicit retirement.
+pub struct RequesterBinding {
+    address: Address,
+    retention: ConfigRetention,
+}
+impl RequesterBinding {
+    pub fn address(&self) -> Address {
+        self.address
+    }
+    pub fn requester(&self) -> u16 {
+        u16::from(self.address.bus) << 8
+            | u16::from(self.address.device) << 3
+            | u16::from(self.address.function)
+    }
+    pub fn check_live(&self) -> Result<(), MappingError> {
+        self.retention.check_live()
+    }
+    pub fn matches_mapping(&self, mapping: &Mapping) -> Result<bool, MappingError> {
+        self.retention.matches_mapping(mapping)
+    }
 }
 
 impl StoppedRequester {
@@ -76,7 +108,11 @@ impl StoppedRequester {
         if let Err(error) = validate_stopped(&mut function) {
             return Err((error, function));
         }
-        Ok(Self { function, address })
+        Ok(Self {
+            function,
+            address,
+            dma_bound: false,
+        })
     }
 
     pub fn address(&self) -> Address {
@@ -103,6 +139,31 @@ impl StoppedRequester {
     /// mapping lifetime or authorize bus mastering; the recipient owns config.
     pub fn into_function(self) -> Function<OwnedConfig> {
         self.function
+    }
+
+    /// Return this exact original stopped owner and retain its actual
+    /// mapping/root epoch for one DMA domain. No new function or access path is
+    /// manufactured. A private flag forbids a second safe split. Any failure
+    /// returns the same original stopped owner.
+    /// The driver must not reset, remove or reassign this epoch while the DMA
+    /// binding survives; retaining a mapping cannot itself stop config resets.
+    pub fn into_dma_binding(mut self) -> Result<(Self, RequesterBinding), (ClaimError, Self)> {
+        if self.dma_bound {
+            return Err((ClaimError::AlreadyBound, self));
+        }
+        if let Err(error) = self.check_stopped() {
+            return Err((error, self));
+        }
+        let retention = match self.function.config().retain_epoch() {
+            Ok(retention) => retention,
+            Err(error) => return Err((ClaimError::Mapping(error), self)),
+        };
+        let binding = RequesterBinding {
+            address: self.address,
+            retention,
+        };
+        self.dma_bound = true;
+        Ok((self, binding))
     }
 }
 
@@ -427,6 +488,97 @@ mod tests {
         assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
         assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 0);
         release(claim.into_function(), &counters);
+    }
+
+    fn bound_fixture() -> (StoppedRequester, RequesterBinding, Arc<Counters>) {
+        let (mut config, counters) = fixture(ADDRESS);
+        configure(&mut config);
+        let function = Function::new(ADDRESS, config).unwrap();
+        // SAFETY: actual isolated registry-owned RAM; no device/IRQ/worker.
+        let claim =
+            match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
+                Ok(claim) => claim,
+                Err((error, _)) => panic!("fixture claim: {error:?}"),
+            };
+        let (function, binding) = match claim.into_dma_binding() {
+            Ok(pair) => pair,
+            Err((error, _)) => panic!("fixture binding: {error:?}"),
+        };
+        (function, binding, counters)
+    }
+
+    #[test]
+    fn binding_retains_exact_original_config_and_native_root_until_explicit_release() {
+        let (mut claim, binding, counters) = bound_fixture();
+        assert_eq!(claim.check_stopped(), Ok(()));
+        let (error, claim) = match claim.into_dma_binding() {
+            Err(error) => error,
+            Ok(_) => panic!("second safe DMA binding accepted"),
+        };
+        assert_eq!(error, ClaimError::AlreadyBound);
+        let mut function = claim.into_function();
+        assert_eq!(binding.address(), ADDRESS);
+        assert_eq!(binding.requester(), 0xe7ee);
+        assert_eq!(binding.check_live(), Ok(()));
+        assert_eq!(function.config().read32(0), 0x2c02_10de);
+        let mut mapping = function.into_config().into_mapping();
+        assert_eq!(binding.matches_mapping(&mapping), Ok(true));
+        // SAFETY: stopped synchronous fixture; Busy must refuse before unmap.
+        assert_eq!(unsafe { mapping.retire() }, Err(MappingError::Busy));
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+        let (other, other_counters) = fixture(ADDRESS);
+        let mut other = other.into_mapping();
+        // Same BDF and even the fixture's same numeric root identity do not
+        // reproduce the original retained Authority allocation.
+        assert_eq!(binding.matches_mapping(&other), Ok(false));
+        drop(binding);
+        // SAFETY: explicit fixture release follows the final retained binding.
+        unsafe { mapping.retire() }.unwrap();
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 1);
+        // SAFETY: independent original synchronous fixture mapping.
+        unsafe { other.retire() }.unwrap();
+        assert_eq!(other_counters.unmaps.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn dropping_original_config_permanently_quarantines_the_bound_epoch() {
+        let (function, binding, counters) = bound_fixture();
+        drop(function);
+        assert!(binding.check_live().is_err());
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+        drop(binding);
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn binding_recheck_refusal_returns_the_unchanged_original_function() {
+        let (mut config, counters) = fixture(ADDRESS);
+        configure(&mut config);
+        let function = Function::new(ADDRESS, config).unwrap();
+        // SAFETY: isolated synchronous stopped fixture, as above.
+        let mut claim =
+            match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
+                Ok(claim) => claim,
+                Err((error, _)) => panic!("fixture claim: {error:?}"),
+            };
+        // Private test access models an actual changed hardware observation.
+        claim
+            .function
+            .config()
+            .write16(COMMAND, INTX_DISABLE | BUS_MASTER);
+        let (error, claim) = match claim.into_dma_binding() {
+            Err(error) => error,
+            Ok(_) => panic!("active requester accepted"),
+        };
+        assert_eq!(error, ClaimError::Active { offset: COMMAND });
+        let mut function = claim.into_function();
+        assert_eq!(function.address, ADDRESS);
+        assert_eq!(function.config().read16(COMMAND), INTX_DISABLE | BUS_MASTER);
+        function.config().write16(COMMAND, INTX_DISABLE);
+        release(function, &counters);
     }
 
     #[test]

@@ -712,6 +712,16 @@ impl Mapping {
             range,
         })
     }
+    /// Compare the original retained mapping-platform authority, checking both
+    /// mappings are still live. Equal numeric root identities are insufficient.
+    /// This establishes mapping-service provenance only; it grants no PCI
+    /// root, IOMMU route, device, alias, reset, writer or completion authority.
+    pub fn shares_authority(&self, view: &MappingView) -> Result<bool, Error> {
+        let lease = self.lease()?;
+        lease.address(0..lease.bytes)?;
+        view.address(0, view.bytes())?;
+        Ok(Arc::ptr_eq(&lease.authority, &view.lease.authority))
+    }
     /// # Safety
     /// All device, CPU, callback and worker accesses through every raw pointer
     /// obtained from this mapping have stopped/drained, including posted/WC
