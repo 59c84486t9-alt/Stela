@@ -332,6 +332,19 @@ impl Policy {
         Ok(())
     }
 
+    /// MC startup VA1004138..100416c clears current active requests before
+    /// rebuilding defaults. Retain actual last-input lane provenance; these
+    /// zeroes are software lifecycle effects, not newly received PTD lanes.
+    /// Actual defaults publication and metric registration remain the caller's
+    /// effects before allocation. Preflight revision exhaustion before clearing.
+    pub fn start_defaults(&mut self) -> Result<(), Error> {
+        self.next_revision()?;
+        for slot in self.groups.iter_mut().flatten() {
+            slot.requested = 0;
+        }
+        self.defaults()
+    }
+
     /// VA1003f80..10040b0: full original first-row tier/class policy. Same-tier
     /// limits overlap; only completed higher tiers reduce remaining budget.
     /// Class1/feature-retained groups do not enter the dynamic sums. Outputs
@@ -520,6 +533,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn startup_clears_requests_without_fabricating_new_input_lanes() {
+        let mut p = policy(&[row(0, 1, 3), row(1, 2, 1)]);
+        p.set_request(0, 0x2014).unwrap();
+        p.allocate().unwrap();
+        clear_work(&mut p);
+        assert_eq!(p.group(0).unwrap().assigned, 20);
+        p.start_defaults().unwrap();
+        assert_eq!(p.group(0).unwrap().requested, 0);
+        assert_eq!(p.group(0).unwrap().hardware_target, 64);
+        assert_eq!(p.request_lane(0).unwrap(), Some(0x2014));
+        assert_eq!(p.group(1).unwrap().assigned, 64);
+        assert_eq!(
+            p.dirty_masks(),
+            DirtyMasks {
+                hardware: 3,
+                responses: 3
+            }
+        );
+        p.allocate().unwrap();
+        assert_eq!(p.group(0).unwrap().assigned, 0);
+        assert_eq!(p.group(1).unwrap().assigned, 64);
+        p.set_request(0, 20).unwrap();
+        p.revision = u64::MAX;
+        assert!(p.start_defaults().is_err());
+        assert_eq!(p.group(0).unwrap().requested, 20);
+    }
     #[test]
     fn raw_rows_duplicates_sentinel_and_opaque_words_remain_exact() {
         let first = row(3, 7, 2);

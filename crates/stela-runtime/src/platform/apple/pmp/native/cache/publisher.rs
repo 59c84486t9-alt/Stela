@@ -205,10 +205,21 @@ impl Publisher {
         self.allocated = true;
         Ok(())
     }
+    /// Execute source startup's request clear/default rebuild and schedule its
+    /// real publisher. After advance completes, the service must perform any
+    /// reached metric registrations before allocating. This does not mark it
+    /// running, drain work, or authorize native command consumption.
+    pub fn start_defaults(&mut self) -> Result<(), Error> {
+        self.idle()?;
+        self.policy.start_defaults()?;
+        self.cursor = Some(Cursor::new(false));
+        Ok(())
+    }
     /// Begin only the pending publisher work selected by the real source
-    /// caller. Construction itself schedules no publication: MC startup
-    /// VA100416c..1004224 allocates before its first event publisher, whereas
-    /// op1 publishes rebuilt defaults before allocating. This does not execute
+    /// caller. Construction itself schedules no publication. Both MC startup
+    /// and op1 call defaults, whose VA1003f7c tail-calls the publisher before
+    /// allocation. Startup additionally registers reached metrics between the
+    /// defaults publisher and allocator. This does not execute
     /// or certify the caller's independently owned lifecycle/housekeeping.
     pub fn publish_pending(&mut self) -> Result<(), Error> {
         if let Some(reason) = self.failed {

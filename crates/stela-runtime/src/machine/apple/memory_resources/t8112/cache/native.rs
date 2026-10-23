@@ -212,7 +212,7 @@ mod tests {
         }
     }
     #[test]
-    fn initial_allocation_can_precede_first_actual_publication() {
+    fn construction_leaves_source_default_publication_and_allocation_explicit() {
         let (memory, mut cache) = components();
         let binding = memory.bind_quota_publisher(&mut cache).unwrap();
         let mut publisher = Publisher::new(
@@ -224,20 +224,41 @@ mod tests {
         )
         .unwrap();
         let mut latch = InterruptLatch::new();
-        // Construction and an unscheduled advance perform no I/O. Native MC
-        // startup can allocate before the event's first publisher invocation.
+        // Construction and an unscheduled advance perform no I/O. Source
+        // defaults tail-call the real publisher before startup allocation.
         advance(&mut publisher, &mut cache, &mut latch);
         assert_eq!(publisher.progress().completed_passes, 0);
         assert_eq!(publisher.progress().current_group, None);
         assert!(memory.publication_bank().requests().is_empty());
+        publisher.start_defaults().unwrap();
+        advance(&mut publisher, &mut cache, &mut latch);
+        assert_eq!(quota(&mut cache, 0), 0x4012_0040);
+        assert_eq!(publisher.progress().programmed_words, 0);
+        assert_eq!(memory.publication_bank().requests().len(), 1);
+        // Actual optional metric registration belongs to the service caller,
+        // after defaults publication and before this separate allocation.
         publisher.allocate().unwrap();
         assert_eq!(publisher.policy().group(0).unwrap().hardware_target, 0);
         publisher.publish_allocated().unwrap();
         advance(&mut publisher, &mut cache, &mut latch);
         assert_eq!(quota(&mut cache, 0), 0x4012_0000);
         assert_eq!(publisher.progress().programmed_words, 1);
-        assert_eq!(publisher.progress().completed_passes, 1);
-        assert_eq!(memory.publication_bank().requests().len(), 1);
+        assert_eq!(publisher.progress().completed_passes, 2);
+        assert_eq!(memory.publication_bank().requests().len(), 2);
+        publisher.set_request(0, 0x2014).unwrap();
+        publisher.allocate().unwrap();
+        publisher.publish_allocated().unwrap();
+        advance(&mut publisher, &mut cache, &mut latch);
+        assert_eq!(quota(&mut cache, 0), 0x4012_0014);
+        publisher.start_defaults().unwrap();
+        advance(&mut publisher, &mut cache, &mut latch);
+        assert_eq!(quota(&mut cache, 0), 0x4012_0040);
+        assert_eq!(publisher.policy().group(0).unwrap().requested, 0);
+        assert_eq!(publisher.policy().request_lane(0).unwrap(), Some(0x2014));
+        publisher.allocate().unwrap();
+        publisher.publish_allocated().unwrap();
+        advance(&mut publisher, &mut cache, &mut latch);
+        assert_eq!(quota(&mut cache, 0), 0x4012_0000);
     }
     #[test]
     fn actual_words_and_ptd_preserve_interleaving_and_a_failed_fourth_store_prefix() {
@@ -506,6 +527,12 @@ mod tests {
         ] {
             assert_eq!(crate::sha256(&pmp[start..end]), hash);
         }
+        // Defaults tail-calls the actual publisher before allocation.
+        // Its full source window is also pinned by the pure policy test.
+        assert_eq!(
+            u32::from_le_bytes(pmp[0x4f7c..0x4f80].try_into().unwrap()),
+            0x17ffff50
+        );
         let root = Node::root(&dt).unwrap();
         let raw = root
             .child("arm-io")
