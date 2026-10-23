@@ -3,7 +3,7 @@
 // Copyright (c) 2026 Stela contributors
 //! Serialized firmware notification quiescence and fresh resume discovery.
 
-use super::super::{Command, Controller, Error, Timer, Transport, wire::NOTIFY};
+use super::super::{Command, Controller, Error, Phase, Timer, Transport, Version, wire::NOTIFY};
 
 impl<T: Transport, C: Timer> Controller<T, C> {
     /// Disable actual PPM notifications and wait for command acknowledgement
@@ -25,6 +25,16 @@ impl<T: Transport, C: Timer> Controller<T, C> {
     /// Re-read capabilities and every connector from firmware after a genuine
     /// reset; no pre-suspend role/connection snapshot is republished as current.
     pub fn resume(&mut self) -> Result<(), Error> {
+        self.ready = false;
+        self.initialized = false;
+        self.capability = None;
+        self.connectors.clear();
+        self.last_completion = None;
+        // Firmware may have restarted while suspended. Refresh transport layout
+        // and reject an unknown revision before publishing another command.
+        let read = self.transport.read_version();
+        let raw = self.io(Phase::Version, read)?;
+        self.version = Version::new(raw).map_err(|error| self.poison(error))?;
         self.initialize()
     }
 }

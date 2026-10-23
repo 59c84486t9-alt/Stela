@@ -1489,4 +1489,20 @@ mod tests {
         );
         assert!(controller.transport.replies.is_empty());
     }
+    #[test]
+    fn resume_refreshes_firmware_version_before_publishing_commands() {
+        let mut controller = initialized();
+        controller
+            .transport
+            .replies
+            .push_back(Reply::new(Command::global(NOTIFY), &[]));
+        controller.suspend().unwrap();
+        let publications = controller.transport.controls.len();
+        controller.transport.version = 0x0400;
+        assert_eq!(controller.resume(), Err(Error::UnsupportedVersion(0x0400)));
+        assert_eq!(controller.transport.controls.len(), publications);
+        assert!(controller.connectors().is_empty());
+        assert_eq!(controller.last_completion(), None);
+        assert!(controller.fault().is_some());
+    }
 }
