@@ -630,8 +630,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         } else {
             0xfffff
         };
-        self.write(0x440, (address & mask) | (3 << 24))?;
-        let value = self.read_register(0x448)?;
+        self.write(0x448, (address & mask) | (3 << 24))?;
+        let value = self.read_register(0x450)?;
         let gp = self.read_register(0x24)?;
         self.write(0x24, gp & !8)?;
         Ok(value)
@@ -2820,7 +2820,7 @@ mod tests {
         let domain = Arc::new(Domain::default());
         let state = ax210_state();
         let drops = Arc::new(AtomicUsize::new(0));
-        state.lock().unwrap().registers.insert(0x448, 0x80);
+        state.lock().unwrap().registers.insert(0x450, 0x80);
         let step = super::super::platform::load_step(observation, &step_catalog).unwrap();
         let mut boot = start_ax210(&catalog, step, &source, &domain, &state, &drops);
         assert_eq!(
@@ -2833,8 +2833,10 @@ mod tests {
         let ops = state.lock().unwrap().ops.clone();
         let sb = ops
             .iter()
-            .position(|op| *op == Op::Write(0x440, 0x03d03088))
+            .position(|op| *op == Op::Write(0x448, 0x03d03088))
             .unwrap();
+        assert_eq!(ops[sb + 1], Op::Read(0x450));
+        assert!(!ops.iter().any(|op| matches!(op, Op::Write(0x440, _))));
         let context = ops
             .iter()
             .position(|op| matches!(op, Op::Write(0x118, _)))
