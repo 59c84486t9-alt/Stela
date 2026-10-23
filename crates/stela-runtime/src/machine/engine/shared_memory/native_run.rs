@@ -34,7 +34,7 @@ pub struct Identity {
 /// Per-PE compiler-artifact resource policy, independent of guest/application.
 /// No persistent cache or installed Host arena is charged to this separate
 /// in-memory artifact budget. Every actual PE has its own independent bound.
-const ARTIFACT_CACHE_BYTES: usize = 1024 * 1024;
+const ARTIFACT_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactCacheStats {
