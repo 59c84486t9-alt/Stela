@@ -573,7 +573,7 @@ mod tests {
         let local = Ptd::initialized_local_profile(
             NativeProfile::T8112,
             Geometry::new((0x23b3c0000, 0x20000), (0x23b3d0000, 0x4000)).unwrap(),
-            &[range.clone()],
+            core::slice::from_ref(&range),
             live,
         )
         .unwrap()
