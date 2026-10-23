@@ -225,11 +225,6 @@ impl DeviceAccess<'_> {
             .stream_capacity(slot, endpoints, selected, requested)
     }
 
-    pub(crate) fn string(&mut self, language: u16, index: u8) -> Option<String> {
-        let slot = self.slot().ok()?;
-        self.controller.string(slot, language, index)
-    }
-
     pub fn submit(&mut self, dci: u8, buffer: u64, length: usize) -> Result<u64, BlockError> {
         let slot = self.slot()?;
         self.controller.submit(slot, dci, buffer, length)

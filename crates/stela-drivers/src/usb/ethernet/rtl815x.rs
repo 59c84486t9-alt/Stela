@@ -1045,7 +1045,7 @@ pub(crate) mod tests {
                 9, 2, 32, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 0, 2,
                 0, 7, 5, 0x02, 2, 0, 2, 0,
             ];
-            let mut device = model::device(vec![configuration]);
+            let mut device = model::addressed_device(&controller, vec![configuration]);
             device.speed = HIGH_SPEED;
             device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x52, 0x81]);
             controller.preflight_vendor_ethernet(&mut device).unwrap();
@@ -1213,7 +1213,7 @@ pub(crate) mod tests {
                 9, 2, 32, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 0, 2,
                 0, 7, 5, 2, 2, 0, 2, 0,
             ];
-            let mut dev = model::device(vec![config]);
+            let mut dev = model::addressed_device(&controller, vec![config]);
             dev.speed = HIGH_SPEED;
             let is_8156 = ethernet::rtl815x::Revision(revision).is_8156();
             dev.descriptor[8..14].copy_from_slice(&[
@@ -1400,7 +1400,7 @@ pub(crate) mod tests {
                     0,
                 ];
             }
-            let mut device = model::device(vec![configuration]);
+            let mut device = model::addressed_device(&controller, vec![configuration]);
             device.speed = speed;
             device.descriptor[8..14].copy_from_slice(&[
                 vid as u8,

@@ -784,7 +784,7 @@ mod tests {
                                 0,
                             ]);
                         }
-                        let mut dev = model::device(vec![config]);
+                        let mut dev = model::addressed_device(&controller, vec![config]);
                         dev.speed = speed;
                         dev.descriptor[8..10].copy_from_slice(&vid.to_le_bytes());
                         dev.descriptor[10..12].copy_from_slice(&pid.to_le_bytes());
@@ -1010,7 +1010,7 @@ mod tests {
                     }
                     let total = config.len() as u16;
                     config[2..4].copy_from_slice(&total.to_le_bytes());
-                    let mut dev = model::device(vec![config]);
+                    let mut dev = model::addressed_device(&controller, vec![config]);
                     dev.speed = speed;
                     dev.descriptor[8..10].copy_from_slice(&vid.to_le_bytes());
                     dev.descriptor[10..12].copy_from_slice(&pid.to_le_bytes());

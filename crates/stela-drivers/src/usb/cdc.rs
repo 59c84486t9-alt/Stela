@@ -551,7 +551,7 @@ mod tests {
         }
     }
 
-    fn cdc_device(ncm: Option<u8>) -> Device {
+    fn cdc_device(controller: &Shared, ncm: Option<u8>) -> Device {
         let mut bytes = model::ecm(42);
         if let Some(capabilities) = ncm {
             bytes[15] = cdc::NCM;
@@ -574,10 +574,66 @@ mod tests {
         let total = bytes.len() as u16;
         bytes[2..4].copy_from_slice(&total.to_le_bytes());
         model::sanitize(&bytes, SUPER_SPEED).unwrap();
-        let mut device = model::device(vec![bytes]);
+        let mut device = model::addressed_device(&controller.borrow(), vec![bytes]);
         device.language = Some(LANGUAGE_EN_US);
         model::select(&mut device).unwrap();
         device
+    }
+
+    #[test]
+    fn native_cdc_binding_requires_its_own_addressed_generation() {
+        let mut backing = vec![0u64; 128 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives both controllers and every class DMA object.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let configurations = [vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]];
+        let (first, hardware) =
+            unconfigured_cancellation_controller_with_configurations(&mut dma, &configurations);
+        let (second, other_hardware) =
+            unconfigured_cancellation_controller_with_configurations(&mut dma, &configurations);
+        hardware.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
+        let first = Rc::new(RefCell::new(first));
+        let second = Rc::new(RefCell::new(second));
+        let device = cdc_device(&first, None);
+        let foreign = cdc_device(&second, None);
+        assert_eq!(device.slot, foreign.slot);
+        assert_ne!(device.id, foreign.id);
+        for id in [SlotId::fixture(device.slot), foreign.id] {
+            let mut rejected = device.clone();
+            rejected.id = id;
+            let mut found = Found::default();
+            bind(&first, rejected, &mut dma, &mut found);
+            assert!(found.links.is_empty());
+            assert_eq!(found.failures.len(), 1);
+            assert_eq!(
+                found.failures[0].1,
+                BlockError::Unsupported("xHCI device generation is permanently retired")
+            );
+            // Neither the class request path nor Configure Endpoint may be
+            // entered by a descriptor-only or another controller's identity.
+            assert!(hardware.borrow().setup.is_empty());
+            assert!(hardware.borrow().seen.is_empty());
+            assert!(
+                hardware
+                    .borrow()
+                    .configuration_seen_before_endpoints
+                    .is_empty()
+            );
+            assert!(other_hardware.borrow().setup.is_empty());
+            assert!(other_hardware.borrow().seen.is_empty());
+        }
+        // Refusal did not consume the genuine native claim. The exact device
+        // still binds through the real EP0 and endpoint DMA submission path.
+        let mut found = Found::default();
+        bind(&first, device, &mut dma, &mut found);
+        assert!(found.failures.is_empty(), "{:?}", found.failures);
+        assert_eq!(found.links.len(), 1);
+        assert_eq!(hardware.borrow().configuration_seen_before_endpoints, [42]);
+        assert_eq!(
+            hardware.borrow().setup[0].0,
+            setup(0, SET_CONFIGURATION, 42, 0, 0)
+        );
+        assert!(hardware.borrow().seen.contains(&CONFIGURE_ENDPOINT));
     }
 
     fn cdc_mac_descriptor() -> Vec<u8> {
@@ -648,7 +704,7 @@ mod tests {
                 .push_back((setup(0xa1, 0x80, 0, 0, 28), parameters));
             let shared = Rc::new(RefCell::new(controller));
             let mut found = Found::default();
-            bind(&shared, cdc_device(Some(1)), &mut dma, &mut found);
+            bind(&shared, cdc_device(&shared, Some(1)), &mut dma, &mut found);
             assert!(found.failures.is_empty(), "{:?}", found.failures);
             assert_eq!(found.links.len(), 1);
             let frame: Vec<_> = (0..MAX_FRAME).map(|byte| byte as u8).collect();
@@ -736,7 +792,12 @@ mod tests {
                 fail,
                 requests: Vec::new(),
             };
-            bind(&shared, cdc_device(Some(1)), &mut checked, &mut found);
+            bind(
+                &shared,
+                cdc_device(&shared, Some(1)),
+                &mut checked,
+                &mut found,
+            );
             assert!(found.links.is_empty());
             assert_eq!(found.failures.len(), 1);
             if let Some(request) = fail {
@@ -784,7 +845,7 @@ mod tests {
             }
             let shared = Rc::new(RefCell::new(controller));
             let mut found = Found::default();
-            bind(&shared, cdc_device(ncm), &mut dma, &mut found);
+            bind(&shared, cdc_device(&shared, ncm), &mut dma, &mut found);
             assert!(found.failures.is_empty(), "{:?}", found.failures);
             assert_eq!(found.links.len(), 1);
             let link = &mut found.links[0];
@@ -834,7 +895,7 @@ mod tests {
             let mut found = Found::default();
             bind(
                 &shared,
-                cdc_device(Some(capabilities)),
+                cdc_device(&shared, Some(capabilities)),
                 &mut dma,
                 &mut found,
             );
@@ -945,7 +1006,12 @@ mod tests {
                 }
                 let shared = Rc::new(RefCell::new(controller));
                 let mut found = Found::default();
-                bind(&shared, cdc_device(Some(0x31)), &mut dma, &mut found);
+                bind(
+                    &shared,
+                    cdc_device(&shared, Some(0x31)),
+                    &mut dma,
+                    &mut found,
+                );
                 assert!(found.links.is_empty());
                 assert_eq!(found.failures.len(), 1);
                 assert!(match &found.failures[0].1 {
@@ -993,9 +1059,37 @@ mod tests {
                 .push_back((setup(0xa1, 0x80, 0, 0, 28), parameters));
             let shared = Rc::new(RefCell::new(controller));
             let mut found = Found::default();
-            bind(&shared, cdc_device(Some(0x21)), &mut dma, &mut found);
+            bind(
+                &shared,
+                cdc_device(&shared, Some(0x21)),
+                &mut dma,
+                &mut found,
+            );
             assert_eq!(found.failures.len(), 1);
             assert!(found.links.is_empty());
+            assert_eq!(
+                found.failures[0].1,
+                BlockError::Unsupported(match failure {
+                    0 => "short NTB parameters",
+                    1 => "NCM function without NTB16",
+                    2 => "short USB control OUT transfer",
+                    _ => unreachable!(),
+                })
+            );
+            assert!(model.borrow().control_replies.is_empty());
+            assert!(
+                model
+                    .borrow()
+                    .setup
+                    .iter()
+                    .any(|(request, _)| *request == setup(0xa1, 0x80, 0, 0, 28))
+            );
+            if failure == 2 {
+                assert_eq!(
+                    model.borrow().setup.last().unwrap().0,
+                    setup(0x21, 0x86, 0, 0, 8)
+                );
+            }
             assert!(
                 !model
                     .borrow()

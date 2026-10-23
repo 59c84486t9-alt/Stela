@@ -1,6 +1,6 @@
 //! xHCI controller and device models shared by tests across the USB stack.
 pub(crate) use super::bind::{bind, bind_with_provider};
-pub(crate) use super::configuration::tests::{device, ecm};
+pub(crate) use super::configuration::tests::{addressed_device, device, ecm};
 pub(crate) use super::configuration::{sanitize, select};
 pub(crate) use super::iso::tests::class_fixture as iso_class_fixture;
 pub(crate) use super::reset::tests::{

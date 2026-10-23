@@ -487,6 +487,8 @@ pub(super) mod tests {
         ]
     }
 
+    /// Descriptor-only selection fixture. Its synthetic identity deliberately
+    /// grants no access to an addressed controller.
     pub(crate) fn device(configurations: Vec<Vec<u8>>) -> Device {
         let count = configurations.len() as u8;
         Device {
@@ -506,6 +508,18 @@ pub(super) mod tests {
             serial: None,
             language: None,
         }
+    }
+
+    /// Class-binding fixture whose authority belongs to the controller that
+    /// actually completed Address Device. Never substitute a hardware slot
+    /// number or another controller's otherwise identical descriptor fixture.
+    pub(crate) fn addressed_device(
+        controller: &Controller,
+        configurations: Vec<Vec<u8>>,
+    ) -> Device {
+        let mut device = device(configurations);
+        device.id = controller.test_device_id(device.slot).unwrap();
+        device
     }
 
     #[test]
