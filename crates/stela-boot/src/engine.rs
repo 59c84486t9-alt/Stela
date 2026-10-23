@@ -1856,8 +1856,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 ZeroWayConfiguration::DisableArgument,
             )
             .unwrap_or_else(|error| output::fatal(&error));
-            let plan = t8112_cold::Plan::prepare(board, &canonical_ram, programmed, &configuration)
-                .unwrap_or_else(|error| output::fatal(&error));
+            let plan = t8112_cold::Plan::prepare_ap_frontend(
+                board,
+                &canonical_ram,
+                programmed,
+                &configuration,
+            )
+            .unwrap_or_else(|error| output::fatal(&error));
             mount::MemoryResources::T8112Cold(plan)
         });
     let cacheless_memory = memory.is_some();
