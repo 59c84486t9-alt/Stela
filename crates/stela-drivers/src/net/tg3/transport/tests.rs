@@ -598,6 +598,8 @@ fn reset_model(asic: Asic) -> (Hardware<Reg, Timer>, Rc<RefCell<Model>>) {
     m.borrow_mut().config.insert(0x40, 0x10);
     m.borrow_mut().config.insert(0x48, 0x0810);
     m.borrow_mut().reset_firmware_ack = true;
+    m.borrow_mut().sram.insert(0xb54, FIRMWARE_MAGIC);
+    m.borrow_mut().sram.insert(0xb58, 0);
     (hardware, m)
 }
 
@@ -713,4 +715,23 @@ fn ignored_mandatory_reset_controls_never_count_as_completion() {
         Err(Error::ConfigDidNotLatch)
     );
     assert!(!hardware.core_reset_completed());
+}
+
+#[test]
+fn absent_or_invalid_board_ownership_evidence_refuses_before_reset() {
+    for signature in [0, 1, u32::MAX, !FIRMWARE_MAGIC] {
+        let (mut hardware, m) = reset_model(Asic::Bcm5762);
+        m.borrow_mut().sram.insert(0xb54, signature);
+        assert_eq!(
+            hardware.reset_unmanaged_core(),
+            Err(Error::UnmanagedNotObserved)
+        );
+        assert!(!hardware.core_reset_completed());
+        assert!(
+            !m.borrow()
+                .trace
+                .iter()
+                .any(|e| matches!(e, Event::Write(0x6804, _) | Event::Write(MAC_RX_MODE, _)))
+        );
+    }
 }

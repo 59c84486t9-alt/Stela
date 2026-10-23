@@ -75,9 +75,13 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         {
             return Err(Error::UnsupportedManaged);
         }
-        if self.sram(SRAM_DATA_SIGNATURE, None)? == FIRMWARE_MAGIC
-            && self.sram(SRAM_DATA_CONFIG, None)? & (ASF_ENABLE | APE_ENABLE) != 0
-        {
+        // Signature/ready absence alone does not establish ownership while
+        // management firmware may still be booting. Require positive signed
+        // board configuration showing that neither manager is enabled.
+        if self.sram(SRAM_DATA_SIGNATURE, None)? != FIRMWARE_MAGIC {
+            return Err(Error::UnmanagedNotObserved);
+        }
+        if self.sram(SRAM_DATA_CONFIG, None)? & (ASF_ENABLE | APE_ENABLE) != 0 {
             return Err(Error::UnsupportedManaged);
         }
         Ok(())

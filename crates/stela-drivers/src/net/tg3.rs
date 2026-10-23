@@ -34,6 +34,7 @@ pub enum Error {
     FirmwareTimeout,
     StopTimeout(u32),
     UnsupportedManaged,
+    UnmanagedNotObserved,
     UnsupportedPcie,
     ConfigDidNotLatch,
     NvramTimeout,
