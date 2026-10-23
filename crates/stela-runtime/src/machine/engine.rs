@@ -10,6 +10,7 @@ mod device_write;
 mod exclusive;
 mod guarded;
 mod hosted;
+pub mod installed_code;
 mod monitor;
 pub use crate::platform::dma::{DmaError, TransferFault};
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
@@ -392,6 +393,14 @@ pub trait Host {
     }
 
     fn install(&mut self, code: &[u8]) -> Result<NativeCode, InstallError>;
+    /// Install immutable context code, optionally reusing this same live Arc's
+    /// installation on this actual Host. Ordinary patchable installs stay
+    /// independent. Implementations must invalidate reuse before every arena
+    /// patch, discard or reclaim; replacement Hosts start with no entries.
+    /// The default preserves the existing one-install-per-call behavior.
+    fn install_immutable(&mut self, code: &Arc<Vec<u8>>) -> Result<NativeCode, InstallError> {
+        self.install(code.as_slice())
+    }
     /// Overwrite installed code at `code` with `bytes`, which the next
     /// native run executes.
     fn patch(&mut self, code: NativeCode, bytes: &[u8]);

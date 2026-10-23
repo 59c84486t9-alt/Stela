@@ -11,10 +11,12 @@
 //! copy through the kernel (`mach_vm_write`): an unmapped or protected page
 //! is refused instead of faulting the host.
 use super::tables::Tables;
+use crate::machine::engine::installed_code::InstalledCodeCache;
 use crate::machine::{
     FaultCause, Host, InstallError, NativeCode, NativeExit, NativeFault, Regime,
     mmu::{Fault, FaultKind},
 };
+use alloc::sync::Arc;
 use core::{
     arch::global_asm,
     cell::Cell,
@@ -431,6 +433,7 @@ pub fn host_nanoseconds() -> u64 {
 pub struct ProcessHost {
     arena: *mut u8,
     used: usize,
+    installed_immutable: InstalledCodeCache,
     tables: std::sync::Arc<Tables>,
     deadline: Option<u64>,
     runner: NativeRunner,
@@ -466,6 +469,7 @@ impl ProcessHost {
         Ok(Self {
             arena: arena.cast(),
             used: 0,
+            installed_immutable: InstalledCodeCache::default(),
             tables,
             deadline: None,
             // Installed blocks, chained ones and thunks lie in the arena.
@@ -557,7 +561,17 @@ impl Host for ProcessHost {
         Ok(NativeCode(self.arena as usize + offset))
     }
 
+    fn install_immutable(&mut self, code: &Arc<Vec<u8>>) -> Result<NativeCode, InstallError> {
+        if let Some(installed) = self.installed_immutable.lookup(code) {
+            return Ok(installed);
+        }
+        let installed = self.install(code.as_slice())?;
+        self.installed_immutable.record(code, installed);
+        Ok(installed)
+    }
+
     fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
+        self.installed_immutable.clear();
         let offset = code.0 - self.arena as usize;
         assert!(
             offset + bytes.len() <= self.used,
@@ -570,6 +584,7 @@ impl Host for ProcessHost {
     }
 
     fn discard_code(&mut self) {
+        self.installed_immutable.clear();
         self.used = 0;
     }
 

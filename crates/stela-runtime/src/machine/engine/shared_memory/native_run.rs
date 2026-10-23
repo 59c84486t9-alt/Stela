@@ -29,7 +29,7 @@ pub struct Identity {
     pub target: stela_compiler::TargetCpu,
     pub requirements: MemoryRequirements,
 }
-const ARTIFACT_CACHE_ENTRIES: usize = 64;
+const ARTIFACT_CACHE_ENTRIES: usize = crate::machine::engine::installed_code::MAX_ENTRIES;
 /// Per-PE compiler-artifact resource policy, independent of guest/application.
 /// No persistent cache or installed Host arena is charged to this separate
 /// in-memory artifact budget. Every actual PE has its own independent bound.
@@ -146,7 +146,7 @@ impl ArtifactCache {
 struct Artifact {
     key: ArtifactKey,
     identity: Identity,
-    code: Vec<u8>,
+    code: Arc<Vec<u8>>,
     source_map: Vec<(stela_compiler::GuestAddress, usize)>,
     source: Vec<u8>,
     requirements: MemoryRequirements,
@@ -157,6 +157,7 @@ impl Artifact {
     fn retained_bytes(&self) -> usize {
         core::mem::size_of::<Self>()
             + 2 * core::mem::size_of::<usize>()
+            + crate::machine::engine::installed_code::ARC_VEC_METADATA_BYTES
             + self.code.capacity()
             + self.source.capacity()
             + self.source_map.capacity()
@@ -263,14 +264,14 @@ impl NativeRun<'_> {
         // A service/publication loan outlives both callback finalization and PC
         // settlement. This Host borrow pins the installed arena throughout them.
         let _publication = self.memory.memory.execution_loan()?;
-        let code = match host.install(&self.artifact.code) {
+        let code = match host.install_immutable(&self.artifact.code) {
             Ok(code) => code,
             Err(crate::machine::InstallError::Full) => {
                 // This fixed owner has returned/recovered its preceding frame;
                 // no installed pointer escapes a NativeRun. The shared lane
                 // never falls back to legacy cached block addresses.
                 host.discard_code();
-                host.install(&self.artifact.code)
+                host.install_immutable(&self.artifact.code)
                     .map_err(|_| MemoryStatus::Unsupported)?
             }
         };
@@ -623,7 +624,7 @@ fn prepare<'a>(
             let artifact = Arc::new(Artifact {
                 key,
                 identity,
-                code: compiled.native.x86_64_code,
+                code: Arc::new(compiled.native.x86_64_code),
                 source_map: compiled.native.source_map,
                 branch_type: source::branch_type(
                     u32::from_le_bytes(input.last_chunk().copied().ok_or(MemoryStatus::Domain)?),
@@ -1101,7 +1102,7 @@ mod artifact_tests {
             key.pc += index * 4;
             cache.insert(Arc::new(Artifact {
                 key, identity: first.identity.clone(),
-                code: alloc::vec![0; if index == 3 { ARTIFACT_CACHE_BYTES } else { ARTIFACT_CACHE_BYTES / 2 }],
+                code: Arc::new(alloc::vec![0; if index == 3 { ARTIFACT_CACHE_BYTES } else { ARTIFACT_CACHE_BYTES / 2 }]),
                 source_map: Vec::new(), source: first.source.clone(),
                 requirements: first.requirements, branch_type: first.branch_type,
             }));
@@ -1161,7 +1162,7 @@ mod artifact_tests {
             cache.insert(Arc::new(Artifact {
                 key,
                 identity: first.identity.clone(),
-                code: Vec::new(),
+                code: Arc::new(Vec::new()),
                 source_map: Vec::new(),
                 source: first.source.clone(),
                 requirements: first.requirements,
@@ -1178,5 +1179,33 @@ mod artifact_tests {
         assert!(reset.artifacts.entries.is_empty());
         assert_eq!(owner.artifacts.entries.len(), 1);
         assert!(Arc::ptr_eq(&owner.ram, &reset.ram));
+    }
+
+    #[test]
+    fn immutable_code_arc_metadata_is_charged_at_the_exact_artifact_budget_boundary() {
+        let (mut machine, _) = fixture();
+        let artifact = prepare_artifact(&mut machine, BINDING).unwrap();
+        let expected = core::mem::size_of::<Artifact>()
+            + 2 * core::mem::size_of::<usize>()
+            + crate::machine::engine::installed_code::ARC_VEC_METADATA_BYTES
+            + artifact.code.capacity()
+            + artifact.source.capacity()
+            + artifact.source_map.capacity()
+                * core::mem::size_of::<(stela_compiler::GuestAddress, usize)>()
+            + artifact.key.controls_sha256.capacity()
+            + artifact.identity.source_sha256.capacity()
+            + artifact.identity.native_sha256.capacity()
+            + artifact.identity.controls_sha256.capacity();
+        assert_eq!(artifact.retained_bytes(), expected);
+        let mut denied = ArtifactCache::default();
+        let slots = denied.slot_bytes();
+        denied.tighten(expected + slots - 1);
+        denied.insert(Arc::clone(&artifact));
+        assert!(denied.entries.is_empty());
+        let mut exact = ArtifactCache::default();
+        exact.tighten(expected + slots);
+        exact.insert(artifact);
+        assert_eq!(exact.stats().entries, 1);
+        assert_eq!(exact.stats().retained_bytes, expected + slots);
     }
 }

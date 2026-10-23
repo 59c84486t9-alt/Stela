@@ -192,6 +192,10 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         self.native_entry();
         self.local.install(code)
     }
+    fn install_immutable(&mut self, code: &Arc<Vec<u8>>) -> Result<NativeCode, InstallError> {
+        self.native_entry();
+        self.local.install_immutable(code)
+    }
     fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
         self.native_entry();
         self.local.patch(code, bytes);

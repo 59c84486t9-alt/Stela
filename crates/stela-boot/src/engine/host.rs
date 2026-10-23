@@ -19,9 +19,10 @@ use crate::{
     layout,
     tables::{self, Frames, NX, PAGE, PRESENT, WRITABLE},
 };
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::arch::{asm, global_asm};
 use stela_compiler::{GuestState, block::BlockExit};
+use stela_runtime::machine::engine::installed_code::InstalledCodeCache;
 use stela_runtime::machine::{
     FaultCause, Host, InstallError, NativeCode, NativeExit, NativeFault, Regime,
     mmu::{
@@ -168,6 +169,7 @@ pub struct State {
     /// installed last.
     code_unit: u64,
     code_used: u64,
+    installed_immutable: InstalledCodeCache,
     recorded: Option<Recorded>,
     native: bool,
     tsc_base: u64,
@@ -300,6 +302,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             code_bytes: config.code_bytes,
             code_unit: 0,
             code_used: 0,
+            installed_immutable: InstalledCodeCache::default(),
             recorded: None,
             native: false,
             tsc_base: config.tsc_base,
@@ -897,8 +900,18 @@ impl Host for BareHost<'_> {
         Ok(NativeCode((state.code_virtual + offset) as usize))
     }
 
+    fn install_immutable(&mut self, code: &Arc<Vec<u8>>) -> Result<NativeCode, InstallError> {
+        if let Some(installed) = state().installed_immutable.lookup(code) {
+            return Ok(installed);
+        }
+        let installed = self.install(code.as_slice())?;
+        state().installed_immutable.record(code, installed);
+        Ok(installed)
+    }
+
     fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
         let state = state();
+        state.installed_immutable.clear();
         let offset = code.0 as u64 - state.code_virtual;
         assert!(
             offset + bytes.len() as u64 <= state.code_bytes,
@@ -918,12 +931,14 @@ impl Host for BareHost<'_> {
 
     fn discard_code(&mut self) {
         let state = state();
+        state.installed_immutable.clear();
         state.code_unit = 0;
         state.code_used = 0;
     }
 
     fn reclaim_code(&mut self) -> Option<core::ops::Range<usize>> {
         let state = state();
+        state.installed_immutable.clear();
         let unit = code_unit_bytes(state);
         state.code_unit = (state.code_unit + 1) % CODE_UNITS;
         state.code_used = state.code_unit * unit;
