@@ -20,6 +20,7 @@ mod canonical;
 pub mod dcs;
 mod resource;
 pub(super) use resource::resource_for;
+pub mod t6000_cold;
 pub mod t8112;
 
 /// One prepared software resource with immutable placement and actual shared
@@ -30,6 +31,7 @@ pub mod t8112;
 pub struct Prepared {
     router: Router,
     ptd: Ptd,
+    local: Option<LocalNotifications>,
     descriptor: DirectMemoryCache,
     ram: Option<alloc::sync::Arc<crate::memory::RegisteredSystemRam>>,
 }
@@ -54,6 +56,7 @@ impl Prepared {
         Ok(Self {
             router,
             ptd,
+            local: None,
             descriptor,
             ram: None,
         })
@@ -79,6 +82,7 @@ impl Prepared {
             Self {
                 router,
                 ptd,
+                local: Some(local.clone()),
                 descriptor,
                 ram: None,
             },
@@ -112,6 +116,14 @@ impl Prepared {
     }
     pub fn publication_bank(&self) -> &Ptd {
         &self.ptd
+    }
+    /// The SAME actual receiver initialized with the local PTD. Borrowing it
+    /// creates no service/callback/IRQ owner or ready/ACK authority.
+    pub fn local_notifications(&self) -> Option<&LocalNotifications> {
+        self.local.as_ref()
+    }
+    pub fn registered_ram(&self) -> Option<&alloc::sync::Arc<crate::memory::RegisteredSystemRam>> {
+        self.ram.as_ref()
     }
     pub fn descriptor(&self) -> &DirectMemoryCache {
         &self.descriptor
