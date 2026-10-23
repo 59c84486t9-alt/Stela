@@ -6,18 +6,17 @@ use crate::bytes::le32;
 use crate::{
     Clock, Handoff,
     block::{BlockDevice, BlockError, Identity, Transport, ascii},
-    bus::{
-        dma::{DmaAllocator, DmaBuffer},
-        mmio::Mmio,
-        pci::Function,
-    },
+    bus::{dma::DmaAllocator, pci::Function},
     registers,
 };
 use alloc::{format, rc::Rc, vec::Vec};
+
+pub mod owned;
 use core::{
     cell::RefCell,
     sync::atomic::{Ordering, fence},
 };
+use owned::{Buffer, RegisterIo};
 
 pub const CLASS: [u8; 3] = [0x01, 0x08, 0x02];
 
@@ -84,8 +83,8 @@ const BOUNCE_BYTES: usize = 128 * 1024;
 const COMMAND_TIMEOUT_US: u64 = 30_000_000;
 
 struct Queue {
-    submissions: DmaBuffer,
-    completions: DmaBuffer,
+    submissions: Buffer,
+    completions: Buffer,
     id: u16,
     tail: u16,
     head: u16,
@@ -95,8 +94,8 @@ struct Queue {
 impl Queue {
     fn new(id: u16, dma: &mut dyn DmaAllocator) -> Result<Self, BlockError> {
         Ok(Self {
-            submissions: dma.allocate(PAGE, PAGE)?,
-            completions: dma.allocate(PAGE, PAGE)?,
+            submissions: Buffer::Legacy(dma.allocate(PAGE, PAGE)?),
+            completions: Buffer::Legacy(dma.allocate(PAGE, PAGE)?),
             id,
             tail: 0,
             head: 0,
@@ -107,12 +106,12 @@ impl Queue {
 
 /// One controller, shared by its namespaces.
 struct Controller {
-    registers: Mmio,
+    registers: RegisterIo,
     doorbell_stride: usize,
     admin: Queue,
     io: Queue,
-    bounce: DmaBuffer,
-    prp_list: DmaBuffer,
+    bounce: Buffer,
+    prp_list: Buffer,
     max_transfer: usize,
     /// How long a normal shutdown may take.
     shutdown_timeout_us: u64,
@@ -123,6 +122,10 @@ struct Controller {
     /// An unresolved command may still own the queues, PRPs and bounce RAM.
     /// No buffer or queue may be reused until a new, acknowledged reset.
     fault: Option<BlockError>,
+    owned: Option<owned::Owner>,
+    retired: bool,
+    prepared: bool,
+    ready_timeout_us: u64,
 }
 
 impl Controller {
@@ -133,7 +136,7 @@ impl Controller {
         if self.shut_down {
             return Err(BlockError::Unsupported("NVMe controller is shut down"));
         }
-        let status = self.registers.read32(STATUS);
+        let status = self.registers.read32(STATUS)?;
         if status & FATAL != 0 {
             return Err(self.poison(BlockError::Device { status }));
         }
@@ -145,58 +148,162 @@ impl Controller {
         error
     }
 
-    /// Submit one command on `queue` (admin when false) and poll for its
-    /// completion; return completion dword 0.
+    fn wait_status(&self, timeout: u64, condition: impl Fn(u32) -> bool) -> Result<(), BlockError> {
+        let mut failure = None;
+        let done = self
+            .clock
+            .wait(timeout, || match self.registers.read32(STATUS) {
+                Ok(status) => condition(status),
+                Err(error) => {
+                    failure = Some(error);
+                    true
+                }
+            });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if done {
+            Ok(())
+        } else {
+            Err(BlockError::Timeout)
+        }
+    }
+
+    fn initialize(&mut self) -> Result<(), BlockError> {
+        if let Some(owner) = self.owned.as_mut() {
+            // Retain a possibly changed owner even if prepare reports failure.
+            self.prepared = true;
+            owner.lifecycle.prepare()?;
+        }
+        let capabilities = self.registers.read64(CAPABILITIES)?;
+        self.doorbell_stride = 4usize << (capabilities >> 32 & 0xf);
+        self.ready_timeout_us = ((capabilities >> 24 & 0xff).max(1)) * 500_000;
+        if capabilities >> 37 & 1 == 0 {
+            return Err(BlockError::Unsupported(
+                "NVMe controller without the NVM command set",
+            ));
+        }
+        if capabilities >> 48 & 0xf != 0 {
+            return Err(BlockError::Unsupported(
+                "NVMe controller without 4 KiB pages",
+            ));
+        }
+        if (capabilities & 0xffff) + 1 < u64::from(ENTRIES) {
+            return Err(BlockError::Unsupported(
+                "NVMe queues shorter than 16 entries",
+            ));
+        }
+        if 4 * self.doorbell_stride + DOORBELLS > 0x2000 {
+            return Err(BlockError::Unsupported("NVMe doorbell stride"));
+        }
+        self.registers.write32(CONFIGURATION, 0)?;
+        self.wait_status(self.ready_timeout_us, |status| status & READY == 0)?;
+        self.admin.completions.give()?;
+        self.io.completions.give()?;
+        // Empty SQs are CPU-owned until their first command publication. The
+        // controller cannot consume any SQE before the corresponding doorbell.
+        let entries = u32::from(ENTRIES - 1);
+        self.registers
+            .write32(ADMIN_ATTRIBUTES, entries << 16 | entries)?;
+        self.registers
+            .write64(ADMIN_SUBMISSION, self.admin.submissions.address()?)?;
+        self.admin.submissions.publish();
+        self.registers
+            .write64(ADMIN_COMPLETION, self.admin.completions.address()?)?;
+        self.registers.write32(INTERRUPT_MASK_SET, u32::MAX)?;
+        if let Some(owner) = self.owned.as_mut() {
+            owner.lifecycle.enable_dma()?;
+        }
+        self.registers.write32(CONFIGURATION, CONFIGURATION_VALUE)?;
+        self.wait_status(self.ready_timeout_us, |status| {
+            status & (READY | FATAL) != 0
+        })?;
+        self.ready()
+    }
+
+    /// A failure after publication poisons every sibling. Only a positively
+    /// identified CQE can authorize SQ/PRP/data CPU reuse.
     fn execute(&mut self, io: bool, command: [u32; 16]) -> Result<u32, BlockError> {
         self.ready()?;
+        match self.execute_inner(io, command) {
+            Ok((result, 0)) => Ok(result),
+            Ok((_, status)) => Err(BlockError::Device { status }),
+            Err(error) => Err(self.poison(error)),
+        }
+    }
+    fn execute_inner(&mut self, io: bool, command: [u32; 16]) -> Result<(u32, u32), BlockError> {
         let stride = self.doorbell_stride;
-        let registers = self.registers;
+        let registers = &self.registers;
         self.command_id = self.command_id.wrapping_add(1);
         let id = self.command_id;
         let queue = if io { &mut self.io } else { &mut self.admin };
         let base = usize::from(queue.tail) * 64;
         for (index, word) in command.iter().enumerate() {
-            let value = if index == 0 {
-                word | u32::from(id) << 16
-            } else {
-                *word
-            };
-            queue.submissions.write(base + 4 * index, value);
+            queue.submissions.write(
+                base + 4 * index,
+                if index == 0 {
+                    word | u32::from(id) << 16
+                } else {
+                    *word
+                },
+            );
         }
+        self.bounce.give()?;
+        self.prp_list.give()?;
+        queue.submissions.give()?;
         queue.tail = (queue.tail + 1) % ENTRIES;
         fence(Ordering::SeqCst);
         registers.write32(
             DOORBELLS + 2 * usize::from(queue.id) * stride,
             u32::from(queue.tail),
-        );
+        )?;
         let entry = usize::from(queue.head) * 16;
-        let phase = queue.phase;
-        let completions = &queue.completions;
+        let mut failure = None;
         let done = self.clock.wait(COMMAND_TIMEOUT_US, || {
-            registers.read32(STATUS) & FATAL != 0
-                || (completions.read::<u32>(entry + 12) >> 16 & 1 == 1) == phase
+            let observed = (|| {
+                let status = registers.read32(STATUS)?;
+                if status & FATAL != 0 {
+                    return Err(BlockError::Device { status });
+                }
+                Ok((queue.completions.coherent(entry + 12)? >> 16 & 1 == 1) == queue.phase)
+            })();
+            match observed {
+                Ok(ready) => ready,
+                Err(error) => {
+                    failure = Some(error);
+                    true
+                }
+            }
         });
-        let status = registers.read32(STATUS);
-        if status & FATAL != 0 {
-            return Err(self.poison(BlockError::Device { status }));
+        if let Some(error) = failure {
+            return Err(error);
         }
         if !done {
-            return Err(self.poison(BlockError::Timeout));
+            return Err(BlockError::Timeout);
         }
+        let status = registers.read32(STATUS)?;
+        if status & FATAL != 0 {
+            return Err(BlockError::Device { status });
+        }
+        // The domain qualifies the coherent observation; this barrier orders
+        // later CQ words after the device's final phase/status publication.
         fence(Ordering::SeqCst);
-        let result = queue.completions.read::<u32>(entry);
-        let tail_word = queue.completions.read::<u32>(entry + 12);
-        let submission = queue.completions.read::<u32>(entry + 8);
-        // A phase bit alone does not retire our command. A stale/malformed
-        // completion must not authorize reuse or acknowledge an unknown CQE.
-        if tail_word as u16 != id
+        let result = queue.completions.coherent(entry)?;
+        let submission = queue.completions.coherent(entry + 8)?;
+        let tail_word = queue.completions.coherent(entry + 12)?;
+        if ((tail_word >> 16 & 1) == 1) != queue.phase
+            || tail_word as u16 != id
             || submission >> 16 != u32::from(queue.id)
-            // With exactly one outstanding command, consuming its SQE must
-            // advance SQHD to our tail, including the modulo-ENTRIES wrap.
-            // NVMe Base 2.1: SQHD reports the head when this CQE was created.
             || submission as u16 != queue.tail
         {
-            return Err(self.poison(BlockError::Device { status: 0xffff }));
+            return Err(BlockError::Device { status: 0xffff });
+        }
+        // SAFETY: exact outstanding command completed; no other command can
+        // access these ranges until this synchronous call permits another.
+        unsafe {
+            queue.submissions.take()?;
+            self.bounce.take()?;
+            self.prp_list.take()?;
         }
         queue.head = (queue.head + 1) % ENTRIES;
         if queue.head == 0 {
@@ -205,30 +312,29 @@ impl Controller {
         registers.write32(
             DOORBELLS + (2 * usize::from(queue.id) + 1) * stride,
             u32::from(queue.head),
-        );
-        match tail_word >> 17 & 0x7fff {
-            0 => Ok(result),
-            status => Err(BlockError::Device { status }),
-        }
+        )?;
+        Ok((result, tail_word >> 17 & 0x7fff))
     }
 
-    /// Notify the controller of a normal shutdown and wait for it to finish
-    /// (Linux `nvme_disable_ctrl` with `shutdown`).
+    /// Flush callers before this method; acknowledged SHST prevents further
+    /// commands, while owned resource retirement separately requires RDY0.
     fn shutdown(&mut self) -> Result<(), BlockError> {
         if self.shut_down {
             return Ok(());
         }
         self.ready()?;
-        let configuration = self.registers.read32(CONFIGURATION);
-        self.registers.write32(
-            CONFIGURATION,
-            configuration & !SHUTDOWN_NOTIFICATION | SHUTDOWN_NORMAL,
-        );
-        let registers = self.registers;
-        if !self.clock.wait(self.shutdown_timeout_us, || {
-            registers.read32(STATUS) & SHUTDOWN_STATUS == SHUTDOWN_COMPLETE
-        }) {
-            return Err(self.poison(BlockError::Timeout));
+        let result = (|| {
+            let configuration = self.registers.read32(CONFIGURATION)?;
+            self.registers.write32(
+                CONFIGURATION,
+                configuration & !SHUTDOWN_NOTIFICATION | SHUTDOWN_NORMAL,
+            )?;
+            self.wait_status(self.shutdown_timeout_us, |status| {
+                status & SHUTDOWN_STATUS == SHUTDOWN_COMPLETE
+            })
+        })();
+        if let Err(error) = result {
+            return Err(self.poison(error));
         }
         self.shut_down = true;
         Ok(())
@@ -239,7 +345,7 @@ impl Controller {
         let mut command = [0u32; 16];
         command[0] = u32::from(ADMIN_IDENTIFY);
         command[1] = namespace;
-        let page = self.bounce.physical();
+        let page = self.bounce.address()?;
         command[6] = page as u32;
         command[7] = (page >> 32) as u32;
         command[10] = cns;
@@ -248,17 +354,17 @@ impl Controller {
     }
 
     /// The PRP entries for the first `bytes` of the bounce buffer.
-    fn data_pointers(&mut self, bytes: usize) -> (u64, u64) {
-        let first = self.bounce.physical();
+    fn data_pointers(&mut self, bytes: usize) -> Result<(u64, u64), BlockError> {
+        let first = self.bounce.address()?;
         match bytes.div_ceil(PAGE) {
-            0 | 1 => (first, 0),
-            2 => (first, first + PAGE as u64),
+            0 | 1 => Ok((first, 0)),
+            2 => Ok((first, first + PAGE as u64)),
             pages => {
                 for page in 1..pages {
                     self.prp_list
                         .write(8 * (page - 1), first + (page * PAGE) as u64);
                 }
-                (first, self.prp_list.physical())
+                Ok((first, self.prp_list.address()?))
             }
         }
     }
@@ -272,7 +378,7 @@ impl Controller {
         bytes: usize,
     ) -> Result<(), BlockError> {
         self.ready()?;
-        let (prp1, prp2) = self.data_pointers(bytes);
+        let (prp1, prp2) = self.data_pointers(bytes)?;
         let mut command = [0u32; 16];
         command[0] = u32::from(opcode);
         command[1] = namespace;
@@ -303,70 +409,35 @@ pub fn attach(
 ) -> Result<Attached, BlockError> {
     function.power_up(&handoff.clock)?;
     let bars = function.bars();
-    let registers = registers(handoff, bars[0], 0, 0x2000)?;
+    let registers = RegisterIo::Legacy(registers(handoff, bars[0], 0, 0x2000)?);
     function.enable_polled();
-    let capabilities = registers.read64(CAPABILITIES);
-    let entries_supported = (capabilities & 0xffff) + 1;
-    let doorbell_stride = 4usize << (capabilities >> 32 & 0xf);
-    let ready_timeout = ((capabilities >> 24 & 0xff).max(1)) * 500_000;
-    let page_minimum = capabilities >> 48 & 0xf;
-    if capabilities >> 37 & 1 == 0 {
-        return Err(BlockError::Unsupported(
-            "NVMe controller without the NVM command set",
-        ));
-    }
-    if page_minimum != 0 {
-        return Err(BlockError::Unsupported(
-            "NVMe controller without 4 KiB pages",
-        ));
-    }
-    if entries_supported < u64::from(ENTRIES) {
-        return Err(BlockError::Unsupported(
-            "NVMe queues shorter than 16 entries",
-        ));
-    }
-    if 2 * 2 * doorbell_stride + DOORBELLS > 0x2000 {
-        return Err(BlockError::Unsupported("NVMe doorbell stride"));
-    }
-    let clock = handoff.clock;
-    if registers.read32(CONFIGURATION) & ENABLE != 0 {
-        registers.write32(CONFIGURATION, 0);
-    }
-    if !clock.wait(ready_timeout, || registers.read32(STATUS) & READY == 0) {
-        return Err(BlockError::Timeout);
-    }
-    let admin = Queue::new(0, dma)?;
-    let io = Queue::new(1, dma)?;
-    let entries = u32::from(ENTRIES - 1);
-    registers.write32(ADMIN_ATTRIBUTES, entries << 16 | entries);
-    registers.write64(ADMIN_SUBMISSION, admin.submissions.physical());
-    registers.write64(ADMIN_COMPLETION, admin.completions.physical());
-    registers.write32(CONFIGURATION, CONFIGURATION_VALUE);
-    if !clock.wait(ready_timeout, || {
-        registers.read32(STATUS) & (READY | FATAL) != 0
-    }) {
-        return Err(BlockError::Timeout);
-    }
-    let status = registers.read32(STATUS);
-    if status & FATAL != 0 {
-        return Err(BlockError::Device { status });
-    }
-    registers.write32(INTERRUPT_MASK_SET, u32::MAX);
     let mut controller = Controller {
         registers,
-        doorbell_stride,
-        admin,
-        io,
-        bounce: dma.allocate(BOUNCE_BYTES, PAGE)?,
-        prp_list: dma.allocate(PAGE, PAGE)?,
+        doorbell_stride: 0,
+        admin: Queue::new(0, dma)?,
+        io: Queue::new(1, dma)?,
+        bounce: Buffer::Legacy(dma.allocate(BOUNCE_BYTES, PAGE)?),
+        prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE)?),
         max_transfer: BOUNCE_BYTES,
         shutdown_timeout_us: SHUTDOWN_MINIMUM_US,
         shut_down: false,
         command_id: 0,
-        clock,
+        clock: handoff.clock,
         fault: None,
+        owned: None,
+        retired: false,
+        prepared: false,
+        ready_timeout_us: 500_000,
     };
+    controller.initialize()?;
+    discover(controller, format!("{}", function.address))
+}
 
+fn discover(
+    mut controller: Controller,
+    location: alloc::string::String,
+) -> Result<Attached, BlockError> {
+    let entries = u32::from(ENTRIES - 1);
     let identify = controller.identify(IDENTIFY_CONTROLLER, 0)?;
     let serial = ascii(&identify[CONTROLLER_SERIAL]);
     let model = ascii(&identify[CONTROLLER_MODEL]);
@@ -380,8 +451,8 @@ pub fn attach(
     }
     controller.shutdown_timeout_us = shutdown_timeout_us(rtd3_entry_us);
 
-    let completion = controller.io.completions.physical();
-    let submission = controller.io.submissions.physical();
+    let completion = controller.io.completions.address()?;
+    let submission = controller.io.submissions.address()?;
     let mut command = [0u32; 16];
     command[0] = u32::from(ADMIN_CREATE_COMPLETION);
     command[6] = completion as u32;
@@ -393,11 +464,12 @@ pub fn attach(
     command[6] = submission as u32;
     command[7] = (submission >> 32) as u32;
     command[11] = 1 << 16 | 1; // completion queue 1, contiguous
+    controller.io.submissions.publish();
     controller.execute(false, command)?;
 
     // Linux `nvme_scan_work`: the active list from NVMe 1.1, otherwise (or
     // when the controller refuses it) every namespace ID in turn.
-    let version = registers.read32(VERSION);
+    let version = controller.registers.read32(VERSION)?;
     let listed = if version >= VERSION_1_1 {
         controller
             .identify(IDENTIFY_ACTIVE_NAMESPACES, 0)
@@ -418,7 +490,6 @@ pub fn attach(
         Some(active) => (active, false),
         None => ((1..=namespaces.min(SEQUENTIAL_SCAN_LIMIT)).collect(), true),
     };
-    let location = format!("{}", function.address);
     let mut attached = Attached {
         namespaces: Vec::new(),
         failures: Vec::new(),
@@ -568,7 +639,7 @@ impl BlockDevice for Namespace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::{dma::RegionAllocator, mmio::Mmio};
     use alloc::boxed::Box;
 
     struct Fixture {
@@ -594,12 +665,12 @@ mod tests {
                 )
             };
             let controller = Controller {
-                registers: mmio,
+                registers: RegisterIo::Legacy(mmio),
                 doorbell_stride: 4,
                 admin: Queue::new(0, &mut dma).unwrap(),
                 io: Queue::new(1, &mut dma).unwrap(),
-                bounce: dma.allocate(BOUNCE_BYTES, PAGE).unwrap(),
-                prp_list: dma.allocate(PAGE, PAGE).unwrap(),
+                bounce: Buffer::Legacy(dma.allocate(BOUNCE_BYTES, PAGE).unwrap()),
+                prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE).unwrap()),
                 max_transfer: BOUNCE_BYTES,
                 shutdown_timeout_us: SHUTDOWN_MINIMUM_US,
                 shut_down: false,
@@ -609,6 +680,10 @@ mod tests {
                     ticks_per_microsecond: 0,
                 },
                 fault: None,
+                owned: None,
+                retired: false,
+                prepared: false,
+                ready_timeout_us: 500_000,
             };
             Self {
                 _registers: registers,
@@ -651,7 +726,7 @@ mod tests {
             (
                 c.io.submissions.bytes().to_vec(),
                 c.prp_list.bytes().to_vec(),
-                c.registers.read32(DOORBELLS + 8),
+                c.registers.read32(DOORBELLS + 8).unwrap(),
             )
         };
         let mut output = vec![0x55; BOUNCE_BYTES];
@@ -670,7 +745,7 @@ mod tests {
         assert!(c.bounce.bytes().iter().all(|byte| *byte == 0x9d));
         assert_eq!(c.io.submissions.bytes(), submission);
         assert_eq!(c.prp_list.bytes(), prps);
-        assert_eq!(c.registers.read32(DOORBELLS + 8), doorbell);
+        assert_eq!(c.registers.read32(DOORBELLS + 8).unwrap(), doorbell);
         assert_eq!((c.command_id, c.io.tail, c.io.head), (1, 1, 0));
     }
 
@@ -694,7 +769,7 @@ mod tests {
             assert_eq!(fixture.disk.write(0, &[0x71; 512]), Err(error));
             let c = fixture.disk.controller.borrow();
             assert_eq!(c.io.head, 0);
-            assert_eq!(c.registers.read32(DOORBELLS + 12), 0);
+            assert_eq!(c.registers.read32(DOORBELLS + 12).unwrap(), 0);
             assert!(c.bounce.bytes().iter().all(|byte| *byte == 0));
         }
     }
@@ -770,7 +845,8 @@ mod tests {
             .controller
             .borrow()
             .registers
-            .write32(STATUS, FATAL);
+            .write32(STATUS, FATAL)
+            .unwrap();
         let error = BlockError::Device { status: FATAL };
         assert_eq!(fixture.disk.write(0, &[0xa9; 512]), Err(error.clone()));
         fixture
@@ -778,13 +854,14 @@ mod tests {
             .controller
             .borrow()
             .registers
-            .write32(STATUS, 0);
+            .write32(STATUS, 0)
+            .unwrap();
         assert_eq!(fixture.disk.flush(), Err(error));
         let c = fixture.disk.controller.borrow();
         assert_eq!((c.command_id, c.io.tail, c.io.head), (0, 0, 0));
         assert!(c.io.submissions.bytes().iter().all(|byte| *byte == 0));
         assert!(c.bounce.bytes().iter().all(|byte| *byte == 0));
-        assert_eq!(c.registers.read32(DOORBELLS + 8), 0);
+        assert_eq!(c.registers.read32(DOORBELLS + 8).unwrap(), 0);
     }
 
     fn namespace(blocks: u64, flbas: u8, formats: &[(usize, u32)], attributes: u8) -> Vec<u8> {
@@ -834,18 +911,20 @@ mod tests {
         let mut controller = fixture.disk.controller.borrow_mut();
         controller
             .registers
-            .write32(CONFIGURATION, CONFIGURATION_VALUE);
+            .write32(CONFIGURATION, CONFIGURATION_VALUE)
+            .unwrap();
         controller
             .registers
-            .write32(STATUS, READY | SHUTDOWN_COMPLETE);
+            .write32(STATUS, READY | SHUTDOWN_COMPLETE)
+            .unwrap();
         controller.shutdown().unwrap();
         assert_eq!(
-            controller.registers.read32(CONFIGURATION),
+            controller.registers.read32(CONFIGURATION).unwrap(),
             CONFIGURATION_VALUE | SHUTDOWN_NORMAL
         );
-        controller.registers.write32(CONFIGURATION, 0);
+        controller.registers.write32(CONFIGURATION, 0).unwrap();
         controller.shutdown().unwrap();
-        assert_eq!(controller.registers.read32(CONFIGURATION), 0);
+        assert_eq!(controller.registers.read32(CONFIGURATION).unwrap(), 0);
         assert_eq!(
             controller.ready(),
             Err(BlockError::Unsupported("NVMe controller is shut down"))
