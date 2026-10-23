@@ -281,6 +281,15 @@ get_value(struct translator *t, LLVMValueRef llvm)
 }
 
 static bool
+binding_prelude(struct translator *t)
+{
+   if (exec_list_length(&t->b.impl->body) != 1 ||
+       nir_block_ends_in_jump(nir_start_block(t->b.impl)))
+      return fail(t, STELA_AIR_CONTROL_FLOW, "resource callback must emit a straight-line prelude");
+   return true;
+}
+
+static bool
 kernel_arguments(struct translator *t, LLVMValueRef fn)
 {
    struct stela_air_kernel kernel;
@@ -323,6 +332,8 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
             if (!t->options->bind_buffer)
                return fail(t, STELA_AIR_ARGUMENT, "unbound device buffer %u", index);
             def = t->options->bind_buffer(&t->b, &desc, t->options->binding_data);
+            if (!binding_prelude(t))
+               return false;
             if (!def || def->num_components != 1 || def->bit_size != 64)
                return fail(t, STELA_AIR_ARGUMENT, "binding callback refused/invalid buffer %u", index);
          }
@@ -864,9 +875,12 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
                return fail(t, STELA_AIR_ARGUMENT, "invalid constant-buffer SSBO binding");
             slots[slot] = true; def = nir_imm_int64(&t->b, 0);
          } else {
-            if (!t->options->bind_buffer ||
-                !(def = t->options->bind_buffer(&t->b, &io->buffer, t->options->binding_data)) ||
-                def->num_components != 1 || def->bit_size != 64)
+            if (!t->options->bind_buffer)
+               return fail(t, STELA_AIR_ARGUMENT, "unbound readonly constant view");
+            def = t->options->bind_buffer(&t->b, &io->buffer, t->options->binding_data);
+            if (!binding_prelude(t))
+               return false;
+            if (!def || def->num_components != 1 || def->bit_size != 64)
                return fail(t, STELA_AIR_ARGUMENT, "invalid/unbound readonly constant view");
          }
       } else if (io->semantic == STELA_AIR_VERTEX_ID) {
@@ -1375,8 +1389,8 @@ static bool
 cfg_declare(struct translator *t)
 {
    nir_block *entry = nir_start_block(t->b.impl);
-   if (exec_list_length(&t->b.impl->body) != 1 || nir_block_ends_in_jump(entry))
-      return fail(t, STELA_AIR_CONTROL_FLOW, "resource callback must emit a straight-line prelude");
+   if (!binding_prelude(t))
+      return false;
    t->b.impl->structured = false;
    t->work[0]->start = entry;
    for (unsigned i = 1; i < t->reachable_count; i++) {
@@ -1471,7 +1485,10 @@ cfg_emit(struct translator *t)
             nir_def *value = get_value(t, incoming);
             if (!value)
                return false;
-            nir_phi_instr_add_src(phi, pred->end, value);
+            /* This PHI was inserted before backedge defs existed. The API
+             * only links uses during insertion, so attach this late use too. */
+            nir_phi_src *source = nir_phi_instr_add_src(phi, pred->end, value);
+            list_addtail(&source->src.use_link, &value->uses);
             sources++;
          }
          if (sources != nir_block_num_preds(block->start))

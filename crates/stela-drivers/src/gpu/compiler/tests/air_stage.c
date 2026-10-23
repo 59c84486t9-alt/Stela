@@ -185,6 +185,39 @@ static void refusal(const char *text,const char *entry,enum stela_air_stage stag
    if(n || e.kind!=expected)fprintf(stderr,"refusal expected%u got%u %s\n",expected,e.kind,e.detail);
    CHECK(!n && e.kind==expected);LLVMDisposeMemoryBuffer(b);
 }
+static nir_def *stage_binding_prelude(nir_builder *b,const struct stela_air_buffer *buffer,void *data)
+{
+   unsigned mode=*(unsigned *)data;
+   CHECK(buffer->address_space==2 && buffer->access==STELA_AIR_READ);
+   nir_def *address=nir_imm_int64(b,0x100000); /* Compile fixture only. */
+   if(mode==1) {
+      nir_if *region=nir_push_if(b,nir_imm_true(b));
+      nir_def *yes=nir_imm_int64(b,0x100000);
+      nir_push_else(b,region);nir_def *no=nir_imm_int64(b,0x200000);
+      nir_pop_if(b,region);address=nir_if_phi(b,yes,no);
+   } else if(mode==2) nir_jump(b,nir_jump_return);
+   return address;
+}
+static void stage_binding_prelude_contract(void)
+{
+   /* Buffer-first descriptors make the next vertex-ID instruction expose a
+    * terminal callback immediately, before any output variable is stored. */
+   for(unsigned order=0;order<2;order++) {
+      char *text=order?change(fixture,"!4 = !{!5,!6}","!4 = !{!6,!5}"):NULL;
+      LLVMMemoryBufferRef raw=bitcode(text?text:fixture);free(text);
+      for(unsigned mode=0;mode<3;mode++) {
+         struct stela_air_stage_options o=options(STELA_AIR_VERTEX,NULL,0,NULL);
+         o.resources.bind_ssbo=NULL;o.resources.ssbo_count=0;
+         o.resources.bind_buffer=stage_binding_prelude;o.resources.binding_data=&mode;
+         struct stela_air_error e;
+         nir_shader *nir=stela_air_stage_to_nir(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw),
+            "test_vertex",&nir_options,&o,&e);
+         if(!mode) {CHECK(nir && e.kind==STELA_AIR_OK);nir_validate_shader(nir,"valid stage binding prelude");ralloc_free(nir);}
+         else CHECK(!nir && e.kind==STELA_AIR_CONTROL_FLOW && e.detail[0]);
+      }
+      LLVMDisposeMemoryBuffer(raw);
+   }
+}
 static void run(LLVMMemoryBufferRef raw,const char *vsname,const char *fsname,bool original)
 {
    struct snapshot vs,fs;struct stela_air_error e;
@@ -565,6 +598,7 @@ int main(int argc,char **argv)
    glsl_type_singleton_init_or_ref();
    LLVMMemoryBufferRef b=bitcode(fixture);run(b,"test_vertex","test_fragment",false);
    link_and_option_failures(b,"test_vertex","test_fragment");LLVMDisposeMemoryBuffer(b);
+   stage_binding_prelude_contract();
    unused_stage_buffer_semantics();
    primitive_layout_semantics();
    arithmetic_and_lane_semantics();
