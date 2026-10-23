@@ -657,7 +657,7 @@ int stela_linux_page_catalog_verify(u64 generation)
 		return -ENOMEM;
 	page = &folio->page;
 	correct = verify_extent(page, 2) && folio_order(folio) == 2 &&
-		folio_test_large_rmappable(folio);
+		folio_test_large_rmappable(folio) == IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE);
 	for (size_t i = 1; i < 4; i++)
 		correct &= PageTail(page + i) && compound_head(page + i) == page;
 	get_page(page + 3);
@@ -1091,7 +1091,8 @@ static void compound_and_split(void)
 	put_page(page);
 	stela_linux_pages_finish();
 	struct folio *folio = folio_alloc(GFP_KERNEL, 1);
-	assert(folio && folio_order(folio) == 1 && folio_test_large_rmappable(folio));
+	assert(folio && folio_order(folio) == 1 &&
+	       folio_test_large_rmappable(folio) == IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE));
 	folio_get(folio);
 	assert(folio_ref_count(folio) == 2);
 	folio_put_refs(folio, 2);
