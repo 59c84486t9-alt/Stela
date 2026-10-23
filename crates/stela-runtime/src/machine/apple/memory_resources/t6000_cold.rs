@@ -494,9 +494,20 @@ mod tests {
         // Use the established direct-router fixture's descriptor/layout only.
         // Its declared ACTIVE/control image is not consumed by this factory.
         let original = super::super::tests::prepared();
+        // Router::new removes this SOURCE descriptor field from its private
+        // AMCC layout: actual shared status is served by the MCC, never an
+        // independent AMCC ready/disabled bit. Reconstruct the original input
+        // descriptor here; the transformed inner layout is not that input.
+        let mut layout = original.router.lock_layout;
+        assert!(layout.cache_status.is_none());
+        layout.cache_status = Some(amcc::Register {
+            offset: 0x1c00,
+            mask: 0x1f,
+            value: 0,
+        });
         let controller = MemoryController {
             apertures: original.descriptor().apertures.clone(),
-            layout: original.router.lock_layout,
+            layout,
         };
         let direct = original.descriptor().clone();
         let power = PowerStates {
@@ -825,6 +836,13 @@ mod tests {
     fn all_geometry_ram_locks_controls_and_live_source_are_preflighted() {
         let (controller, direct, ram, power) = components();
         let config = configuration();
+        let mut missing_status = controller.clone();
+        missing_status.layout.cache_status = None;
+        assert!(
+            matches!(Plan::prepare_resources(&missing_status, &direct, &power, &ram,
+            [None; 4], &config), Err(reason) if reason ==
+            "cold T6000 requires its source PTD geometry and shared way-command status")
+        );
         let mut bad = direct.clone();
         bad.ptd_entries = 377;
         assert!(
