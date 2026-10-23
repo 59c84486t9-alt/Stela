@@ -591,19 +591,32 @@ unsafe extern "C" fn msi_with_fp_sentinel(_: *mut AsyncCall) {
         "fninit",
         "fld1",
         "fldpi",
-        // Nonzero real data/instruction/error-opcode fields, plus a safely
-        // masked pending invalid-operation flag (0/0). No FWAIT may expose an
-        // unmasked x87 exception in this asynchronous return diagnostic.
+        // Safely masked pending invalid-operation status (0/0). Modern Intel
+        // need not update FOP for a masked divide; seed actual pointer/opcode
+        // registers below through FXRSTOR, then immediately reobserve them.
+        // No FWAIT may expose an unmasked x87 exception in this diagnostic.
         "mov rax, 0x3ff0000000000000",
         "mov [rsp+1568], rax",
         "fld qword ptr [rsp+1568]",
         "fldz",
         "fldz",
+        "8:",
         "fdivp st(1), st(0)",
         "mov dword ptr [rsp+1568], 0x7fa1",
         "ldmxcsr [rsp+1568]",
         "mov word ptr [rsp+1568], 0x0b7f",
         "fldcw [rsp+1568]",
+        "fxsave64 [rsp+544]",
+        // This owned image is an input register setup, never rewritten failed
+        // evidence. Only the immediate actual FXSAVE observation is retained.
+        // DE F9 at label8 has architectural FOP0x6f9; FDP is the owned slot
+        // actually used by the preceding source memory load.
+        "mov word ptr [rsp+550], 0x6f9",
+        "lea rax, [rip+8b]",
+        "mov [rsp+552], rax",
+        "lea rax, [rsp+1568]",
+        "mov [rsp+560], rax",
+        "fxrstor64 [rsp+544]",
         "fxsave64 [rsp+544]",
         // Preserve actual preflight bytes for a failed diagnostic, including
         // an oracle that cannot produce meaningful x87 pointer/opcode state.
@@ -617,12 +630,16 @@ unsafe extern "C" fn msi_with_fp_sentinel(_: *mut AsyncCall) {
         "jz 4f",
         "test word ptr [rsp+546], 0x80",
         "jnz 4f",
-        "cmp word ptr [rsp+550], 0",
-        "je 4f",
-        "cmp qword ptr [rsp+552], 0",
-        "je 4f",
-        "cmp qword ptr [rsp+560], 0",
-        "je 4f",
+        "movzx eax, word ptr [rsp+550]",
+        "and eax, 0x7ff",
+        "cmp eax, 0x6f9",
+        "jne 4f",
+        "lea rax, [rip+8b]",
+        "cmp [rsp+552], rax",
+        "jne 4f",
+        "lea rax, [rsp+1568]",
+        "cmp [rsp+560], rax",
+        "jne 4f",
         "pushfq",
         "pop rax",
         "test eax, {interrupt_flag}",
