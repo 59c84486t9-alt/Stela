@@ -752,7 +752,9 @@ impl<B: Backend> Owner<B> {
                 Op::ClearPending => self.mc_pending = false,
                 Op::CallbackDone => {}
                 Op::StopCheck => {
-                    if self.callback.is_some() || self.mc_pending || self.work_pending {
+                    // Source1004280..100429c tests O3f8, not callback-tail
+                    // lifetime. An already retained DrainWait still must retire.
+                    if self.mc_pending {
                         job.ops.push_front(Op::StopCheck);
                         job.ops.push_front(Op::Effect(Effect::DrainWait));
                     }
@@ -1092,6 +1094,37 @@ mod tests {
         assert!(waits[0].0.same_operation(&waits[1].0));
     }
     #[test]
+    fn stop_after_pending_clear_preserves_callback_tail_without_entering_wait() {
+        let (mut o, s) = initialized();
+        o.backend.busy_notify = true;
+        o.submit_after_housekeeping().unwrap();
+        until(&mut o, &s, Progress::Scheduled);
+        let mut reached_notify = false;
+        for _ in 0..32 {
+            if step(&mut o, &s).unwrap() == (Progress::Busy { deadline: Some(9) }) {
+                reached_notify = true;
+                break;
+            }
+        }
+        assert!(reached_notify && o.callback_executing());
+        assert!(!o.pending() && !o.queued());
+        let notify = o.backend.effects.last().unwrap().0.clone();
+        o.begin_stop().unwrap();
+        assert_eq!(step(&mut o, &s), Ok(Progress::Drained));
+        assert!(o.callback_executing());
+        assert_eq!(o.backend.notifications, 0);
+        assert!(
+            !o.backend
+                .effects
+                .iter()
+                .any(|(_, e)| matches!(e, Effect::DrainWait))
+        );
+        until(&mut o, &s, Progress::CallbackComplete);
+        assert!(!o.callback_executing());
+        assert_eq!(o.backend.notifications, 1);
+        assert!(notify.same_operation(&o.backend.effects.last().unwrap().0));
+    }
+    #[test]
     fn trace_refusal_and_retired_prefix_cannot_complete_absent_destination() {
         let (mut o, s) = initialized();
         o.backend.trace = 1;
@@ -1273,7 +1306,10 @@ mod original_tests {
             (0x10302f8, 0x39000409),
             (0x102ff10, 0x3900077f),
             (0x1004310, 0x390fe27f),
+            (0x1004280, 0x394fe268), // Load actual MC-pending byte.
             (0x1004284, 0x7100051f),
+            (0x1004288, 0x540000c1), // Initial non-one skips drain.
+            (0x100429c, 0x3707ff88), // Retained wait loops on pending bit0.
         ] {
             assert_eq!(word(&b, a), v, "{a:x}");
         }
