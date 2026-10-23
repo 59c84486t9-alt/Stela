@@ -1185,6 +1185,9 @@ fn failed_or_uncertain_raw_configuration_keeps_maximum_draw_until_actual_ack() {
 #[test]
 fn usb2_bus_hub_uses_two_ma_configuration_units_and_hundred_ma_child_limits() {
     let mut hub = Node::hub(HIGH_SPEED, 2);
+    for port in hub.ports.as_mut().unwrap() {
+        port.child_speed = FULL_SPEED;
+    }
     hub.self_powered = false;
     hub.max_power = 250;
     hub.controller_current = 20;
