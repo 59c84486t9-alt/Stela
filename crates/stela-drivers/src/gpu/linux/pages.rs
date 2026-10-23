@@ -329,7 +329,7 @@ impl<P: Provider> Catalog<P> {
     /// the same context rules; a busy drop quarantines, never frees live pages.
     pub unsafe fn register(provider: P, reservation: Reservation) -> Result<Self, Error> {
         let generation = NEXT_GENERATION
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)
             })
             .map_err(|_| Error::GenerationExhausted)?;
@@ -419,7 +419,7 @@ impl<P: Provider> Drop for Catalog<P> {
             // their actual provider stable even after losing the Rust handle.
             if let Some(context) = self.context.take() {
                 core::mem::forget(context);
-                let _ = QUARANTINED_CATALOGS.fetch_update(
+                let _ = QUARANTINED_CATALOGS.try_update(
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                     |count| Some(count.saturating_add(1)),
