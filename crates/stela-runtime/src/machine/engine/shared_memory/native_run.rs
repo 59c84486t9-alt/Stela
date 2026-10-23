@@ -1916,6 +1916,14 @@ mod artifact_tests {
             cache.insert(Arc::clone(artifact));
         }
         assert!(cache.entries.capacity() >= artifacts.len());
+        // Source/code capacities can make one artifact larger than the slot
+        // allocation for this roster. Derive sufficient metadata pressure from
+        // its actual charge rather than assuming a particular compiled size.
+        let required = (artifacts[0].retained_bytes() + slots).div_ceil(slots);
+        cache
+            .reserve_slots(required.max(cache.entries.len()))
+            .unwrap();
+        assert_accounting(&cache);
         // Retaining only the old slot allocation fits exactly, but leaves no
         // payload room. Insertion must release it and regrow a smaller buffer.
         let high_water = cache.slot_bytes();
