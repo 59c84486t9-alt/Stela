@@ -928,10 +928,10 @@ mod tests {
                 offset
             };
             d.registers.insert((key(space), offset), value);
-            if let Some((at, delay)) = d.delay_offset {
-                if original == at {
-                    d.ticks += delay;
-                }
+            if let Some((at, delay)) = d.delay_offset
+                && original == at
+            {
+                d.ticks += delay;
             }
             match (space, offset) {
                 (Space::Bar0, 0x140) => {
@@ -1690,8 +1690,7 @@ mod tests {
                     t.send(Kind::Command, &[1, 0, 0]).unwrap();
                     t.poll().unwrap();
                 }
-                let count = d.lock().unwrap().operations - before;
-                count
+                d.lock().unwrap().operations - before
             };
             for fail_at in 1..=count {
                 let (mut t, d) = active(0x5f69);

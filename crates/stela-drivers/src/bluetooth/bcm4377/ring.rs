@@ -314,7 +314,7 @@ impl<P: Platform> Transport<P> {
             put16(
                 &mut message,
                 30,
-                u16::from(ring.virtual_ring) * 0x80 | u16::from(ring.sync) * 0x100,
+                (u16::from(ring.virtual_ring) * 0x80) | (u16::from(ring.sync) * 0x100),
             );
             self.control(&message)?;
             self.transfers[id].enabled = true;
