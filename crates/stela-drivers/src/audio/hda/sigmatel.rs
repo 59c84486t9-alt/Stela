@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! STAC9200/9202/925x/922x native held-D0 analog backend adapted from Linux
+//! SigmaTel STAC9200/9202/925x/922x and IDT83xxx held-D0 analog backend from Linux
 //! sound/hda/codecs/sigmatel.c and common/codec.c at
 //! a804c5742bff224d4cb4d25dd383554d598be32b.
 //! Copyright (c) 2005 Embedded Alley Solutions, Inc. Matt Porter.
@@ -13,6 +13,8 @@ use super::{
 };
 use crate::{audio::Error, bus::i2c::Timer};
 use alloc::vec::Vec;
+mod idt83;
+pub use idt83::{Idt83PortPower, Idt83PowerReport};
 
 const GET_GPIO_DATA: u16 = 0xf15;
 const GET_GPIO_MASK: u16 = 0xf16;
@@ -36,6 +38,7 @@ pub enum SigmatelProfile {
     Stac9200,
     Stac925x,
     Stac922x,
+    Idt92hd83xxx,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SigmatelGpio {
@@ -60,6 +63,7 @@ pub struct SigmatelReport {
     pub volume_knob: Option<(u8, u8)>,
     /// Source-qualified effective output amp range; observed graph stays intact.
     pub capture_output_amplifier: Option<(u8, u32)>,
+    pub idt83: Option<Idt83PowerReport>,
 }
 #[derive(Clone)]
 pub(super) struct State {
@@ -72,12 +76,25 @@ pub(super) struct State {
     quiet: bool,
     authority_lost: bool,
     knob_capabilities: Option<u32>,
+    idt83: Option<idt83::State>,
 }
 fn profile(id: u32) -> Result<SigmatelProfile, Error> {
     match id {
         0x8384_7690 => Ok(SigmatelProfile::Stac9200),
         0x8384_7632..=0x8384_7637 => Ok(SigmatelProfile::Stac925x),
         0x8384_7882 | 0x8384_7880 | 0x8384_7680..=0x8384_7683 => Ok(SigmatelProfile::Stac922x),
+        0x111d_7604
+        | 0x111d_76d4
+        | 0x111d_7605
+        | 0x111d_76d5
+        | 0x111d_76d1
+        | 0x111d_76d9
+        | 0x111d_7666..=0x111d_7669
+        | 0x111d_76df
+        | 0x111d_76e0
+        | 0x111d_76e3
+        | 0x111d_76e5
+        | 0x111d_76e7..=0x111d_76f3 => Ok(SigmatelProfile::Idt92hd83xxx),
         _ => Err(Error::UnsupportedTopology),
     }
 }
@@ -128,6 +145,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     return Err(Error::InvalidCodecGraph);
                 }
             }
+            if let Some(idt83) = &state.idt83 {
+                self.validate_idt83(graph, state.group, idt83)?;
+            }
             Ok(())
         });
         if let Err(error) = live {
@@ -160,6 +180,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         graph: &CodecGraph,
         selected: SigmatelProfile,
     ) -> Result<Option<u8>, Error> {
+        if selected == SigmatelProfile::Idt92hd83xxx {
+            return Ok(None);
+        }
         let selector = if selected == SigmatelProfile::Stac9200 {
             7
         } else {
@@ -237,7 +260,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(caps)
     }
     /// Cold/link-startup standard analog ownership. No OEM pin, GPIO/EAPD mask,
-    /// LED, beep, SPDIF mux, power-map or suspend/resume policy is inferred.
+    /// LED, beep, SPDIF mux or suspend/resume policy is inferred. IDT83xxx
+    /// retains its verified source port map and explicit polled jack updates.
     pub fn initialize_sigmatel_codec(
         &mut self,
         graph: &CodecGraph,
@@ -280,6 +304,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         } else {
             None
         };
+        let mut idt83 = if selected == SigmatelProfile::Idt92hd83xxx {
+            Some(self.preflight_idt83(graph, group)?)
+        } else {
+            None
+        };
         let gpio_caps = self.verb(Verb::short(graph.address, group, 0xf00, 0x11)?)?;
         if gpio_caps == u32::MAX {
             return Err(Error::InvalidCodecGraph);
@@ -300,6 +329,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             quiet: false,
             authority_lost: false,
             knob_capabilities,
+            idt83: idt83.clone(),
         });
         let result = (|| {
             self.power_d0(graph.address, group)?;
@@ -337,13 +367,20 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     }
                 }
                 (None, Some((0x0e, 0x80)))
-            } else {
+            } else if selected == SigmatelProfile::Stac922x {
                 self.route_control(
                     graph.address,
                     STAC922X_VOLUME_KNOB,
                     SET_VOLUME_KNOB,
                     GET_VOLUME_KNOB,
                     DIRECT_MAX_VOLUME,
+                )?;
+                (None, None)
+            } else {
+                self.initialize_idt83(
+                    graph,
+                    group,
+                    idt83.as_mut().ok_or(Error::InvalidCodecGraph)?,
                 )?;
                 (None, None)
             };
@@ -365,10 +402,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 volume_knob: knob_capabilities.map(|_| (STAC922X_VOLUME_KNOB, DIRECT_MAX_VOLUME)),
                 capture_output_amplifier: knob_capabilities
                     .map(|_| (STAC922X_CAPTURE_MUX, STAC922X_CAPTURE_AMP_CAPS)),
+                idt83: idt83.as_ref().map(idt83::State::report).transpose()?,
             })
         })();
         if result.is_ok() {
             self.sigmatel_codecs[index].active = true;
+            self.sigmatel_codecs[index].idt83 = idt83;
         } else {
             self.routing_failed = true;
         }
@@ -391,26 +430,77 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             RoutePolicy::Standard
         };
         self.preflight_analog_route_policy(graph, route, id, channel, options, policy)?;
-        self.sigmatel_active(graph)?;
+        let state = self.sigmatel_active(graph)?;
         if matches!(options, PinOptions::Playback { eapd: Some(_), .. }) {
             return Err(Error::InvalidPinControl);
+        }
+        if let Some(idt83) = state.idt83 {
+            idt83.require_route_power(route.pin())?;
         }
         self.configure_analog_route_policy(graph, route, id, channel, options, policy)
     }
     /// STAC/IDT's no_trigger_sense applies through the canonical pin API too.
+    /// IDT83xxx detectable ports also retain source jack-driven power control.
     pub fn poll_sigmatel_pin_sense(
         &mut self,
         graph: &CodecGraph,
         pin: u8,
     ) -> Result<PinSense, Error> {
-        self.sigmatel_active(graph)?;
-        let result = self.poll_pin_sense_policy(graph, pin, false);
+        let mut state = self.sigmatel_active(graph)?;
+        let result = self
+            .poll_pin_sense_policy(graph, pin, false)
+            .and_then(|sense| {
+                if let Some(idt83) = &mut state.idt83 {
+                    self.update_idt83_pin(graph.address, state.group, idt83, pin, sense)?;
+                    if let Some(owned) = self
+                        .sigmatel_codecs
+                        .iter_mut()
+                        .find(|owned| owned.address == graph.address)
+                    {
+                        owned.idt83 = state.idt83;
+                    }
+                }
+                Ok(sense)
+            });
         if result.as_ref().is_err_and(|error| {
             *error != Error::UnsupportedTopology && *error != Error::InvalidCodecGraph
         }) {
             self.routing_failed = true;
         }
         result
+    }
+    /// Refresh all seven source-defined IDT83xxx ports through explicit
+    /// no-trigger polling and checked whole-map programming. PCM may continue.
+    pub fn refresh_idt83_power_map(
+        &mut self,
+        graph: &CodecGraph,
+    ) -> Result<Idt83PowerReport, Error> {
+        let mut state = self.sigmatel_active(graph)?;
+        let idt83 = state.idt83.as_mut().ok_or(Error::UnsupportedTopology)?;
+        if let Err(error) = self.refresh_idt83(graph, state.group, idt83) {
+            self.routing_failed = true;
+            return Err(error);
+        }
+        let report = idt83.report()?;
+        self.sigmatel_codecs
+            .iter_mut()
+            .find(|owned| owned.address == graph.address)
+            .ok_or(Error::NeedsReset)?
+            .idt83 = state.idt83;
+        Ok(report)
+    }
+    pub(super) fn require_sigmatel_route_power(&self, id: StreamId) -> Result<(), Error> {
+        for (_, route) in self.routes.iter().filter(|(stream, _)| *stream == id) {
+            if let Some(idt83) = self
+                .sigmatel_codecs
+                .iter()
+                .find(|state| state.address == route.codec_address())
+                .and_then(|state| state.idt83.as_ref())
+            {
+                idt83.require_route_power(route.pin())?;
+            }
+        }
+        Ok(())
     }
     /// Quiet the owned actual pin inventory after every stream stop has
     /// acknowledged. This is a native shutdown boundary, not S3/S4 support.

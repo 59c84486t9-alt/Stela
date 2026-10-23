@@ -423,6 +423,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.stream(id)?.running {
             return Err(Error::StreamRunning);
         }
+        self.require_sigmatel_route_power(id)?;
         let base = stream_base(id.index);
         self.registers.write8(base + SD_STS, SD_STATUS);
         fence(Ordering::SeqCst);

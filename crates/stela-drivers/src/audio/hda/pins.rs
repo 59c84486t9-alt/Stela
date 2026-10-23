@@ -201,8 +201,9 @@ pub struct PinSense {
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
     /// Standard polling works without unsolicited interrupts. Trigger-required
-    /// pins receive SET_PIN_SENSE before GET_PIN_SENSE, as in jack.c. No power,
-    /// amp, pin-enable or GPIO control is changed; configure power separately.
+    /// pins receive SET_PIN_SENSE before GET_PIN_SENSE, as in jack.c. Managed
+    /// SigmaTel codecs retain no-trigger sense; IDT83xxx also synchronizes its
+    /// source port-power map. Standard polling changes no power or GPIO.
     pub fn poll_pin_sense(&mut self, graph: &CodecGraph, pin: u8) -> Result<PinSense, Error> {
         if self.manages_sigmatel_codec(graph.address) {
             return self.poll_sigmatel_pin_sense(graph, pin);
