@@ -1331,10 +1331,32 @@ mod tests {
                 assert_eq!(cpu.read(low), 0x1111);
                 assert_eq!(cpu.read(high), 0x2222);
             }
-            assert!(matches!(
-                cpu.apple_access(msr(31, impdef::APGAKEYLO_EL12), 0),
-                Outcome::Refused(_)
-            ));
+            let el2_keys = cpu.apple.pointer_keys.pairs();
+            let el12 = impdef::APGAKEYLO_EL12;
+            if let Some(entry) = impdef::lookup(el12, chip) {
+                // Existing EL12 Guest storage is held, not applied as PAC
+                // state. A nonzero word remains an explicit guest-entry gap.
+                assert_eq!(entry.class, impdef::Class::Guest);
+                cpu.state.x[0] = 999;
+                assert!(matches!(
+                    cpu.apple_access(msr(0, el12), 0),
+                    Outcome::Written(_)
+                ));
+                assert_eq!(cpu.apple_access(mrs(0, el12), 0), Outcome::Read(999));
+                assert_eq!(
+                    cpu.apple.impdef.guest_state().map(|entry| entry.encoding),
+                    Some(el12)
+                );
+                assert!(matches!(
+                    cpu.apple_access(msr(31, el12), 0),
+                    Outcome::Written(_)
+                ));
+                assert!(cpu.apple.impdef.guest_state().is_none());
+            } else {
+                assert!(!impdef::consumed(el12, chip));
+                assert_eq!(cpu.apple_access(msr(31, el12), 0), Outcome::Undefined);
+            }
+            assert_eq!(cpu.apple.pointer_keys.pairs(), el2_keys);
             assert!(cpu.read_el2_pointer_key(Register::HCR_EL2).is_none());
             assert!(!cpu.write_el2_pointer_key(Register::HCR_EL2, 0));
             let initialized = cpu.apple.pointer_keys.pairs();
