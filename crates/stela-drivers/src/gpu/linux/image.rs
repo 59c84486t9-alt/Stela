@@ -192,9 +192,8 @@ mod tests {
         let registry = Registry::new();
         for state in [EMPTY, INSTALLING] {
             registry.state.store(state, Ordering::Relaxed);
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                registry.contains(0)
-            }));
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| registry.contains(0)));
             assert!(result.is_err());
         }
         let rejected = empty_image();
