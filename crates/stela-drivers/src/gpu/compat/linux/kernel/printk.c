@@ -105,3 +105,92 @@ void __warn_printk(const char *fmt, ...)
 	vprintk(fmt, args);
 	va_end(args);
 }
+
+/* Only the current function's saved return address is compiler-defined here.
+ * Reading a caller's frame chain needs a retained native stack and its bounds.
+ * Preserve this diagnostic before strict mode stops at the missing unwinder. */
+static void dump_caller(const char *level, const void *caller)
+{
+	const char *prefix = level;
+	int number = level_of(&prefix);
+	emitf(number, "Call trace incomplete: caller %px; stack unwinding unavailable\n", caller);
+	stela_linux_unsupported("native stack unwinding");
+}
+
+noinline void dump_stack_lvl(const char *log_lvl)
+{
+	dump_caller(log_lvl, __builtin_extract_return_addr(__builtin_return_address(0)));
+}
+
+noinline void dump_stack(void)
+{
+	dump_caller(KERN_DEFAULT, __builtin_extract_return_addr(__builtin_return_address(0)));
+}
+
+#ifdef STELA_LINUX_PRINTK_TEST
+#include <linux/string.h>
+#include <stela/test.h>
+
+static unsigned int messages;
+static unsigned int missing;
+static int observed_level;
+static char observed[256];
+
+static void test_log(void *context, int level, const char *message)
+{
+	assert(context == &messages);
+	messages++;
+	observed_level = level;
+	size_t length = strlen(message);
+	assert(length < sizeof(observed));
+	memcpy(observed, message, length + 1);
+}
+
+static void test_missing(void *context, const char *operation)
+{
+	assert(context == &messages && messages == missing + 1);
+	assert(!strcmp(operation, "native stack unwinding"));
+	assert(strstr(observed, "Call trace incomplete: caller ") == observed);
+	assert(strstr(observed, "; stack unwinding unavailable\n"));
+	missing++;
+}
+
+static void strict_missing(void *context, const char *operation)
+{
+	test_missing(context, operation);
+	__builtin_trap();
+}
+
+static void strict_trace(void)
+{
+	const struct stela_linux_services services = {.log = test_log, .unsupported = strict_missing};
+	const struct stela_linux_owner owner = {.services = &services, .context = &messages};
+	stela_linux_enter(&owner);
+	dump_stack();
+}
+
+static void outside_owner(void)
+{
+	dump_stack();
+}
+
+int main(void)
+{
+	const struct stela_linux_services services = {.log = test_log, .unsupported = test_missing};
+	const struct stela_linux_owner owner = {.services = &services, .context = &messages};
+	stela_linux_enter(&owner);
+	/* A known address checks the actual formatter and diagnostic ordering;
+	 * the public entry points below capture a real, nonzero saved caller. */
+	dump_caller(KERN_ERR, (const void *)0x1234UL);
+	assert(observed_level == LOGLEVEL_ERR && strstr(observed, "0000000000001234;"));
+	dump_stack_lvl(KERN_WARNING);
+	assert(observed_level == LOGLEVEL_WARNING && !strstr(observed, "0000000000000000;"));
+	dump_stack();
+	assert(observed_level == MESSAGE_LOGLEVEL_DEFAULT && missing == 3);
+	stela_linux_exit();
+	assert(stela_test_traps(strict_trace));
+	assert(stela_test_traps(outside_owner));
+	printf("Linux stack diagnostic: caller, severity, missing-unwinder policy passed\n");
+	return 0;
+}
+#endif

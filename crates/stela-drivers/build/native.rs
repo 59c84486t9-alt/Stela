@@ -221,6 +221,7 @@ impl Linux {
         self.apply(&mut build, None, &[], None);
         let archives = self.hosted.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         for (name, source, define) in [
+            ("linux_printk", "printk.c", "STELA_LINUX_PRINTK_TEST"),
             ("linux_drm_formats", "drm.c", "STELA_LINUX_DRM_FORMAT_TEST"),
             ("linux_rcu", "rcu.c", "STELA_LINUX_RCU_TEST"),
             ("linux_pages", "page.c", "STELA_LINUX_PAGE_TEST"),
