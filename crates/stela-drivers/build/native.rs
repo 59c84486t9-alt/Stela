@@ -23,19 +23,19 @@ pub const MESA: &str = "../../third_party/mesa";
 pub const NVIDIA: &str = "../../third_party/nvidia";
 
 pub fn require_sources() {
-    for source in [
-        #[cfg(feature = "linux-kernel")]
-        LINUX,
-        #[cfg(feature = "intel-port")]
-        MESA,
-        #[cfg(feature = "nvidia-port")]
-        NVIDIA,
-    ] {
-        assert!(
-            Path::new(source).join(".git").exists(),
-            "{source} is missing; run `cargo xtask gpu fetch`"
-        );
-    }
+    #[cfg(feature = "linux-kernel")]
+    require_source(LINUX);
+    #[cfg(feature = "intel-port")]
+    require_source(MESA);
+    #[cfg(feature = "nvidia-port")]
+    require_source(NVIDIA);
+}
+
+fn require_source(source: &str) {
+    assert!(
+        Path::new(source).join(".git").exists(),
+        "{source} is missing; run `cargo xtask gpu fetch`"
+    );
 }
 
 /// The port's sources compiled for Cargo's target, freestanding as the mount
