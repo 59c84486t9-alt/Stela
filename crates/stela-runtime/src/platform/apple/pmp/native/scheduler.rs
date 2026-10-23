@@ -94,6 +94,14 @@ pub struct Queue {
     thread: Rc<Thread>,
 }
 impl Queue {
+    pub fn configuration(&self) -> Result<QueueConfiguration> {
+        let state = self
+            .runtime
+            .upgrade()
+            .ok_or(Error::Contract("native scheduler abandoned"))?;
+        let config = state.borrow().queues[self.id].config.clone();
+        Ok(config)
+    }
     pub fn thread_id(&self) -> u32 {
         self.thread.id
     }
@@ -119,6 +127,19 @@ impl Work {
     }
     pub fn enabled(&self) -> bool {
         self.cells.enabled.get()
+    }
+    /// Actual registered queue, not a local backend promise of registration.
+    pub fn registered_queue(&self) -> Result<Option<Queue>> {
+        let state = self
+            .runtime
+            .upgrade()
+            .ok_or(Error::Contract("native scheduler abandoned"))?;
+        let s = state.borrow();
+        Ok(s.works[self.id].queue.map(|id| Queue {
+            runtime: self.runtime.clone(),
+            id,
+            thread: s.queues[id].thread.clone(),
+        }))
     }
     pub fn same_work(&self, other: &Self) -> bool {
         self.runtime.ptr_eq(&other.runtime) && self.id == other.id

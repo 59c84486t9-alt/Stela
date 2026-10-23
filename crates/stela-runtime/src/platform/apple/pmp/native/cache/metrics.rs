@@ -6,7 +6,11 @@
 //!10042b8..4584 computes callback traces, clears MCpending and notifies.
 //! Evidence: pmgr/cache-metrics-r1. No firmware executes. Samples/arrival and
 //! command ACK remain service-owned. Numeric increments are software DATA.
-use super::super::platform::owner::Completion;
+//! Shared Work/actual Invocation binding: pmgr/metrics-shared-work-r1.
+use super::super::{
+    platform::owner::Completion,
+    scheduler::{Invocation, Work},
+};
 use crate::platform::apple::bus::Access;
 use alloc::{format, rc::Rc, string::String, vec::Vec};
 use core::{
@@ -110,6 +114,11 @@ pub enum Effect {
 /// only, never runtime dispatch keys. Trace-control reads observe the real
 /// retained global source control, not a successful absent observer.
 pub trait Backend {
+    /// Actual BindWork destination. None before that source cursor; afterwards
+    /// every RegisterWork/Wake/dispatch must reference this same shared Work.
+    /// Production factories bind a mandatory Weak service callback, never an
+    /// absent callback or local shadow pending state.
+    fn work(&self) -> Option<&Work>;
     fn effect(
         &mut self,
         request: &Request,
@@ -198,7 +207,6 @@ enum Op {
     ZeroCounter(u32, MetricKind),
     AssociateGroup(u32),
     RegistrationDone,
-    Dispatch,
     TraceRead,
     TraceIf { event: u32, args: [u64; 4] },
     Details,
@@ -245,7 +253,9 @@ pub struct Owner<B: Backend> {
     service_word: u32,
     statistics_word: u32,
     mc_pending: bool,
-    work_pending: bool,
+    bound_work: Option<Work>,
+    dispatch_identity: Option<Invocation>,
+    last_dispatch: Option<Invocation>,
     control: Option<Job>,
     callback: Option<Job>,
     stopping: bool,
@@ -269,7 +279,9 @@ impl<B: Backend> Owner<B> {
             service_word: 0,
             statistics_word: 0,
             mc_pending: false,
-            work_pending: false,
+            bound_work: None,
+            dispatch_identity: None,
+            last_dispatch: None,
             control: None,
             callback: None,
             stopping: false,
@@ -287,7 +299,7 @@ impl<B: Backend> Owner<B> {
         self.mc_pending
     }
     pub fn queued(&self) -> bool {
-        self.work_pending
+        self.bound_work.as_ref().is_some_and(Work::pending)
     }
     /// Preflight foreground service work before retaining/consuming its input.
     /// Queued-only work is distinct and does not require serialization.
@@ -420,8 +432,8 @@ impl<B: Backend> Owner<B> {
         Ok(())
     }
     /// Invoke only at the service's actual equality-housekeeping cursor1003c94.
-    /// Sets MCpending then work.pending under a release barrier and schedules
-    /// actual Wake. Scheduled is returned before any callback runs inline.
+    /// Sets source MCpending then issues actual Wake, whose scheduler owns the
+    /// sole work.pending cell. Scheduled returns before callback execution.
     pub fn submit_after_housekeeping(&mut self) -> Result<bool, Error> {
         if !self.initialized {
             return Err(Error::Contract(
@@ -439,7 +451,6 @@ impl<B: Backend> Owner<B> {
         self.serial = serial;
         self.mc_pending = true;
         fence(Ordering::Release);
-        self.work_pending = true;
         self.control = Some(Job::new(
             serial,
             alloc::vec![Op::Effect(Effect::Wake)],
@@ -516,7 +527,6 @@ impl<B: Backend> Owner<B> {
         Ok(Job::new(
             serial,
             alloc::vec![
-                Op::Dispatch,
                 Op::TraceRead,
                 Op::TraceIf {
                     event: self.config.trace_base,
@@ -535,9 +545,10 @@ impl<B: Backend> Owner<B> {
             Progress::CallbackComplete,
         ))
     }
-    /// A single destination retirement per call is enough for forward progress;
-    /// source-only arithmetic runs until the next real boundary. A retained drain
-    /// wait may coexist with the callback it waits for; no fake wait completion.
+    /// Foreground source cursor only. Actual callbacks are entered exclusively
+    /// through dispatch under the scheduler Invocation. A retained DrainWait
+    /// releases its actual queue lock; the parent continues real scheduler and
+    /// immediate endpoint dispatch independently, never inline fake callback work.
     pub fn advance(
         &mut self,
         samples: &dyn SamplesView,
@@ -546,57 +557,112 @@ impl<B: Backend> Owner<B> {
         if let Some(reason) = self.fault {
             return Err(Error::Contract(reason));
         }
-        if let Some(mut job) = self.control.take() {
-            let draining = job.terminal == Progress::Drained;
-            let result = self.run(&mut job, samples, access);
-            match result {
-                Ok(Some(terminal)) if !matches!(terminal, Progress::Busy { .. }) => {
-                    if terminal == Progress::Initialized {
-                        self.initialized = true
-                    }
-                    if terminal == Progress::Drained {
-                        self.drained = true;
-                        self.stopping = false
-                    }
-                    return Ok(terminal);
+        let Some(mut job) = self.control.take() else {
+            return if self.drained {
+                Ok(Progress::Drained)
+            } else {
+                Err(Error::Contract(
+                    "MC metrics have no retained foreground work",
+                ))
+            };
+        };
+        let result = self.run(&mut job, samples, access);
+        match result {
+            Ok(Some(terminal)) if !matches!(terminal, Progress::Busy { .. }) => {
+                if terminal == Progress::Initialized {
+                    self.initialized = true;
                 }
-                Err(error) => {
-                    if let Error::Contract(reason) = error {
-                        self.fault = Some(reason)
-                    }
-                    self.control = Some(job);
-                    return Err(error);
+                if terminal == Progress::Drained {
+                    self.drained = true;
+                    self.stopping = false;
                 }
-                other => {
-                    self.control = Some(job);
-                    if !draining {
-                        return other.map(|p| p.unwrap_or(Progress::Busy { deadline: None }));
-                    }
-                    // A real source wait releases the queue lock. Cooperatively
-                    // execute the actual queued callback while that wait is Busy.
-                    if self.callback.is_none() && !self.work_pending {
-                        return other.map(|p| p.unwrap_or(Progress::Busy { deadline: None }));
-                    }
+                Ok(terminal)
+            }
+            other => {
+                if let Err(Error::Contract(reason)) = other {
+                    self.fault = Some(reason);
                 }
+                self.control = Some(job);
+                other.map(|p| p.unwrap_or(Progress::Busy { deadline: None }))
             }
         }
-        if self.callback.is_none() && self.work_pending {
-            self.callback = Some(self.callback_job()?)
+    }
+    /// Only the actual scheduler-entered callback for the retained Work may
+    /// execute this source callback. Its Work.pending was cleared by scheduler
+    /// before entry; an actual later Wake survives callback return0. Stop may
+    /// retain its independent foreground wait while this callback advances.
+    pub fn dispatch(
+        &mut self,
+        invocation: &Invocation,
+        samples: &dyn SamplesView,
+        access: &mut Access<'_>,
+    ) -> Result<Progress, Error> {
+        if let Some(reason) = self.fault {
+            return Err(Error::Contract(reason));
         }
-        if let Some(mut job) = self.callback.take() {
-            let result = self.run(&mut job, samples, access);
+        if !self.initialized {
+            return Err(Error::Contract(
+                "MC callback before actual queue initialization",
+            ));
+        }
+        let work = self
+            .bound_work
+            .as_ref()
+            .ok_or(Error::Contract("MC callback has no bound native Work"))?;
+        let actual = self
+            .backend
+            .work()
+            .ok_or(Error::Contract("MC backend lost bound native Work"))?;
+        if !actual.same_work(work) || work.validate_dispatch(invocation).is_err() {
+            return Err(Error::Contract(
+                "MC callback requires actual same Work invocation",
+            ));
+        }
+        if self
+            .last_dispatch
+            .as_ref()
+            .is_some_and(|prior| prior.same_dispatch(invocation))
+        {
+            return Err(Error::Contract(
+                "MC callback source return already retired for this invocation",
+            ));
+        }
+        if let Some(prior) = self.dispatch_identity.as_ref() {
+            if !prior.same_dispatch(invocation) {
+                return Err(Error::Contract(
+                    "MC callback invocation changed across retained prefix",
+                ));
+            }
+        } else {
+            if self
+                .control
+                .as_ref()
+                .is_some_and(|job| job.terminal != Progress::Drained)
+            {
+                return Err(Error::Contract(
+                    "MC callback serialized behind retained foreground operation",
+                ));
+            }
+            // Preflight before installing invocation or callback software state.
+            let job = self.callback_job()?;
+            self.callback = Some(job);
+            self.dispatch_identity = Some(invocation.clone());
+        }
+        let mut job = self
+            .callback
+            .take()
+            .ok_or(Error::Contract("MC callback invocation lost source job"))?;
+        let result = self.run(&mut job, samples, access);
+        if matches!(result, Ok(Some(Progress::CallbackComplete))) {
+            self.dispatch_identity = None;
+            self.last_dispatch = Some(invocation.clone());
+        } else {
             if let Err(Error::Contract(reason)) = result {
-                self.fault = Some(reason)
+                self.fault = Some(reason);
             }
-            if !matches!(result, Ok(Some(Progress::CallbackComplete))) {
-                self.callback = Some(job)
-            }
-            return result.map(|p| p.unwrap_or(Progress::Busy { deadline: None }));
+            self.callback = Some(job);
         }
-        if self.drained {
-            return Ok(Progress::Drained);
-        }
-        Err(Error::Contract("MC metrics have no scheduled native work"))
+        result.map(|p| p.unwrap_or(Progress::Busy { deadline: None }))
     }
     fn run(
         &mut self,
@@ -604,11 +670,12 @@ impl<B: Backend> Owner<B> {
         samples: &dyn SamplesView,
         access: &mut Access<'_>,
     ) -> Result<Option<Progress>, Error> {
-        while let Some(op) = job.ops.pop_front() {
+        while !job.ops.is_empty() {
             let next = job
                 .cursor
                 .checked_add(1)
                 .ok_or(Error::Contract("MC metric cursor exhausted before effects"))?;
+            let op = job.ops.pop_front().unwrap();
             let request = Request {
                 owner: self.identity.clone(),
                 serial: job.serial,
@@ -625,7 +692,52 @@ impl<B: Backend> Owner<B> {
                         job.ops.push_front(op);
                         return Err(Error::Backend(reason));
                     }
-                    Completion::Retired { value: (), refusal } => retired_refusal = refusal,
+                    Completion::Retired { value: (), refusal } => {
+                        // Actual resource identity is opaque and cannot be minted
+                        // by metrics. Retain the same Work from source bind onward.
+                        if matches!(
+                            effect,
+                            Effect::BindWork { .. } | Effect::RegisterWork | Effect::Wake
+                        ) {
+                            let actual = self.backend.work().ok_or(Error::Contract(
+                                "MC actual Work effect retired without bound resource",
+                            ))?;
+                            if let Some(bound) = self.bound_work.as_ref() {
+                                if !actual.same_work(bound) {
+                                    return Err(Error::Contract("MC backend replaced bound Work"));
+                                }
+                            } else if matches!(effect, Effect::BindWork { .. }) {
+                                self.bound_work = Some(actual.clone());
+                            } else {
+                                return Err(Error::Contract(
+                                    "MC native work used before source BindWork",
+                                ));
+                            }
+                            if matches!(effect, Effect::RegisterWork) {
+                                let queue = actual
+                                    .registered_queue()
+                                    .map_err(|_| Error::Contract("MC Work scheduler abandoned"))?
+                                    .ok_or(Error::Contract(
+                                        "MC actual work registration did not occur",
+                                    ))?;
+                                if queue
+                                    .configuration()
+                                    .map_err(|_| Error::Contract("MC queue scheduler abandoned"))?
+                                    != super::super::scheduler::QueueConfiguration::mc_metrics()
+                                {
+                                    return Err(Error::Contract(
+                                        "MC actual registered queue differs from source configuration",
+                                    ));
+                                }
+                            }
+                            if matches!(effect, Effect::Wake) && !actual.pending() {
+                                return Err(Error::Contract(
+                                    "MC Wake retired without scheduling actual Work",
+                                ));
+                            }
+                        }
+                        retired_refusal = refusal;
+                    }
                 },
                 Op::TraceRead => match self.backend.trace_control(&request, access) {
                     Completion::Busy { deadline } => {
@@ -646,10 +758,6 @@ impl<B: Backend> Owner<B> {
                 }
                 Op::AssociateGroup(group) => self.associations[*group as usize] = Some(*group),
                 Op::RegistrationDone => self.registration_flag = false,
-                Op::Dispatch => {
-                    self.work_pending = false;
-                    fence(Ordering::Acquire);
-                }
                 Op::TraceIf { event, args } => {
                     if job.trace != 0 {
                         job.ops.push_front(Op::Effect(Effect::Trace {
@@ -774,6 +882,7 @@ impl<B: Backend> Owner<B> {
 mod tests {
     use super::*;
     use crate::platform::apple::interrupt::InterruptLatch;
+    #[derive(Clone)]
     struct Samples {
         geometry: Geometry,
         data: Vec<[u8; 64]>,
@@ -805,7 +914,16 @@ mod tests {
                 .ok_or(Error::Contract("authored sample group absent"))
         }
     }
+    // Authored destination fault controls stay cfg(test). Queue binding and
+    // callback dispatch themselves use the actual scheduler, with Weak owner
+    // capture; no production local scheduler or duplicate pending bit exists.
+    type Slot = Rc<core::cell::RefCell<alloc::rc::Weak<core::cell::RefCell<Option<Owner<Sink>>>>>>;
     struct Sink {
+        runtime: super::super::super::scheduler::Runtime,
+        queue: Option<super::super::super::scheduler::Queue>,
+        work: Option<Work>,
+        owner: Slot,
+        samples: Rc<core::cell::RefCell<Samples>>,
         effects: Vec<(Request, Effect)>,
         reads: Vec<Request>,
         trace: u32,
@@ -815,11 +933,19 @@ mod tests {
         notifications: u32,
         wait: bool,
         refuse_init: bool,
+        omit_registration: bool,
+        omit_wake: bool,
+        check_replay: bool,
         refuse_metric: Option<(u32, MetricKind)>,
     }
     impl Sink {
         fn new() -> Self {
             Self {
+                runtime: super::super::super::scheduler::Runtime::new(),
+                queue: None,
+                work: None,
+                owner: Rc::new(core::cell::RefCell::new(alloc::rc::Weak::new())),
+                samples: Rc::new(core::cell::RefCell::new(Samples::new())),
                 effects: Vec::new(),
                 reads: Vec::new(),
                 trace: 0,
@@ -829,11 +955,53 @@ mod tests {
                 notifications: 0,
                 wait: false,
                 refuse_init: false,
+                omit_registration: false,
+                omit_wake: false,
+                check_replay: false,
                 refuse_metric: None,
             }
         }
     }
+    struct InvokeMetrics {
+        owner: Slot,
+        samples: Rc<core::cell::RefCell<Samples>>,
+    }
+    impl super::super::super::scheduler::Callback for InvokeMetrics {
+        fn advance(&mut self, invocation: &Invocation, access: &mut Access<'_>) -> Completion<u32> {
+            let Some(owner) = self.owner.borrow().upgrade() else {
+                return Completion::Refused("authored actual metrics owner absent");
+            };
+            let mut owner = owner.borrow_mut();
+            let Some(owner) = owner.as_mut() else {
+                return Completion::Refused("authored actual metrics owner moved");
+            };
+            match owner.dispatch(invocation, &*self.samples.borrow(), access) {
+                Ok(Progress::CallbackComplete) => {
+                    if owner.backend.check_replay {
+                        assert!(matches!(
+                            owner.dispatch(invocation, &*self.samples.borrow(), access),
+                            Err(Error::Contract(
+                                "MC callback source return already retired for this invocation"
+                            ))
+                        ));
+                    }
+                    Completion::Retired {
+                        value: 0,
+                        refusal: None,
+                    }
+                }
+                Ok(Progress::Busy { deadline }) => Completion::Busy { deadline },
+                Ok(_) => Completion::Refused("authored metrics callback returned wrong progress"),
+                Err(Error::Backend(reason) | Error::Contract(reason)) => {
+                    Completion::Refused(reason)
+                }
+            }
+        }
+    }
     impl Backend for Sink {
+        fn work(&self) -> Option<&Work> {
+            self.work.as_ref()
+        }
         fn effect(&mut self, r: &Request, e: &Effect, _: &mut Access<'_>) -> Completion<()> {
             self.effects.push((r.clone(), e.clone()));
             if let Effect::RegisterMetric { group, kind, .. } = e
@@ -861,6 +1029,46 @@ mod tests {
             if matches!(e, Effect::NotifyStop) {
                 self.notifications += 1;
             }
+            use super::super::super::scheduler::QueueConfiguration;
+            match e {
+                Effect::InitializeQueue {
+                    name,
+                    stack_bytes,
+                    priority,
+                } => {
+                    self.queue = Some(
+                        self.runtime
+                            .create_queue(QueueConfiguration {
+                                name: (*name).into(),
+                                stack_bytes: *stack_bytes,
+                                priority: *priority,
+                            })
+                            .unwrap(),
+                    );
+                }
+                Effect::BindWork { priority } => {
+                    self.work = Some(
+                        self.runtime
+                            .bind_work(
+                                *priority,
+                                InvokeMetrics {
+                                    owner: self.owner.clone(),
+                                    samples: self.samples.clone(),
+                                },
+                            )
+                            .unwrap(),
+                    );
+                }
+                Effect::RegisterWork if !self.omit_registration => {
+                    return self
+                        .runtime
+                        .register_work(self.queue.as_ref().unwrap(), self.work.as_ref().unwrap());
+                }
+                Effect::Wake if !self.omit_wake => {
+                    self.runtime.wake(self.work.as_ref().unwrap()).unwrap()
+                }
+                _ => {}
+            }
             let refusal = if matches!(e, Effect::Trace { .. }) && self.retired_trace {
                 self.retired_trace = false;
                 Some("authored trace retired prefix refusal")
@@ -877,9 +1085,56 @@ mod tests {
             }
         }
     }
-    fn step(o: &mut Owner<Sink>, s: &Samples) -> Result<Progress, Error> {
+    fn callback_step(o: &mut Owner<Sink>, s: &Samples) -> Result<Progress, Error> {
+        let runtime = o.backend.runtime.clone();
+        let slot = o.backend.owner.clone();
+        *o.backend.samples.borrow_mut() = s.clone();
+        // The authored fixture temporarily loans this same owner into a Weak
+        // callback slot. There is no pointer cast or Work->Rc<Owner> cycle.
+        let placeholder = Owner::initialized_source(Configuration::t8112(), Sink::new());
+        let loan = Rc::new(core::cell::RefCell::new(Some(core::mem::replace(
+            o,
+            placeholder,
+        ))));
+        *slot.borrow_mut() = Rc::downgrade(&loan);
         let mut latch = InterruptLatch::new();
-        o.advance(s, &mut Access::new(0, 1, &mut latch))
+        let result = runtime.step(&mut Access::new(0, 100, &mut latch));
+        *slot.borrow_mut() = alloc::rc::Weak::new();
+        *o = loan.borrow_mut().take().unwrap();
+        use super::super::super::scheduler;
+        match result {
+            Ok(scheduler::Progress::Retired { refusal: None, .. }) => {
+                Ok(Progress::CallbackComplete)
+            }
+            Ok(scheduler::Progress::Retired {
+                refusal: Some(reason),
+                ..
+            }) => Err(Error::Backend(reason)),
+            Ok(scheduler::Progress::Busy { deadline }) => Ok(Progress::Busy { deadline }),
+            Ok(scheduler::Progress::Idle) => Ok(Progress::Busy { deadline: None }),
+            Err(scheduler::Error::Contract(reason)) => Err(Error::Contract(reason)),
+            Err(scheduler::Error::Callback(reason)) => Err(Error::Backend(reason)),
+        }
+    }
+    fn step(o: &mut Owner<Sink>, s: &Samples) -> Result<Progress, Error> {
+        if o.control.is_some() {
+            let mut latch = InterruptLatch::new();
+            let result = o.advance(s, &mut Access::new(0, 100, &mut latch));
+            // Authored harness supplies the independent executor while a
+            // foreground source Stop wait is retained. Production root owns it.
+            if matches!(result, Ok(Progress::Busy { .. }))
+                && o.stopping
+                && (o.queued() || o.callback_executing())
+            {
+                let _ = callback_step(o, s)?;
+            }
+            result
+        } else if o.queued() || o.callback_executing() {
+            callback_step(o, s)
+        } else {
+            let mut latch = InterruptLatch::new();
+            o.advance(s, &mut Access::new(0, 100, &mut latch))
+        }
     }
     fn until(o: &mut Owner<Sink>, s: &Samples, want: Progress) {
         for _ in 0..256 {
@@ -895,6 +1150,58 @@ mod tests {
         o.begin_initialize().unwrap();
         until(&mut o, &s, Progress::Initialized);
         (o, s)
+    }
+    #[test]
+    fn actual_scheduler_registration_and_wake_cannot_be_replaced_by_effect_success() {
+        let mut sink = Sink::new();
+        sink.omit_registration = true;
+        let mut o = Owner::initialized_source(Configuration::t8112(), sink);
+        let samples = Samples::new();
+        o.begin_initialize().unwrap();
+        step(&mut o, &samples).unwrap();
+        step(&mut o, &samples).unwrap();
+        assert_eq!(
+            step(&mut o, &samples),
+            Err(Error::Contract("MC actual work registration did not occur"))
+        );
+        assert!(!o.initialized() && !o.queued());
+        let (mut o, samples) = initialized();
+        o.backend.omit_wake = true;
+        o.submit_after_housekeeping().unwrap();
+        assert!(o.pending() && !o.queued()); // No local shadow pending on submit.
+        assert_eq!(
+            step(&mut o, &samples),
+            Err(Error::Contract(
+                "MC Wake retired without scheduling actual Work"
+            ))
+        );
+        assert!(o.pending() && !o.queued());
+    }
+    #[test]
+    fn missing_weak_callback_owner_refuses_and_same_actual_invocation_can_retry() {
+        let (mut o, samples) = initialized();
+        o.backend.check_replay = true;
+        o.submit_after_housekeeping().unwrap();
+        until(&mut o, &samples, Progress::Scheduled);
+        let runtime = o.backend.runtime.clone();
+        let mut irq = InterruptLatch::new();
+        assert!(matches!(
+            runtime.step(&mut Access::new(0, 100, &mut irq)),
+            Err(super::super::super::scheduler::Error::Callback(
+                "authored actual metrics owner absent"
+            ))
+        ));
+        assert!(!o.queued() && o.pending() && !o.callback_executing());
+        // Retry enters the retained scheduler Invocation rather than re-waking
+        // or manufacturing a completion after the weak lookup failure.
+        for _ in 0..32 {
+            if callback_step(&mut o, &samples).unwrap() == Progress::CallbackComplete {
+                break;
+            }
+        }
+        assert!(!o.pending() && !o.queued());
+        assert_eq!(o.backend.notifications, 1);
+        assert!(o.last_dispatch.as_ref().unwrap().check_current().is_err());
     }
     #[test]
     fn actual_registration_live_getters_and_source_once_flag() {
@@ -1286,7 +1593,7 @@ mod tests {
         o.control.as_mut().unwrap().cursor = u64::MAX;
         assert!(matches!(step(&mut o, &s), Err(Error::Contract(_))));
         assert_eq!(o.backend.effects.len(), n);
-        assert!(o.pending() && o.queued());
+        assert!(o.pending() && !o.queued());
         assert!(step(&mut o, &s).is_err());
     }
 }
