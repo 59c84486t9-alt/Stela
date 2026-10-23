@@ -26,7 +26,8 @@ mod scan;
 mod scan_configuration;
 pub use mcc::{Ax200Mcc, Ax200MccError, Ax200MccPhase};
 pub use scan::{
-    Ax200Scan, Ax200ScanError, Ax200ScanPhase, ScanCompletion, ScanResult, ScanResultProgress,
+    Ax200Scan, Ax200ScanError, Ax200ScanPhase, ScanCompletion, ScanRawReceive, ScanRejectedMpdu,
+    ScanResult, ScanResultProgress, ScanRetirement,
 };
 pub use scan_configuration::{
     Ax200ScanConfiguration, Ax200ScanConfigurationError, Ax200ScanConfigurationPhase,

@@ -88,7 +88,8 @@ pub(super) fn passive(
         .try_reserve_exact(REQUEST_BYTES)
         .map_err(|_| Ax200ScanError::NoMemory)?;
     bytes.resize(REQUEST_BYTES, 0);
-    // First and only UID0 in this native firmware epoch. Never reused.
+    // One serialized UID0. Only the same retained owner can reuse it after
+    // actual completion, command reclaim and old-RB/deferred-user retirement.
     bytes[4..8].copy_from_slice(&PRIORITY_EXT_6.to_le_bytes());
     bytes[GENERAL..GENERAL + 2]
         .copy_from_slice(&(FORCE_PASSIVE | PASS_ALL | ADAPTIVE_DWELL).to_le_bytes());

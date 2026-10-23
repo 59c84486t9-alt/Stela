@@ -42,8 +42,8 @@ pub use ax200::{
     Ax200MccError, Ax200MccPhase, Ax200Scan, Ax200ScanConfiguration, Ax200ScanConfigurationError,
     Ax200ScanConfigurationPhase, Ax200ScanError, Ax200ScanPhase, Ax200Setup, Ax200SetupError,
     Ax200SetupOptions, Ax200SetupPhase, BoardCommand, BoardCommandKind, CountryIo, CountryIoError,
-    MacCommand, MacCommandKind, ScanCompletion, ScanResult, ScanResultProgress, SelectedCountry,
-    SetupDecisions,
+    MacCommand, MacCommandKind, ScanCompletion, ScanRawReceive, ScanRejectedMpdu, ScanResult,
+    ScanResultProgress, ScanRetirement, SelectedCountry, SetupDecisions,
 };
 mod lari;
 pub use lari::{LariError, LariPhase, LariRadio};

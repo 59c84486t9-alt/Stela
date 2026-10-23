@@ -3,13 +3,16 @@
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
 //! Original-owner UMAC15 passive scanning. ACK, scan-complete and retirement
-//! are separate: no UID reuse or owner extraction before actual radio/RX drain.
+//! are separate: no UID reuse before actual cold-unbound request retirement.
+//! The shared native RX owner stays live; whole-device extraction is separate.
 use super::super::hcmd::{CapturedNotification, NotificationPoll};
 use super::*;
 use crate::net::wifi::intel::command::Id;
 use crate::net::wifi::{Band, Channel, regulatory, scan as protocol};
 use regulatory::OsPolicy;
 mod policy;
+mod retirement;
+pub use retirement::{ScanRawReceive, ScanRetirement};
 mod wire;
 static NEXT_CONTEXT: crate::net::wifi::Identities = crate::net::wifi::Identities::new();
 const MAX_SCAN_US: u64 = 30_000_000;
@@ -39,6 +42,9 @@ pub enum Ax200ScanError {
     UnsupportedRequest,
     ReceiveBackpressure { notifications: usize },
     PreScanReceiveRequired,
+    PostScanReceiveRequired,
+    DeferredUsers(usize),
+    NotificationsRequired(usize),
     StaleNotification,
     CompletionLength(usize),
     CompletionUid(u32),
@@ -60,6 +66,20 @@ pub struct ScanCompletion {
 pub struct ScanResult {
     observed: ObservedMpdu,
     result: Result<protocol::result::Bss, Ax200ScanError>,
+    _user: Arc<()>,
+}
+/// Rejected bytes retain the same deferred scan-user lifetime as good results.
+pub struct ScanRejectedMpdu {
+    rejected: RejectedMpdu,
+    _user: Arc<()>,
+}
+impl ScanRejectedMpdu {
+    pub fn error(&self) -> crate::net::wifi::intel::receive::mpdu::Error {
+        self.rejected.error()
+    }
+    pub fn raw_packet(&self) -> &[u8] {
+        self.rejected.raw_packet()
+    }
 }
 impl ScanResult {
     pub fn observed(&self) -> &ObservedMpdu {
@@ -72,7 +92,7 @@ impl ScanResult {
 pub enum ScanResultProgress {
     Pending,
     Backpressure { notifications: usize },
-    Rejected(RejectedMpdu),
+    Rejected(ScanRejectedMpdu),
     Observed(ScanResult),
 }
 impl ScanCompletion {
@@ -97,6 +117,7 @@ pub struct Ax200Scan<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> {
     phase: Ax200ScanPhase,
     native: regulatory::NativeContext,
     scanner: protocol::Scanner,
+    users: Arc<()>,
     scan_ticket: Option<protocol::Ticket>,
     command_ticket: Option<CommandTicket>,
     command_deadline: Option<crate::Deadline>,
@@ -161,6 +182,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Mac<'a, Q, B, O> {
                 policy_revision: revision,
             },
             scanner,
+            users: Arc::new(()),
             scan_ticket: None,
             command_ticket: None,
             command_deadline: None,
@@ -342,7 +364,12 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             .decode_captured_mpdu(captured)
             .map_err(Ax200ScanError::Boot)?
         {
-            MpduProgress::Rejected(rejected) => return Ok(ScanResultProgress::Rejected(rejected)),
+            MpduProgress::Rejected(rejected) => {
+                return Ok(ScanResultProgress::Rejected(ScanRejectedMpdu {
+                    rejected,
+                    _user: self.users.clone(),
+                }));
+            }
             MpduProgress::Observed(observed) => observed,
             _ => return Err(Ax200ScanError::State),
         };
@@ -368,6 +395,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         Ok(ScanResultProgress::Observed(ScanResult {
             observed,
             result,
+            _user: self.users.clone(),
         }))
     }
     pub fn stop(&mut self) -> Result<(), Error> {
@@ -418,6 +446,9 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         if self.phase != Ax200ScanPhase::NotStarted || self.scanner.phase() != protocol::Phase::Idle
         {
             return Err(Ax200ScanError::State);
+        }
+        if let Some(error) = self.first_error.as_ref() {
+            return Err(error.clone());
         }
         if request.active() {
             return Err(Ax200ScanError::ProbePowerRequired);

@@ -1024,3 +1024,6 @@ fn pre_scan_raw_drain_native_fault_is_sticky_before_any_request_publication() {
     assert_eq!(native.state.lock().unwrap().registers[&0x460], bell);
     scan.stop().unwrap();
 }
+
+#[path = "ax200_scan_retirement_tests.rs"]
+mod retirement_tests;
