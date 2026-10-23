@@ -3,9 +3,10 @@
  * alignment just below it, as a slab keeps them in its cache. Alignment is
  * kmalloc's: at least the greatest power-of-two divisor of the size and
  * ARCH_KMALLOC_MINALIGN. Memory comes back zeroed, which
- * __GFP_ZERO asks for and plain kmalloc permits. Stela has one heap and no
- * caches, so every kmalloc_caches entry is empty and the cache a constant
- * size selects is not consulted. */
+ * __GFP_ZERO asks for and plain kmalloc permits. These raw allocations use
+ * one heap; their kmalloc_caches entries remain empty and the bucket a
+ * constant size selects is not consulted. Explicit kmem_cache handles use
+ * the separate page-backed public cache service. */
 #include <linux/limits.h>
 #include <linux/gfp.h>
 #include <linux/minmax.h>
@@ -41,7 +42,7 @@ static bool request_supported(gfp_t flags)
 	return true;
 }
 
-static void *allocate(size_t size, gfp_t flags)
+static void *allocate(size_t size, gfp_t flags, size_t minimum_align)
 {
 	if (!size)
 		return ZERO_SIZE_PTR;
@@ -49,7 +50,8 @@ static void *allocate(size_t size, gfp_t flags)
 		return NULL;
 	if (!request_supported(flags))
 		return NULL;
-	size_t align = max(alignment(size), sizeof(struct header));
+	size_t align = max(alignment(size), minimum_align);
+	align = max(align, sizeof(struct header));
 	if (size > SIZE_MAX - align)
 		return NULL;
 	u8 *base = stela_linux_heap_alloc(align + size, align);
@@ -62,18 +64,24 @@ static void *allocate(size_t size, gfp_t flags)
 
 void *__kmalloc_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t flags)
 {
-	return allocate(size, flags);
+	return allocate(size, flags, ARCH_KMALLOC_MINALIGN);
 }
 
 void *__kmalloc_cache_noprof(struct kmem_cache *s, gfp_t flags, size_t size)
 {
 	(void)s;
-	return allocate(size, flags);
+	return allocate(size, flags, ARCH_KMALLOC_MINALIGN);
 }
 
 void *__kmalloc_large_noprof(size_t size, gfp_t flags)
 {
-	return allocate(size, flags);
+	/* kmalloc handles zero before selecting this internal entry. Its page
+	 * alignment declaration cannot admit the ordinary ZERO_SIZE_PTR. */
+	if (!size)
+		return NULL;
+	/* The public declaration lets the optimizer assume page alignment, even
+	 * for a direct call whose size would ordinarily select a small bucket. */
+	return allocate(size, flags, PAGE_SIZE);
 }
 
 void kfree(const void *object)
@@ -189,6 +197,8 @@ static void check_allocation(size_t size)
 		u8 *object = objects[i];
 		assert(object && (unsigned long)object % divisor == 0);
 		assert((unsigned long)object % ARCH_KMALLOC_MINALIGN == 0);
+		if (i == 2)
+			assert((unsigned long)object % PAGE_SIZE == 0);
 		const struct header *metadata = (const struct header *)object - 1;
 		assert(metadata->size == metadata->align + size);
 		assert((unsigned long)(object - metadata->align) % metadata->align == 0);
@@ -221,7 +231,7 @@ int main(void)
 	}
 	assert(__kmalloc_noprof(0, GFP_KERNEL) == ZERO_SIZE_PTR);
 	assert(__kmalloc_cache_noprof(NULL, GFP_KERNEL, 0) == ZERO_SIZE_PTR);
-	assert(__kmalloc_large_noprof(0, GFP_KERNEL) == ZERO_SIZE_PTR);
+	assert(!__kmalloc_large_noprof(0, GFP_KERNEL));
 	assert(!__kmalloc_noprof(KMALLOC_MAX_SIZE + 1, GFP_KERNEL));
 	assert(!__kmalloc_noprof(SIZE_MAX, GFP_KERNEL));
 	kfree(NULL);
