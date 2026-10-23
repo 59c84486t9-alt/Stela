@@ -202,14 +202,20 @@ impl Linux {
             return;
         };
         self.apply(&mut build, None, &[], None);
-        build.define("STELA_LINUX_DRM_FORMAT_TEST", None);
         let archives = self.hosted.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        tests.add(
-            &build,
-            "linux_drm_formats",
-            &format!("{COMPAT}/kernel/drm.c"),
-            &archives,
-        );
+        for (name, source, define) in [
+            ("linux_drm_formats", "drm.c", "STELA_LINUX_DRM_FORMAT_TEST"),
+            ("linux_rcu", "rcu.c", "STELA_LINUX_RCU_TEST"),
+        ] {
+            let mut build = build.clone();
+            build.define(define, None);
+            tests.add(
+                &build,
+                name,
+                &format!("{COMPAT}/kernel/{source}"),
+                &archives,
+            );
+        }
     }
 
     /// Kbuild's definitions, flags and forced includes, and system include

@@ -3,17 +3,21 @@
  * allocators, and the services stela/test.h declares. Built on the C library,
  * outside Stela's Linux environment. */
 #include <errno.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 void *stela_linux_heap_alloc(size_t size, size_t align);
 void stela_linux_heap_free(void *object, size_t size, size_t align);
 int64_t stela_test_now_ns(void);
 void stela_test_sleep_us(uint64_t usecs);
 _Noreturn void stela_test_fail(const char *file, int line, const char *condition);
+int stela_test_traps(void (*operation)(void));
 
 void *stela_linux_heap_alloc(size_t size, size_t align)
 {
@@ -51,4 +55,29 @@ void stela_test_fail(const char *file, int line, const char *condition)
 {
 	fprintf(stderr, "%s:%d: assertion failed: %s\n", file, line, condition);
 	abort();
+}
+
+static void expected_trap(int signal_number)
+{
+	(void)signal_number;
+	_Exit(86);
+}
+
+int stela_test_traps(void (*operation)(void))
+{
+	pid_t child = fork();
+	if (child < 0)
+		abort();
+	if (!child) {
+		if (signal(SIGILL, expected_trap) == SIG_ERR)
+			_Exit(87);
+		operation();
+		_Exit(88);
+	}
+	int status;
+	while (waitpid(child, &status, 0) < 0) {
+		if (errno != EINTR)
+			abort();
+	}
+	return WIFEXITED(status) && WEXITSTATUS(status) == 86;
 }
