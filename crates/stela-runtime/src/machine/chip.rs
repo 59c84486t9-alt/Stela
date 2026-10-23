@@ -13,6 +13,7 @@ use alloc::{vec, vec::Vec};
 mod forms;
 #[rustfmt::skip]
 mod checks;
+mod check_index;
 
 /// An access check a form's Execute pseudocode makes (Arm
 /// `AArch64_CheckFPEnabled`, `AArch64_CheckFPAdvSIMDEnabled`,
@@ -301,8 +302,16 @@ impl Chip {
     /// word no checked form claims. The most specific encoding wins, as in
     /// Arm's decode tables.
     pub fn checks(self, word: u32) -> &'static [Check] {
+        self.checks_in(word, check_index::groups(word))
+    }
+
+    fn checks_in(
+        self,
+        word: u32,
+        groups: impl IntoIterator<Item = &'static CheckGroup>,
+    ) -> &'static [Check] {
         let bit = 1u8 << self as u8;
-        for group in checks::CHECKS {
+        for group in groups {
             let Ok(index) = group
                 .forms
                 .binary_search_by_key(&(word & group.mask), |form| form.value)
