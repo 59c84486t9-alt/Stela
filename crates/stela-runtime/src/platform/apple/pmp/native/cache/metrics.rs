@@ -697,18 +697,14 @@ impl<B: Backend> Owner<B> {
                         let denominator = geometry
                             .interval
                             .wrapping_mul(u64::from(geometry.platform_scale));
-                        let rates = if geometry.interval != 0 && geometry.platform_scale != 0 {
-                            if denominator == 0 {
-                                [0, 0]
-                            } else {
-                                [
-                                    (1_000_000 * u64::from(a) / denominator) >> 20,
-                                    (1_000_000 * u64::from(b) / denominator) >> 20,
-                                ]
-                            }
-                        } else {
-                            [0, 0]
-                        };
+                        // A64 UDIV returns zero for a zero denominator, including
+                        // a wrapped product of otherwise nonzero source values.
+                        let rates = [a, b].map(|value| {
+                            (1_000_000 * u64::from(value))
+                                .checked_div(denominator)
+                                .unwrap_or(0)
+                                >> 20
+                        });
                         let event = self
                             .config
                             .trace_base
@@ -1044,6 +1040,27 @@ mod tests {
         assert_eq!(traces[2], (0x860bb410, [1280, 4608, 0, 2]));
         assert_eq!(traces[3], (0x860bb000, [0; 4]));
         assert_eq!(o.backend.notifications, 1);
+    }
+    #[test]
+    fn rate_udiv_zero_preserves_raw_counts_for_zero_and_wrapped_intervals() {
+        for interval in [0, 1u64 << 61] {
+            let (mut o, mut s) = initialized();
+            o.begin_register(1).unwrap();
+            until(&mut o, &s, Progress::Registered);
+            o.apply_registry_control(RegistryControl::Statistics(1));
+            o.backend.trace = 1;
+            s.geometry.interval = interval;
+            s.data[0][..8].copy_from_slice(&(70u64 | (100u64 << 32)).to_le_bytes());
+            o.submit_after_housekeeping().unwrap();
+            until(&mut o, &s, Progress::Scheduled);
+            until(&mut o, &s, Progress::CallbackComplete);
+            assert!(o.backend.effects.iter().any(|(_, e)| matches!(
+                e,
+                Effect::Trace { event: 0x860bb400, args }
+                    if *args == [0, 0, 70 * 2048, 100 * 2048]
+            )));
+            assert_eq!(o.backend.notifications, 1);
+        }
     }
     #[test]
     fn actual_callback_retirement_and_busy_keep_both_pending_lifecycles() {
