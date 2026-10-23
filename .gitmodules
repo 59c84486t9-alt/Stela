@@ -2,12 +2,10 @@
 	path = third_party/linux
 	url = https://github.com/gregkh/linux.git
 	shallow = true
-	ignore = all
 [submodule "mesa"]
 	path = third_party/mesa
 	url = https://gitlab.freedesktop.org/mesa/mesa.git
 	shallow = true
-	ignore = all
 [submodule "nvidia"]
 	path = third_party/nvidia
 	url = https://github.com/NVIDIA/open-gpu-kernel-modules.git
