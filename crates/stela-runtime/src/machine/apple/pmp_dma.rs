@@ -131,9 +131,11 @@ impl AppleDevices {
     ///
     /// # Safety
     /// `ram` is the SAME Arc used by every actual canonical Host/table walker
-    /// passed to this device set. All physical native workers are held, their
-    /// native frames recovered, actual worker/copyout memory fences completed,
-    /// and every synchronous producer is closed. All future service calls must
+    /// passed to this device set. At cold binding, no guest frame/native loan
+    /// has ever been published, actual AP executors are parked and every raw
+    /// input copy is finished. Otherwise all physical native workers are held,
+    /// frames recovered and real worker/copyout memory fences completed. Every
+    /// synchronous producer is closed. All future service calls must
     /// preserve this contract. No legacy/raw transfer may call this binding.
     /// CPUID words come from the admitted host processor's actual snapshot;
     /// static source properties have no runtime IORegistry/startup overrides.
@@ -310,7 +312,13 @@ impl AppleDevices {
     pub(super) fn native_pmp_dma_deadline(&self) -> Option<u64> {
         self.native_pmp_dma
             .as_ref()
-            .filter(|m| m.service.has_work())
+            .filter(|m| {
+                m.service.has_work()
+                    && self
+                        .bus
+                        .device::<Asc>(m.asc)
+                        .is_some_and(Asc::execution_enabled)
+            })
             .map(|_| 0)
     }
 }

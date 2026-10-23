@@ -85,6 +85,9 @@ mod canonical_reads;
 mod canonical_writes;
 mod display_resources;
 pub mod memory_resources;
+mod pmp_dma;
+mod pmp_services;
+pub use pmp_dma::{ExplicitRuntimeConfiguration, SourceProvenance};
 mod processor_power;
 mod service;
 mod sleep;
@@ -101,6 +104,7 @@ pub use crate::platform::apple::{
     dcp::Log as DisplayLog,
     interrupt::AicInput,
     nor,
+    pmp::native::services::Clock as NativePmpClock,
     scanout::{
         ChannelMasks as ScanoutMasks, Mode as ScanoutMode, PixelFormat as ScanoutFormat, Scanout,
     },
@@ -167,6 +171,8 @@ pub struct AppleDevices {
     power_refusals: Vec<(u64, String)>,
     power_configured: bool,
     processor_power: Option<processor_power::AssignedPower>,
+    native_pmp_dma: Option<pmp_dma::PmpDma>,
+    native_pmp_services: Option<pmp_services::NativePmpServices>,
     /// The SoC's sleep and wake (`sleep`).
     sleep: sleep::SocSleep,
     rtc_clock: Option<pmu::RtcClock>,
@@ -504,6 +510,8 @@ impl AppleDevices {
             power_refusals: Vec::new(),
             power_configured: false,
             processor_power: None,
+            native_pmp_dma: None,
+            native_pmp_services: None,
             sleep: sleep::SocSleep::for_boot_processor(boot_processor),
             rtc_clock: None,
         }
@@ -3217,6 +3225,8 @@ impl Devices for AppleDevices {
                 let host = controller.and_then(|c| c.host_deadline(function));
                 poll.into_iter().chain(host).min()
             })
+            .chain(self.native_pmp_dma_deadline())
+            .chain(self.native_pmp_services_deadline())
             .min()
     }
 
@@ -3228,6 +3238,14 @@ impl Devices for AppleDevices {
     ) -> Result<(), DeviceError> {
         self.publish_rtc_time(now)?;
         self.settle_lifecycle(cpu, now);
+        // SAFETY: the persistent native binding admits only the canonical
+        // execution path. Its actual held cohort/fenced Host sessions and
+        // exclusive synchronous device owner remain live through this step.
+        unsafe {
+            self.service_native_pmp_services(cpu, now)?;
+            self.service_native_pmp_dma(cpu, memory, now)?;
+            self.service_native_pmp_services(cpu, now)?;
+        }
         for master in &self.masters {
             let (aes, dart) = self
                 .bus

@@ -131,6 +131,15 @@ const INVLPG_PAGES: u64 = 16;
 const FAULT_KIND: u64 = 0xffff;
 pub(crate) const COUNTER_HZ: u64 = 24_000_000;
 
+/// Fresh ticks from the actual installed physical Host's configured 24 MHz
+/// clock. Native PMP services execute on the retained BSP owner and share this
+/// same source, rather than reusing an Access timestamp or a copied sample.
+pub(crate) fn fresh_counter() -> u64 {
+    let state = state();
+    let ticks = rdtsc() - state.tsc_base;
+    ((u128::from(ticks) * u128::from(state.counter_per_tsc)) >> 64) as u64
+}
+
 #[derive(Clone, Copy)]
 struct Recorded {
     rip: u64,
@@ -815,33 +824,33 @@ impl Host for BareHost<'_> {
         physical: u64,
         bytes: usize,
         write: bool,
-    ) -> Result<(), stela_runtime::platform::dma::DmaError> {
+    ) -> Result<(), stela_runtime::machine::engine::DmaError> {
         let ram = state().registered_ram.as_ref().ok_or(
-            stela_runtime::platform::dma::DmaError::Unsupported(
+            stela_runtime::machine::engine::DmaError::Unsupported(
                 "canonical DMA RAM owner is not installed",
             ),
         )?;
         ram.check_dma_range(physical, bytes, write)
-            .map_err(|_| stela_runtime::platform::dma::DmaError::Memory)
+            .map_err(|_| stela_runtime::machine::engine::DmaError::Memory)
     }
     fn read_ram_progress(
         &mut self,
         physical: u64,
         buffer: &mut [u8],
-    ) -> Result<(), stela_runtime::platform::dma::TransferFault> {
+    ) -> Result<(), stela_runtime::machine::engine::TransferFault> {
         super::speculation::fence();
         let Some(ram) = &state().registered_ram else {
             return self.read_ram(physical, buffer).then_some(()).ok_or(
-                stela_runtime::platform::dma::TransferFault {
-                    error: stela_runtime::platform::dma::DmaError::Memory,
+                stela_runtime::machine::engine::TransferFault {
+                    error: stela_runtime::machine::engine::DmaError::Memory,
                     completed: 0,
                 },
             );
         };
         // SAFETY: private DMA staging, same canonical reader/owner contract.
         unsafe { ram.read_physical_progress(physical, buffer) }.map_err(|fault| {
-            stela_runtime::platform::dma::TransferFault {
-                error: stela_runtime::platform::dma::DmaError::Memory,
+            stela_runtime::machine::engine::TransferFault {
+                error: stela_runtime::machine::engine::DmaError::Memory,
                 completed: fault.completed,
             }
         })
@@ -850,19 +859,19 @@ impl Host for BareHost<'_> {
         &mut self,
         physical: u64,
         data: &[u8],
-    ) -> Result<(), stela_runtime::platform::dma::TransferFault> {
+    ) -> Result<(), stela_runtime::machine::engine::TransferFault> {
         let Some(ram) = &state().registered_ram else {
             return self.write_ram(physical, data).then_some(()).ok_or(
-                stela_runtime::platform::dma::TransferFault {
-                    error: stela_runtime::platform::dma::DmaError::Memory,
+                stela_runtime::machine::engine::TransferFault {
+                    error: stela_runtime::machine::engine::DmaError::Memory,
                     completed: 0,
                 },
             );
         };
         // SAFETY: private staging, every writer participates in this same domain.
         unsafe { ram.publish_physical(physical, data) }.map_err(|fault| {
-            stela_runtime::platform::dma::TransferFault {
-                error: stela_runtime::platform::dma::DmaError::Memory,
+            stela_runtime::machine::engine::TransferFault {
+                error: stela_runtime::machine::engine::DmaError::Memory,
                 completed: fault.completed,
             }
         })
@@ -1055,9 +1064,7 @@ impl Host for BareHost<'_> {
     }
 
     fn counter(&mut self) -> u64 {
-        let state = state();
-        let ticks = rdtsc() - state.tsc_base;
-        ((u128::from(ticks) * u128::from(state.counter_per_tsc)) >> 64) as u64
+        fresh_counter()
     }
 
     fn arm_timer(&mut self, deadline: Option<u64>) {

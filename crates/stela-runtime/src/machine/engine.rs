@@ -11,6 +11,7 @@ mod exclusive;
 mod guarded;
 mod hosted;
 mod monitor;
+pub use crate::platform::dma::{DmaError, TransferFault};
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
 mod pointer;
 mod prepare;
