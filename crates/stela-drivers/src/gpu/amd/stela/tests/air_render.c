@@ -1,10 +1,4 @@
-/*
- * Copyright © 2019, 2022 Valve Corporation.
- * Copyright © 2016 Red Hat.
- * Copyright © 2016 Bas Nieuwenhuizen
- * Based in part on anv: Copyright © 2015 Intel Corporation.
- * SPDX-License-Identifier: MIT
- */
+/* SPDX-License-Identifier: MIT */
 /* Offline original AIR -> original AMD legacy VS / NGG / PS compilation.
  * Explicit modeled compiler/raster ABI fixtures, never initialized devices.
  * Mesa policy provenance:31e9a6b2e95e30d84bf3177d1f497d063e59b6b2.
