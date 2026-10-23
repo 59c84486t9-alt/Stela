@@ -1770,7 +1770,7 @@ mod tests {
         let mut dart = Dart::new(16, None).with_apf(16);
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
-        for (index, raw) in records.chunks_exact(52).enumerate() {
+        for (index, raw) in records.as_chunks::<52>().0.iter().enumerate() {
             // Original AP _apfSetupInstance 9f172f0..17328: raw record
             // bytes50/49/48 populate bits1:0,5:4,9:8 respectively.
             // These positions establish encoding, not permission meanings.

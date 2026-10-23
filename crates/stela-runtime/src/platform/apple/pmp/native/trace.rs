@@ -1015,11 +1015,12 @@ mod tests {
     use alloc::collections::VecDeque;
     use core::cell::RefCell;
 
+    type WriteLog = Rc<RefCell<Vec<(Request, u64, Vec<u8>)>>>;
     #[derive(Clone)]
     struct Bytes {
         geometry: Geometry,
         data: Rc<RefCell<Vec<u8>>>,
-        writes: Rc<RefCell<Vec<(Request, u64, Vec<u8>)>>>,
+        writes: WriteLog,
         busy_timestamp: Rc<core::cell::Cell<bool>>,
         refuse_body: Rc<core::cell::Cell<bool>>,
         retired_body: Rc<core::cell::Cell<bool>>,

@@ -246,8 +246,9 @@ mod tests {
     use crate::platform::apple::{bus::Direction, interrupt::InterruptLatch};
     use alloc::{rc::Rc, vec, vec::Vec};
     use core::cell::RefCell;
+    type AccessLog = Rc<RefCell<Vec<(u64, Option<u64>)>>>;
     #[derive(Clone)]
-    struct Device(Rc<RefCell<Vec<(u64, Option<u64>)>>>, bool);
+    struct Device(AccessLog, bool);
     impl MmioDevice for Device {
         fn name(&self) -> &'static str {
             "authored actual controller view"
