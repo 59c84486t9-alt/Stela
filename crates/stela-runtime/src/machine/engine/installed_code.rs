@@ -10,6 +10,8 @@ use alloc::{
 
 /// Independent finite metadata envelope for this Host's installed native addresses.
 pub const MAX_ENTRIES: usize = 64;
+const NO_HINT: u8 = u8::MAX;
+const _: () = assert!(MAX_ENTRIES < NO_HINT as usize);
 /// Separate Arc<Vec> allocation: the Vec value plus strong/weak counters.
 /// Payload capacity is separately charged to the retained compiler artifact.
 /// Allocator headers are excluded, as in that existing accounting policy.
@@ -25,12 +27,16 @@ struct Entry {
 /// Before any patch/discard/reclaim, clear it while no native run is active.
 pub struct InstalledCodeCache {
     entries: [Option<Entry>; MAX_ENTRIES],
+    /// Allocation-address bits select a hint, never permission to reuse code.
+    /// Ring replacement may leave a stale index; lookup rechecks its owner.
+    hints: [u8; MAX_ENTRIES],
     next: usize,
 }
 impl Default for InstalledCodeCache {
     fn default() -> Self {
         Self {
             entries: core::array::from_fn(|_| None),
+            hints: [NO_HINT; MAX_ENTRIES],
             next: 0,
         }
     }
@@ -42,7 +48,16 @@ impl InstalledCodeCache {
         core::mem::size_of::<Self>() + MAX_ENTRIES * ARC_VEC_METADATA_BYTES;
 
     pub fn lookup(&mut self, owner: &Arc<Vec<u8>>) -> Option<NativeCode> {
-        for slot in &mut self.entries {
+        let identity = Arc::as_ptr(owner);
+        let hint = Self::hint_slot(owner);
+        if let Some(Some(entry)) = self.entries.get(usize::from(self.hints[hint]))
+            && entry.owner.as_ptr() == identity
+        {
+            // The same retained Weak and borrowed strong Arc prove identity
+            // and lifetime as in the scan below. A hint alone proves neither.
+            return Some(entry.code);
+        }
+        for (index, slot) in self.entries.iter_mut().enumerate() {
             let Some(entry) = slot else {
                 continue;
             };
@@ -50,7 +65,7 @@ impl InstalledCodeCache {
             // reusable payload buffer or installed native code. The Weak pins
             // that allocation identity even after its strong owner expires.
             // Avoid strong-count RMWs for every live nonmatching cache entry.
-            if entry.owner.as_ptr() != Arc::as_ptr(owner) {
+            if entry.owner.as_ptr() != identity {
                 if entry.owner.strong_count() == 0 {
                     *slot = None;
                 }
@@ -61,14 +76,24 @@ impl InstalledCodeCache {
             // lookup. Equality above names the Arc-allocated Vec, not its
             // replaceable payload buffer. An upgrade/drop adds no authority
             // and would perform two needless strong-count atomic RMWs.
+            self.hints[hint] = index as u8;
             return Some(entry.code);
         }
         None
+    }
+    fn hint_slot(owner: &Arc<Vec<u8>>) -> usize {
+        let address = Arc::as_ptr(owner).addr();
+        // Mix alignment and page-offset bits without reading code bytes or
+        // treating an address/hash as artifact identity. Collisions just scan.
+        ((address >> 3) ^ (address >> 12)) % MAX_ENTRIES
     }
     /// Record only after the actual Host successfully installed all bytes.
     /// Failed/partial installation must never create an entry. Weak<Vec> keeps
     /// only the small Arc/Vec metadata after artifact eviction, not its payload.
     pub fn record(&mut self, owner: &Arc<Vec<u8>>, code: NativeCode) {
+        // Preserve the scan's first-entry choice even when the same owner is
+        // recorded again across ring wrap. Other stale hints recheck identity.
+        self.hints[Self::hint_slot(owner)] = NO_HINT;
         self.entries[self.next] = Some(Entry {
             owner: Arc::downgrade(owner),
             code,
@@ -79,6 +104,7 @@ impl InstalledCodeCache {
         for entry in &mut self.entries {
             *entry = None;
         }
+        self.hints.fill(NO_HINT);
         self.next = 0;
     }
     pub fn entries(&self) -> usize {
@@ -174,6 +200,65 @@ mod tests {
         assert!(cache.lookup(&equal_payload).is_none());
         drop(owners);
         assert!(cache.lookup(&equal_payload).is_none());
+        assert_eq!(cache.entries(), 0);
+    }
+    #[test]
+    fn colliding_hints_and_stale_indices_never_select_another_owner() {
+        // More live allocations than hint slots guarantees a real collision,
+        // independently of the allocator's placement and alignment choices.
+        let owners: Vec<_> = (0..=MAX_ENTRIES)
+            .map(|_| Arc::new(vec![1, 2, 3, 4]))
+            .collect();
+        let (first, second) = owners
+            .iter()
+            .enumerate()
+            .find_map(|(index, first)| {
+                owners[index + 1..]
+                    .iter()
+                    .find(|second| {
+                        InstalledCodeCache::hint_slot(first)
+                            == InstalledCodeCache::hint_slot(second)
+                    })
+                    .map(|second| (first, second))
+            })
+            .expect("a collision among more owners than slots");
+        let mut cache = InstalledCodeCache::default();
+        cache.record(first, NativeCode(10));
+        cache.record(second, NativeCode(20));
+        for _ in 0..32 {
+            assert_eq!(cache.lookup(first), Some(NativeCode(10)));
+            assert_eq!(cache.lookup(second), Some(NativeCode(20)));
+        }
+        // A hint may also name an empty slot, an out-of-range slot, or an
+        // installed entry whose bytes happen to equal the requested owner's.
+        let hint = InstalledCodeCache::hint_slot(first);
+        for index in [2, NO_HINT, 1] {
+            cache.hints[hint] = index;
+            assert_eq!(cache.lookup(first), Some(NativeCode(10)));
+        }
+        assert_eq!(Arc::strong_count(first), 1);
+        assert_eq!(Arc::strong_count(second), 1);
+        cache.clear();
+        assert!(cache.hints.iter().all(|&hint| hint == NO_HINT));
+        assert!(cache.lookup(first).is_none());
+    }
+    #[test]
+    fn recording_across_ring_wrap_preserves_first_entry_and_expiration() {
+        let owners: Vec<_> = (0..MAX_ENTRIES)
+            .map(|_| Arc::new(vec![1, 2, 3, 4]))
+            .collect();
+        let mut cache = InstalledCodeCache::default();
+        for (index, owner) in owners.iter().enumerate() {
+            cache.record(owner, NativeCode(index));
+        }
+        let last = owners.last().unwrap();
+        assert_eq!(cache.lookup(last), Some(NativeCode(MAX_ENTRIES - 1)));
+        // The replacement at slot zero now precedes the owner's old entry.
+        cache.record(last, NativeCode(MAX_ENTRIES));
+        assert_eq!(cache.lookup(last), Some(NativeCode(MAX_ENTRIES)));
+        assert!(cache.lookup(&owners[0]).is_none());
+        drop(owners);
+        assert!(cache.lookup(&Arc::new(vec![1, 2, 3, 4])).is_none());
         assert_eq!(cache.entries(), 0);
     }
     #[test]
@@ -291,6 +376,11 @@ mod tests {
         *Arc::make_mut(&mut replacement) = compile(11);
         assert_eq!(arena.run(&replacement), 11);
         assert_eq!(arena.run(&equal), 7);
+        assert_eq!(arena.installs, 4);
+        // Stale hint metadata names the different, still-live seven body.
+        // The actual translated execution must still return eleven.
+        arena.cache.hints[InstalledCodeCache::hint_slot(&replacement)] = 1;
+        assert_eq!(arena.run(&replacement), 11);
         assert_eq!(arena.installs, 4);
         arena.reset();
         assert_eq!(arena.run(&replacement), 11);
