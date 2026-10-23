@@ -12,6 +12,7 @@ mod configuration;
 mod drain;
 pub mod policy;
 mod status;
+pub mod t6020;
 pub use configuration::Configuration;
 use policy::CacheResource;
 

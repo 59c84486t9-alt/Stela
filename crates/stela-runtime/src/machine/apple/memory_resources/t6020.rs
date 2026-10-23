@@ -134,13 +134,18 @@ impl Prepared {
             .enumerate()
             .map(|(i, &pa)| (pa, t6020::APERTURE_BYTES, i as u64 * t6020::APERTURE_BYTES))
             .collect::<Vec<_>>();
-        bindings.push((self.descriptor.ptd.physical, ptd::PTD_BYTES, PTD_OFFSET));
+        bindings.push(self.publication_footprint());
         bindings.push((
             self.descriptor.auxiliary.0,
             self.descriptor.auxiliary.1,
             AUXILIARY_OFFSET,
         ));
         bindings
+    }
+    /// Owned extent, including refused PTD effects. This is deliberately not
+    /// an implemented publication binding or a display alias grant.
+    pub(super) fn publication_footprint(&self) -> (u64, u64, u64) {
+        (self.descriptor.ptd.physical, ptd::PTD_BYTES, PTD_OFFSET)
     }
     fn live_generation(&self) -> Result<(), &'static str> {
         if self
@@ -366,11 +371,33 @@ impl MmioDevice for Prepared {
     }
 }
 
+impl crate::machine::apple::AppleDevices {
+    /// Place the actual joint lock/controller owner, retaining every physical
+    /// bank even where its operations refuse. This is structural placement:
+    /// a source power join, native topology and controller/PMP effects remain
+    /// separate requirements before a production mount may adopt this owner.
+    pub fn add_t6020_memory_resources(&mut self, owner: Prepared) -> Result<(), String> {
+        if self.memory_controller.is_some() || self.memory_publication.is_some() {
+            return Err("T602x memory already has an actual owner".into());
+        }
+        owner.live_generation().map_err(String::from)?;
+        let bindings = owner.bindings();
+        let id = self
+            .bus
+            .install(alloc::boxed::Box::new(owner), &bindings)
+            .map_err(|error| alloc::format!("T602x joint memory placement: {error:?}"))?;
+        self.memory_controller = Some(id);
+        // The owned bank is visible through the joint resource, but no
+        // implemented PTD publication/interrupt service has been supplied.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(in crate::machine::apple) mod tests {
     use super::*;
     use crate::{
-        machine::soc::PtdBank,
+        machine::{Devices, apple::AppleDevices, engine::DeviceReadShape, soc::PtdBank},
         memory::{ReservedSystemRamRange, source_ram::system::fixture},
         platform::apple::{
             amcc::{Layout, LockGroup, Register},
@@ -487,6 +514,10 @@ mod tests {
             ram,
         )
         .unwrap()
+    }
+    /// Authored structural fixture only; never production native authority.
+    pub(in crate::machine::apple) fn fixture_owner(count: usize) -> Prepared {
+        prepared(count, ram(RAM))
     }
     #[test]
     fn complete_sparse_ultra_bindings_keep_ptd_auxiliary_and_both_dies_distinct() {
@@ -628,5 +659,101 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn placed_owner_dispatches_real_ram_drains_and_joint_locks_on_both_dies() {
+        let ram = ram(RAM);
+        let owner = prepared(16, Arc::clone(&ram));
+        let bindings = owner.bindings();
+        let mut devices = AppleDevices::new();
+        devices.add_t6020_memory_resources(owner).unwrap();
+        let id = devices.memory_controller.unwrap();
+        assert!(devices.memory_publication.is_none());
+        for &(physical, bytes, offset) in &bindings {
+            assert_eq!(devices.bus.route(physical, Width::Word), Ok((id, offset)));
+            assert_eq!(
+                devices.bus.route(physical + bytes - 4, Width::Word),
+                Ok((id, offset + bytes - 4))
+            );
+        }
+        let drain = bindings[15].0 + t6020::DCS_BASE + 3 * t6020::DCS_STRIDE + t6020::DRAIN;
+        assert!(devices.read_needs_ram(drain, DeviceReadShape::Scalar { bytes: 4 }));
+        assert!(!devices.read_needs_ram(drain, DeviceReadShape::Scalar { bytes: 8 }));
+        let (_, offset) = devices.bus.route(drain, Width::Word).unwrap();
+        let resource = super::super::resource_for(&devices.bus, id).unwrap();
+        let service = ram.try_service().unwrap().unwrap();
+        // SAFETY: this joined fixture has no other producer or native frame.
+        assert_eq!(
+            unsafe { resource.read_ram_drain(offset, Width::Word, &service) },
+            Ok(0)
+        );
+        // SAFETY: the same exact joined fixture producer hold is still live.
+        assert!(unsafe { resource.write_ram_drain(offset, Width::Word, 0, 7, &service) }.is_ok());
+        drop(service);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 8, &mut latch);
+        for physical in [bindings[0].0, bindings[15].0] {
+            devices
+                .bus
+                .write(physical + 0x690, Width::Word, 1, &mut access)
+                .unwrap();
+        }
+        assert_eq!(devices.memory_lock()[0], Some((RAM, RAM + 0x7fff)));
+        assert!(
+            devices
+                .add_t6020_memory_resources(prepared(4, self::ram(RAM)))
+                .is_err()
+        );
+        assert_eq!(devices.memory_controller, Some(id));
+    }
+    #[test]
+    fn publication_dispatch_retains_refused_footprint_without_a_pair_or_alias_grant() {
+        let mut devices = AppleDevices::new();
+        devices
+            .add_t6020_memory_resources(prepared(4, ram(RAM)))
+            .unwrap();
+        let id = devices.memory_controller.unwrap();
+        let resource = super::super::resource_for(&devices.bus, id).unwrap();
+        assert_eq!(
+            resource.publication_footprint(),
+            (0x28e3c0000, ptd::PTD_BYTES, PTD_OFFSET)
+        );
+        assert!(resource.publication_binding().is_err());
+        assert!(
+            resource
+                .display_publication_view(0x28e3d0000, 0x2000)
+                .is_err()
+        );
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        for (offset, bytes) in [
+            (PTD_OFFSET, 8),
+            (PTD_OFFSET, 4),
+            (PTD_OFFSET + ptd::UPDATE_OFFSET, 8),
+        ] {
+            assert!(!resource.supports_pair(offset, bytes));
+            assert!(
+                resource
+                    .read_pair_values(offset, bytes, &mut access)
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            devices.bus.route(0x28e3d0000, Width::Double),
+            Ok((id, PTD_OFFSET + ptd::UPDATE_OFFSET))
+        );
+        assert!(
+            devices
+                .bus
+                .read(0x28e3d0000, Width::Double, &mut access)
+                .is_err()
+        );
+        assert!(
+            devices
+                .bus
+                .write(0x28e3d0000, Width::Double, 1, &mut access)
+                .is_err()
+        );
+        assert!(devices.read_pair(0, 0x28e3c0000, 8, 0).unwrap().is_none());
     }
 }

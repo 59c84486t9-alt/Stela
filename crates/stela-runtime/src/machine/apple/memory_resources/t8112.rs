@@ -492,7 +492,7 @@ mod tests {
         );
         let resource = super::super::resource_for(&board.bus, id).unwrap();
         assert_eq!(
-            resource.publication_binding(),
+            resource.publication_binding().unwrap(),
             (PTD, ptd::PTD_BYTES, PTD_OFFSET)
         );
         assert_eq!(

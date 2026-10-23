@@ -90,6 +90,7 @@ pub use dma_routes::NativeDmaRoute;
 mod handoff;
 mod memory_resources;
 pub use memory_resources::DirectMemoryCache;
+pub use memory_resources::t6020::{T6020Memory, from_io as t6020_memory_source};
 mod power_resources;
 mod topology;
 pub use handoff::{

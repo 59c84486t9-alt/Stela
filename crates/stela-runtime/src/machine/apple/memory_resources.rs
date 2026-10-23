@@ -21,6 +21,7 @@ pub mod dcs;
 mod resource;
 pub(super) use resource::resource_for;
 pub mod t6000_cold;
+pub mod t6020;
 pub mod t8112;
 
 /// One prepared software resource with immutable placement and actual shared

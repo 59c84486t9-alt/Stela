@@ -291,6 +291,11 @@ mod tests {
         let bindings = owner.bindings();
         devices.add_memory_resources(owner).unwrap();
         let id = devices.memory_controller.unwrap();
+        let resource = super::super::resource_for(&devices.bus, id).unwrap();
+        assert_eq!(
+            resource.publication_binding(),
+            Ok(resource.publication_footprint())
+        );
         for (physical, bytes, offset) in bindings {
             assert_eq!(devices.bus.route(physical, Width::Word), Ok((id, offset)));
             assert_eq!(

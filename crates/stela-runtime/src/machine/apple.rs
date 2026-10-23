@@ -3186,8 +3186,10 @@ impl Devices for AppleDevices {
         let Some(device) = self.memory_controller else {
             return [None; amcc::GROUPS];
         };
-        if let Some(owner) = self.bus.device::<memory_resources::Prepared>(device) {
-            owner.locked_regions()
+        if let Some(locked) = memory_resources::resource_for(&self.bus, device)
+            .and_then(|owner| owner.locked_regions())
+        {
+            locked
         } else if let Some(owner) = self
             .bus
             .device::<memory_resources::t8112::cache::EmptyResource>(device)

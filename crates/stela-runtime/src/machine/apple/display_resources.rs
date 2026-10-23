@@ -57,12 +57,13 @@ impl AppleDevices {
         if let Some(device) = self.memory_publication.or(self.memory_controller)
             && let Some(owner) = memory_resources::resource_for(&self.bus, device)
         {
-            let (bank_start, bank_bytes, bank_offset) = owner.publication_binding();
+            let (bank_start, bank_bytes, _) = owner.publication_footprint();
             let bank_end = bank_start + bank_bytes;
             if spans
                 .iter()
                 .any(|&(physical, bytes)| physical < bank_end && bank_start < physical + bytes)
             {
+                let (bank_start, bank_bytes, bank_offset) = owner.publication_binding()?;
                 // The original parent owns the full publication bank, including
                 // LDP entries and IRQs outside display's narrower update view.
                 self.bus
@@ -592,6 +593,45 @@ mod tests {
             .add_display_with_darts(&views, "DCPEXT0", &owners)
             .unwrap();
         assert_eq!(devices.bus.route(INSIDE, Width::Word), Ok(before));
+        assert!(devices.bus.route(PRIMARY, Width::Word).is_ok());
+    }
+
+    #[test]
+    fn refused_ptd_owner_blocks_overlapping_display_publication_before_any_alias() {
+        let (mut devices, owners, views) = placement();
+        devices
+            .add_t6020_memory_resources(memory_resources::t6020::tests::fixture_owner(4))
+            .unwrap();
+        let before = devices.bus.route(SHARED, Width::Double).unwrap();
+        let error = devices
+            .add_display_with_darts(&views, "DCPEXT0", &owners)
+            .unwrap_err();
+        assert_eq!(error, "T602x PTD publication has no qualified source owner");
+        assert_eq!(devices.bus.route(SHARED, Width::Double), Ok(before));
+        assert!(devices.bus.route(PRIMARY, Width::Word).is_err());
+        assert!(devices.bus.route(0x2_8932_0000, Width::Word).is_err());
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        assert!(
+            devices
+                .bus
+                .write(SHARED, Width::Double, 1, &mut access)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn unrelated_display_windows_preserve_a_refused_ptd_owners_full_extent() {
+        let (mut devices, owners, mut views) = placement();
+        views.retain(|(_, range)| range.physical != SHARED);
+        devices
+            .add_t6020_memory_resources(memory_resources::t6020::tests::fixture_owner(4))
+            .unwrap();
+        let before = devices.bus.route(SHARED, Width::Double).unwrap();
+        devices
+            .add_display_with_darts(&views, "DCPEXT0", &owners)
+            .unwrap();
+        assert_eq!(devices.bus.route(SHARED, Width::Double), Ok(before));
         assert!(devices.bus.route(PRIMARY, Width::Word).is_ok());
     }
 

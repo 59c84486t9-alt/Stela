@@ -7,6 +7,8 @@ use crate::{
 };
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 
+pub mod t6020;
+
 pub(super) const COMPATIBLE: &str = "mcc,t6000";
 // Original AppleT6000PMGR::initRegMaps, KC 26A434 mac13j 0x2ef5300:
 // selector8 is DT reg41. PMP's update alias independently cross-checks it.
