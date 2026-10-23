@@ -137,6 +137,48 @@ constant_store(const char *body, uint64_t expected, uint64_t address)
    constant_store_layout(stela_air_test_prefix, body, expected, address);
 }
 
+static nir_def *
+bind_prelude(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
+{
+   unsigned mode = *(unsigned *)data;
+   CHECK(buffer->argument == 1 && buffer->address_space == 1);
+   nir_def *address = nir_imm_int64(b, 0x100000);
+   if (mode == 1) {
+      nir_if *region = nir_push_if(b, nir_imm_true(b));
+      nir_def *yes = nir_imm_int64(b, 0x100000);
+      nir_push_else(b, region);
+      nir_def *no = nir_imm_int64(b, 0x200000);
+      nir_pop_if(b, region);
+      address = nir_if_phi(b, yes, no);
+   } else if (mode == 2) {
+      nir_jump(b, nir_jump_return);
+   }
+   return address;
+}
+
+static void
+binding_prelude_contract(void)
+{
+   LLVMMemoryBufferRef input = stela_air_test_bitcode(stela_air_test_store_body, "");
+   for (unsigned mode = 0; mode < 3; mode++) {
+      struct stela_air_options options = {
+         .workgroup_size = {32, 1, 1}, .max_instructions = 100,
+         .bind_buffer = bind_prelude, .binding_data = &mode,
+      };
+      struct stela_air_error error;
+      nir_shader *nir = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+         "kernel", &test_nir_options, &options, &error);
+      if (!mode) {
+         CHECK(nir && error.kind == STELA_AIR_OK);
+         nir_validate_shader(nir, "straight-line resource binding prelude");
+         ralloc_free(nir);
+      } else {
+         CHECK(!nir && error.kind == STELA_AIR_CONTROL_FLOW && error.detail[0]);
+      }
+   }
+   LLVMDisposeMemoryBuffer(input);
+}
+
 static void
 constant_semantics(void)
 {
@@ -1700,6 +1742,7 @@ tests(void)
    CHECK(!translate(input, &test_nir_options, 1, &error) && error.kind == STELA_AIR_LIMIT);
    LLVMDisposeMemoryBuffer(input);
    constant_semantics();
+   binding_prelude_contract();
    conditional_semantics();
    loop_semantics();
    cfg_semantics();

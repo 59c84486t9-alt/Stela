@@ -1374,8 +1374,11 @@ cfg_prepare(struct translator *t, LLVMValueRef fn)
 static bool
 cfg_declare(struct translator *t)
 {
+   nir_block *entry = nir_start_block(t->b.impl);
+   if (exec_list_length(&t->b.impl->body) != 1 || nir_block_ends_in_jump(entry))
+      return fail(t, STELA_AIR_CONTROL_FLOW, "resource callback must emit a straight-line prelude");
    t->b.impl->structured = false;
-   t->work[0]->start = nir_start_block(t->b.impl);
+   t->work[0]->start = entry;
    for (unsigned i = 1; i < t->reachable_count; i++) {
       t->work[i]->start = new_block(t);
       if (!t->work[i]->start)
@@ -1447,9 +1450,12 @@ cfg_emit(struct translator *t)
       for (LLVMValueRef inst = LLVMGetFirstInstruction(block->llvm);
            inst && LLVMGetInstructionOpcode(inst) == LLVMPHI; inst = LLVMGetNextInstruction(inst)) {
          nir_phi_instr *phi = nir_instr_as_phi(find_value(t, inst)->def->parent_instr);
+         unsigned sources = 0;
          for (unsigned s = 0; s < LLVMCountIncoming(inst); s++) {
             struct air_block *pred = cfg_block(t, LLVMGetIncomingBlock(inst, s));
-            if (!pred || !pred->reachable)
+            if (!pred)
+               return fail(t, STELA_AIR_CONTROL_FLOW, "PHI predecessor leaves AIR entry");
+            if (!pred->reachable)
                continue; /* No NIR edge exists for an unreachable LLVM block. */
             LLVMValueRef incoming = LLVMGetIncomingValue(inst, s);
             if (pred->incoming_phi == inst) {
@@ -1466,7 +1472,10 @@ cfg_emit(struct translator *t)
             if (!value)
                return false;
             nir_phi_instr_add_src(phi, pred->end, value);
+            sources++;
          }
+         if (sources != nir_block_num_preds(block->start))
+            return fail(t, STELA_AIR_CONTROL_FLOW, "PHI sources differ from emitted predecessor edges");
       }
    }
    nir_sort_unstructured_blocks(t->b.impl);

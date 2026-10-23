@@ -13,7 +13,8 @@
 /* Resolve a validated Metal buffer binding to a 64-bit device virtual address.
  * The caller owns resource lifetime, size/access validation, actual allocation,
  * residency and runtime argument ABI. Returning NULL refuses compilation. This
- * callback must only build NIR; it must not submit commands or mutate resources.
+ * callback must build straight-line NIR in the entry prelude; it must not
+ * introduce control flow, submit commands or mutate resources.
  * Test callbacks may use fixed addresses; production bindings must not do so.
  */
 typedef nir_def *(*stela_air_bind_buffer)(nir_builder *b,
@@ -125,7 +126,8 @@ nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
  * legalization and Mesa goto-to-if structurization, including numeric PHIs,
  * early returns, nested/multiple-latch loops and irreducible entries. Original
  * and legalized inputs share the caller's instruction budget; total switch
- * cases also obey that budget before legalization. Production has no iteration cap. Pointer/aggregate PHIs and reachable unsupported terminators
+ * cases also obey that budget before legalization. Production has no iteration
+ * cap. Pointer/aggregate PHIs and reachable unsupported terminators
  * are refused explicitly. Unreachable blocks consume the budget but emit no
  * effects. These source paths await semantic/vendor qualification; no family
  * capability follows from accepting a control-flow shape.
