@@ -225,6 +225,7 @@ impl Linux {
             ("linux_drm_formats", "drm.c", "STELA_LINUX_DRM_FORMAT_TEST"),
             ("linux_rcu", "rcu.c", "STELA_LINUX_RCU_TEST"),
             ("linux_pages", "page.c", "STELA_LINUX_PAGE_TEST"),
+            ("linux_slab", "slab.c", "STELA_LINUX_SLAB_TEST"),
         ] {
             let mut build = build.clone();
             build.define(define, None);

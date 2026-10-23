@@ -60,7 +60,7 @@ void stela_linux_unsupported(const char *operation);
 
 /* Platform memory behind Linux's allocators: Stela's global heap in its
  * images, libc in hosted test programs. Zeroed and aligned to align, a power
- * of two no larger than PAGE_SIZE, or NULL when exhausted; freed with the
+ * of two accepted by the platform layout, or NULL when exhausted; freed with the
  * same size and alignment. */
 void *stela_linux_heap_alloc(size_t size, size_t align);
 void stela_linux_heap_free(void *object, size_t size, size_t align);
