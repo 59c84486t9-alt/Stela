@@ -1974,8 +1974,8 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // borrow has ended. It never executes a guest instruction.
     // SAFETY: actual started executors, retained source Plan/profile and exact
     // RAM/device owners remain live for the whole non-returning run below.
-    let mut machine = unsafe {
-        crate::native_smp::canonical::prepare(
+    let machine = unsafe {
+        crate::native_smp::canonical::prepare_with_locks(
             handoff,
             native_processors.expect("validated native roster"),
             &executors,
@@ -1988,10 +1988,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             boot_processor,
             &worker_bindings,
             &processor_power,
+            Some(core_locks),
         )
     }
     .unwrap_or_else(|error| output::fatal(error));
-    machine.hand_off_core_locks(core_locks);
     run_machine(
         machine,
         &options,
