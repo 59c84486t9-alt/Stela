@@ -18,13 +18,16 @@
 //! bypasses the software check. The separate complete-owned post-order group
 //! gate authenticates all constituents before one parent replay update. This
 //! does not implement grouping, BA/reordering, fragmentation, deaggregation or
-//! protected management frames; those boundaries remain explicit.
+//! unicast protected management or PMF association negotiation. The separate
+//! management module authenticates group BIP-CMAC128 under an actually retained
+//! IGTK; this grants no current-association or controlled-port authority.
 
 use super::{Aggregation, frame::Mpdu};
 use crate::net::Mac;
 use sha2::{Digest, Sha256};
 
 pub mod aggregate;
+pub mod management;
 pub mod tx;
 pub use tx::{HostTxNonce, NonceOwner, TransmitSeed};
 

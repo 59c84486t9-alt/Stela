@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Initial source GTK/IGTK batch ownership. This is hardware programming and
-//! identity retention, not PMF negotiation, MMIE generation or authenticated RX.
+//! Initial source GTK/IGTK batch ownership and bound group BIP authentication.
+//! This grants no PMF negotiation, MMIE generation or current-association RX
+//! delivery authority; station/key-generation checks remain mandatory.
 use super::*;
 use crate::net::wifi::{
     mediatek::{identity::Chip, mcu::key::bip as wire},
-    security::PacketNumber,
+    security::{PacketNumber, management},
 };
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -15,6 +16,7 @@ pub enum Error {
     DataKeyRequired,
     GenerationExhausted,
     AlreadyInstalled,
+    Authentication(management::Error),
 }
 
 /// One acknowledged management-key batch, bound to the exact installed GTK,
@@ -45,7 +47,7 @@ pub(super) struct GtkCache {
 pub(super) struct Installed {
     identity: Identity,
     digest: [u8; 32],
-    receive: PacketNumber,
+    key: management::BipKey,
 }
 
 pub(super) fn remember<C>(state: &mut Owned<C>, key: KeyIdentity, material: &[u8]) {
@@ -72,8 +74,33 @@ impl<C: 'static> HardwareKey<C> {
     }
     pub fn igtk_receive_floor(&self) -> Option<PacketNumber> {
         self.installed_igtk()?;
-        Some(self.owned().igtk.as_ref()?.receive)
+        Some(self.owned().igtk.as_ref()?.key.receive_floor())
     }
+    pub fn igtk_statistics(&self) -> Option<management::Statistics> {
+        self.installed_igtk()?;
+        Some(self.owned().igtk.as_ref()?.key.statistics())
+    }
+    /// Authenticate a complete group robust-management frame under this actual
+    /// acknowledged IGTK and original still-installed GTK. Software CMAC and IPN
+    /// checks always run, independently of copied hardware integrity flags.
+    /// The returned frame proof grants no current association/port authority;
+    /// its eventual consuming station must recheck the exact retained association
+    /// and still-current GTK/IGTK before acting on a deferred frame.
+    pub fn authenticate_bip<'a>(
+        &mut self,
+        frame: &'a crate::net::wifi::frame::Mpdu,
+    ) -> Result<management::Authenticated<'a>, super::Error> {
+        self.installed_igtk()
+            .ok_or(super::Error::Bip(Error::DataKeyRequired))?;
+        self.owned_mut()
+            .igtk
+            .as_mut()
+            .unwrap()
+            .key
+            .authenticate(frame)
+            .map_err(|error| super::Error::Bip(Error::Authentication(error)))
+    }
+
     /// Program the source CCMP128 GTK || BIP-CMAC128 IGTK batch. The firmware
     /// batch repeats the same GTK, while its canonical data identity and replay
     /// floors remain unchanged. Exact identical retries publish no command and
@@ -142,11 +169,13 @@ impl<C: 'static> HardwareKey<C> {
             generation,
             index,
         };
+        let key = management::BipKey::new(gtk, index, material, receive)
+            .map_err(|error| super::Error::Bip(Error::Authentication(error)))?;
         s.igtk_generation = generation;
         s.pending_igtk = Some(Installed {
             identity,
             digest,
-            receive,
+            key,
         });
         s.phase = Phase::Quarantined;
         s.reply = None;
@@ -188,6 +217,135 @@ mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+
+    fn source_bip_packet(gtk: KeyIdentity) -> crate::net::wifi::frame::Mpdu {
+        // Complete pinned CMAC helper native.trace, SHA256 3bbe84f7780d5cc948d8a6a0c9fff42a891370c7ecadfb650c2c1baf3119fe40.
+        // Expected MIC comes from independent CommonCrypto-AES + unchanged Linux CMAC/BIP bodies.
+        let bytes = vec![
+            0xc0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 2, 6, 7, 8, 9, 10, 2, 6, 7, 8, 9, 10, 0,
+            0, 7, 0, 76, 16, 4, 0, 101, 0, 0, 0, 0, 0, 0xc4, 0x80, 0xa2, 0x3a, 0x2c, 0x44, 0x77,
+            0x70,
+        ];
+        crate::net::wifi::frame::Mpdu::new(
+            bytes,
+            key_packet(gtk, 1).radio,
+            security::SecurityStatus::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn actual_acknowledged_igtk_authenticates_source_mic_without_hardware_flag_bypass() {
+        let response = Arc::new(Mutex::new(Response {
+            key_execution: true,
+            ..Response::default()
+        }));
+        let (mut mailbox, wm, _, _) =
+            setup_controlled(Chip::Mt7925, true, false, 0, response.clone());
+        let drops = Arc::new(AtomicUsize::new(0));
+        // SAFETY: exclusive empty source-modeled actual WCID and drained old users.
+        let mut key = unsafe {
+            HardwareKey::claim(
+                &mailbox,
+                7,
+                key_context(),
+                key_scope(true),
+                KeyResource(drops.clone()),
+            )
+        }
+        .unwrap();
+        let gtk = key
+            .install(
+                &mut mailbox,
+                2,
+                Cipher::Ccmp128,
+                &[0x44; 16],
+                ReplaySeed::ZERO,
+            )
+            .unwrap();
+        key.authorize(&key_packet(gtk, 9)).unwrap();
+        let frame = source_bip_packet(gtk);
+        assert!(matches!(
+            key.authenticate_bip(&frame),
+            Err(super::super::Error::Bip(Error::DataKeyRequired))
+        ));
+        // SAFETY: actual initial modeled GTK request/ACK drained; no other key users exist.
+        let identity = unsafe {
+            key.install_igtk(
+                &mut mailbox,
+                4,
+                &[0x55; 16],
+                PacketNumber::new(100).unwrap(),
+            )
+        }
+        .unwrap();
+        let commands = wm.lock().unwrap().completed.len();
+        let authenticated = key.authenticate_bip(&frame).unwrap();
+        assert_eq!(authenticated.body(), &[7, 0]);
+        assert_eq!(authenticated.gtk(), gtk);
+        assert_eq!(authenticated.index(), 4);
+        assert_eq!(authenticated.packet_number().value(), 101);
+        assert_eq!(key.igtk_receive_floor().unwrap().value(), 101);
+        assert!(matches!(
+            key.authenticate_bip(&frame),
+            Err(super::super::Error::Bip(Error::Authentication(
+                management::Error::Replay
+            )))
+        ));
+        // Fake copied hardware integrity must not bypass the actual software MIC.
+        let mut bytes = frame.bytes().to_vec();
+        bytes[30] = 102;
+        let mut forged = crate::net::wifi::frame::Mpdu::new(
+            bytes,
+            frame.radio.clone(),
+            security::SecurityStatus::default(),
+        )
+        .unwrap();
+        forged.security.decrypted = true;
+        forged.security.integrity = security::Integrity::Verified;
+        assert!(matches!(
+            key.authenticate_bip(&forged),
+            Err(super::super::Error::Bip(Error::Authentication(
+                management::Error::Integrity
+            )))
+        ));
+        assert_eq!(key.igtk_receive_floor().unwrap().value(), 101);
+        assert_eq!(
+            key.igtk_statistics(),
+            Some(management::Statistics {
+                replays: 1,
+                mic_failures: 1
+            })
+        );
+        // Authenticated management replay never consumes a canonical GTK data PN.
+        assert!(matches!(
+            key.authorize(&key_packet(gtk, 9)),
+            Err(security::Error::Replay)
+        ));
+        key.authorize(&key_packet(gtk, 10)).unwrap();
+        // SAFETY: unchanged actual drained namespace; identical retry must preserve advanced management IPN.
+        assert_eq!(
+            unsafe {
+                key.install_igtk(&mut mailbox, 4, &[0x55; 16], PacketNumber::new(0).unwrap())
+            }
+            .unwrap(),
+            identity
+        );
+        assert_eq!(key.igtk_receive_floor().unwrap().value(), 101);
+        assert_eq!(wm.lock().unwrap().completed.len(), commands);
+        let removed = key.remove(&mut mailbox).unwrap();
+        assert!(matches!(
+            key.authenticate_bip(&frame),
+            Err(super::super::Error::Bip(Error::DataKeyRequired))
+        ));
+        // SAFETY: successful actual whole-batch removal and complete old model user drain.
+        unsafe { key.retire_after_drain(removed) }.unwrap();
+        assert!(key.igtk_statistics().is_none());
+        assert!(key.igtk_receive_floor().is_none());
+        assert!(!response.lock().unwrap().keys.contains_key(&7));
+        drop(key);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn actual_owned_gtk_igtk_batch_preserves_original_data_key_replay_and_exact_retry() {
@@ -428,6 +586,10 @@ mod tests {
             assert!(key.is_quarantined());
             assert!(key.slot().installed().is_none());
             assert!(key.installed_igtk().is_none());
+            assert!(matches!(
+                key.authenticate_bip(&source_bip_packet(gtk)),
+                Err(super::super::Error::Bip(Error::DataKeyRequired))
+            ));
             assert!(matches!(
                 key.authorize(&key_packet(gtk, 2)),
                 Err(security::Error::NoInstalledKey)
