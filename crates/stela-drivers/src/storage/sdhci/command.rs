@@ -2,46 +2,8 @@
 //! Actual command, response, FIFO and ADMA2 completion; no inferred DMA stop.
 use super::*;
 
-/// Command wire encodings shared by the native transport and card protocols.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct Opcode(u8);
-pub(super) const GO_IDLE: Opcode = Opcode(0);
-pub(super) const MMC_SEND_OP_COND: Opcode = Opcode(1);
-pub(super) const ALL_SEND_CID: Opcode = Opcode(2);
-pub(super) const SET_RELATIVE_ADDRESS: Opcode = Opcode(3);
-pub(super) const SWITCH: Opcode = Opcode(6);
-pub(super) const SELECT_CARD: Opcode = Opcode(7);
-pub(super) const SD_SEND_IF_COND: Opcode = Opcode(8);
-pub(super) const MMC_SEND_EXT_CSD: Opcode = Opcode(8);
-pub(super) const SEND_CSD: Opcode = Opcode(9);
-pub(super) const STOP_TRANSMISSION: Opcode = Opcode(12);
-pub(super) const SEND_STATUS: Opcode = Opcode(13);
-pub(super) const SET_BLOCK_LENGTH: Opcode = Opcode(16);
-pub(super) const READ_SINGLE: Opcode = Opcode(17);
-pub(super) const READ_MULTIPLE: Opcode = Opcode(18);
-pub(super) const WRITE_SINGLE: Opcode = Opcode(24);
-pub(super) const WRITE_MULTIPLE: Opcode = Opcode(25);
-pub(super) const SD_SEND_OP_COND: Opcode = Opcode(41);
-pub(super) const SD_SEND_SCR: Opcode = Opcode(51);
-pub(super) const APP_CMD: Opcode = Opcode(55);
+pub(super) use crate::storage::mmc::wire::*;
 
-const R1_STATUS_ERRORS: u32 = 0xfff9_a000;
-const R1_UNDERRUN: u32 = 1 << 18;
-const R1_OVERRUN: u32 = 1 << 17;
-const R1_SWITCH_ERROR: u32 = 1 << 7;
-const SD_AKE_SEQUENCE_ERROR: u32 = 1 << 3;
-pub(super) const R1_ERRORS: u32 =
-    R1_STATUS_ERRORS | R1_UNDERRUN | R1_OVERRUN | R1_SWITCH_ERROR | SD_AKE_SEQUENCE_ERROR;
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Response {
-    None,
-    Status,
-    Busy,
-    Long,
-    Ocr,
-    Rca,
-    Echo,
-}
 impl Response {
     fn flags(self) -> u16 {
         match self {
@@ -166,7 +128,7 @@ impl Engine {
             };
         fence(Ordering::Release);
         self.registers
-            .write16(COMMAND, u16::from(command.0) << 8 | flags);
+            .write16(COMMAND, u16::from(command.number()) << 8 | flags);
         self.wait_interrupt(RESPONSE_END, COMMAND_US)?;
         self.registers.write32(INTERRUPT, RESPONSE_END);
         let mut result = [0; 4];
