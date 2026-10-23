@@ -430,6 +430,11 @@ impl Engine {
         )
     }
     pub(super) fn set_clock(&mut self, requested: u32) -> Result<u32, BlockError> {
+        if requested < 30_000_000 / 128 {
+            return Err(BlockError::Unsupported(
+                "RTSX requested clock below qualified initial rate",
+            ));
+        }
         let initial = requested <= 1_000_000;
         let internal = if initial {
             30

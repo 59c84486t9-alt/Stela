@@ -46,6 +46,11 @@ pub(in crate::storage) trait Host {
     fn voltage(&mut self) -> Result<u32, BlockError>;
     fn writable(&mut self) -> Result<bool, BlockError>;
     fn allow_kind(&self, kind: Kind) -> Result<(), BlockError>;
+    // Some native engines bypass their identification divider for PIO data.
+    // Refuse cards below that real physical rate before any data command.
+    fn minimum_data_hz(&self) -> u32 {
+        0
+    }
     fn high_speed_supported(&self) -> bool;
     fn mmc_width(&self) -> u8;
     fn set_bus_width(&mut self, width: u8) -> Result<(), BlockError>;
@@ -158,6 +163,11 @@ impl<H: Host> Session<'_, H> {
         }
 
         let (mut blocks, maximum_hz) = capacity(kind, csd)?;
+        if maximum_hz < self.host.minimum_data_hz() {
+            return Err(BlockError::Unsupported(
+                "MMC/SD CSD transfer clock below host physical minimum",
+            ));
+        }
         let sector_addressed = ocr & OCR_SECTOR != 0;
         if sd && !v2 && sector_addressed {
             return Err(BlockError::Unsupported(

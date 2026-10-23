@@ -361,6 +361,7 @@ mod tests {
         ext: [u8; 512],
         blocks: BTreeMap<u32, [u8; 512]>,
         nonready: bool,
+        transfer_speed: u8,
     }
     impl CardModel {
         fn new(mmc: bool) -> Self {
@@ -382,6 +383,7 @@ mod tests {
                 ext,
                 blocks: BTreeMap::new(),
                 nonready: false,
+                transfer_speed: 0x32,
             }
         }
         fn block(&self, lba: u32) -> [u8; 512] {
@@ -395,7 +397,7 @@ mod tests {
             } else {
                 (1 << 126) | (7 << 48)
             };
-            csd |= (9 << 80) | (0x414 << 84) | (0x32 << 96) | 1;
+            csd |= (9 << 80) | (0x414 << 84) | (u128::from(self.transfer_speed) << 96) | 1;
             csd.to_be_bytes()
         }
         fn command(
@@ -686,7 +688,22 @@ mod tests {
                             }
                     );
                 } else {
-                    assert!(card_hz <= 25_000_000);
+                    assert!(
+                        card_hz
+                            <= if self.card.transfer_speed == 0x0a {
+                                10_000_000
+                            } else {
+                                25_000_000
+                            }
+                    );
+                }
+                if card_hz > 25_000_000 {
+                    assert!(
+                        self.card.high_speed,
+                        "physical fast clock requires card high-speed negotiation"
+                    );
+                    assert_eq!(self.regs[0x3da8] & 0x10, 0x10, "SD20 fast transmit phase");
+                    assert_eq!(self.regs[0x3da7] & 8, 8, "SD20 fast sample phase");
                 }
                 let data = if transfer.mode == 12 {
                     transfer.bytes
@@ -724,8 +741,10 @@ mod tests {
                     ));
                     let (status, long, bytes) =
                         self.card.command(transfer.opcode, transfer.argument, data);
-                    self.regs[0x3da9] = 0;
-                    self.regs[0x3daa..0x3dae].copy_from_slice(&status.to_be_bytes());
+                    if transfer.mode == 8 {
+                        self.regs[0x3da9] = 0;
+                        self.regs[0x3daa..0x3dae].copy_from_slice(&status.to_be_bytes());
+                    }
                     if let Some(long) = long {
                         assert_eq!(transfer.response & 3, 2);
                         self.regs[0x3a00] = 0x3f;
@@ -1432,5 +1451,24 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Effect::Command(..)))
         );
+    }
+    #[test]
+    fn native_card_below_source_initial_data_rate_refuses_before_overclocked_data() {
+        let chip = Chip::new(false, true);
+        chip.borrow_mut().card.transfer_speed = 0x0a; // actual CSD:10MHz
+        let mut host = make_host(&chip, false).unwrap();
+        assert!(matches!(
+            host.poll(),
+            Err(BlockError::Unsupported(
+                "MMC/SD CSD transfer clock below host physical minimum"
+            ))
+        ));
+        let c = chip.borrow();
+        assert!(
+            !c.effects
+                .iter()
+                .any(|e| matches!(e, Effect::Command(_, _, 12) | Effect::DataWrite(_)))
+        );
+        assert!(host.inner.borrow().medium.is_none());
     }
 }

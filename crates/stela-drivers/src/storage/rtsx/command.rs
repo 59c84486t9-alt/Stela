@@ -78,7 +78,7 @@ impl Engine {
             if initial {
                 self.write_reg(SD_CFG1, SD_CLK_DIVIDE_MASK, SD_CLK_DIVIDE_0)?;
             }
-            let result = self.read_data(opcode, argument, response, bytes);
+            let result = self.read_data(opcode, argument, bytes);
             if initial {
                 self.write_reg(SD_CFG1, SD_CLK_DIVIDE_MASK, SD_CLK_DIVIDE_128)?;
             }
@@ -91,7 +91,6 @@ impl Engine {
         &mut self,
         opcode: Opcode,
         argument: u32,
-        response: Response,
         bytes: usize,
     ) -> Result<[u32; 4], BlockError> {
         self.set_command(opcode, argument)?;
@@ -100,12 +99,13 @@ impl Engine {
         self.write_reg(CARD_DATA_SOURCE, 1, PINGPONG_BUFFER)?;
         self.write_reg(SD_TRANSFER, 0xff, SD_TM_NORMAL_READ | SD_TRANSFER_START)?;
         self.wait_transfer(SD_TRANSFER_END, DATA_US, true)?;
-        let result = self.response(response)?;
+        // sd_read_data consumes END and PPBUF, not an inferred R1 in SD_CMDx.
+        // Hardware CRC/status and the later actual CMD13 readiness own errors.
         for index in 0..bytes {
             self.scratch[index] = self.read_reg(PPBUF_BASE2 + index as u16)?;
         }
         self.check_card()?;
-        Ok(result)
+        Ok([0; 4])
     }
     fn set_command(&mut self, opcode: Opcode, argument: u32) -> Result<(), BlockError> {
         // Completion IRQs are sticky. Retire only the prior command/data bits;
@@ -292,6 +292,11 @@ impl CardHost for Engine {
             ));
         }
         Ok(())
+    }
+    fn minimum_data_hz(&self) -> u32 {
+        // Source normal-read bypasses /128 while the SSC remains 30MHz and
+        // standard SD20 uses the double-clock route: the card sees 15MHz.
+        15_000_000
     }
     fn high_speed_supported(&self) -> bool {
         true
