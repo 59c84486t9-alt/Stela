@@ -9,6 +9,7 @@ const NO_REPORT_LUNS: u8 = 8;
 const NO_ATA: u8 = 16;
 const BROKEN_FUA: u8 = 32;
 const ALWAYS_SYNC: u8 = 64;
+const MAX_SECTORS_240: u8 = 128;
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Flags(u8);
 impl Flags {
@@ -26,6 +27,19 @@ impl Flags {
                 .map_or(0, |&(_, _, _, _, flags)| flags)
                 | if vendor == 0x0bc2 { NO_ATA } else { 0 },
         )
+    }
+    pub fn limit_to_240_sectors(self) -> Self {
+        Self(self.0 | MAX_SECTORS_240)
+    }
+    pub fn max_transfer_bytes(self) -> usize {
+        // Linux sector limits are in 512-byte units, independent of the
+        // medium's logical block size. The native TD bound currently wins.
+        let enclosure = if self.0 & MAX_SECTORS_240 != 0 {
+            240 * 512
+        } else {
+            usize::MAX
+        };
+        enclosure.min(super::MAX_TD)
     }
     pub fn ignored(self) -> bool {
         self.0 & IGNORE != 0

@@ -271,6 +271,19 @@ impl Host {
             false => super::Caching::Query,
         }
     }
+    /// `uas_sdev_configure` sets `read_before_ms` for every UAS unit. Some
+    /// bridges otherwise return generic write-protect/cache mode information.
+    /// This metadata read is never a retry of a caller's failed block command.
+    pub(super) fn read_before_mode_sense(
+        &mut self,
+        lun: [u8; 8],
+        block_size: usize,
+    ) -> Result<(), BlockError> {
+        read_block_zero(&mut self.engine, self.flags, lun, block_size)
+    }
+    pub(super) fn max_transfer_bytes(&self) -> usize {
+        self.flags.max_transfer_bytes()
+    }
     pub(super) fn report_luns_permitted(&self) -> bool {
         self.flags.report_luns_permitted()
     }
@@ -291,7 +304,37 @@ fn execute<I: Io>(
             "CDB requires an unsupported enclosure operation",
         ));
     }
+    let length = match &data {
+        Data::None => 0,
+        Data::In(bytes) => *bytes,
+        Data::Out(bytes) => bytes.len(),
+    };
+    if length > flags.max_transfer_bytes() {
+        return Err(BlockError::Unsupported("UAS enclosure transfer limit"));
+    }
     engine.command(lun, cdb, data)
+}
+
+/// Linux `sd_read_block_zero` uses READ(10) when the ordinary block path uses
+/// ten-byte CDBs. Stela propagates failure rather than querying mode pages after
+/// uncertain transport/media change. No retry, write, or data publication occurs.
+fn read_block_zero<I: Io>(
+    engine: &mut Engine<I>,
+    flags: quirks::Flags,
+    lun: [u8; 8],
+    block_size: usize,
+) -> Result<(), BlockError> {
+    if block_size < 512 || !block_size.is_power_of_two() || block_size > MAX_TD {
+        return Err(BlockError::Unsupported("UAS block-zero probe geometry"));
+    }
+    let mut cdb = [0; 10];
+    cdb[0] = super::scsi::READ_10;
+    cdb[8] = 1;
+    let bytes = execute(engine, flags, lun, &cdb, Data::In(block_size))?;
+    if bytes.len() != block_size {
+        return Err(BlockError::Protocol("short UAS block-zero probe"));
+    }
+    Ok(())
 }
 
 trait Io {
@@ -440,7 +483,14 @@ impl<I: Io> Engine<I> {
         if cdb.is_empty() || cdb.len() > MAX_CDB || length > MAX_TD {
             return Err(BlockError::Unsupported("UAS CDB or transfer length"));
         }
-        self.io.ready()?;
+        // Readiness can fail because topology retirement, a controller fault,
+        // or an earlier endpoint error invalidated this attachment. Fence the
+        // entire class owner before media code observes the failure. No DMA
+        // buffer may be rewritten and no later command may reuse this epoch.
+        self.touched = [false; 4];
+        if let Err(error) = self.io.ready() {
+            return self.failure(error);
+        }
         let streams = self.io.streams();
         let maximum = streams.unwrap_or(u16::MAX);
         self.tag = if self.tag >= maximum { 1 } else { self.tag + 1 };
@@ -649,6 +699,7 @@ mod tests {
         FlushError,
         CommandLast,
         SubmitData,
+        EndpointUnavailable,
     }
     #[derive(Clone, Copy)]
     struct Ticket {
@@ -710,7 +761,11 @@ mod tests {
     impl Io for Model {
         type Ticket = Ticket;
         fn ready(&mut self) -> Result<(), BlockError> {
-            Ok(())
+            if self.state.borrow().fault == Fault::EndpointUnavailable {
+                Err(BlockError::Unsupported("model attachment retired"))
+            } else {
+                Ok(())
+            }
         }
         fn streams(&self) -> Option<u16> {
             self.state.borrow().streams
@@ -1239,6 +1294,16 @@ mod tests {
         }
         fn report_luns_permitted(&self) -> bool {
             self.flags.report_luns_permitted()
+        }
+        fn read_before_mode_sense(
+            &mut self,
+            lun: Lun,
+            block_size: usize,
+        ) -> Result<(), BlockError> {
+            read_block_zero(&mut self.engine, self.flags, lun.bytes(), block_size)
+        }
+        fn max_transfer_bytes(&self) -> usize {
+            self.flags.max_transfer_bytes()
         }
     }
     fn target_owner(
@@ -1923,6 +1988,7 @@ mod tests {
                     write_cache: unit.write_cache,
                 }),
             };
+            let commands_before_fault = hardware.borrow().scsi.len();
             hardware.borrow_mut().hang_next = true;
             let mut old_read = [0x91; 512];
             assert_eq!(disks[0].read(1, &mut old_read), Err(BlockError::Timeout));
@@ -1964,8 +2030,7 @@ mod tests {
             assert_eq!(bytes, [0xa7; 512]);
             let hardware = hardware.borrow();
             assert_eq!(
-                hardware
-                    .scsi
+                hardware.scsi[commands_before_fault..]
                     .iter()
                     .filter(|(epoch, op)| *epoch == 0 && *op == 0x28)
                     .count(),
@@ -2058,6 +2123,96 @@ mod tests {
             let access = hardware.borrow().accesses;
             assert!(disks[0].read(0, &mut [0; 512]).is_err());
             assert_eq!(hardware.borrow().accesses, access);
+        }
+    }
+
+    #[test]
+    fn block_zero_probe_uses_actual_lun_and_geometry_before_any_mode_page() {
+        use super::super::Scsi;
+        for streams in [None, Some(2)] {
+            for block_size in [512, 4096, MAX_TD] {
+                let lun = Lun::from_bytes([0x40, 9, 0, 3, 0, 0, 0, 0]);
+                let mut medium = Media::disk(lun, 0x47);
+                medium.block_size = block_size as u32;
+                let mut memory = vec![0u64; 32 * 1024];
+                let (owner, state) = target_owner(
+                    &mut memory,
+                    Target::new(vec![medium]),
+                    quirks::Flags::default(),
+                );
+                state.borrow_mut().streams = streams;
+                owner
+                    .borrow_mut()
+                    .read_before_mode_sense(lun, block_size)
+                    .unwrap();
+                let state = state.borrow();
+                assert_eq!(state.history.len(), 1);
+                let command = &state.history[0];
+                assert_eq!(&command[8..16], &lun.bytes());
+                assert_eq!(&command[16..26], &[0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+                assert!(state.active.is_empty());
+                assert!(state.target.as_ref().unwrap().writes.is_empty());
+                assert!(state.target.as_ref().unwrap().flushes.is_empty());
+            }
+        }
+    }
+    #[test]
+    fn block_zero_failure_never_retries_or_queries_generic_mode_information() {
+        for fault in [Fault::ShortData, Fault::Timeout, Fault::ErrorAfterReady] {
+            let mut memory = vec![0u64; 32 * 1024];
+            let (io, mut dma) = model(&mut memory, 512, true, fault);
+            let state = io.state.clone();
+            let mut engine = Engine::new(io, &mut dma).unwrap();
+            assert!(read_block_zero(&mut engine, quirks::Flags::default(), [0; 8], 512).is_err());
+            let state = state.borrow();
+            assert_eq!(state.history.len(), 1);
+            assert_eq!(state.history[0][16], 0x28);
+            assert!(state.written.is_empty());
+        }
+    }
+    #[test]
+    fn lost_endpoint_readiness_fences_every_published_lun_before_dma_mutation() {
+        use super::super::media::{Owner, scan_uas};
+        use crate::block::BlockDevice;
+        for streams in [None, Some(2)] {
+            let mut memory = vec![0u64; 32 * 1024];
+            let (raw, state) = target_owner(
+                &mut memory,
+                Target::new(vec![
+                    Media::disk(Lun::default(), 1),
+                    Media::disk(Lun::sequential(4), 4),
+                ]),
+                quirks::Flags::default(),
+            );
+            state.borrow_mut().streams = streams;
+            let raw = Rc::try_unwrap(raw).ok().unwrap().into_inner();
+            let owner = Rc::new(RefCell::new(Owner::new(raw, "uas".into(), "serial".into())));
+            let mut disks = scan_uas(owner.clone(), &mut Vec::new()).unwrap();
+            let before = {
+                let owner = owner.borrow();
+                let engine = &owner.transport.engine;
+                (
+                    engine.command.bytes().to_vec(),
+                    engine.status.bytes().to_vec(),
+                    engine.data.bytes().to_vec(),
+                )
+            };
+            state.borrow_mut().fault = Fault::EndpointUnavailable;
+            let events = state.borrow().events.len();
+            assert!(disks[0].write(0, &[0xa5; 512]).is_err());
+            assert!(disks[1].read(0, &mut [0; 512]).is_err());
+            state.borrow_mut().fault = Fault::None;
+            assert!(
+                disks[0].flush().is_err(),
+                "old owner revived after readiness recovered"
+            );
+            assert_eq!(state.borrow().events.len(), events);
+            let owner = owner.borrow();
+            let engine = &owner.transport.engine;
+            assert!(engine.poisoned);
+            assert_eq!(engine.command.bytes(), before.0);
+            assert_eq!(engine.status.bytes(), before.1);
+            assert_eq!(engine.data.bytes(), before.2);
         }
     }
 
@@ -2353,6 +2508,71 @@ mod tests {
         assert!(state.borrow().events.is_empty());
         assert_eq!(engine.tag, 0);
     }
+    #[test]
+    #[ignore = "requires STELA_USB_UAS_RECOVERY_ORACLE from pinned uas.c and sd.c"]
+    fn unchanged_linux_uas_reset_order_and_block_zero_cdb_match() {
+        extern crate std;
+        let trace = std::fs::read(
+            std::env::var("STELA_USB_UAS_RECOVERY_ORACLE").expect("UAS recovery oracle trace"),
+        )
+        .unwrap();
+        assert_eq!(&trace[..8], b"UASRCV01");
+        let mut at = 8;
+        for lock_failure in [0, 1] {
+            for reset_failure in [0, 1] {
+                let header = &trace[at..at + 4];
+                at += 4;
+                assert_eq!(&header[..2], &[lock_failure, reset_failure]);
+                assert_eq!(header[2], u8::from(lock_failure != 0 || reset_failure != 0));
+                let events = &trace[at..at + usize::from(header[3])];
+                at += events.len();
+                assert_eq!(
+                    events,
+                    if lock_failure != 0 {
+                        &b"L"[..]
+                    } else {
+                        &b"LCSDZRU"[..]
+                    }
+                );
+            }
+        }
+        for block_size in [512usize, 4096, MAX_TD] {
+            for long_cdb in [false, true] {
+                let bytes = u32::from_le_bytes(trace[at..at + 4].try_into().unwrap()) as usize;
+                assert_eq!(bytes, block_size);
+                assert_eq!(trace[at + 4], u8::from(long_cdb));
+                let cdb = &trace[at + 5..at + 21];
+                at += 21;
+                if long_cdb {
+                    // The ordinary Stela block-zero path selects READ(10).
+                    // Retain the donor's alternative bytes without claiming a
+                    // production use_16_for_rw quirk that is not selected.
+                    assert_eq!(cdb[0], 0x88);
+                    assert_eq!(&cdb[10..14], &1u32.to_be_bytes());
+                    continue;
+                }
+                let mut medium = Media::disk(Lun::default(), 0x7a);
+                medium.block_size = block_size as u32;
+                let mut memory = vec![0u64; 32 * 1024];
+                let (owner, state) = target_owner(
+                    &mut memory,
+                    Target::new(vec![medium]),
+                    quirks::Flags::default(),
+                );
+                let mut owner = owner.borrow_mut();
+                read_block_zero(
+                    &mut owner.engine,
+                    quirks::Flags::default(),
+                    [0; 8],
+                    block_size,
+                )
+                .unwrap();
+                assert_eq!(&state.borrow().history[0][16..32], cdb);
+            }
+        }
+        assert_eq!(at, trace.len());
+    }
+
     #[test]
     #[ignore = "requires pinned unchanged UAS builders and enclosure table"]
     fn unchanged_linux_uas_builders_and_enclosure_rows_match() {

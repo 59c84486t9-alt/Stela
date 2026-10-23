@@ -38,6 +38,12 @@ impl Binding {
         {
             return Err("source-listed enclosure requires BOT instead of UAS");
         }
+        // The accepted nonzero-power ASM105x profile is the source's
+        // ASM1053 branch, which must retain its 240-sector transfer ceiling.
+        // Preserve the policy even while the current native TD limit is lower.
+        if vendor == 0x174c && matches!(product, 0x5106 | 0x55aa) && device.configuration[8] != 0 {
+            binding.flags = binding.flags.limit_to_240_sectors();
+        }
         Ok(binding)
     }
     fn from_raw(raw: &[u8], interface: &Interface) -> Result<Self, &'static str> {
@@ -243,6 +249,29 @@ mod tests {
                 Binding::from_raw(&raw, &interface).is_err(),
                 "mutation {mutation}"
             );
+        }
+    }
+    #[test]
+    fn accepted_asm1053_binding_retains_240_sector_limit_and_asm1153_does_not() {
+        for power in [0, 36] {
+            let original = raw([1, 2, 3, 4]);
+            let mut configuration = original[..18].to_vec();
+            configuration[8] = power;
+            for (index, endpoint) in original[18..].chunks_exact(14).enumerate() {
+                configuration.extend_from_slice(&endpoint[..7]);
+                configuration.extend_from_slice(&[6, 48, 0, if index == 0 { 0 } else { 4 }, 0, 0]);
+                configuration.extend_from_slice(&endpoint[10..]);
+            }
+            let length = configuration.len() as u16;
+            configuration[2..4].copy_from_slice(&length.to_le_bytes());
+            let interface = crate::usb::xhci::interfaces(&configuration).remove(0);
+            let mut device = crate::usb::xhci::model::device(vec![configuration.clone()]);
+            device.configuration = configuration;
+            device.speed = crate::usb::xhci::SUPER_SPEED;
+            device.descriptor[8..12].copy_from_slice(&[0x4c, 0x17, 0xaa, 0x55]);
+            let binding = Binding::new(&device, &interface).unwrap();
+            assert_eq!(binding.flags.bits() & 128 != 0, power != 0);
+            assert_eq!(binding.flags.max_transfer_bytes(), super::super::MAX_TD);
         }
     }
     #[test]
