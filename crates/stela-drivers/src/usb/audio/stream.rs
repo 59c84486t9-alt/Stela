@@ -433,6 +433,24 @@ impl<T: Transport> AudioDevice<T> {
             .graph
             .set_volume(&mut self.transport, entity, channel, volume_db256)
     }
+    pub fn mixer_volume(&mut self, entity: u8, input: u8, output: u8) -> Result<i16, Error> {
+        self.ready()?;
+        self.binding
+            .graph
+            .mixer_volume(&mut self.transport, entity, input, output)
+    }
+    pub fn set_mixer_volume(
+        &mut self,
+        entity: u8,
+        input: u8,
+        output: u8,
+        value: i16,
+    ) -> Result<(), Error> {
+        self.ready()?;
+        self.binding
+            .graph
+            .set_mixer_volume(&mut self.transport, entity, input, output, value)
+    }
     pub fn select_clock(&mut self, entity: u8, pin: u8) -> Result<(), Error> {
         self.ready()?;
         if self.playback.is_some() || self.capture.is_some() {
@@ -779,6 +797,7 @@ pub(crate) mod tests {
     // SPDX-License-Identifier: GPL-2.0-or-later
     //! Representative standard UAC2 descriptors, not a dump of the physical PC.
     use super::*;
+    mod mixer;
     mod uac1;
     use crate::usb::audio::*;
     use crate::{

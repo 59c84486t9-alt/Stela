@@ -140,6 +140,7 @@ fn graph(control: &Interface) -> Result<(Graph, Vec<u8>), Error> {
                     clock: 0,
                 })
             }
+            4 => Some(super::mixer::parse(d, UAC1)?),
             5 => {
                 if d.len() < 7 || d[4] == 0 || d.len() != 6 + usize::from(d[4]) {
                     return Err(invalid());
@@ -180,7 +181,7 @@ fn graph(control: &Interface) -> Result<(Graph, Vec<u8>), Error> {
                     controls,
                 })
             }
-            _ => return Err(Error::Unsupported("UAC1 mixer/processing/extension entity")),
+            _ => return Err(Error::Unsupported("UAC1 processing/extension entity")),
         };
         if let Some(entity) = entity {
             if entity.id() == 0 || entities.iter().any(|e: &Entity| e.id() == entity.id()) {
@@ -204,45 +205,12 @@ fn graph(control: &Interface) -> Result<(Graph, Vec<u8>), Error> {
         if let Entity::Feature {
             source, controls, ..
         } = entity
-            && controls.len() != usize::from(channels(&graph, *source, &mut [false; 256])?) + 1
+            && controls.len() != usize::from(graph.signal_cluster(*source)?.0) + 1
         {
             return Err(Error::Descriptor("UAC1 feature channel count"));
         }
     }
     Ok((graph, collection))
-}
-fn channels(graph: &Graph, id: u8, visited: &mut [bool; 256]) -> Result<u8, Error> {
-    cluster(graph, id, visited).map(|(count, _)| count)
-}
-fn cluster(graph: &Graph, id: u8, visited: &mut [bool; 256]) -> Result<(u8, u32), Error> {
-    if visited[usize::from(id)] {
-        return Err(Error::Descriptor("cyclic UAC1 signal cluster"));
-    }
-    visited[usize::from(id)] = true;
-    let result = match graph.entity(id)? {
-        Entity::Input {
-            channels,
-            channel_config,
-            ..
-        } => Ok((*channels, *channel_config)),
-        Entity::Feature { source, .. } | Entity::Output { source, .. } => {
-            cluster(graph, *source, visited)
-        }
-        Entity::Selector { sources, .. } => {
-            let mut common = None;
-            for source in sources {
-                let value = cluster(graph, *source, &mut *visited)?;
-                if common.is_some_and(|n| n != value) {
-                    return Err(Error::Unsupported("UAC1 selector changes channel cluster"));
-                }
-                common = Some(value);
-            }
-            common.ok_or(Error::Descriptor("empty UAC1 selector"))
-        }
-        _ => Err(Error::Descriptor("UAC1 signal references a clock")),
-    };
-    visited[usize::from(id)] = false;
-    result
 }
 fn endpoint_descriptor(
     configuration: &[u8],
@@ -355,7 +323,7 @@ fn format(
         Direction::Playback
     };
     graph.terminal_clock(general[3], direction)?;
-    let (terminal_channels, channel_config) = cluster(graph, general[3], &mut [false; 256])?;
+    let (terminal_channels, channel_config) = graph.signal_cluster(general[3])?;
     if terminal_channels != channels_count {
         return Err(Error::Descriptor("UAC1 format/terminal channel mismatch"));
     }

@@ -104,6 +104,14 @@ impl Control for LegacyModel {
                 _ => panic!("unexpected UAC1 interface request {r:?}"),
             }
         }
+        if r[5] == 6 {
+            // This fixture exposes one programmable mixer gain register;
+            // model it with the base device's real signed gain storage.
+            assert_eq!((r[3], r[2]), (1, 1));
+            r[5] = 2;
+            r[3] = 2;
+            r[2] = 0;
+        }
         // This representative unit gangs all three channel controls. The
         // original request still carries and validates the selected channel.
         if r[0] == 0xa1 || r[0] == 0x21 {
@@ -496,4 +504,32 @@ fn uac1_collections_cannot_escape_their_iad_or_claim_a_sibling_iad() {
             .collect::<Vec<_>>(),
         [1, 2]
     );
+}
+
+#[test]
+fn uac1_descriptor_mixer_routes_real_pcm_and_uses_legacy_cell_controls() {
+    let mut c = configuration();
+    let header = 18;
+    let speaker = c.windows(4).position(|d| d == [9, 0x24, 3, 3]).unwrap();
+    c[speaker + 7] = 6;
+    let at = c
+        .windows(9)
+        .position(|d| d == [9, 4, 3, 0, 0, 1, 2, 0, 0])
+        .unwrap();
+    c.splice(at..at, [13, 0x24, 4, 6, 2, 1, 4, 2, 3, 0, 0, 0x91, 0]);
+    let total = u16::from_le_bytes([c[header + 5], c[header + 6]]) + 13;
+    c[header + 5..header + 7].copy_from_slice(&total.to_le_bytes());
+    let total = c.len() as u16;
+    c[2..4].copy_from_slice(&total.to_le_bytes());
+    let binding = parse(&c).unwrap();
+    assert_eq!(binding.graph.signal_cluster(6), Ok((2, 3)));
+    run(|a| {
+        a.binding = binding;
+        a.set_mixer_volume(6, 1, 1, -256).unwrap();
+        assert_eq!(a.mixer_volume(6, 1, 1), Ok(-256));
+        a.start_playback(0, 48000, &[0x55; 192], true).unwrap();
+        a.poll().unwrap();
+        assert_eq!(a.transport.inner.output, [0x55; 192]);
+        assert!(a.transport.inner.pending.is_empty());
+    });
 }

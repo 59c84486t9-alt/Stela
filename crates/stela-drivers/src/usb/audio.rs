@@ -15,6 +15,7 @@ pub use uac1::EndpointRates;
 
 mod control;
 mod descriptors;
+mod mixer;
 mod native;
 mod packet;
 pub use native::{Native, UsbAudio};

@@ -50,6 +50,16 @@ pub enum Entity {
         source: u8,
         clock: u8,
     },
+    Mixer {
+        id: u8,
+        sources: Vec<u8>,
+        channels: u8,
+        channel_config: u32,
+        /// Flattened input/output crosspoints, MSB-first as specified by USB audio.
+        matrix: Vec<u8>,
+        /// UAC2 unit event controls; UAC1 has no such field.
+        unit_controls: Option<u8>,
+    },
     Feature {
         id: u8,
         source: u8,
@@ -69,6 +79,7 @@ impl Entity {
             | Self::ClockMultiplier { id, .. }
             | Self::Input { id, .. }
             | Self::Output { id, .. }
+            | Self::Mixer { id, .. }
             | Self::Feature { id, .. }
             | Self::Selector { id, .. } => *id,
         }
@@ -115,9 +126,9 @@ impl Graph {
         for entity in &self.entities {
             let refs: Vec<u8> = match entity {
                 Entity::ClockSource { .. } => Vec::new(),
-                Entity::ClockSelector { sources, .. } | Entity::Selector { sources, .. } => {
-                    sources.clone()
-                }
+                Entity::ClockSelector { sources, .. }
+                | Entity::Selector { sources, .. }
+                | Entity::Mixer { sources, .. } => sources.clone(),
                 Entity::ClockMultiplier { source, .. } | Entity::Feature { source, .. } => {
                     vec![*source]
                 }
@@ -141,7 +152,7 @@ impl Graph {
             }
             self.acyclic(entity.id(), &mut [false; 256], &mut [false; 256])?;
         }
-        Ok(())
+        self.validate_mixers()
     }
     fn acyclic(
         &self,
@@ -157,7 +168,9 @@ impl Graph {
         }
         active[usize::from(id)] = true;
         let sources: &[u8] = match self.entity(id)? {
-            Entity::ClockSelector { sources, .. } | Entity::Selector { sources, .. } => sources,
+            Entity::ClockSelector { sources, .. }
+            | Entity::Selector { sources, .. }
+            | Entity::Mixer { sources, .. } => sources,
             Entity::ClockMultiplier { source, .. }
             | Entity::Feature { source, .. }
             | Entity::Output { source, .. } => core::slice::from_ref(source),
@@ -279,6 +292,7 @@ fn graph(control: &Interface) -> Result<Graph, Error> {
                     clock: d[8],
                 })
             }
+            4 => Some(super::mixer::parse(d, UAC2)?),
             5 | 11 => {
                 if d.len() < 8 || d[4] == 0 || d.len() != usize::from(d[4]) + 7 {
                     return Err(short());
@@ -341,7 +355,7 @@ fn graph(control: &Interface) -> Result<Graph, Error> {
             }
             _ => {
                 return Err(Error::Unsupported(
-                    "UAC2 mixer/effect/processing/extension entity",
+                    "UAC2 effect/processing/extension entity",
                 ));
             }
         };
