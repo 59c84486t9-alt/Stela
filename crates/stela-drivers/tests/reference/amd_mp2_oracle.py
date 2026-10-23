@@ -41,7 +41,7 @@ def main():
     args.out.mkdir(parents=True, exist_ok=False)
     sources = {}
     for name, digest in HASHES.items():
-        raw = subprocess.check_output(["git", "-C", str(args.linux.resolve()), "show", f"{PIN}:{name}"])
+        raw = subprocess.check_output(["git", "-C", str(args.linux.resolve()), "show", f"{PIN}:{name}"], timeout=30)
         if hashlib.sha256(raw).hexdigest() != digest:
             raise SystemExit(f"source integrity mismatch: {name}")
         (args.out / Path(name).name).write_bytes(raw)
@@ -125,11 +125,11 @@ int main(void) {
     (args.out / "oracle.c").write_text(harness)
     command = [args.cc, "-std=gnu11", "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all", str(args.out / "oracle.c"), "-o", str(args.out / "oracle")]
     (args.out / "compiler-command.json").write_text(json.dumps(command) + "\n")
-    compiled = subprocess.run(command, capture_output=True)
+    compiled = subprocess.run(command, capture_output=True, timeout=120)
     (args.out / "compiler-stdout.txt").write_bytes(compiled.stdout)
     (args.out / "compiler-stderr.txt").write_bytes(compiled.stderr)
     compiled.check_returncode()
-    run = subprocess.run([str((args.out / "oracle").resolve())], capture_output=True)
+    run = subprocess.run([str((args.out / "oracle").resolve())], capture_output=True, timeout=60)
     (args.out / "trace.csv").write_bytes(run.stdout)
     (args.out / "stderr.txt").write_bytes(run.stderr)
     run.check_returncode()
