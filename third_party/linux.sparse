@@ -15,6 +15,9 @@
 /drivers/gpu/drm/Makefile
 /drivers/gpu/drm/Kconfig
 /lib/rbtree.c
+/lib/kobject.c
+/lib/kobject_uevent.c
+/lib/ctype.c
 /lib/scatterlist*.c
 /lib/Makefile
 /include/

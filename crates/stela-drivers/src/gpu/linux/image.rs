@@ -92,8 +92,9 @@ pub struct LinuxImageRegistration {
 /// preserve complete name provenance for the mount's lifetime: every admitted
 /// literal or borrowed constant name, including its terminating NUL, is covered
 /// by this provider. Classification must stay true throughout each borrow and
-/// its release. A negative classification used to free a name must separately
-/// have live heap-allocation ownership; a negative duplication query can instead
+/// its release. Except for the canonical allocator's NULL/zero-size no-op
+/// values, a negative classification used to free a name must separately have
+/// live heap-allocation ownership; a negative duplication query can instead
 /// copy an ordinary valid stack or mutable string. No later image or literal
 /// may enter that lifecycle outside this coverage. A partial image capability
 /// by itself does not establish this admission contract. Registration failure

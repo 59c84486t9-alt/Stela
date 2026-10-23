@@ -70,7 +70,8 @@ void stela_linux_heap_free(void *object, size_t size, size_t align);
  * The registration is independent of per-call Linux execution owners. The
  * admission owner must cover every complete borrowed constant name (including
  * NUL), with stable true classification through release. A negative free query
- * requires separate heap ownership; negative duplication may copy a valid
+ * requires separate heap ownership (except canonical NULL/zero-size no-op
+ * values); negative duplication may copy a valid
  * mutable/stack string. A negative result never proves an unknown pointer is
  * heap. */
 bool stela_linux_is_rodata(const void *address);

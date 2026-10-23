@@ -229,6 +229,19 @@ impl Linux {
             ("linux_cache", "cache.c", "STELA_LINUX_CACHE_TEST"),
             ("linux_params", "params.c", "STELA_LINUX_PARAMS_TEST"),
             ("linux_firmware", "firmware.c", "STELA_LINUX_FIRMWARE_TEST"),
+            (
+                "linux_string_helpers",
+                "string_helpers.c",
+                "STELA_LINUX_STRING_HELPERS_TEST",
+            ),
+            ("linux_printf", "printf.c", "STELA_LINUX_PRINTF_TEST"),
+            ("linux_uuid", "uuid.c", "STELA_LINUX_UUID_TEST"),
+            ("linux_refcount", "refcount.c", "STELA_LINUX_REFCOUNT_TEST"),
+            (
+                "linux_const_string",
+                "const_string.c",
+                "STELA_LINUX_CONST_STRING_TEST",
+            ),
         ] {
             let mut build = build.clone();
             build.define(define, None);
