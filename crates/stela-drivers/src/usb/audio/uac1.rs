@@ -439,8 +439,34 @@ pub(super) fn binding(
     configuration: &[u8],
     speed: u8,
 ) -> Result<Binding, Error> {
-    super::descriptors::scope(configuration, control.number, all, UAC1)?;
+    let scope = super::descriptors::scope(configuration, control.number, all, UAC1)?;
     let (graph, collection) = graph(control)?;
+    if collection
+        .iter()
+        .any(|member| !scope.contains(&u16::from(*member)))
+    {
+        return Err(Error::Descriptor(
+            "UAC1 stream outside interface association",
+        ));
+    }
+    // A legacy AC header may have no own IAD. Its collection still cannot
+    // claim an interface which a sibling function's IAD owns.
+    let mut at = 0;
+    while at < configuration.len() {
+        let n = usize::from(configuration[at]);
+        let d = &configuration[at..at + n]; // scope() validated all extents
+        if d[1] == crate::usb::xhci::INTERFACE_ASSOCIATION_DESCRIPTOR {
+            let range = u16::from(d[2])..u16::from(d[2]) + u16::from(d[3]);
+            if !range.contains(&u16::from(control.number))
+                && collection.iter().any(|id| range.contains(&u16::from(*id)))
+            {
+                return Err(Error::Descriptor(
+                    "UAC1 stream belongs to sibling association",
+                ));
+            }
+        }
+        at += n;
+    }
     for other in all.iter().filter(|i| {
         i.number != control.number
             && i.alternate == 0

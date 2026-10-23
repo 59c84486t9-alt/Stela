@@ -384,6 +384,7 @@ pub(super) fn scope(
     let mut expected = None;
     let mut addresses = Vec::new();
     let mut association = None;
+    let mut associations: Vec<core::ops::Range<u16>> = Vec::new();
     while at < configuration.len() {
         if configuration.len() - at < 2 {
             return Err(Error::Descriptor("truncated USB descriptor"));
@@ -426,6 +427,16 @@ pub(super) fn scope(
             }
             let start = u16::from(d[2]);
             let end = start + u16::from(d[3]);
+            if end > 256
+                || associations
+                    .iter()
+                    .any(|range| start < range.end && range.start < end)
+            {
+                return Err(Error::Descriptor(
+                    "overlapping/out-of-range interface associations",
+                ));
+            }
+            associations.push(start..end);
             if start <= u16::from(control) && u16::from(control) < end {
                 if association.is_some()
                     || d[4] != CLASS

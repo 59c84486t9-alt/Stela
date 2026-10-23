@@ -442,3 +442,58 @@ fn uac1_full_speed_cadence_and_selector_unit_request_encoding() {
     graph.signal_selection(&mut io, 14, 2).unwrap();
     assert_eq!(io.0, 2);
 }
+
+#[test]
+fn uac1_collections_cannot_escape_their_iad_or_claim_a_sibling_iad() {
+    let original = configuration();
+    for (iads, expected) in [
+        (
+            vec![8, 11, 0, 4, 1, 0, 0, 0],
+            "UAC1 stream outside interface association",
+        ),
+        (
+            vec![8, 11, 7, 1, 3, 0, 0, 0],
+            "UAC1 stream belongs to sibling association",
+        ),
+        (
+            vec![8, 11, 0, 8, 1, 0, 0, 0, 8, 11, 7, 1, 3, 0, 0, 0],
+            "overlapping/out-of-range interface associations",
+        ),
+    ] {
+        let mut c = original.clone();
+        c.splice(9..9, iads);
+        let n = c.len() as u16;
+        c[2..4].copy_from_slice(&n.to_le_bytes());
+        assert_eq!(parse(&c), Err(Error::Descriptor(expected)));
+    }
+    let mut c = original;
+    // A normal three-interface association admits the same standard graph.
+    let mut at = 0;
+    while at < c.len() {
+        let n = usize::from(c[at]);
+        if c[at + 1] == 4 {
+            c[at + 2] = match c[at + 2] {
+                3 => 1,
+                7 => 2,
+                other => other,
+            };
+        }
+        if c[at + 1] == 0x24 && c[at + 2] == 1 && n == 10 {
+            c[at + 8] = 1;
+            c[at + 9] = 2;
+        }
+        at += n;
+    }
+    c.splice(9..9, [8, 11, 0, 3, 1, 0, 0, 0]);
+    let n = c.len() as u16;
+    c[2..4].copy_from_slice(&n.to_le_bytes());
+    let binding = parse(&c).unwrap();
+    assert_eq!(
+        binding
+            .formats
+            .iter()
+            .map(|f| f.interface)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+}
