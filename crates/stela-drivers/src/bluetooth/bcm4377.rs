@@ -2198,12 +2198,13 @@ mod tests {
         }
         packets
     }
+    type SetupFixture = (Transport<Model>, Arc<Mutex<Device>>, Catalog, Vec<Vec<u8>>);
     fn setup_fixture(
         device: u16,
         stepping: &str,
         replacement: bool,
         fault: HciFault,
-    ) -> (Transport<Model>, Arc<Mutex<Device>>, Catalog, Vec<Vec<u8>>) {
+    ) -> SetupFixture {
         let (p, mut a, d) = fixture(device);
         let calibration = (0..461).map(|n| (n % 251) as u8).collect::<Vec<_>>();
         let bf = (0..461).map(|n| 0x80 | (n % 113) as u8).collect::<Vec<_>>();
