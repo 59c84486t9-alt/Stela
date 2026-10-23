@@ -236,6 +236,24 @@ fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() 
         let mut memory = vec![0u64; 1024 * 1024];
         let (mut host, old, hardware, state, mut dma) =
             fixture_with_leaf(&mut memory, speed, true, Node::bot_disk(speed));
+        // Host::new retains topology/hubs; normal class binding separately
+        // configures the actual addressed BOT leaf and publishes its disk.
+        let mut original = Found::default();
+        for device in old
+            .iter()
+            .filter(|device| device.descriptor[4] != HUB_CLASS)
+        {
+            bind(&host.controller, device.clone(), &mut dma, &mut original);
+        }
+        assert!(original.failures.is_empty(), "{:?}", original.failures);
+        assert_eq!(original.storage.len(), 1);
+        assert_eq!(original.disks.len(), 1);
+        let retained_payload = [0x5b; 512];
+        original.disks[0].write(2, &retained_payload).unwrap();
+        let mut original_read = [0xee; 512];
+        original.disks[0].read(2, &mut original_read).unwrap();
+        assert_eq!(original_read, retained_payload);
+        let original_commands = hardware.borrow().nodes[&1].bot_commands().len();
         if speed >= SUPER_SPEED {
             // Seed actual acknowledged function options in both configured
             // devices. Suspend must clear them through each native EP0 ring.
@@ -273,6 +291,16 @@ fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() 
         for old in &old {
             assert!(host.controller.borrow_mut().device(old.id).is_err());
         }
+        let before = (hardware.borrow().mmio_reads, hardware.borrow().mmio_writes);
+        assert!(original.disks[0].read(2, &mut original_read).is_err());
+        assert_eq!(
+            (hardware.borrow().mmio_reads, hardware.borrow().mmio_writes),
+            before
+        );
+        assert_eq!(
+            hardware.borrow().nodes[&1].bot_commands().len(),
+            original_commands
+        );
         assert!(
             host.poll(&mut dma, &crate::firmware::HandoffProvider::new(None))
                 .added
@@ -300,6 +328,9 @@ fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() 
             (disk.identity().blocks, disk.identity().block_size),
             (16, 512)
         );
+        let mut retained_read = [0xee; 512];
+        disk.read(2, &mut retained_read).unwrap();
+        assert_eq!(retained_read, retained_payload);
         let payload = [0xa7; 512];
         disk.write(3, &payload).unwrap();
         let mut received = [0xee; 512];
@@ -320,7 +351,26 @@ fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() 
         for opcode in [0x12, 0x00, 0x25, 0x28, 0x2a] {
             assert!(commands.iter().any(|(_, op)| *op == opcode));
         }
-        assert!(commands.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1));
+        // Each real class binding owns a new BOT tag sequence. Retain both
+        // command histories; resetting a physical address does not erase it.
+        for binding_commands in [
+            &commands[..original_commands],
+            &commands[original_commands..],
+        ] {
+            assert_eq!(binding_commands[0].0, 1);
+            assert!(
+                binding_commands
+                    .windows(2)
+                    .all(|pair| pair[1].0 == pair[0].0 + 1)
+            );
+        }
+        drop(bus);
+        let before = (hardware.borrow().mmio_reads, hardware.borrow().mmio_writes);
+        assert!(original.disks[0].read(2, &mut original_read).is_err());
+        assert_eq!(
+            (hardware.borrow().mmio_reads, hardware.borrow().mmio_writes),
+            before
+        );
     }
 }
 
