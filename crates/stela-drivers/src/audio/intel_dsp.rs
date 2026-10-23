@@ -948,14 +948,14 @@ mod tests {
         }
         fn set_bus_master(&mut self, value: bool) -> Result<(), Error> {
             let mut model = self.0.lock().unwrap();
-            if let Some((wanted, after_effect)) = model.master_failure {
-                if wanted == value {
-                    if after_effect {
-                        model.master = value;
-                    }
-                    model.ownership_trace.push("master-failed");
-                    return Err(Error::Authority);
+            if let Some((wanted, after_effect)) = model.master_failure
+                && wanted == value
+            {
+                if after_effect {
+                    model.master = value;
                 }
+                model.ownership_trace.push("master-failed");
+                return Err(Error::Authority);
             }
             model.master = value;
             model
@@ -1151,23 +1151,16 @@ mod tests {
             board: None,
         }
     }
-    fn fixture() -> (
+    type Fixture = (
         Controller<Regs, Time>,
         Arc<Mutex<Model>>,
         Source,
         Arc<dyn DmaDomain>,
-    ) {
+    );
+    fn fixture() -> Fixture {
         fixture_image(vec![0x5a; 4096], BUSY | 0x70000000)
     }
-    fn fixture_image(
-        bytes: Vec<u8>,
-        doorbell: u32,
-    ) -> (
-        Controller<Regs, Time>,
-        Arc<Mutex<Model>>,
-        Source,
-        Arc<dyn DmaDomain>,
-    ) {
+    fn fixture_image(bytes: Vec<u8>, doorbell: u32) -> Fixture {
         let mut state = Model::new();
         state.expected_firmware = ipc::firmware_payload(&bytes).unwrap().to_vec();
         state.firmware_doorbell = doorbell;

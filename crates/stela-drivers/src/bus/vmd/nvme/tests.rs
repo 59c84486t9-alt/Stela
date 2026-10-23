@@ -199,34 +199,34 @@ unsafe impl Registers for Model {
     }
     fn child_read(&mut self, offset: usize, width: u8) -> Result<u32, Error> {
         let mut state = self.state.lock().unwrap();
-        if let Some((posted, posted_width, value)) = state.pending {
-            if posted == offset && posted_width == width {
-                state.pending = None;
-                if [ROOT, BRIDGE, NVME]
-                    .into_iter()
-                    .any(|base| posted == base + COMMAND_OFFSET)
-                {
-                    if (state.child(posted, posted_width) | value) & u32::from(BUS_MASTER) != 0 {
-                        state.drained = false;
-                    }
-                }
-                let mut value = value;
-                if [ROOT, BRIDGE, NVME]
-                    .into_iter()
-                    .any(|base| posted == base + 0x84)
-                {
-                    let old = state.child(posted, 2);
-                    value = value & !0x8000 | if value & 0x8000 == 0 { old & 0x8000 } else { 0 };
-                    if state.pm_failure {
-                        value |= 3;
-                    }
-                    if state.pm_loses_bar {
-                        state.set(NVME + 0x10, 4, 0);
-                    }
-                }
-                state.set(posted, posted_width, value);
-                state.events.push(Event::Flushed(posted, posted_width));
+        if let Some((posted, posted_width, value)) = state.pending
+            && posted == offset
+            && posted_width == width
+        {
+            state.pending = None;
+            if [ROOT, BRIDGE, NVME]
+                .into_iter()
+                .any(|base| posted == base + COMMAND_OFFSET)
+                && (state.child(posted, posted_width) | value) & u32::from(BUS_MASTER) != 0
+            {
+                state.drained = false;
             }
+            let mut value = value;
+            if [ROOT, BRIDGE, NVME]
+                .into_iter()
+                .any(|base| posted == base + 0x84)
+            {
+                let old = state.child(posted, 2);
+                value = value & !0x8000 | if value & 0x8000 == 0 { old & 0x8000 } else { 0 };
+                if state.pm_failure {
+                    value |= 3;
+                }
+                if state.pm_loses_bar {
+                    state.set(NVME + 0x10, 4, 0);
+                }
+            }
+            state.set(posted, posted_width, value);
+            state.events.push(Event::Flushed(posted, posted_width));
         }
         let value = state.child(offset, width);
         Ok(if state.ack_failure == Some(offset) {

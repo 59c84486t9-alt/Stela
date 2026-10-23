@@ -601,10 +601,11 @@ unsafe impl Registers for Rc<Peer> {
             self.set(offset, value | (1 << 31));
             return Ok(());
         }
-        if offset == 0x7c08 && value & (1 << 31) == 0 {
-            if let Some(tail) = self.pending_tx.take() {
-                self.transmit(tail);
-            }
+        if offset == 0x7c08
+            && value & (1 << 31) == 0
+            && let Some(tail) = self.pending_tx.take()
+        {
+            self.transmit(tail);
         }
         self.set(offset, value);
         if matches!(offset, 0x7c08 | 0x5b08) {

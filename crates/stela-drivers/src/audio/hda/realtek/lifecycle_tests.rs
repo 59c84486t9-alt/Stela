@@ -545,7 +545,7 @@ mod realtek_owned_models {
                 realtek_headphone_model(id, true)
             };
             model.borrow_mut().coefficients.insert((0x20, 0), zero);
-            if matches!(id, 0x10ec_0255 | 0x10ec_0256 | 0x10ec_0257) {
+            if matches!(id, 0x10ec_0255..=0x10ec_0257) {
                 // Force the real startup clear and preserve unrelated bits.
                 // ALC257 later skips the shutdown set, as in alc256_shutup.
                 model.borrow_mut().coefficients.insert((0x20, 0x46), 0xb5a5);
@@ -596,7 +596,7 @@ mod realtek_owned_models {
                 .iter()
                 .filter(|(node, index, _, _)| *node == 0x20 && *index == 0x46)
                 .count();
-            if matches!(id, 0x10ec_0255 | 0x10ec_0256 | 0x10ec_0257) {
+            if matches!(id, 0x10ec_0255..=0x10ec_0257) {
                 assert_eq!(model.borrow().coefficients[&(0x20, 0x46)], 0x85a5);
                 assert_eq!(pull_writes_before_shutdown, 1);
             }
@@ -620,7 +620,7 @@ mod realtek_owned_models {
                     0x24
                 }
             );
-            if matches!(id, 0x10ec_0255 | 0x10ec_0256 | 0x10ec_0257) {
+            if matches!(id, 0x10ec_0255..=0x10ec_0257) {
                 let retained = model.borrow();
                 assert_eq!(
                     retained.coefficients[&(0x20, 0x46)],

@@ -803,8 +803,10 @@ mod tests {
             } else if count > 2 {
                 let list = self.read_iova(second, (count - 1) * 8);
                 out.extend(
-                    list.chunks_exact(8)
-                        .map(|b| u64::from_le_bytes(b.try_into().unwrap())),
+                    list.as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|b| u64::from_le_bytes(*b)),
                 );
             }
             out
