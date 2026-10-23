@@ -207,6 +207,7 @@ impl Linux {
         let upstream = [
             PathBuf::from(format!("{DRM}/drm_fourcc.c")),
             PathBuf::from(format!("{LINUX}/lib/scatterlist.c")),
+            PathBuf::from(format!("{LINUX}/lib/find_bit.c")),
         ];
         for source in &upstream {
             println!("cargo:rerun-if-changed={}", source.display());
@@ -248,6 +249,7 @@ impl Linux {
             ("linux_params", "params.c", "STELA_LINUX_PARAMS_TEST"),
             ("linux_firmware", "firmware.c", "STELA_LINUX_FIRMWARE_TEST"),
             ("linux_crc", "crc.c", "STELA_LINUX_CRC_TEST"),
+            ("linux_find_bit", "find_bit.c", "STELA_LINUX_FIND_BIT_TEST"),
             (
                 "linux_string_helpers",
                 "string_helpers.c",
