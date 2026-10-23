@@ -1,0 +1,391 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 18:55:10 -0400
+Subject: [PATCH] fix(nouveau): bound GSP firmware parsing and radix sizing
+
+---
+ .../gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c   |  55 ++++--
+ .../drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c | 176 ++++++++++++++----
+ 2 files changed, 181 insertions(+), 50 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c
+index 88436a264177994ee27be3ff126b20ecef885283..700e66411b5deb600a892baaa16da3e7d1175d0e 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c
+@@ -171,6 +171,8 @@ gh100_gsp_wpr_meta_init(struct nvkm_gsp *gsp)
+ 
+ #define ELF_HDR_SIZE ((u8)sizeof(struct elf32_hdr))
+ #define ELF_SHDR_SIZE ((u8)sizeof(struct elf32_shdr))
++#define FMC_NUM_SECTIONS 6
++#define FMC_STRTAB 1
+ 
+ /* The FMC ELF header must be exactly this */
+ static const u8 elf_header[] = {
+@@ -184,7 +186,7 @@ static const u8 elf_header[] = {
+ 	ELF_HDR_SIZE, 0, 0, 0, /* e_ehsize, e_phentsize */
+ 	0, 0, ELF_SHDR_SIZE, 0, /* e_phnum, e_shentsize */
+ 
+-	6, 0, 1, 0, /* e_shnum, e_shstrndx */
++	FMC_NUM_SECTIONS, 0, FMC_STRTAB, 0, /* e_shnum, e_shstrndx */
+ };
+ 
+ /**
+@@ -195,18 +197,20 @@ static const u8 elf_header[] = {
+ static bool
+ elf_validate_sections(const void *elf, size_t length)
+ {
+-	const struct elf32_hdr *ehdr = elf;
+-	const struct elf32_shdr *shdr = elf + ehdr->e_shoff;
++	struct elf32_shdr shdr[FMC_NUM_SECTIONS];
++	const char *names;
+ 
+ 	/* The offset of the first section */
+-	Elf32_Off section_begin = ehdr->e_shoff + ehdr->e_shnum * ehdr->e_shentsize;
++	Elf32_Off section_begin = ELF_HDR_SIZE + sizeof(shdr);
+ 
+-	if (section_begin > length)
++	if (length < ELF_HDR_SIZE || memcmp(elf, elf_header, sizeof(elf_header)) ||
++	    section_begin > length)
+ 		return false;
++	memcpy(shdr, elf + ELF_HDR_SIZE, sizeof(shdr));
+ 
+ 	/* The first section header is the null section, so skip it */
+-	for (unsigned int i = 1; i < ehdr->e_shnum; i++) {
+-		if (i == ehdr->e_shstrndx) {
++	for (unsigned int i = 1; i < FMC_NUM_SECTIONS; i++) {
++		if (i == FMC_STRTAB) {
+ 			if (shdr[i].sh_type != SHT_STRTAB)
+ 				return false;
+ 			if (shdr[i].sh_flags != SHF_STRINGS)
+@@ -233,6 +237,14 @@ elf_validate_sections(const void *elf, size_t length)
+ 		}
+ 	}
+ 
++	names = elf + shdr[FMC_STRTAB].sh_offset;
++	for (unsigned int i = 1; i < FMC_NUM_SECTIONS; i++) {
++		if (shdr[i].sh_name >= shdr[FMC_STRTAB].sh_size ||
++		    !memchr(names + shdr[i].sh_name, 0,
++			    shdr[FMC_STRTAB].sh_size - shdr[i].sh_name))
++			return false;
++	}
++
+ 	return true;
+ }
+ 
+@@ -245,18 +257,27 @@ elf_validate_sections(const void *elf, size_t length)
+ static const void *
+ elf_section(const void *elf, const char *name, unsigned int *len)
+ {
+-	const struct elf32_hdr *ehdr = elf;
+-	const struct elf32_shdr *shdr = elf + ehdr->e_shoff;
+-	const char *names = elf + shdr[ehdr->e_shstrndx].sh_offset;
++	struct elf32_shdr shdr[FMC_NUM_SECTIONS];
++	const void *found = NULL;
++	unsigned int found_len = 0;
++	const char *names;
++
++	/* elf_validate_sections() has checked the complete image and names. */
++	memcpy(shdr, elf + ELF_HDR_SIZE, sizeof(shdr));
++	names = elf + shdr[FMC_STRTAB].sh_offset;
+ 
+-	for (unsigned int i = 1; i < ehdr->e_shnum; i++) {
++	for (unsigned int i = 1; i < FMC_NUM_SECTIONS; i++) {
+ 		if (!strcmp(&names[shdr[i].sh_name], name)) {
+-			*len = shdr[i].sh_size;
+-			return elf + shdr[i].sh_offset;
++			if (found)
++				return NULL;
++			found_len = shdr[i].sh_size;
++			found = elf + shdr[i].sh_offset;
+ 		}
+ 	}
+ 
+-	return NULL;
++	if (found)
++		*len = found_len;
++	return found;
+ }
+ 
+ int
+@@ -270,9 +291,7 @@ gh100_gsp_oneinit(struct nvkm_gsp *gsp)
+ 	unsigned int img_len = 0, hash_len = 0, pkey_len = 0, sig_len = 0;
+ 	int ret;
+ 
+-	if (gsp->fws.fmc->size < ELF_HDR_SIZE ||
+-	    memcmp(fw, elf_header, sizeof(elf_header)) ||
+-	    !elf_validate_sections(fw, gsp->fws.fmc->size)) {
++	if (!elf_validate_sections(fw, gsp->fws.fmc->size)) {
+ 		nvkm_error(subdev, "fmc firmware image is invalid\n");
+ 		return -ENODATA;
+ 	}
+@@ -282,7 +301,7 @@ gh100_gsp_oneinit(struct nvkm_gsp *gsp)
+ 	pkey = elf_section(fw, "publickey", &pkey_len);
+ 	img = elf_section(fw, "image", &img_len);
+ 
+-	if (!hash || !sig || !pkey || !img) {
++	if (!hash || !sig || !pkey || !img || !img_len) {
+ 		nvkm_error(subdev, "fmc firmware image is invalid\n");
+ 		return -ENODATA;
+ 	}
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
+index 94925f1590ea48820b50cbbe2ba56562f8b75056..a67a84074ac1453a069087e165a3a2d13b46e68d 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
+@@ -41,6 +41,8 @@
+ 
+ #include <linux/acpi.h>
+ #include <linux/ctype.h>
++#include <linux/elf.h>
++#include <linux/limits.h>
+ #include <linux/parser.h>
+ 
+ extern struct dentry *nouveau_debugfs_root;
+@@ -1620,6 +1622,20 @@ nvkm_gsp_radix3_dtor(struct nvkm_gsp *gsp, struct nvkm_gsp_radix3 *rx3)
+ 	nvkm_gsp_mem_dtor(&rx3->lvl0);
+ }
+ 
++static int
++r535_gsp_radix3_size(u64 size, size_t *bufsize)
++{
++	const u64 entries = GSP_PAGE_SIZE / sizeof(u64);
++	u64 pages;
++
++	if (!size || size > entries * entries * GSP_PAGE_SIZE)
++		return -EINVAL;
++
++	pages = DIV_ROUND_UP_ULL(size, GSP_PAGE_SIZE);
++	*bufsize = ALIGN(pages * sizeof(u64), GSP_PAGE_SIZE);
++	return 0;
++}
++
+ /**
+  * nvkm_gsp_radix3_sg - build a radix3 table from a S/G list
+  * @gsp: gsp pointer
+@@ -1663,6 +1679,10 @@ nvkm_gsp_radix3_sg(struct nvkm_gsp *gsp, struct sg_table *sgt, u64 size,
+ 	u64 *pte;
+ 	int ret, i, page_idx = 0;
+ 
++	ret = r535_gsp_radix3_size(size, &bufsize);
++	if (ret)
++		return ret;
++
+ 	ret = nvkm_gsp_mem_ctor(gsp, GSP_PAGE_SIZE, &rx3->lvl0);
+ 	if (ret)
+ 		return ret;
+@@ -1672,7 +1692,6 @@ nvkm_gsp_radix3_sg(struct nvkm_gsp *gsp, struct sg_table *sgt, u64 size,
+ 		goto lvl1_fail;
+ 
+ 	// Allocate level 2
+-	bufsize = ALIGN((size / GSP_PAGE_SIZE) * sizeof(u64), GSP_PAGE_SIZE);
+ 	ret = nvkm_gsp_sg(gsp->subdev.device, bufsize, &rx3->lvl2);
+ 	if (ret)
+ 		goto lvl2_fail;
+@@ -1815,19 +1834,69 @@ done:
+ }
+ 
+ static int
+-r535_gsp_rm_boot_ctor(struct nvkm_gsp *gsp)
++r535_gsp_fw_sizes(u64 size, u64 sig_size, int *image_size, size_t *signature_size)
++{
++	size_t radix3_size, sig_alloc_size;
++	int ret;
++
++	if (size > INT_MAX - (PAGE_SIZE - 1) ||
++	    !sig_size || sig_size > SIZE_MAX - (256 - 1))
++		return -EINVAL;
++	sig_alloc_size = ALIGN(sig_size, 256);
++	/* DMA allocators also round the aligned signature to whole pages. */
++	if (sig_alloc_size > SIZE_MAX - (PAGE_SIZE - 1))
++		return -EINVAL;
++	ret = r535_gsp_radix3_size(size, &radix3_size);
++	if (ret)
++		return ret;
++
++	*image_size = (int)size;
++	*signature_size = sig_alloc_size;
++	return 0;
++}
++
++static int
++r535_gsp_rm_boot_parse(const void *data, size_t size, struct nvfw_bin_hdr *hdr,
++		       RM_RISCV_UCODE_DESC *desc)
++{
++	const size_t desc_size = offsetof(RM_RISCV_UCODE_DESC, monitorCodeSize) +
++				 sizeof(desc->monitorCodeSize);
++
++	if (size < sizeof(*hdr))
++		return -EINVAL;
++	memcpy(hdr, data, sizeof(*hdr));
++
++	/* bin_size may include padding absent from the file; use actual extents. */
++	if (hdr->header_offset > size || desc_size > size - hdr->header_offset ||
++	    hdr->data_offset > size || hdr->data_size > size - hdr->data_offset ||
++	    !hdr->data_size)
++		return -EINVAL;
++	/* The later, unconsumed descriptor fields need not be present. */
++	memcpy(desc, (const u8 *)data + hdr->header_offset, desc_size);
++
++	if (desc->monitorCodeOffset > hdr->data_size ||
++	    desc->monitorCodeSize > hdr->data_size - desc->monitorCodeOffset ||
++	    desc->monitorDataOffset > hdr->data_size ||
++	    desc->monitorDataSize > hdr->data_size - desc->monitorDataOffset ||
++	    desc->manifestOffset > hdr->data_size ||
++	    desc->manifestSize > hdr->data_size - desc->manifestOffset)
++		return -EINVAL;
++
++	return 0;
++}
++
++static int
++r535_gsp_rm_boot_ctor(struct nvkm_gsp *gsp, const struct nvfw_bin_hdr *hdr,
++		      const RM_RISCV_UCODE_DESC *desc)
+ {
+ 	const struct firmware *fw = gsp->fws.bl;
+-	const struct nvfw_bin_hdr *hdr;
+-	RM_RISCV_UCODE_DESC *desc;
+ 	int ret;
+ 
+ 	ret = nvkm_gsp_fwsec_sb_ctor(gsp);
+ 	if (ret)
+ 		return ret;
+ 
+-	hdr = nvfw_bin_hdr(&gsp->subdev, fw->data);
+-	desc = (void *)fw->data + hdr->header_offset;
++	nvfw_bin_hdr(&gsp->subdev, hdr);
+ 
+ 	ret = nvkm_gsp_mem_ctor(gsp, hdr->data_size, &gsp->boot.fw);
+ 	if (ret)
+@@ -1851,23 +1920,57 @@ r535_gsp_fw = {
+ };
+ 
+ static int
+-r535_gsp_elf_section(struct nvkm_gsp *gsp, const char *name, const u8 **pdata, u64 *psize)
++r535_gsp_elf_section(const void *data, size_t size, const char *name,
++		     const u8 **pdata, u64 *psize)
+ {
+-	const u8 *img = gsp->fws.rm->data;
+-	const struct elf64_hdr *ehdr = (const struct elf64_hdr *)img;
+-	const struct elf64_shdr *shdr = (const struct elf64_shdr *)&img[ehdr->e_shoff];
+-	const char *names = &img[shdr[ehdr->e_shstrndx].sh_offset];
+-
+-	for (int i = 0; i < ehdr->e_shnum; i++, shdr++) {
+-		if (!strcmp(&names[shdr->sh_name], name)) {
+-			*pdata = &img[shdr->sh_offset];
+-			*psize = shdr->sh_size;
+-			return 0;
++	const u8 *img = data, *found = NULL;
++	struct elf64_hdr ehdr;
++	struct elf64_shdr shdr, strings;
++	const char *names;
++	size_t names_size;
++	u64 found_size = 0;
++
++	if (size < sizeof(ehdr))
++		return -EINVAL;
++	memcpy(&ehdr, img, sizeof(ehdr));
++	if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) ||
++	    ehdr.e_ident[EI_CLASS] != ELFCLASS64 ||
++	    ehdr.e_ident[EI_DATA] != ELFDATA2LSB ||
++	    ehdr.e_ident[EI_VERSION] != EV_CURRENT || ehdr.e_version != EV_CURRENT ||
++	    ehdr.e_ehsize != sizeof(ehdr) || ehdr.e_shentsize != sizeof(shdr) ||
++	    !ehdr.e_shnum || ehdr.e_shstrndx >= ehdr.e_shnum ||
++	    ehdr.e_shoff > size || ehdr.e_shnum > (size - ehdr.e_shoff) / sizeof(shdr))
++		return -EINVAL;
++
++	memcpy(&strings, img + ehdr.e_shoff + ehdr.e_shstrndx * sizeof(shdr),
++	       sizeof(strings));
++	if (strings.sh_type != SHT_STRTAB || strings.sh_offset > size ||
++	    strings.sh_size > size - strings.sh_offset)
++		return -EINVAL;
++	names = (const char *)img + strings.sh_offset;
++	/* Every offset below the last NUL has an in-table terminator. */
++	names_size = strings.sh_size;
++	while (names_size && names[names_size - 1])
++		names_size--;
++
++	for (unsigned int i = 0; i < ehdr.e_shnum; i++) {
++		memcpy(&shdr, img + ehdr.e_shoff + i * sizeof(shdr), sizeof(shdr));
++		if (shdr.sh_name >= names_size)
++			return -EINVAL;
++		if (!strcmp(names + shdr.sh_name, name)) {
++			if (found || shdr.sh_type != SHT_PROGBITS || shdr.sh_offset > size ||
++			    shdr.sh_size > size - shdr.sh_offset)
++				return -EINVAL;
++			found = img + shdr.sh_offset;
++			found_size = shdr.sh_size;
+ 		}
+ 	}
+ 
+-	nvkm_error(&gsp->subdev, "section '%s' not found\n", name);
+-	return -ENOENT;
++	if (!found)
++		return -ENOENT;
++	*pdata = found;
++	*psize = found_size;
++	return 0;
+ }
+ 
+ #ifdef CONFIG_DEBUG_FS
+@@ -2137,32 +2240,41 @@ r535_gsp_oneinit(struct nvkm_gsp *gsp)
+ {
+ 	struct nvkm_device *device = gsp->subdev.device;
+ 	const struct nvkm_rm_api *rmapi = gsp->rm->api;
+-	const u8 *data;
+-	u64 size;
+-	int ret;
++	const struct firmware *rm = gsp->fws.rm, *bl = gsp->fws.bl;
++	struct nvfw_bin_hdr hdr;
++	RM_RISCV_UCODE_DESC desc;
++	const u8 *data, *sig;
++	u64 size, sig_size;
++	size_t signature_size;
++	int image_size, ret;
+ 
+ 	mutex_init(&gsp->cmdq.mutex);
+ 	mutex_init(&gsp->msgq.mutex);
+ 
+-	/* Load GSP firmware from ELF image into DMA-accessible memory. */
+-	ret = r535_gsp_elf_section(gsp, ".fwimage", &data, &size);
++	/* Validate every consumed span before allocating DMA-accessible memory. */
++	ret = r535_gsp_elf_section(rm->data, rm->size, ".fwimage", &data, &size);
+ 	if (ret)
+ 		return ret;
+-
+-	ret = nvkm_firmware_ctor(&r535_gsp_fw, "gsp-rm", device, data, size, &gsp->fw);
++	ret = r535_gsp_elf_section(rm->data, rm->size, gsp->func->sig_section,
++				    &sig, &sig_size);
+ 	if (ret)
+ 		return ret;
+-
+-	/* Load relevant signature from ELF image. */
+-	ret = r535_gsp_elf_section(gsp, gsp->func->sig_section, &data, &size);
++	ret = r535_gsp_fw_sizes(size, sig_size, &image_size, &signature_size);
++	if (ret)
++		return ret;
++	ret = r535_gsp_rm_boot_parse(bl->data, bl->size, &hdr, &desc);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = nvkm_gsp_mem_ctor(gsp, ALIGN(size, 256), &gsp->sig);
++	/* Load GSP firmware and its signature into DMA-accessible memory. */
++	ret = nvkm_firmware_ctor(&r535_gsp_fw, "gsp-rm", device, data, image_size, &gsp->fw);
++	if (ret)
++		return ret;
++	ret = nvkm_gsp_mem_ctor(gsp, signature_size, &gsp->sig);
+ 	if (ret)
+ 		return ret;
+ 
+-	memcpy(gsp->sig.data, data, size);
++	memcpy(gsp->sig.data, sig, sig_size);
+ 
+ 	/* Build radix3 page table for ELF image. */
+ 	ret = nvkm_gsp_radix3_sg(gsp, &gsp->fw.mem.sgt, gsp->fw.len, &gsp->radix3);
+@@ -2183,7 +2295,7 @@ r535_gsp_oneinit(struct nvkm_gsp *gsp)
+ 	if (rmapi->gsp->drop_post_nocat_record)
+ 		rmapi->gsp->drop_post_nocat_record(gsp);
+ 
+-	ret = r535_gsp_rm_boot_ctor(gsp);
++	ret = r535_gsp_rm_boot_ctor(gsp, &hdr, &desc);
+ 	if (ret)
+ 		return ret;
+ 
