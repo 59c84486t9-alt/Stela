@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! USB Audio Class 2 PCM, with descriptor-selected clocks and endpoints.
+//! USB Audio Class 1/2 PCM, with descriptor-selected clocks and endpoints.
 //! Mixer adaptation retains Copyright (c) 2002 Takashi Iwai; original audio.c
 //! contributions by Alan Cox and Thomas Sailer. UAC2 layout reference retains
 //! Copyright (c) 2010 Daniel Mack. See audio/THIRD_PARTY.md.
 //! Control/rate/feedback sequencing adapts Linux sound/usb/{clock,format,
 //! endpoint,pcm,mixer}.c at a804c5742bff224d4cb4d25dd383554d598be32b.
-//! Like snd-usb-audio, any UAC2 audio control interface binds by class; its
+//! Like snd-usb-audio, standard UAC1/UAC2 control interfaces bind by class; their
 //! descriptors alone decide clocks, alternates, channels and sample rates.
 use super::xhci::{Endpoint, Interface};
 use crate::{audio::Direction, block::BlockError};
+
+mod uac1;
+pub use uac1::EndpointRates;
 
 mod control;
 mod descriptors;
@@ -22,6 +25,7 @@ pub use descriptors::{Binding, Entity, Format, Graph, Sync};
 pub const CLASS: u8 = 1;
 pub const CONTROL_SUBCLASS: u8 = 1;
 pub const STREAMING_SUBCLASS: u8 = 2;
+pub const UAC1: u8 = 0;
 pub const UAC2: u8 = 0x20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

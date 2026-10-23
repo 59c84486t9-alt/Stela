@@ -57,10 +57,16 @@ impl<K> Lane<K> {
         self.order.clear();
     }
 }
+#[derive(Clone, Copy)]
+enum StreamClock {
+    Entity(ResolvedClock),
+    Endpoint,
+}
+
 struct Playback {
     format: Format,
     rate: u32,
-    clock: ResolvedClock,
+    clock: StreamClock,
     packetizer: Packetizer,
     planned: Option<usize>,
     finite: bool,
@@ -70,7 +76,7 @@ struct Playback {
 struct Capture {
     format: Format,
     rate: u32,
-    clock: ResolvedClock,
+    clock: StreamClock,
     requested: bool,
     implicit: bool,
     last_progress: u64,
@@ -139,7 +145,22 @@ impl<T: Transport> AudioDevice<T> {
             Ok(())
         }
     }
-    fn clock(&mut self, format: &Format, rate: u32) -> Result<ResolvedClock, Error> {
+    fn clock(&mut self, format: &Format, rate: u32) -> Result<StreamClock, Error> {
+        if let Some(rates) = &format.endpoint_rates {
+            rates.validate_rate(rate)?;
+            // UAC1 provides no clock-sharing graph. Do not retune one side of
+            // an active duplex device to a conflicting nominal frequency.
+            if self
+                .playback
+                .iter()
+                .map(|p| p.rate)
+                .chain(self.capture.iter().map(|c| c.rate))
+                .any(|active| active != rate)
+            {
+                return Err(Error::Busy);
+            }
+            return Ok(StreamClock::Endpoint);
+        }
         let clock = self
             .binding
             .graph
@@ -150,7 +171,8 @@ impl<T: Transport> AudioDevice<T> {
             .map(|p| (p.clock, p.rate))
             .chain(self.capture.iter().map(|c| (c.clock, c.rate)))
         {
-            if other_clock.source == clock.source
+            if let StreamClock::Entity(other_clock) = other_clock
+                && other_clock.source == clock.source
                 && other_clock.source_rate(other_rate)? != clock.source_rate(rate)?
             {
                 return Err(Error::Busy);
@@ -159,7 +181,7 @@ impl<T: Transport> AudioDevice<T> {
         self.binding
             .graph
             .set_rate(&mut self.transport, clock, rate)?;
-        Ok(clock)
+        Ok(StreamClock::Entity(clock))
     }
     fn format(&self, index: usize, direction: Direction) -> Result<Format, Error> {
         let f = self
@@ -279,6 +301,10 @@ impl<T: Transport> AudioDevice<T> {
                 self.playback.as_ref().unwrap().format.interface,
                 self.playback.as_ref().unwrap().format.alternate,
             )?;
+            let format = &self.playback.as_ref().unwrap().format;
+            if let Some(rates) = &format.endpoint_rates {
+                rates.apply(&mut self.transport, format.data.address, rate)?;
+            }
             self.transport.configure(Direction::Playback, &endpoints)?;
             self.queue_inputs()?;
             self.queue_output()?;
@@ -372,6 +398,9 @@ impl<T: Transport> AudioDevice<T> {
         let format = &self.capture.as_ref().unwrap().format;
         self.transport
             .alternate(format.interface, format.alternate)?;
+        if let Some(rates) = &format.endpoint_rates {
+            rates.apply(&mut self.transport, format.data.address, rate)?;
+        }
         self.transport
             .configure(Direction::Capture, &self.input.endpoints())?;
         self.queue_inputs()
@@ -595,8 +624,19 @@ impl<T: Transport> AudioDevice<T> {
                 self.progress.playback_frames += (bytes / p.format.frame_bytes()) as u64;
                 p.last_progress = self.transport.now_us();
             }
+            let feedback_deadline = if let Sync::Explicit(endpoint) = p.format.sync {
+                FEEDBACK_TIMEOUT_US.max(
+                    u64::from(super::descriptors::service_interval(
+                        endpoint,
+                        self.binding.speed,
+                    )?) * 125
+                        * 4,
+                )
+            } else {
+                FEEDBACK_TIMEOUT_US
+            };
             if matches!(p.format.sync, Sync::Explicit(_) | Sync::Implicit { .. })
-                && self.transport.now_us().saturating_sub(p.last_feedback) > FEEDBACK_TIMEOUT_US
+                && self.transport.now_us().saturating_sub(p.last_feedback) > feedback_deadline
             {
                 return Err(Error::Feedback);
             }
@@ -739,6 +779,7 @@ pub(crate) mod tests {
     // SPDX-License-Identifier: GPL-2.0-or-later
     //! Representative standard UAC2 descriptors, not a dump of the physical PC.
     use super::*;
+    mod uac1;
     use crate::usb::audio::*;
     use crate::{
         bus::dma::RegionAllocator,

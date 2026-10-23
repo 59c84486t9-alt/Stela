@@ -42,6 +42,7 @@ pub enum Entity {
         terminal_type: u16,
         clock: u8,
         channels: u8,
+        channel_config: u32,
     },
     Output {
         id: u8,
@@ -76,6 +77,7 @@ impl Entity {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Graph {
+    pub protocol: u8,
     pub control_interface: u8,
     pub entities: Vec<Entity>,
 }
@@ -109,7 +111,7 @@ impl Graph {
             )),
         }
     }
-    fn validate(&self) -> Result<(), Error> {
+    pub(super) fn validate(&self) -> Result<(), Error> {
         for entity in &self.entities {
             let refs: Vec<u8> = match entity {
                 Entity::ClockSource { .. } => Vec::new(),
@@ -119,8 +121,20 @@ impl Graph {
                 Entity::ClockMultiplier { source, .. } | Entity::Feature { source, .. } => {
                     vec![*source]
                 }
-                Entity::Input { clock, .. } => vec![*clock],
-                Entity::Output { source, clock, .. } => vec![*source, *clock],
+                Entity::Input { clock, .. } => {
+                    if self.protocol == super::UAC1 {
+                        Vec::new()
+                    } else {
+                        vec![*clock]
+                    }
+                }
+                Entity::Output { source, clock, .. } => {
+                    if self.protocol == super::UAC1 {
+                        vec![*source]
+                    } else {
+                        vec![*source, *clock]
+                    }
+                }
             };
             for id in refs {
                 self.entity(id)?;
@@ -173,6 +187,8 @@ pub enum Sync {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Format {
+    /// UAC1 endpoint-owned frequencies; UAC2 uses its real clock graph.
+    pub endpoint_rates: Option<super::EndpointRates>,
     pub interface: u8,
     pub alternate: u8,
     pub terminal: u8,
@@ -249,6 +265,7 @@ fn graph(control: &Interface) -> Result<Graph, Error> {
                     terminal_type: le16(d, 4),
                     clock: d[7],
                     channels: d[8],
+                    channel_config: le32(d, 9),
                 })
             }
             3 => {
@@ -339,6 +356,7 @@ fn graph(control: &Interface) -> Result<Graph, Error> {
         return Err(Error::Descriptor("UAC2 AC header total length"));
     }
     let graph = Graph {
+        protocol: UAC2,
         control_interface: control.number,
         entities,
     };
@@ -346,10 +364,11 @@ fn graph(control: &Interface) -> Result<Graph, Error> {
     Ok(graph)
 }
 
-fn scope(
+pub(super) fn scope(
     configuration: &[u8],
     control: u8,
     all: &[Interface],
+    protocol: u8,
 ) -> Result<core::ops::Range<u16>, Error> {
     if configuration.len() < 9
         || configuration[0] != 9
@@ -410,7 +429,7 @@ fn scope(
             if start <= u16::from(control) && u16::from(control) < end {
                 if association.is_some()
                     || d[4] != CLASS
-                    || d[6] != UAC2
+                    || d[6] != protocol
                     || d[2] != control
                     || end > 256
                 {
@@ -433,10 +452,14 @@ fn scope(
     }
     association
         .or_else(|| {
-            (all.iter()
-                .filter(|i| i.alternate == 0 && i.class == CLASS && i.subclass == CONTROL_SUBCLASS)
-                .count()
-                == 1)
+            (protocol == super::UAC1
+                || all
+                    .iter()
+                    .filter(|i| {
+                        i.alternate == 0 && i.class == CLASS && i.subclass == CONTROL_SUBCLASS
+                    })
+                    .count()
+                    == 1)
                 .then_some(0..256)
         })
         .ok_or(Error::Descriptor(
@@ -566,6 +589,7 @@ fn format(
     }
     let fill_max = endpoint[0][3] & 0x80 != 0;
     Ok(Format {
+        endpoint_rates: None,
         interface: interface.number,
         alternate: interface.alternate,
         terminal: g[3],
@@ -623,6 +647,13 @@ impl Binding {
         configuration: &[u8],
         speed: u8,
     ) -> Result<Self, Error> {
+        if control.class == CLASS
+            && control.subclass == CONTROL_SUBCLASS
+            && control.protocol == super::UAC1
+            && control.alternate == 0
+        {
+            return super::uac1::binding(control, all, configuration, speed);
+        }
         if control.class != CLASS
             || control.subclass != CONTROL_SUBCLASS
             || control.protocol != UAC2
@@ -632,7 +663,7 @@ impl Binding {
                 "standard UAC2 control interface required",
             ));
         }
-        let scope = scope(configuration, control.number, all)?;
+        let scope = scope(configuration, control.number, all, UAC2)?;
         let graph = graph(control)?;
         let mut formats = Vec::new();
         let mut unsupported = Vec::new();

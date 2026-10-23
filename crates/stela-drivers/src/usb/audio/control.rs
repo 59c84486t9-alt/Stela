@@ -212,8 +212,14 @@ impl Graph {
         if pin == 0 || usize::from(pin) > sources.len() || !access(u32::from(*controls), 1)?.1 {
             return Err(Error::Unsupported("signal selector choice is not writable"));
         }
-        set(io, self.control_interface, id, 1, 0, &[pin])?;
-        if get(io, self.control_interface, id, 1, 0, 1, 1)? != [pin] {
+        let selector = if self.protocol == super::UAC1 { 0 } else { 1 };
+        set(io, self.control_interface, id, selector, 0, &[pin])?;
+        let request = if self.protocol == super::UAC1 {
+            0x81
+        } else {
+            1
+        };
+        if get(io, self.control_interface, id, selector, 0, request, 1)? != [pin] {
             return Err(Error::ControlReadback);
         }
         Ok(())
@@ -352,7 +358,12 @@ impl Graph {
     }
     pub fn mute<C: Control>(&self, io: &mut C, id: u8, channel: u8) -> Result<bool, Error> {
         self.feature(id, channel, 1, false)?;
-        match get(io, self.control_interface, id, 1, channel, 1, 1)?[0] {
+        let request = if self.protocol == super::UAC1 {
+            0x81
+        } else {
+            1
+        };
+        match get(io, self.control_interface, id, 1, channel, request, 1)?[0] {
             0 => Ok(false),
             1 => Ok(true),
             _ => Err(Error::ControlReadback),
@@ -381,8 +392,13 @@ impl Graph {
     }
     pub fn volume<C: Control>(&self, io: &mut C, id: u8, channel: u8) -> Result<i16, Error> {
         self.feature(id, channel, 2, false)?;
+        let request = if self.protocol == super::UAC1 {
+            0x81
+        } else {
+            1
+        };
         Ok(i16::from_le_bytes(
-            get(io, self.control_interface, id, 2, channel, 1, 2)?
+            get(io, self.control_interface, id, 2, channel, request, 2)?
                 .try_into()
                 .unwrap(),
         ))
@@ -395,25 +411,43 @@ impl Graph {
         value: i16,
     ) -> Result<(), Error> {
         self.feature(id, channel, 2, true)?;
-        let head = get(io, self.control_interface, id, 2, channel, 2, 2)?;
-        let count = usize::from(u16::from_le_bytes(head.try_into().unwrap()));
-        if !(1..=64).contains(&count) {
-            return Err(Error::Descriptor("volume range count"));
-        }
-        let ranges = get(
-            io,
-            self.control_interface,
-            id,
-            2,
-            channel,
-            2,
-            (2 + 6 * count) as u16,
-        )?;
-        if usize::from(u16::from_le_bytes(ranges[..2].try_into().unwrap())) != count {
-            return Err(Error::ControlReadback);
-        }
+        let ranges = if self.protocol == super::UAC1 {
+            let mut values = Vec::new();
+            for request in [0x82, 0x83, 0x84] {
+                // UAC1 GET_MIN, GET_MAX, GET_RES
+                values.extend_from_slice(&get(
+                    io,
+                    self.control_interface,
+                    id,
+                    2,
+                    channel,
+                    request,
+                    2,
+                )?);
+            }
+            values
+        } else {
+            let head = get(io, self.control_interface, id, 2, channel, 2, 2)?;
+            let count = usize::from(u16::from_le_bytes(head.try_into().unwrap()));
+            if !(1..=64).contains(&count) {
+                return Err(Error::Descriptor("volume range count"));
+            }
+            let ranges = get(
+                io,
+                self.control_interface,
+                id,
+                2,
+                channel,
+                2,
+                (2 + 6 * count) as u16,
+            )?;
+            if usize::from(u16::from_le_bytes(ranges[..2].try_into().unwrap())) != count {
+                return Err(Error::ControlReadback);
+            }
+            ranges[2..].to_vec()
+        };
         let mut supported = false;
-        for r in ranges[2..].as_chunks::<6>().0 {
+        for r in ranges.as_chunks::<6>().0 {
             let min = i32::from(i16::from_le_bytes(r[..2].try_into().unwrap()));
             let max = i32::from(i16::from_le_bytes(r[2..4].try_into().unwrap()));
             let res = i32::from(u16::from_le_bytes(r[4..].try_into().unwrap()));
