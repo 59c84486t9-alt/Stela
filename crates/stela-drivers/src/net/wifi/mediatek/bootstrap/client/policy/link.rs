@@ -88,8 +88,8 @@ struct State<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> {
     // The next packet I/O reports it before polling or publishing again.
     deferred_error: Option<LinkControlError>,
 }
-struct ServiceFailure {
-    error: LinkControlError,
+struct ServiceOutcome {
+    result: Result<LinkProgress, LinkControlError>,
     soft_rx: bool,
 }
 /// Owns the exact existing native client and allocation provider. It has no raw
@@ -281,9 +281,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     /// frontend queues retain their batch and apply backpressure without making
     /// a fabricated completion or discarding control-port/event bytes.
     pub fn service(&mut self) -> Result<LinkProgress, LinkControlError> {
-        self.service_inner().map_err(|failure| failure.error)
+        self.service_inner().result
     }
-    fn service_inner(&mut self) -> Result<LinkProgress, ServiceFailure> {
+    fn service_inner(&mut self) -> ServiceOutcome {
         let now = self.now();
         let s = self.state_mut();
         Self::reconcile(s);
@@ -365,13 +365,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         }
         Self::reconcile(s);
         Self::drain(s);
-        if let Some(error) = failure {
-            return Err(ServiceFailure {
-                error: error.into(),
-                soft_rx,
-            });
+        ServiceOutcome {
+            result: failure.map_or_else(|| Ok(Self::progress(s)), |error| Err(error.into())),
+            soft_rx,
         }
-        Ok(Self::progress(s))
     }
     // An error-only call starts no new poll and performs no packet publication.
     // Thus repeated bad RX can alternate useful packet I/O and the exact error,
@@ -380,13 +377,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         if let Some(error) = self.state_mut().deferred_error.take() {
             return Err(error);
         }
-        match self.service_inner() {
+        let outcome = self.service_inner();
+        match outcome.result {
             Ok(_) => Ok(None),
-            Err(ServiceFailure {
-                error,
-                soft_rx: true,
-            }) => Ok(Some(error)),
-            Err(failure) => Err(failure.error),
+            Err(error) if outcome.soft_rx => Ok(Some(error)),
+            Err(error) => Err(error),
         }
     }
     pub fn begin_scan(
