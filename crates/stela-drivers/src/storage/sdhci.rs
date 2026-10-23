@@ -48,6 +48,21 @@ const PCI_CAP_POINTER: u16 = 0x34;
 const PCI_HEADER_TYPE: u16 = 0x0e;
 const PCI_PM: u8 = 0x01;
 const PCI_PM_BYTES: usize = 8;
+const PCI_VPD: u8 = 0x03;
+const PCI_VENDOR: u8 = 0x09;
+const PCI_SSVID: u8 = 0x0d;
+const PCI_EXPRESS: u8 = 0x10;
+const PCI_VENDOR_LENGTH: u16 = 2;
+const PCI_EXP_VERSION: u16 = 0x000f;
+const PCI_EXP_TYPE: u16 = 0x00f0;
+const PCI_EXP_SLOT: u16 = 0x0100;
+const PCI_EXP_ENDPOINT: u16 = 0;
+const PCI_EXP_LEGACY_ENDPOINT: u16 = 1;
+const PCI_EXP_RC_ENDPOINT: u16 = 9;
+const PCI_EXP_ENDPOINT_V1_BYTES: usize = 20;
+const PCI_EXP_ENDPOINT_V2_BYTES: usize = 0x34;
+const PCI_EXP_RC_ENDPOINT_V1_BYTES: usize = 12;
+const PCI_EXP_RC_ENDPOINT_V2_BYTES: usize = 0x2c;
 const PCI_MSI: u8 = 0x05;
 const PCI_MSIX: u8 = 0x11;
 const PCI_MSI_ENABLE: u16 = 1;
@@ -182,7 +197,7 @@ fn pio_interrupt_controls<C: ConfigSpace>(config: &C) -> Result<[Option<u16>; 2]
         return Err(malformed);
     }
     let mut controls = [None; 2];
-    let mut power_management = false;
+    let mut singletons = [false; 256];
     if config.read16(PCI_STATUS) & PCI_CAP_PRESENT == 0 {
         return Ok(controls);
     }
@@ -197,37 +212,68 @@ fn pio_interrupt_controls<C: ConfigSpace>(config: &C) -> Result<[Option<u16>; 2]
         if id == 0 || id == 0xff {
             return Err(malformed);
         }
-        let bytes = if id == PCI_PM {
-            // prepare_slots subsequently calls power_up, including PMCSR+4.
-            if power_management {
+        // Every admitted body must be measured. Otherwise a next pointer can
+        // name PM/MSI controls inside a different capability's real registers.
+        if id != PCI_VENDOR {
+            if singletons[usize::from(id)] {
                 return Err(malformed);
             }
-            power_management = true;
-            PCI_PM_BYTES
-        } else if id == PCI_MSI || id == PCI_MSIX {
-            let index = usize::from(id == PCI_MSIX);
-            if controls[index].is_some() {
-                return Err(malformed);
+            singletons[usize::from(id)] = true;
+        }
+        let bytes = match id {
+            PCI_PM => PCI_PM_BYTES,
+            PCI_VPD | PCI_SSVID => 8,
+            PCI_VENDOR => {
+                let length = usize::from(config.read8(at + PCI_VENDOR_LENGTH));
+                if length < 3 {
+                    return Err(malformed);
+                }
+                length
             }
-            controls[index] = Some(at + PCI_CAP_CONTROL);
-            let control = config.read16(at + PCI_CAP_CONTROL);
-            if id == PCI_MSIX {
-                12
-            } else {
-                // MSI: header/control, address, optional upper address, data,
-                // and optional per-vector mask/pending dwords (with padding).
-                let wide = control & (1 << 7) != 0;
-                let masking = control & (1 << 8) != 0;
-                if masking {
-                    if wide { 24 } else { 20 }
-                } else if wide {
-                    14
-                } else {
-                    10
+            PCI_EXPRESS => {
+                let flags = config.read16(at + PCI_CAP_CONTROL);
+                let version = flags & PCI_EXP_VERSION;
+                let kind = (flags & PCI_EXP_TYPE) >> 4;
+                if flags & PCI_EXP_SLOT != 0 {
+                    return Err(BlockError::Unsupported(
+                        "SDHCI unqualified PCIe slot capability",
+                    ));
+                }
+                match (kind, version) {
+                    (PCI_EXP_ENDPOINT | PCI_EXP_LEGACY_ENDPOINT, 1) => PCI_EXP_ENDPOINT_V1_BYTES,
+                    (PCI_EXP_ENDPOINT | PCI_EXP_LEGACY_ENDPOINT, 2) => PCI_EXP_ENDPOINT_V2_BYTES,
+                    (PCI_EXP_RC_ENDPOINT, 1) => PCI_EXP_RC_ENDPOINT_V1_BYTES,
+                    (PCI_EXP_RC_ENDPOINT, 2) => PCI_EXP_RC_ENDPOINT_V2_BYTES,
+                    _ => {
+                        return Err(BlockError::Unsupported(
+                            "SDHCI unqualified PCIe capability extent",
+                        ));
+                    }
                 }
             }
-        } else {
-            2
+            PCI_MSI | PCI_MSIX => {
+                let index = usize::from(id == PCI_MSIX);
+                controls[index] = Some(at + PCI_CAP_CONTROL);
+                let control = config.read16(at + PCI_CAP_CONTROL);
+                if id == PCI_MSIX {
+                    12
+                } else {
+                    let wide = control & (1 << 7) != 0;
+                    let masking = control & (1 << 8) != 0;
+                    if masking {
+                        if wide { 24 } else { 20 }
+                    } else if wide {
+                        14
+                    } else {
+                        10
+                    }
+                }
+            }
+            _ => {
+                return Err(BlockError::Unsupported(
+                    "SDHCI unsupported PCI capability extent",
+                ));
+            }
         };
         let end = usize::from(at) + bytes;
         if end > occupied.len() || occupied[usize::from(at)..end].iter().any(|used| *used) {
@@ -1063,7 +1109,7 @@ mod owned_tests {
                 panic!("PCI status/control RMW would clear adjacent W1C status");
             }
             fn write16(&mut self, at: u16, value: u16) {
-                assert!(matches!(at, 0x04 | 0x52 | 0x62));
+                assert!(matches!(at, 0x04 | 0x52 | 0x62 | 0x92 | 0xa2));
                 if at == 0x04 {
                     assert_eq!(value & PCI_BUS_MASTER, 0, "transient DMA grant");
                 }
@@ -1149,6 +1195,104 @@ mod owned_tests {
                 "capability overlaps MSI control",
                 vec![(0x51, 0x54), (0x54, 1)],
             ),
+            (
+                "PCIe v1 body hides PM",
+                vec![
+                    (0x34, 0x40),
+                    (0x40, 0x10),
+                    (0x41, 0x44),
+                    (0x42, 1),
+                    (0x44, 1),
+                    (0x48, 1), // real PCIe Device Control, not a PMCSR
+                ],
+            ),
+            (
+                "PCIe v1 body hides MSI",
+                vec![(0x34, 0x40), (0x40, 0x10), (0x41, 0x50), (0x42, 1)],
+            ),
+            (
+                "PCIe v2 tail hides PM",
+                vec![
+                    (0x34, 0x40),
+                    (0x40, 0x10),
+                    (0x41, 0x70),
+                    (0x42, 2),
+                    (0x70, 1),
+                ],
+            ),
+            (
+                "PCIe v2 tail hides MSI",
+                vec![
+                    (0x34, 0x40),
+                    (0x40, 0x10),
+                    (0x41, 0x70),
+                    (0x42, 2),
+                    (0x70, 5),
+                ],
+            ),
+            (
+                "VPD body hides PM",
+                vec![(0x34, 0x40), (0x40, 3), (0x41, 0x44), (0x44, 1)],
+            ),
+            (
+                "VPD body hides MSI",
+                vec![(0x34, 0x40), (0x40, 3), (0x41, 0x44), (0x44, 5)],
+            ),
+            (
+                "vendor body hides PM",
+                vec![(0x34, 0x40), (0x40, 9), (0x41, 0x44), (0x42, 16), (0x44, 1)],
+            ),
+            (
+                "vendor body hides MSI",
+                vec![(0x34, 0x40), (0x40, 9), (0x41, 0x44), (0x42, 16), (0x44, 5)],
+            ),
+            (
+                "subsystem body hides MSI",
+                vec![(0x34, 0x40), (0x40, 0x0d), (0x41, 0x44), (0x44, 5)],
+            ),
+            (
+                "PCIe unknown version",
+                vec![(0x34, 0x40), (0x40, 0x10), (0x41, 0), (0x42, 3)],
+            ),
+            (
+                "PCIe unqualified port type",
+                vec![(0x34, 0x40), (0x40, 0x10), (0x41, 0), (0x42, 0x42)],
+            ),
+            (
+                "PCIe endpoint with slot",
+                vec![(0x34, 0x40), (0x40, 0x10), (0x41, 0), (0x42, 2), (0x43, 1)],
+            ),
+            (
+                "PCIe truncated v2 body",
+                vec![(0x34, 0xe0), (0xe0, 0x10), (0xe2, 2)],
+            ),
+            ("vendor missing length", vec![(0x34, 0x40), (0x40, 9)]),
+            (
+                "vendor short header",
+                vec![(0x34, 0x40), (0x40, 9), (0x42, 2)],
+            ),
+            ("vendor overflow", vec![(0x34, 0xfc), (0xfc, 9), (0xfe, 5)]),
+            ("unknown extent", vec![(0x34, 0x40), (0x40, 0x7f)]),
+            ("unsupported known extent", vec![(0x34, 0x40), (0x40, 7)]),
+            (
+                "duplicate PCIe",
+                vec![
+                    (0x34, 0x40),
+                    (0x40, 0x10),
+                    (0x41, 0x80),
+                    (0x42, 1),
+                    (0x80, 0x10),
+                    (0x82, 1),
+                ],
+            ),
+            (
+                "duplicate VPD",
+                vec![(0x34, 0x40), (0x40, 3), (0x41, 0x48), (0x48, 3)],
+            ),
+            (
+                "duplicate subsystem capability",
+                vec![(0x34, 0x40), (0x40, 0x0d), (0x41, 0x48), (0x48, 0x0d)],
+            ),
             ("non-endpoint header", vec![(0x0e, 1)]),
         ] {
             let mut corrupt = valid.clone();
@@ -1195,6 +1339,85 @@ mod owned_tests {
             &*writes.borrow(),
             &[(4, 2, 0x401), (0x52, 2, 0x80), (0x62, 2, 1)]
         );
+        // Exact source endpoint lengths differ by version and link presence.
+        // All headers following these real bodies remain separate from PMCSR
+        // and interrupt controls, even when body bytes resemble header IDs.
+        for flags in [0x01u16, 0x02, 0x11, 0x12, 0x91, 0x92] {
+            let mut mixed = valid.clone();
+            mixed[0x34] = 0x40;
+            mixed[0x40] = 0x10;
+            mixed[0x41] = 0x80;
+            mixed[0x42..0x44].copy_from_slice(&flags.to_le_bytes());
+            mixed[0x80] = 1;
+            mixed[0x81] = 0x90;
+            mixed[0x82] = 3;
+            mixed[0x90] = 5;
+            mixed[0x91] = 0xa0;
+            mixed[0x92..0x94].copy_from_slice(&1u16.to_le_bytes());
+            mixed[0xa0] = 0x11;
+            mixed[0xa1] = 0xb0;
+            mixed[0xa2..0xa4].copy_from_slice(&0x8001u16.to_le_bytes());
+            mixed[0xb0] = 3;
+            mixed[0xb1] = 0xb8;
+            mixed[0xb8] = 9;
+            mixed[0xb9] = 0xc0;
+            mixed[0xba] = 8;
+            mixed[0xc0] = 0x0d;
+            let writes = Rc::new(RefCell::new(Vec::new()));
+            let mut function = Function::new(
+                function.address,
+                Config {
+                    bytes: Rc::new(RefCell::new(mixed)),
+                    writes: writes.clone(),
+                },
+            )
+            .unwrap();
+            quiesce_pio(&mut function).unwrap();
+            function
+                .power_up(&Clock {
+                    ticks_per_microsecond: CLOCK_TICKS_PER_US,
+                })
+                .unwrap();
+            assert_eq!(
+                &*writes.borrow(),
+                &[(4, 2, 0x401), (0x92, 2, 0), (0xa2, 2, 1)],
+                "flags={flags:x}"
+            );
+        }
+        // Exact endpoint bodies and vendor lengths may end at byte255. These
+        // are genuine boundary profiles, not headers admitted by truncation.
+        for (start, id, extra) in [
+            (0xec, 0x10, 0x01u8),
+            (0xcc, 0x10, 0x02),
+            (0xf4, 0x10, 0x91),
+            (0xd4, 0x10, 0x92),
+            (0xfc, 9, 3),
+            (0x40, 9, 0xc0),
+        ] {
+            let mut boundary = valid.clone();
+            boundary[0x34] = start as u8;
+            boundary[start] = id;
+            boundary[start + 1] = 0;
+            boundary[start + 2] = extra;
+            if id == 0x10 {
+                boundary[start + 3] = 0;
+            }
+            let writes = Rc::new(RefCell::new(Vec::new()));
+            let mut function = Function::new(
+                function.address,
+                Config {
+                    bytes: Rc::new(RefCell::new(boundary)),
+                    writes: writes.clone(),
+                },
+            )
+            .unwrap();
+            quiesce_pio(&mut function).unwrap();
+            assert_eq!(
+                &*writes.borrow(),
+                &[(4, 2, 0x401)],
+                "start={start:x}, extra={extra:x}"
+            );
+        }
         // A complete maximum-length list of four-byte vendor capabilities
         // terminates normally without a forgiving iteration cutoff.
         let mut complete = valid;
