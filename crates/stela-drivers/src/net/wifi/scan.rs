@@ -308,6 +308,22 @@ impl Scanner {
             .validate_policy(policy)
     }
 
+    /// Release a locally prepared request that never reached transport. The
+    /// vendor owner must call submitted before handoff; once Submitted (or
+    /// cancelling/retiring), only actual completion/drain may retire the scan.
+    /// This records no invented firmware rejection or terminal outcome.
+    pub(super) fn withdraw_unsubmitted(&mut self, ticket: Ticket) -> Result<Request, Error> {
+        self.current(ticket)?;
+        if self.phase != Phase::Starting {
+            return Err(Error::WrongPhase);
+        }
+        let request = self.request.take().ok_or(Error::WrongPhase)?;
+        self.phase = Phase::Idle;
+        self.cancelled = false;
+        self.outcome = None;
+        Ok(request)
+    }
+
     /// Mark actual transport handoff after validate_submission, within that
     /// same owner serialization; not firmware acceptance or completion.
     pub fn submitted(&mut self, ticket: Ticket) -> Result<(), Error> {
@@ -541,6 +557,28 @@ mod tests {
             SecurityStatus::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn withdrawn_prepublication_request_cannot_withdraw_a_submitted_generation() {
+        let mut scanner = Scanner::new(LOCAL).unwrap();
+        let mut p = policy();
+        let request = Request::new(vec![CH36], vec![], vec![]).unwrap();
+        let old = scanner.begin(request, 0, 100, &mut p).unwrap();
+        let request = scanner.withdraw_unsubmitted(old).unwrap();
+        assert_eq!(scanner.phase(), Phase::Idle);
+        let next = scanner.begin(request, 1, 100, &mut p).unwrap();
+        assert!(matches!(
+            scanner.withdraw_unsubmitted(old),
+            Err(Error::Stale)
+        ));
+        scanner.submitted(next).unwrap();
+        assert!(matches!(
+            scanner.withdraw_unsubmitted(next),
+            Err(Error::WrongPhase)
+        ));
+        assert_eq!(scanner.phase(), Phase::Submitted);
+        assert!(scanner.request().is_some());
     }
 
     #[test]

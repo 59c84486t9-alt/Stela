@@ -71,12 +71,20 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .begin(request, now, budget, policy)
             .map_err(Error::Scan)?;
         s.scan_ticket = Some(ticket);
-        s.scan_sequence = sequence;
-        s.scanner
-            .validate_submission(ticket, now, policy)
-            .map_err(Error::Scan)?;
-        s.scanner.submitted(ticket).map_err(Error::Scan)?;
+        // From request ownership through transport, any unexpected failure
+        // retains an explicit non-Idle owner. A policy refusal before handoff
+        // can withdraw only the never-submitted Starting generation.
         s.phase = Phase::Quarantined;
+        if let Err(error) = s.scanner.validate_submission(ticket, now, policy) {
+            s.scanner
+                .withdraw_unsubmitted(ticket)
+                .map_err(Error::Scan)?;
+            s.scan_ticket = None;
+            s.phase = Phase::Idle;
+            return Err(Error::Scan(error));
+        }
+        s.scanner.submitted(ticket).map_err(Error::Scan)?;
+        s.scan_sequence = sequence;
         let fact = s
             .controller
             .state_mut()
@@ -313,6 +321,67 @@ mod tests {
         fn allow_data_tx(&mut self, _: Channel) -> bool {
             false
         }
+    }
+
+    #[test]
+    fn changed_prepublication_policy_withdraws_actual_native_request_before_reuse() {
+        struct Changing(usize);
+        impl scan::Policy for Changing {
+            fn allow_receive(&mut self, _: Channel) -> bool {
+                self.0 += 1;
+                self.0 == 1
+            }
+            fn allow_probe(&mut self, _: Channel) -> bool {
+                true
+            }
+            fn lookup_channel(&mut self, _: Band, _: u16) -> Option<Channel> {
+                Some(CHANNEL)
+            }
+        }
+        let (mut driver, model) = setup();
+        let before = model.response.lock().unwrap().client_commands.len();
+        let request = scan::Request::new(vec![CHANNEL], vec![vec![]], vec![]).unwrap();
+        let mut policy = Changing(0);
+        assert!(matches!(
+            driver.begin_scan(request, 0, 1_000_000, &mut policy),
+            Err(Error::Scan(scan::Error::Regulatory))
+        ));
+        assert_eq!(policy.0, 2);
+        assert_eq!(driver.phase(), Phase::Idle);
+        assert_eq!(driver.state().scanner.phase(), scan::Phase::Idle);
+        assert!(driver.state().scan_ticket.is_none());
+        assert!(driver.state().scanner.request().is_none());
+        assert_eq!(driver.state().scan_sequence, 0);
+        assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
+        let request = scan::Request::new(vec![CHANNEL], vec![], vec![]).unwrap();
+        driver
+            .begin_scan(request, 1, 1_000_000, &mut Policy(true))
+            .unwrap();
+        assert_eq!(driver.phase(), Phase::Scanning);
+        assert_eq!(driver.state().scan_sequence, 1);
+        assert_eq!(
+            model.response.lock().unwrap().client_commands.len(),
+            before + 1
+        );
+        let mut done = vec![0; 52];
+        done[..4].copy_from_slice(&(7u32 << 27).to_le_bytes());
+        done[36] = 14;
+        done[38] = 6;
+        done[50] = 4;
+        device_receive(&model.queues[&0xd4500], &done, true, 0);
+        driver.poll(2, &Source, &mut Policy(true)).unwrap();
+        assert_eq!(driver.phase(), Phase::ScanCompleted);
+        // SAFETY: the fixture consumed all actual scan RX/notifications; no
+        // external hardware or delayed descriptor users exist in this model.
+        unsafe { driver.retire_scan_after_drain() }.unwrap();
+        driver.stop().unwrap();
+        model.response.lock().unwrap().clc_processing = false;
+        model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
+        // SAFETY: actual model stop/reset has drained every retained DMA user.
+        unsafe { driver.stop_after_quiesce() }.unwrap();
+        drop(driver);
+        assert_eq!(model.drops.load(core::sync::atomic::Ordering::Relaxed), 1);
+        assert!(model.memory.lock().unwrap().mappings.is_empty());
     }
 
     #[test]
