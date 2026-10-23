@@ -349,6 +349,7 @@ impl<B: Backend> Owner<B> {
     pub fn begin_retained_capture(
         &mut self,
         frames: &Frames,
+        retained: Retained,
         d: &Descriptor,
         context: CounterContext,
         activation: u32,
@@ -359,9 +360,6 @@ impl<B: Backend> Owner<B> {
                 "generic retained input requires source bulk-copy skip",
             ));
         }
-        let retained = frames
-            .retain_cells(d.ordinal().index() as u32)
-            .map_err(Error::Contract)?;
         self.begin_capture_input(
             frames,
             FrameInput::Retained(retained),
@@ -1378,7 +1376,8 @@ mod tests {
                 &mut Access::new(0, 1, &mut latch),
             )
             .unwrap();
-        o.begin_retained_capture(&frames, &d, c, 1).unwrap();
+        o.begin_retained_capture(&frames, frames.retain_cells(1).unwrap(), &d, c, 1)
+            .unwrap();
         assert!(matches!(
             run(&mut o, &frames, &mut latch),
             Ok(Progress::Complete(_))
@@ -1423,14 +1422,18 @@ mod tests {
         let mut o =
             Owner::initialized_software(Configuration::t8112(&d).unwrap(), TestBackend::new());
         let c = context();
-        o.begin_retained_capture(&frames, &d, c, 1).unwrap();
+        o.begin_retained_capture(&frames, frames.retain_cells(2).unwrap(), &d, c, 1)
+            .unwrap();
         assert!(o.cells(&frames).unwrap().is_empty());
         assert_eq!(frames.progress().completed_copies, 0);
         let (frames, _, _) = setup();
         let d = descriptor(1);
         let mut o =
             Owner::initialized_software(Configuration::t8112(&d).unwrap(), TestBackend::new());
-        assert!(o.begin_retained_capture(&frames, &d, context(), 1).is_err());
+        assert!(
+            o.begin_retained_capture(&frames, frames.retain_cells(1).unwrap(), &d, context(), 1)
+                .is_err()
+        );
         assert!(o.receipt.is_none());
         assert!(!o.awaiting_post);
         assert_eq!(o.products().0, 0);
@@ -1438,6 +1441,7 @@ mod tests {
         assert!(
             o.begin_retained_capture(
                 &frames,
+                frames.retain_cells(1).unwrap(),
                 &d,
                 CounterContext {
                     activity: 0,
