@@ -57,7 +57,9 @@ pub(in crate::storage) trait Host {
     fn set_high_speed(&mut self) -> Result<(), BlockError>;
     fn set_clock(&mut self, requested: u32) -> Result<u32, BlockError>;
     fn scratch(&self) -> &[u8];
-    fn retire(&mut self) -> Result<(), BlockError>;
+    /// Fence/retire the host, retain cleanup diagnostics and return the primary
+    /// failure unchanged, including when actual retirement also fails.
+    fn retire(&mut self, primary: BlockError) -> BlockError;
 }
 
 pub(in crate::storage) struct Description {
@@ -122,12 +124,21 @@ impl<H: Host> Session<'_, H> {
         let request = voltage | if v2 || !sd { OCR_SECTOR } else { 0 };
         let deadline = self.clock.deadline(COMMAND_US);
         let ocr = loop {
+            if deadline.passed() {
+                return Err(self.host.retire(BlockError::Timeout));
+            }
             let response = if sd {
                 self.application(0)?;
+                if deadline.passed() {
+                    return Err(self.host.retire(BlockError::Timeout));
+                }
                 self.execute(SD_SEND_OP_COND, request, Response::Ocr, None)?[0]
             } else {
                 self.execute(MMC_SEND_OP_COND, request, Response::Ocr, None)?[0]
             };
+            if deadline.passed() {
+                return Err(self.host.retire(BlockError::Timeout));
+            }
             if response & voltage == 0 {
                 return Err(BlockError::Unsupported(
                     "MMC/SD card does not support the actual supply",
@@ -135,9 +146,6 @@ impl<H: Host> Session<'_, H> {
             }
             if response & OCR_READY != 0 {
                 break response;
-            }
-            if deadline.passed() {
-                return Err(BlockError::Timeout);
             }
             self.clock.delay(10_000);
         };
@@ -394,18 +402,20 @@ impl<H: Host> Session<'_, H> {
     pub(in crate::storage) fn wait_card_ready(&mut self) -> Result<(), BlockError> {
         let deadline = self.clock.deadline(DATA_US);
         loop {
+            if deadline.passed() {
+                return Err(self.host.retire(BlockError::Timeout));
+            }
             let status = self.execute(
                 SEND_STATUS,
                 u32::from(self.rca) << 16,
                 Response::Status,
                 None,
             )?[0];
+            if deadline.passed() {
+                return Err(self.host.retire(BlockError::Timeout));
+            }
             if status & (1 << 8) != 0 && status >> 9 & 15 == 4 {
                 return Ok(());
-            }
-            if deadline.passed() {
-                self.host.retire()?;
-                return Err(BlockError::Timeout);
             }
             self.clock.delay(1000);
         }
@@ -414,4 +424,165 @@ impl<H: Host> Session<'_, H> {
 fn unavailable(error: &BlockError) -> bool {
     matches!(error, BlockError::Timeout)
         || matches!(error, BlockError::Device { status } if status & R1_ERRORS == R1_ILLEGAL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec::Vec;
+
+    struct SlowHost {
+        mmc: bool,
+        slow: u8,
+        actual_error: Option<BlockError>,
+        failed_retirement: bool,
+        commands: Vec<u8>,
+        failure: Option<Failure>,
+    }
+    impl SlowHost {
+        fn new(mmc: bool, slow: u8) -> Self {
+            Self {
+                mmc,
+                slow,
+                actual_error: None,
+                failed_retirement: true,
+                commands: Vec::new(),
+                failure: None,
+            }
+        }
+    }
+    impl Host for SlowHost {
+        fn command(
+            &mut self,
+            opcode: Opcode,
+            _: u32,
+            _: Response,
+            _: Option<usize>,
+        ) -> Result<[u32; 4], BlockError> {
+            let command = opcode.number();
+            self.commands.push(command);
+            if command == self.slow {
+                // The real TSC advances past the caller's existing deadline;
+                // the completed response still carries READY, not a fake error.
+                self.clock().delay(if command == 13 {
+                    DATA_US + 1
+                } else {
+                    COMMAND_US + 1
+                });
+                if let Some(error) = &self.actual_error {
+                    return Err(error.clone());
+                }
+            }
+            let value = match command {
+                0 => 0,
+                8 => {
+                    if self.mmc {
+                        R1_ILLEGAL
+                    } else {
+                        0x1aa
+                    }
+                }
+                55 if self.mmc => return Err(BlockError::Device { status: R1_ILLEGAL }),
+                55 => SD_APP | 0x900,
+                1 | 41 => OCR_READY | OCR_SECTOR | OCR_330,
+                13 => 0x900,
+                _ => panic!("late response must retire before later command {command}"),
+            };
+            Ok([value, 0, 0, 0])
+        }
+        fn clock(&self) -> Clock {
+            Clock {
+                ticks_per_microsecond: 1,
+            }
+        }
+        fn location(&self) -> &str {
+            "shared late-response contract"
+        }
+        fn voltage(&mut self) -> Result<u32, BlockError> {
+            Ok(OCR_330)
+        }
+        fn writable(&mut self) -> Result<bool, BlockError> {
+            panic!("no card data after late response")
+        }
+        fn allow_kind(&self, _: Kind) -> Result<(), BlockError> {
+            Ok(())
+        }
+        fn high_speed_supported(&self) -> bool {
+            panic!("no card modes after late response")
+        }
+        fn mmc_width(&self) -> u8 {
+            panic!("no card modes after late response")
+        }
+        fn set_bus_width(&mut self, _: u8) -> Result<(), BlockError> {
+            panic!("no card modes after late response")
+        }
+        fn set_high_speed(&mut self) -> Result<(), BlockError> {
+            panic!("no card modes after late response")
+        }
+        fn set_clock(&mut self, _: u32) -> Result<u32, BlockError> {
+            panic!("no card modes after late response")
+        }
+        fn scratch(&self) -> &[u8] {
+            panic!("no card data after late response")
+        }
+        fn retire(&mut self, primary: BlockError) -> BlockError {
+            self.failure = Some(Failure {
+                primary: primary.clone(),
+                restoration: None,
+                retirement: self
+                    .failed_retirement
+                    .then_some(BlockError::Unsupported("model reset did not retire")),
+                quarantined: self.failed_retirement,
+            });
+            primary
+        }
+    }
+    #[test]
+    fn late_real_clock_ready_status_retires_instead_of_accepting_tran() {
+        for failed_retirement in [false, true] {
+            let mut host = SlowHost::new(false, 13);
+            host.failed_retirement = failed_retirement;
+            assert_eq!(
+                Session::new(&mut host, 1).wait_card_ready(),
+                Err(BlockError::Timeout)
+            );
+            assert_eq!(host.commands, [13]);
+            let failure = host.failure.unwrap();
+            assert_eq!(failure.primary, BlockError::Timeout);
+            assert_eq!(failure.quarantined, failed_retirement);
+            assert_eq!(failure.retirement.is_some(), failed_retirement);
+        }
+    }
+    #[test]
+    fn late_real_clock_ocr_ready_retires_before_cid_for_sd_and_mmc() {
+        for mmc in [false, true] {
+            let slow = if mmc { 1 } else { 41 };
+            let mut host = SlowHost::new(mmc, slow);
+            assert!(matches!(
+                Session::new(&mut host, 0).identify(),
+                Err(BlockError::Timeout)
+            ));
+            assert_eq!(host.commands.last().copied(), Some(slow));
+            assert!(!host.commands.contains(&2));
+            assert_eq!(host.failure.unwrap().primary, BlockError::Timeout);
+        }
+    }
+    #[test]
+    fn actual_ready_or_ocr_command_failure_survives_elapsed_poll_budget() {
+        for command in [13, 41] {
+            let mut host = SlowHost::new(false, command);
+            let primary = BlockError::Device { status: 1 << 21 };
+            host.actual_error = Some(primary.clone());
+            let result = if command == 13 {
+                Session::new(&mut host, 1).wait_card_ready()
+            } else {
+                Session::new(&mut host, 0).identify().map(|_| ())
+            };
+            assert_eq!(result, Err(primary));
+            assert!(
+                host.failure.is_none(),
+                "poll budget cannot replace the actual command failure"
+            );
+        }
+    }
 }

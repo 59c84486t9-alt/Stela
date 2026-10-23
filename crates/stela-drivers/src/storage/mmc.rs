@@ -11,6 +11,14 @@ pub enum Kind {
     Sd,
     Mmc,
 }
+/// Original card operation failure and separately observed cleanup outcomes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failure {
+    pub primary: BlockError,
+    pub restoration: Option<BlockError>,
+    pub retirement: Option<BlockError>,
+    pub quarantined: bool,
+}
 /// Actual card registers and the acknowledged physical operating mode.
 #[derive(Clone, Debug)]
 pub struct CardInfo {

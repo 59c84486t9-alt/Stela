@@ -5,7 +5,7 @@
 //! SD/SDHC/SDXC and eMMC user-area access share the actual command engine.
 use crate::{
     Clock, Handoff,
-    block::{BlockDevice, BlockError, Identity, Transport},
+    block::{BlockDevice, BlockError, Identity},
     bus::{
         dma::{DmaAllocator, DmaBuffer},
         pci::Function,
@@ -27,6 +27,8 @@ mod command;
 mod pci;
 mod protocol;
 use super::pci::{quiesce_pio, set_pio_command};
+#[cfg(test)]
+use crate::block::Transport;
 use pci::{Control, Controller, Profile};
 mod registers;
 use registers::*;
@@ -205,7 +207,7 @@ fn finish_attach(
     attached
 }
 
-pub use super::mmc::{CardInfo, Kind};
+pub use super::mmc::{CardInfo, Failure, Kind};
 struct Medium {
     id: u64,
     identity: Identity,
@@ -231,6 +233,7 @@ struct Engine {
     dma_mode: Option<bool>,
     medium: Option<Medium>,
     fault: Option<BlockError>,
+    last_failure: Option<Failure>,
 }
 
 /// Actual architectural registers captured after acknowledged host reset.
@@ -248,6 +251,10 @@ pub struct Host {
     inner: Rc<RefCell<Engine>>,
 }
 impl Host {
+    /// Retained primary/cleanup diagnostics require no physical access.
+    pub fn last_failure(&self) -> Option<Failure> {
+        self.inner.borrow().last_failure.clone()
+    }
     pub fn info(&self) -> HostInfo {
         let c = self.inner.borrow();
         HostInfo {
@@ -305,6 +312,7 @@ impl Host {
             dma_mode: None,
             medium: None,
             fault: None,
+            last_failure: None,
         };
         engine.configure_host()?;
         Ok(Self {

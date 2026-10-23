@@ -36,9 +36,7 @@ impl Engine {
         if let Err(error) = result {
             // Fence publication before retirement. A failed reset poisons the
             // controller permanently and preserves the complete DMA allocation.
-            self.medium = None;
-            self.reset(RESET_COMMAND | RESET_DATA)?;
-            return Err(error);
+            return Err(self.retire_error(error));
         }
         result
     }

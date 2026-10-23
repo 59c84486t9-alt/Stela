@@ -188,6 +188,9 @@ impl Engine {
             scratch: [0; 512],
             medium: None,
             fault: None,
+            last_failure: None,
+            request_deadline: None,
+            restoration_failure: None,
         };
         engine.healthy()?;
         engine.registers.write32(BIER, 0);
@@ -196,14 +199,20 @@ impl Engine {
                 "RTSX interrupt mask did not acknowledge",
             ));
         }
+        let budget = Budget::new(&engine, 100_000);
+        budget.check()?;
         engine.registers.write32(HCBCTLR, STOP_CMD);
+        budget.check()?;
         engine.registers.write32(HDBCTLR, STOP_DMA);
-        let deadline = clock.deadline(100_000);
-        while engine.registers.read32(HCBCTLR) & HAIMR_TRANS_START != 0
-            || engine.registers.read32(HDBCTLR) & HAIMR_TRANS_START != 0
-        {
-            if deadline.passed() {
-                return engine.failed(BlockError::Timeout);
+        budget.check()?;
+        loop {
+            budget.check()?;
+            let command = engine.registers.read32(HCBCTLR);
+            budget.check()?;
+            let data = engine.registers.read32(HDBCTLR);
+            budget.check()?;
+            if command & HAIMR_TRANS_START == 0 && data & HAIMR_TRANS_START == 0 {
+                break;
             }
         }
         engine.write_reg(DMACTL, 0x80, 0x80)?;
@@ -218,22 +227,55 @@ impl Engine {
         Err(error)
     }
     pub(super) fn read_reg(&mut self, at: u16) -> Result<u8, BlockError> {
+        self.read_reg_before(at, None)
+    }
+    pub(super) fn read_reg_before(
+        &mut self,
+        at: u16,
+        budget: Option<Budget>,
+    ) -> Result<u8, BlockError> {
         if let Some(error) = &self.fault {
             return Err(error.clone());
         }
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
         self.registers
             .write32(HAIMR, HAIMR_READ_START | u32::from(at & 0x3fff) << 16);
+        // Once HAIMR is published, expiration with no observed terminal state
+        // quarantines the owner. Another HAIMR must not replace that command.
         for _ in 0..1024 {
+            if budget.is_some_and(Budget::expired) {
+                return self.failed(BlockError::Timeout);
+            }
             let result = self.registers.read32(HAIMR);
             if result & HAIMR_TRANS_START == 0 {
+                if let Some(budget) = budget {
+                    budget.check()?;
+                }
                 return Ok(result as u8);
+            }
+            if budget.is_some_and(Budget::expired) {
+                return self.failed(BlockError::Timeout);
             }
         }
         self.failed(BlockError::Timeout)
     }
     pub(super) fn write_reg(&mut self, at: u16, mask: u8, value: u8) -> Result<(), BlockError> {
+        self.write_reg_before(at, mask, value, None)
+    }
+    pub(super) fn write_reg_before(
+        &mut self,
+        at: u16,
+        mask: u8,
+        value: u8,
+        budget: Option<Budget>,
+    ) -> Result<(), BlockError> {
         if let Some(error) = &self.fault {
             return Err(error.clone());
+        }
+        if let Some(budget) = budget {
+            budget.check()?;
         }
         self.registers.write32(
             HAIMR,
@@ -243,14 +285,23 @@ impl Engine {
                 | u32::from(value),
         );
         for _ in 0..1024 {
+            if budget.is_some_and(Budget::expired) {
+                return self.failed(BlockError::Timeout);
+            }
             let result = self.registers.read32(HAIMR);
             if result & HAIMR_TRANS_START == 0 {
+                if let Some(budget) = budget {
+                    budget.check()?;
+                }
                 if result as u8 != value {
                     return self.failed(BlockError::Unsupported(
                         "RTSX register write did not acknowledge",
                     ));
                 }
                 return Ok(());
+            }
+            if budget.is_some_and(Budget::expired) {
+                return self.failed(BlockError::Timeout);
             }
         }
         self.failed(BlockError::Timeout)

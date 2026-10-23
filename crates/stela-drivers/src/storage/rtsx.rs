@@ -4,7 +4,7 @@
 // Authors: Wei WANG, Roger Tseng. See ../THIRD_PARTY.md.
 //! Native RTS5227 PCIe SD/MMC reader with actual HAIMR and ping-pong PIO.
 //! Command-buffer/data DMA, Memory Stick, UHS/DDR and global PM remain separate.
-pub use super::mmc::{CardInfo, Kind};
+pub use super::mmc::{CardInfo, Failure, Kind};
 use crate::{
     Clock, Handoff,
     block::{BlockDevice, BlockError, Identity},
@@ -22,6 +22,7 @@ use core::{
 mod command;
 mod controller;
 mod registers;
+use command::Budget;
 use registers::*;
 
 const VENDOR: u16 = 0x10ec;
@@ -115,6 +116,10 @@ pub struct Host {
     inner: Rc<RefCell<Engine>>,
 }
 impl Host {
+    /// Retained diagnostics require no PCI/MMIO and preserve the primary error.
+    pub fn last_failure(&self) -> Option<Failure> {
+        self.inner.borrow().last_failure.clone()
+    }
     pub fn poll(&mut self) -> Result<Option<Card>, BlockError> {
         let mut engine = self.inner.borrow_mut();
         engine.healthy()?;
@@ -167,9 +172,16 @@ impl BlockDevice for Card {
         for (index, block) in bytes.chunks_mut(512).enumerate() {
             engine.live(self.generation)?;
             let address = engine.address(lba + index as u64)?;
-            engine.execute(READ_SINGLE, address, Response::Status, Some(512))?;
-            engine.ready()?;
-            block.copy_from_slice(&engine.scratch);
+            engine.begin_request();
+            let result = (|| {
+                engine.execute(READ_SINGLE, address, Response::Status, Some(512))?;
+                engine.ready()?;
+                // Output is accepted only after the last actual readiness access.
+                engine.check_request()?;
+                block.copy_from_slice(&engine.scratch);
+                Ok(())
+            })();
+            engine.end_request(result)?;
         }
         Ok(())
     }
@@ -183,20 +195,30 @@ impl BlockDevice for Card {
                 return Err(BlockError::ReadOnly);
             }
             let address = engine.address(lba + index as u64)?;
-            engine.write_block(address, block)?;
-            engine.ready()?;
+            engine.begin_request();
+            let result = (|| {
+                engine.write_block(address, block)?;
+                engine.ready()?;
+                engine.check_request()
+            })();
+            engine.end_request(result)?;
         }
         Ok(())
     }
     fn flush(&mut self) -> Result<(), BlockError> {
         let mut engine = self.inner.borrow_mut();
         engine.live(self.generation)?;
-        let card = &engine.medium.as_ref().expect("live").card;
-        if card.kind == Kind::Mmc && card.cache {
-            let rca = engine.rca;
-            Session::new(&mut *engine, rca).mmc_switch(32, 1)?;
-        }
-        engine.ready()
+        engine.begin_request();
+        let result = (|| {
+            let card = &engine.medium.as_ref().expect("live").card;
+            if card.kind == Kind::Mmc && card.cache {
+                let rca = engine.rca;
+                Session::new(&mut *engine, rca).mmc_switch(32, 1)?;
+            }
+            engine.ready()?;
+            engine.check_request()
+        })();
+        engine.end_request(result)
     }
     fn shutdown(&mut self, power_off: bool) -> Result<(), BlockError> {
         self.flush()?;
@@ -228,6 +250,9 @@ struct Engine {
     scratch: [u8; 512],
     medium: Option<Medium>,
     fault: Option<BlockError>,
+    last_failure: Option<Failure>,
+    request_deadline: Option<crate::Deadline>,
+    restoration_failure: Option<BlockError>,
 }
 impl Engine {
     fn healthy(&mut self) -> Result<(), BlockError> {
@@ -349,6 +374,16 @@ mod tests {
         Command(u8, u32, u8),
         DataWrite(u32),
         Stop,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum DelayPoint {
+        HaimrPublication,
+        StartAck,
+        Completion,
+        Status,
+        LastPpbuf,
+        StopComplete,
+        ConstructorStop,
     }
     struct CardModel {
         mmc: bool,
@@ -574,6 +609,14 @@ mod tests {
         timeline: bool,
         partial_at: Option<u64>,
         toggled_at: Option<u64>,
+        delay_on: Option<DelayPoint>,
+        delay_us: u64,
+        delayed: Vec<DelayPoint>,
+        stop_observed: bool,
+        wrong_restore: bool,
+        dma_stops: Vec<usize>,
+        last_mode: u8,
+        last_opcode: u8,
     }
     impl Chip {
         fn new(mmc: bool, present: bool) -> Rc<RefCell<Self>> {
@@ -627,7 +670,25 @@ mod tests {
                 timeline: false,
                 partial_at: None,
                 toggled_at: None,
+                delay_on: None,
+                delay_us: 0,
+                delayed: Vec::new(),
+                stop_observed: false,
+                wrong_restore: false,
+                dma_stops: Vec::new(),
+                last_mode: 0,
+                last_opcode: 0,
             }))
+        }
+        fn delay_at(&mut self, point: DelayPoint) {
+            if self.delay_on == Some(point) {
+                self.delay_on = None;
+                Clock {
+                    ticks_per_microsecond: 100,
+                }
+                .delay(self.delay_us);
+                self.delayed.push(point);
+            }
         }
         fn ticks() -> u64 {
             // SAFETY: model timestamps use the same native invariant TSC as Clock.
@@ -783,6 +844,17 @@ mod tests {
             let at = usize::from(at & 0x3fff);
             if at == 0x3db3 {
                 self.complete();
+                if self.stop_observed {
+                    self.delay_at(DelayPoint::StopComplete);
+                } else if !(self.last_mode == 8 && self.last_opcode == 24) {
+                    self.delay_at(DelayPoint::Completion);
+                }
+            }
+            if at == 0x3da4 {
+                self.delay_at(DelayPoint::Status);
+            }
+            if at == 0x3bff {
+                self.delay_at(DelayPoint::LastPpbuf);
             }
             if (0x3a00..0x3c00).contains(&at) {
                 assert_eq!(
@@ -826,6 +898,7 @@ mod tests {
             }
             if at == 0x3d54 && value & 0x44 == 0x44 {
                 self.effects.push(Effect::Stop);
+                self.stop_observed = true;
                 if !self.stuck_stop {
                     self.transfer = None;
                     self.regs[0x3db3] = 0;
@@ -854,6 +927,9 @@ mod tests {
                     );
                     assert!((1..=512).contains(&bytes));
                 }
+                self.stop_observed = false;
+                self.last_mode = value & 15;
+                self.last_opcode = self.regs[0x3da9] & 63;
                 self.transfer = Some(Transfer {
                     mode: value & 15,
                     opcode: self.regs[0x3da9] & 63,
@@ -944,12 +1020,20 @@ mod tests {
                         if write && !c.haimr_effected {
                             c.haimr_effected = true;
                             c.internal_write(address, (command >> 8) as u8, value);
+                            if address == 0x3db3 && value & 0x80 != 0 {
+                                c.delay_at(DelayPoint::StartAck);
+                            }
                         }
                         if c.stuck_haimr == Some(address | 0xc000) {
                             return command;
                         }
                         c.haimr_result = if write {
-                            if c.wrong_echo == Some(address | 0xc000) {
+                            if c.wrong_echo == Some(address | 0xc000)
+                                || (c.wrong_restore
+                                    && address == 0x3da0
+                                    && value & 0xc0 == 0x80
+                                    && command >> 8 & 0xc0 == 0xc0)
+                            {
                                 u32::from(value ^ 1)
                             } else {
                                 u32::from(value)
@@ -970,11 +1054,17 @@ mod tests {
             assert_eq!(c.config[4] & 6, 2);
             match at {
                 0x18 => assert_eq!(value, 0, "polled owner disables all interrupt generation"),
-                4 | 12 => assert_eq!(
-                    value,
-                    1 << 28,
-                    "HCB/HDB must only stop, never start unowned DMA"
-                ),
+                4 | 12 => {
+                    assert_eq!(
+                        value,
+                        1 << 28,
+                        "HCB/HDB must only stop, never start unowned DMA"
+                    );
+                    c.dma_stops.push(at);
+                    if at == 4 {
+                        c.delay_at(DelayPoint::ConstructorStop);
+                    }
+                }
                 0x14 => {
                     assert_eq!(
                         value & 0x000f_0000,
@@ -989,6 +1079,12 @@ mod tests {
                     c.haimr = Some(value);
                     c.haimr_busy = true;
                     c.haimr_effected = false;
+                    if (value >> 16 & 0x3fff) == 0x3db3
+                        && value & (1 << 30) != 0
+                        && value & 0x80 != 0
+                    {
+                        c.delay_at(DelayPoint::HaimrPublication);
+                    }
                 }
                 _ => panic!("unexpected MMIO write or fabricated DMA address {at:x}"),
             }
@@ -1011,7 +1107,7 @@ mod tests {
         let admission = controller::admission(&mut function)?;
         super::super::pci::quiesce_pio(&mut function)?;
         let clock = Clock {
-            ticks_per_microsecond: if timeline { 1000 } else { 0 },
+            ticks_per_microsecond: 1000,
         };
         function.power_up(&clock)?;
         let config = controller::Configuration::capture(&mut function, admission)?;
@@ -1027,6 +1123,14 @@ mod tests {
         Ok(Host {
             inner: Rc::new(RefCell::new(engine)),
         })
+    }
+    fn inject(host: &Host, chip: &Rc<RefCell<Chip>>, fault: Fault) {
+        // Keep positive setup generous; fault waits use a smaller, still-real
+        // TSC clock so the actual deadlines expire without multi-second stalls.
+        host.inner.borrow_mut().clock = Clock {
+            ticks_per_microsecond: 100,
+        };
+        chip.borrow_mut().next_fault = fault;
     }
     fn stale(card: &mut Card, chip: &Rc<RefCell<Chip>>) {
         let before = chip.borrow().accesses;
@@ -1167,7 +1271,11 @@ mod tests {
             let chip = Chip::new(false, true);
             let mut host = make_host(&chip, false).unwrap();
             let mut card = host.poll().unwrap().unwrap();
-            chip.borrow_mut().next_fault = fault;
+            inject(&host, &chip, fault);
+            if fault == Fault::MissingEnd {
+                chip.borrow_mut().delay_on = Some(DelayPoint::Completion);
+                chip.borrow_mut().delay_us = 5_000_001;
+            }
             let mut bytes = [0xa5; 512];
             assert!(card.read(11, &mut bytes).is_err(), "{fault:?}");
             assert_eq!(bytes, [0xa5; 512], "{fault:?}");
@@ -1183,7 +1291,9 @@ mod tests {
         let chip = Chip::new(false, true);
         let mut host = make_host(&chip, false).unwrap();
         let mut card = host.poll().unwrap().unwrap();
-        chip.borrow_mut().next_fault = Fault::MissingIdle;
+        inject(&host, &chip, Fault::MissingIdle);
+        chip.borrow_mut().delay_on = Some(DelayPoint::Completion);
+        chip.borrow_mut().delay_us = 1_000_001;
         assert_eq!(card.flush(), Err(BlockError::Timeout));
         stale(&mut card, &chip);
         // CMD24 accepted the write and the physical data changed, but no END
@@ -1191,7 +1301,11 @@ mod tests {
         let chip = Chip::new(false, true);
         let mut host = make_host(&chip, false).unwrap();
         let mut card = host.poll().unwrap().unwrap();
-        chip.borrow_mut().next_fault = Fault::AfterWrite;
+        inject(&host, &chip, Fault::AfterWrite);
+        // Defer this delay until the data mode: CMD24's separate R1 phase must
+        // complete first, and the physical PPBUF write must actually take effect.
+        chip.borrow_mut().delay_on = Some(DelayPoint::Completion);
+        chip.borrow_mut().delay_us = 5_000_001;
         assert_eq!(card.write(29, &[0xce; 512]), Err(BlockError::Timeout));
         assert_eq!(chip.borrow().card.block(29), [0xce; 512]);
         stale(&mut card, &chip);
@@ -1212,20 +1326,43 @@ mod tests {
         assert_eq!(bytes, [0xa5; 512]);
         stale(&mut card, &chip);
         let mut card = host.poll().unwrap().unwrap();
-        chip.borrow_mut().next_fault = Fault::Busy;
+        inject(&host, &chip, Fault::Busy);
         assert!(card.shutdown(true).is_err());
         stale(&mut card, &chip);
         let chip = Chip::new(false, true);
         let mut host = make_host(&chip, false).unwrap();
         let mut card = host.poll().unwrap().unwrap();
+        host.inner.borrow_mut().clock = Clock {
+            ticks_per_microsecond: 100,
+        };
         chip.borrow_mut().card.nonready = true;
         assert_eq!(card.flush(), Err(BlockError::Timeout));
         stale(&mut card, &chip);
         chip.borrow_mut().card.nonready = false;
         let mut card = host.poll().unwrap().unwrap();
-        chip.borrow_mut().next_fault = Fault::MissingEnd;
+        inject(&host, &chip, Fault::MissingEnd);
+        chip.borrow_mut().delay_on = Some(DelayPoint::Completion);
+        chip.borrow_mut().delay_us = 5_000_001;
         chip.borrow_mut().stuck_stop = true;
+        let stops = chip
+            .borrow()
+            .effects
+            .iter()
+            .filter(|e| matches!(e, Effect::Stop))
+            .count();
         assert_eq!(card.read(0, &mut bytes), Err(BlockError::Timeout));
+        assert!(
+            chip.borrow()
+                .effects
+                .iter()
+                .filter(|e| matches!(e, Effect::Stop))
+                .count()
+                > stops
+        );
+        assert_eq!(
+            host.last_failure().unwrap().retirement,
+            Some(BlockError::Timeout)
+        );
         stale(&mut card, &chip);
         let before = chip.borrow().accesses;
         assert!(host.poll().is_err());
@@ -1470,5 +1607,132 @@ mod tests {
                 .any(|e| matches!(e, Effect::Command(_, _, 12) | Effect::DataWrite(_)))
         );
         assert!(host.inner.borrow().medium.is_none());
+    }
+    #[test]
+    fn native_real_clock_late_publication_ack_completion_status_and_ppbuf_refuse_output() {
+        for point in [
+            DelayPoint::HaimrPublication,
+            DelayPoint::StartAck,
+            DelayPoint::Completion,
+            DelayPoint::Status,
+            DelayPoint::LastPpbuf,
+        ] {
+            let chip = Chip::new(false, true);
+            let mut host = make_host(&chip, false).unwrap();
+            let mut card = host.poll().unwrap().unwrap();
+            host.inner.borrow_mut().clock = Clock {
+                ticks_per_microsecond: 100,
+            };
+            chip.borrow_mut().delay_on = Some(point);
+            chip.borrow_mut().delay_us = 5_000_001;
+            let start = chip.borrow().effects.len();
+            let mut poison = [0xd6; 512];
+            assert_eq!(
+                card.read(19, &mut poison),
+                Err(BlockError::Timeout),
+                "{point:?}"
+            );
+            assert_eq!(poison, [0xd6; 512]);
+            let c = chip.borrow();
+            assert_eq!(c.delayed, [point]);
+            assert!(
+                !c.effects[start..]
+                    .iter()
+                    .any(|e| matches!(e, Effect::Command(13, _, _))),
+                "no new readiness transaction after expired data request"
+            );
+            drop(c);
+            let failure = host.last_failure().unwrap();
+            assert_eq!(failure.primary, BlockError::Timeout);
+            assert_eq!(failure.quarantined, point == DelayPoint::HaimrPublication);
+            stale(&mut card, &chip);
+            if failure.quarantined {
+                let before = chip.borrow().accesses;
+                assert!(host.poll().is_err());
+                assert_eq!(chip.borrow().accesses, before);
+            } else {
+                host.inner.borrow_mut().clock = Clock {
+                    ticks_per_microsecond: 1000,
+                };
+                assert!(host.poll().unwrap().is_some());
+            }
+        }
+    }
+    #[test]
+    fn native_primary_crc_survives_late_or_failed_retirement_and_failed_initial_restore() {
+        for late in [false, true] {
+            let chip = Chip::new(false, true);
+            let mut host = make_host(&chip, false).unwrap();
+            let mut card = host.poll().unwrap().unwrap();
+            inject(&host, &chip, Fault::Crc16);
+            if late {
+                chip.borrow_mut().delay_on = Some(DelayPoint::StopComplete);
+                chip.borrow_mut().delay_us = 1_000_001;
+            } else {
+                chip.borrow_mut().wrong_echo = Some(0xfd54);
+            }
+            let mut poison = [0xd6; 512];
+            let primary = card.read(7, &mut poison).unwrap_err();
+            assert!(matches!(primary, BlockError::Device { status } if status & 0x4000 != 0));
+            let failure = host.last_failure().unwrap();
+            assert_eq!(failure.primary, primary);
+            assert!(failure.quarantined);
+            if late {
+                assert_eq!(failure.retirement, Some(BlockError::Timeout));
+            } else {
+                assert!(matches!(
+                    failure.retirement,
+                    Some(BlockError::Unsupported(_))
+                ));
+            }
+            assert_eq!(poison, [0xd6; 512]);
+            stale(&mut card, &chip);
+            let before = chip.borrow().accesses;
+            assert_eq!(host.poll().err(), Some(primary));
+            assert_eq!(chip.borrow().accesses, before);
+        }
+        let chip = Chip::new(false, true);
+        let mut host = make_host(&chip, false).unwrap();
+        let mut card = host.poll().unwrap().unwrap();
+        host.inner.borrow_mut().set_clock(400_000).unwrap();
+        chip.borrow_mut().card.app = true;
+        chip.borrow_mut().wrong_restore = true;
+        inject(&host, &chip, Fault::Crc16);
+        let result = host
+            .inner
+            .borrow_mut()
+            .execute(SD_SEND_SCR, 0, Response::Status, Some(8));
+        let primary = result.unwrap_err();
+        assert!(matches!(primary, BlockError::Device { status } if status & 0x4000 != 0));
+        let failure = host.last_failure().unwrap();
+        assert_eq!(failure.primary, primary);
+        assert!(matches!(
+            failure.restoration,
+            Some(BlockError::Unsupported(_))
+        ));
+        assert!(
+            failure.retirement.is_none(),
+            "uncertain restore HAIMR refuses another cleanup publication"
+        );
+        assert!(failure.quarantined);
+        stale(&mut card, &chip);
+    }
+    #[test]
+    fn native_constructor_stop_budget_starts_before_first_mmio_publication() {
+        let chip = Chip::new(false, true);
+        chip.borrow_mut().delay_on = Some(DelayPoint::ConstructorStop);
+        // Constructor uses100ms at clock1000; advance the real TSC by more
+        // than that same interval using the model clock100 delay primitive.
+        chip.borrow_mut().delay_us = 1_000_001;
+        assert!(matches!(make_host(&chip, false), Err(BlockError::Timeout)));
+        let c = chip.borrow();
+        assert_eq!(c.delayed, [DelayPoint::ConstructorStop]);
+        assert_eq!(
+            c.dma_stops,
+            [4],
+            "late first stop cannot authorize HDB or later publication"
+        );
+        assert_eq!(c.config[4] & 4, 0);
+        assert!(!c.effects.iter().any(|e| matches!(e, Effect::Command(..))));
     }
 }

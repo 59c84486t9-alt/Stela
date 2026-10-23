@@ -10,10 +10,93 @@ const DATA_US: u64 = 5_000_000;
 const SD_COMMAND_START: u8 = 0x40;
 const SD_CRC_TIMEOUT: u8 = 0x02;
 
+#[derive(Clone, Copy)]
+pub(super) struct Budget {
+    phase: crate::Deadline,
+    request: Option<crate::Deadline>,
+}
+impl Budget {
+    pub(super) fn new(engine: &Engine, microseconds: u64) -> Self {
+        Self {
+            phase: engine.clock.deadline(microseconds),
+            request: engine.request_deadline,
+        }
+    }
+    fn retirement(engine: &Engine) -> Self {
+        Self {
+            phase: engine.clock.deadline(COMMAND_US),
+            request: None,
+        }
+    }
+    pub(super) fn expired(self) -> bool {
+        self.phase.passed() || self.request.is_some_and(|deadline| deadline.passed())
+    }
+    pub(super) fn check(self) -> Result<(), BlockError> {
+        if self.expired() {
+            Err(BlockError::Timeout)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl Engine {
-    pub(super) fn check_card(&mut self) -> Result<(), BlockError> {
+    pub(super) fn begin_request(&mut self) {
+        debug_assert!(self.request_deadline.is_none());
+        self.request_deadline = Some(self.clock.deadline(DATA_US));
+    }
+    pub(super) fn check_request(&self) -> Result<(), BlockError> {
+        if self
+            .request_deadline
+            .is_some_and(|deadline| deadline.passed())
+        {
+            Err(BlockError::Timeout)
+        } else {
+            Ok(())
+        }
+    }
+    pub(super) fn end_request(&mut self, result: Result<(), BlockError>) -> Result<(), BlockError> {
+        self.request_deadline = None;
+        result.map_err(|error| {
+            if self.medium.is_some() {
+                self.retire_error(error)
+            } else {
+                error
+            }
+        })
+    }
+    fn retire_error(&mut self, primary: BlockError) -> BlockError {
+        self.medium = None;
+        let retirement = if self.fault.is_none() {
+            self.stop_card().err()
+        } else {
+            None
+        };
+        let quarantined = self.fault.is_some() || retirement.is_some();
+        if quarantined {
+            self.fault = Some(primary.clone());
+        }
+        self.last_failure = Some(Failure {
+            primary: primary.clone(),
+            restoration: self.restoration_failure.take(),
+            retirement,
+            quarantined,
+        });
+        primary
+    }
+    fn rd(&mut self, budget: Budget, at: u16) -> Result<u8, BlockError> {
+        self.read_reg_before(at, Some(budget))
+    }
+    fn wr(&mut self, budget: Budget, at: u16, mask: u8, value: u8) -> Result<(), BlockError> {
+        self.write_reg_before(at, mask, value, Some(budget))
+    }
+    fn check_card_before(&mut self, budget: Budget) -> Result<(), BlockError> {
+        budget.check()?;
         self.healthy()?;
+        // A slow PCI identity read cannot authorize another MMIO access.
+        budget.check()?;
         let status = self.status()?;
+        budget.check()?;
         if status & MS_EXIST != 0 {
             self.medium = None;
             self.power_off()?;
@@ -27,17 +110,37 @@ impl Engine {
                 "RTSX card changed during operation",
             ));
         }
-        Ok(())
+        budget.check()
     }
+    fn ack_completion(&mut self, budget: Budget) -> Result<(), BlockError> {
+        budget.check()?;
+        self.registers.write32(BIPR, COMPLETION_INTERRUPTS);
+        budget.check()
+    }
+
     pub(super) fn stop_card(&mut self) -> Result<(), BlockError> {
-        self.write_reg(CARD_STOP, SD_STOP | SD_CLR_ERR, SD_STOP | SD_CLR_ERR)?;
-        let deadline = self.clock.deadline(COMMAND_US);
-        while self.read_reg(SD_TRANSFER)? & SD_TRANSFER_START != 0 {
-            if deadline.passed() {
-                return self.failed(BlockError::Timeout);
+        let budget = Budget::retirement(self);
+        let result = (|| {
+            self.wr(
+                budget,
+                CARD_STOP,
+                SD_STOP | SD_CLR_ERR,
+                SD_STOP | SD_CLR_ERR,
+            )?;
+            loop {
+                let transfer = self.rd(budget, SD_TRANSFER)?;
+                budget.check()?;
+                if transfer & SD_TRANSFER_START == 0 {
+                    return Ok(());
+                }
+                core::hint::spin_loop();
             }
+        })();
+        if let Err(error) = result {
+            self.failed(error)
+        } else {
+            Ok(())
         }
-        Ok(())
     }
     pub(super) fn execute(
         &mut self,
@@ -46,16 +149,17 @@ impl Engine {
         response: Response,
         read_bytes: Option<usize>,
     ) -> Result<[u32; 4], BlockError> {
-        self.healthy()?;
-        let result = self.execute_inner(opcode, argument, response, read_bytes);
-        if let Err(error) = result {
-            self.medium = None;
-            if self.fault.is_none() {
-                self.stop_card()?;
-            }
-            return Err(error);
-        }
-        result
+        let budget = Budget::new(
+            self,
+            if read_bytes.is_some() || response == Response::Busy {
+                DATA_US
+            } else {
+                COMMAND_US
+            },
+        );
+        self.restoration_failure = None;
+        let result = self.execute_inner(opcode, argument, response, read_bytes, budget);
+        result.map_err(|error| self.retire_error(error))
     }
     fn execute_inner(
         &mut self,
@@ -63,8 +167,9 @@ impl Engine {
         argument: u32,
         response: Response,
         read_bytes: Option<usize>,
+        budget: Budget,
     ) -> Result<[u32; 4], BlockError> {
-        self.check_card()?;
+        self.check_card_before(budget)?;
         if let Some(bytes) = read_bytes {
             if bytes == 0 || bytes > 512 {
                 return Err(BlockError::Protocol(
@@ -74,17 +179,28 @@ impl Engine {
             if response != Response::Status {
                 return Err(BlockError::Protocol("RTSX unsupported data response"));
             }
-            let initial = self.read_reg(SD_CFG1)? & SD_CLK_DIVIDE_MASK == SD_CLK_DIVIDE_128;
+            let initial = self.rd(budget, SD_CFG1)? & SD_CLK_DIVIDE_MASK == SD_CLK_DIVIDE_128;
             if initial {
-                self.write_reg(SD_CFG1, SD_CLK_DIVIDE_MASK, SD_CLK_DIVIDE_0)?;
+                self.wr(budget, SD_CFG1, SD_CLK_DIVIDE_MASK, SD_CLK_DIVIDE_0)?;
             }
-            let result = self.read_data(opcode, argument, bytes);
-            if initial {
-                self.write_reg(SD_CFG1, SD_CLK_DIVIDE_MASK, SD_CLK_DIVIDE_128)?;
+            let result = self.read_data(opcode, argument, bytes, budget);
+            // Never replace the first card/data failure with a later restore
+            // error, or publish another HAIMR after ownership became uncertain.
+            let restoration = if initial && self.fault.is_none() {
+                self.wr(budget, SD_CFG1, SD_CLK_DIVIDE_MASK, SD_CLK_DIVIDE_128)
+                    .err()
+            } else {
+                None
+            };
+            match result {
+                Err(primary) => {
+                    self.restoration_failure = restoration;
+                    Err(primary)
+                }
+                Ok(words) => restoration.map_or(Ok(words), Err),
             }
-            result
         } else {
-            self.send_command(opcode, argument, response)
+            self.send_command(opcode, argument, response, budget)
         }
     }
     fn read_data(
@@ -92,44 +208,56 @@ impl Engine {
         opcode: Opcode,
         argument: u32,
         bytes: usize,
+        budget: Budget,
     ) -> Result<[u32; 4], BlockError> {
-        self.set_command(opcode, argument)?;
-        self.data_length(bytes)?;
-        self.write_reg(SD_CFG2, 0xff, SD_RSP_LEN_6)?;
-        self.write_reg(CARD_DATA_SOURCE, 1, PINGPONG_BUFFER)?;
-        self.write_reg(SD_TRANSFER, 0xff, SD_TM_NORMAL_READ | SD_TRANSFER_START)?;
-        self.wait_transfer(SD_TRANSFER_END, DATA_US, true)?;
+        self.set_command(opcode, argument, budget)?;
+        self.data_length(bytes, budget)?;
+        self.wr(budget, SD_CFG2, 0xff, SD_RSP_LEN_6)?;
+        self.wr(budget, CARD_DATA_SOURCE, 1, PINGPONG_BUFFER)?;
+        self.wr(
+            budget,
+            SD_TRANSFER,
+            0xff,
+            SD_TM_NORMAL_READ | SD_TRANSFER_START,
+        )?;
+        self.wait_transfer(SD_TRANSFER_END, true, budget)?;
         // sd_read_data consumes END and PPBUF, not an inferred R1 in SD_CMDx.
         // Hardware CRC/status and the later actual CMD13 readiness own errors.
         for index in 0..bytes {
-            self.scratch[index] = self.read_reg(PPBUF_BASE2 + index as u16)?;
+            self.scratch[index] = self.rd(budget, PPBUF_BASE2 + index as u16)?;
         }
-        self.check_card()?;
+        self.check_card_before(budget)?;
         Ok([0; 4])
     }
-    fn set_command(&mut self, opcode: Opcode, argument: u32) -> Result<(), BlockError> {
+    fn set_command(
+        &mut self,
+        opcode: Opcode,
+        argument: u32,
+        budget: Budget,
+    ) -> Result<(), BlockError> {
         // Completion IRQs are sticky. Retire only the prior command/data bits;
         // card-change/overcurrent/de-link evidence must survive this operation.
-        self.registers.write32(BIPR, COMPLETION_INTERRUPTS);
-        self.write_reg(SD_CMD0, 0xff, SD_COMMAND_START | opcode.number())?;
+        self.ack_completion(budget)?;
+        self.wr(budget, SD_CMD0, 0xff, SD_COMMAND_START | opcode.number())?;
         for (index, value) in argument.to_be_bytes().into_iter().enumerate() {
-            self.write_reg(SD_CMD1 + index as u16, 0xff, value)?;
+            self.wr(budget, SD_CMD1 + index as u16, 0xff, value)?;
         }
         Ok(())
     }
-    fn data_length(&mut self, bytes: usize) -> Result<(), BlockError> {
-        self.write_reg(SD_BLOCK_CNT_L, 0xff, 1)?;
-        self.write_reg(SD_BLOCK_CNT_H, 0xff, 0)?;
-        self.write_reg(SD_BYTE_CNT_L, 0xff, bytes as u8)?;
-        self.write_reg(SD_BYTE_CNT_H, 0xff, (bytes >> 8) as u8)
+    fn data_length(&mut self, bytes: usize, budget: Budget) -> Result<(), BlockError> {
+        self.wr(budget, SD_BLOCK_CNT_L, 0xff, 1)?;
+        self.wr(budget, SD_BLOCK_CNT_H, 0xff, 0)?;
+        self.wr(budget, SD_BYTE_CNT_L, 0xff, bytes as u8)?;
+        self.wr(budget, SD_BYTE_CNT_H, 0xff, (bytes >> 8) as u8)
     }
     fn send_command(
         &mut self,
         opcode: Opcode,
         argument: u32,
         response: Response,
+        budget: Budget,
     ) -> Result<[u32; 4], BlockError> {
-        self.set_command(opcode, argument)?;
+        self.set_command(opcode, argument, budget)?;
         let config = match response {
             Response::None => SD_RSP_TYPE_R0,
             Response::Long => SD_RSP_TYPE_R2,
@@ -137,28 +265,24 @@ impl Engine {
             Response::Busy => SD_RSP_TYPE_R1b,
             _ => SD_RSP_TYPE_R1,
         };
-        self.write_reg(SD_CFG2, 0xff, config)?;
-        self.write_reg(CARD_DATA_SOURCE, 1, PINGPONG_BUFFER)?;
-        self.write_reg(SD_TRANSFER, 0xff, SD_TM_CMD_RSP | SD_TRANSFER_START)?;
+        self.wr(budget, SD_CFG2, 0xff, config)?;
+        self.wr(budget, CARD_DATA_SOURCE, 1, PINGPONG_BUFFER)?;
+        self.wr(budget, SD_TRANSFER, 0xff, SD_TM_CMD_RSP | SD_TRANSFER_START)?;
         self.wait_transfer(
             SD_TRANSFER_END | SD_STAT_IDLE,
-            if response == Response::Busy {
-                DATA_US
-            } else {
-                COMMAND_US
-            },
             config & SD_NO_CHECK_CRC7 == 0,
+            budget,
         )?;
-        let result = self.response(response)?;
-        if response == Response::Busy && self.read_reg(SD_BUS_STAT)? & SD_DAT0_STATUS == 0 {
+        let result = self.response(response, budget)?;
+        if response == Response::Busy && self.rd(budget, SD_BUS_STAT)? & SD_DAT0_STATUS == 0 {
             return Err(BlockError::Unsupported(
                 "RTSX busy response did not release DAT0",
             ));
         }
-        self.check_card()?;
+        self.check_card_before(budget)?;
         Ok(result)
     }
-    fn response(&mut self, response: Response) -> Result<[u32; 4], BlockError> {
+    fn response(&mut self, response: Response, budget: Budget) -> Result<[u32; 4], BlockError> {
         let mut result = [0; 4];
         if response == Response::None {
             return Ok(result);
@@ -166,11 +290,14 @@ impl Engine {
         let mut bytes = [0u8; 17];
         let length = if response == Response::Long { 16 } else { 5 };
         for (index, byte) in bytes.iter_mut().enumerate().take(length) {
-            *byte = self.read_reg(if response == Response::Long {
-                PPBUF_BASE2 + index as u16
-            } else {
-                SD_CMD0 + index as u16
-            })?;
+            *byte = self.rd(
+                budget,
+                if response == Response::Long {
+                    PPBUF_BASE2 + index as u16
+                } else {
+                    SD_CMD0 + index as u16
+                },
+            )?;
         }
         if bytes[0] & 0xc0 != 0 {
             return Err(BlockError::Protocol(
@@ -200,66 +327,76 @@ impl Engine {
     fn wait_transfer(
         &mut self,
         wanted: u8,
-        timeout: u64,
         check_crc7: bool,
+        budget: Budget,
     ) -> Result<(), BlockError> {
-        let deadline = self.clock.deadline(timeout);
         loop {
-            self.check_card()?;
-            let transfer = self.read_reg(SD_TRANSFER)?;
-            let status1 = self.read_reg(SD_STAT1)?;
-            let status2 = self.read_reg(SD_STAT2)?;
+            self.check_card_before(budget)?;
+            let transfer = self.rd(budget, SD_TRANSFER)?;
+            if transfer & SD_TRANSFER_ERR != 0 {
+                return Err(BlockError::Device {
+                    status: u32::from(transfer),
+                });
+            }
+            let status1 = self.rd(budget, SD_STAT1)?;
             let crc = SD_CRC16_ERR | SD_CRC_WRITE_ERR | if check_crc7 { SD_CRC7_ERR } else { 0 };
-            if status2 & SD_RSP_80CLK_TIMEOUT != 0 || status1 & SD_CRC_TIMEOUT != 0 {
+            // Once an actual error is observed, later status/cleanup accesses
+            // cannot replace it, including an elapsed deadline in those reads.
+            if status1 & SD_CRC_TIMEOUT != 0 {
                 return Err(BlockError::Timeout);
             }
-            if transfer & SD_TRANSFER_ERR != 0
-                || status1 & crc != 0
-                || self.registers.read32(BIPR) & TRANS_FAIL_INT != 0
-            {
+            if status1 & crc != 0 {
                 return Err(BlockError::Device {
-                    status: u32::from(transfer)
-                        | u32::from(status1) << 8
-                        | u32::from(status2) << 16,
+                    status: u32::from(transfer) | u32::from(status1) << 8,
                 });
+            }
+            let status2 = self.rd(budget, SD_STAT2)?;
+            if status2 & SD_RSP_80CLK_TIMEOUT != 0 {
+                return Err(BlockError::Timeout);
+            }
+            budget.check()?;
+            let interrupts = self.registers.read32(BIPR);
+            budget.check()?;
+            if interrupts & TRANS_FAIL_INT != 0 {
+                return Err(BlockError::Device { status: interrupts });
             }
             if transfer & wanted == wanted {
                 return Ok(());
-            }
-            if deadline.passed() {
-                return Err(BlockError::Timeout);
             }
             core::hint::spin_loop();
         }
     }
     pub(super) fn write_block(&mut self, argument: u32, bytes: &[u8]) -> Result<(), BlockError> {
-        self.healthy()?;
+        let budget = Budget::new(self, DATA_US);
         let result = (|| {
-            self.check_card()?;
+            self.check_card_before(budget)?;
             if bytes.len() != 512 {
                 return Err(BlockError::Protocol("RTSX single-block PIO length"));
             }
             // Source sd_write_data first completes the real R1 command, then
             // transfers a filled PPBUF with AUTO_WRITE3 and no second command.
-            self.send_command(WRITE_SINGLE, argument, Response::Status)?;
+            self.send_command(
+                WRITE_SINGLE,
+                argument,
+                Response::Status,
+                Budget::new(self, COMMAND_US),
+            )?;
             for (index, value) in bytes.iter().enumerate() {
-                self.write_reg(PPBUF_BASE2 + index as u16, 0xff, *value)?;
+                self.wr(budget, PPBUF_BASE2 + index as u16, 0xff, *value)?;
             }
-            self.registers.write32(BIPR, COMPLETION_INTERRUPTS);
-            self.data_length(bytes.len())?;
-            self.write_reg(SD_CFG2, 0xff, SD_RSP_LEN_0)?;
-            self.write_reg(SD_TRANSFER, 0xff, SD_TM_AUTO_WRITE_3 | SD_TRANSFER_START)?;
-            self.wait_transfer(SD_TRANSFER_END, DATA_US, true)?;
-            self.check_card()
+            self.ack_completion(budget)?;
+            self.data_length(bytes.len(), budget)?;
+            self.wr(budget, SD_CFG2, 0xff, SD_RSP_LEN_0)?;
+            self.wr(
+                budget,
+                SD_TRANSFER,
+                0xff,
+                SD_TM_AUTO_WRITE_3 | SD_TRANSFER_START,
+            )?;
+            self.wait_transfer(SD_TRANSFER_END, true, budget)?;
+            self.check_card_before(budget)
         })();
-        if let Err(error) = result {
-            self.medium = None;
-            if self.fault.is_none() {
-                self.stop_card()?;
-            }
-            return Err(error);
-        }
-        result
+        result.map_err(|error| self.retire_error(error))
     }
 }
 
@@ -325,8 +462,7 @@ impl CardHost for Engine {
     fn scratch(&self) -> &[u8] {
         &self.scratch
     }
-    fn retire(&mut self) -> Result<(), BlockError> {
-        self.medium = None;
-        self.stop_card()
+    fn retire(&mut self, primary: BlockError) -> BlockError {
+        self.retire_error(primary)
     }
 }
