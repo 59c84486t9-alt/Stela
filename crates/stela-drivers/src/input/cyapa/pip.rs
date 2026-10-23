@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Cypress Gen5 PIP I2C FIFO, serialized command replies and physical reports.
+//! Cypress Gen5/6 PIP I2C FIFO, serialized command replies and physical reports.
 use super::{Interrupt, InterruptError, Recovery};
 use crate::bus::i2c::{self, Address, Bus, Operation, Timer};
 use alloc::collections::VecDeque;
@@ -83,14 +83,24 @@ impl core::fmt::Display for Error {
         write!(f, "Cypress PIP {:?} ({:?})", self.kind, self.recovery)
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Generation {
+    Gen5,
+    Gen6,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Capabilities {
+    pub generation: Generation,
     pub descriptor: [u8; 32],
     pub system_info: [u8; 71],
     pub product_id: [u8; 15],
     pub platform_version: u8,
     pub firmware_version: (u8, u8),
     pub electrodes: (u8, u8),
+    /// Gen6 queried receive electrodes and the corresponding four-aligned count.
+    pub receive_electrodes: Option<(u8, u16)>,
+    /// Gen6 actual ACTIVE/LP1/LP2 intervals, read back without changing policy.
+    pub power_intervals: Option<(u16, u16, u16)>,
     pub physical_size_mm: (u16, u16),
     pub maximum: (u16, u16),
     pub maximum_z: u16,
@@ -102,6 +112,8 @@ pub struct Device<B, I, T> {
     interrupt: I,
     timer: T,
     address: Address,
+    generation: Generation,
+    wake_notice: Option<i2c::Error>,
     state: State,
     capabilities: Option<Capabilities>,
     pending: VecDeque<Packet>,
@@ -113,7 +125,22 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     /// drain currently queued data but cannot exclude a delayed identical-opcode reply.
     /// An uncertain prior owner must be retired through platform reset before this grant.
     pub fn new(bus: B, interrupt: I, timer: T, address: Address) -> Result<Self, Error> {
-        if !matches!(address, Address::SevenBit(value @ 0x08..=0x77) if value & 1 == 0) {
+        Self::with_generation(bus, interrupt, timer, address, Generation::Gen5)
+    }
+    /// Same exclusive startup grant as `new`; actual Gen6 identity must qualify
+    /// before any Gen6 power/proximity/command-IRQ mutation is permitted.
+    pub fn new_gen6(bus: B, interrupt: I, timer: T, address: Address) -> Result<Self, Error> {
+        Self::with_generation(bus, interrupt, timer, address, Generation::Gen6)
+    }
+    fn with_generation(
+        bus: B,
+        interrupt: I,
+        timer: T,
+        address: Address,
+        generation: Generation,
+    ) -> Result<Self, Error> {
+        if !matches!(address, Address::SevenBit(value @ 0x08..=0x77) if generation == Generation::Gen6 || value & 1 == 0)
+        {
             return Err(ErrorKind::InvalidAddress.into());
         }
         Ok(Self {
@@ -121,11 +148,18 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             interrupt,
             timer,
             address,
+            generation,
+            wake_notice: None,
             state: State::Fresh,
             capabilities: None,
             pending: VecDeque::new(),
             failed_packet: None,
         })
+    }
+    /// Most recent expected, controller-recovered Gen6 preparation-ping NACK.
+    /// This is retained as an observed protocol outcome, not silently discarded.
+    pub fn take_wake_notice(&mut self) -> Option<i2c::Error> {
+        self.wake_notice.take()
     }
     pub fn state(&self) -> State {
         self.state
@@ -150,11 +184,19 @@ mod tests {
     use alloc::{collections::VecDeque, rc::Rc, vec, vec::Vec};
     use core::cell::{Cell, RefCell};
     struct Hardware {
+        address: u8,
         queue: VecDeque<Vec<u8>>,
         deferred: Vec<(u64, Vec<u8>)>,
         clock: Rc<Cell<u64>>,
         bootloader: bool,
         boot_info_length: usize,
+        generation: Generation,
+        command_irq: bool,
+        needs_ping: bool,
+        ping_error: Option<i2c::Error>,
+        fatal_error: Option<i2c::Error>,
+        intervals: (u16, u16, u16),
+        interval_length: usize,
         deep: bool,
         power: u8,
         info: Vec<u8>,
@@ -196,11 +238,19 @@ mod tests {
         info[65] = 0;
         info[70] = 7;
         Rc::new(RefCell::new(Hardware {
+            address: 0x24,
             queue: VecDeque::new(),
             deferred: Vec::new(),
             clock: Rc::new(Cell::new(0)),
             bootloader,
             boot_info_length: 19,
+            generation: Generation::Gen5,
+            command_irq: true,
+            needs_ping: false,
+            ping_error: None,
+            fatal_error: None,
+            intervals: (8, 30, 50),
+            interval_length: 11,
             deep: true,
             power: 0,
             info,
@@ -272,10 +322,11 @@ mod tests {
             address: Address,
             operations: &mut [Operation<'_>],
         ) -> Result<(), i2c::Error> {
-            assert_eq!(address, Address::SevenBit(0x24));
             let mut h = self.0.borrow_mut();
+            assert_eq!(address, Address::SevenBit(h.address));
             assert!(h.masked);
             h.update();
+            let mut protocol_result = Ok(());
             match operations {
                 [Operation::Write(bytes)] => {
                     h.effects.push((bytes.to_vec(), 0));
@@ -299,6 +350,12 @@ mod tests {
                         }
                         [5, 0, state, 8] => {
                             assert!(state <= 1);
+                            if h.generation == Generation::Gen6 {
+                                if state == 0 {
+                                    assert!(!h.needs_ping);
+                                }
+                                h.needs_ping = state != 0;
+                            }
                             h.deep = state != 0;
                             h.schedule(0xf0, vec![5, 0, 0xf0, state, 0x88]);
                         }
@@ -308,13 +365,47 @@ mod tests {
                             h.power = state;
                             h.schedule(8, vec![6, 0, 0x1f, 0, 0x88, 0]);
                         }
+                        [4, 0, 5, 0, 0x2f, 0, 0] => {
+                            assert_eq!(h.generation, Generation::Gen6);
+                            h.needs_ping = false;
+                            protocol_result = h.ping_error.map_or(Ok(()), Err);
+                        }
+                        [4, 0, 5, 0, 0x2f, 0, code @ (0x41 | 0x42)] => {
+                            assert_eq!(h.generation, Generation::Gen6);
+                            assert!(!h.deep);
+                            h.command_irq = code == 0x41;
+                            h.schedule(code, vec![6, 0, 0x1f, 0, code | 0x80, 0]);
+                        }
+                        [4, 0, 6, 0, 0x2f, 0, 0x46, state] => {
+                            assert_eq!(h.generation, Generation::Gen6);
+                            assert!(!h.command_irq && !h.deep);
+                            assert!(matches!(state, 1 | 4));
+                            h.power = state;
+                            h.schedule(0x46, vec![6, 0, 0x1f, 0, 0xc6, state]);
+                        }
+                        [4, 0, 5, 0, 0x2f, 0, 0x48] => {
+                            assert_eq!(h.generation, Generation::Gen6);
+                            assert!(!h.command_irq && h.power == 1);
+                            let mut response = vec![11, 0, 0x1f, 0, 0xc8];
+                            for value in [h.intervals.0, h.intervals.1, h.intervals.2] {
+                                response.extend_from_slice(&value.to_le_bytes());
+                            }
+                            response.resize(h.interval_length, 0x96);
+                            let length = response.len() as u16;
+                            response[..2].copy_from_slice(&length.to_le_bytes());
+                            h.schedule(0x48, response);
+                        }
                         [4, 0, 5, 0, 0x2f, 0, 2] => {
                             assert!(!h.bootloader && !h.deep);
                             let info = h.info.clone();
                             h.schedule(2, info);
                         }
                         [4, 0, 6, 0, 0x2f, 0, 0x49, 1] => {
-                            assert!(h.info[49] >> 4 >= 2);
+                            if h.generation == Generation::Gen6 {
+                                assert!(!h.command_irq);
+                            } else {
+                                assert!(h.info[49] >> 4 >= 2);
+                            }
                             h.schedule(0x49, vec![6, 0, 0x1f, 0, 0xc9, 0]);
                         }
                         [4, 0, 0x0b, 0, 0x40, 0, 1, 0x38, 0, 0, 0x70, 0x9e, 0x17] => {
@@ -371,9 +462,9 @@ mod tests {
                 h.jump = None;
             }
             if h.fail == Some(h.effects.len()) {
-                return Err(failure());
+                return Err(h.fatal_error.unwrap_or_else(failure));
             }
-            Ok(())
+            protocol_result
         }
     }
     impl Interrupt for Irq {
@@ -1020,5 +1111,397 @@ mod tests {
         );
         assert_eq!(h.borrow().power, 5);
         assert_eq!(d.capabilities().unwrap().system_info[19], 0x91);
+    }
+
+    mod gen6_tests {
+        use super::*;
+        fn hardware6(boot: bool, platform: u8) -> Rc<RefCell<Hardware>> {
+            let h = hardware(boot, platform);
+            {
+                let mut hw = h.borrow_mut();
+                hw.generation = Generation::Gen6;
+                hw.ping_error = Some(failure());
+                hw.info.fill(0x96);
+                hw.info[..6].copy_from_slice(&[71, 0, 0x1f, 0, 0x82, 0]);
+                hw.info[7..9].copy_from_slice(&0x1000u16.to_le_bytes());
+                hw.info[9..11].copy_from_slice(&[6, 7]);
+                hw.info[19] = 0x9b;
+                hw.info[22] = 0x0b;
+                hw.info[33..35].copy_from_slice(&[17, 14]);
+                for (offset, value) in [
+                    (35, 12000u16),
+                    (37, 6500),
+                    (39, 8191),
+                    (41, 4095),
+                    (43, 1023),
+                ] {
+                    hw.info[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+                }
+                hw.info[45] = 0;
+                hw.info[46] = 0;
+                hw.info[51..64].copy_from_slice(b"CYTRA65432190");
+                hw.info[67] = platform << 4;
+                hw.info[68] = 0;
+                hw.info[70] = 5;
+            }
+            h
+        }
+        fn device6(h: &Rc<RefCell<Hardware>>) -> Device<Wire, Irq, Time> {
+            Device::new_gen6(
+                Wire(h.clone()),
+                Irq(h.clone()),
+                Time(h.borrow().clock.clone()),
+                Address::SevenBit(h.borrow().address),
+            )
+            .unwrap()
+        }
+        fn fatal() -> i2c::Error {
+            i2c::Error {
+                kind: i2c::ErrorKind::Aborted {
+                    kind: i2c::AbortKind::ArbitrationLost,
+                    source: 0x1000,
+                },
+                recovery: i2c::Recovery::Disabled,
+            }
+        }
+        #[test]
+        fn gen6_actual_query_layout_admission_boot_launch_irq_power_intervals_and_proximity() {
+            for boot in [false, true] {
+                for platform in [0, 1, 2, 15] {
+                    for rotated in [0, 1] {
+                        let h = hardware6(boot, platform);
+                        h.borrow_mut().info[68] = rotated;
+                        h.borrow_mut().address = 0x24 + rotated;
+                        h.borrow_mut().descriptor_bad = true; // Common Gen6 admission has no Gen5 max-output heuristic.
+                        h.borrow_mut().no_reply_irq = true;
+                        let mut d = device6(&h);
+                        d.initialize().unwrap();
+                        let c = d.capabilities().unwrap();
+                        assert_eq!(c.generation, Generation::Gen6);
+                        assert_eq!(&c.product_id, b"CYTRA-654321-90");
+                        assert_eq!(c.platform_version, platform);
+                        assert_eq!(c.firmware_version, (6, 7));
+                        assert_eq!(
+                            (c.electrodes, c.physical_size_mm, c.maximum, c.maximum_z),
+                            ((17, 14), (120, 65), (8191, 4095), 1023)
+                        );
+                        assert_eq!(
+                            c.receive_electrodes,
+                            Some(if rotated == 0 { (17, 20) } else { (14, 16) })
+                        );
+                        assert_eq!(c.power_intervals, Some((8, 30, 50)));
+                        assert_eq!(c.button_capabilities, 0x28);
+                        assert_eq!(c.system_info.as_slice(), h.borrow().info);
+                        assert_eq!(d.take_wake_notice(), Some(failure()));
+                        assert_eq!(d.state(), State::Ready);
+                        assert!(
+                            !h.borrow().deep && h.borrow().power == 1 && h.borrow().command_irq
+                        );
+                        assert!(
+                            h.borrow()
+                                .effects
+                                .iter()
+                                .all(|(b, _)| b.len() < 7 || b[6] != 8)
+                        );
+                    }
+                }
+            }
+        }
+        #[test]
+        fn gen6_identity_and_geometry_refuse_other_generations_before_specific_mutation() {
+            for boot in [false, true] {
+                for (family, high) in [(0x91, 2), (0x9b, 2), (0, 0)] {
+                    let h = hardware6(boot, 2);
+                    h.borrow_mut().info[19] = family;
+                    h.borrow_mut().info[22] = high;
+                    let mut d = device6(&h);
+                    assert_eq!(
+                        d.initialize().unwrap_err().kind,
+                        ErrorKind::UnsupportedGeneration {
+                            family,
+                            silicon_high: high
+                        }
+                    );
+                    assert_eq!(d.state(), State::Uncertain);
+                    assert!(d.capabilities().is_none());
+                    assert_eq!(h.borrow().power, 0);
+                    assert!(h.borrow().command_irq);
+                    assert!(h.borrow().effects.iter().all(|(b, _)| b.len() < 7
+                        || !matches!(b[6], 0x41 | 0x42 | 0x46 | 0x49) && b.get(7) != Some(&0x3b)));
+                }
+            }
+            for offset in [33, 34, 35, 37, 39, 41, 43] {
+                let h = hardware6(false, 2);
+                h.borrow_mut().info[offset] = 0;
+                if offset >= 35 {
+                    h.borrow_mut().info[offset + 1] = 0;
+                }
+                let mut d = device6(&h);
+                assert_eq!(d.initialize().unwrap_err().kind, ErrorKind::InvalidGeometry);
+                assert_eq!(h.borrow().power, 0);
+            }
+        }
+        #[test]
+        fn gen6_expected_ping_nacks_are_observed_and_other_bus_failures_quarantine() {
+            for kind in [i2c::AbortKind::AddressNack, i2c::AbortKind::DataNack] {
+                let error = i2c::Error {
+                    kind: i2c::ErrorKind::Aborted { kind, source: 0x55 },
+                    recovery: i2c::Recovery::Disabled,
+                };
+                let h = hardware6(false, 2);
+                h.borrow_mut().ping_error = Some(error);
+                let mut d = device6(&h);
+                d.initialize().unwrap();
+                assert_eq!(d.take_wake_notice(), Some(error));
+                assert!(d.take_wake_notice().is_none());
+            }
+            let h = hardware6(false, 2);
+            h.borrow_mut().ping_error = None;
+            let mut d = device6(&h);
+            d.initialize().unwrap();
+            assert!(d.take_wake_notice().is_none());
+            for error in [
+                fatal(),
+                i2c::Error {
+                    kind: i2c::ErrorKind::Timeout(i2c::Phase::Transfer),
+                    recovery: i2c::Recovery::Disabled,
+                },
+                i2c::Error {
+                    kind: failure().kind,
+                    recovery: i2c::Recovery::Failed,
+                },
+                i2c::Error {
+                    kind: failure().kind,
+                    recovery: i2c::Recovery::NotAttempted,
+                },
+            ] {
+                let h = hardware6(false, 2);
+                h.borrow_mut().ping_error = Some(error);
+                let mut d = device6(&h);
+                assert_eq!(d.initialize().unwrap_err().kind, ErrorKind::Bus(error));
+                assert_eq!(d.state(), State::Uncertain);
+                assert_eq!(h.borrow().power, 0);
+                assert!(d.take_wake_notice().is_none());
+            }
+        }
+        #[test]
+        fn gen6_all_initialization_and_wake_late_errors_keep_actual_effects_without_replay() {
+            for boot in [false, true] {
+                let h = hardware6(boot, 2);
+                device6(&h).initialize().unwrap();
+                let count = h.borrow().effects.len();
+                for index in 1..=count {
+                    let h = hardware6(boot, 2);
+                    h.borrow_mut().fatal_error = Some(fatal());
+                    h.borrow_mut().fail = Some(index);
+                    let mut d = device6(&h);
+                    assert_eq!(d.initialize().unwrap_err().kind, ErrorKind::Bus(fatal()));
+                    assert_eq!(d.state(), State::Uncertain);
+                    assert!(d.capabilities().is_none());
+                    assert_eq!(h.borrow().effects.len(), index);
+                    assert_eq!(d.initialize().unwrap_err().kind, ErrorKind::NeedsReset);
+                    assert_eq!(h.borrow().effects.len(), index);
+                }
+            }
+            for action in 0..3 {
+                let sample = hardware6(false, 2);
+                let mut baseline = device6(&sample);
+                baseline.initialize().unwrap();
+                let before = sample.borrow().effects.len();
+                match action {
+                    0 => baseline.buttons_only().unwrap(),
+                    1 => baseline.deep_sleep().unwrap(),
+                    _ => baseline.stop().unwrap(),
+                }
+                let count = sample.borrow().effects.len() - before;
+                for index in 1..=count {
+                    let h = hardware6(false, 2);
+                    let mut d = device6(&h);
+                    d.initialize().unwrap();
+                    let next = h.borrow().effects.len() + index;
+                    h.borrow_mut().fatal_error = Some(fatal());
+                    h.borrow_mut().fail = Some(next);
+                    let error = match action {
+                        0 => d.buttons_only().unwrap_err(),
+                        1 => d.deep_sleep().unwrap_err(),
+                        _ => d.stop().unwrap_err(),
+                    };
+                    assert_eq!(error.kind, ErrorKind::Bus(fatal()));
+                    assert_eq!(d.state(), State::Uncertain);
+                    assert_eq!(d.capabilities().unwrap().generation, Generation::Gen6);
+                    assert_eq!(h.borrow().effects.len(), next);
+                    assert_eq!(d.wake().unwrap_err().kind, ErrorKind::NeedsReset);
+                    assert_eq!(h.borrow().effects.len(), next);
+                }
+            }
+            let sample = hardware6(false, 2);
+            let mut baseline = device6(&sample);
+            baseline.initialize().unwrap();
+            baseline.deep_sleep().unwrap();
+            let before = sample.borrow().effects.len();
+            baseline.wake().unwrap();
+            let count = sample.borrow().effects.len() - before;
+            for index in 1..=count {
+                let h = hardware6(false, 2);
+                let mut d = device6(&h);
+                d.initialize().unwrap();
+                d.deep_sleep().unwrap();
+                let next = h.borrow().effects.len() + index;
+                h.borrow_mut().fatal_error = Some(fatal());
+                h.borrow_mut().fail = Some(next);
+                assert_eq!(d.wake().unwrap_err().kind, ErrorKind::Bus(fatal()));
+                assert_eq!(d.state(), State::Uncertain);
+                assert_eq!(d.capabilities().unwrap().firmware_version, (6, 7));
+                assert_eq!(h.borrow().effects.len(), next);
+            }
+        }
+        #[test]
+        fn gen6_real_buttons_deep_wake_and_stop_preserve_current_identity_and_intervals() {
+            for buttons in [false, true] {
+                let h = hardware6(false, 2);
+                let mut d = device6(&h);
+                d.initialize().unwrap();
+                d.take_wake_notice();
+                if buttons {
+                    d.buttons_only().unwrap();
+                    assert_eq!(h.borrow().power, 4);
+                    assert!(h.borrow().command_irq);
+                } else {
+                    d.deep_sleep().unwrap();
+                    assert!(h.borrow().deep);
+                    assert!(!h.borrow().command_irq);
+                }
+                assert_eq!(d.poll().unwrap_err().kind, ErrorKind::NotReady);
+                d.wake().unwrap();
+                assert!(!h.borrow().deep && h.borrow().power == 1 && h.borrow().command_irq);
+                assert_eq!(
+                    d.take_wake_notice(),
+                    if buttons { None } else { Some(failure()) }
+                );
+                d.deep_sleep().unwrap();
+                h.borrow_mut().info[68] = 1;
+                assert_eq!(d.wake().unwrap_err().kind, ErrorKind::IdentityChanged);
+                assert_eq!(d.capabilities().unwrap().receive_electrodes, Some((17, 20)));
+            }
+            let h = hardware6(false, 2);
+            let mut d = device6(&h);
+            d.initialize().unwrap();
+            d.stop().unwrap();
+            assert_eq!(d.state(), State::Stopped);
+            assert!(h.borrow().deep && !h.borrow().command_irq);
+        }
+        #[test]
+        fn gen6_power_echo_irq_status_interval_extent_and_timeout_are_required() {
+            for code in [0x41, 0x42, 0x46, 0x49] {
+                let h = hardware6(false, 2);
+                h.borrow_mut().bad_status = Some((code, if code == 0x46 { 0 } else { 7 }));
+                let mut d = device6(&h);
+                assert_eq!(
+                    d.initialize().unwrap_err().kind,
+                    ErrorKind::CommandStatus {
+                        command: code,
+                        status: if code == 0x46 { 0 } else { 7 }
+                    }
+                );
+                assert_eq!(d.state(), State::Uncertain);
+                assert!(d.capabilities().is_none());
+            }
+            for length in [5, 6, 7, 8, 9, 10, 12] {
+                let h = hardware6(false, 2);
+                h.borrow_mut().interval_length = length;
+                let mut d = device6(&h);
+                assert_eq!(
+                    d.initialize().unwrap_err().kind,
+                    ErrorKind::ReportLength {
+                        id: 0x1f,
+                        actual: length as u16
+                    }
+                );
+                assert_eq!(d.take_failed_packet().unwrap().as_bytes().len(), length);
+                assert_eq!(h.borrow().power, 1);
+                assert!(!h.borrow().command_irq);
+            }
+            let h = hardware6(false, 2);
+            h.borrow_mut().omit = Some(0x46);
+            let mut d = device6(&h);
+            assert_eq!(d.initialize().unwrap_err().kind, ErrorKind::Timeout);
+            assert_eq!(h.borrow().power, 1);
+            assert!(!h.borrow().command_irq);
+            let sample = hardware6(false, 2);
+            device6(&sample).initialize().unwrap();
+            let power_write = sample
+                .borrow()
+                .effects
+                .iter()
+                .position(|(b, _)| b.get(6) == Some(&0x46))
+                .unwrap()
+                + 1;
+            for offset in [1, 2] {
+                let h = hardware6(false, 2);
+                let next = power_write + offset;
+                h.borrow_mut().jump = Some((next, 500_000));
+                let mut d = device6(&h);
+                assert_eq!(d.initialize().unwrap_err().kind, ErrorKind::Timeout);
+                assert_eq!(d.state(), State::Uncertain);
+                assert!(d.capabilities().is_none());
+                assert_eq!(h.borrow().power, 1);
+                assert!(!h.borrow().command_irq);
+                assert_eq!(h.borrow().effects.len(), next);
+                assert_eq!(
+                    d.take_failed_packet().unwrap().as_bytes().len(),
+                    if offset == 1 { 2 } else { 6 }
+                );
+            }
+            let h = hardware6(false, 2);
+            h.borrow_mut().intervals = (0, 256, 65535);
+            let mut d = device6(&h);
+            d.initialize().unwrap();
+            assert_eq!(
+                d.capabilities().unwrap().power_intervals,
+                Some((0, 256, 65535))
+            );
+        }
+        #[test]
+        fn gen6_pending_and_consumed_reports_keep_shared_physical_record_ownership() {
+            for origins in [(false, false), (true, false), (false, true), (true, true)] {
+                let h = hardware6(false, 2);
+                h.borrow_mut().info[45] = u8::from(origins.0);
+                h.borrow_mut().info[46] = u8::from(origins.1);
+                let mut d = device6(&h);
+                d.initialize().unwrap();
+                for id in 0..32 {
+                    let packet = touch(1, id, 1, 255);
+                    h.borrow_mut().queue.push_back(packet.clone());
+                    let Some(Frame::Touches { raw, touches }) = d.poll().unwrap() else {
+                        panic!()
+                    };
+                    assert_eq!(raw.as_bytes(), packet);
+                    let contact = touches.active[usize::from(id)].unwrap();
+                    assert_eq!(
+                        (contact.x, contact.y),
+                        (
+                            if origins.0 { 8191 - 7 } else { 7 },
+                            if origins.1 { 4095 - 9 } else { 9 }
+                        )
+                    );
+                }
+            }
+            let h = hardware6(false, 2);
+            let first = touch(1, 31, 1, 0);
+            let buttons = vec![6, 0, 3, 0, 0, 7];
+            h.borrow_mut().inject = Some((0x46, vec![first.clone(), buttons.clone()]));
+            let mut d = device6(&h);
+            d.initialize().unwrap();
+            assert_eq!(d.take_pending_packet().unwrap().as_bytes(), first);
+            assert_eq!(d.take_pending_packet().unwrap().as_bytes(), buttons);
+            let packet = touch(1, 0, 1, 0);
+            h.borrow_mut().queue.push_back(packet);
+            h.borrow_mut().fatal_error = Some(fatal());
+            let index = h.borrow().effects.len() + 2;
+            h.borrow_mut().fail = Some(index);
+            assert_eq!(d.poll().unwrap_err().kind, ErrorKind::Bus(fatal()));
+            assert!(h.borrow().queue.is_empty());
+            assert_eq!(d.take_failed_packet().unwrap().as_bytes().len(), 2);
+        }
     }
 }

@@ -209,7 +209,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         let bytes = packet.as_bytes();
         let maximum = u16::from_le_bytes([bytes[16], bytes[17]]);
         let bootloader = bytes[2] == 0xff;
-        if maximum != if bootloader { 0x100 } else { 0xfe } {
+        if self.generation == Generation::Gen5 && maximum != if bootloader { 0x100 } else { 0xfe } {
             self.failed_packet = Some(packet);
             return Err(ErrorKind::Descriptor);
         }
@@ -242,6 +242,28 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         Ok(())
     }
     fn deep(&mut self, sleeping: bool) -> Result<(), ErrorKind> {
+        if self.generation == Generation::Gen6 && !sleeping {
+            // The actual Gen6 preparation ping may NACK. Accept only an actual
+            // NACK with completed controller recovery; retain it for the owner.
+            if let Err(kind) = self.raw_write(&[4, 0, 5, 0, 0x2f, 0, 0]) {
+                match kind {
+                    ErrorKind::Bus(
+                        error @ i2c::Error {
+                            kind:
+                                i2c::ErrorKind::Aborted {
+                                    kind: i2c::AbortKind::AddressNack | i2c::AbortKind::DataNack,
+                                    ..
+                                },
+                            recovery: i2c::Recovery::Disabled,
+                        },
+                    ) => self.wake_notice = Some(error),
+                    error => return Err(error),
+                }
+            }
+        }
+        self.common_deep(sleeping)
+    }
+    fn common_deep(&mut self, sleeping: bool) -> Result<(), ErrorKind> {
         let state = u8::from(sleeping);
         self.request(&[5, 0, state, 8], Reply::Deep(state), 500_000)?;
         Ok(())
@@ -250,7 +272,11 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         self.app_status(&[4, 0, 6, 0, 0x2f, 0, POWER_COMMAND, state], POWER_COMMAND)
     }
     fn qualify(&mut self, family: u8, silicon_high: u8, packet: Packet) -> Result<(), ErrorKind> {
-        if (family, silicon_high) != (0x91, 0x02) {
+        let expected = match self.generation {
+            Generation::Gen5 => (0x91, 0x02),
+            Generation::Gen6 => (0x9b, 0x0b),
+        };
+        if (family, silicon_high) != expected {
             self.failed_packet = Some(packet);
             return Err(ErrorKind::UnsupportedGeneration {
                 family,
@@ -291,16 +317,29 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             self.failed_packet = Some(packet);
             return Err(ErrorKind::ProductFamily(family));
         }
-        let platform_version = (bytes[49] >> 4) & 15;
-        let firmware_version = if platform_version < 2 {
+        let gen6 = self.generation == Generation::Gen6;
+        let platform_version = (bytes[if gen6 { 67 } else { 49 }] >> 4) & 15;
+        let firmware_version = if !gen6 && platform_version < 2 {
             (bytes[15], bytes[16])
         } else {
             (bytes[9], bytes[10])
         };
-        let electrodes = (bytes[52], bytes[53]);
-        let physical_size_mm = (word(54) / 100, word(56) / 100);
-        let maximum = (word(58), word(60));
-        let maximum_z = word(62);
+        let offset = if gen6 { 33 } else { 52 };
+        let electrodes = (bytes[offset], bytes[offset + 1]);
+        let physical_size_mm = (word(offset + 2) / 100, word(offset + 4) / 100);
+        let maximum = (word(offset + 6), word(offset + 8));
+        let maximum_z = word(offset + 10);
+        let origin_offset = if gen6 { 45 } else { 64 };
+        let receive_electrodes = if gen6 {
+            let count = if bytes[68] != 0 {
+                electrodes.1
+            } else {
+                electrodes.0
+            };
+            Some((count, (u16::from(count) + 3) & !3))
+        } else {
+            None
+        };
         if electrodes.0 == 0
             || electrodes.1 == 0
             || physical_size_mm.0 == 0
@@ -313,11 +352,12 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             return Err(ErrorKind::InvalidGeometry);
         }
         let mut product_id = [0; 15];
-        product_id[..5].copy_from_slice(&bytes[33..38]);
+        let product_offset = if gen6 { 51 } else { 33 };
+        product_id[..5].copy_from_slice(&bytes[product_offset..product_offset + 5]);
         product_id[5] = b'-';
-        product_id[6..12].copy_from_slice(&bytes[38..44]);
+        product_id[6..12].copy_from_slice(&bytes[product_offset + 5..product_offset + 11]);
         product_id[12] = b'-';
-        product_id[13..].copy_from_slice(&bytes[44..46]);
+        product_id[13..].copy_from_slice(&bytes[product_offset + 11..product_offset + 13]);
         if &product_id[..5] != b"CYTRA" {
             self.failed_packet = Some(packet);
             return Err(ErrorKind::UnsupportedProduct);
@@ -325,21 +365,89 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         let mut system_info = [0; 71];
         system_info.copy_from_slice(bytes);
         let c = Capabilities {
+            generation: self.generation,
             descriptor,
             system_info,
             product_id,
             platform_version,
             firmware_version,
             electrodes,
+            receive_electrodes,
+            power_intervals: None,
             physical_size_mm,
             maximum,
             maximum_z,
-            origins: (bytes[64] & 1 != 0, bytes[65] & 1 != 0),
+            origins: (
+                bytes[origin_offset] & 1 != 0,
+                bytes[origin_offset + 1] & 1 != 0,
+            ),
             button_capabilities: (bytes[70] << 3) & 0x38,
         };
         Ok(c)
     }
-    fn configure(&mut self, c: &Capabilities) -> Result<(), ErrorKind> {
+    fn gen6_irq(&mut self, enabled: bool) -> Result<(), ErrorKind> {
+        let code = if enabled { 0x41 } else { 0x42 };
+        self.app_status(&[4, 0, 5, 0, 0x2f, 0, code], code)
+    }
+    fn gen6_power(&mut self, state: u8) -> Result<(), ErrorKind> {
+        let packet = self.request(
+            &[4, 0, 6, 0, 0x2f, 0, 0x46, state],
+            Reply::App {
+                command: 0x46,
+                minimum: 6,
+            },
+            500_000,
+        )?;
+        let bytes = packet.as_bytes();
+        if bytes.len() != 6 {
+            let actual = bytes.len() as u16;
+            self.failed_packet = Some(packet);
+            return Err(ErrorKind::ReportLength { id: 0x1f, actual });
+        }
+        if bytes[5] != state {
+            let status = bytes[5];
+            self.failed_packet = Some(packet);
+            return Err(ErrorKind::CommandStatus {
+                command: 0x46,
+                status,
+            });
+        }
+        Ok(())
+    }
+    fn gen6_intervals(&mut self) -> Result<(u16, u16, u16), ErrorKind> {
+        let packet = self.request(
+            &[4, 0, 5, 0, 0x2f, 0, 0x48],
+            Reply::App {
+                command: 0x48,
+                minimum: 11,
+            },
+            500_000,
+        )?;
+        let bytes = packet.as_bytes();
+        if bytes.len() != 11 {
+            let actual = bytes.len() as u16;
+            self.failed_packet = Some(packet);
+            return Err(ErrorKind::ReportLength { id: 0x1f, actual });
+        }
+        Ok((
+            u16::from_le_bytes([bytes[5], bytes[6]]),
+            u16::from_le_bytes([bytes[7], bytes[8]]),
+            u16::from_le_bytes([bytes[9], bytes[10]]),
+        ))
+    }
+    fn configure(&mut self, c: &mut Capabilities) -> Result<(), ErrorKind> {
+        if self.generation == Generation::Gen6 {
+            self.gen6_irq(false)?;
+            self.gen6_power(1)?;
+            c.power_intervals = Some(self.gen6_intervals()?);
+            self.gen6_irq(true)?;
+            self.gen6_irq(false)?;
+            self.app_status(
+                &[4, 0, 6, 0, 0x2f, 0, PROXIMITY_COMMAND, 1],
+                PROXIMITY_COMMAND,
+            )?;
+            return self.gen6_irq(true);
+        }
         self.change_power(ACTIVE_POWER)?;
         if c.platform_version >= 2 {
             self.app_status(
@@ -361,6 +469,9 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             self.interrupt
                 .mask_and_drain()
                 .map_err(ErrorKind::Interrupt)?;
+            if self.generation == Generation::Gen6 {
+                self.common_deep(false)?;
+            }
             let (mut descriptor, bootloader) = self.descriptor()?;
             if bootloader {
                 self.qualify_bootloader()?;
@@ -375,9 +486,14 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
                 }
                 descriptor = app;
             }
-            self.deep(false)?;
-            let c = self.query(descriptor)?;
-            self.configure(&c)?;
+            if self.generation == Generation::Gen5 {
+                self.deep(false)?;
+            }
+            let mut c = self.query(descriptor)?;
+            if self.generation == Generation::Gen6 {
+                self.deep(false)?;
+            }
+            self.configure(&mut c)?;
             Ok(c)
         })();
         let c = self.quarantine(result)?;
@@ -422,7 +538,12 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             .interrupt
             .mask_and_drain()
             .map_err(ErrorKind::Interrupt)
-            .and_then(|()| self.deep(true));
+            .and_then(|()| {
+                if self.generation == Generation::Gen6 {
+                    self.gen6_irq(false)?;
+                }
+                self.deep(true)
+            });
         self.quarantine(result)?;
         self.state = State::DeepSleep;
         Ok(())
@@ -433,7 +554,15 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             .interrupt
             .mask_and_drain()
             .map_err(ErrorKind::Interrupt)
-            .and_then(|()| self.change_power(BUTTON_POWER));
+            .and_then(|()| {
+                if self.generation == Generation::Gen6 {
+                    self.gen6_irq(false)?;
+                    self.gen6_power(4)?;
+                    self.gen6_irq(true)
+                } else {
+                    self.change_power(BUTTON_POWER)
+                }
+            });
         self.quarantine(result)?;
         self.state = State::ButtonsOnly;
         Ok(())
@@ -445,22 +574,26 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         if !matches!(self.state, State::DeepSleep | State::ButtonsOnly) {
             return Err(ErrorKind::NotReady.into());
         }
+        let was_deep = self.state == State::DeepSleep;
         self.state = State::Starting;
         let result = (|| {
             self.interrupt
                 .mask_and_drain()
                 .map_err(ErrorKind::Interrupt)?;
-            self.deep(false)?;
+            if self.generation == Generation::Gen5 || was_deep {
+                self.deep(false)?;
+            }
             let (descriptor, bootloader) = self.descriptor()?;
             if bootloader {
                 return Err(ErrorKind::FirmwareLaunch);
             }
-            let c = self.query(descriptor)?;
+            let mut c = self.query(descriptor)?;
             let old = self.capabilities.as_ref().ok_or(ErrorKind::NotReady)?;
             if c.product_id != old.product_id
                 || c.platform_version != old.platform_version
                 || c.firmware_version != old.firmware_version
                 || c.electrodes != old.electrodes
+                || c.receive_electrodes != old.receive_electrodes
                 || c.physical_size_mm != old.physical_size_mm
                 || c.maximum != old.maximum
                 || c.maximum_z != old.maximum_z
@@ -469,7 +602,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             {
                 return Err(ErrorKind::IdentityChanged);
             }
-            self.configure(&c)?;
+            self.configure(&mut c)?;
             Ok(c)
         })();
         let c = self.quarantine(result)?;

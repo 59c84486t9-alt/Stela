@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Native Cypress APA Gen3 and Gen5 PIP I2C touchpad engines.
+//! Native Cypress APA Gen3 and Gen5/6 PIP I2C touchpad engines.
 //! The platform provides powered exclusive I2C ownership and a physical IRQ pin.
 //! CPU IRQ delivery stays masked while the pin is polled. Firmware flashing,
-//! SMBus, Gen6, platform rails and guest routing remain separate requirements.
+//! SMBus, platform rails and guest routing remain separate requirements.
 pub use super::hid_i2c::{Interrupt, InterruptError};
 use crate::bus::i2c::{self, Address, Bus, Operation, Timer};
 mod device;
