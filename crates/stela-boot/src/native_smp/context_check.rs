@@ -76,7 +76,8 @@ fn compile(words: &[u32]) -> Result<stela_compiler::block::CompiledBlock, &'stat
 /// Run before any artifact/guest loan is published on this private Host.
 /// All private frames/views/code remain alive until true fault/return checks;
 /// installed fixtures are discarded only after their last use.
-pub(super) fn check(host: &mut dyn Host) -> Result<(), &'static str> {
+pub(super) fn check(host: &mut crate::engine::host::BareHost<'_>) -> Result<(), &'static str> {
+    crate::engine::host::fp_diagnostic::check(host)?;
     let mut state = GuestState {
         x: core::array::from_fn(|i| 0x100 + i as u64),
         sp: 0x8000,

@@ -1509,6 +1509,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     crate::status::begin("Installing the host processor state");
     let mut host_owner =
         unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
+    if options.native_bootstrap_check {
+        host::fp_diagnostic::check(&mut host_owner.host())
+            .unwrap_or_else(|error| output::fatal(error));
+    }
     let apic_hz = host::statistics().apic_hz;
     crate::status::done("");
     crate::status::begin("Starting the other host processors");

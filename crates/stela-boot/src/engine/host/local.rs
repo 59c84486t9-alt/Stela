@@ -21,6 +21,7 @@ pub(crate) struct Local {
     interrupted: AtomicBool,
     xstate: super::super::xstate::EntryAbi,
     xstate_active: UnsafeCell<[u64; 2]>,
+    helper_rsp: UnsafeCell<u64>,
     doorbells: AtomicU64,
     worker: UnsafeCell<Option<stela_runtime::machine::engine::publication::WorkerId>>,
     declarations: UnsafeCell<Option<stela_runtime::NativeCpuOwner>>,
@@ -36,6 +37,7 @@ impl Local {
             interrupted: AtomicBool::new(false),
             xstate: super::super::xstate::EntryAbi::EMPTY,
             xstate_active: UnsafeCell::new([0; 2]),
+            helper_rsp: UnsafeCell::new(0),
             doorbells: AtomicU64::new(0),
             worker: UnsafeCell::new(None),
             declarations: UnsafeCell::new(None),
@@ -150,6 +152,7 @@ pub(crate) const XSTATE_AVAILABLE_OFFSET: usize = core::mem::offset_of!(Local, x
 pub(crate) const XSTATE_MSR_FLAGS_OFFSET: usize = core::mem::offset_of!(Local, xstate)
     + core::mem::offset_of!(super::super::xstate::EntryAbi, msr_flags);
 pub(crate) const XSTATE_ACTIVE_OFFSET: usize = core::mem::offset_of!(Local, xstate_active);
+pub(super) const HELPER_RSP_OFFSET: usize = core::mem::offset_of!(Local, helper_rsp);
 
 /// Install only an actual destination capture before making this Local/IDT
 /// active. A caller-supplied mask/size cannot create this contract.
@@ -279,7 +282,7 @@ impl Drop for Owner {
             let slot = &mut *local.state.get();
             let state = slot.as_mut().expect("host state owner installed");
             assert!(
-                !state.native && *local.recovery_rsp.get() == 0,
+                !state.native && *local.recovery_rsp.get() == 0 && *local.helper_rsp.get() == 0,
                 "active native host state dropped"
             );
             state

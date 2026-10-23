@@ -48,52 +48,93 @@ struct Saved {
     ret: u64,
 }
 
+// This helper image is separate from the original host image retained by
+// stela_enter_block. Normal return restores the actual guest image; abandon
+// restores the original host image through the one real recovery continuation.
+#[repr(C)]
+struct HelperFooter {
+    xstate: super::super::xstate::EntryMetadata,
+    saved_stack: u64,
+    result: u64,
+}
+
 global_asm!(
-    ".global stela_translation_helper",
-    "stela_translation_helper:",
-    "push r15",
-    "push r14",
-    "push r13",
-    "push r12",
-    "push r11",
-    "push r10",
-    "push r9",
-    "push r8",
-    "push rdi",
-    "push rsi",
-    "push rbp",
-    "push rbx",
-    "push rdx",
-    "push rcx",
-    "push rax",
-    // RBX keeps the saved registers' address across the call; native code
-    // keeps RSP unaligned, and the Rust side may use any vector register.
-    "mov rbx, rsp",
-    "and rsp, -16",
-    "sub rsp, 512",
-    "fxsave [rsp]",
-    "mov rdi, rbx",
-    "call {translate}",
-    "fxrstor [rsp]",
-    "mov rsp, rbx",
-    "add rsp, 8",
-    "pop rcx",
-    "pop rdx",
-    "pop rbx",
-    "pop rbp",
-    "pop rsi",
-    "pop rdi",
-    "pop r8",
-    "pop r9",
-    "pop r10",
-    "pop r11",
-    "pop r12",
-    "pop r13",
-    "pop r14",
-    "pop r15",
-    // Past the size and flags.
-    "add qword ptr [rsp], 2",
-    "ret",
+    r#"
+.global stela_translation_helper
+stela_translation_helper:
+    push r15
+    push r14
+    push r13
+    push r12
+    push r11
+    push r10
+    push r9
+    push r8
+    push rdi
+    push rsi
+    push rbp
+    push rbx
+    push rdx
+    push rcx
+    push rax
+    mov rbx, rsp
+    cmp qword ptr gs:[{recovery}], 0
+    je {refuse}
+    cmp qword ptr gs:[{helper}], 0
+    jne {refuse}
+    mov r11, gs:[{image_bytes}]
+    sub rsp, r11
+    sub rsp, {footer_bytes}
+    and rsp, -64
+    lea rsi, [rsp + r11]
+    mov [rsi + {saved_stack}], rbx
+    mov rdi, rsp
+    call {save}
+    mov gs:[{helper}], rsp
+    cld
+    fninit
+    ldmxcsr [rip + {default_mxcsr}]
+    mov rdi, rbx
+    call {translate}
+    mov r11, gs:[{image_bytes}]
+    mov [rsp + r11 + {result}], rax
+    mov rdi, rsp
+    lea rsi, [rsp + r11]
+    call {restore}
+    mov r11, gs:[{image_bytes}]
+    mov rax, [rsp + r11 + {result}]
+    mov rbx, [rsp + r11 + {saved_stack}]
+    mov qword ptr gs:[{helper}], 0
+    mov rsp, rbx
+    add rsp, 8
+    pop rcx
+    pop rdx
+    pop rbx
+    pop rbp
+    pop rsi
+    pop rdi
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    // Past the size and flags; the caller's exact Saved layout is unchanged.
+    add qword ptr [rsp], 2
+    ret
+"#,
+    recovery = const super::local::RECOVERY_RSP_OFFSET,
+    helper = const super::local::HELPER_RSP_OFFSET,
+    image_bytes = const super::local::XSTATE_IMAGE_BYTES_OFFSET,
+    footer_bytes = const size_of::<HelperFooter>(),
+    saved_stack = const core::mem::offset_of!(HelperFooter, saved_stack),
+    result = const core::mem::offset_of!(HelperFooter, result),
+    save = sym super::super::xstate::stela_xstate_save_owned,
+    restore = sym super::super::xstate::stela_xstate_restore_owned,
+    refuse = sym super::super::xstate::stela_xstate_boundary_refuse,
+    default_mxcsr = sym super::super::xstate::DEFAULT_MXCSR,
     translate = sym translate,
 );
 

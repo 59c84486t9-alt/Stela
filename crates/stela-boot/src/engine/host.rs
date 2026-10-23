@@ -34,6 +34,7 @@ use stela_runtime::machine::{
     },
 };
 
+pub(crate) mod fp_diagnostic;
 pub(super) mod local;
 mod ram;
 mod translated;
@@ -525,61 +526,124 @@ impl mmu::TableMemory for GuestTables<'_> {
     }
 }
 
+// Retained in the actual owning host stack through native/context execution.
+// recovery_rsp points to the complete image, never to a naked GPR snapshot.
+// The adjacent footer preserves both original stack ownership and BlockExit's
+// two result registers across scalar-only state restoration.
+#[repr(C)]
+struct RecoveryFooter {
+    xstate: super::xstate::EntryMetadata,
+    saved_stack: u64,
+    result_rax: u64,
+    result_rdx: u64,
+    context: u64,
+}
+
 global_asm!(
-    ".global stela_enter_block",
-    "stela_enter_block:",
-    "push rbp",
-    "push rbx",
-    "push r12",
-    "push r13",
-    "push r14",
-    "push r15",
-    "mov gs:[{recovery}], rsp",
-    "call rsi",
-    "mov qword ptr gs:[{recovery}], 0",
-    "pop r15",
-    "pop r14",
-    "pop r13",
-    "pop r12",
-    "pop rbx",
-    "pop rbp",
-    "ret",
-    // The extended block ABI passes state/context in RDI/RSI. Keep its
-    // published SysV stack alignment while using the same recovery layout.
-    ".global stela_enter_context_block",
-    "stela_enter_context_block:",
-    "push rbp",
-    "push rbx",
-    "push r12",
-    "push r13",
-    "push r14",
-    "push r15",
-    "mov gs:[{recovery}], rsp",
-    "sub rsp, 8",
-    "call rdx",
-    "add rsp, 8",
-    "mov qword ptr gs:[{recovery}], 0",
-    "pop r15",
-    "pop r14",
-    "pop r13",
-    "pop r12",
-    "pop rbx",
-    "pop rbp",
-    "ret",
-    ".global stela_native_recover",
-    "stela_native_recover:",
-    "mov rsp, gs:[{recovery}]",
-    "mov qword ptr gs:[{recovery}], 0",
-    "pop r15",
-    "pop r14",
-    "pop r13",
-    "pop r12",
-    "pop rbx",
-    "pop rbp",
-    "xor eax, eax",
-    "mov edx, 0xffff",
-    "ret",
+    r#"
+.global stela_enter_block
+stela_enter_block:
+    xor r10d, r10d
+    jmp stela_enter_owned
+.global stela_enter_context_block
+stela_enter_context_block:
+    mov r10d, 1
+stela_enter_owned:
+    push rbp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    push rdi
+    push rsi
+    push rdx
+    mov rbx, rsp
+    cmp qword ptr gs:[{recovery}], 0
+    jne {refuse}
+    cmp qword ptr gs:[{helper}], 0
+    jne {refuse}
+    mov r11, gs:[{image_bytes}]
+    sub rsp, r11
+    sub rsp, {footer_bytes}
+    and rsp, -64
+    lea rsi, [rsp + r11]
+    mov [rsi + {saved_stack}], rbx
+    mov [rsi + {context}], r10
+    mov rdi, rsp
+    call {save}
+    fninit
+    ldmxcsr [rip + {default_mxcsr}]
+    // Publish only a complete actual owned image. IRQs use separate IST images;
+    // a terminal NMI can never return through a half-published recovery frame.
+    mov gs:[{recovery}], rsp
+    mov r11, gs:[{image_bytes}]
+    mov rbx, [rsp + r11 + {saved_stack}]
+    mov rdi, [rbx + 16]
+    mov rsi, [rbx + 8]
+    cmp qword ptr [rsp + r11 + {context}], 0
+    jne stela_enter_owned_context
+    // Preserve the legacy generated-block entry alignment (RSP%16=0 in the
+    // block); the separate context ABI remains SysV (RSP%16=8 in the block).
+    sub rsp, 8
+    call rsi
+    add rsp, 8
+    jmp stela_native_owned_return
+stela_enter_owned_context:
+    mov rdx, [rbx]
+    call rdx
+stela_native_owned_return:
+    cmp qword ptr gs:[{helper}], 0
+    jne {refuse}
+    mov rsp, gs:[{recovery}]
+    test rsp, rsp
+    jz {refuse}
+    mov r11, gs:[{image_bytes}]
+    mov [rsp + r11 + {result_rax}], rax
+    mov [rsp + r11 + {result_rdx}], rdx
+    jmp stela_native_restore_host
+.global stela_native_recover
+stela_native_recover:
+    mov rsp, gs:[{recovery}]
+    test rsp, rsp
+    jz {refuse}
+    mov r11, gs:[{image_bytes}]
+    mov qword ptr [rsp + r11 + {result_rax}], 0
+    mov qword ptr [rsp + r11 + {result_rdx}], 0xffff
+stela_native_restore_host:
+    mov rdi, rsp
+    lea rsi, [rsp + r11]
+    call {restore}
+    // No Rust runs between exact restoration and returning to the original
+    // host stack. An abandoned helper has no surviving borrowed state/image.
+    mov r11, gs:[{image_bytes}]
+    mov rbx, [rsp + r11 + {saved_stack}]
+    mov rax, [rsp + r11 + {result_rax}]
+    mov rdx, [rsp + r11 + {result_rdx}]
+    mov qword ptr gs:[{helper}], 0
+    mov qword ptr gs:[{recovery}], 0
+    mov rsp, rbx
+    add rsp, 24
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+"#,
     recovery = const local::RECOVERY_RSP_OFFSET,
+    helper = const local::HELPER_RSP_OFFSET,
+    image_bytes = const local::XSTATE_IMAGE_BYTES_OFFSET,
+    footer_bytes = const size_of::<RecoveryFooter>(),
+    saved_stack = const core::mem::offset_of!(RecoveryFooter, saved_stack),
+    result_rax = const core::mem::offset_of!(RecoveryFooter, result_rax),
+    result_rdx = const core::mem::offset_of!(RecoveryFooter, result_rdx),
+    context = const core::mem::offset_of!(RecoveryFooter, context),
+    save = sym super::xstate::stela_xstate_save_owned,
+    restore = sym super::xstate::stela_xstate_restore_owned,
+    refuse = sym super::xstate::stela_xstate_boundary_refuse,
+    default_mxcsr = sym super::xstate::DEFAULT_MXCSR,
 );
 
 unsafe extern "sysv64" {
@@ -973,6 +1037,7 @@ impl Host for BareHost<'_> {
     }
 
     unsafe fn execute(&mut self, code: NativeCode, guest: &mut GuestState) -> NativeExit {
+        assert!(!state().native, "nested native block entry");
         state().native = true;
         let entered = rdtsc();
         // SAFETY: the engine passes installed system-mode block code.
