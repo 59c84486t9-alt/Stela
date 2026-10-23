@@ -883,11 +883,15 @@ mod tests {
         fn set_mxcsr(value: u32) {
             // SAFETY: tests use only allocated SSE control/status bits, mask
             // every exception, and restore the actual original environment.
-            unsafe { core::arch::asm!("ldmxcsr [{}]", in(reg) &value, options(nostack)); }
+            unsafe {
+                core::arch::asm!("ldmxcsr [{}]", in(reg) &value, options(nostack));
+            }
         }
         struct Original(u32);
         impl Drop for Original {
-            fn drop(&mut self) { set_mxcsr(self.0); }
+            fn drop(&mut self) {
+                set_mxcsr(self.0);
+            }
         }
         let operation = operand(true, 8, false, Register::X(2), 0, AddressMode::Offset);
         let mut body = vec![];
@@ -897,7 +901,10 @@ mod tests {
             for fail_part in [None, Some(0)] {
                 let mut actual = state();
                 let mut harness = Harness {
-                    ram: [0x35; RAM_BYTES], fail_part, requests: vec![], incoming_mxcsr: vec![],
+                    ram: [0x35; RAM_BYTES],
+                    fail_part,
+                    requests: vec![],
+                    incoming_mxcsr: vec![],
                 };
                 let mut view = view(&mut harness);
                 let original = Original(mxcsr());
@@ -910,10 +917,18 @@ mod tests {
                 drop(original);
                 assert_eq!(harness.incoming_mxcsr, [0x1f80]);
                 assert_eq!(returned, caller);
-                assert_eq!(result, if fail_part.is_some() {
-                    MemoryStatus::Permission as u32
-                } else { MemoryStatus::Success as u32 });
-                assert_eq!(view.completed_bytes, if fail_part.is_some() { 0 } else { 8 });
+                assert_eq!(
+                    result,
+                    if fail_part.is_some() {
+                        MemoryStatus::Permission as u32
+                    } else {
+                        MemoryStatus::Success as u32
+                    }
+                );
+                assert_eq!(
+                    view.completed_bytes,
+                    if fail_part.is_some() { 0 } else { 8 }
+                );
                 assert_eq!(harness.requests.len(), 1);
             }
         }
