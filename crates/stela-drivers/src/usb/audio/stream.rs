@@ -320,7 +320,7 @@ impl<T: Transport> AudioDevice<T> {
                     .ok_or(Error::Descriptor(
                         "implicit feedback source format is missing",
                     ))?;
-                self.start_capture_inner(capture_index, rate, false, true)?;
+                self.start_capture_inner(capture_index, rate, false, true, &mut false)?;
             }
             self.prepare_power()?;
             self.output.endpoint = Some(format.data);
@@ -391,9 +391,12 @@ impl<T: Transport> AudioDevice<T> {
         {
             return Err(Error::Busy);
         }
-        let result = self.start_capture_inner(index, rate, true, false);
+        let mut effects_attempted = false;
+        let result = self.start_capture_inner(index, rate, true, false, &mut effects_attempted);
         if let Err(error) = result {
-            if self.input.endpoint.is_none() && self.power_owners.is_empty() {
+            // Existing duplex-session power does not belong to this request.
+            // A rate/alias/preflight refusal cannot tear down a healthy sibling.
+            if self.input.endpoint.is_none() && !effects_attempted {
                 return Err(error);
             }
             return self.fail(error);
@@ -406,6 +409,7 @@ impl<T: Transport> AudioDevice<T> {
         rate: u32,
         requested: bool,
         implicit: bool,
+        effects_attempted: &mut bool,
     ) -> Result<(), Error> {
         let format = self.format(index, Direction::Capture)?;
         Packetizer::new(&format, rate)?;
@@ -428,6 +432,9 @@ impl<T: Transport> AudioDevice<T> {
         }
         self.transport.preflight(&[format.data])?;
         let clock = self.clock(&format, rate)?;
+        // Beyond preflight, an unsuccessful live power observation invalidates
+        // the session's authority even if it does not acquire a new domain.
+        *effects_attempted = true;
         self.prepare_power()?;
         self.input.endpoint = Some(format.data);
         self.capture = Some(Capture {

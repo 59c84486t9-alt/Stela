@@ -493,3 +493,66 @@ fn badd_standard_mono_alternate_and_explicit_feedback_stream_real_pcm() {
         a.shutdown().unwrap();
     });
 }
+
+#[test]
+fn badd_rejected_capture_request_preserves_live_playback_power_and_dma() {
+    run(|a| {
+        a.transport.inner.hold = true;
+        a.start_playback(0, 48000, &[0x36; 12288], false).unwrap();
+        let pending = a.transport.inner.pending.len();
+        let alternates = a.transport.inner.alternates.clone();
+        let power_writes = a.transport.writes.clone();
+        let now = a.transport.inner.time;
+        assert_eq!(a.start_capture(1, 44100), Err(Error::RateUnsupported));
+        assert!(a.playback.is_some());
+        assert_eq!(a.transport.inner.pending.len(), pending);
+        assert_eq!(a.transport.inner.alternates, alternates);
+        assert_eq!(a.transport.writes, power_writes);
+        assert_eq!(a.transport.inner.time, now);
+        assert_eq!(a.transport.states, [0, 0]);
+        // A foreign capture DCI refusal is also wholly prepublication. It may
+        // not stop or deconfigure either the sibling or that foreign owner.
+        a.transport.inner.active.push(0x82);
+        assert!(a.start_capture(1, 48000).is_err());
+        assert!(a.playback.is_some());
+        assert_eq!(a.transport.inner.pending.len(), pending);
+        assert_eq!(a.transport.inner.alternates, alternates);
+        assert_eq!(a.transport.writes, power_writes);
+        assert!(a.transport.inner.active.contains(&0x82));
+        assert_eq!(a.write_playback(&[0; 4]), Ok(()));
+        a.transport.inner.active.retain(|e| *e != 0x82);
+        a.shutdown().unwrap();
+    });
+}
+
+#[test]
+fn badd_failed_live_power_authority_check_retires_or_quarantines_the_session() {
+    for mode in 0..3 {
+        run(|a| {
+            a.transport.inner.hold = true;
+            a.start_playback(0, 48000, &[0x61; 12288], false).unwrap();
+            assert!(!a.transport.inner.pending.is_empty());
+            match mode {
+                0 => a.transport.states[0] = 1,
+                1 => a.transport.short_get = true,
+                2 => a.transport.fail_get = true,
+                _ => unreachable!(),
+            }
+            assert!(a.start_capture(1, 48000).is_err());
+            assert!(a.transport.inner.pending.is_empty());
+            // A completely acknowledged cleanup may return to idle; otherwise
+            // power ownership remains poisoned. Neither permits producer use.
+            assert!(matches!(
+                a.write_playback(&[0; 4]),
+                Err(Error::NotRunning | Error::Poisoned)
+            ));
+            if mode != 0 {
+                assert!(!a.power_owners.is_empty());
+            }
+            a.transport.short_get = false;
+            a.transport.fail_get = false;
+            a.shutdown().unwrap();
+            assert!(a.power_owners.is_empty());
+        });
+    }
+}
