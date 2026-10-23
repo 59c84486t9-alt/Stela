@@ -12,6 +12,8 @@ use alloc::{format, sync::Arc, vec::Vec};
 mod memory;
 use memory::{Memory, RET, RX, TX};
 
+const SD_STATUS_ERROR: u32 = 4;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
     Building,
@@ -31,6 +33,7 @@ pub struct Packet<R: Registers, D: Delay> {
     carrier_up: bool,
     state: State,
     failure: Option<Error>,
+    mbuf_low_water_events: u64,
     tx_producer: usize,
     tx_consumer: usize,
     rx_producer: usize,
@@ -69,6 +72,7 @@ impl<R: Registers, D: Delay> Packet<R, D> {
             carrier_up: false,
             state: State::Building,
             failure: None,
+            mbuf_low_water_events: 0,
             tx_producer: 0,
             tx_consumer: 0,
             rx_producer: RX - 1,
@@ -106,6 +110,13 @@ impl<R: Registers, D: Delay> Packet<R, D> {
     pub fn failure(&self) -> Option<Error> {
         self.failure
     }
+    /// Successfully handled BCM5720 A0 MBUF low-water discard indications,
+    /// acknowledged through the real W1C register. Multiple drops can coalesce
+    /// into one event; this is not an exact packet-loss counter. Faulted cause
+    /// or acknowledgement observations remain in `failure`. Saturates at u64::MAX.
+    pub fn mbuf_low_water_events(&self) -> u64 {
+        self.mbuf_low_water_events
+    }
     fn fault(&mut self, error: Error) -> Error {
         self.failure.get_or_insert(error);
         self.state = State::Faulted;
@@ -122,7 +133,10 @@ impl<R: Registers, D: Delay> Packet<R, D> {
         self.check()?;
         self.hardware.request_status()?;
         let (flags, tx, rx) = self.memory.as_ref().unwrap().status()?;
-        if flags & 4 != 0 || tx >= TX || rx >= RET {
+        if flags & SD_STATUS_ERROR != 0 && self.hardware.packet_attention()? {
+            self.mbuf_low_water_events = self.mbuf_low_water_events.saturating_add(1);
+        }
+        if tx >= TX || rx >= RET {
             return Err(Error::RingCorrupt);
         }
         let done = (tx + TX - self.tx_consumer) % TX;

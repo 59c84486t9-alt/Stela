@@ -47,6 +47,12 @@ pub enum Error {
     UnsupportedBoard,
     InvalidMac,
     RingCorrupt,
+    Attention {
+        flow: u32,
+        message: u32,
+        read_dma: u32,
+        write_dma: u32,
+    },
     RingFull,
     Dma(crate::bus::dma::mapping::DmaError),
     Memory(crate::bus::dma::memory::MemoryError),

@@ -160,9 +160,6 @@ impl Domain {
             self.store(at, bytes);
         }
     }
-    fn put32(&self, at: u64, word: u32) {
-        self.write(at, &word.to_le_bytes());
-    }
     fn complete(&self, at: u64, bytes: usize) {
         self.completions.lock().unwrap().push(at..at + bytes as u64);
     }
@@ -309,6 +306,12 @@ unsafe impl DmaDomain for Domain {
         Ok(())
     }
 }
+#[derive(Clone, Copy)]
+enum DmaPath {
+    Tx,
+    Rx,
+    Status,
+}
 #[derive(Default)]
 struct Device {
     config: BTreeMap<u16, u32>,
@@ -336,6 +339,12 @@ struct Device {
     command_clear_observed: bool,
     drops: usize,
     ignore_master_clear: bool,
+    ignore_reserve_fix: bool,
+    fail_read_on: Option<(u32, usize)>,
+    read_counts: BTreeMap<u32, usize>,
+    fail_write: Option<u32>,
+    attention_reassert: u32,
+    dma_effects: usize,
 }
 impl Device {
     fn new() -> Self {
@@ -368,6 +377,8 @@ impl Device {
             p.sram.insert(at, value);
         }
         p.mac.insert(0x7014, 0x0200_0000);
+        // Independent arbitrary firmware reserve bits must survive the fix.
+        p.mac.insert(0x4900, 0x0123_0840);
         let id = 0x5c0d_8b62u32;
         p.phy.insert(2, (id >> 10) as u16);
         p.phy
@@ -404,6 +415,11 @@ impl Device {
         }
     }
     fn read(&mut self, at: u32) -> Result<u32, Error> {
+        let count = self.read_counts.entry(at).or_default();
+        *count += 1;
+        if self.fail_read_on == Some((at, *count)) {
+            return Err(Error::Access);
+        }
         if self.config[&4] & 2 == 0 {
             return Err(Error::Access);
         }
@@ -441,12 +457,94 @@ impl Device {
     fn status(&self) -> u64 {
         (u64::from(self.mac[&0x3c38]) << 32) | u64::from(self.mac[&0x3c3c])
     }
-    fn transmit(&mut self, tail: usize, domain: &Domain) {
-        if self.tx == tail {
-            return;
+    // These expectations use the pinned donor's numeric encodings rather
+    // than the production constants. Check actual stored controls for EVERY
+    // device effect; an attach phase or caller-supplied ready flag is no proof.
+    fn require_bits(&self, at: u32, mask: u32, value: u32) {
+        assert_eq!(
+            self.mac.get(&at).copied().unwrap_or(0) & mask,
+            value,
+            "DMA control {at:x}"
+        );
+    }
+    fn require_dma(&self, path: DmaPath) {
+        assert_eq!(self.config[&4] & 6, 6, "actual memory decode and BME");
+        assert_eq!(
+            self.config[&0x68] & 0x98,
+            0x98,
+            "host word-swap/indirect access"
+        );
+        self.require_bits(0x4000, 3, 2); // MEMARB enabled, not reset.
+        self.require_bits(0x6800, 0x34, 0x34); // data/nonframe word and byte swap.
+        match path {
+            DmaPath::Status => {
+                self.require_bits(0x3c00, 0x187, 0x106); // 32-byte, attention, enabled.
+                self.require_bits(0x4c00, 3, 2); // host status needs write DMA.
+            }
+            DmaPath::Tx => {
+                self.require_bits(0x4400, 3, 2); // buffer manager.
+                self.require_bits(0x400, 0xa0_0000, 0xa0_0000); // TX/frame engines.
+                self.require_bits(0x45c, 0x103, 0x102); // TX, A0 MBUF lockup fix.
+                self.require_bits(0x6800, 0x20000, 0x20000); // host send BDs.
+                self.require_bits(0x4800, 3, 2); // read DMA.
+                self.require_bits(0x4900, 4, 4); // BCM5720 RDMA FIFO overflow fix.
+                self.require_bits(0x4910, 0xf0000, 0xf0000); // 4K BD/LSO boundaries.
+                for at in [0x1400, 0x1800, 0xc00, 0x1000, 0x1c00] {
+                    self.require_bits(at, 3, 2);
+                }
+            }
+            DmaPath::Rx => {
+                self.require_bits(0x4400, 3, 2);
+                self.require_bits(0x400, 0xc0_0000, 0xc0_0000); // RX/frame engines.
+                self.require_bits(0x468, 0x403, 0x402); // RX and intact VLAN bytes.
+                self.require_bits(0x4c00, 3, 2);
+                self.require_bits(0x2400, 0x10003, 0x10002); // large standard ring.
+                for at in [0x2c00, 0x2000, 0x2800, 0x3000] {
+                    self.require_bits(at, 3, 2);
+                }
+            }
         }
-        assert_ne!(self.config[&4] & 4, 0);
-        if self.hold_tx {
+    }
+    fn dma_read32(&mut self, path: DmaPath, domain: &Domain, at: u64) -> u32 {
+        self.require_dma(path);
+        let value = domain.read32(at);
+        self.dma_effects += 1;
+        value
+    }
+    fn dma_read(&mut self, path: DmaPath, domain: &Domain, at: u64, bytes: usize) -> Vec<u8> {
+        self.require_dma(path);
+        let value = domain.visible(at, bytes);
+        self.dma_effects += 1;
+        value
+    }
+    fn dma_write(&mut self, path: DmaPath, domain: &Domain, at: u64, bytes: &[u8]) {
+        self.require_dma(path);
+        domain.write(at, bytes);
+        self.dma_effects += 1;
+    }
+    fn dma_put32(&mut self, path: DmaPath, domain: &Domain, at: u64, value: u32) {
+        self.dma_write(path, domain, at, &value.to_le_bytes());
+    }
+    fn publish_indices(&mut self, domain: &Domain) {
+        let at = self.status() + 16;
+        let value = ((self.tx as u32) << 16) | self.ret as u32;
+        self.dma_put32(DmaPath::Status, domain, at, value);
+    }
+    fn publish_attention(&mut self, domain: &Domain) {
+        // Independent hardware causes produce the status error indication.
+        let error = [0x3c48, 0x4804, 0x4c04]
+            .iter()
+            .any(|at| self.mac.get(at).copied().unwrap_or(0) != 0)
+            || self.mac.get(&0x6004).copied().unwrap_or(0) & !1 != 0;
+        self.dma_put32(
+            DmaPath::Status,
+            domain,
+            self.status(),
+            if error { 4 } else { 0 },
+        );
+    }
+    fn transmit(&mut self, tail: usize, domain: &Domain) {
+        if self.tx == tail || self.hold_tx {
             return;
         }
         let base = (u64::from(self.sram[&0x100]) << 32) | u64::from(self.sram[&0x104]);
@@ -456,19 +554,20 @@ impl Device {
                 return;
             }
             let at = base + (self.tx * 16) as u64;
-            let address = (u64::from(domain.read32(at)) << 32) | u64::from(domain.read32(at + 4));
-            let command = domain.read32(at + 8);
+            let high = self.dma_read32(DmaPath::Tx, domain, at);
+            let low = self.dma_read32(DmaPath::Tx, domain, at + 4);
+            let address = (u64::from(high) << 32) | u64::from(low);
+            let command = self.dma_read32(DmaPath::Tx, domain, at + 8);
             assert_eq!(command & 0xffff, 0x84);
-            assert_eq!(domain.read32(at + 12), 0);
+            assert_eq!(self.dma_read32(DmaPath::Tx, domain, at + 12), 0);
             let length = (command >> 16) as usize;
             assert!((60..=1514).contains(&length));
-            self.sent.push(domain.visible(address, length));
+            let frame = self.dma_read(DmaPath::Tx, domain, address, length);
+            self.sent.push(frame);
+            self.require_dma(DmaPath::Tx);
             domain.complete(address, 4096);
             self.tx = (self.tx + 1) & 511;
-            domain.put32(
-                self.status() + 16,
-                ((self.tx as u32) << 16) | self.ret as u32,
-            );
+            self.publish_indices(domain);
         }
         panic!("unbounded TX walk")
     }
@@ -478,28 +577,37 @@ impl Device {
         assert_ne!(self.rx, tail);
         let base = (u64::from(self.mac[&0x2450]) << 32) | u64::from(self.mac[&0x2454]);
         let at = base + (self.rx * 32) as u64;
-        let address = (u64::from(domain.read32(at)) << 32) | u64::from(domain.read32(at + 4));
-        assert_eq!(domain.read32(at + 8), 1536);
-        assert_eq!(domain.read32(at + 12), 4);
-        let opaque = domain.read32(at + 28);
+        let high = self.dma_read32(DmaPath::Rx, domain, at);
+        let low = self.dma_read32(DmaPath::Rx, domain, at + 4);
+        let address = (u64::from(high) << 32) | u64::from(low);
+        assert_eq!(self.dma_read32(DmaPath::Rx, domain, at + 8), 1536);
+        assert_eq!(self.dma_read32(DmaPath::Rx, domain, at + 12), 4);
+        let opaque = self.dma_read32(DmaPath::Rx, domain, at + 28);
         assert_eq!(opaque, 0x10000 | self.rx as u32);
-        domain.visible(address, 4096); // device receives only offered, visible page.
+        self.dma_read(DmaPath::Rx, domain, address, 4096); // actual offered page.
         let returns = (u64::from(self.sram[&0x200]) << 32) | u64::from(self.sram[&0x204]);
         assert_eq!(self.sram[&0x208], 4096 << 16);
         let returned = returns + (self.ret * 32) as u64;
-        domain.write(address, frame);
-        domain.write(address + frame.len() as u64, &[0xde, 0xad, 0xbe, 0xef]);
+        self.dma_write(DmaPath::Rx, domain, address, frame);
+        self.dma_write(
+            DmaPath::Rx,
+            domain,
+            address + frame.len() as u64,
+            &[0xde, 0xad, 0xbe, 0xef],
+        );
+        self.require_dma(DmaPath::Rx);
         domain.complete(address, 4096);
-        domain.put32(returned + 8, frame.len() as u32 + 4);
-        domain.put32(returned + 12, if errors != 0 { 0x404 } else { 4 });
-        domain.put32(returned + 20, errors);
-        domain.put32(returned + 28, opaque);
+        for (offset, value) in [
+            (8, frame.len() as u32 + 4),
+            (12, if errors != 0 { 0x404 } else { 4 }),
+            (20, errors),
+            (28, opaque),
+        ] {
+            self.dma_put32(DmaPath::Rx, domain, returned + offset, value);
+        }
         self.rx = (self.rx + 1) & 2047;
         self.ret = (self.ret + 1) & 4095;
-        domain.put32(
-            self.status() + 16,
-            ((self.tx as u32) << 16) | self.ret as u32,
-        );
+        self.publish_indices(domain);
     }
 }
 struct Reg {
@@ -562,6 +670,9 @@ unsafe impl Registers for Reg {
         if p.config[&4] & 2 == 0 {
             return Err(Error::Access);
         }
+        if p.fail_write == Some(at) {
+            return Err(Error::Access);
+        }
         p.access.push((true, at, value));
         match at {
             0x84 => {
@@ -571,6 +682,19 @@ unsafe impl Registers for Reg {
             0x404 => {
                 let old = p.mac.get(&at).copied().unwrap_or(0);
                 p.mac.insert(at, old & !value);
+            }
+            0x3c48 => {
+                let old = p.mac.get(&at).copied().unwrap_or(0);
+                let reassert = p.attention_reassert;
+                p.mac.insert(at, (old & !value) | reassert);
+            }
+            0x4900 if p.ignore_reserve_fix => {}
+            0x3c00 if value & 8 != 0 => {
+                // COALESCE_NOW is a hardware request, not a sticky enable.
+                // Complete it synchronously in this model; later stop RMWs
+                // must not issue a fictitious update after disabling HOSTCC.
+                p.mac.insert(at, value & !8);
+                p.publish_attention(&self.domain);
             }
             0x44c => {
                 let expected_phy = ((p.sram[&0xe00] >> 30) + 1) & 31;
@@ -991,4 +1115,318 @@ fn partial_page_allocation_keeps_every_mapping_handle_for_explicit_retirement() 
         drop(registers);
         assert_eq!(peer.lock().unwrap().drops, 1);
     }
+}
+
+#[test]
+fn rdma_fifo_fix_preserves_reserve_bits_and_is_observed_before_enable() {
+    let (packet, _, _, peer) = attach();
+    let p = peer.lock().unwrap();
+    assert_eq!(p.mac[&0x4900], 0x0123_0844);
+    let write = p
+        .access
+        .iter()
+        .position(|a| *a == (true, 0x4900, 0x0123_0844))
+        .unwrap();
+    let readback = p
+        .access
+        .iter()
+        .position(|a| *a == (false, 0x4900, 0x0123_0844))
+        .unwrap();
+    let enable = p
+        .access
+        .iter()
+        .position(|a| a.0 && a.1 == 0x4800 && a.2 & 2 != 0)
+        .unwrap();
+    assert!(write < readback && readback < enable);
+    drop(p);
+    assert!(packet.retire().is_ok());
+}
+#[test]
+fn rdma_fix_access_or_readback_failure_never_enables_read_dma() {
+    for fault in 0..4 {
+        let (hardware, pages, domain, peer) = parts();
+        {
+            let mut p = peer.lock().unwrap();
+            match fault {
+                0 => p.fail_read_on = Some((0x4900, 1)),
+                1 => p.fail_write = Some(0x4900),
+                2 => p.fail_read_on = Some((0x4900, 2)),
+                _ => p.ignore_reserve_fix = true,
+            }
+        }
+        let packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
+            Err((error, packet)) => {
+                assert_eq!(
+                    error,
+                    if fault == 3 {
+                        Error::ConfigDidNotLatch
+                    } else {
+                        Error::Access
+                    }
+                );
+                packet
+            }
+            Ok(_) => panic!("missing RDMA workaround admitted"),
+        };
+        let mut p = peer.lock().unwrap();
+        assert!(
+            !p.access
+                .iter()
+                .any(|a| a.0 && a.1 == 0x4800 && a.2 & 2 != 0)
+        );
+        assert_eq!(p.dma_effects, 0);
+        assert_eq!(p.drops, 0);
+        assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
+        assert_eq!(domain.maps.lock().unwrap().len(), 6);
+        p.fail_read_on = None;
+        p.fail_write = None;
+        drop(p);
+        assert!(packet.retire().is_ok());
+    }
+}
+#[test]
+fn a0_mbuf_low_water_is_counted_acknowledged_and_packet_io_continues() {
+    let (mut packet, _, domain, peer) = attach();
+    peer.lock().unwrap().mac.insert(0x3c48, 0x40);
+    assert_eq!(packet.receive().unwrap(), None);
+    assert_eq!(packet.mbuf_low_water_events(), 1);
+    assert_eq!(packet.failure(), None);
+    let p = peer.lock().unwrap();
+    assert_eq!(p.mac[&0x3c48], 0);
+    let ack = p
+        .access
+        .iter()
+        .position(|a| *a == (true, 0x3c48, 0x40))
+        .unwrap();
+    for at in [0x3c48, 0x6004, 0x4804, 0x4c04] {
+        assert!(p.access[..ack].iter().any(|a| !a.0 && a.1 == at));
+    }
+    assert_eq!(p.access[ack + 1], (false, 0x3c48, 0));
+    drop(p);
+    packet.transmit(&[0x37; 60]).unwrap();
+    peer.lock().unwrap().receive(&[0x73; 60], 0, &domain);
+    assert_eq!(packet.receive().unwrap(), Some(vec![0x73; 60]));
+    assert_eq!(packet.mbuf_low_water_events(), 1);
+    assert!(packet.retire().is_ok());
+}
+#[test]
+fn reasserted_low_water_remains_visible_and_counter_never_wraps() {
+    let (mut packet, _, _, peer) = attach();
+    {
+        let mut p = peer.lock().unwrap();
+        p.mac.insert(0x3c48, 0x40);
+        p.attention_reassert = 0x40;
+    }
+    packet.mbuf_low_water_events = u64::MAX - 1;
+    for _ in 0..2 {
+        assert_eq!(packet.receive().unwrap(), None);
+        assert_eq!(packet.mbuf_low_water_events(), u64::MAX);
+        assert_eq!(peer.lock().unwrap().mac[&0x3c48], 0x40);
+    }
+    peer.lock().unwrap().attention_reassert = 0;
+    assert_eq!(packet.receive().unwrap(), None);
+    assert_eq!(peer.lock().unwrap().mac[&0x3c48], 0);
+    assert_eq!(packet.failure(), None);
+    assert!(packet.retire().is_ok());
+}
+#[test]
+fn every_fatal_flow_message_and_dma_cause_remains_an_explicit_retained_fault() {
+    for at in [0x3c48, 0x6004, 0x4804, 0x4c04] {
+        for bit in 0..32 {
+            let value = 1u32 << bit;
+            if (at == 0x3c48 && value == 0x40) || (at == 0x6004 && value == 1) {
+                continue;
+            }
+            let (mut packet, pages, domain, peer) = attach();
+            {
+                let mut p = peer.lock().unwrap();
+                p.mac.insert(0x3c48, 0x40);
+                p.mac
+                    .insert(at, value | if at == 0x3c48 { 0x40 } else { 0 });
+            }
+            assert!(packet.receive().is_err());
+            assert_eq!(
+                packet.failure(),
+                Some(Error::Attention {
+                    flow: if at == 0x3c48 { value | 0x40 } else { 0x40 },
+                    message: if at == 0x6004 { value } else { 0 },
+                    read_dma: if at == 0x4804 { value } else { 0 },
+                    write_dma: if at == 0x4c04 { value } else { 0 },
+                })
+            );
+            assert_eq!(packet.mbuf_low_water_events(), 0);
+            assert!(
+                !peer
+                    .lock()
+                    .unwrap()
+                    .access
+                    .iter()
+                    .any(|a| a.0 && a.1 == 0x3c48)
+            );
+            assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
+            assert_eq!(domain.maps.lock().unwrap().len(), 6);
+            assert!(packet.transmit(&[0; 60]).is_err());
+            assert!(packet.retire().is_ok());
+        }
+    }
+}
+#[test]
+fn stale_status_and_msi_request_alone_are_not_fatal_attention_causes() {
+    let (mut packet, _, _, peer) = attach();
+    assert_eq!(packet.hardware.packet_attention(), Ok(false));
+    peer.lock().unwrap().mac.insert(0x6004, 1);
+    assert_eq!(packet.hardware.packet_attention(), Ok(false));
+    assert_eq!(packet.failure(), None);
+    assert!(packet.retire().is_ok());
+}
+#[test]
+fn attention_access_and_w1c_ack_failures_are_explicit_and_retain_owners() {
+    // Cause reads, targeted W1C write, and ordering read after that write.
+    for fault in 0..6 {
+        let (mut packet, pages, domain, peer) = attach();
+        {
+            let mut p = peer.lock().unwrap();
+            p.mac.insert(0x3c48, 0x40);
+            if fault == 4 {
+                p.fail_write = Some(0x3c48);
+            } else {
+                let at = [0x3c48, 0x6004, 0x4804, 0x4c04, 0, 0x3c48][fault];
+                let count = p.read_counts.get(&at).copied().unwrap_or(0);
+                p.fail_read_on = Some((at, count + if fault == 5 { 2 } else { 1 }));
+            }
+        }
+        assert!(packet.receive().is_err());
+        assert_eq!(packet.failure(), Some(Error::Access));
+        assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
+        assert_eq!(domain.maps.lock().unwrap().len(), 6);
+        let mut p = peer.lock().unwrap();
+        p.fail_write = None;
+        p.fail_read_on = None;
+        drop(p);
+        assert!(packet.retire().is_ok());
+    }
+}
+
+fn rejected_dma_effect(
+    packet: &Packet<Reg, Timer>,
+    domain: &Domain,
+    p: &mut Device,
+    path: DmaPath,
+) {
+    let before = p.dma_effects;
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match path {
+        DmaPath::Tx => p.transmit(1, domain),
+        DmaPath::Rx => p.receive(&[0x19; 60], 0, domain),
+        DmaPath::Status => p.publish_attention(domain),
+    }));
+    assert!(refused.is_err(), "missing device control admitted DMA");
+    assert_eq!(
+        p.dma_effects, before,
+        "DMA effect before prerequisite refusal"
+    );
+    assert_eq!(p.tx, packet.tx_consumer);
+    assert_eq!(p.rx, 0);
+}
+#[test]
+fn peer_refuses_each_deleted_or_disabled_mac_dma_engine_and_workaround() {
+    let common = [(0x4000, 2), (0x6800, 4), (0x6800, 0x10), (0x6800, 0x20)];
+    let tx = [
+        (0x4400, 2),
+        (0x400, 0x20_0000),
+        (0x400, 0x80_0000),
+        (0x45c, 2),
+        (0x45c, 0x100),
+        (0x6800, 0x20000),
+        (0x4800, 2),
+        (0x4900, 4),
+        (0x4910, 0x10000),
+        (0x4910, 0x20000),
+        (0x4910, 0x40000),
+        (0x4910, 0x80000),
+        (0x1400, 2),
+        (0x1800, 2),
+        (0xc00, 2),
+        (0x1000, 2),
+        (0x1c00, 2),
+    ];
+    let rx = [
+        (0x4400, 2),
+        (0x400, 0x40_0000),
+        (0x400, 0x80_0000),
+        (0x468, 2),
+        (0x468, 0x400),
+        (0x4c00, 2),
+        (0x2400, 2),
+        (0x2400, 0x10000),
+        (0x2c00, 2),
+        (0x2000, 2),
+        (0x2800, 2),
+        (0x3000, 2),
+    ];
+    let status = [(0x3c00, 2), (0x3c00, 4), (0x3c00, 0x100), (0x4c00, 2)];
+    for (path, controls) in [
+        (DmaPath::Tx, &tx[..]),
+        (DmaPath::Rx, &rx[..]),
+        (DmaPath::Status, &status[..]),
+    ] {
+        for &(at, bit) in common.iter().chain(controls) {
+            for delete in [false, true] {
+                let (packet, _, domain, peer) = attach();
+                packet.memory.as_ref().unwrap().tx(0, &[0x91; 60]).unwrap();
+                // Guard is acquired outside catch_unwind, so the deliberate
+                // model assertion cannot poison the mutex or hide cleanup.
+                let mut p = peer.lock().unwrap();
+                let original = p.mac[&at];
+                if delete {
+                    p.mac.remove(&at);
+                } else {
+                    p.mac.insert(at, original & !bit);
+                }
+                rejected_dma_effect(&packet, &domain, &mut p, path);
+                p.mac.insert(at, original);
+                drop(p);
+                assert!(packet.retire().is_ok());
+            }
+        }
+    }
+}
+#[test]
+fn peer_refuses_dma_without_actual_pci_and_host_access_controls() {
+    for path in [DmaPath::Tx, DmaPath::Rx, DmaPath::Status] {
+        for (at, bit) in [(4, 2), (4, 4), (0x68, 8), (0x68, 0x10), (0x68, 0x80)] {
+            let (packet, _, domain, peer) = attach();
+            packet.memory.as_ref().unwrap().tx(0, &[0x92; 60]).unwrap();
+            let mut p = peer.lock().unwrap();
+            let original = p.config[&at];
+            p.config.insert(at, original & !bit);
+            rejected_dma_effect(&packet, &domain, &mut p, path);
+            p.config.insert(at, original);
+            drop(p);
+            assert!(packet.retire().is_ok());
+        }
+    }
+}
+
+#[test]
+fn fatal_flow_observed_during_low_water_ack_is_never_discarded() {
+    let (mut packet, pages, domain, peer) = attach();
+    {
+        let mut p = peer.lock().unwrap();
+        p.mac.insert(0x3c48, 0x40);
+        p.attention_reassert = 0x80;
+    }
+    assert!(packet.receive().is_err());
+    assert_eq!(
+        packet.failure(),
+        Some(Error::Attention {
+            flow: 0x80,
+            message: 0,
+            read_dma: 0,
+            write_dma: 0,
+        })
+    );
+    assert_eq!(peer.lock().unwrap().mac[&0x3c48], 0x80);
+    assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
+    assert_eq!(domain.maps.lock().unwrap().len(), 6);
+    assert!(packet.retire().is_ok());
 }

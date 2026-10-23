@@ -210,6 +210,17 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 | WDMAC_MODE_STATUS_TAG_FIX,
         )?;
         self.delay.delay_us(40);
+        // BCM5720 belongs to 57765_PLUS. tg3_reset_hw applies this
+        // reserve-control fix before enabling RDMA, without the 5719_A0/5762
+        // threshold/margin rewrite. Preserve every unrelated observed bit.
+        let reserve = self.read(TG3_RDMA_RSRVCTRL_REG)?;
+        self.write(
+            TG3_RDMA_RSRVCTRL_REG,
+            reserve | TG3_RDMA_RSRVCTRL_FIFO_OFLW_FIX,
+        )?;
+        if self.read(TG3_RDMA_RSRVCTRL_REG)? != reserve | TG3_RDMA_RSRVCTRL_FIFO_OFLW_FIX {
+            return Err(Error::ConfigDidNotLatch);
+        }
         let rdma = self.read(RDMAC_MODE)? & RDMAC_MODE_H2BNC_VLAN_DET;
         self.flush(
             RDMAC_MODE,
@@ -302,6 +313,46 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 | HOSTCC_MODE_NOW
                 | HOSTCC_MODE_NOINT_ON_NOW,
         )
+    }
+    /// Classify the actual causes behind SD_STATUS_ERROR, following
+    /// tg3_process_error. BCM5720_A0's MBUF low-water event is a discard
+    /// indication, not a fatal DMA failure. tg3_periodic_fetch_stats clears
+    /// that one W1C bit and counts one observation, not an exact packet total.
+    pub(in crate::net::tg3) fn packet_attention(&mut self) -> Result<bool, Error> {
+        let flow = self.read(HOSTCC_FLOW_ATTN)?;
+        let message = self.read(MSGINT_STATUS)?;
+        let read_dma = self.read(RDMAC_STATUS)?;
+        let write_dma = self.read(WDMAC_STATUS)?;
+        if flow & !HOSTCC_FLOW_ATTN_MBUF_LWM != 0
+            || message & !MSGINT_STATUS_MSI_REQ != 0
+            || read_dma != 0
+            || write_dma != 0
+        {
+            return Err(Error::Attention {
+                flow,
+                message,
+                read_dma,
+                write_dma,
+            });
+        }
+        let low_water = flow & HOSTCC_FLOW_ATTN_MBUF_LWM != 0;
+        if low_water {
+            // Do not echo the whole observed status into this W1C register.
+            // Readback orders the acknowledgement; a new low-water event may
+            // immediately reassert, so its being clear is not a completion
+            // prerequisite. Never overwrite device-owned status DMA memory.
+            self.write(HOSTCC_FLOW_ATTN, HOSTCC_FLOW_ATTN_MBUF_LWM)?;
+            let after = self.read(HOSTCC_FLOW_ATTN)?;
+            if after & !HOSTCC_FLOW_ATTN_MBUF_LWM != 0 {
+                return Err(Error::Attention {
+                    flow: after,
+                    message,
+                    read_dma,
+                    write_dma,
+                });
+            }
+        }
+        Ok(low_water)
     }
     pub(in crate::net::tg3) fn tx_producer(&mut self, index: usize) -> Result<(), Error> {
         self.flush(MAILBOX_SNDHOST_PROD_IDX_0 + 4, index as u32)
