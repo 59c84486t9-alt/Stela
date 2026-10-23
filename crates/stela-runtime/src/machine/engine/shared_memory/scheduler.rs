@@ -522,9 +522,18 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                         self.alignment_fault(fault.address, write)
                     }
                 }
-                _ => Err(self.unsupported(RequirementKind::Native(
-                    "native Device/MMIO or unsupported source memory service remains unexecuted",
-                ))),
+                _ => Err(self.unsupported(match settlement.fault_word {
+                    Some(word) => RequirementKind::Instruction {
+                        word,
+                        detail: alloc::format!(
+                            "native source memory service remains unexecuted: {fault:?}; source={:?}",
+                            settlement.source_failure
+                        ),
+                    },
+                    None => RequirementKind::Native(
+                        "native Device/MMIO or unsupported source memory service remains unexecuted",
+                    ),
+                })),
             };
         }
         let Some(super::super::NativeExit::Exit { kind, .. }) = settlement.native else {
