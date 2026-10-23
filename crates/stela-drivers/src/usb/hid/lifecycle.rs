@@ -36,7 +36,8 @@ impl UsbInput {
         let result = self
             .controller
             .borrow_mut()
-            .cancel(self.slot, self.endpoint.dci());
+            .device(self.id)
+            .and_then(|mut device| device.cancel(self.endpoint.dci()));
         if let Err(error) = result {
             self.fault(error.clone());
             return Err(error);
@@ -85,7 +86,8 @@ impl UsbInput {
         let result = self
             .controller
             .borrow_mut()
-            .endpoint_ready(self.slot, self.endpoint.dci());
+            .device(self.id)
+            .and_then(|mut device| device.endpoint_ready(self.endpoint.dci()));
         if let Err(error) = result {
             self.fault(error.clone());
             return Err(error);

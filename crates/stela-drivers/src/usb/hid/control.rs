@@ -29,7 +29,8 @@ impl UsbInput {
         let bytes = self
             .controller
             .borrow_mut()
-            .control(self.slot, request, &[])?;
+            .device(self.id)?
+            .control(request, &[])?;
         if bytes.len() != length || (id != 0 && bytes.first() != Some(&id)) {
             return Err(BlockError::Protocol(
                 "invalid USB HID GET_REPORT length or ID",
@@ -75,7 +76,8 @@ impl UsbInput {
         );
         self.controller
             .borrow_mut()
-            .control(self.slot, request, bytes)?;
+            .device(self.id)?
+            .control(request, bytes)?;
         Ok(())
     }
 
@@ -95,7 +97,8 @@ impl UsbInput {
         );
         self.controller
             .borrow_mut()
-            .control(self.slot, request, &[])?;
+            .device(self.id)?
+            .control(request, &[])?;
         Ok(())
     }
 }

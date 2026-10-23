@@ -23,7 +23,7 @@ pub use descriptor::{DecodeError, Descriptor, Frame, ReportType};
 
 use super::xhci::{
     Controller, DEVICE_TO_HOST, Device, Endpoint, GET_DESCRIPTOR, Interface, Plan,
-    RECIPIENT_INTERFACE, STALL, Shared, TYPE_CLASS, setup,
+    RECIPIENT_INTERFACE, STALL, Shared, SlotId, TYPE_CLASS, setup,
 };
 use crate::{
     block::BlockError,
@@ -85,7 +85,7 @@ fn read_descriptor(
         u16::from(interface.number),
         length,
     );
-    let bytes = c.control(device.slot, request, &[])?;
+    let bytes = c.device(device.id)?.control(request, &[])?;
     if bytes.len() != usize::from(length) {
         return Err(BlockError::Protocol("short USB HID report descriptor"));
     }
@@ -208,7 +208,7 @@ impl Retry {
 /// One HID interface the host polls.
 pub struct UsbInput {
     controller: Shared,
-    slot: u8,
+    id: SlotId,
     interface: u8,
     descriptor: Option<Descriptor>,
     report_descriptor: Vec<u8>,
@@ -258,10 +258,9 @@ impl UsbInput {
                     index,
                     0,
                 );
-                c.control(device.slot, request, &[])?;
+                c.device(device.id)?.control(request, &[])?;
                 // Reports on change only; a device may refuse.
-                match c.control(
-                    device.slot,
+                match c.device(device.id)?.control(
                     setup(TYPE_CLASS | RECIPIENT_INTERFACE, SET_IDLE, 0, index, 0),
                     &[],
                 ) {
@@ -318,7 +317,7 @@ impl UsbInput {
                     // SET_PROTOCOL is only defined for boot-subclass devices.
                     // SET_IDLE is optional for an ordinary report interface.
                     let idle = setup(TYPE_CLASS | RECIPIENT_INTERFACE, SET_IDLE, 0, index, 0);
-                    match c.control(device.slot, idle, &[]) {
+                    match c.device(device.id)?.control(idle, &[]) {
                         Ok(_) | Err(BlockError::Device { status: STALL }) => {}
                         Err(error) => return Err(error),
                     }
@@ -346,7 +345,7 @@ impl UsbInput {
         let buffer = dma.allocate(length, length.next_power_of_two())?;
         Ok(Some(Self {
             controller,
-            slot: device.slot,
+            id: device.id,
             interface: interface.number,
             descriptor,
             report_descriptor,
@@ -387,12 +386,13 @@ impl UsbInput {
             let trb = match self.queued {
                 Some(trb) => trb,
                 None => {
-                    let submitted = self.controller.borrow_mut().submit(
-                        self.slot,
-                        self.endpoint.dci(),
-                        self.buffer.physical(),
-                        length,
-                    );
+                    let submitted =
+                        self.controller
+                            .borrow_mut()
+                            .device(self.id)
+                            .and_then(|mut device| {
+                                device.submit(self.endpoint.dci(), self.buffer.physical(), length)
+                            });
                     match submitted {
                         Ok(trb) => {
                             self.queued = Some(trb);
@@ -405,10 +405,10 @@ impl UsbInput {
                     }
                 }
             };
-            let result =
-                self.controller
-                    .borrow_mut()
-                    .completed(self.slot, self.endpoint.dci(), trb, length);
+            let result = match self.controller.borrow_mut().device(self.id) {
+                Ok(mut device) => device.completed(self.endpoint.dci(), trb, length),
+                Err(error) => Some(Err(error)),
+            };
             let Some(result) = result else {
                 break;
             };
@@ -468,15 +468,17 @@ impl UsbInput {
                 }
                 Err(error) => {
                     self.error.get_or_insert_with(|| error.clone());
-                    let recovered = if error == (BlockError::Device { status: STALL }) {
+                    let recovered =
                         self.controller
                             .borrow_mut()
-                            .clear(self.slot, &self.endpoint)
-                    } else {
-                        self.controller
-                            .borrow_mut()
-                            .reset_endpoint(self.slot, &self.endpoint)
-                    };
+                            .device(self.id)
+                            .and_then(|mut device| {
+                                if error == (BlockError::Device { status: STALL }) {
+                                    device.clear(&self.endpoint)
+                                } else {
+                                    device.reset_endpoint(&self.endpoint)
+                                }
+                            });
                     if recovered.is_ok() {
                         self.queued = None;
                     }
@@ -752,8 +754,10 @@ mod tests {
         }
     }
 
-    fn device() -> Device {
-        model::device(Vec::new())
+    fn device(controller: &Shared) -> Device {
+        let mut device = model::device(Vec::new());
+        device.id = controller.borrow().test_device_id(1).unwrap();
+        device
     }
 
     #[test]
@@ -770,8 +774,8 @@ mod tests {
         let shared: Shared = Rc::new(RefCell::new(controller));
         let interface = interface(GAMEPAD, 0, 0);
         let mut input = UsbInput::new(
-            shared,
-            &device(),
+            shared.clone(),
+            &device(&shared),
             &interface,
             interface.endpoints[0],
             &mut dma,
@@ -864,7 +868,7 @@ mod tests {
         let interface = interface(GAMEPAD, 0, 0);
         let mut input = UsbInput::new(
             shared.clone(),
-            &device(),
+            &device(&shared),
             &interface,
             interface.endpoints[0],
             &mut dma,
@@ -904,8 +908,8 @@ mod tests {
         let shared: Shared = Rc::new(RefCell::new(controller));
         let interface = interface(&keyboard, BOOT, KEYBOARD);
         let mut input = UsbInput::new(
-            shared,
-            &device(),
+            shared.clone(),
+            &device(&shared),
             &interface,
             interface.endpoints[0],
             &mut dma,
@@ -1053,8 +1057,8 @@ mod tests {
             let shared: Shared = Rc::new(RefCell::new(controller));
             let interface = interface(&pointer, 0, 0);
             let mut input = UsbInput::new(
-                shared,
-                &device(),
+                shared.clone(),
+                &device(&shared),
                 &interface,
                 interface.endpoints[0],
                 &mut dma,
@@ -1102,8 +1106,8 @@ mod tests {
         let shared: Shared = Rc::new(RefCell::new(controller));
         let interface = interface(&descriptor, BOOT, KEYBOARD);
         let mut input = UsbInput::new(
-            shared,
-            &device(),
+            shared.clone(),
+            &device(&shared),
             &interface,
             interface.endpoints[0],
             &mut dma,
@@ -1132,5 +1136,45 @@ mod tests {
             }]
         );
         assert!(matches!(&polled.reports[0], ReceivedReport::Boot(_)));
+    }
+
+    #[test]
+    fn retired_identity_refuses_old_hid_control_poll_and_restart_without_dma_mutation() {
+        let mut backing = vec![0u64; 128 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: this exclusive model allocation outlives all DMA users.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (controller, hardware) = model::cancellation_controller(&mut dma);
+        hardware
+            .borrow_mut()
+            .descriptors
+            .push((REPORT_DESCRIPTOR, 0, GAMEPAD.to_vec()));
+        let shared: Shared = Rc::new(RefCell::new(controller));
+        let interface = interface(GAMEPAD, 0, 0);
+        let mut input = UsbInput::new(
+            shared.clone(),
+            &device(&shared),
+            &interface,
+            interface.endpoints[0],
+            &mut dma,
+        )
+        .unwrap()
+        .unwrap();
+        input.poll_hid();
+        let ticket = input.queued;
+        let memory = input.buffer.bytes().to_vec();
+        shared.borrow_mut().quarantine_slot(1);
+        let commands = hardware.borrow().seen.clone();
+        let requests = hardware.borrow().setup.clone();
+        assert!(input.set_report(ReportType::Output, 2, &[2, 0]).is_err());
+        assert!(input.get_report(ReportType::Feature, 2).is_err());
+        assert!(input.poll_hid().reports.is_empty());
+        assert_eq!(input.state(), State::Faulted);
+        assert_eq!(input.queued, ticket);
+        assert_eq!(input.buffer.bytes(), memory);
+        assert!(input.stop_hid().is_err());
+        assert!(input.restart().is_err());
+        assert_eq!(hardware.borrow().seen, commands);
+        assert_eq!(hardware.borrow().setup, requests);
     }
 }
