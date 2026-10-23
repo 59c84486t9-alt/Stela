@@ -40,6 +40,12 @@ const STOP_TX: [u32; 6] = [0x1400, 0x1800, 0xc00, 0x4800, 0x1000, 0x1c00];
 const WDMAC_MODE: u32 = 0x4c00;
 const MAILBOX_INTERRUPT: u32 = 0x204;
 const MASK_PCI_INT: u32 = 2;
+const MEMARB_MODE: u32 = 0x4000;
+const PCISTATE: u16 = 0x70;
+const ALLOW_APE: u32 = 0x0007_0000;
+const CPMU_STATUS: u32 = 0x362c;
+const SRAM_CPMU_STATUS: u32 = 0xe00;
+const HOST_ACCESS: u32 = 0x9a; // MASK_PCI_INT | WORD_SWAP | INDIR_ACCESS | PCISTATE_RW.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
@@ -47,6 +53,10 @@ pub struct Identity {
     /// Unaltered source chip identity, including revision and metal stepping.
     pub chip_revision: u32,
     pub asic: Asic,
+    /// PCI BDF function observed from the retained config owner.
+    pub bdf_function: u8,
+    /// ASIC port: BCM5720 derives this from the signed CPMU SRAM word or
+    /// live CPMU status, which need not equal the BDF function.
     pub function: u8,
     pub phy_address: u8,
 }
@@ -175,6 +185,14 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             return Err(Error::UnsupportedDevice);
         }
         let host = Self::checked(self.regs().config_read32(MISC_HOST_CTRL)?)?;
+        // tg3_get_invariants establishes register word swapping/indirect
+        // access through CONFIG space before the first MAC MMIO operation.
+        let control = (host & 0xffff_0000) | HOST_ACCESS;
+        self.regs().config_write32(MISC_HOST_CTRL, control)?;
+        let observed = Self::checked(self.regs().config_read32(MISC_HOST_CTRL)?)?;
+        if observed & 0xffff != HOST_ACCESS {
+            return Err(Error::ConfigDidNotLatch);
+        }
         let mut chip_revision = host >> 16;
         if chip_revision >> 12 == 0xf {
             let at = if matches!(device, 0x165f | 0x1687) {
@@ -190,9 +208,32 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             (0x1687, 0x5762) => Asic::Bcm5762,
             _ => return Err(Error::UnsupportedRevision),
         };
-        let function = self.regs().function_number();
-        if function > 3 {
+        let bdf_function = self.regs().function_number();
+        if bdf_function > 7 {
             return Err(Error::UnsupportedDevice);
+        }
+        // tg3_get_invariants: netboot may have disabled the memory arbiter.
+        // Establish and observe it before any SRAM data can be trusted.
+        let arbiter = self.read(MEMARB_MODE)?;
+        self.flush(MEMARB_MODE, arbiter | ENABLE)?;
+        if self.read(MEMARB_MODE)? & ENABLE == 0 {
+            return Err(Error::ConfigDidNotLatch);
+        }
+        let function = if asic == Asic::Bcm5720 {
+            let saved = self.sram(SRAM_CPMU_STATUS, None)?;
+            let status = if saved & 0xffff == CPMU_STATUS {
+                saved
+            } else {
+                self.read(CPMU_STATUS)?
+            };
+            (status >> 30) as u8
+        } else {
+            bdf_function & 3
+        };
+        let state = Self::checked(self.regs().config_read32(PCISTATE)?)?;
+        self.regs().config_write32(PCISTATE, state | ALLOW_APE)?;
+        if Self::checked(self.regs().config_read32(PCISTATE)?)? & ALLOW_APE != ALLOW_APE {
+            return Err(Error::ConfigDidNotLatch);
         }
         // tg3_mdio_init: only 5717_PLUS (5720 here) changes the PHY address.
         let phy_address = if asic == Asic::Bcm5720 {
@@ -207,10 +248,27 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             device,
             chip_revision,
             asic,
+            bdf_function,
             function,
             phy_address,
         };
         self.identity = Some(identity);
+        // tg3_ape_lock_init clears only this actual port's stale grant bits;
+        // it never fabricates an acquisition or clears a competitor's bit.
+        let grant_base = if asic == Asic::Bcm5761 {
+            APE_LOCK_GRANT
+        } else {
+            APE_PER_LOCK_GRANT
+        };
+        for lock in 0..=7u8 {
+            let bit = if PHY_LOCKS.contains(&lock) || function == 0 {
+                APE_DRIVER
+            } else {
+                1 << function
+            };
+            self.regs()
+                .ape_write32(grant_base + u32::from(lock) * 4, bit)?;
+        }
         Ok(identity)
     }
 

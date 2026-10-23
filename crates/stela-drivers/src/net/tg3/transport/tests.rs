@@ -7,6 +7,8 @@ use core::cell::RefCell;
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Event {
     Config(u16, u32),
+    ConfigWrite(u16, u32),
+    ConfigWrite16(u16, u16),
     Read(u32, u32),
     Write(u32, u32),
     ApeRead(u32, u32),
@@ -67,6 +69,23 @@ unsafe impl Registers for Reg {
         let value = *m.config.get(&at).unwrap_or(&0);
         m.event(Event::Config(at, value))?;
         Ok(value)
+    }
+    fn config_write32(&mut self, at: u16, value: u32) -> Result<(), Error> {
+        let mut m = self.0.borrow_mut();
+        m.event(Event::ConfigWrite(at, value))?;
+        m.config.insert(at, value);
+        Ok(())
+    }
+    fn config_write16(&mut self, at: u16, value: u16) -> Result<(), Error> {
+        let mut m = self.0.borrow_mut();
+        m.event(Event::ConfigWrite16(at, value))?;
+        let shift = (at & 2) * 8;
+        let previous = *m.config.get(&(at & !3)).unwrap_or(&0);
+        m.config.insert(
+            at & !3,
+            (previous & !(0xffff << shift)) | (u32::from(value) << shift),
+        );
+        Ok(())
     }
     fn read32(&mut self, at: u32) -> Result<u32, Error> {
         let mut m = self.0.borrow_mut();
@@ -176,6 +195,8 @@ fn model(asic: Asic, function: u8) -> (Hardware<Reg, Timer>, Rc<RefCell<Model>>)
     m.phy
         .insert(3, (((identity >> 16) & 0xfc00) | (identity & 0x3ff)) as u16);
     m.phy.insert(7, 0xa55a);
+    m.sram
+        .insert(SRAM_CPMU_STATUS, (u32::from(function) << 30) | CPMU_STATUS);
     let m = Rc::new(RefCell::new(m));
     (Hardware::new(Reg(m.clone()), Timer(m.clone())), m)
 }
@@ -388,4 +409,77 @@ fn engine_stop_observes_each_ack_and_never_counts_timeout_as_silent_success() {
         drop(hardware);
         assert_eq!(m.borrow().dropped, 0);
     }
+}
+
+#[test]
+fn bcm5720_internal_port_comes_from_signed_sram_then_live_fallback() {
+    for signature_valid in [false, true] {
+        let (mut hardware, m) = model(Asic::Bcm5720, 0);
+        m.borrow_mut().sram.insert(
+            SRAM_CPMU_STATUS,
+            if signature_valid {
+                (3 << 30) | CPMU_STATUS
+            } else {
+                0
+            },
+        );
+        m.borrow_mut().mac.insert(CPMU_STATUS, 2 << 30);
+        let identity = hardware.identify().unwrap();
+        assert_eq!(identity.bdf_function, 0);
+        assert_eq!(identity.function, if signature_valid { 3 } else { 2 });
+        assert_eq!(identity.phy_address, identity.function + 1);
+        m.borrow_mut().trace.clear();
+        hardware.read_phy(7).unwrap();
+        assert!(m.borrow().trace.contains(&Event::ApeWrite(
+            APE_PER_LOCK_REQ + u32::from(PHY_LOCKS[usize::from(identity.function)]) * 4,
+            APE_DRIVER
+        )));
+    }
+}
+
+#[test]
+fn initial_mac_access_follows_observed_config_word_swap_and_sram_arbiter() {
+    let (mut hardware, m) = model(Asic::Bcm5720, 1);
+    hardware.identify().unwrap();
+    let m = m.borrow();
+    let config = m
+        .trace
+        .iter()
+        .position(|e| *e == Event::ConfigWrite(MISC_HOST_CTRL, 0xf000_0000 | HOST_ACCESS))
+        .unwrap();
+    let first_mac = m
+        .trace
+        .iter()
+        .position(|e| matches!(e, Event::Read(..) | Event::Write(..)))
+        .unwrap();
+    assert!(config < first_mac);
+    let arbiter = m
+        .trace
+        .iter()
+        .position(|e| *e == Event::Write(MEMARB_MODE, ENABLE))
+        .unwrap();
+    let sram = m
+        .trace
+        .iter()
+        .position(|e| *e == Event::Write(MEM_BASE, SRAM_CPMU_STATUS))
+        .unwrap();
+    assert!(arbiter < sram);
+    let allow = m
+        .trace
+        .iter()
+        .position(|e| *e == Event::ConfigWrite(PCISTATE, ALLOW_APE))
+        .unwrap();
+    let first_ape = m
+        .trace
+        .iter()
+        .position(|e| matches!(e, Event::ApeWrite(..)))
+        .unwrap();
+    assert!(allow < first_ape);
+    assert_eq!(
+        m.trace
+            .iter()
+            .filter(|e| matches!(e, Event::ApeWrite(..)))
+            .count(),
+        8
+    );
 }

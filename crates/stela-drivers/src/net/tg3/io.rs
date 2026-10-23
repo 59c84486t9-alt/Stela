@@ -85,6 +85,24 @@ unsafe impl<C: ConfigSpace> Registers for Mmio<C> {
             Ok(value)
         }
     }
+    fn config_write32(&mut self, at: u16, value: u32) -> Result<(), Error> {
+        if at & 3 != 0 || at > 4092 {
+            return Err(Error::Bounds);
+        }
+        self.function.config().write32(at, value);
+        self.config_read32(0)?; // Real config remains reachable after a write.
+        Ok(())
+    }
+    fn config_write16(&mut self, at: u16, value: u16) -> Result<(), Error> {
+        if at & 1 != 0 || at > 4094 {
+            return Err(Error::Bounds);
+        }
+        // Native ConfigSpace overrides this with an actual narrow store,
+        // never a dword RMW that could acknowledge adjacent W1C status.
+        self.function.config().write16(at, value);
+        self.config_read32(0)?;
+        Ok(())
+    }
     fn read32(&mut self, at: u32) -> Result<u32, Error> {
         self.mac.read(at)
     }

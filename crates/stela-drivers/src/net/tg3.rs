@@ -33,6 +33,10 @@ pub enum Error {
     MdioReadFailed,
     FirmwareTimeout,
     StopTimeout(u32),
+    UnsupportedManaged,
+    UnsupportedPcie,
+    ConfigDidNotLatch,
+    NvramTimeout,
     Poisoned,
     NotIdentified,
     Stopped,
@@ -51,6 +55,8 @@ pub enum Error {
 pub unsafe trait Registers {
     fn function_number(&self) -> u8;
     fn config_read32(&mut self, at: u16) -> Result<u32, Error>;
+    fn config_write32(&mut self, at: u16, value: u32) -> Result<(), Error>;
+    fn config_write16(&mut self, at: u16, value: u16) -> Result<(), Error>;
     fn read32(&mut self, at: u32) -> Result<u32, Error>;
     fn write32(&mut self, at: u32, value: u32) -> Result<(), Error>;
     fn ape_read32(&mut self, at: u32) -> Result<u32, Error>;
