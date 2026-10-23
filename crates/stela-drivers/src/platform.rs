@@ -6,6 +6,7 @@ pub mod acpi;
 pub mod battery;
 pub mod ec;
 pub mod ec_smbus;
+pub mod image;
 pub mod sbs;
 pub mod wait;
 pub mod work;
