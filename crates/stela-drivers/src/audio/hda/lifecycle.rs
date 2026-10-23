@@ -22,8 +22,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .generation
             .checked_add(1)
             .ok_or(Error::NeedsReset)?;
+        let shutdown = self.shutdown();
         self.lifecycle_failed = true;
-        self.shutdown()?;
+        if let Err(error) = shutdown
+            && !self.stopped
+        {
+            return Err(error);
+        }
+        // A failed codec amplifier-off readback can still leave every DMA RUN
+        // acknowledged off (stopped=true). Reset is its recovery boundary;
+        // that codec failure never licenses reuse without this actual reset.
         // Every RUN acknowledgement succeeded. It is now safe to retire the
         // old software maps; backing RAM itself is never returned to an allocator.
         self.token.generation = generation;
@@ -40,6 +48,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             let _ = self.shutdown();
             return Err(error);
         }
+        self.conexant_codecs.clear();
         self.command_poisoned = false;
         self.routing_failed = false;
         self.lifecycle_failed = false;

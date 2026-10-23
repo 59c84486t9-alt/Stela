@@ -1,0 +1,319 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//! Conexant standard-route backend adapted from Linux conexant.c and generic.c.
+//! Linux a804c5742bff224d4cb4d25dd383554d598be32b.
+//! generic.c Copyright (c) 2004 Takashi Iwai.
+//! Copyright (c) 2006 Pototskiy Akex, Takashi Iwai and Tobin Davis.
+//! EAPD count selects the donor's global/dynamic heuristic; no OEM GPIO, ACPI,
+//! LED, pin override or proprietary headset policy is inferred from a codec ID.
+use super::{
+    AnalogRoute, CodecGraph, Controller, PinOptions, Registers, StreamId, Verb, WidgetKind,
+};
+use crate::{
+    audio::{Direction, Error},
+    bus::i2c::Timer,
+};
+use alloc::vec::Vec;
+
+const GET_PARAMETER: u16 = 0xf00;
+const GET_EAPD: u16 = 0xf0c;
+const SET_EAPD: u16 = 0x70c;
+const PIN_EAPD: u32 = 1 << 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConexantEapdMode {
+    Global,
+    Dynamic,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConexantReport {
+    pub codec_id: u32,
+    pub revision_id: u32,
+    pub subsystem_id: u32,
+    pub function_group: u8,
+    /// Inferred from the donor's count heuristic, not a silicon capability bit.
+    pub eapd_mode: ConexantEapdMode,
+    /// Actual pin IDs and observed EAPD controls after initialization.
+    pub eapd: Vec<(u8, u8)>,
+    pub single_adc_amplifier: bool,
+}
+#[derive(Clone)]
+pub(super) struct State {
+    address: u8,
+    codec_id: u32,
+    revision_id: u32,
+    group: u8,
+    pins: Vec<u8>,
+    active: bool,
+    retired: bool,
+}
+fn profile(id: u32) -> Result<bool, Error> {
+    match id {
+        // CX20549 uses a single ADC amp regardless of selected input index.
+        0x14f1_5045 => Ok(true),
+        0x14f1_2008 | 0x14f1_20d0 | 0x14f1_20d1 | 0x14f1_5047 | 0x14f1_5051 | 0x14f1_5066
+        | 0x14f1_5067 | 0x14f1_5068 | 0x14f1_5069 | 0x14f1_506c | 0x14f1_506e | 0x14f1_5097
+        | 0x14f1_5098 | 0x14f1_50a1 | 0x14f1_50a2 | 0x14f1_50ab | 0x14f1_50ac | 0x14f1_50b8
+        | 0x14f1_50b9 | 0x14f1_50f1 | 0x14f1_50f2 | 0x14f1_50f3 | 0x14f1_50f4 | 0x14f1_510f
+        | 0x14f1_5110 | 0x14f1_5111 | 0x14f1_5113 | 0x14f1_5114 | 0x14f1_5115 | 0x14f1_51d7 => {
+            Ok(false)
+        }
+        // CX11880/SN6140 require vendor headset/micbias procedures, kept explicit.
+        _ => Err(Error::UnsupportedTopology),
+    }
+}
+impl<R: Registers, T: Timer> Controller<R, T> {
+    fn conexant_parameter(&mut self, codec: u8, node: u8, parameter: u8) -> Result<u32, Error> {
+        self.verb(Verb::short(codec, node, GET_PARAMETER, parameter)?)
+    }
+    fn conexant_guard(&self, graph: &CodecGraph) -> Result<(), Error> {
+        if graph.token != self.token {
+            return Err(Error::InvalidCodecGraph);
+        }
+        if self.routing_failed || self.lifecycle_failed || self.command_poisoned {
+            return Err(Error::NeedsReset);
+        }
+        if self.stopped {
+            return Err(Error::Shutdown);
+        }
+        profile(graph.vendor_id)?;
+        Ok(())
+    }
+    fn conexant_identity(&mut self, graph: &CodecGraph) -> Result<(u8, u32, Vec<u8>), Error> {
+        let vendor = self.conexant_parameter(graph.address, 0, 0)?;
+        let revision = self.conexant_parameter(graph.address, 0, 2)?;
+        if vendor != graph.vendor_id || revision != graph.revision_id || revision == u32::MAX {
+            return Err(Error::InvalidCodecGraph);
+        }
+        profile(vendor)?;
+        let groups: Vec<_> = graph
+            .groups
+            .iter()
+            .filter(|g| g.function_type & 255 == 1)
+            .collect();
+        if groups.len() != 1 {
+            return Err(Error::UnsupportedTopology);
+        }
+        let group = groups[0];
+        let roots = self.conexant_parameter(graph.address, 0, 4)?;
+        let root_first = (roots >> 16) & 255;
+        let root_end = root_first + (roots & 255);
+        if root_first == 0
+            || root_end > 128
+            || !(root_first..root_end).contains(&u32::from(group.node))
+            || self.conexant_parameter(graph.address, group.node, 5)? != group.function_type
+        {
+            return Err(Error::InvalidCodecGraph);
+        }
+        let power = self.conexant_parameter(graph.address, group.node, 0x0f)?;
+        if power == u32::MAX || power & 1 == 0 || group.power_states != Some(power) {
+            return Err(Error::InvalidCodecGraph);
+        }
+        let nodes = self.conexant_parameter(graph.address, group.node, 4)?;
+        let first = (nodes >> 16) & 255;
+        let end = first + (nodes & 255);
+        if first <= u32::from(group.node)
+            || nodes & 255 == 0
+            || end > 128
+            || group.widgets.len() != (nodes & 255) as usize
+        {
+            return Err(Error::InvalidCodecGraph);
+        }
+        let mut pins = Vec::new();
+        for node in first..end {
+            let node = node as u8;
+            let caps = self.conexant_parameter(graph.address, node, 9)?;
+            let cached = group
+                .widgets
+                .iter()
+                .find(|w| w.node == node)
+                .ok_or(Error::InvalidCodecGraph)?;
+            if caps == u32::MAX || cached.capabilities != caps {
+                return Err(Error::InvalidCodecGraph);
+            }
+            if (caps >> 20) & 15 != 4 {
+                continue;
+            }
+            let pin = self.conexant_parameter(graph.address, node, 0x0c)?;
+            if pin == u32::MAX {
+                return Err(Error::InvalidCodecGraph);
+            }
+            if cached.kind != WidgetKind::Pin || cached.pin_capabilities != Some(pin) {
+                return Err(Error::InvalidCodecGraph);
+            }
+            if pin & PIN_EAPD != 0 {
+                if pins.len() == 4 {
+                    return Err(Error::UnsupportedTopology);
+                }
+                pins.push(node);
+            }
+        }
+        let subsystem = self.verb(Verb::short(graph.address, group.node, 0xf20, 0)?)?;
+        if subsystem == u32::MAX {
+            return Err(Error::InvalidCodecGraph);
+        }
+        Ok((group.node, subsystem, pins))
+    }
+    fn conexant_eapd(&mut self, codec: u8, pin: u8, enabled: bool) -> Result<u8, Error> {
+        // Match cx_auto_turn_eapd exactly, including its whole control value.
+        let value = if enabled { 2 } else { 0 };
+        self.route_control(codec, pin, SET_EAPD, GET_EAPD, value)?;
+        Ok(value)
+    }
+    /// Initialize held-D0 standard analog control ownership. The graph must
+    /// describe the actual codec. Dynamic EAPD retains its observed value until
+    /// the caller explicitly applies the master output switch. OEM pin/GPIO,
+    /// ACPI, headset protocols, unsolicited events and suspend are separate.
+    pub fn initialize_conexant_codec(
+        &mut self,
+        graph: &CodecGraph,
+    ) -> Result<ConexantReport, Error> {
+        self.conexant_guard(graph)?;
+        self.require_routing_stopped()?;
+        if self
+            .routes
+            .iter()
+            .any(|(_, r)| r.codec_address() == graph.address)
+            || self
+                .codec_controls
+                .iter()
+                .any(|(_, c, _)| *c == graph.address)
+            || self
+                .conexant_codecs
+                .iter()
+                .any(|c| c.address == graph.address)
+        {
+            return Err(Error::RouteInUse);
+        }
+        let single_adc = profile(graph.vendor_id)?;
+        let (group, subsystem, pins) = self.conexant_identity(graph)?;
+        let mode = if pins.len() > 2 {
+            ConexantEapdMode::Dynamic
+        } else {
+            ConexantEapdMode::Global
+        };
+        let index = self.conexant_codecs.len();
+        // Retain the exact verified pin set before any power/EAPD effects.
+        self.conexant_codecs.push(State {
+            address: graph.address,
+            codec_id: graph.vendor_id,
+            revision_id: graph.revision_id,
+            group,
+            pins: pins.clone(),
+            active: false,
+            retired: false,
+        });
+        let result = (|| {
+            self.power_d0(graph.address, group)?;
+            let mut observed = Vec::new();
+            for pin in pins {
+                let value = if mode == ConexantEapdMode::Global {
+                    self.conexant_eapd(graph.address, pin, true)?
+                } else {
+                    let value = self.verb(Verb::short(graph.address, pin, GET_EAPD, 0)?)?;
+                    if value > 7 {
+                        return Err(Error::RouteRejected);
+                    }
+                    value as u8
+                };
+                observed.push((pin, value));
+            }
+            Ok(ConexantReport {
+                codec_id: graph.vendor_id,
+                revision_id: graph.revision_id,
+                subsystem_id: subsystem,
+                function_group: group,
+                eapd_mode: mode,
+                eapd: observed,
+                single_adc_amplifier: single_adc,
+            })
+        })();
+        if result.is_ok() {
+            self.conexant_codecs[index].active = true;
+        } else {
+            self.routing_failed = true;
+        }
+        result
+    }
+    fn conexant_active(&mut self, graph: &CodecGraph) -> Result<State, Error> {
+        self.conexant_guard(graph)?;
+        let state = self
+            .conexant_codecs
+            .iter()
+            .find(|c| c.address == graph.address && c.active && !c.retired)
+            .cloned()
+            .ok_or(Error::NeedsReset)?;
+        let (group, _, pins) = self.conexant_identity(graph)?;
+        if group != state.group
+            || pins != state.pins
+            || graph.vendor_id != state.codec_id
+            || graph.revision_id != state.revision_id
+        {
+            return Err(Error::InvalidCodecGraph);
+        }
+        Ok(state)
+    }
+    /// Configure an explicit analog path using the codec's ADC amp policy.
+    /// EAPD stays under codec ownership: pass None in playback options and use
+    /// set_conexant_outputs_enabled for the master output switch.
+    pub fn configure_conexant_route(
+        &mut self,
+        graph: &CodecGraph,
+        route: &AnalogRoute,
+        id: StreamId,
+        channel: u8,
+        options: PinOptions,
+    ) -> Result<(), Error> {
+        self.conexant_guard(graph)?;
+        let single_adc = profile(graph.vendor_id)?;
+        self.preflight_analog_route_policy(graph, route, id, channel, options, single_adc)?;
+        let state = self.conexant_active(graph)?;
+        // own_eapd_ctl in cx_probe suppresses generic per-pin EAPD updates.
+        // Both global and dynamic codecs use the separate whole-value master
+        // operation, so routing cannot silently rewrite that policy.
+        if route.direction() == Direction::Playback
+            && state.pins.contains(&route.pin())
+            && matches!(options, PinOptions::Playback { eapd: Some(_), .. })
+        {
+            return Err(Error::InvalidPinControl);
+        }
+        self.configure_analog_route_policy(graph, route, id, channel, options, single_adc)
+    }
+    /// Linux's vmaster EAPD operation. Live DMA may continue; any failed effect
+    /// blocks future starts until reset, while all buffers remain retained.
+    pub fn set_conexant_outputs_enabled(
+        &mut self,
+        graph: &CodecGraph,
+        enabled: bool,
+    ) -> Result<(), Error> {
+        if self.streams.iter().flatten().any(|s| s.poisoned) {
+            return Err(Error::NeedsReset);
+        }
+        let state = self.conexant_active(graph)?;
+        for pin in state.pins {
+            if let Err(error) = self.conexant_eapd(graph.address, pin, enabled) {
+                self.routing_failed = true;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+    /// Called only after every actual stream stop has acknowledged, before CORB
+    /// and RIRB stop. Unknown codec effects remain retained through error/reset.
+    pub(super) fn shutdown_conexant_codecs(&mut self) -> Result<(), Error> {
+        for index in 0..self.conexant_codecs.len() {
+            let state = self.conexant_codecs[index].clone();
+            if state.retired {
+                continue;
+            }
+            if self.stopped || self.command_poisoned {
+                return Err(Error::NeedsReset);
+            }
+            for pin in state.pins {
+                self.conexant_eapd(state.address, pin, false)?;
+            }
+            self.conexant_codecs[index].active = false;
+            self.conexant_codecs[index].retired = true;
+        }
+        Ok(())
+    }
+}

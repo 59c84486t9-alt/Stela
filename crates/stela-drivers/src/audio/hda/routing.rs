@@ -255,7 +255,12 @@ fn amplifier(
     })
 }
 
-fn plan(graph: &CodecGraph, route: &AnalogRoute, options: PinOptions) -> Result<Plan, Error> {
+fn plan(
+    graph: &CodecGraph,
+    route: &AnalogRoute,
+    options: PinOptions,
+    single_adc_amp: bool,
+) -> Result<Plan, Error> {
     if graph.analog_route(route.direction, route.pin, route.converter)? != *route {
         return Err(Error::InvalidCodecGraph);
     }
@@ -351,7 +356,11 @@ fn plan(graph: &CodecGraph, route: &AnalogRoute, options: PinOptions) -> Result<
             _ => return Err(Error::UnsupportedTopology),
         };
         if input && let Some(caps) = current.input_amplifier {
-            let index = selected.unwrap_or(0);
+            let index = if single_adc_amp && current.kind == WidgetKind::Input {
+                0
+            } else {
+                selected.unwrap_or(0)
+            };
             if current.kind == WidgetKind::Mixer {
                 for other in 0..current.connections.len() {
                     plan.amplifiers.push(amplifier(
@@ -448,6 +457,17 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<Plan, Error> {
+        self.preflight_analog_route_policy(graph, route, id, channel, options, false)
+    }
+    pub(super) fn preflight_analog_route_policy(
+        &self,
+        graph: &CodecGraph,
+        route: &AnalogRoute,
+        id: StreamId,
+        channel: u8,
+        options: PinOptions,
+        single_adc_amp: bool,
+    ) -> Result<Plan, Error> {
         if graph.token != self.token || route.token != self.token {
             return Err(Error::InvalidCodecGraph);
         }
@@ -459,7 +479,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(Error::InvalidStream);
         }
         self.validate_converter(graph, route.converter, id, channel)?;
-        let plan = plan(graph, route, options)?;
+        let plan = plan(graph, route, options, single_adc_amp)?;
         if self.routes.iter().any(|(owner, previous)| {
             *owner == id
                 || (previous.codec == route.codec
@@ -489,7 +509,19 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<(), Error> {
-        let plan = self.preflight_analog_route(graph, route, id, channel, options)?;
+        self.configure_analog_route_policy(graph, route, id, channel, options, false)
+    }
+    pub(super) fn configure_analog_route_policy(
+        &mut self,
+        graph: &CodecGraph,
+        route: &AnalogRoute,
+        id: StreamId,
+        channel: u8,
+        options: PinOptions,
+        single_adc_amp: bool,
+    ) -> Result<(), Error> {
+        let plan =
+            self.preflight_analog_route_policy(graph, route, id, channel, options, single_adc_amp)?;
         let result = (|| {
             for node in plan.power {
                 self.power_d0(route.codec, node)?;
