@@ -171,6 +171,18 @@ impl<C: 'static> HardwareKey<C> {
     ) -> Result<security::AuthenticatedData<'a>, security::Error> {
         self.owned_mut().slot.authorize(mpdu)
     }
+    /// Apply the separate PTK management replay boundary to actual normalized
+    /// RX. Caller retains actual DMA, local-interface and current-peer provenance;
+    /// the resulting proof does not authorize a delayed station transition.
+    pub fn authorize_unicast_management<'a>(
+        &mut self,
+        mpdu: &'a crate::net::wifi::frame::Mpdu,
+        local: crate::net::Mac,
+    ) -> Result<security::unicast_management::Authenticated<'a>, security::Error> {
+        self.owned_mut()
+            .slot
+            .authorize_unicast_management(mpdu, local)
+    }
     pub fn resource(&self) -> &C {
         &self.owned().resource
     }

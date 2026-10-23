@@ -12,6 +12,8 @@ mod policy;
 pub use policy::{AttachError, BssHandle, Environment, ManagedClient, PolicyError};
 mod radio;
 mod receive;
+#[cfg(test)]
+mod unicast_management_tests;
 use crate::{
     bus::dma::memory::PageSource,
     net::wifi::{

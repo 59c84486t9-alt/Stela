@@ -18,7 +18,9 @@
 //! bypasses the software check. The separate complete-owned post-order group
 //! gate authenticates all constituents before one parent replay update. This
 //! does not implement grouping, BA/reordering, fragmentation, deaggregation or
-//! unicast protected management or PMF association negotiation. The separate
+//! PMF association negotiation. The unicast management boundary authenticates
+//! hardware-verified CCMP128 under the installed PTK and separate counter16;
+//! it grants no current-association or station-delivery authority. The separate
 //! management module authenticates group BIP-CMAC128 under an actually retained
 //! IGTK; this grants no current-association or controlled-port authority.
 
@@ -29,6 +31,7 @@ use sha2::{Digest, Sha256};
 pub mod aggregate;
 pub mod management;
 pub mod tx;
+pub mod unicast_management;
 pub use tx::{HostTxNonce, NonceOwner, TransmitSeed};
 
 static NEXT_NATIVE_EPOCH: super::Identities = super::Identities::new();
@@ -198,8 +201,8 @@ pub enum Error {
 
 /// Authenticated initial receive counters from the actual key exchange or
 /// device handoff. Queues 0..15 correspond to TIDs; non-QoS data shares queue 0.
-/// Queue 16 is reserved by the source for protected management, still unsupported
-/// by this data-only authorization boundary.
+/// Queue 16 is the separate unicast protected-management receive counter.
+/// Data authorization never reads or advances that counter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReplaySeed([u64; 17]);
 
@@ -456,6 +459,23 @@ impl KeySlot {
         if !aggregate && (header.amsdu || mpdu.aggregation != Aggregation::default()) {
             return Err(Error::Unsupported("aggregate replay/reordering"));
         }
+        let (start, end, pn) = self.checked_payload(mpdu, key, parent_pn)?;
+        Ok(AuthenticatedData {
+            mpdu,
+            start,
+            end,
+            key,
+            pn,
+        })
+    }
+    // Shared hardware-verified plaintext extraction. Callers first establish
+    // their own frame class, peer, aggregate and key-scope constraints.
+    fn checked_payload(
+        &self,
+        mpdu: &Mpdu,
+        key: KeyIdentity,
+        parent_pn: Option<PacketNumber>,
+    ) -> Result<(usize, usize, PacketNumber), Error> {
         let status = mpdu.security;
         if !valid_receive_observations(mpdu)
             || !status.decrypted
@@ -466,7 +486,7 @@ impl KeySlot {
         if status.key != Some(key) {
             return Err(Error::WrongKey);
         }
-        let mut start = header.length;
+        let mut start = mpdu.header().length;
         let pn = if status.iv_stripped {
             status.pn.or(parent_pn).ok_or(Error::MissingPacketNumber)?
         } else {
@@ -492,13 +512,7 @@ impl KeySlot {
             .checked_sub(mic)
             .filter(|end| *end >= start)
             .ok_or(Error::Truncated)?;
-        Ok(AuthenticatedData {
-            mpdu,
-            start,
-            end,
-            key,
-            pn,
-        })
+        Ok((start, end, pn))
     }
     fn commit_receive(&mut self, queue: usize, pn: PacketNumber) -> Result<(), Error> {
         if pn.0 <= self.rx_pn[queue] {
