@@ -24,11 +24,21 @@ const ATTEMPT_US: u64 = 120_000_000;
 pub(super) fn run<B: Io>(hci: &mut Hci<B>, provider: &dyn Provider) -> Result<OwnedReport> {
     let usb = UsbIdentity::read(hci.binding.device());
     let kind = usb.kind().ok_or(Error::Unsupported("source USB ID"))?;
+    run_as(hci, provider, kind, None)
+}
+pub(super) fn run_as<B: Io>(
+    hci: &mut Hci<B>,
+    provider: &dyn Provider,
+    kind: Kind,
+    expected_rom: Option<u32>,
+) -> Result<OwnedReport> {
+    let usb = UsbIdentity::read(hci.binding.device());
     hci.open()?;
     let start = hci.io.now_us();
     let mut engine = Engine {
         hci,
         start,
+        expected_rom,
         attempt: Attempt {
             usb: Some(usb),
             ..Attempt::default()
@@ -56,6 +66,7 @@ pub(super) fn run<B: Io>(hci: &mut Hci<B>, provider: &dyn Provider) -> Result<Ow
 struct Engine<'a, B: Io> {
     hci: &'a mut Hci<B>,
     start: u64,
+    expected_rom: Option<u32>,
     attempt: Attempt,
 }
 impl<B: Io> Engine<'_, B> {
@@ -209,6 +220,12 @@ impl<B: Io> Engine<'_, B> {
         self.hci.io.quiesce_bulk().map_err(Error::Usb)?;
         let before = self.version()?;
         self.attempt.before = Some(before.clone());
+        if self.expected_rom.is_some_and(|rom| rom != before.rom()) {
+            return Err(Error::protocol(
+                "runtime ROM changed before DFU",
+                &before.raw,
+            ));
+        }
         let profile = before.profile()?;
         let status = self.read(CHECK_STATUS, 1)?[0];
         self.attempt.status = Some(status);
@@ -250,7 +267,7 @@ impl<B: Io> Engine<'_, B> {
             completed: core::mem::take(&mut self.attempt.completed),
             policy: HostPolicy {
                 simultaneous_discovery: true,
-                wideband_speech: true,
+                wideband_speech: kind != Kind::Ath3012,
                 broken_enhanced_setup_sync_conn: true,
                 microsoft_opcode: if kind == Kind::Wcn {
                     Some(0xfd70)

@@ -35,6 +35,8 @@ impl UsbIdentity {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
+    /// Source ATH3012 runtime uses the same identified USB DFU engine.
+    Ath3012,
     Rome,
     Wcn,
 }

@@ -126,3 +126,16 @@ pub fn initialize<B: Io>(
 mod tests;
 
 pub(super) use packet::classify;
+
+/// Reuse the exact USB DFU protocol only for a source-listed, freshly bound
+/// AR3012 runtime identity. Raw bootloader slots are never admitted here.
+pub(super) fn initialize_atheros<B: Io>(
+    hci: &mut Hci<B>,
+    provider: &dyn crate::firmware::Provider,
+    expected_rom: u32,
+) -> Result<OwnedReport> {
+    if !super::ath3k::is_runtime_candidate(hci.binding.device()) {
+        return Err(Error::Unsupported("ATH3012 runtime USB identity/revision"));
+    }
+    initialize::run_as(hci, provider, Kind::Ath3012, Some(expected_rom))
+}

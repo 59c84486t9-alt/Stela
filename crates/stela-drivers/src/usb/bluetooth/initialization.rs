@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Explicit native consumer initialization, separate from raw USB attachment.
 //! The retained result owns metadata only and never extends a provider borrow.
-use super::{Error, Hci, Io, broadcom, intel, mediatek, qca, realtek};
+use super::{Error, Hci, Io, ath3k, broadcom, intel, mediatek, qca, realtek};
 use crate::firmware::Provider;
 use alloc::boxed::Box;
 use core::fmt;
@@ -10,6 +10,7 @@ use core::fmt;
 /// guest readiness. Inspect transport lifecycle separately before using HCI.
 #[derive(Debug)]
 pub enum InitializationReport {
+    Atheros(ath3k::runtime::OwnedReport),
     Qualcomm(qca::OwnedReport),
     Broadcom(broadcom::OwnedReport),
     Intel(intel::OwnedReport),
@@ -20,6 +21,7 @@ pub enum InitializationReport {
 /// HCI controller status, transport/cleanup errors and partial receipts.
 #[derive(Debug)]
 pub enum InitializationError {
+    Atheros(ath3k::runtime::Error),
     UnsupportedDevice {
         vendor: u16,
         product: u16,
@@ -73,6 +75,11 @@ impl<B: Io> Hci<B> {
         platform: intel::PlatformInputs,
     ) -> Result<InitializationReport, InitializationError> {
         self.open().map_err(InitializationError::Transport)?;
+        if ath3k::is_runtime_candidate(self.binding.device()) {
+            return ath3k::runtime::initialize(self, provider)
+                .map(InitializationReport::Atheros)
+                .map_err(InitializationError::Atheros);
+        }
         if qca::is_candidate(self.binding.device()) {
             return qca::initialize(self, provider)
                 .map(InitializationReport::Qualcomm)

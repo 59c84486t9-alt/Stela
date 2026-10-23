@@ -6,6 +6,7 @@
 mod host;
 mod identity;
 mod initialize;
+pub mod runtime;
 #[cfg(test)]
 mod tests;
 use super::{FirmwareReceipt, Io};
@@ -57,6 +58,13 @@ impl Binding {
     pub(in crate::usb) fn endpoints(&self) -> Vec<Endpoint> {
         vec![self.output]
     }
+}
+pub(super) fn is_runtime_candidate(device: &Device) -> bool {
+    let usb = UsbIdentity::read(device);
+    usb.revision > 1
+        && SOURCE_USB_IDS
+            .iter()
+            .any(|&(v, p, k)| (v, p, k) == (usb.vendor, usb.product, Kind::Ar3012))
 }
 pub fn is_candidate(device: &Device) -> bool {
     UsbIdentity::read(device).kind().is_some()
