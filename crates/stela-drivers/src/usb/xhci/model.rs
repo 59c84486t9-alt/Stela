@@ -140,6 +140,34 @@ pub(crate) fn address_controller(
     dma: &mut dyn DmaAllocator,
     address_code: u32,
 ) -> (Controller, Rc<RefCell<AddressModel>>) {
+    address_controller_with_capabilities(dma, address_code, None)
+}
+
+/// Independent capability-register image installed before the model Controller
+/// captures ISO capabilities. The default fixture does not install this peer.
+struct CapabilityRegisters {
+    original: Box<dyn Registers>,
+    words: [u32; 3],
+}
+impl Registers for CapabilityRegisters {
+    fn read32(&mut self, offset: usize) -> u32 {
+        match offset {
+            0x00 => self.words[0],
+            0x08 => self.words[1],
+            0x10 => self.words[2],
+            _ => self.original.read32(offset),
+        }
+    }
+    fn write32(&mut self, offset: usize, value: u32) {
+        self.original.write32(offset, value);
+    }
+}
+
+fn address_controller_with_capabilities(
+    dma: &mut dyn DmaAllocator,
+    address_code: u32,
+    capability_words: Option<[u32; 3]>,
+) -> (Controller, Rc<RefCell<AddressModel>>) {
     let commands = Ring::new(dma).unwrap();
     let events = dma.allocate(RING_TRBS * TRB, 64).unwrap();
     let clock = Clock {
@@ -161,8 +189,23 @@ pub(crate) fn address_controller(
         setup_seen: Vec::new(),
         early_setup: false,
     }));
+    let mut registers: Box<dyn Registers> = Box::new(AddressRegisters(model.clone()));
+    let iso_caps = if let Some(words) = capability_words {
+        registers = Box::new(CapabilityRegisters {
+            original: registers,
+            words,
+        });
+        // Actual reads of the installed independent wire image precede capture;
+        // caller integers never replace an already-constructed Controller field.
+        let version = (registers.read32(0x00) >> 16) as u16;
+        let hcs2 = registers.read32(0x08);
+        let hcc1 = registers.read32(0x10);
+        iso::Capabilities::new(version, hcs2, hcc1)
+    } else {
+        iso::Capabilities::new(0x100, 0, 0)
+    };
     let controller = Controller {
-        registers: Box::new(AddressRegisters(model.clone())),
+        registers,
         clock,
         operational: 0x40,
         runtime: 0x800,
@@ -173,7 +216,7 @@ pub(crate) fn address_controller(
         quirks: quirks::Profile::default(),
         max_primary_streams: 4,
         stream_policy: streams::Policy::Unknown,
-        iso_caps: iso::Capabilities::new(0x100, 0, 0),
+        iso_caps,
         max_slots: 1,
         max_ports: 1,
         port_major: vec![2],
@@ -632,7 +675,17 @@ fn cancellation_controller_at_speed(
     configurations: &[Vec<u8>],
     speed: u8,
 ) -> (Controller, Rc<RefCell<CancelModel>>) {
-    let (mut controller, address_peer) = address_controller(dma, SUCCESS);
+    cancellation_controller_with_capabilities(dma, configurations, speed, None)
+}
+
+fn cancellation_controller_with_capabilities(
+    dma: &mut dyn DmaAllocator,
+    configurations: &[Vec<u8>],
+    speed: u8,
+    capability_words: Option<[u32; 3]>,
+) -> (Controller, Rc<RefCell<CancelModel>>) {
+    let (mut controller, address_peer) =
+        address_controller_with_capabilities(dma, SUCCESS, capability_words);
     if speed >= SUPER_SPEED {
         controller.port_major[0] = 3;
         address_peer.borrow_mut().port_speed = speed;
@@ -832,6 +885,31 @@ pub(crate) fn forwarding_fixture<C: crate::bus::pci::ConfigSpace>(
     wrap: impl FnOnce(Box<dyn Registers>, Rc<RefCell<CancelModel>>) -> Box<dyn Registers>,
 ) -> (Controller, Rc<RefCell<CancelModel>>) {
     let (mut controller, model) = cancellation_controller_at_speed(dma, configurations, speed);
+    controller.stream_policy = streams::pci_policy(function).unwrap();
+    controller.registers = wrap(controller.registers, model.clone());
+    (controller, model)
+}
+
+/// A forwarding peer whose capability-register image is installed and read
+/// before the original Controller captures its immutable scheduling policy.
+/// The existing fixture above retains its no-CFC/default capability path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn forwarding_scheduled_fixture<C: crate::bus::pci::ConfigSpace>(
+    dma: &mut dyn DmaAllocator,
+    configurations: &[Vec<u8>],
+    speed: u8,
+    function: &mut Function<C>,
+    version: u16,
+    hcs2: u32,
+    hcc1: u32,
+    wrap: impl FnOnce(Box<dyn Registers>, Rc<RefCell<CancelModel>>) -> Box<dyn Registers>,
+) -> (Controller, Rc<RefCell<CancelModel>>) {
+    let (mut controller, model) = cancellation_controller_with_capabilities(
+        dma,
+        configurations,
+        speed,
+        Some([u32::from(version) << 16 | 0x40, hcs2, hcc1]),
+    );
     controller.stream_policy = streams::pci_policy(function).unwrap();
     controller.registers = wrap(controller.registers, model.clone());
     (controller, model)

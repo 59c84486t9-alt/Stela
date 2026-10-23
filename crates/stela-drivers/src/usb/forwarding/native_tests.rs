@@ -48,6 +48,8 @@ struct Peer {
     out: Vec<Vec<u8>>,
     mfindex: u32,
     fatal_after: Option<usize>,
+    advance_after: Option<(usize, u32)>,
+    explicit_next: BTreeMap<u8, u32>,
 }
 impl Peer {
     fn word(at: u64) -> u32 {
@@ -71,6 +73,7 @@ impl Peer {
                 let base = self.base.borrow();
                 for ep in 2..32 {
                     if (add | drop) & (1 << ep) != 0 {
+                        self.explicit_next.remove(&(ep as u8));
                         self.cursor
                             .retain(|(endpoint, _), _| usize::from(*endpoint) != ep);
                     }
@@ -99,6 +102,7 @@ impl Peer {
                 }
             }
             STOP => {
+                self.explicit_next.remove(&dci);
                 self.active.retain(|td| td.endpoint != dci);
             }
             SET_DEQUEUE => {
@@ -176,7 +180,39 @@ impl Peer {
         if self.fatal_after == Some(self.published.len()) {
             self.base.borrow_mut().fatal_status = 1 << 2;
         }
+        if let Some((count, now)) = self.advance_after
+            && count == self.published.len()
+        {
+            self.mfindex = now;
+        }
     }
+    fn service_explicit(&mut self, dci: u8, target: u32, code: u32, residual: usize, bytes: &[u8]) {
+        assert!(target < 16384);
+        let ep = {
+            let base = self.base.borrow();
+            base.output + u64::from(dci) * base.context_bytes as u64
+        };
+        // Interval comes from the actual configured endpoint context; Frame ID
+        // and CFC's implicit subframe progression come from published wire TDs.
+        let interval = 1u32 << (Self::word(ep) >> 16 & 0xff);
+        assert!(target.is_multiple_of(interval));
+        let td = self.active.iter().find(|td| td.endpoint == dci).unwrap();
+        assert_eq!(td.control & (1 << 31), 0);
+        assert_eq!(td.control >> 20 & 2047, target / 8);
+        if let Some(next) = self.explicit_next.get(&dci) {
+            assert_eq!(*next, target);
+        } else {
+            assert!(target.is_multiple_of(8));
+        }
+        self.mfindex = target;
+        self.complete(dci, 0, code, residual, bytes);
+        if self.active.iter().any(|td| td.endpoint == dci) {
+            self.explicit_next.insert(dci, (target + interval) % 16384);
+        } else {
+            self.explicit_next.remove(&dci);
+        }
+    }
+
     fn complete(&mut self, dci: u8, stream: u16, code: u32, residual: usize, bytes: &[u8]) {
         let index = self
             .active
@@ -259,19 +295,34 @@ impl Registers for RegisterPeer {
     }
 }
 fn fixture(dma: &mut dyn DmaAllocator, streams: bool) -> (Device, Rc<RefCell<Peer>>) {
+    fixture_with_schedule(
+        dma,
+        streams,
+        if streams {
+            xhci::SUPER_SPEED
+        } else {
+            xhci::FULL_SPEED
+        },
+        1,
+        None,
+    )
+}
+
+fn fixture_with_schedule(
+    dma: &mut dyn DmaAllocator,
+    streams: bool,
+    speed: u8,
+    interval: u8,
+    capabilities: Option<(u16, u32, u32)>,
+) -> (Device, Rc<RefCell<Peer>>) {
     let mut configuration = vec![
         9, 2, 32, 0, 1, 19, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0,
     ];
-    let speed = if streams {
-        xhci::SUPER_SPEED
-    } else {
-        xhci::FULL_SPEED
-    };
     for address in [0x81, 2] {
         if streams {
             configuration.extend_from_slice(&[7, 5, address, 2, 0, 4, 0, 6, 48, 0, 2, 0, 0]);
         } else {
-            configuration.extend_from_slice(&[7, 5, address, 1, 192, 0, 1]);
+            configuration.extend_from_slice(&[7, 5, address, 1, 192, 0, interval]);
         }
     }
     configuration[2] = configuration.len() as u8;
@@ -287,28 +338,38 @@ fn fixture(dma: &mut dyn DmaAllocator, streams: bool) -> (Device, Rc<RefCell<Pee
     )
     .unwrap();
     let mut peer = None;
-    let (controller, _) = model::forwarding_fixture(
-        dma,
-        &configurations,
-        speed,
-        &mut function,
-        |original, base| {
-            let shared = Rc::new(RefCell::new(Peer {
-                base,
-                cursor: BTreeMap::new(),
-                active: Vec::new(),
-                published: Vec::new(),
-                out: Vec::new(),
-                mfindex: 16000,
-                fatal_after: None,
-            }));
-            peer = Some(shared.clone());
-            Box::new(RegisterPeer {
-                original,
-                peer: shared,
-            })
-        },
-    );
+    let wrap = |original, base| {
+        let shared = Rc::new(RefCell::new(Peer {
+            base,
+            cursor: BTreeMap::new(),
+            active: Vec::new(),
+            published: Vec::new(),
+            out: Vec::new(),
+            mfindex: 16000,
+            fatal_after: None,
+            advance_after: None,
+            explicit_next: BTreeMap::new(),
+        }));
+        peer = Some(shared.clone());
+        Box::new(RegisterPeer {
+            original,
+            peer: shared,
+        }) as Box<dyn Registers>
+    };
+    let (controller, _) = if let Some((version, hcs2, hcc1)) = capabilities {
+        model::forwarding_scheduled_fixture(
+            dma,
+            &configurations,
+            speed,
+            &mut function,
+            version,
+            hcs2,
+            hcc1,
+            wrap,
+        )
+    } else {
+        model::forwarding_fixture(dma, &configurations, speed, &mut function, wrap)
+    };
     let mut physical = model::device(configurations);
     physical.id = controller.test_device_id(1).unwrap();
     physical.speed = speed;
@@ -557,4 +618,466 @@ fn transport_error_stops_all_endpoint_requests_without_reading_unknown_packet_by
     let fresh = owner.submit_isochronous(0x81, &[1], &[], &mut dma).unwrap();
     peer.borrow_mut().complete(3, 0, 1, 0, &[7]);
     assert_eq!(owner.poll(fresh).unwrap().unwrap().packets[0].data, [7]);
+}
+
+fn scheduled_refused_without_publication(
+    owner: &mut Device,
+    peer: &Rc<RefCell<Peer>>,
+    dma: &mut model::RegionAllocator,
+    lengths: &[usize],
+    target: u16,
+) {
+    let remaining = dma.remaining();
+    let requests: Vec<_> = owner.iso_requests.keys().copied().collect();
+    let completed = owner.completed.clone();
+    let spare: Vec<_> = owner.iso_spare.iter().map(DmaBuffer::physical).collect();
+    let cursors = peer.borrow().cursor.clone();
+    let published = peer.borrow().published.len();
+    let active: Vec<_> = peer
+        .borrow()
+        .active
+        .iter()
+        .map(|td| (td.trb, td.buffer, td.length, td.control))
+        .collect();
+    let commands = peer.borrow().base.borrow().command_index;
+    assert!(
+        owner
+            .submit_isochronous_scheduled(
+                0x81,
+                lengths,
+                &[],
+                xhci::IsoSchedule::AtMicroframe(target),
+                dma,
+            )
+            .is_err()
+    );
+    assert!(!owner.fenced());
+    assert_eq!(dma.remaining(), remaining);
+    assert_eq!(
+        owner.iso_requests.keys().copied().collect::<Vec<_>>(),
+        requests
+    );
+    assert_eq!(owner.completed, completed);
+    assert_eq!(
+        owner
+            .iso_spare
+            .iter()
+            .map(DmaBuffer::physical)
+            .collect::<Vec<_>>(),
+        spare
+    );
+    let peer = peer.borrow();
+    assert_eq!(peer.cursor, cursors);
+    assert_eq!(peer.published.len(), published);
+    assert_eq!(
+        peer.active
+            .iter()
+            .map(|td| (td.trb, td.buffer, td.length, td.control))
+            .collect::<Vec<_>>(),
+        active
+    );
+    assert_eq!(peer.base.borrow().command_index, commands);
+}
+
+#[test]
+fn explicit_single_packet_uses_requested_frame_and_cannot_fallback_without_cfc() {
+    let mut ram = vec![0u64; 512 * 1024];
+    let start = ram.as_mut_ptr() as u64;
+    // SAFETY: original model RAM is retained through terminal events and cancel ACK.
+    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let (mut owner, peer) = fixture(&mut dma, false);
+    // This actual fixture has no Contiguous Frame ID capability. A two-packet
+    // request must fail as a whole before its otherwise-valid first TD escapes.
+    scheduled_refused_without_publication(&mut owner, &peer, &mut dma, &[2, 3], 16032);
+    let request = owner
+        .submit_isochronous_scheduled(
+            0x81,
+            &[3],
+            &[],
+            xhci::IsoSchedule::AtMicroframe(16032),
+            &mut dma,
+        )
+        .unwrap();
+    let control = peer.borrow().published[0].control;
+    assert_eq!(control >> 20 & 2047, 2004);
+    assert_eq!(control & (1 << 31), 0);
+    assert!(owner.poll(request).unwrap().is_none());
+    // Even the exact next frame is not an explicit continuation on this host.
+    // Rejection must preserve the original pending request and its DMA.
+    scheduled_refused_without_publication(&mut owner, &peer, &mut dma, &[1], 16040);
+    assert!(owner.poll(request).unwrap().is_none());
+    peer.borrow_mut().mfindex = 16032;
+    peer.borrow_mut().complete(3, 0, 13, 1, &[0x31, 0x32]);
+    let done = owner.poll(request).unwrap().unwrap();
+    assert_eq!(done.status, Status::Complete);
+    assert_eq!(done.actual, Some(2));
+    assert_eq!(done.packets[0].data, [0x31, 0x32]);
+    assert_eq!(done.packets[0].requested, 3);
+    assert_eq!(
+        done.packets[0].status,
+        Status::Isochronous(xhci::IsoStatus::Short)
+    );
+    assert!(owner.poll(request).is_err());
+}
+
+#[test]
+fn explicit_packet_request_rejects_past_alignment_and_ambiguous_epochs_before_allocation() {
+    let mut ram = vec![0u64; 512 * 1024];
+    let start = ram.as_mut_ptr() as u64;
+    // SAFETY: exclusive fixture RAM remains live until the native owner drops.
+    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let (mut owner, peer) = fixture(&mut dma, false);
+    for target in [15992, 16000, 16008, 16017, 0x4000, u16::MAX] {
+        scheduled_refused_without_publication(&mut owner, &peer, &mut dma, &[1], target);
+    }
+    peer.borrow_mut().mfindex = 0;
+    for target in [0, 8, 896 * 8, 1024 * 8, 2047 * 8] {
+        scheduled_refused_without_publication(&mut owner, &peer, &mut dma, &[1], target);
+    }
+    assert!(peer.borrow().published.is_empty());
+    assert!(owner.iso_requests.is_empty());
+}
+
+#[test]
+fn explicit_request_cancellation_and_configuration_retire_original_identities() {
+    let mut ram = vec![0u64; 512 * 1024];
+    let start = ram.as_mut_ptr() as u64;
+    // SAFETY: original packet DMA remains live through endpoint Stop/Dequeue ACK.
+    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let (mut owner, peer) = fixture(&mut dma, false);
+    let first = owner
+        .submit_isochronous_scheduled(
+            0x81,
+            &[3],
+            &[],
+            xhci::IsoSchedule::AtMicroframe(16032),
+            &mut dma,
+        )
+        .unwrap();
+    owner.cancel(0x81).unwrap();
+    assert!(peer.borrow().active.is_empty());
+    let done = owner.poll(first).unwrap().unwrap();
+    assert_eq!(done.status, Status::Cancelled);
+    assert_eq!(done.packets[0].actual, None);
+    assert!(done.packets[0].data.is_empty());
+    let remaining = dma.remaining();
+    let second = owner
+        .submit_isochronous_scheduled(
+            0x81,
+            &[3],
+            &[],
+            xhci::IsoSchedule::AtMicroframe(16048),
+            &mut dma,
+        )
+        .unwrap();
+    assert_eq!(dma.remaining(), remaining);
+    assert_ne!(second, first);
+    assert!(owner.poll(first).is_err());
+    owner.configure(19, &mut dma).unwrap();
+    assert!(peer.borrow().active.is_empty());
+    assert_eq!(
+        owner.poll(second).unwrap().unwrap().status,
+        Status::Cancelled
+    );
+    let fresh = owner
+        .submit_isochronous_scheduled(
+            0x81,
+            &[2],
+            &[],
+            xhci::IsoSchedule::AtMicroframe(16064),
+            &mut dma,
+        )
+        .unwrap();
+    assert!(owner.poll(second).is_err());
+    peer.borrow_mut().mfindex = 16064;
+    peer.borrow_mut().complete(3, 0, 1, 0, &[0x71, 0x72]);
+    let done = owner.poll(fresh).unwrap().unwrap();
+    assert_eq!(done.packets[0].data, [0x71, 0x72]);
+    assert_eq!(done.packets[0].actual, Some(2));
+    owner.shutdown().unwrap();
+    let published = peer.borrow().published.len();
+    assert!(
+        owner
+            .submit_isochronous_scheduled(
+                0x81,
+                &[1],
+                &[],
+                xhci::IsoSchedule::AtMicroframe(16080),
+                &mut dma,
+            )
+            .is_err()
+    );
+    assert_eq!(peer.borrow().published.len(), published);
+}
+
+#[test]
+fn explicit_packet_lists_wrap_real_microframes_and_keep_subframe_queue_continuations() {
+    let mut ram = vec![0u64; 512 * 1024];
+    let start = ram.as_mut_ptr() as u64;
+    // SAFETY: every TD/event/payload is within this retained independent RAM.
+    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let (mut owner, peer) = fixture_with_schedule(
+        &mut dma,
+        false,
+        xhci::HIGH_SPEED,
+        1,
+        Some((0x110, 0xb, 1 << 11)),
+    );
+    peer.borrow_mut().mfindex = 16300;
+    let mut lengths = vec![3; 16];
+    lengths[2] = 0;
+    let first = owner
+        .submit_isochronous_scheduled(
+            0x81,
+            &lengths,
+            &[],
+            xhci::IsoSchedule::AtMicroframe(16376),
+            &mut dma,
+        )
+        .unwrap();
+    let second = owner
+        .submit_isochronous_scheduled(
+            0x81,
+            &[2, 2],
+            &[],
+            xhci::IsoSchedule::AtMicroframe(8),
+            &mut dma,
+        )
+        .unwrap();
+    assert_eq!(peer.borrow().published.len(), 18);
+    for (index, td) in peer.borrow().published.iter().enumerate() {
+        let target = (16376 + index as u32) % 16384;
+        assert_eq!(td.control & (1 << 31), 0);
+        assert_eq!(td.control >> 20 & 2047, target / 8);
+    }
+    assert!(owner.poll(second).unwrap().is_none());
+    let mut completed = None;
+    for (index, length) in lengths.iter().copied().enumerate() {
+        let target = (16376 + index as u32) % 16384;
+        let (code, residual, bytes) = match index {
+            1 => (13, 1, vec![0x81, 0x82]),
+            5 => (23, length, vec![]),
+            _ => (1, 0, vec![index as u8; length]),
+        };
+        peer.borrow_mut()
+            .service_explicit(3, target, code, residual, &bytes);
+        let done = owner.poll(first).unwrap();
+        if index + 1 == lengths.len() {
+            completed = done;
+        } else {
+            assert!(done.is_none());
+        }
+    }
+    let done = completed.unwrap();
+    assert_eq!(done.status, Status::Complete);
+    assert_eq!(done.packets.len(), 16);
+    assert_eq!(done.actual, Some(41)); // 14*3 minus one short byte; zero/miss are holes.
+    assert!(done.data.is_empty());
+    for (index, packet) in done.packets.iter().enumerate() {
+        assert_eq!(packet.requested, lengths[index]);
+        if index == 1 {
+            assert_eq!(packet.actual, Some(2));
+            assert_eq!(packet.data, [0x81, 0x82]);
+            assert_eq!(packet.status, Status::Isochronous(xhci::IsoStatus::Short));
+        } else if index == 5 {
+            assert_eq!(packet.actual, Some(0));
+            assert!(packet.data.is_empty());
+            assert_eq!(
+                packet.status,
+                Status::Isochronous(xhci::IsoStatus::MissedService)
+            );
+        } else {
+            assert_eq!(packet.actual, Some(lengths[index]));
+            assert_eq!(packet.data, vec![index as u8; lengths[index]]);
+        }
+    }
+    assert!(owner.poll(first).is_err());
+    for target in [8, 9] {
+        peer.borrow_mut()
+            .service_explicit(3, target, 1, 0, &[0xc1, 0xc2]);
+    }
+    let done = owner.poll(second).unwrap().unwrap();
+    assert_eq!(done.actual, Some(4));
+    assert!(
+        done.packets
+            .iter()
+            .all(|packet| packet.data == [0xc1, 0xc2])
+    );
+}
+
+#[test]
+fn explicit_preflight_uses_actual_interval_and_checks_entire_list_horizon_without_cancel() {
+    let mut ram = vec![0u64; 512 * 1024];
+    let start = ram.as_mut_ptr() as u64;
+    // SAFETY: original addressed endpoint contexts and payload DMA remain live.
+    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let (mut owner, peer) = fixture_with_schedule(
+        &mut dma,
+        false,
+        xhci::FULL_SPEED,
+        2,
+        Some((0x110, 0, 1 << 11)),
+    );
+    let first = owner
+        .submit_isochronous_scheduled(
+            0x81,
+            &[1, 2],
+            &[],
+            xhci::IsoSchedule::AtMicroframe(16032),
+            &mut dma,
+        )
+        .unwrap();
+    // Actual FS bInterval=2 configures a 16-microframe interval. Neither an
+    // aligned gap nor a copied descriptor's wrong phase can change that queue.
+    for target in [16056, 16080, 16032] {
+        scheduled_refused_without_publication(&mut owner, &peer, &mut dma, &[1], target);
+    }
+    assert!(owner.poll(first).unwrap().is_none());
+    let second = owner
+        .submit_isochronous_scheduled(
+            0x81,
+            &[1, 1],
+            &[],
+            xhci::IsoSchedule::AtMicroframe(16064),
+            &mut dma,
+        )
+        .unwrap();
+    for (target, bytes) in [
+        (16032, vec![1]),
+        (16048, vec![2, 3]),
+        (16064, vec![4]),
+        (16080, vec![5]),
+    ] {
+        peer.borrow_mut().service_explicit(3, target, 1, 0, &bytes);
+    }
+    assert_eq!(owner.poll(first).unwrap().unwrap().actual, Some(3));
+    assert_eq!(owner.poll(second).unwrap().unwrap().actual, Some(2));
+
+    let (mut high, high_peer) = fixture_with_schedule(
+        &mut dma,
+        false,
+        xhci::HIGH_SPEED,
+        1,
+        Some((0x110, 0xb, 1 << 11)),
+    );
+    high_peer.borrow_mut().mfindex = 0;
+    // A valid first target cannot publish if a later packet crosses frame 895.
+    scheduled_refused_without_publication(&mut high, &high_peer, &mut dma, &[1; 9], 895 * 8);
+    for target in [32, 41] {
+        scheduled_refused_without_publication(&mut high, &high_peer, &mut dma, &[1], target);
+    }
+    assert!(high_peer.borrow().published.is_empty());
+}
+
+#[test]
+fn explicit_clock_advance_during_publication_requires_real_endpoint_cancellation() {
+    let mut ram = vec![0u64; 512 * 1024];
+    let start = ram.as_mut_ptr() as u64;
+    // SAFETY: original buffers remain retained until real endpoint retirement ACK.
+    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let (mut owner, peer) = fixture_with_schedule(
+        &mut dma,
+        false,
+        xhci::FULL_SPEED,
+        1,
+        Some((0x110, 0, 1 << 11)),
+    );
+    let earlier = owner
+        .submit_isochronous_scheduled(
+            0x81,
+            &[2],
+            &[],
+            xhci::IsoSchedule::AtMicroframe(16032),
+            &mut dma,
+        )
+        .unwrap();
+    peer.borrow_mut().advance_after = Some((2, 16048));
+    assert!(
+        owner
+            .submit_isochronous_scheduled(
+                0x81,
+                &[2, 3],
+                &[],
+                xhci::IsoSchedule::AtMicroframe(16040),
+                &mut dma,
+            )
+            .is_err()
+    );
+    assert!(!owner.fenced());
+    assert_eq!(peer.borrow().published.len(), 2); // third TD was never published.
+    assert!(peer.borrow().active.is_empty());
+    assert!(peer.borrow().base.borrow().seen.contains(&STOP));
+    assert!(peer.borrow().base.borrow().seen.contains(&SET_DEQUEUE));
+    assert!(owner.iso_requests.is_empty());
+    let done = owner.poll(earlier).unwrap().unwrap();
+    assert_eq!(done.status, Status::Cancelled);
+    assert_eq!(done.packets[0].actual, None);
+    assert!(done.packets[0].data.is_empty());
+    assert!(owner.take_completions().is_empty()); // failed call exposes no phantom ID.
+    assert_eq!(owner.iso_spare.len(), 2);
+}
+
+#[test]
+fn explicit_partial_publication_or_failed_stop_retains_every_original_packet_buffer() {
+    for fatal in [false, true] {
+        let mut ram = vec![0u64; 512 * 1024];
+        let start = ram.as_mut_ptr() as u64;
+        // SAFETY: failed-retirement owners and every original DMA allocation stay live.
+        let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+        let (mut owner, peer) = fixture_with_schedule(
+            &mut dma,
+            false,
+            xhci::FULL_SPEED,
+            1,
+            Some((0x110, 0, 1 << 11)),
+        );
+        if fatal {
+            peer.borrow_mut().fatal_after = Some(1);
+            assert!(
+                owner
+                    .submit_isochronous_scheduled(
+                        0x81,
+                        &[2, 3],
+                        &[],
+                        xhci::IsoSchedule::AtMicroframe(16032),
+                        &mut dma,
+                    )
+                    .is_err()
+            );
+            assert_eq!(peer.borrow().published.len(), 1);
+        } else {
+            owner
+                .submit_isochronous_scheduled(
+                    0x81,
+                    &[2, 3],
+                    &[],
+                    xhci::IsoSchedule::AtMicroframe(16032),
+                    &mut dma,
+                )
+                .unwrap();
+            peer.borrow().base.borrow_mut().fail = Some((STOP, 17));
+            assert!(owner.cancel(0x81).is_err());
+            assert_eq!(peer.borrow().published.len(), 2);
+        }
+        assert!(owner.fenced());
+        assert_eq!(owner.iso_requests.len(), 1);
+        assert!(owner.iso_spare.is_empty());
+        assert!(owner.take_completions().is_empty());
+        let pending = owner.iso_requests.values().next().unwrap();
+        assert_eq!(pending.buffer.len(), 65536);
+        assert_eq!(peer.borrow().active[0].buffer, pending.buffer.physical());
+        let published = peer.borrow().published.len();
+        assert!(
+            owner
+                .submit_isochronous_scheduled(
+                    0x81,
+                    &[1],
+                    &[],
+                    xhci::IsoSchedule::AtMicroframe(16064),
+                    &mut dma,
+                )
+                .is_err()
+        );
+        assert_eq!(peer.borrow().published.len(), published);
+    }
 }

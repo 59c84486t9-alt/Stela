@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Packet-list ownership above the actual xHCI service-interval queue.
-//! The native controller chooses ASAP slots from its own MFINDEX and retained
-//! endpoint schedule. This adapter never invents a guest frame calendar.
+//! The native controller validates schedules from its own MFINDEX and retained
+//! endpoint queue. This adapter never invents a guest frame calendar.
 use super::*;
 use core::sync::atomic::{Ordering, fence};
 
@@ -30,12 +30,35 @@ impl Device {
     ///
     /// Repeated calls append to the real endpoint schedule while earlier TDs
     /// remain active. Late service is reported per packet by the controller.
-    /// Explicit caller-selected frame numbers require a separate native API.
+    /// Use `submit_isochronous_scheduled` to request an explicit native frame.
     pub fn submit_isochronous(
         &mut self,
         address: u8,
         lengths: &[usize],
         out: &[u8],
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<Request, BlockError> {
+        self.submit_isochronous_scheduled(address, lengths, out, xhci::IsoSchedule::Asap, dma)
+    }
+
+    /// Queue consecutive service intervals starting at a caller-selected native
+    /// microframe, or preserve the native ASAP policy. The actual addressed
+    /// endpoint supplies the interval and queued continuation. The controller
+    /// preflights every requested slot before payload allocation or publication,
+    /// then validates each TD again as it is submitted. Clock movement or a
+    /// controller failure during publication cancels the entire endpoint through
+    /// its real acknowledgement path; failed retirement retains all buffers.
+    ///
+    /// Explicit requests require an encodable first phase, the controller's
+    /// scheduling window, and Contiguous Frame ID capability for continuation.
+    /// They never fall back to ASAP. Microframe values select the next bounded
+    /// occurrence of the native 14-bit clock, not a host-wall-clock epoch.
+    pub fn submit_isochronous_scheduled(
+        &mut self,
+        address: u8,
+        lengths: &[usize],
+        out: &[u8],
+        schedule: xhci::IsoSchedule,
         dma: &mut dyn DmaAllocator,
     ) -> Result<Request, BlockError> {
         self.ready()?;
@@ -98,10 +121,16 @@ impl Device {
                 "invalid forwarded ISO request extent",
             ));
         }
-        self.controller
+        let schedules = self
+            .controller
             .borrow_mut()
             .device(self.physical.id)?
-            .endpoint_ready(endpoint.dci())?;
+            .iso_schedule_list(endpoint.dci(), schedule, lengths.len())?;
+        if schedules.len() != lengths.len() {
+            return Err(BlockError::Protocol(
+                "native ISO schedule list extent mismatch",
+            ));
+        }
         let mut packets = Vec::new();
         packets
             .try_reserve_exact(lengths.len())
@@ -157,11 +186,12 @@ impl Device {
             let mut controller = native.device(self.physical.id)?;
             let pending = self.iso_requests.get_mut(&request).unwrap();
             let mut failure = None;
-            for packet in &mut pending.packets {
-                match controller.submit_iso(
+            for (packet, schedule) in pending.packets.iter_mut().zip(schedules) {
+                match controller.submit_iso_scheduled(
                     endpoint.dci(),
                     pending.buffer.physical() + packet.offset as u64,
                     packet.length,
+                    schedule,
                 ) {
                     Ok(ticket) => packet.ticket = Some(ticket),
                     Err(error) => {
