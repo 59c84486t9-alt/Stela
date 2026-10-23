@@ -199,7 +199,7 @@ impl DataPolicy for Policy {
                 },
             ));
         }
-        // Ordinary Normal-WB transfers use Mem's exact SCA/byte decomposition.
+        // Ordinary Normal transfers use Mem's exact SCA/byte decomposition.
         // Keep the separate cold Device and nonordinary alignment cohorts
         // explicit; their admission is not inferred from ordinary RAM support.
         if !shape.aligned(request.address)
@@ -300,8 +300,7 @@ impl DataPolicy for Policy {
             && translated.attributes == mmu::attributes::DEVICE_NGNRNE;
         if !cold_device
             && (translated.memory != mmu::MemoryType::Normal
-                || translated.attributes == mmu::attributes::TAGGED
-                || !mmu::attributes::write_back(translated.attributes))
+                || translated.attributes == mmu::attributes::TAGGED)
             || !matches!(
                 translated.shareability,
                 mmu::attributes::INNER_SHAREABLE | mmu::attributes::OUTER_SHAREABLE
@@ -321,6 +320,11 @@ impl DataPolicy for Policy {
                 part.address,
             ));
         }
+        // Normal cacheability, allocation and transience describe the guest
+        // translation, not a new host mapping. Every observer still reaches
+        // the same qualified coherent WB reservation below. Existing SCA,
+        // monitor, publication and barrier services supply its memory effects;
+        // Normal Non-cacheable is not Device memory and needs no Device lock.
         // Mapping the data quantity to an unowned device/aperture cannot acquire
         // canonical-RAM authority just because its ARM descriptor was Normal.
         if let Err(status) = self.ram.check_physical(translated.physical, part.bytes) {
@@ -504,6 +508,196 @@ pub(super) mod tests {
             })
         }
         .unwrap()
+    }
+
+    #[test]
+    fn normal_cacheability_hints_use_the_same_canonical_ram_without_device_ordering() {
+        // Allocated Normal MAIR nibbles: transient/non-transient WT and WB
+        // with their allocation hints, plus NC. Cross inner and outer levels.
+        const NORMAL_NIBBLES: [u8; 13] = [1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 13, 14, 15];
+        for inner in NORMAL_NIBBLES {
+            for outer in NORMAL_NIBBLES {
+                for shareability in [
+                    mmu::attributes::INNER_SHAREABLE,
+                    mmu::attributes::OUTER_SHAREABLE,
+                ] {
+                    let mut policy = ordinary_policy();
+                    let attribute = outer << 4 | inner;
+                    policy.controls.translation.mair = u64::from(attribute);
+                    let descriptor = (DESCRIPTOR & !(3 << 8)) | u64::from(shareability) << 8;
+                    let ram = Arc::clone(&policy.ram);
+                    unsafe { ram.publish_physical(LEAF, &descriptor.to_le_bytes()) }.unwrap();
+                    let mut thread = ram.domain().thread(policy);
+                    let expected = [attribute, shareability, 0x31, 0x42, 0x53, 0x64, 0x75, 0x86];
+                    let mut data = expected;
+                    assert_eq!(
+                        ordinary_transfer(&mut thread, 0x4000, &mut data, flags::WRITE),
+                        (MemoryStatus::Success, 8, 0),
+                        "MAIR={attribute:#x} SH={shareability}"
+                    );
+                    data.fill(0);
+                    assert_eq!(
+                        ordinary_transfer(&mut thread, 0x4000, &mut data, 0),
+                        (MemoryStatus::Success, 8, 0)
+                    );
+                    assert_eq!(data, expected);
+                    let mut physical = [0; 8];
+                    unsafe { ram.read_physical(DATA, &mut physical) }.unwrap();
+                    assert_eq!(physical, expected);
+                    assert!(!thread.policy_mut().device_ram_ordering());
+                    assert_eq!(thread.policy_mut().failure, None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_writeback_normal_ram_retains_page_fault_prefix_and_physical_ownership() {
+        for attribute in [0x44, 0xbb, 0x4f, 0xf4] {
+            for descriptor in [0, (DESCRIPTOR + PAGE as u64) | (2 << 6)] {
+                let mut policy = ordinary_policy();
+                policy.controls.translation.mair = attribute;
+                let ram = Arc::clone(&policy.ram);
+                unsafe { ram.publish_physical(LEAF + 8, &descriptor.to_le_bytes()) }.unwrap();
+                let mut thread = ram.domain().thread(policy);
+                assert_eq!(
+                    ordinary_transfer(&mut thread, 0x4ffd, &mut [0x39; 8], flags::WRITE),
+                    (
+                        if descriptor == 0 {
+                            MemoryStatus::Translation
+                        } else {
+                            MemoryStatus::Permission
+                        },
+                        3,
+                        0x5000
+                    )
+                );
+                let mut physical = [0; 8];
+                unsafe { ram.read_physical(DATA + PAGE as u64 - 3, &mut physical) }.unwrap();
+                assert_eq!(physical, [0x39, 0x39, 0x39, 0, 0, 0, 0, 0]);
+            }
+            let mut policy = ordinary_policy();
+            policy.controls.translation.mair = attribute;
+            let ram = Arc::clone(&policy.ram);
+            let unowned = (DESCRIPTOR & !0x0000_ffff_ffff_f000) | 0x999000;
+            unsafe { ram.publish_physical(LEAF, &unowned.to_le_bytes()) }.unwrap();
+            let mut thread = ram.domain().thread(policy);
+            assert_eq!(
+                ordinary_transfer(&mut thread, 0x4000, &mut [0x39; 8], flags::WRITE),
+                (MemoryStatus::Unsupported, 0, 0x4000)
+            );
+            assert!(matches!(
+                thread.policy_mut().failure,
+                Some(Failure::Unsupported {
+                    reason: Refusal::PhysicalGeometry,
+                    ..
+                })
+            ));
+            let mut physical = [0; 8];
+            unsafe { ram.read_physical(DATA, &mut physical) }.unwrap();
+            assert_eq!(physical, [0; 8]);
+        }
+    }
+
+    #[test]
+    fn non_writeback_normal_ram_keeps_global_exclusives_ordered_and_atomic_effects() {
+        use stela_compiler::context::memory::{
+            MemoryOrder, MemoryRequest, MemoryRequirements,
+            atomic::{AtomicData, AtomicOperation},
+            exclusive::{EXCLUSIVE_FAILED, EXCLUSIVE_STORED, ExclusiveData, ExclusiveOperation},
+            ordered::{OrderedData, OrderedOperation},
+        };
+        unsafe fn transfer<T>(
+            thread: &mut crate::memory::domain::MemoryThread<Policy>,
+            data: &mut T,
+            flags: u32,
+        ) -> (u32, u64) {
+            let request = MemoryRequest {
+                address: 0x4000,
+                bytes: 8,
+                flags,
+                pc: 0x8000,
+                data: core::ptr::from_mut(data).cast(),
+            };
+            let entry = thread
+                .prepare(MemoryRequirements {
+                    required_flags: flags,
+                    ..Default::default()
+                })
+                .unwrap();
+            // SAFETY: each caller supplies its complete initialized typed
+            // exclusive, ordered or atomic payload in private test storage.
+            unsafe {
+                entry.with_checked_view(|view| {
+                    let status = (view.callback)(view, &request);
+                    (status, view.completed_bytes)
+                })
+            }
+            .unwrap()
+        }
+        // SAFETY: all calls below use the complete initialized typed staging
+        // selected by the exact request category, disjoint from canonical RAM.
+        for attribute in [0x44, 0xbb, 0x4f, 0xf4] {
+            let mut first_policy = ordinary_policy();
+            first_policy.controls.translation.mair = attribute;
+            let ram = Arc::clone(&first_policy.ram);
+            let second_policy = Policy::new(first_policy.controls.clone(), Arc::clone(&ram));
+            let mut first = ram.domain().thread(first_policy);
+            let mut second = ram.domain().thread(second_policy);
+            unsafe { ram.publish_physical(DATA, &5u64.to_le_bytes()) }.unwrap();
+            let mut load = ExclusiveData::default();
+            assert_eq!(
+                unsafe { transfer(&mut first, &mut load, flags::EXCLUSIVE) },
+                (0, 8)
+            );
+            assert_eq!(load.value, [5, 0]);
+            let mut ordered = OrderedData {
+                operation: OrderedOperation::Store as u32,
+                order: MemoryOrder::Release as u32,
+                value: [9, 0],
+                ..Default::default()
+            };
+            assert_eq!(
+                unsafe { transfer(&mut second, &mut ordered, flags::ORDERED | flags::WRITE) },
+                (0, 8)
+            );
+            let mut store = ExclusiveData {
+                operation: ExclusiveOperation::Store as u32,
+                value: [7, 0],
+                ..Default::default()
+            };
+            assert_eq!(
+                unsafe { transfer(&mut first, &mut store, flags::EXCLUSIVE | flags::WRITE) },
+                (0, 0)
+            );
+            assert_eq!(store.status, EXCLUSIVE_FAILED);
+            load = ExclusiveData::default();
+            assert_eq!(
+                unsafe { transfer(&mut first, &mut load, flags::EXCLUSIVE) },
+                (0, 8)
+            );
+            assert_eq!(load.value, [9, 0]);
+            store.status = EXCLUSIVE_STORED;
+            assert_eq!(
+                unsafe { transfer(&mut first, &mut store, flags::EXCLUSIVE | flags::WRITE) },
+                (0, 8)
+            );
+            assert_eq!(store.status, EXCLUSIVE_STORED);
+            let mut atomic = AtomicData {
+                operation: AtomicOperation::Add as u32,
+                order: MemoryOrder::AcquireRelease as u32,
+                operand: [3, 0],
+                ..Default::default()
+            };
+            assert_eq!(
+                unsafe { transfer(&mut first, &mut atomic, flags::ATOMIC | flags::WRITE) },
+                (0, 8)
+            );
+            assert_eq!(atomic.result, [7, 0]);
+            let mut physical = [0; 8];
+            unsafe { ram.read_physical(DATA, &mut physical) }.unwrap();
+            assert_eq!(u64::from_le_bytes(physical), 10);
+        }
     }
     #[test]
     fn ordinary_unaligned_scalar_and_simd_parts_preserve_exact_registered_ram_bytes() {

@@ -57,13 +57,8 @@ pub(in crate::machine::engine::shared_memory) fn instruction(
             return Err(FetchFailure::Refused(MemoryStatus::Unsupported));
         }
     };
-    let cold = controls.cold_m0()
-        && matches!(
-            mapped.attributes,
-            mmu::attributes::NORMAL_WRITE_THROUGH | mmu::attributes::NORMAL_NON_CACHEABLE
-        );
     if mapped.memory != mmu::MemoryType::Normal
-        || !cold && !mmu::attributes::write_back(mapped.attributes)
+        || mapped.attributes == mmu::attributes::TAGGED
         || 4 > mapped.size - (mapped.physical & (mapped.size - 1))
     {
         return Err(FetchFailure::Refused(MemoryStatus::Unsupported));
@@ -146,6 +141,48 @@ mod tests {
             instruction(memory, &controls, 0x4000),
             Err(FetchFailure::Fault(_))
         ));
+    }
+
+    #[test]
+    fn normal_fetch_hints_keep_exact_bytes_guard_and_explicit_tagged_device_refusals() {
+        let (mut machine, ram, events) = super::super::super::tests::machine();
+        machine
+            .install_shared_memory_for_processors(alloc::sync::Arc::clone(&ram), &events)
+            .unwrap();
+        let mut controls =
+            Controls::capture(&machine.cpu, machine.profile.name, &machine.profile_missing)
+                .unwrap();
+        let memory = machine.cpu.canonical_memory.as_ref().unwrap();
+        const LEAF: u64 = 0x13020;
+        const DATA: u64 = 0x14000;
+        const GP: u64 = 1 << 50;
+        let mut descriptor = [0; 8];
+        unsafe { ram.read_physical(LEAF, &mut descriptor) }.unwrap();
+        let descriptor = u64::from_le_bytes(descriptor) | GP;
+        unsafe { ram.publish_physical(LEAF, &descriptor.to_le_bytes()) }.unwrap();
+        let word = 0xd503_245fu32;
+        unsafe { ram.publish_physical(DATA, &word.to_le_bytes()) }.unwrap();
+        for attribute in [0x44, 0xbb, 0xff, 0x4f, 0xf4, 0xa0, 0x40] {
+            controls.translation.mair = attribute;
+            for xs in [false, true] {
+                controls.translation.xs = xs;
+                assert_eq!(instruction(memory, &controls, 0x4000), Ok((word, true)));
+                let mut bytes = [0; 4];
+                assert_eq!(memory.fetch(&controls, 0x4000, &mut bytes), Ok(()));
+                assert_eq!(u32::from_le_bytes(bytes), word);
+            }
+        }
+        controls.translation.tagged = true;
+        for attribute in [0, u64::from(mmu::attributes::TAGGED)] {
+            controls.translation.mair = attribute;
+            assert!(instruction(memory, &controls, 0x4000).is_err());
+            let mut bytes = [0xa5; 4];
+            assert_eq!(
+                memory.fetch(&controls, 0x4000, &mut bytes),
+                Err(MemoryStatus::Unsupported)
+            );
+            assert_eq!(bytes, [0xa5; 4]);
+        }
     }
 
     #[test]

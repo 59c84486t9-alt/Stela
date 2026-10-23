@@ -193,13 +193,8 @@ impl SharedMemory {
         let mmu::Outcome::Mapped(mapped) = outcome else {
             return Err(MemoryStatus::Unsupported);
         };
-        let cold_fetch = controls.cold_m0()
-            && matches!(
-                mapped.attributes,
-                mmu::attributes::NORMAL_WRITE_THROUGH | mmu::attributes::NORMAL_NON_CACHEABLE
-            );
         if mapped.memory != mmu::MemoryType::Normal
-            || !cold_fetch && !mmu::attributes::write_back(mapped.attributes)
+            || mapped.attributes == mmu::attributes::TAGGED
             || output.len() as u64 > mapped.size - (mapped.physical & (mapped.size - 1))
         {
             return Err(MemoryStatus::Unsupported);
