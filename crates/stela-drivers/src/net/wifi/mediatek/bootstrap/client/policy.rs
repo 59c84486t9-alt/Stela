@@ -13,6 +13,11 @@ use station::phy::{Mode, Width};
 use triomphe::Arc as Shared;
 use wifi::{Band, Channel, regulatory as reg};
 
+mod link;
+pub use link::{
+    LinkAttachError, LinkControlError, LinkEvent, LinkNotice, LinkProgress, ManagedLink,
+};
+
 static NEXT_OWNER: wifi::Identities = wifi::Identities::new();
 static NEXT_BSS: wifi::Identities = wifi::Identities::new();
 
@@ -923,10 +928,16 @@ mod tests {
     };
     use sha2::{Digest, Sha256};
 
-    fn setup_modern() -> (Client<Bar, Q, NativeGuard>, Model) {
+    pub(super) fn setup_modern() -> (Client<Bar, Q, NativeGuard>, Model) {
         setup_modern_power(false)
     }
     fn setup_modern_power(split: bool) -> (Client<Bar, Q, NativeGuard>, Model) {
+        setup_modern_radio(split, CHANNEL)
+    }
+    pub(super) fn setup_modern_radio(
+        split: bool,
+        channel: Channel,
+    ) -> (Client<Bar, Q, NativeGuard>, Model) {
         let mut f = NativeFixture::new(Chip::Mt7925);
         f.install().unwrap();
         f.boot(Chip::Mt7925);
@@ -956,7 +967,14 @@ mod tests {
         );
         // SAFETY: actual modeled completed bootstrap, source policy and owner.
         unsafe { f.controller.initialize_mac() }.unwrap();
-        unsafe { f.controller.start(Band::Ghz5, 36, 5180) }.unwrap();
+        unsafe {
+            f.controller.start(
+                channel.band,
+                u8::try_from(channel.number).unwrap(),
+                channel.frequency_mhz,
+            )
+        }
+        .unwrap();
         let interface = unsafe { f.controller.register_interface(profile().interface) }.unwrap();
         f.model.lock().unwrap().client_execution = true;
         f.model.lock().unwrap().key_execution = true;
@@ -981,7 +999,7 @@ mod tests {
             },
         )
     }
-    fn done(model: &Model) {
+    pub(super) fn done(model: &Model) {
         let mut done = vec![0; 52];
         done[..4].copy_from_slice(&(7u32 << 27).to_le_bytes());
         done[36] = 14;

@@ -9,7 +9,10 @@ mod local;
 mod modern;
 mod packet;
 mod policy;
-pub use policy::{AttachError, BssHandle, Environment, ManagedClient, PolicyError};
+pub use policy::{
+    AttachError, BssHandle, Environment, LinkAttachError, LinkControlError, LinkEvent, LinkNotice,
+    LinkProgress, ManagedClient, ManagedLink, PolicyError,
+};
 mod radio;
 mod receive;
 use crate::{
@@ -1130,12 +1133,15 @@ pub(crate) mod tests {
     // Actual model device fetches the published descriptor, then TXWI/TXP and
     // payload via the same requester's registry. It retains no CPU-address alias.
     pub(crate) fn finish_tx(model: &Model) -> Vec<Vec<u8>> {
+        finish_tx_on(model, 36)
+    }
+    pub(crate) fn finish_tx_on(model: &Model, channel: u8) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
         let mut queue = model.queues[&0xd4300].lock().unwrap();
         while queue.index != queue.head {
             {
                 let r = model.response.lock().unwrap();
-                assert_eq!(r.roc_channel.or(r.home_channel), Some(36));
+                assert_eq!(r.roc_channel.or(r.home_channel), Some(channel));
             }
             let memory = model.memory.lock().unwrap();
             let desc = unsafe {
