@@ -866,6 +866,7 @@ mod tests {
         unmaps: usize,
         cpu_syncs: usize,
         device_syncs: usize,
+        device_owns: bool,
         start_never: bool,
         stop_never: bool,
         reset_never: bool,
@@ -904,6 +905,7 @@ mod tests {
                 unmaps: 0,
                 cpu_syncs: 0,
                 device_syncs: 0,
+                device_owns: false,
                 start_never: false,
                 stop_never: false,
                 reset_never: false,
@@ -939,11 +941,12 @@ mod tests {
             } else {
                 self.words[offset / 4]
             };
-            if let Some((at, ready, elapsed)) = self.jump_read {
-                if at == offset && ready == value {
-                    self.jump_read = None;
-                    self.clock.fetch_add(elapsed, Ordering::Relaxed);
-                }
+            if let Some((at, ready, elapsed)) = self.jump_read
+                && at == offset
+                && ready == value
+            {
+                self.jump_read = None;
+                self.clock.fetch_add(elapsed, Ordering::Relaxed);
             }
             value
         }
@@ -959,9 +962,7 @@ mod tests {
                     }
                 }
                 0x1000 => {
-                    self.words[offset / 4] = if self.reset_never {
-                        0x10001
-                    } else if value == 1 {
+                    self.words[offset / 4] = if self.reset_never || value == 1 {
                         0x10001
                     } else {
                         0
@@ -984,7 +985,7 @@ mod tests {
                         assert_eq!(self.words[0x2c04 / 4], 1);
                         assert_eq!(self.words[0x2c28 / 4], 0);
                         assert_eq!(self.words[0x2c2c / 4], 2);
-                        assert!(self.device_syncs > 0);
+                        assert!(self.device_owns);
                         self.cursor = 0;
                         // Request may retire while independent active status
                         // stays asserted. Source checks bit1, not exact3.
@@ -999,11 +1000,12 @@ mod tests {
                 }
                 _ => self.words[offset / 4] = value,
             }
-            if let Some((at, request, elapsed)) = self.jump_write {
-                if at == offset && request == value {
-                    self.jump_write = None;
-                    self.clock.fetch_add(elapsed, Ordering::Relaxed);
-                }
+            if let Some((at, request, elapsed)) = self.jump_write
+                && at == offset
+                && request == value
+            {
+                self.jump_write = None;
+                self.clock.fetch_add(elapsed, Ordering::Relaxed);
             }
             if self.fail_after_write == Some(offset) {
                 self.fail_after_write = None;
@@ -1014,6 +1016,7 @@ mod tests {
             if !self.master || self.words[0x2c08 / 4] & 2 == 0 {
                 return;
             }
+            assert!(self.device_owns);
             assert_eq!(self.words[0xc00 / 4], 2);
             assert_eq!(self.words[0xc04 / 4], 0x8380_0000);
             assert_eq!(self.words[0xc40 / 4], 1);
@@ -1141,6 +1144,7 @@ mod tests {
                 return Err(DmaError::VisibilityFailed);
             }
             device.device_syncs += 1;
+            device.device_owns = true;
             Ok(())
         }
         unsafe fn sync_for_cpu(
@@ -1159,6 +1163,7 @@ mod tests {
                 return Err(DmaError::VisibilityFailed);
             }
             device.cpu_syncs += 1;
+            device.device_owns = false;
             Ok(())
         }
     }
@@ -1221,6 +1226,9 @@ mod tests {
             let ring = period * 4;
             assert_eq!(controller.buffer_bytes(), Some(ring));
             let capture = controller.capture.as_ref().unwrap();
+            // SAFETY: prepared DMA has never started; take actual CPU cache
+            // ownership before poisoning, then start must hand it back.
+            unsafe { capture.dma.sync_for_cpu(0..capture.cpu.bytes()) }.unwrap();
             for offset in 0..capture.cpu.bytes() {
                 // SAFETY: DMA has not started; poison the actual CPU allocation.
                 unsafe {
