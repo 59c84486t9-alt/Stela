@@ -14,7 +14,7 @@ use crate::memory::{RegisteredSystemRam, domain::MemoryThread};
 use alloc::{sync::Arc, vec::Vec};
 use controls::Controls;
 pub use native_run::{
-    Cohort as NativeCohort, Identity as NativeRunIdentity, NativeRun,
+    ArtifactCacheStats, Cohort as NativeCohort, Identity as NativeRunIdentity, NativeRun,
     Observation as NativeRunObservation, ReturnedRun, dispatch as dispatch_native_run,
     recover as recover_native_run,
 };
@@ -34,6 +34,7 @@ pub struct SharedMemory {
     pe: usize,
     machine: Arc<()>,
     event: crate::system::events::EventEndpoint,
+    artifacts: native_run::ArtifactCache,
 }
 impl core::fmt::Debug for SharedMemory {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -48,6 +49,14 @@ impl SharedMemory {
         &mut self,
     ) -> Result<crate::memory::domain::PreparedLocalClear<'_>, MemoryStatus> {
         self.memory.prepare_clear_reservation()
+    }
+    /// Tighten the per-PE retained compiler-artifact limit. This cannot raise
+    /// the named default or a previously tightened bound; zero disables reuse.
+    pub fn tighten_artifact_cache_budget(&mut self, bytes: usize) {
+        self.artifacts.tighten(bytes);
+    }
+    pub fn native_artifact_stats(&self) -> ArtifactCacheStats {
+        self.artifacts.stats()
     }
     pub fn processor(&self) -> usize {
         self.pe
@@ -82,6 +91,7 @@ impl SharedMemory {
             pe,
             machine: Arc::clone(&self.machine),
             event,
+            artifacts: self.artifacts.empty_like(),
         })
     }
     pub fn event_endpoint(&self) -> &crate::system::events::EventEndpoint {
@@ -201,6 +211,43 @@ impl SharedMemory {
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
+    /// Bound every currently instantiated canonical PE's compiler artifacts.
+    /// Reset/start owners inherit the tightened bound from their real source.
+    /// No executing code or architectural state is cached or invalidated here.
+    pub fn tighten_native_artifact_cache_budget(
+        &mut self,
+        per_pe_bytes: usize,
+    ) -> Result<(), MemoryStatus> {
+        for (pe, peer) in self.peers.iter().enumerate() {
+            let cpu = match peer {
+                super::processors::Peer::Running if pe == self.current => &self.cpu,
+                super::processors::Peer::Parked(parked) => parked.cpu(),
+                super::processors::Peer::Off => continue,
+                _ => return Err(MemoryStatus::Domain),
+            };
+            let memory = cpu
+                .canonical_memory
+                .as_ref()
+                .ok_or(MemoryStatus::Unsupported)?;
+            if memory.pe != pe || !Arc::ptr_eq(&memory.machine, &self.native_memory_identity) {
+                return Err(MemoryStatus::Domain);
+            }
+        }
+        for (pe, peer) in self.peers.iter_mut().enumerate() {
+            let cpu = match peer {
+                super::processors::Peer::Running if pe == self.current => &mut self.cpu,
+                super::processors::Peer::Parked(parked) => parked.cpu_mut(),
+                super::processors::Peer::Off => continue,
+                _ => unreachable!("validated actual PE roster"),
+            };
+            cpu.canonical_memory
+                .as_mut()
+                .expect("validated canonical owner")
+                .tighten_artifact_cache_budget(per_pe_bytes);
+        }
+        Ok(())
+    }
+
     /// Move every active PE's monitor/event authority into its actual Cpu.
     /// Before worker binding, exclusive Machine ownership excludes native loans;
     /// afterwards the complete roster must be recovered/invalidated and held in
@@ -284,6 +331,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     pe,
                     event,
                     machine: Arc::clone(&self.native_memory_identity),
+                    artifacts: native_run::ArtifactCache::default(),
                 },
             ));
         }
