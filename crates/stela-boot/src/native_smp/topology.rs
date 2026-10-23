@@ -7,6 +7,19 @@ use alloc::vec::Vec;
 
 pub const MAX_PROCESSORS: usize = 256;
 pub const MAX_CORES: usize = 64;
+
+/// Default ownership covers every discovered physical core. An explicit count
+/// is the only narrowing policy; unavailable cores are never fabricated.
+pub(crate) fn assignment_count(
+    requested: Option<usize>,
+    available: usize,
+) -> Result<usize, &'static str> {
+    let count = requested.unwrap_or(available);
+    if available == 0 || available > MAX_CORES || count == 0 || count > available {
+        return Err("native assignment is outside the actual physical-core roster");
+    }
+    Ok(count)
+}
 pub const MAX_CPUID: usize = 48;
 pub const MAX_MSRS: usize = 64;
 
@@ -322,6 +335,20 @@ mod tests {
             },
             thread,
         }
+    }
+
+    #[test]
+    fn default_assignment_uses_all_actual_cores_and_only_explicit_counts_narrow_it() {
+        for available in 1..=MAX_CORES {
+            assert_eq!(assignment_count(None, available), Ok(available));
+            for selected in 1..=available {
+                assert_eq!(assignment_count(Some(selected), available), Ok(selected));
+            }
+            assert!(assignment_count(Some(0), available).is_err());
+            assert!(assignment_count(Some(available + 1), available).is_err());
+        }
+        assert!(assignment_count(None, 0).is_err());
+        assert!(assignment_count(None, MAX_CORES + 1).is_err());
     }
 
     #[test]

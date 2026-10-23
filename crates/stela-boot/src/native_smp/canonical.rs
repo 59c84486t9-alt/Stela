@@ -104,7 +104,7 @@ pub(crate) unsafe fn reserve(
 /// DMA/background producer or legacy raw V1 execution is admitted. The actual
 /// topology capture, executor, HostOwner and mappings remain pinned. The explicit
 /// PE/worker bijection binds the selected boot PE to physical BSP worker0; no
-/// source CPU or profile entry is reordered. Native IRQ,
+/// source physical identity is changed by the dense logical projection. Native IRQ,
 /// reset, PMU and other unjoined platform services remain explicit refusals.
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn prepare<'a, D: Devices>(
@@ -176,7 +176,7 @@ pub(crate) unsafe fn prepare<'a, D: Devices>(
 ///
 /// # Safety
 /// `prepare`'s complete closed producer/mount contract remains valid. This is
-/// a serial-first candidate until the final platform owner admits its graph.
+/// admitted only after the final platform owner joins its complete graph.
 pub(crate) unsafe fn run_slice<D: Devices>(
     machine: &mut CanonicalMachine<'_, D>,
     limit: u64,

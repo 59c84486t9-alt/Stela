@@ -1,4 +1,4 @@
-//! Source metadata for the admitted single-BSP construction envelope. No
+//! Source metadata for selected physical-PE construction envelopes. No
 //! lifecycle sink, PS value, CPU-start ACK or native worker is created here.
 //! T6000 normal mode1 takes the first CPU perf complex and bounds its core
 //! records by the derived kernel cluster's one actual PE. Original26A434 mac13j
@@ -10,6 +10,7 @@
 //! core/CPM prefixes and stores the normalized source DeviceID, independently
 //! of the function-enable_core bitmask consumed at2b5686c/2b2dcb0.
 //! These are source membership identities, never observations of PS readiness.
+mod selected;
 mod t8112;
 use super::*;
 use crate::machine::{
@@ -36,13 +37,13 @@ pub struct BspSource<'a> {
     name: String,
     profile: ResourceProfile,
     capacities: Vec<Capacity>,
-    kinds: [CoreKind; 1],
-    slots: [PeSlot; 1],
-    clusters: [ClusterSlot; 1],
-    caches: [SharedCache; 1],
-    interrupts: [InterruptTarget; 1],
-    starts: [StartResource; 1],
-    powers: [PowerResource; 2],
+    kinds: Vec<CoreKind>,
+    slots: Vec<PeSlot>,
+    clusters: Vec<ClusterSlot>,
+    caches: Vec<SharedCache>,
+    interrupts: Vec<InterruptTarget>,
+    starts: Vec<StartResource>,
+    powers: Vec<PowerResource>,
     graph: PowerStates,
     core_address: u64,
     cluster_address: u64,
@@ -389,7 +390,7 @@ impl<'a> BspSource<'a> {
             name: text(node, "name")?.into(),
             profile,
             capacities,
-            kinds: [CoreKind {
+            kinds: vec![CoreKind {
                 id: KindId(0),
                 cluster_type: b'E',
                 midr: identity.midr,
@@ -398,7 +399,7 @@ impl<'a> BspSource<'a> {
                 instruction,
                 data,
             }],
-            slots: [PeSlot {
+            slots: vec![PeSlot {
                 id: slot,
                 reg: boot_reg,
                 kind: Some(KindId(0)),
@@ -409,7 +410,7 @@ impl<'a> BspSource<'a> {
                 power: Some(core_id),
                 cpu_impl: Some(region(node, "cpu-impl-reg")?),
             }],
-            clusters: [ClusterSlot {
+            clusters: vec![ClusterSlot {
                 id: cluster,
                 aff1: 0,
                 firmware_id: 0,
@@ -420,20 +421,20 @@ impl<'a> BspSource<'a> {
                 acc_impl: Some(region(node, "acc-impl-reg")?),
                 cpm_impl: Some(region(node, "cpm-impl-reg")?),
             }],
-            caches: [SharedCache {
+            caches: vec![SharedCache {
                 id: cache,
                 cluster,
                 geometry,
             }],
-            interrupts: [InterruptTarget {
+            interrupts: vec![InterruptTarget {
                 id: InterruptId(0),
                 reg: boot_reg,
             }],
-            starts: [StartResource {
+            starts: vec![StartResource {
                 id: StartId(0),
                 reg: boot_reg,
             }],
-            powers: [
+            powers: vec![
                 PowerResource {
                     id: core_id,
                     cores: vec![slot],

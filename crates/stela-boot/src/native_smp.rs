@@ -48,7 +48,7 @@ pub(crate) unsafe fn validate(
     handoff: &crate::handoff::Handoff,
     requested: Option<usize>,
 ) -> Result<Option<&'static firmware::Capture>, &'static str> {
-    let cores = requested.unwrap_or(1);
+    let cores = requested.unwrap_or(handoff.native_resources.cores as usize);
     if cores == 0 || cores > topology::MAX_CORES {
         return Err("native physical-core count is outside capacity");
     }
@@ -66,15 +66,12 @@ pub(crate) unsafe fn validate(
     {
         return Err("native SIPI page is not owned low memory");
     }
-    if requested.is_none() {
-        if handoff.native_processors.bytes != 0 || resources.sipi != 0 {
-            return Err("unrequested native processor resources");
-        }
-        return Ok(None);
-    }
     // SAFETY: the caller retains the immutable loader allocation.
     let capture = unsafe { firmware::captured(handoff.native_processors) }
         .map_err(firmware::Error::message)?;
+    if requested.is_none() && cores != capture.core_count as usize {
+        return Err("default native assignment differs from the captured physical-core roster");
+    }
     if cores > capture.core_count as usize {
         return Err("requested native cores exceed physical source inventory");
     }

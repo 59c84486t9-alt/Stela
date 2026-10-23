@@ -329,6 +329,18 @@ extern "efiapi" fn observe_ap(argument: *mut c_void) {
     }
 }
 
+/// Observe all available physical cores even when no explicit assignment was
+/// given. The default assignment is the actual selected physical-core roster;
+/// --native-cores narrows ownership explicitly, never supplies invented PEs.
+pub(crate) fn capture_assignment(requested: Option<usize>) -> Result<(Region, usize), Error> {
+    let region = capture(requested.unwrap_or(1))?;
+    // SAFETY: capture just allocated and initialized this exact retained UEFI
+    // allocation; before EBS its physical address is directly accessible.
+    let count = unsafe { (&*(region.physical as *const Capture)).core_count as usize };
+    let assigned = topology::assignment_count(requested, count).map_err(|_| Error::CoreCount)?;
+    Ok((region, assigned))
+}
+
 pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
     let handle = boot::get_handle_for_protocol::<MpServices>().map_err(|_| Error::NoMpServices)?;
     let mp =

@@ -530,18 +530,14 @@ fn load(
     )?;
     let text = core::str::from_utf8(&options).map_err(|_| "stela.cfg is not UTF-8")?;
     let native_cores = crate::native_smp::requested(text)?;
-    let native_processors = match native_cores {
-        Some(count) => crate::native_smp::firmware::capture(count)
-            .map_err(crate::native_smp::firmware::Error::message)?,
-        None => Region::default(),
-    };
+    let (native_processors, cores) = crate::native_smp::firmware::capture_assignment(native_cores)
+        .map_err(crate::native_smp::firmware::Error::message)?;
     let guest = match option(text, crate::engine::RAM_OPTION) {
         Some(bytes) => crate::engine::number(bytes)?,
         None => crate::engine::DEFAULT_RAM,
     };
     let sizes = Sizes::for_host(free_ram()?, guest);
     let heap = allocate(sizes.heap)?;
-    let cores = native_cores.unwrap_or(1);
     let mut native_resources = NativeResources {
         cores: cores as u32,
         stacks: allocate(STACK_BYTES * cores as u64)?,

@@ -131,6 +131,74 @@ impl RetainedRoster for BspRoster<'_> {
     }
 }
 
+/// A retained roster of actual started executors. Captured AP inventory alone
+/// cannot construct this view: each selected AP must have acknowledged its
+/// private installed Host and CPUID identity through Executors::start.
+#[cfg(not(test))]
+pub(crate) struct AssignedRoster<'a> {
+    _bsp: BspRoster<'a>,
+    _executors: &'a crate::native_smp::executor::Executors,
+    cores: Vec<AssignedCore>,
+}
+#[cfg(not(test))]
+impl<'a> AssignedRoster<'a> {
+    pub(crate) fn new(
+        capture: &'a Capture,
+        executors: &'a crate::native_smp::executor::Executors,
+        owner: &super::host::HostOwner,
+    ) -> Result<Self, String> {
+        let bsp = BspRoster::new(capture, owner, 0)?;
+        let mut cores = bsp.cores.to_vec();
+        for worker in 1..=executors.processors().len() {
+            let processor = executors
+                .processors()
+                .iter()
+                .find(|processor| processor.slot() == worker)
+                .ok_or("assigned started worker roster has a slot gap")?;
+            let index = *capture
+                .selected
+                .get(worker)
+                .filter(|_| worker < capture.core_count as usize)
+                .ok_or("assigned worker exceeds captured physical cores")?
+                as usize;
+            let source = *capture
+                .processors
+                .get(index)
+                .filter(|_| index < capture.processor_count as usize)
+                .ok_or("assigned worker has no captured source processor")?;
+            if !source.available()
+                || source.flags & native::BSP != 0
+                || processor.apic_id() != source.apic_id
+                || !processor.observation().matches(source)
+            {
+                return Err("assigned worker differs from actual started AP identity".into());
+            }
+            cores.push(AssignedCore {
+                worker,
+                package: source.location.package,
+                core: source.location.core,
+                apic: u32::try_from(source.apic_id)
+                    .map_err(|_| "assigned APIC exceeds transport width")?,
+                started: true,
+            });
+        }
+        Ok(Self {
+            _bsp: bsp,
+            _executors: executors,
+            cores,
+        })
+    }
+}
+#[cfg(not(test))]
+impl RetainedRoster for AssignedRoster<'_> {
+    fn revision(&self) -> u64 {
+        1
+    }
+    fn cores(&self) -> &[AssignedCore] {
+        &self.cores
+    }
+}
+
 fn current_apic() -> Result<u32, String> {
     use core::arch::x86_64::{__cpuid, __cpuid_count};
     // CPUID is unprivileged. Reuse the canonical captured APIC decoder; this
@@ -193,8 +261,8 @@ pub(crate) struct Join {
     pub cpm_impl: RegisterRange,
 }
 
-/// Actual one-BSP source owner and immutable ADT. Full source power records
-/// remain retained, independently of the one assigned PE and unknown PS state.
+/// Retained source owner and immutable ADT. Full source power records remain
+/// retained independently of the selected PE subset and unknown PS state.
 pub(crate) struct Source<'a> {
     pub resources: BspSource<'a>,
     tree: DeviceTree,
@@ -236,47 +304,64 @@ impl<'a> Source<'a> {
             dense_ids: Some((immutable, identity.original_tree_sha256)),
         })
     }
+    /// Full selected-source adapter for the retained started-worker roster.
+    pub(crate) fn t8112_assigned(
+        original: &'a [u8],
+        live: &LiveTree,
+        identity: SourceIdentity,
+        boot_reg: u32,
+        workers: usize,
+    ) -> Result<Self, String> {
+        let mut source = Self::t8112(original, live, identity, boot_reg)?;
+        source.resources =
+            BspSource::t8112_assigned(original, live.bytes(), identity, boot_reg, 0, workers)?;
+        Ok(source)
+    }
     pub(crate) fn prepare<'s>(
         &'s self,
-        roster: &'s BspRoster<'_>,
+        roster: &'s dyn RetainedRoster,
         profile: CpuProfile,
     ) -> Result<Prepared<'s>, String> {
         use sha2::{Digest, Sha256};
         let resources = self.resources.resources();
-        let slot = resources
-            .slots
-            .first()
-            .ok_or("assigned source has no actual BSP resource")?;
-        let kind = resources
-            .kinds
-            .iter()
-            .find(|kind| Some(kind.id) == slot.kind)
-            .ok_or("assigned source BSP kind is unknown")?;
-        let cluster = resources
-            .clusters
-            .iter()
-            .find(|cluster| cluster.id == slot.cluster)
-            .ok_or("assigned source BSP cluster is unknown")?;
-        let nodes = [NodeBinding {
-            slot: slot.id,
-            name: self.resources.name(),
-            midr: kind.midr,
-            cache: cluster
-                .cache
-                .ok_or("assigned source BSP cache is unknown")?,
-            interrupt: slot
-                .interrupt
-                .ok_or("assigned source BSP interrupt owner is unknown")?,
-            start: slot
-                .start
-                .ok_or("assigned source BSP start owner is unknown")?,
-            core_power: slot
-                .power
-                .ok_or("assigned source BSP power identity is unknown")?,
-            cluster_power: cluster
-                .power
-                .ok_or("assigned source BSP complex power identity is unknown")?,
-        }];
+        if resources.slots.len() != roster.cores().len() {
+            return Err("assigned source and actual started worker cardinality differ".into());
+        }
+        let mut nodes = Vec::with_capacity(resources.slots.len());
+        let mut assignments = Vec::with_capacity(resources.slots.len());
+        for (ordinal, (slot, worker)) in resources.slots.iter().zip(roster.cores()).enumerate() {
+            let kind = resources
+                .kinds
+                .iter()
+                .find(|kind| Some(kind.id) == slot.kind)
+                .ok_or("assigned source core kind is unknown")?;
+            let cluster = resources
+                .clusters
+                .iter()
+                .find(|cluster| cluster.id == slot.cluster)
+                .ok_or("assigned source cluster is unknown")?;
+            nodes.push(NodeBinding {
+                slot: slot.id,
+                name: self.resources.name_for(slot.id)?,
+                midr: kind.midr,
+                cache: cluster.cache.ok_or("assigned source cache is unknown")?,
+                interrupt: slot
+                    .interrupt
+                    .ok_or("assigned source interrupt owner is unknown")?,
+                start: slot.start.ok_or("assigned source start owner is unknown")?,
+                core_power: slot
+                    .power
+                    .ok_or("assigned source power identity is unknown")?,
+                cluster_power: cluster
+                    .power
+                    .ok_or("assigned source complex power identity is unknown")?,
+            });
+            assignments.push(Assignment {
+                worker: worker.worker,
+                slot: slot.id,
+                boot: ordinal == 0,
+            });
+        }
         let source = SourceBindings {
             source_set_sha256: resources.profile.input_set_sha256,
             tree_sha256: Sha256::digest(self.tree.serialize()).into(),
@@ -292,10 +377,10 @@ impl<'a> Source<'a> {
                 None => CpuIdRecipe::Preserve,
             },
         };
-        prepare(
+        prepare_assigned(
             roster,
             &self.resources,
-            slot.id,
+            &assignments,
             &self.tree,
             &source,
             profile,
@@ -314,6 +399,25 @@ pub(crate) struct Prepared<'a> {
     pub joins: Vec<Join>,
 }
 impl Prepared<'_> {
+    /// Exact checked Plan-to-runtime assignment, preserving actual physical
+    /// worker identity independently of the projected guest logical index.
+    pub(crate) fn worker_bindings(
+        &self,
+    ) -> Result<Vec<stela_runtime::machine::engine::publication::WorkerBinding>, String> {
+        use stela_runtime::machine::engine::publication::{WorkerBinding, WorkerId};
+        self.plan
+            .revalidate()
+            .map_err(|e| format!("assigned worker route is stale: {e:?}"))?;
+        Ok(self
+            .plan
+            .pes()
+            .iter()
+            .map(|pe| WorkerBinding {
+                pe: pe.logical,
+                worker: WorkerId(pe.host.worker),
+            })
+            .collect())
+    }
     /// Lookup only; original error/start inputs never manufacture an assigned
     /// PE. The same retained owner revision must still be current at adoption.
     pub(crate) fn join(&self, reg: u32) -> Result<&Join, String> {

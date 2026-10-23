@@ -17,6 +17,25 @@ impl<'a> BspSource<'a> {
         boot_reg: u32,
         acc_harvesting: u32,
     ) -> Result<Self, String> {
+        Self::t8112_member(
+            original,
+            prepared,
+            identity,
+            boot_reg,
+            boot_reg,
+            acc_harvesting,
+        )
+    }
+    // Member metadata retains the actual running BSP independently of the
+    // selected waiting PE. This never rewrites source or prepared CPU state.
+    pub(super) fn t8112_member(
+        original: &'a [u8],
+        prepared: &[u8],
+        identity: SourceIdentity,
+        boot_reg: u32,
+        member_reg: u32,
+        acc_harvesting: u32,
+    ) -> Result<Self, String> {
         let profile = identity.profile;
         if profile.chip != Chip::AppleM2 || profile.soc != 0x8112 || acc_harvesting != 0 {
             return Err("assigned source requires qualified T8112 normal-mode geometry".into());
@@ -168,7 +187,7 @@ impl<'a> BspSource<'a> {
         let matches = processors
             .iter()
             .enumerate()
-            .filter(|(_, cpu)| cpu.reg == boot_reg)
+            .filter(|(_, cpu)| cpu.reg == member_reg)
             .map(|(pe, _)| pe)
             .collect::<Vec<_>>();
         let [pe] = matches.as_slice() else {
@@ -181,7 +200,13 @@ impl<'a> BspSource<'a> {
             .filter(|cpu| cpu.property("state") == Some(b"running\0"))
             .count()
             != 1
-            || property(&prepared_all[pe], "state")? != b"running\0"
+            || prepared_all
+                .iter()
+                .filter(|cpu| {
+                    word(cpu, "reg") == Ok(boot_reg) && cpu.property("state") == Some(b"running\0")
+                })
+                .count()
+                != 1
             || prepared_all.iter().any(|cpu| {
                 ![Some(b"waiting\0".as_slice()), Some(b"running\0".as_slice())]
                     .contains(&cpu.property("state"))
@@ -241,7 +266,7 @@ impl<'a> BspSource<'a> {
             name: text(node, "name")?.into(),
             profile,
             capacities,
-            kinds: [CoreKind {
+            kinds: vec![CoreKind {
                 id: KindId(0),
                 cluster_type: kind,
                 midr: identity.midr,
@@ -250,29 +275,29 @@ impl<'a> BspSource<'a> {
                 instruction,
                 data,
             }],
-            slots: [PeSlot {
+            slots: vec![PeSlot {
                 id: slot,
-                reg: boot_reg,
+                reg: member_reg,
                 kind: Some(KindId(0)),
                 cluster,
-                cluster_core: boot_reg & 3,
+                cluster_core: member_reg & 3,
                 interrupt: Some(InterruptId(0)),
                 start: Some(StartId(0)),
                 power: Some(core.domain),
                 cpu_impl: Some(region(node, "cpu-impl-reg")?),
             }],
-            clusters: [ClusterSlot {
+            clusters: vec![ClusterSlot {
                 id: cluster,
-                aff1: (boot_reg >> 8) as u8,
+                aff1: (member_reg >> 8) as u8,
                 firmware_id: word(node, "cluster-id")?,
                 die: 0,
-                die_cluster: boot_reg >> 8,
+                die_cluster: member_reg >> 8,
                 cache: Some(cache),
                 power: Some(complex.domain),
                 acc_impl: Some(region(node, "acc-impl-reg")?),
                 cpm_impl: Some(region(node, "cpm-impl-reg")?),
             }],
-            caches: [SharedCache {
+            caches: vec![SharedCache {
                 id: cache,
                 cluster,
                 geometry: Cache {
@@ -281,15 +306,15 @@ impl<'a> BspSource<'a> {
                     bytes: word(node, "l2-cache-size")?,
                 },
             }],
-            interrupts: [InterruptTarget {
+            interrupts: vec![InterruptTarget {
                 id: InterruptId(0),
-                reg: boot_reg,
+                reg: member_reg,
             }],
-            starts: [StartResource {
+            starts: vec![StartResource {
                 id: StartId(0),
-                reg: boot_reg,
+                reg: member_reg,
             }],
-            powers: [
+            powers: vec![
                 PowerResource {
                     id: core.domain,
                     cores: vec![slot],
@@ -558,6 +583,97 @@ mod tests {
     }
 
     #[test]
+    fn selected_t8112_resources_cover_each_worker_once_and_retain_actual_boot_state() {
+        struct Roster(Vec<AssignedCore>);
+        impl RetainedRoster for Roster {
+            fn revision(&self) -> u64 {
+                1
+            }
+            fn cores(&self) -> &[AssignedCore] {
+                &self.0
+            }
+        }
+        let original = authored(false);
+        let prepared = authored(true);
+        for count in 1..=8 {
+            let source = BspSource::t8112_assigned(
+                &original,
+                &prepared,
+                identity(&original, 0x24),
+                0x100,
+                0,
+                count,
+            )
+            .unwrap();
+            let resources = source.resources();
+            assert_eq!(source.source(), original);
+            assert_eq!(resources.slots.len(), count);
+            assert_eq!(resources.slots[0].reg, 0x100);
+            assert_eq!(source.name_for(resources.slots[0].id).unwrap(), "cpu4");
+            assert_eq!(source.graph().domains.len(), 12);
+            let roster = Roster(
+                (0..count)
+                    .map(|worker| AssignedCore {
+                        worker,
+                        package: 0,
+                        core: worker as u32,
+                        apic: worker as u32 + 10,
+                        started: true,
+                    })
+                    .collect(),
+            );
+            let assignments = resources
+                .slots
+                .iter()
+                .enumerate()
+                .map(|(worker, slot)| Assignment {
+                    worker,
+                    slot: slot.id,
+                    boot: worker == 0,
+                })
+                .collect::<Vec<_>>();
+            let plan = Plan::build(&roster, &source, &assignments).unwrap();
+            assert_eq!(plan.pes().len(), count);
+            assert_eq!(plan.pes()[0].reg, 0x100);
+            assert_eq!(plan.pes()[0].core_power.device, 5);
+            assert_eq!(resources.clusters.len(), if count == 1 { 1 } else { 2 });
+            assert_eq!(
+                resources
+                    .powers
+                    .iter()
+                    .flat_map(|power| &power.cores)
+                    .count(),
+                count
+            );
+            assert_eq!(
+                resources
+                    .powers
+                    .iter()
+                    .flat_map(|power| &power.clusters)
+                    .count(),
+                resources.clusters.len()
+            );
+        }
+        for count in [0, 9, usize::MAX] {
+            assert!(
+                BspSource::t8112_assigned(
+                    &original,
+                    &prepared,
+                    identity(&original, 0x24),
+                    0x100,
+                    0,
+                    count
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            BspSource::t8112_assigned(&original, &prepared, identity(&original, 0x24), 0, 0, 8)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn equal_provider_settings_must_be_an_exact_u32_zero_even_with_declared_normal_mode() {
         let zero = 0u32.to_le_bytes();
         let original = authored_config(false, Some(&zero));
@@ -623,6 +739,20 @@ mod tests {
             assert_eq!(owner.resources().slots[0].reg, 0x100);
             assert_eq!(owner.graph().domains.len(), 303);
             assert_eq!(owner.power_addresses(), (0x2_3b70_0020, 0x2_3b70_0048));
+            for count in 1..=8 {
+                let assigned = BspSource::t8112_assigned(
+                    &raw,
+                    &prepared,
+                    identity(&raw, board_id),
+                    0x100,
+                    0,
+                    count,
+                )
+                .unwrap_or_else(|e| panic!("{name} count={count}: {e}"));
+                assert_eq!(assigned.resources().slots.len(), count);
+                assert_eq!(assigned.resources().slots[0].reg, 0x100);
+                assert_eq!(assigned.graph().domains.len(), 303);
+            }
         }
         std::println!(
             "qualified first-P T8112 source membership on all four pinned original board ADTs"
