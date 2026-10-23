@@ -158,6 +158,9 @@ pub struct State {
     /// Engine root without any guest mapping.
     host_root: u64,
     roots: [u64; ROOTS],
+    /// A shadow-map attempt or software-TLB fill may have published guest
+    /// translations. Only a complete reset can prove both halves clean again.
+    legacy_translations_dirty: bool,
     current: usize,
     regime: Option<Regime>,
     /// The halves whose Tagged memory the tag-checked roots keep out.
@@ -294,6 +297,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             pool,
             host_root,
             roots,
+            legacy_translations_dirty: false,
             current: usize::MAX,
             regime: None,
             tag_checks: [false; 2],
@@ -411,11 +415,15 @@ impl State {
     }
 
     fn reset_shadow(&mut self) {
+        if !self.legacy_translations_dirty {
+            return;
+        }
         self.clear(LOWER);
         self.clear(UPPER);
         self.tlb.clear();
         self.resets += 1;
         self.reload();
+        self.legacy_translations_dirty = false;
     }
 
     /// Drop the lower half's translations only.
@@ -664,11 +672,14 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
     let virtual_page = address & !(PAGE - 1);
     let half = if address >> 63 == 0 { LOWER } else { UPPER };
     state.pool.half = half;
+    // A failed allocation can already have installed intermediate tables.
+    state.legacy_translations_dirty = true;
     if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
         // The shadow pool is exhausted: start over and map again.
         state.exhausted += 1;
         state.reset_shadow();
         state.pool.half = half;
+        state.legacy_translations_dirty = true;
         if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
             super::interrupts::fatal(frame);
         }
@@ -692,6 +703,7 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
                 .wrapping_sub(address)
                 .wrapping_add(page);
             if let Some(host) = state.host_physical(physical) {
+                state.legacy_translations_dirty = true;
                 if tables::map_page(&mut state.pool, root, page, host, rights).is_err() {
                     // Out of frames: the rest stays to fault.
                     break;

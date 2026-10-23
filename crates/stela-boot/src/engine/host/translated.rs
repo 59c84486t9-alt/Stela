@@ -177,6 +177,7 @@ extern "sysv64" fn translate(saved: &mut Saved) -> u64 {
                 state.helper_fills += 1;
                 match resolve(state, missing, write, flags & UNPRIVILEGED != 0) {
                     Ok((translation, host)) => {
+                        state.legacy_translations_dirty = true;
                         state.tlb.fill(missing, host, translation.writable, view)
                     }
                     // The stub runs before the block's alignment check, and
