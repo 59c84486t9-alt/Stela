@@ -52,6 +52,8 @@ const IOTLB_INVALIDATE: u64 = 1 << 63;
 const IOTLB_GLOBAL: u64 = 1 << 60;
 const IOTLB_WRITE_DRAIN: u64 = 1 << 48;
 const IOTLB_READ_DRAIN: u64 = 1 << 49;
+const CAP_WRITE_DRAIN: u64 = 1 << 54;
+const CAP_READ_DRAIN: u64 = 1 << 55;
 const MSI_START: u64 = 0xfee0_0000;
 const MSI_END: u64 = 0xfef0_0000;
 
@@ -632,10 +634,10 @@ impl<R: Registers> Unit<R> {
             }
         }
         let mut request = IOTLB_INVALIDATE | IOTLB_GLOBAL;
-        if self.cap & (1 << 54) != 0 {
+        if self.cap & CAP_WRITE_DRAIN != 0 {
             request |= IOTLB_WRITE_DRAIN;
         }
-        if self.cap & (1 << 55) != 0 {
+        if self.cap & CAP_READ_DRAIN != 0 {
             request |= IOTLB_READ_DRAIN;
         }
         self.wait64(self.iotlb, IOTLB_INVALIDATE)?;
@@ -1042,6 +1044,63 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
         publish();
         Ok(())
     }
+
+    unsafe fn read_coherent_u32(
+        &self,
+        info: DomainMapping,
+        offset: usize,
+        direction: Direction,
+    ) -> Result<u32, DmaError> {
+        let end = offset.checked_add(4).ok_or(DmaError::InvalidRange)?;
+        if !offset.is_multiple_of(4) || direction == Direction::ToDevice {
+            return Err(DmaError::InvalidRange);
+        }
+        let mut guard = self.unit.lock();
+        let live = self
+            .domain(guard.state(), true)?
+            .mapping(info, &(offset..end), direction)?;
+        // The takeover/claim contracts independently qualify coherent WB
+        // payload DMA and exclude ATS/NoSnoop and incompatible aliases. ECAP
+        // table-walk coherency is not that grant. Scatter mappings do not
+        // manufacture a contiguous CPU view.
+        let pages = live
+            ._pages
+            .as_single()
+            .ok_or(DmaError::CoherenceUnavailable)?;
+        let cpu = pages
+            .cpu_mapping(CacheAttribute::WriteBack)
+            .map_err(|_| DmaError::CoherenceUnavailable)?;
+        let pointer = cpu.address(offset, 4).map_err(|_| DmaError::InvalidRange)?;
+        if !(pointer.as_ptr() as usize).is_multiple_of(4) {
+            return Err(DmaError::InvalidRange);
+        }
+        publish();
+        // SAFETY: this live domain retains its actual aligned WB allocation;
+        // only raw access is exposed. The qualified platform supports these
+        // per-word observations during device writes, not atomic whole frames.
+        let value = unsafe { pointer.as_ptr().cast::<u32>().read_volatile() };
+        publish();
+        Ok(u32::from_le(value))
+    }
+
+    unsafe fn drain_posted_writes(&self) -> Result<(), DmaError> {
+        let mut guard = self.unit.lock();
+        let state = guard.state();
+        self.domain(state, true)?;
+        if self.unit.cap & CAP_WRITE_DRAIN == 0 {
+            return Err(DmaError::DrainUnavailable);
+        }
+        // VT-d section 6.5.4: with DWD support, the actual DW invalidation
+        // completes queued translated writes through this root path before
+        // returning. It neither establishes device stop nor drains peer DMA.
+        // The existing operation verifies completion/granularity and performs
+        // the real write-buffer flush where the unit requires it.
+        if self.unit.invalidate(TRANSLATION, false).is_err() {
+            state.poisoned = true;
+            return Err(DmaError::InvalidationFailed);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1155,6 +1214,8 @@ mod tests {
         source: Option<&'static Source>,
         visible_tables: BTreeMap<u64, Vec<u64>>,
         active_observations: usize,
+        pending_payload: Vec<(usize, u32)>,
+        iotlb_granularity: u64,
     }
     impl Model {
         fn visible_table(&self, physical: u64) -> &[u64] {
@@ -1240,6 +1301,8 @@ mod tests {
                 source: None,
                 visible_tables: BTreeMap::new(),
                 active_observations: 0,
+                pending_payload: Vec::new(),
+                iotlb_granularity: 1,
             })))
         }
     }
@@ -1266,7 +1329,14 @@ mod tests {
                 model.values.insert(offset, value);
             }
             if offset == 0x108 && value & IOTLB_INVALIDATE != 0 && !model.block_iotlb {
-                value = value & !IOTLB_INVALIDATE | 1 << 57;
+                if value & IOTLB_WRITE_DRAIN != 0 && model.iotlb_granularity == 1 {
+                    for (address, word) in model.pending_payload.drain(..) {
+                        // SAFETY: each test retains the actual owned allocation
+                        // through this modeled device-write completion.
+                        unsafe { (address as *mut u32).write_volatile(word.to_le()) };
+                    }
+                }
+                value = value & !(IOTLB_INVALIDATE | 3 << 57) | model.iotlb_granularity << 57;
                 model.values.insert(offset, value);
             }
             value
@@ -1338,6 +1408,180 @@ mod tests {
     fn stopped_claim(rid: u16) -> RequesterClaim {
         RequesterClaim::model(rid, Arc::new(AtomicU64::new(0)))
     }
+
+    #[test]
+    fn coherent_words_observe_only_the_live_domains_actual_pins() {
+        let registers = ModelRegisters::new();
+        let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8, 16], 48) }.unwrap();
+        let first = unsafe { unit.attach_requester(stopped_claim(8)) }.unwrap();
+        let second = unsafe { unit.attach_requester(stopped_claim(16)) }.unwrap();
+        let released = Arc::new(AtomicU64::new(0));
+        let pin = pages(PAGE, 12, 0x810000, released.clone());
+        let cpu = pin.cpu_mapping(CacheAttribute::WriteBack).unwrap();
+        let pointer = cpu.address(0, 4).unwrap().as_ptr().cast::<u32>();
+        let mut mapping =
+            DmaMapping::map(first.clone(), pin, Direction::FromDevice, u64::MAX).unwrap();
+        let mut other = DmaMapping::map(
+            second.clone(),
+            pages(PAGE, 12, 0x910000, released.clone()),
+            Direction::FromDevice,
+            u64::MAX,
+        )
+        .unwrap();
+        assert_eq!(mapping.address(), other.address());
+        let token = {
+            let mut guard = unit.lock();
+            guard.state().domains[&8].mappings[&mapping.address().unwrap()].info
+        };
+        let before = registers.0.lock().unwrap().writes.len();
+        for value in [0u32, 1, 0x8000_0000, 0x1234_5678, u32::MAX] {
+            // SAFETY: synchronous modeled device producer writes its actual
+            // retained allocation, without a CPU ownership transfer.
+            unsafe { pointer.write_volatile(value.to_le()) };
+            assert_eq!(mapping.read_coherent_u32(0), Ok(value));
+            assert_eq!(other.read_coherent_u32(0), Ok(0));
+        }
+        // Observing coherent payloads does not invent a device stop, perform
+        // cache invalidation, or trigger IOTLB/ownership-transfer commands.
+        assert_eq!(registers.0.lock().unwrap().writes.len(), before);
+        for offset in [1, PAGE - 3, PAGE, usize::MAX] {
+            assert_eq!(
+                mapping.read_coherent_u32(offset),
+                Err(DmaError::InvalidRange)
+            );
+        }
+        assert_eq!(
+            unsafe { second.read_coherent_u32(token, 0, Direction::FromDevice) },
+            Err(DmaError::Unmapped)
+        );
+        assert_eq!(
+            unsafe { first.read_coherent_u32(token, 0, Direction::ToDevice) },
+            Err(DmaError::InvalidRange)
+        );
+        // SAFETY: modeled producer and workers are stopped; no writes pending.
+        unsafe { mapping.unmap() }.unwrap();
+        assert_eq!(mapping.read_coherent_u32(0), Err(DmaError::Unmapped));
+        assert_eq!(
+            unsafe { first.read_coherent_u32(token, 0, Direction::FromDevice) },
+            Err(DmaError::Unmapped)
+        );
+        drop(unsafe { first.detach() }.unwrap());
+        assert_eq!(
+            unsafe { first.read_coherent_u32(token, 0, Direction::FromDevice) },
+            Err(DmaError::Unmapped)
+        );
+        drop(first);
+        unsafe { other.unmap() }.unwrap();
+        drop(unsafe { second.detach() }.unwrap());
+        drop(second);
+        drop(cpu);
+        assert_eq!(released.load(Ordering::Relaxed), 2);
+        unsafe { unit.shut_down() }.unwrap();
+    }
+
+    #[test]
+    fn payload_drain_requires_real_write_capability_and_acknowledged_visibility() {
+        for supported in [false, true] {
+            let registers = ModelRegisters::new();
+            if !supported {
+                *registers.0.lock().unwrap().values.get_mut(&CAP).unwrap() &= !CAP_WRITE_DRAIN;
+            }
+            let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8], 48) }.unwrap();
+            let domain = unsafe { unit.attach_requester(stopped_claim(8)) }.unwrap();
+            let pin = pages(PAGE, 12, 0xa10000, Arc::new(AtomicU64::new(0)));
+            let cpu = pin.cpu_mapping(CacheAttribute::WriteBack).unwrap();
+            let pointer = cpu.address(0, 4).unwrap().as_ptr().cast::<u32>();
+            let mut mapping =
+                DmaMapping::map(domain.clone(), pin, Direction::FromDevice, u64::MAX).unwrap();
+            let before = registers.0.lock().unwrap().writes.len();
+            if supported {
+                registers
+                    .0
+                    .lock()
+                    .unwrap()
+                    .pending_payload
+                    .push((pointer as usize, 0x1234_abcd));
+                assert_eq!(mapping.read_coherent_u32(0), Ok(0));
+                // SAFETY: modeled engine cannot submit more requests; queued
+                // translated payload remains retained until real model ACK.
+                unsafe { domain.drain_posted_writes() }.unwrap();
+                assert_eq!(mapping.read_coherent_u32(0), Ok(0x1234_abcd));
+                let model = registers.0.lock().unwrap();
+                let writes = &model.writes[before..];
+                assert!(model.pending_payload.is_empty());
+                assert_eq!(
+                    writes[0],
+                    (
+                        unit.iotlb,
+                        IOTLB_INVALIDATE | IOTLB_GLOBAL | IOTLB_WRITE_DRAIN | IOTLB_READ_DRAIN
+                    )
+                );
+                assert_eq!(writes[1], (GCMD, u64::from(TRANSLATION | WRITE_BUFFER)));
+            } else {
+                assert_eq!(
+                    unsafe { domain.drain_posted_writes() },
+                    Err(DmaError::DrainUnavailable)
+                );
+                assert_eq!(registers.0.lock().unwrap().writes.len(), before);
+            }
+            assert_eq!(unit.lock().state().domains[&8].mappings.len(), 1);
+            // SAFETY: the model has no engine and no queued payload now.
+            unsafe { mapping.unmap() }.unwrap();
+            drop(unsafe { domain.detach() }.unwrap());
+            drop(domain);
+            unsafe { unit.shut_down() }.unwrap();
+        }
+    }
+
+    #[test]
+    fn withheld_drain_bad_granularity_and_write_buffer_fault_keep_all_backing() {
+        for failure in 0..3 {
+            let registers = ModelRegisters::new();
+            let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8], 48) }.unwrap();
+            let claim_drops = Arc::new(AtomicU64::new(0));
+            let domain =
+                unsafe { unit.attach_requester(RequesterClaim::model(8, claim_drops.clone())) }
+                    .unwrap();
+            let pin_drops = Arc::new(AtomicU64::new(0));
+            let pin = pages(PAGE, 12, 0xb10000, pin_drops.clone());
+            let cpu = pin.cpu_mapping(CacheAttribute::WriteBack).unwrap();
+            let pointer = cpu.address(0, 4).unwrap().as_ptr().cast::<u32>();
+            let mapping =
+                DmaMapping::map(domain.clone(), pin, Direction::FromDevice, u64::MAX).unwrap();
+            {
+                let mut model = registers.0.lock().unwrap();
+                model.pending_payload.push((pointer as usize, 0xfeed_beef));
+                match failure {
+                    0 => model.block_iotlb = true,
+                    1 => model.iotlb_granularity = 0,
+                    _ => model.fail_gsts_after = Some(TRANSLATION | WRITE_BUFFER),
+                }
+            }
+            assert_eq!(
+                unsafe { domain.drain_posted_writes() },
+                Err(DmaError::InvalidationFailed)
+            );
+            {
+                let mut guard = unit.lock();
+                let state = guard.state();
+                assert!(state.poisoned);
+                assert_eq!(state.domains[&8].mappings.len(), 1);
+            }
+            assert_eq!(mapping.read_coherent_u32(0), Err(DmaError::MappingFailed));
+            assert_eq!(
+                unsafe { domain.drain_posted_writes() },
+                Err(DmaError::MappingFailed)
+            );
+            drop(cpu);
+            drop(mapping);
+            drop(domain);
+            drop(unit);
+            assert_eq!(pin_drops.load(Ordering::Relaxed), 0);
+            assert_eq!(claim_drops.load(Ordering::Relaxed), 0);
+            // Deliberate quarantine: only external platform recovery can
+            // acknowledge the retained hardware lifetime after these faults.
+        }
+    }
     #[test]
     fn scatter_maps_retained_native_subranges_and_releases_only_after_invalidation() {
         use stela_drivers::bus::dma::pages::PageRange;
@@ -1368,6 +1612,10 @@ mod tests {
             DmaMapping::map(domain.clone(), scatter, Direction::Bidirectional, u64::MAX).unwrap();
         let address = mapping.address().unwrap();
         assert_eq!(mapping.bytes(), 3 * granule);
+        assert_eq!(
+            mapping.read_coherent_u32(0),
+            Err(DmaError::CoherenceUnavailable)
+        );
         {
             let model = registers.0.lock().unwrap();
             for (index, physical) in [0x902000, 0x903000, 0x300000, 0x301000, 0x902000, 0x903000]

@@ -47,6 +47,8 @@ pub enum DmaError {
     MappingFailed,
     InvalidationFailed,
     VisibilityFailed,
+    CoherenceUnavailable,
+    DrainUnavailable,
     Unmapped,
 }
 
@@ -110,6 +112,47 @@ pub unsafe trait DmaDomain: Send + Sync {
         range: Range<usize>,
         direction: Direction,
     ) -> Result<(), DmaError>;
+
+    /// Observe one little-endian word while the device may keep writing.
+    ///
+    /// Unlike `sync_for_cpu`, this transfers no ownership. Implementations
+    /// must independently qualify coherent device/CPU access to the actual
+    /// mapping's retained RAM; CPU WB policy or an ordering fence alone cannot
+    /// grant that capability. Read from those exact pins, without accepting a
+    /// caller's unrelated CPU pointer. Never invalidate a live device buffer.
+    /// Each aligned word is an observation, not an atomic multiword snapshot
+    /// or proof that firmware produced a new sample. Legacy backends refuse.
+    ///
+    /// # Safety
+    /// The private mapping and direction belong to this domain and remain
+    /// live. `offset..offset+4` is in bounds and naturally aligned. Ordinary
+    /// CPU writers/references cannot race the device or this observation.
+    unsafe fn read_coherent_u32(
+        &self,
+        _mapping: DomainMapping,
+        _offset: usize,
+        _direction: Direction,
+    ) -> Result<u32, DmaError> {
+        Err(DmaError::CoherenceUnavailable)
+    }
+
+    /// Complete previously issued translated DMA payload writes through this
+    /// domain's actual owned remapper/root path.
+    ///
+    /// This does not stop a device, drain IRQ/work callbacks, remove mappings,
+    /// or certify posted MSI, peer/bypass traffic, or accesses outside that
+    /// translated payload path. Success must
+    /// come from actual hardware completion, not BusMaster-clear, a CPU fence,
+    /// or translation invalidation without its required write-drain semantics.
+    /// Failure must retain the domain, translations, pins and root owners.
+    ///
+    /// # Safety
+    /// Device engines and submissions are stopped and cannot issue new DMA.
+    /// The driver retains all target backing, configuration and root owners
+    /// through this operation and subsequent IRQ/work drain and unmapping.
+    unsafe fn drain_posted_writes(&self) -> Result<(), DmaError> {
+        Err(DmaError::DrainUnavailable)
+    }
 }
 
 /// Keeps the actual page pin and domain alive until quiescence, unmap and
@@ -192,6 +235,21 @@ impl DmaMapping {
         // SAFETY: token/direction/bounds are retained and checked; the caller
         // establishes hardware completion and CPU ownership of the range.
         unsafe { domain.sync_for_cpu(self.mapping, range, self.direction) }
+    }
+
+    /// Read a coherent little-endian word from this exact device mapping.
+    /// Does not stop DMA or establish freshness/whole-record consistency.
+    /// Unsupported backends explicitly return `CoherenceUnavailable`.
+    pub fn read_coherent_u32(&self, offset: usize) -> Result<u32, DmaError> {
+        let end = offset.checked_add(4).ok_or(DmaError::InvalidRange)?;
+        let domain = self.domain(&(offset..end))?;
+        if !offset.is_multiple_of(4) || self.direction == Direction::ToDevice {
+            return Err(DmaError::InvalidRange);
+        }
+        // SAFETY: this retained private token/direction and checked aligned
+        // range name the actual mapping. Safe CPU aliases expose no writers;
+        // raw CPU access already requires the caller's synchronization.
+        unsafe { domain.read_coherent_u32(self.mapping, offset, self.direction) }
     }
 
     /// Release only after hardware completion and a stopped submission path.
@@ -348,5 +406,52 @@ mod tests {
         assert!(after.mappings > before.mappings);
         assert!(after.bytes >= before.bytes + 4096);
         // Deliberate retained allocation: no fake completion/reset is supplied.
+    }
+
+    #[test]
+    fn legacy_visibility_does_not_grant_continuous_reads_or_posted_write_drain() {
+        let domain = Arc::new(ModelDomain);
+        // SAFETY: this synchronous model has no hardware, but its legacy
+        // visibility methods must not imply the new independent capabilities.
+        assert_eq!(
+            unsafe { domain.drain_posted_writes() },
+            Err(DmaError::DrainUnavailable)
+        );
+        for direction in [
+            Direction::FromDevice,
+            Direction::Bidirectional,
+            Direction::ToDevice,
+        ] {
+            let released = Arc::new(AtomicUsize::new(0));
+            let layout = Layout::from_size_align(4096, 4096).unwrap();
+            // SAFETY: actual zeroed, uniquely retained model RAM.
+            let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
+            let pin = PinnedPages::new(
+                Box::new(ModelBacking {
+                    pointer,
+                    pages: vec![0x10000],
+                    released: released.clone(),
+                }),
+                4096,
+                4096,
+            )
+            .unwrap();
+            let mut lease = DmaMapping::map(domain.clone(), pin, direction, u64::MAX).unwrap();
+            for offset in [1, 4093, 4096, usize::MAX] {
+                assert_eq!(lease.read_coherent_u32(offset), Err(DmaError::InvalidRange));
+            }
+            let error = if direction == Direction::ToDevice {
+                DmaError::InvalidRange
+            } else {
+                DmaError::CoherenceUnavailable
+            };
+            assert_eq!(lease.read_coherent_u32(0), Err(error));
+            assert_eq!(lease.read_coherent_u32(4092), Err(error));
+            assert_eq!(released.load(Ordering::Relaxed), 0);
+            // SAFETY: no modeled device or worker ever received this mapping.
+            unsafe { lease.unmap() }.unwrap();
+            assert_eq!(released.load(Ordering::Relaxed), 1);
+            assert_eq!(lease.read_coherent_u32(0), Err(DmaError::Unmapped));
+        }
     }
 }
