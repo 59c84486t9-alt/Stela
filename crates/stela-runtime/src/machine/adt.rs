@@ -139,6 +139,24 @@ impl<'a> Node<'a> {
             .map(|(_, value)| value)
     }
 
+    /// The ADT length's high bit marks an iBoot fill-in recipe. Its bytes are
+    /// not a hardware value; the loader may resolve or remove that property.
+    pub fn property_is_placeholder(&self, name: &str) -> Option<bool> {
+        let mut offset = self.start;
+        for _ in 0..self.properties {
+            let key = self.data.get(offset..offset + 32)?;
+            let key = &key[..key.iter().position(|&b| b == 0).unwrap_or(32)];
+            let encoded = u32_at(self.data, offset + 32)?;
+            let length = (encoded & 0x7fff_ffff) as usize;
+            self.data.get(offset + 36..offset + 36 + length)?;
+            if key == name.as_bytes() {
+                return Some(encoded & 0x8000_0000 != 0);
+            }
+            offset += 36 + length.next_multiple_of(4);
+        }
+        None
+    }
+
     pub fn child(&self, name: &str) -> Option<Self> {
         let (_, mut offset) = self.walk_properties()?;
         for _ in 0..self.children {

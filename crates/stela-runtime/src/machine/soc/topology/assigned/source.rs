@@ -114,6 +114,12 @@ fn retained(original: &Node<'_>, prepared: &Node<'_>, mutable: &[&str]) -> Resul
         if mutable.contains(&key) {
             continue;
         }
+        if original.property_is_placeholder(key) == Some(true) {
+            if prepared.property_is_placeholder(key) == Some(true) {
+                return Err(format!("assigned prepared source retains unresolved {key}"));
+            }
+            continue;
+        }
         if property(prepared, key)? != value {
             return Err(format!("assigned prepared source changed {key}"));
         }
@@ -494,6 +500,42 @@ impl RetainedResources for BspSource<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_retention_distinguishes_fill_in_recipes_from_structural_values() {
+        use crate::machine::adt::encode;
+        let fixed = 7u32.to_le_bytes();
+        let mut original = encode(&[("fixed", &fixed), ("recipe", b"syscfg/ABCD\0")], &[]);
+        let value = Node::root(&original).unwrap().property("recipe").unwrap();
+        let length_offset = value.as_ptr() as usize - original.as_ptr() as usize - 4;
+        let encoded = u32::from_le_bytes(
+            original[length_offset..length_offset + 4]
+                .try_into()
+                .unwrap(),
+        );
+        original[length_offset..length_offset + 4]
+            .copy_from_slice(&(encoded | 0x8000_0000).to_le_bytes());
+        let source = Node::root(&original).unwrap();
+        let removed = encode(&[("fixed", &fixed)], &[]);
+        let resolved = encode(&[("fixed", &fixed), ("recipe", &[1, 2, 3, 4])], &[]);
+        assert_eq!(source.property_is_placeholder("recipe"), Some(true));
+        assert!(retained(&source, &Node::root(&removed).unwrap(), &[]).is_ok());
+        assert!(retained(&source, &Node::root(&resolved).unwrap(), &[]).is_ok());
+        assert!(retained(&source, &source, &[]).is_err());
+        let changed = encode(&[("fixed", &8u32.to_le_bytes())], &[]);
+        assert!(retained(&source, &Node::root(&changed).unwrap(), &[]).is_err());
+        let missing = encode(&[], &[]);
+        assert!(retained(&source, &Node::root(&missing).unwrap(), &[]).is_err());
+        let ordinary = encode(&[("fixed", &fixed), ("recipe", b"syscfg/ABCD\0")], &[]);
+        assert!(
+            retained(
+                &Node::root(&ordinary).unwrap(),
+                &Node::root(&removed).unwrap(),
+                &[]
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     #[ignore = "requires unchanged original26A434J314sDeviceTree"]
     fn original_mode1_bsp_uses_canonical_dynamic_domain_ids_without_granting_ps_state() {
