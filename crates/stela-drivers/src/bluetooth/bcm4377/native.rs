@@ -267,6 +267,9 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
     /// serializes all service/retirement. No device effect is inferred from
     /// numerical matching. Constructor errors return every original input owner
     /// without native writes; later failures quarantine uncertain ownership.
+    // Return the exact potentially unqualified owners without allocating or
+    // dropping any native resource on rejection.
+    #[allow(clippy::result_large_err)]
     pub unsafe fn new(mut inputs: Inputs<C, R, T>) -> Result<Self, (Error, Inputs<C, R, T>)> {
         let checked = (|| {
             let f = &mut inputs.function;
@@ -426,10 +429,10 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
             unsafe { self.delivery.as_ref().unwrap().borrow().drain() }?;
         }
         self.signals.stopped.store(true, Ordering::Release);
-        if let Some(registration) = self.registration.as_mut() {
-            if let Err(error) = registration.retire() {
-                return Err(self.irq_error(error));
-            }
+        if let Some(registration) = self.registration.as_mut()
+            && let Err(error) = registration.retire()
+        {
+            return Err(self.irq_error(error));
         }
         self.registration = None;
         self.signals.pending.store(false, Ordering::Release);
