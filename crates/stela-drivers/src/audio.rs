@@ -80,6 +80,7 @@ pub enum Phase {
     StreamStart,
     CodecPower,
     CodecDepop,
+    CodecHeadsetDetection,
     LinkPowerDown,
     LinkPowerUp,
 }

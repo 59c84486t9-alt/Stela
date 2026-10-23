@@ -22,7 +22,10 @@ use crate::bus::{
 
 mod codec;
 mod conexant;
-pub use conexant::{ConexantEapdMode, ConexantReport};
+pub use conexant::{
+    ConexantEapdMode, ConexantHeadsetInitialization, ConexantHeadsetKind, ConexantHeadsetReport,
+    ConexantReport,
+};
 mod extended;
 pub use extended::LinkClock;
 mod lifecycle;
@@ -678,6 +681,12 @@ mod tests {
         parameters: BTreeMap<(u8, u8), u32>,
         pin_defaults: BTreeMap<u8, u32>,
         pin_senses: BTreeMap<u8, u32>,
+        conexant_headset_model: bool,
+        conexant_detection_ready: Option<u64>,
+        conexant_detection_reads: usize,
+        conexant_type: u32,
+        conexant_vendor_fault: Option<u16>,
+        conexant_trim: Option<u16>,
         sense_triggers: Vec<u8>,
         coefficient_indexes: BTreeMap<u8, u16>,
         coefficients: BTreeMap<(u8, u16), u16>,
@@ -769,6 +778,12 @@ mod tests {
                 parameters: BTreeMap::new(),
                 pin_defaults: BTreeMap::new(),
                 pin_senses: BTreeMap::new(),
+                conexant_headset_model: false,
+                conexant_detection_ready: None,
+                conexant_detection_reads: 0,
+                conexant_type: 0,
+                conexant_vendor_fault: None,
+                conexant_trim: None,
                 sense_triggers: Vec::new(),
                 coefficient_indexes: BTreeMap::new(),
                 coefficients: BTreeMap::new(),
@@ -973,6 +988,30 @@ mod tests {
             let node = ((command >> 20) & 127) as u8;
             let verb = ((command >> 8) & 0xfff) as u16;
             let long = (command >> 16) & 15;
+            if self.conexant_headset_model && node == 0x1c {
+                if self.conexant_vendor_fault == Some(verb) {
+                    return u32::MAX;
+                }
+                if command & 0x000f_ffff == 0x0003_be10 {
+                    self.conexant_trim = Some(0x0e10);
+                    return 0;
+                }
+                if verb == 0xca0 {
+                    self.conexant_detection_reads += 1;
+                    return if self
+                        .conexant_detection_ready
+                        .is_some_and(|time| self.clock.now_us() >= time)
+                    {
+                        0x80
+                    } else {
+                        0
+                    };
+                }
+                if verb == 0xcb0 {
+                    return self.conexant_type;
+                }
+            }
+
             if long == 3 {
                 let value = command as u16;
                 let output = value & (1 << 15) != 0;
@@ -6638,6 +6677,323 @@ mod tests {
                     assert_eq!(access_counts(&model), before);
                     assert_eq!(controller.routes.len(), 1);
                     assert_eq!(controller.conexant_codecs.len(), 1);
+                }
+            }
+        }
+        fn headset_device(id: u32, present: bool) -> Rc<RefCell<Model>> {
+            let model = device(id, 3);
+            let mut m = model.borrow_mut();
+            m.conexant_headset_model = true;
+            m.conexant_detection_ready = Some(0);
+            m.conexant_type = 0x800;
+            m.parameters.insert((1, 4), (2 << 16) | 27);
+            for node in 11..=0x1c {
+                m.parameters.insert((node, 9), 0);
+            }
+            m.parameters.insert((0x16, 9), (4 << 20) | 1 | (1 << 8));
+            m.parameters.insert((0x16, 0x0c), 0x18);
+            m.parameters.insert((0x16, 0x0e), 1);
+            m.connection_words.insert((0x16, 0), 2);
+            m.parameters.insert((0x19, 9), (4 << 20) | 1 | (1 << 1));
+            m.parameters.insert((0x19, 0x0c), 0x1124);
+            m.parameters.insert((0x1c, 9), 0xf << 20);
+            m.connection_words.insert((3, 0), 0x19);
+            m.parameters.insert((3, 0x0e), 1);
+            m.pin_senses.insert(0x19, if present { 1 << 31 } else { 0 });
+            drop(m);
+            model
+        }
+
+        #[test]
+        fn conexant_headset_cold_trim_bias_real_routes_and_duplex_pcm() {
+            for id in [0x14f1_1f86, 0x14f1_1f87] {
+                for present in [false, true] {
+                    let mut fixture = Fixture::new();
+                    let model = headset_device(id, present);
+                    let mut controller = create(&model, &mut fixture, config()).unwrap();
+                    let graph = controller.enumerate_codec(0).unwrap();
+                    assert_eq!(
+                        controller.initialize_conexant_codec(&graph),
+                        Err(Error::UnsupportedTopology)
+                    );
+                    let report = controller
+                        .initialize_conexant_headset_codec(&graph)
+                        .unwrap();
+                    assert_eq!(model.borrow().conexant_trim, Some(0xe10));
+                    assert_eq!(
+                        report.headset.kind,
+                        if present {
+                            ConexantHeadsetKind::Unclassified
+                        } else {
+                            ConexantHeadsetKind::Disconnected
+                        }
+                    );
+                    assert_eq!(
+                        report.headset.microphone_control,
+                        if present { 0x24 } else { 0x20 }
+                    );
+                    let m = model.borrow();
+                    assert!(m.commands.contains(&((0x1c << 20) | 0x3be10)));
+                    assert_eq!(m.conexant_detection_reads, 0);
+                    drop(m);
+                    let output = graph.analog_route(Direction::Playback, 0x16, 2).unwrap();
+                    let input = graph.analog_route(Direction::Capture, 0x19, 3).unwrap();
+                    let playback = controller
+                        .allocate_stream(
+                            Direction::Playback,
+                            stereo(),
+                            128,
+                            2,
+                            &mut fixture.allocator,
+                        )
+                        .unwrap();
+                    let capture = controller
+                        .allocate_stream(
+                            Direction::Capture,
+                            stereo(),
+                            128,
+                            2,
+                            &mut fixture.allocator,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        controller.configure_analog_route(
+                            &graph,
+                            &output,
+                            playback,
+                            0,
+                            PinOptions::Playback {
+                                headphone: false,
+                                eapd: None
+                            }
+                        ),
+                        Err(Error::InvalidPinControl)
+                    );
+                    controller
+                        .configure_analog_route(
+                            &graph,
+                            &output,
+                            playback,
+                            0,
+                            PinOptions::Playback {
+                                headphone: true,
+                                eapd: None,
+                            },
+                        )
+                        .unwrap();
+                    let vref = if present {
+                        Vref::EightyPercent
+                    } else {
+                        Vref::HighImpedance
+                    };
+                    let wrong = if present {
+                        Vref::HighImpedance
+                    } else {
+                        Vref::EightyPercent
+                    };
+                    assert_eq!(
+                        controller.configure_analog_route(
+                            &graph,
+                            &input,
+                            capture,
+                            0,
+                            PinOptions::Capture { vref: wrong }
+                        ),
+                        Err(Error::InvalidPinControl)
+                    );
+                    assert!(!controller.routing_failed);
+                    controller
+                        .configure_analog_route(
+                            &graph,
+                            &input,
+                            capture,
+                            0,
+                            PinOptions::Capture { vref },
+                        )
+                        .unwrap();
+                    controller
+                        .set_conexant_outputs_enabled(&graph, true)
+                        .unwrap();
+                    controller.write_pcm(playback, 0, &[0x39; 256]).unwrap();
+                    controller.fill_capture(capture, 0xa5).unwrap();
+                    controller.start(capture).unwrap();
+                    controller.start(playback).unwrap();
+                    model.borrow_mut().dma_step_bytes = 128;
+                    advance(&model, 16);
+                    assert!(controller.status(playback).unwrap().period_completed);
+                    assert!(controller.status(capture).unwrap().period_completed);
+                    model
+                        .borrow_mut()
+                        .pin_senses
+                        .insert(0x19, if present { 0 } else { 1 << 31 });
+                    let changed = controller.poll_conexant_headset(&graph).unwrap();
+                    assert_eq!(
+                        changed.microphone_control,
+                        if present { 0x20 } else { 0x24 }
+                    );
+                    assert!(controller.status(capture).unwrap().running);
+                    controller.stop(capture).unwrap();
+                    let mut actual = [0; 256];
+                    controller.read_pcm(capture, 0, &mut actual).unwrap();
+                    assert_eq!(actual, core::array::from_fn(|index| index as u8));
+                    controller.shutdown().unwrap();
+                    assert!(model.borrow().playback.iter().all(|byte| *byte == 0x39));
+                    assert!(model.borrow().playback.len() >= 256);
+                }
+            }
+        }
+
+        #[test]
+        fn conexant_headset_poll_preserves_type_precedence_and_source_bias_on_headphone_only() {
+            for (raw, kind) in [
+                (0, ConexantHeadsetKind::Headphone),
+                (0x400, ConexantHeadsetKind::Omtp),
+                (0x800, ConexantHeadsetKind::Ctia),
+                (0xc00, ConexantHeadsetKind::Ctia),
+            ] {
+                let mut fixture = Fixture::new();
+                let model = headset_device(0x14f1_1f87, false);
+                let mut controller = create(&model, &mut fixture, config()).unwrap();
+                let graph = controller.enumerate_codec(0).unwrap();
+                controller
+                    .initialize_conexant_headset_codec(&graph)
+                    .unwrap();
+                {
+                    let mut m = model.borrow_mut();
+                    m.pin_senses.insert(0x19, 0x8000_005a);
+                    m.conexant_type = raw;
+                    m.conexant_detection_ready = Some(m.clock.now_us() + 25_000);
+                }
+                let before = model.borrow().clock.now_us();
+                let report = controller.poll_conexant_headset(&graph).unwrap();
+                assert_eq!(report.kind, kind);
+                assert_eq!(report.sense, 0x8000_005a);
+                assert_eq!(report.detection_status, Some(0x80));
+                assert_eq!(report.type_status, Some(raw));
+                assert_eq!(report.microphone_control, 0x24);
+                assert_eq!(model.borrow().conexant_detection_reads, 3);
+                assert!(model.borrow().clock.now_us() - before >= 40_000);
+                let before = model.borrow().conexant_detection_reads;
+                model.borrow_mut().pin_senses.insert(0x19, 0);
+                let report = controller.poll_conexant_headset(&graph).unwrap();
+                assert_eq!(report.kind, ConexantHeadsetKind::Disconnected);
+                assert_eq!(report.microphone_control, 0x20);
+                assert_eq!(model.borrow().conexant_detection_reads, before);
+            }
+        }
+
+        #[test]
+        fn conexant_headset_incomplete_detection_and_readback_failures_hold_owned_routes() {
+            for fault in 0..5 {
+                let mut fixture = Fixture::new();
+                let model = headset_device(0x14f1_1f86, true);
+                let mut controller = create(&model, &mut fixture, config()).unwrap();
+                let graph = controller.enumerate_codec(0).unwrap();
+                controller
+                    .initialize_conexant_headset_codec(&graph)
+                    .unwrap();
+                let route = graph.analog_route(Direction::Capture, 0x19, 3).unwrap();
+                let stream = controller
+                    .allocate_stream(Direction::Capture, stereo(), 128, 2, &mut fixture.allocator)
+                    .unwrap();
+                controller
+                    .configure_analog_route(
+                        &graph,
+                        &route,
+                        stream,
+                        0,
+                        PinOptions::Capture {
+                            vref: Vref::EightyPercent,
+                        },
+                    )
+                    .unwrap();
+                {
+                    let mut m = model.borrow_mut();
+                    match fault {
+                        0 => m.conexant_detection_ready = None,
+                        1 => m.conexant_vendor_fault = Some(0xca0),
+                        2 => m.conexant_vendor_fault = Some(0xcb0),
+                        3 => {
+                            m.reject_route_control = Some(0xf07);
+                            m.reject_route_node = Some(0x19);
+                        }
+                        _ => {
+                            m.pin_senses.insert(0x19, u32::MAX);
+                        }
+                    }
+                }
+                let before = model.borrow().clock.now_us();
+                let expected = if fault == 0 {
+                    Error::Timeout(crate::audio::Phase::CodecHeadsetDetection)
+                } else {
+                    Error::RouteRejected
+                };
+                assert_eq!(controller.poll_conexant_headset(&graph), Err(expected));
+                if fault == 0 {
+                    assert_eq!(model.borrow().conexant_detection_reads, 3);
+                    assert!(model.borrow().clock.now_us() - before >= 60_000);
+                }
+                let before = access_counts(&model);
+                assert_eq!(controller.start(stream), Err(Error::NeedsReset));
+                assert_eq!(access_counts(&model), before);
+                assert_eq!(controller.routes.len(), 1);
+                assert_eq!(controller.conexant_codecs.len(), 1);
+                {
+                    let mut m = model.borrow_mut();
+                    m.conexant_vendor_fault = None;
+                    m.reject_route_control = None;
+                }
+                controller.reinitialize().unwrap();
+                assert!(controller.conexant_codecs.is_empty());
+            }
+        }
+
+        #[test]
+        fn conexant_headset_cold_failures_and_missing_actual_controls_refuse_without_false_readiness()
+         {
+            for fault in 0..6 {
+                let mut fixture = Fixture::new();
+                let model = headset_device(0x14f1_1f87, true);
+                if fault == 0 {
+                    model.borrow_mut().parameters.insert((0x19, 0x0c), 0x120);
+                }
+                let mut controller = create(&model, &mut fixture, config()).unwrap();
+                let graph = controller.enumerate_codec(0).unwrap();
+                if fault == 1 {
+                    model.borrow_mut().parameters.insert((0x1c, 9), u32::MAX);
+                }
+                if fault == 2 {
+                    model.borrow_mut().pin_senses.insert(0x19, u32::MAX);
+                }
+                if fault == 3 {
+                    model.borrow_mut().reject_route_control = Some(0xf07);
+                }
+                if fault == 4 {
+                    model.borrow_mut().drop_reply_command = Some((0x1c << 20) | 0x3be10);
+                }
+                if fault == 5 {
+                    model.borrow_mut().conexant_vendor_fault = Some(0x3be);
+                }
+                let before = model.borrow().commands.len();
+                assert!(
+                    controller
+                        .initialize_conexant_headset_codec(&graph)
+                        .is_err()
+                );
+                if fault < 2 {
+                    assert!(controller.conexant_codecs.is_empty());
+                    assert!(
+                        model.borrow().commands[before..]
+                            .iter()
+                            .all(|v| ((v >> 8) & 0xfff) >= 0xf00)
+                    );
+                } else {
+                    assert_eq!(controller.conexant_codecs.len(), 1);
+                    assert!(controller.routing_failed);
+                    assert_eq!(
+                        controller.poll_conexant_headset(&graph),
+                        Err(Error::NeedsReset)
+                    );
                 }
             }
         }

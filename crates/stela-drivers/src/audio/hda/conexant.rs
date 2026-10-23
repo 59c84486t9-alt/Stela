@@ -4,7 +4,8 @@
 //! generic.c Copyright (c) 2004 Takashi Iwai.
 //! Copyright (c) 2006 Pototskiy Akex, Takashi Iwai and Tobin Davis.
 //! EAPD count selects the donor's global/dynamic heuristic; no OEM GPIO, ACPI,
-//! LED, pin override or proprietary headset policy is inferred from a codec ID.
+//! LED or pin override policy is inferred from a codec ID. Fixed-node headset
+//! procedures require the separate source-bound headset initialization entry.
 use super::{
     AnalogRoute, CodecGraph, Controller, PinOptions, Registers, StreamId, Verb, WidgetKind,
 };
@@ -13,6 +14,9 @@ use crate::{
     bus::i2c::Timer,
 };
 use alloc::vec::Vec;
+
+mod headset;
+pub use headset::{ConexantHeadsetInitialization, ConexantHeadsetKind, ConexantHeadsetReport};
 
 const GET_PARAMETER: u16 = 0xf00;
 const GET_EAPD: u16 = 0xf0c;
@@ -45,6 +49,7 @@ pub(super) struct State {
     pins: Vec<u8>,
     active: bool,
     retired: bool,
+    headset: Option<headset::State>,
 }
 fn profile(id: u32) -> Result<bool, Error> {
     match id {
@@ -57,7 +62,7 @@ fn profile(id: u32) -> Result<bool, Error> {
         | 0x14f1_5110 | 0x14f1_5111 | 0x14f1_5113 | 0x14f1_5114 | 0x14f1_5115 | 0x14f1_51d7 => {
             Ok(false)
         }
-        // CX11880/SN6140 require vendor headset/micbias procedures, kept explicit.
+        0x14f1_1f86 | 0x14f1_1f87 => Ok(false),
         _ => Err(Error::UnsupportedTopology),
     }
 }
@@ -173,6 +178,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         graph: &CodecGraph,
     ) -> Result<ConexantReport, Error> {
         self.conexant_guard(graph)?;
+        if headset::is_profile(graph.vendor_id) {
+            return Err(Error::UnsupportedTopology);
+        }
+        self.initialize_conexant_common(graph)
+    }
+    fn initialize_conexant_common(&mut self, graph: &CodecGraph) -> Result<ConexantReport, Error> {
+        self.conexant_guard(graph)?;
         self.require_routing_stopped()?;
         if self
             .routes
@@ -206,6 +218,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             pins: pins.clone(),
             active: false,
             retired: false,
+            headset: None,
         });
         let result = (|| {
             self.power_d0(graph.address, group)?;
@@ -281,6 +294,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let single_adc = profile(graph.vendor_id)?;
         self.preflight_analog_route_policy(graph, route, id, channel, options, single_adc)?;
         let state = self.conexant_active(graph)?;
+        if let Some(headset) = &state.headset {
+            headset::route_options(headset, route, options)?;
+        }
         // own_eapd_ctl in cx_probe suppresses generic per-pin EAPD updates.
         // Both global and dynamic codecs use the separate whole-value master
         // operation, so routing cannot silently rewrite that policy.
