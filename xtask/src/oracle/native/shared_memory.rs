@@ -4,7 +4,7 @@
 use super::*;
 use stela_compiler::{
     Lifter,
-    aarch64::{Decoder, Operation, ordered},
+    aarch64::{Decoder, Operation, ordered, simd},
     block::CheckedMemoryProfile,
 };
 use stela_runtime::{
@@ -29,7 +29,7 @@ fn admitted(operation: &Operation) -> bool {
             ..
         }) => false,
         Operation::Ordered(_) => true,
-        Operation::Literal(_) => true,
+        Operation::Literal(_) | Operation::Simd(simd::Operand::StructureMemory(_)) => true,
         _ => false,
     }
 }
@@ -80,7 +80,7 @@ pub(super) fn run(
     body: &CheckedMemoryBlock,
     windows: &Windows,
     case: &Case,
-) -> Result<(GuestState, u64)> {
+) -> Result<(GuestState, u64, Option<super::super::Exception>)> {
     let rights = AccessPermissions {
         readable: true,
         writable: true,
@@ -184,7 +184,7 @@ pub(super) fn run(
                     transfer: stela_compiler::aarch64::literal::Transfer::Simd { .. },
                     ..
                 }
-            ))
+            ) | Operation::Simd(simd::Operand::StructureMemory(_)))
         )
     });
     let observed = if asimd {
@@ -234,22 +234,86 @@ pub(super) fn run(
         // SAFETY: exact fixture contract described above, ordinary authority.
         unsafe { body.run(&controls, &system, &mut memory, &event, &mut thread) }?
     };
-    ensure!(
-        observed.fault.is_none(),
-        "checked memory fault: {:?}",
-        observed.fault
-    );
+    let exception = observed.fault.map(translation_fault).transpose()?;
     // Like the existing leaf lane, the closing RET is harness machinery; compare
     // the source prefix's next PC, not its synthetic terminal's X30 target.
     Ok((
         thread.registers,
-        CODE_PAGE + (case.steps * INSTRUCTION_BYTES) as u64,
+        exception.map_or(CODE_PAGE + (case.steps * INSTRUCTION_BYTES) as u64, |fault| fault.address),
+        exception,
     ))
+}
+
+/// This fixture maps the complete data window through valid level-3 pages and
+/// leaves the next page absent. Only that exact EL0/LE/A=0 fault is synthesized;
+/// it supplies no general architectural exception adapter. AdvSIMD accesses
+/// have ISV=0, and a failed checked entry retains its exact source PC and FAR.
+fn translation_fault(fault: stela_runtime::memory::domain::MemoryFault) -> Result<super::super::Exception> {
+    use stela_compiler::context::memory::{FaultAccess, MemoryStatus};
+    ensure!(fault.status == MemoryStatus::Translation, "unqualified checked oracle fault: {fault:?}");
+    ensure!(fault.address == DATA_WINDOW + DATA_BYTES as u64,
+        "checked oracle fault outside qualified window boundary: {fault:?}");
+    let write = match fault.access {
+        FaultAccess::Read => false,
+        FaultAccess::Write => true,
+        _ => anyhow::bail!("unqualified checked oracle fault direction: {fault:?}"),
+    };
+    // EC=Data Abort from lower EL; IL=1; DFSC=Translation fault, level 3.
+    const EL0_DATA_ABORT: u64 = (0x24 << 26) | (1 << 25);
+    const WRITE: u64 = 1 << 6;
+    const TRANSLATION_LEVEL3: u64 = 0b000111;
+    Ok(super::super::Exception {
+        syndrome: EL0_DATA_ABORT | (if write { WRITE } else { 0 }) | TRANSLATION_LEVEL3,
+        address: fault.pc,
+        fault_address: fault.address,
+        level: 1,
+        hpfar: 0,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn checked_oracle_admits_all_canonical_structure_samples_and_no_other_simd() {
+        // Load the source inventory directly: no compile success substitutes for
+        // checking the original typed operations for all 150 canonical forms.
+        let registry: serde_json::Value = serde_json::from_str(include_str!("../../../../isa/apple-silicon-reviewed-forms.json")).unwrap();
+        let mut forms = 0;
+        for form in registry["forms"].as_array().unwrap() {
+            if !form["id"].as_str().unwrap().contains("asisdl") { continue; }
+            forms += 1;
+            for sample in form["smoke_samples"].as_array().unwrap() {
+                let word = u32::from_str_radix(sample["word"].as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
+                let instruction = Decoder.lift(GuestAddress(CODE_PAGE), word).unwrap();
+                assert!(matches!(instruction.operation, Operation::Simd(simd::Operand::StructureMemory(_))));
+                assert!(admitted(&instruction.operation));
+            }
+        }
+        assert_eq!(forms, 150);
+        for word in [0x4e22_8420, 0x4e01_0000, 0x3dc0_0040] {
+            let instruction = Decoder.lift(GuestAddress(CODE_PAGE), word).unwrap();
+            assert!(!admitted(&instruction.operation));
+        }
+    }
+
+    #[test]
+    fn checked_fault_adapter_refuses_unqualified_status_or_address() {
+        use stela_compiler::context::memory::{FaultAccess, MemoryStatus};
+        let fault = stela_runtime::memory::domain::MemoryFault {
+            status: MemoryStatus::Translation, access: FaultAccess::Read,
+            address: DATA_WINDOW + DATA_BYTES as u64, pc: CODE_PAGE, completed_bytes: 0,
+        };
+        let read = translation_fault(fault).unwrap();
+        assert_eq!(read.syndrome, 0x9200_0007);
+        let write = translation_fault(stela_runtime::memory::domain::MemoryFault { access: FaultAccess::Write, ..fault }).unwrap();
+        assert_eq!(write.syndrome, 0x9200_0047);
+        for status in [MemoryStatus::Permission, MemoryStatus::Alignment, MemoryStatus::Unsupported] {
+            assert!(translation_fault(stela_runtime::memory::domain::MemoryFault { status, ..fault }).is_err());
+        }
+        assert!(translation_fault(stela_runtime::memory::domain::MemoryFault { address: fault.address - 1, ..fault }).is_err());
+    }
+
     #[test]
     fn checked_oracle_admits_exact_integer_and_simd_literals_without_prefetch() {
         for form in [

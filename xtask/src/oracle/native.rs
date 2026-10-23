@@ -225,6 +225,19 @@ pub enum Translation {
 }
 
 impl Translation {
+    /// The one checked structured source operation, if present. Its typed
+    /// address/footprint drives mapped and boundary-fault oracle cases.
+    pub fn checked_structure(&self, words: &[u32]) -> Option<stela_compiler::aarch64::simd::structure_memory::Operand> {
+        use stela_compiler::{Lifter, aarch64::{Decoder, Operation, simd}};
+        if !matches!(self, Self::CheckedShared(_)) || words.len() != 1 {
+            return None;
+        }
+        match Decoder.lift(GuestAddress(CODE_PAGE), words[0]).ok()?.operation {
+            Operation::Simd(simd::Operand::StructureMemory(operand)) => Some(operand),
+            _ => None,
+        }
+    }
+
     pub fn checked_shared(words: &[u32]) -> Result<Option<Self>> {
         shared_memory::prepare(words).map(|body| body.map(Self::CheckedShared))
     }
@@ -314,8 +327,9 @@ impl Translation {
     /// Run the translation against `case`'s state and data window.
     ///
     /// # Safety
-    /// The case must have completed on the oracle, so every access stays inside
-    /// the windows.
+    /// Direct-RAM cases must have completed on the oracle, so every access
+    /// stays inside the windows. Checked cases may fault: all accesses remain
+    /// mediated by the retained memory domain.
     pub unsafe fn run(&mut self, case: &Case) -> Result<Outcome> {
         if let Self::System = self {
             // SAFETY: `system` admitted only blocks that reach their exit
@@ -328,8 +342,12 @@ impl Translation {
         unsafe { install_case(&windows, case)? };
         let saved = mxcsr();
         let mut scalable_result = None;
+        let mut exception = None;
         let result = match self {
-            Self::CheckedShared(body) => shared_memory::run(body, &windows, case),
+            Self::CheckedShared(body) => shared_memory::run(body, &windows, case).map(|(state, pc, fault)| {
+                exception = fault;
+                (state, pc)
+            }),
             Self::Leaf(executable) => {
                 let mut state = case.state.clone();
                 // SAFETY: the mapping holds a leaf that follows the guest-state ABI.
@@ -370,7 +388,7 @@ impl Translation {
             next_pc,
             data,
             scalable: scalable_result,
-            exception: None,
+            exception,
             spsr: None,
         })
     }
