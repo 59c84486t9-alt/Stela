@@ -10,7 +10,6 @@ type PrefixBits = [[u64; GROUP_WORDS]; PREFIXES];
 // This temporary bitmap exists only during constant evaluation. Enumerating
 // each form's feasible unmasked prefixes avoids scanning every form for every
 // prefix, and deduplicates groups without retaining a runtime bitmap.
-const PREFIX_GROUPS: PrefixBits = prefix_groups();
 const GROUP_REFERENCES: usize = group_references();
 
 struct Index {
@@ -45,7 +44,7 @@ const fn prefix_groups() -> PrefixBits {
 }
 
 const fn group_references() -> usize {
-    let prefixes = &PREFIX_GROUPS;
+    let prefixes = prefix_groups();
     let mut total = 0;
     let mut prefix = 0;
     while prefix < PREFIXES {
@@ -67,7 +66,7 @@ const fn compact() -> Index {
         groups: [0; GROUP_REFERENCES],
     };
     let mut next = 0;
-    let prefixes = &PREFIX_GROUPS;
+    let prefixes = prefix_groups();
     let mut prefix = 0;
     while prefix < PREFIXES {
         index.starts[prefix] = next as u32;
