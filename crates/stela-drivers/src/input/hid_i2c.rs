@@ -1,0 +1,606 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//! Standard HID-over-I2C transport, following Linux i2c-hid-core.c.
+//!
+//! Copyright (c) 2012 Benjamin Tissoires, Ecole Nationale de l'Aviation Civile
+//! and Red Hat, Inc. Retained notices and upstream source hashes are in
+//! input/THIRD_PARTY.md. This is a native Stela backend, not a Linux shim.
+//!
+//! The platform supplies an exclusively owned, powered I2C attachment, the ACPI
+//! descriptor register and the actual interrupt pin. The CPU route stays masked
+//! and drained; this polled backend observes the pin itself. Reset completes
+//! only after an asserted pin and a real zero-length reset acknowledgement.
+//! Raw HID reports and the exact report descriptor pass to a shared HID consumer;
+//! no keyboard, touchpad or touchscreen descriptor is substituted here.
+use crate::bus::i2c::{self, Address, Bus, Operation, Timer};
+use alloc::vec::Vec;
+
+mod descriptor;
+pub use descriptor::Descriptor;
+use descriptor::Quirks;
+
+const DESCRIPTOR_BYTES: usize = 30;
+const MAX_DESCRIPTOR: usize = 4096;
+const MAX_BUFFER: usize = 16384;
+const RESET: u8 = 1;
+const GET_REPORT: u8 = 2;
+const SET_REPORT: u8 = 3;
+const SET_POWER: u8 = 8;
+const WAKE_DELAY_US: u64 = 60_000;
+const ADDRESS_WAKE_DELAY_US: u64 = 400;
+const GOODIX_RESUME_DELAY_US: u64 = 1_500_000;
+
+/// Actual platform IRQ provider. Masking must acknowledge the CPU route's
+/// mask/drain, not merely change a local boolean. `asserted` samples this
+/// attachment's physical active level even while the CPU route is masked.
+pub trait Interrupt {
+    fn mask_and_drain(&mut self) -> Result<(), InterruptError>;
+    fn asserted(&mut self) -> Result<bool, InterruptError>;
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InterruptError {
+    Unavailable,
+    Hardware(u32),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportType {
+    Input = 1,
+    Output = 2,
+    Feature = 3,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerState {
+    Uninitialized,
+    On,
+    Sleep,
+    SuspendedAwake,
+    Stopped,
+    Uncertain,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    InvalidAddress,
+    InvalidConfiguration,
+    NotReady,
+    AlreadyInitialized,
+    NeedsReset,
+    Bus(i2c::Error),
+    Interrupt(InterruptError),
+    Allocation,
+    DescriptorLength(u16),
+    Version(u16),
+    ReportDescriptorLength(u16),
+    BufferLength(u16),
+    ReportLength { actual: usize, maximum: usize },
+    ReportId { expected: u8, actual: u8 },
+    UnsupportedReportType,
+    NoOutputRegister,
+    ResetTimeout,
+    UnexpectedReset,
+    UnqualifiedQuirk { vendor: u16, product: u16 },
+    IdentityChanged,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    NotAttempted,
+    IrqMasked,
+    Failed,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Error {
+    pub kind: ErrorKind,
+    pub recovery: Recovery,
+}
+impl From<ErrorKind> for Error {
+    fn from(kind: ErrorKind) -> Self {
+        Self {
+            kind,
+            recovery: Recovery::NotAttempted,
+        }
+    }
+}
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "I2C HID {:?} (recovery {:?})", self.kind, self.recovery)
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    Fresh,
+    Starting,
+    Ready,
+    Sleeping,
+    SuspendedAwake,
+    Stopped,
+    Faulted,
+}
+/// One observed input result. No-data and ELAN's documented bogus interrupt are
+/// visible outcomes, not empty fabricated HID reports.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InputReport {
+    Data(Vec<u8>),
+    Empty,
+    SpuriousInterrupt,
+}
+
+/// Captured control-report bytes and the full HID length advertised on wire.
+/// A caller may deliberately bound the read; truncation is never hidden.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlReport {
+    pub data: Vec<u8>,
+    pub reported_length: usize,
+}
+impl ControlReport {
+    pub fn is_complete(&self) -> bool {
+        self.data.len() == self.reported_length
+    }
+}
+
+pub struct Device<B, I, T> {
+    bus: B,
+    interrupt: I,
+    timer: T,
+    address: Address,
+    descriptor_register: u16,
+    reset_timeout_us: u64,
+    state: State,
+    descriptor: Option<Descriptor>,
+    report_descriptor: Vec<u8>,
+    input: Vec<u8>,
+    quirks: Quirks,
+    discarded_before_start: u64,
+}
+impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
+    /// Does not touch hardware. GPIO/reset-rail sequencing and ACPI descriptor
+    /// discovery belong to the platform; no vendor/ACPI identity supplies IRQ
+    /// completion in place of the required actual pin provider.
+    pub fn new(
+        bus: B,
+        interrupt: I,
+        timer: T,
+        address: Address,
+        descriptor_register: u16,
+        reset_timeout_us: u64,
+    ) -> Result<Self, Error> {
+        if !matches!(
+            address,
+            Address::SevenBit(0x08..=0x77) | Address::TenBit(0..=0x3ff)
+        ) {
+            return Err(ErrorKind::InvalidAddress.into());
+        }
+        if reset_timeout_us == 0 {
+            return Err(ErrorKind::InvalidConfiguration.into());
+        }
+        Ok(Self {
+            bus,
+            interrupt,
+            timer,
+            address,
+            descriptor_register,
+            reset_timeout_us,
+            state: State::Fresh,
+            descriptor: None,
+            report_descriptor: Vec::new(),
+            input: Vec::new(),
+            quirks: Quirks::default(),
+            discarded_before_start: 0,
+        })
+    }
+    pub fn is_ready(&self) -> bool {
+        self.state == State::Ready
+    }
+    pub fn needs_reset(&self) -> bool {
+        self.state == State::Faulted
+    }
+    pub fn power_state(&self) -> PowerState {
+        match self.state {
+            State::Fresh | State::Starting => PowerState::Uninitialized,
+            State::Ready => PowerState::On,
+            State::Sleeping => PowerState::Sleep,
+            State::SuspendedAwake => PowerState::SuspendedAwake,
+            State::Stopped => PowerState::Stopped,
+            State::Faulted => PowerState::Uncertain,
+        }
+    }
+    pub fn descriptor(&self) -> Option<&Descriptor> {
+        self.descriptor.as_ref()
+    }
+    pub fn report_descriptor(&self) -> &[u8] {
+        &self.report_descriptor
+    }
+    pub fn discarded_before_start(&self) -> u64 {
+        self.discarded_before_start
+    }
+    fn ready(&self) -> Result<(), Error> {
+        if self.state == State::Faulted {
+            Err(ErrorKind::NeedsReset.into())
+        } else if !self.is_ready() {
+            Err(ErrorKind::NotReady.into())
+        } else {
+            Ok(())
+        }
+    }
+    fn delay(&self, us: u64) {
+        let start = self.timer.now_us();
+        while self.timer.now_us().wrapping_sub(start) < us {
+            self.timer.relax();
+        }
+    }
+    fn buffer(length: usize) -> Result<Vec<u8>, ErrorKind> {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(length)
+            .map_err(|_| ErrorKind::Allocation)?;
+        bytes.resize(length, 0);
+        Ok(bytes)
+    }
+    fn transfer(&mut self, send: &[u8], receive: &mut [u8]) -> Result<(), ErrorKind> {
+        let result = match (send.is_empty(), receive.is_empty()) {
+            (false, false) => self.bus.transaction(
+                self.address,
+                &mut [Operation::Write(send), Operation::Read(receive)],
+            ),
+            (false, true) => self
+                .bus
+                .transaction(self.address, &mut [Operation::Write(send)]),
+            (true, false) => self
+                .bus
+                .transaction(self.address, &mut [Operation::Read(receive)]),
+            (true, true) => return Err(ErrorKind::InvalidConfiguration),
+        };
+        result.map_err(ErrorKind::Bus)
+    }
+    fn address_nack(error: ErrorKind) -> bool {
+        matches!(
+            error,
+            ErrorKind::Bus(i2c::Error {
+                kind: i2c::ErrorKind::Aborted {
+                    kind: i2c::AbortKind::AddressNack,
+                    ..
+                },
+                recovery: i2c::Recovery::Disabled
+            })
+        )
+    }
+    fn register(&mut self, register: u16, receive: &mut [u8]) -> Result<(), ErrorKind> {
+        self.transfer(&register.to_le_bytes(), receive)
+    }
+    fn command(&self, opcode: u8, report_type: u8, id: u8) -> Result<Vec<u8>, ErrorKind> {
+        let descriptor = self.descriptor.ok_or(ErrorKind::NotReady)?;
+        let mut bytes = Self::buffer(if id < 15 { 4 } else { 5 })?;
+        bytes[..2].copy_from_slice(&descriptor.command_register.to_le_bytes());
+        bytes[2] = (report_type << 4) | id.min(15);
+        bytes[3] = opcode;
+        if id >= 15 {
+            bytes[4] = id;
+        }
+        bytes
+            .try_reserve_exact(2)
+            .map_err(|_| ErrorKind::Allocation)?;
+        Ok(bytes)
+    }
+    fn power(&mut self, on: bool) -> Result<(), ErrorKind> {
+        let bytes = self.command(SET_POWER, 0, u8::from(!on))?;
+        let result = self.transfer(&bytes, &mut []);
+        if let Err(error) = result {
+            if !on || !Self::address_nack(error) {
+                return Err(error);
+            }
+            // The one-write command was address-NACKed, so no action reached
+            // the device. No partially accepted command is replayed.
+            self.delay(ADDRESS_WAKE_DELAY_US);
+            self.transfer(&bytes, &mut [])?;
+        }
+        if on {
+            self.delay(WAKE_DELAY_US);
+        }
+        Ok(())
+    }
+    fn read_input(&mut self) -> Result<u16, ErrorKind> {
+        self.bus
+            .transaction(self.address, &mut [Operation::Read(&mut self.input)])
+            .map_err(ErrorKind::Bus)?;
+        Ok(u16::from_le_bytes([self.input[0], self.input[1]]))
+    }
+    fn validate_input(&self, length: u16) -> Result<(), ErrorKind> {
+        if length < 2 || usize::from(length) > self.input.len() {
+            return Err(ErrorKind::ReportLength {
+                actual: usize::from(length),
+                maximum: self.input.len(),
+            });
+        }
+        Ok(())
+    }
+    fn reset(&mut self) -> Result<(), ErrorKind> {
+        self.power(true)?;
+        let bytes = self.command(RESET, 0, 0)?;
+        self.transfer(&bytes, &mut [])?;
+        let start = self.timer.now_us();
+        loop {
+            if self.interrupt.asserted().map_err(ErrorKind::Interrupt)? {
+                let length = self.read_input()?;
+                if length == 0 {
+                    break;
+                }
+                if !(self.quirks.elan && length == u16::MAX) {
+                    self.validate_input(length)?;
+                }
+                // Before start these reports have no guest consumer. Count
+                // them; only the actual zero report acknowledges this RESET.
+                self.discarded_before_start = self.discarded_before_start.saturating_add(1);
+            }
+            if self.timer.now_us().wrapping_sub(start) >= self.reset_timeout_us {
+                return Err(ErrorKind::ResetTimeout);
+            }
+            self.timer.relax();
+        }
+        if !self.quirks.elan {
+            self.power(true)?;
+        }
+        Ok(())
+    }
+    fn fail(&mut self, kind: ErrorKind) -> Error {
+        self.state = State::Faulted;
+        let recovery = if self.interrupt.mask_and_drain().is_ok() {
+            Recovery::IrqMasked
+        } else {
+            Recovery::Failed
+        };
+        Error { kind, recovery }
+    }
+    pub fn initialize(&mut self) -> Result<(), Error> {
+        if self.is_ready() {
+            return Err(ErrorKind::AlreadyInitialized.into());
+        }
+        if !matches!(self.state, State::Fresh | State::Stopped) {
+            return Err(ErrorKind::NeedsReset.into());
+        }
+        self.state = State::Starting;
+        let result = (|| {
+            self.interrupt
+                .mask_and_drain()
+                .map_err(ErrorKind::Interrupt)?;
+            let mut bytes = [0; DESCRIPTOR_BYTES];
+            if let Err(error) = self.register(self.descriptor_register, &mut bytes) {
+                if !Self::address_nack(error) {
+                    return Err(error);
+                }
+                self.delay(ADDRESS_WAKE_DELAY_US);
+                self.register(self.descriptor_register, &mut bytes)?;
+            }
+            let descriptor = Descriptor::parse(&bytes)?;
+            if self.descriptor.is_some_and(|old| old != descriptor) {
+                return Err(ErrorKind::IdentityChanged);
+            }
+            self.quirks = Quirks::for_device(descriptor)?;
+            self.input = Self::buffer(usize::from(descriptor.max_input_length))?;
+            self.descriptor = Some(descriptor);
+            self.reset()?;
+            let mut report = Self::buffer(usize::from(descriptor.report_descriptor_length))?;
+            self.register(descriptor.report_descriptor_register, &mut report)?;
+            if !self.report_descriptor.is_empty() && self.report_descriptor != report {
+                return Err(ErrorKind::IdentityChanged);
+            }
+            self.report_descriptor = report;
+            if self.quirks.repower {
+                self.power(true)?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.state = State::Ready;
+                Ok(())
+            }
+            Err(kind) => Err(self.fail(kind)),
+        }
+    }
+    /// Read only when the actual device IRQ pin is asserted. Returned HID bytes
+    /// include the report ID if the device's descriptor uses numbered reports.
+    pub fn poll(&mut self) -> Result<Option<InputReport>, Error> {
+        self.ready()?;
+        let result = (|| {
+            if !self.interrupt.asserted().map_err(ErrorKind::Interrupt)? {
+                return Ok(None);
+            }
+            let length = self.read_input()?;
+            if length == 0 {
+                return Err(ErrorKind::UnexpectedReset);
+            }
+            if self.quirks.elan && length == u16::MAX {
+                return Ok(Some(InputReport::SpuriousInterrupt));
+            }
+            self.validate_input(length)?;
+            if length == 2 {
+                return Ok(Some(InputReport::Empty));
+            }
+            let mut report = Self::buffer(usize::from(length) - 2)?;
+            report.copy_from_slice(&self.input[2..usize::from(length)]);
+            Ok(Some(InputReport::Data(report)))
+        })();
+        result.map_err(|kind| self.fail(kind))
+    }
+    /// GET_REPORT returns raw HID data (including the report ID when nonzero).
+    /// A bounded read can capture a prefix of a larger device report, as Linux
+    /// permits. The returned full length makes that truncation explicit.
+    pub fn get_report(
+        &mut self,
+        kind: ReportType,
+        id: u8,
+        maximum: usize,
+    ) -> Result<ControlReport, Error> {
+        self.ready()?;
+        if maximum == 0 || maximum > MAX_BUFFER - 2 {
+            return Err(ErrorKind::InvalidConfiguration.into());
+        }
+        let result = (|| {
+            let mut command = self.command(GET_REPORT, kind as u8, id)?;
+            command.extend_from_slice(
+                &self
+                    .descriptor
+                    .ok_or(ErrorKind::NotReady)?
+                    .data_register
+                    .to_le_bytes(),
+            );
+            let mut bytes = Self::buffer(maximum + 2)?;
+            self.transfer(&command, &mut bytes)?;
+            let length = usize::from(u16::from_le_bytes([bytes[0], bytes[1]]));
+            if length < 2 {
+                return Err(ErrorKind::ReportLength {
+                    actual: length,
+                    maximum: bytes.len(),
+                });
+            }
+            if id != 0 && length > 2 && bytes[2] != id {
+                return Err(ErrorKind::ReportId {
+                    expected: id,
+                    actual: bytes[2],
+                });
+            }
+            bytes.truncate(length.min(bytes.len()));
+            bytes.drain(..2);
+            Ok(ControlReport {
+                data: bytes,
+                reported_length: length - 2,
+            })
+        })();
+        result.map_err(|kind| self.fail(kind))
+    }
+    fn formatted_report(id: u8, data: &[u8]) -> Result<Vec<u8>, ErrorKind> {
+        let length = 2 + usize::from(id != 0) + data.len();
+        if length > MAX_BUFFER {
+            return Err(ErrorKind::ReportLength {
+                actual: length,
+                maximum: MAX_BUFFER,
+            });
+        }
+        let mut bytes = Self::buffer(length)?;
+        bytes[..2].copy_from_slice(&(length as u16).to_le_bytes());
+        let offset = if id != 0 {
+            bytes[2] = id;
+            3
+        } else {
+            2
+        };
+        bytes[offset..].copy_from_slice(data);
+        Ok(bytes)
+    }
+    /// SET_REPORT payload excludes its report ID; the encoder supplies it once.
+    pub fn set_report(&mut self, kind: ReportType, id: u8, data: &[u8]) -> Result<(), Error> {
+        self.ready()?;
+        if kind == ReportType::Input {
+            return Err(ErrorKind::UnsupportedReportType.into());
+        }
+        let report = Self::formatted_report(id, data).map_err(Error::from)?;
+        let result = (|| {
+            let mut command = self.command(SET_REPORT, kind as u8, id)?;
+            command.extend_from_slice(
+                &self
+                    .descriptor
+                    .ok_or(ErrorKind::NotReady)?
+                    .data_register
+                    .to_le_bytes(),
+            );
+            command
+                .try_reserve_exact(report.len())
+                .map_err(|_| ErrorKind::Allocation)?;
+            command.extend_from_slice(&report);
+            self.transfer(&command, &mut [])
+        })();
+        result.map_err(|kind| self.fail(kind))
+    }
+    /// Plain output-register transfer. A missing output register is explicit;
+    /// callers may choose the separate SET_REPORT operation if appropriate.
+    pub fn output(&mut self, id: u8, data: &[u8]) -> Result<(), Error> {
+        self.ready()?;
+        let descriptor = self.descriptor.ok_or(ErrorKind::NotReady)?;
+        if descriptor.max_output_length == 0 {
+            return Err(ErrorKind::NoOutputRegister.into());
+        }
+        let report = Self::formatted_report(id, data).map_err(Error::from)?;
+        if report.len() > usize::from(descriptor.max_output_length) {
+            return Err(ErrorKind::ReportLength {
+                actual: report.len(),
+                maximum: usize::from(descriptor.max_output_length),
+            }
+            .into());
+        }
+        let mut command = Self::buffer(2 + report.len()).map_err(Error::from)?;
+        command[..2].copy_from_slice(&descriptor.output_register.to_le_bytes());
+        command[2..].copy_from_slice(&report);
+        self.transfer(&command, &mut [])
+            .map_err(|kind| self.fail(kind))
+    }
+    pub fn sleep(&mut self) -> Result<(), Error> {
+        self.ready()?;
+        let result = self
+            .interrupt
+            .mask_and_drain()
+            .map_err(ErrorKind::Interrupt)
+            .and_then(|()| {
+                if self.quirks.no_sleep {
+                    Ok(())
+                } else {
+                    self.power(false)
+                }
+            });
+        match result {
+            Ok(()) => {
+                self.state = if self.quirks.no_sleep {
+                    State::SuspendedAwake
+                } else {
+                    State::Sleeping
+                };
+                Ok(())
+            }
+            Err(kind) => Err(self.fail(kind)),
+        }
+    }
+    pub fn wake(&mut self) -> Result<(), Error> {
+        if !matches!(self.state, State::Sleeping | State::SuspendedAwake) {
+            return Err(if self.needs_reset() {
+                ErrorKind::NeedsReset
+            } else {
+                ErrorKind::NotReady
+            }
+            .into());
+        }
+        let result = {
+            if self.quirks.delayed_resume {
+                self.delay(GOODIX_RESUME_DELAY_US);
+            }
+            if self.quirks.reset_resume {
+                self.reset()
+            } else {
+                self.power(true)
+            }
+        };
+        match result {
+            Ok(()) => {
+                self.state = State::Ready;
+                Ok(())
+            }
+            Err(kind) => Err(self.fail(kind)),
+        }
+    }
+    pub fn stop(&mut self) -> Result<(), Error> {
+        if self.is_ready() {
+            self.sleep()?;
+        }
+        if !matches!(self.state, State::Sleeping | State::SuspendedAwake) {
+            return Err(if self.needs_reset() {
+                ErrorKind::NeedsReset
+            } else {
+                ErrorKind::NotReady
+            }
+            .into());
+        }
+        self.interrupt
+            .mask_and_drain()
+            .map_err(|error| self.fail(ErrorKind::Interrupt(error)))?;
+        self.state = State::Stopped;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests;
