@@ -56,6 +56,10 @@ impl Controller {
             "Enable Slot without recycling retired IDs",
             self.fresh_slot(),
         )?;
+        if let Err(error) = self.reserve_current(slot, attachment) {
+            let _ = self.disable_slot(slot, reset::Ownership::Vacant);
+            return Err(("reserve USB upstream current".into(), error));
+        }
         let context = self.context();
         let allocation = format!("slot {slot} allocate contexts and EP0 ring");
         let output = during(
@@ -171,6 +175,7 @@ impl Controller {
                         tier: 0,
                         speed,
                         translator: None,
+                        parent: None,
                     })
                 })
             };
@@ -276,6 +281,11 @@ impl Controller {
         let portsc = self.registers.read32(at);
         if portsc & PED == 0 {
             return Err(BlockError::Unsupported("root port did not enable"));
+        }
+        if self.port_major[usize::from(port - 1)] != 3
+            || matches!(link, LINK_INACTIVE | LINK_COMPLIANCE)
+        {
+            self.current_port_reset(None, port);
         }
         Ok(Some((portsc >> PORT_SPEED_SHIFT & PORT_SPEED_FIELD) as u8))
     }
@@ -452,6 +462,8 @@ impl Controller {
             }
             configurations.push(bytes);
         }
+        self.current_descriptions(slot, &configurations)
+            .map_err(|error| ("retain USB configuration current descriptors".into(), error))?;
         Ok(configurations)
     }
 
@@ -558,7 +570,10 @@ impl Controller {
         } else {
             0
         };
+        let self_powered = self.hub_power_source(slot)?;
         self.set_configuration(slot, device.configuration_value())?;
+        self.install_hub_current(slot, ports, u16::from(hub[6]), self_powered)?;
+        self.observe_hub_current(slot)?;
         // Linux `hub_configure`: a multi-TT hub (device protocol 2) gets one
         // TT per port through interface 0's alternate setting 1; a refusal
         // leaves it a single-TT hub.
@@ -581,7 +596,15 @@ impl Controller {
             .into_iter()
             .collect();
         self.configure(slot, &endpoints, Some((ports, tt_think, multi)), dma)?;
+        let mut powered_ports = Vec::new();
         for port in 1..=ports {
+            if let Err(error) = self.reserve_port_current(slot, port) {
+                failures.push((
+                    format!("{}.{port} reserve initial USB current", device.location),
+                    error,
+                ));
+                continue;
+            }
             self.control(
                 slot,
                 setup(
@@ -593,9 +616,10 @@ impl Controller {
                 ),
                 &[],
             )?;
+            powered_ports.push(port);
         }
         self.clock.delay(power_good_us.max(PORT_POWER_US));
-        for port in 1..=ports {
+        for port in powered_ports {
             let location = format!("{}.{port}", device.location);
             crate::working(&location);
             let reset = |c: &mut Self| {
@@ -605,6 +629,7 @@ impl Controller {
                         route: child_route(attachment.route, attachment.tier, port),
                         tier: attachment.tier + 1,
                         speed,
+                        parent: Some((slot, port)),
                         translator: match (speed, attachment.speed) {
                             (LOW_SPEED | FULL_SPEED, HIGH_SPEED) => Some((slot, port)),
                             _ => attachment.translator,
@@ -697,6 +722,8 @@ impl Controller {
         if status & HUB_PORT_ENABLE == 0 {
             return Err(BlockError::Unsupported("hub port did not enable"));
         }
+        let root = self.slot(slot)?.attachment.root_port;
+        self.current_port_reset(Some((slot, port)), root);
         Ok(Some(if status & HUB_PORT_LOW_SPEED != 0 {
             LOW_SPEED
         } else if status & HUB_PORT_HIGH_SPEED != 0 {
@@ -788,6 +815,7 @@ mod tests {
             tier: 0,
             speed: FULL_SPEED,
             translator: None,
+            parent: None,
         };
         let slot = controller.address(attachment, &mut dma).unwrap();
         let request = setup(
@@ -817,6 +845,7 @@ mod tests {
             tier: 0,
             speed: FULL_SPEED,
             translator: None,
+            parent: None,
         };
         assert_eq!(
             controller
@@ -851,6 +880,7 @@ mod tests {
             tier: 0,
             speed: FULL_SPEED,
             translator: None,
+            parent: None,
         };
         let slot = controller.address(attachment, &mut dma).unwrap();
         // Model a descriptor transfer failing after successful addressing.
@@ -882,7 +912,8 @@ mod tests {
         let start = backing.as_mut_ptr() as u64;
         // SAFETY: backing remains live and exclusive through all modeled DMA.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-        let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+        let (mut controller, model) =
+            unconfigured_cancellation_controller_with_configurations(&mut dma, &[]);
         let originals = vec![vendor(9), ecm(42), vendor(5)];
         model.borrow_mut().descriptors = originals
             .iter()

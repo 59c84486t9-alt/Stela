@@ -68,8 +68,12 @@ impl AddressModel {
 pub(crate) struct AddressRegisters(Rc<RefCell<AddressModel>>);
 
 impl Registers for AddressRegisters {
-    fn read32(&mut self, _offset: usize) -> u32 {
-        0
+    fn read32(&mut self, offset: usize) -> u32 {
+        if offset == 0x440 {
+            PP | CCS | PED | u32::from(HIGH_SPEED) << 10
+        } else {
+            0
+        }
     }
 
     fn write32(&mut self, offset: usize, _value: u32) {
@@ -178,6 +182,7 @@ pub(crate) fn address_controller(
         event_cycle: true,
         slots: vec![None, None],
         slot_ownership: vec![reset::Ownership::Vacant; 2],
+        power: power::Ledger::new(2),
         pending: Vec::new(),
         error: None,
         command_poisoned: false,
@@ -575,7 +580,9 @@ impl Registers for CancelRegisters {
     fn read32(&mut self, offset: usize) -> u32 {
         let mut model = self.0.borrow_mut();
         if offset == 0x40 + PORTSC {
-            return if model.connected { CCS } else { 0 };
+            return PP
+                | u32::from(FULL_SPEED) << PORT_SPEED_SHIFT
+                | if model.connected { CCS | PED } else { 0 };
         }
         if offset == 0x40 + USBSTS {
             if model.asix.is_some() || model.asix_legacy.is_some() {
@@ -602,6 +609,16 @@ impl Registers for CancelRegisters {
 pub(crate) fn unconfigured_cancellation_controller(
     dma: &mut dyn DmaAllocator,
 ) -> (Controller, Rc<RefCell<CancelModel>>) {
+    unconfigured_cancellation_controller_with_configurations(
+        dma,
+        &[vec![9, 2, 9, 0, 0, 1, 0, 0x80, 50]],
+    )
+}
+
+pub(crate) fn unconfigured_cancellation_controller_with_configurations(
+    dma: &mut dyn DmaAllocator,
+    configurations: &[Vec<u8>],
+) -> (Controller, Rc<RefCell<CancelModel>>) {
     let (mut controller, _) = address_controller(dma, SUCCESS);
     let slot = controller
         .address(
@@ -611,6 +628,7 @@ pub(crate) fn unconfigured_cancellation_controller(
                 route: 0,
                 tier: 0,
                 translator: None,
+                parent: None,
             },
             dma,
         )
@@ -663,6 +681,11 @@ pub(crate) fn unconfigured_cancellation_controller(
     controller.registers = Box::new(CancelRegisters(model.clone()));
     // A short actual test deadline without pretending any completion happened.
     controller.clock.ticks_per_microsecond = 1;
+    if !configurations.is_empty() {
+        // These are the fixture's original wire descriptor/current profiles;
+        // production discovery retains the descriptors before class binding.
+        controller.current_descriptions(1, configurations).unwrap();
+    }
     (controller, model)
 }
 

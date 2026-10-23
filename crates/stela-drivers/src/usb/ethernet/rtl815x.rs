@@ -1035,7 +1035,10 @@ pub(crate) mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives every controller/device/model DMA object.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
+                &mut dma,
+                &[vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50]],
+            );
             controller.set_slot_speed(1, HIGH_SPEED);
             model.borrow_mut().ethernet = Some(ethernet::rtl815x::tests::Model::new(revision));
             let configuration = vec![
@@ -1150,7 +1153,11 @@ pub(crate) mod tests {
                 // SAFETY: backing outlives all real control/ring DMA and model access.
                 let mut dma =
                     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-                let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+                let (mut controller, model) =
+                    unconfigured_cancellation_controller_with_configurations(
+                        &mut dma,
+                        &[vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50]],
+                    );
                 controller.set_configuration(1, 7).unwrap();
                 model.borrow_mut().ethernet_upload = Some(FirmwareModel::new(revision, &bytes));
                 let shared = Rc::new(RefCell::new(controller));
@@ -1197,7 +1204,10 @@ pub(crate) mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing remains exclusive/live through all controller DMA.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
+                &mut dma,
+                &[vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50]],
+            );
             controller.set_slot_speed(1, HIGH_SPEED);
             let config = vec![
                 9, 2, 32, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 0, 2,
@@ -1331,7 +1341,10 @@ pub(crate) mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: all DMA objects/model references die before this backing.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
+                &mut dma,
+                &[vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50]],
+            );
             controller.set_slot_speed(1, speed);
             model.borrow_mut().ethernet_upload =
                 Some(ethernet::rtl815x::FirmwareModel::new(revision, &image));

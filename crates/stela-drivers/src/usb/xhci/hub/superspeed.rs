@@ -142,22 +142,37 @@ impl Controller {
                 "SuperSpeedPlus hub requires actual BOS sublink capabilities",
             ));
         }
-        self.self_powered_hub(slot)?;
+        let self_powered = self.hub_power_source(slot)?;
         self.set_configuration(slot, device.configuration_value())?;
+        self.install_hub_current(
+            slot,
+            descriptor.ports,
+            descriptor.controller_ma,
+            self_powered,
+        )?;
         self.observe_hub_power(slot, attachment)?;
         // SuperSpeed has no USB2 transaction translator or MTT/TT think time.
         self.configure(slot, &[endpoint], Some((descriptor.ports, 0, false)), dma)?;
         self.control(slot, depth_request(attachment.tier), &[])?;
+        let mut powered_ports = Vec::new();
         for port in 1..=descriptor.ports {
+            if let Err(error) = self.reserve_port_current(slot, port) {
+                failures.push((
+                    format!("{}.{port} reserve initial USB current", device.location),
+                    error,
+                ));
+                continue;
+            }
             self.control(
                 slot,
                 setup(0x23, SET_FEATURE, PORT_POWER, u16::from(port), 0),
                 &[],
             )?;
+            powered_ports.push(port);
         }
         self.clock.delay(descriptor.power_good_us);
         self.observe_hub_power(slot, attachment)?;
-        for port in 1..=descriptor.ports {
+        for port in powered_ports {
             let location = format!("{}.{port}", device.location);
             crate::working(&location);
             let reset = |controller: &mut Self| {
@@ -167,7 +182,7 @@ impl Controller {
                 // failed. A local reset error must not hide parent power loss.
                 controller.observe_hub_power(slot, attachment)?;
                 speed?
-                    .map(|speed| child(attachment, port, speed))
+                    .map(|speed| child(slot, attachment, port, speed))
                     .transpose()
             };
             self.connect(location, reset, dma, devices, failures);
@@ -180,61 +195,16 @@ impl Controller {
         Ok(())
     }
 
-    fn observe_hub_power(&mut self, slot: u8, attachment: Attachment) -> Result<(), BlockError> {
-        let result = self
-            .self_powered_hub(slot)
-            .and_then(|()| self.healthy_superspeed_hub(slot));
-        if result.is_err() {
-            let prefix = (1u32 << (4 * attachment.tier)) - 1;
-            for state in self.slots.iter_mut().flatten() {
-                let child = state.attachment;
-                if child.root_port == attachment.root_port
-                    && child.tier >= attachment.tier
-                    && child.route & prefix == attachment.route
-                {
-                    // This is software quarantine, not proof of DMA stop. The
-                    // complete rings/contexts/payload owners remain allocated.
-                    state.retiring = true;
-                }
-            }
-        }
-        result
+    fn observe_hub_power(&mut self, slot: u8, _attachment: Attachment) -> Result<(), BlockError> {
+        self.observe_hub_current(slot)
     }
 
-    fn self_powered_hub(&mut self, slot: u8) -> Result<(), BlockError> {
+    pub(in super::super) fn hub_power_source(&mut self, slot: u8) -> Result<bool, BlockError> {
         let bytes = self.control(slot, setup(0x80, GET_STATUS, 0, 0, 2), &[])?;
-        if bytes.len() != 2 || bytes[0] & 1 == 0 {
-            return Err(BlockError::Unsupported(
-                "bus-powered hub requires a qualified upstream current budget",
-            ));
+        if bytes.len() != 2 {
+            return Err(BlockError::Unsupported("short USB hub power source status"));
         }
-        Ok(())
-    }
-
-    fn healthy_superspeed_hub(&mut self, slot: u8) -> Result<(), BlockError> {
-        for _ in 0..2 {
-            let bytes = self.control(slot, setup(0xa0, GET_STATUS, 0, 0, 4), &[])?;
-            if bytes.len() != 4 {
-                return Err(BlockError::Unsupported("short SuperSpeed hub status"));
-            }
-            let status = u16::from_le_bytes([bytes[0], bytes[1]]);
-            let change = u16::from_le_bytes([bytes[2], bytes[3]]);
-            if status & !3 != 0 || change & !3 != 0 {
-                return Err(BlockError::Unsupported("reserved SuperSpeed hub status"));
-            }
-            if status != 0 || change & 2 != 0 {
-                return Err(BlockError::Unsupported(
-                    "hub local power/over-current requires recovery ownership",
-                ));
-            }
-            if change == 0 {
-                return Ok(());
-            }
-            self.control(slot, setup(0x20, CLEAR_FEATURE, 0, 0, 0), &[])?;
-        }
-        Err(BlockError::Unsupported(
-            "hub local power change did not clear",
-        ))
+        Ok(bytes[0] & 1 != 0)
     }
 
     fn hub_ssp(&mut self, slot: u8) -> Result<Option<Ssp>, BlockError> {
@@ -356,6 +326,8 @@ impl Controller {
                         state = final_state;
                         break;
                     }
+                    let root = self.slot(slot)?.attachment.root_port;
+                    self.current_port_reset(Some((slot, port)), root);
                     return match ssp {
                         Some(ssp) => ssp.speed(final_state.extended.unwrap()).map(Some),
                         None => Ok(Some(SUPER_SPEED)),

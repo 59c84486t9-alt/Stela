@@ -11,6 +11,7 @@ const SSP_CAPABILITY: u8 = 10;
 pub(super) struct Descriptor {
     pub ports: u8,
     pub power_good_us: u64,
+    pub controller_ma: u16,
 }
 impl Descriptor {
     pub fn new(bytes: &[u8], endpoint: &Endpoint) -> Result<Self, BlockError> {
@@ -42,6 +43,7 @@ impl Descriptor {
         }
         Ok(Self {
             ports: bytes[2],
+            controller_ma: u16::from(bytes[6]),
             // Pinned hub_power_on_good_delay: every non-root hub gets >=100ms.
             power_good_us: (u64::from(bytes[5]) * 2000).max(100_000),
         })
@@ -63,7 +65,12 @@ pub(super) fn topology(attachment: Attachment) -> Result<(), BlockError> {
     Ok(())
 }
 
-pub(super) fn child(parent: Attachment, port: u8, speed: u8) -> Result<Attachment, BlockError> {
+pub(super) fn child(
+    parent_slot: u8,
+    parent: Attachment,
+    port: u8,
+    speed: u8,
+) -> Result<Attachment, BlockError> {
     topology(parent)?;
     if !(1..=15).contains(&port) || !matches!(speed, SUPER_SPEED | SUPER_SPEED_PLUS) {
         return Err(BlockError::Unsupported(
@@ -76,6 +83,7 @@ pub(super) fn child(parent: Attachment, port: u8, speed: u8) -> Result<Attachmen
         tier: parent.tier + 1,
         speed,
         translator: None,
+        parent: Some((parent_slot, port)),
     })
 }
 

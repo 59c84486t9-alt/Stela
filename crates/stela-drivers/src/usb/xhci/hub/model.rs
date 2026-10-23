@@ -61,6 +61,8 @@ pub(super) struct Node {
     pub configured: bool,
     pub depth: Option<u16>,
     pub self_powered: bool,
+    pub max_power: u8,
+    pub controller_current: u8,
     pub hub_status: u16,
     pub hub_change: u16,
     pub after_power_status: Option<u16>,
@@ -75,6 +77,8 @@ impl Node {
             configured: false,
             depth: None,
             self_powered: true,
+            max_power: 0,
+            controller_current: 0,
             hub_status: 0,
             hub_change: 0,
             after_power_status: None,
@@ -89,6 +93,8 @@ impl Node {
             configured: false,
             depth: None,
             self_powered: true,
+            max_power: 0,
+            controller_current: 0,
             hub_status: 0,
             hub_change: 0,
             after_power_status: None,
@@ -121,8 +127,8 @@ impl Node {
             1,
             1,
             0,
-            0xc0,
-            0,
+            0x80 | if self.self_powered { 0x40 } else { 0 },
+            self.max_power,
             9,
             4,
             0,
@@ -167,7 +173,7 @@ impl Node {
                     1,
                     0,
                     1,
-                    0,
+                    self.controller_current,
                     0,
                     0,
                     0,
@@ -182,7 +188,7 @@ impl Node {
                     0x61,
                     0,
                     1,
-                    0,
+                    self.controller_current,
                     0,
                     0xff,
                 ]
@@ -252,6 +258,9 @@ pub(super) struct Hardware {
     pub silent: Option<(u32, u8)>,
     pub outgoing: Vec<Vec<u8>>,
     pub loss_after_child_route: Option<u32>,
+    pub silent_configuration: Option<u8>,
+    pub failed_configuration: Option<u8>,
+    pub root_status: Option<u32>,
     pub mmio_reads: usize,
     pub mmio_writes: usize,
     registers: BTreeMap<usize, u32>,
@@ -276,6 +285,9 @@ impl Hardware {
             silent: None,
             outgoing: Vec::new(),
             loss_after_child_route: None,
+            silent_configuration: None,
+            failed_configuration: None,
+            root_status: None,
             mmio_reads: 0,
             mmio_writes: 0,
             registers: BTreeMap::new(),
@@ -437,8 +449,11 @@ impl Hardware {
                 Ok(node.hub_descriptor())
             }
             (0, SET_CONFIGURATION) => {
-                assert_eq!(value, 1);
-                node.configured = true;
+                assert!(value <= 1);
+                if self.failed_configuration == Some(slot) {
+                    return Err(6);
+                }
+                node.configured = value != 0;
                 Ok(Vec::new())
             }
             (0x20, 12) => {
@@ -577,6 +592,12 @@ impl Hardware {
             assert_eq!(control >> 10 & 0x3f, STATUS);
             match self.request(slot, request) {
                 Ok(mut reply) => {
+                    if request[0] == 0
+                        && request[1] == SET_CONFIGURATION
+                        && self.silent_configuration == Some(slot)
+                    {
+                        return;
+                    }
                     if let Some((address, buffer, length, _)) = data {
                         reply.truncate(requested);
                         assert_eq!(length as usize, requested);
@@ -662,7 +683,9 @@ impl Registers for RegistersModel {
                     | SUPPORTED_PROTOCOL
             }
             0x88 => 1 | 1 << 8,
-            0x440 => PP | CCS | PED | PRC | u32::from(state.nodes[&0].speed) << 10,
+            0x440 => state
+                .root_status
+                .unwrap_or(PP | CCS | PED | PRC | u32::from(state.nodes[&0].speed) << 10),
             _ => *state.registers.get(&at).unwrap_or(&0),
         }
     }

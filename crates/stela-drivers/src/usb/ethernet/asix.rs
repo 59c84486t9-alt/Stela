@@ -755,7 +755,10 @@ mod tests {
                             RegionAllocator::new(start..start + backing.len() as u64 * 8)
                         };
                         let (mut controller, model) =
-                            unconfigured_cancellation_controller(&mut dma);
+                            unconfigured_cancellation_controller_with_configurations(
+                                &mut dma,
+                                &[vec![9, 2, 9, 0, 0, 9, 0, 0x80, 50]],
+                            );
                         controller.set_slot_speed(1, speed);
                         model.borrow_mut().asix_legacy = Some(ethernet::LegacyModel::new(
                             code,
@@ -957,7 +960,11 @@ mod tests {
                     // SAFETY: the backing outlives every modeled DMA object.
                     let mut dma =
                         unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-                    let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+                    let (mut controller, model) =
+                        unconfigured_cancellation_controller_with_configurations(
+                            &mut dma,
+                            &[vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50]],
+                        );
                     controller.set_slot_speed(1, speed);
                     model.borrow_mut().asix = Some(ethernet::AsixModel::new(
                         if speed >= SUPER_SPEED {

@@ -67,6 +67,7 @@ mod hub;
 mod iso;
 #[cfg(test)]
 pub(crate) mod model;
+mod power;
 mod reset;
 mod ring;
 mod streams;
@@ -370,6 +371,8 @@ struct Attachment {
     /// The high-speed hub slot and port a low- or full-speed device's
     /// transactions go through.
     translator: Option<(u8, u8)>,
+    /// Actual hub slot/port, kept separately from the saturated route nibble.
+    parent: Option<(u8, u8)>,
 }
 
 pub struct Controller {
@@ -388,6 +391,7 @@ pub struct Controller {
     /// Each root port's USB major revision from the Supported Protocol
     /// capabilities.
     port_major: Vec<u8>,
+    power: power::Ledger,
     dcbaa: DmaBuffer,
     _scratchpads: Vec<DmaBuffer>,
     commands: Ring,
@@ -576,6 +580,7 @@ impl Controller {
             event_index: 0,
             event_cycle: true,
             slot_ownership: vec![reset::Ownership::Vacant; slots.len()],
+            power: power::Ledger::new(slots.len()),
             slots,
             pending: Vec::new(),
             error: None,

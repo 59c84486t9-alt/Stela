@@ -59,12 +59,18 @@ impl Controller {
         // A timeout may occur after the device accepted the request; do not
         // preserve the old value or infer success from cancellation of EP0.
         self.endpoint_ready(slot, 1)?;
+        let current_demand = if configuration {
+            Some(self.prepare_current_configuration(slot, request[2])?)
+        } else {
+            None
+        };
         if configuration {
             self.slot(slot)?.current_configuration = None;
         }
         let result = self.control_transfer(slot, request, out);
         if configuration && result.is_ok() {
             self.slot(slot)?.current_configuration = Some(request[2]);
+            self.ack_current_configuration(slot, current_demand.unwrap())?;
         }
         result
     }

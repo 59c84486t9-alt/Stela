@@ -632,7 +632,10 @@ mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives all modeled controller/class DMA.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let (controller, model) = unconfigured_cancellation_controller_with_configurations(
+                &mut dma,
+                &[vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]],
+            );
             model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
             let mut parameters = ncm_parameters();
             parameters[16..20].copy_from_slice(&out_max.to_le_bytes());
@@ -697,7 +700,10 @@ mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives all modeled controller/class DMA.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let (controller, model) = unconfigured_cancellation_controller_with_configurations(
+                &mut dma,
+                &[vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]],
+            );
             model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
             let mut parameters = ncm_parameters();
             parameters[16..20].copy_from_slice(&8192u32.to_le_bytes());
@@ -765,7 +771,10 @@ mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives all modeled controller/class DMA.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let (controller, model) = unconfigured_cancellation_controller_with_configurations(
+                &mut dma,
+                &[vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]],
+            );
             model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
             if ncm.is_some() {
                 model
@@ -809,7 +818,10 @@ mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives all modeled controller/class DMA.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let (controller, model) = unconfigured_cancellation_controller_with_configurations(
+                &mut dma,
+                &[vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]],
+            );
             model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
             let mut parameters = ncm_parameters();
             parameters[2..4].copy_from_slice(&formats.to_le_bytes());
@@ -915,7 +927,10 @@ mod tests {
                 // SAFETY: backing outlives all modeled controller/class DMA.
                 let mut dma =
                     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-                let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+                let (controller, model) = unconfigured_cancellation_controller_with_configurations(
+                    &mut dma,
+                    &[vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]],
+                );
                 model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
                 let mut parameters = ncm_parameters();
                 parameters[2] = 3;
@@ -960,7 +975,10 @@ mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives all modeled controller/class DMA.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let (controller, model) = unconfigured_cancellation_controller_with_configurations(
+                &mut dma,
+                &[vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]],
+            );
             model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
             let mut parameters = ncm_parameters();
             match failure {

@@ -278,6 +278,7 @@ impl Controller {
                 }
                 self.write_port(port, portsc & PORT_CHANGES);
                 self.clock.delay(POST_RESET_US);
+                self.current_port_reset(None, port);
                 return Ok(());
             }
             if deadline.passed() {
@@ -1014,6 +1015,7 @@ pub(crate) mod tests {
                 .take(max_slots + 1)
                 .collect(),
             slot_ownership: vec![Ownership::Vacant; max_slots + 1],
+            power: power::Ledger::new(max_slots + 1),
             pending: Vec::new(),
             error: None,
             command_poisoned: false,
@@ -1027,6 +1029,7 @@ pub(crate) mod tests {
                     tier: 0,
                     speed,
                     translator: None,
+                    parent: None,
                 },
                 "native root UAS".into(),
                 &mut dma,
@@ -1135,6 +1138,8 @@ pub(crate) mod tests {
                     before,
                     "stale handle reached MMIO"
                 );
+                assert!(!c.power.retained(old.slot));
+                assert!(c.power.retained(fresh.slot));
                 assert_eq!((old.slot, fresh.slot), (1, 2));
                 assert_eq!(hardware.borrow().enables, vec![1, 1, 2]);
                 assert_eq!(hardware.borrow().resets, 1);
@@ -1211,6 +1216,13 @@ pub(crate) mod tests {
                 "{fault:?}"
             );
             assert!(shared.borrow_mut().endpoint_ready(old.slot, 1).is_err());
+            // Disable Slot only revokes DMA: the physical device may still draw
+            // current. Release follows actual port reset and its required ACKs.
+            assert_eq!(
+                shared.borrow().power.retained(old.slot),
+                !matches!(fault, Fault::Reserve | Fault::SilentReserve),
+                "{fault:?}"
+            );
             if matches!(
                 fault,
                 Fault::Disable | Fault::WrongDisableSlot | Fault::SilentDisable
@@ -1332,27 +1344,35 @@ pub(crate) mod tests {
                 prepared(&mut memory, HIGH_SPEED, 32, 3);
             // Inject a second addressed route into the ownership inventory. This is
             // an adverse topology check, not a claim that this fixture models hubs.
-            let other = if other_state == 2 {
-                // Actual Enable Slot ACK followed by incomplete allocation has no
-                // provable physical attachment and must block reset globally.
-                shared.borrow_mut().fresh_slot().unwrap()
-            } else {
-                shared
-                    .borrow_mut()
-                    .address(
-                        Attachment {
-                            root_port: 1,
-                            route: 1,
-                            tier: 1,
-                            speed: HIGH_SPEED,
-                            translator: None,
-                        },
-                        &mut dma,
-                    )
-                    .unwrap()
-            };
+            let other = shared.borrow_mut().fresh_slot().unwrap();
             if other_state < 2 {
-                shared.borrow_mut().slot(other).unwrap().retiring = other_state == 1;
+                // Corrupt the software ownership inventory directly, as this
+                // test intends; do not invent a qualified physical hub parent.
+                let mut controller = shared.borrow_mut();
+                let source = controller.slots[usize::from(old.slot)]
+                    .as_ref()
+                    .unwrap()
+                    .attachment;
+                let context = controller.context();
+                let input = dma.allocate(33 * context, 64).unwrap();
+                let output = dma.allocate(32 * context, 64).unwrap();
+                let control = dma.allocate(CONTROL_BYTES, CONTROL_BYTES).unwrap();
+                controller.slots[usize::from(other)] = Some(Slot {
+                    attachment: Attachment {
+                        route: 1,
+                        tier: 1,
+                        ..source
+                    },
+                    retiring: other_state == 1,
+                    input,
+                    _output: output,
+                    context: [0; 4],
+                    endpoints: Default::default(),
+                    retired_rings: Default::default(),
+                    control,
+                    speed: HIGH_SPEED,
+                    current_configuration: Some(0),
+                });
             } else {
                 assert!(shared.borrow().slots[usize::from(other)].is_none());
             }

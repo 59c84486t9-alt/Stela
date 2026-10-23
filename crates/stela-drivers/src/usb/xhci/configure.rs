@@ -252,7 +252,14 @@ mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: exclusive backing outlives controller and hardware model.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
+                &mut dma,
+                &[
+                    vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50],
+                    vec![9, 2, 9, 0, 0, 9, 0, 0x80, 50],
+                    vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50],
+                ],
+            );
             if scenario == 0 {
                 model.borrow_mut().halt_transfer = Some(1);
             } else {
@@ -306,7 +313,14 @@ mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing is live/exclusive through every retained DMA ring.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
+                &mut dma,
+                &[
+                    vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50],
+                    vec![9, 2, 9, 0, 0, 9, 0, 0x80, 50],
+                    vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50],
+                ],
+            );
             controller.set_configuration(1, 42).unwrap();
             if missing_completion {
                 model.borrow_mut().silence = Some(CONFIGURE_ENDPOINT);
@@ -348,7 +362,14 @@ mod tests {
         let start = backing.as_mut_ptr() as u64;
         // SAFETY: backing remains live and exclusive through controller/model use.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-        let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+        let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
+            &mut dma,
+            &[
+                vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50],
+                vec![9, 2, 9, 0, 0, 9, 0, 0x80, 50],
+                vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50],
+            ],
+        );
         controller.set_configuration(1, 42).unwrap();
         for malformed in [
             setup(0, SET_CONFIGURATION, 0x100, 0, 0),
@@ -397,7 +418,14 @@ mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing stays exclusive/live throughout model and controller access.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let (controller, model) = unconfigured_cancellation_controller_with_configurations(
+                &mut dma,
+                &[
+                    vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50],
+                    vec![9, 2, 9, 0, 0, 9, 0, 0x80, 50],
+                    vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50],
+                ],
+            );
             let input = controller.slots[1].as_ref().unwrap().input.bytes().to_vec();
             let shared = Rc::new(RefCell::new(controller));
             let mut found = Found::default();
@@ -422,7 +450,15 @@ mod tests {
                 // SAFETY: backing outlives every model and controller DMA object.
                 let mut dma =
                     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-                let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+                let (mut controller, model) =
+                    unconfigured_cancellation_controller_with_configurations(
+                        &mut dma,
+                        &[
+                            vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50],
+                            vec![9, 2, 9, 0, 0, 9, 0, 0x80, 50],
+                            vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50],
+                        ],
+                    );
                 controller.set_configuration(1, 7).unwrap();
                 controller.context_bytes = context;
                 let slot = controller.slots[1].as_mut().unwrap();
@@ -498,7 +534,14 @@ mod tests {
         let start = backing.as_mut_ptr() as u64;
         // SAFETY: backing remains exclusive and live throughout model DMA use.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-        let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+        let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
+            &mut dma,
+            &[
+                vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50],
+                vec![9, 2, 9, 0, 0, 9, 0, 0x80, 50],
+                vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50],
+            ],
+        );
         controller.set_configuration(1, 7).unwrap();
         controller.slots[1].as_mut().unwrap().speed = SUPER_SPEED;
         let input = controller.slots[1].as_ref().unwrap().input.bytes().to_vec();

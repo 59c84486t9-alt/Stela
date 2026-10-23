@@ -244,7 +244,6 @@ fn asymmetric_or_unknown_actual_ssp_port_status_never_inherits_upstream_speed() 
 #[test]
 fn actual_hub_power_and_overcurrent_health_gate_all_downstream_admission() {
     for (self_powered, status, change, after) in [
-        (false, 0, 0, None),
         (true, 1, 0, None),
         (true, 2, 0, None),
         (true, 4, 0, None),
@@ -612,6 +611,7 @@ fn invalid_route_and_retired_or_foreign_hub_owner_refuse_before_transport_effect
         tier: 0,
         speed: SUPER_SPEED,
         translator: None,
+        parent: None,
     };
     assert!(topology(root).is_ok());
     for invalid in [
@@ -625,9 +625,9 @@ fn invalid_route_and_retired_or_foreign_hub_owner_refuse_before_transport_effect
     ] {
         assert!(topology(invalid).is_err());
     }
-    assert!(child(root, 0, SUPER_SPEED).is_err());
-    assert!(child(root, 16, SUPER_SPEED).is_err());
-    assert!(child(root, 1, HIGH_SPEED).is_err());
+    assert!(child(1, root, 0, SUPER_SPEED).is_err());
+    assert!(child(1, root, 16, SUPER_SPEED).is_err());
+    assert!(child(1, root, 1, HIGH_SPEED).is_err());
     let mut backing = vec![0u64; 256 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: all addressed but unconfigured state remains retained.
@@ -935,4 +935,327 @@ fn superspeed_retries_ordinary_disabled_or_not_ready_hot_resets() {
                 .any(|(_, _, q)| q[0] == 0x23 && q[1] == SET_FEATURE && q[2] == 28)
         );
     }
+}
+
+fn bus_powered_hub(ports: usize) -> Node {
+    let mut node = Node::hub(SUPER_SPEED, ports);
+    node.self_powered = false;
+    node.max_power = 112; // 896mA descriptor demand, inside the standard900mA contract.
+    node.controller_current = 20;
+    node
+}
+
+#[test]
+fn bus_powered_hub_charges_controller_and_ports_once_and_commits_actual_configuration() {
+    let mut nodes = BTreeMap::from([(0, bus_powered_hub(4))]);
+    for port in 1..=4 {
+        let mut leaf = Node::leaf(SUPER_SPEED);
+        leaf.max_power = 12;
+        nodes.insert(port, leaf);
+    }
+    let mut backing = vec![0u64; 256 * 1024];
+    let start = backing.as_mut_ptr() as u64;
+    // SAFETY: fixture backing is exclusively retained through every DMA access.
+    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let (mut controller, model) = controller(&mut dma, 64, nodes);
+    let mut failures = Vec::new();
+    let devices = controller.enumerate(&mut dma, &mut failures);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(devices.len(), 5);
+    let child = devices.iter().find(|d| d.location.ends_with(".1")).unwrap();
+    assert_eq!(controller.power.snapshot(child.slot), (150, 150, 150));
+    controller
+        .control(child.slot, setup(0, SET_CONFIGURATION, 1, 0, 0), &[])
+        .unwrap();
+    assert_eq!(controller.power.snapshot(child.slot), (150, 96, 96));
+    assert_eq!(controller.power.snapshot(1), (900, 896, 896));
+    let requests = model.borrow().requests.len();
+    controller.set_configuration(child.slot, 1).unwrap();
+    assert_eq!(model.borrow().requests.len(), requests);
+    assert_eq!(controller.power.snapshot(1), (900, 896, 896));
+    controller
+        .control(child.slot, setup(0, SET_CONFIGURATION, 0, 0, 0), &[])
+        .unwrap();
+    assert_eq!(controller.power.snapshot(child.slot), (150, 150, 150));
+    let before = model.borrow().requests.len();
+    assert!(
+        controller
+            .control(child.slot, setup(0, SET_CONFIGURATION, 2, 0, 0), &[])
+            .is_err()
+    );
+    assert_eq!(model.borrow().requests.len(), before);
+}
+
+#[test]
+fn bus_powered_hub_never_powers_ports_without_a_current_reservation() {
+    let mut nodes = BTreeMap::from([(0, bus_powered_hub(7))]);
+    for port in 1..=7 {
+        nodes.insert(port, Node::leaf(SUPER_SPEED));
+    }
+    let mut backing = vec![0u64; 512 * 1024];
+    let start = backing.as_mut_ptr() as u64;
+    // SAFETY: all hub and child contexts remain retained in exclusive fixture RAM.
+    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let (mut controller, model) = controller(&mut dma, 32, nodes);
+    let mut failures = Vec::new();
+    let devices = controller.enumerate(&mut dma, &mut failures);
+    assert_eq!(devices.len(), 6);
+    assert_eq!(failures.len(), 2);
+    let state = model.borrow();
+    let powered: Vec<_> = state
+        .requests
+        .iter()
+        .filter(|(_, route, q)| {
+            *route == 0 && q[0] == 0x23 && q[1] == SET_FEATURE && q[2] == PORT_POWER as u8
+        })
+        .map(|(_, _, q)| q[4])
+        .collect();
+    assert_eq!(powered, [1, 2, 3, 4, 5]);
+    assert!(
+        state.nodes[&0].ports.as_ref().unwrap()[5..]
+            .iter()
+            .all(|p| p.status & (1 << 9) == 0)
+    );
+    assert_eq!(controller.power.snapshot(1), (900, 896, 896));
+}
+
+#[test]
+fn bus_powered_child_configuration_cannot_bypass_the_one_unit_limit() {
+    let mut leaf = Node::leaf(SUPER_SPEED);
+    leaf.max_power = 20; //160mA >150mA parent contract.
+    let nodes = BTreeMap::from([(0, bus_powered_hub(1)), (1, leaf)]);
+    let mut backing = vec![0u64; 256 * 1024];
+    let start = backing.as_mut_ptr() as u64;
+    // SAFETY: controller and every retained TD reference this exclusive live RAM.
+    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let (mut controller, model) = controller(&mut dma, 64, nodes);
+    let mut failures = Vec::new();
+    let devices = controller.enumerate(&mut dma, &mut failures);
+    assert!(failures.is_empty());
+    let child = devices.iter().find(|d| d.location.ends_with(".1")).unwrap();
+    let input = controller.slots[usize::from(child.slot)]
+        .as_ref()
+        .unwrap()
+        .input
+        .bytes()
+        .to_vec();
+    assert!(
+        controller
+            .control(child.slot, setup(0, SET_CONFIGURATION, 1, 0, 0), &[])
+            .is_err()
+    );
+    assert!(
+        !model
+            .borrow()
+            .requests
+            .iter()
+            .any(|(slot, _, q)| *slot == child.slot && q[0] == 0 && q[1] == SET_CONFIGURATION)
+    );
+    assert_eq!(controller.current_configuration(child.slot), Ok(Some(0)));
+    assert_eq!(controller.power.snapshot(child.slot), (150, 150, 150));
+    assert_eq!(
+        controller.slots[usize::from(child.slot)]
+            .as_ref()
+            .unwrap()
+            .input
+            .bytes(),
+        input
+    );
+}
+
+#[test]
+fn consecutive_bus_hubs_refuse_but_self_powered_downstream_hubs_keep_local_capacity() {
+    for self_powered in [false, true] {
+        let mut middle = Node::hub(SUPER_SPEED, 1);
+        middle.self_powered = self_powered;
+        middle.max_power = 12;
+        let mut leaf = Node::leaf(SUPER_SPEED);
+        leaf.max_power = 100;
+        let nodes = BTreeMap::from([(0, bus_powered_hub(1)), (1, middle), (0x11, leaf)]);
+        let mut backing = vec![0u64; 512 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: all nested parent and child DMA owners retain the backing.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = controller(&mut dma, 64, nodes);
+        let mut failures = Vec::new();
+        let devices = controller.enumerate(&mut dma, &mut failures);
+        if self_powered {
+            assert!(failures.is_empty(), "{failures:?}");
+            assert_eq!(devices.len(), 3);
+            let child = devices
+                .iter()
+                .find(|d| d.location.ends_with(".1.1"))
+                .unwrap();
+            controller
+                .control(child.slot, setup(0, SET_CONFIGURATION, 1, 0, 0), &[])
+                .unwrap();
+            assert_eq!(controller.power.snapshot(child.slot), (900, 800, 800));
+            assert_eq!(controller.power.snapshot(1), (900, 896, 896));
+        } else {
+            assert_eq!(devices.len(), 2);
+            assert_eq!(failures.len(), 1);
+            assert!(
+                !model
+                    .borrow()
+                    .requests
+                    .iter()
+                    .any(|(_, route, q)| *route == 1
+                        && q[0] == 0x23
+                        && q[1] == SET_FEATURE
+                        && q[2] == PORT_POWER as u8)
+            );
+        }
+    }
+}
+
+#[test]
+fn failed_or_uncertain_raw_configuration_keeps_maximum_draw_until_actual_ack() {
+    for silent in [false, true] {
+        let mut leaf = Node::leaf(SUPER_SPEED);
+        leaf.max_power = 100;
+        let nodes = BTreeMap::from([(0, leaf)]);
+        let mut backing = vec![0u64; 256 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: DMA remains retained across control cancellation and retries.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = controller(&mut dma, 32, nodes);
+        let mut failures = Vec::new();
+        let devices = controller.enumerate(&mut dma, &mut failures);
+        assert!(failures.is_empty());
+        let slot = devices[0].slot;
+        if silent {
+            model.borrow_mut().silent_configuration = Some(slot);
+        } else {
+            model.borrow_mut().failed_configuration = Some(slot);
+        }
+        assert!(
+            controller
+                .control(slot, setup(0, SET_CONFIGURATION, 1, 0, 0), &[])
+                .is_err()
+        );
+        assert_eq!(controller.current_configuration(slot), Ok(None));
+        assert_eq!(controller.power.snapshot(slot), (900, 800, 800));
+        model.borrow_mut().silent_configuration = None;
+        model.borrow_mut().failed_configuration = None;
+        controller
+            .control(slot, setup(0, SET_CONFIGURATION, 0, 0, 0), &[])
+            .unwrap();
+        assert_eq!(controller.power.snapshot(slot), (900, 150, 150));
+    }
+}
+
+#[test]
+fn usb2_bus_hub_uses_two_ma_configuration_units_and_hundred_ma_child_limits() {
+    let mut hub = Node::hub(HIGH_SPEED, 2);
+    hub.self_powered = false;
+    hub.max_power = 250;
+    hub.controller_current = 20;
+    let mut first = Node::leaf(FULL_SPEED);
+    first.max_power = 50;
+    let mut second = Node::leaf(FULL_SPEED);
+    second.max_power = 51;
+    let nodes = BTreeMap::from([(0, hub), (1, first), (2, second)]);
+    let mut backing = vec![0u64; 256 * 1024];
+    let start = backing.as_mut_ptr() as u64;
+    // SAFETY: the USB2 TT tree retains the actual fixture contexts and payloads.
+    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let (mut controller, model) = controller(&mut dma, 32, nodes);
+    let mut failures = Vec::new();
+    let devices = controller.enumerate(&mut dma, &mut failures);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(devices.len(), 3);
+    let first = devices.iter().find(|d| d.location.ends_with(".1")).unwrap();
+    let second = devices.iter().find(|d| d.location.ends_with(".2")).unwrap();
+    controller
+        .control(first.slot, setup(0, SET_CONFIGURATION, 1, 0, 0), &[])
+        .unwrap();
+    assert_eq!(controller.power.snapshot(first.slot), (100, 100, 100));
+    assert!(
+        controller
+            .control(second.slot, setup(0, SET_CONFIGURATION, 1, 0, 0), &[])
+            .is_err()
+    );
+    assert!(
+        !model
+            .borrow()
+            .requests
+            .iter()
+            .any(|(slot, _, q)| *slot == second.slot && q[0] == 0 && q[1] == SET_CONFIGURATION)
+    );
+    assert_eq!(controller.power.snapshot(1), (500, 500, 500));
+}
+
+#[test]
+fn root_power_loss_quarantines_old_handles_and_unknown_power_never_grants_current() {
+    for override_status in [
+        PP | CCS | PED | u32::from(SUPER_SPEED) << 10 | (1 << 3),
+        CCS | PED | u32::from(SUPER_SPEED) << 10,
+        PP,                        // Physical disconnect also removes the speed observation.
+        PP | CCS | PED,            // Unknown protocol state cannot preserve authority.
+        PP | CCS | PED | (1 << 3), // Over-current with unknown wire speed.
+    ] {
+        let nodes = BTreeMap::from([(0, Node::leaf(SUPER_SPEED))]);
+        let mut backing = vec![0u64; 256 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: root owner and all DMA remain live across power failure.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = controller(&mut dma, 32, nodes);
+        let mut failures = Vec::new();
+        let devices = controller.enumerate(&mut dma, &mut failures);
+        assert!(failures.is_empty());
+        let slot = devices[0].slot;
+        model.borrow_mut().root_status = Some(override_status);
+        let requests = model.borrow().requests.len();
+        assert!(
+            controller
+                .control(slot, setup(0, SET_CONFIGURATION, 1, 0, 0), &[])
+                .is_err()
+        );
+        assert_eq!(model.borrow().requests.len(), requests);
+        assert!(
+            controller.slots[usize::from(slot)]
+                .as_ref()
+                .unwrap()
+                .retiring
+        );
+        model.borrow_mut().root_status = None;
+        let before = (model.borrow().mmio_reads, model.borrow().mmio_writes);
+        assert!(
+            controller
+                .control(slot, setup(0, SET_CONFIGURATION, 1, 0, 0), &[])
+                .is_err()
+        );
+        assert_eq!(
+            (model.borrow().mmio_reads, model.borrow().mmio_writes),
+            before
+        );
+    }
+    let nodes = BTreeMap::from([(0, Node::leaf(SUPER_SPEED))]);
+    let mut backing = vec![0u64; 256 * 1024];
+    let start = backing.as_mut_ptr() as u64;
+    // SAFETY: no device is granted DMA until its root protocol qualifies.
+    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let (mut controller, model) = controller(&mut dma, 32, nodes);
+    controller.port_major[0] = 0;
+    let before = (model.borrow().mmio_reads, model.borrow().mmio_writes);
+    assert!(
+        controller
+            .reserve_current(
+                1,
+                Attachment {
+                    root_port: 1,
+                    route: 0,
+                    tier: 0,
+                    speed: SUPER_SPEED,
+                    translator: None,
+                    parent: None
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(
+        (model.borrow().mmio_reads, model.borrow().mmio_writes),
+        before
+    );
+    assert!(controller.slots[1].is_none());
 }
