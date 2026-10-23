@@ -109,6 +109,7 @@ impl Controller {
         self.dcbaa.write(usize::from(slot) * 8, output.physical());
         self.slots[usize::from(slot)] = Some(Slot {
             generation: during("allocate device generation", identity::next_generation())?,
+            inventory: None,
             consumer: identity::Consumer::Unclaimed,
             suspended: false,
             attachment,
@@ -320,6 +321,9 @@ impl Controller {
         }
         // Selection failures still preserve the entire descriptor
         // inventory for diagnostics and future generic forwarding.
+        if let Ok(slot) = self.slot(device.slot) {
+            slot.inventory = Some(device.clone());
+        }
         devices.push(device);
     }
 
@@ -350,6 +354,9 @@ impl Controller {
         if described.is_err() {
             // Best effort: a slot that will not disable stays enabled.
             let _ = self.disable_slot(slot, reset::Ownership::Vacant);
+        }
+        if let Ok(device) = &described {
+            self.slot(slot).unwrap().inventory = Some(device.clone());
         }
         described
     }

@@ -95,6 +95,7 @@ pub use iso::{IsoCompletion, IsoStatus, IsoTransfer};
 pub use lifecycle::{Changes, Host};
 use ring::{Event, Ring};
 pub use streams::StreamTransfer;
+pub use transfer::{TransferCancellation, TransferTicket};
 
 pub const CLASS: [u8; 3] = [0x0c, 0x03, 0x30];
 
@@ -361,6 +362,8 @@ struct Transfer {
 
 struct Slot {
     generation: u64,
+    /// Original physical descriptor inventory for topology reconciliation.
+    inventory: Option<Device>,
     consumer: identity::Consumer,
     /// Consumer traffic is fenced while private lifecycle operations run.
     suspended: bool,

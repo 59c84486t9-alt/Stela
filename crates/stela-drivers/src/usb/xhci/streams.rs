@@ -741,6 +741,7 @@ mod tests {
         let mut slots = vec![None];
         slots.push(Some(Slot {
             generation: 0,
+            inventory: None,
             consumer: identity::Consumer::Unclaimed,
             suspended: false,
             attachment: Attachment {

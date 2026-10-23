@@ -6,6 +6,7 @@ use super::*;
 #[cfg(test)]
 mod downstream_tests;
 mod recovery;
+mod suspend;
 
 /// Private proof retained only after complete subtree transfer quiescence.
 /// This never restores public access to the old hardware slot.
@@ -48,12 +49,14 @@ struct Hub {
 /// `poll` from the native service loop, and deliver its changes to consumers.
 /// Reconnection uses fresh, never-recycled hardware IDs: exhausted boot-lifetime
 /// slot capacity is an explicit failure until generation-bound handles exist.
-/// This owner does not authorize global system suspend/resume or guest reset.
+/// The explicit topology suspend/resume service does not enter platform sleep
+/// or authorize a guest-directed controller reset.
 pub struct Host {
     controller: Shared,
     devices: Vec<Device>,
     hubs: Vec<Hub>,
     roots: Vec<u32>,
+    sleep: suspend::Sleep,
 }
 impl Host {
     /// Transfer this inventory's actual unbound Address-state device to the
@@ -99,6 +102,7 @@ impl Host {
             devices: devices.to_vec(),
             hubs: Vec::new(),
             roots,
+            sleep: suspend::Sleep::default(),
         };
         host.register_hubs(devices, dma, failures);
         host
@@ -177,6 +181,10 @@ impl Host {
         firmware: &dyn crate::firmware::Provider,
     ) -> Changes {
         let mut changes = Changes::default();
+        if !self.sleep.awake() {
+            return changes;
+        }
+        self.reconcile(&mut changes);
         for port in 1..=self.roots.len() as u8 {
             if let Err(error) = self.root(port, dma, &mut changes) {
                 changes
@@ -227,6 +235,42 @@ impl Host {
         }
         self.devices.extend(added);
         changes
+    }
+
+    /// A class-owned exclusive reset may replace a leaf between topology
+    /// polls. Follow the controller's actual fresh descriptor inventory without
+    /// attempting a second native bind of that already-owned replacement.
+    fn reconcile(&mut self, changes: &mut Changes) {
+        let current: Vec<_> = {
+            let c = self.controller.borrow();
+            c.slots
+                .iter()
+                .enumerate()
+                .filter_map(|(id, state)| {
+                    state
+                        .as_ref()
+                        .filter(|state| {
+                            !state.retiring
+                                && !state.suspended
+                                && c.slot_ownership[id] == reset::Ownership::Enabled
+                        })
+                        .and_then(|state| state.inventory.clone())
+                })
+                .collect()
+        };
+        self.devices.retain(|old| {
+            if current.iter().any(|device| device.id == old.id) {
+                true
+            } else {
+                changes.removed.push(old.clone());
+                false
+            }
+        });
+        for device in current {
+            if !self.devices.iter().any(|old| old.id == device.id) {
+                self.devices.push(device);
+            }
+        }
     }
 
     fn root(

@@ -96,6 +96,7 @@ impl Controller {
         )?;
         let slot = device.slot;
         let attachment = self.slot(slot).unwrap().attachment;
+        let consumer = self.slot(slot).unwrap().consumer;
         // Reobserve root and every actual ancestor before invalidating the
         // leaf. A failed shared supply cannot authorize private class recovery.
         during(
@@ -164,6 +165,9 @@ impl Controller {
             )?;
         }
         let result = self.identify(attachment, device.location.clone(), dma);
+        if let Ok(fresh) = &result {
+            self.slot(fresh.slot).unwrap().consumer = consumer;
+        }
         if result.is_err() {
             // A failed fresh enumeration may already have acknowledged Address
             // Device and EP0. Keep that new grant inaccessible as well.
@@ -1434,6 +1438,7 @@ pub(crate) mod tests {
                 let control = dma.allocate(CONTROL_BYTES, CONTROL_BYTES).unwrap();
                 controller.slots[usize::from(other)] = Some(Slot {
                     generation: 0,
+                    inventory: None,
                     consumer: identity::Consumer::Unclaimed,
                     suspended: false,
                     attachment: Attachment {

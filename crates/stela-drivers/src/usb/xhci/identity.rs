@@ -235,6 +235,42 @@ impl DeviceAccess<'_> {
         self.controller.submit(slot, dci, buffer, length)
     }
 
+    pub fn submit_ticket(
+        &mut self,
+        dci: u8,
+        buffer: u64,
+        length: usize,
+    ) -> Result<TransferTicket, BlockError> {
+        let slot = self.slot()?;
+        self.controller.submit_ticket(slot, dci, buffer, length)
+    }
+
+    pub fn completed_ticket(
+        &mut self,
+        ticket: &TransferTicket,
+    ) -> Option<Result<usize, BlockError>> {
+        if let Err(error) = self.slot() {
+            return Some(Err(error));
+        }
+        if ticket.hardware_slot() != self.id.slot {
+            return Some(Err(BlockError::Unsupported("foreign USB transfer ticket")));
+        }
+        self.controller.completed_ticket(ticket)
+    }
+
+    pub fn cancel_ticket(
+        &mut self,
+        ticket: &TransferTicket,
+    ) -> Result<TransferCancellation, BlockError> {
+        self.slot()?;
+        if ticket.hardware_slot() != self.id.slot {
+            return Err(BlockError::Unsupported(
+                "foreign USB transfer cancellation ticket",
+            ));
+        }
+        self.controller.cancel_ticket(ticket)
+    }
+
     pub fn completed(
         &mut self,
         dci: u8,
