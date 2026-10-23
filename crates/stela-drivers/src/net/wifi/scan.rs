@@ -45,11 +45,23 @@ pub trait Policy {
     fn lookup_channel(&mut self, band: Band, number: u16) -> Option<Channel>;
 }
 
+/// Prepared cfg80211-style 6GHz target observations from the OS scan planner.
+/// RNR/PSC metadata selects firmware targets; it never grants probe authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SixGhz {
+    pub channel_index: usize,
+    pub bssid: crate::net::Mac,
+    pub short_ssid: Option<u32>,
+    pub unsolicited_probe: bool,
+    pub psc_no_listen: bool,
+    pub psd_20: i8,
+}
 #[derive(Debug)]
 pub struct Request {
     channels: Vec<Channel>,
     ssids: Vec<Vec<u8>>,
     extra_elements: Vec<u8>,
+    six_ghz: Vec<SixGhz>,
 }
 
 impl Request {
@@ -61,13 +73,35 @@ impl Request {
         ssids: Vec<Vec<u8>>,
         extra_elements: Vec<u8>,
     ) -> Result<Self, Error> {
+        Self::with_six_ghz(channels, ssids, extra_elements, Vec::new())
+    }
+    /// Explicit prepared 6GHz targets, retaining all source input fields. A
+    /// vendor must implement their protocol or refuse before publication.
+    pub fn with_six_ghz(
+        channels: Vec<Channel>,
+        ssids: Vec<Vec<u8>>,
+        extra_elements: Vec<u8>,
+        six_ghz: Vec<SixGhz>,
+    ) -> Result<Self, Error> {
+        if six_ghz.len() > 64
+            || six_ghz.iter().any(|p| {
+                channels
+                    .get(p.channel_index)
+                    .is_none_or(|ch| ch.band != Band::Ghz6)
+            })
+        {
+            return Err(Error::Invalid("6GHz target count/channel index"));
+        }
         if channels.is_empty() || channels.len() > MAX_CHANNELS {
             return Err(Error::Invalid("explicit scan channel count"));
         }
-        // Explicit passive listening needs no RNR-derived probe target or
-        // permission to initiate radiation. Active 6GHz probing still needs
-        // its own source-qualified RNR/short-SSID/PSC request model.
-        if !ssids.is_empty() && channels.iter().any(|channel| channel.band == Band::Ghz6) {
+        // Passive listening requires no RNR target. Active 6GHz needs an
+        // explicit OS-prepared target list, separately from probe authority.
+        // Physical encoders still enforce their actual firmware limits.
+        if !ssids.is_empty()
+            && six_ghz.is_empty()
+            && channels.iter().any(|channel| channel.band == Band::Ghz6)
+        {
             return Err(Error::Unsupported("active 6GHz/RNR scanning"));
         }
         if channels
@@ -89,7 +123,7 @@ impl Request {
                 45 | 61 | 191 | 192 => return Err(Error::Unsupported("HT/VHT probe context")),
                 255 if data
                     .first()
-                    .is_some_and(|id| matches!(id, 35 | 36 | 106 | 107 | 108)) =>
+                    .is_some_and(|id| matches!(id, 35 | 36 | 59 | 106 | 107 | 108)) =>
                 {
                     return Err(Error::Unsupported("HE/EHT/MLO probe context"));
                 }
@@ -100,9 +134,13 @@ impl Request {
             channels,
             ssids,
             extra_elements,
+            six_ghz,
         })
     }
 
+    pub fn six_ghz(&self) -> &[SixGhz] {
+        &self.six_ghz
+    }
     pub fn channels(&self) -> &[Channel] {
         &self.channels
     }
@@ -505,6 +543,43 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn prepared_active_six_ghz_targets_do_not_bypass_probe_policy_or_indices() {
+        let target = SixGhz {
+            channel_index: 0,
+            bssid: AP,
+            short_ssid: Some(42),
+            unsolicited_probe: true,
+            psc_no_listen: false,
+            psd_20: -70,
+        };
+        assert!(Request::with_six_ghz(vec![CH36], vec![vec![]], vec![], vec![target]).is_err());
+        assert!(
+            Request::with_six_ghz(
+                vec![SIX1],
+                vec![vec![]],
+                vec![],
+                vec![SixGhz {
+                    channel_index: 1,
+                    ..target
+                }]
+            )
+            .is_err()
+        );
+        let mut scanner = Scanner::new(LOCAL).unwrap();
+        let mut p = policy();
+        p.probe = false;
+        let request =
+            Request::with_six_ghz(vec![SIX1], vec![vec![]], vec![], vec![target]).unwrap();
+        assert!(matches!(
+            scanner.begin(request, 0, 100, &mut p),
+            Err(Error::Regulatory)
+        ));
+        p.probe = true;
+        let request =
+            Request::with_six_ghz(vec![SIX1], vec![vec![]], vec![], vec![target]).unwrap();
+        assert!(scanner.begin(request, 1, 100, &mut p).is_ok());
+    }
     #[test]
     fn six_ghz_passive_scan_preserves_policy_and_he_operating_channel() {
         let mut policy = policy();

@@ -19,6 +19,8 @@ pub enum Error {
     InvalidPeer,
     InvalidWcid,
     InvalidChannel,
+    InvalidScanTargets,
+    InvalidScanElements,
     InvalidRates,
     InvalidTiming,
     UnsupportedCipher,
@@ -372,24 +374,80 @@ impl Profile {
     }
 }
 
-/// Full non-RNR/non-random MT7925 scan TLVs. Extra probe IEs are already built
-/// by the shared/frontend profile; preserve them per actual selected band.
+/// Full non-random MT7925 scan TLVs, including source RNR BSSID targeting.
+/// The caller supplies already prepared probe IEs for this codec-only entry.
 pub fn scan(
     context: Context,
     sequence: u8,
     request: &crate::net::wifi::scan::Request,
 ) -> Result<super::init::Request, Error> {
+    scan_with_elements(context, sequence, request, None)
+}
+/// Native prepared per-band probe IEs. Capacity refusal precedes scan ownership;
+/// the native caller must never silently lose a later band's capabilities.
+pub(in crate::net::wifi::mediatek) fn scan_with_elements(
+    context: Context,
+    sequence: u8,
+    request: &crate::net::wifi::scan::Request,
+    elements: Option<&[Vec<u8>; 3]>,
+) -> Result<super::init::Request, Error> {
+    const SCAN_IE_BUDGET: usize = 608;
+    const RNR_MAX_BSSIDS: usize = 10;
+    const SCAN_FUNCTION_SPLIT: u8 = 1 << 5;
+    const SCAN_FUNCTION_RNR: u8 = 1 << 3;
+    if let Some(elements) = elements {
+        let required: usize = elements
+            .iter()
+            .filter(|ie| !ie.is_empty())
+            .map(|ie| 8 + ie.len())
+            .sum();
+        if required > SCAN_IE_BUDGET {
+            return Err(Error::InvalidScanElements);
+        }
+    }
     Requests::station(context, true).map_err(Error::Context)?;
-    let mut out = vec![
+    // Source deduplicates by BSSID, preserving the first channel association.
+    // Firmware can consume only ten unique targets. Refuse excess work explicitly
+    // before scan ownership/publication rather than silently dropping a target.
+    let mut targets = [None; RNR_MAX_BSSIDS];
+    let mut target_count = 0;
+    for target in request.six_ghz() {
+        if targets[..target_count]
+            .iter()
+            .flatten()
+            .any(|&(bssid, _)| bssid == target.bssid)
+        {
+            continue;
+        }
+        if target_count == targets.len() {
+            return Err(Error::InvalidScanTargets);
+        }
+        let channel = request
+            .channels()
+            .get(target.channel_index)
+            .filter(|ch| ch.band == Band::Ghz6)
+            .ok_or(Error::InvalidScanTargets)?;
+        let number = u8::try_from(channel.number).map_err(|_| Error::InvalidChannel)?;
+        targets[target_count] = Some((target.bssid, number));
+        target_count += 1;
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(1308).map_err(|_| Error::NoMemory)?;
+    out.extend_from_slice(&[
         sequence | (context.band_index << 7),
         context.bss_index,
         0,
         0,
-    ];
+    ]);
     let req = tlv(&mut out, 1, 20);
     req[4] = u8::from(request.active());
     req[5] = if request.active() { 2 } else { 0 };
-    req[6] = 32;
+    req[6] = SCAN_FUNCTION_SPLIT
+        | if request.six_ghz().is_empty() {
+            0
+        } else {
+            SCAN_FUNCTION_RNR
+        };
     let ssid = tlv(&mut out, 10, 368);
     let mut count = 0;
     for name in request.ssids() {
@@ -403,7 +461,17 @@ pub fn scan(
     }
     ssid[4] = if count > 0 { 4 } else { 1 };
     ssid[5] = count as u8;
-    tlv(&mut out, 11, 16)[4..10].copy_from_slice(&[255; 6]);
+    if target_count == 0 {
+        tlv(&mut out, 11, 16)[4..10].copy_from_slice(&[255; 6]);
+    } else {
+        for &(bssid, channel) in targets[..target_count].iter().flatten() {
+            let bssid_tlv = tlv(&mut out, 11, 16);
+            bssid_tlv[4..10].copy_from_slice(&bssid.0);
+            bssid_tlv[10] = channel;
+            bssid_tlv[11] = RNR_MAX_BSSIDS as u8;
+            bssid_tlv[13] = RNR_MAX_BSSIDS as u8;
+        }
+    }
     let channels = tlv(&mut out, 12, 136);
     channels[4] = 4;
     channels[5] = request.channels().len() as u8;
@@ -420,30 +488,34 @@ pub fn scan(
     }
     tlv(&mut out, 14, 12);
     let mut ie_count = 0;
-    if !request.extra_elements().is_empty() {
+    if elements.is_some() || !request.extra_elements().is_empty() {
         // Full source helper shares this budget between all selected bands;
         // it stops, rather than emitting an over-budget later band.
-        let mut remaining = 8 + 600;
-        for band in [Band::Ghz2, Band::Ghz5, Band::Ghz6] {
+        let mut remaining = SCAN_IE_BUDGET;
+        for (index, band) in [Band::Ghz2, Band::Ghz5, Band::Ghz6].into_iter().enumerate() {
             if request.channels().iter().any(|ch| ch.band == band) {
-                let length = 8 + request.extra_elements().len();
+                let bytes = elements.map_or(request.extra_elements(), |ies| ies[index].as_slice());
+                if bytes.is_empty() {
+                    continue;
+                }
+                let length = 8 + bytes.len();
                 if length > remaining {
                     break;
                 }
                 let ie = tlv(&mut out, 13, length);
-                put16(ie, 4, request.extra_elements().len() as u16);
+                put16(ie, 4, bytes.len() as u16);
                 ie[6] = match band {
                     Band::Ghz2 => 1,
                     Band::Ghz5 => 2,
                     Band::Ghz6 => 3,
                 };
-                ie[8..].copy_from_slice(request.extra_elements());
+                ie[8..].copy_from_slice(bytes);
                 ie_count += 1;
                 remaining -= length;
             }
         }
     }
-    let count = 5 + ie_count;
+    let count = 4 + target_count.max(1) + ie_count;
     put16(&mut out, 2, count as u16);
     Ok(super::init::Request::scan(out, false))
 }
@@ -520,6 +592,124 @@ mod tests {
             broadcast_wcid: 19,
             address: Mac([2; 6]),
         }
+    }
+    #[test]
+    fn full_source_rnr_scan_requests_match_targets_duplicates_bands_and_ie_budget() {
+        use crate::net::wifi::scan::{Request, SixGhz};
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        let mut index = 0;
+        for n in [1, 2, 4, 10] {
+            for duplicate in 0..3 {
+                for names in [0, 1, 2, 4] {
+                    for length in [0, 4, 200] {
+                        for mix in 0..3 {
+                            let all = [
+                                Channel {
+                                    band: Band::Ghz2,
+                                    number: 1,
+                                    frequency_mhz: 2412,
+                                },
+                                Channel {
+                                    band: Band::Ghz5,
+                                    number: 36,
+                                    frequency_mhz: 5180,
+                                },
+                                Channel {
+                                    band: Band::Ghz6,
+                                    number: 1,
+                                    frequency_mhz: 5955,
+                                },
+                                Channel {
+                                    band: Band::Ghz6,
+                                    number: 5,
+                                    frequency_mhz: 5975,
+                                },
+                            ];
+                            let mut channels = Vec::new();
+                            if mix == 2 {
+                                channels.push(all[0]);
+                            }
+                            if mix != 0 {
+                                channels.push(all[1]);
+                            }
+                            let six = channels.len();
+                            channels.extend_from_slice(&all[2..]);
+                            let mut params = Vec::new();
+                            for j in 0..n {
+                                let target = SixGhz {
+                                    channel_index: six + j % 2,
+                                    bssid: Mac([
+                                        2,
+                                        0x42,
+                                        (index & 255) as u8,
+                                        (index >> 8) as u8,
+                                        j as u8,
+                                        0x7f,
+                                    ]),
+                                    short_ssid: (j % 2 != 0).then_some(0xabc000 + j as u32),
+                                    unsolicited_probe: j % 2 == 0,
+                                    psc_no_listen: j % 2 != 0,
+                                    psd_20: -75 + j as i8,
+                                };
+                                params.push(target);
+                                if duplicate == 2 {
+                                    params.push(SixGhz {
+                                        channel_index: six + (j + 1) % 2,
+                                        ..target
+                                    });
+                                }
+                            }
+                            if duplicate == 1 {
+                                for j in 0..n {
+                                    params.push(SixGhz {
+                                        channel_index: six + j % 2,
+                                        ..params[n - 1 - j]
+                                    });
+                                }
+                            }
+                            let ssids = (0..names).map(|j| vec![65 + j as u8; j]).collect();
+                            let request = Request::with_six_ghz(
+                                channels,
+                                ssids,
+                                scan_elements(length),
+                                params,
+                            )
+                            .unwrap();
+                            let encoded =
+                                scan(scan_context(), (index % 127 + 1) as u8, &request).unwrap();
+                            hash.update([0x16]);
+                            hash.update((encoded.body().len() as u16).to_le_bytes());
+                            hash.update(encoded.body());
+                            index += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(index, 432);
+        assert_eq!(
+            alloc::format!("{:x}", hash.finalize()),
+            "68a1c494a1886a2da6e86f7f013f35f70d3990ae076f4bf0f4c71216d722c831"
+        );
+    }
+    #[test]
+    fn native_per_band_probe_budget_refuses_before_losing_a_band() {
+        let request =
+            crate::net::wifi::scan::Request::new(scan_channels(7), vec![], vec![]).unwrap();
+        let over = core::array::from_fn(|_| scan_elements(200));
+        assert!(matches!(
+            scan_with_elements(scan_context(), 1, &request, Some(&over)),
+            Err(Error::InvalidScanElements)
+        ));
+        let mut fit = over;
+        fit[2] = scan_elements(184);
+        let bytes = scan_with_elements(scan_context(), 1, &request, Some(&fit)).unwrap();
+        assert_eq!(
+            u16::from_le_bytes(bytes.body()[2..4].try_into().unwrap()),
+            8
+        );
+        assert_eq!(bytes.body().len(), 4 + 20 + 368 + 16 + 136 + 12 + 608);
     }
     #[test]
     fn odd_scan_elements_keep_byte_layout_and_shared_band_budget() {

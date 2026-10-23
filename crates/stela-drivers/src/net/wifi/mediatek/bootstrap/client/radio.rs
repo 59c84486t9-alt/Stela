@@ -29,18 +29,49 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.transport_facts
             .try_reserve(1)
             .map_err(|_| Error::NoMemory)?;
+        let sequence = (s.scan_sequence + 1) & 127;
+        // Complete fallible codec/capacity checks before Scanner owns the
+        // request. A refused RNR list must leave this same owner reusable.
+        let mut elements = [Vec::new(), Vec::new(), Vec::new()];
+        let prepared = request.active() && !request.six_ghz().is_empty();
+        if prepared {
+            let six = local::current(s, wifi::Band::Ghz6).map_err(Error::Local)?;
+            let he6 = six.capabilities().he_6ghz().ok_or(Error::WrongProfile)?;
+            // Full custom-IE placement/splitting is a separate frontend
+            // contract. Refuse it before ownership rather than lose or reorder
+            // a requested element behind the source band writer.
+            if !request.extra_elements().is_empty() {
+                return Err(Error::Unsupported);
+            }
+            for (index, band) in [wifi::Band::Ghz2, wifi::Band::Ghz5, wifi::Band::Ghz6]
+                .into_iter()
+                .enumerate()
+            {
+                if request.channels().iter().any(|ch| ch.band == band) {
+                    let actual = local::current(s, band).map_err(Error::Local)?;
+                    let domain = actual_policy
+                        .programmed_mt7925()
+                        .ok_or(Error::WrongProfile)?
+                        .0;
+                    let selection = local::scan::Selection::programmed(domain, band, he6);
+                    elements[index] =
+                        local::scan::elements(&actual, selection).map_err(Error::Local)?;
+                }
+            }
+        }
+        let encoded = wire::scan_with_elements(
+            s.interface.registered_context().unwrap(),
+            sequence,
+            &request,
+            prepared.then_some(&elements),
+        )
+        .map_err(Error::Codec)?;
         let ticket = s
             .scanner
             .begin(request, now, budget, policy)
             .map_err(Error::Scan)?;
         s.scan_ticket = Some(ticket);
-        s.scan_sequence = (s.scan_sequence + 1) & 127;
-        let request = wire::scan(
-            s.interface.registered_context().unwrap(),
-            s.scan_sequence,
-            s.scanner.request().unwrap(),
-        )
-        .map_err(Error::Codec)?;
+        s.scan_sequence = sequence;
         s.scanner
             .validate_submission(ticket, now, policy)
             .map_err(Error::Scan)?;
@@ -52,7 +83,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .mailbox
             .as_mut()
             .unwrap()
-            .initial(&request)
+            .initial(&encoded)
             .map_err(Error::Transport)?;
         s.transport_facts.push(fact);
         s.phase = Phase::Scanning;

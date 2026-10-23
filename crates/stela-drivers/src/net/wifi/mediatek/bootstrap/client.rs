@@ -54,6 +54,7 @@ pub enum Error {
     WrongPhase,
     WrongDevice,
     WrongProfile,
+    Local(LocalError),
     Busy,
     NoMemory,
     NeedsDrain,

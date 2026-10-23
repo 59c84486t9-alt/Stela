@@ -12,8 +12,11 @@ use crate::net::wifi::{
 };
 use alloc::vec;
 
+pub(super) mod scan;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LocalError {
+    NoMemory,
     WrongDevice,
     MissingPhy,
     MissingSixGhz,

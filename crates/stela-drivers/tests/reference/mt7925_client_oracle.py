@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """Pinned complete MT7925 source request/capability helpers under sanitizers.
-Usage: mt7925_client_oracle.py MT76_DIRECTORY FRESH_OUTPUT_DIRECTORY [--modern | --local KERNEL_HEADERS | --scan6]
+Usage: mt7925_client_oracle.py MT76_DIRECTORY FRESH_OUTPUT_DIRECTORY [--modern | --local KERNEL_HEADERS | --probe KERNEL_HEADERS | --scan6 | --rnr KERNEL_HEADERS]
 Default models non-MLO station legacy20. --modern builds complete modern peer,
 BSS, EDCA, BA and puncture writers; the Rust runner supplies typed contexts over
 stdin and records modern-run.json with exact executed counts and hashes.
 --local executes full HT/VHT/HE/EHT/PPE issuers plus BE_CONTROL decisions,
 retaining source HE struct slots separately from transmitted capability maps.
+--probe executes full ordinary mac80211 probe IE and scan command writers.
 No firmware ACK, physical authority, encryption or radio execution is established.
 """
 from pathlib import Path
 import re,hashlib,json,subprocess,sys
+probe=len(sys.argv)>3 and sys.argv[3]=="--probe"
 scan6=len(sys.argv)>3 and sys.argv[3]=="--scan6"
-source,out=map(Path,sys.argv[1:3]);modern=len(sys.argv)>3 and sys.argv[3]=="--modern";local=len(sys.argv)>3 and sys.argv[3]=="--local";out.mkdir(parents=True,exist_ok=False)
+rnr=len(sys.argv)>3 and sys.argv[3]=="--rnr"
+source,out=map(Path,sys.argv[1:3]);modern=len(sys.argv)>3 and sys.argv[3]=="--modern";local=probe or (len(sys.argv)>3 and sys.argv[3]=="--local");out.mkdir(parents=True,exist_ok=False)
 hashes={'mt792x_mac.c':'472d899597f5da141a9fba4d9d38d202cd8ac13ba53677e2e527f0b4e1884a45','mt76_connac_mcu.c':'52472fd20bc0a1d744f3eee7a28b7205609e160c479a9da1ec5afa4528e389ec','mt76_connac_mcu.h':'2448b6c145f17397a717965eadf50c591934902f0b09684d37a8b0ae290b31ed','mt76_connac.h':'fef14ff63ab1a098b8fe90b5c2e28811cf7fcaf78a7bf5753818b05acf2414b0','mt7925/mcu.c':'cca76caa6429584b0b37f2772f5132e754a9e26b71660fb0e362ead4ee01dde6','mt7925/mcu.h':'35855f4cdc673a7562241afd618fdd73fc181d210127e3ca2f762f3199cbc772','mt7925/main.c':'93023cfa7f7bc57efcf64b2a4fe55d932a60c0128942ff911b2e0d792a0de588','mt7925/mt7925.h':'b6fec2103954269927b44b095944120dd22a5a0503fa8930e49a8ecc044844dc'}
+if rnr:hashes['mt76.h']='b7e52e9559ff1bd5d256ccdbaa2b4c277d418955acd141708059af3161470bea'
 t={}
 for f,h in hashes.items():b=(source/f).read_bytes();assert hashlib.sha256(b).hexdigest()==h,f;t[f]=b.decode()
 def function(f,n):
@@ -237,21 +241,67 @@ int main(void) {
  return 0;
 }
 '''
+if rnr:
+ cfg=(Path(sys.argv[4])/'include/net/cfg80211.h').read_bytes();assert hashlib.sha256(cfg).hexdigest()=='972ae23f32259859b54c4b93fa46fb60cba8c879da888b2751014a6cd27bfcf3'
+ cfg=cfg.decode();at=cfg.index('struct cfg80211_scan_6ghz_params {');cfg_layout=cfg[at:cfg.index('};',at)+2]
+ macro=re.search(r'^#define MT76_RNR_SCAN_MAX_BSSIDS[^\n]+',t['mt76.h'],re.M).group()
+ old='struct mt76_dev{struct{int bssid_num;u8 bssid[10][6],channel[10];}rnr;};'
+ assert old in pre
+ pre=pre.replace(old,'\n'+macro+'\n'+layout('mt76.h','mt76_scan_rnr_param')+'\nstruct mt76_dev{struct mt76_scan_rnr_param rnr;};')
+ old='struct cfg80211_scan_request {int n_ssids,n_channels,n_6ghz_params;'
+ assert old in pre
+ pre=pre.replace(old,cfg_layout+'\nstruct cfg80211_scan_request {struct cfg80211_scan_6ghz_params *scan_6ghz_params;int n_ssids,n_channels,n_6ghz_params;')
+ old='static void mt76_connac_mcu_build_rnr_scan_param(struct mt76_dev*d,struct cfg80211_scan_request*s){(void)d;assert(!s->n_6ghz_params);}'
+ assert old in pre;pre=pre.replace(old,'')
+ helpers=function(c,'mt76_connac_mcu_build_rnr_scan_param')+helpers
+ main=r'''
+int main(void){
+ struct mt792x_dev d={0};struct mt76_phy m={.dev=&d.mt76};d.phy=(struct mt792x_phy){.dev=&d,.mt76=&m};
+ unsigned counts[]={1,2,4,10},sizes[]={0,4,200},index=0;
+ for(unsigned ni=0;ni<4;ni++)for(unsigned duplicate=0;duplicate<3;duplicate++)for(unsigned names=0;names<4;names++)for(unsigned length=0;length<3;length++)for(unsigned mix=0;mix<3;mix++,index++){
+  unsigned n=counts[ni],ssids_n=(unsigned[]){0,1,2,4}[names],size=sizes[length];
+  struct ieee80211_vif v={.type=NL80211_IFTYPE_STATION};v.drv_priv[0].phy=&d.phy;
+  struct mt76_vif_link*r=&v.drv_priv[0].bss_conf.mt76;r->band_idx=255;r->scan_seq_num=index%127;
+  struct ieee80211_channel ch[4]={{.band=0,.hw_value=1,.center_freq=2412},{.band=1,.hw_value=36,.center_freq=5180},{.band=3,.hw_value=1,.center_freq=5955},{.band=3,.hw_value=5,.center_freq=5975}};
+  struct ieee80211_channel *channels[4];unsigned nc=0;
+  if(mix==2)channels[nc++]=&ch[0];if(mix)channels[nc++]=&ch[1];unsigned six=nc;channels[nc++]=&ch[2];channels[nc++]=&ch[3];
+  struct cfg80211_ssid ssids[4]={0};for(unsigned j=0;j<4;j++){ssids[j].ssid_len=j;memset(ssids[j].ssid,65+j,j);}
+  struct cfg80211_scan_6ghz_params params[20]={0};unsigned np=0;
+  for(unsigned j=0;j<n;j++){
+   struct cfg80211_scan_6ghz_params p={.channel_idx=six+j%2,.short_ssid=0xabc000+j,.short_ssid_valid=j%2,.unsolicited_probe=!(j%2),.psc_no_listen=j%2,.psd_20=-75+(int)j};
+   u8 bssid[]={2,0x42,index&255,index>>8,j,0x7f};memcpy(p.bssid,bssid,6);params[np++]=p;
+   if(duplicate==2){p.channel_idx=six+(j+1)%2;params[np++]=p;}
+  }
+  if(duplicate==1)for(unsigned j=0;j<n;j++){params[np]=params[n-1-j];params[np++].channel_idx=six+j%2;}
+  u8 ies[200];memset(ies,0x5a,sizeof(ies));if(size){ies[0]=221;ies[1]=size-2;}
+  struct ieee80211_scan_request scan={.req={.n_ssids=ssids_n,.n_channels=nc,.channels=channels,.ssids=ssids,.n_6ghz_params=np,.scan_6ghz_params=params}};
+  memset(scan.req.bssid,255,6);for(unsigned j=0;j<nc;j++){unsigned band=channels[j]->band;scan.ies.ies[band]=ies;scan.ies.len[band]=size;}
+  m.state=0;if(mt7925_mcu_hw_scan(&m,&v,&scan))abort();
+ }
+ return 0;
+}
+'''
 if modern or local:
  from mt7925_modern_fixture import extend
  pre,parts,helpers,main=extend(pre,parts,helpers,main,function,layout)
+command_parts=parts.copy()
 if local:
  from mt7925_local_fixture import extend_local
  pre,parts,helpers,main=extend_local(pre,parts,helpers,main,function,layout,t,hashes,source,Path(sys.argv[4]))
+if probe:
+ from mt7925_probe_fixture import extend_probe
+ pre,parts,helpers,main,probe_helpers=extend_probe(pre,parts+command_parts,helpers,main,function,layout,t,hashes,Path(sys.argv[4]))
 # Definitions used by complete layouts precede them; model follows layouts only
 # where sizeof/layout names are needed by extracted functions.
 pre=pre.replace('typedef uint16_t __le16;','typedef uint16_t __le16;')
 unit=out/'client.c';unit.write_text(pre+'\n#define HT_MCS_MASK_NUM 10\n'+''.join(parts)+helpers+main)
 exe=out/'client';subprocess.run(['cc','-std=gnu11','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all',str(unit),'-o',str(exe)],check=True)
 b=b'' if modern else subprocess.run([str(exe.resolve())],stdout=subprocess.PIPE,check=True).stdout
-if not modern:(out/('scan6.trace' if scan6 else 'client.trace')).write_bytes(b)
-manifest={'linux_commit':'a804c5742bff224d4cb4d25dd383554d598be32b','sources':hashes,'profile':'scan6-passive' if scan6 else 'local-capabilities' if local else 'modern-stdin' if modern else 'legacy20','cases':49 if scan6 else 80 if local else None if modern else 128,'requests':49 if scan6 else None if modern or local else 1792,'trace_sha256':None if modern else hashlib.sha256(b).hexdigest()}
+if not modern:(out/('rnr.trace' if rnr else 'scan6.trace' if scan6 else 'client.trace')).write_bytes(b)
+manifest={'linux_commit':'a804c5742bff224d4cb4d25dd383554d598be32b','sources':hashes,'profile':'scan6-rnr' if rnr else 'scan6-passive' if scan6 else 'local-capabilities' if local else 'modern-stdin' if modern else 'legacy20','cases':432 if rnr else 49 if scan6 else 80 if local else None if modern else 128,'requests':432 if rnr else 49 if scan6 else None if modern or local else 1792,'trace_sha256':None if modern else hashlib.sha256(b).hexdigest()}
+if probe:manifest.update(profile='full-probe-ies',cases=400,requests=400,helpers_sha256=probe_helpers,oracle_limit=['No custom IEs or S1G in this accepted native profile; their unexecuted model branches assert if called. Modeled source channels carry NO_UHR, so the unavailable MT7925 UHR family is never invented.', 'Source capability and usable-band observations are modeled, not physical radio/regulatory authority.'])
 if scan6:manifest.update(helpers_sha256={n:hashlib.sha256(function(f,n).encode()).hexdigest() for f,n in [(c3,'mt7925_mcu_hw_scan'),(c3,'mt7925_mcu_build_scan_ie_tlv'),(h,'mt76_connac_mcu_add_tlv')]},oracle_limit=['The upstream unpacked scan_ie_tlv has 2-byte alignment; odd-length IEs followed by another band trigger UBSan in the full unchanged helper. Matrix uses aligned sizes or an odd size exhausted before a second TLV; separate Rust tests retain odd mixed-band cases.'])
-if local:manifest.update(be_control_cases=180,full_local_he_struct_slots=3)
+if rnr:manifest.update(cfg80211_sha256='972ae23f32259859b54c4b93fa46fb60cba8c879da888b2751014a6cd27bfcf3',helpers_sha256={n:hashlib.sha256(function(f,n).encode()).hexdigest() for f,n in [(c,'mt76_connac_mcu_build_rnr_scan_param'),(c3,'mt7925_mcu_hw_scan'),(c3,'mt7925_mcu_build_scan_ie_tlv'),(h,'mt76_connac_mcu_add_tlv')]},oracle_limit=['Bounded accepted profile has at most10unique targets; Rust explicitly refuses higher firmware-target capacity before scan ownership.', 'Shared odd-length mixed-band IE alignment limit remains recorded by the previous immutable scan6 oracle; this matrix uses aligned lengths.'])
+if local and not probe:manifest.update(be_control_cases=180,full_local_he_struct_slots=3)
 if modern:manifest['execution_record']='modern-run.json (created by the Rust runner after actual stdin execution)'
 (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');print(manifest['trace_sha256'])

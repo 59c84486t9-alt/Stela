@@ -1288,6 +1288,234 @@ mod tests {
         }
     }
     #[test]
+    fn active_six_ghz_rnr_requires_programmed_probe_policy_and_reuses_refused_owner() {
+        use crate::net::wifi::mediatek::mailbox::clc::remaining::tests::caps;
+        let six = Channel {
+            band: Band::Ghz6,
+            number: 1,
+            frequency_mhz: 5955,
+        };
+        let six5 = Channel {
+            band: Band::Ghz6,
+            number: 5,
+            frequency_mhz: 5975,
+        };
+        let mut f = NativeFixture::new(Chip::Mt7925);
+        f.model.lock().unwrap().capability_payload = Some(caps(Chip::Mt7925, [true; 3]));
+        f.install().unwrap();
+        f.boot(Chip::Mt7925);
+        f.policy_channels(
+            Chip::Mt7925,
+            [true; 3],
+            [
+                vec![domain::Channel {
+                    hardware_value: 1,
+                    flags: 0,
+                }],
+                vec![domain::Channel {
+                    hardware_value: 36,
+                    flags: 0,
+                }],
+                vec![
+                    domain::Channel {
+                        hardware_value: 1,
+                        flags: 0,
+                    },
+                    domain::Channel {
+                        hardware_value: 5,
+                        flags: 2,
+                    },
+                ],
+            ],
+        );
+        unsafe { f.controller.initialize_mac() }.unwrap();
+        unsafe { f.controller.start(Band::Ghz5, 36, 5180) }.unwrap();
+        let interface = unsafe { f.controller.register_interface(profile().interface) }.unwrap();
+        f.model.lock().unwrap().client_execution = true;
+        let NativeFixture {
+            controller,
+            model,
+            bar,
+            queues,
+            memory,
+            drops,
+            ..
+        } = f;
+        let client = unsafe { Client::new(controller, interface) }.unwrap();
+        let model = Model {
+            response: model,
+            bar,
+            queues,
+            memory,
+            drops,
+        };
+        let original = fixture();
+        let mut b = vec![0; 112];
+        b[..24].copy_from_slice(&original[..24]);
+        b[17] = 3;
+        b[20..26].copy_from_slice(&[0, 8, 0, 14, 0, 20]);
+        b[32..48].copy_from_slice(&original[24..40]);
+        b[56..72].copy_from_slice(&original[48..64]);
+        b[80..96].copy_from_slice(&original[48..64]);
+        b[84..88].copy_from_slice(&5_945_000u32.to_be_bytes());
+        b[88..92].copy_from_slice(&5_985_000u32.to_be_bytes());
+        b[92..96].copy_from_slice(&40_000u32.to_be_bytes());
+        let country = Database::parse(Arc::from(b.clone()), Sha256::digest(&b).into())
+            .unwrap()
+            .select(*b"US")
+            .unwrap();
+        let mut driver = ManagedClient::new(client, country, Environment::Indoor).unwrap();
+        let target = scan::SixGhz {
+            channel_index: 0,
+            bssid: AP,
+            short_ssid: Some(42),
+            unsolicited_probe: true,
+            psc_no_listen: false,
+            psd_20: -70,
+        };
+        let before = model.response.lock().unwrap().client_commands.len();
+        let custom =
+            scan::Request::with_six_ghz(vec![six], vec![vec![]], vec![221, 2, 1, 2], vec![target])
+                .unwrap();
+        assert!(matches!(
+            driver.begin_scan(custom, 0, 1000),
+            Err(PolicyError::Client(Error::Unsupported))
+        ));
+        assert_eq!(driver.phase(), Phase::Idle);
+        let excessive = (0..11)
+            .map(|i| scan::SixGhz {
+                bssid: crate::net::Mac([2, 0x42, 0, 0, i, 1]),
+                ..target
+            })
+            .collect();
+        let request =
+            scan::Request::with_six_ghz(vec![six], vec![vec![]], vec![], excessive).unwrap();
+        assert!(matches!(
+            driver.begin_scan(request, 0, 1000),
+            Err(PolicyError::Client(Error::Codec(
+                wire::Error::InvalidScanTargets
+            )))
+        ));
+        assert_eq!(driver.phase(), Phase::Idle);
+        let request = scan::Request::with_six_ghz(
+            vec![six, six5],
+            vec![vec![]],
+            vec![],
+            vec![
+                target,
+                scan::SixGhz {
+                    channel_index: 1,
+                    bssid: crate::net::Mac([2, 0x42, 0, 0, 1, 1]),
+                    ..target
+                },
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            driver.begin_scan(request, 1, 1000),
+            Err(PolicyError::Client(Error::Scan(scan::Error::Regulatory)))
+        ));
+        assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
+        // Both codec-capacity and real NO_IR refusals leave the original owner
+        // available. No copied RNR data can override programmed probe policy.
+        let request = scan::Request::with_six_ghz(
+            vec![
+                Channel {
+                    band: Band::Ghz2,
+                    number: 1,
+                    frequency_mhz: 2412,
+                },
+                CHANNEL,
+                six,
+            ],
+            vec![vec![]],
+            vec![],
+            vec![
+                scan::SixGhz {
+                    channel_index: 2,
+                    ..target
+                },
+                scan::SixGhz {
+                    channel_index: 2,
+                    ..target
+                },
+            ],
+        )
+        .unwrap();
+        driver.begin_scan(request, 2, 1000).unwrap();
+        let commands = model.response.lock().unwrap().client_commands.clone();
+        let body = &commands.last().unwrap()[48..];
+        assert_eq!(&body[8..11], &[1, 2, 40]);
+        let mut rest = &body[4..];
+        let mut targets = Vec::new();
+        let mut probes = Vec::new();
+        while !rest.is_empty() {
+            let n = usize::from(u16::from_le_bytes(rest[2..4].try_into().unwrap()));
+            if rest[..2] == 11u16.to_le_bytes() {
+                targets.push(rest[..n].to_vec());
+            }
+            if rest[..2] == 13u16.to_le_bytes() {
+                probes.push(rest[..n].to_vec());
+            }
+            rest = &rest[n..];
+        }
+        assert_eq!(
+            targets,
+            vec![[vec![11, 0, 16, 0], AP.0.to_vec(), vec![1, 10, 0, 10, 0, 0]].concat()]
+        );
+        assert_eq!(probes.len(), 3);
+        for (index, probe) in probes.iter().enumerate() {
+            let band = [Band::Ghz2, Band::Ghz5, Band::Ghz6][index];
+            assert_eq!(probe[6], index as u8 + 1);
+            let local = driver.local_advertisement(band).unwrap();
+            assert_eq!(
+                &probe[8..],
+                super::super::local::scan::elements(
+                    &local,
+                    super::super::local::scan::Selection::programmed(
+                        driver
+                            .client
+                            .state()
+                            .controller
+                            .state()
+                            .policy
+                            .as_ref()
+                            .unwrap()
+                            .programmed_mt7925()
+                            .unwrap()
+                            .0,
+                        band,
+                        0x30b8
+                    )
+                )
+                .unwrap()
+            );
+            assert_eq!(&probe[probe.len() - 5..], &[255, 3, 59, 0xb8, 0x36]);
+        }
+        let mut beacon = response(
+            0x80,
+            &[
+                0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0x11, 0, 0, 1, b'x', 255, 12, 36, 0, 0, 2, 0, 0, 0,
+                1, 0, 1, 0, 6,
+            ],
+        );
+        beacon[4..10].copy_from_slice(&crate::net::Mac::BROADCAST.0);
+        let mut raw = incoming_bytes(&beacon, None, false);
+        raw[12..16].copy_from_slice(&(181u32 << 8).to_le_bytes());
+        device_receive(&model.queues[&0xd4520], &raw, true, 0);
+        assert!(
+            matches!(driver.poll(3,&Source).unwrap().as_slice(),[Event::Bss(b)]if b.channel==six)
+        );
+        done(&model);
+        driver.poll(4, &Source).unwrap();
+        driver.revoke().unwrap();
+        unsafe { driver.retire_scan_after_drain() }.unwrap();
+        finish_stop(&mut driver, &model);
+        drop(driver);
+        assert_eq!(model.drops.load(Ordering::Relaxed), 1);
+        assert!(model.memory.lock().unwrap().mappings.is_empty());
+    }
+    #[test]
     fn mismatched_country_returns_original_owner_and_sku_padding_is_not_power() {
         let (client, model) = setup();
         let mut bytes = fixture();
