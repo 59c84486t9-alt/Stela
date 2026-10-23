@@ -89,6 +89,10 @@ impl ScanResult {
         self.result.as_ref()
     }
 }
+#[allow(
+    clippy::large_enum_variant,
+    reason = "captured scan results and their deferred-user guards transfer inline without a new allocation or failure branch"
+)]
 pub enum ScanResultProgress {
     Pending,
     Backpressure { notifications: usize },

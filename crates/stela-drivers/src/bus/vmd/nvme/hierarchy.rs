@@ -248,15 +248,14 @@ impl Hierarchy {
             return Err(Error::InvalidResource);
         }
         for function in &children {
-            if let Some(bridge) = function.bridge {
-                if bridge.buses as u8 != function.child.address.bus
+            if let Some(bridge) = function.bridge
+                && (bridge.buses as u8 != function.child.address.bus
                     || bridge.secondary() <= function.child.address.bus
                     || bridge.secondary() > bridge.subordinate()
                     || bridge.subordinate() > host.last_bus
-                    || !function.capabilities.is_pcie()
-                {
-                    return Err(Error::InvalidResource);
-                }
+                    || !function.capabilities.is_pcie())
+            {
+                return Err(Error::InvalidResource);
             }
         }
         // Every enumerated bus must have one real path. This rejects stray

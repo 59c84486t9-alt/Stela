@@ -284,10 +284,10 @@ impl Capabilities {
         clock: Clock,
     ) -> Result<(), Error> {
         for (offset, enabled) in [(self.msi, 1), (self.msix, 0x8000)] {
-            if let Some(offset) = offset {
-                if word(config, offset + 2)? & enabled != 0 {
-                    return Err(Error::ActiveChild);
-                }
+            if let Some(offset) = offset
+                && word(config, offset + 2)? & enabled != 0
+            {
+                return Err(Error::ActiveChild);
             }
         }
         let Some(pm) = self.pm else {
@@ -311,10 +311,10 @@ impl Capabilities {
         &self,
         config: &mut ChildConfig<'_, R>,
     ) -> Result<(), Error> {
-        if let Some(pm) = self.pm {
-            if word(config, pm + 4)? & 0x103 != 0 {
-                return Err(Error::Suspended);
-            }
+        if let Some(pm) = self.pm
+            && word(config, pm + 4)? & 0x103 != 0
+        {
+            return Err(Error::Suspended);
         }
         Ok(())
     }

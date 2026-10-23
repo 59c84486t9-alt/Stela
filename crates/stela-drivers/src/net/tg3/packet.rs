@@ -58,6 +58,10 @@ impl<R: Registers, D: Delay> Packet<R, D> {
     /// owner through retirement; no other provider may re-enable them.
     /// All calls/releases run in the original provider's qualified context.
     /// A numeric BDF, arbitrary Arc or fake domain cannot grant this authority.
+    #[allow(
+        clippy::result_large_err,
+        reason = "attach failure returns the complete original hardware/DMA epoch without a fallible error-path allocation"
+    )]
     pub unsafe fn attach(
         hardware: Hardware<R, D>,
         pages: &dyn PageSource,
@@ -183,6 +187,10 @@ impl<R: Registers, D: Delay> Packet<R, D> {
     }
     /// Release only after stop/drain and acknowledged removal of every real
     /// mapping. An unmap error returns this same epoch with original owners.
+    #[allow(
+        clippy::result_large_err,
+        reason = "failed retirement must return the same retained hardware/DMA epoch for retry without allocating"
+    )]
     pub fn retire(mut self) -> Result<R, (Error, Self)> {
         let result = self.stop().and_then(|()| {
             if let Some(memory) = &mut self.memory {

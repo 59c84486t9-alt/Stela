@@ -178,10 +178,10 @@ impl RegisterIo {
         Ok(())
     }
     fn quarantine(&mut self) {
-        if let Self::Owned(owner) = self {
-            if let Some(r) = owner.take() {
-                mem::forget(r);
-            }
+        if let Self::Owned(owner) = self
+            && let Some(r) = owner.take()
+        {
+            mem::forget(r);
         }
     }
 }
@@ -274,6 +274,10 @@ impl Buffer {
                 .checked_add(size_of::<T>())
                 .is_some_and(|end| end <= bytes.len())
         );
+        // SAFETY: bytes_mut established a unique CPU-owned mapped slice, and
+        // the checked complete T span above keeps offset within that allocation.
+        // Pointer arithmetic alone does not dereference the cast T pointer;
+        // its alignment is checked below before the volatile write.
         let p = unsafe { bytes.as_mut_ptr().add(offset) }.cast::<T>();
         assert!((p as usize).is_multiple_of(align_of::<T>()));
         // SAFETY: complete aligned span in uniquely CPU-owned memory.
@@ -305,12 +309,12 @@ impl Buffer {
     }
     /// Only after actual command completion or acknowledged stopped/drained DMA.
     pub(super) unsafe fn take(&mut self) -> Result<(), BlockError> {
-        if let Self::Owned(b) = self {
-            if !b.cpu_owned {
-                // SAFETY: caller establishes actual hardware completion.
-                unsafe { b.dma.sync_for_cpu(0..b.dma.bytes()) }.map_err(map_dma_error)?;
-                b.cpu_owned = true;
-            }
+        if let Self::Owned(b) = self
+            && !b.cpu_owned
+        {
+            // SAFETY: caller establishes actual hardware completion.
+            unsafe { b.dma.sync_for_cpu(0..b.dma.bytes()) }.map_err(map_dma_error)?;
+            b.cpu_owned = true;
         }
         Ok(())
     }

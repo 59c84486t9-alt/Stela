@@ -23,9 +23,10 @@ impl Buffer {
     }
     fn write(&self, offset: usize, bytes: &[u8]) -> Result<()> {
         let p = self.cpu.address(offset, bytes.len())?;
-        // SAFETY: the queue owns this unpublished/completed range exclusively.
-        // Byte stores preserve neighboring live descriptor words.
         for (i, b) in bytes.iter().enumerate() {
+            // SAFETY: address checked the complete retained CPU-mapped span;
+            // i is within bytes, and the serialized queue owns this exact
+            // unpublished/completed range. Byte stores preserve its neighbors.
             unsafe { p.as_ptr().add(i).write_volatile(*b) }
         }
         Ok(())
@@ -155,9 +156,11 @@ impl Memory {
             &mut self.tx_data,
             &mut self.rx_data,
         ] {
-            // SAFETY: Aqtion::stop acknowledged engines and remapper write drain;
-            // all calls are serialized and there are no registered IRQ workers.
             if buffer.mapping.address().is_ok() {
+                // SAFETY: Aqtion::retire completed stop's actual engine/BME
+                // containment and original-domain write drain before entry.
+                // This retained mapping is still live; calls are serialized
+                // and there are no registered IRQ workers or new submissions.
                 unsafe { buffer.mapping.unmap() }?;
             }
         }

@@ -289,9 +289,9 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             self.write(at, u32::MAX)?;
         }
         self.write(MAC_RCV_RULE_0, 0xc200_0000 & RCV_RULE_DISABLE_MASK)?;
-        self.write(MAC_RCV_VALUE_0, u32::MAX & RCV_RULE_DISABLE_MASK)?;
+        self.write(MAC_RCV_VALUE_0, RCV_RULE_DISABLE_MASK)?;
         self.write(MAC_RCV_RULE_1, 0x8600_0004 & RCV_RULE_DISABLE_MASK)?;
-        self.write(MAC_RCV_VALUE_1, u32::MAX & RCV_RULE_DISABLE_MASK)?;
+        self.write(MAC_RCV_VALUE_1, RCV_RULE_DISABLE_MASK)?;
         for index in 4..8 {
             self.write(MAC_RCV_RULE_0 + index * 8, 0)?;
             self.write(MAC_RCV_VALUE_0 + index * 8, 0)?;
