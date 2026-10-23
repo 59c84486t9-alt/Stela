@@ -213,12 +213,16 @@ unsafe impl NativeTransport for FixedWorkers<'_> {
         if self.recovered_rounds.is_multiple_of(PROGRESS_ROUNDS) {
             for report in &reports {
                 crate::output::arguments(format_args!(
-                    "NATIVE PROGRESS recovered_rounds={} pe={} pc={:#x} instructions={} status={:?}\n",
+                    "NATIVE PROGRESS recovered_rounds={} pe={} pc={:#x} instructions={} status={:?} compiled={} reused={} cache_bytes={} cache_entries={}\n",
                     self.recovered_rounds,
                     report.identity.pe,
                     report.settled_pc,
                     report.retired,
-                    report.status
+                    report.status,
+                    report.artifact_cache.compiled,
+                    report.artifact_cache.reused,
+                    report.artifact_cache.retained_bytes,
+                    report.artifact_cache.entries
                 ));
             }
         }
