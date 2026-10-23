@@ -8,17 +8,7 @@ use memory::DMA_WINDOW_BYTES;
 
 impl<P: Platform> Transport<P> {
     pub(super) fn validate_pci(platform: &mut P, identity: PciIdentity) -> Result<()> {
-        for (offset, expected) in [
-            (
-                0,
-                u32::from(identity.vendor) | u32::from(identity.device) << 16,
-            ),
-            (8, identity.class << 8 | u32::from(identity.revision)),
-            (
-                0x2c,
-                u32::from(identity.subsystem_vendor) | u32::from(identity.subsystem_device) << 16,
-            ),
-        ] {
+        for (offset, expected) in Self::pci_words(identity) {
             let observed = platform.read32(Space::Configuration, offset)?;
             if observed != expected {
                 return Err(Error::Readback {
@@ -29,6 +19,19 @@ impl<P: Platform> Transport<P> {
             }
         }
         Ok(())
+    }
+    fn pci_words(identity: PciIdentity) -> [(u32, u32); 3] {
+        [
+            (
+                0,
+                u32::from(identity.vendor) | u32::from(identity.device) << 16,
+            ),
+            (8, identity.class << 8 | u32::from(identity.revision)),
+            (
+                0x2c,
+                u32::from(identity.subsystem_vendor) | u32::from(identity.subsystem_device) << 16,
+            ),
+        ]
     }
     fn config_write(&mut self, offset: u32, value: u32) -> Result<()> {
         self.write(Space::Configuration, offset, value)?;
@@ -44,7 +47,16 @@ impl<P: Platform> Transport<P> {
     }
     fn configure(&mut self) -> Result<()> {
         let pci = self.pci;
-        Self::validate_pci(self.platform(), pci)?;
+        for (offset, expected) in Self::pci_words(pci) {
+            let observed = self.read(Space::Configuration, offset)?;
+            if observed != expected {
+                return Err(Error::Readback {
+                    space: Space::Configuration,
+                    offset,
+                    observed,
+                });
+            }
+        }
         let (window1, window2, core2) = self.chip.windows();
         for (offset, value) in [(0x80, window1), (0x70, window2), (0x74, 0x18011000)] {
             self.config_write(offset, value)?;
@@ -69,8 +81,7 @@ impl<P: Platform> Transport<P> {
         self.snapshot.otp.clear();
         for (at, byte) in otp.iter_mut().enumerate() {
             let offset = self.chip.otp_offset() + at as u32;
-            *byte = self.platform().read8(Space::Bar0, offset)?;
-            self.snapshot.otp.push(*byte);
+            *byte = self.read_otp(offset)?;
         }
         let board = self.platform().board();
         self.identity = Some(Identity::parse(self.pci, board, otp)?);
@@ -89,6 +100,7 @@ impl<P: Platform> Transport<P> {
         }
         let image = self.load_named(provider, "bin")?;
         self.image = Some(image.into());
+        self.check_budget()?;
         if image.bytes().len() > FIRMWARE_BYTES {
             return Err(Error::Unsupported(
                 "Broadcom boot image exceeds declared 4MiB budget",
@@ -96,9 +108,11 @@ impl<P: Platform> Transport<P> {
         }
         let buffer = self.firmware.as_mut().unwrap();
         buffer.write(0, image.bytes());
-        buffer.publish()?;
         let address = buffer.address();
+        self.publish(self.firmware.as_ref().unwrap())?;
+        self.check_budget()?;
         self.platform().arm_msi()?;
+        self.check_budget()?;
         // The bound begins before any publication effect, including a delayed
         // register store followed by an otherwise immediate modeled boot ACK.
         let deadline = self.platform().now_us().saturating_add(5_000_000);
@@ -115,7 +129,7 @@ impl<P: Platform> Transport<P> {
         let deadline = self.platform().now_us().saturating_add(1_000_000);
         self.write(Space::Bar0, 0x144, 1)?;
         self.wait_status(deadline, (2, 0), (2, 1), "actual Broadcom RTI1")?;
-        self.core().publish()?;
+        self.publish(self.core())?;
         let deadline = self.platform().now_us().saturating_add(1_000_000);
         for (offset, value) in [
             (0x200494, 0),
@@ -153,6 +167,7 @@ impl<P: Platform> Transport<P> {
             Ok(image) => Ok(image),
             Err(error) if error.kind == ErrorKind::Missing => {
                 self.snapshot.firmware_errors.push(error);
+                self.check_budget()?;
                 provider
                     .load(Requirement {
                         name: &names[1],

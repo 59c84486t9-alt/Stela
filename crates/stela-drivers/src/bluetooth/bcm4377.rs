@@ -18,8 +18,8 @@ use crate::{
 use alloc::{boxed::Box, vec::Vec};
 pub use identity::{Board, BoardSource, Chip, Identity, PciIdentity};
 pub use initialize::{
-    CommandReceipt, Initialization, InitializationStage, PropertyReceipt, PtbDisposition, Quirks,
-    Report,
+    CommandReceipt, Initialization, InitializationStage, PropertyDiagnostic, PropertyReceipt,
+    PtbDisposition, Quirks, Report,
 };
 use memory::{CoherentAllocator, CoherentBuffer};
 use ring::{Completion, Transfer};
@@ -125,6 +125,22 @@ pub struct Observations {
     /// observed ACK. This is cancellation evidence, never packet delivery.
     pub retired_without_ack: Vec<Submission>,
 }
+/// Last actual read or attempted native write, including late observations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegisterAccess {
+    Read {
+        space: Space,
+        offset: u32,
+        width: u8,
+        value: u32,
+    },
+    Write {
+        space: Space,
+        offset: u32,
+        value: u32,
+        returned: bool,
+    },
+}
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
     /// Successful original OTP byte reads, including bytes rejected by parsing.
@@ -137,6 +153,7 @@ pub struct Snapshot {
     pub completion_footer: Vec<u8>,
     pub firmware_errors: Vec<crate::firmware::Error>,
     pub initialization: Option<Initialization>,
+    pub native_access: Option<RegisterAccess>,
 }
 
 /// Actual exclusive Function/BARs/MSI/coherent-domain adapter, or explicit model.
@@ -194,6 +211,7 @@ pub struct Transport<P: Platform> {
     observation_bytes: usize,
     retirement_attempted: bool,
     retirement_error: Option<Error>,
+    initialization_deadline: Option<u64>,
 }
 impl<P: Platform> Transport<P> {
     pub fn new(mut platform: P, dma: &mut dyn CoherentAllocator) -> Result<Self> {
@@ -232,6 +250,7 @@ impl<P: Platform> Transport<P> {
             observation_bytes: 0,
             retirement_attempted: false,
             retirement_error: None,
+            initialization_deadline: None,
         };
         result.initialize_context();
         Ok(result)
@@ -274,7 +293,11 @@ impl<P: Platform> Transport<P> {
         if self.state != State::Allocated {
             return Err(Error::State(self.state));
         }
-        match self.initialize_inner(provider) {
+        let result = self.initialize_inner(provider);
+        // Necessary independent retirement and later ordinary transport close
+        // are outside the setup budget; expiry never suppresses cleanup.
+        self.initialization_deadline = None;
+        match result {
             Ok(report) => Ok(report),
             Err(error) => Err(self.fail(error)),
         }
@@ -288,11 +311,63 @@ impl<P: Platform> Transport<P> {
     fn core_mut(&mut self) -> &mut CoherentBuffer {
         self.core.as_mut().unwrap()
     }
+    fn check_budget(&self) -> Result<()> {
+        if let Some(deadline) = self.initialization_deadline
+            && self.platform.as_ref().unwrap().now_us() >= deadline
+        {
+            return Err(Error::Timeout(
+                "complete Broadcom controller initialization",
+            ));
+        }
+        Ok(())
+    }
+    fn publish(&self, buffer: &CoherentBuffer) -> Result<()> {
+        self.check_budget()?;
+        buffer.publish()?;
+        self.check_budget()
+    }
     fn read(&mut self, space: Space, offset: u32) -> Result<u32> {
-        self.platform().read32(space, offset)
+        self.check_budget()?;
+        let value = self.platform().read32(space, offset)?;
+        self.snapshot.native_access = Some(RegisterAccess::Read {
+            space,
+            offset,
+            width: 4,
+            value,
+        });
+        self.check_budget()?;
+        Ok(value)
+    }
+    fn read_otp(&mut self, offset: u32) -> Result<u8> {
+        self.check_budget()?;
+        let value = self.platform().read8(Space::Bar0, offset)?;
+        self.snapshot.native_access = Some(RegisterAccess::Read {
+            space: Space::Bar0,
+            offset,
+            width: 1,
+            value: u32::from(value),
+        });
+        // Preserve the actual late byte before the outer deadline can refuse it.
+        self.snapshot.otp.push(value);
+        self.check_budget()?;
+        Ok(value)
     }
     fn write(&mut self, space: Space, offset: u32, value: u32) -> Result<()> {
-        self.platform().write32(space, offset, value)
+        self.check_budget()?;
+        self.snapshot.native_access = Some(RegisterAccess::Write {
+            space,
+            offset,
+            value,
+            returned: false,
+        });
+        self.platform().write32(space, offset, value)?;
+        self.snapshot.native_access = Some(RegisterAccess::Write {
+            space,
+            offset,
+            value,
+            returned: true,
+        });
+        self.check_budget()
     }
     fn bar2(&mut self, offset: u32) -> Result<u32> {
         self.read(Space::Bar2, self.chip.bar2(offset))
@@ -435,6 +510,8 @@ mod tests {
         syncs: usize,
         fail_sync: Option<usize>,
         fail_unmap: bool,
+        delay_sync: Option<usize>,
+        elapsed_us: u64,
     }
     struct Domain(Mutex<DomainState>);
     impl Domain {
@@ -447,6 +524,8 @@ mod tests {
                 syncs: 0,
                 fail_sync: None,
                 fail_unmap: false,
+                delay_sync: None,
+                elapsed_us: 0,
             }))
         }
         fn read(&self, address: u64, bytes: usize) -> Vec<u8> {
@@ -569,6 +648,9 @@ mod tests {
             assert_eq!(direction, Direction::Bidirectional);
             assert!(range.end <= state.leases[&mapping.id].token.bytes);
             state.syncs += 1;
+            if state.delay_sync == Some(state.syncs) {
+                state.elapsed_us += 121_000_000;
+            }
             if state.fail_sync == Some(state.syncs) {
                 return Err(DmaError::VisibilityFailed);
             }
@@ -651,6 +733,8 @@ mod tests {
         sent: Vec<(usize, Vec<u8>, u16)>,
         doorbells: Vec<u32>,
         delay_offset: Option<(u32, u64)>,
+        read_delay: Option<(Space, u32, u64)>,
+        arm_delay: u64,
         boot_reply: u32,
         rti_reply: Option<u32>,
         consume_tx: bool,
@@ -1069,6 +1153,12 @@ mod tests {
                 (Space::Bar2, 0x20045c) => d.rti,
                 _ => d.register(key(space), offset),
             };
+            if let Some((at_space, at, delay)) = d.read_delay
+                && at_space == space
+                && at == original
+            {
+                d.ticks += delay;
+            }
             d.operation(space, original)?;
             Ok(value)
         }
@@ -1082,6 +1172,12 @@ mod tests {
                 _ => unreachable!(),
             };
             let byte = d.otp[(offset - base) as usize];
+            if let Some((at_space, at, delay)) = d.read_delay
+                && at_space == space
+                && at == offset
+            {
+                d.ticks += delay;
+            }
             d.operation(space, offset)?;
             Ok(byte)
         }
@@ -1170,10 +1266,12 @@ mod tests {
             let mut d = self.0.lock().unwrap();
             d.ticks += 10_000;
             d.ticks
+                .saturating_add(d.domain.0.lock().unwrap().elapsed_us)
         }
         fn arm_msi(&mut self) -> Result<()> {
             let mut d = self.0.lock().unwrap();
             d.armed = true;
+            d.ticks += d.arm_delay;
             d.operation(Space::Configuration, 0xeeee)
         }
         fn retire(&mut self) -> Result<()> {
@@ -1251,6 +1349,8 @@ mod tests {
             sent: Vec::new(),
             doorbells: Vec::new(),
             delay_offset: None,
+            read_delay: None,
+            arm_delay: 0,
             boot_reply: 2,
             rti_reply: None,
             consume_tx: true,
@@ -2335,6 +2435,16 @@ mod tests {
         for property in [None, Some(vec![]), Some(vec![0; 4 * 1024 * 1024 + 1])] {
             let (mut transport, d, provider, _) =
                 setup_fixture(0x5f69, "b1", false, HciFault::None);
+            let diagnostic = property
+                .as_ref()
+                .map(|bytes| PropertyDiagnostic::Rejected {
+                    name: "brcm,taurus-bf-cal-blob",
+                    bytes: bytes.len(),
+                    sha256: Sha256::digest(bytes).into(),
+                })
+                .unwrap_or(PropertyDiagnostic::Missing {
+                    name: "brcm,taurus-bf-cal-blob",
+                });
             {
                 let mut d = d.lock().unwrap();
                 d.properties.remove("brcm,taurus-bf-cal-blob");
@@ -2343,6 +2453,15 @@ mod tests {
                 }
             }
             assert!(transport.initialize(&provider).is_err());
+            assert_eq!(
+                transport
+                    .snapshot()
+                    .initialization
+                    .as_ref()
+                    .unwrap()
+                    .property_diagnostics,
+                vec![diagnostic]
+            );
             assert!(d.lock().unwrap().sent.is_empty());
             assert_eq!(
                 transport.snapshot().initialization.as_ref().unwrap().stage,
@@ -2643,5 +2762,233 @@ mod tests {
         assert_eq!(d.retire, 1);
         assert_eq!(d.domain.0.lock().unwrap().unmaps, 1);
         assert!(!d.dropped);
+    }
+    struct SlowBin {
+        catalog: Catalog,
+        device: Arc<Mutex<Device>>,
+        missing: bool,
+        calls: core::cell::Cell<usize>,
+    }
+    impl Provider for SlowBin {
+        fn load(
+            &self,
+            requirement: crate::firmware::Requirement<'_>,
+        ) -> core::result::Result<crate::firmware::Image<'_>, crate::firmware::Error> {
+            self.calls.set(self.calls.get() + 1);
+            if requirement.name.ends_with(".bin") {
+                self.device.lock().unwrap().ticks += 121_000_000;
+                if self.missing {
+                    return Err(crate::firmware::Error {
+                        name: requirement.name.into(),
+                        kind: crate::firmware::ErrorKind::Missing,
+                    });
+                }
+            }
+            self.catalog.load(requirement)
+        }
+    }
+    #[test]
+    fn outer_budget_contains_late_bin_lookup_before_firmware_or_irq_publication() {
+        for missing in [false, true] {
+            for fail_retire in [false, true] {
+                let (mut transport, d, catalog, _) =
+                    setup_fixture(0x5f69, "b1", false, HciFault::None);
+                d.lock().unwrap().fail_retire = fail_retire;
+                let provider = SlowBin {
+                    catalog,
+                    device: d.clone(),
+                    missing,
+                    calls: core::cell::Cell::new(0),
+                };
+                let error = transport.initialize(&provider).unwrap_err();
+                let cause = match &error {
+                    Error::Cleanup { cause, .. } => cause.as_ref(),
+                    other => other,
+                };
+                assert_eq!(
+                    cause,
+                    &Error::Timeout("complete Broadcom controller initialization")
+                );
+                assert_eq!(provider.calls.get(), 1);
+                if missing {
+                    assert!(transport.firmware().is_none());
+                    assert_eq!(transport.snapshot().firmware_errors.len(), 1);
+                } else {
+                    assert_eq!(transport.firmware().unwrap().length, 64);
+                    assert_eq!(
+                        transport.firmware().unwrap().sha256,
+                        Sha256::digest([0xa5; 64]).as_slice()
+                    );
+                }
+                assert_eq!(
+                    transport.firmware.as_ref().unwrap().read(0, 64),
+                    vec![0; 64]
+                );
+                assert_eq!(transport.close(), Err(error));
+                let d = d.lock().unwrap();
+                assert!(!d.armed);
+                assert_eq!(d.boot, 0);
+                assert_eq!(d.rti, 0);
+                assert!(d.controls.is_empty());
+                assert!(!d.registers.contains_key(&(2, 0x200478)));
+                assert_eq!(d.domain.0.lock().unwrap().syncs, 0);
+                assert_eq!(d.retire, 1);
+            }
+        }
+    }
+    #[test]
+    fn outer_budget_contains_configuration_and_otp_expiry_with_observed_bytes() {
+        for otp in [false, true] {
+            for fail_retire in [false, true] {
+                let (mut transport, d, provider, _) =
+                    setup_fixture(0x5f69, "b1", false, HciFault::None);
+                let (space, offset) = if otp {
+                    (Space::Bar0, 0x4125)
+                } else {
+                    (Space::Configuration, 0)
+                };
+                {
+                    let mut d = d.lock().unwrap();
+                    d.read_delay = Some((space, offset, 121_000_000));
+                    d.fail_retire = fail_retire;
+                }
+                assert!(transport.initialize(&provider).is_err());
+                let snapshot = transport.snapshot();
+                assert!(
+                    matches!(snapshot.native_access,Some(RegisterAccess::Read{space:s,offset:o,width,..}) if s==space&&o==offset&&width==if otp{1}else{4})
+                );
+                assert_eq!(snapshot.otp.len(), if otp { 6 } else { 0 });
+                if otp {
+                    assert_eq!(snapshot.otp, &d.lock().unwrap().otp[..6]);
+                }
+                assert!(transport.firmware().is_none());
+                let writes = d.lock().unwrap().writes;
+                let error = transport.fault().unwrap().clone();
+                assert_eq!(transport.close(), Err(error));
+                let d = d.lock().unwrap();
+                assert_eq!(d.writes, writes);
+                assert!(!d.armed);
+                assert_eq!(d.domain.0.lock().unwrap().syncs, 0);
+                assert_eq!(d.retire, 1);
+                assert!(d.controls.is_empty());
+            }
+        }
+    }
+    #[test]
+    fn outer_budget_stops_after_late_firmware_rti_or_control_effect_without_next_publication() {
+        for (offset, expected_boot, expected_rti, controls) in
+            [(0x140, 2, 0, 0), (0x144, 2, 1, 0), (0x174, 2, 2, 1)]
+        {
+            for fail_retire in [false, true] {
+                let (mut transport, d, provider, _) =
+                    setup_fixture(0x5f69, "b1", false, HciFault::None);
+                {
+                    let mut d = d.lock().unwrap();
+                    d.delay_offset = Some((offset, 121_000_000));
+                    d.fail_retire = fail_retire;
+                }
+                let error = transport.initialize(&provider).unwrap_err();
+                let cause = match &error {
+                    Error::Cleanup { cause, .. } => cause.as_ref(),
+                    other => other,
+                };
+                assert_eq!(
+                    cause,
+                    &Error::Timeout("complete Broadcom controller initialization")
+                );
+                assert!(
+                    matches!(transport.snapshot().native_access,Some(RegisterAccess::Write{space:Space::Bar0,offset:o,returned:true,..}) if o==offset)
+                );
+                assert_eq!(transport.firmware().unwrap().length, 64);
+                let writes = d.lock().unwrap().writes;
+                assert_eq!(transport.close(), Err(error));
+                let d = d.lock().unwrap();
+                assert_eq!(
+                    (d.boot, d.rti, d.controls.len()),
+                    (expected_boot, expected_rti, controls)
+                );
+                assert_eq!(d.writes, writes);
+                assert_eq!(d.retire, 1);
+                assert!(d.sent.is_empty());
+                if offset == 0x140 {
+                    assert!(!d.registers.contains_key(&(0, 0x144)));
+                }
+                if offset == 0x144 {
+                    assert!(!d.registers.contains_key(&(2, 0x20048c)));
+                }
+                if offset == 0x174 {
+                    assert_eq!(d.controls[0][0], 2);
+                    assert_eq!(u16at(&d.controls[0], 4), 1);
+                }
+            }
+        }
+    }
+    #[test]
+    fn outer_budget_contains_late_dma_visibility_and_msi_admission() {
+        for sync in 1..=3 {
+            let (mut transport, d, provider, _) =
+                setup_fixture(0x5f69, "b1", false, HciFault::None);
+            d.lock().unwrap().domain.0.lock().unwrap().delay_sync = Some(sync);
+            assert_eq!(
+                transport.initialize(&provider),
+                Err(Error::Timeout(
+                    "complete Broadcom controller initialization"
+                ))
+            );
+            let d = d.lock().unwrap();
+            assert_eq!(d.domain.0.lock().unwrap().syncs, sync);
+            assert_eq!(
+                (d.boot, d.rti),
+                match sync {
+                    1 => (0, 0),
+                    2 => (2, 1),
+                    3 => (2, 2),
+                    _ => unreachable!(),
+                }
+            );
+            assert!(d.controls.is_empty());
+            assert_eq!(d.retire, 1);
+            if sync == 1 {
+                assert!(!d.armed);
+                assert!(!d.registers.contains_key(&(0, 0x590)));
+            }
+            if sync == 2 {
+                assert!(!d.registers.contains_key(&(2, 0x20048c)));
+            }
+        }
+        let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
+        d.lock().unwrap().arm_delay = 121_000_000;
+        assert_eq!(
+            transport.initialize(&provider),
+            Err(Error::Timeout(
+                "complete Broadcom controller initialization"
+            ))
+        );
+        let d = d.lock().unwrap();
+        assert!(d.armed);
+        assert!(!d.registers.contains_key(&(0, 0x590)));
+        assert_eq!(d.boot, 0);
+        assert_eq!(d.retire, 1);
+    }
+    #[test]
+    fn original_visibility_failure_has_priority_over_expiry_and_failed_retirement() {
+        let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
+        {
+            let mut d = d.lock().unwrap();
+            d.fail_retire = true;
+            let mut domain = d.domain.0.lock().unwrap();
+            domain.delay_sync = Some(1);
+            domain.fail_sync = Some(1);
+        }
+        let error = transport.initialize(&provider).unwrap_err();
+        assert!(
+            matches!(&error,Error::Cleanup{cause,cleanup} if **cause==Error::Dma(DmaError::VisibilityFailed)&&**cleanup==Error::Unsupported("independent root drain failed"))
+        );
+        assert_eq!(transport.close(), Err(error));
+        assert_eq!(transport.firmware().unwrap().length, 64);
+        let d = d.lock().unwrap();
+        assert_eq!(d.retire, 1);
+        assert!(!d.armed);
+        assert_eq!(d.domain.0.lock().unwrap().unmaps, 0);
     }
 }

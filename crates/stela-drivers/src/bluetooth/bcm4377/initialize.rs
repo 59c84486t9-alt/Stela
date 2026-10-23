@@ -40,6 +40,22 @@ pub struct PropertyReceipt {
     pub sha256: [u8; 32],
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PropertyDiagnostic {
+    Missing {
+        name: &'static str,
+    },
+    Unavailable {
+        name: &'static str,
+    },
+    /// Exact original length/hash, with no truncated raw value represented as
+    /// a complete property and no >budget duplicate retained in the attempt.
+    Rejected {
+        name: &'static str,
+        bytes: usize,
+        sha256: [u8; 32],
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandReceipt {
     pub opcode: u16,
     pub packet_bytes: usize,
@@ -82,6 +98,7 @@ pub struct Report {
 pub struct Initialization {
     pub stage: InitializationStage,
     pub calibration: Option<PropertyReceipt>,
+    pub property_diagnostics: Vec<PropertyDiagnostic>,
     pub ptb: Option<FirmwareReceipt>,
     pub ptb_disposition: Option<PtbDisposition>,
     pub address_property: Option<PropertyReceipt>,
@@ -100,6 +117,7 @@ impl<P: Platform> Transport<P> {
     pub(super) fn initialize_inner(&mut self, provider: &dyn Provider) -> Result<Report> {
         self.snapshot.initialization = Some(Initialization::default());
         let deadline = self.platform().now_us().saturating_add(ATTEMPT_US);
+        self.initialization_deadline = Some(deadline);
         self.start_inner(provider)?;
         Engine {
             transport: self,
@@ -127,26 +145,49 @@ impl<P: Platform> Engine<'_, P> {
         Ok(())
     }
     fn property(&mut self, name: &'static str) -> Result<PropertyReceipt> {
-        let bytes = self
-            .transport
-            .platform()
-            .property(name)?
-            .ok_or(Error::Unsupported(
-                "actual board-bound Broadcom firmware property",
-            ))?;
-        // No truncated property is accepted as a complete calibration source.
+        self.bounded(self.deadline)?;
+        let bytes = match self.transport.platform().property(name) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                self.attempt()
+                    .property_diagnostics
+                    .push(PropertyDiagnostic::Missing { name });
+                self.bounded(self.deadline)?;
+                return Err(Error::Unsupported(
+                    "actual board-bound Broadcom firmware property",
+                ));
+            }
+            Err(error) => {
+                self.attempt()
+                    .property_diagnostics
+                    .push(PropertyDiagnostic::Unavailable { name });
+                return Err(error);
+            }
+        };
+        let sha256 = Sha256::digest(&bytes).into();
+        // Record observed rejected metadata before either budget or shape
+        // refusal. Original admitted bytes are stored by the calling stage.
         if bytes.is_empty() || bytes.len() > PROPERTY_BYTES {
+            self.attempt()
+                .property_diagnostics
+                .push(PropertyDiagnostic::Rejected {
+                    name,
+                    bytes: bytes.len(),
+                    sha256,
+                });
+            self.bounded(self.deadline)?;
             return Err(Error::Unsupported(
                 "bounded nonempty Broadcom firmware property",
             ));
         }
         Ok(PropertyReceipt {
             name,
-            sha256: Sha256::digest(&bytes).into(),
+            sha256,
             bytes,
         })
     }
     fn command(&mut self, opcode: u16, parameters: &[u8]) -> Result<Vec<u8>> {
+        self.bounded(self.deadline)?;
         let packet = hci::packet(opcode, parameters).map_err(|requirement| Error::Hci {
             requirement,
             bytes: parameters.into(),
@@ -256,6 +297,7 @@ impl<P: Platform> Engine<'_, P> {
             })?;
             let count = property.bytes.len().div_ceil(230);
             self.attempt().calibration = Some(property);
+            self.bounded(self.deadline)?;
             for index in 0..count {
                 let mut parameters = [0; 233];
                 parameters[0] = 3;
@@ -278,6 +320,7 @@ impl<P: Platform> Engine<'_, P> {
         self.attempt().stage = InitializationStage::Ptb;
         let image = self.transport.load_named(provider, "ptb")?;
         self.attempt().ptb = Some(image.into());
+        self.bounded(self.deadline)?;
         if image.bytes().len() > PROPERTY_BYTES {
             return Err(Error::Unsupported(
                 "Broadcom PTB exceeds declared 4MiB budget",
@@ -312,6 +355,7 @@ impl<P: Platform> Engine<'_, P> {
         if !valid_address(chip, observed) {
             let property = self.property(ADDRESS)?;
             self.attempt().address_property = Some(property.clone());
+            self.bounded(self.deadline)?;
             let selected: [u8; 6] = property.bytes.as_slice().try_into().map_err(|_| {
                 Error::Unsupported("exact six-byte actual Broadcom address property")
             })?;

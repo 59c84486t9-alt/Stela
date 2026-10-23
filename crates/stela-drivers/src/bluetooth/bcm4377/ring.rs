@@ -204,6 +204,7 @@ impl<P: Platform> Transport<P> {
         self.write(Space::Bar0, DOORBELL, value)
     }
     pub(super) fn enqueue_ring(&mut self, id: usize, bytes: &[u8]) -> Result<Submission> {
+        self.check_budget()?;
         let ring = &self.transfers[id];
         if !ring.enabled || ring.virtual_ring || bytes.len() > ring.footer.max(ring.mapped) {
             return Err(Error::Unsupported(
@@ -243,15 +244,18 @@ impl<P: Platform> Transport<P> {
                 payloads.address() + (message * ring.mapped) as u64,
             );
             payloads.write(message * ring.mapped, bytes);
-            payloads.publish()?;
         }
         let offset = usize::from(head) * (16 + ring.footer);
         ring.buffer.as_mut().unwrap().write(offset, &entry);
-        ring.buffer.as_ref().unwrap().publish()?;
         let sync = ring.sync;
+        if entry[0] == MAPPED {
+            self.publish(self.transfers[id].payloads.as_ref().unwrap())?;
+        }
+        self.publish(self.transfers[id].buffer.as_ref().unwrap())?;
         self.write(Space::Bar0, SLEEP, 2)?;
+        self.check_budget()?;
         self.core_mut().write16(TR_HEAD + id * 2, next);
-        self.core().publish()?;
+        self.publish(self.core())?;
         if !sync {
             self.doorbell(id, next)?;
         }
@@ -319,6 +323,7 @@ impl<P: Platform> Transport<P> {
             self.control(&message)?;
             self.transfers[id].enabled = true;
             if id == 6 {
+                self.check_budget()?;
                 let ring = &mut self.transfers[id];
                 for index in 0..ENTRIES {
                     let mut entry = [0; 16];
@@ -336,11 +341,12 @@ impl<P: Platform> Transport<P> {
                     );
                     ring.buffer.as_mut().unwrap().write(index * 16, &entry);
                 }
-                ring.buffer.as_ref().unwrap().publish()?;
+                self.publish(self.transfers[id].buffer.as_ref().unwrap())?;
             }
             if matches!(id, 2 | 4 | 6) {
+                self.check_budget()?;
                 self.core_mut().write16(TR_HEAD + id * 2, 15);
-                self.core().publish()?;
+                self.publish(self.core())?;
                 self.doorbell(id, 15)?;
             }
         }
@@ -455,8 +461,9 @@ impl<P: Platform> Transport<P> {
                     self.receive(ring_id, offset, transfer, raw, entry)?;
                 }
                 tail = (tail + 1) % count as u16;
+                self.check_budget()?;
                 self.core_mut().write16(CR_TAIL + ring_id * 2, tail);
-                self.core().publish()?;
+                self.publish(self.core())?;
             }
         }
         Ok(())
@@ -519,8 +526,9 @@ impl<P: Platform> Transport<P> {
         self.record_bytes(observed_bytes)?;
         let head = self.ring_index(TR_HEAD, transfer, ENTRIES)?;
         let next = (head + 1) % ENTRIES as u16;
+        self.check_budget()?;
         self.core_mut().write16(TR_HEAD + transfer * 2, next);
-        self.core().publish()?;
+        self.publish(self.core())?;
         self.doorbell(transfer, next)
     }
     pub fn close(&mut self) -> Result<()> {
