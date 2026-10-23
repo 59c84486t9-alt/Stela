@@ -174,7 +174,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Country<'_, Q, B, O> {
             }
         }
     }
-    fn check_selection(&mut self) -> Result<(), Ax200CountryError> {
+    pub(super) fn check_selection(&mut self) -> Result<(), Ax200CountryError> {
         let selection = self.selection.as_ref().ok_or(Ax200CountryError::State)?;
         if !self
             .os

@@ -4,10 +4,10 @@
 use super::{ax200_scan_tests::finish_mcc, ax200_tests::*, *};
 use crate::net::wifi::regulatory::database;
 use core::sync::atomic::AtomicBool;
-struct Os {
-    drops: Arc<AtomicUsize>,
-    revoked: Arc<AtomicBool>,
-    unavailable: bool,
+pub(super) struct Os {
+    pub(super) drops: Arc<AtomicUsize>,
+    pub(super) revoked: Arc<AtomicBool>,
+    pub(super) unavailable: bool,
 }
 impl Drop for Os {
     fn drop(&mut self) {

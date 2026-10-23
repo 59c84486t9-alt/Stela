@@ -19,6 +19,8 @@ mod country;
 pub use country::{
     Ax200Country, Ax200CountryError, Ax200CountryPhase, CountryIo, CountryIoError, SelectedCountry,
 };
+mod mac_context;
+pub use mac_context::{Ax200Mac, Ax200MacError, Ax200MacPhase, MacCommand, MacCommandKind};
 mod mcc;
 mod scan_configuration;
 pub use mcc::{Ax200Mcc, Ax200MccError, Ax200MccPhase};
