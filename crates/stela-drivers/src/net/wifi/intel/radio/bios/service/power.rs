@@ -381,12 +381,11 @@ impl<B: BiosIo> Session<B> {
     pub(crate) fn power_tables(&mut self) -> Result<Tables, Error> {
         let ppag = self.selected_table(Variable::Ppag, uefi_ppag, acpi_ppag)?;
         let mut sar = self.selected_table(Variable::Wrds, uefi_sar, acpi_sar)?;
-        if let Some(sar) = sar.as_mut() {
-            if let Some(extended) =
+        if let Some(sar) = sar.as_mut()
+            && let Some(extended) =
                 self.selected_table(Variable::Ewrd, uefi_extended_sar, acpi_extended_sar)?
-            {
-                sar.value.profiles[1..].copy_from_slice(&extended.value);
-            }
+        {
+            sar.value.profiles[1..].copy_from_slice(&extended.value);
         }
         // Source also observes WGDS without WRDS for diagnostics. AX200 API77
         // is newer than the source's serial>=38 geo-support threshold.
