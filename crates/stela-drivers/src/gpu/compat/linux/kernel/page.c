@@ -1134,6 +1134,258 @@ static void capacity(void)
 	stela_linux_pages_finish();
 }
 
+static void sg_markers_and_traversal(void)
+{
+	struct page *page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	assert(page);
+	struct scatterlist first[3], second[2], single;
+	memset(first, 0xa7, sizeof(first));
+	sg_init_table(first, 3);
+	sg_init_table(second, 2);
+	for (size_t i = 0; i < 3; i++) {
+		assert(!sg_page(first + i) && !first[i].offset && !first[i].length &&
+		       !sg_dma_address(first + i) && !sg_dma_len(first + i) && !sg_is_chain(first + i));
+#ifdef CONFIG_NEED_SG_DMA_FLAGS
+		assert(!first[i].dma_flags);
+#endif
+		assert(!!sg_is_last(first + i) == (i == 2));
+	}
+	assert(sg_next(first) == first + 1 && sg_next(first + 2) == NULL);
+	sg_init_one(&single, (u8 *)page_address(page) + 37, 77);
+	assert(sg_page(&single) == page && single.offset == 37 && single.length == 77);
+	assert(sg_is_last(&single) && sg_nents(&single) == 1 && !sg_next(&single));
+	assert(sg_phys(&single) == page_to_phys(page) + 37);
+	assert(sg_virt(&single) == (u8 *)page_address(page) + 37);
+	sg_chain(first, 3, second);
+	assert(sg_is_chain(first + 2) && !sg_is_last(first + 2));
+	assert(sg_chain_ptr(first + 2) == second && !first[2].offset && !first[2].length);
+	struct scatterlist *expected[] = {first, first + 1, second, second + 1};
+	for (size_t i = 0; i < ARRAY_SIZE(expected); i++) {
+		unsigned int length = (unsigned int)(i + 1) * 100;
+		sg_set_page(expected[i], page, length, 0);
+		sg_dma_len(expected[i]) = length;
+	}
+	struct scatterlist *sg = first;
+	for (size_t i = 0; i < ARRAY_SIZE(expected); i++) {
+		assert(sg == expected[i]);
+		sg = sg_next(sg);
+	}
+	assert(!sg && sg_nents(first) == 4 && sg_last(first, 4) == second + 1);
+	assert(!sg_nents(NULL) && sg_nents_for_len(NULL, 1) == -EINVAL);
+	assert(!sg_nents_for_len(first, 0));
+	assert(sg_nents_for_len(first, 100) == 1);
+	assert(sg_nents_for_len(first, 101) == 2);
+	assert(sg_nents_for_len(first, 300) == 2);
+	assert(sg_nents_for_len(first, 301) == 3);
+	assert(sg_nents_for_len(first, 1000) == 4);
+	assert(sg_nents_for_len(first, 1001) == -EINVAL);
+	assert(sg_nents_for_dma(first, 4, 128) == 10);
+	__free_page(page);
+	stela_linux_pages_finish();
+}
+
+static void sg_iterator_geometry(void)
+{
+	struct page *pages = alloc_pages(GFP_KERNEL, 3);
+	assert(pages);
+	struct scatterlist first[2], second[2];
+	sg_init_table(first, 2);
+	sg_init_table(second, 2);
+	sg_chain(first, 2, second);
+	sg_set_page(first, pages, PAGE_SIZE + 200, PAGE_SIZE - 100);
+	sg_set_page(second, pages + 3, 100, 17);
+	sg_set_page(second + 1, pages + 4, 2 * PAGE_SIZE, 0);
+	struct sg_page_iter iterator;
+	size_t count = 0;
+	for_each_sg_page(first, &iterator, 3, 0) {
+		assert(count < 6 && sg_page_iter_page(&iterator) == pages + count);
+		count++;
+	}
+	assert(count == 6);
+	count = 0;
+	for_each_sg_page(first, &iterator, 3, 2) {
+		assert(count < 4 && sg_page_iter_page(&iterator) == pages + 2 + count);
+		count++;
+	}
+	assert(count == 4);
+	count = 0;
+	for_each_sg_page(first, &iterator, 3, 3) {
+		assert(count < 3 && sg_page_iter_page(&iterator) == pages + 3 + count);
+		count++;
+	}
+	assert(count == 3);
+	count = 0;
+	for_each_sg_page(first, &iterator, 1, 0)
+		count++;
+	assert(count == 3);
+	__sg_page_iter_start(&iterator, first, 0, 0);
+	assert(!__sg_page_iter_next(&iterator));
+	__sg_page_iter_start(&iterator, first, 3, 6);
+	assert(!__sg_page_iter_next(&iterator));
+	/* Explicit CPU-only address labels exercise the original DMA iterator's
+	 * arithmetic. They establish no requester mapping or DMA capability. */
+	sg_dma_address(first) = 0x91000000;
+	sg_dma_address(second) = 0xa2000000;
+	sg_dma_address(second + 1) = 0xb3000000;
+#ifdef CONFIG_NEED_SG_DMA_LENGTH
+	sg_dma_len(first) = first->length;
+	sg_dma_len(second) = second->length;
+	sg_dma_len(second + 1) = second[1].length;
+#endif
+	const dma_addr_t addresses[] = {
+		0x91000000, 0x91001000, 0x91002000, 0xa2000000, 0xb3000000, 0xb3001000,
+	};
+	struct sg_dma_page_iter dma_iterator;
+	count = 0;
+	for_each_sg_dma_page(first, &dma_iterator, 3, 0) {
+		assert(count < ARRAY_SIZE(addresses));
+		assert(sg_page_iter_dma_address(&dma_iterator) == addresses[count++]);
+	}
+	assert(count == ARRAY_SIZE(addresses));
+	count = 0;
+	for_each_sg_dma_page(first, &dma_iterator, 3, 3) {
+		assert(count < 3 && sg_page_iter_dma_address(&dma_iterator) == addresses[3 + count]);
+		count++;
+	}
+	assert(count == 3);
+#ifdef CONFIG_NEED_SG_DMA_LENGTH
+	/* Mapped lengths may differ from the logical page list. Neither iterator
+	 * may accidentally consume the other's lengths. */
+	sg_dma_len(first) = 200;
+	sg_dma_len(second + 1) = PAGE_SIZE;
+	const dma_addr_t shortened[] = {0x91000000, 0x91001000, 0xa2000000, 0xb3000000};
+	count = 0;
+	for_each_sg_dma_page(first, &dma_iterator, 3, 0) {
+		assert(count < ARRAY_SIZE(shortened));
+		assert(sg_page_iter_dma_address(&dma_iterator) == shortened[count++]);
+	}
+	assert(count == ARRAY_SIZE(shortened));
+	count = 0;
+	for_each_sg_page(first, &iterator, 3, 0)
+		count++;
+	assert(count == 6);
+#endif
+	__free_pages(pages, 3);
+	stela_linux_pages_finish();
+}
+
+static void sg_chained_allocation(void)
+{
+	struct page *payload = alloc_page(GFP_KERNEL);
+	assert(payload);
+	unsigned int allocations = fixture.allocations;
+	unsigned int releases = fixture.releases;
+	unsigned int maximum = (unsigned int)SG_MAX_SINGLE_ALLOC;
+	unsigned int nents = 2 * maximum + 3;
+	struct sg_table table;
+	assert(sg_alloc_table(&table, 0, GFP_KERNEL) == -EINVAL && !table.sgl);
+	assert(!sg_alloc_table(&table, nents, GFP_KERNEL));
+	assert(table.nents == nents && table.orig_nents == nents);
+	assert(fixture.allocations == allocations + 2 && catalog.live_pages == 3);
+	struct scatterlist *middle = sg_chain_ptr(table.sgl + maximum - 1);
+	struct scatterlist *last_chunk = sg_chain_ptr(middle + maximum - 1);
+	assert(sg_is_chain(table.sgl + maximum - 1) && sg_is_chain(middle + maximum - 1));
+	assert(sg_next(table.sgl + maximum - 2) == middle);
+	assert(sg_next(middle + maximum - 2) == last_chunk);
+	struct page *first_chunk_page = virt_to_page(table.sgl);
+	struct page *middle_chunk_page = virt_to_page(middle);
+	assert(first_chunk_page != middle_chunk_page && first_chunk_page != payload);
+	assert(page_ref_count(first_chunk_page) == 1 && page_ref_count(middle_chunk_page) == 1);
+	struct scatterlist *sg;
+	unsigned int index;
+	for_each_sg(table.sgl, sg, table.orig_nents, index) {
+		assert(!sg_is_chain(sg));
+		sg_set_page(sg, payload, 64, 0);
+	}
+	assert(index == nents && sg_nents(table.sgl) == (int)nents);
+	assert(sg_last(table.sgl, nents) == last_chunk + 4);
+	assert(sg_nents_for_len(table.sgl, (u64)nents * 64) == (int)nents);
+	assert(sg_nents_for_len(table.sgl, (u64)nents * 64 + 1) == -EINVAL);
+	sg_free_table(&table);
+	assert(!table.sgl && catalog.live_pages == 1 && fixture.releases == releases);
+	assert(page_ref_count(payload) == 1 && page_to_phys(payload) == TEST_PHYSICAL);
+	stela_linux_pages_finish();
+	assert(fixture.releases == releases + 2);
+	__free_page(payload);
+	stela_linux_pages_finish();
+	/* Exhaust the real fixture/catalog capacity after the first page-backed
+	 * chunk. The unchanged allocation helper must unwind that partial chain. */
+	struct page *held[TEST_PAGES - 1];
+	for (size_t i = 0; i < ARRAY_SIZE(held); i++) {
+		held[i] = alloc_page(GFP_KERNEL);
+		assert(held[i]);
+	}
+	allocations = fixture.allocations;
+	releases = fixture.releases;
+	assert(sg_alloc_table(&table, nents, GFP_KERNEL) == -ENOMEM);
+	assert(!table.sgl && table.orig_nents == maximum);
+	assert(fixture.allocations == allocations + 1 && fixture.releases == releases);
+	assert(catalog.live_pages == ARRAY_SIZE(held));
+	stela_linux_pages_finish();
+	assert(fixture.releases == releases + 1);
+	for (size_t i = 0; i < ARRAY_SIZE(held); i++)
+		__free_page(held[i]);
+	stela_linux_pages_finish();
+	assert(!catalog.live_pages);
+}
+
+static void sg_page_segments(void)
+{
+	struct page *pages[6];
+	for (size_t i = 0; i < ARRAY_SIZE(pages); i++) {
+		pages[i] = alloc_page(GFP_KERNEL);
+		assert(pages[i]);
+		if (i)
+			assert(pages[i] == pages[0] + i && page_to_pfn(pages[i]) == page_to_pfn(pages[0]) + i);
+	}
+	struct sg_table table;
+	unsigned long bytes = ARRAY_SIZE(pages) * PAGE_SIZE - 113 - 77;
+	assert(!sg_alloc_table_from_pages(&table, pages, ARRAY_SIZE(pages), 113, bytes, GFP_KERNEL));
+	assert(table.nents == 1 && table.orig_nents == 1 && sg_is_last(table.sgl));
+	assert(sg_page(table.sgl) == pages[0] && table.sgl->offset == 113 && table.sgl->length == bytes);
+	assert(sg_phys(table.sgl) == page_to_phys(pages[0]) + 113);
+	assert(sg_virt(table.sgl) == (u8 *)page_address(pages[0]) + 113);
+	sg_free_table(&table);
+	assert(!sg_alloc_table_from_pages_segment(&table, pages, ARRAY_SIZE(pages), 113, bytes,
+						2 * PAGE_SIZE + 127, GFP_KERNEL));
+	assert(table.nents == 3 && table.orig_nents == 3);
+	struct scatterlist *sg = table.sgl;
+	const unsigned int lengths[] = {2 * PAGE_SIZE - 113, 2 * PAGE_SIZE, 2 * PAGE_SIZE - 77};
+	for (size_t i = 0; i < ARRAY_SIZE(lengths); i++) {
+		assert(sg && sg_page(sg) == pages[2 * i] && sg->length == lengths[i]);
+		assert(sg->offset == (i ? 0U : 113U));
+		sg = sg_next(sg);
+	}
+	assert(!sg);
+	sg_free_table(&table);
+	struct page *gapped[] = {pages[0], pages[1], pages[3], pages[4]};
+	assert(!sg_alloc_table_from_pages(&table, gapped, ARRAY_SIZE(gapped), 17,
+					4 * PAGE_SIZE - 17 - 9, GFP_KERNEL));
+	assert(table.nents == 2 && table.orig_nents == 2);
+	assert(sg_page(table.sgl) == pages[0] && table.sgl->offset == 17 &&
+	       table.sgl->length == 2 * PAGE_SIZE - 17);
+	sg = sg_next(table.sgl);
+	assert(sg && sg_page(sg) == pages[3] && !sg->offset && sg->length == 2 * PAGE_SIZE - 9);
+	assert(sg_is_last(sg));
+	sg_free_table(&table);
+	struct sg_append_table append = {0};
+	assert(!sg_alloc_append_table_from_pages(&append, pages, 2, 0, 2 * PAGE_SIZE,
+					       4 * PAGE_SIZE, 2, GFP_KERNEL));
+	assert(!sg_alloc_append_table_from_pages(&append, pages + 2, 2, 0, 2 * PAGE_SIZE,
+					       4 * PAGE_SIZE, 0, GFP_KERNEL));
+	assert(append.sgt.nents == 1 && append.sgt.orig_nents == 1);
+	assert(sg_page(append.sgt.sgl) == pages[0] && append.sgt.sgl->length == 4 * PAGE_SIZE);
+	assert(sg_is_last(append.sgt.sgl));
+	sg_free_append_table(&append);
+	assert(!append.sgt.sgl && catalog.live_pages == ARRAY_SIZE(pages));
+	for (size_t i = 0; i < ARRAY_SIZE(pages); i++) {
+		assert(page_ref_count(pages[i]) == 1);
+		__free_page(pages[i]);
+	}
+	stela_linux_pages_finish();
+	assert(!catalog.live_pages);
+}
+
 int main(void)
 {
 	assert(stela_linux_page_request_basic((__force u32)(GFP_KERNEL | __GFP_ZERO | __GFP_COMP)));
@@ -1176,6 +1428,10 @@ int main(void)
 	compound_and_split();
 	stela_linux_enter(&owner);
 	capacity();
+	sg_markers_and_traversal();
+	sg_iterator_geometry();
+	sg_chained_allocation();
+	sg_page_segments();
 	assert(!catalog.live_pages);
 	assert(!stela_linux_page_catalog_unregister(1));
 	assert(stela_linux_page_catalog_register(&reservation, &test_ops, &fixture) == -EINVAL);
@@ -1189,7 +1445,7 @@ int main(void)
 	for (size_t i = 0; i < TEST_PAGES; i++)
 		assert(!fixture.used[i] && !fixture.pins[i].active);
 	free(fixture.cpu);
-	printf("Linux page catalog: ownership, PFNs, rollback, compound, split and deferred retirement passed\n");
+	printf("Linux pages/SG: ownership, retirement, chains, iterators and coalescing passed\n");
 	return 0;
 }
 #endif

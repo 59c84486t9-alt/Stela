@@ -188,21 +188,28 @@ impl Linux {
             wrappers,
             hosted: Vec::new(),
         };
-        let mut kernel = sources(&format!("{COMPAT}/kernel"));
-        // Keep Linux's complete format inventory and arithmetic unchanged.
-        // Format metadata is shared by every driver's mode-setting path.
-        kernel.push(PathBuf::from(format!("{DRM}/drm_fourcc.c")));
-        println!("cargo:rerun-if-changed={DRM}/drm_fourcc.c");
+        let kernel = sources(&format!("{COMPAT}/kernel"));
+        // Unchanged shared helpers use Linux's arithmetic types. Stela's
+        // extra conversion diagnostics remain confined to its own source.
+        let upstream = [
+            PathBuf::from(format!("{DRM}/drm_fourcc.c")),
+            PathBuf::from(format!("{LINUX}/lib/scatterlist.c")),
+        ];
+        for source in &upstream {
+            println!("cargo:rerun-if-changed={}", source.display());
+        }
         let mut build = configure();
         linux.apply(&mut build, None, &[], None);
-        check_declarations(&build, &kernel);
-        build.files(&kernel).compile("stela-linux");
+        linux_archive(&build, "stela-linux", &kernel, &upstream);
         if let Some(host) = hosted() {
             let services = [PathBuf::from(format!("{COMPAT}/stela/test.c"))];
             let services = archive(&host, "linux-host", &services);
             let mut kernel_build = host;
             linux.apply(&mut kernel_build, None, &[], None);
-            linux.hosted = vec![archive(&kernel_build, "linux-hosted", &kernel), services];
+            linux.hosted = vec![
+                linux_archive(&kernel_build, "linux-hosted", &kernel, &upstream),
+                services,
+            ];
         }
         linux
     }
@@ -303,6 +310,28 @@ impl Linux {
             build.flag("-isystem").flag(directory);
         }
     }
+}
+
+/// Compile unchanged helpers with the common ABI and baseline diagnostics,
+/// then archive them with the strictly checked owned objects. One archive
+/// preserves dependency resolution between Linux helpers and host services.
+fn linux_archive(
+    build: &cc::Build,
+    name: &str,
+    kernel: &[PathBuf],
+    upstream: &[PathBuf],
+) -> PathBuf {
+    check_declarations(build, kernel);
+    check_declarations(build, upstream);
+    let mut upstream_build = build.clone();
+    upstream_build
+        .remove_flag("-Wconversion")
+        .remove_flag("-Wsign-conversion")
+        .files(upstream);
+    let objects = upstream_build.compile_intermediates();
+    let mut combined = build.clone();
+    combined.objects(&objects);
+    archive(&combined, name, kernel)
 }
 
 /// Every header in `compat` adds to Linux's: none stands in for one of

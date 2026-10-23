@@ -1,0 +1,1383 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 04:31:52 -0400
+Subject: [PATCH] refactor(scatterlist): separate mapping and iterator
+ extraction
+
+---
+ lib/Makefile              |   1 +
+ lib/scatterlist-iov.c     | 343 ++++++++++++++++++++
+ lib/scatterlist-mapping.c | 329 +++++++++++++++++++
+ lib/scatterlist.c         | 656 --------------------------------------
+ 4 files changed, 673 insertions(+), 656 deletions(-)
+ create mode 100644 lib/scatterlist-iov.c
+ create mode 100644 lib/scatterlist-mapping.c
+
+diff --git a/lib/Makefile b/lib/Makefile
+index 7f75cc6edf94afc9802436e60b671276b1e79ff0..f9c55745e19c8e19a8bdc20c3de97f869d4f77a5 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -54,6 +54,7 @@ CONTEXT_ANALYSIS_rhashtable.o := y
+ 
+ obj-y += bcd.o sort.o parser.o debug_locks.o random32.o \
+ 	 bust_spinlocks.o kasprintf.o bitmap.o scatterlist.o \
++	 scatterlist-mapping.o scatterlist-iov.o \
+ 	 list_sort.o uuid.o iov_iter.o clz_ctz.o \
+ 	 bsearch.o find_bit.o llist.o lwq.o memweight.o kfifo.o \
+ 	 percpu-refcount.o rhashtable.o base64.o \
+diff --git a/lib/scatterlist-iov.c b/lib/scatterlist-iov.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..b336d21bc9d178cbe8a179eaf216662a7c72d646
+--- /dev/null
++++ b/lib/scatterlist-iov.c
+@@ -0,0 +1,343 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2007 Jens Axboe <jens.axboe@oracle.com>
++ *
++ * Scatterlist handling helpers.
++ */
++#include <linux/export.h>
++#include <linux/scatterlist.h>
++#include <linux/bvec.h>
++#include <linux/uio.h>
++#include <linux/folio_queue.h>
++
++/*
++ * Extract and pin a list of up to sg_max pages from UBUF- or IOVEC-class
++ * iterators, and add them to the scatterlist.
++ */
++static ssize_t extract_user_to_sg(struct iov_iter *iter,
++				  ssize_t maxsize,
++				  struct sg_table *sgtable,
++				  unsigned int sg_max,
++				  iov_iter_extraction_t extraction_flags)
++{
++	struct scatterlist *sg = sgtable->sgl + sgtable->nents;
++	struct page **pages;
++	unsigned int npages;
++	ssize_t ret = 0, res;
++	size_t len, off;
++
++	/* We decant the page list into the tail of the scatterlist */
++	pages = (void *)sg + array_size(sg_max, sizeof(struct scatterlist));
++	pages -= sg_max;
++
++	do {
++		res = iov_iter_extract_pages(iter, &pages, maxsize, sg_max,
++					     extraction_flags, &off);
++		if (res <= 0)
++			goto failed;
++
++		len = res;
++		maxsize -= len;
++		ret += len;
++		npages = DIV_ROUND_UP(off + len, PAGE_SIZE);
++		sg_max -= npages;
++
++		for (; npages > 0; npages--) {
++			struct page *page = *pages;
++			size_t seg = min_t(size_t, PAGE_SIZE - off, len);
++
++			*pages++ = NULL;
++			sg_set_page(sg, page, seg, off);
++			sgtable->nents++;
++			sg++;
++			len -= seg;
++			off = 0;
++		}
++	} while (maxsize > 0 && sg_max > 0);
++
++	return ret;
++
++failed:
++	while (sgtable->nents > sgtable->orig_nents)
++		unpin_user_page(sg_page(&sgtable->sgl[--sgtable->nents]));
++	return res;
++}
++
++/*
++ * Extract up to sg_max pages from a BVEC-type iterator and add them to the
++ * scatterlist.  The pages are not pinned.
++ */
++static ssize_t extract_bvec_to_sg(struct iov_iter *iter,
++				  ssize_t maxsize,
++				  struct sg_table *sgtable,
++				  unsigned int sg_max,
++				  iov_iter_extraction_t extraction_flags)
++{
++	const struct bio_vec *bv = iter->bvec;
++	struct scatterlist *sg = sgtable->sgl + sgtable->nents;
++	unsigned long start = iter->iov_offset;
++	unsigned int i;
++	ssize_t ret = 0;
++
++	for (i = 0; i < iter->nr_segs; i++) {
++		size_t off, len;
++
++		len = bv[i].bv_len;
++		if (start >= len) {
++			start -= len;
++			continue;
++		}
++
++		len = min_t(size_t, maxsize, len - start);
++		off = bv[i].bv_offset + start;
++
++		sg_set_page(sg, bv[i].bv_page, len, off);
++		sgtable->nents++;
++		sg++;
++		sg_max--;
++
++		ret += len;
++		maxsize -= len;
++		if (maxsize <= 0 || sg_max == 0)
++			break;
++		start = 0;
++	}
++
++	if (ret > 0)
++		iov_iter_advance(iter, ret);
++	return ret;
++}
++
++/*
++ * Extract up to sg_max pages from a KVEC-type iterator and add them to the
++ * scatterlist.  This can deal with vmalloc'd buffers as well as kmalloc'd or
++ * static buffers.  The pages are not pinned.
++ */
++static ssize_t extract_kvec_to_sg(struct iov_iter *iter,
++				  ssize_t maxsize,
++				  struct sg_table *sgtable,
++				  unsigned int sg_max,
++				  iov_iter_extraction_t extraction_flags)
++{
++	const struct kvec *kv = iter->kvec;
++	struct scatterlist *sg = sgtable->sgl + sgtable->nents;
++	unsigned long start = iter->iov_offset;
++	unsigned int i;
++	ssize_t ret = 0;
++
++	for (i = 0; i < iter->nr_segs; i++) {
++		struct page *page;
++		unsigned long kaddr;
++		size_t off, len, seg;
++
++		len = kv[i].iov_len;
++		if (start >= len) {
++			start -= len;
++			continue;
++		}
++
++		kaddr = (unsigned long)kv[i].iov_base + start;
++		off = kaddr & ~PAGE_MASK;
++		len = min_t(size_t, maxsize, len - start);
++		kaddr &= PAGE_MASK;
++
++		maxsize -= len;
++		ret += len;
++		do {
++			seg = min_t(size_t, len, PAGE_SIZE - off);
++			if (is_vmalloc_or_module_addr((void *)kaddr))
++				page = vmalloc_to_page((void *)kaddr);
++			else
++				page = virt_to_page((void *)kaddr);
++
++			sg_set_page(sg, page, seg, off);
++			sgtable->nents++;
++			sg++;
++			sg_max--;
++
++			len -= seg;
++			kaddr += PAGE_SIZE;
++			off = 0;
++		} while (len > 0 && sg_max > 0);
++		ret -= len;
++
++		if (maxsize <= 0 || sg_max == 0)
++			break;
++		start = 0;
++	}
++
++	if (ret > 0)
++		iov_iter_advance(iter, ret);
++	return ret;
++}
++
++/*
++ * Extract up to sg_max folios from an FOLIOQ-type iterator and add them to
++ * the scatterlist.  The pages are not pinned.
++ */
++static ssize_t extract_folioq_to_sg(struct iov_iter *iter,
++				   ssize_t maxsize,
++				   struct sg_table *sgtable,
++				   unsigned int sg_max,
++				   iov_iter_extraction_t extraction_flags)
++{
++	const struct folio_queue *folioq = iter->folioq;
++	struct scatterlist *sg = sgtable->sgl + sgtable->nents;
++	unsigned int slot = iter->folioq_slot;
++	ssize_t ret = 0;
++	size_t offset = iter->iov_offset;
++
++	BUG_ON(!folioq);
++
++	if (slot >= folioq_nr_slots(folioq)) {
++		folioq = folioq->next;
++		if (WARN_ON_ONCE(!folioq))
++			return 0;
++		slot = 0;
++	}
++
++	do {
++		struct folio *folio = folioq_folio(folioq, slot);
++		size_t fsize = folioq_folio_size(folioq, slot);
++
++		if (offset < fsize) {
++			size_t part = umin(maxsize - ret, fsize - offset);
++
++			sg_set_page(sg, folio_page(folio, 0), part, offset);
++			sgtable->nents++;
++			sg++;
++			sg_max--;
++			offset += part;
++			ret += part;
++		}
++
++		if (offset >= fsize) {
++			offset = 0;
++			slot++;
++			if (slot >= folioq_nr_slots(folioq)) {
++				if (!folioq->next) {
++					WARN_ON_ONCE(ret < iter->count);
++					break;
++				}
++				folioq = folioq->next;
++				slot = 0;
++			}
++		}
++	} while (sg_max > 0 && ret < maxsize);
++
++	iter->folioq = folioq;
++	iter->folioq_slot = slot;
++	iter->iov_offset = offset;
++	iter->count -= ret;
++	return ret;
++}
++
++/*
++ * Extract up to sg_max folios from an XARRAY-type iterator and add them to
++ * the scatterlist.  The pages are not pinned.
++ */
++static ssize_t extract_xarray_to_sg(struct iov_iter *iter,
++				    ssize_t maxsize,
++				    struct sg_table *sgtable,
++				    unsigned int sg_max,
++				    iov_iter_extraction_t extraction_flags)
++{
++	struct scatterlist *sg = sgtable->sgl + sgtable->nents;
++	struct xarray *xa = iter->xarray;
++	struct folio *folio;
++	loff_t start = iter->xarray_start + iter->iov_offset;
++	pgoff_t index = start / PAGE_SIZE;
++	ssize_t ret = 0;
++	size_t offset, len;
++	XA_STATE(xas, xa, index);
++
++	rcu_read_lock();
++
++	xas_for_each(&xas, folio, ULONG_MAX) {
++		if (xas_retry(&xas, folio))
++			continue;
++		if (WARN_ON(xa_is_value(folio)))
++			break;
++		if (WARN_ON(folio_test_hugetlb(folio)))
++			break;
++
++		offset = offset_in_folio(folio, start);
++		len = min_t(size_t, maxsize, folio_size(folio) - offset);
++
++		sg_set_page(sg, folio_page(folio, 0), len, offset);
++		sgtable->nents++;
++		sg++;
++		sg_max--;
++
++		maxsize -= len;
++		start += len;
++		ret += len;
++		if (maxsize <= 0 || sg_max == 0)
++			break;
++	}
++
++	rcu_read_unlock();
++	if (ret > 0)
++		iov_iter_advance(iter, ret);
++	return ret;
++}
++
++/**
++ * extract_iter_to_sg - Extract pages from an iterator and add to an sglist
++ * @iter: The iterator to extract from
++ * @maxsize: The amount of iterator to copy
++ * @sgtable: The scatterlist table to fill in
++ * @sg_max: Maximum number of elements in @sgtable that may be filled
++ * @extraction_flags: Flags to qualify the request
++ *
++ * Extract the page fragments from the given amount of the source iterator and
++ * add them to a scatterlist that refers to all of those bits, to a maximum
++ * addition of @sg_max elements.
++ *
++ * The pages referred to by UBUF- and IOVEC-type iterators are extracted and
++ * pinned; BVEC-, KVEC-, FOLIOQ- and XARRAY-type are extracted but aren't
++ * pinned; DISCARD-type is not supported.
++ *
++ * No end mark is placed on the scatterlist; that's left to the caller.
++ *
++ * @extraction_flags can have ITER_ALLOW_P2PDMA set to request peer-to-peer DMA
++ * be allowed on the pages extracted.
++ *
++ * If successful, @sgtable->nents is updated to include the number of elements
++ * added and the number of bytes added is returned.  @sgtable->orig_nents is
++ * left unaltered.
++ *
++ * The iov_iter_extract_mode() function should be used to query how cleanup
++ * should be performed.
++ */
++ssize_t extract_iter_to_sg(struct iov_iter *iter, size_t maxsize,
++			   struct sg_table *sgtable, unsigned int sg_max,
++			   iov_iter_extraction_t extraction_flags)
++{
++	if (maxsize == 0 || sg_max == 0)
++		return 0;
++
++	switch (iov_iter_type(iter)) {
++	case ITER_UBUF:
++	case ITER_IOVEC:
++		return extract_user_to_sg(iter, maxsize, sgtable, sg_max,
++					  extraction_flags);
++	case ITER_BVEC:
++		return extract_bvec_to_sg(iter, maxsize, sgtable, sg_max,
++					  extraction_flags);
++	case ITER_KVEC:
++		return extract_kvec_to_sg(iter, maxsize, sgtable, sg_max,
++					  extraction_flags);
++	case ITER_FOLIOQ:
++		return extract_folioq_to_sg(iter, maxsize, sgtable, sg_max,
++					    extraction_flags);
++	case ITER_XARRAY:
++		return extract_xarray_to_sg(iter, maxsize, sgtable, sg_max,
++					    extraction_flags);
++	default:
++		pr_err("%s(%u) unsupported\n", __func__, iov_iter_type(iter));
++		WARN_ON_ONCE(1);
++		return -EIO;
++	}
++}
++EXPORT_SYMBOL_GPL(extract_iter_to_sg);
+diff --git a/lib/scatterlist-mapping.c b/lib/scatterlist-mapping.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..9cff85cc3b7c8be7a06dadb91cb97edf84e6bed6
+--- /dev/null
++++ b/lib/scatterlist-mapping.c
+@@ -0,0 +1,329 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2007 Jens Axboe <jens.axboe@oracle.com>
++ *
++ * Scatterlist handling helpers.
++ */
++#include <linux/export.h>
++#include <linux/scatterlist.h>
++#include <linux/highmem.h>
++
++/**
++ * sg_miter_start - start mapping iteration over a sg list
++ * @miter: sg mapping iter to be started
++ * @sgl: sg list to iterate over
++ * @nents: number of sg entries
++ * @flags: sg iterator flags
++ *
++ * Description:
++ *   Starts mapping iterator @miter.
++ *
++ * Context:
++ *   Don't care.
++ */
++void sg_miter_start(struct sg_mapping_iter *miter, struct scatterlist *sgl,
++		    unsigned int nents, unsigned int flags)
++{
++	memset(miter, 0, sizeof(struct sg_mapping_iter));
++
++	__sg_page_iter_start(&miter->piter, sgl, nents, 0);
++	WARN_ON(!(flags & (SG_MITER_TO_SG | SG_MITER_FROM_SG)));
++	miter->__flags = flags;
++}
++EXPORT_SYMBOL(sg_miter_start);
++
++static bool sg_miter_get_next_page(struct sg_mapping_iter *miter)
++{
++	if (!miter->__remaining) {
++		struct scatterlist *sg;
++
++		if (!__sg_page_iter_next(&miter->piter))
++			return false;
++
++		sg = miter->piter.sg;
++
++		miter->__offset = miter->piter.sg_pgoffset ? 0 : sg->offset;
++		miter->piter.sg_pgoffset += miter->__offset >> PAGE_SHIFT;
++		miter->__offset &= PAGE_SIZE - 1;
++		miter->__remaining = sg->offset + sg->length -
++				     (miter->piter.sg_pgoffset << PAGE_SHIFT) -
++				     miter->__offset;
++		miter->__remaining = min_t(unsigned long, miter->__remaining,
++					   PAGE_SIZE - miter->__offset);
++	}
++
++	return true;
++}
++
++/**
++ * sg_miter_skip - reposition mapping iterator
++ * @miter: sg mapping iter to be skipped
++ * @offset: number of bytes to plus the current location
++ *
++ * Description:
++ *   Sets the offset of @miter to its current location plus @offset bytes.
++ *   If mapping iterator @miter has been proceeded by sg_miter_next(), this
++ *   stops @miter.
++ *
++ * Context:
++ *   Don't care.
++ *
++ * Returns:
++ *   true if @miter contains the valid mapping.  false if end of sg
++ *   list is reached.
++ */
++bool sg_miter_skip(struct sg_mapping_iter *miter, off_t offset)
++{
++	sg_miter_stop(miter);
++
++	while (offset) {
++		off_t consumed;
++
++		if (!sg_miter_get_next_page(miter))
++			return false;
++
++		consumed = min_t(off_t, offset, miter->__remaining);
++		miter->__offset += consumed;
++		miter->__remaining -= consumed;
++		offset -= consumed;
++	}
++
++	return true;
++}
++EXPORT_SYMBOL(sg_miter_skip);
++
++/**
++ * sg_miter_next - proceed mapping iterator to the next mapping
++ * @miter: sg mapping iter to proceed
++ *
++ * Description:
++ *   Proceeds @miter to the next mapping.  @miter should have been started
++ *   using sg_miter_start().  On successful return, @miter->page,
++ *   @miter->addr and @miter->length point to the current mapping.
++ *
++ * Context:
++ *   May sleep if !SG_MITER_ATOMIC && !SG_MITER_LOCAL.
++ *
++ * Returns:
++ *   true if @miter contains the next mapping.  false if end of sg
++ *   list is reached.
++ */
++bool sg_miter_next(struct sg_mapping_iter *miter)
++{
++	sg_miter_stop(miter);
++
++	/*
++	 * Get to the next page if necessary.
++	 * __remaining, __offset is adjusted by sg_miter_stop
++	 */
++	if (!sg_miter_get_next_page(miter))
++		return false;
++
++	miter->page = sg_page_iter_page(&miter->piter);
++	miter->consumed = miter->length = miter->__remaining;
++
++	if (miter->__flags & SG_MITER_ATOMIC)
++		miter->addr = kmap_atomic(miter->page) + miter->__offset;
++	else if (miter->__flags & SG_MITER_LOCAL)
++		miter->addr = kmap_local_page(miter->page) + miter->__offset;
++	else
++		miter->addr = kmap(miter->page) + miter->__offset;
++
++	return true;
++}
++EXPORT_SYMBOL(sg_miter_next);
++
++/**
++ * sg_miter_stop - stop mapping iteration
++ * @miter: sg mapping iter to be stopped
++ *
++ * Description:
++ *   Stops mapping iterator @miter.  @miter should have been started
++ *   using sg_miter_start().  A stopped iteration can be resumed by
++ *   calling sg_miter_next() on it.  This is useful when resources (kmap)
++ *   need to be released during iteration.
++ *
++ * Context:
++ *   Don't care otherwise.
++ */
++void sg_miter_stop(struct sg_mapping_iter *miter)
++{
++	WARN_ON(miter->consumed > miter->length);
++
++	/* drop resources from the last iteration */
++	if (miter->addr) {
++		miter->__offset += miter->consumed;
++		miter->__remaining -= miter->consumed;
++
++		if (miter->__flags & SG_MITER_TO_SG)
++			flush_dcache_page(miter->page);
++
++		if (miter->__flags & SG_MITER_ATOMIC) {
++			WARN_ON_ONCE(!pagefault_disabled());
++			kunmap_atomic(miter->addr);
++		} else if (miter->__flags & SG_MITER_LOCAL)
++			kunmap_local(miter->addr);
++		else
++			kunmap(miter->page);
++
++		miter->page = NULL;
++		miter->addr = NULL;
++		miter->length = 0;
++		miter->consumed = 0;
++	}
++}
++EXPORT_SYMBOL(sg_miter_stop);
++
++/**
++ * sg_copy_buffer - Copy data between a linear buffer and an SG list
++ * @sgl:		 The SG list
++ * @nents:		 Number of SG entries
++ * @buf:		 Where to copy from
++ * @buflen:		 The number of bytes to copy
++ * @skip:		 Number of bytes to skip before copying
++ * @to_buffer:		 transfer direction (true == from an sg list to a
++ *			 buffer, false == from a buffer to an sg list)
++ *
++ * Returns the number of copied bytes.
++ *
++ **/
++size_t sg_copy_buffer(struct scatterlist *sgl, unsigned int nents, void *buf,
++		      size_t buflen, off_t skip, bool to_buffer)
++{
++	unsigned int offset = 0;
++	struct sg_mapping_iter miter;
++	unsigned int sg_flags = SG_MITER_LOCAL;
++
++	if (to_buffer)
++		sg_flags |= SG_MITER_FROM_SG;
++	else
++		sg_flags |= SG_MITER_TO_SG;
++
++	sg_miter_start(&miter, sgl, nents, sg_flags);
++
++	if (!sg_miter_skip(&miter, skip))
++		return 0;
++
++	while ((offset < buflen) && sg_miter_next(&miter)) {
++		unsigned int len;
++
++		len = min(miter.length, buflen - offset);
++
++		if (to_buffer)
++			memcpy(buf + offset, miter.addr, len);
++		else
++			memcpy(miter.addr, buf + offset, len);
++
++		offset += len;
++	}
++
++	sg_miter_stop(&miter);
++
++	return offset;
++}
++EXPORT_SYMBOL(sg_copy_buffer);
++
++/**
++ * sg_copy_from_buffer - Copy from a linear buffer to an SG list
++ * @sgl:		 The SG list
++ * @nents:		 Number of SG entries
++ * @buf:		 Where to copy from
++ * @buflen:		 The number of bytes to copy
++ *
++ * Returns the number of copied bytes.
++ *
++ **/
++size_t sg_copy_from_buffer(struct scatterlist *sgl, unsigned int nents,
++			   const void *buf, size_t buflen)
++{
++	return sg_copy_buffer(sgl, nents, (void *)buf, buflen, 0, false);
++}
++EXPORT_SYMBOL(sg_copy_from_buffer);
++
++/**
++ * sg_copy_to_buffer - Copy from an SG list to a linear buffer
++ * @sgl:		 The SG list
++ * @nents:		 Number of SG entries
++ * @buf:		 Where to copy to
++ * @buflen:		 The number of bytes to copy
++ *
++ * Returns the number of copied bytes.
++ *
++ **/
++size_t sg_copy_to_buffer(struct scatterlist *sgl, unsigned int nents,
++			 void *buf, size_t buflen)
++{
++	return sg_copy_buffer(sgl, nents, buf, buflen, 0, true);
++}
++EXPORT_SYMBOL(sg_copy_to_buffer);
++
++/**
++ * sg_pcopy_from_buffer - Copy from a linear buffer to an SG list
++ * @sgl:		 The SG list
++ * @nents:		 Number of SG entries
++ * @buf:		 Where to copy from
++ * @buflen:		 The number of bytes to copy
++ * @skip:		 Number of bytes to skip before copying
++ *
++ * Returns the number of copied bytes.
++ *
++ **/
++size_t sg_pcopy_from_buffer(struct scatterlist *sgl, unsigned int nents,
++			    const void *buf, size_t buflen, off_t skip)
++{
++	return sg_copy_buffer(sgl, nents, (void *)buf, buflen, skip, false);
++}
++EXPORT_SYMBOL(sg_pcopy_from_buffer);
++
++/**
++ * sg_pcopy_to_buffer - Copy from an SG list to a linear buffer
++ * @sgl:		 The SG list
++ * @nents:		 Number of SG entries
++ * @buf:		 Where to copy to
++ * @buflen:		 The number of bytes to copy
++ * @skip:		 Number of bytes to skip before copying
++ *
++ * Returns the number of copied bytes.
++ *
++ **/
++size_t sg_pcopy_to_buffer(struct scatterlist *sgl, unsigned int nents,
++			  void *buf, size_t buflen, off_t skip)
++{
++	return sg_copy_buffer(sgl, nents, buf, buflen, skip, true);
++}
++EXPORT_SYMBOL(sg_pcopy_to_buffer);
++
++/**
++ * sg_zero_buffer - Zero-out a part of a SG list
++ * @sgl:		 The SG list
++ * @nents:		 Number of SG entries
++ * @buflen:		 The number of bytes to zero out
++ * @skip:		 Number of bytes to skip before zeroing
++ *
++ * Returns the number of bytes zeroed.
++ **/
++size_t sg_zero_buffer(struct scatterlist *sgl, unsigned int nents,
++		       size_t buflen, off_t skip)
++{
++	unsigned int offset = 0;
++	struct sg_mapping_iter miter;
++	unsigned int sg_flags = SG_MITER_LOCAL | SG_MITER_TO_SG;
++
++	sg_miter_start(&miter, sgl, nents, sg_flags);
++
++	if (!sg_miter_skip(&miter, skip))
++		return false;
++
++	while (offset < buflen && sg_miter_next(&miter)) {
++		unsigned int len;
++
++		len = min(miter.length, buflen - offset);
++		memset(miter.addr, 0, len);
++
++		offset += len;
++	}
++
++	sg_miter_stop(&miter);
++	return offset;
++}
++EXPORT_SYMBOL(sg_zero_buffer);
+diff --git a/lib/scatterlist.c b/lib/scatterlist.c
+index 6ea40d2e6247555203d20b2f1c13c74c21c4da30..bea5bc96a09a870244dd58e2f4258a34820904fd 100644
+--- a/lib/scatterlist.c
++++ b/lib/scatterlist.c
+@@ -7,11 +7,7 @@
+ #include <linux/export.h>
+ #include <linux/slab.h>
+ #include <linux/scatterlist.h>
+-#include <linux/highmem.h>
+ #include <linux/kmemleak.h>
+-#include <linux/bvec.h>
+-#include <linux/uio.h>
+-#include <linux/folio_queue.h>
+ 
+ /**
+  * sg_nents - return total count of entries in scatterlist
+@@ -785,655 +781,3 @@ bool __sg_page_iter_dma_next(struct sg_dma_page_iter *dma_iter)
+ 	return true;
+ }
+ EXPORT_SYMBOL(__sg_page_iter_dma_next);
+-
+-/**
+- * sg_miter_start - start mapping iteration over a sg list
+- * @miter: sg mapping iter to be started
+- * @sgl: sg list to iterate over
+- * @nents: number of sg entries
+- * @flags: sg iterator flags
+- *
+- * Description:
+- *   Starts mapping iterator @miter.
+- *
+- * Context:
+- *   Don't care.
+- */
+-void sg_miter_start(struct sg_mapping_iter *miter, struct scatterlist *sgl,
+-		    unsigned int nents, unsigned int flags)
+-{
+-	memset(miter, 0, sizeof(struct sg_mapping_iter));
+-
+-	__sg_page_iter_start(&miter->piter, sgl, nents, 0);
+-	WARN_ON(!(flags & (SG_MITER_TO_SG | SG_MITER_FROM_SG)));
+-	miter->__flags = flags;
+-}
+-EXPORT_SYMBOL(sg_miter_start);
+-
+-static bool sg_miter_get_next_page(struct sg_mapping_iter *miter)
+-{
+-	if (!miter->__remaining) {
+-		struct scatterlist *sg;
+-
+-		if (!__sg_page_iter_next(&miter->piter))
+-			return false;
+-
+-		sg = miter->piter.sg;
+-
+-		miter->__offset = miter->piter.sg_pgoffset ? 0 : sg->offset;
+-		miter->piter.sg_pgoffset += miter->__offset >> PAGE_SHIFT;
+-		miter->__offset &= PAGE_SIZE - 1;
+-		miter->__remaining = sg->offset + sg->length -
+-				     (miter->piter.sg_pgoffset << PAGE_SHIFT) -
+-				     miter->__offset;
+-		miter->__remaining = min_t(unsigned long, miter->__remaining,
+-					   PAGE_SIZE - miter->__offset);
+-	}
+-
+-	return true;
+-}
+-
+-/**
+- * sg_miter_skip - reposition mapping iterator
+- * @miter: sg mapping iter to be skipped
+- * @offset: number of bytes to plus the current location
+- *
+- * Description:
+- *   Sets the offset of @miter to its current location plus @offset bytes.
+- *   If mapping iterator @miter has been proceeded by sg_miter_next(), this
+- *   stops @miter.
+- *
+- * Context:
+- *   Don't care.
+- *
+- * Returns:
+- *   true if @miter contains the valid mapping.  false if end of sg
+- *   list is reached.
+- */
+-bool sg_miter_skip(struct sg_mapping_iter *miter, off_t offset)
+-{
+-	sg_miter_stop(miter);
+-
+-	while (offset) {
+-		off_t consumed;
+-
+-		if (!sg_miter_get_next_page(miter))
+-			return false;
+-
+-		consumed = min_t(off_t, offset, miter->__remaining);
+-		miter->__offset += consumed;
+-		miter->__remaining -= consumed;
+-		offset -= consumed;
+-	}
+-
+-	return true;
+-}
+-EXPORT_SYMBOL(sg_miter_skip);
+-
+-/**
+- * sg_miter_next - proceed mapping iterator to the next mapping
+- * @miter: sg mapping iter to proceed
+- *
+- * Description:
+- *   Proceeds @miter to the next mapping.  @miter should have been started
+- *   using sg_miter_start().  On successful return, @miter->page,
+- *   @miter->addr and @miter->length point to the current mapping.
+- *
+- * Context:
+- *   May sleep if !SG_MITER_ATOMIC && !SG_MITER_LOCAL.
+- *
+- * Returns:
+- *   true if @miter contains the next mapping.  false if end of sg
+- *   list is reached.
+- */
+-bool sg_miter_next(struct sg_mapping_iter *miter)
+-{
+-	sg_miter_stop(miter);
+-
+-	/*
+-	 * Get to the next page if necessary.
+-	 * __remaining, __offset is adjusted by sg_miter_stop
+-	 */
+-	if (!sg_miter_get_next_page(miter))
+-		return false;
+-
+-	miter->page = sg_page_iter_page(&miter->piter);
+-	miter->consumed = miter->length = miter->__remaining;
+-
+-	if (miter->__flags & SG_MITER_ATOMIC)
+-		miter->addr = kmap_atomic(miter->page) + miter->__offset;
+-	else if (miter->__flags & SG_MITER_LOCAL)
+-		miter->addr = kmap_local_page(miter->page) + miter->__offset;
+-	else
+-		miter->addr = kmap(miter->page) + miter->__offset;
+-
+-	return true;
+-}
+-EXPORT_SYMBOL(sg_miter_next);
+-
+-/**
+- * sg_miter_stop - stop mapping iteration
+- * @miter: sg mapping iter to be stopped
+- *
+- * Description:
+- *   Stops mapping iterator @miter.  @miter should have been started
+- *   using sg_miter_start().  A stopped iteration can be resumed by
+- *   calling sg_miter_next() on it.  This is useful when resources (kmap)
+- *   need to be released during iteration.
+- *
+- * Context:
+- *   Don't care otherwise.
+- */
+-void sg_miter_stop(struct sg_mapping_iter *miter)
+-{
+-	WARN_ON(miter->consumed > miter->length);
+-
+-	/* drop resources from the last iteration */
+-	if (miter->addr) {
+-		miter->__offset += miter->consumed;
+-		miter->__remaining -= miter->consumed;
+-
+-		if (miter->__flags & SG_MITER_TO_SG)
+-			flush_dcache_page(miter->page);
+-
+-		if (miter->__flags & SG_MITER_ATOMIC) {
+-			WARN_ON_ONCE(!pagefault_disabled());
+-			kunmap_atomic(miter->addr);
+-		} else if (miter->__flags & SG_MITER_LOCAL)
+-			kunmap_local(miter->addr);
+-		else
+-			kunmap(miter->page);
+-
+-		miter->page = NULL;
+-		miter->addr = NULL;
+-		miter->length = 0;
+-		miter->consumed = 0;
+-	}
+-}
+-EXPORT_SYMBOL(sg_miter_stop);
+-
+-/**
+- * sg_copy_buffer - Copy data between a linear buffer and an SG list
+- * @sgl:		 The SG list
+- * @nents:		 Number of SG entries
+- * @buf:		 Where to copy from
+- * @buflen:		 The number of bytes to copy
+- * @skip:		 Number of bytes to skip before copying
+- * @to_buffer:		 transfer direction (true == from an sg list to a
+- *			 buffer, false == from a buffer to an sg list)
+- *
+- * Returns the number of copied bytes.
+- *
+- **/
+-size_t sg_copy_buffer(struct scatterlist *sgl, unsigned int nents, void *buf,
+-		      size_t buflen, off_t skip, bool to_buffer)
+-{
+-	unsigned int offset = 0;
+-	struct sg_mapping_iter miter;
+-	unsigned int sg_flags = SG_MITER_LOCAL;
+-
+-	if (to_buffer)
+-		sg_flags |= SG_MITER_FROM_SG;
+-	else
+-		sg_flags |= SG_MITER_TO_SG;
+-
+-	sg_miter_start(&miter, sgl, nents, sg_flags);
+-
+-	if (!sg_miter_skip(&miter, skip))
+-		return 0;
+-
+-	while ((offset < buflen) && sg_miter_next(&miter)) {
+-		unsigned int len;
+-
+-		len = min(miter.length, buflen - offset);
+-
+-		if (to_buffer)
+-			memcpy(buf + offset, miter.addr, len);
+-		else
+-			memcpy(miter.addr, buf + offset, len);
+-
+-		offset += len;
+-	}
+-
+-	sg_miter_stop(&miter);
+-
+-	return offset;
+-}
+-EXPORT_SYMBOL(sg_copy_buffer);
+-
+-/**
+- * sg_copy_from_buffer - Copy from a linear buffer to an SG list
+- * @sgl:		 The SG list
+- * @nents:		 Number of SG entries
+- * @buf:		 Where to copy from
+- * @buflen:		 The number of bytes to copy
+- *
+- * Returns the number of copied bytes.
+- *
+- **/
+-size_t sg_copy_from_buffer(struct scatterlist *sgl, unsigned int nents,
+-			   const void *buf, size_t buflen)
+-{
+-	return sg_copy_buffer(sgl, nents, (void *)buf, buflen, 0, false);
+-}
+-EXPORT_SYMBOL(sg_copy_from_buffer);
+-
+-/**
+- * sg_copy_to_buffer - Copy from an SG list to a linear buffer
+- * @sgl:		 The SG list
+- * @nents:		 Number of SG entries
+- * @buf:		 Where to copy to
+- * @buflen:		 The number of bytes to copy
+- *
+- * Returns the number of copied bytes.
+- *
+- **/
+-size_t sg_copy_to_buffer(struct scatterlist *sgl, unsigned int nents,
+-			 void *buf, size_t buflen)
+-{
+-	return sg_copy_buffer(sgl, nents, buf, buflen, 0, true);
+-}
+-EXPORT_SYMBOL(sg_copy_to_buffer);
+-
+-/**
+- * sg_pcopy_from_buffer - Copy from a linear buffer to an SG list
+- * @sgl:		 The SG list
+- * @nents:		 Number of SG entries
+- * @buf:		 Where to copy from
+- * @buflen:		 The number of bytes to copy
+- * @skip:		 Number of bytes to skip before copying
+- *
+- * Returns the number of copied bytes.
+- *
+- **/
+-size_t sg_pcopy_from_buffer(struct scatterlist *sgl, unsigned int nents,
+-			    const void *buf, size_t buflen, off_t skip)
+-{
+-	return sg_copy_buffer(sgl, nents, (void *)buf, buflen, skip, false);
+-}
+-EXPORT_SYMBOL(sg_pcopy_from_buffer);
+-
+-/**
+- * sg_pcopy_to_buffer - Copy from an SG list to a linear buffer
+- * @sgl:		 The SG list
+- * @nents:		 Number of SG entries
+- * @buf:		 Where to copy to
+- * @buflen:		 The number of bytes to copy
+- * @skip:		 Number of bytes to skip before copying
+- *
+- * Returns the number of copied bytes.
+- *
+- **/
+-size_t sg_pcopy_to_buffer(struct scatterlist *sgl, unsigned int nents,
+-			  void *buf, size_t buflen, off_t skip)
+-{
+-	return sg_copy_buffer(sgl, nents, buf, buflen, skip, true);
+-}
+-EXPORT_SYMBOL(sg_pcopy_to_buffer);
+-
+-/**
+- * sg_zero_buffer - Zero-out a part of a SG list
+- * @sgl:		 The SG list
+- * @nents:		 Number of SG entries
+- * @buflen:		 The number of bytes to zero out
+- * @skip:		 Number of bytes to skip before zeroing
+- *
+- * Returns the number of bytes zeroed.
+- **/
+-size_t sg_zero_buffer(struct scatterlist *sgl, unsigned int nents,
+-		       size_t buflen, off_t skip)
+-{
+-	unsigned int offset = 0;
+-	struct sg_mapping_iter miter;
+-	unsigned int sg_flags = SG_MITER_LOCAL | SG_MITER_TO_SG;
+-
+-	sg_miter_start(&miter, sgl, nents, sg_flags);
+-
+-	if (!sg_miter_skip(&miter, skip))
+-		return false;
+-
+-	while (offset < buflen && sg_miter_next(&miter)) {
+-		unsigned int len;
+-
+-		len = min(miter.length, buflen - offset);
+-		memset(miter.addr, 0, len);
+-
+-		offset += len;
+-	}
+-
+-	sg_miter_stop(&miter);
+-	return offset;
+-}
+-EXPORT_SYMBOL(sg_zero_buffer);
+-
+-/*
+- * Extract and pin a list of up to sg_max pages from UBUF- or IOVEC-class
+- * iterators, and add them to the scatterlist.
+- */
+-static ssize_t extract_user_to_sg(struct iov_iter *iter,
+-				  ssize_t maxsize,
+-				  struct sg_table *sgtable,
+-				  unsigned int sg_max,
+-				  iov_iter_extraction_t extraction_flags)
+-{
+-	struct scatterlist *sg = sgtable->sgl + sgtable->nents;
+-	struct page **pages;
+-	unsigned int npages;
+-	ssize_t ret = 0, res;
+-	size_t len, off;
+-
+-	/* We decant the page list into the tail of the scatterlist */
+-	pages = (void *)sg + array_size(sg_max, sizeof(struct scatterlist));
+-	pages -= sg_max;
+-
+-	do {
+-		res = iov_iter_extract_pages(iter, &pages, maxsize, sg_max,
+-					     extraction_flags, &off);
+-		if (res <= 0)
+-			goto failed;
+-
+-		len = res;
+-		maxsize -= len;
+-		ret += len;
+-		npages = DIV_ROUND_UP(off + len, PAGE_SIZE);
+-		sg_max -= npages;
+-
+-		for (; npages > 0; npages--) {
+-			struct page *page = *pages;
+-			size_t seg = min_t(size_t, PAGE_SIZE - off, len);
+-
+-			*pages++ = NULL;
+-			sg_set_page(sg, page, seg, off);
+-			sgtable->nents++;
+-			sg++;
+-			len -= seg;
+-			off = 0;
+-		}
+-	} while (maxsize > 0 && sg_max > 0);
+-
+-	return ret;
+-
+-failed:
+-	while (sgtable->nents > sgtable->orig_nents)
+-		unpin_user_page(sg_page(&sgtable->sgl[--sgtable->nents]));
+-	return res;
+-}
+-
+-/*
+- * Extract up to sg_max pages from a BVEC-type iterator and add them to the
+- * scatterlist.  The pages are not pinned.
+- */
+-static ssize_t extract_bvec_to_sg(struct iov_iter *iter,
+-				  ssize_t maxsize,
+-				  struct sg_table *sgtable,
+-				  unsigned int sg_max,
+-				  iov_iter_extraction_t extraction_flags)
+-{
+-	const struct bio_vec *bv = iter->bvec;
+-	struct scatterlist *sg = sgtable->sgl + sgtable->nents;
+-	unsigned long start = iter->iov_offset;
+-	unsigned int i;
+-	ssize_t ret = 0;
+-
+-	for (i = 0; i < iter->nr_segs; i++) {
+-		size_t off, len;
+-
+-		len = bv[i].bv_len;
+-		if (start >= len) {
+-			start -= len;
+-			continue;
+-		}
+-
+-		len = min_t(size_t, maxsize, len - start);
+-		off = bv[i].bv_offset + start;
+-
+-		sg_set_page(sg, bv[i].bv_page, len, off);
+-		sgtable->nents++;
+-		sg++;
+-		sg_max--;
+-
+-		ret += len;
+-		maxsize -= len;
+-		if (maxsize <= 0 || sg_max == 0)
+-			break;
+-		start = 0;
+-	}
+-
+-	if (ret > 0)
+-		iov_iter_advance(iter, ret);
+-	return ret;
+-}
+-
+-/*
+- * Extract up to sg_max pages from a KVEC-type iterator and add them to the
+- * scatterlist.  This can deal with vmalloc'd buffers as well as kmalloc'd or
+- * static buffers.  The pages are not pinned.
+- */
+-static ssize_t extract_kvec_to_sg(struct iov_iter *iter,
+-				  ssize_t maxsize,
+-				  struct sg_table *sgtable,
+-				  unsigned int sg_max,
+-				  iov_iter_extraction_t extraction_flags)
+-{
+-	const struct kvec *kv = iter->kvec;
+-	struct scatterlist *sg = sgtable->sgl + sgtable->nents;
+-	unsigned long start = iter->iov_offset;
+-	unsigned int i;
+-	ssize_t ret = 0;
+-
+-	for (i = 0; i < iter->nr_segs; i++) {
+-		struct page *page;
+-		unsigned long kaddr;
+-		size_t off, len, seg;
+-
+-		len = kv[i].iov_len;
+-		if (start >= len) {
+-			start -= len;
+-			continue;
+-		}
+-
+-		kaddr = (unsigned long)kv[i].iov_base + start;
+-		off = kaddr & ~PAGE_MASK;
+-		len = min_t(size_t, maxsize, len - start);
+-		kaddr &= PAGE_MASK;
+-
+-		maxsize -= len;
+-		ret += len;
+-		do {
+-			seg = min_t(size_t, len, PAGE_SIZE - off);
+-			if (is_vmalloc_or_module_addr((void *)kaddr))
+-				page = vmalloc_to_page((void *)kaddr);
+-			else
+-				page = virt_to_page((void *)kaddr);
+-
+-			sg_set_page(sg, page, seg, off);
+-			sgtable->nents++;
+-			sg++;
+-			sg_max--;
+-
+-			len -= seg;
+-			kaddr += PAGE_SIZE;
+-			off = 0;
+-		} while (len > 0 && sg_max > 0);
+-		ret -= len;
+-
+-		if (maxsize <= 0 || sg_max == 0)
+-			break;
+-		start = 0;
+-	}
+-
+-	if (ret > 0)
+-		iov_iter_advance(iter, ret);
+-	return ret;
+-}
+-
+-/*
+- * Extract up to sg_max folios from an FOLIOQ-type iterator and add them to
+- * the scatterlist.  The pages are not pinned.
+- */
+-static ssize_t extract_folioq_to_sg(struct iov_iter *iter,
+-				   ssize_t maxsize,
+-				   struct sg_table *sgtable,
+-				   unsigned int sg_max,
+-				   iov_iter_extraction_t extraction_flags)
+-{
+-	const struct folio_queue *folioq = iter->folioq;
+-	struct scatterlist *sg = sgtable->sgl + sgtable->nents;
+-	unsigned int slot = iter->folioq_slot;
+-	ssize_t ret = 0;
+-	size_t offset = iter->iov_offset;
+-
+-	BUG_ON(!folioq);
+-
+-	if (slot >= folioq_nr_slots(folioq)) {
+-		folioq = folioq->next;
+-		if (WARN_ON_ONCE(!folioq))
+-			return 0;
+-		slot = 0;
+-	}
+-
+-	do {
+-		struct folio *folio = folioq_folio(folioq, slot);
+-		size_t fsize = folioq_folio_size(folioq, slot);
+-
+-		if (offset < fsize) {
+-			size_t part = umin(maxsize - ret, fsize - offset);
+-
+-			sg_set_page(sg, folio_page(folio, 0), part, offset);
+-			sgtable->nents++;
+-			sg++;
+-			sg_max--;
+-			offset += part;
+-			ret += part;
+-		}
+-
+-		if (offset >= fsize) {
+-			offset = 0;
+-			slot++;
+-			if (slot >= folioq_nr_slots(folioq)) {
+-				if (!folioq->next) {
+-					WARN_ON_ONCE(ret < iter->count);
+-					break;
+-				}
+-				folioq = folioq->next;
+-				slot = 0;
+-			}
+-		}
+-	} while (sg_max > 0 && ret < maxsize);
+-
+-	iter->folioq = folioq;
+-	iter->folioq_slot = slot;
+-	iter->iov_offset = offset;
+-	iter->count -= ret;
+-	return ret;
+-}
+-
+-/*
+- * Extract up to sg_max folios from an XARRAY-type iterator and add them to
+- * the scatterlist.  The pages are not pinned.
+- */
+-static ssize_t extract_xarray_to_sg(struct iov_iter *iter,
+-				    ssize_t maxsize,
+-				    struct sg_table *sgtable,
+-				    unsigned int sg_max,
+-				    iov_iter_extraction_t extraction_flags)
+-{
+-	struct scatterlist *sg = sgtable->sgl + sgtable->nents;
+-	struct xarray *xa = iter->xarray;
+-	struct folio *folio;
+-	loff_t start = iter->xarray_start + iter->iov_offset;
+-	pgoff_t index = start / PAGE_SIZE;
+-	ssize_t ret = 0;
+-	size_t offset, len;
+-	XA_STATE(xas, xa, index);
+-
+-	rcu_read_lock();
+-
+-	xas_for_each(&xas, folio, ULONG_MAX) {
+-		if (xas_retry(&xas, folio))
+-			continue;
+-		if (WARN_ON(xa_is_value(folio)))
+-			break;
+-		if (WARN_ON(folio_test_hugetlb(folio)))
+-			break;
+-
+-		offset = offset_in_folio(folio, start);
+-		len = min_t(size_t, maxsize, folio_size(folio) - offset);
+-
+-		sg_set_page(sg, folio_page(folio, 0), len, offset);
+-		sgtable->nents++;
+-		sg++;
+-		sg_max--;
+-
+-		maxsize -= len;
+-		start += len;
+-		ret += len;
+-		if (maxsize <= 0 || sg_max == 0)
+-			break;
+-	}
+-
+-	rcu_read_unlock();
+-	if (ret > 0)
+-		iov_iter_advance(iter, ret);
+-	return ret;
+-}
+-
+-/**
+- * extract_iter_to_sg - Extract pages from an iterator and add to an sglist
+- * @iter: The iterator to extract from
+- * @maxsize: The amount of iterator to copy
+- * @sgtable: The scatterlist table to fill in
+- * @sg_max: Maximum number of elements in @sgtable that may be filled
+- * @extraction_flags: Flags to qualify the request
+- *
+- * Extract the page fragments from the given amount of the source iterator and
+- * add them to a scatterlist that refers to all of those bits, to a maximum
+- * addition of @sg_max elements.
+- *
+- * The pages referred to by UBUF- and IOVEC-type iterators are extracted and
+- * pinned; BVEC-, KVEC-, FOLIOQ- and XARRAY-type are extracted but aren't
+- * pinned; DISCARD-type is not supported.
+- *
+- * No end mark is placed on the scatterlist; that's left to the caller.
+- *
+- * @extraction_flags can have ITER_ALLOW_P2PDMA set to request peer-to-peer DMA
+- * be allowed on the pages extracted.
+- *
+- * If successful, @sgtable->nents is updated to include the number of elements
+- * added and the number of bytes added is returned.  @sgtable->orig_nents is
+- * left unaltered.
+- *
+- * The iov_iter_extract_mode() function should be used to query how cleanup
+- * should be performed.
+- */
+-ssize_t extract_iter_to_sg(struct iov_iter *iter, size_t maxsize,
+-			   struct sg_table *sgtable, unsigned int sg_max,
+-			   iov_iter_extraction_t extraction_flags)
+-{
+-	if (maxsize == 0 || sg_max == 0)
+-		return 0;
+-
+-	switch (iov_iter_type(iter)) {
+-	case ITER_UBUF:
+-	case ITER_IOVEC:
+-		return extract_user_to_sg(iter, maxsize, sgtable, sg_max,
+-					  extraction_flags);
+-	case ITER_BVEC:
+-		return extract_bvec_to_sg(iter, maxsize, sgtable, sg_max,
+-					  extraction_flags);
+-	case ITER_KVEC:
+-		return extract_kvec_to_sg(iter, maxsize, sgtable, sg_max,
+-					  extraction_flags);
+-	case ITER_FOLIOQ:
+-		return extract_folioq_to_sg(iter, maxsize, sgtable, sg_max,
+-					    extraction_flags);
+-	case ITER_XARRAY:
+-		return extract_xarray_to_sg(iter, maxsize, sgtable, sg_max,
+-					    extraction_flags);
+-	default:
+-		pr_err("%s(%u) unsupported\n", __func__, iov_iter_type(iter));
+-		WARN_ON_ONCE(1);
+-		return -EIO;
+-	}
+-}
+-EXPORT_SYMBOL_GPL(extract_iter_to_sg);

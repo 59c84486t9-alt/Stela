@@ -4,6 +4,7 @@ use core::ops::Range;
 
 pub mod mapping;
 pub mod memory;
+pub mod pages;
 
 mod sealed {
     pub trait DmaValue {}

@@ -180,10 +180,11 @@ impl Domain {
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
         &self,
-        pages: &PinnedPages,
+        pages: &crate::bus::dma::pages::DmaPages,
         direction: DmaDirection,
         limit: u64,
     ) -> Result<DomainMapping, DmaError> {
+        let pages = pages.as_single().ok_or(DmaError::MappingFailed)?;
         let mut state = self.state.lock().unwrap();
         let address = state.next;
         if address + pages.bytes() as u64 - 1 > limit {

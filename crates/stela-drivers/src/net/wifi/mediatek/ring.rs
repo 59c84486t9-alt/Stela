@@ -497,10 +497,11 @@ pub(crate) mod tests {
     unsafe impl DmaDomain for Domain {
         unsafe fn map(
             &self,
-            pages: &PinnedPages,
+            pages: &crate::bus::dma::pages::DmaPages,
             direction: Direction,
             limit: u64,
         ) -> Result<DomainMapping, DmaError> {
+            let pages = pages.as_single().ok_or(DmaError::MappingFailed)?;
             let mut s = self.0.lock().unwrap();
             s.next += 0x10000;
             let address = 0x10000000 + s.next;

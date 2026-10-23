@@ -1,6 +1,6 @@
 //! Device-domain DMA leases. A physical page list is never an identity-DMA
 //! fallback. The platform supplies a real attached VT-d/AMD-Vi domain.
-use super::memory::PinnedPages;
+use super::pages::DmaPages;
 use alloc::sync::Arc;
 use core::{
     ops::Range,
@@ -63,7 +63,8 @@ pub struct DomainMapping {
 ///
 /// # Safety
 /// Implementors must bind the actual device/requester to an isolated domain,
-/// map exactly these pinned pages with the direction's access permissions, and
+/// map this exact ordered page sequence (including repeated-page aliases)
+/// with the direction's access permissions, and
 /// finish page-table visibility and required IOTLB invalidation before `map`
 /// returns. `Err` must leave no live translation, or quarantine the real pins,
 /// hardware tables and domain reservation until acknowledged removal/reset;
@@ -83,7 +84,7 @@ pub unsafe trait DmaDomain: Send + Sync {
     /// unmap; uncertain teardown must quarantine both. Prefer `DmaMapping`.
     unsafe fn map(
         &self,
-        pages: &PinnedPages,
+        pages: &DmaPages,
         direction: Direction,
         address_limit: u64,
     ) -> Result<DomainMapping, DmaError>;
@@ -120,7 +121,7 @@ pub unsafe trait DmaDomain: Send + Sync {
 /// `quarantine_status` makes abandoned leases and retained bytes observable.
 pub struct DmaMapping {
     domain: Option<Arc<dyn DmaDomain>>,
-    pages: Option<PinnedPages>,
+    pages: Option<DmaPages>,
     mapping: DomainMapping,
     direction: Direction,
 }
@@ -128,10 +129,11 @@ pub struct DmaMapping {
 impl DmaMapping {
     pub fn map(
         domain: Arc<dyn DmaDomain>,
-        pages: PinnedPages,
+        pages: impl Into<DmaPages>,
         direction: Direction,
         address_limit: u64,
     ) -> Result<Self, DmaError> {
+        let pages = pages.into();
         // SAFETY: the lease retains pages/domain through acknowledged unmap,
         // quarantining them if a caller drops it without proving quiescence.
         let mapping = unsafe { domain.map(&pages, direction, address_limit)? };
@@ -216,7 +218,7 @@ impl Drop for DmaMapping {
             count_quarantine(&QUARANTINED_MAPPINGS, 1);
             count_quarantine(
                 &QUARANTINED_BYTES,
-                self.pages.as_ref().map_or(0, PinnedPages::bytes) as u64,
+                self.pages.as_ref().map_or(0, DmaPages::bytes) as u64,
             );
             core::mem::forget(domain);
             if let Some(pages) = self.pages.take() {
@@ -229,7 +231,7 @@ impl Drop for DmaMapping {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::dma::memory::{CacheAttribute, PageBacking};
+    use crate::bus::dma::memory::{CacheAttribute, PageBacking, PinnedPages};
     use alloc::{
         alloc::{alloc_zeroed, dealloc},
         boxed::Box,
@@ -280,7 +282,7 @@ mod tests {
     unsafe impl DmaDomain for ModelDomain {
         unsafe fn map(
             &self,
-            pages: &PinnedPages,
+            pages: &DmaPages,
             _: Direction,
             limit: u64,
         ) -> Result<DomainMapping, DmaError> {

@@ -381,10 +381,11 @@ mod tests {
     unsafe impl DmaDomain for Model {
         unsafe fn map(
             &self,
-            pages: &PinnedPages,
+            pages: &crate::bus::dma::pages::DmaPages,
             direction: Direction,
             _: u64,
         ) -> Result<crate::bus::dma::mapping::DomainMapping, DmaError> {
+            let pages = pages.as_single().ok_or(DmaError::MappingFailed)?;
             assert_eq!(direction, Direction::Bidirectional);
             let id = self.maps.fetch_add(1, Ordering::Relaxed) + 1;
             self.events.lock().unwrap().push(Event::Map(

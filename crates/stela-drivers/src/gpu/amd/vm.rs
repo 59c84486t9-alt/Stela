@@ -343,7 +343,7 @@ mod tests {
     unsafe impl DmaDomain for ModelDomain {
         unsafe fn map(
             &self,
-            pages: &PinnedPages,
+            pages: &crate::bus::dma::pages::DmaPages,
             _: Direction,
             _: u64,
         ) -> Result<DomainMapping, DmaError> {

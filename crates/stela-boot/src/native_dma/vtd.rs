@@ -20,6 +20,7 @@ use core::{
 use stela_drivers::bus::dma::{
     mapping::{Direction, DmaDomain, DmaError, DomainMapping},
     memory::{CacheAttribute, CpuMapping, PageSource, PinnedPages},
+    pages::DmaPages,
 };
 
 #[cfg(not(test))]
@@ -259,7 +260,7 @@ impl Table {
 struct LiveMapping {
     info: DomainMapping,
     direction: Direction,
-    _pages: PinnedPages,
+    _pages: DmaPages,
     leaves: Vec<(usize, usize)>,
 }
 
@@ -910,7 +911,7 @@ impl<R: Registers> Drop for RequesterDomain<R> {
 unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
     unsafe fn map(
         &self,
-        pages: &PinnedPages,
+        pages: &DmaPages,
         direction: Direction,
         address_limit: u64,
     ) -> Result<DomainMapping, DmaError> {
@@ -1337,6 +1338,70 @@ mod tests {
     fn stopped_claim(rid: u16) -> RequesterClaim {
         RequesterClaim::model(rid, Arc::new(AtomicU64::new(0)))
     }
+    #[test]
+    fn scatter_maps_retained_native_subranges_and_releases_only_after_invalidation() {
+        use stela_drivers::bus::dma::pages::PageRange;
+        let source = source();
+        let registers = ModelRegisters::new();
+        {
+            let mut model = registers.0.lock().unwrap();
+            model.values.insert(ECAP, 0x10 << 8);
+            model.source = Some(source);
+        }
+        // SAFETY: exclusive deterministic register/requester model; no device.
+        let unit = unsafe { Unit::take_over(registers.clone(), source, &[8], 48) }.unwrap();
+        // SAFETY: the model supplies the exact stopped requester claim.
+        let domain = unsafe { unit.attach_requester(stopped_claim(8)) }.unwrap();
+        let released = Arc::new(AtomicU64::new(0));
+        let granule = 2 * PAGE;
+        let first = pages(2 * granule, 13, 0x900000, released.clone());
+        let second = pages(granule, 13, 0x300000, released.clone());
+        let scatter = DmaPages::from_ranges(vec![
+            PageRange::new(first.clone(), granule..2 * granule).unwrap(),
+            PageRange::new(second, 0..granule).unwrap(),
+            PageRange::new(first, granule..2 * granule).unwrap(),
+        ])
+        .unwrap();
+        assert!(scatter.as_single().is_none());
+        assert_eq!(scatter.page_shift(), 13);
+        let mut mapping =
+            DmaMapping::map(domain.clone(), scatter, Direction::Bidirectional, u64::MAX).unwrap();
+        let address = mapping.address().unwrap();
+        assert_eq!(mapping.bytes(), 3 * granule);
+        {
+            let model = registers.0.lock().unwrap();
+            for (index, physical) in [0x902000, 0x903000, 0x300000, 0x301000, 0x902000, 0x903000]
+                .into_iter()
+                .enumerate()
+            {
+                assert_eq!(
+                    model.translation(8, address + (index * PAGE) as u64),
+                    Some(physical)
+                );
+            }
+            assert_eq!(model.translation(8, address + 3 * granule as u64), None);
+            assert_eq!(model.translation(16, address), None);
+        }
+        assert_eq!(released.load(Ordering::Relaxed), 0);
+        registers.0.lock().unwrap().block_iotlb = true;
+        // SAFETY: model is quiescent; an unacknowledged removal retains pins.
+        assert_eq!(
+            unsafe { mapping.unmap() },
+            Err(DmaError::InvalidationFailed)
+        );
+        assert_eq!(released.load(Ordering::Relaxed), 0);
+        registers.0.lock().unwrap().block_iotlb = false;
+        // SAFETY: same stopped requester and unreused retained mapping token.
+        unsafe { mapping.unmap() }.unwrap();
+        assert_eq!(released.load(Ordering::Relaxed), 2);
+        assert_eq!(registers.0.lock().unwrap().translation(8, address), None);
+        // SAFETY: no mapping remains and the requester is still stopped.
+        drop(unsafe { domain.detach() }.unwrap());
+        drop(domain);
+        // SAFETY: all contexts/mappings are retired; model has no DMA worker.
+        unsafe { unit.shut_down() }.unwrap();
+    }
+
     #[test]
     fn actual_contexts_separate_same_iova_and_reject_cross_domain_or_stale_tokens() {
         let source = source();

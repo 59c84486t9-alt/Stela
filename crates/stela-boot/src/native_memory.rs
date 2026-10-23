@@ -528,6 +528,54 @@ mod tests {
         assert_eq!(ALLOCATOR.usage().live, before);
     }
 
+    fn scatter_metadata_failures_reclaim_every_original_pin(source: &NativeMemory) {
+        use stela_drivers::bus::dma::pages::{DmaPages, PageRange};
+        let before = ALLOCATOR.usage().live;
+        // Fail the real physical-sequence vector and then shared scatter owner.
+        // Input pins and range metadata exist before allocation denial begins.
+        for index in 0..2 {
+            let ranges = vec![
+                PageRange::new(
+                    source
+                        .allocate(2 * PAGE, PAGE, CacheAttribute::WriteBack)
+                        .unwrap(),
+                    PAGE..2 * PAGE,
+                )
+                .unwrap(),
+                PageRange::new(
+                    source
+                        .allocate(PAGE, PAGE, CacheAttribute::WriteBack)
+                        .unwrap(),
+                    0..PAGE,
+                )
+                .unwrap(),
+            ];
+            assert_eq!(ALLOCATOR.usage().live, before + 3 * PAGE);
+            allocation_failure::arm(index);
+            let result = DmaPages::from_ranges(ranges);
+            let observation = allocation_failure::disarm();
+            assert!(matches!(result, Err(MemoryError::OutOfMemory)));
+            assert_eq!(observation.attempts, index + 1);
+            assert_eq!(observation.denied, 1);
+            assert_eq!(observation.outstanding(), 0);
+            assert!(!observation.overflow);
+            assert_eq!(ALLOCATOR.usage().live, before);
+        }
+        let pin = source
+            .allocate(PAGE, PAGE, CacheAttribute::WriteBack)
+            .unwrap();
+        allocation_failure::arm(0);
+        let single = DmaPages::from(pin);
+        let cloned = single.clone();
+        drop(single);
+        let observation = allocation_failure::disarm();
+        assert_eq!(observation.attempts, 0);
+        assert!(cloned.as_single().is_some());
+        assert_eq!(ALLOCATOR.usage().live, before + PAGE);
+        drop(cloned);
+        assert_eq!(ALLOCATOR.usage().live, before);
+    }
+
     #[test]
     fn unsorted_pin_metadata_failures_drop_the_consumed_backing() {
         use std::sync::Arc;
@@ -610,6 +658,7 @@ mod tests {
         ));
         assert_eq!(ALLOCATOR.usage().live, 0);
         metadata_failures_reclaim_payload(source);
+        scatter_metadata_failures_reclaim_every_original_pin(source);
         let geometry = source.page_geometry().unwrap();
         assert_eq!(geometry, PageGeometry::base_only(PAGE_SHIFT).unwrap());
         assert!(!geometry.supports(PAGE_SHIFT + 1));
@@ -687,7 +736,7 @@ mod tests {
         unsafe impl DmaDomain for ModelDomain {
             unsafe fn map(
                 &self,
-                pages: &stela_drivers::bus::dma::memory::PinnedPages,
+                pages: &stela_drivers::bus::dma::pages::DmaPages,
                 _: Direction,
                 _: u64,
             ) -> Result<DomainMapping, DmaError> {

@@ -226,7 +226,7 @@ mod tests {
     unsafe impl DmaDomain for Unavailable {
         unsafe fn map(
             &self,
-            _: &PinnedPages,
+            _: &crate::bus::dma::pages::DmaPages,
             _: Direction,
             _: u64,
         ) -> Result<DomainMapping, DmaError> {
