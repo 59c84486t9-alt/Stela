@@ -16,6 +16,10 @@ use stela_runtime::machine::{
 };
 use stela_runtime::memory::RegisteredSystemRam;
 
+/// Bounded recent identities suppress loop diagnostics without retaining code,
+/// frames or execution authority. Eviction only permits a diagnostic to repeat.
+const RECENT_ARTIFACT_DIAGNOSTICS: usize = 256;
+
 pub(crate) struct FixedWorkers<'a> {
     bsp: Option<WorkerOwner>,
     executors: &'a Executors,
@@ -23,7 +27,8 @@ pub(crate) struct FixedWorkers<'a> {
     tsc_hz: u64,
     ram: Arc<RegisteredSystemRam>,
     // Diagnostics retain identities, never execution authority or live loans.
-    last_artifacts: Vec<NativeRunIdentity>,
+    recent_artifacts: Vec<NativeRunIdentity>,
+    next_artifact_slot: usize,
     reported_services: Vec<(publication::WorkerBinding, &'static str)>,
 }
 impl<'a> FixedWorkers<'a> {
@@ -39,7 +44,8 @@ impl<'a> FixedWorkers<'a> {
             sender,
             tsc_hz,
             ram,
-            last_artifacts: Vec::new(),
+            recent_artifacts: Vec::new(),
+            next_artifact_slot: 0,
             reported_services: Vec::new(),
         }
     }
@@ -151,23 +157,15 @@ unsafe impl NativeTransport for FixedWorkers<'_> {
         let mut bsp = None;
         for frame in frames {
             let identity = frame.identity();
-            let previous = self
-                .last_artifacts
-                .iter_mut()
-                .find(|old| old.pe == identity.pe);
-            let changed = match previous {
-                Some(old) if old == identity => false,
-                Some(old) => {
-                    *old = identity.clone();
-                    true
-                }
-                None => {
-                    self.last_artifacts.push(identity.clone());
-                    true
-                }
-            };
-            if changed {
+            if !self.recent_artifacts.contains(identity) {
                 crate::output::arguments(format_args!("NATIVE SCHEDULER artifact {identity:?}\n"));
+                if self.recent_artifacts.len() == RECENT_ARTIFACT_DIAGNOSTICS {
+                    self.recent_artifacts[self.next_artifact_slot] = identity.clone();
+                    self.next_artifact_slot =
+                        (self.next_artifact_slot + 1) % RECENT_ARTIFACT_DIAGNOSTICS;
+                } else {
+                    self.recent_artifacts.push(identity.clone());
+                }
             }
             let loan = engine::dispatch_native_run(inventory, frame)
                 .unwrap_or_else(|_| fail("actual native frame dispatch refused"));
