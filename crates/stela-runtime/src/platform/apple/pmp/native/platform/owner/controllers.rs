@@ -1155,4 +1155,62 @@ mod tests {
             .is_err()
         );
     }
+    #[test]
+    fn provider_cache_refuses_another_native_capture_on_the_same_actual_ptd() {
+        use crate::platform::apple::pmp::native;
+        use native::{counters::Frames, power::DeviceTable};
+        let (native, mut own_frames, mut cache, mut manager) = cache_fixture();
+        let mut foreign = native::Owner::initialized(
+            native.notifications().clone(),
+            [1, 2, 3, 4, 5, 6, 7, 8, 0, 10, 11, 12, 13, 14, 0],
+            MissingNativeResources,
+        )
+        .unwrap();
+        let profile = native::platform::authored_profile();
+        let raw: Vec<u8> = profile
+            .descriptors()
+            .iter()
+            .flat_map(|d| d.raw_soc_device().iter().flat_map(|w| w.to_le_bytes()))
+            .collect();
+        let table = DeviceTable::from_properties(&raw, &0x3fff0u64.to_le_bytes(), None).unwrap();
+        let mut foreign_frames =
+            Frames::initialized(foreign.claim_counter_frames().unwrap(), &table, &[0; 144])
+                .unwrap();
+        assert!(
+            native
+                .notifications()
+                .owns(foreign_frames.notifications().bank())
+        );
+        advance(
+            &mut manager,
+            &request(1, 1, None),
+            ManagerEffect::BeforeCapture,
+            context(),
+        );
+        let mut irq = InterruptLatch::default();
+        let mut access = Access::new(0, 25, &mut irq);
+        let foreign_capture = foreign_frames.capture_pending(&access).unwrap();
+        assert!(
+            cache
+                .bind_capture(&foreign_frames, &foreign_capture)
+                .is_err()
+        );
+        let own_capture = own_frames.capture_pending(&access).unwrap();
+        cache.bind_capture(&own_frames, &own_capture).unwrap();
+        assert!(matches!(
+            cache.read(&foreign_frames, &foreign_capture, 2, 0, &mut access),
+            Completion::Refused(_)
+        ));
+        assert!(matches!(
+            cache.read_bound(&foreign_frames, 2, 0, &mut access),
+            Completion::Refused(_)
+        ));
+        assert_eq!(cache.consumed(), 0);
+        assert_eq!(manager.scratch(), [0; 32]);
+        assert!(matches!(
+            cache.read(&own_frames, &own_capture, 2, 0, &mut access),
+            Completion::Retired { refusal: None, .. }
+        ));
+        assert_eq!(cache.consumed(), 1);
+    }
 }

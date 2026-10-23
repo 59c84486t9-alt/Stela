@@ -255,9 +255,7 @@ impl Cache {
         if let Some(e) = self.fault {
             return Err(e);
         }
-        if !self.claim.local.owns(frames.notifications().bank()) {
-            return Err("provider cache and manager capture have different PTD owners");
-        }
+        frames.validate_native_recipient(&self.claim.local, &self.claim.alive)?;
         frames.validate_capture(captured)?;
         let generation = self.masks.generation();
         if generation == 0 {
@@ -281,9 +279,7 @@ impl Cache {
         if let Some(e) = self.fault {
             return Err(e);
         }
-        if !self.claim.local.owns(frames.notifications().bank()) {
-            return Err("provider-cache consumer has a foreign actual PTD bank");
-        }
+        frames.validate_native_recipient(&self.claim.local, &self.claim.alive)?;
         frames.validate_capture_identity(
             self.capture
                 .as_ref()

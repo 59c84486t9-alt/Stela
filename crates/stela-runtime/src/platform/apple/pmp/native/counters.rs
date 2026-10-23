@@ -255,6 +255,20 @@ impl Frames {
         }
         Ok(())
     }
+    /// Same actual native recipient, not merely another Frames over this PTD.
+    /// The supplied liveness Rc is the existing native claim identity; it does
+    /// not mint a recipient, revive an owner or authorize a capture/consume.
+    pub(in crate::platform::apple::pmp::native) fn validate_native_recipient(
+        &self,
+        local: &LocalNotifications,
+        alive: &Rc<Cell<bool>>,
+    ) -> Result<(), Error> {
+        self.check_bank(local)?;
+        if !Rc::ptr_eq(&self.claim.alive, alive) || !alive.get() {
+            return Err("PMP frames belong to a different actual native recipient");
+        }
+        Ok(())
+    }
     pub fn initialized(
         claim: Claim,
         table: &DeviceTable,
