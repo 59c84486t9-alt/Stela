@@ -52,7 +52,7 @@ impl Descriptor {
 
 /// USB2's two variable bitmaps include the hub's bit zero. Never accept a
 /// nine-byte prefix of a descriptor for an eight-or-more-port hub.
-pub(super) struct Usb2Descriptor {
+pub(in crate::usb::xhci) struct Usb2Descriptor {
     pub ports: u8,
     pub power_good_us: u64,
     pub controller_ma: u16,
