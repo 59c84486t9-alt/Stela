@@ -139,8 +139,8 @@ int main(void){
 bodies = [function(path,name) for path,name in helpers]
 code = pre + '\n'.join(parts+bodies) + main
 unit = out/'management-ccmp.c';unit.write_text(code);binary=out/'management-ccmp'
-subprocess.run(['clang','-std=c11','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all',str(unit),'-o',str(binary)],check=True)
-trace = subprocess.check_output([str(binary.resolve())]);assert len(trace)==1_508_160
+subprocess.run(['clang','-std=c11','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all',str(unit),'-o',str(binary)],check=True,timeout=120)
+trace = subprocess.check_output([str(binary.resolve())],timeout=60);assert len(trace)==1_508_160
 (out/'management-ccmp.trace').write_bytes(trace)
 receipt = {'linux_commit':PIN,'sources':pins,'layouts':layouts,'rx_flags_sha256':hashlib.sha256(parts[-1].encode()).hexdigest(),'helpers':{name:hashlib.sha256(body.encode()).hexdigest() for (_,name),body in zip(helpers,bodies)},'harness_sha256':hashlib.sha256(code.encode()).hexdigest(),'cases':3*5*6*2*64,'trace_bytes':len(trace),'trace_sha256':hashlib.sha256(trace).hexdigest(),'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'oracle_limit':['Complete source selected-key CCMP helper under modeled DECRYPTED status and real source parse_qos counter16; actual IV retained, MIC retained/stripped, all17 replay counters and successful output bytes.','Software crypto and encrypted-association branches trap if reached. No AES-CCM crypto substitute, hardware MIC proof, whole RX dispatcher, PMF association, frame fragmentation/aggregation or physical radio acceptance. Native additionally requires current PTK/peer/local/BSSID/integrity and rejects hardware replay failures before committing its PN.']}
 (out/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n');print(json.dumps(receipt))

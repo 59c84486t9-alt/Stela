@@ -68,8 +68,8 @@ if management:
  code=code.replace('s->qos_ctl=kind==16?0:kind;', 's->qos_ctl=kind<16?kind:0;')
  code=code.replace('a<17;a++)for(unsigned b=0;b<17', 'a<20;a++)for(unsigned b=0;b<20')
 unit=out/'mixed-replay.c';unit.write_text(code);binary=out/'mixed-replay'
-subprocess.run(['clang','-std=c11','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all',str(unit),'-o',str(binary)],check=True)
-trace=subprocess.check_output([str(binary.resolve())]);assert len(trace)==kinds*kinds*4*7*7*106
+subprocess.run(['clang','-std=c11','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all',str(unit),'-o',str(binary)],check=True,timeout=120)
+trace=subprocess.check_output([str(binary.resolve())],timeout=60);assert len(trace)==kinds*kinds*4*7*7*106
 (out/'mixed-replay.trace').write_bytes(trace)
 receipt={'linux_commit':PIN,'sources':dict(zip(['drivers/net/wireless/mediatek/mt76/mac80211.c','include/net/mac80211.h'],pins)),'helper_sha256':hashlib.sha256(helper.encode()).hexdigest(),'flags_sha256':hashlib.sha256(flags.encode()).hexdigest(),'harness_sha256':hashlib.sha256(code.encode()).hexdigest(),'cases':kinds*kinds*4*7*7,'trace_sha256':hashlib.sha256(trace).hexdigest(),'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'oracle_limit':['Accepted profile is ordinary protected unfragmented data with actual modeled decrypted/IV-stripped PN observations. No physical MIC verification, fragments, aggregation or protected management authority is established.','Non-QoS source status qos_ctl is zero, matching native source parsing; the complete PN helper chooses its own counter and mutates all 17 modeled queues.']}
 if management:
