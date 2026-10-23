@@ -184,6 +184,7 @@ enum Model {
 }
 
 pub struct Dart {
+    profile: Profile,
     model: Model,
 }
 
@@ -200,6 +201,7 @@ impl Dart {
     /// The existing cacheless revision-1 t8110 profile.
     pub fn new(streams: usize, irq: Option<AicInput>) -> Self {
         Self {
+            profile: Profile::T8110,
             model: Model::T8110(t8110::Dart::new(streams, irq)),
         }
     }
@@ -215,6 +217,7 @@ impl Dart {
             return Err("DART stream count is outside the selected native profile");
         }
         Ok(Self {
+            profile,
             model: match profile {
                 Profile::T8110 | Profile::T8110Rev22 => Model::T8110(t8110::Dart::for_version(
                     t8110::version(profile),
@@ -226,6 +229,11 @@ impl Dart {
                 }
             },
         })
+    }
+
+    /// Actual construction profile, retained independently of optional views.
+    pub fn profile(&self) -> Profile {
+        self.profile
     }
 
     /// Constructed incoming-SID capacity, independent of enable/configuration
@@ -243,6 +251,7 @@ impl Dart {
         t8110::Dart::group(streams, irq, count)
             .into_iter()
             .map(|model| Self {
+                profile: Profile::T8110,
                 model: Model::T8110(model),
             })
             .collect()
@@ -263,6 +272,7 @@ impl Dart {
                 t8110::Dart::group_for_version(t8110::version(profile), streams, irq, count)
                     .into_iter()
                     .map(|model| Self {
+                        profile,
                         model: Model::T8110(model),
                     })
                     .collect()
@@ -270,6 +280,7 @@ impl Dart {
             Profile::T8020 | Profile::T6000 => legacy::Dart::group(profile, streams, irq, count)
                 .into_iter()
                 .map(|model| Self {
+                    profile,
                     model: Model::Legacy(model),
                 })
                 .collect(),
@@ -597,6 +608,34 @@ mod tests {
             assert!(!model.can_attach_smmu());
             let constructed = Dart::for_profile(profile, 16, None).unwrap().with_smmu();
             assert_eq!(constructed.is_ok(), supported);
+        }
+    }
+
+    #[test]
+    fn construction_profile_survives_grouping_and_optional_views() {
+        assert_eq!(Dart::new(16, None).profile(), Profile::T8110);
+        for dart in Dart::group(16, None, 2) {
+            assert_eq!(dart.profile(), Profile::T8110);
+        }
+        for profile in [
+            Profile::T8020,
+            Profile::T6000,
+            Profile::T8110,
+            Profile::T8110Rev22,
+        ] {
+            assert_eq!(
+                Dart::for_profile(profile, 16, None)
+                    .unwrap()
+                    .with_apf(1)
+                    .profile(),
+                profile
+            );
+            for dart in Dart::group_for_profile(profile, 16, None, 2).unwrap() {
+                assert_eq!(dart.profile(), profile);
+                if dart.supports_smmu() {
+                    assert_eq!(dart.with_smmu().unwrap().profile(), profile);
+                }
+            }
         }
     }
 

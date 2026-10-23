@@ -16,6 +16,94 @@ pub struct PmpController {
 }
 
 impl PmpController {
+    /// Read the static physical-parent/nub inputs used by the qualified RTBuddy
+    /// startup. This is not an observer of later IORegistry property overrides.
+    /// The caller must exclude those overrides for the lifetime of native DMA.
+    pub fn native_dma_configuration(
+        &self,
+        tree: &[u8],
+    ) -> Result<(Option<u32>, Option<u64>), String> {
+        let root = Node::root(tree).ok_or("PMP configuration ADT is malformed")?;
+        let children = root
+            .children()
+            .ok_or("PMP configuration root is malformed")?;
+        let mut ios = children
+            .into_iter()
+            .filter(|n| n.property("name") == Some(b"arm-io\0"));
+        let io = ios.next().ok_or("PMP configuration has no arm-io")?;
+        if ios.next().is_some() {
+            return Err("PMP configuration has duplicate arm-io nodes".into());
+        }
+        let mut found = None;
+        for node in io
+            .children()
+            .ok_or("PMP configuration arm-io is malformed")?
+        {
+            if !node.compatible(ASC) || node.property("role") != Some(b"PMP\0") {
+                continue;
+            }
+            let registers =
+                apertures::registers(&node).ok_or("PMP configuration reg is malformed")?;
+            let &(address, bytes) = registers
+                .first()
+                .ok_or("PMP configuration wrapper is absent")?;
+            if (io.translate_range(address, bytes), bytes) != (Some(self.wrapper.0), self.wrapper.1)
+            {
+                continue;
+            }
+            if found.is_some() {
+                return Err("PMP configuration has ambiguous physical owners".into());
+            }
+            if native_dma_phandle(&node, "iommu-parent")? != self.mapper || self.mapper.is_none() {
+                return Err("PMP configuration IOMapper differs from its retained source".into());
+            }
+            let nub = rtbuddy_nub(&node, "PMP native DMA")?;
+            for owner in [&node, &nub] {
+                let properties = owner
+                    .properties()
+                    .ok_or("PMP configuration properties are malformed")?;
+                if properties
+                    .iter()
+                    .enumerate()
+                    .any(|(i, (name, _))| properties[..i].iter().any(|(prior, _)| prior == name))
+                {
+                    return Err("PMP configuration owner has duplicate properties".into());
+                }
+            }
+            let property =
+                |node: &Node<'_>, name: &str, bytes: usize| -> Result<Option<u64>, String> {
+                    let properties = node
+                        .properties()
+                        .ok_or("PMP configuration properties are malformed")?;
+                    let mut values = properties
+                        .into_iter()
+                        .filter(|(key, _)| *key == name.as_bytes());
+                    let Some((_, value)) = values.next() else {
+                        return Ok(None);
+                    };
+                    if values.next().is_some() || value.len() != bytes {
+                        return Err(format!(
+                            "PMP configuration {name} is duplicate or has the wrong width"
+                        ));
+                    }
+                    let mut cell = [0; 8];
+                    cell[..bytes].copy_from_slice(value);
+                    Ok(Some(u64::from_le_bytes(cell)))
+                };
+            if property(&nub, "user-power-managed", 4)? != Some(1) {
+                return Err("PMP native DMA nub is not user-power-managed".into());
+            }
+            if bytes < asc::WRAPPER_BYTES {
+                return Err("PMP native DMA wrapper is too short".into());
+            }
+            found = Some((
+                property(&node, "mapper-index", 4)?.map(|v| v as u32),
+                property(&nub, "asc-dram-mask", 8)?,
+            ));
+        }
+        found.ok_or_else(|| "PMP configuration has no matching physical source owner".into())
+    }
+
     /// Join the original phandle to one declared actual DART context. Buffer
     /// mapping must subsequently use that placed owner, preserving its remap.
     pub fn dma_route(&self, darts: &[Iommu]) -> Result<NativeDmaRoute, String> {
