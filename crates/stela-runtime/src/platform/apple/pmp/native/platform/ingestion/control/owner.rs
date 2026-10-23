@@ -10,6 +10,34 @@ use super::{
 use crate::platform::apple::bus::Access;
 use crate::platform::apple::ptd::transport::notifications::LocalNotifications;
 use alloc::{collections::VecDeque, rc::Rc, vec::Vec};
+use core::cell::Cell;
+
+/// Retained identity of the actual101cff0 context allocation. Cloning carries
+/// that identity, not permission to mark registration complete or set flags.
+#[derive(Clone)]
+pub struct AuxiliaryBinding {
+    identity: Identity,
+    slot: usize,
+    source: u32,
+    registered: Rc<Cell<bool>>,
+}
+impl AuxiliaryBinding {
+    pub fn slot(&self) -> usize {
+        self.slot
+    }
+    pub fn source(&self) -> u32 {
+        self.source
+    }
+    pub fn registered(&self) -> bool {
+        self.registered.get()
+    }
+    pub(in crate::platform::apple::pmp::native) fn same(&self, other: &Self) -> bool {
+        self.identity.same(&other.identity)
+            && self.slot == other.slot
+            && self.source == other.source
+            && Rc::ptr_eq(&self.registered, &other.registered)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Signature {
@@ -19,9 +47,17 @@ enum Signature {
         mode: u32,
         activation: u32,
     },
+    ConfigureAuxiliary {
+        slot: usize,
+        flags: u16,
+        thresholds: u16,
+        period: u32,
+        activation: u32,
+    },
 }
 #[derive(Clone, Copy)]
 enum After {
+    Registered(usize),
     Nothing,
     SavedFlags(usize, usize),
     Packed(usize),
@@ -32,6 +68,7 @@ enum After {
 }
 #[derive(Clone)]
 enum Step {
+    ConfigureAuxiliary(usize, u16, u16, u32),
     Slot(usize),
     Transition(usize, u32),
     Mode(usize, u32),
@@ -76,6 +113,8 @@ pub struct Owner {
     configuration: Configuration,
     image: SoftwareImage,
     identity: Identity,
+    auxiliary: [AuxiliaryBinding; 4],
+    last_reset: [Option<super::super::super::super::interrupts::AuxiliaryReset>; 4],
     resources: Option<Identity>,
     local: Option<LocalNotifications>,
     sequence: u64,
@@ -91,10 +130,19 @@ impl Owner {
         image: SoftwareImage,
     ) -> Result<Self, Error> {
         image.check(&configuration)?;
+        let identity = Identity::new();
+        let auxiliary = core::array::from_fn(|slot| AuxiliaryBinding {
+            identity: identity.clone(),
+            slot,
+            source: configuration.rows[slot].words[1],
+            registered: Rc::new(Cell::new(false)),
+        });
         Ok(Self {
             configuration,
             image,
-            identity: Identity::new(),
+            identity,
+            auxiliary,
+            last_reset: core::array::from_fn(|_| None),
             resources: None,
             local: None,
             sequence: 0,
@@ -116,6 +164,105 @@ impl Owner {
     }
     pub fn refusal(&self) -> Option<&'static str> {
         self.fault
+    }
+
+    /// Context identity only. The root may retain it in the actual registration
+    /// resource closure before configure_auxiliary; it grants no admission.
+    pub fn auxiliary_binding(&self, slot: usize) -> Result<AuxiliaryBinding, Error> {
+        self.auxiliary.get(slot).cloned().ok_or(Error::Contract(
+            "auxiliary binding slot exceeds source geometry",
+        ))
+    }
+    /// Read-only query; initial software flags alone cannot make this Some.
+    pub fn registered_auxiliary(&self, slot: usize) -> Result<Option<AuxiliaryBinding>, Error> {
+        let binding = self.auxiliary_binding(slot)?;
+        Ok(binding.registered().then_some(binding))
+    }
+    /// Actual101d02c store, admitted only by a live same-allocation callback
+    /// receipt produced AFTER that callback's disable retired. Replay returns
+    /// its retained result without reasserting a flag already consumed later.
+    pub fn reset_slot(
+        &mut self,
+        reset: &super::super::super::super::interrupts::AuxiliaryReset,
+    ) -> Completion<()> {
+        let slot = reset.slot();
+        let Some(binding) = self.auxiliary.get(slot) else {
+            return Completion::Refused("auxiliary reset slot exceeds actual control owner");
+        };
+        if let Err(reason) = reset.validate(binding) {
+            return Completion::Refused(reason);
+        }
+        if let Some(previous) = &self.last_reset[slot] {
+            match reset.after(previous) {
+                Err(reason) => return Completion::Refused(reason),
+                Ok(false) => {
+                    return Completion::Retired {
+                        value: (),
+                        refusal: None,
+                    };
+                }
+                Ok(true) => {}
+            }
+        }
+        self.image.slots[slot].raw[0] = 1;
+        self.last_reset[slot] = Some(reset.clone());
+        Completion::Retired {
+            value: (),
+            refusal: None,
+        }
+    }
+
+    /// Actual101ced0 configuration producer. Inputs are source software
+    /// configuration, never measured readiness. The typed resource must retain
+    /// actual callback registration before the source transition can advance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn configure_auxiliary(
+        &mut self,
+        request: &super::super::super::owner::Request,
+        source_step: u64,
+        slot: usize,
+        flags: u16,
+        thresholds: u16,
+        period: u32,
+        activation: u32,
+        resources: &mut impl Resources,
+        access: &mut Access<'_>,
+    ) -> Completion<Value> {
+        if slot >= 4 {
+            return Completion::Refused("auxiliary configuration exceeds source slots");
+        }
+        let caller = Caller::Transition(request.clone(), source_step);
+        let signature = Signature::ConfigureAuxiliary {
+            slot,
+            flags,
+            thresholds,
+            period,
+            activation,
+        };
+        match self.resume(&caller, &signature, resources) {
+            Err(error) => return Completion::Refused(reason(error)),
+            Ok(true) => return retired(),
+            Ok(false) => {}
+        }
+        if self.pending.is_none() {
+            if let Some((last, step)) = &self.last_transition {
+                if (request.serial(), request.operation(), source_step)
+                    <= (last.serial(), last.operation(), *step)
+                {
+                    return Completion::Refused("auxiliary configuration source cursor is stale");
+                }
+            }
+            if let Err(error) = self.begin(
+                caller,
+                signature,
+                activation,
+                None,
+                Some(Step::ConfigureAuxiliary(slot, flags, thresholds, period)),
+            ) {
+                return Completion::Refused(reason(error));
+            }
+        }
+        self.advance(None, resources, access)
     }
 
     /// Actual current manager capture and the outer ingestion's activation
@@ -428,6 +575,9 @@ impl Owner {
     }
     fn after(&mut self, after: After, value: ResourceValue) -> Result<(), Error> {
         match (after, value) {
+            (After::Registered(slot), ResourceValue::Complete) => {
+                self.auxiliary[slot].registered.set(true)
+            }
             (After::Nothing, ResourceValue::Complete) => {}
             (After::SavedFlags(slot, member), ResourceValue::Word(value)) => {
                 self.image.slots[slot].members[member][20] = value as u8 & 1;
@@ -497,6 +647,40 @@ impl Owner {
     fn software(&mut self, step: Step, frames: Option<&Frames>) -> Result<Vec<Step>, Error> {
         let mut out = Vec::new();
         match step {
+            Step::ConfigureAuxiliary(slot, flags, thresholds, period) => {
+                let state = &mut self.image.slots[slot];
+                if period != 0 {
+                    state.timer[2] = period;
+                }
+                for (member, raw) in state
+                    .members
+                    .iter_mut()
+                    .zip(&self.configuration.rows[slot].members)
+                {
+                    if raw[0] != 0 {
+                        member[..5].copy_from_slice(&[1, 0, 0, 0, 0]);
+                    }
+                }
+                for i in 0..2 {
+                    state.raw[1 + i] |= (flags >> (8 * i)) as u8;
+                    state.raw[3 + i] |= (thresholds >> (8 * i)) as u8;
+                }
+                if state.raw[1] | state.raw[2] != 0 {
+                    // Raw native pointer bytes remain provenance only; the
+                    // actual context is the same-owner AuxiliaryBinding.
+                    put_word(&mut state.raw, 24, slot as u32);
+                    out.push(Step::Resource(
+                        Operation::RegisterAuxiliary {
+                            slot,
+                            source: self.configuration.rows[slot].words[1],
+                        },
+                        After::Registered(slot),
+                    ));
+                    if self.pending.as_ref().unwrap().activation == 1 {
+                        out.push(Step::Transition(slot, 0));
+                    }
+                }
+            }
             Step::Slot(slot) if slot < 4 => {
                 if self.image.slots[slot].raw[0] == 1 {
                     out.extend([
@@ -1494,6 +1678,257 @@ mod tests {
         ));
         assert_eq!(resources.calls.len(), 1);
     }
+    #[test]
+    fn source_configure_retains_registration_prefix_and_does_not_register_thresholds_alone() {
+        let (_, local, mut latch) = setup();
+        let cfg = Configuration::t8112(&descriptor(4)).unwrap();
+        let mut image = SoftwareImage::zeroed(&cfg);
+        put_word(&mut image.slots[0].raw, 8, 1);
+        image.slots[0].members[8][..5].fill(7);
+        let mut owner = Owner::initialized_software(cfg, image).unwrap();
+        let mut resources = Actual::new(local);
+        let req = request(1);
+        owner
+            .begin(
+                Caller::Tail(req.clone()),
+                Signature::ConfigureAuxiliary {
+                    slot: 0,
+                    flags: 0,
+                    thresholds: 0xffff,
+                    period: 7,
+                    activation: 1,
+                },
+                1,
+                None,
+                Some(Step::ConfigureAuxiliary(0, 0, 0xffff, 7)),
+            )
+            .unwrap();
+        complete(owner.advance(None, &mut resources, &mut Access::new(0, 1, &mut latch)));
+        assert!(resources.calls.is_empty());
+        assert_eq!(owner.image.slots[0].raw[1..5], [0, 0, 255, 255]);
+        assert_eq!(owner.image.slots[0].members[8][..5], [1, 0, 0, 0, 0]);
+        assert_eq!(owner.image.slots[0].timer[2], 7);
+        assert!(owner.registered_auxiliary(0).unwrap().is_none());
+        owner
+            .begin(
+                Caller::Tail(req),
+                Signature::ConfigureAuxiliary {
+                    slot: 0,
+                    flags: 0x200,
+                    thresholds: 0,
+                    period: 0,
+                    activation: 1,
+                },
+                1,
+                None,
+                Some(Step::ConfigureAuxiliary(0, 0x200, 0, 0)),
+            )
+            .unwrap();
+        resources.busy = true;
+        assert!(matches!(
+            owner.advance(None, &mut resources, &mut Access::new(0, 2, &mut latch)),
+            Completion::Busy { .. }
+        ));
+        assert!(!owner.auxiliary_binding(0).unwrap().registered());
+        assert_eq!(word(&owner.image.slots[0].raw, 8), 1);
+        resources.retired_error = true;
+        assert!(matches!(
+            owner.advance(None, &mut resources, &mut Access::new(0, 3, &mut latch)),
+            Completion::Refused(_)
+        ));
+        assert!(owner.registered_auxiliary(0).unwrap().unwrap().registered());
+        assert_eq!(word(&owner.image.slots[0].raw, 8), 1); // Transition is still owed.
+        complete(owner.advance(None, &mut resources, &mut Access::new(0, 4, &mut latch)));
+        assert_eq!(word(&owner.image.slots[0].raw, 8), 0);
+        assert_eq!(owner.image.slots[0].timer[2], 7); // Input0 preserves source period.
+        assert_eq!(
+            resources.calls[0].1,
+            Operation::RegisterAuxiliary {
+                slot: 0,
+                source: 64
+            }
+        );
+        assert!(resources.calls[0].0.same_operation(&resources.calls[1].0));
+        assert_eq!(
+            resources
+                .calls
+                .iter()
+                .filter(|(_, op)| matches!(op, Operation::RegisterAuxiliary { .. }))
+                .count(),
+            2
+        ); // Busy then one actual retirement.
+    }
+
+    #[test]
+    fn actual_auxiliary_callback_binds_same_control_and_preserves_busy_reset_and_replay() {
+        use super::super::super::super::super::interrupts as irq;
+        use alloc::boxed::Box;
+        use core::cell::RefCell;
+        struct Device(irq::Placement);
+        impl irq::Device for Device {
+            fn placement(&self) -> irq::Placement {
+                self.0
+            }
+            fn read(&mut self, offset: u64, _: &mut Access<'_>) -> Result<u32, irq::Error> {
+                Ok(match offset {
+                    4 => 512,
+                    0x14 => 0xa4,
+                    0xc000 => 0x10040,
+                    _ => panic!("unexpected authored IRQ read"),
+                })
+            }
+            fn write(&mut self, offset: u64, _: u32, _: &mut Access<'_>) -> Result<(), irq::Error> {
+                assert_eq!(offset, 0x14);
+                Ok(()) // Current-source disable has no extra MMIO.
+            }
+            fn order(&mut self, _: &mut Access<'_>) -> Result<(), irq::Error> {
+                Ok(())
+            }
+            fn irq_pending(&mut self, _: &mut Access<'_>) -> Result<bool, irq::Error> {
+                Ok(false)
+            }
+        }
+        struct Target(
+            Rc<RefCell<Owner>>,
+            Rc<RefCell<Vec<irq::AuxiliaryReset>>>,
+            bool,
+        );
+        impl irq::AuxiliaryTarget for Target {
+            fn reset_slot(
+                &mut self,
+                reset: &irq::AuxiliaryReset,
+                _: &mut Access<'_>,
+            ) -> Completion<()> {
+                self.1.borrow_mut().push(reset.clone());
+                if core::mem::take(&mut self.2) {
+                    return Completion::Busy { deadline: None };
+                }
+                self.0.borrow_mut().reset_slot(reset)
+            }
+        }
+        let (_, local, mut latch) = setup();
+        let d = descriptor(4);
+        let cfg = Configuration::t8112(&d).unwrap();
+        let control = Rc::new(RefCell::new(
+            Owner::initialized_software(cfg.clone(), SoftwareImage::zeroed(&cfg)).unwrap(),
+        ));
+        let binding = control.borrow().auxiliary_binding(0).unwrap();
+        let receipts = Rc::new(RefCell::new(Vec::new()));
+        let p = irq::Placement::t8112(0).unwrap();
+        let mut irq = irq::Owner::t8112(
+            p,
+            Box::new(Device(p)),
+            irq::SoftwareConfiguration::default(),
+        )
+        .unwrap();
+        irq.initialize(&mut Access::new(0, 1, &mut latch)).unwrap();
+        // Retain actual native registration in the typed source resource.
+        struct Register<'a> {
+            actual: Actual,
+            native: &'a mut irq::Owner,
+            handler: Option<Box<dyn irq::Handler>>,
+        }
+        impl Resources for Register<'_> {
+            fn identity(&self) -> &Identity {
+                self.actual.identity()
+            }
+            fn notifications(&self) -> &LocalNotifications {
+                self.actual.notifications()
+            }
+            fn call(
+                &mut self,
+                req: &ResourceRequest,
+                op: Operation,
+                a: &mut Access<'_>,
+            ) -> Completion<ResourceValue> {
+                if let Operation::RegisterAuxiliary { source, .. } = op {
+                    self.native
+                        .register(source, self.handler.take().unwrap())
+                        .unwrap();
+                    Completion::Retired {
+                        value: ResourceValue::Complete,
+                        refusal: None,
+                    }
+                } else {
+                    self.actual.call(req, op, a)
+                }
+            }
+        }
+        let handler = irq::AuxiliaryHandler::t8112(
+            &d,
+            0,
+            binding.clone(),
+            Target(control.clone(), receipts.clone(), true),
+        )
+        .unwrap();
+        let mut resource = Register {
+            actual: Actual::new(local),
+            native: &mut irq,
+            handler: Some(Box::new(handler)),
+        };
+        control
+            .borrow_mut()
+            .begin(
+                Caller::Tail(request(1)),
+                Signature::ConfigureAuxiliary {
+                    slot: 0,
+                    flags: 1,
+                    thresholds: 0,
+                    period: 3,
+                    activation: 0,
+                },
+                0,
+                None,
+                Some(Step::ConfigureAuxiliary(0, 1, 0, 3)),
+            )
+            .unwrap();
+        complete(control.borrow_mut().advance(
+            None,
+            &mut resource,
+            &mut Access::new(0, 2, &mut latch),
+        ));
+        assert!(binding.registered());
+        drop(resource);
+        irq.begin_dispatch(false).unwrap();
+        assert!(matches!(
+            irq.advance_dispatch(&mut Access::new(0, 3, &mut latch)),
+            Completion::Busy { .. }
+        ));
+        assert_eq!(irq.snapshot().current_enabled, 0);
+        assert_eq!(control.borrow().image.slots[0].raw[0], 0);
+        assert!(matches!(
+            irq.advance_dispatch(&mut Access::new(0, 4, &mut latch)),
+            Completion::Retired {
+                value: irq::Outcome::Dispatched {
+                    registered: true,
+                    ..
+                },
+                refusal: None
+            }
+        ));
+        assert_eq!(control.borrow().image.slots[0].raw[0], 1);
+        assert_eq!(receipts.borrow().len(), 2);
+        let reset = receipts.borrow()[1].clone();
+        let mut foreign =
+            Owner::initialized_software(cfg.clone(), SoftwareImage::zeroed(&cfg)).unwrap();
+        assert!(matches!(foreign.reset_slot(&reset), Completion::Refused(_)));
+        control
+            .borrow_mut()
+            .software(Step::ResetFlag(0), None)
+            .unwrap();
+        assert!(matches!(
+            control.borrow_mut().reset_slot(&reset),
+            Completion::Retired { .. }
+        ));
+        assert_eq!(control.borrow().image.slots[0].raw[0], 0); // Replay cannot reassert consumed flag.
+        irq.begin_dispatch(false).unwrap();
+        assert!(matches!(
+            control.borrow_mut().reset_slot(&reset),
+            Completion::Refused(_)
+        ));
+        assert_eq!(control.borrow().image.slots[0].timer[2], 3);
+    }
+
     #[test]
     #[cfg(feature = "std")]
     #[ignore = "requires original26A434 T8112 PMP via STELA_TEST_PMP_T8112"]

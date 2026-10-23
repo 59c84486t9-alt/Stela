@@ -17,7 +17,7 @@ use crate::platform::apple::bus::Access;
 use crate::platform::apple::ptd::transport::notifications::LocalNotifications;
 use alloc::rc::Rc;
 pub use model::{Configuration, SlotImage, SoftwareImage};
-pub use owner::Owner;
+pub use owner::{AuxiliaryBinding, Owner};
 
 /// Identity of the actual retained resource composition; no completion rights.
 #[derive(Clone)]
@@ -45,6 +45,12 @@ pub enum FlagsMethod {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
+    /// Actual101cff0 callback/context registration. Backend binds the same
+    /// Owner's AuxiliaryBinding; retirement means actual registry storage.
+    RegisterAuxiliary {
+        slot: usize,
+        source: u32,
+    },
     Flags70 {
         provider: u32,
         member: u32,

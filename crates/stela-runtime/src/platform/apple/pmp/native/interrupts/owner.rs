@@ -2,6 +2,7 @@ use super::super::platform::owner::Completion;
 use super::{Device, Error, Outcome, Placement, SPECIAL, SoftwareConfiguration, refused};
 use crate::platform::apple::bus::Access;
 use alloc::{boxed::Box, rc::Rc, vec::Vec};
+use core::cell::Cell;
 
 /// Actual handler invocation, pinned to the sole consumed hardware event.
 /// Cloning this value grants no right to create another dispatch operation.
@@ -71,6 +72,8 @@ struct NestedDone {
     previous: bool,
 }
 struct Core {
+    identity: Rc<()>,
+    live_generation: Rc<Cell<u64>>,
     device: Box<dyn Device>,
     config: SoftwareConfiguration,
     count: Option<u32>,
@@ -171,8 +174,38 @@ impl Core {
 pub struct Signals<'a> {
     core: &'a mut Core,
     generation: u64,
+    event: Event,
 }
 impl Signals<'_> {
+    pub(super) fn reset_receipt(
+        &self,
+        binding: &super::super::platform::ingestion::control::AuxiliaryBinding,
+        event: Event,
+    ) -> Result<super::AuxiliaryReset, Error> {
+        self.core.check()?;
+        if !binding.registered()
+            || event != self.event
+            || event.word.is_none()
+            || binding.source() != event.source
+            || self.core.live_generation.get() != event.generation
+            || !self.core.nested_done.as_ref().is_some_and(|done| {
+                done.generation == event.generation
+                    && done.step == 0
+                    && done.source == event.source
+                    && !done.enable
+            })
+        {
+            return Err(Error::Refused(
+                "auxiliary reset requires same live actual callback and retired disable/registration",
+            ));
+        }
+        Ok(super::AuxiliaryReset::retired(
+            binding.clone(),
+            event,
+            self.core.identity.clone(),
+            self.core.live_generation.clone(),
+        ))
+    }
     pub fn current(&self) -> u32 {
         self.core.current
     }
@@ -292,8 +325,11 @@ impl Owner {
                 "native interrupt owner mapping differs from actual relocated source placement",
             ));
         }
+        let identity = Rc::new(());
         Ok(Self {
             core: Core {
+                identity: identity.clone(),
+                live_generation: Rc::new(Cell::new(0)),
                 device,
                 config: configuration,
                 count: None,
@@ -305,7 +341,7 @@ impl Owner {
                 nested: None,
                 nested_done: None,
             },
-            identity: Rc::new(()),
+            identity,
             serial: 0,
             signal: None,
             signal_done: None,
@@ -500,6 +536,7 @@ impl Owner {
             "native interrupt event generation exhausted",
         ))?;
         self.event_generation = generation;
+        self.core.live_generation.set(generation);
         self.event = Some(EventWork {
             event: Event {
                 source: SPECIAL,
@@ -633,6 +670,7 @@ impl Owner {
                             &mut Signals {
                                 core: &mut self.core,
                                 generation: work.event.generation,
+                                event: work.event,
                             },
                             access,
                         ),
