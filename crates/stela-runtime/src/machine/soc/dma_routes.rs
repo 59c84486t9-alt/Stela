@@ -1,6 +1,41 @@
 //! DeviceTree placement and validation for dma routes.
 use super::{Iommu, Node, String, Vec, format};
 
+/// Declared mapper context and its assigned incoming native DMA stream.
+/// This does not resolve a buffer address, strip a relocation tag, or grant
+/// access without the actual placed DART and its live translation tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeDmaRoute {
+    pub mapper: u32,
+    pub iommu: usize,
+    pub instance: usize,
+    pub context: u32,
+    pub stream: u32,
+}
+
+pub(super) fn native_dma_route(darts: &[Iommu], mapper: u32) -> Result<NativeDmaRoute, String> {
+    let mut found = darts.iter().enumerate().flat_map(|(index, dart)| {
+        dart.mappers
+            .iter()
+            .filter(move |(phandle, _)| *phandle == mapper)
+            .map(move |&(_, context)| (index, dart, context))
+    });
+    let (iommu, dart, context) = found.next().ok_or("mapper is not mounted")?;
+    if mapper == 0 || found.next().is_some() {
+        return Err("mapper ownership is zero or ambiguous".into());
+    }
+    if dart.instances.len() != 1 {
+        return Err("DMA owner requires explicit multiple-TRAD selection".into());
+    }
+    Ok(NativeDmaRoute {
+        mapper,
+        iommu,
+        instance: 0,
+        context,
+        stream: native_mapper_input(dart, context)?,
+    })
+}
+
 /// Owner properties are one nonzero phandle, never a truncated first word.
 pub(super) fn native_dma_phandle(node: &Node<'_>, key: &str) -> Result<Option<u32>, String> {
     node.property(key)
@@ -54,6 +89,53 @@ pub(super) fn native_mapper_input(dart: &Iommu, context: u32) -> Result<u32, Str
 mod tests {
     use super::super::*;
     use super::*;
+
+    fn dart(mapper: u32) -> Iommu {
+        Iommu {
+            profile: dart::Profile::T8110,
+            instances: alloc::vec![DartInstance {
+                physical: 0x20000,
+                bytes: 0x4000,
+                number: 0,
+                reg_index: 0,
+                owner: *b"DART\0\0\0\0",
+            }],
+            streams: 16,
+            irq: 1,
+            mappers: alloc::vec![(mapper, 0)],
+            apf: None,
+            clock_gates: Vec::new(),
+            power_gates: Vec::new(),
+            retention: false,
+            sids: alloc::vec![0],
+            remap: alloc::vec![(5, 0)],
+            vm_base: 0x4000,
+            smmu: None,
+        }
+    }
+
+    #[test]
+    fn native_route_preserves_context_and_requires_one_declared_owner() {
+        let actual = dart(0x7d);
+        assert_eq!(
+            native_dma_route(&[dart(1), actual.clone()], 0x7d).unwrap(),
+            NativeDmaRoute {
+                mapper: 0x7d,
+                iommu: 1,
+                instance: 0,
+                context: 0,
+                stream: 5,
+            }
+        );
+        assert!(native_dma_route(&[actual.clone(), actual.clone()], 0x7d).is_err());
+        assert!(native_dma_route(&[], 0x7d).is_err());
+        let mut multiple = actual.clone();
+        multiple.instances.push(multiple.instances[0].clone());
+        assert!(native_dma_route(&[multiple], 0x7d).is_err());
+        let mut foreign = actual;
+        foreign.sids = alloc::vec![1];
+        assert!(native_dma_route(&[foreign], 0x7d).is_err());
+    }
 
     #[test]
     fn native_dma_owner_properties_keep_complete_lists_and_refuse_truncation() {

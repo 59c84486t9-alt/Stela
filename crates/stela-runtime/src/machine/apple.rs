@@ -5055,6 +5055,7 @@ mod tests {
                 wrapper: (WRAPPER, 0x6c000),
                 interrupts: [0x275, 0x274, 0x277, 0x276],
                 quiesced: false,
+                mapper: None,
             })
             .unwrap();
         assert_eq!(devices.power_devices.len(), 2);

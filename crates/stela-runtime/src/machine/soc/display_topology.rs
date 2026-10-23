@@ -1,5 +1,5 @@
 //! DeviceTree placement and validation for display topology.
-use super::dma_routes::{native_dma_mapper_list, native_dma_phandle};
+use super::dma_routes::{native_dma_mapper_list, native_dma_phandle, native_dma_route};
 use super::{
     ASC, DCP_EXPERT, DCP_EXPERT_HARDWARE_FEATURES, DISPLAY_CROSSBAR, DPTX_PHY, Iommu, Node, String,
     Vec, asc, dcp, external_output, format, rtbuddy_nub,
@@ -152,30 +152,8 @@ pub(super) fn dcp_device(
         return Err(err("mailbox interrupt exceeds the AIC encoding"));
     }
     let route = |parent: u32| -> Result<(usize, usize, u32, u32), String> {
-        let mut found = darts.iter().enumerate().flat_map(|(index, dart)| {
-            dart.mappers
-                .iter()
-                .filter(move |(phandle, _)| *phandle == parent)
-                .map(move |&(_, context)| (index, dart, context))
-        });
-        let (index, dart, context) = found.next().ok_or_else(|| err("mapper is not mounted"))?;
-        if found.next().is_some() {
-            return Err(err("mapper ownership is ambiguous"));
-        }
-        if dart.instances.len() != 1 {
-            return Err(err("DMA owner requires explicit multiple-TRAD selection"));
-        }
-        if !dart.sids.is_empty() && !dart.sids.contains(&context) {
-            return Err(err("mapper context is absent from the original SID set"));
-        }
-        // DART owner supplies this pure join. It preserves mapper context0
-        // while returning incoming5 for the original remap5->0.
-        let input = dart
-            .profile
-            .mapper_input_stream(usize::from(dart.streams), context as usize, &dart.remap)
-            .map_err(err)?;
-        let input = u32::try_from(input).map_err(|_| err("DMA input stream overflows"))?;
-        Ok((index, 0, context, input))
+        let route = native_dma_route(darts, parent).map_err(|why| err(&why))?;
+        Ok((route.iommu, route.instance, route.context, route.stream))
     };
     let phandle = native_dma_phandle(node, "AAPL,phandle").map_err(|why| err(&why))?;
     let mapper = native_dma_phandle(node, "iommu-parent")
