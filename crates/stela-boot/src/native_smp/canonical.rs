@@ -257,6 +257,40 @@ pub(crate) unsafe fn run_slice<D: Devices>(
     machine: &mut CanonicalMachine<'_, D>,
     limit: u64,
 ) -> Stop {
+    // SAFETY: same complete mount/producer contract as this entry point.
+    unsafe { run_slice_while(machine, limit, || true) }
+}
+
+/// Return to the outer host-service loop after `service_ticks` of the qualified
+/// BSP counter, even when the block limit has not been reached. The caller
+/// chooses the wall-time service interval from its calibrated counter rate.
+/// One recovered round or synchronous device completion can exceed the interval;
+/// a live frame, retained device continuation or Host session is never preempted.
+///
+/// # Safety
+/// The complete closed producer/mount contract of `run_slice` remains valid.
+pub(crate) unsafe fn run_slice_for<D: Devices>(
+    machine: &mut CanonicalMachine<'_, D>,
+    limit: u64,
+    service_ticks: u64,
+) -> Stop {
+    let started = host::rdtsc();
+    // SAFETY: same complete mount/producer contract as this entry point.
+    unsafe {
+        run_slice_while(machine, limit, || {
+            host::rdtsc().wrapping_sub(started) < service_ticks.max(1)
+        })
+    }
+}
+
+/// Check the host-service deadline only at the same settled boundary as the
+/// block budget. In particular, finish the entire recovered device cohort first:
+/// its next access can retain the actual stopped workers and Host sessions.
+unsafe fn run_slice_while<D: Devices>(
+    machine: &mut CanonicalMachine<'_, D>,
+    limit: u64,
+    mut continue_running: impl FnMut() -> bool,
+) -> Stop {
     loop {
         if machine.pending_native_device_access().is_some() {
             // SAFETY: same retained cohort, controller and closed producers.
@@ -265,7 +299,7 @@ pub(crate) unsafe fn run_slice<D: Devices>(
                 Err(stop) => return stop,
             }
         }
-        if machine.statistics.blocks >= limit {
+        if machine.statistics.blocks >= limit || !continue_running() {
             return Stop::Budget;
         }
         // SAFETY: same registered owner/fixed executor and closed providers.
