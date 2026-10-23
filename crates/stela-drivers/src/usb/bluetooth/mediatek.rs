@@ -416,6 +416,7 @@ mod tests {
             7, 5, 0x82, 2, 64, 0, 0, 7, 5, 2, 2, 64, 0, 0,
         ];
         let d = Device {
+            id: crate::usb::xhci::SlotId::fixture(1),
             vendor_ethernet_tcr: None,
             vendor_ethernet_revision: None,
             slot: 1,

@@ -296,6 +296,7 @@ mod tests {
                 1, 7, 5, 0x82, 2, 64, 0, 0, 7, 5, 2, 2, 64, 0, 0,
             ];
             let device = Device {
+                id: controller.borrow().test_device_id(1).unwrap(),
                 vendor_ethernet_tcr: None,
                 vendor_ethernet_revision: None,
                 slot: 1,
@@ -328,12 +329,13 @@ mod tests {
             assert_eq!(hci.state(), super::super::State::Failed);
         }
     }
-    fn firmware_device() -> Device {
+    fn firmware_device(id: xhci::SlotId) -> Device {
         let configuration = vec![
             9, 2, 39, 0, 1, 1, 0, 0x80, 50, 9, 4, 0, 0, 3, 0xe0, 1, 1, 0, 7, 5, 0x81, 3, 16, 0, 1,
             7, 5, 0x82, 2, 64, 0, 0, 7, 5, 2, 2, 64, 0, 0,
         ];
         Device {
+            id,
             vendor_ethernet_tcr: None,
             vendor_ethernet_revision: None,
             slot: 1,
@@ -360,7 +362,7 @@ mod tests {
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (controller, model) = xhci::model::cancellation_controller(&mut dma);
         let controller = Rc::new(RefCell::new(controller));
-        let device = firmware_device();
+        let device = firmware_device(controller.borrow().test_device_id(1).unwrap());
         let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
         let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
         hci.io.clock.ticks_per_microsecond = 1000;
@@ -393,7 +395,7 @@ mod tests {
         const CONTEXT_STATE_ERROR: u32 = 19;
         model.borrow_mut().fail = Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));
         let controller = Rc::new(RefCell::new(controller));
-        let device = firmware_device();
+        let device = firmware_device(controller.borrow().test_device_id(1).unwrap());
         let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
         let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
         // Use a generous real publication window: this is a timeout/ownership

@@ -98,6 +98,7 @@ pub(in crate::usb::bluetooth) mod tests {
         let len = c.len() as u16;
         c[2..4].copy_from_slice(&len.to_le_bytes());
         let d = Device {
+            id: crate::usb::xhci::SlotId::fixture(1),
             slot: 1,
             speed: HIGH_SPEED,
             location: "synthetic MT7925 media descriptors".into(),

@@ -546,6 +546,7 @@ mod tests {
         let length = configuration.len() as u16;
         configuration[2..4].copy_from_slice(&length.to_le_bytes());
         Device {
+            id: crate::usb::xhci::SlotId::fixture(1),
             vendor_ethernet_revision: None,
             vendor_ethernet_tcr: None,
             slot: 1,
@@ -911,6 +912,7 @@ mod tests {
             let (controller, model) = unconfigured_cancellation_controller(&mut dma);
             let shared: Shared = Rc::new(RefCell::new(controller));
             let mut device = Device {
+                id: shared.borrow().test_device_id(1).unwrap(),
                 vendor_ethernet_revision: None,
                 vendor_ethernet_tcr: None,
                 slot: 1,

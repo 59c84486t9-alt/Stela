@@ -139,6 +139,7 @@ fn binding(kind: Kind) -> Binding {
     let mut descriptor = [18, 1, 0, 2, 0, 0, 0, 64, 0xf3, 0x0c, 0, 0, 0, 1, 0, 0, 0, 1];
     descriptor[10..12].copy_from_slice(&product.to_le_bytes());
     let device = Device {
+        id: crate::usb::xhci::SlotId::fixture(1),
         vendor_ethernet_revision: None,
         vendor_ethernet_tcr: None,
         slot: 1,

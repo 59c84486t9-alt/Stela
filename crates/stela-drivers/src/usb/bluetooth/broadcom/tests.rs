@@ -141,6 +141,7 @@ fn device(vendor: u16, product: u16, class: u8) -> Device {
     descriptor[8..10].copy_from_slice(&vendor.to_le_bytes());
     descriptor[10..12].copy_from_slice(&product.to_le_bytes());
     Device {
+        id: crate::usb::xhci::SlotId::fixture(1),
         vendor_ethernet_revision: None,
         vendor_ethernet_tcr: None,
         slot: 1,

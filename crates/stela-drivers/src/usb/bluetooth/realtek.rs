@@ -299,6 +299,7 @@ mod tests {
             7, 5, 0x82, 2, 64, 0, 0, 7, 5, 2, 2, 64, 0, 0,
         ];
         let device = Device {
+            id: crate::usb::xhci::SlotId::fixture(1),
             slot: 1,
             speed: FULL_SPEED,
             location: "Realtek stateful HCI model".into(),

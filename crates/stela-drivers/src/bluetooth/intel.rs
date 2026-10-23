@@ -561,6 +561,7 @@ pub(crate) mod tests {
     }
     pub(crate) fn fixture() -> (Device, Catalog, Script) {
         let mut device = Device {
+            id: crate::usb::xhci::SlotId::fixture(1),
             vendor_ethernet_revision: None,
             vendor_ethernet_tcr: None,
             slot: 1,
