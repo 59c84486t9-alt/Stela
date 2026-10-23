@@ -125,8 +125,8 @@ impl Submodule {
     }
 
     /// Refuses a gitlink that names a commit `checkout` made by applying the
-    /// series: no clone can fetch it. Committing the superproject with `-a` or
-    /// an explicit `git add` of a patched submodule records one.
+    /// series: no clone can fetch it. `git commit -a` or `git add` records one
+    /// when the index has lost `hold_pin`'s flag.
     fn ensure_upstream_pin(&self) -> Result<()> {
         let committer = capture(
             self.git()
@@ -141,6 +141,14 @@ impl Submodule {
             self.path
         );
         Ok(())
+    }
+
+    /// Keeps `git commit -a` and `git add` from recording the checkout's HEAD,
+    /// a local commit of the series, as the gitlink. The flag lives in the
+    /// index, so each fetch sets it again; a new pin goes in with
+    /// `git update-index --cacheinfo`.
+    fn hold_pin(&self) -> Result<()> {
+        exec(git(tools::root()).args(["update-index", "--assume-unchanged", "--", &self.path]))
     }
 
     /// Commits or tracked edits that `export` has not written to the series.
@@ -284,6 +292,7 @@ fn checkout(submodule: &Submodule) -> Result<()> {
 pub fn fetch(force: bool) -> Result<()> {
     super::toolchain::install()?;
     for submodule in submodules()? {
+        submodule.hold_pin()?;
         if !submodule.directory().join(".git").exists() {
             initialize(&submodule)?;
             continue;
