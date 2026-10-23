@@ -483,3 +483,83 @@ fn initial_mac_access_follows_observed_config_word_swap_and_sram_arbiter() {
         8
     );
 }
+
+#[test]
+#[ignore = "UNRUN: set STELA_TG3_TRANSPORT_ORACLE from pinned unchanged-Linux tg3_transport_oracle.py"]
+fn unchanged_linux_ape_mdio_sram_transport() {
+    extern crate std;
+    use alloc::{format, string::String};
+    let path =
+        std::env::var("STELA_TG3_TRANSPORT_ORACLE").expect("fresh original Linux trace required");
+    let source = std::fs::read_to_string(path).unwrap();
+    let mut lines = source.lines();
+    let mut cases = 0;
+    while let Some(header) = lines.next() {
+        let words: Vec<_> = header.split_whitespace().collect();
+        let (mut hardware, m, write, sram) = if words[0] == "CASE" {
+            let asic = match words[1] {
+                "0" => Asic::Bcm5761,
+                "1" => Asic::Bcm5720,
+                "2" => Asic::Bcm5762,
+                _ => panic!("unknown oracle ASIC"),
+            };
+            let function = words[2].parse().unwrap();
+            let (hardware, m) = identified(asic, function);
+            m.borrow_mut()
+                .mac
+                .insert(MAC_MI_MODE, if words[3] == "1" { MI_AUTO_POLL } else { 0 });
+            (hardware, m, words[4] == "1", false)
+        } else {
+            assert_eq!(words[0], "SRAM");
+            let (hardware, m) = identified(Asic::Bcm5761, 0);
+            m.borrow_mut().sram.insert(0x1000, u32::MAX);
+            (hardware, m, words[1] == "1", true)
+        };
+        let value = match (sram, write) {
+            (false, false) => u32::from(hardware.read_phy(7).unwrap()),
+            (false, true) => {
+                hardware.write_phy(7, 0x1234).unwrap();
+                0
+            }
+            (true, false) => hardware.read_sram(0x1000).unwrap(),
+            (true, true) => {
+                hardware.write_sram(0x1000, u32::MAX).unwrap();
+                0
+            }
+        };
+        let mut expected = Vec::new();
+        let end = loop {
+            let line = lines.next().expect("complete oracle case");
+            if line.starts_with("END ") {
+                break line;
+            }
+            expected.push(String::from(line));
+        };
+        let actual: Vec<_> = m
+            .borrow()
+            .trace
+            .iter()
+            .map(|event| {
+                let (kind, at, value) = match *event {
+                    Event::Read(at, value) => ('R', at, value),
+                    Event::Write(at, value) => ('W', at, value),
+                    Event::ApeRead(at, value) => ('A', at, value),
+                    Event::ApeWrite(at, value) => ('G', at, value),
+                    Event::Delay(us) => ('D', u32::try_from(us).unwrap(), 0),
+                    _ => panic!("no config I/O in selected helper"),
+                };
+                format!("{kind} {at:08x} {value:08x}")
+            })
+            .collect();
+        assert_eq!(actual, expected, "{header}");
+        let result: Vec<_> = end.split_whitespace().collect();
+        assert_eq!(result[1], "0", "{header}");
+        assert_eq!(
+            value,
+            u32::from_str_radix(result[2], 16).unwrap(),
+            "{header}"
+        );
+        cases += 1;
+    }
+    assert_eq!(cases, 50);
+}
