@@ -833,3 +833,89 @@ fn result_poll_native_fault_and_repaired_retry_return_the_same_original_error() 
     assert!(scan.completion().is_none());
     scan.stop().unwrap();
 }
+#[test]
+fn prepublication_completed_rbs_and_backpressure_never_relabel_old_rx_as_new_scan() {
+    for case in 0..3 {
+        let bytes = bytes();
+        let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
+        let empty = resources::Catalog::from_handoff(vec![]).unwrap();
+        let native = Native::default();
+        let source = Source::default();
+        let policy = Arc::new(PolicyState::default());
+        let (mut scan, _, entry) = ready(&catalog, &empty, &source, &native, &policy, false);
+        let old = beacon_packet();
+        let mut unrelated = command_packet(
+            super::super::super::command::Id {
+                group: 0,
+                opcode: 0x99,
+                version: 0,
+            },
+            0x8000,
+            &[],
+        );
+        if case == 2 {
+            let header = unrelated[..8].to_vec();
+            unrelated.fill(0);
+            for at in (0..4096).step_by(64) {
+                unrelated[at..at + 8].copy_from_slice(&header);
+            }
+        }
+        if case != 0 {
+            complete(boot(&scan), &native.domain, entry, entry + 1, &unrelated);
+        }
+        let index = entry + u16::from(case != 0);
+        complete(
+            boot(&scan),
+            &native.domain,
+            index,
+            index + 1,
+            if case == 2 { &unrelated } else { &old },
+        );
+        let bell = native.state.lock().unwrap().registers[&0x460];
+        let allocations = source.calls.load(Ordering::Relaxed);
+        let expected = if case == 2 {
+            Ax200ScanError::ReceiveBackpressure { notifications: 128 }
+        } else {
+            Ax200ScanError::PreScanReceiveRequired
+        };
+        assert_eq!(
+            unsafe { scan.start(request(false), 30_000_000, &source) },
+            Err(expected)
+        );
+        assert_eq!(scan.protocol_phase(), scan::Phase::Idle);
+        assert!(scan.request().is_none());
+        assert!(scan.command_ticket().is_none());
+        assert_eq!(policy.acquired.load(Ordering::SeqCst), 0);
+        assert_eq!(source.calls.load(Ordering::Relaxed), allocations);
+        assert_eq!(native.state.lock().unwrap().registers[&0x460], bell);
+        if case < 2 {
+            let observed = match scan.poll_pre_scan_receive().unwrap() {
+                MpduProgress::Observed(observed) => observed,
+                _ => panic!("old raw MPDU was not retained"),
+            };
+            let length = (u32::from_le_bytes(old[..4].try_into().unwrap()) & 0x3fff) as usize + 4;
+            assert_eq!(observed.raw_packet(), &old[..length]);
+            assert_eq!(scan.protocol_phase(), scan::Phase::Idle);
+            assert!(scan.request().is_none());
+        }
+        let mut drained = 0;
+        while scan.take_other_notification().is_some() {
+            drained += 1;
+        }
+        assert_eq!(
+            drained,
+            match case {
+                0 => 0,
+                1 => 1,
+                _ => 128,
+            }
+        );
+        // Quiet original RX has now actually been observed. Only a fresh exact
+        // request can enter Submitted; old captures remain raw historical data.
+        assert_eq!(
+            unsafe { scan.start(request(false), 30_000_000, &source) }.unwrap(),
+            Ax200ScanPhase::WaitingStart
+        );
+        scan.stop().unwrap();
+    }
+}

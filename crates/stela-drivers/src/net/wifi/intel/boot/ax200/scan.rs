@@ -37,6 +37,8 @@ pub enum Ax200ScanError {
     Version { command: u8, version: u8 },
     ProbePowerRequired,
     UnsupportedRequest,
+    ReceiveBackpressure { notifications: usize },
+    PreScanReceiveRequired,
     StaleNotification,
     CompletionLength(usize),
     CompletionUid(u32),
@@ -229,6 +231,56 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
                 (0xc1, 0),
             ])
     }
+    /// Drain a genuine pre-publication MPDU as an unattributed raw observation.
+    /// It can never acquire this Scanner's later request ticket or BSS result.
+    pub fn poll_pre_scan_receive(&mut self) -> Result<MpduProgress, Ax200ScanError> {
+        let result = self.poll_pre_scan_receive_inner();
+        if let Err(error @ Ax200ScanError::Boot(_)) = &result {
+            self.first_error.get_or_insert_with(|| error.clone());
+            self.phase = Ax200ScanPhase::Failed;
+        }
+        result
+    }
+    fn poll_pre_scan_receive_inner(&mut self) -> Result<MpduProgress, Ax200ScanError> {
+        if self.phase == Ax200ScanPhase::Failed {
+            return Err(self.first_error.clone().unwrap_or(Ax200ScanError::State));
+        }
+        if self.phase != Ax200ScanPhase::NotStarted || self.scanner.phase() != protocol::Phase::Idle
+        {
+            return Err(Ax200ScanError::State);
+        }
+        let boot = &mut self
+            .mac
+            .country
+            .board
+            .scan
+            .mcc
+            .setup
+            .lari
+            .radio
+            .initialized
+            .boot;
+        if let Some(captured) = boot.hcmd.take_matching(0xc1, 0) {
+            return boot
+                .decode_captured_mpdu(captured)
+                .map_err(Ax200ScanError::Boot);
+        }
+        if matches!(
+            boot.poll_one_notification_buffer()
+                .map_err(Ax200ScanError::Boot)?,
+            NotificationPoll::Backpressure
+        ) {
+            return Ok(MpduProgress::Backpressure {
+                notifications: boot.hcmd.notification_count(),
+            });
+        }
+        if let Some(captured) = boot.hcmd.take_matching(0xc1, 0) {
+            boot.decode_captured_mpdu(captured)
+                .map_err(Ax200ScanError::Boot)
+        } else {
+            Ok(MpduProgress::Pending)
+        }
+    }
     /// Consume actual queued scan MPDUs in RX order before the matching real
     /// completion. No fabricated raw packet/current-ticket restoration path.
     pub fn poll_result(&mut self) -> Result<ScanResultProgress, Ax200ScanError> {
@@ -389,8 +441,36 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             .initialized
             .boot;
         wire::validate(&boot.firmware)?;
-        boot.poll_one_notification_buffer()
-            .map_err(Ax200ScanError::Boot)?;
+        // Capture every already-completed RB before admitting a new request.
+        // This exclusive owner never rearms inside the loop, so the real fixed
+        // pool bounds it. Backpressure cannot hide an old MCC/scan/MPDU event
+        // and cannot silently turn a pre-publication packet into a new result.
+        let mut quiet = false;
+        for _ in 0..=boot.entries {
+            match boot
+                .poll_one_notification_buffer()
+                .map_err(Ax200ScanError::Boot)?
+            {
+                NotificationPoll::Pending => {
+                    quiet = true;
+                    break;
+                }
+                NotificationPoll::Processed => (),
+                NotificationPoll::Backpressure => {
+                    return Err(Ax200ScanError::ReceiveBackpressure {
+                        notifications: boot.hcmd.notification_count(),
+                    });
+                }
+            }
+        }
+        if !quiet {
+            return Err(Ax200ScanError::ReceiveBackpressure {
+                notifications: boot.hcmd.notification_count(),
+            });
+        }
+        if boot.hcmd.has_matching(0xc1, 0) {
+            return Err(Ax200ScanError::PreScanReceiveRequired);
+        }
         if boot
             .hcmd
             .has_matching(wire::COMPLETE_OPCODE, wire::COMPLETE_GROUP)
