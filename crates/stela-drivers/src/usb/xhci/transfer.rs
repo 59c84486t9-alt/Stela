@@ -19,6 +19,41 @@ impl Controller {
     /// previous failed transfer. This does not claim completion of a currently
     /// outstanding TD; its normal completion/cancellation must still be awaited.
     pub fn endpoint_ready(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
+        self.completion_ready(slot, dci)?;
+        // Incompatible Device may be transferless; its pointer need not name
+        // any ticket. It requires slot retirement before new DMA publication.
+        let incompatible = self.pending.iter().any(|event| {
+            event.kind() == TRANSFER_EVENT
+                && event.slot() == slot
+                && event.endpoint() == dci
+                && event.code() == INCOMPATIBLE_DEVICE
+        });
+        let endpoint = self.slot(slot)?.endpoints[usize::from(dci)]
+            .as_mut()
+            .unwrap();
+        if incompatible {
+            endpoint.poisoned = true;
+            return Err(BlockError::Device {
+                status: INCOMPATIBLE_DEVICE,
+            });
+        }
+        endpoint.ring.normal.readiness()?;
+        if endpoint
+            .streams
+            .as_ref()
+            .is_some_and(streams::Streams::requires_cancellation)
+        {
+            return Err(BlockError::Unsupported(
+                "stream endpoint requires cancellation",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Completion polling may inspect an errored TD while its buffer remains
+    /// fenced against resubmission. Cancellation deliberately bypasses this
+    /// submission fence and establishes retirement through actual commands.
+    pub(super) fn completion_ready(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
         self.live_slot(slot)?;
         self.endpoint_ready_inner(slot, dci)
     }
@@ -110,6 +145,7 @@ impl Controller {
         owner: &lifecycle::Recovery,
         request: [u8; 8],
     ) -> Result<Vec<u8>, BlockError> {
+        self.validate_recovery_id(owner.id())?;
         let slot = owner.slot();
         let status = request == setup(0x80, GET_STATUS, 0, 0, 2)
             || request == setup(0xa0, GET_STATUS, 0, 0, 4);
@@ -243,6 +279,12 @@ impl Controller {
                     if status == INCOMPATIBLE_DEVICE {
                         self.slot(slot)?.endpoints[1].as_mut().unwrap().poisoned = true;
                     } else {
+                        self.slot(slot)?.endpoints[1]
+                            .as_mut()
+                            .unwrap()
+                            .ring
+                            .normal
+                            .control_failure(status);
                         self.cancel_inner(slot, 1)?;
                     }
                     return Err(BlockError::Device { status });
@@ -362,6 +404,13 @@ impl Controller {
                 & 7)
         };
         let mut current = state(self)?;
+        let clear_tt = self.slot(slot)?.endpoints[usize::from(dci)]
+            .as_ref()
+            .unwrap()
+            .ring
+            .normal
+            .needs_tt_clear()
+            || (current == ENDPOINT_HALTED && dci != 1);
         if current == ENDPOINT_RUNNING {
             // Running, including a ring whose TD just completed.
             match self.command(0, 0, STOP_ENDPOINT << 10 | target) {
@@ -404,6 +453,12 @@ impl Controller {
         self.pending.retain(|event| {
             !(event.kind() == TRANSFER_EVENT && event.slot() == slot && event.endpoint() == dci)
         });
+        // A failed split control/bulk transaction may leave the external
+        // high-speed hub's TT occupied even after xHC DMA has retired. Only
+        // the actual hub request ACK permits this endpoint to resume.
+        if clear_tt {
+            self.clear_hub_tt(slot, dci)?;
+        }
         let endpoint = self.slot(slot)?.endpoints[usize::from(dci)]
             .as_mut()
             .unwrap();

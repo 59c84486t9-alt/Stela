@@ -19,9 +19,22 @@ pub(in crate::usb::xhci) struct Queue {
     active: Vec<Active>,
     recovery: bool,
     failure: Option<BlockError>,
+    clear_tt: bool,
 }
 
 impl Queue {
+    pub(in crate::usb::xhci) fn readiness(&self) -> Result<(), BlockError> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        if self.recovery {
+            return Err(BlockError::Unsupported(
+                "xHCI transfer requires cancellation",
+            ));
+        }
+        Ok(())
+    }
+
     pub(in crate::usb::xhci) fn reserve(
         &mut self,
         trb: u64,
@@ -89,6 +102,7 @@ impl Queue {
                 // Stopped (including length-invalid and short-packet stopped)
                 // and every error retain DMA until Stop/Reset/SetDequeue ACK.
                 self.recovery = true;
+                self.clear_tt |= matches!(status, 3 | 4 | STALL | 36);
                 Err(BlockError::Device { status })
             }
         };
@@ -108,9 +122,19 @@ impl Queue {
         Some(done)
     }
 
+    /// EP0 protocol STALL does not leave a functional TT halt to clear.
+    pub(in crate::usb::xhci) fn control_failure(&mut self, code: u32) {
+        self.clear_tt |= matches!(code, 3 | 4 | 36);
+    }
+
+    pub(in crate::usb::xhci) fn needs_tt_clear(&self) -> bool {
+        self.clear_tt
+    }
+
     pub(in crate::usb::xhci) fn cancelled(&mut self) {
         self.active.clear();
         self.recovery = false;
         self.failure = None;
+        self.clear_tt = false;
     }
 }

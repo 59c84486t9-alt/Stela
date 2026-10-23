@@ -243,6 +243,10 @@ impl Streams {
         }
     }
 
+    pub(super) fn requires_cancellation(&self) -> bool {
+        self.recovery
+    }
+
     pub fn cancelled(&mut self) {
         for stream in &mut self.rings {
             stream.active = None;
@@ -375,7 +379,7 @@ impl Controller {
         &mut self,
         ticket: &StreamTransfer,
     ) -> Option<Result<usize, BlockError>> {
-        if let Err(error) = self.endpoint_ready(ticket.hardware_slot(), ticket.dci) {
+        if let Err(error) = self.completion_ready(ticket.hardware_slot(), ticket.dci) {
             return Some(Err(error));
         }
         let checked = (|| {
@@ -404,7 +408,7 @@ impl Controller {
             e.kind() == TRANSFER_EVENT
                 && e.slot() == ticket.slot
                 && e.endpoint() == ticket.dci
-                && e.parameter == ticket.trb
+                && (e.parameter == ticket.trb || e.code() == INCOMPATIBLE_DEVICE)
         })?;
         let endpoint = self.slot(ticket.slot).unwrap().endpoints[usize::from(ticket.dci)]
             .as_mut()
@@ -736,6 +740,9 @@ mod tests {
         }));
         let mut slots = vec![None];
         slots.push(Some(Slot {
+            generation: 0,
+            consumer: identity::Consumer::Unclaimed,
+            suspended: false,
             attachment: Attachment {
                 root_port: 1,
                 route: 0,

@@ -88,7 +88,7 @@ impl Controller {
         trb: u64,
         length: usize,
     ) -> Option<Result<usize, BlockError>> {
-        if let Err(error) = self.endpoint_ready(slot, dci) {
+        if let Err(error) = self.completion_ready(slot, dci) {
             return Some(Err(error));
         }
         let endpoint = self.slot(slot).unwrap().endpoints[usize::from(dci)]
@@ -119,7 +119,7 @@ impl Controller {
         &mut self,
         ticket: &TransferTicket,
     ) -> Option<Result<usize, BlockError>> {
-        if let Err(error) = self.endpoint_ready(ticket.hardware_slot(), ticket.dci) {
+        if let Err(error) = self.completion_ready(ticket.hardware_slot(), ticket.dci) {
             return Some(Err(error));
         }
         let transfer = self.slot(ticket.slot).unwrap().endpoints[usize::from(ticket.dci)]
@@ -171,7 +171,23 @@ impl Controller {
         let deadline = self.clock.deadline(microseconds);
         loop {
             if let Some(result) = self.completed_ticket(&ticket) {
-                return result;
+                return match result {
+                    Ok(bytes) => Ok(bytes),
+                    Err(error) => {
+                        // Class transports may check readiness and rewrite
+                        // their retained buffer after a synchronous error.
+                        // Establish actual DMA retirement before returning it.
+                        if !matches!(
+                            error,
+                            BlockError::Device {
+                                status: INCOMPATIBLE_DEVICE
+                            }
+                        ) {
+                            self.cancel(slot, dci)?;
+                        }
+                        Err(error)
+                    }
+                };
             }
             if deadline.passed() {
                 self.cancel(slot, dci)?;
@@ -541,5 +557,73 @@ mod tests {
                 .is_err()
         );
         assert!(model.borrow().seen.is_empty());
+    }
+    #[test]
+    fn readiness_fences_async_error_dma_until_acknowledged_retirement() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: actual model DMA is retained through the failed readiness path.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let mut buffer = dma.allocate(64, 64).unwrap();
+        buffer.bytes_mut().fill(0xa5);
+        let ticket = controller
+            .submit_ticket(1, 5, buffer.physical(), 64)
+            .unwrap();
+        model
+            .borrow_mut()
+            .event(ticket.trb, SUCCESS, TRANSFER_EVENT, 5, 65);
+        assert!(matches!(controller.completed_ticket(&ticket), Some(Err(_))));
+        // This is the class transport's readiness-before-buffer-write order.
+        // A refused readiness check must stop that write before submit rejects.
+        if controller.endpoint_ready(1, 5).is_ok() {
+            buffer.bytes_mut().fill(0x37);
+        }
+        assert_eq!(buffer.bytes(), &[0xa5; 64]);
+        assert!(model.borrow().active[5].is_some());
+        controller.cancel(1, 5).unwrap();
+        assert!(model.borrow().active[5].is_none());
+        controller.endpoint_ready(1, 5).unwrap();
+        buffer.bytes_mut().fill(0x37);
+        assert_eq!(buffer.bytes(), &[0x37; 64]);
+    }
+
+    #[test]
+    fn synchronous_error_retires_real_dma_before_class_recovery_readiness() {
+        for fail_dequeue in [false, true] {
+            let mut backing = vec![0u64; 64 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing stays allocated even when cancellation is uncertain.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = cancellation_controller(&mut dma);
+            let mut buffer = dma.allocate(64, 64).unwrap();
+            buffer.bytes_mut().fill(0xa5);
+            model.borrow_mut().halt_transfer = Some(5);
+            if fail_dequeue {
+                model.borrow_mut().fail = Some((SET_DEQUEUE, 17));
+            }
+            let result = controller.transfer(1, 5, buffer.physical(), 64, 1000);
+            assert!(result.is_err());
+            assert_eq!(model.borrow().seen, vec![RESET_ENDPOINT, SET_DEQUEUE]);
+            assert_eq!(controller.endpoint_ready(1, 5).is_err(), fail_dequeue);
+            assert_eq!(buffer.bytes(), &[0xa5; 64]);
+            let endpoint = controller.slots[1].as_ref().unwrap().endpoints[5]
+                .as_ref()
+                .unwrap();
+            if fail_dequeue {
+                assert!(endpoint.poisoned);
+                assert!(
+                    endpoint
+                        .ring
+                        .normal
+                        .identity(endpoint.ring.buffer.physical(), 64)
+                        .unwrap()
+                        .is_some()
+                );
+            } else {
+                assert_eq!(result, Err(BlockError::Device { status: STALL }));
+                assert_eq!(endpoint.in_flight, 0);
+            }
+        }
     }
 }
