@@ -104,6 +104,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::any::Any;
 
+pub mod channel;
+
 const MANAGEMENT: u8 = 0;
 /// The crashlog system endpoint (see the module comment).
 const CRASHLOG: u8 = 1;
