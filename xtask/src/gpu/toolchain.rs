@@ -1,9 +1,8 @@
 //! The pinned tools the GPU builds run, installed under `.tools/gpu`: Meson,
 //! Ninja and Mesa's Python generator modules in a virtual environment, and the
 //! Rust binding generators NAK's build calls.
-use super::support::capture;
 use crate::tools::{self, exec};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use sha2::{Digest, Sha256};
 use std::{fs, path::PathBuf, process::Command};
 
@@ -93,13 +92,11 @@ fn base_python() -> Result<PathBuf> {
         let Some(python) = tools::which(name) else {
             continue;
         };
-        let version =
-            capture(Command::new(&python).args(["-c", "import sys; print(sys.version_info[1])"]))?;
-        if version
-            .trim()
-            .parse::<u32>()
-            .context("Python minor version")?
-            >= PYTHON_MINOR
+        let check = format!("import sys; sys.exit(sys.version_info < (3, {PYTHON_MINOR}))");
+        if Command::new(&python)
+            .args(["-c", &check])
+            .status()?
+            .success()
         {
             return Ok(python);
         }
