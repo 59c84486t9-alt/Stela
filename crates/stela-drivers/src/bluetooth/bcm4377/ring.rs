@@ -203,7 +203,7 @@ impl<P: Platform> Transport<P> {
         let value = u32::from(head) << 16 | u32::from(self.transfers[ring].doorbell) << 8 | 0x20;
         self.write(Space::Bar0, DOORBELL, value)
     }
-    fn enqueue_ring(&mut self, id: usize, bytes: &[u8]) -> Result<Submission> {
+    pub(super) fn enqueue_ring(&mut self, id: usize, bytes: &[u8]) -> Result<Submission> {
         let ring = &self.transfers[id];
         if !ring.enabled || ring.virtual_ring || bytes.len() > ring.footer.max(ring.mapped) {
             return Err(Error::Unsupported(
@@ -390,7 +390,7 @@ impl<P: Platform> Transport<P> {
         }
         Ok(())
     }
-    fn service(&mut self) -> Result<()> {
+    pub(super) fn service(&mut self) -> Result<()> {
         self.refresh_snapshot()?;
         if self.snapshot.boot_stage != 2 || self.snapshot.rti_status != 2 {
             return Err(Error::Protocol {

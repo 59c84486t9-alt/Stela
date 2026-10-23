@@ -87,30 +87,7 @@ impl<P: Platform> Transport<P> {
                     | u64::from(self.snapshot.rti_status),
             });
         }
-        let identity = self.identity.as_ref().unwrap();
-        let hardware = identity.hardware_label();
-        let revision = identity.revision_label();
-        let target = identity.target(&hardware, &revision);
-        let names = identity.names("bin")?;
-        let first = provider.load(Requirement {
-            name: &names[0],
-            target,
-            minimum_bytes: 1,
-        });
-        let image = match first {
-            Ok(image) => image,
-            Err(error) if error.kind == ErrorKind::Missing => {
-                self.snapshot.firmware_errors.push(error);
-                provider
-                    .load(Requirement {
-                        name: &names[1],
-                        target,
-                        minimum_bytes: 1,
-                    })
-                    .map_err(Error::Firmware)?
-            }
-            Err(error) => return Err(Error::Firmware(error)),
-        };
+        let image = self.load_named(provider, "bin")?;
         self.image = Some(image.into());
         if image.bytes().len() > FIRMWARE_BYTES {
             return Err(Error::Unsupported(
@@ -156,6 +133,36 @@ impl<P: Platform> Transport<P> {
         self.open_rings()?;
         self.state = State::Active;
         Ok(())
+    }
+    pub(super) fn load_named<'p>(
+        &mut self,
+        provider: &'p dyn Provider,
+        suffix: &str,
+    ) -> Result<crate::firmware::Image<'p>> {
+        let identity = self.identity.as_ref().unwrap();
+        let hardware = identity.hardware_label();
+        let revision = identity.revision_label();
+        let target = identity.target(&hardware, &revision);
+        let names = identity.names(suffix)?;
+        let first = provider.load(Requirement {
+            name: &names[0],
+            target,
+            minimum_bytes: 1,
+        });
+        match first {
+            Ok(image) => Ok(image),
+            Err(error) if error.kind == ErrorKind::Missing => {
+                self.snapshot.firmware_errors.push(error);
+                provider
+                    .load(Requirement {
+                        name: &names[1],
+                        target,
+                        minimum_bytes: 1,
+                    })
+                    .map_err(Error::Firmware)
+            }
+            Err(error) => Err(Error::Firmware(error)),
+        }
     }
     fn wait_status(
         &mut self,

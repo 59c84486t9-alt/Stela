@@ -3,9 +3,11 @@
 //! Source-ported Broadcom 4377/4378/4387/4388 PCIe IPC transport.
 //! Firmware/RTI/ring acknowledgments are distinct from HCI command completion.
 //! This library requires actual retained PCI/reset/coherent-DMA/MSI ownership;
-//! native provisioning, PTB/calibration and guest/radio services are separate.
+//! Source controller setup uses real board-bound properties and HCI events;
+//! native provisioning and guest/radio services remain separate.
 mod boot;
 mod identity;
+mod initialize;
 pub mod memory;
 mod ring;
 pub use crate::usb::bluetooth::FirmwareReceipt;
@@ -15,6 +17,10 @@ use crate::{
 };
 use alloc::{boxed::Box, vec::Vec};
 pub use identity::{Board, BoardSource, Chip, Identity, PciIdentity};
+pub use initialize::{
+    CommandReceipt, Initialization, InitializationStage, PropertyReceipt, PtbDisposition, Quirks,
+    Report,
+};
 use memory::{CoherentAllocator, CoherentBuffer};
 use ring::{Completion, Transfer};
 
@@ -56,6 +62,15 @@ pub enum Error {
     Packet {
         kind: Kind,
         bytes: Vec<u8>,
+    },
+    Hci {
+        requirement: &'static str,
+        bytes: Vec<u8>,
+    },
+    Controller {
+        opcode: u16,
+        status: u8,
+        returned: Vec<u8>,
     },
     State(State),
     Timeout(&'static str),
@@ -121,6 +136,7 @@ pub struct Snapshot {
     pub completion: Option<[u8; 16]>,
     pub completion_footer: Vec<u8>,
     pub firmware_errors: Vec<crate::firmware::Error>,
+    pub initialization: Option<Initialization>,
 }
 
 /// Actual exclusive Function/BARs/MSI/coherent-domain adapter, or explicit model.
@@ -145,6 +161,13 @@ pub struct Snapshot {
 pub unsafe trait Platform: 'static {
     fn identity(&self) -> PciIdentity;
     fn board(&self) -> Board;
+    /// Read this actual retained requester's firmware-node property. Values
+    /// must come from its real bound node and remain immutable through setup;
+    /// copied PCI/board labels never authorize another device's calibration.
+    /// Returned bytes retain original property order, including BD_ADDR order.
+    fn property(&self, _name: &'static str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
     fn prepare(&mut self, chip: Chip) -> Result<()>;
     fn read32(&mut self, space: Space, offset: u32) -> Result<u32>;
     fn write32(&mut self, space: Space, offset: u32, value: u32) -> Result<()>;
@@ -240,6 +263,19 @@ impl<P: Platform> Transport<P> {
         }
         match self.start_inner(provider) {
             Ok(()) => Ok(()),
+            Err(error) => Err(self.fail(error)),
+        }
+    }
+    /// Fresh boot plus source calibration/PTB/address setup over actual HCI.
+    /// Raw inbound observations and the initialization attempt survive failure.
+    /// This entry requires the untouched Allocated epoch; an arbitrary live
+    /// transport does not grant initial HCI credits or a controller identity.
+    pub fn initialize(&mut self, provider: &dyn Provider) -> Result<Report> {
+        if self.state != State::Allocated {
+            return Err(Error::State(self.state));
+        }
+        match self.initialize_inner(provider) {
+            Ok(report) => Ok(report),
             Err(error) => Err(self.fail(error)),
         }
     }
@@ -620,6 +656,9 @@ mod tests {
         consume_tx: bool,
         acknowledge: bool,
         source_image: Vec<u8>,
+        properties: BTreeMap<&'static str, Vec<u8>>,
+        property_requests: Vec<&'static str>,
+        setup: Option<Setup>,
     }
     fn u16at(bytes: &[u8], at: usize) -> u16 {
         u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap())
@@ -635,6 +674,115 @@ mod tests {
     }
     fn field64(bytes: &mut [u8], at: usize, value: u64) {
         bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum HciFault {
+        None,
+        Preexisting,
+        StatusThenComplete(usize),
+        AckOnly(usize),
+        StatusOnly(usize),
+        Reject(usize, u8),
+        WrongOpcode(usize),
+        Duplicate(usize),
+        MalformedAfter(usize),
+        Late(usize),
+        SilentCredits(usize),
+        ZeroCredits(usize),
+        ReadLength,
+        IgnoreAddressWrite,
+        InvalidReadback,
+    }
+    struct Setup {
+        expected: Vec<Vec<u8>>,
+        index: usize,
+        fault: HciFault,
+        address: [u8; 6],
+        pending_credit_reads: usize,
+    }
+    impl Device {
+        fn credit_tick(&mut self) {
+            let setup = self.setup.as_mut().unwrap();
+            if setup.pending_credit_reads != 0 {
+                setup.pending_credit_reads -= 1;
+                if setup.pending_credit_reads == 0 {
+                    self.completion(2, 2, 0xfacd, 0x82, &[0x0e, 3, 1, 0, 0], false);
+                }
+            }
+        }
+        fn setup_command(&mut self, packet: Vec<u8>) {
+            let setup = self.setup.as_mut().unwrap();
+            let index = setup.index;
+            assert_eq!(
+                packet, setup.expected[index],
+                "independent native HCI packet{index}"
+            );
+            setup.index += 1;
+            let opcode = u16at(&packet, 0);
+            if setup.fault == HciFault::AckOnly(index) {
+                return;
+            }
+            let mut response_opcode = opcode;
+            let mut returned = vec![0];
+            if let HciFault::Reject(at, status) = setup.fault
+                && at == index
+            {
+                returned[0] = status;
+            }
+            if setup.fault == HciFault::WrongOpcode(index) {
+                response_opcode ^= 1;
+            }
+            if opcode == 0xfc01 && setup.fault != HciFault::IgnoreAddressWrite {
+                setup.address.copy_from_slice(&packet[3..]);
+                if setup.fault == HciFault::InvalidReadback {
+                    setup.address[3] ^= 0x55;
+                }
+            }
+            if opcode == 0x1009 {
+                returned.extend_from_slice(&setup.address);
+                if setup.fault == HciFault::ReadLength {
+                    returned.pop();
+                }
+            }
+            let credits = if matches!(setup.fault,HciFault::SilentCredits(at)|HciFault::ZeroCredits(at) if at==index)
+            {
+                0
+            } else {
+                1
+            };
+            if setup.fault == HciFault::ZeroCredits(index) {
+                setup.pending_credit_reads = 12;
+            }
+            let fault = setup.fault;
+            let mut event = vec![0x0e, (3 + returned.len()) as u8, credits];
+            event.extend_from_slice(&response_opcode.to_le_bytes());
+            event.extend_from_slice(&returned);
+            if fault == HciFault::StatusOnly(index) {
+                event = vec![0x0f, 4, 0, credits, opcode as u8, (opcode >> 8) as u8];
+            }
+            // Retain unrelated real async traffic and all source footer padding.
+            self.completion(2, 2, 0xffff, 0x82, &[0xff, 2, 0xa1, index as u8], false);
+            if fault == HciFault::StatusThenComplete(index) {
+                self.completion(
+                    2,
+                    2,
+                    0xabcc,
+                    0x82,
+                    &[0x0f, 4, 0, credits, opcode as u8, (opcode >> 8) as u8],
+                    false,
+                );
+            }
+            self.completion(2, 2, 0xabcd, 0x42, &event, false);
+            if fault == HciFault::Duplicate(index) {
+                self.completion(2, 2, 0xabce, 0x82, &event, false);
+            }
+            if fault == HciFault::MalformedAfter(index) {
+                self.completion(2, 2, 0xabcf, 0x82, &[0xff, 7, 0x99], false);
+            }
+            if fault == HciFault::Late(index) {
+                self.ticks += 10_100_000;
+            }
+        }
     }
     impl Device {
         fn register(&self, space: u8, offset: u32) -> u32 {
@@ -809,6 +957,15 @@ mod tests {
                 bytes, expected,
                 "all source control fields and reserved bytes"
             );
+            if bytes[0] == 1
+                && id == 6
+                && self
+                    .setup
+                    .as_ref()
+                    .is_some_and(|s| s.fault == HciFault::Preexisting)
+            {
+                self.completion(2, 2, 0xfacd, 0x82, &[0x0e, 4, 1, 0x97, 0xfd, 0], false);
+            }
             self.controls.push(bytes);
         }
         fn consume(&mut self, id: usize) {
@@ -843,7 +1000,10 @@ mod tests {
                 if id == 0 {
                     self.control(bytes);
                 } else {
-                    self.sent.push((id, bytes, raw));
+                    self.sent.push((id, bytes.clone(), raw));
+                    if id == 1 && self.setup.is_some() {
+                        self.setup_command(bytes);
+                    }
                 }
                 tail = (tail + 1) % ring.count;
                 self.domain.set_word(self.txtails + id as u64 * 2, tail);
@@ -879,6 +1039,11 @@ mod tests {
         fn board(&self) -> Board {
             Board::from_property(b"apple,formosa\0").unwrap()
         }
+        fn property(&self, name: &'static str) -> Result<Option<Vec<u8>>> {
+            let mut d = self.0.lock().unwrap();
+            d.property_requests.push(name);
+            Ok(d.properties.get(name).cloned())
+        }
         fn prepare(&mut self, _: Chip) -> Result<()> {
             let mut d = self.0.lock().unwrap();
             d.prepare += 1;
@@ -889,6 +1054,9 @@ mod tests {
             let mut d = self.0.lock().unwrap();
             if d.rti == 2 && d.tx[3].enabled && !d.domain.0.lock().unwrap().stopped {
                 d.consume(3);
+            }
+            if d.setup.is_some() {
+                d.credit_tick();
             }
             let original = offset;
             let offset = if space == Space::Bar2 && d.pci.device == 0x5f72 {
@@ -1088,6 +1256,9 @@ mod tests {
             consume_tx: true,
             acknowledge: true,
             source_image: vec![0xa5; 64],
+            properties: BTreeMap::new(),
+            property_requests: Vec::new(),
+            setup: None,
         }));
         (
             Model(d.clone()),
@@ -1815,5 +1986,582 @@ mod tests {
             assert!(transport.snapshot().firmware_errors.is_empty());
             assert!(!d.lock().unwrap().armed);
         }
+    }
+    fn setup_catalog(d: &Arc<Mutex<Device>>, ptb: &[u8], fallback: bool) -> Catalog {
+        let d = d.lock().unwrap();
+        let identity = Identity::parse(
+            d.pci,
+            Board::from_property(b"apple,formosa\0").unwrap(),
+            d.otp,
+        )
+        .unwrap();
+        let bin = identity.names("bin").unwrap();
+        let ptb_names = identity.names("ptb").unwrap();
+        let hardware = identity.hardware_label();
+        let revision = identity.revision_label();
+        let resources = [
+            (&bin[0], d.source_image.as_slice()),
+            (&ptb_names[usize::from(fallback)], ptb),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| Resource {
+            name,
+            target: identity.target(&hardware, &revision),
+            provenance: Provenance {
+                source: "independent-source-model",
+                revision: "calibration-wire-v1",
+                member: name,
+                license: "test fixture",
+            },
+            expected_length: bytes.len(),
+            expected_sha256: Sha256::digest(bytes).into(),
+            bytes: bytes.to_vec(),
+        })
+        .collect();
+        Catalog::from_handoff(resources).unwrap()
+    }
+    fn expected_setup(
+        chip: u16,
+        calibration: &[u8],
+        ptb: &[u8],
+        replacement: Option<[u8; 6]>,
+    ) -> Vec<Vec<u8>> {
+        let mut packets = Vec::new();
+        if chip != 0x4377 {
+            let chunks = calibration.len().div_ceil(230);
+            for (index, bytes) in calibration.chunks(230).enumerate() {
+                let mut packet = vec![0x97, 0xfd, 233, 3];
+                packet.extend_from_slice(&((chunks - index - 1) as u16).to_le_bytes());
+                packet.extend_from_slice(bytes);
+                packet.resize(236, 0);
+                packets.push(packet);
+            }
+            let chunks = ptb.len().div_ceil(207);
+            for (index, bytes) in ptb.chunks(207).enumerate() {
+                let mut packet = vec![0x0d, 0xfe, 209];
+                packet.extend_from_slice(&((chunks - index - 1) as u16).to_le_bytes());
+                packet.extend_from_slice(bytes);
+                packet.resize(212, 0);
+                packets.push(packet);
+            }
+        } else {
+            let mut packet = vec![0x98, 0xfd, ptb.len() as u8];
+            packet.extend_from_slice(ptb);
+            packets.push(packet);
+        }
+        packets.push(vec![9, 0x10, 0]);
+        if let Some(address) = replacement {
+            let mut packet = vec![1, 0xfc, 6];
+            packet.extend_from_slice(&address);
+            packets.push(packet);
+            packets.push(vec![9, 0x10, 0]);
+        }
+        packets
+    }
+    fn setup_fixture(
+        device: u16,
+        stepping: &str,
+        replacement: bool,
+        fault: HciFault,
+    ) -> (Transport<Model>, Arc<Mutex<Device>>, Catalog, Vec<Vec<u8>>) {
+        let (p, mut a, d) = fixture(device);
+        let calibration = (0..461).map(|n| (n % 251) as u8).collect::<Vec<_>>();
+        let bf = (0..461).map(|n| 0x80 | (n % 113) as u8).collect::<Vec<_>>();
+        let ptb = (0..if device == 0x5fa0 { 233 } else { 415 })
+            .map(|n| (n % 239) as u8)
+            .collect::<Vec<_>>();
+        let selected = [0x52, 0x43, 0x34, 0x25, 0x16, 0x07];
+        let chip = match device {
+            0x5fa0 => 0x4377,
+            0x5f69 => 0x4378,
+            0x5f71 => 0x4387,
+            0x5f72 => 0x4388,
+            _ => unreachable!(),
+        };
+        let use_bf = match device {
+            0x5f69 => matches!(stepping, "b1" | "b3"),
+            0x5f71 => stepping == "c2",
+            0x5f72 => true,
+            _ => false,
+        };
+        let expected = expected_setup(
+            chip,
+            if use_bf { &bf } else { &calibration },
+            &ptb,
+            replacement.then_some(selected),
+        );
+        {
+            let mut d = d.lock().unwrap();
+            let mut data = 8u32.to_le_bytes().to_vec();
+            data.extend_from_slice(alloc::format!("s={stepping} x=7\0V=Murata z=0\0").as_bytes());
+            d.otp = [0; 224];
+            d.otp[0] = 0x15;
+            d.otp[1] = data.len() as u8;
+            d.otp[2..2 + data.len()].copy_from_slice(&data);
+            d.properties.insert("brcm,taurus-cal-blob", calibration);
+            d.properties.insert("brcm,taurus-bf-cal-blob", bf);
+            if replacement {
+                d.properties.insert("local-bd-address", selected.to_vec());
+            }
+            let address = if replacement {
+                [0x93, 0x76, 0, 0x88, chip as u8, (chip >> 8) as u8]
+            } else {
+                [0x62, 0x53, 0x44, 0x35, 0x26, 0x17]
+            };
+            d.setup = Some(Setup {
+                expected: expected.clone(),
+                index: 0,
+                fault,
+                address,
+                pending_credit_reads: 0,
+            });
+        }
+        let provider = setup_catalog(&d, &ptb, false);
+        (Transport::new(p, &mut a).unwrap(), d, provider, expected)
+    }
+    #[test]
+    fn actual_ipc_initialization_uses_source_variant_calibration_ptb_and_address() {
+        for (device, stepping) in [
+            (0x5fa0, "a0"),
+            (0x5f69, "b1"),
+            (0x5f69, "b3"),
+            (0x5f69, "b2"),
+            (0x5f71, "c2"),
+            (0x5f71, "c1"),
+            (0x5f72, "z9"),
+        ] {
+            for replacement in [false, true] {
+                let (mut transport, d, provider, expected) =
+                    setup_fixture(device, stepping, replacement, HciFault::None);
+                let report = transport.initialize(&provider).unwrap();
+                assert_eq!(report.property_address_applied, replacement);
+                assert_eq!(report.ptb, PtbDisposition::Accepted);
+                assert_eq!(
+                    report.address,
+                    if replacement {
+                        [0x52, 0x43, 0x34, 0x25, 0x16, 7]
+                    } else {
+                        [0x62, 0x53, 0x44, 0x35, 0x26, 0x17]
+                    }
+                );
+                let attempt = transport.snapshot().initialization.as_ref().unwrap();
+                assert_eq!(attempt.stage, InitializationStage::Complete);
+                assert_eq!(attempt.report, Some(report));
+                assert_eq!(attempt.commands.len(), expected.len());
+                for (command, packet) in attempt.commands.iter().zip(&expected) {
+                    assert_eq!(command.packet_sha256, Sha256::digest(packet).as_slice());
+                    assert_eq!(command.packet_bytes, packet.len());
+                    assert!(command.submission.is_some());
+                    assert_eq!(command.returned.as_ref().unwrap()[0], 0);
+                }
+                let observed = transport.take_observations();
+                assert_eq!(observed.packets.len(), expected.len() * 2);
+                assert!(observed.packets.iter().all(|p| p.footer.len() == 264
+                    && p.footer[p.bytes.len()..].iter().all(|b| *b == 0xdd)));
+                let d = d.lock().unwrap();
+                assert_eq!(
+                    d.sent
+                        .iter()
+                        .map(|(_, packet, _)| packet.clone())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                assert_eq!(d.setup.as_ref().unwrap().index, expected.len());
+                assert_eq!(
+                    d.property_requests.len(),
+                    usize::from(device != 0x5fa0) + usize::from(replacement)
+                );
+            }
+        }
+    }
+    #[test]
+    fn native_ack_or_status_alone_cannot_finish_hci_and_credits_require_actual_grant() {
+        for fault in [
+            HciFault::AckOnly(0),
+            HciFault::StatusOnly(0),
+            HciFault::SilentCredits(0),
+        ] {
+            let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, fault);
+            assert!(matches!(
+                transport.initialize(&provider),
+                Err(Error::Timeout(_))
+            ));
+            assert_eq!(d.lock().unwrap().setup.as_ref().unwrap().index, 1);
+            assert!(
+                transport
+                    .snapshot()
+                    .initialization
+                    .as_ref()
+                    .unwrap()
+                    .report
+                    .is_none()
+            );
+            assert_eq!(d.lock().unwrap().retire, 1);
+        }
+        let (mut transport, d, provider, expected) =
+            setup_fixture(0x5f69, "b1", false, HciFault::ZeroCredits(0));
+        transport.initialize(&provider).unwrap();
+        assert_eq!(
+            d.lock().unwrap().setup.as_ref().unwrap().index,
+            expected.len()
+        );
+        let observed = transport.take_observations();
+        assert!(
+            observed
+                .packets
+                .iter()
+                .any(|p| p.bytes == [0x0e, 3, 1, 0, 0])
+        );
+    }
+    #[test]
+    fn actual_controller_rejections_stop_required_upload_but_4377_ptb_is_explicit() {
+        for at in 0..7 {
+            let (mut transport, d, provider, _) =
+                setup_fixture(0x5f69, "b1", false, HciFault::Reject(at, 0x0c));
+            assert!(matches!(
+                transport.initialize(&provider),
+                Err(Error::Controller { status: 0x0c, .. })
+            ));
+            assert_eq!(d.lock().unwrap().setup.as_ref().unwrap().index, at + 1);
+            let attempt = transport.snapshot().initialization.as_ref().unwrap();
+            assert_eq!(
+                attempt.commands.last().unwrap().returned.as_ref().unwrap()[0],
+                0x0c
+            );
+            assert!(attempt.report.is_none());
+        }
+        let (mut transport, _, provider, _) =
+            setup_fixture(0x5fa0, "a0", false, HciFault::Reject(0, 0x0c));
+        let report = transport.initialize(&provider).unwrap();
+        assert_eq!(
+            report.ptb,
+            PtbDisposition::Rejected {
+                status: 0x0c,
+                returned: vec![0x0c]
+            }
+        );
+        assert_eq!(
+            transport
+                .snapshot()
+                .initialization
+                .as_ref()
+                .unwrap()
+                .ptb_disposition,
+            Some(report.ptb)
+        );
+    }
+    #[test]
+    fn native_malformed_wrong_duplicate_and_late_hci_are_terminal_with_raw_transcript() {
+        for fault in [
+            HciFault::WrongOpcode(0),
+            HciFault::Duplicate(0),
+            HciFault::MalformedAfter(0),
+            HciFault::Late(0),
+            HciFault::ReadLength,
+        ] {
+            for fail_retire in [false, true] {
+                let (mut transport, d, provider, _) = setup_fixture(0x5f71, "c2", false, fault);
+                d.lock().unwrap().fail_retire = fail_retire;
+                let error = transport.initialize(&provider).unwrap_err();
+                assert_eq!(transport.state(), State::Failed);
+                assert!(
+                    transport
+                        .snapshot()
+                        .initialization
+                        .as_ref()
+                        .unwrap()
+                        .report
+                        .is_none()
+                );
+                let writes = d.lock().unwrap().writes;
+                let observed = transport.take_observations();
+                if fault != HciFault::Late(0) {
+                    assert!(!observed.packets.is_empty());
+                    assert!(observed.packets.iter().all(|p| p.footer.len() == 264));
+                }
+                assert_eq!(transport.close(), Err(error));
+                drop(transport);
+                let d = d.lock().unwrap();
+                assert_eq!(d.writes, writes);
+                assert_eq!(d.retire, 1);
+                assert!(!d.dropped);
+                assert_eq!(d.domain.0.lock().unwrap().unmaps, 0);
+            }
+        }
+    }
+    #[test]
+    fn actual_address_property_requires_real_write_and_matching_readback() {
+        for fault in [HciFault::IgnoreAddressWrite, HciFault::InvalidReadback] {
+            let (mut transport, _, provider, _) = setup_fixture(0x5f72, "z9", true, fault);
+            assert!(matches!(
+                transport.initialize(&provider),
+                Err(Error::Hci { .. })
+            ));
+            let attempt = transport.snapshot().initialization.as_ref().unwrap();
+            assert_eq!(attempt.stage, InitializationStage::VerifyAddress);
+            assert!(attempt.report.is_none());
+            assert_eq!(
+                attempt.address_property.as_ref().unwrap().bytes,
+                [0x52, 0x43, 0x34, 0x25, 0x16, 7]
+            );
+        }
+        for property in [
+            None,
+            Some(vec![0; 6]),
+            Some(vec![0xff; 6]),
+            Some(vec![1; 5]),
+            Some(vec![0x93, 0x76, 0, 0, 0x88, 0x43]),
+        ] {
+            let (mut transport, d, provider, _) = setup_fixture(0x5f72, "z9", true, HciFault::None);
+            {
+                let mut d = d.lock().unwrap();
+                d.properties.remove("local-bd-address");
+                if let Some(bytes) = property {
+                    d.properties.insert("local-bd-address", bytes);
+                }
+            }
+            assert!(transport.initialize(&provider).is_err());
+            assert!(
+                !d.lock()
+                    .unwrap()
+                    .sent
+                    .iter()
+                    .any(|(_, packet, _)| packet[..2] == [1, 0xfc])
+            );
+        }
+    }
+    #[test]
+    fn metadata_labels_do_not_supply_actual_board_calibration_or_live_hci_credits() {
+        for property in [None, Some(vec![]), Some(vec![0; 4 * 1024 * 1024 + 1])] {
+            let (mut transport, d, provider, _) =
+                setup_fixture(0x5f69, "b1", false, HciFault::None);
+            {
+                let mut d = d.lock().unwrap();
+                d.properties.remove("brcm,taurus-bf-cal-blob");
+                if let Some(bytes) = property {
+                    d.properties.insert("brcm,taurus-bf-cal-blob", bytes);
+                }
+            }
+            assert!(transport.initialize(&provider).is_err());
+            assert!(d.lock().unwrap().sent.is_empty());
+            assert_eq!(
+                transport.snapshot().initialization.as_ref().unwrap().stage,
+                InitializationStage::Calibration
+            );
+        }
+        let (mut transport, d) = active(0x5fa0);
+        let provider = catalog(&d, false);
+        let writes = d.lock().unwrap().writes;
+        assert_eq!(
+            transport.initialize(&provider),
+            Err(Error::State(State::Active))
+        );
+        assert_eq!(d.lock().unwrap().writes, writes);
+    }
+    struct SetupProvider {
+        catalog: Catalog,
+        kind: crate::firmware::ErrorKind,
+        calls: core::cell::Cell<usize>,
+    }
+    impl Provider for SetupProvider {
+        fn load(
+            &self,
+            requirement: crate::firmware::Requirement<'_>,
+        ) -> core::result::Result<crate::firmware::Image<'_>, crate::firmware::Error> {
+            if requirement.name.ends_with(".ptb") {
+                self.calls.set(self.calls.get() + 1);
+                Err(crate::firmware::Error {
+                    name: requirement.name.into(),
+                    kind: self.kind.clone(),
+                })
+            } else {
+                self.catalog.load(requirement)
+            }
+        }
+    }
+    #[test]
+    fn actual_ptb_missing_fallback_and_nonmissing_refusal_preserve_completed_calibration() {
+        let (mut transport, d, _, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
+        let ptb = (0..415).map(|n| (n % 239) as u8).collect::<Vec<_>>();
+        let fallback = setup_catalog(&d, &ptb, true);
+        transport.initialize(&fallback).unwrap();
+        let attempt = transport.snapshot().initialization.as_ref().unwrap();
+        assert!(
+            attempt
+                .ptb
+                .as_ref()
+                .unwrap()
+                .name
+                .ends_with("-apple,formosa.ptb")
+        );
+        assert_eq!(transport.snapshot().firmware_errors.len(), 1);
+        for kind in [
+            crate::firmware::ErrorKind::Missing,
+            crate::firmware::ErrorKind::WrongTarget,
+            crate::firmware::ErrorKind::DigestMismatch {
+                expected: [1; 32],
+                actual: [2; 32],
+            },
+        ] {
+            let (mut transport, d, catalog, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
+            let missing = kind == crate::firmware::ErrorKind::Missing;
+            let provider = SetupProvider {
+                catalog,
+                kind,
+                calls: core::cell::Cell::new(0),
+            };
+            assert!(matches!(
+                transport.initialize(&provider),
+                Err(Error::Firmware(_))
+            ));
+            assert_eq!(provider.calls.get(), if missing { 2 } else { 1 });
+            let attempt = transport.snapshot().initialization.as_ref().unwrap();
+            assert_eq!(attempt.stage, InitializationStage::Ptb);
+            assert!(attempt.calibration.is_some());
+            assert_eq!(attempt.commands.len(), 3);
+            assert!(
+                attempt
+                    .commands
+                    .iter()
+                    .all(|c| c.returned.as_ref().unwrap() == &[0])
+            );
+            assert_eq!(d.lock().unwrap().setup.as_ref().unwrap().index, 3);
+            assert_eq!(transport.take_observations().packets.len(), 6);
+        }
+    }
+    #[test]
+    fn actual_ptb_capacity_refuses_without_truncated_hci_or_fallback() {
+        for (device, ptb) in [
+            (0x5fa0, vec![0xa1; 256]),
+            (0x5f69, vec![0xa2; 4 * 1024 * 1024 + 1]),
+        ] {
+            let (mut transport, d, _, _) = setup_fixture(device, "b1", false, HciFault::None);
+            let provider = setup_catalog(&d, &ptb, false);
+            assert!(transport.initialize(&provider).is_err());
+            let attempt = transport.snapshot().initialization.as_ref().unwrap();
+            assert_eq!(attempt.ptb.as_ref().unwrap().length, ptb.len());
+            assert_eq!(
+                d.lock().unwrap().setup.as_ref().unwrap().index,
+                if device == 0x5fa0 { 0 } else { 3 }
+            );
+            assert!(attempt.report.is_none());
+        }
+    }
+    #[test]
+    fn initialization_transcript_bound_keeps_real_completion_before_terminal_refusal() {
+        let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
+        // Ten actual startup control ACKs, then actual async event+HCI CC fit;
+        // its actual transfer ACK is the observation crossing the bound.
+        transport.observation_bytes = OBSERVATION_BYTES - 160 - 585;
+        assert_eq!(
+            transport.initialize(&provider),
+            Err(Error::ObservationLimit)
+        );
+        let observed = transport.take_observations();
+        assert_eq!(observed.packets.len(), 2);
+        assert_eq!(observed.packets[1].bytes, [0x0e, 4, 1, 0x97, 0xfd, 0]);
+        assert_eq!(observed.packets[1].footer.len(), 264);
+        assert!(
+            transport
+                .snapshot()
+                .initialization
+                .as_ref()
+                .unwrap()
+                .report
+                .is_none()
+        );
+        assert_eq!(d.lock().unwrap().retire, 1);
+    }
+    #[test]
+    fn every_native_setup_mmio_effect_error_retains_first_fault_and_actual_domain() {
+        let first = {
+            let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", true, HciFault::None);
+            transport.start(&provider).unwrap();
+            d.lock().unwrap().operations + 1
+        };
+        let last = {
+            let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", true, HciFault::None);
+            transport.initialize(&provider).unwrap();
+            d.lock().unwrap().operations
+        };
+        // All command-phase accesses, including actual RX credit/doorbells,
+        // are bounded independently of startup OTP/config coverage above.
+        for operation in first..=last {
+            for fail_retire in [false, true] {
+                let (mut transport, d, provider, _) =
+                    setup_fixture(0x5f69, "b1", true, HciFault::None);
+                {
+                    let mut d = d.lock().unwrap();
+                    d.fail_operation = Some(operation);
+                    d.fail_retire = fail_retire;
+                }
+                let error = transport.initialize(&provider).unwrap_err();
+                let attempt = transport
+                    .snapshot()
+                    .initialization
+                    .as_ref()
+                    .unwrap()
+                    .clone();
+                assert!(attempt.report.is_none());
+                let observed = transport.take_observations();
+                assert!(observed.packets.iter().all(|p| p.footer.len() == 264));
+                let writes = d.lock().unwrap().writes;
+                assert_eq!(transport.close(), Err(error));
+                assert_eq!(
+                    transport.snapshot().initialization.as_ref().unwrap(),
+                    &attempt
+                );
+                drop(transport);
+                let d = d.lock().unwrap();
+                assert_eq!(d.writes, writes);
+                assert_eq!(d.retire, 1);
+                assert!(!d.dropped);
+                assert_eq!(d.domain.0.lock().unwrap().unmaps, 0);
+                if fail_retire && d.context != 0 {
+                    let domain = d.domain.clone();
+                    let address = d.context;
+                    drop(d);
+                    domain.write(address, &[0x91; 16]);
+                    assert_eq!(domain.read(address, 16), vec![0x91; 16]);
+                }
+            }
+        }
+    }
+    #[test]
+    fn already_received_same_opcode_cannot_authorize_a_new_hci_command() {
+        let (mut transport, d, provider, _) =
+            setup_fixture(0x5f69, "b1", false, HciFault::Preexisting);
+        assert!(matches!(
+            transport.initialize(&provider),
+            Err(Error::Hci { .. })
+        ));
+        assert!(d.lock().unwrap().sent.is_empty());
+        let observed = transport.take_observations();
+        assert_eq!(observed.packets.len(), 1);
+        assert_eq!(observed.packets[0].bytes, [0x0e, 4, 1, 0x97, 0xfd, 0]);
+    }
+    #[test]
+    fn actual_status_then_complete_preserves_both_events_and_only_complete_finishes() {
+        let (mut transport, _, provider, expected) =
+            setup_fixture(0x5f69, "b1", false, HciFault::StatusThenComplete(0));
+        transport.initialize(&provider).unwrap();
+        let observed = transport.take_observations();
+        assert_eq!(observed.packets.len(), expected.len() * 2 + 1);
+        assert!(
+            observed
+                .packets
+                .iter()
+                .any(|p| p.bytes == [0x0f, 4, 0, 1, 0x97, 0xfd])
+        );
+        assert_eq!(
+            transport
+                .snapshot()
+                .initialization
+                .as_ref()
+                .unwrap()
+                .commands[0]
+                .returned,
+            Some(vec![0])
+        );
     }
 }
