@@ -35,6 +35,9 @@ if with_amd
   # Mesa's AMD support code uses libdrm's types but Stela never calls libdrm,
   # which builds only on DRM systems: its headers alone, from the submodule.
   libdrm = '../../../../third_party/libdrm'
+  if not fs.is_file(libdrm / 'xf86drm.h')
+    error('third_party/libdrm is missing; run `cargo xtask gpu fetch`')
+  endif
   meson.override_dependency('libdrm_amdgpu', declare_dependency(
     include_directories : include_directories(libdrm, libdrm / 'include/drm',
                                               libdrm / 'amdgpu'),
