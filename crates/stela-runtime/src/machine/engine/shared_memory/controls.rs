@@ -301,10 +301,12 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn cached_digest_keeps_the_original_effective_control_identity_format() {
-        let (cpu, profile, missing) = captured();
+    fn cached_digest_separates_qualified_address_controls_from_legacy_identity() {
+        let (mut cpu, profile, missing) = captured();
         let controls = Controls::capture(&cpu, profile.name, &missing).unwrap();
-        let original = crate::sha256(
+        // Preserve the prior serialization as a negative compatibility input;
+        // the new source-qualified address policy must not reuse that key.
+        let legacy = crate::sha256(
             alloc::format!(
                 "{:?} {:?} {:?} {} {}",
                 controls.translation,
@@ -315,7 +317,26 @@ pub(super) mod tests {
             )
             .as_bytes(),
         );
-        assert_eq!(controls.identity(), original);
+        assert_ne!(controls.identity(), legacy);
+        assert_eq!(
+            controls.identity(),
+            Controls::capture(&cpu, profile.name, &missing)
+                .unwrap()
+                .identity()
+        );
+        // CPA0 and CPA1 resolve the same unchecked address behavior, but their
+        // distinct actual declarations must still produce distinct identities.
+        let isar3 = cpu.read(SystemRegister::ID_AA64ISAR3_EL1);
+        for cpa in [0, 1] {
+            cpu.registers
+                .set_raw(SystemRegister::ID_AA64ISAR3_EL1, 0, (isar3 & !15) | cpa);
+            let fresh = Controls::capture(&cpu, profile.name, &missing).unwrap();
+            assert_eq!(fresh.address_checks, controls.address_checks);
+            assert_eq!(fresh.identity() == controls.identity(), cpa == (isar3 & 15));
+        }
+        cpu.registers
+            .set_raw(SystemRegister::ID_AA64ISAR3_EL1, 0, (isar3 & !15) | 2);
+        assert!(Controls::capture(&cpu, profile.name, &missing).is_err());
     }
     #[test]
     fn source_feature_changes_and_current_el_sp_selection_are_not_assumed() {
