@@ -1,6 +1,7 @@
 //! Host keyboards and pointers, read as [`Input`] changes for the native
-//! USB peripheral: virtio-input ([`virtio`]). USB HID devices are in
+//! USB peripheral: virtio-input ([`virtio`]) and i8042 PS/2 ([`ps2`]). USB HID devices are in
 //! [`usb::hid`](crate::usb::hid).
+pub mod ps2;
 pub mod virtio;
 
 /// The largest absolute pointer coordinate on either axis.
