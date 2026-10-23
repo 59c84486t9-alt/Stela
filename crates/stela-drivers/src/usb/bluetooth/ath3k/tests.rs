@@ -477,13 +477,9 @@ fn real_bind_configures_only_raw_output_and_retains_the_completed_uploader() {
     let shared = Rc::new(RefCell::new(controller));
     let (_, catalog, _) = model(Kind::Ar3011, 0, false, 0, 4097);
     let mut found = xhci::Found::default();
-    xhci::model::bind_with_provider(
-        &shared,
-        device(Kind::Ar3011, 1),
-        &mut dma,
-        &mut found,
-        &catalog,
-    );
+    let mut device = device(Kind::Ar3011, 1);
+    device.id = shared.borrow().test_device_id(device.slot).unwrap();
+    xhci::model::bind_with_provider(&shared, device, &mut dma, &mut found, &catalog);
     assert!(found.failures.is_empty() && found.unused.is_empty());
     assert!(found.bluetooth.is_empty());
     assert_eq!(found.bootloaders.len(), 1);
@@ -531,13 +527,9 @@ fn native_body_timeout_and_failed_stop_preserve_bytes_and_terminal_raw_owner() {
     let shared = Rc::new(RefCell::new(controller));
     let (_, catalog, _) = model(Kind::Ar3011, 0, false, 0, 1);
     let mut found = xhci::Found::default();
-    xhci::model::bind_with_provider(
-        &shared,
-        device(Kind::Ar3011, 1),
-        &mut dma,
-        &mut found,
-        &catalog,
-    );
+    let mut device = device(Kind::Ar3011, 1);
+    device.id = shared.borrow().test_device_id(device.slot).unwrap();
+    xhci::model::bind_with_provider(&shared, device, &mut dma, &mut found, &catalog);
     assert_eq!(found.bootloaders.len(), 1);
     let owner = &mut found.bootloaders[0];
     assert_eq!(owner.state(), State::Failed);

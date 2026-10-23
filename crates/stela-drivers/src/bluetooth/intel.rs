@@ -2240,7 +2240,8 @@ pub(crate) mod tests {
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (controller, model) = unconfigured_cancellation_controller(&mut dma);
         let shared: Shared = Rc::new(RefCell::new(controller));
-        let (device, catalog, script) = intel::tests::fixture();
+        let (mut device, catalog, script) = intel::tests::fixture();
+        device.id = shared.borrow().test_device_id(device.slot).unwrap();
         let mut found = Found::default();
         bind(&shared, device, &mut dma, &mut found);
         assert!(found.failures.is_empty(), "{:?}", found.failures);
