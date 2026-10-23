@@ -8,11 +8,13 @@ use super::*;
 pub(super) mod descriptor;
 #[cfg(test)]
 mod model;
+mod power;
 #[cfg(test)]
 mod runtime_tests;
 mod superspeed;
 #[cfg(test)]
 mod tests;
+mod usb2;
 
 pub(super) fn status_endpoint(device: &Device, interface: &Interface) -> Option<Endpoint> {
     if interface.class != HUB_CLASS || interface.alternate != 0 || interface.endpoints.len() != 1 {

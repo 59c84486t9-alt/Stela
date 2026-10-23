@@ -560,25 +560,41 @@ impl Controller {
             ),
             &[],
         )?;
-        if hub.len() < 7 || hub[1] != HUB_DESCRIPTOR {
-            return Err(BlockError::Unsupported("hub descriptor"));
-        }
-        let ports = hub[2];
-        if ports > MAX_HUB_PORTS {
-            return Err(BlockError::Unsupported("hub with more than 31 ports"));
-        }
-        let characteristics = u16::from_le_bytes([hub[3], hub[4]]);
-        let power_good_us = u64::from(hub[5]) * 2000;
-        let think_time = (characteristics >> 5 & 3) as u8;
+        let length = hub::descriptor::Usb2Descriptor::length(&hub)?;
+        let bytes = if hub.len() == length {
+            hub
+        } else {
+            let bytes = self.control(
+                slot,
+                setup(
+                    DEVICE_TO_HOST | TYPE_CLASS,
+                    GET_DESCRIPTOR,
+                    u16::from(HUB_DESCRIPTOR) << 8,
+                    0,
+                    length as u16,
+                ),
+                &[],
+            )?;
+            if bytes.get(..hub.len()) != Some(hub.as_slice()) {
+                return Err(BlockError::Unsupported(
+                    "USB2 hub descriptor changed during read",
+                ));
+            }
+            bytes
+        };
+        let endpoint = hub_status_endpoint(&device.configuration, 0)
+            .ok_or(BlockError::Unsupported("USB2 hub has no status endpoint"))?;
+        let descriptor = hub::descriptor::Usb2Descriptor::new(&bytes, &endpoint)?;
+        let ports = descriptor.ports;
         let tt_think = if attachment.speed == HIGH_SPEED {
-            think_time
+            descriptor.tt_think
         } else {
             0
         };
         self.set_configuration(slot, device.configuration_value())?;
         // Device status describes the configuration the device acknowledged.
         let self_powered = self.hub_power_source(slot)?;
-        self.install_hub_current(slot, ports, u16::from(hub[6]), self_powered)?;
+        self.install_hub_current(slot, ports, descriptor.controller_ma, self_powered)?;
         self.observe_hub_current(slot)?;
         // Linux `hub_configure`: a multi-TT hub (device protocol 2) gets one
         // TT per port through interface 0's alternate setting 1; a refusal
@@ -624,7 +640,7 @@ impl Controller {
             )?;
             powered_ports.push(port);
         }
-        self.clock.delay(power_good_us.max(PORT_POWER_US));
+        self.clock.delay(descriptor.power_good_us);
         for port in powered_ports {
             let location = format!("{}.{port}", device.location);
             crate::working(&location);
@@ -660,83 +676,23 @@ impl Controller {
             ),
             &[],
         )?;
-        if status.len() < 4 {
+        if status.len() != 4 {
             return Err(BlockError::Unsupported("short hub port status"));
+        }
+        let port_status = u16::from_le_bytes([status[0], status[1]]);
+        let change = u16::from_le_bytes([status[2], status[3]]);
+        if self.slot(slot)?.attachment.speed < SUPER_SPEED
+            && (port_status & !0x1f3f != 0
+                || port_status & (HUB_PORT_LOW_SPEED | HUB_PORT_HIGH_SPEED)
+                    == HUB_PORT_LOW_SPEED | HUB_PORT_HIGH_SPEED
+                || change & !0x3f != 0)
+        {
+            return Err(BlockError::Unsupported("reserved USB2 hub port status"));
         }
         Ok((
             u16::from_le_bytes([status[0], status[1]]),
             u16::from_le_bytes([status[2], status[3]]),
         ))
-    }
-
-    /// A hub port's device speed once the port is reset and enabled.
-    pub(super) fn hub_port(&mut self, slot: u8, port: u8) -> Result<Option<u8>, BlockError> {
-        let index = u16::from(port);
-        let clear_connection = setup(
-            TYPE_CLASS | RECIPIENT_OTHER,
-            CLEAR_FEATURE,
-            C_PORT_CONNECTION,
-            index,
-            0,
-        );
-        let clock = self.clock;
-        let connected = debounce(clock, || {
-            let (status, change) = self.hub_port_status(slot, port)?;
-            let changed = change & HUB_PORT_CONNECTION != 0;
-            if changed {
-                self.control(slot, clear_connection, &[])?;
-            }
-            Ok((status & HUB_PORT_CONNECTION != 0, changed))
-        })?;
-        if !connected {
-            return Ok(None);
-        }
-        self.control(
-            slot,
-            setup(
-                TYPE_CLASS | RECIPIENT_OTHER,
-                SET_FEATURE,
-                PORT_RESET,
-                index,
-                0,
-            ),
-            &[],
-        )?;
-        let deadline = self.clock.deadline(PORT_RESET_US);
-        let status = loop {
-            let (status, change) = self.hub_port_status(slot, port)?;
-            if change & HUB_PORT_RESET != 0 && status & HUB_PORT_RESET == 0 {
-                break status;
-            }
-            if deadline.passed() {
-                return Err(BlockError::Timeout);
-            }
-            self.clock.delay(1000);
-        };
-        self.control(
-            slot,
-            setup(
-                TYPE_CLASS | RECIPIENT_OTHER,
-                CLEAR_FEATURE,
-                C_PORT_RESET,
-                index,
-                0,
-            ),
-            &[],
-        )?;
-        self.clock.delay(RESET_RECOVERY_US);
-        if status & HUB_PORT_ENABLE == 0 {
-            return Err(BlockError::Unsupported("hub port did not enable"));
-        }
-        let root = self.slot(slot)?.attachment.root_port;
-        self.current_port_reset(Some((slot, port)), root);
-        Ok(Some(if status & HUB_PORT_LOW_SPEED != 0 {
-            LOW_SPEED
-        } else if status & HUB_PORT_HIGH_SPEED != 0 {
-            HIGH_SPEED
-        } else {
-            FULL_SPEED
-        }))
     }
 }
 

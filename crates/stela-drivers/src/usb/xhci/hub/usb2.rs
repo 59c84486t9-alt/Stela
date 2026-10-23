@@ -1,0 +1,155 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//! External USB2 reset/debounce through actual parent-hub EP0 requests.
+use super::*;
+
+const POWER: u16 = 1 << 8;
+const OVER_CURRENT: u16 = 1 << 3;
+const SUSPEND: u16 = 1 << 2;
+const RESET_ATTEMPTS: usize = 5;
+// hub_port_reset: TRSTRCY plus the donor's ordinary 40-ms device margin.
+const RESET_SETTLE_US: u64 = 50_000;
+
+fn powered(status: u16, change: u16) -> Result<(), BlockError> {
+    if status & POWER == 0 || (status | change) & OVER_CURRENT != 0 {
+        return Err(BlockError::Unsupported(
+            "USB2 hub port power absent or over-current",
+        ));
+    }
+    Ok(())
+}
+
+impl Controller {
+    /// Only a stable, powered, enabled post-reset observation establishes the
+    /// child speed and releases an old current subtree. The reset notification
+    /// by itself cannot authorize a replacement child.
+    pub(in super::super) fn hub_port(
+        &mut self,
+        slot: u8,
+        port: u8,
+    ) -> Result<Option<u8>, BlockError> {
+        let index = u16::from(port);
+        self.observe_current_ancestors(slot, true)?;
+        let clock = self.clock;
+        let connected = enumerate::debounce(clock, || {
+            let (status, change) = self.hub_port_status(slot, port)?;
+            powered(status, change)?;
+            let changed = change & HUB_PORT_CONNECTION != 0;
+            for (bit, selector) in [
+                (HUB_PORT_CONNECTION, C_PORT_CONNECTION),
+                (2, 17),
+                (4, 18),
+                (16, 20),
+                (32, 23),
+            ] {
+                if change & bit != 0 {
+                    self.control(slot, setup(0x23, CLEAR_FEATURE, selector, index, 0), &[])?;
+                }
+            }
+            Ok((status & HUB_PORT_CONNECTION != 0, changed))
+        })?;
+        if !connected {
+            return Ok(None);
+        }
+        for _ in 0..RESET_ATTEMPTS {
+            self.control(slot, setup(0x23, SET_FEATURE, PORT_RESET, index, 0), &[])?;
+            let deadline = self.clock.deadline(PORT_RESET_US);
+            loop {
+                let (status, change) = self.hub_port_status(slot, port)?;
+                powered(status, change)?;
+                if change & HUB_PORT_RESET != 0 && status & HUB_PORT_RESET == 0 {
+                    self.control(
+                        slot,
+                        setup(0x23, CLEAR_FEATURE, C_PORT_RESET, index, 0),
+                        &[],
+                    )?;
+                    self.clock.delay(RESET_SETTLE_US);
+                    let (status, change) = self.hub_port_status(slot, port)?;
+                    powered(status, change)?;
+                    self.observe_current_ancestors(slot, true)?;
+                    if status & HUB_PORT_CONNECTION == 0 {
+                        return Ok(None);
+                    }
+                    if change != 0 || status & (SUSPEND | (1 << 5) | (1 << 11)) != 0 {
+                        return Err(BlockError::Unsupported(
+                            "USB2 hub port changed during reset recovery",
+                        ));
+                    }
+                    if status & (HUB_PORT_ENABLE | HUB_PORT_RESET) == HUB_PORT_ENABLE {
+                        let root = self.slot(slot)?.attachment.root_port;
+                        self.current_port_reset(Some((slot, port)), root);
+                        return Ok(Some(if status & HUB_PORT_LOW_SPEED != 0 {
+                            LOW_SPEED
+                        } else if status & HUB_PORT_HIGH_SPEED != 0 {
+                            HIGH_SPEED
+                        } else {
+                            FULL_SPEED
+                        }));
+                    }
+                    // A reset which completed disabled may be retried. Keep the
+                    // physical current ownership until a later valid ACK.
+                    break;
+                }
+                if deadline.passed() {
+                    return Err(BlockError::Timeout);
+                }
+                self.clock.delay(1000);
+            }
+        }
+        Err(BlockError::Unsupported(
+            "USB2 hub port failed bounded resets",
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        super::{model::*, tests::controller},
+        *,
+    };
+    use crate::bus::dma::RegionAllocator;
+    use alloc::collections::BTreeMap;
+
+    #[test]
+    fn usb2_reset_reobserves_recovery_before_releasing_child_current() {
+        for context in [32, 64] {
+            for fault in [
+                Fault::ResetRecoveryLoss,
+                Fault::FirstResetDisabled,
+                Fault::NoResetChange,
+                Fault::OverCurrentChange,
+            ] {
+                let nodes =
+                    BTreeMap::from([(0, Node::hub(HIGH_SPEED, 1)), (1, Node::leaf(HIGH_SPEED))]);
+                let mut backing = vec![0u64; 256 * 1024];
+                let start = backing.as_mut_ptr() as u64;
+                // SAFETY: actual model commands and TDs stay in retained RAM.
+                let mut dma =
+                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let (mut c, model) = controller(&mut dma, context, nodes);
+                let mut failures = Vec::new();
+                c.enumerate(&mut dma, &mut failures);
+                assert!(failures.is_empty());
+                let grant = c.power.snapshot(2);
+                {
+                    let mut m = model.borrow_mut();
+                    let port = &mut m.nodes.get_mut(&0).unwrap().ports.as_mut().unwrap()[0];
+                    port.fault = fault;
+                    port.reset_count = 0;
+                }
+                let result = c.hub_port(1, 1);
+                if fault == Fault::FirstResetDisabled {
+                    assert_eq!(result, Ok(Some(HIGH_SPEED)));
+                    assert_eq!(
+                        model.borrow().nodes[&0].ports.as_ref().unwrap()[0].reset_count,
+                        2
+                    );
+                    assert!(!c.power.retained(2));
+                } else {
+                    assert!(result != Ok(Some(HIGH_SPEED)), "{fault:?}");
+                    assert_eq!(c.power.snapshot(2), grant);
+                }
+            }
+        }
+    }
+}

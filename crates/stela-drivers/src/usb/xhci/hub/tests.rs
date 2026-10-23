@@ -1459,3 +1459,49 @@ fn raw_port_power_revalidates_root_and_hub_health_before_authorizing_current() {
         );
     }
 }
+
+#[test]
+fn usb2_hub_reads_complete_variable_bitmaps_and_refuses_malformed_descriptors() {
+    for ports in [1usize, 7, 8, 15, 31] {
+        let mut hub = Node::hub(HIGH_SPEED, ports);
+        hub.multi_tt = true;
+        // Empty ports exercise descriptor/current/status ownership without a
+        // separate fake leaf at each route.
+        for port in hub.ports.as_mut().unwrap() {
+            port.status = 0;
+            port.change = 0;
+        }
+        let nodes = BTreeMap::from([(0, hub)]);
+        let mut backing = vec![0u64; 256 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: the model consumes actual DMA from retained backing only.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut c, model) = controller(&mut dma, 32, nodes);
+        let mut failures = Vec::new();
+        assert_eq!(c.enumerate(&mut dma, &mut failures).len(), 1);
+        assert!(failures.is_empty(), "{ports}: {failures:?}");
+        let length = 7 + 2 * (ports + 1).div_ceil(8);
+        assert!(model.borrow().requests.iter().any(|(_, _, q)| q[0] == 0xa0
+            && q[1] == GET_DESCRIPTOR
+            && q[3] == HUB_DESCRIPTOR
+            && usize::from(u16::from_le_bytes([q[6], q[7]])) == length));
+    }
+    for bytes in [
+        vec![9, 0x29, 0, 1, 0, 1, 0, 0, 255],
+        vec![9, 0x29, 8, 1, 0, 1, 0, 0, 255],
+        vec![9, 0x29, 1, 3, 0, 1, 0, 0, 255],
+        vec![9, 0x29, 1, 1, 1, 1, 0, 0, 255],
+    ] {
+        let mut hub = Node::hub(HIGH_SPEED, 1);
+        hub.descriptor = Some(bytes);
+        let mut backing = vec![0u64; 256 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: malformed wire data cannot alter the retained fixture range.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut c, model) = controller(&mut dma, 64, BTreeMap::from([(0, hub)]));
+        let mut failures = Vec::new();
+        assert_eq!(c.enumerate(&mut dma, &mut failures).len(), 1);
+        assert_eq!(failures.len(), 1);
+        assert!(!model.borrow().requests.iter().any(|(_, _, q)| q[0] == 0x23));
+    }
+}

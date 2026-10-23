@@ -50,6 +50,53 @@ impl Descriptor {
     }
 }
 
+/// USB2's two variable bitmaps include the hub's bit zero. Never accept a
+/// nine-byte prefix of a descriptor for an eight-or-more-port hub.
+pub(super) struct Usb2Descriptor {
+    pub ports: u8,
+    pub power_good_us: u64,
+    pub controller_ma: u16,
+    pub tt_think: u8,
+}
+impl Usb2Descriptor {
+    pub fn length(header: &[u8]) -> Result<usize, BlockError> {
+        if header.len() < 7
+            || header[1] != HUB_DESCRIPTOR
+            || !(1..=MAX_HUB_PORTS).contains(&header[2])
+        {
+            return Err(BlockError::Unsupported("invalid USB2 hub descriptor"));
+        }
+        let length = 7 + 2 * usize::from(header[2] + 1).div_ceil(8);
+        if usize::from(header[0]) != length {
+            return Err(BlockError::Unsupported("invalid USB2 hub bitmap length"));
+        }
+        Ok(length)
+    }
+    pub fn new(bytes: &[u8], endpoint: &Endpoint) -> Result<Self, BlockError> {
+        if bytes.len() != Self::length(bytes)? {
+            return Err(BlockError::Unsupported("short USB2 hub descriptor"));
+        }
+        let characteristics = u16::from_le_bytes([bytes[3], bytes[4]]);
+        if characteristics & !0xff != 0
+            || characteristics & 3 == 3
+            || characteristics & 0x18 == 0x18
+        {
+            return Err(BlockError::Unsupported("reserved USB2 hub characteristics"));
+        }
+        if usize::from(endpoint.max_packet & 0x7ff) < usize::from(bytes[2] + 1).div_ceil(8) {
+            return Err(BlockError::Unsupported(
+                "USB2 hub status bitmap exceeds endpoint",
+            ));
+        }
+        Ok(Self {
+            ports: bytes[2],
+            power_good_us: (u64::from(bytes[5]) * 2000).max(100_000),
+            controller_ma: u16::from(bytes[6]),
+            tt_think: (characteristics >> 5 & 3) as u8,
+        })
+    }
+}
+
 pub(super) fn topology(attachment: Attachment) -> Result<(), BlockError> {
     if attachment.root_port == 0
         || attachment.tier >= MAX_TIERS

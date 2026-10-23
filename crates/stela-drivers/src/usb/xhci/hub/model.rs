@@ -26,6 +26,9 @@ pub(super) enum Fault {
     FirstResetNotU0,
     OverCurrentChange,
     NoResetChange,
+    SuspendIgnored,
+    ResumeIgnored,
+    ResetRecoveryLoss,
 }
 #[derive(Clone)]
 pub(super) struct PortModel {
@@ -206,17 +209,20 @@ impl Node {
                     0,
                 ]
             } else {
-                vec![
-                    9,
+                let ports = self.ports.as_ref().unwrap().len();
+                let bitmap = (ports + 1).div_ceil(8);
+                let mut bytes = vec![
+                    (7 + 2 * bitmap) as u8,
                     0x29,
-                    self.ports.as_ref().unwrap().len() as u8,
+                    ports as u8,
                     0x61,
                     0,
                     1,
                     self.controller_current,
-                    0,
-                    0xff,
-                ]
+                ];
+                bytes.resize(7 + bitmap, 0);
+                bytes.resize(7 + 2 * bitmap, 0xff);
+                bytes
             }
         })
     }
@@ -558,7 +564,7 @@ impl Hardware {
                 let ss = node.speed >= SUPER_SPEED;
                 let configured = node.configured;
                 let depth = node.depth;
-                let port = &mut node.ports.as_mut().unwrap()[usize::from(index) - 1];
+                let port = &mut node.ports.as_mut().unwrap()[usize::from(index & 0xff) - 1];
                 match (request[0], request[1]) {
                     (0x23, SET_FEATURE) if value == PORT_POWER => {
                         assert!(configured);
@@ -570,6 +576,28 @@ impl Hardware {
                         }
                         if port.fault != Fault::PowerAbsent {
                             port.status |= if ss { 1 << 9 } else { 1 << 8 };
+                        }
+                    }
+                    (0x23, SET_FEATURE) if value == 5 && ss => {
+                        assert!(configured && depth.is_some());
+                        let link = index >> 8;
+                        assert!(matches!(link, 0 | 3));
+                        if !(link == 3 && port.fault == Fault::SuspendIgnored
+                            || link == 0 && port.fault == Fault::ResumeIgnored)
+                        {
+                            port.status = port.status & !(15 << 5) | link << 5;
+                            port.change |= 1 << 6;
+                        }
+                    }
+                    (0x23, SET_FEATURE) if value == 2 && !ss => {
+                        if port.fault != Fault::SuspendIgnored {
+                            port.status |= 1 << 2;
+                        }
+                    }
+                    (0x23, CLEAR_FEATURE) if value == 2 && !ss => {
+                        if port.fault != Fault::ResumeIgnored {
+                            port.status &= !(1 << 2);
+                            port.change |= 1 << 2;
                         }
                     }
                     (0x23, SET_FEATURE) if value == PORT_RESET || value == 28 => {
@@ -621,6 +649,9 @@ impl Hardware {
                             change |= 1;
                         }
                         port.pending.push_back((status, change));
+                        if port.fault == Fault::ResetRecoveryLoss {
+                            port.pending.push_back((power, 1));
+                        }
                     }
                     (0x23, CLEAR_FEATURE) => {
                         if port.fault == Fault::ClearChange {
@@ -628,6 +659,9 @@ impl Hardware {
                         }
                         let bit = match value {
                             16 => 1,
+                            17 if !ss => 1 << 1,
+                            18 if !ss => 1 << 2,
+                            23 if !ss => 1 << 5,
                             19 => 1 << 3,
                             20 => 1 << 4,
                             29 if ss => 1 << 5,
