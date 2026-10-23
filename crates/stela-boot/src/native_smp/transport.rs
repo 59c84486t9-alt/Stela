@@ -6,7 +6,8 @@ use alloc::{sync::Arc, vec::Vec};
 use stela_runtime::machine::{
     Host,
     engine::{
-        self, NativeRun, NativeRunObservation, NativeTransport, ServiceTransport,
+        self, NativeRun, NativeRunIdentity, NativeRunObservation, NativeTransport,
+        ServiceTransport,
         publication::{
             self, HostEffectCommand, HostEffectReceipt, WithPayload, WorkerOwner,
             WorkerPublications,
@@ -21,6 +22,9 @@ pub(crate) struct FixedWorkers<'a> {
     sender: &'a Apic,
     tsc_hz: u64,
     ram: Arc<RegisteredSystemRam>,
+    // Diagnostics retain identities, never execution authority or live loans.
+    last_artifacts: Vec<NativeRunIdentity>,
+    reported_services: Vec<(publication::WorkerBinding, &'static str)>,
 }
 impl<'a> FixedWorkers<'a> {
     pub(crate) fn new(
@@ -35,6 +39,8 @@ impl<'a> FixedWorkers<'a> {
             sender,
             tsc_hz,
             ram,
+            last_artifacts: Vec::new(),
+            reported_services: Vec::new(),
         }
     }
     fn processor(&self, binding: publication::WorkerBinding) -> &super::executor::Processor {
@@ -83,7 +89,11 @@ impl ServiceTransport for FixedWorkers<'_> {
             self.processor(command.binding())
                 .host_effect(command, self.sender, self.tsc_hz)
         };
-        if result.is_ok() {
+        if result.is_ok() && !self.reported_services.contains(&(binding, effect)) {
+            // Every real effect still executes and returns its actual receipt.
+            // Repeating the same fence diagnostic for every block can flood the
+            // serial device during an ordinary guest RAM-initialization loop.
+            self.reported_services.push((binding, effect));
             crate::output::arguments(format_args!(
                 "NATIVE SERVICE applied pe={} worker={} generation={generation} sequence={sequence} effect={effect}\n",
                 binding.pe, binding.worker.0
@@ -140,10 +150,25 @@ unsafe impl NativeTransport for FixedWorkers<'_> {
         let mut pending = Vec::new();
         let mut bsp = None;
         for frame in frames {
-            crate::output::arguments(format_args!(
-                "NATIVE SCHEDULER artifact {:?}\n",
-                frame.identity()
-            ));
+            let identity = frame.identity();
+            let previous = self
+                .last_artifacts
+                .iter_mut()
+                .find(|old| old.pe == identity.pe);
+            let changed = match previous {
+                Some(old) if old == identity => false,
+                Some(old) => {
+                    *old = identity.clone();
+                    true
+                }
+                None => {
+                    self.last_artifacts.push(identity.clone());
+                    true
+                }
+            };
+            if changed {
+                crate::output::arguments(format_args!("NATIVE SCHEDULER artifact {identity:?}\n"));
+            }
             let loan = engine::dispatch_native_run(inventory, frame)
                 .unwrap_or_else(|_| fail("actual native frame dispatch refused"));
             if self.is_bsp(loan.binding()) {
