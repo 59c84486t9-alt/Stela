@@ -4,6 +4,7 @@
 use alloc::alloc::{alloc_zeroed, dealloc};
 use core::{alloc::Layout, ffi::c_void, ptr};
 
+pub mod image;
 pub mod pages;
 
 #[unsafe(no_mangle)]

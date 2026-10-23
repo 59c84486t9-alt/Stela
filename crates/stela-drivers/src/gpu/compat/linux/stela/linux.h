@@ -64,4 +64,14 @@ void stela_linux_unsupported(const char *operation);
  * same size and alignment. */
 void *stela_linux_heap_alloc(size_t size, size_t align);
 void stela_linux_heap_free(void *object, size_t size, size_t align);
+/* Actual retained native image DATA only; no pointer read or heap/free grant.
+ * Requires permanent Rust image registration before the dependent lifecycle is
+ * admitted. Missing/in-progress registration traps instead of returning false.
+ * The registration is independent of per-call Linux execution owners. The
+ * admission owner must cover every complete borrowed constant name (including
+ * NUL), with stable true classification through release. A negative free query
+ * requires separate heap ownership; negative duplication may copy a valid
+ * mutable/stack string. A negative result never proves an unknown pointer is
+ * heap. */
+bool stela_linux_is_rodata(const void *address);
 #endif
