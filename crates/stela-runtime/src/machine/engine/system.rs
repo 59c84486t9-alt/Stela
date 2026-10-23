@@ -3947,7 +3947,9 @@ mod tests {
             machine.cpu.set_pstate(Pstate::reset(2));
             let read = |machine: &mut TestMachine, encoding| {
                 machine.cpu.pc = BASE;
-                machine.system_instruction(access(true, encoding, 2)).unwrap();
+                machine
+                    .system_instruction(access(true, encoding, 2))
+                    .unwrap();
                 machine.cpu.state.x[2]
             };
             let write = |machine: &mut TestMachine, encoding, value| {
@@ -3970,12 +3972,17 @@ mod tests {
             }
             let before = machine.cpu.read(Register::ACTLR_EL1);
             for refused in [1, 1 << 4, 1 << 5, 1 << 6, 1 << 63] {
-                assert!(matches!(write(&mut machine, alias, refused), Err(Stop::Unsupported(_))));
+                assert!(matches!(
+                    write(&mut machine, alias, refused),
+                    Err(Stop::Unsupported(_))
+                ));
                 assert_eq!(machine.cpu.read(Register::ACTLR_EL1), before);
                 assert_eq!(machine.cpu.pc, BASE);
             }
             // XZR is an ordinary discarded destination/zero source.
-            machine.system_instruction(access(false, alias, 31)).unwrap();
+            machine
+                .system_instruction(access(false, alias, 31))
+                .unwrap();
             assert_eq!(read(&mut machine, ARCHITECTURAL), 0);
             let original_x = machine.cpu.state.x;
             machine.system_instruction(access(true, alias, 31)).unwrap();
@@ -3997,8 +4004,15 @@ mod tests {
                     for tidcp in [false, true] {
                         let mut machine = machine_on(chip, &[]);
                         machine.cpu.set_pstate(Pstate::reset(el));
-                        machine.cpu.registers.set(Register::HCR_EL2, 0,
-                            if tidcp { 1 << crate::machine::registers::HCR_TIDCP } else { 0 });
+                        machine.cpu.registers.set(
+                            Register::HCR_EL2,
+                            0,
+                            if tidcp {
+                                1 << crate::machine::registers::HCR_TIDCP
+                            } else {
+                                0
+                            },
+                        );
                         machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
                         machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
                         machine.cpu.state.x[1] = ACTLR_EN_TSO;
@@ -4006,11 +4020,16 @@ mod tests {
                         let word = access(read, impdef::ACTLR_EL12, 1);
                         machine.system_instruction(word).unwrap();
                         let trapped = el == 1 && tidcp;
-                        let target = if trapped { Register::ESR_EL2 } else { Register::ESR_EL1 };
+                        let target = if trapped {
+                            Register::ESR_EL2
+                        } else {
+                            Register::ESR_EL1
+                        };
                         let syndrome = machine.cpu.read(target);
                         assert_eq!(syndrome >> 26, if trapped { 0x18 } else { 0 });
                         if trapped {
-                            let original = stela_compiler::aarch64::system::registers::decode(word).unwrap();
+                            let original =
+                                stela_compiler::aarch64::system::registers::decode(word).unwrap();
                             assert_eq!(syndrome & 0x1ff_ffff, u64::from(trap_iss(original)));
                         }
                         assert_eq!(machine.cpu.read(Register::ACTLR_EL1), before);

@@ -6,7 +6,8 @@ use super::{commit, vector_offset};
 use crate::{
     TargetCpu,
     aarch64::{
-        AddressMode, Operation, Register, register_offset::IndexExtend,
+        AddressMode, Operation, Register,
+        register_offset::IndexExtend,
         simd::{
             Operand as SimdOperand,
             structure_memory::{Direction, Layout, LoadCommit, Operand, PostIndex},
@@ -14,8 +15,8 @@ use crate::{
     },
     block::CheckedMemoryProfile,
     context::memory::{
-        MEMORY_REQUEST_BYTES, MemoryRequirements, SpAlignmentRequirement,
-        address::IncrementChoice, flags, host_caps, profile_requirements,
+        MEMORY_REQUEST_BYTES, MemoryRequirements, SpAlignmentRequirement, address::IncrementChoice,
+        flags, host_caps, profile_requirements,
     },
     x86_64::{isa::SimdOpcode as Host, memory_context as service, store},
 };
@@ -243,8 +244,7 @@ impl CheckedOperand {
                             code,
                             true,
                             operand.element_bytes,
-                            vector_offset(access.vector)
-                                + u32::from(index * operand.element_bytes),
+                            vector_offset(access.vector) + u32::from(index * operand.element_bytes),
                         );
                         if clear_upper {
                             clear_upper_half(code, access.vector);
@@ -318,10 +318,7 @@ fn clear_upper_half(code: &mut Vec<u8>, vector: u8) {
 /// optional shuffle mask after each callback; no host vector survives it.
 fn replicate(code: &mut Vec<u8>, bytes: u8, vector_bytes: u8, target: TargetCpu) {
     Host::MoveGprQword.register(code, 0, 1, TargetCpu::Baseline); // XMM0 <- RCX
-    if bytes == BYTE_BYTES
-        && vector_bytes == VECTOR_BYTES
-        && target.supports(TargetCpu::Ssse3)
-    {
+    if bytes == BYTE_BYTES && vector_bytes == VECTOR_BYTES && target.supports(TargetCpu::Ssse3) {
         Host::Xor.register(code, 1, 1, TargetCpu::Baseline);
         Host::ByteShuffle.register(code, 0, 1, target);
         return;
@@ -368,17 +365,23 @@ mod tests {
             for q in 0..2 {
                 for load in 0..2 {
                     for fields in 0..128 {
-                        let word = class | (q << 30) | (load << 22)
+                        let word = class
+                            | (q << 30)
+                            | (load << 22)
                             | if class == 0x0c00_0000 {
                                 // Includes reserved opcodes, bit11:10 sizes,
                                 // and zero/one in the reserved bit21.
-                                ((fields & 15) << 12) | (((fields >> 4) & 3) << 10)
+                                ((fields & 15) << 12)
+                                    | (((fields >> 4) & 3) << 10)
                                     | (((fields >> 6) & 1) << 21)
                             } else {
-                                ((fields & 7) << 13) | (((fields >> 3) & 1) << 12)
-                                    | (((fields >> 4) & 3) << 10) | (((fields >> 6) & 1) << 21)
+                                ((fields & 7) << 13)
+                                    | (((fields >> 3) & 1) << 12)
+                                    | (((fields >> 4) & 3) << 10)
+                                    | (((fields >> 6) & 1) << 21)
                             }
-                            | (2 << BASE_SHIFT) | 31;
+                            | (2 << BASE_SHIFT)
+                            | 31;
                         if matches!(structure_memory::decode(word), Some(Ok(_))) {
                             words.push(word);
                         }
@@ -390,8 +393,11 @@ mod tests {
     }
 
     fn checked(operand: Operand, profile: CheckedMemoryProfile) -> CheckedOperand {
-        CheckedOperand::from_operation(&Operation::Simd(SimdOperand::StructureMemory(operand)), profile)
-            .expect("allocated structured operand")
+        CheckedOperand::from_operation(
+            &Operation::Simd(SimdOperand::StructureMemory(operand)),
+            profile,
+        )
+        .expect("allocated structured operand")
     }
 
     #[test]
@@ -409,12 +415,14 @@ mod tests {
                     operand.base = base;
                     operand.post_index = post_index;
                     for checks in [AddressAddChecks::Disabled, AddressAddChecks::Enabled] {
-                        let effects = EffectiveAddressChecks::new(AddressAddChecks::Disabled, checks);
+                        let effects =
+                            EffectiveAddressChecks::new(AddressAddChecks::Disabled, checks);
                         for sp in [
                             CheckedMemoryProfile::SpAlignmentEnabled,
                             CheckedMemoryProfile::SpAlignmentDisabled,
                         ] {
-                            let profile = sp.with_address_checks(AccessEl::El1, AccessEl::El0, effects);
+                            let profile =
+                                sp.with_address_checks(AccessEl::El1, AccessEl::El0, effects);
                             let required = checked(operand, profile).requirements();
                             let tag = base != Register::Sp || post_index != PostIndex::None;
                             let write = operand.direction == Direction::Store;
@@ -426,7 +434,8 @@ mod tests {
                             );
                             assert_eq!(
                                 required.required_host_caps,
-                                if !write && operand.element_bytes > 1
+                                if !write
+                                    && operand.element_bytes > 1
                                     && (base != Register::Sp
                                         || sp == CheckedMemoryProfile::SpAlignmentDisabled)
                                 {
@@ -438,7 +447,11 @@ mod tests {
                             assert_eq!(
                                 required.required_profile,
                                 profile_requirements::NATIVE_ACCESS
-                                    | if tag { profile_requirements::TAG_GRANULES } else { 0 }
+                                    | if tag {
+                                        profile_requirements::TAG_GRANULES
+                                    } else {
+                                        0
+                                    }
                             );
                             assert_eq!(
                                 required.required_sp_alignment,
@@ -448,12 +461,16 @@ mod tests {
                                     SpAlignmentRequirement::Any
                                 }
                             );
-                            assert!(required.required_address_checks.matches(
-                                effects, IncrementChoice::Unchecked
-                            ));
-                            assert!(!required.required_address_checks.matches(
-                                effects, IncrementChoice::Checked
-                            ));
+                            assert!(
+                                required
+                                    .required_address_checks
+                                    .matches(effects, IncrementChoice::Unchecked)
+                            );
+                            assert!(
+                                !required
+                                    .required_address_checks
+                                    .matches(effects, IncrementChoice::Checked)
+                            );
                             if post_index != PostIndex::None {
                                 let opposite = match checks {
                                     AddressAddChecks::Disabled => AddressAddChecks::Enabled,
@@ -477,43 +494,86 @@ mod tests {
         let valid = structure_memory::decode(0x4c40_0044).unwrap().unwrap();
         let profile = CheckedMemoryProfile::SpAlignmentEnabled;
         for operand in [
-            Operand { first_vector: 32, ..valid },
-            Operand { base: Register::Zero, ..valid },
-            Operand { base: Register::X(31), ..valid },
-            Operand { element_bytes: 0, ..valid },
-            Operand { element_bytes: 3, ..valid },
-            Operand { post_index: PostIndex::Register(31), ..valid },
             Operand {
-                layout: Layout::Lane { structures: 4, index: 16 },
+                first_vector: 32,
                 ..valid
             },
             Operand {
-                layout: Layout::Multiple { repetitions: 4, structures: 4, vector_bytes: 16 },
+                base: Register::Zero,
                 ..valid
             },
             Operand {
-                layout: Layout::Multiple { repetitions: 1, structures: 0, vector_bytes: 16 },
+                base: Register::X(31),
+                ..valid
+            },
+            Operand {
+                element_bytes: 0,
+                ..valid
+            },
+            Operand {
+                element_bytes: 3,
+                ..valid
+            },
+            Operand {
+                post_index: PostIndex::Register(31),
+                ..valid
+            },
+            Operand {
+                layout: Layout::Lane {
+                    structures: 4,
+                    index: 16,
+                },
+                ..valid
+            },
+            Operand {
+                layout: Layout::Multiple {
+                    repetitions: 4,
+                    structures: 4,
+                    vector_bytes: 16,
+                },
+                ..valid
+            },
+            Operand {
+                layout: Layout::Multiple {
+                    repetitions: 1,
+                    structures: 0,
+                    vector_bytes: 16,
+                },
                 ..valid
             },
             Operand {
                 element_bytes: 8,
-                layout: Layout::Multiple { repetitions: 1, structures: 4, vector_bytes: 8 },
+                layout: Layout::Multiple {
+                    repetitions: 1,
+                    structures: 4,
+                    vector_bytes: 8,
+                },
                 ..valid
             },
             Operand {
                 direction: Direction::Store,
-                layout: Layout::Replicate { structures: 4, vector_bytes: 16 },
+                layout: Layout::Replicate {
+                    structures: 4,
+                    vector_bytes: 16,
+                },
                 ..valid
             },
         ] {
-            assert!(CheckedOperand::from_operation(
-                &Operation::Simd(SimdOperand::StructureMemory(operand)), profile
-            ).is_none());
+            assert!(
+                CheckedOperand::from_operation(
+                    &Operation::Simd(SimdOperand::StructureMemory(operand)),
+                    profile
+                )
+                .is_none()
+            );
         }
-        assert!(CheckedOperand::from_operation(
-            &Operation::Simd(SimdOperand::StructureMemory(valid)),
-            CheckedMemoryProfile::M0DeviceRamRead64Staged
-        ).is_none());
+        assert!(
+            CheckedOperand::from_operation(
+                &Operation::Simd(SimdOperand::StructureMemory(valid)),
+                CheckedMemoryProfile::M0DeviceRamRead64Staged
+            )
+            .is_none()
+        );
     }
 
     #[cfg(all(target_arch = "x86_64", unix))]
@@ -524,8 +584,8 @@ mod tests {
             context::{
                 ExecutionContext,
                 memory::{
-                    MEMORY_CONTEXT_BYTES, MEMORY_CONTEXT_VERSION, MemoryContextView,
-                    MemoryRequest, MemoryStatus,
+                    MEMORY_CONTEXT_BYTES, MEMORY_CONTEXT_VERSION, MemoryContextView, MemoryRequest,
+                    MemoryStatus,
                 },
             },
         };
@@ -543,11 +603,19 @@ mod tests {
             let first = usize::from(operand.first_vector);
             let width = usize::from(operand.element_bytes);
             match operand.layout {
-                Layout::Multiple { repetitions, structures, vector_bytes } => {
+                Layout::Multiple {
+                    repetitions,
+                    structures,
+                    vector_bytes,
+                } => {
                     for repetition in 0..usize::from(repetitions) {
                         for lane in 0..usize::from(vector_bytes) / width {
                             for structure in 0..usize::from(structures) {
-                                accesses.push(((first + repetition + structure) % 32, lane * width, 0));
+                                accesses.push((
+                                    (first + repetition + structure) % 32,
+                                    lane * width,
+                                    0,
+                                ));
                             }
                         }
                     }
@@ -557,7 +625,10 @@ mod tests {
                         accesses.push(((first + structure) % 32, usize::from(index) * width, 0));
                     }
                 }
-                Layout::Replicate { structures, vector_bytes } => {
+                Layout::Replicate {
+                    structures,
+                    vector_bytes,
+                } => {
                     for structure in 0..usize::from(structures) {
                         accesses.push(((first + structure) % 32, 0, usize::from(vector_bytes)));
                     }
@@ -602,8 +673,15 @@ mod tests {
                         }
                         bytes[replicate_bytes..].fill(0);
                     } else {
-                        bytes[lane_byte..lane_byte + width].copy_from_slice(&ram[start..start + width]);
-                        if matches!(operand.layout, Layout::Multiple { vector_bytes: 8, .. }) {
+                        bytes[lane_byte..lane_byte + width]
+                            .copy_from_slice(&ram[start..start + width]);
+                        if matches!(
+                            operand.layout,
+                            Layout::Multiple {
+                                vector_bytes: 8,
+                                ..
+                            }
+                        ) {
                             bytes[8..].fill(0);
                         }
                     }
@@ -654,15 +732,13 @@ mod tests {
             // staging until native return. No reference spans this callback.
             let (view, request) = unsafe { (&mut *view, &*request) };
             let harness = unsafe { &mut *view.opaque.cast::<Harness>() };
-            harness.requests.push((
-                request.address,
-                request.bytes,
-                request.flags,
-                request.pc,
-            ));
+            harness
+                .requests
+                .push((request.address, request.bytes, request.flags, request.pc));
             harness.observed.push(unsafe { (&*harness.state).clone() });
             let start = request.address.wrapping_sub(harness.base) as usize;
-            let data = unsafe { core::slice::from_raw_parts_mut(request.data, request.bytes as usize) };
+            let data =
+                unsafe { core::slice::from_raw_parts_mut(request.data, request.bytes as usize) };
             if request.flags & flags::WRITE == 0 {
                 data.fill(0xcc);
             }
@@ -778,7 +854,11 @@ mod tests {
                 Self::new(&code)
             }
 
-            fn run(&self, state: &mut GuestState, harness: &mut Harness) -> (u32, MemoryContextView) {
+            fn run(
+                &self,
+                state: &mut GuestState,
+                harness: &mut Harness,
+            ) -> (u32, MemoryContextView) {
                 harness.state = state;
                 let mut view = MemoryContextView {
                     version: MEMORY_CONTEXT_VERSION,
@@ -797,11 +877,17 @@ mod tests {
                     ..ExecutionContext::default()
                 };
                 // SAFETY: the exact generated wrapper implements this borrowed ABI.
-                let entry: unsafe extern "sysv64" fn(*mut GuestState, *mut ExecutionContext) -> u32 =
-                    unsafe { core::mem::transmute(self.0) };
+                let entry: unsafe extern "sysv64" fn(
+                    *mut GuestState,
+                    *mut ExecutionContext,
+                ) -> u32 = unsafe { core::mem::transmute(self.0) };
                 let before = mxcsr();
                 let status = unsafe { entry(state, &mut context) };
-                assert_eq!(mxcsr(), before, "full host MXCSR must survive every callback");
+                assert_eq!(
+                    mxcsr(),
+                    before,
+                    "full host MXCSR must survive every callback"
+                );
                 (status, view)
             }
         }
@@ -872,11 +958,19 @@ mod tests {
             let success = stop == usize::from(operand.transferred_bytes());
             assert_eq!(
                 status,
-                if success { MemoryStatus::Success } else { MemoryStatus::Permission } as u32
+                if success {
+                    MemoryStatus::Success
+                } else {
+                    MemoryStatus::Permission
+                } as u32
             );
-            let (expected, expected_ram) = reference(operand, original, initial_ram, stop, success, checks);
+            let (expected, expected_ram) =
+                reference(operand, original, initial_ram, stop, success, checks);
             assert_eq!(actual, expected, "operand={operand:?}, prefix={stop}");
-            assert_eq!(harness.ram, expected_ram, "operand={operand:?}, prefix={stop}");
+            assert_eq!(
+                harness.ram, expected_ram,
+                "operand={operand:?}, prefix={stop}"
+            );
             assert_eq!(view.completed_bytes, stop as u64);
             assert_eq!(view.fault_kind, status);
             assert_eq!(view.fault_access, 0);
@@ -885,7 +979,11 @@ mod tests {
                 assert_eq!(view.fault_pc, GUEST_PC);
             }
             let width = usize::from(operand.element_bytes);
-            let requests = if success { stop / width } else { stop / width + 1 };
+            let requests = if success {
+                stop / width
+            } else {
+                stop / width + 1
+            };
             assert_eq!(harness.requests.len(), requests);
             let descriptor = flags::ASIMD
                 | if operand.direction == Direction::Store {
@@ -901,11 +999,23 @@ mod tests {
             for (ordinal, request) in harness.requests.iter().enumerate() {
                 assert_eq!(
                     *request,
-                    (base.wrapping_add((ordinal * width) as u64), width as u32, descriptor, GUEST_PC)
+                    (
+                        base.wrapping_add((ordinal * width) as u64),
+                        width as u32,
+                        descriptor,
+                        GUEST_PC
+                    )
                 );
                 // A prior element must already be committed when the next
                 // service observes State, including Q0 upper-half clearing.
-                let (expected, _) = reference(operand, original, initial_ram, ordinal * width, false, checks);
+                let (expected, _) = reference(
+                    operand,
+                    original,
+                    initial_ram,
+                    ordinal * width,
+                    false,
+                    checks,
+                );
                 assert_eq!(harness.observed[ordinal], expected);
             }
         }
@@ -925,7 +1035,14 @@ mod tests {
                     let base = 0x1ffd;
                     let original = state(operand, base);
                     for stop in 0..=usize::from(operand.transferred_bytes()) {
-                        check_prefix(&code, operand, &original, base, stop, AddressAddChecks::Disabled);
+                        check_prefix(
+                            &code,
+                            operand,
+                            &original,
+                            base,
+                            stop,
+                            AddressAddChecks::Disabled,
+                        );
                     }
                 }
             }
@@ -949,7 +1066,8 @@ mod tests {
                         let code = NativeCode::body(operand, profile);
                         for base in [0x2000, 0x2003] {
                             let original = state(operand, base);
-                            if profile == CheckedMemoryProfile::SpAlignmentEnabled && base & 15 != 0 {
+                            if profile == CheckedMemoryProfile::SpAlignmentEnabled && base & 15 != 0
+                            {
                                 let mut actual = original.clone();
                                 let mut harness = harness(base, usize::MAX);
                                 let (status, view) = code.run(&mut actual, &mut harness);
@@ -963,7 +1081,11 @@ mod tests {
                                 let total = usize::from(operand.transferred_bytes());
                                 for stop in [0, total / 2, total] {
                                     check_prefix(
-                                        &code, operand, &original, base, stop,
+                                        &code,
+                                        operand,
+                                        &original,
+                                        base,
+                                        stop,
                                         AddressAddChecks::Disabled,
                                     );
                                 }
@@ -977,8 +1099,13 @@ mod tests {
         #[test]
         fn element_increment_wraps_unchecked_and_only_post_index_uses_cpa2_address_add() {
             for word in [
-                0x4c40_0044, 0x4c40_0444, 0x4c40_0844, 0x4c40_0c44,
-                0x4c00_0044, 0x4d60_e05f, 0x4d60_205f,
+                0x4c40_0044,
+                0x4c40_0444,
+                0x4c40_0844,
+                0x4c40_0c44,
+                0x4c00_0044,
+                0x4d60_e05f,
+                0x4d60_205f,
             ] {
                 for post_index in [
                     PostIndex::None,
@@ -990,17 +1117,22 @@ mod tests {
                         let mut operand = structure_memory::decode(word).unwrap().unwrap();
                         operand.post_index = post_index;
                         let checks = AddressAddChecks::Enabled;
-                        let profile = CheckedMemoryProfile::SpAlignmentDisabled.with_address_checks(
-                            AccessEl::El1,
-                            AccessEl::El0,
-                            EffectiveAddressChecks::new(AddressAddChecks::Disabled, checks),
-                        );
+                        let profile = CheckedMemoryProfile::SpAlignmentDisabled
+                            .with_address_checks(
+                                AccessEl::El1,
+                                AccessEl::El0,
+                                EffectiveAddressChecks::new(AddressAddChecks::Disabled, checks),
+                            );
                         let code = NativeCode::body(operand, profile);
                         let mut original = state(operand, base);
                         if post_index == PostIndex::Register(30) {
                             original.x[30] = 0x0100_0000_0000_0010;
                         }
-                        for stop in [0, usize::from(operand.element_bytes), usize::from(operand.transferred_bytes())] {
+                        for stop in [
+                            0,
+                            usize::from(operand.element_bytes),
+                            usize::from(operand.transferred_bytes()),
+                        ] {
                             check_prefix(&code, operand, &original, base, stop, checks);
                         }
                     }
@@ -1026,7 +1158,11 @@ mod tests {
                             harness.ram.fill(value);
                             let success = stop == usize::from(operand.transferred_bytes());
                             let expected = reference(
-                                operand, &original, harness.ram, stop, success,
+                                operand,
+                                &original,
+                                harness.ram,
+                                stop,
+                                success,
                                 AddressAddChecks::Disabled,
                             );
                             let (status, view) = code.run(&mut actual, &mut harness);
@@ -1058,8 +1194,12 @@ mod tests {
                 BlockProfile::SystemModeSharedV1(CheckedMemoryProfile::SpAlignmentDisabled),
             ] {
                 let plan = CompilationPlan::new(
-                    &source, GuestAddress(GUEST_PC), profile, TargetCpu::X86_64_V2,
-                ).unwrap();
+                    &source,
+                    GuestAddress(GUEST_PC),
+                    profile,
+                    TargetCpu::X86_64_V2,
+                )
+                .unwrap();
                 let required = plan.memory_requirements().unwrap();
                 assert_eq!(required.required_flags, flags::ASIMD | flags::TAG_CHECKED);
                 assert_eq!(required.required_host_caps, 0); // LD4 .16B has byte Mem accesses
@@ -1071,11 +1211,23 @@ mod tests {
                 let operand = structure_memory::decode(0x4c40_0044).unwrap().unwrap();
                 let code = NativeCode::new(&compiled.native.x86_64_code);
                 let original = state(operand, 0x1ffd);
-                check_prefix(&code, operand, &original, 0x1ffd, 31, AddressAddChecks::Disabled);
+                check_prefix(
+                    &code,
+                    operand,
+                    &original,
+                    0x1ffd,
+                    31,
+                    AddressAddChecks::Disabled,
+                );
                 let mut actual = original.clone();
                 let mut harness = harness(0x1ffd, usize::MAX);
                 let expected = reference(
-                    operand, &original, harness.ram, 64, true, AddressAddChecks::Disabled,
+                    operand,
+                    &original,
+                    harness.ram,
+                    64,
+                    true,
+                    AddressAddChecks::Disabled,
                 );
                 // Success reaches the real RET terminator, returning a block
                 // exit rather than a MemoryStatus. The retained view is decisive.

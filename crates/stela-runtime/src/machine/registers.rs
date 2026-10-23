@@ -2363,7 +2363,10 @@ mod tests {
             for operation in [mrs(0, impdef::ACTLR_EL12), msr(0, impdef::ACTLR_EL12)] {
                 let outcome = cpu.apple_access(operation, 0);
                 if impdef::consumed(impdef::ACTLR_EL12, chip) {
-                    assert_eq!(outcome, Outcome::View(encodings::ACTLR_EL12, agt::selected(&cpu)));
+                    assert_eq!(
+                        outcome,
+                        Outcome::View(encodings::ACTLR_EL12, agt::selected(&cpu))
+                    );
                 } else {
                     assert_eq!(outcome, Outcome::Undefined);
                 }
