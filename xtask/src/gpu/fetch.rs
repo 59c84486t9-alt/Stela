@@ -3,7 +3,8 @@
 //! the patterns in `third_party/<name>.sparse` where that file exists, and
 //! applies Stela's series from `third_party/patches/<name>/` as commits on
 //! the local branch `stela`. `export` writes a submodule's commits since its
-//! pin back to that series. Meson downloads the wraps Stela's compiler build
+//! pin back to that series, each file keeping its short name while its
+//! commit's subject stays the same. Meson downloads the wraps Stela's compiler build
 //! names into the ignored `gpu/subprojects/`.
 use super::support::{capture, gpu, tool};
 use crate::tools::{self, exec};
@@ -11,6 +12,7 @@ use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -348,7 +350,9 @@ pub fn export() -> Result<()> {
             submodule.pin
         );
         let patches = submodule.patches_directory();
+        let mut names = HashMap::new();
         for patch in submodule.patches()? {
+            names.insert(subject(&patch)?, name(&patch));
             fs::remove_file(patch)?;
         }
         if submodule.head()? != submodule.pin {
@@ -360,6 +364,7 @@ pub fn export() -> Result<()> {
                         "format-patch",
                         "-q",
                         "--no-numbered",
+                        "--numbered-files",
                         "--zero-commit",
                         // Abbreviated blob names grow with the checkout.
                         "--full-index",
@@ -369,12 +374,63 @@ pub fn export() -> Result<()> {
                     .arg(&patches)
                     .arg(format!("{}..HEAD", submodule.pin)),
             )?;
+            for number in 1.. {
+                let patch = patches.join(number.to_string());
+                if !patch.exists() {
+                    break;
+                }
+                let subject = subject(&patch)?;
+                let name = names.remove(&subject).unwrap_or_else(|| slug(&subject));
+                fs::rename(patch, patches.join(format!("{number:04}-{name}.patch")))?;
+            }
         } else if patches.is_dir() {
             fs::remove_dir(&patches)?;
         }
         submodule.record(&submodule.series()?)?;
     }
     Ok(())
+}
+
+/// A patch's subject, unfolded and without `[PATCH]`.
+fn subject(patch: &Path) -> Result<String> {
+    let text = fs::read_to_string(patch)?;
+    let mut lines = text
+        .lines()
+        .skip_while(|line| !line.starts_with("Subject: "));
+    let first = lines
+        .next()
+        .with_context(|| format!("{} has no subject", patch.display()))?;
+    let mut subject = first["Subject: ".len()..]
+        .trim_start_matches("[PATCH] ")
+        .to_owned();
+    for line in lines.take_while(|line| line.starts_with(' ')) {
+        subject.push_str(line);
+    }
+    Ok(subject)
+}
+
+/// A patch file's name between its number and extension, which `export`
+/// keeps while the commit's subject stays the same.
+fn name(patch: &Path) -> String {
+    let file = patch.file_stem().unwrap().to_string_lossy();
+    file.split_once('-')
+        .map_or(&*file, |(_, name)| name)
+        .to_owned()
+}
+
+/// A new patch's name: the first three words of its subject's summary.
+fn slug(subject: &str) -> String {
+    let summary = subject
+        .split_once(": ")
+        .map_or(subject, |(_, summary)| summary);
+    summary
+        .replace('\'', "")
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(3)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// Each submodule's origin, pin, checked-out commit and series, for receipts.
@@ -393,4 +449,29 @@ pub fn origins() -> Result<Value> {
             }))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_follow_subjects() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let patch = directory.path().join("0002-stela-compilers.patch");
+        fs::write(
+            &patch,
+            "From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n\
+             Subject: [PATCH] meson: build Stela's shader compiler libraries without API\n \
+             drivers\n\n---\n",
+        )?;
+        assert_eq!(
+            subject(&patch)?,
+            "meson: build Stela's shader compiler libraries without API drivers"
+        );
+        assert_eq!(name(&patch), "stela-compilers");
+        assert_eq!(slug(&subject(&patch)?), "build-stelas-shader");
+        assert_eq!(slug("brw: Add Xe3P (GFX_VERx10 == 350)"), "add-xe3p-gfx");
+        Ok(())
+    }
 }
