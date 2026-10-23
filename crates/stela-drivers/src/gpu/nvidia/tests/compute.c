@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
-#include "nvidia_compute.h"
+#include "../hosted/compute.h"
 #include "air_to_nir.h"
-#include "air_test_fixture.h"
+#include "../../compiler/tests/air_test_fixture.h"
 #include "nouveau/headers/drf.h"
 #include "cl906f.h"
 #include "cla0c0.h"
@@ -16,7 +16,7 @@
 #include "clc6c0qmd.h"
 #include "clcbc0qmd.h"
 #include "clcdc0qmd.h"
-#include "targets/nvidia.h"
+#include "../../compiler/tests/targets/nvidia.h"
 #include "util/ralloc.h"
 
 #define CHECK(condition) do { if (!(condition)) { \

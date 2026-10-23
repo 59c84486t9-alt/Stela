@@ -196,7 +196,7 @@ if stela_air_llvm != ''
     stela_air_test_args += ['-DSTELA_AIR_TEST_NAK']
     stela_air_input_nak_probe = executable(
       'stela_air_input_nak_probe',
-      'tests/air_input_nak_probe.c',
+      '../nvidia/tests/air_nak.c',
       include_directories : [inc_include, inc_src, inc_gpu],
       dependencies : [idep_stela_air, idep_nak],
       link_with : stela_nak,
@@ -249,7 +249,7 @@ if stela_air_llvm != ''
     if with_amd_llvm
       stela_air_amd_llvm_probe = executable(
         'stela_air_amd_llvm_probe',
-        '../amd/tests/air_llvm_probe.c',
+        '../amd/tests/air_llvm.c',
         include_directories : [inc_include, inc_src, inc_gpu, inc_amd, inc_amd_common,
                                include_directories('.')],
         # Keep the full matching development headers. idep_stela_air exposes
@@ -266,7 +266,7 @@ if stela_air_llvm != ''
     endif
     stela_air_aco_probe = executable(
       'stela_air_aco_probe',
-      'tests/air_aco_probe.c',
+      '../amd/tests/air_aco.c',
       include_directories : [inc_include, inc_src, inc_gpu, inc_amd, inc_amd_common],
       dependencies : [idep_stela_air, idep_aco, idep_amd_generated_headers] +
                      (with_amd_llvm ? [dep_llvm] : []),
@@ -317,7 +317,7 @@ if stela_air_llvm != ''
     )
     stela_air_brw_probe = executable(
       'stela_air_brw_probe',
-      '../intel/tests/air_brw_probe.c',
+      '../intel/tests/air_brw.c',
       include_directories : [inc_include, inc_src, inc_gpu, inc_intel],
       dependencies : [idep_stela_air, idep_intel_compiler_brw, idep_intel_dev],
       c_args : ['-Werror'],
@@ -326,7 +326,7 @@ if stela_air_llvm != ''
     test('stela_air_brw', stela_air_brw_probe, suite : ['stela', 'stela-air-input'])
     stela_air_elk_probe = executable(
       'stela_air_elk_probe',
-      '../intel/tests/air_elk_probe.c',
+      '../intel/tests/air_elk.c',
       include_directories : [inc_include, inc_src, inc_gpu, inc_intel],
       dependencies : [idep_stela_air, idep_intel_compiler_elk,
                       idep_intel_compiler_gen, idep_intel_dev],
@@ -382,7 +382,7 @@ if with_nvidia
   test('stela_nv_sampler', stela_nv_sampler_probe, suite : 'stela')
   stela_nv_compute = static_library(
     'stela_nv_compute',
-    ['nvidia_compute.c', stela_nv_compute_headers],
+    ['../nvidia/hosted/compute.c', stela_nv_compute_headers],
     include_directories : [inc_include, inc_src, inc_gpu,
                            nvidia_headers],
     dependencies : [idep_nak, idep_nir_headers, idep_mesautil],
@@ -391,7 +391,7 @@ if with_nvidia
   if stela_air_llvm != ''
     stela_nv_compute_probe = executable(
       'stela_nv_compute_probe',
-      'tests/nvidia_compute_probe.c',
+      '../nvidia/tests/compute.c',
       include_directories : [inc_include, inc_src, inc_gpu,
                              nvidia_headers],
       dependencies : [idep_stela_air, idep_nak],
@@ -456,7 +456,7 @@ if with_nvidia
   endif
   stela_nak_probe = executable(
     'stela_nak_probe',
-    'tests/nak_probe.c',
+    'tests/nak.c',
     include_directories : [inc_include, inc_src, inc_gpu],
     dependencies : [idep_nak, idep_nir, idep_mesautil],
     link_with : stela_nak,
@@ -775,7 +775,7 @@ if with_intel
   endif
   stela_elk_probe = executable(
     'stela_elk_probe',
-    'tests/elk_probe.c',
+    'tests/elk.c',
     include_directories : [inc_include, inc_src, inc_gpu, inc_intel],
     dependencies : [idep_intel_compiler_elk, idep_intel_compiler_gen,
                     idep_intel_dev, idep_mesautil],
@@ -784,7 +784,7 @@ if with_intel
   test('stela_elk_codegen', stela_elk_probe, suite : 'stela')
   stela_brw_probe = executable(
     'stela_brw_probe',
-    'tests/brw_probe.c',
+    'tests/brw.c',
     include_directories : [inc_include, inc_src, inc_gpu, inc_intel],
     dependencies : [idep_intel_compiler_brw, idep_intel_dev, idep_mesautil],
   )
@@ -879,7 +879,7 @@ if with_amd
   test('stela_amd_image_copy', stela_amd_image_copy_probe, suite : 'stela')
   stela_amd_commands = static_library(
     'stela_amd_commands',
-    'amd_commands.c',
+    '../amd/hosted/commands.c',
     include_directories : [inc_include, inc_src, inc_gpu, inc_amd, inc_amd_common],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
     link_with : [libamd_common],
@@ -948,7 +948,7 @@ if with_amd
 
   stela_amd_commands_probe = executable(
     'stela_amd_commands_probe',
-    'tests/amd_commands_probe.c',
+    '../amd/tests/commands.c',
     include_directories : [inc_include, inc_src, inc_gpu, inc_amd, inc_amd_common],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
     link_with : [stela_amd_commands, libamd_common],
@@ -958,7 +958,7 @@ if with_amd
 
   stela_aco_probe = executable(
     'stela_aco_probe',
-    'tests/aco_probe.c',
+    'tests/aco.c',
     include_directories : [inc_include, inc_src, inc_gpu, inc_amd, inc_amd_common],
     dependencies : [idep_aco, idep_nir, idep_mesautil, idep_amd_generated_headers] +
                    (with_amd_llvm ? [dep_llvm] : []),

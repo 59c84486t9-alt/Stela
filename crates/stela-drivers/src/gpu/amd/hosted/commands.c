@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "amd_commands.h"
+#include "commands.h"
 #include "amd/common/ac_cmdbuf.h"
 #include "amd/common/ac_pm4.h"
 #include "amd/common/sid.h"

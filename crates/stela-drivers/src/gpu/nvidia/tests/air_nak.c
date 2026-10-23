@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 /* Offline, original-input compiler qualification. No device is opened. */
 #include "air_to_nir.h"
-#include "air_probe.h"
-#include "air_test_fixture.h"
-#include "targets/nvidia.h"
+#include "../../compiler/tests/air_probe.h"
+#include "../../compiler/tests/air_test_fixture.h"
+#include "../../compiler/tests/targets/nvidia.h"
 #include "nouveau/compiler/nak.h"
 #include "util/ralloc.h"
 #include <stdio.h>

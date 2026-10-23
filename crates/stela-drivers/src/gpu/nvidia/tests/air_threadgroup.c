@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "air_to_nir.h"
-#include "compiler/nvidia_compute.h"
+#include "nvidia/hosted/compute.h"
 #include "llvm-c/Core.h"
 #include "nouveau/headers/drf.h"
 #include "cl906f.h"

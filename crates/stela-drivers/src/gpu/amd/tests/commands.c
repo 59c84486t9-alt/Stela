@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: MIT */
-#include "amd_commands.h"
+#include "../hosted/commands.h"
 #include "amd/common/ac_cmdbuf.h"
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/sid.h"
-#include "targets/amd.h"
+#include "../../compiler/tests/targets/amd.h"
 
 #include <stdio.h>
 #include <string.h>

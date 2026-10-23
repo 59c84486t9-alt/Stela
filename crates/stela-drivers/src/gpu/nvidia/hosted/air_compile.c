@@ -10,7 +10,7 @@
 #define MAX_CODE (64u * 1024u * 1024u)
 #define CBUF_COUNT 8u
 #define CBUF_BYTES 65536u
-/* Existing NVK/native compute limits, also checked by nvidia_compute.c. */
+/* Existing NVK/native compute limits, also checked by compute.c. */
 #define MAX_LOCAL_XY 1024u
 #define MAX_LOCAL_Z 64u
 #define MAX_THREADS 1024u

@@ -42,7 +42,7 @@ bind_ssbo(const struct stela_air_buffer *buffer, unsigned *slot, void *data)
    return true;
 }
 
-/* Same compact/uncompact traversal as the retained elk_probe.c. Instruction
+/* Same compact/uncompact traversal as compiler/tests/elk.c. Instruction
  * legality is checked by the original complete ELK validator first. */
 static unsigned
 count_sends(const struct elk_isa_info *isa, const void *code, unsigned bytes)

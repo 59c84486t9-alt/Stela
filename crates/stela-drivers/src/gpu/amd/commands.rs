@@ -191,7 +191,7 @@ unsafe extern "C" {
     ) -> u32;
 }
 
-// amd_commands.h independently asserts the corresponding C layouts.
+// hosted/commands.h independently asserts the corresponding C layouts.
 const _: () = {
     assert!(core::mem::size_of::<ComputePipeline>() == 112);
     assert!(core::mem::align_of::<ComputePipeline>() == 8);

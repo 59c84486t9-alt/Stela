@@ -4,7 +4,7 @@
 #include "../../compiler/library_assembly.h"
 #include "compiler/air_to_nir.h"
 #include "../../compiler/threadgroup.h"
-#include "compiler/nvidia_compute.h"
+#include "compute.h"
 #ifdef __cplusplus
 extern "C" {
 #endif

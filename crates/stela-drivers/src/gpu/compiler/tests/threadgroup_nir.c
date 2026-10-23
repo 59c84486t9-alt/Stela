@@ -2,7 +2,7 @@
 /* Original LLVM fixtures and existing NIR optimization; no GPU interpreter. */
 #include "../threadgroup.h"
 #include "compiler/air_to_nir.h"
-#include "compiler/tests/air_test_fixture.h"
+#include "air_test_fixture.h"
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdio.h>

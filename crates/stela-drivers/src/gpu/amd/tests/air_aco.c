@@ -3,9 +3,9 @@
  * CPU compilation only: no initialized GPU, mappings or submission are claimed.
  */
 #include "air_to_nir.h"
-#include "air_probe.h"
-#include "air_test_fixture.h"
-#include "targets/amd.h"
+#include "../../compiler/tests/air_probe.h"
+#include "../../compiler/tests/air_test_fixture.h"
+#include "../../compiler/tests/targets/amd.h"
 #include "amd/compiler/aco_interface.h"
 #include "amd/common/ac_binary.h"
 #include "amd/common/ac_gpu_info.h"
@@ -15,7 +15,7 @@
 #include "amd/llvm/ac_llvm_util.h"
 #endif
 #include "util/ralloc.h"
-#include "../../amd/tests/air_probe_input.h"
+#include "air_probe_input.h"
 
 #define CHECK(condition) do { if (!(condition)) { \
    fprintf(stderr, "%s:%u: %s\n", __func__, __LINE__, #condition); exit(1); \

@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "nvidia_compute.h"
+#include "compute.h"
 #include "nouveau/headers/nv_push.h"
 #include "nv_push_cla0c0.h"
 #include "nv_push_clc6c0.h"

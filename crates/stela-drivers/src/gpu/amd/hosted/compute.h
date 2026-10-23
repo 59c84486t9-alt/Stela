@@ -5,7 +5,7 @@
 #include "buffer.h"
 #include "amd/common/ac_shader_args.h"
 #include "amd/common/amd_family.h"
-#include "compiler/amd_commands.h"
+#include "commands.h"
 
 #ifdef __cplusplus
 extern "C" {
