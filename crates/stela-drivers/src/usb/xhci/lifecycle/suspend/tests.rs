@@ -54,32 +54,19 @@ impl RegisterIo for Registers {
     }
 }
 
-fn fixture(
-    memory: &mut [u64],
-    speed: u8,
-    hub: bool,
-) -> (
+type Fixture = (
     Host,
     Vec<Device>,
     Rc<RefCell<Hardware>>,
     Rc<RefCell<State>>,
     RegionAllocator,
-) {
+);
+
+fn fixture(memory: &mut [u64], speed: u8, hub: bool) -> Fixture {
     fixture_with_leaf(memory, speed, hub, Node::leaf(speed))
 }
 
-fn fixture_with_leaf(
-    memory: &mut [u64],
-    speed: u8,
-    hub: bool,
-    leaf: Node,
-) -> (
-    Host,
-    Vec<Device>,
-    Rc<RefCell<Hardware>>,
-    Rc<RefCell<State>>,
-    RegionAllocator,
-) {
+fn fixture_with_leaf(memory: &mut [u64], speed: u8, hub: bool, leaf: Node) -> Fixture {
     let start = memory.as_mut_ptr() as u64;
     // SAFETY: the caller retains this exclusive backing through every owner.
     let mut dma =

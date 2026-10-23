@@ -1004,7 +1004,7 @@ pub(super) mod trace_assertions {
         started: bool,
     ) {
         let ring_bytes = period_bytes * 4;
-        let pages = ring_bytes.next_multiple_of(4096) / 4096;
+        let pages = ring_bytes.div_ceil(4096);
         let mut expected = vec![(0xc04, sram | 0x8000_0000), (0xc00, 2)];
         for page in 0..pages {
             let address = iova + (page * 4096) as u64;

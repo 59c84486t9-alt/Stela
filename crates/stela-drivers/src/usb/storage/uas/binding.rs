@@ -257,7 +257,7 @@ mod tests {
             let original = raw([1, 2, 3, 4]);
             let mut configuration = original[..18].to_vec();
             configuration[8] = power;
-            for (index, endpoint) in original[18..].chunks_exact(14).enumerate() {
+            for (index, endpoint) in original[18..].as_chunks::<14>().0.iter().enumerate() {
                 configuration.extend_from_slice(&endpoint[..7]);
                 configuration.extend_from_slice(&[6, 48, 0, if index == 0 { 0 } else { 4 }, 0, 0]);
                 configuration.extend_from_slice(&endpoint[10..]);
