@@ -1,7 +1,7 @@
 //! Bounds-checked Metal library containers and LLVM bitcode wrappers.
 //!
 //! The MTLB layout is reverse-engineered, not a public Apple ABI. See
-//! `metal/README.md` for its source and qualification scope. Shader bytes,
+//! `metal/README.md` for its sources and contract. Shader bytes,
 //! metadata and digest remain borrowed from the original input.
 use alloc::vec::Vec;
 use core::{fmt, ops::Range, str};
