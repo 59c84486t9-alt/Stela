@@ -160,9 +160,12 @@ global_asm!(
     ".global stela_ap_gdt",
     "stela_ap_gdt:",
     ".quad 0",
-    ".quad 0x00af9a000000ffff", // 0x08 long code
-    ".quad 0x00cf92000000ffff", // 0x10 data
-    ".quad 0x00cf9a000000ffff", // 0x18 protected code
+    // Intel SDM3A §3.4.5 / AMD APM2 §4.8: loading a descriptor may set
+    // Accessed. The identity SIPI page is read-only after CR0.WP/paging;
+    // pre-set A so the long-mode CS load needs no hidden low-page write.
+    ".quad 0x00af9b000000ffff", // 0x08 long code, Accessed
+    ".quad 0x00cf93000000ffff", // 0x10 data, Accessed
+    ".quad 0x00cf9b000000ffff", // 0x18 protected code, Accessed
     ".global stela_ap_gdtr",
     "stela_ap_gdtr: .word 31",
     ".long 0",
