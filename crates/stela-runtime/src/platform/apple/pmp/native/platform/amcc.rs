@@ -12,6 +12,7 @@ use super::ingestion::{self, Backend, Pair, Statistics};
 use super::owner::{CounterContext, EffectValue};
 use super::{CounterReference, Descriptor};
 use crate::platform::apple::bus::Access;
+use alloc::rc::Rc;
 
 pub use ingestion::{Error, Progress};
 const TIME_MASK: u64 = (1 << 54) - 1;
@@ -85,6 +86,7 @@ struct CapturedState {
 /// Sole specialized software fields. The generic owner retains its actual
 /// input receipt; this wrapper never clones it or reconsumes PTD entries.
 pub struct Owner<B: Backend> {
+    identity: Rc<()>,
     generic: ingestion::Owner<B>,
     config: Configuration,
     pairs: [[Pair; 2]; METRICS],
@@ -110,6 +112,7 @@ impl<B: Backend> Owner<B> {
             }
         }
         Ok(Self {
+            identity: Rc::new(()),
             generic: ingestion::Owner::initialized_software(config.generic.clone(), backend),
             config,
             pairs: [[Pair::default(); 2]; METRICS],
@@ -124,6 +127,42 @@ impl<B: Backend> Owner<B> {
     }
     pub fn generic(&self) -> &ingestion::Owner<B> {
         &self.generic
+    }
+    pub(in crate::platform::apple::pmp::native) fn identity(&self) -> Rc<()> {
+        self.identity.clone()
+    }
+    /// The later MC event's source1003ad8..1003bbc operation, not Capture.
+    /// Copy every selected actual group before clearing low96 arrival bits.
+    /// Unequal masks leave both destinations and arrivals untouched.
+    pub(in crate::platform::apple::pmp::native) fn copy_completed_groups(
+        &mut self,
+        frames: &Frames,
+        expected: u128,
+        destination: &mut [[u8; GROUP_BYTES]],
+    ) -> Result<Option<u32>, Error> {
+        if self.batch.is_some() || self.awaiting_post.is_some() || destination.len() != GROUPS {
+            return Err(Error::Contract(
+                "AMCC MC-event copy has unfinished work or foreign geometry",
+            ));
+        }
+        if expected != self.arrived {
+            return Ok(None);
+        }
+        // Source1003b34 skips the frame read for every empty group. When a
+        // copy is reached, preflight the full retained buffer before any write.
+        let low_mask = (1u128 << (4 * GROUPS)) - 1;
+        if self.arrived & low_mask != 0 {
+            self.generic.cells(frames)?;
+        }
+        let mut copied = 0;
+        for (group, out) in destination.iter_mut().enumerate() {
+            if self.arrived & (15u128 << (4 * group)) != 0 {
+                self.group(frames, group)?.copy_into_existing(out)?;
+                copied |= 1 << group;
+            }
+        }
+        self.arrived &= !low_mask;
+        Ok(Some(copied))
     }
     pub fn group_count(&self) -> usize {
         GROUPS
@@ -743,6 +782,69 @@ mod tests {
         o.begin_postprocess(&frames, &d(), current, 1).unwrap();
         run(&mut o, &frames, &mut latch).unwrap();
         assert_eq!(frames.progress().consumed, 6);
+    }
+    #[test]
+    fn empty_mc_event_mask_reads_no_frames_and_preserves_initialized_samples() {
+        let (frames, _, _) = setup();
+        let mut o =
+            Owner::initialized_software(Configuration::t8112(&d()).unwrap(), NoProviders).unwrap();
+        assert!(o.generic.cells(&frames).is_err());
+        let mut destination = [[0x55; GROUP_BYTES]; GROUPS];
+        assert_eq!(
+            o.copy_completed_groups(&frames, 0, &mut destination),
+            Ok(Some(0))
+        );
+        assert_eq!(destination, [[0x55; GROUP_BYTES]; GROUPS]);
+        assert_eq!(o.arrivals(), 0);
+    }
+    #[test]
+    fn mc_event_copy_preflights_storage_and_clears_only_low96_arrivals() {
+        let (mut frames, local, mut latch) = setup();
+        let (capture, copy, selected) = copied(&mut frames, &local, &mut latch);
+        let mut o =
+            Owner::initialized_software(Configuration::t8112(&d()).unwrap(), NoProviders).unwrap();
+        let mut context = ctx(selected);
+        o.begin_capture(&frames, &capture, Input::Copied(copy), &d(), context, 1)
+            .unwrap();
+        products(&mut context, run(&mut o, &frames, &mut latch).unwrap()).unwrap();
+        let mut destination = [[0x55; GROUP_BYTES]; GROUPS];
+        assert!(
+            o.copy_completed_groups(&frames, o.arrivals(), &mut destination)
+                .is_err()
+        );
+        assert_eq!(destination, [[0x55; GROUP_BYTES]; GROUPS]);
+        o.begin_postprocess(&frames, &d(), context, 1).unwrap();
+        run(&mut o, &frames, &mut latch).unwrap();
+        // Authored high-bit state checks the clear width, not a new producer.
+        o.arrived = (1 << 100) | 1 | (1 << 92);
+        let expected = o.arrivals();
+        assert_eq!(
+            o.copy_completed_groups(&frames, 1, &mut destination),
+            Ok(None)
+        );
+        assert_eq!(destination, [[0x55; GROUP_BYTES]; GROUPS]);
+        let (foreign, _, _) = setup();
+        assert!(
+            o.copy_completed_groups(&foreign, expected, &mut destination)
+                .is_err()
+        );
+        assert_eq!(destination, [[0x55; GROUP_BYTES]; GROUPS]);
+        assert_eq!(o.arrivals(), expected);
+        assert_eq!(
+            o.copy_completed_groups(&frames, expected, &mut destination),
+            Ok(Some(1 | (1 << 23)))
+        );
+        assert_eq!(o.arrivals(), 1 << 100);
+        assert_eq!(
+            u64::from_le_bytes(destination[0][..8].try_into().unwrap()),
+            0x1234
+        );
+        assert_eq!(
+            u64::from_le_bytes(destination[23][..8].try_into().unwrap()),
+            0x9876
+        );
+        assert_eq!(destination[1], [0x55; GROUP_BYTES]);
+        assert_eq!(frames.progress().consumed, 3);
     }
     #[test]
     fn group_views_copy_exact_retained_value_metadata_without_reconsume_or_early_copy() {

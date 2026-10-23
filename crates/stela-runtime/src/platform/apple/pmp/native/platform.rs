@@ -25,6 +25,8 @@ mod profile;
 mod selection;
 
 pub use interpolation::{Interpolation, Packed};
+#[cfg(test)]
+pub(in crate::platform::apple::pmp::native) use profile::tests::fixture as authored_profile;
 pub use profile::{Configuration, Descriptor, Hook, Ordinal, Profile, Slice};
 pub use selection::{CounterReference, CounterSelection, McSelection};
 

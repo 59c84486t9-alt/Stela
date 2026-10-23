@@ -439,6 +439,10 @@ impl<B: Backend> Owner<B> {
     pub fn profile(&self) -> &Profile {
         &self.profile
     }
+    /// Backing identity only; no lifecycle or completion is granted.
+    pub(in crate::platform::apple::pmp::native) fn identity(&self) -> Rc<()> {
+        self.identity.clone()
+    }
     pub fn backend(&self) -> &B {
         &self.backend
     }

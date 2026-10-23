@@ -220,6 +220,7 @@ pub struct Owner<B> {
     memory_claimed: bool,
     registry_claimed: bool,
     counter_frames_claimed: bool,
+    cache_claimed: bool,
 }
 impl<B: Resources> Owner<B> {
     /// `selected_ids` is the original pm-ptd-ranges array, not range ordinals or
@@ -282,6 +283,7 @@ impl<B: Resources> Owner<B> {
             memory_claimed: false,
             registry_claimed: false,
             counter_frames_claimed: false,
+            cache_claimed: false,
         })
     }
     /// The original class1 callback/mutex slot belongs to this actual native
@@ -337,6 +339,37 @@ impl<B: Resources> Owner<B> {
     }
     pub fn resources(&self) -> &B {
         &self.resources
+    }
+    /// One MC service on this native recipient. The registry-resolved range
+    /// IDs must identify actual directional ranges on this same PTD object.
+    /// Dropping the service cannot reopen the claim or authorize a reset.
+    pub fn claim_cache_services(
+        &mut self,
+        request_id: u32,
+        response_id: u32,
+    ) -> Result<cache::service::Claim, Error> {
+        if self.cache_claimed || request_id == response_id {
+            return Err(Error::Contract("PMP cache service ownership is duplicated"));
+        }
+        let ranges = self.local.bank().ranges();
+        let range = |id| {
+            ranges
+                .iter()
+                .find(|r| r.id == id)
+                .cloned()
+                .ok_or(Error::Contract(
+                    "PMP cache service requires actual resolved PTD ranges",
+                ))
+        };
+        let request = range(request_id)?;
+        let response = range(response_id)?;
+        self.cache_claimed = true;
+        Ok(cache::service::Claim::new(
+            self.local.clone(),
+            request,
+            response,
+            self.service_alive.clone(),
+        ))
     }
     pub fn phase(&self) -> Phase {
         self.phase

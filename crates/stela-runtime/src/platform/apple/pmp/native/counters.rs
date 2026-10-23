@@ -245,6 +245,16 @@ pub struct Frames {
     copy_generation: u64,
 }
 impl Frames {
+    pub(in crate::platform::apple::pmp::native) fn check_bank(
+        &self,
+        local: &LocalNotifications,
+    ) -> Result<(), Error> {
+        self.claim.check()?;
+        if !self.claim.local.owns(local.bank()) {
+            return Err("PMP frames belong to a different actual PTD owner");
+        }
+        Ok(())
+    }
     pub fn initialized(
         claim: Claim,
         table: &DeviceTable,

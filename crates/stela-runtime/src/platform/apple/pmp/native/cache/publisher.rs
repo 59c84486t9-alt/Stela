@@ -181,7 +181,33 @@ impl Publisher {
     pub fn notifications(&self) -> &LocalNotifications {
         &self.binding.local
     }
-    fn idle(&self) -> Result<(), Error> {
+    pub(super) fn response_range(&self) -> &Range {
+        &self.range
+    }
+    pub(super) fn response_words(&self) -> u32 {
+        self.configuration.response_words
+    }
+    pub(super) fn check_bank_identity(&self, bank: &impl Bank) -> Result<(), Error> {
+        if self.binding.identity.same(bank.identity()) {
+            Ok(())
+        } else {
+            Err("native quota callback borrowed another actual cache owner")
+        }
+    }
+    /// The sole MC service now retains the source restart/event, including
+    /// every existing dirty word. Defaults or commands may supersede startup's
+    /// allocation before final publication; no actual effect completes here.
+    pub(super) fn begin_service_pass(&mut self) -> Result<(), Error> {
+        if let Some(reason) = self.failed {
+            return Err(reason);
+        }
+        if self.cursor.is_some() {
+            return Err("native quota publication prefix is still retained");
+        }
+        self.allocated = false;
+        Ok(())
+    }
+    pub(super) fn idle(&self) -> Result<(), Error> {
         if let Some(reason) = self.failed {
             return Err(reason);
         }

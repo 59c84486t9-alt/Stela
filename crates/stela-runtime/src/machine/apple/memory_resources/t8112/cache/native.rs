@@ -3,6 +3,10 @@ use super::super::Prepared;
 use super::*;
 
 impl EmptyResource {
+    #[cfg(test)]
+    pub(crate) fn service_test_components() -> (Prepared, Self) {
+        tests::service_components()
+    }
     /// Borrow this exact AP-facing bank for a native quota callback. This is
     /// not a clone of its words, a PMP startup or a service-completion token.
     pub fn quota_view(&mut self) -> QuotaView<'_> {
@@ -99,10 +103,7 @@ mod tests {
         retention: true,
     };
     fn components() -> (Prepared, EmptyResource) {
-        let mut descriptor = descriptor();
-        descriptor.cache.shared = (0x100000, 0x80000);
-        descriptor.cache.broadcast = BROADCAST;
-        descriptor.ptd.ranges = vec![
+        components_with_ranges(vec![
             Range {
                 id: 14,
                 start: 194,
@@ -115,8 +116,39 @@ mod tests {
                 count: 6,
                 name: "authored responses".into(),
             },
-        ];
-        descriptor.ptd.interrupts = vec![14, 15];
+        ])
+    }
+    pub(super) fn service_components() -> (Prepared, EmptyResource) {
+        let mut ranges: Vec<_> = [
+            (1, 0, 1),
+            (2, 1, 1),
+            (3, 2, 4),
+            (4, 6, 1),
+            (10, 180, 1),
+            (11, 181, 1),
+            (12, 182, 1),
+            (13, 183, 1),
+            (9, 16, 144),
+            (14, 194, 7),
+            (30, 208, 6),
+        ]
+        .into_iter()
+        .map(|(id, start, count)| Range {
+            id,
+            start,
+            count,
+            name: alloc::format!("authored native service range {id}"),
+        })
+        .collect();
+        ranges.sort_by_key(|r| r.start);
+        components_with_ranges(ranges)
+    }
+    fn components_with_ranges(ranges: Vec<Range>) -> (Prepared, EmptyResource) {
+        let mut descriptor = descriptor();
+        descriptor.cache.shared = (0x100000, 0x80000);
+        descriptor.cache.broadcast = BROADCAST;
+        descriptor.ptd.ranges = ranges;
+        descriptor.ptd.interrupts = (14..14 + descriptor.ptd.ranges.len() as u32).collect();
         let memory = Prepared::initialized(descriptor, configuration(), LIVE, ram()).unwrap();
         let locks = memory
             .initialize_amcc_locks(source(), [None; 4], LIVE)

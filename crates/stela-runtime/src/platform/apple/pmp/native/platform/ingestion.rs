@@ -273,6 +273,10 @@ impl<B: Backend> Owner<B> {
     pub fn ordinal(&self) -> Ordinal {
         self.config.ordinal
     }
+    /// Actual initialized source P268/P270 software cells, not elapsed host time.
+    pub fn periods(&self) -> (u32, u64) {
+        self.config.periods
+    }
     /// Source101c54c STR XZR,[P+10] on enable-from-zero resets P14 along
     /// with the parent's activity. This mutates software data only; it grants
     /// no activation, provider completion, frame/event or arrival authority.
