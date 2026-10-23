@@ -2,7 +2,7 @@
 //! The SDK's own compiler and linker build each object directly; `-MD` records
 //! the headers each one read, which the receipts bind.
 mod library;
-use super::support::{capture, evidence_directory, source_binding};
+use super::support::{capture, evidence_directory, gpu, source_binding};
 use crate::tools;
 use anyhow::{Context, Result, ensure};
 use object::{Architecture, BinaryFormat, Object, ObjectKind, ObjectSymbol};
@@ -15,6 +15,26 @@ use std::{
     process::{Command, Stdio},
 };
 
+/// Each component's ABIs: the architecture name, its object architecture and
+/// its Mach-O CPU subtype.
+const ABIS: [(&str, Architecture, u32); 3] = [
+    (
+        "arm64e",
+        Architecture::Aarch64,
+        object::macho::CPU_SUBTYPE_ARM64E,
+    ),
+    (
+        "arm64",
+        Architecture::Aarch64,
+        object::macho::CPU_SUBTYPE_ARM64_ALL,
+    ),
+    (
+        "x86_64",
+        Architecture::X86_64,
+        object::macho::CPU_SUBTYPE_X86_64_ALL,
+    ),
+];
+
 fn sdk(arguments: &[&str]) -> Result<String> {
     capture(
         Command::new("xcrun")
@@ -24,7 +44,11 @@ fn sdk(arguments: &[&str]) -> Result<String> {
 }
 
 /// Runs one SDK tool, appending its output to `log`.
-fn run(tool: &str, arguments: &[&OsStr], log: &Path) -> Result<()> {
+fn run(
+    tool: &str,
+    arguments: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    log: &Path,
+) -> Result<()> {
     let output = File::options().create(true).append(true).open(log)?;
     let status = Command::new(sdk(&["--find", tool])?.trim())
         .args(arguments)
@@ -33,6 +57,33 @@ fn run(tool: &str, arguments: &[&OsStr], log: &Path) -> Result<()> {
         .status()?;
     ensure!(status.success(), "{tool} failed: {}", log.display());
     Ok(())
+}
+
+/// Parses a 64-bit Mach-O `kind` for `abi`, returning it with its CPU subtype
+/// word, capability bits included.
+fn mach_o<'data>(
+    bytes: &'data [u8],
+    kind: ObjectKind,
+    (arch, architecture, subtype): (&str, Architecture, u32),
+) -> Result<(object::File<'data>, u32)> {
+    let file = object::File::parse(bytes)?;
+    // object's sub_architecture() compares the whole subtype word; arm64e's
+    // kernel ABI capability bits must be separated before comparing.
+    let word = match &file {
+        object::File::MachO64(macho) => {
+            use object::read::macho::MachHeader;
+            macho.macho_header().cpusubtype(macho.endian())
+        }
+        _ => anyhow::bail!("expected a 64-bit Mach-O for {arch}"),
+    };
+    ensure!(
+        file.format() == BinaryFormat::MachO
+            && file.kind() == kind
+            && file.architecture() == architecture
+            && word & !object::macho::CPU_SUBTYPE_MASK == subtype,
+        "incorrect Mach-O ABI for {arch}"
+    );
+    Ok((file, word))
 }
 
 /// The kernel component's flags for `arch`.
@@ -72,8 +123,7 @@ fn kernel_flags(arch: &str, sdk_root: &Path) -> Vec<OsString> {
     flags
 }
 
-/// Compiles the kernel component for `arch` into `output`: `gpu-memory.o`, a
-/// relocatable link of `memory.o`, and `task_memory.o`.
+/// Compiles the kernel component's units for `arch` into `output`.
 fn kernel_component(
     source: &Path,
     sdk_root: &Path,
@@ -99,28 +149,9 @@ fn kernel_component(
         arguments.push(source.join(format!("{unit}.cpp")).into());
         arguments.push("-o".into());
         arguments.push(output.join(format!("{unit}.o")).into());
-        run(
-            "clang++",
-            &arguments
-                .iter()
-                .map(OsString::as_os_str)
-                .collect::<Vec<_>>(),
-            log,
-        )?;
+        run("clang++", &arguments, log)?;
     }
-    let link: Vec<OsString> = vec![
-        "-r".into(),
-        "-arch".into(),
-        arch.into(),
-        "-o".into(),
-        output.join("gpu-memory.o").into(),
-        output.join("memory.o").into(),
-    ];
-    run(
-        "ld",
-        &link.iter().map(OsString::as_os_str).collect::<Vec<_>>(),
-        log,
-    )
+    Ok(())
 }
 
 // Dependency files include the headers actually read by each target,
@@ -142,30 +173,13 @@ fn dependencies(directory: &Path, filename: &str) -> Result<BTreeSet<PathBuf>> {
 
 fn inspect_component(
     path: &Path,
-    arch: &str,
-    architecture: Architecture,
-    subarchitecture: u32,
+    abi: (&str, Architecture, u32),
     expected: &[&str],
     required: &[&str],
 ) -> Result<serde_json::Value> {
+    let arch = abi.0;
     let bytes = fs::read(path)?;
-    let object = object::File::parse(bytes.as_slice())?;
-    // object 0.37's sub_architecture() compares the entire subtype word;
-    // arm64e kernel ABI capability bits must be separated before comparing.
-    let subtype = match &object {
-        object::File::MachO64(file) => {
-            use object::read::macho::MachHeader;
-            file.macho_header().cpusubtype(file.endian())
-        }
-        _ => anyhow::bail!("expected a 64-bit Mach-O kernel object"),
-    };
-    ensure!(
-        object.format() == BinaryFormat::MachO
-            && object.kind() == ObjectKind::Relocatable
-            && object.architecture() == architecture
-            && subtype & !object::macho::CPU_SUBTYPE_MASK == subarchitecture,
-        "incorrect kernel object ABI for {arch}"
-    );
+    let (object, subtype) = mach_o(&bytes, ObjectKind::Relocatable, abi)?;
     let imports: BTreeSet<_> = object
         .symbols()
         .filter(|symbol| symbol.is_undefined())
@@ -221,20 +235,13 @@ fn contract(source: &Path, sdk_root: &Path, output: &Path) -> Result<serde_json:
     arguments.push(source.join("tests/task_memory_contract.cpp").into());
     arguments.push("-o".into());
     arguments.push(binary.as_os_str().into());
+    run("clang++", &arguments, &output.join("compile.log"))?;
     let log = output.join("contract.log");
-    run(
-        "clang++",
-        &arguments
-            .iter()
-            .map(OsString::as_os_str)
-            .collect::<Vec<_>>(),
-        &log,
-    )?;
     let mut command = Command::new(&binary);
     fs::write(&log, capture(&mut command)?)?;
     Ok(
         json!({"scope":"Actual owner C++ with test-only original-service mocks under ASan/UBSan; no kernel page wiring or hardware",
-        "command":format!("{command:?}"),"binary":tools::binding(&output.join("task-memory-contract"))?,
+        "command":format!("{command:?}"),"binary":tools::binding(&binary)?,
         "output":tools::binding(&log)?,"dependencies":dependencies(output,"task-memory-contract.d")?
             .iter().map(|p|tools::binding(p)).collect::<Result<Vec<_>>>()?}),
     )
@@ -249,7 +256,7 @@ pub fn build() -> Result<()> {
     let sdk_version = sdk(&["--show-sdk-version"])?;
     let clang = sdk(&["--find", "clang"])?;
     let compiler = capture(Command::new(clang.trim()).arg("--version"))?;
-    let gpu = tools::root().join("crates/stela-drivers/src/gpu");
+    let gpu = gpu();
     let source = gpu.join("iokit");
     let evidence = evidence_directory()?;
     for path in [&gpu, &sdk_root, &evidence] {
@@ -261,27 +268,11 @@ pub fn build() -> Result<()> {
     }
     let mut artifacts = Vec::new();
     let mut inputs = BTreeSet::new();
-    for (arch, architecture, subarchitecture) in [
-        (
-            "arm64e",
-            Architecture::Aarch64,
-            object::macho::CPU_SUBTYPE_ARM64E,
-        ),
-        (
-            "arm64",
-            Architecture::Aarch64,
-            object::macho::CPU_SUBTYPE_ARM64_ALL,
-        ),
-        (
-            "x86_64",
-            Architecture::X86_64,
-            object::macho::CPU_SUBTYPE_X86_64_ALL,
-        ),
-    ] {
+    for abi in ABIS {
+        let arch = abi.0;
         let directory = evidence.join(arch);
         let log = evidence.join(format!("macos-{arch}.log"));
         kernel_component(&source, &sdk_root, arch, &directory, &log)?;
-        let path = directory.join("gpu-memory.o");
         // Apple's x86 kernel headers redirect bzero to __bzero.
         let zero = if arch == "x86_64" {
             "___bzero"
@@ -289,19 +280,14 @@ pub fn build() -> Result<()> {
             "_bzero"
         };
         artifacts.push(inspect_component(
-            &path,
-            arch,
-            architecture,
-            subarchitecture,
+            &directory.join("memory.o"),
+            abi,
             &["_IOFreeAligned", "_IOMallocAligned", zero],
             &["_stela_gpu_iokit_allocate_zeroed", "_stela_gpu_iokit_free"],
         )?);
-        let task = directory.join("task_memory.o");
         artifacts.push(inspect_component(
-            &task,
-            arch,
-            architecture,
-            subarchitecture,
+            &directory.join("task_memory.o"),
+            abi,
             &[
                 "__ZN18IOMemoryDescriptor16withAddressRangeEyyjP4task",
                 "_kernel_task",
@@ -352,10 +338,5 @@ pub fn build() -> Result<()> {
 fn task_memory_preserves_original_service_ownership_and_failure_contracts() {
     let sdk_root = PathBuf::from(sdk(&["--show-sdk-path"]).unwrap().trim());
     let output = tempfile::tempdir().unwrap();
-    contract(
-        &tools::root().join("crates/stela-drivers/src/gpu/iokit"),
-        &sdk_root,
-        output.path(),
-    )
-    .unwrap();
+    contract(&gpu().join("iokit"), &sdk_root, output.path()).unwrap();
 }

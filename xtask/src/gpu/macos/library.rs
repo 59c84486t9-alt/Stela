@@ -1,8 +1,8 @@
 //! Link the actual user-space objects against the SDK's public frameworks.
-use super::{dependencies, run, tools};
+use super::{ABIS, dependencies, mach_o, run, tools};
 use crate::gpu::support::source_binding;
 use anyhow::{Result, ensure};
-use object::{Architecture, BinaryFormat, Object, ObjectKind, ObjectSymbol};
+use object::{Object, ObjectKind, ObjectSymbol};
 use serde_json::json;
 use std::{collections::BTreeSet, ffi::OsString, fs, path::Path};
 
@@ -16,23 +16,8 @@ pub(super) fn build(
     let source = gpu.join("metal/macos");
     let mut artifacts = Vec::new();
     let mut inputs = BTreeSet::new();
-    for (arch, architecture, expected_subtype) in [
-        (
-            "arm64",
-            Architecture::Aarch64,
-            object::macho::CPU_SUBTYPE_ARM64_ALL,
-        ),
-        (
-            "arm64e",
-            Architecture::Aarch64,
-            object::macho::CPU_SUBTYPE_ARM64E,
-        ),
-        (
-            "x86_64",
-            Architecture::X86_64,
-            object::macho::CPU_SUBTYPE_X86_64_ALL,
-        ),
-    ] {
+    for abi in ABIS {
+        let arch = abi.0;
         let directory = evidence.join("metal").join(arch);
         let log = evidence.join(format!("metal-library-{arch}.log"));
         let path = directory.join("libstela-metal-library.dylib");
@@ -55,11 +40,7 @@ pub(super) fn build(
         compile.push(source.join("library.m").into());
         compile.push("-o".into());
         compile.push(object.as_os_str().into());
-        run(
-            "clang",
-            &compile.iter().map(OsString::as_os_str).collect::<Vec<_>>(),
-            &log,
-        )?;
+        run("clang", &compile, &log)?;
         let mut link = flags;
         link.push("-dynamiclib".into());
         link.push(object.into());
@@ -75,27 +56,9 @@ pub(super) fn build(
             .map(OsString::from),
         );
         link.push(path.as_os_str().into());
-        run(
-            "clang",
-            &link.iter().map(OsString::as_os_str).collect::<Vec<_>>(),
-            &log,
-        )?;
+        run("clang", &link, &log)?;
         let bytes = fs::read(&path)?;
-        let binary = object::File::parse(bytes.as_slice())?;
-        let subtype = match &binary {
-            object::File::MachO64(file) => {
-                use object::read::macho::MachHeader;
-                file.macho_header().cpusubtype(file.endian())
-            }
-            _ => anyhow::bail!("expected a 64-bit Mach-O Metal component"),
-        };
-        ensure!(
-            binary.format() == BinaryFormat::MachO
-                && binary.kind() == ObjectKind::Dynamic
-                && binary.architecture() == architecture
-                && subtype & !object::macho::CPU_SUBTYPE_MASK == expected_subtype,
-            "incorrect Metal component ABI for {arch}"
-        );
+        let (binary, subtype) = mach_o(&bytes, ObjectKind::Dynamic, abi)?;
         for required in [
             "_STELAMetalCreateLibrary",
             "_STELAMetalCopyFunctionSnapshot",
