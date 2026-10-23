@@ -88,6 +88,7 @@ pub struct MemoryControls {
     tag_check_mask: bool,
     effective_sp_alignment: Option<bool>,
     pointer_checks: Option<crate::system::process_memory::ResolvedPointerChecks>,
+    address_checks: Option<stela_compiler::context::memory::address::EffectiveAddressChecks>,
     memory_implementation_profile: Option<MemoryImplementationProfile>,
     operation_scope: OperationScope,
 }
@@ -110,6 +111,7 @@ impl MemoryControls {
             tag_check_mask,
             effective_sp_alignment: None,
             pointer_checks: None,
+            address_checks: None,
             memory_implementation_profile: None,
             operation_scope: OperationScope::Unbound,
         }
@@ -155,6 +157,18 @@ impl MemoryControls {
         authority: &crate::system::process_memory::PointerMemoryAuthorization<'_>,
     ) -> Self {
         self.pointer_checks = Some(authority.checks());
+        self.address_checks = Some(authority.checks().address_checks());
+        self
+    }
+
+    /// Resolve the unchecked increment specialization only from the process
+    /// owner's qualified CPA0/CPA1 declaration. CPA2 needs its separate live
+    /// pointer-control owner; an unbound public policy has no such proof.
+    pub(crate) fn with_unchecked_address_authority(
+        mut self,
+        features: &crate::system::process_memory::ProcessMemoryFeatures,
+    ) -> Self {
+        self.address_checks = features.unchecked_address_checks();
         self
     }
 
@@ -295,10 +309,10 @@ impl DataPolicy for MemoryControls {
         if required.is_empty() {
             return Ok(());
         }
-        match self.pointer_checks {
+        match self.address_checks {
             Some(checks)
                 if required.matches(
-                    checks.address_checks(),
+                    checks,
                     stela_compiler::context::memory::address::IncrementChoice::Unchecked,
                 ) =>
             {
@@ -462,6 +476,70 @@ mod tests {
             mode,
             false,
         )
+    }
+
+    #[test]
+    fn address_increment_requires_qualified_features_and_matching_specialization() {
+        use crate::system::{process_memory::ProcessMemoryFeatures, profile::BaseSpeAbsence};
+        use stela_compiler::context::memory::address::{
+            AccessEl, AddressAddChecks, AddressCheckRequirements, IncrementChoice,
+        };
+        let unbound = controls(TagCheckFaultMode::Ignore);
+        let increment =
+            AddressCheckRequirements::default().with_increment_choice(IncrementChoice::Unchecked);
+        assert_eq!(
+            unbound.validate_address_checks(increment),
+            Err(MemoryStatus::Unsupported)
+        );
+        assert_eq!(
+            unbound.validate_address_checks(AddressCheckRequirements::default()),
+            Ok(())
+        );
+        for cpa in [0, 1] {
+            let features = ProcessMemoryFeatures::from_id_registers(
+                0,
+                1 << 32,
+                cpa,
+                0,
+                BaseSpeAbsence::from_id_aa64dfr0_el1(0).unwrap(),
+            )
+            .unwrap();
+            let qualified = unbound.with_unchecked_address_authority(&features);
+            assert_eq!(qualified.validate_address_checks(increment), Ok(()));
+            assert_eq!(
+                qualified.validate_address_checks(
+                    increment.with_increment_choice(IncrementChoice::Checked)
+                ),
+                Err(MemoryStatus::Unsupported)
+            );
+            for level in [AccessEl::El0, AccessEl::El1] {
+                assert_eq!(
+                    qualified.validate_address_checks(
+                        AddressCheckRequirements::for_access(level, AddressAddChecks::Disabled)
+                            .merge(increment)
+                            .unwrap()
+                    ),
+                    Ok(())
+                );
+                assert_eq!(
+                    qualified.validate_address_checks(AddressCheckRequirements::for_access(
+                        level,
+                        AddressAddChecks::Enabled
+                    )),
+                    Err(MemoryStatus::Unsupported)
+                );
+            }
+        }
+        assert!(
+            ProcessMemoryFeatures::from_id_registers(
+                0,
+                1 << 32,
+                2,
+                0,
+                BaseSpeAbsence::from_id_aa64dfr0_el1(0).unwrap(),
+            )
+            .is_err()
+        );
     }
 
     fn request(backing: &MemoryBacking, offset: usize, bytes: usize, tag: u8) -> DataAccess<'_> {

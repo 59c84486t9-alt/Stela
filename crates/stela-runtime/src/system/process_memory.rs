@@ -519,6 +519,7 @@ impl FixedProcessMemoryControls {
             false, // Constructor rejects TCMA0 in this MTE-absent scope.
         )
         .with_effective_sp_alignment(self.sctlr_el1 & SCTLR_SP_ALIGNMENT_EL0 != 0)
+        .with_unchecked_address_authority(&self.features)
     }
 }
 
