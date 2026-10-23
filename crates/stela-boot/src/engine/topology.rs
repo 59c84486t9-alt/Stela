@@ -205,12 +205,36 @@ impl RetainedRoster for AssignedRoster<'_> {
 }
 
 fn current_apic() -> Result<u32, String> {
-    use core::arch::x86_64::{__cpuid, __cpuid_count};
+    use core::arch::x86_64::__cpuid_count;
     // CPUID is unprivileged. Reuse the canonical captured APIC decoder; this
     // observation establishes current identity, not native capability admission.
+    current_identity(|leaf, subleaf| {
+        let value = __cpuid_count(leaf, subleaf);
+        native::Cpuid {
+            leaf,
+            subleaf,
+            eax: value.eax,
+            ebx: value.ebx,
+            ecx: value.ecx,
+            edx: value.edx,
+        }
+    })
+    .apic_id()
+    .ok_or("assigned BSP has no actual CPUID APIC identity".into())
+}
+
+/// Retain the actual maximum/vendor records together with the leaves they
+/// authorize. Keeping maxima only in local variables creates an incomplete
+/// Snapshot that the shared identity decoder must correctly refuse. The query
+/// seam permits direct collector regression tests without a privileged owner
+/// or guessed processor identity; production above queries this actual CPU.
+fn current_identity(mut query: impl FnMut(u32, u32) -> native::Cpuid) -> native::Snapshot {
+    let identity = query(0, 0);
+    let extended = query(0x8000_0000, 0);
     let mut snapshot = native::Snapshot::default();
-    let maximum = __cpuid(0).eax;
-    let extended = __cpuid(0x8000_0000).eax;
+    snapshot.records[0] = identity;
+    snapshot.records[1] = extended;
+    snapshot.count = 2;
     for (leaf, subleaf) in [
         (1, 0),
         (0xb, 0),
@@ -218,23 +242,15 @@ fn current_apic() -> Result<u32, String> {
         (0x8000_0001, 0),
         (0x8000_001e, 0),
     ] {
-        if (leaf < 0x8000_0000 && leaf > maximum) || (leaf >= 0x8000_0000 && leaf > extended) {
+        if (leaf < 0x8000_0000 && leaf > identity.eax)
+            || (leaf >= 0x8000_0000 && leaf > extended.eax)
+        {
             continue;
         }
-        let value = __cpuid_count(leaf, subleaf);
-        snapshot.records[snapshot.count as usize] = native::Cpuid {
-            leaf,
-            subleaf,
-            eax: value.eax,
-            ebx: value.ebx,
-            ecx: value.ecx,
-            edx: value.edx,
-        };
+        snapshot.records[snapshot.count as usize] = query(leaf, subleaf);
         snapshot.count += 1;
     }
     snapshot
-        .apic_id()
-        .ok_or("assigned BSP has no actual CPUID APIC identity".into())
 }
 
 /// A source protocol reference, never a DeviceID inferred from its payload.
@@ -660,6 +676,141 @@ mod tests {
             Resources, SharedCache, StartId, StartResource,
         },
     };
+
+    fn cpuid_identity(maximum: u32, vendor: [u32; 3]) -> native::Cpuid {
+        native::Cpuid {
+            leaf: 0,
+            eax: maximum,
+            ebx: vendor[0],
+            edx: vendor[1],
+            ecx: vendor[2],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn actual_bsp_collector_retains_maxima_and_zero_extended_apic_identity() {
+        use stela_compiler::TargetCpu;
+        let mut queries = Vec::new();
+        let snapshot = current_identity(|leaf, subleaf| {
+            queries.push((leaf, subleaf));
+            match (leaf, subleaf) {
+                (0, 0) => cpuid_identity(0x1f, TargetCpu::INTEL_VENDOR),
+                (0x8000_0000, 0) => native::Cpuid {
+                    leaf,
+                    eax: 0x8000_0001,
+                    ..Default::default()
+                },
+                (1, 0) => native::Cpuid {
+                    leaf,
+                    ebx: 0x7b << 24,
+                    ..Default::default()
+                },
+                (0xb, 0) | (0x1f, 0) => native::Cpuid {
+                    leaf,
+                    ebx: 2,
+                    ecx: 1 << 8,
+                    edx: if leaf == 0x1f { 0 } else { 0x1234 },
+                    ..Default::default()
+                },
+                (0x8000_0001, 0) => native::Cpuid {
+                    leaf,
+                    ..Default::default()
+                },
+                _ => panic!("unsupported CPUID query {leaf:#x}/{subleaf}"),
+            }
+        });
+        assert_eq!(snapshot.get(0, 0).unwrap().eax, 0x1f);
+        assert_eq!(snapshot.get(0x8000_0000, 0).unwrap().eax, 0x8000_0001);
+        assert_eq!(snapshot.apic_id(), Some(0));
+        assert_eq!(
+            queries,
+            vec![
+                (0, 0),
+                (0x8000_0000, 0),
+                (1, 0),
+                (0xb, 0),
+                (0x1f, 0),
+                (0x8000_0001, 0)
+            ]
+        );
+        let mut deficient = snapshot;
+        deficient.records[0].leaf = 2;
+        assert_eq!(deficient.apic_id(), None); // decoder remains strict
+    }
+
+    #[test]
+    fn actual_bsp_collector_does_not_probe_beyond_either_observed_maximum() {
+        use stela_compiler::TargetCpu;
+        for vendor in [TargetCpu::INTEL_VENDOR, TargetCpu::AMD_VENDOR] {
+            let mut queries = Vec::new();
+            let snapshot = current_identity(|leaf, subleaf| {
+                queries.push((leaf, subleaf));
+                match (leaf, subleaf) {
+                    (0, 0) => cpuid_identity(1, vendor),
+                    (0x8000_0000, 0) => native::Cpuid {
+                        leaf,
+                        eax: 0x8000_0000,
+                        ..Default::default()
+                    },
+                    (1, 0) => native::Cpuid {
+                        leaf,
+                        ebx: 0x7b << 24,
+                        ..Default::default()
+                    },
+                    _ => panic!("unsupported CPUID query {leaf:#x}/{subleaf}"),
+                }
+            });
+            assert_eq!(snapshot.apic_id(), Some(0x7b));
+            assert_eq!(queries, vec![(0, 0), (0x8000_0000, 0), (1, 0)]);
+            assert_eq!(snapshot.count, 3);
+        }
+    }
+
+    #[test]
+    fn actual_bsp_collector_keeps_amd_full_width_identity_and_vendor_gate() {
+        use stela_compiler::TargetCpu;
+        for vendor in [TargetCpu::AMD_VENDOR, TargetCpu::INTEL_VENDOR, [0; 3]] {
+            let snapshot = current_identity(|leaf, subleaf| match (leaf, subleaf) {
+                (0, 0) => cpuid_identity(1, vendor),
+                (0x8000_0000, 0) => native::Cpuid {
+                    leaf,
+                    eax: 0x8000_001e,
+                    ..Default::default()
+                },
+                (1, 0) => native::Cpuid {
+                    leaf,
+                    ebx: 0x7b << 24,
+                    ..Default::default()
+                },
+                (0x8000_0001, 0) => native::Cpuid {
+                    leaf,
+                    ecx: 1 << 22,
+                    ..Default::default()
+                },
+                (0x8000_001e, 0) => native::Cpuid {
+                    leaf,
+                    eax: 0x1234_5678,
+                    ..Default::default()
+                },
+                _ => panic!("unsupported CPUID query {leaf:#x}/{subleaf}"),
+            });
+            assert_eq!(
+                snapshot.apic_id(),
+                Some(if vendor == TargetCpu::AMD_VENDOR {
+                    0x1234_5678
+                } else {
+                    0x7b
+                })
+            );
+            if vendor == TargetCpu::AMD_VENDOR {
+                let mut deficient = snapshot;
+                deficient.records[1].leaf = 0x8000_0002;
+                assert_eq!(deficient.apic_id(), None); // no guessed legacy fallback
+            }
+        }
+    }
+
     struct Inventory {
         revision: Cell<u64>,
         capacities: Vec<Capacity>,
