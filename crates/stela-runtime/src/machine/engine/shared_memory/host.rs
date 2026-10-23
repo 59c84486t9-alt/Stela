@@ -115,6 +115,25 @@ impl<H: Host, T: ServiceTransport> ServiceHost<H, T> {
         self.selected = None;
         core::mem::take(&mut self.services)
     }
+    /// Transfer only empty storage. Every next session still comes from the
+    /// freshly validated actual held inventory, never from retained authority.
+    pub(super) fn take_empty_service_buffer(&mut self) -> Vec<WorkerServices> {
+        if !self.services.is_empty() || self.selected.is_some() {
+            self.transport
+                .fail_stopped("native service buffer still has active sessions");
+        }
+        core::mem::take(&mut self.services)
+    }
+
+    /// Call only after each drained session passed publication close. Keeping
+    /// allocation capacity carries no session, receipt, frame or stop token.
+    pub(super) fn retain_empty_service_buffer(&mut self, services: Vec<WorkerServices>) {
+        if !services.is_empty() || !self.services.is_empty() || self.selected.is_some() {
+            self.transport
+                .fail_stopped("native service buffer is not empty after close");
+        }
+        self.services = services;
+    }
     fn effect(&mut self, effect: HostEffect) {
         let Some(index) = self.selected else {
             self.transport
@@ -544,6 +563,288 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             .unwrap();
         machine.initialize_native_transport(owners);
         (machine, ram)
+    }
+
+    #[test]
+    fn native_services_reuse_empty_storage_after_actual_close_and_release() {
+        let (mut machine, _) = memory_service_machine(false);
+        let mut allocation = None;
+        let mut previous_generation = 0;
+        for _ in 0..8 {
+            let held = machine.hold_native_services().unwrap();
+            let current = (
+                machine.host.services.as_ptr(),
+                machine.host.services.capacity(),
+            );
+            assert_eq!(machine.host.services.len(), 1);
+            if let Some(previous) = allocation {
+                assert_eq!(current, previous);
+            }
+            allocation = Some(current);
+            let command = machine.host.services[0]
+                .command(HostEffect::MemoryBarrier)
+                .unwrap();
+            assert!(command.generation() > previous_generation);
+            previous_generation = command.generation();
+            let receipt = machine
+                .host
+                .transport
+                .apply(&mut machine.host.local, command)
+                .unwrap();
+            machine.host.services[0].accept(receipt).unwrap();
+            assert!(machine.host.select_native_service(WorkerId(17)));
+            machine.host.memory_barrier(); // actual owner command and receipt
+            machine.release_native_services(held);
+            assert!(machine.host.services.is_empty());
+            assert!(machine.host.selected.is_none());
+            assert_eq!(
+                (
+                    machine.host.services.as_ptr(),
+                    machine.host.services.capacity()
+                ),
+                current
+            );
+            assert!(
+                machine
+                    .native_publication
+                    .as_ref()
+                    .unwrap()
+                    .require_stopped(1, &[0])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_ram_close_capacity_is_reused_by_the_next_scheduler_open() {
+        let (mut machine, _) = memory_service_machine(false);
+        // SAFETY: closed model with the actual canonical owner, no external
+        // writer/native entry. Explicit finish consumes every actual receipt.
+        unsafe { machine.prepare_native_ram_service() }
+            .unwrap()
+            .finish();
+        assert!(machine.host.services.is_empty());
+        let allocation = (
+            machine.host.services.as_ptr(),
+            machine.host.services.capacity(),
+        );
+        assert!(allocation.1 > 0);
+        let held = machine.hold_native_services().unwrap();
+        assert_eq!(
+            (
+                machine.host.services.as_ptr(),
+                machine.host.services.capacity()
+            ),
+            allocation
+        );
+        machine.release_native_services(held);
+    }
+
+    #[test]
+    fn public_begin_end_keep_actual_sessions_and_clear_selection() {
+        let (mut machine, _) = memory_service_machine(false);
+        let held = machine.hold_native_services().unwrap();
+        assert!(machine.host.select_native_service(WorkerId(17)));
+        assert!(machine.host.begin_services(Vec::new()).is_err());
+        let sessions = machine.host.end_services();
+        assert_eq!(sessions.len(), 1);
+        assert!(machine.host.selected.is_none());
+        assert!(machine.host.services.is_empty());
+        let allocation = (sessions.as_ptr(), sessions.capacity());
+        machine.host.begin_services(sessions).unwrap();
+        assert_eq!(
+            (
+                machine.host.services.as_ptr(),
+                machine.host.services.capacity()
+            ),
+            allocation
+        );
+        machine.release_native_services(held);
+    }
+
+    #[test]
+    #[should_panic(expected = "native service buffer still has active sessions")]
+    fn service_buffer_cannot_be_taken_with_live_sessions() {
+        let (mut machine, _) = memory_service_machine(false);
+        let _held = machine.hold_native_services().unwrap();
+        let _ = machine.host.take_empty_service_buffer();
+    }
+
+    #[test]
+    #[should_panic(expected = "native service buffer is not empty after close")]
+    fn service_buffer_cannot_retain_unclosed_sessions() {
+        let (mut machine, _) = memory_service_machine(false);
+        let _held = machine.hold_native_services().unwrap();
+        let sessions = machine.host.end_services();
+        machine.host.retain_empty_service_buffer(sessions);
+    }
+
+    #[test]
+    #[should_panic(expected = "native service buffer still has active sessions")]
+    fn empty_service_buffer_with_stale_selection_is_refused() {
+        let (mut machine, _) = memory_service_machine(false);
+        machine.host.selected = Some(0);
+        let _ = machine.host.take_empty_service_buffer();
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn pending_effect_close_fails_stopped_without_recycling_capacity() {
+        let (mut machine, _) = memory_service_machine(false);
+        let held = machine.hold_native_services().unwrap();
+        let _pending = machine.host.services[0]
+            .command(HostEffect::MemoryBarrier)
+            .unwrap();
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            machine.release_native_services(held);
+        }));
+        assert!(stopped.is_err());
+        // Publication retains the actual open session; no release occurred and
+        // no emptied allocation was installed after the refused close.
+        assert_eq!(machine.host.services.capacity(), 0);
+        let inventory = machine.native_publication.as_mut().unwrap();
+        assert!(inventory.require_stopped(1, &[0]).is_ok());
+        assert!(inventory.request_stop(&[0]).is_err());
+    }
+
+    struct RosterLocal(WorkerId);
+    impl Host for RosterLocal {
+        fn native_worker(&self) -> Option<WorkerId> {
+            Some(self.0)
+        }
+        fn read_ram(&mut self, _: u64, _: &mut [u8]) -> bool {
+            panic!("roster model has no RAM lane")
+        }
+        fn write_ram(&mut self, _: u64, _: &[u8]) -> bool {
+            panic!("roster model has no RAM lane")
+        }
+        fn install(&mut self, _: &[u8]) -> Result<NativeCode, InstallError> {
+            unreachable!()
+        }
+        fn patch(&mut self, _: NativeCode, _: &[u8]) {
+            unreachable!()
+        }
+        fn discard_code(&mut self) {
+            unreachable!()
+        }
+        unsafe fn execute(&mut self, _: NativeCode, _: &mut GuestState) -> NativeExit {
+            unreachable!()
+        }
+        fn set_regime(&mut self, _: &Regime) {
+            unreachable!()
+        }
+        fn invalidate_translations(&mut self) {}
+        fn counter(&mut self) -> u64 {
+            0
+        }
+        fn arm_timer(&mut self, _: Option<u64>) {
+            unreachable!()
+        }
+        fn wait_for_interrupt(&mut self) {
+            unreachable!()
+        }
+    }
+    struct RosterTransport(Vec<(WorkerOwner, RosterLocal)>);
+    impl ServiceTransport for RosterTransport {
+        fn apply(
+            &mut self,
+            _: &mut dyn Host,
+            command: HostEffectCommand,
+        ) -> Result<HostEffectReceipt, WithPayload<HostEffectCommand>> {
+            let (owner, host) = self
+                .0
+                .iter_mut()
+                .find(|(owner, _)| owner.binding() == command.binding())
+                .expect("actual assigned owner");
+            owner.apply_host_effect(command, host)
+        }
+        fn fail_stopped(&mut self, reason: &'static str) -> ! {
+            panic!("{reason}")
+        }
+    }
+
+    #[test]
+    fn empty_storage_reopens_fresh_sparse_permuted_rosters_with_nonzero_bsp() {
+        let (_, _, _, ram) = super::super::policy::tests::fixture();
+        let mut host = ServiceHost::new(Local, RosterTransport(Vec::new()), ram);
+        let mut allocation = None;
+        // Change both actual source membership and owner order between fully
+        // closed inventories. The BSP's worker 17 belongs to nonzero PE 7.
+        for members in [[7, 2, 11], [11, 7, 2], [9, 3, 7]] {
+            let bindings: Vec<_> = members
+                .into_iter()
+                .map(|pe| WorkerBinding {
+                    pe,
+                    worker: WorkerId(if pe == 7 { 17 } else { pe + 100 }),
+                })
+                .collect();
+            let (mut inventory, owners) = WorkerPublications::new(&bindings).unwrap();
+            host.transport.0 = owners
+                .into_iter()
+                .map(|owner| {
+                    let local = RosterLocal(owner.binding().worker);
+                    (owner, local)
+                })
+                .collect();
+            for (owner, local) in &mut host.transport.0 {
+                inventory
+                    .accept_initial(owner.publish_initial(local).unwrap())
+                    .unwrap();
+            }
+            let request = inventory.request_stop(&members).unwrap();
+            for command in inventory.native_stop_commands(&request).unwrap() {
+                let (owner, local) = host
+                    .transport
+                    .0
+                    .iter_mut()
+                    .find(|(owner, _)| owner.binding() == command.binding())
+                    .unwrap();
+                inventory
+                    .accept_invalidation(owner.invalidate(command, local).unwrap())
+                    .unwrap();
+            }
+            let held = inventory.hold_stop(request).unwrap();
+            inventory.require_all_held(&held).unwrap();
+            let mut services = host.take_empty_service_buffer();
+            services.reserve(bindings.len());
+            for binding in inventory.bindings().collect::<Vec<_>>() {
+                services.push(inventory.open_services(&held, binding.pe).unwrap());
+            }
+            host.begin_services(services).unwrap();
+            assert_eq!(
+                host.services
+                    .iter()
+                    .map(WorkerServices::binding)
+                    .collect::<Vec<_>>(),
+                bindings
+            );
+            let current = (host.services.as_ptr(), host.services.capacity());
+            if let Some(previous) = allocation {
+                assert_eq!(current, previous);
+            }
+            allocation = Some(current);
+            for binding in &bindings {
+                assert!(host.select_native_service(binding.worker));
+                host.memory_barrier();
+            }
+            let mut services = host.end_services();
+            for session in services.drain(..) {
+                inventory.close_services(session).unwrap();
+            }
+            host.retain_empty_service_buffer(services);
+            assert!(host.services.is_empty());
+            for release in inventory.release(held).unwrap() {
+                let (owner, _) = host
+                    .transport
+                    .0
+                    .iter_mut()
+                    .find(|(owner, _)| owner.binding() == release.binding())
+                    .unwrap();
+                inventory
+                    .accept_release(owner.release(release).unwrap())
+                    .unwrap();
+            }
+        }
     }
     #[test]
     fn active_bootstrap_keeps_off_slots_unbound_and_refuses_start_or_reset() {

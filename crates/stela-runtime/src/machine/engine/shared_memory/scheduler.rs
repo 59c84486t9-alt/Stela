@@ -85,7 +85,8 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 .transport
                 .fail_stopped("native source services lack actual held workers");
         }
-        let mut services = Vec::with_capacity(bindings.len());
+        let mut services = self.host.take_empty_service_buffer();
+        services.reserve(bindings.len());
         for binding in &bindings {
             match inventory.open_services(&held, binding.pe) {
                 Ok(service) => services.push(service),
@@ -121,13 +122,15 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             .native_publication
             .as_mut()
             .expect("held native inventory");
-        for services in self.host.end_services() {
-            if inventory.close_services(services).is_err() {
+        let mut services = self.host.end_services();
+        for service in services.drain(..) {
+            if inventory.close_services(service).is_err() {
                 self.host
                     .transport
                     .fail_stopped("native Host service did not actually finish");
             }
         }
+        self.host.retain_empty_service_buffer(services);
     }
 
     pub(in crate::machine::engine) fn release_native_services(
