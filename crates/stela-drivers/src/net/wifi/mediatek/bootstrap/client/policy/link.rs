@@ -1123,7 +1123,11 @@ mod tests {
             incoming(model, &response(0xb1, &[0, 0, 2, 0, 0, 0]), None, false);
         } else {
             let mut raw = incoming_bytes(&data(false), Some((1, 0, 100)), false);
-            raw[7] |= 2; // actual descriptor cipher mismatch, before replay admission
+            raw[6] |= 0x80; // source RXD1_NORMAL_CM, bit23; not ICV_ERR bit25
+            let decoded = rx::decode(Chip::Mt7925, &raw).unwrap();
+            assert!(decoded.security.cipher_mismatch);
+            assert!(!decoded.security.decrypted);
+            assert!(!decoded.security.icv_error);
             device_receive(&model.queues[&0xd4520], &raw, true, 0);
         }
     }
@@ -1152,11 +1156,14 @@ mod tests {
             assert_eq!(received.last(), Some(&n));
             assert_eq!(link.queues().data_frames, usize::from(3 - n));
             let original = deferred_message(&link);
-            assert!(if n % 2 == 0 {
-                original.contains("ProtocolVersion")
-            } else {
-                original.contains("WrongProfile")
-            });
+            assert!(
+                if n % 2 == 0 {
+                    original.contains("ProtocolVersion")
+                } else {
+                    original.contains("WrongProfile")
+                },
+                "actual deferred diagnostic: {original}"
+            );
             let head = model.queues[&0xd4520].lock().unwrap().head;
             let syncs = model.memory.lock().unwrap().syncs.len();
             assert_eq!(link.receive(), Err(LinkError::Adapter(original)));
