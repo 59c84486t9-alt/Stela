@@ -289,6 +289,8 @@ static const char *conditional_body =
 static nir_shader *
 translate_body(const char *body)
 {
+   if (getenv("STELA_AIR_CFG_TRACE"))
+      fprintf(stderr, "AIR CFG fixture:\n%s\n", body);
    LLVMMemoryBufferRef input = stela_air_test_bitcode(body, "");
    struct stela_air_error error;
    nir_shader *nir = translate(input, &test_nir_options, 1000, &error);
@@ -340,6 +342,8 @@ check_stores(nir_shader *nir, const uint64_t *addresses, const uint32_t *values,
 {
    unsigned stores = 0;
    nir_foreach_function_impl(impl, nir) {
+      if (!finite_effect_body(impl))
+         nir_print_shader(nir, stderr);
       CHECK(finite_effect_body(impl));
       nir_foreach_block(block, impl) {
          CHECK(nir_block_get_following_if(block) == NULL);
@@ -478,9 +482,20 @@ specialize_loop(nir_shader *nir, uint32_t tid)
    static const nir_shader_compiler_options options = {.max_unroll_iterations = 16};
    specialize_invocation(nir, tid);
    nir->options = &options;
+   /* Multiple LLVM latches can leave identical induction updates in opposite
+    * arms of an if. Expose their common value with original Mesa passes before
+    * asking its loop analysis to recognize the finite specialized induction.
+    * Do not speculate loads, stores or discard while flattening pure ALU. */
+   const nir_opt_peephole_select_options select = {
+      .limit = 64, .expensive_alu_ok = true,
+   };
    bool progress;
    do {
-      progress = nir_opt_loop_unroll(nir);
+      progress = nir_opt_peephole_select(nir, &select);
+      progress |= nir_opt_cse(nir);
+      progress |= nir_opt_algebraic(nir);
+      progress |= nir_opt_if(nir, nir_opt_if_optimize_phi_true_false);
+      progress |= nir_opt_loop_unroll(nir);
       progress |= nir_opt_constant_folding(nir);
       progress |= nir_opt_dead_cf(nir);
       progress |= nir_opt_remove_phis(nir);

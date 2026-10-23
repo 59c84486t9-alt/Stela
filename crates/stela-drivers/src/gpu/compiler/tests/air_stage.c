@@ -209,13 +209,21 @@ static void stage_binding_prelude_contract(void)
    for(unsigned order=0;order<2;order++) {
       char *text=order?change(fixture,"!4 = !{!5,!6}","!4 = !{!6,!5}"):NULL;
       LLVMMemoryBufferRef raw=bitcode(text?text:fixture);free(text);
+      struct snapshot vs,fs; struct stela_air_error link_error;
+      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw),
+         "test_vertex",STELA_AIR_VERTEX,capture,&vs,&link_error));
+      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw),
+         "test_fragment",STELA_AIR_FRAGMENT,capture,&fs,&link_error));
+      struct stela_air_varying_slot map[16]; unsigned count=0;
+      CHECK(stela_air_link_stage_io(&vs.entry,&fs.entry,16,map,16,&count,&link_error) && count==1);
       for(unsigned mode=0;mode<3;mode++) {
-         struct stela_air_stage_options o=options(STELA_AIR_VERTEX,NULL,0,NULL);
+         struct stela_air_stage_options o=options(STELA_AIR_VERTEX,map,count,NULL);
          o.resources.bind_ssbo=NULL;o.resources.ssbo_count=0;
          o.resources.bind_buffer=stage_binding_prelude;o.resources.binding_data=&mode;
          struct stela_air_error e;
          nir_shader *nir=stela_air_stage_to_nir(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw),
             "test_vertex",&nir_options,&o,&e);
+         if (!nir && !mode) fprintf(stderr,"prelude order%u: %u %s\n",order,e.kind,e.detail);
          if(!mode) {CHECK(nir && e.kind==STELA_AIR_OK);nir_validate_shader(nir,"valid stage binding prelude");ralloc_free(nir);}
          else CHECK(!nir && e.kind==STELA_AIR_CONTROL_FLOW && e.detail[0]);
       }

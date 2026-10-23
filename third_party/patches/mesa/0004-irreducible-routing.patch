@@ -1,0 +1,19 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 16:03:26 -0400
+Subject: [PATCH] fix(nir): retain mutable routing for irreducible loops
+
+---
+ src/compiler/nir/nir_lower_goto_ifs.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/compiler/nir/nir_lower_goto_ifs.c b/src/compiler/nir/nir_lower_goto_ifs.c
+index c0b5213b547bc698de8a97a9541256e92233a9db..278f53400755a64d0c5a8e7037c9703002d371f2 100644
+--- a/src/compiler/nir/nir_lower_goto_ifs.c
++++ b/src/compiler/nir/nir_lower_goto_ifs.c
+@@ -762,3 +762,4 @@ organize_levels(struct list_head *levels, struct set *remaining,
+    list_for_each_entry_rev(struct strct_lvl, level, levels, link) {
+-      bool need_var = !(is_domminated && level->link.prev == levels);
++      bool need_var = level->irreducible ||
++                      !(is_domminated && level->link.prev == levels);
+       level->out_path = routing->regular;
