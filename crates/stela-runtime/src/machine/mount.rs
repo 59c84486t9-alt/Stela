@@ -5,13 +5,54 @@
 //! `stela boot check` mount the same machine.
 use super::apple::{
     AicInput, AppleDevices, AscLines, ConsoleSink, Range, RtcEpoch, Scanout, SepEntropy,
-    SepProvisioning, UsbCables, UsbId, WallClock, memory_resources::amcc, sep_state, typec,
+    SepProvisioning, UsbCables, UsbId, WallClock,
+    memory_resources::{amcc, t8112},
+    sep_state, typec,
 };
 use super::ctrr;
 use super::soc::{Board, PmgrBankRefusal};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::fmt;
 use stela_drivers::block::BlockDevice;
+
+/// Already constructed native owners, consumed by the board mount. Descriptor
+/// equality is checked before any host input or bus placement is consumed.
+/// This is placement, not canonical execution or native PMP admission.
+pub enum MemoryResources {
+    T8112 {
+        memory: t8112::Prepared,
+        cache: t8112::cache::EmptyResource,
+    },
+}
+
+impl MemoryResources {
+    fn validate(
+        &self,
+        controller: Option<&super::soc::MemoryController>,
+        descriptor: Option<&super::soc::MemoryCache>,
+    ) -> Result<(), String> {
+        match self {
+            Self::T8112 { memory, cache } => {
+                if descriptor != Some(memory.descriptor()) || controller != Some(cache.source()) {
+                    return Err(
+                        "native memory resources differ from the live board descriptors".into(),
+                    );
+                }
+                if !alloc::sync::Arc::ptr_eq(memory.registered_ram(), cache.registered_ram()) {
+                    return Err(
+                        "native memory resources require the same actual registered RAM".into(),
+                    );
+                }
+                if cache.binding().0.checked_add(cache.binding().1)
+                    != Some(memory.descriptor().channels.0)
+                {
+                    return Err("native cache and DCS physical ownership is not contiguous".into());
+                }
+                Ok(())
+            }
+        }
+    }
+}
 
 /// The regions iBoot leaves in the memory controller's lock groups:
 /// CTRR-A over the bundle's read-only run, and CTRR-C and CTRR-D over the
@@ -117,6 +158,23 @@ pub fn devices<C: ConsoleSink + 'static>(
     inputs: Inputs<'_>,
     log: &mut dyn FnMut(fmt::Arguments<'_>),
 ) -> Result<(AppleDevices, Option<UsbId>), String> {
+    devices_with_memory(board, console, inputs, None, log)
+}
+
+/// Mount the ordinary board around actual native memory owners. Callers must
+/// retain their registered RAM and close all native/host writers before guest
+/// entry. No legacy memory constructor is used when native owners are supplied.
+pub fn devices_with_memory<C: ConsoleSink + 'static>(
+    board: &Board,
+    console: C,
+    inputs: Inputs<'_>,
+    memory: Option<MemoryResources>,
+    log: &mut dyn FnMut(fmt::Arguments<'_>),
+) -> Result<(AppleDevices, Option<UsbId>), String> {
+    if let Some(memory) = memory.as_ref() {
+        memory.validate(board.memory_controller.as_ref(), board.memory_cache.as_ref())?;
+    }
+    let native_memory = memory.is_some();
     pmgr_qualifications(&board.pmgr_refusals, false, log)?;
     let Inputs {
         programmed,
@@ -331,6 +389,18 @@ pub fn devices<C: ConsoleSink + 'static>(
             states.registers.len(),
             blocks.len()
         ));
+    }
+    // The display's PTD update view must borrow this actual publication bank,
+    // before a broad display container can claim any overlapping bytes.
+    if let Some(memory) = memory {
+        match memory {
+            MemoryResources::T8112 { memory, cache } => {
+                devices.add_t8112_empty_memory_resources(memory, cache)?;
+                log(format_args!(
+                    "DEVICES mcc native DCS/PTD and cache share registered RAM\n"
+                ));
+            }
+        }
     }
     // The dcpext display coprocessor and its register apertures, presenting
     // to the host's scanout, mastering through its DART and reading swap
@@ -547,7 +617,9 @@ pub fn devices<C: ConsoleSink + 'static>(
     }
     let memory_controller = board.memory_controller.as_ref();
     let memory_cache = board.memory_cache.as_ref();
-    if let Some(controller) = memory_controller {
+    if !native_memory
+        && let Some(controller) = memory_controller
+    {
         let mut programmed = programmed;
         for (region, group) in programmed.iter_mut().zip(controller.layout.groups) {
             if group.is_none() {
@@ -568,7 +640,9 @@ pub fn devices<C: ConsoleSink + 'static>(
             amcc::ctrr_a(programmed[0]),
         )?;
     }
-    if let Some(mcc) = memory_cache {
+    if !native_memory
+        && let Some(mcc) = memory_cache
+    {
         let (physical, bytes, channels) = mcc.channels;
         devices.add_memory_channels(
             Range { physical, bytes },
@@ -636,6 +710,36 @@ pub fn devices<C: ConsoleSink + 'static>(
 mod tests {
     use super::*;
     use crate::machine::soc::PmgrBank;
+
+    #[test]
+    fn native_memory_preflight_matches_live_descriptors_and_actual_ram() {
+        let (memory, cache) = t8112::cache::EmptyResource::service_test_components();
+        let descriptor = memory.descriptor().clone();
+        let controller = cache.source().clone();
+        let resources = MemoryResources::T8112 { memory, cache };
+        assert_eq!(
+            resources.validate(Some(&controller), Some(&descriptor)),
+            Ok(())
+        );
+
+        let mut changed = descriptor.clone();
+        changed.ptd.interrupts[0] ^= 1;
+        assert!(resources.validate(Some(&controller), Some(&changed)).is_err());
+        let mut changed = controller.clone();
+        changed.apertures[0] += 0x40000;
+        assert!(resources.validate(Some(&changed), Some(&descriptor)).is_err());
+        assert!(resources.validate(None, Some(&descriptor)).is_err());
+        assert!(resources.validate(Some(&controller), None).is_err());
+
+        let (memory, _) = t8112::cache::EmptyResource::service_test_components();
+        let (_, cache) = t8112::cache::EmptyResource::service_test_components();
+        assert!(
+            MemoryResources::T8112 { memory, cache }
+                .validate(Some(&controller), Some(&descriptor))
+                .unwrap_err()
+                .contains("same actual registered RAM")
+        );
+    }
 
     #[test]
     fn clpc_absence_reports_each_path_once_and_strict_stops_at_the_first() {

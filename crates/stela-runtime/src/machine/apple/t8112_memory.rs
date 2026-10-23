@@ -12,13 +12,19 @@ impl AppleDevices {
         memory: t8112::Prepared,
         cache: t8112::cache::EmptyResource,
     ) -> Result<(), String> {
-        if self.memory_controller.is_some() || self.memory_publication.is_some() {
+        if self.power_configured
+            || self.memory_controller.is_some()
+            || self.memory_publication.is_some()
+        {
             return Err("memory resource owners are already installed".into());
         }
         if !Arc::ptr_eq(memory.registered_ram(), cache.registered_ram()) {
             return Err("T8112 cache and DCS/PTD require the same actual registered RAM".into());
         }
         let cache_binding = [cache.binding()];
+        // reg[0] of the original MCC node names the shared aperture, while
+        // cache.binding() covers the union beginning at the AMCC planes.
+        let lifecycle_physical = cache.placement().shared.0;
         if cache_binding[0].0.checked_add(cache_binding[0].1)
             != Some(memory.descriptor().channels.0)
         {
@@ -34,6 +40,12 @@ impl AppleDevices {
             .map_err(|error| format!("T8112 memory placement: {error:?}"))?;
         self.memory_publication = Some(publication);
         self.memory_controller = Some(controller);
+        // These are distinct actual lifecycle sinks of the same source MCC
+        // resource. Both follow its domains; DCS/PTD must not stay active when
+        // its cache/lock owner is paused. The hooks still refuse unsupported
+        // reset/loss transitions rather than grant completion here.
+        self.register_power_device(lifecycle_physical, controller, true)?;
+        self.register_power_device(lifecycle_physical, publication, true)?;
         Ok(())
     }
 
@@ -115,6 +127,11 @@ mod tests {
             .add_t8112_empty_memory_resources(memory, cache)
             .unwrap();
         assert_ne!(board.memory_controller, board.memory_publication);
+        assert_eq!(board.power_devices.len(), 2);
+        assert!(
+            board.power_devices.iter().all(|sink| sink.physical == base + 0x100000)
+        );
+        assert_ne!(board.power_devices[0].device, board.power_devices[1].device);
         assert_eq!(
             board.bus.route(base + 0x680, Width::Word).unwrap().0,
             board.memory_controller.unwrap()
