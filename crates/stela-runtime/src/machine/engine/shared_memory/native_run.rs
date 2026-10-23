@@ -1981,9 +1981,8 @@ mod artifact_tests {
             let mut source = artifact.source.clone();
             source.reserve_exact(artifact.source.capacity() + (index + 1) * 11 - source.len());
             let mut source_map = artifact.source_map.clone();
-            source_map.reserve_exact(
-                artifact.source_map.capacity() + (index + 1) * 3 - source_map.len(),
-            );
+            source_map
+                .reserve_exact(artifact.source_map.capacity() + (index + 1) * 3 - source_map.len());
             let enlarged = Arc::new(Artifact {
                 key: artifact.key.clone(),
                 identity: Arc::clone(&artifact.identity),
@@ -2005,7 +2004,14 @@ mod artifact_tests {
         assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &artifacts[1]));
         assert_accounting(&cache);
         cache.tighten(cache.stats().retained_bytes);
-        machine.profile_missing.push(Register::TTBR0_EL1);
+        // The retained missing-register slice is charged at host-word
+        // alignment. One additional register may fit within its old charge.
+        machine.profile_missing.extend([
+            Register::TTBR0_EL1,
+            Register::TTBR1_EL1,
+            Register::TCR_EL1,
+            Register::SCTLR_EL1,
+        ]);
         let changed = capture_controls(&machine).unwrap();
         assert!(changed.retained_bytes() > original_controls.retained_bytes());
         cache.remember_controls(&changed);
