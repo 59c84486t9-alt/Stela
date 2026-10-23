@@ -53,6 +53,11 @@ struct Model {
     auto_reset_stage: u32,
     auto_boot: bool,
     d0_stage: u32,
+    silence_d0: bool,
+    d0_delay: u64,
+    read_error: Option<usize>,
+    write_error: Option<(usize, usize)>,
+    byte_error: Option<usize>,
     context: u64,
     posted: BTreeMap<u16, u64>,
     transmitted: Vec<Vec<u8>>,
@@ -104,6 +109,11 @@ impl Model {
             auto_reset_stage: IML,
             auto_boot: false,
             d0_stage: OP,
+            silence_d0: false,
+            d0_delay: 0,
+            read_error: None,
+            write_error: None,
+            byte_error: None,
             context: 0,
             posted: BTreeMap::new(),
             transmitted: Vec::new(),
@@ -326,8 +336,11 @@ impl Model {
             }
             SLEEP => {
                 assert_eq!(v, 0);
-                self.regs.insert(BOOT, self.d0_stage);
-                self.cause(0, 1);
+                self.time.set(self.time.get() + self.d0_delay);
+                if !self.silence_d0 {
+                    self.regs.insert(BOOT, self.d0_stage);
+                    self.cause(0, 1);
+                }
                 self.regs.insert(o, v);
             }
             _ => {
@@ -344,14 +357,34 @@ unsafe impl Platform for ModelPlatform {
         self.0.borrow().identity
     }
     fn read32(&mut self, o: usize) -> Result<u32> {
-        Ok(self.0.borrow().reg(o))
+        let mut m = self.0.borrow_mut();
+        if m.read_error == Some(o) {
+            m.read_error = None;
+            return Err(Error::Mmio("model register read fault"));
+        }
+        Ok(m.reg(o))
     }
     fn write32(&mut self, o: usize, v: u32) -> Result<()> {
-        self.0.borrow_mut().write32(o, v);
+        let mut m = self.0.borrow_mut();
+        m.write32(o, v);
+        if let Some((offset, remaining)) = m.write_error
+            && offset == o
+        {
+            if remaining == 1 {
+                m.write_error = None;
+                return Err(Error::Mmio("model effect-then-error write fault"));
+            }
+            m.write_error = Some((offset, remaining - 1));
+        }
         Ok(())
     }
     fn write8(&mut self, o: usize, v: u8) -> Result<()> {
-        self.0.borrow_mut().byte_writes.push((o, v));
+        let mut m = self.0.borrow_mut();
+        m.byte_writes.push((o, v));
+        if m.byte_error == Some(o) {
+            m.byte_error = None;
+            return Err(Error::Mmio("model effect-then-error IVAR fault"));
+        }
         Ok(())
     }
     fn now_us(&self) -> u64 {
@@ -540,6 +573,53 @@ fn d0_requires_complete_boot_notification_and_subsequent_operational_stage() {
 }
 
 #[test]
+fn old_gp0_cannot_acknowledge_a_silent_d0_request() {
+    for silent in [false, true] {
+        let mut backing = vec![0u64; 1024 * 1024];
+        let mut dma = allocator(&mut backing);
+        let (mut t, m) = transport(0xa876, &mut dma);
+        t.start().unwrap();
+        m.borrow_mut().auto_reset_stage = OP;
+        m.borrow_mut().auto_boot = true;
+        t.send(Kind::Command, &[1, 0xfc, 0]).unwrap();
+        t.poll().unwrap();
+        m.borrow_mut().silence_d0 = silent;
+        // A genuine older OP GP0 is already pending before the new SLEEP write.
+        m.borrow_mut().cause(0, 1);
+        if silent {
+            assert!(matches!(t.enter_d0(), Err(Error::Timeout(_))));
+            assert_eq!(t.state(), State::Failed);
+        } else {
+            assert_eq!(t.enter_d0().unwrap().boot_stage, OP);
+        }
+    }
+}
+
+#[test]
+fn d0_preexisting_stage_change_and_late_write_acknowledgment_are_refused() {
+    for lost_stage in [false, true] {
+        let mut backing = vec![0u64; 1024 * 1024];
+        let mut dma = allocator(&mut backing);
+        let (mut t, m) = transport(0xa876, &mut dma);
+        t.start().unwrap();
+        m.borrow_mut().auto_reset_stage = OP;
+        m.borrow_mut().auto_boot = true;
+        t.send(Kind::Command, &[1, 0xfc, 0]).unwrap();
+        t.poll().unwrap();
+        if lost_stage {
+            m.borrow_mut().regs.insert(BOOT, ROM);
+            m.borrow_mut().cause(0, 1);
+            assert!(matches!(t.enter_d0(), Err(Error::Protocol { .. })));
+            assert!(!m.borrow().writes.iter().any(|(_, o, _)| *o == SLEEP));
+        } else {
+            m.borrow_mut().d0_delay = 4_000_000;
+            assert!(matches!(t.enter_d0(), Err(Error::Timeout(_))));
+        }
+        assert_eq!(t.state(), State::Failed);
+    }
+}
+
+#[test]
 fn rom_stage_without_actual_gp0_never_starts_rx_or_claims_startup() {
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
@@ -629,6 +709,131 @@ fn missing_bus_master_ack_or_failed_route_drain_never_release_native_ownership()
         assert_eq!(m.borrow().writes.len(), writes);
         assert_eq!(m.borrow().dropped, 0);
         assert_eq!(m.borrow().retire_count, 1);
+    }
+}
+
+fn assert_terminal(t: &mut Transport<ModelPlatform>, m: &Rc<RefCell<Model>>) {
+    assert_eq!(t.state(), State::Failed);
+    assert!(t.fault().is_some());
+    assert!(t.fault_snapshot().is_some());
+    let fault = t.fault().cloned();
+    let writes = m.borrow().writes.len();
+    let byte_writes = m.borrow().byte_writes.len();
+    let tx = t.memory.tx.bytes().to_vec();
+    let rx = t.memory.rx.bytes().to_vec();
+    assert!(t.start().is_err());
+    assert!(t.send(Kind::Acl, &[1, 0, 0, 0]).is_err());
+    assert!(t.poll().is_err());
+    let _ = t.close();
+    assert_eq!(m.borrow().writes.len(), writes);
+    assert_eq!(m.borrow().byte_writes.len(), byte_writes);
+    assert_eq!(t.memory.tx.bytes(), tx);
+    assert_eq!(t.memory.rx.bytes(), rx);
+    assert_eq!(t.fault(), fault.as_ref());
+}
+
+#[test]
+fn mmio_start_read_and_effect_then_write_errors_cannot_reopen_or_rewrite_dma() {
+    for failure in 0..20 {
+        let mut backing = vec![0u64; 1024 * 1024];
+        let mut dma = allocator(&mut backing);
+        let (mut t, m) = transport(0xa876, &mut dma);
+        match failure {
+            0..=5 => {
+                m.borrow_mut().read_error =
+                    Some([FUNC, BOOT, FH_MASK, HW_MASK, HW_REV, RF_ID][failure]);
+            }
+            6 => m.borrow_mut().byte_error = Some(IVAR + 0x20),
+            _ => {
+                m.borrow_mut().write_error = Some(
+                    [
+                        (FUNC, 1),
+                        (FUNC, 2),
+                        (FUNC, 3),
+                        (FUNC, 4),
+                        (CI_LOW, 1),
+                        (CI_HIGH, 1),
+                        (FH_MASK, 1),
+                        (HW_MASK, 1),
+                        (FH_CAUSE, 1),
+                        (HW_CAUSE, 1),
+                        (AUTOMASK, 1),
+                        (DOORBELL, 1),
+                        (DOORBELL, 61),
+                    ][failure - 7],
+                );
+            }
+        }
+        assert!(matches!(t.start(), Err(Error::Mmio(_))), "fault {failure}");
+        assert_terminal(&mut t, &m);
+        assert!(t.retired);
+        drop(t);
+        assert_eq!(m.borrow().dropped, 1);
+    }
+}
+
+#[test]
+fn active_tx_rx_and_cause_errors_retain_first_fault_and_failed_cleanup_owner() {
+    for operation in 0..7 {
+        for cleanup_fails in [false, true] {
+            let mut backing = vec![0u64; 1024 * 1024];
+            let mut dma = allocator(&mut backing);
+            let (mut t, m) = transport(0xa876, &mut dma);
+            t.start().unwrap();
+            if cleanup_fails {
+                m.borrow_mut().stop_ack = false;
+            }
+            let error = match operation {
+                0 => {
+                    m.borrow_mut().write_error = Some((DOORBELL, 1));
+                    t.send(Kind::Acl, &[1, 0, 0, 0]).unwrap_err()
+                }
+                1 => {
+                    m.borrow_mut().receive(0, 4, &[0xff, 1, 9], &[]);
+                    m.borrow_mut().write_error = Some((DOORBELL, 1));
+                    t.poll().unwrap_err()
+                }
+                2..=5 => {
+                    m.borrow_mut().cause(0, 1);
+                    if operation == 2 {
+                        m.borrow_mut().read_error = Some(HW_CAUSE);
+                    } else {
+                        m.borrow_mut().write_error =
+                            Some(([FH_CAUSE, HW_CAUSE, AUTOMASK][operation - 3], 1));
+                    }
+                    t.poll().unwrap_err()
+                }
+                _ => {
+                    m.borrow_mut().auto_reset_stage = OP;
+                    m.borrow_mut().auto_boot = true;
+                    t.send(Kind::Command, &[1, 0xfc, 0]).unwrap();
+                    t.poll().unwrap();
+                    m.borrow_mut().write_error = Some((SLEEP, 1));
+                    t.enter_d0().unwrap_err()
+                }
+            };
+            assert!(matches!(error, Error::Mmio(_) | Error::Cleanup { .. }));
+            assert_eq!(t.retired, !cleanup_fails);
+            assert_terminal(&mut t, &m);
+            drop(t);
+            assert_eq!(m.borrow().dropped, usize::from(!cleanup_fails));
+        }
+    }
+}
+
+#[test]
+fn uncertain_mask_or_reset_cleanup_write_never_releases_platform() {
+    for fault in [(FH_MASK, 1), (HW_MASK, 1), (FUNC, 1), (FUNC, 2)] {
+        let mut backing = vec![0u64; 1024 * 1024];
+        let mut dma = allocator(&mut backing);
+        let (mut t, m) = transport(0xa876, &mut dma);
+        t.start().unwrap();
+        m.borrow_mut().write_error = Some(fault);
+        assert!(matches!(t.close(), Err(Error::Mmio(_))));
+        assert!(!t.retired);
+        assert_terminal(&mut t, &m);
+        drop(t);
+        assert_eq!(m.borrow().dropped, 0);
     }
 }
 #[test]

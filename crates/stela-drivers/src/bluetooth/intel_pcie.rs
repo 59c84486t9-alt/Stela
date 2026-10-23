@@ -607,9 +607,22 @@ impl<P: Platform> Transport<P> {
         }
     }
     fn enter_d0_inner(&mut self) -> Result<Snapshot> {
+        // Consume preexisting GP0 causes before recording the request baseline;
+        // an older OP notification cannot acknowledge the new SLEEP write.
+        self.service()?;
+        if self.state != State::Operational
+            || !self.awaiting_d0
+            || !self.boot_notification
+            || self.snapshot.boot_stage & OP == 0
+        {
+            return Err(Error::Protocol {
+                requirement: "current OP boot context before D0 request",
+                observed: u64::from(self.snapshot.boot_stage),
+            });
+        }
         let alive = self.alive;
-        self.write(SLEEP, 0)?;
         let start = self.platform.now_us();
+        self.write(SLEEP, 0)?;
         while self.alive == alive {
             self.service()?;
             if self.platform.now_us().wrapping_sub(start) >= 3_000_000 {
