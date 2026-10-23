@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Polled PC i8042, raw-set-2 AT keyboards and ordinary/IntelliMouse PS/2 mice.
+//! Polled PC i8042, raw-set-2 AT keyboards and ordinary/IntelliMouse/Explorer PS/2 mice.
 //!
 //! Linux `i8042.c`, `libps2.c`, `atkbd.c` and `psmouse-base.c` are the protocol
 //! references; see [`../THIRD_PARTY.md`](../THIRD_PARTY.md). Vojtech Pavlik
@@ -105,12 +105,21 @@ impl Registers for PortIo {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MouseProtocol {
+    #[default]
+    Standard,
+    IntelliMouse,
+    Explorer,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
     pub keyboard: bool,
     pub mouse: bool,
-    /// Attempt the standard 200/100/80 IntelliMouse negotiation; an ordinary
-    /// mouse returning ID 0 remains a three-byte mouse.
+    /// Probe IntelliMouse (200/100/80) then Explorer (200/200/80), each
+    /// followed by an actual GETID. An ordinary ID0 mouse stays three-byte.
+    /// The separate Explorer4.0 horizontal-mode sequence is not enabled.
     pub wheel: bool,
     pub io_timeout_us: u64,
     pub command_timeout_us: u64,
@@ -152,11 +161,25 @@ pub enum ErrorKind {
     NeedsReset,
     NoController,
     Timeout(Phase),
-    ControllerReply { command: u8, received: u8 },
-    Frame { port: Port, status: u8 },
-    DeviceReply { port: Port, received: u8 },
-    ResendLimit { port: Port, byte: u8 },
+    ControllerReply {
+        command: u8,
+        received: u8,
+    },
+    Frame {
+        port: Port,
+        status: u8,
+    },
+    DeviceReply {
+        port: Port,
+        received: u8,
+    },
+    ResendLimit {
+        port: Port,
+        byte: u8,
+    },
     UnsupportedMouseId(u8),
+    /// Enhanced horizontal/6-bit modes were not negotiated by this engine.
+    MousePacketMode(u8),
     UnsupportedScanSet(u8),
     QueueFull,
     UnsupportedScanCode(u16),
@@ -257,7 +280,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.discarded_before_start
     }
     pub fn has_wheel(&self) -> bool {
-        self.mouse.wheel()
+        self.mouse.protocol() != MouseProtocol::Standard
+    }
+    pub fn mouse_protocol(&self) -> Option<MouseProtocol> {
+        (self.is_ready() && self.config.mouse).then(|| self.mouse.protocol())
     }
 
     fn expired(&self, start: u64, limit: u64) -> bool {
@@ -418,6 +444,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(())
     }
+    fn mouse_id(&mut self) -> Result<u8, ErrorKind> {
+        match self.send_byte(Port::Mouse, GET_ID, self.config.command_timeout_us, true)? {
+            Some(id) => Ok(id),
+            None => self.response(
+                Port::Mouse,
+                self.timer.now_us(),
+                self.config.command_timeout_us,
+            ),
+        }
+    }
     fn reset_device(&mut self, port: Port) -> Result<(), ErrorKind> {
         self.send_byte(port, RESET, self.config.reset_timeout_us, false)?;
         let received = self.response(port, self.timer.now_us(), self.config.reset_timeout_us)?;
@@ -499,23 +535,20 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 for rate in [200, 100, 80] {
                     self.device_command(Port::Mouse, SET_RATE, &[rate])?;
                 }
-                let id = match self.send_byte(
-                    Port::Mouse,
-                    GET_ID,
-                    self.config.command_timeout_us,
-                    true,
-                )? {
-                    Some(id) => id,
-                    None => self.response(
-                        Port::Mouse,
-                        self.timer.now_us(),
-                        self.config.command_timeout_us,
-                    )?,
-                };
-                if !matches!(id, 0 | 3) {
+                let id = self.mouse_id()?;
+                if !matches!(id, 0 | 3 | 4) {
                     return Err(ErrorKind::UnsupportedMouseId(id));
                 }
-                self.mouse.set_wheel(id == 3);
+                for rate in [200, 200, 80] {
+                    self.device_command(Port::Mouse, SET_RATE, &[rate])?;
+                }
+                let protocol = match self.mouse_id()? {
+                    0 => MouseProtocol::Standard,
+                    3 => MouseProtocol::IntelliMouse,
+                    4 => MouseProtocol::Explorer,
+                    id => return Err(ErrorKind::UnsupportedMouseId(id)),
+                };
+                self.mouse.set_protocol(protocol);
             }
             self.device_command(Port::Mouse, SET_RATE, &[100])?;
         }

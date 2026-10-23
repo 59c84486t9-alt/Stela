@@ -21,6 +21,7 @@ struct Hardware {
     rates: Vec<u8>,
     mouse_id: u8,
     wheel_capable: bool,
+    explorer_capable: bool,
     no_id_ack: bool,
     force_id: Option<u8>,
     self_test: u8,
@@ -52,6 +53,7 @@ impl Hardware {
             rates: Vec::new(),
             mouse_id: 0,
             wheel_capable: true,
+            explorer_capable: false,
             no_id_ack: false,
             force_id: None,
             self_test: 0x55,
@@ -104,6 +106,9 @@ impl Hardware {
                     self.rates.push(data);
                     if self.wheel_capable && self.rates.ends_with(&[200, 100, 80]) {
                         self.mouse_id = 3;
+                    }
+                    if self.explorer_capable && self.rates.ends_with(&[200, 200, 80]) {
+                        self.mouse_id = 4;
                     }
                 }
                 SET_RATE | SET_RESOLUTION => {}
@@ -470,12 +475,12 @@ fn unsupported_interface_or_controller_state_is_read_back_and_refused() {
             0 => h.borrow_mut().self_test = 0xfc,
             1 => h.borrow_mut().interface_test = 1,
             2 => h.borrow_mut().translation_stuck = true,
-            _ => h.borrow_mut().force_id = Some(4),
+            _ => h.borrow_mut().force_id = Some(5),
         }
         let error = c.initialize().unwrap_err();
         assert!(matches!(
             error.kind,
-            ErrorKind::ControllerReply { .. } | ErrorKind::UnsupportedMouseId(4)
+            ErrorKind::ControllerReply { .. } | ErrorKind::UnsupportedMouseId(5)
         ));
         assert!(!c.is_ready());
         assert!(c.needs_reset());
@@ -725,4 +730,74 @@ fn idle_expiration_does_not_preempt_a_complete_retained_frame() {
             Input::Motion { dx: 1, dy: -2 }
         ]
     );
+}
+
+#[test]
+fn explorer_negotiates_both_actual_ids_and_retains_five_buttons_and_wheel() {
+    for no_ack in [false, true] {
+        let (mut c, h) = controller(Config::default());
+        h.borrow_mut().explorer_capable = true;
+        h.borrow_mut().no_id_ack = no_ack;
+        c.initialize().unwrap();
+        assert_eq!(c.mouse_protocol(), Some(MouseProtocol::Explorer));
+        assert_eq!(h.borrow().rates, vec![200, 100, 80, 200, 200, 80, 100]);
+        assert!(c.has_wheel());
+        emit(&h, Port::Mouse, &[0x0f, 2, 3, 0x38]);
+        assert_eq!(
+            c.poll().unwrap(),
+            vec![
+                Input::MouseButtons(31),
+                Input::Motion { dx: 2, dy: -3 },
+                Input::MouseWheel(8)
+            ]
+        );
+        assert_eq!(c.stop().unwrap(), vec![Input::MouseButtons(0)]);
+    }
+}
+
+#[test]
+fn explorer_all_wheel_nibbles_and_extra_button_bits_match_source_conversion() {
+    for mode in [0, 0xc0] {
+        for bits in [0, 0x10, 0x20, 0x30] {
+            let (mut c, h) = controller(Config::default());
+            h.borrow_mut().explorer_capable = true;
+            c.initialize().unwrap();
+            for raw in 0..16 {
+                emit(&h, Port::Mouse, &[0x08, 0, 0, mode | bits | raw]);
+                let events = c.poll().unwrap();
+                let wheel = events
+                    .iter()
+                    .filter_map(|e| {
+                        if let Input::MouseWheel(v) = e {
+                            Some(i16::from(*v))
+                        } else {
+                            None
+                        }
+                    })
+                    .sum::<i16>();
+                let signed = if raw < 8 {
+                    i16::from(raw)
+                } else {
+                    i16::from(raw) - 16
+                };
+                assert_eq!(wheel, -signed);
+                if raw == 0 && bits != 0 {
+                    assert_eq!(events, vec![Input::MouseButtons(bits >> 1)]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn unnegotiated_explorer_enhanced_modes_never_masquerade_as_vertical_input() {
+    for byte in [0x40, 0x80] {
+        let (mut c, h) = controller(Config::default());
+        h.borrow_mut().explorer_capable = true;
+        c.initialize().unwrap();
+        emit(&h, Port::Mouse, &[0x0f, 1, 2, byte]);
+        assert_eq!(c.poll().unwrap_err().kind, ErrorKind::MousePacketMode(byte));
+        assert!(c.needs_reset());
+        assert!(c.drain_events().is_empty());
+    }
 }

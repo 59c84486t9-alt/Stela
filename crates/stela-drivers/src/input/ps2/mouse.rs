@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Standard PS/2 and IntelliMouse packets, following Linux psmouse-base.c.
+//! Standard PS/2, IntelliMouse and Explorer packets from Linux psmouse-base.c.
 //! Copyright (c) 1999–2002 Vojtech Pavlik; 2003–2004 Dmitry Torokhov.
-use super::{ErrorKind, Input, Port};
+use super::{ErrorKind, Input, MouseProtocol, Port};
 use alloc::vec::Vec;
 
 #[derive(Default)]
@@ -9,15 +9,15 @@ pub(super) struct Mouse {
     packet: [u8; 4],
     position: usize,
     start: u64,
-    wheel: bool,
+    protocol: MouseProtocol,
     buttons: u8,
 }
 impl Mouse {
-    pub(super) fn wheel(&self) -> bool {
-        self.wheel
+    pub(super) fn protocol(&self) -> MouseProtocol {
+        self.protocol
     }
-    pub(super) fn set_wheel(&mut self, wheel: bool) {
-        self.wheel = wheel;
+    pub(super) fn set_protocol(&mut self, protocol: MouseProtocol) {
+        self.protocol = protocol;
         self.position = 0;
     }
     pub(super) fn expire(&mut self, now: u64, timeout: u64) -> Result<(), ErrorKind> {
@@ -50,13 +50,31 @@ impl Mouse {
             self.position = 0;
             return Err(ErrorKind::DeviceReset(Port::Mouse));
         }
-        let length = if self.wheel { 4 } else { 3 };
+        let length = if self.protocol == MouseProtocol::Standard {
+            3
+        } else {
+            4
+        };
         if self.position != length {
             return Ok(());
         }
         self.position = 0;
         let header = self.packet[0];
-        let buttons = header & 7;
+        let extra = self.packet[3];
+        let (buttons, wheel) = match self.protocol {
+            MouseProtocol::Standard => (header & 7, 0),
+            MouseProtocol::IntelliMouse => (header & 7, -i16::from(extra as i8)),
+            MouseProtocol::Explorer => {
+                // The pinned Linux handler treats mode0 and mode0xc0 as the
+                // ordinary signed-nibble vertical wheel with side/extra keys.
+                // 0x40/0x80 require the separately enabled Explorer4.0 mode.
+                if !matches!(extra & 0xc0, 0 | 0xc0) {
+                    return Err(ErrorKind::MousePacketMode(extra));
+                }
+                let signed = i16::from(extra & 15) - if extra & 8 != 0 { 16 } else { 0 };
+                ((header & 7) | ((extra & 0x30) >> 1), -signed)
+            }
+        };
         if buttons != self.buttons {
             self.buttons = buttons;
             events.push(Input::MouseButtons(buttons));
@@ -76,9 +94,8 @@ impl Mouse {
         if dx != 0 || dy != 0 {
             events.push(Input::Motion { dx, dy });
         }
-        if self.wheel {
-            let wheel = -i16::from(self.packet[3] as i8);
-            // +128 detents cannot fit one Input; retain the exact sum.
+        {
+            // +128 IntelliMouse detents cannot fit one Input; retain the sum.
             if wheel == 128 {
                 events.push(Input::MouseWheel(127));
                 events.push(Input::MouseWheel(1));

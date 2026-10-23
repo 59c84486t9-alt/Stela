@@ -21,7 +21,8 @@ pub enum Input {
     Wheel(i8),
     /// Mouse motion in counts, positive right and down.
     Motion { dx: i16, dy: i16 },
-    /// The mouse's buttons 1..3 held, as bits 0..2.
+    /// Mouse buttons 1..5 held, as bits 0..4: left, right, middle, side,
+    /// extra. Consumers with a narrower descriptor must refuse extra buttons.
     MouseButtons(u8),
     /// Mouse wheel detents, positive away from the user.
     MouseWheel(i8),
