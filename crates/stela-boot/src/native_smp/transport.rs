@@ -269,6 +269,19 @@ unsafe impl NativeTransport for FixedWorkers<'_> {
             );
         }
         self.recovered_rounds = self.recovered_rounds.saturating_add(1);
+        for report in &reports {
+            if report.status.is_err() {
+                crate::output::arguments(format_args!(
+                    "NATIVE FAILURE recovered_rounds={} identity={:?} status={:?} native={:?} memory_fault={:?} source_failure={:?}\n",
+                    self.recovered_rounds,
+                    report.identity,
+                    report.status,
+                    report.native,
+                    report.memory_fault,
+                    report.source_failure,
+                ));
+            }
+        }
         let now = crate::engine::host::rdtsc();
         if now.wrapping_sub(self.progress_reported) >= self.tsc_hz {
             self.progress_reported = now;

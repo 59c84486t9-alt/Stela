@@ -11,6 +11,9 @@ const STR_W11_X12: u32 = 0xb900018b;
 const LDRSW_X3_X2: u32 = 0xb9800043;
 const LDP_X4_X5_X2_POST16: u32 = 0xa8c11444;
 const LDP_X7_X8_X2_POST16: u32 = 0xa8c12047;
+const LDR_Q0_X1: u32 = 0x3dc00020;
+const LD4_V4_V7_X1: u32 = 0x4c400024;
+const TBL_V16_V4_V0: u32 = 0x4e000090;
 const DSB_SY: u32 = 0xd5033f9f;
 const BRANCH_SELF: u32 = 0x14000000;
 const VALUE: u64 = 0x1122334455667788;
@@ -173,6 +176,9 @@ pub(super) unsafe fn check(
     words.push(STR_W11_X12);
     source::constant(&mut words, 9, mcc::DRAIN);
     words.push(LDR_W10_X9);
+    // Exercise one mixed native prefix through the real cold policy, callback
+    // ABI and host recovery entry, rather than only a standalone LD4 body.
+    words.extend_from_slice(&[LDR_Q0_X1, LD4_V4_V7_X1, TBL_V16_V4_V0]);
     source::constant(&mut words, 2, source::READY);
     words.extend_from_slice(&[LDRSW_X3_X2, LDP_X4_X5_X2_POST16, LDP_X7_X8_X2_POST16]);
     let done = source::CODE + words.len() as u64 * 4;
@@ -236,6 +242,26 @@ pub(super) unsafe fn check(
     expected.x[4] = 0xaaaa;
     expected.x[5] = 0xbbbb;
     expected.x[6] = VALUE;
+    expected.v[0] = [VALUE, 0];
+    let mut input = [0; 64];
+    input[..8].copy_from_slice(&VALUE.to_le_bytes());
+    for register in 0..4 {
+        let bytes: [u8; 16] = core::array::from_fn(|lane| input[lane * 4 + register]);
+        expected.v[4 + register] = [
+            u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+            u64::from_le_bytes(bytes[8..].try_into().unwrap()),
+        ];
+    }
+    let table: [u8; 16] = core::array::from_fn(|lane| input[lane * 4]);
+    let indices = [VALUE.to_le_bytes(), [0; 8]].concat();
+    let selected: Vec<u8> = indices
+        .iter()
+        .map(|&index| table.get(index as usize).copied().unwrap_or(0))
+        .collect();
+    expected.v[16] = [
+        u64::from_le_bytes(selected[..8].try_into().unwrap()),
+        u64::from_le_bytes(selected[8..].try_into().unwrap()),
+    ];
     expected.x[7] = 0xcccc;
     expected.x[8] = 0xdddd;
     expected.x[9] = mcc::DRAIN;
