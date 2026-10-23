@@ -4,7 +4,7 @@
 Usage: wifi_data_oracle.py OUTPUT_DIR [VERIFIED_LINUX_CACHE]
 Only the reproducer is committed; donor source, executable and output stay ignored.
 The skb scaffold supplies checked linear storage, not replacement conversion logic.
-GPL-2.0-only donor functions retain their original source notices in THIRD_PARTY.md.
+GPL-2.0-only donor functions retain their original source notices in src/net/wifi/THIRD_PARTY.md.
 """
 
 import hashlib

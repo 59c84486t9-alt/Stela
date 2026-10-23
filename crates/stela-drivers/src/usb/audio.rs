@@ -2,7 +2,7 @@
 //! USB Audio Class 2 PCM, with descriptor-selected clocks and endpoints.
 //! Mixer adaptation retains Copyright (c) 2002 Takashi Iwai; original audio.c
 //! contributions by Alan Cox and Thomas Sailer. UAC2 layout reference retains
-//! Copyright (c) 2010 Daniel Mack. See stela-drivers/THIRD_PARTY.md.
+//! Copyright (c) 2010 Daniel Mack. See audio/THIRD_PARTY.md.
 //! Control/rate/feedback sequencing adapts Linux sound/usb/{clock,format,
 //! endpoint,pcm,mixer}.c at a804c5742bff224d4cb4d25dd383554d598be32b.
 //! Like snd-usb-audio, any UAC2 audio control interface binds by class; its

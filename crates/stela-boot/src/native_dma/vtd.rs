@@ -3,7 +3,7 @@
 // Register definitions and legacy invalidation/context sequencing adapted from
 // Linux drivers/iommu/intel/{iommu.h,iommu.c,dmar.c}, commit
 // a804c5742bff224d4cb4d25dd383554d598be32b. Source hashes and license terms:
-// crates/stela-drivers/THIRD_PARTY.md and LICENSES/GPL-2.0-only.txt.
+// crates/stela-drivers/src/platform/THIRD_PARTY.md and LICENSES/GPL-2.0-only.txt.
 //! Exclusive legacy VT-d unit with distinct owned requester contexts/domains.
 //! Noncoherent table walks use actual CPUID-qualified CLFLUSH plus MFENCE.
 //! This never attaches by guessing a DMAR scope or changes active firmware

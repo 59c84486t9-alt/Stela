@@ -11,7 +11,7 @@
 //! Native Rust adaptation of Linux r8169 at
 //! `a804c5742bff224d4cb4d25dd383554d598be32b`, including its ordered MAC
 //! revision table, analogue PHY sequences and firmware-script instruction set.
-//! See `crates/stela-drivers/THIRD_PARTY.md` and `LICENSES/GPL-2.0-only.txt`.
+//! See `crates/stela-drivers/src/net/THIRD_PARTY.md` and `LICENSES/GPL-2.0-only.txt`.
 //!
 //! This slice implements MAC versions 02..06 (8169S/SB/SC, 8110S/SB/SC),
 //! 17..26 (8168B/C/CP/D, 8111B/C/CP/D), 28/31 (8168DP/8111DP), 32..36 (8168E/E-VL/F,

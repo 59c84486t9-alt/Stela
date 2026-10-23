@@ -28,7 +28,7 @@ helpers = [complete_function(source, name) for name in (
 )]
 scaffold = r'''
 // SPDX-License-Identifier: GPL-2.0-only
-// Full source notices retained in the source ledger and THIRD_PARTY.md.
+// Full source notices retained in the source ledger and src/net/wifi/THIRD_PARTY.md.
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
