@@ -18,7 +18,9 @@ cpp = meson.get_compiler('cpp')
 # subproject's files to the subproject, so those are named through the
 # submodule rather than `subprojects/mesa`.
 mesa_src = third_party / 'mesa/src'
-llvm_include = include_directories(third_party / 'llvm/llvm/include')
+# LLVM's C API headers, with Stela's statement of the build configuration
+# they include.
+llvm_include = include_directories('llvm/include', third_party / 'llvm/llvm/include')
 inc_gpu = include_directories('..')
 foreach name : ['inc_include', 'inc_src', 'idep_mesautil', 'idep_nir',
                 'idep_nir_headers', 'dep_thread', 'dep_dl', 'dep_m', 'prog_python']

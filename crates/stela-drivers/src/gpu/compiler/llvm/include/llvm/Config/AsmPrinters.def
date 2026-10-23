@@ -1,0 +1,6 @@
+/* SPDX-License-Identifier: MIT */
+/* The AIR bridge initializes no LLVM target; see llvm-config.h. */
+#ifndef LLVM_ASM_PRINTER
+#error "define LLVM_ASM_PRINTER before including this file"
+#endif
+#undef LLVM_ASM_PRINTER
