@@ -10,6 +10,8 @@
 #define CONFIG_PRINTK 1
 #define CONFIG_MESSAGE_LOGLEVEL_DEFAULT 4
 #define CONFIG_FW_LOADER 1
+/* Real generic IEEE/CRC32C library; no architecture dispatch. */
+#define CONFIG_CRC32 1
 #define CONFIG_BUG 1
 /* x86's WARN flags; asm/bug.h reports each site without a bug table. */
 #define CONFIG_GENERIC_BUG 1

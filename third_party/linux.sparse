@@ -18,6 +18,10 @@
 /lib/kobject.c
 /lib/kobject_uevent.c
 /lib/ctype.c
+/lib/bitrev.c
+/lib/crc/crc32-main.c
+/lib/crc/gen_crc32table.c
+/lib/crc/Makefile
 /lib/scatterlist*.c
 /lib/Makefile
 /include/

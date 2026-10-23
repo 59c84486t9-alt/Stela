@@ -7,6 +7,10 @@ use std::{
     process::Command,
 };
 
+#[cfg(feature = "linux-kernel")]
+#[path = "linux_crc.rs"]
+mod linux_crc;
+
 /// LP64 COFF with the Win64 calling convention; see `configure`.
 pub const NATIVE_TARGET: &str = "x86_64-pc-cygwin";
 
@@ -76,6 +80,7 @@ pub fn configure() -> cc::Build {
 
 /// The same sources compiled for this machine with sanitizers, for the C test
 /// programs. `None` when Cargo cross-compiles: the programs cannot run then.
+#[cfg(feature = "linux-kernel")]
 pub fn hosted() -> Option<cc::Build> {
     if env::var("TARGET").ok() != env::var("HOST").ok() {
         return None;
@@ -135,6 +140,7 @@ fn rust_archiver() -> PathBuf {
 }
 
 /// A Linux module, as Kbuild names it to the sources it builds.
+#[cfg(feature = "linux-kernel")]
 pub struct Module {
     pub name: &'static str,
     /// The module's path in Linux's tree, without its extension.
@@ -143,6 +149,7 @@ pub struct Module {
 
 /// Stela's Linux environment for unchanged Linux sources, and the kernel-API
 /// in `compat/linux/kernel` that they call, built once for every port.
+#[cfg(feature = "linux-kernel")]
 pub struct Linux {
     /// Kbuild's generated asm wrappers, in `asm/` and `uapi/asm/`.
     wrappers: PathBuf,
@@ -151,11 +158,16 @@ pub struct Linux {
     pub hosted: Vec<PathBuf>,
 }
 
+#[cfg(feature = "linux-kernel")]
 const DRM: &str = "../../third_party/linux/drivers/gpu/drm";
+#[cfg(feature = "linux-kernel")]
 const COMPAT: &str = "src/gpu/compat/linux";
+#[cfg(feature = "linux-kernel")]
 const INCLUDE: &str = "../../third_party/linux/include";
+#[cfg(feature = "linux-kernel")]
 const X86_UAPI: &str = "../../third_party/linux/arch/x86/include/uapi";
 
+#[cfg(feature = "linux-kernel")]
 impl Linux {
     pub fn new() -> Self {
         require_sources();
@@ -189,6 +201,7 @@ impl Linux {
             hosted: Vec::new(),
         };
         let kernel = sources(&format!("{COMPAT}/kernel"));
+        let crc_tables = linux_crc::tables();
         // Unchanged shared helpers use Linux's arithmetic types. Stela's
         // extra conversion diagnostics remain confined to its own source.
         let upstream = [
@@ -200,12 +213,16 @@ impl Linux {
         }
         let mut build = configure();
         linux.apply(&mut build, None, &[], None);
+        let crc_objects = linux_crc::objects(&build, &crc_tables);
+        build.objects(crc_objects);
         linux_archive(&build, "stela-linux", &kernel, &upstream);
         if let Some(host) = hosted() {
             let services = [PathBuf::from(format!("{COMPAT}/stela/test.c"))];
             let services = archive(&host, "linux-host", &services);
             let mut kernel_build = host;
             linux.apply(&mut kernel_build, None, &[], None);
+            let crc_objects = linux_crc::objects(&kernel_build, &crc_tables);
+            kernel_build.objects(crc_objects);
             linux.hosted = vec![
                 linux_archive(&kernel_build, "linux-hosted", &kernel, &upstream),
                 services,
@@ -229,6 +246,7 @@ impl Linux {
             ("linux_cache", "cache.c", "STELA_LINUX_CACHE_TEST"),
             ("linux_params", "params.c", "STELA_LINUX_PARAMS_TEST"),
             ("linux_firmware", "firmware.c", "STELA_LINUX_FIRMWARE_TEST"),
+            ("linux_crc", "crc.c", "STELA_LINUX_CRC_TEST"),
             (
                 "linux_string_helpers",
                 "string_helpers.c",
@@ -333,6 +351,7 @@ impl Linux {
 /// Compile unchanged helpers with the common ABI and baseline diagnostics,
 /// then archive them with the strictly checked owned objects. One archive
 /// preserves dependency resolution between Linux helpers and host services.
+#[cfg(feature = "linux-kernel")]
 fn linux_archive(
     build: &cc::Build,
     name: &str,
@@ -358,6 +377,7 @@ fn linux_archive(
 /// Every header in `compat` adds to Linux's: none stands in for one of
 /// `include/` by sharing its path, so upstream code always compiles against
 /// Linux's own headers. Its `asm/` is Stela's arch, which stands in for x86's.
+#[cfg(feature = "linux-kernel")]
 fn additions(directory: &Path) {
     for entry in fs::read_dir(directory).expect("read the kernel-API directory") {
         let path = entry.expect("readable directory entry").path();
@@ -380,6 +400,7 @@ fn additions(directory: &Path) {
 
 /// Clang reports nothing from system headers, not even a call to a service no
 /// header declares, so check each adapter for those before it links.
+#[cfg(feature = "linux-kernel")]
 pub fn check_declarations(build: &cc::Build, sources: &[PathBuf]) {
     for source in sources {
         run(build
@@ -408,9 +429,11 @@ pub fn sources(directory: &str) -> Vec<PathBuf> {
 }
 
 /// Hosted C test programs, each run by its own Rust test.
+#[cfg(feature = "linux-kernel")]
 #[derive(Default)]
 pub struct Tests(Vec<(String, PathBuf)>);
 
+#[cfg(feature = "linux-kernel")]
 impl Tests {
     /// Link `source` with `archives` into a program named `name`. A source may
     /// include the adapter it tests; the archives supply the others it calls.
@@ -437,6 +460,7 @@ impl Tests {
 }
 
 /// Compile `sources` with `build` into an archive outside Cargo's link line.
+#[cfg(feature = "linux-kernel")]
 pub fn archive(build: &cc::Build, name: &str, sources: &[PathBuf]) -> PathBuf {
     build.clone().files(sources).compile(name);
     out_dir().join(format!("lib{name}.a"))
@@ -446,6 +470,7 @@ pub fn out_dir() -> PathBuf {
     PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"))
 }
 
+#[cfg(feature = "linux-kernel")]
 pub fn run(command: &mut Command) {
     let line = std::iter::once(command.get_program())
         .chain(command.get_args())
