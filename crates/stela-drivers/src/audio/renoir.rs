@@ -25,7 +25,10 @@ pub struct Renoir;
 impl Profile for Renoir {
     const POWER_CONTROL: usize = POWER_CONTROL;
     const POWER_STATUS: usize = POWER_STATUS;
-    const CLOCK: usize = CLOCK;
+    const CLOCK: Option<usize> = Some(CLOCK);
+    const ZSC_CONTROL: Option<usize> = None;
+    const PRESERVE_INITIAL_IRQ_CONTROL: bool = true;
+    const CLEAR_IRQ_CONTROL_ON_DISABLE: bool = false;
     const IRQ_ENABLE: usize = IRQ_ENABLE;
     const IRQ_CONTROL: usize = IRQ_CONTROL;
     const IRQ_STATUS: usize = IRQ_STATUS;

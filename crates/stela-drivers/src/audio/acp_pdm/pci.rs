@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Shared direct-PDM adapter over the canonical stopped PCI function and owned UC mapping.
-//! AMD identity/register facts: Linux sound/soc/amd/{yc,renoir} at
+//! AMD identity/register facts: Linux sound/soc/amd/{yc,renoir,ps} at
 //! a804c5742bff224d4cb4d25dd383554d598be32b.
-//! Copyright (C) 2020, 2021 Advanced Micro Devices, Inc. All rights reserved.
+//! Copyright (C) 2020, 2021, 2022, 2023, 2025 Advanced Micro Devices, Inc. All rights reserved.
 use super::{Error, Identity, Profile, Registers, registers::*};
 use crate::bus::{
     mmio::owned::{CacheAttribute, Mapping, Protection},
@@ -131,11 +131,13 @@ impl<P: Profile> NativeRegisters<P> {
     /// shutdown and removed DMA. Failure retains this register provider intact.
     pub fn into_stopped_resources(mut self) -> Result<(Function<OwnedConfig>, Mapping), Self> {
         if self.associated().is_err()
+            || P::exclusive(&mut self).is_err()
             || self.master != Some(false)
             || self.read32(DMA_ENABLE) != 0
             || self.read32(PDM_ENABLE) != 0
             || self.read32(PAGE_BASE) & GROUP_ENABLE != 0
-            || self.read32(CONTROL) != 0
+            || !P::parked_control(self.read32(CONTROL))
+            || P::ZSC_CONTROL.is_some_and(|offset| self.read32(offset) != 1)
         {
             return Err(self);
         }

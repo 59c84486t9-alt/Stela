@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Shared owned direct-PDM PCM, deadline and DMA lifecycle. Hardware profiles
 //! retain their own source admission and actual register facts. Adapted from
-//! AMD Linux yc (2021) and renoir (2020), at
+//! AMD Linux yc (2021), renoir (2020) and ps (2022/2025), at
 //! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
-//! Copyright (C) 2020, 2021 Advanced Micro Devices, Inc.
+//! Copyright (C) 2020, 2021, 2022, 2023, 2025 Advanced Micro Devices, Inc.
 use alloc::sync::Arc;
 use core::sync::atomic::{Ordering, fence};
 
@@ -28,7 +28,7 @@ pub const CAPTURE_FORMAT: PcmFormat = PcmFormat {
 const PAGE_BYTES: usize = 4096;
 const FRAME_BYTES: usize = 8;
 const DMA_TIMEOUT_US: u64 = 100_000;
-const POWER_TIMEOUT_US: u64 = 500;
+const DEFAULT_POWER_TIMEOUT_US: u64 = 500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
@@ -36,12 +36,33 @@ pub struct Identity {
     pub device: u16,
     pub revision: u8,
 }
-/// Sealed hardware profile. Only the two source-reviewed direct PDM variants
+/// Sealed hardware profile. Only source-reviewed direct PDM variants
 /// implement this interface; a matching PCI ID never selects register behavior.
 pub trait Profile {
     const POWER_CONTROL: usize;
+    const POWER_TIMEOUT_US: u64 = DEFAULT_POWER_TIMEOUT_US;
+    /// Source PGFSM request policy; some generations must request even while
+    /// low bits report transition-to-on.
+    const POWER_ON_REQUEST: u32 = registers::POWER_ON_REQUEST;
+    fn power_on_request(status: u32) -> bool {
+        status & POWER_STATE_MASK != POWER_ON_IN_PROGRESS
+    }
+    /// Dedicated ACP70 keeps CONTROL asserted when parking ZSC.
+    const CLEAR_CONTROL_ON_QUIET: bool = true;
+    fn parked_control(control: u32) -> bool {
+        control == 0
+    }
+    const ZSC_BEFORE_INTERRUPTS: bool = false;
+    const PME_ENABLE: Option<usize> = None;
+    /// Extra actual engine exclusion checks, not inferred from a profile ID.
+    fn exclusive<R: Registers>(_: &mut R) -> Result<(), Error> {
+        Ok(())
+    }
     const POWER_STATUS: usize;
-    const CLOCK: usize;
+    const CLOCK: Option<usize>;
+    const ZSC_CONTROL: Option<usize>;
+    const PRESERVE_INITIAL_IRQ_CONTROL: bool;
+    const CLEAR_IRQ_CONTROL_ON_DISABLE: bool;
     const IRQ_ENABLE: usize;
     const IRQ_CONTROL: usize;
     const IRQ_STATUS: usize;
@@ -293,14 +314,32 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
     }
     fn live(&mut self) -> Result<(), Error> {
         self.pci_authority()?;
+        P::exclusive(&mut self.registers)?;
         let observed_pin_mode = P::pin_mode(&mut self.registers)?;
         if self.pin_mode != observed_pin_mode
             || self.read(P::POWER_STATUS)? != 0
             || self.read(CONTROL)? != 1
-            || self.read(P::CLOCK)? != 3
-            || self.read(P::IRQ_ENABLE)? != 1
+        {
+            return Err(Error::AuthorityChanged);
+        }
+        if let Some(clock) = P::CLOCK
+            && self.read(clock)? != 3
+        {
+            return Err(Error::AuthorityChanged);
+        }
+        if self.read(P::IRQ_ENABLE)? != 1
             || (P::ERROR_ENABLE != 0
                 && self.read(P::IRQ_CONTROL)? & P::ERROR_ENABLE != P::ERROR_ENABLE)
+        {
+            return Err(Error::AuthorityChanged);
+        }
+        if let Some(zsc) = P::ZSC_CONTROL
+            && self.read(zsc)? != 0
+        {
+            return Err(Error::AuthorityChanged);
+        }
+        if let Some(pme) = P::PME_ENABLE
+            && self.read(pme)? != 1
         {
             return Err(Error::AuthorityChanged);
         }
@@ -329,12 +368,12 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         result
     }
     fn soft_reset(&mut self) -> Result<(), Error> {
-        let assert = self.deadline(Phase::ResetAssert, POWER_TIMEOUT_US);
+        let assert = self.deadline(Phase::ResetAssert, P::POWER_TIMEOUT_US);
         self.phase_write(RESET, 1, assert)?;
         // The source accepts either bit of 0x10001, not bit16 alone. Require
         // its actual observed handshake and a bounded complete clear.
         self.wait(RESET, assert, |value| value & RESET_ACK != 0)?;
-        let clear = self.deadline(Phase::ResetClear, POWER_TIMEOUT_US);
+        let clear = self.deadline(Phase::ResetClear, P::POWER_TIMEOUT_US);
         self.phase_write(RESET, 0, clear)?;
         self.wait(RESET, clear, |value| value == 0)?;
         self.phase_expect(DMA_ENABLE, 0, clear)?;
@@ -358,33 +397,51 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         self.finish(result)
     }
     fn initialize_inner(&mut self) -> Result<(), Error> {
-        let deadline = self.deadline(Phase::PowerOn, POWER_TIMEOUT_US);
+        P::exclusive(&mut self.registers)?;
+        let deadline = self.deadline(Phase::PowerOn, P::POWER_TIMEOUT_US);
         let power = self.phase_read(P::POWER_STATUS, deadline)?;
         if power != 0 {
-            if power & POWER_STATE_MASK != POWER_ON_IN_PROGRESS {
-                self.phase_write(P::POWER_CONTROL, POWER_ON_REQUEST, deadline)?;
+            if P::power_on_request(power) {
+                self.phase_write(P::POWER_CONTROL, P::POWER_ON_REQUEST, deadline)?;
             }
             self.wait(P::POWER_STATUS, deadline, |value| value == 0)?;
         }
         self.write_checked(CONTROL, 1)?;
         self.soft_reset()?;
-        self.write_checked(P::CLOCK, 3)?;
+        if let Some(clock) = P::CLOCK {
+            self.write_checked(clock, 3)?;
+        }
         self.write_checked(PAGE_BASE, 0)?;
         self.registers.set_bus_master(false)?;
         // Admit the actual completion service while the reset-acknowledged
         // engine is quiet, before exposing even the first capture mapping.
         self.drain_stopped_domain()?;
+        if P::ZSC_BEFORE_INTERRUPTS {
+            self.write_checked(P::ZSC_CONTROL.ok_or(Error::InvalidConfiguration)?, 0)?;
+        }
         if P::ERROR_ENABLE == 0 {
             self.write_checked(P::IRQ_CONTROL, 0)?;
             self.registers.write32(P::IRQ_STATUS, u32::MAX);
             self.write_checked(P::IRQ_ENABLE, 1)?;
         } else {
-            // Renoir source enables the external gate before preserving the
-            // existing control word and setting its error-enable bit. Its
-            // pending status is not implicitly discarded by initialization.
+            // Both later sources enable the external gate before control.
+            // Renoir preserves existing control bits; dedicated ACP63 writes
+            // the source's exact error mask. Pending status is retained.
             self.write_checked(P::IRQ_ENABLE, 1)?;
-            let control = self.read(P::IRQ_CONTROL)?;
+            let control = if P::PRESERVE_INITIAL_IRQ_CONTROL {
+                self.read(P::IRQ_CONTROL)?
+            } else {
+                0
+            };
             self.write_checked(P::IRQ_CONTROL, control | P::ERROR_ENABLE)?;
+        }
+        if !P::ZSC_BEFORE_INTERRUPTS
+            && let Some(zsc) = P::ZSC_CONTROL
+        {
+            self.write_checked(zsc, 0)?;
+        }
+        if let Some(pme) = P::PME_ENABLE {
+            self.write_checked(pme, 1)?;
         }
         let mode = P::pin_mode(&mut self.registers)?;
         P::validate_pin(mode, self.identity)?;
@@ -791,6 +848,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
     }
     fn stop_inner(&mut self) -> Result<(), Error> {
         self.pci_authority()?;
+        P::exclusive(&mut self.registers)?;
         let deadline = self.deadline(Phase::DmaStop, DMA_TIMEOUT_US);
         if self.phase_read(DMA_ENABLE, deadline)? & (DMA_REQUEST | DMA_ACTIVE) != 0 {
             self.phase_write(DMA_ENABLE, DMA_ACTIVE, deadline)?;
@@ -837,10 +895,9 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         self.write_checked(PAGE_BASE, 0)?;
         self.registers.set_bus_master(false)?;
         self.drain_stopped_domain()?;
-        self.write_checked(P::CLOCK, 0)?;
-        self.write_checked(CONTROL, 0)?;
+        self.quiet_block()?;
         if power_gate {
-            let deadline = self.deadline(Phase::PowerOff, POWER_TIMEOUT_US);
+            let deadline = self.deadline(Phase::PowerOff, P::POWER_TIMEOUT_US);
             self.phase_write(P::POWER_CONTROL, POWER_OFF_REQUEST, deadline)?;
             self.wait(P::POWER_STATUS, deadline, |value| {
                 value & POWER_STATE_MASK == POWERED_OFF
@@ -895,7 +952,24 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
             // Renoir source quiets pending status before disabling the gate;
             // stop already removed the period bit without losing error policy.
             self.registers.write32(P::IRQ_STATUS, u32::MAX);
+            if P::CLEAR_IRQ_CONTROL_ON_DISABLE {
+                self.write_checked(P::IRQ_CONTROL, 0)?;
+            }
             self.write_checked(P::IRQ_ENABLE, 0)?;
+        }
+        Ok(())
+    }
+    fn quiet_block(&mut self) -> Result<(), Error> {
+        if let Some(clock) = P::CLOCK {
+            self.write_checked(clock, 0)?;
+        }
+        if P::CLEAR_CONTROL_ON_QUIET {
+            self.write_checked(CONTROL, 0)?;
+        } else if !P::parked_control(self.read(CONTROL)?) {
+            return Err(Error::AuthorityChanged);
+        }
+        if let Some(zsc) = P::ZSC_CONTROL {
+            self.write_checked(zsc, 1)?;
         }
         Ok(())
     }
@@ -925,8 +999,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         self.write_checked(PAGE_BASE, 0)?;
         self.registers.set_bus_master(false)?;
         self.release_capture()?;
-        self.write_checked(P::CLOCK, 0)?;
-        self.write_checked(CONTROL, 0)
+        self.quiet_block()
     }
     /// Callers must first observe engine stop/PDM disable or actual reset,
     /// while preserving the requester, root, domain and every target mapping.
@@ -991,7 +1064,7 @@ pub(super) fn check_dma_range(
 
 /// Assertions over independent model write traces, not a translation-cache
 /// implementation or a cache-completion/ACK model. Source addresses and order
-/// below come from the pinned YC/Renoir DMA configuration and ring helpers.
+/// below come from the pinned YC/Renoir/PS DMA configuration and ring helpers.
 #[cfg(test)]
 pub(super) mod trace_assertions {
     use alloc::vec::Vec;

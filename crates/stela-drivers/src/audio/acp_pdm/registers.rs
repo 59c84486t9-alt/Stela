@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Register facts common to the pinned Renoir/Yellow Carp direct PDM blocks.
-//! Copyright (C) 2020, 2021, 2023 Advanced Micro Devices, Inc.
+//! Register facts common to the pinned Renoir/Yellow Carp/ACP63/ACP70 direct PDM blocks.
+//! Copyright (C) 2020, 2021, 2022, 2023, 2025 Advanced Micro Devices, Inc.
 use super::{Error, Identity};
 // BAR-relative offsets. The source's 0x1240000 is a register namespace base,
 // not the PCI BAR or the host DMA address.
