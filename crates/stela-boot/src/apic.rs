@@ -31,11 +31,34 @@ const SIPI_WAIT_US: u64 = 200;
 const DELIVERY_WAIT_US: u64 = 10_000;
 const MICROSECONDS_PER_SECOND: u64 = 1_000_000;
 
+fn init_destination(destination: u32, bsp: u32, x2: bool, tsc_hz: u64) -> Result<(), StartupError> {
+    if tsc_hz == 0
+        || tsc_hz
+            .div_ceil(MICROSECONDS_PER_SECOND)
+            .checked_mul(INIT_WAIT_US)
+            .is_none()
+    {
+        return Err(StartupError::ClockUnavailable);
+    }
+    if destination == bsp {
+        return Err(StartupError::BootstrapDestination);
+    }
+    if !x2 && destination > u32::from(u8::MAX) {
+        return Err(StartupError::DestinationTooWide);
+    }
+    // Physical destination all-ones is broadcast, never one owned logical AP.
+    if destination == if x2 { u32::MAX } else { u32::from(u8::MAX) } {
+        return Err(StartupError::BroadcastDestination);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartupError {
     ClockUnavailable,
     DestinationTooWide,
     BootstrapDestination,
+    BroadcastDestination,
     InvalidVector,
     DeliveryTimeout,
 }
@@ -158,6 +181,41 @@ impl Apic {
         self.wait_delivery(tsc_hz)
     }
 
+    pub(crate) fn validate_init(&self, destination: u32, tsc_hz: u64) -> Result<(), StartupError> {
+        init_destination(destination, self.id(), self.x2, tsc_hz)
+    }
+
+    fn wait_microseconds(&self, microseconds: u64, tsc_hz: u64) {
+        let started = rdtsc();
+        // INIT destination validation bounds this multiplication; SIPI's wait
+        // is smaller. No firmware timer or callback survives into this path.
+        let ticks = tsc_hz.div_ceil(MICROSECONDS_PER_SECOND) * microseconds;
+        while rdtsc().wrapping_sub(started) < ticks {
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Directed INIT without SIPI. Intel SDM3A, "Local APIC State After an
+    /// INIT Reset (Wait-for-SIPI State)": an AP receiving INIT initializes and
+    /// waits for startup. No firmware idle loop or private AP stack is needed.
+    /// ICR completion plus the architectural 10 ms settling interval reports
+    /// delivery only, not an independently observed destination acknowledgement.
+    ///
+    /// # Safety
+    /// Post-EBS BSP, exclusive local ICR with IF clear; the caller owns this
+    /// validated enabled logical AP. Firmware code must not resume afterward;
+    /// any later SIPI belongs to a separate complete owned startup sequence.
+    pub(crate) unsafe fn init_only(
+        &self,
+        destination: u32,
+        tsc_hz: u64,
+    ) -> Result<(), StartupError> {
+        self.validate_init(destination, tsc_hz)?;
+        self.send(destination, ICR_INIT | ICR_LEVEL_ASSERT, tsc_hz)?;
+        self.wait_microseconds(INIT_WAIT_US, tsc_hz);
+        Ok(())
+    }
+
     /// Start one enabled AP at its owned SIPI page after ExitBootServices.
     /// Intel SDM Vol. 3A, multiprocessor initialization: directed INIT,
     /// 10 ms, STARTUP, 200 us, second STARTUP for integrated local APICs.
@@ -174,34 +232,14 @@ impl Apic {
         vector: u8,
         tsc_hz: u64,
     ) -> Result<(), StartupError> {
-        if tsc_hz == 0
-            || tsc_hz
-                .div_ceil(MICROSECONDS_PER_SECOND)
-                .checked_mul(INIT_WAIT_US)
-                .is_none()
-        {
-            return Err(StartupError::ClockUnavailable);
-        }
-        if destination == self.id() {
-            return Err(StartupError::BootstrapDestination);
-        }
-        if !self.x2 && destination > u32::from(u8::MAX) {
-            return Err(StartupError::DestinationTooWide);
-        }
+        self.validate_init(destination, tsc_hz)?;
         if vector == 0 {
             return Err(StartupError::InvalidVector);
         }
         self.send(destination, ICR_INIT | ICR_LEVEL_ASSERT, tsc_hz)?;
-        let wait = |microseconds| {
-            let started = rdtsc();
-            let ticks = tsc_hz.div_ceil(MICROSECONDS_PER_SECOND) * microseconds;
-            while rdtsc().wrapping_sub(started) < ticks {
-                core::hint::spin_loop();
-            }
-        };
-        wait(INIT_WAIT_US);
+        self.wait_microseconds(INIT_WAIT_US, tsc_hz);
         self.send(destination, ICR_STARTUP | u32::from(vector), tsc_hz)?;
-        wait(SIPI_WAIT_US);
+        self.wait_microseconds(SIPI_WAIT_US, tsc_hz);
         self.send(destination, ICR_STARTUP | u32::from(vector), tsc_hz)
     }
 
@@ -247,5 +285,39 @@ impl Apic {
         let tsc = rdtsc() - start;
         self.write(INITIAL, 0);
         (u128::from(elapsed) * u128::from(tsc_hz) / u128::from(tsc.max(1))) as u64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directed_init_excludes_bsp_and_broadcast_for_both_apic_modes() {
+        for x2 in [false, true] {
+            for bsp in [0, 7, 254] {
+                assert_eq!(
+                    init_destination(bsp, bsp, x2, 4_700_000_000),
+                    Err(StartupError::BootstrapDestination)
+                );
+            }
+            assert_eq!(init_destination(0, 7, x2, 1), Ok(()));
+            assert_eq!(init_destination(254, 7, x2, 4_700_000_000), Ok(()));
+            assert_eq!(
+                init_destination(if x2 { u32::MAX } else { 255 }, 7, x2, 1),
+                Err(StartupError::BroadcastDestination)
+            );
+            assert_eq!(
+                init_destination(3, 7, x2, 0),
+                Err(StartupError::ClockUnavailable)
+            );
+        }
+        assert_eq!(
+            init_destination(256, 7, false, 1),
+            Err(StartupError::DestinationTooWide)
+        );
+        assert_eq!(init_destination(256, 7, true, 1), Ok(()));
+        assert_eq!(init_destination(255, 7, true, 1), Ok(()));
+        assert_eq!(init_destination(u32::MAX - 1, 7, true, 1), Ok(()));
     }
 }

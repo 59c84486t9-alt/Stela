@@ -31,6 +31,12 @@ pub(crate) enum StartupFailure {
         cause: bootstrap::EarlyFault,
     },
     Delivery(apic::StartupError),
+    FirmwareTopology(topology::Refusal),
+    FirmwareInit {
+        processor_number: u32,
+        apic_id: u64,
+        cause: apic::StartupError,
+    },
     Timeout {
         slot: usize,
     },
@@ -246,6 +252,87 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
     }
 }
 
+/// Remove every enabled firmware AP from its idle code before reclaiming boot
+/// services RAM, including APs that will later receive owned startup/SIPI.
+/// No AP stack, callback, heap allocation or execution acknowledgement is used.
+/// Intel SDM3A, "Local APIC State After an INIT Reset (Wait-for-SIPI State)";
+/// UEFI PI MP Services' firmware idle state is not a Stela-owned executor.
+///
+/// # Safety
+/// Run immediately after EBS and before reusing any firmware boot-services RAM,
+/// on the captured BSP with IF clear and exclusive access to its local ICR.
+/// `capture` is the immutable loader-owned copy, validated before EBS. `sender`
+/// addresses the live local APIC (identity UC mapping or x2APIC), and `tsc_hz`
+/// is the calibrated source clock. No firmware call may follow. Keep all AP
+/// resources retained on delivery failure; no uncertain AP is admitted here.
+pub(crate) unsafe fn quiesce_firmware_aps(
+    capture: &firmware::Capture,
+    sender: &Apic,
+    tsc_hz: u64,
+) -> Result<usize, StartupFailure> {
+    let source = capture
+        .processors
+        .get(..capture.processor_count as usize)
+        .ok_or(StartupFailure::Resources)?;
+    let selected = capture
+        .selected
+        .get(..capture.core_count as usize)
+        .filter(|selected| !selected.is_empty())
+        .ok_or(StartupFailure::Resources)?;
+    // Validate the entire captured assignment before exposing any target. Only
+    // the BSP is excluded from INIT at this boundary; selected APs still use
+    // firmware idle code until their later owned INIT/SIPI sequence.
+    let _validated =
+        topology::enabled_unselected(source, selected).map_err(StartupFailure::FirmwareTopology)?;
+    let targets = topology::enabled_unselected(source, &selected[..1])
+        .map_err(StartupFailure::FirmwareTopology)?;
+    if source[selected[0] as usize].apic_id != u64::from(sender.id()) {
+        return Err(StartupFailure::Bootstrap(
+            "firmware BSP differs from the live local APIC",
+        ));
+    }
+    if tsc_hz == 0 {
+        return Err(StartupFailure::Delivery(
+            apic::StartupError::ClockUnavailable,
+        ));
+    }
+    // Validate every destination before sending the first INIT: a wide xAPIC
+    // target, duplicate source identity or malformed assignment fails closed.
+    let destination = |index: usize| -> Result<u32, StartupFailure> {
+        let processor = source[index];
+        let failure = |cause| StartupFailure::FirmwareInit {
+            processor_number: processor.processor_number,
+            apic_id: processor.apic_id,
+            cause,
+        };
+        let id = u32::try_from(processor.apic_id)
+            .map_err(|_| failure(apic::StartupError::DestinationTooWide))?;
+        sender.validate_init(id, tsc_hz).map_err(failure)?;
+        Ok(id)
+    };
+    for index in targets.clone() {
+        destination(index)?;
+    }
+    let mut delivered = 0;
+    for index in targets {
+        let processor = source[index];
+        let id = destination(index)?;
+        // SAFETY: source identity, actual BSP exclusion, full destination set
+        // and source clock were checked before any effect. No SIPI is sent.
+        unsafe { sender.init_only(id, tsc_hz) }.map_err(|cause| StartupFailure::FirmwareInit {
+            processor_number: processor.processor_number,
+            apic_id: processor.apic_id,
+            cause,
+        })?;
+        delivered += 1;
+        crate::output::arguments(format_args!(
+            "NATIVE FIRMWARE INIT delivered apic={id:#x} firmware_cpu={} destination_ack=unobserved\n",
+            processor.processor_number,
+        ));
+    }
+    Ok(delivered)
+}
+
 /// Start the selected physical APs using Stela-owned resources after EBS.
 ///
 /// # Safety
@@ -253,6 +340,8 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
 /// installed. The immutable loader capture and every reserved stack/root/code/
 /// pool/bounce/physmap mapping stay pinned through this boot. RAM ranges remain
 /// owned and immutable as metadata. The caller already called native_smp::validate.
+/// The post-EBS loader already called quiesce_firmware_aps before reclaiming
+/// firmware boot-services RAM; INIT delivery is not an AP READY observation.
 /// No native guest execution is admitted merely by returning this startup set.
 pub(crate) unsafe fn start(
     handoff: &'static Handoff,

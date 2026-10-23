@@ -23,6 +23,10 @@ mod boot_entropy;
 #[path = "../../crates/stela-boot/src/engine/bundle/live_tree.rs"]
 mod boot_live_tree;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/apic.rs"]
+#[allow(dead_code)] // Only pure directed-INIT admission tests execute hosted.
+mod boot_native_apic;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_smp/canonical/bindings.rs"]
 mod boot_native_bindings;
 #[cfg(test)]

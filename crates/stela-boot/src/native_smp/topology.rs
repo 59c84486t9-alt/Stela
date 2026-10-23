@@ -251,11 +251,10 @@ pub enum Refusal {
     DuplicateApicId,
     DuplicateThreadLocation,
     MixedTopologyVersions,
+    InvalidAssignment,
 }
 
-/// Return original processor indices, BSP first, without renumbering their
-/// firmware identity. No AP is started and no capability is inferred here.
-pub fn select(processors: &[Processor]) -> Result<Vec<usize>, Refusal> {
+fn bootstrap_index(processors: &[Processor]) -> Result<usize, Refusal> {
     if processors.len() > MAX_PROCESSORS {
         return Err(Refusal::Capacity);
     }
@@ -287,7 +286,13 @@ pub fn select(processors: &[Processor]) -> Result<Vec<usize>, Refusal> {
             }
         }
     }
-    let bsp = bsp.ok_or(Refusal::NoBootstrapProcessor)?;
+    bsp.ok_or(Refusal::NoBootstrapProcessor)
+}
+
+/// Return original processor indices, BSP first, without renumbering their
+/// firmware identity. No AP is started and no capability is inferred here.
+pub fn select(processors: &[Processor]) -> Result<Vec<usize>, Refusal> {
+    let bsp = bootstrap_index(processors)?;
     let mut selected = alloc::vec![bsp];
     // Prefer the lowest original thread/processor number on each other core.
     // The BSP owns its own physical core even when its thread number is nonzero.
@@ -316,6 +321,39 @@ pub fn select(processors: &[Processor]) -> Result<Vec<usize>, Refusal> {
         selected.push(index);
     }
     Ok(selected)
+}
+
+/// Enabled logical processors outside the actual requested physical roster.
+/// Unlike admission, this includes enabled unhealthy APs: health does not prove
+/// that their firmware execution has stopped. Disabled processors stay disabled.
+/// No allocation or firmware access is needed at the post-EBS boundary.
+pub(crate) fn enabled_unselected<'a>(
+    processors: &'a [Processor],
+    selected: &'a [u32],
+) -> Result<impl Iterator<Item = usize> + Clone + 'a, Refusal> {
+    let bsp = bootstrap_index(processors)?;
+    if selected.is_empty() || selected.len() > MAX_CORES || selected[0] as usize != bsp {
+        return Err(Refusal::InvalidAssignment);
+    }
+    for (slot, &index) in selected.iter().enumerate() {
+        let processor = processors
+            .get(index as usize)
+            .filter(|processor| processor.available())
+            .ok_or(Refusal::InvalidAssignment)?;
+        if selected[..slot]
+            .iter()
+            .any(|&previous| processors[previous as usize].location == processor.location)
+        {
+            return Err(Refusal::InvalidAssignment);
+        }
+    }
+    Ok(processors
+        .iter()
+        .enumerate()
+        .filter(move |(index, processor)| {
+            processor.flags & ENABLED != 0 && !selected.contains(&(*index as u32))
+        })
+        .map(|(index, _)| index))
 }
 
 #[cfg(test)]
@@ -366,6 +404,62 @@ mod tests {
         cores[4].location.package = 0;
         cores[4].location.die = 1;
         assert_eq!(select(&cores), Ok(alloc::vec![0, 3, 4]));
+    }
+
+    #[test]
+    fn unselected_enabled_threads_and_unrequested_cores_need_init_without_identity_assumptions() {
+        let mut source = [
+            processor(41, 3, 9, 0),
+            processor(77, 3, 9, 3),
+            processor(12, 3, 2, 0),
+            processor(93, 3, 2, 1),
+            processor(3, 6, 1, 0),
+            processor(66, 6, 1, 1),
+            processor(51, 6, 8, 0),
+            processor(24, 6, 8, 1),
+        ];
+        source[1].flags |= BSP; // BSP is neither first nor thread zero.
+        source[6].flags = HEALTHY; // disabled: no INIT target
+        source[7].flags = ENABLED; // unhealthy but still enabled: INIT target
+        let all = select(&source).unwrap();
+        assert_eq!(all, [1, 2, 4]);
+        for requested in 1..=all.len() {
+            let selected: Vec<_> = all[..requested].iter().map(|&index| index as u32).collect();
+            let actual: Vec<_> = enabled_unselected(&source, &selected).unwrap().collect();
+            let expected: Vec<_> = (0..source.len())
+                .filter(|index| *index != 6 && !all[..requested].contains(index))
+                .collect();
+            assert_eq!(actual, expected);
+            assert!(actual.contains(&0)); // BSP's enabled sibling
+            assert!(actual.contains(&7)); // enabled, unhealthy AP
+            assert!(!actual.contains(&1)); // never INIT the BSP
+        }
+    }
+
+    #[test]
+    fn malformed_quiescence_assignment_refuses_before_any_targets_are_exposed() {
+        let mut source = [
+            processor(9, 0, 0, 0),
+            processor(5, 0, 0, 1),
+            processor(3, 0, 1, 0),
+        ];
+        source[0].flags |= BSP;
+        for selected in [&[][..], &[1][..], &[0, 0][..], &[0, 1][..], &[0, 3][..]] {
+            assert!(matches!(
+                enabled_unselected(&source, selected),
+                Err(Refusal::InvalidAssignment)
+            ));
+        }
+        source[2].flags = ENABLED;
+        assert!(matches!(
+            enabled_unselected(&source, &[0, 2]),
+            Err(Refusal::InvalidAssignment)
+        ));
+        source[2].apic_id = source[0].apic_id;
+        assert!(matches!(
+            enabled_unselected(&source, &[0]),
+            Err(Refusal::DuplicateApicId)
+        ));
     }
 
     #[test]
