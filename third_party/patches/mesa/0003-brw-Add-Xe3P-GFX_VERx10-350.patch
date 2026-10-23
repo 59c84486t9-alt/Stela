@@ -1,8 +1,17 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH] intel/compiler: map Xe3p in gfx_ver_from_devinfo
+From: Jordan Justen <jordan.l.justen@intel.com>
+Date: Fri, 16 Aug 2024 11:51:18 -0700
+Subject: [PATCH] brw: Add Xe3P (GFX_VERx10 == 350)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
+Signed-off-by: Jordan Justen <jordan.l.justen@intel.com>
+Reviewed-by: José Roberto de Souza <jose.souza@intel.com>
+Reviewed-by: Lionel Landwerlin <lionel.g.landwerlin@intel.com>
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/43926>
+
+(cherry picked from commit f75a2bd862304b97b85a615c782a66033b333b6c)
 ---
  src/intel/compiler/intel_gfx_ver_enum.h | 2 ++
  1 file changed, 2 insertions(+)
