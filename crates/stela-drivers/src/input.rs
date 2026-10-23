@@ -3,6 +3,7 @@
 //! [`usb::hid`](crate::usb::hid).
 pub mod hid_i2c;
 pub mod ps2;
+pub mod rmi;
 pub mod virtio;
 
 /// The largest absolute pointer coordinate on either axis.
