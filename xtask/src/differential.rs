@@ -1303,7 +1303,7 @@ fn retain_structure_fault(report: &mut Report, index: usize, form: &str, case: &
         }).collect();
     use std::fmt::Write as _;
     let mut initial_hex = String::with_capacity(DATA_BYTES * 2);
-    for byte in &case.data {
+    for byte in case.data.iter() {
         write!(initial_hex, "{byte:02x}")?;
     }
     let record = serde_json::json!({
