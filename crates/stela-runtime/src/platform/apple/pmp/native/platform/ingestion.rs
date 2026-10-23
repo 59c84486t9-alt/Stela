@@ -9,6 +9,7 @@
 //! remain separate owners. Provider and auxiliary operations have no default
 //! success implementation; their actual owners retain any inner partial work.
 mod arithmetic;
+pub mod control;
 mod model;
 use super::super::counters::{Copied, Frame, Frames, Retained};
 use super::owner::{Completion, CounterContext, EffectValue};
