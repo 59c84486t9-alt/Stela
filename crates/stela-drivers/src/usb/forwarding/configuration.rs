@@ -123,6 +123,12 @@ impl Device {
             .ok_or(BlockError::Unsupported("unknown USB alternate setting"))?
             .endpoints
             .clone();
+        let single_alternate = configuration
+            .interfaces
+            .iter()
+            .filter(|i| i.number == number)
+            .count()
+            == 1;
         let old_alternate = self.settings.iter().find(|s| s.0 == number).unwrap().1;
         let addresses: Vec<_> = configuration
             .interfaces
@@ -149,12 +155,37 @@ impl Device {
                 ),
                 &[],
             );
-        if let Err(error) = result {
+        // USB 9.4.10 permits STALL when only one setting exists. Follow
+        // usb_set_interface's manual fallback: that same setting remains active,
+        // then reset each non-ISO endpoint through actual CLEAR_FEATURE ACKs.
+        let manual = matches!(
+            result,
+            Err(BlockError::Device {
+                status: xhci::STALL
+            })
+        ) && single_alternate;
+        if let Err(error) = result
+            && !manual
+        {
             self.fenced = true;
             return Err(error);
         }
         self.settings = settings;
-        self.install(&endpoints, dma)
+        self.install(&endpoints, dma)?;
+        if manual {
+            for endpoint in endpoints.iter().filter(|ep| ep.kind() != 1) {
+                let result = self
+                    .controller
+                    .borrow_mut()
+                    .device(self.physical.id)?
+                    .clear(endpoint);
+                if let Err(error) = result {
+                    self.fenced = true;
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Allocate checked primary streams on actual advertised bulk endpoints.

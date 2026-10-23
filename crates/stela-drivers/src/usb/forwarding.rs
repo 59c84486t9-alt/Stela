@@ -234,7 +234,13 @@ mod tests {
         ]
     }
     fn owner(dma: &mut dyn DmaAllocator) -> (Device, Rc<RefCell<model::CancelModel>>) {
-        let configurations = vec![configuration()];
+        owner_with_configuration(dma, configuration())
+    }
+    fn owner_with_configuration(
+        dma: &mut dyn DmaAllocator,
+        bytes: Vec<u8>,
+    ) -> (Device, Rc<RefCell<model::CancelModel>>) {
+        let configurations = vec![bytes];
         let (controller, model) =
             model::unconfigured_cancellation_controller_with_configurations(dma, &configurations);
         let mut physical = model::device(configurations);
@@ -350,5 +356,26 @@ mod tests {
         );
         assert!(owner.submit(0x81, 1, 16, &[]).is_err());
         assert!(owner.submit(2, 0, 2, &[1]).is_err());
+    }
+    #[test]
+    fn single_alternate_stall_uses_real_endpoint_clear_requests() {
+        let mut memory = vec![0u64; 512 * 1024];
+        let start = memory.as_mut_ptr() as u64;
+        // SAFETY: exclusive fixture RAM remains live through all native ACKs.
+        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let mut bytes = configuration();
+        bytes.truncate(32);
+        bytes[2] = 32;
+        bytes[4] = 1;
+        let (mut owner, model) = owner_with_configuration(&mut dma, bytes);
+        owner.configure(19, &mut dma).unwrap();
+        model.borrow_mut().stall_control = Some(xhci::SET_INTERFACE);
+        owner.set_interface(3, 0, &mut dma).unwrap();
+        assert!(!owner.fenced());
+        for endpoint in [0x81, 2] {
+            assert!(model.borrow().setup.iter().any(
+                |(request, _)| *request == xhci::setup(2, xhci::CLEAR_FEATURE, 0, endpoint, 0)
+            ));
+        }
     }
 }
