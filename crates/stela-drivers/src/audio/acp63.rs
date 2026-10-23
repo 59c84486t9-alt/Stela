@@ -439,10 +439,12 @@ mod tests {
                     } else {
                         1
                     };
-                    if value == on && !self.power_never {
+                    assert_eq!(value, on, "dedicated ACP63 has no source PGFSM-off request");
+                    // Request acceptance and eventual completion are separate:
+                    // the pinned power-on path must tolerate a valid command
+                    // whose PGFSM status never reaches powered-on.
+                    if !self.power_never {
                         self.words[0x1028 / 4] = 0;
-                    } else {
-                        panic!("dedicated ACP63 has no source PGFSM-off request");
                     }
                 }
                 0x1000 => {
@@ -818,6 +820,39 @@ mod tests {
     }
 
     #[test]
+    fn peer_power_request_validation_is_independent_of_completion() {
+        for revision in [0x63, 0x70, 0x71, 0x72] {
+            let on = if revision == 0x63 { 1 } else { 0x1f };
+            for stalled in [false, true] {
+                let mut device = Device::new(revision);
+                device.power_never = stalled;
+                device.write(0x1024, on);
+                assert_eq!(device.words[0x1028 / 4], if stalled { 2 } else { 0 });
+                assert_eq!(device.writes, [(0x1024, on)]);
+                assert_eq!(device.resets, 0);
+                assert!(!device.master);
+                assert_eq!(device.maps, 0);
+            }
+            // A completion fault must never turn a power-off, reserved value,
+            // or another generation's request into a permitted command.
+            for stalled in [false, true] {
+                for request in [0, 2, 3, u32::MAX, if on == 1 { 0x1f } else { 1 }] {
+                    let mut device = Device::new(revision);
+                    device.power_never = stalled;
+                    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        device.write(0x1024, request);
+                    }));
+                    assert!(refused.is_err());
+                    assert_eq!(device.words[0x1028 / 4], 2);
+                    assert_eq!(device.resets, 0);
+                    assert!(!device.master);
+                    assert_eq!(device.maps, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn actual_pte_capture_pcm_wraps_stop_restart_and_acknowledged_release() {
         for (revision, period) in [(0x63, 4096), (0x63, 8192), (0x63, 5000)] {
             let (mut controller, device, source) = ready(revision, period);
@@ -904,6 +939,17 @@ mod tests {
         let (mut controller, device, source) = fixture(0x63);
         device.lock().unwrap().power_never = true;
         assert_eq!(controller.initialize(), Err(Error::Timeout(Phase::PowerOn)));
+        assert_eq!(controller.state(), State::Faulted);
+        assert!(controller.capture.is_none());
+        {
+            let model = device.lock().unwrap();
+            assert_eq!(model.words[0x1028 / 4], 2);
+            assert_eq!(model.writes, [(0x1024, 1)]);
+            assert_eq!(model.resets, 0);
+            assert!(!model.master);
+            assert_eq!(model.maps, 0);
+        }
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
         assert_eq!(
             controller.first_error(),
             Some(Error::Timeout(Phase::PowerOn))
@@ -1420,6 +1466,17 @@ mod tests {
         let (mut controller, device, source) = fixture(0x63);
         device.lock().unwrap().power_never = true;
         assert_eq!(controller.initialize(), Err(Error::Timeout(Phase::PowerOn)));
+        assert_eq!(controller.state(), State::Faulted);
+        assert!(controller.capture.is_none());
+        {
+            let model = device.lock().unwrap();
+            assert_eq!(model.words[0x1028 / 4], 2);
+            assert_eq!(model.writes, [(0x1024, 1)]);
+            assert_eq!(model.resets, 0);
+            assert!(!model.master);
+            assert_eq!(model.maps, 0);
+        }
+        assert_eq!(source.drops.load(Ordering::Relaxed), 0);
         assert_eq!(device.lock().unwrap().maps, 0);
         device.lock().unwrap().power_never = false;
         device.lock().unwrap().ignore_write = Some(0x1014);
