@@ -68,6 +68,10 @@ class Evidence:
 
     def command(self, name, arguments, timeout):
         self.check_cancelled()
+        if not all(hasattr(os, name) for name in ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT")):
+            raise RuntimeError("reference runner requires POSIX waitid/WNOWAIT process ownership")
+        if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+            raise RuntimeError("reference runner requires exclusive child-reaping ownership")
         item = {"name": name, "argv": arguments, "timeout_seconds": timeout}
         self.record["commands"].append(item)
         self.save()
@@ -86,14 +90,24 @@ class Evidence:
                     # before a wait can reap it. No asynchronous exception can
                     # orphan a half-created child or signal a retired PGID.
                     self.check_cancelled()
+                    finished = os.waitid(os.P_PID, process.pid,
+                                         os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                    if finished is not None:
+                        # Keep the original leader unreaped until all members
+                        # are signaled. Even a leader that exited during a
+                        # cancellation cannot orphan descendants or allow its
+                        # numeric group ID to be reused before this cleanup.
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        item["group_cleanup"] = "before original leader reap"
+                        item["returncode"] = process.wait()
+                        break
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise subprocess.TimeoutExpired(arguments, timeout)
-                    try:
-                        item["returncode"] = process.wait(timeout=min(remaining, 0.05))
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
+                    time.sleep(min(remaining, 0.05))
             except BaseException as error:
                 item["timed_out"] = isinstance(error, subprocess.TimeoutExpired)
                 item["interruption"] = type(error).__name__

@@ -72,10 +72,10 @@ class ProcessControls(unittest.TestCase):
             reference.function("static void selected(void) {", "selected")
 
     def test_actual_harness_signals_reap_command_and_kill_its_descendants(self):
-        for cancellation, spawning in ((signal.SIGTERM, False), (signal.SIGINT, False),
-                                       (signal.SIGTERM, True)):
-            with self.subTest(signal=cancellation, during_spawn=spawning):
-                tag = f"{cancellation}-{spawning}"
+        for cancellation, phase in ((signal.SIGTERM, "wait"), (signal.SIGINT, "wait"),
+                                    (signal.SIGTERM, "spawn"), (signal.SIGTERM, "exit")):
+            with self.subTest(signal=cancellation, phase=phase):
+                tag = f"{cancellation}-{phase}"
                 output = self.output.parent / f"signal-{tag}.txt"
                 ready = self.output.parent / f"ready-{tag}.txt"
                 gate = self.output.parent / f"gate-{tag}.txt"
@@ -90,7 +90,7 @@ class ProcessControls(unittest.TestCase):
                     "    time.sleep(30)\n"
                     "    os._exit(0)\n"
                     f"open({str(ready)!r}, 'w').write(str(os.getpid()))\n"
-                    "time.sleep(30)\n"
+                    + ("time.sleep(0.1)\n" if phase == "exit" else "time.sleep(30)\n")
                 )
                 helper = (
                     "import sys\n"
@@ -101,7 +101,7 @@ class ProcessControls(unittest.TestCase):
                     "reference.generate = controlled\n"
                     f"sys.argv = ['reference', '--linux-git-dir', 'unused', '--output', {str(output)!r}]\n"
                 )
-                if spawning:
+                if phase == "spawn":
                     # Deliver SIGTERM after the real child exists, but before
                     # its Popen call returns ownership to Evidence.command.
                     helper += (
@@ -121,6 +121,17 @@ class ProcessControls(unittest.TestCase):
                         "    return child\n"
                         "reference.subprocess.Popen = interrupted_spawn\n"
                     )
+                if phase == "exit":
+                    helper += (
+                        "import os, signal\n"
+                        "original_waitid = reference.os.waitid\n"
+                        "def interrupted_exit(*args):\n"
+                        "    result = original_waitid(*args)\n"
+                        "    if result is not None:\n"
+                        "        os.kill(os.getpid(), signal.SIGTERM)\n"
+                        "    return result\n"
+                        "reference.os.waitid = interrupted_exit\n"
+                    )
                 helper += "reference.main()\n"
                 harness = subprocess.Popen([sys.executable, "-c", helper],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -136,12 +147,13 @@ class ProcessControls(unittest.TestCase):
                         self.assertIsNone(harness.poll(), "harness exited before readiness")
                         time.sleep(0.01)
                     self.assertIsNotNone(command_pid, "command failed to become ready")
-                    if not spawning:
+                    if phase == "wait":
                         os.kill(harness.pid, cancellation)
                     self.assertNotEqual(harness.wait(timeout=5), 0)
                     receipt = json.loads((output.parent / (output.name + ".evidence") / "receipt.json").read_text())
                     self.assertEqual(receipt["status"], "failed")
-                    self.assertEqual(receipt["commands"][0]["returncode"], -signal.SIGKILL)
+                    expected = 0 if phase == "exit" else -signal.SIGKILL
+                    self.assertEqual(receipt["commands"][0]["returncode"], expected)
                     with self.assertRaises(ProcessLookupError):
                         os.kill(command_pid, 0)
                     with gate.open() as lock:
