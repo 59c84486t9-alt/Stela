@@ -6,7 +6,7 @@
 use super::{Error, Profile, put16, put32, tlv};
 use crate::net::wifi::{
     Band,
-    station::phy::{McsMaps, Mode, Negotiated, Width},
+    station::phy::{AccessCategory, McsMaps, Mode, Negotiated, Width},
 };
 use alloc::vec::Vec;
 
@@ -283,10 +283,46 @@ impl Configuration {
             .wmm
             .as_ref()
             .ok_or(Error::InvalidNegotiation)?;
-        let mut out = vec![p.interface.bss_index, 0, 0, 0];
+        self.edca_restricted_request(p, &w.access_categories)
+    }
+    /// Private native queue restriction; never change negotiated AP metadata.
+    pub(in crate::net::wifi::mediatek) fn edca_restricted_request(
+        &self,
+        p: Profile,
+        effective: &[AccessCategory; 4],
+    ) -> Result<Vec<u8>, Error> {
+        self.matches(p)?;
+        let original = &self
+            .negotiated
+            .wmm
+            .as_ref()
+            .ok_or(Error::InvalidNegotiation)?
+            .access_categories;
+        let mut seen = 0u8;
+        for ac in effective {
+            let old = original
+                .iter()
+                .find(|old| old.aci == ac.aci)
+                .ok_or(Error::InvalidNegotiation)?;
+            if ac.aci >= 4
+                || seen & (1 << ac.aci) != 0
+                || ac.ecw_min < old.ecw_min
+                || ac.ecw_max < old.ecw_max
+                || ac.ecw_min > ac.ecw_max
+                || ac.ecw_max > 15
+                || ac.aifsn < old.aifsn
+                || ac.txop_32us > old.txop_32us
+                || ac.admission_control != old.admission_control
+            {
+                return Err(Error::InvalidNegotiation);
+            }
+            seen |= 1 << ac.aci;
+        }
+        let mut out = Vec::new();
+        out.try_reserve_exact(52).map_err(|_| Error::NoMemory)?;
+        out.extend_from_slice(&[p.interface.bss_index, 0, 0, 0]);
         for (queue, aci) in [3, 2, 0, 1].into_iter().enumerate() {
-            let ac = w
-                .access_categories
+            let ac = effective
                 .iter()
                 .find(|c| c.aci == aci)
                 .ok_or(Error::InvalidNegotiation)?;

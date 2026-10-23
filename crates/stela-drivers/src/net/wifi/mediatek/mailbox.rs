@@ -818,6 +818,7 @@ pub(crate) mod tests {
     pub(crate) struct Response {
         pub(crate) initial_execution: bool,
         pub(crate) client_execution: bool,
+        pub(crate) edca_status: Option<u32>,
         pub(crate) roc_channel: Option<u8>,
         pub(crate) home_channel: Option<u8>,
         pub(crate) wrong_roc_token: bool,
@@ -870,6 +871,7 @@ pub(crate) mod tests {
             Self {
                 initial_execution: false,
                 client_execution: false,
+                edca_status: None,
                 roc_channel: None,
                 home_channel: None,
                 wrong_roc_token: false,
@@ -1350,7 +1352,12 @@ pub(crate) mod tests {
                             }
                         }
                     }
-                    let status = if model.device_execution && (command == 1 || command == 2) {
+                    let status = if command == 4
+                        && model.client_execution
+                        && let Some(status) = model.edca_status
+                    {
+                        status
+                    } else if model.device_execution && (command == 1 || command == 2) {
                         let body = &packet[48..];
                         if command == 1 {
                             assert_eq!(body.len(), 16);

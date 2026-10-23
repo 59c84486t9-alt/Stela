@@ -425,24 +425,19 @@ impl Os {
             {
                 return false;
             }
-            if let Some(wmm) = r.wmm {
-                let Some(actual) = n.wmm.as_ref() else {
-                    return false;
-                };
-                for ac in &actual.access_categories {
-                    // Database/mac80211 order VO,VI,BE,BK; on-air ACI BE,BK,VI,VO.
-                    let limit = wmm.client[[2, 3, 1, 0][usize::from(ac.aci)]];
-                    if ((1u32 << ac.ecw_min) - 1) < u32::from(limit.cw_min)
-                        || ((1u32 << ac.ecw_max) - 1) < u32::from(limit.cw_max)
-                        || ac.aifsn < limit.aifsn
-                        || u32::from(ac.txop_32us) * 32 > u32::from(limit.cot_us)
-                    {
-                        return false;
-                    }
-                }
-            }
         }
-        true
+        let Some(parameters) = n.wmm.as_ref().map(|w| &w.access_categories) else {
+            return false;
+        };
+        let Some(rule) = self
+            .country
+            .rule(u32::from(ctx.channel().frequency_mhz) * 1000, 20_000)
+        else {
+            return false;
+        };
+        // ManagedClient installs the exact derived local queues before its
+        // private configuration publication. AP observations stay unchanged.
+        reg::wmm::station(parameters, rule.wmm.as_ref()).is_ok()
     }
 }
 impl reg::OsLease for OsGuard<'_> {
@@ -724,6 +719,21 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .modern_context()
             .ok_or(PolicyError::Bss)?
             .clone();
+        let rule = self
+            .country
+            .rule(u32::from(context.channel().frequency_mhz) * 1000, 20_000)
+            .ok_or(PolicyError::RestrictionMismatch)?;
+        let parameters = &context
+            .negotiated()
+            .wmm
+            .as_ref()
+            .ok_or(PolicyError::RestrictionMismatch)?
+            .access_categories;
+        let effective = reg::wmm::station(parameters, rule.wmm.as_ref())
+            .map_err(|_| PolicyError::RestrictionMismatch)?;
+        self.client
+            .restrict_prepared_edca(&effective)
+            .map_err(PolicyError::Client)?;
         let admission = self
             .authority
             .admit_association(
@@ -1181,6 +1191,101 @@ mod tests {
         driver.revoke().unwrap();
         unsafe { driver.retire_peer_after_drain() }.unwrap();
         finish_stop(&mut driver, &model);
+    }
+    #[test]
+    fn actual_restricted_edca_publication_waits_for_ack_and_preserves_ap_metadata() {
+        for accepted in [true, false] {
+            let (client, model) = setup_modern();
+            let mut b = fixture();
+            b.resize(112, 0);
+            b[48] = 20;
+            b[66..68].copy_from_slice(&20u16.to_be_bytes());
+            for (j, bytes) in [
+                [0x68, 7, 0, 1],
+                [0x79, 8, 0, 2],
+                [0x5a, 9, 0, 3],
+                [0x6b, 10, 0, 4],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                b[80 + j * 4..84 + j * 4].copy_from_slice(&bytes);
+                b[96 + j * 4..100 + j * 4].copy_from_slice(&bytes);
+            }
+            let country = Database::parse(Arc::from(b.clone()), Sha256::digest(&b).into())
+                .unwrap()
+                .select(*b"US")
+                .unwrap();
+            let (mut driver, model) = awaiting(client, model, country);
+            let original = driver
+                .client
+                .modern_context()
+                .unwrap()
+                .negotiated()
+                .wmm
+                .clone();
+            let before = model.response.lock().unwrap().client_commands.len();
+            if !accepted {
+                model.response.lock().unwrap().edca_status = Some(0xbad);
+            }
+            let result = driver.configure_modern(105);
+            assert_eq!(
+                driver.client.modern_context().unwrap().negotiated().wmm,
+                original
+            );
+            let commands = model.response.lock().unwrap().client_commands.clone();
+            let edca = commands[before..]
+                .iter()
+                .find(|p| p[34..36] == [4, 0])
+                .expect("actual native EDCA command");
+            let mut expected = vec![0, 0, 4, 0];
+            for bytes in [
+                [0, 0, 12, 0, 0, 15, 6, 8, 31, 0, 7, 0],
+                [0, 0, 12, 0, 1, 15, 7, 9, 62, 0, 8, 0],
+                [0, 0, 12, 0, 2, 15, 5, 10, 0, 0, 9, 0],
+                [0, 0, 12, 0, 3, 15, 6, 11, 0, 0, 10, 0],
+            ] {
+                expected.extend_from_slice(&bytes);
+            }
+            assert_eq!(&edca[48..], expected);
+            if !accepted {
+                assert!(matches!(
+                    result,
+                    Err(PolicyError::Client(Error::Firmware(0xbad)))
+                ));
+                assert_eq!(driver.phase(), Phase::Quarantined);
+                assert_eq!(driver.station().phase(), station::Phase::Configuring);
+                assert_eq!(driver.client.completed_modern_requests(), 3);
+                assert!(
+                    driver
+                        .authorize_port(driver.station().association_epoch().unwrap())
+                        .is_err()
+                );
+                drop(driver);
+                assert_eq!(model.drops.load(Ordering::Relaxed), 0);
+                assert!(!model.memory.lock().unwrap().mappings.is_empty());
+                continue;
+            }
+            result.unwrap();
+            assert_eq!(driver.phase(), Phase::Associated);
+            driver
+                .install_key(true, 0, &[4; 16], ReplaySeed::ZERO)
+                .unwrap();
+            driver
+                .install_key(false, 2, &[5; 16], ReplaySeed::ZERO)
+                .unwrap();
+            let epoch = driver.station().association_epoch().unwrap();
+            driver.authorize_port(epoch).unwrap();
+            driver
+                .transmit(epoch, &eth(0x0800), TxClass::Data, Some(5), &Source)
+                .unwrap();
+            assert_eq!(finish_tx(&model).len(), 1);
+            driver.poll(106, &Source).unwrap();
+            driver.poll_released().unwrap();
+            driver.revoke().unwrap();
+            unsafe { driver.retire_peer_after_drain() }.unwrap();
+            finish_stop(&mut driver, &model);
+        }
     }
     #[test]
     fn mismatched_country_returns_original_owner_and_sku_padding_is_not_power() {

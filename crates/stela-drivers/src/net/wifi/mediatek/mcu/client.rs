@@ -14,6 +14,7 @@ pub mod modern;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    NoMemory,
     Context(super::device::Error),
     InvalidPeer,
     InvalidWcid,

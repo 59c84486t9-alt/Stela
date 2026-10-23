@@ -155,6 +155,34 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             0
         }
     }
+    /// Derive the complete restricted command before replacing the pending
+    /// command. Allocation/validation failure leaves the old owner intact;
+    /// this helper performs no native publication or association completion.
+    pub(super) fn restrict_prepared_edca(
+        &mut self,
+        effective: &[station::phy::AccessCategory; 4],
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        if s.phase != Phase::AwaitingModernAdmission {
+            return Err(Error::WrongPhase);
+        }
+        let m = s.modern.as_mut().ok_or(Error::WrongPhase)?;
+        if m.completed != 0 {
+            return Err(Error::WrongPhase);
+        }
+        let p = s.profile.ok_or(Error::WrongProfile)?;
+        let body = m
+            .wire
+            .edca_restricted_request(p, effective)
+            .map_err(Error::Codec)?;
+        let pending = m
+            .commands
+            .iter_mut()
+            .find(|(command, _)| *command == Command::Edca)
+            .ok_or(Error::WrongPhase)?;
+        pending.1 = body;
+        Ok(())
+    }
     pub fn completed_modern_requests(&self) -> usize {
         self.state().modern.as_ref().map_or(0, |m| m.completed)
     }

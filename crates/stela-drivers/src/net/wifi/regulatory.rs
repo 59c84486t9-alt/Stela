@@ -15,6 +15,7 @@ use super::{Band, Channel, scan, station};
 
 mod association;
 pub mod database;
+pub mod wmm;
 pub use association::{AssociationAdmission, AssociationOperation, AssociationUse};
 
 static NEXT_OWNER: super::Identities = super::Identities::new();
