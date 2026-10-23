@@ -442,7 +442,7 @@ pub unsafe fn probe_with_provider(
                     if let Some(error) = attached.failure {
                         disks
                             .device_failures
-                            .push((alloc::format!("{address} RTS5227 SD slot"), error));
+                            .push((alloc::format!("{address} RTSX SD slot"), error));
                     }
                     attached
                         .card

@@ -155,3 +155,26 @@ pub(super) const LTR_TX_EN_MASK: u8 = 0x80;
 pub(super) const LTR_LATENCY_MODE_MASK: u8 = 0x40;
 pub(super) const LTR_TX_EN_1: u8 = 0x80;
 pub(super) const LTR_LATENCY_MODE_SW: u8 = 0x40;
+
+// RTS522A's moved PM registers and mandatory OCP/OOBS controls.
+pub(super) const RTS522A_PM_CTRL3: u16 = 0xff7e;
+pub(super) const RTS522A_PME_FORCE_CTL: u16 = 0xff78;
+pub(super) const RTS522A_AUTOLOAD_CFG1: u16 = 0xff7c;
+pub(super) const DUMMY_REG_RESET_0: u16 = 0xfe90;
+pub(super) const PCLK_CTL: u16 = 0xfe55;
+pub(super) const PM_CLK_FORCE_CTL: u16 = 0xfe58;
+pub(super) const FUNC_FORCE_CTL: u16 = 0xfe59;
+pub(super) const PM_EVENT_DEBUG: u16 = 0xfe71;
+pub(super) const L1SUB_CONFIG3: u16 = 0xfe8f;
+pub(super) const REG_CFG_OOBS_OFF_TIMER: u16 = 0xfea6;
+pub(super) const REG_CFG_OOBS_ON_TIMER: u16 = 0xfea7;
+pub(super) const REG_CFG_VCM_ON_TIMER: u16 = 0xfea8;
+pub(super) const REG_CFG_OOBS_POLLING: u16 = 0xfea9;
+pub(super) const REG_OCPCTL: u16 = 0xfd6a;
+pub(super) const REG_OCPPARA1: u16 = 0xfd6b;
+pub(super) const REG_OCPGLITCH: u16 = 0xfd6c;
+pub(super) const REG_OCPPARA2: u16 = 0xfd6d;
+pub(super) const REG_OCPSTAT: u16 = 0xfd6e;
+pub(super) const OC_POWER_DOWN: u8 = 2;
+pub(super) const SD_OCP_ENABLE: u8 = 0x0c;
+pub(super) const SD_OCP_CLEAR: u8 = 3;

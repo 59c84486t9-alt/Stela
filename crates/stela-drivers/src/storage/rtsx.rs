@@ -2,7 +2,7 @@
 // Native adaptation of rtsx_pcr.c, rts5227.c and rtsx_pci_sdmmc.c.
 // Copyright(c) 2009-2013 Realtek Semiconductor Corp. All rights reserved.
 // Authors: Wei WANG, Roger Tseng. See ../THIRD_PARTY.md.
-//! Native RTS5227 PCIe SD/MMC reader with actual HAIMR and ping-pong PIO.
+//! Native RTS5227/RTS522A PCIe SD/MMC reader with actual HAIMR and ping-pong PIO.
 //! Command-buffer/data DMA, Memory Stick, UHS/DDR and global PM remain separate.
 pub use super::mmc::{CardInfo, Failure, Kind};
 use crate::{
@@ -22,18 +22,46 @@ use core::{
 mod command;
 mod controller;
 mod registers;
+mod rts522a;
 use command::Budget;
 use registers::*;
 
 const VENDOR: u16 = 0x10ec;
-const DEVICE: u16 = 0x5227;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChipProfile {
+    Rts5227,
+    Rts522a,
+}
+impl ChipProfile {
+    fn device(self) -> u16 {
+        match self {
+            Self::Rts5227 => 0x5227,
+            Self::Rts522a => 0x522a,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Rts5227 => "RTS5227",
+            Self::Rts522a => "RTS522A",
+        }
+    }
+    fn select(device: u16) -> Option<Self> {
+        match device {
+            0x5227 => Some(Self::Rts5227),
+            0x522a => Some(Self::Rts522a),
+            _ => None,
+        }
+    }
+}
 const STALE: &str = "RTSX card publication is permanently stale";
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Exact source identity and class; other Realtek reader generations have
 /// different PHY/power/clock profiles and cannot inherit this setup.
-pub fn matches(function: &Function) -> bool {
-    function.vendor == VENDOR && function.device == DEVICE && function.class[0] == 0xff
+pub fn matches<C>(function: &Function<C>) -> bool {
+    function.vendor == VENDOR
+        && ChipProfile::select(function.device).is_some()
+        && function.class[0] == 0xff
 }
 
 /// Retained even when the socket is empty or card identification fails.
@@ -48,7 +76,7 @@ pub struct Attached {
 pub fn attach(mut function: Function, handoff: &Handoff) -> Result<Attached, BlockError> {
     if !matches(&function) {
         return Err(BlockError::Unsupported(
-            "PCI function is not qualified RTS5227",
+            "PCI function is not a qualified RTS5227/RTS522A",
         ));
     }
     if handoff.clock.ticks_per_microsecond == 0 {
@@ -63,7 +91,7 @@ pub fn attach(mut function: Function, handoff: &Handoff) -> Result<Attached, Blo
     let bars = function.bars();
     let registers = crate::registers(handoff, bars[0], 0, 0x20)?;
     super::pci::set_pio_command(&mut function, true)?;
-    let location = alloc::format!("{} RTS5227 SD slot", function.address);
+    let location = alloc::format!("{} {} SD slot", function.address, config.profile.name());
     let engine = Engine::new(
         Box::new(function),
         Box::new(registers),
@@ -116,6 +144,10 @@ pub struct Host {
     inner: Rc<RefCell<Engine>>,
 }
 impl Host {
+    /// Last actual OCP status sampled before socket power-off (RTS522A only).
+    pub fn overcurrent_status(&self) -> Option<u8> {
+        self.inner.borrow().ocp_status
+    }
     /// Retained diagnostics require no PCI/MMIO and preserve the primary error.
     pub fn last_failure(&self) -> Option<Failure> {
         self.inner.borrow().last_failure.clone()
@@ -254,13 +286,15 @@ struct Engine {
     request_deadline: Option<crate::Deadline>,
     restoration_failure: Option<BlockError>,
     failure_finalized: bool,
+    ocp_status: Option<u8>,
 }
 impl Engine {
     fn healthy(&mut self) -> Result<(), BlockError> {
         if let Some(error) = &self.fault {
             return Err(error.clone());
         }
-        if self.pci.read32(0) != (u32::from(VENDOR) | u32::from(DEVICE) << 16) {
+        if self.pci.read32(0) != (u32::from(VENDOR) | u32::from(self.config.profile.device()) << 16)
+        {
             let error = BlockError::Unsupported("RTSX owned PCI function disappeared");
             self.medium = None;
             self.fault = Some(error.clone());
@@ -638,6 +672,7 @@ mod tests {
         dma_stops: Vec<usize>,
         last_mode: u8,
         last_opcode: u8,
+        ocp_clear_at: Option<u64>,
     }
     impl Chip {
         fn new(mmc: bool, present: bool) -> Rc<RefCell<Self>> {
@@ -699,6 +734,7 @@ mod tests {
                 dma_stops: Vec::new(),
                 last_mode: 0,
                 last_opcode: 0,
+                ocp_clear_at: None,
             }))
         }
         fn delay_at(&mut self, point: DelayPoint) {
@@ -727,7 +763,20 @@ mod tests {
             if !transfer.effected {
                 assert_eq!(self.regs[0x3d50] & 3, 0, "card must have full power");
                 assert_eq!(self.regs[0x3e75] & 6, 6, "physical 3.3V gate");
-                assert_eq!(self.phy[8], 0x4fe4, "qualified 3.3V PHY");
+                let rts522a = self.config[2..4] == [0x2a, 0x52];
+                assert_eq!(
+                    self.phy[8],
+                    if rts522a { 0x57e4 } else { 0x4fe4 },
+                    "qualified 3.3V PHY"
+                );
+                if rts522a {
+                    assert_eq!(self.regs[0x3c00] & 2, 0, "OCP analog powered");
+                    assert_eq!(self.regs[0x3d6a] & 12, 12, "OCP detector enabled");
+                    assert_eq!(self.regs[0x3d6b] & 7, 5, "800 OCP time");
+                    assert_eq!(self.regs[0x3d6d] & 7, 6, "800mA threshold");
+                    assert_eq!(self.regs[0x3d6c] & 15, 15, "10ms glitch");
+                    assert_eq!(self.regs[0x3e57] & 0x30, 0x30, "register ASPM off");
+                }
                 assert_eq!(self.regs[0x3d69] & 4, 4, "card clock on");
                 assert_eq!(self.regs[0x3d55] & 4, 4, "SD outputs on");
                 assert_eq!(self.regs[0x3d61], 0xaa);
@@ -851,7 +900,10 @@ mod tests {
                 Fault::Remove => self.bipr = (self.bipr & !(1 << 16)) | (1 << 25),
                 Fault::Delink => self.bipr |= 1 << 24,
                 Fault::MemoryStick => self.bipr |= 1 << 17,
-                Fault::Overcurrent => self.bipr |= 1 << 22,
+                Fault::Overcurrent => {
+                    self.bipr |= 1 << 22;
+                    self.regs[0x3d6e] |= 6;
+                }
                 Fault::Busy => self.regs[0x3da5] &= !2,
                 _ => {}
             }
@@ -900,11 +952,38 @@ mod tests {
             self.regs[at] = (self.regs[at] & !mask) | (value & mask);
             if at == 0x3e3c && value & 0x80 != 0 && !self.stuck_phy {
                 let index = usize::from(self.regs[0x3e3f]);
-                self.phy[index] = u16::from_le_bytes([self.regs[0x3e3d], self.regs[0x3e3e]]);
+                if value & 1 == 0 {
+                    let bytes = self.phy[index].to_le_bytes();
+                    self.regs[0x3e3d..0x3e3f].copy_from_slice(&bytes);
+                } else {
+                    self.phy[index] = u16::from_le_bytes([self.regs[0x3e3d], self.regs[0x3e3e]]);
+                }
                 self.regs[at] &= !0x80;
+            }
+            if at == 0x3d6a && mask & 3 == 3 {
+                if value & 3 == 3 {
+                    assert_eq!(
+                        self.regs[0x3d50] & 3,
+                        3,
+                        "socket off before OCP latch clear"
+                    );
+                    assert_eq!(self.regs[0x3e75] & 6, 0, "power gate off before OCP clear");
+                    self.ocp_clear_at = Some(Self::ticks());
+                    self.regs[0x3d6e] &= !6;
+                    self.bipr &= !(1 << 22);
+                } else if value & 3 == 0 && self.ocp_clear_at.is_some() {
+                    assert!(
+                        Self::ticks() - self.ocp_clear_at.take().expect("OCP clear pulse start")
+                            >= 100 * 1000
+                    );
+                }
             }
             if at == 0x3d50 {
                 if value & 3 == 1 {
+                    if self.config[2..4] == [0x2a, 0x52] {
+                        assert_eq!(self.regs[0x3d6a] & 12, 12, "OCP before partial power");
+                        assert_eq!(self.regs[0x3c00] & 2, 0);
+                    }
                     self.partial_at = Some(Self::ticks());
                 }
                 if value & 3 == 0 && self.timeline {
@@ -1982,5 +2061,185 @@ mod tests {
         assert_eq!(chip.borrow().delayed, [DelayPoint::LastResponse]);
         assert_eq!(host.last_failure().unwrap().primary, primary);
         stale(&mut card, &chip);
+    }
+    fn rts522a(mmc: bool, present: bool, revision: u8, l1ss: u8, rtd3: bool) -> Rc<RefCell<Chip>> {
+        let chip = Chip::new(mmc, present);
+        {
+            let mut c = chip.borrow_mut();
+            c.config[2..4].copy_from_slice(&0x522au16.to_le_bytes());
+            c.config[0x188] = l1ss;
+            // Nonzero unrelated bits prove that OOBS is a real PHY RMW.
+            c.phy[1] = 0xa6b5;
+            c.regs[0x3e90] = 0xb0 | revision;
+            c.config[0x727] = 0;
+            c.config[0x814] = u8::from(rtd3) << 1;
+            // Keep the old registers nonzero to detect accidental RTS5227 writes.
+            c.regs[0x3f46] = 0x91;
+            c.regs[0x3e56] = 0xb7;
+        }
+        chip
+    }
+    #[test]
+    fn native_rts522a_real_silicon_revision_l1ss_board_and_electrical_profiles() {
+        for revision in [0, 1, 15] {
+            for l1ss in [0, 1, 2, 4, 8, 15] {
+                for rtd3 in [false, true] {
+                    let chip = rts522a(false, true, revision, l1ss, rtd3);
+                    assert!(matches(&function(&chip)));
+                    let mut host = make_host(&chip, false).unwrap();
+                    let mut card = host.poll().unwrap().unwrap();
+                    let mut block = [0; 512];
+                    card.read(3, &mut block).unwrap();
+                    assert_eq!(block, chip.borrow().card.block(3));
+                    let c = chip.borrow();
+                    assert_eq!(c.phy[0], 0, "never RTS5227 RX sensitivity recipe");
+                    for (at, value) in [
+                        (3, 0xc152),
+                        (2, 0x0a1f),
+                        (0x1a, 0x2546),
+                        (0x1d, 4),
+                        (0x1e, 0x5c7f),
+                    ] {
+                        assert_eq!(c.phy[at], if revision == 0 { value } else { 0 });
+                    }
+                    assert_eq!(
+                        c.phy[1],
+                        if l1ss == 0 {
+                            0xa6b5 | 0x200
+                        } else {
+                            0xa6b5 & !0x200
+                        }
+                    );
+                    assert_eq!(c.phy[8], 0x57e4);
+                    assert_eq!(c.regs[0x3ea8], if l1ss == 0 { 0x83 } else { 3 });
+                    assert_eq!(c.regs[0x3ea9], if l1ss == 0 { 0xde } else { 0 });
+                    assert_eq!(c.regs[0x3f7c] & 0xf0, 0xf0);
+                    assert_eq!(c.regs[0x3f7e] & 1, u8::from(rtd3));
+                    assert_eq!(c.regs[0x3f78] & 0x30, if rtd3 { 0x30 } else { 0x20 });
+                    assert_eq!(c.regs[0x3f46], 0x91);
+                    assert_eq!(c.regs[0x3e56], 0xb7);
+                    assert_eq!(&c.regs[0x3e44..0x3e48], &[0x3c, 0x88, 0, 0]);
+                    assert_eq!(c.regs[0x3e8f], if l1ss & 8 != 0 { 0x78 } else { 0 });
+                    assert_eq!(c.regs[0x3e59] & 2, 2);
+                    assert_eq!(c.regs[0x3e55] & 4, 4);
+                    assert_eq!(c.regs[0x3e71] & 8, 8);
+                    assert_eq!(c.regs[0x3e58], 0x11);
+                    assert_eq!(c.config[4] & 6, 2, "PIO never enables bus mastering");
+                }
+            }
+        }
+    }
+    #[test]
+    fn native_rts522a_mmc_empty_media_retirement_and_failed_ocp_ack() {
+        for mmc in [false, true] {
+            let chip = rts522a(mmc, false, 0, 8, true);
+            let mut host = make_host(&chip, false).unwrap();
+            assert!(host.poll().unwrap().is_none());
+            assert_eq!(chip.borrow().regs[0x3d6a] & 12, 0);
+            assert_eq!(chip.borrow().regs[0x3c00] & 2, 2);
+            chip.borrow_mut().bipr |= (1 << 16) | (1 << 25);
+            let mut card = host.poll().unwrap().unwrap();
+            card.write(3, &[0x69; 512]).unwrap();
+            card.flush().unwrap();
+            let mut block = [0; 512];
+            card.read(3, &mut block).unwrap();
+            assert_eq!(block, [0x69; 512]);
+            chip.borrow_mut().bipr = 1 << 25;
+            assert!(card.flush().is_err());
+            stale(&mut card, &chip);
+            chip.borrow_mut().bipr = (1 << 16) | (1 << 25);
+            let mut fresh = host.poll().unwrap().unwrap();
+            fresh.read(3, &mut block).unwrap();
+            stale(&mut card, &chip);
+            fresh.shutdown(true).unwrap();
+            assert_eq!(chip.borrow().regs[0x3d6a] & 12, 0);
+            assert_eq!(chip.borrow().regs[0x3c00] & 2, 2);
+        }
+        for wrong in [0xfd6a, 0xfc00, 0xfd50] {
+            let chip = rts522a(false, true, 1, 0, false);
+            let mut host = make_host(&chip, false).unwrap();
+            let mut card = host.poll().unwrap().unwrap();
+            chip.borrow_mut().next_fault = Fault::Overcurrent;
+            chip.borrow_mut().wrong_echo = Some(wrong);
+            let mut poison = [0x91; 512];
+            let start = chip.borrow().effects.len();
+            let primary = card.read(3, &mut poison).unwrap_err();
+            assert!(matches!(primary, BlockError::Device { status } if status & (1 << 22) != 0));
+            assert_eq!(poison, [0x91; 512]);
+            assert_eq!(host.overcurrent_status(), Some(6));
+            let failure = host.last_failure().unwrap();
+            assert_eq!(failure.primary, primary);
+            assert!(failure.retirement.is_some());
+            assert!(failure.quarantined);
+            assert!(
+                !chip.borrow().effects[start..]
+                    .iter()
+                    .any(|e| matches!(e, Effect::Stop))
+            );
+            stale(&mut card, &chip);
+            let before = chip.borrow().accesses;
+            assert_eq!(host.poll().err(), Some(primary));
+            assert_eq!(chip.borrow().accesses, before);
+        }
+    }
+    #[test]
+    fn native_rts522a_overcurrent_clears_actual_latch_after_poweroff_without_later_stop() {
+        let chip = rts522a(false, true, 0, 15, false);
+        let mut host = make_host(&chip, false).unwrap();
+        let mut card = host.poll().unwrap().unwrap();
+        chip.borrow_mut().next_fault = Fault::Overcurrent;
+        let start = chip.borrow().effects.len();
+        let mut poison = [0x91; 512];
+        let primary = card.read(3, &mut poison).unwrap_err();
+        assert!(matches!(primary, BlockError::Device { status } if status & (1 << 22) != 0));
+        assert_eq!(poison, [0x91; 512]);
+        assert_eq!(host.overcurrent_status(), Some(6));
+        let c = chip.borrow();
+        assert_eq!(c.regs[0x3d50] & 3, 3);
+        assert_eq!(c.regs[0x3e75] & 6, 0);
+        assert_eq!(c.regs[0x3d6e] & 6, 0);
+        assert_eq!(c.bipr & (1 << 22), 0);
+        assert!(
+            !c.effects[start..]
+                .iter()
+                .any(|e| matches!(e, Effect::Stop | Effect::Command(13, _, _)))
+        );
+        drop(c);
+        assert!(host.last_failure().unwrap().retirement.is_none());
+        stale(&mut card, &chip);
+    }
+    #[test]
+    fn native_rts522a_unavailable_ltr_and_revision_access_failures_are_explicit() {
+        let chip = rts522a(false, false, 1, 0, false);
+        {
+            let mut c = chip.borrow_mut();
+            c.config[0x100..].fill(0);
+            c.config[0x68..0x6a].fill(0);
+        }
+        let mut host = make_host(&chip, false).unwrap();
+        assert!(host.poll().unwrap().is_none());
+        assert_eq!(&chip.borrow().regs[0x3e44..0x3e48], &[0; 4]);
+        assert_eq!(chip.borrow().regs[0x3e8f], 0);
+        for at in [0xfe90, 0xff7e, 0xfe3c, 0xfd6b, 0xfd6d, 0xfd6c] {
+            let chip = rts522a(false, true, 0, 15, false);
+            chip.borrow_mut().stuck_haimr = Some(at);
+            assert!(make_host(&chip, false).is_err());
+            assert!(
+                !chip
+                    .borrow()
+                    .effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::Command(_, _, _)))
+            );
+            assert_eq!(chip.borrow().config[4] & 4, 0);
+        }
+        for device in [0x5229u16, 0x5249, 0x525a] {
+            let chip = Chip::new(false, false);
+            chip.borrow_mut().config[2..4].copy_from_slice(&device.to_le_bytes());
+            assert!(!matches(&function(&chip)));
+        }
+        let chip = rts522a(false, false, 0, 0, false);
+        chip.borrow_mut().config[0x0b] = 8;
+        assert!(!matches(&function(&chip)));
     }
 }
