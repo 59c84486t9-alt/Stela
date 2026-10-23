@@ -255,8 +255,11 @@ fn power_down<C: ConfigSpace>(function: &mut Function<C>, power: &mut PciPower) 
 /// Owns the actual PCI configuration, UC register window, DMA domain and pins.
 /// Failed initialization returns this complete owner for stop/retry/inspection.
 /// Drop quarantines every active physical owner; it never invents DMA completion.
-pub struct Aqtion<R: Registers = MappedRegisters, T: Timer = Clock> {
-    function: Option<Function<OwnedConfig>>,
+/// Native attachment accepts `OwnedConfig` only. The defaulted configuration
+/// parameter lets protocol peers exercise the same lifecycle implementation;
+/// it supplies no constructor or physical resource authority.
+pub struct Aqtion<R: Registers = MappedRegisters, T: Timer = Clock, C: ConfigSpace = OwnedConfig> {
+    function: Option<Function<C>>,
     hardware: Option<Hardware<R, T>>,
     domain: Option<Arc<dyn DmaDomain>>,
     memory: Option<Memory>,
@@ -367,7 +370,7 @@ impl Aqtion {
         self.resume_with_clock(&clock)
     }
 }
-impl<R: Registers, T: Timer> Aqtion<R, T> {
+impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
     fn hw(&self) -> &Hardware<R, T> {
         self.hardware.as_ref().unwrap()
     }
@@ -595,7 +598,7 @@ impl<R: Registers, T: Timer> Aqtion<R, T> {
         Ok(None)
     }
 }
-impl<R: Registers, T: Timer> Link for Aqtion<R, T> {
+impl<R: Registers, T: Timer, C: ConfigSpace> Link for Aqtion<R, T, C> {
     fn mac(&self) -> Mac {
         self.mac
     }
@@ -621,7 +624,7 @@ impl<R: Registers, T: Timer> Link for Aqtion<R, T> {
 fn adapter(error: Error) -> LinkError {
     LinkError::Adapter(format!("AQtion: {error:?}"))
 }
-impl<R: Registers, T: Timer> Drop for Aqtion<R, T> {
+impl<R: Registers, T: Timer, C: ConfigSpace> Drop for Aqtion<R, T, C> {
     fn drop(&mut self) {
         // Even stopped owners retain their MMIO epoch until the platform retires
         // its mapping explicitly. An unretired DMA mapping quarantines its pins.

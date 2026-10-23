@@ -123,6 +123,32 @@ impl Domain {
             0,
             "PCI bus mastering must be disabled before DMA drain or unmap"
         );
+        let readback = {
+            let accesses = config.accesses.lock().unwrap();
+            let last_write = accesses.iter().rposition(|access| {
+                matches!(
+                    access,
+                    ConfigAccess::Write8(4 | 5, _)
+                        | ConfigAccess::Write16(4, _)
+                        | ConfigAccess::Write32(4, _)
+                )
+            });
+            last_write.is_some_and(|index| {
+                let cleared = match accesses[index] {
+                    ConfigAccess::Write16(4, value) => value & 4 == 0,
+                    _ => false,
+                };
+                let acknowledged = accesses[index + 1..].iter().any(|access| match access {
+                    ConfigAccess::Read16(4, value) => *value != u16::MAX && *value & 4 == 0,
+                    _ => false,
+                });
+                cleared && acknowledged
+            })
+        };
+        assert!(
+            readback,
+            "PCI bus-master clear requires caller readback before DMA drain or unmap"
+        );
     }
     fn raw(&self, address: u64, bytes: usize) -> NonNull<u8> {
         let maps = self.maps.lock().unwrap();
@@ -627,12 +653,15 @@ fn hardware(peer: &Rc<Peer>) -> Hardware<Rc<Peer>, Rc<Peer>> {
     }
 }
 type Fixture = (
-    Aqtion<Rc<Peer>, Rc<Peer>>,
+    Aqtion<Rc<Peer>, Rc<Peer>, ControlledConfig>,
     Rc<Peer>,
     Arc<Domain>,
     Arc<AtomicUsize>,
 );
 fn setup(device: u16) -> Fixture {
+    setup_with_memory(device, true)
+}
+fn setup_with_memory(device: u16, allocate_memory: bool) -> Fixture {
     let profile = Profile::identify(0x1d6a, device).unwrap();
     let domain = Arc::new(Domain::default());
     let dropped = Arc::new(AtomicUsize::new(0));
@@ -654,7 +683,7 @@ fn setup(device: u16) -> Fixture {
         function: Some(function),
         hardware: Some(hardware(&peer)),
         domain: Some(domain.clone()),
-        memory: Some(Memory::new(&pages, domain.clone()).unwrap()),
+        memory: allocate_memory.then(|| Memory::new(&pages, domain.clone()).unwrap()),
         profile,
         firmware: None,
         mac: Mac::default(),
@@ -832,18 +861,18 @@ fn ordinary_suspend_stops_dma_before_d3_and_retains_the_resumable_epoch() {
     assert_eq!(dropped.load(Ordering::Relaxed), 4);
 }
 
-// Native OwnedConfig storage shared with the device/DMA peer. Command checks
-// sample the actual volatile word. Verification hold: check_context runs for
-// mapping operations, not individual OwnedConfig register accesses, so the PM
-// fault modes below do not yet provide deterministic D0/D3 fault injection.
+// Native volatile storage shared with the device/DMA peer. The platform only
+// supplies RAM; ControlledConfig below models synchronous device responses at
+// the actual ConfigSpace boundary. Neither component grants physical authority.
 #[repr(align(4096))]
 struct ConfigPage([u8; 4096]);
 struct NativePm {
     page: Box<UnsafeCell<ConfigPage>>,
-    mode: AtomicUsize, // 0 normal, 1 refuse D0, 2 lose D3 readback, 3 refuse D3
+    mode: Mutex<PmMode>,
+    accesses: Mutex<Vec<ConfigAccess>>,
     actual_state: AtomicUsize,
 }
-// SAFETY: test-only stable RAM, serialized native volatile accesses and callback.
+// SAFETY: test-only stable RAM, serialized native volatile accesses and locked metadata.
 unsafe impl Send for NativePm {}
 // SAFETY: no references into the UnsafeCell storage are exposed.
 unsafe impl Sync for NativePm {}
@@ -851,10 +880,130 @@ impl NativePm {
     fn pointer(&self) -> NonNull<u8> {
         unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.page.get()).0).cast()) }
     }
+    fn pm_accesses_since(&self, start: usize) -> Vec<ConfigAccess> {
+        self.accesses.lock().unwrap()[start..]
+            .iter()
+            .copied()
+            .filter(|access| {
+                matches!(
+                    access,
+                    ConfigAccess::Read16(0x44, _) | ConfigAccess::Write16(0x44, _)
+                )
+            })
+            .collect()
+    }
     fn command(&self) -> u16 {
         // SAFETY: stable aligned native configuration RAM retained by this
         // model owner; serialized observation, with no write or access callback.
         unsafe { self.pointer().as_ptr().add(4).cast::<u16>().read_volatile() }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PmMode {
+    Normal,
+    RefuseD0,
+    LoseD3Readback,
+    RefuseD3,
+    Removed,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigAccess {
+    Read8(u16, u8),
+    Read16(u16, u16),
+    Read32(u16, u32),
+    Write8(u16, u8),
+    Write16(u16, u16),
+    Write32(u16, u32),
+}
+// Owns exactly the original native accessor. No copied configuration handle,
+// test-only production hook, mapping callback or asynchronous writer is used.
+// Response overrides are modeled firmware behavior, not native ECAM evidence.
+struct ControlledConfig {
+    native: OwnedConfig,
+    peer: Arc<NativePm>,
+}
+impl ConfigSpace for ControlledConfig {
+    fn read8(&self, offset: u16) -> u8 {
+        let native = self.native.read8(offset);
+        let value = if *self.peer.mode.lock().unwrap() == PmMode::Removed {
+            u8::MAX
+        } else {
+            native
+        };
+        self.peer
+            .accesses
+            .lock()
+            .unwrap()
+            .push(ConfigAccess::Read8(offset, value));
+        value
+    }
+    fn read16(&self, offset: u16) -> u16 {
+        let native = self.native.read16(offset);
+        let mode = *self.peer.mode.lock().unwrap();
+        let value = if mode == PmMode::Removed
+            || (mode == PmMode::LoseD3Readback && offset == 0x44 && native & 3 == 3)
+        {
+            u16::MAX
+        } else {
+            native
+        };
+        self.peer
+            .accesses
+            .lock()
+            .unwrap()
+            .push(ConfigAccess::Read16(offset, value));
+        value
+    }
+    fn read32(&self, offset: u16) -> u32 {
+        let native = self.native.read32(offset);
+        let value = if *self.peer.mode.lock().unwrap() == PmMode::Removed {
+            u32::MAX
+        } else {
+            native
+        };
+        self.peer
+            .accesses
+            .lock()
+            .unwrap()
+            .push(ConfigAccess::Read32(offset, value));
+        value
+    }
+    fn write8(&mut self, offset: u16, value: u8) {
+        self.native.write8(offset, value);
+        self.peer
+            .accesses
+            .lock()
+            .unwrap()
+            .push(ConfigAccess::Write8(offset, value));
+    }
+    fn write16(&mut self, offset: u16, value: u16) {
+        self.native.write16(offset, value);
+        self.peer
+            .accesses
+            .lock()
+            .unwrap()
+            .push(ConfigAccess::Write16(offset, value));
+        if offset == 0x44 {
+            match (*self.peer.mode.lock().unwrap(), value & 3) {
+                (PmMode::RefuseD0, 0) => self.native.write16(offset, (value & !3) | 3),
+                (PmMode::RefuseD3, 3) => self.native.write16(offset, value & !3),
+                _ => {}
+            }
+            // Synchronous device response through the same retained accessor.
+            // This internal read is deliberately absent from the caller trace.
+            self.peer.actual_state.store(
+                usize::from(self.native.read16(offset) & 3),
+                Ordering::Relaxed,
+            );
+        }
+    }
+    fn write32(&mut self, offset: u16, value: u32) {
+        self.native.write32(offset, value);
+        self.peer
+            .accesses
+            .lock()
+            .unwrap()
+            .push(ConfigAccess::Write32(offset, value));
     }
 }
 struct ConfigResource(owned::PhysicalSpan);
@@ -871,24 +1020,6 @@ unsafe impl owned::ResourceBacking for ConfigResource {
 // check_context is a mapping-context callback, not a register-access callback.
 unsafe impl owned::MappingPlatform for NativePm {
     fn check_context(&self, _: owned::AddressSpace) -> core::result::Result<(), owned::Error> {
-        let pm = unsafe { self.pointer().as_ptr().add(0x44).cast::<u16>() };
-        let value = unsafe { pm.read_volatile() };
-        if value != u16::MAX {
-            self.actual_state
-                .store(usize::from(value & 3), Ordering::Relaxed);
-        }
-        match self.mode.load(Ordering::Relaxed) {
-            1 if value & 3 == 0 => {
-                unsafe { pm.write_volatile(3) };
-                self.actual_state.store(3, Ordering::Relaxed);
-            }
-            2 if value & 3 == 3 => unsafe { pm.write_volatile(u16::MAX) },
-            3 if value & 3 == 3 => {
-                unsafe { pm.write_volatile(0) };
-                self.actual_state.store(0, Ordering::Relaxed);
-            }
-            _ => {}
-        }
         Ok(())
     }
     unsafe fn map(
@@ -915,10 +1046,11 @@ unsafe impl owned::MappingPlatform for NativePm {
         Ok(())
     }
 }
-fn native_config(address: Address, device: u16) -> (Function<OwnedConfig>, Arc<NativePm>) {
+fn native_config(address: Address, device: u16) -> (Function<ControlledConfig>, Arc<NativePm>) {
     let model = Arc::new(NativePm {
         page: Box::new(UnsafeCell::new(ConfigPage([0; 4096]))),
-        mode: AtomicUsize::new(0),
+        mode: Mutex::new(PmMode::Normal),
+        accesses: Mutex::new(Vec::new()),
         actual_state: AtomicUsize::new(0),
     });
     let span = owned::PhysicalSpan::new(0x8010_0000, 4096).unwrap();
@@ -954,22 +1086,44 @@ fn native_config(address: Address, device: u16) -> (Function<OwnedConfig>, Arc<N
     config.write8(0x34, 0x40);
     config.write16(0x40, 1);
     config.write16(0x44, 0);
+    let config = ControlledConfig {
+        native: config,
+        peer: model.clone(),
+    };
     (Function::new(address, config).unwrap(), model)
 }
 
+// Preserve these historical selector names. Their native volatile transport is
+// real RAM; refused/absent device responses are explicitly modeled by the wrapper.
 #[test]
 fn native_failed_d0_resume_is_retryable_and_never_uses_powered_off_mmio() {
-    let (mut net, peer, domain, _) = setup(0x07b1);
+    let (mut net, peer, domain, dropped) = setup(0x07b1);
     let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
     net.start().unwrap();
     net.suspend().unwrap();
     let writes = peer.writes.borrow().len();
     let reads = peer.reads.borrow().len();
-    pm.mode.store(1, Ordering::Relaxed);
+    *pm.mode.lock().unwrap() = PmMode::RefuseD0;
+    let access_start = pm.accesses.lock().unwrap().len();
     let clock = Clock {
         ticks_per_microsecond: 0,
     };
-    assert!(net.resume_with_clock(&clock).is_err());
+    assert_eq!(
+        net.resume_with_clock(&clock),
+        Err(Error::Unsupported("AQtion PCI D0 transition failed"))
+    );
+    assert_eq!(
+        pm.pm_accesses_since(access_start),
+        [
+            ConfigAccess::Read16(0x44, 3),
+            ConfigAccess::Write16(0x44, 0),
+            ConfigAccess::Read16(0x44, 3),
+        ]
+    );
+    assert!(net.function.is_some() && net.hardware.is_some() && net.domain.is_some());
+    assert!(net.memory.is_some());
+    assert_eq!(domain.maps.lock().unwrap().len(), 4);
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
     assert_eq!(net.state(), State::Suspended);
     assert_eq!(net.power, PciPower::Unknown);
     assert_eq!(pm.actual_state.load(Ordering::Relaxed), 3);
@@ -977,8 +1131,17 @@ fn native_failed_d0_resume_is_retryable_and_never_uses_powered_off_mmio() {
     assert!(net.restart().is_err());
     assert_eq!(peer.writes.borrow().len(), writes);
     assert_eq!(peer.reads.borrow().len(), reads);
-    pm.mode.store(0, Ordering::Relaxed);
+    *pm.mode.lock().unwrap() = PmMode::Normal;
+    let access_start = pm.accesses.lock().unwrap().len();
     net.resume_with_clock(&clock).unwrap();
+    assert_eq!(
+        pm.pm_accesses_since(access_start),
+        [
+            ConfigAccess::Read16(0x44, 3),
+            ConfigAccess::Write16(0x44, 0),
+            ConfigAccess::Read16(0x44, 0),
+        ]
+    );
     assert_eq!(net.power, PciPower::D0);
     assert_eq!(net.state(), State::Running);
     assert_eq!(domain.engine_epoch.load(Ordering::Relaxed), 2);
@@ -993,8 +1156,22 @@ fn native_d3_readback_loss_keeps_drained_retirement_and_d0_retry_safe() {
         let (mut net, peer, domain, dropped) = setup(0x04c0);
         let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
         net.start().unwrap();
-        pm.mode.store(2, Ordering::Relaxed);
+        *pm.mode.lock().unwrap() = PmMode::LoseD3Readback;
+        let access_start = pm.accesses.lock().unwrap().len();
         assert_eq!(net.suspend(), Err(Error::Removed));
+        assert_eq!(
+            pm.pm_accesses_since(access_start),
+            [
+                ConfigAccess::Read16(0x44, 0),
+                ConfigAccess::Write16(0x44, 3),
+                ConfigAccess::Read16(0x44, u16::MAX),
+            ]
+        );
+        assert!(net.function.is_some() && net.hardware.is_some() && net.domain.is_some());
+        assert!(net.memory.is_some());
+        assert_eq!(domain.maps.lock().unwrap().len(), 4);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(domain.drained_epoch.load(Ordering::Relaxed), 1);
         assert_eq!(net.power, PciPower::Unknown);
         assert_eq!(net.state(), State::Stopped);
         assert_eq!(pm.actual_state.load(Ordering::Relaxed), 3);
@@ -1010,37 +1187,52 @@ fn native_d3_readback_loss_keeps_drained_retirement_and_d0_retry_safe() {
         assert_eq!(peer.writes.borrow().len(), writes);
         assert_eq!(peer.reads.borrow().len(), reads);
         if !retire {
-            pm.mode.store(0, Ordering::Relaxed);
-            // The native function answers config again, still actually D3hot.
-            net.function.as_mut().unwrap().config().write16(0x44, 3);
+            *pm.mode.lock().unwrap() = PmMode::Normal;
+            // The model answers config again; the retained native PMCSR is D3hot.
             net.resume_with_clock(&Clock {
                 ticks_per_microsecond: 0,
             })
             .unwrap();
+            assert_eq!(net.power, PciPower::D0);
+            assert_eq!(net.state(), State::Running);
+            assert_eq!(domain.engine_epoch.load(Ordering::Relaxed), 2);
             net.retire().unwrap();
+            assert_eq!(dropped.load(Ordering::Relaxed), 4);
         }
     }
 }
 
 #[test]
 fn initial_native_d0_failure_retains_uninitialized_owner_without_mmio() {
-    let (mut net, peer, _, dropped) = setup(0x07b1);
+    let (mut net, peer, domain, dropped) = setup_with_memory(0x07b1, false);
     let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
     // Model attach before Memory allocation, using its actual power helper.
-    net.memory = None;
     net.state = State::Faulted;
     net.function.as_mut().unwrap().config().write16(0x44, 3);
-    pm.mode.store(1, Ordering::Relaxed);
-    assert!(
+    *pm.mode.lock().unwrap() = PmMode::RefuseD0;
+    let access_start = pm.accesses.lock().unwrap().len();
+    assert_eq!(
         power_up(
             net.function.as_mut().unwrap(),
             &Clock {
                 ticks_per_microsecond: 0
             },
             &mut net.power
-        )
-        .is_err()
+        ),
+        Err(Error::Unsupported("AQtion PCI D0 transition failed"))
     );
+    assert_eq!(
+        pm.pm_accesses_since(access_start),
+        [
+            ConfigAccess::Read16(0x44, 3),
+            ConfigAccess::Write16(0x44, 0),
+            ConfigAccess::Read16(0x44, 3),
+        ]
+    );
+    assert_eq!(pm.actual_state.load(Ordering::Relaxed), 3);
+    assert!(net.function.is_some() && net.hardware.is_some() && net.domain.is_some());
+    assert!(net.memory.is_none());
+    assert!(domain.maps.lock().unwrap().is_empty());
     assert_eq!(net.power, PciPower::Unknown);
     assert!(net.stop().is_err());
     assert!(net.restart().is_err());
@@ -1048,6 +1240,44 @@ fn initial_native_d0_failure_retains_uninitialized_owner_without_mmio() {
     assert!(peer.writes.borrow().is_empty());
     assert!(peer.reads.borrow().is_empty());
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn modeled_removed_config_resume_retains_owners_and_never_uses_powered_off_mmio() {
+    for device in [0x07b1, 0x04c0] {
+        let (mut net, peer, domain, dropped) = setup(device);
+        let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
+        net.start().unwrap();
+        net.suspend().unwrap();
+        let reads = peer.reads.borrow().len();
+        let writes = peer.writes.borrow().len();
+        let access_start = pm.accesses.lock().unwrap().len();
+        *pm.mode.lock().unwrap() = PmMode::Removed;
+        let clock = Clock {
+            ticks_per_microsecond: 0,
+        };
+        assert_eq!(net.resume_with_clock(&clock), Err(Error::Removed));
+        assert_eq!(
+            &pm.accesses.lock().unwrap()[access_start..],
+            &[ConfigAccess::Read16(4, u16::MAX)]
+        );
+        assert_eq!(net.state(), State::Suspended);
+        assert_eq!(net.power, PciPower::Unknown);
+        assert_eq!(pm.actual_state.load(Ordering::Relaxed), 3);
+        assert!(net.function.is_some() && net.hardware.is_some() && net.domain.is_some());
+        assert!(net.memory.is_some());
+        assert_eq!(domain.maps.lock().unwrap().len(), 4);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        assert!(net.restart().is_err());
+        assert_eq!(peer.reads.borrow().len(), reads);
+        assert_eq!(peer.writes.borrow().len(), writes);
+        *pm.mode.lock().unwrap() = PmMode::Normal;
+        net.resume_with_clock(&clock).unwrap();
+        assert_eq!(net.power, PciPower::D0);
+        assert_eq!(domain.engine_epoch.load(Ordering::Relaxed), 2);
+        net.retire().unwrap();
+        assert_eq!(dropped.load(Ordering::Relaxed), 4);
+    }
 }
 
 fn firmware4(peer: &Peer, flb: bool) {
@@ -1301,6 +1531,70 @@ fn model_rejects_dma_drain_before_native_bus_master_clear_and_retains_pending_wr
     }
 }
 #[test]
+fn model_rejects_dma_drain_and_unmap_without_bus_master_readback() {
+    for device in [0x07b1, 0x04c0] {
+        for unmap in [false, true] {
+            let (mut net, peer, domain, dropped) = setup(device);
+            net.start().unwrap();
+            if unmap {
+                net.stop().unwrap();
+            } else {
+                domain.defer_writebacks.store(true, Ordering::Relaxed);
+                peer.receive(&[23; 60], 0, 3, 60);
+                net.hw().stop_queues().unwrap();
+            }
+            let drains = domain.drain_count.load(Ordering::Relaxed);
+            let epoch = domain.drained_epoch.load(Ordering::Relaxed);
+            let pending = domain.pending_dma.load(Ordering::Relaxed);
+            let posted = domain.posted.lock().unwrap().clone();
+            assert_eq!(domain.maps.lock().unwrap().len(), 4);
+            if !unmap {
+                assert!(pending > 0);
+                assert!(!posted.is_empty());
+            }
+            let config = net.function.as_mut().unwrap().config();
+            let command = config.read16(4);
+            config.write16(4, command & !4);
+            // This device-side volatile sample is deliberately absent from the
+            // caller trace: cleared RAM cannot substitute for driver readback.
+            assert_eq!(peer.native_pm.borrow().as_ref().unwrap().command() & 4, 0);
+            let rejection = catch_unwind(AssertUnwindSafe(|| {
+                if unmap {
+                    net.memory.as_mut().unwrap().retire().unwrap();
+                } else {
+                    unsafe { domain.drain_posted_writes().unwrap() };
+                }
+            }))
+            .expect_err("model accepted teardown without command readback");
+            let message = rejection
+                .downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+                .or_else(|| rejection.downcast_ref::<&str>().copied())
+                .expect("expected the readback assertion");
+            assert!(message.contains(
+                "PCI bus-master clear requires caller readback before DMA drain or unmap"
+            ));
+            assert_eq!(domain.drain_count.load(Ordering::Relaxed), drains);
+            assert_eq!(domain.drained_epoch.load(Ordering::Relaxed), epoch);
+            assert_eq!(domain.pending_dma.load(Ordering::Relaxed), pending);
+            assert_eq!(*domain.posted.lock().unwrap(), posted);
+            assert_eq!(domain.maps.lock().unwrap().len(), 4);
+            assert_eq!(dropped.load(Ordering::Relaxed), 0);
+            assert!(net.memory.is_some());
+            // Re-enter production stop even if the control deliberately broke
+            // an already stopped owner's readback assumption.
+            net.state = State::Faulted;
+            net.retire().unwrap();
+            assert_eq!(domain.drain_count.load(Ordering::Relaxed), drains + 1);
+            assert_eq!(domain.pending_dma.load(Ordering::Relaxed), 0);
+            assert!(domain.posted.lock().unwrap().is_empty());
+            assert!(domain.maps.lock().unwrap().is_empty());
+            assert_eq!(dropped.load(Ordering::Relaxed), 4);
+        }
+    }
+}
+
+#[test]
 fn model_rejects_unmap_after_native_bus_master_reenable_and_retains_dma() {
     for device in [0x07b1, 0x04c0] {
         let (mut net, _, domain, dropped) = setup(device);
@@ -1417,10 +1711,11 @@ fn firmware4_first_lock_timeout_does_not_release_another_owner() {
 
 #[test]
 fn native_refused_d3_requires_fresh_d0_acknowledgement_before_restart() {
-    let (mut net, peer, _, _) = setup(0x07b1);
+    let (mut net, peer, domain, dropped) = setup(0x07b1);
     let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
     net.start().unwrap();
-    pm.mode.store(3, Ordering::Relaxed);
+    *pm.mode.lock().unwrap() = PmMode::RefuseD3;
+    let access_start = pm.accesses.lock().unwrap().len();
     assert_eq!(
         net.suspend(),
         Err(Error::Readback {
@@ -1428,16 +1723,36 @@ fn native_refused_d3_requires_fresh_d0_acknowledgement_before_restart() {
             observed: 0
         })
     );
+    assert_eq!(
+        pm.pm_accesses_since(access_start),
+        [
+            ConfigAccess::Read16(0x44, 0),
+            ConfigAccess::Write16(0x44, 3),
+            ConfigAccess::Read16(0x44, 0),
+        ]
+    );
+    assert!(net.function.is_some() && net.hardware.is_some() && net.domain.is_some());
+    assert!(net.memory.is_some());
+    assert_eq!(domain.maps.lock().unwrap().len(), 4);
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    assert_eq!(pm.actual_state.load(Ordering::Relaxed), 0);
     assert_eq!(net.state(), State::Stopped);
     assert_eq!(net.power, PciPower::Unknown);
+    let reads = peer.reads.borrow().len();
     let writes = peer.writes.borrow().len();
     assert!(net.restart().is_err());
     assert_eq!(peer.writes.borrow().len(), writes);
-    pm.mode.store(0, Ordering::Relaxed);
+    assert_eq!(peer.reads.borrow().len(), reads);
+    *pm.mode.lock().unwrap() = PmMode::Normal;
+    let access_start = pm.accesses.lock().unwrap().len();
     net.resume_with_clock(&Clock {
         ticks_per_microsecond: 0,
     })
     .unwrap();
+    assert_eq!(
+        pm.pm_accesses_since(access_start),
+        [ConfigAccess::Read16(0x44, 0)]
+    );
     assert_eq!(net.power, PciPower::D0);
     net.retire().unwrap();
 }
