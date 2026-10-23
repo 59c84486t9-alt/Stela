@@ -75,7 +75,7 @@ impl<B: Io> Engine<'_, B> {
     }
     fn asynchronous(&mut self, packet: Packet) -> Result<()> {
         if self.attempt.asynchronous.len() >= MAX_ASYNC_PACKETS {
-            let (Packet::Event(bytes) | Packet::Acl(bytes)) = packet;
+            let (Packet::Event(bytes) | Packet::Acl(bytes) | Packet::Diagnostic(bytes)) = packet;
             return Err(Error::protocol(
                 "bounded asynchronous initialization queue",
                 &bytes,

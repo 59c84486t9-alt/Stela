@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Explicit native consumer initialization, separate from raw USB attachment.
 //! The retained result owns metadata only and never extends a provider borrow.
-use super::{Error, Hci, Io, broadcom, intel, mediatek, realtek};
+use super::{Error, Hci, Io, broadcom, intel, mediatek, qca, realtek};
 use crate::firmware::Provider;
 use alloc::boxed::Box;
 use core::fmt;
@@ -10,6 +10,7 @@ use core::fmt;
 /// guest readiness. Inspect transport lifecycle separately before using HCI.
 #[derive(Debug)]
 pub enum InitializationReport {
+    Qualcomm(qca::OwnedReport),
     Broadcom(broadcom::OwnedReport),
     Intel(intel::OwnedReport),
     Realtek(realtek::OwnedReport),
@@ -24,6 +25,7 @@ pub enum InitializationError {
         product: u16,
         revision: u16,
     },
+    Qualcomm(qca::Error),
     Broadcom(broadcom::Error),
     Intel(intel::Error),
     Realtek(realtek::Error),
@@ -71,6 +73,11 @@ impl<B: Io> Hci<B> {
         platform: intel::PlatformInputs,
     ) -> Result<InitializationReport, InitializationError> {
         self.open().map_err(InitializationError::Transport)?;
+        if qca::is_candidate(self.binding.device()) {
+            return qca::initialize(self, provider)
+                .map(InitializationReport::Qualcomm)
+                .map_err(InitializationError::Qualcomm);
+        }
         if broadcom::is_candidate(self.binding.device()) {
             return broadcom::initialize(self, provider)
                 .map(InitializationReport::Broadcom)

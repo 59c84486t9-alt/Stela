@@ -95,7 +95,7 @@ impl<B: Io> Engine<'_, B> {
         for p in self.hci.poll()? {
             match p {
                 Packet::Event(e) => self.pending.push_back(e),
-                Packet::Acl(a) => {
+                Packet::Acl(a) | Packet::Diagnostic(a) => {
                     return Err(Error::protocol(
                         "unexpected ACL while initializing MT79xx",
                         &a,

@@ -24,7 +24,10 @@
 //! retained post-download observations. Matching vendor-specific HCI interfaces
 //! are admitted separately from the standard class; descriptor IDs never prove
 //! the runtime silicon or firmware. A Bluetooth host stack independently
-//! establishes radio services.
+//! establishes radio services. [`qca::initialize`] adds source-listed Rome/WCN
+//! USB DFU with actual OTP/status and exact board-specific rampatch/NVM resources.
+//! WCN debug ACL retains its original bytes as [`Packet::Diagnostic`]; controller
+//! dump signatures fail the attachment and retain the first raw fault.
 //! A successful USB command submission is not HCI Command Complete/Status.
 //! The separate [`mediatek::media`] session adds this PC's initialized MT7925
 //! SCO/interrupt-ISO transport. Generic media, bulk serialization, physical
@@ -42,6 +45,7 @@ mod host;
 mod initialization;
 pub mod intel;
 pub mod mediatek;
+pub mod qca;
 pub mod realtek;
 
 pub use binding::{Binding, CLASS};
@@ -108,6 +112,18 @@ pub trait Io {
     fn receive(&mut self, pipe: Pipe) -> Result<Option<Vec<u8>>, BlockError>;
     /// Raw bulk OUT; the HCI layer validates ACL or identified vendor commands.
     fn write_acl(&mut self, packet: &[u8]) -> Result<(), BlockError>;
+    /// Identified vendor firmware body on the bound bulk OUT endpoint, with
+    /// an actual per-transfer deadline starting before publication. Cleanup has
+    /// its own bounded retirement interval; a timed-out transfer must retain its
+    /// owner until acknowledged retirement or permanent quarantine. This is not
+    /// an HCI ACL packet. A
+    /// transport lacking bounded firmware I/O must refuse rather than silently
+    /// substitute an incompatible deadline or framing mode.
+    fn write_firmware(&mut self, _bytes: &[u8], _timeout_us: u64) -> Result<(), BlockError> {
+        Err(BlockError::Unsupported(
+            "bounded Bluetooth firmware bulk output",
+        ))
+    }
     /// Cancel/acknowledge a posted bulk IN before changing its framing mode.
     fn quiesce_bulk(&mut self) -> Result<(), BlockError>;
     fn close(&mut self) -> Result<(), BlockError>;
@@ -131,8 +147,17 @@ pub enum State {
 pub enum ErrorKind {
     Usb(BlockError),
     InvalidPacket(&'static str),
-    TooLarge { maximum: usize, actual: usize },
+    TooLarge {
+        maximum: usize,
+        actual: usize,
+    },
     PartialTimeout(Pipe),
+    /// Exact first controller-dump packet. The transport is terminal and its
+    /// outstanding DMA must be retired or quarantined; no recovery is implied.
+    ControllerDump {
+        driver: &'static str,
+        packet: Packet,
+    },
     Closed,
     Failed,
 }
@@ -163,6 +188,9 @@ fn error(kind: ErrorKind) -> Error {
 pub enum Packet {
     Event(Vec<u8>),
     Acl(Vec<u8>),
+    /// Original vendor diagnostic frame, including its original ACL header.
+    /// This must never be delivered as ordinary Bluetooth ACL data.
+    Diagnostic(Vec<u8>),
 }
 
 /// Raw legacy HCI transport over a validated USB binding.
@@ -303,11 +331,22 @@ impl<B: Io> Hci<B> {
                 Ok(frames) => frames,
                 Err(failure) => return Err(self.fail(failure)),
             };
-            packets.extend(frames.into_iter().map(|frame| match pipe {
-                Pipe::Event => Packet::Event(frame),
-                Pipe::Acl if self.intel_bootloader => Packet::Event(frame),
-                Pipe::Acl => Packet::Acl(frame),
-            }));
+            for frame in frames {
+                let packet = match pipe {
+                    Pipe::Event => Packet::Event(frame),
+                    Pipe::Acl if self.intel_bootloader => Packet::Event(frame),
+                    Pipe::Acl => Packet::Acl(frame),
+                };
+                match qca::classify(self.binding.device(), packet) {
+                    Ok(packet) => packets.push(packet),
+                    Err(packet) => {
+                        return Err(self.fail(ErrorKind::ControllerDump {
+                            driver: "qualcomm-usb",
+                            packet,
+                        }));
+                    }
+                }
+            }
         }
         Ok(packets)
     }

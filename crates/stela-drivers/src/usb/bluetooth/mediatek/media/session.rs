@@ -153,7 +153,7 @@ impl<B: MediaIo> Session<B> {
         let mut bytes: usize = pending
             .iter()
             .map(|p| match p {
-                Received::Hci(Packet::Event(b) | Packet::Acl(b))
+                Received::Hci(Packet::Event(b) | Packet::Acl(b) | Packet::Diagnostic(b))
                 | Received::Sco(b)
                 | Received::Iso(b) => b.len(),
                 Received::Loss(_, _) => 0,
@@ -205,7 +205,7 @@ impl<B: MediaIo> Session<B> {
                 };
                 if !matched {
                     bytes += match &packet {
-                        Packet::Event(b) | Packet::Acl(b) => b.len(),
+                        Packet::Event(b) | Packet::Acl(b) | Packet::Diagnostic(b) => b.len(),
                     };
                     if bytes > 32768 || pending.len() >= 64 {
                         return Err(Error::Packet(

@@ -88,7 +88,7 @@ impl<B: Io> Engine<'_, B> {
             for packet in self.hci.poll()? {
                 match packet {
                     Packet::Event(e) => self.pending.push_back(e),
-                    Packet::Acl(a) => {
+                    Packet::Acl(a) | Packet::Diagnostic(a) => {
                         return Err(Error::protocol("ACL while initializing firmware", &a));
                     }
                 }

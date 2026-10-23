@@ -86,6 +86,62 @@ impl Host {
         }
         Ok(())
     }
+    fn write_bulk(&mut self, packet: &[u8], timeout_us: u64) -> Result<(), BlockError> {
+        if self.transmit_pending {
+            return Err(BlockError::Unsupported(
+                "unretired USB Bluetooth bulk output",
+            ));
+        }
+        let deadline = self.clock.deadline(timeout_us);
+        self.open()?;
+        if packet.len() > self.transmit.len() {
+            return Err(BlockError::Unsupported("USB Bluetooth bulk buffer size"));
+        }
+        self.controller
+            .borrow_mut()
+            .endpoint_ready(self.slot, self.output.dci())?;
+        if deadline.passed() {
+            return Err(BlockError::Timeout);
+        }
+        self.transmit.bytes_mut()[..packet.len()].copy_from_slice(packet);
+        fence(Ordering::Release);
+        let dci = self.output.dci();
+        if deadline.passed() {
+            return Err(BlockError::Timeout);
+        }
+        let trb = self.controller.borrow_mut().submit(
+            self.slot,
+            dci,
+            self.transmit.physical(),
+            packet.len(),
+        )?;
+        self.transmit_pending = true;
+        loop {
+            if deadline.passed() {
+                return Err(BlockError::Timeout);
+            }
+            let completed =
+                self.controller
+                    .borrow_mut()
+                    .completed(self.slot, dci, trb, packet.len());
+            if let Some(result) = completed {
+                if deadline.passed() {
+                    return Err(BlockError::Timeout);
+                }
+                let length = result?;
+                if length != packet.len() {
+                    return Err(BlockError::Unsupported("short USB Bluetooth bulk output"));
+                }
+                self.transmit_pending = false;
+                return Ok(());
+            }
+            if deadline.passed() {
+                return Err(BlockError::Timeout);
+            }
+            crate::waiting();
+            core::hint::spin_loop();
+        }
+    }
 }
 
 impl Io for Host {
@@ -150,43 +206,14 @@ impl Io for Host {
     }
 
     fn write_acl(&mut self, packet: &[u8]) -> Result<(), BlockError> {
-        self.open()?;
-        if packet.len() > self.transmit.len() {
-            return Err(BlockError::Unsupported("USB Bluetooth ACL buffer size"));
+        self.write_bulk(packet, SEND_US)
+    }
+
+    fn write_firmware(&mut self, bytes: &[u8], timeout_us: u64) -> Result<(), BlockError> {
+        if timeout_us == 0 {
+            return Err(BlockError::Unsupported("zero firmware bulk deadline"));
         }
-        self.controller
-            .borrow_mut()
-            .endpoint_ready(self.slot, self.output.dci())?;
-        self.transmit.bytes_mut()[..packet.len()].copy_from_slice(packet);
-        fence(Ordering::Release);
-        let dci = self.output.dci();
-        let trb = self.controller.borrow_mut().submit(
-            self.slot,
-            dci,
-            self.transmit.physical(),
-            packet.len(),
-        )?;
-        self.transmit_pending = true;
-        let deadline = self.clock.deadline(SEND_US);
-        loop {
-            let completed =
-                self.controller
-                    .borrow_mut()
-                    .completed(self.slot, dci, trb, packet.len());
-            if let Some(result) = completed {
-                let length = result?;
-                if length != packet.len() {
-                    return Err(BlockError::Unsupported("short USB Bluetooth ACL output"));
-                }
-                self.transmit_pending = false;
-                return Ok(());
-            }
-            if deadline.passed() {
-                return Err(BlockError::Timeout);
-            }
-            crate::waiting();
-            core::hint::spin_loop();
-        }
+        self.write_bulk(bytes, timeout_us)
     }
 
     fn quiesce_bulk(&mut self) -> Result<(), BlockError> {
@@ -300,5 +327,91 @@ mod tests {
             assert!(hci.close().is_err());
             assert_eq!(hci.state(), super::super::State::Failed);
         }
+    }
+    fn firmware_device() -> Device {
+        let configuration = vec![
+            9, 2, 39, 0, 1, 1, 0, 0x80, 50, 9, 4, 0, 0, 3, 0xe0, 1, 1, 0, 7, 5, 0x81, 3, 16, 0, 1,
+            7, 5, 0x82, 2, 64, 0, 0, 7, 5, 2, 2, 64, 0, 0,
+        ];
+        Device {
+            vendor_ethernet_tcr: None,
+            vendor_ethernet_revision: None,
+            slot: 1,
+            speed: FULL_SPEED,
+            location: "real QCA firmware DMA model".into(),
+            descriptor: [
+                18, 1, 0, 2, 0xe0, 1, 1, 64, 0xf3, 0x0c, 0, 0xe3, 0, 1, 0, 0, 0, 1,
+            ],
+            configurations: vec![configuration.clone()],
+            configuration,
+            manufacturer: None,
+            product: None,
+            serial: None,
+            language: None,
+        }
+    }
+    #[test]
+    fn firmware_bulk_uses_actual_dma_and_expired_or_zero_budget_never_publishes() {
+        use alloc::rc::Rc;
+        use core::cell::RefCell;
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: retained backing exclusively owns these actual modeled DMA pages.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (controller, model) = xhci::model::cancellation_controller(&mut dma);
+        let controller = Rc::new(RefCell::new(controller));
+        let device = firmware_device();
+        let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+        let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
+        hci.io.clock.ticks_per_microsecond = 1000;
+        let payload = vec![0xa5; 4096];
+        hci.io.write_firmware(&payload, 3_000_000).unwrap();
+        assert_eq!(model.borrow().outgoing.last().unwrap(), &payload);
+        assert!(!hci.io.transmit_pending);
+        let before = backing.clone();
+        assert!(hci.io.write_firmware(&[0xbb; 64], 0).is_err());
+        assert_eq!(backing, before);
+        hci.io.clock.ticks_per_microsecond = 0;
+        assert_eq!(
+            hci.io.write_firmware(&[0xcc; 64], 3_000_000),
+            Err(BlockError::Timeout)
+        );
+        assert_eq!(backing, before);
+        assert!(!hci.io.transmit_pending);
+    }
+    #[test]
+    fn timed_out_firmware_bulk_cannot_rewrite_live_dma_after_failed_retirement() {
+        use alloc::rc::Rc;
+        use core::cell::RefCell;
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives the native controller, HCI owner and DMA buffers.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (controller, model) = xhci::model::cancellation_controller(&mut dma);
+        model.borrow_mut().silence_transfer = Some(4);
+        const STOP_ENDPOINT: u32 = 15;
+        const CONTEXT_STATE_ERROR: u32 = 19;
+        model.borrow_mut().fail = Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));
+        let controller = Rc::new(RefCell::new(controller));
+        let device = firmware_device();
+        let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+        let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
+        // Use a generous real publication window: this is a timeout/ownership
+        // test, not a wall-time benchmark or a scheduler-latency assertion.
+        hci.io.clock.ticks_per_microsecond = 1000;
+        assert_eq!(
+            hci.io.write_firmware(&[0xa5; 64], 3_000_000),
+            Err(BlockError::Timeout)
+        );
+        assert!(hci.io.transmit_pending);
+        let before = backing.clone();
+        assert!(hci.io.write_firmware(&[0xbb; 64], 3_000_000).is_err());
+        assert_eq!(backing, before);
+        assert!(hci.close().is_err());
+        assert_eq!(hci.state(), super::super::State::Failed);
+        assert!(hci.io.transmit_pending);
+        let after = backing.clone();
+        assert!(hci.io.write_firmware(&[0xcc; 64], 3_000_000).is_err());
+        assert_eq!(backing, after);
     }
 }
