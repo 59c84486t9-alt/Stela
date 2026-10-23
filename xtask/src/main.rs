@@ -47,10 +47,6 @@ mod boot_native_memory;
 #[allow(dead_code)] // Includes UEFI capability checks unused by hosted topology tests.
 mod boot_native_topology;
 #[cfg(test)]
-#[path = "../../crates/stela-boot/src/engine/xstate.rs"]
-#[allow(dead_code)] // Actual descriptor/IST capture and entry execute only in UEFI.
-mod boot_xstate;
-#[cfg(test)]
 #[path = "../../crates/stela-boot/src/paging/controls.rs"]
 mod boot_paging_controls;
 #[cfg(test)]
@@ -68,6 +64,10 @@ mod boot_topology;
 #[path = "../../crates/stela-boot/src/native_dma/vtd.rs"]
 #[allow(dead_code)]
 mod boot_vtd;
+#[cfg(test)]
+#[path = "../../crates/stela-boot/src/engine/xstate.rs"]
+#[allow(dead_code)] // Actual descriptor/IST capture and entry execute only in UEFI.
+mod boot_xstate;
 
 #[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_irq/ioapic.rs"]

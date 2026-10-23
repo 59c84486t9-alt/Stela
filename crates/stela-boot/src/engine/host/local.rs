@@ -195,7 +195,10 @@ pub(crate) unsafe fn activate(
         local.this.is_null(),
         "host processor local record already active"
     );
-    assert!(local.xstate.image_bytes != 0, "processor xstate descriptor owner absent");
+    assert!(
+        local.xstate.image_bytes != 0,
+        "processor xstate descriptor owner absent"
+    );
     local.handler = handler;
     local.this = local;
     // SAFETY: the descriptor owner pins this private record for the CPU lifetime.

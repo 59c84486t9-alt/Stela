@@ -455,16 +455,18 @@ pub(crate) unsafe fn install_on(
     }
     // SAFETY: install_on owns this actual CPU and permanently pinned Tables,
     // including both distinct IST arrays, before HostOwner or AP READY.
-    let owner = unsafe { super::xstate::XstateOwner::capture() }
-        .unwrap_or_else(|error| {
-            output::arguments(format_args!("native xstate entry refused: {error:?}\n"));
-            output::fatal("native IRQ state contract unavailable")
-        });
+    let owner = unsafe { super::xstate::XstateOwner::capture() }.unwrap_or_else(|error| {
+        output::arguments(format_args!("native xstate entry refused: {error:?}\n"));
+        output::fatal("native IRQ state contract unavailable")
+    });
     for stack in [&tables.fault_stack, &tables.fatal_stack] {
         let bottom = &raw const stack.0 as usize;
         let top = bottom + IST_BYTES;
         let frame = top - size_of::<Frame>();
-        if owner.check_entry_extent(frame, bottom + HANDLER_STACK_BYTES, top).is_err() {
+        if owner
+            .check_entry_extent(frame, bottom + HANDLER_STACK_BYTES, top)
+            .is_err()
+        {
             output::fatal("native IST cannot retain full xstate image and handler budget");
         }
     }

@@ -360,7 +360,8 @@ fn same_legacy(left: &Image, right: &Image) -> bool {
         && (0..8).all(|register| {
             let offset = 32 + register * 16;
             left.0[offset..offset + 10] == right.0[offset..offset + 10]
-        }) && left.0[160..416] == right.0[160..416]
+        })
+        && left.0[160..416] == right.0[160..416]
 }
 
 fn pointer(image: &Image, start: usize) -> u64 {
@@ -373,26 +374,48 @@ fn pointer(image: &Image, start: usize) -> u64 {
 /// a fresh actual run qualifies every case and its meaningful FP pointer seed.
 pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
     let bodies = [
-        (ptr::addr_of!(stela_native_fp_normal), ptr::addr_of!(stela_native_fp_normal_end), false),
-        (ptr::addr_of!(stela_native_fp_fault), ptr::addr_of!(stela_native_fp_fault_end), true),
+        (
+            ptr::addr_of!(stela_native_fp_normal),
+            ptr::addr_of!(stela_native_fp_normal_end),
+            false,
+        ),
+        (
+            ptr::addr_of!(stela_native_fp_fault),
+            ptr::addr_of!(stela_native_fp_fault_end),
+            true,
+        ),
     ];
     for (start, end, faulting) in bodies {
-        let bytes = (end as usize).checked_sub(start as usize)
+        let bytes = (end as usize)
+            .checked_sub(start as usize)
             .filter(|&bytes| bytes != 0 && bytes < 4096)
             .ok_or("native FP fixture source extent differs")?;
         // SAFETY: exact mapped read-only image symbols delimit the authored
         // body, including only baseline instructions and its true RET/UD2.
         let body = unsafe { core::slice::from_raw_parts(start, bytes) };
-        let code = host.install(body).map_err(|_| "native FP fixture arena full")?;
+        let code = host
+            .install(body)
+            .map_err(|_| "native FP fixture arena full")?;
         for context_abi in [0, 1] {
             let mut guest = GuestState::default();
             let mut context = ExecutionContext::default();
-            let context_before = (context.version, context.bytes, context.memory, context.scalable, context.system);
+            let context_before = (
+                context.version,
+                context.bytes,
+                context.memory,
+                context.scalable,
+                context.system,
+            );
             let mut expected_guest = guest.clone();
             expected_guest.reserved = EXECUTED;
             let mut probe = Probe {
-                original: Image([0; 512]), expected: Image([0; 512]), returned: Image([0; 512]),
-                result_rax: 0, result_rdx: 0, gpr_errors: u64::MAX, fp_errors: u64::MAX,
+                original: Image([0; 512]),
+                expected: Image([0; 512]),
+                returned: Image([0; 512]),
+                result_rax: 0,
+                result_rdx: 0,
+                gpr_errors: u64::MAX,
+                fp_errors: u64::MAX,
             };
             if state().native || state().recorded.is_some() {
                 return Err("native FP fixture entered with a live preceding frame");
@@ -406,7 +429,14 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
             unsafe {
                 stela_native_fp_probe(&mut probe, code.0, &mut guest, &mut context, context_abi);
             }
-            let result = native_return(code, BlockExit { next_pc: probe.result_rax, kind: probe.result_rdx }, entered);
+            let result = native_return(
+                code,
+                BlockExit {
+                    next_pc: probe.result_rax,
+                    kind: probe.result_rdx,
+                },
+                entered,
+            );
             let fip = pointer(&probe.expected, 8);
             let fdp = pointer(&probe.expected, 16);
             let fop = u16::from_le_bytes([probe.expected.0[6], probe.expected.0[7]]) & 0x7ff;
@@ -415,13 +445,22 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
                 probe.gpr_errors, probe.fp_errors, probe.result_rax, probe.result_rdx,
             ));
             if fip != ptr::addr_of!(stela_native_fp_seed_divide) as u64
-                || fdp != ptr::addr_of!(ZERO) as u64 || fop != 0x435
+                || fdp != ptr::addr_of!(ZERO) as u64
+                || fop != 0x435
             {
                 return Err("native FP fixture lacks exact meaningful x87 pointer sentinels");
             }
             if guest != expected_guest
-                || (context.version, context.bytes, context.memory, context.scalable, context.system) != context_before
-                || probe.gpr_errors != 0 || probe.fp_errors != 0 || !same_legacy(&probe.expected, &probe.returned)
+                || (
+                    context.version,
+                    context.bytes,
+                    context.memory,
+                    context.scalable,
+                    context.system,
+                ) != context_before
+                || probe.gpr_errors != 0
+                || probe.fp_errors != 0
+                || !same_legacy(&probe.expected, &probe.returned)
             {
                 return Err("native FP caller state or real callee execution differs");
             }
@@ -434,7 +473,12 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
                 {
                     return Err("native FP fixture did not enter actual #UD recovery");
                 }
-            } else if result != (NativeExit::Exit { next_pc: RETURN_RAX, kind: RETURN_RDX }) {
+            } else if result
+                != (NativeExit::Exit {
+                    next_pc: RETURN_RAX,
+                    kind: RETURN_RDX,
+                })
+            {
                 return Err("native FP full native return ABI differs");
             }
         }

@@ -15,7 +15,6 @@ pub(crate) mod host;
 mod input;
 pub(crate) mod install;
 pub(crate) mod interrupts;
-pub(crate) mod xstate;
 mod network;
 pub(crate) mod nor;
 pub(crate) mod power;
@@ -25,6 +24,7 @@ mod speculation;
 pub(crate) mod storage;
 mod topology;
 pub(crate) mod translations;
+pub(crate) mod xstate;
 
 use crate::{
     handoff::{Handoff, MAGIC},
