@@ -5169,9 +5169,40 @@ mod tests {
     }
     #[test]
     fn lari_actual_bios_source_commands_and_dma_retirement_both_families() {
+        exercise_lari_bios(false);
+    }
+    #[test]
+    #[ignore = "requires actual pinned Intel firmware images"]
+    fn lari_actual_images_drive_lari6_without_extension_and_lari8_with_extension() {
+        exercise_lari_bios(true);
+    }
+    fn exercise_lari_bios(actual: bool) {
         for ax210 in [false, true] {
             let profile = if ax210 { ax210_profile() } else { profile() };
-            let bytes = lari_bytes(ax210, if ax210 { 12 } else { 6 });
+            let bytes = if actual {
+                use sha2::{Digest, Sha256};
+                let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
+                let bytes = std::fs::read(
+                    std::path::Path::new(&root).join(profile.family().firmware_name()),
+                )
+                .unwrap();
+                assert_eq!(
+                    std::format!("{:x}", Sha256::digest(&bytes)),
+                    if ax210 {
+                        "792478ef7752595525379a5068e2d47e310a2c344636b7df866c54746ced1dc0"
+                    } else {
+                        "1866a58a1daee56b120362122d5f7548b443b53d33f2558a7e4407d58fd27dab"
+                    }
+                );
+                bytes
+            } else {
+                lari_bytes(ax210, if ax210 { 12 } else { 6 })
+            };
+            let expected_ids = if actual && !ax210 {
+                vec![1]
+            } else {
+                vec![8, 1]
+            };
             let catalog = catalog_for(&profile, profile.family().firmware_name(), &bytes);
             let empty = resources::Catalog::from_handoff(vec![]).unwrap();
             let source = Source::default();
@@ -5238,7 +5269,9 @@ mod tests {
                 unsafe { cold.begin_lari(bios) }.unwrap_or_else(|_| panic!("real prefix"));
             assert_eq!(
                 unsafe { lari.advance(&source) }.unwrap(),
-                LariPhase::Waiting { command: 8 }
+                LariPhase::Waiting {
+                    command: expected_ids[0]
+                }
             );
             let commands: Vec<_> = lari
                 .plan()
@@ -5248,7 +5281,15 @@ mod tests {
                 .collect();
             assert_eq!(
                 commands.iter().map(|(id, _)| id.opcode).collect::<Vec<_>>(),
-                [8, 1]
+                expected_ids
+            );
+            assert_eq!(
+                lari.plan().unwrap().schema(),
+                if ax210 {
+                    if actual { 8 } else { 12 }
+                } else {
+                    6
+                }
             );
             assert_eq!(lari.platform_reads().len(), 3); // actual GLAI, GeneralCfg, WBEM
             let mut copied = lari.plan().unwrap().clone();
@@ -5259,7 +5300,7 @@ mod tests {
                 copied_inputs,
             )
             .unwrap();
-            assert_eq!(copied.commands().count(), 2); // no owner/advancement authority
+            assert_eq!(copied.commands().count(), commands.len()); // no owner/advancement authority
             let base = expected.commands().len() as u16;
             for (i, (id, payload)) in commands.iter().enumerate() {
                 let sequence = 3 + base + i as u16;
@@ -5300,26 +5341,23 @@ mod tests {
                         unsafe { lari.advance(&source) },
                         Err(LariError::Boot(Error::CommandReclaim(_)))
                     ));
-                    assert_eq!(lari.phase(), LariPhase::Waiting { command: 8 });
+                    assert_eq!(lari.phase(), LariPhase::Waiting { command: id.opcode });
                     assert_eq!(state.lock().unwrap().registers[&0x460], bell);
                     domain.records.lock().unwrap().cpu_sync_fail = None;
                 }
                 assert_eq!(
                     unsafe { lari.advance(&source) }.unwrap(),
-                    if i == 0 {
-                        LariPhase::Waiting { command: 1 }
-                    } else {
-                        LariPhase::RxQueueConfigurationRequired
-                    }
+                    commands
+                        .get(i + 1)
+                        .map_or(LariPhase::RxQueueConfigurationRequired, |(id, _)| {
+                            LariPhase::Waiting { command: id.opcode }
+                        })
                 );
             }
-            assert_eq!(
-                lari.responses()
-                    .iter()
-                    .map(|r| r.raw.as_slice())
-                    .collect::<Vec<_>>(),
-                [&[0xa5][..], &[0xa6][..]]
-            );
+            assert_eq!(lari.responses().len(), commands.len());
+            for (i, response) in lari.responses().iter().enumerate() {
+                assert_eq!(response.raw, [0xa5 + i as u8]);
+            }
             let ops = state.lock().unwrap().ops.len();
             assert_eq!(
                 unsafe { lari.advance(&source) }.unwrap(),
