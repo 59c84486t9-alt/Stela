@@ -228,6 +228,7 @@ impl Linux {
             ("linux_slab", "slab.c", "STELA_LINUX_SLAB_TEST"),
             ("linux_cache", "cache.c", "STELA_LINUX_CACHE_TEST"),
             ("linux_params", "params.c", "STELA_LINUX_PARAMS_TEST"),
+            ("linux_firmware", "firmware.c", "STELA_LINUX_FIRMWARE_TEST"),
         ] {
             let mut build = build.clone();
             build.define(define, None);
