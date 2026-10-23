@@ -134,17 +134,40 @@ impl RegisteredSystemRam {
         physical: u64,
         output: &mut [u8],
     ) -> Result<(), MemoryStatus> {
-        self.preflight(physical, output.len())?;
+        // SAFETY: the caller retains the same private output and live owner.
+        unsafe { self.read_physical_progress(physical, output) }.map_err(|fault| fault.status)
+    }
+
+    /// Read through the same canonical scalar access path, retaining the exact
+    /// output prefix if a later access encounters a terminal owner failure.
+    ///
+    /// # Safety
+    /// The `read_physical` private-output and live-registration contract applies.
+    pub unsafe fn read_physical_progress(
+        &self,
+        physical: u64,
+        output: &mut [u8],
+    ) -> Result<(), crate::memory::domain::PublicationFault> {
+        use crate::memory::domain::PublicationFault;
+        self.preflight(physical, output.len())
+            .map_err(|status| PublicationFault {
+                status,
+                completed: 0,
+            })?;
         let mut done = 0;
         while done < output.len() {
+            let fault = |status| PublicationFault {
+                status,
+                completed: done,
+            };
             let (region, offset) = self
                 .region(physical + done as u64)
-                .ok_or(MemoryStatus::Domain)?;
+                .ok_or_else(|| fault(MemoryStatus::Domain))?;
             let remaining = (output.len() - done).min(region.bytes - offset);
             let pointer = region
                 .backing
                 .host_pointer(offset, remaining, AccessKind::Read)
-                .map_err(|_| MemoryStatus::Domain)?;
+                .map_err(|_| fault(MemoryStatus::Domain))?;
             let width = [8, 4, 2, 1]
                 .into_iter()
                 .find(|width| {
@@ -154,9 +177,41 @@ impl RegisteredSystemRam {
             // SAFETY: a pinned exact aligned scalar part, qualified baseline
             // host, no Rust reference into concurrently mutable guest storage.
             let value = unsafe { access::read_part(pointer.as_ptr(), width, TargetCpu::Baseline) }
-                .map_err(|_| MemoryStatus::Domain)?;
+                .map_err(|_| fault(MemoryStatus::Domain))?;
             output[done..done + width].copy_from_slice(&value.to_le_bytes()[..width]);
             done += width;
+        }
+        Ok(())
+    }
+
+    /// Validate physical geometry and actual retained backing permissions for a
+    /// DMA descriptor. No bytes are copied and no translation is cached.
+    pub fn check_dma_range(
+        &self,
+        physical: u64,
+        bytes: usize,
+        write: bool,
+    ) -> Result<(), MemoryStatus> {
+        self.preflight(physical, bytes)?;
+        let mut done = 0;
+        while done < bytes {
+            let (region, offset) = self
+                .region(physical + done as u64)
+                .ok_or(MemoryStatus::Translation)?;
+            let count = (bytes - done).min(region.bytes - offset);
+            region
+                .backing
+                .host_pointer(
+                    offset,
+                    count,
+                    if write {
+                        AccessKind::Write
+                    } else {
+                        AccessKind::Read
+                    },
+                )
+                .map_err(|_| MemoryStatus::Permission)?;
+            done += count;
         }
         Ok(())
     }

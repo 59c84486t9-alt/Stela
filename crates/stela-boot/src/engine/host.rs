@@ -810,6 +810,63 @@ impl Host for BareHost<'_> {
         })
     }
 
+    fn check_ram_range(
+        &mut self,
+        physical: u64,
+        bytes: usize,
+        write: bool,
+    ) -> Result<(), stela_runtime::platform::dma::DmaError> {
+        let ram = state().registered_ram.as_ref().ok_or(
+            stela_runtime::platform::dma::DmaError::Unsupported(
+                "canonical DMA RAM owner is not installed",
+            ),
+        )?;
+        ram.check_dma_range(physical, bytes, write)
+            .map_err(|_| stela_runtime::platform::dma::DmaError::Memory)
+    }
+    fn read_ram_progress(
+        &mut self,
+        physical: u64,
+        buffer: &mut [u8],
+    ) -> Result<(), stela_runtime::platform::dma::TransferFault> {
+        super::speculation::fence();
+        let Some(ram) = &state().registered_ram else {
+            return self.read_ram(physical, buffer).then_some(()).ok_or(
+                stela_runtime::platform::dma::TransferFault {
+                    error: stela_runtime::platform::dma::DmaError::Memory,
+                    completed: 0,
+                },
+            );
+        };
+        // SAFETY: private DMA staging, same canonical reader/owner contract.
+        unsafe { ram.read_physical_progress(physical, buffer) }.map_err(|fault| {
+            stela_runtime::platform::dma::TransferFault {
+                error: stela_runtime::platform::dma::DmaError::Memory,
+                completed: fault.completed,
+            }
+        })
+    }
+    fn write_ram_progress(
+        &mut self,
+        physical: u64,
+        data: &[u8],
+    ) -> Result<(), stela_runtime::platform::dma::TransferFault> {
+        let Some(ram) = &state().registered_ram else {
+            return self.write_ram(physical, data).then_some(()).ok_or(
+                stela_runtime::platform::dma::TransferFault {
+                    error: stela_runtime::platform::dma::DmaError::Memory,
+                    completed: 0,
+                },
+            );
+        };
+        // SAFETY: private staging, every writer participates in this same domain.
+        unsafe { ram.publish_physical(physical, data) }.map_err(|fault| {
+            stela_runtime::platform::dma::TransferFault {
+                error: stela_runtime::platform::dma::DmaError::Memory,
+                completed: fault.completed,
+            }
+        })
+    }
     fn install(&mut self, code: &[u8]) -> Result<NativeCode, InstallError> {
         let state = state();
         let offset = state.code_used.next_multiple_of(16);

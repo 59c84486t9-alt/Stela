@@ -351,6 +351,45 @@ pub trait Host {
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool;
     /// Write guest RAM. False when any byte is not RAM.
     fn write_ram(&mut self, physical: u64, data: &[u8]) -> bool;
+    /// Descriptor admission needs a real RAM/permission owner. A legacy host
+    /// without that service cannot qualify a native coprocessor mapping.
+    fn check_ram_range(
+        &mut self,
+        _physical: u64,
+        _bytes: usize,
+        _write: bool,
+    ) -> Result<(), crate::platform::dma::DmaError> {
+        Err(crate::platform::dma::DmaError::Unsupported(
+            "host DMA range validation is unavailable",
+        ))
+    }
+    /// Stateful DMA must retain partial effects across later owner failures.
+    /// The default is for hosts whose boolean failure commits no bytes.
+    fn read_ram_progress(
+        &mut self,
+        physical: u64,
+        buffer: &mut [u8],
+    ) -> Result<(), crate::platform::dma::TransferFault> {
+        self.read_ram(physical, buffer)
+            .then_some(())
+            .ok_or(crate::platform::dma::TransferFault {
+                error: crate::platform::dma::DmaError::Memory,
+                completed: 0,
+            })
+    }
+    fn write_ram_progress(
+        &mut self,
+        physical: u64,
+        data: &[u8],
+    ) -> Result<(), crate::platform::dma::TransferFault> {
+        self.write_ram(physical, data)
+            .then_some(())
+            .ok_or(crate::platform::dma::TransferFault {
+                error: crate::platform::dma::DmaError::Memory,
+                completed: 0,
+            })
+    }
+
     fn install(&mut self, code: &[u8]) -> Result<NativeCode, InstallError>;
     /// Overwrite installed code at `code` with `bytes`, which the next
     /// native run executes.
@@ -685,26 +724,64 @@ struct HostMemory<'a, H: Host> {
 
 impl<H: Host> Memory for HostMemory<'_, H> {
     fn read(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
-        self.host.read_ram(physical, buffer)
+        self.read_progress(physical, buffer).is_ok()
     }
     fn write(&mut self, physical: u64, data: &[u8]) -> bool {
-        if !data.is_empty() {
-            let Some(last) = u64::try_from(data.len() - 1)
+        self.write_progress(physical, data).is_ok()
+    }
+    fn check_range(
+        &mut self,
+        physical: u64,
+        bytes: usize,
+        write: bool,
+    ) -> Result<(), crate::platform::dma::DmaError> {
+        if write && bytes != 0 {
+            let last = u64::try_from(bytes - 1)
                 .ok()
-                .and_then(|bytes| physical.checked_add(bytes))
-            else {
-                return false;
-            };
+                .and_then(|n| physical.checked_add(n))
+                .ok_or(crate::platform::dma::DmaError::Memory)?;
             if self
                 .lock
                 .into_iter()
                 .flatten()
                 .any(|(first, end)| physical <= end && first <= last)
             {
-                return false;
+                return Err(crate::platform::dma::DmaError::Memory);
             }
         }
-        self.host.write_ram(physical, data)
+        self.host.check_ram_range(physical, bytes, write)
+    }
+    fn read_progress(
+        &mut self,
+        physical: u64,
+        buffer: &mut [u8],
+    ) -> Result<(), crate::platform::dma::TransferFault> {
+        self.host.read_ram_progress(physical, buffer)
+    }
+    fn write_progress(
+        &mut self,
+        physical: u64,
+        data: &[u8],
+    ) -> Result<(), crate::platform::dma::TransferFault> {
+        let refused = crate::platform::dma::TransferFault {
+            error: crate::platform::dma::DmaError::Memory,
+            completed: 0,
+        };
+        if !data.is_empty() {
+            let last = u64::try_from(data.len() - 1)
+                .ok()
+                .and_then(|bytes| physical.checked_add(bytes))
+                .ok_or(refused)?;
+            if self
+                .lock
+                .into_iter()
+                .flatten()
+                .any(|(first, end)| physical <= end && first <= last)
+            {
+                return Err(refused);
+            }
+        }
+        self.host.write_ram_progress(physical, data)
     }
 }
 

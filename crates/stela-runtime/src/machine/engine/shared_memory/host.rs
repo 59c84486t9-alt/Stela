@@ -152,6 +152,42 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         // SAFETY: every source/host/alias writer uses this same physical domain.
         unsafe { self.ram.publish_physical(physical, data).is_ok() }
     }
+    fn check_ram_range(
+        &mut self,
+        physical: u64,
+        bytes: usize,
+        write: bool,
+    ) -> Result<(), crate::platform::dma::DmaError> {
+        self.ram
+            .check_dma_range(physical, bytes, write)
+            .map_err(|_| crate::platform::dma::DmaError::Memory)
+    }
+    fn read_ram_progress(
+        &mut self,
+        physical: u64,
+        buffer: &mut [u8],
+    ) -> Result<(), crate::platform::dma::TransferFault> {
+        // SAFETY: private DMA staging, same canonical reader/owner contract.
+        unsafe { self.ram.read_physical_progress(physical, buffer) }.map_err(|fault| {
+            crate::platform::dma::TransferFault {
+                error: crate::platform::dma::DmaError::Memory,
+                completed: fault.completed,
+            }
+        })
+    }
+    fn write_ram_progress(
+        &mut self,
+        physical: u64,
+        data: &[u8],
+    ) -> Result<(), crate::platform::dma::TransferFault> {
+        // SAFETY: private staging, every writer participates in this same domain.
+        unsafe { self.ram.publish_physical(physical, data) }.map_err(|fault| {
+            crate::platform::dma::TransferFault {
+                error: crate::platform::dma::DmaError::Memory,
+                completed: fault.completed,
+            }
+        })
+    }
     fn install(&mut self, code: &[u8]) -> Result<NativeCode, InstallError> {
         self.native_entry();
         self.local.install(code)

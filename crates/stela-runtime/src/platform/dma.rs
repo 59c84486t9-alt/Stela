@@ -3,11 +3,46 @@
 //! IOMMU.
 use super::apple::bus::Access;
 
-/// Guest RAM by physical address. `false` when any byte of the range is not
-/// RAM; nothing is transferred then.
+/// Guest RAM by physical address. The boolean methods serve callers that do
+/// not resume a transfer. Stateful DMA owners use the progress methods to
+/// retain any committed prefix, including a terminal coherence failure.
 pub trait Memory {
     fn read(&mut self, physical: u64, buffer: &mut [u8]) -> bool;
     fn write(&mut self, physical: u64, data: &[u8]) -> bool;
+    /// Validate actual physical RAM and access permission without transferring
+    /// bytes. An unavailable range owner is an explicit refusal.
+    fn check_range(&mut self, _physical: u64, _bytes: usize, _write: bool) -> Result<(), DmaError> {
+        Err(DmaError::Unsupported(
+            "DMA RAM range validation is unavailable",
+        ))
+    }
+    /// Default atomic adapter for RAM owners whose boolean failure transfers
+    /// nothing. Owners with partial effects must override this method.
+    fn read_progress(&mut self, physical: u64, buffer: &mut [u8]) -> Result<(), TransferFault> {
+        self.read(physical, buffer)
+            .then_some(())
+            .ok_or(TransferFault {
+                error: DmaError::Memory,
+                completed: 0,
+            })
+    }
+    /// Same contract as `read_progress`, for the actual committed write prefix.
+    fn write_progress(&mut self, physical: u64, data: &[u8]) -> Result<(), TransferFault> {
+        self.write(physical, data)
+            .then_some(())
+            .ok_or(TransferFault {
+                error: DmaError::Memory,
+                completed: 0,
+            })
+    }
+}
+
+/// A fault after exactly `completed` bytes of this transfer. A nonzero prefix
+/// must never be replayed merely because a later translation or writer failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferFault {
+    pub error: DmaError,
+    pub completed: usize,
 }
 
 /// Why a DMA access did not reach memory.
@@ -71,14 +106,36 @@ pub struct Port<'a, 'b> {
 
 impl Port<'_, '_> {
     pub fn read(&mut self, iova: u64, buffer: &mut [u8]) -> Result<(), DmaError> {
-        self.each_page(iova, buffer.len(), false, |memory, physical, range| {
-            memory.read(physical, &mut buffer[range])
-        })
+        self.read_progress(iova, buffer)
+            .map_err(|fault| fault.error)
     }
 
     pub fn write(&mut self, iova: u64, data: &[u8]) -> Result<(), DmaError> {
+        self.write_progress(iova, data).map_err(|fault| fault.error)
+    }
+
+    /// Walk every reached IOMMU page and check its actual RAM owner. This does
+    /// not cache translations or authorize a later access after a remap.
+    pub fn check(&mut self, iova: u64, bytes: usize, write: bool) -> Result<(), TransferFault> {
+        self.each_page(iova, bytes, write, |memory, physical, range| {
+            memory
+                .check_range(physical, range.len(), write)
+                .map_err(|error| TransferFault {
+                    error,
+                    completed: 0,
+                })
+        })
+    }
+
+    pub fn read_progress(&mut self, iova: u64, buffer: &mut [u8]) -> Result<(), TransferFault> {
+        self.each_page(iova, buffer.len(), false, |memory, physical, range| {
+            memory.read_progress(physical, &mut buffer[range])
+        })
+    }
+
+    pub fn write_progress(&mut self, iova: u64, data: &[u8]) -> Result<(), TransferFault> {
         self.each_page(iova, data.len(), true, |memory, physical, range| {
-            memory.write(physical, &data[range])
+            memory.write_progress(physical, &data[range])
         })
     }
 
@@ -87,28 +144,47 @@ impl Port<'_, '_> {
         iova: u64,
         bytes: usize,
         write: bool,
-        mut transfer: impl FnMut(&mut dyn Memory, u64, core::ops::Range<usize>) -> bool,
-    ) -> Result<(), DmaError> {
+        mut transfer: impl FnMut(
+            &mut dyn Memory,
+            u64,
+            core::ops::Range<usize>,
+        ) -> Result<(), TransferFault>,
+    ) -> Result<(), TransferFault> {
         let page = self.iommu.page();
+        if page == 0 && bytes != 0 {
+            return Err(TransferFault {
+                error: DmaError::Unsupported("DMA IOMMU page size is zero"),
+                completed: 0,
+            });
+        }
         let mut done = 0;
         while done < bytes {
+            let fault = |error| TransferFault {
+                error,
+                completed: done,
+            };
             let address = iova
                 .checked_add(done as u64)
-                .ok_or(DmaError::Unsupported("DMA past the end of the I/O space"))?;
+                .ok_or_else(|| fault(DmaError::Unsupported("DMA past the end of the I/O space")))?;
             let chunk = (page - address % page).min((bytes - done) as u64) as usize;
             let last = address
                 .checked_add(chunk as u64 - 1)
-                .ok_or(DmaError::Unsupported("DMA past the end of the I/O space"))?;
-            let physical = self.iommu.translate(
-                self.memory,
-                self.stream,
-                address,
-                last,
-                write,
-                self.access,
-            )?;
-            if !transfer(self.memory, physical, done..done + chunk) {
-                return Err(DmaError::Memory);
+                .ok_or_else(|| fault(DmaError::Unsupported("DMA past the end of the I/O space")))?;
+            let physical = self
+                .iommu
+                .translate(self.memory, self.stream, address, last, write, self.access)
+                .map_err(fault)?;
+            if let Err(partial) = transfer(self.memory, physical, done..done + chunk) {
+                // A violated owner contract makes the actual prefix unknown;
+                // fail stopped instead of manufacturing replay authority.
+                assert!(
+                    partial.completed <= chunk,
+                    "DMA RAM owner reported an invalid committed prefix"
+                );
+                return Err(TransferFault {
+                    error: partial.error,
+                    completed: done + partial.completed,
+                });
             }
             done += chunk;
         }
@@ -147,6 +223,11 @@ pub(crate) mod tests {
     }
 
     impl Memory for Ram {
+        fn check_range(&mut self, physical: u64, bytes: usize, _: bool) -> Result<(), DmaError> {
+            self.range(physical, bytes)
+                .map(|_| ())
+                .ok_or(DmaError::Memory)
+        }
         fn read(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
             let Some(range) = self.range(physical, buffer.len()) else {
                 return false;
@@ -323,5 +404,139 @@ pub(crate) mod tests {
         assert_eq!(buffer, [0x99; 2]);
         assert_eq!(ram.bytes, [0x5a]);
         assert_eq!(iommu.calls, 0);
+    }
+    #[test]
+    fn progress_retains_prior_pages_and_terminal_writer_prefix() {
+        struct Partial {
+            calls: usize,
+            bytes: [u8; 32],
+        }
+        impl Memory for Partial {
+            fn read(&mut self, _: u64, _: &mut [u8]) -> bool {
+                panic!("progress adapter bypassed")
+            }
+            fn write(&mut self, _: u64, _: &[u8]) -> bool {
+                panic!("progress adapter bypassed")
+            }
+            fn read_progress(
+                &mut self,
+                physical: u64,
+                output: &mut [u8],
+            ) -> Result<(), TransferFault> {
+                let start = (physical - 0x1000) as usize;
+                let count = output.len().min(if start == 16 { 3 } else { output.len() });
+                output[..count].copy_from_slice(&self.bytes[start..start + count]);
+                if count == output.len() {
+                    Ok(())
+                } else {
+                    Err(TransferFault {
+                        error: DmaError::Memory,
+                        completed: count,
+                    })
+                }
+            }
+            fn write_progress(&mut self, physical: u64, data: &[u8]) -> Result<(), TransferFault> {
+                self.calls += 1;
+                let start = (physical - 0x1000) as usize;
+                let count = data.len().min(if start == 16 { 3 } else { data.len() });
+                self.bytes[start..start + count].copy_from_slice(&data[..count]);
+                if count == data.len() {
+                    Ok(())
+                } else {
+                    Err(TransferFault {
+                        error: DmaError::Memory,
+                        completed: count,
+                    })
+                }
+            }
+        }
+        let mut memory = Partial {
+            calls: 0,
+            bytes: [0; 32],
+        };
+        let mut iommu = Shift {
+            offset: 0x1000,
+            hole: u64::MAX,
+        };
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut port = Port {
+            iommu: &mut iommu,
+            stream: 0,
+            memory: &mut memory,
+            access: &mut access,
+        };
+        let expected = Err(TransferFault {
+            error: DmaError::Memory,
+            completed: 11,
+        });
+        assert_eq!(port.write_progress(8, &[0x5a; 24]), expected);
+        let mut output = [0x99; 24];
+        assert_eq!(port.read_progress(8, &mut output), expected);
+        assert_eq!(&output[..11], &[0x5a; 11]);
+        assert_eq!(&output[11..], &[0x99; 13]);
+        assert_eq!(memory.calls, 2);
+        assert_eq!(&memory.bytes[8..19], &[0x5a; 11]);
+        assert_eq!(&memory.bytes[19..], &[0; 13]);
+    }
+
+    #[test]
+    fn progress_counts_only_completed_pages_before_iommu_fault() {
+        let mut ram = Ram::new(0x1000, 64);
+        let mut iommu = Shift {
+            offset: 0x1000,
+            hole: 1,
+        };
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut port = Port {
+            iommu: &mut iommu,
+            stream: 0,
+            memory: &mut ram,
+            access: &mut access,
+        };
+        assert_eq!(
+            port.write_progress(8, &[0xa5; 24]),
+            Err(TransferFault {
+                error: DmaError::Fault(1),
+                completed: 8
+            })
+        );
+        let mut output = [0x99; 24];
+        assert_eq!(
+            port.read_progress(8, &mut output),
+            Err(TransferFault {
+                error: DmaError::Fault(1),
+                completed: 8
+            })
+        );
+        assert_eq!(&output[..8], &[0xa5; 8]);
+        assert_eq!(&output[8..], &[0x99; 16]);
+    }
+    #[test]
+    fn map_admission_walks_actual_permissions_without_touching_ram() {
+        let mut ram = Ram::new(0x1000, 48);
+        ram.bytes.fill(0xa5);
+        let mut iommu = Shift {
+            offset: 0x1000,
+            hole: 2,
+        };
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut port = Port {
+            iommu: &mut iommu,
+            stream: 0,
+            memory: &mut ram,
+            access: &mut access,
+        };
+        assert_eq!(port.check(8, 24, true), Ok(()));
+        assert_eq!(
+            port.check(8, 40, false),
+            Err(TransferFault {
+                error: DmaError::Fault(1),
+                completed: 24
+            })
+        );
+        assert_eq!(ram.bytes, [0xa5; 48]);
     }
 }
