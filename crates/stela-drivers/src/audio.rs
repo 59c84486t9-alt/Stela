@@ -7,6 +7,7 @@ pub mod acp70;
 pub mod acp_i2s;
 mod acp_pdm;
 pub mod hda;
+pub mod intel_dsp;
 pub mod renoir;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
