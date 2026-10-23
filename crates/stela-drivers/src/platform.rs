@@ -7,4 +7,5 @@ pub mod battery;
 pub mod ec;
 pub mod ec_smbus;
 pub mod sbs;
+pub mod wait;
 pub mod work;
