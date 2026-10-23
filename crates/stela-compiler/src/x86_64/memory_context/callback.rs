@@ -16,6 +16,11 @@ const SUB_RSP_SAVE: &[u8] = &[0x48, 0x83, 0xec, CALLBACK_SAVE_BYTES as u8];
 const ADD_RSP_SAVE: &[u8] = &[0x48, 0x83, 0xc4, CALLBACK_SAVE_BYTES as u8];
 const STMXCSR_RSP: &[u8] = &[0x0f, 0xae, 0x1c, 0x24];
 const LDMXCSR_RSP: &[u8] = &[0x0f, 0xae, 0x14, 0x24];
+// Reuse the existing 16-byte reservation: original MXCSR at 0, default at 4.
+// This baseline recipe costs 2 instructions/13 bytes, with no literal relocation
+// or additional GPR spill. Actual emitted-code/timing gates remain separate.
+const MOV_DEFAULT_MXCSR_RSP_4: &[u8] = &[0xc7, 0x44, 0x24, 4, 0x80, 0x1f, 0, 0];
+const LDMXCSR_RSP_4: &[u8] = &[0x0f, 0xae, 0x54, 0x24, 4];
 const PUSH_RDI: &[u8] = &[0x57];
 const POP_RDI: &[u8] = &[0x5f];
 const MOV_RDI_CONTEXT_DISP8: &[u8] = &[0x49, 0x8b, 0x7f];
@@ -96,12 +101,15 @@ pub(crate) fn request(
 /// Invoke the validated memory service. Before entry RSP must be 8 modulo16,
 /// as at extended body entry; family scratch allocations are multiples of16.
 /// Preserves RDI/R15. Other caller-saved GPRs and XMM registers are clobbered.
-/// Preserves the full caller MXCSR, including exception status bits. Returns the
+/// Runs the callback under default MXCSR, then preserves the full caller
+/// MXCSR, including exception status bits, on success and refusal. Returns the
 /// typed MemoryStatus encoding in EAX. No callback address is embedded.
 pub(crate) fn call(code: &mut Vec<u8>, request_offset: u32) {
     code.extend(PUSH_RDI);
     code.extend(SUB_RSP_SAVE);
     code.extend(STMXCSR_RSP);
+    code.extend(MOV_DEFAULT_MXCSR_RSP_4);
+    code.extend(LDMXCSR_RSP_4);
     code.extend(MOV_RDI_CONTEXT_DISP8);
     code.push(EXECUTION_CONTEXT_MEMORY_OFFSET as u8);
     code.extend(LEA_RSI_RSP_DISP32);

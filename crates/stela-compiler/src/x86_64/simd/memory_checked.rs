@@ -671,6 +671,7 @@ mod tests {
         ram: [u8; RAM_BYTES],
         fail_part: Option<usize>,
         requests: Vec<(u64, u32, u32, u64)>,
+        incoming_mxcsr: Vec<u32>,
     }
 
     /// A test transport, not the production MemorySystem. It deliberately poisons
@@ -679,9 +680,11 @@ mod tests {
         view: *mut MemoryContextView,
         request: *const MemoryRequest,
     ) -> u32 {
+        let incoming_mxcsr = mxcsr();
         // SAFETY: native test entry borrows these disjoint objects until return.
         let (view, request) = unsafe { (&mut *view, &*request) };
         let harness = unsafe { &mut *view.opaque.cast::<Harness>() };
+        harness.incoming_mxcsr.push(incoming_mxcsr);
         harness
             .requests
             .push((request.address, request.bytes, request.flags, request.pc));
@@ -876,6 +879,47 @@ mod tests {
     }
 
     #[test]
+    fn actual_callback_defaults_mxcsr_and_restores_hostile_caller_on_both_outcomes() {
+        fn set_mxcsr(value: u32) {
+            // SAFETY: tests use only allocated SSE control/status bits, mask
+            // every exception, and restore the actual original environment.
+            unsafe { core::arch::asm!("ldmxcsr [{}]", in(reg) &value, options(nostack)); }
+        }
+        struct Original(u32);
+        impl Drop for Original {
+            fn drop(&mut self) { set_mxcsr(self.0); }
+        }
+        let operation = operand(true, 8, false, Register::X(2), 0, AddressMode::Offset);
+        let mut body = vec![];
+        emit_context(&mut body, &operation, GUEST_PC);
+        let code = NativeCode::new(&body);
+        for caller in [0x1fa1, 0x3fa5, 0x5f85, 0x7fa1] {
+            for fail_part in [None, Some(0)] {
+                let mut actual = state();
+                let mut harness = Harness {
+                    ram: [0x35; RAM_BYTES], fail_part, requests: vec![], incoming_mxcsr: vec![],
+                };
+                let mut view = view(&mut harness);
+                let original = Original(mxcsr());
+                set_mxcsr(caller);
+                // This executes the actual emitted common callback wrapper.
+                // The transport records actual entry MXCSR and poisons it
+                // before either success or an explicit service refusal.
+                let result = code.run(&mut actual, &mut view);
+                let returned = mxcsr();
+                drop(original);
+                assert_eq!(harness.incoming_mxcsr, [0x1f80]);
+                assert_eq!(returned, caller);
+                assert_eq!(result, if fail_part.is_some() {
+                    MemoryStatus::Permission as u32
+                } else { MemoryStatus::Success as u32 });
+                assert_eq!(view.completed_bytes, if fail_part.is_some() { 0 } else { 8 });
+                assert_eq!(harness.requests.len(), 1);
+            }
+        }
+    }
+
+    #[test]
     fn actual_native_staging_defers_all_destinations_and_writeback_on_later_faults() {
         for load in [false, true] {
             for pair in [false, true] {
@@ -902,6 +946,7 @@ mod tests {
                                     ram: core::array::from_fn(|i| i as u8 ^ 0xa5),
                                     fail_part,
                                     requests: vec![],
+                                    incoming_mxcsr: vec![],
                                 };
                                 let old_ram = harness.ram;
                                 let mut view = view(&mut harness);
@@ -1032,6 +1077,7 @@ mod tests {
                             ram: core::array::from_fn(|i| i as u8 ^ 0xa5),
                             fail_part,
                             requests: vec![],
+                            incoming_mxcsr: vec![],
                         };
                         let old_ram = harness.ram;
                         let mut view = view(&mut harness);
@@ -1096,6 +1142,7 @@ mod tests {
             ram: [0xa5; RAM_BYTES],
             fail_part: None,
             requests: vec![],
+            incoming_mxcsr: vec![],
         };
         let mut view = view(&mut harness);
         assert_eq!(
@@ -1143,6 +1190,7 @@ mod tests {
                             ram: core::array::from_fn(|index| index as u8 ^ 0x59),
                             fail_part: None,
                             requests: vec![],
+                            incoming_mxcsr: vec![],
                         };
                         let old_ram = harness.ram;
                         let mut view = view(&mut harness);
@@ -1206,6 +1254,7 @@ mod tests {
                 ram: [0; RAM_BYTES],
                 fail_part: None,
                 requests: vec![],
+                incoming_mxcsr: vec![],
             };
             let mut view = view(&mut harness);
             assert_eq!(
@@ -1238,6 +1287,7 @@ mod tests {
                     ram: core::array::from_fn(|index| index as u8 ^ 0x59),
                     fail_part: None,
                     requests: vec![],
+                    incoming_mxcsr: vec![],
                 };
                 let old_ram = harness.ram;
                 let mut view = view(&mut harness);
