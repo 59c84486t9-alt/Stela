@@ -13,6 +13,8 @@ workspace = true
 [features]
 # Native x86 ACPICA interpreter; builds freestanding C with clang.
 native-acpi = []
+# Unchanged upstream I801 polled SMBus engine through the shared Linux API.
+linux-i801 = ["dep:cc"]
 # `block::RamDisk`, the in-memory disk the runtime's tests run models on.
 ram-disk = []
 # Build the implemented native NVIDIA OS hooks, not a complete GPU driver.

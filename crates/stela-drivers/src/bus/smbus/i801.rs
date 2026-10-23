@@ -599,6 +599,8 @@ impl<R: Registers, T: Timer> Bus for I801<R, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "linux-i801")]
+    mod comparison;
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::{Cell, RefCell};
 
@@ -623,6 +625,7 @@ mod tests {
         due: u64,
         latency: u64,
         requests: Vec<Request>,
+        reads: usize,
         writes: Vec<(u8, u8)>,
         reply: Vec<u8>,
         reply_word: u16,
@@ -657,6 +660,7 @@ mod tests {
                 due: 0,
                 latency: 3,
                 requests: Vec::new(),
+                reads: 0,
                 writes: Vec::new(),
                 reply: vec![5, 6, 7],
                 reply_word: 0x9876,
@@ -782,6 +786,7 @@ mod tests {
         }
 
         fn read(&mut self, offset: u8) -> u8 {
+            self.reads += 1;
             self.step();
             assert!(self.auxiliary_present || !matches!(offset, AUX_CONTROL | AUX_STATUS));
             match offset {

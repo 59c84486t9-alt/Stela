@@ -1,4 +1,4 @@
-//! Native C for the physical GPU ports: target and tool selection, Stela's
+//! Native C for the physical drivers: target and tool selection, Stela's
 //! Linux environment for unchanged Linux sources, and the hosted C test
 //! programs that `cargo test` runs when Cargo builds for this machine.
 use std::{
@@ -20,7 +20,28 @@ pub const MESA: &str = "../../third_party/mesa";
 pub const NVIDIA: &str = "../../third_party/nvidia";
 
 pub fn require_sources() {
-    for source in [LINUX, MESA, NVIDIA] {
+    for (source, required) in [
+        (
+            LINUX,
+            cfg!(any(
+                feature = "amd-port",
+                feature = "intel-port",
+                feature = "linux-i801"
+            )),
+        ),
+        (
+            MESA,
+            cfg!(any(
+                feature = "amd-port",
+                feature = "intel-port",
+                feature = "amd-commands"
+            )),
+        ),
+        (NVIDIA, cfg!(feature = "nvidia-port")),
+    ] {
+        if !required {
+            continue;
+        }
         assert!(
             Path::new(source).join(".git").exists(),
             "{source} is missing; run `cargo xtask gpu fetch`"
@@ -35,7 +56,7 @@ pub fn configure() -> cc::Build {
     assert_eq!(
         env::var("CARGO_CFG_TARGET_ARCH").as_deref(),
         Ok("x86_64"),
-        "the native physical GPU backends currently target x86-64"
+        "the native physical backends currently target x86-64"
     );
     let mut build = cc::Build::new();
     common(&mut build);
@@ -318,8 +339,10 @@ pub fn sources(directory: &str) -> Vec<PathBuf> {
 
 /// Hosted C test programs, each run by its own Rust test.
 #[derive(Default)]
+#[cfg(any(feature = "amd-port", feature = "intel-port"))]
 pub struct Tests(Vec<(String, PathBuf)>);
 
+#[cfg(any(feature = "amd-port", feature = "intel-port"))]
 impl Tests {
     /// Link `source` with `archives` into a program named `name`. A source may
     /// include the adapter it tests; the archives supply the others it calls.

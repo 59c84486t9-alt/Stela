@@ -8,6 +8,8 @@
 use core::fmt;
 
 pub mod i801;
+#[cfg(feature = "linux-i801")]
+pub mod linux_i801;
 pub mod piix4;
 
 pub const MAX_BLOCK: usize = 32;
@@ -112,6 +114,7 @@ pub enum ErrorKind {
     InvalidAddress,
     InvalidBlockLength(usize),
     InvalidConfiguration,
+    AllocationFailed,
     InvalidPortRange,
     HostDisabled,
     FirmwareSmi,
