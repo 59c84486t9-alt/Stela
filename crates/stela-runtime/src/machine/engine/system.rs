@@ -642,6 +642,12 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             self.refuse("identification register without a profile value");
             return 0;
         }
+        if let Some(value) = cpu.read_el2_pointer_key(register) {
+            return value.unwrap_or_else(|reason| {
+                self.refuse(reason);
+                0
+            });
+        }
         match register {
             Register::AMEVCNTR0_EL0 | Register::AMCNTENSET0_EL0 | Register::AMCNTENCLR0_EL0 => {
                 self.read_activity_monitor(register, index)
@@ -823,12 +829,13 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         }
         let cpu = &mut self.machine.cpu;
         // The Apple bank's copy keeps the register's reserved bits.
-        let banked = self.bank == Bank::Apple && {
-            let (res0, res1) = (cpu.registers.res0(register), cpu.registers.res1(register));
-            cpu.apple
-                .generic_timer
-                .set(register, value & !res0 & !res1 | res1)
-        };
+        let banked = cpu.write_el2_pointer_key(register, value)
+            || self.bank == Bank::Apple && {
+                let (res0, res1) = (cpu.registers.res0(register), cpu.registers.res1(register));
+                cpu.apple
+                    .generic_timer
+                    .set(register, value & !res0 & !res1 | res1)
+            };
         if !banked {
             cpu.registers.set(register, index, value);
         }

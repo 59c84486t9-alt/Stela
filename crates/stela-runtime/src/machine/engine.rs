@@ -9328,6 +9328,65 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn standard_el2_key_writes_feed_pacga_without_mutating_the_lower_bank() {
+        use crate::machine::system::key;
+        use stela_compiler::aarch64::system::registers::Encoding;
+        // Original SPTM's early canary instruction, used here with authored
+        // operands. Its preceding standard-name MSRs must feed actual EL2 PAC.
+        const PACGA: u32 = 0x9ac0_33e1;
+        let mut machine = pac_machine_for(crate::machine::Chip::AppleM2, &[PACGA]);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::APGAKeyLo_EL1, 0, 91);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::APGAKeyHi_EL1, 0, 92);
+        machine.cpu.pstate = Pstate::reset(2);
+        machine.cpu.state.x[0] = 0x5354_4143_4b47_5244;
+        let modifier = machine.cpu.state.x[0];
+        let before = machine.cpu.pc;
+        assert!(matches!(
+            machine.pointer_authentication(PACGA),
+            Err(Stop::Unsupported(_))
+        ));
+        assert_eq!(machine.cpu.pc, before);
+        for (half, value) in [11, 21].into_iter().enumerate() {
+            machine.cpu.state.x[2] = value;
+            let encoding = Encoding::new(3, 0, 2, 3, half as u8);
+            machine
+                .system_instruction(0xd500_0000 | u32::from(key(encoding)) << 5 | 2)
+                .unwrap();
+            if half == 0 {
+                assert!(!machine.pointer_context().unwrap().has_generic_key());
+            }
+        }
+        machine.cpu.pc = BASE;
+        machine.host.exits.push(NativeExit::Exit {
+            next_pc: BASE,
+            kind: ExitKind::PointerAuthentication as u64,
+        });
+        machine.step().unwrap();
+        let expected = pauth::Context::new_with_version(
+            0,
+            pauth::Keys::from_optional_words([None; 4]).with_generic_words([11, 21]),
+            machine.pointer_version().unwrap(),
+        )
+        .generic_code(0, modifier)
+        .unwrap();
+        assert_eq!(
+            (machine.cpu.pc, machine.cpu.state.x[1]),
+            (BASE + 4, expected)
+        );
+        assert_eq!(machine.cpu.read(SystemRegister::APGAKeyLo_EL1), 91);
+        assert_eq!(machine.cpu.read(SystemRegister::APGAKeyHi_EL1), 92);
+        machine.cpu.pstate = Pstate::reset(1);
+        machine.derived_changed();
+        assert_eq!(machine.pointer_keys()[4], Some([91, 92]));
+    }
+
     const PACM: u32 = 0xd503_24ff;
     /// HCRX_EL2.SCTLR2En and PACMEn, and SCTLR2_EL1.EnPACM.
     fn enable_pacm(machine: &mut Machine<FakeHost, NoDevices>) {
