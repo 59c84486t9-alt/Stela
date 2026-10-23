@@ -73,7 +73,10 @@ pub fn take_snapshot() {
         return;
     };
     let (base, bytes) = image.info();
-    let bytes = (bytes as usize).next_multiple_of(PAGE as usize);
+    let Ok(extent) = firmware::loaded_extent(base as usize, bytes) else {
+        return;
+    };
+    let bytes = extent.mapped_bytes;
     let Ok(copy) = boot::allocate_pages(
         AllocateType::AnyPages,
         MemoryType::LOADER_DATA,
@@ -81,9 +84,13 @@ pub fn take_snapshot() {
     ) else {
         return;
     };
-    // SAFETY: the loaded image and a fresh allocation of the same size.
+    // SAFETY: exact checked firmware source extent and distinct fresh owned
+    // pages. Zero only the destination tail, without reading source padding.
     unsafe {
-        core::ptr::copy_nonoverlapping(base.cast::<u8>(), copy.as_ptr(), bytes);
+        core::ptr::copy_nonoverlapping(base.cast::<u8>(), copy.as_ptr(), extent.bytes);
+        copy.as_ptr()
+            .add(extent.bytes)
+            .write_bytes(0, bytes - extent.bytes);
         *PRISTINE.0.get() = Some(Snapshot {
             copy: copy.as_ptr() as usize,
             start: base as usize,

@@ -23,6 +23,9 @@ mod boot_entropy;
 #[path = "../../crates/stela-boot/src/engine/bundle/live_tree.rs"]
 mod boot_live_tree;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/firmware/pe.rs"]
+mod boot_loaded_image;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/apic.rs"]
 #[allow(dead_code)] // Only pure directed-INIT admission tests execute hosted.
 mod boot_native_apic;

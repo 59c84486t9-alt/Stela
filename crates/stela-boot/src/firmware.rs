@@ -31,8 +31,8 @@ pub(crate) const STACK_PAGES: usize = 256;
 pub const NATIVE_ARENAS: usize = 2;
 pub const RAM_ARENAS: usize = 8;
 
-const SECTION_EXECUTE: u32 = 0x2000_0000;
-const SECTION_WRITE: u32 = 0x8000_0000;
+mod pe;
+pub(crate) use pe::loaded_extent;
 
 pub struct Handoff {
     pub options: Vec<u8>,
@@ -152,40 +152,39 @@ impl Image {
         let image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle())
             .map_err(|_| "no loaded image")?;
         let (base, bytes) = image.info();
-        let start = base as usize;
-        // SAFETY: the firmware loaded these PE headers as part of the image.
-        let read = |offset: usize, width: usize| unsafe {
-            let address = (start + offset) as *const u8;
-            match width {
-                2 => address.cast::<u16>().read_unaligned() as usize,
-                _ => address.cast::<u32>().read_unaligned() as usize,
+        let extent = loaded_extent(base as usize, bytes)?;
+        let sections = pe::sections(extent.bytes, |offset, out| {
+            // SAFETY: pe::sections checks each short read against the exact
+            // firmware-owned LoadedImage extent before invoking this callback.
+            // No shared slice covers live writable image statics.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    base.cast::<u8>().add(offset),
+                    out.as_mut_ptr(),
+                    out.len(),
+                );
             }
-        };
-        let header = read(0x3c, 4);
-        if read(header, 4) != 0x4550 {
-            return Err("Stela's image is not PE");
-        }
-        let count = read(header + 6, 2);
-        let table = header + 24 + read(header + 20, 2);
-        let sections = (0..count)
-            .map(|i| {
-                let section = table + i * 40;
-                let address = start + read(section + 12, 4);
-                let size = read(section + 8, 4).next_multiple_of(PAGE);
-                let flags = read(section + 36, 4) as u32;
-                let rights = if flags & SECTION_EXECUTE != 0 {
-                    PRESENT
-                } else if flags & SECTION_WRITE != 0 {
-                    PRESENT | WRITABLE | NX
-                } else {
-                    PRESENT | NX
-                };
-                (address, address + size, rights)
-            })
-            .collect();
+        })?
+        .into_iter()
+        .map(|section| {
+            let rights = if section.executable {
+                PRESENT
+            } else if section.writable {
+                PRESENT | WRITABLE | NX
+            } else {
+                PRESENT | NX
+            };
+            // Both RVAs lie within the checked actual loaded extent.
+            (
+                extent.start + section.first,
+                extent.start + section.end,
+                rights,
+            )
+        })
+        .collect();
         Ok(Self {
-            start,
-            end: (start + bytes as usize).next_multiple_of(PAGE),
+            start: extent.start,
+            end: extent.end,
             sections,
         })
     }
