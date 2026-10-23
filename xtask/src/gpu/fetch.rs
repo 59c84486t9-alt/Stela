@@ -1,12 +1,11 @@
-//! Upstream GPU sources: the git submodules in `third_party/`, each at the
+//! Upstream sources: the git submodules in `third_party/`, each at the
 //! commit its gitlink pins. `fetch` checks each one out shallowly, limited to
 //! the patterns in `third_party/<name>.sparse` where that file exists, and
 //! applies Stela's series from `third_party/patches/<name>/` as commits on
 //! the local branch `stela`. `export` writes a submodule's commits since its
 //! pin back to that series, each file keeping its short name while its
-//! commit's subject stays the same. Meson downloads the wraps Stela's compiler build
-//! names into the ignored `gpu/subprojects/`.
-use super::support::{capture, gpu, tool};
+//! commit's subject stays the same.
+use super::support::capture;
 use crate::tools::{self, exec};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -291,8 +290,8 @@ fn checkout(submodule: &Submodule) -> Result<()> {
     submodule.record(&submodule.series()?)
 }
 
-/// Checks out every submodule at its pin with Stela's series, then downloads
-/// the compiler build's own wraps, which the Cargo build never downloads.
+/// Installs the pinned tools, then checks out every submodule at its pin with
+/// Stela's series.
 pub fn fetch(force: bool) -> Result<()> {
     super::toolchain::install()?;
     for submodule in submodules()? {
@@ -317,11 +316,7 @@ pub fn fetch(force: bool) -> Result<()> {
         );
         checkout(&submodule)?;
     }
-    exec(
-        Command::new(tool("meson", "generators/bin")?)
-            .args(["subprojects", "download", "--sourcedir"])
-            .arg(gpu()),
-    )
+    Ok(())
 }
 
 /// Writes each submodule's commits since its pin to its patch series.

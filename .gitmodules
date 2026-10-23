@@ -16,3 +16,7 @@
 	path = third_party/llvm
 	url = https://github.com/llvm/llvm-project.git
 	shallow = true
+[submodule "libdrm"]
+	path = third_party/libdrm
+	url = https://gitlab.freedesktop.org/mesa/drm.git
+	shallow = true

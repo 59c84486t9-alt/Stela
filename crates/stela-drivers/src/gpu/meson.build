@@ -32,8 +32,14 @@ if with_amd and host_machine.system() == 'darwin'
   add_global_arguments('-DHAVE_TSERVER', language : ['c', 'cpp'])
 endif
 if with_amd
-  # Mesa's AMD support code takes libdrm_amdgpu from here: headers only.
-  subproject('libdrm-headers')
+  # Mesa's AMD support code uses libdrm's types but Stela never calls libdrm,
+  # which builds only on DRM systems: its headers alone, from the submodule.
+  libdrm = '../../../../third_party/libdrm'
+  meson.override_dependency('libdrm_amdgpu', declare_dependency(
+    include_directories : include_directories(libdrm, libdrm / 'include/drm',
+                                              libdrm / 'amdgpu'),
+    version : '2.4.133',
+  ))
 endif
 # A plain `git submodule update` checks Mesa out without Stela's series.
 if not fs.read('subprojects/mesa/meson.options').contains('stela-compilers')

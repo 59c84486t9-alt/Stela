@@ -1,0 +1,5 @@
+# The libdrm and amdgpu API headers Mesa's AMD support code includes; no
+# library sources.
+/*.h
+/include/drm/
+/amdgpu/*.h
