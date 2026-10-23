@@ -219,6 +219,7 @@ pub(super) enum RoutePolicy {
     ConexantCx20561,
     SigmatelStac922x,
     CirrusCs4208,
+    CirrusCs4210,
 }
 fn effective_channels(widget: &Widget, policy: RoutePolicy) -> u8 {
     super::codec::widget_channels(
@@ -427,6 +428,11 @@ fn plan(
                 // offset0, 10dB steps and no mute. Keep observed silicon
                 // capabilities intact; only this owned path uses the policy.
                 caps = STAC922X_CAPTURE_AMP_CAPS;
+            }
+            if policy == RoutePolicy::CirrusCs4210 && *node == 2 {
+                // fix_volume_caps limits the DAC to its observed 0dB offset,
+                // retaining all other raw amplifier capability bits.
+                caps = (caps & !0x7f00) | ((caps & 0x7f) << 8);
             }
             let mut amp = amplifier(*node, true, 0, current_channels, caps, false)?;
             // add_cx5051_fake_mutes authorizes minimum volume as mute only

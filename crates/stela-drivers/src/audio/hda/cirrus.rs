@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! CS4206/CS4207/CS4208 held-D0 analog startup adapted from Linux
-//! sound/hda/codecs/cirrus/cs420x.c at
+//! Cirrus held-D0 analog startup adapted from Linux
+//! sound/hda/codecs/cirrus/cs420x.c and cs421x.c at
 //! a804c5742bff224d4cb4d25dd383554d598be32b.
 //! Copyright (c) 2009 Takashi Iwai <tiwai@suse.de>.
 //! GPL version2 combines the upstream GPL-2.0-or-later codec with native HDA.
@@ -13,6 +13,8 @@ use alloc::vec::Vec;
 
 mod cs4208;
 mod cs420x;
+mod cs4210;
+pub use cs4210::CirrusSpeakerBoost;
 const GROUP: u8 = 1;
 const PROCESSING: u32 = 1 << 6;
 const POWER: u32 = 1 << 10;
@@ -21,24 +23,28 @@ const DIGITAL: u32 = 1 << 9;
 pub enum CirrusProfile {
     Cs420x,
     Cs4208,
+    Cs4210,
 }
 impl CirrusProfile {
     fn vendor(self) -> u8 {
         match self {
             Self::Cs420x => 0x11,
             Self::Cs4208 => 0x24,
+            Self::Cs4210 => 0x0b,
         }
     }
     fn coefficient_count(self) -> u32 {
         match self {
             Self::Cs420x => 24,
             Self::Cs4208 => 53,
+            Self::Cs4210 => 28,
         }
     }
     fn route_policy(self) -> RoutePolicy {
         match self {
             Self::Cs420x => RoutePolicy::SingleAdc,
             Self::Cs4208 => RoutePolicy::CirrusCs4208,
+            Self::Cs4210 => RoutePolicy::CirrusCs4210,
         }
     }
 }
@@ -50,6 +56,12 @@ pub struct CirrusInputAmplifier {
     pub effective_channels: u8,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CirrusOutputAmplifier {
+    pub node: u8,
+    pub observed_caps: u32,
+    pub effective_caps: u32,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CirrusCoefficient {
     pub index: u16,
     pub value: u16,
@@ -59,11 +71,13 @@ pub struct CirrusReport {
     pub profile: CirrusProfile,
     pub processing_node: u8,
     pub input_amplifiers: Vec<CirrusInputAmplifier>,
+    pub output_amplifiers: Vec<CirrusOutputAmplifier>,
     pub codec_id: u32,
     pub revision_id: u32,
     pub subsystem_id: u32,
-    /// CS4206/7 acknowledge six protected errata coefficient writes; CS4208
-    /// has no such sequence. No transient-key stable getters are invented.
+    /// CS4206/7 acknowledge six protected errata coefficient writes; CS4210
+    /// acknowledges five and CS4208 has no such sequence. No transient-key
+    /// stable getters are invented.
     pub errata_coefficients_acknowledged: usize,
     pub shared_pins: Vec<(u8, u32)>,
     /// Final ordinary configuration values, each read back through real verbs.
@@ -73,6 +87,7 @@ pub struct CirrusReport {
 struct Authority {
     profile: CirrusProfile,
     input_amplifiers: Vec<CirrusInputAmplifier>,
+    output_amplifiers: Vec<CirrusOutputAmplifier>,
     processing_caps: u32,
     shared_pins: Vec<(u8, u32)>,
     power_nodes: Vec<(u8, u32)>,
@@ -93,6 +108,7 @@ fn profile(id: u32) -> Result<CirrusProfile, Error> {
     match id {
         0x1013_4206 | 0x1013_4207 => Ok(CirrusProfile::Cs420x),
         0x1013_4208 => Ok(CirrusProfile::Cs4208),
+        0x1013_4210 => Ok(CirrusProfile::Cs4210),
         _ => Err(Error::UnsupportedTopology),
     }
 }
@@ -170,6 +186,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let (shared_pins, input_amplifiers) = match selected {
             CirrusProfile::Cs420x => (self.cs420x_shared_pins(graph)?, Vec::new()),
             CirrusProfile::Cs4208 => (Vec::new(), self.cs4208_input_amplifiers(graph)?),
+            CirrusProfile::Cs4210 => (Vec::new(), Vec::new()),
+        };
+        let output_amplifiers = if selected == CirrusProfile::Cs4210 {
+            self.cs4210_output_amplifiers(graph)?
+        } else {
+            Vec::new()
         };
         Ok(Authority {
             profile: selected,
@@ -177,6 +199,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             shared_pins,
             power_nodes,
             input_amplifiers,
+            output_amplifiers,
         })
     }
     fn cirrus_index(&mut self, address: u8, vendor: u8, index: u16) -> Result<(), Error> {
@@ -330,18 +353,20 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             let coefficients = match selected {
                 CirrusProfile::Cs420x => self.initialize_cs420x_coefficients(graph, &authority)?,
                 CirrusProfile::Cs4208 => self.initialize_cs4208_coefficients(graph)?,
+                CirrusProfile::Cs4210 => self.initialize_cs4210_coefficients(graph)?,
             };
             Ok(CirrusReport {
                 profile: selected,
                 processing_node: vendor,
                 input_amplifiers: authority.input_amplifiers.clone(),
+                output_amplifiers: authority.output_amplifiers.clone(),
                 codec_id: graph.vendor_id,
                 revision_id: graph.revision_id,
                 subsystem_id: live.subsystem,
-                errata_coefficients_acknowledged: if selected == CirrusProfile::Cs420x {
-                    cs420x::ERRATA_COEFFICIENT_WRITES
-                } else {
-                    0
+                errata_coefficients_acknowledged: match selected {
+                    CirrusProfile::Cs420x => cs420x::ERRATA_COEFFICIENT_WRITES,
+                    CirrusProfile::Cs4208 => 0,
+                    CirrusProfile::Cs4210 => cs4210::ERRATA_COEFFICIENT_WRITES,
                 },
                 shared_pins: authority.shared_pins.clone(),
                 coefficients,
