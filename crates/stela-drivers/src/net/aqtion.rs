@@ -19,6 +19,7 @@ use crate::{
     },
 };
 use alloc::{format, sync::Arc, vec::Vec};
+use core::cell::Cell;
 mod firmware;
 mod hardware;
 mod memory;
@@ -150,6 +151,7 @@ impl Timer for Clock {
 struct Hardware<R, T> {
     registers: R,
     timer: T,
+    reset_ownership: Cell<firmware::ResetOwnership>,
 }
 impl<R: Registers, T: Timer> Hardware<R, T> {
     fn read(&self, offset: usize) -> Result<u32> {
@@ -200,6 +202,56 @@ pub enum State {
     Suspended,
     Faulted,
 }
+// Independent of queue health: a failed PMCSR transaction may have reached
+// the device even when readback fails. Only native power_up can restore D0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PciPower {
+    Unknown,
+    D0,
+    D3hot,
+}
+fn power_up<C: ConfigSpace>(
+    function: &mut Function<C>,
+    clock: &Clock,
+    power: &mut PciPower,
+) -> Result<()> {
+    *power = PciPower::Unknown;
+    if function.config().read16(4) == u16::MAX || function.config().read16(6) == u16::MAX {
+        return Err(Error::Removed);
+    }
+    function
+        .power_up(clock)
+        .map_err(|_| Error::Unsupported("AQtion PCI D0 transition failed"))?;
+    *power = PciPower::D0;
+    Ok(())
+}
+fn power_down<C: ConfigSpace>(function: &mut Function<C>, power: &mut PciPower) -> Result<()> {
+    let pm = function
+        .capabilities()
+        .into_iter()
+        .find_map(|(offset, id)| (id == 1).then_some(u16::from(offset)))
+        .ok_or(Error::Unsupported("AQtion PCI power capability absent"))?;
+    let pmcsr = pm + 4;
+    let control = function.config().read16(pmcsr);
+    if control == u16::MAX {
+        return Err(Error::Removed);
+    }
+    *power = PciPower::Unknown;
+    // Exact native WORD store: leave PME_Status W1C pending and disable PME.
+    function.config().write16(pmcsr, (control & !0x8103) | 3);
+    let observed = function.config().read16(pmcsr);
+    if observed == u16::MAX {
+        return Err(Error::Removed);
+    }
+    if observed & 3 != 3 {
+        return Err(Error::Readback {
+            register: usize::from(pmcsr),
+            observed: u32::from(observed),
+        });
+    }
+    *power = PciPower::D3hot;
+    Ok(())
+}
 /// Owns the actual PCI configuration, UC register window, DMA domain and pins.
 /// Failed initialization returns this complete owner for stop/retry/inspection.
 /// Drop quarantines every active physical owner; it never invents DMA completion.
@@ -212,6 +264,7 @@ pub struct Aqtion<R: Registers = MappedRegisters, T: Timer = Clock> {
     firmware: Option<firmware::Firmware>,
     mac: Mac,
     state: State,
+    power: PciPower,
     tx_tail: usize,
     tx_head: usize,
     rx_head: usize,
@@ -240,6 +293,7 @@ impl Aqtion {
             hardware: Some(Hardware {
                 registers,
                 timer: clock,
+                reset_ownership: Cell::new(firmware::ResetOwnership::default()),
             }),
             domain: Some(domain),
             memory: None,
@@ -251,6 +305,7 @@ impl Aqtion {
             firmware: None,
             mac: Mac::default(),
             state: State::Stopped,
+            power: PciPower::Unknown,
             tx_tail: 0,
             tx_head: 0,
             rx_head: 0,
@@ -275,9 +330,7 @@ impl Aqtion {
             // BAR sizing writes temporary all-ones values; disable mastering first,
             // and power to D0 before touching the BAR or register window.
             let function = owner.function.as_mut().unwrap();
-            function
-                .power_up(&clock)
-                .map_err(|_| Error::Unsupported("AQtion PCI D0 transition failed"))?;
+            power_up(function, &clock, &mut owner.power)?;
             let command = function.config().read16(4);
             if command == u16::MAX {
                 return Err(Error::Removed);
@@ -307,21 +360,11 @@ impl Aqtion {
     }
 }
 impl Aqtion {
-    /// Resume the actual PCI function from the acknowledged D3hot state and
-    /// rebuild firmware/queues before permitting traffic. No WoL is advertised.
+    /// Restore acknowledged D0, then rebuild firmware/queues. A failed PCI
+    /// transition retains the owner and may be retried without touching MMIO.
     pub fn resume(&mut self) -> Result<()> {
-        if self.state != State::Suspended {
-            return Err(Error::Unsupported("AQtion is not suspended"));
-        }
         let clock = self.hw().timer;
-        self.state = State::Faulted;
-        self.function
-            .as_mut()
-            .unwrap()
-            .power_up(&clock)
-            .map_err(|_| Error::Unsupported("AQtion D3hot exit failed"))?;
-        self.state = State::Stopped;
-        self.start()
+        self.resume_with_clock(&clock)
     }
 }
 impl<R: Registers, T: Timer> Aqtion<R, T> {
@@ -337,12 +380,24 @@ impl<R: Registers, T: Timer> Aqtion<R, T> {
     pub fn firmware_version(&self) -> Option<u32> {
         self.firmware.map(|f| f.version)
     }
-    fn start(&mut self) -> Result<()> {
-        if self.state == State::Suspended {
-            return Err(Error::Unsupported(
-                "AQtion needs PCI D0 resume before reset",
-            ));
+    fn resume_with_clock(&mut self, clock: &Clock) -> Result<()> {
+        if self.power == PciPower::D0 {
+            return Err(Error::Unsupported("AQtion is already in D0"));
         }
+        power_up(self.function.as_mut().unwrap(), clock, &mut self.power)?;
+        if self.state == State::Suspended {
+            self.state = State::Stopped;
+        }
+        self.start()
+    }
+    fn require_d0(&self) -> Result<()> {
+        if self.power != PciPower::D0 {
+            return Err(Error::Unsupported("AQtion requires acknowledged PCI D0"));
+        }
+        Ok(())
+    }
+    fn start(&mut self) -> Result<()> {
+        self.require_d0()?;
         if self.state == State::Running {
             return Err(Error::Unsupported("AQtion already running"));
         }
@@ -392,6 +447,7 @@ impl<R: Registers, T: Timer> Aqtion<R, T> {
         if matches!(self.state, State::Stopped | State::Suspended) {
             return Ok(());
         }
+        self.require_d0()?;
         self.state = State::Faulted;
         self.hw().stop_queues()?;
         if let Some(fw) = self.firmware {
@@ -426,30 +482,10 @@ impl<R: Registers, T: Timer> Aqtion<R, T> {
         if self.state == State::Suspended {
             return Ok(());
         }
-        let function = self.function.as_mut().unwrap();
-        let pm = function
-            .capabilities()
-            .into_iter()
-            .find_map(|(offset, id)| (id == 1).then_some(u16::from(offset)))
-            .ok_or(Error::Unsupported("AQtion PCI power capability absent"))?;
-        let pmcsr = pm + 4;
-        let control = function.config().read16(pmcsr);
-        if control == u16::MAX {
-            return Err(Error::Removed);
-        }
-        self.state = State::Faulted;
-        // Exact native WORD store: leave PME_Status W1C pending and disable PME.
-        function.config().write16(pmcsr, (control & !0x8103) | 3);
-        let observed = function.config().read16(pmcsr);
-        if observed == u16::MAX {
-            return Err(Error::Removed);
-        }
-        if observed & 3 != 3 {
-            return Err(Error::Readback {
-                register: usize::from(pmcsr),
-                observed: u32::from(observed),
-            });
-        }
+        self.require_d0()?;
+        // stop() already proved this queue epoch drained. Keep Stopped on an
+        // ambiguous D3 readback; retire can reclaim it without powered MMIO.
+        power_down(self.function.as_mut().unwrap(), &mut self.power)?;
         self.state = State::Suspended;
         Ok(())
     }
@@ -589,7 +625,7 @@ impl<R: Registers, T: Timer> Drop for Aqtion<R, T> {
     fn drop(&mut self) {
         // Even stopped owners retain their MMIO epoch until the platform retires
         // its mapping explicitly. An unretired DMA mapping quarantines its pins.
-        if self.state != State::Stopped {
+        if self.state != State::Stopped || self.power != PciPower::D0 {
             if let Some(f) = self.function.take() {
                 core::mem::forget(f);
             }

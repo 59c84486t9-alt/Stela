@@ -13,8 +13,23 @@ pub(super) struct Firmware {
     pub art_base: u8,
     pub art_count: u8,
 }
+// CPU semaphore bank: read 1 acquires; write 1 releases. Reading again is
+// another acquire, never a release acknowledgement (Linux hw_atl_llh.c).
+const RESET_SEMAPHORES: [usize; 2] = [0x3ac, 0x3b0];
+#[derive(Clone, Copy, Default)]
+pub(super) struct ResetOwnership {
+    acquired: u8,
+    reset_issued: bool,
+    semaphore_uncertain: bool,
+}
 impl<R: Registers, T: Timer> Hardware<R, T> {
     pub(super) fn reset(&self, profile: Profile) -> Result<()> {
+        let held = self.reset_ownership.get();
+        if held.reset_issued || held.semaphore_uncertain || held.acquired != 0 {
+            return Err(Error::Unsupported(
+                "AQtion reset ownership uncertain; retain owner",
+            ));
+        }
         if profile.generation == Generation::Antigua {
             self.write(0xf08, 1)?;
             self.write(0x3040, 1)?;
@@ -63,15 +78,76 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
         if !started {
             return Err(Error::Unsupported("AQtion neither RBL nor FLB started"));
         }
-        if ver >> 24 == 4 {
-            let timeout = self.read(0x348)?.min(3000) as u64 * 1000;
-            if timeout != 0 {
-                // Donor logs timeout and continues; Stela requires actual lock
-                // acquisition instead of claiming reset synchronization.
-                self.wait(0x3ac, 1, timeout, |v| v == 1)?;
-                self.wait(0x3b0, 1, timeout, |v| v == 1)?;
+        let result = (|| {
+            if ver >> 24 == 4 {
+                let timeout = self.read(0x348)?.min(3000) as u64 * 1000;
+                if timeout != 0 {
+                    // Unlike Linux's log-and-reset policy, fail fast only after
+                    // unwinding locks actually acquired by this attempt.
+                    for (index, register) in RESET_SEMAPHORES.iter().enumerate() {
+                        self.acquire_reset_semaphore(index, *register, timeout)?;
+                    }
+                }
+            }
+            self.reset_atlantic(boot)
+        })();
+        if result.is_ok() {
+            // The completed reset and live firmware finish this reset epoch.
+            self.reset_ownership.set(ResetOwnership::default());
+        } else if !self.reset_ownership.get().reset_issued {
+            self.release_reset_semaphores()?;
+        }
+        result
+    }
+    fn acquire_reset_semaphore(&self, index: usize, register: usize, timeout: u64) -> Result<()> {
+        for _ in 0..=timeout {
+            let mut held = self.reset_ownership.get();
+            match self.read(register) {
+                Ok(1) => {
+                    held.acquired |= 1 << index;
+                    self.reset_ownership.set(held);
+                    return Ok(());
+                }
+                Ok(_) => self.timer.delay(1),
+                Err(error) => {
+                    // A failed read-to-acquire can itself have taken the lock.
+                    // No observed ownership permits releasing that semaphore.
+                    held.semaphore_uncertain = true;
+                    self.reset_ownership.set(held);
+                    return Err(error);
+                }
             }
         }
+        Err(Error::Timeout { register })
+    }
+    fn release_reset_semaphores(&self) -> Result<()> {
+        let mut failure = None;
+        for (index, register) in RESET_SEMAPHORES.iter().enumerate().rev() {
+            let mut held = self.reset_ownership.get();
+            if held.acquired & (1 << index) != 0 {
+                // A failed store may still have reached hardware. Do not repeat
+                // it on retry: another owner could have acquired in between.
+                match self.write(*register, 1) {
+                    Ok(()) => held.acquired &= !(1 << index),
+                    Err(error) => {
+                        held.semaphore_uncertain = true;
+                        failure.get_or_insert(error);
+                    }
+                }
+                self.reset_ownership.set(held);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+    fn issue_reset(&self, preserve: u32) -> Result<()> {
+        let word = (self.read(0)? & preserve) | 0x8000;
+        let mut held = self.reset_ownership.get();
+        // Set before the store: an error cannot prove the device missed reset.
+        held.reset_issued = true;
+        self.reset_ownership.set(held);
+        self.write(0, word)
+    }
+    fn reset_atlantic(&self, boot: u32) -> Result<()> {
         self.write(0x404, 0x40e1)?;
         if boot != 0 {
             self.write(0x3a0, 1)?;
@@ -93,7 +169,9 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
             self.timer.delay(50_000);
             let spi = self.read(0x53c)?;
             self.write(0x53c, spi | 0x10)?;
-            self.write(0, (self.read(0)? & 0xbfff) | 0x8000)?;
+            // FLB issues its first real reset here, before MAC kickstart and
+            // the later global reset. Never release pre-reset locks after it.
+            self.issue_reset(0xbfff)?;
             self.write(0x404, 0x80e0)?;
             self.write(0x32a8, 0)?;
             self.write(0x520, 1)?;
@@ -116,7 +194,7 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
         self.set(f::RX_RX_REG_RES_DIS_SET, 0, 0)?;
         self.set(f::TX_TX_REG_RES_DIS_SET, 0, 0)?;
         self.write(0x4000, self.read(0x4000)? & !(1 << 29))?;
-        self.write(0, (self.read(0)? & 0xffffbfff) | 0x8000)
+        self.issue_reset(0xffffbfff)
     }
     fn ram_read(&self, address: u32, words: &mut [u32]) -> Result<()> {
         if address == 0
