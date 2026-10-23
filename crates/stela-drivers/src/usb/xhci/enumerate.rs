@@ -5,7 +5,7 @@ use super::*;
 /// Linux `hub_port_debounce`: sample a port until its connection holds
 /// steady and say whether a device is there. `sample` returns the port's
 /// connection and connect change, clearing a change it reports.
-fn debounce(
+pub(super) fn debounce(
     clock: Clock,
     mut sample: impl FnMut() -> Result<(bool, bool), BlockError>,
 ) -> Result<bool, BlockError> {
@@ -511,7 +511,7 @@ impl Controller {
         )
     }
 
-    fn hub(
+    pub(super) fn hub(
         &mut self,
         device: &Device,
         attachment: Attachment,
@@ -519,8 +519,14 @@ impl Controller {
         devices: &mut Vec<Device>,
         failures: &mut Vec<(String, BlockError)>,
     ) -> Result<(), BlockError> {
+        self.live_slot(device.slot)?;
+        if self.slot(device.slot)?.attachment != attachment {
+            return Err(BlockError::Unsupported(
+                "USB hub attachment is not its retained owner",
+            ));
+        }
         if matches!(attachment.speed, SUPER_SPEED | SUPER_SPEED_PLUS) {
-            return Err(BlockError::Unsupported("SuperSpeed hubs"));
+            return self.superspeed_hub(device, attachment, dma, devices, failures);
         }
         if attachment.tier + 1 > MAX_TIERS {
             return Err(BlockError::Unsupported("hub more than five tiers deep"));

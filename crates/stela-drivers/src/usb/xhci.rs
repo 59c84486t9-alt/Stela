@@ -20,8 +20,8 @@
 //! asks. Devices are enumerated once, at attach: every powered root port
 //! with a connection is debounced, then reset (USB 2 ports) or trained (USB 3
 //! ports, warm-reset out of SS.Inactive or Compliance), with up to four
-//! reset/enumeration attempts as in Linux `hub_port_init`. Every USB 2.0 hub's
-//! ports are powered, reset and enumerated in turn, with each slot's route
+//! reset/enumeration attempts as in Linux `hub_port_init`. Supported USB2 and
+//! SuperSpeed hub ports are powered, reset and enumerated with each slot's route
 //! string and, for low- and full-speed devices behind a high-speed hub, its
 //! single or multiple transaction translator. A STALL on a
 //! control pipe resets the endpoint and fails the request; on a bulk or
@@ -35,8 +35,8 @@
 //! submit_iso/completed_iso API on any xHCI 1.0+ controller. Payloads fit
 //! one TRB/service and completion ownership survives uncertain cancellation.
 //!
-//! Refused rather than handled: SuperSpeed hubs (they need Set Hub Depth
-//! and SuperSpeed port control, and no class driver here needs one),
+//! SuperSpeed hubs require observed healthy self-power; bus-powered hubs need
+//! separately qualified upstream current budgeting. Refused rather than handled:
 //! SuperSpeed/hub-routed isochronous endpoints, secondary stream arrays, hubs more than five tiers
 //! deep, and controllers without 4 KiB pages. Hot plug after attach is not seen.
 use super::{audio, bluetooth, cdc, ethernet, hid, storage};
@@ -63,6 +63,7 @@ mod descriptor;
 mod dma;
 mod endpoint;
 mod enumerate;
+mod hub;
 mod iso;
 #[cfg(test)]
 pub(crate) mod model;
@@ -360,7 +361,7 @@ struct Slot {
 }
 
 /// Where a device hangs off the controller.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Attachment {
     root_port: u8,
     route: u32,

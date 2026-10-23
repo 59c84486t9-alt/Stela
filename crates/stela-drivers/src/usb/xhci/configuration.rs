@@ -316,12 +316,7 @@ pub(super) fn select_with_controller(
         let mut claimed = Vec::new();
         for interface in all.iter().filter(|i| primary(i)) {
             if device.descriptor[4] == HUB_CLASS && interface.class == HUB_CLASS {
-                if interface.endpoints.len() == 1
-                    && interface.endpoints[0].kind() == 3
-                    && interface.endpoints[0].is_in()
-                    && device.speed < SUPER_SPEED
-                    && endpoint::Context::new(&interface.endpoints[0], device.speed).is_ok()
-                {
+                if hub::status_endpoint(device, interface).is_some() {
                     count += 1;
                 }
             } else if let Ok(binding) = plan_with_controller(device, interface, &all, controller) {
