@@ -86,13 +86,20 @@ struct Slice {
     offset: usize,
     generation: u64,
     last_snapshot: u64,
+    last_freshness: u64,
 }
 struct Pending {
     slice: usize,
+    destination: Destination,
     selected: u128,
     remaining: u128,
-    copied: u32,
+    consumed: u32,
     at: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Destination {
+    Buffer,
+    Discard,
 }
 
 /// A completed bulk-copy receipt, not completion of generic ingestion or
@@ -104,6 +111,28 @@ pub struct Copied {
     selected: u128,
     copied: u32,
     captured_at: u64,
+}
+/// Completed source NULL-destination consumption. This grants no access to
+/// copied cells and supplies no arrival, hardware event or hook completion.
+pub struct Discarded {
+    layout: Layout,
+    selected: u128,
+    consumed: u32,
+    captured_at: u64,
+}
+impl Discarded {
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+    pub fn selected(&self) -> u128 {
+        self.selected
+    }
+    pub fn consumed(&self) -> u32 {
+        self.consumed
+    }
+    pub fn captured_at(&self) -> u64 {
+        self.captured_at
+    }
 }
 /// One actual manager SOC-DEV-PKT pending capture, shared by all platform
 /// evaluations and copies in that cycle. Numeric desired masks cannot create
@@ -160,6 +189,7 @@ impl Copied {
         self.captured_at
     }
 }
+/// Progress of either buffered copying or NULL-destination discarding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyStep {
     Consumed { relative: u32 },
@@ -170,6 +200,9 @@ pub struct Progress {
     pub captures: u64,
     pub consumed: u64,
     pub completed_copies: u64,
+    pub discarded: u64,
+    pub completed_discards: u64,
+    pub freshness_consumed: u64,
     pub next_entry: Option<u32>,
 }
 
@@ -222,6 +255,7 @@ impl Frames {
                 offset: (next - claim.range.start) as usize,
                 generation: 0,
                 last_snapshot: 0,
+                last_freshness: 0,
             });
             next = slice_end;
         }
@@ -307,34 +341,96 @@ impl Frames {
         ordinal: u32,
         desired: u128,
     ) -> Result<(), Error> {
+        self.begin(captured, ordinal, desired, Destination::Buffer)
+    }
+    /// Source VA10112c8..10112d8 and 101164c pass a NULL destination to
+    /// bulk consumption. Retain actual consume prefixes without touching any
+    /// software frame byte or invalidating the previous copied-cell receipt.
+    /// Activity-zero generic ingestion must not schedule a second bulk copy.
+    pub fn begin_discard(
+        &mut self,
+        captured: &Captured,
+        ordinal: u32,
+        desired: u128,
+    ) -> Result<(), Error> {
+        self.begin(captured, ordinal, desired, Destination::Discard)
+    }
+    /// Source VA10115d4..10115f8 consumes the first actual slice entry into a
+    /// temporary, then reads its VALUE low32 for freshness. It does not read
+    /// metadata as a clock or replace the retained platform buffer. The source
+    /// caller must qualify its separate freshness-arm and selection predicates.
+    /// Frozen pending bits are deliberately not retested, including bit0.
+    pub fn consume_freshness(
+        &mut self,
+        captured: &Captured,
+        ordinal: u32,
+        access: &mut Access<'_>,
+    ) -> Result<Entry, Error> {
         self.claim.check()?;
         if self.pending.is_some() {
-            return Err("PMP counter copy still retains its captured prefix");
+            return Err("PMP counter transfer still retains its captured prefix");
         }
+        let slice = self.captured_slice(captured, ordinal)?;
+        if slice.layout.count == 0
+            || slice.last_freshness == captured.generation
+            || slice.last_snapshot == captured.generation
+        {
+            return Err(
+                "PMP first-entry freshness consumption is absent, repeated or out of order",
+            );
+        }
+        let consumed = next(self.progress.consumed)?;
+        let freshness = next(self.progress.freshness_consumed)?;
+        let entry = self
+            .claim
+            .local
+            .bank()
+            .consume_entry(slice.layout.start, access)?;
+        self.slices[ordinal as usize].last_freshness = captured.generation;
+        self.progress.consumed = consumed;
+        self.progress.freshness_consumed = freshness;
+        Ok(entry)
+    }
+    fn captured_slice(&self, captured: &Captured, ordinal: u32) -> Result<&Slice, Error> {
         if !Rc::ptr_eq(&captured.owner, &self.identity)
             || captured.generation != self.progress.captures
         {
-            return Err("PMP counter copy requires the latest same-owner pending capture");
+            return Err("PMP counter transfer requires the latest same-owner pending capture");
         }
-        let slice = self
-            .slices
+        self.slices
             .get(ordinal as usize)
-            .ok_or("PMP counter ordinal is absent")?;
+            .ok_or("PMP counter ordinal is absent")
+    }
+    fn begin(
+        &mut self,
+        captured: &Captured,
+        ordinal: u32,
+        desired: u128,
+        destination: Destination,
+    ) -> Result<(), Error> {
+        self.claim.check()?;
+        if self.pending.is_some() {
+            return Err("PMP counter transfer still retains its captured prefix");
+        }
+        let slice = self.captured_slice(captured, ordinal)?;
         if slice.last_snapshot == captured.generation {
             return Err("PMP counter platform copy already began for this pending capture");
         }
-        let generation = next(self.copy_generation)?;
         let selected = captured.bits(slice.layout.start, slice.layout.count)? & desired;
-        self.slices[ordinal as usize].generation = generation;
+        if destination == Destination::Buffer {
+            let generation = next(self.copy_generation)?;
+            self.slices[ordinal as usize].generation = generation;
+            self.copy_generation = generation;
+        }
         self.slices[ordinal as usize].last_snapshot = captured.generation;
         self.pending = Some(Pending {
             slice: ordinal as usize,
+            destination,
             selected,
             remaining: selected,
-            copied: 0,
+            consumed: 0,
             at: captured.at,
         });
-        self.copy_generation = generation;
         Ok(())
     }
     #[cfg(test)]
@@ -343,8 +439,8 @@ impl Frames {
         self.begin_copy(&captured, ordinal, desired)
     }
     /// Consume at most one actual entry. A later failure leaves every earlier
-    /// entry consumed and cell copied; no callback, allocation or fallible step
-    /// occurs between successful consume and its retained destination update.
+    /// entry consumed and, when requested, cell copied. No callback, allocation
+    /// or fallible step occurs between consume and its retained software effects.
     /// Frozen selection is not retested against NEW after source snapshot races.
     pub fn step(&mut self, access: &mut Access<'_>) -> Result<CopyStep, Error> {
         self.claim.check()?;
@@ -356,6 +452,11 @@ impl Frames {
             return Ok(CopyStep::Complete);
         }
         let consumed = next(self.progress.consumed)?;
+        let discarded = if pending.destination == Destination::Discard {
+            next(self.progress.discarded)?
+        } else {
+            self.progress.discarded
+        };
         let relative = pending.remaining.trailing_zeros();
         let slice = &self.slices[pending.slice];
         let index = slice.offset + relative as usize;
@@ -364,10 +465,13 @@ impl Frames {
             .local
             .bank()
             .consume_entry(slice.layout.start + relative, access)?;
-        self.frames[index].copy(raw);
+        if pending.destination == Destination::Buffer {
+            self.frames[index].copy(raw);
+        }
         pending.remaining &= pending.remaining - 1;
-        pending.copied += 1;
+        pending.consumed += 1;
         self.progress.consumed = consumed;
+        self.progress.discarded = discarded;
         Ok(CopyStep::Consumed { relative })
     }
     /// Finish the bulk-copy stage only. Generic extraction, auxiliary providers
@@ -378,6 +482,9 @@ impl Frames {
             .pending
             .as_ref()
             .ok_or("PMP counter copy has no captured input")?;
+        if pending.destination != Destination::Buffer {
+            return Err("PMP counter discard cannot produce a copied-cell receipt");
+        }
         if pending.remaining != 0 {
             return Err("PMP counter copy has unconsumed selected entries");
         }
@@ -389,7 +496,26 @@ impl Frames {
             generation: self.copy_generation,
             layout: self.slices[pending.slice].layout,
             selected: pending.selected,
-            copied: pending.copied,
+            copied: pending.consumed,
+            captured_at: pending.at,
+        })
+    }
+    pub fn finish_discard(&mut self) -> Result<Discarded, Error> {
+        self.claim.check()?;
+        let pending = self
+            .pending
+            .as_ref()
+            .ok_or("PMP counter discard has no captured input")?;
+        if pending.destination != Destination::Discard || pending.remaining != 0 {
+            return Err("PMP counter discard has not completed its actual consumption");
+        }
+        let completed = next(self.progress.completed_discards)?;
+        let pending = self.pending.take().unwrap();
+        self.progress.completed_discards = completed;
+        Ok(Discarded {
+            layout: self.slices[pending.slice].layout,
+            selected: pending.selected,
+            consumed: pending.consumed,
             captured_at: pending.at,
         })
     }
@@ -401,10 +527,9 @@ impl Frames {
         let index = copied.layout.ordinal as usize;
         let slice = &self.slices[index];
         if copied.generation != slice.generation
-            || self
-                .pending
-                .as_ref()
-                .is_some_and(|pending| pending.slice == index)
+            || self.pending.as_ref().is_some_and(|pending| {
+                pending.slice == index && pending.destination == Destination::Buffer
+            })
         {
             return Err("PMP counter cells require the latest same-owner completed copy");
         }
@@ -765,6 +890,250 @@ mod tests {
         }
     }
     #[test]
+    fn null_destination_discard_retains_cells_and_real_partial_consumption() {
+        let local = local();
+        let mut frames = frames(&local, &[14], &[0xa5; 112]);
+        let mut latch = InterruptLatch::new();
+        for entry in [16, 19] {
+            publish(&local, entry, u64::from(entry), 7, &mut latch);
+        }
+        frames
+            .capture(0, u128::MAX, &Access::new(0, 8, &mut latch))
+            .unwrap();
+        assert!(frames.finish_discard().is_err());
+        let copied = drain(&mut frames, &mut latch);
+        let before = frames.cells(&copied).unwrap().to_vec();
+        for entry in [16, 17, 79, 80] {
+            publish(&local, entry, 1000 + u64::from(entry), 9, &mut latch);
+        }
+        let captured = frames
+            .capture_pending(&Access::new(0, 10, &mut latch))
+            .unwrap();
+        let desired = 1 | 1u128 << 63 | 1u128 << 64;
+        frames.begin_discard(&captured, 0, desired).unwrap();
+        assert!(frames.finish_copy().is_err());
+        assert!(frames.finish_discard().is_err());
+        assert_eq!(frames.cells(&copied).unwrap(), before);
+        assert_eq!(
+            frames.step(&mut Access::new(0, 11, &mut latch)),
+            Ok(CopyStep::Consumed { relative: 0 })
+        );
+        let mut bank = local.bank().clone();
+        bank.set_lifecycle(
+            LifecycleState {
+                quiesced: true,
+                ..LIVE
+            },
+            &mut Access::new(0, 12, &mut latch),
+        );
+        assert!(frames.step(&mut Access::new(0, 13, &mut latch)).is_err());
+        assert_eq!(frames.progress().next_entry, Some(79));
+        assert_eq!(frames.progress().discarded, 1);
+        assert_eq!(frames.cells(&copied).unwrap(), before);
+        bank.set_lifecycle(LIVE, &mut Access::new(0, 14, &mut latch));
+        publish(&local, 16, 9000, 15, &mut latch); // cannot replay the consumed prefix
+        while frames.step(&mut Access::new(0, 16, &mut latch)).unwrap() != CopyStep::Complete {}
+        let discarded = frames.finish_discard().unwrap();
+        assert_eq!(discarded.layout(), copied.layout());
+        assert_eq!(
+            (
+                discarded.selected(),
+                discarded.consumed(),
+                discarded.captured_at()
+            ),
+            (desired, 3, 10)
+        );
+        assert_eq!(frames.cells(&copied).unwrap(), before);
+        assert_eq!(
+            (frames.progress().consumed, frames.progress().discarded),
+            (5, 3)
+        );
+        assert_eq!(
+            (
+                frames.progress().completed_copies,
+                frames.progress().completed_discards
+            ),
+            (1, 1)
+        );
+        assert!(frames.finish_discard().is_err());
+        assert!(frames.begin_copy(&captured, 0, desired).is_err());
+        assert!(frames.begin_discard(&captured, 0, desired).is_err());
+        let next = frames
+            .capture_pending(&Access::new(0, 17, &mut latch))
+            .unwrap();
+        assert_eq!(next.bits(16, 112), Ok(3)); // newer16 and unselected17 remain pending
+        assert!(frames.begin_discard(&captured, 0, desired).is_err());
+        let mut foreign = self::frames(&self::local(), &[14], &[0; 112]);
+        assert!(foreign.begin_discard(&next, 0, desired).is_err());
+        frames.begin_copy(&next, 0, u128::MAX).unwrap();
+        assert!(frames.cells(&copied).is_err());
+        let newer = drain(&mut frames, &mut latch);
+        assert_eq!(frames.cells(&newer).unwrap()[0].value, 9000);
+        assert_eq!(frames.cells(&newer).unwrap()[1].value, 1017);
+        assert_eq!(frames.cells(&newer).unwrap()[63], before[63]); // discarded input was never copied
+    }
+    #[test]
+    fn discard_exhaustion_refuses_before_consume_or_receipt_and_empty_selection_reads_nothing() {
+        let local = local();
+        let mut frames = frames(&local, &[1], &[0x4a; 8]);
+        let mut latch = InterruptLatch::new();
+        publish(&local, 16, 100, 7, &mut latch);
+        let captured = frames
+            .capture_pending(&Access::new(0, 8, &mut latch))
+            .unwrap();
+        frames.begin_discard(&captured, 0, 1).unwrap();
+        frames.progress.discarded = u64::MAX; // authored accounting exhaustion only
+        assert!(frames.step(&mut Access::new(0, 9, &mut latch)).is_err());
+        assert_eq!(local.bank().pending_range(16, 8).unwrap().low, 1);
+        assert_eq!(frames.progress().consumed, 0);
+        frames.progress.discarded = 0;
+        assert_eq!(
+            frames.step(&mut Access::new(0, 10, &mut latch)),
+            Ok(CopyStep::Consumed { relative: 0 })
+        );
+        frames.progress.completed_discards = u64::MAX;
+        assert!(frames.finish_discard().is_err());
+        assert!(frames.pending.is_some());
+        frames.progress.completed_discards = 0;
+        assert_eq!(frames.finish_discard().unwrap().consumed(), 1);
+        publish(&local, 16, 200, 11, &mut latch);
+        let captured = frames
+            .capture_pending(&Access::new(0, 12, &mut latch))
+            .unwrap();
+        frames.begin_discard(&captured, 0, 0).unwrap();
+        assert_eq!(
+            frames.step(&mut Access::new(0, 13, &mut latch)),
+            Ok(CopyStep::Complete)
+        );
+        let empty = frames.finish_discard().unwrap();
+        assert_eq!((empty.selected(), empty.consumed()), (0, 0));
+        assert_eq!(local.bank().pending_range(16, 8).unwrap().low, 1);
+        assert_eq!(frames.progress().consumed, 1);
+        assert!(
+            frames
+                .frames
+                .iter()
+                .all(|cell| *cell == Frame::initialized(0x4a))
+        );
+    }
+    #[test]
+    fn freshness_consumes_actual_first_value_without_copy_or_retesting_frozen_bits() {
+        let local = local();
+        let mut frames = frames(&local, &[1, 0], &[0x6a; 8]);
+        let mut latch = InterruptLatch::new();
+        publish(&local, 16, 0xfeed00000007, 42, &mut latch);
+        publish(&local, 17, 17, 43, &mut latch);
+        let captured = frames
+            .capture_pending(&Access::new(0, 44, &mut latch))
+            .unwrap();
+        assert!(
+            frames
+                .consume_freshness(&captured, 1, &mut Access::new(0, 44, &mut latch))
+                .is_err()
+        );
+        let mut foreign = self::frames(&self::local(), &[1], &[0; 8]);
+        assert!(
+            foreign
+                .consume_freshness(&captured, 0, &mut Access::new(0, 44, &mut latch))
+                .is_err()
+        );
+        let entry = frames
+            .consume_freshness(&captured, 0, &mut Access::new(0, 45, &mut latch))
+            .unwrap();
+        assert_eq!(entry.value as u32, 7); // source LDR W8 of the copied VALUE
+        assert_eq!(entry.metadata, 42 << 10 | 2); // distinct actual transport metadata
+        assert!(
+            frames
+                .consume_freshness(&captured, 0, &mut Access::new(0, 46, &mut latch))
+                .is_err()
+        );
+        assert_eq!(captured.bits(16, 8), Ok(3)); // original pending snapshot remains unchanged
+        frames.begin_discard(&captured, 0, u128::MAX).unwrap();
+        while frames.step(&mut Access::new(0, 47, &mut latch)).unwrap() != CopyStep::Complete {}
+        assert_eq!(frames.finish_discard().unwrap().consumed(), 2); // includes the already consumed first entry
+        assert_eq!(
+            (
+                frames.progress().consumed,
+                frames.progress().freshness_consumed
+            ),
+            (3, 1)
+        );
+        assert!(
+            frames
+                .frames
+                .iter()
+                .all(|cell| *cell == Frame::initialized(0x6a))
+        );
+        publish(&local, 17, 1700, 48, &mut latch);
+        let next = frames
+            .capture_pending(&Access::new(0, 49, &mut latch))
+            .unwrap();
+        assert!(
+            frames
+                .consume_freshness(&captured, 0, &mut Access::new(0, 50, &mut latch))
+                .is_err()
+        );
+        assert_eq!(next.bits(16, 8), Ok(2));
+        let unchanged = frames
+            .consume_freshness(&next, 0, &mut Access::new(0, 51, &mut latch))
+            .unwrap();
+        assert_eq!(unchanged.value as u32, 7); // bit0 need not be pending; the source still consumes entry0
+        assert_eq!(unchanged.metadata, 42 << 10);
+        frames.begin_copy(&next, 0, u128::MAX).unwrap();
+        let copied = drain(&mut frames, &mut latch);
+        assert_eq!(frames.cells(&copied).unwrap()[0], Frame::initialized(0x6a));
+        assert_eq!(frames.cells(&copied).unwrap()[1].value, 1700);
+        assert!(
+            frames
+                .consume_freshness(&next, 0, &mut Access::new(0, 52, &mut latch))
+                .is_err()
+        );
+    }
+    #[test]
+    fn freshness_failure_and_exhaustion_leave_first_entry_available_for_the_same_operation() {
+        let local = local();
+        let mut frames = frames(&local, &[1], &[0; 8]);
+        let mut latch = InterruptLatch::new();
+        publish(&local, 16, 100, 7, &mut latch);
+        let captured = frames
+            .capture_pending(&Access::new(0, 8, &mut latch))
+            .unwrap();
+        frames.progress.freshness_consumed = u64::MAX;
+        assert!(
+            frames
+                .consume_freshness(&captured, 0, &mut Access::new(0, 9, &mut latch))
+                .is_err()
+        );
+        assert_eq!(frames.progress().consumed, 0);
+        assert_eq!(local.bank().pending_range(16, 8).unwrap().low, 1);
+        frames.progress.freshness_consumed = 0;
+        let mut bank = local.bank().clone();
+        bank.set_lifecycle(
+            LifecycleState {
+                quiesced: true,
+                ..LIVE
+            },
+            &mut Access::new(0, 10, &mut latch),
+        );
+        assert!(
+            frames
+                .consume_freshness(&captured, 0, &mut Access::new(0, 11, &mut latch))
+                .is_err()
+        );
+        assert_eq!(frames.slices[0].last_freshness, 0);
+        assert_eq!(frames.progress().consumed, 0);
+        bank.set_lifecycle(LIVE, &mut Access::new(0, 12, &mut latch));
+        assert_eq!(
+            frames
+                .consume_freshness(&captured, 0, &mut Access::new(0, 13, &mut latch))
+                .unwrap()
+                .metadata,
+            7 << 10 | 2
+        );
+        assert_eq!(frames.progress().freshness_consumed, 1);
+        assert_eq!(local.bank().pending_range(16, 8).unwrap().low, 0);
+    }
+    #[test]
     #[cfg(feature = "std")]
     #[ignore = "requires original T8112 PMP and J473 DT via STELA_TEST_PMP_T8112 and STELA_TEST_MCC_J473_DT"]
     fn original_dynamic_slices_and_metadata_copy_match_actual_ptd_effects() {
@@ -804,6 +1173,11 @@ mod tests {
                 0x13e40,
                 0x13fa8,
                 "5b3d66502b0b3dae1f718d5deda7da3a0942e3346931e2e8cbf27f77ae0e13b5",
+            ),
+            (
+                0x12160,
+                0x12674,
+                "5ffb9090d6b2b23dcf29a50bca350fb6c57a73815f27d0ccab92c25f7a1e40aa",
             ),
         ] {
             assert_eq!(crate::sha256(&pmp[start..end]), hash);
@@ -877,6 +1251,9 @@ mod tests {
             );
         }
         let word = |offset| u32::from_le_bytes(pmp[offset..offset + 4].try_into().unwrap());
+        assert_eq!(word(0x122cc), 0xaa1f03e1); // wrap calls bulk with NULL destination
+        assert_eq!(word(0x13c98), 0xb4000102); // consume skips copying for NULL destination
+        assert_eq!(word(0x125f8), 0xb94033e8); // freshness reads VALUE low32 at temporary+0
         // These on-disk zeros are rewritten during source initialization.
         assert_eq!((word(0x47ab8 + 0x64), word(0x47ab8 + 0x68)), (0, 0));
         let mut latch = InterruptLatch::new();
