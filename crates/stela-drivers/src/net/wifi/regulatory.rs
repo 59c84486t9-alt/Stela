@@ -11,9 +11,11 @@
 //! inferred. Parsed vendor receipts and channel flags alone are observations;
 //! native providers must retain the actual programmed controller and policy.
 
-use super::{Band, Channel, scan, station};
+use super::{Band, Channel, scan as scan_protocol, station};
 
 mod association;
+mod scan;
+pub use scan::{ScanAdmission, ScanOperation};
 pub mod database;
 pub mod wmm;
 pub use association::{AssociationAdmission, AssociationOperation, AssociationUse};
@@ -112,6 +114,7 @@ impl Operation {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    NoMemory,
     OwnerExhausted,
     HardwareUnavailable,
     OsUnavailable,
@@ -367,7 +370,7 @@ impl<H: HardwarePolicy, O: OsPolicy> Preflight<'_, H, O> {
     }
 }
 
-impl<H: HardwarePolicy, O: OsPolicy> scan::Policy for Preflight<'_, H, O> {
+impl<H: HardwarePolicy, O: OsPolicy> scan_protocol::Policy for Preflight<'_, H, O> {
     fn allow_receive(&mut self, channel: Channel) -> bool {
         self.owner.admit(Operation::Receive(channel)).is_ok()
     }
@@ -667,7 +670,7 @@ mod tests {
 
     #[test]
     fn preflight_traits_preserve_receive_probe_management_data_distinctions() {
-        use scan::Policy;
+        use scan_protocol::Policy;
         use station::RegulatoryPolicy;
         let (mut owner, hardware, _) = fixture();
         hardware.permissions.set(1 | 4);

@@ -17,9 +17,11 @@ static NEXT_SCAN: super::Identities = super::Identities::new();
 // Shared ceilings informed by initial AX200/210, MT7921/22/25, RTL8822CE/8852BE
 // sources. These are not capabilities: vendor encoders must enforce narrower
 // negotiated firmware limits and actual built-probe/reserved-page bounds.
-const MAX_SSIDS: usize = 4;
-const MAX_CHANNELS: usize = 64;
-const MAX_EXTRA_ELEMENTS: usize = 384;
+pub(super) const MAX_SSIDS: usize = 4;
+pub(super) const MAX_SSID_BYTES: usize = 32;
+pub(super) const MAX_SIX_GHZ: usize = 64;
+pub(super) const MAX_CHANNELS: usize = 64;
+pub(super) const MAX_EXTRA_ELEMENTS: usize = 384;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -83,7 +85,7 @@ impl Request {
         extra_elements: Vec<u8>,
         six_ghz: Vec<SixGhz>,
     ) -> Result<Self, Error> {
-        if six_ghz.len() > 64
+        if six_ghz.len() > MAX_SIX_GHZ
             || six_ghz.iter().any(|p| {
                 channels
                     .get(p.channel_index)
@@ -111,7 +113,7 @@ impl Request {
         {
             return Err(Error::Invalid("duplicate scan channel"));
         }
-        if ssids.len() > MAX_SSIDS || ssids.iter().any(|ssid| ssid.len() > 32) {
+        if ssids.len() > MAX_SSIDS || ssids.iter().any(|ssid| ssid.len() > MAX_SSID_BYTES) {
             return Err(Error::Invalid("scan SSID count/length"));
         }
         if extra_elements.len() > MAX_EXTRA_ELEMENTS {
@@ -130,6 +132,32 @@ impl Request {
                 _ => (),
             }
         }
+        Ok(Self {
+            channels,
+            ssids,
+            extra_elements,
+            six_ghz,
+        })
+    }
+
+    /// Fallible immutable snapshot of this already validated request. No
+    /// parser reruns or arbitrary-parts constructor can introduce unchecked
+    /// allocations into a native regulatory-publication preparation path.
+    pub(super) fn try_snapshot(&self) -> Result<Self, alloc::collections::TryReserveError> {
+        fn copy<T: Copy>(source: &[T]) -> Result<Vec<T>, alloc::collections::TryReserveError> {
+            let mut destination = Vec::new();
+            destination.try_reserve_exact(source.len())?;
+            destination.extend_from_slice(source);
+            Ok(destination)
+        }
+        let channels = copy(&self.channels)?;
+        let mut ssids = Vec::new();
+        ssids.try_reserve_exact(self.ssids.len())?;
+        for ssid in &self.ssids {
+            ssids.push(copy(ssid)?);
+        }
+        let extra_elements = copy(&self.extra_elements)?;
+        let six_ghz = copy(&self.six_ghz)?;
         Ok(Self {
             channels,
             ssids,
