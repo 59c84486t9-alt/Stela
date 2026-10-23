@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native host audio primitives. The HDA backend provides command transport,
-//! codec graphs and cyclic PCM DMA; ACP6x supplies bounded direct PDM capture.
+//! codec graphs and cyclic PCM DMA; AMD ACP profiles supply direct PDM capture.
 pub mod acp6x;
+mod acp_pdm;
 pub mod hda;
+pub mod renoir;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {

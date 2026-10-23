@@ -11,38 +11,50 @@
 //! DMA uses actual retained native RAM and an attached device domain. After an error or drop, mappings,
 //! power and exclusive ownership must remain pinned until acknowledged reset
 //! or shutdown. No destructor attempts device access or frees active DMA.
+use super::acp_pdm::{self, DmaConfig, Profile};
+pub use super::acp_pdm::{CAPTURE_FORMAT, Error, Identity, Phase, Position, Registers, State};
+use crate::bus::{dma::mapping::DmaDomain, i2c::Timer};
 use alloc::sync::Arc;
-use core::sync::atomic::{Ordering, fence};
-
-use super::PcmFormat;
-use crate::bus::{
-    dma::{
-        mapping::{Direction as DmaDirection, DmaDomain, DmaError, DmaMapping},
-        memory::{CacheAttribute, CpuMapping, MemoryError, PageSource},
-    },
-    i2c::Timer,
-};
 pub mod pci;
 mod registers;
-pub use registers::Registers;
 use registers::*;
 
-pub const CAPTURE_FORMAT: PcmFormat = PcmFormat {
-    rate: 48_000,
-    bits: 32,
-    channels: 2,
-};
-const PAGE_BYTES: usize = 4096;
-const FRAME_BYTES: usize = 8;
-const DMA_TIMEOUT_US: u64 = 100_000;
-const POWER_TIMEOUT_US: u64 = 500;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Identity {
-    pub vendor: u16,
-    pub device: u16,
-    pub revision: u8,
+#[doc(hidden)]
+pub struct YellowCarp;
+impl Profile for YellowCarp {
+    const POWER_CONTROL: usize = POWER_CONTROL;
+    const POWER_STATUS: usize = POWER_STATUS;
+    const CLOCK: usize = CLOCK;
+    const IRQ_ENABLE: usize = IRQ_ENABLE;
+    const IRQ_CONTROL: usize = IRQ_CONTROL;
+    const IRQ_STATUS: usize = IRQ_STATUS;
+    const SRAM_TABLE: u32 = SRAM_TABLE;
+    const ERROR_ENABLE: u32 = 0;
+    const REQUIRE_DRAIN: bool = false;
+    const PERIOD_DELIVERY: bool = false;
+    fn supported(identity: Identity) -> bool {
+        identity.supported()
+    }
+    fn class_allowed(_: [u8; 3]) -> bool {
+        true
+    }
+    fn pin_mode<R: Registers>(registers: &mut R) -> Result<Option<u32>, Error> {
+        let mode = registers.read32(PIN_CONFIG);
+        if mode == u32::MAX {
+            return Err(Error::RegisterUnavailable(PIN_CONFIG));
+        }
+        Ok(Some(mode))
+    }
+    fn validate_pin(mode: Option<u32>, identity: Identity) -> Result<(), Error> {
+        let mode = mode.unwrap();
+        if !matches!(mode, 4..=8 | 10..=14) || (identity.revision == 0x62 && mode >= 10) {
+            return Err(Error::UnsupportedPinMode(mode));
+        }
+        Ok(())
+    }
 }
+pub type Controller<R, T> = acp_pdm::Controller<R, T, YellowCarp>;
+
 impl Identity {
     fn supported(self) -> bool {
         self.vendor == 0x1022
@@ -76,95 +88,8 @@ pub struct Config {
     /// Source WOV gain encoding 0..=3, applied preserving other MISC bits.
     pub gain: u8,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Phase {
-    PowerOn,
-    ResetAssert,
-    ResetClear,
-    DmaStart,
-    DmaStop,
-}
-#[derive(Clone, Copy)]
-struct Deadline {
-    phase: Phase,
-    start: u64,
-    timeout: u64,
-}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Error {
-    Ownership,
-    MicrophoneAbsent,
-    UnsupportedController,
-    PciAuthority,
-    InvalidConfiguration,
-    InvalidBar,
-    UnsupportedPinMode(u32),
-    AuthorityChanged,
-    RegisterUnavailable(usize),
-    RegisterRejected(usize),
-    Timeout(Phase),
-    NotInitialized,
-    NotPrepared,
-    Busy,
-    InvalidFormat,
-    InvalidBuffer,
-    Memory(MemoryError),
-    Dma(DmaError),
-    DmaAddress,
-    DmaFault(u32),
-    CounterUnstable,
-    CounterDiscontinuity,
-    NeedsReset,
-    Shutdown,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum State {
-    Claimed,
-    Ready,
-    Prepared,
-    Running,
-    Stopped,
-    Faulted,
-    Shutdown,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Position {
-    /// Bytes since the latest start, including complete ring wraps.
-    pub bytes: u64,
-    pub ring_offset: usize,
-    pub period_pending: bool,
-}
-struct Capture {
-    cpu: CpuMapping,
-    dma: DmaMapping,
-    published: bool,
-    period_bytes: usize,
-    baseline: u64,
-    produced: u64,
-}
-
-impl Drop for Capture {
-    fn drop(&mut self) {
-        if !self.published && self.dma.address().is_ok() {
-            // SAFETY: no device has received this mapping's address.
-            let _ = unsafe { self.dma.unmap() };
-        }
-        // A published still-live lease is quarantined by DmaMapping's Drop.
-    }
-}
-
-pub struct Controller<R, T> {
-    registers: R,
-    timer: T,
-    config: Config,
-    identity: Identity,
-    pin_mode: Option<u32>,
-    state: State,
-    capture: Option<Capture>,
-    domain: Arc<dyn DmaDomain>,
-}
-impl<R: Registers, T: Timer> Controller<R, T> {
+impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, YellowCarp> {
     /// Claim without writing hardware. Initialization errors retain this owner.
     ///
     /// # Safety
@@ -178,7 +103,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// requires INTx disabled and MSI/MSI-X disabled). This backend polls W1C
     /// status rather than registering an interrupt handler.
     pub unsafe fn claim(
-        mut registers: R,
+        registers: R,
         timer: T,
         config: Config,
         domain: Arc<dyn DmaDomain>,
@@ -191,593 +116,34 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         {
             return Err(Error::MicrophoneAbsent);
         }
-        if !(32..=63).contains(&config.dma_address_bits) || config.gain > 3 {
-            return Err(Error::InvalidConfiguration);
-        }
-        if registers.region_bytes() < REGION_BYTES {
-            return Err(Error::InvalidBar);
-        }
-        let identity = registers.identity()?;
-        if !identity.supported() {
-            return Err(Error::UnsupportedController);
-        }
-        Ok(Self {
+        Self::claim_profile(
             registers,
             timer,
-            config,
-            identity,
-            pin_mode: None,
-            state: State::Claimed,
-            capture: None,
+            DmaConfig {
+                dma_address_bits: config.dma_address_bits,
+                gain: config.gain,
+            },
             domain,
-        })
-    }
-    pub fn state(&self) -> State {
-        self.state
-    }
-    pub fn buffer_bytes(&self) -> Option<usize> {
-        self.capture
-            .as_ref()
-            .map(|capture| capture.period_bytes * 4)
-    }
-
-    fn read(&mut self, offset: usize) -> Result<u32, Error> {
-        let value = self.registers.read32(offset);
-        if value == u32::MAX {
-            Err(Error::RegisterUnavailable(offset))
-        } else {
-            Ok(value)
-        }
-    }
-    fn write_checked(&mut self, offset: usize, value: u32) -> Result<(), Error> {
-        self.registers.write32(offset, value);
-        let observed = if value == u32::MAX {
-            self.registers.read32(offset)
-        } else {
-            self.read(offset)?
-        };
-        if observed != value {
-            return Err(Error::RegisterRejected(offset));
-        }
-        Ok(())
-    }
-    fn deadline(&self, phase: Phase, timeout: u64) -> Deadline {
-        Deadline {
-            phase,
-            start: self.timer.now_us(),
-            timeout,
-        }
-    }
-    fn check_deadline(&self, deadline: Deadline) -> Result<(), Error> {
-        if self.timer.now_us().wrapping_sub(deadline.start) >= deadline.timeout {
-            return Err(Error::Timeout(deadline.phase));
-        }
-        Ok(())
-    }
-    fn phase_read(&mut self, offset: usize, deadline: Deadline) -> Result<u32, Error> {
-        self.check_deadline(deadline)?;
-        // A failed actual access takes priority over the clock observed after
-        // that access; a successful late ready value never grants completion.
-        let value = self.read(offset)?;
-        self.check_deadline(deadline)?;
-        Ok(value)
-    }
-    fn phase_write(&mut self, offset: usize, value: u32, deadline: Deadline) -> Result<(), Error> {
-        self.check_deadline(deadline)?;
-        self.registers.write32(offset, value);
-        self.check_deadline(deadline)
-    }
-    fn phase_expect(&mut self, offset: usize, value: u32, deadline: Deadline) -> Result<(), Error> {
-        self.check_deadline(deadline)?;
-        let observed = self.read(offset)?;
-        if observed != value {
-            return Err(Error::RegisterRejected(offset));
-        }
-        self.check_deadline(deadline)
-    }
-    fn phase_checked_write(
-        &mut self,
-        offset: usize,
-        value: u32,
-        deadline: Deadline,
-    ) -> Result<(), Error> {
-        self.phase_write(offset, value, deadline)?;
-        self.phase_expect(offset, value, deadline)
-    }
-    fn wait(
-        &mut self,
-        offset: usize,
-        deadline: Deadline,
-        ready: impl Fn(u32) -> bool,
-    ) -> Result<(), Error> {
-        loop {
-            if ready(self.phase_read(offset, deadline)?) {
-                return Ok(());
-            }
-            self.timer.relax();
-        }
-    }
-    fn pci_authority(&mut self) -> Result<(), Error> {
-        if self.registers.identity()? != self.identity {
-            return Err(Error::AuthorityChanged);
-        }
-        Ok(())
-    }
-    fn live(&mut self) -> Result<(), Error> {
-        self.pci_authority()?;
-        let expected_pin_mode = self.pin_mode;
-        if expected_pin_mode != Some(self.read(PIN_CONFIG)?)
-            || self.read(POWER_STATUS)? != 0
-            || self.read(CONTROL)? != 1
-            || self.read(CLOCK)? != 3
-            || self.read(IRQ_ENABLE)? != 1
-        {
-            return Err(Error::AuthorityChanged);
-        }
-        Ok(())
-    }
-    fn usable(&self) -> Result<(), Error> {
-        match self.state {
-            State::Claimed => Err(Error::NotInitialized),
-            State::Faulted => Err(Error::NeedsReset),
-            State::Shutdown => Err(Error::Shutdown),
-            _ => Ok(()),
-        }
-    }
-    fn finish<U>(&mut self, result: Result<U, Error>) -> Result<U, Error> {
-        if result.is_err() {
-            self.state = State::Faulted;
-        }
-        result
-    }
-    fn soft_reset(&mut self) -> Result<(), Error> {
-        let assert = self.deadline(Phase::ResetAssert, POWER_TIMEOUT_US);
-        self.phase_write(RESET, 1, assert)?;
-        // The source accepts either bit of 0x10001, not bit16 alone. Require
-        // its actual observed handshake and a bounded complete clear.
-        self.wait(RESET, assert, |value| value & RESET_ACK != 0)?;
-        let clear = self.deadline(Phase::ResetClear, POWER_TIMEOUT_US);
-        self.phase_write(RESET, 0, clear)?;
-        self.wait(RESET, clear, |value| value == 0)?;
-        self.phase_expect(DMA_ENABLE, 0, clear)?;
-        self.phase_expect(PDM_ENABLE, 0, clear)
-    }
-    /// Initialize or recover a fault through an actual whole-function reset.
-    /// Existing capture ownership survives any failed handshake. A successful
-    /// reset invalidates the old ring and requires a fresh prepare.
-    pub fn initialize(&mut self) -> Result<(), Error> {
-        if self.state == State::Shutdown {
-            return Err(Error::Shutdown);
-        }
-        self.state = State::Faulted;
-        self.pci_authority()?;
-        self.initialize_inner()?;
-        self.release_capture()?;
-        self.state = State::Ready;
-        Ok(())
-    }
-    fn initialize_inner(&mut self) -> Result<(), Error> {
-        let deadline = self.deadline(Phase::PowerOn, POWER_TIMEOUT_US);
-        let power = self.phase_read(POWER_STATUS, deadline)?;
-        if power != 0 {
-            if power & 3 != 1 {
-                self.phase_write(POWER_CONTROL, 1, deadline)?;
-            }
-            self.wait(POWER_STATUS, deadline, |value| value == 0)?;
-        }
-        self.write_checked(CONTROL, 1)?;
-        self.soft_reset()?;
-        self.write_checked(CLOCK, 3)?;
-        self.write_checked(ATU_CONTROL, 0)?;
-        self.registers.set_bus_master(false)?;
-        self.write_checked(IRQ_CONTROL, 0)?;
-        self.registers.write32(IRQ_STATUS, u32::MAX);
-        self.write_checked(IRQ_ENABLE, 1)?;
-        let mode = self.read(PIN_CONFIG)?;
-        // Restrict the source's default branch to its declared 4-bit modes.
-        // RPL reserves 10..14; never treat an unavailable/reserved value as PDM.
-        if !matches!(mode, 4..=8 | 10..=14) || (self.identity.revision == 0x62 && mode >= 10) {
-            return Err(Error::UnsupportedPinMode(mode));
-        }
-        self.pin_mode = Some(mode);
-        Ok(())
-    }
-    /// Four equal 4K..8K periods. No allocation is published before complete
-    /// format/range checks; once programming begins it is retained on faults.
-    pub fn prepare_capture(
-        &mut self,
-        source: &dyn PageSource,
-        format: PcmFormat,
-        period_bytes: usize,
-    ) -> Result<(), Error> {
-        self.usable()?;
-        if self.state == State::Running {
-            return Err(Error::Busy);
-        }
-        if format != CAPTURE_FORMAT {
-            return Err(Error::InvalidFormat);
-        }
-        if !(4096..=8192).contains(&period_bytes) || !period_bytes.is_multiple_of(FRAME_BYTES) {
-            return Err(Error::InvalidBuffer);
-        }
-        let result = self.prepare_inner(source, period_bytes);
-        self.finish(result)
-    }
-    fn prepare_inner(&mut self, source: &dyn PageSource, period_bytes: usize) -> Result<(), Error> {
-        self.live()?;
-        if self.read(DMA_ENABLE)? != 0 || self.read(PDM_ENABLE)? != 0 {
-            return Err(Error::Busy);
-        }
-        let bytes = period_bytes * 4;
-        // Source allocates 32K but permits a smaller runtime ring. Own the
-        // complete rounded page range without mapping a partial final page.
-        let allocation_bytes = bytes.next_multiple_of(PAGE_BYTES);
-        self.write_checked(ATU_CONTROL, 0)?;
-        self.registers.set_bus_master(false)?;
-        self.release_capture()?;
-        let geometry = source.page_geometry().map_err(Error::Memory)?;
-        if geometry.base_shift() != 12 {
-            return Err(Error::InvalidBuffer);
-        }
-        let pages = source
-            .allocate(allocation_bytes, PAGE_BYTES, CacheAttribute::WriteBack)
-            .map_err(Error::Memory)?;
-        if pages.page_shift() != 12
-            || pages.bytes() != allocation_bytes
-            || pages.logical_bytes() != allocation_bytes
-        {
-            return Err(Error::InvalidBuffer);
-        }
-        let cpu = pages
-            .cpu_mapping(CacheAttribute::WriteBack)
-            .map_err(Error::Memory)?;
-        let dma = DmaMapping::map(
-            self.domain.clone(),
-            pages,
-            DmaDirection::FromDevice,
-            (1u64 << self.config.dma_address_bits) - 1,
         )
-        .map_err(Error::Dma)?;
-        let capture = Capture {
-            cpu,
-            dma,
-            published: false,
-            period_bytes,
-            baseline: 0,
-            produced: 0,
-        };
-        check_dma_range(
-            capture.dma.address().map_err(Error::Dma)?,
-            capture.dma.bytes(),
-            allocation_bytes,
-            self.config.dma_address_bits,
-        )?;
-        capture
-            .dma
-            .sync_for_device(0..allocation_bytes)
-            .map_err(Error::Dma)?;
-        self.capture = Some(capture);
-        // From this point even partial SRAM publication retains the lease.
-        self.capture.as_mut().unwrap().published = true;
-        self.write_checked(PAGE_BASE, SRAM_TABLE | PTE_VALID)?;
-        self.write_checked(PAGE_SIZE, 2)?;
-        let base = self
-            .capture
-            .as_ref()
-            .unwrap()
-            .dma
-            .address()
-            .map_err(Error::Dma)?;
-        for page in 0..allocation_bytes / PAGE_BYTES {
-            let address = base + (page * PAGE_BYTES) as u64;
-            self.write_checked(SCRATCH + page * 8, address as u32)?;
-            self.write_checked(SCRATCH + page * 8 + 4, (address >> 32) as u32 | PTE_VALID)?;
-        }
-        // Invalidate remaining group1 slots from a previous larger ring.
-        for page in allocation_bytes / PAGE_BYTES..8 {
-            self.write_checked(SCRATCH + page * 8 + 4, 0)?;
-        }
-        self.write_checked(RING_ADDRESS, PDM_WINDOW)?;
-        self.write_checked(RING_SIZE, bytes as u32)?;
-        self.write_checked(WATERMARK, period_bytes as u32)?;
-        fence(Ordering::Release);
-        self.write_checked(ATU_CONTROL, 1)?;
-        self.state = State::Prepared;
-        Ok(())
     }
-    fn ring_authority(&mut self) -> Result<(), Error> {
-        self.live()?;
-        let capture = self.capture.as_ref().ok_or(Error::NotPrepared)?;
-        let (base, allocation, period) = (
-            capture.dma.address().map_err(Error::Dma)?,
-            capture.dma.bytes(),
-            capture.period_bytes,
-        );
-        for (offset, expected) in [
-            (PAGE_BASE, SRAM_TABLE | PTE_VALID),
-            (PAGE_SIZE, 2),
-            (ATU_CONTROL, 1),
-            (RING_ADDRESS, PDM_WINDOW),
-            (RING_SIZE, (period * 4) as u32),
-            (WATERMARK, period as u32),
-        ] {
-            if self.read(offset)? != expected {
-                return Err(Error::AuthorityChanged);
-            }
-        }
-        for page in 0..allocation / PAGE_BYTES {
-            let address = base + (page * PAGE_BYTES) as u64;
-            if self.read(SCRATCH + page * 8)? != address as u32
-                || self.registers.read32(SCRATCH + page * 8 + 4)
-                    != ((address >> 32) as u32 | PTE_VALID)
-            {
-                return Err(Error::AuthorityChanged);
-            }
-        }
-        if self.state == State::Running {
-            for (offset, expected) in [(CHANNELS, 0), (DECIMATION, 2), (PDM_CLOCK, 7)] {
-                if self.read(offset)? != expected {
-                    return Err(Error::AuthorityChanged);
-                }
-            }
-            if self.read(MISC)? & GAIN_MASK != u32::from(self.config.gain) << 3 {
-                return Err(Error::AuthorityChanged);
-            }
-        }
-        Ok(())
-    }
-    fn byte_count(&mut self) -> Result<u64, Error> {
-        // Registers are ordinary halves, not a documented latch. Retry a
-        // rollover rather than manufacture a position from different epochs.
-        for _ in 0..8 {
-            let high = self.registers.read32(COUNT_HIGH);
-            let low = self.registers.read32(COUNT_LOW);
-            if self.registers.read32(COUNT_HIGH) == high {
-                return Ok(u64::from(high) << 32 | u64::from(low));
-            }
-        }
-        Err(Error::CounterUnstable)
-    }
-    pub fn start(&mut self) -> Result<(), Error> {
-        self.usable()?;
-        if self.state == State::Running {
-            return Err(Error::Busy);
-        }
-        if !matches!(self.state, State::Prepared | State::Stopped) {
-            return Err(Error::NotPrepared);
-        }
-        let result = self.start_inner();
-        self.finish(result)
-    }
-    fn start_inner(&mut self) -> Result<(), Error> {
-        self.ring_authority()?;
-        if self.read(DMA_ENABLE)? != 0 || self.read(PDM_ENABLE)? != 0 {
-            return Err(Error::AuthorityChanged);
-        }
-        self.write_checked(CHANNELS, 0)?;
-        self.write_checked(DECIMATION, 2)?;
-        let baseline = self.byte_count()?;
-        let capture = self.capture.as_mut().unwrap();
-        capture.baseline = baseline;
-        capture.produced = 0;
-        capture
-            .dma
-            .sync_for_device(0..capture.dma.bytes())
-            .map_err(Error::Dma)?;
-        self.registers.write32(IRQ_STATUS, PERIOD_IRQ);
-        let irq = self.read(IRQ_CONTROL)?;
-        self.write_checked(IRQ_CONTROL, irq | PERIOD_IRQ)?;
-        let deadline = self.deadline(Phase::DmaStart, DMA_TIMEOUT_US);
-        self.phase_checked_write(PDM_CLOCK, 7, deadline)?;
-        let misc =
-            self.phase_read(MISC, deadline)? & !GAIN_MASK | (u32::from(self.config.gain) << 3);
-        self.phase_checked_write(MISC, misc, deadline)?;
-        fence(Ordering::Release);
-        self.phase_checked_write(PDM_ENABLE, 1, deadline)?;
-        // The status bit may become set immediately, so an exact readback of
-        // request1 is invalid. Acknowledgement is the separate active bit.
-        self.check_deadline(deadline)?;
-        self.registers.set_bus_master(true)?;
-        self.check_deadline(deadline)?;
-        self.phase_write(DMA_ENABLE, DMA_REQUEST, deadline)?;
-        self.wait(DMA_ENABLE, deadline, |value| value & DMA_ACTIVE != 0)?;
-        self.state = State::Running;
-        Ok(())
-    }
-    fn position_inner(&mut self) -> Result<Position, Error> {
-        self.ring_authority()?;
-        let status = self.read(IRQ_STATUS)?;
-        if status & ERROR_IRQ != 0 {
-            return Err(Error::DmaFault(status));
-        }
-        let dma = self.read(DMA_ENABLE)?;
-        if dma & !3 != 0
-            || (self.state == State::Running && dma & DMA_ACTIVE == 0)
-            || (self.state != State::Running && dma != 0)
-            || self.read(PDM_ENABLE)? != u32::from(self.state == State::Running)
-        {
-            return Err(Error::AuthorityChanged);
-        }
-        let count = self.byte_count()?;
-        let capture = self.capture.as_mut().ok_or(Error::NotPrepared)?;
-        let produced =
-            count.wrapping_sub(capture.baseline) / FRAME_BYTES as u64 * FRAME_BYTES as u64;
-        if produced < capture.produced || produced >= (1u64 << 63) {
-            return Err(Error::CounterDiscontinuity);
-        }
-        capture.produced = produced;
-        fence(Ordering::Acquire);
-        Ok(Position {
-            bytes: produced,
-            ring_offset: (produced % (capture.period_bytes * 4) as u64) as usize,
-            period_pending: status & PERIOD_IRQ != 0,
-        })
-    }
-    /// Observe the real byte counter and acknowledge only the PDM period bit.
-    /// Multiple periods may coalesce; `bytes` is authoritative, not IRQ count.
-    pub fn position(&mut self) -> Result<Position, Error> {
-        self.usable()?;
-        if !matches!(self.state, State::Running | State::Stopped) {
-            return Err(Error::NotPrepared);
-        }
-        let result = self.position_inner().inspect(|position| {
-            if position.period_pending {
-                self.registers.write32(IRQ_STATUS, PERIOD_IRQ);
-            }
-        });
-        self.finish(result)
-    }
-    /// Copy the acknowledged stopped ring in its physical cyclic layout.
-    /// `Position::ring_offset` identifies the next write position for ordering
-    /// the latest ring after wraps. A running cyclic producer never grants the
-    /// canonical DMA domain's required CPU ownership; copying while running
-    /// refuses before touching the destination. No CPU/physical/IOVA alias is
-    /// inferred. On a mapping error the destination may be partly modified.
-    pub fn copy_stopped_ring(
-        &mut self,
-        offset: usize,
-        destination: &mut [u8],
-    ) -> Result<(), Error> {
-        self.usable()?;
-        if self.state == State::Running {
-            return Err(Error::Busy);
-        }
-        if self.state != State::Stopped {
-            return Err(Error::NotPrepared);
-        }
-        let ring = self
-            .capture
-            .as_ref()
-            .ok_or(Error::NotPrepared)?
-            .period_bytes
-            * 4;
-        if !offset.is_multiple_of(FRAME_BYTES)
-            || !destination.len().is_multiple_of(FRAME_BYTES)
-            || offset
-                .checked_add(destination.len())
-                .is_none_or(|last| last > ring)
-        {
-            return Err(Error::InvalidBuffer);
-        }
-        let result = self.ring_authority().and_then(|()| {
-            if self.read(DMA_ENABLE)? != 0 || self.read(PDM_ENABLE)? != 0 {
-                return Err(Error::AuthorityChanged);
-            }
-            let capture = self.capture.as_ref().unwrap();
-            // SAFETY: actual stop acknowledgement and PDM disable were checked;
-            // there are no asynchronous submissions or interrupt workers here.
-            unsafe { capture.dma.sync_for_cpu(offset..offset + destination.len()) }
-                .map_err(Error::Dma)?;
-            for (index, byte) in destination.iter_mut().enumerate() {
-                let pointer = capture
-                    .cpu
-                    .address(offset + index, 1)
-                    .map_err(Error::Memory)?;
-                // SAFETY: retained real CPU mapping, checked bounds, no DMA.
-                *byte = unsafe { pointer.as_ptr().read_volatile() };
-            }
-            Ok(())
-        });
-        self.finish(result)
-    }
-    fn stop_inner(&mut self) -> Result<(), Error> {
-        self.pci_authority()?;
-        let deadline = self.deadline(Phase::DmaStop, DMA_TIMEOUT_US);
-        if self.phase_read(DMA_ENABLE, deadline)? & (DMA_REQUEST | DMA_ACTIVE) != 0 {
-            self.phase_write(DMA_ENABLE, DMA_ACTIVE, deadline)?;
-            self.wait(DMA_ENABLE, deadline, |value| {
-                value & (DMA_REQUEST | DMA_ACTIVE) == 0
-            })?;
-        }
-        self.phase_checked_write(PDM_ENABLE, 0, deadline)?;
-        self.phase_write(FIFO_FLUSH, 1, deadline)?;
-        let irq = self.phase_read(IRQ_CONTROL, deadline)?;
-        self.phase_checked_write(IRQ_CONTROL, irq & !PERIOD_IRQ, deadline)
-    }
-    pub fn stop(&mut self) -> Result<(), Error> {
-        self.usable()?;
-        if !matches!(self.state, State::Running | State::Stopped) {
-            return Err(Error::NotPrepared);
-        }
-        let result = self.ring_authority().and_then(|()| self.stop_inner());
-        if result.is_ok() {
-            self.state = State::Stopped;
-        }
-        self.finish(result)
-    }
-    /// Stop first, then contain interrupts and reset the function. Memory and
-    /// ownership remain retained on any failure; a subsequent explicit reset
-    /// may recover them. No writes follow a lost PCI association.
-    pub fn shutdown(&mut self) -> Result<(), Error> {
-        if self.state == State::Shutdown {
-            return Ok(());
-        }
-        let result = self.shutdown_inner();
-        if result.is_ok() {
-            self.state = State::Shutdown;
-        }
-        self.finish(result)
-    }
-    fn shutdown_inner(&mut self) -> Result<(), Error> {
-        self.pci_authority()?;
-        self.stop_inner()?;
-        self.write_checked(IRQ_CONTROL, 0)?;
-        self.write_checked(IRQ_ENABLE, 0)?;
-        self.registers.write32(IRQ_STATUS, u32::MAX);
-        self.soft_reset()?;
-        self.write_checked(ATU_CONTROL, 0)?;
-        self.registers.set_bus_master(false)?;
-        self.release_capture()?;
-        self.write_checked(CLOCK, 0)?;
-        self.write_checked(CONTROL, 0)
-    }
-    fn release_capture(&mut self) -> Result<(), Error> {
-        if let Some(capture) = self.capture.as_mut() {
-            // SAFETY: callers first prove actual whole-function reset, or
-            // stopped DMA plus disabled ATU and PCI bus mastering. No IRQ/work
-            // submissions exist. Failure retains this exact lease for retry.
-            unsafe { capture.dma.unmap() }.map_err(Error::Dma)?;
-        }
-        self.capture = None;
-        Ok(())
-    }
-    /// Transfer the retained register provider only after acknowledged shutdown.
-    /// A non-shutdown owner is returned intact, including every DMA lease.
-    // Returning ownership must neither allocate nor drop a retained DMA lease.
-    #[allow(clippy::result_large_err)]
-    pub fn into_stopped(self) -> Result<(R, T), Self> {
-        if self.state != State::Shutdown {
-            return Err(self);
-        }
-        Ok((self.registers, self.timer))
-    }
-}
-
-fn check_dma_range(base: u64, bytes: usize, required: usize, bits: u8) -> Result<(), Error> {
-    if base == 0
-        || !base.is_multiple_of(PAGE_BYTES as u64)
-        || bytes != required
-        || !bytes.is_multiple_of(PAGE_BYTES)
-        || !(32..=63).contains(&bits)
-        || base
-            .checked_add(bytes as u64 - 1)
-            .is_none_or(|last| last >> bits != 0)
-    {
-        return Err(Error::DmaAddress);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     extern crate std;
+    use super::super::{PcmFormat, acp_pdm::check_dma_range};
     use super::*;
     use crate::bus::dma::{
         mapping::DomainMapping,
         memory::{PageBacking, PageGeometry, PinnedPages},
         pages::DmaPages,
     };
+    use crate::bus::dma::{
+        mapping::{Direction as DmaDirection, DmaError},
+        memory::{CacheAttribute, CpuMapping, MemoryError, PageSource},
+    };
     use alloc::{boxed::Box, vec::Vec};
+    use core::sync::atomic::Ordering;
     use core::{
         cell::UnsafeCell,
         ops::Range,
