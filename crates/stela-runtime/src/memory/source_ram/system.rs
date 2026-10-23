@@ -163,23 +163,34 @@ impl RegisteredSystemRam {
             let (region, offset) = self
                 .region(physical + done as u64)
                 .ok_or_else(|| fault(MemoryStatus::Domain))?;
-            let remaining = (output.len() - done).min(region.bytes - offset);
+            let count = (output.len() - done).min(region.bytes - offset);
             let pointer = region
                 .backing
-                .host_pointer(offset, remaining, AccessKind::Read)
+                .host_pointer(offset, count, AccessKind::Read)
                 .map_err(|_| fault(MemoryStatus::Domain))?;
-            let width = [8, 4, 2, 1]
-                .into_iter()
-                .find(|width| {
-                    remaining >= *width && (pointer.as_ptr() as usize).is_multiple_of(*width)
-                })
-                .expect("a byte fits the admitted range");
-            // SAFETY: a pinned exact aligned scalar part, qualified baseline
-            // host, no Rust reference into concurrently mutable guest storage.
-            let value = unsafe { access::read_part(pointer.as_ptr(), width, TargetCpu::Baseline) }
-                .map_err(|_| fault(MemoryStatus::Domain))?;
-            output[done..done + width].copy_from_slice(&value.to_le_bytes()[..width]);
-            done += width;
+            // Registration keeps this region and its backing envelope immutable.
+            // Reuse only that checked envelope within this call; each actual
+            // scalar read still observes the canonical, concurrently mutable RAM.
+            let mut advanced = 0;
+            while advanced < count {
+                // SAFETY: this nonempty suffix stays inside the checked envelope.
+                let part = unsafe { pointer.as_ptr().add(advanced) };
+                let remaining = count - advanced;
+                let width = [8, 4, 2, 1]
+                    .into_iter()
+                    .find(|width| remaining >= *width && (part as usize).is_multiple_of(*width))
+                    .expect("a byte fits the admitted range");
+                // SAFETY: a pinned exact aligned scalar part, qualified baseline
+                // host, no Rust reference into concurrently mutable guest storage.
+                let value = unsafe { access::read_part(part, width, TargetCpu::Baseline) }
+                    .map_err(|_| PublicationFault {
+                        status: MemoryStatus::Domain,
+                        completed: done,
+                    })?;
+                output[done..done + width].copy_from_slice(&value.to_le_bytes()[..width]);
+                advanced += width;
+                done += width;
+            }
         }
         Ok(())
     }
@@ -538,12 +549,132 @@ mod tests {
         let registered = unsafe { model(&ranges, storage) };
         for physical in [0x3ff0, 0x4038, 0x40b8, u64::MAX - 7] {
             let mut bytes = [0xa5; 16];
-            assert_eq!(
-                unsafe { registered.read_physical(physical, &mut bytes) },
-                Err(MemoryStatus::Translation)
-            );
+            let fault =
+                unsafe { registered.read_physical_progress(physical, &mut bytes) }.unwrap_err();
+            assert_eq!(fault.status, MemoryStatus::Translation);
+            assert_eq!(fault.completed, 0);
             assert_eq!(bytes, [0xa5; 16]);
         }
+        // Empty reads still perform the existing domain-health preflight but
+        // need no region or backing, even at a hole or the address-space end.
+        for physical in [0x3ff0, 0x4040, 0x4080, u64::MAX] {
+            unsafe { registered.read_physical_progress(physical, &mut []) }.unwrap();
+        }
+    }
+
+    #[test]
+    fn unaligned_physical_reads_preserve_all_reached_scalar_tails() {
+        let storage = Storage::new();
+        let registered = unsafe { model(&[range(&storage, 0x4000, 0, 128)], storage) };
+        let expected: [u8; 128] = core::array::from_fn(|index| u8::try_from(index).unwrap() ^ 0xa5);
+        unsafe { registered.publish_physical(0x4000, &expected) }.unwrap();
+        for start in 0..16 {
+            for bytes in 0..=expected.len() - start {
+                let mut output = [0x3c; 128];
+                unsafe {
+                    registered.read_physical_progress(0x4000 + start as u64, &mut output[..bytes])
+                }
+                .unwrap();
+                assert_eq!(&output[..bytes], &expected[start..start + bytes]);
+                assert!(output[bytes..].iter().all(|byte| *byte == 0x3c));
+            }
+        }
+    }
+
+    #[test]
+    fn physical_reads_cross_adjacent_source_regions_with_distinct_backings() {
+        let first = Storage::new();
+        let second = Storage::new();
+        let first_range = range(&first, 0x4000, 16, 64);
+        let mut second_range = range(&second, 0x4040, 32, 64);
+        second_range.host_pa = 0x2000_0020;
+        // These source-adjacent regions retain different actual allocations,
+        // host offsets and physical placements; pointer arithmetic cannot cross
+        // their boundary even though the requested source range is contiguous.
+        let registered = unsafe {
+            fixture(
+                &[second_range, first_range],
+                Arc::new((Arc::clone(&first), Arc::clone(&second))),
+            )
+        };
+        let expected: [u8; 128] = core::array::from_fn(|index| u8::try_from(index).unwrap() ^ 0x69);
+        unsafe { registered.publish_physical(0x4000, &expected) }.unwrap();
+        for start in 0..expected.len() {
+            for bytes in [
+                0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 63, 64, 65, 127, 128,
+            ] {
+                if bytes > expected.len() - start {
+                    continue;
+                }
+                let mut output = [0xc3; 128];
+                unsafe {
+                    registered.read_physical_progress(0x4000 + start as u64, &mut output[..bytes])
+                }
+                .unwrap();
+                assert_eq!(&output[..bytes], &expected[start..start + bytes]);
+                assert!(output[bytes..].iter().all(|byte| *byte == 0xc3));
+            }
+        }
+    }
+
+    #[test]
+    fn later_backing_refusal_reports_only_the_completed_output_prefix() {
+        let storage = Storage::new();
+        let ranges = [
+            range(&storage, 0x4000, 0, 64),
+            range(&storage, 0x4040, 64, 64),
+        ];
+        let mut registered = unsafe { model(&ranges, Arc::clone(&storage)) };
+        // Deliberately inconsistent private metadata models a later envelope
+        // refusal. Production registration never changes a backing's rights.
+        // No failed read may expose bytes from that backing or erase the prefix.
+        registered.regions[1].backing = unsafe {
+            MemoryBacking::new(
+                ranges[1].host_base,
+                ranges[1].bytes,
+                AccessPermissions {
+                    readable: false,
+                    writable: true,
+                    executable: false,
+                },
+                storage,
+            )
+        }
+        .unwrap();
+        for start in 0..64 {
+            let mut output = [0xa5; 128];
+            let bytes = 128 - start;
+            let refused = unsafe {
+                registered.read_physical_progress(0x4000 + start as u64, &mut output[..bytes])
+            }
+            .unwrap_err();
+            assert_eq!(refused.status, MemoryStatus::Domain);
+            assert_eq!(refused.completed, 64 - start);
+            assert!(output[..refused.completed].iter().all(|byte| *byte == 0x53));
+            assert!(output[refused.completed..].iter().all(|byte| *byte == 0xa5));
+        }
+    }
+
+    #[test]
+    fn long_physical_read_keeps_one_backing_and_the_original_scalar_observations() {
+        #[repr(C, align(16))]
+        struct LongStorage(UnsafeCell<[u8; 1024]>);
+        // SAFETY: the retained storage is accessed only through the canonical
+        // native scalar reader and same-system publication after registration.
+        unsafe impl Sync for LongStorage {}
+        let storage = Arc::new(LongStorage(UnsafeCell::new([0; 1024])));
+        let range = ReservedSystemRamRange {
+            source_pa: 0x4000,
+            host_pa: 0x1000_0000,
+            host_base: NonNull::new(storage.0.get().cast::<u8>()).unwrap(),
+            bytes: 1024,
+        };
+        let registered = unsafe { fixture(&[range], storage) };
+        let expected: [u8; 1024] = core::array::from_fn(|index| u8::try_from(index % 251).unwrap());
+        unsafe { registered.publish_physical(0x4000, &expected) }.unwrap();
+        let mut output = [0; 1024];
+        unsafe { registered.read_physical_progress(0x4000, &mut output) }.unwrap();
+        assert_eq!(output, expected);
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -566,10 +697,17 @@ mod tests {
                 }
             });
             for _ in 0..10_000 {
-                let mut value = [0; 8];
-                unsafe { registered.read_physical(0x4000, &mut value) }.unwrap();
-                assert!(matches!(value[0], 0x53 | 0x55 | 0xaa));
-                assert!(value.iter().all(|byte| *byte == value[0]));
+                for bytes in [8, 128] {
+                    // Both the original one-scalar read and a multi-scalar
+                    // read keep the real aligned 8-byte prefix non-torn while
+                    // the joined writer changes it. Later scalar reads are
+                    // independent observations, not an atomic snapshot.
+                    let mut value = [0; 128];
+                    unsafe { registered.read_physical(0x4000, &mut value[..bytes]) }.unwrap();
+                    assert!(matches!(value[0], 0x53 | 0x55 | 0xaa));
+                    assert!(value[..8].iter().all(|byte| *byte == value[0]));
+                    assert!(value[8..bytes].iter().all(|byte| *byte == 0x53));
+                }
             }
         });
     }
