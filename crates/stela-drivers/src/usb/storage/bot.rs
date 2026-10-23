@@ -1,16 +1,13 @@
 //! Serialized SCSI-transparent Bulk-Only Transport for all LUNs of one interface.
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only AND GPL-2.0-or-later
 // Hardware protocol reference: Linux drivers/usb/storage/transport.c,
 // Copyright 1999-2002 Matthew Dharm; 2000 David L. Brown, Jr.;
 // 2000 Stephen J. Gowdy; 2002 Alan Stern; 1999 Michael Gee.
-use super::super::xhci::{DEVICE_TO_HOST, RECIPIENT_INTERFACE, TYPE_CLASS};
-use super::super::xhci::{Device, Interface};
+// Block-zero ordering: Linux sd.c, Drew Eckhardt 1992; Eric Youngdale
+// 1993-1995, 1999. Retained lifecycle uses Stela's shared xHCI authority.
+use super::super::xhci::{DEVICE_TO_HOST, Device, Interface, RECIPIENT_INTERFACE, TYPE_CLASS};
 use super::{Data, Endpoint, MAX_TD, Shared, scsi, setup};
 mod quirks;
-
-pub(super) fn supported(device: &Device) -> Result<(), &'static str> {
-    quirks::Flags::from_device(device).map(|_| ())
-}
 use crate::{
     block::{BlockError, Sense},
     bus::dma::{DmaAllocator, DmaBuffer},
@@ -28,6 +25,10 @@ const RESET_RECOVERY_US: u64 = 6_000_000;
 const MAX_LUN: u8 = 15;
 const PROTOCOL_ERROR: BlockError = BlockError::Protocol("malformed Bulk-Only wrapper or transfer");
 const SHORT_WRITE: BlockError = BlockError::Protocol("short Bulk-Only write");
+
+pub(super) fn supported(device: &Device) -> Result<(), &'static str> {
+    quirks::Flags::from_device(device).map(|_| ())
+}
 
 /// Private seam: every native transfer returns only after completion or actual
 /// xHCI cancellation. An error may leave poison; ready must expose it before

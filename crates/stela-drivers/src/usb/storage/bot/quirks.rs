@@ -1,7 +1,8 @@
 //! Descriptor-bound policies from pinned Linux unusual_devs.h and scsiglue.c.
 // SPDX-License-Identifier: GPL-2.0-only AND GPL-2.0-or-later
 // Copyright Matthew Dharm 1999-2002; Adam J. Richter/Yggdrasil 2000;
-// Pete Zaitcev 2005. See ../../THIRD_PARTY.md for exact donor identities.
+// Pete Zaitcev 2005; Hans de Goede 2013. See ../../THIRD_PARTY.md
+// for exact donor identities.
 use super::super::super::xhci::{Device, HIGH_SPEED};
 const SINGLE_LUN: u32 = 0x00000001;
 const SCM_MULT_TARG: u32 = 0x00000004;
