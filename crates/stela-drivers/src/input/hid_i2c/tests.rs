@@ -28,6 +28,7 @@ struct Hardware {
     masked: bool,
     force_irq_low: bool,
     no_reset_ack: bool,
+    repeated_input: Option<Vec<u8>>,
     fail_irq: bool,
     fail_mask: bool,
     fail_next: bool,
@@ -77,6 +78,7 @@ impl Hardware {
             masked: false,
             force_irq_low: false,
             no_reset_ack: false,
+            repeated_input: None,
             fail_irq: false,
             fail_mask: false,
             fail_next: false,
@@ -112,7 +114,6 @@ impl Hardware {
                 assert!(self.power_on);
                 assert_eq!(id, 0);
                 self.reset_count += 1;
-                self.input.clear();
                 if !self.no_reset_ack {
                     self.input.push_back(vec![0, 0]);
                 }
@@ -183,7 +184,11 @@ impl Bus for Model {
                 assert!(h.power_on);
                 assert!(!h.force_irq_low, "read without actual asserted device pin");
                 h.reads += 1;
-                let frame = h.input.pop_front().expect("read without device output");
+                let frame = h
+                    .input
+                    .pop_front()
+                    .or_else(|| h.repeated_input.clone())
+                    .expect("read without device output");
                 assert_eq!(
                     output.len(),
                     usize::from(u16::from_le_bytes([h.desc[10], h.desc[11]]))
@@ -252,7 +257,7 @@ impl Interrupt for Pin {
         if h.fail_irq {
             return Err(InterruptError::Hardware(2));
         }
-        Ok(!h.force_irq_low && !h.input.is_empty())
+        Ok(!h.force_irq_low && (!h.input.is_empty() || h.repeated_input.is_some()))
     }
 }
 impl Timer for Time {
@@ -621,4 +626,40 @@ fn bounded_feature_reads_report_truncation_without_treating_valid_device_as_brok
         full.data,
         core::iter::once(17).chain(0..64).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn preexisting_zero_cannot_acknowledge_a_new_silent_reset() {
+    let (mut d, h) = device(0x06cb, 1);
+    h.borrow_mut().input.push_back(vec![0, 0]);
+    h.borrow_mut().input.push_back(Hardware::frame(&[17, 1, 2]));
+    h.borrow_mut().no_reset_ack = true;
+    assert_eq!(d.initialize().unwrap_err().kind, ErrorKind::ResetTimeout);
+    assert_eq!(d.discarded_before_start(), 2);
+    assert_eq!(h.borrow().reset_count, 1);
+    assert_eq!(h.borrow().reads, 2);
+    assert!(d.needs_reset());
+    assert!(d.report_descriptor().is_empty());
+
+    let (mut d, h) = device(0x06cb, 1);
+    h.borrow_mut().input.push_back(vec![0, 0]);
+    d.initialize().unwrap();
+    assert_eq!(d.discarded_before_start(), 1);
+    assert_eq!(h.borrow().reads, 2);
+    assert!(d.is_ready());
+}
+
+#[test]
+fn continuously_asserted_device_pin_bounds_pre_reset_drain() {
+    let (mut d, h) = device(0x06cb, 1);
+    h.borrow_mut().repeated_input = Some(Hardware::frame(&[17, 1, 2]));
+    assert_eq!(
+        d.initialize().unwrap_err().kind,
+        ErrorKind::InputDrainTimeout
+    );
+    assert_eq!(h.borrow().reset_count, 0);
+    assert!(d.discarded_before_start() > 0);
+    assert!(d.discarded_before_start() <= 101);
+    assert!(d.needs_reset());
+    assert!(d.report_descriptor().is_empty());
 }

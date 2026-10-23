@@ -75,6 +75,7 @@ pub enum ErrorKind {
     UnsupportedReportType,
     NoOutputRegister,
     ResetTimeout,
+    InputDrainTimeout,
     UnexpectedReset,
     UnqualifiedQuirk { vendor: u16, product: u16 },
     IdentityChanged,
@@ -310,8 +311,28 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         }
         Ok(())
     }
+    // An interrupt route drain does not consume the peripheral's report FIFO.
+    // Establish a deasserted pin epoch before RESET so a stale zero-length
+    // response cannot acknowledge the new command. Unknown pre-start reports
+    // are counted and discarded, never delivered to a consumer.
+    fn drain_before_reset(&mut self) -> Result<(), ErrorKind> {
+        let start = self.timer.now_us();
+        while self.interrupt.asserted().map_err(ErrorKind::Interrupt)? {
+            let length = self.read_input()?;
+            if length != 0 && !(self.quirks.elan && length == u16::MAX) {
+                self.validate_input(length)?;
+            }
+            self.discarded_before_start = self.discarded_before_start.saturating_add(1);
+            if self.timer.now_us().wrapping_sub(start) >= self.reset_timeout_us {
+                return Err(ErrorKind::InputDrainTimeout);
+            }
+            self.timer.relax();
+        }
+        Ok(())
+    }
     fn reset(&mut self) -> Result<(), ErrorKind> {
         self.power(true)?;
+        self.drain_before_reset()?;
         let bytes = self.command(RESET, 0, 0)?;
         self.transfer(&bytes, &mut [])?;
         let start = self.timer.now_us();
