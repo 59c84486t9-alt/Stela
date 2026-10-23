@@ -131,7 +131,7 @@ fn write32<C: MsiConfigSpace>(c: &mut C, offset: u16, value: u32) -> Result<(), 
 
 /// Full standard extents from the pinned pci_regs.h. Unknown capability
 /// formats still reserve their two-byte headers; no body length is invented.
-pub(super) fn other_capability_bytes<C: MsiConfigSpace>(
+pub(crate) fn other_capability_bytes<C: MsiConfigSpace>(
     c: &C,
     offset: u16,
     id: u8,
