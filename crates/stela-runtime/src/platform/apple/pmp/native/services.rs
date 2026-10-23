@@ -185,8 +185,9 @@ impl Services {
     pub fn reporting_ready(&self) -> bool {
         self.report_shared.ready.get()
     }
+    /// Actual initializer return, not its earlier source software-cell write.
     pub fn trace_initialized(&self) -> bool {
-        self.trace.borrow().is_initialized()
+        self.trace_shared.init_complete.get()
     }
     /// Stela scheduling deadline, independent of raw/converted source clock.
     /// Waiting for an AP allocation/ACK alone supplies no zero-deadline spin.
@@ -234,7 +235,7 @@ impl Services {
             }
         }
         if self.trace_shared.started() {
-            if !self.trace.borrow().is_initialized() {
+            if !self.trace_initialized() {
                 self.runtime
                     .invoke(&self.trace_init, access)
                     .map_err(schedule_error)?;
@@ -328,6 +329,39 @@ mod tests {
         }
         assert_eq!(output, alloc::vec![(1 << 48) | 0x8001]);
         assert!(services.check_reset().is_err());
+    }
+    #[test]
+    fn trace_work_waits_for_actual_initializer_return_after_software_flag_write() {
+        let (mut services, mut endpoints, _dispatcher) = fixture();
+        let endpoint = endpoints.trace.as_mut().unwrap();
+        let mut output = Vec::new();
+        endpoint.start(&mut output).unwrap();
+        endpoint.receive(8 << 48, &mut output).unwrap();
+        let mut reached_partial = false;
+        for _ in 0..24 {
+            advance(&mut services);
+            if services.trace.borrow().is_initialized() && !services.trace_initialized() {
+                reached_partial = true;
+                break;
+            }
+        }
+        assert!(reached_partial);
+        assert!(services.trace.borrow().foreground_pending());
+        assert!(!services.trace.borrow().dispatch_pending());
+        assert_eq!(services.deadline(), Some(0));
+        // Continue the SAME actual initializer until its terminal source return;
+        // only then may the retained queued command begin protocol execution.
+        advance(&mut services);
+        assert!(services.trace_initialized());
+        assert!(!services.trace.borrow().foreground_pending());
+        for _ in 0..24 {
+            advance(&mut services);
+            endpoint.poll(&mut output).unwrap();
+            if !output.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(output, alloc::vec![(1 << 48) | 0x8001]);
     }
     #[test]
     fn reporting_real_request_waits_for_ap_input_without_fake_allocation_or_spin() {

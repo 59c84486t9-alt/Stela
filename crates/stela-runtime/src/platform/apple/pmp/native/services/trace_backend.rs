@@ -4,6 +4,9 @@ use alloc::collections::VecDeque;
 use core::sync::atomic::{Ordering, fence};
 pub(super) struct Shared {
     pub init_started: Cell<bool>,
+    // Retained product of the actual initializer's terminal return. The trace
+    // owner's initialized cell is written one source step before that return.
+    pub init_complete: Cell<bool>,
     pub runtime: scheduler::WeakRuntime,
     pub global: scheduler::Queue,
     broker: dma::Broker,
@@ -30,6 +33,7 @@ impl Shared {
         let key = runtime.upgrade().unwrap().key();
         Self {
             init_started: Cell::new(false),
+            init_complete: Cell::new(false),
             runtime,
             global,
             broker,
@@ -296,7 +300,7 @@ impl scheduler::Callback for Worker {
             Ok(v) => v,
             Err(_) => return Completion::Refused("trace owner is executing another caller"),
         };
-        if !trace.is_initialized() {
+        if !self.shared.init_complete.get() {
             return Completion::Busy { deadline: None };
         }
         if !trace.dispatch_pending()
@@ -331,7 +335,7 @@ impl scheduler::Callback for Initialize {
             Err(e) => return Completion::Refused(e),
         };
         let mut trace = cell.borrow_mut();
-        if trace.is_initialized() {
+        if self.shared.init_complete.get() {
             return done(0);
         }
         if !self.begun {
@@ -342,7 +346,10 @@ impl scheduler::Callback for Initialize {
             self.shared.init_started.set(true);
         }
         match trace.advance(a) {
-            Ok(trace::Progress::Initialized) => done(0),
+            Ok(trace::Progress::Initialized) => {
+                self.shared.init_complete.set(true);
+                done(0)
+            }
             Ok(trace::Progress::Busy { deadline }) => Completion::Busy { deadline },
             Ok(_) => Completion::Refused("trace source initialization returned wrong phase"),
             Err(e) => Completion::Refused(trace_error(e)),
