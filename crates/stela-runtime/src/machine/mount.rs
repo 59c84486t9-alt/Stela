@@ -192,6 +192,9 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     memory: Option<MemoryResources>,
     log: &mut dyn FnMut(fmt::Arguments<'_>),
 ) -> Result<(AppleDevices, Option<UsbId>), String> {
+    if board.direct_memory_cache.is_some() && memory.is_none() {
+        return Err("direct MCC/AMCC/PTD requires its actual qualified native memory owner".into());
+    }
     if let Some(memory) = memory.as_ref() {
         match memory {
             MemoryResources::T8112Cold(plan) => plan.validate_power(board.power_states.as_ref())?,
