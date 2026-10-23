@@ -89,6 +89,7 @@ struct Authority {
     input_amplifiers: Vec<CirrusInputAmplifier>,
     output_amplifiers: Vec<CirrusOutputAmplifier>,
     processing_caps: u32,
+    pin_defaults: Vec<(u8, u32)>,
     shared_pins: Vec<(u8, u32)>,
     power_nodes: Vec<(u8, u32)>,
 }
@@ -193,7 +194,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         } else {
             Vec::new()
         };
+        let pin_defaults = if selected == CirrusProfile::Cs4210 {
+            self.cs4210_pin_defaults(graph)?
+        } else {
+            Vec::new()
+        };
         Ok(Authority {
+            pin_defaults,
             profile: selected,
             processing_caps,
             shared_pins,

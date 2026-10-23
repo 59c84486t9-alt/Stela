@@ -9866,7 +9866,7 @@ mod tests {
         }
         #[test]
         fn cs4210_bad_fixed_authority_refuses_without_codec_effect_or_retained_owner() {
-            for fault in 0..6 {
+            for fault in 0..7 {
                 let mut fixture = Fixture::new();
                 let model = cs4210_device(false, 63);
                 {
@@ -9887,8 +9887,11 @@ mod tests {
                         4 => {
                             m.parameters.insert((2, 0x12), u32::MAX);
                         }
-                        _ => {
+                        5 => {
                             m.parameters.insert((3, 9), 0xf << 20);
+                        }
+                        _ => {
+                            m.pin_defaults.insert(6, u32::MAX);
                         }
                     }
                 }
@@ -10020,7 +10023,8 @@ mod tests {
                     assert!(
                         controller
                             .set_cirrus_cs4210_speaker_boost(&graph, 1)
-                            .is_err()
+                            .is_err(),
+                        "inherited={inherited} fault={fault}"
                     );
                     let before = access_counts(&model);
                     assert_eq!(controller.start(stream), Err(Error::NeedsReset));

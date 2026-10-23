@@ -3,7 +3,7 @@
 //! sound/hda/codecs/cirrus/cs421x.c at
 //! a804c5742bff224d4cb4d25dd383554d598be32b. See audio/THIRD_PARTY.md.
 //! GPL version2 combines the upstream GPL-2.0-or-later codec with native HDA.
-use super::super::{CodecGraph, Controller, PinConnection, PinDevice, Registers, WidgetKind};
+use super::super::{CodecGraph, Controller, PinConnection, PinDevice, Registers, Verb, WidgetKind};
 use super::{CirrusCoefficient, CirrusOutputAmplifier, CirrusProfile, GROUP};
 use crate::{
     audio::{Direction, Error},
@@ -26,6 +26,26 @@ pub struct CirrusSpeakerBoost {
     pub changed: bool,
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
+    pub(super) fn cs4210_pin_defaults(
+        &mut self,
+        graph: &CodecGraph,
+    ) -> Result<Vec<(u8, u32)>, Error> {
+        let mut defaults = Vec::new();
+        for pin in graph
+            .groups
+            .iter()
+            .flat_map(|group| &group.widgets)
+            .filter(|widget| widget.kind == WidgetKind::Pin)
+        {
+            let cached = pin.pin_default.ok_or(Error::InvalidCodecGraph)?;
+            let live = self.verb(Verb::short(graph.address, pin.node, 0xf1c, 0)?)?;
+            if live == u32::MAX || live != cached {
+                return Err(Error::InvalidCodecGraph);
+            }
+            defaults.push((pin.node, live));
+        }
+        Ok(defaults)
+    }
     pub(super) fn cs4210_output_amplifiers(
         &mut self,
         graph: &CodecGraph,
