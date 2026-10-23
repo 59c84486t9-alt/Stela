@@ -3,6 +3,7 @@
 //! ([`dma`]), owned IRQ registrations ([`irq`]), I²C ([`i2c`]), SMBus ([`smbus`]) and the virtio PCI transport
 //! ([`virtio`]).
 pub mod dma;
+pub mod gpio;
 pub mod i2c;
 pub mod irq;
 pub mod lpss;
