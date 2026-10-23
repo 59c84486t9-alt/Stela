@@ -4,7 +4,7 @@
 // Authors: Wei WANG, Roger Tseng. See ../THIRD_PARTY.md.
 //! Native RTS5227/RTS522A PCIe SD/MMC reader with actual HAIMR and ping-pong PIO.
 //! Command-buffer/data DMA, Memory Stick, UHS/DDR and global PM remain separate.
-pub use super::mmc::{CardInfo, Failure, Kind};
+pub use super::mmc::{CardInfo, Failure, Kind, SignalVoltage, Timing};
 use crate::{
     Clock, Handoff,
     block::{BlockDevice, BlockError, Identity},
@@ -23,6 +23,7 @@ mod command;
 mod controller;
 mod registers;
 mod rts522a;
+mod tuning;
 use command::Budget;
 use registers::*;
 
@@ -287,6 +288,9 @@ struct Engine {
     restoration_failure: Option<BlockError>,
     failure_finalized: bool,
     ocp_status: Option<u8>,
+    timing_mode: Timing,
+    signal_voltage: SignalVoltage,
+    tuning_rejection_observed: bool,
 }
 impl Engine {
     fn healthy(&mut self) -> Result<(), BlockError> {
@@ -404,6 +408,7 @@ mod tests {
         Crc7,
         Crc16,
         CrcTimeout,
+        ResponseTimeout,
         Remove,
         Delink,
         MemoryStick,
@@ -445,6 +450,11 @@ mod tests {
         nonready: bool,
         transfer_speed: u8,
         status_error: u32,
+        uhs_modes: u8,
+        low_voltage: bool,
+        bus_function: u8,
+        current_function: u8,
+        reject_switch: bool,
     }
     impl CardModel {
         fn new(mmc: bool) -> Self {
@@ -468,6 +478,11 @@ mod tests {
                 nonready: false,
                 transfer_speed: 0x32,
                 status_error: 0,
+                uhs_modes: 0,
+                low_voltage: false,
+                bus_function: 0,
+                current_function: 0,
+                reject_switch: false,
             }
         }
         fn block(&self, lba: u32) -> [u8; 512] {
@@ -503,6 +518,8 @@ mod tests {
                     self.state = 0;
                     self.width = 1;
                     self.high_speed = false;
+                    self.low_voltage = false;
+                    self.bus_function = 0;
                     0
                 }
                 8 if data == 0 => {
@@ -525,6 +542,17 @@ mod tests {
                     assert_ne!(arg & 0x0030_0000, 0);
                     self.state = 1;
                     0xc030_0000
+                        | if self.uhs_modes != 0 && arg & (1 << 24) != 0 {
+                            1 << 24
+                        } else {
+                            0
+                        }
+                }
+                11 if !self.mmc => {
+                    assert_eq!(self.state, 1);
+                    assert_ne!(self.uhs_modes, 0);
+                    self.low_voltage = true;
+                    0
                 }
                 1 if self.mmc => {
                     assert_ne!(arg & 0x0030_0000, 0);
@@ -571,7 +599,16 @@ mod tests {
                 }
                 51 if app && !self.mmc => {
                     assert_eq!(data, 8);
-                    bytes = vec![2, 5, 0, 0, 0, 0, 0, 0];
+                    bytes = vec![
+                        2,
+                        5,
+                        if self.uhs_modes != 0 { 0x80 } else { 0 },
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ];
                     0x900
                 }
                 6 if app && !self.mmc => {
@@ -582,11 +619,42 @@ mod tests {
                 6 if !self.mmc => {
                     assert_eq!(data, 64);
                     bytes = vec![0; 64];
-                    bytes[13] = 2;
+                    bytes[13] = if self.uhs_modes != 0 {
+                        self.uhs_modes
+                    } else {
+                        2
+                    };
+                    bytes[7] = 15; // all four current limits
                     if arg & (1 << 31) != 0 {
-                        self.high_speed = true;
-                        bytes[16] = 1;
+                        let current = ((arg >> 12) & 15) as u8;
+                        let speed = (arg & 15) as u8;
+                        if current != 15 {
+                            self.current_function = current;
+                        }
+                        if speed != 15 {
+                            if self.low_voltage {
+                                assert_ne!(self.uhs_modes & (1 << speed), 0);
+                                self.bus_function = speed;
+                            } else {
+                                assert_eq!(speed, 1);
+                                self.high_speed = true;
+                            }
+                        }
+                        bytes[15] = self.current_function << 4;
+                        bytes[16] = if self.reject_switch {
+                            15
+                        } else if self.low_voltage {
+                            self.bus_function
+                        } else {
+                            1
+                        };
                     }
+                    0x900
+                }
+                19 if !self.mmc => {
+                    assert_eq!(self.state, 4);
+                    assert!(self.low_voltage);
+                    assert_eq!(data, 64);
                     0x900
                 }
                 6 if self.mmc => {
@@ -673,6 +741,14 @@ mod tests {
         last_mode: u8,
         last_opcode: u8,
         ocp_clear_at: Option<u64>,
+        voltage_set_at: Option<u64>,
+        bad_cmd11_low: bool,
+        bad_cmd11_high: bool,
+        tuning_windows: [u32; 3],
+        tuning_attempts: usize,
+        tuning_fault: Option<Fault>,
+        tuning_rejection: Fault,
+        tuning_late_timeout: bool,
     }
     impl Chip {
         fn new(mmc: bool, present: bool) -> Rc<RefCell<Self>> {
@@ -735,6 +811,14 @@ mod tests {
                 last_mode: 0,
                 last_opcode: 0,
                 ocp_clear_at: None,
+                voltage_set_at: None,
+                bad_cmd11_low: false,
+                bad_cmd11_high: false,
+                tuning_windows: [u32::MAX; 3],
+                tuning_attempts: 0,
+                tuning_fault: None,
+                tuning_rejection: Fault::Crc16,
+                tuning_late_timeout: false,
             }))
         }
         fn delay_at(&mut self, point: DelayPoint) {
@@ -766,7 +850,13 @@ mod tests {
                 let rts522a = self.config[2..4] == [0x2a, 0x52];
                 assert_eq!(
                     self.phy[8],
-                    if rts522a { 0x57e4 } else { 0x4fe4 },
+                    if self.card.low_voltage && transfer.opcode != 11 {
+                        0x54a4
+                    } else if rts522a {
+                        0x57e4
+                    } else {
+                        0x4fe4
+                    },
                     "qualified 3.3V PHY"
                 );
                 if rts522a {
@@ -783,7 +873,9 @@ mod tests {
                 assert_eq!(self.regs[0x3d62], 0xe9);
                 assert_eq!(self.regs[0x3d5c] & 7, 2);
                 assert_eq!(self.regs[0x3d52] & 15, 4);
-                assert_eq!(self.regs[0x3d5b] & 1, 1, "PPBUF physically selected");
+                if transfer.mode != 15 {
+                    assert_eq!(self.regs[0x3d5b] & 1, 1, "PPBUF physically selected");
+                }
                 if self.timeline && transfer.mode == 8 && transfer.opcode == 0 {
                     assert!(
                         Self::ticks() - self.toggled_at.expect("initial clocks") >= 1000 * 1000
@@ -800,15 +892,34 @@ mod tests {
                 let divider = self.regs[0x3c03] >> 4;
                 assert!((1..=4).contains(&divider));
                 let internal_hz = (n * 1_000_000) >> (divider - 1);
+                let sdr_fast = self.regs[0x3da0] & 12 == 8;
                 let card_hz = if self.regs[0x3da0] & 0xc0 == 0x80 {
                     internal_hz / 128
+                } else if sdr_fast {
+                    internal_hz
                 } else {
                     internal_hz / 2
                 };
-                assert_eq!(self.regs[0x3c2e], 0x24, "actual SD20 clock routing");
+                assert_eq!(
+                    self.regs[0x3c2e],
+                    if sdr_fast { 0x21 } else { 0x24 },
+                    "actual timing clock routing"
+                );
                 assert_eq!(self.regs[0x3c02] & 1, 0, "SSC ungated after settling");
                 if transfer.mode == 8 && transfer.opcode == 0 {
                     assert!(card_hz <= 400_000);
+                } else if self.card.low_voltage && transfer.opcode != 11 {
+                    let max = match self.card.bus_function {
+                        0 => 25_000_000,
+                        1 => 50_000_000,
+                        2 => 100_000_000,
+                        3 => 208_000_000,
+                        _ => panic!("undeclared UHS function"),
+                    };
+                    assert!(card_hz <= max);
+                    if sdr_fast {
+                        assert!(matches!(self.card.bus_function, 2 | 3));
+                    }
                 } else if self.card.high_speed {
                     assert!(
                         card_hz
@@ -828,7 +939,7 @@ mod tests {
                             }
                     );
                 }
-                if card_hz > 25_000_000 {
+                if card_hz > 25_000_000 && !self.card.low_voltage {
                     assert!(
                         self.card.high_speed,
                         "physical fast clock requires card high-speed negotiation"
@@ -836,7 +947,7 @@ mod tests {
                     assert_eq!(self.regs[0x3da8] & 0x10, 0x10, "SD20 fast transmit phase");
                     assert_eq!(self.regs[0x3da7] & 8, 8, "SD20 fast sample phase");
                 }
-                let data = if transfer.mode == 12 {
+                let data = if transfer.mode == 12 || transfer.mode == 15 {
                     transfer.bytes
                 } else {
                     0
@@ -872,6 +983,30 @@ mod tests {
                     ));
                     let (status, long, bytes) =
                         self.card.command(transfer.opcode, transfer.argument, data);
+                    if transfer.opcode == 11 {
+                        self.regs[0x3da5] = if self.bad_cmd11_low { 0x1e } else { 0 };
+                    }
+                    if transfer.opcode == 19 {
+                        assert_eq!(
+                            transfer.mode, 15,
+                            "actual hardware auto tuning, not PPBUF emulation"
+                        );
+                        let phase = self.regs[0x3c2b] & 31;
+                        let window = self.tuning_windows[(self.tuning_attempts / 32).min(2)];
+                        self.tuning_attempts += 1;
+                        if window & (1 << phase) == 0 {
+                            transfer.fault = self.tuning_rejection;
+                        }
+                        if let Some(fault) = self.tuning_fault.take() {
+                            transfer.fault = fault;
+                        }
+                        if self.tuning_late_timeout {
+                            self.tuning_late_timeout = false;
+                            transfer.fault = Fault::ResponseTimeout;
+                            self.delay_on = Some(DelayPoint::Status);
+                            self.delay_us = 2_000_000;
+                        }
+                    }
                     if transfer.mode == 8 {
                         self.regs[0x3da9] = 0;
                         self.regs[0x3daa..0x3dae].copy_from_slice(&status.to_be_bytes());
@@ -897,6 +1032,7 @@ mod tests {
                 Fault::Crc7 => self.regs[0x3da3] |= 0x80,
                 Fault::Crc16 => self.regs[0x3da3] |= 0x40,
                 Fault::CrcTimeout => self.regs[0x3da3] |= 2,
+                Fault::ResponseTimeout => self.regs[0x3da4] |= 1,
                 Fault::Remove => self.bipr = (self.bipr & !(1 << 16)) | (1 << 25),
                 Fault::Delink => self.bipr |= 1 << 24,
                 Fault::MemoryStick => self.bipr |= 1 << 17,
@@ -916,6 +1052,14 @@ mod tests {
         }
         fn internal_read(&mut self, at: u16) -> u8 {
             let at = usize::from(at & 0x3fff);
+            if at == 0x3da5
+                && self.card.low_voltage
+                && self.phy[8] == 0x54a4
+                && self.regs[0x3d69] & 4 != 0
+            {
+                self.regs[at] =
+                    (self.regs[at] & !0x1e) | if self.bad_cmd11_high { 0 } else { 0x1e };
+            }
             if at == 0x3db3 {
                 self.complete();
                 if self.stop_observed {
@@ -957,6 +1101,15 @@ mod tests {
                     self.regs[0x3e3d..0x3e3f].copy_from_slice(&bytes);
                 } else {
                     self.phy[index] = u16::from_le_bytes([self.regs[0x3e3d], self.regs[0x3e3e]]);
+                    if index == 8 && self.phy[index] == 0x54a4 {
+                        assert!(self.card.low_voltage, "CMD11 before1.8V PHY");
+                        assert_eq!(
+                            self.regs[0x3d69] & 4,
+                            0,
+                            "clock gated during voltage change"
+                        );
+                        self.voltage_set_at = Some(Self::ticks());
+                    }
                 }
                 self.regs[at] &= !0x80;
             }
@@ -978,6 +1131,9 @@ mod tests {
                     );
                 }
             }
+            if at == 0x3d69 && value & 4 != 0 && self.card.low_voltage {
+                assert!(Self::ticks() - self.voltage_set_at.expect("PHY first") >= 10_000 * 1000);
+            }
             if at == 0x3d50 {
                 if value & 3 == 1 {
                     if self.config[2..4] == [0x2a, 0x52] {
@@ -996,6 +1152,7 @@ mod tests {
                     self.card.asleep = false;
                     self.card.state = 0;
                     self.card.pending_write = None;
+                    self.card.low_voltage = false;
                     self.card.ext[34] = 0;
                     self.regs[0x3da5] |= 2;
                 }
@@ -1011,6 +1168,7 @@ mod tests {
                     self.regs[0x3db3] = 0;
                     self.regs[0x3da3] = 0;
                     self.regs[0x3da4] = 0;
+                    self.regs[0x3db6] = 0x80;
                 }
             }
             if at == 0x3db3 && value & 0x80 != 0 {
@@ -2241,5 +2399,184 @@ mod tests {
         let chip = rts522a(false, false, 0, 0, false);
         chip.borrow_mut().config[0x0b] = 8;
         assert!(!matches(&function(&chip)));
+    }
+    #[test]
+    fn native_rts522a_actual_cmd11_modes_clocks_and_three_sweep_tuning() {
+        for (function, hz, timing) in [
+            (0, 25_000_000, Timing::Sdr12),
+            (1, 50_000_000, Timing::Sdr25),
+            (2, 100_000_000, Timing::Sdr50),
+            (3, 208_000_000, Timing::Sdr104),
+        ] {
+            let chip = rts522a(false, true, 0, 15, false);
+            chip.borrow_mut().card.uhs_modes = 1 << function;
+            // Intersect three real sweeps; the stable window wraps across phase0.
+            chip.borrow_mut().tuning_windows = [0xf000_001f, 0xe000_000f, 0xc000_0007];
+            let mut host = make_host(&chip, false).unwrap();
+            let mut card = host.poll().unwrap().unwrap();
+            assert_eq!(card.info().signal_voltage, SignalVoltage::V1_8);
+            assert_eq!(card.info().timing, timing);
+            assert_eq!(card.info().clock_hz, hz);
+            let mut bytes = [0; 512];
+            card.read(3, &mut bytes).unwrap();
+            assert_eq!(bytes, chip.borrow().card.block(3));
+            card.write(3, &[0x7e; 512]).unwrap();
+            card.flush().unwrap();
+            card.read(3, &mut bytes).unwrap();
+            assert_eq!(bytes, [0x7e; 512]);
+            let c = chip.borrow();
+            assert_eq!(c.phy[0x11], 0x3c02);
+            assert_eq!(c.phy[8], 0x54a4);
+            assert_eq!(c.regs[0x3d5a], 0x99, "actual vendor1.8V drive index0");
+            if function >= 2 {
+                assert_eq!(c.tuning_attempts, 97);
+                assert_eq!(c.regs[0x3c2a] & 31, 20, "RTS522A TX phase");
+                assert_eq!(
+                    c.regs[0x3c2b] & 31,
+                    0,
+                    "middle of actual stable wrap window"
+                );
+                assert_eq!(
+                    c.card.current_function, 1,
+                    "400mA actual3.3V VCC current limit"
+                );
+            } else {
+                assert_eq!(c.tuning_attempts, 0);
+            }
+            let cmd11 = c
+                .effects
+                .iter()
+                .position(|e| matches!(e, Effect::Command(11, 0, 8)))
+                .unwrap();
+            let cid = c
+                .effects
+                .iter()
+                .position(|e| matches!(e, Effect::Command(2, 0, 8)))
+                .unwrap();
+            assert!(cmd11 < cid);
+            drop(c);
+            card.shutdown(true).unwrap();
+        }
+    }
+    #[test]
+    fn native_rts522a_voltage_or_tuning_failure_never_publishes_and_repower_uses_fresh_cmd0() {
+        for fault in 0..5 {
+            let chip = rts522a(false, true, 1, 0, false);
+            chip.borrow_mut().card.uhs_modes = 8;
+            match fault {
+                0 => chip.borrow_mut().bad_cmd11_low = true,
+                1 => chip.borrow_mut().bad_cmd11_high = true,
+                2 => chip.borrow_mut().tuning_windows = [0; 3],
+                3 => chip.borrow_mut().tuning_windows = [0xff, 0xff00, 0xff0000],
+                _ => chip.borrow_mut().tuning_windows = [1; 3],
+            }
+            let mut host = make_host(&chip, false).unwrap();
+            if fault == 4 {
+                // Fault after the voltage transition, during tuning publication.
+                chip.borrow_mut().wrong_echo = Some(0xfc2b);
+            }
+            assert!(host.poll().is_err());
+            assert!(host.inner.borrow().medium.is_none());
+            if fault <= 1 {
+                assert_eq!(
+                    chip.borrow().regs[0x3d50] & 3,
+                    3,
+                    "failed electrical transition actually powers off"
+                );
+                assert_eq!(chip.borrow().regs[0x3e75] & 6, 0);
+                assert!(
+                    !chip
+                        .borrow()
+                        .effects
+                        .iter()
+                        .any(|e| matches!(e, Effect::Command(2, _, _)))
+                );
+            }
+            if fault == 4 {
+                let before = chip.borrow().accesses;
+                assert!(host.poll().is_err());
+                assert_eq!(chip.borrow().accesses, before);
+            } else {
+                let start = chip.borrow().effects.len();
+                {
+                    let mut c = chip.borrow_mut();
+                    c.bad_cmd11_low = false;
+                    c.bad_cmd11_high = false;
+                    c.tuning_windows = [u32::MAX; 3];
+                    c.tuning_attempts = 0;
+                }
+                let mut fresh = host.poll().unwrap().unwrap();
+                fresh.flush().unwrap();
+                assert!(
+                    chip.borrow().effects[start..]
+                        .iter()
+                        .any(|e| matches!(e, Effect::Command(0, _, _)))
+                );
+            }
+        }
+    }
+    #[test]
+    fn native_rts522a_tuning_media_faults_or_unacknowledged_speed_do_not_become_phase_evidence() {
+        for fault in [Fault::Remove, Fault::Delink, Fault::Overcurrent] {
+            let chip = rts522a(false, true, 0, 15, false);
+            chip.borrow_mut().card.uhs_modes = 8;
+            chip.borrow_mut().tuning_fault = Some(fault);
+            let mut host = make_host(&chip, false).unwrap();
+            assert!(host.poll().is_err());
+            assert_eq!(chip.borrow().tuning_attempts, 1);
+            assert!(host.inner.borrow().medium.is_none());
+            assert!(host.last_failure().is_some());
+        }
+        let chip = rts522a(false, true, 1, 0, false);
+        chip.borrow_mut().card.uhs_modes = 8;
+        chip.borrow_mut().card.reject_switch = true;
+        let mut host = make_host(&chip, false).unwrap();
+        assert_eq!(
+            host.poll().err(),
+            Some(BlockError::Unsupported(
+                "SD UHS speed selection was not acknowledged"
+            ))
+        );
+        assert_eq!(chip.borrow().tuning_attempts, 0);
+        assert_eq!(chip.borrow().regs[0x3da0] & 12, 0);
+        assert!(host.inner.borrow().medium.is_none());
+    }
+    #[test]
+    fn native_rts522a_actual_phase_timeouts_continue_only_after_acknowledged_idle_and_stop() {
+        for rejection in [Fault::CrcTimeout, Fault::ResponseTimeout] {
+            let chip = rts522a(false, true, 1, 15, false);
+            chip.borrow_mut().card.uhs_modes = 8;
+            chip.borrow_mut().tuning_windows = [0xf000_000f; 3];
+            chip.borrow_mut().tuning_rejection = rejection;
+            let mut host = make_host(&chip, false).unwrap();
+            let mut card = host.poll().unwrap().unwrap();
+            assert_eq!(chip.borrow().tuning_attempts, 97);
+            assert_eq!(chip.borrow().regs[0x3c2b] & 31, 0);
+            card.flush().unwrap();
+            assert!(!host.inner.borrow().tuning_rejection_observed);
+        }
+        let chip = rts522a(false, true, 1, 15, false);
+        chip.borrow_mut().card.uhs_modes = 8;
+        chip.borrow_mut().tuning_windows = [0; 3];
+        chip.borrow_mut().tuning_rejection = Fault::ResponseTimeout;
+        chip.borrow_mut().stuck_stop = true;
+        let mut host = make_host(&chip, false).unwrap();
+        // A stuck CARD_STOP leaves a pending START in this model; inject that
+        // independently for the first tuning transaction, not initialization.
+        chip.borrow_mut().tuning_fault = Some(Fault::MissingEnd);
+        assert!(host.poll().is_err());
+        assert_eq!(chip.borrow().tuning_attempts, 1);
+        assert!(host.inner.borrow().medium.is_none());
+    }
+    #[test]
+    fn native_rts522a_late_actual_timeout_status_is_fatal_not_another_phase() {
+        let chip = rts522a(false, true, 1, 15, false);
+        chip.borrow_mut().card.uhs_modes = 8;
+        chip.borrow_mut().tuning_late_timeout = true;
+        let mut host = make_host(&chip, false).unwrap();
+        assert_eq!(host.poll().err(), Some(BlockError::Timeout));
+        assert_eq!(chip.borrow().tuning_attempts, 1);
+        assert!(!host.inner.borrow().tuning_rejection_observed);
+        assert!(host.inner.borrow().medium.is_none());
     }
 }

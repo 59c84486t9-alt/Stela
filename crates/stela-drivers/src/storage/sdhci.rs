@@ -207,7 +207,7 @@ fn finish_attach(
     attached
 }
 
-pub use super::mmc::{CardInfo, Failure, Kind};
+pub use super::mmc::{CardInfo, Failure, Kind, SignalVoltage, Timing};
 struct Medium {
     id: u64,
     identity: Identity,

@@ -52,6 +52,29 @@ pub(in crate::storage) trait Host {
         0
     }
     fn high_speed_supported(&self) -> bool;
+    fn sd_uhs_modes(&self) -> SdUhsModes {
+        SdUhsModes::default()
+    }
+    /// CMD11 has completed. Verify DAT low, gate clock, switch actual PHY/pads,
+    /// retain the gated settling interval, restart clock and verify DAT high.
+    /// A failed transition requires actual power-off before another identify.
+    fn switch_sd_signal_voltage(&mut self) -> Result<(), BlockError> {
+        Err(BlockError::Unsupported(
+            "host SD1.8V switching is not implemented",
+        ))
+    }
+    fn set_sd_uhs_timing(&mut self, _timing: Timing) -> Result<(), BlockError> {
+        Err(BlockError::Unsupported(
+            "host SD UHS timing is not implemented",
+        ))
+    }
+    fn tune_sd(&mut self) -> Result<(), BlockError> {
+        Err(BlockError::Unsupported("host SD tuning is not implemented"))
+    }
+    /// Card VCC supply capacity, independently of signal voltage/OCP threshold.
+    fn sd_max_current_ma(&self) -> u32 {
+        0
+    }
     fn mmc_width(&self) -> u8;
     fn set_bus_width(&mut self, width: u8) -> Result<(), BlockError>;
     fn set_high_speed(&mut self) -> Result<(), BlockError>;
@@ -121,7 +144,16 @@ impl<H: Host> Session<'_, H> {
                 "SD memory requires initial3.3V signaling",
             ));
         }
-        let request = voltage | if v2 || !sd { OCR_SECTOR } else { 0 };
+        let uhs = self.host.sd_uhs_modes();
+        let request_uhs = sd && v2 && uhs.available();
+        let request = voltage
+            | if v2 || !sd { OCR_SECTOR } else { 0 }
+            | if request_uhs { 1 << 24 } else { 0 }
+            | if sd && self.host.sd_max_current_ma() > 150 {
+                1 << 28
+            } else {
+                0
+            };
         let deadline = self.clock.deadline(COMMAND_US);
         let ocr = loop {
             if deadline.passed() {
@@ -149,6 +181,11 @@ impl<H: Host> Session<'_, H> {
             }
             self.clock.delay(10_000);
         };
+        let low_voltage = request_uhs && ocr & (1 << 24) != 0;
+        if low_voltage {
+            self.execute(SD_SWITCH_VOLTAGE, 0, Response::Status, None)?;
+            self.host.switch_sd_signal_voltage()?;
+        }
         let cid = self.execute(ALL_SEND_CID, 0, Response::Long, None)?;
         self.rca = if sd {
             let rca = (self.execute(SET_RELATIVE_ADDRESS, 0, Response::Rca, None)?[0] >> 16) as u16;
@@ -206,6 +243,12 @@ impl<H: Host> Session<'_, H> {
             ext_csd: None,
             clock_hz: maximum_hz.min(25_000_000),
             bus_width: 1,
+            signal_voltage: if low_voltage || voltage == OCR_180 {
+                SignalVoltage::V1_8
+            } else {
+                SignalVoltage::V3_3
+            },
+            timing: Timing::Legacy,
         };
         let mut cache = false;
         let mut notify = false;
@@ -225,7 +268,14 @@ impl<H: Host> Session<'_, H> {
                 info.bus_width = 4;
             }
             info.scr = Some(scr);
-            if scr[0] & 15 >= 1
+            if low_voltage {
+                if scr[0] & 15 != 2 || scr[2] & 0x80 == 0 || info.bus_width != 4 {
+                    return Err(self.host.retire(BlockError::Unsupported(
+                        "SD UHS requires actual SD3 SCR and four-bit bus",
+                    )));
+                }
+                self.sd_uhs(uhs, &mut info)?;
+            } else if scr[0] & 15 >= 1
                 && self.host.high_speed_supported()
                 && bits(csd, 84, 12) & (1 << 10) != 0
             {
@@ -239,6 +289,7 @@ impl<H: Host> Session<'_, H> {
                     }
                     self.host.set_high_speed()?;
                     info.clock_hz = 50_000_000;
+                    info.timing = Timing::HighSpeed;
                 }
             }
         } else if bits(csd, 122, 4) >= 4 {
@@ -308,6 +359,7 @@ impl<H: Host> Session<'_, H> {
                 self.mmc_switch(EXT_TIMING as u8, 1)?;
                 ext[EXT_TIMING] = 1;
                 self.host.set_high_speed()?;
+                info.timing = Timing::HighSpeed;
                 info.clock_hz = if ext[EXT_CARD_TYPE] & 2 != 0 {
                     52_000_000
                 } else {
@@ -331,7 +383,9 @@ impl<H: Host> Session<'_, H> {
         if !sector_addressed {
             self.execute(SET_BLOCK_LENGTH, 512, Response::Status, None)?;
         }
-        info.clock_hz = self.host.set_clock(info.clock_hz)?;
+        if !low_voltage {
+            info.clock_hz = self.host.set_clock(info.clock_hz)?;
+        }
         let product: Vec<u8> = (0..if sd {
             5
         } else if bits(csd, 122, 4) <= 1 {
@@ -372,6 +426,59 @@ impl<H: Host> Session<'_, H> {
             info,
             notify,
         })
+    }
+    fn sd_uhs(&mut self, modes: SdUhsModes, info: &mut CardInfo) -> Result<(), BlockError> {
+        let result = (|| {
+            self.execute(SWITCH, 0x00ff_fff0, Response::Status, Some(64))?;
+            let status = self.host.scratch();
+            let (timing, function, hz) = modes.select(status[13]).ok_or(
+                BlockError::Unsupported("SD card and host share no UHS bus speed"),
+            )?;
+            let currents = u16::from_be_bytes([status[6], status[7]]);
+            // Type B is mandatory/default. The native host uses its source board
+            // drive selection; no unsupported drive-strength function is requested.
+            if matches!(timing, Timing::Sdr50 | Timing::Sdr104) {
+                let maximum = self.host.sd_max_current_ma();
+                let current =
+                    [(3, 800), (2, 600), (1, 400)]
+                        .into_iter()
+                        .find_map(|(function, ma)| {
+                            (ma <= maximum && currents & (1 << function) != 0).then_some(function)
+                        });
+                if let Some(current) = current {
+                    self.execute(
+                        SWITCH,
+                        0x80ff_ffff & !(15 << 12) | current << 12,
+                        Response::Status,
+                        Some(64),
+                    )?;
+                    if self.host.scratch()[15] >> 4 != current as u8 {
+                        return Err(BlockError::Unsupported(
+                            "SD UHS current selection was not acknowledged",
+                        ));
+                    }
+                }
+            }
+            self.execute(
+                SWITCH,
+                0x80ff_fff0 | u32::from(function),
+                Response::Status,
+                Some(64),
+            )?;
+            if self.host.scratch()[16] & 15 != function {
+                return Err(BlockError::Unsupported(
+                    "SD UHS speed selection was not acknowledged",
+                ));
+            }
+            self.host.set_sd_uhs_timing(timing)?;
+            info.clock_hz = self.host.set_clock(hz)?;
+            if matches!(timing, Timing::Sdr50 | Timing::Sdr104) {
+                self.host.tune_sd()?;
+            }
+            info.timing = timing;
+            Ok(())
+        })();
+        result.map_err(|error| self.host.retire(error))
     }
     fn application(&mut self, rca: u16) -> Result<(), BlockError> {
         let status = self.execute(APP_CMD, u32::from(rca) << 16, Response::Status, None)?[0];

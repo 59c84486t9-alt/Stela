@@ -118,7 +118,7 @@ impl Engine {
     fn wr(&mut self, budget: Budget, at: u16, mask: u8, value: u8) -> Result<(), BlockError> {
         self.write_reg_before(at, mask, value, Some(budget))
     }
-    fn check_card_before(&mut self, budget: Budget) -> Result<(), BlockError> {
+    pub(super) fn check_card_before(&mut self, budget: Budget) -> Result<(), BlockError> {
         budget.check()?;
         self.healthy()?;
         budget.check()?;
@@ -179,7 +179,9 @@ impl Engine {
     ) -> Result<[u32; 4], BlockError> {
         let budget = Budget::new(
             self,
-            if read_bytes.is_some() || response == Response::Busy {
+            if opcode == SD_SEND_TUNING {
+                100_000
+            } else if read_bytes.is_some() || response == Response::Busy {
                 DATA_US
             } else {
                 COMMAND_US
@@ -187,6 +189,7 @@ impl Engine {
         );
         self.restoration_failure = None;
         self.failure_finalized = false;
+        self.tuning_rejection_observed = false;
         let result = self.execute_inner(opcode, argument, response, read_bytes, budget);
         result.map_err(|error| self.retire_error(error))
     }
@@ -242,18 +245,27 @@ impl Engine {
         self.set_command(opcode, argument, budget)?;
         self.data_length(bytes, budget)?;
         self.wr(budget, SD_CFG2, 0xff, SD_RSP_LEN_6)?;
-        self.wr(budget, CARD_DATA_SOURCE, 1, PINGPONG_BUFFER)?;
+        let tuning = opcode == SD_SEND_TUNING;
+        if !tuning {
+            self.wr(budget, CARD_DATA_SOURCE, 1, PINGPONG_BUFFER)?;
+        }
         self.wr(
             budget,
             SD_TRANSFER,
             0xff,
-            SD_TM_NORMAL_READ | SD_TRANSFER_START,
+            if tuning {
+                SD_TM_AUTO_TUNING
+            } else {
+                SD_TM_NORMAL_READ
+            } | SD_TRANSFER_START,
         )?;
         self.wait_transfer(SD_TRANSFER_END, true, budget)?;
         // sd_read_data consumes END and PPBUF, not an inferred R1 in SD_CMDx.
         // Hardware CRC/status and the later actual CMD13 readiness own errors.
-        for index in 0..bytes {
-            self.scratch[index] = self.rd(budget, PPBUF_BASE2 + index as u16)?;
+        if !tuning {
+            for index in 0..bytes {
+                self.scratch[index] = self.rd(budget, PPBUF_BASE2 + index as u16)?;
+            }
         }
         self.check_card_before(budget)?;
         Ok([0; 4])
@@ -374,6 +386,7 @@ impl Engine {
             self.check_card_before(budget)?;
             let (transfer, late) = self.observe_reg_before(SD_TRANSFER, Some(budget))?;
             if transfer & SD_TRANSFER_ERR != 0 {
+                self.tuning_rejection_observed = !late && !budget.expired();
                 return Err(BlockError::Device {
                     status: u32::from(transfer),
                 });
@@ -384,9 +397,11 @@ impl Engine {
             let (status1, late) = self.observe_reg_before(SD_STAT1, Some(budget))?;
             let crc = SD_CRC16_ERR | SD_CRC_WRITE_ERR | if check_crc7 { SD_CRC7_ERR } else { 0 };
             if status1 & SD_CRC_TIMEOUT != 0 {
+                self.tuning_rejection_observed = !late && !budget.expired();
                 return Err(BlockError::Timeout);
             }
             if status1 & crc != 0 {
+                self.tuning_rejection_observed = !late && !budget.expired();
                 return Err(BlockError::Device {
                     status: u32::from(transfer) | u32::from(status1) << 8,
                 });
@@ -396,6 +411,7 @@ impl Engine {
             }
             let (status2, late) = self.observe_reg_before(SD_STAT2, Some(budget))?;
             if status2 & SD_RSP_80CLK_TIMEOUT != 0 {
+                self.tuning_rejection_observed = !late && !budget.expired();
                 return Err(BlockError::Timeout);
             }
             if late {
@@ -416,6 +432,7 @@ impl Engine {
         }
     }
     pub(super) fn write_block(&mut self, argument: u32, bytes: &[u8]) -> Result<(), BlockError> {
+        self.tuning_rejection_observed = false;
         self.restoration_failure = None;
         self.failure_finalized = false;
         let budget = Budget::new(self, DATA_US);
@@ -488,6 +505,32 @@ impl CardHost for Engine {
     }
     fn high_speed_supported(&self) -> bool {
         true
+    }
+    fn sd_uhs_modes(&self) -> crate::storage::mmc::SdUhsModes {
+        let supported = self.config.profile == ChipProfile::Rts522a;
+        crate::storage::mmc::SdUhsModes {
+            sdr12: supported,
+            sdr25: supported,
+            sdr50: supported,
+            sdr104: supported,
+        }
+    }
+    fn sd_max_current_ma(&self) -> u32 {
+        // The board still supplies3.3V VCC; CMD11 changes signaling only.
+        if self.config.profile == ChipProfile::Rts522a {
+            400
+        } else {
+            0
+        }
+    }
+    fn switch_sd_signal_voltage(&mut self) -> Result<(), BlockError> {
+        self.rts522a_switch_signal()
+    }
+    fn set_sd_uhs_timing(&mut self, timing: Timing) -> Result<(), BlockError> {
+        self.rts522a_timing(timing)
+    }
+    fn tune_sd(&mut self) -> Result<(), BlockError> {
+        self.rts522a_tune()
     }
     fn mmc_width(&self) -> u8 {
         4

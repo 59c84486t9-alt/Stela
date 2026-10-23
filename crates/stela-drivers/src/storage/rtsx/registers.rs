@@ -178,3 +178,19 @@ pub(super) const REG_OCPSTAT: u16 = 0xfd6e;
 pub(super) const OC_POWER_DOWN: u8 = 2;
 pub(super) const SD_OCP_ENABLE: u8 = 0x0c;
 pub(super) const SD_OCP_CLEAR: u8 = 3;
+
+pub(super) const SD_CFG3: u16 = 0xfda2;
+pub(super) const SD_DATA_STATE: u16 = 0xfdb6;
+pub(super) const SD_DATA_IDLE: u8 = 0x80;
+pub(super) const SD_RSP_80CLK_TIMEOUT_EN: u8 = 1;
+pub(super) const SD_DAT_MASK: u8 = 0x1e;
+pub(super) const SD_30_MODE: u8 = 8;
+pub(super) const SD_ASYNC_FIFO_NOT_RST: u8 = 0x10;
+pub(super) const SD_VPTX_CTL: u16 = 0xfc2a;
+pub(super) const SD_VPRX_CTL: u16 = 0xfc2b;
+pub(super) const PHASE_NOT_RESET: u8 = 0x40;
+pub(super) const PHASE_SELECT_MASK: u8 = 0x1f;
+pub(super) const SSC_DEPTH_2M: u8 = 2;
+pub(super) const SSC_DEPTH_1M: u8 = 3;
+
+pub(super) const SD_TM_AUTO_TUNING: u8 = 0x0f;

@@ -125,6 +125,7 @@ pub(super) struct Configuration {
     force_clock_request: bool,
     card_drive: u8,
     drive: usize,
+    drive_1v8: usize,
     reverse_socket: bool,
     reverse_cd: bool,
     reverse_wp: bool,
@@ -132,6 +133,9 @@ pub(super) struct Configuration {
     pub vendor_valid: bool,
 }
 impl Configuration {
+    pub(super) fn drive_1v8(&self) -> u8 {
+        [0x99, 0xaa, 0xfe, 0xb3][self.drive_1v8]
+    }
     pub fn capture<C: ConfigSpace>(
         function: &mut Function<C>,
         expected: Admission,
@@ -161,6 +165,7 @@ impl Configuration {
             force_clock_request,
             card_drive: 0x41,
             drive: 3,
+            drive_1v8: 3,
             reverse_socket: false,
             reverse_cd: false,
             reverse_wp: false,
@@ -171,6 +176,7 @@ impl Configuration {
             let setting2 = pci.read32(VENDOR_SETTING2);
             config.card_drive = (config.card_drive & 0x3f) | (((setting1 >> 25) as u8 & 1) << 6);
             config.drive = ((setting2 >> 5) & 3) as usize;
+            config.drive_1v8 = ((setting1 >> 26) & 3) as usize;
             config.reverse_socket = setting2 & 0x4000 != 0;
             config.reverse_cd = setting2 & 0x0080_0000 != 0;
             config.reverse_wp = setting2 & 0x0040_0000 != 0;
@@ -204,6 +210,9 @@ impl Engine {
             restoration_failure: None,
             failure_finalized: false,
             ocp_status: None,
+            timing_mode: Timing::Legacy,
+            signal_voltage: SignalVoltage::V3_3,
+            tuning_rejection_observed: false,
         };
         engine.healthy()?;
         engine.registers.write32(BIER, 0);
@@ -463,7 +472,7 @@ impl Engine {
         }
         Ok(())
     }
-    fn driving(&mut self) -> Result<(), BlockError> {
+    pub(super) fn driving(&mut self) -> Result<(), BlockError> {
         let value = [0x13, 0x96, 0x7f, 0x96][self.config.drive];
         for at in [SD30_CLK_DRIVE_SEL, SD30_CMD_DRIVE_SEL, SD30_DAT_DRIVE_SEL] {
             self.write_reg(at, 0xff, value)?;
@@ -504,6 +513,7 @@ impl Engine {
             },
         )?;
         self.driving()?;
+        self.signal_voltage = SignalVoltage::V3_3;
         self.write_reg(CARD_SELECT, 7, SD_MOD_SEL)?;
         self.write_reg(CARD_SHARE_MODE, CARD_SHARE_MASK, CARD_SHARE_48_SD)?;
         self.write_reg(CARD_CLK_EN, SD_CLK_EN, SD_CLK_EN)?;
@@ -535,6 +545,11 @@ impl Engine {
         Ok(())
     }
     pub(super) fn timing(&mut self, high_speed: bool) -> Result<(), BlockError> {
+        self.timing_mode = if high_speed {
+            Timing::HighSpeed
+        } else {
+            Timing::Legacy
+        };
         self.write_reg(SD_CFG1, 0x0c, 0)?;
         self.write_reg(CLK_CTL, CLK_LOW_FREQ, CLK_LOW_FREQ)?;
         self.write_reg(CARD_CLK_SOURCE, 0xff, 0x24)?;
@@ -561,10 +576,12 @@ impl Engine {
             ));
         }
         let initial = requested <= 1_000_000;
+        let variable_phase = matches!(self.timing_mode, Timing::Sdr50 | Timing::Sdr104);
+        let double_clock = !variable_phase;
         let internal = if initial {
             30
         } else {
-            requested / 1_000_000 * 2
+            requested / 1_000_000 * if double_clock { 2 } else { 1 }
         };
         if internal <= 2 || internal > 210 {
             return Err(BlockError::Unsupported("RTSX unsupported standard clock"));
@@ -580,7 +597,12 @@ impl Engine {
         }
         let count = (125 / internal + 3).min(15) as u8;
         // Source double-CLK compensation followed by revision for the selected divider.
-        let depth = (SSC_DEPTH_500K - 1)
+        let depth = match self.timing_mode {
+            Timing::Sdr50 | Timing::Sdr104 => SSC_DEPTH_2M,
+            Timing::Sdr25 => SSC_DEPTH_1M,
+            _ => SSC_DEPTH_500K,
+        };
+        let depth = (depth - u8::from(double_clock))
             .checked_sub(div - 1)
             .filter(|depth| *depth != 0)
             .unwrap_or(SSC_DEPTH_4M);
@@ -603,12 +625,16 @@ impl Engine {
         ] {
             self.write_reg(at, mask, value)?;
         }
+        if variable_phase {
+            self.write_reg(SD_VPTX_CTL, PHASE_NOT_RESET, 0)?;
+            self.write_reg(SD_VPTX_CTL, PHASE_NOT_RESET, PHASE_NOT_RESET)?;
+        }
         self.clock.delay(130);
         self.write_reg(CLK_CTL, CLK_LOW_FREQ, 0)?;
         Ok(if initial {
             30_000_000 / 128
         } else {
-            internal * 1_000_000 / 2
+            internal * 1_000_000 / if double_clock { 2 } else { 1 }
         })
     }
 }

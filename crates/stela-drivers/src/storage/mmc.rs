@@ -19,6 +19,46 @@ pub struct Failure {
     pub retirement: Option<BlockError>,
     pub quarantined: bool,
 }
+/// Actual signaling voltage; this is distinct from the card's VCC supply OCR.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalVoltage {
+    V3_3,
+    V1_8,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Timing {
+    Legacy,
+    HighSpeed,
+    Sdr12,
+    Sdr25,
+    Sdr50,
+    Sdr104,
+}
+/// Only source-qualified host modes may request S18R during OCR negotiation.
+#[derive(Clone, Copy, Default)]
+pub(in crate::storage) struct SdUhsModes {
+    pub sdr12: bool,
+    pub sdr25: bool,
+    pub sdr50: bool,
+    pub sdr104: bool,
+}
+impl SdUhsModes {
+    pub fn available(self) -> bool {
+        self.sdr12 || self.sdr25 || self.sdr50 || self.sdr104
+    }
+    pub fn select(self, card: u8) -> Option<(Timing, u8, u32)> {
+        [
+            (self.sdr104, 3, Timing::Sdr104, 208_000_000),
+            (self.sdr50, 2, Timing::Sdr50, 100_000_000),
+            (self.sdr25, 1, Timing::Sdr25, 50_000_000),
+            (self.sdr12, 0, Timing::Sdr12, 25_000_000),
+        ]
+        .into_iter()
+        .find_map(|(host, function, timing, hz)| {
+            (host && card & (1 << function) != 0).then_some((timing, function, hz))
+        })
+    }
+}
 /// Actual card registers and the acknowledged physical operating mode.
 #[derive(Clone, Debug)]
 pub struct CardInfo {
@@ -29,6 +69,8 @@ pub struct CardInfo {
     pub ext_csd: Option<Vec<u8>>,
     pub clock_hz: u32,
     pub bus_width: u8,
+    pub signal_voltage: SignalVoltage,
+    pub timing: Timing,
 }
 /// Register bits use the card's127..0 numbering, after actual R2 reconstruction.
 pub(super) fn bits(words: [u32; 4], start: u32, count: u32) -> u32 {
