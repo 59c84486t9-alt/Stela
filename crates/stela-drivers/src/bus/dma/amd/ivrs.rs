@@ -3,7 +3,7 @@
 // commit cc9de5d4b5ab6459f5774946aa3195ad51236fa8.
 // Copyright (C) 2007-2010 Advanced Micro Devices, Inc.
 // Original authors: Joerg Roedel <jroedel@suse.de>, Leo Duran <leo.duran@amd.com>.
-//! Allocation-free IVRS decoding. Firmware descriptions grant no ownership,
+//! Resource-bounded IVRS decoding. Firmware descriptions grant no ownership,
 //! requester isolation, MMIO access or permission to change a remapping unit.
 //! Framing, checksums, known entry encodings, range grammar and version identity
 //! are checked for every block, including superseded IVHD versions. Raw policy
@@ -11,6 +11,8 @@
 //! alignment, reserved bits and policy semantics require separate live admission
 //! and explicit refusal of unresolved requirements. Range starts must be followed
 //! immediately by their end; interleaved entries, including padding, are refused.
+use alloc::vec::Vec;
+use core::cmp::Reverse;
 
 const TABLE_HEADER: usize = 48;
 const BLOCK_HEADER: usize = 4;
@@ -39,6 +41,8 @@ pub enum ErrorKind {
     DuplicateVersion,
     UnitIdentity,
     AddressOverflow,
+    ResourceLimit,
+    OutOfMemory,
 }
 
 fn error(offset: usize, kind: ErrorKind) -> ParseError {
@@ -59,13 +63,18 @@ fn read64(bytes: &[u8], offset: usize) -> u64 {
 
 /// An entire, checksum-validated IVRS table. Input must have its exact declared
 /// length; callers with a larger firmware mapping must first bound that view.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct Ivrs<'a> {
     raw: &'a [u8],
+    units: Vec<Ivhd<'a>>,
 }
 
 impl<'a> Ivrs<'a> {
-    pub fn parse(raw: &'a [u8]) -> Result<Self, ParseError> {
+    /// `maximum_hardware_blocks` is the caller's actual admission budget,
+    /// including superseded versions. No implicit platform-sized limit applies.
+    /// All framing/entry checks precede index allocation. A budget failure may
+    /// reject an input before examining its remaining bytes, never admit it.
+    pub fn parse(raw: &'a [u8], maximum_hardware_blocks: usize) -> Result<Self, ParseError> {
         if raw.len() < TABLE_HEADER {
             return Err(error(raw.len(), ErrorKind::Truncated));
         }
@@ -79,6 +88,7 @@ impl<'a> Ivrs<'a> {
             return Err(error(9, ErrorKind::Checksum));
         }
         let mut offset = TABLE_HEADER;
+        let mut hardware_blocks = 0usize;
         while offset < raw.len() {
             let remaining = &raw[offset..];
             if remaining.len() < BLOCK_HEADER {
@@ -102,6 +112,10 @@ impl<'a> Ivrs<'a> {
                         return Err(error(offset + 2, ErrorKind::BlockLength));
                     }
                     validate_entries(&block[header..], block[0], offset + header)?;
+                    if hardware_blocks == maximum_hardware_blocks {
+                        return Err(error(offset, ErrorKind::ResourceLimit));
+                    }
+                    hardware_blocks += 1;
                 }
                 0x20..=0x22 => {
                     if length < IVMD_HEADER {
@@ -118,48 +132,73 @@ impl<'a> Ivrs<'a> {
             }
             offset += length;
         }
-        let table = Self { raw };
-        // No allocation or assumed block ordering: compare every version pair
-        // only after all block/entry bounds have been established.
-        for first in table.hardware_blocks() {
-            for second in table
-                .hardware_blocks()
-                .filter(|unit| unit.offset > first.offset)
-            {
-                if first.id() != second.id() {
-                    continue;
-                }
+        let mut units = Vec::new();
+        units
+            .try_reserve_exact(hardware_blocks)
+            .map_err(|_| error(TABLE_HEADER, ErrorKind::OutOfMemory))?;
+        units.extend(
+            Blocks {
+                remaining: &raw[TABLE_HEADER..],
+                offset: TABLE_HEADER,
+            }
+            .filter_map(|block| match block {
+                Block::Hardware(unit) => Some(unit),
+                Block::Memory(_) => None,
+            }),
+        );
+        // The complete table is validated. Sorting needs no further allocation;
+        // adjacent checks cover every version within each full requester ID.
+        units.sort_unstable_by_key(|unit| {
+            (
+                unit.id().segment,
+                unit.id().device_id,
+                Reverse(unit.version()),
+                unit.offset,
+            )
+        });
+        for pair in units.windows(2) {
+            let [first, second] = [pair[0], pair[1]];
+            if first.id() == second.id() {
+                let offending = first.offset.max(second.offset);
                 if first.version() == second.version() {
-                    return Err(error(second.offset, ErrorKind::DuplicateVersion));
+                    return Err(error(offending, ErrorKind::DuplicateVersion));
                 }
                 if !first.same_identity(second) {
-                    return Err(error(second.offset, ErrorKind::UnitIdentity));
+                    return Err(error(offending, ErrorKind::UnitIdentity));
                 }
             }
         }
-        Ok(table)
+        let mut previous = None;
+        units.retain(|unit| {
+            let id = unit.id();
+            let selected = previous != Some(id);
+            previous = Some(id);
+            selected
+        });
+        units.sort_unstable_by_key(|unit| unit.offset);
+        Ok(Self { raw, units })
     }
 
-    pub fn raw(self) -> &'a [u8] {
+    pub fn raw(&self) -> &'a [u8] {
         self.raw
     }
 
-    pub fn info(self) -> u32 {
+    pub fn info(&self) -> u32 {
         read32(self.raw, 36)
     }
 
-    pub fn revision(self) -> u8 {
+    pub fn revision(&self) -> u8 {
         self.raw[8]
     }
 
-    pub fn blocks(self) -> Blocks<'a> {
+    pub fn blocks(&self) -> Blocks<'a> {
         Blocks {
             remaining: &self.raw[TABLE_HEADER..],
             offset: TABLE_HEADER,
         }
     }
 
-    pub fn hardware_blocks(self) -> impl Iterator<Item = Ivhd<'a>> {
+    pub fn hardware_blocks(&self) -> impl Iterator<Item = Ivhd<'a>> {
         self.blocks().filter_map(|block| match block {
             Block::Hardware(unit) => Some(unit),
             Block::Memory(_) => None,
@@ -168,15 +207,11 @@ impl<'a> Ivrs<'a> {
 
     /// One highest-version description per (segment, IOMMU device ID), in
     /// table order. All lower versions were still validated by `parse`.
-    pub fn units(self) -> impl Iterator<Item = Ivhd<'a>> {
-        self.hardware_blocks().filter(move |unit| {
-            !self
-                .hardware_blocks()
-                .any(|other| other.id() == unit.id() && other.version() > unit.version())
-        })
+    pub fn units(&self) -> impl ExactSizeIterator<Item = Ivhd<'a>> + '_ {
+        self.units.iter().copied()
     }
 
-    pub fn memory_definitions(self) -> impl Iterator<Item = Ivmd<'a>> {
+    pub fn memory_definitions(&self) -> impl Iterator<Item = Ivmd<'a>> {
         self.blocks().filter_map(|block| match block {
             Block::Memory(memory) => Some(memory),
             Block::Hardware(_) => None,
@@ -608,7 +643,114 @@ mod tests {
         raw
     }
     fn fail(raw: &[u8], kind: ErrorKind) {
-        assert_eq!(Ivrs::parse(raw).unwrap_err().kind, kind);
+        assert_eq!(Ivrs::parse(raw, usize::MAX).unwrap_err().kind, kind);
+    }
+
+    #[test]
+    fn admission_budget_counts_every_version_and_keeps_zero_unit_tables_valid() {
+        let empty = table(&[]);
+        assert_eq!(Ivrs::parse(&empty, 0).unwrap().units().len(), 0);
+        let mut memory = vec![0; IVMD_HEADER];
+        memory[0] = 0x20;
+        put16(&mut memory, 2, IVMD_HEADER as u16);
+        let memory_only = table(&[&memory]);
+        let parsed = Ivrs::parse(&memory_only, 0).unwrap();
+        assert_eq!(parsed.units().len(), 0);
+        assert_eq!(parsed.memory_definitions().count(), 1);
+
+        let low = hardware(0x10, 7, 0x8123, &[]);
+        let high = hardware(0x40, 7, 0x8123, &[]);
+        let raw = table(&[&low, &memory, &high]);
+        let unchanged = raw.clone();
+        for (budget, offset) in [
+            (0, TABLE_HEADER),
+            (1, TABLE_HEADER + low.len() + memory.len()),
+        ] {
+            assert_eq!(
+                Ivrs::parse(&raw, budget).unwrap_err(),
+                error(offset, ErrorKind::ResourceLimit)
+            );
+        }
+        let parsed = Ivrs::parse(&raw, 2).unwrap();
+        assert_eq!(parsed.units().len(), 1);
+        assert_eq!(
+            parsed.units().next().unwrap().version(),
+            HardwareVersion::Type40
+        );
+        assert_eq!(parsed.hardware_blocks().count(), 2);
+        assert_eq!(raw, unchanged);
+    }
+
+    #[test]
+    fn every_version_permutation_selects_the_same_unit_and_checks_hidden_versions() {
+        let versions = [
+            hardware(0x10, 0xffff, 0xffff, &[]),
+            hardware(0x11, 0xffff, 0xffff, &[]),
+            hardware(0x40, 0xffff, 0xffff, &[]),
+        ];
+        for permutation in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let blocks = permutation.map(|index| versions[index].as_slice());
+            let raw = table(&blocks);
+            let parsed = Ivrs::parse(&raw, 3).unwrap();
+            let selected = parsed.units().next().unwrap();
+            assert_eq!(selected.version(), HardwareVersion::Type40);
+            assert_eq!(selected.raw(), versions[2]);
+            // Full original block order remains independent of cached selection.
+            for (block, expected) in parsed.hardware_blocks().zip(blocks) {
+                assert_eq!(block.raw(), expected);
+            }
+            for version in 0..3 {
+                let mut duplicate = blocks.to_vec();
+                duplicate.push(&versions[version]);
+                fail(&table(&duplicate), ErrorKind::DuplicateVersion);
+                let mut changed = versions[version].clone();
+                changed[8] ^= 0x10;
+                let mut inconsistent = blocks.to_vec();
+                inconsistent[permutation
+                    .iter()
+                    .position(|&index| index == version)
+                    .unwrap()] = &changed;
+                fail(&table(&inconsistent), ErrorKind::UnitIdentity);
+            }
+        }
+    }
+
+    #[test]
+    fn large_interleaved_index_preserves_selected_table_order_and_original_bytes() {
+        const UNITS: u16 = 2048;
+        let mut blocks = Vec::new();
+        // Firmware order deliberately disagrees with both identity and version
+        // sort order; the final cache must follow the selected record's offset.
+        for id in (0..UNITS).rev() {
+            blocks.push(hardware(0x11, id % 7, id, &[]));
+        }
+        for id in 0..UNITS {
+            blocks.push(hardware(0x40, id % 7, id, &[]));
+        }
+        for id in (0..UNITS).rev() {
+            blocks.push(hardware(0x10, id % 7, id, &[]));
+        }
+        let raw = table(&blocks.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        let original = raw.clone();
+        let parsed = Ivrs::parse(&raw, usize::from(UNITS) * 3).unwrap();
+        assert_eq!(parsed.hardware_blocks().count(), usize::from(UNITS) * 3);
+        for _ in 0..3 {
+            assert_eq!(parsed.units().len(), usize::from(UNITS));
+            for (id, unit) in parsed.units().enumerate() {
+                assert_eq!(unit.id().device_id, id as u16);
+                assert_eq!(unit.id().segment, id as u16 % 7);
+                assert_eq!(unit.version(), HardwareVersion::Type40);
+                assert_eq!(unit.raw().as_ptr(), raw[unit.offset()..].as_ptr());
+            }
+        }
+        assert_eq!(raw, original);
     }
 
     #[test]
@@ -685,7 +827,7 @@ mod tests {
         let mut raw = table(&[&high, &other_segment, &middle, &other_device, &first]);
         raw[36..40].copy_from_slice(&0x12345678u32.to_le_bytes());
         checksum(&mut raw);
-        let parsed = Ivrs::parse(&raw).unwrap();
+        let parsed = Ivrs::parse(&raw, usize::MAX).unwrap();
         assert_eq!(parsed.raw().as_ptr(), raw.as_ptr());
         assert_eq!((parsed.info(), parsed.revision()), (0x12345678, 2));
         assert_eq!(parsed.hardware_blocks().count(), 5);
@@ -745,7 +887,11 @@ mod tests {
         }
         entries.extend(entry(0x48, 0, 0x9a, Some(0x01fabc07)));
         let raw = table(&[&hardware(0x11, 0x4567, 8, &entries)]);
-        let unit = Ivrs::parse(&raw).unwrap().units().next().unwrap();
+        let unit = Ivrs::parse(&raw, usize::MAX)
+            .unwrap()
+            .units()
+            .next()
+            .unwrap();
         let decoded: Vec<_> = unit.entries().collect();
         let rid = |device_id| RequesterId {
             segment: 0x4567,
@@ -859,7 +1005,7 @@ mod tests {
         hid.extend_from_slice(b"COMPAT00");
         hid.extend_from_slice(&[2, 3, b'a', 0, b'b']);
         let raw = table(&[&hardware(0x40, 0x1234, 8, &hid)]);
-        let entry = Ivrs::parse(&raw)
+        let entry = Ivrs::parse(&raw, usize::MAX)
             .unwrap()
             .units()
             .next()
@@ -896,7 +1042,7 @@ mod tests {
         }
         hid[21] = 0;
         hid.truncate(HID_PREFIX);
-        assert!(Ivrs::parse(&table(&[&hardware(0x40, 0, 8, &hid)])).is_ok());
+        assert!(Ivrs::parse(&table(&[&hardware(0x40, 0, 8, &hid)]), usize::MAX).is_ok());
     }
 
     #[test]
@@ -915,7 +1061,10 @@ mod tests {
             blocks.push(block);
         }
         let raw = table(&blocks.iter().map(Vec::as_slice).collect::<Vec<_>>());
-        let memory: Vec<_> = Ivrs::parse(&raw).unwrap().memory_definitions().collect();
+        let memory: Vec<_> = Ivrs::parse(&raw, usize::MAX)
+            .unwrap()
+            .memory_definitions()
+            .collect();
         assert_eq!(memory.len(), 3);
         for item in &memory {
             assert_eq!(
@@ -942,7 +1091,7 @@ mod tests {
         put16(&mut extended, 2, (IVMD_HEADER + 2) as u16);
         let extension_table = table(&[&extended]);
         assert_eq!(
-            Ivrs::parse(&extension_table)
+            Ivrs::parse(&extension_table, usize::MAX)
                 .unwrap()
                 .memory_definitions()
                 .next()
