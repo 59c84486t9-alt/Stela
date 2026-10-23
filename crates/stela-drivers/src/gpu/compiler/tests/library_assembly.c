@@ -3,7 +3,7 @@
  * Original LLVM/MTLB fixtures are not Apple compiler output or a GPU reference.
  * Optional source mode consumes the retained genuine adapter result unchanged. */
 #include "../library_assembly.h"
-#include "../../../compiler/tests/air_test_fixture.h"
+#include "air_test_fixture.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <assert.h>
 #include <errno.h>

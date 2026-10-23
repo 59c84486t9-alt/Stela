@@ -82,14 +82,14 @@ endif
 
 stela_apple_source = static_library(
   'stela_apple_source',
-  '../metal/compiler/apple_source.c',
+  'apple_source.c',
   include_directories : llvm_include,
   dependencies : [dep_thread, dep_dl],
   c_args : ['-Wall', '-Wextra', '-Werror', '-Wconversion'],
 )
 stela_apple_source_test = executable(
   'stela_apple_source_test',
-  '../metal/compiler/tests/apple_source.c',
+  'tests/apple_source.c',
   link_with : stela_apple_source,
   dependencies : [dep_thread, dep_dl],
   c_args : ['-Wall', '-Wextra', '-Werror', '-Wconversion'],
@@ -99,12 +99,12 @@ test('stela_apple_source_boundary', stela_apple_source_test, suite : 'stela')
 # Value normalization owns no LLVM, NIR or driver state.
 stela_metal_threadgroup = static_library(
   'stela_metal_threadgroup',
-  '../metal/compiler/threadgroup.c',
+  'threadgroup.c',
   c_args : ['-Wall', '-Wextra', '-Werror', '-Wconversion'],
 )
 stela_metal_threadgroup_test = executable(
   'stela_metal_threadgroup_test',
-  '../metal/compiler/tests/threadgroup.c',
+  'tests/threadgroup.c',
   link_with : stela_metal_threadgroup,
   c_args : ['-Wall', '-Wextra', '-Werror', '-Wconversion'],
 )
@@ -155,7 +155,7 @@ if stela_air_llvm != ''
     endif
     stela_metal_assembly = static_library(
       'stela_metal_assembly',
-      '../metal/compiler/library_assembly.c',
+      'library_assembly.c',
       dependencies : [stela_air_llvm_dep],
       c_args : ['-Wall', '-Wextra', '-Werror', '-Wconversion'],
     )
@@ -163,7 +163,7 @@ if stela_air_llvm != ''
     # this local owner does not depend on NIR or any vendor compiler backend.
     stela_metal_assembly_test = executable(
       'stela_metal_assembly_test',
-      '../metal/compiler/tests/library_assembly.c',
+      'tests/library_assembly.c',
       dependencies : [stela_air_llvm_dep, dependency('appleframeworks', modules : ['CoreFoundation'])],
       link_with : [stela_metal_assembly, stela_air, stela_apple_source],
       link_args : [stela_metal_input, '-lresolv', '-liconv'],
@@ -179,7 +179,7 @@ if stela_air_llvm != ''
   )
   stela_metal_threadgroup_nir_test = executable(
     'stela_metal_threadgroup_nir_test',
-    '../metal/compiler/tests/threadgroup_nir.c',
+    'tests/threadgroup_nir.c',
     include_directories : [inc_include, inc_src, inc_gpu],
     dependencies : [idep_stela_air],
     link_with : stela_metal_threadgroup,

@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_INTEL_AIR_COMPILE_H
 #define STELA_INTEL_AIR_COMPILE_H
-#include "../../../metal/compiler/library_assembly.h"
+#include "../../../compiler/library_assembly.h"
 #include "compiler/air_to_nir.h"
-#include "../../../metal/compiler/threadgroup.h"
+#include "../../../compiler/threadgroup.h"
 #include "intel/compiler/brw/brw_compiler.h"
 #include "intel/compiler/elk/elk_compiler.h"
 #include "intel/dev/intel_debug.h"

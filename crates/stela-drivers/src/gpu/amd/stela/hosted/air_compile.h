@@ -3,9 +3,9 @@
 #define STELA_AMD_AIR_COMPILE_H
 
 #include "compute.h"
-#include "../../../metal/compiler/library_assembly.h"
+#include "../../../compiler/library_assembly.h"
 #include "compiler/air_to_nir.h"
-#include "../../../metal/compiler/threadgroup.h"
+#include "../../../compiler/threadgroup.h"
 #include "amd/common/ac_gpu_info.h"
 
 #ifdef __cplusplus

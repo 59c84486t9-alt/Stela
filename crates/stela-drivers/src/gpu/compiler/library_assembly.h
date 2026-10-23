@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_METAL_LIBRARY_ASSEMBLY_H
 #define STELA_METAL_LIBRARY_ASSEMBLY_H
-#include "../macos/library_manifest.h"
+#include "../metal/macos/library_manifest.h"
 #ifdef __cplusplus
 extern "C" {
 #endif

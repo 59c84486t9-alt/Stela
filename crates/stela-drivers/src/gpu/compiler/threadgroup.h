@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_METAL_THREADGROUP_H
 #define STELA_METAL_THREADGROUP_H
-#include "../../compiler/air_metadata.h"
+#include "air_metadata.h"
 #include <stdbool.h>
 #include <stdint.h>
 #ifdef __cplusplus
