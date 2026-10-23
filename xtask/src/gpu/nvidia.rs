@@ -131,7 +131,7 @@ fn inspect(path: &Path) -> Result<(u64, String, BTreeSet<String>)> {
 }
 
 /// NVIDIA's open modules (`third_party/nvidia`) and Stela's port of them
-/// (`gpu/nvidia`, whose C is in `stela/`), named together as one tree.
+/// (`gpu/nvidia`), named together as one tree.
 pub(super) struct Sources {
     upstream: PathBuf,
     port: PathBuf,
@@ -145,9 +145,11 @@ impl Sources {
         }
     }
 
-    /// `stela/...` is the port's C; every other path is NVIDIA's.
+    /// `port/...` is Stela's port; every other path is NVIDIA's.
     pub(super) fn join(&self, path: &str) -> PathBuf {
-        if path == "stela" || path.starts_with("stela/") {
+        if path == "port" {
+            self.port.clone()
+        } else if let Some(path) = path.strip_prefix("port/") {
             self.port.join(path)
         } else {
             self.upstream.join(path)
@@ -168,7 +170,7 @@ impl Sources {
 /// NVIDIA's FreeBSD interface layer includes a few FreeBSD kernel headers;
 /// Stela's stand-ins apply only where the compiler's own system has none.
 fn freebsd_headers(command: &mut Command, source: &Sources) {
-    command.arg("-idirafter").arg(source.join("stela/compat"));
+    command.arg("-idirafter").arg(source.join("port/compat"));
 }
 
 pub fn build(jobs: u16, target: Target) -> Result<()> {
@@ -223,7 +225,7 @@ pub fn build(jobs: u16, target: Target) -> Result<()> {
         let output = build.join(component);
         fs::create_dir_all(&output)?;
         let source_directory = source.join(subdirectory);
-        let port = source.join("stela");
+        let port = source.join("port");
         if component == "modeset" {
             prepare_shaders(&source_directory, &output)?;
         }
@@ -367,7 +369,7 @@ mod tests {
                     .args(["-target", target, os, "-ffreestanding"])
                     .args([standard, "-fsyntax-only", "-Werror"])
                     .args(["-Wno-missing-field-initializers"])
-                    .arg(source.join("stela/tests").join(fixture));
+                    .arg(source.join("port/tests").join(fixture));
                 for include in [
                     "src/common/sdk/nvidia/inc",
                     "src/nvidia/inc/kernel",

@@ -10,7 +10,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
     let objdump = tools::which("llvm-objdump")
         .or_else(crate::dit::toolchain_objdump)
         .context("original ordering inspection requires llvm-objdump")?;
-    let fixture = source.join("stela/tests/ordering.c");
+    let fixture = source.join("port/tests/ordering.c");
     let mut profiles = Vec::new();
     for target in [NATIVE_TARGET, "x86_64-apple-macosx"] {
         let artifact = output.join(format!("{target}.o"));
@@ -30,7 +30,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
             "-Werror",
         ]);
         for include in [
-            "stela",
+            "port",
             "src/common/sdk/nvidia/inc",
             "src/nvidia/arch/nvalloc/unix/include",
             "src/common/inc",
@@ -107,7 +107,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
         output.join("receipt.json"),
         serde_json::to_vec_pretty(&json!({
             "scope":"Three ABI compile/IR/actual emitted-binary inspection only; no hardware or fence execution",
-            "adapter":tools::binding(&source.join("stela/stela_ordering.c"))?,
+            "adapter":tools::binding(&source.join("port/stela_ordering.c"))?,
             "fixture":tools::binding(&fixture)?,"objdump":tools::binding(&objdump)?,"profiles":profiles,
         }))?,
     )?;

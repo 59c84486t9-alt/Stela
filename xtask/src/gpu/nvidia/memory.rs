@@ -17,7 +17,7 @@ fn nvlink_preserves_full_lengths_and_refuses_common_heap_failures() {
     let mut compiler = Command::new(tools::which("clang").unwrap());
     compiler.args(["-std=gnu11", "-DNV_BSD", "-Wall", "-Wextra", "-Werror"]);
     for include in [
-        "stela",
+        "port",
         "src/common/nvlink/interface",
         "src/common/sdk/nvidia/inc",
         "src/common/inc",
@@ -26,8 +26,8 @@ fn nvlink_preserves_full_lengths_and_refuses_common_heap_failures() {
     }
     super::freebsd_headers(&mut compiler, &source);
     compiler
-        .arg(source.join("stela/stela_nvlink_memory.c"))
-        .arg(source.join("stela/tests/nvlink_memory.c"))
+        .arg(source.join("port/stela_nvlink_memory.c"))
+        .arg(source.join("port/tests/nvlink_memory.c"))
         .arg("-o")
         .arg(&binary);
     capture(&mut compiler).unwrap();
@@ -46,16 +46,16 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
         output,
         &flags,
         &[
-            ("stela/tests/nvkms_memory.c", &[]),
+            ("port/tests/nvkms_memory.c", &[]),
             (
-                "stela/stela_nvkms_memory.c",
+                "port/stela_nvkms_memory.c",
                 &[
                     "-Dstela_nvidia_alloc=stela_nvkms_model_alloc",
                     "-Dstela_nvidia_free=stela_nvkms_model_free",
                     "-Dnvkms_memset=stela_nvkms_model_zero",
                 ],
             ),
-            ("stela/stela_nvkms_primitives.c", &[]),
+            ("port/stela_nvkms_primitives.c", &[]),
         ],
     )?);
     #[cfg(not(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux"))))]

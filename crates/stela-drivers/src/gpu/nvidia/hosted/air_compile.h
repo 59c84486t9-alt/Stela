@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_NVIDIA_AIR_COMPILE_H
 #define STELA_NVIDIA_AIR_COMPILE_H
-#include "../../../compiler/library_assembly.h"
+#include "../../compiler/library_assembly.h"
 #include "compiler/air_to_nir.h"
-#include "../../../compiler/threadgroup.h"
+#include "../../compiler/threadgroup.h"
 #include "compiler/nvidia_compute.h"
 #ifdef __cplusplus
 extern "C" {

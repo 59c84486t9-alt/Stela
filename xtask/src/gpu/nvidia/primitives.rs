@@ -6,8 +6,8 @@ use std::{fs, path::Path, process::Command};
 
 pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()> {
     fs::create_dir_all(output)?;
-    let adapter = source.join("stela/stela_nvswitch_primitives.c");
-    let fixture = source.join("stela/tests/nvswitch_primitives.c");
+    let adapter = source.join("port/stela_nvswitch_primitives.c");
+    let fixture = source.join("port/tests/nvswitch_primitives.c");
     let mut models = Vec::new();
     for sanitize in [false, true] {
         for forward in [false, true] {
@@ -33,7 +33,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
                     "-O2",
                 ]);
                 for include in [
-                    "stela",
+                    "port",
                     "src/common/sdk/nvidia/inc",
                     "src/nvidia/arch/nvalloc/unix/include",
                     "src/nvidia/inc/kernel",

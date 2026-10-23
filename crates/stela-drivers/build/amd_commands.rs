@@ -84,7 +84,7 @@ pub fn build() {
     println!("cargo:rustc-link-lib=static=amd_common");
     // The command tests' immutable radeon_info fixture; only cfg(test) links it.
     cc::Build::new()
-        .file(manifest.join("src/gpu/amd/stela/tests/commands_fixture.c"))
+        .file(manifest.join("src/gpu/amd/tests/commands_fixture.c"))
         .include(source.join("include"))
         .include(source.join("src"))
         .include(build.join("subprojects/mesa/src"))
@@ -97,7 +97,7 @@ pub fn build() {
         "cargo:rustc-link-search=native={}",
         env::var("OUT_DIR").expect("Cargo supplies OUT_DIR")
     );
-    println!("cargo:rerun-if-changed=src/gpu/amd/stela/tests/commands_fixture.c");
+    println!("cargo:rerun-if-changed=src/gpu/amd/tests/commands_fixture.c");
     println!("cargo:rerun-if-changed={}", source.display());
     println!(
         "cargo:rerun-if-changed={}",

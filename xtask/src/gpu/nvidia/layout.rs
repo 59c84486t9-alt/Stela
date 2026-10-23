@@ -31,7 +31,7 @@ pub(super) fn constants(object: &object::File<'_>, name: &str, count: usize) -> 
 
 pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()> {
     fs::create_dir_all(output)?;
-    let fixture = source.join("stela/tests/record_layout.c");
+    let fixture = source.join("port/tests/record_layout.c");
     let text = fs::read_to_string(&fixture)?;
     let labels: Vec<_> = text
         .lines()
@@ -83,7 +83,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
             command.args(&core_defines);
         }
         for include in [
-            "stela",
+            "port",
             "src/common/sdk/nvidia/inc",
             "src/nvidia/arch/nvalloc/unix/include",
             "src/nvidia/arch/nvalloc/common/inc",

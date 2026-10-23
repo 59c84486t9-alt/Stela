@@ -10,7 +10,7 @@ const AMDGPU: Module = Module {
 /// `amdgpu_drv.c` and `amdgpu_discovery.c`, and Stela's BAR policy, all in
 /// Stela's Linux environment with amdgpu's Kbuild include directories.
 pub fn port(linux: &Linux, tests: &mut Tests) {
-    const FIXTURES: &str = "src/gpu/amd/stela/tests/fixtures.c";
+    const FIXTURES: &str = "src/gpu/amd/tests/fixtures.c";
     let configure = |mut build: cc::Build| {
         linux.apply(
             &mut build,
@@ -34,7 +34,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
         );
         build
     };
-    let adapters = native::sources("src/gpu/amd/stela");
+    let adapters = native::sources("src/gpu/amd");
     let port = configure(native::configure());
     native::check_declarations(&port, &adapters);
     port.clone().files(&adapters).compile("stela-amd-port");
@@ -43,7 +43,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
         .file(FIXTURES)
         .cargo_metadata(false)
         .compile("stela-amd-test-fixtures");
-    println!("cargo:rerun-if-changed=src/gpu/amd/stela/tests");
+    println!("cargo:rerun-if-changed=src/gpu/amd/tests");
     let Some(hosted) = native::hosted() else {
         return;
     };
@@ -53,7 +53,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
     let mut archives = vec![adapters.as_path(), fixtures.as_path()];
     archives.extend(linux.hosted.iter().map(|archive| archive.as_path()));
     for name in ["ip_discovery", "native_bar", "pci_match"] {
-        let source = format!("src/gpu/amd/stela/tests/{name}.c");
+        let source = format!("src/gpu/amd/tests/{name}.c");
         tests.add(&hosted, &format!("amd_{name}"), &source, &archives);
     }
 }

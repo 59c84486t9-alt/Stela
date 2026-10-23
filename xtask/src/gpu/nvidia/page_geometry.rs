@@ -42,8 +42,8 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
     }
     let header = output.join("page_geometry_accessors.h");
     fs::write(&header, accessors)?;
-    let adapter = source.join("stela/stela_page_geometry.c");
-    let fixture = source.join("stela/tests/page_geometry.c");
+    let adapter = source.join("port/stela_page_geometry.c");
+    let fixture = source.join("port/tests/page_geometry.c");
     let mut processes = Vec::new();
     for sanitized in [false, true] {
         let binary = output.join(if sanitized { "sanitized" } else { "normal" });
@@ -60,7 +60,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
             "-O2",
         ]);
         for include in [
-            "stela",
+            "port",
             "src/common/sdk/nvidia/inc",
             "src/nvidia/arch/nvalloc/unix/include",
             "src/nvidia/inc/kernel",

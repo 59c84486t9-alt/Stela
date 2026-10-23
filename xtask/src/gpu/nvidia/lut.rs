@@ -58,7 +58,7 @@ pub(super) fn flags(clang: &Path, source: &Sources, output: &Path) -> Result<Fla
 pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()> {
     fs::create_dir_all(output)?;
     let flags = flags(clang, source, output)?;
-    let fixture = source.join("stela/tests/lut_layout.c");
+    let fixture = source.join("port/tests/lut_layout.c");
     let mut profiles = Vec::new();
     for (profile, target, linux) in [
         ("native", NATIVE_TARGET, false),
@@ -108,9 +108,9 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
         output,
         &flags,
         &[
-            ("stela/tests/lut_access.c", &[]),
+            ("port/tests/lut_access.c", &[]),
             ("src/nvidia-modeset/src/nvkms-lut.c", &[]),
-            ("stela/stela_nvkms_primitives.c", &[]),
+            ("port/stela_nvkms_primitives.c", &[]),
         ],
     )?);
     #[cfg(not(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux"))))]
@@ -170,9 +170,9 @@ pub(super) fn cpu_model(
                 "-fno-inline",
                 "-I",
             ])
-            .arg(source.join("stela"))
+            .arg(source.join("port"))
             .arg("-idirafter")
-            .arg(source.join("stela/compat"))
+            .arg(source.join("port/compat"))
             // The fixtures include the original NVKMS sources they model.
             .arg("-iquote")
             .arg(source.join("src/nvidia-modeset/src"))
@@ -196,7 +196,7 @@ pub(super) fn cpu_model(
         "-C",
         "opt-level=2",
     ])
-    .arg(source.join("stela/tests/lut_heap.rs"))
+    .arg(source.join("port/tests/lut_heap.rs"))
     .arg("-o")
     .arg(&heap);
     capture(&mut rust)?;

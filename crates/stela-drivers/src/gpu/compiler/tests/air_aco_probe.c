@@ -15,7 +15,7 @@
 #include "amd/llvm/ac_llvm_util.h"
 #endif
 #include "util/ralloc.h"
-#include "../../amd/stela/tests/air_probe_input.h"
+#include "../../amd/tests/air_probe_input.h"
 
 #define CHECK(condition) do { if (!(condition)) { \
    fprintf(stderr, "%s:%u: %s\n", __func__, __LINE__, #condition); exit(1); \

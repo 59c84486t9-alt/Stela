@@ -81,17 +81,16 @@ struct Builds {
 
 impl Builds {
     fn new(linux: &Linux, base: &cc::Build, generated: &Path, dispatch: &Path) -> Self {
-        let stela = format!("{SOURCE}/stela");
         let mut xe = base.clone();
         linux.apply(&mut xe, Some(generated), &["xe"], Some(&XE));
-        xe.include(&stela);
+        xe.include(SOURCE);
         let mut i915 = base.clone();
         linux.apply(&mut i915, None, &["i915"], Some(&I915));
-        i915.define("I915", None).include(&stela);
+        i915.define("I915", None).include(SOURCE);
         let mut encoders = base.clone();
         encoders
             .include(dispatch)
-            .include(&stela)
+            .include(SOURCE)
             .include(format!("{}/include", native::MESA))
             .include(format!("{}/src", native::MESA))
             .include(GENXML);
@@ -105,7 +104,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
     let generated = output.join("intel-generated");
     workarounds(&generated);
     let dispatch = output.join("intel-dispatch");
-    let (mut encoders, adapters): (Vec<_>, Vec<_>) = native::sources(&format!("{SOURCE}/stela"))
+    let (mut encoders, adapters): (Vec<_>, Vec<_>) = native::sources(SOURCE)
         .into_iter()
         .partition(|path| named(path, &ENCODERS));
     let (i915, xe): (Vec<_>, Vec<_>) = adapters
@@ -116,7 +115,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
     // Mesa's packing helpers include a few C library headers, which the
     // freestanding encoders take from Stela.
     port.encoders
-        .include(format!("{SOURCE}/stela/freestanding"))
+        .include(format!("{SOURCE}/freestanding"))
         .define("HAVE_ENDIAN_H", None);
     native::check_declarations(&port.xe, &xe);
     native::check_declarations(&port.i915, &i915);
@@ -138,10 +137,10 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
     archives.extend(linux.hosted.iter().cloned());
     let archives = archives.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let mut host = base.clone();
-    host.include(format!("{SOURCE}/stela"));
+    host.include(SOURCE);
     for (build, names) in [(&hosted.xe, &LINUX_TESTS[..]), (&host, &HOST_TESTS[..])] {
         for name in names {
-            let source = format!("{SOURCE}/stela/tests/{name}.c");
+            let source = format!("{SOURCE}/tests/{name}.c");
             tests.add(build, &format!("intel_{name}"), &source, &archives);
         }
     }
@@ -171,7 +170,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
     }
     for (name, generations) in PACKERS {
         for generation in generations {
-            let source = format!("{SOURCE}/stela/tests/{name}_mesa.c");
+            let source = format!("{SOURCE}/tests/{name}_mesa.c");
             let test = format!("intel_{name}_mesa_{generation}");
             let mut build = mesa.clone();
             build.define("GFX_VERx10", generation.to_string().as_str());
@@ -233,7 +232,7 @@ fn packets(python: &Path, output: &Path) -> Vec<PathBuf> {
                     .args(["--include-symbols", symbols]),
                 &output.join(format!("gen{generation}_{family}_pack.h")),
             );
-            PathBuf::from(format!("{SOURCE}/stela/dispatch/{unit}{generation}.c"))
+            PathBuf::from(format!("{SOURCE}/dispatch/{unit}{generation}.c"))
         })
         .collect()
 }

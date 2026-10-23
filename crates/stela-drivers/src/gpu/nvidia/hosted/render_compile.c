@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "render_compile.h"
-#include "../../../compiler/library_assembly.h"
+#include "../../compiler/library_assembly.h"
 #include "air_compile.h" /* Reuse the existing immutable resource-view record. */
 #include "nouveau/compiler/nak_private.h"
 #include "nouveau/headers/nvidia/classes/cla097.h"

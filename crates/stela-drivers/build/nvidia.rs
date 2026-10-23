@@ -6,7 +6,7 @@ use std::fs;
 pub fn port() {
     native::require_sources();
     let source = native::NVIDIA;
-    let port = "src/gpu/nvidia/stela";
+    let port = "src/gpu/nvidia";
     let version_mk = format!("{source}/version.mk");
     let version = fs::read_to_string(&version_mk).expect("read NVIDIA version.mk");
     let version = version
