@@ -17,7 +17,7 @@ Subject: [PATCH] meson: build Stela's shader compiler libraries without API
  9 files changed, 39 insertions(+), 12 deletions(-)
 
 diff --git a/meson.build b/meson.build
-index a864ed0b23cdb0c4853e68432cdfdb6fcdd519c2..8b09d58a5b6e0ab2f78e7592c6f238584a94d5b9 100644
+index 5f19ef921a6c762d25fda834ff02c95715ad62b2..89f46db0b1c66f847d02b0d4866fdd64039c35c1 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -39,6 +39,12 @@ sizeof_pointer = cc.sizeof('void*').to_string()

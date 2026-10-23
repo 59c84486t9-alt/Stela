@@ -1,6 +1,7 @@
-# Selected GPU drivers, shared DRM helpers and kernel headers; not a buildable
-# kernel tree. netfilter's headers differ only in case, which a
+# Selected GPU drivers, shared DRM helpers, ACPICA and kernel headers; not a
+# buildable kernel tree. netfilter's headers differ only in case, which a
 # case-insensitive file system cannot check out.
+/drivers/acpi/acpica/
 /drivers/gpu/drm/amd/
 /drivers/gpu/drm/i915/
 /drivers/gpu/drm/xe/

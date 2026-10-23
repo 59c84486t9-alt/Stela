@@ -1,5 +1,14 @@
-//! Build the pinned freestanding ACPICA implementation only when requested.
-use std::{env, fs, path::PathBuf, process::Command};
+//! Build the pinned freestanding ACPICA implementation only when requested,
+//! from Linux's unchanged `drivers/acpi/acpica` with Stela's host header.
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+/// ACPICA's interpreter in the Linux submodule, and the headers it shares.
+const ACPICA: &str = "../../third_party/linux/drivers/acpi/acpica";
+const HEADERS: &str = "../../third_party/linux/include/acpi";
 
 fn run(command: &mut Command) {
     let status = command.status().expect("execute ACPICA tool");
@@ -15,9 +24,15 @@ pub fn build() {
         return;
     }
     let base = PathBuf::from("src/platform/acpi");
-    for name in ["vendor", "bridge.c", "bridge.h", "libc.c"] {
+    assert!(
+        Path::new(ACPICA).is_dir(),
+        "{ACPICA} is missing; run `cargo xtask gpu fetch`"
+    );
+    for name in ["include", "bridge.c", "bridge.h", "libc.c"] {
         println!("cargo:rerun-if-changed={}", base.join(name).display());
     }
+    println!("cargo:rerun-if-changed={ACPICA}");
+    println!("cargo:rerun-if-changed={HEADERS}");
     let target = env::var("TARGET").unwrap();
     assert!(target.starts_with("x86_64-"), "native ACPI requires x86-64");
     let coff = target == "x86_64-unknown-uefi";
@@ -29,6 +44,14 @@ pub fn build() {
         &target
     };
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    // ACPICA includes `acpi/...`; this root exposes Linux's `include/acpi`
+    // alone, so no other Linux header can stand in for a C library one.
+    let headers = out.join("acpica-include");
+    fs::create_dir_all(&headers).unwrap();
+    let link = headers.join("acpi");
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink(fs::canonicalize(HEADERS).unwrap(), &link)
+        .expect("link ACPICA's headers");
     let compiler = env::var_os("CC").unwrap_or_else(|| "clang".into());
     let archiver = env::var_os("AR").unwrap_or_else(|| {
         let output = Command::new(env::var_os("RUSTC").unwrap())
@@ -42,7 +65,8 @@ pub fn build() {
             .join("bin/llvm-ar")
             .into_os_string()
     });
-    let mut sources: Vec<_> = fs::read_dir(base.join("vendor/core"))
+    // The debugger and resource dump are outside the configured interpreter.
+    let mut sources: Vec<_> = fs::read_dir(ACPICA)
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "c"))
@@ -82,9 +106,11 @@ pub fn build() {
                 "-Werror=implicit-function-declaration",
             ])
             .arg("-I")
-            .arg(base.join("vendor/include"))
+            .arg(&headers)
             .arg("-I")
-            .arg(base.join("vendor/core"))
+            .arg(ACPICA)
+            .arg("-I")
+            .arg(base.join("include"))
             .arg("-I")
             .arg(&base);
         if target == "x86_64-apple-darwin" {

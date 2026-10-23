@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 01:03:52 -0400
+Subject: [PATCH] ACPICA: select Stela's freestanding environment
+
+---
+ include/acpi/platform/acenv.h   | 7 +++++--
+ include/acpi/platform/acenvex.h | 6 ++++--
+ 2 files changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/include/acpi/platform/acenv.h b/include/acpi/platform/acenv.h
+index 1c66cfeeea35f70e15edd3b4c323dce911667933..cc2ad264fa66939f66f01025e9008f06da0ee789 100644
+--- a/include/acpi/platform/acenv.h
++++ b/include/acpi/platform/acenv.h
+@@ -148,7 +148,7 @@
+  *
+  *****************************************************************************/
+ 
+-#if defined(__GNUC__)
++#if defined(STELA_ACPI) || defined(__GNUC__)
+ #include <acpi/platform/acgcc.h>
+ 
+ #elif defined(_MSC_VER)
+@@ -156,7 +156,10 @@
+ 
+ #endif
+ 
+-#if defined(_LINUX) || defined(__linux__)
++#if defined(STELA_ACPI)
++#include "acstela.h"
++
++#elif defined(_LINUX) || defined(__linux__)
+ #include <acpi/platform/aclinux.h>
+ 
+ #elif defined(_APPLE) || defined(__APPLE__)
+diff --git a/include/acpi/platform/acenvex.h b/include/acpi/platform/acenvex.h
+index f7797ca6312d757efe2adf68eb4077cad3095422..43db76f8a99e070d2771c501dfadc3ccad25338d 100644
+--- a/include/acpi/platform/acenvex.h
++++ b/include/acpi/platform/acenvex.h
+@@ -19,7 +19,9 @@
+  *
+  *****************************************************************************/
+ 
+-#if defined(_LINUX) || defined(__linux__)
++#if defined(STELA_ACPI)
++/* Stela needs no extra host headers. */
++#elif defined(_LINUX) || defined(__linux__)
+ #include <acpi/platform/aclinuxex.h>
+ 
+ #elif defined(__DragonFly__)
+@@ -35,7 +37,7 @@
+ 
+ #endif
+ 
+-#if defined(__GNUC__)
++#if defined(STELA_ACPI) || defined(__GNUC__)
+ #include "acgccex.h"
+ 
+ #elif defined(_MSC_VER)
