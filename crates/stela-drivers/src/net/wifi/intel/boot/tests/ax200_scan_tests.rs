@@ -112,7 +112,9 @@ fn exercise(actual: bool) {
         }
         if case == 3 {
             let mut r = domain.records.lock().unwrap();
-            r.sync_fail = Some(r.syncs + 2);
+            // 8-byte wide header + 12-byte body fits the exact 20-byte TB0:
+            // no remainder allocation. TB0 is sync N, descriptor is N+1.
+            r.sync_fail = Some(r.syncs + 1);
         }
         let bell_before = state.lock().unwrap().registers[&0x460];
         let result = unsafe { scan.advance(&source) };
@@ -133,10 +135,22 @@ fn exercise(actual: bool) {
                 Err(Ax200ScanConfigurationError::Boot(Error::RfKilled))
             );
         } else if case == 3 {
-            assert!(matches!(
+            assert_eq!(
                 result,
-                Err(Ax200ScanConfigurationError::Boot(Error::Dma(_)))
-            ));
+                Err(Ax200ScanConfigurationError::Boot(Error::Dma(
+                    dma::Error::Dma(crate::bus::dma::mapping::DmaError::VisibilityFailed)
+                )))
+            );
+            let records = domain.records.lock().unwrap();
+            assert_eq!(records.sync_fail, Some(records.syncs - 1));
+            drop(records);
+            // The original transport retained its pending command before the
+            // uncertain descriptor store; no producer doorbell was issued.
+            assert_eq!(
+                scan.mcc.setup.lari.radio.initialized.boot.state,
+                State::Poisoned
+            );
+            assert_eq!(state.lock().unwrap().registers[&0x460], bell_before);
         } else {
             assert_eq!(result.unwrap(), Ax200ScanConfigurationPhase::Waiting);
             assert_eq!(
