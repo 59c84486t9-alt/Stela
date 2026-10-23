@@ -3,7 +3,12 @@
 use super::*;
 mod ordinary;
 mod queue;
-pub use ordinary::TransferTicket;
+pub use ordinary::{TransferCancellation, TransferTicket};
+const BABBLE_DETECTED: u32 = 3;
+const USB_TRANSACTION_ERROR: u32 = 4;
+const SPLIT_TRANSACTION_ERROR: u32 = 36;
+const STOPPED_TRANSFER: u32 = 26;
+const STOPPED_SHORT_PACKET: u32 = 28;
 const INCOMPATIBLE_DEVICE: u32 = 22;
 const EVENT_DATA: u32 = 1 << 2;
 pub(super) use queue::Queue;
@@ -45,6 +50,15 @@ impl Controller {
         {
             return Err(BlockError::Unsupported(
                 "stream endpoint requires cancellation",
+            ));
+        }
+        if endpoint
+            .iso
+            .as_ref()
+            .is_some_and(iso::Queue::requires_cancellation)
+        {
+            return Err(BlockError::Unsupported(
+                "isochronous endpoint requires cancellation",
             ));
         }
         Ok(())
@@ -378,6 +392,10 @@ impl Controller {
     }
 
     pub(super) fn cancel_inner(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
+        self.cancel_observed(slot, dci).map(|_| ())
+    }
+
+    fn cancel_observed(&mut self, slot: u8, dci: u8) -> Result<Vec<Event>, BlockError> {
         if !(1..32).contains(&dci) {
             return Err(BlockError::Unsupported("cancel requires a valid endpoint"));
         }
@@ -404,7 +422,7 @@ impl Controller {
                 & 7)
         };
         let mut current = state(self)?;
-        let clear_tt = self.slot(slot)?.endpoints[usize::from(dci)]
+        let mut clear_tt = self.slot(slot)?.endpoints[usize::from(dci)]
             .as_ref()
             .unwrap()
             .ring
@@ -425,6 +443,7 @@ impl Controller {
             current = state(self)?;
         }
         if current == ENDPOINT_HALTED {
+            clear_tt |= dci != 1;
             // Halted.
             self.command(0, 0, RESET_ENDPOINT << 10 | target)?;
             current = state(self)?;
@@ -450,8 +469,32 @@ impl Controller {
         // Stop/Set Dequeue completion acknowledges abandonment. Drain also takes
         // stale transfer events posted while those commands were executing.
         self.drain();
+        if self.pending.iter().any(|event| {
+            event.kind() == TRANSFER_EVENT
+                && event.slot() == slot
+                && event.endpoint() == dci
+                && event.code() == INCOMPATIBLE_DEVICE
+        }) {
+            // Stop/SetDequeue is not the required Disable Slot recovery.
+            // Preserve poison and all records even if those commands ACKed.
+            return Err(BlockError::Device {
+                status: INCOMPATIBLE_DEVICE,
+            });
+        }
+        let mut observed = Vec::new();
         self.pending.retain(|event| {
-            !(event.kind() == TRANSFER_EVENT && event.slot() == slot && event.endpoint() == dci)
+            if event.kind() == TRANSFER_EVENT && event.slot() == slot && event.endpoint() == dci {
+                observed.push(*event);
+                false
+            } else {
+                true
+            }
+        });
+        clear_tt |= observed.iter().any(|event| {
+            matches!(
+                event.code(),
+                BABBLE_DETECTED | USB_TRANSACTION_ERROR | SPLIT_TRANSACTION_ERROR
+            ) || event.code() == STALL && dci != 1
         });
         // A failed split control/bulk transaction may leave the external
         // high-speed hub's TT occupied even after xHC DMA has retired. Only
@@ -471,7 +514,7 @@ impl Controller {
         endpoint.ring.normal.cancelled();
         endpoint.poisoned = false;
         endpoint.in_flight = 0;
-        Ok(())
+        Ok(observed)
     }
 
     /// Resets the host side of an endpoint a transaction error halted; the

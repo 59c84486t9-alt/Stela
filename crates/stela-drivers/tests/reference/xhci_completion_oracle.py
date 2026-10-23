@@ -75,17 +75,17 @@ static void finish_td(struct xhci_hcd *x, struct xhci_virt_ep *e,
 '''
 macros = "\n".join(macro(name) for name in [
     "COMP_CODE_MASK", "GET_COMP_CODE", "EVENT_TRB_LEN", "TRB_LEN", "COMP_SUCCESS",
-    "COMP_SHORT_PACKET", "COMP_STOPPED_SHORT_PACKET", "COMP_STOPPED_LENGTH_INVALID",
+    "COMP_SHORT_PACKET", "COMP_STOPPED", "COMP_STOPPED_SHORT_PACKET", "COMP_STOPPED_LENGTH_INVALID",
     "COMP_USB_TRANSACTION_ERROR", "XHCI_NO_SOFT_RETRY", "MAX_SOFT_RETRY",
     "TT_SLOT",
 ])
 reset_type = re.search(r"enum xhci_ep_reset_type \{[^}]+\};", text["xhci.h"])
 assert reset_type
-main = r''' 
+main = r'''
 int main(void) {
     unsigned sizes[] = {0, 1, 16, 64, 512, 4096, 65536};
-    unsigned codes[] = {COMP_SUCCESS, COMP_SHORT_PACKET};
-    for (unsigned c=0; c<2; c++) for (unsigned s=0; s<7; s++) {
+    unsigned codes[] = {COMP_SUCCESS, COMP_SHORT_PACKET, COMP_STOPPED, COMP_STOPPED_SHORT_PACKET};
+    for (unsigned c=0; c<4; c++) for (unsigned s=0; s<7; s++) {
         unsigned length=sizes[s];
         for (unsigned residual=0; residual<=length; residual++) {
             struct xhci_hcd x = { .quirks=XHCI_NO_SOFT_RETRY };
@@ -95,8 +95,9 @@ int main(void) {
             struct xhci_td td = { .urb=&urb, .end_trb=&trb, .status=-123 };
             struct xhci_transfer_event event = { .transfer_len=codes[c]<<24 | residual };
             process_bulk_intr_td(&x,&ep,&ring,&td,&trb,&event);
-            assert(urb.actual_length == length-residual && td.status == 0);
-            printf("B %u %u %u %u\n",codes[c],length,residual,urb.actual_length);
+            assert(urb.actual_length == (c==3 ? residual : length-residual));
+            assert(td.status == (c<2 ? 0 : -123));
+            printf("%c %u %u %u %u\n",c<2 ? 'B' : 'C',codes[c],length,residual,urb.actual_length);
         }
     }
 }
@@ -113,5 +114,5 @@ with (out / "trace.txt").open("w") as stream:
 (out / "manifest.json").write_text(json.dumps({
     "revision": "a804c5742bff224d4cb4d25dd383554d598be32b", "donors": expected,
     "function": name, "sha256": hashlib.sha256(body.encode()).hexdigest(),
-    "compiler": compiler, "scope": "one-TRB success/short byte accounting only",
+    "compiler": compiler, "scope": "one-TRB success/short/stopped byte accounting only",
 }, indent=2) + "\n")

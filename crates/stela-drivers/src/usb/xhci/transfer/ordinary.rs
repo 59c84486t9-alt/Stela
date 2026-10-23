@@ -14,6 +14,51 @@ pub struct TransferTicket {
     trb: u64,
 }
 
+/// An observed receive boundary after acknowledged endpoint cancellation.
+/// Every variant means the endpoint's TDs retired; Unknown supplies no byte
+/// count and must not be treated as zero bytes or a complete protocol packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferCancellation {
+    Completed(usize),
+    Stopped(usize),
+    Unknown,
+}
+
+impl TransferCancellation {
+    fn observed(
+        length: usize,
+        cached: Option<Result<usize, BlockError>>,
+        trb: u64,
+        events: &[Event],
+    ) -> Self {
+        let mut matching = events.iter().filter(|event| event.parameter == trb);
+        let event = matching.next();
+        if matching.next().is_some() {
+            return Self::Unknown;
+        }
+        if let Some(done) = cached {
+            return match (done, event) {
+                (Ok(bytes), None) => Self::Completed(bytes),
+                _ => Self::Unknown,
+            };
+        }
+        let Some(event) = event else {
+            return Self::Unknown;
+        };
+        if event.control & EVENT_DATA != 0 || event.residual() > length {
+            return Self::Unknown;
+        }
+        match event.code() {
+            SUCCESS | SHORT_PACKET => Self::Completed(length - event.residual()),
+            // Linux process_bulk_intr_td: Stopped uses bytes remaining,
+            // whereas Stopped Short Packet's field already holds actual bytes.
+            STOPPED_TRANSFER => Self::Stopped(length - event.residual()),
+            STOPPED_SHORT_PACKET => Self::Stopped(event.residual()),
+            _ => Self::Unknown,
+        }
+    }
+}
+
 impl TransferTicket {
     pub(in crate::usb::xhci) fn hardware_slot(&self) -> u8 {
         self.slot
@@ -156,6 +201,33 @@ impl Controller {
             endpoint.in_flight -= 1;
         }
         done
+    }
+
+    /// Cancels this endpoint's complete queue and preserves the requested
+    /// ordinary TD's observed receive boundary, including completions racing
+    /// Stop Endpoint. Other endpoint tickets become stale. Only exact retained
+    /// generation identity authorizes the operation; no raw address assertion
+    /// can recover a forgotten ticket. Err retains cancellation uncertainty.
+    pub fn cancel_ticket(
+        &mut self,
+        ticket: &TransferTicket,
+    ) -> Result<TransferCancellation, BlockError> {
+        self.live_slot(ticket.hardware_slot())?;
+        let queue = &self.slot(ticket.slot)?.endpoints[usize::from(ticket.dci)]
+            .as_ref()
+            .ok_or(BlockError::Unsupported("xHCI endpoint not configured"))?
+            .ring
+            .normal;
+        let (length, cached) =
+            queue
+                .cancellation_snapshot(ticket.id, ticket.trb)
+                .ok_or(BlockError::Unsupported(
+                    "stale or foreign xHCI transfer ticket",
+                ))?;
+        let observed = self.cancel_observed(ticket.slot, ticket.dci)?;
+        Ok(TransferCancellation::observed(
+            length, cached, ticket.trb, &observed,
+        ))
     }
 
     /// One TD, waited for.
@@ -435,7 +507,9 @@ mod tests {
         for line in text.lines() {
             let fields: Vec<_> = line.split_whitespace().collect();
             assert_eq!(fields.len(), 5);
-            assert_eq!(fields[0], "B");
+            if fields[0] != "B" {
+                continue;
+            }
             let code: u32 = fields[1].parse().unwrap();
             let length: usize = fields[2].parse().unwrap();
             let residual: usize = fields[3].parse().unwrap();
@@ -625,5 +699,156 @@ mod tests {
                 assert_eq!(endpoint.in_flight, 0);
             }
         }
+    }
+    #[test]
+    fn cancellation_observes_actual_dma_completion_racing_stop_ack() {
+        struct Empty;
+        impl Registers for Empty {
+            fn read32(&mut self, _: usize) -> u32 {
+                panic!("temporary register owner used")
+            }
+            fn write32(&mut self, _: usize, _: u32) {
+                panic!("temporary register owner used")
+            }
+        }
+        struct Race {
+            inner: Box<dyn Registers>,
+            model: Rc<RefCell<CancelModel>>,
+            code: u32,
+        }
+        impl Registers for Race {
+            fn read32(&mut self, at: usize) -> u32 {
+                self.inner.read32(at)
+            }
+            fn write32(&mut self, at: usize, value: u32) {
+                if at == 0x1000 {
+                    let mut hardware = self.model.borrow_mut();
+                    let command = hardware.commands + (hardware.command_index * TRB) as u64;
+                    // SAFETY: actual published command TRB in retained model DMA.
+                    let kind =
+                        unsafe { ((command + 12) as *const u32).read_volatile() >> 10 & 0x3f };
+                    if kind == STOP_ENDPOINT && self.code != 0 {
+                        let (trb, buffer, length) = hardware.active[5].unwrap();
+                        let bytes = if self.code == 27 { 0 } else { 7 };
+                        // SAFETY: the model still owns this submitted receive
+                        // DMA. Payload becomes visible before its event/Stop ACK.
+                        unsafe {
+                            core::slice::from_raw_parts_mut(buffer as *mut u8, bytes).fill(0x37);
+                        }
+                        let residual = if self.code == 28 {
+                            bytes
+                        } else {
+                            length - bytes
+                        };
+                        hardware.event(trb, self.code, TRANSFER_EVENT, 5, residual);
+                    }
+                }
+                self.inner.write32(at, value);
+            }
+        }
+        for code in [0, SUCCESS, SHORT_PACKET, 26, 27, 28] {
+            for stop_failure in [false, true] {
+                let mut backing = vec![0u64; 64 * 1024];
+                let start = backing.as_mut_ptr() as u64;
+                // SAFETY: controller, observed events and receive bytes retain DMA.
+                let mut dma =
+                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let (mut controller, model) = cancellation_controller(&mut dma);
+                let mut buffer = dma.allocate(64, 64).unwrap();
+                buffer.bytes_mut().fill(0xa5);
+                let ticket = controller
+                    .submit_ticket(1, 5, buffer.physical(), 64)
+                    .unwrap();
+                let inner = core::mem::replace(&mut controller.registers, Box::new(Empty));
+                controller.registers = Box::new(Race {
+                    inner,
+                    model: model.clone(),
+                    code,
+                });
+                if stop_failure {
+                    model.borrow_mut().fail = Some((STOP_ENDPOINT, 11));
+                }
+                let result = controller.cancel_ticket(&ticket);
+                if stop_failure {
+                    assert!(result.is_err());
+                    assert!(controller.endpoint_ready(1, 5).is_err());
+                    assert!(model.borrow().active[5].is_some());
+                    continue;
+                }
+                let expected = match code {
+                    SUCCESS | SHORT_PACKET => TransferCancellation::Completed(7),
+                    26 | 28 => TransferCancellation::Stopped(7),
+                    _ => TransferCancellation::Unknown,
+                };
+                assert_eq!(result, Ok(expected));
+                if !matches!(expected, TransferCancellation::Unknown) {
+                    assert_eq!(
+                        &buffer.bytes()[..8],
+                        &[0x37, 0x37, 0x37, 0x37, 0x37, 0x37, 0x37, 0xa5]
+                    );
+                }
+                assert!(model.borrow().active[5].is_none());
+                controller.endpoint_ready(1, 5).unwrap();
+                let commands = model.borrow().seen.clone();
+                assert!(controller.cancel_ticket(&ticket).is_err());
+                assert_eq!(model.borrow().seen, commands);
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_preserves_an_unpolled_cached_completion_and_retires_siblings() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: all allocations remain retained through endpoint-wide cancel.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let buffer = dma.allocate(128, 64).unwrap();
+        model.borrow_mut().incoming_events.push_back(vec![1, 2, 3]);
+        let first = controller
+            .submit_ticket(1, 3, buffer.physical(), 64)
+            .unwrap();
+        let second = controller
+            .submit_ticket(1, 3, buffer.physical() + 64, 64)
+            .unwrap();
+        assert_eq!(controller.completed_ticket(&second), None);
+        assert_eq!(
+            controller.cancel_ticket(&first),
+            Ok(TransferCancellation::Completed(3))
+        );
+        assert_eq!(&buffer.bytes()[..3], &[1, 2, 3]);
+        assert!(matches!(controller.completed_ticket(&second), Some(Err(_))));
+        assert!(model.borrow().active[3].is_none());
+    }
+
+    #[test]
+    #[ignore = "requires STELA_XHCI_COMPLETION_ORACLE pinned unchanged Linux trace"]
+    fn unchanged_linux_stopped_td_byte_accounting() {
+        extern crate std;
+        let path = std::env::var("STELA_XHCI_COMPLETION_ORACLE").unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut count = 0;
+        for line in text.lines() {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 5);
+            if fields[0] != "C" {
+                continue;
+            }
+            let code: u32 = fields[1].parse().unwrap();
+            let length: usize = fields[2].parse().unwrap();
+            let residual: usize = fields[3].parse().unwrap();
+            let actual: usize = fields[4].parse().unwrap();
+            let event = Event {
+                parameter: 0x1000,
+                status: code << 24 | residual as u32,
+                control: TRANSFER_EVENT << 10,
+            };
+            assert_eq!(
+                TransferCancellation::observed(length, None, 0x1000, &[event]),
+                TransferCancellation::Stopped(actual)
+            );
+            count += 1;
+        }
+        assert_eq!(count, 140464);
     }
 }

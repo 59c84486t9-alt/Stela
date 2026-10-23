@@ -102,12 +102,27 @@ impl Queue {
                 // Stopped (including length-invalid and short-packet stopped)
                 // and every error retain DMA until Stop/Reset/SetDequeue ACK.
                 self.recovery = true;
-                self.clear_tt |= matches!(status, 3 | 4 | STALL | 36);
+                self.clear_tt |= matches!(
+                    status,
+                    BABBLE_DETECTED | USB_TRANSACTION_ERROR | STALL | SPLIT_TRANSACTION_ERROR
+                );
                 Err(BlockError::Device { status })
             }
         };
         td.done = Some(done);
         Ok(())
+    }
+
+    pub(in crate::usb::xhci) fn cancellation_snapshot(
+        &self,
+        id: u64,
+        trb: u64,
+    ) -> Option<(usize, Option<Result<usize, BlockError>>)> {
+        let td = self.active.iter().find(|td| td.id == id && td.trb == trb)?;
+        Some((
+            td.length,
+            self.failure.clone().map(Err).or_else(|| td.done.clone()),
+        ))
     }
 
     pub(in crate::usb::xhci) fn completed(&mut self, id: u64) -> Option<Result<usize, BlockError>> {
@@ -124,7 +139,10 @@ impl Queue {
 
     /// EP0 protocol STALL does not leave a functional TT halt to clear.
     pub(in crate::usb::xhci) fn control_failure(&mut self, code: u32) {
-        self.clear_tt |= matches!(code, 3 | 4 | 36);
+        self.clear_tt |= matches!(
+            code,
+            BABBLE_DETECTED | USB_TRANSACTION_ERROR | SPLIT_TRANSACTION_ERROR
+        );
     }
 
     pub(in crate::usb::xhci) fn needs_tt_clear(&self) -> bool {
