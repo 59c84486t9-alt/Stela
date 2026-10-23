@@ -23,6 +23,8 @@ pub(super) struct Controls {
     pub(super) translation: mmu::Controls,
     pub(super) requester: mmu::Requester,
     pub(super) sp: CheckedMemoryProfile,
+    /// Real source FP access permission and nonstreaming AdvSIMD mode.
+    pub(super) asimd: bool,
     identification: Arc<Snapshot>,
 }
 impl Controls {
@@ -31,12 +33,11 @@ impl Controls {
         name: &'static str,
         missing: &[SystemRegister],
     ) -> Result<Self, MemoryStatus> {
-        // The checked GPR lane does not claim debug stepping, BTI validation,
+        // The checked lane does not claim debug stepping,
         // DIT recipes, CPA, MTE or scalable state through a copied control bit.
         if cpu.pstate.il
             || cpu.pstate.ss
             || cpu.pstate.dit
-            || cpu.pstate.btype != 0
             || cpu.pstate.pacm
             || crate::machine::debug::watching(cpu)
             || crate::machine::debug::enabled(cpu)
@@ -92,6 +93,7 @@ impl Controls {
             }
             != 0;
         Ok(Self {
+            asimd: cpu.floating_point_trap().is_none() && cpu.svcr() & 1 == 0,
             translation,
             requester,
             sp: if check_sp {
@@ -115,10 +117,11 @@ impl Controls {
     pub(super) fn identity(&self) -> alloc::string::String {
         crate::sha256(
             alloc::format!(
-                "{:?} {:?} {:?} {}",
+                "{:?} {:?} {:?} {} {}",
                 self.translation,
                 self.requester,
                 self.sp,
+                self.asimd,
                 self.identification.provenance().input_sha256()
             )
             .as_bytes(),
@@ -183,6 +186,28 @@ pub(super) mod tests {
             .set_raw(SystemRegister::SCTLR_EL1, 0, SCTLR_M | SCTLR_C | (1 << 12));
         (cpu, profile, missing)
     }
+    #[test]
+    fn fp_memory_admission_tracks_actual_cpacr_and_cptr_permissions() {
+        let (mut cpu, profile, missing) = captured();
+        assert!(
+            !Controls::capture(&cpu, profile.name, &missing)
+                .unwrap()
+                .asimd
+        );
+        cpu.registers.set_raw(SystemRegister::CPACR_EL1, 0, 3 << 20);
+        cpu.registers.set_raw(SystemRegister::CPTR_EL2, 0, 3 << 20);
+        let enabled = Controls::capture(&cpu, profile.name, &missing).unwrap();
+        assert!(enabled.asimd);
+        cpu.registers.set_raw(SystemRegister::CPTR_EL2, 0, 0);
+        let disabled = Controls::capture(&cpu, profile.name, &missing).unwrap();
+        assert!(!disabled.asimd);
+        assert_ne!(enabled.identity(), disabled.identity());
+        cpu.pstate.btype = 3;
+        assert!(Controls::capture(&cpu, profile.name, &missing).is_ok());
+        cpu.pstate.pacm = true;
+        assert!(Controls::capture(&cpu, profile.name, &missing).is_err());
+    }
+
     #[test]
     fn actual_cpu_ids_and_effective_controls_qualify_without_raw_authority() {
         let (mut cpu, profile, missing) = captured();

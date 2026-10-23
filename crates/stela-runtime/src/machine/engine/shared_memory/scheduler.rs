@@ -205,10 +205,9 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             self.deliver_interrupts();
             self.sync_monitor();
             let debug = self.debug_mode();
-            if debug.breakpoints || debug.step || self.cpu.pstate.pacm || self.cpu.pstate.btype != 0
-            {
+            if debug.breakpoints || debug.step || self.cpu.pstate.pacm {
                 return Err(self.unsupported(RequirementKind::Native(
-                    "native debug/single-step/PACM/guarded-branch entry is not joined",
+                    "native debug/single-step/PACM entry is not joined",
                 )));
             }
             if !self.cpu.pc.is_multiple_of(4) {
@@ -221,6 +220,17 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 self.take(exception);
             } else if self.cpu.pstate.il {
                 self.take(crate::machine::cpu::Exception::undefined(self.cpu.pc));
+            }
+            for boundary in 0..64 {
+                if !self.native_entry_check()? {
+                    break;
+                }
+                if boundary == 63 {
+                    // A bounded source-check quantum: retain actual progress
+                    // and return to host work before preparing another loan.
+                    self.release_native_services(held);
+                    return Ok(0);
+                }
             }
             if self.breakpoints.binary_search(&self.cpu.pc).is_ok() {
                 return Err(Stop::Breakpoint(self.cpu.pc));
@@ -284,6 +294,122 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         Ok(expected.len())
     }
 
+    /// Check the real fetched word before a frame may cross a physical core.
+    /// This uses the canonical descriptor/source owner, including AF updates.
+    fn native_entry_check(&mut self) -> Result<bool, Stop> {
+        let controls = Controls::capture(&self.cpu, self.profile.name, &self.profile_missing)
+            .map_err(|_| {
+                self.unsupported(RequirementKind::Native(
+                    "native entry controls are unqualified",
+                ))
+            })?;
+        let memory = self
+            .cpu
+            .canonical_memory
+            .as_ref()
+            .expect("validated canonical owner");
+        match native_run::source::instruction(memory, &controls, self.cpu.pc) {
+            Ok((word, guarded)) => {
+                if guarded && self.cpu.pstate.btype != 0 && !self.branch_target_compatible(word) {
+                    let exception = self
+                        .branch_target_exception(self.cpu.pc, word)
+                        .expect("incompatible branch target");
+                    self.take(exception);
+                    return Ok(true);
+                }
+                let admitted = self.admit(word);
+                if admitted != word {
+                    if admitted == 0xd503_201f {
+                        completing(self, Self::next)?;
+                        self.statistics.blocks += 1;
+                    } else if admitted == 0 {
+                        self.undefined()?;
+                    } else {
+                        return Err(self.unsupported(RequirementKind::Native(
+                            "unqualified source instruction admission replacement",
+                        )));
+                    }
+                    return Ok(true);
+                }
+                let checks = self.profile.chip.checks(word);
+                let denied = crate::machine::streaming::check(&self.cpu, checks);
+                match denied {
+                    Err(crate::machine::streaming::Denial::FloatingPoint(el)) => {
+                        self.take(
+                            crate::machine::cpu::Exception::synchronous(
+                                crate::machine::exception::Class::FloatingPointAccess,
+                                super::super::TRAPPED_AARCH64,
+                                self.cpu.pc,
+                            )
+                            .to(el),
+                        );
+                        return Ok(true);
+                    }
+                    Err(crate::machine::streaming::Denial::Sme { el, smtc }) => {
+                        self.take(
+                            crate::machine::cpu::Exception::synchronous(
+                                crate::machine::exception::Class::SmeAccess,
+                                smtc,
+                                self.cpu.pc,
+                            )
+                            .to(el),
+                        );
+                        return Ok(true);
+                    }
+                    Err(crate::machine::streaming::Denial::Undefined) => {
+                        self.undefined()?;
+                        return Ok(true);
+                    }
+                    Err(crate::machine::streaming::Denial::Unimplemented(detail)) => {
+                        return Err(self.unsupported(RequirementKind::Native(detail)));
+                    }
+                    Ok(()) => {}
+                }
+                if super::super::is_floating_point(word) {
+                    if self.cpu.floating_point_trap().is_some() {
+                        let exception = self.floating_point_exception(self.cpu.pc);
+                        self.take(exception);
+                        return Ok(true);
+                    }
+                    if self.cpu.svcr() & 1 != 0 {
+                        return Err(self.unsupported(RequirementKind::Native(
+                            "native streaming FP state is not joined",
+                        )));
+                    }
+                }
+                if checks.iter().any(|check| {
+                    !matches!(
+                        check,
+                        crate::machine::chip::Check::Fp | crate::machine::chip::Check::FpAdvSimd
+                    )
+                }) {
+                    return Err(self.unsupported(RequirementKind::Native(
+                        "native scalable/FPMR source service is not joined",
+                    )));
+                }
+                Ok(false)
+            }
+            Err(native_run::source::FetchFailure::Fault(fault)) => {
+                let pc = self.cpu.pc;
+                let exception = self.abort(
+                    fault,
+                    [
+                        crate::machine::exception::Class::InstructionAbortLower,
+                        crate::machine::exception::Class::InstructionAbortSame,
+                    ],
+                    fault.instruction_syndrome(),
+                    pc,
+                    pc,
+                );
+                self.take(exception);
+                Ok(true)
+            }
+            Err(native_run::source::FetchFailure::Refused(_)) => Err(self.unsupported(
+                RequirementKind::Native("canonical native instruction fetch refused"),
+            )),
+        }
+    }
+
     fn validate_native_source(&mut self, settlement: &native_run::Settlement) -> Step {
         if !Arc::ptr_eq(&settlement.machine, &self.native_memory_identity)
             || self.native_publication.as_ref().is_none_or(|inventory| {
@@ -308,7 +434,6 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             )));
         }
         self.statistics.blocks += 1;
-        self.cpu.pstate.btype = 0;
         self.sync_monitor();
         Ok(())
     }
@@ -442,13 +567,32 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                     machine.system_instruction(settlement.terminal)
                 })
             }
+            Ok(ExitKind::FloatingPoint) => {
+                let Some(Ok(operation)) =
+                    stela_compiler::aarch64::FloatingPointOperation::decode(settlement.terminal)
+                else {
+                    return Err(self.unsupported(RequirementKind::Native(
+                        "numerical source exit is not an FP operation",
+                    )));
+                };
+                crate::floating::complete(&mut self.cpu.state, &operation).map_err(|_| {
+                    self.unsupported(RequirementKind::Instruction {
+                        word: settlement.terminal,
+                        detail: alloc::format!(
+                            "FPCR {:#x} enables a trapped FP exception",
+                            self.cpu.state.fpcr
+                        ),
+                    })
+                })?;
+                completing(self, Self::next)
+            }
             Ok(ExitKind::PointerAuthentication) => completing(self, |machine| {
                 machine.pointer_authentication(settlement.terminal)
             }),
             _ => Err(self.unsupported(RequirementKind::Instruction {
                 word: settlement.terminal,
                 detail: alloc::string::String::from(
-                    "source boundary is unexecuted; native AMX/FP/trap service is not joined",
+                    "source boundary is unexecuted; native AMX/trap service is not joined",
                 ),
             })),
         }

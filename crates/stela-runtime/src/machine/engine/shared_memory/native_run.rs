@@ -1,5 +1,6 @@
 //! An actual borrowed architectural frame; no Cpu or Host crosses a core.
 mod access;
+pub(super) mod source;
 use super::super::{NativeExit, publication};
 use super::*;
 use crate::{execution::context::ContextLoan, platform::cpu::system::NativeSystemTarget};
@@ -34,6 +35,7 @@ struct Artifact {
     source_map: Vec<(stela_compiler::GuestAddress, usize)>,
     source: Vec<u8>,
     requirements: MemoryRequirements,
+    branch_type: u8,
 }
 
 /// Created only from Machine's actual mutable frame and effective controls.
@@ -44,6 +46,7 @@ pub struct NativeRun<'a> {
     state: &'a mut GuestState,
     pc: &'a mut u64,
     retired: &'a mut u64,
+    btype: &'a mut u8,
     worker: publication::WorkerId,
     artifact: Artifact,
 }
@@ -200,10 +203,27 @@ impl NativeRun<'_> {
             (pc, index as u64)
         } else {
             match native {
-                NativeExit::Fault(_) => {
-                    // A checked body never dereferences a guest VA directly.
-                    // A host fault is retained intact and terminal; it is not
-                    // invented into an ARM data abort or a completed source op.
+                NativeExit::Fault(fault) => {
+                    // No direct guest VA is dereferenced by a checked body.
+                    // Retain its exact reached source prefix for diagnostics,
+                    // but a host bug/fault is terminal, never an ARM data abort.
+                    if fault.offset >= self.artifact.code.len() {
+                        return Err(MemoryStatus::Domain);
+                    }
+                    let index = self
+                        .artifact
+                        .source_map
+                        .partition_point(|(_, offset)| *offset <= fault.offset)
+                        .checked_sub(1)
+                        .ok_or(MemoryStatus::Domain)?;
+                    let source_pc = self.artifact.source_map[index].0.0;
+                    *self.pc = source_pc;
+                    *self.retired = self.retired.wrapping_add(index as u64);
+                    if index != 0 {
+                        *self.btype = 0;
+                    }
+                    observation.settled_pc = source_pc;
+                    observation.retired = index as u64;
                     return Err(MemoryStatus::Domain);
                 }
                 NativeExit::Exit { next_pc, kind } => {
@@ -231,6 +251,24 @@ impl NativeRun<'_> {
                 }
             }
         };
+        let next_btype = match native {
+            NativeExit::Exit { kind, .. }
+                if status == MemoryStatus::Success
+                    && matches!(
+                        ExitKind::try_from(kind),
+                        Ok(ExitKind::Fallthrough
+                            | ExitKind::Direct
+                            | ExitKind::Indirect
+                            | ExitKind::Call
+                            | ExitKind::Return)
+                    ) =>
+            {
+                self.artifact.branch_type
+            }
+            _ if retired == 0 => *self.btype,
+            _ => 0,
+        };
+        *self.btype = next_btype;
         *self.pc = settled_pc;
         *self.retired = self.retired.wrapping_add(retired);
         observation.settled_pc = settled_pc;
@@ -295,8 +333,28 @@ fn prepare<'a>(
     if binding.pe != pe || cpu.monitor.is_some() {
         return Err(MemoryStatus::Unsupported);
     }
+    if !cpu.pc.is_multiple_of(4) {
+        return Err(MemoryStatus::Alignment);
+    }
     let controls = Controls::capture(cpu, cpu_profile.name, missing)?;
     let pc = cpu.pc;
+    let memory = cpu
+        .canonical_memory
+        .as_ref()
+        .ok_or(MemoryStatus::Unsupported)?;
+    let (first, guarded) =
+        source::instruction(memory, &controls, pc).map_err(|failure| match failure {
+            source::FetchFailure::Fault(_) => MemoryStatus::Unsupported,
+            source::FetchFailure::Refused(status) => status,
+        })?;
+    if cpu.pstate.btype != 0
+        && guarded
+        && !source::target_accepts(first, cpu.pstate.btype, cpu.regime_sctlr(), cpu.pstate.el)
+    {
+        return Err(MemoryStatus::Unsupported);
+    }
+    let asimd = controls.asimd;
+    let btype = &mut cpu.pstate.btype;
     let state = &mut cpu.state;
     let retired = &mut cpu.retired;
     let frame_pc = &mut cpu.pc;
@@ -307,13 +365,28 @@ fn prepare<'a>(
     if memory.pe != pe {
         return Err(MemoryStatus::Unsupported);
     }
-    if !pc.is_multiple_of(4) {
-        return Err(MemoryStatus::Alignment);
-    }
     let mut input = alloc::vec![0; super::super::window(pc)];
     // Instruction walks use the same source controls, canonical descriptor
     // owner and original physical bytes. No direct identity-frame shortcut.
     memory.fetch(&controls, pc, &mut input)?;
+    // A denied later access check must not erase an already reached GPR
+    // prefix. End before it; the held scheduler checks that exact next word.
+    if let Some(boundary) = input.as_chunks::<4>().0.iter().position(|raw| {
+        let word = u32::from_le_bytes(*raw);
+        admit.admit(word) != word
+            || super::super::is_floating_point(word) && !asimd
+            || cpu_profile.chip.checks(word).iter().any(|check| {
+                !matches!(
+                    check,
+                    crate::machine::chip::Check::Fp | crate::machine::chip::Check::FpAdvSimd
+                )
+            })
+    }) {
+        if boundary == 0 {
+            return Err(MemoryStatus::Unsupported);
+        }
+        input.truncate(boundary * 4);
+    }
     let profile = stela_compiler::block::BlockProfile::SystemModeSharedV1(controls.sp);
     let target = memory.ram.target();
     let plan = stela_compiler::block::CompilationPlan::new(
@@ -327,15 +400,14 @@ fn prepare<'a>(
     input.truncate(bytes);
     for word in input.as_chunks::<4>().0 {
         let word = u32::from_le_bytes(*word);
-        // BR/BLR need source guarded-page BTypeNext settlement. They stay
-        // explicit boundaries until the complete branch-control owner joins.
-        const REGISTER_BRANCH: u32 = 0xffff_fc1f;
-        const BR: u32 = 0xd61f_0000;
-        const BLR: u32 = 0xd63f_0000;
         if admit.admit(word) != word
-            || matches!(word & REGISTER_BRANCH, BR | BLR)
-            || super::super::is_floating_point(word)
-            || !cpu_profile.chip.checks(word).is_empty()
+            || super::super::is_floating_point(word) && !asimd
+            || cpu_profile.chip.checks(word).iter().any(|check| {
+                !matches!(
+                    check,
+                    crate::machine::chip::Check::Fp | crate::machine::chip::Check::FpAdvSimd
+                )
+            })
         {
             return Err(MemoryStatus::Unsupported);
         }
@@ -365,11 +437,16 @@ fn prepare<'a>(
         state,
         pc: frame_pc,
         retired,
+        btype,
         worker: binding.worker,
         artifact: Artifact {
             identity,
             code: compiled.native.x86_64_code,
             source_map: compiled.native.source_map,
+            branch_type: source::branch_type(
+                u32::from_le_bytes(input.last_chunk().copied().ok_or(MemoryStatus::Domain)?),
+                guarded,
+            ),
             source: input,
             requirements,
         },

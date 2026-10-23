@@ -112,7 +112,9 @@ impl DataPolicy for Policy {
         if required & !flags::KNOWN != 0 {
             return Err(MemoryStatus::InvalidRequest);
         }
-        if required & (flags::SME | flags::SVE_PREDICATED | flags::ASIMD) != 0 {
+        if required & (flags::SME | flags::SVE_PREDICATED) != 0
+            || required & flags::ASIMD != 0 && !self.controls.asimd
+        {
             return Err(MemoryStatus::Unsupported);
         }
         Ok(())
@@ -148,6 +150,9 @@ impl DataPolicy for Policy {
         self.validate_execution(request.flags)?;
         if request.bytes == 0
             || request.bytes > 16
+                && !(request.bytes == 32
+                    && request.operation == DataOperation::Ordinary
+                    && request.flags & (flags::ASIMD | flags::PAIR) == (flags::ASIMD | flags::PAIR))
             || request.operation == DataOperation::AllocationTag
         {
             return Err(MemoryStatus::Unsupported);
@@ -389,6 +394,67 @@ pub(super) mod tests {
             ram,
         )
     }
+    #[test]
+    fn actual_asimd_pair_store_copies_both_q_members_through_canonical_parts() {
+        use stela_compiler::context::memory::{MemoryRequest, MemoryRequirements};
+        let (mut cpu, profile, missing, ram) = fixture();
+        cpu.registers.set_raw(Register::CPACR_EL1, 0, 3 << 20);
+        cpu.registers.set_raw(Register::CPTR_EL2, 0, 3 << 20);
+        let policy = Policy::new(
+            Controls::capture(&cpu, profile.name, &missing).unwrap(),
+            alloc::sync::Arc::clone(&ram),
+        );
+        let mut thread = ram.domain().thread(policy);
+        let mut bytes = core::array::from_fn::<_, 32, _>(|index| index as u8 + 1);
+        let request = MemoryRequest {
+            address: 0x4000,
+            data: bytes.as_mut_ptr(),
+            bytes: 32,
+            flags: flags::WRITE | flags::ASIMD | flags::PAIR,
+            pc: 0x8000,
+        };
+        let entry = thread.prepare(MemoryRequirements::default()).unwrap();
+        let (status, completed) = unsafe {
+            entry.with_checked_view(|view| {
+                let status = (view.callback)(view, &request);
+                (status, view.completed_bytes)
+            })
+        }
+        .unwrap();
+        assert_eq!((status, completed), (MemoryStatus::Success as u32, 32));
+        let mut actual = [0; 32];
+        unsafe { ram.read_physical(DATA, &mut actual) }.unwrap();
+        assert_eq!(actual, bytes);
+    }
+
+    #[test]
+    fn asimd_requests_require_actual_source_permission_and_preserve_scalable_refusals() {
+        let (mut cpu, profile, missing, ram) = fixture();
+        let denied = Policy::new(
+            Controls::capture(&cpu, profile.name, &missing).unwrap(),
+            alloc::sync::Arc::clone(&ram),
+        );
+        assert_eq!(
+            denied.validate_execution(flags::ASIMD),
+            Err(MemoryStatus::Unsupported)
+        );
+        cpu.registers.set_raw(Register::CPACR_EL1, 0, 3 << 20);
+        cpu.registers.set_raw(Register::CPTR_EL2, 0, 3 << 20);
+        let enabled = Policy::new(
+            Controls::capture(&cpu, profile.name, &missing).unwrap(),
+            ram,
+        );
+        assert_eq!(enabled.validate_execution(flags::ASIMD), Ok(()));
+        assert_eq!(
+            enabled.validate_execution(flags::ASIMD | flags::SME),
+            Err(MemoryStatus::Unsupported)
+        );
+        assert_eq!(
+            enabled.validate_execution(flags::SVE_PREDICATED),
+            Err(MemoryStatus::Unsupported)
+        );
+    }
+
     #[test]
     fn cold_el2_m0_uses_real_device_attributes_and_checked_native_ram_parts() {
         use stela_compiler::context::memory::{MemoryRequest, MemoryRequirements};
