@@ -1264,7 +1264,7 @@ mod tests {
             controller.stop().unwrap();
             let mut pcm = vec![0; ring];
             controller.copy_stopped_ring(0, &mut pcm).unwrap();
-            for (index, frame) in pcm.chunks_exact(8).enumerate() {
+            for (index, frame) in pcm.as_chunks::<8>().0.iter().enumerate() {
                 let latest_frame = if index < 17 {
                     ring / 8 * 5 + index
                 } else {
