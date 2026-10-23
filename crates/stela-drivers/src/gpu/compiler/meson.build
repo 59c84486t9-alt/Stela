@@ -561,9 +561,11 @@ if with_intel
   )
   test('stela_intel_sampler', stela_intel_sampler_probe, suite : 'stela')
 
-  # The native integer encoders use the same retained XML generator as the
-  # hosted packers. Explicit struct dependencies keep the narrow prologue free
-  # of unrelated floating-point state, without replacing packing algorithms.
+  # The native packet encoders run Mesa's unchanged generator over the packets
+  # they select. As in the firmware image, the C library headers its packing
+  # helpers include come from Stela's freestanding set.
+  stela_intel_encoder_includes = include_directories(
+    '../intel/stela/freestanding', '../intel/stela', intel_genxml)
   stela_intel_compute_headers = []
   foreach generation : [['125', 'gen125'], ['200', 'xe2'], ['300', 'xe3'], ['350', 'xe3p']]
     stela_intel_compute_headers += custom_target(
@@ -572,8 +574,7 @@ if with_intel
                intel_genxml / '@0@.xml'.format(generation[1])],
       output : 'gen@0@_compute_pack.h'.format(generation[0]),
       command : [prog_python, '@INPUT@', '--include-symbols',
-                 'COMPUTE_WALKER,COMPUTE_WALKER_BODY,INTERFACE_DESCRIPTOR_DATA,POSTSYNC_DATA,PREF_SLM_ALLOCATION_SIZE',
-                 '--helpers-include', 'genxml_native.h'],
+                 'COMPUTE_WALKER,COMPUTE_WALKER_BODY,INTERFACE_DESCRIPTOR_DATA,POSTSYNC_DATA,PREF_SLM_ALLOCATION_SIZE'],
       capture : true,
       depend_files : gen_pack_header_deps,
     )
@@ -586,7 +587,7 @@ if with_intel
                intel_genxml / 'gen@0@.xml'.format(generation)],
       output : 'gen@0@_dispatch_pack.h'.format(generation),
       command : [prog_python, '@INPUT@', '--include-symbols',
-                 'GPGPU_WALKER,MEDIA_STATE_FLUSH', '--helpers-include', 'genxml_native.h'],
+                 'GPGPU_WALKER,MEDIA_STATE_FLUSH'],
       capture : true,
       depend_files : gen_pack_header_deps,
     )
@@ -600,8 +601,8 @@ if with_intel
      '../intel/stela/dispatch/gen90.c',
      '../intel/stela/dispatch/gen110.c',
      '../intel/stela/dispatch/gen120.c', stela_intel_gpgpu_headers],
-    include_directories : [inc_src, inc_gpu, inc_intel,
-                           include_directories('../intel/stela', intel_genxml)],
+    include_directories : [inc_include, inc_src, inc_gpu, inc_intel,
+                           stela_intel_encoder_includes],
     c_args : ['-Werror'],
   )
   stela_intel_compute_native = static_library(
@@ -611,8 +612,8 @@ if with_intel
      '../intel/stela/dispatch/compute200.c',
      '../intel/stela/dispatch/compute300.c',
      '../intel/stela/dispatch/compute350.c', stela_intel_compute_headers],
-    include_directories : [inc_src, inc_gpu, inc_intel,
-                           include_directories('../intel/stela', intel_genxml)],
+    include_directories : [inc_include, inc_src, inc_gpu, inc_intel,
+                           stela_intel_encoder_includes],
     c_args : ['-Werror'],
   )
   # Keep these original policy TUs intact; stela_dead_strip removes their

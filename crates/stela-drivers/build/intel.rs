@@ -92,6 +92,7 @@ impl Builds {
         encoders
             .include(dispatch)
             .include(&stela)
+            .include(format!("{}/include", native::MESA))
             .include(format!("{}/src", native::MESA))
             .include(GENXML);
         Self { xe, i915, encoders }
@@ -111,7 +112,12 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
         .into_iter()
         .partition(|path| named(path, &I915_ADAPTERS));
     encoders.extend(packets(&python, &dispatch));
-    let port = Builds::new(linux, &native::configure(), &generated, &dispatch);
+    let mut port = Builds::new(linux, &native::configure(), &generated, &dispatch);
+    // Mesa's packing helpers include a few C library headers, which the
+    // freestanding encoders take from Stela.
+    port.encoders
+        .include(format!("{SOURCE}/stela/freestanding"))
+        .define("HAVE_ENDIAN_H", None);
     native::check_declarations(&port.xe, &xe);
     native::check_declarations(&port.i915, &i915);
     port.xe.clone().files(&xe).compile("stela-intel-xe");
@@ -224,8 +230,7 @@ fn packets(python: &Path, output: &Path) -> Vec<PathBuf> {
                 Command::new(python)
                     .arg(format!("{GENXML}/gen_pack_header.py"))
                     .arg(format!("{GENXML}/{xml}.xml"))
-                    .args(["--include-symbols", symbols])
-                    .args(["--helpers-include", "genxml_native.h"]),
+                    .args(["--include-symbols", symbols]),
                 &output.join(format!("gen{generation}_{family}_pack.h")),
             );
             PathBuf::from(format!("{SOURCE}/stela/dispatch/{unit}{generation}.c"))

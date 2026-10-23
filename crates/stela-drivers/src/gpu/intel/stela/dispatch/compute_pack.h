@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "../compute_dispatch_internal.h"
+#include "../genxml_native.h"
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wconversion"
 #pragma clang diagnostic ignored "-Wsign-conversion"

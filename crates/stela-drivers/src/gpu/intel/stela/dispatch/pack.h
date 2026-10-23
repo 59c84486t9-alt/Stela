@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "../dispatch_internal.h"
+#include "../genxml_native.h"
 
 /* One translation unit per hardware generation, as in Mesa. Original XML
  * packers contain global enum constants and must not be combined in one TU.
