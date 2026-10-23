@@ -687,6 +687,8 @@ mod tests {
         conexant_type: u32,
         conexant_vendor_fault: Option<u16>,
         conexant_trim: Option<u16>,
+        conexant_mic_writes: usize,
+        conexant_mic_fault_after: Option<usize>,
         sense_triggers: Vec<u8>,
         coefficient_indexes: BTreeMap<u8, u16>,
         coefficients: BTreeMap<(u8, u16), u16>,
@@ -784,6 +786,8 @@ mod tests {
                 conexant_type: 0,
                 conexant_vendor_fault: None,
                 conexant_trim: None,
+                conexant_mic_writes: 0,
+                conexant_mic_fault_after: None,
                 sense_triggers: Vec::new(),
                 coefficient_indexes: BTreeMap::new(),
                 coefficients: BTreeMap::new(),
@@ -1141,11 +1145,23 @@ mod tests {
                     }
                 }
                 0x701 | 0x707 | 0x70c => {
+                    if self.conexant_headset_model && node == 0x19 && verb == 0x707 {
+                        self.conexant_mic_writes += 1;
+                    }
                     self.route_controls
                         .insert((node, verb + 0x800), command as u8);
                     0
                 }
                 0xf01 | 0xf07 | 0xf0c => {
+                    if self.conexant_headset_model
+                        && node == 0x19
+                        && verb == 0xf07
+                        && self
+                            .conexant_mic_fault_after
+                            .is_some_and(|count| self.conexant_mic_writes >= count)
+                    {
+                        return u32::MAX;
+                    }
                     if self.reject_route_control == Some(verb)
                         && self.reject_route_node.is_none_or(|target| target == node)
                     {
@@ -6864,9 +6880,14 @@ mod tests {
                     m.conexant_type = raw;
                     m.conexant_detection_ready = Some(m.clock.now_us() + 25_000);
                 }
+                let writes_before = model.borrow().conexant_mic_writes;
                 let before = model.borrow().clock.now_us();
                 let report = controller.poll_conexant_headset(&graph).unwrap();
                 assert_eq!(report.kind, kind);
+                assert_eq!(
+                    model.borrow().conexant_mic_writes - writes_before,
+                    if raw == 0 { 1 } else { 2 }
+                );
                 assert_eq!(report.sense, 0x8000_005a);
                 assert_eq!(report.detection_status, Some(0x80));
                 assert_eq!(report.type_status, Some(raw));
@@ -6884,7 +6905,7 @@ mod tests {
 
         #[test]
         fn conexant_headset_incomplete_detection_and_readback_failures_hold_owned_routes() {
-            for fault in 0..5 {
+            for fault in 0..6 {
                 let mut fixture = Fixture::new();
                 let model = headset_device(0x14f1_1f86, true);
                 let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -6917,8 +6938,11 @@ mod tests {
                             m.reject_route_control = Some(0xf07);
                             m.reject_route_node = Some(0x19);
                         }
-                        _ => {
+                        4 => {
                             m.pin_senses.insert(0x19, u32::MAX);
+                        }
+                        _ => {
+                            m.conexant_mic_fault_after = Some(m.conexant_mic_writes + 2);
                         }
                     }
                 }
@@ -6942,6 +6966,7 @@ mod tests {
                     let mut m = model.borrow_mut();
                     m.conexant_vendor_fault = None;
                     m.reject_route_control = None;
+                    m.conexant_mic_fault_after = None;
                 }
                 controller.reinitialize().unwrap();
                 assert!(controller.conexant_codecs.is_empty());

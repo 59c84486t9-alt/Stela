@@ -218,6 +218,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 if kind == u32::MAX {
                     return Err(Error::RouteRejected);
                 }
+                // The detection helper writes VREF for a recognized headset;
+                // the outer callback repeats it below. Preserve both actual
+                // transactions rather than assuming duplicate writes are inert.
+                if kind & (TYPE_CTIA | TYPE_OMTP) != 0 {
+                    self.conexant_microphone_control(graph.address, true)?;
+                }
                 // Preserve the donor's precedence if both type bits are set.
                 let decoded = if kind & TYPE_CTIA != 0 {
                     ConexantHeadsetKind::Ctia
