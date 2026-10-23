@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Linux HID reference: Copyright (c) 1999 Andreas Gal;
+// 2000-2005 Vojtech Pavlik; 2005 Michael Haboustak for Concept2, Inc;
+// 2006-2012 Jiri Kosina; 2007-2008 Oliver Neukum.
+// Retained source identities and adaptation scope: ../THIRD_PARTY.md.
 //! HID report descriptors (HID 1.11 6.2.2) as the input fields they
 //! describe, and the pointer and keyboard reports read from those fields.
 //!
@@ -23,7 +28,7 @@ const GENERIC_DESKTOP_X: u32 = 0x0001_0030;
 const GENERIC_DESKTOP_Y: u32 = 0x0001_0031;
 const GENERIC_DESKTOP_WHEEL: u32 = 0x0001_0038;
 const BUTTON_1: u32 = 0x0009_0001;
-const BUTTON_3: u32 = 0x0009_0003;
+const BUTTON_5: u32 = 0x0009_0005;
 const KEYBOARD_PAGE: u32 = 0x07;
 /// The array usages that report an error state instead of keys.
 const KEY_ERRORS: core::ops::RangeInclusive<u32> = 0x01..=0x03;
@@ -114,6 +119,7 @@ struct Item {
     report: Option<u8>,
     field: Field,
     usage: Usage,
+    application: u32,
 }
 
 /// A pointer report's layout.
@@ -123,7 +129,7 @@ pub struct Pointer {
     pub x: Option<Field>,
     pub y: Option<Field>,
     pub wheel: Option<Field>,
-    pub buttons: [Option<Field>; 3],
+    pub buttons: [Option<Field>; 5],
 }
 
 impl Pointer {
@@ -147,6 +153,8 @@ impl Pointer {
                 field(0, 1, 0, false),
                 field(1, 1, 0, false),
                 field(2, 1, 0, false),
+                None,
+                None,
             ],
         }
     }
@@ -253,6 +261,7 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
     let mut range: Option<(u32, u32)> = None;
     let mut offsets: Vec<(Option<u8>, usize)> = Vec::new();
     let mut items = Vec::new();
+    let mut collections: Vec<(u32, bool)> = Vec::new();
     let mut at = 0;
     while at < descriptor.len() {
         let prefix = descriptor[at];
@@ -325,6 +334,11 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
                     };
                     items.push(Item {
                         report: global.report,
+                        application: collections
+                            .iter()
+                            .rev()
+                            .find(|(_, app)| *app)
+                            .map_or(0, |(usage, _)| *usage),
                         field: Field {
                             offset: start + n * global.size,
                             size: global.size,
@@ -338,7 +352,24 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
                 usages.clear();
                 range = None;
             }
-            OUTPUT | FEATURE | COLLECTION | END_COLLECTION => {
+            COLLECTION => {
+                collections.push((
+                    usages
+                        .first()
+                        .copied()
+                        .or_else(|| range.map(|r| r.0))
+                        .unwrap_or(0),
+                    unsigned == 1,
+                ));
+                usages.clear();
+                range = None;
+            }
+            END_COLLECTION => {
+                collections.pop();
+                usages.clear();
+                range = None;
+            }
+            OUTPUT | FEATURE => {
                 usages.clear();
                 range = None;
             }
@@ -385,6 +416,14 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
 fn pointer(items: &[Item]) -> Option<Pointer> {
     let mut layouts: Vec<Pointer> = Vec::new();
     for item in items {
+        // Gamepad and Finger X/Y are not a native mouse. Uncollected fields
+        // remain accepted for existing standalone descriptor-reader users.
+        if !matches!(
+            item.application,
+            0 | 0x0001_0001 | 0x0001_0002 | 0x000d_0002
+        ) {
+            continue;
+        }
         let Usage::Variable(usage) = item.usage else {
             continue;
         };
@@ -403,7 +442,7 @@ fn pointer(items: &[Item]) -> Option<Pointer> {
             GENERIC_DESKTOP_X => layout.x = layout.x.or(field),
             GENERIC_DESKTOP_Y => layout.y = layout.y.or(field),
             GENERIC_DESKTOP_WHEEL => layout.wheel = layout.wheel.or(field),
-            BUTTON_1..=BUTTON_3 => {
+            BUTTON_1..=BUTTON_5 => {
                 let button = &mut layout.buttons[(usage - BUTTON_1) as usize];
                 *button = button.or(field);
             }

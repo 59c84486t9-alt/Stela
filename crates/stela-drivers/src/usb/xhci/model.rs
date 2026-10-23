@@ -441,7 +441,7 @@ impl CancelModel {
                 let next =
                     self.rings[dci] + (((self.indices[dci] + 1) % (RING_TRBS - 1)) * TRB) as u64;
                 let buffer = unsafe { (next as *const u64).read_volatile() };
-                if request[0] == 0x80
+                if matches!(request[0], 0x80 | 0x81)
                     && request[1] == GET_DESCRIPTOR
                     && let Some((_, _, bytes)) = self
                         .descriptors
