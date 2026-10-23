@@ -1,10 +1,19 @@
 //! Owned INIT/SIPI entry, independent of firmware AP stacks and callbacks.
 //! The single low page is reused only after the preceding AP has acknowledged
 //! entry into permanently pinned high-window code and stopped reading it.
+//!
+//! Early32 covers privileged setup after its low stack/IDT installation;
+//! early64 covers the mapped transition/high-entry prefix until private IDT
+//! installation. Real mode/first PE setup and the PG/far-jump/64-IDTR window
+//! remain outside this containment. No early IST/task gate is supplied: a
+//! corrupt stack, IDT or faulting exception delivery can still double/triple
+//! fault. This contains ordinary delivered exceptions, not every CPU shutdown.
 use core::arch::global_asm;
 
 use super::memory_types::{Image, MAX_WRITABLE, Write, amd};
-use crate::tables::PAGE;
+use crate::{layout, tables::PAGE};
+mod early;
+pub(crate) use early::EarlyFault;
 
 global_asm!(
     ".balign 16",
@@ -15,15 +24,13 @@ global_asm!(
     "cld",
     "mov %cs, %ax",
     "mov %ax, %ds",
+    "mov %ax, %ss",
+    "movl ${page}, %esp",
     "lgdtl (stela_ap_gdtr - stela_ap_start)",
     "movl (stela_ap_base - stela_ap_start), %ebp",
     "mov %cr0, %eax",
-    // Before reading shared high memory: no cache fills; INIT retains cache
-    // contents, so flush them rather than assuming reset emptied the cache.
-    "andl $0xdfffffff, %eax", // NW=0
-    "orl $0x40000001, %eax",  // CD=1, PE=1
+    "orl $1, %eax", // PE; remaining controls change under the early32 IDT.
     "mov %eax, %cr0",
-    "wbinvd",
     "ljmpl *(stela_ap_far32 - stela_ap_start)",
     ".code32",
     ".global stela_ap_protected",
@@ -32,6 +39,15 @@ global_asm!(
     "mov %ax, %ds",
     "mov %ax, %es",
     "mov %ax, %ss",
+    "lea {page}(%ebp), %esp",
+    "lidtl (stela_ap_idtr32 - stela_ap_start)(%ebp)",
+    // No shared high memory is reached before the cache/MTRR image. INIT
+    // retains cache contents, so flush under the now-installed early32 IDT.
+    "mov %cr0, %eax",
+    "andl $0xdfffffff, %eax", // NW=0
+    "orl $0x40000000, %eax", // CD=1
+    "mov %eax, %cr0",
+    "wbinvd",
     "mov (stela_ap_cr4 - stela_ap_start)(%ebp), %eax",
     "mov %eax, %cr4",
     "mov (stela_ap_root - stela_ap_start)(%ebp), %eax",
@@ -137,6 +153,10 @@ global_asm!(
     ".code64",
     ".global stela_ap_long",
     "stela_ap_long:",
+    // Exception frames must use the writable physmap alias, not the read-only
+    // executable SIPI identity page. No CALL/PUSH precedes this stack switch.
+    "mov stela_ap_early_stack(%rip), %rsp",
+    "lidt stela_ap_idtr64(%rip)",
     "mov $0x10, %ax",
     "mov %ax, %ds",
     "mov %ax, %es",
@@ -156,11 +176,12 @@ global_asm!(
     "1: cli",
     "hlt",
     "jmp 1b",
+    include_str!("bootstrap/early.S"),
     ".balign 8",
     ".global stela_ap_gdt",
     "stela_ap_gdt:",
     ".quad 0",
-    // Intel SDM3A §3.4.5 / AMD APM2 §4.8: loading a descriptor may set
+    // Intel SDM3A §3.4.5 / AMD APM2 §4.7.2: loading a descriptor may set
     // Accessed. The identity SIPI page is read-only after CR0.WP/paging;
     // pre-set A so the long-mode CS load needs no hidden low-page write.
     ".quad 0x00af9b000000ffff", // 0x08 long code, Accessed
@@ -210,6 +231,13 @@ global_asm!(
     "stela_ap_mtrrs: .zero {mtrr_bytes}",
     ".global stela_ap_end",
     "stela_ap_end:",
+    page = const PAGE,
+    faults = const early::EXCEPTIONS,
+    stub_bytes = const early::STUB_BYTES,
+    error_mask = const early::ERROR_MASK,
+    fault_writing = const early::WRITING,
+    fault_ready = const early::SEALED,
+    fault_record_bytes = const core::mem::size_of::<early::Record>(),
     amd_syscfg = const amd::SYSCFG,
     amd_ebx = const amd::VENDOR[0],
     amd_edx = const amd::VENDOR[1],
@@ -223,6 +251,15 @@ global_asm!(
 
 unsafe extern "C" {
     static stela_ap_start: u8;
+    static stela_ap_stubs32: u8;
+    static stela_ap_stubs64: u8;
+    static stela_ap_idt32: u8;
+    static stela_ap_idt64: u8;
+    static stela_ap_idtr32: u8;
+    static stela_ap_idtr64: u8;
+    static stela_ap_early_stack: u8;
+    static stela_ap_fault_record: u8;
+    static stela_ap_fault_alias: u8;
     static stela_ap_end: u8;
     static stela_ap_protected: u8;
     static stela_ap_long: u8;
@@ -284,7 +321,7 @@ pub(crate) unsafe fn prepare(
     let bytes = offset(&raw const stela_ap_end);
     if !(PAGE..1 << 20).contains(&physical)
         || !physical.is_multiple_of(PAGE)
-        || bytes > PAGE as usize
+        || bytes > PAGE as usize - early::STACK_BYTES
         || entry.memory_types.count > MAX_WRITABLE
         || entry.root == 0
         || entry.root >= 1 << 32
@@ -311,6 +348,42 @@ pub(crate) unsafe fn prepare(
                 .write_unaligned(value)
         };
         put32(&raw const stela_ap_base, physical as u32);
+        put64(
+            &raw const stela_ap_early_stack,
+            layout::physical(physical + PAGE),
+        );
+        put64(
+            &raw const stela_ap_fault_alias,
+            layout::physical(physical + offset(&raw const stela_ap_fault_record) as u64),
+        );
+        mapped
+            .add(offset(&raw const stela_ap_idtr32) + 2)
+            .cast::<u32>()
+            .write_unaligned((physical + offset(&raw const stela_ap_idt32) as u64) as u32);
+        mapped
+            .add(offset(&raw const stela_ap_idtr64) + 2)
+            .cast::<u64>()
+            .write_unaligned(physical + offset(&raw const stela_ap_idt64) as u64);
+        for vector in 0..early::EXCEPTIONS {
+            let handler32 = physical
+                + offset(&raw const stela_ap_stubs32) as u64
+                + (vector * early::STUB_BYTES) as u64;
+            let handler64 = physical
+                + offset(&raw const stela_ap_stubs64) as u64
+                + (vector * early::STUB_BYTES) as u64;
+            let gate32 = early::gate32(handler32 as u32);
+            let gate64 = early::gate64(handler64);
+            core::ptr::copy_nonoverlapping(
+                gate32.as_ptr(),
+                mapped.add(offset(&raw const stela_ap_idt32) + vector * gate32.len()),
+                gate32.len(),
+            );
+            core::ptr::copy_nonoverlapping(
+                gate64.as_ptr(),
+                mapped.add(offset(&raw const stela_ap_idt64) + vector * gate64.len()),
+                gate64.len(),
+            );
+        }
         put32(&raw const stela_ap_root, entry.root as u32);
         put32(
             &raw const stela_ap_cr4,
@@ -368,4 +441,13 @@ pub(crate) unsafe fn prepare(
         core::arch::asm!("wbinvd", options(nostack, preserves_flags));
     }
     Ok((physical / PAGE) as u8)
+}
+
+/// Observe only an actual sealed early AP failure; an empty/unfinished record
+/// never supplies READY or permission to reuse the low page.
+///
+/// # Safety
+/// `mapped` is the retained actual owned SIPI page, prepared for this one AP.
+pub(crate) unsafe fn failure(mapped: *const u8) -> Result<Option<EarlyFault>, &'static str> {
+    unsafe { early::read(mapped.add(offset(&raw const stela_ap_fault_record)).cast()) }
 }

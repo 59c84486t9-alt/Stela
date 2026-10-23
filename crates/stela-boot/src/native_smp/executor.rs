@@ -26,9 +26,18 @@ const REFUSED: u8 = 2;
 pub(crate) enum StartupFailure {
     Resources,
     Bootstrap(&'static str),
+    EarlyException {
+        slot: usize,
+        cause: bootstrap::EarlyFault,
+    },
     Delivery(apic::StartupError),
-    Timeout { slot: usize },
-    Refused { slot: usize, reason: &'static str },
+    Timeout {
+        slot: usize,
+    },
+    Refused {
+        slot: usize,
+        reason: &'static str,
+    },
 }
 
 /// This object and its descriptors remain pinned for the whole boot, even
@@ -390,6 +399,15 @@ pub(crate) unsafe fn start(
         ));
         let before = apic::rdtsc();
         loop {
+            // A sealed hardware exception is an actual failed startup, not a
+            // timeout or a synthetic READY. Return without reusing any owned
+            // AP/low-page resource whose execution remains uncertain.
+            if let Some(cause) =
+                unsafe { bootstrap::failure(layout::physical(physical) as *const u8) }
+                    .map_err(StartupFailure::Bootstrap)?
+            {
+                return Err(StartupFailure::EarlyException { slot, cause });
+            }
             match argument.status.load(Ordering::Acquire) {
                 READY => break,
                 REFUSED => {
