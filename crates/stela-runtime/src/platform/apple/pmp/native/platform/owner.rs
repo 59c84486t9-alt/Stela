@@ -7,6 +7,8 @@ use super::{Descriptor, Evaluation, Hook, McSelection, Ordinal, Packed, Profile,
 use crate::platform::apple::bus::Access;
 use alloc::{collections::VecDeque, rc::Rc, vec::Vec};
 
+pub mod controllers;
+
 /// An immutable actual pending snapshot. Numeric bits are observations only.
 /// The built-in adapter retains Frames' non-Clone owner-bound capture.
 pub trait Pending {
@@ -206,7 +208,8 @@ pub enum ManagerEffect {
     /// all Capture hooks and a fresh actual clock observation100f97c..100f990.
     RestoreControllers,
     ///100fa18..100fb14: process actual24-byte accumulator descriptors, intersect
-    /// each mask with eligible, extract its logical nibble from G540 and invoke
+    /// each mask with eligible, extract its logical nibble from the retained
+    /// current packet (sp+a0, not the separately cleared G540 scratch) and invoke
     /// both actual counter callbacks(+50, arguments selector/0 then selector/1),
     /// accumulating their u32 results into the selected16-byte bucket.
     AccumulateCounters,
@@ -216,6 +219,7 @@ pub enum ManagerEffect {
 pub struct ManagerContext {
     pub output: Evaluation,
     pub tick: u64,
+    pub current_packet: Packets,
 }
 
 /// Backend has no default implementation. Every reached inner source effect
@@ -1000,6 +1004,9 @@ impl<B: Backend> Owner<B> {
                         ManagerContext {
                             output: batch.output,
                             tick: Self::tick(batch)?,
+                            current_packet: batch.current_packet.ok_or(Error::Contract(
+                                "native actual manager six-word packet absent",
+                            ))?,
                         },
                         batch.snapshot.as_ref(),
                         access,
@@ -1426,7 +1433,7 @@ mod tests {
         calls: Vec<(Request, Effect)>,
         reads: Vec<(Request, Observation)>,
         captures: u32,
-        manager: Vec<(Request, ManagerEffect, usize, usize)>,
+        manager: Vec<(Request, ManagerEffect, usize, usize, ManagerContext)>,
         snapshot: (u128, u128),
         tick: u64,
         observer: u32,
@@ -1509,13 +1516,18 @@ mod tests {
             request: &Request,
             effect: ManagerEffect,
             _: &Profile,
-            _: ManagerContext,
+            context: ManagerContext,
             snapshot: Option<&Self::Snapshot>,
             _: &mut Access<'_>,
         ) -> Completion<()> {
             assert!(snapshot.is_some());
-            self.manager
-                .push((request.clone(), effect, self.calls.len(), self.reads.len()));
+            self.manager.push((
+                request.clone(),
+                effect,
+                self.calls.len(),
+                self.reads.len(),
+                context,
+            ));
             Completion::Retired {
                 value: (),
                 refusal: None,
@@ -1612,6 +1624,11 @@ mod tests {
         assert_eq!(stages[0].1, ManagerEffect::BeforeCapture);
         assert_eq!(stages[1].1, ManagerEffect::RestoreControllers);
         assert_eq!(stages[2].1, ManagerEffect::AccumulateCounters);
+        assert!(
+            stages
+                .iter()
+                .all(|stage| stage.4.current_packet == o.backend.packets)
+        );
         let captures = &o.backend.calls[stages[0].2..stages[1].2];
         assert!(!captures.is_empty());
         assert!(captures.iter().all(|(_, e)| matches!(
