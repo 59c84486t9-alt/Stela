@@ -142,8 +142,9 @@ impl Controller {
                 "SuperSpeedPlus hub requires actual BOS sublink capabilities",
             ));
         }
-        let self_powered = self.hub_power_source(slot)?;
         self.set_configuration(slot, device.configuration_value())?;
+        // Device status describes the configuration the device acknowledged.
+        let self_powered = self.hub_power_source(slot)?;
         self.install_hub_current(
             slot,
             descriptor.ports,

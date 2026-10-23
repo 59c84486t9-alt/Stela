@@ -570,8 +570,9 @@ impl Controller {
         } else {
             0
         };
-        let self_powered = self.hub_power_source(slot)?;
         self.set_configuration(slot, device.configuration_value())?;
+        // Device status describes the configuration the device acknowledged.
+        let self_powered = self.hub_power_source(slot)?;
         self.install_hub_current(slot, ports, u16::from(hub[6]), self_powered)?;
         self.observe_hub_current(slot)?;
         // Linux `hub_configure`: a multi-TT hub (device protocol 2) gets one

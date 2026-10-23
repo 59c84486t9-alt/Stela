@@ -61,6 +61,7 @@ pub(super) struct Node {
     pub configured: bool,
     pub depth: Option<u16>,
     pub self_powered: bool,
+    pub unconfigured_self_powered: Option<bool>,
     pub max_power: u8,
     pub controller_current: u8,
     pub hub_status: u16,
@@ -77,6 +78,7 @@ impl Node {
             configured: false,
             depth: None,
             self_powered: true,
+            unconfigured_self_powered: None,
             max_power: 0,
             controller_current: 0,
             hub_status: 0,
@@ -93,6 +95,7 @@ impl Node {
             configured: false,
             depth: None,
             self_powered: true,
+            unconfigured_self_powered: None,
             max_power: 0,
             controller_current: 0,
             hub_status: 0,
@@ -346,6 +349,15 @@ impl Hardware {
                     let output = read64(self.register64(0x40 + DCBAAP) + u64::from(slot) * 8);
                     self.outputs.insert(slot, output);
                     let add = read32(parameter + 4);
+                    if kind == CONFIGURE_ENDPOINT {
+                        let drop = read32(parameter);
+                        for dci in 2..32 {
+                            if drop & (1 << dci) != 0 {
+                                self.endpoints.remove(&(slot, dci as u8));
+                                write32(output + (dci * self.context_bytes) as u64, 0);
+                            }
+                        }
+                    }
                     for dci in 0..32 {
                         if add & (1 << dci) == 0 {
                             continue;
@@ -407,7 +419,14 @@ impl Hardware {
         let value = u16::from_le_bytes([request[2], request[3]]);
         let index = u16::from_le_bytes([request[4], request[5]]);
         match (request[0], request[1]) {
-            (0x80, GET_STATUS) => Ok(vec![u8::from(node.self_powered), 0]),
+            (0x80, GET_STATUS) => Ok(vec![
+                u8::from(if node.configured {
+                    node.self_powered
+                } else {
+                    node.unconfigured_self_powered.unwrap_or(node.self_powered)
+                }),
+                0,
+            ]),
             (0xa0, GET_STATUS) => {
                 assert!(node.configured);
                 let powered = node

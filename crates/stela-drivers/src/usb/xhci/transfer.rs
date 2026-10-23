@@ -45,6 +45,23 @@ impl Controller {
         out: &[u8],
     ) -> Result<Vec<u8>, BlockError> {
         self.live_slot(slot)?;
+        // Any raw class requester must acquire the same physical-port current
+        // reservation as enumeration before publishing a PORT_POWER request.
+        if request[0] == 0x23 && request[2..4] == PORT_POWER.to_le_bytes() {
+            if request[1] == CLEAR_FEATURE {
+                return Err(BlockError::Unsupported(
+                    "USB hub port power removal requires subtree retirement",
+                ));
+            }
+            if request[1] == SET_FEATURE {
+                if request[5..] != [0; 3] || !out.is_empty() {
+                    return Err(BlockError::Unsupported(
+                        "invalid USB hub PORT_POWER request",
+                    ));
+                }
+                self.prepare_port_current(slot, request[4])?;
+            }
+        }
         let configuration = request[0] == 0 && request[1] == SET_CONFIGURATION;
         if configuration {
             if request[3..] != [0; 5] || !out.is_empty() {

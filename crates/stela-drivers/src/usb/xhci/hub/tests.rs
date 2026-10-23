@@ -1017,6 +1017,44 @@ fn bus_powered_hub_never_powers_ports_without_a_current_reservation() {
             .all(|p| p.status & (1 << 9) == 0)
     );
     assert_eq!(controller.power.snapshot(1), (900, 896, 896));
+    drop(state);
+    let before = (model.borrow().mmio_reads, model.borrow().mmio_writes);
+    let requests = model.borrow().requests.len();
+    let control = controller.slots[1]
+        .as_ref()
+        .unwrap()
+        .control
+        .bytes()
+        .to_vec();
+    let input = controller.slots[1].as_ref().unwrap().input.bytes().to_vec();
+    for port in [6, 7] {
+        assert!(
+            controller
+                .control(1, setup(0x23, SET_FEATURE, PORT_POWER, port, 0), &[])
+                .is_err()
+        );
+        assert_eq!(controller.power.snapshot(1), (900, 896, 896));
+    }
+    assert!(
+        controller
+            .control(1, setup(0x23, CLEAR_FEATURE, PORT_POWER, 1, 0), &[])
+            .is_err()
+    );
+    assert_eq!(
+        (model.borrow().mmio_reads, model.borrow().mmio_writes),
+        before
+    );
+    assert_eq!(model.borrow().requests.len(), requests);
+    assert_eq!(
+        controller.slots[1].as_ref().unwrap().control.bytes(),
+        control
+    );
+    assert_eq!(controller.slots[1].as_ref().unwrap().input.bytes(), input);
+    assert!(
+        model.borrow().nodes[&0].ports.as_ref().unwrap()[5..]
+            .iter()
+            .all(|p| p.status & (1 << 9) == 0)
+    );
 }
 
 #[test]
@@ -1258,4 +1296,166 @@ fn root_power_loss_quarantines_old_handles_and_unknown_power_never_grants_curren
         before
     );
     assert!(controller.slots[1].is_none());
+}
+
+#[test]
+fn hub_power_contract_uses_actual_status_after_configuration_ack() {
+    for speed in [HIGH_SPEED, SUPER_SPEED] {
+        for self_powered in [false, true] {
+            let mut hub = Node::hub(speed, 1);
+            hub.self_powered = self_powered;
+            hub.unconfigured_self_powered = Some(!self_powered);
+            hub.max_power = if speed == HIGH_SPEED { 250 } else { 112 };
+            hub.controller_current = 20;
+            let mut leaf = Node::leaf(speed);
+            leaf.max_power = 100; // 200/800mA needs a self-powered parent.
+            let nodes = BTreeMap::from([(0, hub), (1, leaf)]);
+            let mut backing = vec![0u64; 256 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: each full USB2/SS tree owns this exclusive fixture RAM.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = controller(&mut dma, 64, nodes);
+            let mut failures = Vec::new();
+            let devices = controller.enumerate(&mut dma, &mut failures);
+            assert!(failures.is_empty(), "{speed}/{self_powered}: {failures:?}");
+            assert_eq!(devices.len(), 2);
+            let state = model.borrow();
+            let configured = state
+                .requests
+                .iter()
+                .position(|(_, route, q)| *route == 0 && q[0] == 0 && q[1] == SET_CONFIGURATION)
+                .unwrap();
+            let observed = state
+                .requests
+                .iter()
+                .position(|(_, route, q)| *route == 0 && q[0] == 0x80 && q[1] == GET_STATUS)
+                .unwrap();
+            assert!(configured < observed);
+            drop(state);
+            let child = devices.iter().find(|d| d.location.ends_with(".1")).unwrap();
+            assert_eq!(
+                controller
+                    .control(child.slot, setup(0, SET_CONFIGURATION, 1, 0, 0), &[])
+                    .is_ok(),
+                self_powered
+            );
+        }
+    }
+}
+
+#[test]
+fn hub_endpoint_teardown_does_not_authorize_reconfiguration_of_live_children() {
+    for speed in [HIGH_SPEED, SUPER_SPEED] {
+        let mut hub = Node::hub(speed, 1);
+        hub.max_power = 10;
+        let nodes = BTreeMap::from([(0, hub), (1, Node::leaf(speed))]);
+        let mut backing = vec![0u64; 256 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: all old hub/child DMA owners retain this exclusive RAM.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = controller(&mut dma, 32, nodes);
+        let mut failures = Vec::new();
+        let devices = controller.enumerate(&mut dma, &mut failures);
+        assert!(failures.is_empty());
+        let hub = devices
+            .iter()
+            .find(|d| d.location.ends_with("port 1"))
+            .unwrap();
+        let child = devices.iter().find(|d| d.location.ends_with(".1")).unwrap();
+        let endpoint = interfaces(&hub.configuration)[0].endpoints[0];
+        controller.deconfigure(hub.slot, &[endpoint]).unwrap();
+        assert!(
+            controller.slots[usize::from(hub.slot)]
+                .as_ref()
+                .unwrap()
+                .endpoints[usize::from(endpoint.dci())]
+            .is_none()
+        );
+        let grant = controller.power.snapshot(hub.slot);
+        for value in [0, 1, 2] {
+            let requests = model.borrow().requests.len();
+            assert_eq!(
+                controller.control(hub.slot, setup(0, SET_CONFIGURATION, value, 0, 0), &[]),
+                Err(BlockError::Unsupported(
+                    "USB hub configuration requires complete subtree retirement"
+                ))
+            );
+            assert_eq!(model.borrow().requests.len(), requests);
+            assert_eq!(controller.power.snapshot(hub.slot), grant);
+            assert_eq!(controller.current_configuration(hub.slot), Ok(Some(1)));
+        }
+        let requests = model.borrow().requests.len();
+        controller.set_configuration(hub.slot, 1).unwrap();
+        assert_eq!(model.borrow().requests.len(), requests);
+        controller
+            .control(child.slot, setup(0, SET_CONFIGURATION, 1, 0, 0), &[])
+            .unwrap();
+        assert!(
+            !controller.slots[usize::from(child.slot)]
+                .as_ref()
+                .unwrap()
+                .retiring
+        );
+    }
+}
+
+#[test]
+fn raw_port_power_revalidates_root_and_hub_health_before_authorizing_current() {
+    for root_lost in [false, true] {
+        let nodes = BTreeMap::from([(0, Node::hub(SUPER_SPEED, 1)), (1, Node::leaf(SUPER_SPEED))]);
+        let mut backing = vec![0u64; 256 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: uncertain power never frees any fixture allocation/alias.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = controller(&mut dma, 64, nodes);
+        let mut failures = Vec::new();
+        let devices = controller.enumerate(&mut dma, &mut failures);
+        assert!(failures.is_empty());
+        if root_lost {
+            model.borrow_mut().root_status = Some(PP | CCS | PED | (1 << 3));
+        } else {
+            model.borrow_mut().nodes.get_mut(&0).unwrap().self_powered = false;
+        }
+        let powers = model
+            .borrow()
+            .requests
+            .iter()
+            .filter(|(_, _, q)| *q == setup(0x23, SET_FEATURE, PORT_POWER, 1, 0))
+            .count();
+        assert!(
+            controller
+                .control(1, setup(0x23, SET_FEATURE, PORT_POWER, 1, 0), &[])
+                .is_err()
+        );
+        assert_eq!(
+            model
+                .borrow()
+                .requests
+                .iter()
+                .filter(|(_, _, q)| *q == setup(0x23, SET_FEATURE, PORT_POWER, 1, 0))
+                .count(),
+            powers
+        );
+        model.borrow_mut().root_status = None;
+        model.borrow_mut().nodes.get_mut(&0).unwrap().self_powered = true;
+        let before = (model.borrow().mmio_reads, model.borrow().mmio_writes);
+        for device in &devices {
+            assert!(
+                controller
+                    .control(device.slot, setup(0x80, GET_STATUS, 0, 0, 2), &[])
+                    .is_err()
+            );
+            assert!(
+                controller.slots[usize::from(device.slot)]
+                    .as_ref()
+                    .unwrap()
+                    .retiring
+            );
+            assert!(controller.power.retained(device.slot));
+        }
+        assert_eq!(
+            (model.borrow().mmio_reads, model.borrow().mmio_writes),
+            before
+        );
+    }
 }

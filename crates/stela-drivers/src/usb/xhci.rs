@@ -35,8 +35,10 @@
 //! submit_iso/completed_iso API on any xHCI 1.0+ controller. Payloads fit
 //! one TRB/service and completion ownership survives uncertain cancellation.
 //!
-//! SuperSpeed hubs require observed healthy self-power; bus-powered hubs need
-//! separately qualified upstream current budgeting. Refused rather than handled:
+//! Hubs require observed healthy power and retained upstream current contracts:
+//! actual root protocol/power selects the USB-standard default, and actual
+//! configuration descriptors and hub status bound downstream current. Refused
+//! rather than handled:
 //! SuperSpeed/hub-routed isochronous endpoints, secondary stream arrays, hubs more than five tiers
 //! deep, and controllers without 4 KiB pages. Hot plug after attach is not seen.
 use super::{audio, bluetooth, cdc, ethernet, hid, storage};

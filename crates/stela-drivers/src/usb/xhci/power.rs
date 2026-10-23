@@ -424,7 +424,20 @@ impl Controller {
         slot: u8,
         value: u8,
     ) -> Result<u16, BlockError> {
+        // A configured hub owns its powered ports and descendant contracts.
+        // Endpoint teardown alone cannot authorize replacing that authority.
+        // Reconfiguration needs explicit subtree retirement and a fresh hub
+        // owner; the cached same-value helper remains a harmless no-op.
+        if self.power.grant(slot)?.hub.is_some() {
+            return Err(BlockError::Unsupported(
+                "USB hub configuration requires complete subtree retirement",
+            ));
+        }
         self.power.demand(slot, value)?;
+        self.observe_current_ancestors(slot, false)?;
+        self.power.configuration_prepare(slot, value)
+    }
+    fn observe_current_ancestors(&mut self, slot: u8, include_hub: bool) -> Result<(), BlockError> {
         let attachment = self.power.grant(slot)?.attachment;
         let root_speed = if self
             .port_major
@@ -436,6 +449,9 @@ impl Controller {
             HIGH_SPEED
         };
         self.root_current(attachment.root_port, root_speed)?;
+        if include_hub {
+            self.observe_hub_current(slot)?;
+        }
         let mut parent = attachment.parent;
         while let Some((slot, _)) = parent {
             let ancestor = self.power.grant(slot)?.attachment;
@@ -443,7 +459,13 @@ impl Controller {
             self.observe_hub_current(slot)?;
             parent = ancestor.parent;
         }
-        self.power.configuration_prepare(slot, value)
+        Ok(())
+    }
+    pub(super) fn prepare_port_current(&mut self, slot: u8, port: u8) -> Result<(), BlockError> {
+        // Reject pure budget/ownership failures before touching MMIO or DMA.
+        // Reservation is conservative across any later uncertain health/ACK.
+        self.power.powered_port(slot, port)?;
+        self.observe_current_ancestors(slot, true)
     }
     pub(super) fn ack_current_configuration(
         &mut self,
