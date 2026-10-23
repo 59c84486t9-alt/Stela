@@ -39,6 +39,13 @@ impl Keyboard {
         }
         events.push(Input::Key { usage, pressed });
     }
+    pub(super) fn expire(&mut self, now: u64, timeout: u64) -> Result<(), ErrorKind> {
+        if self.prefix() && now.wrapping_sub(self.prefix_at) >= timeout {
+            self.reset_prefix();
+            return Err(ErrorKind::PacketTimeout(Port::Keyboard));
+        }
+        Ok(())
+    }
     pub(super) fn feed(
         &mut self,
         data: u8,

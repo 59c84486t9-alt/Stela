@@ -213,6 +213,8 @@ pub struct Controller<R = PortIo, T = Clock> {
     config: Config,
     state: State,
     controller_config: Option<u8>,
+    input_known: bool,
+    discarded_before_start: u64,
     pending: VecDeque<Byte>,
     events: Vec<Input>,
     keyboard: keyboard::Keyboard,
@@ -235,6 +237,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             config,
             state: State::Fresh,
             controller_config: None,
+            input_known: false,
+            discarded_before_start: 0,
             pending: VecDeque::new(),
             events: Vec::new(),
             keyboard: keyboard::Keyboard::default(),
@@ -246,6 +250,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     pub fn needs_reset(&self) -> bool {
         self.state == State::Faulted
+    }
+    /// Pre-reset bytes have unknown protocol/scan-set provenance and are not
+    /// guest input. Count them rather than decoding them under the new mode.
+    pub fn discarded_before_start(&self) -> u64 {
+        self.discarded_before_start
     }
     pub fn has_wheel(&self) -> bool {
         self.mouse.wheel()
@@ -305,6 +314,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }))
     }
     fn queue(&mut self, byte: Byte) -> Result<(), ErrorKind> {
+        if !self.input_known {
+            self.discarded_before_start = self.discarded_before_start.saturating_add(1);
+            return Ok(());
+        }
         if self.pending.len() == QUEUE_LIMIT {
             return Err(ErrorKind::QueueFull);
         }
@@ -336,6 +349,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     fn set_config(&mut self, value: u8) -> Result<(), ErrorKind> {
         self.command(WRITE_CONFIG)?;
         self.write_data(value)?;
+        self.write_ready()?;
+        // Inhibited keyboards cannot produce another byte; remove any older
+        // pre-handoff data before a controller response uses the same lane.
+        if value & KEYBOARD_DISABLED != 0 {
+            self.collect_output()?;
+        }
         let actual = self.controller_response(READ_CONFIG)?;
         let mask = IRQ_BITS | KEYBOARD_DISABLED | MOUSE_DISABLED | TRANSLATION;
         if actual & mask != value & mask {
@@ -384,6 +403,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                         received_us: self.timer.now_us(),
                     })?,
                 }
+                if self.expired(start, timeout) {
+                    return Err(ErrorKind::Timeout(Phase::Response));
+                }
+                self.timer.relax();
             }
         }
         Err(ErrorKind::ResendLimit { port, byte: value })
@@ -412,6 +435,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let mut drained = 0;
         while self.read_byte()?.is_some() {
             drained += 1;
+            self.discarded_before_start = self.discarded_before_start.saturating_add(1);
             if drained == QUEUE_LIMIT || self.expired(start, self.config.io_timeout_us) {
                 return Err(ErrorKind::Timeout(Phase::Drain));
             }
@@ -425,11 +449,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.set_config((config & !(IRQ_BITS | TRANSLATION)) | KEYBOARD_DISABLED | MOUSE_DISABLED)?;
         if self.config.keyboard {
             self.expect_controller(TEST_KEYBOARD, 0)?;
-            self.command(ENABLE_KEYBOARD)?;
         }
         if self.config.mouse {
             self.expect_controller(TEST_MOUSE, 0)?;
-            self.command(ENABLE_MOUSE)?;
         }
         let enabled = (config & !(IRQ_BITS | TRANSLATION | KEYBOARD_DISABLED | MOUSE_DISABLED))
             | if self.config.keyboard {
@@ -438,8 +460,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 KEYBOARD_DISABLED
             }
             | if self.config.mouse { 0 } else { MOUSE_DISABLED };
-        self.set_config(enabled)?;
         if self.config.keyboard {
+            self.command(ENABLE_KEYBOARD)?;
+            // Firmware may have left this keyboard reporting an unknown scan
+            // set. Quiesce it before RESET, and never interpret those bytes.
+            self.device_command(Port::Keyboard, DISABLE_REPORTING, &[])?;
             self.reset_device(Port::Keyboard)?;
             self.device_command(Port::Keyboard, DISABLE_REPORTING, &[])?;
             self.device_command(Port::Keyboard, SET_SCAN, &[2])?;
@@ -455,6 +480,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.device_command(Port::Keyboard, SET_LEDS, &[0])?;
         }
         if self.config.mouse {
+            self.command(ENABLE_MOUSE)?;
+            self.device_command(Port::Mouse, DISABLE_REPORTING, &[])?;
             self.reset_device(Port::Mouse)?;
             let id = self.response(
                 Port::Mouse,
@@ -491,6 +518,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 self.mouse.set_wheel(id == 3);
             }
             self.device_command(Port::Mouse, SET_RATE, &[100])?;
+        }
+        // Both configured devices have now acknowledged reporting disable and
+        // their new protocol is known. Only now is the keyboard response lane
+        // safe for final CTR readback with the keyboard clock running.
+        self.set_config(enabled)?;
+        self.input_known = true;
+        if self.config.mouse {
             self.device_command(Port::Mouse, ENABLE_REPORTING, &[])?;
         }
         if self.config.keyboard {
@@ -509,6 +543,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(ErrorKind::NeedsReset.into());
         }
         self.state = State::Initializing;
+        self.input_known = false;
         match self.initialize_inner() {
             Ok(()) => {
                 self.state = State::Ready;
@@ -517,10 +552,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             Err(kind) => Err(self.fail(kind)),
         }
     }
-    fn disable_ports(&mut self) -> Result<(), ErrorKind> {
-        self.command(DISABLE_KEYBOARD)?;
-        self.command(DISABLE_MOUSE)?;
-        self.write_ready()?;
+    fn collect_output(&mut self) -> Result<(), ErrorKind> {
         // Controller replies share the keyboard data lane. Retain all older
         // input before asking for CTR; otherwise a key byte could be mistaken
         // for a successful controller acknowledgement.
@@ -533,6 +565,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.status()? & OUTPUT_FULL != 0 {
             return Err(ErrorKind::QueueFull);
         }
+        Ok(())
+    }
+    fn disable_ports(&mut self) -> Result<(), ErrorKind> {
+        self.command(DISABLE_KEYBOARD)?;
+        self.command(DISABLE_MOUSE)?;
+        self.write_ready()?;
+        self.collect_output()?;
         let config = match self.controller_config {
             Some(value) => value,
             None => self.controller_response(READ_CONFIG)?,
@@ -606,6 +645,20 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 if matches!(kind, ErrorKind::UnsupportedScanCode(_)) {
                     return Err(kind.into());
                 }
+                return Err(self.fail(kind));
+            }
+        }
+        // A silent device must not retain an incomplete prefix indefinitely.
+        // Do not expire a frame while complete bytes remain queued to decode.
+        if self.pending.is_empty()
+            && self.status().map_err(|kind| self.fail(kind))? & OUTPUT_FULL == 0
+        {
+            let now = self.timer.now_us();
+            let result = self
+                .keyboard
+                .expire(now, self.config.packet_timeout_us)
+                .and_then(|()| self.mouse.expire(now, self.config.packet_timeout_us));
+            if let Err(kind) = result {
                 return Err(self.fail(kind));
             }
         }

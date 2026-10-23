@@ -24,6 +24,8 @@ struct Hardware {
     no_id_ack: bool,
     force_id: Option<u8>,
     self_test: u8,
+    keyboard_on_enable: Vec<u8>,
+    after_self_test: Vec<u8>,
     interface_test: u8,
     translation_stuck: bool,
     busy_forever: bool,
@@ -44,7 +46,7 @@ impl Hardware {
             config_write: false,
             mouse_write: false,
             argument: [None, None],
-            scanning: [false; 2],
+            scanning: [true; 2],
             scan: 2,
             leds: 0,
             rates: Vec::new(),
@@ -53,6 +55,8 @@ impl Hardware {
             no_id_ack: false,
             force_id: None,
             self_test: 0x55,
+            keyboard_on_enable: Vec::new(),
+            after_self_test: Vec::new(),
             interface_test: 0,
             translation_stuck: false,
             busy_forever: false,
@@ -172,6 +176,10 @@ impl Registers for Model {
         h.writes.push((true, value));
         match value {
             READ_CONFIG => {
+                assert!(
+                    h.config & KEYBOARD_DISABLED != 0 || !h.scanning[0],
+                    "CTR reply lane is not owned while a keyboard can report"
+                );
                 let config = h.config;
                 h.emit(Port::Keyboard, config);
             }
@@ -180,6 +188,9 @@ impl Registers for Model {
                 let reply = h.self_test;
                 h.config = TRANSLATION | IRQ_BITS;
                 h.emit(Port::Keyboard, reply);
+                for byte in core::mem::take(&mut h.after_self_test) {
+                    h.emit(Port::Keyboard, byte);
+                }
             }
             TEST_KEYBOARD | TEST_MOUSE => {
                 let reply = h.interface_test;
@@ -187,7 +198,14 @@ impl Registers for Model {
             }
             DISABLE_KEYBOARD => h.config |= KEYBOARD_DISABLED,
             DISABLE_MOUSE => h.config |= MOUSE_DISABLED,
-            ENABLE_KEYBOARD => h.config &= !KEYBOARD_DISABLED,
+            ENABLE_KEYBOARD => {
+                h.config &= !KEYBOARD_DISABLED;
+                if h.scanning[0] {
+                    for byte in core::mem::take(&mut h.keyboard_on_enable) {
+                        h.emit(Port::Keyboard, byte);
+                    }
+                }
+            }
             ENABLE_MOUSE => h.config &= !MOUSE_DISABLED,
             SEND_MOUSE => h.mouse_write = true,
             _ => panic!("unknown controller command {value:x}"),
@@ -276,19 +294,23 @@ fn real_initialization_negotiates_devices_and_survives_controller_test_reset() {
         assert!(c.is_ready());
         assert_eq!(c.has_wheel(), mouse && wheel_capable);
         assert_eq!(h.borrow().config & (IRQ_BITS | TRANSLATION), 0);
-        assert_eq!(h.borrow().scanning, [keyboard, mouse]);
+        // Unselected devices remain clock-inhibited; their pre-handoff
+        // reporting state is not rewritten by this owner.
+        assert_eq!(h.borrow().scanning, [true, true]);
         assert_eq!(h.borrow().config & KEYBOARD_DISABLED != 0, !keyboard);
         assert_eq!(h.borrow().config & MOUSE_DISABLED != 0, !mouse);
         assert_eq!(h.borrow().scan, 2);
         assert!(h.borrow().output.is_empty());
         c.stop().unwrap();
-        assert_eq!(h.borrow().scanning, [false, false]);
+        assert_eq!(h.borrow().scanning, [!keyboard, !mouse]);
         assert_eq!(
             h.borrow().config & (KEYBOARD_DISABLED | MOUSE_DISABLED),
             KEYBOARD_DISABLED | MOUSE_DISABLED
         );
         c.initialize().unwrap();
-        assert_eq!(h.borrow().scanning, [keyboard, mouse]);
+        // Unselected devices remain clock-inhibited; their pre-handoff
+        // reporting state is not rewritten by this owner.
+        assert_eq!(h.borrow().scanning, [true, true]);
     }
 }
 
@@ -633,4 +655,74 @@ fn rejected_led_argument_retries_only_that_argument() {
         .filter_map(|&(command, byte)| (!command).then_some(byte))
         .collect();
     assert_eq!(data, vec![SET_LEDS, 3, 3]);
+}
+
+#[test]
+fn already_reporting_keyboard_cannot_alias_ctr_or_publish_old_scan_set_bytes() {
+    let (mut c, h) = controller(Config::default());
+    // Review regression: if make 0x0c aliases enabled CTR, real SYSF CTR0x04
+    // would later decode as a phantom set2 F3 press. These are old unknown-mode
+    // bytes; only acknowledged disable/reset establishes new input provenance.
+    h.borrow_mut().config = 0x47;
+    h.borrow_mut().keyboard_on_enable = vec![0x0c, 0x1e, 0xe0, 0xf0];
+    h.borrow_mut().after_self_test = vec![0x0c];
+    c.initialize().unwrap();
+    assert_eq!(h.borrow().config, 4);
+    assert!(c.poll().unwrap().is_empty());
+    assert_eq!(c.discarded_before_start(), 5);
+    // The first actually owned set2 input still decodes with fresh framing.
+    emit(&h, Port::Keyboard, &[0x1c, 0xf0, 0x1c]);
+    assert_eq!(
+        c.poll().unwrap(),
+        vec![
+            Input::Key {
+                usage: 4,
+                pressed: true
+            },
+            Input::Key {
+                usage: 4,
+                pressed: false
+            }
+        ]
+    );
+}
+
+#[test]
+fn silent_partial_frames_expire_without_waiting_for_a_later_byte() {
+    for (port, bytes) in [(Port::Keyboard, vec![0xe0]), (Port::Mouse, vec![0x08, 1])] {
+        let (mut c, h) = ready();
+        emit(&h, port, &bytes);
+        assert!(c.poll().unwrap().is_empty());
+        let time = h.borrow().time.clone();
+        time.set(time.get() + 500);
+        assert_eq!(c.poll().unwrap_err().kind, ErrorKind::PacketTimeout(port));
+        assert!(c.needs_reset());
+        assert!(c.drain_events().is_empty());
+    }
+}
+
+#[test]
+fn idle_expiration_does_not_preempt_a_complete_retained_frame() {
+    let (mut c, h) = ready();
+    h.borrow_mut().inject_led = vec![
+        (Port::Keyboard, 0xe0),
+        (Port::Keyboard, 0x14),
+        (Port::Mouse, 0x08),
+        (Port::Mouse, 1),
+        (Port::Mouse, 2),
+        (Port::Mouse, 0),
+    ];
+    c.set_leds(1).unwrap();
+    let time = h.borrow().time.clone();
+    time.set(time.get() + 500);
+    assert_eq!(
+        c.poll().unwrap(),
+        vec![
+            Input::Key {
+                usage: 0xe4,
+                pressed: true
+            },
+            Input::Motion { dx: 1, dy: -2 }
+        ]
+    );
 }

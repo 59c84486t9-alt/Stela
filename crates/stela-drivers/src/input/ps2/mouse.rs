@@ -20,6 +20,13 @@ impl Mouse {
         self.wheel = wheel;
         self.position = 0;
     }
+    pub(super) fn expire(&mut self, now: u64, timeout: u64) -> Result<(), ErrorKind> {
+        if self.position != 0 && now.wrapping_sub(self.start) >= timeout {
+            self.position = 0;
+            return Err(ErrorKind::PacketTimeout(Port::Mouse));
+        }
+        Ok(())
+    }
     pub(super) fn feed(
         &mut self,
         data: u8,
