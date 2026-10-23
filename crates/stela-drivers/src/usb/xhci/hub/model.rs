@@ -59,10 +59,13 @@ pub(super) struct Node {
     pub bos: Option<Vec<u8>>,
     pub descriptor: Option<Vec<u8>>,
     pub configured: bool,
+    pub multi_tt: bool,
+    active_alternate: u8,
     pub depth: Option<u16>,
     pub self_powered: bool,
     pub unconfigured_self_powered: Option<bool>,
     pub max_power: u8,
+    pub interface_class: Option<u8>,
     pub controller_current: u8,
     pub hub_status: u16,
     pub hub_change: u16,
@@ -76,10 +79,13 @@ impl Node {
             bos: None,
             descriptor: None,
             configured: false,
+            multi_tt: false,
+            active_alternate: 0,
             depth: None,
             self_powered: true,
             unconfigured_self_powered: None,
             max_power: 0,
+            interface_class: None,
             controller_current: 0,
             hub_status: 0,
             hub_change: 0,
@@ -93,10 +99,13 @@ impl Node {
             bos: None,
             descriptor: None,
             configured: false,
+            multi_tt: false,
+            active_alternate: 0,
             depth: None,
             self_powered: true,
             unconfigured_self_powered: None,
             max_power: 0,
+            interface_class: None,
             controller_current: 0,
             hub_status: 0,
             hub_change: 0,
@@ -109,7 +118,13 @@ impl Node {
         ];
         if self.ports.is_some() {
             out[4] = HUB_CLASS;
-            out[6] = if self.speed >= SUPER_SPEED { 3 } else { 1 };
+            out[6] = if self.speed >= SUPER_SPEED {
+                3
+            } else if self.multi_tt {
+                2
+            } else {
+                1
+            };
         }
         if self.speed < SUPER_SPEED {
             out[2..4].copy_from_slice(&0x0200u16.to_le_bytes());
@@ -137,13 +152,20 @@ impl Node {
             0,
             0,
             if hub { 1 } else { 2 },
-            if hub { 9 } else { 8 },
+            if hub {
+                9
+            } else {
+                self.interface_class.unwrap_or(8)
+            },
             if hub { 0 } else { 6 },
             if hub { 0 } else { 0x50 },
             0,
         ];
         if hub {
-            out.extend_from_slice(&[7, 5, 0x81, 3, 2, 0, 8]);
+            out.extend_from_slice(&[7, 5, 0x81, 3, if self.multi_tt { 4 } else { 2 }, 0, 8]);
+            if self.multi_tt {
+                out.extend_from_slice(&[9, 4, 0, 1, 1, 9, 0, 2, 0, 7, 5, 0x82, 3, 4, 0, 8]);
+            }
             if self.speed >= SUPER_SPEED {
                 out.extend_from_slice(&[6, 0x30, 0, 0, 2, 0]);
             }
@@ -264,6 +286,8 @@ pub(super) struct Hardware {
     pub silent_configuration: Option<u8>,
     pub failed_configuration: Option<u8>,
     pub root_status: Option<u32>,
+    pub notification_override: Option<u32>,
+    pending_interrupts: BTreeMap<(u8, u8), (u64, u64, usize)>,
     pub mmio_reads: usize,
     pub mmio_writes: usize,
     registers: BTreeMap<usize, u32>,
@@ -291,6 +315,8 @@ impl Hardware {
             silent_configuration: None,
             failed_configuration: None,
             root_status: None,
+            notification_override: None,
+            pending_interrupts: BTreeMap::new(),
             mmio_reads: 0,
             mmio_writes: 0,
             registers: BTreeMap::new(),
@@ -304,6 +330,12 @@ impl Hardware {
             events: 0,
             next_slot: 1,
         }
+    }
+    pub fn notify_root(&mut self) {
+        self.notify_root_code(SUCCESS);
+    }
+    pub fn notify_root_code(&mut self, code: u32) {
+        self.event(1 << 24, code, reset::PORT_STATUS_CHANGE, 0, 0, 0);
     }
     fn register64(&self, at: usize) -> u64 {
         u64::from(*self.registers.get(&at).unwrap_or(&0))
@@ -397,7 +429,27 @@ impl Hardware {
                         self.nodes.get_mut(&0).unwrap().hub_status = 1;
                     }
                 }
+                reset::DISABLE_SLOT => {
+                    assert!(self.pending_interrupts.keys().all(|(s, _)| *s != slot));
+                    for &(s, dci) in self.endpoints.keys() {
+                        if s == slot {
+                            assert_eq!(
+                                read32(
+                                    self.outputs[&slot]
+                                        + u64::from(dci) * self.context_bytes as u64
+                                ) & 7,
+                                ENDPOINT_STOPPED,
+                                "Disable Slot before acknowledged endpoint retirement"
+                            );
+                        }
+                    }
+                    self.endpoints.retain(|(s, _), _| *s != slot);
+                }
                 STOP_ENDPOINT | RESET_ENDPOINT => {
+                    if let Some((trb, _, _)) = self.pending_interrupts.remove(&(slot, dci)) {
+                        // Stopped transfer event precedes actual Stop ACK.
+                        self.event(trb, 26, TRANSFER_EVENT, slot, dci, 0);
+                    }
                     let output = self.outputs[&slot] + u64::from(dci) * self.context_bytes as u64;
                     write32(output, read32(output) & !7 | ENDPOINT_STOPPED);
                 }
@@ -466,6 +518,10 @@ impl Hardware {
                     }
                 );
                 Ok(node.hub_descriptor())
+            }
+            (RECIPIENT_INTERFACE, SET_INTERFACE) if node.multi_tt && index == 0 && value == 1 => {
+                node.active_alternate = 1;
+                Ok(Vec::new())
             }
             (0, SET_CONFIGURATION) => {
                 assert!(value <= 1);
@@ -651,6 +707,23 @@ impl Hardware {
             let (trb, buffer, length, control) =
                 self.endpoints.get_mut(&(slot, dci)).unwrap().next();
             assert_eq!(control >> 10 & 0x3f, NORMAL);
+            if self.nodes[&self.routes[&slot]].ports.is_some() {
+                assert_eq!(
+                    dci,
+                    if self.nodes[&self.routes[&slot]].active_alternate == 1 {
+                        5
+                    } else {
+                        3
+                    }
+                );
+                assert!(
+                    self.pending_interrupts
+                        .insert((slot, dci), (trb, buffer, length as usize))
+                        .is_none()
+                );
+                self.complete_interrupts();
+                return;
+            }
             if dci & 1 != 0 {
                 // SAFETY: actual published IN payload belongs to this fixture.
                 unsafe {
@@ -663,6 +736,34 @@ impl Hardware {
                         .to_vec(),
                 );
             }
+            self.event(trb, SUCCESS, TRANSFER_EVENT, slot, dci, 0);
+        }
+    }
+}
+impl Hardware {
+    fn complete_interrupts(&mut self) {
+        let mut completed = Vec::new();
+        for (&(slot, dci), &(trb, buffer, length)) in &self.pending_interrupts {
+            let node = &self.nodes[&self.routes[&slot]];
+            let mut bits = u32::from(node.hub_change != 0);
+            for (port, state) in node.ports.as_ref().unwrap().iter().enumerate() {
+                if state.change != 0 {
+                    bits |= 1 << (port + 1);
+                }
+            }
+            let bits = self.notification_override.unwrap_or(bits);
+            if bits == 0 {
+                continue;
+            } // Real hub NAKs while no change is pending.
+            let bytes = bits.to_le_bytes();
+            // SAFETY: only the published interrupt TD owns this device write.
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer as *mut u8, length);
+            }
+            completed.push((slot, dci, trb));
+        }
+        for (slot, dci, trb) in completed {
+            self.pending_interrupts.remove(&(slot, dci));
             self.event(trb, SUCCESS, TRANSFER_EVENT, slot, dci, 0);
         }
     }
@@ -686,11 +787,8 @@ impl Registers for RegistersModel {
                 }
             }
             0x44 => {
-                if state.running {
-                    0
-                } else {
-                    HCH
-                }
+                state.complete_interrupts();
+                if state.running { 0 } else { HCH }
             }
             0x48 => 1,
             0x80 => {
@@ -712,6 +810,17 @@ impl Registers for RegistersModel {
         let mut state = self.0.borrow_mut();
         state.mmio_writes += 1;
         state.registers.insert(at, value);
+        if at == 0x440 {
+            if let Some(status) = state.root_status.as_mut() {
+                *status &= !(value & PORT_CHANGES);
+                if value & PR != 0 {
+                    *status = *status & !PR | PED | PRC;
+                }
+            }
+            if value & PR != 0 {
+                state.event(1 << 24, SUCCESS, reset::PORT_STATUS_CHANGE, 0, 0, 0);
+            }
+        }
         if at == 0x40 {
             state.running = value & RUN != 0;
             if state.running {

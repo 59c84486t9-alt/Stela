@@ -208,7 +208,7 @@ impl Controller {
         Ok(bytes[0] & 1 != 0)
     }
 
-    fn hub_ssp(&mut self, slot: u8) -> Result<Option<Ssp>, BlockError> {
+    pub(in super::super) fn hub_ssp(&mut self, slot: u8) -> Result<Option<Ssp>, BlockError> {
         let header = self.descriptor(slot, BOS_DESCRIPTOR, 0, 5)?;
         if header.len() != 5 || header[0] != 5 || header[1] != BOS_DESCRIPTOR {
             return Err(BlockError::Unsupported("invalid hub BOS header"));
@@ -252,7 +252,7 @@ impl Controller {
         Ok(())
     }
 
-    fn superspeed_port(
+    pub(in super::super) fn superspeed_port(
         &mut self,
         slot: u8,
         port: u8,

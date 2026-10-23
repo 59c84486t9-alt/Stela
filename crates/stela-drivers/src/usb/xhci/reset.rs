@@ -5,7 +5,7 @@
 use super::*;
 
 pub(super) const DISABLE_SLOT: u32 = 10;
-const PORT_STATUS_CHANGE: u32 = 34;
+pub(super) const PORT_STATUS_CHANGE: u32 = 34;
 const POST_RESET_US: u64 = 50_000;
 pub(super) const EXHAUSTED: &str = "xHCI boot-lifetime non-recycled slot budget exhausted";
 
@@ -226,7 +226,7 @@ impl Controller {
         }
         Ok(())
     }
-    fn reset_root_device(&mut self, attachment: Attachment) -> Result<(), BlockError> {
+    pub(super) fn reset_root_device(&mut self, attachment: Attachment) -> Result<(), BlockError> {
         let port = attachment.root_port;
         let at = self.port_offset(port);
         let before = self.registers.read32(at);

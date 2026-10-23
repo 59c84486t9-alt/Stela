@@ -5,9 +5,11 @@
 //! Cold enumeration of owned USB2 and SuperSpeed hub trees.
 use super::*;
 
-mod descriptor;
+pub(super) mod descriptor;
 #[cfg(test)]
 mod model;
+#[cfg(test)]
+mod runtime_tests;
 mod superspeed;
 #[cfg(test)]
 mod tests;

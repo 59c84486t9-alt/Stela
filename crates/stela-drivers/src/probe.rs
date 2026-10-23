@@ -208,6 +208,8 @@ pub struct Disks {
     /// Complete descriptor inventories, including hubs and unbound devices.
     /// Retention does not grant hardware ownership or guest forwarding.
     pub usb_devices: Vec<xhci::Device>,
+    /// Explicitly polled USB topology owners, including empty controllers.
+    pub usb_hosts: Vec<xhci::Host>,
     /// Storage class owners remain available for explicit media rescan.
     pub usb_storage: Vec<crate::usb::storage::UsbStorage>,
     /// USB HCI transports with retained device-specific initialization results.
@@ -336,6 +338,7 @@ pub unsafe fn probe_with_provider(
                         );
                         disks.usb_inputs.extend(found.inputs);
                         disks.usb_devices.extend(found.devices);
+                        disks.usb_hosts.extend(found.hosts);
                         disks.usb_storage.extend(found.storage);
                         disks.audio.extend(found.audio);
                         disks.bluetooth_bootloaders.extend(found.bootloaders);

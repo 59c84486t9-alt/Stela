@@ -32,7 +32,7 @@ pub(super) fn debounce(
 }
 
 /// The status change endpoint of a hub's interface in `alternate`.
-fn hub_status_endpoint(configuration: &[u8], alternate: u8) -> Option<Endpoint> {
+pub(super) fn hub_status_endpoint(configuration: &[u8], alternate: u8) -> Option<Endpoint> {
     interfaces(configuration)
         .into_iter()
         .find(|interface| interface.class == HUB_CLASS && interface.alternate == alternate)
@@ -41,7 +41,7 @@ fn hub_status_endpoint(configuration: &[u8], alternate: u8) -> Option<Endpoint> 
 
 /// A hub child's route string: the parent's, with this tier's port, which
 /// xHCI holds as 15 at most (Linux `usb_alloc_dev`).
-fn child_route(parent: u32, tier: u8, port: u8) -> u32 {
+pub(super) fn child_route(parent: u32, tier: u8, port: u8) -> u32 {
     parent | u32::from(port.min(MAX_ROUTE_PORT)) << (4 * tier)
 }
 
@@ -226,7 +226,7 @@ impl Controller {
 
     /// A root port's device speed once the port is enabled, or `None` with
     /// nothing connected.
-    fn root_port(&mut self, port: u8) -> Result<Option<u8>, BlockError> {
+    pub(super) fn root_port(&mut self, port: u8) -> Result<Option<u8>, BlockError> {
         let at = self.port_offset(port);
         if self.registers.read32(at) & PP == 0 {
             self.write_port(port, PP);
@@ -643,7 +643,7 @@ impl Controller {
         Ok(())
     }
 
-    fn hub_port_status(&mut self, slot: u8, port: u8) -> Result<(u16, u16), BlockError> {
+    pub(super) fn hub_port_status(&mut self, slot: u8, port: u8) -> Result<(u16, u16), BlockError> {
         let status = self.control(
             slot,
             setup(
@@ -665,7 +665,7 @@ impl Controller {
     }
 
     /// A hub port's device speed once the port is reset and enabled.
-    fn hub_port(&mut self, slot: u8, port: u8) -> Result<Option<u8>, BlockError> {
+    pub(super) fn hub_port(&mut self, slot: u8, port: u8) -> Result<Option<u8>, BlockError> {
         let index = u16::from(port);
         let clear_connection = setup(
             TYPE_CLASS | RECIPIENT_OTHER,

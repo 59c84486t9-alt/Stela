@@ -303,7 +303,7 @@ impl Ledger {
             .map(|hub| hub.self_powered)
             .ok_or(BlockError::Unsupported("USB hub power contract absent"))
     }
-    fn belongs_to(&self, mut slot: u8, ancestor: u8) -> bool {
+    pub(super) fn belongs_to(&self, mut slot: u8, ancestor: u8) -> bool {
         for _ in 0..=MAX_TIERS {
             if slot == ancestor {
                 return true;
@@ -317,6 +317,19 @@ impl Ledger {
             slot = parent;
         }
         false
+    }
+    pub(super) fn port_owner(&self, parent: Option<(u8, u8)>, root: u8) -> Option<u8> {
+        self.entries.iter().enumerate().find_map(|(slot, grant)| {
+            grant
+                .as_ref()
+                .filter(|grant| {
+                    grant.attachment.parent == parent && grant.attachment.root_port == root
+                })
+                .map(|_| slot as u8)
+        })
+    }
+    pub(super) fn hub_ports(&self, slot: u8) -> Option<u8> {
+        self.grant(slot).ok()?.hub.as_ref().map(|hub| hub.ports)
     }
     fn reset_port(&mut self, parent: Option<(u8, u8)>, root: u8) {
         let roots: Vec<u8> = self
@@ -350,7 +363,7 @@ impl Ledger {
 }
 
 impl Controller {
-    fn root_current(&mut self, port: u8, speed: u8) -> Result<u16, BlockError> {
+    pub(super) fn root_current(&mut self, port: u8, speed: u8) -> Result<u16, BlockError> {
         let major = self
             .port_major
             .get(usize::from(port.wrapping_sub(1)))
@@ -437,7 +450,11 @@ impl Controller {
         self.observe_current_ancestors(slot, false)?;
         self.power.configuration_prepare(slot, value)
     }
-    fn observe_current_ancestors(&mut self, slot: u8, include_hub: bool) -> Result<(), BlockError> {
+    pub(super) fn observe_current_ancestors(
+        &mut self,
+        slot: u8,
+        include_hub: bool,
+    ) -> Result<(), BlockError> {
         let attachment = self.power.grant(slot)?.attachment;
         let root_speed = if self
             .port_major

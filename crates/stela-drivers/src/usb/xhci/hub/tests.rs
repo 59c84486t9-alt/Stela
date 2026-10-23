@@ -3,7 +3,7 @@ use super::{model::*, *};
 use crate::bus::dma::RegionAllocator;
 use alloc::collections::BTreeMap;
 
-fn controller(
+pub(super) fn controller(
     dma: &mut dyn DmaAllocator,
     context: usize,
     nodes: BTreeMap<u32, Node>,

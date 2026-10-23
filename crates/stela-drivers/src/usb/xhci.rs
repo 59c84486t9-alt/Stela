@@ -17,8 +17,8 @@
 //! one TRB of at most 64 KiB that never crosses a 64 KiB boundary (the
 //! buffers come from aligned DMA pages). Contexts are 32 or 64 bytes as
 //! HCCPARAMS1.CSZ says; scratchpad pages are given when the controller
-//! asks. Devices are enumerated once, at attach: every powered root port
-//! with a connection is debounced, then reset (USB 2 ports) or trained (USB 3
+//! asks. Initial enumeration at attach visits every powered root port:
+//! connections are debounced, then reset (USB 2 ports) or trained (USB 3
 //! ports, warm-reset out of SS.Inactive or Compliance), with up to four
 //! reset/enumeration attempts as in Linux `hub_port_init`. Supported USB2 and
 //! SuperSpeed hub ports are powered, reset and enumerated with each slot's route
@@ -40,7 +40,10 @@
 //! configuration descriptors and hub status bound downstream current. Refused
 //! rather than handled:
 //! SuperSpeed/hub-routed isochronous endpoints, secondary stream arrays, hubs more than five tiers
-//! deep, and controllers without 4 KiB pages. Hot plug after attach is not seen.
+//! deep, and controllers without 4 KiB pages. The retained [`Host`] explicitly
+//! polls root events and hub bitmaps after attach and returns actual topology
+//! changes. Old IDs remain tombstones; finite slot exhaustion is reported.
+//! Global suspend/resume and hub over-current recovery remain unsupported.
 use super::{audio, bluetooth, cdc, ethernet, hid, storage};
 use crate::{
     Clock, Handoff,
@@ -67,6 +70,7 @@ mod endpoint;
 mod enumerate;
 mod hub;
 mod iso;
+mod lifecycle;
 #[cfg(test)]
 pub(crate) mod model;
 mod power;
@@ -80,6 +84,7 @@ pub use bind::Plan;
 use bind::bind_with_provider;
 pub use descriptor::{Device, Endpoint, Interface, SuperSpeedCompanion, interfaces};
 pub use iso::{IsoCompletion, IsoStatus, IsoTransfer};
+pub use lifecycle::{Changes, Host};
 use ring::{Event, Ring};
 pub use streams::StreamTransfer;
 
@@ -633,7 +638,23 @@ impl Controller {
             let stale = event.kind() == TRANSFER_EVENT
                 && self.slot_ownership.get(usize::from(event.slot()))
                     != Some(&reset::Ownership::Enabled);
-            if !stale && matches!(event.kind(), TRANSFER_EVENT | COMMAND_COMPLETION) {
+            if event.kind() == reset::PORT_STATUS_CHANGE {
+                // Preserve one notification per physical root port until the
+                // runtime owner checks actual PORTSC; commands never consume it.
+                if let Some(old) = self
+                    .pending
+                    .iter_mut()
+                    .find(|old| old.kind() == event.kind() && old.parameter == event.parameter)
+                {
+                    // Coalescing normal notifications must not hide a failed
+                    // notification for that same physical port.
+                    if event.code() != SUCCESS {
+                        *old = event;
+                    }
+                } else {
+                    self.pending.push(event);
+                }
+            } else if !stale && matches!(event.kind(), TRANSFER_EVENT | COMMAND_COMPLETION) {
                 self.pending.push(event);
             }
         }
@@ -769,6 +790,9 @@ fn take_from_firmware(registers: &mut dyn Registers, at: usize, clock: Clock) {
 /// What the class drivers found on one controller.
 #[derive(Default)]
 pub struct Found {
+    /// Runtime topology owner, retained even for an empty/hub-only controller.
+    /// Poll explicitly to obtain new class owners and permanently retired IDs.
+    pub hosts: Vec<Host>,
     /// Native UAC2 owners; idle until an explicit PCM start request.
     pub audio: Vec<audio::UsbAudio>,
     pub vendor_links: Vec<ethernet::UsbEthernet>,
@@ -899,6 +923,9 @@ fn start_with_policies(
     for device in &devices {
         bind_with_provider(&shared, device.clone(), dma, &mut found, firmware);
     }
+    found
+        .hosts
+        .push(Host::new(shared, &devices, dma, &mut found.failures));
     found.devices = devices;
     Ok(found)
 }
