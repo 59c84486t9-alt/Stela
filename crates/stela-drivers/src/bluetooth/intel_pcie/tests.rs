@@ -28,7 +28,7 @@ unsafe fn write(address: u64, b: &[u8]) {
         }
     }
 }
-struct Model {
+pub(super) struct Model {
     identity: Identity,
     regs: BTreeMap<usize, u32>,
     time: Cell<u64>,
@@ -389,7 +389,7 @@ impl Model {
         }
     }
 }
-struct ModelPlatform(Rc<RefCell<Model>>);
+pub(super) struct ModelPlatform(Rc<RefCell<Model>>);
 // SAFETY: explicit independent hardware model. All pointers name retained test
 // DMA, operations are serialized, and the enclosing test backing outlives it.
 unsafe impl Platform for ModelPlatform {
@@ -468,12 +468,12 @@ impl Drop for ModelPlatform {
         assert!(!m.armed, "platform dropped before actual route drain");
     }
 }
-fn allocator(backing: &mut [u64]) -> RegionAllocator {
+pub(super) fn allocator(backing: &mut [u64]) -> RegionAllocator {
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: test retains backing, with exclusive physical/DMA use until drop.
     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) }
 }
-fn transport(
+pub(super) fn transport(
     device: u16,
     dma: &mut RegionAllocator,
 ) -> (Transport<ModelPlatform>, Rc<RefCell<Model>>) {

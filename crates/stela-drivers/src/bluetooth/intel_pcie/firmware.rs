@@ -6,6 +6,7 @@
 use super::{Kind, Packet, Platform, State, Transport};
 use crate::{bluetooth::intel, firmware::Provider};
 use alloc::{boxed::Box, vec::Vec};
+const TRANSCRIPT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct Report {
@@ -39,12 +40,7 @@ pub fn initialize<P: Platform>(
         received_bytes: 0,
     };
     let result = intel::initialize_with_platform(&mut io, provider, platform);
-    // send/poll/D0 service can receive complete packets and then fault before
-    // returning its ordinary batch. Closing/resetting does not erase that queue.
-    // Transfer it on every exit, including a failed physical cleanup.
-    let pending: Vec<_> = io.transport.received.drain(..).collect();
-    io.retain(&pending);
-    match result {
+    match io.finish(result) {
         Ok(report) => Ok(Report {
             initialization: report.into(),
             received: io.received,
@@ -61,6 +57,20 @@ struct Native<'a, P: Platform> {
     received_bytes: usize,
 }
 impl<P: Platform> Native<'_, P> {
+    fn finish<T>(&mut self, result: Result<T, intel::Error>) -> Result<T, intel::Error> {
+        // send/poll/D0 can queue complete packets before a later fault. Closing
+        // does not erase them. Transfer the final batch on every exit and apply
+        // the same limit before publishing success; retain an earlier cause.
+        let pending: Vec<_> = self.transport.received.drain(..).collect();
+        self.retain(&pending);
+        if result.is_ok() && self.received_bytes > TRANSCRIPT_BYTES {
+            return Err(intel::CommandIo::fail(
+                self,
+                intel::Error::Protocol("bounded PCIe firmware transcript"),
+            ));
+        }
+        result
+    }
     fn retain(&mut self, packets: &[Packet]) {
         self.received_bytes += packets
             .iter()
@@ -86,7 +96,7 @@ impl<P: Platform> intel::CommandIo for Native<'_, P> {
         self.retain(&packets);
         // Retain the complete final batch too. The underlying transport caps a
         // batch at128x4KiB, so a refused transcript remains finitely bounded.
-        if self.received_bytes > 16 * 1024 * 1024 {
+        if self.received_bytes > TRANSCRIPT_BYTES {
             return Err(intel::Error::Protocol("bounded PCIe firmware transcript"));
         }
         packets
@@ -143,6 +153,54 @@ impl<P: Platform> intel::CommandIo for Native<'_, P> {
                 cause: Box::new(cause),
                 cleanup: Box::new(cleanup),
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn final_pending_batch_enforces_budget_before_success_and_preserves_prior_error() {
+        for prior_error in [false, true] {
+            let mut backing = alloc::vec![0u64; 1024 * 1024];
+            let mut dma = super::super::tests::allocator(&mut backing);
+            let (mut transport, _) = super::super::tests::transport(0xa876, &mut dma);
+            transport.start().unwrap();
+            let packet = Packet {
+                kind: Kind::Event,
+                bytes: alloc::vec![0xff, 1, 9],
+                padding: alloc::vec![0xa5],
+                receive_header: [0; 8],
+                completion: 1 << 31,
+                diagnostic: false,
+            };
+            transport.received.push_back(packet.clone());
+            let mut native = Native {
+                transport: &mut transport,
+                received: Vec::new(),
+                received_bytes: TRANSCRIPT_BYTES - 1,
+            };
+            let result = native.finish(if prior_error {
+                Err(intel::Error::Timeout("original cause"))
+            } else {
+                Ok(())
+            });
+            assert_eq!(native.received, [packet]);
+            assert!(native.transport.received.is_empty());
+            if prior_error {
+                assert!(matches!(
+                    result,
+                    Err(intel::Error::Timeout("original cause"))
+                ));
+                assert_eq!(native.transport.state(), State::Rom);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(intel::Error::Protocol("bounded PCIe firmware transcript"))
+                ));
+                assert_eq!(native.transport.state(), State::Closed);
+            }
         }
     }
 }
