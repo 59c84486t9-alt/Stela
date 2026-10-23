@@ -310,10 +310,9 @@ impl XstateOwner {
         let controls = read_controls(&layout);
         if let SaveFormat::Xsave { mask } | SaveFormat::XsaveLegacySse { mask } =
             layout.format(controls)?
+            && (cpuid(0xd, 0).ebx as usize) < layout.enabled_extent(mask)
         {
-            if (cpuid(0xd, 0).ebx as usize) < layout.enabled_extent(mask) {
-                return Err(LayoutError::Geometry);
-            }
+            return Err(LayoutError::Geometry);
         }
         Ok(Self {
             processor,
