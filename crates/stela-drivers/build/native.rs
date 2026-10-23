@@ -178,7 +178,11 @@ impl Linux {
             wrappers,
             hosted: Vec::new(),
         };
-        let kernel = sources(&format!("{COMPAT}/kernel"));
+        let mut kernel = sources(&format!("{COMPAT}/kernel"));
+        // Keep Linux's complete format inventory and arithmetic unchanged.
+        // Format metadata is shared by every driver's mode-setting path.
+        kernel.push(PathBuf::from(format!("{DRM}/drm_fourcc.c")));
+        println!("cargo:rerun-if-changed={DRM}/drm_fourcc.c");
         let mut build = configure();
         linux.apply(&mut build, None, &[], None);
         check_declarations(&build, &kernel);
@@ -191,6 +195,21 @@ impl Linux {
             linux.hosted = vec![archive(&kernel_build, "linux-hosted", &kernel), services];
         }
         linux
+    }
+
+    pub fn tests(&self, tests: &mut Tests) {
+        let Some(mut build) = hosted() else {
+            return;
+        };
+        self.apply(&mut build, None, &[], None);
+        build.define("STELA_LINUX_DRM_FORMAT_TEST", None);
+        let archives = self.hosted.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        tests.add(
+            &build,
+            "linux_drm_formats",
+            &format!("{COMPAT}/kernel/drm.c"),
+            &archives,
+        );
     }
 
     /// Kbuild's definitions, flags and forced includes, and system include
@@ -210,7 +229,12 @@ impl Linux {
         // As Kbuild builds, no headers outside Linux's trees: neither the
         // host's C library nor the compiler's own. Stela's C code gets the C
         // headers it uses from `compat`, over Linux's types.
-        build.flag("-nostdinc").define("__KERNEL__", None);
+        build
+            .flag("-nostdinc")
+            .define("__KERNEL__", None)
+            // Linux explicitly supports static reuse without its ELF module
+            // export records (also used by its own UEFI stub).
+            .define("__DISABLE_EXPORTS", None);
         for flag in [
             "-fms-extensions",
             "-fno-strict-aliasing",

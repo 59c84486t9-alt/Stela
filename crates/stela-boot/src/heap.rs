@@ -9,6 +9,7 @@
 use core::{
     alloc::{GlobalAlloc, Layout},
     cell::UnsafeCell,
+    marker::PhantomData,
     ptr,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -64,7 +65,8 @@ pub struct Heap {
     state: UnsafeCell<State>,
 }
 // SAFETY: all list/header mutations use the real acquire/release exclusion.
-// The loader excludes interrupts, reentry, migration, other PEs and firmware.
+// UEFI callers mask local interrupts before acquiring the lock. Critical
+// sections cannot migrate/block; NMI and fault handlers never reenter the heap.
 unsafe impl Sync for Heap {}
 impl Heap {
     pub const fn new() -> Self {
@@ -82,6 +84,14 @@ impl Heap {
         }
     }
     fn lock(&self) -> Guard<'_> {
+        // Save before spinning: an ISR must not wait for its interrupted
+        // context to release this same lock. No state access crosses the asm.
+        #[cfg(target_os = "uefi")]
+        let flags: usize;
+        #[cfg(target_os = "uefi")]
+        unsafe {
+            core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags);
+        }
         while self
             .held
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -89,7 +99,12 @@ impl Heap {
         {
             core::hint::spin_loop();
         }
-        Guard(self)
+        Guard {
+            heap: self,
+            #[cfg(target_os = "uefi")]
+            flags,
+            same_cpu: PhantomData,
+        }
     }
     /// # Safety
     /// The entire aligned extent is live RW+NX boot-private Normal-WB RAM, has
@@ -141,10 +156,23 @@ impl Heap {
         }
     }
 }
-struct Guard<'a>(&'a Heap);
+struct Guard<'a> {
+    heap: &'a Heap,
+    #[cfg(target_os = "uefi")]
+    flags: usize,
+    // A saved interrupt state belongs to the acquiring CPU, even though the
+    // underlying heap may be shared. Do not make this guard Send or Sync.
+    same_cpu: PhantomData<*mut ()>,
+}
 impl Drop for Guard<'_> {
     fn drop(&mut self) {
-        self.0.held.store(false, Ordering::Release);
+        self.heap.held.store(false, Ordering::Release);
+        #[cfg(target_os = "uefi")]
+        // SAFETY: this CPU's saved flags; the guard cannot migrate and no
+        // lock/state access spans restoration. An incoming clear IF stays clear.
+        unsafe {
+            core::arch::asm!("push {}", "popfq", in(reg) self.flags);
+        }
     }
 }
 fn aligned(value: usize, alignment: usize) -> Option<usize> {
@@ -318,5 +346,111 @@ unsafe fn release(state: &mut State, pointer: *mut u8) {
         unsafe {
             (*previous).next = node;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{boxed::Box, sync::Barrier, thread};
+
+    #[repr(align(4096))]
+    struct Ram([u8; 128 * 1024]);
+
+    fn backing() -> Box<Ram> {
+        Box::new(Ram([0; 128 * 1024]))
+    }
+
+    #[test]
+    fn aligned_extents_coalesce_after_exhaustion() {
+        let heap = Heap::new();
+        let mut ram = backing();
+        let layout = Layout::from_size_align(4097, 4096).unwrap();
+        unsafe {
+            assert!(heap.alloc(layout).is_null());
+            heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
+            let mut blocks = Vec::new();
+            loop {
+                let block = heap.alloc(layout);
+                if block.is_null() {
+                    break;
+                }
+                assert!((block as usize).is_multiple_of(4096));
+                blocks.push(block);
+            }
+            assert!(blocks.len() > 8);
+            // Interleave holes to exercise coalescing on both sides.
+            for block in blocks.iter().step_by(2) {
+                heap.dealloc(*block, layout);
+            }
+            for block in blocks.iter().skip(1).step_by(2) {
+                heap.dealloc(*block, layout);
+            }
+        }
+        let usage = heap.usage();
+        assert_eq!(usage.live, 0);
+        assert_eq!(usage.carved, 0);
+        assert_eq!(usage.largest, ram.0.len());
+        assert!(usage.peak > 0);
+    }
+
+    #[test]
+    fn size_class_reuse_preserves_other_live_bytes() {
+        let heap = Heap::new();
+        let mut ram = backing();
+        let layout = Layout::from_size_align(17, 16).unwrap();
+        unsafe {
+            heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
+            let a = heap.alloc(layout);
+            let b = heap.alloc(layout);
+            assert!(!a.is_null() && !b.is_null() && a != b);
+            b.write_bytes(0x5a, layout.size());
+            heap.dealloc(a, layout);
+            let reused = heap.alloc(layout);
+            assert_eq!(reused, a);
+            reused.write_bytes(0xa5, layout.size());
+            assert!(
+                core::slice::from_raw_parts(b, layout.size())
+                    .iter()
+                    .all(|v| *v == 0x5a)
+            );
+            heap.dealloc(reused, layout);
+            heap.dealloc(b, layout);
+        }
+        assert_eq!(heap.usage().live, 0);
+    }
+
+    #[test]
+    fn concurrent_allocations_preserve_data_and_reclaim_live_bytes() {
+        let heap = Heap::new();
+        let mut ram = backing();
+        unsafe { heap.initialize(ram.0.as_mut_ptr(), ram.0.len()) };
+        let barrier = Barrier::new(8);
+        thread::scope(|scope| {
+            for id in 1..=8 {
+                let heap = &heap;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let layout = Layout::from_size_align(257, 64).unwrap();
+                    for _ in 0..64 {
+                        unsafe {
+                            let block = heap.alloc(layout);
+                            assert!(!block.is_null() && (block as usize).is_multiple_of(64));
+                            block.write_bytes(id, layout.size());
+                            barrier.wait();
+                            assert!(
+                                core::slice::from_raw_parts(block, layout.size())
+                                    .iter()
+                                    .all(|byte| *byte == id)
+                            );
+                            heap.dealloc(block, layout);
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(heap.usage().live, 0);
+        assert_eq!(heap.usage().carved, 0);
+        assert_eq!(heap.usage().largest, ram.0.len());
     }
 }

@@ -1,8 +1,9 @@
 //! Native system-RAM pins backed by the mount's existing reusable heap.
 //!
 //! Allocation and the final release of any pin/CPU/DMA mapping must occur in
-//! process or deferred-work context. The existing heap does not exclude hard
-//! IRQ reentry. This service is not a VRAM allocator or an IOMMU.
+//! process or deferred-work context. Raw heap exclusion is maskable-IRQ safe;
+//! that does not qualify pin/cache checks or mapping lifetime transitions in
+//! an ISR. This service is not a VRAM allocator or an IOMMU.
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     alloc::{GlobalAlloc, Layout},
