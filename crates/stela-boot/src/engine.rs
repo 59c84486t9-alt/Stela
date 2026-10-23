@@ -1525,6 +1525,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             native_processors.expect("validated native roster"),
             &worker_ram,
             native_tsc_base,
+            options.native_bootstrap_check,
         )
     }
     .unwrap_or_else(|error| {

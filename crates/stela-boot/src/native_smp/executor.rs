@@ -52,6 +52,8 @@ struct Argument {
     processor: topology::Processor,
     source: topology::Snapshot,
     effective_pat: u64,
+    // An explicit authored diagnostic request, never execution/ISA authority.
+    fp_qualification: bool,
     stack_bottom: u64,
     stack_top: u64,
     config: UnsafeCell<Option<host::Config>>,
@@ -199,6 +201,9 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
         let mut owner =
             unsafe { host::install(config) }.map_err(|_| "AP private host installation failed")?;
         super::context_check::check(&mut owner.host())?;
+        if argument.fp_qualification {
+            host::fp_diagnostic::check(&mut owner.host())?;
+        }
         // Retain the actual installed private root/control state, not the
         // earlier loader root observed before Host initialization.
         let installed =
@@ -348,6 +353,7 @@ pub(crate) unsafe fn start(
     capture: &'static firmware::Capture,
     ram: &[host::RamRange],
     tsc_base: u64,
+    fp_qualification: bool,
 ) -> Result<Executors, StartupFailure> {
     let cores = handoff.native_resources.cores as usize;
     if cores == 0 || cores > capture.core_count as usize || handoff.tsc_hz == 0 {
@@ -419,6 +425,7 @@ pub(crate) unsafe fn start(
             processor,
             source: memory_source,
             effective_pat,
+            fp_qualification,
             stack_bottom: layout::stack() + slot as u64 * resources::STACK_STRIDE + PAGE,
             stack_top: layout::stack()
                 + slot as u64 * resources::STACK_STRIDE
