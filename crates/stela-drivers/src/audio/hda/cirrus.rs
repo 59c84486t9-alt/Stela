@@ -1,28 +1,54 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! CS4206/CS4207 held-D0 analog startup adapted from Linux
+//! CS4206/CS4207/CS4208 held-D0 analog startup adapted from Linux
 //! sound/hda/codecs/cirrus/cs420x.c at
 //! a804c5742bff224d4cb4d25dd383554d598be32b.
 //! Copyright (c) 2009 Takashi Iwai <tiwai@suse.de>.
 //! GPL version2 combines the upstream GPL-2.0-or-later codec with native HDA.
 use super::{
-    AnalogRoute, CodecGraph, Controller, PinConnection, PinOptions, PinSense, Registers, StreamId,
-    Verb, WidgetKind, routing::RoutePolicy,
+    AnalogRoute, CodecGraph, Controller, PinOptions, PinSense, Registers, StreamId, Verb,
+    WidgetKind, routing::RoutePolicy,
 };
 use crate::{audio::Error, bus::i2c::Timer};
 use alloc::vec::Vec;
 
-const VENDOR: u8 = 0x11;
+mod cs4208;
+mod cs420x;
 const GROUP: u8 = 1;
 const PROCESSING: u32 = 1 << 6;
 const POWER: u32 = 1 << 10;
 const DIGITAL: u32 = 1 << 9;
-const SHARED_PINS: [u8; 3] = [0x0e, 0x12, 0x15];
-const DAC_CONFIG: u16 = 0x146a;
-const ADC_CONFIG: u16 = 0x000a;
-const BEEP_CONFIG: u16 = 0x0007;
-const SPDIF_CONFIG: u16 = 0x000a;
-const ERRATA_COEFFICIENT_WRITES: usize = 6;
-
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CirrusProfile {
+    Cs420x,
+    Cs4208,
+}
+impl CirrusProfile {
+    fn vendor(self) -> u8 {
+        match self {
+            Self::Cs420x => 0x11,
+            Self::Cs4208 => 0x24,
+        }
+    }
+    fn coefficient_count(self) -> u32 {
+        match self {
+            Self::Cs420x => 24,
+            Self::Cs4208 => 53,
+        }
+    }
+    fn route_policy(self) -> RoutePolicy {
+        match self {
+            Self::Cs420x => RoutePolicy::SingleAdc,
+            Self::Cs4208 => RoutePolicy::CirrusCs4208,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CirrusInputAmplifier {
+    pub node: u8,
+    pub observed_caps: u32,
+    pub effective_caps: u32,
+    pub effective_channels: u8,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CirrusCoefficient {
     pub index: u16,
@@ -30,11 +56,14 @@ pub struct CirrusCoefficient {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CirrusReport {
+    pub profile: CirrusProfile,
+    pub processing_node: u8,
+    pub input_amplifiers: Vec<CirrusInputAmplifier>,
     pub codec_id: u32,
     pub revision_id: u32,
     pub subsystem_id: u32,
-    /// Six protected errata coefficient writes preserve source ordering. Their
-    /// command acknowledgements do not invent getters for transient test keys.
+    /// CS4206/7 acknowledge six protected errata coefficient writes; CS4208
+    /// has no such sequence. No transient-key stable getters are invented.
     pub errata_coefficients_acknowledged: usize,
     pub shared_pins: Vec<(u8, u32)>,
     /// Final ordinary configuration values, each read back through real verbs.
@@ -42,6 +71,8 @@ pub struct CirrusReport {
 }
 #[derive(Clone, PartialEq, Eq)]
 struct Authority {
+    profile: CirrusProfile,
+    input_amplifiers: Vec<CirrusInputAmplifier>,
     processing_caps: u32,
     shared_pins: Vec<(u8, u32)>,
     power_nodes: Vec<(u8, u32)>,
@@ -58,11 +89,11 @@ pub(super) struct State {
     quiet: bool,
     authority_lost: bool,
 }
-fn supported(id: u32) -> Result<(), Error> {
-    if matches!(id, 0x1013_4206 | 0x1013_4207) {
-        Ok(())
-    } else {
-        Err(Error::UnsupportedTopology)
+fn profile(id: u32) -> Result<CirrusProfile, Error> {
+    match id {
+        0x1013_4206 | 0x1013_4207 => Ok(CirrusProfile::Cs420x),
+        0x1013_4208 => Ok(CirrusProfile::Cs4208),
+        _ => Err(Error::UnsupportedTopology),
     }
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
@@ -81,7 +112,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.stopped {
             return Err(Error::Shutdown);
         }
-        supported(graph.vendor_id)
+        profile(graph.vendor_id).map(|_| ())
     }
     fn cirrus_authority(&mut self, graph: &CodecGraph) -> Result<Authority, Error> {
         let group = graph
@@ -89,26 +120,37 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .iter()
             .find(|group| group.node == GROUP && group.function_type & 255 == 1)
             .ok_or(Error::UnsupportedTopology)?;
-        let vendor = graph.widget(VENDOR).ok_or(Error::UnsupportedTopology)?;
+        let selected = profile(graph.vendor_id)?;
+        let vendor_node = selected.vendor();
+        let vendor = graph
+            .widget(vendor_node)
+            .ok_or(Error::UnsupportedTopology)?;
         if vendor.kind != WidgetKind::Vendor(15) || vendor.capabilities & PROCESSING == 0 {
             return Err(Error::UnsupportedTopology);
         }
-        let processing_caps = self.verb(Verb::short(graph.address, VENDOR, 0xf00, 0x10)?)?;
-        if processing_caps == u32::MAX || (processing_caps >> 8) & 255 < 24 {
+        let processing_caps = self.verb(Verb::short(graph.address, vendor_node, 0xf00, 0x10)?)?;
+        if processing_caps == u32::MAX
+            || (processing_caps >> 8) & 255 < selected.coefficient_count()
+        {
             return Err(Error::UnsupportedTopology);
         }
         let mut power_nodes = Vec::new();
-        for (node, kind) in [
-            (7, WidgetKind::Input),
-            (8, WidgetKind::Output),
-            (VENDOR, WidgetKind::Vendor(15)),
-        ] {
+        let nodes = if selected == CirrusProfile::Cs420x {
+            alloc::vec![
+                (7, WidgetKind::Input),
+                (8, WidgetKind::Output),
+                (vendor_node, WidgetKind::Vendor(15))
+            ]
+        } else {
+            alloc::vec![(vendor_node, WidgetKind::Vendor(15))]
+        };
+        for (node, kind) in nodes {
             let widget = graph.widget(node).ok_or(Error::UnsupportedTopology)?;
-            if widget.kind != kind || (node != VENDOR && widget.capabilities & DIGITAL == 0) {
+            if widget.kind != kind || (node != vendor_node && widget.capabilities & DIGITAL == 0) {
                 return Err(Error::UnsupportedTopology);
             }
             if widget.capabilities & POWER == 0 {
-                if node != VENDOR {
+                if node != vendor_node {
                     return Err(Error::UnsupportedTopology);
                 }
                 continue;
@@ -125,56 +167,49 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             }
             power_nodes.push((node, effective));
         }
-        let mut shared_pins = Vec::new();
-        for node in SHARED_PINS {
-            let pin = graph.widget(node).ok_or(Error::UnsupportedTopology)?;
-            let caps = pin.pin_capabilities.ok_or(Error::UnsupportedTopology)?;
-            let configuration = pin.pin_configuration().ok_or(Error::UnsupportedTopology)?;
-            let direction = if node == 0x15 { 1 << 4 } else { 1 << 5 };
-            if pin.kind != WidgetKind::Pin
-                || pin.capabilities & DIGITAL == 0
-                || caps == u32::MAX
-                || caps & direction == 0
-                || configuration.raw == u32::MAX
-            {
-                return Err(Error::UnsupportedTopology);
-            }
-            if self.verb(Verb::short(graph.address, node, 0xf1c, 0)?)? != configuration.raw {
-                return Err(Error::InvalidCodecGraph);
-            }
-            shared_pins.push((node, configuration.raw));
-        }
+        let (shared_pins, input_amplifiers) = match selected {
+            CirrusProfile::Cs420x => (self.cs420x_shared_pins(graph)?, Vec::new()),
+            CirrusProfile::Cs4208 => (Vec::new(), self.cs4208_input_amplifiers(graph)?),
+        };
         Ok(Authority {
+            profile: selected,
             processing_caps,
             shared_pins,
             power_nodes,
+            input_amplifiers,
         })
     }
-    fn cirrus_index(&mut self, address: u8, index: u16) -> Result<(), Error> {
-        self.verb(Verb::long(address, VENDOR, 5, index)?)?;
-        if self.verb(Verb::long(address, VENDOR, 13, 0)?)? != u32::from(index) {
+    fn cirrus_index(&mut self, address: u8, vendor: u8, index: u16) -> Result<(), Error> {
+        self.verb(Verb::long(address, vendor, 5, index)?)?;
+        if self.verb(Verb::long(address, vendor, 13, 0)?)? != u32::from(index) {
             return Err(Error::CoefficientRejected {
-                node: VENDOR,
+                node: vendor,
                 index,
             });
         }
         Ok(())
     }
-    fn cirrus_read(&mut self, address: u8, index: u16) -> Result<u16, Error> {
-        self.cirrus_index(address, index)?;
-        u16::try_from(self.verb(Verb::long(address, VENDOR, 12, 0)?)?).map_err(|_| {
+    fn cirrus_read(&mut self, address: u8, vendor: u8, index: u16) -> Result<u16, Error> {
+        self.cirrus_index(address, vendor, index)?;
+        u16::try_from(self.verb(Verb::long(address, vendor, 12, 0)?)?).map_err(|_| {
             Error::CoefficientRejected {
-                node: VENDOR,
+                node: vendor,
                 index,
             }
         })
     }
-    fn cirrus_coefficient_ack(&mut self, address: u8, index: u16, value: u16) -> Result<(), Error> {
-        if self.verb(Verb::long(address, VENDOR, 5, index)?)? == u32::MAX
-            || self.verb(Verb::long(address, VENDOR, 4, value)?)? == u32::MAX
+    fn cirrus_coefficient_ack(
+        &mut self,
+        address: u8,
+        vendor: u8,
+        index: u16,
+        value: u16,
+    ) -> Result<(), Error> {
+        if self.verb(Verb::long(address, vendor, 5, index)?)? == u32::MAX
+            || self.verb(Verb::long(address, vendor, 4, value)?)? == u32::MAX
         {
             return Err(Error::CoefficientRejected {
-                node: VENDOR,
+                node: vendor,
                 index,
             });
         }
@@ -183,40 +218,21 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     fn cirrus_write(
         &mut self,
         address: u8,
+        vendor: u8,
         index: u16,
         value: u16,
     ) -> Result<CirrusCoefficient, Error> {
-        self.cirrus_coefficient_ack(address, index, value)?;
-        if self.cirrus_read(address, index)? != value {
+        self.cirrus_coefficient_ack(address, vendor, index, value)?;
+        if self.cirrus_read(address, vendor, index)? != value {
             return Err(Error::CoefficientRejected {
-                node: VENDOR,
+                node: vendor,
                 index,
             });
         }
         Ok(CirrusCoefficient { index, value })
     }
-    fn cirrus_processing(&mut self, address: u8, state: u8) -> Result<(), Error> {
-        self.route_control(address, VENDOR, 0x703, 0xf03, state)
-    }
-    fn cirrus_errata(&mut self, address: u8, authority: &Authority) -> Result<(), Error> {
-        self.power_d0(address, GROUP)?;
-        if authority
-            .power_nodes
-            .iter()
-            .any(|(node, _)| *node == VENDOR)
-        {
-            self.power_d0(address, VENDOR)?;
-        }
-        self.cirrus_processing(address, 1)?;
-        for (index, value) in [(8, 0x9999), (0x17, 0xa412), (1, 9)] {
-            self.cirrus_coefficient_ack(address, index, value)?;
-        }
-        self.power_d0(address, 7)?;
-        self.power_d0(address, 8)?;
-        for (index, value) in [(0x17, 0x2412), (8, 0), (1, 8)] {
-            self.cirrus_coefficient_ack(address, index, value)?;
-        }
-        self.cirrus_processing(address, 0)
+    fn cirrus_processing(&mut self, address: u8, vendor: u8, state: u8) -> Result<(), Error> {
+        self.route_control(address, vendor, 0x703, 0xf03, state)
     }
     fn cirrus_active(&mut self, graph: &CodecGraph) -> Result<State, Error> {
         self.cirrus_guard(graph)?;
@@ -236,13 +252,15 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             {
                 return Err(Error::InvalidCodecGraph);
             }
-            if self.verb(Verb::short(graph.address, VENDOR, 0xf03, 0)?)? != 1 {
+            let vendor = state.authority.profile.vendor();
+            if self.verb(Verb::short(graph.address, vendor, 0xf03, 0)?)? != 1 {
                 return Err(Error::RouteRejected);
             }
             for coefficient in &state.coefficients {
-                if self.cirrus_read(graph.address, coefficient.index)? != coefficient.value {
+                if self.cirrus_read(graph.address, vendor, coefficient.index)? != coefficient.value
+                {
                     return Err(Error::CoefficientRejected {
-                        node: VENDOR,
+                        node: vendor,
                         index: coefficient.index,
                     });
                 }
@@ -262,7 +280,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(state)
     }
-    /// Source-qualified cold startup and shared-pin mux configuration only.
+    /// Source-qualified cold startup, shared-pin mux and analog capabilities.
     /// No OEM GPIO, pin rewrite, automute or digital-stream policy is inferred.
     pub fn initialize_cirrus_codec(&mut self, graph: &CodecGraph) -> Result<CirrusReport, Error> {
         self.cirrus_guard(graph)?;
@@ -299,37 +317,32 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             authority_lost: false,
         });
         let result = (|| {
-            // The donor applies this sequence unconditionally to both CS4206
-            // and CS4207, regardless of revision; no source effect is skipped.
-            self.cirrus_errata(graph.address, &authority)?;
-            self.cirrus_processing(graph.address, 1)?;
-            let mut coefficients = alloc::vec![
-                self.cirrus_write(graph.address, 3, DAC_CONFIG)?,
-                self.cirrus_write(graph.address, 2, ADC_CONFIG)?,
-            ];
-            self.cirrus_write(graph.address, 4, BEEP_CONFIG)?;
-            let active = |node| {
-                authority.shared_pins.iter().any(|(pin, raw)| {
-                    *pin == node
-                        && (super::PinConfiguration { raw: *raw }).connection()
-                            != PinConnection::None
-                })
+            let selected = authority.profile;
+            let vendor = selected.vendor();
+            self.power_d0(graph.address, GROUP)?;
+            if authority
+                .power_nodes
+                .iter()
+                .any(|(node, _)| *node == vendor)
+            {
+                self.power_d0(graph.address, vendor)?;
+            }
+            let coefficients = match selected {
+                CirrusProfile::Cs420x => self.initialize_cs420x_coefficients(graph, &authority)?,
+                CirrusProfile::Cs4208 => self.initialize_cs4208_coefficients(graph)?,
             };
-            let mut beep = self.cirrus_read(graph.address, 4)?;
-            if active(0x12) {
-                beep |= 1 << 4;
-            }
-            if active(0x0e) {
-                beep |= 1 << 3;
-            }
-            coefficients.push(self.cirrus_write(graph.address, 4, beep)?);
-            let spdif = SPDIF_CONFIG | if active(0x15) { 0x4000 } else { 0 };
-            coefficients.push(self.cirrus_write(graph.address, 1, spdif)?);
             Ok(CirrusReport {
+                profile: selected,
+                processing_node: vendor,
+                input_amplifiers: authority.input_amplifiers.clone(),
                 codec_id: graph.vendor_id,
                 revision_id: graph.revision_id,
                 subsystem_id: live.subsystem,
-                errata_coefficients_acknowledged: ERRATA_COEFFICIENT_WRITES,
+                errata_coefficients_acknowledged: if selected == CirrusProfile::Cs420x {
+                    cs420x::ERRATA_COEFFICIENT_WRITES
+                } else {
+                    0
+                },
                 shared_pins: authority.shared_pins.clone(),
                 coefficients,
             })
@@ -343,8 +356,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         result
     }
-    /// Use the actual analog path with source single_adc_amp index0. Standard
-    /// per-pin EAPD still follows the caller's explicit electrical options.
+    /// Use the actual analog path with the retained source ADC/stereo/gain
+    /// policy. Per-pin EAPD follows the caller's explicit electrical options.
     pub fn configure_cirrus_route(
         &mut self,
         graph: &CodecGraph,
@@ -354,23 +367,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         options: PinOptions,
     ) -> Result<(), Error> {
         self.cirrus_guard(graph)?;
-        self.preflight_analog_route_policy(
-            graph,
-            route,
-            stream,
-            channel,
-            options,
-            RoutePolicy::SingleAdc,
-        )?;
+        let policy = profile(graph.vendor_id)?.route_policy();
+        self.preflight_analog_route_policy(graph, route, stream, channel, options, policy)?;
         self.cirrus_active(graph)?;
-        self.configure_analog_route_policy(
-            graph,
-            route,
-            stream,
-            channel,
-            options,
-            RoutePolicy::SingleAdc,
-        )
+        self.configure_analog_route_policy(graph, route, stream, channel, options, policy)
     }
     pub fn poll_cirrus_pin_sense(
         &mut self,

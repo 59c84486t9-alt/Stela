@@ -148,8 +148,11 @@ pub struct Widget {
 
 impl Widget {
     pub fn channels(&self) -> u8 {
-        (((self.capabilities >> 13) & 7) as u8 * 2) + (self.capabilities as u8 & 1) + 1
+        widget_channels(self.capabilities)
     }
+}
+pub(super) fn widget_channels(capabilities: u32) -> u8 {
+    (((capabilities >> 13) & 7) as u8 * 2) + (capabilities as u8 & 1) + 1
 }
 
 #[derive(Clone, Debug)]
@@ -371,6 +374,26 @@ pub(super) struct LiveAnalogCodec {
     pub pins: Vec<(u8, u32)>,
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
+    pub(super) fn validate_live_input_amplifier(
+        &mut self,
+        address: u8,
+        group: u8,
+        widget: &Widget,
+    ) -> Result<u32, Error> {
+        if widget.capabilities & WCAP_IN_AMP == 0 || widget.input_amplifier.is_none() {
+            return Err(Error::UnsupportedTopology);
+        }
+        let node = if widget.capabilities & WCAP_AMP_OVERRIDE != 0 {
+            widget.node
+        } else {
+            group
+        };
+        let caps = self.parameter(address, node, PAR_AMP_IN)?;
+        if caps == u32::MAX || widget.input_amplifier != Some(caps) {
+            return Err(Error::InvalidCodecGraph);
+        }
+        Ok(caps)
+    }
     pub(super) fn validate_live_output_amplifier(
         &mut self,
         address: u8,

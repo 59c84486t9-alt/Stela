@@ -218,6 +218,17 @@ pub(super) enum RoutePolicy {
     SingleAdc,
     ConexantCx20561,
     SigmatelStac922x,
+    CirrusCs4208,
+}
+fn effective_channels(widget: &Widget, policy: RoutePolicy) -> u8 {
+    super::codec::widget_channels(
+        widget.capabilities
+            | if policy == RoutePolicy::CirrusCs4208 && widget.node == 0x18 {
+                1
+            } else {
+                0
+            },
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -323,10 +334,11 @@ fn plan(
         eapd,
     };
     plan.power.push(group.node);
-    let channels = widget(group, route.converter)?.channels();
+    let channels = effective_channels(widget(group, route.converter)?, policy);
     for (offset, node) in route.nodes.iter().enumerate() {
         let current = widget(group, *node)?;
-        if current.channels() > 2 || current.channels() < channels {
+        let current_channels = effective_channels(current, policy);
+        if current_channels > 2 || current_channels < channels {
             return Err(Error::UnsupportedTopology);
         }
         if let Some(power) = current.power_states {
@@ -370,7 +382,12 @@ fn plan(
             WidgetKind::Mixer | WidgetKind::Selector => (true, true),
             _ => return Err(Error::UnsupportedTopology),
         };
-        if input && let Some(caps) = current.input_amplifier {
+        if input && let Some(mut caps) = current.input_amplifier {
+            if policy == RoutePolicy::CirrusCs4208 && matches!(*node, 0x18 | 0x1b | 0x1c) {
+                // cs4208_fix_amp_caps corrects only the 0dB offset; retain
+                // every observed step-size/range/mute bit in this policy.
+                caps = (caps & !0x7f) | 2;
+            }
             let index = if policy == RoutePolicy::SingleAdc && current.kind == WidgetKind::Input {
                 0
             } else {
@@ -382,7 +399,7 @@ fn plan(
                         *node,
                         false,
                         other,
-                        current.channels(),
+                        current_channels,
                         caps,
                         other != index,
                     )?);
@@ -392,7 +409,7 @@ fn plan(
                     *node,
                     false,
                     index,
-                    current.channels(),
+                    current_channels,
                     caps,
                     false,
                 )?);
@@ -411,7 +428,7 @@ fn plan(
                 // capabilities intact; only this owned path uses the policy.
                 caps = STAC922X_CAPTURE_AMP_CAPS;
             }
-            let mut amp = amplifier(*node, true, 0, current.channels(), caps, false)?;
+            let mut amp = amplifier(*node, true, 0, current_channels, caps, false)?;
             // add_cx5051_fake_mutes authorizes minimum volume as mute only
             // for these two DAC outputs; physical mute bits retain precedence.
             amp.minimum_mute = policy == RoutePolicy::ConexantCx20561
@@ -543,6 +560,15 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(Error::InvalidStream);
         }
         self.validate_converter(graph, route.converter, id, channel)?;
+        if effective_channels(
+            graph
+                .widget(route.converter)
+                .ok_or(Error::InvalidCodecGraph)?,
+            policy,
+        ) > self.stream_format(id)?.channels - channel
+        {
+            return Err(Error::InvalidFormat);
+        }
         let plan = plan(graph, route, options, policy)?;
         if self.routes.iter().any(|(owner, previous)| {
             *owner == id
