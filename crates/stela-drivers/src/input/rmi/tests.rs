@@ -754,3 +754,5 @@ fn smbus_waits_for_firmware_after_each_actual_companion_reset_before_mode_read()
 mod f12_tests;
 
 mod f11_tests;
+
+mod f1a_tests;
