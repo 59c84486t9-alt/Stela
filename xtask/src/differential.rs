@@ -747,25 +747,40 @@ impl Differential {
             let path = match &self.checked_memory_report {
                 Some(path) => path.clone(),
                 None => {
-                    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_nanos();
                     root().join(format!(".stela/differential/checked-memory-{stamp}.jsonl"))
                 }
             };
             if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
                 std::fs::create_dir_all(parent)?;
             }
-            let mut evidence = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
-                .with_context(|| format!("create fresh checked oracle evidence {}", path.display()))?;
-            writeln!(evidence, "{}", serde_json::json!({
-                "kind": "checked-memory-oracle-input", "seed": self.seed,
-                "states": self.states, "fields": self.fields, "form": self.form,
-                "profile": self.profile, "target": self.target.map(|target| target.id()),
-                "scope": "EL0 LE nonstreaming ASIMD A=0 untagged Normal WB; structure fault assigned lanes/store-prefix are oracle-limited; all other state compares"
-            }))?;
+            let mut evidence = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .with_context(|| {
+                    format!("create fresh checked oracle evidence {}", path.display())
+                })?;
+            writeln!(
+                evidence,
+                "{}",
+                serde_json::json!({
+                    "kind": "checked-memory-oracle-input", "seed": self.seed,
+                    "states": self.states, "fields": self.fields, "form": self.form,
+                    "profile": self.profile, "target": self.target.map(|target| target.id()),
+                    "scope": "EL0 LE nonstreaming ASIMD A=0 untagged Normal WB; structure fault assigned lanes/store-prefix are oracle-limited; all other state compares"
+                })
+            )?;
             println!("checked fault evidence: {}", path.display());
             report.checked_faults = Some(evidence);
         }
-        let batch_words = if self.checked_memory { CHECKED_BATCH_WORDS } else { BATCH_WORDS };
+        let batch_words = if self.checked_memory {
+            CHECKED_BATCH_WORDS
+        } else {
+            BATCH_WORDS
+        };
         let mut batch = Vec::with_capacity(batch_words);
         let mut skipped = 0;
         if self.system_matrix {
@@ -822,9 +837,15 @@ impl Differential {
             report.skipped
         );
         if self.checked_memory {
-            println!("{} checked structure fault frames compared with bounded vector/store-prefix oracle limits", report.fault_limited);
+            println!(
+                "{} checked structure fault frames compared with bounded vector/store-prefix oracle limits",
+                report.fault_limited
+            );
         }
-        ensure!(report.words > 0 && report.compared > 0, "no comparisons selected");
+        ensure!(
+            report.words > 0 && report.compared > 0,
+            "no comparisons selected"
+        );
         ensure!(
             report.mismatches == 0,
             "native translation differs from the original"
@@ -901,7 +922,10 @@ impl Differential {
             let subject = &mut batch[case_subjects[index]];
             if let Some(exception) = original.exception
                 && !subject.system
-                && subject.translation.checked_structure(&subject.code).is_none()
+                && subject
+                    .translation
+                    .checked_structure(&subject.code)
+                    .is_none()
             {
                 *report
                     .uncovered
@@ -914,8 +938,12 @@ impl Differential {
             if original.exception.is_none() || subject.system {
                 report.covered.insert(subject.form.clone());
             } else if let Some(exception) = original.exception {
-                *report.uncovered.entry(subject.form.clone()).or_default()
-                    .entry(exception.syndrome >> ESR_CLASS_SHIFT).or_default() += 1;
+                *report
+                    .uncovered
+                    .entry(subject.form.clone())
+                    .or_default()
+                    .entry(exception.syndrome >> ESR_CLASS_SHIFT)
+                    .or_default() += 1;
             }
             if oracle_limit(&subject.form, &case.state)
                 || subject.system && system_oracle_limit(&subject.form, case)
@@ -963,7 +991,9 @@ impl Differential {
             report.compared += 1;
             let system_word =
                 (subject.system && subject.form != regions::SYSTEM_FORM).then_some(case.code[0]);
-            let structure_fault = subject.translation.checked_structure(&subject.code)
+            let structure_fault = subject
+                .translation
+                .checked_structure(&subject.code)
                 .filter(|operand| qualified_structure_fault(original, *operand));
             let mut translated_comparable = comparable(&translated, case, system_word);
             let mut original_comparable = comparable(original, case, system_word);
@@ -975,7 +1005,15 @@ impl Differential {
             if structure_fault.is_some() {
                 report.fault_limited += 1;
                 let frame_index = report.cases + index;
-                retain_structure_fault(report, frame_index, &subject.form, case, original, &translated, matched)?;
+                retain_structure_fault(
+                    report,
+                    frame_index,
+                    &subject.form,
+                    case,
+                    original,
+                    &translated,
+                    matched,
+                )?;
             }
             if let Some(tally) = report.rows.tally(&subject.form, case.el) {
                 tally.compared += 1;
@@ -1212,14 +1250,22 @@ fn subjects_for(
 /// remain aligned, so only its architecturally reachable prefixes participate.
 /// Zero includes failure before any access; every later prefix crosses after
 /// one or more source quantities or within a multibyte quantity.
-fn structure_fault_prefixes(operand: stela_compiler::aarch64::simd::structure_memory::Operand) -> Vec<u8> {
-    (0..operand.transferred_bytes()).filter(|prefix| {
-        operand.base != stela_compiler::aarch64::Register::Sp
-            || u64::from(*prefix).is_multiple_of(POINTER_ALIGNMENT)
-    }).collect()
+fn structure_fault_prefixes(
+    operand: stela_compiler::aarch64::simd::structure_memory::Operand,
+) -> Vec<u8> {
+    (0..operand.transferred_bytes())
+        .filter(|prefix| {
+            operand.base != stela_compiler::aarch64::Register::Sp
+                || u64::from(*prefix).is_multiple_of(POINTER_ALIGNMENT)
+        })
+        .collect()
 }
 
-fn set_structure_base(operand: stela_compiler::aarch64::simd::structure_memory::Operand, state: &mut GuestState, address: u64) {
+fn set_structure_base(
+    operand: stela_compiler::aarch64::simd::structure_memory::Operand,
+    state: &mut GuestState,
+    address: u64,
+) {
     use stela_compiler::aarch64::Register;
     match operand.base {
         Register::X(index) => state.x[usize::from(index)] = address,
@@ -1228,14 +1274,19 @@ fn set_structure_base(operand: stela_compiler::aarch64::simd::structure_memory::
     }
 }
 
-fn qualified_structure_fault(outcome: &Outcome, operand: stela_compiler::aarch64::simd::structure_memory::Operand) -> bool {
+fn qualified_structure_fault(
+    outcome: &Outcome,
+    operand: stela_compiler::aarch64::simd::structure_memory::Operand,
+) -> bool {
     use stela_compiler::aarch64::simd::structure_memory::Direction;
     outcome.exception.is_some_and(|fault| {
         let syndrome = match operand.direction {
             Direction::Load => 0x9200_0007,
             Direction::Store => 0x9200_0047,
         };
-        fault.syndrome == syndrome && fault.address == CODE_PAGE && fault.level == 1
+        fault.syndrome == syndrome
+            && fault.address == CODE_PAGE
+            && fault.level == 1
             && fault.fault_address == DATA_WINDOW + DATA_BYTES as u64
     })
 }
@@ -1244,8 +1295,15 @@ fn qualified_structure_fault(outcome: &Outcome, operand: stela_compiler::aarch64
 /// Bound that limitation to assignment bits and store bytes that this exact
 /// typed operation could affect before reaching the absent page. All other
 /// state, including the base/writeback and the full exception, still compares.
-fn structure_fault_comparable(outcome: &mut Outcome, case: &Case, operand: stela_compiler::aarch64::simd::structure_memory::Operand) {
-    use stela_compiler::aarch64::{Register, simd::structure_memory::{Direction, LoadCommit}};
+fn structure_fault_comparable(
+    outcome: &mut Outcome,
+    case: &Case,
+    operand: stela_compiler::aarch64::simd::structure_memory::Operand,
+) {
+    use stela_compiler::aarch64::{
+        Register,
+        simd::structure_memory::{Direction, LoadCommit},
+    };
     match operand.direction {
         Direction::Load => {
             let base = match operand.base {
@@ -1254,7 +1312,10 @@ fn structure_fault_comparable(outcome: &mut Outcome, case: &Case, operand: stela
                 Register::Zero => unreachable!("no structured zero base"),
             };
             let prefix = (DATA_WINDOW + DATA_BYTES as u64).saturating_sub(base);
-            for access in operand.accesses().filter(|access| u64::from(access.byte_offset) < prefix) {
+            for access in operand
+                .accesses()
+                .filter(|access| u64::from(access.byte_offset) < prefix)
+            {
                 let vector = &mut outcome.state.v[usize::from(access.vector)];
                 match access.commit {
                     LoadCommit::Lane { index, clear_upper } => {
@@ -1262,7 +1323,9 @@ fn structure_fault_comparable(outcome: &mut Outcome, case: &Case, operand: stela
                         for byte in start..start + usize::from(operand.element_bytes) {
                             vector[byte / 8] &= !(0xff << ((byte % 8) * 8));
                         }
-                        if clear_upper { vector[1] = 0; }
+                        if clear_upper {
+                            vector[1] = 0;
+                        }
                     }
                     LoadCommit::Replicate { .. } => *vector = [0; 2],
                 }
@@ -1275,8 +1338,11 @@ fn structure_fault_comparable(outcome: &mut Outcome, case: &Case, operand: stela
                 Register::Zero => unreachable!("no structured zero base"),
             };
             for offset in 0..u64::from(operand.transferred_bytes()) {
-                if let Some(index) = base.checked_add(offset).and_then(|address| address.checked_sub(DATA_WINDOW))
-                    .filter(|index| *index < DATA_BYTES as u64) {
+                if let Some(index) = base
+                    .checked_add(offset)
+                    .and_then(|address| address.checked_sub(DATA_WINDOW))
+                    .filter(|index| *index < DATA_BYTES as u64)
+                {
                     outcome.data[index as usize] = 0;
                 }
             }
@@ -1287,20 +1353,43 @@ fn structure_fault_comparable(outcome: &mut Outcome, case: &Case, operand: stela
 /// Retain complete register/exception frames and lossless data reconstruction:
 /// original/native data equal the retained initial bytes plus their changed
 /// byte triples. Hashes bind all three full windows, including unchanged bytes.
-fn retain_structure_fault(report: &mut Report, index: usize, form: &str, case: &Case, original: &Outcome, native: &Outcome, matched: bool) -> Result<()> {
+fn retain_structure_fault(
+    report: &mut Report,
+    index: usize,
+    form: &str,
+    case: &Case,
+    original: &Outcome,
+    native: &Outcome,
+    matched: bool,
+) -> Result<()> {
     use sha2::{Digest, Sha256};
-    let state = |state: &GuestState| serde_json::json!({
-        "x": state.x, "sp": state.sp, "v": state.v, "nzcv": state.nzcv,
-        "fpcr": state.fpcr, "fpsr": state.fpsr, "reserved": state.reserved,
-    });
-    let exception = |outcome: &Outcome| outcome.exception.map(|fault| serde_json::json!({
-        "syndrome": fault.syndrome, "pc": fault.address, "far": fault.fault_address,
-        "level": fault.level, "hpfar": fault.hpfar,
-    }));
-    let changes: Vec<_> = case.data.iter().zip(original.data.iter().zip(native.data.iter()))
-        .enumerate().filter_map(|(index, (before, (original, native)))| {
-            (before != original || before != native).then_some([index as u64, u64::from(*original), u64::from(*native)])
-        }).collect();
+    let state = |state: &GuestState| {
+        serde_json::json!({
+            "x": state.x, "sp": state.sp, "v": state.v, "nzcv": state.nzcv,
+            "fpcr": state.fpcr, "fpsr": state.fpsr, "reserved": state.reserved,
+        })
+    };
+    let exception = |outcome: &Outcome| {
+        outcome.exception.map(|fault| {
+            serde_json::json!({
+                "syndrome": fault.syndrome, "pc": fault.address, "far": fault.fault_address,
+                "level": fault.level, "hpfar": fault.hpfar,
+            })
+        })
+    };
+    let changes: Vec<_> = case
+        .data
+        .iter()
+        .zip(original.data.iter().zip(native.data.iter()))
+        .enumerate()
+        .filter_map(|(index, (before, (original, native)))| {
+            (before != original || before != native).then_some([
+                index as u64,
+                u64::from(*original),
+                u64::from(*native),
+            ])
+        })
+        .collect();
     use std::fmt::Write as _;
     let mut initial_hex = String::with_capacity(DATA_BYTES * 2);
     for byte in case.data.iter() {
@@ -1318,7 +1407,13 @@ fn retain_structure_fault(report: &mut Report, index: usize, form: &str, case: &
         "original_data_sha256": format!("{:x}", Sha256::digest(&original.data)),
         "native_data_sha256": format!("{:x}", Sha256::digest(&native.data)),
     });
-    writeln!(report.checked_faults.as_mut().context("missing checked fault evidence")?, "{record}")?;
+    writeln!(
+        report
+            .checked_faults
+            .as_mut()
+            .context("missing checked fault evidence")?,
+        "{record}"
+    )?;
     Ok(())
 }
 
@@ -1563,14 +1658,26 @@ mod tests {
     use crate::oracle::Exception;
 
     fn structure(word: u32) -> stela_compiler::aarch64::simd::structure_memory::Operand {
-        stela_compiler::aarch64::simd::structure_memory::decode(word).unwrap().unwrap()
+        stela_compiler::aarch64::simd::structure_memory::decode(word)
+            .unwrap()
+            .unwrap()
     }
 
     fn frame(state: GuestState, data: Box<[u8]>) -> Outcome {
-        Outcome { state, data, next_pc: CODE_PAGE, scalable: None, exception: Some(Exception {
-            syndrome: 0x9200_0007, address: CODE_PAGE,
-            fault_address: DATA_WINDOW + DATA_BYTES as u64, level: 1, hpfar: 0,
-        }), spsr: None }
+        Outcome {
+            state,
+            data,
+            next_pc: CODE_PAGE,
+            scalable: None,
+            exception: Some(Exception {
+                syndrome: 0x9200_0007,
+                address: CODE_PAGE,
+                fault_address: DATA_WINDOW + DATA_BYTES as u64,
+                level: 1,
+                hpfar: 0,
+            }),
+            spsr: None,
+        }
     }
 
     #[test]
@@ -1612,8 +1719,16 @@ mod tests {
         let operand = structure(0x4c40_0044); // LD4 V4..V7, byte elements.
         let mut state = GuestState::default();
         state.x[2] = DATA_WINDOW + DATA_BYTES as u64 - 1;
-        let case = Case { code: vec![0x4c40_0044], steps: 1, state: state.clone(),
-            data: vec![0xa5; DATA_BYTES].into(), scalable: None, el: 0, hypervisor: None, pauth: false };
+        let case = Case {
+            code: vec![0x4c40_0044],
+            steps: 1,
+            state: state.clone(),
+            data: vec![0xa5; DATA_BYTES].into(),
+            scalable: None,
+            el: 0,
+            hypervisor: None,
+            pauth: false,
+        };
         let original = frame(state.clone(), case.data.clone());
         let mut changed = original.clone();
         changed.state.v[4][0] = 0xff;
@@ -1647,8 +1762,16 @@ mod tests {
         let operand = structure(0x4c00_0044); // ST4 V4..V7.
         let mut state = GuestState::default();
         state.x[2] = DATA_WINDOW + DATA_BYTES as u64 - 3;
-        let case = Case { code: vec![0x4c00_0044], steps: 1, state: state.clone(),
-            data: vec![0xa5; DATA_BYTES].into(), scalable: None, el: 0, hypervisor: None, pauth: false };
+        let case = Case {
+            code: vec![0x4c00_0044],
+            steps: 1,
+            state: state.clone(),
+            data: vec![0xa5; DATA_BYTES].into(),
+            scalable: None,
+            el: 0,
+            hypervisor: None,
+            pauth: false,
+        };
         let mut original = frame(state, case.data.clone());
         let mut changed = original.clone();
         changed.data[DATA_BYTES - 2] ^= 1;

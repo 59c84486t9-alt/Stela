@@ -227,12 +227,22 @@ pub enum Translation {
 impl Translation {
     /// The one checked structured source operation, if present. Its typed
     /// address/footprint drives mapped and boundary-fault oracle cases.
-    pub fn checked_structure(&self, words: &[u32]) -> Option<stela_compiler::aarch64::simd::structure_memory::Operand> {
-        use stela_compiler::{Lifter, aarch64::{Decoder, Operation, simd}};
+    pub fn checked_structure(
+        &self,
+        words: &[u32],
+    ) -> Option<stela_compiler::aarch64::simd::structure_memory::Operand> {
+        use stela_compiler::{
+            Lifter,
+            aarch64::{Decoder, Operation, simd},
+        };
         if !matches!(self, Self::CheckedShared(_)) || words.len() != 1 {
             return None;
         }
-        match Decoder.lift(GuestAddress(CODE_PAGE), words[0]).ok()?.operation {
+        match Decoder
+            .lift(GuestAddress(CODE_PAGE), words[0])
+            .ok()?
+            .operation
+        {
             Operation::Simd(simd::Operand::StructureMemory(operand)) => Some(operand),
             _ => None,
         }
@@ -344,10 +354,12 @@ impl Translation {
         let mut scalable_result = None;
         let mut exception = None;
         let result = match self {
-            Self::CheckedShared(body) => shared_memory::run(body, &windows, case).map(|(state, pc, fault)| {
-                exception = fault;
-                (state, pc)
-            }),
+            Self::CheckedShared(body) => {
+                shared_memory::run(body, &windows, case).map(|(state, pc, fault)| {
+                    exception = fault;
+                    (state, pc)
+                })
+            }
             Self::Leaf(executable) => {
                 let mut state = case.state.clone();
                 // SAFETY: the mapping holds a leaf that follows the guest-state ABI.
