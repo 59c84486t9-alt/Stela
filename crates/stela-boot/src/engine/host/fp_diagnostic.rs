@@ -23,6 +23,7 @@ struct Probe {
     result_rax: u64,
     result_rdx: u64,
     gpr_errors: u64,
+    fp_errors: u64,
 }
 
 static SEED_VECTOR: [u8; 256] = {
@@ -119,6 +120,86 @@ stela_native_fp_probe_returned:
     mov [r10 + {result_rax}], rax
     mov [r10 + {result_rdx}], rdx
     fxsave64 [r10 + {returned}]
+    // Compare every defined legacy FP/SIMD field before any Rust reentry.
+    // Reserved byte5, FOP[15:11] and each x87 slot's padding are excluded.
+    mov eax, [r10 + {expected}]
+    cmp eax, [r10 + {returned}]
+    jne stela_native_fp_snapshot_bad
+    mov al, [r10 + {expected} + 4]
+    cmp al, [r10 + {returned} + 4]
+    jne stela_native_fp_snapshot_bad
+    movzx eax, word ptr [r10 + {expected} + 6]
+    xor ax, word ptr [r10 + {returned} + 6]
+    test eax, 0x7ff
+    jnz stela_native_fp_snapshot_bad
+    mov rax, [r10 + {expected} + 8]
+    cmp rax, [r10 + {returned} + 8]
+    jne stela_native_fp_snapshot_bad
+    mov rax, [r10 + {expected} + 16]
+    cmp rax, [r10 + {returned} + 16]
+    jne stela_native_fp_snapshot_bad
+    mov rax, [r10 + {expected} + 24]
+    cmp rax, [r10 + {returned} + 24]
+    jne stela_native_fp_snapshot_bad
+    mov rax, [r10 + {expected} + 32]
+    cmp rax, [r10 + {returned} + 32]
+    jne stela_native_fp_snapshot_bad
+    mov ax, [r10 + {expected} + 40]
+    cmp ax, [r10 + {returned} + 40]
+    jne stela_native_fp_snapshot_bad
+    mov rax, [r10 + {expected} + 48]
+    cmp rax, [r10 + {returned} + 48]
+    jne stela_native_fp_snapshot_bad
+    mov ax, [r10 + {expected} + 56]
+    cmp ax, [r10 + {returned} + 56]
+    jne stela_native_fp_snapshot_bad
+    mov rax, [r10 + {expected} + 64]
+    cmp rax, [r10 + {returned} + 64]
+    jne stela_native_fp_snapshot_bad
+    mov ax, [r10 + {expected} + 72]
+    cmp ax, [r10 + {returned} + 72]
+    jne stela_native_fp_snapshot_bad
+    mov rax, [r10 + {expected} + 80]
+    cmp rax, [r10 + {returned} + 80]
+    jne stela_native_fp_snapshot_bad
+    mov ax, [r10 + {expected} + 88]
+    cmp ax, [r10 + {returned} + 88]
+    jne stela_native_fp_snapshot_bad
+    mov rax, [r10 + {expected} + 96]
+    cmp rax, [r10 + {returned} + 96]
+    jne stela_native_fp_snapshot_bad
+    mov ax, [r10 + {expected} + 104]
+    cmp ax, [r10 + {returned} + 104]
+    jne stela_native_fp_snapshot_bad
+    mov rax, [r10 + {expected} + 112]
+    cmp rax, [r10 + {returned} + 112]
+    jne stela_native_fp_snapshot_bad
+    mov ax, [r10 + {expected} + 120]
+    cmp ax, [r10 + {returned} + 120]
+    jne stela_native_fp_snapshot_bad
+    mov rax, [r10 + {expected} + 128]
+    cmp rax, [r10 + {returned} + 128]
+    jne stela_native_fp_snapshot_bad
+    mov ax, [r10 + {expected} + 136]
+    cmp ax, [r10 + {returned} + 136]
+    jne stela_native_fp_snapshot_bad
+    mov rax, [r10 + {expected} + 144]
+    cmp rax, [r10 + {returned} + 144]
+    jne stela_native_fp_snapshot_bad
+    mov ax, [r10 + {expected} + 152]
+    cmp ax, [r10 + {returned} + 152]
+    jne stela_native_fp_snapshot_bad
+    lea rsi, [r10 + {expected} + 160]
+    lea rdi, [r10 + {returned} + 160]
+    mov ecx, 32
+    cld
+    repe cmpsq
+    jne stela_native_fp_snapshot_bad
+    mov qword ptr [r10 + {fp_errors}], 0
+    jmp stela_native_fp_snapshot_checked
+stela_native_fp_snapshot_bad:
+    mov qword ptr [r10 + {fp_errors}], 1
+stela_native_fp_snapshot_checked:
     xor r9d, r9d
     cmp rbp, 0x11111111
     je stela_native_fp_gpr_1
@@ -241,6 +322,7 @@ stela_native_fp_fault_end:
     result_rax = const offset_of!(Probe, result_rax),
     result_rdx = const offset_of!(Probe, result_rdx),
     gpr_errors = const offset_of!(Probe, gpr_errors),
+    fp_errors = const offset_of!(Probe, fp_errors),
     guest_reserved = const offset_of!(GuestState, reserved),
     executed = const EXECUTED,
     return_rax = const RETURN_RAX,
@@ -310,7 +392,7 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
             expected_guest.reserved = EXECUTED;
             let mut probe = Probe {
                 original: Image([0; 512]), expected: Image([0; 512]), returned: Image([0; 512]),
-                result_rax: 0, result_rdx: 0, gpr_errors: u64::MAX,
+                result_rax: 0, result_rdx: 0, gpr_errors: u64::MAX, fp_errors: u64::MAX,
             };
             if state().native || state().recorded.is_some() {
                 return Err("native FP fixture entered with a live preceding frame");
@@ -329,8 +411,8 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
             let fdp = pointer(&probe.expected, 16);
             let fop = u16::from_le_bytes([probe.expected.0[6], probe.expected.0[7]]) & 0x7ff;
             output::arguments(format_args!(
-                "NATIVE FP context={context_abi} fault={faulting} fip={fip:#x} fdp={fdp:#x} fop={fop:#x} gpr={:#x} rax={:#x} rdx={:#x}\n",
-                probe.gpr_errors, probe.result_rax, probe.result_rdx,
+                "NATIVE FP context={context_abi} fault={faulting} fip={fip:#x} fdp={fdp:#x} fop={fop:#x} gpr={:#x} fp={:#x} rax={:#x} rdx={:#x}\n",
+                probe.gpr_errors, probe.fp_errors, probe.result_rax, probe.result_rdx,
             ));
             if fip != ptr::addr_of!(stela_native_fp_seed_divide) as u64
                 || fdp != ptr::addr_of!(ZERO) as u64 || fop != 0x435
@@ -339,7 +421,7 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
             }
             if guest != expected_guest
                 || (context.version, context.bytes, context.memory, context.scalable, context.system) != context_before
-                || probe.gpr_errors != 0 || !same_legacy(&probe.expected, &probe.returned)
+                || probe.gpr_errors != 0 || probe.fp_errors != 0 || !same_legacy(&probe.expected, &probe.returned)
             {
                 return Err("native FP caller state or real callee execution differs");
             }
