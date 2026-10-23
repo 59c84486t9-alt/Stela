@@ -193,8 +193,7 @@ impl Engine {
                             "SD high-speed selection was not acknowledged",
                         ));
                     }
-                    let control = self.registers.read8(HOST_CONTROL);
-                    self.set_ios_control(control | HIGH_SPEED)?;
+                    self.set_high_speed_host()?;
                     info.clock_hz = 50_000_000;
                 }
             }
@@ -239,14 +238,15 @@ impl Engine {
                 self.mmc_switch(EXT_PARTITION as u8, value)?;
                 ext[EXT_PARTITION] = value;
             }
-            // sdhci_setup_host deliberately does not infer board wiring from
-            // the controller's 8-bit capability. Generic PCI uses four-bit
-            // mode; an 8-bit profile needs separate board-wiring evidence.
-            self.mmc_switch(EXT_BUS_WIDTH as u8, 1)?;
+            // Only an exact source-declared board profile grants eight pins;
+            // generic controller CAP_8BIT never establishes board wiring.
+            let width = self.profile.mmc_width();
+            let wire_width = if width == 8 { 2 } else { 1 };
+            self.mmc_switch(EXT_BUS_WIDTH as u8, wire_width)?;
             let control = self.registers.read8(HOST_CONTROL) & !(BUS4 | BUS8);
-            self.set_ios_control(control | BUS4)?;
-            info.bus_width = 4;
-            ext[EXT_BUS_WIDTH] = 1;
+            self.set_ios_control(control | if width == 8 { BUS8 } else { BUS4 })?;
+            info.bus_width = width;
+            ext[EXT_BUS_WIDTH] = wire_width;
             // Reread EXT_CSD at the new actual bus width and compare immutable
             // identity/capacity bytes, as Linux's bus-width validation does.
             self.execute(
@@ -276,7 +276,7 @@ impl Engine {
                     (false, false) => 203,
                     (false, true) => 202,
                 };
-                let power_class = ext[power_index] & 15;
+                let power_class = ext[power_index] >> if width == 8 { 4 } else { 0 } & 15;
                 if power_class != 0 {
                     self.mmc_switch(187, power_class)?;
                     ext[187] = power_class;
@@ -284,8 +284,7 @@ impl Engine {
 
                 self.mmc_switch(EXT_TIMING as u8, 1)?;
                 ext[EXT_TIMING] = 1;
-                let control = self.registers.read8(HOST_CONTROL);
-                self.set_ios_control(control | HIGH_SPEED)?;
+                self.set_high_speed_host()?;
                 info.clock_hz = if ext[EXT_CARD_TYPE] & 2 != 0 {
                     52_000_000
                 } else {

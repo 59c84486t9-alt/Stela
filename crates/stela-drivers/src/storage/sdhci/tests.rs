@@ -701,3 +701,133 @@ fn ene_failed_post_settings_reset_retires_old_aliases_and_pins_controller() {
         before
     );
 }
+
+#[test]
+fn intel_exact_profiles_apply_declared_wiring_without_hispd_or_broken_adma() {
+    for device in [0x08a7, 0x0807, 0x0808, 0x084f] {
+        for kind in [Kind::Sd, Kind::Mmc] {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: each modeled Intel controller owns these live DMA pages.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let model = Rc::new(RefCell::new(Hardware::new(kind, true)));
+            {
+                let mut m = model.borrow_mut();
+                m.adma_broken = device != 0x08a7;
+                m.reject_high_speed_bit = true;
+                m.wired_width = if device == 0x0807 { 8 } else { 4 };
+                // The source board declaration supplies the authority even if
+                // the raw controller's separate capability bit is absent.
+                m.caps &= !CAP_8BIT;
+                m.ext[202] = 0xb3;
+            }
+            let profile = Profile::select(0x8086, device);
+            let mut host = Host::new(
+                Box::new(Port(model.clone())),
+                Clock {
+                    ticks_per_microsecond: CLOCK_TICKS_PER_US,
+                },
+                format!("Intel {device:04x}"),
+                &mut dma,
+                profile,
+            )
+            .unwrap();
+            let mut card = host.poll().unwrap().unwrap();
+            let width = if device == 0x0807 && kind == Kind::Mmc {
+                8
+            } else {
+                4
+            };
+            assert_eq!(card.info().bus_width, width);
+            assert_eq!(card.info().clock_hz, 50_000_000);
+            assert_eq!(host.info().capabilities & CAP_8BIT, 0);
+            let mut bytes = [0xa5; 1024];
+            card.read(5, &mut bytes).unwrap();
+            assert_eq!(bytes, model.borrow().disk[5 * 512..7 * 512]);
+            bytes.fill(0xb5);
+            card.write(8, &bytes).unwrap();
+            card.flush().unwrap();
+            assert_eq!(bytes, model.borrow().disk[8 * 512..10 * 512]);
+            let m = model.borrow();
+            assert!(m.writes.iter().all(|(at,_,value)| *at != HOST_CONTROL || value & u32::from(HIGH_SPEED) == 0));
+            assert_eq!(
+                m.writes.iter().any(|(at, _, _)| *at == ADMA_ADDRESS),
+                device == 0x08a7
+            );
+            if kind == Kind::Mmc {
+                assert_eq!(
+                    card.info().ext_csd.as_ref().unwrap()[183],
+                    if width == 8 { 2 } else { 1 }
+                );
+                assert_eq!(
+                    card.info().ext_csd.as_ref().unwrap()[187],
+                    if width == 8 { 11 } else { 3 }
+                );
+                assert_eq!(card.info().ext_csd.as_ref().unwrap()[185], 1);
+            }
+            drop(m);
+            card.shutdown(true).unwrap();
+            assert!(host.poll().unwrap().is_some());
+            for reported in 1..=8 {
+                assert_eq!(
+                    profile.slots(reported),
+                    if matches!(device, 0x0808 | 0x084f) {
+                        1
+                    } else {
+                        reported
+                    }
+                );
+            }
+        }
+    }
+    assert_eq!(Profile::select(0x8086, 0x0809), Profile::Standard);
+    assert_eq!(Profile::select(0x8087, 0x0807), Profile::Standard);
+}
+
+#[test]
+fn intel_wide_bus_crc_failure_never_publishes_or_revives_legacy_alias() {
+    let mut backing = vec![0u64; 128 * 1024];
+    let start = backing.as_mut_ptr() as u64;
+    // SAFETY: CRC failure keeps both the former and attempted DMA state retained.
+    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let model = Rc::new(RefCell::new(Hardware::new(Kind::Mmc, false)));
+    {
+        let mut m = model.borrow_mut();
+        m.adma_broken = true;
+        m.reject_high_speed_bit = true;
+        m.wired_width = 4;
+        put(&mut m.csd, 122, 4, 3);
+    }
+    let mut host = Host::new(
+        Box::new(Port(model.clone())),
+        Clock {
+            ticks_per_microsecond: CLOCK_TICKS_PER_US,
+        },
+        "Intel faulty wiring".into(),
+        &mut dma,
+        Profile::select(0x8086, 0x0807),
+    )
+    .unwrap();
+    let mut old = host.poll().unwrap().unwrap();
+    assert_eq!(old.info().bus_width, 1);
+    model.borrow_mut().replace();
+    put(&mut model.borrow_mut().csd, 122, 4, 4);
+    assert!(matches!(host.poll(),Err(BlockError::Device{status}) if status & (1<<21)!=0));
+    assert!(host.inner.borrow().medium.is_none());
+    let before = (
+        model.borrow().reads,
+        model.borrow().writes.len(),
+        model.borrow().commands.len(),
+    );
+    let mut bytes = [0x95; 512];
+    assert_eq!(old.read(0, &mut bytes), Err(BlockError::Unsupported(STALE)));
+    assert_eq!(bytes, [0x95; 512]);
+    assert_eq!(
+        (
+            model.borrow().reads,
+            model.borrow().writes.len(),
+            model.borrow().commands.len()
+        ),
+        before
+    );
+}

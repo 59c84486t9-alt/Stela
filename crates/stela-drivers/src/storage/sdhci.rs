@@ -62,7 +62,7 @@ pub fn attach(
     let profile = Profile::select(function.vendor, function.device);
     function.power_up(&handoff.clock)?;
     let info = function.config().read8(PCI_SLOT_INFO);
-    let slots = ((info >> 4) & 7) + 1;
+    let slots = profile.slots(((info >> 4) & 7) + 1);
     let first = usize::from(info & 7);
     if first + usize::from(slots) > 6 {
         return Err(BlockError::Unsupported("SDHCI slot BAR inventory"));
@@ -378,7 +378,7 @@ impl Engine {
         if self.base_hz == 0 {
             return Err(BlockError::Unsupported("SDHCI needs an actual base clock"));
         }
-        self.dma_mode = if self.profile.broken_dma() || self.capabilities & CAP_ADMA2 == 0 {
+        self.dma_mode = if self.profile.disable_adma() || self.capabilities & CAP_ADMA2 == 0 {
             None
         } else if self.capabilities & CAP_64 != 0 {
             Some(true)
@@ -438,6 +438,15 @@ impl Engine {
             return Err(BlockError::Unsupported("SDHCI clock exceeds card limit"));
         }
         self.finish_ios()
+    }
+    fn set_high_speed_host(&mut self) -> Result<(), BlockError> {
+        let control = self.registers.read8(HOST_CONTROL) & !HIGH_SPEED;
+        let high_speed = if self.profile.no_high_speed_bit() {
+            0
+        } else {
+            HIGH_SPEED
+        };
+        self.set_ios_control(control | high_speed)
     }
     fn set_ios_control(&mut self, value: u8) -> Result<(), BlockError> {
         self.registers.write8(HOST_CONTROL, value);

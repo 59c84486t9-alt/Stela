@@ -35,6 +35,9 @@ pub(super) struct Hardware {
     pub initial_clock_seen: Option<u64>,
     pub single_power_write: bool,
     pub dma_broken: bool,
+    pub adma_broken: bool,
+    pub reject_high_speed_bit: bool,
+    pub wired_width: u8,
     pub reset_after_settings: bool,
     pub fail_settings_reset: bool,
     pub settings_dirty: bool,
@@ -132,6 +135,9 @@ impl Hardware {
             initial_clock_seen: None,
             single_power_write: false,
             dma_broken: false,
+            adma_broken: false,
+            reject_high_speed_bit: false,
+            wired_width: 4,
             reset_after_settings: false,
             fail_settings_reset: false,
             settings_dirty: false,
@@ -203,6 +209,10 @@ impl Hardware {
         assert!(
             !self.dma_broken || mode & DMA == 0,
             "ENE broken DMA was enabled"
+        );
+        assert!(
+            !self.adma_broken || mode & DMA == 0 || self.byte(HOST_CONTROL) & DMA_MASK == 0,
+            "broken Intel ADMA enabled"
         );
         if self.notified {
             self.command_after_notification = true;
@@ -365,6 +375,25 @@ impl Hardware {
         }
         self.status |= RESPONSE_END;
         if let Some(data) = data {
+            if self.kind == Kind::Mmc {
+                let host_width = if self.byte(HOST_CONTROL) & BUS8 != 0 {
+                    8
+                } else if self.byte(HOST_CONTROL) & BUS4 != 0 {
+                    4
+                } else {
+                    1
+                };
+                let card_width = match self.ext[183] {
+                    0 => 1,
+                    1 => 4,
+                    2 => 8,
+                    _ => panic!("unmodeled card bus width"),
+                };
+                if host_width > self.wired_width || host_width != card_width {
+                    self.status |= 1 << 21 | 1 << 15; // actual DATA_CRC interrupt
+                    return;
+                }
+            }
             assert_ne!(value & 0x20, 0, "card payload without command data bit");
             self.expected =
                 usize::from(self.word(BLOCK_SIZE) & 0xfff) * usize::from(self.word(BLOCK_COUNT));
@@ -543,6 +572,9 @@ impl Registers for Port {
                     value == 0 || value & POWER_ON != 0,
                     "ENE split voltage/power write"
                 );
+            }
+            if at == HOST_CONTROL && m.reject_high_speed_bit {
+                assert_eq!(value & HIGH_SPEED, 0, "Intel NO_HISPD_BIT was violated");
             }
             if at == HOST_CONTROL && (m.byte(at) ^ value) & (BUS4 | BUS8 | HIGH_SPEED) != 0 {
                 m.settings_dirty = true;
