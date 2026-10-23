@@ -1,6 +1,8 @@
 //! Authored actual native-entry/context/#UD recovery FP qualification.
 //! No ARM image is modified, no target is widened and no result is fabricated
 //! from a copied frame. Run only before production frames/artifacts are lent.
+mod helper;
+
 use super::{BareHost, native_return, state};
 use crate::output;
 use core::{arch::global_asm, mem::offset_of, ptr};
@@ -484,5 +486,6 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
         }
     }
     host.discard_code();
+    helper::check(host)?;
     Ok(())
 }

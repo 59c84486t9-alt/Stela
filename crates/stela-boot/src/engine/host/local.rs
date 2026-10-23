@@ -248,6 +248,17 @@ pub(super) fn state() -> &'static mut State {
     }
 }
 
+/// Actual current-owner slots only; numbers or copied records cannot prove
+/// that a private fixture may release mapped backing after a continuation.
+pub(super) fn native_frames_idle() -> bool {
+    // SAFETY: as for state(): caller retains this actual processor's Owner,
+    // IF is clear and no frame/handler overlaps this process boundary.
+    unsafe {
+        let local = &*current();
+        *local.recovery_rsp.get() == 0 && *local.helper_rsp.get() == 0
+    }
+}
+
 pub(super) fn interrupt() {
     // SAFETY: one processor owns this record for the handler's whole lifetime.
     unsafe { &(*current()).interrupted }.store(true, Ordering::Release);
