@@ -3934,6 +3934,93 @@ mod tests {
     }
 
     #[test]
+    fn apple_actlr_el12_alias_shares_the_architectural_owner_and_refusals() {
+        use crate::machine::impdef;
+        const ARCHITECTURAL: Encoding = Encoding::new(3, 5, 1, 0, 1);
+        const HOST: Encoding = Encoding::new(3, 0, 1, 0, 1);
+        let alias = impdef::ACTLR_EL12;
+        for chip in Chip::ALL {
+            if !impdef::consumed(alias, chip) {
+                continue;
+            }
+            let mut machine = machine_on(chip, &[]);
+            machine.cpu.set_pstate(Pstate::reset(2));
+            let read = |machine: &mut TestMachine, encoding| {
+                machine.cpu.pc = BASE;
+                machine.system_instruction(access(true, encoding, 2)).unwrap();
+                machine.cpu.state.x[2]
+            };
+            let write = |machine: &mut TestMachine, encoding, value| {
+                machine.cpu.pc = BASE;
+                machine.cpu.state.x[1] = value;
+                machine.system_instruction(access(false, encoding, 1))
+            };
+            // First read reaches the canonical reset value with no degraded
+            // storage slot. The host's ACTLR_EL2 remains independent.
+            let reset = machine.cpu.read(Register::ACTLR_EL1);
+            assert_eq!(read(&mut machine, alias), reset);
+            assert!(machine.take_unmodeled().is_empty());
+            write(&mut machine, HOST, ACTLR_ICDSB).unwrap();
+            for value in [0, ACTLR_EN_TSO, ACTLR_EN_TSO | ACTLR_ICDSB] {
+                write(&mut machine, alias, value).unwrap();
+                assert_eq!(read(&mut machine, ARCHITECTURAL), value);
+                write(&mut machine, ARCHITECTURAL, value ^ ACTLR_EN_TSO).unwrap();
+                assert_eq!(read(&mut machine, alias), value ^ ACTLR_EN_TSO);
+                assert_eq!(machine.cpu.read(Register::ACTLR_EL2), ACTLR_ICDSB);
+            }
+            let before = machine.cpu.read(Register::ACTLR_EL1);
+            for refused in [1, 1 << 4, 1 << 5, 1 << 6, 1 << 63] {
+                assert!(matches!(write(&mut machine, alias, refused), Err(Stop::Unsupported(_))));
+                assert_eq!(machine.cpu.read(Register::ACTLR_EL1), before);
+                assert_eq!(machine.cpu.pc, BASE);
+            }
+            // XZR is an ordinary discarded destination/zero source.
+            machine.system_instruction(access(false, alias, 31)).unwrap();
+            assert_eq!(read(&mut machine, ARCHITECTURAL), 0);
+            let original_x = machine.cpu.state.x;
+            machine.system_instruction(access(true, alias, 31)).unwrap();
+            assert_eq!(machine.cpu.state.x, original_x);
+            let peer = machine_on(chip, &[]);
+            assert_eq!(peer.cpu.read(Register::ACTLR_EL1), reset);
+        }
+    }
+
+    #[test]
+    fn apple_actlr_el12_alias_preserves_lower_el_permissions_and_original_trap_iss() {
+        use crate::machine::{impdef, registers::trap_iss};
+        for chip in Chip::ALL {
+            if !impdef::consumed(impdef::ACTLR_EL12, chip) {
+                continue;
+            }
+            for read in [false, true] {
+                for el in [0, 1] {
+                    for tidcp in [false, true] {
+                        let mut machine = machine_on(chip, &[]);
+                        machine.cpu.set_pstate(Pstate::reset(el));
+                        machine.cpu.registers.set(Register::HCR_EL2, 0,
+                            if tidcp { 1 << crate::machine::registers::HCR_TIDCP } else { 0 });
+                        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+                        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+                        machine.cpu.state.x[1] = ACTLR_EN_TSO;
+                        let before = machine.cpu.read(Register::ACTLR_EL1);
+                        let word = access(read, impdef::ACTLR_EL12, 1);
+                        machine.system_instruction(word).unwrap();
+                        let trapped = el == 1 && tidcp;
+                        let target = if trapped { Register::ESR_EL2 } else { Register::ESR_EL1 };
+                        let syndrome = machine.cpu.read(target);
+                        assert_eq!(syndrome >> 26, if trapped { 0x18 } else { 0 });
+                        if trapped {
+                            let original = stela_compiler::aarch64::system::registers::decode(word).unwrap();
+                            assert_eq!(syndrome & 0x1ff_ffff, u64::from(trap_iss(original)));
+                        }
+                        assert_eq!(machine.cpu.read(Register::ACTLR_EL1), before);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn implementation_defined_registers_take_the_bits_the_census_models() {
         const ACTLR_EL1: Encoding = Encoding::new(3, 0, 1, 0, 1);
         const ACTLR_EL12: Encoding = Encoding::new(3, 5, 1, 0, 1);

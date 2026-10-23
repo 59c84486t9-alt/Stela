@@ -758,13 +758,6 @@ const MEM_STALL_WIDE_COUNTER_EVIDENCE: &str = "no public name; the same samplers
     0xfffffe0009f7c420, mac17j 0xfffffe0009cede28). It counts only under its selectors, whose counting is not modeled, so \
     it holds what software wrote, 0 from reset (inference)";
 
-const ACTLR_EL12_EVIDENCE: &str = "m1n1 cpu_regs.h names it ACTLR_EL12; the 26A434 T8103 \
-    and T6000 SPTMs save it with the EL12 bank when an EL1 guest exits and load it before \
-    entering one (sptm.t8103 file 0xe5a74, 0xe51e0), as the T8103 kernel's hypervisor does \
-    (kernelcache.release.mac13g file 0x4af9fc0, 0x4af9fcc). A VM's copy of Apple EL1 state \
-    this machine does not apply to a guest: stored; entering an EL1&0 guest while it is \
-    nonzero stops at the ERET or GEXIT";
-
 const VM_COUNTER_OFFSET_EVIDENCE: &str = "no public name; the 26A434 T8122 SPTM writes 0 to it \
     right after CNTVOFF_EL2 when it starts at EL2 (sptm.t8122 file 0xab0cc, 0xab670), and the \
     T8122 kernel's hypervisor loads a vCPU's saved value less a global offset into it beside \
@@ -1466,7 +1459,6 @@ pub const TABLE: &[Entry] = &[
     )
     .el2(),
     entry(APSTS_EL12, "APSTS_EL12", Class::Storage, VM_STATUS_EVIDENCE).el2(),
-    entry(ACTLR_EL12, "ACTLR_EL12", Class::Guest, ACTLR_EL12_EVIDENCE).el2(),
     entry(
         VM_COUNTER_OFFSET,
         "S3_1_C15_C9_4 (unnamed)",

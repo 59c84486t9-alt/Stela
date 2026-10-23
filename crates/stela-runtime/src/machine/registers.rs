@@ -68,6 +68,7 @@ pub mod encodings {
         };
     }
     registers! {
+        ACTLR_EL12 = 3, 5, 1, 0, 1;
         MIDR_EL1 = 3, 0, 0, 0, 0;
         MPIDR_EL1 = 3, 0, 0, 0, 5;
         REVIDR_EL1 = 3, 0, 0, 0, 6;
@@ -797,6 +798,21 @@ impl Cpu {
                 .unwrap_or_else(|reason| Outcome::Refused(Refusal::UnsupportedSetting(reason)));
         }
         let consumed = impdef::consumed(encoding, self.registers.chip());
+        // Apple's pre-M2 ACTLR_EL12 encoding is another view of ACTLR_EL1,
+        // not independent VM storage. m1n1/q1n1 hv.c selects this encoding
+        // instead of architectural ACTLR_EL12 on the older cores, and
+        // hv_exc.c uses it to emulate a guest's ACTLR_EL1 accesses. The
+        // 26A434 T8103/T6000 SPTMs save/restore it with the EL12 bank.
+        // Reusing the architectural accessor keeps the same bank, reset,
+        // permitted bits and refusal behavior. Uncensused chips and EL1
+        // receive no new allocation/permission from this alias.
+        if encoding == impdef::ACTLR_EL12 && consumed {
+            return if self.pstate.el == 2 {
+                Outcome::View(encodings::ACTLR_EL12, agt::selected(self))
+            } else {
+                Outcome::Undefined
+            };
+        }
         if super::amx::Unit::owns(encoding) {
             let el = if self.regime() == TranslationRegime::El20 {
                 2
@@ -2336,6 +2352,22 @@ mod tests {
                         chip.name()
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_actlr_alias_allocates_only_on_consuming_chips() {
+        for chip in super::super::Chip::ALL {
+            let mut cpu = Cpu::of(chip, 0, Pstate::reset(2));
+            for operation in [mrs(0, impdef::ACTLR_EL12), msr(0, impdef::ACTLR_EL12)] {
+                let outcome = cpu.apple_access(operation, 0);
+                if impdef::consumed(impdef::ACTLR_EL12, chip) {
+                    assert_eq!(outcome, Outcome::View(encodings::ACTLR_EL12, agt::selected(&cpu)));
+                } else {
+                    assert_eq!(outcome, Outcome::Undefined);
+                }
+                assert!(cpu.apple.impdef.used().next().is_none());
             }
         }
     }
