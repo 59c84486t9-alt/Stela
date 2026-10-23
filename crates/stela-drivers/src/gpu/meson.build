@@ -35,6 +35,10 @@ if with_amd
   # Mesa's AMD support code takes libdrm_amdgpu from here: headers only.
   subproject('libdrm-headers')
 endif
+# A plain `git submodule update` checks Mesa out without Stela's series.
+if not fs.read('subprojects/mesa/meson.options').contains('stela-compilers')
+  error('third_party/mesa lacks Stela\'s patch series; run `cargo xtask gpu fetch`')
+endif
 mesa = subproject(
   'mesa',
   default_options : {
