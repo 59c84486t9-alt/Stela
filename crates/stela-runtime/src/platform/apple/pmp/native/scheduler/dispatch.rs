@@ -40,6 +40,43 @@ impl State {
     }
 }
 impl Runtime {
+    /// Actual retained runnable work only. Key/mutex-blocked threads have no
+    /// deadline until their real owner wakes/unlocks them; zero means runnable.
+    pub fn next_deadline(&self) -> Option<u64> {
+        let s = self.state.borrow();
+        let mut deadline = None;
+        let mut add = |frame: &Frame| {
+            if frame.status.get() == Status::Active
+                && !frame.executing.get()
+                && waits::runnable(&s, &frame.thread)
+            {
+                let next = frame.deadline.get().unwrap_or(0);
+                deadline = Some(deadline.map_or(next, |prior: u64| prior.min(next)));
+            }
+        };
+        for queue in &s.queues {
+            if let Some(id) = queue.active {
+                if let Some(frame) = s.works[id].target.frame.as_ref() {
+                    add(frame);
+                }
+            }
+        }
+        for immediate in &s.immediate {
+            if let Some(frame) = immediate.target.frame.as_ref() {
+                add(frame);
+            }
+        }
+        if s.queues.iter().any(|q| {
+            q.active.is_none()
+                && q.lock.is_none()
+                && q.order
+                    .iter()
+                    .any(|id| s.works[*id].cells.enabled.get() && s.works[*id].cells.pending.get())
+        }) {
+            return Some(0);
+        }
+        deadline
+    }
     /// One actual callback step. Queues use source thread priorities (larger
     /// numeric priority first) and stable source work-list order. An unfinished
     /// callback retains its queue thread; releasing a lock for a drain does not

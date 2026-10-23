@@ -9,6 +9,7 @@
 use super::super::{
     counters::Frames,
     platform::{self, amcc, ingestion, owner},
+    scheduler,
 };
 use super::{
     metrics,
@@ -382,16 +383,32 @@ impl<B: metrics::Backend> Owner<B> {
     }
     pub fn dispatch_metrics<M: owner::Backend, I: ingestion::Backend>(
         &mut self,
+        invocation: &scheduler::Invocation,
         sources: Sources<'_, M, I>,
         access: &mut Access<'_>,
     ) -> Result<Progress, Error> {
         self.check(&sources)?;
-        if self.batch.is_some() {
+        if self
+            .batch
+            .as_ref()
+            .is_some_and(|batch| !matches!(batch.stage, Stage::Stop))
+        {
             return Err(Error::Contract(
                 "MC callback overlaps retained foreground service work",
             ));
         }
-        match self.metric_advance(sources.amcc.generic().periods().1, access)? {
+        match self
+            .metrics
+            .dispatch(
+                invocation,
+                &View {
+                    samples: &self.samples,
+                    interval: sources.amcc.generic().periods().1,
+                },
+                access,
+            )
+            .map_err(Error::Metrics)?
+        {
             metrics::Progress::Busy { deadline } => Ok(Progress::Busy { deadline }),
             metrics::Progress::CallbackComplete => Ok(Progress::MetricsComplete),
             _ => Err(Error::Contract(
@@ -872,8 +889,6 @@ mod tests {
     struct Sink {
         effects: Vec<(metrics::Request, metrics::Effect)>,
         registrations: Vec<(u32, metrics::MetricKind, metrics::Counter)>,
-        queue: bool,
-        work: bool,
         wakes: u32,
         notified: bool,
         trace: u32,
@@ -882,15 +897,56 @@ mod tests {
         busy_notify: bool,
         retire_exit: bool,
     }
-    struct Destinations(Rc<RefCell<Sink>>);
+    type CallbackSlot = Rc<RefCell<alloc::rc::Weak<RefCell<Option<Fixture>>>>>;
+    struct Destinations {
+        sink: Rc<RefCell<Sink>>,
+        runtime: scheduler::Runtime,
+        queue: Option<scheduler::Queue>,
+        work: Option<scheduler::Work>,
+        callback: CallbackSlot,
+    }
+    struct InvokeMetrics(CallbackSlot);
+    impl scheduler::Callback for InvokeMetrics {
+        fn advance(&mut self, i: &scheduler::Invocation, a: &mut Access<'_>) -> Completion<u32> {
+            let Some(fixture) = self.0.borrow().upgrade() else {
+                return Completion::Refused("authored MC service owner absent");
+            };
+            let mut fixture = fixture.borrow_mut();
+            let Some(f) = fixture.as_mut() else {
+                return Completion::Refused("authored MC service owner moved");
+            };
+            match f.service.dispatch_metrics(
+                i,
+                Sources {
+                    manager: &f.manager,
+                    amcc: &mut f.amcc,
+                    frames: &f.frames.borrow(),
+                },
+                a,
+            ) {
+                Ok(Progress::MetricsComplete) => Completion::Retired {
+                    value: 0,
+                    refusal: None,
+                },
+                Ok(Progress::Busy { deadline }) => Completion::Busy { deadline },
+                Ok(_) => Completion::Refused("authored MC callback returned unrelated stage"),
+                Err(Error::Metrics(metrics::Error::Contract(e) | metrics::Error::Backend(e)))
+                | Err(Error::Contract(e)) => Completion::Refused(e),
+                Err(_) => Completion::Refused("authored MC callback source check refused"),
+            }
+        }
+    }
     impl metrics::Backend for Destinations {
+        fn work(&self) -> Option<&scheduler::Work> {
+            self.work.as_ref()
+        }
         fn effect(
             &mut self,
             request: &metrics::Request,
             effect: &metrics::Effect,
             _: &mut Access<'_>,
         ) -> Completion<()> {
-            let mut sink = self.0.borrow_mut();
+            let mut sink = self.sink.borrow_mut();
             if matches!(effect, metrics::Effect::Wake) && sink.busy_wake {
                 sink.busy_wake = false;
                 return Completion::Busy { deadline: Some(99) };
@@ -909,12 +965,33 @@ mod tests {
                 return Completion::Busy { deadline: None };
             }
             match effect {
-                metrics::Effect::InitializeQueue { .. } => sink.queue = true,
-                metrics::Effect::BindWork { .. } => {
-                    assert!(sink.queue);
-                    sink.work = true;
+                metrics::Effect::InitializeQueue {
+                    name,
+                    stack_bytes,
+                    priority,
+                } => {
+                    self.queue = Some(
+                        self.runtime
+                            .create_queue(scheduler::QueueConfiguration {
+                                name: (*name).into(),
+                                stack_bytes: *stack_bytes,
+                                priority: *priority,
+                            })
+                            .unwrap(),
+                    )
                 }
-                metrics::Effect::RegisterWork => assert!(sink.queue && sink.work),
+                metrics::Effect::BindWork { priority } => {
+                    self.work = Some(
+                        self.runtime
+                            .bind_work(*priority, InvokeMetrics(self.callback.clone()))
+                            .unwrap(),
+                    )
+                }
+                metrics::Effect::RegisterWork => {
+                    return self
+                        .runtime
+                        .register_work(self.queue.as_ref().unwrap(), self.work.as_ref().unwrap());
+                }
                 metrics::Effect::RegisterMetric {
                     group,
                     kind,
@@ -922,7 +999,7 @@ mod tests {
                     ..
                 } => sink.registrations.push((*group, *kind, counter.clone())),
                 metrics::Effect::Wake => {
-                    assert!(sink.work);
+                    self.runtime.wake(self.work.as_ref().unwrap()).unwrap();
                     sink.wakes += 1;
                     sink.notified = false;
                 }
@@ -949,7 +1026,7 @@ mod tests {
         }
         fn trace_control(&mut self, _: &metrics::Request, _: &mut Access<'_>) -> Completion<u32> {
             Completion::Retired {
-                value: self.0.borrow().trace,
+                value: self.sink.borrow().trace,
                 refusal: None,
             }
         }
@@ -1034,7 +1111,13 @@ mod tests {
             let sink = Rc::new(RefCell::new(Sink::default()));
             let metrics = metrics::Owner::initialized_source(
                 metrics::Configuration::t8112(),
-                Destinations(sink.clone()),
+                Destinations {
+                    sink: sink.clone(),
+                    runtime: scheduler::Runtime::new(),
+                    queue: None,
+                    work: None,
+                    callback: Rc::new(RefCell::new(alloc::rc::Weak::new())),
+                },
             );
             let mut amcc = amcc;
             let service = Owner::initialized_software(
@@ -1065,7 +1148,7 @@ mod tests {
             }
         }
         fn step(&mut self) -> Result<Progress, Error> {
-            self.service.advance(
+            let result = self.service.advance(
                 Sources {
                     manager: &self.manager,
                     amcc: &mut self.amcc,
@@ -1073,17 +1156,44 @@ mod tests {
                 },
                 &mut self.cache.quota_view(),
                 &mut Access::new(0, 1000, &mut self.latch),
-            )
+            );
+            // Independent real scheduler progress while the foreground Stop
+            // retains its authored destination wait. Never inline advance().
+            if matches!(result, Ok(Progress::Busy { .. }))
+                && self
+                    .service
+                    .batch
+                    .as_ref()
+                    .is_some_and(|b| matches!(b.stage, Stage::Stop))
+                && (self.service.metrics.queued() || self.service.metrics.callback_executing())
+            {
+                let _ = self.dispatch()?;
+            }
+            result
         }
         fn dispatch(&mut self) -> Result<Progress, Error> {
-            self.service.dispatch_metrics(
-                Sources {
-                    manager: &self.manager,
-                    amcc: &mut self.amcc,
-                    frames: &self.frames.borrow(),
-                },
-                &mut Access::new(0, 1000, &mut self.latch),
-            )
+            let runtime = self.service.metrics.backend().runtime.clone();
+            let slot = self.service.metrics.backend().callback.clone();
+            let loan = Rc::new(RefCell::new(Some(core::mem::replace(self, Self::new()))));
+            *slot.borrow_mut() = Rc::downgrade(&loan);
+            let mut irq = InterruptLatch::new();
+            let result = runtime.step(&mut Access::new(0, 1000, &mut irq));
+            *slot.borrow_mut() = alloc::rc::Weak::new();
+            *self = loan.borrow_mut().take().unwrap();
+            match result {
+                Ok(scheduler::Progress::Retired { refusal: None, .. }) => {
+                    Ok(Progress::MetricsComplete)
+                }
+                Ok(scheduler::Progress::Retired {
+                    refusal: Some(e), ..
+                })
+                | Err(scheduler::Error::Callback(e)) => {
+                    Err(Error::Metrics(metrics::Error::Backend(e)))
+                }
+                Ok(scheduler::Progress::Busy { deadline }) => Ok(Progress::Busy { deadline }),
+                Ok(scheduler::Progress::Idle) => Ok(Progress::Busy { deadline: None }),
+                Err(scheduler::Error::Contract(e)) => Err(Error::Contract(e)),
+            }
         }
         fn finish(&mut self) -> Result<Progress, Error> {
             for _ in 0..256 {

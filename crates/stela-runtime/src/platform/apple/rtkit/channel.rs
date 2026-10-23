@@ -36,6 +36,12 @@ pub fn channel() -> (NativeEndpoint, Mailbox) {
 }
 
 impl Mailbox {
+    /// Actual unread AP messages retained by this paired transport. No payload
+    /// or scheduling/arrival authority is created by this read-only query.
+    pub fn pending_input(&self) -> bool {
+        let state = self.0.borrow();
+        state.transport_alive && !state.incoming.is_empty()
+    }
     /// Actual endpoint-control start observed by the transport, not readiness
     /// of the protocol behind it. A disabled endpoint may retain queued work.
     pub fn started(&self) -> bool {
