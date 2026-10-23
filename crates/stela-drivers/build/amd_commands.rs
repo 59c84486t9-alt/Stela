@@ -29,11 +29,10 @@ pub fn build() {
     );
     let build =
         PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR")).join("amd-commands");
+    // The pinned tools `cargo xtask gpu fetch` installs come first.
     let local = manifest.join("../../.tools/gpu/generators/bin");
-    let mut paths = env::split_paths(&env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
-    if local.is_dir() {
-        paths.push(local);
-    }
+    let mut paths = Vec::from_iter(local.is_dir().then_some(local));
+    paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
     let path = env::join_paths(&paths).expect("native tool paths must form a valid PATH");
     let meson = tool("STELA_MESON", "meson", &paths);
     let ninja = tool("STELA_NINJA", "ninja", &paths);
