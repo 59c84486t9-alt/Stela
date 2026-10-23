@@ -1116,6 +1116,7 @@ mod tests {
         report_attention: usize,
         unit_attention: Option<u32>,
         report_change_blocks: Option<u64>,
+        block_zero_change: Option<(Lun, u64)>,
         report_illegal: bool,
         poison_lun: Option<Lun>,
         writes: Vec<(Lun, u64, Vec<u8>)>,
@@ -1130,6 +1131,7 @@ mod tests {
                 report_attention: 0,
                 unit_attention: None,
                 report_change_blocks: None,
+                block_zero_change: None,
                 report_illegal: false,
                 poison_lun: None,
                 writes: Vec::new(),
@@ -1139,6 +1141,20 @@ mod tests {
         fn prepare(&mut self, iu: &[u8]) -> Reply {
             let lun = Lun::from_bytes(iu[8..16].try_into().unwrap());
             let cdb = &iu[16..];
+            if cdb[..10] == [0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0]
+                && let Some((unit, blocks)) = self.block_zero_change
+                && unit == lun
+            {
+                self.block_zero_change = None;
+                self.media[0].blocks = blocks;
+                return Reply {
+                    requested: 0,
+                    input: true,
+                    data: Vec::new(),
+                    sense: Some(0x063f0e),
+                    wrong_tag: false,
+                };
+            }
             let media = self.media.iter().find(|media| media.lun == lun);
             let mut reply = Reply {
                 requested: 0,
@@ -1933,6 +1949,50 @@ mod tests {
         let before = state.borrow().events.len();
         assert!(fresh[0].flush().is_err());
         assert_eq!(state.borrow().events.len(), before);
+    }
+
+    #[test]
+    fn block_zero_target_change_restarts_earlier_lun_metadata_before_publication() {
+        use super::super::media::{Owner, scan_uas};
+        use crate::block::BlockDevice;
+        for streams in [None, Some(2)] {
+            let mut memory = vec![0u64; 32 * 1024];
+            let later = Lun::sequential(4);
+            let (raw, state) = target_owner(
+                &mut memory,
+                Target::new(vec![Media::disk(Lun::default(), 1), Media::disk(later, 4)]),
+                quirks::Flags::default(),
+            );
+            state.borrow_mut().streams = streams;
+            let raw = Rc::try_unwrap(raw).ok().unwrap().into_inner();
+            let owner = Rc::new(RefCell::new(Owner::new(raw, "uas".into(), "serial".into())));
+            let mut old = scan_uas(owner.clone(), &mut Vec::new()).unwrap();
+            assert_eq!(old.len(), 2);
+            state
+                .borrow_mut()
+                .target
+                .as_mut()
+                .unwrap()
+                .block_zero_change = Some((later, 8192));
+            let mut failures = Vec::new();
+            let fresh = scan_uas(owner, &mut failures).unwrap();
+            assert_eq!(fresh.len(), 2);
+            assert_eq!(
+                fresh[0].identity().blocks,
+                8192,
+                "earlier provisional geometry survived a later block-zero target-change UA"
+            );
+            assert!(failures.iter().any(|(_, error)| *error
+                == BlockError::Sense(Sense {
+                    key: 6,
+                    asc: 0x3f,
+                    ascq: 0x0e,
+                })));
+            let before = state.borrow().events.len();
+            assert!(old[0].read(0, &mut [0; 512]).is_err());
+            assert!(old[1].flush().is_err());
+            assert_eq!(state.borrow().events.len(), before);
+        }
     }
 
     #[test]
