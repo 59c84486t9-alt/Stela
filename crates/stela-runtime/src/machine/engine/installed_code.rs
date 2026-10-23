@@ -26,12 +26,16 @@ struct Entry {
 pub struct InstalledCodeCache {
     entries: [Option<Entry>; MAX_ENTRIES],
     next: usize,
+    #[cfg(test)]
+    upgrade_attempts: usize,
 }
 impl Default for InstalledCodeCache {
     fn default() -> Self {
         Self {
             entries: core::array::from_fn(|_| None),
             next: 0,
+            #[cfg(test)]
+            upgrade_attempts: 0,
         }
     }
 }
@@ -46,6 +50,20 @@ impl InstalledCodeCache {
             let Some(entry) = slot else {
                 continue;
             };
+            // These pointers name the Arc-allocated Vec object, never its
+            // reusable payload buffer or installed native code. The Weak pins
+            // that allocation identity even after its strong owner expires.
+            // Avoid strong-count RMWs for every live nonmatching cache entry.
+            if entry.owner.as_ptr() != Arc::as_ptr(owner) {
+                if entry.owner.strong_count() == 0 {
+                    *slot = None;
+                }
+                continue;
+            }
+            #[cfg(test)]
+            {
+                self.upgrade_attempts += 1;
+            }
             let Some(actual) = entry.owner.upgrade() else {
                 *slot = None;
                 continue;
@@ -144,6 +162,30 @@ mod tests {
         let equal = Arc::new(vec![1, 2, 3, 4]);
         assert_ne!(arena.immutable(&equal).unwrap().0, cold.0);
         assert_eq!((arena.installs, arena.copies), (2, 8));
+    }
+    #[test]
+    fn last_slot_warm_hit_upgrades_only_its_matching_allocation() {
+        let mut cache = InstalledCodeCache::default();
+        let owners: Vec<_> = (0..MAX_ENTRIES)
+            .map(|_| Arc::new(vec![1, 2, 3, 4]))
+            .collect();
+        for (index, owner) in owners.iter().enumerate() {
+            cache.record(owner, NativeCode(index));
+        }
+        for attempt in 1..=32 {
+            assert_eq!(
+                cache.lookup(owners.last().unwrap()),
+                Some(NativeCode(MAX_ENTRIES - 1))
+            );
+            assert_eq!(cache.upgrade_attempts, attempt);
+        }
+        let equal_payload = Arc::new(vec![1, 2, 3, 4]);
+        assert!(cache.lookup(&equal_payload).is_none());
+        assert_eq!(cache.upgrade_attempts, 32);
+        drop(owners);
+        assert!(cache.lookup(&equal_payload).is_none());
+        assert_eq!(cache.entries(), 0);
+        assert_eq!(cache.upgrade_attempts, 32);
     }
     #[test]
     fn expired_owner_reused_payload_and_make_mut_never_authorize_old_code() {

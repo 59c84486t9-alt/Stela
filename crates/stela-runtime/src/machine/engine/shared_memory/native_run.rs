@@ -267,9 +267,10 @@ impl NativeRun<'_> {
         let code = match host.install_immutable(&self.artifact.code) {
             Ok(code) => code,
             Err(crate::machine::InstallError::Full) => {
-                // This fixed owner has returned/recovered its preceding frame;
-                // no installed pointer escapes a NativeRun. The shared lane
-                // never falls back to legacy cached block addresses.
+                // This fixed owner has returned/recovered its preceding frame.
+                // Installed reuse pointers remain inside this actual Host;
+                // discard invalidates its reuse metadata before the retry. The
+                // shared lane never uses legacy cached block addresses.
                 host.discard_code();
                 host.install_immutable(&self.artifact.code)
                     .map_err(|_| MemoryStatus::Unsupported)?
