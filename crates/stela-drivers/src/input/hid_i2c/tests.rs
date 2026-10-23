@@ -521,28 +521,11 @@ fn safe_address_nack_wakeup_retry_and_qtec_extra_power_are_real_commands() {
     assert!(h.borrow().time.get() >= 3 * WAKE_DELAY_US + ADDRESS_WAKE_DELAY_US);
 }
 #[test]
-fn identity_change_and_nonconforming_source_profiles_are_explicit() {
+fn restart_identity_change_is_explicit() {
     let (mut d, h) = ready();
     d.stop().unwrap();
     h.borrow_mut().desc[22..24].copy_from_slice(&99_u16.to_le_bytes());
     assert_eq!(d.initialize().unwrap_err().kind, ErrorKind::IdentityChanged);
-    for (vendor, product) in [
-        (0x0911, 0x5288),
-        (0x103c, 0x184f),
-        (0x048d, 0x83db),
-        (0x2386, 0x3118),
-        (0x0488, 0xd0c1),
-        (0x36b6, 0xc001),
-        (0x048d, 0x837a),
-    ] {
-        let (mut d, h) = device(vendor, product);
-        assert_eq!(
-            d.initialize().unwrap_err().kind,
-            ErrorKind::UnqualifiedQuirk { vendor, product }
-        );
-        assert!(h.borrow().commands.is_empty());
-        assert!(!d.is_ready());
-    }
 }
 
 #[test]
@@ -662,4 +645,113 @@ fn continuously_asserted_device_pin_bounds_pre_reset_drain() {
     assert!(d.discarded_before_start() <= 101);
     assert!(d.needs_reset());
     assert!(d.report_descriptor().is_empty());
+}
+
+#[test]
+fn source_qualified_no_irq_devices_expose_delay_instead_of_inventing_ack() {
+    for (vendor, product) in [
+        (0x0911, 0x5288),
+        (0x103c, 0x184f),
+        (0x048d, 0x83db),
+        (0x2386, 0x3118),
+        (0x0488, 0xd0c1),
+        (0x36b6, 0xc001),
+    ] {
+        let (mut d, h) = device(vendor, product);
+        h.borrow_mut().no_reset_ack = true;
+        d.initialize().unwrap();
+        assert!(d.is_ready());
+        assert_eq!(
+            d.reset_completion(),
+            Some(ResetCompletion::DeviceQuirkDelay)
+        );
+        assert_eq!(h.borrow().reads, 0);
+        assert_eq!(h.borrow().reset_count, 1);
+        assert_eq!(
+            h.borrow().time.get(),
+            2 * WAKE_DELAY_US + QUIRK_RESET_DELAY_US
+        );
+        h.borrow_mut().input.push_back(Hardware::frame(&[17, 1, 2]));
+        assert_eq!(d.poll().unwrap(), Some(InputReport::Data(vec![17, 1, 2])));
+    }
+    // Source identity is exact: a neighboring ordinary device still requires
+    // its new actual zero-length response regardless of elapsed time.
+    let (mut d, h) = device(0x2386, 0x3119);
+    h.borrow_mut().no_reset_ack = true;
+    assert_eq!(d.initialize().unwrap_err().kind, ErrorKind::ResetTimeout);
+    assert_eq!(d.reset_completion(), None);
+    let (d, _) = ready();
+    assert_eq!(
+        d.reset_completion(),
+        Some(ResetCompletion::InterruptAcknowledgement)
+    );
+}
+
+#[test]
+fn no_irq_profile_keeps_actual_irq_and_mutable_command_failure_requirements() {
+    let (mut d, h) = device(0x2386, 0x3118);
+    h.borrow_mut().no_reset_ack = true;
+    h.borrow_mut().fail_irq = true;
+    assert!(matches!(
+        d.initialize().unwrap_err().kind,
+        ErrorKind::Interrupt(_)
+    ));
+    assert_eq!(h.borrow().reset_count, 0);
+    assert_eq!(d.reset_completion(), None);
+
+    let (mut d, h) = device(0x2386, 0x3118);
+    h.borrow_mut().no_reset_ack = true;
+    h.borrow_mut().fail_after_opcode = Some(RESET);
+    assert!(matches!(
+        d.initialize().unwrap_err().kind,
+        ErrorKind::Bus(_)
+    ));
+    assert_eq!(h.borrow().reset_count, 1);
+    assert_eq!(d.reset_completion(), None);
+    assert!(d.needs_reset());
+
+    // Even when a no-IRQ device does emit a real ACK, consume it without
+    // relabeling the qualified delay as IRQ evidence or leaking it to poll.
+    let (mut d, h) = device(0x2386, 0x3118);
+    d.initialize().unwrap();
+    assert_eq!(
+        d.reset_completion(),
+        Some(ResetCompletion::DeviceQuirkDelay)
+    );
+    assert_eq!(d.discarded_before_start(), 1);
+    assert_eq!(h.borrow().reads, 1);
+    assert_eq!(d.poll().unwrap(), None);
+}
+
+#[test]
+fn exact_bad_input_size_profiles_expose_original_header_and_all_actual_bytes() {
+    for (vendor, product) in [(0x0911, 0x5288), (0x048d, 0x837a)] {
+        for reported_length in [1u16, 33, 65535] {
+            let (mut d, h) = device(vendor, product);
+            h.borrow_mut().no_reset_ack = vendor == 0x0911;
+            d.initialize().unwrap();
+            let mut bytes: Vec<u8> = (0..32).collect();
+            bytes[..2].copy_from_slice(&reported_length.to_le_bytes());
+            let expected = bytes[2..].to_vec();
+            h.borrow_mut().input.push_back(bytes);
+            assert_eq!(
+                d.poll().unwrap(),
+                Some(InputReport::CorrectedLength {
+                    data: expected,
+                    reported_length,
+                    read_length: 32,
+                })
+            );
+            assert!(d.is_ready());
+            h.borrow_mut().input.push_back(vec![0, 0]);
+            assert_eq!(d.poll().unwrap_err().kind, ErrorKind::UnexpectedReset);
+        }
+    }
+    let (mut d, h) = device(0x048d, 0x837b);
+    d.initialize().unwrap();
+    h.borrow_mut().input.push_back(vec![33, 0, 17, 1, 2]);
+    assert!(matches!(
+        d.poll().unwrap_err().kind,
+        ErrorKind::ReportLength { .. }
+    ));
 }

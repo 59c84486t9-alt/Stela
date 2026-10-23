@@ -8,7 +8,8 @@
 //! The platform supplies an exclusively owned, powered I2C attachment, the ACPI
 //! descriptor register and the actual interrupt pin. The CPU route stays masked
 //! and drained; this polled backend observes the pin itself. Reset completes
-//! only after an asserted pin and a real zero-length reset acknowledgement.
+//! by a new zero-length IRQ acknowledgement, except exact source-qualified
+//! no-reset-IRQ devices that explicitly expose their separate delay contract.
 //! Raw HID reports and the exact report descriptor pass to a shared HID consumer;
 //! no keyboard, touchpad or touchscreen descriptor is substituted here.
 use crate::bus::i2c::{self, Address, Bus, Operation, Timer};
@@ -28,6 +29,7 @@ const SET_POWER: u8 = 8;
 const WAKE_DELAY_US: u64 = 60_000;
 const ADDRESS_WAKE_DELAY_US: u64 = 400;
 const GOODIX_RESUME_DELAY_US: u64 = 1_500_000;
+const QUIRK_RESET_DELAY_US: u64 = 100_000;
 
 /// Actual platform IRQ provider. Masking must acknowledge the CPU route's
 /// mask/drain, not merely change a local boolean. `asserted` samples this
@@ -77,7 +79,6 @@ pub enum ErrorKind {
     ResetTimeout,
     InputDrainTimeout,
     UnexpectedReset,
-    UnqualifiedQuirk { vendor: u16, product: u16 },
     IdentityChanged,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +122,24 @@ pub enum InputReport {
     Data(Vec<u8>),
     Empty,
     SpuriousInterrupt,
+    /// Exact upstream BAD_INPUT_SIZE devices return the complete read buffer
+    /// when their header is invalid. Preserve every actual byte and expose the
+    /// original wire length; a consumer never mistakes this for a valid header.
+    CorrectedLength {
+        data: Vec<u8>,
+        reported_length: u16,
+        read_length: u16,
+    },
+}
+
+/// Evidence for the most recent successful reset sequence. These outcomes are
+/// deliberately distinct: a known no-IRQ device never claims an observed ACK.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResetCompletion {
+    InterruptAcknowledgement,
+    /// The exact pinned source profile omits a reset interrupt. The RESET write
+    /// was accepted, the required 100ms elapsed, and post-reset power-on succeeded.
+    DeviceQuirkDelay,
 }
 
 /// Captured control-report bytes and the full HID length advertised on wire.
@@ -149,6 +168,7 @@ pub struct Device<B, I, T> {
     input: Vec<u8>,
     quirks: Quirks,
     discarded_before_start: u64,
+    reset_completion: Option<ResetCompletion>,
 }
 impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     /// Does not touch hardware. GPIO/reset-rail sequencing and ACPI descriptor
@@ -184,6 +204,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             input: Vec::new(),
             quirks: Quirks::default(),
             discarded_before_start: 0,
+            reset_completion: None,
         })
     }
     pub fn is_ready(&self) -> bool {
@@ -210,6 +231,9 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     }
     pub fn discarded_before_start(&self) -> u64 {
         self.discarded_before_start
+    }
+    pub fn reset_completion(&self) -> Option<ResetCompletion> {
+        self.reset_completion
     }
     fn ready(&self) -> Result<(), Error> {
         if self.state == State::Faulted {
@@ -302,14 +326,17 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             .map_err(ErrorKind::Bus)?;
         Ok(u16::from_le_bytes([self.input[0], self.input[1]]))
     }
-    fn validate_input(&self, length: u16) -> Result<(), ErrorKind> {
+    fn input_length(&self, length: u16) -> Result<usize, ErrorKind> {
         if length < 2 || usize::from(length) > self.input.len() {
+            if self.quirks.bad_input_size {
+                return Ok(self.input.len());
+            }
             return Err(ErrorKind::ReportLength {
                 actual: usize::from(length),
                 maximum: self.input.len(),
             });
         }
-        Ok(())
+        Ok(usize::from(length))
     }
     // An interrupt route drain does not consume the peripheral's report FIFO.
     // Establish a deasserted pin epoch before RESET so a stale zero-length
@@ -320,7 +347,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         while self.interrupt.asserted().map_err(ErrorKind::Interrupt)? {
             let length = self.read_input()?;
             if length != 0 && !(self.quirks.elan && length == u16::MAX) {
-                self.validate_input(length)?;
+                self.input_length(length)?;
             }
             self.discarded_before_start = self.discarded_before_start.saturating_add(1);
             if self.timer.now_us().wrapping_sub(start) >= self.reset_timeout_us {
@@ -331,32 +358,43 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         Ok(())
     }
     fn reset(&mut self) -> Result<(), ErrorKind> {
+        self.reset_completion = None;
         self.power(true)?;
         self.drain_before_reset()?;
         let bytes = self.command(RESET, 0, 0)?;
         self.transfer(&bytes, &mut [])?;
-        let start = self.timer.now_us();
-        loop {
-            if self.interrupt.asserted().map_err(ErrorKind::Interrupt)? {
-                let length = self.read_input()?;
-                if length == 0 {
-                    break;
+        let completion = if self.quirks.no_reset_irq {
+            // Linux i2c_hid_finish_hwreset uses this exact 100ms contract only
+            // for the listed device identities. Do not relabel it as an IRQ ACK.
+            self.delay(QUIRK_RESET_DELAY_US);
+            // Consume any actual response/input accumulated during the delay;
+            // a stale delayed reset response cannot become guest input later.
+            self.drain_before_reset()?;
+            ResetCompletion::DeviceQuirkDelay
+        } else {
+            let start = self.timer.now_us();
+            loop {
+                if self.interrupt.asserted().map_err(ErrorKind::Interrupt)? {
+                    let length = self.read_input()?;
+                    if length == 0 {
+                        break;
+                    }
+                    if !(self.quirks.elan && length == u16::MAX) {
+                        self.input_length(length)?;
+                    }
+                    self.discarded_before_start = self.discarded_before_start.saturating_add(1);
                 }
-                if !(self.quirks.elan && length == u16::MAX) {
-                    self.validate_input(length)?;
+                if self.timer.now_us().wrapping_sub(start) >= self.reset_timeout_us {
+                    return Err(ErrorKind::ResetTimeout);
                 }
-                // Before start these reports have no guest consumer. Count
-                // them; only the actual zero report acknowledges this RESET.
-                self.discarded_before_start = self.discarded_before_start.saturating_add(1);
+                self.timer.relax();
             }
-            if self.timer.now_us().wrapping_sub(start) >= self.reset_timeout_us {
-                return Err(ErrorKind::ResetTimeout);
-            }
-            self.timer.relax();
-        }
+            ResetCompletion::InterruptAcknowledgement
+        };
         if !self.quirks.elan {
             self.power(true)?;
         }
+        self.reset_completion = Some(completion);
         Ok(())
     }
     fn fail(&mut self, kind: ErrorKind) -> Error {
@@ -392,7 +430,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             if self.descriptor.is_some_and(|old| old != descriptor) {
                 return Err(ErrorKind::IdentityChanged);
             }
-            self.quirks = Quirks::for_device(descriptor)?;
+            self.quirks = Quirks::for_device(descriptor);
             self.input = Self::buffer(usize::from(descriptor.max_input_length))?;
             self.descriptor = Some(descriptor);
             self.reset()?;
@@ -430,13 +468,21 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             if self.quirks.elan && length == u16::MAX {
                 return Ok(Some(InputReport::SpuriousInterrupt));
             }
-            self.validate_input(length)?;
+            let effective = self.input_length(length)?;
             if length == 2 {
                 return Ok(Some(InputReport::Empty));
             }
-            let mut report = Self::buffer(usize::from(length) - 2)?;
-            report.copy_from_slice(&self.input[2..usize::from(length)]);
-            Ok(Some(InputReport::Data(report)))
+            let mut report = Self::buffer(effective - 2)?;
+            report.copy_from_slice(&self.input[2..effective]);
+            Ok(Some(if effective == usize::from(length) {
+                InputReport::Data(report)
+            } else {
+                InputReport::CorrectedLength {
+                    data: report,
+                    reported_length: length,
+                    read_length: effective as u16,
+                }
+            }))
         })();
         result.map_err(|kind| self.fail(kind))
     }

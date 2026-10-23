@@ -59,33 +59,27 @@ pub(super) struct Quirks {
     pub(super) delayed_resume: bool,
     pub(super) no_sleep: bool,
     pub(super) repower: bool,
+    pub(super) no_reset_irq: bool,
+    pub(super) bad_input_size: bool,
 }
 impl Quirks {
-    pub(super) fn for_device(d: Descriptor) -> Result<Self, ErrorKind> {
-        // These source profiles require unacknowledged reset or fabricate a
-        // report length. They cannot meet this backend's actual reset/framing
-        // contract and are explicitly unqualified, rather than silently ready.
-        if matches!(
-            (d.vendor, d.product),
-            (0x0911, 0x5288)
-                | (0x103c, 0x184f)
-                | (0x048d, 0x83db)
-                | (0x2386, 0x3118)
-                | (0x0488, 0xd0c1)
-                | (0x36b6, 0xc001)
-                | (0x048d, 0x837a)
-        ) {
-            return Err(ErrorKind::UnqualifiedQuirk {
-                vendor: d.vendor,
-                product: d.product,
-            });
-        }
-        Ok(Self {
+    pub(super) fn for_device(d: Descriptor) -> Self {
+        Self {
             elan: d.vendor == 0x04f3,
             reset_resume: d.vendor == 0x044e || (d.vendor, d.product) == (0x06cb, 0x7a13),
             delayed_resume: (d.vendor, d.product) == (0x27c6, 0x0d42),
             no_sleep: (d.vendor, d.product) == (0x0488, 0x1063),
             repower: d.vendor == 0x6243,
-        })
+            no_reset_irq: matches!(
+                (d.vendor, d.product),
+                (0x0911, 0x5288)
+                    | (0x103c, 0x184f)
+                    | (0x048d, 0x83db)
+                    | (0x2386, 0x3118)
+                    | (0x0488, 0xd0c1)
+                    | (0x36b6, 0xc001)
+            ),
+            bad_input_size: matches!((d.vendor, d.product), (0x0911, 0x5288) | (0x048d, 0x837a)),
+        }
     }
 }
