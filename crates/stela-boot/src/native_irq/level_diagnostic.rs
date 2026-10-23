@@ -24,12 +24,18 @@ use stela_drivers::{
 };
 use stela_runtime::pc::acpi;
 
-// Exact 8098-byte DSDT from the source-bound Q35/TCG single-BSP fixture.
+// Separately evaluated 8098-byte DSDTs from the Q35/TCG single-BSP fixture,
+// using -cpu max and max,vendor=GenuineIntel respectively. Keep the original
+// capture binding; docs/design/host-drivers.md records the new input's evidence.
 // ACPICA returns unique _PRT entry [0x2ffff,0,Reference(\_SB_.GSIG),0]
 // and GSIG._CRS [89,06,00,09,01,16,00,00,00,79,00]: high/shared/level GSI22.
 const DSDT_HASH: [u8; 32] = [
     0xed, 0x48, 0xc9, 0x77, 0x2a, 0xee, 0x85, 0x40, 0x66, 0xc1, 0x4b, 0x36, 0xce, 0x8f, 0x78, 0x7b,
     0xb6, 0x9d, 0x27, 0x9a, 0xfa, 0x15, 0xde, 0xa7, 0x29, 0xb8, 0xba, 0x2f, 0x9b, 0x77, 0x25, 0x6d,
+];
+const INTEL_DSDT_HASH: [u8; 32] = [
+    0xdf, 0xe8, 0xaf, 0xc1, 0x3a, 0x17, 0x52, 0x62, 0xe7, 0xbf, 0x69, 0x71, 0x0b, 0xf7, 0x73, 0x8c,
+    0x11, 0xd2, 0x20, 0x51, 0x99, 0x8d, 0x20, 0xd8, 0x20, 0x68, 0x5f, 0x37, 0x3e, 0x31, 0xcf, 0x80,
 ];
 const LINE: LineRoute = LineRoute {
     gsi: 22,
@@ -49,6 +55,7 @@ pub(crate) struct Prepared {
     // Actual immutable ACPI reclaim pages remain reserved and identity-mapped
     // in the host-check root; no heap/guest allocator can reclaim this table.
     dsdt: &'static [u8],
+    dsdt_hash: [u8; 32],
 }
 impl Prepared {
     /// Enclosed by the source-bound TCG/Q35/SMM-off fixture qualification,
@@ -93,9 +100,10 @@ impl Prepared {
             return Err(String::from("fixture DSDT missing"));
         }
         let dsdt = unsafe { acpi::table(address) }.map_err(|e| format!("fixture DSDT: {e:?}"))?;
+        let dsdt_hash = Sha256::digest(dsdt).into();
         if dsdt.len() != 8098
             || &dsdt[..4] != b"DSDT"
-            || Sha256::digest(dsdt).as_slice() != DSDT_HASH
+            || ![DSDT_HASH, INTEL_DSDT_HASH].contains(&dsdt_hash)
         {
             return Err(String::from(
                 "fixture actual DSDT differs from ACPICA route receipt",
@@ -110,6 +118,7 @@ impl Prepared {
             madt_hash: Sha256::digest(madt).into(),
             fadt_hash: Sha256::digest(fadt).into(),
             dsdt,
+            dsdt_hash,
         })
     }
     pub(crate) fn mapping(&self) -> Range<u64> {
@@ -120,7 +129,7 @@ impl Prepared {
     pub(crate) fn run(self, base: u64, clock: Clock) -> Result<String, String> {
         // Recheck the actual mapped table after EBS, immediately before line
         // ownership. The capture/receipt cannot authorize a changed live input.
-        if Sha256::digest(self.dsdt).as_slice() != DSDT_HASH {
+        if Sha256::digest(self.dsdt).as_slice() != self.dsdt_hash {
             return Err(String::from("fixture DSDT changed before INTx ownership"));
         }
         let platform = super::NativePlatform(());
@@ -262,7 +271,8 @@ impl Prepared {
             return Err(String::from("level delivery survived retirement"));
         }
         Ok(format!(
-            "INTx gsi=22 high+shared+level vector={vector:#x} first=2 second=1 hold→EOI→retrigger=verified RemoteIRR=observed/drained group_refs=released late_delivery=absent DSDT=ed48c9772aee854066c14b36ce8f787bb69d279afa15dea729b8ba2f9b77256d MADT={:x} FADT={:x} SCI_gsi={} SCI_polarity={:?} SCI_trigger={:?}",
+            "INTx gsi=22 high+shared+level vector={vector:#x} first=2 second=1 hold→EOI→retrigger=verified RemoteIRR=observed/drained group_refs=released late_delivery=absent DSDT={:x} MADT={:x} FADT={:x} SCI_gsi={} SCI_polarity={:?} SCI_trigger={:?}",
+            Sha256::digest(self.dsdt),
             sha2::digest::generic_array::GenericArray::from(self.madt_hash),
             sha2::digest::generic_array::GenericArray::from(self.fadt_hash),
             self.sci.gsi,

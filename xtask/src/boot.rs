@@ -1573,6 +1573,13 @@ fn native_isolation_verified(serial: &str) -> bool {
 fn native_level_verified(serial: &str) -> bool {
     serial.lines().any(|line| {
         line.starts_with("CHECK native-irq PASS ")
+            && line.split_whitespace().any(|field| {
+                [
+                    "DSDT=ed48c9772aee854066c14b36ce8f787bb69d279afa15dea729b8ba2f9b77256d",
+                    "DSDT=dfe8afc13a175262e7bf69710bf7738c11d22051998d20d820685f373e31cf80",
+                ]
+                .contains(&field)
+            })
             && [
                 "INTx gsi=22 high+shared+level",
                 "first=2 second=1",
@@ -1580,7 +1587,6 @@ fn native_level_verified(serial: &str) -> bool {
                 "RemoteIRR=observed/drained",
                 "group_refs=released",
                 "late_delivery=absent",
-                "DSDT=ed48c9772aee854066c14b36ce8f787bb69d279afa15dea729b8ba2f9b77256d",
             ]
             .iter()
             .all(|marker| line.contains(marker))
@@ -1703,6 +1709,13 @@ mod tests {
             "{old}; INTx gsi=22 high+shared+level first=2 second=1 hold→EOI→retrigger=verified RemoteIRR=observed/drained group_refs=released DSDT=ed48c9772aee854066c14b36ce8f787bb69d279afa15dea729b8ba2f9b77256d"
         );
         assert!(native_level_verified(&full));
+        let intel = full.replace(
+            "ed48c9772aee854066c14b36ce8f787bb69d279afa15dea729b8ba2f9b77256d",
+            "dfe8afc13a175262e7bf69710bf7738c11d22051998d20d820685f373e31cf80",
+        );
+        assert!(native_level_verified(&intel));
+        assert!(!native_level_verified(&format!("{intel}0")));
+        assert!(!native_level_verified(&intel.replace("DSDT=df", "DSDT=00")));
         assert!(!native_level_verified(
             &full.replace("RemoteIRR=observed/drained", "RemoteIRR=unknown")
         ));
