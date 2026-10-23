@@ -9,6 +9,7 @@ pub mod audio;
 pub mod bluetooth;
 pub mod cdc;
 pub mod ethernet;
+pub mod forwarding;
 pub mod hid;
 pub mod storage;
 pub mod typec;
