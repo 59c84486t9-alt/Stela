@@ -2,6 +2,7 @@
 /* The execution Stela gives Linux code: one owner at a time, on one context
  * that nothing preempts or interrupts. */
 #include <linux/irqflags.h>
+#include <linux/bottom_half.h>
 #include <linux/processor.h>
 #include <linux/preempt.h>
 #include <linux/thread_info.h>
@@ -12,6 +13,10 @@ const struct stela_linux_owner stela_linux_bare = {.services = &no_services};
 
 static bool running;
 static const struct stela_linux_owner *owner;
+/* No interrupt reaches Linux code. This is only its simulated local state. */
+static unsigned long irq_flags = ARCH_IRQ_ENABLED;
+/* Linux headers keep actual nested atomic/read-side state here. */
+struct thread_info stela_thread_info;
 
 void stela_linux_enter(const struct stela_linux_owner *next)
 {
@@ -19,12 +24,17 @@ void stela_linux_enter(const struct stela_linux_owner *next)
 		__builtin_trap();
 	while (__atomic_exchange_n(&running, true, __ATOMIC_ACQUIRE))
 		cpu_relax();
+	if (owner || preempt_count() || irq_flags != ARCH_IRQ_ENABLED)
+		__builtin_trap();
 	owner = next;
 }
 
 void stela_linux_exit(void)
 {
-	if (!owner)
+	if (!stela_linux_quiescent())
+		__builtin_trap();
+	stela_linux_rcu_finish();
+	if (!stela_linux_quiescent())
 		__builtin_trap();
 	owner = NULL;
 	__atomic_store_n(&running, false, __ATOMIC_RELEASE);
@@ -53,19 +63,50 @@ void stela_linux_warn(const char *file, int line, const char *condition, unsigne
 		current_owner->services->warn(current_owner->context, file, line, condition);
 }
 
-/* Linux code's single context, with its thread flags and preemption count. */
-struct thread_info stela_thread_info;
-
-/* The interrupt flag local_irq_save() and its kind keep. No interrupt reaches
- * Linux code either way. */
-static unsigned long irq_flags = ARCH_IRQ_ENABLED;
-
 unsigned long arch_local_save_flags(void)
 {
+	(void)stela_linux_owner();
 	return irq_flags;
 }
 
 void arch_local_irq_restore(unsigned long flags)
 {
+	(void)stela_linux_owner();
+	if (flags != ARCH_IRQ_ENABLED && flags != ARCH_IRQ_DISABLED)
+		__builtin_trap();
 	irq_flags = flags;
+}
+
+bool stela_linux_quiescent(void)
+{
+	(void)stela_linux_owner();
+	return !preempt_count() && irq_flags == ARCH_IRQ_ENABLED;
+}
+
+/* Only depth bookkeeping is needed in this nonpreemptible, non-interrupting
+ * context. RCU work is deferred until a checked quiescent boundary, never
+ * invoked from inside another atomic/read-side section. */
+static void enable_bh(unsigned int count)
+{
+	(void)stela_linux_owner();
+	int nesting = preempt_count();
+	if (nesting < 0 || !count || (count & ~(SOFTIRQ_MASK | PREEMPT_MASK)) ||
+	    softirq_count() < (count & SOFTIRQ_MASK) ||
+	    ((unsigned int)nesting & PREEMPT_MASK) < (count & PREEMPT_MASK))
+		__builtin_trap();
+	barrier();
+	preempt_count_sub((int)count);
+}
+
+void _local_bh_enable(void)
+{
+	enable_bh(SOFTIRQ_DISABLE_OFFSET);
+}
+
+void __local_bh_enable_ip(unsigned long ip, unsigned int count)
+{
+	(void)ip;
+	if (irqs_disabled() || in_hardirq())
+		__builtin_trap();
+	enable_bh(count);
 }

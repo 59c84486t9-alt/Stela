@@ -5,12 +5,17 @@
 #include <linux/delay.h>
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
+#include <linux/preempt.h>
 #include <linux/timekeeping.h>
 #include <stela/linux.h>
 
 static void delay_us(u64 minimum, u64 maximum, bool atomic)
 {
 	const struct stela_linux_owner *owner = stela_linux_owner();
+	/* Sleeping in a read-side, IRQ-disabled or callback section cannot
+	 * provide a valid grace period or preserve its nonblocking contract. */
+	if (!atomic && !stela_linux_quiescent())
+		__builtin_trap();
 	if (!owner->services->delay_us)
 		__builtin_trap();
 	owner->services->delay_us(owner->context, minimum, maximum, atomic);

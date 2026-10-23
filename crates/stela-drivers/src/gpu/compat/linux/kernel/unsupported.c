@@ -74,6 +74,3 @@ STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_freezable_power_effic
 STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_bh_wq);
 STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_bh_highpri_wq);
 STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_dfl_long_wq);
-
-/* Only module unloading waits for RCU callbacks, and Stela unloads none. */
-STELA_UNSUPPORTED(void, rcu_barrier, void)

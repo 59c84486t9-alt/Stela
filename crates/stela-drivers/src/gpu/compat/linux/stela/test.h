@@ -16,6 +16,8 @@ void free(void *object);
 /* The host's monotonic clock, and a sleep of at least usecs on it. */
 s64 stela_test_now_ns(void);
 void stela_test_sleep_us(u64 usecs);
+/* A separate child must stop at the contract trap instead of returning. */
+int stela_test_traps(void (*operation)(void));
 
 __noreturn void stela_test_fail(const char *file, int line, const char *condition);
 #define assert(condition) \

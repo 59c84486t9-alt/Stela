@@ -15,6 +15,8 @@
 #define CONFIG_GENERIC_BUG 1
 #define CONFIG_TINY_RCU 1
 #define CONFIG_TINY_SRCU 1
+/* Record balanced atomic/RCU sections; this enables no scheduling. */
+#define CONFIG_PREEMPT_COUNT 1
 #define CONFIG_ARCH_DMA_ADDR_T_64BIT 1
 #define CONFIG_PHYS_ADDR_T_64BIT 1
 #define CONFIG_NR_CPUS 1

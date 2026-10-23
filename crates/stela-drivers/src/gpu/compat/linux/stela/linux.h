@@ -5,6 +5,9 @@
  * and stela_linux_exit, for one owner at a time: entering waits until no other
  * owner runs Linux code, and Linux code never enters again. That is the
  * uniprocessor, non-preemptible execution generated/autoconf.h configures.
+ * Both boundaries require balanced preemption/BH/read-side state and enabled
+ * simulated IRQs. Callbacks and critical sections cannot escape the borrowed
+ * owner; exit invokes pending RCU callbacks before returning that owner.
  *
  * The owner supplies the services that depend on its device and platform.
  * Linux names no device for most of them (msleep, ktime_get, printk), so they
@@ -43,6 +46,10 @@ extern const struct stela_linux_owner stela_linux_bare;
 
 void stela_linux_enter(const struct stela_linux_owner *owner);
 void stela_linux_exit(void);
+/* Checked quiescence in the serialized context, not a native IRQ witness. */
+bool stela_linux_quiescent(void);
+/* Internal RCU retirement while the execution owner is still borrowed. */
+void stela_linux_rcu_finish(void);
 /* The owner running Linux code; traps outside enter and exit. */
 const struct stela_linux_owner *stela_linux_owner(void);
 /* Report an operation Stela does not provide yet to the running owner. */
