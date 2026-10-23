@@ -12,6 +12,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 mod config;
 mod native;
+pub mod nvme;
 pub mod remap;
 mod source;
 pub use config::ChildConfig;
@@ -164,6 +165,7 @@ pub struct Child {
 
 pub struct Host<R: Registers> {
     registers: Option<R>,
+    identity: u32,
     profile: Profile,
     domain: u32,
     first_bus: u8,
@@ -217,15 +219,16 @@ impl<R: Registers> Host<R> {
                     n.checked_add(1).filter(|next| *next <= i32::MAX as u32)
                 })
                 .map_err(|_| Error::Exhausted)?;
-            Ok((profile, command, domain))
+            Ok((profile, command, domain, id))
         })();
-        let (profile, command, domain) = match prepared {
+        let (profile, command, domain, identity) = match prepared {
             Ok(p) => p,
             Err(e) => return Err((e, Some(registers))),
         };
         // Once decoding may have changed, no failure can release the hierarchy.
         let mut host = Self {
             registers: Some(registers),
+            identity,
             profile,
             domain,
             first_bus: 0,
@@ -522,7 +525,9 @@ impl<R: Registers> Host<R> {
         let old_buses = (self.first_bus, self.last_bus);
         let result = (|| {
             let id = self.io().parent_read(0, 4)?;
-            if Profile::identify(id as u16, (id >> 16) as u16)? != self.profile {
+            if id != self.identity
+                || Profile::identify(id as u16, (id >> 16) as u16)? != self.profile
+            {
                 return Err(Error::UnsupportedDevice);
             }
             for index in [0, 2, 4] {

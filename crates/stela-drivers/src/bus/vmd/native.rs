@@ -28,10 +28,14 @@ pub struct NativeRegisters {
     msix: Option<crate::bus::pci::msix::MappedBar>,
 }
 impl NativeRegisters {
+    pub(super) fn resource(&self, index: usize) -> Resource {
+        self.bars[index].clone()
+    }
     /// # Safety
     /// All resources belong to this exact actual VMD parent/reset epoch. Own
     /// all firmware-enumerated child config/reset/routing resources exclusively;
-    /// every child engine, DMA/IRQ and work item has actually stopped/drained.
+    /// the actual VMD parent is already in D0 before mapping/shadow access.
+    /// Every child engine, DMA/IRQ and work item has actually stopped/drained.
     /// The mapping authority grants real UC/RW CPU mappings, not physical-number
     /// casts. All access is process/deferred context; no callback or foreign
     /// config writer accesses the CFGBAR while a host/child borrow exists.
