@@ -291,6 +291,34 @@ const fn cyc_ovrd_field(value: u64, shift: u32) -> u64 {
 }
 
 impl Cpu {
+    /// Called by the architectural accessor context AFTER its permission tree.
+    /// Standard EL1 key names at EL2 address Stela's canonical EL2 PAC state.
+    /// A known half can be read; an unwritten half never invents reset material.
+    pub(crate) fn read_el2_pointer_key(
+        &self,
+        register: Register,
+    ) -> Option<Result<u64, &'static str>> {
+        if self.pstate.el != 2 {
+            return None;
+        }
+        let key = super::pointer_keys::Register::architectural(register)?;
+        Some(self.apple.pointer_keys.read(key))
+    }
+
+    /// Returns whether this was an EL2 key write. The architectural accessor
+    /// caller must apply its normal derived-state/PAC-tag invalidation effect.
+    /// EL1 and EL0 still follow the generated architectural permission path.
+    pub(crate) fn write_el2_pointer_key(&mut self, register: Register, value: u64) -> bool {
+        if self.pstate.el != 2 {
+            return false;
+        }
+        let Some(key) = super::pointer_keys::Register::architectural(register) else {
+            return false;
+        };
+        self.apple.pointer_keys.write(key, value);
+        true
+    }
+
     /// CYC_OVRD's WFI mode.
     pub fn wfi_mode(&self) -> u64 {
         cyc_ovrd_field(self.apple.cyc_ovrd, CYC_OVRD_WFI_SHIFT)
@@ -1262,6 +1290,63 @@ mod tests {
                 | u32::from(read.rt()),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn standard_el2_key_names_join_typed_bank_without_inventing_halves_or_lower_bank_aliases() {
+        let pairs = [
+            [Register::APIAKeyLo_EL1, Register::APIAKeyHi_EL1],
+            [Register::APIBKeyLo_EL1, Register::APIBKeyHi_EL1],
+            [Register::APDAKeyLo_EL1, Register::APDAKeyHi_EL1],
+            [Register::APDBKeyLo_EL1, Register::APDBKeyHi_EL1],
+            [Register::APGAKeyLo_EL1, Register::APGAKeyHi_EL1],
+        ];
+        for chip in super::super::Chip::ALL {
+            let mut cpu = Cpu::of(chip, 0, Pstate::reset(2));
+            for (pair, [low, high]) in pairs.into_iter().enumerate() {
+                cpu.registers.set(low, 0, 0x1111);
+                cpu.registers.set(high, 0, 0x2222);
+                assert!(cpu.read_el2_pointer_key(low).unwrap().is_err());
+                assert!(cpu.write_el2_pointer_key(low, 0));
+                assert_eq!(cpu.read_el2_pointer_key(low), Some(Ok(0)));
+                assert!(cpu.read_el2_pointer_key(high).unwrap().is_err());
+                assert!(cpu.apple.pointer_keys.pairs()[pair].is_none());
+                assert!(cpu.write_el2_pointer_key(high, 100 + pair as u64));
+                assert_eq!(
+                    cpu.apple.pointer_keys.pairs()[pair],
+                    Some([0, 100 + pair as u64])
+                );
+                let index = pair * 2;
+                let direct = Encoding::new(3, 6, 15, 13 + (index / 8) as u8, (index % 8) as u8);
+                cpu.state.x[0] = 200 + pair as u64;
+                assert!(matches!(
+                    cpu.apple_access(msr(0, direct), 0),
+                    Outcome::Written(_)
+                ));
+                assert_eq!(cpu.read_el2_pointer_key(low), Some(Ok(200 + pair as u64)));
+                assert!(matches!(
+                    cpu.apple_access(mrs(0, direct), 0),
+                    Outcome::Refused(_)
+                ));
+                assert_eq!(cpu.read(low), 0x1111);
+                assert_eq!(cpu.read(high), 0x2222);
+            }
+            assert!(matches!(
+                cpu.apple_access(msr(31, impdef::APGAKEYLO_EL12), 0),
+                Outcome::Refused(_)
+            ));
+            assert!(cpu.read_el2_pointer_key(Register::HCR_EL2).is_none());
+            assert!(!cpu.write_el2_pointer_key(Register::HCR_EL2, 0));
+            let initialized = cpu.apple.pointer_keys.pairs();
+            for el in [0, 1] {
+                cpu.pstate.el = el;
+                assert!(cpu.read_el2_pointer_key(Register::APGAKeyLo_EL1).is_none());
+                assert!(!cpu.write_el2_pointer_key(Register::APGAKeyLo_EL1, 999));
+                assert_eq!(cpu.apple.pointer_keys.pairs(), initialized);
+            }
+            let other = Cpu::of(chip, 0, Pstate::reset(2));
+            assert_eq!(other.apple.pointer_keys.pairs(), [None; 5]);
+        }
     }
 
     #[test]

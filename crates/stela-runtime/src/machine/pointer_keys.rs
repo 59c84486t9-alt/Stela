@@ -3,8 +3,10 @@
 //! The original T6000 LLB writes all five pairs at 0x22858..0x228b8;
 //! 0xfa398 initializes pair A before enabling SCTLR.EnIA and using PAC.
 //! These are actual PAC inputs, not opaque implementation-defined storage.
-//! Standard architectural EL1 registers remain the lower bank. Neither
-//! C7/EL12 aliases nor lower-EL access permissions follow from register names.
+//! Original T8112 SPTM writes the standard EL1 names at EL2 before PACGA
+//! (file 0xab7b0..0xab8c4). Stela joins those accesses to this canonical
+//! EL2 state; equivalence to C13/C14 is an inference, not a physical alias
+//! measurement. EL1 remains separate; EL12 permissions are not inferred.
 use core::fmt;
 use stela_compiler::aarch64::system::registers::Encoding;
 
@@ -18,6 +20,27 @@ pub(crate) struct Register {
 }
 
 impl Register {
+    /// Standard names used by original SPTM at EL2. Arm's accessors establish
+    /// EL2 access permission; the original producer/use chain establishes the
+    /// required EL2 state join, not a new reset value or HCR-based selector.
+    pub(crate) fn architectural(register: super::system::Register) -> Option<Self> {
+        use super::system::Register as R;
+        let (pair, word) = match register {
+            R::APIAKeyLo_EL1 => (0, 0),
+            R::APIAKeyHi_EL1 => (0, 1),
+            R::APIBKeyLo_EL1 => (1, 0),
+            R::APIBKeyHi_EL1 => (1, 1),
+            R::APDAKeyLo_EL1 => (2, 0),
+            R::APDAKeyHi_EL1 => (2, 1),
+            R::APDBKeyLo_EL1 => (3, 0),
+            R::APDBKeyHi_EL1 => (3, 1),
+            R::APGAKeyLo_EL1 => (4, 0),
+            R::APGAKeyHi_EL1 => (4, 1),
+            _ => return None,
+        };
+        Some(Self { pair, word })
+    }
+
     /// All ten source-proven C13/C14 words. No adjacent unknown encoding
     /// acquires storage merely because it resembles a key register.
     pub(crate) fn decode(encoding: Encoding) -> Option<Self> {
@@ -55,6 +78,11 @@ impl fmt::Debug for Bank {
 }
 
 impl Bank {
+    pub(crate) fn read(&self, register: Register) -> Result<u64, &'static str> {
+        self.words[register.pair][register.word]
+            .ok_or("EL2 pointer authentication key half is unavailable")
+    }
+
     pub(crate) fn write(&mut self, register: Register, value: u64) {
         self.words[register.pair][register.word] = Some(value);
     }
