@@ -77,7 +77,7 @@ fn decode(
 /// The AP is the sole claimant; its assembly latches the first exception and
 /// never changes payload after publishing SEALED, including later NMI entry.
 pub(super) unsafe fn read(record: *const Record) -> Result<Option<EarlyFault>, &'static str> {
-    let seal = unsafe { &*(&raw const (*record).seal) }.load(Ordering::Acquire);
+    let seal = unsafe { &(*record).seal }.load(Ordering::Acquire);
     match seal {
         0 | WRITING => Ok(None),
         SEALED => {
