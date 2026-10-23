@@ -720,6 +720,8 @@ mod tests {
         route_controls: BTreeMap<(u8, u16), u8>,
         amplifiers: BTreeMap<(u8, bool, u8, u8), u8>,
         outputs_without_hardware_mute: Vec<u8>,
+        stac922x_capture_amp: bool,
+        reject_amplifier_channel: Option<(u8, u8)>,
         power_ready: BTreeMap<u8, u64>,
         power_delay: u64,
         power_stuck: bool,
@@ -822,6 +824,8 @@ mod tests {
                 route_controls: BTreeMap::new(),
                 amplifiers: BTreeMap::new(),
                 outputs_without_hardware_mute: Vec::new(),
+                stac922x_capture_amp: false,
+                reject_amplifier_channel: None,
                 power_ready: BTreeMap::new(),
                 power_delay: 12,
                 power_stuck: false,
@@ -1035,11 +1039,14 @@ mod tests {
                 let output = value & (1 << 15) != 0;
                 assert_eq!(value & (1 << 14) != 0, !output);
                 let index = ((value >> 8) & 15) as u8;
-                let gain = if output && self.outputs_without_hardware_mute.contains(&node) {
+                let mut gain = if output && self.outputs_without_hardware_mute.contains(&node) {
                     value as u8 & 0x7f
                 } else {
                     value as u8
                 };
+                if self.stac922x_capture_amp && node == 0x12 && output {
+                    gain = (gain & 0x7f).min(2);
+                }
                 if value & (1 << 13) != 0 {
                     self.amplifiers.insert((node, output, index, 0), gain);
                 }
@@ -1055,6 +1062,9 @@ mod tests {
                 let value = command as u16;
                 let output = value & (1 << 15) != 0;
                 let channel = u8::from(value & (1 << 13) == 0);
+                if self.reject_amplifier_channel == Some((node, channel)) {
+                    return u32::MAX;
+                }
                 return u32::from(
                     *self
                         .amplifiers
@@ -1161,7 +1171,7 @@ mod tests {
                         0
                     }
                 }
-                0x701 | 0x707 | 0x70c | 0x715 | 0x716 | 0x717 | 0x7e7 => {
+                0x701 | 0x707 | 0x70c | 0x70f | 0x715 | 0x716 | 0x717 | 0x7e7 => {
                     *self
                         .route_control_writes
                         .entry((node, verb + 0x800))
@@ -1169,11 +1179,16 @@ mod tests {
                     if self.conexant_headset_model && node == 0x19 && verb == 0x707 {
                         self.conexant_mic_writes += 1;
                     }
-                    self.route_controls
-                        .insert((node, verb + 0x800), command as u8);
+                    let value = if verb == 0x70f {
+                        let max = *self.parameters.get(&(node, 0x13)).unwrap_or(&0) as u8 & 0x7f;
+                        (command as u8 & 0x80) | (command as u8 & 0x7f).min(max)
+                    } else {
+                        command as u8
+                    };
+                    self.route_controls.insert((node, verb + 0x800), value);
                     0
                 }
-                0xf01 | 0xf07 | 0xf0c | 0xf15 | 0xf16 | 0xf17 => {
+                0xf01 | 0xf07 | 0xf0c | 0xf0f | 0xf15 | 0xf16 | 0xf17 => {
                     if self.conexant_headset_model
                         && node == 0x19
                         && verb == 0xf07
@@ -7750,6 +7765,326 @@ mod tests {
                     controller.conexant_codecs.len() + controller.sigmatel_codecs.len(),
                     1
                 );
+            }
+        }
+        fn stac922x_device(id: u32, inherited_amp: bool) -> Rc<RefCell<Model>> {
+            let model = device(id);
+            let mut m = model.borrow_mut();
+            m.parameters.insert((1, 4), (2 << 16) | 21);
+            for node in 0x0f..=0x16 {
+                m.parameters.insert((node, 9), 0xf << 20);
+            }
+            // Actual capture mux output has a broken reported range. The
+            // independent device clamps gain to 0..2 and has no mute bit.
+            m.parameters.insert(
+                (0x12, 9),
+                (3 << 20) | 1 | (1 << 2) | (1 << 8) | if inherited_amp { 0 } else { 1 << 3 },
+            );
+            m.parameters.insert((0x12, 0x12), 0x8000_1f1f);
+            m.parameters.insert((0x12, 0x0e), 1);
+            m.connection_words.insert((0x12, 0), 5);
+            m.parameters.insert((3, 0x0e), 1);
+            m.connection_words.insert((3, 0), 0x12);
+            m.connection_words.insert((4, 0), 2);
+            m.parameters.insert((0x16, 9), 6 << 20);
+            m.parameters.insert((0x16, 0x13), 0xff);
+            m.route_controls.insert((0x16, 0xf0f), 0x20);
+            m.stac922x_capture_amp = true;
+            drop(m);
+            model
+        }
+        #[test]
+        fn stac922x_direct_knob_capture_range_and_real_native_duplex_preserve_observed_caps() {
+            for id in [
+                0x8384_7882,
+                0x8384_7680,
+                0x8384_7880,
+                0x8384_7681,
+                0x8384_7682,
+                0x8384_7683,
+            ] {
+                for inherited in [false, true] {
+                    let mut fixture = Fixture::new();
+                    let model = stac922x_device(id, inherited);
+                    let mut controller = create(&model, &mut fixture, config()).unwrap();
+                    let graph = controller.enumerate_codec(0).unwrap();
+                    let report = controller.initialize_sigmatel_codec(&graph).unwrap();
+                    assert_eq!(report.profile, SigmatelProfile::Stac922x);
+                    assert_eq!(report.selector_node, None);
+                    assert_eq!(report.volume_knob, Some((0x16, 0xff)));
+                    assert_eq!(report.capture_output_amplifier, Some((0x12, 0x0027_0200)));
+                    assert_eq!(report.eapd, None);
+                    assert_eq!(report.master_amplifier, None);
+                    assert_eq!(model.borrow().route_controls[&(0x16, 0xf0f)], 0xff);
+                    // No board-specific GPIO0 or Intel-Mac GPIO0/1 grant.
+                    assert_eq!(report.gpio.data, 0xa5);
+                    assert_eq!(report.gpio.mask, 0x5a);
+                    assert_eq!(report.gpio.direction, 0x3c);
+                    let output = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+                    let input = graph.analog_route(Direction::Capture, 5, 3).unwrap();
+                    assert_eq!(input.nodes(), &[3, 0x12, 5]);
+                    let playback = controller
+                        .allocate_stream(
+                            Direction::Playback,
+                            stereo(),
+                            128,
+                            2,
+                            &mut fixture.allocator,
+                        )
+                        .unwrap();
+                    let capture = controller
+                        .allocate_stream(
+                            Direction::Capture,
+                            stereo(),
+                            128,
+                            2,
+                            &mut fixture.allocator,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        controller.configure_analog_route(
+                            &graph,
+                            &output,
+                            playback,
+                            0,
+                            PinOptions::Playback {
+                                headphone: true,
+                                eapd: Some(true)
+                            }
+                        ),
+                        Err(Error::InvalidPinControl)
+                    );
+                    controller
+                        .configure_analog_route(
+                            &graph,
+                            &output,
+                            playback,
+                            0,
+                            PinOptions::Playback {
+                                headphone: true,
+                                eapd: None,
+                            },
+                        )
+                        .unwrap();
+                    let before = model.borrow().commands.len();
+                    controller
+                        .configure_analog_route(
+                            &graph,
+                            &input,
+                            capture,
+                            0,
+                            PinOptions::Capture {
+                                vref: Vref::EightyPercent,
+                            },
+                        )
+                        .unwrap();
+                    {
+                        let m = model.borrow();
+                        let physical: Vec<_> = m.commands[before..]
+                            .iter()
+                            .filter(|command| {
+                                (**command >> 20) & 127 == 0x12 && (**command >> 16) & 15 == 3
+                            })
+                            .collect();
+                        assert_eq!(physical.len(), 1); // No fabricated bit7 pre-mute.
+                        assert_eq!(*physical[0] as u16, 0xb000); // Both channels, gain0.
+                        for channel in 0..2 {
+                            assert_eq!(m.amplifiers[&(0x12, true, 0, channel)], 0);
+                        }
+                    }
+                    assert_eq!(
+                        graph.widget(0x12).unwrap().output_amplifier,
+                        Some(0x8000_1f1f)
+                    );
+                    assert_eq!(
+                        graph.widget(0x12).unwrap().capabilities & 8 != 0,
+                        !inherited
+                    );
+                    assert!(controller.poll_pin_sense(&graph, 5).unwrap().present);
+                    assert!(model.borrow().sense_triggers.is_empty());
+                    controller.write_pcm(playback, 0, &[0x22; 256]).unwrap();
+                    controller.fill_capture(capture, 0xa5).unwrap();
+                    controller.start(capture).unwrap();
+                    controller.start(playback).unwrap();
+                    model.borrow_mut().dma_step_bytes = 128;
+                    advance(&model, 8);
+                    assert!(controller.status(playback).unwrap().period_completed);
+                    assert!(controller.status(capture).unwrap().period_completed);
+                    controller.stop(capture).unwrap();
+                    let mut samples = [0; 256];
+                    controller.read_pcm(capture, 0, &mut samples).unwrap();
+                    assert_eq!(samples, core::array::from_fn(|index| index as u8));
+                    controller.shutdown().unwrap();
+                    assert!(model.borrow().playback.iter().all(|byte| *byte == 0x22));
+                    assert!(model.borrow().playback.len() >= 256);
+                    for pin in [4, 5, 8] {
+                        assert_eq!(model.borrow().route_controls[&(pin, 0xf07)], 0);
+                    }
+                }
+            }
+        }
+        #[test]
+        fn stac922x_missing_fixed_authority_and_unexpressible_knob_refuse_before_effects() {
+            for fault in 0..7 {
+                let mut fixture = Fixture::new();
+                let model = stac922x_device(0x8384_7680, false);
+                {
+                    let mut m = model.borrow_mut();
+                    match fault {
+                        0 => {
+                            m.parameters.insert((0, 0), 0x8384_7684);
+                        }
+                        1 => {
+                            m.parameters.insert((0x16, 9), 0xf << 20);
+                        }
+                        2 => {
+                            m.parameters.insert((0x16, 0x13), 0x1f);
+                        }
+                        3 => {
+                            m.parameters.insert((0x16, 0x13), u32::MAX);
+                        }
+                        4 => {
+                            m.parameters.insert((0x12, 9), (3 << 20) | 1 | (1 << 8));
+                        }
+                        5 => {
+                            m.parameters.insert((0x12, 0x12), u32::MAX);
+                        }
+                        _ => {
+                            m.parameters.insert((0x12, 0x0e), 0);
+                        }
+                    }
+                }
+                let mut controller = create(&model, &mut fixture, config()).unwrap();
+                let graph = controller.enumerate_codec(0).unwrap();
+                let before = model.borrow().commands.len();
+                assert!(controller.initialize_sigmatel_codec(&graph).is_err());
+                assert!(controller.sigmatel_codecs.is_empty());
+                assert!(!controller.routing_failed);
+                assert!(
+                    model.borrow().commands[before..]
+                        .iter()
+                        .all(|command| command & (1 << 19) != 0)
+                );
+            }
+        }
+        #[test]
+        fn stac922x_knob_effect_and_capture_right_channel_failures_retain_ownership_until_reset() {
+            for fault in 0..3 {
+                let mut fixture = Fixture::new();
+                let model = stac922x_device(0x8384_7882, false);
+                let mut controller = create(&model, &mut fixture, config()).unwrap();
+                let graph = controller.enumerate_codec(0).unwrap();
+                if fault == 0 {
+                    let mut m = model.borrow_mut();
+                    m.reject_route_control = Some(0xf0f);
+                    m.reject_route_after_write = true;
+                } else if fault == 1 {
+                    model.borrow_mut().drop_reply_command = Some((0x16 << 20) | 0x70fff);
+                }
+                if fault < 2 {
+                    assert!(controller.initialize_sigmatel_codec(&graph).is_err());
+                    assert_eq!(model.borrow().route_controls[&(0x16, 0xf0f)], 0xff);
+                } else {
+                    controller.initialize_sigmatel_codec(&graph).unwrap();
+                    let route = graph.analog_route(Direction::Capture, 5, 3).unwrap();
+                    let stream = controller
+                        .allocate_stream(
+                            Direction::Capture,
+                            stereo(),
+                            128,
+                            2,
+                            &mut fixture.allocator,
+                        )
+                        .unwrap();
+                    model.borrow_mut().reject_amplifier_channel = Some((0x12, 1));
+                    assert_eq!(
+                        controller.configure_analog_route(
+                            &graph,
+                            &route,
+                            stream,
+                            0,
+                            PinOptions::Capture {
+                                vref: Vref::EightyPercent
+                            }
+                        ),
+                        Err(Error::RouteRejected)
+                    );
+                    assert_eq!(model.borrow().amplifiers[&(0x12, true, 0, 1)], 0);
+                    assert_eq!(controller.start(stream), Err(Error::NeedsReset));
+                }
+                assert!(controller.routing_failed);
+                assert_eq!(controller.sigmatel_codecs.len(), 1);
+                let before = access_counts(&model);
+                assert_eq!(
+                    controller.initialize_sigmatel_codec(&graph),
+                    Err(Error::NeedsReset)
+                );
+                assert_eq!(access_counts(&model), before);
+                {
+                    let mut m = model.borrow_mut();
+                    m.reject_route_control = None;
+                    m.drop_reply_command = None;
+                    m.reject_amplifier_channel = None;
+                }
+                controller.reinitialize().unwrap();
+                assert!(controller.sigmatel_codecs.is_empty());
+                assert!(controller.routes.is_empty());
+                assert_eq!(
+                    controller.initialize_sigmatel_codec(&graph),
+                    Err(Error::InvalidCodecGraph)
+                );
+            }
+        }
+        #[test]
+        fn stac922x_live_knob_and_raw_inherited_or_override_amp_authority_quarantine_existing_pcm()
+        {
+            for fault in 0..3 {
+                let mut fixture = Fixture::new();
+                let inherited = fault == 2;
+                let model = stac922x_device(0x8384_7683, inherited);
+                let mut controller = create(&model, &mut fixture, config()).unwrap();
+                let graph = controller.enumerate_codec(0).unwrap();
+                controller.initialize_sigmatel_codec(&graph).unwrap();
+                let route = graph.analog_route(Direction::Capture, 5, 3).unwrap();
+                let stream = controller
+                    .allocate_stream(Direction::Capture, stereo(), 128, 2, &mut fixture.allocator)
+                    .unwrap();
+                controller
+                    .configure_analog_route(
+                        &graph,
+                        &route,
+                        stream,
+                        0,
+                        PinOptions::Capture {
+                            vref: Vref::EightyPercent,
+                        },
+                    )
+                    .unwrap();
+                model.borrow_mut().parameters.insert(
+                    if fault == 0 {
+                        (0x16, 0x13)
+                    } else if inherited {
+                        (1, 0x12)
+                    } else {
+                        (0x12, 0x12)
+                    },
+                    if fault == 0 { 0x7f } else { 0x8000_1f0f },
+                );
+                assert_eq!(
+                    controller.poll_pin_sense(&graph, 5),
+                    Err(Error::InvalidCodecGraph)
+                );
+                let before = access_counts(&model);
+                assert_eq!(controller.start(stream), Err(Error::NeedsReset));
+                assert_eq!(access_counts(&model), before);
+                let before = model.borrow().commands.len();
+                assert_eq!(controller.shutdown(), Err(Error::NeedsReset));
+                assert!(controller.stopped);
+                assert_eq!(model.borrow().commands.len(), before);
+                assert_eq!(controller.routes.len(), 1);
+                controller.reinitialize().unwrap();
+                assert!(controller.routes.is_empty());
+                assert!(controller.sigmatel_codecs.is_empty());
             }
         }
     }

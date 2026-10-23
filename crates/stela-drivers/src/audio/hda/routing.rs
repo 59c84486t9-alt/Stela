@@ -47,6 +47,7 @@ const AMP_LEFT: u16 = 1 << 13;
 const AMP_RIGHT: u16 = 1 << 12;
 const AMP_INPUT: u16 = 1 << 14;
 const AMP_OUTPUT: u16 = 1 << 15;
+pub(super) const STAC922X_CAPTURE_AMP_CAPS: u32 = 0x0027_0200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Vref {
@@ -216,6 +217,7 @@ pub(super) enum RoutePolicy {
     Standard,
     SingleAdc,
     ConexantCx20561,
+    SigmatelStac922x,
 }
 
 #[derive(Clone, Copy)]
@@ -226,6 +228,7 @@ struct Amplifier {
     channels: u8,
     gain: u8,
     mute: bool,
+    hardware_mute: bool,
     minimum_mute: bool,
 }
 
@@ -262,6 +265,7 @@ fn amplifier(
         channels,
         gain,
         mute,
+        hardware_mute: caps & AMP_MUTE_SUPPORTED != 0,
         minimum_mute: false,
     })
 }
@@ -400,7 +404,13 @@ fn plan(
         {
             return Err(Error::UnsupportedTopology);
         }
-        if output && let Some(caps) = current.output_amplifier {
+        if output && let Some(mut caps) = current.output_amplifier {
+            if policy == RoutePolicy::SigmatelStac922x && *node == 0x12 {
+                // probe_stac922x limits the capture mux to gain codes 0..2,
+                // offset0, 10dB steps and no mute. Keep observed silicon
+                // capabilities intact; only this owned path uses the policy.
+                caps = STAC922X_CAPTURE_AMP_CAPS;
+            }
             let mut amp = amplifier(*node, true, 0, current.channels(), caps, false)?;
             // add_cx5051_fake_mutes authorizes minimum volume as mute only
             // for these two DAC outputs; physical mute bits retain precedence.
@@ -598,19 +608,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             // Mute-capable selected amps are silenced before changing selectors.
             // Unselected mixer inputs remain muted when selected amps unmute.
             for amp in &plan.amplifiers {
-                let group = graph
-                    .groups
-                    .iter()
-                    .find(|group| group.node == route.group)
-                    .ok_or(Error::InvalidCodecGraph)?;
-                let current = widget(group, amp.node)?;
-                let caps = if amp.output {
-                    current.output_amplifier
-                } else {
-                    current.input_amplifier
-                }
-                .ok_or(Error::InvalidCodecGraph)?;
-                if caps & AMP_MUTE_SUPPORTED != 0 || amp.minimum_mute {
+                if amp.hardware_mute || amp.minimum_mute {
                     self.route_amplifier(route.codec, Amplifier { mute: true, ..*amp })?;
                 }
             }
