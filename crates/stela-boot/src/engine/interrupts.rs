@@ -45,6 +45,7 @@ fn msr(index: u32) -> u64 {
 /// every BSP/AP/host-check path; never silently truncate an enabled xstate.
 fn qualify_fp_entry() {
     let vendor = core::arch::x86_64::__cpuid(0);
+    let maximum_basic = vendor.eax;
     let vendor = [vendor.ebx, vendor.edx, vendor.ecx];
     let intel = vendor == [0x756e_6547, 0x4965_6e69, 0x6c65_746e];
     let amd = vendor == [0x6874_7541, 0x6974_6e65, 0x444d_4163];
@@ -75,6 +76,9 @@ fn qualify_fp_entry() {
         output::fatal("native IRQ entry requires usable FXSR/SSE/SSE2 state");
     }
     if cr4 & CR4_OSXSAVE != 0 {
+        if maximum_basic < 0xd {
+            output::fatal("native IRQ entry cannot enumerate enabled XSAVE state");
+        }
         let (low, high): (u32, u32);
         // SAFETY: actual CR4.OSXSAVE qualifies XGETBV(0).
         unsafe {
