@@ -16,21 +16,20 @@ const ROOT: u64 = 0x000f_ffff_ffff_f000;
 const MODE: u64 = 7 << 9;
 const DOMAIN: u64 = 0xffff;
 const INTERRUPTS: u64 = 0xff0f_ffff_ffff_ffff;
-const RESERVED_POLICY: u8 = 1 << 3;
 const SYSTEM_MANAGEMENT: u8 = 3 << 4;
 
 #[derive(Clone, Copy)]
 pub(super) struct Policy(u8);
 
 impl Policy {
-    pub(super) fn new(flags: u8) -> Result<Self, DeviceTableError> {
-        if flags & RESERVED_POLICY != 0 {
-            return Err(DeviceTableError::Policy);
-        }
-        Ok(Self(flags))
+    pub(super) fn new(flags: u8) -> Self {
+        Self(flags)
     }
 
     fn words(self) -> [u64; 4] {
+        // IVHD bit3 is ATCPermit metadata (AMD48882rev3.11 Table106),
+        // not actual DTE bit3 or DTE.I. Permission never enables ATS in this
+        // separately admitted host-only profile with actual ATS/ATC off.
         let mut words = [0; 4];
         for (flag, bit) in [(1, 56), (2, 57), (4, 58), (64, 62), (128, 63)] {
             if self.0 & flag != 0 {
@@ -115,7 +114,7 @@ mod tests {
 
     fn translated(flags: u8, mode: u8) -> Entry {
         Entry::translated(
-            Policy::new(flags).unwrap(),
+            Policy::new(flags),
             PhysicalAddress::new(ROOT_ADDRESS, 48).unwrap(),
             TableLevel::new(mode).unwrap(),
             DomainId::new(0x5a7c).unwrap(),
@@ -125,7 +124,7 @@ mod tests {
 
     #[test]
     fn literal_host_words_distinguish_blocked_initial_and_translated_entries() {
-        let clean = Policy::new(0).unwrap();
+        let clean = Policy::new(0);
         assert_eq!(Entry::blocked(clean).words(), [1, 0, 0, 0]);
         assert_eq!(Entry::blocked(clean).domain(), None);
         // Initial V|TV with zero rights is not Linux's runtime blocked image.
@@ -142,7 +141,7 @@ mod tests {
         assert_eq!(Entry::existing(entry.words(), clean, 48), Ok(entry));
 
         // INIT/EINT/NMI, SYSMGT=1, LINT0/LINT1, including erratum 63.
-        let policy = Policy::new(0xd7).unwrap();
+        let policy = Policy::new(0xd7);
         let blocked = Entry::blocked(policy);
         assert_eq!(
             blocked.words(),
@@ -169,13 +168,9 @@ mod tests {
     }
 
     #[test]
-    fn every_policy_byte_preserves_literal_ivhd_positions_or_refuses_reserved_bit() {
+    fn every_policy_byte_preserves_literal_ivhd_positions_with_atc_permission_as_metadata() {
         for flags in 0u8..=u8::MAX {
-            if flags & 0x08 != 0 {
-                assert!(matches!(Policy::new(flags), Err(DeviceTableError::Policy)));
-                continue;
-            }
-            let policy = Policy::new(flags).unwrap();
+            let policy = Policy::new(flags);
             // Independent DTE word masks from the pinned global bit numbers:
             // 184/185/186/190/191 and system-management bits 104/105.
             let mut interrupts = 0;
@@ -216,6 +211,33 @@ mod tests {
     }
 
     #[test]
+    fn atc_permission_never_enables_actual_ats_or_a_reserved_dte_bit() {
+        for flags in (0u8..=u8::MAX).filter(|flags| flags & 8 == 0) {
+            let ordinary = Policy::new(flags);
+            let permitted = Policy::new(flags | 8);
+            assert_eq!((ordinary.0, permitted.0), (flags, flags | 8));
+            assert_eq!(Entry::blocked(ordinary), Entry::blocked(permitted));
+            for mode in 1..=6 {
+                let expected = translated(flags, mode);
+                let actual = translated(flags | 8, mode);
+                assert_eq!(actual, expected);
+                assert_eq!(actual.words()[0] & 8, 0, "actual DTE bit3 stays reserved");
+                assert_eq!(actual.words()[1] & (1 << 32), 0, "DTE.I stays off");
+                for image in [Entry::blocked(permitted).words(), actual.words()] {
+                    for (word, mask) in [(0, 8), (1, 1 << 32)] {
+                        let mut wrong = image;
+                        wrong[word] |= mask;
+                        assert_eq!(
+                            Entry::existing(wrong, permitted, 48),
+                            Err(DeviceTableError::Profile)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn erratum_write_permission_is_only_required_for_system_management_one() {
         for (flags, low, system) in [
             (0x00, 0x0000_0000_0000_0001, 0x0000_0000_0000_0000),
@@ -223,7 +245,7 @@ mod tests {
             (0x20, 0x0000_0000_0000_0001, 0x0000_0200_0000_0000),
             (0x30, 0x0000_0000_0000_0001, 0x0000_0300_0000_0000),
         ] {
-            let policy = Policy::new(flags).unwrap();
+            let policy = Policy::new(flags);
             let blocked = Entry::blocked(policy);
             assert_eq!(blocked.words(), [low, system, 0, 0]);
             // The admitted image includes exactly the policy's IW requirement.
@@ -238,7 +260,7 @@ mod tests {
 
     #[test]
     fn host_modes_root_alignment_and_narrower_physical_width_are_checked() {
-        let policy = Policy::new(0).unwrap();
+        let policy = Policy::new(0);
         for (mode, low) in [
             (1, 0x6000_1234_5678_9203),
             (2, 0x6000_1234_5678_9403),
@@ -286,10 +308,11 @@ mod tests {
 
     #[test]
     fn unknown_dma_irq_guest_and_reserved_profiles_are_not_reconstructed() {
-        let policy = Policy::new(0).unwrap();
+        let policy = Policy::new(0);
         let base = [0x6000_1234_5678_9803, 0x5a7c, 0, 0];
         for (word, mask) in [
             (0, 1u64 << 2), // Reserved low control.
+            (0, 1 << 3),    // Actual DTE bit3 is not IVHD ATCPermit.
             (0, 1 << 7),    // HAD.
             (0, 1 << 8),    // HAD.
             (0, 1 << 52),   // PPR.

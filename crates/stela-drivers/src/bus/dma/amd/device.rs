@@ -44,7 +44,6 @@ pub enum DeviceTableError {
     Context(DmaError),
     Invalidation(DmaError),
     PolicyCount,
-    Policy,
     InvalidProvider,
     PhysicalContiguity,
     AddressLimit,
@@ -62,6 +61,9 @@ pub enum DeviceTableError {
 /// command and completion resources. Only the admitted host-only profile is
 /// active: unencrypted/SNP-disabled tables, no hardware DTE writes, guest
 /// translation, ATS/PASID/PRI or interrupt-remapping table/pointer owners.
+/// Actual ATS/ATC must also be off for integrated non-PCI devices with alternate
+/// signaling; missing PCI capabilities alone do not establish that fact. IVHD
+/// ATCPermit metadata permits use but neither requires nor enables it here.
 /// `enter` returns a real guard excluding other DTE writers and retaining a
 /// qualified CPU/process/root context through its Drop. CPU-affine qualification
 /// requires preventing migration; a context qualified on every allowed CPU
@@ -110,7 +112,7 @@ impl<H> State<H> {
     }
 
     fn policy(&self, requester: u16) -> Policy {
-        Policy::new(self.policies[usize::from(requester)]).expect("immutable validated IVHD policy")
+        Policy::new(self.policies[usize::from(requester)])
     }
 }
 
@@ -136,9 +138,6 @@ impl<H: DeviceTableHardware> DeviceTable<H> {
         PhysicalAddress::new(0, physical_bits).map_err(DeviceTableError::Format)?;
         if policies.len() != REQUESTERS {
             return Err(DeviceTableError::PolicyCount);
-        }
-        for &flags in policies {
-            Policy::new(flags)?;
         }
         let mut retained_policy = Vec::new();
         retained_policy
@@ -189,7 +188,7 @@ impl<H: DeviceTableHardware> DeviceTable<H> {
         // unreachable by every remapper. Live IRQ-field preservation would
         // incorrectly erase the initial policy if applied to its zero image.
         for (requester, &flags) in retained_policy.iter().enumerate() {
-            let words = Entry::blocked(Policy::new(flags).expect("validated IVHD policy")).words();
+            let words = Entry::blocked(Policy::new(flags)).words();
             for (word, value) in words.into_iter().enumerate() {
                 // SAFETY: fresh exclusive complete table RAM, checked aligned
                 // CPU span; no hardware or other software writer can reach it.
@@ -770,6 +769,47 @@ mod tests {
     }
 
     #[test]
+    fn all_policy_metadata_is_retained_without_turning_permission_into_ats_enable() {
+        let monitor = Monitor::new();
+        let mut flags: Vec<u8> = (0..REQUESTERS).map(|requester| requester as u8).collect();
+        let Some(mut table) = construct(&monitor, &flags) else {
+            return;
+        };
+        flags.fill(0);
+        assert_eq!(table.state.as_ref().unwrap().policies[0xffff], 0xff);
+        for flags in (0u8..=u8::MAX).filter(|flags| flags & 8 == 0) {
+            let first = u16::from(flags);
+            let second = u16::from(flags | 8);
+            let state = table.state.as_ref().unwrap();
+            assert_eq!(state.policies[usize::from(first)], flags);
+            assert_eq!(state.policies[usize::from(second)], flags | 8);
+            assert_eq!(table.snapshot(first).unwrap(), blocked(flags));
+            assert_eq!(table.snapshot(second).unwrap(), blocked(flags));
+        }
+        table.register_for_publication().unwrap();
+        // SAFETY: the model has no active device/ATC/worker. These independent
+        // RIDs use the same retained symbolic root/domain; no native alias or
+        // integrated-device admission is inferred from the permission metadata.
+        for requester in [0u16, 8, 0xffff] {
+            unsafe {
+                table.translate(
+                    requester,
+                    root(),
+                    TableLevel::new(4).unwrap(),
+                    DomainId::new(7).unwrap(),
+                )
+            }
+            .unwrap();
+            let words = table.snapshot(requester).unwrap();
+            assert_eq!(words, translated(requester as u8, root().value(), 4, 7));
+            assert_eq!((words[0] & 8, words[1] & (1 << 32)), (0, 0));
+            unsafe { table.block(requester) }.unwrap();
+            assert_eq!(table.snapshot(requester).unwrap(), blocked(requester as u8));
+        }
+        retire(table, &monitor);
+    }
+
+    #[test]
     fn initial_policy_is_literal_complete_immutable_and_guarded() {
         let monitor = Monitor::new();
         let mut flags = policies();
@@ -910,15 +950,6 @@ mod tests {
                 DeviceTableError::Format(FormatError::PhysicalWidth),
             ),
             (vec![0; REQUESTERS - 1], 48, DeviceTableError::PolicyCount),
-            (
-                {
-                    let mut flags = policies();
-                    flags[0xffff] = 8;
-                    flags
-                },
-                48,
-                DeviceTableError::Policy,
-            ),
         ] {
             let monitor = Monitor::new();
             // SAFETY: malformed numeric/profile admission is rejected before effects.
