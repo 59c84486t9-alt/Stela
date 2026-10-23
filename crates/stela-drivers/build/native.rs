@@ -132,7 +132,7 @@ pub struct Module {
 }
 
 /// Stela's Linux environment for unchanged Linux sources, and the kernel-API
-/// in `compat/kernel` that they call, built once for every port.
+/// in `compat/linux/kernel` that they call, built once for every port.
 pub struct Linux {
     /// Kbuild's generated asm wrappers, in `asm/` and `uapi/asm/`.
     wrappers: PathBuf,
@@ -142,7 +142,7 @@ pub struct Linux {
 }
 
 const DRM: &str = "../../third_party/linux/drivers/gpu/drm";
-const COMPAT: &str = "src/gpu/compat";
+const COMPAT: &str = "src/gpu/compat/linux";
 const INCLUDE: &str = "../../third_party/linux/include";
 const X86_UAPI: &str = "../../third_party/linux/arch/x86/include/uapi";
 
@@ -197,7 +197,7 @@ impl Linux {
     /// directories so upstream code keeps Linux's warning profile rather than
     /// Stela's. `generated` holds headers a driver's build generates and
     /// `drivers` its directories below Linux's `drivers/gpu/drm`. Stela's
-    /// arch headers in `compat/asm` and the generated wrappers stand for
+    /// arch headers in `compat/linux/asm` and the generated wrappers stand for
     /// Linux's arch tree ahead of its `include` tree, and the x86 uapi
     /// headers and their wrappers ahead of `include/uapi`.
     pub fn apply(

@@ -94,7 +94,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
         ] {
             command.arg("-I").arg(source.join(include));
         }
-        super::freebsd_headers(&mut command, source);
+        super::freebsd_headers(&mut command);
         command.arg("-c").arg(&fixture).arg("-o").arg(&artifact);
         capture(&mut command)?;
         let bytes = fs::read(&artifact)?;

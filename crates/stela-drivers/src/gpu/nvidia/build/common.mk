@@ -6,7 +6,7 @@
 # ELF partial link.
 $(foreach src,$(STELA_SRCS),$(eval $(call DEFINE_OBJECT_RULE,TARGET,$(src))))
 STELA_PORT_OBJS := $(call BUILD_OBJECT_LIST,$(STELA_SRCS))
-$(STELA_PORT_OBJS): CFLAGS += -I $(STELA) -idirafter $(STELA)/compat -I $(OUTPUTDIR)
+$(STELA_PORT_OBJS): CFLAGS += -I $(STELA) -idirafter $(STELA)/../compat/freebsd -I $(OUTPUTDIR)
 # The port names its firmware directory by version.mk's generated header.
 $(STELA_PORT_OBJS): $(OUTPUTDIR)/version.h
 

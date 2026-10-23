@@ -1,5 +1,6 @@
-//! The platform heap under the native ports' kernel-API (`compat/kernel`),
-//! which keeps each object's size and alignment and returns them on free.
+//! The platform heap under the native ports' kernel-API
+//! (`compat/linux/kernel`), which keeps each object's size and alignment
+//! and returns them on free.
 use alloc::alloc::{alloc_zeroed, dealloc};
 use core::{alloc::Layout, ffi::c_void, ptr};
 

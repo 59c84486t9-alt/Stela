@@ -69,7 +69,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
         ] {
             compiler.arg("-I").arg(source.join(include));
         }
-        super::freebsd_headers(&mut compiler, source);
+        super::freebsd_headers(&mut compiler);
         if sanitized {
             compiler.args(["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]);
         }

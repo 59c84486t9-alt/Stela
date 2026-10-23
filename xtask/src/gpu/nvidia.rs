@@ -169,8 +169,8 @@ impl Sources {
 
 /// NVIDIA's FreeBSD interface layer includes a few FreeBSD kernel headers;
 /// Stela's stand-ins apply only where the compiler's own system has none.
-fn freebsd_headers(command: &mut Command, source: &Sources) {
-    command.arg("-idirafter").arg(source.join("port/compat"));
+fn freebsd_headers(command: &mut Command) {
+    command.arg("-idirafter").arg(gpu().join("compat/freebsd"));
 }
 
 pub fn build(jobs: u16, target: Target) -> Result<()> {
@@ -377,7 +377,7 @@ mod tests {
                 ] {
                     command.arg("-I").arg(source.join(include));
                 }
-                freebsd_headers(&mut command, &source);
+                freebsd_headers(&mut command);
                 capture(&mut command).unwrap();
             }
         }

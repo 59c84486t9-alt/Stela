@@ -34,7 +34,7 @@ pub fn port() {
         .include(port)
         // FreeBSD headers NVIDIA's interface layer includes, where none exist.
         .flag("-idirafter")
-        .flag(format!("{port}/compat"));
+        .flag("src/gpu/compat/freebsd");
     for directory in [
         "src/common/sdk/nvidia/inc",
         "src/nvidia/arch/nvalloc/unix/include",

@@ -1,5 +1,5 @@
 //! Actual NVKMS types and original CPU upload over the maintained common heap.
-use super::{NATIVE_TARGET, Sources, capture, layout, tools};
+use super::{NATIVE_TARGET, Sources, capture, gpu, layout, tools};
 use anyhow::{Context, Result, ensure};
 use object::{Architecture, Object};
 use serde_json::json;
@@ -172,7 +172,7 @@ pub(super) fn cpu_model(
             ])
             .arg(source.join("port"))
             .arg("-idirafter")
-            .arg(source.join("port/compat"))
+            .arg(gpu().join("compat/freebsd"))
             // The fixtures include the original NVKMS sources they model.
             .arg("-iquote")
             .arg(source.join("src/nvidia-modeset/src"))

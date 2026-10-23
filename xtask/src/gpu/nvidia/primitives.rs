@@ -44,7 +44,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
                 ] {
                     command.arg("-I").arg(source.join(include));
                 }
-                super::freebsd_headers(&mut command, source);
+                super::freebsd_headers(&mut command);
                 if sanitize {
                     command.args(["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]);
                 }

@@ -39,7 +39,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
         ] {
             command.arg("-I").arg(source.join(include));
         }
-        super::freebsd_headers(&mut command, source);
+        super::freebsd_headers(&mut command);
         let ir = output.join(format!("{target}.ll"));
         let mut ir_command = Command::new(clang);
         ir_command

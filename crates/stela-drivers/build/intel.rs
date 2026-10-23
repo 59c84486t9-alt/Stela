@@ -115,7 +115,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
     // Mesa's packing helpers include a few C library headers, which the
     // freestanding encoders take from Stela.
     port.encoders
-        .include(format!("{SOURCE}/freestanding"))
+        .include("src/gpu/compat/freestanding")
         .define("HAVE_ENDIAN_H", None);
     native::check_declarations(&port.xe, &xe);
     native::check_declarations(&port.i915, &i915);

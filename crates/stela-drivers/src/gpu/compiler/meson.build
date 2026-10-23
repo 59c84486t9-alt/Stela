@@ -565,7 +565,7 @@ if with_intel
   # they select. As in the firmware image, the C library headers its packing
   # helpers include come from Stela's freestanding set.
   stela_intel_encoder_includes = include_directories(
-    '../intel/freestanding', '../intel', intel_genxml)
+    '../compat/freestanding', '../intel', intel_genxml)
   stela_intel_compute_headers = []
   foreach generation : [['125', 'gen125'], ['200', 'xe2'], ['300', 'xe3'], ['350', 'xe3p']]
     stela_intel_compute_headers += custom_target(

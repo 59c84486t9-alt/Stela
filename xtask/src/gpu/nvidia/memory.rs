@@ -24,7 +24,7 @@ fn nvlink_preserves_full_lengths_and_refuses_common_heap_failures() {
     ] {
         compiler.arg("-I").arg(source.join(include));
     }
-    super::freebsd_headers(&mut compiler, &source);
+    super::freebsd_headers(&mut compiler);
     compiler
         .arg(source.join("port/stela_nvlink_memory.c"))
         .arg(source.join("port/tests/nvlink_memory.c"))
