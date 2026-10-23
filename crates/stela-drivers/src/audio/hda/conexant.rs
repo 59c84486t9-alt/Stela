@@ -6,6 +6,7 @@
 //! EAPD count selects the donor's global/dynamic heuristic; no OEM GPIO, ACPI,
 //! LED or pin override policy is inferred from a codec ID. Fixed-node headset
 //! procedures require the separate source-bound headset initialization entry.
+use super::routing::RoutePolicy;
 use super::{
     AnalogRoute, CodecGraph, Controller, PinOptions, Registers, StreamId, Verb, WidgetKind,
 };
@@ -50,6 +51,15 @@ pub(super) struct State {
     active: bool,
     retired: bool,
     headset: Option<headset::State>,
+}
+fn route_policy(id: u32) -> Result<RoutePolicy, Error> {
+    if profile(id)? {
+        Ok(RoutePolicy::SingleAdc)
+    } else if id == 0x14f1_5051 {
+        Ok(RoutePolicy::ConexantCx20561)
+    } else {
+        Ok(RoutePolicy::Standard)
+    }
 }
 fn profile(id: u32) -> Result<bool, Error> {
     match id {
@@ -291,8 +301,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         options: PinOptions,
     ) -> Result<(), Error> {
         self.conexant_guard(graph)?;
-        let single_adc = profile(graph.vendor_id)?;
-        self.preflight_analog_route_policy(graph, route, id, channel, options, single_adc)?;
+        let policy = route_policy(graph.vendor_id)?;
+        self.preflight_analog_route_policy(graph, route, id, channel, options, policy)?;
         let state = self.conexant_active(graph)?;
         if let Some(headset) = &state.headset {
             headset::route_options(headset, route, options)?;
@@ -306,7 +316,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         {
             return Err(Error::InvalidPinControl);
         }
-        self.configure_analog_route_policy(graph, route, id, channel, options, single_adc)
+        self.configure_analog_route_policy(graph, route, id, channel, options, policy)
     }
     /// Linux's vmaster EAPD operation. Live DMA may continue; any failed effect
     /// blocks future starts until reset, while all buffers remain retained.
@@ -327,6 +337,59 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(())
     }
+    /// Mute/unmute a retained CX20561 DAC route at its advertised 0dB gain.
+    /// The two source-authorized DACs use physical minimum gain when no mute
+    /// bit exists. Existing PCM DMA may continue. No mixer cache or external
+    /// volume is inferred; unmute explicitly reapplies this route's 0dB level.
+    pub fn set_conexant_cx20561_converter_muted(
+        &mut self,
+        graph: &CodecGraph,
+        converter: u8,
+        muted: bool,
+    ) -> Result<(), Error> {
+        self.conexant_guard(graph)?;
+        if graph.vendor_id != 0x14f1_5051 || !matches!(converter, 0x10 | 0x11) {
+            return Err(Error::UnsupportedTopology);
+        }
+        if self.streams.iter().flatten().any(|stream| stream.poisoned) {
+            return Err(Error::NeedsReset);
+        }
+        if !self.routes.iter().any(|(_, route)| {
+            route.codec_address() == graph.address
+                && route.converter() == converter
+                && route.direction() == Direction::Playback
+        }) {
+            return Err(Error::RouteInUse);
+        }
+        let widget = graph.widget(converter).ok_or(Error::InvalidCodecGraph)?;
+        let caps = widget.output_amplifier.ok_or(Error::UnsupportedTopology)?;
+        if widget.kind != WidgetKind::Output
+            || (widget.capabilities >> 20) & 15 != 0
+            || caps == u32::MAX
+            || widget.channels() > 2
+            || (caps & 127) > ((caps >> 8) & 127)
+            || (caps & (1 << 31) == 0 && caps & 127 == 0)
+        {
+            return Err(Error::UnsupportedTopology);
+        }
+        let state = self.conexant_active(graph)?;
+        let result = (|| {
+            let node = if widget.capabilities & (1 << 3) != 0 {
+                converter
+            } else {
+                state.group
+            };
+            if self.conexant_parameter(graph.address, node, 0x12)? != caps {
+                return Err(Error::InvalidCodecGraph);
+            }
+            self.minimum_gain_mute(graph.address, widget, muted)
+        })();
+        if result.is_err() {
+            self.routing_failed = true;
+        }
+        result
+    }
+
     /// Called only after every actual stream stop has acknowledged, before CORB
     /// and RIRB stop. Unknown codec effects remain retained through error/reset.
     pub(super) fn shutdown_conexant_codecs(&mut self) -> Result<(), Error> {

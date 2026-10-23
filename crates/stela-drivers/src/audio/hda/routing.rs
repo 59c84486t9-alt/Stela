@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Standard analog codec route selection, power, pin and amplifier controls.
 //! Verb/capability layouts adapt Linux include/sound/hda_verbs.h and common
-//! codec control sequencing from sound/hda/common/codec.c at
+//! codec control sequencing from sound/hda/common/codec.c, and physical minimum-
+//! gain mute encoding from sound/hda/core/regmap.c at
 //! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
 //!
 //! Explicit pin/converter choices and electrical options belong to platform
@@ -209,6 +210,14 @@ impl CodecGraph {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum RoutePolicy {
+    #[default]
+    Standard,
+    SingleAdc,
+    ConexantCx20561,
+}
+
 #[derive(Clone, Copy)]
 struct Amplifier {
     node: u8,
@@ -217,6 +226,7 @@ struct Amplifier {
     channels: u8,
     gain: u8,
     mute: bool,
+    minimum_mute: bool,
 }
 
 pub(super) struct Plan {
@@ -252,6 +262,7 @@ fn amplifier(
         channels,
         gain,
         mute,
+        minimum_mute: false,
     })
 }
 
@@ -259,7 +270,7 @@ fn plan(
     graph: &CodecGraph,
     route: &AnalogRoute,
     options: PinOptions,
-    single_adc_amp: bool,
+    policy: RoutePolicy,
 ) -> Result<Plan, Error> {
     if graph.analog_route(route.direction, route.pin, route.converter)? != *route {
         return Err(Error::InvalidCodecGraph);
@@ -356,7 +367,7 @@ fn plan(
             _ => return Err(Error::UnsupportedTopology),
         };
         if input && let Some(caps) = current.input_amplifier {
-            let index = if single_adc_amp && current.kind == WidgetKind::Input {
+            let index = if policy == RoutePolicy::SingleAdc && current.kind == WidgetKind::Input {
                 0
             } else {
                 selected.unwrap_or(0)
@@ -383,9 +394,23 @@ fn plan(
                 )?);
             }
         }
+        if policy == RoutePolicy::ConexantCx20561
+            && matches!(*node, 0x10 | 0x11)
+            && (current.kind != WidgetKind::Output || current.output_amplifier.is_none())
+        {
+            return Err(Error::UnsupportedTopology);
+        }
         if output && let Some(caps) = current.output_amplifier {
-            plan.amplifiers
-                .push(amplifier(*node, true, 0, current.channels(), caps, false)?);
+            let mut amp = amplifier(*node, true, 0, current.channels(), caps, false)?;
+            // add_cx5051_fake_mutes authorizes minimum volume as mute only
+            // for these two DAC outputs; physical mute bits retain precedence.
+            amp.minimum_mute = policy == RoutePolicy::ConexantCx20561
+                && matches!(*node, 0x10 | 0x11)
+                && caps & AMP_MUTE_SUPPORTED == 0;
+            if amp.minimum_mute && amp.gain == 0 {
+                return Err(Error::UnsupportedTopology);
+            }
+            plan.amplifiers.push(amp);
         }
     }
     Ok(plan)
@@ -429,7 +454,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     fn route_amplifier(&mut self, codec: u8, amp: Amplifier) -> Result<(), Error> {
-        let value = u16::from(amp.gain) | if amp.mute { AMP_MUTE } else { 0 };
+        // Fake mute is a real minimum-gain write, never a fabricated bit7
+        // capability. Enabling restores the route's advertised 0dB value.
+        let value = if amp.minimum_mute && amp.mute {
+            0
+        } else {
+            u16::from(amp.gain) | if amp.mute { AMP_MUTE } else { 0 }
+        };
         let channels = AMP_LEFT | if amp.channels == 2 { AMP_RIGHT } else { 0 };
         let payload = if amp.output { AMP_OUTPUT } else { AMP_INPUT }
             | channels
@@ -448,6 +479,22 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
 
+    pub(super) fn minimum_gain_mute(
+        &mut self,
+        codec: u8,
+        widget: &Widget,
+        muted: bool,
+    ) -> Result<(), Error> {
+        let caps = widget.output_amplifier.ok_or(Error::UnsupportedTopology)?;
+        let mut amp = amplifier(widget.node, true, 0, widget.channels(), caps, false)?;
+        amp.minimum_mute = caps & AMP_MUTE_SUPPORTED == 0;
+        if amp.minimum_mute && amp.gain == 0 {
+            return Err(Error::UnsupportedTopology);
+        }
+        amp.mute = muted;
+        self.route_amplifier(codec, amp)
+    }
+
     /// Pure typed validation shared with codec-specific startup transactions.
     pub(super) fn preflight_analog_route(
         &self,
@@ -457,7 +504,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<Plan, Error> {
-        self.preflight_analog_route_policy(graph, route, id, channel, options, false)
+        self.preflight_analog_route_policy(
+            graph,
+            route,
+            id,
+            channel,
+            options,
+            RoutePolicy::Standard,
+        )
     }
     pub(super) fn preflight_analog_route_policy(
         &self,
@@ -466,7 +520,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         id: StreamId,
         channel: u8,
         options: PinOptions,
-        single_adc_amp: bool,
+        policy: RoutePolicy,
     ) -> Result<Plan, Error> {
         if graph.token != self.token || route.token != self.token {
             return Err(Error::InvalidCodecGraph);
@@ -479,7 +533,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(Error::InvalidStream);
         }
         self.validate_converter(graph, route.converter, id, channel)?;
-        let plan = plan(graph, route, options, single_adc_amp)?;
+        let plan = plan(graph, route, options, policy)?;
         if self.routes.iter().any(|(owner, previous)| {
             *owner == id
                 || (previous.codec == route.codec
@@ -514,7 +568,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.manages_conexant_codec(graph.address) {
             return self.configure_conexant_route(graph, route, id, channel, options);
         }
-        self.configure_analog_route_policy(graph, route, id, channel, options, false)
+        self.configure_analog_route_policy(
+            graph,
+            route,
+            id,
+            channel,
+            options,
+            RoutePolicy::Standard,
+        )
     }
     pub(super) fn configure_analog_route_policy(
         &mut self,
@@ -523,10 +584,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         id: StreamId,
         channel: u8,
         options: PinOptions,
-        single_adc_amp: bool,
+        policy: RoutePolicy,
     ) -> Result<(), Error> {
         let plan =
-            self.preflight_analog_route_policy(graph, route, id, channel, options, single_adc_amp)?;
+            self.preflight_analog_route_policy(graph, route, id, channel, options, policy)?;
         let result = (|| {
             for node in plan.power {
                 self.power_d0(route.codec, node)?;
@@ -546,7 +607,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     current.input_amplifier
                 }
                 .ok_or(Error::InvalidCodecGraph)?;
-                if caps & AMP_MUTE_SUPPORTED != 0 {
+                if caps & AMP_MUTE_SUPPORTED != 0 || amp.minimum_mute {
                     self.route_amplifier(route.codec, Amplifier { mute: true, ..*amp })?;
                 }
             }
