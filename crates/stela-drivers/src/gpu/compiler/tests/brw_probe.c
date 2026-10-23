@@ -86,10 +86,6 @@ int
 main(void)
 {
    struct intel_device_info device;
-   if (intel_get_device_info_for_build(0, &device)) {
-      fprintf(stderr, "an unknown PCI ID was accepted as a compile target\n");
-      return 1;
-   }
    const char *platform;
    STELA_INTEL_FOREACH_TARGET(platform, device) {
       if (!stela_intel_elk(&device))
