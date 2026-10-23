@@ -11,6 +11,7 @@ use core::cell::Cell;
 
 pub mod cache;
 pub mod counters;
+pub mod dma;
 pub mod interrupts;
 pub mod memory;
 pub mod platform;
