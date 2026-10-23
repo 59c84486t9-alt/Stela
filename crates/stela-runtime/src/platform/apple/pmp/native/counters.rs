@@ -65,14 +65,14 @@ pub struct Frame {
     pub copied: bool,
 }
 impl Frame {
-    fn initialized(top: u8) -> Self {
+    pub(in crate::platform::apple::pmp::native) fn initialized(top: u8) -> Self {
         Self {
             value: 0,
             metadata: u64::from(top) << 56,
             copied: false,
         }
     }
-    fn copy(&mut self, entry: Entry) {
+    pub(in crate::platform::apple::pmp::native) fn copy(&mut self, entry: Entry) {
         self.value = entry.value;
         self.metadata = entry.metadata >> 10
             | (entry.metadata & 2) << 53

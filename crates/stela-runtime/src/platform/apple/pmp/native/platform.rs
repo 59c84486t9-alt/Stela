@@ -18,6 +18,7 @@
 //! pending-work, trace-publication, scheduling and timing-accounting stages.
 //! Completing this component does not admit that parent cycle or an MC ACK.
 pub mod amcc;
+pub mod counter_cache;
 pub mod ingestion;
 mod interpolation;
 pub mod owner;

@@ -3,11 +3,13 @@
 //! Original T8112 PMP b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //! 100f8cc..100f934 saves controller bits19:16 and clears G540; 100f990..100f9e8
 //! restores those bits; 100fa18..100fb14 accumulates real slot50 results. The
-//! bucket comes from the current packet at sp+a0, never the G540 scratch.
+//! bucket comes from the current packet at sp+a0, never G540's four provider
+//! read masks. Those same bytes are lent to counter_cache, not copied.
 //! 100e648..100e678 sizes each bucket array from its joined DVFS state count.
 //! This owner supplies neither the outer manager tail nor counter-event/IRQ
 //! production. The fixed callback owner must implement every reached query.
 use super::super::Ordinal;
+use super::super::counter_cache::{ManagerClaim, ReadMasks};
 use super::{Completion, ManagerContext, ManagerEffect, Request};
 use crate::platform::apple::bus::{Access, MmioDevice, MmioError, Width};
 use alloc::vec::Vec;
@@ -162,14 +164,39 @@ pub struct Manager<D, C> {
     counters: C,
     buckets: Vec<Vec<[u64; 2]>>,
     saved: Vec<Option<u32>>,
-    scratch: [u8; 32],
+    scratch: ReadMasks,
     cycle: Option<(Request, ManagerContext)>,
     expected: ManagerEffect,
     pending: Option<Pending>,
     uncertain: Option<MmioError>,
 }
 impl<D: MmioDevice, C: Counters> Manager<D, C> {
+    /// Unbound software state for pure use. A provider cache rejects its masks.
     pub fn initialized_software(configuration: Configuration, device: D, counters: C) -> Self {
+        Self::with_masks(configuration, device, counters, ReadMasks::initialized())
+    }
+    /// Bind this manager's G540 to the same live native recipient as its cache.
+    /// The caller must still supply the source physical controller/aperture and
+    /// source-derived configuration; the claim does not prove either mapping.
+    pub fn initialized_for_native(
+        configuration: Configuration,
+        device: D,
+        counters: C,
+        claim: ManagerClaim,
+    ) -> Result<Self, Error> {
+        Ok(Self::with_masks(
+            configuration,
+            device,
+            counters,
+            ReadMasks::initialized_for_native(claim)?,
+        ))
+    }
+    fn with_masks(
+        configuration: Configuration,
+        device: D,
+        counters: C,
+        scratch: ReadMasks,
+    ) -> Self {
         let buckets = configuration
             .descriptors
             .iter()
@@ -182,7 +209,7 @@ impl<D: MmioDevice, C: Counters> Manager<D, C> {
             counters,
             buckets,
             saved,
-            scratch: [0; 32],
+            scratch,
             cycle: None,
             expected: ManagerEffect::BeforeCapture,
             pending: None,
@@ -192,16 +219,22 @@ impl<D: MmioDevice, C: Counters> Manager<D, C> {
     pub fn buckets(&self) -> &[Vec<[u64; 2]>] {
         &self.buckets
     }
-    pub fn scratch(&self) -> &[u8; 32] {
-        &self.scratch
+    pub fn scratch(&self) -> [u8; 32] {
+        self.scratch.bytes()
     }
-    /// The actual native hook owner writes this software scratch between
-    /// manager stages. It is not a counter observation or eligibility setter.
-    pub fn capture_scratch(&mut self) -> Result<&mut [u8; 32], Error> {
+    /// The actual G540 storage used by every platform's P250+40 cache masks.
+    /// Cloning does not create another mask array or a reset authority.
+    pub fn read_masks(&self) -> ReadMasks {
+        self.scratch.clone()
+    }
+    // Authored mutation for the original stage-order fixture only. Production
+    // mask writes belong to the same shared provider cache and source reset.
+    #[cfg(test)]
+    fn capture_scratch(&mut self) -> Result<core::cell::RefMut<'_, [u8; 32]>, Error> {
         if self.pending.is_some() || self.expected != ManagerEffect::RestoreControllers {
             return Err("native manager scratch requires the completed pre-capture stage");
         }
-        Ok(&mut self.scratch)
+        Ok(self.scratch.test_bytes_mut())
     }
     /// Ordinary MmioError proves no retirement boundary. Preserve it and never
     /// replay the uncertain device operation; no reset/replacement API exists.
@@ -217,6 +250,9 @@ impl<D: MmioDevice, C: Counters> Manager<D, C> {
     ) -> Result<(), Error> {
         if self.uncertain.is_some() {
             return Err("native manager MMIO effect is uncertain; replay refused");
+        }
+        if effect == ManagerEffect::BeforeCapture && self.pending.is_none() {
+            self.scratch.preflight_reset()?;
         }
         if let Some(pending) = &self.pending {
             if !pending.request.same_operation(request)
@@ -328,8 +364,10 @@ impl<D: MmioDevice, C: Counters> Manager<D, C> {
                 p.word = None;
                 p.index += 1;
             }
-            if p.effect == ManagerEffect::BeforeCapture {
-                self.scratch.fill(0);
+            if p.effect == ManagerEffect::BeforeCapture
+                && let Err(reason) = self.scratch.reset()
+            {
+                return Completion::Refused(reason);
             }
         } else {
             while let Some(descriptor) = self.configuration.descriptors.get(p.index) {
@@ -590,7 +628,7 @@ mod tests {
     fn controller_rmw_preserves_intervening_bits_and_repeated_source_indices() {
         let (mut m, d, _) = manager(configuration(&[3, 0, 3], &[], &[]));
         d.borrow_mut().words = [0, 0x81212345, 0x45670089, 0];
-        m.scratch.fill(0xa5);
+        m.scratch.test_bytes_mut().fill(0xa5);
         let c = context();
         let r = request(1, 1, None);
         assert!(m.capture_scratch().is_err());
@@ -598,7 +636,7 @@ mod tests {
             advance(&mut m, &r, ManagerEffect::BeforeCapture, c),
             Completion::Retired { .. }
         ));
-        assert_eq!(m.scratch(), &[0; 32]);
+        assert_eq!(m.scratch(), [0; 32]);
         m.capture_scratch().unwrap()[0] = 17;
         assert_eq!(
             d.borrow().writes,
@@ -832,5 +870,289 @@ mod tests {
         // initialized/overlaid manager configuration remains empty.
         assert_eq!(&pmp[0x1046140 - 0xfff000..0x1046144 - 0xfff000], &[0; 4]);
         assert_eq!(&pmp[0x1046188 - 0xfff000..0x104618c - 0xfff000], &[0; 4]);
+    }
+    struct MissingNativeResources;
+    impl crate::platform::apple::pmp::native::Resources for MissingNativeResources {
+        fn inventory(&self) -> crate::platform::apple::pmp::native::Inventory {
+            crate::platform::apple::pmp::native::Inventory { power_groups: 1 }
+        }
+        fn refresh_power_states(
+            &mut self,
+            _: &crate::platform::apple::pmp::native::Request,
+            _: &mut Access<'_>,
+        ) -> crate::platform::apple::pmp::native::Refresh {
+            crate::platform::apple::pmp::native::Refresh::Refused(
+                "authored native hardware unavailable",
+            )
+        }
+        fn snapshot_observer_packets(
+            &mut self,
+            _: &crate::platform::apple::pmp::native::Request,
+            _: &mut Access<'_>,
+        ) -> crate::platform::apple::pmp::native::Refresh {
+            crate::platform::apple::pmp::native::Refresh::Refused(
+                "authored native observer unavailable",
+            )
+        }
+        fn effect(
+            &mut self,
+            _: &crate::platform::apple::pmp::native::Request,
+            _: crate::platform::apple::pmp::native::Effect,
+            _: Option<&crate::platform::apple::pmp::native::PublicationTarget>,
+            _: &crate::platform::apple::pmp::native::Packets,
+            _: &mut Access<'_>,
+        ) -> crate::platform::apple::pmp::native::Step {
+            crate::platform::apple::pmp::native::Step::Refused("authored native effect unavailable")
+        }
+    }
+    type CacheHarness = (
+        crate::platform::apple::pmp::native::Owner<MissingNativeResources>,
+        crate::platform::apple::pmp::native::counters::Frames,
+        super::super::super::counter_cache::Cache,
+        Manager<Device, Queries>,
+    );
+    fn cache_fixture() -> CacheHarness {
+        use crate::platform::apple::{
+            bus::LifecycleState,
+            pmp::native,
+            ptd::{
+                Geometry, PTD_BYTES, Ptd, Range, UPDATE_OFFSET,
+                transport::notifications::NativeProfile,
+            },
+        };
+        use native::{counters::Frames, platform::counter_cache::Cache, power::DeviceTable};
+        let ranges: Vec<Range> = [
+            (1, 0, 1),
+            (2, 1, 1),
+            (3, 2, 4),
+            (4, 6, 1),
+            (5, 8, 8),
+            (6, 16, 8),
+            (7, 24, 8),
+            (8, 32, 8),
+            (10, 64, 144),
+            (11, 208, 1),
+            (12, 209, 1),
+            (13, 210, 1),
+            (14, 211, 1),
+        ]
+        .into_iter()
+        .map(|(id, start, count)| Range {
+            id,
+            start,
+            count,
+            name: alloc::format!("authored-{id}"),
+        })
+        .collect();
+        let geometry =
+            Geometry::new((0x100000, PTD_BYTES), (0x100000 + UPDATE_OFFSET, 0x800)).unwrap();
+        let (_, local) = Ptd::initialized_local_profile(
+            NativeProfile::T8112,
+            geometry,
+            &ranges,
+            LifecycleState {
+                powered: true,
+                clocked: true,
+                quiesced: false,
+                reset: false,
+                retention: true,
+            },
+        )
+        .unwrap();
+        let mut native = native::Owner::initialized(
+            local,
+            [1, 2, 3, 4, 5, 6, 7, 8, 0, 10, 11, 12, 13, 14, 0],
+            MissingNativeResources,
+        )
+        .unwrap();
+        let profile = native::platform::authored_profile();
+        let raw: Vec<u8> = profile
+            .descriptors()
+            .iter()
+            .flat_map(|d| d.raw_soc_device().iter().flat_map(|w| w.to_le_bytes()))
+            .collect();
+        let table = DeviceTable::from_properties(&raw, &0x3fff0u64.to_le_bytes(), None).unwrap();
+        let frames =
+            Frames::initialized(native.claim_counter_frames().unwrap(), &table, &[0; 144]).unwrap();
+        let claim = native.claim_provider_frames().unwrap();
+        let manager = Manager::initialized_for_native(
+            configuration(&[], &[], &[]),
+            Device(Rc::new(RefCell::new(DeviceState::default()))),
+            Queries(Rc::new(RefCell::new(QueryState::default()))),
+            native.claim_manager_read_masks().unwrap(),
+        )
+        .unwrap();
+        assert!(native.claim_manager_read_masks().is_err());
+        assert!(native.claim_provider_frames().is_err());
+        let cache = Cache::initialized(
+            claim,
+            &[[1; 4]],
+            manager.read_masks(),
+            core::array::from_fn(|_| alloc::vec![0xa5;8]),
+        )
+        .unwrap();
+        (native, frames, cache, manager)
+    }
+    #[test]
+    fn provider_cache_uses_actual_before_capture_masks_and_preserves_newer_ptd_until_next_reset() {
+        use crate::platform::apple::{bus::MmioDevice, ptd::UPDATE_OFFSET};
+        let (native, mut frames, mut cache, mut manager) = cache_fixture();
+        let masks = manager.read_masks();
+        let mut irq = InterruptLatch::default();
+        let mut access = Access::new(0, 25, &mut irq);
+        let captured = frames.capture_pending(&access).unwrap();
+        assert!(cache.bind_capture(&frames, &captured).is_err()); // Constructor zeros are not source reset.
+        let first = request(1, 1, None);
+        assert!(matches!(
+            manager.advance(&first, ManagerEffect::BeforeCapture, context(), &mut access),
+            Completion::Retired { .. }
+        ));
+        cache.bind_capture(&frames, &captured).unwrap();
+        let mut bank = frames.notifications().bank().clone();
+        bank.write(UPDATE_OFFSET + 24 * 8, Width::Double, 0x1122, &mut access)
+            .unwrap();
+        let Completion::Retired {
+            value: one,
+            refusal: None,
+        } = cache.read(&frames, &captured, 2, 0, &mut access)
+        else {
+            panic!("actual provider consume refused")
+        };
+        assert_eq!(one.value, 0x1122);
+        assert!(one.copied);
+        assert_eq!(one.metadata >> 56, 0xa5);
+        assert_ne!(one.metadata & (1 << 54), 0);
+        assert_eq!(masks.bytes()[16], 1);
+        assert_eq!(manager.scratch()[16], 1);
+        assert_eq!(cache.consumed(), 1);
+        bank.write(UPDATE_OFFSET + 24 * 8, Width::Double, 0x3344, &mut access)
+            .unwrap();
+        let Completion::Retired {
+            value: two,
+            refusal: None,
+        } = cache.read(&frames, &captured, 2, 0, &mut access)
+        else {
+            panic!("retained cache read refused")
+        };
+        assert_eq!(one, two);
+        assert_eq!(cache.consumed(), 1);
+        assert_ne!(bank.pending_range(24, 8).unwrap().low & 1, 0);
+        let newer = frames.capture_pending(&access).unwrap();
+        assert!(cache.bind_capture(&frames, &newer).is_err());
+        let restore = request(1, 2, Some(&first));
+        manager.advance(
+            &restore,
+            ManagerEffect::RestoreControllers,
+            context(),
+            &mut access,
+        );
+        let accumulate = request(1, 3, Some(&first));
+        manager.advance(
+            &accumulate,
+            ManagerEffect::AccumulateCounters,
+            context(),
+            &mut access,
+        );
+        let next = request(2, 4, Some(&first));
+        manager.advance(&next, ManagerEffect::BeforeCapture, context(), &mut access);
+        assert_eq!(masks.bytes(), [0; 32]);
+        cache.bind_capture(&frames, &newer).unwrap();
+        let Completion::Retired {
+            value: three,
+            refusal: None,
+        } = cache.read(&frames, &newer, 2, 0, &mut access)
+        else {
+            panic!("new cycle consume refused")
+        };
+        assert_eq!(three.value, 0x3344);
+        assert_eq!(cache.consumed(), 2);
+        drop(native);
+    }
+    #[test]
+    fn provider_cache_refuses_foreign_capture_and_abandoned_native_owner_before_consumption() {
+        let (native, mut frames, mut cache, mut manager) = cache_fixture();
+        let first = request(1, 1, None);
+        advance(
+            &mut manager,
+            &first,
+            ManagerEffect::BeforeCapture,
+            context(),
+        );
+        let (_other, mut other_frames, _other_cache, mut other_manager) = cache_fixture();
+        advance(
+            &mut other_manager,
+            &request(1, 1, None),
+            ManagerEffect::BeforeCapture,
+            context(),
+        );
+        let mut irq = InterruptLatch::default();
+        let mut access = Access::new(0, 25, &mut irq);
+        let foreign = other_frames.capture_pending(&access).unwrap();
+        assert!(cache.bind_capture(&other_frames, &foreign).is_err());
+        let own = frames.capture_pending(&access).unwrap();
+        cache.bind_capture(&frames, &own).unwrap();
+        drop(native);
+        assert!(matches!(
+            cache.read(&frames, &own, 2, 0, &mut access),
+            Completion::Refused(_)
+        ));
+        assert_eq!(cache.consumed(), 0);
+    }
+    #[test]
+    fn provider_cache_rejects_unbound_and_other_recipient_masks_even_on_same_ptd() {
+        use crate::platform::apple::pmp::native;
+        use native::platform::counter_cache::Cache;
+        let (fixture, _, _, _) = cache_fixture();
+        let selected = [1, 2, 3, 4, 5, 6, 7, 8, 0, 10, 11, 12, 13, 14, 0];
+        let make = || {
+            native::Owner::initialized(
+                fixture.notifications().clone(),
+                selected,
+                MissingNativeResources,
+            )
+            .unwrap()
+        };
+        // Same PTD object deliberately; native recipient identity must also match.
+        let mut native = make();
+        let mut foreign = make();
+        let bound = Manager::initialized_for_native(
+            configuration(&[], &[], &[]),
+            Device(Rc::new(RefCell::new(DeviceState::default()))),
+            Queries(Rc::new(RefCell::new(QueryState::default()))),
+            native.claim_manager_read_masks().unwrap(),
+        )
+        .unwrap();
+        let top = || core::array::from_fn(|_| alloc::vec![0; 8]);
+        assert!(
+            Cache::initialized(
+                foreign.claim_provider_frames().unwrap(),
+                &[[1; 4]],
+                bound.read_masks(),
+                top()
+            )
+            .is_err()
+        );
+        // Rejection must not claim or mutate the same source storage.
+        assert_eq!(bound.scratch(), [0; 32]);
+        assert!(
+            Cache::initialized(
+                native.claim_provider_frames().unwrap(),
+                &[[1; 4]],
+                bound.read_masks(),
+                top()
+            )
+            .is_ok()
+        );
+        let mut unbound_native = make();
+        let (unbound, _, _) = manager(configuration(&[], &[], &[]));
+        assert!(
+            Cache::initialized(
+                unbound_native.claim_provider_frames().unwrap(),
+                &[[1; 4]],
+                unbound.read_masks(),
+                top()
+            )
+            .is_err()
+        );
     }
 }

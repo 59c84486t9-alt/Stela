@@ -226,6 +226,8 @@ pub struct Owner<B> {
     memory_claimed: bool,
     registry_claimed: bool,
     counter_frames_claimed: bool,
+    provider_frames_claimed: bool,
+    manager_masks_claimed: bool,
     cache_claimed: bool,
 }
 impl<B: Resources> Owner<B> {
@@ -289,6 +291,8 @@ impl<B: Resources> Owner<B> {
             memory_claimed: false,
             registry_claimed: false,
             counter_frames_claimed: false,
+            provider_frames_claimed: false,
+            manager_masks_claimed: false,
             cache_claimed: false,
         })
     }
@@ -340,6 +344,41 @@ impl<B: Resources> Owner<B> {
         Ok(counters::Claim::new(
             self.local.clone(),
             range,
+            self.service_alive.clone(),
+        ))
+    }
+    /// One shared101ba6c provider cache for source-selected slots4..7.
+    /// Counts/storage still require their actual source block-row product;
+    /// this unique claim supplies only the same live native/PTD ownership.
+    pub fn claim_provider_frames(&mut self) -> Result<platform::counter_cache::Claim, Error> {
+        if self.provider_frames_claimed {
+            return Err(Error::Contract(
+                "PMP provider-frame owner is already admitted",
+            ));
+        }
+        let ranges = core::array::from_fn(|i| self.ranges[i + 4].clone());
+        self.provider_frames_claimed = true;
+        Ok(platform::counter_cache::Claim::new(
+            self.identity.clone(),
+            self.local.clone(),
+            ranges,
+            self.service_alive.clone(),
+        ))
+    }
+    /// One source manager G540 storage binding on this actual native recipient.
+    /// This supplies ownership only, never controller geometry or reset effects.
+    pub fn claim_manager_read_masks(
+        &mut self,
+    ) -> Result<platform::counter_cache::ManagerClaim, Error> {
+        if self.manager_masks_claimed {
+            return Err(Error::Contract(
+                "PMP manager read-mask owner is already admitted",
+            ));
+        }
+        self.manager_masks_claimed = true;
+        Ok(platform::counter_cache::ManagerClaim::new(
+            self.identity.clone(),
+            self.local.clone(),
             self.service_alive.clone(),
         ))
     }

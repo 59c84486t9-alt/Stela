@@ -196,8 +196,8 @@ pub enum Effect {
 }
 
 /// Reached manager operations around the platform hooks. The fixed backend owns
-/// the actual configured controller list, its saved nibble vector and G540
-/// software accumulator. Source addresses document order, never dispatch keys.
+/// the actual configured controller list, its saved nibble vector and the shared G540
+/// provider-cache read masks. Source addresses document order, never dispatch keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManagerEffect {
     ///100f8cc..100f934: for cfg28 controller records, resolve the actual index
