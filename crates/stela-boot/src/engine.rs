@@ -1487,9 +1487,12 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     };
     // SAFETY: once on the BSP, with interrupts off and owned native resources.
     // Retain the processor-local state through every native call and handler.
+    crate::status::begin("Installing the host processor state");
     let mut host_owner =
         unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
     let apic_hz = host::statistics().apic_hz;
+    crate::status::done("");
+    crate::status::begin("Starting the other host processors");
     // SAFETY: the retained physical inventory and loader-owned reservations
     // were validated before any SIPI; the BSP Host is installed, guest entry
     // is excluded, and APs remain parked until canonical worker publication.
@@ -1505,6 +1508,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         output::arguments(format_args!("native executor refusal: {error:?}\n"));
         output::fatal("owned native AP bootstrap refused")
     });
+    crate::status::done("");
     let sender = crate::apic::Apic::new(
         handoff.apic_base,
         layout::physical(handoff.apic_base & crate::apic::BASE_ADDRESS),
