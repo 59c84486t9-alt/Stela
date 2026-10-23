@@ -1,6 +1,4 @@
-/* Copyright © 2017 Intel Corporation
- * SPDX-License-Identifier: MIT
- */
+/* SPDX-License-Identifier: MIT */
 #include "../compute_dispatch_internal.h"
 #include "../genxml_native.h"
 #pragma clang diagnostic push
