@@ -1938,6 +1938,137 @@ mod tests {
         );
     }
 
+    /// Direct AP memory registers do not master through the separate PMP
+    /// transport. Model-class admission supplies no native owner or lifecycle
+    /// authority: mount must still require the actual joint memory resources.
+    #[test]
+    fn direct_memory_admission_does_not_admit_unsupported_pmp_dma() {
+        let mut mcc = node("mcc", Some(b"mcc,t6000\0"), vec![]);
+        for (key, bytes) in [
+            (
+                "reg",
+                [0x200000000u64, 0x1000000]
+                    .into_iter()
+                    .flat_map(u64::to_le_bytes)
+                    .collect(),
+            ),
+            ("config-data", vec![0xa5; 200]),
+            ("dramcfg-data", 0xffff0000u32.to_le_bytes().to_vec()),
+        ] {
+            mcc.set_property(key, bytes).unwrap();
+        }
+        let mut nub = node("iop-pmp-nub", Some(soc::RTBUDDY.as_bytes()), vec![]);
+        nub.set_property("ptd-range", vec![0x5a; 40]).unwrap();
+        let mut pmp = node("pmp", Some(soc::ASC.as_bytes()), vec![nub]);
+        pmp.set_property("role", b"PMP\0".to_vec()).unwrap();
+        pmp.set_property(IOMMU_PARENT, 0xa9u32.to_le_bytes().to_vec())
+            .unwrap();
+        pmp.set_property("ptd-update-reg-index", 3u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut dart = node(
+            "dart-pmp",
+            Some(b"dart,t6000\0"),
+            vec![mapper("mapper-pmp", 0xa9)],
+        );
+        dart.set_property("instance", b"FPADDART\0\0\0\0".to_vec())
+            .unwrap();
+        dart.set_property("page-size", 0x4000u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut tree = DeviceTree {
+            root: node(
+                "device-tree",
+                None,
+                vec![node("arm-io", None, vec![mcc.clone(), pmp, dart])],
+            ),
+        };
+        let original = tree.clone();
+        assert_eq!(
+            hide_unmodeled(&mut tree),
+            [
+                "/arm-io/pmp",
+                "/arm-io/pmp/iop-pmp-nub",
+                "/arm-io/dart-pmp",
+                "/arm-io/dart-pmp/mapper-pmp"
+            ]
+        );
+        assert_eq!(tree.node("/arm-io/mcc"), Some(&mcc));
+        for path in [
+            "/arm-io/pmp",
+            "/arm-io/pmp/iop-pmp-nub",
+            "/arm-io/dart-pmp",
+            "/arm-io/dart-pmp/mapper-pmp",
+        ] {
+            assert!(tree.property(path, COMPATIBLE).is_none(), "{path}");
+            let expected: Vec<_> = original
+                .node(path)
+                .unwrap()
+                .properties
+                .iter()
+                .filter(|property| property.name() != COMPATIBLE)
+                .collect();
+            let actual: Vec<_> = tree.node(path).unwrap().properties.iter().collect();
+            assert_eq!(actual, expected, "{path}");
+        }
+        // A direct-memory class does not exempt an actual declared DMA
+        // dependency from the ordinary unsupported-provider cascade.
+        let mut dependent = original;
+        dependent
+            .node_mut("/arm-io/mcc")
+            .unwrap()
+            .set_property(IOMMU_PARENT, 0xa9u32.to_le_bytes().to_vec())
+            .unwrap();
+        assert!(hide_unmodeled(&mut dependent).contains(&"/arm-io/mcc".into()));
+        let mut unknown = DeviceTree {
+            root: node(
+                "device-tree",
+                None,
+                vec![node("memory", Some(b"mcc,unknown\0"), vec![])],
+            ),
+        };
+        assert_eq!(hide_unmodeled(&mut unknown), ["/memory"]);
+    }
+
+    #[test]
+    #[ignore = "requires unchanged original J314s ADT via STELA_T6000_MCC_DEVICE_TREE"]
+    fn original_direct_memory_preserves_source_while_pmp_dma_stays_hidden() {
+        let bytes = std::fs::read(std::env::var("STELA_T6000_MCC_DEVICE_TREE").unwrap()).unwrap();
+        assert_eq!(
+            stela_runtime::sha256(&bytes),
+            "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
+        );
+        let original = DeviceTree::parse(&bytes).unwrap();
+        let mut prepared = original.clone();
+        let hidden = hide_unmodeled(&mut prepared);
+        assert_eq!(prepared.node("/arm-io/mcc"), original.node("/arm-io/mcc"));
+        assert_eq!(
+            prepared.property("/arm-io/mcc", COMPATIBLE).unwrap().value,
+            b"mcc,t6000\0"
+        );
+        assert!(!hidden.contains(&"/arm-io/mcc".into()));
+        for path in [
+            "/arm-io/pmp",
+            "/arm-io/pmp/iop-pmp-nub",
+            "/arm-io/dart-pmp",
+            "/arm-io/dart-pmp/mapper-pmp",
+        ] {
+            assert_eq!(
+                hidden.iter().filter(|entry| entry.as_str() == path).count(),
+                1,
+                "{path}"
+            );
+            assert!(prepared.property(path, COMPATIBLE).is_none(), "{path}");
+            let expected: Vec<_> = original
+                .node(path)
+                .unwrap()
+                .properties
+                .iter()
+                .filter(|property| property.name() != COMPATIBLE)
+                .collect();
+            let actual: Vec<_> = prepared.node(path).unwrap().properties.iter().collect();
+            assert_eq!(actual, expected, "{path}");
+        }
+    }
+
     #[test]
     fn a_modeled_serial_device_stays_selected() {
         let mut tree = DeviceTree {

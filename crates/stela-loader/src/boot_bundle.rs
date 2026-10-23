@@ -98,7 +98,9 @@ pub const SCHEMA_VERSION: u32 = 4;
 /// compatibles while preserving their distinct original alias geometry.
 /// Revision 27: default to the first original performance CPU, preserve
 /// explicit overrides and publish one running node with source identity.
-pub const REVISION: u32 = 27;
+/// Revision 28: retain the modeled direct MCC frontend independently of
+/// unsupported PMP DMA, requiring actual native memory resources at mount.
+pub const REVISION: u32 = 28;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
