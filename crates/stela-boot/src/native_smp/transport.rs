@@ -32,6 +32,9 @@ pub(crate) struct FixedWorkers<'a> {
     next_artifact_slot: usize,
     recovered_rounds: u64,
     progress_reported: u64,
+    remote_invalidations: u64,
+    remote_releases: u64,
+    remote_effects: u64,
     reported_services: Vec<(publication::WorkerBinding, &'static str)>,
 }
 impl<'a> FixedWorkers<'a> {
@@ -53,6 +56,9 @@ impl<'a> FixedWorkers<'a> {
             next_artifact_slot: 0,
             recovered_rounds: 0,
             progress_reported: crate::engine::host::rdtsc(),
+            remote_invalidations: 0,
+            remote_releases: 0,
+            remote_effects: 0,
             reported_services: Vec::new(),
         }
     }
@@ -72,6 +78,51 @@ impl<'a> FixedWorkers<'a> {
         self.bsp
             .as_ref()
             .is_some_and(|owner| owner.binding() == binding)
+    }
+
+    fn invalidate_owners(
+        &mut self,
+        local: &mut dyn Host,
+        inventory: &mut WorkerPublications,
+        commands: Vec<publication::NativeStopCommand>,
+    ) {
+        for command in commands {
+            let receipt = if self.is_bsp(command.binding()) {
+                self.bsp()
+                    .invalidate(command, local)
+                    .unwrap_or_else(|_| fail("actual BSP stopped invalidation refused"))
+            } else {
+                self.remote_invalidations = self.remote_invalidations.saturating_add(1);
+                self.processor(command.binding())
+                    .invalidate(command, self.sender, self.tsc_hz)
+                    .unwrap_or_else(|_| fail("actual AP stopped invalidation refused"))
+            };
+            inventory
+                .accept_invalidation(receipt)
+                .unwrap_or_else(|_| fail("native stopped invalidation receipt mismatch"));
+        }
+    }
+
+    fn release_owners(
+        &mut self,
+        inventory: &mut WorkerPublications,
+        releases: Vec<publication::WorkerRelease>,
+    ) {
+        for release in releases {
+            let receipt = if self.is_bsp(release.binding()) {
+                self.bsp()
+                    .release(release)
+                    .unwrap_or_else(|_| fail("actual BSP release refused"))
+            } else {
+                self.remote_releases = self.remote_releases.saturating_add(1);
+                self.processor(release.binding())
+                    .release(release, self.sender, self.tsc_hz)
+                    .unwrap_or_else(|_| fail("actual AP release refused"))
+            };
+            inventory
+                .accept_release(receipt)
+                .unwrap_or_else(|_| fail("actual native release receipt mismatch"));
+        }
     }
 }
 fn fail(reason: &'static str) -> ! {
@@ -99,6 +150,7 @@ impl ServiceTransport for FixedWorkers<'_> {
         let result = if self.is_bsp(binding) {
             self.bsp().apply_host_effect(command, local)
         } else {
+            self.remote_effects = self.remote_effects.saturating_add(1);
             self.processor(command.binding())
                 .host_effect(command, self.sender, self.tsc_hz)
         };
@@ -222,7 +274,7 @@ unsafe impl NativeTransport for FixedWorkers<'_> {
             self.progress_reported = now;
             for report in &reports {
                 crate::output::arguments(format_args!(
-                    "NATIVE PROGRESS recovered_rounds={} pe={} pc={:#x} instructions={} status={:?} compiled={} reused={} cache_bytes={} cache_entries={}\n",
+                    "NATIVE PROGRESS recovered_rounds={} pe={} pc={:#x} instructions={} status={:?} compiled={} reused={} cache_bytes={} cache_entries={} remote_invalidations={} remote_releases={} remote_effects={}\n",
                     self.recovered_rounds,
                     report.identity.pe,
                     report.settled_pc,
@@ -231,11 +283,39 @@ unsafe impl NativeTransport for FixedWorkers<'_> {
                     report.artifact_cache.compiled,
                     report.artifact_cache.reused,
                     report.artifact_cache.retained_bytes,
-                    report.artifact_cache.entries
+                    report.artifact_cache.entries,
+                    self.remote_invalidations,
+                    self.remote_releases,
+                    self.remote_effects,
                 ));
             }
         }
         reports
+    }
+    fn execute_held<'a>(
+        &mut self,
+        local: &mut dyn Host,
+        inventory: &mut WorkerPublications,
+        frames: Vec<NativeRun<'a>>,
+        held: publication::StoppedWorkers,
+    ) -> (Vec<NativeRunObservation>, publication::StoppedWorkers) {
+        if frames.is_empty() {
+            return (Vec::new(), held);
+        }
+        let members: Vec<_> = frames.iter().map(|frame| frame.identity().pe).collect();
+        let (running, releases) = inventory
+            .release_for_run(held, &members)
+            .unwrap_or_else(|_| fail("actual native run roster release refused"));
+        self.release_owners(inventory, releases);
+        let reports = self.execute(local, inventory, frames);
+        let commands = inventory
+            .request_rejoin(&running)
+            .unwrap_or_else(|_| fail("actual native run roster did not recover"));
+        self.invalidate_owners(local, inventory, commands);
+        let held = inventory
+            .rejoin(running)
+            .unwrap_or_else(|_| fail("actual native run roster did not rejoin held owners"));
+        (reports, held)
     }
     fn hold_all(
         &mut self,
@@ -246,23 +326,10 @@ unsafe impl NativeTransport for FixedWorkers<'_> {
         let request = inventory
             .request_stop(&members)
             .unwrap_or_else(|_| fail("native whole-cohort stop refused"));
-        for command in inventory
+        let commands = inventory
             .native_stop_commands(&request)
-            .unwrap_or_else(|_| fail("native unrecovered frame refused stop"))
-        {
-            let receipt = if self.is_bsp(command.binding()) {
-                self.bsp()
-                    .invalidate(command, local)
-                    .unwrap_or_else(|_| fail("actual BSP stopped invalidation refused"))
-            } else {
-                self.processor(command.binding())
-                    .invalidate(command, self.sender, self.tsc_hz)
-                    .unwrap_or_else(|_| fail("actual AP stopped invalidation refused"))
-            };
-            inventory
-                .accept_invalidation(receipt)
-                .unwrap_or_else(|_| fail("native stopped invalidation receipt mismatch"));
-        }
+            .unwrap_or_else(|_| fail("native unrecovered frame refused stop"));
+        self.invalidate_owners(local, inventory, commands);
         inventory
             .hold_stop(request)
             .unwrap_or_else(|_| fail("actual whole native cohort was not held"))
@@ -273,22 +340,9 @@ unsafe impl NativeTransport for FixedWorkers<'_> {
         inventory: &mut WorkerPublications,
         held: publication::StoppedWorkers,
     ) {
-        for release in inventory
+        let releases = inventory
             .release(held)
-            .unwrap_or_else(|_| fail("native cohort has unfinished services"))
-        {
-            let receipt = if self.is_bsp(release.binding()) {
-                self.bsp()
-                    .release(release)
-                    .unwrap_or_else(|_| fail("actual BSP release refused"))
-            } else {
-                self.processor(release.binding())
-                    .release(release, self.sender, self.tsc_hz)
-                    .unwrap_or_else(|_| fail("actual AP release refused"))
-            };
-            inventory
-                .accept_release(receipt)
-                .unwrap_or_else(|_| fail("actual native release receipt mismatch"));
-        }
+            .unwrap_or_else(|_| fail("native cohort has unfinished services"));
+        self.release_owners(inventory, releases);
     }
 }
