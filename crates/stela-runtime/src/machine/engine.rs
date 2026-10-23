@@ -349,6 +349,13 @@ pub trait Host {
         None
     }
 
+    /// Optional destination-local stable declaration owner. Absence keeps full
+    /// live enumeration at every native boundary. A supplied invalid/revoked
+    /// lease refuses; it never falls back to disguise stale ownership.
+    fn native_cpu_lease(&self) -> Option<crate::NativeCpuLease> {
+        None
+    }
+
     /// Read guest RAM. False when any byte is not RAM.
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool;
     /// Write guest RAM. False when any byte is not RAM.

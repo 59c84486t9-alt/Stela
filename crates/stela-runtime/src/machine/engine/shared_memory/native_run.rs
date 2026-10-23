@@ -381,7 +381,8 @@ impl NativeRun<'_> {
         if host.native_worker() != Some(self.worker) {
             return Err(MemoryStatus::Unsupported);
         }
-        let authority = NativeSystemTarget::capture().map_err(|_| MemoryStatus::Unsupported)?;
+        let authority = NativeSystemTarget::capture_for(self.worker, host.native_cpu_lease())
+            .map_err(|_| MemoryStatus::Unsupported)?;
         observation.physical_processor = Some(authority.physical_processor());
         if !authority.target().supports(self.artifact.identity.target) {
             return Err(MemoryStatus::Unsupported);

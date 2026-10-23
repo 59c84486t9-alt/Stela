@@ -251,6 +251,12 @@ pub struct Config {
 /// Runs once on this host processor, after its descriptor setup, with
 /// interrupts disabled. Its pool, code arena and bounce entries are private to
 /// this processor; the returned owner outlives every local native call/handler.
+/// This owned post-EBS mount adopts stable relevant ISA/vendor/identity
+/// declarations as a supported-platform requirement: trusted firmware and any
+/// VMM preserve them throughout ownership. Stop and retire the owner before
+/// physical reset/resume, microcode update or feature reconfiguration, including
+/// SMT-shared changes; reinstall and re-enumerate afterwards. ExitBootServices
+/// and CPUID do not prove that external promise or hardware qualification.
 pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
     let mut pool = Pool {
         base: config.pool_physical,
@@ -798,6 +804,10 @@ fn code_unit_bytes(state: &State) -> u64 {
 impl Host for BareHost<'_> {
     fn native_worker(&self) -> Option<stela_runtime::machine::engine::publication::WorkerId> {
         local::native_worker()
+    }
+
+    fn native_cpu_lease(&self) -> Option<stela_runtime::NativeCpuLease> {
+        local::native_cpu_lease()
     }
 
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool {

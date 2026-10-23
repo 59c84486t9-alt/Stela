@@ -204,6 +204,9 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
     fn native_worker(&self) -> Option<WorkerId> {
         self.local.native_worker()
     }
+    fn native_cpu_lease(&self) -> Option<crate::NativeCpuLease> {
+        self.local.native_cpu_lease()
+    }
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
         // SAFETY: the retained canonical owner supplies mapping and all-reader
         // exclusion. No identity/raw-RAM fallback is admitted by this adapter.
@@ -564,6 +567,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
                 .collect();
         }
         let host = ServiceHost::new(Local, OneWorker(None), Arc::clone(&ram));
+        assert!(Local.native_cpu_lease().is_none());
+        assert!(host.native_cpu_lease().is_none());
         let mut machine =
             Machine::new(cpu, host, Copyout { calls: 0, fail }, profile, ram.target());
         machine.profile_missing = missing;

@@ -48,6 +48,8 @@ pub mod freestanding {
     pub use crate::execution::boot_frames::FrameError as BootStorageError;
     pub use crate::platform::boot::{BootArena, CpuObservation, MountError, install, verify};
 }
+/// Destination-local stable CPU declaration ownership for native system Hosts.
+pub use platform::cpu::system::{NativeCpuError, NativeCpuLease, NativeCpuOwner};
 pub mod process;
 pub mod scalable;
 pub mod system;
