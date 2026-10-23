@@ -523,3 +523,45 @@ fn runtime_usb2_multi_tt_bitmap_uses_acknowledged_alternate_and_physical_port31(
     assert_eq!(removed.removed.len(), 1);
     assert_eq!(removed.removed[0].slot, old);
 }
+
+#[test]
+fn runtime_usb2_initial_ped_zero_is_baselined_from_reset_ack_without_churning_identity() {
+    for context in [32, 64] {
+        let nodes = BTreeMap::from([(0, unbound_leaf(HIGH_SPEED))]);
+        let mut backing = vec![0u64; 512 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: both actual reset handshake and later aliases retain RAM.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut c, model) = controller(&mut dma, context, nodes);
+        model.borrow_mut().root_status = Some(PP);
+        let mut failures = Vec::new();
+        let devices = c.enumerate(&mut dma, &mut failures);
+        assert!(devices.is_empty());
+        let shared = Rc::new(RefCell::new(c));
+        let mut host = Host::new(shared.clone(), &devices, &mut dma, &mut failures);
+        model.borrow_mut().root_status = Some(PP | CCS | CSC); // PED0/speed0 until reset.
+        model.borrow_mut().notify_root();
+        let first = runtime_poll(&mut host, &mut dma);
+        assert!(
+            first.added.failures.is_empty(),
+            "{:?}",
+            first.added.failures
+        );
+        assert_eq!(first.added.devices.len(), 1);
+        let slot = first.added.devices[0].slot;
+        let commands = model.borrow().commands.clone();
+        for _ in 0..4 {
+            let stable = runtime_poll(&mut host, &mut dma);
+            assert!(stable.removed.is_empty());
+            assert!(stable.added.devices.is_empty());
+            assert!(stable.added.failures.is_empty());
+        }
+        assert_eq!(model.borrow().commands, commands);
+        assert!(
+            shared
+                .borrow_mut()
+                .control(slot, setup(0x80, GET_DESCRIPTOR, 1 << 8, 0, 8), &[])
+                .is_ok()
+        );
+    }
+}

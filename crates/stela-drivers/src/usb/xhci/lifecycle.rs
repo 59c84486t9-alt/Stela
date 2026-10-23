@@ -240,11 +240,17 @@ impl Host {
             // Pinned port_event waits100ms after actual port over-current.
             c.clock.delay(100_000);
         }
-        c.root_current(
-            port,
-            ((status >> PORT_SPEED_SHIFT) & PORT_SPEED_FIELD) as u8,
-        )?;
+        // A disabled USB2 port has not completed its speed handshake yet.
+        // Its actual Supported Protocol permits reset; reserve_current still
+        // requires the enabled port's actual speed before Address Device.
+        if c.port_major[usize::from(port - 1)] != 2 || status & PED != 0 {
+            c.root_current(
+                port,
+                ((status >> PORT_SPEED_SHIFT) & PORT_SPEED_FIELD) as u8,
+            )?;
+        }
         let location = format!("{} port {port}", c.location);
+        let mut acknowledged_speed = None;
         let reset = |c: &mut Controller| {
             let Some(speed) = c.root_port(port)? else {
                 return Ok(None);
@@ -262,6 +268,7 @@ impl Host {
             if c.power.port_owner(None, port).is_some() {
                 c.reset_root_device(attachment)?;
             }
+            acknowledged_speed = Some(speed);
             Ok(Some(attachment))
         };
         c.connect(
@@ -271,6 +278,14 @@ impl Host {
             &mut changes.added.devices,
             &mut changes.added.failures,
         );
+        if let Some(speed) = acknowledged_speed {
+            // Baseline only effects proved by our reset/training ACK. Preserve
+            // prior connection/power authority so a late physical change is
+            // observed on the next poll; late CSC is never consumed here.
+            let controlled = PED | (PORT_SPEED_FIELD << PORT_SPEED_SHIFT) | PLS;
+            self.roots[usize::from(port - 1)] =
+                status & !controlled | PED | u32::from(speed) << PORT_SPEED_SHIFT;
+        }
         Ok(())
     }
 

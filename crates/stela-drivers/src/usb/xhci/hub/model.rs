@@ -811,10 +811,16 @@ impl Registers for RegistersModel {
         state.mmio_writes += 1;
         state.registers.insert(at, value);
         if at == 0x440 {
+            let actual_speed = state.nodes[&0].speed;
             if let Some(status) = state.root_status.as_mut() {
                 *status &= !(value & PORT_CHANGES);
                 if value & PR != 0 {
-                    *status = *status & !PR | PED | PRC;
+                    // The device handshake determines speed when reset enables
+                    // the port; its pre-reset speed field may be undefined.
+                    *status = *status & !(PR | (PORT_SPEED_FIELD << PORT_SPEED_SHIFT))
+                        | PED
+                        | PRC
+                        | u32::from(actual_speed) << PORT_SPEED_SHIFT;
                 }
             }
             if value & PR != 0 {
