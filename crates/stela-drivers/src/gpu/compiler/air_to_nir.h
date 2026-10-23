@@ -104,6 +104,10 @@ struct stela_air_options {
  * IO limits are real caller facts, not inferred Metal family advertisement.
  * Returned NIR owns variables/names; no descriptor/map/input pointer survives.
  * Original NIR stage IO lowering belongs to the actual vendor compiler owner.
+ * Packed flat FP32 scalar/vector aggregates assembled through insertvalue may
+ * cross PHIs, including loop backedges; every reachable incoming leaf must be
+ * completely defined. Nested/unpacked aggregates, other leaf types and direct
+ * aggregate constants remain unsupported. The source path awaits qualification.
  * As with the compute entrypoint, nir_options must outlive the returned shader;
  * the owned vendor compiler wrapper must retain a stable qualified options copy. */
 struct stela_air_stage_options {
@@ -127,7 +131,7 @@ nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
  * early returns, nested/multiple-latch loops and irreducible entries. Original
  * and legalized inputs share the caller's instruction budget; total switch
  * cases also obey that budget before legalization. Production has no iteration
- * cap. Pointer/aggregate PHIs and reachable unsupported terminators
+ * cap. Pointer PHIs, compute aggregate PHIs and reachable unsupported terminators
  * are refused explicitly. Unreachable blocks consume the budget but emit no
  * effects. These source paths await semantic/vendor qualification; no family
  * capability follows from accepting a control-flow shape.

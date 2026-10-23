@@ -1386,6 +1386,74 @@ cfg_prepare(struct translator *t, LLVMValueRef fn)
 }
 
 static bool
+cfg_phi_shape(struct translator *t, LLVMTypeRef type, unsigned *leaves)
+{
+   unsigned components, bits;
+   *leaves = 0;
+   if (value_shape(type, &components, &bits))
+      return true;
+   if (!t->stage_options || LLVMGetTypeKind(type) != LLVMStructTypeKind ||
+       LLVMIsOpaqueStruct(type) || !LLVMIsPackedStruct(type) ||
+       !LLVMCountStructElementTypes(type) || LLVMCountStructElementTypes(type) > AIR_MAX_ARGUMENTS)
+      return fail(t, STELA_AIR_TYPE, "PHI requires numeric value or packed flat FP32 render aggregate");
+   *leaves = LLVMCountStructElementTypes(type);
+   for (unsigned i = 0; i < *leaves; i++) {
+      if (!float_shape(LLVMStructGetTypeAtIndex(type, i), &components, &bits))
+         return fail(t, STELA_AIR_TYPE, "aggregate PHI requires flat FP32 scalar/vector leaves");
+   }
+   return true;
+}
+
+static struct value *
+cfg_phi_leaf(struct translator *t, LLVMTypeRef type)
+{
+   unsigned components, bits;
+   if (!value_shape(type, &components, &bits)) {
+      fail(t, STELA_AIR_TYPE, "unsupported PHI leaf type");
+      return NULL;
+   }
+   struct value *value = rzalloc(t->values, struct value);
+   nir_phi_instr *phi = nir_phi_instr_create(t->b.shader);
+   if (!value || !phi) {
+      fail(t, STELA_AIR_ALLOCATION, "AIR PHI leaf allocation failed");
+      return NULL;
+   }
+   nir_def_init(&phi->instr, &phi->def, components, bits);
+   nir_builder_instr_insert(&t->b, &phi->instr);
+   value->def = &phi->def;
+   value->components = components;
+   value->bits = bits;
+   return value;
+}
+
+static bool
+cfg_declare_phi(struct translator *t, LLVMValueRef inst)
+{
+   LLVMTypeRef type = LLVMTypeOf(inst);
+   unsigned leaves;
+   if (!cfg_phi_shape(t, type, &leaves))
+      return false;
+   struct value *value;
+   if (leaves) {
+      value = rzalloc(t->values, struct value);
+      if (!value || !(value->elements = rzalloc_array(t->values, struct value *, leaves)))
+         return fail(t, STELA_AIR_ALLOCATION, "aggregate PHI wrapper allocation failed");
+      value->aggregate_count = leaves;
+      for (unsigned i = 0; i < leaves; i++) {
+         value->elements[i] = cfg_phi_leaf(t, LLVMStructGetTypeAtIndex(type, i));
+         if (!value->elements[i])
+            return false;
+      }
+   } else {
+      value = cfg_phi_leaf(t, type);
+      if (!value)
+         return false;
+   }
+   return _mesa_hash_table_insert(t->values, inst, value) != NULL ||
+      fail(t, STELA_AIR_ALLOCATION, "AIR PHI value map allocation failed");
+}
+
+static bool
 cfg_declare(struct translator *t)
 {
    nir_block *entry = nir_start_block(t->b.impl);
@@ -1403,15 +1471,7 @@ cfg_declare(struct translator *t)
       t->b.cursor = nir_before_block(block->start);
       for (LLVMValueRef inst = LLVMGetFirstInstruction(block->llvm);
            inst && LLVMGetInstructionOpcode(inst) == LLVMPHI; inst = LLVMGetNextInstruction(inst)) {
-         unsigned components, bits;
-         if (!value_shape(LLVMTypeOf(inst), &components, &bits))
-            return fail(t, STELA_AIR_TYPE, "only integer/FP32 scalar/vector PHI values supported");
-         nir_phi_instr *phi = nir_phi_instr_create(t->b.shader);
-         if (!phi)
-            return fail(t, STELA_AIR_ALLOCATION, "AIR PHI allocation failed");
-         nir_def_init(&phi->instr, &phi->def, components, bits);
-         nir_builder_instr_insert(&t->b, &phi->instr);
-         if (!put_value(t, inst, &phi->def, 0))
+         if (!cfg_declare_phi(t, inst))
             return false;
       }
    }
@@ -1463,7 +1523,7 @@ cfg_emit(struct translator *t)
       struct air_block *block = t->work[i];
       for (LLVMValueRef inst = LLVMGetFirstInstruction(block->llvm);
            inst && LLVMGetInstructionOpcode(inst) == LLVMPHI; inst = LLVMGetNextInstruction(inst)) {
-         nir_phi_instr *phi = nir_instr_as_phi(nir_def_instr(find_value(t, inst)->def));
+         struct value *target = find_value(t, inst);
          unsigned sources = 0;
          for (unsigned s = 0; s < LLVMCountIncoming(inst); s++) {
             struct air_block *pred = cfg_block(t, LLVMGetIncomingBlock(inst, s));
@@ -1482,13 +1542,24 @@ cfg_emit(struct translator *t)
             /* Constants are materialized before the predecessor's jump. Uses
              * of loop-carried PHIs retain their original simultaneous defs. */
             t->b.cursor = nir_before_instr(nir_block_last_instr(pred->end));
-            nir_def *value = get_value(t, incoming);
-            if (!value)
-               return false;
-            /* This PHI was inserted before backedge defs existed. The API
-             * only links uses during insertion, so attach this late use too. */
-            nir_phi_src *source = nir_phi_instr_add_src(phi, pred->end, value);
-            list_addtail(&source->src.use_link, &value->uses);
+            struct value *aggregate = target->aggregate_count ? aggregate_value(t, incoming) : NULL;
+            if (target->aggregate_count &&
+                (!aggregate || aggregate->aggregate_count != target->aggregate_count))
+               return fail(t, STELA_AIR_TYPE, "aggregate PHI incoming shape mismatch");
+            unsigned leaves = target->aggregate_count ? target->aggregate_count : 1;
+            for (unsigned leaf = 0; leaf < leaves; leaf++) {
+               nir_def *value = aggregate ?
+                  (aggregate->elements[leaf] ? aggregate->elements[leaf]->def : NULL) : get_value(t, incoming);
+               if (!value)
+                  return fail(t, STELA_AIR_INSTRUCTION, "undefined/poison aggregate PHI leaf/lane");
+               nir_def *def = target->aggregate_count ? target->elements[leaf]->def : target->def;
+               if (value->num_components != def->num_components || value->bit_size != def->bit_size)
+                  return fail(t, STELA_AIR_TYPE, "PHI incoming leaf shape mismatch");
+               nir_phi_instr *phi = nir_instr_as_phi(nir_def_instr(def));
+               /* Leaves are already inserted; attach each late use as well. */
+               nir_phi_src *source = nir_phi_instr_add_src(phi, pred->end, value);
+               list_addtail(&source->src.use_link, &value->uses);
+            }
             sources++;
          }
          if (sources != nir_block_num_preds(block->start))

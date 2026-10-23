@@ -155,24 +155,86 @@ static void specialize(nir_shader *nir,unsigned vertex,const uint32_t *words,uns
       fold(nir);
    }
 }
-static void outputs(nir_shader *nir,const uint32_t *position,const uint32_t *color)
+static bool outputs_match(nir_shader *nir,const uint32_t *position,const uint32_t *color)
 {
-   unsigned stores=0;
-   nir_foreach_function_impl(impl,nir) CHECK(finite_effect_body(impl));
+   bool seen_position=false,seen_color=false;
+   if(!color || (position ? nir->info.stage!=MESA_SHADER_VERTEX :
+                           nir->info.stage!=MESA_SHADER_FRAGMENT))return false;
+   nir_foreach_function_impl(impl,nir) if(!finite_effect_body(impl))return false;
    nir_foreach_function_impl(impl,nir) nir_foreach_block(block,impl) nir_foreach_instr(instr,block) {
-      if(instr->type!=nir_instr_type_intrinsic)continue;
+      /* After specialization only pure value construction, a real return and
+       * the expected output stores may remain. Reject every other intrinsic,
+       * including memory operations beyond the original SSBO checks. */
+      switch(instr->type) {
+      case nir_instr_type_alu: case nir_instr_type_deref:
+      case nir_instr_type_load_const: case nir_instr_type_undef: continue;
+      case nir_instr_type_jump:
+         if(nir_instr_as_jump(instr)->type!=nir_jump_return)return false;
+         continue;
+      case nir_instr_type_intrinsic: break;
+      default: return false;
+      }
       nir_intrinsic_instr *i=nir_instr_as_intrinsic(instr);
-      CHECK(i->intrinsic!=nir_intrinsic_load_ssbo && i->intrinsic!=nir_intrinsic_store_ssbo &&
-            i->intrinsic!=nir_intrinsic_load_vertex_id);
-      if(i->intrinsic!=nir_intrinsic_store_deref)continue;
-      nir_variable *v=nir_intrinsic_get_var(i,0);CHECK(v->data.mode==nir_var_shader_out);
-      const uint32_t *expected=v->data.location==VARYING_SLOT_POS ? position : color;
-      CHECK(expected && nir_src_is_const(i->src[1]));
+      if(i->intrinsic!=nir_intrinsic_store_deref)return false;
+      nir_deref_instr *deref=nir_src_as_deref(i->src[0]);
+      if(deref->deref_type!=nir_deref_type_var)return false;
+      nir_variable *v=deref->var;
+      if(v->data.mode!=nir_var_shader_out || v->type!=glsl_vec4_type() ||
+         v->data.location_frac || v->data.index ||
+         i->src[1].ssa->num_components!=4 || i->src[1].ssa->bit_size!=32 ||
+         nir_intrinsic_write_mask(i)!=0xf || !nir_src_is_const(i->src[1]))return false;
+      const uint32_t *expected;
+      if(position && v->data.location==VARYING_SLOT_POS) {
+         if(seen_position)return false;
+         seen_position=true;expected=position;
+      } else if(v->data.location==(position?VARYING_SLOT_VAR0:FRAG_RESULT_DATA0)) {
+         if(seen_color)return false;
+         seen_color=true;expected=color;
+      } else return false;
       nir_const_value *values=nir_src_as_const_value(i->src[1]);
-      for(unsigned k=0;k<4;k++)CHECK(values[k].u32==expected[k]);
-      stores++;
+      for(unsigned k=0;k<4;k++)if(values[k].u32!=expected[k])return false;
    }
-   CHECK(stores==(position?2:1));
+   return seen_color && seen_position==(position!=NULL);
+}
+static void outputs(nir_shader *nir,const uint32_t *position,const uint32_t *color)
+{ CHECK(outputs_match(nir,position,color)); }
+
+static void output_oracle_controls(void)
+{
+   /* Identical payloads make output identity, multiplicity and coverage the
+    * only distinctions. Cases are direct NIR mutations, not AIR translations. */
+   const uint32_t expected[4]={1,2,3,4};
+   for(unsigned fragment=0;fragment<2;fragment++)for(unsigned mutation=0;mutation<10;mutation++) {
+      nir_builder b=nir_builder_init_simple_shader(fragment?MESA_SHADER_FRAGMENT:MESA_SHADER_VERTEX,
+         &nir_options,"stage output oracle control");
+      nir_const_value values[4];
+      for(unsigned k=0;k<4;k++)values[k]=nir_const_value_for_raw_uint(expected[k],32);
+      nir_def *value=nir_build_imm(&b,4,32,values);
+      nir_variable *position=nir_variable_create(b.shader,nir_var_shader_out,glsl_vec4_type(),"position");
+      position->data.location=VARYING_SLOT_POS;
+      if(!fragment)nir_store_deref(&b,nir_build_deref_var(&b,position),value,0xf);
+      nir_variable *color=nir_variable_create(b.shader,nir_var_shader_out,
+         mutation==6?glsl_vector_type(GLSL_TYPE_FLOAT,3):
+         mutation==8?glsl_dvec4_type():glsl_vec4_type(),"color");
+      color->data.location=fragment?FRAG_RESULT_DATA0:VARYING_SLOT_VAR0;
+      if(mutation==4)color->data.location++;
+      if(mutation==7)color->data.index=1;
+      if(mutation==9)color->data.location_frac=1;
+      if(mutation!=1) {
+         nir_variable *target=mutation==2?position:color;
+         nir_def *stored=value;
+         if(mutation==6)stored=nir_build_imm(&b,3,32,values);
+         if(mutation==8) {
+            for(unsigned k=0;k<4;k++)values[k]=nir_const_value_for_raw_uint(expected[k],64);
+            stored=nir_build_imm(&b,4,64,values);
+         }
+         nir_store_deref(&b,nir_build_deref_var(&b,target),
+            stored,mutation==3?7:0xf);
+      }
+      if(mutation==5)nir_store_global(&b,nir_imm_int(&b,1),nir_imm_int64(&b,0x100000),.align_mul=4);
+      CHECK(outputs_match(b.shader,fragment?NULL:expected,expected)==(mutation==0));
+      ralloc_free(b.shader);
+   }
 }
 static char *change(const char *source,const char *old,const char *replacement)
 {
@@ -386,6 +448,209 @@ fragment_body(const char *body, const char *extra)
    char *text = malloc(strlen(first) + strlen(extra) + 1); CHECK(text);
    strcpy(text, first); strcat(text, extra); free(first); return text;
 }
+
+#define STAGE_PAIR "<{<4 x float>,<4 x float>}>"
+#define STAGE_MIXED "<{float,<2 x float>,<3 x float>,<4 x float>}>"
+static char *
+vertex_body(const char *body)
+{
+   const char *start = strstr(fixture, "define " STAGE_PAIR " @test_vertex");
+   const char *end = strstr(fixture, "define <4 x float> @test_fragment");
+   CHECK(start && end && end > start);
+   const char *signature = "define " STAGE_PAIR " @test_vertex(i32 %id, ptr addrspace(2) %buffer) ";
+   size_t prefix = (size_t)(start - fixture);
+   size_t bytes = prefix + strlen(signature) + strlen(body) + strlen(end) + 2;
+   char *text = malloc(bytes); CHECK(text);
+   snprintf(text, bytes, "%.*s%s%s\n%s", (int)prefix, fixture, signature, body, end);
+   return text;
+}
+
+static void
+aggregate_phi_semantics(void)
+{
+   LLVMMemoryBufferRef initial = bitcode(fixture);
+   struct snapshot vs, fs; struct stela_air_error error;
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+      "test_vertex", STELA_AIR_VERTEX, capture, &vs, &error));
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+      "test_fragment", STELA_AIR_FRAGMENT, capture, &fs, &error));
+   LLVMDisposeMemoryBuffer(initial);
+   struct stela_air_varying_slot map[16]; unsigned count = 0, calls = 0;
+   CHECK(stela_air_link_stage_io(&vs.entry, &fs.entry, 16, map, 16, &count, &error));
+   struct stela_air_stage_options o = options(STELA_AIR_VERTEX, map, count, &calls);
+
+   /* Aggregate-to-aggregate joins, then extractvalue/insertvalue, select every
+    * output bit on the same edge. Include signed zero and a NaN payload. */
+   const char *nested = "{\nentry:\n %inside = icmp ult i32 %id, 2\n"
+      " br i1 %inside, label %choose, label %right\n"
+      "choose:\n %first = icmp eq i32 %id, 0\n br i1 %first, label %a, label %b\n"
+      "a:\n %a0 = insertvalue " STAGE_PAIR " poison, <4 x float> <float -0.0,float 0x7FF8000020000000,float 0.0,float 4.0>, 0\n"
+      " %a1 = insertvalue " STAGE_PAIR " %a0, <4 x float> <float 5.0,float 6.0,float 7.0,float 8.0>, 1\n br label %inner\n"
+      "b:\n %b0 = insertvalue " STAGE_PAIR " undef, <4 x float> <float 9.0,float 10.0,float 11.0,float 12.0>, 0\n"
+      " %b1 = insertvalue " STAGE_PAIR " %b0, <4 x float> <float 13.0,float 14.0,float 15.0,float 16.0>, 1\n br label %inner\n"
+      "inner:\n %left = phi " STAGE_PAIR " [%b1,%b],[%a1,%a]\n br label %join\n"
+      "right:\n %r0 = insertvalue " STAGE_PAIR " undef, <4 x float> <float 17.0,float 18.0,float 19.0,float 20.0>, 0\n"
+      " %r1 = insertvalue " STAGE_PAIR " %r0, <4 x float> <float 21.0,float 22.0,float 23.0,float 24.0>, 1\n br label %join\n"
+      "join:\n %selected = phi " STAGE_PAIR " [%left,%inner],[%r1,%right]\n"
+      " %color = extractvalue " STAGE_PAIR " %selected, 1\n"
+      " %out = insertvalue " STAGE_PAIR " %selected, <4 x float> %color, 1\n"
+      " ret " STAGE_PAIR " %out\n}";
+   char *text = vertex_body(nested); LLVMMemoryBufferRef raw = bitcode(text); free(text);
+   for (unsigned id = 0; id < 3; id++) {
+      nir_shader *nir = translate(raw, "test_vertex", &o);
+      uint32_t position[4], color[4], unused[4] = {0};
+      for (unsigned lane = 0; lane < 4; lane++) {
+         position[lane] = bits((float)(id ? 1 + 8 * id + lane : lane));
+         color[lane] = bits((float)(5 + 8 * id + lane));
+      }
+      if (!id) {
+         position[0] = UINT32_C(0x80000000);
+         position[1] = UINT32_C(0x7fc00001);
+         position[2] = 0;
+         position[3] = bits(4.f);
+      }
+      specialize(nir, id, unused, 16, 0, 0, false);
+      outputs(nir, position, color);
+      ralloc_free(nir);
+   }
+   LLVMDisposeMemoryBuffer(raw);
+
+   /* Exercise scalar and every admitted vector width as internal leaves. */
+   const char *mixed = "{\nentry:\n %take = icmp eq i32 %id, 0\n br i1 %take, label %a, label %b\n"
+      "a:\n %a0 = insertvalue " STAGE_MIXED " undef, float 1.0, 0\n"
+      " %a1 = insertvalue " STAGE_MIXED " %a0, <2 x float> <float 2.0,float 3.0>, 1\n"
+      " %a2 = insertvalue " STAGE_MIXED " %a1, <3 x float> <float 4.0,float 5.0,float 6.0>, 2\n"
+      " %a3 = insertvalue " STAGE_MIXED " %a2, <4 x float> <float 7.0,float 8.0,float 9.0,float 10.0>, 3\n br label %join\n"
+      "b:\n %b0 = insertvalue " STAGE_MIXED " undef, float 11.0, 0\n"
+      " %b1 = insertvalue " STAGE_MIXED " %b0, <2 x float> <float 12.0,float 13.0>, 1\n"
+      " %b2 = insertvalue " STAGE_MIXED " %b1, <3 x float> <float 14.0,float 15.0,float 16.0>, 2\n"
+      " %b3 = insertvalue " STAGE_MIXED " %b2, <4 x float> <float 17.0,float 18.0,float 19.0,float 20.0>, 3\n br label %join\n"
+      "join:\n %selected = phi " STAGE_MIXED " [%a3,%a],[%b3,%b]\n"
+      " %s = extractvalue " STAGE_MIXED " %selected, 0\n"
+      " %v2 = extractvalue " STAGE_MIXED " %selected, 1\n %s2 = extractelement <2 x float> %v2, i32 1\n"
+      " %v3 = extractvalue " STAGE_MIXED " %selected, 2\n %s3 = extractelement <3 x float> %v3, i32 2\n"
+      " %v4 = extractvalue " STAGE_MIXED " %selected, 3\n %s4 = extractelement <4 x float> %v4, i32 3\n"
+      " %c0 = insertelement <4 x float> poison, float %s, i32 0\n"
+      " %c1 = insertelement <4 x float> %c0, float %s2, i32 1\n"
+      " %c2 = insertelement <4 x float> %c1, float %s3, i32 2\n"
+      " %color = insertelement <4 x float> %c2, float %s4, i32 3\n"
+      " %r0 = insertvalue " STAGE_PAIR " undef, <4 x float> <float 0.0,float 0.0,float 0.0,float 1.0>, 0\n"
+      " %r1 = insertvalue " STAGE_PAIR " %r0, <4 x float> %color, 1\n ret " STAGE_PAIR " %r1\n}";
+   text = vertex_body(mixed); raw = bitcode(text); free(text);
+   for (unsigned id = 0; id < 2; id++) {
+      nir_shader *nir = translate(raw, "test_vertex", &o);
+      uint32_t unused[4] = {0}, position[4] = {0, 0, 0, bits(1.f)};
+      uint32_t color[] = {bits((float)(1 + 10 * id)), bits((float)(3 + 10 * id)),
+         bits((float)(6 + 10 * id)), bits((float)(10 + 10 * id))};
+      specialize(nir, id, unused, 16, 0, 0, false);
+      outputs(nir, position, color);
+      ralloc_free(nir);
+   }
+   LLVMDisposeMemoryBuffer(raw);
+
+   /* Whole-aggregate a'=b,b'=a must publish every scalar/vector leaf in
+    * parallel. Zero through three trips alternate complete output pairs. */
+   const char *cycle = "{\nentry:\n %trips = and i32 %id, 3\n"
+      " %a0 = insertvalue " STAGE_PAIR " undef, <4 x float> <float 1.0,float 2.0,float 3.0,float 4.0>, 0\n"
+      " %a1 = insertvalue " STAGE_PAIR " %a0, <4 x float> <float 5.0,float 6.0,float 7.0,float 8.0>, 1\n"
+      " %b0 = insertvalue " STAGE_PAIR " undef, <4 x float> <float 9.0,float 10.0,float 11.0,float 12.0>, 0\n"
+      " %b1 = insertvalue " STAGE_PAIR " %b0, <4 x float> <float 13.0,float 14.0,float 15.0,float 16.0>, 1\n br label %header\n"
+      "header:\n %i = phi i32 [0,%entry],[%next,%latch]\n"
+      " %a = phi " STAGE_PAIR " [%a1,%entry],[%b,%latch]\n"
+      " %b = phi " STAGE_PAIR " [%b1,%entry],[%a,%latch]\n"
+      " %more = icmp ult i32 %i, %trips\n br i1 %more, label %latch, label %exit\n"
+      "latch:\n %next = add i32 %i, 1\n br label %header\n"
+      "exit:\n ret " STAGE_PAIR " %a\n}";
+   text = vertex_body(cycle); raw = bitcode(text); free(text);
+   static const nir_shader_compiler_options unroll = {.max_unroll_iterations = 16};
+   for (unsigned trips = 0; trips < 4; trips++) {
+      nir_shader *nir = translate(raw, "test_vertex", &o);
+      uint32_t position[4], color[4], unused[4] = {0};
+      for (unsigned lane = 0; lane < 4; lane++) {
+         position[lane] = bits((float)(1 + 8 * (trips & 1) + lane));
+         color[lane] = bits((float)(5 + 8 * (trips & 1) + lane));
+      }
+      specialize(nir, trips, unused, 16, 0, 0, false);
+      nir->options = &unroll;
+      bool progress;
+      do { progress = nir_opt_loop_unroll(nir); fold(nir); } while (progress);
+      outputs(nir, position, color); /* Retains the straight-line requirement. */
+      ralloc_free(nir);
+   }
+   LLVMDisposeMemoryBuffer(raw);
+
+   /* A load can split the actual incoming predecessor before its aggregate
+    * is assembled. Its exact view is zero outside the full sixteen bytes. */
+   const char *guarded = "{\nentry:\n %take = icmp eq i32 %id, 0\n br i1 %take, label %load, label %other\n"
+      "load:\n %p = getelementptr %Input, ptr addrspace(2) %buffer, i64 0, i32 0\n"
+      " %value = load <4 x float>, ptr addrspace(2) %p, align 16\n"
+      " %a0 = insertvalue " STAGE_PAIR " undef, <4 x float> %value, 0\n"
+      " %a1 = insertvalue " STAGE_PAIR " %a0, <4 x float> <float 5.0,float 6.0,float 7.0,float 8.0>, 1\n br label %join\n"
+      "other:\n %b0 = insertvalue " STAGE_PAIR " undef, <4 x float> <float 9.0,float 10.0,float 11.0,float 12.0>, 0\n"
+      " %b1 = insertvalue " STAGE_PAIR " %b0, <4 x float> <float 13.0,float 14.0,float 15.0,float 16.0>, 1\n br label %join\n"
+      "join:\n %selected = phi " STAGE_PAIR " [%a1,%load],[%b1,%other]\n ret " STAGE_PAIR " %selected\n}";
+   text = vertex_body(guarded); raw = bitcode(text); free(text);
+   const unsigned sizes[] = {0, 15, 16, 32};
+   const uint32_t source[8] = {0x80000000, 0x7fc00001, 0x3f000000, 0x3f800000, 0, 0, 0, 0};
+   for (unsigned id = 0; id < 2; id++) for (unsigned size = 0; size < ARRAY_SIZE(sizes); size++) {
+      nir_shader *nir = translate(raw, "test_vertex", &o);
+      uint32_t position[4], color[4];
+      for (unsigned lane = 0; lane < 4; lane++) {
+         position[lane] = id ? bits((float)(9 + lane)) : sizes[size] >= 16 ? source[lane] : 0;
+         color[lane] = bits((float)(5 + 8 * id + lane));
+      }
+      specialize(nir, id, source, sizes[size], 0, 0, false);
+      outputs(nir, position, color);
+      ralloc_free(nir);
+   }
+   LLVMDisposeMemoryBuffer(raw);
+
+   /* Keep missing/poison leaves and unsupported aggregate shapes explicit. */
+   const char *unreachable = "{\nentry:\n br label %live\n"
+      "dead:\n br label %join\n"
+      "live:\n %a0 = insertvalue " STAGE_PAIR " undef, <4 x float> <float 1.0,float 2.0,float 3.0,float 4.0>, 0\n"
+      " %a1 = insertvalue " STAGE_PAIR " %a0, <4 x float> <float 5.0,float 6.0,float 7.0,float 8.0>, 1\n br label %join\n"
+      "join:\n %selected = phi " STAGE_PAIR " [poison,%dead],[%a1,%live]\n ret " STAGE_PAIR " %selected\n}";
+   text = vertex_body(unreachable); raw = bitcode(text); free(text);
+   nir_shader *live = translate(raw, "test_vertex", &o);
+   uint32_t unused[4] = {0}, live_position[4], live_color[4];
+   for (unsigned lane = 0; lane < 4; lane++) {
+      live_position[lane] = bits((float)(1 + lane));
+      live_color[lane] = bits((float)(5 + lane));
+   }
+   specialize(live, 0, unused, 16, 0, 0, false);
+   outputs(live, live_position, live_color);
+   ralloc_free(live); LLVMDisposeMemoryBuffer(raw);
+   const char *partial = "{\nentry:\n %take = icmp eq i32 %id, 0\n br i1 %take, label %a, label %b\n"
+      "a:\n %a0 = insertvalue " STAGE_PAIR " undef, <4 x float> <float 1.0,float 2.0,float 3.0,float 4.0>, 0\n br label %join\n"
+      "b:\n %b0 = insertvalue " STAGE_PAIR " undef, <4 x float> <float 5.0,float 6.0,float 7.0,float 8.0>, 0\n"
+      " %b1 = insertvalue " STAGE_PAIR " %b0, <4 x float> <float 9.0,float 10.0,float 11.0,float 12.0>, 1\n br label %join\n"
+      "join:\n %selected = phi " STAGE_PAIR " [%a0,%a],[%b1,%b]\n ret " STAGE_PAIR " %selected\n}";
+   text = vertex_body(partial);
+   refusal(text, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_INSTRUCTION);
+   free(text);
+   text = vertex_body(nested);
+   char *bad = change(text, "float -0.0,float 0x7FF8000020000000,float 0.0,float 4.0",
+      "float -0.0,float poison,float 0.0,float 4.0");
+   refusal(bad, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_INSTRUCTION);
+   free(bad); free(text);
+   const char *unsupported[] = {"{<4 x float>,<4 x float>}", "<{i32,<4 x float>}>", "<{<{float}>,<4 x float>}>"};
+   for (unsigned i = 0; i < ARRAY_SIZE(unsupported); i++) {
+      char body[1024];
+      snprintf(body, sizeof(body), "{\nentry:\n %%take = icmp eq i32 %%id, 0\n br i1 %%take, label %%a, label %%b\n"
+         "a:\n br label %%join\nb:\n br label %%join\njoin:\n %%bad = phi %s [undef,%%a],[undef,%%b]\n ret " STAGE_PAIR " undef\n}", unsupported[i]);
+      text = vertex_body(body);
+      refusal(text, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_TYPE);
+      free(text);
+   }
+   const char *constant = "{\nentry:\n br label %join\njoin:\n %bad = phi " STAGE_PAIR " [zeroinitializer,%entry]\n ret " STAGE_PAIR " %bad\n}";
+   text = vertex_body(constant);
+   refusal(text, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_TYPE);
+   free(text);
+   puts("Packed aggregate PHIs: nested edges, cyclic swaps, exact FP32 bits, guarded predecessors and explicit missing/unsupported leaf refusals");
+}
+#undef STAGE_PAIR
+#undef STAGE_MIXED
 
 static void
 arithmetic_and_lane_semantics(void)
@@ -635,7 +900,9 @@ int main(int argc,char **argv)
    stage_binding_prelude_contract();
    unused_stage_buffer_semantics();
    primitive_layout_semantics();
+   output_oracle_controls();
    arithmetic_and_lane_semantics();
+   aggregate_phi_semantics();
    if(argc==5 && !strcmp(argv[1],"--input") && !strcmp(argv[3],"--texture")) {
       b=file(argv[2]);run(b,"vertexShader","fragmentShader",true);LLVMDisposeMemoryBuffer(b);
       b=file(argv[4]);struct stela_air_error e;
