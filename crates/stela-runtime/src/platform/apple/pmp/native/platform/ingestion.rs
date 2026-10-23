@@ -91,6 +91,9 @@ pub enum Call {
     ControlTail {
         ordinal: Ordinal,
         context: CounterContext,
+        /// Actual retained P294 activation from this ingestion operation.
+        /// P10 activity in `context` is a distinct source operand.
+        activation: u32,
         descriptors: Vec<Auxiliary>,
     },
     /// Actual source-derived coefficient rows after101c2e4 initialization/update.
@@ -941,6 +944,7 @@ impl<B: Backend> Owner<B> {
                     if self.config.auxiliary {
                         b.ops.push_front(Op::Call(Call::ControlTail {
                             ordinal: b.ordinal,
+                            activation: b.activation,
                             context: CounterContext {
                                 buffer_index: self.products().0,
                                 state_index: self.products().1,
@@ -1479,6 +1483,27 @@ mod tests {
         assert_eq!(o.products().0, 1);
         assert_eq!(o.backend.calls.len(), n + 1);
         assert!(request.same_operation(&o.backend.calls[n].0));
+    }
+    #[test]
+    fn auxiliary_tail_keeps_activation_distinct_from_activity() {
+        let (mut frames, local, mut latch) = setup();
+        let d = descriptor(4);
+        let receipt = copied(&mut frames, &local, 4, 0, &mut latch);
+        let mut backend = TestBackend::new();
+        backend.refuse_tail = true;
+        let mut o = Owner::initialized_software(Configuration::t8112(&d).unwrap(), backend);
+        o.begin_capture(&frames, receipt, &d, context(), 7).unwrap();
+        assert!(matches!(
+            run(&mut o, &frames, &mut latch),
+            Err(Error::Refused(_))
+        ));
+        let Call::ControlTail {
+            context, activation, ..
+        } = &o.backend.calls.last().unwrap().1
+        else {
+            panic!("the actual auxiliary tail was not reached");
+        };
+        assert_eq!((*activation, context.activity), (7, 1));
     }
     #[test]
     fn retired_callback_refusal_never_replays_and_stale_receipts_never_read() {
