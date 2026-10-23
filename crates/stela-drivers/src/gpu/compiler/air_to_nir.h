@@ -121,11 +121,14 @@ nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
  * Failure returns NULL, destroys partial NIR, and reports an explicit error.
  * The caller retains input bytes/digest/build ID and records the exact selected
  * target, workgroup specialization and argument mapping alongside vendor output.
- * Structured diamonds/triangles and pre-tested natural loops retain exact
- * integer/FP32 scalar/vector PHIs. Loops require one unconditional preheader,
- * one distinct unconditional latch and one header exit; iterations are uncapped.
- * One final return, <=128 blocks/header-or-merge PHIs and <=32 nested constructs.
- * Nested/multi-latch/body-exit loops, pointer PHIs and general CFGs are refused.
+ * Reachable integer/FP32 scalar/vector CFGs use the original LLVM switch
+ * legalization and Mesa goto-to-if structurization, including numeric PHIs,
+ * early returns, nested/multiple-latch loops and irreducible entries. Original
+ * and legalized inputs share the caller's instruction budget; total switch
+ * cases also obey that budget before legalization. Production has no iteration cap. Pointer/aggregate PHIs and reachable unsupported terminators
+ * are refused explicitly. Unreachable blocks consume the budget but emit no
+ * effects. These source paths await semantic/vendor qualification; no family
+ * capability follows from accepting a control-flow shape.
  * Qualified AS3 storage is returned as explicit shared32 NIR with the original
  * aligned layout in info.shared_size. Dynamic view sizes/alignment and target
  * byte limits are caller specializations, never inferred GPU capabilities.

@@ -172,6 +172,94 @@ conditional_accesses(void)
 }
 
 static void
+loop_guarded_phis(void)
+{
+   const char *body =
+      "entry:\n%rounds = add i32 %tid, 1\nbr label %header\n"
+      "header:\n%i = phi i32 [0, %entry], [%next, %latch]\n"
+      "%value = phi i32 [11, %entry], [%loaded, %latch]\n"
+      "%more = icmp ult i32 %i, %rounds\nbr i1 %more, label %body, label %exit\n"
+      "body:\n%p = getelementptr i32, ptr addrspace(1) %out, i32 %i\n"
+      "store i32 %value, ptr addrspace(1) %p, align 4\nbr label %latch\n"
+      "latch:\n%high = getelementptr i8, ptr addrspace(1) %out, i64 4294967300\n"
+      "%loaded = load i32, ptr addrspace(1) %high, align 1\n"
+      "%next = add i32 %i, 1\nbr label %header\n"
+      "exit:\n%result = getelementptr i32, ptr addrspace(1) %out, i32 3\n"
+      "store i32 %value, ptr addrspace(1) %result, align 4\nret void\n";
+   const uint32_t sizes[] = {0, 4, 14, 16, 64};
+   static const nir_shader_compiler_options unroll = {.max_unroll_iterations = 16};
+   for (unsigned tid = 0; tid < 3; tid++) {
+      for (unsigned size = 0; size < ARRAY_SIZE(sizes); size++) {
+         nir_shader *nir = translate(body, 2);
+         nir_foreach_function_impl(impl, nir) {
+            nir_foreach_block(block, impl) {
+               nir_foreach_instr_safe(instr, block) {
+                  if (instr->type != nir_instr_type_intrinsic)
+                     continue;
+                  nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+                  if (in->intrinsic != nir_intrinsic_load_workgroup_id &&
+                      in->intrinsic != nir_intrinsic_load_local_invocation_id)
+                     continue;
+                  nir_builder b = nir_builder_at(nir_before_instr(instr));
+                  nir_def_rewrite_uses(&in->def, nir_imm_ivec3(&b,
+                     in->intrinsic == nir_intrinsic_load_workgroup_id ? 0 : tid, 0, 0));
+                  nir_instr_remove(instr);
+               }
+            }
+         }
+         set_size(nir, sizes[size]);
+         nir->options = &unroll;
+         bool progress;
+         do {
+            progress = nir_opt_loop_unroll(nir);
+            progress |= nir_opt_constant_folding(nir);
+            progress |= nir_opt_dead_cf(nir);
+            progress |= nir_opt_remove_phis(nir);
+            progress |= nir_opt_copy_prop(nir);
+            progress |= nir_opt_dce(nir);
+         } while (progress);
+         nir_validate_shader(nir, "AIR guarded backedge PHIs and exact effects");
+         uint32_t offsets[4], values[4];
+         unsigned expected = 0, actual = 0;
+         for (unsigned iteration = 0; iteration <= tid; iteration++) {
+            if (sizes[size] >= 4 * iteration + 4) {
+               offsets[expected] = 4 * iteration;
+               values[expected++] = iteration ? 0 : 11;
+            }
+         }
+         if (sizes[size] >= 16) {
+            offsets[expected] = 12;
+            values[expected++] = 0;
+         }
+         nir_foreach_function_impl(impl, nir) {
+            nir_foreach_cf_node(node, &impl->body)
+               CHECK(node->type != nir_cf_node_loop);
+            nir_foreach_block(block, impl) {
+               CHECK(nir_block_get_following_if(block) == NULL);
+               nir_foreach_instr(instr, block) {
+                  if (instr->type != nir_instr_type_intrinsic)
+                     continue;
+                  nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+                  CHECK(in->intrinsic != nir_intrinsic_load_ssbo &&
+                        in->intrinsic != nir_intrinsic_load_global &&
+                        in->intrinsic != nir_intrinsic_store_global);
+                  if (in->intrinsic != nir_intrinsic_store_ssbo)
+                     continue;
+                  CHECK(actual < expected);
+                  CHECK(nir_src_is_const(in->src[1]) && nir_src_as_uint(in->src[1]) == 2);
+                  CHECK(nir_src_is_const(in->src[2]) && nir_src_as_uint(in->src[2]) == offsets[actual]);
+                  CHECK(nir_src_is_const(in->src[0]) && nir_src_as_uint(in->src[0]) == values[actual]);
+                  actual++;
+               }
+            }
+         }
+         CHECK(actual == expected);
+         ralloc_free(nir);
+      }
+   }
+}
+
+static void
 view_validation(void)
 {
    struct stela_air_ssbo_view view = {
@@ -284,6 +372,7 @@ main(void)
    view_validation();
    binding_refusals();
    conditional_accesses();
+   loop_guarded_phis();
    store_case(0, 64, true);
    store_case(60, 64, true);
    store_case(61, 64, false);

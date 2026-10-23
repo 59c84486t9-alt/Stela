@@ -546,84 +546,192 @@ loop_semantics(void)
    }
 }
 
+/* Each expected value/effect is derived from the LLVM fixture, independently
+ * of the frontend's CFG construction. Original NIR optimization specializes
+ * only test inputs; no production trip bound or substitute interpreter exists. */
 static void
-loop_refusals(void)
+cfg_semantics(void)
 {
-   expect_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %header, label %body\n"
-      "header:\nbr i1 %c, label %body, label %exit\nbody:\nbr label %header\nexit:\nret void\n",
-      "", 100, STELA_AIR_CONTROL_FLOW); /* Irreducible side entry. */
-   expect_refusal("entry:\nbr label %header\nheader:\n%c = icmp eq i32 %tid, 0\n"
-      "br i1 %c, label %body, label %exit\nbody:\nbr i1 %c, label %latch, label %exit\n"
-      "latch:\nbr label %header\nexit:\nret void\n", "", 100, STELA_AIR_CONTROL_FLOW);
-   expect_refusal("entry:\nbr label %header\nheader:\n%c = icmp eq i32 %tid, 0\n"
-      "br i1 %c, label %body, label %exit\nbody:\nbr i1 %c, label %l1, label %l2\n"
-      "l1:\nbr label %header\nl2:\nbr label %header\nexit:\nret void\n",
-      "", 100, STELA_AIR_CONTROL_FLOW);
-   expect_refusal("entry:\nbr label %h1\nh1:\n%c = icmp eq i32 %tid, 0\n"
-      "br i1 %c, label %pre, label %exit\npre:\nbr label %h2\n"
-      "h2:\nbr i1 %c, label %l2, label %l1\nl2:\nbr label %h2\n"
-      "l1:\nbr label %h1\nexit:\nret void\n", "", 100, STELA_AIR_CONTROL_FLOW);
+   const char *switch_body =
+      "entry:\nswitch i32 %tid, label %other [i32 0, label %a i32 5, label %b i32 10, label %c i32 15, label %d]\n"
+      "a:\nbr label %join\nb:\nbr label %join\nc:\nbr label %join\nd:\nbr label %join\nother:\nbr label %join\n"
+      "join:\n%v = phi i32 [11, %a], [22, %b], [33, %c], [44, %d], [55, %other]\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\nret void\n";
+   const char *early =
+      "entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %right\n"
+      "left:\nstore i32 7, ptr addrspace(1) %out, align 4\nret void\n"
+      "right:\n%p = getelementptr i32, ptr addrspace(1) %out, i32 1\n"
+      "store i32 9, ptr addrspace(1) %p, align 4\nret void\n";
+   const char *unordered =
+      "entry:\nbr label %def\nuse:\n%v = add i32 %base, 5\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\nret void\n"
+      "def:\n%base = add i32 %tid, 10\nbr label %use\n";
+   const char *dead =
+      "entry:\nbr label %live\ndead:\n%unused = udiv i32 %tid, 7\nbr label %join\n"
+      "live:\n%v = add i32 %tid, 11\nbr label %join\n"
+      "join:\n%p = phi i32 [%unused, %dead], [%v, %live]\n"
+      "store i32 %p, ptr addrspace(1) %out, align 4\nret void\n";
+   const char *duplicate =
+      "entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %same, label %same\n"
+      "same:\n%p = phi i32 [31, %entry], [31, %entry]\n"
+      "store i32 %p, ptr addrspace(1) %out, align 4\nret void\n";
+   const char *overlap =
+      "entry:\n%c = icmp ult i32 %tid, 2\nbr i1 %c, label %a, label %b\n"
+      "a:\n%c2 = icmp eq i32 %tid, 0\nbr i1 %c2, label %cblock, label %d\n"
+      "b:\nbr label %d\ncblock:\nbr label %join\nd:\nbr label %join\n"
+      "join:\n%p = phi i32 [17, %cblock], [29, %d]\n"
+      "store i32 %p, ptr addrspace(1) %out, align 4\nret void\n";
+   const uint32_t tids[] = {0, 1, 2, 5, 10, 15, UINT32_MAX};
+   for (unsigned i = 0; i < ARRAY_SIZE(tids); i++) {
+      uint32_t tid = tids[i];
+      const struct { const char *body; uint64_t address; uint32_t value; } cases[] = {
+         {switch_body, 0x100000, tid == 0 ? 11 : tid == 5 ? 22 : tid == 10 ? 33 : tid == 15 ? 44 : 55},
+         {early, tid ? 0x100004 : 0x100000, tid ? 9 : 7},
+         {unordered, 0x100000, tid + 15}, {dead, 0x100000, tid + 11},
+         {duplicate, 0x100000, 31}, {overlap, 0x100000, tid ? 29 : 17},
+      };
+      for (unsigned j = 0; j < ARRAY_SIZE(cases); j++) {
+         nir_shader *nir = translate_body(cases[j].body);
+         specialize_invocation(nir, tid);
+         check_stores(nir, &cases[j].address, &cases[j].value, 1);
+         ralloc_free(nir);
+      }
+   }
+   /* Nine original instructions fit, but switch legalization needs additional
+    * compares/branches. The caller's budget also bounds that expansion. */
+   expect_refusal(switch_body, "", 9, STELA_AIR_LIMIT);
+
+   /* Many cases targeting one block can legalize to a single branch, but the
+    * source work must still fit the explicit budget before invoking LLVM. */
+   expect_refusal("switch i32 %tid, label %same [i32 0, label %same i32 1, label %same i32 2, label %same]\n"
+      "same:\nret void\n", "", 2, STELA_AIR_LIMIT);
+
+   const char *multi_latch =
+      "entry:\n%trips = and i32 %tid, 3\nbr label %header\n"
+      "header:\n%i = phi i32 [0, %entry], [%il, %left], [%ir, %right]\n"
+      "%sum = phi i32 [0, %entry], [%sl, %left], [%sr, %right]\n"
+      "%more = icmp ult i32 %i, %trips\nbr i1 %more, label %body, label %exit\n"
+      "body:\n%parity = and i32 %i, 1\n%even = icmp eq i32 %parity, 0\n"
+      "br i1 %even, label %left, label %right\n"
+      "left:\n%il = add i32 %i, 1\n%sl = add i32 %sum, 3\nbr label %header\n"
+      "right:\n%ir = add i32 %i, 1\n%sr = add i32 %sum, 7\nbr label %header\n"
+      "exit:\nstore i32 %sum, ptr addrspace(1) %out, align 4\nret void\n";
+   const char *nested =
+      "entry:\n%trips = and i32 %tid, 3\nbr label %outer\n"
+      "outer:\n%i = phi i32 [0, %entry], [%inext, %inner_exit]\n"
+      "%acc = phi i32 [0, %entry], [%anext, %inner_exit]\n"
+      "%more = icmp ult i32 %i, %trips\nbr i1 %more, label %pre, label %exit\n"
+      "pre:\nbr label %inner\n"
+      "inner:\n%j = phi i32 [0, %pre], [%jnext, %body]\n"
+      "%sum = phi i32 [%acc, %pre], [%snext, %body]\n"
+      "%inside = icmp ult i32 %j, 2\nbr i1 %inside, label %body, label %inner_exit\n"
+      "body:\n%base = mul i32 %i, 10\n%v = add i32 %base, %j\n"
+      "%snext = add i32 %sum, %v\n%jnext = add i32 %j, 1\nbr label %inner\n"
+      "inner_exit:\n%anext = add i32 %sum, 1\n%inext = add i32 %i, 1\nbr label %outer\n"
+      "exit:\nstore i32 %acc, ptr addrspace(1) %out, align 4\nret void\n";
+   const char *body_exit =
+      "entry:\n%stop = and i32 %tid, 3\nbr label %header\n"
+      "header:\n%i = phi i32 [0, %entry], [%next, %latch]\n"
+      "%more = icmp ult i32 %i, 6\nbr i1 %more, label %body, label %exit\n"
+      "body:\n%done = icmp eq i32 %i, %stop\nbr i1 %done, label %early, label %latch\n"
+      "latch:\n%next = add i32 %i, 1\nbr label %header\n"
+      "early:\nstore i32 %i, ptr addrspace(1) %out, align 4\nret void\n"
+      "exit:\nstore i32 99, ptr addrspace(1) %out, align 4\nret void\n";
+   for (unsigned tid = 0; tid < 4; tid++) {
+      uint32_t nested_sum = 0, latch_sum = 0;
+      for (unsigned i = 0; i < tid; i++) {
+         latch_sum += i & 1 ? 7 : 3;
+         for (unsigned j = 0; j < 2; j++)
+            nested_sum += 10 * i + j;
+         nested_sum++;
+      }
+      const struct { const char *body; uint32_t value; } cases[] = {
+         {multi_latch, latch_sum}, {nested, nested_sum}, {body_exit, tid},
+      };
+      for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
+         nir_shader *nir = translate_body(cases[i].body);
+         specialize_loop(nir, tid);
+         const uint64_t address = 0x100000;
+         check_stores(nir, &address, &cases[i].value, 1);
+         ralloc_free(nir);
+      }
+   }
+   const char *irreducible =
+      "entry:\n%odd = and i32 %tid, 1\n%c = icmp eq i32 %odd, 0\n"
+      "br i1 %c, label %a, label %b\n"
+      "a:\n%av = phi i32 [0, %entry], [%bn, %b]\n%an = add i32 %av, 1\n"
+      "store i32 %an, ptr addrspace(1) %out, align 4\n"
+      "%amore = icmp ult i32 %an, 3\nbr i1 %amore, label %b, label %exit\n"
+      "b:\n%bv = phi i32 [0, %entry], [%an, %a]\n%bn = add i32 %bv, 1\n"
+      "%tag = add i32 %bn, 100\n%p = getelementptr i32, ptr addrspace(1) %out, i32 1\n"
+      "store i32 %tag, ptr addrspace(1) %p, align 4\n"
+      "%bmore = icmp ult i32 %bn, 3\nbr i1 %bmore, label %a, label %exit\n"
+      "exit:\n%result = phi i32 [%an, %a], [%bn, %b]\n"
+      "%r = getelementptr i32, ptr addrspace(1) %out, i32 2\n"
+      "store i32 %result, ptr addrspace(1) %r, align 4\nret void\n";
+   for (unsigned tid = 0; tid < 2; tid++) {
+      nir_shader *nir = translate_body(irreducible);
+      specialize_loop(nir, tid);
+      const uint64_t addresses[2][4] = {
+         {0x100000, 0x100004, 0x100000, 0x100008},
+         {0x100004, 0x100000, 0x100004, 0x100008},
+      };
+      const uint32_t values[2][4] = {{1, 102, 3, 3}, {101, 2, 103, 3}};
+      check_stores(nir, addresses[tid], values[tid], 4);
+      ralloc_free(nir);
+   }
+}
+
+static void
+cfg_limits_and_refusals(void)
+{
    expect_refusal("entry:\nbr label %header\nheader:\n"
       "%p = phi ptr addrspace(1) [%out, %entry], [%p, %latch]\n"
       "%c = icmp eq i32 %tid, 0\nbr i1 %c, label %latch, label %exit\n"
       "latch:\nbr label %header\nexit:\nret void\n", "", 100, STELA_AIR_TYPE);
-   expect_refusal("entry:\nbr label %header\nheader:\nbr label %body\n"
-      "body:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %latch, label %exit\n"
-      "latch:\nbr label %header\nexit:\nret void\n", "", 100, STELA_AIR_CONTROL_FLOW);
-   expect_refusal(loop_body, "", 20, STELA_AIR_LIMIT);
-   expect_refusal("entry:\nbr label %header\nheader:\n"
-      "%i = phi i32 [0, %entry], [1, %exit]\n"
-      "%c = icmp eq i32 %tid, 0\nbr i1 %c, label %latch, label %exit\n"
-      "latch:\nbr label %header\nexit:\nret void\n", "", 100, STELA_AIR_VERIFY);
-}
-
-static void
-conditional_refusals(void)
-{
-   expect_refusal("entry:\nbr label %loop\nloop:\nbr label %loop\n", "", 100, STELA_AIR_CONTROL_FLOW);
-   expect_refusal("entry:\nbr label %loop\nloop:\n%c = icmp eq i32 %tid, 0\n"
-      "br i1 %c, label %loop, label %exit\nexit:\nret void\n", "", 100, STELA_AIR_CONTROL_FLOW);
-   expect_refusal("ret void\ndead:\nbr label %dead\n", "", 100, STELA_AIR_CONTROL_FLOW);
-   expect_refusal("%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %right\n"
-      "left:\nret void\nright:\nret void\n", "", 100, STELA_AIR_CONTROL_FLOW);
-   expect_refusal("switch i32 %tid, label %exit [i32 0, label %other]\n"
-      "other:\nbr label %exit\nexit:\nret void\n", "", 100, STELA_AIR_CONTROL_FLOW);
-   expect_refusal("unreachable\n", "", 100, STELA_AIR_CONTROL_FLOW);
-   expect_refusal("%c = icmp eq i32 %tid, 0\nbr i1 %c, label %same, label %same\n"
-      "same:\nret void\n", "", 100, STELA_AIR_CONTROL_FLOW);
-   expect_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %join\n"
-      "left:\nbr i1 %c, label %inner, label %join\ninner:\nbr label %join\njoin:\nret void\n",
-      "", 100, STELA_AIR_CONTROL_FLOW);
-   expect_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %a, label %b\n"
-      "a:\nbr i1 %c, label %cblock, label %d\nb:\nbr label %d\n"
-      "cblock:\nbr label %join\nd:\nbr label %join\njoin:\nret void\n",
-      "", 100, STELA_AIR_CONTROL_FLOW);
    expect_refusal("%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %right\n"
       "left:\nbr label %join\nright:\nbr label %join\n"
       "join:\n%p = phi ptr addrspace(1) [%out, %left], [%out, %right]\nret void\n",
       "", 100, STELA_AIR_TYPE);
-   /* Malformed SSA remains an LLVM verifier refusal, not a guessed PHI edge. */
+   expect_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %right\n"
+      "left:\nbr label %join\nright:\nbr label %join\n"
+      "join:\n%p = phi {i32, i32} [{i32 1, i32 2}, %left], [{i32 3, i32 4}, %right]\nret void\n",
+      "", 100, STELA_AIR_TYPE);
+   expect_refusal("br i1 poison, label %same, label %same\nsame:\nret void\n",
+      "", 100, STELA_AIR_INSTRUCTION);
+   expect_refusal("unreachable\n", "", 100, STELA_AIR_CONTROL_FLOW);
+   expect_refusal(loop_body, "", 20, STELA_AIR_LIMIT);
+   expect_refusal(conditional_body, "", 20, STELA_AIR_LIMIT);
+   /* Malformed SSA remains an LLVM verifier refusal. Duplicate CFG edges are
+    * allowed only when their PHI values agree, never guessed or overwritten. */
    expect_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %right\n"
       "left:\nbr label %join\nright:\nbr label %join\n"
       "join:\n%p = phi i32 [1, %left], [2, %entry]\nret void\n", "", 100, STELA_AIR_VERIFY);
-   expect_refusal(conditional_body, "", 20, STELA_AIR_LIMIT);
+   expect_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %same, label %same\n"
+      "same:\n%p = phi i32 [31, %entry], [32, %entry]\nret void\n", "", 100, STELA_AIR_VERIFY);
+   expect_refusal("entry:\nbr label %header\nheader:\n"
+      "%i = phi i32 [0, %entry], [1, %exit]\n"
+      "%c = icmp eq i32 %tid, 0\nbr i1 %c, label %latch, label %exit\n"
+      "latch:\nbr label %header\nexit:\nret void\n", "", 100, STELA_AIR_VERIFY);
 
    char body[32768];
    size_t used;
+   /* Both sides of each removed pattern limit now have effects to verify. */
    for (unsigned blocks = 128; blocks <= 129; blocks++) {
       used = (size_t)snprintf(body, sizeof(body), "entry:\nbr label %%b0\n");
       for (unsigned i = 0; i < blocks - 2; i++)
          used += (size_t)snprintf(body + used, sizeof(body) - used,
             "b%u:\nbr label %%b%u\n", i, i + 1);
-      snprintf(body + used, sizeof(body) - used, "b%u:\nret void\n", blocks - 2);
-      if (blocks == 129) {
-         expect_refusal(body, "", 1000, STELA_AIR_LIMIT);
-      } else {
-         nir_shader *nir = translate_body(body);
-         ralloc_free(nir);
-      }
+      snprintf(body + used, sizeof(body) - used,
+         "b%u:\nstore i32 41, ptr addrspace(1) %%out, align 4\nret void\n", blocks - 2);
+      nir_shader *nir = translate_body(body);
+      specialize_invocation(nir, 0);
+      const uint64_t address = 0x100000;
+      const uint32_t value = 41;
+      check_stores(nir, &address, &value, 1);
+      ralloc_free(nir);
+      expect_refusal(body, "", blocks, STELA_AIR_LIMIT); /* Store adds one. */
    }
-
    for (unsigned phis = 128; phis <= 129; phis++) {
       used = (size_t)snprintf(body, sizeof(body),
          "entry:\n%%c = icmp eq i32 %%tid, 0\nbr i1 %%c, label %%left, label %%right\n"
@@ -633,21 +741,15 @@ conditional_refusals(void)
             "%%p%u = phi i32 [1, %%left], [2, %%right]\n", i);
       snprintf(body + used, sizeof(body) - used,
          "store i32 %%p%u, ptr addrspace(1) %%out, align 4\nret void\n", phis - 1);
-      if (phis == 129) {
-         expect_refusal(body, "", 1000, STELA_AIR_LIMIT);
-      } else {
-         for (unsigned tid = 0; tid < 2; tid++) {
-            nir_shader *nir = translate_body(body);
-            specialize_invocation(nir, tid);
-            const uint64_t address = 0x100000;
-            const uint32_t value = tid ? 2 : 1;
-            check_stores(nir, &address, &value, 1);
-            ralloc_free(nir);
-         }
+      for (unsigned tid = 0; tid < 2; tid++) {
+         nir_shader *nir = translate_body(body);
+         specialize_invocation(nir, tid);
+         const uint64_t address = 0x100000;
+         const uint32_t value = tid ? 2 : 1;
+         check_stores(nir, &address, &value, 1);
+         ralloc_free(nir);
       }
    }
-
-   /* Test both sides of the nesting limit with valid separate two-edge joins. */
    for (unsigned depth = 32; depth <= 33; depth++) {
       used = (size_t)snprintf(body, sizeof(body), "entry:\nbr label %%if0\n");
       for (unsigned i = 0; i < depth; i++)
@@ -662,17 +764,37 @@ conditional_refusals(void)
          if (i)
             used += (size_t)snprintf(body + used, sizeof(body) - used, "br label %%join%u\n", i - 1);
          else
-            used += (size_t)snprintf(body + used, sizeof(body) - used, "ret void\n");
+            used += (size_t)snprintf(body + used, sizeof(body) - used,
+               "store i32 43, ptr addrspace(1) %%out, align 4\nret void\n");
       }
-      if (depth == 33) {
-         expect_refusal(body, "", 1000, STELA_AIR_LIMIT);
-      } else {
-         nir_shader *nir = translate_body(body);
-         specialize_invocation(nir, 0);
-         check_stores(nir, NULL, NULL, 0);
-         ralloc_free(nir);
+      nir_shader *nir = translate_body(body);
+      specialize_invocation(nir, 0);
+      const uint64_t address = 0x100000;
+      const uint32_t value = 43;
+      check_stores(nir, &address, &value, 1);
+      ralloc_free(nir);
+   }
+   /* A dead cycle has no effects; a reachable nonterminating cycle must remain
+    * a real loop, rather than an injected return or bounded production loop. */
+   nir_shader *nir = translate_body("ret void\ndead:\nbr label %dead\n");
+   specialize_invocation(nir, 0);
+   check_stores(nir, NULL, NULL, 0);
+   ralloc_free(nir);
+   nir = translate_body("entry:\nbr label %loop\nloop:\n"
+      "store i32 5, ptr addrspace(1) %out, align 4\nbr label %loop\n");
+   unsigned loops = 0, stores = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_cf_node(node, &impl->body)
+         loops += node->type == nir_cf_node_loop;
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic)
+               stores += nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_store_global;
+         }
       }
    }
+   CHECK(loops == 1 && stores == 1);
+   ralloc_free(nir);
 }
 
 static char *
@@ -1580,8 +1702,8 @@ tests(void)
    constant_semantics();
    conditional_semantics();
    loop_semantics();
-   loop_refusals();
-   conditional_refusals();
+   cfg_semantics();
+   cfg_limits_and_refusals();
    floating_semantics();
    floating_loop_semantics();
    floating_backend_options();

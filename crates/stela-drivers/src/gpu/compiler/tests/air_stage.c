@@ -427,6 +427,22 @@ arithmetic_and_lane_semantics(void)
       outputs(nir, NULL, result); ralloc_free(nir);
    }
    LLVMDisposeMemoryBuffer(raw);
+   /* Both real return sites publish only their own render outputs. */
+   const char *early = "{\n %a = extractelement <4 x float> %color, i32 0\n"
+      " %condition = fcmp oeq float %a, 1.0\n br i1 %condition, label %yes, label %no\n"
+      "yes:\n ret <4 x float> <float 7.0,float 8.0,float 9.0,float 10.0>\n"
+      "no:\n ret <4 x float> <float 11.0,float 12.0,float 13.0,float 14.0>\n}";
+   text = fragment_body(early, ""); raw = bitcode(text); free(text);
+   for (unsigned arm = 0; arm < 2; arm++) {
+      nir_shader *nir = translate(raw, "test_fragment", &o);
+      uint32_t input[4] = {arm ? bits(0.f) : bits(1.f),0,0,0};
+      specialize(nir, 0, input, 16, 0, 0, true);
+      uint32_t result[4];
+      for (unsigned lane = 0; lane < 4; lane++)
+         result[lane] = bits((arm ? 11.f : 7.f) + lane);
+      outputs(nir, NULL, result); ralloc_free(nir);
+   }
+   LLVMDisposeMemoryBuffer(raw);
    text = fragment_body("{\n %bad = shufflevector <4 x float> poison, <4 x float> %color, <4 x i32> <i32 0,i32 5,i32 6,i32 7>\n ret <4 x float> %bad\n}", "");
    refusal(text, "test_fragment", STELA_AIR_FRAGMENT, &o, STELA_AIR_INSTRUCTION); free(text);
    puts("Stage FP32 fastdivision rounding/FTZ/zero and uint2/3/4conversion boundaries; both conditional PHI paths, masked/escaping poison passed");
