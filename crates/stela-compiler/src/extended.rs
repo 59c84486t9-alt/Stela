@@ -67,7 +67,7 @@ fn emit_decoded(
                 "checked scalar service was not requested by scalable profile".into(),
             ));
         }
-        Decoded::MemoryPair(_) | Decoded::MemoryFixed(_) | Decoded::PrefetchHint(_) => {
+        Decoded::MemoryPair(_) | Decoded::MemoryFixed(_) | Decoded::PrefetchHint => {
             return Err(CompileError(
                 "checked fixed-width memory service was not requested by scalable profile".into(),
             ));

@@ -31,7 +31,7 @@ pub(crate) enum Decoded {
     MemoryFixed(crate::x86_64::CheckedFixedMemoryOperand),
     /// The architecturally permitted no-action hint, without lending an
     /// untranslated guest address to the host's cache or memory system.
-    PrefetchHint(crate::context::memory::address::AddressCheckRequirements),
+    PrefetchHint,
     Ordinary(Instruction),
     Address(address::Operand),
     IntegerDot(dot::Operand),
@@ -70,7 +70,7 @@ pub(crate) enum Decoded {
 impl Decoded {
     pub(super) fn execution_access_requirements(&self) -> ScalableAccessRequirements {
         match self {
-            Self::PrefetchHint(_) => ScalableAccessRequirements::Known(Box::new([])),
+            Self::PrefetchHint => ScalableAccessRequirements::Known(Box::new([])),
             Self::Exclusive(_) | Self::SharedMemory(_) => ScalableAccessRequirements::Unqualified,
             Self::MemoryScalar(_) | Self::MemoryPair(_) | Self::MemoryFixed(_) => {
                 ScalableAccessRequirements::Unqualified
@@ -126,7 +126,7 @@ impl Decoded {
 
     pub(super) const fn guest_memory_quantity(&self) -> GuestMemoryQuantity {
         match self {
-            Self::PrefetchHint(_) => GuestMemoryQuantity::None,
+            Self::PrefetchHint => GuestMemoryQuantity::None,
             Self::Exclusive(_) | Self::SharedMemory(_) => GuestMemoryQuantity::Unqualified,
             Self::MemoryScalar(_) | Self::MemoryPair(_) | Self::MemoryFixed(_) => {
                 GuestMemoryQuantity::Unqualified
@@ -175,10 +175,7 @@ impl Decoded {
 
     pub(crate) fn memory_requirements(&self) -> crate::context::memory::MemoryRequirements {
         match self {
-            Self::PrefetchHint(checks) => crate::context::memory::MemoryRequirements {
-                required_address_checks: *checks,
-                ..Default::default()
-            },
+            Self::PrefetchHint => Default::default(),
             Self::MemoryScalar(operand) => {
                 crate::x86_64::memory_store::checked_scalar::requirements(operand)
             }
@@ -237,7 +234,7 @@ impl Decoded {
         original_word: u32,
     ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
         match self {
-            Self::PrefetchHint(_) => Ok(None),
+            Self::PrefetchHint => Ok(None),
             Self::SharedMemory(_)
             | Self::Exclusive(_)
             | Self::MemoryScalar(_)
@@ -293,7 +290,7 @@ impl Decoded {
             | Self::Reductions(_)
             | Self::IntegerArithmetic(_) => Ok(()),
             Self::SharedMemory(_)
-            | Self::PrefetchHint(_)
+            | Self::PrefetchHint
             | Self::Exclusive(_)
             | Self::MemoryScalar(_)
             | Self::MemoryPair(_)
@@ -345,23 +342,12 @@ impl Decoded {
                 instruction.pc.0
             )));
         }
-        if let Operation::Prefetch(operand) = &instruction.operation {
-            use crate::aarch64::prefetch::Address;
-            use crate::context::memory::address::AddressAddChecks;
-            let checks = if matches!(operand.address, Address::Literal(_)) {
-                Default::default()
-            } else {
-                // AddressAdd precedes even an ignored hint. Checked CPA2
-                // arithmetic must not disappear merely because no RAM is read.
-                if profile.address_checks(false) != AddressAddChecks::Disabled {
-                    return Err(CompileError(format!(
-                        "prefetch AddressAdd checking is unqualified at {:#x}",
-                        instruction.pc.0
-                    )));
-                }
-                profile.address_requirements(false)
-            };
-            return Ok(Self::PrefetchHint(checks));
+        if matches!(instruction.operation, Operation::Prefetch(_)) {
+            // The ignored hint has no consumer for its address/descriptor.
+            // AddressAdd/PointerAddCheckAtEL only change that dead temporary;
+            // neither raises a fault or writes architectural state, even with
+            // CPA2 enabled. Do not require controls for an unobserved result.
+            return Ok(Self::PrefetchHint);
         }
         if let Some(operand) = crate::x86_64::shared_memory::CheckedOperand::from_operation(
             &instruction.operation,
@@ -417,7 +403,7 @@ impl Decoded {
             // forbids synchronous translation/alignment faults and Device
             // accesses. A host prefetch using a raw guest VA would not preserve
             // the guest translation/permission boundary. Keep a source interval.
-            Self::PrefetchHint(_) => code.push(x86_64::NOP),
+            Self::PrefetchHint => code.push(x86_64::NOP),
             Self::Ordinary(instruction) => {
                 if instruction.pc != pc {
                     return Err(CompileError("checked instruction PC differs".into()));
@@ -555,10 +541,7 @@ mod checked_register_tests {
 
     #[test]
     fn checked_prefetch_uses_ignored_hint_for_every_address_form_and_hint() {
-        use crate::context::memory::address::{
-            AccessEl, AddressAddChecks, AddressCheckRequirements, EffectiveAddressChecks,
-            IncrementChoice,
-        };
+        use crate::context::memory::address::{AccessEl, AddressAddChecks, EffectiveAddressChecks};
         let pc = GuestAddress(0x4000);
         for hint in 0..32 {
             let mut words = vec![
@@ -576,46 +559,24 @@ mod checked_register_tests {
             }
             for word in words {
                 let instruction = Decoder.lift(pc, word).unwrap();
-                let Operation::Prefetch(operand) = &instruction.operation else {
-                    panic!("{word:08x}")
-                };
-                let literal = matches!(
-                    operand.address,
-                    crate::aarch64::prefetch::Address::Literal(_)
-                );
-                let disabled = EffectiveAddressChecks::new(
-                    AddressAddChecks::Disabled,
-                    AddressAddChecks::Disabled,
-                );
+                assert!(matches!(instruction.operation, Operation::Prefetch(_)));
                 let plain = CheckedMemoryProfile::SpAlignmentDisabled;
-                for (profile, access_el) in [
-                    (CheckedMemoryProfile::SpAlignmentEnabled, None),
-                    (plain, None),
-                    (
-                        plain.with_address_checks(AccessEl::El0, AccessEl::El1, disabled),
-                        Some(AccessEl::El0),
-                    ),
-                    (
-                        plain.with_address_checks(AccessEl::El1, AccessEl::El0, disabled),
-                        Some(AccessEl::El1),
-                    ),
-                ] {
+                let mut profiles = vec![CheckedMemoryProfile::SpAlignmentEnabled, plain];
+                for access_el in [AccessEl::El0, AccessEl::El1] {
+                    for el0 in [AddressAddChecks::Disabled, AddressAddChecks::Enabled] {
+                        for el1 in [AddressAddChecks::Disabled, AddressAddChecks::Enabled] {
+                            profiles.push(plain.with_address_checks(
+                                access_el,
+                                AccessEl::El0,
+                                EffectiveAddressChecks::new(el0, el1),
+                            ));
+                        }
+                    }
+                }
+                for profile in profiles {
                     let decoded = Decoded::checked_ordinary(instruction.clone(), profile).unwrap();
-                    assert!(matches!(decoded, Decoded::PrefetchHint(_)));
-                    let expected_checks = if literal {
-                        AddressCheckRequirements::default()
-                    } else if let Some(access_el) = access_el {
-                        AddressCheckRequirements::for_access(access_el, AddressAddChecks::Disabled)
-                            .with_increment_choice(IncrementChoice::Unchecked)
-                    } else {
-                        // Legacy profiles already declare CPA2off in their ABI.
-                        AddressCheckRequirements::default()
-                    };
-                    let expected = crate::context::memory::MemoryRequirements {
-                        required_address_checks: expected_checks,
-                        ..Default::default()
-                    };
-                    assert_eq!(decoded.memory_requirements(), expected);
+                    assert!(matches!(decoded, Decoded::PrefetchHint));
+                    assert_eq!(decoded.memory_requirements(), Default::default());
                     let mut code = Vec::new();
                     let mut recovery = Vec::new();
                     decoded
@@ -663,7 +624,8 @@ mod checked_register_tests {
         );
         for word in [0xf980_0190, 0xf890_03e0, 0xf8a2_6bf0] {
             let instruction = Decoder.lift(pc, word).unwrap();
-            assert!(Decoded::checked_ordinary(instruction.clone(), checked).is_err());
+            let admitted = Decoded::checked_ordinary(instruction.clone(), checked).unwrap();
+            assert_eq!(admitted.memory_requirements(), Default::default());
             assert!(
                 Decoded::checked_ordinary(
                     instruction,
