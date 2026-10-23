@@ -443,6 +443,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if self.pending_native_device_access().is_some() {
             return Err(MemoryStatus::Unsupported);
         }
+        let bytes = source_window(self.cpu.pc, &self.breakpoints, &self.traces);
         prepare(
             &mut self.cpu,
             binding,
@@ -450,8 +451,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
             &self.profile,
             &self.profile_missing,
             &self.admit_table,
+            bytes,
         )
     }
+}
+
+/// A host observation is an exact source boundary, even when a longer immutable
+/// artifact was compiled before the observation was installed. The two point
+/// lists are sorted by Machine's setters; unaligned PCs cannot be reached.
+fn source_window(pc: u64, breakpoints: &[u64], traces: &[u64]) -> usize {
+    let mut bytes = super::super::window(pc);
+    for points in [breakpoints, traces] {
+        let next = points.partition_point(|point| *point <= pc);
+        if let Some(point) = points[next..].iter().find(|point| point.is_multiple_of(4)) {
+            bytes = bytes.min(usize::try_from(*point - pc).unwrap_or(usize::MAX));
+        }
+    }
+    bytes
 }
 
 fn prepare<'a>(
@@ -461,6 +477,7 @@ fn prepare<'a>(
     cpu_profile: &crate::machine::CpuProfile,
     missing: &[crate::machine::system::Register],
     admit: &crate::machine::chip::AdmitTable,
+    source_bytes: usize,
 ) -> Result<NativeRun<'a>, MemoryStatus> {
     if binding.pe != pe || cpu.monitor.is_some() {
         return Err(MemoryStatus::Unsupported);
@@ -520,7 +537,11 @@ fn prepare<'a>(
                 )
             })
     };
-    let artifact = if let Some(artifact) = memory.artifacts.candidate(&key) {
+    let candidate = memory
+        .artifacts
+        .candidate(&key)
+        .filter(|artifact| artifact.source.len() <= source_bytes);
+    let artifact = if let Some(artifact) = candidate {
         // A hit is merely immutable compilation reuse. Rewalk executable source
         // and read actual canonical bytes for its exact retained prefix every
         // time. A shorter compiled prefix remains a valid scheduling boundary;
@@ -547,7 +568,7 @@ fn prepare<'a>(
             artifact
         }
         None => {
-            let mut input = alloc::vec![0; super::super::window(pc)];
+            let mut input = alloc::vec![0; source_bytes];
             // Instruction walks use the same source controls, canonical descriptor
             // owner and original physical bytes. No direct identity-frame shortcut.
             memory.fetch(&controls, pc, &mut input)?;
@@ -796,6 +817,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 _ => return Err(MemoryStatus::Unsupported),
             };
+            let bytes = source_window(cpu.pc, &self.breakpoints, &self.traces);
             frames.push(prepare(
                 cpu,
                 binding,
@@ -803,6 +825,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 &self.profile,
                 &self.profile_missing,
                 &self.admit_table,
+                bytes,
             )?);
         }
         Ok(Cohort {
@@ -936,6 +959,7 @@ mod artifact_tests {
         binding: publication::WorkerBinding,
     ) -> Result<Arc<Artifact>, MemoryStatus> {
         // Preparation only: no hosted fixture enters a physical native frame.
+        let bytes = source_window(machine.cpu.pc, &machine.breakpoints, &machine.traces);
         let run = prepare(
             &mut machine.cpu,
             binding,
@@ -943,6 +967,7 @@ mod artifact_tests {
             &machine.profile,
             &machine.profile_missing,
             &machine.admit_table,
+            bytes,
         )?;
         Ok(Arc::clone(&run.artifact))
     }
@@ -974,6 +999,34 @@ mod artifact_tests {
             .native_artifact_stats();
         assert_eq!((stats.compiled, stats.reused, stats.entries), (2, 2, 1));
         assert!(stats.retained_bytes <= ARTIFACT_CACHE_BYTES);
+    }
+    #[test]
+    fn new_host_points_cut_a_warm_artifact_before_the_observed_instruction() {
+        for breakpoint in [false, true] {
+            let (mut machine, _) = fixture();
+            let full = prepare_artifact(&mut machine, BINDING).unwrap();
+            assert_eq!(full.source.len(), 8);
+            if breakpoint {
+                machine.set_breakpoints(&[PC + 4]);
+            } else {
+                machine.set_traces(&[PC, PC + 1, PC + 4, PC + 8]);
+            }
+            let prefix = prepare_artifact(&mut machine, BINDING).unwrap();
+            assert!(!Arc::ptr_eq(&full, &prefix));
+            assert_eq!(prefix.source, full.source[..4]);
+            assert_eq!(prefix.source_map.len(), 1);
+            assert!(Arc::ptr_eq(
+                &prefix,
+                &prepare_artifact(&mut machine, BINDING).unwrap()
+            ));
+            machine.set_breakpoints(&[]);
+            machine.set_traces(&[]);
+            // Removing a point may retain the shorter, still valid boundary.
+            assert!(Arc::ptr_eq(
+                &prefix,
+                &prepare_artifact(&mut machine, BINDING).unwrap()
+            ));
+        }
     }
     #[test]
     fn controls_worker_and_guarded_leaf_are_actual_cache_identity() {

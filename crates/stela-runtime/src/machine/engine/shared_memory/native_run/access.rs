@@ -605,6 +605,27 @@ mod tests {
         }
     }
     #[test]
+    fn new_host_points_preserve_an_already_entered_bus_continuation() {
+        for word in [LDR, 0xf9000020] {
+            let (mut machine, _) = pending(word, false);
+            let queued = machine.pending_native_device_access().unwrap();
+            machine.set_breakpoints(&[PC]);
+            machine.set_traces(&[PC]);
+            // These points cannot retroactively replace this already entered
+            // instruction's linear continuation. No native frame is executed.
+            assert_eq!(unsafe { machine.native_round() }, Err(queued));
+            assert!(machine.take_trace_hits().is_empty());
+            assert_eq!(machine.pending_native_device_access_count(), 1);
+            unsafe { machine.complete_native_device_access() }.unwrap();
+            assert_eq!((machine.cpu.pc, machine.cpu.retired), (PC + 4, 1));
+            assert_eq!(machine.devices.reads + machine.devices.writes.len(), 1);
+            assert_eq!(machine.pending_native_device_access_count(), 0);
+            assert!(machine.take_trace_hits().is_empty());
+            assert!(unsafe { machine.complete_native_device_access() }.is_err());
+            assert_eq!(machine.devices.reads + machine.devices.writes.len(), 1);
+        }
+    }
+    #[test]
     fn sequential_memory_and_actual_processor_leases_complete_under_one_stop() {
         let (mut machine, _) = pending(0xf9000020, false);
         machine.devices.clock = true;

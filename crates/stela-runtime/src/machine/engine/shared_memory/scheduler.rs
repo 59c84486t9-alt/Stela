@@ -147,6 +147,9 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// refusals until their actual platform owners join this candidate. Calling
     /// this method does not enable production SMP or qualify original macOS.
     pub unsafe fn native_round(&mut self) -> Result<usize, Stop> {
+        // A recovered bus continuation has already entered its instruction.
+        // Newly installed host points apply to future entries; they cannot
+        // revoke this retained generation or replay its possible effects.
         if let Some(pending) = self.pending_native_device_access() {
             return Err(pending);
         }
@@ -222,6 +225,15 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 self.take(crate::machine::cpu::Exception::undefined(self.cpu.pc));
             }
             for boundary in 0..64 {
+                // Observe the actual stopped frame before fetching or servicing
+                // its instruction, including a source-side exception boundary.
+                if self.breakpoints.binary_search(&self.cpu.pc).is_ok() {
+                    self.release_native_services(held);
+                    return Err(Stop::Breakpoint(self.cpu.pc));
+                }
+                if self.traces.binary_search(&self.cpu.pc).is_ok() {
+                    self.trace(self.cpu.pc);
+                }
                 if !self.native_entry_check()? {
                     break;
                 }
@@ -231,9 +243,6 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                     self.release_native_services(held);
                     return Ok(0);
                 }
-            }
-            if self.breakpoints.binary_search(&self.cpu.pc).is_ok() {
-                return Err(Stop::Breakpoint(self.cpu.pc));
             }
         }
         self.release_native_services(held);

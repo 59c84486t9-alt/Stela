@@ -306,6 +306,7 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
 pub(in crate::machine::engine::shared_memory) mod tests {
     use super::*;
     use crate::machine::{
+        Stop,
         engine::NoDevices,
         engine::publication::{WorkerBinding, WorkerOwner, WorkerPublications},
     };
@@ -677,8 +678,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         assert_eq!(bytes, 0x12345678u64.to_le_bytes());
     }
 
-    #[test]
-    fn unprivileged_round_recovers_refusal_without_source_execution_or_raw_ram_fallback() {
+    fn branch_source_machine() -> Machine<ServiceHost<Local, OneWorker>, NoDevices> {
         let (mut cpu, profile, missing, ram) = super::super::policy::tests::fixture();
         cpu.pc = 0x4000;
         const SOURCE_PA: u64 = 0x14000;
@@ -697,6 +697,45 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         };
         let owners = machine.bind_native_workers(&[binding]).unwrap();
         machine.initialize_native_transport(owners);
+        machine
+    }
+
+    #[test]
+    fn native_breakpoint_releases_stopped_services_and_trace_captures_actual_frame() {
+        let mut machine = branch_source_machine();
+        let pc = machine.cpu.pc;
+        machine.cpu.state.x[..4].copy_from_slice(&[0x10, 0x20, 0x30, 0x40]);
+        let before = (machine.cpu.state.clone(), pc, machine.cpu.retired);
+        machine.set_breakpoints(&[pc]);
+        machine.set_traces(&[pc]);
+        // SAFETY: closed one-worker model with no external writers/native entry.
+        assert_eq!(unsafe { machine.native_round() }, Err(Stop::Breakpoint(pc)));
+        assert!(machine.take_trace_hits().is_empty());
+        assert!(machine.host.services.is_empty());
+        machine.set_breakpoints(&[]);
+        // Reenter the actual released owner. The host's CPL0 refusal follows
+        // the trace, and cannot stand in for successful native execution.
+        assert!(matches!(
+            unsafe { machine.native_round() },
+            Err(Stop::Unsupported(_))
+        ));
+        let hits = machine.take_trace_hits();
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].pc, hits[0].pe), (pc, 0));
+        assert_eq!(hits[0].arguments, [0x10, 0x20, 0x30, 0x40]);
+        assert_eq!(
+            (
+                machine.cpu.state.clone(),
+                machine.cpu.pc,
+                machine.cpu.retired
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn unprivileged_round_recovers_refusal_without_source_execution_or_raw_ram_fallback() {
+        let mut machine = branch_source_machine();
         let before = (
             machine.cpu.state.clone(),
             machine.cpu.pc,
