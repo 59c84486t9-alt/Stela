@@ -3,12 +3,17 @@
 # case-insensitive file system cannot check out.
 /drivers/acpi/acpica/
 /drivers/gpu/drm/amd/
+/drivers/gpu/drm/nouveau/
 /drivers/gpu/drm/i915/
 /drivers/gpu/drm/xe/
+/drivers/gpu/drm/virtio/
 /drivers/gpu/drm/display/
 /drivers/gpu/drm/ttm/
 /drivers/gpu/drm/scheduler/
-/drivers/gpu/drm/drm_mm.c
+/drivers/gpu/drm/*.c
+/drivers/gpu/drm/*.h
+/drivers/gpu/drm/Makefile
+/drivers/gpu/drm/Kconfig
 /lib/rbtree.c
 /include/
 !/include/**/netfilter/

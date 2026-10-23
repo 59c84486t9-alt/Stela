@@ -62,8 +62,6 @@
 !/src/nouveau/ci/
 !/src/amd/drm-shim/
 !/src/nouveau/drm-shim/
-!/src/intel/perf/
-!/src/intel/ds/
 !/src/intel/tools/
 !/src/intel/executor/
 !/src/intel/nullhw-layer/
