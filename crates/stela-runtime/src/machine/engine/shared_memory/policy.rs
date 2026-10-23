@@ -41,7 +41,14 @@ pub enum Failure {
 pub enum Refusal {
     UnalignedQuantity,
     Translation(mmu::Unsupported),
-    MemoryAttributes,
+    /// Exact effective output of the reached walk, retained only on refusal.
+    /// The diagnostic must not require another walk after the source stopped.
+    MemoryAttributes {
+        physical: u64,
+        memory: mmu::MemoryType,
+        attributes: u8,
+        shareability: u8,
+    },
     PhysicalGeometry,
 }
 
@@ -301,7 +308,16 @@ impl DataPolicy for Policy {
             )
         {
             return Err((
-                self.unsupported(request, part.address, Refusal::MemoryAttributes),
+                self.unsupported(
+                    request,
+                    part.address,
+                    Refusal::MemoryAttributes {
+                        physical: translated.physical,
+                        memory: translated.memory,
+                        attributes: translated.attributes,
+                        shareability: translated.shareability,
+                    },
+                ),
                 part.address,
             ));
         }
@@ -999,7 +1015,15 @@ pub(super) mod tests {
         let mut policy = policy();
         let request = request(0x4000, 0);
         for (descriptor, reason) in [
-            (DESCRIPTOR & !(3 << 8), Refusal::MemoryAttributes),
+            (
+                DESCRIPTOR & !(3 << 8),
+                Refusal::MemoryAttributes {
+                    physical: DATA,
+                    memory: mmu::MemoryType::Normal,
+                    attributes: mmu::attributes::NORMAL_WRITE_BACK,
+                    shareability: mmu::attributes::NON_SHAREABLE,
+                },
+            ),
             (
                 (DESCRIPTOR & !0x0000_ffff_ffff_f000) | 0x999000,
                 Refusal::PhysicalGeometry,
@@ -1025,7 +1049,12 @@ pub(super) mod tests {
         assert!(matches!(
             policy.failure,
             Some(Failure::Unsupported {
-                reason: Refusal::MemoryAttributes,
+                reason: Refusal::MemoryAttributes {
+                    physical: DATA,
+                    memory: mmu::MemoryType::Device,
+                    attributes: mmu::attributes::DEVICE_NGNRNE,
+                    shareability: mmu::attributes::OUTER_SHAREABLE,
+                },
                 ..
             })
         ));
