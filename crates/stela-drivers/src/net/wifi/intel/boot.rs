@@ -5404,7 +5404,7 @@ mod tests {
                                 version: 0,
                             },
                             sequence,
-                            &[],
+                            &[0xde, 0xad, 0, 0xff],
                         ),
                     );
                     assert_eq!(
@@ -5414,6 +5414,19 @@ mod tests {
                             command: 1
                         }))
                     );
+                    assert_eq!(lari.responses().len(), 1);
+                    let response = &lari.responses()[0];
+                    assert_eq!(response.raw, [0xde, 0xad, 0, 0xff]);
+                    assert_eq!((response.command, response.group), (1, 12));
+                    assert_eq!((response.request.opcode, response.request.group), (8, 12));
+                    assert_eq!(response.ticket.sequence(), sequence);
+                    let doorbell = state.lock().unwrap().registers[&0x460];
+                    assert_eq!(
+                        unsafe { lari.advance(&source) },
+                        Err(LariError::Boot(Error::State))
+                    );
+                    assert_eq!(state.lock().unwrap().registers[&0x460], doorbell);
+                    assert_eq!(lari.responses().len(), 1);
                 }
                 4 => {
                     assert!(matches!(result, Err(LariError::Boot(Error::Dma(_)))));
@@ -5456,7 +5469,11 @@ mod tests {
                         LariPhase::Failed
                     }
                 );
+                let rejected = (case == 3).then(|| lari.responses()[0].clone());
                 lari.stop().unwrap();
+                if let Some(original) = rejected {
+                    assert_eq!(lari.responses(), [original]);
+                }
                 drop(lari);
                 assert_eq!(bios_drops.load(Ordering::Relaxed), 1);
                 assert_eq!(drops.load(Ordering::Relaxed), 1);

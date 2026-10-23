@@ -152,14 +152,18 @@ impl<Q: BootIo, B: BiosIo> LariRadio<'_, Q, B> {
                         .commands()
                         .nth(self.next - 1)
                         .unwrap();
-                    if response.command != id.opcode || response.group != id.group {
-                        return Err(LariError::Boot(Error::InitializationResponse {
-                            command: response.command,
-                            group: response.group,
-                        }));
-                    }
+                    let command = response.command;
+                    let group = response.group;
+                    // HCMD reclaim has already retired its internal response.
+                    // Preserve the original completion, including rejected bytes.
                     self.responses.push(response);
                     self.ticket = None;
+                    if command != id.opcode || group != id.group {
+                        return Err(LariError::Boot(Error::InitializationResponse {
+                            command,
+                            group,
+                        }));
+                    }
                 }
             }
         }

@@ -143,7 +143,7 @@ int main(void){
 }
 '''
 out.mkdir(parents=True,exist_ok=False);unit=out/'linux-iwlwifi-bios-selection.c';unit.write_text(p);exe=out/'linux-iwlwifi-bios-selection'
-subprocess.run(['cc','-std=gnu11','-O1','-g','-fsanitize=address,undefined',str(unit),'-o',str(exe)],check=True)
-with (out/'trace.txt').open('wb') as trace:subprocess.run([str(exe.resolve())],stdout=trace,check=True)
+subprocess.run(['cc','-std=gnu11','-O1','-g','-fsanitize=address,undefined',str(unit),'-o',str(exe)],check=True,timeout=120)
+with (out/'trace.txt').open('wb') as trace:subprocess.run([str(exe.resolve())],stdout=trace,check=True,timeout=60)
 manifest={'linux_commit':'a804c5742bff224d4cb4d25dd383554d598be32b','sources':expected,'helpers':helpers,'scenarios':4096,'observations':65536,'trace_sha256':hashlib.sha256((out/'trace.txt').read_bytes()).hexdigest(),'unit_sha256':hashlib.sha256(unit.read_bytes()).hexdigest()}
 (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');print(json.dumps(manifest,indent=2))
