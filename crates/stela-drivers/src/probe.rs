@@ -18,7 +18,7 @@ use crate::{
         realtek::{self, Realtek},
         virtio::VirtioNet,
     },
-    storage::{ahci, nvme, sdhci, virtio},
+    storage::{ahci, nvme, rtsx, sdhci, virtio},
     usb::{bluetooth::UsbHci, cdc::UsbNet, ethernet::UsbEthernet, hid::UsbInput, xhci},
 };
 use alloc::{boxed::Box, string::String, vec::Vec};
@@ -170,6 +170,7 @@ pub fn claims(function: &Function) -> bool {
         || function.class == nvme::CLASS
         || function.class == ahci::CLASS
         || sdhci::matches(function)
+        || rtsx::matches(function)
         || function.class == xhci::CLASS
 }
 
@@ -214,6 +215,8 @@ pub struct Disks {
     pub usb_hosts: Vec<xhci::Host>,
     /// Native SDHCI socket owners, including empty/removable card sockets.
     pub sd_hosts: Vec<sdhci::Host>,
+    /// Native Realtek socket owners, retained for empty/removable SD/MMC cards.
+    pub rtsx_hosts: Vec<rtsx::Host>,
     /// Storage class owners remain available for explicit media rescan.
     pub usb_storage: Vec<crate::usb::storage::UsbStorage>,
     /// USB HCI transports with retained device-specific initialization results.
@@ -433,6 +436,20 @@ pub unsafe fn probe_with_provider(
                     Err(error) => disks.failures.push((address, error.into())),
                 }
                 continue;
+            } else if rtsx::matches(&function) {
+                rtsx::attach(function, handoff).map(|attached| {
+                    disks.rtsx_hosts.push(attached.host);
+                    if let Some(error) = attached.failure {
+                        disks
+                            .device_failures
+                            .push((alloc::format!("{address} RTS5227 SD slot"), error));
+                    }
+                    attached
+                        .card
+                        .into_iter()
+                        .map(|card| Box::new(card) as Box<dyn BlockDevice>)
+                        .collect()
+                })
             } else if sdhci::matches(&function) {
                 let attached = if sdhci::requires_owned_config(&function) {
                     sdhci::attach_owned(function, handoff, dma)

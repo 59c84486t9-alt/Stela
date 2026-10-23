@@ -7,8 +7,12 @@ pub(super) trait Registers {
     fn write32(&mut self, at: usize, value: u32);
 }
 impl Registers for Mmio {
-    fn read32(&mut self, at: usize) -> u32 { Mmio::read32(self, at) }
-    fn write32(&mut self, at: usize, value: u32) { Mmio::write32(self, at, value); }
+    fn read32(&mut self, at: usize) -> u32 {
+        Mmio::read32(self, at)
+    }
+    fn write32(&mut self, at: usize, value: u32) {
+        Mmio::write32(self, at, value);
+    }
 }
 pub(super) const HCBCTLR: usize = 0x4;
 pub(super) const HDBCTLR: usize = 0xc;
@@ -26,6 +30,7 @@ pub(super) const SD_INT: u32 = 0x2000000;
 pub(super) const SD_WRITE_PROTECT: u32 = 0x80000;
 pub(super) const DELINK_INT: u32 = 0x1000000;
 pub(super) const SD_OC_INT: u32 = 0x400000;
+pub(super) const COMPLETION_INTERRUPTS: u32 = (1 << 30) | (1 << 29) | (1 << 28);
 pub(super) const TRANS_FAIL_INT: u32 = 0x10000000;
 pub(super) const FPDCTL: u16 = 0xfc00;
 pub(super) const CLK_CTL: u16 = 0xfc02;
@@ -39,7 +44,6 @@ pub(super) const GPIO_CTL: u16 = 0xfc1f;
 pub(super) const CARD_CLK_SOURCE: u16 = 0xfc2e;
 pub(super) const SD_CFG1: u16 = 0xfda0;
 pub(super) const SD_CFG2: u16 = 0xfda1;
-pub(super) const SD_CFG3: u16 = 0xfda2;
 pub(super) const SD_STAT1: u16 = 0xfda3;
 pub(super) const SD_STAT2: u16 = 0xfda4;
 pub(super) const SD_BUS_STAT: u16 = 0xfda5;
@@ -47,9 +51,6 @@ pub(super) const SD_SAMPLE_POINT_CTL: u16 = 0xfda7;
 pub(super) const SD_PUSH_POINT_CTL: u16 = 0xfda8;
 pub(super) const SD_CMD0: u16 = 0xfda9;
 pub(super) const SD_CMD1: u16 = 0xfdaa;
-pub(super) const SD_CMD2: u16 = 0xfdab;
-pub(super) const SD_CMD3: u16 = 0xfdac;
-pub(super) const SD_CMD4: u16 = 0xfdad;
 pub(super) const SD_BYTE_CNT_L: u16 = 0xfdaf;
 pub(super) const SD_BYTE_CNT_H: u16 = 0xfdb0;
 pub(super) const SD_BLOCK_CNT_L: u16 = 0xfdb1;
@@ -86,7 +87,6 @@ pub(super) const HOST_SLEEP_STATE: u16 = 0xfe60;
 pub(super) const NFTS_TX_CTRL: u16 = 0xfe72;
 pub(super) const PWR_GATE_CTRL: u16 = 0xfe75;
 pub(super) const LDO_PWR_SEL: u16 = 0xfe78;
-pub(super) const DUMMY_REG_RESET_0: u16 = 0xfe90;
 pub(super) const PETXCFG: u16 = 0xff03;
 pub(super) const PM_CTRL3: u16 = 0xff46;
 pub(super) const PPBUF_BASE2: u16 = 0xfa00;
@@ -96,7 +96,6 @@ pub(super) const SD_CLK_DIVIDE_0: u8 = 0x0;
 pub(super) const SD_CLK_EN: u8 = 0x4;
 pub(super) const SD_BUS_WIDTH_1BIT: u8 = 0x0;
 pub(super) const SD_BUS_WIDTH_4BIT: u8 = 0x1;
-pub(super) const SD_BUS_WIDTH_8BIT: u8 = 0x2;
 pub(super) const SD_TRANSFER_START: u8 = 0x80;
 pub(super) const SD_TRANSFER_END: u8 = 0x40;
 pub(super) const SD_STAT_IDLE: u8 = 0x20;
@@ -111,7 +110,6 @@ pub(super) const SD_RSP_80CLK_TIMEOUT: u8 = 0x1;
 pub(super) const SD_CLK_TOGGLE_EN: u8 = 0x80;
 pub(super) const SD_CLK_FORCE_STOP: u8 = 0x40;
 pub(super) const SD_DAT0_STATUS: u8 = 0x2;
-pub(super) const SD_CMD_STATUS: u8 = 0x1;
 pub(super) const SD_RSP_TYPE_R0: u8 = 0x4;
 pub(super) const SD_RSP_TYPE_R1: u8 = 0x1;
 pub(super) const SD_RSP_TYPE_R1b: u8 = 0x9;

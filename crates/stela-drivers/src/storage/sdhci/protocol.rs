@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Actual SDHCI effects behind the shared SD/MMC card protocol.
 use super::{command::*, *};
+#[cfg(test)]
 pub(super) use crate::storage::mmc::capacity;
 use crate::storage::mmc::protocol::{Host, OCR_180, OCR_300, OCR_330, Session};
 
