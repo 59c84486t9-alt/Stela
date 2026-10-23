@@ -1708,11 +1708,12 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                     boot.affinity,
                     handoff.native_resources.cores as usize,
                 ),
-                0x6000 if handoff.native_resources.cores == 1 => topology::Source::t6000(
+                0x6000 => topology::Source::t6000_assigned(
                     intake.original(),
-                    live.bytes(),
+                    live,
                     identity,
                     boot.affinity,
+                    handoff.native_resources.cores as usize,
                 ),
                 _ => Err(String::from(
                     "native assigned topology for this source family is not qualified",
@@ -1866,10 +1867,23 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             as alloc::boxed::Box<dyn stela_runtime::machine::apple::Scanout>
     });
     let programmed = mount::memory_locks(read_only_region, &core_locks);
-    let memory = board
-        .as_ref()
-        .filter(|board| board.memory_cache.is_some())
-        .map(|board| {
+    let memory = board.as_ref().and_then(|board| {
+        if let Some(direct) = board.direct_memory_cache.as_ref() {
+            use stela_runtime::machine::apple::memory_resources::t6000_cold;
+            // Equal nonzero software quota weights; these are policy for a
+            // new cacheless frontend, never a measured Apple reset image.
+            let configuration =
+                t6000_cold::Configuration::zeroed_control_image(direct.apertures.len(), [1; 32])
+                    .unwrap_or_else(|error| output::fatal(&error));
+            let plan = t6000_cold::Plan::prepare_ap_frontend(
+                board,
+                &canonical_ram,
+                programmed,
+                &configuration,
+            )
+            .unwrap_or_else(|error| output::fatal(&error));
+            Some(mount::MemoryResources::T6000Cold(plan))
+        } else if board.memory_cache.is_some() {
             use stela_runtime::machine::apple::{
                 memory_resources::t8112::cache::ZeroWayConfiguration, t8112_cold,
             };
@@ -1884,8 +1898,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 &configuration,
             )
             .unwrap_or_else(|error| output::fatal(&error));
-            mount::MemoryResources::T8112Cold(plan)
-        });
+            Some(mount::MemoryResources::T8112Cold(plan))
+        } else {
+            None
+        }
+    });
     let cacheless_memory = memory.is_some();
     let (mut devices, restore_usb) = match devices(
         board.as_ref(),
@@ -1982,7 +1999,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                     &original,
                     &full_profile,
                     &assigned.plan,
-                    0,
+                    source.acc_harvesting(),
                 )
                 .unwrap_or_else(|error| output::fatal(&error))
         }

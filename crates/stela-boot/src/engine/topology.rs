@@ -272,8 +272,11 @@ pub(crate) struct Source<'a> {
     pub resources: BspSource<'a>,
     tree: DeviceTree,
     dense_ids: Option<(DeviceTree, [u8; 32])>,
+    boot_reg: u32,
+    acc_harvesting: u32,
 }
 impl<'a> Source<'a> {
+    #[cfg(test)]
     pub(crate) fn t6000(
         original: &'a [u8],
         prepared: &[u8],
@@ -286,6 +289,30 @@ impl<'a> Source<'a> {
             resources,
             tree,
             dense_ids: None,
+            boot_reg,
+            acc_harvesting: 1,
+        })
+    }
+    /// Normal T6000 mode1 preserves original cluster-discovery order. The
+    /// selected first P-core remains the BSP independently of its logical PE.
+    pub(crate) fn t6000_assigned(
+        original: &'a [u8],
+        live: &LiveTree,
+        identity: SourceIdentity,
+        boot_reg: u32,
+        workers: usize,
+    ) -> Result<Self, String> {
+        live.require_no_harvesting_override()?;
+        let tree = DeviceTree::parse(live.bytes())
+            .map_err(|e| format!("assigned live source ADT: {e}"))?;
+        let resources =
+            BspSource::t6000_assigned(original, live.bytes(), identity, boot_reg, 1, workers)?;
+        Ok(Self {
+            resources,
+            tree,
+            dense_ids: None,
+            boot_reg,
+            acc_harvesting: 1,
         })
     }
     /// Explicit source-family adapter. Checks the actual boot_args snapshot
@@ -307,7 +334,12 @@ impl<'a> Source<'a> {
             resources,
             tree,
             dense_ids: Some((immutable, identity.original_tree_sha256)),
+            boot_reg,
+            acc_harvesting: 0,
         })
+    }
+    pub(crate) fn acc_harvesting(&self) -> u32 {
+        self.acc_harvesting
     }
     /// Full selected-source adapter for the retained started-worker roster.
     pub(crate) fn t8112_assigned(
@@ -334,7 +366,22 @@ impl<'a> Source<'a> {
         }
         let mut nodes = Vec::with_capacity(resources.slots.len());
         let mut assignments = Vec::with_capacity(resources.slots.len());
-        for (ordinal, (slot, worker)) in resources.slots.iter().zip(roster.cores()).enumerate() {
+        let boot = resources
+            .slots
+            .iter()
+            .position(|slot| slot.reg == self.boot_reg)
+            .ok_or("assigned source omits the original boot PE")?;
+        for (ordinal, slot) in resources.slots.iter().enumerate() {
+            // Native worker0 is the executing BSP. Keeping source PE order
+            // preserves PMGR mode1's kernel cluster ordinal coupling.
+            let worker_index = if ordinal == boot {
+                0
+            } else if ordinal < boot {
+                ordinal + 1
+            } else {
+                ordinal
+            };
+            let worker = &roster.cores()[worker_index];
             let kind = resources
                 .kinds
                 .iter()
@@ -364,7 +411,7 @@ impl<'a> Source<'a> {
             assignments.push(Assignment {
                 worker: worker.worker,
                 slot: slot.id,
-                boot: ordinal == 0,
+                boot: ordinal == boot,
             });
         }
         let source = SourceBindings {
@@ -1229,6 +1276,117 @@ mod tests {
             .set_property("/cpus/cpu1", "AAPL,phandle", 26u32.to_le_bytes().to_vec())
             .unwrap();
         assert!(Source::t6000(&original, &changed.serialize(), identity, 0).is_err());
+    }
+    #[test]
+    #[ignore = "requires original J314s and a fresh default-first-P prepared DT"]
+    fn original_mode1_keeps_discovery_order_with_nonzero_logical_boot_pe() {
+        use stela_runtime::machine::soc;
+        let original = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_DT").unwrap()).unwrap();
+        let raw = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_PREPARED_DT").unwrap()).unwrap();
+        let tree = DeviceTree::parse(&raw).unwrap();
+        let board = soc::board(&raw).unwrap();
+        let boot = board.boot_processor.as_ref().unwrap();
+        assert_ne!(boot.cpu, 0);
+        assert!(stela_runtime::machine::apple::AppleDevices::native_pmp_system_endpoint_refusal(
+            &board,
+        ).unwrap().unwrap().contains("T8112"));
+        let regs = tree
+            .node("/cpus")
+            .unwrap()
+            .children
+            .iter()
+            .map(|node| node.property("reg").unwrap().as_u32().unwrap())
+            .collect::<Vec<_>>();
+        let profile = CpuProfile {
+            name: "original component projection fixture; no native AP authority",
+            chip: board.cpus.chip,
+            processors: board.cpus.processors.clone(),
+            counter_frequency: 24_000_000,
+            fixed: vec![],
+        };
+        let identity = SourceIdentity {
+            original_tree_sha256: Sha256::digest(&original).into(),
+            profile: soc::assigned::ResourceProfile {
+                chip: profile.chip,
+                soc: word(&tree, "/chosen", "chip-id").unwrap(),
+                board: word(&tree, "/chosen", "board-id").unwrap(),
+                input_set_sha256: Sha256::digest(&raw).into(),
+                adapted_set_sha256: None,
+            },
+        };
+        struct Roster(Vec<AssignedCore>);
+        impl RetainedRoster for Roster {
+            fn revision(&self) -> u64 {
+                1
+            }
+            fn cores(&self) -> &[AssignedCore] {
+                &self.0
+            }
+        }
+        // Keep a member of every source complex. Shorter selections need the
+        // independently reviewed constructor skip rule, not an inferred cap.
+        let minimum = regs
+            .iter()
+            .enumerate()
+            .filter(|(i, reg)| !regs[..*i].iter().any(|earlier| earlier >> 8 == **reg >> 8))
+            .map(|(i, _)| i + 1)
+            .max()
+            .unwrap();
+        let live = captured_live_tree(tree.clone(), "-v");
+        for count in minimum..=regs.len() {
+            let roster = Roster(
+                (0..count)
+                    .map(|worker| AssignedCore {
+                        worker,
+                        package: 0,
+                        core: worker as u32,
+                        apic: worker as u32 + 42,
+                        started: true,
+                    })
+                    .collect(),
+            );
+            let selected =
+                Source::t6000_assigned(&original, &live, identity, boot.affinity, count).unwrap();
+            let prepared = selected.prepare(&roster, profile.clone()).unwrap();
+            let projected = soc::board(&prepared.tree.serialize()).unwrap();
+            assert_eq!(projected.boot_processor.unwrap().cpu, boot.cpu);
+            assert_eq!(projected.cpus.processors, prepared.profile.processors);
+            assert_eq!(
+                prepared.tree.node("/arm-io/pmgr"),
+                tree.node("/arm-io/pmgr")
+            );
+            assert_eq!(
+                prepared
+                    .tree
+                    .node("/cpus")
+                    .unwrap()
+                    .children
+                    .iter()
+                    .map(|node| node.property("reg").unwrap().as_u32().unwrap())
+                    .collect::<Vec<_>>(),
+                regs[..count]
+            );
+            for (logical, &reg) in regs[..count].iter().enumerate() {
+                let join = prepared.join(reg).unwrap();
+                assert_eq!(join.logical, logical);
+                let name = selected
+                    .resources
+                    .name_for(selected.resources.resources().slots[logical].id)
+                    .unwrap();
+                let path = format!("/cpus/{name}");
+                assert_eq!(
+                    prepared.tree.property(&path, "cpu-id"),
+                    tree.property(&path, "cpu-id")
+                );
+            }
+            assert_eq!(prepared.join(boot.affinity).unwrap().worker, 0);
+            let bindings = prepared.worker_bindings().unwrap();
+            assert_eq!(bindings.iter().filter(|b| b.worker.0 == 0).count(), 1);
+            assert_eq!(
+                bindings.iter().find(|b| b.worker.0 == 0).unwrap().pe,
+                boot.cpu
+            );
+        }
     }
     #[test]
     fn actual_selected_bsp_only_does_not_start_captured_aps() {

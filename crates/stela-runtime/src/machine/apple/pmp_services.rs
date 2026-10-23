@@ -27,6 +27,13 @@ impl AppleDevices {
     pub fn native_pmp_system_endpoint_refusal(
         board: &Board,
     ) -> Result<Option<&'static str>, String> {
+        // Services::t8112 carries source-specific reporting/trace defaults.
+        // A direct MCC owner supplies no qualification for that protocol.
+        if board.memory_cache.is_none() || board.direct_memory_cache.is_some() {
+            return Ok(Some(
+                "PMP reporting/trace endpoints unavailable: this memory family has no source-qualified T8112 system-service profile; no AP buffer service is advertised",
+            ));
+        }
         let pmp = board
             .pmp
             .as_ref()

@@ -6,7 +6,7 @@
 use super::apple::{
     AicInput, AppleDevices, AscLines, ConsoleSink, Range, RtcEpoch, Scanout, SepEntropy,
     SepProvisioning, UsbCables, UsbId, WallClock,
-    memory_resources::{amcc, t8112},
+    memory_resources::{amcc, t6000_cold, t8112},
     sep_state, typec,
 };
 use super::ctrr;
@@ -26,6 +26,9 @@ pub enum MemoryResources {
     /// Source-checked cold resources whose lifecycle is sampled from the actual
     /// placed PMGR before the native memory owners are constructed.
     T8112Cold(super::apple::t8112_cold::Plan),
+    /// Direct MCC/AMCC/PTD frontend; keeps its full source graph and canonical
+    /// RAM separate from the T8112 cache/quota protocol.
+    T6000Cold(t6000_cold::Plan),
     T8112 {
         memory: t8112::Prepared,
         cache: t8112::cache::EmptyResource,
@@ -37,9 +40,19 @@ impl MemoryResources {
         &self,
         controller: Option<&super::soc::MemoryController>,
         descriptor: Option<&super::soc::MemoryCache>,
+        direct: Option<&super::soc::DirectMemoryCache>,
     ) -> Result<(), String> {
+        if direct.is_some() && !matches!(self, Self::T6000Cold(_)) {
+            return Err("cache/quota native memory cannot adopt a direct MCC descriptor".into());
+        }
         match self {
             Self::T8112Cold(plan) => plan.validate(controller, descriptor),
+            Self::T6000Cold(plan) => {
+                if descriptor.is_some() {
+                    return Err("direct native memory cannot adopt a cache/quota descriptor".into());
+                }
+                plan.validate(controller, direct)
+            }
             Self::T8112 { memory, cache } => {
                 if descriptor != Some(memory.descriptor()) || controller != Some(cache.source()) {
                     return Err(
@@ -180,12 +193,15 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     log: &mut dyn FnMut(fmt::Arguments<'_>),
 ) -> Result<(AppleDevices, Option<UsbId>), String> {
     if let Some(memory) = memory.as_ref() {
-        if let MemoryResources::T8112Cold(plan) = memory {
-            plan.validate_power(board.power_states.as_ref())?;
+        match memory {
+            MemoryResources::T8112Cold(plan) => plan.validate_power(board.power_states.as_ref())?,
+            MemoryResources::T6000Cold(plan) => plan.validate_power(board.power_states.as_ref())?,
+            MemoryResources::T8112 { .. } => {}
         }
         memory.validate(
             board.memory_controller.as_ref(),
             board.memory_cache.as_ref(),
+            board.direct_memory_cache.as_ref(),
         )?;
     }
     let native_memory = memory.is_some();
@@ -408,6 +424,12 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     // before a broad display container can claim any overlapping bytes.
     if let Some(memory) = memory {
         match memory {
+            MemoryResources::T6000Cold(plan) => {
+                plan.install(&mut devices)?;
+                log(format_args!(
+                    "DEVICES mcc native direct MCC/AMCC/PTD share canonical RAM and source power graph\n"
+                ));
+            }
             MemoryResources::T8112Cold(plan) => {
                 plan.install(&mut devices)?;
                 log(format_args!(
@@ -734,7 +756,7 @@ mod tests {
         let controller = cache.source().clone();
         let resources = MemoryResources::T8112 { memory, cache };
         assert_eq!(
-            resources.validate(Some(&controller), Some(&descriptor)),
+            resources.validate(Some(&controller), Some(&descriptor), None),
             Ok(())
         );
 
@@ -742,24 +764,24 @@ mod tests {
         changed.ptd.interrupts[0] ^= 1;
         assert!(
             resources
-                .validate(Some(&controller), Some(&changed))
+                .validate(Some(&controller), Some(&changed), None)
                 .is_err()
         );
         let mut changed = controller.clone();
         changed.apertures[0] += 0x40000;
         assert!(
             resources
-                .validate(Some(&changed), Some(&descriptor))
+                .validate(Some(&changed), Some(&descriptor), None)
                 .is_err()
         );
-        assert!(resources.validate(None, Some(&descriptor)).is_err());
-        assert!(resources.validate(Some(&controller), None).is_err());
+        assert!(resources.validate(None, Some(&descriptor), None).is_err());
+        assert!(resources.validate(Some(&controller), None, None).is_err());
 
         let (memory, _) = t8112::cache::EmptyResource::service_test_components();
         let (_, cache) = t8112::cache::EmptyResource::service_test_components();
         assert!(
             MemoryResources::T8112 { memory, cache }
-                .validate(Some(&controller), Some(&descriptor))
+                .validate(Some(&controller), Some(&descriptor), None)
                 .unwrap_err()
                 .contains("same actual registered RAM")
         );
