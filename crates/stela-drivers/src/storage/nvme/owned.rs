@@ -533,7 +533,11 @@ impl Namespace {
 }
 
 #[cfg(test)]
+pub(crate) use tests::protocol;
+
+#[cfg(test)]
 mod tests {
+    pub(crate) mod protocol;
     use super::*;
     use crate::bus::dma::{
         mapping::DomainMapping,
@@ -643,6 +647,7 @@ mod tests {
         Delayed,
     }
     struct Model {
+        access: Option<Arc<dyn protocol::Access>>,
         registers: BTreeMap<usize, u32>,
         maps: BTreeMap<u64, Lease>,
         next: u64,
@@ -689,6 +694,7 @@ mod tests {
             registers.insert(4, 1 << 5);
             registers.insert(8, 0x0001_0100);
             Self {
+                access: None,
                 registers,
                 maps: BTreeMap::new(),
                 next: 1,
@@ -726,6 +732,25 @@ mod tests {
                 commands: 0,
                 sync_cpu: 0,
                 pending: None,
+            }
+        }
+        fn registers_available(&self) -> bool {
+            self.access
+                .as_ref()
+                .map_or(self.prepared, |a| a.registers_available())
+        }
+        fn dma_enabled(&self) -> bool {
+            self.access.as_ref().map_or(self.bme, |a| a.dma_enabled())
+        }
+        fn any_bus_master(&self) -> bool {
+            self.access
+                .as_ref()
+                .map_or(self.bme, |a| a.any_bus_master())
+        }
+        fn record(&mut self, event: &'static str) {
+            self.events.push(event);
+            if let Some(access) = &self.access {
+                access.observe(event);
             }
         }
         fn register64(&self, offset: usize) -> u64 {
@@ -781,7 +806,12 @@ mod tests {
             out
         }
         fn process(&mut self, queue: usize, tail: u16) {
-            assert!(self.prepared && self.bme && self.enabled && !self.outstanding);
+            assert!(
+                self.registers_available()
+                    && self.dma_enabled()
+                    && self.enabled
+                    && !self.outstanding
+            );
             assert_eq!(tail, (self.heads[queue] + 1) % 16);
             let bytes =
                 self.read_iova(self.queues[queue].0 + u64::from(self.heads[queue]) * 64, 64);
@@ -791,7 +821,7 @@ mod tests {
             self.commands += 1;
             self.outstanding = true;
             self.drained = false;
-            self.events.push("command");
+            self.record("command");
             if matches!(self.mutation, Mutation::Delayed) {
                 self.pending = Some((queue, command));
                 return;
@@ -870,7 +900,7 @@ mod tests {
                 &cqe,
             );
             self.outstanding = false;
-            self.events.push("completion");
+            self.record("completion");
         }
     }
     struct Domain(Arc<Mutex<Model>>);
@@ -909,19 +939,21 @@ mod tests {
                     visible: false,
                 },
             );
-            m.events.push("map");
+            m.record("map");
             Ok(token)
         }
         unsafe fn unmap(&self, token: DomainMapping) -> Result<(), DmaError> {
             let mut m = self.0.lock().unwrap();
             let unpublished = !m.maps[&token.id].visible;
-            assert!(unpublished || (!m.enabled && !m.bme && m.drained && !m.outstanding));
+            assert!(
+                unpublished || (!m.enabled && !m.any_bus_master() && m.drained && !m.outstanding)
+            );
             m.unmap_attempts += 1;
             if m.fail_unmap || m.fail_unmap_at == Some(m.unmap_attempts) {
                 return Err(DmaError::InvalidationFailed);
             }
             m.maps.remove(&token.id).expect("live exact map");
-            m.events.push("unmap");
+            m.record("unmap");
             Ok(())
         }
         unsafe fn sync_for_device(
@@ -943,7 +975,7 @@ mod tests {
                 b.device[at] = unsafe { p.as_ptr().add(i).read_volatile() };
             }
             b.visible = true;
-            m.events.push("visible");
+            m.record("visible");
             Ok(())
         }
         unsafe fn sync_for_cpu(
@@ -965,7 +997,7 @@ mod tests {
                 unsafe { p.as_ptr().add(i).write_volatile(b.device[at]) };
             }
             m.sync_cpu += 1;
-            m.events.push("cpu");
+            m.record("cpu");
             Ok(())
         }
         unsafe fn read_coherent_u32(
@@ -987,8 +1019,8 @@ mod tests {
         }
         unsafe fn drain_posted_writes(&self) -> Result<(), DmaError> {
             let mut m = self.0.lock().unwrap();
-            assert!(!m.bme && !m.enabled && !m.outstanding);
-            m.events.push("drain");
+            assert!(!m.any_bus_master() && !m.enabled && !m.outstanding);
+            m.record("drain");
             if m.fail_drain {
                 return Err(DmaError::DrainUnavailable);
             }
@@ -1004,7 +1036,7 @@ mod tests {
             assert!(offset < 0x2000 && offset.is_multiple_of(4));
             let mut m = self.0.lock().unwrap();
             m.mmio_accesses += 1;
-            assert!(m.prepared && !m.retired);
+            assert!(m.registers_available() && !m.retired);
             if m.fail_read {
                 return Err(register_error());
             }
@@ -1017,18 +1049,18 @@ mod tests {
             assert!(offset < 0x2000 && offset.is_multiple_of(4));
             let mut m = self.0.lock().unwrap();
             m.mmio_accesses += 1;
-            assert!(m.prepared && !m.retired);
+            assert!(m.registers_available() && !m.retired);
             m.registers.insert(offset, value);
             match offset {
                 0x14 => {
                     if value & 1 != 0 {
-                        assert!(m.bme);
+                        assert!(m.dma_enabled());
                         m.enabled = true;
                         m.stopped = false;
                         m.queues[0] = (m.register64(0x28), m.register64(0x30));
-                        m.events.push("enable");
+                        m.record("enable");
                     } else {
-                        m.events.push("stop");
+                        m.record("stop");
                         if !m.stuck_ready {
                             m.enabled = false;
                             m.outstanding = false;
@@ -1054,7 +1086,7 @@ mod tests {
                     if value == 0 {
                         m.phases[q] = !m.phases[q];
                     }
-                    m.events.push("cq_ack");
+                    m.record("cq_ack");
                 }
                 _ => {}
             }
@@ -1062,13 +1094,13 @@ mod tests {
         }
         unsafe fn retire(&mut self) -> Result<(), BlockError> {
             let mut m = self.0.lock().unwrap();
-            assert!(m.maps.is_empty() && m.drained && !m.bme && !m.enabled);
-            m.events.push("retire_regs_attempt");
+            assert!(m.maps.is_empty() && m.drained && !m.any_bus_master() && !m.enabled);
+            m.record("retire_regs_attempt");
             if m.fail_retire {
                 return Err(register_error());
             }
             m.retired = true;
-            m.events.push("retire_regs");
+            m.record("retire_regs");
             Ok(())
         }
     }
@@ -1089,26 +1121,26 @@ mod tests {
         fn prepare(&mut self) -> Result<(), BlockError> {
             let mut m = self.0.lock().unwrap();
             assert!(!m.bme);
-            m.events.push("prepare_attempt");
+            m.record("prepare_attempt");
             if m.fail_prepare {
                 // Actual power remains D3; no BAR access is possible.
                 return Err(register_error());
             }
             m.prepared = true;
-            m.events.push("prepare");
+            m.record("prepare");
             Ok(())
         }
         fn enable_dma(&mut self) -> Result<(), BlockError> {
             let mut m = self.0.lock().unwrap();
             assert!(m.prepared && !m.enabled && m.maps.len() == 6);
             m.bme = true;
-            m.events.push("bme_on");
+            m.record("bme_on");
             Ok(())
         }
         fn disable_dma(&mut self) -> Result<(), BlockError> {
             let mut m = self.0.lock().unwrap();
             assert!(!m.enabled);
-            m.events.push("bme_off");
+            m.record("bme_off");
             if m.fail_disable {
                 return Err(register_error());
             }
@@ -1118,12 +1150,12 @@ mod tests {
         fn release(&mut self) -> Result<(), BlockError> {
             let mut m = self.0.lock().unwrap();
             assert!(m.retired && m.maps.is_empty() && !m.bme && m.drained);
-            m.events.push("release_attempt");
+            m.record("release_attempt");
             if m.fail_release {
                 return Err(register_error());
             }
             m.released = true;
-            m.events.push("release");
+            m.record("release");
             Ok(())
         }
     }

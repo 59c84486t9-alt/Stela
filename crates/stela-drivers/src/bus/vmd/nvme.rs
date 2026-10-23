@@ -200,6 +200,35 @@ pub unsafe fn attach(
     clock: Clock,
     label: String,
 ) -> Result<(Attached, RetiredHierarchy), (BlockError, RetiredHierarchy)> {
+    // SAFETY: the public native boundary retains the actual mapping authority;
+    // only this private factory seam varies in independent protocol tests.
+    unsafe {
+        attach_with_registers(host, bar, domain, pages, clock, label, |bar| {
+            let mapping = map_registers(bar, &authority)?;
+            let registers = owned::MappingRegisters::new(mapping).map_err(|(error, mapping)| {
+                // Mapping Drop itself quarantines its original reservation and roots.
+                drop(mapping);
+                error
+            })?;
+            Ok(Box::new(registers))
+        })
+    }
+}
+
+// Same actual hierarchy/engine sequence for native mappings and the independent
+// cfg(test) register peer. This never exposes a public model attachment route.
+// SAFETY: the caller retains the matching original hierarchy/domain authority,
+// and the factory retains registers for that exact selected controller.
+#[allow(clippy::type_complexity)]
+unsafe fn attach_with_registers<R: Registers + 'static>(
+    host: Host<R>,
+    bar: FirmwareBar,
+    domain: Arc<dyn DmaDomain>,
+    pages: &dyn PageSource,
+    clock: Clock,
+    label: String,
+    registers: impl FnOnce(&FirmwareBar) -> Result<Box<dyn owned::Registers>, BlockError>,
+) -> Result<(Attached, RetiredHierarchy<R>), (BlockError, RetiredHierarchy<R>)> {
     let returned = Rc::new(RefCell::new(Returned(None)));
     let handle = RetiredHierarchy(Rc::clone(&returned));
     let result = (|| {
@@ -213,16 +242,11 @@ pub unsafe fn attach(
         });
         let prepared = Hierarchy::discover(lifecycle.host.as_mut().expect("retained"), &bar);
         lifecycle.hierarchy = Some(prepared.map_err(block)?);
-        let mapping = map_registers(&bar, &authority)?;
-        let registers = owned::MappingRegisters::new(mapping).map_err(|(error, mapping)| {
-            // Mapping Drop itself quarantines its original reservation and roots.
-            drop(mapping);
-            error
-        })?;
+        let registers = registers(&bar)?;
         // SAFETY: caller grants the actual original hierarchy/domain identity; the
         // reservation-backed mapping and consumed lifecycle refer to its selected
         // controller. No independent numeric-domain assertion is used as proof.
-        unsafe { owned::attach(Box::new(registers), lifecycle, pages, domain, clock, label) }
+        unsafe { owned::attach(registers, lifecycle, pages, domain, clock, label) }
     })();
     match result {
         Ok(attached) => Ok((attached, handle)),

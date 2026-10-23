@@ -37,6 +37,7 @@ enum Event {
     Map(u64),
     Drain,
     Unmap(u64),
+    Nvme(&'static str),
 }
 struct State {
     parent: BTreeMap<u16, u8>,
@@ -210,7 +211,10 @@ unsafe impl Registers for Model {
                     }
                 }
                 let mut value = value;
-                if posted == NVME + 0x84 {
+                if [ROOT, BRIDGE, NVME]
+                    .into_iter()
+                    .any(|base| posted == base + 0x84)
+                {
                     let old = state.child(posted, 2);
                     value = value & !0x8000 | if value & 0x8000 == 0 { old & 0x8000 } else { 0 };
                     if state.pm_failure {
@@ -873,3 +877,5 @@ fn original_resource_identity_and_epoch_gate_real_registry_maps_and_platform_ret
     assert_ne!(unmaps[0], unmaps[1]);
     assert_eq!(unmaps[1], unmaps[2]);
 }
+
+mod composed;
