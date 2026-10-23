@@ -40,8 +40,44 @@ mod sha32;
 mod sha512;
 pub(crate) mod shifts;
 mod sqrt;
+mod structure_checked;
 mod structure_memory;
 mod widening;
+
+/// Fixed-width SIMD memory routing; checked bodies never use private-RAM emitters.
+#[derive(Clone, Copy)]
+pub(crate) enum CheckedMemoryOperand {
+    Fixed(memory_checked::CheckedOperand),
+    Structure(structure_checked::CheckedOperand),
+}
+
+impl CheckedMemoryOperand {
+    pub(crate) fn from_operation(
+        operation: &crate::aarch64::Operation,
+        profile: crate::block::CheckedMemoryProfile,
+    ) -> Option<Self> {
+        memory_checked::CheckedOperand::from_operation(operation, profile)
+            .map(Self::Fixed)
+            .or_else(|| {
+                structure_checked::CheckedOperand::from_operation(operation, profile)
+                    .map(Self::Structure)
+            })
+    }
+
+    pub(crate) fn requirements(&self) -> crate::context::memory::MemoryRequirements {
+        match self {
+            Self::Fixed(operand) => operand.requirements(),
+            Self::Structure(operand) => operand.requirements(),
+        }
+    }
+
+    pub(crate) fn emit_context(&self, code: &mut Vec<u8>, pc: u64, target: crate::TargetCpu) {
+        match self {
+            Self::Fixed(operand) => operand.emit_context(code, pc),
+            Self::Structure(operand) => operand.emit_context(code, pc, target),
+        }
+    }
+}
 
 fn vector_offset(vector: u8) -> u32 {
     (core::mem::offset_of!(crate::GuestState, v) + usize::from(vector) * 16) as u32

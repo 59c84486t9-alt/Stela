@@ -98,7 +98,7 @@ mod scalable_matrix;
 pub(crate) mod shared_memory;
 mod simd;
 mod stack_alignment;
-pub(crate) use simd::memory_checked::CheckedOperand as CheckedFixedMemoryOperand;
+pub(crate) use simd::CheckedMemoryOperand as CheckedFixedMemoryOperand;
 pub mod cache_clean;
 pub(crate) mod sme;
 pub(crate) mod sve;

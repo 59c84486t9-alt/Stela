@@ -402,7 +402,7 @@ impl Decoded {
             Self::MemoryPair(operand) => {
                 crate::x86_64::memory_store::checked_pair::emit_context(code, operand, pc.0)
             }
-            Self::MemoryFixed(operand) => operand.emit_context(code, pc.0),
+            Self::MemoryFixed(operand) => operand.emit_context(code, pc.0, target),
             Self::SharedMemory(operand) => operand.emit(code, pc.0),
             Self::Exclusive(operand) => {
                 crate::x86_64::exclusive::emit_context(code, operand, pc.0)?
@@ -597,6 +597,42 @@ mod checked_register_tests {
                 Decoded::checked_ordinary(instruction, CheckedMemoryProfile::SpAlignmentDisabled)
             {
                 assert!(!matches!(decoded, Decoded::Ordinary(_)));
+            }
+        }
+    }
+
+    #[test]
+    fn structured_simd_uses_fixed_width_service_routing_for_every_address_mode() {
+        let pc = GuestAddress(0x4000);
+        for class in [
+            0x4c40_0044u32, // original LD4 .16B
+            0x4c00_005f,    // ST4 .16B, V31 wrap
+            0x0c40_705f,    // LD1 .8B
+            0x0c00_205f,    // ST1 four .8B registers
+            0x4d60_205f,    // LD4 lane
+            0x4d20_205f,    // ST4 lane
+            0x0d60_e05f,    // LD4R .8B
+            0x4d60_e05f,    // LD4R .16B
+        ] {
+            for addressing in [0, (1 << 23) | (31 << 16), (1 << 23) | (2 << 16)] {
+                let instruction = Decoder.lift(pc, class | addressing).unwrap();
+                assert!(!checked_register_asimd(&instruction.operation));
+                for profile in [
+                    CheckedMemoryProfile::SpAlignmentEnabled,
+                    CheckedMemoryProfile::SpAlignmentDisabled,
+                ] {
+                    let decoded = Decoded::checked_ordinary(instruction.clone(), profile).unwrap();
+                    assert!(matches!(decoded, Decoded::MemoryFixed(_)));
+                    assert_eq!(
+                        decoded.memory_requirements().required_flags & flags::ASIMD,
+                        flags::ASIMD
+                    );
+                    let mut code = Vec::new();
+                    decoded
+                        .emit_checked_ordinary(&mut code, pc, TargetCpu::Baseline, &mut Vec::new())
+                        .unwrap();
+                    assert!(!code.is_empty());
+                }
             }
         }
     }
