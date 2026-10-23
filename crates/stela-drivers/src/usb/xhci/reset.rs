@@ -1002,6 +1002,8 @@ pub(crate) mod tests {
             doorbells: 0x1000,
             context_bytes: context,
             dma_profile: super::super::dma::Profile::SPEC,
+            hardware: hardware::State::Running,
+            quirks: quirks::Profile::default(),
             max_primary_streams: 4,
             stream_policy: streams::Policy::Standard,
             iso_caps: iso::Capabilities::new(0x100, 0, 0),

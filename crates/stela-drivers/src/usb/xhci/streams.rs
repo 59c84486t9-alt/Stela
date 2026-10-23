@@ -752,6 +752,8 @@ mod tests {
                 doorbells: 0x1000,
                 context_bytes,
                 dma_profile: dma::Profile::SPEC,
+                hardware: hardware::State::Running,
+                quirks: quirks::Profile::default(),
                 max_primary_streams: 16,
                 stream_policy: Policy::Standard,
                 iso_caps: iso::Capabilities::new(0x100, 0, 0),

@@ -29,21 +29,24 @@
 //! transfer completions require acknowledged Stop Endpoint and Set TR Dequeue;
 //! failed cancellation poisons the endpoint. An unresolved command completion or
 //! fatal controller status prevents all later DMA/ring mutation until an
-//! independently proven controller reset (not implemented as recovery here).
+//! independently proven controller reset and fresh lifecycle publication.
 //!
-//! Root-direct FS/HS isochronous service intervals use the dedicated queued
-//! submit_iso/completed_iso API on any xHCI 1.0+ controller. Payloads fit
-//! one TRB/service and completion ownership survives uncertain cancellation.
+//! FS/HS and standard SuperSpeed isochronous service intervals, including hub
+//! routes and actual USB2 transaction translators, use queued submit_iso /
+//! completed_iso on xHCI 1.0+. Payloads fit one TRB/service and completion
+//! ownership survives uncertain cancellation. Extended SSP payloads are refused.
 //!
 //! Hubs require observed healthy power and retained upstream current contracts:
 //! actual root protocol/power selects the USB-standard default, and actual
 //! configuration descriptors and hub status bound downstream current. Refused
 //! rather than handled:
-//! SuperSpeed/hub-routed isochronous endpoints, secondary stream arrays, hubs more than five tiers
-//! deep, and controllers without 4 KiB pages. The retained [`Host`] explicitly
+//! Extended SSP isochronous payloads, secondary stream arrays, hubs more than
+//! five tiers deep, and controllers without 4 KiB pages. The retained [`Host`] explicitly
 //! polls root events and hub bitmaps after attach and returns actual topology
 //! changes. Old IDs remain tombstones; finite slot exhaustion is reported.
-//! Global suspend/resume and hub over-current recovery remain unsupported.
+//! Controller save/restore requires observed U3 roots and acknowledged CSS/CRS;
+//! reset-on-resume profiles require fresh lifecycle publication. Hub over-current
+//! recovery remains a separate topology operation.
 use super::{audio, bluetooth, cdc, ethernet, hid, storage};
 use crate::{
     Clock, Handoff,
@@ -68,6 +71,7 @@ mod descriptor;
 mod dma;
 mod endpoint;
 mod enumerate;
+mod hardware;
 mod hub;
 mod iso;
 mod identity;
@@ -75,6 +79,7 @@ mod lifecycle;
 #[cfg(test)]
 pub(crate) mod model;
 mod power;
+mod quirks;
 mod reset;
 mod ring;
 mod streams;
@@ -96,6 +101,7 @@ pub const CLASS: [u8; 3] = [0x0c, 0x03, 0x30];
 const HCSPARAMS1: usize = 0x04;
 const HCSPARAMS2: usize = 0x08;
 const HCCPARAMS1: usize = 0x10;
+const HCCPARAMS2: usize = 0x1c;
 const DBOFF: usize = 0x14;
 const RTSOFF: usize = 0x18;
 // Operational registers.
@@ -397,6 +403,8 @@ pub struct Controller {
     max_primary_streams: u32,
     stream_policy: streams::Policy,
     iso_caps: iso::Capabilities,
+    hardware: hardware::State,
+    quirks: quirks::Profile,
     max_slots: usize,
     max_ports: u8,
     /// Each root port's USB major revision from the Supported Protocol
@@ -437,13 +445,36 @@ impl Controller {
         Self::with_dma_profile(registers, clock, dma, location, dma::Profile::SPEC)
     }
 
+    #[cfg(test)]
     fn with_dma_profile(
-        mut registers: Box<dyn Registers>,
+        registers: Box<dyn Registers>,
         clock: Clock,
         dma: &mut dyn DmaAllocator,
         location: String,
         profile: dma::Profile,
     ) -> Result<Self, BlockError> {
+        Self::with_hardware_profile(
+            registers,
+            clock,
+            dma,
+            location,
+            hardware::Policy {
+                dma: profile,
+                ..Default::default()
+            },
+            || Ok(()),
+        )
+    }
+
+    fn with_hardware_profile(
+        mut registers: Box<dyn Registers>,
+        clock: Clock,
+        dma: &mut dyn DmaAllocator,
+        location: String,
+        policy: hardware::Policy,
+        after_reset: impl FnOnce() -> Result<(), BlockError>,
+    ) -> Result<Self, BlockError> {
+        let profile = policy.dma;
         let capability = registers.read32(0);
         let operational = (capability & 0xff) as usize;
         let parameters1 = registers.read32(HCSPARAMS1);
@@ -509,24 +540,21 @@ impl Controller {
                 at += next * 4;
             }
         }
-        // Halt, then reset (4.2).
-        if registers.read32(operational + USBSTS) & HCH == 0 {
-            let command = registers.read32(operational + USBCMD);
-            registers.write32(operational + USBCMD, command & !RUN);
-            if !wait(&mut *registers, clock, HALT_US, |r| {
-                r.read32(operational + USBSTS) & HCH != 0
-            }) {
-                return Err(BlockError::Timeout);
-            }
-        }
-        registers.write32(operational + USBCMD, HCRST);
-        clock.delay(profile.reset_settle_us());
-        let reset = wait(&mut *registers, clock, RESET_US, |r| {
-            r.read32(operational + USBCMD) & HCRST == 0 && r.read32(operational + USBSTS) & CNR == 0
-        });
-        if !reset {
-            return Err(BlockError::Timeout);
-        }
+        hardware::halt(&mut *registers, clock, operational, HALT_US)?;
+        hardware::pre_reset(
+            &mut *registers,
+            operational,
+            runtime,
+            (parameters1 >> 8 & 0x7ff) as usize,
+            policy.quirks,
+        )?;
+        hardware::reset(
+            &mut *registers,
+            clock,
+            operational,
+            profile.reset_settle_us(),
+        )?;
+        after_reset()?;
         if registers.read32(operational + PAGESIZE) & 1 == 0 {
             return Err(BlockError::Unsupported(
                 "xHCI controller without 4 KiB pages",
@@ -561,12 +589,14 @@ impl Controller {
         registers.write32(runtime + ERSTSZ, 1);
         registers.write64(runtime + ERDP, events.physical());
         registers.write64(runtime + ERSTBA, event_table.physical());
-        registers.write32(operational + USBCMD, RUN);
-        if !wait(&mut *registers, clock, HALT_US, |r| {
-            r.read32(operational + USBSTS) & HCH == 0
-        }) {
-            return Err(BlockError::Timeout);
-        }
+        hardware::start(&mut *registers, clock, operational)?;
+        let iso_caps =
+            iso::Capabilities::new((capability >> 16) as u16, parameters2, capabilities1);
+        let iso_caps = if capability >> 16 > 0x100 {
+            iso_caps.extended(registers.read32(HCCPARAMS2))
+        } else {
+            iso_caps
+        };
         let mut slots = Vec::new();
         slots.resize_with(max_slots + 1, || None);
         Ok(Self {
@@ -578,8 +608,10 @@ impl Controller {
             context_bytes,
             dma_profile: profile,
             max_primary_streams: 1 << ((capabilities1 >> 12 & 0xf) + 1),
-            stream_policy: streams::Policy::Unknown,
-            iso_caps: iso::Capabilities::new((capability >> 16) as u16, parameters2, capabilities1),
+            stream_policy: policy.streams,
+            iso_caps,
+            hardware: hardware::State::Running,
+            quirks: policy.quirks,
             max_slots,
             max_ports,
             port_major,
@@ -633,6 +665,9 @@ impl Controller {
     /// system or host controller error (5.4.2) stops the controller for
     /// good.
     fn drain(&mut self) {
+        if self.hardware.ready().is_err() {
+            return;
+        }
         let status = self.registers.read32(self.operational + USBSTS);
         if status & (HSE | HCE) != 0 && self.error.is_none() {
             self.error = Some(status);
@@ -695,6 +730,7 @@ impl Controller {
     /// Before any new command-dependent DMA mutation or doorbell. A late
     /// completion cannot establish a new command generation or undo poison.
     fn ready(&mut self) -> Result<(), BlockError> {
+        self.hardware.ready()?;
         self.drain();
         if let Some(status) = self.error {
             self.command_poisoned = true;
@@ -840,6 +876,7 @@ pub fn attach_with_provider(
 ) -> Result<Found, BlockError> {
     let stream_policy = streams::pci_policy(function)?;
     let dma_profile = dma::Profile::pci(function.vendor, function.device);
+    let quirks = quirks::Profile::pci(function)?;
     function.power_up(&handoff.clock)?;
     let bars = function.bars();
     // The capability, operational, runtime and doorbell registers all lie
@@ -864,8 +901,12 @@ pub fn attach_with_provider(
         dma,
         location,
         firmware,
-        stream_policy,
-        dma_profile,
+        hardware::Policy {
+            streams: stream_policy,
+            dma: dma_profile,
+            quirks,
+        },
+        || quirks::after_reset(function, handoff.clock),
     )
 }
 
@@ -901,8 +942,8 @@ pub fn start_with_provider(
         dma,
         location,
         firmware,
-        streams::Policy::Unknown,
-        dma::Profile::SPEC,
+        hardware::Policy::default(),
+        || Ok(()),
     )
 }
 
@@ -912,15 +953,14 @@ fn start_with_policies(
     dma: &mut dyn DmaAllocator,
     location: String,
     firmware: &dyn crate::firmware::Provider,
-    stream_policy: streams::Policy,
-    dma_profile: dma::Profile,
+    policy: hardware::Policy,
+    after_reset: impl FnOnce() -> Result<(), BlockError>,
 ) -> Result<Found, BlockError> {
     let mut controller =
-        Controller::with_dma_profile(registers, clock, dma, location, dma_profile)?;
+        Controller::with_hardware_profile(registers, clock, dma, location, policy, after_reset)?;
     // The policy came from this same actual PCI function before BAR access,
     // and applies only to the controller reset just completed above. No public
     // raw-register caller can supply a guessed PCI identity or enable streams.
-    controller.stream_policy = stream_policy;
     let mut found = Found::default();
     let devices = controller.enumerate(dma, &mut found.failures);
     let shared: Shared = Rc::new(RefCell::new(controller));

@@ -167,6 +167,8 @@ pub(crate) fn address_controller(
         doorbells: 0x1000,
         context_bytes: 32,
         dma_profile: dma::Profile::SPEC,
+        hardware: hardware::State::Running,
+        quirks: quirks::Profile::default(),
         max_primary_streams: 4,
         stream_policy: streams::Policy::Unknown,
         iso_caps: iso::Capabilities::new(0x100, 0, 0),

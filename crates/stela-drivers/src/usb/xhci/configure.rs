@@ -90,15 +90,28 @@ impl Controller {
                     "xHCI endpoint replacement requires teardown"
                 }));
             }
-            contexts.push(endpoint::Context::new(endpoint, speed)?);
+            let context = endpoint::Context::new(endpoint, speed)?;
+            let context = if endpoint.kind() == 1 {
+                self.iso_caps.context(context)
+            } else {
+                context
+            };
+            contexts.push(self.quirks.endpoint(context)?);
             selected |= 1 << dci;
         }
         if endpoints.iter().any(|ep| ep.kind() == 1) {
             self.iso_caps.admit()?;
             let attachment = self.slot(slot)?.attachment;
-            if attachment.tier != 0 || attachment.route != 0 || attachment.translator.is_some() {
+            if attachment.tier > MAX_TIERS
+                || attachment.route >> (4 * MAX_TIERS) != 0
+                || (attachment.tier == 0
+                    && (attachment.route != 0
+                        || attachment.parent.is_some()
+                        || attachment.translator.is_some()))
+                || (attachment.tier != 0 && (attachment.route == 0 || attachment.parent.is_none()))
+            {
                 return Err(BlockError::Unsupported(
-                    "isochronous transport currently requires root-direct USB2",
+                    "invalid isochronous attachment route",
                 ));
             }
         }

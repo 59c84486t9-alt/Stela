@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Isochronous scheduling/completion follows pinned Linux xhci-ring.c and xhci-mem.c.
 // Copyright (C) 2008 Intel Corp. Author: Sarah Sharp.
-//! Queued root-direct USB2 service intervals on retained native transfer rings.
+//! Queued USB2 and SuperSpeed service intervals on retained native transfer rings.
 use super::*;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -48,11 +48,18 @@ pub struct IsoTransfer {
     trb: u64,
 }
 
+impl IsoTransfer {
+    pub(super) fn hardware_slot(&self) -> u8 {
+        self.slot
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Capabilities {
     version: u16,
     ist: u32,
     cfc: bool,
+    lec: bool,
 }
 impl Capabilities {
     pub fn new(version: u16, hcs2: u32, hcc1: u32) -> Self {
@@ -60,7 +67,19 @@ impl Capabilities {
             version,
             ist: (hcs2 & 7) * if hcs2 & 8 != 0 { 8 } else { 1 },
             cfc: hcc1 & (1 << 11) != 0,
+            lec: false,
         }
+    }
+    pub fn extended(mut self, hcc2: u32) -> Self {
+        // Large ESIT Payload Capability removes the legacy Mult context field.
+        self.lec = self.version > 0x100 && hcc2 & (1 << 4) != 0;
+        self
+    }
+    pub fn context(self, mut context: endpoint::Context) -> endpoint::Context {
+        if self.lec {
+            context.info &= !(3 << 8);
+        }
+        context
     }
     pub fn admit(self) -> Result<(), BlockError> {
         // Pre-1.0 hosts need Linux's 0.96 Link-TRB and TLBPC quirks, which
@@ -78,13 +97,15 @@ impl Capabilities {
 pub(super) struct Recipe {
     packet: u32,
     burst: u32,
+    mult: u32,
+    superspeed: bool,
     exponent: u32,
     payload: u32,
     is_in: bool,
 }
 impl Recipe {
     pub fn new(ep: &Endpoint, speed: u8) -> Result<Self, BlockError> {
-        let invalid = || BlockError::Unsupported("invalid root-direct USB2 isochronous endpoint");
+        let invalid = || BlockError::Unsupported("invalid speed-specific isochronous endpoint");
         let packet = u32::from(ep.max_packet & 0x7ff);
         let transactions = u32::from(ep.max_packet >> 11 & 3);
         if ep.kind() != 1
@@ -95,14 +116,38 @@ impl Recipe {
             || ep.max_packet & 0xe000 != 0
             || packet == 0
             || !(1..=16).contains(&ep.interval)
-            || ep.companion.is_some()
         {
             return Err(invalid());
         }
-        let (burst, exponent) = match speed {
-            FULL_SPEED if packet <= 1023 && transactions == 0 => (0, u32::from(ep.interval) + 2),
-            HIGH_SPEED if packet <= 1024 && transactions <= 2 => {
-                (transactions, u32::from(ep.interval) - 1)
+        let superspeed = matches!(speed, SUPER_SPEED | SUPER_SPEED_PLUS);
+        let (burst, mult, exponent, payload) = match speed {
+            FULL_SPEED if packet <= 1023 && transactions == 0 && ep.companion.is_none() => {
+                (0, 0, u32::from(ep.interval) + 2, packet)
+            }
+            HIGH_SPEED if packet <= 1024 && transactions <= 2 && ep.companion.is_none() => (
+                transactions,
+                0,
+                u32::from(ep.interval) - 1,
+                packet * (transactions + 1),
+            ),
+            SUPER_SPEED | SUPER_SPEED_PLUS if packet <= 1024 && transactions == 0 => {
+                let companion = ep.companion.ok_or(BlockError::Unsupported(
+                    "missing SuperSpeed isochronous companion",
+                ))?;
+                let burst = u32::from(companion.max_burst);
+                let mult = u32::from(companion.attributes & 3);
+                let payload = u32::from(companion.bytes_per_interval);
+                if burst > 15
+                    || mult > 2
+                    || companion.attributes & !3 != 0
+                    || payload == 0
+                    || payload > packet * (burst + 1) * (mult + 1)
+                {
+                    // SSP extended companion/large payload needs its actual
+                    // descriptor and ETE layout, never an inferred byte count.
+                    return Err(invalid());
+                }
+                (burst, mult, u32::from(ep.interval) - 1, payload)
             }
             _ => return Err(invalid()),
         };
@@ -116,14 +161,16 @@ impl Recipe {
         Ok(Self {
             packet,
             burst,
+            mult,
+            superspeed,
             exponent,
-            payload: packet * (burst + 1),
+            payload,
             is_in: ep.is_in(),
         })
     }
     pub fn context(self) -> endpoint::Context {
         endpoint::Context {
-            info: self.exponent << 16,
+            info: self.exponent << 16 | self.mult << 8,
             info2: (if self.is_in { 5 } else { 1 }) << 3 | self.burst << 8 | self.packet << 16,
             tx_info: self.payload | self.payload << 16,
         }
@@ -285,15 +332,28 @@ fn completion(code: u32, bytes: usize, residual: usize) -> Result<IsoCompletion,
 
 fn trb_control(recipe: Recipe, length: usize, frame: u32) -> u32 {
     let packets = (length as u32).div_ceil(recipe.packet).max(1);
-    ISOCH << 10 | IOC | frame | (packets - 1) << 16 | if recipe.is_in { ISP } else { 0 }
+    let (bursts, last_packets) = if recipe.superspeed {
+        (
+            packets.div_ceil(recipe.burst + 1) - 1,
+            (packets - 1) % (recipe.burst + 1),
+        )
+    } else {
+        (0, packets - 1)
+    };
+    ISOCH << 10
+        | IOC
+        | frame
+        | bursts << 7
+        | last_packets << 16
+        | if recipe.is_in { ISP } else { 0 }
 }
 
 impl Controller {
-    /// Queue one USB2 isochronous service interval. The entire DMA extent must
+    /// Queue one USB2 or SuperSpeed isochronous service interval. The entire DMA extent must
     /// stay live and unmodified until terminal completion or successful endpoint
     /// cancellation. Buffers must not cross 64 KiB; maximum payload is the actual
-    /// endpoint's packet size times its advertised HS transactions (<=3072).
-    /// A full queue or late schedule is refused before any ring publication.
+    /// endpoint's advertised bytes per service interval (up to 49,152 bytes).
+    /// A full queue is refused before publication; hardware reports missed service for late TDs.
     pub fn submit_iso(
         &mut self,
         slot: u8,
@@ -454,6 +514,7 @@ pub(super) mod tests {
         control: u32,
     }
     struct Hardware {
+        speed: u8,
         commands: u64,
         command_index: usize,
         events: u64,
@@ -587,10 +648,15 @@ pub(super) mod tests {
             assert_eq!(control >> 10 & 63, ISOCH);
             assert_ne!(control & IOC, 0);
             let packet = Self::word(ep + 4) >> 16;
-            assert_eq!(
-                control >> 16 & 15,
-                (bytes as u32).div_ceil(packet).max(1) - 1
-            );
+            let packets = (bytes as u32).div_ceil(packet).max(1);
+            if self.speed >= SUPER_SPEED {
+                let maximum = (Self::word(ep + 4) >> 8 & 0xff) + 1;
+                assert_eq!(control >> 7 & 3, (packets - 1) / maximum);
+                assert_eq!(control >> 16 & 15, (packets - 1) % maximum);
+            } else {
+                assert_eq!(control >> 7 & 3, 0);
+                assert_eq!(control >> 16 & 15, packets - 1);
+            }
             let buffer = Self::long(trb);
             assert!(buffer % 65536 + bytes as u64 <= 65536);
             assert!(
@@ -691,6 +757,7 @@ pub(super) mod tests {
         let events = dma.allocate(RING_TRBS * TRB, RING_TRBS * TRB).unwrap();
         let output = dma.allocate(32 * context_bytes, 64).unwrap();
         let model = Rc::new(RefCell::new(Hardware {
+            speed,
             commands: commands.buffer.physical(),
             command_index: 0,
             events: events.physical(),
@@ -737,6 +804,8 @@ pub(super) mod tests {
                 doorbells: 0x1000,
                 context_bytes,
                 dma_profile: dma::Profile::SPEC,
+                hardware: hardware::State::Running,
+                quirks: quirks::Profile::default(),
                 max_primary_streams: 4,
                 stream_policy: streams::Policy::Unknown,
                 iso_caps: Capabilities::new(0x110, 0xb, if cfc { 1 << 11 } else { 0 }),
@@ -760,6 +829,136 @@ pub(super) mod tests {
             },
             model,
         )
+    }
+
+    #[test]
+    #[ignore = "requires fresh pinned Linux STELA_XHCI_SS_ISO_ORACLE directory; authored UNRUN"]
+    fn unchanged_linux_superspeed_iso_burst_counts_and_large_esit_mult() {
+        use sha2::{Digest, Sha256};
+        let directory =
+            std::path::PathBuf::from(std::env::var("STELA_XHCI_SS_ISO_ORACLE").unwrap());
+        let trace = std::fs::read(directory.join("trace.txt")).unwrap();
+        let receipt = std::fs::read_to_string(directory.join("receipt.json")).unwrap();
+        for digest in [
+            "abfe6f6f70bdeaf7a279a734bdab034ef014f329785ccb8c5f5cf3e763320198",
+            "8c15822f3e118fc5ee9e647b5fc82f75d72f51519f1d9f6dee96d222fe6c9882",
+        ] {
+            assert!(receipt.contains(digest));
+        }
+        assert!(receipt.contains(&alloc::format!(
+            "\"trace_sha256\": \"{:x}\"",
+            Sha256::digest(&trace)
+        )));
+        let text = std::str::from_utf8(&trace).unwrap();
+        let mut count = 0;
+        for line in text.lines() {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            assert_eq!(fields[0], "B");
+            let values: Vec<u32> = fields[1..]
+                .iter()
+                .map(|value| value.parse().unwrap())
+                .collect();
+            assert_eq!(values.len(), 8);
+            let speed = values[0] as u8;
+            let payload = 1024 * (values[2] + 1) * (values[3] + 1);
+            let ep = Endpoint {
+                address: 0x81,
+                attributes: 1,
+                max_packet: 1024,
+                interval: 1,
+                companion: Some(SuperSpeedCompanion {
+                    max_burst: values[2] as u8,
+                    attributes: values[3] as u8,
+                    bytes_per_interval: payload as u16,
+                }),
+            };
+            let recipe = Recipe::new(&ep, speed).unwrap();
+            let caps = Capabilities::new(0x110, 0, 0).extended(values[1] << 4);
+            let context = caps.context(recipe.context());
+            let control = trb_control(recipe, values[4] as usize * 1024, 0);
+            assert_eq!(context.info >> 8 & 3, values[5]);
+            assert_eq!(control >> 7 & 3, values[6]);
+            assert_eq!(control >> 16 & 15, values[7]);
+            count += 1;
+        }
+        assert_eq!(count, 3264);
+        assert!(receipt.contains("\"rows\": 3264"));
+    }
+
+    #[test]
+    fn superspeed_service_bursts_and_lec_contexts_cover_all_standard_mult_values() {
+        for speed in [SUPER_SPEED, SUPER_SPEED_PLUS] {
+            for burst in 0..=15u8 {
+                for mult in 0..=2u8 {
+                    let payload = 1024 * (u16::from(burst) + 1) * (u16::from(mult) + 1);
+                    let ep = Endpoint {
+                        address: 0x81,
+                        attributes: 1,
+                        max_packet: 1024,
+                        interval: 4,
+                        companion: Some(SuperSpeedCompanion {
+                            max_burst: burst,
+                            attributes: mult,
+                            bytes_per_interval: payload,
+                        }),
+                    };
+                    let recipe = Recipe::new(&ep, speed).unwrap();
+                    let context = recipe.context();
+                    assert_eq!(context.info, 3 << 16 | u32::from(mult) << 8);
+                    assert_eq!(context.info2, 5 << 3 | u32::from(burst) << 8 | 1024 << 16);
+                    assert_eq!(
+                        context.tx_info,
+                        u32::from(payload) | u32::from(payload) << 16
+                    );
+                    let lec = Capabilities::new(0x110, 0, 0)
+                        .extended(1 << 4)
+                        .context(context);
+                    assert_eq!(lec.info, 3 << 16);
+                    for packets in 1..=(u32::from(burst) + 1) * (u32::from(mult) + 1) {
+                        let field = trb_control(recipe, packets as usize * 1024, 0);
+                        assert_eq!(field >> 7 & 3, (packets - 1) / (u32::from(burst) + 1));
+                        assert_eq!(field >> 16 & 15, (packets - 1) % (u32::from(burst) + 1));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn routed_usb2_and_superspeed_iso_complete_actual_retained_ring_payloads() {
+        for speed in [FULL_SPEED, HIGH_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS] {
+            let mut backing = vec![0u64; 64 * 1024];
+            let base = backing.as_mut_ptr() as u64;
+            let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+            let (mut c, model) = controller(&mut dma, speed, 32, true);
+            let mut ep = endpoint(0x81, speed);
+            if speed >= SUPER_SPEED {
+                ep.max_packet = 1024;
+                ep.companion = Some(SuperSpeedCompanion {
+                    max_burst: 3,
+                    attributes: 2,
+                    bytes_per_interval: 12 * 1024,
+                });
+            }
+            c.slot(1).unwrap().attachment.tier = 1;
+            c.slot(1).unwrap().attachment.route = 2;
+            c.slot(1).unwrap().attachment.parent = Some((2, 2));
+            if speed == FULL_SPEED {
+                c.slot(1).unwrap().attachment.translator = Some((2, 2));
+            }
+            c.configure(1, &[ep], None, &mut dma).unwrap();
+            let mut payload = dma.allocate(16 * 1024, 16 * 1024).unwrap();
+            payload.bytes_mut().fill(0xa7);
+            let length = if speed >= SUPER_SPEED { 12 * 1024 } else { 128 };
+            let ticket = c
+                .submit_iso(1, ep.dci(), payload.physical(), length)
+                .unwrap();
+            assert!(c.completed_iso(&ticket).is_none());
+            model.borrow_mut().complete(ep.dci(), 0, SUCCESS, 0);
+            assert_eq!(c.completed_iso(&ticket).unwrap().unwrap().bytes, length);
+            assert!(payload.bytes()[..length].iter().any(|byte| *byte != 0xa7));
+            assert!(c.completed_iso(&ticket).unwrap().is_err());
+        }
     }
 
     #[test]
