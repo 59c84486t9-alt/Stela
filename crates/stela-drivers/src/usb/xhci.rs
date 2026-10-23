@@ -73,8 +73,8 @@ mod endpoint;
 mod enumerate;
 mod hardware;
 mod hub;
-mod iso;
 mod identity;
+mod iso;
 mod lifecycle;
 #[cfg(test)]
 pub(crate) mod model;
