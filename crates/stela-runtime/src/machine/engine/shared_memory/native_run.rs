@@ -180,7 +180,7 @@ impl ArtifactCache {
 
 struct Artifact {
     key: ArtifactKey,
-    identity: Identity,
+    identity: Arc<Identity>,
     code: Arc<Vec<u8>>,
     source_map: Vec<(stela_compiler::GuestAddress, usize)>,
     source: Vec<u8>,
@@ -191,6 +191,8 @@ struct Artifact {
 impl Artifact {
     fn retained_bytes(&self) -> usize {
         core::mem::size_of::<Self>()
+            + 2 * core::mem::size_of::<usize>()
+            + core::mem::size_of::<Identity>()
             + 2 * core::mem::size_of::<usize>()
             + crate::machine::engine::installed_code::ARC_VEC_METADATA_BYTES
             + self.code.capacity()
@@ -230,7 +232,10 @@ pub struct ReturnedRun<'a> {
 }
 #[derive(Debug)]
 pub struct Observation {
-    pub identity: Identity,
+    /// Immutable provenance shared with the exact artifact that executed.
+    /// Cloning an observation's provenance retains its bytes without copying
+    /// three digest allocations on every warm native return.
+    pub identity: Arc<Identity>,
     pub artifact_cache: ArtifactCacheStats,
     pub native: Option<NativeExit>,
     pub memory_fault: Option<crate::memory::domain::MemoryFault>,
@@ -264,7 +269,7 @@ impl<'a> publication::NativeFrame for NativeRun<'a> {
     type Returned = ReturnedRun<'a>;
     fn execute(mut self, host: &mut dyn Host) -> Self::Returned {
         let mut observation = Observation {
-            identity: self.artifact.identity.clone(),
+            identity: Arc::clone(&self.artifact.identity),
             artifact_cache: self.memory.artifacts.stats(),
             native: None,
             memory_fault: None,
@@ -588,9 +593,13 @@ fn prepare<'a>(
         if bytes == 0 || !bytes.is_multiple_of(4) || bytes > super::super::window(pc) {
             return Err(MemoryStatus::Domain);
         }
-        let mut input = alloc::vec![0; bytes];
-        memory.fetch(&controls, pc, &mut input)?;
-        (input == artifact.source
+        // The existing compiler block bound also bounds private revalidation
+        // staging. Every hit still walks source permissions and copies actual
+        // canonical bytes; only the per-round heap allocation disappears.
+        let mut staging = [0; super::super::MAX_BLOCK_BYTES as usize];
+        let input = staging.get_mut(..bytes).ok_or(MemoryStatus::Domain)?;
+        memory.fetch(&controls, pc, input)?;
+        (input == artifact.source.as_slice()
             && input
                 .as_chunks::<4>()
                 .0
@@ -660,7 +669,7 @@ fn prepare<'a>(
             };
             let artifact = Arc::new(Artifact {
                 key,
-                identity,
+                identity: Arc::new(identity),
                 code: Arc::new(compiled.native.x86_64_code),
                 source_map: compiled.native.source_map,
                 branch_type: source::branch_type(
@@ -1174,6 +1183,66 @@ mod artifact_tests {
         assert_eq!((stats.compiled, stats.reused, stats.entries), (2, 2, 1));
         assert!(stats.retained_bytes <= ARTIFACT_CACHE_BYTES);
     }
+
+    #[test]
+    fn actual_return_shares_immutable_provenance_after_artifact_replacement() {
+        let (mut machine, ram) = fixture();
+        let bytes = source_window(machine.cpu.pc, &machine.breakpoints, &machine.traces);
+        let run = prepare(
+            &mut machine.cpu,
+            BINDING,
+            machine.current,
+            &machine.profile,
+            &machine.profile_missing,
+            &machine.admit_table,
+            bytes,
+        )
+        .unwrap();
+        let identity = Arc::clone(&run.artifact.identity);
+        let returned = publication::NativeFrame::execute(run, &mut machine.host);
+        let observation = returned.observation.as_ref().unwrap();
+        // The unassigned test Host refuses entry, while the real frame path
+        // constructs its observation from this exact prepared artifact.
+        assert_eq!(observation.status, Err(MemoryStatus::Unsupported));
+        assert!(Arc::ptr_eq(&identity, &observation.identity));
+        let retained = Arc::clone(&observation.identity);
+        drop(returned);
+        unsafe { ram.publish_physical(DATA, &0x91000800u32.to_le_bytes()) }.unwrap();
+        let changed = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(!Arc::ptr_eq(&retained, &changed.identity));
+        assert_ne!(retained.source_sha256, changed.identity.source_sha256);
+        assert_eq!(retained, identity);
+        machine.tighten_native_artifact_cache_budget(0).unwrap();
+        assert_eq!(retained, identity);
+    }
+
+    #[test]
+    fn warm_revalidation_reads_the_entire_maximum_compiler_window() {
+        let (mut machine, ram) = fixture();
+        let mut words = [0xd503201fu32; stela_compiler::block::MAX_BLOCK_INSTRUCTIONS];
+        *words.last_mut().unwrap() = 0x14000000;
+        let source: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        unsafe { ram.publish_physical(DATA, &source) }.unwrap();
+        let first = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert_eq!(
+            first.source.len(),
+            super::super::super::MAX_BLOCK_BYTES as usize
+        );
+        assert!(Arc::ptr_eq(
+            &first,
+            &prepare_artifact(&mut machine, BINDING).unwrap()
+        ));
+        let changed_offset = source.len() - 8;
+        unsafe { ram.publish_physical(DATA + changed_offset as u64, &0x91000400u32.to_le_bytes()) }
+            .unwrap();
+        let changed = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(!Arc::ptr_eq(&first, &changed));
+        assert_ne!(first.identity.source_sha256, changed.identity.source_sha256);
+        assert_eq!(
+            &changed.source[changed_offset..changed_offset + 4],
+            &0x91000400u32.to_le_bytes()
+        );
+    }
     #[test]
     fn new_host_points_cut_a_warm_artifact_before_the_observed_instruction() {
         for breakpoint in [false, true] {
@@ -1359,6 +1428,8 @@ mod artifact_tests {
         let (mut machine, _) = fixture();
         let artifact = prepare_artifact(&mut machine, BINDING).unwrap();
         let expected = core::mem::size_of::<Artifact>()
+            + 2 * core::mem::size_of::<usize>()
+            + core::mem::size_of::<Identity>()
             + 2 * core::mem::size_of::<usize>()
             + crate::machine::engine::installed_code::ARC_VEC_METADATA_BYTES
             + artifact.code.capacity()
