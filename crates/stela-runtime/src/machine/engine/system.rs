@@ -1491,7 +1491,7 @@ pub(super) fn identify(
 #[cfg(test)]
 mod tests {
     use super::super::tests::{BASE, machine, machine_on, normal_memory, one_timer_bank};
-    use super::{Code, Translation};
+    use super::{ACTLR_EN_TSO, ACTLR_ICDSB, Code, Translation};
     use crate::machine::{
         Chip, Stop,
         cpu::{HCR_HCD, HCR_TGE, HCR_TSC},
