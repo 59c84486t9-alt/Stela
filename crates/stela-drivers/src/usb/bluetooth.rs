@@ -19,7 +19,12 @@
 //! itself never initializes a controller. [`realtek::initialize`] adds exact
 //! RTL8761BU/RTL8822B stock-ROM identification and EPATCH v1 upload with owned
 //! observations. Other vendor/format variants remain explicit unsupported paths.
-//! A Bluetooth host stack independently establishes radio services.
+//! [`broadcom::initialize`] adds source-selected Broadcom/Cypress USB PatchRAM
+//! identification, complete HCD replay, genuine completion/credit handling and
+//! retained post-download observations. Matching vendor-specific HCI interfaces
+//! are admitted separately from the standard class; descriptor IDs never prove
+//! the runtime silicon or firmware. A Bluetooth host stack independently
+//! establishes radio services.
 //! A successful USB command submission is not HCI Command Complete/Status.
 //! The separate [`mediatek::media`] session adds this PC's initialized MT7925
 //! SCO/interrupt-ISO transport. Generic media, bulk serialization, physical
@@ -30,6 +35,7 @@
 //! the transport; failed hardware cancellation retains DMA ownership and prevents
 //! reuse. There is deliberately no generic method to mark firmware "ready".
 mod binding;
+pub mod broadcom;
 mod command;
 mod firmware;
 mod host;

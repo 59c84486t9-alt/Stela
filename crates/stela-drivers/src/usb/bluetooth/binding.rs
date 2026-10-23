@@ -32,8 +32,9 @@ impl Binding {
             return Err("Bluetooth transport supports USB full/high speed only");
         }
         if interface.alternate != 0
-            || (interface.class, interface.subclass, interface.protocol)
+            || ((interface.class, interface.subclass, interface.protocol)
                 != (CLASS, SUBCLASS, PROTOCOL)
+                && !super::broadcom::is_vendor_interface(device, interface))
         {
             return Err("not a legacy Bluetooth HCI interface");
         }

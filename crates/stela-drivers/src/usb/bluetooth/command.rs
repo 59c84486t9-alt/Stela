@@ -41,7 +41,9 @@ pub(super) fn packet(opcode: u16, parameters: &[u8]) -> Result<Vec<u8>, &'static
 /// Read `event` against the command `opcode` in flight.
 pub(super) fn response(event: &[u8], opcode: u16) -> Result<Response<'_>, &'static str> {
     let (credits, returned_opcode) = match event {
-        [COMMAND_COMPLETE, _, credits, low, high, _, ..] => {
+        [COMMAND_COMPLETE, length, credits, low, high, ..]
+            if event.len() == usize::from(*length) + 2 =>
+        {
             (*credits, u16::from_le_bytes([*low, *high]))
         }
         [COMMAND_STATUS, 4, _, credits, low, high] => (*credits, u16::from_le_bytes([*low, *high])),
@@ -50,6 +52,9 @@ pub(super) fn response(event: &[u8], opcode: u16) -> Result<Response<'_>, &'stat
     };
     if returned_opcode == NOP {
         return Ok(Response::Credits(credits));
+    }
+    if event[0] == COMMAND_COMPLETE && event.len() < 6 {
+        return Err("command completion lacks status");
     }
     if returned_opcode != opcode {
         return Err("command event for another opcode");
@@ -90,7 +95,7 @@ mod tests {
             })
         );
         assert_eq!(
-            response(&[0x0e, 3, 2, 0, 0, 0], reset),
+            response(&[0x0e, 3, 2, 0, 0], reset),
             Ok(Response::Credits(2))
         );
         assert_eq!(
@@ -102,5 +107,30 @@ mod tests {
             Err("malformed command event")
         );
         assert_eq!(response(&[0xff, 1, 6], reset), Ok(Response::Other));
+    }
+    #[test]
+    fn statusless_nop_grants_require_exact_lengths_and_do_not_complete_commands() {
+        for credits in [0, 1, 255] {
+            assert_eq!(
+                response(&[0x0e, 3, credits, 0, 0], 0x0c03),
+                Ok(Response::Credits(credits))
+            );
+        }
+        assert_eq!(
+            response(&[0x0e, 3, 1, 3, 0x0c], 0x0c03),
+            Err("command completion lacks status")
+        );
+        assert_eq!(
+            response(&[0x0e, 3, 1, 0, 0, 0], 0x0c03),
+            Err("malformed command event")
+        );
+        assert_eq!(
+            response(&[0x0e, 4, 1, 1, 0x10, 0], 0x0c03),
+            Err("command event for another opcode")
+        );
+        assert_eq!(
+            response(&[0x0f, 3, 0, 1, 3, 0x0c], 0x0c03),
+            Err("malformed command event")
+        );
     }
 }

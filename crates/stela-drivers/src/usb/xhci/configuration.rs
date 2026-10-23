@@ -226,6 +226,9 @@ pub(super) fn plan_with_controller(
         hid::CLASS => hid::plan(interface),
         cdc::COMMUNICATIONS => cdc::plan(interface, all),
         bluetooth::CLASS => bluetooth::Binding::new(device, interface).map(Plan::Bluetooth),
+        0xff if bluetooth::broadcom::is_vendor_interface(device, interface) => {
+            bluetooth::Binding::new(device, interface).map(Plan::Bluetooth)
+        }
         0xff => {
             let mut failure = "no supported vendor Ethernet interface setting";
             let mut chosen = None;
@@ -497,6 +500,27 @@ pub(super) mod tests {
             serial: None,
             language: None,
         }
+    }
+
+    #[test]
+    fn source_listed_broadcom_vendor_hci_is_selected_before_vendor_ethernet() {
+        let mut configuration = vec![
+            9, 2, 39, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 3, 0xff, 1, 1, 0, 7, 5, 0x81, 3, 16, 0, 1,
+            7, 5, 0x82, 2, 64, 0, 0, 7, 5, 0x02, 2, 64, 0, 0,
+        ];
+        let length = configuration.len() as u16;
+        configuration[2..4].copy_from_slice(&length.to_le_bytes());
+        let mut device = device(vec![configuration]);
+        device.descriptor[8..12].copy_from_slice(&[0x5c, 0x0a, 0xe8, 0x21]);
+        select(&mut device).unwrap();
+        assert_eq!(device.configuration_value(), 7);
+        let all = interfaces(&device.configuration);
+        assert!(matches!(
+            plan(&device, &all[0], &all),
+            Ok(Plan::Bluetooth(_))
+        ));
+        device.descriptor[8..12].copy_from_slice(&[0x34, 0x12, 0x78, 0x56]);
+        assert!(plan(&device, &all[0], &all).is_err());
     }
 
     #[test]
