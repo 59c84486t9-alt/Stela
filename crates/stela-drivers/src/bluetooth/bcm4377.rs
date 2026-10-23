@@ -9,6 +9,7 @@ mod boot;
 mod identity;
 mod initialize;
 pub mod memory;
+pub mod native;
 mod ring;
 pub use crate::usb::bluetooth::FirmwareReceipt;
 use crate::{
@@ -48,6 +49,7 @@ pub enum Space {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Unsupported(&'static str),
+    Native(native::Error),
     Memory(MemoryError),
     Dma(DmaError),
     Firmware(crate::firmware::Error),
@@ -196,6 +198,14 @@ pub unsafe trait Platform: 'static {
     fn write32(&mut self, space: Space, offset: u32, value: u32) -> Result<()>;
     fn read8(&mut self, space: Space, offset: u32) -> Result<u8>;
     fn now_us(&self) -> u64;
+    /// Serialized process service consumes a callback request before DMA polling.
+    fn service_begin(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// Native preparation can enable BM even before the first IPC publication.
+    fn retire_unpublished(&self) -> bool {
+        false
+    }
     fn arm_msi(&mut self) -> Result<()>;
     fn retire(&mut self) -> Result<()>;
 }
@@ -473,6 +483,7 @@ mod tests {
     //! to retained CPU mappings; model physical pages and CPU pointers are above
     //! 4GiB and are never used as the source's 32-bit DMA addresses.
     extern crate std;
+    mod native;
     use super::*;
     use crate::bus::{
         dma::{

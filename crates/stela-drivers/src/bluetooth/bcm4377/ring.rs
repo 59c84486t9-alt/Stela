@@ -403,6 +403,7 @@ impl<P: Platform> Transport<P> {
         Ok(())
     }
     pub(super) fn service(&mut self) -> Result<()> {
+        self.platform().service_begin()?;
         self.refresh_snapshot()?;
         if self.snapshot.boot_stage != 2 || self.snapshot.rti_status != 2 {
             return Err(Error::Protocol {
@@ -580,6 +581,8 @@ impl<P: Platform> Transport<P> {
         // retained root/platform must separately acknowledge whole retirement.
         if self.state != State::Allocated {
             self.refresh_snapshot()?;
+        }
+        if self.state != State::Allocated || self.platform().retire_unpublished() {
             self.retire_platform()?;
         }
         for (id, ring) in self.transfers.iter_mut().enumerate() {

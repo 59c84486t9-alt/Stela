@@ -13,7 +13,7 @@ pub mod msi;
 pub mod msix;
 pub mod owned;
 pub mod requester;
-pub use aspm::{disable_aspm_l1_2_link, disable_aspm_link};
+pub use aspm::{disable_aspm_l1_2_link, disable_aspm_link, native as native_aspm};
 
 const VENDOR: u16 = 0x00;
 const COMMAND: u16 = 0x04;

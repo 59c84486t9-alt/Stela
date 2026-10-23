@@ -11,6 +11,8 @@
 //! `a804c5742bff224d4cb4d25dd383554d598be32b`: disable L0s/L1 on the
 //! downstream component before its upstream bridge. Register/topology access
 //! and validation here are Stela's own implementation.
+pub mod native;
+
 use super::{ConfigSpace, EcamWindow, Function};
 use crate::{Handoff, block::BlockError};
 use alloc::vec::Vec;
