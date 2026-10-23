@@ -53,8 +53,7 @@ void stela_linux_warn(const char *file, int line, const char *condition, unsigne
 		current_owner->services->warn(current_owner->context, file, line, condition);
 }
 
-/* Linux code's single context, with its preemption count and thread flags. */
-int __preempt_count;
+/* Linux code's single context, with its thread flags and preemption count. */
 struct thread_info stela_thread_info;
 
 /* The interrupt flag local_irq_save() and its kind keep. No interrupt reaches
