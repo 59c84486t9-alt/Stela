@@ -39,6 +39,61 @@ fn notification(command: u8) -> Vec<u8> {
         &[],
     )
 }
+fn replenish_prefix_for_receive(
+    scan: &mut Ax200Scan<'_, Model, ClockBios, ScanOs>,
+    native: &Native,
+    needed: u16,
+) {
+    // The real cold-boot command prefix has already consumed RX buffers. A
+    // device may not complete the longer scenarios below against unposted
+    // descriptors, even though their RAM was allocated at initialization.
+    let credits = boot(scan).credits;
+    let read = boot(scan).read;
+    let producer = native.state.lock().unwrap().registers[&0x1c80];
+    let command = native.state.lock().unwrap().registers[&0x460];
+    let allocations = native.domain.records.lock().unwrap().live.len();
+    assert_eq!(u32::from(credits + read), producer);
+    assert!(credits < needed);
+    assert!(read + needed < boot(scan).entries);
+    assert_eq!(boot(scan).hcmd.notification_count(), 0);
+    // Use the production handoff, free-descriptor writes and actual grouped
+    // producer doorbell. Never mutate credits or device ownership in a peer.
+    let replenished = scan.replenish_completed_receive().unwrap();
+    assert_eq!(replenished.returned, read);
+    assert_ne!(replenished.published, 0);
+    assert!(replenished.published.is_multiple_of(8));
+    assert_eq!(replenished.device_credits, credits + replenished.published);
+    assert_eq!(boot(scan).credits, replenished.device_credits);
+    assert!(replenished.device_credits >= needed);
+    assert!(!replenished.waiting_for_completed_slot);
+    let published = native.state.lock().unwrap().registers[&0x1c80];
+    assert_eq!(
+        published,
+        (producer + u32::from(replenished.published)) & u32::from(boot(scan).entries - 1)
+    );
+    assert_ne!(published, producer);
+    assert_eq!(native.state.lock().unwrap().registers[&0x460], command);
+    assert_eq!(
+        native.domain.records.lock().unwrap().live.len(),
+        allocations
+    );
+    // These scenarios do not wrap. Verify that each forthcoming peer event
+    // uses the original VID/address actually posted in its free descriptor,
+    // including the initially staged descriptors beyond the old producer.
+    for slot in read..read + needed {
+        let descriptor = device_read(
+            &native.domain,
+            boot(scan).free.region().address,
+            usize::from(slot) * 8,
+            8,
+        );
+        let descriptor = u64::from_le_bytes(descriptor.try_into().unwrap());
+        let buffer = &boot(scan).buffers[usize::from(slot)];
+        assert!(buffer.device_owned);
+        assert_eq!(descriptor & 0xfff, u64::from(slot + 1));
+        assert_eq!(descriptor & !0xfff, buffer.allocation.region().address);
+    }
+}
 #[test]
 fn completed_scan_retires_and_second_scan_uses_new_ticket_real_dma_and_completion() {
     let bytes = bytes();
@@ -49,6 +104,7 @@ fn completed_scan_retires_and_second_scan_uses_new_ticket_real_dma_and_completio
     let policy = Arc::new(PolicyState::default());
     let (mut scan, mut sequence, mut entry) =
         ready(&catalog, &empty, &source, &native, &policy, false);
+    replenish_prefix_for_receive(&mut scan, &native, 6);
     let mut previous_ticket = None;
     let mut histories = Vec::new();
     for turn in 0..2 {
@@ -89,6 +145,7 @@ fn completed_scan_retires_and_second_scan_uses_new_ticket_real_dma_and_completio
             Ax200ScanPhase::DrainRequired
         );
         let bell = native.state.lock().unwrap().registers[&0x460];
+        let producer = native.state.lock().unwrap().registers[&0x1c80];
         assert!(matches!(
             scan.retire(),
             Err(Ax200ScanError::DeferredUsers(1))
@@ -98,6 +155,7 @@ fn completed_scan_retires_and_second_scan_uses_new_ticket_real_dma_and_completio
         assert!(scan.request().is_some());
         drop(result);
         let retired = scan.retire().unwrap();
+        assert_eq!(native.state.lock().unwrap().registers[&0x1c80], producer);
         assert_eq!(retired.outcome(), scan::Outcome::Completed);
         assert_eq!(retired.start_response().ticket, command);
         assert_eq!(retired.completion().raw_packet()[4..8], [0x0f, 0, 0, 0x80]);
@@ -411,6 +469,7 @@ fn retirement_backpressure_preserves_hidden_rb_and_requires_real_notification_co
     let source = Source::default();
     let policy = Arc::new(PolicyState::default());
     let (mut scan, sequence, entry) = ready(&catalog, &empty, &source, &native, &policy, false);
+    replenish_prefix_for_receive(&mut scan, &native, 5);
     complete_scan(&mut scan, &native, &source, sequence, entry);
     let mut unrelated = notification(0x99);
     let header = unrelated[..8].to_vec();
