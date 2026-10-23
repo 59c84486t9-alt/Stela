@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 mod cs4208;
 mod cs420x;
 mod cs4210;
+mod power;
 pub use cs4210::CirrusSpeakerBoost;
 const GROUP: u8 = 1;
 const PROCESSING: u32 = 1 << 6;
@@ -24,6 +25,8 @@ pub enum CirrusProfile {
     Cs420x,
     Cs4208,
     Cs4210,
+    /// CS4213 shares the DAC range policy but has no CS4210 coefficient recipe.
+    Cs4213,
 }
 impl CirrusProfile {
     fn vendor(self) -> u8 {
@@ -31,6 +34,7 @@ impl CirrusProfile {
             Self::Cs420x => 0x11,
             Self::Cs4208 => 0x24,
             Self::Cs4210 => 0x0b,
+            Self::Cs4213 => 0x09,
         }
     }
     fn coefficient_count(self) -> u32 {
@@ -38,13 +42,14 @@ impl CirrusProfile {
             Self::Cs420x => 24,
             Self::Cs4208 => 53,
             Self::Cs4210 => 28,
+            Self::Cs4213 => 0,
         }
     }
     fn route_policy(self) -> RoutePolicy {
         match self {
             Self::Cs420x => RoutePolicy::SingleAdc,
             Self::Cs4208 => RoutePolicy::CirrusCs4208,
-            Self::Cs4210 => RoutePolicy::CirrusCs4210,
+            Self::Cs4210 | Self::Cs4213 => RoutePolicy::CirrusCs4210,
         }
     }
 }
@@ -88,7 +93,7 @@ struct Authority {
     profile: CirrusProfile,
     input_amplifiers: Vec<CirrusInputAmplifier>,
     output_amplifiers: Vec<CirrusOutputAmplifier>,
-    processing_caps: u32,
+    processing_caps: Option<u32>,
     pin_defaults: Vec<(u8, u32)>,
     shared_pins: Vec<(u8, u32)>,
     power_nodes: Vec<(u8, u32)>,
@@ -104,12 +109,17 @@ pub(super) struct State {
     active: bool,
     quiet: bool,
     authority_lost: bool,
+    suspended: bool,
+    replaying: bool,
+    routes: Vec<power::SavedRoute>,
+    suspended_speaker_control: Option<u16>,
 }
 fn profile(id: u32) -> Result<CirrusProfile, Error> {
     match id {
         0x1013_4206 | 0x1013_4207 => Ok(CirrusProfile::Cs420x),
         0x1013_4208 => Ok(CirrusProfile::Cs4208),
         0x1013_4210 => Ok(CirrusProfile::Cs4210),
+        0x1013_4213 => Ok(CirrusProfile::Cs4213),
         _ => Err(Error::UnsupportedTopology),
     }
 }
@@ -142,15 +152,24 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let vendor = graph
             .widget(vendor_node)
             .ok_or(Error::UnsupportedTopology)?;
-        if vendor.kind != WidgetKind::Vendor(15) || vendor.capabilities & PROCESSING == 0 {
+        if vendor.kind != WidgetKind::Vendor(15) {
             return Err(Error::UnsupportedTopology);
         }
-        let processing_caps = self.verb(Verb::short(graph.address, vendor_node, 0xf00, 0x10)?)?;
-        if processing_caps == u32::MAX
-            || (processing_caps >> 8) & 255 < selected.coefficient_count()
-        {
-            return Err(Error::UnsupportedTopology);
-        }
+        // cs421x_init deliberately skips every vendor/processing operation for
+        // CS4213. Its node9 identifies the variant; it does not authorize the
+        // CS4210 coefficient protocol or a fabricated processing capability.
+        let processing_caps = if selected == CirrusProfile::Cs4213 {
+            None
+        } else {
+            if vendor.capabilities & PROCESSING == 0 {
+                return Err(Error::UnsupportedTopology);
+            }
+            let caps = self.verb(Verb::short(graph.address, vendor_node, 0xf00, 0x10)?)?;
+            if caps == u32::MAX || (caps >> 8) & 255 < selected.coefficient_count() {
+                return Err(Error::UnsupportedTopology);
+            }
+            Some(caps)
+        };
         let mut power_nodes = Vec::new();
         let nodes = if selected == CirrusProfile::Cs420x {
             alloc::vec![
@@ -187,14 +206,15 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let (shared_pins, input_amplifiers) = match selected {
             CirrusProfile::Cs420x => (self.cs420x_shared_pins(graph)?, Vec::new()),
             CirrusProfile::Cs4208 => (Vec::new(), self.cs4208_input_amplifiers(graph)?),
-            CirrusProfile::Cs4210 => (Vec::new(), Vec::new()),
+            CirrusProfile::Cs4210 | CirrusProfile::Cs4213 => (Vec::new(), Vec::new()),
         };
-        let output_amplifiers = if selected == CirrusProfile::Cs4210 {
+        let output_amplifiers = if matches!(selected, CirrusProfile::Cs4210 | CirrusProfile::Cs4213)
+        {
             self.cs4210_output_amplifiers(graph)?
         } else {
             Vec::new()
         };
-        let pin_defaults = if selected == CirrusProfile::Cs4210 {
+        let pin_defaults = if matches!(selected, CirrusProfile::Cs4210 | CirrusProfile::Cs4213) {
             self.cs4210_pin_defaults(graph)?
         } else {
             Vec::new()
@@ -283,7 +303,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 return Err(Error::InvalidCodecGraph);
             }
             let vendor = state.authority.profile.vendor();
-            if self.verb(Verb::short(graph.address, vendor, 0xf03, 0)?)? != 1 {
+            if state.authority.processing_caps.is_some()
+                && self.verb(Verb::short(graph.address, vendor, 0xf03, 0)?)? != 1
+            {
                 return Err(Error::RouteRejected);
             }
             for coefficient in &state.coefficients {
@@ -315,7 +337,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     pub fn initialize_cirrus_codec(&mut self, graph: &CodecGraph) -> Result<CirrusReport, Error> {
         self.cirrus_guard(graph)?;
         self.require_routing_stopped()?;
-        if self.manages_cirrus_codec(graph.address)
+        if self
+            .converter_bindings
+            .iter()
+            .any(|binding| binding.codec == graph.address)
+            || self.manages_realtek_codec(graph.address)
+            || self.manages_cirrus_codec(graph.address)
             || self.manages_conexant_codec(graph.address)
             || self.manages_sigmatel_codec(graph.address)
             || self
@@ -345,6 +372,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             active: false,
             quiet: false,
             authority_lost: false,
+            suspended: false,
+            replaying: false,
+            routes: Vec::new(),
+            suspended_speaker_control: None,
         });
         let result = (|| {
             let selected = authority.profile;
@@ -361,6 +392,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 CirrusProfile::Cs420x => self.initialize_cs420x_coefficients(graph, &authority)?,
                 CirrusProfile::Cs4208 => self.initialize_cs4208_coefficients(graph)?,
                 CirrusProfile::Cs4210 => self.initialize_cs4210_coefficients(graph)?,
+                CirrusProfile::Cs4213 => Vec::new(),
             };
             Ok(CirrusReport {
                 profile: selected,
@@ -372,7 +404,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 subsystem_id: live.subsystem,
                 errata_coefficients_acknowledged: match selected {
                     CirrusProfile::Cs420x => cs420x::ERRATA_COEFFICIENT_WRITES,
-                    CirrusProfile::Cs4208 => 0,
+                    CirrusProfile::Cs4208 | CirrusProfile::Cs4213 => 0,
                     CirrusProfile::Cs4210 => cs4210::ERRATA_COEFFICIENT_WRITES,
                 },
                 shared_pins: authority.shared_pins.clone(),
@@ -402,7 +434,19 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let policy = profile(graph.vendor_id)?.route_policy();
         self.preflight_analog_route_policy(graph, route, stream, channel, options, policy)?;
         self.cirrus_active(graph)?;
-        self.configure_analog_route_policy(graph, route, stream, channel, options, policy)
+        self.configure_analog_route_policy(graph, route, stream, channel, options, policy)?;
+        self.cirrus_codecs
+            .iter_mut()
+            .find(|state| state.address == graph.address)
+            .ok_or(Error::NeedsReset)?
+            .routes
+            .push(power::SavedRoute {
+                route: route.clone(),
+                stream,
+                channel,
+                options,
+            });
+        Ok(())
     }
     pub fn poll_cirrus_pin_sense(
         &mut self,
@@ -426,6 +470,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             }
             if state.authority_lost || self.command_poisoned {
                 return Err(Error::NeedsReset);
+            }
+            if state.suspended {
+                // Successful D3hot already acknowledged pin quiet and rail
+                // power-down. Do not issue pin writes to a sleeping function.
+                self.cirrus_codecs[index].quiet = true;
+                continue;
             }
             for (pin, _) in state.pins {
                 self.route_control(state.address, pin, 0x707, 0xf07, 0)?;

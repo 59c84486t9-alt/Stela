@@ -23,7 +23,9 @@ use crate::bus::{
     pci::{Address, Bar, ConfigSpace, Function},
 };
 
+mod power;
 mod registers;
+pub use power::PowerError;
 pub use registers::PciRegisters;
 
 pub const CLASS: [u8; 3] = [0x04, 0x03, 0x00];
@@ -34,11 +36,18 @@ const INTEL_CLOCK_GATE_IDS: &[u16] = &[
     0xa170, 0x9d70, // SKL / SKL-LP.
     0xa171, 0x9d71, 0xa2f0, // KBL / KBL-LP / KBL-H.
     0xa348, 0x9dc8, // Coffee / Cannon.
-    0x34c8, 0x3dc8, // Ice LP/H.
+    0x02c8, 0x06c8, 0xa3f0, 0xf0c8, 0xf1c8, // Comet LP/H/S/R, Rocket S.
+    0x34c8, 0x3dc8, 0x38c8, 0x4dc8, // Ice LP/H/N, Jasper N.
     0xa0c8, 0x43c8, // Tiger LP/H.
     0x7ad0, 0x51c8, 0x51c9, 0x51cd, 0x51cc, 0x54c8, // Alder S/P/PS/PX/M/N.
-    0x7e28, // Meteor.
+    0x4b55, 0x4b58, // Elkhart.
+    0x3198, // Gemini Lake; APL-only VS_EM4L latency operation does not apply.
+    0x7a50, 0x51ca, 0x51cb, 0x51ce, 0x51cf, // Raptor S/P0/P1/M/PX.
+    0x7e28, 0x7f50, 0x7728, // Meteor, Arrow S/H.
 ];
+// Lewisburg selects SKYLAKE capabilities but AZX_DRIVER_PCH, so tags
+// are separate while the SKL-only CGCTL/extended reset bracket must not run.
+const INTEL_LBG_IDS: &[u16] = &[0xa1f0, 0xa270];
 const ATI: u16 = 0x1002;
 const AMD: u16 = 0x1022;
 const PCI_ID: u16 = 0;
@@ -227,12 +236,16 @@ fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, Attach
         }
         // Haswell/Broadwell analog PCH, without I915_COMPONENT. GPU HDMI
         // identities require the separate graphics component and stay refused.
-        (INTEL, 0x8c20 | 0x8ca0 | 0x8d20 | 0x8d21 | 0x9c20 | 0x9c21 | 0x9ca0) => {
-            (Setup::IntelPch, 64)
-        }
+        (
+            INTEL,
+            0x8c20 | 0x8ca0 | 0x8d20 | 0x8d21 | 0x9c20 | 0x9c21 | 0x9ca0 | 0x1c20 | 0x1d20 | 0x1e20
+            | 0x3b56 | 0x3b57 | 0x811b | 0x080a | 0x0f04 | 0x2284,
+        ) => (Setup::IntelPch, 64),
         // Mapped ownership, native PCI clock reset hooks and bounded
         // conventional extended-link setup are mandatory for these IDs.
-        (INTEL, id) if INTEL_CLOCK_GATE_IDS.contains(&id) => (Setup::IntelPch, 64),
+        (INTEL, id) if INTEL_CLOCK_GATE_IDS.contains(&id) || INTEL_LBG_IDS.contains(&id) => {
+            (Setup::IntelPch, 64)
+        }
         // Linux restricts ATI to 40 bits, and SB600 companion-SMBus revisions
         // before 0x30 additionally require 32 bits. Without companion evidence,
         // retain the supported conservative 32-bit mode on every ATI stepping.
@@ -264,7 +277,7 @@ fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, Attach
         } else {
             ResetPolicy::Generic
         },
-        stream_tag_policy: if modern {
+        stream_tag_policy: if modern || (vendor == INTEL && INTEL_LBG_IDS.contains(&device)) {
             StreamTagPolicy::PerDirection
         } else {
             StreamTagPolicy::Global
@@ -335,6 +348,11 @@ pub struct Prepared {
 }
 
 impl Identity {
+    fn requires_mapped_preflight(self) -> bool {
+        self.reset_policy == ResetPolicy::IntelClockGate
+            || self.stream_tag_policy == StreamTagPolicy::PerDirection
+    }
+
     fn config(self) -> Config {
         Config {
             corb_reset: self.corb_reset,
@@ -366,7 +384,7 @@ impl Prepared {
     /// owned and remain mapped until controller shutdown succeeds. Retain PCI
     /// ownership, power and decode established by `prepare` for that lifetime.
     pub unsafe fn claim_mmio(self) -> Result<MmioRegisters, super::super::Error> {
-        if self.identity.reset_policy != ResetPolicy::Generic {
+        if self.identity.requires_mapped_preflight() {
             return Err(super::super::Error::InvalidConfiguration);
         }
         // SAFETY: covered by this function's own safety contract.
@@ -728,7 +746,7 @@ unsafe fn prepare_inner<C: ConfigSpace>(
     if actual != selected || config.read8(PCI_HEADER) & 0x7f != 0 {
         return Err(AttachError::IdentityChanged);
     }
-    if selected.reset_policy == ResetPolicy::IntelClockGate && !mapped_preflight {
+    if selected.requires_mapped_preflight() && !mapped_preflight {
         return Err(AttachError::MappedPreflightRequired);
     }
     check_subsystem(config, actual, board)?;
@@ -1773,6 +1791,65 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn remaining_legacy_pch_profiles_prepare_with_exact_word_snoop_and_global_tags() {
+        for device in [
+            0x1c20, 0x1d20, 0x1e20, 0x3b56, 0x3b57, 0x811b, 0x080a, 0x0f04, 0x2284,
+        ] {
+            let (mut function, timer, bar) = pch_fixture(device, 2, 9);
+            let prepared = prepare_model(&mut function, &timer, bar).unwrap();
+            assert_eq!(prepared.config().reset_policy, ResetPolicy::Generic);
+            assert_eq!(prepared.config().stream_tag_policy, StreamTagPolicy::Global);
+            assert_eq!(prepared.config().position_policy, PositionPolicy::Link);
+            assert_eq!(function.config().words[30], 0xf91f_7255);
+            assert_eq!(function.config().words[17], 0x5ac3_a5f0);
+            assert!(
+                !function
+                    .config()
+                    .writes
+                    .iter()
+                    .any(|(offset, _, _, _)| *offset == CGCTL)
+            );
+            assert!(timer.now_us() >= 10_000);
+        }
+    }
+
+    #[test]
+    fn lewisburg_requires_mapped_ownership_and_separate_tags_without_skl_reset() {
+        for &device in INTEL_LBG_IDS {
+            let (mut function, timer, bar) = modern_pci_model_for(device);
+            assert_eq!(
+                prepare_model(&mut function, &timer, bar).unwrap_err(),
+                AttachError::MappedPreflightRequired
+            );
+            assert!(function.config().writes.is_empty());
+            let adapter = unsafe {
+                prepare_with_registers(
+                    &mut function,
+                    bar,
+                    &timer,
+                    Ownership::ExclusiveLegacy,
+                    MappedModel::new(),
+                )
+            }
+            .unwrap();
+            assert_eq!(adapter.config().reset_policy, ResetPolicy::Generic);
+            assert_eq!(
+                adapter.config().stream_tag_policy,
+                StreamTagPolicy::PerDirection
+            );
+            drop(adapter);
+            assert_eq!(function.config().words[30], 0xf91f_7255);
+            assert!(
+                !function
+                    .config()
+                    .writes
+                    .iter()
+                    .any(|(offset, _, _, _)| *offset == CGCTL)
+            );
+        }
+    }
+
+    #[test]
     fn pch_snoop_capability_ownership_rejects_unrelated_headers_bodies_and_wrong_pcie_layout() {
         for variant in 0..11 {
             let (mut function, timer, bar) = pch_fixture(0x8c20, 2, 9);
@@ -1904,9 +1981,7 @@ pub(super) mod tests {
             );
             assert!(function.config().writes.is_empty());
         }
-        for device in [
-            0x1c20, 0x1e20, 0x0a0c, 0x160c, 0xa828, 0xe428, 0xe328, 0xd328,
-        ] {
+        for device in [0x0a0c, 0x160c, 0xa828, 0xe428, 0xe328, 0xd328, 0x5a98] {
             assert_eq!(
                 identity(INTEL, device, CLASS),
                 Err(AttachError::UnsupportedController)

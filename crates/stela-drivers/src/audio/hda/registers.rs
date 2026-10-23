@@ -77,6 +77,14 @@ pub trait Registers {
         }
         Ok(())
     }
+    /// Authentic original PCI subsystem at configuration offset 0x2c, packed
+    /// vendor in low16/device in high16. Generic MMIO/codec graph authority does
+    /// not establish this board identity. Native bound adapters must revalidate
+    /// their retained function and reject failed reads/power epochs; None is
+    /// actual absence of that service, never a positive OEM/default-board grant.
+    fn codec_pci_subsystem(&mut self) -> Result<Option<u32>, Error> {
+        Ok(None)
+    }
     fn reset_clock_gate(&mut self, _enabled: bool) -> Result<(), Error> {
         Err(Error::InvalidConfiguration)
     }

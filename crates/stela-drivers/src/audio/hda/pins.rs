@@ -205,6 +205,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// SigmaTel codecs retain no-trigger sense; IDT83xxx also synchronizes its
     /// source port-power map. Standard polling changes no power or GPIO.
     pub fn poll_pin_sense(&mut self, graph: &CodecGraph, pin: u8) -> Result<PinSense, Error> {
+        if self.manages_realtek_codec(graph.address) {
+            return self.poll_realtek_pin_sense(graph, pin);
+        }
         if self.manages_sigmatel_codec(graph.address) {
             return self.poll_sigmatel_pin_sense(graph, pin);
         }

@@ -5,7 +5,7 @@
 //!
 //! This is the conventional HDA MMIO core. The `pci` module prepares a bounded
 //! conventional Intel/ATI/AMD subset. Intel DSP/firmware ownership, other vendor quirks, ACPI
-//! power resources, HDMI GPU coordination, OEM amplifier/pin policy, suspend and
+//! power resources, the actual HDMI GPU port provider, OEM amplifier/pin policy, suspend and
 //! guest audio bridging remain platform responsibilities. An ID match alone
 //! does not establish exclusive controller ownership.
 //! All DMA allocations live for the boot, even after an error or drop. Do not
@@ -33,6 +33,7 @@ pub use conexant::{
 };
 mod extended;
 pub use extended::LinkClock;
+pub mod hdmi;
 mod lifecycle;
 pub mod pci;
 mod pins;
@@ -41,13 +42,14 @@ pub use pins::{AnalogEndpoint, PinConfiguration, PinConnection, PinDevice, PinSe
 mod realtek;
 pub use realtek::{
     Alc269CommonReport, Alc269Variant, CoefficientChange, RealtekCommonReport,
-    RealtekDualHeadphoneReport, RealtekHeadphoneReport, RealtekHeadphoneRoute,
+    RealtekDualHeadphoneReport, RealtekFamily, RealtekHeadphoneReport, RealtekHeadphoneRoute,
+    RealtekOem, RealtekReport,
 };
 mod routing;
 mod sigmatel;
 pub use sigmatel::{
-    Idt73PowerReport, Idt83PortPower, Idt83PowerReport, SigmatelGpio, SigmatelProfile,
-    SigmatelReport,
+    Idt73PowerReport, Idt83PortPower, Idt83PowerReport, Idt95PowerReport, SigmatelGpio,
+    SigmatelProfile, SigmatelReport,
 };
 mod stream;
 pub use codec::{CodecGraph, FunctionGroup, PcmCapabilities, Verb, Widget, WidgetKind};
@@ -55,7 +57,7 @@ pub use lifecycle::{CodecDiscovery, CodecFailure, DiscoveryFailure, ProbePolicy}
 use registers::*;
 pub use registers::{MmioRegisters, Registers};
 pub use routing::{AnalogRoute, PinOptions, Vref};
-use stream::Stream;
+use stream::{ConverterBinding, Stream};
 pub use stream::{PositionInfo, PositionPolicy, StreamId, StreamStatus, StreamTagPolicy};
 
 /// Select from an actual controller identity/quirk table in platform glue.
@@ -149,9 +151,12 @@ pub struct Controller<R, T> {
     // Non-route codec controls: owner, codec address, actual node. Observing or
     // preconditioning a pin does not fabricate a converter path for it.
     codec_controls: Vec<(StreamId, u8, u8)>,
+    converter_bindings: Vec<ConverterBinding>,
+    realtek_codecs: Vec<realtek::State>,
     conexant_codecs: Vec<conexant::State>,
     sigmatel_codecs: Vec<sigmatel::State>,
     cirrus_codecs: Vec<cirrus::State>,
+    hdmi_ports: Vec<Option<hdmi::Port>>,
     routing_failed: bool,
     token: ControllerToken,
     lifecycle_failed: bool,
@@ -254,9 +259,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             streams: (0..total).map(|_| None).collect(),
             routes: Vec::new(),
             codec_controls: Vec::new(),
+            converter_bindings: Vec::new(),
+            realtek_codecs: Vec::new(),
             conexant_codecs: Vec::new(),
             sigmatel_codecs: Vec::new(),
             cirrus_codecs: Vec::new(),
+            hdmi_ports: Vec::new(),
             routing_failed: false,
         };
         if let Err(error) = controller.initialize() {
@@ -528,6 +536,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let mut error = None;
         for index in 0..self.streams.len() as u8 {
             if let Err(fault) = self.stop_descriptor(index) {
+                self.hdmi_note_descriptor_fault(index, fault);
                 error.get_or_insert(fault);
             }
             if let Some(stream) = self.streams[usize::from(index)].as_mut() {
@@ -539,7 +548,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         // before command engines retire. A codec-control failure still permits
         // command-DMA quiescence, but is returned as a real incomplete shutdown.
         let codec_error = if error.is_none() {
-            let mut error = self.shutdown_conexant_codecs().err();
+            let mut error = self.shutdown_hdmi().err();
+            if let Err(fault) = self.shutdown_realtek_codecs() {
+                error.get_or_insert(fault);
+            }
+            if let Err(fault) = self.shutdown_conexant_codecs() {
+                error.get_or_insert(fault);
+            }
             if let Err(fault) = self.shutdown_sigmatel_codecs() {
                 error.get_or_insert(fault);
             }
@@ -611,6 +626,9 @@ mod tests {
     };
     use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
     use core::cell::{Cell, RefCell};
+    include!("hda/lifecycle_tests.rs");
+    include!("hda/realtek/lifecycle_tests.rs");
+    include!("hda/composition_tests.rs");
 
     #[derive(Clone)]
     struct ModelClock(Rc<Cell<u64>>);
@@ -753,6 +771,9 @@ mod tests {
         cirrus_errata_invalid: bool,
         cirrus_early_coefficient_reads: usize,
         adc_amp_index_zero: Vec<u8>,
+        codec_power_model: bool,
+        codec_requested_power: BTreeMap<u8, u8>,
+        codec_actual_power: BTreeMap<u8, u8>,
         power_ready: BTreeMap<u8, u64>,
         power_delay: u64,
         power_stuck: bool,
@@ -876,6 +897,9 @@ mod tests {
                 cirrus_errata_invalid: false,
                 cirrus_early_coefficient_reads: 0,
                 adc_amp_index_zero: Vec::new(),
+                codec_power_model: false,
+                codec_requested_power: BTreeMap::new(),
+                codec_actual_power: BTreeMap::new(),
                 power_ready: BTreeMap::new(),
                 power_delay: 12,
                 power_stuck: false,
@@ -1356,6 +1380,18 @@ mod tests {
                     self.idt83_amplifier_reply
                 }
                 0x705 => {
+                    if self.codec_power_model {
+                        if !self.power_stuck
+                            && self
+                                .power_ready
+                                .get(&node)
+                                .is_some_and(|ready| self.clock.now_us() >= *ready)
+                        {
+                            self.codec_actual_power
+                                .insert(node, *self.codec_requested_power.get(&node).unwrap_or(&0));
+                        }
+                        self.codec_requested_power.insert(node, command as u8 & 15);
+                    }
                     if self.cirrus_model && self.cirrus_errata_stage == 3 && matches!(node, 7 | 8) {
                         self.cirrus_errata_powered[usize::from(node - 7)] = true;
                     }
@@ -1364,6 +1400,21 @@ mod tests {
                     0
                 }
                 0xf05 => {
+                    if self.codec_power_model {
+                        let requested = *self.codec_requested_power.get(&node).unwrap_or(&0);
+                        if !self.power_stuck
+                            && self
+                                .power_ready
+                                .get(&node)
+                                .is_some_and(|ready| self.clock.now_us() >= *ready)
+                        {
+                            self.codec_actual_power.insert(node, requested);
+                        }
+                        let actual = *self.codec_actual_power.get(&node).unwrap_or(&0);
+                        return u32::from(requested)
+                            | (u32::from(actual) << 4)
+                            | if self.power_error { 1 << 8 } else { 0 };
+                    }
                     if self.power_error {
                         1 << 8
                     } else if self.power_stuck
@@ -7600,6 +7651,7 @@ mod tests {
     }
     mod sigmatel {
         use super::*;
+        include!("hda/sigmatel/tests.rs");
         fn device(id: u32) -> Rc<RefCell<Model>> {
             let model = analog_model();
             let mut m = model.borrow_mut();
@@ -9287,6 +9339,7 @@ mod tests {
     }
     mod cirrus {
         use super::*;
+        include!("hda/cirrus/tests.rs");
         fn device(id: u32, shared: u8) -> Rc<RefCell<Model>> {
             let model = analog_model();
             let mut m = model.borrow_mut();

@@ -130,7 +130,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     fn initialize_conexant_common(&mut self, graph: &CodecGraph) -> Result<ConexantReport, Error> {
         self.conexant_guard(graph)?;
         self.require_routing_stopped()?;
-        if self.manages_sigmatel_codec(graph.address)
+        if self
+            .converter_bindings
+            .iter()
+            .any(|binding| binding.codec == graph.address)
+            || self.manages_realtek_codec(graph.address)
+            || self.manages_sigmatel_codec(graph.address)
             || self.manages_cirrus_codec(graph.address)
             || self
                 .routes

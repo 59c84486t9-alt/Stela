@@ -32,14 +32,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         // A failed codec amplifier-off readback can still leave every DMA RUN
         // acknowledged off (stopped=true). Reset is its recovery boundary;
         // that codec failure never licenses reuse without this actual reset.
-        // Every RUN acknowledgement succeeded. It is now safe to retire the
-        // old software maps; backing RAM itself is never returned to an allocator.
+        // Invalidate public handles now, but keep the original reservations
+        // until actual link/ring reset and retained GPU cleanup both succeed.
         self.token.generation = generation;
-        for stream in &mut self.streams {
-            *stream = None;
-        }
-        self.routes.clear();
-        self.codec_controls.clear();
         self.corb_wp = 0;
         self.rirb_rp = 0;
         self.codec_mask = 0;
@@ -48,6 +43,23 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             let _ = self.shutdown();
             return Err(error);
         }
+        // New command epoch is live only after actual link/ring reset. Failed
+        // HDMI teardown retains original owners and requires another reset.
+        self.command_poisoned = false;
+        self.lifecycle_failed = false;
+        self.stopped = false;
+        if let Err(error) = self.retire_hdmi_after_reset() {
+            self.lifecycle_failed = true;
+            self.routing_failed = true;
+            return Err(error);
+        }
+        for stream in &mut self.streams {
+            *stream = None;
+        }
+        self.routes.clear();
+        self.codec_controls.clear();
+        self.converter_bindings.clear();
+        self.realtek_codecs.clear();
         self.conexant_codecs.clear();
         self.sigmatel_codecs.clear();
         self.cirrus_codecs.clear();

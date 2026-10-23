@@ -16,15 +16,16 @@ use crate::{
 /// One prepared PCI function retained exclusively throughout MMIO/reset use.
 /// The mutable borrow prevents another typed owner from changing PCI state.
 pub struct PciRegisters<'a, R, C> {
-    inner: R,
-    function: &'a mut Function<C>,
-    identity: Identity,
-    address: Address,
-    base: u64,
-    bytes: usize,
+    pub(super) inner: R,
+    pub(super) function: &'a mut Function<C>,
+    pub(super) identity: Identity,
+    pub(super) address: Address,
+    pub(super) base: u64,
+    pub(super) bytes: usize,
+    pub(super) suspended: Option<super::power::Snapshot>,
 }
 
-fn associated<C: ConfigSpace>(
+pub(super) fn associated<C: ConfigSpace>(
     function: &mut Function<C>,
     address: Address,
     identity: Identity,
@@ -69,6 +70,7 @@ impl Prepared {
             address: self.address,
             base: self.base,
             bytes: self.bytes as usize,
+            suspended: None,
         })
     }
 
@@ -101,6 +103,9 @@ impl<R: Registers, C: ConfigSpace> Registers for PciRegisters<'_, R, C> {
         self.inner.region_bytes().min(self.bytes)
     }
     fn validate_config(&self, config: &Config) -> Result<(), Error> {
+        if self.suspended.is_some() {
+            return Err(Error::Shutdown);
+        }
         let required = self.identity;
         if config.reset_policy != required.reset_policy
             || config.corb_reset != required.corb_reset
@@ -114,8 +119,20 @@ impl<R: Registers, C: ConfigSpace> Registers for PciRegisters<'_, R, C> {
         }
         Ok(())
     }
+    fn codec_pci_subsystem(&mut self) -> Result<Option<u32>, Error> {
+        if self.suspended.is_some()
+            || !associated(self.function, self.address, self.identity, self.base)
+        {
+            return Err(Error::InvalidConfiguration);
+        }
+        let subsystem = self.function.config().read32(super::PCI_SUBSYSTEM);
+        if subsystem == u32::MAX {
+            return Err(Error::InvalidConfiguration);
+        }
+        Ok(Some(subsystem))
+    }
     fn reset_clock_gate(&mut self, enabled: bool) -> Result<(), Error> {
-        if self.identity.reset_policy != ResetPolicy::IntelClockGate {
+        if self.suspended.is_some() || self.identity.reset_policy != ResetPolicy::IntelClockGate {
             return Err(Error::InvalidConfiguration);
         }
         let fault = Error::PciResetControl { offset: CGCTL };
@@ -140,21 +157,39 @@ impl<R: Registers, C: ConfigSpace> Registers for PciRegisters<'_, R, C> {
         Ok(())
     }
     fn read8(&mut self, offset: usize) -> u8 {
-        self.inner.read8(offset)
+        if self.suspended.is_some() {
+            u8::MAX
+        } else {
+            self.inner.read8(offset)
+        }
     }
     fn read16(&mut self, offset: usize) -> u16 {
-        self.inner.read16(offset)
+        if self.suspended.is_some() {
+            u16::MAX
+        } else {
+            self.inner.read16(offset)
+        }
     }
     fn read32(&mut self, offset: usize) -> u32 {
-        self.inner.read32(offset)
+        if self.suspended.is_some() {
+            u32::MAX
+        } else {
+            self.inner.read32(offset)
+        }
     }
     fn write8(&mut self, offset: usize, value: u8) {
-        self.inner.write8(offset, value)
+        if self.suspended.is_none() {
+            self.inner.write8(offset, value)
+        }
     }
     fn write16(&mut self, offset: usize, value: u16) {
-        self.inner.write16(offset, value)
+        if self.suspended.is_none() {
+            self.inner.write16(offset, value)
+        }
     }
     fn write32(&mut self, offset: usize, value: u32) {
-        self.inner.write32(offset, value)
+        if self.suspended.is_none() {
+            self.inner.write32(offset, value)
+        }
     }
 }

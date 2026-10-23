@@ -8,6 +8,14 @@ use super::{CodecGraph, Controller, Registers, Verb};
 use crate::{audio::Error, bus::i2c::Timer};
 use alloc::vec::Vec;
 
+mod family;
+pub use family::RealtekFamily;
+mod oem;
+pub use oem::RealtekOem;
+mod laptop;
+mod managed;
+pub use managed::RealtekReport;
+pub(super) use managed::State;
 mod headphone;
 pub use headphone::RealtekHeadphoneReport;
 mod dual_headphone;
@@ -141,7 +149,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(Error::NeedsReset);
         }
         self.require_routing_stopped()?;
-        if self.manages_cirrus_codec(graph.address)
+        if self
+            .converter_bindings
+            .iter()
+            .any(|binding| binding.codec == graph.address)
+            || self.manages_realtek_codec(graph.address)
+            || self.manages_cirrus_codec(graph.address)
             || self.manages_conexant_codec(graph.address)
             || self.manages_sigmatel_codec(graph.address)
         {

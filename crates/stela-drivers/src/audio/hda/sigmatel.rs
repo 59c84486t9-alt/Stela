@@ -41,8 +41,15 @@ pub enum SigmatelProfile {
     Stac9200,
     Stac925x,
     Stac922x,
+    Stac9872,
     Idt92hd83xxx,
     Idt92hd73xx,
+    Idt92hd95,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Idt95PowerReport {
+    pub power_map: u8,
+    pub ports: Vec<Idt83PortPower>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SigmatelGpio {
@@ -70,6 +77,7 @@ pub struct SigmatelReport {
     pub capture_output_amplifier: Option<(u8, u32)>,
     pub idt83: Option<Idt83PowerReport>,
     pub idt73: Option<Idt73PowerReport>,
+    pub idt95: Option<Idt95PowerReport>,
 }
 #[derive(Clone)]
 pub(super) struct State {
@@ -82,8 +90,10 @@ pub(super) struct State {
     quiet: bool,
     authority_lost: bool,
     knob_capabilities: Option<u32>,
+    startup_amplifier: Option<(u8, u32)>,
     idt83: Option<idt83::State>,
     idt73: Option<idt73::State>,
+    idt95: Option<port_power::State>,
 }
 fn profile(id: u32) -> Result<SigmatelProfile, Error> {
     match id {
@@ -103,6 +113,8 @@ fn profile(id: u32) -> Result<SigmatelProfile, Error> {
         | 0x111d_76e5
         | 0x111d_76e7..=0x111d_76f3 => Ok(SigmatelProfile::Idt92hd83xxx),
         0x111d_7674..=0x111d_7676 | 0x111d_76c0..=0x111d_76ce => Ok(SigmatelProfile::Idt92hd73xx),
+        0x8384_7661 | 0x8384_7662 | 0x8384_7664 => Ok(SigmatelProfile::Stac9872),
+        0x111d_7695 => Ok(SigmatelProfile::Idt92hd95),
         _ => Err(Error::UnsupportedTopology),
     }
 }
@@ -153,11 +165,24 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     return Err(Error::InvalidCodecGraph);
                 }
             }
+            if let Some((node, caps)) = state.startup_amplifier {
+                if self.validate_live_output_amplifier(
+                    graph.address,
+                    state.group,
+                    graph.widget(node).ok_or(Error::InvalidCodecGraph)?,
+                )? != caps
+                {
+                    return Err(Error::InvalidCodecGraph);
+                }
+            }
             if let Some(idt83) = &state.idt83 {
                 self.validate_idt83(graph, state.group, idt83)?;
             }
             if let Some(idt73) = &state.idt73 {
                 self.validate_idt73(graph, state.group, idt73)?;
+            }
+            if let Some(idt95) = &state.idt95 {
+                self.validate_idt_ports(graph, state.group, idt95)?;
             }
             Ok(())
         });
@@ -225,9 +250,25 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     ) -> Result<Option<u8>, Error> {
         if matches!(
             selected,
-            SigmatelProfile::Idt92hd83xxx | SigmatelProfile::Idt92hd73xx
+            SigmatelProfile::Idt92hd83xxx
+                | SigmatelProfile::Idt92hd73xx
+                | SigmatelProfile::Idt92hd95
         ) {
             return Ok(None);
+        }
+        if selected == SigmatelProfile::Stac9872 {
+            let selector = graph.widget(0x15).ok_or(Error::UnsupportedTopology)?;
+            if selector.kind != WidgetKind::Selector
+                || selector.connections.len() < 2
+                || selector.channels() != 2
+                || selector.capabilities & WCAP_OUTPUT_AMP == 0
+                || selector
+                    .output_amplifier
+                    .is_none_or(|caps| caps == u32::MAX)
+            {
+                return Err(Error::UnsupportedTopology);
+            }
+            return Ok(Some(0x15));
         }
         let selector = if selected == SigmatelProfile::Stac9200 {
             7
@@ -309,7 +350,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     ) -> Result<SigmatelReport, Error> {
         self.sigmatel_guard(graph)?;
         self.require_routing_stopped()?;
-        if self.manages_sigmatel_codec(graph.address)
+        if self
+            .converter_bindings
+            .iter()
+            .any(|binding| binding.codec == graph.address)
+            || self.manages_realtek_codec(graph.address)
+            || self.manages_sigmatel_codec(graph.address)
             || self.manages_cirrus_codec(graph.address)
             || self.manages_conexant_codec(graph.address)
             || self
@@ -346,8 +392,25 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         } else {
             None
         };
+        let startup_amplifier = if selected == SigmatelProfile::Stac9872 {
+            Some((
+                0x15,
+                self.validate_live_output_amplifier(
+                    graph.address,
+                    group,
+                    graph.widget(0x15).ok_or(Error::InvalidCodecGraph)?,
+                )?,
+            ))
+        } else {
+            None
+        };
         let mut idt83 = if selected == SigmatelProfile::Idt92hd83xxx {
             Some(self.preflight_idt83(graph, group)?)
+        } else {
+            None
+        };
+        let mut idt95 = if selected == SigmatelProfile::Idt92hd95 {
+            Some(self.preflight_idt_ports(graph, group, &[0x0a, 0x0b, 0x0c, 0x0d])?)
         } else {
             None
         };
@@ -376,8 +439,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             quiet: false,
             authority_lost: false,
             knob_capabilities,
+            startup_amplifier,
             idt83: idt83.clone(),
             idt73: idt73.clone(),
+            idt95: idt95.clone(),
         });
         let result = (|| {
             self.power_d0(graph.address, group)?;
@@ -410,7 +475,17 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 },
             )?;
             if let Some(selector) = selector {
-                self.route_control(graph.address, selector, 0x701, 0xf01, 0)?;
+                self.route_control(
+                    graph.address,
+                    selector,
+                    0x701,
+                    0xf01,
+                    if selected == SigmatelProfile::Stac9872 {
+                        1
+                    } else {
+                        0
+                    },
+                )?;
             }
             let (eapd, master_amplifier) = if selected == SigmatelProfile::Stac9200 {
                 self.route_control(graph.address, 8, 0x70c, 0xf0c, 2)?;
@@ -423,6 +498,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     }
                 }
                 (None, Some((0x0e, 0x80)))
+            } else if selected == SigmatelProfile::Stac9872 {
+                // stac9872_core_init selects input1 and physically unmutes
+                // both output channels at gain0, not an inferred 0dB offset.
+                self.verb(Verb::long(graph.address, 0x15, 3, 0xb000)?)?;
+                for channel in [0xa000, 0x8000] {
+                    if self.verb(Verb::long(graph.address, 0x15, 0xb, channel)?)? != 0 {
+                        return Err(Error::RouteRejected);
+                    }
+                }
+                (None, Some((0x15, 0)))
             } else if selected == SigmatelProfile::Stac922x {
                 self.route_control(
                     graph.address,
@@ -439,6 +524,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     idt73.as_mut().ok_or(Error::InvalidCodecGraph)?,
                     gpio,
                 )?;
+                (None, None)
+            } else if selected == SigmatelProfile::Idt92hd95 {
+                let ports = idt95.as_mut().ok_or(Error::InvalidCodecGraph)?;
+                self.observe_idt_port_map(graph, group, ports)?;
+                self.refresh_idt_ports(graph, group, ports)?;
                 (None, None)
             } else {
                 self.initialize_idt83(
@@ -468,12 +558,22 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     .map(|_| (STAC922X_CAPTURE_MUX, STAC922X_CAPTURE_AMP_CAPS)),
                 idt83: idt83.as_ref().map(idt83::State::report).transpose()?,
                 idt73: idt73.as_ref().map(idt73::State::report).transpose()?,
+                idt95: idt95
+                    .as_ref()
+                    .map(|state| {
+                        state.report().map(|report| Idt95PowerReport {
+                            power_map: report.power_map,
+                            ports: report.ports,
+                        })
+                    })
+                    .transpose()?,
             })
         })();
         if result.is_ok() {
             self.sigmatel_codecs[index].active = true;
             self.sigmatel_codecs[index].idt83 = idt83;
             self.sigmatel_codecs[index].idt73 = idt73;
+            self.sigmatel_codecs[index].idt95 = idt95;
         } else {
             self.routing_failed = true;
         }
@@ -506,6 +606,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if let Some(idt73) = state.idt73 {
             idt73.require_route_power(route.pin())?;
         }
+        if let Some(idt95) = state.idt95 {
+            idt95.require_route_power(route.pin())?;
+        }
         self.configure_analog_route_policy(graph, route, id, channel, options, policy)
     }
     /// STAC/IDT's no_trigger_sense applies through the canonical pin API too.
@@ -537,6 +640,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                         .find(|owned| owned.address == graph.address)
                     {
                         owned.idt73 = state.idt73;
+                    }
+                }
+                if let Some(idt95) = &mut state.idt95 {
+                    self.update_idt_port(graph.address, state.group, idt95, pin, sense)?;
+                    if let Some(owned) = self
+                        .sigmatel_codecs
+                        .iter_mut()
+                        .find(|owned| owned.address == graph.address)
+                    {
+                        owned.idt95 = state.idt95;
                     }
                 }
                 Ok(sense)
@@ -588,6 +701,30 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .idt73 = state.idt73;
         Ok(report)
     }
+    /// Refresh the exact four IDT92HD95 ports through no-trigger actual jack
+    /// sensing. Unlike IDT83xxx this profile has no mode788 startup effect.
+    pub fn refresh_idt95_power_map(
+        &mut self,
+        graph: &CodecGraph,
+    ) -> Result<Idt95PowerReport, Error> {
+        let mut state = self.sigmatel_active(graph)?;
+        let ports = state.idt95.as_mut().ok_or(Error::UnsupportedTopology)?;
+        if let Err(error) = self.refresh_idt_ports(graph, state.group, ports) {
+            self.routing_failed = true;
+            return Err(error);
+        }
+        let report = ports.report()?;
+        self.sigmatel_codecs
+            .iter_mut()
+            .find(|owned| owned.address == graph.address)
+            .ok_or(Error::NeedsReset)?
+            .idt95 = state.idt95;
+        Ok(Idt95PowerReport {
+            power_map: report.power_map,
+            ports: report.ports,
+        })
+    }
+
     pub(super) fn require_sigmatel_route_power(&self, id: StreamId) -> Result<(), Error> {
         for (_, route) in self.routes.iter().filter(|(stream, _)| *stream == id) {
             if let Some(idt83) = self
@@ -605,6 +742,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 .and_then(|state| state.idt73.as_ref())
             {
                 idt73.require_route_power(route.pin())?;
+            }
+            if let Some(idt95) = self
+                .sigmatel_codecs
+                .iter()
+                .find(|state| state.address == route.codec_address())
+                .and_then(|state| state.idt95.as_ref())
+            {
+                idt95.require_route_power(route.pin())?;
             }
         }
         Ok(())

@@ -565,6 +565,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.stream_direction(id)? != route.direction {
             return Err(Error::InvalidStream);
         }
+        if self.hdmi_stream_port(id).is_some()
+            || route
+                .nodes()
+                .iter()
+                .any(|node| self.hdmi_owns_node(graph.address, *node))
+        {
+            return Err(Error::RouteInUse);
+        }
         self.validate_converter(graph, route.converter, id, channel)?;
         if effective_channels(
             graph
@@ -576,6 +584,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(Error::InvalidFormat);
         }
         let plan = plan(graph, route, options, policy)?;
+        if self.converter_bindings.iter().any(|binding| {
+            binding.stream == id
+                || (binding.codec == route.codec && route.nodes.contains(&binding.node))
+        }) {
+            return Err(Error::RouteInUse);
+        }
         if self.routes.iter().any(|(owner, previous)| {
             *owner == id
                 || (previous.codec == route.codec
@@ -607,6 +621,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<(), Error> {
+        if self.manages_realtek_codec(graph.address) {
+            return self.configure_realtek_route(graph, route, id, channel, options);
+        }
         if self.manages_sigmatel_codec(graph.address) {
             return self.configure_sigmatel_route(graph, route, id, channel, options);
         }

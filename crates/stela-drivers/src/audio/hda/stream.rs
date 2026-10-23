@@ -93,15 +93,29 @@ pub struct StreamStatus {
     pub position: PositionInfo,
 }
 
+/// Actual converter effect reservation, including a failed/uncertain ACK.
+/// A full actual reset is the generic retirement boundary; vendor replay may
+/// replace only its exact owned entries after real stopped/power proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ConverterBinding {
+    pub(super) stream: StreamId,
+    pub(super) codec: u8,
+    pub(super) node: u8,
+    pub(super) channel: u8,
+}
+
 pub(super) struct Stream {
     id: StreamId,
     direction: Direction,
-    format: PcmFormat,
+    pub(super) format: PcmFormat,
     frame_bytes: u32,
     payload_words: u16,
-    buffer: DmaBuffer,
+    pub(super) buffer: DmaBuffer,
     // Kept for the boot even when stopped: the controller can prefetch it.
-    _bdl: DmaBuffer,
+    pub(super) _bdl: DmaBuffer,
+    pub(super) period_bytes: usize,
+    pub(super) hdmi_required: bool,
+    pub(super) bdl_entries: u16,
     pub(super) running: bool,
     pub(super) poisoned: bool,
     fifo_insufficient: bool,
@@ -127,7 +141,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
 
-    fn reset_descriptor(&mut self, index: u8) -> Result<(), Error> {
+    pub(super) fn reset_descriptor(&mut self, index: u8) -> Result<(), Error> {
         self.stop_descriptor(index)?;
         let base = stream_base(index);
         self.registers.write8(base + SD_CTL, SD_RESET);
@@ -142,7 +156,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })
     }
 
-    fn stream(&self, id: StreamId) -> Result<&Stream, Error> {
+    pub(super) fn stream(&self, id: StreamId) -> Result<&Stream, Error> {
         if id.token != self.token {
             return Err(Error::InvalidStream);
         }
@@ -168,7 +182,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Periods must be frame-aligned multiples of 128 bytes. Entries are split
     /// at 4K boundaries, including controller families with that restriction.
     /// Max 256 entries and 4MiB cyclic buffers; bidirectional engines, non-PCM,
-    /// scatter/gather external buffers and live refill are not provided here.
+    /// and scatter/gather external buffers are not provided here. The explicit
+    /// HDMI owner adds completed-period live playback refill separately.
     pub fn allocate_stream(
         &mut self,
         direction: Direction,
@@ -325,6 +340,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             payload_words,
             buffer,
             _bdl: bdl,
+            period_bytes,
+            hdmi_required: false,
+            bdl_entries: count as u16,
             running: false,
             poisoned: false,
             fifo_insufficient: true,
@@ -357,9 +375,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(self.stream(id)?.buffer.len())
     }
 
-    /// Only a stopped stream's PCM memory can be accessed. Continuous refill,
-    /// capture consumption and xrun accounting need a future period-ownership
-    /// API; LPIB alone is insufficient to hand a live period back to the CPU.
+    /// Direct PCM access requires a stopped stream. The explicit HDMI owner
+    /// supplies its separate completed-period playback refill API; generic
+    /// live capture consumption remains unsupported. LPIB alone grants no RAM.
     pub fn write_pcm(&mut self, id: StreamId, offset: usize, bytes: &[u8]) -> Result<(), Error> {
         let stream = self.stream(id)?;
         if stream.running {
@@ -424,6 +442,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(Error::StreamRunning);
         }
         self.require_sigmatel_route_power(id)?;
+        self.require_cirrus_route_power(id)?;
+        if self.stream(id)?.hdmi_required && self.hdmi_stream_port(id).is_none() {
+            return Err(Error::SinkUnavailable);
+        }
+        if let Err(error) = self.hdmi_before_start(id) {
+            if let Some(index) = self.hdmi_stream_port(id) {
+                self.hdmi_start_failed(index, id, error);
+            }
+            return Err(error);
+        }
         let base = stream_base(id.index);
         self.registers.write8(base + SD_STS, SD_STATUS);
         fence(Ordering::SeqCst);
@@ -437,6 +465,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 .as_mut()
                 .unwrap()
                 .poisoned = true;
+            if let Some(index) = self.hdmi_stream_port(id) {
+                self.hdmi_start_failed(index, id, error);
+            }
             return Err(error);
         }
         self.streams[usize::from(id.index)]
@@ -459,12 +490,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if result.is_err() {
             stream.poisoned = true;
         }
+        if let Err(error) = result {
+            self.hdmi_note_descriptor_fault(id.index, error);
+        }
         // Coherent capture data is only exposed after stop acknowledged.
         fence(Ordering::SeqCst);
         result
     }
 
     pub fn status(&mut self, id: StreamId) -> Result<StreamStatus, Error> {
+        self.hdmi_runtime(id)?;
         let running = self.stream(id)?.running;
         let base = stream_base(id.index);
         let status = self.registers.read8(base + SD_STS);
@@ -473,10 +508,17 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             let stream = self.streams[usize::from(id.index)].as_mut().unwrap();
             stream.running = false;
             stream.poisoned = true;
-            return Err(Error::StreamDma { status });
+            let error = Error::StreamDma { status };
+            if let Some(index) = self.hdmi_stream_port(id) {
+                self.hdmi_start_failed(index, id, error);
+            }
+            return Err(error);
         }
         let position = self.position_info(id)?;
         self.registers.write8(base + SD_STS, status & SD_COMPLETE);
+        if running {
+            self.hdmi_progress(id, position.transport_bytes, status & SD_COMPLETE != 0)?;
+        }
         Ok(StreamStatus {
             running,
             period_completed: status & SD_COMPLETE != 0,
@@ -565,27 +607,48 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.routing_failed {
             return Err(Error::NeedsReset);
         }
-        if self.routes.iter().any(|(_, route)| {
-            route.codec_address() == graph.address && route.nodes().contains(&node)
-        }) || self
-            .codec_controls
-            .iter()
-            .any(|(_, codec, control)| *codec == graph.address && *control == node)
+        self.require_cirrus_converter_power(graph.address)?;
+        self.validate_converter(graph, node, id, channel)?;
+        if self.hdmi_stream_port(id).is_some()
+            || self.hdmi_owns_node(graph.address, node)
+            || self
+                .converter_bindings
+                .iter()
+                .any(|binding| binding.codec == graph.address && binding.node == node)
+            || self.routes.iter().any(|(owner, route)| {
+                *owner == id
+                    || (route.codec_address() == graph.address && route.nodes().contains(&node))
+            })
+            || self
+                .codec_controls
+                .iter()
+                .any(|(_, codec, control)| *codec == graph.address && *control == node)
         {
             return Err(Error::RouteInUse);
         }
-        self.validate_converter(graph, node, id, channel)?;
         let stream = self.stream(id)?;
         let format = stream.format.encode()?;
         let binding = (id.tag << 4) | channel;
-        self.verb(Verb::long(graph.address, node, 2, format)?)?;
-        self.verb(Verb::short(graph.address, node, 0x706, binding)?)?;
-        let read_format = self.verb(Verb::short(graph.address, node, 0xa00, 0)?)?;
-        let read_binding = self.verb(Verb::short(graph.address, node, 0xf06, 0)?)?;
-        if read_format != u32::from(format) || read_binding != u32::from(binding) {
-            return Err(Error::ConverterRejected);
+        self.converter_bindings.push(ConverterBinding {
+            stream: id,
+            codec: graph.address,
+            node,
+            channel,
+        });
+        let result = (|| {
+            self.verb(Verb::long(graph.address, node, 2, format)?)?;
+            self.verb(Verb::short(graph.address, node, 0x706, binding)?)?;
+            let read_format = self.verb(Verb::short(graph.address, node, 0xa00, 0)?)?;
+            let read_binding = self.verb(Verb::short(graph.address, node, 0xf06, 0)?)?;
+            if read_format != u32::from(format) || read_binding != u32::from(binding) {
+                return Err(Error::ConverterRejected);
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.routing_failed = true;
         }
-        Ok(())
+        result
     }
     pub(super) fn validate_converter(
         &self,
