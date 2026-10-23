@@ -1762,7 +1762,7 @@ fn native_refused_d3_requires_fresh_d0_acknowledgement_before_restart() {
 mod registers_oracle {
     use super::super::registers as f;
     use super::*;
-    use alloc::collections::BTreeSet;
+    use alloc::{collections::BTreeSet, string::String};
 
     const INITIAL: &[u32] = &[0, 0xa5c3_5a3c, 0x5a3c_a5c3];
     const RINGS: &[u32] = &[0, 7, 31];
@@ -1789,7 +1789,8 @@ mod registers_oracle {
     }
     // Actual production constants only. Input domains are explicit donor-width
     // encodings, independent of Field addresses/masks/shifts. No expected result
-    // or address is calculated from this table: those come from original Linux.
+    // or address is calculated from this table. The external comparison gets
+    // them from original Linux; the verifier controls below use donor literals.
     const FIELDS: &[RegisterCase] = &[
         RegisterCase {
             name: "hw_atl_rdm_rx_desc_en_set",
@@ -2130,17 +2131,8 @@ mod registers_oracle {
         }
     }
 
-    #[test]
-    #[ignore = "UNRUN: set STELA_AQTION_REGISTERS_ORACLE to the unchanged Linux trace.txt"]
-    fn unchanged_linux_aqtion_registers() {
-        let path = std::env::var_os("STELA_AQTION_REGISTERS_ORACLE")
-            .expect("set STELA_AQTION_REGISTERS_ORACLE");
-        assert!(
-            std::fs::metadata(&path).unwrap().len() <= 256_000,
-            "oversized trace"
-        );
-        let text = std::fs::read_to_string(path).unwrap();
-        let rows = parse_trace(&text).expect("complete, strictly framed Linux trace");
+    fn compare_trace(text: &str) {
+        let rows = parse_trace(text).expect("complete, strictly framed Linux trace");
         assert_eq!(rows.len(), CASE_COUNT);
         for row in rows {
             let spec = &FIELDS[row.case];
@@ -2180,6 +2172,140 @@ mod registers_oracle {
     }
 
     #[test]
+    #[ignore = "UNRUN: set STELA_AQTION_REGISTERS_ORACLE to the unchanged Linux trace.txt"]
+    fn unchanged_linux_aqtion_registers() {
+        let path = std::env::var_os("STELA_AQTION_REGISTERS_ORACLE")
+            .expect("set STELA_AQTION_REGISTERS_ORACLE");
+        assert!(
+            std::fs::metadata(&path).unwrap().len() <= 256_000,
+            "oversized trace"
+        );
+        compare_trace(&std::fs::read_to_string(path).unwrap());
+    }
+
+    // Synthetic verifier controls, not executed original-Linux evidence. These
+    // (base, stride, mask, shift) literals were transcribed from the pinned
+    // hw_atl{,2}_llh_internal.h macros used by the 28 original helpers above.
+    // Keep them independent of Field and Hardware::set/get, including when a
+    // production constant changes. Full-word helpers ignore mask/shift.
+    fn control_trace() -> String {
+        const DONOR_ENCODINGS: &[(u32, u32, u32, u32)] = &[
+            (0x5b08, 0x20, 0x8000_0000, 31), // RDM_DESCDEN
+            (0x5b00, 0x20, u32::MAX, 0),     // RX_DMA_DESC_BASE_ADDRLSW
+            (0x5b04, 0x20, u32::MAX, 0),     // RX_DMA_DESC_BASE_ADDRMSW
+            (0x5b08, 0x20, 0x0000_1ff8, 3),  // RDM_DESCDLEN
+            (0x5b18, 0x20, 0x0000_001f, 0),  // RDM_DESCDDATA_SIZE
+            (0x5b18, 0x20, 0x0000_1f00, 8),  // RDM_DESCDHDR_SIZE
+            (0x5b08, 0x20, 0x1000_0000, 28), // RDM_DESCDHDR_SPLIT
+            (0x5b10, 0x20, u32::MAX, 0),     // RX_DMA_DESC_TAIL_PTR
+            (0x7c08, 0x40, 0x8000_0000, 31), // TDM_DESCDEN
+            (0x7c00, 0x40, u32::MAX, 0),     // TX_DMA_DESC_BASE_ADDRLSW
+            (0x7c04, 0x40, u32::MAX, 0),     // TX_DMA_DESC_BASE_ADDRMSW
+            (0x7c08, 0x40, 0x0000_1ff8, 3),  // TDM_DESCDLEN
+            (0x7c0c, 0x40, 0x0000_1fff, 0),  // TDM_DESCDHD
+            (0x7c10, 0x40, u32::MAX, 0),     // TX_DMA_DESC_TAIL_PTR
+            (0x5114, 0x08, 0x8000_0000, 31), // RPFL2UC_ENF
+            (0x5114, 0x08, 0x0007_0000, 16), // RPFL2UC_ACTF
+            (0x5110, 0x08, u32::MAX, 0),     // RPFL2UC_DAFLSW
+            (0x5114, 0x08, 0x0000_ffff, 0),  // RPFL2UC_DAFMSW
+            (0x5710, 0x10, 0x0000_01ff, 0),  // RPB_RXBBUF_SIZE
+            (0x5714, 0x10, 0x3fff_0000, 16), // RPB_RXBHI_THRESH
+            (0x7910, 0x10, 0x0000_00ff, 0),  // TPB_TXBBUF_SIZE
+            (0x7914, 0x10, 0x1fff_0000, 16), // TPB_TXBHI_THRESH
+            (0x5a10, 0x00, 0x0000_0001, 0),  // RDM_RX_DMA_DESC_CACHE_INIT_DONE
+            (0x5114, 0x08, 0x0fc0_0000, 22), // ATL2_RPFL2UC_TAG
+            (0x50f0, 0x00, 0x0000_003f, 0),  // ATL2_RPF_L2_BC_TAG
+            (0x54c8, 0x00, 0x0000_01ff, 0),  // ATL2_RPF_PIF_RPF_RSS_HASH_TYPEI
+            (0x6ff0, 0x00, 0x0000_ffff, 0),  // ATL2_RPF_REC_TAB_EN (set)
+            (0x6ff0, 0x00, 0x0000_ffff, 0),  // ATL2_RPF_REC_TAB_EN (get)
+        ];
+        assert_eq!(DONOR_ENCODINGS.len(), FIELDS.len());
+        let mut trace = String::from("AQTION_REGISTERS_V1 600\n");
+        for (spec, &(base, stride, mask, shift)) in FIELDS.iter().zip(DONOR_ENCODINGS) {
+            for &index in spec.indexes {
+                for &initial in INITIAL {
+                    for &value in spec.values {
+                        let (word, result, reads, writes) = match spec.access {
+                            Access::Get(_) => (initial, (initial & mask) >> shift, 1, 0),
+                            Access::Word => (value, 0, 0, 1),
+                            Access::Bits => {
+                                let word = (initial & !mask) | (value << shift);
+                                (word, 0, 1, u32::from(word != initial))
+                            }
+                        };
+                        trace.push_str(&format!(
+                            "{} {index} {initial} {value} {} {word} {result} {reads} {writes}\n",
+                            spec.name,
+                            base + index * stride
+                        ));
+                    }
+                }
+            }
+        }
+        trace.push_str("END 600\n");
+        trace
+    }
+
+    #[test]
+    fn accepts_complete_aqtion_register_control_trace() {
+        let trace = control_trace();
+        assert_eq!(parse_trace(&trace).unwrap().len(), CASE_COUNT);
+        compare_trace(&trace);
+    }
+
+    #[test]
+    fn rejects_parseable_aqtion_register_comparison_corruptions() {
+        let trace = control_trace();
+        compare_trace(&trace); // A baseline failure cannot count as rejection.
+        // Every replacement retains a complete valid input inventory and passes
+        // the parser. Only the real Hardware comparison can reject these rows.
+        // Exercise addresses for every access class, words for both setter
+        // classes, and in-range results for all three getters.
+        for (original, corrupted) in [
+            (
+                "hw_atl_rdm_rx_desc_en_set 0 0 0 23304 0 0 1 0\n",
+                "hw_atl_rdm_rx_desc_en_set 0 0 0 23308 0 0 1 0\n",
+            ),
+            (
+                "hw_atl_reg_rx_dma_desc_base_addresslswset 0 0 0 23296 0 0 0 1\n",
+                "hw_atl_reg_rx_dma_desc_base_addresslswset 0 0 0 23300 0 0 0 1\n",
+            ),
+            (
+                "hw_atl_tdm_tx_desc_head_ptr_get 0 0 0 31756 0 0 1 0\n",
+                "hw_atl_tdm_tx_desc_head_ptr_get 0 0 0 31760 0 0 1 0\n",
+            ),
+            (
+                "hw_atl_rdm_rx_desc_en_set 0 0 1 23304 2147483648 0 1 1\n",
+                "hw_atl_rdm_rx_desc_en_set 0 0 1 23304 2147483649 0 1 1\n",
+            ),
+            (
+                "hw_atl_reg_rx_dma_desc_base_addresslswset 0 0 0 23296 0 0 0 1\n",
+                "hw_atl_reg_rx_dma_desc_base_addresslswset 0 0 0 23296 1 0 0 1\n",
+            ),
+            (
+                "hw_atl_tdm_tx_desc_head_ptr_get 0 0 0 31756 0 0 1 0\n",
+                "hw_atl_tdm_tx_desc_head_ptr_get 0 0 0 31756 0 1 1 0\n",
+            ),
+            (
+                "hw_atl_rdm_rx_dma_desc_cache_init_done_get 0 0 0 23056 0 0 1 0\n",
+                "hw_atl_rdm_rx_dma_desc_cache_init_done_get 0 0 0 23056 0 1 1 0\n",
+            ),
+            (
+                "hw_atl2_rpf_act_rslvr_section_en_get 0 0 0 28656 0 0 1 0\n",
+                "hw_atl2_rpf_act_rslvr_section_en_get 0 0 0 28656 0 1 1 0\n",
+            ),
+        ] {
+            assert_eq!(trace.matches(original).count(), 1, "control target");
+            let mutated = trace.replacen(original, corrupted, 1);
+            assert_eq!(parse_trace(&mutated).unwrap().len(), CASE_COUNT);
+            assert!(
+                std::panic::catch_unwind(|| compare_trace(&mutated)).is_err(),
+                "comparison accepted corruption: {corrupted}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_malformed_aqtion_register_oracle_rows_and_incomplete_coverage() {
         const VALID: &str = "hw_atl_rdm_rx_desc_en_set 0 0 0 23304 0 0 1 0";
         assert_eq!(parse_row(VALID).unwrap().address, 23304);
@@ -2200,6 +2326,14 @@ mod registers_oracle {
             "hw_atl_rdm_rx_desc_en_set 0 0 0 23304 0 0 1 2",
             "hw_atl_rdm_rx_desc_en_set 0 0 0 23304 0 1 1 0",
             "hw_atl_rdm_rx_desc_en_set 0 0 0 23304 1 0 1 0",
+            "hw_atl_reg_rx_dma_desc_base_addresslswset 0 0 0 23296 0 0 1 1",
+            "hw_atl_reg_rx_dma_desc_base_addresslswset 0 0 0 23296 0 0 0 0",
+            "hw_atl_reg_rx_dma_desc_base_addresslswset 0 0 0 23296 0 0 0 2",
+            "hw_atl_reg_rx_dma_desc_base_addresslswset 0 0 0 23296 0 1 0 1",
+            "hw_atl_tdm_tx_desc_head_ptr_get 0 0 0 31756 0 0 0 0",
+            "hw_atl_tdm_tx_desc_head_ptr_get 0 0 0 31756 0 0 2 0",
+            "hw_atl_tdm_tx_desc_head_ptr_get 0 0 0 31756 0 0 1 1",
+            "hw_atl_tdm_tx_desc_head_ptr_get 0 0 0 31756 1 0 1 0",
             "hw_atl_tdm_tx_desc_head_ptr_get 0 0 0 31756 0 8192 1 0",
         ] {
             assert!(parse_row(bad).is_err(), "accepted malformed row: {bad}");

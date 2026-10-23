@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -215,7 +216,11 @@ int main(void) {
 '''
     cpath, binary = out / "wrapper.c", out / "aqtion-registers"
     cpath.write_text(code)
-    compile_cmd = ["clang", "-std=c11", "-O1", "-g", "-fsanitize=address,undefined",
+    overrides = {"ASAN_OPTIONS": "detect_leaks=0:halt_on_error=1",
+                 "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1"}
+    env = dict(os.environ, **overrides)
+    compiler = shutil.which("clang", path=env.get("PATH"))
+    compile_cmd = [compiler or "clang", "-std=c11", "-O1", "-g", "-fsanitize=address,undefined",
                    "-fno-sanitize-recover=all", "-fno-omit-frame-pointer",
                    "-I", str(out / "include"), str(cpath), "-o", str(binary)]
     run_cmd = [str(binary)]
@@ -230,8 +235,21 @@ int main(void) {
                                   str(source), str(out)],
                      "compile": compile_cmd, "run": run_cmd},
         "timeouts_seconds": {"compile": 60, "run": 15},
-        "environment": {"ASAN_OPTIONS": "detect_leaks=0:halt_on_error=1",
-                        "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1"},
+        "environment": {
+            "scope": "selected effective inherited settings and sanitizer overrides; "
+                     "remaining environment inherited, not an exact environment snapshot",
+            "overrides": overrides,
+            "effective_selected": {key: env.get(key) for key in (
+                "PATH", "SDKROOT", "DEVELOPER_DIR", "MACOSX_DEPLOYMENT_TARGET",
+                "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH", "CCC_OVERRIDE_OPTIONS",
+                "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+                "LD_LIBRARY_PATH", "LD_PRELOAD", "TMPDIR", "LANG", "LC_ALL",
+                "ASAN_OPTIONS", "UBSAN_OPTIONS")},
+        },
+        "tool_resolution": {"clang": compiler, "python": sys.executable,
+                            "cwd": str(Path.cwd()),
+                            "clang_sha256": sha256(Path(compiler).read_bytes())
+                            if compiler else None},
         "trace_columns": "helper index initial value address final result reads writes",
         "rust_comparison": "UNRUN",
     }
@@ -241,7 +259,6 @@ int main(void) {
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
     save()  # Retain source/commands even if compilation or execution fails.
-    env = dict(os.environ, **manifest["environment"])
     for stage, command, timeout in [("compile", compile_cmd, 60), ("run", run_cmd, 15)]:
         manifest["status"] = stage.upper() + "_STARTED"
         save()
@@ -256,6 +273,11 @@ int main(void) {
             manifest["status"] = stage.upper() + "_TIMEOUT"
             save()
             raise
+        except OSError as error:
+            manifest[stage] = {"error": str(error)}
+            manifest["status"] = stage.upper() + "_FAILED"
+            save()
+            raise
         (out / (stage + ".stdout")).write_bytes(receipt.stdout)
         (out / (stage + ".stderr")).write_bytes(receipt.stderr)
         manifest[stage] = {"returncode": receipt.returncode,
@@ -264,6 +286,11 @@ int main(void) {
         manifest["status"] = stage.upper() + ("_OK" if receipt.returncode == 0 else "_FAILED")
         save()
         receipt.check_returncode()
+        if stage == "compile":
+            # Persist executable identity before starting it: failed/timed-out
+            # runs must retain the binary hash just like successful runs.
+            manifest["binary_sha256"] = sha256(binary.read_bytes())
+            save()
     trace = receipt.stdout
     # Check framing/count only here; strict independent input/output validation
     # belongs to the Rust comparison. Never compute expected fields in Python.
@@ -276,7 +303,6 @@ int main(void) {
     (out / "trace.txt").write_bytes(trace)
     manifest["trace"] = {"sha256": sha256(trace), "bytes": len(trace),
                          "case_count": EXPECTED_CASES}
-    manifest["binary_sha256"] = sha256(binary.read_bytes())
     manifest["status"] = "C_ORACLE_EXECUTED_RUST_COMPARISON_UNRUN"
     save()
     print(manifest_path)
