@@ -19,6 +19,7 @@ fn host(
         },
         "SDHCI native model".into(),
         dma,
+        Profile::Standard,
     )
     .unwrap();
     (host, model)
@@ -433,7 +434,8 @@ fn initial_card_clock_runs_before_cmd0_and_unqualified_1v8_hosts_refuse() {
                 ticks_per_microsecond: 0
             },
             "uncalibrated".into(),
-            &mut dma
+            &mut dma,
+            Profile::Standard,
         ),
         Err(BlockError::Unsupported(_))
     ));
@@ -448,7 +450,8 @@ fn initial_card_clock_runs_before_cmd0_and_unqualified_1v8_hosts_refuse() {
                 ticks_per_microsecond: CLOCK_TICKS_PER_US
             },
             "unqualified1.8V".into(),
-            &mut dma
+            &mut dma,
+            Profile::Standard,
         ),
         Err(BlockError::Unsupported(_))
     ));
@@ -558,4 +561,143 @@ fn mmc_reserved_specifications_refuse_and_legacy_cid_keeps_manufacturer24_bits()
             assert_eq!(card.info().bus_width, 1);
         }
     }
+}
+
+#[test]
+fn ene_exact_pci_profiles_apply_real_power_pio_and_ios_reset_sequences() {
+    for device in [0x0550, 0x0551, 0x0750, 0x0751] {
+        for kind in [Kind::Sd, Kind::Mmc] {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: each real PIO engine owns this retained native DMA region.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let model = Rc::new(RefCell::new(Hardware::new(kind, true)));
+            {
+                let mut m = model.borrow_mut();
+                // Physical device rules are independent of the driver's profile.
+                // Advertised ADMA stays set: using it must actually fail here.
+                m.single_power_write = true;
+                m.dma_broken = true;
+                m.reset_after_settings = device >= 0x0700;
+            }
+            let mut host = Host::new(
+                Box::new(Port(model.clone())),
+                Clock {
+                    ticks_per_microsecond: CLOCK_TICKS_PER_US,
+                },
+                format!("ENE {device:04x}"),
+                &mut dma,
+                Profile::select(0x1524, device),
+            )
+            .unwrap();
+            let mut card = host.poll().unwrap().unwrap();
+            let mut bytes = [0xa5; 1024];
+            card.read(3, &mut bytes).unwrap();
+            assert_eq!(bytes, model.borrow().disk[3 * 512..5 * 512]);
+            bytes.fill(0x3b);
+            card.write(5, &bytes).unwrap();
+            card.flush().unwrap();
+            assert_eq!(bytes, model.borrow().disk[5 * 512..7 * 512]);
+            let m = model.borrow();
+            assert_eq!(host.info().capabilities & CAP_ADMA2, CAP_ADMA2);
+            assert!(
+                m.writes
+                    .iter()
+                    .all(|(at, _, value)| *at != TRANSFER_MODE || value & u32::from(DMA) == 0)
+            );
+            assert!(
+                m.writes
+                    .iter()
+                    .all(|(at, _, _)| !matches!(*at, ADMA_ADDRESS | ADMA_ADDRESS_HIGH))
+            );
+            assert!(m.writes.iter().all(|(at, _, value)| *at != POWER
+                || *value == 0
+                || value & u32::from(POWER_ON) != 0));
+            let resets = m
+                .writes
+                .iter()
+                .filter(|(at, _, value)| {
+                    *at == RESET && *value == u32::from(RESET_COMMAND | RESET_DATA)
+                })
+                .count();
+            assert!(if device >= 0x0700 {
+                resets >= 5
+            } else {
+                resets == usize::from(kind == Kind::Mmc)
+            });
+            drop(m);
+            let mut old = card.clone();
+            card.shutdown(true).unwrap();
+            if device >= 0x0700 {
+                assert!(
+                    !model.borrow().settings_dirty,
+                    "missing trailing power-off IOS reset"
+                );
+            }
+            assert!(host.poll().unwrap().is_some());
+            let before = (
+                model.borrow().reads,
+                model.borrow().writes.len(),
+                model.borrow().commands.len(),
+            );
+            assert_eq!(old.flush(), Err(BlockError::Unsupported(STALE)));
+            assert_eq!(
+                (
+                    model.borrow().reads,
+                    model.borrow().writes.len(),
+                    model.borrow().commands.len()
+                ),
+                before
+            );
+        }
+    }
+    assert_eq!(Profile::select(0x1524, 0x0510), Profile::Standard);
+    assert_eq!(Profile::select(0x1524, 0x0752), Profile::Standard);
+    assert_eq!(Profile::select(0x1525, 0x0750), Profile::Standard);
+}
+
+#[test]
+fn ene_failed_post_settings_reset_retires_old_aliases_and_pins_controller() {
+    let mut backing = vec![0u64; 128 * 1024];
+    let start = backing.as_mut_ptr() as u64;
+    // SAFETY: uncertain device retirement retains all original payload memory.
+    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let model = Rc::new(RefCell::new(Hardware::new(Kind::Sd, true)));
+    {
+        let mut m = model.borrow_mut();
+        m.single_power_write = true;
+        m.dma_broken = true;
+        m.reset_after_settings = true;
+    }
+    let mut host = Host::new(
+        Box::new(Port(model.clone())),
+        Clock {
+            ticks_per_microsecond: CLOCK_TICKS_PER_US,
+        },
+        "ENE fault".into(),
+        &mut dma,
+        Profile::select(0x1524, 0x0750),
+    )
+    .unwrap();
+    let mut old = host.poll().unwrap().unwrap();
+    let mut clone = old.clone();
+    model.borrow_mut().replace();
+    model.borrow_mut().fail_settings_reset = true;
+    assert!(host.poll().is_err());
+    let m = model.borrow();
+    let before = (m.reads, m.writes.len(), m.commands.len());
+    drop(m);
+    let mut bytes = [0x95; 512];
+    assert_eq!(old.read(0, &mut bytes), Err(BlockError::Unsupported(STALE)));
+    assert_eq!(bytes, [0x95; 512]);
+    assert_eq!(clone.flush(), Err(BlockError::Unsupported(STALE)));
+    assert!(host.poll().is_err());
+    assert_eq!(
+        (
+            model.borrow().reads,
+            model.borrow().writes.len(),
+            model.borrow().commands.len()
+        ),
+        before
+    );
 }

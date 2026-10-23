@@ -157,7 +157,7 @@ impl Engine {
                 self.application(self.rca)?;
                 self.execute(SWITCH, 2, Response::Status, None)?;
                 let control = self.registers.read8(HOST_CONTROL);
-                self.registers.write8(HOST_CONTROL, control | BUS4);
+                self.set_ios_control(control | BUS4)?;
                 info.bus_width = 4;
             }
             info.scr = Some(scr);
@@ -194,7 +194,7 @@ impl Engine {
                         ));
                     }
                     let control = self.registers.read8(HOST_CONTROL);
-                    self.registers.write8(HOST_CONTROL, control | HIGH_SPEED);
+                    self.set_ios_control(control | HIGH_SPEED)?;
                     info.clock_hz = 50_000_000;
                 }
             }
@@ -244,7 +244,7 @@ impl Engine {
             // mode; an 8-bit profile needs separate board-wiring evidence.
             self.mmc_switch(EXT_BUS_WIDTH as u8, 1)?;
             let control = self.registers.read8(HOST_CONTROL) & !(BUS4 | BUS8);
-            self.registers.write8(HOST_CONTROL, control | BUS4);
+            self.set_ios_control(control | BUS4)?;
             info.bus_width = 4;
             ext[EXT_BUS_WIDTH] = 1;
             // Reread EXT_CSD at the new actual bus width and compare immutable
@@ -285,7 +285,7 @@ impl Engine {
                 self.mmc_switch(EXT_TIMING as u8, 1)?;
                 ext[EXT_TIMING] = 1;
                 let control = self.registers.read8(HOST_CONTROL);
-                self.registers.write8(HOST_CONTROL, control | HIGH_SPEED);
+                self.set_ios_control(control | HIGH_SPEED)?;
                 info.clock_hz = if ext[EXT_CARD_TYPE] & 2 != 0 {
                     52_000_000
                 } else {

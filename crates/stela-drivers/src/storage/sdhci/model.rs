@@ -33,6 +33,11 @@ pub(super) struct Hardware {
     pub never_ready: bool,
     pub command_after_notification: bool,
     pub initial_clock_seen: Option<u64>,
+    pub single_power_write: bool,
+    pub dma_broken: bool,
+    pub reset_after_settings: bool,
+    pub fail_settings_reset: bool,
+    pub settings_dirty: bool,
     notified: bool,
     clock_started: Option<u64>,
     regs: BTreeMap<usize, u32>,
@@ -125,6 +130,11 @@ impl Hardware {
             never_ready: false,
             command_after_notification: false,
             initial_clock_seen: None,
+            single_power_write: false,
+            dma_broken: false,
+            reset_after_settings: false,
+            fail_settings_reset: false,
+            settings_dirty: false,
             notified: false,
             clock_started: None,
             regs: BTreeMap::new(),
@@ -186,6 +196,14 @@ impl Hardware {
         let argument = self.reg(ARGUMENT);
         let mode = self.word(TRANSFER_MODE);
         self.commands.push((cmd, argument, value));
+        assert!(
+            !self.reset_after_settings || !self.settings_dirty,
+            "ENE command before post-settings reset"
+        );
+        assert!(
+            !self.dma_broken || mode & DMA == 0,
+            "ENE broken DMA was enabled"
+        );
         if self.notified {
             self.command_after_notification = true;
             self.status |= COMMAND_TIMEOUT | 1 << 15;
@@ -507,7 +525,11 @@ impl Registers for Port {
         let mut m = self.0.borrow_mut();
         m.writes.push((at, 1, u32::from(value)));
         if at == RESET {
+            if m.fail_settings_reset && m.settings_dirty {
+                m.reset_stuck = true;
+            }
             if !m.reset_stuck {
+                m.settings_dirty = false;
                 m.expected = 0;
                 m.fifo.clear();
                 m.status &= CARD_INSERT | CARD_REMOVE;
@@ -516,6 +538,15 @@ impl Registers for Port {
                 }
             }
         } else {
+            if at == POWER && m.single_power_write {
+                assert!(
+                    value == 0 || value & POWER_ON != 0,
+                    "ENE split voltage/power write"
+                );
+            }
+            if at == HOST_CONTROL && (m.byte(at) ^ value) & (BUS4 | BUS8 | HIGH_SPEED) != 0 {
+                m.settings_dirty = true;
+            }
             if at == POWER && value & POWER_ON == 0 {
                 m.notified = false;
                 m.selected = false;
@@ -527,6 +558,9 @@ impl Registers for Port {
         let mut m = self.0.borrow_mut();
         m.writes.push((at, 2, u32::from(value)));
         m.write(at, 2, u32::from(value));
+        if at == CLOCK {
+            m.settings_dirty = true;
+        }
         if at == CLOCK && value & CLOCK_CARD != 0 {
             m.clock_started = Some(
                 Clock {

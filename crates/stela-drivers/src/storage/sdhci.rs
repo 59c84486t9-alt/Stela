@@ -18,7 +18,9 @@ use core::{
     sync::atomic::{AtomicU64, Ordering, fence},
 };
 mod command;
+mod pci;
 mod protocol;
+use pci::Profile;
 mod registers;
 use registers::*;
 #[cfg(test)]
@@ -57,6 +59,7 @@ pub fn attach(
             "PCI function is not standard SDHCI",
         ));
     }
+    let profile = Profile::select(function.vendor, function.device);
     function.power_up(&handoff.clock)?;
     let info = function.config().read8(PCI_SLOT_INFO);
     let slots = ((info >> 4) & 7) + 1;
@@ -83,7 +86,7 @@ pub fn attach(
     };
     for (index, registers) in mappings.into_iter().enumerate() {
         let location = format!("{} SD slot {index}", function.address);
-        match Host::new(Box::new(registers), handoff.clock, location, dma) {
+        match Host::new(Box::new(registers), handoff.clock, location, dma, profile) {
             Ok(mut host) => {
                 match host.poll() {
                     Ok(Some(card)) => attached.cards.push(card),
@@ -125,6 +128,7 @@ struct Medium {
 }
 struct Engine {
     registers: Box<dyn Registers>,
+    profile: Profile,
     clock: Clock,
     location: String,
     version: u8,
@@ -168,6 +172,7 @@ impl Host {
         clock: Clock,
         location: String,
         dma: &mut dyn DmaAllocator,
+        profile: Profile,
     ) -> Result<Self, BlockError> {
         if clock.ticks_per_microsecond == 0 {
             return Err(BlockError::Unsupported(
@@ -178,6 +183,7 @@ impl Host {
         let descriptors = dma.allocate(4096, 64)?;
         let mut engine = Engine {
             registers,
+            profile,
             clock,
             location,
             version: 0,
@@ -293,6 +299,7 @@ impl BlockDevice for Card {
             c.reset(RESET_COMMAND | RESET_DATA)?;
             c.registers.write16(CLOCK, 0);
             c.registers.write8(POWER, 0);
+            c.finish_ios()?;
         }
         Ok(())
     }
@@ -371,7 +378,7 @@ impl Engine {
         if self.base_hz == 0 {
             return Err(BlockError::Unsupported("SDHCI needs an actual base clock"));
         }
-        self.dma_mode = if self.capabilities & CAP_ADMA2 == 0 {
+        self.dma_mode = if self.profile.broken_dma() || self.capabilities & CAP_ADMA2 == 0 {
             None
         } else if self.capabilities & CAP_64 != 0 {
             Some(true)
@@ -403,7 +410,9 @@ impl Engine {
             .write32(INTERRUPT, !(CARD_INSERT | CARD_REMOVE));
         self.registers.write8(POWER, 0);
         self.clock.delay(1000);
-        self.registers.write8(POWER, power);
+        if !self.profile.single_power_write() {
+            self.registers.write8(POWER, power);
+        }
         self.registers.write8(POWER, power | POWER_ON);
         self.clock.delay(10_000);
         self.set_clock(INIT_HZ)?;
@@ -427,6 +436,18 @@ impl Engine {
             .write16(CLOCK, field | CLOCK_INTERNAL | CLOCK_CARD);
         if actual > hz {
             return Err(BlockError::Unsupported("SDHCI clock exceeds card limit"));
+        }
+        self.finish_ios()
+    }
+    fn set_ios_control(&mut self, value: u8) -> Result<(), BlockError> {
+        self.registers.write8(HOST_CONTROL, value);
+        self.finish_ios()
+    }
+    fn finish_ios(&mut self) -> Result<(), BlockError> {
+        // ENE CB714 signals spurious timeout/CRC after host settings change.
+        // The source set_ios hook resets command/data after applying settings.
+        if self.profile.reset_after_ios() {
+            self.reset(RESET_COMMAND | RESET_DATA)?;
         }
         Ok(())
     }

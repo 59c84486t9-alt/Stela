@@ -201,6 +201,7 @@ fn real_paused_qemu_sd_card_runs_native_initialization_pio_and_durable_io() {
         },
         "real paused QEMU SDHCI".into(),
         &mut dma,
+        Profile::Standard,
     )
     .unwrap();
     let mut card = host.poll().unwrap().unwrap();
