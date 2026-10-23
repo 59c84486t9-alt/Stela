@@ -12,6 +12,7 @@ pub enum Request {
     Glai,
     WideBandwidth,
     ExternalClock,
+    Country,
     /// Intel DSM GUID f21202bf-8f78-4dc6-a5b3-1f738e285ade, revision 0,
     /// no fourth-argument payload, at the actual function's ACPI handle.
     Dsm(u8),
@@ -79,6 +80,7 @@ pub(crate) struct Session<B: BiosIo> {
     locked: Option<bool>,
     cache: Option<Cache>,
     external_clock: Option<lari::Observation>,
+    country: Option<lari::Observation>,
 }
 impl<B: BiosIo> Session<B> {
     pub(crate) fn new(io: B) -> Self {
@@ -88,6 +90,7 @@ impl<B: BiosIo> Session<B> {
             locked: None,
             cache: None,
             external_clock: None,
+            country: None,
         }
     }
     pub(crate) fn reads(&self) -> &[Read] {
@@ -99,10 +102,34 @@ impl<B: BiosIo> Session<B> {
         if let Some(observation) = self.external_clock {
             return Ok(observation);
         }
+        let observation = self.scalar(
+            ScalarKind::ExternalClock,
+            Variable::Eckv,
+            Request::ExternalClock,
+        )?;
+        self.external_clock = Some(observation);
+        Ok(observation)
+    }
+    /// Source WRDD permits CN only. This records a BIOS observation, never
+    /// location/OS authority or an override of an actual firmware response.
+    pub(crate) fn country(&mut self) -> Result<lari::Observation, Error> {
+        if let Some(observation) = self.country {
+            return Ok(observation);
+        }
+        let observation = self.scalar(ScalarKind::Country, Variable::Wrdd, Request::Country)?;
+        self.country = Some(observation);
+        Ok(observation)
+    }
+    fn scalar(
+        &mut self,
+        kind: ScalarKind,
+        variable: Variable,
+        request: Request,
+    ) -> Result<lari::Observation, Error> {
         let mut value = None;
         if self.locked()?
-            && let Some(raw) = self.uefi(Variable::Eckv)?
-            && let Ok(scalar) = Scalar::parse(ScalarKind::ExternalClock, &raw)
+            && let Some(raw) = self.uefi(variable)?
+            && let Ok(scalar) = Scalar::parse(kind, &raw)
         {
             value = Some(lari::Value {
                 value: scalar.value(),
@@ -111,10 +138,8 @@ impl<B: BiosIo> Session<B> {
             });
         }
         if value.is_none()
-            && let Some((0, raw)) = self
-                .acpi(Request::ExternalClock)?
-                .as_ref()
-                .and_then(wifi_value)
+            && let Some((0, raw)) = self.acpi(request)?.as_ref().and_then(wifi_value)
+            && (kind != ScalarKind::Country || raw as u32 == 0x434e)
         {
             value = Some(lari::Value {
                 value: raw as u32,
@@ -122,9 +147,7 @@ impl<B: BiosIo> Session<B> {
                 revision: 0,
             });
         }
-        let observation = value.map_or(lari::Observation::Unavailable, lari::Observation::Observed);
-        self.external_clock = Some(observation);
-        Ok(observation)
+        Ok(value.map_or(lari::Observation::Unavailable, lari::Observation::Observed))
     }
     fn acpi(&mut self, request: Request) -> Result<Option<Object>, Error> {
         let result = self.io.evaluate(request);
@@ -320,7 +343,9 @@ mod tests {
         fn evaluate(&mut self, request: Request) -> Result<Object, IoError> {
             let s = self.scenario;
             Ok(match request {
-                Request::ExternalClock => panic!("ECKV is outside the historical LARI model"),
+                Request::ExternalClock | Request::Country => {
+                    panic!("scalar is outside the historical LARI model")
+                }
                 Request::Glai => {
                     let mode = s % 8;
                     if mode == 0 {
@@ -414,7 +439,9 @@ mod tests {
             .map(|read| match read {
                 Read::Acpi(Request::Glai, _) => 1,
                 Read::Acpi(Request::WideBandwidth, _) => 2,
-                Read::Acpi(Request::ExternalClock, _) => panic!("unexpected historical ECKV read"),
+                Read::Acpi(Request::ExternalClock | Request::Country, _) => {
+                    panic!("unexpected historical scalar read")
+                }
                 Read::Acpi(Request::Dsm(index), _) => 10 + u64::from(*index),
                 Read::Uefi(Variable::GeneralConfiguration, _) => 3,
                 Read::Uefi(Variable::Wbem, _) => 4,
@@ -668,6 +695,63 @@ mod tests {
                         Read::Acpi(Request::ExternalClock, _)
                     ));
                 }
+            }
+        }
+    }
+    struct CountryModel(u8);
+    // SAFETY: exact modeled BIOS service reads, never a real location issuer.
+    unsafe impl BiosIo for CountryModel {
+        fn evaluate(&mut self, request: Request) -> Result<Object, IoError> {
+            match request {
+                Request::Glai => Ok(package(0, 1, 7)),
+                Request::Country if self.0 == 4 => Err(IoError::Unavailable),
+                Request::Country if self.0 == 5 => Err(IoError::NotFound),
+                Request::Country => Ok(package(
+                    0,
+                    if self.0 == 3 { 0x5553 } else { 0x1_0000_434e },
+                    7,
+                )),
+                _ => panic!("unexpected country read"),
+            }
+        }
+        fn variable(&mut self, variable: Variable) -> Result<Vec<u8>, IoError> {
+            assert_eq!(variable, Variable::Wrdd);
+            match self.0 {
+                0 => Ok(vec![0, 0x4e, 0x43, 0, 0]),
+                1 => Ok(vec![0, 0x53, 0x55, 0, 0]),
+                2 => Err(IoError::Unavailable),
+                _ => Err(IoError::NotFound),
+            }
+        }
+    }
+    #[test]
+    fn bios_country_accepts_only_genuine_cn_and_never_converts_missing_service_into_absence() {
+        for scenario in 0..6 {
+            let mut session = Session::new(CountryModel(scenario));
+            let result = session.country();
+            let expected = match scenario {
+                0 | 1 => Ok(lari::Observation::Observed(lari::Value {
+                    value: 0x434e,
+                    source: if scenario == 0 {
+                        lari::Source::Uefi
+                    } else {
+                        lari::Source::Acpi
+                    },
+                    revision: 0,
+                })),
+                2 => Err(Error::IncompleteUefi(Variable::Wrdd, IoError::Unavailable)),
+                3 | 5 => Ok(lari::Observation::Unavailable),
+                4 => Err(Error::IncompleteAcpi(
+                    Request::Country,
+                    IoError::Unavailable,
+                )),
+                _ => unreachable!(),
+            };
+            assert_eq!(result, expected);
+            if result.is_ok() {
+                let reads = session.reads().len();
+                assert_eq!(session.country(), expected);
+                assert_eq!(session.reads().len(), reads);
             }
         }
     }
