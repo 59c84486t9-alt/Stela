@@ -152,6 +152,22 @@ impl DataPolicy for Policy {
             Err(MemoryStatus::Unsupported)
         }
     }
+    fn validate_address_checks(
+        &self,
+        required: stela_compiler::context::memory::address::AddressCheckRequirements,
+    ) -> Result<(), MemoryStatus> {
+        use stela_compiler::context::memory::address::IncrementChoice;
+        if required.is_empty()
+            || self
+                .controls
+                .address_checks
+                .is_some_and(|checks| required.matches(checks, IncrementChoice::Unchecked))
+        {
+            Ok(())
+        } else {
+            Err(MemoryStatus::Unsupported)
+        }
+    }
     fn translate(&self, address: u64) -> Result<u64, MemoryStatus> {
         // TBI/address-size decisions belong to the source walker. Its low four
         // address bits are unchanged, so decomposition needs no early walk.
@@ -844,6 +860,55 @@ pub(super) mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn address_specialization_requires_actual_source_cpa2_absence() {
+        use stela_compiler::context::memory::address::{
+            AccessEl, AddressAddChecks, AddressCheckRequirements, IncrementChoice,
+        };
+        let (cpu, profile, missing, ram) = fixture();
+        let controls = Controls::capture(&cpu, profile.name, &missing).unwrap();
+        assert!(controls.address_checks.is_some());
+        let policy = Policy::new(controls.clone(), Arc::clone(&ram));
+        let increment =
+            AddressCheckRequirements::default().with_increment_choice(IncrementChoice::Unchecked);
+        assert_eq!(policy.validate_address_checks(increment), Ok(()));
+        assert_eq!(
+            policy.validate_address_checks(
+                AddressCheckRequirements::default().with_increment_choice(IncrementChoice::Checked)
+            ),
+            Err(MemoryStatus::Unsupported),
+        );
+        for el in [AccessEl::El0, AccessEl::El1] {
+            assert_eq!(
+                policy.validate_address_checks(AddressCheckRequirements::for_access(
+                    el,
+                    AddressAddChecks::Disabled,
+                )),
+                Ok(())
+            );
+            assert_eq!(
+                policy.validate_address_checks(AddressCheckRequirements::for_access(
+                    el,
+                    AddressAddChecks::Enabled,
+                )),
+                Err(MemoryStatus::Unsupported)
+            );
+        }
+        // The private negative model removes the source proof; no pointer,
+        // target tier or previously admitted specialization can replace it.
+        let mut unproven = controls;
+        unproven.address_checks = None;
+        let policy = Policy::new(unproven, ram);
+        assert_eq!(
+            policy.validate_address_checks(increment),
+            Err(MemoryStatus::Unsupported)
+        );
+        assert_eq!(
+            policy.validate_address_checks(AddressCheckRequirements::default()),
+            Ok(())
+        );
     }
 
     #[test]

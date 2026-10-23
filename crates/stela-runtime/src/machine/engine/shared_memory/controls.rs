@@ -7,7 +7,13 @@ use crate::{
         process_memory::ProcessMemoryFeatures,
     },
 };
-use stela_compiler::{block::CheckedMemoryProfile, context::memory::InstructionRequirements};
+use stela_compiler::{
+    block::CheckedMemoryProfile,
+    context::memory::{
+        InstructionRequirements,
+        address::{AddressAddChecks, EffectiveAddressChecks},
+    },
+};
 
 const SCTLR_M: u64 = 1;
 const SCTLR_C: u64 = 1 << 2;
@@ -37,6 +43,9 @@ pub(super) struct Controls {
     pub(super) sp: CheckedMemoryProfile,
     /// Real source FP access permission and nonstreaming AdvSIMD mode.
     pub(super) asimd: bool,
+    /// Resolved only when actual source feature facts exclude FEAT_CPA2.
+    /// An unknown or enabled CPA2 implementation never implies unchecked adds.
+    pub(super) address_checks: Option<EffectiveAddressChecks>,
     identification: Arc<Snapshot>,
     name: &'static str,
     ids: [u64; IDENTIFICATION_PAIRS.len()],
@@ -99,6 +108,14 @@ impl Controls {
             CheckedMemoryProfile::SpAlignmentDisabled
         };
         let asimd = cpu.floating_point_trap().is_none() && cpu.svcr() & 1 == 0;
+        let address_checks = (cpu
+            .registers
+            .implemented(crate::machine::system::Feature::FEAT_CPA2)
+            == Ok(false))
+        .then_some(EffectiveAddressChecks::new(
+            AddressAddChecks::Disabled,
+            AddressAddChecks::Disabled,
+        ));
         // All effective fields above come from this actual stopped Cpu anew.
         // Only immutable declarations and their digest may be reused, after
         // exact equality; no source, access or physical-target proof is cached.
@@ -114,6 +131,7 @@ impl Controls {
                     && cached.requester == requester
                     && cached.sp == sp
                     && cached.asimd == asimd
+                    && cached.address_checks == address_checks
             })
         {
             return Ok(cached.clone());
@@ -126,11 +144,12 @@ impl Controls {
             .map_err(|_| MemoryStatus::Unsupported)?;
         let identity = crate::sha256(
             alloc::format!(
-                "{:?} {:?} {:?} {} {}",
+                "{:?} {:?} {:?} {} {:?} {}",
                 translation,
                 requester,
                 sp,
                 asimd,
+                address_checks,
                 identification.provenance().input_sha256()
             )
             .as_bytes(),
@@ -138,6 +157,7 @@ impl Controls {
         .into();
         Ok(Self {
             asimd,
+            address_checks,
             translation,
             requester,
             sp,
