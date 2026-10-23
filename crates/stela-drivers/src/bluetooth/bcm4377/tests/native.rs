@@ -757,7 +757,7 @@ fn native_constructor_rejects_malformed_original_owners_before_any_write() {
         f.state.events.lock().unwrap().clear();
         // SAFETY: fixture owns the real symbolic maps; corrupt metadata tests
         // read-only rejection rather than granting another physical requester.
-        let returned = match unsafe { NativePlatform::new(f.inputs) } {
+        let mut returned = match unsafe { NativePlatform::new(f.inputs) } {
             Err((_, inputs)) => inputs,
             Ok(_) => panic!("malformed original native input {failure} admitted"),
         };
