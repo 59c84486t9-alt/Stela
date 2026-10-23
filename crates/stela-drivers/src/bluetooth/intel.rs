@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2015 Intel Corporation
-//! Shared Intel legacy RSA and TLV RSA/ECDSA initializer over real USB or PCIe
+//! Shared Intel legacy RSA and TLV RSA/ECDSA/LMS initializer over real USB or PCIe
 //! command transports, adapted from Linux btintel.c/btusb.c at
 //! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
 //!
 //! Supported: the exact USB IDs in identity.rs, platform 0x37 and legacy
 //! variants 0x0b/0x0c/0x11–0x14 with secure boot and per-fragment completions.
-//! TLV variants 0x17/0x18/0x19/0x1b–0x1f/0x22 use combined RSA/ECDSA SFI headers and
+//! TLV variants 0x17/0x18/0x19/0x1b–0x22 use combined RSA/ECDSA SFI headers and
 //! the identified secure boot engine. SFI command streams must be complete,
 //! aligned and contain explicit boot parameters. TLV 0x11–0x14 re-read the legacy
 //! version instead of guessing a legacy filename from TLV fields. DSBR-dependent
 //! uploads retain explicit captured/default platform input and real command
-//! acceptance. Variants 0x1e/0x1f/0x22 boot IML then select the operational
-//! image from its actual FW_ID. Hybrid engines, ROM patching and running-image
+//! acceptance. Variants 0x1e–0x22 boot IML then select the operational
+//! image from its actual FW_ID. Variants 0x20–0x22 additionally accept the source
+//! hybrid header and secure engines LMS or ECDSA+LMS. ROM patching and running-image
 //! upgrades remain unsupported. Each operational SFI/DDC pair must be present
 //! before its upload; initial IML has only its exact SFI requirement.
 //! For Uploaded evidence, enabled controller secure ROM authenticates signatures;
@@ -20,8 +21,8 @@
 //! operational identity/version/OTP address are required for that upload report.
 //! Already-operational firmware is observed through identity/address checks and
 //! reported as RunningUnknown, with no invented image provenance/authentication.
-//! PCIe accepts source-listed TLV variants 1e–22, with RSA/ECDSA uploads for
-//! 1e/1f/22. Hybrid uploads remain explicitly unsupported. Its wrapper retains
+//! PCIe accepts source-listed TLV variants 1e–22 and the same bounded firmware
+//! formats as USB. Its wrapper retains
 //! original RFH/completion/padding metadata and requires the real OP D0 handshake.
 //! Reports do not establish physical/radio/profile qualification.
 //!
@@ -928,6 +929,38 @@ pub(crate) mod tests {
         bytes.extend_from_slice(&legacy[644..]);
         bytes
     }
+    pub(crate) fn hybrid_image() -> Vec<u8> {
+        let legacy = image();
+        let mut bytes = vec![0; 2116];
+        // Synthetic opaque CSS; only its actual source discriminator is known.
+        // No vendor signature, complete hybrid CSS field schema or crypto proof.
+        bytes[..128].copy_from_slice(&legacy[..128]);
+        bytes[8..12].copy_from_slice(&0x0006_9700u32.to_le_bytes());
+        bytes[128..224].fill(0x31);
+        bytes[224..320].fill(0x42);
+        bytes[320..372].fill(0x53);
+        bytes[372..2116].fill(0x64);
+        bytes.extend_from_slice(&legacy[644..]);
+        bytes
+    }
+    pub(crate) fn hybrid_fragments(image: &[u8]) -> Vec<(u8, &[u8])> {
+        // Independent pinned source wire ranges, including all seven actual
+        // 252-byte-max LMS signature fragments. No production parser/constants.
+        vec![
+            (0, &image[..128]),
+            (3, &image[128..224]),
+            (2, &image[224..320]),
+            (5, &image[320..372]),
+            (4, &image[372..624]),
+            (4, &image[624..876]),
+            (4, &image[876..1128]),
+            (4, &image[1128..1380]),
+            (4, &image[1380..1632]),
+            (4, &image[1632..1884]),
+            (4, &image[1884..2116]),
+            (1, &image[2116..]),
+        ]
+    }
     fn tlv_fixture(engine: u8) -> (Device, Catalog, Script) {
         tlv_fixture_variant(engine, 0x18)
     }
@@ -1176,9 +1209,9 @@ pub(crate) mod tests {
         for at in [644, 648, 652, 660, 668, 672, 676, 680] {
             let mut bytes = combined_image();
             bytes[at] ^= 1;
-            assert!(firmware::Sfi::parse_tlv(&bytes, [0; 3], 1).is_err());
+            assert!(firmware::Sfi::parse_tlv(&bytes, [0; 3], 1, 0x18).is_err());
         }
-        assert!(firmware::Sfi::parse_tlv(&combined_image(), [0; 3], 2).is_err());
+        assert!(firmware::Sfi::parse_tlv(&combined_image(), [0; 3], 2, 0x20).is_err());
     }
     #[test]
     fn missing_sfi_still_records_exact_ddc_companion_without_upload() {
@@ -1667,7 +1700,9 @@ pub(crate) mod tests {
         fn add_upload(steps: &mut VecDeque<Step>, engine: u8, image: &[u8]) {
             // Independently spell the donor's complete RSA/ECDSA fragments, never use
             // production Sfi::sections to manufacture the expected command sequence.
-            let sections: Vec<(u8, &[u8])> = if engine == 0 {
+            let sections: Vec<(u8, &[u8])> = if engine >= 2 {
+                hybrid_fragments(image)
+            } else if engine == 0 {
                 vec![
                     (0, &image[..128]),
                     (3, &image[128..380]),
@@ -1730,9 +1765,14 @@ pub(crate) mod tests {
                 license: "MIT",
             };
             let mut entries = Vec::new();
+            let image = if first.secure_engine.is_some_and(|engine| engine >= 2) {
+                hybrid_image()
+            } else {
+                combined_image()
+            };
             for (name, revision, bytes) in [
-                (name1.as_str(), revision1.as_str(), combined_image()),
-                (name2.as_str(), revision2.as_str(), combined_image()),
+                (name1.as_str(), revision1.as_str(), image.clone()),
+                (name2.as_str(), revision2.as_str(), image),
                 (ddc.as_str(), revision2.as_str(), vec![3, 1, 2, 0xaa]),
             ] {
                 if !include_stage2 && !entries.is_empty() {
@@ -1762,15 +1802,101 @@ pub(crate) mod tests {
             let catalog = resources(&device, &initial, &iml, include_stage2);
             let mut steps = VecDeque::new();
             add_command(&mut steps, READ_VERSION, &[0xff], &initial);
-            add_upload(&mut steps, engine, &combined_image());
+            let image = if engine >= 2 {
+                hybrid_image()
+            } else {
+                combined_image()
+            };
+            add_upload(&mut steps, engine, &image);
             add_command(&mut steps, READ_VERSION, &[0xff], &iml);
-            add_command(&mut steps, SET_DSBR, &[0, 0], &[0]);
-            add_upload(&mut steps, engine, &combined_image());
+            if matches!(variant, 0x1e | 0x1f | 0x22) {
+                add_command(&mut steps, SET_DSBR, &[0, 0], &[0]);
+            }
+            add_upload(&mut steps, engine, &image);
             add_command(&mut steps, READ_VERSION, &[0xff], &op);
             add_command(&mut steps, READ_BD_ADDR, &[], &[0, 1, 2, 3, 4, 5, 6]);
             add_command(&mut steps, WRITE_DDC, &[3, 1, 2, 0xaa], &[0]);
             add_command(&mut steps, READ_VERSION, &[0xff], &op);
             (device, catalog, Script { steps })
+        }
+        #[test]
+        fn each_hybrid_lms_fragment_requires_a_real_success_and_keeps_completed_stage_on_fault() {
+            let (_, _, reference) = fixture_iml(0x20, 3, true);
+            let indices: Vec<usize> = reference
+                .steps
+                .iter()
+                .enumerate()
+                .filter_map(|(index, step)| {
+                    (step.command[..2] == SECURE_SEND.to_le_bytes()
+                        && matches!(step.command[3], 4 | 5))
+                    .then_some(index)
+                })
+                .collect();
+            assert_eq!(indices.len(), 16);
+            for (ordinal, index) in indices.into_iter().enumerate() {
+                let (device, catalog, mut script) = fixture_iml(0x20, 3, true);
+                script.steps[index].events = vec![(Pipe::Acl, complete(SECURE_SEND, &[0x0c]))];
+                let mut hci = transport(device, script);
+                let error = initialize(&mut hci, &catalog).unwrap_err();
+                let cause = if ordinal < 8 {
+                    &error
+                } else {
+                    let Error::Stages {
+                        completed,
+                        pending,
+                        cause,
+                    } = &error
+                    else {
+                        panic!("completed hybrid IML evidence lost: {error:?}")
+                    };
+                    assert_eq!(completed.len(), 1);
+                    assert_eq!(completed[0].firmware.name, "intel/ibt-0190-0041-iml.sfi");
+                    assert!(
+                        matches!(pending.as_ref(), ControllerIdentity::Tlv(i) if i.image_type == 2)
+                    );
+                    cause.as_ref()
+                };
+                assert!(matches!(
+                    cause,
+                    Error::Controller {
+                        opcode: SECURE_SEND,
+                        status: 0x0c
+                    }
+                ));
+                assert_eq!(hci.state(), State::Closed);
+                let submitted = hci.test_io().submitted;
+                assert!(initialize(&mut hci, &catalog).is_err());
+                assert_eq!(hci.test_io().submitted, submitted);
+            }
+        }
+        #[test]
+        fn hybrid_lms_and_combined_engines_use_actual_iml_security_and_per_fragment_events() {
+            for variant in [0x20, 0x21, 0x22] {
+                for engine in [2, 3] {
+                    let (device, catalog, script) = fixture_iml(variant, engine, true);
+                    let mut hci = transport(device, script);
+                    let report = initialize(&mut hci, &catalog).unwrap();
+                    assert!(report.after.is_operational());
+                    assert_eq!(report.stages.len(), 2);
+                    assert_eq!(report.address, [1, 2, 3, 4, 5, 6]);
+                    assert!(
+                        report.stages[1]
+                            .inherited
+                            .contains(&InheritedField::SecureEngine)
+                    );
+                    let ControllerIdentity::Tlv(before) = &report.stages[0].before else {
+                        unreachable!()
+                    };
+                    assert_eq!(before.hardware_variant(), variant);
+                    assert_eq!(before.secure_engine, Some(engine));
+                    assert_eq!(
+                        report.stages[0].dsbr.applied,
+                        (variant == 0x22).then_some([0, 0])
+                    );
+                    assert!(hci.test_io().script.steps.is_empty());
+                    assert_eq!(hci.state(), State::Open);
+                }
+            }
         }
         #[test]
         fn actual_iml_observation_selects_second_stage_and_preserves_raw_inherited_inputs() {

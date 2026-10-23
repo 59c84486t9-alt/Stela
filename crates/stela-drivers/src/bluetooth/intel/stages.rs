@@ -85,7 +85,11 @@ impl<B: CommandIo> Engine<'_, B> {
         let firmware_result = provider.load(Requirement {
             name: &sfi_name,
             target,
-            minimum_bytes: firmware::RSA_BYTES + if engine.is_some() { 321 } else { 1 },
+            minimum_bytes: match engine {
+                None => firmware::RSA_BYTES + 1,
+                Some(2 | 3) => firmware::HYBRID_PAYLOAD + 1,
+                Some(_) => firmware::RSA_BYTES + 321,
+            },
         });
         // An initial IML image has no invented DDC companion. For the actual
         // operational stage, record BOTH immutable loads before the first error.
@@ -100,7 +104,12 @@ impl<B: CommandIo> Engine<'_, B> {
         let configuration = configuration_result.transpose()?;
         let sfi = match engine {
             None => firmware::Sfi::parse(image.bytes(), minimum)?,
-            Some(sbe) => firmware::Sfi::parse_tlv(image.bytes(), minimum, sbe)?,
+            Some(sbe) => {
+                let ControllerIdentity::Tlv(identity) = before else {
+                    unreachable!()
+                };
+                firmware::Sfi::parse_tlv(image.bytes(), minimum, sbe, identity.hardware_variant())?
+            }
         };
         if let Some(ddc) = configuration {
             firmware::ddc(ddc.bytes())?;
@@ -144,7 +153,7 @@ impl<B: CommandIo> Engine<'_, B> {
         if !self.events.is_empty() {
             return Err(Error::Protocol("stale response before reset"));
         }
-        // Reset has USB delivery only, never a synthetic HCI Command Complete.
+        // Reset has actual transport delivery only, never a synthetic HCI CC.
         self.submit(INTEL_RESET, &reset)?;
         self.vendor(true)?;
         self.hci.finish_boot()?;

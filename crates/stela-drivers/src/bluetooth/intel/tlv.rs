@@ -134,14 +134,12 @@ impl TlvIdentity {
         // 0x11–14 are parsed only to trigger the legacy-version fallback.
         let supported = match transport {
             TransportIdentity::Usb(_) => {
-                matches!(variant,0x11..=0x14|0x17..=0x19|0x1b..=0x1f|0x22)
+                matches!(variant,0x11..=0x14|0x17..=0x19|0x1b..=0x22)
             }
             TransportIdentity::Pcie(_) => matches!(variant, 0x1e..=0x22),
         };
         if !supported {
-            return Err(Error::Unsupported(
-                "Intel TLV hardware/hybrid engine unsupported",
-            ));
+            return Err(Error::Unsupported("Intel TLV hardware unsupported"));
         }
         let image_type = req(IMAGE_TYPE)?[0];
         if !matches!(image_type, 1 | 3) && !(image_type == 2 && variant >= 0x1e) {
@@ -159,12 +157,12 @@ impl TlvIdentity {
         if image_type == 1 && variant >= 0x17 {
             if secure_boot != Some(1)
                 || get(LIMITED_CCE) != Some(&[0][..])
-                || !matches!(secure_engine, Some(0 | 1))
+                || !secure_engine.is_some_and(|engine| supported_engine(variant, engine))
                 || minimum_build.is_none()
                 || address.is_none()
             {
                 return Err(Error::Unsupported(
-                    "TLV secure boot/individual completions/RSA-ECDSA parameters required",
+                    "TLV secure boot/individual completions/engine parameters required",
                 ));
             }
             for field in [0x2a, 0x2b, 0x2c] {
@@ -350,8 +348,8 @@ impl TlvIdentity {
             ));
         }
         let engine = required(SBE, InheritedField::SecureEngine)?[0];
-        if engine > 1 {
-            return Err(Error::Unsupported("IML hybrid secure engine unsupported"));
+        if !supported_engine(self.hardware_variant(), engine) {
+            return Err(Error::Unsupported("IML secure engine unsupported"));
         }
         let minimum = required(MINIMUM, InheritedField::MinimumBuild)?
             .try_into()
@@ -402,6 +400,10 @@ impl TlvIdentity {
             other.device_revision,
         )
     }
+}
+
+fn supported_engine(variant: u8, engine: u8) -> bool {
+    engine <= 1 || (variant >= 0x20 && engine <= 3)
 }
 
 /// Named fields reused only from prior actual observations after verified IML boot.

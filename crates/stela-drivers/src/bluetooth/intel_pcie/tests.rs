@@ -1123,7 +1123,9 @@ fn firmware_tlv_variant(engine: u8, stage: u8, variant: u8) -> Vec<u8> {
 fn append_firmware_upload(m: &mut Model, engine: u8, image: &[u8]) {
     // Spell source sections independently; expected bytes never come from the
     // production parser. The synthetic image contains no vendor signatures.
-    let sections: Vec<(u8, &[u8])> = if engine == 0 {
+    let sections: Vec<(u8, &[u8])> = if engine >= 2 {
+        crate::bluetooth::intel::tests::hybrid_fragments(image)
+    } else if engine == 0 {
         vec![
             (0, &image[..128]),
             (3, &image[128..380]),
@@ -1175,6 +1177,12 @@ fn shared_firmware_engine_uses_real_pcie_dma_for_rsa_ecdsa_iml_op_and_d0() {
         (0x1f, 1),
         (0x22, 0),
         (0x22, 1),
+        (0x20, 2),
+        (0x20, 3),
+        (0x21, 2),
+        (0x21, 3),
+        (0x22, 2),
+        (0x22, 3),
     ] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -1195,7 +1203,11 @@ fn shared_firmware_engine_uses_real_pcie_dma_for_rsa_ecdsa_iml_op_and_d0() {
             iml.filename("sfi"),
             iml.filename("ddc"),
         ];
-        let image = intel::tests::combined_image();
+        let image = if engine >= 2 {
+            intel::tests::hybrid_image()
+        } else {
+            intel::tests::combined_image()
+        };
         let mut resources = Vec::new();
         for (index, name) in names.iter().enumerate() {
             let bytes = if index == 2 {
@@ -1986,82 +1998,96 @@ mod native_models {
             firmware::{Catalog, Provenance, Resource},
         };
         use sha2::{Digest, Sha256};
-        let mut backing = vec![0u64; 1024 * 1024];
-        let mut dma = allocator(&mut backing);
-        let (mut t, h, _, _) = attach(&mut dma);
-        t.start().unwrap();
-        let replies = [firmware_tlv(1, 1), firmware_tlv(1, 2), firmware_tlv(1, 3)];
-        let before =
-            intel::TlvIdentity::parse_transport(TransportIdentity::Pcie(t.identity()), &replies[0])
-                .unwrap();
-        let iml =
-            intel::TlvIdentity::parse_transport(TransportIdentity::Pcie(t.identity()), &replies[1])
-                .unwrap();
-        let hardware = before.hardware_label();
-        let revisions = [before.revision_label(), iml.iml_revision_label(&before)];
-        let names = [
-            before.filename("sfi"),
-            iml.filename("sfi"),
-            iml.filename("ddc"),
-        ];
-        let image = intel::tests::combined_image();
-        let mut resources = Vec::new();
-        for (index, name) in names.iter().enumerate() {
-            let bytes = if index == 2 {
-                vec![3, 1, 2, 0xaa]
+        for (variant, engine) in [(0x1e, 1), (0x20, 3), (0x21, 2)] {
+            let mut backing = vec![0u64; 1024 * 1024];
+            let mut dma = allocator(&mut backing);
+            let (mut t, h, _, _) = attach(&mut dma);
+            t.start().unwrap();
+            let replies = [
+                firmware_tlv_variant(engine, 1, variant),
+                firmware_tlv_variant(engine, 2, variant),
+                firmware_tlv_variant(engine, 3, variant),
+            ];
+            let before = intel::TlvIdentity::parse_transport(
+                TransportIdentity::Pcie(t.identity()),
+                &replies[0],
+            )
+            .unwrap();
+            let iml = intel::TlvIdentity::parse_transport(
+                TransportIdentity::Pcie(t.identity()),
+                &replies[1],
+            )
+            .unwrap();
+            let hardware = before.hardware_label();
+            let revisions = [before.revision_label(), iml.iml_revision_label(&before)];
+            let names = [
+                before.filename("sfi"),
+                iml.filename("sfi"),
+                iml.filename("ddc"),
+            ];
+            let image = if engine >= 2 {
+                intel::tests::hybrid_image()
             } else {
-                image.clone()
+                intel::tests::combined_image()
             };
-            resources.push(Resource {
-                name,
-                target: before.target(&hardware, &revisions[usize::from(index != 0)]),
-                provenance: Provenance {
-                    source: "Stela native PCIe IRQ/DMA model",
-                    revision: "1",
-                    member: "synthetic",
-                    license: "MIT",
-                },
-                expected_length: bytes.len(),
-                expected_sha256: Sha256::digest(&bytes).into(),
-                bytes,
-            });
-        }
-        let catalog = Catalog::from_handoff(resources).unwrap();
-        let mut device = h.lock().unwrap();
-        device.bt.hci_script.push_back((
-            firmware_command(0xfc05, &[0xff]),
-            vec![firmware_complete(0xfc05, &replies[0])],
-        ));
-        append_firmware_upload(&mut device.bt, 1, &image);
-        device.bt.hci_script.push_back((
-            firmware_command(0xfc05, &[0xff]),
-            vec![firmware_complete(0xfc05, &replies[1])],
-        ));
-        append_firmware_upload(&mut device.bt, 1, &image);
-        for (opcode, params, reply) in [
-            (0xfc05, vec![0xff], replies[2].clone()),
-            (0x1009, vec![], vec![0, 1, 2, 3, 4, 5, 6]),
-            (0xfc8b, vec![3, 1, 2, 0xaa], vec![0]),
-            (0xfc05, vec![0xff], replies[2].clone()),
-        ] {
+            let mut resources = Vec::new();
+            for (index, name) in names.iter().enumerate() {
+                let bytes = if index == 2 {
+                    vec![3, 1, 2, 0xaa]
+                } else {
+                    image.clone()
+                };
+                resources.push(Resource {
+                    name,
+                    target: before.target(&hardware, &revisions[usize::from(index != 0)]),
+                    provenance: Provenance {
+                        source: "Stela native PCIe IRQ/DMA model",
+                        revision: "1",
+                        member: "synthetic",
+                        license: "MIT",
+                    },
+                    expected_length: bytes.len(),
+                    expected_sha256: Sha256::digest(&bytes).into(),
+                    bytes,
+                });
+            }
+            let catalog = Catalog::from_handoff(resources).unwrap();
+            let mut device = h.lock().unwrap();
             device.bt.hci_script.push_back((
-                firmware_command(opcode, &params),
-                vec![firmware_complete(opcode, &reply)],
+                firmware_command(0xfc05, &[0xff]),
+                vec![firmware_complete(0xfc05, &replies[0])],
             ));
+            append_firmware_upload(&mut device.bt, engine, &image);
+            device.bt.hci_script.push_back((
+                firmware_command(0xfc05, &[0xff]),
+                vec![firmware_complete(0xfc05, &replies[1])],
+            ));
+            append_firmware_upload(&mut device.bt, engine, &image);
+            for (opcode, params, reply) in [
+                (0xfc05, vec![0xff], replies[2].clone()),
+                (0x1009, vec![], vec![0, 1, 2, 3, 4, 5, 6]),
+                (0xfc8b, vec![3, 1, 2, 0xaa], vec![0]),
+                (0xfc05, vec![0xff], replies[2].clone()),
+            ] {
+                device.bt.hci_script.push_back((
+                    firmware_command(opcode, &params),
+                    vec![firmware_complete(opcode, &reply)],
+                ));
+            }
+            device.bt.reset_stages = VecDeque::from([IML, OP]);
+            let eoi = device.callback_eoi.clone();
+            let before_irqs = eoi.load(Ordering::Relaxed);
+            drop(device);
+            let report =
+                firmware::initialize(&mut t, &catalog, intel::PlatformInputs::default()).unwrap();
+            assert_eq!(report.initialization.stages.len(), 2);
+            assert_eq!(report.initialization.address, [1, 2, 3, 4, 5, 6]);
+            assert!(eoi.load(Ordering::Relaxed) > before_irqs + 10);
+            assert!(h.lock().unwrap().bt.hci_script.is_empty());
+            assert_eq!(t.state(), State::Operational);
+            t.close().unwrap();
+            drop(t);
+            assert_eq!(h.lock().unwrap().config_drops, 1);
         }
-        device.bt.reset_stages = VecDeque::from([IML, OP]);
-        let eoi = device.callback_eoi.clone();
-        let before_irqs = eoi.load(Ordering::Relaxed);
-        drop(device);
-        let report =
-            firmware::initialize(&mut t, &catalog, intel::PlatformInputs::default()).unwrap();
-        assert_eq!(report.initialization.stages.len(), 2);
-        assert_eq!(report.initialization.address, [1, 2, 3, 4, 5, 6]);
-        assert!(eoi.load(Ordering::Relaxed) > before_irqs + 10);
-        assert!(h.lock().unwrap().bt.hci_script.is_empty());
-        assert_eq!(t.state(), State::Operational);
-        t.close().unwrap();
-        drop(t);
-        assert_eq!(h.lock().unwrap().config_drops, 1);
     }
 }
