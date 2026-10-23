@@ -184,6 +184,15 @@ pub enum State {
     Retired,
 }
 
+/// Completed, acknowledged observations remain available if a later event in
+/// the same service batch fails. The failure must be reported/recovered before
+/// treating the batch as fully serviced.
+#[must_use]
+pub struct ServiceReport {
+    pub changes: Vec<ConnectorSnapshot>,
+    pub error: Option<Error>,
+}
+
 pub struct Attachment<'a, M: Mapping, D: Dependency<'a>, C: Timer> {
     device: Device<'a>,
     notification: Option<Notification<'a>>,
@@ -313,31 +322,40 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Attachment<'a, M, D, C> {
     /// Process/deferred-context service. The finite budget bounds a constantly
     /// changing connector; unserviced hardware-latched work remains pending.
     /// Polling also recovers a missed notification without manufacturing events.
-    pub fn service(&mut self, budget: usize) -> Result<Vec<ConnectorSnapshot>, Error> {
+    pub fn service(&mut self, budget: usize) -> Result<ServiceReport, Error> {
         self.controller_mut()?;
+        let mut report = ServiceReport {
+            changes: Vec::new(),
+            error: None,
+        };
         if budget == 0 {
-            return Ok(Vec::new());
+            return Ok(report);
         }
         self.pending.swap(false, Ordering::AcqRel);
-        let result = (|| {
-            let mut changes = Vec::new();
-            for _ in 0..budget {
-                if self.controller.poll_change()?.is_none() {
+        for _ in 0..budget {
+            let event = self.controller.poll_change().and_then(|number| {
+                if number.is_some() {
+                    self.controller.service_change()
+                } else {
+                    Ok(None)
+                }
+            });
+            match event {
+                Ok(Some(snapshot)) => report.changes.push(snapshot),
+                Ok(None) => break,
+                Err(error) => {
+                    report.error = Some(Error::Ucsi(error));
                     break;
                 }
-                if let Some(snapshot) = self.controller.service_change()? {
-                    changes.push(snapshot);
-                }
             }
-            Ok(changes)
-        })();
+        }
         if self.controller.fault().is_some() {
             self.state = State::Faulted;
         }
-        if result.is_err() || self.controller.pending_change().is_some() {
+        if report.error.is_some() || self.controller.pending_change().is_some() {
             self.pending.store(true, Ordering::Release);
         }
-        result
+        Ok(report)
     }
     /// Stop caller work before platform EC/AML suspend; disable PPM Notify with
     /// the real command/ACK. Notify callbacks themselves only set an atomic hint.
@@ -369,8 +387,8 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Attachment<'a, M, D, C> {
             notification.remove()?;
         }
         self.state = State::Retired;
-        self.mapping.take();
-        self.dependencies.take();
+        drop(self.mapping.take());
+        drop(self.dependencies.take());
         Ok(())
     }
 }
@@ -378,7 +396,7 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Drop for Attachment<'a, M, D, 
     fn drop(&mut self) {
         // Removal drains callbacks; their closure owns only the atomic, never
         // mailbox memory. No blocking firmware command is issued from Drop.
-        self.notification.take();
+        drop(self.notification.take());
         if !matches!(self.state, State::Bound | State::Suspended | State::Retired) {
             // Uncertain firmware state cannot authorize resource retirement.
             // Explicit detach while AML services are live is the normal path.
