@@ -305,7 +305,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     fn live(&mut self) -> Result<(), Error> {
         self.pci_authority()?;
-        if self.pin_mode != Some(self.read(PIN_CONFIG)?)
+        let expected_pin_mode = self.pin_mode;
+        if expected_pin_mode != Some(self.read(PIN_CONFIG)?)
             || self.read(POWER_STATUS)? != 0
             || self.read(CONTROL)? != 1
             || self.read(CLOCK)? != 3
