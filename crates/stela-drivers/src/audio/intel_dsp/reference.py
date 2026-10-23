@@ -178,6 +178,10 @@ def main():
     args = parser.parse_args()
     args.output = args.output.resolve()
     evidence = Evidence(args.output)
+    def interrupted(signum, _frame):
+        raise InterruptedError(f"harness interrupted by signal {signum}")
+
+    previous_term = signal.signal(signal.SIGTERM, interrupted)
     try:
         generate(evidence, args)
         evidence.record["status"] = "passed"
@@ -186,8 +190,11 @@ def main():
         evidence.record["error"] = str(error)
         raise
     finally:
-        evidence.record["finished_utc"] = datetime.now(timezone.utc).isoformat()
-        evidence.save()
+        try:
+            evidence.record["finished_utc"] = datetime.now(timezone.utc).isoformat()
+            evidence.save()
+        finally:
+            signal.signal(signal.SIGTERM, previous_term)
 
 
 if __name__ == "__main__":

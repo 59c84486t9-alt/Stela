@@ -7,10 +7,14 @@ python3 crates/stela-drivers/src/audio/intel_dsp/reference_controls.py
 """
 import hashlib
 import json
+import fcntl
+import os
 from pathlib import Path
 import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 import reference
@@ -66,6 +70,76 @@ class ProcessControls(unittest.TestCase):
     def test_truncated_original_body_refuses_before_compilation(self):
         with self.assertRaisesRegex(SystemExit, "unterminated original function"):
             reference.function("static void selected(void) {", "selected")
+
+    def test_actual_harness_signals_reap_command_and_kill_its_descendants(self):
+        for cancellation in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=cancellation):
+                output = self.output.parent / f"signal-{cancellation}.txt"
+                ready = self.output.parent / f"ready-{cancellation}.txt"
+                gate = self.output.parent / f"gate-{cancellation}.txt"
+                # The inherited file lock stays held until both the direct
+                # command and its forked descendant close their descriptors.
+                command = (
+                    "import fcntl, os, time\n"
+                    f"gate = open({str(gate)!r}, 'w')\n"
+                    "fcntl.flock(gate, fcntl.LOCK_EX)\n"
+                    "child = os.fork()\n"
+                    "if child == 0:\n"
+                    "    time.sleep(30)\n"
+                    "    os._exit(0)\n"
+                    f"open({str(ready)!r}, 'w').write(str(os.getpid()))\n"
+                    "time.sleep(30)\n"
+                )
+                helper = (
+                    "import sys\n"
+                    f"sys.path.insert(0, {str(Path(reference.__file__).parent)!r})\n"
+                    "import reference\n"
+                    "def controlled(evidence, args):\n"
+                    f"    evidence.command('descendants', [sys.executable, '-c', {command!r}], 20)\n"
+                    "reference.generate = controlled\n"
+                    f"sys.argv = ['reference', '--linux-git-dir', 'unused', '--output', {str(output)!r}]\n"
+                    "reference.main()\n"
+                )
+                harness = subprocess.Popen([sys.executable, "-c", helper],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True)
+                command_pid = None
+                try:
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        if ready.exists() and ready.read_text():
+                            command_pid = int(ready.read_text())
+                            break
+                        self.assertIsNone(harness.poll(), "harness exited before readiness")
+                        time.sleep(0.01)
+                    self.assertIsNotNone(command_pid, "command failed to become ready")
+                    os.kill(harness.pid, cancellation)
+                    self.assertNotEqual(harness.wait(timeout=5), 0)
+                    receipt = json.loads((output.parent / (output.name + ".evidence") / "receipt.json").read_text())
+                    self.assertEqual(receipt["status"], "failed")
+                    self.assertEqual(receipt["commands"][0]["returncode"], -signal.SIGKILL)
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(command_pid, 0)
+                    with gate.open() as lock:
+                        deadline = time.monotonic() + 2
+                        while True:
+                            try:
+                                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                break
+                            except BlockingIOError:
+                                if time.monotonic() >= deadline:
+                                    self.fail("descendant retained its inherited lock after cancellation")
+                                time.sleep(0.01)
+                    self.assertFalse(output.exists())
+                finally:
+                    if command_pid is not None:
+                        try:
+                            os.killpg(command_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    if harness.poll() is None:
+                        harness.kill()
+                    harness.wait(timeout=5)
 
 
 if __name__ == "__main__":
