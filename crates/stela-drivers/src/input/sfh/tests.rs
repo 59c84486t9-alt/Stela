@@ -270,14 +270,13 @@ impl Registers for Model {
         self.0.lock().unwrap().quiescent = true;
     }
 }
-fn fixture(
-    sensors: &[Sensor],
-) -> (
+type Fixture = (
     Controller<Model, Arc<Time>>,
     Arc<Mutex<RegisterState>>,
     Arc<Domain>,
     Pages,
-) {
+);
+fn fixture(sensors: &[Sensor]) -> Fixture {
     let time = Arc::new(Time(AtomicU64::new(0)));
     let registers = Arc::new(Mutex::new(RegisterState {
         acs: 2 | sensors
