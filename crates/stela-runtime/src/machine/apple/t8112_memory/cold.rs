@@ -1,6 +1,7 @@
 //! Cold native T8112 memory placement over the loader's registered RAM.
-//! Software backing is declared here; PMGR lifecycle comes only from the actual
-//! placed model. Neither source metadata nor clear words certify hardware ready.
+//! Software backing is declared here. Switched inputs come from the actual
+//! PMGR; an explicitly certified input-free AP frontend owns its software state.
+//! Neither case nor clear words certify Apple hardware/private PMP readiness.
 use super::super::{
     AppleDevices,
     memory_resources::{amcc, t8112},
@@ -53,10 +54,26 @@ pub struct Plan {
     controller: MemoryController,
     cache: MemoryCache,
     source_power: PowerStates,
-    domains: Vec<u64>,
+    lifecycle: LifecycleInput,
     ram: Arc<RegisteredSystemRam>,
     programmed: amcc::Programmed,
     configuration: Configuration,
+}
+// Private constructors prevent a missing/failed dependency lookup from granting
+// an unswitched lifecycle. The certificate retains the actual backing identity.
+enum LifecycleInput {
+    Switched(Vec<u64>),
+    UnswitchedApFrontend(UnswitchedApFrontend),
+}
+struct UnswitchedApFrontend {
+    generation: u64,
+    shared: u64,
+    ram: Arc<RegisteredSystemRam>,
+}
+#[derive(Clone, Copy)]
+enum LifecyclePolicy {
+    RequireDomains,
+    SourceQualifiedApFrontend,
 }
 impl Plan {
     pub fn prepare(
@@ -65,10 +82,44 @@ impl Plan {
         programmed: amcc::Programmed,
         configuration: &Configuration,
     ) -> Result<Self, String> {
+        Self::prepare_board(
+            board,
+            ram,
+            programmed,
+            configuration,
+            LifecyclePolicy::RequireDomains,
+        )
+    }
+
+    /// Selects a switched lifecycle or an explicitly input-free Stela AP
+    /// frontend from the complete source graph, never from a failed lookup.
+    /// This does not qualify private Apple MCC/PMP power transitions.
+    pub fn prepare_ap_frontend(
+        board: &Board,
+        ram: &Arc<RegisteredSystemRam>,
+        programmed: amcc::Programmed,
+        configuration: &Configuration,
+    ) -> Result<Self, String> {
+        Self::prepare_board(
+            board,
+            ram,
+            programmed,
+            configuration,
+            LifecyclePolicy::SourceQualifiedApFrontend,
+        )
+    }
+
+    fn prepare_board(
+        board: &Board,
+        ram: &Arc<RegisteredSystemRam>,
+        programmed: amcc::Programmed,
+        configuration: &Configuration,
+        policy: LifecyclePolicy,
+    ) -> Result<Self, String> {
         if board.cpus.chip != Chip::AppleM2 {
             return Err("cold T8112 memory does not qualify this CPU family".into());
         }
-        Self::prepare_resources(
+        Self::prepare_resources_with_policy(
             board
                 .memory_controller
                 .as_ref()
@@ -84,9 +135,11 @@ impl Plan {
             ram,
             programmed,
             configuration,
+            policy,
         )
     }
 
+    #[cfg(test)]
     fn prepare_resources(
         controller: &MemoryController,
         cache: &MemoryCache,
@@ -95,17 +148,49 @@ impl Plan {
         programmed: amcc::Programmed,
         configuration: &Configuration,
     ) -> Result<Self, String> {
+        Self::prepare_resources_with_policy(
+            controller,
+            cache,
+            states,
+            ram,
+            programmed,
+            configuration,
+            LifecyclePolicy::RequireDomains,
+        )
+    }
+
+    fn prepare_resources_with_policy(
+        controller: &MemoryController,
+        cache: &MemoryCache,
+        states: &PowerStates,
+        ram: &Arc<RegisteredSystemRam>,
+        programmed: amcc::Programmed,
+        configuration: &Configuration,
+        policy: LifecyclePolicy,
+    ) -> Result<Self, String> {
         if configuration.selection != ZeroWayConfiguration::DisableArgument {
             return Err("cold T8112 memory cannot infer an empty cache configuration".into());
         }
         geometry(controller, cache, ram, programmed)?;
         let shared = controller.apertures[0] + cache.cache.shared.0;
         let domains = power_domains(states, shared)?;
+        let lifecycle = if domains.is_empty() {
+            if matches!(policy, LifecyclePolicy::RequireDomains) {
+                return Err(
+                    "cold T8112 MCC has no qualified physical power/clock dependencies".into(),
+                );
+            }
+            LifecycleInput::UnswitchedApFrontend(UnswitchedApFrontend::certify(
+                states, shared, ram,
+            )?)
+        } else {
+            LifecycleInput::Switched(domains)
+        };
         Ok(Self {
             controller: controller.clone(),
             cache: cache.clone(),
             source_power: states.clone(),
-            domains,
+            lifecycle,
             ram: Arc::clone(ram),
             programmed,
             configuration: *configuration,
@@ -159,29 +244,36 @@ impl Plan {
         {
             return Err("cold T8112 memory PMGR omits part of the retained source graph".into());
         }
-        let states = self
-            .domains
-            .iter()
-            .map(|&address| {
-                if devices.bus.route(address, Width::Word).ok() != Some((pmgr_id, address)) {
-                    return Err(format!(
-                        "MCC lifecycle domain {address:#x} has no actual PMGR route"
-                    ));
+        let lifecycle = match &self.lifecycle {
+            LifecycleInput::Switched(domains) => {
+                let states = domains
+                    .iter()
+                    .map(|&address| {
+                        if devices.bus.route(address, Width::Word).ok() != Some((pmgr_id, address))
+                        {
+                            return Err(format!(
+                                "MCC lifecycle domain {address:#x} has no actual PMGR route"
+                            ));
+                        }
+                        pmgr.domain_state(address).ok_or_else(|| {
+                            format!("MCC lifecycle domain {address:#x} has no actual PMGR state")
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                // Retention declares that this software backing keeps data on gating.
+                // Every other input is the actual current controller word, never ACTIVE
+                // substituted for an absent domain or an asserted reset.
+                LifecycleState {
+                    powered: states.iter().all(|state| state.power != pmgr::POWER_GATED),
+                    clocked: states.iter().all(|state| state.power == pmgr::ACTIVE),
+                    quiesced: states.iter().any(|state| state.disabled),
+                    reset: states.iter().any(|state| state.reset),
+                    retention: true,
                 }
-                pmgr.domain_state(address).ok_or_else(|| {
-                    format!("MCC lifecycle domain {address:#x} has no actual PMGR state")
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        // Retention declares that this software backing keeps data on gating.
-        // Every other input is the actual current controller word, never ACTIVE
-        // substituted for an absent domain or an asserted reset.
-        let lifecycle = LifecycleState {
-            powered: states.iter().all(|state| state.power != pmgr::POWER_GATED),
-            clocked: states.iter().all(|state| state.power == pmgr::ACTIVE),
-            quiesced: states.iter().any(|state| state.disabled),
-            reset: states.iter().any(|state| state.reset),
-            retention: true,
+            }
+            LifecycleInput::UnswitchedApFrontend(certificate) => {
+                certificate.initialize(&self.controller, &self.cache, &self.ram)?
+            }
         };
         let memory = t8112::Prepared::initialized(
             self.cache,
@@ -265,10 +357,73 @@ fn power_domains(states: &PowerStates, shared: u64) -> Result<Vec<u64>, String> 
         })
         .map(|domain| domain.address)
         .collect::<Vec<_>>();
-    if domains.is_empty() {
-        return Err("cold T8112 MCC has no qualified physical power/clock dependencies".into());
-    }
     Ok(domains)
+}
+
+impl UnswitchedApFrontend {
+    fn certify(
+        states: &PowerStates,
+        shared: u64,
+        ram: &Arc<RegisteredSystemRam>,
+    ) -> Result<Self, String> {
+        // Original 26A434 J473 MCC/arm-io and shared-reg error-handler alias
+        // have no consumer gate arrays. arm-io gate functions are provider
+        // recipes; private MCC dynamic gating remains a separate protocol.
+        // See ignored mcc-unswitched-r1 for exact ADT/AP-driver coordinates.
+        // power_domains has already validated placement and complete graph
+        // closure. Require literal absence of inputs in EVERY same-owner alias,
+        // including implicit power; unresolved/virtual inputs are not absence.
+        if !power_domains(states, shared)?.is_empty() {
+            return Err("unswitched AP frontend has physical PMGR inputs".into());
+        }
+        let power = states.power_requirements()?;
+        for (id, resource) in states.resources.iter().enumerate() {
+            if resource.owner == Some(PowerOwner::Mmio(shared))
+                && (!resource.activated_clocks().is_empty() || !power[id].is_empty())
+            {
+                return Err("unswitched AP frontend has source clock/power inputs".into());
+            }
+        }
+        let generation = ram
+            .domain()
+            .generation()
+            .map_err(|status| format!("unswitched AP frontend RAM is not live: {status:?}"))?;
+        Ok(Self {
+            generation,
+            shared,
+            ram: Arc::clone(ram),
+        })
+    }
+
+    fn initialize(
+        &self,
+        controller: &MemoryController,
+        cache: &MemoryCache,
+        ram: &Arc<RegisteredSystemRam>,
+    ) -> Result<LifecycleState, String> {
+        if self.shared != controller.apertures[0] + cache.cache.shared.0
+            || !Arc::ptr_eq(&self.ram, ram)
+        {
+            return Err("unswitched AP frontend differs from its certified backing".into());
+        }
+        if ram
+            .domain()
+            .generation()
+            .map_err(|status| format!("unswitched AP frontend RAM is not live: {status:?}"))?
+            != self.generation
+        {
+            return Err("unswitched AP frontend RAM generation changed".into());
+        }
+        // State of the newly owned Stela RAM frontend with no AP PMGR inputs.
+        // This is NOT an observed Apple MCC state or private power-protocol ACK.
+        Ok(LifecycleState {
+            powered: true,
+            clocked: true,
+            quiesced: false,
+            reset: false,
+            retention: true,
+        })
+    }
 }
 
 /// Pure source placement/RAM preflight; leaf constructors repeat their complete
@@ -590,6 +745,144 @@ mod tests {
                 reset: false
             })
         );
+    }
+
+    #[test]
+    fn certified_input_free_ap_frontend_owns_same_ram_without_sampling_unrelated_gates() {
+        let (controller, cache, ram, mut states) = components();
+        states.resources[0].clocks.clear();
+        states.resources[0].power.clear();
+        assert!(
+            Plan::prepare_resources(
+                &controller,
+                &cache,
+                &states,
+                &ram,
+                [None; 4],
+                &configuration()
+            )
+            .is_err()
+        );
+        let plan = Plan::prepare_resources_with_policy(
+            &controller,
+            &cache,
+            &states,
+            &ram,
+            [None; 4],
+            &configuration(),
+            LifecyclePolicy::SourceQualifiedApFrontend,
+        )
+        .unwrap();
+        let LifecycleInput::UnswitchedApFrontend(certificate) = &plan.lifecycle else {
+            panic!("expected explicit input-free certificate")
+        };
+        let (_, _, foreign_ram, _) = components();
+        assert!(
+            certificate
+                .initialize(&controller, &cache, &foreign_ram)
+                .is_err()
+        );
+        assert!(
+            certificate
+                .initialize(&controller, &cache, &ram)
+                .unwrap()
+                .clocked
+        );
+        plan.validate_power(Some(&states)).unwrap();
+        let mut devices = placed(&states, pmgr::POWER_GATED);
+        plan.install(&mut devices).unwrap();
+        assert_eq!(devices.read(0, cache.channels.0 + 0xec8, 4, 0).unwrap(), 0);
+        for actual in [
+            devices
+                .bus
+                .device::<t8112::Prepared>(devices.memory_publication.unwrap())
+                .unwrap()
+                .registered_ram(),
+            devices
+                .bus
+                .device::<EmptyResource>(devices.memory_controller.unwrap())
+                .unwrap()
+                .registered_ram(),
+        ] {
+            assert!(Arc::ptr_eq(actual, &ram));
+        }
+        assert_eq!(
+            devices
+                .bus
+                .device::<Pmgr>(devices.pmgr.unwrap())
+                .unwrap()
+                .domain_state(SUPPLY)
+                .unwrap()
+                .power,
+            pmgr::POWER_GATED
+        );
+    }
+
+    #[test]
+    fn failed_canonical_ram_refuses_certificate_and_install_without_publication() {
+        let (controller, cache, ram, mut states) = components();
+        states.resources[0].clocks.clear();
+        states.resources[0].power.clear();
+        let prepare = || {
+            Plan::prepare_resources_with_policy(
+                &controller,
+                &cache,
+                &states,
+                &ram,
+                [None; 4],
+                &configuration(),
+                LifecyclePolicy::SourceQualifiedApFrontend,
+            )
+        };
+        let plan = prepare().unwrap();
+        let service = ram.try_service().unwrap().unwrap();
+        service.fail();
+        drop(service);
+        assert!(prepare().is_err());
+        let mut devices = placed(&states, pmgr::ACTIVE);
+        assert!(plan.install(&mut devices).is_err());
+        assert!(devices.memory_publication.is_none() && devices.memory_controller.is_none());
+    }
+
+    #[test]
+    fn ap_frontend_selection_preserves_switched_inputs_and_refuses_incomplete_or_virtual_aliases() {
+        let (controller, cache, ram, mut states) = components();
+        let prepare = |states: &PowerStates| {
+            Plan::prepare_resources_with_policy(
+                &controller,
+                &cache,
+                states,
+                &ram,
+                [None; 4],
+                &configuration(),
+                LifecyclePolicy::SourceQualifiedApFrontend,
+            )
+        };
+        let switched = prepare(&states).unwrap();
+        assert!(matches!(switched.lifecycle, LifecycleInput::Switched(_)));
+        let mut devices = placed(&states, pmgr::CLOCK_GATED);
+        switched.install(&mut devices).unwrap();
+        assert!(devices.read(0, cache.channels.0 + 0xec8, 4, 0).is_err());
+        states.resources[0].clocks.clear();
+        states.resources[0].power.clear();
+        let mut alias = states.resources[0].clone();
+        alias.name.push_str(" alias");
+        alias.power.push(id(2));
+        states.resources.push(alias);
+        states.domains[1].address = None;
+        states.domains[1].parents = [None; 4];
+        states.registers.retain(|&address| address != SUPPLY + 8);
+        assert!(
+            power_domains(&states, controller.apertures[0] + cache.cache.shared.0)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(prepare(&states).is_err());
+        states.resources[1].power.clear();
+        states.resources[1].admission = Admission::Unavailable;
+        assert!(prepare(&states).is_err());
+        states.resources.clear();
+        assert!(prepare(&states).is_err());
     }
 
     #[test]
