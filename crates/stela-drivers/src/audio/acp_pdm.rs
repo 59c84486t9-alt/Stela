@@ -63,6 +63,7 @@ pub(super) struct DmaConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     PowerOn,
+    PowerOff,
     ResetAssert,
     ResetClear,
     DmaStart,
@@ -89,6 +90,8 @@ pub enum Error {
     RegisterRejected(usize),
     Timeout(Phase),
     NotInitialized,
+    Suspended,
+    NotSuspended,
     NotPrepared,
     Busy,
     InvalidFormat,
@@ -111,6 +114,7 @@ pub enum State {
     Running,
     Stopped,
     Faulted,
+    Suspended,
     Shutdown,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -313,6 +317,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
             State::Claimed => Err(Error::NotInitialized),
             State::Faulted => Err(Error::NeedsReset),
             State::Shutdown => Err(Error::Shutdown),
+            State::Suspended => Err(Error::Suspended),
             _ => Ok(()),
         }
     }
@@ -356,8 +361,8 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         let deadline = self.deadline(Phase::PowerOn, POWER_TIMEOUT_US);
         let power = self.phase_read(P::POWER_STATUS, deadline)?;
         if power != 0 {
-            if power & 3 != 1 {
-                self.phase_write(P::POWER_CONTROL, 1, deadline)?;
+            if power & POWER_STATE_MASK != POWER_ON_IN_PROGRESS {
+                self.phase_write(P::POWER_CONTROL, POWER_ON_REQUEST, deadline)?;
             }
             self.wait(P::POWER_STATUS, deadline, |value| value == 0)?;
         }
@@ -470,15 +475,18 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         self.capture = Some(capture);
         // From this point even partial SRAM publication retains the lease.
         self.capture.as_mut().unwrap().published = true;
+        self.program_capture_ring()?;
+        self.state = State::Prepared;
+        Ok(())
+    }
+    fn program_capture_ring(&mut self) -> Result<(), Error> {
+        let capture = self.capture.as_ref().ok_or(Error::NotPrepared)?;
+        let base = capture.dma.address().map_err(Error::Dma)?;
+        let allocation_bytes = capture.dma.bytes();
+        let period_bytes = capture.period_bytes;
+        let bytes = period_bytes * 4;
         self.write_checked(PAGE_BASE, P::SRAM_TABLE | PTE_VALID)?;
         self.write_checked(PAGE_SIZE, 2)?;
-        let base = self
-            .capture
-            .as_ref()
-            .unwrap()
-            .dma
-            .address()
-            .map_err(Error::Dma)?;
         for page in 0..allocation_bytes / PAGE_BYTES {
             let address = base + (page * PAGE_BYTES) as u64;
             self.write_checked(SCRATCH + page * 8, address as u32)?;
@@ -493,7 +501,6 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         self.write_checked(WATERMARK, period_bytes as u32)?;
         fence(Ordering::Release);
         self.write_checked(ATU_CONTROL, 1)?;
-        self.state = State::Prepared;
         Ok(())
     }
     fn ring_authority(&mut self) -> Result<(), Error> {
@@ -801,6 +808,88 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         }
         self.finish(result)
     }
+    pub(super) fn suspend_retained(&mut self, power_gate: bool) -> Result<(), Error> {
+        self.usable()?;
+        let result = self.suspend_inner(power_gate);
+        if result.is_ok() {
+            self.state = State::Suspended;
+        }
+        self.finish(result)
+    }
+    fn suspend_inner(&mut self, power_gate: bool) -> Result<(), Error> {
+        if self.capture.is_some() {
+            self.ring_authority()?;
+        } else {
+            self.live()?;
+        }
+        self.stop_inner()?;
+        self.disable_interrupts()?;
+        self.soft_reset()?;
+        self.write_checked(ATU_CONTROL, 0)?;
+        self.registers.set_bus_master(false)?;
+        self.drain_stopped_domain()?;
+        self.write_checked(P::CLOCK, 0)?;
+        self.write_checked(CONTROL, 0)?;
+        if power_gate {
+            let deadline = self.deadline(Phase::PowerOff, POWER_TIMEOUT_US);
+            self.phase_write(P::POWER_CONTROL, POWER_OFF_REQUEST, deadline)?;
+            self.wait(P::POWER_STATUS, deadline, |value| {
+                value & POWER_STATE_MASK == POWERED_OFF
+            })?;
+        }
+        Ok(())
+    }
+    pub(super) fn resume_retained(&mut self) -> Result<(), Error> {
+        match self.state {
+            State::Suspended => (),
+            State::Faulted => return Err(Error::NeedsReset),
+            State::Shutdown => return Err(Error::Shutdown),
+            _ => return Err(Error::NotSuspended),
+        }
+        self.state = State::Faulted;
+        let result = self.resume_inner();
+        self.finish(result)
+    }
+    fn resume_inner(&mut self) -> Result<(), Error> {
+        // The unsafe claim still owns the same PCI/firmware/board epoch. The
+        // native provider revalidates actual BDF/BAR/D0/delivery containment;
+        // actual domain completion below revalidates retained root authority.
+        self.pci_authority()?;
+        self.initialize_inner()?;
+        if let Some(capture) = self.capture.as_ref() {
+            capture
+                .dma
+                .sync_for_device(0..capture.dma.bytes())
+                .map_err(Error::Dma)?;
+            if P::PERIOD_DELIVERY {
+                // Recheck the actual retained domain's coherent observation
+                // capability, discarding old PCM before publishing its PTEs.
+                capture.dma.read_coherent_u32(0).map_err(Error::Dma)?;
+            }
+            // This is the original ever-published lease, never a fresh mapping.
+            self.program_capture_ring()?;
+            let control = self.read(P::IRQ_CONTROL)?;
+            self.write_checked(P::IRQ_CONTROL, control | PERIOD_IRQ)?;
+            self.state = State::Prepared;
+        } else {
+            self.state = State::Ready;
+        }
+        // Source trigger RESUME/START is a separate explicit start operation.
+        Ok(())
+    }
+    fn disable_interrupts(&mut self) -> Result<(), Error> {
+        if P::ERROR_ENABLE == 0 {
+            self.write_checked(P::IRQ_CONTROL, 0)?;
+            self.write_checked(P::IRQ_ENABLE, 0)?;
+            self.registers.write32(P::IRQ_STATUS, u32::MAX);
+        } else {
+            // Renoir source quiets pending status before disabling the gate;
+            // stop already removed the period bit without losing error policy.
+            self.registers.write32(P::IRQ_STATUS, u32::MAX);
+            self.write_checked(P::IRQ_ENABLE, 0)?;
+        }
+        Ok(())
+    }
     /// Stop first, then contain interrupts and reset the function. Memory and
     /// ownership remain retained on any failure; a subsequent explicit reset
     /// may recover them. No writes follow a lost PCI association.
@@ -815,18 +904,14 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         self.finish(result)
     }
     fn shutdown_inner(&mut self) -> Result<(), Error> {
+        if self.state == State::Suspended {
+            // Restore real register accessibility before the existing full
+            // shutdown proof; a cached suspend flag never frees DMA owners.
+            self.resume_inner()?;
+        }
         self.pci_authority()?;
         self.stop_inner()?;
-        if P::ERROR_ENABLE == 0 {
-            self.write_checked(P::IRQ_CONTROL, 0)?;
-            self.write_checked(P::IRQ_ENABLE, 0)?;
-            self.registers.write32(P::IRQ_STATUS, u32::MAX);
-        } else {
-            // Renoir source quiets pending status before disabling the gate;
-            // stop already removed the period bit without losing error policy.
-            self.registers.write32(P::IRQ_STATUS, u32::MAX);
-            self.write_checked(P::IRQ_ENABLE, 0)?;
-        }
+        self.disable_interrupts()?;
         self.soft_reset()?;
         self.write_checked(ATU_CONTROL, 0)?;
         self.registers.set_bus_master(false)?;
