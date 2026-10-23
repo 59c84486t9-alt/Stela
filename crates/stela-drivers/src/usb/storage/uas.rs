@@ -1109,6 +1109,15 @@ mod tests {
         sense: Option<u32>,
         wrong_tag: bool,
     }
+    enum CacheReply {
+        Replace {
+            sense: u32,
+            blocks: u64,
+            read_only: bool,
+        },
+        Sense(u32),
+        Data(Vec<u8>),
+    }
     struct Target {
         media: Vec<Media>,
         reported: Vec<Lun>,
@@ -1117,6 +1126,7 @@ mod tests {
         unit_attention: Option<u32>,
         report_change_blocks: Option<u64>,
         block_zero_change: Option<(Lun, u64)>,
+        cache_reply: Option<CacheReply>,
         report_illegal: bool,
         poison_lun: Option<Lun>,
         writes: Vec<(Lun, u64, Vec<u8>)>,
@@ -1132,6 +1142,7 @@ mod tests {
                 unit_attention: None,
                 report_change_blocks: None,
                 block_zero_change: None,
+                cache_reply: None,
                 report_illegal: false,
                 poison_lun: None,
                 writes: Vec::new(),
@@ -1141,6 +1152,37 @@ mod tests {
         fn prepare(&mut self, iu: &[u8]) -> Reply {
             let lun = Lun::from_bytes(iu[8..16].try_into().unwrap());
             let cdb = &iu[16..];
+            if cdb[0] == super::super::scsi::MODE_SENSE_6
+                && cdb[2] == super::super::scsi::CACHING_PAGE
+                && let Some(cache) = self.cache_reply.take()
+            {
+                let (sense, data) = match cache {
+                    CacheReply::Replace {
+                        sense,
+                        blocks,
+                        read_only,
+                    } => {
+                        let media = self
+                            .media
+                            .iter_mut()
+                            .find(|media| media.lun == lun)
+                            .unwrap();
+                        media.blocks = blocks;
+                        media.read_only = read_only;
+                        media.empty = (sense >> 8) & 0xff == 0x3a;
+                        (Some(sense), Vec::new())
+                    }
+                    CacheReply::Sense(sense) => (Some(sense), Vec::new()),
+                    CacheReply::Data(data) => (None, data),
+                };
+                return Reply {
+                    requested: usize::from(cdb[4]),
+                    input: true,
+                    data,
+                    sense,
+                    wrong_tag: false,
+                };
+            }
             if cdb[..10] == [0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0]
                 && let Some((unit, blocks)) = self.block_zero_change
                 && unit == lun
@@ -1992,6 +2034,168 @@ mod tests {
             assert!(old[0].read(0, &mut [0; 512]).is_err());
             assert!(old[1].flush().is_err());
             assert_eq!(state.borrow().events.len(), before);
+        }
+    }
+
+    #[test]
+    fn first_lun_cache_change_restarts_geometry_and_protection_before_publication() {
+        use super::super::media::{Owner, scan_uas};
+        use crate::block::BlockDevice;
+        for streams in [None, Some(2)] {
+            for sense in [0x062800, 0x063f0e] {
+                let mut memory = vec![0u64; 32 * 1024];
+                let mut initial = Media::disk(Lun::default(), 0x51);
+                initial.blocks = 1024;
+                initial.read_only = true;
+                let mut target = Target::new(vec![initial]);
+                target.cache_reply = Some(CacheReply::Replace {
+                    sense,
+                    blocks: 8192,
+                    read_only: false,
+                });
+                let (raw, state) = target_owner(&mut memory, target, quirks::Flags::default());
+                state.borrow_mut().streams = streams;
+                let raw = Rc::try_unwrap(raw).ok().unwrap().into_inner();
+                let owner = Rc::new(RefCell::new(Owner::new(raw, "uas".into(), "serial".into())));
+                let mut failures = Vec::new();
+                let mut fresh = scan_uas(owner, &mut failures).unwrap();
+                assert_eq!(fresh.len(), 1);
+                assert_eq!(
+                    fresh[0].identity().blocks,
+                    8192,
+                    "final cache query published earlier geometry"
+                );
+                assert!(
+                    !fresh[0].identity().read_only,
+                    "final cache query published earlier protection"
+                );
+                assert!(failures.iter().any(|(_, error)| *error
+                    == BlockError::Sense(Sense {
+                        key: (sense >> 16) as u8,
+                        asc: (sense >> 8) as u8,
+                        ascq: sense as u8
+                    })));
+                assert_eq!(
+                    state
+                        .borrow()
+                        .history
+                        .iter()
+                        .filter(|iu| iu[16] == 0x25)
+                        .count(),
+                    2
+                );
+                fresh[0].write(7000, &[0x62; 512]).unwrap();
+                fresh[0].flush().unwrap();
+                assert_eq!(
+                    state.borrow().target.as_ref().unwrap().flushes,
+                    vec![Lun::default()],
+                    "write-back flush suppressed after cache change"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn first_lun_final_cache_no_media_never_publishes_previous_metadata() {
+        use super::super::media::{Owner, scan_uas};
+        for streams in [None, Some(2)] {
+            for sense in [0x023a00, 0x063a00] {
+                let mut memory = vec![0u64; 32 * 1024];
+                let mut target = Target::new(vec![Media::disk(Lun::default(), 0x31)]);
+                target.cache_reply = Some(CacheReply::Replace {
+                    sense,
+                    blocks: 8192,
+                    read_only: false,
+                });
+                let (raw, state) = target_owner(&mut memory, target, quirks::Flags::default());
+                state.borrow_mut().streams = streams;
+                let raw = Rc::try_unwrap(raw).ok().unwrap().into_inner();
+                let owner = Rc::new(RefCell::new(Owner::new(raw, "uas".into(), "serial".into())));
+                let mut failures = Vec::new();
+                assert!(scan_uas(owner.clone(), &mut failures).unwrap().is_empty());
+                assert!(failures.iter().any(|(_, error)| *error
+                    == BlockError::Sense(Sense {
+                        key: (sense >> 16) as u8,
+                        asc: (sense >> 8) as u8,
+                        ascq: sense as u8
+                    })));
+                // The reader remains retained. A later actual insertion is
+                // freshly probed and keeps the target's real cache policy.
+                state.borrow_mut().target.as_mut().unwrap().media[0].empty = false;
+                let mut fresh = scan_uas(owner, &mut failures).unwrap();
+                assert_eq!(fresh.len(), 1);
+                assert_eq!(fresh[0].identity.blocks, 8192);
+                use crate::block::BlockDevice;
+                fresh[0].flush().unwrap();
+                assert_eq!(
+                    state.borrow().target.as_ref().unwrap().flushes,
+                    vec![Lun::default()]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stable_cache_policy_and_explicit_unsupported_page_preserve_flush_semantics() {
+        use super::super::media::{Owner, scan_uas};
+        use crate::block::BlockDevice;
+        for (reply, write_back) in [
+            (CacheReply::Data(vec![7, 0, 0, 0, 8, 0x12, 4, 0]), true),
+            (CacheReply::Data(vec![7, 0, 0, 0, 8, 0x12, 0, 0]), false),
+            (CacheReply::Data(vec![3, 0, 0, 0]), false),
+            (CacheReply::Sense(0x052400), false),
+        ] {
+            let mut memory = vec![0u64; 32 * 1024];
+            let mut target = Target::new(vec![Media::disk(Lun::default(), 0x11)]);
+            target.cache_reply = Some(reply);
+            let (raw, state) = target_owner(&mut memory, target, quirks::Flags::default());
+            let raw = Rc::try_unwrap(raw).ok().unwrap().into_inner();
+            let owner = Rc::new(RefCell::new(Owner::new(raw, "uas".into(), "serial".into())));
+            let mut failures = Vec::new();
+            let mut disks = scan_uas(owner, &mut failures).unwrap();
+            assert_eq!(disks.len(), 1);
+            assert!(failures.is_empty());
+            assert_eq!(disks[0].write_cache, write_back);
+            disks[0].write(1, &[0x91; 512]).unwrap();
+            disks[0].flush().unwrap();
+            assert_eq!(
+                state.borrow().target.as_ref().unwrap().flushes.len(),
+                usize::from(write_back)
+            );
+            assert_eq!(
+                state
+                    .borrow()
+                    .history
+                    .iter()
+                    .filter(|iu| iu[16] == 0x25)
+                    .count(),
+                1
+            );
+        }
+        for (reply, error) in [
+            (
+                CacheReply::Sense(0x052000),
+                BlockError::Sense(Sense {
+                    key: 5,
+                    asc: 0x20,
+                    ascq: 0,
+                }),
+            ),
+            (
+                CacheReply::Data(vec![0; 4]),
+                BlockError::Protocol("malformed USB mode parameter header"),
+            ),
+        ] {
+            let mut memory = vec![0u64; 32 * 1024];
+            let mut target = Target::new(vec![Media::disk(Lun::default(), 0x11)]);
+            target.cache_reply = Some(reply);
+            let (raw, _) = target_owner(&mut memory, target, quirks::Flags::default());
+            let raw = Rc::try_unwrap(raw).ok().unwrap().into_inner();
+            let owner = Rc::new(RefCell::new(Owner::new(raw, "uas".into(), "serial".into())));
+            let mut failures = Vec::new();
+            assert!(scan_uas(owner, &mut failures).unwrap().is_empty());
+            assert_eq!(failures.len(), 1);
+            assert_eq!(failures[0].1, error);
         }
     }
 

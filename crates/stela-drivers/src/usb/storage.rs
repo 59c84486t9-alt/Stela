@@ -363,34 +363,53 @@ fn quarantined() -> BlockError {
     BlockError::Unsupported("USB storage interface quarantined during discovery")
 }
 
-fn publication<T: Scsi>(owner: &Rc<RefCell<T>>, lun: T::Lun, identity: Identity) -> Disk<T> {
+fn publication<T: Scsi>(
+    owner: &Rc<RefCell<T>>,
+    lun: T::Lun,
+    identity: Identity,
+) -> Result<Disk<T>, BlockError> {
     let media = Rc::new(Cell::new(true));
-    let write_cache = write_cache(&mut *owner.borrow_mut(), lun);
+    // The cache query is still part of revalidation. Register this publication
+    // before it can report a media change, including for the first/only LUN.
     owner.borrow_mut().media_publication(lun, media.clone());
-    Disk {
+    let write_cache = write_cache(&mut *owner.borrow_mut(), lun)?;
+    Ok(Disk {
         bot: owner.clone(),
         lun,
         identity,
         media,
         write_cache,
-    }
+    })
 }
 
 /// Linux `sd_read_cache_type`: the Caching page's WCE bit, or the
-/// transport's assumption; an unreadable page means write-through.
-fn write_cache<T: Scsi>(bot: &mut T, lun: T::Lun) -> bool {
+/// transport's source-selected assumption. Its recognized 05/24/00 invalid
+/// field response permits the default write-through policy. Other failures
+/// cannot establish cache policy for a publication of the earlier metadata.
+fn write_cache<T: Scsi>(bot: &mut T, lun: T::Lun) -> Result<bool, BlockError> {
     match bot.caching() {
-        Caching::WriteThrough => false,
-        Caching::WriteBack => true,
-        Caching::Query => bot
-            .command(
-                lun,
-                &scsi::mode_sense(scsi::CACHING_PAGE),
-                Data::In(scsi::MODE_SENSE_BYTES),
-            )
-            .ok()
-            .and_then(|mode| scsi::write_cache_enabled(&mode))
-            .unwrap_or(false),
+        Caching::WriteThrough => Ok(false),
+        Caching::WriteBack => Ok(true),
+        Caching::Query => match bot.command(
+            lun,
+            &scsi::mode_sense(scsi::CACHING_PAGE),
+            Data::In(scsi::MODE_SENSE_BYTES),
+        ) {
+            // A complete header-only response establishes that no caching
+            // page exists (sd_read_cache_type's No Caching mode page path).
+            Ok(mode) if mode.len() >= 4 && mode[0] == 3 && mode[3] == 0 => Ok(false),
+            Ok(mode) if scsi::write_protected(&mode).is_some() => scsi::write_cache_enabled(&mode)
+                .ok_or(BlockError::Protocol(
+                    "missing or malformed USB Caching mode page",
+                )),
+            Ok(_) => Err(BlockError::Protocol("malformed USB mode parameter header")),
+            Err(BlockError::Sense(Sense {
+                key: Sense::ILLEGAL_REQUEST,
+                asc: 0x24,
+                ascq: 0,
+            })) => Ok(false),
+            Err(error) => Err(error),
+        },
     }
 }
 
@@ -404,11 +423,13 @@ fn publish_unit<T: Scsi>(
     disks: &mut Vec<Disk<T>>,
 ) -> Result<(), BlockError> {
     let location = format!("{prefix} LUN {lun}");
-    let result = found.and_then(|bytes| {
-        probe_identified(&mut *owner.borrow_mut(), lun, &bytes, &location, serial)
-    });
+    let result = found
+        .and_then(|bytes| {
+            probe_identified(&mut *owner.borrow_mut(), lun, &bytes, &location, serial)
+        })
+        .and_then(|identity| publication(owner, lun, identity));
     match result {
-        Ok(identity) => disks.push(publication(owner, lun, identity)),
+        Ok(disk) => disks.push(disk),
         Err(error) => failures.push((location, error)),
     }
     if owner.borrow().poisoned() {
@@ -491,9 +512,10 @@ fn discover_units<T: Scsi<Lun = u8>>(
     let max_lun = bot.borrow().max_lun();
     for lun in 0..=max_lun {
         let location = format!("{prefix} LUN {lun}");
-        let result = probe(&mut *bot.borrow_mut(), lun, &location, serial);
+        let identified = probe(&mut *bot.borrow_mut(), lun, &location, serial);
+        let result = identified.and_then(|identity| publication(&bot, lun, identity));
         match result {
-            Ok(identity) => disks.push(publication(&bot, lun, identity)),
+            Ok(disk) => disks.push(disk),
             Err(error) => {
                 failures.push((location, error));
                 // An uncertain interface cannot publish previously found disks
