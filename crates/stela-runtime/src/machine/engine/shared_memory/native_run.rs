@@ -31,7 +31,6 @@ pub struct Identity {
     pub target: stela_compiler::TargetCpu,
     pub requirements: MemoryRequirements,
 }
-const ARTIFACT_CACHE_ENTRIES: usize = crate::machine::engine::installed_code::MAX_ENTRIES;
 /// Per-PE compiler-artifact resource policy, independent of guest/application.
 /// No persistent cache or installed Host arena is charged to this separate
 /// in-memory artifact budget. Every actual PE has its own independent bound.
@@ -42,8 +41,8 @@ pub struct ArtifactCacheStats {
     pub compiled: u64,
     pub reused: u64,
     /// Retained Rust allocation capacities and metadata; allocator headers are
-    /// outside this accounting. At most 64 artifacts and one effective-control
-    /// declaration share the same per-PE byte limit.
+    /// outside this accounting. Artifacts, actual slot capacity and one
+    /// effective-control declaration share the same per-PE byte limit.
     pub retained_bytes: usize,
     pub entries: usize,
 }
@@ -83,16 +82,20 @@ pub(super) struct ArtifactCache {
     compiled: u64,
     reused: u64,
     byte_budget: usize,
+    #[cfg(test)]
+    fail_next_growth: bool,
 }
 impl Default for ArtifactCache {
     fn default() -> Self {
         Self {
-            entries: Vec::with_capacity(ARTIFACT_CACHE_ENTRIES),
+            entries: Vec::new(),
             controls: None,
             retained_payload: 0,
             compiled: 0,
             reused: 0,
             byte_budget: ARTIFACT_CACHE_BYTES,
+            #[cfg(test)]
+            fail_next_growth: false,
         }
     }
 }
@@ -106,11 +109,16 @@ impl ArtifactCache {
     fn remember_controls(&mut self, controls: &Controls) {
         self.controls = None;
         let bytes = controls.retained_bytes();
-        if bytes > self.byte_budget.saturating_sub(self.slot_bytes()) {
+        if bytes > self.byte_budget {
             return;
         }
-        while self.retained_payload + self.slot_bytes() + bytes > self.byte_budget {
+        while !self.entries.is_empty() && !self.fits(bytes) {
             self.remove(0);
+        }
+        if !self.fits(bytes) {
+            // An empty high-water slot allocation must not prevent a smaller
+            // declaration (or a later artifact) from fitting the same bound.
+            self.entries = Vec::new();
         }
         self.controls = Some(controls.clone());
     }
@@ -159,27 +167,49 @@ impl ArtifactCache {
     fn remove(&mut self, index: usize) {
         self.retained_payload -= self.entries.remove(index).retained_bytes();
     }
+    /// Whether the actual retained allocation plus additional payload fits.
+    fn fits(&self, additional: usize) -> bool {
+        self.retained_payload
+            .checked_add(self.slot_bytes())
+            .and_then(|bytes| bytes.checked_add(self.controls_bytes()))
+            .and_then(|bytes| bytes.checked_add(additional))
+            .is_some_and(|bytes| bytes <= self.byte_budget)
+    }
+    /// Required and geometric growth are both clipped by *remaining* bytes;
+    /// speculative slots never cause otherwise unnecessary payload eviction.
+    fn growth_capacity(&self, incoming: usize) -> Option<usize> {
+        let required = self.entries.len().checked_add(1)?;
+        let available = self
+            .byte_budget
+            .checked_sub(self.controls_bytes())?
+            .checked_sub(self.retained_payload)?
+            .checked_sub(incoming)?
+            / core::mem::size_of::<Arc<Artifact>>();
+        if required > available {
+            return None;
+        }
+        let geometric = self.entries.capacity().checked_mul(2).unwrap_or(available);
+        Some(geometric.max(required).min(available))
+    }
+    fn reserve_slots(&mut self, capacity: usize) -> Result<(), ()> {
+        #[cfg(test)]
+        if core::mem::take(&mut self.fail_next_growth) {
+            return Err(());
+        }
+        // Vec's additional count is relative to length, not current capacity.
+        let additional = capacity.checked_sub(self.entries.len()).ok_or(())?;
+        self.entries.try_reserve_exact(additional).map_err(|_| ())
+    }
     fn insert(&mut self, artifact: Arc<Artifact>) {
         self.compiled = self.compiled.saturating_add(1);
-        let bytes = artifact.retained_bytes();
-        if self.entries.capacity() == 0 {
-            let slots = ARTIFACT_CACHE_ENTRIES * core::mem::size_of::<Arc<Artifact>>();
-            if bytes
-                > self
-                    .byte_budget
-                    .saturating_sub(slots + self.controls_bytes())
-                || slots > self.byte_budget
-            {
-                return;
-            }
-            self.entries.reserve_exact(ARTIFACT_CACHE_ENTRIES);
-        }
-        if bytes
-            > self
-                .byte_budget
-                .saturating_sub(self.slot_bytes() + self.controls_bytes())
-        {
-            return; // Valid one-shot compilation, without retaining oversize code.
+        let Some(bytes) = artifact.checked_retained_bytes() else {
+            return;
+        };
+        let minimum = bytes
+            .checked_add(core::mem::size_of::<Arc<Artifact>>())
+            .and_then(|bytes| bytes.checked_add(self.controls_bytes()));
+        if minimum.is_none_or(|bytes| bytes > self.byte_budget) {
+            return; // Valid one-shot compilation; never raises the owner bound.
         }
         if let Some(index) = self
             .entries
@@ -188,12 +218,35 @@ impl ArtifactCache {
         {
             self.remove(index);
         }
-        while self.entries.len() >= ARTIFACT_CACHE_ENTRIES
-            || self.retained_payload + self.slot_bytes() + self.controls_bytes() + bytes
-                > self.byte_budget
-        {
+        loop {
+            if self.entries.len() < self.entries.capacity() && self.fits(bytes) {
+                break;
+            }
+            // Existing capacity remains charged after eviction. Release an
+            // empty buffer if that high-water allocation alone prevents reuse.
+            if self.entries.is_empty() && !self.fits(bytes) {
+                self.entries = Vec::new();
+            }
+            if self.entries.len() == self.entries.capacity()
+                && let Some(capacity) = self.growth_capacity(bytes)
+            {
+                if self.reserve_slots(capacity).is_err() {
+                    return; // Cache decline only: the caller still owns/runs it.
+                }
+                // Allocators may supply more capacity than requested. The
+                // observed allocation, rather than the growth target, rules.
+                while !self.entries.is_empty() && !self.fits(bytes) {
+                    self.remove(0);
+                }
+                if !self.fits(bytes) {
+                    self.entries = Vec::new();
+                    return;
+                }
+                break;
+            }
             self.remove(0);
         }
+        // fits() checked this addition as well as the full retained charge.
         self.retained_payload += bytes;
         self.entries.push(artifact);
     }
@@ -211,20 +264,30 @@ struct Artifact {
 
 impl Artifact {
     fn retained_bytes(&self) -> usize {
-        core::mem::size_of::<Self>()
-            + 2 * core::mem::size_of::<usize>()
-            + core::mem::size_of::<Identity>()
-            + 2 * core::mem::size_of::<usize>()
-            + crate::machine::engine::installed_code::ARC_VEC_METADATA_BYTES
-            + self.code.capacity()
-            + self.source.capacity()
-            + self.source_map.capacity()
-                * core::mem::size_of::<(stela_compiler::GuestAddress, usize)>()
-            + self.key.controls_sha256.len()
-            + 2 * core::mem::size_of::<usize>()
-            + self.identity.source_sha256.capacity()
-            + self.identity.native_sha256.capacity()
-            + self.identity.controls_sha256.capacity()
+        // Only admitted entries call this infallible accounting accessor.
+        self.checked_retained_bytes()
+            .expect("retained artifact charge")
+    }
+    fn checked_retained_bytes(&self) -> Option<usize> {
+        [
+            core::mem::size_of::<Self>(),
+            2 * core::mem::size_of::<usize>(),
+            core::mem::size_of::<Identity>(),
+            2 * core::mem::size_of::<usize>(),
+            crate::machine::engine::installed_code::ARC_VEC_METADATA_BYTES,
+            self.code.capacity(),
+            self.source.capacity(),
+            self.source_map
+                .capacity()
+                .checked_mul(core::mem::size_of::<(stela_compiler::GuestAddress, usize)>())?,
+            self.key.controls_sha256.len(),
+            2 * core::mem::size_of::<usize>(),
+            self.identity.source_sha256.capacity(),
+            self.identity.native_sha256.capacity(),
+            self.identity.controls_sha256.capacity(),
+        ]
+        .into_iter()
+        .try_fold(0usize, usize::checked_add)
     }
 }
 
@@ -1631,8 +1694,8 @@ mod artifact_tests {
     }
 
     #[test]
-    fn validated_hot_source_survives_entry_and_byte_budget_eviction() {
-        for count in [3, ARTIFACT_CACHE_ENTRIES] {
+    fn validated_hot_source_survives_byte_budget_eviction() {
+        for count in [3, 80] {
             let (mut machine, _, artifacts) = branch_artifacts(count);
             let initial = machine
                 .cpu
@@ -1640,11 +1703,9 @@ mod artifact_tests {
                 .as_ref()
                 .unwrap()
                 .native_artifact_stats();
-            if count < ARTIFACT_CACHE_ENTRIES {
-                machine
-                    .tighten_native_artifact_cache_budget(initial.retained_bytes)
-                    .unwrap();
-            }
+            machine
+                .tighten_native_artifact_cache_budget(initial.retained_bytes)
+                .unwrap();
             machine.cpu.pc = PC;
             assert!(Arc::ptr_eq(
                 &artifacts[0],
@@ -1771,34 +1832,208 @@ mod artifact_tests {
         assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &prefix));
     }
 
+    fn assert_accounting(cache: &ArtifactCache) {
+        let payload: usize = cache
+            .entries
+            .iter()
+            .map(|entry| entry.retained_bytes())
+            .sum();
+        assert_eq!(cache.retained_payload, payload);
+        assert_eq!(
+            cache.stats().retained_bytes,
+            payload
+                + cache.entries.capacity() * core::mem::size_of::<Arc<Artifact>>()
+                + cache.controls_bytes()
+        );
+        assert!(cache.stats().retained_bytes <= cache.byte_budget);
+    }
+
     #[test]
-    fn immutable_cache_is_bounded_and_reset_memory_starts_empty() {
-        let (mut machine, _) = fixture();
-        let first = prepare_artifact(&mut machine, BINDING).unwrap();
-        let mut cache = ArtifactCache::default();
-        for index in 0..=ARTIFACT_CACHE_ENTRIES {
-            let mut key = first.key.clone();
-            key.pc += index as u64 * 4;
-            cache.insert(Arc::new(Artifact {
-                key,
-                identity: first.identity.clone(),
-                code: Arc::new(Vec::new()),
-                source_map: Vec::new(),
-                source: first.source.clone(),
-                requirements: first.requirements,
-                branch_type: first.branch_type,
-            }));
-        }
-        assert_eq!(cache.entries.len(), ARTIFACT_CACHE_ENTRIES);
-        assert!(cache.candidate(&first.key).is_none());
-        let (cpu, profile, missing, _) = super::super::policy::tests::fixture();
+    fn more_than_the_old_entry_limit_reuses_real_prepared_artifacts_and_reset_is_empty() {
+        let (mut machine, _, artifacts) = branch_artifacts(129);
         let owner = machine.cpu.canonical_memory.as_ref().unwrap();
+        assert_eq!(owner.artifacts.entries.len(), artifacts.len());
+        assert_accounting(&owner.artifacts);
+        let initial = owner.artifacts.stats();
+        for (index, artifact) in artifacts.iter().enumerate() {
+            machine.cpu.pc = PC + index as u64 * 4;
+            assert!(Arc::ptr_eq(
+                artifact,
+                &prepare_artifact(&mut machine, BINDING).unwrap()
+            ));
+        }
+        let owner = machine.cpu.canonical_memory.as_ref().unwrap();
+        assert_eq!(owner.artifacts.stats().compiled, initial.compiled);
+        assert_eq!(
+            owner.artifacts.stats().reused,
+            initial.reused + artifacts.len() as u64
+        );
+        assert_accounting(&owner.artifacts);
+        let (cpu, profile, missing, _) = super::super::policy::tests::fixture();
         let reset = owner
             .prepare_reset_peer(&cpu, 1, profile.name, &missing)
             .unwrap();
         assert!(reset.artifacts.entries.is_empty());
-        assert_eq!(owner.artifacts.entries.len(), 1);
+        assert_eq!(reset.artifacts.entries.capacity(), 0);
+        assert_eq!(reset.artifacts.byte_budget, owner.artifacts.byte_budget);
         assert!(Arc::ptr_eq(&owner.ram, &reset.ram));
+    }
+
+    #[test]
+    fn adaptive_growth_uses_spare_bytes_without_evicting_for_speculative_slots() {
+        let (machine, _, artifacts) = branch_artifacts(5);
+        let controls = capture_controls(&machine).unwrap();
+        let mut cache = ArtifactCache::default();
+        cache.remember_controls(&controls);
+        for artifact in &artifacts[..4] {
+            cache.insert(Arc::clone(artifact));
+            assert_accounting(&cache);
+        }
+        let slots = core::mem::size_of::<Arc<Artifact>>();
+        assert_eq!(cache.entries.capacity(), 4);
+        let budget = cache.retained_payload
+            + controls.retained_bytes()
+            + artifacts[4].retained_bytes()
+            + 5 * slots;
+        cache.tighten(budget);
+        cache.insert(Arc::clone(&artifacts[4]));
+        assert_eq!(cache.entries.capacity(), 5);
+        assert_eq!(cache.entries.len(), 5);
+        assert_eq!(cache.stats().retained_bytes, budget);
+        assert_accounting(&cache);
+        for (entry, artifact) in cache.entries.iter().zip(&artifacts) {
+            assert!(Arc::ptr_eq(entry, artifact));
+        }
+    }
+
+    #[test]
+    fn high_water_slots_release_for_tiny_artifact_and_zero_budget() {
+        let (machine, _, artifacts) = branch_artifacts(129);
+        let controls = capture_controls(&machine).unwrap();
+        let slots = core::mem::size_of::<Arc<Artifact>>();
+        let mut cache = ArtifactCache::default();
+        for artifact in &artifacts {
+            cache.insert(Arc::clone(artifact));
+        }
+        assert!(cache.entries.capacity() >= artifacts.len());
+        // Retaining only the old slot allocation fits exactly, but leaves no
+        // payload room. Insertion must release it and regrow a smaller buffer.
+        let high_water = cache.slot_bytes();
+        assert!(high_water >= artifacts[0].retained_bytes() + slots);
+        cache.tighten(high_water);
+        assert!(cache.entries.is_empty());
+        assert_eq!(cache.slot_bytes(), high_water);
+        cache.insert(Arc::clone(&artifacts[0]));
+        assert_eq!(cache.stats().entries, 1);
+        assert_eq!(cache.entries.capacity(), 1);
+        assert_accounting(&cache);
+        let tiny = artifacts[0].retained_bytes() + slots;
+        cache.tighten(tiny);
+        assert_eq!(cache.stats().retained_bytes, tiny);
+        cache.tighten(0);
+        cache.remember_controls(&controls);
+        cache.insert(Arc::clone(&artifacts[0]));
+        assert_eq!(cache.stats().retained_bytes, 0);
+        assert_eq!(cache.entries.capacity(), 0);
+        assert!(cache.controls.is_none());
+        assert_eq!(cache.empty_like().byte_budget, 0);
+    }
+
+    #[test]
+    fn oversized_slot_buffer_does_not_prevent_retaining_controls_after_eviction() {
+        let (machine, _, _) = branch_artifacts(1);
+        let controls = capture_controls(&machine).unwrap();
+        let mut cache = ArtifactCache::default();
+        let slots = controls
+            .retained_bytes()
+            .div_ceil(core::mem::size_of::<Arc<Artifact>>());
+        cache.reserve_slots(slots).unwrap();
+        let budget = cache.slot_bytes();
+        cache.tighten(budget);
+        assert_eq!(cache.slot_bytes(), budget);
+        cache.remember_controls(&controls);
+        assert!(cache.controls.is_some());
+        assert!(cache.entries.is_empty());
+        assert_eq!(cache.entries.capacity(), 0);
+        assert_eq!(cache.stats().retained_bytes, controls.retained_bytes());
+        assert_accounting(&cache);
+    }
+
+    #[test]
+    fn varied_payload_capacity_replacement_and_controls_changes_charge_actual_storage() {
+        let (mut machine, _, artifacts) = branch_artifacts(3);
+        let original_controls = capture_controls(&machine).unwrap();
+        let mut cache = ArtifactCache::default();
+        cache.remember_controls(&original_controls);
+        for (index, artifact) in artifacts.iter().enumerate() {
+            let mut code = artifact.code.as_ref().clone();
+            code.reserve_exact((index + 1) * 37);
+            let mut source = artifact.source.clone();
+            source.reserve_exact((index + 1) * 11);
+            let mut source_map = artifact.source_map.clone();
+            source_map.reserve_exact((index + 1) * 3);
+            cache.insert(Arc::new(Artifact {
+                key: artifact.key.clone(),
+                identity: Arc::clone(&artifact.identity),
+                code: Arc::new(code),
+                source_map,
+                source,
+                requirements: artifact.requirements,
+                branch_type: artifact.branch_type,
+            }));
+            assert_accounting(&cache);
+        }
+        let initial_count = cache.entries.len();
+        cache.tighten(cache.stats().retained_bytes);
+        // Same-key replacement removes the old capacity charge exactly once.
+        cache.insert(Arc::clone(&artifacts[1]));
+        assert_eq!(cache.entries.len(), initial_count);
+        assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &artifacts[1]));
+        assert_accounting(&cache);
+        cache.tighten(cache.stats().retained_bytes);
+        machine.profile_missing.push(Register::TTBR0_EL1);
+        let changed = capture_controls(&machine).unwrap();
+        assert!(changed.retained_bytes() > original_controls.retained_bytes());
+        cache.remember_controls(&changed);
+        assert_eq!(cache.entries.len(), initial_count - 1);
+        assert_eq!(cache.controls_bytes(), changed.retained_bytes());
+        assert_accounting(&cache);
+    }
+
+    #[test]
+    fn growth_failure_returns_prepared_uncached_code_without_losing_valid_entries() {
+        let (mut machine, _, artifacts) = branch_artifacts(4);
+        let cache = &mut machine.cpu.canonical_memory.as_mut().unwrap().artifacts;
+        assert_eq!(cache.entries.len(), cache.entries.capacity());
+        let initial = cache.stats();
+        cache.fail_next_growth = true;
+        machine.cpu.pc = PC + artifacts.len() as u64 * 4;
+        let uncached = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(!uncached.code.is_empty());
+        assert_eq!(uncached.source, 0x14000000u32.to_le_bytes());
+        let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
+        assert_eq!(cache.stats().compiled, initial.compiled + 1);
+        assert_eq!(cache.stats().retained_bytes, initial.retained_bytes);
+        assert_eq!(cache.stats().entries, initial.entries);
+        assert!(cache.candidate(&uncached.key).is_none());
+        for (entry, artifact) in cache.entries.iter().zip(&artifacts) {
+            assert!(Arc::ptr_eq(entry, artifact));
+        }
+        assert_accounting(cache);
+        let retry = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(!Arc::ptr_eq(&retry, &uncached));
+        assert_accounting(&machine.cpu.canonical_memory.as_ref().unwrap().artifacts);
+    }
+
+    #[test]
+    fn growth_arithmetic_overflow_declines_without_mutating_retained_cache() {
+        let (machine, _, _) = branch_artifacts(3);
+        let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
+        let initial = cache.stats();
+        assert_eq!(cache.growth_capacity(usize::MAX), None);
+        assert!(!cache.fits(usize::MAX));
+        assert_eq!(cache.stats(), initial);
+        assert_accounting(cache);
     }
 
     #[test]
@@ -1821,7 +2056,7 @@ mod artifact_tests {
             + artifact.identity.controls_sha256.capacity();
         assert_eq!(artifact.retained_bytes(), expected);
         let mut denied = ArtifactCache::default();
-        let slots = denied.slot_bytes();
+        let slots = core::mem::size_of::<Arc<Artifact>>();
         denied.tighten(expected + slots - 1);
         denied.insert(Arc::clone(&artifact));
         assert!(denied.entries.is_empty());

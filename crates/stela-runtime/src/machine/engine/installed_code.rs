@@ -8,7 +8,7 @@ use alloc::{
     vec::Vec,
 };
 
-/// Same finite per-PE entry envelope as the compiler-artifact cache.
+/// Independent finite metadata envelope for this Host's installed native addresses.
 pub const MAX_ENTRIES: usize = 64;
 /// Separate Arc<Vec> allocation: the Vec value plus strong/weak counters.
 /// Payload capacity is separately charged to the retained compiler artifact.
