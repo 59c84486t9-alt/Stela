@@ -332,27 +332,49 @@ fn power_domains(power: &PowerStates, direct: &DirectMemoryCache) -> Result<Vec<
     }
     Ok(domains)
 }
-// Coverage checks missing IDs/cycles. Additionally require every virtual leaf
-// in a requested ancestry to resolve to actual physical register ownership;
-// one physical sibling cannot hide another unbacked virtual requirement.
+// Match coverage::analyze's actual normalized graph: all records sharing a
+// physical address are ONE key with the union of their parents. Raw virtual
+// IDs remain distinct. Missing IDs/raw cycles/alias cycles were checked above.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputKey {
+    Physical(u64),
+    Virtual(coverage::DomainId),
+}
+fn input_key(domain: &coverage::Domain) -> InputKey {
+    domain
+        .address
+        .map_or(InputKey::Virtual(domain.id), InputKey::Physical)
+}
 fn resolved_input(power: &PowerStates, input: coverage::DomainId) -> bool {
     let mut pending = vec![input];
     let mut seen = Vec::new();
     let mut physical = false;
     while let Some(id) = pending.pop() {
-        if seen.contains(&id) {
-            continue;
-        }
-        seen.push(id);
         let Some(domain) = power.domains.iter().find(|d| d.id == id) else {
             return false;
         };
-        if domain.address.is_some() {
-            physical = true;
-        } else if domain.parents.iter().all(Option::is_none) {
-            return false;
+        let key = input_key(domain);
+        if seen.contains(&key) {
+            continue;
         }
-        pending.extend(domain.parents.iter().flatten().copied());
+        seen.push(key);
+        let mut parents = Vec::new();
+        for alias in power.domains.iter().filter(|d| input_key(d) == key) {
+            for &parent_id in alias.parents.iter().flatten() {
+                let Some(parent) = power.domains.iter().find(|d| d.id == parent_id) else {
+                    return false;
+                };
+                if input_key(parent) != key {
+                    parents.push(parent_id);
+                }
+            }
+        }
+        match key {
+            InputKey::Physical(_) => physical = true,
+            InputKey::Virtual(_) if parents.is_empty() => return false,
+            InputKey::Virtual(_) => {}
+        }
+        pending.extend(parents);
     }
     physical
 }
@@ -710,6 +732,94 @@ mod tests {
             .power
             .push(DomainId { die: 0, device: 2 });
         assert!(prepare(&unknown).is_err());
+    }
+    #[test]
+    fn physical_alias_parents_cannot_hide_unresolved_virtual_root_or_intermediate_inputs() {
+        let (controller, direct, ram, source) = components();
+        let domain = |device: u16, address: Option<u64>, parent: Option<u16>| Domain {
+            name: alloc::format!("authored-alias-{device}"),
+            id: DomainId { die: 0, device },
+            address,
+            parents: [
+                parent.map(|device| DomainId { die: 0, device }),
+                None,
+                None,
+                None,
+            ],
+        };
+        for intermediate in [false, true] {
+            let mut power = source.clone();
+            power.resources[0].clocks.push(id());
+            let virtual_id = if intermediate { 4 } else { 3 };
+            // A(P,no parents), B(P,parent V), V(None,no parents), or
+            // A(P,parent C), C(Q,no parents), D(Q,parent V). Every reached
+            // physical key must expand ALL its aliases, including Q.
+            if intermediate {
+                power.domains[0].parents[0] = Some(DomainId { die: 0, device: 2 });
+                power.domains.push(domain(2, Some(SUPPLY + 8), None));
+                power
+                    .domains
+                    .push(domain(3, Some(SUPPLY + 8), Some(virtual_id)));
+                power.registers.push(SUPPLY + 8);
+            } else {
+                power
+                    .domains
+                    .push(domain(2, Some(SUPPLY), Some(virtual_id)));
+            }
+            power.domains.push(domain(virtual_id, None, None));
+            assert!(!resolved_input(&power, id()));
+            assert!(
+                matches!(Plan::prepare_resources(&controller, &direct, &power, &ram,
+                [None; 4], &configuration()),
+                Err(reason) if reason == "cold T6000 requested input has an unresolved virtual ancestor")
+            );
+            // The same alias ancestry is supported when V actually resolves
+            // to a physical ancestor. No arbitrary virtual-input veto.
+            let backed_id = virtual_id + 1;
+            power
+                .domains
+                .iter_mut()
+                .find(|d| d.id.device == virtual_id)
+                .unwrap()
+                .parents[0] = Some(DomainId {
+                die: 0,
+                device: backed_id,
+            });
+            let backed_address = SUPPLY + if intermediate { 16 } else { 8 };
+            power
+                .domains
+                .push(domain(backed_id, Some(backed_address), None));
+            power.registers.push(backed_address);
+            power.blocks[0].1 = if intermediate { 24 } else { 16 };
+            assert!(resolved_input(&power, id()));
+            let plan = Plan::prepare_resources(
+                &controller,
+                &direct,
+                &power,
+                &ram,
+                [None; 4],
+                &configuration(),
+            )
+            .unwrap();
+            assert_eq!(plan.domains, power.registers);
+        }
+        // An acyclic raw A->B edge within the SAME physical key disappears in
+        // normalized coverage; it is not an unresolved virtual requirement.
+        let mut same_key = source.clone();
+        same_key.resources[0].clocks.push(id());
+        same_key.domains[0].parents[0] = Some(DomainId { die: 0, device: 2 });
+        same_key.domains.push(domain(2, Some(SUPPLY), None));
+        assert!(
+            Plan::prepare_resources(
+                &controller,
+                &direct,
+                &same_key,
+                &ram,
+                [None; 4],
+                &configuration()
+            )
+            .is_ok()
+        );
     }
     #[test]
     fn all_geometry_ram_locks_controls_and_live_source_are_preflighted() {
