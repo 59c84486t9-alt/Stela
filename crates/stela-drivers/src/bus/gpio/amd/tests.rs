@@ -3,6 +3,51 @@
 //! self-clearing EOI, GPIO levels, lock refusal and delayed debounce visibility.
 mod oracle;
 
+#[test]
+fn controller_wide_settlement_preserves_each_unowned_firmware_wake_source() {
+    for profile in profiles() {
+        for wake in [1 << 13, 1 << 14, 1 << 15, 1 << 27] {
+            for trigger in [None, Some(Interrupt::Rising)] {
+                let (mut controller, state, drops) = setup(profile, &[1]);
+                {
+                    let mut state = state.borrow_mut();
+                    // Firmware wake does not require either IRQ-enable bit.
+                    // Both its already-latched cause and the target's cause
+                    // must survive this refusal without any write or EOI.
+                    state.pads[3] = wake | 0x1001_0000;
+                    state.pads[1] = 0x2000_0000;
+                    state.trace.clear();
+                }
+                let before = state.borrow().pads;
+                let result = match trigger {
+                    Some(kind) => controller.interrupt_type(p(1), kind),
+                    None => controller.debounce(p(1), 61),
+                };
+                assert_eq!(result, Err(Error::FirmwareWake));
+                assert_eq!(state.borrow().pads, before);
+                assert!(
+                    state
+                        .borrow()
+                        .trace
+                        .iter()
+                        .all(|access| { matches!(access, Access::Read32(_) | Access::Read8(_)) })
+                );
+                assert_eq!(drops.get(), 0);
+                // A fresh real observation of firmware clearing that policy,
+                // rather than a local boolean, permits the original request.
+                state.borrow_mut().pads[3] &= !wake;
+                match trigger {
+                    Some(kind) => controller.interrupt_type(p(1), kind).unwrap(),
+                    None => controller.debounce(p(1), 61).unwrap(),
+                }
+                assert_eq!(state.borrow().pads[3], 0x1001_0000);
+                assert_eq!(state.borrow().pads[1] & 0x3000_0000, 0x2000_0000);
+                controller.retire().unwrap();
+            }
+        }
+    }
+}
+
 extern crate std;
 use super::*;
 use alloc::{rc::Rc, vec::Vec};

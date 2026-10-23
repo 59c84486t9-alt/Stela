@@ -279,6 +279,9 @@ impl<R: RegisterIo> Controller<R> {
                 continue;
             }
             let control = self.read(other)?;
+            if !contains(&self.owned, other) && control & WAKE_POLICY != 0 {
+                return Err(Error::FirmwareWake);
+            }
             if !contains(&self.owned, other) && control & (ENABLE | UNMASK) != 0 {
                 return Err(Error::FirmwareInterrupt);
             }
