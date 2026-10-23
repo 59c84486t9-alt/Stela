@@ -5214,8 +5214,8 @@ mod tests {
             };
             let drops = Arc::new(AtomicUsize::new(0));
             let bios_drops = Arc::new(AtomicUsize::new(0));
+            let (observation, step_catalog) = step_fixture();
             let boot = if ax210 {
-                let (observation, step_catalog) = step_fixture();
                 start_ax210(
                     &catalog,
                     super::super::platform::load_step(observation, &step_catalog).unwrap(),
