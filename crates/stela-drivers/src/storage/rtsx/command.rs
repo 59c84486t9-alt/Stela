@@ -22,7 +22,7 @@ impl Budget {
             request: engine.request_deadline,
         }
     }
-    fn retirement(engine: &Engine) -> Self {
+    pub(super) fn retirement(engine: &Engine) -> Self {
         Self {
             phase: engine.clock.deadline(COMMAND_US),
             request: None,
@@ -66,13 +66,38 @@ impl Engine {
         })
     }
     fn retire_error(&mut self, primary: BlockError) -> BlockError {
+        // A nested emergency cleanup already captured its actual failure. A
+        // surrounding command must not replace it with a second empty record.
+        if self.fault.is_some()
+            && self
+                .last_failure
+                .as_ref()
+                .is_some_and(|failure| failure.quarantined && failure.primary == primary)
+        {
+            return primary;
+        }
+        self.finish_failure(primary, false, false)
+    }
+    pub(super) fn emergency_off(&mut self, primary: BlockError, permanent: bool) -> BlockError {
+        self.finish_failure(primary, true, permanent)
+    }
+    fn finish_failure(
+        &mut self,
+        primary: BlockError,
+        power_off: bool,
+        permanent: bool,
+    ) -> BlockError {
         self.medium = None;
         let retirement = if self.fault.is_none() {
-            self.stop_card().err()
+            if power_off {
+                self.power_off().err()
+            } else {
+                self.stop_card().err()
+            }
         } else {
             None
         };
-        let quarantined = self.fault.is_some() || retirement.is_some();
+        let quarantined = permanent || self.fault.is_some() || retirement.is_some();
         if quarantined {
             self.fault = Some(primary.clone());
         }
@@ -93,16 +118,16 @@ impl Engine {
     fn check_card_before(&mut self, budget: Budget) -> Result<(), BlockError> {
         budget.check()?;
         self.healthy()?;
-        // A slow PCI identity read cannot authorize another MMIO access.
         budget.check()?;
         let status = self.status()?;
-        budget.check()?;
+        self.check_presence(status)?;
+        budget.check()
+    }
+    fn check_presence(&mut self, status: u32) -> Result<(), BlockError> {
         if status & MS_EXIST != 0 {
-            self.medium = None;
-            self.power_off()?;
-            return Err(BlockError::Unsupported(
-                "RTSX shared PMOS observed Memory Stick during command",
-            ));
+            let primary =
+                BlockError::Unsupported("RTSX shared PMOS observed Memory Stick during command");
+            return Err(self.emergency_off(primary, false));
         }
         if status & SD_EXIST == 0 || status & SD_INT != 0 {
             self.medium = None;
@@ -110,7 +135,7 @@ impl Engine {
                 "RTSX card changed during operation",
             ));
         }
-        budget.check()
+        Ok(())
     }
     fn ack_completion(&mut self, budget: Budget) -> Result<(), BlockError> {
         budget.check()?;
@@ -289,20 +314,28 @@ impl Engine {
         }
         let mut bytes = [0u8; 17];
         let length = if response == Response::Long { 16 } else { 5 };
+        let mut late = false;
         for (index, byte) in bytes.iter_mut().enumerate().take(length) {
-            *byte = self.rd(
-                budget,
+            let (value, expired) = self.observe_reg_before(
                 if response == Response::Long {
                     PPBUF_BASE2 + index as u16
                 } else {
                     SD_CMD0 + index as u16
                 },
+                Some(budget),
             )?;
-        }
-        if bytes[0] & 0xc0 != 0 {
-            return Err(BlockError::Protocol(
-                "RTSX response start/transmission bits",
-            ));
+            *byte = value;
+            if index == 0 && value & 0xc0 != 0 {
+                return Err(BlockError::Protocol(
+                    "RTSX response start/transmission bits",
+                ));
+            }
+            // An incomplete late frame cannot authorize additional reads. The
+            // final completed frame still decodes actual R1/R6 errors first.
+            if expired && index + 1 < length {
+                return Err(BlockError::Timeout);
+            }
+            late |= expired;
         }
         if response == Response::Long {
             // Native RTSX strips the final CRC/end byte, exactly as the source
@@ -322,6 +355,9 @@ impl Engine {
         if errors != 0 {
             return Err(BlockError::Device { status: result[0] });
         }
+        if late {
+            return Err(BlockError::Timeout);
+        }
         Ok(result)
     }
     fn wait_transfer(
@@ -332,16 +368,17 @@ impl Engine {
     ) -> Result<(), BlockError> {
         loop {
             self.check_card_before(budget)?;
-            let transfer = self.rd(budget, SD_TRANSFER)?;
+            let (transfer, late) = self.observe_reg_before(SD_TRANSFER, Some(budget))?;
             if transfer & SD_TRANSFER_ERR != 0 {
                 return Err(BlockError::Device {
                     status: u32::from(transfer),
                 });
             }
-            let status1 = self.rd(budget, SD_STAT1)?;
+            if late {
+                return Err(BlockError::Timeout);
+            }
+            let (status1, late) = self.observe_reg_before(SD_STAT1, Some(budget))?;
             let crc = SD_CRC16_ERR | SD_CRC_WRITE_ERR | if check_crc7 { SD_CRC7_ERR } else { 0 };
-            // Once an actual error is observed, later status/cleanup accesses
-            // cannot replace it, including an elapsed deadline in those reads.
             if status1 & SD_CRC_TIMEOUT != 0 {
                 return Err(BlockError::Timeout);
             }
@@ -350,16 +387,24 @@ impl Engine {
                     status: u32::from(transfer) | u32::from(status1) << 8,
                 });
             }
-            let status2 = self.rd(budget, SD_STAT2)?;
+            if late {
+                return Err(BlockError::Timeout);
+            }
+            let (status2, late) = self.observe_reg_before(SD_STAT2, Some(budget))?;
             if status2 & SD_RSP_80CLK_TIMEOUT != 0 {
+                return Err(BlockError::Timeout);
+            }
+            if late {
                 return Err(BlockError::Timeout);
             }
             budget.check()?;
             let interrupts = self.registers.read32(BIPR);
-            budget.check()?;
+            self.accept_status(interrupts)?;
+            self.check_presence(interrupts)?;
             if interrupts & TRANS_FAIL_INT != 0 {
                 return Err(BlockError::Device { status: interrupts });
             }
+            budget.check()?;
             if transfer & wanted == wanted {
                 return Ok(());
             }

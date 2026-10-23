@@ -492,7 +492,7 @@ mod tests {
         }
         fn clock(&self) -> Clock {
             Clock {
-                ticks_per_microsecond: 1,
+                ticks_per_microsecond: 100,
             }
         }
         fn location(&self) -> &str {

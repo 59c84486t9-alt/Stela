@@ -269,6 +269,9 @@ impl Engine {
     }
     fn status(&mut self) -> Result<u32, BlockError> {
         let status = self.registers.read32(BIPR);
+        self.accept_status(status)
+    }
+    fn accept_status(&mut self, status: u32) -> Result<u32, BlockError> {
         if status == u32::MAX || status & DELINK_INT != 0 {
             self.medium = None;
             let error = BlockError::Device { status };
@@ -276,16 +279,20 @@ impl Engine {
             return Err(error);
         }
         if status & SD_OC_INT != 0 {
-            self.medium = None;
-            // Private emergency shutdown precedes permanent public refusal.
-            // No alias may issue a command while this exclusive borrow drains.
-            self.power_off()?;
-            return self.failed(BlockError::Device { status });
+            // Fence first and keep the observed status even if emergency
+            // power-off itself fails or its acknowledgement is late.
+            return Err(self.emergency_off(BlockError::Device { status }, true));
         }
         Ok(status)
     }
     fn observe(&mut self) -> Result<bool, BlockError> {
         let status = self.status()?;
+        if status & MS_EXIST != 0 {
+            return Err(self.emergency_off(
+                BlockError::Unsupported("RTSX shared PMOS refuses concurrent Memory Stick"),
+                false,
+            ));
+        }
         if status & SD_INT != 0 || status & SD_EXIST == 0 && self.medium.is_some() {
             self.medium = None;
             self.stop_card()?;
@@ -299,10 +306,9 @@ impl Engine {
             return Ok(false);
         }
         if status & MS_EXIST != 0 {
-            self.medium = None;
-            self.power_off()?;
-            return Err(BlockError::Unsupported(
-                "RTSX shared PMOS refuses concurrent Memory Stick",
+            return Err(self.emergency_off(
+                BlockError::Unsupported("RTSX shared PMOS refuses concurrent Memory Stick"),
+                false,
             ));
         }
         Ok(status & SD_EXIST != 0)
@@ -364,6 +370,7 @@ mod tests {
         Remove,
         Delink,
         MemoryStick,
+        Overcurrent,
         Busy,
         AfterWrite,
     }
@@ -381,7 +388,10 @@ mod tests {
         StartAck,
         Completion,
         Status,
+        Status1,
+        BiprFailure,
         LastPpbuf,
+        LastResponse,
         StopComplete,
         ConstructorStop,
     }
@@ -397,6 +407,7 @@ mod tests {
         blocks: BTreeMap<u32, [u8; 512]>,
         nonready: bool,
         transfer_speed: u8,
+        status_error: u32,
     }
     impl CardModel {
         fn new(mmc: bool) -> Self {
@@ -419,6 +430,7 @@ mod tests {
                 blocks: BTreeMap::new(),
                 nonready: false,
                 transfer_speed: 0x32,
+                status_error: 0,
             }
         }
         fn block(&self, lba: u32) -> [u8; 512] {
@@ -512,7 +524,13 @@ mod tests {
                 13 => {
                     assert_eq!(self.state, 4);
                     assert_eq!(arg, 0x10000);
-                    if self.nonready { 0xe00 } else { 0x900 }
+                    if self.status_error != 0 {
+                        self.status_error
+                    } else if self.nonready {
+                        0xe00
+                    } else {
+                        0x900
+                    }
                 }
                 51 if app && !self.mmc => {
                     assert_eq!(data, 8);
@@ -830,6 +848,7 @@ mod tests {
                 Fault::Remove => self.bipr = (self.bipr & !(1 << 16)) | (1 << 25),
                 Fault::Delink => self.bipr |= 1 << 24,
                 Fault::MemoryStick => self.bipr |= 1 << 17,
+                Fault::Overcurrent => self.bipr |= 1 << 22,
                 Fault::Busy => self.regs[0x3da5] &= !2,
                 _ => {}
             }
@@ -853,8 +872,14 @@ mod tests {
             if at == 0x3da4 {
                 self.delay_at(DelayPoint::Status);
             }
+            if at == 0x3da3 {
+                self.delay_at(DelayPoint::Status1);
+            }
             if at == 0x3bff {
                 self.delay_at(DelayPoint::LastPpbuf);
+            }
+            if at == 0x3dad {
+                self.delay_at(DelayPoint::LastResponse);
             }
             if (0x3a00..0x3c00).contains(&at) {
                 assert_eq!(
@@ -1007,7 +1032,16 @@ mod tests {
             );
             match at {
                 0x18 | 4 | 12 => 0,
-                0x14 => c.bipr,
+                0x14 => {
+                    if c.delay_on == Some(DelayPoint::BiprFailure)
+                        && c.last_mode == 12
+                        && c.regs[0x3db3] & 0x40 != 0
+                    {
+                        c.bipr |= 1 << 28;
+                        c.delay_at(DelayPoint::BiprFailure);
+                    }
+                    c.bipr
+                }
                 0x10 => {
                     if let Some(command) = c.haimr {
                         let address = ((command >> 16) & 0x3fff) as u16;
@@ -1734,5 +1768,148 @@ mod tests {
         );
         assert_eq!(c.config[4] & 4, 0);
         assert!(!c.effects.iter().any(|e| matches!(e, Effect::Command(..))));
+    }
+    #[test]
+    fn native_actual_wrong_ack_sd_error_and_transfer_failure_survive_same_read_deadline() {
+        for mode in 0..4 {
+            let chip = Chip::new(false, true);
+            let mut host = make_host(&chip, false).unwrap();
+            let mut card = host.poll().unwrap().unwrap();
+            host.inner.borrow_mut().clock = Clock {
+                ticks_per_microsecond: 100,
+            };
+            let point = match mode {
+                0 => {
+                    chip.borrow_mut().wrong_echo = Some(0xfdb3);
+                    DelayPoint::StartAck
+                }
+                1 => {
+                    chip.borrow_mut().next_fault = Fault::Crc16;
+                    DelayPoint::Status1
+                }
+                2 => {
+                    chip.borrow_mut().card.width = 8;
+                    DelayPoint::Completion
+                }
+                _ => DelayPoint::BiprFailure,
+            };
+            chip.borrow_mut().delay_on = Some(point);
+            chip.borrow_mut().delay_us = 5_000_001;
+            let start = chip.borrow().effects.len();
+            let mut poison = [0xb7; 512];
+            let primary = card.read(13, &mut poison).unwrap_err();
+            assert_ne!(
+                primary,
+                BlockError::Timeout,
+                "actual error cannot become only elapsed success refusal"
+            );
+            match mode {
+                0 => assert_eq!(
+                    primary,
+                    BlockError::Unsupported("RTSX register write did not acknowledge")
+                ),
+                1 => assert!(
+                    matches!(primary, BlockError::Device { status } if status & 0x4000 != 0)
+                ),
+                2 => {
+                    assert!(matches!(primary, BlockError::Device { status } if status & 0x10 != 0))
+                }
+                _ => assert!(
+                    matches!(primary, BlockError::Device { status } if status & (1 << 28) != 0)
+                ),
+            }
+            assert_eq!(chip.borrow().delayed, [point]);
+            assert_eq!(poison, [0xb7; 512]);
+            let failure = host.last_failure().unwrap();
+            assert_eq!(failure.primary, primary);
+            assert_eq!(failure.quarantined, mode == 0);
+            assert!(
+                !chip.borrow().effects[start..]
+                    .iter()
+                    .any(|e| matches!(e, Effect::Command(13, _, _)))
+            );
+            if mode == 0 {
+                assert!(
+                    !chip.borrow().effects[start..]
+                        .iter()
+                        .any(|e| matches!(e, Effect::Stop)),
+                    "rejected ACK never authorizes another HAIMR"
+                );
+                let before = chip.borrow().accesses;
+                assert_eq!(host.poll().err(), Some(primary));
+                assert_eq!(chip.borrow().accesses, before);
+            }
+            stale(&mut card, &chip);
+        }
+    }
+    #[test]
+    fn native_observed_overcurrent_or_memory_stick_survives_failed_emergency_shutdown() {
+        for overcurrent in [false, true] {
+            for during in [false, true] {
+                let chip = Chip::new(false, true);
+                let mut host = make_host(&chip, false).unwrap();
+                let mut card = host.poll().unwrap().unwrap();
+                chip.borrow_mut().wrong_echo = Some(0xfd69);
+                if during {
+                    chip.borrow_mut().next_fault = if overcurrent {
+                        Fault::Overcurrent
+                    } else {
+                        Fault::MemoryStick
+                    };
+                } else {
+                    chip.borrow_mut().bipr |=
+                        (if overcurrent { 1 << 22 } else { 1 << 17 }) | (1 << 25);
+                }
+                let start = chip.borrow().effects.len();
+                let mut poison = [0xb7; 512];
+                let primary = card.read(3, &mut poison).unwrap_err();
+                if overcurrent {
+                    assert!(
+                        matches!(primary, BlockError::Device { status } if status & (1 << 22) != 0)
+                    );
+                } else {
+                    assert!(
+                        matches!(primary, BlockError::Unsupported(message) if message.contains("Memory Stick"))
+                    );
+                }
+                assert_eq!(poison, [0xb7; 512]);
+                let failure = host.last_failure().unwrap();
+                assert_eq!(failure.primary, primary);
+                assert_eq!(
+                    failure.retirement,
+                    Some(BlockError::Unsupported(
+                        "RTSX register write did not acknowledge"
+                    ))
+                );
+                assert!(failure.quarantined);
+                assert!(
+                    !chip.borrow().effects[start..]
+                        .iter()
+                        .any(|e| matches!(e, Effect::Stop)),
+                    "failed emergency ACK refuses further cleanup publication"
+                );
+                stale(&mut card, &chip);
+                let before = chip.borrow().accesses;
+                assert_eq!(host.poll().err(), Some(primary));
+                assert_eq!(chip.borrow().accesses, before);
+            }
+        }
+    }
+    #[test]
+    fn native_completed_r1_error_survives_late_final_response_observation() {
+        let chip = Chip::new(false, true);
+        let mut host = make_host(&chip, false).unwrap();
+        let mut card = host.poll().unwrap().unwrap();
+        host.inner.borrow_mut().clock = Clock {
+            ticks_per_microsecond: 100,
+        };
+        chip.borrow_mut().card.status_error = 1 << 21;
+        chip.borrow_mut().delay_on = Some(DelayPoint::LastResponse);
+        chip.borrow_mut().delay_us = 1_000_001;
+        let primary = BlockError::Device { status: 1 << 21 };
+        assert_eq!(card.flush(), Err(primary.clone()));
+        assert_eq!(chip.borrow().delayed, [DelayPoint::LastResponse]);
+        assert_eq!(host.last_failure().unwrap().primary, primary);
+        stale(&mut card, &chip);
     }
 }

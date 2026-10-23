@@ -234,6 +234,20 @@ impl Engine {
         at: u16,
         budget: Option<Budget>,
     ) -> Result<u8, BlockError> {
+        let (value, late) = self.observe_reg_before(at, budget)?;
+        if late {
+            Err(BlockError::Timeout)
+        } else {
+            Ok(value)
+        }
+    }
+    // A terminal value remains available for actual error decoding even if the
+    // same completed observation was late. It never authorizes late success.
+    pub(super) fn observe_reg_before(
+        &mut self,
+        at: u16,
+        budget: Option<Budget>,
+    ) -> Result<(u8, bool), BlockError> {
         if let Some(error) = &self.fault {
             return Err(error.clone());
         }
@@ -242,18 +256,13 @@ impl Engine {
         }
         self.registers
             .write32(HAIMR, HAIMR_READ_START | u32::from(at & 0x3fff) << 16);
-        // Once HAIMR is published, expiration with no observed terminal state
-        // quarantines the owner. Another HAIMR must not replace that command.
         for _ in 0..1024 {
             if budget.is_some_and(Budget::expired) {
                 return self.failed(BlockError::Timeout);
             }
             let result = self.registers.read32(HAIMR);
             if result & HAIMR_TRANS_START == 0 {
-                if let Some(budget) = budget {
-                    budget.check()?;
-                }
-                return Ok(result as u8);
+                return Ok((result as u8, budget.is_some_and(Budget::expired)));
             }
             if budget.is_some_and(Budget::expired) {
                 return self.failed(BlockError::Timeout);
@@ -290,13 +299,13 @@ impl Engine {
             }
             let result = self.registers.read32(HAIMR);
             if result & HAIMR_TRANS_START == 0 {
-                if let Some(budget) = budget {
-                    budget.check()?;
-                }
                 if result as u8 != value {
                     return self.failed(BlockError::Unsupported(
                         "RTSX register write did not acknowledge",
                     ));
+                }
+                if let Some(budget) = budget {
+                    budget.check()?;
                 }
                 return Ok(());
             }
@@ -416,16 +425,18 @@ impl Engine {
     }
     pub(super) fn power_off(&mut self) -> Result<(), BlockError> {
         self.medium = None;
-        self.write_reg(CARD_CLK_EN, SD_CLK_EN, 0)?;
-        self.write_reg(CARD_OE, SD_OUTPUT_EN | MS_OUTPUT_EN, 0)?;
-        self.write_reg(
+        let budget = Budget::retirement(self);
+        self.write_reg_before(CARD_CLK_EN, SD_CLK_EN, 0, Some(budget))?;
+        self.write_reg_before(CARD_OE, SD_OUTPUT_EN | MS_OUTPUT_EN, 0, Some(budget))?;
+        self.write_reg_before(
             CARD_PWR_CTL,
             SD_POWER_MASK | PMOS_STRG_MASK,
             SD_POWER_OFF | PMOS_STRG_400mA,
+            Some(budget),
         )?;
-        self.write_reg(PWR_GATE_CTRL, LDO3318_PWR_MASK, 0)?;
-        self.write_reg(CARD_PULL_CTL2, 0xff, 0x55)?;
-        self.write_reg(CARD_PULL_CTL3, 0xff, 0xd5)?;
+        self.write_reg_before(PWR_GATE_CTRL, LDO3318_PWR_MASK, 0, Some(budget))?;
+        self.write_reg_before(CARD_PULL_CTL2, 0xff, 0x55, Some(budget))?;
+        self.write_reg_before(CARD_PULL_CTL3, 0xff, 0xd5, Some(budget))?;
         Ok(())
     }
     pub(super) fn configure_card(&mut self) -> Result<(), BlockError> {
