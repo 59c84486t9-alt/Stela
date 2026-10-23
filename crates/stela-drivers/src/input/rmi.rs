@@ -9,6 +9,8 @@ use crate::bus::{i2c, smbus};
 use alloc::vec::Vec;
 
 pub mod descriptor;
+pub mod f03;
+mod f03_device;
 pub mod f11;
 mod f11_device;
 pub mod f12;
@@ -30,6 +32,8 @@ const NOSLEEP: u8 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    UnsupportedPassthroughDevices(u8),
+    InvalidF03QueueLength,
     InvalidButtonCount(u8),
     UnsupportedFormat { function: u8, format: u8 },
     UnsupportedF11Extension { query: u8, flags: u8 },
@@ -187,6 +191,7 @@ pub struct F12Poll {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FunctionReport {
+    F03(f03::Frame),
     F11(f11::Frame),
     F12(f12::Frame),
     F1A(f1a::Frame),
@@ -214,6 +219,7 @@ pub struct Device<X, A, T> {
     f12: Vec<f12::Engine>,
     f11: Vec<f11::Engine>,
     f1a: Vec<f1a::Engine>,
+    f03: Vec<f03::Engine>,
 }
 impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
     pub fn new(
@@ -240,6 +246,7 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
             f12: Vec::new(),
             f11: Vec::new(),
             f1a: Vec::new(),
+            f03: Vec::new(),
         })
     }
     pub fn control_state(&self) -> ControlState {
@@ -375,6 +382,7 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
         self.f12.clear();
         self.f11.clear();
         self.f1a.clear();
+        self.f03.clear();
         self.state = ControlState::Configured;
         Ok(())
     }
@@ -480,7 +488,11 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
     /// returned exact status bytes; this substrate does not fabricate events.
     pub fn poll_control(&mut self) -> Result<Option<AttentionReport>, Error> {
         self.configured()?;
-        if !self.f12.is_empty() || !self.f11.is_empty() || !self.f1a.is_empty() {
+        if !self.f12.is_empty()
+            || !self.f11.is_empty()
+            || !self.f1a.is_empty()
+            || !self.f03.is_empty()
+        {
             return Err(Error::InputConsumerActive);
         }
         self.poll_attention()

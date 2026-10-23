@@ -8,6 +8,7 @@ use transport::{Companion, CompanionError, I2c, Smbus};
 struct Hardware {
     memory: Vec<u8>,
     windows: BTreeMap<(u16, usize), Vec<u8>>,
+    fifo_windows: BTreeMap<u16, Vec<u8>>,
     time: Rc<Cell<u64>>,
     reset_at: u64,
     minimum_settle_us: u64,
@@ -41,6 +42,7 @@ impl Hardware {
         let mut h = Self {
             memory: vec![0; 65536],
             windows: BTreeMap::new(),
+            fifo_windows: BTreeMap::new(),
             time: Rc::new(Cell::new(0)),
             reset_at: 0,
             minimum_settle_us: 100_000,
@@ -95,7 +97,10 @@ impl Hardware {
     }
     fn read(&mut self, address: u16, output: &mut [u8]) -> bool {
         self.reads += 1;
-        if let Some(bytes) = self.windows.get(&(address, output.len())) {
+        if let Some(bytes) = self.fifo_windows.get_mut(&address) {
+            output.copy_from_slice(bytes);
+            bytes.fill(0);
+        } else if let Some(bytes) = self.windows.get(&(address, output.len())) {
             output.copy_from_slice(bytes);
         } else {
             output.copy_from_slice(
@@ -756,3 +761,5 @@ mod f12_tests;
 mod f11_tests;
 
 mod f1a_tests;
+
+mod f03_tests;
