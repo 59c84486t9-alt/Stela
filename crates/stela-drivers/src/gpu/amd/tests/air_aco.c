@@ -166,6 +166,7 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
    };
    ac_nir_lower_intrinsics_to_args(shader, &binding.args, &args_options);
    ac_nir_lower_global_access(shader, gpu.gfx_level);
+   nir_lower_idiv(shader, &(nir_lower_idiv_options){.allow_fp16 = false});
    nir_lower_int64(shader);
    bool progress;
    do {

@@ -2297,6 +2297,8 @@ module_flag_test(const char *extra, enum stela_air_error_kind expected)
    LLVMDisposeMemoryBuffer(input);
 }
 
+#include "air_division_tests.h"
+
 static void
 tests(void)
 {
@@ -2313,6 +2315,7 @@ tests(void)
    constant_semantics();
    binding_prelude_contract();
    effect_oracle_contract();
+   integer_division_tests();
    conditional_semantics();
    loop_semantics();
    cfg_semantics();
@@ -2369,7 +2372,6 @@ tests(void)
    expect_refusal("%v = fadd float 1.0, 2.0\nret void\n", "", 100, STELA_AIR_METADATA);
    expect_refusal("%v = load volatile i32, ptr addrspace(1) %out, align 4\nret void\n", "", 100, STELA_AIR_MEMORY);
    expect_refusal("%v = load atomic i32, ptr addrspace(1) %out monotonic, align 4\nret void\n", "", 100, STELA_AIR_MEMORY);
-   expect_refusal("%v = udiv i32 %tid, 2\nret void\n", "", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("%v = freeze i32 poison\nret void\n", "", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("call void @helper()\nret void\n", "declare void @helper()\n", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("store i32 %later, ptr addrspace(1) %out, align 4\n%later = add i32 %tid, 1\nret void\n", "", 100, STELA_AIR_VERIFY);

@@ -1175,8 +1175,9 @@ instruction(struct translator *t, LLVMValueRef inst)
       return put_value(t, inst, value, 0);
    }
    if (bits == 1 && (op == LLVMAdd || op == LLVMSub || op == LLVMMul ||
+                    op == LLVMUDiv || op == LLVMSDiv || op == LLVMURem || op == LLVMSRem ||
                     op == LLVMShl || op == LLVMLShr || op == LLVMAShr))
-      return fail(t, STELA_AIR_TYPE, "one-bit arithmetic/shift unsupported");
+      return fail(t, STELA_AIR_TYPE, "one-bit arithmetic/division/remainder/shift unsupported");
    if (op == LLVMICmp && LLVMGetTypeKind(LLVMTypeOf(LLVMGetOperand(inst, 0))) == LLVMPointerTypeKind) {
       LLVMIntPredicate predicate = LLVMGetICmpPredicate(inst);
       if (predicate != LLVMIntEQ && predicate != LLVMIntNE)
@@ -1235,10 +1236,13 @@ instruction(struct translator *t, LLVMValueRef inst)
    }
    /* The remaining arithmetic is integer-only. Flags restricting defined
     * LLVM inputs (nuw/nsw/exact) need no extra NIR operation on those inputs;
-    * poison, freeze, FP, division and all helper calls are explicitly refused. */
+    * direct poison/undef, freeze and all remaining opcodes are refused. LLVM
+    * divisor-zero and signed MIN/-1 (including srem) inputs are undefined;
+    * no result or trap contract is invented for those cases. */
    nir_def *a = NULL, *b = NULL, *def = NULL;
    switch (op) {
    case LLVMAdd: case LLVMSub: case LLVMMul:
+   case LLVMUDiv: case LLVMSDiv: case LLVMURem: case LLVMSRem:
    case LLVMAnd: case LLVMOr: case LLVMXor:
    case LLVMShl: case LLVMLShr: case LLVMAShr: case LLVMICmp:
    case LLVMTrunc: case LLVMZExt: case LLVMSExt:
@@ -1281,6 +1285,10 @@ instruction(struct translator *t, LLVMValueRef inst)
       case LLVMAdd: def = nir_iadd(&t->b, a, b); break;
       case LLVMSub: def = nir_isub(&t->b, a, b); break;
       case LLVMMul: def = nir_imul(&t->b, a, b); break;
+      case LLVMUDiv: def = nir_udiv(&t->b, a, b); break;
+      case LLVMSDiv: def = nir_idiv(&t->b, a, b); break;
+      case LLVMURem: def = nir_umod(&t->b, a, b); break;
+      case LLVMSRem: def = nir_irem(&t->b, a, b); break;
       case LLVMAnd: def = nir_iand(&t->b, a, b); break;
       case LLVMOr: def = nir_ior(&t->b, a, b); break;
       case LLVMXor: def = nir_ixor(&t->b, a, b); break;

@@ -3,6 +3,7 @@
  * resource owners are synthetic test models, never hardware qualification. */
 #include "../hosted/air_compile.h"
 #include "compiler/tests/air_test_fixture.h"
+#include "compiler/tests/air_division_fixture.h"
 #include "compiler/tests/targets/nvidia.h"
 #include "compiler/tests/threadgroup_record.h"
 #include "nouveau/compiler/nak_private.h"
@@ -500,8 +501,19 @@ static void selected_and_binding_tests(void)
     CHECK(stela_nvidia_air_pack_arguments(owner,&mismatch,40,views,2,table,sizeof(table))==STELA_NVIDIA_AIR_DEVICE&&!memcmp(table,expected,sizeof(table)));
     destroy(&owner);stela_metal_assembly_destroy(&library);nak_compiler_destroy(nak);
 }
+static void integer_division_tests(void)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(stela_air_division_fixtures); i++) {
+        LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_division_fixtures[i].body, "");
+        struct stela_metal_assembly *library = fixture(air);
+        LLVMDisposeMemoryBuffer(air);
+        targets(library, STELA_AIR_FP_IEEE_DEFAULT, stela_air_division_fixtures[i].name, false);
+        stela_metal_assembly_destroy(&library);
+    }
+}
 static void original_tests(void)
 {
+    integer_division_tests();
     selected_and_binding_tests();
     LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_test_store_body, "");
     struct stela_metal_assembly *library = fixture(air); LLVMDisposeMemoryBuffer(air);

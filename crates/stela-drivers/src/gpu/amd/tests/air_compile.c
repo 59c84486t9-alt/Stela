@@ -7,6 +7,7 @@
 #include "amd/common/sid.h"
 #include "amd/compiler/aco_interface.h"
 #include "compiler/tests/air_test_fixture.h"
+#include "compiler/tests/air_division_fixture.h"
 #include "compiler/tests/targets/amd.h"
 #include "compiler/tests/threadgroup_record.h"
 #include "util/ralloc.h"
@@ -457,8 +458,19 @@ static void targets(struct stela_metal_assembly *library, enum stela_air_fp_prof
       }
    }
 }
+static void integer_division_tests(void)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(stela_air_division_fixtures); i++) {
+        LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_division_fixtures[i].body, "");
+        struct stela_metal_assembly *library = fixture(air);
+        LLVMDisposeMemoryBuffer(air);
+        targets(library, STELA_AIR_FP_IEEE_DEFAULT, stela_air_division_fixtures[i].name);
+        stela_metal_assembly_destroy(&library);
+    }
+}
 static void original_tests(void)
 {
+    integer_division_tests();
    LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_test_store_body, "");
    struct stela_metal_assembly *library = fixture(air);
    LLVMDisposeMemoryBuffer(air);

@@ -137,6 +137,12 @@ nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
  * remain static and every incoming edge must agree. Pointer eq/ne require the
  * same resource authority, ignoring only AS2 root-reflection typing state;
  * relational and cross-resource comparisons remain explicit refusals.
+ * Integer division/remainder admit i8/i16/i32/i64 scalar or fixed2-4 lanes
+ * through original NIR udiv/idiv/umod/irem. Only LLVM-defined inputs constrain
+ * their values: zero divisors and signed MIN/-1 division/remainder are UB;
+ * inexact exact-div results are poison. No result/trap behavior is promised
+ * there. Direct undef/poison and freeze remain refused. Target owners must
+ * run their actual Mesa division/int64 lowering; this source unit is UNRUN.
  * Cross-resource joins,
  * rootless/undef/poison/integer-derived pointers, unsupported pointer producers,
  * compute aggregate PHIs and reachable unsupported terminators are refused

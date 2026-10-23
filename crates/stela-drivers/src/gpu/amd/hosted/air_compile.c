@@ -355,6 +355,10 @@ stela_amd_air_compile_specialized(const struct radeon_info *info, const struct s
    };
    ac_nir_lower_intrinsics_to_args(shader, &owner->args, &arg_options);
    ac_nir_lower_global_access(shader, info->gfx_level);
+   /* ACO selects the lowered operations, not native NIR integer division.
+    * Match RADV's original pass; retain full integer precision and avoid its
+    * optional FP16 path on every owned target. */
+   nir_lower_idiv(shader, &(nir_lower_idiv_options){.allow_fp16 = false});
    nir_lower_int64(shader);
    bool progress;
    do {

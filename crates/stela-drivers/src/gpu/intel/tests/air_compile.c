@@ -7,6 +7,7 @@
 #include "surface.h"
 #include "fp_controls.h"
 #include "compiler/tests/air_test_fixture.h"
+#include "compiler/tests/air_division_fixture.h"
 #include "compiler/tests/targets/intel.h"
 #include "compiler/tests/threadgroup_record.h"
 #include "intel/compiler/brw/brw_nir.h"
@@ -656,8 +657,19 @@ static void invalid_capture_tests(void)
     puts("malformed original compiler outputs refused atomically; no successful fake program");
 }
 #endif
+static void integer_division_tests(void)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(stela_air_division_fixtures); i++) {
+        LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_division_fixtures[i].body, "");
+        struct stela_metal_assembly *library = fixture(air);
+        LLVMDisposeMemoryBuffer(air);
+        targets(library, STELA_AIR_FP_IEEE_DEFAULT, stela_air_division_fixtures[i].name, 0);
+        stela_metal_assembly_destroy(&library);
+    }
+}
 static void original_tests(void)
 {
+    integer_division_tests();
     selected_tests();
     LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_test_store_body, "");
     struct stela_metal_assembly *library = fixture(air);
