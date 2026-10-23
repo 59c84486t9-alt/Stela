@@ -1247,6 +1247,15 @@ pub(crate) mod tests {
                 }
             );
             assert_eq!(request.revision, format!("tcr-{revision:04x}"));
+            assert_eq!(model.borrow().configuration_seen_before_endpoints, [7]);
+            assert!(
+                model
+                    .borrow()
+                    .setup
+                    .iter()
+                    .any(|(request, _)| *request == setup(0, SET_CONFIGURATION, 7, 0, 0))
+            );
+            assert!(model.borrow().seen.contains(&CONFIGURE_ENDPOINT));
             assert!(model.borrow().active[3].is_none() && model.borrow().outgoing.is_empty());
         }
     }

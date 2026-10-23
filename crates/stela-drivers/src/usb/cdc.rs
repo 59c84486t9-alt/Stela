@@ -804,7 +804,12 @@ mod tests {
                 assert!(checked.requests.contains(&request));
                 assert_eq!(found.failures[0].1, BlockError::NoDmaMemory);
             } else {
-                assert!(matches!(found.failures[0].1, BlockError::Unsupported(_)));
+                assert_eq!(
+                    found.failures[0].1,
+                    BlockError::Unsupported(
+                        "NCM OUT parameters cannot fit the maximum Ethernet frame"
+                    )
+                );
                 assert!(
                     checked
                         .requests
@@ -818,6 +823,16 @@ mod tests {
                     .setup
                     .iter()
                     .any(|(request, _)| matches!(request[1], SET_INTERFACE | 0x43))
+            );
+            // Every failure must reach the actual NCM response; an earlier
+            // binding refusal is not evidence for DMA or frame-size handling.
+            assert!(model.borrow().control_replies.is_empty());
+            assert!(
+                model
+                    .borrow()
+                    .setup
+                    .iter()
+                    .any(|(request, _)| *request == setup(0xa1, 0x80, 0, 0, 28))
             );
             assert!(model.borrow().outgoing.is_empty());
             assert!(model.borrow().active[5].is_none());

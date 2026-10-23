@@ -803,7 +803,28 @@ mod tests {
                         if scenario >= 4 {
                             assert!(found.vendor_links.is_empty());
                             assert_eq!(found.vendor_failures.len(), 1);
-                            assert!(model.borrow().active[in_dci].is_none());
+                            let ethernet::Error::Device(error) = &found.vendor_failures[0].1 else {
+                                panic!("{:?}", found.vendor_failures);
+                            };
+                            assert_eq!(
+                                *error,
+                                BlockError::Unsupported(if scenario == 4 {
+                                    "short USB control OUT transfer"
+                                } else {
+                                    "AX88772 external/unknown PHY requires its own initialization"
+                                })
+                            );
+                            let hardware = model.borrow();
+                            let trace = &hardware.asix_legacy.as_ref().unwrap().trace;
+                            assert!(!trace.is_empty());
+                            if scenario == 5 {
+                                assert!(
+                                    trace
+                                        .iter()
+                                        .any(|(request, _)| *request == setup(0xc0, 0x19, 0, 0, 2))
+                                );
+                            }
+                            assert!(hardware.active[in_dci].is_none());
                             continue;
                         }
                         assert!(
@@ -1030,6 +1051,17 @@ mod tests {
                     if scenario == 4 || scenario == 5 {
                         assert!(found.vendor_links.is_empty());
                         assert_eq!(found.vendor_failures.len(), 1);
+                        let ethernet::Error::Device(error) = &found.vendor_failures[0].1 else {
+                            panic!("{:?}", found.vendor_failures);
+                        };
+                        assert_eq!(
+                            *error,
+                            if scenario == 5 {
+                                BlockError::Device { status: STALL }
+                            } else {
+                                BlockError::Unsupported("short USB control OUT transfer")
+                            }
+                        );
                         assert_eq!(
                             model.borrow().asix.as_ref().unwrap().trace.len(),
                             if scenario == 5 { 0 } else { 1 }
