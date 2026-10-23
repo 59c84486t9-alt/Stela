@@ -698,7 +698,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
             return Ok(None);
         }
         let start = (consumed % ring) as usize;
-        for (word, output) in destination.chunks_exact_mut(4).enumerate() {
+        for (word, output) in destination.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let observed = capture
                 .dma
                 .read_coherent_u32(start + word * 4)
