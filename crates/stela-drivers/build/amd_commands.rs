@@ -97,16 +97,17 @@ pub fn build() {
         "cargo:rustc-link-search=native={}",
         env::var("OUT_DIR").expect("Cargo supplies OUT_DIR")
     );
-    println!("cargo:rerun-if-changed=src/gpu/amd/tests/commands_fixture.c");
     println!("cargo:rerun-if-changed={}", source.display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        project.join("meson.build").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        project.join("compiler").display()
-    );
+    println!("cargo:rerun-if-changed=../../third_party/libdrm");
+    for input in [
+        "meson.build",
+        "meson.options",
+        "compiler/meson.build",
+        "amd/hosted",
+        "amd/tests/commands_fixture.c",
+    ] {
+        println!("cargo:rerun-if-changed={}", project.join(input).display());
+    }
     for name in [
         "CC", "CXX", "AR", "CFLAGS", "CPPFLAGS", "CXXFLAGS", "LDFLAGS", "PATH",
     ] {
