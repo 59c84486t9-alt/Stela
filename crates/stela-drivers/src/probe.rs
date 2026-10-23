@@ -18,7 +18,7 @@ use crate::{
         realtek::{self, Realtek},
         virtio::VirtioNet,
     },
-    storage::{ahci, nvme, virtio},
+    storage::{ahci, nvme, sdhci, virtio},
     usb::{bluetooth::UsbHci, cdc::UsbNet, ethernet::UsbEthernet, hid::UsbInput, xhci},
 };
 use alloc::{boxed::Box, string::String, vec::Vec};
@@ -169,6 +169,7 @@ pub fn claims(function: &Function) -> bool {
         || crate::audio::hda::pci::identify(function).is_ok()
         || function.class == nvme::CLASS
         || function.class == ahci::CLASS
+        || sdhci::matches(function)
         || function.class == xhci::CLASS
 }
 
@@ -187,6 +188,7 @@ fn unsupported(class: [u8; 3]) -> Option<&'static str> {
         [0x04, 0x03, _] => Some("HD Audio controller (audio is not attached yet)"),
         [0x0c, 0x03, _] => Some("USB host controller other than xHCI"),
         [0x0c, 0x0a, _] => Some("USB4/Thunderbolt host (not attached yet)"),
+        [0x08, 0x05, _] => Some("SD host controller without standard SDHCI interface"),
         [0x0d, 0x11, _] => Some("PCIe Bluetooth controller"),
         _ => None,
     }
@@ -210,6 +212,8 @@ pub struct Disks {
     pub usb_devices: Vec<xhci::Device>,
     /// Explicitly polled USB topology owners, including empty controllers.
     pub usb_hosts: Vec<xhci::Host>,
+    /// Native SDHCI socket owners, including empty/removable card sockets.
+    pub sd_hosts: Vec<sdhci::Host>,
     /// Storage class owners remain available for explicit media rescan.
     pub usb_storage: Vec<crate::usb::storage::UsbStorage>,
     /// USB HCI transports with retained device-specific initialization results.
@@ -429,6 +433,20 @@ pub unsafe fn probe_with_provider(
                     Err(error) => disks.failures.push((address, error.into())),
                 }
                 continue;
+            } else if sdhci::matches(&function) {
+                sdhci::attach(&mut function, handoff, dma).map(|attached| {
+                    disks.sd_hosts.extend(attached.hosts);
+                    disks.device_failures.extend(
+                        attached.failures.into_iter().map(|(slot, error)| {
+                            (alloc::format!("{address} SD slot {slot}"), error)
+                        }),
+                    );
+                    attached
+                        .cards
+                        .into_iter()
+                        .map(|card| Box::new(card) as Box<dyn BlockDevice>)
+                        .collect()
+                })
             } else if function.class == ahci::CLASS {
                 ahci::attach(&mut function, handoff, dma).map(|attached| {
                     disks.device_failures.extend(
@@ -480,6 +498,10 @@ mod tests {
         assert_eq!(
             unsupported([0x0c, 0x03, 0x20]),
             Some("USB host controller other than xHCI")
+        );
+        assert_eq!(
+            unsupported([0x08, 0x05, 0x02]),
+            Some("SD host controller without standard SDHCI interface")
         );
         assert_eq!(unsupported([0x06, 0x04, 0x00]), None); // PCI bridge
         assert_eq!(unsupported([0x03, 0x00, 0x00]), None); // display: GPU inventory

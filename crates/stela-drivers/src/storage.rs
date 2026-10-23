@@ -3,4 +3,5 @@
 //! virtio-blk ([`virtio`]). USB disks are in [`usb::storage`](crate::usb::storage).
 pub mod ahci;
 pub mod nvme;
+pub mod sdhci;
 pub mod virtio;

@@ -114,6 +114,8 @@ pub enum Transport {
     Ram,
     /// A file in the firmware's file system, while boot services run.
     Firmware,
+    /// Native SD or MMC/eMMC user-area storage behind an SDHCI host.
+    SdMmc,
 }
 
 /// What a device reports about itself.
