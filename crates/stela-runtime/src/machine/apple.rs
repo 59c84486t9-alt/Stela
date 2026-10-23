@@ -91,6 +91,7 @@ mod sleep;
 mod t8112_memory;
 pub use service::{AicDelivery, ServiceBatch, ServiceInput};
 pub use sleep::PowerLog;
+pub use t8112_memory::cold as t8112_cold;
 
 pub use crate::platform::apple::{
     aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG, AicLayout},

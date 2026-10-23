@@ -875,11 +875,21 @@ const J473_AIC_TIMESTAMPS: u8 = 16;
 fn devices(
     board: Option<&soc::Board>,
     inputs: mount::Inputs<'_>,
+    memory: Option<mount::MemoryResources>,
 ) -> Result<(AppleDevices, Option<stela_runtime::machine::apple::UsbId>), String> {
     if let Some(board) = board {
-        return mount::devices(board, GuestConsole::default(), inputs, &mut |arguments| {
-            output::arguments(arguments)
-        });
+        return mount::devices_with_memory(
+            board,
+            GuestConsole::default(),
+            inputs,
+            memory,
+            &mut |arguments| output::arguments(arguments),
+        );
+    }
+    if memory.is_some() {
+        return Err(String::from(
+            "native board memory requires a live assigned DeviceTree",
+        ));
     }
     if inputs.backing.is_some() {
         return Err("--storage was supplied but this DeviceTree exposes no modeled ANS2".into());
@@ -1834,10 +1844,27 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         alloc::boxed::Box::new(display::GopScanout::new(screen))
             as alloc::boxed::Box<dyn stela_runtime::machine::apple::Scanout>
     });
+    let programmed = mount::memory_locks(read_only_region, &core_locks);
+    let memory = board
+        .as_ref()
+        .filter(|board| board.memory_cache.is_some())
+        .map(|board| {
+            use stela_runtime::machine::apple::{
+                memory_resources::t8112::cache::ZeroWayConfiguration, t8112_cold,
+            };
+            let configuration = t8112_cold::Configuration::clear_software_controls(
+                ZeroWayConfiguration::DisableArgument,
+            )
+            .unwrap_or_else(|error| output::fatal(&error));
+            let plan = t8112_cold::Plan::prepare(board, &canonical_ram, programmed, &configuration)
+                .unwrap_or_else(|error| output::fatal(&error));
+            mount::MemoryResources::T8112Cold(plan)
+        });
+    let cacheless_memory = memory.is_some();
     let (mut devices, restore_usb) = match devices(
         board.as_ref(),
         mount::Inputs {
-            programmed: mount::memory_locks(read_only_region, &core_locks),
+            programmed,
             reset,
             now,
             wall: handoff.wall_seconds.map(|seconds| WallClock {
@@ -1859,6 +1886,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             scanout,
             firmware: &firmware,
         },
+        memory,
     ) {
         Ok(devices) => devices,
         Err(error) => {
@@ -1958,11 +1986,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             // SAFETY: cold owner, parked APs, no frame loans or device DMA;
             // every earlier raw guest copy has completed.
             let mut memory = unsafe { bundle::live_tree::registered::ColdRam::new(&canonical_ram) };
-            let published = loaded_tree
-                .take()
-                .expect("retained source tree")
-                .publish(&mut memory, &assigned.tree)
-                .unwrap_or_else(|error| output::fatal(&error));
+            let live = loaded_tree.take().expect("retained source tree");
+            let published = if cacheless_memory {
+                live.publish_cacheless(&mut memory, &assigned.tree)
+            } else {
+                live.publish(&mut memory, &assigned.tree)
+            }
+            .unwrap_or_else(|error| output::fatal(&error));
             if Some(published.bytes()) != projected_bytes.as_deref() {
                 output::fatal("published assigned topology differs from the prepared device graph");
             }

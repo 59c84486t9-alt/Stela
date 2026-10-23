@@ -1,4 +1,6 @@
 //! Distinct T8112 cache/lock and DCS/PTD owners over one actual RAM allocation.
+pub mod cold;
+
 use super::{AppleDevices, memory_resources::t8112};
 use crate::platform::apple::bus::Width;
 use alloc::{boxed::Box, format, string::String, sync::Arc};

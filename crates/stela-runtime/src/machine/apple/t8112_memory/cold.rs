@@ -124,6 +124,17 @@ impl Plan {
         Ok(())
     }
 
+    /// The mount's later lifecycle connection must use this SAME source graph,
+    /// including admission, ancestors and aliases, not only equal apertures.
+    pub fn validate_power(&self, states: Option<&PowerStates>) -> Result<(), String> {
+        if states != Some(&self.source_power) {
+            return Err(
+                "cold T8112 memory differs from the actual live power dependency graph".into(),
+            );
+        }
+        Ok(())
+    }
+
     /// Call after PMGR placement and before power connection/display aliases.
     /// All guest/native/DMA publishers remain excluded throughout cold setup.
     pub fn install(self, devices: &mut AppleDevices) -> Result<(), String> {
@@ -490,6 +501,11 @@ mod tests {
         .unwrap();
         assert!(Arc::ptr_eq(&plan.ram, &ram));
         plan.validate(Some(&controller), Some(&cache)).unwrap();
+        plan.validate_power(Some(&states)).unwrap();
+        assert!(plan.validate_power(None).is_err());
+        let mut changed_power = states.clone();
+        changed_power.resources[0].name.push_str(" changed");
+        assert!(plan.validate_power(Some(&changed_power)).is_err());
         cache.channels.2 -= 1;
         assert!(plan.validate(Some(&controller), Some(&cache)).is_err());
         assert!(

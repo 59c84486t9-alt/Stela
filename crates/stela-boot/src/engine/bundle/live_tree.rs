@@ -150,9 +150,29 @@ impl LiveTree {
     /// This supplies no new RAM reservation, physical resource or CPU authority.
     #[allow(dead_code)] // Adoption also needs the actual Plan/RAM/device owners.
     pub(crate) fn publish(
+        self,
+        ram: &mut impl Ram,
+        projected: &DeviceTree,
+    ) -> Result<Self, String> {
+        self.publish_inner(ram, projected, false)
+    }
+
+    /// Publish the actual original driver's cacheless argument together with
+    /// the assigned topology, only after the parent constructed its matching
+    /// empty cache and canonical RAM owners. This changes no bundle schema.
+    pub(crate) fn publish_cacheless(
+        self,
+        ram: &mut impl Ram,
+        projected: &DeviceTree,
+    ) -> Result<Self, String> {
+        self.publish_inner(ram, projected, true)
+    }
+
+    fn publish_inner(
         mut self,
         ram: &mut impl Ram,
         projected: &DeviceTree,
+        cacheless: bool,
     ) -> Result<Self, String> {
         reservation(projected, self.physical, self.reservation_bytes)?;
         let bytes = projected.serialize();
@@ -163,6 +183,20 @@ impl LiveTree {
         }
         let length =
             u32::try_from(bytes.len()).map_err(|_| "projected DeviceTree length overflows")?;
+        // Prepare every argument byte before the first guest RAM effect.
+        // Preserve unrelated fields and opaque padding from the live snapshot.
+        let mut next_args = self.args;
+        next_args[boot_args::offset::DEVICE_TREE_LENGTH..boot_args::offset::DEVICE_TREE_LENGTH + 4]
+            .copy_from_slice(&length.to_le_bytes());
+        if cacheless {
+            let decoded =
+                BootArgs::decode(&self.args).map_err(|e| format!("live boot_args: {e}"))?;
+            let line = stela_loader::boot_policy::mcc::cacheless_arguments(&decoded.command_line)
+                .map_err(|e| format!("cacheless original boot arguments: {e}"))?;
+            let at = boot_args::offset::COMMAND_LINE;
+            next_args[at..at + line.len()].copy_from_slice(line.as_bytes());
+            next_args[at + line.len()] = 0;
+        }
         let mut old = buffer(self.bytes.len())?;
         let mut args = [0; boot_args::BYTES];
         if !ram.read(self.physical, &mut old)
@@ -177,12 +211,19 @@ impl LiveTree {
         if !ram.write(self.physical, &old) {
             return Err("DeviceTree publication failed; guest entry is forbidden".into());
         }
-        let length_at = self.args_physical + boot_args::offset::DEVICE_TREE_LENGTH as u64;
-        if !ram.write(length_at, &length.to_le_bytes()) {
-            return Err("DeviceTree was written but boot_args length publication failed; guest entry is forbidden".into());
+        let arguments_written = if cacheless {
+            ram.write(self.args_physical, &next_args)
+        } else {
+            let length_at = self.args_physical + boot_args::offset::DEVICE_TREE_LENGTH as u64;
+            ram.write(length_at, &length.to_le_bytes())
+        };
+        if !arguments_written {
+            return Err(
+                "DeviceTree was written but boot_args publication failed; guest entry is forbidden"
+                    .into(),
+            );
         }
-        self.args[boot_args::offset::DEVICE_TREE_LENGTH..boot_args::offset::DEVICE_TREE_LENGTH + 4]
-            .copy_from_slice(&length.to_le_bytes());
+        self.args = next_args;
         ram.fence();
         let mut actual = buffer(old.len())?;
         if !ram.read(self.physical, &mut actual)
@@ -428,5 +469,69 @@ mod tests {
             tree.serialize()
         );
         assert_eq!(&ram.bytes[0x1000..0x1000 + boot_args::BYTES], old_args);
+    }
+    #[test]
+    fn cacheless_publication_preserves_padding_and_original_argument_bytes() {
+        let (mut ram, regions, mut tree) = fixture();
+        let before = ram.bytes[0x1000..0x1000 + boot_args::BYTES].to_vec();
+        let live = LiveTree::capture(&mut ram, &regions, ARGS).unwrap();
+        tree.node_mut("/chosen")
+            .unwrap()
+            .remove_property("live-entropy");
+        let published = live.publish_cacheless(&mut ram, &tree).unwrap();
+        let args = &ram.bytes[0x1000..0x1000 + boot_args::BYTES];
+        assert_eq!(
+            BootArgs::decode(args).unwrap().command_line,
+            "-v -disable_mcc"
+        );
+        assert_eq!(
+            BootArgs::decode(args).unwrap().device_tree_length as usize,
+            published.bytes().len()
+        );
+        let mut expected = before;
+        let length_at = boot_args::offset::DEVICE_TREE_LENGTH;
+        expected[length_at..length_at + 4]
+            .copy_from_slice(&(published.bytes().len() as u32).to_le_bytes());
+        let at = boot_args::offset::COMMAND_LINE;
+        let line = b"-v -disable_mcc\0";
+        expected[at..at + line.len()].copy_from_slice(line);
+        assert_eq!(args, expected);
+        assert_eq!(ram.writes, 2);
+        assert_eq!(ram.fences, 1);
+    }
+
+    #[test]
+    fn conflicting_cacheless_argument_refuses_before_tree_publication() {
+        let (mut ram, regions, tree) = fixture();
+        let mut args = BootArgs::decode(&ram.bytes[0x1000..]).unwrap();
+        args.command_line = "-v -disable_mcc=0".into();
+        let encoded = args.encode().unwrap();
+        ram.bytes[0x1000..0x1000 + encoded.len()].copy_from_slice(&encoded);
+        let live = LiveTree::capture(&mut ram, &regions, ARGS).unwrap();
+        assert!(live.publish_cacheless(&mut ram, &tree).is_err());
+        assert_eq!(ram.writes, 0);
+        assert_eq!(ram.fences, 0);
+    }
+
+    #[test]
+    fn failed_cacheless_argument_write_cannot_authorize_guest_entry() {
+        let (mut ram, regions, mut tree) = fixture();
+        let live = LiveTree::capture(&mut ram, &regions, ARGS).unwrap();
+        let old_args = ram.bytes[0x1000..0x1000 + boot_args::BYTES].to_vec();
+        tree.node_mut("/chosen")
+            .unwrap()
+            .remove_property("live-entropy");
+        ram.fail_write = Some(1);
+        assert!(
+            live.publish_cacheless(&mut ram, &tree)
+                .err()
+                .unwrap()
+                .contains("guest entry is forbidden")
+        );
+        assert_eq!(&ram.bytes[0x1000..0x1000 + boot_args::BYTES], old_args);
+        assert_eq!(
+            &ram.bytes[0x2000..0x2000 + tree.serialize().len()],
+            tree.serialize()
+        );
     }
 }

@@ -19,6 +19,9 @@ use stela_drivers::block::BlockDevice;
 /// equality is checked before any host input or bus placement is consumed.
 /// This is placement, not canonical execution or native PMP admission.
 pub enum MemoryResources {
+    /// Source-checked cold resources whose lifecycle is sampled from the actual
+    /// placed PMGR before the native memory owners are constructed.
+    T8112Cold(super::apple::t8112_cold::Plan),
     T8112 {
         memory: t8112::Prepared,
         cache: t8112::cache::EmptyResource,
@@ -32,6 +35,7 @@ impl MemoryResources {
         descriptor: Option<&super::soc::MemoryCache>,
     ) -> Result<(), String> {
         match self {
+            Self::T8112Cold(plan) => plan.validate(controller, descriptor),
             Self::T8112 { memory, cache } => {
                 if descriptor != Some(memory.descriptor()) || controller != Some(cache.source()) {
                     return Err(
@@ -172,6 +176,9 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     log: &mut dyn FnMut(fmt::Arguments<'_>),
 ) -> Result<(AppleDevices, Option<UsbId>), String> {
     if let Some(memory) = memory.as_ref() {
+        if let MemoryResources::T8112Cold(plan) = memory {
+            plan.validate_power(board.power_states.as_ref())?;
+        }
         memory.validate(
             board.memory_controller.as_ref(),
             board.memory_cache.as_ref(),
@@ -397,6 +404,12 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     // before a broad display container can claim any overlapping bytes.
     if let Some(memory) = memory {
         match memory {
+            MemoryResources::T8112Cold(plan) => {
+                plan.install(&mut devices)?;
+                log(format_args!(
+                    "DEVICES mcc native cold cache/DCS/PTD follow actual PMGR and canonical RAM\n"
+                ));
+            }
             MemoryResources::T8112 { memory, cache } => {
                 devices.add_t8112_empty_memory_resources(memory, cache)?;
                 log(format_args!(
