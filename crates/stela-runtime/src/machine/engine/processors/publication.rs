@@ -193,6 +193,15 @@ pub struct StoppedWorkers {
     request: StopRequest,
 }
 
+/// Linear authority to rejoin one selectively released execution round. Every
+/// omitted owner remains physically held in the original stopped generation.
+#[derive(Debug)]
+#[must_use = "recover and invalidate every released owner before rejoining"]
+pub struct RunningCohort {
+    request: StopRequest,
+    released: Vec<(WorkerBinding, Option<u64>)>,
+}
+
 #[derive(Debug)]
 #[must_use = "release on the actual owner; dispatch remains refused until receipt"]
 pub struct WorkerRelease {
@@ -584,6 +593,165 @@ impl WorkerPublications {
         Ok(releases)
     }
 
+    /// Release only owners with actual prepared native frames. The complete
+    /// stopped request remains retained; omitted owners never lose their hold.
+    pub fn release_for_run(
+        &mut self,
+        held: StoppedWorkers,
+        members: &[usize],
+    ) -> Result<(RunningCohort, Vec<WorkerRelease>), WithPayload<StoppedWorkers>> {
+        let check = (|| {
+            self.check_stop(&held.request, StopPhase::Held)?;
+            if self.slots.iter().any(|slot| slot.services.is_some()) {
+                return Err(PublicationError::ServiceBusy);
+            }
+            if members.is_empty() {
+                return Err(PublicationError::EmptyCohort);
+            }
+            let mut released = Vec::with_capacity(members.len());
+            for (i, &pe) in members.iter().enumerate() {
+                if members[..i].contains(&pe) {
+                    return Err(PublicationError::DuplicatePe(pe));
+                }
+                let slot = &self.slots[self.slot(pe)?];
+                if !held.request.members.contains(&slot.binding) {
+                    return Err(PublicationError::UnknownPe(pe));
+                }
+                let Frame::Recovered(last_run) = slot.frame else {
+                    return Err(PublicationError::InFlight);
+                };
+                released.push((slot.binding, last_run));
+            }
+            Ok(released)
+        })();
+        let released = match check {
+            Ok(released) => released,
+            Err(error) => {
+                return Err(WithPayload {
+                    error,
+                    payload: held,
+                });
+            }
+        };
+        let releases = released
+            .iter()
+            .map(|(binding, _)| WorkerRelease {
+                identity: self.identity.clone(),
+                binding: *binding,
+                stop: held.request.generation,
+            })
+            .collect();
+        for (binding, _) in &released {
+            let index = self.slot(binding.pe).unwrap();
+            self.slots[index].stop = Some((held.request.generation, StopPhase::Releasing));
+        }
+        Ok((
+            RunningCohort {
+                request: held.request,
+                released,
+            },
+            releases,
+        ))
+    }
+
+    /// Every released owner must have supplied a new, actually recovered native
+    /// return. Retained idle owners keep their original physical Held receipt;
+    /// only the released owners receive fresh fence/invalidation commands.
+    pub fn request_rejoin(
+        &mut self,
+        running: &RunningCohort,
+    ) -> Result<Vec<NativeStopCommand>, PublicationError> {
+        self.identity(&running.request.identity)?;
+        for member in &running.request.members {
+            let slot = &self.slots[self.slot(member.pe)?];
+            if slot.binding != *member {
+                return Err(PublicationError::WrongOwner);
+            }
+            let Frame::Recovered(last_run) = slot.frame else {
+                return Err(PublicationError::InFlight);
+            };
+            if let Some((_, previous)) = running
+                .released
+                .iter()
+                .find(|(binding, _)| binding == member)
+            {
+                if slot.stop.is_some() {
+                    return Err(PublicationError::StaleStop);
+                }
+                if !last_run.is_some_and(|run| previous.is_none_or(|previous| run > previous)) {
+                    return Err(PublicationError::StaleRun);
+                }
+            } else if slot.stop != Some((running.request.generation, StopPhase::Held)) {
+                return Err(PublicationError::MissingInvalidation);
+            }
+            if slot.services.is_some() {
+                return Err(PublicationError::ServiceBusy);
+            }
+        }
+        let mut commands = Vec::with_capacity(running.released.len());
+        for (binding, _) in &running.released {
+            let index = self.slot(binding.pe)?;
+            let Frame::Recovered(last_run) = self.slots[index].frame else {
+                unreachable!()
+            };
+            self.slots[index].stop = Some((running.request.generation, StopPhase::CommandIssued));
+            commands.push(NativeStopCommand {
+                identity: self.identity.clone(),
+                binding: *binding,
+                stop: running.request.generation,
+                last_run,
+            });
+        }
+        Ok(commands)
+    }
+
+    /// Reconstitute the original complete all-writer hold only after all new
+    /// actual-owner invalidation receipts were accepted. No receipt is rebased
+    /// and no guest power/park state substitutes for physical owner authority.
+    pub fn rejoin(
+        &mut self,
+        running: RunningCohort,
+    ) -> Result<StoppedWorkers, WithPayload<RunningCohort>> {
+        let check = (|| {
+            self.identity(&running.request.identity)?;
+            for member in &running.request.members {
+                let slot = &self.slots[self.slot(member.pe)?];
+                if slot.binding != *member || !matches!(slot.frame, Frame::Recovered(_)) {
+                    return Err(PublicationError::InFlight);
+                }
+                let phase = if running
+                    .released
+                    .iter()
+                    .any(|(binding, _)| binding == member)
+                {
+                    StopPhase::Invalidated
+                } else {
+                    StopPhase::Held
+                };
+                if slot.stop != Some((running.request.generation, phase)) {
+                    return Err(PublicationError::MissingInvalidation);
+                }
+                if slot.services.is_some() {
+                    return Err(PublicationError::ServiceBusy);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = check {
+            return Err(WithPayload {
+                error,
+                payload: running,
+            });
+        }
+        for (binding, _) in &running.released {
+            let index = self.slot(binding.pe).unwrap();
+            self.slots[index].stop = Some((running.request.generation, StopPhase::Held));
+        }
+        Ok(StoppedWorkers {
+            request: running.request,
+        })
+    }
+
     pub fn accept_release(
         &mut self,
         receipt: ReleaseReceipt,
@@ -944,6 +1112,153 @@ mod tests {
             publications.accept_invalidation(receipt).unwrap();
         }
         publications.hold_stop(request).unwrap()
+    }
+
+    #[test]
+    fn retained_idle_owners_rejoin_changing_actual_run_rosters_without_new_commands() {
+        let (mut publications, mut owners, mut hosts) = ready();
+        let request = publications.request_stop(&[0, 1]).unwrap();
+        let mut held = hold(&mut publications, &mut owners, &mut hosts, request);
+        let stopped_generation = held.request.generation;
+        let mut states = [GuestState::default(), GuestState::default()];
+        let mut retired = [0, 0];
+        for members in [&[1][..], &[0][..], &[0, 1][..]] {
+            let (running, releases) = publications.release_for_run(held, members).unwrap();
+            for release in releases {
+                let pe = release.binding().pe;
+                publications
+                    .accept_release(owners[pe].release(release).unwrap())
+                    .unwrap();
+            }
+            assert!(publications.require_stopped(2, &[0, 1]).is_err());
+            assert_eq!(
+                publications.request_rejoin(&running).unwrap_err(),
+                PublicationError::StaleRun
+            );
+            for (pe, (state, retirement)) in states.iter_mut().zip(&mut retired).enumerate() {
+                if !members.contains(&pe) {
+                    assert_eq!(
+                        publications.dispatch(pe, ()).unwrap_err().error,
+                        PublicationError::StopBusy
+                    );
+                    continue;
+                }
+                let loan = publications
+                    .dispatch(
+                        pe,
+                        FrameLoan {
+                            state,
+                            retired: retirement,
+                        },
+                    )
+                    .unwrap();
+                let returned = owners[pe].execute(loan, &mut hosts[pe]).unwrap();
+                publications.recover(returned, |_| Ok::<_, ()>(())).unwrap();
+            }
+            let commands = publications.request_rejoin(&running).unwrap();
+            assert_eq!(commands.len(), members.len());
+            assert!(
+                commands
+                    .iter()
+                    .all(|command| command.generation() == stopped_generation)
+            );
+            let refused = publications.rejoin(running).unwrap_err();
+            assert_eq!(refused.error, PublicationError::MissingInvalidation);
+            for command in commands {
+                let pe = command.binding().pe;
+                publications
+                    .accept_invalidation(owners[pe].invalidate(command, &mut hosts[pe]).unwrap())
+                    .unwrap();
+            }
+            held = publications.rejoin(refused.payload).unwrap();
+            publications.require_all_held(&held).unwrap();
+        }
+        assert_eq!(
+            hosts.iter().map(|host| host.calls).collect::<Vec<_>>(),
+            [2, 2]
+        );
+        // Initial publication + first full stop + only two actual runs per PE.
+        assert_eq!(
+            hosts
+                .iter()
+                .map(|host| host.invalidations)
+                .collect::<Vec<_>>(),
+            [4, 4]
+        );
+        assert_eq!(retired, [14, 14]);
+        assert_eq!(states[0], states[1]);
+    }
+
+    #[test]
+    fn selective_release_preflight_and_failed_actual_recovery_keep_full_authority() {
+        let (mut publications, mut owners, mut hosts) = ready();
+        let request = publications.request_stop(&[0, 1]).unwrap();
+        let mut held = hold(&mut publications, &mut owners, &mut hosts, request);
+        for (members, expected) in [
+            (&[][..], PublicationError::EmptyCohort),
+            (&[0, 0][..], PublicationError::DuplicatePe(0)),
+            (&[0, 9][..], PublicationError::UnknownPe(9)),
+        ] {
+            let refused = publications.release_for_run(held, members).unwrap_err();
+            assert_eq!(refused.error, expected);
+            held = refused.payload;
+            publications.require_all_held(&held).unwrap();
+        }
+        let services = publications.open_services(&held, 1).unwrap();
+        let refused = publications.release_for_run(held, &[0]).unwrap_err();
+        assert_eq!(refused.error, PublicationError::ServiceBusy);
+        publications.close_services(services).unwrap();
+        let (running, releases) = publications.release_for_run(refused.payload, &[1]).unwrap();
+        for release in releases {
+            publications
+                .accept_release(owners[1].release(release).unwrap())
+                .unwrap();
+        }
+        let mut state = GuestState::default();
+        let mut retired = 0;
+        let loan = publications
+            .dispatch(
+                1,
+                FrameLoan {
+                    state: &mut state,
+                    retired: &mut retired,
+                },
+            )
+            .unwrap();
+        let returned = owners[1].execute(loan, &mut hosts[1]).unwrap();
+        let failed = publications
+            .recover(returned, |_| Err("actual recovery incomplete"))
+            .unwrap_err();
+        assert_eq!(
+            publications.request_rejoin(&running).unwrap_err(),
+            PublicationError::InFlight
+        );
+        let (mut foreign, _, _) = ready();
+        assert_eq!(
+            foreign.request_rejoin(&running).unwrap_err(),
+            PublicationError::WrongInventory
+        );
+        publications
+            .recover(failed.payload, |actual| {
+                assert!(matches!(actual.exit, NativeExit::Fault(_)));
+                assert_eq!(*actual.frame.retired, 7);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        let mut commands = publications.request_rejoin(&running).unwrap();
+        assert_eq!(commands.len(), 1);
+        let wrong = owners[0]
+            .invalidate(commands.pop().unwrap(), &mut hosts[0])
+            .unwrap_err();
+        assert_eq!(wrong.error, PublicationError::WrongOwner);
+        let receipt = owners[1].invalidate(wrong.payload, &mut hosts[1]).unwrap();
+        publications.accept_invalidation(receipt).unwrap();
+        let held = publications.rejoin(running).unwrap();
+        publications.require_all_held(&held).unwrap();
+        assert_eq!(hosts[0].calls, 0);
+        assert_eq!(hosts[0].invalidations, 2);
+        assert_eq!(retired, 7);
+        assert_eq!(state.sp, 0xfeed);
     }
 
     #[test]

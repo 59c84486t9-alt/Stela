@@ -31,6 +31,7 @@ pub struct ServiceHost<H, T> {
     ram: Arc<RegisteredSystemRam>,
     services: Vec<WorkerServices>,
     selected: Option<usize>,
+    pub(super) retained_hold: Option<publication::StoppedWorkers>,
 }
 /// Existing fixed-owner execution/stop transport, retaining the actual frame
 /// loans and generation-bound owner tokens. No metadata-only completion exists.
@@ -55,6 +56,25 @@ pub unsafe trait NativeTransport: ServiceTransport {
         inventory: &mut publication::WorkerPublications,
         frames: Vec<super::NativeRun<'a>>,
     ) -> Vec<super::NativeRunObservation>;
+    /// Execute prepared frames while retaining the actual idle-owner holds.
+    /// The fallback preserves the complete original stop/release protocol;
+    /// physical transports may selectively release the exact frame roster and
+    /// rejoin their real returns under the retained stopped request.
+    fn execute_held<'a>(
+        &mut self,
+        local: &mut dyn Host,
+        inventory: &mut publication::WorkerPublications,
+        frames: Vec<super::NativeRun<'a>>,
+        held: publication::StoppedWorkers,
+    ) -> (
+        Vec<super::NativeRunObservation>,
+        publication::StoppedWorkers,
+    ) {
+        self.release(local, inventory, held);
+        let reports = self.execute(local, inventory, frames);
+        let held = self.hold_all(local, inventory);
+        (reports, held)
+    }
     fn hold_all(
         &mut self,
         local: &mut dyn Host,
@@ -75,6 +95,7 @@ impl<H: Host, T: ServiceTransport> ServiceHost<H, T> {
             ram,
             services: Vec::new(),
             selected: None,
+            retained_hold: None,
         }
     }
     /// Each linear session was opened from the exact currently-held cohort.

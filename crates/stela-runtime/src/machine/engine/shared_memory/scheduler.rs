@@ -53,10 +53,32 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 "native publication inventory is absent",
             )));
         };
+        if let Some(held) = self.host.retained_hold.take() {
+            if inventory.require_all_held(&held).is_err() {
+                self.host
+                    .transport
+                    .fail_stopped("retained native hold changed");
+            }
+            // Stopped source helpers can perform copyout on this BSP between
+            // rounds. Idle remote owners have executed no new native frame.
+            self.host.local.memory_barrier();
+            return Ok(held);
+        }
         let held = self
             .host
             .transport
             .hold_all(&mut self.host.local, inventory);
+        Ok(self.begin_native_services(held))
+    }
+
+    fn begin_native_services(
+        &mut self,
+        held: publication::StoppedWorkers,
+    ) -> publication::StoppedWorkers {
+        let inventory = self
+            .native_publication
+            .as_mut()
+            .expect("held native inventory");
         let bindings: Vec<_> = inventory.bindings().collect();
         if inventory.require_all_held(&held).is_err() {
             self.host
@@ -83,13 +105,18 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         // device work occurs while these software sessions open. Keep that
         // completed fence instead of sending another command to every owner.
         // Later source/controller writes still use their own checked fences.
-        Ok(held)
+        held
     }
 
-    pub(in crate::machine::engine) fn release_native_services(
-        &mut self,
-        held: publication::StoppedWorkers,
-    ) {
+    fn retain_native_services(&mut self, held: publication::StoppedWorkers) {
+        if self.host.retained_hold.replace(held).is_some() {
+            self.host
+                .transport
+                .fail_stopped("native hold retained twice");
+        }
+    }
+
+    fn close_native_services(&mut self) {
         let inventory = self
             .native_publication
             .as_mut()
@@ -101,9 +128,20 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                     .fail_stopped("native Host service did not actually finish");
             }
         }
-        self.host
-            .transport
-            .release(&mut self.host.local, inventory, held);
+    }
+
+    pub(in crate::machine::engine) fn release_native_services(
+        &mut self,
+        held: publication::StoppedWorkers,
+    ) {
+        self.close_native_services();
+        self.host.transport.release(
+            &mut self.host.local,
+            self.native_publication
+                .as_mut()
+                .expect("held native inventory"),
+            held,
+        );
     }
 
     pub(in crate::machine::engine) fn native_source_pe(
@@ -233,12 +271,14 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 if boundary == 63 {
                     // A bounded source-check quantum: retain actual progress
                     // and return to host work before preparing another loan.
-                    self.release_native_services(held);
+                    self.retain_native_services(held);
                     return Ok(0);
                 }
             }
         }
-        self.release_native_services(held);
+        // Preparation can borrow canonical state while physical owners remain
+        // held; close only the software Host sessions before constructing loans.
+        self.close_native_services();
         let preparation_refused = self.unsupported(RequirementKind::Native(
             "checked native source/control preparation refused before execution",
         ));
@@ -250,12 +290,12 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             .iter()
             .map(|frame| frame.identity().pe)
             .collect();
-        let reports = {
+        let (reports, held) = {
             let host = cohort.host;
             host.transport
-                .execute(&mut host.local, cohort.inventory, cohort.frames)
+                .execute_held(&mut host.local, cohort.inventory, cohort.frames, held)
         };
-        let held = self.hold_native_services()?;
+        let held = self.begin_native_services(held);
         if reports.len() != expected.len() {
             self.host
                 .transport
@@ -292,7 +332,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         if !pending_accesses.is_empty() {
             return Err(self.queue_device_accesses(pending_accesses, held));
         }
-        self.release_native_services(held);
+        self.retain_native_services(held);
         Ok(expected.len())
     }
 
