@@ -1745,6 +1745,103 @@ mod tests {
         assert!(plain.read(DAPF_OFFSET, Width::Word, &mut access).is_err());
     }
 
+    /// Original programming inputs are qualified independently of active APF
+    /// transfer semantics. This fixture intentionally preserves that refusal.
+    #[test]
+    #[ignore = "requires pinned original J473 ADT in STELA_TEST_CPU_DT_DIR"]
+    fn original_pmp_apf_programming_retains_all_slices_without_granting_dma() {
+        let bytes = std::fs::read(
+            std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap())
+                .join("DeviceTree.j473ap.adt"),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::sha256(&bytes),
+            "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
+        );
+        let root = crate::machine::adt::Node::root(&bytes).unwrap();
+        let node = root.child("arm-io").unwrap().child("dart-pmp").unwrap();
+        assert_eq!(node.first_u32("n-apfs-instance-0"), Some(16));
+        assert_eq!(node.first_u32("sid"), Some(0));
+        assert!(node.property("apf-bypass-0").is_none());
+        assert!(node.property("bypass-0").is_none());
+        let records = node.property("dapf-instance-0").unwrap();
+        assert_eq!(records.len(), 16 * 52);
+        let mut dart = Dart::new(16, None).with_apf(16);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        for (index, raw) in records.chunks_exact(52).enumerate() {
+            // Original AP _apfSetupInstance 9f172f0..17328: raw record
+            // bytes50/49/48 populate bits1:0,5:4,9:8 respectively.
+            // These positions establish encoding, not permission meanings.
+            let control = u32::from(raw[50] & 3)
+                | (u32::from(raw[49] & 3) << 4)
+                | (u32::from(raw[48] & 3) << 8);
+            assert_eq!(&raw[48..52], &[0, 3, 1, 0]);
+            assert_eq!(control, 0x31);
+            let base = DAPF_OFFSET + index as u64 * SLICE;
+            for (offset, value) in [
+                (SLICE_START, 0),
+                (SLICE_START + 4, 4),
+                (SLICE_END, 8),
+                (SLICE_END + 4, 12),
+            ] {
+                let value = u64::from(u32::from_le_bytes(
+                    raw[value..value + 4].try_into().unwrap(),
+                ));
+                dart.write(base + offset, Width::Word, value, &mut access)
+                    .unwrap();
+                assert_eq!(
+                    dart.read(base + offset, Width::Word, &mut access),
+                    Ok(value)
+                );
+            }
+            for word in 0..8 {
+                let value = u64::from(u32::from_le_bytes(
+                    raw[16 + word * 4..20 + word * 4].try_into().unwrap(),
+                ));
+                assert_eq!(value, u64::from(word == 0));
+                let offset = base + SLICE_STREAMS + word as u64 * 4;
+                dart.write(offset, Width::Word, value, &mut access).unwrap();
+                assert_eq!(dart.read(offset, Width::Word, &mut access), Ok(value));
+            }
+            dart.write(
+                base + SLICE_CONTROL,
+                Width::Word,
+                u64::from(control),
+                &mut access,
+            )
+            .unwrap();
+            assert_eq!(
+                dart.read(base + SLICE_CONTROL, Width::Word, &mut access),
+                Ok(0x31)
+            );
+        }
+        for register in [PROTECT, PROTECT_LOCK] {
+            dart.write(register, Width::Word, u64::from(PROTECT_APF), &mut access)
+                .unwrap();
+        }
+        dart.write(DAPF_OFFSET + SLICE_CONTROL, Width::Word, 0, &mut access)
+            .unwrap();
+        assert_eq!(
+            dart.read(DAPF_OFFSET + SLICE_CONTROL, Width::Word, &mut access),
+            Ok(0x31)
+        );
+        // Authored TCR state: the source has no APF bypass property, but
+        // this fixture does not claim to have executed original setup.
+        dart.write(ENABLE_STREAMS, Width::Word, 1, &mut access)
+            .unwrap();
+        dart.write(TCR, Width::Word, u64::from(TCR_TRANSLATE), &mut access)
+            .unwrap();
+        let mut ram = Ram::new(ROOT, PAGE as usize);
+        for write in [false, true] {
+            assert_eq!(
+                dart.translate(&mut ram, 0, 0x4000, 0x4003, write, &mut access),
+                Err(DmaError::Unsupported("DART address permission filtering"))
+            );
+        }
+    }
+
     #[test]
     fn protection_freezes_stream_tables_and_the_lock_keeps_it() {
         let (mut dart, _, mut latch) = setup();
