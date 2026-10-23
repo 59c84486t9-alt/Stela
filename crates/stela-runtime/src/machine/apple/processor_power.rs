@@ -213,6 +213,10 @@ impl AppleDevices {
         // transaction. Preserve that completion; never return an outer no-effect
         // error or replay the source store after an ACK has become observable.
         let settlement = published.and(self.settle(cpu, now, None));
+        #[allow(
+            clippy::drop_non_drop,
+            reason = "retain the exclusive processor borrow through the PMGR commit and wire settlement"
+        )]
         drop(unchanged);
         Ok(ConsumedWrite::Complete { settlement })
     }

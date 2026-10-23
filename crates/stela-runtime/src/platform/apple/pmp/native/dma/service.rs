@@ -70,10 +70,10 @@ impl Service {
             if state.dispatching {
                 return Completion::Refused("native PMP DMA service reentry");
             }
-            if let Some(job) = &self.pending {
-                if state.replies.contains_key(&job.request.serial) {
-                    return Completion::Busy { deadline: None };
-                }
+            if let Some(job) = &self.pending
+                && state.replies.contains_key(&job.request.serial)
+            {
+                return Completion::Busy { deadline: None };
             }
         }
         let Some(mut job) = self

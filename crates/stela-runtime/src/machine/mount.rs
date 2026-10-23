@@ -18,6 +18,10 @@ use stela_drivers::block::BlockDevice;
 /// Already constructed native owners, consumed by the board mount. Descriptor
 /// equality is checked before any host input or bus placement is consumed.
 /// This is placement, not canonical execution or native PMP admission.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "cold placement resources are moved once and consumed together before guest entry"
+)]
 pub enum MemoryResources {
     /// Source-checked cold resources whose lifecycle is sampled from the actual
     /// placed PMGR before the native memory owners are constructed.

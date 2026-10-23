@@ -82,10 +82,10 @@ use display_topology::dcp_device;
 pub use display_topology::{DcpController, DcpMapperRoute};
 mod dart_topology;
 mod dma_routes;
-pub use dma_routes::NativeDmaRoute;
 #[cfg(test)]
 use dart_topology::iommu;
 use dart_topology::iommus;
+pub use dma_routes::NativeDmaRoute;
 
 mod handoff;
 mod memory_resources;

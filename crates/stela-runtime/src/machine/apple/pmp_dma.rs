@@ -402,21 +402,15 @@ impl dma::Coherence for WriteBackCoherence {
             Some(view)
                 if effect != dma::Effect::Map
                     && view.descriptor == descriptor
-                    && view.life == expected =>
-            {
-                ()
-            }
+                    && view.life == expected => {}
             _ => return Completion::Refused("PMP native DMA native descriptor lifecycle differs"),
         }
-        if let dma::Effect::ReportingSynchronize { offset, bytes } = effect {
-            if offset
+        if let dma::Effect::ReportingSynchronize { offset, bytes } = effect
+            && offset
                 .checked_add(bytes)
                 .is_none_or(|end| end > descriptor.bytes)
-            {
-                return Completion::Refused(
-                    "PMP native DMA synchronization exceeds native descriptor",
-                );
-            }
+        {
+            return Completion::Refused("PMP native DMA synchronization exceeds native descriptor");
         }
         // A Busy Map retry revalidates the live DART, even though the broker
         // already checked it before this callback. No PA translation is cached.
