@@ -94,7 +94,7 @@ pub struct Differential {
     /// Mismatches to print in full.
     #[arg(long, default_value_t = 20)]
     show: usize,
-    /// Run LSE/ordered and integer-literal forms through the checked memory service
+    /// Run LSE/ordered and integer/SIMD-literal forms through the checked memory service
     /// instead of the direct-RAM leaf. LOR and unavailable host tiers refuse.
     #[arg(long, conflicts_with_all = ["system_matrix", "el2", "data_independent_timing"])]
     checked_memory: bool,

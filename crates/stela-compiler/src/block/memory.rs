@@ -421,6 +421,76 @@ mod tests {
     }
 
     #[test]
+    fn shared_simd_literal_forms_retain_checked_asimd_requirements_and_source_maps() {
+        use crate::context::memory::{SpAlignmentRequirement, flags, host_caps};
+        for (form, bytes) in [(0x1c00_0000u32, 4u64), (0x5c00_0000, 8), (0x9c00_0000, 16)] {
+            for destination in 0..32 {
+                for (pc, immediate) in [(0x1000u64, -1i32), (0x1004, 0), (0x1000, 1)] {
+                    for profile in [
+                        CheckedMemoryProfile::SpAlignmentEnabled,
+                        CheckedMemoryProfile::SpAlignmentDisabled,
+                    ] {
+                        for target in [TargetCpu::X86_64_V2, TargetCpu::AtomicLoad16] {
+                            let word = form | ((immediate as u32 & 0x7ffff) << 5) | destination;
+                            let source: Vec<_> = [word, 0xd65f_03c0]
+                                .into_iter()
+                                .flat_map(u32::to_le_bytes)
+                                .collect();
+                            let plan = crate::block::CompilationPlan::new(
+                                &source,
+                                GuestAddress(pc),
+                                crate::block::BlockProfile::SystemModeSharedV1(profile),
+                                target,
+                            )
+                            .unwrap();
+                            let requirements = plan.memory_requirements().unwrap();
+                            let address = pc.wrapping_add_signed(i64::from(immediate) * 4);
+                            assert_eq!(requirements.required_flags, flags::ASIMD);
+                            assert_eq!(
+                                requirements.required_sp_alignment,
+                                SpAlignmentRequirement::Any
+                            );
+                            assert!(requirements.required_address_checks.is_empty());
+                            assert_eq!(
+                                requirements.required_host_caps,
+                                if bytes < 16 && !address.is_multiple_of(bytes) {
+                                    if target.supports(TargetCpu::AtomicLoad16) {
+                                        host_caps::ATOMIC_LOAD16
+                                    } else {
+                                        host_caps::CX16
+                                    }
+                                } else {
+                                    0
+                                }
+                            );
+                            let emitted = plan.compile().unwrap();
+                            assert!(emitted.fault_recovery.is_empty());
+                            assert_eq!(
+                                emitted
+                                    .native
+                                    .source_map
+                                    .iter()
+                                    .map(|(pc, _)| pc.0)
+                                    .collect::<Vec<_>>(),
+                                [pc, pc + 4]
+                            );
+                            let mut constant = alloc::vec![0x48, 0xb8];
+                            constant.extend(address.to_le_bytes());
+                            assert!(
+                                emitted
+                                    .native
+                                    .x86_64_code
+                                    .windows(constant.len())
+                                    .any(|window| window == constant)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn m0_staged_read_never_combines_with_process_helpers() {
         let source = 0xf940_0000u32.to_le_bytes();
         let selected = crate::block::BlockProfile::CheckedMemoryPauthClockThread(

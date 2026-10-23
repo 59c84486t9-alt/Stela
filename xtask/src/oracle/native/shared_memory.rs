@@ -10,10 +10,13 @@ use stela_compiler::{
 use stela_runtime::{
     execution::checked_memory::CheckedMemoryBlock,
     system::{
+        debug::DebugControls,
         events::EventDomain,
+        fp_access::{self, NoSme, StreamingState},
         identification::Register as Id,
         identification_snapshot::Snapshot,
         process_memory::{FixedProcessMemoryControls, SourceNormalWbDomain},
+        scalable_controls::fp::FpControlOwner,
         state::{El1Registers, SystemState},
     },
 };
@@ -26,10 +29,7 @@ fn admitted(operation: &Operation) -> bool {
             ..
         }) => false,
         Operation::Ordered(_) => true,
-        Operation::Literal(stela_compiler::aarch64::literal::Operand {
-            transfer: stela_compiler::aarch64::literal::Transfer::Integer { .. },
-            ..
-        }) => true,
+        Operation::Literal(_) => true,
         _ => false,
     }
 }
@@ -127,6 +127,8 @@ pub(super) fn run(
                 (Id::IdAa64Pfr0El1, 0x11),
                 (Id::IdAa64Mmfr0El1, 0),
                 (Id::IdAa64Mmfr2El1, 1 << 32),
+                (Id::IdAa64Mmfr3El1, 0),
+                (Id::IdAa64Mmfr4El1, 0),
                 (Id::IdAa64Isar3El1, 0),
                 (Id::IdAa64Pfr1El1, 0),
                 (Id::IdAa64Dfr0El1, 0),
@@ -141,7 +143,7 @@ pub(super) fn run(
     let source = unsafe { SourceNormalWbDomain::from_source_resolved(Arc::clone(&domain)) }
         .map_err(|error| anyhow::anyhow!("checked source attributes: {error:?}"))?;
     let controls = FixedProcessMemoryControls::new_with_identification(
-        ids,
+        Arc::clone(&ids),
         1 | (1 << 2) | (1 << 4),
         u64::from(64 - ADDRESS_BITS),
         ADDRESS_BITS,
@@ -172,7 +174,66 @@ pub(super) fn run(
     };
     // SAFETY: closed original source, fixed qualified EL0 state and no debug,
     // IRQ, MTE or direct/DMA writer. Every reached memory effect uses this domain.
-    let observed = unsafe { body.run(&controls, &system, &mut memory, &event, &mut thread) }?;
+    let asimd = case.code.iter().any(|word| {
+        matches!(
+            Decoder
+                .lift(GuestAddress(CODE_PAGE), *word)
+                .map(|instruction| instruction.operation),
+            Ok(Operation::Literal(
+                stela_compiler::aarch64::literal::Operand {
+                    transfer: stela_compiler::aarch64::literal::Transfer::Simd { .. },
+                    ..
+                }
+            ))
+        )
+    });
+    let observed = if asimd {
+        // This oracle is explicitly EL0, enabled non-streaming FP, without
+        // SVE/SME. Actual ASIMD memory admission retains that exact owner and
+        // same mutable bank; the ordinary entry continues to refuse ASIMD.
+        let fp = FpControlOwner::new_declared_el10(&ids, 3 << 20)
+            .map_err(|error| anyhow::anyhow!("checked FP controls: {error:?}"))?;
+        let no_sme = NoSme::from_snapshot(&ids)
+            .map_err(|error| anyhow::anyhow!("checked SME absence: {error:?}"))?;
+        let debug = DebugControls {
+            halted: false,
+            ignore_traps_in_debug: false,
+            halting_allowed: false,
+            edscr_tda: false,
+            os_locked: false,
+            breakpoint_count: 0,
+            watchpoint_count: 0,
+            raw_bank: 0,
+            effective_bank: 0,
+        };
+        fp_access::with_nonstreaming_low128(
+            &ids,
+            &fp,
+            &system,
+            StreamingState::Absent(no_sme),
+            &mut thread.registers,
+            thread.pc,
+            |mut access| {
+                // SAFETY: exact fixture source and retained FP/domain authority
+                // cover this same bank through memory and PC finalization.
+                unsafe {
+                    body.run_with_low128(
+                        &controls,
+                        &system,
+                        &debug,
+                        &mut memory,
+                        &event,
+                        &mut thread.pc,
+                        &mut access,
+                    )
+                }
+            },
+        )
+        .map_err(|error| anyhow::anyhow!("checked FP entry: {error:?}"))??
+    } else {
+        // SAFETY: exact fixture contract described above, ordinary authority.
+        unsafe { body.run(&controls, &system, &mut memory, &event, &mut thread) }?
+    };
     ensure!(
         observed.fault.is_none(),
         "checked memory fault: {:?}",
@@ -190,8 +251,15 @@ pub(super) fn run(
 mod tests {
     use super::*;
     #[test]
-    fn checked_oracle_admits_exact_integer_literal_classes_without_simd_or_prefetch() {
-        for form in [0x18000000u32, 0x58000000, 0x98000000] {
+    fn checked_oracle_admits_exact_integer_and_simd_literals_without_prefetch() {
+        for form in [
+            0x18000000u32,
+            0x58000000,
+            0x98000000,
+            0x1c000000,
+            0x5c000000,
+            0x9c000000,
+        ] {
             for register in [0, 10, 30, 31] {
                 let instruction = Decoder
                     .lift(GuestAddress(CODE_PAGE), form | (4 << 5) | register)
@@ -199,15 +267,7 @@ mod tests {
                 assert!(admitted(&instruction.operation));
             }
         }
-        for word in [
-            0x1c000000u32,
-            0x5c000000,
-            0x9c000000,
-            0xdc000000,
-            0xd8000000,
-            0xf9400000,
-            0xd503201f,
-        ] {
+        for word in [0xdc000000u32, 0xd8000000, 0xf9400000, 0xd503201f] {
             if let Ok(instruction) = Decoder.lift(GuestAddress(CODE_PAGE), word) {
                 assert!(
                     !admitted(&instruction.operation),

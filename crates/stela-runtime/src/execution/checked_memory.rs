@@ -9,8 +9,12 @@ use crate::{
     blocks::ThreadState,
     memory::{domain::MemoryThread, policy::MemoryControls},
     system::{
-        events::EventEndpoint, execution::EntryBoundary,
-        process_memory::FixedProcessMemoryControls, state::SystemState,
+        debug::DebugControls,
+        events::EventEndpoint,
+        execution::EntryBoundary,
+        fp_access::{Low128FpAccess, Low128FpContext},
+        process_memory::FixedProcessMemoryControls,
+        state::SystemState,
     },
 };
 use anyhow::{Result, ensure};
@@ -206,12 +210,74 @@ impl CheckedMemoryBlock {
         event: &EventEndpoint,
         state: &mut ThreadState,
     ) -> Result<Observation> {
+        // SAFETY: forwards the unchanged caller contract with no FP authority.
+        unsafe {
+            self.run_registers(
+                controls,
+                system,
+                memory,
+                event,
+                &mut state.registers,
+                &mut state.pc,
+                None,
+            )
+        }
+    }
+
+    /// Enter the exact checked block with the same live low128 FP bank and
+    /// controls held by `access`. The ordinary entry keeps refusing ASIMD.
+    /// `pc` is settled only after the retained memory service finalizes.
+    ///
+    /// # Safety
+    /// The source, debug/interrupt, memory-domain and all-writer contracts of
+    /// `run` apply. `debug` describes this PE's current effective debug state;
+    /// it must remain unchanged throughout this synchronous invocation. The
+    /// caller obtains `access` through `with_nonstreaming_low128`, retaining
+    /// that authority and the original register bank through PC settlement.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn run_with_low128(
+        &self,
+        controls: &FixedProcessMemoryControls,
+        system: &SystemState,
+        debug: &DebugControls,
+        memory: &mut MemoryThread<MemoryControls>,
+        event: &EventEndpoint,
+        pc: &mut GuestAddress,
+        access: &mut Low128FpAccess<'_, '_>,
+    ) -> Result<Observation> {
+        access.with_guest(|context, registers| {
+            // SAFETY: the context and mutable bank are split by their actual
+            // owner. The same source/domain contracts apply to both entries.
+            unsafe {
+                self.run_registers(
+                    controls,
+                    system,
+                    memory,
+                    event,
+                    registers,
+                    pc,
+                    Some((debug, context)),
+                )
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn run_registers(
+        &self,
+        controls: &FixedProcessMemoryControls,
+        system: &SystemState,
+        memory: &mut MemoryThread<MemoryControls>,
+        event: &EventEndpoint,
+        registers: &mut stela_compiler::GuestState,
+        pc: &mut GuestAddress,
+        low128: Option<(&DebugControls, &Low128FpContext<'_, '_>)>,
+    ) -> Result<Observation> {
         ensure!(
-            state.pc == self.identity.entry,
+            *pc == self.identity.entry,
             "thread PC differs from checked source entry"
         );
-        // The outer provider loan extends beyond the prepared invocation's own
-        // loan, through finalization and exact architectural PC settlement.
+        // Retain this outer loan through exact architectural PC settlement.
         let _publication = memory
             .execution_loan()
             .map_err(|status| anyhow::anyhow!("checked publication loan refused: {status:?}"))?;
@@ -223,96 +289,139 @@ impl CheckedMemoryBlock {
             self.source.len(),
             u32::from_le_bytes(self.source[..4].try_into().expect("complete instruction")),
         );
-        let entry = controls
-            .prepare(
-                &boundary,
-                self.requirements,
-                system,
-                &state.registers,
-                memory,
-                Some(event),
-            )
-            .map_err(|error| anyhow::anyhow!("checked CPU entry refused: {error:?}"))?;
-        ensure!(
-            entry.requirements() == self.requirements
-                && entry.profile_id() == self.profile.process_memory_profile_id(),
-            "checked body/authority mismatch"
-        );
-        let _floating = HostFloatingEnvironment::capture();
-        let mut context = ExecutionContext::default();
         let mut observation = None;
         let mut raw_memory = None;
-        // SAFETY: only this owner's exact compiler-produced checked mapping is
-        // invoked. The typed entry retains CPU policy/storage/PE borrows, and
-        // private state, context and staging cannot escape the synchronous call.
-        let finalized = unsafe {
-            entry.with_view(|view| {
-                let mut loan = ContextLoan::memory(&mut context, view);
-                let exit = self
-                    .mapping
-                    .call_context_block(&mut state.registers, loan.context())?;
-                raw_memory = Some(RawMemoryObservation {
-                    version: view.version,
-                    bytes: view.bytes,
-                    status_code: view.fault_kind,
-                    access_code: view.fault_access,
-                    address: view.fault_address,
-                    pc: view.fault_pc,
-                    completed_bytes: view.completed_bytes,
-                });
-                ensure!(
-                    loan.context().has_supported_header()
-                        && loan.context().memory == core::ptr::from_mut(view).cast(),
-                    "checked context association changed during native call"
-                );
-                let status =
-                    stela_compiler::context::memory::MemoryStatus::from_code(view.fault_kind)
-                        .ok_or_else(|| anyhow::anyhow!("unknown checked memory status"))?;
-                let access =
-                    stela_compiler::context::memory::FaultAccess::from_code(view.fault_access)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "unknown checked memory fault access {}",
-                                view.fault_access
-                            )
-                        })?;
-                let fault = (status != stela_compiler::context::memory::MemoryStatus::Success)
-                    .then_some(MemoryFault {
-                        access,
+        let finalized = if let Some((debug, context)) = low128 {
+            let entry = controls
+                .prepare_profile_with_low128(
+                    &boundary,
+                    self.profile,
+                    self.requirements,
+                    system,
+                    debug,
+                    context,
+                    registers,
+                    memory,
+                    Some(event),
+                )
+                .map_err(|error| anyhow::anyhow!("checked low128 CPU entry refused: {error:?}"))?;
+            ensure!(
+                entry.requirements() == self.requirements
+                    && entry.profile_id() == self.profile.process_memory_profile_id(),
+                "checked body/authority mismatch"
+            );
+            let _floating = HostFloatingEnvironment::capture();
+            // SAFETY: the actual context stays borrowed through the checked
+            // callback; only the same split register bank enters native code.
+            let result = unsafe {
+                entry.with_view(registers, |_, registers, view| {
+                    self.invoke_native(registers, view, &mut observation, &mut raw_memory)
+                })
+            };
+            result.map_err(|error| {
+                if let crate::system::process_memory::ProcessMemoryError::Memory(status) = error {
+                    anyhow::Error::new(FinalizationFailure {
                         status,
-                        address: view.fault_address,
-                        pc: view.fault_pc,
-                        completed_bytes: view.completed_bytes,
-                    });
-                observation = Some(Observation { exit, fault });
-                if let Some(fault) = observation.as_ref().and_then(|value| value.fault) {
-                    ensure!(
-                        self.source_map.iter().any(|(pc, _)| pc.0 == fault.pc),
-                        "fault outside consumed source"
-                    );
+                        observation: observation.take(),
+                        raw_memory: raw_memory.take(),
+                    })
+                } else {
+                    anyhow::anyhow!(
+                        "checked low128 finalization refused: {error:?}; observation: {observation:?}; raw memory: {raw_memory:?}"
+                    )
                 }
-                Ok::<(), anyhow::Error>(())
+            })
+        } else {
+            let entry = controls
+                .prepare(
+                    &boundary,
+                    self.requirements,
+                    system,
+                    registers,
+                    memory,
+                    Some(event),
+                )
+                .map_err(|error| anyhow::anyhow!("checked CPU entry refused: {error:?}"))?;
+            ensure!(
+                entry.requirements() == self.requirements
+                    && entry.profile_id() == self.profile.process_memory_profile_id(),
+                "checked body/authority mismatch"
+            );
+            let _floating = HostFloatingEnvironment::capture();
+            // SAFETY: this is the unchanged ordinary typed memory entry.
+            unsafe {
+                entry.with_view(|view| {
+                    self.invoke_native(registers, view, &mut observation, &mut raw_memory)
+                })
+            }
+            .map_err(|status| {
+                anyhow::Error::new(FinalizationFailure {
+                    status,
+                    observation: observation.take(),
+                    raw_memory: raw_memory.take(),
+                })
             })
         };
-        match finalized {
-            Ok(result) => result?,
-            Err(status) => {
-                return Err(FinalizationFailure {
-                    status,
-                    observation,
-                    raw_memory,
-                }
-                .into());
-            }
-        }
+        finalized??;
         let observation = observation
             .ok_or_else(|| anyhow::anyhow!("checked entry returned without an observation"))?;
-        state.pc = GuestAddress(
+        *pc = GuestAddress(
             observation
                 .fault
                 .map_or(observation.exit.next_pc, |fault| fault.pc),
         );
         Ok(observation)
+    }
+
+    unsafe fn invoke_native(
+        &self,
+        registers: &mut stela_compiler::GuestState,
+        view: &mut stela_compiler::context::memory::MemoryContextView,
+        observation: &mut Option<Observation>,
+        raw_memory: &mut Option<RawMemoryObservation>,
+    ) -> Result<()> {
+        let mut context = ExecutionContext::default();
+        let mut loan = ContextLoan::memory(&mut context, view);
+        // SAFETY: the invoking entry retains exact source, CPU/context and
+        // all-writer memory authority through this synchronous call.
+        let exit = unsafe { self.mapping.call_context_block(registers, loan.context()) }?;
+        *raw_memory = Some(RawMemoryObservation {
+            version: view.version,
+            bytes: view.bytes,
+            status_code: view.fault_kind,
+            access_code: view.fault_access,
+            address: view.fault_address,
+            pc: view.fault_pc,
+            completed_bytes: view.completed_bytes,
+        });
+        ensure!(
+            loan.context().has_supported_header()
+                && loan.context().memory == core::ptr::from_mut(view).cast(),
+            "checked context association changed during native call"
+        );
+        let status = stela_compiler::context::memory::MemoryStatus::from_code(view.fault_kind)
+            .ok_or_else(|| anyhow::anyhow!("unknown checked memory status"))?;
+        let access = stela_compiler::context::memory::FaultAccess::from_code(view.fault_access)
+            .ok_or_else(|| {
+                anyhow::anyhow!("unknown checked memory fault access {}", view.fault_access)
+            })?;
+        let fault = (status != stela_compiler::context::memory::MemoryStatus::Success).then_some(
+            MemoryFault {
+                access,
+                status,
+                address: view.fault_address,
+                pc: view.fault_pc,
+                completed_bytes: view.completed_bytes,
+            },
+        );
+        *observation = Some(Observation { exit, fault });
+        if let Some(fault) = observation.as_ref().and_then(|value| value.fault) {
+            ensure!(
+                self.source_map.iter().any(|(pc, _)| pc.0 == fault.pc),
+                "fault outside consumed source"
+            );
+        }
+        Ok::<(), anyhow::Error>(())
     }
 }
 
@@ -480,6 +589,8 @@ mod tests {
                         (Id::IdAa64Pfr0El1, 0x11),
                         (Id::IdAa64Mmfr0El1, 0),
                         (Id::IdAa64Mmfr2El1, 1 << 32),
+                        (Id::IdAa64Mmfr3El1, 0),
+                        (Id::IdAa64Mmfr4El1, 0),
                         (Id::IdAa64Isar3El1, 0),
                         (Id::IdAa64Pfr1El1, 0),
                         (Id::IdAa64Dfr0El1, 0),
@@ -540,6 +651,150 @@ mod tests {
             self.memory.read_scalar(DATA, 8, 0, PC.0).unwrap() as u64
         }
     }
+    #[test]
+    fn checked_low128_literal_entry_requires_actual_context_and_preserves_full_fault_state() {
+        use crate::system::{
+            fp_access::{self, NoSme, StreamingState},
+            scalable_controls::fp::FpControlOwner,
+        };
+        use stela_compiler::aarch64::literal;
+        let domain = domain();
+        let mut worker = Worker::qualified(&domain, 2, 2, false);
+        let writer = block(&[STR, RET]);
+        for offset in (0..128).step_by(8) {
+            let mut initial = GuestState::default();
+            initial.x[0] = DATA + offset;
+            initial.x[1] =
+                u64::from_le_bytes(core::array::from_fn(|i| (offset + i as u64) as u8 ^ 0xa5));
+            assert!(worker.run(&writer, &mut initial).unwrap().fault.is_none());
+        }
+        let ids = worker
+            .controls
+            .identification_snapshot_owner()
+            .unwrap()
+            .clone();
+        let fp = FpControlOwner::new_declared_el10(&ids, 3 << 20).unwrap();
+        for (form, bytes) in [
+            (0x1c00_0000u32, 4usize),
+            (0x5c00_0000, 8),
+            (0x9c00_0000, 16),
+        ] {
+            for destination in [0u32, 1, 31] {
+                for address in [DATA + 4, DATA + 124] {
+                    let immediate = ((address - PC.0) / 4) as u32;
+                    let word = form | (immediate << 5) | destination;
+                    let body = block(&[word, RET]);
+                    let mut registers = GuestState {
+                        nzcv: 0xa000_0000,
+                        fpcr: 0x0040_0000,
+                        fpsr: 0x0800_009f,
+                        sp: 0x1235,
+                        ..GuestState::default()
+                    };
+                    registers.x = core::array::from_fn(|i| i as u64 * 0x0101_0101_0101_0101);
+                    registers.v = core::array::from_fn(|i| [u64::MAX - i as u64, 0xabad_cafe]);
+                    let original = registers.clone();
+                    // The generic GPR entry must not silently authorize ASIMD.
+                    assert!(worker.run(&body, &mut registers).is_err());
+                    assert_eq!(registers, original);
+                    let mut pc = PC;
+                    let observed = fp_access::with_nonstreaming_low128(
+                        &ids,
+                        &fp,
+                        &worker.system,
+                        StreamingState::Absent(NoSme::from_snapshot(&ids).unwrap()),
+                        &mut registers,
+                        pc,
+                        |mut access| {
+                            // SAFETY: immutable authored literal source, exact same FP bank,
+                            // disabled debug/IRQ state and one checked all-writer domain.
+                            unsafe {
+                                body.run_with_low128(
+                                    &worker.controls,
+                                    &worker.system,
+                                    &DebugControls::default(),
+                                    &mut worker.memory,
+                                    &worker.event,
+                                    &mut pc,
+                                    &mut access,
+                                )
+                            }
+                        },
+                    )
+                    .unwrap()
+                    .unwrap();
+                    let mut expected = original;
+                    if address + bytes as u64 > DATA + 128 {
+                        let fault = observed.fault.unwrap();
+                        assert_eq!(fault.pc, PC.0);
+                        assert_eq!(fault.address, DATA + 128);
+                        assert_eq!(fault.completed_bytes, 4);
+                        assert_eq!(pc, PC);
+                    } else {
+                        assert!(observed.fault.is_none());
+                        let mut loaded = [0; 16];
+                        for (index, byte) in loaded[..bytes].iter_mut().enumerate() {
+                            *byte = (address - DATA + index as u64) as u8 ^ 0xa5;
+                        }
+                        expected.v[destination as usize] = [
+                            u64::from_le_bytes(loaded[..8].try_into().unwrap()),
+                            u64::from_le_bytes(loaded[8..].try_into().unwrap()),
+                        ];
+                        assert_eq!(pc.0, expected.x[30]);
+                    }
+                    assert_eq!(registers, expected);
+                    assert_eq!(literal::decode(PC, word).unwrap().unwrap().address, address);
+                }
+            }
+        }
+        let body = block(&[0x9c01_8001, RET]); // LDR Q1, DATA
+        let other_system = SystemState::new(0, 0, El1Registers::new(0, 0, 0, 0, 0)).unwrap();
+        let mut registers = GuestState::default();
+        let original = registers.clone();
+        let mut pc = PC;
+        let result = fp_access::with_nonstreaming_low128(
+            &ids,
+            &fp,
+            &other_system,
+            StreamingState::Absent(NoSme::from_snapshot(&ids).unwrap()),
+            &mut registers,
+            pc,
+            |mut access| {
+                // SAFETY: negative test retains the exact bank and domain;
+                // different actual SystemState objects must be refused before native entry.
+                unsafe {
+                    body.run_with_low128(
+                        &worker.controls,
+                        &worker.system,
+                        &DebugControls::default(),
+                        &mut worker.memory,
+                        &worker.event,
+                        &mut pc,
+                        &mut access,
+                    )
+                }
+            },
+        )
+        .unwrap();
+        assert!(result.is_err());
+        assert_eq!(registers, original);
+        assert_eq!(pc, PC);
+        let disabled = FpControlOwner::new_declared_el10(&ids, 0).unwrap();
+        assert!(matches!(
+            fp_access::with_nonstreaming_low128(
+                &ids,
+                &disabled,
+                &worker.system,
+                StreamingState::Absent(NoSme::from_snapshot(&ids).unwrap()),
+                &mut registers,
+                pc,
+                |_| panic!("disabled FP must trap before checked/native entry")
+            ),
+            Err(fp_access::Error::PreflightTrap(_))
+        ));
+        assert_eq!(registers, original);
+    }
+
     fn block(words: &[u32]) -> CheckedMemoryBlock {
         let body = CheckedMemoryBlock::compile(
             ASID,

@@ -4,7 +4,8 @@
 
 use super::{commit, read_vector, vector_offset};
 use crate::aarch64::{
-    AddressMode, Operation, Register, non_temporal, register_offset::IndexExtend, simd::Operand,
+    AddressMode, Operation, Register, literal, non_temporal, register_offset::IndexExtend,
+    simd::Operand,
 };
 use crate::block::CheckedMemoryProfile;
 use crate::context::memory::{
@@ -45,6 +46,9 @@ const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
 
 #[derive(Clone, Copy)]
 enum Address {
+    Literal {
+        address: u64,
+    },
     Immediate {
         displacement: i32,
         mode: AddressMode,
@@ -62,7 +66,7 @@ struct Transfer {
     bytes: u8,
     vectors: [u8; 2],
     elements: u8,
-    base: Register,
+    base: Option<Register>,
     address: Address,
 }
 
@@ -81,7 +85,7 @@ impl Transfer {
                 bytes,
                 vectors: [vector, vector],
                 elements: 1,
-                base,
+                base: Some(base),
                 address: Address::Immediate { displacement, mode },
             },
             Operand::MemoryPair {
@@ -96,7 +100,7 @@ impl Transfer {
                 bytes,
                 vectors,
                 elements: PAIR_ELEMENTS,
-                base,
+                base: Some(base),
                 address: Address::Immediate { displacement, mode },
             },
             Operand::MemoryRegisterOffset(operand) => Self {
@@ -104,7 +108,7 @@ impl Transfer {
                 bytes: operand.bytes,
                 vectors: [operand.vector, operand.vector],
                 elements: 1,
-                base: operand.base,
+                base: Some(operand.base),
                 address: Address::Register {
                     index: operand.index,
                     extend: operand.extend,
@@ -112,6 +116,25 @@ impl Transfer {
                 },
             },
             _ => return None,
+        })
+    }
+
+    fn from_literal(operand: &literal::Operand) -> Option<Self> {
+        let literal::Transfer::Simd { destination, bytes } = operand.transfer else {
+            return None;
+        };
+        if !matches!(bytes, DWORD_BYTES | QWORD_BYTES | VECTOR_BYTES) {
+            return None;
+        }
+        Some(Self {
+            load: true,
+            bytes,
+            vectors: [destination, destination],
+            elements: 1,
+            base: None,
+            address: Address::Literal {
+                address: operand.address,
+            },
         })
     }
 
@@ -124,7 +147,7 @@ impl Transfer {
             bytes: operand.bytes,
             vectors,
             elements: PAIR_ELEMENTS,
-            base: operand.base,
+            base: Some(operand.base),
             address: Address::Immediate {
                 displacement: operand.displacement,
                 mode: AddressMode::Offset,
@@ -145,9 +168,10 @@ impl Transfer {
                 0
             }
             | if non_temporal { flags::NON_TEMPORAL } else { 0 }
-            | if self.writeback()
-                || self.base != Register::Sp
-                || matches!(self.address, Address::Register { .. })
+            | if !matches!(self.address, Address::Literal { .. })
+                && (self.writeback()
+                    || self.base != Some(Register::Sp)
+                    || matches!(self.address, Address::Register { .. }))
             {
                 flags::TAG_CHECKED
             } else {
@@ -161,9 +185,12 @@ impl Transfer {
 
     fn naturally_aligned(self) -> bool {
         match self.address {
+            Address::Literal { address } => {
+                address.is_multiple_of(u64::from(self.quantity_bytes()))
+            }
             Address::Immediate { displacement, mode } => {
                 crate::x86_64::memory_store::aligned_immediate(
-                    self.base,
+                    self.base.expect("register-based SIMD address"),
                     displacement,
                     mode,
                     self.quantity_bytes(),
@@ -171,7 +198,7 @@ impl Transfer {
             }
             Address::Register { index, shift, .. } => {
                 crate::x86_64::memory_store::aligned_register_offset(
-                    self.base,
+                    self.base.expect("register-based SIMD address"),
                     index,
                     shift,
                     self.quantity_bytes(),
@@ -196,6 +223,7 @@ impl CheckedOperand {
     ) -> Option<Self> {
         let (transfer, non_temporal) = match operation {
             Operation::Simd(operand) => (Transfer::from_operand(operand)?, false),
+            Operation::Literal(operand) => (Transfer::from_literal(operand)?, false),
             Operation::MemoryNonTemporal(operand)
                 if matches!(operand.data, non_temporal::Data::Vector(_)) =>
             {
@@ -203,8 +231,13 @@ impl CheckedOperand {
             }
             _ => return None,
         };
-        let valid_base = matches!(transfer.base, Register::X(index) if index < GPR_COUNT)
-            || transfer.base == Register::Sp;
+        let valid_base = match transfer.address {
+            Address::Literal { .. } => transfer.base.is_none(),
+            _ => {
+                matches!(transfer.base, Some(Register::X(index)) if index < GPR_COUNT)
+                    || transfer.base == Some(Register::Sp)
+            }
+        };
         if !valid_base
             || !matches!(
                 transfer.bytes,
@@ -273,11 +306,15 @@ fn transfer_requirements(
     let required_flags = transfer.descriptor(non_temporal);
     MemoryRequirements {
         required_pointer_arithmetic: None,
-        required_address_checks: profile.address_requirements(false),
+        required_address_checks: if matches!(transfer.address, Address::Literal { .. }) {
+            Default::default()
+        } else {
+            profile.address_requirements(false)
+        },
         required_flags,
         required_host_caps: if transfer.load
             && !(transfer.naturally_aligned()
-                && (transfer.base != Register::Sp
+                && (transfer.base != Some(Register::Sp)
                     || profile.sp_requirement() == SpAlignmentRequirement::Enabled))
             && matches!(
                 transfer.quantity_bytes(),
@@ -293,7 +330,7 @@ fn transfer_requirements(
             } else {
                 0
             },
-        required_sp_alignment: if transfer.base == Register::Sp {
+        required_sp_alignment: if transfer.base == Some(Register::Sp) {
             profile.sp_requirement()
         } else {
             SpAlignmentRequirement::Any
@@ -304,10 +341,11 @@ fn transfer_requirements(
 
 fn address(code: &mut Vec<u8>, transfer: Transfer, profile: CheckedMemoryProfile) {
     match transfer.address {
+        Address::Literal { address } => crate::x86_64::immediate(code, address),
         Address::Immediate { displacement, mode } => {
             service::address::immediate_with_checks(
                 code,
-                transfer.base,
+                transfer.base.expect("register-based SIMD address"),
                 displacement,
                 mode,
                 profile.address_checks(false),
@@ -324,7 +362,7 @@ fn address(code: &mut Vec<u8>, transfer: Transfer, profile: CheckedMemoryProfile
         } => {
             service::address::register_offset_with_checks(
                 code,
-                transfer.base,
+                transfer.base.expect("register-based SIMD address"),
                 index,
                 extend,
                 shift,
@@ -408,13 +446,14 @@ fn emit_transfer(
     non_temporal: bool,
     profile: CheckedMemoryProfile,
 ) {
-    debug_assert!(offset(transfer.base).is_some());
+    debug_assert!(transfer.base.is_none_or(|base| offset(base).is_some()));
     code.extend(SUB_RSP_IMM8);
     code.push(SCRATCH_BYTES);
     service::begin(code);
     let mut failed = Vec::new();
     if profile.sp_requirement() == SpAlignmentRequirement::Enabled
-        && let Some(failure) = service::address::check_sp(code, transfer.base, pc)
+        && let Some(base) = transfer.base
+        && let Some(failure) = service::address::check_sp(code, base, pc)
     {
         failed.push(failure);
     }
@@ -438,7 +477,10 @@ fn emit_transfer(
     if transfer.writeback() {
         code.extend(MOV_RAX_RSP_DISP8);
         code.push(WRITEBACK_OFFSET);
-        store(code, transfer.base);
+        store(
+            code,
+            transfer.base.expect("writeback requires a register base"),
+        );
     }
     code.extend(XOR_EAX_EAX);
     let cleanup = code.len();
@@ -495,6 +537,63 @@ mod tests {
                 displacement,
                 mode,
             }
+        }
+    }
+
+    #[test]
+    fn literal_adapter_preserves_absolute_source_address_and_rejects_invalid_shapes() {
+        for form in [0x1c00_0000u32, 0x5c00_0000, 0x9c00_0000] {
+            for destination in 0..VECTOR_REGISTER_COUNT {
+                for immediate in [-262144i32, -1, 0, 1, 262143] {
+                    for pc in [0, 0x1004, u64::MAX - 3] {
+                        let word =
+                            form | ((immediate as u32 & 0x7ffff) << 5) | u32::from(destination);
+                        let decoded = literal::decode(crate::GuestAddress(pc), word)
+                            .unwrap()
+                            .unwrap();
+                        let checked = CheckedOperand::from_operation(
+                            &Operation::Literal(decoded),
+                            CheckedMemoryProfile::SpAlignmentEnabled,
+                        )
+                        .unwrap();
+                        assert!(checked.transfer.base.is_none());
+                        assert!(!checked.transfer.writeback());
+                        assert!(
+                            matches!(checked.transfer.address, Address::Literal { address }
+                            if address == (i128::from(pc) + i128::from(immediate) * 4) as u64)
+                        );
+                        assert_eq!(checked.requirements().required_flags, flags::ASIMD);
+                        assert_eq!(
+                            checked.requirements().required_sp_alignment,
+                            SpAlignmentRequirement::Any
+                        );
+                    }
+                }
+            }
+        }
+        for (destination, bytes) in [(32, 4), (0, 1), (0, 2), (0, 32)] {
+            assert!(
+                CheckedOperand::from_operation(
+                    &Operation::Literal(literal::Operand {
+                        address: GUEST_BASE,
+                        transfer: literal::Transfer::Simd { destination, bytes },
+                    }),
+                    CheckedMemoryProfile::SpAlignmentDisabled,
+                )
+                .is_none()
+            );
+        }
+        for word in [0x1800_0000, 0x5800_0000, 0x9800_0000] {
+            let decoded = literal::decode(crate::GuestAddress(GUEST_PC), word)
+                .unwrap()
+                .unwrap();
+            assert!(
+                CheckedOperand::from_operation(
+                    &Operation::Literal(decoded),
+                    CheckedMemoryProfile::SpAlignmentDisabled
+                )
+                .is_none()
+            );
         }
     }
 
@@ -901,6 +1000,83 @@ mod tests {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn actual_literal_loads_zero_upper_bits_and_commit_only_after_the_complete_read() {
+        for bytes in [DWORD_BYTES, QWORD_BYTES, VECTOR_BYTES] {
+            for destination in 0..VECTOR_REGISTER_COUNT {
+                for residue in [0, 4, 8, 12] {
+                    let address = GUEST_BASE + 32 + residue;
+                    let operation = Operation::Literal(literal::Operand {
+                        address,
+                        transfer: literal::Transfer::Simd { destination, bytes },
+                    });
+                    let checked = CheckedOperand::from_operation(
+                        &operation,
+                        CheckedMemoryProfile::SpAlignmentEnabled,
+                    )
+                    .unwrap();
+                    let mut body = vec![];
+                    checked.emit_context(&mut body, GUEST_PC);
+                    let code = NativeCode::new(&body);
+                    for fail_part in [None, Some(0), Some(1)] {
+                        let mut actual = state();
+                        actual.sp |= 1; // Literal loads have no SP alignment check.
+                        let mut expected = actual.clone();
+                        let mut harness = Harness {
+                            ram: core::array::from_fn(|i| i as u8 ^ 0xa5),
+                            fail_part,
+                            requests: vec![],
+                        };
+                        let old_ram = harness.ram;
+                        let mut view = view(&mut harness);
+                        let result = code.run(&mut actual, &mut view);
+                        let total = usize::from(bytes);
+                        let parts = if bytes == VECTOR_BYTES {
+                            if address.is_multiple_of(8) { 2 } else { total }
+                        } else if (address as usize & 15) + total <= 16 {
+                            1
+                        } else {
+                            total
+                        };
+                        let fault = fail_part.is_some_and(|part| part < parts);
+                        let completed = if fault {
+                            fail_part.unwrap() * total / parts
+                        } else {
+                            total
+                        };
+                        let status = if fault {
+                            MemoryStatus::Permission
+                        } else {
+                            MemoryStatus::Success
+                        };
+                        assert_eq!(result, status as u32);
+                        assert_eq!(view.completed_bytes, completed as u64);
+                        assert_eq!(
+                            harness.requests,
+                            vec![(address, u32::from(bytes), flags::ASIMD, GUEST_PC)]
+                        );
+                        if !fault {
+                            let start = (address - GUEST_BASE) as usize;
+                            let mut loaded = [0; 16];
+                            loaded[..total].copy_from_slice(&old_ram[start..start + total]);
+                            expected.v[usize::from(destination)] = [
+                                u64::from_le_bytes(loaded[..8].try_into().unwrap()),
+                                u64::from_le_bytes(loaded[8..].try_into().unwrap()),
+                            ];
+                        } else {
+                            assert_eq!(
+                                (view.fault_kind, view.fault_address, view.fault_pc),
+                                (status as u32, address + completed as u64, GUEST_PC)
+                            );
+                        }
+                        assert_eq!(actual, expected);
+                        assert_eq!(harness.ram, old_ram);
                     }
                 }
             }
