@@ -5,6 +5,7 @@
 pub mod dma;
 pub mod i2c;
 pub mod irq;
+pub mod lpss;
 pub mod mmio;
 pub mod pci;
 pub mod smbus;
