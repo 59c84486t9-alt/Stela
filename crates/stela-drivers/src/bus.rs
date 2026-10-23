@@ -11,3 +11,4 @@ pub mod pci;
 pub mod smbus;
 pub mod thunderbolt;
 pub mod virtio;
+pub mod vmd;
