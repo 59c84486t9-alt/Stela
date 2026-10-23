@@ -883,6 +883,8 @@ pub enum RequirementKind {
     /// apply to a guest.
     VmState(&'static str),
     Native(&'static str),
+    /// Detailed refusal before an actual checked native frame was executed.
+    NativePreparation(String),
 }
 
 impl fmt::Display for Requirement {
@@ -940,6 +942,9 @@ impl fmt::Display for Requirement {
                 "entering an EL1&0 guest with nonzero Apple VM state in {register}"
             )?,
             RequirementKind::Native(detail) => write!(f, "native execution: {detail}")?,
+            RequirementKind::NativePreparation(detail) => {
+                write!(f, "native preparation: {detail}")?
+            }
         }
         if let Some(syndrome) = self.syndrome {
             write!(f, " esr={syndrome:#x}")?;

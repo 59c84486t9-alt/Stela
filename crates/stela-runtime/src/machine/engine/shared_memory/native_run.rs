@@ -1,5 +1,7 @@
 //! An actual borrowed architectural frame; no Cpu or Host crosses a core.
 mod access;
+mod preparation;
+use preparation::PreparationFailure;
 pub(super) mod source;
 use super::super::{NativeExit, publication};
 use super::*;
@@ -508,6 +510,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             &self.admit_table,
             bytes,
         )
+        .map_err(|failure| failure.status)
     }
 }
 
@@ -533,29 +536,35 @@ fn prepare<'a>(
     missing: &[crate::machine::system::Register],
     admit: &crate::machine::chip::AdmitTable,
     source_bytes: usize,
-) -> Result<NativeRun<'a>, MemoryStatus> {
+) -> Result<NativeRun<'a>, PreparationFailure> {
+    let location = (pe, cpu.pc, cpu.pstate.el);
+    let at = |stage, status| PreparationFailure::at(stage, status, location, None);
     if binding.pe != pe || cpu.monitor.is_some() {
-        return Err(MemoryStatus::Unsupported);
+        return Err(at("worker/frame ownership", MemoryStatus::Unsupported));
     }
     if !cpu.pc.is_multiple_of(4) {
-        return Err(MemoryStatus::Alignment);
+        return Err(at("source PC alignment", MemoryStatus::Alignment));
     }
-    let controls = Controls::capture(cpu, cpu_profile.name, missing)?;
+    let controls = Controls::capture(cpu, cpu_profile.name, missing)
+        .map_err(|status| at("control capture", status))?;
     let pc = cpu.pc;
     let memory = cpu
         .canonical_memory
         .as_ref()
-        .ok_or(MemoryStatus::Unsupported)?;
-    let (first, guarded) =
-        source::instruction(memory, &controls, pc).map_err(|failure| match failure {
+        .ok_or_else(|| at("canonical memory ownership", MemoryStatus::Unsupported))?;
+    let (first, guarded) = source::instruction(memory, &controls, pc).map_err(|failure| {
+        let status = match failure {
             source::FetchFailure::Fault(_) => MemoryStatus::Unsupported,
             source::FetchFailure::Refused(status) => status,
-        })?;
+        };
+        at("first instruction fetch", status).detail(alloc::format!("{failure:?}"))
+    })?;
+    let at = |stage, status| PreparationFailure::at(stage, status, location, Some(first));
     if cpu.pstate.btype != 0
         && guarded
         && !source::target_accepts(first, cpu.pstate.btype, cpu.regime_sctlr(), cpu.pstate.el)
     {
-        return Err(MemoryStatus::Unsupported);
+        return Err(at("branch target compatibility", MemoryStatus::Unsupported));
     }
     let asimd = controls.asimd;
     let btype = &mut cpu.pstate.btype;
@@ -565,9 +574,9 @@ fn prepare<'a>(
     let memory = cpu
         .canonical_memory
         .as_mut()
-        .ok_or(MemoryStatus::Unsupported)?;
+        .ok_or_else(|| at("canonical memory ownership", MemoryStatus::Unsupported))?;
     if memory.pe != pe {
-        return Err(MemoryStatus::Unsupported);
+        return Err(at("canonical PE ownership", MemoryStatus::Unsupported));
     }
     let profile = stela_compiler::block::BlockProfile::SystemModeSharedV1(controls.sp);
     let target = memory.ram.target();
@@ -609,14 +618,18 @@ fn prepare<'a>(
         // words after it cannot grant or revoke its instruction effects.
         let bytes = artifact.source.len();
         if bytes == 0 || !bytes.is_multiple_of(4) || bytes > super::super::window(pc) {
-            return Err(MemoryStatus::Domain);
+            return Err(at("cached source extent", MemoryStatus::Domain));
         }
         // The existing compiler block bound also bounds private revalidation
         // staging. Every hit still walks source permissions and copies actual
         // canonical bytes; only the per-round heap allocation disappears.
         let mut staging = [0; super::super::MAX_BLOCK_BYTES as usize];
-        let input = staging.get_mut(..bytes).ok_or(MemoryStatus::Domain)?;
-        memory.fetch(&controls, pc, input)?;
+        let input = staging
+            .get_mut(..bytes)
+            .ok_or_else(|| at("cached source staging", MemoryStatus::Domain))?;
+        memory
+            .fetch(&controls, pc, input)
+            .map_err(|status| at("cached executable source fetch", status))?;
         // The immutable artifact was admitted in full before construction.
         // Exact bytes and the fresh key above bind every pure decoder input:
         // both actual chips, withheld features and effective ASIMD permission.
@@ -626,80 +639,93 @@ fn prepare<'a>(
     } else {
         None
     };
-    let artifact = match artifact {
-        Some(artifact) => {
-            memory.artifacts.reused = memory.artifacts.reused.saturating_add(1);
-            artifact
-        }
-        None => {
-            let mut input = alloc::vec![0; source_bytes];
-            // Instruction walks use the same source controls, canonical descriptor
-            // owner and original physical bytes. No direct identity-frame shortcut.
-            memory.fetch(&controls, pc, &mut input)?;
-            // A denied later access check must not erase an already reached GPR
-            // prefix. End before it; the held scheduler checks that exact next word.
-            if let Some(boundary) = input
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .position(|raw| !admitted(u32::from_le_bytes(*raw)))
-            {
-                if boundary == 0 {
-                    return Err(MemoryStatus::Unsupported);
+    let artifact =
+        match artifact {
+            Some(artifact) => {
+                memory.artifacts.reused = memory.artifacts.reused.saturating_add(1);
+                artifact
+            }
+            None => {
+                let mut input = alloc::vec![0; source_bytes];
+                // Instruction walks use the same source controls, canonical descriptor
+                // owner and original physical bytes. No direct identity-frame shortcut.
+                memory
+                    .fetch(&controls, pc, &mut input)
+                    .map_err(|status| at("cold executable source fetch", status))?;
+                // A denied later access check must not erase an already reached GPR
+                // prefix. End before it; the held scheduler checks that exact next word.
+                if let Some(boundary) = input
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .position(|raw| !admitted(u32::from_le_bytes(*raw)))
+                {
+                    if boundary == 0 {
+                        return Err(at("instruction admission", MemoryStatus::Unsupported));
+                    }
+                    input.truncate(boundary * 4);
                 }
-                input.truncate(boundary * 4);
+                let plan = stela_compiler::block::CompilationPlan::new(
+                    &input,
+                    stela_compiler::GuestAddress(pc),
+                    profile,
+                    target,
+                )
+                .map_err(|error| {
+                    at("compilation planning", MemoryStatus::Unsupported).detail(error.0)
+                })?;
+                let bytes = plan.source_bytes();
+                input.truncate(bytes);
+                if !input
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|raw| admitted(u32::from_le_bytes(*raw)))
+                {
+                    return Err(at("compiled prefix admission", MemoryStatus::Unsupported));
+                }
+                let requirements = plan
+                    .memory_requirements()
+                    .ok_or_else(|| at("checked memory requirements", MemoryStatus::Unsupported))?;
+                let compiled = plan.compile().map_err(|error| {
+                    at("native emission", MemoryStatus::Unsupported).detail(error.0)
+                })?;
+                if !compiled.fault_recovery.is_empty() {
+                    return Err(at(
+                        "checked fault recovery contract",
+                        MemoryStatus::Unsupported,
+                    ));
+                }
+                let identity = Identity {
+                    pe,
+                    pc,
+                    source_sha256: crate::sha256(&input),
+                    native_sha256: crate::sha256(&compiled.native.x86_64_code),
+                    controls_sha256: key.controls_sha256.as_ref().into(),
+                    compiler_source_sha256: stela_compiler::SOURCE_SHA256,
+                    abi: profile.abi(),
+                    target,
+                    requirements,
+                };
+                let artifact =
+                    Arc::new(Artifact {
+                        key,
+                        identity: Arc::new(identity),
+                        code: Arc::new(compiled.native.x86_64_code),
+                        source_map: compiled.native.source_map,
+                        branch_type: source::branch_type(
+                            u32::from_le_bytes(input.last_chunk().copied().ok_or_else(|| {
+                                at("compiled source extent", MemoryStatus::Domain)
+                            })?),
+                            guarded,
+                        ),
+                        source: input,
+                        requirements,
+                    });
+                memory.artifacts.insert(Arc::clone(&artifact));
+                artifact
             }
-            let plan = stela_compiler::block::CompilationPlan::new(
-                &input,
-                stela_compiler::GuestAddress(pc),
-                profile,
-                target,
-            )
-            .map_err(|_| MemoryStatus::Unsupported)?;
-            let bytes = plan.source_bytes();
-            input.truncate(bytes);
-            if !input
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .all(|raw| admitted(u32::from_le_bytes(*raw)))
-            {
-                return Err(MemoryStatus::Unsupported);
-            }
-            let requirements = plan
-                .memory_requirements()
-                .ok_or(MemoryStatus::Unsupported)?;
-            let compiled = plan.compile().map_err(|_| MemoryStatus::Unsupported)?;
-            if !compiled.fault_recovery.is_empty() {
-                return Err(MemoryStatus::Unsupported);
-            }
-            let identity = Identity {
-                pe,
-                pc,
-                source_sha256: crate::sha256(&input),
-                native_sha256: crate::sha256(&compiled.native.x86_64_code),
-                controls_sha256: key.controls_sha256.as_ref().into(),
-                compiler_source_sha256: stela_compiler::SOURCE_SHA256,
-                abi: profile.abi(),
-                target,
-                requirements,
-            };
-            let artifact = Arc::new(Artifact {
-                key,
-                identity: Arc::new(identity),
-                code: Arc::new(compiled.native.x86_64_code),
-                source_map: compiled.native.source_map,
-                branch_type: source::branch_type(
-                    u32::from_le_bytes(input.last_chunk().copied().ok_or(MemoryStatus::Domain)?),
-                    guarded,
-                ),
-                source: input,
-                requirements,
-            });
-            memory.artifacts.insert(Arc::clone(&artifact));
-            artifact
-        }
-    };
+        };
     memory.artifacts.remember_controls(&controls);
     memory.memory.policy_mut().controls = controls;
     memory.memory.policy_mut().failure = None;
@@ -813,15 +839,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return Err(MemoryStatus::Unsupported);
         }
         self.native_cohort(bindings, false)
+            .map_err(|failure| failure.status)
     }
 
     pub(super) fn native_cohort<'a>(
         &'a mut self,
         bindings: &[publication::WorkerBinding],
         runnable_only: bool,
-    ) -> Result<Cohort<'a, H>, MemoryStatus> {
+    ) -> Result<Cohort<'a, H>, PreparationFailure> {
         if bindings.len() != self.peers.len() || (!runnable_only && self.waiting.is_some()) {
-            return Err(MemoryStatus::Unsupported);
+            return Err(MemoryStatus::Unsupported.into());
         }
         let mut services = Vec::new();
         for (pe, peer) in self.peers.iter().enumerate() {
@@ -833,14 +860,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     parked.cpu()
                 }
                 super::super::processors::Peer::Off => continue,
-                _ => return Err(MemoryStatus::Unsupported),
+                _ => return Err(MemoryStatus::Unsupported.into()),
             };
             let memory = cpu
                 .canonical_memory
                 .as_ref()
                 .ok_or(MemoryStatus::Unsupported)?;
             if memory.pe != pe || !Arc::ptr_eq(&memory.machine, &self.native_memory_identity) {
-                return Err(MemoryStatus::Unsupported);
+                return Err(MemoryStatus::Unsupported.into());
             }
             services.push(memory);
         }
@@ -848,7 +875,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if services.iter().any(|candidate| {
             !Arc::ptr_eq(&candidate.ram, &first.ram) || !candidate.event.same_domain(&first.event)
         }) {
-            return Err(MemoryStatus::Unsupported);
+            return Err(MemoryStatus::Unsupported.into());
         }
         drop(services);
         let mut current = Some(&mut self.cpu);
@@ -880,7 +907,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 super::super::processors::Peer::Parked(parked) if parked.native_ready() => {
                     parked.cpu_mut()
                 }
-                _ => return Err(MemoryStatus::Unsupported),
+                _ => return Err(MemoryStatus::Unsupported.into()),
             };
             let bytes = source_window(cpu.pc, &self.breakpoints, &self.traces);
             frames.push(prepare(
@@ -1033,11 +1060,78 @@ mod artifact_tests {
             &machine.profile_missing,
             &machine.admit_table,
             bytes,
-        )?;
+        )
+        .map_err(|failure| failure.status)?;
         Ok(Arc::clone(&run.artifact))
     }
     fn capture_controls(machine: &Machine<FakeHost, NoDevices>) -> Result<Controls, MemoryStatus> {
         Controls::capture(&machine.cpu, machine.profile.name, &machine.profile_missing)
+    }
+
+    fn prepare_failure(
+        machine: &mut Machine<FakeHost, NoDevices>,
+        binding: publication::WorkerBinding,
+    ) -> PreparationFailure {
+        let bytes = source_window(machine.cpu.pc, &machine.breakpoints, &machine.traces);
+        match prepare(
+            &mut machine.cpu,
+            binding,
+            machine.current,
+            &machine.profile,
+            &machine.profile_missing,
+            &machine.admit_table,
+            bytes,
+        ) {
+            Ok(_) => panic!("preparation unexpectedly succeeded"),
+            Err(failure) => failure,
+        }
+    }
+
+    #[test]
+    fn preparation_refusal_preserves_source_and_owner_reason_without_execution() {
+        use crate::machine::engine::{RequirementKind, Stop};
+        let (mut machine, ram) = fixture();
+        let state = machine.cpu.state.clone();
+        let retired = machine.cpu.retired;
+        let el = machine.cpu.pstate.el;
+        let failure = prepare_failure(
+            &mut machine,
+            publication::WorkerBinding { pe: 1, ..BINDING },
+        );
+        assert_eq!(failure.status, MemoryStatus::Unsupported);
+        let Stop::Unsupported(requirement) = failure.into_stop(0, 3) else {
+            panic!()
+        };
+        assert_eq!((requirement.pc, requirement.el), (PC, el));
+        let RequirementKind::NativePreparation(detail) = requirement.kind else {
+            panic!()
+        };
+        assert!(detail.contains("worker/frame ownership"));
+        assert!(detail.contains("PE=0"));
+        assert!(!detail.contains("first_word="));
+
+        // A genuine failed executable walk must retain the original MMU cause.
+        unsafe { ram.publish_physical(LEAF, &0u64.to_le_bytes()) }.unwrap();
+        let failure = prepare_failure(&mut machine, BINDING);
+        let rendered = match failure.into_stop(0, 3) {
+            Stop::Unsupported(requirement) => alloc::format!("{requirement}"),
+            _ => panic!(),
+        };
+        assert!(rendered.contains("first instruction fetch"));
+        assert!(rendered.contains("Fault("));
+        assert_eq!(machine.cpu.state, state);
+        assert_eq!(machine.cpu.pc, PC);
+        assert_eq!(machine.cpu.retired, retired);
+        assert_eq!(
+            machine
+                .cpu
+                .canonical_memory
+                .as_ref()
+                .unwrap()
+                .native_artifact_stats()
+                .compiled,
+            0
+        );
     }
 
     #[test]

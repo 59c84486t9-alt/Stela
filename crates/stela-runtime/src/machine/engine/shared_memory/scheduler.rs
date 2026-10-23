@@ -279,12 +279,11 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         // Preparation can borrow canonical state while physical owners remain
         // held; close only the software Host sessions before constructing loans.
         self.close_native_services();
-        let preparation_refused = self.unsupported(RequirementKind::Native(
-            "checked native source/control preparation refused before execution",
-        ));
+        let preparation_pc = self.cpu.pc;
+        let preparation_el = self.cpu.pstate.el;
         let cohort = self
             .native_cohort(&bindings, true)
-            .map_err(|_| preparation_refused)?;
+            .map_err(|failure| failure.into_stop(preparation_pc, preparation_el))?;
         let expected: Vec<_> = cohort
             .frames
             .iter()
