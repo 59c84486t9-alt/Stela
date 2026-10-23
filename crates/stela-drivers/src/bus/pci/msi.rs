@@ -15,6 +15,9 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+mod retirement;
+pub use retirement::DisabledMsiConfig;
+
 const COMMAND: u16 = 4;
 const STATUS: u16 = 6;
 const INTX_DISABLE: u16 = 1 << 10;
@@ -57,6 +60,8 @@ pub enum MsiError {
     FailedRead { offset: u16 },
     Readback { offset: u16 },
     NotProgrammed,
+    TerminalRetirement,
+    StopAlreadyAttempted,
     Released,
 }
 
@@ -274,13 +279,15 @@ fn discover<C: MsiConfigSpace>(f: &mut Function<C>) -> Result<(Layout, u16), Msi
 }
 
 /// Owns the original Function and actual retained PCI/config/root/reset epoch.
-/// There is no raw config escape or second enumeration. No method changes BM,
+/// There is no normal config escape or second enumeration. Terminal retirement
+/// separately permits one unsafe scoped device-stop operation. No MSI method changes BM,
 /// acknowledges a device cause, drains callbacks, or infers DMA coherency.
 /// Operations and final release require process/deferred context, never an ISR.
 pub struct MsiConfig<C: MsiConfigSpace = EcamConfig> {
     owner: Option<Released<C>>,
     layout: Layout,
     message: Option<MsiMessage>,
+    terminal: bool,
 }
 impl<C: MsiConfigSpace> MsiConfig<C> {
     /// # Safety
@@ -302,6 +309,7 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
                 owner: Some((function, retained)),
                 layout,
                 message: None,
+                terminal: false,
             }),
             Ok(_) => Err((MsiError::ActiveMsi, (function, retained))),
             Err(error) => Err((error, (function, retained))),
@@ -309,6 +317,32 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     }
     pub fn address(&self) -> Result<Address, MsiError> {
         Ok(self.owner.as_ref().ok_or(MsiError::Released)?.0.address)
+    }
+    fn normal(&self) -> Result<(), MsiError> {
+        if self.terminal {
+            Err(MsiError::TerminalRetirement)
+        } else if self.owner.is_none() {
+            Err(MsiError::Released)
+        } else {
+            Ok(())
+        }
+    }
+    /// Irreversibly disable MSI and fallback INTx before a device stop that
+    /// needs the original configuration owner. This establishes no DMA, posted
+    /// write, IRQ or worker completion. The registry retains its route/callbacks
+    /// while the terminal owner performs the real source stop.
+    ///
+    /// Authorization is revoked before even the first configuration access.
+    /// Failure retains the actual owner here with no program/unmask/retry path.
+    /// Ordinary admission-time mask remains reversible and does not use this.
+    pub fn begin_device_retirement(&mut self) -> Result<DisabledMsiConfig<C>, MsiError> {
+        self.normal()?;
+        self.terminal = true;
+        self.message = None;
+        self.mask_inner()?;
+        Ok(DisabledMsiConfig::new(
+            self.owner.take().ok_or(MsiError::Released)?,
+        ))
     }
     fn checked(&mut self) -> Result<u16, MsiError> {
         let f = &mut self.owner.as_mut().ok_or(MsiError::Released)?.0;
@@ -340,6 +374,7 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     /// Mask and acknowledge MSI plus fallback INTx. This does not stop a device
     /// or drain already posted writes, callbacks, timers or deferred work.
     pub fn mask(&mut self) -> Result<(), MsiError> {
+        self.normal()?;
         let result = self.mask_inner();
         if result.is_err() {
             self.message = None;
@@ -359,6 +394,7 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     /// every callback/resource remains retained. Reprogramming requires real
     /// source/callback/posted-write drain; masking alone is insufficient.
     pub unsafe fn program(&mut self, message: MsiMessage) -> Result<(), MsiError> {
+        self.normal()?;
         if message.address & 3 != 0
             || message.data > u32::from(u16::MAX)
             || (!self.layout.wide() && message.address > u64::from(u32::MAX))
@@ -385,6 +421,7 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     /// the requester and all IRQ/DMA/work/reset owners remain retained. BM and
     /// vendor source enable are separately controlled by that owner.
     pub unsafe fn unmask(&mut self) -> Result<(), MsiError> {
+        self.normal()?;
         let message = self.message.ok_or(MsiError::NotProgrammed)?;
         self.mask()?;
         let layout = self.layout;
@@ -457,6 +494,8 @@ mod tests {
         fail_read: Option<(u16, u8)>,
         block_write: Option<(u16, u8)>,
         fail_enable_ack: bool,
+        fault_at_access: Option<(usize, bool)>,
+        transport_dead: bool,
     }
     impl Model {
         fn get(&self, offset: u16, width: u8) -> u32 {
@@ -479,14 +518,25 @@ mod tests {
         fn read(&self, offset: u16, width: u8) -> u32 {
             let mut m = self.model.lock().unwrap();
             m.events.push(Event::Read(offset, width));
-            if m.fail_read == Some((offset, width)) {
-                return if width == 2 {
-                    u32::from(u16::MAX)
-                } else {
-                    u32::MAX
-                };
+            let fault = m
+                .fault_at_access
+                .filter(|&(access, _)| access == m.events.len());
+            let failed = m.transport_dead
+                || m.fail_read == Some((offset, width))
+                || fault == Some((m.events.len(), false));
+            let value = if failed {
+                match width {
+                    1 => 0xff,
+                    2 => 0xffff,
+                    _ => u32::MAX,
+                }
+            } else {
+                m.get(offset, width)
+            };
+            if fault.is_some() {
+                m.transport_dead = true;
             }
-            m.get(offset, width)
+            value
         }
         fn write(&mut self, offset: u16, width: u8, value: u32) {
             assert!(
@@ -495,11 +545,20 @@ mod tests {
             );
             let mut m = self.model.lock().unwrap();
             m.events.push(Event::Write(offset, width, value));
-            if m.block_write != Some((offset, width)) {
+            let fault = m
+                .fault_at_access
+                .filter(|&(access, _)| access == m.events.len());
+            if !m.transport_dead
+                && m.block_write != Some((offset, width))
+                && fault != Some((m.events.len(), false))
+            {
                 m.put(offset, width, value);
                 if m.fail_enable_ack && offset == 0x52 && value & 1 != 0 {
                     m.fail_read = Some((0x52, 2));
                 }
+            }
+            if fault.is_some() {
+                m.transport_dead = true;
             }
         }
     }
@@ -516,7 +575,7 @@ mod tests {
             self.read(offset, 2) as u16
         }
         fn read8(&self, offset: u16) -> u8 {
-            self.model.lock().unwrap().get(offset, 1) as u8
+            self.read(offset, 1) as u8
         }
         fn write32(&mut self, offset: u16, value: u32) {
             self.write(offset, 4, value);
@@ -547,6 +606,8 @@ mod tests {
             fail_read: None,
             block_write: None,
             fail_enable_ack: false,
+            fault_at_access: None,
+            transport_dead: false,
         };
         model.put(0, 4, 0x1234_8086);
         model.put(COMMAND, 2, 0x107); // BM, IO, memory and unrelated SERR bit.
@@ -605,6 +666,255 @@ mod tests {
         address: 0xfee0_1000,
         data: 0x51,
     };
+
+    fn assert_terminal(helper: &mut MsiConfig<Config>, model: &Arc<Mutex<Model>>) {
+        let before = model.lock().unwrap().events.len();
+        assert_eq!(helper.mask(), Err(MsiError::TerminalRetirement));
+        assert_eq!(helper.disable(), Err(MsiError::TerminalRetirement));
+        // SAFETY: isolated qualified model route; terminal calls must fail
+        // before touching hardware regardless of the old authorization.
+        assert_eq!(
+            unsafe { helper.program(MESSAGE) },
+            Err(MsiError::TerminalRetirement)
+        );
+        assert_eq!(
+            unsafe { helper.unmask() },
+            Err(MsiError::TerminalRetirement)
+        );
+        assert!(matches!(
+            helper.begin_device_retirement(),
+            Err(MsiError::TerminalRetirement)
+        ));
+        assert!(matches!(
+            unsafe { helper.release() },
+            Err(MsiError::TerminalRetirement)
+        ));
+        assert_eq!(model.lock().unwrap().events.len(), before);
+    }
+    #[test]
+    fn terminal_stop_preserves_original_owners_and_releases_without_powered_config_access() {
+        for wide in [false, true] {
+            for mask in [false, true] {
+                let f = fixture(wide, mask);
+                let configs = f.config_drops.clone();
+                let roots = f.root_drops.clone();
+                let (mut helper, model) = attach(f);
+                // SAFETY: isolated qualified message/source/callback model.
+                unsafe { helper.program(MESSAGE) }.unwrap();
+                unsafe { helper.unmask() }.unwrap();
+                // Ordinary admission masking remains reversible.
+                helper.mask().unwrap();
+                unsafe { helper.unmask() }.unwrap();
+                let mut terminal = helper.begin_device_retirement().unwrap();
+                assert_terminal(&mut helper, &model);
+                assert_eq!(terminal.address().unwrap().device, 2);
+                {
+                    let m = model.lock().unwrap();
+                    assert_eq!(m.get(0x52, 2) & u32::from(ENABLE), 0);
+                    assert_ne!(m.get(COMMAND, 2) & u32::from(INTX_DISABLE), 0);
+                    assert_eq!(m.get(STATUS, 2), 0xa510);
+                }
+                // SAFETY: synchronous actual config model, no device/IRQ users;
+                // this is the single terminal stop, with no BM/MSI re-enable.
+                let original = unsafe {
+                    terminal.with_device_stop(|config| {
+                        let command = config.read16(COMMAND);
+                        config.write16(COMMAND, command & !4);
+                        command
+                    })
+                }
+                .unwrap();
+                assert_ne!(original & 4, 0);
+                assert_eq!(model.lock().unwrap().get(COMMAND, 2) & 4, 0);
+                // The original config transport can now be genuinely inaccessible.
+                model.lock().unwrap().transport_dead = true;
+                let before = model.lock().unwrap().events.len();
+                // SAFETY: isolated fixture has no DMA/posted/IRQ/deferred users;
+                // their actual empty completion is independent of BM-clear.
+                let owners = unsafe { terminal.release_after_drain() }.unwrap();
+                assert_eq!(model.lock().unwrap().events.len(), before);
+                drop(owners);
+                assert_eq!(configs.load(Ordering::Relaxed), 1);
+                assert_eq!(roots.load(Ordering::Relaxed), 1);
+                assert_eq!(terminal.address(), Err(MsiError::Released));
+                assert!(matches!(
+                    unsafe { terminal.release_after_drain() },
+                    Err(MsiError::Released)
+                ));
+            }
+        }
+    }
+    #[test]
+    fn every_before_after_disable_access_fault_is_terminal_and_retains_actual_epoch() {
+        for wide in [false, true] {
+            for mask in [false, true] {
+                let (mut baseline, model) = attach(fixture(wide, mask));
+                unsafe { baseline.program(MESSAGE) }.unwrap();
+                unsafe { baseline.unmask() }.unwrap();
+                model.lock().unwrap().events.clear();
+                let terminal = baseline.begin_device_retirement().unwrap();
+                let count = model.lock().unwrap().events.len();
+                drop(terminal); // live terminal abandonment retains both real guards.
+                for access in 1..=count {
+                    for after in [false, true] {
+                        let f = fixture(wide, mask);
+                        let configs = f.config_drops.clone();
+                        let roots = f.root_drops.clone();
+                        let (mut helper, model) = attach(f);
+                        unsafe { helper.program(MESSAGE) }.unwrap();
+                        unsafe { helper.unmask() }.unwrap();
+                        {
+                            let mut m = model.lock().unwrap();
+                            m.events.clear();
+                            m.fault_at_access = Some((access, after));
+                        }
+                        let result = helper.begin_device_retirement();
+                        assert!(model.lock().unwrap().transport_dead);
+                        assert_terminal(&mut helper, &model);
+                        // A successful final ACK followed by loss may transfer
+                        // the original owner, but cannot create a stop proof.
+                        drop(result);
+                        drop(helper);
+                        assert_eq!(
+                            configs.load(Ordering::Relaxed),
+                            0,
+                            "config freed access={access},after={after}"
+                        );
+                        assert_eq!(
+                            roots.load(Ordering::Relaxed),
+                            0,
+                            "root freed access={access},after={after}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn unwinding_after_a_real_stop_effect_cannot_replay_or_release_the_original_owner() {
+        let f = fixture(true, true);
+        let configs = f.config_drops.clone();
+        let roots = f.root_drops.clone();
+        let (mut helper, model) = attach(f);
+        let mut terminal = helper.begin_device_retirement().unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // SAFETY: isolated actual config model, one terminal stop with a
+            // deliberate post-effect unwind; no configuration escape/re-enable.
+            unsafe {
+                terminal.with_device_stop::<()>(|config| {
+                    config.write16(COMMAND, INTX_DISABLE);
+                    panic!("modeled caller unwind after actual stop effect");
+                })
+            }
+        }));
+        assert!(result.is_err());
+        assert_eq!(
+            model.lock().unwrap().get(COMMAND, 2),
+            u32::from(INTX_DISABLE)
+        );
+        let before = model.lock().unwrap().events.len();
+        assert_eq!(
+            unsafe { terminal.with_device_stop::<()>(|_| panic!("replay after unwind")) },
+            Err(MsiError::StopAlreadyAttempted)
+        );
+        assert_eq!(model.lock().unwrap().events.len(), before);
+        drop(terminal);
+        drop(helper);
+        assert_eq!(configs.load(Ordering::Relaxed), 0);
+        assert_eq!(roots.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn concrete_owned_config_epoch_survives_terminal_transfer_and_uncertain_abandonment() {
+        use crate::bus::pci::owned::tests::fixture as owned_fixture;
+        for abandon in [false, true] {
+            let address = Address {
+                segment: 7,
+                bus: 3,
+                device: 4,
+                function: 1,
+            };
+            let (mut config, counters) = owned_fixture(address);
+            config.write32(0, 0x1234_8086);
+            config.write16(COMMAND, 0x107);
+            config.write16(STATUS, CAP_LIST);
+            config.write8(0x34, 0x50);
+            config.write16(0x50, u16::from(MSI));
+            config.write16(0x52, WIDE | MASK_CAPABLE);
+            let function = Function::new(address, config).unwrap();
+            let root_drops = Arc::new(AtomicU64::new(0));
+            let root: RetainedOwner = Arc::new(Root(root_drops.clone()));
+            // SAFETY: original isolated registry-owned RAM config epoch, no
+            // device, IRQ delivery, worker or production qualification exists.
+            let mut helper = match unsafe { MsiConfig::new(function, root) } {
+                Ok(helper) => helper,
+                Err((error, _)) => panic!("valid actual owned transport: {error:?}"),
+            };
+            let mut terminal = helper.begin_device_retirement().unwrap();
+            assert_eq!(terminal.address(), Ok(address));
+            // SAFETY: single synchronous stop of this isolated actual owner.
+            let stopped = unsafe {
+                terminal.with_device_stop(|config| {
+                    let command = config.read16(COMMAND);
+                    config.write16(COMMAND, command & !4);
+                    config.read16(COMMAND) & 4 == 0
+                })
+            }
+            .unwrap();
+            assert!(stopped);
+            assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+            assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
+            if abandon {
+                drop(terminal);
+                drop(helper);
+                assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+                assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
+                assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 0);
+                assert_eq!(root_drops.load(Ordering::Relaxed), 0);
+            } else {
+                // SAFETY: the isolated real resource has no async users; empty
+                // device/IRQ completion is known independently of config bits.
+                let (function, root) = unsafe { terminal.release_after_drain() }.unwrap();
+                let mut mapping = function.into_config().into_mapping();
+                // SAFETY: exact original mapping, all synchronous users ended.
+                unsafe { mapping.retire() }.unwrap();
+                drop(root);
+                assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
+                assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 1);
+                assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 1);
+                assert_eq!(root_drops.load(Ordering::Relaxed), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn an_uncertain_terminal_device_stop_cannot_retry_or_release_actual_resources_on_drop() {
+        let f = fixture(true, true);
+        let configs = f.config_drops.clone();
+        let roots = f.root_drops.clone();
+        let (mut helper, model) = attach(f);
+        let mut terminal = helper.begin_device_retirement().unwrap();
+        // SAFETY: one actual isolated model stop; its precise failure remains
+        // caller-visible, and supplies no quiescence or release authorization.
+        let original: Result<(), u32> = unsafe {
+            terminal.with_device_stop(|config| {
+                config.write16(COMMAND, INTX_DISABLE);
+                Err(0x4377_00ff)
+            })
+        }
+        .unwrap();
+        assert_eq!(original, Err(0x4377_00ff));
+        let before = model.lock().unwrap().events.len();
+        assert_eq!(
+            unsafe { terminal.with_device_stop(|_| panic!("reset replay")) },
+            Err::<(), _>(MsiError::StopAlreadyAttempted)
+        );
+        assert_eq!(model.lock().unwrap().events.len(), before);
+        drop(terminal);
+        drop(helper);
+        assert_eq!(configs.load(Ordering::Relaxed), 0);
+        assert_eq!(roots.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn real_layouts_program_while_disabled_with_narrow_writes_and_preserved_bits() {
