@@ -98,6 +98,122 @@ fn fixture(
     (host, devices, hardware, state, dma)
 }
 
+/// Retained bare-slot consumer shaped like the legacy HID/CDC/storage owners.
+/// Configuration and initial I/O use the actual native command/TRB model.
+struct RawConsumer {
+    controller: Shared,
+    slot: u8,
+    endpoint: Endpoint,
+    buffer: DmaBuffer,
+    pending: u64,
+    output: u64,
+    ring: u64,
+}
+impl RawConsumer {
+    fn retain(host: &Host, device: &Device, dma: &mut dyn DmaAllocator) -> Self {
+        let configuration = &device.configurations[0];
+        let endpoints = interfaces(configuration)[0].endpoints.clone();
+        let endpoint = *endpoints.iter().find(|endpoint| endpoint.is_in()).unwrap();
+        let buffer = dma.allocate(64, 64).unwrap();
+        let mut c = host.controller.borrow_mut();
+        c.set_configuration(device.slot, configuration[5]).unwrap();
+        c.configure(device.slot, &endpoints, None, dma).unwrap();
+        let pending = c
+            .submit(device.slot, endpoint.dci(), buffer.physical(), buffer.len())
+            .unwrap();
+        let state = c.slot(device.slot).unwrap();
+        Self {
+            controller: host.controller.clone(),
+            slot: device.slot,
+            endpoint,
+            buffer,
+            pending,
+            output: state._output.physical(),
+            ring: state.endpoints[usize::from(endpoint.dci())]
+                .as_ref()
+                .unwrap()
+                .ring
+                .buffer
+                .physical(),
+        }
+    }
+
+    fn submit(&mut self) -> Result<u64, BlockError> {
+        self.controller.borrow_mut().submit(
+            self.slot,
+            self.endpoint.dci(),
+            self.buffer.physical(),
+            self.buffer.len(),
+        )
+    }
+
+    fn assert_fenced(&mut self, hardware: &Rc<RefCell<Hardware>>) {
+        let before = (hardware.borrow().mmio_reads, hardware.borrow().mmio_writes);
+        let (commands, input, control, output, ring, count, poisoned) = {
+            let c = self.controller.borrow();
+            let state = c.slots[usize::from(self.slot)].as_ref().unwrap();
+            let transfer = state.endpoints[usize::from(self.endpoint.dci())]
+                .as_ref()
+                .unwrap();
+            // Quarantine is not a claim that hardware stopped or freed the slot.
+            assert_eq!(
+                c.slot_ownership[usize::from(self.slot)],
+                reset::Ownership::Enabled
+            );
+            assert_eq!(state._output.physical(), self.output);
+            assert_eq!(transfer.ring.buffer.physical(), self.ring);
+            (
+                c.commands.buffer.bytes().to_vec(),
+                state.input.bytes().to_vec(),
+                state.control.bytes().to_vec(),
+                state._output.bytes().to_vec(),
+                transfer.ring.buffer.bytes().to_vec(),
+                transfer.in_flight,
+                transfer.poisoned,
+            )
+        };
+        let payload = self.buffer.bytes().to_vec();
+        // Exercise the retained legacy owner itself, not only SlotId access.
+        assert!(self.submit().is_err());
+        let mut c = self.controller.borrow_mut();
+        assert!(c.endpoint_ready(self.slot, self.endpoint.dci()).is_err());
+        assert!(matches!(
+            c.completed(
+                self.slot,
+                self.endpoint.dci(),
+                self.pending,
+                self.buffer.len()
+            ),
+            Some(Err(_))
+        ));
+        assert!(
+            c.control(self.slot, setup(0x80, GET_STATUS, 0, 0, 2), &[])
+                .is_err()
+        );
+        assert!(c.current_configuration(self.slot).is_err());
+        assert!(c.connected(self.slot).is_err());
+        assert!(c.cancel(self.slot, self.endpoint.dci()).is_err());
+        assert!(c.set_configuration(self.slot, 1).is_err());
+        let state = c.slots[usize::from(self.slot)].as_ref().unwrap();
+        assert!(state.retiring && state.suspended);
+        let transfer = state.endpoints[usize::from(self.endpoint.dci())]
+            .as_ref()
+            .unwrap();
+        assert_eq!(c.commands.buffer.bytes(), commands);
+        assert_eq!(state.input.bytes(), input);
+        assert_eq!(state.control.bytes(), control);
+        assert_eq!(state._output.bytes(), output);
+        assert_eq!(transfer.ring.buffer.bytes(), ring);
+        assert_eq!(transfer.in_flight, count);
+        assert_eq!(transfer.poisoned, poisoned);
+        assert_eq!(self.buffer.bytes(), payload);
+        assert_eq!(
+            (hardware.borrow().mmio_reads, hardware.borrow().mmio_writes),
+            before
+        );
+    }
+}
+
 #[test]
 fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
@@ -145,11 +261,17 @@ fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() 
 fn unacknowledged_root_suspend_never_saves_or_revives_consumers() {
     let mut memory = vec![0u64; 512 * 1024];
     let (mut host, old, hardware, state, mut dma) = fixture(&mut memory, HIGH_SPEED, false);
+    let mut consumer = RawConsumer::retain(&host, &old[0], &mut dma);
     state.borrow_mut().refuse_suspend = true;
     let removed = host.suspend();
     assert_eq!(removed.removed.len(), old.len());
     assert!(!removed.added.failures.is_empty());
     assert_eq!(state.borrow().save, 0);
+    assert!(matches!(
+        host.controller.borrow().hardware,
+        hardware::State::Running
+    ));
+    consumer.assert_fenced(&hardware);
     let before = (hardware.borrow().mmio_reads, hardware.borrow().mmio_writes);
     for device in old {
         assert!(host.controller.borrow_mut().device(device.id).is_err());
@@ -161,4 +283,131 @@ fn unacknowledged_root_suspend_never_saves_or_revives_consumers() {
     let refused = host.resume(&mut dma, &crate::firmware::HandoffProvider::new(None));
     assert!(!refused.added.failures.is_empty());
     assert_eq!(state.borrow().restore, 0);
+}
+
+#[test]
+fn post_fence_suspend_errors_quarantine_raw_consumers_without_fake_retirement() {
+    for failure in 0..4 {
+        let mut memory = vec![0u64; 512 * 1024];
+        let (mut host, devices, hardware, state, mut dma) = fixture(&mut memory, HIGH_SPEED, false);
+        let mut consumer = RawConsumer::retain(&host, &devices[0], &mut dma);
+        let status = setup(0x80, GET_STATUS, 0, 0, 2);
+        match failure {
+            0 => hardware.borrow_mut().effect_fail = Some((consumer.slot, status)),
+            1 => hardware.borrow_mut().effect_silence = Some((consumer.slot, status)),
+            2 => hardware.borrow_mut().fail = Some((STOP_ENDPOINT, consumer.slot)),
+            3 => hardware.borrow_mut().silent = Some((STOP_ENDPOINT, consumer.slot)),
+            _ => unreachable!(),
+        }
+        let before = hardware.borrow().commands.len();
+        let removed = host.suspend();
+        assert_eq!(removed.removed.len(), devices.len());
+        assert!(!removed.added.failures.is_empty());
+        assert_eq!(state.borrow().save, 0);
+        assert!(matches!(host.sleep, Sleep::Failed));
+        assert!(matches!(
+            host.controller.borrow().hardware,
+            hardware::State::Running
+        ));
+        // These failures precede bulk cancellation. Keep its actual TD and
+        // original buffers even when EP0/command ownership is unresolved.
+        assert_eq!(
+            host.controller.borrow().slots[usize::from(consumer.slot)]
+                .as_ref()
+                .unwrap()
+                .endpoints[usize::from(consumer.endpoint.dci())]
+            .as_ref()
+            .unwrap()
+            .in_flight,
+            1
+        );
+        assert!(
+            hardware.borrow().commands[before..]
+                .iter()
+                .all(|(kind, _)| *kind != reset::DISABLE_SLOT)
+        );
+        if failure == 3 {
+            assert!(host.controller.borrow().command_poisoned);
+        }
+        consumer.assert_fenced(&hardware);
+    }
+}
+
+#[test]
+fn failed_external_port_suspend_quarantines_both_parent_and_raw_leaf() {
+    let mut memory = vec![0u64; 1024 * 1024];
+    let (mut host, devices, hardware, state, mut dma) = fixture(&mut memory, HIGH_SPEED, true);
+    let leaf = devices
+        .iter()
+        .find(|device| device.descriptor[4] != HUB_CLASS)
+        .unwrap();
+    let parent = devices
+        .iter()
+        .find(|device| device.descriptor[4] == HUB_CLASS)
+        .unwrap();
+    let mut consumer = RawConsumer::retain(&host, leaf, &mut dma);
+    let suspend = setup(0x23, SET_FEATURE, 2, 1, 0);
+    hardware.borrow_mut().effect_fail = Some((parent.slot, suspend));
+    let removed = host.suspend();
+    assert_eq!(removed.removed.len(), devices.len());
+    assert!(!removed.added.failures.is_empty());
+    assert!(
+        hardware
+            .borrow()
+            .requests
+            .iter()
+            .any(|(slot, _, request)| *slot == parent.slot && *request == suspend)
+    );
+    assert_eq!(state.borrow().save, 0);
+    consumer.assert_fenced(&hardware);
+    let before = (hardware.borrow().mmio_reads, hardware.borrow().mmio_writes);
+    assert!(
+        host.controller
+            .borrow_mut()
+            .control(parent.slot, setup(0xa0, GET_STATUS, 0, 0, 4), &[])
+            .is_err()
+    );
+    assert_eq!(
+        (hardware.borrow().mmio_reads, hardware.borrow().mmio_writes),
+        before
+    );
+}
+
+#[test]
+fn failed_resume_after_controller_restart_does_not_revive_raw_consumers() {
+    let mut memory = vec![0u64; 512 * 1024];
+    let (mut host, devices, hardware, state, mut dma) = fixture(&mut memory, HIGH_SPEED, false);
+    let mut consumer = RawConsumer::retain(&host, &devices[0], &mut dma);
+    let removed = host.suspend();
+    assert!(
+        removed.added.failures.is_empty(),
+        "{:?}",
+        removed.added.failures
+    );
+    assert_eq!(removed.removed.len(), devices.len());
+    // An actual connection-change latch invalidates the restored session even
+    // if CCS and speed happen to match the original values.
+    *hardware.borrow_mut().root_status.as_mut().unwrap() |= CSC;
+    let refused = host.resume(&mut dma, &crate::firmware::HandoffProvider::new(None));
+    assert!(!refused.added.failures.is_empty());
+    assert!(refused.added.devices.is_empty());
+    assert_eq!(state.borrow().restore, 1);
+    assert!(matches!(
+        host.controller.borrow().hardware,
+        hardware::State::Running
+    ));
+    consumer.assert_fenced(&hardware);
+}
+
+#[test]
+fn suspend_preflight_failure_preserves_live_raw_consumer() {
+    let mut memory = vec![0u64; 512 * 1024];
+    let (mut host, devices, hardware, _, mut dma) = fixture(&mut memory, HIGH_SPEED, false);
+    let mut consumer = RawConsumer::retain(&host, &devices[0], &mut dma);
+    *hardware.borrow_mut().root_status.as_mut().unwrap() |= CSC;
+    let unchanged = host.suspend();
+    assert!(!unchanged.added.failures.is_empty());
+    assert!(unchanged.removed.is_empty());
+    assert!(host.sleep.awake());
+    assert!(consumer.submit().is_ok());
 }

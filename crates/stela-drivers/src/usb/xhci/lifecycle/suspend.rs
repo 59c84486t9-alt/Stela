@@ -53,10 +53,15 @@ impl Host {
         let result = self.prepare_suspend(&mut changes);
         match result {
             Ok(snapshot) => self.sleep = Sleep::Suspended(snapshot),
-            Err(error) => changes
-                .added
-                .failures
-                .push(("USB topology suspend".into(), error)),
+            Err(error) => {
+                if matches!(self.sleep, Sleep::Failed) {
+                    self.controller.borrow_mut().quarantine_suspended_slots();
+                }
+                changes
+                    .added
+                    .failures
+                    .push(("USB topology suspend".into(), error));
+            }
         }
         changes
     }
@@ -154,6 +159,7 @@ impl Host {
             return changes;
         };
         if let Err(error) = self.restore_suspend(&snapshot) {
+            self.controller.borrow_mut().quarantine_suspended_slots();
             changes
                 .added
                 .failures
@@ -170,6 +176,7 @@ impl Host {
             .collect();
         for slot in roots {
             if let Err(error) = self.retire(slot, &mut changes) {
+                self.controller.borrow_mut().quarantine_suspended_slots();
                 changes
                     .added
                     .failures
@@ -193,6 +200,7 @@ impl Host {
                     translator: None,
                 };
                 if let Err(error) = c.reset_root_device(attachment) {
+                    c.quarantine_suspended_slots();
                     changes
                         .added
                         .failures
@@ -276,6 +284,20 @@ fn root_session(before: u32, actual: u32) -> Result<(), BlockError> {
 }
 
 impl Controller {
+    /// Terminal transition failures have no remaining private port operations.
+    /// Close the raw-slot consumer boundary as well as the SlotId boundary.
+    /// This is a pure quarantine: ownership, pending TDs, poison, contexts and
+    /// DMA allocations remain unchanged, with no inferred Stop/Disable ACK.
+    /// Successful suspend/resume keeps its private parent EP0 path until all
+    /// link operations finish; only a failed path takes this terminal fence.
+    fn quarantine_suspended_slots(&mut self) {
+        for state in self.slots.iter_mut().flatten() {
+            if state.suspended {
+                state.retiring = true;
+            }
+        }
+    }
+
     fn read_suspend_port(&mut self, port: u8) -> u32 {
         let at = self.port_offset(port);
         self.registers.read32(at)
