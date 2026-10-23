@@ -72,6 +72,9 @@ add_project_arguments(mesa.get_variable('pre_args'),
                       mesa.get_variable('c_cpp_args'), language : ['c', 'cpp'])
 add_project_arguments(mesa.get_variable('c_args'), language : 'c')
 add_project_arguments(mesa.get_variable('cpp_args'), language : 'cpp')
+# Every target here, including the unchanged Mesa sources Stela builds itself,
+# compiles without warnings.
+add_project_arguments('-Werror', language : ['c', 'cpp'])
 
 if with_amd_llvm
   dep_llvm = mesa.get_variable('dep_llvm')
