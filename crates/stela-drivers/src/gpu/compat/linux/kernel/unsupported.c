@@ -2,7 +2,6 @@
 /* Kernel services Stela does not provide yet. */
 #include <linux/io.h>
 #include <linux/kobject.h>
-#include <linux/moduleparam.h>
 #include <linux/rcupdate.h>
 #include <linux/workqueue.h>
 #include <stela/linux.h>
@@ -42,17 +41,6 @@ STELA_UNSUPPORTED(int, kobject_init_and_add, struct kobject *, const struct kobj
 STELA_UNSUPPORTED(void, kobject_put, struct kobject *)
 STELA_UNSUPPORTED(int, kset_register, struct kset *)
 STELA_UNSUPPORTED_OBJECT(const struct sysfs_ops, kobj_sysfs_ops);
-
-/* Stela has no command line or sysfs to set module parameters through, so
- * their operations never run. */
-STELA_UNSUPPORTED_OBJECT(const struct kernel_param_ops, param_ops_bool);
-STELA_UNSUPPORTED_OBJECT(const struct kernel_param_ops, param_ops_bint);
-STELA_UNSUPPORTED_OBJECT(const struct kernel_param_ops, param_ops_int);
-STELA_UNSUPPORTED_OBJECT(const struct kernel_param_ops, param_ops_uint);
-STELA_UNSUPPORTED_OBJECT(const struct kernel_param_ops, param_ops_hexint);
-STELA_UNSUPPORTED_OBJECT(const struct kernel_param_ops, param_ops_ullong);
-STELA_UNSUPPORTED_OBJECT(const struct kernel_param_ops, param_ops_charp);
-STELA_UNSUPPORTED_OBJECT(const struct kernel_param_ops, param_ops_string);
 
 /* Stela runs no kernel threads, so Linux code has no workers to queue
  * work for. */
