@@ -434,7 +434,12 @@ pub unsafe fn probe_with_provider(
                 }
                 continue;
             } else if sdhci::matches(&function) {
-                sdhci::attach(&mut function, handoff, dma).map(|attached| {
+                let attached = if sdhci::requires_owned_config(&function) {
+                    sdhci::attach_owned(function, handoff, dma)
+                } else {
+                    sdhci::attach(&mut function, handoff, dma)
+                };
+                attached.map(|attached| {
                     disks.sd_hosts.extend(attached.hosts);
                     disks.device_failures.extend(
                         attached.failures.into_iter().map(|(slot, error)| {

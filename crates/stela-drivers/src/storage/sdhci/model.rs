@@ -38,6 +38,11 @@ pub(super) struct Hardware {
     pub adma_broken: bool,
     pub reject_high_speed_bit: bool,
     pub wired_width: u8,
+    pub o2_chip: Option<Rc<RefCell<O2Chip>>>,
+    pub o2_pll_stuck: bool,
+    pub o2_cd_mismatch: bool,
+    pll_sequence: u8,
+    pll_locked: bool,
     pub reset_after_settings: bool,
     pub fail_settings_reset: bool,
     pub settings_dirty: bool,
@@ -138,6 +143,11 @@ impl Hardware {
             adma_broken: false,
             reject_high_speed_bit: false,
             wired_width: 4,
+            o2_chip: None,
+            o2_pll_stuck: false,
+            o2_cd_mismatch: false,
+            pll_sequence: 0,
+            pll_locked: false,
             reset_after_settings: false,
             fail_settings_reset: false,
             settings_dirty: false,
@@ -202,6 +212,13 @@ impl Hardware {
         let argument = self.reg(ARGUMENT);
         let mode = self.word(TRANSFER_MODE);
         self.commands.push((cmd, argument, value));
+        if let Some(chip) = &self.o2_chip {
+            let chip = chip.borrow();
+            assert!(chip.ready, "O2 command before finite/ADMA/power setup");
+            assert_eq!(chip.reg32(0x304) >> 16, 0x2510);
+            assert_eq!(chip.reg32(0x354) & (1 << 16 | 15 << 20), 0);
+            assert!(self.pll_locked, "O2 card command without physical PLL lock");
+        }
         assert!(
             !self.reset_after_settings || !self.settings_dirty,
             "ENE command before post-settings reset"
@@ -487,6 +504,123 @@ pub(super) fn put(value: &mut u128, start: u32, count: u32, bits: u32) {
     *value = *value & !mask | u128::from(bits) << start;
 }
 pub(super) struct Port(pub Rc<RefCell<Hardware>>);
+
+/// Separate physical PCI configuration register bank. Writes are protected and
+/// consumed in the silicon-required order, independently of driver helpers.
+pub(super) struct O2Chip {
+    bytes: [u8; 4096],
+    pub slots: Vec<alloc::rc::Weak<RefCell<Hardware>>>,
+    pub writes: Vec<(usize, usize, u32)>,
+    pub reads: usize,
+    pub ready: bool,
+    step: usize,
+    pub ignore_write: Option<usize>,
+    pub read_fault_after_write: Option<usize>,
+    fault_armed: bool,
+}
+impl O2Chip {
+    pub fn new(device: u16) -> Self {
+        let mut c = Self {
+            bytes: [0; 4096],
+            slots: Vec::new(),
+            writes: Vec::new(),
+            reads: 0,
+            ready: false,
+            step: 0,
+            ignore_write: None,
+            read_fault_after_write: None,
+            fault_armed: false,
+        };
+        c.bytes[..4].copy_from_slice(&(0x1217u32 | u32::from(device) << 16).to_le_bytes());
+        c.bytes[0xd3] = 0xd5;
+        c.bytes[0xec] = 0x81;
+        c.bytes[0xe0] = 0x20;
+        c.bytes[0xf1] = 0x50;
+        c.bytes[0x304..0x308].copy_from_slice(&0x9910_551au32.to_le_bytes());
+        c.bytes[0x354..0x358].copy_from_slice(&(1u32 << 16 | 10 << 20 | 0x43).to_le_bytes());
+        c
+    }
+    pub fn reg32(&self, at: usize) -> u32 {
+        u32::from_le_bytes(self.bytes[at..at + 4].try_into().unwrap())
+    }
+    fn read(&mut self, at: usize, width: usize) -> u32 {
+        self.reads += 1;
+        let mut bytes = [0; 4];
+        bytes[..width].copy_from_slice(&self.bytes[at..at + width]);
+        let value = u32::from_le_bytes(bytes);
+        if self.fault_armed && self.read_fault_after_write == Some(at) {
+            self.fault_armed = false;
+            value ^ 1
+        } else {
+            value
+        }
+    }
+    fn write(&mut self, at: usize, width: usize, value: u32) {
+        self.writes.push((at, width, value));
+        if self.ignore_write == Some(at) {
+            return;
+        }
+        if at != 0xd3 {
+            assert_eq!(self.bytes[0xd3] & 0x80, 0, "O2 PCI write while locked");
+        }
+        if !self.ready && at != 0xd3 {
+            let sequence = [
+                (0xee, 1, 0x08),
+                (0xec, 1, 0xa1),
+                (0xe0, 1, 0x21),
+                (0xe0, 1, 0x73),
+                (0xe2, 1, 0x39),
+                (0xe7, 1, 0x08),
+                (0xf1, 1, 0x58),
+            ];
+            assert_eq!(
+                (at, width, value),
+                sequence[self.step],
+                "O2 initial hardware sequence"
+            );
+            self.step += 1;
+        }
+        if matches!(at, 0x304 | 0x354) && self.reg32(at) != value {
+            for slot in &self.slots {
+                if let Some(slot) = slot.upgrade() {
+                    assert_eq!(
+                        slot.borrow().word(CLOCK) & CLOCK_CARD,
+                        0,
+                        "O2 clock source changed under card clock"
+                    );
+                }
+            }
+        }
+        self.bytes[at..at + width].copy_from_slice(&value.to_le_bytes()[..width]);
+        if at == 0xd3 && value & 0x80 != 0 && self.step == 7 {
+            self.ready = true;
+        }
+        if self.read_fault_after_write == Some(at) {
+            self.fault_armed = true;
+        }
+    }
+}
+pub(super) struct O2ConfigPort(pub Rc<RefCell<O2Chip>>);
+impl Registers for O2ConfigPort {
+    fn read8(&mut self, at: usize) -> u8 {
+        self.0.borrow_mut().read(at, 1) as u8
+    }
+    fn read16(&mut self, at: usize) -> u16 {
+        self.0.borrow_mut().read(at, 2) as u16
+    }
+    fn read32(&mut self, at: usize) -> u32 {
+        self.0.borrow_mut().read(at, 4)
+    }
+    fn write8(&mut self, at: usize, value: u8) {
+        self.0.borrow_mut().write(at, 1, u32::from(value));
+    }
+    fn write16(&mut self, at: usize, value: u16) {
+        self.0.borrow_mut().write(at, 2, u32::from(value));
+    }
+    fn write32(&mut self, at: usize, value: u32) {
+        self.0.borrow_mut().write(at, 4, value);
+    }
+}
 impl Registers for Port {
     fn read8(&mut self, at: usize) -> u8 {
         let mut m = self.0.borrow_mut();
@@ -502,6 +636,8 @@ impl Registers for Port {
         m.reads += 1;
         if at == VERSION {
             m.version
+        } else if at == 0x1cc && m.o2_chip.is_some() {
+            m.word(at) & !(1 << 14) | if m.pll_locked { 1 << 14 } else { 0 }
         } else if at == CLOCK {
             m.word(at) | if m.clock_stuck { 0 } else { CLOCK_STABLE }
         } else {
@@ -516,8 +652,13 @@ impl Registers for Port {
             CAPABILITIES2 => 0,
             INTERRUPT => m.status,
             PRESENT => {
+                let cd = if m.o2_chip.is_some() && (m.present != m.o2_cd_mismatch) {
+                    1 << 18
+                } else {
+                    0
+                };
                 if m.present {
-                    CARD_PRESENT
+                    cd | CARD_PRESENT
                         | CARD_STABLE
                         | DATA0
                         | if m.writable { WRITE_ALLOWED } else { 0 }
@@ -531,8 +672,11 @@ impl Registers for Port {
                             0
                         }
                 } else {
-                    0
+                    cd
                 }
+            }
+            0x1cc if m.o2_chip.is_some() => {
+                m.reg(at) & !(1 << 14) | if m.pll_locked { 1 << 14 } else { 0 }
             }
             BUFFER => {
                 assert!(m.transfer_read);
@@ -567,6 +711,16 @@ impl Registers for Port {
                 }
             }
         } else {
+            if at == POWER
+                && value == 0
+                && let Some(chip) = &m.o2_chip
+            {
+                assert_eq!(
+                    chip.borrow().reg32(0x354) & (1 << 16),
+                    0,
+                    "O2 power-off before OPE clock restore"
+                );
+            }
             if at == POWER && m.single_power_write {
                 assert!(
                     value == 0 || value & POWER_ON != 0,
@@ -608,7 +762,22 @@ impl Registers for Port {
     fn write32(&mut self, at: usize, value: u32) {
         let mut m = self.0.borrow_mut();
         m.writes.push((at, 4, value));
-        if at == INTERRUPT {
+        if at == 0x1cc && m.o2_chip.is_some() {
+            if value & (1 << 12) != 0 {
+                m.pll_sequence = 1;
+                m.pll_locked = false;
+            } else if m.pll_sequence == 1 {
+                m.pll_sequence = 2;
+            }
+            if value & (1 << 18) != 0 {
+                assert_eq!(m.pll_sequence, 2, "O2 PLL forced without reset/release");
+                m.pll_sequence = 3;
+                if !m.o2_pll_stuck {
+                    m.pll_locked = true;
+                }
+            }
+            m.write(at, 4, value & !(1 << 14));
+        } else if at == INTERRUPT {
             m.status &= !value;
         } else if at == BUFFER {
             assert!(!m.transfer_read);
