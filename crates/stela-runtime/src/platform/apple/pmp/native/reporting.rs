@@ -7,3 +7,9 @@
 //! No Apple firmware executes. Numeric wire data grants no mapping authority.
 pub mod record;
 pub mod wire;
+pub mod getter;
+pub mod resources;
+mod receive;
+mod owner;
+pub use receive::Receiver;
+pub use owner::{Finished, NO_DATABASE, Owner, Progress, Registration, RegistrationResult};
