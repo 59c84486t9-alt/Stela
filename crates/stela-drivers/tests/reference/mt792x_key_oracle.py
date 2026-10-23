@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compile unchanged pinned station-key/layout/cipher/TLV/header helpers.
 
-Usage: mt792x_key_oracle.py MT76_DIRECTORY FRESH_OUTPUT_DIRECTORY
+Usage: mt792x_key_oracle.py MT76_DIRECTORY FRESH_OUTPUT_DIRECTORY [--bip]
 MT76_DIRECTORY also contains include/net/mac80211.h and include/linux/ieee80211.h
 from the same kernel pin. ASan/UBSan exercise actual request bytes; modeled skb,
 BSS/STA lookups and allocation do not establish real firmware state or ACK.
@@ -13,7 +13,8 @@ import re
 import subprocess
 import sys
 
-source,out=map(Path,sys.argv[1:]);out.mkdir(parents=True,exist_ok=False)
+bip=len(sys.argv)>3 and sys.argv[3]=="--bip"
+source,out=map(Path,sys.argv[1:3]);out.mkdir(parents=True,exist_ok=False)
 hashes={
  'mt76_connac_mcu.c':'52472fd20bc0a1d744f3eee7a28b7205609e160c479a9da1ec5afa4528e389ec',
  'mt76_connac_mcu.h':'2448b6c145f17397a717965eadf50c591934902f0b09684d37a8b0ae290b31ed',
@@ -120,11 +121,35 @@ int main(int argc,char **argv) {
  return 0;
 }
 '''
+if bip:
+ main=r'''
+int main(int argc,char **argv) {
+ if(argc!=2 || atoi(argv[1])!=7925)return 1;struct mt76_dev d={0};
+ for(u32 i=0;i<128;i++){
+  struct ieee80211_vif vif={0};struct mt792x_vif*mvif=&vif.drv_priv;mvif->sta.vif=mvif;
+  for(int j=0;j<6;j++)vif.bssid[j]=2+i*7+j;vif.bssid[0]&=0xfe;
+  mvif->conf.mt76.idx=i*13;mvif->conf.mt76.omac_idx=(i*7)%64;
+  struct mt76_wcid w={.idx=(i*3)%20,.sta=false,.sta_disabled=(i/8)%2};
+  struct mt76_connac_sta_key_conf conf={0};
+  struct ieee80211_key_conf gtk={.cipher=WLAN_CIPHER_SUITE_CCMP,.keyidx=(i/2)%4,.keylen=16};
+  struct ieee80211_key_conf igtk={.cipher=WLAN_CIPHER_SUITE_AES_CMAC,.keyidx=4+i%2,.keylen=16};
+  for(int j=0;j<16;j++){gtk.key[j]=i*17+j;igtk.key[j]=i*31+j;}
+  for(int operation=0;operation<3;operation++){
+   struct sk_buff*s=__mt76_connac_mcu_alloc_sta_req(&d,&mvif->conf.mt76,&w,256);
+   struct ieee80211_key_conf*key=operation==1?&igtk:&gtk;
+   if(mt7925_mcu_sta_key_tlv(&w,&conf,s,key,operation==2?DISABLE_KEY:SET_KEY,&mvif->sta))abort();
+   u8 header[]={i,operation,s->len};if(fwrite(header,1,3,stdout)!=3 || fwrite(s->data,1,s->len,stdout)!=s->len)abort();
+   free(s->data);free(s);
+  }
+ }
+ return 0;
+}
+'''
 unit=out/'linux-mt792x-key.c';unit.write_text(prelude+''.join(parts)+helpers+main)
-exe=out/'linux-mt792x-key';subprocess.run(['cc','-std=gnu11','-O1','-g','-fsanitize=address,undefined',str(unit),'-o',str(exe)],check=True)
+exe=out/'linux-mt792x-key';subprocess.run(['cc','-std=gnu11','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all',str(unit),'-o',str(exe)],check=True)
 cases=[]
-for chip in [7921,7922,7925]:
+for chip in ([7925] if bip else [7921,7922,7925]):
  trace=subprocess.run([str(exe.resolve()),str(chip)],stdout=subprocess.PIPE,check=True).stdout
- (out/f'{chip}.trace').write_bytes(trace);cases.append({'chip':chip,'cases':320,'bytes':len(trace),'sha256':hashlib.sha256(trace).hexdigest()})
-(out/'manifest.json').write_text(json.dumps({'linux_commit':'a804c5742bff224d4cb4d25dd383554d598be32b','sources':hashes,'cases':cases},indent=2)+'\n')
+ (out/f'{chip}.trace').write_bytes(trace);cases.append({'chip':chip,'cases':128 if bip else 320,'requests':384 if bip else 320,'bytes':len(trace),'sha256':hashlib.sha256(trace).hexdigest()})
+(out/'manifest.json').write_text(json.dumps({'linux_commit':'a804c5742bff224d4cb4d25dd383554d598be32b','sources':hashes,'profile':'initial-gtk-igtk-batch' if bip else 'ordinary-data','helpers_sha256':{n:hashlib.sha256(function(f,n).encode()).hexdigest() for f,n in [('mt7925/mcu.c','mt7925_mcu_sta_key_tlv'),(c,'__mt76_connac_mcu_alloc_sta_req'),(h,'mt76_connac_mcu_add_tlv'),(h3,'mt7925_mcu_get_cipher')]},'cases':cases},indent=2)+'\n')
 print(json.dumps(cases,indent=2))

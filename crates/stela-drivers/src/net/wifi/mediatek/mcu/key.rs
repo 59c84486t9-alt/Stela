@@ -6,8 +6,14 @@ use super::super::identity::Chip;
 use crate::net::wifi::security::{Cipher, InstallTicket, KeyIdentity, KeyScope, NonceOwner};
 use alloc::vec::Vec;
 
+pub mod bip;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    NoMemory,
+    UnsupportedBip,
+    InvalidBipDataKey,
+    InvalidBipIndex,
     InvalidWcid,
     InvalidOmac,
     InvalidKeyLength,
@@ -90,7 +96,12 @@ impl Request {
         }
         let pairwise = matches!(key.scope(), KeyScope::Pairwise(_));
         let connac3 = chip == Chip::Mt7925;
-        let mut bytes = vec![0; 8 + if connac3 { 68 } else { 80 }];
+        let length = 8 + if connac3 { 68 } else { 80 };
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(length)
+            .map_err(|_| Error::NoMemory)?;
+        bytes.resize(length, 0);
         bytes[0] = context.bss_index;
         bytes[1] = key.slot() as u8;
         bytes[2..4].copy_from_slice(&1u16.to_le_bytes()); // actual one TLV

@@ -30,6 +30,8 @@ metal = []
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false }
+# Retained source GTK/IGTK batch material must clear after actual retirement.
+zeroize = { version = "1.9", default-features = false }
 # Fallible native mapping metadata; the maintained owner supports alloc-only UEFI.
 triomphe = { version = "=0.1.16", default-features = false }
 

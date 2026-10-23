@@ -19,8 +19,11 @@ use crate::net::wifi::{
 };
 use alloc::boxed::Box;
 
+pub mod bip;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    Bip(bip::Error),
     WrongMailbox,
     PoisonedMailbox,
     InvalidContext,
@@ -47,6 +50,10 @@ enum Phase {
     Removed,
 }
 struct Owned<C> {
+    gtk: Option<bip::GtkCache>,
+    igtk: Option<bip::Installed>,
+    pending_igtk: Option<bip::Installed>,
+    igtk_generation: u64,
     slot: KeySlot,
     context: Context,
     scope: KeyScope,
@@ -105,6 +112,10 @@ impl<C: 'static> HardwareKey<C> {
         let slot = unsafe { KeySlot::new(wcid) }.map_err(Error::Security)?;
         Ok(Self {
             owned: Some(Box::new(Owned {
+                gtk: None,
+                igtk: None,
+                pending_igtk: None,
+                igtk_generation: 0,
                 slot,
                 context,
                 scope,
@@ -254,6 +265,9 @@ impl<C: 'static> HardwareKey<C> {
                 let status = reply.status;
                 state.reply = Some(reply);
                 if accepted {
+                    if mailbox.identity.chip == crate::net::wifi::mediatek::identity::Chip::Mt7925 {
+                        bip::remember(state, ticket.identity(), material);
+                    }
                     Ok(ticket.identity())
                 } else {
                     Err(Error::Firmware(status))
@@ -321,6 +335,9 @@ impl<C: 'static> HardwareKey<C> {
         unsafe { state.slot.retire_after_drain() };
         state.phase = Phase::Empty;
         state.candidate = None;
+        state.gtk = None;
+        state.igtk = None;
+        state.pending_igtk = None;
         Ok(())
     }
 }
