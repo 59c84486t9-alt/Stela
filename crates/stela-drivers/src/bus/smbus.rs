@@ -113,6 +113,20 @@ pub trait Bus {
     ) -> Result<(), Error>;
 }
 
+/// Fixed-length SMBus I²C-block protocols: exactly 1..=32 payload bytes with
+/// no on-wire count prefix. Separate from SMBus Block, ProcessCall, arbitrary
+/// I²C transfers and combined repeated START. Failure never permits replay.
+pub trait I2cBlockBus: Bus {
+    fn read_i2c_block(
+        &mut self,
+        address: Address,
+        command: u8,
+        bytes: &mut [u8],
+    ) -> Result<(), Error>;
+    fn write_i2c_block(&mut self, address: Address, command: u8, bytes: &[u8])
+    -> Result<(), Error>;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Completion,

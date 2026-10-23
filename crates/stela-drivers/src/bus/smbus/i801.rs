@@ -21,11 +21,14 @@
 //! the PCI I/O decode/host function in D0 and arbitrate ACPI AML and SMM access.
 //! A device ID or an idle status bit does not prove exclusive ownership. The
 //! unsafe [`PortIo::claim`] contract requires that ownership before any I/O.
-//! MMIO-only devices need a separate register accessor. PEC, I²C block mode,
-//! block process calls, SMBALERT and Host Notify are unsupported here.
+//! MMIO-only devices need a separate register accessor. [`i2c_block`] adds
+//! fixed-length I²C blocks with retained PCI configuration ownership. PEC,
+//! block process calls, SMBALERT and Host Notify remain unsupported.
 //!
 //! Read-to-acquire INUSE semantics are documented in Intel's Host Status
 //! Register Address (HSTS), offset 0, Core Ultra SoC I/O Registers, ID 795260.
+pub mod i2c_block;
+
 use super::{Address, Block, Bus, Error, ErrorKind, MAX_BLOCK, Phase, Recovery, Transaction};
 use crate::{Clock, bus::i2c::Timer};
 
@@ -322,6 +325,11 @@ impl<R: Registers, T: Timer> I801<R, T> {
             if let Some(error) = Self::status_error(status) {
                 return Err(error);
             }
+            // An actually observed completion still cannot satisfy an expired
+            // transaction deadline. Retain its raw status for the caller.
+            if self.expired(start, self.config.timeout_us) {
+                return Err(Self::error(ErrorKind::Timeout(phase), status));
+            }
             match phase {
                 Phase::Completion if status & HOST_BUSY == 0 && status & INTR != 0 => {
                     return Ok(status);
@@ -331,9 +339,6 @@ impl<R: Registers, T: Timer> I801<R, T> {
                     return Err(Self::error(ErrorKind::UnexpectedCompletion, status));
                 }
                 _ => {}
-            }
-            if self.expired(start, self.config.timeout_us) {
-                return Err(Self::error(ErrorKind::Timeout(phase), status));
             }
             self.timer.relax();
         }
@@ -403,6 +408,27 @@ impl<R: Registers, T: Timer> I801<R, T> {
         }
     }
 
+    fn deadline(&self, start: u64) -> Result<(), Error> {
+        if self.expired(start, self.config.timeout_us) {
+            Err(ErrorKind::Timeout(Phase::Completion).into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn start_transfer(&mut self, control: u8, start: u64) -> Result<(), Error> {
+        self.deadline(start)?;
+        self.registers.write8(HOST_CONTROL, control | START);
+        Ok(())
+    }
+
+    fn completed_deadline(&self, start: u64) -> Result<(), Error> {
+        self.deadline(start).map_err(|mut error| {
+            error.recovery = Recovery::Cleared;
+            error
+        })
+    }
+
     fn simple(
         &mut self,
         address: Address,
@@ -449,7 +475,9 @@ impl<R: Registers, T: Timer> I801<R, T> {
             }
             _ => unreachable!("block operations use the block engine"),
         };
-        self.registers.write8(HOST_CONTROL, protocol | START);
+        if let Err(error) = self.start_transfer(protocol, start) {
+            return self.finish(Some(error));
+        }
         let completed = self.wait(start, Phase::Completion);
         if let Err(error) = completed {
             return self.finish(Some(error));
@@ -458,6 +486,7 @@ impl<R: Registers, T: Timer> I801<R, T> {
         let low = self.registers.read8(HOST_DATA0);
         let high = self.registers.read8(HOST_DATA1);
         self.finish(None)?;
+        self.completed_deadline(start)?;
         match transaction {
             Transaction::ReceiveByte(byte) | Transaction::ReadByte { data: byte, .. } => {
                 *byte = low
@@ -496,7 +525,9 @@ impl<R: Registers, T: Timer> I801<R, T> {
                     self.registers.write8(BLOCK_DATA, byte);
                 }
             }
-            self.registers.write8(HOST_CONTROL, PROTOCOL_BLOCK | START);
+            if let Err(error) = self.start_transfer(PROTOCOL_BLOCK, start) {
+                return self.finish(Some(error));
+            }
             if let Err(error) = self.wait(start, Phase::Completion) {
                 return self.finish(Some(error));
             }
@@ -520,7 +551,9 @@ impl<R: Registers, T: Timer> I801<R, T> {
                 self.registers.write8(HOST_DATA0, bytes.len() as u8);
                 self.registers.write8(BLOCK_DATA, bytes[0]);
             }
-            self.registers.write8(HOST_CONTROL, PROTOCOL_BLOCK | START);
+            if let Err(error) = self.start_transfer(PROTOCOL_BLOCK, start) {
+                return self.finish(Some(error));
+            }
             let mut count = write.map_or(MAX_BLOCK + 1, <[u8]>::len);
             let mut index = 0;
             while index < count {
@@ -557,6 +590,7 @@ impl<R: Registers, T: Timer> I801<R, T> {
             }
         }
         self.finish(None)?;
+        self.completed_deadline(start)?;
         if let Some(output) = output {
             *output = result;
         }
@@ -564,12 +598,13 @@ impl<R: Registers, T: Timer> I801<R, T> {
     }
 }
 
-impl<R: Registers, T: Timer> Bus for I801<R, T> {
-    fn transaction(
+impl<R: Registers, T: Timer> I801<R, T> {
+    fn transaction_until(
         &mut self,
         address: Address,
         transaction: Transaction<'_>,
         pec: bool,
+        start: u64,
     ) -> Result<(), Error> {
         if pec {
             return Err(ErrorKind::UnsupportedPec.into());
@@ -583,7 +618,6 @@ impl<R: Registers, T: Timer> Bus for I801<R, T> {
             return Err(ErrorKind::NeedsReset.into());
         }
         self.prepare()?;
-        let start = self.timer.now_us();
         match transaction {
             Transaction::WriteBlock { command, data } => {
                 self.block(address, command, Some(data), None, start)
@@ -593,6 +627,18 @@ impl<R: Registers, T: Timer> Bus for I801<R, T> {
             }
             transaction => self.simple(address, transaction, start),
         }
+    }
+}
+
+impl<R: Registers, T: Timer> Bus for I801<R, T> {
+    fn transaction(
+        &mut self,
+        address: Address,
+        transaction: Transaction<'_>,
+        pec: bool,
+    ) -> Result<(), Error> {
+        let start = self.timer.now_us();
+        self.transaction_until(address, transaction, pec, start)
     }
 }
 
