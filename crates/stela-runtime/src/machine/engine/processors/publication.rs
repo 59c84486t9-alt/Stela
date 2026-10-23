@@ -1190,6 +1190,76 @@ mod tests {
     }
 
     #[test]
+    fn sparse_idle_roster_rejects_changed_stop_generation_without_rebasing_receipts() {
+        let bindings = [
+            WorkerBinding {
+                pe: 4,
+                worker: WorkerId(17),
+            },
+            WorkerBinding {
+                pe: 9,
+                worker: WorkerId(42),
+            },
+        ];
+        let (mut publications, mut owners) = WorkerPublications::new(&bindings).unwrap();
+        let mut hosts = bindings.map(|binding| LocalHost {
+            worker: Some(binding.worker),
+            ..LocalHost::default()
+        });
+        for (owner, host) in owners.iter_mut().zip(&mut hosts) {
+            publications
+                .accept_initial(owner.publish_initial(host).unwrap())
+                .unwrap();
+        }
+        let request = publications.request_stop(&[4, 9]).unwrap();
+        let held = hold(&mut publications, &mut owners, &mut hosts, request);
+        let (mut running, releases) = publications.release_for_run(held, &[9]).unwrap();
+        for release in releases {
+            publications
+                .accept_release(owners[1].release(release).unwrap())
+                .unwrap();
+        }
+        let mut state = GuestState::default();
+        let mut retired = 0;
+        let loan = publications
+            .dispatch(
+                9,
+                FrameLoan {
+                    state: &mut state,
+                    retired: &mut retired,
+                },
+            )
+            .unwrap();
+        let returned = owners[1].execute(loan, &mut hosts[1]).unwrap();
+        publications.recover(returned, |_| Ok::<_, ()>(())).unwrap();
+        // Corrupt only the retained request, never manufacture a Host receipt.
+        // The idle owner's actual old-generation hold cannot be promoted.
+        let generation = running.request.generation;
+        running.request.generation += 1;
+        assert_eq!(
+            publications.request_rejoin(&running).unwrap_err(),
+            PublicationError::MissingInvalidation
+        );
+        let refused = publications.rejoin(running).unwrap_err();
+        assert_eq!(refused.error, PublicationError::MissingInvalidation);
+        let mut running = refused.payload;
+        running.request.generation = generation;
+        for command in publications.request_rejoin(&running).unwrap() {
+            assert_eq!(command.binding().pe, 9);
+            publications
+                .accept_invalidation(owners[1].invalidate(command, &mut hosts[1]).unwrap())
+                .unwrap();
+        }
+        let held = publications.rejoin(running).unwrap();
+        publications.require_all_held(&held).unwrap();
+        assert_eq!(hosts[0].calls, 0);
+        assert_eq!(hosts[0].invalidations, 2);
+        assert_eq!(hosts[1].calls, 1);
+        assert_eq!(hosts[1].invalidations, 3);
+        assert_eq!(retired, 7);
+    }
+
+    #[test]
     fn selective_release_preflight_and_failed_actual_recovery_keep_full_authority() {
         let (mut publications, mut owners, mut hosts) = ready();
         let request = publications.request_stop(&[0, 1]).unwrap();
