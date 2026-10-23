@@ -348,6 +348,7 @@ dependencies = [
  "cc",
  "sha2",
  "triomphe",
+ "zeroize",
 ]
 
 [[package]]
