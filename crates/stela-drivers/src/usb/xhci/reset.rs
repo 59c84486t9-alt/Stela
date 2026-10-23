@@ -167,7 +167,11 @@ impl Controller {
     }
 
     fn reset_preflight(&self, device: &Device, endpoints: &[Endpoint]) -> Result<(), BlockError> {
-        self.live_slot(device.slot)?;
+        if self.validate_id(device.id)? != device.slot {
+            return Err(BlockError::Unsupported(
+                "USB reset descriptor slot identity mismatch",
+            ));
+        }
         let slot = self.slots[usize::from(device.slot)].as_ref().unwrap();
         let a = slot.attachment;
         if a.tier != 0
@@ -1358,6 +1362,8 @@ pub(crate) mod tests {
                 let output = dma.allocate(32 * context, 64).unwrap();
                 let control = dma.allocate(CONTROL_BYTES, CONTROL_BYTES).unwrap();
                 controller.slots[usize::from(other)] = Some(Slot {
+                    generation: 0,
+                    consumer: identity::Consumer::Unclaimed,
                     attachment: Attachment {
                         route: 1,
                         tier: 1,

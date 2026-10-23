@@ -60,6 +60,10 @@ pub(crate) fn bind_with_provider(
             .push((device.location.clone(), BlockError::Unsupported(reason)));
         return;
     }
+    if let Err(error) = shared.borrow_mut().claim_native(device.id) {
+        found.failures.push((device.location.clone(), error));
+        return;
+    }
     let configured = {
         let mut controller = shared.borrow_mut();
         let value = device.configuration_value();

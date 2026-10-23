@@ -108,6 +108,8 @@ impl Controller {
         let input_address = input.physical();
         self.dcbaa.write(usize::from(slot) * 8, output.physical());
         self.slots[usize::from(slot)] = Some(Slot {
+            generation: during("allocate device generation", identity::next_generation())?,
+            consumer: identity::Consumer::Unclaimed,
             attachment,
             retiring: true,
             input,
@@ -410,6 +412,9 @@ impl Controller {
         let product = string(descriptor[15]);
         let serial = string(descriptor[16]);
         let device = Device {
+            id: self
+                .device_id(slot)
+                .map_err(|error| ("identify device generation".into(), error))?,
             vendor_ethernet_revision: None,
             vendor_ethernet_tcr: None,
             slot,

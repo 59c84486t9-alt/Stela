@@ -490,6 +490,7 @@ pub(super) mod tests {
     pub(crate) fn device(configurations: Vec<Vec<u8>>) -> Device {
         let count = configurations.len() as u8;
         Device {
+            id: SlotId::fixture(1),
             vendor_ethernet_revision: None,
             vendor_ethernet_tcr: None,
             slot: 1,

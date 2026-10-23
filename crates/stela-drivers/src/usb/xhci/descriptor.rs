@@ -118,6 +118,9 @@ pub struct Device {
     /// selection, matching Linux r8152's cfgselector preflight. None means no
     /// verified identity; product IDs alone never select a vendor backend.
     pub vendor_ethernet_revision: Option<u16>,
+    /// Opaque ownership of this exact addressed device, including slot generation.
+    pub id: super::SlotId,
+    /// Hardware slot number for diagnostics; never an ownership credential.
     pub slot: u8,
     pub speed: u8,
     /// Where it is: the controller's PCI function, root port and hub ports.

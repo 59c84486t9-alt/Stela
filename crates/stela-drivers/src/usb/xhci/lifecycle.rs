@@ -50,6 +50,29 @@ pub struct Host {
     roots: Vec<u32>,
 }
 impl Host {
+    /// Transfer this inventory's actual unbound Address-state device to the
+    /// forwarding adapter. A failed constructor keeps the exclusive claim:
+    /// neither dropping a handle nor a copied descriptor authorizes rebinding.
+    pub(in crate::usb) fn take_forwarding(
+        &mut self,
+        id: SlotId,
+    ) -> Result<(Shared, Device), BlockError> {
+        let physical =
+            self.devices
+                .iter()
+                .find(|device| device.id == id)
+                .ok_or(BlockError::Unsupported(
+                    "USB forwarding device is not in this host inventory",
+                ))?;
+        if physical.descriptor[4] == HUB_CLASS {
+            return Err(BlockError::Unsupported(
+                "USB hub forwarding requires topology ownership",
+            ));
+        }
+        self.controller.borrow_mut().claim_forwarding(id)?;
+        Ok((self.controller.clone(), physical.clone()))
+    }
+
     pub(super) fn new(
         controller: Shared,
         devices: &[Device],
