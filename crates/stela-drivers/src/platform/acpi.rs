@@ -886,6 +886,7 @@ unsafe fn read_value<'a>(
 
 #[cfg(test)]
 mod tests {
+    include!("acpi/battery_tests.rs");
     extern crate std;
     use super::*;
     use std::{
