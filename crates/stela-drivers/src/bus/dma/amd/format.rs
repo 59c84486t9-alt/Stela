@@ -247,7 +247,7 @@ impl Command {
 
     pub fn bytes(self) -> [u8; 16] {
         let mut bytes = [0; 16];
-        for (chunk, word) in bytes.chunks_exact_mut(4).zip(self.0) {
+        for (chunk, word) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(self.0) {
             chunk.copy_from_slice(&word.to_le_bytes());
         }
         bytes

@@ -421,7 +421,7 @@ impl<H: TableHardware> State<H> {
         mutated: &mut bool,
     ) -> Result<(), TranslationError> {
         let binding = &self.bindings[position];
-        let mut previous = None;
+        let mut previous: Option<usize> = None;
         for offset in (0..binding.pages.bytes()).step_by(TABLE_BYTES) {
             let address = binding.address + offset as u64;
             let node = self.leaf(address)?;
@@ -1474,5 +1474,25 @@ mod tests {
         assert_eq!(monitor.live_tables(), 1);
         assert_eq!(monitor.table_drops.load(Ordering::Relaxed), 0);
         assert_eq!(monitor.hardware_drops.load(Ordering::Relaxed), 0);
+
+        let (mut tree, monitor) = new_tree(1, 12);
+        tree.root_for_publication().unwrap();
+        monitor.state.lock().unwrap().fail_invalidate = true;
+        let drops = Arc::new(AtomicUsize::new(0));
+        // SAFETY: the isolated model has no actual requester; failed completion
+        // conservatively models an exposed, uncertain payload mapping.
+        assert_eq!(
+            unsafe { tree.map(0, payload(0x300000, &drops), Direction::Bidirectional) },
+            Err(TranslationError::Invalidation(DmaError::InvalidationFailed))
+        );
+        let before = quarantine_status();
+        drop(tree);
+        let after = quarantine_status();
+        assert!(after.trees >= before.trees.saturating_add(1));
+        assert!(after.tables >= before.tables.saturating_add(1));
+        assert!(after.payload_bytes >= before.payload_bytes.saturating_add(4096));
+        assert_eq!(monitor.live_tables(), 1);
+        assert_eq!(monitor.hardware_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
     }
 }

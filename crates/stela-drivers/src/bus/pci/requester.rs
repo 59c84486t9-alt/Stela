@@ -249,7 +249,7 @@ fn standard<C: ConfigSpace>(config: &C, status: u16) -> Result<(), ClaimError> {
 }
 
 fn extended<C: ConfigSpace>(config: &C) -> Result<(), ClaimError> {
-    let mut offset = 0x100;
+    let mut offset = 0x100u16;
     let mut extents = Extents([0; 16]);
     let mut singleton = 0u32;
     loop {

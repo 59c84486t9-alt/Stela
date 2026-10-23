@@ -514,7 +514,7 @@ pub(crate) mod tests {
         bad.base += 4096;
         cases.push((ADDRESS, bad, ConfigError::Window));
         let mut bad = good;
-        bad.base = u64::MAX & !((1 << BUS_SHIFT) - 1);
+        bad.base = !((1u64 << BUS_SHIFT) - 1);
         cases.push((ADDRESS, bad, ConfigError::Window));
         let mut bad = ADDRESS;
         bad.segment ^= 1;
