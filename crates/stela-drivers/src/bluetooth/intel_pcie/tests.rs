@@ -1486,6 +1486,7 @@ mod native_models {
         register_drops: usize,
         callback_eoi: Arc<AtomicU64>,
         callback_at_automask: Option<&'static irq::Registry<Cpu>>,
+        callback_before_hw_restore: Option<&'static irq::Registry<Cpu>>,
         receive_at_automask: bool,
         route: Option<&'static irq::Registry<Cpu>>,
         automasked: bool,
@@ -1503,6 +1504,7 @@ mod native_models {
                 register_drops: 0,
                 callback_eoi: Arc::new(AtomicU64::new(0)),
                 callback_at_automask: None,
+                callback_before_hw_restore: None,
                 receive_at_automask: false,
                 route: None,
                 automasked: false,
@@ -1608,6 +1610,19 @@ mod native_models {
             Ok(self.0.lock().unwrap().bt.reg(offset))
         }
         fn write32(&self, offset: usize, value: u32) -> core::result::Result<(), native::Error> {
+            if offset == HW_MASK && value != u32::MAX {
+                let callback = {
+                    let mut h = self.0.lock().unwrap();
+                    h.callback_before_hw_restore.take().inspect(|_| {
+                        // An already-posted CPU message after FH restoration's
+                        // last pending check, before this HW store takes effect.
+                        h.bt.receive(1, 4, &[0xff, 1, 0x42], &[0xb6]);
+                    })
+                };
+                if let Some(registry) = callback {
+                    assert!(registry.dispatch(irq::FIRST_VECTOR));
+                }
+            }
             let mut h = self.0.lock().unwrap();
             h.bt.write32(offset, value);
             if let Some((at, n)) = h.bt.write_error
@@ -1851,6 +1866,31 @@ mod native_models {
             assert!(!t.service_pending());
             t.close().unwrap();
         }
+    }
+    #[test]
+    fn native_callback_between_mask_restores_cannot_reopen_pending_sources() {
+        let mut backing = vec![0u64; 1024 * 1024];
+        let mut dma = allocator(&mut backing);
+        let (mut t, h, registry, _) = attach(&mut dma);
+        t.start().unwrap();
+        h.lock().unwrap().bt.receive(0, 4, &[0xff, 1, 9], &[]);
+        assert!(registry.dispatch(irq::FIRST_VECTOR));
+        h.lock().unwrap().callback_before_hw_restore = Some(registry);
+        assert_eq!(t.poll().unwrap()[0].bytes, [0xff, 1, 9]);
+        assert!(t.service_pending());
+        {
+            let device = h.lock().unwrap();
+            assert!(!device.automasked, "posted message must not imply automask");
+            assert_eq!(device.bt.reg(FH_MASK), u32::MAX);
+            assert_eq!(device.bt.reg(HW_MASK), u32::MAX);
+        }
+        let packets = t.poll().unwrap();
+        assert_eq!(packets[0].bytes, [0xff, 1, 0x42]);
+        assert_eq!(packets[0].padding, [0xb6]);
+        assert!(!t.service_pending());
+        assert_eq!(h.lock().unwrap().bt.reg(FH_MASK), !FH_ENABLED);
+        assert_eq!(h.lock().unwrap().bt.reg(HW_MASK), !HW_ENABLED);
+        t.close().unwrap();
     }
     #[test]
     fn native_failed_msix_program_and_callback_mask_keep_raw_fault_and_terminal_owner() {

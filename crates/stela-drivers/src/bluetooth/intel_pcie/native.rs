@@ -468,6 +468,8 @@ unsafe impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> P
             // A callback has already contained newer work. Keep that source
             // masked until its next serialized cause/completion pass.
             signals.check_handler()?;
+            signals.mask().map_err(|(_, error)| error)?;
+            signals.check_handler()?;
             return Ok(());
         }
         for (offset, value) in [
@@ -485,8 +487,11 @@ unsafe impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> P
                 return Err(Error::Readback { offset, observed }.into());
             }
             if pending {
-                // The callback's actual mask/readback supersedes this restore.
-                // Its release-published flag preserves the next service pass.
+                // A callback can run between the prior pending check and this
+                // restore store. Explicitly contain BOTH sources: this store
+                // may otherwise supersede one of the callback's earlier masks.
+                signals.mask().map_err(|(_, error)| error)?;
+                signals.check_handler()?;
                 return Ok(());
             }
         }
