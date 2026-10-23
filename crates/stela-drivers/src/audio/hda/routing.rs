@@ -500,7 +500,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// sharing/reconfiguration needs full controller reinitialization. Any
     /// hardware failure after programming begins blocks future route/stream
     /// starts until reinitialization; partial codec effects are not rolled back.
-    /// OEM GPIO/amp sequencing, jack detection and digital audio remain separate.
+    /// Initialized Conexant codecs retain their ADC/EAPD policy through this
+    /// entry point too. OEM GPIO/amp sequencing, jack detection and digital
+    /// audio remain separate.
     pub fn configure_analog_route(
         &mut self,
         graph: &CodecGraph,
@@ -509,6 +511,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<(), Error> {
+        if self.manages_conexant_codec(graph.address) {
+            return self.configure_conexant_route(graph, route, id, channel, options);
+        }
         self.configure_analog_route_policy(graph, route, id, channel, options, false)
     }
     pub(super) fn configure_analog_route_policy(

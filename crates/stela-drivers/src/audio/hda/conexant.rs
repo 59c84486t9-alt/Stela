@@ -62,6 +62,11 @@ fn profile(id: u32) -> Result<bool, Error> {
     }
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
+    pub(super) fn manages_conexant_codec(&self, address: u8) -> bool {
+        self.conexant_codecs
+            .iter()
+            .any(|state| state.address == address)
+    }
     fn conexant_parameter(&mut self, codec: u8, node: u8, parameter: u8) -> Result<u32, Error> {
         self.verb(Verb::short(codec, node, GET_PARAMETER, parameter)?)
     }
@@ -242,13 +247,22 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .find(|c| c.address == graph.address && c.active && !c.retired)
             .cloned()
             .ok_or(Error::NeedsReset)?;
-        let (group, _, pins) = self.conexant_identity(graph)?;
-        if group != state.group
-            || pins != state.pins
-            || graph.vendor_id != state.codec_id
-            || graph.revision_id != state.revision_id
-        {
-            return Err(Error::InvalidCodecGraph);
+        let identity = self.conexant_identity(graph).and_then(|(group, _, pins)| {
+            if group != state.group
+                || pins != state.pins
+                || graph.vendor_id != state.codec_id
+                || graph.revision_id != state.revision_id
+            {
+                return Err(Error::InvalidCodecGraph);
+            }
+            Ok(())
+        });
+        if let Err(error) = identity {
+            // Once this codec is owned, a lost live authority check makes its
+            // already configured routes uncertain too. Retain their resources
+            // and prevent any later start until actual reset.
+            self.routing_failed = true;
+            return Err(error);
         }
         Ok(state)
     }

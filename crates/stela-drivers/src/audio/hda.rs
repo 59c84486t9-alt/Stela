@@ -6193,7 +6193,7 @@ mod tests {
                     .configure_conexant_route(&graph, &output, playback, 0, playback_options())
                     .unwrap();
                 controller
-                    .configure_conexant_route(
+                    .configure_analog_route(
                         &graph,
                         &input,
                         capture,
@@ -6324,7 +6324,7 @@ mod tests {
             for eapd in [Some(true), Some(false)] {
                 let before = model.borrow().commands.len();
                 assert_eq!(
-                    controller.configure_conexant_route(
+                    controller.configure_analog_route(
                         &graph,
                         &route,
                         stream,
@@ -6574,6 +6574,72 @@ mod tests {
             }
             controller.reinitialize().unwrap();
             assert!(controller.conexant_codecs.is_empty());
+        }
+        #[test]
+        fn conexant_lost_owned_live_authority_blocks_previous_routes_from_starting() {
+            for master_call in [true, false] {
+                for changed_vendor in [true, false] {
+                    let mut fixture = Fixture::new();
+                    let model = device(0x14f1_5045, 3);
+                    let mut controller = create(&model, &mut fixture, config()).unwrap();
+                    let graph = controller.enumerate_codec(0).unwrap();
+                    controller.initialize_conexant_codec(&graph).unwrap();
+                    let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+                    let playback = controller
+                        .allocate_stream(
+                            Direction::Playback,
+                            stereo(),
+                            128,
+                            2,
+                            &mut fixture.allocator,
+                        )
+                        .unwrap();
+                    controller
+                        .configure_analog_route(&graph, &route, playback, 0, playback_options())
+                        .unwrap();
+                    let capture = controller
+                        .allocate_stream(
+                            Direction::Capture,
+                            stereo(),
+                            128,
+                            2,
+                            &mut fixture.allocator,
+                        )
+                        .unwrap();
+                    let input = graph.analog_route(Direction::Capture, 5, 3).unwrap();
+                    if changed_vendor {
+                        model.borrow_mut().parameters.insert((0, 0), 0x14f1_5098);
+                    } else {
+                        model.borrow_mut().parameters.insert((8, 0x0c), 0x10);
+                    }
+                    let before = model.borrow().commands.len();
+                    let result = if master_call {
+                        controller.set_conexant_outputs_enabled(&graph, true)
+                    } else {
+                        controller.configure_analog_route(
+                            &graph,
+                            &input,
+                            capture,
+                            0,
+                            PinOptions::Capture {
+                                vref: Vref::EightyPercent,
+                            },
+                        )
+                    };
+                    assert_eq!(result, Err(Error::InvalidCodecGraph));
+                    assert!(
+                        model.borrow().commands[before..]
+                            .iter()
+                            .all(|v| ((v >> 8) & 0xfff) >= 0xf00)
+                    );
+                    let before = access_counts(&model);
+                    assert_eq!(controller.start(playback), Err(Error::NeedsReset));
+                    assert_eq!(controller.start(capture), Err(Error::NeedsReset));
+                    assert_eq!(access_counts(&model), before);
+                    assert_eq!(controller.routes.len(), 1);
+                    assert_eq!(controller.conexant_codecs.len(), 1);
+                }
+            }
         }
     }
 }
