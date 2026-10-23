@@ -57,15 +57,15 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             .host
             .transport
             .hold_all(&mut self.host.local, inventory);
-        let members: Vec<_> = inventory.bindings().map(|binding| binding.pe).collect();
+        let bindings: Vec<_> = inventory.bindings().collect();
         if inventory.require_all_held(&held).is_err() {
             self.host
                 .transport
                 .fail_stopped("native source services lack actual held workers");
         }
-        let mut services = Vec::with_capacity(members.len());
-        for pe in members {
-            match inventory.open_services(&held, pe) {
+        let mut services = Vec::with_capacity(bindings.len());
+        for binding in &bindings {
+            match inventory.open_services(&held, binding.pe) {
                 Ok(service) => services.push(service),
                 Err(_) => self
                     .host
@@ -77,6 +77,18 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             self.host
                 .transport
                 .fail_stopped("native source Host sessions already active");
+        }
+        // Device DMA may read a source PE's last stores before borrowing an
+        // all-writer RAM service. Fence the ACTUAL physical owners now, after
+        // their recovered frames/held publications and before any device work.
+        // A BSP-only fence cannot retire another worker's store buffer.
+        for binding in bindings {
+            if !self.host.select_native_service(binding.worker) {
+                self.host
+                    .transport
+                    .fail_stopped("native DMA visibility lacks an actual held Host owner");
+            }
+            self.host.memory_barrier();
         }
         Ok(held)
     }
