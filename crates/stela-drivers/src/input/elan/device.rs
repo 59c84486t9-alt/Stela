@@ -255,7 +255,14 @@ impl<B: Bus, I: Interrupt, T: Timer> I2cDevice<B, I, T> {
                 self.raw(&mut bytes)?;
                 Packet::Extended(bytes)
             };
-            report::decode(raw, self.capabilities.as_ref().ok_or(ErrorKind::NotReady)?).map(Some)
+            report::decode(
+                raw,
+                self.capabilities
+                    .as_ref()
+                    .ok_or(ErrorKind::NotReady)?
+                    .into(),
+            )
+            .map(Some)
         })();
         self.quarantine(result)
     }

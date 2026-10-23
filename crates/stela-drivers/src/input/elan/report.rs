@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Compressed ordinary/high-precision contacts and optional trackpoint reports.
 use super::{Capabilities, ErrorKind};
+use crate::bus::smbus::Block;
 pub(super) const STANDARD_REPORT_BYTES: usize = 34;
 pub(super) const EXTENDED_REPORT_BYTES: usize = 39;
-const WIDTH_MARKS_OFFSET: usize = 33;
-const CONTACT_OFFSET: usize = 4;
+const WIDTH_MARKS_OFFSET: usize = 31;
+const CONTACT_OFFSET: usize = 2;
 const CONTACT_BYTES: usize = 5;
-const HOVER_OFFSET: usize = 30;
+const HOVER_OFFSET: usize = 28;
 const WIDTH_REDUCTION: u32 = 90;
 /// Complete actual transfer. Packet ID, rather than length alone, selects
 /// ordinary twelve-bit or high-precision sixteen-bit contact encoding.
@@ -14,12 +15,15 @@ const WIDTH_REDUCTION: u32 = 90;
 pub enum Packet {
     Standard([u8; STANDARD_REPORT_BYTES]),
     Extended([u8; EXTENDED_REPORT_BYTES]),
+    /// Exact count-bearing SMBus payload, without an invented I2C prefix.
+    Smbus(Block),
 }
 impl Packet {
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             Self::Standard(bytes) => bytes,
             Self::Extended(bytes) => bytes,
+            Self::Smbus(block) => block.as_slice(),
         }
     }
 }
@@ -54,18 +58,35 @@ pub enum Frame {
     Absolute(Absolute),
     Trackpoint(Trackpoint),
 }
-pub(super) fn decode(raw: Packet, c: &Capabilities) -> Result<Frame, ErrorKind> {
-    let packet = raw.as_bytes();
-    match packet[2] {
+pub(super) struct Geometry {
+    pub maximum: (u16, u16),
+    pub traces: (u8, u8),
+    pub pressure_adjustment: u8,
+}
+impl From<&Capabilities> for Geometry {
+    fn from(c: &Capabilities) -> Self {
+        Self {
+            maximum: c.maximum,
+            traces: c.traces,
+            pressure_adjustment: c.pressure_adjustment,
+        }
+    }
+}
+pub(super) fn decode(raw: Packet, c: Geometry) -> Result<Frame, ErrorKind> {
+    let (packet, reset) = match &raw {
+        Packet::Smbus(block) => (block.as_slice(), false),
+        _ => (&raw.as_bytes()[2..], raw.as_bytes()[..2] == [0, 0]),
+    };
+    match packet[0] {
         id @ (0x5d | 0x60) => {
             let high_precision = id == 0x60;
-            if high_precision && packet.len() != EXTENDED_REPORT_BYTES {
+            if high_precision && packet.len() != EXTENDED_REPORT_BYTES - 2 {
                 return Err(ErrorKind::ReportId(id));
             }
             let mut contacts = [None; 5];
             let mut offset = CONTACT_OFFSET;
             for (slot, contact) in contacts.iter_mut().enumerate() {
-                if packet[3] & (1 << (slot + 3)) == 0 {
+                if packet[1] & (1 << (slot + 3)) == 0 {
                     continue;
                 }
                 let bytes = &packet[offset..offset + CONTACT_BYTES];
@@ -109,14 +130,14 @@ pub(super) fn decode(raw: Packet, c: &Capabilities) -> Result<Frame, ErrorKind> 
                 });
             }
             Ok(Frame::Absolute(Absolute {
-                buttons: packet[3] & 7,
+                buttons: packet[1] & 7,
                 hover: packet[HOVER_OFFSET] & 64 != 0,
                 contacts,
                 raw,
             }))
         }
         0x5e | 0x5f => {
-            let packet = &packet[3..];
+            let packet = &packet[1..];
             let motion = if packet[3] & 15 == 6 {
                 Some((
                     i16::from(packet[4]) - (i16::from(packet[1] ^ 0x80) << 1),
@@ -131,7 +152,7 @@ pub(super) fn decode(raw: Packet, c: &Capabilities) -> Result<Frame, ErrorKind> 
                 raw,
             }))
         }
-        0 if packet[..2] == [0, 0] => Err(ErrorKind::UnexpectedReset),
+        0 if reset => Err(ErrorKind::UnexpectedReset),
         id => Err(ErrorKind::ReportId(id)),
     }
 }

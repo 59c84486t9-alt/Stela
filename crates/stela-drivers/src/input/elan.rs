@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Native ELAN proprietary I2C touchpads, ordinary and extended I2C reports.
+//! Native ELAN proprietary I2C and SMBus touchpads.
 //! The platform supplies exclusive powered I2C ownership and an actual IRQ pin;
 //! CPU interrupt delivery stays masked while the physical pin is polled.
-//! Firmware flashing, SMBus, GPIO/rail sequencing and
+//! Firmware flashing, GPIO/rail sequencing and
 //! guest contact/trackpoint routing remain separate requirements.
 //! Pinned donor sources and retained copyrights are in input/THIRD_PARTY.md.
 pub use super::hid_i2c::{Interrupt, InterruptError};
 use crate::bus::i2c::{self, Address, Bus, Timer};
 mod device;
 mod report;
+pub mod smbus;
 pub use report::{Absolute, Contact, Frame, Packet, Trackpoint};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,13 +29,25 @@ pub enum ErrorKind {
     AlreadyActive,
     NeedsReset,
     Bus(i2c::Error),
+    Smbus(crate::bus::smbus::Error),
+    BlockLength {
+        command: u8,
+        minimum: usize,
+        maximum: usize,
+        actual: usize,
+    },
+    HelloPacket,
     Interrupt(InterruptError),
     ResetResponse([u8; 2]),
     FirmwareMode(u16),
     InvalidGeometry,
     ReportId(u8),
     UnexpectedReset,
-    Coordinate { slot: u8, x: u16, y: u16 },
+    Coordinate {
+        slot: u8,
+        x: u16,
+        y: u16,
+    },
     IdentityChanged,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
