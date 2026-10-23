@@ -7,6 +7,7 @@
  * caches, so every kmalloc_caches entry is empty and the cache a constant
  * size selects is not consulted. */
 #include <linux/limits.h>
+#include <linux/gfp.h>
 #include <linux/minmax.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -27,11 +28,26 @@ static size_t alignment(size_t size)
 	return max_t(size_t, size & -size, ARCH_KMALLOC_MINALIGN);
 }
 
-static void *allocate(size_t size)
+static bool request_supported(gfp_t flags)
+{
+	gfp_t allowed = GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_NOMEMALLOC |
+		__GFP_NORETRY;
+	if (!IS_ENABLED(CONFIG_MEMCG))
+		allowed |= __GFP_ACCOUNT;
+	if (!stela_linux_quiescent() || !gfpflags_allow_blocking(flags) || (flags & ~allowed)) {
+		stela_linux_unsupported("kmalloc allocation policy or context");
+		return false;
+	}
+	return true;
+}
+
+static void *allocate(size_t size, gfp_t flags)
 {
 	if (!size)
 		return ZERO_SIZE_PTR;
 	if (size > KMALLOC_MAX_SIZE)
+		return NULL;
+	if (!request_supported(flags))
 		return NULL;
 	size_t align = max(alignment(size), sizeof(struct header));
 	if (size > SIZE_MAX - align)
@@ -46,21 +62,18 @@ static void *allocate(size_t size)
 
 void *__kmalloc_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t flags)
 {
-	(void)flags;
-	return allocate(size);
+	return allocate(size, flags);
 }
 
 void *__kmalloc_cache_noprof(struct kmem_cache *s, gfp_t flags, size_t size)
 {
 	(void)s;
-	(void)flags;
-	return allocate(size);
+	return allocate(size, flags);
 }
 
 void *__kmalloc_large_noprof(size_t size, gfp_t flags)
 {
-	(void)flags;
-	return allocate(size);
+	return allocate(size, flags);
 }
 
 void kfree(const void *object)
@@ -83,7 +96,82 @@ char *kstrdup(const char *s, gfp_t gfp)
 }
 
 #ifdef STELA_LINUX_SLAB_TEST
+#include <linux/bottom_half.h>
+#include <linux/irqflags.h>
+#include <linux/preempt.h>
+#include <linux/rcupdate.h>
 #include <stela/test.h>
+
+static unsigned int refusals;
+
+static void unsupported(void *context, const char *operation)
+{
+	(void)context;
+	assert(!strcmp(operation, "kmalloc allocation policy or context"));
+	refusals++;
+}
+
+static void check_refusal(gfp_t flags)
+{
+	unsigned int before = refusals;
+	assert(!__kmalloc_noprof(96, flags));
+	assert(!__kmalloc_cache_noprof(NULL, flags, 96));
+	assert(!__kmalloc_large_noprof(96, flags));
+	assert(refusals == before + 3);
+}
+
+static void policy_and_context(void)
+{
+	const gfp_t refused[] = {
+		GFP_ATOMIC, GFP_NOWAIT, 0,
+		GFP_KERNEL | __GFP_DMA, GFP_KERNEL | __GFP_DMA32,
+		GFP_KERNEL | __GFP_RECLAIMABLE, GFP_KERNEL | __GFP_MOVABLE,
+		GFP_KERNEL | __GFP_COMP, GFP_KERNEL | __GFP_MEMALLOC,
+		GFP_KERNEL | __GFP_RETRY_MAYFAIL, GFP_KERNEL | __GFP_NOFAIL,
+		GFP_KERNEL | __GFP_THISNODE,
+		GFP_KERNEL | (__force gfp_t)(1U << 31),
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(refused); i++)
+		check_refusal(refused[i]);
+	preempt_disable();
+	check_refusal(GFP_KERNEL);
+	preempt_enable();
+	rcu_read_lock();
+	check_refusal(GFP_KERNEL);
+	rcu_read_unlock();
+	local_bh_disable();
+	check_refusal(GFP_KERNEL);
+	local_bh_enable();
+	unsigned long irq = arch_local_irq_save();
+	check_refusal(GFP_KERNEL);
+	arch_local_irq_restore(irq);
+	const gfp_t admitted[] = {
+		GFP_KERNEL, GFP_KERNEL | __GFP_ZERO, GFP_KERNEL | __GFP_NOWARN,
+		GFP_KERNEL | __GFP_NOMEMALLOC, GFP_KERNEL | __GFP_NORETRY,
+		GFP_KERNEL_ACCOUNT,
+	};
+	unsigned int before = refusals;
+	for (size_t i = 0; i < ARRAY_SIZE(admitted); i++) {
+		void *object = __kmalloc_noprof(96, admitted[i]);
+		assert(object);
+		kfree(object);
+	}
+	assert(refusals == before && stela_linux_quiescent());
+}
+
+static void strict_refusal(void)
+{
+	stela_linux_enter(&stela_linux_bare);
+	void *object = __kmalloc_noprof(96, GFP_ATOMIC);
+	kfree(object);
+	stela_linux_exit();
+}
+
+static void outside_owner(void)
+{
+	void *object = __kmalloc_noprof(96, GFP_KERNEL);
+	kfree(object);
+}
 
 static void check_allocation(size_t size)
 {
@@ -118,6 +206,9 @@ static void check_allocation(size_t size)
 
 int main(void)
 {
+	const struct stela_linux_services services = {.unsupported = unsupported};
+	const struct stela_linux_owner owner = {.services = &services};
+	stela_linux_enter(&owner);
 	/* Includes 96/192-byte callers, both sides of every relevant power of
 	 * two, and requests above the old PAGE_SIZE and cache-size caps. */
 	for (size_t size = 1; size <= 256; size++)
@@ -139,7 +230,11 @@ int main(void)
 	assert(copy && !strcmp(copy, "alignment"));
 	kfree(copy);
 	assert(!kstrdup(NULL, GFP_KERNEL));
-	printf("Linux kmalloc: actual alignment, zeroing, live isolation and bounds\n");
+	policy_and_context();
+	stela_linux_exit();
+	assert(stela_test_traps(strict_refusal));
+	assert(stela_test_traps(outside_owner));
+	printf("Linux kmalloc: actual alignment, zeroing, live isolation, bounds and explicit policy/context refusal\n");
 	return 0;
 }
 #endif
