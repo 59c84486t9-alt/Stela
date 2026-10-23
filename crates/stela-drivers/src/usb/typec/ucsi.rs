@@ -1416,4 +1416,77 @@ mod tests {
         assert_eq!(notifications, 393216);
         assert_eq!(commands, 8);
     }
+    #[test]
+    fn suspend_disables_firmware_notifications_and_invalidates_snapshots() {
+        let mut controller = initialized();
+        controller
+            .transport
+            .replies
+            .push_back(Reply::new(Command::global(NOTIFY), &[]));
+        controller.suspend().unwrap();
+        assert!(!controller.initialized());
+        assert!(controller.connectors().is_empty());
+        assert_eq!(controller.capability(), None);
+        assert_eq!(
+            controller.execute(Command::current_cam(port()), &mut [0; 1], &[]),
+            Err(Error::NeedsReset)
+        );
+        assert_eq!(
+            &controller.transport.controls[controller.transport.controls.len() - 2..],
+            &[NOTIFY, ACK | ACK_COMMAND]
+        );
+    }
+    #[test]
+    fn failed_suspend_keeps_transport_fault_and_retires_old_snapshots() {
+        let mut controller = initialized();
+        controller
+            .transport
+            .replies
+            .push_back(Reply::new(Command::global(NOTIFY), &[]));
+        controller.transport.fail_after_control = Some(NOTIFY as u8);
+        assert!(controller.suspend().is_err());
+        assert!(!controller.initialized());
+        assert!(controller.connectors().is_empty());
+        assert!(controller.fault().is_some());
+    }
+
+    #[test]
+    fn resume_reinitializes_firmware_and_replaces_every_snapshot_generation() {
+        let mut controller = initialized();
+        let old = controller.connectors()[0];
+        controller
+            .transport
+            .replies
+            .push_back(Reply::new(Command::global(NOTIFY), &[]));
+        controller.suspend().unwrap();
+        let fresh = initialized();
+        // Replay the genuine discovery requests against the stateful PPM;
+        // firmware status and capability payloads remain supplied by replies.
+        let mut cap = [0; 16];
+        cap[4] = 1;
+        cap[5] = 0xff;
+        cap[6] = 0x3f;
+        let capability = Capability::parse(&cap).unwrap();
+        controller.transport.replies.extend([
+            Reply::new(Command::global(NOTIFY | NOTIFY_BASIC), &[]),
+            Reply::new(Command::capability(), &cap),
+            Reply::new(
+                Command::connector_capability(port()),
+                &[0xff, 0xff, 0x0f, 0],
+            ),
+            Reply::new(Command::connector_status(port()), &status()),
+            Reply::new(
+                Command::global(NOTIFY | capability.notifications(controller.version())),
+                &[],
+            ),
+        ]);
+        controller.resume().unwrap();
+        assert_eq!(controller.generation(), old.generation + 1);
+        assert_eq!(controller.connectors()[0].generation, old.generation + 1);
+        assert_eq!(
+            controller.connectors()[0].status,
+            fresh.connectors()[0].status
+        );
+        assert!(controller.transport.replies.is_empty());
+    }
 }

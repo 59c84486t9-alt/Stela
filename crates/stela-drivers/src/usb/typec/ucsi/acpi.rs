@@ -3,10 +3,15 @@
 // Copyright (c) 2026 Stela contributors
 //! Real UCSI ACPI shared-memory transport, following pinned Linux ucsi_acpi.c.
 //! Discovery, mapping lifetime, AML execution and Notify dispatch are supplied
-//! by the native platform. This module cannot create a platform attachment.
+//! by the native platform. The optional attachment module binds actual ACPICA
+//! handles, owned mailbox mappings and dependency leases.
 
 use super::{Transport, TransportError, Version};
 mod access;
+#[cfg(feature = "native-acpi")]
+pub mod attachment;
+mod lifecycle;
+pub mod resources;
 use core::{
     ptr::NonNull,
     sync::atomic::{Ordering, fence},
