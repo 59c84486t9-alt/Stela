@@ -292,6 +292,17 @@ stela_xstate_restore_no_xfd:
     or r9, rdx
     cmp r9, [rsp + r11 + {mask}]
     jne stela_xstate_refuse
+    cmp qword ptr [rsp + r11 + {format}], {xsave}
+    je stela_xstate_check_sse_tag
+    cmp qword ptr [rsp + r11 + {format}], {xsave_legacy}
+    jne stela_xstate_refuse
+    test r9, 2
+    jnz stela_xstate_refuse
+    jmp stela_xstate_restore_extended
+stela_xstate_check_sse_tag:
+    test r9, 2
+    jz stela_xstate_refuse
+stela_xstate_restore_extended:
     mov rax, r9
     mov rdx, r9
     shr rdx, 32
