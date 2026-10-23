@@ -48,6 +48,18 @@ impl Default for Block {
 }
 
 impl Block {
+    /// Construct an actual completed block result in a bus provider. SMBus
+    /// block counts are 1..=32; an empty default is not a completed transfer.
+    pub fn from_slice(data: &[u8]) -> Result<Self, Error> {
+        if !(1..=MAX_BLOCK).contains(&data.len()) {
+            return Err(ErrorKind::InvalidBlockLength(data.len()).into());
+        }
+        let mut block = Self::default();
+        block.bytes[..data.len()].copy_from_slice(data);
+        block.length = data.len() as u8;
+        Ok(block)
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes[..usize::from(self.length)]
     }
@@ -165,5 +177,26 @@ impl fmt::Display for Error {
             "SMBus {:?}, status {:#04x} (recovery {:?})",
             self.kind, self.status, self.recovery
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn providers_can_return_only_valid_wire_counts_and_exact_completed_bytes() {
+        let bytes: [u8; 33] = core::array::from_fn(|i| (i as u8).wrapping_mul(37));
+        for length in 1..=MAX_BLOCK {
+            let block = Block::from_slice(&bytes[..length]).unwrap();
+            assert_eq!(block.as_slice(), &bytes[..length]);
+        }
+        for length in [0, 33] {
+            assert_eq!(
+                Block::from_slice(&bytes[..length]).unwrap_err().kind,
+                ErrorKind::InvalidBlockLength(length)
+            );
+        }
+        assert!(Block::default().as_slice().is_empty());
     }
 }
