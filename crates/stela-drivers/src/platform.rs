@@ -5,4 +5,5 @@ pub mod acpi;
 #[cfg(feature = "native-acpi")]
 pub mod battery;
 pub mod ec;
+pub mod sbs;
 pub mod work;
