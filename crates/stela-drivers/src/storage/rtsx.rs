@@ -253,6 +253,7 @@ struct Engine {
     last_failure: Option<Failure>,
     request_deadline: Option<crate::Deadline>,
     restoration_failure: Option<BlockError>,
+    failure_finalized: bool,
 }
 impl Engine {
     fn healthy(&mut self) -> Result<(), BlockError> {
@@ -301,6 +302,8 @@ impl Engine {
                 self.clock.delay(200_000);
             }
         }
+        // This fresh observation also catches MemoryStick inserted during the
+        // preceding Stop/interrupt acknowledgement and 200ms debounce.
         let status = self.status()?;
         if status & SD_INT != 0 {
             return Ok(false);
@@ -1893,6 +1896,74 @@ mod tests {
                 assert_eq!(host.poll().err(), Some(primary));
                 assert_eq!(chip.borrow().accesses, before);
             }
+        }
+    }
+    #[test]
+    fn native_successful_memory_stick_poweroff_is_final_and_fresh_commands_retire_again() {
+        for phase in 0..4 {
+            let chip = Chip::new(false, true);
+            let mut host = make_host(&chip, false).unwrap();
+            let mut card = host.poll().unwrap().unwrap();
+            if phase == 3 {
+                host.inner.borrow_mut().set_clock(400_000).unwrap();
+                chip.borrow_mut().card.app = true;
+            }
+            if phase == 0 {
+                chip.borrow_mut().bipr |= 1 << 17;
+            } else {
+                chip.borrow_mut().next_fault = Fault::MemoryStick;
+            }
+            let start = chip.borrow().effects.len();
+            let mut poison = [0xb7; 512];
+            let primary = match phase {
+                2 => card.write(3, &[0x78; 512]).unwrap_err(),
+                3 => host
+                    .inner
+                    .borrow_mut()
+                    .execute(SD_SEND_SCR, 0, Response::Status, Some(8))
+                    .unwrap_err(),
+                _ => card.read(3, &mut poison).unwrap_err(),
+            };
+            assert!(
+                matches!(primary, BlockError::Unsupported(message) if message.contains("Memory Stick"))
+            );
+            assert_eq!(poison, [0xb7; 512]);
+            let failure = host.last_failure().unwrap();
+            assert_eq!(failure.primary, primary);
+            assert_eq!(failure.retirement, None);
+            assert!(!failure.quarantined);
+            assert_eq!(chip.borrow().regs[0x3d50] & 3, 3);
+            assert!(
+                !chip.borrow().effects[start..]
+                    .iter()
+                    .any(|e| matches!(e, Effect::Stop)),
+                "completed emergency power-off is not followed by Stop"
+            );
+            assert!(
+                matches!(
+                    chip.borrow().effects.last(),
+                    Some(Effect::Register(0xfd62, 0xff, 0xd5))
+                ),
+                "power-off is the last hardware publication, including initial divider restoration"
+            );
+            stale(&mut card, &chip);
+            {
+                let mut c = chip.borrow_mut();
+                c.bipr = (c.bipr & !(1 << 17)) | (1 << 25);
+            }
+            let mut fresh = host.poll().unwrap().unwrap();
+            chip.borrow_mut().next_fault = Fault::Crc16;
+            let start = chip.borrow().effects.len();
+            let primary = fresh.read(3, &mut poison).unwrap_err();
+            assert!(matches!(primary, BlockError::Device { .. }));
+            assert_eq!(host.last_failure().unwrap().primary, primary);
+            assert!(
+                chip.borrow().effects[start..]
+                    .iter()
+                    .any(|e| matches!(e, Effect::Stop)),
+                "a fresh command owns its own actual retirement"
+            );
+            stale(&mut fresh, &chip);
         }
     }
     #[test]

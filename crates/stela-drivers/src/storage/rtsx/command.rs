@@ -66,13 +66,15 @@ impl Engine {
         })
     }
     fn retire_error(&mut self, primary: BlockError) -> BlockError {
-        // A nested emergency cleanup already captured its actual failure. A
-        // surrounding command must not replace it with a second empty record.
-        if self.fault.is_some()
+        // A nested emergency cleanup has already finalized this command,
+        // including successful power-off. Do not follow it with Stop or replace
+        // its diagnostic. New commands reset the marker, preserving history
+        // without confusing a prior command's failure with current retirement.
+        if self.failure_finalized
             && self
                 .last_failure
                 .as_ref()
-                .is_some_and(|failure| failure.quarantined && failure.primary == primary)
+                .is_some_and(|failure| failure.primary == primary)
         {
             return primary;
         }
@@ -101,6 +103,7 @@ impl Engine {
         if quarantined {
             self.fault = Some(primary.clone());
         }
+        self.failure_finalized = true;
         self.last_failure = Some(Failure {
             primary: primary.clone(),
             restoration: self.restoration_failure.take(),
@@ -183,6 +186,7 @@ impl Engine {
             },
         );
         self.restoration_failure = None;
+        self.failure_finalized = false;
         let result = self.execute_inner(opcode, argument, response, read_bytes, budget);
         result.map_err(|error| self.retire_error(error))
     }
@@ -211,7 +215,7 @@ impl Engine {
             let result = self.read_data(opcode, argument, bytes, budget);
             // Never replace the first card/data failure with a later restore
             // error, or publish another HAIMR after ownership became uncertain.
-            let restoration = if initial && self.fault.is_none() {
+            let restoration = if initial && self.fault.is_none() && !self.failure_finalized {
                 self.wr(budget, SD_CFG1, SD_CLK_DIVIDE_MASK, SD_CLK_DIVIDE_128)
                     .err()
             } else {
@@ -412,6 +416,8 @@ impl Engine {
         }
     }
     pub(super) fn write_block(&mut self, argument: u32, bytes: &[u8]) -> Result<(), BlockError> {
+        self.restoration_failure = None;
+        self.failure_finalized = false;
         let budget = Budget::new(self, DATA_US);
         let result = (|| {
             self.check_card_before(budget)?;

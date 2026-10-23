@@ -191,6 +191,7 @@ impl Engine {
             last_failure: None,
             request_deadline: None,
             restoration_failure: None,
+            failure_finalized: false,
         };
         engine.healthy()?;
         engine.registers.write32(BIER, 0);
