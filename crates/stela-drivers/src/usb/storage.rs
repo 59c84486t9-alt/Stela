@@ -70,6 +70,28 @@ trait Scsi {
     fn max_lun(&self) -> u8 {
         0
     }
+    fn generation(&self) -> u64 {
+        0
+    }
+    fn max_transfer_bytes(&self) -> usize {
+        MAX_TD
+    }
+    fn capacity16_first(&self) -> bool {
+        false
+    }
+    fn adjust_capacity(&self, blocks: u64) -> Option<u64> {
+        Some(blocks)
+    }
+    fn separate_last_sector(&self) -> bool {
+        false
+    }
+    fn read_before_mode_sense(
+        &mut self,
+        _lun: Self::Lun,
+        _block_size: usize,
+    ) -> Result<(), BlockError> {
+        Ok(())
+    }
     /// The mode page that reports write protection, or none when the unit
     /// is assumed writable (Linux `skip_ms_page_3f`).
     fn write_protect_page(&self) -> Option<u8> {
@@ -99,7 +121,32 @@ impl<I: Io> Scsi for Bot<I> {
     /// Linux usb-storage skips the Caching page for every disk and assumes
     /// write-through without its `WRITE_CACHE` quirk.
     fn caching(&self) -> Caching {
-        Caching::WriteThrough
+        if self.write_cache() {
+            Caching::WriteBack
+        } else {
+            Caching::WriteThrough
+        }
+    }
+    fn write_protect_page(&self) -> Option<u8> {
+        self.write_protect().then_some(scsi::ALL_PAGES)
+    }
+    fn generation(&self) -> u64 {
+        Bot::generation(self)
+    }
+    fn max_transfer_bytes(&self) -> usize {
+        Bot::max_transfer_bytes(self)
+    }
+    fn capacity16_first(&self) -> bool {
+        Bot::capacity16_first(self)
+    }
+    fn adjust_capacity(&self, blocks: u64) -> Option<u64> {
+        Bot::capacity(self, blocks)
+    }
+    fn separate_last_sector(&self) -> bool {
+        true
+    }
+    fn read_before_mode_sense(&mut self, lun: u8, block_size: usize) -> Result<(), BlockError> {
+        Bot::read_before_mode_sense(self, lun, block_size)
     }
 }
 impl Scsi for uas::Host {
@@ -126,6 +173,16 @@ impl Scsi for uas::Host {
     }
     fn report_luns_permitted(&self) -> bool {
         uas::Host::report_luns_permitted(self)
+    }
+    fn max_transfer_bytes(&self) -> usize {
+        uas::Host::max_transfer_bytes(self)
+    }
+    fn read_before_mode_sense(
+        &mut self,
+        lun: uas::Lun,
+        block_size: usize,
+    ) -> Result<(), BlockError> {
+        uas::Host::read_before_mode_sense(self, lun.bytes(), block_size)
     }
 }
 
@@ -155,14 +212,14 @@ pub(super) fn discover_retained(
     dma: &mut dyn DmaAllocator,
     failures: &mut Vec<(String, BlockError)>,
 ) -> Result<(UsbStorage, Vec<UsbDisk>), BlockError> {
-    let bot = Bot::new(
+    let bot = Bot::native(
         Native {
             controller,
             slot: device.slot,
             endpoints,
         },
-        interface.number,
-        endpoints,
+        device,
+        interface,
         dma,
     )?;
     let owner = Rc::new(RefCell::new(media::Owner::new(
@@ -531,39 +588,40 @@ fn probe_identified<T: Scsi>(
     if !ready {
         return Err(BlockError::Unsupported("USB storage never became ready"));
     }
-    let mut read_capacity = [0; 10];
-    read_capacity[0] = scsi::READ_CAPACITY_10;
-    let capacity = bot.command(lun, &read_capacity, Data::In(8))?;
-    if capacity.len() < 8 {
-        return Err(BlockError::Unsupported("short READ CAPACITY data"));
-    }
-    let last = u32::from_be_bytes(capacity[..4].try_into().unwrap());
-    let mut block_size = u32::from_be_bytes(capacity[4..8].try_into().unwrap());
-    let blocks = if last == u32::MAX {
-        let mut cdb = [0u8; 16];
-        cdb[0] = scsi::SERVICE_ACTION_IN_16;
-        cdb[1] = scsi::READ_CAPACITY_16;
-        cdb[13] = 32;
-        let long = bot.command(lun, &cdb, Data::In(32))?;
-        if long.len() < 12 {
-            return Err(BlockError::Unsupported("short READ CAPACITY (16) data"));
-        }
-        block_size = u32::from_be_bytes(long[8..12].try_into().unwrap());
-        u64::from_be_bytes(long[..8].try_into().unwrap())
-            .checked_add(1)
-            .ok_or(BlockError::Unsupported("USB storage capacity overflow"))?
+    let (reported, block_size) = if bot.capacity16_first() {
+        capacity16(bot, lun)?
     } else {
-        u64::from(last) + 1
+        let mut cdb = [0; 10];
+        cdb[0] = scsi::READ_CAPACITY_10;
+        let capacity = bot.command(lun, &cdb, Data::In(8))?;
+        if capacity.len() < 8 {
+            return Err(BlockError::Unsupported("short READ CAPACITY data"));
+        }
+        let last = u32::from_be_bytes(capacity[..4].try_into().unwrap());
+        if last == u32::MAX {
+            capacity16(bot, lun)?
+        } else {
+            (
+                u64::from(last) + 1,
+                u32::from_be_bytes(capacity[4..8].try_into().unwrap()),
+            )
+        }
     };
+    let blocks = bot
+        .adjust_capacity(reported)
+        .ok_or(BlockError::Unsupported(
+            "USB storage invalid adjusted capacity",
+        ))?;
     if block_size < 512
         || !block_size.is_power_of_two()
-        || block_size as usize > MAX_TD
+        || block_size as usize > bot.max_transfer_bytes()
         || blocks.checked_mul(u64::from(block_size)).is_none()
     {
         return Err(BlockError::Unsupported(
             "USB storage block size or capacity",
         ));
     }
+    bot.read_before_mode_sense(lun, block_size as usize)?;
     let read_only = match bot.write_protect_page() {
         None => false,
         Some(page) => {
@@ -596,6 +654,21 @@ fn probe_identified<T: Scsi>(
         block_size,
         read_only,
     })
+}
+
+fn capacity16<T: Scsi>(bot: &mut T, lun: T::Lun) -> Result<(u64, u32), BlockError> {
+    let mut cdb = [0; 16];
+    cdb[0] = scsi::SERVICE_ACTION_IN_16;
+    cdb[1] = scsi::READ_CAPACITY_16;
+    cdb[13] = 32;
+    let bytes = bot.command(lun, &cdb, Data::In(32))?;
+    if bytes.len() < 12 {
+        return Err(BlockError::Unsupported("short READ CAPACITY (16) data"));
+    }
+    let blocks = u64::from_be_bytes(bytes[..8].try_into().unwrap())
+        .checked_add(1)
+        .ok_or(BlockError::Unsupported("USB storage capacity overflow"))?;
+    Ok((blocks, u32::from_be_bytes(bytes[8..12].try_into().unwrap())))
 }
 
 impl<T: Scsi> Disk<T> {
@@ -649,7 +722,19 @@ impl<T: Scsi> BlockDevice for Disk<T> {
         self.identity.check(lba, buffer.len())?;
         let size = self.identity.block_size as usize;
         let mut lba = lba;
-        for chunk in buffer.chunks_mut(MAX_TD / size * size) {
+        let maximum = self.bot.borrow().max_transfer_bytes() / size * size;
+        let separate_last = self.bot.borrow().separate_last_sector();
+        let mut remaining = buffer;
+        while !remaining.is_empty() {
+            let mut length = remaining.len().min(maximum);
+            if separate_last
+                && lba + (length / size) as u64 == self.identity.blocks
+                && length > size
+            {
+                length -= size;
+            }
+            let (chunk, rest) = remaining.split_at_mut(length);
+            remaining = rest;
             let blocks = (chunk.len() / size) as u32;
             let cdb = self.cdb(false, lba, blocks);
             let data = self.command(&cdb, Data::In(chunk.len()))?;
@@ -667,7 +752,19 @@ impl<T: Scsi> BlockDevice for Disk<T> {
         self.identity.check_write(lba, data.len())?;
         let size = self.identity.block_size as usize;
         let mut lba = lba;
-        for chunk in data.chunks(MAX_TD / size * size) {
+        let maximum = self.bot.borrow().max_transfer_bytes() / size * size;
+        let separate_last = self.bot.borrow().separate_last_sector();
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            let mut length = remaining.len().min(maximum);
+            if separate_last
+                && lba + (length / size) as u64 == self.identity.blocks
+                && length > size
+            {
+                length -= size;
+            }
+            let (chunk, rest) = remaining.split_at(length);
+            remaining = rest;
             let blocks = (chunk.len() / size) as u32;
             let cdb = self.cdb(true, lba, blocks);
             self.command(&cdb, Data::Out(chunk))?;
@@ -687,7 +784,7 @@ impl<T: Scsi> BlockDevice for Disk<T> {
 }
 
 impl UsbDisk {
-    /// Explicit recovery for an exclusively owned root-attached UAS device.
+    /// Explicit recovery for an exclusively owned root-attached storage device.
     /// All old disk aliases remain quarantined, including on failure. Returned
     /// disks carry fresh INQUIRY/capacity/protection state; no CDB is replayed.
     /// Use [`Self::reset_and_rebind_retained`] to keep an initially empty fresh

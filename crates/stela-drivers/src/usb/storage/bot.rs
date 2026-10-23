@@ -4,7 +4,13 @@
 // Copyright 1999-2002 Matthew Dharm; 2000 David L. Brown, Jr.;
 // 2000 Stephen J. Gowdy; 2002 Alan Stern; 1999 Michael Gee.
 use super::super::xhci::{DEVICE_TO_HOST, RECIPIENT_INTERFACE, TYPE_CLASS};
+use super::super::xhci::{Device, Interface};
 use super::{Data, Endpoint, MAX_TD, Shared, scsi, setup};
+mod quirks;
+
+pub(super) fn supported(device: &Device) -> Result<(), &'static str> {
+    quirks::Flags::from_device(device).map(|_| ())
+}
 use crate::{
     block::{BlockError, Sense},
     bus::dma::{DmaAllocator, DmaBuffer},
@@ -81,13 +87,27 @@ pub(super) struct Bot<I: Io> {
     tag: u32,
     max_lun: u8,
     poisoned: bool,
+    flags: quirks::Flags,
+    initial_read: bool,
+    attachment: Option<(Device, Interface)>,
+    reset_generation: u64,
 }
 impl<I: Io> Bot<I> {
+    #[cfg(test)]
     pub fn new(
+        io: I,
+        interface: u8,
+        endpoints: [Endpoint; 2],
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<Self, BlockError> {
+        Self::with_flags(io, interface, endpoints, dma, quirks::Flags::default())
+    }
+    fn with_flags(
         mut io: I,
         interface: u8,
         endpoints: [Endpoint; 2],
         dma: &mut dyn DmaAllocator,
+        flags: quirks::Flags,
     ) -> Result<Self, BlockError> {
         io.ready()?;
         let request = setup(
@@ -97,14 +117,18 @@ impl<I: Io> Bot<I> {
             u16::from(interface),
             1,
         );
-        let max_lun = match io.control(request) {
-            Ok(bytes) if bytes.len() == 1 && bytes[0] <= MAX_LUN => bytes[0],
-            // Linux `usb_stor_Bulk_max_lun`: devices stall this request, send
-            // nothing, time out or answer nonsense; all mean one LUN. EP0
-            // must still be usable afterwards.
-            _ => {
-                io.ready()?;
-                0
+        let max_lun = if flags.single_lun() {
+            0
+        } else {
+            match io.control(request) {
+                Ok(bytes) if bytes.len() == 1 && bytes[0] <= MAX_LUN => bytes[0],
+                // Linux `usb_stor_Bulk_max_lun`: devices stall this request, send
+                // nothing, time out or answer nonsense; all mean one LUN. EP0
+                // must still be usable afterwards.
+                _ => {
+                    io.ready()?;
+                    0
+                }
             }
         };
         Ok(Self {
@@ -116,6 +140,10 @@ impl<I: Io> Bot<I> {
             tag: 0,
             max_lun,
             poisoned: false,
+            flags,
+            initial_read: flags.initial_read(),
+            attachment: None,
+            reset_generation: 0,
         })
     }
     pub fn max_lun(&self) -> u8 {
@@ -126,6 +154,48 @@ impl<I: Io> Bot<I> {
     }
     pub fn delay(&self, micros: u64) {
         self.io.delay(micros);
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.reset_generation
+    }
+    pub fn write_protect(&self) -> bool {
+        self.flags.write_protect()
+    }
+    pub fn write_cache(&self) -> bool {
+        self.flags.write_cache()
+    }
+    pub fn capacity16_first(&self) -> bool {
+        self.flags.capacity16_first()
+    }
+    pub fn capacity(&self, blocks: u64) -> Option<u64> {
+        self.flags.capacity(blocks)
+    }
+    pub fn max_transfer_bytes(&self) -> usize {
+        self.flags.max_transfer_bytes()
+    }
+    pub fn read_before_mode_sense(&mut self, lun: u8, block_size: usize) -> Result<(), BlockError> {
+        let mut cdb = [0; 10];
+        cdb[0] = scsi::READ_10;
+        cdb[8] = 1;
+        if self.initial_read {
+            // Linux INITIAL_READ10 discards the first result. This workaround
+            // runs only while probing metadata before publication, never on a
+            // caller's data command or after an observed media change.
+            self.initial_read = false;
+            match self.command(lun, &cdb, Data::In(block_size)) {
+                Err(BlockError::Sense(sense)) if super::media::changed(&sense) => {
+                    return Err(BlockError::Sense(sense));
+                }
+                Err(error) if self.poisoned => return Err(error),
+                _ => {}
+            }
+        }
+        let bytes = self.command(lun, &cdb, Data::In(block_size))?;
+        if bytes.len() != block_size {
+            return Err(BlockError::Protocol("short USB block-zero read"));
+        }
+        Ok(())
     }
 
     fn ready(&mut self) -> Result<(), BlockError> {
@@ -166,6 +236,7 @@ impl<I: Io> Bot<I> {
             self.io.ready()
         })();
         if result.is_ok() {
+            self.reset_generation = self.reset_generation.wrapping_add(1);
             self.poisoned = false;
         }
     }
@@ -188,11 +259,21 @@ impl<I: Io> Bot<I> {
             };
             return Err(sense.map_or(BlockError::CheckCondition, BlockError::Sense));
         }
+        if result.is_ok()
+            && cdb.first() == Some(&scsi::SYNCHRONIZE_CACHE_10)
+            && self.flags.sense_after_sync()
+        {
+            let bytes = self.raw(lun, &scsi::request_sense(), Data::In(scsi::SENSE_BYTES))?;
+            let sense = Sense::parse(&bytes).ok_or(PROTOCOL_ERROR)?;
+            if sense.key != 0 {
+                return Err(BlockError::Sense(sense));
+            }
+        }
         result
     }
 
     fn raw(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
-        if lun > self.max_lun || cdb.is_empty() || cdb.len() > 16 {
+        if lun > self.max_lun || cdb.is_empty() || cdb.len() > 16 || !self.flags.permits(cdb) {
             return Err(BlockError::Unsupported(
                 "invalid USB storage LUN or command",
             ));
@@ -202,15 +283,24 @@ impl<I: Io> Bot<I> {
             Data::In(n) => (*n, true),
             Data::Out(b) => (b.len(), false),
         };
-        if length > MAX_TD {
-            return Err(BlockError::Unsupported("USB storage transfer above 64 KiB"));
+        if length > self.max_transfer_bytes() {
+            return Err(BlockError::Unsupported(
+                "USB storage transfer above device bound",
+            ));
         }
         self.ready()?;
         self.tag = self.tag.wrapping_add(1);
         let wrapper = cbw(self.tag, lun, cdb, length, is_in);
         self.wrapper.bytes_mut()[..31].copy_from_slice(&wrapper);
-        match self.io.bulk(self.endpoints[1], self.wrapper.physical(), 31) {
-            Ok(31) => {}
+        // BULK32 pads the actual native transfer; stale wrapper bytes cannot
+        // leak through the extra donor-defined byte.
+        let cbw_length = self.flags.cbw_len();
+        self.wrapper.bytes_mut()[31] = 0;
+        match self
+            .io
+            .bulk(self.endpoints[1], self.wrapper.physical(), cbw_length)
+        {
+            Ok(n) if n == cbw_length => {}
             Ok(_) => {
                 return self.failed(PROTOCOL_ERROR);
             }
@@ -219,6 +309,9 @@ impl<I: Io> Bot<I> {
         // No uncertain CBW transfer can be followed by a CPU data write.
         if let Data::Out(bytes) = data {
             self.buffer.bytes_mut()[..length].copy_from_slice(bytes);
+        }
+        if self.flags.go_slow() {
+            self.io.delay(125);
         }
         let mut moved = 0;
         if length != 0 {
@@ -238,34 +331,43 @@ impl<I: Io> Bot<I> {
                 Err(error) => return self.failed(error),
             }
         }
-        let input = self.endpoints[0];
-        let address = self.wrapper.physical();
-        let first = self.io.bulk(input, address, 13);
-        let csw = match first {
-            Err(BlockError::Device {
-                status: super::STALL,
-            }) => {
-                if let Err(error) = self.io.clear(input) {
-                    return self.failed(error);
+        // Some bridges skip the data phase and send the CSW directly. Keep
+        // status bytes out of returned media and do not wait for a second CSW.
+        let skipped = is_in
+            && moved == 13
+            && length > 13
+            && u32::from_le_bytes(self.buffer.bytes()[..4].try_into().unwrap()) == CSW_SIGNATURE;
+        if skipped {
+            self.wrapper.bytes_mut()[..13].copy_from_slice(&self.buffer.bytes()[..13]);
+            moved = 0;
+        } else {
+            let input = self.endpoints[0];
+            let address = self.wrapper.physical();
+            let mut zero = false;
+            let mut stalled = false;
+            loop {
+                match self.io.bulk(input, address, 13) {
+                    Ok(13) => break,
+                    Ok(0) if !zero && !stalled => zero = true,
+                    Err(BlockError::Device {
+                        status: super::STALL,
+                    }) if !stalled => {
+                        stalled = true;
+                        if let Err(error) = self.io.clear(input) {
+                            return self.failed(error);
+                        }
+                    }
+                    Ok(_) => return self.failed(PROTOCOL_ERROR),
+                    Err(error) => return self.failed(error),
                 }
-                self.io.bulk(input, address, 13)
             }
-            Ok(0) => self.io.bulk(input, address, 13),
-            other => other,
-        };
-        match csw {
-            Ok(13) => {}
-            Ok(_) => {
-                return self.failed(PROTOCOL_ERROR);
-            }
-            Err(error) => return self.failed(error),
         }
         let bytes = &self.wrapper.bytes()[..13];
         let residue = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         let status = bytes[12];
         if u32::from_le_bytes(bytes[..4].try_into().unwrap()) != CSW_SIGNATURE
-            || u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != self.tag
-            || residue > length
+            || (!self.flags.ignore_tag()
+                && u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != self.tag)
             || status > 1
         {
             return self.failed(PROTOCOL_ERROR);
@@ -273,6 +375,24 @@ impl<I: Io> Bot<I> {
         if status == CSW_FAILED {
             return Err(BlockError::CheckCondition);
         }
+        // transport.c detects bogus residue only from completely received,
+        // successful fixed-size identification replies; no bytes are invented.
+        if is_in
+            && moved == length
+            && residue != 0
+            && ((cdb[0] == scsi::INQUIRY && length == 36)
+                || (cdb[0] == scsi::READ_CAPACITY_10 && length == 8))
+        {
+            self.flags.learn_residue();
+        }
+        if !self.flags.ignore_residue() && residue > length {
+            return self.failed(PROTOCOL_ERROR);
+        }
+        let residue = if self.flags.ignore_residue() {
+            0
+        } else {
+            residue
+        };
         // A successful CSW does not turn a partial block write into success.
         if !is_in && (moved != length || residue != 0) {
             return Err(SHORT_WRITE);
@@ -282,6 +402,152 @@ impl<I: Io> Bot<I> {
         } else {
             Vec::new()
         })
+    }
+}
+
+impl Bot<Native> {
+    pub fn native(
+        io: Native,
+        device: &Device,
+        setting: &Interface,
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<Self, BlockError> {
+        let flags = quirks::Flags::from_device(device).map_err(BlockError::Unsupported)?;
+        let endpoints = io.endpoints;
+        let mut bot = Self::with_flags(io, setting.number, endpoints, dma, flags)?;
+        bot.attachment = Some((device.clone(), setting.clone()));
+        Ok(bot)
+    }
+    pub fn device(&self) -> &Device {
+        &self.attachment.as_ref().expect("native BOT attachment").0
+    }
+    pub fn interface(&self) -> u8 {
+        self.interface
+    }
+    pub fn quarantine(&mut self) {
+        self.poisoned = true;
+        self.io
+            .controller
+            .borrow_mut()
+            .quarantine_slot(self.io.slot);
+    }
+    pub fn reset_and_rebind(
+        &mut self,
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<Self, (alloc::string::String, BlockError)> {
+        self.poisoned = true;
+        let fail = |why| {
+            (
+                alloc::string::String::from("BOT reset/rebind"),
+                BlockError::Unsupported(why),
+            )
+        };
+        let (old, old_setting) = self
+            .attachment
+            .as_ref()
+            .ok_or_else(|| fail("BOT has no retained native attachment"))?;
+        let interfaces = super::super::xhci::interfaces(&old.configuration);
+        if old.configuration.get(4) != Some(&1)
+            || interfaces.is_empty()
+            || interfaces.iter().any(|i| i.number != self.interface)
+        {
+            return Err(fail(
+                "BOT reset requires exclusive ownership of a single-interface device",
+            ));
+        }
+        let controller = self.io.controller.clone();
+        // SAFETY: this sole interface owns both bulk endpoints and was
+        // permanently poisoned before retiring the complete physical device.
+        let mut fresh = unsafe {
+            controller
+                .borrow_mut()
+                .reset_and_identify(old, &self.endpoints, dma)?
+        };
+        let slot = fresh.slot;
+        let result = (|| {
+            if fresh.descriptor != old.descriptor
+                || fresh.configurations != old.configurations
+                || fresh.serial != old.serial
+                || fresh.speed != old.speed
+            {
+                return Err(fail("USB device identity/descriptors changed across reset"));
+            }
+            fresh.configuration = fresh
+                .configurations
+                .iter()
+                .find(|bytes| bytes.get(5) == Some(&old.configuration_value()))
+                .cloned()
+                .ok_or_else(|| fail("USB reset lost the selected configuration"))?;
+            let setting = super::super::xhci::interfaces(&fresh.configuration)
+                .into_iter()
+                .find(|i| {
+                    i.number == self.interface
+                        && i.alternate == old_setting.alternate
+                        && i.class == super::CLASS
+                        && i.subclass == super::SCSI
+                        && i.protocol == super::BULK_ONLY
+                })
+                .ok_or_else(|| fail("USB reset lost the selected BOT alternate"))?;
+            controller
+                .borrow_mut()
+                .set_configuration(slot, fresh.configuration_value())
+                .map_err(|e| {
+                    (
+                        alloc::string::String::from("BOT reset restore configuration"),
+                        e,
+                    )
+                })?;
+            if setting.alternate != 0 {
+                controller
+                    .borrow_mut()
+                    .control(
+                        slot,
+                        setup(
+                            1,
+                            super::super::xhci::SET_INTERFACE,
+                            u16::from(setting.alternate),
+                            u16::from(setting.number),
+                            0,
+                        ),
+                        &[],
+                    )
+                    .map_err(|e| {
+                        (
+                            alloc::string::String::from("BOT reset restore alternate"),
+                            e,
+                        )
+                    })?;
+            }
+            controller
+                .borrow_mut()
+                .configure(slot, &self.endpoints, None, dma)
+                .map_err(|e| {
+                    (
+                        alloc::string::String::from("BOT reset reconstruct endpoints"),
+                        e,
+                    )
+                })?;
+            Self::native(
+                Native {
+                    controller: controller.clone(),
+                    slot,
+                    endpoints: self.endpoints,
+                },
+                &fresh,
+                &setting,
+                dma,
+            )
+            .map_err(|e| {
+                (
+                    alloc::string::String::from("BOT reset reconstruct transport"),
+                    e,
+                )
+            })
+        })();
+        if result.is_err() {
+            controller.borrow_mut().quarantine_slot(slot);
+        }
+        result
     }
 }
 
@@ -311,6 +577,8 @@ mod tests {
         DataStall,
         CswStall,
         CswZero,
+        CswZeroThenStall,
+        SkippedData,
         WrongTag,
         BadSignature,
         BadResidue,
@@ -355,6 +623,7 @@ mod tests {
         command: Option<Command>,
         history: Vec<(u8, u32, Vec<u8>)>,
         controls: Vec<[u8; 8]>,
+        wrappers: Vec<usize>,
         clears: Vec<u8>,
         fault: Fault,
         override_payload: Vec<(u8, Vec<u8>)>,
@@ -414,7 +683,7 @@ mod tests {
             }
         }
         fn delay(&self, micros: u64) {
-            assert!(matches!(micros, 100_000 | RESET_RECOVERY_US));
+            assert!(matches!(micros, 125 | 100_000 | RESET_RECOVERY_US));
             let mut s = self.0.borrow_mut();
             s.now += micros;
             s.order.push(Order::Delay(micros));
@@ -439,7 +708,11 @@ mod tests {
             let bytes = unsafe { core::slice::from_raw_parts_mut(address as *mut u8, length) };
             if s.command.is_none() {
                 assert!(!endpoint.is_in());
-                assert_eq!(length, 31);
+                assert!(matches!(length, 31 | 32));
+                if length == 32 {
+                    assert_eq!(bytes[31], 0);
+                }
+                s.wrappers.push(length);
                 assert_eq!(
                     u32::from_le_bytes(bytes[..4].try_into().unwrap()),
                     CBW_SIGNATURE
@@ -563,7 +836,7 @@ mod tests {
                 if s.fault == Fault::ShortCbw {
                     return Ok(30);
                 }
-                return Ok(31);
+                return Ok(length);
             }
             if s.fault == Fault::Timeout {
                 s.poisoned = true;
@@ -574,6 +847,15 @@ mod tests {
                 assert_eq!(command.input, endpoint.is_in());
                 assert_eq!(length, command.length);
                 command.data_done = true;
+                if s.fault == Fault::SkippedData {
+                    assert!(command.input && length > 13);
+                    bytes[..13].fill(0);
+                    bytes[..4].copy_from_slice(&CSW_SIGNATURE.to_le_bytes());
+                    bytes[4..8].copy_from_slice(&command.tag.to_le_bytes());
+                    bytes[8..12].copy_from_slice(&(command.length as u32).to_le_bytes());
+                    s.fault = Fault::None;
+                    return Ok(13);
+                }
                 if s.fault == Fault::DataStall {
                     s.command = Some(command);
                     return Err(BlockError::Device {
@@ -603,11 +885,18 @@ mod tests {
             }
             assert!(endpoint.is_in());
             assert_eq!(length, 13);
-            if matches!(s.fault, Fault::CswStall | Fault::CswZero) {
+            if matches!(
+                s.fault,
+                Fault::CswStall | Fault::CswZero | Fault::CswZeroThenStall
+            ) {
                 let fault = s.fault;
-                s.fault = Fault::None;
+                s.fault = if fault == Fault::CswZeroThenStall {
+                    Fault::CswStall
+                } else {
+                    Fault::None
+                };
                 s.command = Some(command);
-                return if fault == Fault::CswZero {
+                return if matches!(fault, Fault::CswZero | Fault::CswZeroThenStall) {
                     Ok(0)
                 } else {
                     Err(BlockError::Device {
@@ -675,6 +964,7 @@ mod tests {
             command: None,
             history: Vec::new(),
             controls: Vec::new(),
+            wrappers: Vec::new(),
             clears: Vec::new(),
             fault: Fault::None,
             override_payload: Vec::new(),
@@ -770,6 +1060,7 @@ mod tests {
             u.attention = true;
             u.descriptor_sense = descriptor;
             u.huge = true;
+            u.media.resize(4096, 7);
             u.readonly = true;
             let io = model(start, start + memory.len() as u64 * 8, vec![Some(u)]);
             let state = io.0.clone();
@@ -971,6 +1262,10 @@ mod tests {
                 tag: 7,
                 max_lun: 1,
                 poisoned: false,
+                flags: quirks::Flags::default(),
+                initial_read: false,
+                attachment: None,
+                reset_generation: 0,
             };
             assert!(
                 bot.command(1, &[0x2a, 0, 0, 0, 0, 0, 0, 0, 1, 0], Data::Out(&[1, 2, 3]))
@@ -1366,5 +1661,158 @@ mod tests {
                 Order::Cbw(1)
             ]
         );
+    }
+    #[test]
+    fn source_bridge_profiles_change_actual_wire_transfers_and_probes() {
+        let mut memory = vec![0u64; 32 * 1024];
+        let start = memory.as_mut_ptr() as u64;
+        let mut dma = dma(&mut memory);
+        let io = model(
+            start,
+            start + memory.len() as u64 * 8,
+            vec![unit(3), unit(7)],
+        );
+        let state = io.0.clone();
+        // Kobian Mercury Binocam uses an actual 32-byte wrapper.
+        let flags = quirks::Flags::from_id(0x04fc, 0x80c2, 0x0100, true).unwrap();
+        let mut bot = Bot::with_flags(io, 3, endpoints(), &mut dma, flags).unwrap();
+        bot.command(0, &scsi::inquiry(), Data::In(36)).unwrap();
+        assert_eq!(state.borrow().wrappers, vec![32]);
+        assert_eq!(bot.wrapper.bytes()[31], 0);
+        // Genesis high-speed IDE bridge requires the command/data delay.
+        bot.flags = quirks::Flags::from_id(0x05e3, 0x0702, 0x0010, true).unwrap();
+        bot.command(0, &scsi::inquiry(), Data::In(36)).unwrap();
+        assert!(state.borrow().order.contains(&Order::Delay(125)));
+        let before = state.borrow().controls.len();
+        let flags = quirks::Flags::from_id(0x054c, 0x0010, 0x0106, true).unwrap();
+        let mut single = Bot::with_flags(bot.io.clone(), 3, endpoints(), &mut dma, flags).unwrap();
+        assert_eq!(single.max_lun(), 0);
+        assert_eq!(state.borrow().controls.len(), before);
+        assert!(single.command(1, &scsi::inquiry(), Data::In(36)).is_err());
+        single.flags = quirks::Flags::from_id(0x04e8, 0x5122, 0, true).unwrap();
+        state.borrow_mut().fault = Fault::WrongTag;
+        assert_eq!(
+            single
+                .command(0, &scsi::inquiry(), Data::In(36))
+                .unwrap()
+                .len(),
+            36
+        );
+        assert!(!state.borrow().controls.iter().any(|r| r[1] == RESET));
+    }
+
+    #[test]
+    fn source_residue_learning_skipped_data_and_chained_csw_retry_use_real_status() {
+        for fault in [
+            Fault::BadResidue,
+            Fault::SkippedData,
+            Fault::CswZeroThenStall,
+        ] {
+            let mut memory = vec![0u64; 32 * 1024];
+            let start = memory.as_mut_ptr() as u64;
+            let mut dma = dma(&mut memory);
+            let io = model(start, start + memory.len() as u64 * 8, vec![unit(4)]);
+            let state = io.0.clone();
+            let mut bot = Bot::new(io, 3, endpoints(), &mut dma).unwrap();
+            state.borrow_mut().fault = fault;
+            let bytes = bot.command(0, &scsi::inquiry(), Data::In(36)).unwrap();
+            assert_eq!(
+                bytes.len(),
+                if fault == Fault::SkippedData { 0 } else { 36 }
+            );
+            assert!(!state.borrow().controls.iter().any(|r| r[1] == RESET));
+            if fault == Fault::BadResidue {
+                assert!(bot.flags.ignore_residue());
+            }
+            if fault == Fault::CswZeroThenStall {
+                assert_eq!(state.borrow().clears, vec![0x82]);
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_warmup_limits_and_last_sector_split_reach_actual_block_commands() {
+        use crate::block::BlockDevice;
+        let mut memory = vec![0u64; 32 * 1024];
+        let start = memory.as_mut_ptr() as u64;
+        let mut dma = dma(&mut memory);
+        let mut u = unit(0x55).unwrap();
+        u.media.resize(128 * 1024, 0x55);
+        let io = model(start, start + memory.len() as u64 * 8, vec![Some(u)]);
+        let state = io.0.clone();
+        let mut bot = Bot::new(io, 3, endpoints(), &mut dma).unwrap();
+        // Samsung YP-CP3: 64-sector ceiling and incorrect CSW tags.
+        bot.flags = quirks::Flags::from_id(0x04e8, 0x5122, 0x0000, true).unwrap();
+        let identity = super::super::probe(&mut bot, 0, "slot", "serial").unwrap();
+        {
+            let state = state.borrow();
+            let read = state
+                .history
+                .iter()
+                .position(|(_, _, c)| c[0] == scsi::READ_10)
+                .unwrap();
+            let mode = state
+                .history
+                .iter()
+                .position(|(_, _, c)| c[0] == scsi::MODE_SENSE_6)
+                .unwrap();
+            assert!(read < mode);
+        }
+        let maximum = bot.max_transfer_bytes();
+        assert_eq!(maximum, 32768);
+        let shared = Rc::new(RefCell::new(bot));
+        let mut disk = super::super::Disk {
+            bot: shared,
+            lun: 0,
+            identity,
+            media: Rc::new(core::cell::Cell::new(true)),
+            write_cache: false,
+        };
+        let before = state.borrow().history.len();
+        let mut data = vec![0; 128 * 1024];
+        disk.read(0, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 0x55));
+        let state = state.borrow();
+        let reads: Vec<_> = state.history[before..]
+            .iter()
+            .filter(|(_, _, c)| c[0] == scsi::READ_10)
+            .collect();
+        assert!(
+            reads
+                .iter()
+                .all(|(_, _, c)| usize::from(u16::from_be_bytes([c[7], c[8]])) * 512 <= maximum)
+        );
+        assert_eq!(&reads.last().unwrap().2[7..9], &[0, 1]);
+    }
+
+    #[test]
+    fn acknowledged_class_reset_permanently_invalidates_all_published_luns() {
+        use super::super::media::{Owner, scan_bot};
+        use crate::block::BlockDevice;
+        let mut memory = vec![0u64; 32 * 1024];
+        let start = memory.as_mut_ptr() as u64;
+        let mut dma = dma(&mut memory);
+        let io = model(
+            start,
+            start + memory.len() as u64 * 8,
+            vec![unit(1), unit(2)],
+        );
+        let state = io.0.clone();
+        let owner = Rc::new(RefCell::new(Owner::new(
+            Bot::new(io, 3, endpoints(), &mut dma).unwrap(),
+            "reader".into(),
+            "serial".into(),
+        )));
+        let mut failures = Vec::new();
+        let mut old = scan_bot(owner.clone(), &mut failures).unwrap();
+        state.borrow_mut().fault = Fault::Phase;
+        assert!(old[0].command(&[0; 6], Data::None).is_err());
+        let before = state.borrow().transfers;
+        assert!(old[1].read(0, &mut [0; 512]).is_err());
+        assert!(old[0].flush().is_err());
+        assert_eq!(state.borrow().transfers, before);
+        state.borrow_mut().fault = Fault::None;
+        assert_eq!(scan_bot(owner, &mut failures).unwrap().len(), 2);
+        assert!(old[1].flush().is_err());
     }
 }

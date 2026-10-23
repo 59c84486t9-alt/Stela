@@ -86,6 +86,7 @@ impl<T: Scsi> Scsi for Owner<T> {
         cdb: &[u8],
         data: Data<'_>,
     ) -> Result<Vec<u8>, BlockError> {
+        let generation = self.transport.generation();
         let result = self.transport.command(lun, cdb, data);
         // No retry of data commands. UA identifies an invalidated media view,
         // even when subsequent TUR consumes it and the capacity is unchanged.
@@ -99,6 +100,7 @@ impl<T: Scsi> Scsi for Owner<T> {
             self.changed(lun);
         }
         if self.transport.poisoned()
+            || generation != self.transport.generation()
             || matches!(
                 result,
                 Err(BlockError::Sense(Sense {
@@ -126,6 +128,46 @@ impl<T: Scsi> Scsi for Owner<T> {
     }
     fn report_luns_permitted(&self) -> bool {
         self.transport.report_luns_permitted()
+    }
+    fn generation(&self) -> u64 {
+        self.transport.generation()
+    }
+    fn max_transfer_bytes(&self) -> usize {
+        self.transport.max_transfer_bytes()
+    }
+    fn capacity16_first(&self) -> bool {
+        self.transport.capacity16_first()
+    }
+    fn adjust_capacity(&self, blocks: u64) -> Option<u64> {
+        self.transport.adjust_capacity(blocks)
+    }
+    fn separate_last_sector(&self) -> bool {
+        self.transport.separate_last_sector()
+    }
+    fn read_before_mode_sense(
+        &mut self,
+        lun: Self::Lun,
+        block_size: usize,
+    ) -> Result<(), BlockError> {
+        let generation = self.transport.generation();
+        let result = self.transport.read_before_mode_sense(lun, block_size);
+        if matches!(&result, Err(BlockError::Sense(sense)) if changed(sense)) {
+            self.changed(lun);
+        }
+        if self.transport.poisoned()
+            || generation != self.transport.generation()
+            || matches!(
+                result,
+                Err(BlockError::Sense(Sense {
+                    key: Sense::UNIT_ATTENTION,
+                    asc: Sense::CONDITIONS_CHANGED,
+                    ascq: Sense::LUNS_CHANGED
+                }))
+            )
+        {
+            self.invalidate();
+        }
+        result
     }
     fn media_publication(&mut self, lun: Self::Lun, valid: Rc<Cell<bool>>) {
         self.pending.push((lun, valid));
@@ -253,6 +295,31 @@ impl UsbStorage {
             }),
         }
     }
+    /// One bounded ordinary service pass: poll real media, and replace a
+    /// poisoned transport through acknowledged physical reset and fresh probes.
+    /// Only metadata is reissued; a failed caller data command is never replayed.
+    /// The native event loop must call this method and replace its inventory.
+    pub fn service(
+        &mut self,
+        dma: &mut dyn DmaAllocator,
+        failures: &mut Vec<(String, BlockError)>,
+    ) -> Result<Vec<UsbDisk>, BlockError> {
+        if self.requires_rebind() {
+            return self.reset_and_rebind(dma, failures);
+        }
+        let result = self.rescan(failures);
+        if result.is_err() && self.requires_rebind() {
+            self.reset_and_rebind(dma, failures)
+        } else {
+            result
+        }
+    }
+    fn requires_rebind(&self) -> bool {
+        match &self.owner {
+            TransportOwner::Bot(owner) => owner.borrow().transport.poisoned(),
+            TransportOwner::Uas(owner) => owner.borrow().transport.requires_rebind(),
+        }
+    }
     /// Actual device reset followed by fresh transport, descriptors and media
     /// probes. This owner retains the new interface even when no LUN is ready.
     /// Other copies of the old owner and all its disks remain quarantined.
@@ -261,29 +328,52 @@ impl UsbStorage {
         dma: &mut dyn DmaAllocator,
         failures: &mut Vec<(String, BlockError)>,
     ) -> Result<Vec<UsbDisk>, BlockError> {
-        let TransportOwner::Uas(old) = &self.owner else {
-            return Err(BlockError::Unsupported(
-                "USB reset/rebind currently requires UAS",
-            ));
+        self.owner = match &self.owner {
+            TransportOwner::Bot(old) => {
+                let host = {
+                    let mut old = old.borrow_mut();
+                    old.invalidate();
+                    old.transport.reset_and_rebind(dma)
+                }
+                .map_err(|(operation, error)| {
+                    failures.push((operation, error.clone()));
+                    error
+                })?;
+                let prefix = format!("{} interface {}", host.device().location, host.interface());
+                let serial = String::from(
+                    host.device()
+                        .serial
+                        .as_deref()
+                        .unwrap_or(&host.device().location),
+                );
+                TransportOwner::Bot(Rc::new(RefCell::new(Owner::new(host, prefix, serial))))
+            }
+            TransportOwner::Uas(old) => {
+                let host = {
+                    let mut old = old.borrow_mut();
+                    old.invalidate();
+                    old.transport.reset_and_rebind(dma)
+                }
+                .map_err(|(operation, error)| {
+                    failures.push((operation, error.clone()));
+                    error
+                })?;
+                let prefix = format!("{} interface {}", host.device().location, host.interface());
+                let serial = String::from(
+                    host.device()
+                        .serial
+                        .as_deref()
+                        .unwrap_or(&host.device().location),
+                );
+                TransportOwner::Uas(Rc::new(RefCell::new(Owner::new(host, prefix, serial))))
+            }
         };
-        let result = {
-            let mut old = old.borrow_mut();
-            old.invalidate();
-            old.transport.reset_and_rebind(dma)
-        };
-        let host = result.map_err(|(operation, error)| {
-            failures.push((operation, error.clone()));
-            error
-        })?;
-        let device = host.device();
-        let prefix = format!("{} interface {}", device.location, host.interface());
-        let serial = String::from(device.serial.as_deref().unwrap_or(&device.location));
-        self.owner = TransportOwner::Uas(Rc::new(RefCell::new(Owner::new(host, prefix, serial))));
         let result = self.rescan(failures);
-        if result.is_err()
-            && let TransportOwner::Uas(owner) = &self.owner
-        {
-            owner.borrow_mut().transport.quarantine();
+        if result.is_err() {
+            match &self.owner {
+                TransportOwner::Bot(owner) => owner.borrow_mut().transport.quarantine(),
+                TransportOwner::Uas(owner) => owner.borrow_mut().transport.quarantine(),
+            }
         }
         result
     }
@@ -348,5 +438,86 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn service_recovers_native_uas_without_replaying_data_and_retains_empty_media() {
+        use crate::block::BlockDevice;
+        use crate::usb::xhci;
+        for speed in [xhci::HIGH_SPEED, xhci::SUPER_SPEED] {
+            let mut memory = vec![0u64; 512 * 1024];
+            let (controller, device, hardware, mut dma) =
+                xhci::model::reset_fixture(&mut memory, speed, 32, 3);
+            let binding =
+                uas::Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+            let mut failures = Vec::new();
+            // SAFETY: the fixture grants this owner its one unconfigured interface.
+            let (mut storage, mut disks) = unsafe {
+                super::super::discover_uas_retained(
+                    controller,
+                    &device,
+                    binding,
+                    &mut dma,
+                    &mut failures,
+                )
+            }
+            .unwrap();
+            let stale_owner = storage.clone();
+            let before = hardware.borrow().scsi.len();
+            hardware.borrow_mut().hang_next = true;
+            assert!(disks[0].write(1, &[0xaa; 512]).is_err());
+            let mut fresh = storage.service(&mut dma, &mut failures).unwrap();
+            assert_eq!(fresh[0].identity().blocks, 2048);
+            assert_eq!(hardware.borrow().resets, 1);
+            assert_eq!(
+                hardware.borrow().scsi[before..]
+                    .iter()
+                    .filter(|(_, op)| *op == scsi::WRITE_10)
+                    .count(),
+                1
+            );
+            let accesses = hardware.borrow().accesses;
+            assert!(disks[0].flush().is_err());
+            assert_eq!(hardware.borrow().accesses, accesses);
+            let TransportOwner::Uas(old) = &stale_owner.owner else {
+                panic!("wrong transport");
+            };
+            assert!(old.borrow().transport.requires_rebind());
+            hardware.borrow_mut().empty_media = true;
+            assert!(storage.service(&mut dma, &mut failures).unwrap().is_empty());
+            assert!(fresh[0].read(0, &mut [0; 512]).is_err());
+            hardware.borrow_mut().empty_media = false;
+            let mut inserted = storage.service(&mut dma, &mut failures).unwrap();
+            inserted[0].write(1, &[0xbb; 512]).unwrap();
+            let mut bytes = [0; 512];
+            inserted[0].read(1, &mut bytes).unwrap();
+            assert_eq!(bytes, [0xbb; 512]);
+        }
+    }
+
+    #[test]
+    fn service_recovers_poison_observed_during_metadata_scan_once() {
+        use crate::usb::xhci;
+        let mut memory = vec![0u64; 512 * 1024];
+        let (controller, device, hardware, mut dma) =
+            xhci::model::reset_fixture(&mut memory, xhci::HIGH_SPEED, 32, 3);
+        let binding =
+            uas::Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+        let mut failures = Vec::new();
+        // SAFETY: exclusive fresh fixture interface; no endpoints configured.
+        let (mut storage, mut disks) = unsafe {
+            super::super::discover_uas_retained(
+                controller,
+                &device,
+                binding,
+                &mut dma,
+                &mut failures,
+            )
+        }
+        .unwrap();
+        hardware.borrow_mut().hang_next = true;
+        assert_eq!(storage.service(&mut dma, &mut failures).unwrap().len(), 1);
+        assert_eq!(hardware.borrow().resets, 1);
+        use crate::block::BlockDevice;
+        assert!(disks[0].read(0, &mut [0; 512]).is_err());
     }
 }

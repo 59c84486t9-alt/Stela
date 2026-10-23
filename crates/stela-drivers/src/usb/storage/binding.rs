@@ -77,6 +77,7 @@ pub(super) fn select(
             _ => failure = "unsupported UAS device speed",
         }
     }
+    super::bot::supported(device)?;
     for candidate in candidates().filter(|i| i.protocol == BULK_ONLY) {
         let bulk = |input: bool| {
             candidate
