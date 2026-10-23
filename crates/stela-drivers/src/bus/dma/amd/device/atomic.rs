@@ -4,8 +4,8 @@ use core::ptr::NonNull;
 pub(super) fn supported() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        // SAFETY: CPUID leaf one exists on the declared x86-64 baseline.
-        unsafe { core::arch::x86_64::__cpuid(1).ecx & (1 << 13) != 0 }
+        // CPUID leaf one exists on the declared x86-64 baseline.
+        core::arch::x86_64::__cpuid(1).ecx & (1 << 13) != 0
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
