@@ -991,16 +991,217 @@ duplicate_phi_reader_contract(void)
 }
 
 static void
+pointer_phi_semantics(void)
+{
+   const char *nested =
+      "entry:\n%c = icmp ult i32 %tid, 2\nbr i1 %c, label %choose, label %right\n"
+      "choose:\n%zero = icmp eq i32 %tid, 0\nbr i1 %zero, label %a, label %b\n"
+      "a:\n%pa = getelementptr i32, ptr addrspace(1) %out, i32 1\nbr label %inner\n"
+      "b:\n%pb = getelementptr i32, ptr addrspace(1) %out, i32 2\nbr label %inner\n"
+      "inner:\n%left = phi ptr addrspace(1) [%pb, %b], [%pa, %a]\nbr label %join\n"
+      "right:\n%pr = getelementptr i32, ptr addrspace(1) %out, i32 3\nbr label %join\n"
+      "join:\n%p = phi ptr addrspace(1) [%left, %inner], [%pr, %right]\n"
+      "%alias = bitcast ptr addrspace(1) %p to ptr addrspace(1)\n"
+      "store i32 73, ptr addrspace(1) %alias, align 4\nret void\n";
+   const char *advance =
+      "entry:\n%trips = and i32 %tid, 3\nbr label %header\n"
+      "header:\n%i = phi i32 [0, %entry], [%next, %latch]\n"
+      "%p = phi ptr addrspace(1) [%out, %entry], [%step, %latch]\n"
+      "%more = icmp ult i32 %i, %trips\nbr i1 %more, label %latch, label %exit\n"
+      "latch:\n%step = getelementptr i32, ptr addrspace(1) %p, i32 1\n"
+      "%next = add i32 %i, 1\nbr label %header\n"
+      "exit:\nstore i32 73, ptr addrspace(1) %p, align 4\nret void\n";
+   const char *swap =
+      "entry:\n%trips = and i32 %tid, 3\n"
+      "%base = getelementptr i32, ptr addrspace(1) %out, i32 1\nbr label %header\n"
+      "header:\n%i = phi i32 [0, %entry], [%next, %latch]\n"
+      "%a = phi ptr addrspace(1) [%out, %entry], [%b, %latch]\n"
+      "%b = phi ptr addrspace(1) [%base, %entry], [%a, %latch]\n"
+      "%more = icmp ult i32 %i, %trips\nbr i1 %more, label %latch, label %exit\n"
+      "latch:\n%next = add i32 %i, 1\nbr label %header\n"
+      "exit:\nstore i32 73, ptr addrspace(1) %a, align 4\n"
+      "store i32 97, ptr addrspace(1) %b, align 4\nret void\n";
+   const char *dead = "entry:\nbr label %live\ndead:\n%ignored = inttoptr i64 0 to ptr addrspace(1)\nbr label %join\n"
+      "live:\nbr label %join\njoin:\n%p = phi ptr addrspace(1) [poison, %dead], [%out, %live]\n"
+      "store i32 73, ptr addrspace(1) %p, align 4\nret void\n";
+   const char *bodies[] = {nested, advance, swap, dead};
+   for (unsigned body = 0; body < ARRAY_SIZE(bodies); body++) {
+      for (unsigned tid = 0; tid < 4; tid++) {
+         uint64_t addresses[] = {
+            UINT64_C(0x100000) + (body == 0 ? 4 * (tid < 2 ? tid + 1 : 3) :
+                                    body == 1 ? 4 * tid : body == 2 ? 4 * (tid & 1) : 0),
+            UINT64_C(0x100000) + 4 * ((tid & 1) ^ 1),
+         };
+         const uint32_t values[] = {73, 97};
+         unsigned count = body == 2 ? 2 : 1;
+         nir_shader *nir = translate_body(bodies[body]);
+         specialize_invocation(nir, tid);
+         check_executed_stores(nir, addresses, values, count);
+         ralloc_free(nir);
+         nir = translate_body(bodies[body]);
+         specialize_loop(nir, tid);
+         check_stores(nir, addresses, values, count);
+         ralloc_free(nir);
+      }
+   }
+   /* The same-origin identity loop used to be a blanket type refusal. Retain
+    * genuine nontermination as a bounded test-executor failure, not success. */
+   nir_shader *nir = translate_body("entry:\nbr label %header\nheader:\n"
+      "%p = phi ptr addrspace(1) [%out, %entry], [%p, %latch]\n"
+      "store i32 73, ptr addrspace(1) %p, align 4\nbr label %latch\n"
+      "latch:\nbr label %header\n");
+   specialize_invocation(nir, 0);
+   struct air_effect_store trace[64];
+   CHECK(air_effect_execute(nir, 64, trace, ARRAY_SIZE(trace)).status == AIR_EFFECT_BUDGET);
+   ralloc_free(nir);
+
+   const char *invalid[] = {"undef", "poison", "null"};
+   for (unsigned i = 0; i < ARRAY_SIZE(invalid); i++) {
+      char body[512];
+      snprintf(body, sizeof(body), "entry:\nbr label %%header\nheader:\n"
+         "%%p = phi ptr addrspace(1) [%s, %%entry], [%%step, %%latch]\n"
+         "%%more = icmp eq i32 %%tid, 0\nbr i1 %%more, label %%latch, label %%exit\n"
+         "latch:\n%%step = getelementptr i32, ptr addrspace(1) %%p, i32 1\nbr label %%header\n"
+         "exit:\nret void\n", invalid[i]);
+      expect_refusal(body, "", 100, STELA_AIR_MEMORY);
+   }
+   expect_refusal("entry:\n%raw = inttoptr i64 1048576 to ptr addrspace(1)\nbr label %join\n"
+      "join:\n%p = phi ptr addrspace(1) [%raw, %entry]\nret void\n", "", 100, STELA_AIR_TYPE);
+   expect_refusal("entry:\n%unknown = freeze ptr addrspace(1) %out\nbr label %join\n"
+      "join:\n%p = phi ptr addrspace(1) [%unknown, %entry]\nret void\n", "", 100, STELA_AIR_TYPE);
+   /* LLVM rejects this rootless self-reference on the entry edge before the
+    * provenance pass; do not lend it %out's authority through the later join. */
+   expect_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %cycle, label %root\n"
+      "cycle:\n%p = phi ptr addrspace(1) [%p, %entry], [%p, %cycle]\n"
+      "br i1 %c, label %cycle, label %join\nroot:\nbr label %join\n"
+      "join:\n%q = phi ptr addrspace(1) [%p, %cycle], [%out, %root]\nret void\n",
+      "", 100, STELA_AIR_VERIFY);
+   puts("Same-origin pointer PHIs: nested joins, GEP recurrences, parallel swaps and explicit provenance refusals");
+}
+
+static void
+pointer_equality_semantics(void)
+{
+   const char *loop =
+      "entry:\n%trips = and i32 %tid, 3\nbr label %header\n"
+      "header:\n%i = phi i32 [0, %entry], [%next, %latch]\n"
+      "%p = phi ptr addrspace(1) [%out, %entry], [%step, %latch]\n"
+      "%more = icmp ult i32 %i, %trips\nbr i1 %more, label %latch, label %exit\n"
+      "latch:\n%step = getelementptr i32, ptr addrspace(1) %p, i32 1\n"
+      "%next = add i32 %i, 1\nbr label %header\n"
+      "exit:\n%eq = icmp eq ptr addrspace(1) %p, %out\n"
+      "%ne = icmp ne ptr addrspace(1) %p, %out\n"
+      "%a = zext i1 %eq to i32\n%b = zext i1 %ne to i32\n"
+      "%b2 = shl i32 %b, 1\n%value = or i32 %a, %b2\n"
+      "store i32 %value, ptr addrspace(1) %out, align 4\nret void\n";
+   for (unsigned tid = 0; tid < 4; tid++) {
+      const uint64_t address = 0x100000;
+      const uint32_t value = tid ? 2 : 1;
+      nir_shader *nir = translate_body(loop);
+      specialize_invocation(nir, tid);
+      check_executed_stores(nir, &address, &value, 1);
+      ralloc_free(nir);
+      nir = translate_body(loop);
+      specialize_loop(nir, tid);
+      check_stores(nir, &address, &value, 1);
+      ralloc_free(nir);
+   }
+   /* Non-inbounds GEP arithmetic wraps modulo the pointer width. Adding the
+    * same unknown base preserves eq/ne even across that wrap; it cannot
+    * justify any signed/unsigned ordering of relative offsets. */
+   constant_store("%minus = getelementptr i8, ptr addrspace(1) %out, i64 -1\n"
+      "%wrapped = getelementptr i8, ptr addrspace(1) %minus, i64 1\n"
+      "%eq = icmp eq ptr addrspace(1) %wrapped, %out\n"
+      "%ne = icmp ne ptr addrspace(1) %minus, %out\n"
+      "%a = zext i1 %eq to i32\n%b = zext i1 %ne to i32\n"
+      "%b2 = shl i32 %b, 1\n%value = or i32 %a, %b2\n"
+      "store i32 %value, ptr addrspace(1) %out, align 4\nret void\n", 3, 0x100000);
+   constant_store("%p = getelementptr i32, ptr addrspace(1) %out, i32 0\n"
+      "%same = icmp eq ptr addrspace(1) %p, %out\n%value = zext i1 %same to i32\n"
+      "store i32 %value, ptr addrspace(1) %out, align 4\nret void\n", 1, 0x100000);
+   const char *predicates[] = {"ugt", "uge", "ult", "ule", "sgt", "sge", "slt", "sle"};
+   for (unsigned i = 0; i < ARRAY_SIZE(predicates); i++) {
+      char body[384];
+      snprintf(body, sizeof(body), "%%minus = getelementptr i8, ptr addrspace(1) %%out, i64 -1\n"
+         "%%wrapped = getelementptr i8, ptr addrspace(1) %%minus, i64 1\n"
+         "%%ordered = icmp %s ptr addrspace(1) %%wrapped, %%out\nret void\n", predicates[i]);
+      expect_refusal(body, "", 100, STELA_AIR_TYPE);
+   }
+   const char *invalid[] = {"null", "undef", "poison"};
+   for (unsigned i = 0; i < ARRAY_SIZE(invalid); i++) {
+      for (unsigned ne = 0; ne < 2; ne++) {
+         char body[192];
+         snprintf(body, sizeof(body), "%%same = icmp %s ptr addrspace(1) %%out, %s\nret void\n",
+            ne ? "ne" : "eq", invalid[i]);
+         expect_refusal(body, "", 100, STELA_AIR_MEMORY);
+      }
+   }
+}
+
+static nir_def *
+bind_equal_pointer_roots(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
+{
+   CHECK(buffer->argument == 1 || buffer->argument == 2);
+   (*(unsigned *)data)++;
+   return nir_imm_int64(b, 0x100000); /* Equal test values grant no root identity. */
+}
+
+static void
+pointer_phi_authority_refusals(void)
+{
+   char *prefix = replace_once(stela_air_test_prefix, "ptr addrspace(1) %out)",
+      "ptr addrspace(1) %out, ptr addrspace(1) %other)");
+   char *metadata = replace_once(stela_air_test_metadata, "!4 = !{!5,!6}", "!4 = !{!5,!6,!11}");
+   const char *body = "entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %right\n"
+      "left:\nbr label %join\nright:\nbr label %join\n"
+      "join:\n%p = phi ptr addrspace(1) [%out, %left], [%other, %right]\n"
+      "store i32 73, ptr addrspace(1) %p, align 4\nret void\n";
+   const char *access[] = {"air.read_write", "air.read"};
+   for (unsigned i = 0; i < ARRAY_SIZE(access); i++) {
+      char extra[512];
+      snprintf(extra, sizeof(extra), "!11 = !{i32 2, !\"air.buffer\", !\"air.location_index\", i32 8, i32 1,"
+         " !\"%s\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4,"
+         " !\"air.arg_type_align_size\", i32 4}\n", access[i]);
+      LLVMMemoryBufferRef raw = stela_air_test_custom_bitcode(prefix, body, metadata, extra);
+      unsigned callbacks = 0;
+      const struct stela_air_options options = {.workgroup_size = {32, 1, 1},
+         .max_instructions = 100, .bind_buffer = bind_equal_pointer_roots, .binding_data = &callbacks};
+      struct stela_air_error error;
+      CHECK(!stela_air_to_nir(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw), "kernel",
+         &test_nir_options, &options, &error));
+      CHECK(callbacks == 2 && error.kind == STELA_AIR_MEMORY && strstr(error.detail, "distinct resource"));
+      LLVMDisposeMemoryBuffer(raw);
+   }
+   for (unsigned ne = 0; ne < 2; ne++) {
+      char compare_body[256];
+      snprintf(compare_body, sizeof(compare_body),
+         "%%same = icmp %s ptr addrspace(1) %%out, %%other\nret void\n", ne ? "ne" : "eq");
+      LLVMMemoryBufferRef raw = stela_air_test_custom_bitcode(prefix, compare_body, metadata,
+         "!11 = !{i32 2, !\"air.buffer\", !\"air.location_index\", i32 8, i32 1,"
+         " !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4,"
+         " !\"air.arg_type_align_size\", i32 4}\n");
+      unsigned callbacks = 0;
+      const struct stela_air_options options = {.workgroup_size = {32, 1, 1},
+         .max_instructions = 100, .bind_buffer = bind_equal_pointer_roots, .binding_data = &callbacks};
+      struct stela_air_error error;
+      CHECK(!stela_air_to_nir(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw), "kernel",
+         &test_nir_options, &options, &error));
+      CHECK(callbacks == 2 && error.kind == STELA_AIR_MEMORY && strstr(error.detail, "one validated resource"));
+      LLVMDisposeMemoryBuffer(raw);
+   }
+   free(prefix); free(metadata);
+   metadata = replace_once(stela_air_test_metadata, "air.read_write", "air.read");
+   LLVMMemoryBufferRef raw = stela_air_test_custom_bitcode(stela_air_test_prefix,
+      "entry:\nbr label %join\njoin:\n%p = phi ptr addrspace(1) [%out, %entry]\n"
+      "store i32 73, ptr addrspace(1) %p, align 4\nret void\n", metadata, "");
+   struct stela_air_error error;
+   CHECK(!translate(raw, &test_nir_options, 100, &error) && error.kind == STELA_AIR_MEMORY);
+   LLVMDisposeMemoryBuffer(raw); free(metadata);
+}
+
+static void
 cfg_limits_and_refusals(void)
 {
-   expect_refusal("entry:\nbr label %header\nheader:\n"
-      "%p = phi ptr addrspace(1) [%out, %entry], [%p, %latch]\n"
-      "%c = icmp eq i32 %tid, 0\nbr i1 %c, label %latch, label %exit\n"
-      "latch:\nbr label %header\nexit:\nret void\n", "", 100, STELA_AIR_TYPE);
-   expect_refusal("%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %right\n"
-      "left:\nbr label %join\nright:\nbr label %join\n"
-      "join:\n%p = phi ptr addrspace(1) [%out, %left], [%out, %right]\nret void\n",
-      "", 100, STELA_AIR_TYPE);
    expect_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %right\n"
       "left:\nbr label %join\nright:\nbr label %join\n"
       "join:\n%p = phi {i32, i32} [{i32 1, i32 2}, %left], [{i32 3, i32 4}, %right]\nret void\n",
@@ -1398,6 +1599,108 @@ shared_refusal(const char *body, const char *extra, enum stela_air_error_kind ex
       fprintf(stderr, "shared refusal wanted%u got%u: %s\n", expected, error.kind, error.detail);
    CHECK(!nir && error.kind == expected && error.detail[0]);
    LLVMDisposeMemoryBuffer(input);
+}
+
+static void
+shared_pointer_phi_semantics(void)
+{
+   const char *body =
+      "entry:\n%trips = and i32 %tid, 3\nbr label %header\n"
+      "header:\n%i = phi i32 [0, %entry], [%next, %latch]\n"
+      "%p = phi ptr addrspace(3) [@scratch, %entry], [%step, %latch]\n"
+      "%more = icmp ult i32 %i, %trips\nbr i1 %more, label %latch, label %exit\n"
+      "latch:\n%step = getelementptr i32, ptr addrspace(3) %p, i32 1\n"
+      "%next = add i32 %i, 1\nbr label %header\n"
+      "exit:\nstore i32 42, ptr addrspace(3) %p, align 4\nret void\n";
+   char *dynamic = replace_once(body, "@scratch", "%scratch");
+   for (unsigned mode = 0; mode < 2; mode++) {
+      LLVMMemoryBufferRef raw = shared_bitcode(mode ? dynamic : body, mode != 0,
+         mode ? "" : "@scratch = internal addrspace(3) global [3 x i32] undef, align 4\n");
+      for (unsigned tid = 0; tid < 4; tid++) {
+         struct shared_bindings bindings = {.view = {12, 4, STELA_AIR_READ_WRITE}};
+         struct stela_air_error error;
+         nir_shader *nir = shared_translate(raw, &test_nir_options, &bindings, 12, &error);
+         if (!nir) fprintf(stderr, "shared pointer PHI: %s\n", error.detail);
+         CHECK(nir && nir->info.shared_size == 12 && bindings.shared == mode);
+         specialize_loop(nir, tid);
+         unsigned stores = 0;
+         nir_foreach_function_impl(impl, nir) {
+            CHECK(finite_effect_body(impl));
+            nir_foreach_block(block, impl) {
+               nir_foreach_instr(instr, block) {
+                  if (instr->type != nir_instr_type_intrinsic)
+                     continue;
+                  nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+                  CHECK(in->intrinsic == nir_intrinsic_store_shared && tid < 3);
+                  CHECK(nir_intrinsic_write_mask(in) == 1 && in->num_components == 1);
+                  CHECK(in->src[0].ssa->bit_size == 32 && nir_src_is_const(in->src[0]) &&
+                        nir_src_as_uint(in->src[0]) == 42);
+                  CHECK(nir_src_is_const(in->src[1]) &&
+                        nir_src_as_uint(in->src[1]) + nir_intrinsic_base(in) == 4 * tid);
+                  stores++;
+               }
+            }
+         }
+         CHECK(stores == (tid < 3 ? 1 : 0));
+         ralloc_free(nir);
+      }
+      LLVMDisposeMemoryBuffer(raw);
+   }
+   free(dynamic);
+   shared_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %a, label %b\n"
+      "a:\nbr label %join\nb:\nbr label %join\n"
+      "join:\n%p = phi ptr addrspace(3) [@one, %a], [@two, %b]\nret void\n",
+      "@one = internal addrspace(3) global [1 x i32] undef, align 4\n"
+      "@two = internal addrspace(3) global [2 x i32] undef, align 4\n", STELA_AIR_MEMORY);
+}
+
+static void
+shared_pointer_equality(void)
+{
+   const char *body =
+      "entry:\n%trips = and i32 %tid, 3\nbr label %header\n"
+      "header:\n%i = phi i32 [0, %entry], [%next, %latch]\n"
+      "%p = phi ptr addrspace(3) [@scratch, %entry], [%step, %latch]\n"
+      "%more = icmp ult i32 %i, %trips\nbr i1 %more, label %latch, label %exit\n"
+      "latch:\n%step = getelementptr i32, ptr addrspace(3) %p, i32 1\n"
+      "%next = add i32 %i, 1\nbr label %header\n"
+      "exit:\n%eq = icmp eq ptr addrspace(3) %p, @scratch\n"
+      "%ne = icmp ne ptr addrspace(3) %p, @scratch\n"
+      "%a = zext i1 %eq to i32\n%b = zext i1 %ne to i32\n"
+      "%b2 = shl i32 %b, 1\n%value = or i32 %a, %b2\n"
+      "store i32 %value, ptr addrspace(1) %out, align 4\nret void\n";
+   char *first = replace_once(body, "@scratch", "%scratch");
+   char *second = replace_once(first, "@scratch", "%scratch"); free(first);
+   char *dynamic = replace_once(second, "@scratch", "%scratch"); free(second);
+   for (unsigned mode = 0; mode < 2; mode++) {
+      LLVMMemoryBufferRef raw = shared_bitcode(mode ? dynamic : body, mode != 0,
+         mode ? "" : "@scratch = internal addrspace(3) global [3 x i32] undef, align 4\n");
+      for (unsigned tid = 0; tid < 4; tid++) {
+         struct shared_bindings bindings = {.view = {12, 4, STELA_AIR_READ_WRITE}};
+         struct stela_air_error error;
+         nir_shader *nir = shared_translate(raw, &test_nir_options, &bindings, 12, &error);
+         CHECK(nir);
+         specialize_loop(nir, tid);
+         const uint64_t address = 0x100000;
+         const uint32_t value = tid ? 2 : 1;
+         check_stores(nir, &address, &value, 1);
+         check_executed_stores(nir, &address, &value, 1);
+         ralloc_free(nir);
+      }
+      LLVMDisposeMemoryBuffer(raw);
+   }
+   free(dynamic);
+   for (unsigned ne = 0; ne < 2; ne++) {
+      char compare_body[192];
+      snprintf(compare_body, sizeof(compare_body),
+         "%%same = icmp %s ptr addrspace(3) @one, @two\nret void\n", ne ? "ne" : "eq");
+      shared_refusal(compare_body,
+         "@one = internal addrspace(3) global [3 x i32] undef, align 4\n"
+         "@two = internal addrspace(3) global [3 x i32] undef, align 4\n", STELA_AIR_MEMORY);
+   }
+   shared_refusal("%minus = getelementptr i8, ptr addrspace(3) @scratch, i64 -1\n"
+      "%ordered = icmp ult ptr addrspace(3) %minus, @scratch\nret void\n",
+      "@scratch = internal addrspace(3) global [3 x i32] undef, align 4\n", STELA_AIR_TYPE);
 }
 
 static void
@@ -2013,6 +2316,9 @@ tests(void)
    conditional_semantics();
    loop_semantics();
    cfg_semantics();
+   pointer_phi_semantics();
+   pointer_equality_semantics();
+   pointer_phi_authority_refusals();
    cfg_limits_and_refusals();
    floating_semantics();
    floating_loop_semantics();
@@ -2021,6 +2327,8 @@ tests(void)
    qualified_floating_semantics();
    shared_semantics();
    shared_global_dominance();
+   shared_pointer_phi_semantics();
+   shared_pointer_equality();
    shared_contracts();
    metadata_refusal("i32 2, i32 8, i32 0", "i32 2, i32 10, i32 0", STELA_AIR_METADATA);
    metadata_refusal("i32 2, i32 8, i32 0", "i32 2, i32 9, i32 0", STELA_AIR_TARGET);

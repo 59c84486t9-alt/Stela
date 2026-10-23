@@ -649,6 +649,175 @@ aggregate_phi_semantics(void)
    free(text);
    puts("Packed aggregate PHIs: nested edges, cyclic swaps, exact FP32 bits, guarded predecessors and explicit missing/unsupported leaf refusals");
 }
+static void
+pointer_phi_stage_semantics(void)
+{
+   LLVMMemoryBufferRef initial = bitcode(fixture);
+   struct snapshot vs, fs; struct stela_air_error error;
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+      "test_vertex", STELA_AIR_VERTEX, capture, &vs, &error));
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+      "test_fragment", STELA_AIR_FRAGMENT, capture, &fs, &error));
+   LLVMDisposeMemoryBuffer(initial);
+   struct stela_air_varying_slot map[16]; unsigned count = 0, calls = 0;
+   CHECK(stela_air_link_stage_io(&vs.entry, &fs.entry, 16, map, 16, &count, &error));
+   struct stela_air_stage_options o = options(STELA_AIR_VERTEX, map, count, &calls);
+   const char *root = "{\nentry:\n %c = icmp eq i32 %id, 0\n br i1 %c, label %a, label %b\n"
+      "a:\n br label %join\nb:\n %alias = bitcast ptr addrspace(2) %buffer to ptr addrspace(2)\n br label %join\n"
+      "join:\n %p = phi ptr addrspace(2) [%buffer,%a],[%alias,%b]\n"
+      " %field = getelementptr %Input, ptr addrspace(2) %p, i64 0, i32 0\n"
+      " %position = load <4 x float>, ptr addrspace(2) %field, align 16\n"
+      " %r0 = insertvalue " STAGE_PAIR " undef, <4 x float> %position, 0\n"
+      " %r1 = insertvalue " STAGE_PAIR " %r0, <4 x float> <float 1.0,float 2.0,float 3.0,float 4.0>, 1\n"
+      " ret " STAGE_PAIR " %r1\n}";
+   const char *derived = "{\nentry:\n %c = icmp eq i32 %id, 0\n br i1 %c, label %a, label %b\n"
+      "a:\n %pa = getelementptr %Input, ptr addrspace(2) %buffer, i64 0, i32 0\n br label %join\n"
+      "b:\n %pb = getelementptr %Input, ptr addrspace(2) %buffer, i64 1, i32 0\n br label %join\n"
+      "join:\n %p = phi ptr addrspace(2) [%pa,%a],[%pb,%b]\n"
+      " %position = load <4 x float>, ptr addrspace(2) %p, align 16\n"
+      " %r0 = insertvalue " STAGE_PAIR " undef, <4 x float> %position, 0\n"
+      " %r1 = insertvalue " STAGE_PAIR " %r0, <4 x float> <float 1.0,float 2.0,float 3.0,float 4.0>, 1\n"
+      " ret " STAGE_PAIR " %r1\n}";
+   const char *cycle = "{\nentry:\n %trips = and i32 %id, 3\n br label %header\n"
+      "header:\n %i = phi i32 [0,%entry],[%next,%latch]\n"
+      " %p = phi ptr addrspace(2) [%buffer,%entry],[%p,%latch]\n"
+      " %more = icmp ult i32 %i, %trips\n br i1 %more, label %latch, label %exit\n"
+      "latch:\n %next = add i32 %i, 1\n br label %header\n"
+      "exit:\n %field = getelementptr %Input, ptr addrspace(2) %p, i64 0, i32 0\n"
+      " %position = load <4 x float>, ptr addrspace(2) %field, align 16\n"
+      " %r0 = insertvalue " STAGE_PAIR " undef, <4 x float> %position, 0\n"
+      " %r1 = insertvalue " STAGE_PAIR " %r0, <4 x float> <float 1.0,float 2.0,float 3.0,float 4.0>, 1\n"
+      " ret " STAGE_PAIR " %r1\n}";
+   const char *bodies[] = {root, derived, cycle};
+   const uint32_t source[] = {0x80000000, 0x7fc00001, 0x3f000000, 0x3f800000,
+                             0x40000000, 0x40400000, 0x40800000, 0x40a00000};
+   const unsigned sizes[] = {0, 15, 16, 31, 32};
+   for (unsigned body = 0; body < ARRAY_SIZE(bodies); body++) {
+      char *text = vertex_body(bodies[body]);
+      LLVMMemoryBufferRef raw = bitcode(text); free(text);
+      for (unsigned id = 0; id < 2; id++) {
+         for (unsigned size = 0; size < ARRAY_SIZE(sizes); size++) {
+            nir_shader *nir = translate(raw, "test_vertex", &o);
+            unsigned offset = body == 1 && id ? 4 : 0;
+            uint32_t position[4], color[4];
+            for (unsigned lane = 0; lane < 4; lane++) {
+               position[lane] = sizes[size] >= 4 * offset + 16 ? source[offset + lane] : 0;
+               color[lane] = bits((float)(1 + lane));
+            }
+            specialize(nir, id, source, sizes[size], 0, 0, false);
+            static const nir_shader_compiler_options unroll = {.max_unroll_iterations = 16};
+            nir->options = &unroll;
+            bool progress;
+            do { progress = nir_opt_loop_unroll(nir); fold(nir); } while (progress);
+            outputs(nir, position, color);
+            ralloc_free(nir);
+         }
+      }
+      LLVMDisposeMemoryBuffer(raw);
+   }
+   char *text = vertex_body(root);
+   /* A root PHI still validates the reflected struct before any first GEP. */
+   char *bad = change(text,
+      "getelementptr %Input, ptr addrspace(2) %p, i64 0, i32 0",
+      "getelementptr <4 x float>, ptr addrspace(2) %p, i64 0");
+   refusal(bad, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_TYPE);
+   free(bad); free(text);
+   text = vertex_body(derived);
+   bad = change(text, "[%pa,%a],[%pb,%b]", "[%buffer,%a],[%pb,%b]");
+   refusal(bad, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_MEMORY);
+   free(bad); free(text);
+   text = vertex_body(cycle);
+   bad = change(text, "[%buffer,%entry],[%p,%latch]", "[%buffer,%entry],[%step,%latch]");
+   free(text); text = change(bad, "latch:\n %next = add",
+      "latch:\n %step = getelementptr %Input, ptr addrspace(2) %p, i64 0\n %next = add");
+   free(bad);
+   refusal(text, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_MEMORY);
+   free(text);
+   /* Source roots with equal rights/type remain independent constant views. */
+   text = vertex_body(root);
+   bad = change(text, "ptr addrspace(2) %buffer)", "ptr addrspace(2) %buffer, ptr addrspace(2) %other)");
+   free(text); text = change(bad, "!4 = !{!5,!6}", "!4 = !{!5,!6,!26}"); free(bad);
+   bad = change(text, "[%buffer,%a],[%alias,%b]", "[%buffer,%a],[%other,%b]"); free(text);
+   const char *extra = "!26 = !{i32 2,!\"air.buffer\",!\"air.location_index\",i32 1,i32 1,!\"air.read\",!\"air.address_space\",i32 2,"
+      "!\"air.struct_type_info\",!7,!\"air.arg_type_size\",i32 16,!\"air.arg_type_align_size\",i32 16,!\"air.arg_type_name\",!\"Input\"}\n";
+   size_t bytes = strlen(bad) + strlen(extra) + 1;
+   text = malloc(bytes); CHECK(text); snprintf(text, bytes, "%s%s", bad, extra); free(bad);
+   refusal(text, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_MEMORY);
+   free(text);
+   puts("AS2 pointer PHIs preserve homogeneous root/derived reflection, exact view bounds and root identity");
+}
+
+static void
+pointer_equality_stage_semantics(void)
+{
+   LLVMMemoryBufferRef initial = bitcode(fixture);
+   struct snapshot vs, fs; struct stela_air_error error;
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+      "test_vertex", STELA_AIR_VERTEX, capture, &vs, &error));
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+      "test_fragment", STELA_AIR_FRAGMENT, capture, &fs, &error));
+   LLVMDisposeMemoryBuffer(initial);
+   struct stela_air_varying_slot map[16]; unsigned count = 0, calls = 0;
+   CHECK(stela_air_link_stage_io(&vs.entry, &fs.entry, 16, map, 16, &count, &error));
+   struct stela_air_stage_options o = options(STELA_AIR_VERTEX, map, count, &calls);
+   const char *zero = "{\n %p = getelementptr %Input, ptr addrspace(2) %buffer, i64 0, i32 0\n"
+      " %eq = icmp eq ptr addrspace(2) %p, %buffer\n"
+      " %ne = icmp ne ptr addrspace(2) %p, %buffer\n"
+      " %different = xor i1 %ne, true\n %same = and i1 %eq, %different\n"
+      " %position = select i1 %same, <4 x float> <float 1.0,float 2.0,float 3.0,float 4.0>,"
+      " <4 x float> <float 9.0,float 10.0,float 11.0,float 12.0>\n"
+      " %r0 = insertvalue " STAGE_PAIR " undef, <4 x float> %position, 0\n"
+      " %r1 = insertvalue " STAGE_PAIR " %r0, <4 x float> <float 5.0,float 6.0,float 7.0,float 8.0>, 1\n"
+      " ret " STAGE_PAIR " %r1\n}";
+   const char *loop = "{\nentry:\n %trips = and i32 %id, 3\n"
+      " %first = getelementptr %Input, ptr addrspace(2) %buffer, i64 0, i32 0\n br label %header\n"
+      "header:\n %i = phi i32 [0,%entry],[%next,%latch]\n"
+      " %p = phi ptr addrspace(2) [%first,%entry],[%step,%latch]\n"
+      " %more = icmp ult i32 %i, %trips\n br i1 %more, label %latch, label %exit\n"
+      "latch:\n %step = getelementptr %Input, ptr addrspace(2) %p, i64 1\n"
+      " %next = add i32 %i, 1\n br label %header\n"
+      "exit:\n %eq = icmp eq ptr addrspace(2) %p, %buffer\n"
+      " %ne = icmp ne ptr addrspace(2) %p, %buffer\n"
+      " %different = xor i1 %ne, true\n %same = and i1 %eq, %different\n"
+      " %position = select i1 %same, <4 x float> <float 1.0,float 2.0,float 3.0,float 4.0>,"
+      " <4 x float> <float 9.0,float 10.0,float 11.0,float 12.0>\n"
+      " %r0 = insertvalue " STAGE_PAIR " undef, <4 x float> %position, 0\n"
+      " %r1 = insertvalue " STAGE_PAIR " %r0, <4 x float> <float 5.0,float 6.0,float 7.0,float 8.0>, 1\n"
+      " ret " STAGE_PAIR " %r1\n}";
+   const char *bodies[] = {zero, loop};
+   static const nir_shader_compiler_options unroll = {.max_unroll_iterations = 16};
+   for (unsigned body = 0; body < ARRAY_SIZE(bodies); body++) {
+      char *text = vertex_body(bodies[body]);
+      LLVMMemoryBufferRef raw = bitcode(text); free(text);
+      for (unsigned id = 0; id < 4; id++) {
+         nir_shader *nir = translate(raw, "test_vertex", &o);
+         const uint32_t unused[4] = {0};
+         specialize(nir, id, unused, 0, 0, 0, false);
+         nir->options = &unroll;
+         bool progress;
+         do { progress = nir_opt_loop_unroll(nir); fold(nir); } while (progress);
+         uint32_t position[4], color[4];
+         for (unsigned lane = 0; lane < 4; lane++) {
+            position[lane] = bits((float)(1 + lane + (body && id ? 8 : 0)));
+            color[lane] = bits((float)(5 + lane));
+         }
+         outputs(nir, position, color);
+         ralloc_free(nir);
+      }
+      LLVMDisposeMemoryBuffer(raw);
+   }
+   char *text = vertex_body(zero);
+   char *bad = change(text, "icmp eq ptr addrspace(2) %p, %buffer",
+      "icmp ult ptr addrspace(2) %p, %buffer");
+   refusal(bad, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_TYPE);
+   free(bad);
+   bad = change(text, "icmp eq ptr addrspace(2) %p, %buffer",
+      "icmp eq ptr addrspace(2) %p, null");
+   refusal(bad, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_MEMORY);
+   free(bad); free(text);
+   puts("AS2 same-resource eq/ne ignore only reflection typing and retain exact loop-PHI output decisions");
+}
+
 #undef STAGE_PAIR
 #undef STAGE_MIXED
 
@@ -903,6 +1072,8 @@ int main(int argc,char **argv)
    output_oracle_controls();
    arithmetic_and_lane_semantics();
    aggregate_phi_semantics();
+   pointer_phi_stage_semantics();
+   pointer_equality_stage_semantics();
    if(argc==5 && !strcmp(argv[1],"--input") && !strcmp(argv[3],"--texture")) {
       b=file(argv[2]);run(b,"vertexShader","fragmentShader",true);LLVMDisposeMemoryBuffer(b);
       b=file(argv[4]);struct stela_air_error e;

@@ -24,6 +24,7 @@ struct air_block {
 struct value {
    nir_def *def;
    unsigned access; /* Buffer provenance; zero for integer values. */
+   LLVMValueRef pointer_root; /* Proven resource identity, never a numeric address. */
    bool ssbo;
    unsigned ssbo_slot;
    nir_variable *shared;
@@ -52,6 +53,12 @@ stela_air_ssbo_view_valid(const struct stela_air_ssbo_view *view,
           view->size <= view->buffer_size - view->offset;
 }
 
+struct pointer_node {
+   LLVMValueRef llvm, root;
+   unsigned index, low, next, component;
+   bool active, view_root;
+};
+
 struct translator {
    LLVMContextRef context;
    LLVMModuleRef module;
@@ -76,7 +83,9 @@ struct translator {
    bool fp_checked;
    LLVMValueRef entry;
    void *cfg_scratch;
-   struct hash_table *block_map;
+   struct hash_table *block_map, *pointer_map;
+   struct pointer_node *pointers;
+   unsigned pointer_count;
    struct air_block *blocks;
    struct air_block **work;
    unsigned block_count, reachable_count;
@@ -351,6 +360,8 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
       }
       if (!put_value(t, param, def, desc.access))
          return false;
+      if (buffer)
+         find_value(t, param)->pointer_root = param;
       if (shared) {
          struct value *value = find_value(t, param);
          value->shared = shared;
@@ -464,6 +475,7 @@ shared_global(struct translator *t, LLVMValueRef global)
    struct value *value = find_value(t, global);
    value->shared = var;
    value->shared_size = (unsigned)size;
+   value->pointer_root = global;
    return value->def;
 }
 
@@ -900,7 +912,7 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
       if (!put_value(t, param, def, io->buffer.access)) return false;
       if (io->semantic == STELA_AIR_STAGE_BUFFER) {
          struct value *v = find_value(t, param);
-         v->constant_view = io; v->view_root = true;
+         v->constant_view = io; v->view_root = true; v->pointer_root = param;
          v->ssbo = t->options->bind_ssbo != NULL; v->ssbo_slot = slot;
       }
    }
@@ -932,6 +944,8 @@ stage_return(struct translator *t, LLVMValueRef inst)
    return true;
 }
 
+static bool same_pointer_resource(const struct value *a, const struct value *b);
+
 static bool
 instruction(struct translator *t, LLVMValueRef inst)
 {
@@ -952,6 +966,7 @@ instruction(struct translator *t, LLVMValueRef inst)
       if (!def || !put_value(t, inst, def, origin->access))
          return false;
       struct value *value = find_value(t, inst);
+      value->pointer_root = origin->pointer_root;
       value->ssbo = origin->ssbo;
       value->ssbo_slot = origin->ssbo_slot;
       value->shared = origin->shared;
@@ -971,6 +986,7 @@ instruction(struct translator *t, LLVMValueRef inst)
          if (!origin || !origin->access || !put_value(t, inst, origin->def, origin->access))
             return fail(t, STELA_AIR_MEMORY, "pointer identity cast lacks buffer provenance");
          struct value *value = find_value(t, inst);
+         value->pointer_root = origin->pointer_root;
          value->ssbo = origin->ssbo;
          value->ssbo_slot = origin->ssbo_slot;
          value->shared = origin->shared;
@@ -1161,8 +1177,24 @@ instruction(struct translator *t, LLVMValueRef inst)
    if (bits == 1 && (op == LLVMAdd || op == LLVMSub || op == LLVMMul ||
                     op == LLVMShl || op == LLVMLShr || op == LLVMAShr))
       return fail(t, STELA_AIR_TYPE, "one-bit arithmetic/shift unsupported");
-   if (op == LLVMICmp && LLVMGetTypeKind(LLVMTypeOf(LLVMGetOperand(inst, 0))) == LLVMPointerTypeKind)
-      return fail(t, STELA_AIR_TYPE, "pointer comparison unsupported");
+   if (op == LLVMICmp && LLVMGetTypeKind(LLVMTypeOf(LLVMGetOperand(inst, 0))) == LLVMPointerTypeKind) {
+      LLVMIntPredicate predicate = LLVMGetICmpPredicate(inst);
+      if (predicate != LLVMIntEQ && predicate != LLVMIntNE)
+         return fail(t, STELA_AIR_TYPE, "pointer relational comparison unsupported");
+      LLVMValueRef left = LLVMGetOperand(inst, 0), right = LLVMGetOperand(inst, 1);
+      if ((LLVMIsAGlobalVariable(left) && !get_value(t, left)) ||
+          (LLVMIsAGlobalVariable(right) && !get_value(t, right)))
+         return false;
+      const struct value *a = find_value(t, left), *b = find_value(t, right);
+      if (!same_pointer_resource(a, b) || !a->def || !b->def ||
+          a->def->num_components != 1 || b->def->num_components != 1 ||
+          a->def->bit_size != 64 || b->def->bit_size != 64)
+         return fail(t, STELA_AIR_MEMORY, "pointer equality requires one validated resource origin");
+      /* Equality is invariant under the same unknown base modulo 2^64.
+       * AS2 root reflection affects typing, not the pointer's address. */
+      return put_value(t, inst, predicate == LLVMIntEQ ?
+         nir_ieq(&t->b, a->def, b->def) : nir_ine(&t->b, a->def, b->def), 0);
+   }
    if (op == LLVMLoad || op == LLVMStore) {
       LLVMValueRef pointer = LLVMGetOperand(inst, op == LLVMStore ? 1 : 0);
       if (LLVMIsAGlobalVariable(pointer) && !get_value(t, pointer))
@@ -1385,17 +1417,254 @@ cfg_prepare(struct translator *t, LLVMValueRef fn)
    return true;
 }
 
+/* Static pointer authority is separate from the offset/VA in def. */
+static void
+pointer_authority(struct value *target, const struct value *root, bool view_root)
+{
+   target->pointer_root = root->pointer_root;
+   target->access = root->access;
+   target->ssbo = root->ssbo;
+   target->ssbo_slot = root->ssbo_slot;
+   target->shared = root->shared;
+   target->shared_size = root->shared_size;
+   target->constant_view = root->constant_view;
+   target->view_root = view_root;
+}
+
+static bool
+same_pointer_resource(const struct value *a, const struct value *b)
+{
+   return a && b && a->pointer_root && a->pointer_root == b->pointer_root &&
+      a->access == b->access && a->ssbo == b->ssbo && a->ssbo_slot == b->ssbo_slot &&
+      a->shared == b->shared && a->shared_size == b->shared_size &&
+      a->constant_view == b->constant_view;
+}
+
+static bool
+same_pointer_authority(const struct value *a, const struct value *b)
+{
+   return same_pointer_resource(a, b) && a->view_root == b->view_root;
+}
+
+static struct pointer_node *
+pointer_node(struct translator *t, LLVMValueRef llvm)
+{
+   struct hash_entry *entry = _mesa_hash_table_search(t->pointer_map, llvm);
+   return entry ? entry->data : NULL;
+}
+
+static bool
+pointer_space(struct translator *t, LLVMTypeRef type)
+{
+   if (LLVMGetTypeKind(type) != LLVMPointerTypeKind)
+      return false;
+   unsigned space = LLVMGetPointerAddressSpace(type);
+   return space == 1 || space == 3 || (t->stage_options && space == 2);
+}
+
+static struct value *
+pointer_anchor(struct translator *t, LLVMValueRef llvm)
+{
+   struct value *value = find_value(t, llvm);
+   if (!value && LLVMIsAGlobalVariable(llvm)) {
+      if (!shared_global(t, llvm))
+         return NULL;
+      value = find_value(t, llvm);
+   }
+   if (!value || !value->access || value->pointer_root != llvm ||
+       !pointer_space(t, LLVMTypeOf(llvm)) || !value->def ||
+       value->def->num_components != 1 || value->def->bit_size != 64 ||
+       LLVMGetPointerAddressSpace(LLVMTypeOf(llvm)) !=
+          (value->shared ? 3 : value->constant_view ? 2 : 1)) {
+      fail(t, STELA_AIR_MEMORY, "pointer PHI dependency lacks validated resource origin");
+      return NULL;
+   }
+   return value;
+}
+
+static unsigned
+pointer_dependencies(const struct pointer_node *node, bool reflection)
+{
+   LLVMOpcode op = LLVMGetInstructionOpcode(node->llvm);
+   if (reflection && op == LLVMGetElementPtr)
+      return 0; /* A GEP is a non-root reflection anchor, even in a cycle. */
+   return op == LLVMPHI ? LLVMCountIncoming(node->llvm) : 1;
+}
+
+static LLVMValueRef
+pointer_dependency(struct translator *t, const struct pointer_node *node, unsigned index)
+{
+   if (LLVMGetInstructionOpcode(node->llvm) != LLVMPHI)
+      return LLVMGetOperand(node->llvm, 0);
+   struct air_block *pred = cfg_block(t, LLVMGetIncomingBlock(node->llvm, index));
+   /* LLVM verification has already established entry-local predecessor edges. */
+   return pred && pred->reachable ? LLVMGetIncomingValue(node->llvm, index) : NULL;
+}
+
+/* Resolve one SCC only from already-proven outgoing dependencies. In
+ * particular, a rooted user cannot lend authority backward to a rootless cycle.
+ * Reflection uses the same solver with GEP as a terminal false anchor. */
+static bool
+pointer_component(struct translator *t, struct pointer_node **stack,
+                  unsigned begin, unsigned end, unsigned component, bool reflection)
+{
+   LLVMValueRef root = NULL;
+   bool state = false, anchored = false;
+   for (unsigned i = begin; i < end; i++)
+      stack[i]->component = component;
+   for (unsigned i = begin; i < end; i++) {
+      struct pointer_node *node = stack[i];
+      if (reflection && LLVMGetInstructionOpcode(node->llvm) == LLVMGetElementPtr) {
+         if (anchored && state)
+            return fail(t, STELA_AIR_MEMORY, "pointer PHI mixes AS2 root reflection states");
+         anchored = true;
+         state = false;
+      }
+      unsigned count = pointer_dependencies(node, reflection);
+      for (unsigned j = 0; j < count; j++) {
+         LLVMValueRef dependency = pointer_dependency(t, node, j);
+         if (!dependency)
+            continue;
+         struct pointer_node *dep = pointer_node(t, dependency);
+         LLVMValueRef candidate;
+         bool candidate_state;
+         if (dep) {
+            if (dep->component == component)
+               continue;
+            if (dep->component == UINT_MAX)
+               return fail(t, STELA_AIR_MEMORY, "unresolved pointer provenance component");
+            candidate = dep->root;
+            candidate_state = dep->view_root;
+         } else {
+            struct value *value = pointer_anchor(t, dependency);
+            if (!value)
+               return false;
+            candidate = dependency;
+            candidate_state = value->view_root;
+         }
+         if (anchored && (reflection ? state != candidate_state : root != candidate))
+            return fail(t, STELA_AIR_MEMORY, reflection ?
+               "pointer PHI mixes AS2 root reflection states" :
+               "pointer PHI joins distinct resource origins");
+         anchored = true;
+         root = candidate;
+         state = candidate_state;
+      }
+   }
+   if (!anchored)
+      return fail(t, STELA_AIR_MEMORY, "pointer PHI has a rootless dependency cycle");
+   for (unsigned i = begin; i < end; i++) {
+      if (reflection)
+         stack[i]->view_root = state;
+      else
+         stack[i]->root = root;
+   }
+   return true;
+}
+
+static bool
+pointer_solve(struct translator *t, struct pointer_node **dfs,
+              struct pointer_node **stack, bool reflection)
+{
+   unsigned serial = 0, component = 0, depth = 0, active = 0;
+   for (unsigned i = 0; i < t->pointer_count; i++) {
+      struct pointer_node *node = &t->pointers[i];
+      node->index = node->component = UINT_MAX;
+      node->next = 0;
+      node->active = false;
+   }
+   for (unsigned i = 0; i < t->pointer_count; i++) {
+      if (t->pointers[i].index != UINT_MAX)
+         continue;
+      dfs[depth++] = &t->pointers[i];
+      while (depth) {
+         struct pointer_node *node = dfs[depth - 1];
+         if (node->index == UINT_MAX) {
+            node->index = node->low = serial++;
+            node->active = true;
+            stack[active++] = node;
+         }
+         unsigned count = pointer_dependencies(node, reflection);
+         if (node->next < count) {
+            LLVMValueRef llvm = pointer_dependency(t, node, node->next++);
+            struct pointer_node *dep = llvm ? pointer_node(t, llvm) : NULL;
+            if (!dep)
+               continue; /* Roots are checked when the SCC is resolved. */
+            if (dep->index == UINT_MAX) {
+               dfs[depth++] = dep;
+            } else if (dep->active) {
+               node->low = MIN2(node->low, dep->index);
+            }
+            continue;
+         }
+         if (node->low == node->index) {
+            unsigned end = active;
+            do {
+               stack[--active]->active = false;
+            } while (stack[active] != node);
+            if (!pointer_component(t, stack, active, end, component++, reflection))
+               return false;
+         }
+         depth--;
+         if (depth)
+            dfs[depth - 1]->low = MIN2(dfs[depth - 1]->low, node->low);
+      }
+   }
+   return true;
+}
+
+static bool
+pointer_provenance(struct translator *t)
+{
+   for (unsigned i = 0; i < t->reachable_count; i++) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(t->work[i]->llvm); inst;
+           inst = LLVMGetNextInstruction(inst)) {
+         if (LLVMGetTypeKind(LLVMTypeOf(inst)) == LLVMPointerTypeKind)
+            t->pointer_count++;
+      }
+   }
+   t->pointer_map = _mesa_pointer_hash_table_create(t->cfg_scratch);
+   if (!t->pointer_map)
+      return fail(t, STELA_AIR_ALLOCATION, "pointer provenance map allocation failed");
+   if (!t->pointer_count)
+      return true;
+   t->pointers = rzalloc_array(t->cfg_scratch, struct pointer_node, t->pointer_count);
+   struct pointer_node **dfs = ralloc_array(t->cfg_scratch, struct pointer_node *, t->pointer_count);
+   struct pointer_node **stack = ralloc_array(t->cfg_scratch, struct pointer_node *, t->pointer_count);
+   if (!t->pointers || !dfs || !stack)
+      return fail(t, STELA_AIR_ALLOCATION, "pointer provenance scratch allocation failed");
+   unsigned next = 0;
+   for (unsigned i = 0; i < t->reachable_count; i++) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(t->work[i]->llvm); inst;
+           inst = LLVMGetNextInstruction(inst)) {
+         if (LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMPointerTypeKind)
+            continue;
+         LLVMOpcode op = LLVMGetInstructionOpcode(inst);
+         if (op != LLVMPHI && op != LLVMGetElementPtr && op != LLVMBitCast)
+            return fail(t, STELA_AIR_TYPE, "unsupported pointer provenance producer");
+         if (!pointer_space(t, LLVMTypeOf(inst)) ||
+             (op != LLVMPHI && LLVMTypeOf(LLVMGetOperand(inst, 0)) != LLVMTypeOf(inst)))
+            return fail(t, STELA_AIR_MEMORY, "unsupported pointer provenance address space");
+         struct pointer_node *node = &t->pointers[next++];
+         node->llvm = inst;
+         if (!_mesa_hash_table_insert(t->pointer_map, inst, node))
+            return fail(t, STELA_AIR_ALLOCATION, "pointer provenance insertion failed");
+      }
+   }
+   return pointer_solve(t, dfs, stack, false) && pointer_solve(t, dfs, stack, true);
+}
+
 static bool
 cfg_phi_shape(struct translator *t, LLVMTypeRef type, unsigned *leaves)
 {
    unsigned components, bits;
    *leaves = 0;
-   if (value_shape(type, &components, &bits))
+   if (value_shape(type, &components, &bits) || pointer_space(t, type))
       return true;
    if (!t->stage_options || LLVMGetTypeKind(type) != LLVMStructTypeKind ||
        LLVMIsOpaqueStruct(type) || !LLVMIsPackedStruct(type) ||
        !LLVMCountStructElementTypes(type) || LLVMCountStructElementTypes(type) > AIR_MAX_ARGUMENTS)
-      return fail(t, STELA_AIR_TYPE, "PHI requires numeric value or packed flat FP32 render aggregate");
+      return fail(t, STELA_AIR_TYPE, "PHI requires numeric/proven pointer value or packed flat FP32 render aggregate");
    *leaves = LLVMCountStructElementTypes(type);
    for (unsigned i = 0; i < *leaves; i++) {
       if (!float_shape(LLVMStructGetTypeAtIndex(type, i), &components, &bits))
@@ -1408,7 +1677,10 @@ static struct value *
 cfg_phi_leaf(struct translator *t, LLVMTypeRef type)
 {
    unsigned components, bits;
-   if (!value_shape(type, &components, &bits)) {
+   if (pointer_space(t, type)) {
+      components = 1;
+      bits = 64;
+   } else if (!value_shape(type, &components, &bits)) {
       fail(t, STELA_AIR_TYPE, "unsupported PHI leaf type");
       return NULL;
    }
@@ -1449,6 +1721,13 @@ cfg_declare_phi(struct translator *t, LLVMValueRef inst)
       if (!value)
          return false;
    }
+   if (pointer_space(t, type)) {
+      struct pointer_node *node = pointer_node(t, inst);
+      struct value *root = node ? find_value(t, node->root) : NULL;
+      if (!root)
+         return fail(t, STELA_AIR_MEMORY, "pointer PHI lacks completed provenance proof");
+      pointer_authority(value, root, node->view_root);
+   }
    return _mesa_hash_table_insert(t->values, inst, value) != NULL ||
       fail(t, STELA_AIR_ALLOCATION, "AIR PHI value map allocation failed");
 }
@@ -1481,7 +1760,7 @@ cfg_declare(struct translator *t)
 static bool
 cfg_emit(struct translator *t)
 {
-   if (!cfg_declare(t))
+   if (!pointer_provenance(t) || !cfg_declare(t))
       return false;
    for (unsigned i = 0; i < t->reachable_count; i++) {
       struct air_block *block = t->work[i];
@@ -1542,6 +1821,8 @@ cfg_emit(struct translator *t)
             /* Constants are materialized before the predecessor's jump. Uses
              * of loop-carried PHIs retain their original simultaneous defs. */
             t->b.cursor = nir_before_instr(nir_block_last_instr(pred->end));
+            if (target->pointer_root && !same_pointer_authority(target, find_value(t, incoming)))
+               return fail(t, STELA_AIR_MEMORY, "pointer PHI incoming authority differs from proof");
             struct value *aggregate = target->aggregate_count ? aggregate_value(t, incoming) : NULL;
             if (target->aggregate_count &&
                 (!aggregate || aggregate->aggregate_count != target->aggregate_count))

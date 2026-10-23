@@ -131,8 +131,16 @@ nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
  * early returns, nested/multiple-latch loops and irreducible entries. Original
  * and legalized inputs share the caller's instruction budget; total switch
  * cases also obey that budget before legalization. Production has no iteration
- * cap. Pointer PHIs, compute aggregate PHIs and reachable unsupported terminators
- * are refused explicitly. Unreachable blocks consume the budget but emit no
+ * cap. Pointer PHIs require a pre-emission, cycle-aware proof of one validated
+ * resource root and homogeneous AS2 root/derived reflection state. The numeric
+ * PHI carries only the offset/VA; its root's exact rights/resource/view metadata
+ * remain static and every incoming edge must agree. Pointer eq/ne require the
+ * same resource authority, ignoring only AS2 root-reflection typing state;
+ * relational and cross-resource comparisons remain explicit refusals.
+ * Cross-resource joins,
+ * rootless/undef/poison/integer-derived pointers, unsupported pointer producers,
+ * compute aggregate PHIs and reachable unsupported terminators are refused
+ * explicitly. Unreachable blocks consume the budget but emit no
  * effects. These source paths await semantic/vendor qualification; no family
  * capability follows from accepting a control-flow shape.
  * Qualified AS3 storage is returned as explicit shared32 NIR with the original

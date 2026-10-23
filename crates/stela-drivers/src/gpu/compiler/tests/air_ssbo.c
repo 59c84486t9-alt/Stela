@@ -301,6 +301,124 @@ loop_guarded_phis(void)
 }
 
 static void
+pointer_phi_guarded_bounds(void)
+{
+   const uint64_t offsets[] = {0, 60, 61, UINT64_C(0x100000004), UINT64_MAX - 3};
+   const uint32_t sizes[] = {0, 3, 8, 12, 63, 64};
+   for (unsigned offset = 0; offset < ARRAY_SIZE(offsets); offset++) {
+      char body[1536];
+      snprintf(body, sizeof(body),
+         "entry:\n%%c = icmp eq i32 %%tid, 0\nbr i1 %%c, label %%left, label %%right\n"
+         "left:\n%%high = getelementptr i8, ptr addrspace(1) %%out, i64 4294967300\n"
+         "%%loaded = load i32, ptr addrspace(1) %%high, align 1\n"
+         "%%lp = getelementptr i8, ptr addrspace(1) %%out, i64 %llu\nbr label %%join\n"
+         "right:\n%%rp = getelementptr i8, ptr addrspace(1) %%out, i64 8\nbr label %%join\n"
+         "join:\n%%p = phi ptr addrspace(1) [%%lp, %%left], [%%rp, %%right]\n"
+         "%%v = phi i32 [%%loaded, %%left], [37, %%right]\n"
+         "store i32 %%v, ptr addrspace(1) %%p, align 1\nret void\n",
+         (unsigned long long)offsets[offset]);
+      for (unsigned tid = 0; tid < 2; tid++) {
+         for (unsigned size = 0; size < ARRAY_SIZE(sizes); size++) {
+            nir_shader *nir = translate(body, 2);
+            unsigned ids = 0;
+            nir_foreach_function_impl(impl, nir) {
+               nir_foreach_block(block, impl) {
+                  nir_foreach_instr_safe(instr, block) {
+                     if (instr->type != nir_instr_type_intrinsic)
+                        continue;
+                     nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+                     if (in->intrinsic != nir_intrinsic_load_workgroup_id &&
+                         in->intrinsic != nir_intrinsic_load_local_invocation_id)
+                        continue;
+                     nir_builder b = nir_builder_at(nir_before_instr(instr));
+                     nir_def_rewrite_uses(&in->def, nir_imm_ivec3(&b,
+                        in->intrinsic == nir_intrinsic_load_workgroup_id ? 0 : tid, 0, 0));
+                     nir_instr_remove(instr);
+                     ids++;
+                  }
+               }
+            }
+            CHECK(ids == 2);
+            set_size(nir, sizes[size]);
+            bool progress;
+            do {
+               progress = nir_opt_remove_phis(nir);
+               progress |= nir_opt_copy_prop(nir);
+               progress |= nir_opt_constant_folding(nir);
+               progress |= nir_opt_dead_cf(nir);
+               progress |= nir_opt_dce(nir);
+            } while (progress);
+            uint64_t selected = tid ? 8 : offsets[offset];
+            bool valid = selected <= sizes[size] && 4 <= sizes[size] - selected;
+            check_accesses(nir, 0, valid ? 1 : 0, selected, tid ? 37 : 0);
+            nir_validate_shader(nir, "pointer PHI exact SSBO rights, bounds and guard-split predecessor");
+            ralloc_free(nir);
+         }
+      }
+   }
+}
+
+static void
+pointer_equality_offsets(void)
+{
+   /* The SSBO stores logical offsets, not a VA: compare a loop-carried
+    * same-root pointer with its base, then check the exact observable bits. */
+   const char *body =
+      "entry:\n%trips = and i32 %tid, 3\nbr label %header\n"
+      "header:\n%i = phi i32 [0, %entry], [%next, %latch]\n"
+      "%p = phi ptr addrspace(1) [%out, %entry], [%step, %latch]\n"
+      "%more = icmp ult i32 %i, %trips\nbr i1 %more, label %latch, label %exit\n"
+      "latch:\n%step = getelementptr i32, ptr addrspace(1) %p, i32 1\n"
+      "%next = add i32 %i, 1\nbr label %header\n"
+      "exit:\n%eq = icmp eq ptr addrspace(1) %p, %out\n"
+      "%ne = icmp ne ptr addrspace(1) %p, %out\n"
+      "%a = zext i1 %eq to i32\n%b = zext i1 %ne to i32\n"
+      "%b2 = shl i32 %b, 1\n%value = or i32 %a, %b2\n"
+      "store i32 %value, ptr addrspace(1) %out, align 4\nret void\n";
+   static const nir_shader_compiler_options unroll = {.max_unroll_iterations = 16};
+   for (unsigned tid = 0; tid < 4; tid++) {
+      nir_shader *nir = translate(body, 2);
+      nir_foreach_function_impl(impl, nir) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr_safe(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+               if (in->intrinsic != nir_intrinsic_load_workgroup_id &&
+                   in->intrinsic != nir_intrinsic_load_local_invocation_id)
+                  continue;
+               nir_builder b = nir_builder_at(nir_before_instr(instr));
+               nir_def_rewrite_uses(&in->def, nir_imm_ivec3(&b,
+                  in->intrinsic == nir_intrinsic_load_workgroup_id ? 0 : tid, 0, 0));
+               nir_instr_remove(instr);
+            }
+         }
+      }
+      set_size(nir, 64);
+      nir->options = &unroll;
+      bool progress;
+      do {
+         progress = nir_opt_loop_unroll(nir);
+         progress |= nir_opt_constant_folding(nir);
+         progress |= nir_opt_dead_cf(nir);
+         progress |= nir_opt_remove_phis(nir);
+         progress |= nir_opt_copy_prop(nir);
+         progress |= nir_opt_dce(nir);
+      } while (progress);
+      check_accesses(nir, 0, 1, 0, tid ? 2 : 1);
+      nir_validate_shader(nir, "same-root relative pointer PHI equality");
+      ralloc_free(nir);
+   }
+   nir_shader *nir = translate("%minus = getelementptr i8, ptr addrspace(1) %out, i64 -1\n"
+      "%wrapped = getelementptr i8, ptr addrspace(1) %minus, i64 1\n"
+      "%same = icmp eq ptr addrspace(1) %wrapped, %out\n%value = zext i1 %same to i32\n"
+      "store i32 %value, ptr addrspace(1) %out, align 4\nret void\n", 2);
+   set_size(nir, 64);
+   check_accesses(nir, 0, 1, 0, 1);
+   ralloc_free(nir);
+}
+
+static void
 view_validation(void)
 {
    struct stela_air_ssbo_view view = {
@@ -363,6 +481,14 @@ duplicate_slot(const struct stela_air_buffer *buffer, unsigned *slot, void *data
    return true;
 }
 
+static bool
+distinct_slot(const struct stela_air_buffer *buffer, unsigned *slot, void *data)
+{
+   CHECK(buffer->argument == 1 || buffer->argument == 2);
+   *slot = buffer->argument - 1;
+   return true;
+}
+
 static void
 binding_refusals(void)
 {
@@ -404,6 +530,19 @@ binding_refusals(void)
    CHECK(!stela_air_to_nir(LLVMGetBufferStart(bitcode), LLVMGetBufferSize(bitcode), "kernel", &nir_options, &options, &error));
    CHECK(error.kind == STELA_AIR_ARGUMENT);
    LLVMDisposeMemoryBuffer(bitcode);
+   options.bind_ssbo = distinct_slot;
+   for (unsigned ne = 0; ne < 2; ne++) {
+      char body[192];
+      snprintf(body, sizeof(body), "%%same = icmp %s ptr addrspace(1) %%out, %%other\nret void\n",
+         ne ? "ne" : "eq");
+      bitcode = stela_air_test_custom_bitcode(prefix, body, metadata,
+         "!7 = !{i32 2, !\"air.buffer\", !\"air.location_index\", i32 8, i32 1,"
+         " !\"air.read_write\", !\"air.address_space\", i32 1}\n");
+      CHECK(!stela_air_to_nir(LLVMGetBufferStart(bitcode), LLVMGetBufferSize(bitcode), "kernel",
+         &nir_options, &options, &error));
+      CHECK(error.kind == STELA_AIR_MEMORY && strstr(error.detail, "one validated resource"));
+      LLVMDisposeMemoryBuffer(bitcode);
+   }
 }
 
 int
@@ -415,6 +554,8 @@ main(void)
    finite_effect_oracle_contract();
    conditional_accesses();
    loop_guarded_phis();
+   pointer_phi_guarded_bounds();
+   pointer_equality_offsets();
    store_case(0, 64, true);
    store_case(60, 64, true);
    store_case(61, 64, false);
