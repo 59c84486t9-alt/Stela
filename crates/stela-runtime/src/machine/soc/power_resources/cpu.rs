@@ -1,9 +1,11 @@
 //! Source-qualified CPU ownership, independent of lifecycle state or admission.
 //!
-//! Original 26A434 AppleT8112PMGR normal-mode construction and its actual
-//! MPIDR/idle callbacks establish this geometry. See apple-socs.md's original
-//! J473 CPU power ownership section. No input hash or board name dispatches
+//! Original 26A434 T8112 normal-mode MPIDR/idle callbacks and T6000 mode1
+//! constructor counters establish separate membership rules. See apple-socs.md's
+//! J473 proof and the T6000 source module. No input hash or board name dispatches
 //! production behavior, and no numeric suffix of a record name selects a PE.
+mod t6000;
+
 use super::records::{Layout, Record};
 use crate::{
     machine::{Chip, adt::Node, engine::ProcessorTarget, registers::Identity},
@@ -227,6 +229,9 @@ pub fn resolve_cpu_power(
     processors: &[Identity],
     acc_harvesting: u32,
 ) -> Result<Vec<ProcessorAssociation>, Error> {
+    if chip == Chip::AppleM1 {
+        return t6000::resolve(root, records, processors, acc_harvesting);
+    }
     if chip != Chip::AppleM2 {
         return Err(Error::UnsupportedChip(chip));
     }
@@ -710,18 +715,16 @@ mod tests {
         let bytes = f.bytes();
         let root = Node::root(&bytes).unwrap();
         let views = views(&f.records);
-        for chip in [
-            Chip::AppleM1,
-            Chip::AppleM3,
-            Chip::AppleM4,
-            Chip::AppleM5,
-            Chip::AppleM6,
-        ] {
+        for chip in [Chip::AppleM3, Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
             assert_eq!(
                 resolve_cpu_power(chip, &root, &views, &f.identities, 0),
                 Err(Error::UnsupportedChip(chip))
             );
         }
+        assert_eq!(
+            resolve_cpu_power(Chip::AppleM1, &root, &views, &f.identities, 0),
+            Err(Error::UnsupportedCompatible)
+        );
         for mode in [1, 2, u32::MAX] {
             assert_eq!(
                 resolve_cpu_power(Chip::AppleM2, &root, &views, &f.identities, mode),

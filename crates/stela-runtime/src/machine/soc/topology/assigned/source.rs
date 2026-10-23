@@ -11,6 +11,7 @@
 //! of the function-enable_core bitmask consumed at2b5686c/2b2dcb0.
 //! These are source membership identities, never observations of PS readiness.
 mod selected;
+mod t6000;
 mod t8112;
 use super::*;
 use crate::machine::{
