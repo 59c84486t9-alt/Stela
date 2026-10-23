@@ -79,7 +79,7 @@
 //!
 //! The roll call lists exactly the endpoints the model provides. Of RTKit's
 //! system endpoints (crashlog 1, syslog 2, kdebug 3, IOReporting 4, OSLog 8,
-//! ...) only the crashlog endpoint is listed: the kernel assumes it. On a
+//! ...) the default constructor lists only crashlog: the kernel assumes it. On a
 //! panic, `RTBuddy::callPlatformFunction` (0x4659480) hands every nub marked
 //! `crashlog-non-fatal` (J473's ANS2; `_initCoreDump` 0x4663514) to
 //! `RTBuddyCrashlogEndpoint::forceNonFatalCrashlog` without checking that the
@@ -90,8 +90,8 @@
 //! takes no AP message; with no buffer, `_checkForCrashGated` (0x466b214)
 //! returns before reading or forcing anything. The other system endpoints
 //! are services of Apple's firmware this coprocessor does not have, so they
-//! are not listed rather than advertised with nothing behind them. Every
-//! other management message refuses.
+//! are listed only when their actual endpoint owners are supplied through
+//! [`SystemEndpoints`]. Every other management message refuses.
 //!
 //! Application endpoints also send on their own (the SMC's board
 //! notifications): an enabled endpoint's pending messages leave at each
@@ -107,6 +107,8 @@ use core::any::Any;
 const MANAGEMENT: u8 = 0;
 /// The crashlog system endpoint (see the module comment).
 const CRASHLOG: u8 = 1;
+const KDEBUG: u8 = 3;
+const IOREPORTING: u8 = 4;
 const TYPE_SHIFT: u32 = 52;
 const TYPE: u64 = 0xf << TYPE_SHIFT;
 const HELLO: u64 = 1;
@@ -196,6 +198,15 @@ pub enum Management {
     Ordinary,
 }
 
+/// Optional native system services with independent endpoint ownership. The
+/// caller must supply actual protocol/resource implementations; these slots
+/// never create a successful empty service or borrow application endpoint0x20.
+#[derive(Default)]
+pub struct SystemEndpoints {
+    pub trace: Option<Box<dyn Endpoint>>,
+    pub reporting: Option<Box<dyn Endpoint>>,
+}
+
 /// The RTKit operating system of one coprocessor.
 pub struct RtKit {
     endpoints: BTreeMap<u8, (Box<dyn Endpoint>, bool)>,
@@ -227,6 +238,19 @@ impl RtKit {
         endpoints: Vec<(u8, Box<dyn Endpoint>)>,
         management: Management,
     ) -> Result<Self, &'static str> {
+        Self::with_system_endpoints(endpoints, management, SystemEndpoints::default())
+    }
+
+    /// Original RTBuddy consumes trace and IOReporting on system endpoints3/4.
+    /// Enumerate only moved-in owners and route their control, input, polling
+    /// and reset through the same actual endpoint session as application work.
+    /// AP allocation, clock, mapping and queue resources remain their owners'
+    /// responsibility; attaching an endpoint supplies no such authority.
+    pub fn with_system_endpoints(
+        endpoints: Vec<(u8, Box<dyn Endpoint>)>,
+        management: Management,
+        system: SystemEndpoints,
+    ) -> Result<Self, &'static str> {
         let mut map = BTreeMap::new();
         for (number, endpoint) in endpoints {
             if number < FIRST_APPLICATION {
@@ -234,6 +258,11 @@ impl RtKit {
             }
             if map.insert(number, (endpoint, false)).is_some() {
                 return Err("RTKit endpoint provided twice");
+            }
+        }
+        for (number, endpoint) in [(KDEBUG, system.trace), (IOREPORTING, system.reporting)] {
+            if let Some(endpoint) = endpoint {
+                map.insert(number, (endpoint, false));
             }
         }
         Ok(Self {
@@ -596,6 +625,65 @@ mod tests {
         rtkit.start(&mut outbox).unwrap();
         assert_eq!(outbox, vec![management(HELLO, 12 | 12 << 16)]);
         rtkit
+    }
+
+    #[test]
+    fn explicit_system_owners_enumerate_and_receive_on_their_own_session() {
+        let mut kit = RtKit::with_system_endpoints(
+            Vec::new(),
+            Management::Enumeration,
+            SystemEndpoints {
+                trace: Some(Box::new(Complement)),
+                reporting: Some(Box::new(Complement)),
+            },
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        kit.start(&mut output).unwrap();
+        assert_eq!(
+            mgmt(&mut kit, HELLO_REPLY, VERSION | VERSION << 16).unwrap(),
+            vec![management(
+                ROLL_CALL,
+                ROLL_CALL_LAST | 3 | 1 << KDEBUG | 1 << IOREPORTING
+            )]
+        );
+        mgmt(&mut kit, ROLL_CALL, ROLL_CALL_LAST).unwrap();
+        assert!(step(&mut kit, KDEBUG, 7).is_err());
+        assert!(step(&mut kit, IOREPORTING, 7).is_err());
+        for number in [KDEBUG, IOREPORTING] {
+            assert_eq!(
+                mgmt(&mut kit, ENDPOINT_CONTROL, u64::from(number) << 32 | ENABLE).unwrap(),
+                vec![Message {
+                    endpoint: number,
+                    payload: 5
+                }]
+            );
+            assert_eq!(
+                step(&mut kit, number, 7).unwrap(),
+                vec![Message {
+                    endpoint: number,
+                    payload: !7
+                }]
+            );
+        }
+        mgmt(
+            &mut kit,
+            ENDPOINT_CONTROL,
+            u64::from(KDEBUG) << 32 | DISABLE,
+        )
+        .unwrap();
+        assert!(step(&mut kit, KDEBUG, 7).is_err());
+        assert!(step(&mut kit, IOREPORTING, 7).is_ok());
+        assert!(step(&mut kit, FIRST_APPLICATION, 7).is_err());
+        // Existing callers cannot smuggle a system service into the ordinary
+        // application constructor or replace the reserved crashlog owner.
+        assert!(
+            RtKit::new(
+                vec![(IOREPORTING, Box::new(Complement))],
+                Management::Ordinary
+            )
+            .is_err()
+        );
     }
 
     #[test]
