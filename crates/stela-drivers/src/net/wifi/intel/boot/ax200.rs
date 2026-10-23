@@ -12,7 +12,11 @@ use crate::net::wifi::intel::radio::{
 };
 use alloc::boxed::Box;
 mod mcc;
+mod scan_configuration;
 pub use mcc::{Ax200Mcc, Ax200MccError, Ax200MccPhase};
+pub use scan_configuration::{
+    Ax200ScanConfiguration, Ax200ScanConfigurationError, Ax200ScanConfigurationPhase,
+};
 
 /// Host wait policy, not firmware completion or authority to release DMA.
 #[derive(Clone, Copy, Debug)]

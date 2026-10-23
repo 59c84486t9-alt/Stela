@@ -6,7 +6,7 @@ use crate::net::wifi::intel::radio::{
     bios::service::{BiosIo, IoError, Object, Request},
     control::Kind,
 };
-struct ClockBios {
+pub(super) struct ClockBios {
     inner: RadioBios,
     clock_error: Option<IoError>,
     country_error: Option<IoError>,
@@ -34,14 +34,16 @@ unsafe impl BiosIo for ClockBios {
         self.inner.variable(variable)
     }
 }
-fn setup_bytes() -> Vec<u8> {
+pub(super) fn setup_bytes() -> Vec<u8> {
     let mut bytes = lari_bytes(false, 6);
     let mut at = 88;
     while at < bytes.len() {
         let kind = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
         let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
         if kind == 48 {
-            let versions = [0x18, 1, 12, 2, 0x77, 1, 6, 0, 4, 4, 1, 0, 0xc8, 1, 1, 5];
+            let versions = [
+                0x18, 1, 12, 2, 0x77, 1, 6, 0, 4, 4, 1, 0, 0xc8, 1, 1, 5, 0x0c, 1, 5, 0,
+            ];
             bytes.splice(at + 8 + len..at + 8 + len, versions);
             bytes[at + 4..at + 8].copy_from_slice(&((len + versions.len()) as u32).to_le_bytes());
             break;
@@ -49,7 +51,7 @@ fn setup_bytes() -> Vec<u8> {
         at += 8 + len.next_multiple_of(4);
     }
     for (index, mask) in [
-        (0u32, 1u32 << 1),
+        (0u32, (1u32 << 1) | (1 << 2)),
         (1, 1 << 18),
         (2, (1 << 10) | (1 << 11) | (1 << 25)),
     ] {
@@ -62,9 +64,23 @@ fn setup_bytes() -> Vec<u8> {
     bytes.extend(8u32.to_le_bytes());
     bytes.extend(0u32.to_le_bytes());
     bytes.extend((1u32 << 9).to_le_bytes());
+    bytes.extend(29u32.to_le_bytes());
+    bytes.extend(8u32.to_le_bytes());
+    bytes.extend(1u32.to_le_bytes());
+    bytes.extend((1u32 << 24).to_le_bytes());
+    let mut at = 88;
+    while at < bytes.len() {
+        let kind = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+        if kind == 23 {
+            let word = u32::from_le_bytes(bytes[at + 8..at + 12].try_into().unwrap()) | (3 << 20);
+            bytes[at + 8..at + 12].copy_from_slice(&word.to_le_bytes());
+        }
+        at += 8 + len.next_multiple_of(4);
+    }
     bytes
 }
-fn finish_lari<'a>(
+pub(super) fn finish_lari<'a>(
     init: UnifiedNvm<'a, Model>,
     source: &Source,
     domain: &Domain,
@@ -394,19 +410,34 @@ fn thermal_power_errors_remain_sticky_and_uncertain_dma_keeps_both_owners() {
     }
 }
 
-fn finish_setup<'a>(
+pub(super) fn finish_setup<'a>(
+    lari: LariRadio<'a, Model, ClockBios>,
+    sequence: u16,
+    entry: u16,
+    source: &Source,
+    domain: &Domain,
+) -> (Ax200Setup<'a, Model, ClockBios>, u16, u16) {
+    finish_setup_with_options(
+        lari,
+        sequence,
+        entry,
+        source,
+        domain,
+        Ax200SetupOptions::new(Clock {
+            ticks_per_microsecond: 1_000_000,
+        }),
+    )
+}
+pub(super) fn finish_setup_with_options<'a>(
     lari: LariRadio<'a, Model, ClockBios>,
     mut sequence: u16,
     mut entry: u16,
     source: &Source,
     domain: &Domain,
+    options: Ax200SetupOptions,
 ) -> (Ax200Setup<'a, Model, ClockBios>, u16, u16) {
-    let mut setup = unsafe {
-        lari.begin_ax200_setup(Ax200SetupOptions::new(Clock {
-            ticks_per_microsecond: 1_000_000,
-        }))
-    }
-    .unwrap_or_else(|_| panic!("AX200 setup"));
+    let mut setup =
+        unsafe { lari.begin_ax200_setup(options) }.unwrap_or_else(|_| panic!("AX200 setup"));
     unsafe { setup.advance(source) }.unwrap();
     for (group, opcode) in [(4, 4), (1, 0x77)] {
         complete(
@@ -431,7 +462,7 @@ fn finish_setup<'a>(
     assert_eq!(setup.phase(), Ax200SetupPhase::RegulatoryRequired);
     (setup, sequence, entry)
 }
-fn mcc_payload(country: [u8; 2], source: u8, count: usize) -> Vec<u8> {
+pub(super) fn mcc_payload(country: [u8; 2], source: u8, count: usize) -> Vec<u8> {
     let mut b = vec![0; 20 + count * 4];
     b[..4].copy_from_slice(&0u32.to_le_bytes());
     b[4..6].copy_from_slice(&u16::from_be_bytes(country).to_le_bytes());

@@ -32,7 +32,7 @@ pub enum Ax200MccError {
 }
 pub struct Ax200Mcc<'a, Q: BootIo, B: BiosIo> {
     pub(in crate::net::wifi::intel::boot) setup: Ax200Setup<'a, Q, B>,
-    phase: Ax200MccPhase,
+    pub(super) phase: Ax200MccPhase,
     request: Option<mcc::Request>,
     ticket: Option<CommandTicket>,
     deadline: Option<crate::Deadline>,
@@ -40,7 +40,7 @@ pub struct Ax200Mcc<'a, Q: BootIo, B: BiosIo> {
     profiles: Vec<mcc::Response>,
     channels: Vec<ChannelObservation>,
     bios_country: Option<Observation>,
-    first_error: Option<Ax200MccError>,
+    pub(super) first_error: Option<Ax200MccError>,
 }
 impl<'a, Q: BootIo, B: BiosIo> Ax200Setup<'a, Q, B> {
     /// Consume only the completed original setup epoch. A copied MCC table or
