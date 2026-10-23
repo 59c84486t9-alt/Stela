@@ -368,7 +368,7 @@ mod tests {
             let (mapping, unmaps) = mapping();
             // SAFETY: actual reservation/owner; deliberately wrong native
             // profile metadata must fail before any MMIO or config mutation.
-            let failure = match unsafe {
+            let mut failure = match unsafe {
                 NativeRegisters::attach(ps70_stopped(revision_class), mapping, bar())
             } {
                 Err(failure) => failure,

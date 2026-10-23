@@ -95,6 +95,13 @@ pub(super) struct State {
     idt73: Option<idt73::State>,
     idt95: Option<port_power::State>,
 }
+#[cfg(test)]
+impl State {
+    pub(super) fn authority_lost(&self) -> bool {
+        self.authority_lost
+    }
+}
+
 fn profile(id: u32) -> Result<SigmatelProfile, Error> {
     match id {
         0x8384_7690 => Ok(SigmatelProfile::Stac9200),

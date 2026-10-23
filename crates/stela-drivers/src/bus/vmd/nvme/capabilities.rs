@@ -191,7 +191,7 @@ impl Capabilities {
         config: &mut ChildConfig<'_, R>,
         extents: &mut Extents,
     ) -> Result<(), Error> {
-        let mut offset = 0x100;
+        let mut offset: u16 = 0x100;
         let mut seen = Vec::new();
         loop {
             if !(0x100..=0xffc).contains(&offset) || !offset.is_multiple_of(4) {

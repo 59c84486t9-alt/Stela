@@ -215,7 +215,7 @@ impl<R: Registers> Host<R> {
                 return Err(Error::ActiveChild);
             }
             let domain = NEXT_DOMAIN
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                     n.checked_add(1).filter(|next| *next <= i32::MAX as u32)
                 })
                 .map_err(|_| Error::Exhausted)?;

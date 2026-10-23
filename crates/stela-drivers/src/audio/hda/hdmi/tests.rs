@@ -2,6 +2,8 @@
 //! Independent numeric codec, command-ring and BDL playback model. Actual
 //! fixture RAM is fetched through programmed CORB/RIRB/BDL addresses. No model
 //! imports production verb/register/channel-map constants.
+extern crate std;
+
 use super::*;
 use crate::bus::dma::RegionAllocator;
 use alloc::vec;

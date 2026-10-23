@@ -119,7 +119,7 @@ mod idt95 {
                 model.borrow_mut().idt83_power_map ^= 1;
             }
             assert!(controller.refresh_idt95_power_map(&graph).is_err());
-            assert!(controller.routing_failed && controller.sigmatel_codecs[0].authority_lost);
+            assert!(controller.routing_failed && controller.sigmatel_codecs[0].authority_lost());
             assert!(controller.shutdown().is_err());
             controller.reinitialize().unwrap();
             assert!(controller.sigmatel_codecs.is_empty());
@@ -305,7 +305,7 @@ mod stac9872 {
                     .parameters
                     .insert((0x15, 0x12), 0x8000_1e1e);
                 assert!(controller.poll_sigmatel_pin_sense(&graph, 0x0d).is_err());
-                assert!(controller.sigmatel_codecs[0].authority_lost);
+                assert!(controller.sigmatel_codecs[0].authority_lost());
             } else {
                 model.borrow_mut().reject_amplifier_channel = Some((0x15, 1));
                 assert!(controller.initialize_sigmatel_codec(&graph).is_err());

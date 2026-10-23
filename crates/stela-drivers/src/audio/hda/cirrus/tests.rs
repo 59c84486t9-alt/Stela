@@ -100,7 +100,7 @@ mod cs4213 {
             Err(Error::InvalidCodecGraph)
         );
         assert!(controller.routing_failed);
-        assert!(controller.cirrus_codecs[0].authority_lost);
+        assert!(controller.cirrus_codecs[0].authority_lost());
         assert!(controller.shutdown().is_err());
         controller.reinitialize().unwrap();
         assert!(controller.cirrus_codecs.is_empty());
@@ -374,7 +374,7 @@ mod power {
                 controller.suspend_cirrus_cs421x(&graph),
                 Err(Error::RouteInUse)
             );
-            assert!(!controller.cirrus_codecs[0].suspended);
+            assert!(!controller.cirrus_codecs[0].suspended());
             model.borrow_mut().bindings.insert(2, 0);
             controller.suspend_cirrus_cs421x(&graph).unwrap();
             let before = access_counts(&model);
@@ -422,7 +422,7 @@ mod power {
                 );
             }
             assert_eq!(controller.routes, vec![(out, route)]);
-            assert!(controller.routing_failed && controller.cirrus_codecs[0].authority_lost);
+            assert!(controller.routing_failed && controller.cirrus_codecs[0].authority_lost());
             assert_eq!(controller.start(out), Err(Error::NeedsReset));
             model.borrow_mut().power_stuck = false;
             model.borrow_mut().reject_route_control = None;

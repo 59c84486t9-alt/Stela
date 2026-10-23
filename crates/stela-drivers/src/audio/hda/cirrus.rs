@@ -114,6 +114,16 @@ pub(super) struct State {
     routes: Vec<power::SavedRoute>,
     suspended_speaker_control: Option<u16>,
 }
+#[cfg(test)]
+impl State {
+    pub(super) fn authority_lost(&self) -> bool {
+        self.authority_lost
+    }
+    pub(super) fn suspended(&self) -> bool {
+        self.suspended
+    }
+}
+
 fn profile(id: u32) -> Result<CirrusProfile, Error> {
     match id {
         0x1013_4206 | 0x1013_4207 => Ok(CirrusProfile::Cs420x),
