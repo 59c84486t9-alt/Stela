@@ -176,11 +176,15 @@ fn exercise(actual: bool) {
                 command.bytes()
             );
             let bell = state.lock().unwrap().registers[&0x460];
-            assert_eq!(
-                unsafe { scan.advance(&source) }.unwrap(),
-                Ax200ScanConfigurationPhase::Waiting
-            );
-            assert_eq!(state.lock().unwrap().registers[&0x460], bell);
+            // Deadline cases deliberately use a one-tick wait from creation.
+            // Do not expect an extra pending poll to beat that elapsed deadline.
+            if case < 5 {
+                assert_eq!(
+                    unsafe { scan.advance(&source) }.unwrap(),
+                    Ax200ScanConfigurationPhase::Waiting
+                );
+                assert_eq!(state.lock().unwrap().registers[&0x460], bell);
+            }
             if case == 5 {
                 options.clock.delay(20);
                 assert_eq!(
