@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 #include "air_to_nir.h"
 #include "llvm-c/BitWriter.h"
+#include "llvm-c/BitReader.h"
+#include "llvm-c/Analysis.h"
 #include "llvm-c/Core.h"
 #include "llvm-c/IRReader.h"
 #include "util/ralloc.h"
@@ -19,6 +21,7 @@
 } } while (0)
 
 #include "air_test_fixture.h"
+#include "air_effect_oracle.h"
 
 static nir_def *
 bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
@@ -78,8 +81,18 @@ expect_refusal(const char *body, const char *extra, unsigned budget,
    LLVMMemoryBufferRef input = stela_air_test_bitcode(body, extra);
    struct stela_air_error error;
    nir_shader *nir = translate(input, &test_nir_options, budget, &error);
-   if (nir || error.kind != expected)
-      fprintf(stderr, "refusal wanted %u, got %u: %s\n", expected, error.kind, error.detail);
+   if (nir || error.kind != expected) {
+      fprintf(stderr, "refusal wanted %u, got %u: %s\n%s\n", expected, error.kind, error.detail, body);
+      LLVMContextRef context = LLVMContextCreate();
+      LLVMModuleRef module = NULL;
+      if (!LLVMParseBitcodeInContext2(context, input, &module)) {
+         char *text = LLVMPrintModuleToString(module);
+         fprintf(stderr, "decoded refusal fixture:\n%s\n", text);
+         LLVMDisposeMessage(text);
+         LLVMDisposeModule(module);
+      }
+      LLVMContextDispose(context);
+   }
    CHECK(!nir && error.kind == expected && error.detail[0]);
    LLVMDisposeMemoryBuffer(input);
 }
@@ -366,6 +379,132 @@ check_stores(nir_shader *nir, const uint64_t *addresses, const uint32_t *values,
 }
 
 static void
+check_executed_stores(nir_shader *nir, const uint64_t *addresses,
+                       const uint32_t *values, unsigned count)
+{
+   struct air_effect_store trace[64];
+   CHECK(count <= ARRAY_SIZE(trace));
+   struct air_effect_run run = air_effect_execute(nir, 4096, trace, ARRAY_SIZE(trace));
+   if (run.status != AIR_EFFECT_COMPLETE) {
+      fprintf(stderr, "NIR effects: status%u after%u instructions, %u stores: %s\n",
+              run.status, run.instructions, run.stores, run.detail);
+      nir_print_shader(nir, stderr);
+   }
+   CHECK(run.status == AIR_EFFECT_COMPLETE && run.stores == count);
+   for (unsigned i = 0; i < count; i++) {
+      CHECK(!trace[i].ssbo && trace[i].components == 1 && trace[i].bits == 32);
+      CHECK(trace[i].address == addresses[i] && trace[i].values[0].u32 == values[i]);
+   }
+}
+
+static void
+effect_oracle_contract(void)
+{
+   struct air_effect_store trace[128];
+   nir_shader *nir = translate_body("store i32 17, ptr addrspace(1) %out, align 4\nret void\n");
+   specialize_invocation(nir, 0);
+   CHECK(air_effect_execute(nir, 1, trace, ARRAY_SIZE(trace)).status == AIR_EFFECT_BUDGET);
+   CHECK(air_effect_execute(nir, 64, NULL, 0).status == AIR_EFFECT_TRACE_FULL);
+   const uint64_t address = 0x100000;
+   const uint32_t value = 17;
+   check_executed_stores(nir, &address, &value, 1);
+   check_stores(nir, &address, &value, 1); /* Keep the independent lexical oracle. */
+   ralloc_free(nir);
+
+   const char *cycles[] = {
+      "entry:\nbr label %loop\nloop:\nbr label %loop\n",
+      "entry:\nbr label %loop\nloop:\nstore i32 17, ptr addrspace(1) %out, align 4\nbr label %loop\n",
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(cycles); i++) {
+      nir = translate_body(cycles[i]);
+      /* Do not run dead-CF optimization on the empty-cycle negative control. */
+      nir_opt_dce(nir);
+      nir_foreach_function_impl(impl, nir) CHECK(!finite_effect_body(impl));
+      struct air_effect_run run = air_effect_execute(nir, 64, trace, ARRAY_SIZE(trace));
+      CHECK(run.status == AIR_EFFECT_BUDGET);
+      CHECK((run.stores != 0) == (i != 0));
+      ralloc_free(nir);
+   }
+
+   /* Unknown invocation IDs and actual loads are explicit unsupported results. */
+   nir = translate_body("%c = icmp eq i32 %tid, 0\nbr i1 %c, label %a, label %done\n"
+      "a:\nstore i32 17, ptr addrspace(1) %out, align 4\nbr label %done\ndone:\nret void\n");
+   nir_foreach_function_impl(impl, nir) CHECK(!finite_effect_body(impl));
+   CHECK(air_effect_execute(nir, 256, trace, ARRAY_SIZE(trace)).status == AIR_EFFECT_UNSUPPORTED);
+   ralloc_free(nir);
+   nir = translate_body("%v = load i32, ptr addrspace(1) %out, align 4\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\nret void\n");
+   specialize_invocation(nir, 0);
+   CHECK(air_effect_execute(nir, 256, trace, ARRAY_SIZE(trace)).status == AIR_EFFECT_UNSUPPORTED);
+   ralloc_free(nir);
+
+   /* A direct swap catches sequential PHI publication: b must read OLD a. */
+   nir = translate_body("entry:\nbr label %header\nheader:\n"
+      "%i = phi i32 [0, %entry], [%next, %latch]\n"
+      "%a = phi i32 [11, %entry], [%b, %latch]\n"
+      "%b = phi i32 [22, %entry], [%a, %latch]\n"
+      "store i32 %a, ptr addrspace(1) %out, align 4\n"
+      "%p = getelementptr i32, ptr addrspace(1) %out, i32 1\n"
+      "store i32 %b, ptr addrspace(1) %p, align 4\n"
+      "%more = icmp ult i32 %i, 1\nbr i1 %more, label %latch, label %exit\n"
+      "latch:\n%next = add i32 %i, 1\nbr label %header\nexit:\nret void\n");
+   specialize_invocation(nir, 0);
+   const uint64_t swap_addresses[] = {0x100000, 0x100004, 0x100000, 0x100004};
+   const uint32_t swap_values[] = {11, 22, 22, 11};
+   check_executed_stores(nir, swap_addresses, swap_values, ARRAY_SIZE(swap_values));
+   ralloc_free(nir);
+
+   /* Retain actual arithmetic (DCE only), exercising widths and vector lanes. */
+   nir = translate_body("%b = add i8 -1, 2\nstore i8 %b, ptr addrspace(1) %out, align 1\n"
+      "%s = sext i16 -32768 to i64\nstore i64 %s, ptr addrspace(1) %out, align 1\n"
+      "%v = add <4 x i16> <i16 -1,i16 32767,i16 0,i16 -32768>, <i16 1,i16 1,i16 1,i16 -1>\n"
+      "store <4 x i16> %v, ptr addrspace(1) %out, align 1\nret void\n");
+   nir_opt_dce(nir);
+   struct air_effect_run run = air_effect_execute(nir, 256, trace, ARRAY_SIZE(trace));
+   CHECK(run.status == AIR_EFFECT_COMPLETE && run.stores == 3);
+   CHECK(trace[0].bits == 8 && trace[0].components == 1 && trace[0].values[0].u8 == 1);
+   CHECK(trace[1].bits == 64 && trace[1].components == 1 && trace[1].values[0].u64 == UINT64_C(0xffffffffffff8000));
+   const uint16_t lanes[] = {0, 32768, 1, 32767};
+   CHECK(trace[2].bits == 16 && trace[2].components == 4);
+   for (unsigned i = 0; i < ARRAY_SIZE(lanes); i++) CHECK(trace[2].values[i].u16 == lanes[i]);
+   ralloc_free(nir);
+
+   for (unsigned branch = 0; branch < 2; branch++) {
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, &test_nir_options, "SSBO oracle");
+      b.shader->info.num_ssbos = 4;
+      nir_if *region = nir_push_if(&b, nir_imm_bool(&b, branch));
+      nir_store_ssbo(&b, nir_imm_int(&b, 41), nir_imm_int(&b, 2), nir_imm_int(&b, 4), .align_mul = 4);
+      nir_push_else(&b, region);
+      nir_store_ssbo(&b, nir_imm_int(&b, 43), nir_imm_int(&b, 3), nir_imm_int(&b, 8), .align_mul = 4);
+      nir_pop_if(&b, region);
+      run = air_effect_execute(b.shader, 256, trace, ARRAY_SIZE(trace));
+      CHECK(run.status == AIR_EFFECT_COMPLETE && run.stores == 1);
+      CHECK(trace[0].ssbo && trace[0].components == 1 && trace[0].bits == 32);
+      CHECK(trace[0].slot == (branch ? 2 : 3) && trace[0].address == (branch ? 4 : 8));
+      CHECK(trace[0].values[0].u32 == (branch ? 41 : 43));
+      ralloc_free(b.shader);
+   }
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, &test_nir_options, "undefined oracle");
+   nir_store_global(&b, nir_undef(&b, 1, 32), nir_imm_int64(&b, 0x100000), .align_mul = 4);
+   CHECK(air_effect_execute(b.shader, 64, trace, ARRAY_SIZE(trace)).status == AIR_EFFECT_UNDEFINED);
+   ralloc_free(b.shader);
+
+   /* A valid return can precede unreachable lexical CF. Follow its real edge,
+    * without evaluating either dead branch or mistaking it for completion. */
+   b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, &test_nir_options, "dead if after return");
+   nir_if *dead = nir_push_if(&b, nir_imm_true(&b));
+   nir_store_global(&b, nir_imm_int(&b, 71), nir_imm_int64(&b, 0x100000), .align_mul = 4);
+   nir_push_else(&b, dead);
+   nir_store_global(&b, nir_imm_int(&b, 73), nir_imm_int64(&b, 0x100004), .align_mul = 4);
+   nir_pop_if(&b, dead);
+   b.cursor = nir_after_block(nir_start_block(b.impl));
+   nir_jump(&b, nir_jump_return);
+   run = air_effect_execute(b.shader, 64, trace, ARRAY_SIZE(trace));
+   CHECK(run.status == AIR_EFFECT_COMPLETE && !run.stores);
+   ralloc_free(b.shader);
+}
+
+static void
 conditional_semantics(void)
 {
    /* Independent expected effects of the LLVM source, including order. */
@@ -383,6 +522,7 @@ conditional_semantics(void)
    for (unsigned i = 0; i < ARRAY_SIZE(paths); i++) {
       nir_shader *nir = translate_body(conditional_body);
       specialize_invocation(nir, paths[i].tid);
+      check_executed_stores(nir, paths[i].addresses, paths[i].values, 5);
       check_stores(nir, paths[i].addresses, paths[i].values, 5);
       ralloc_free(nir);
    }
@@ -762,8 +902,91 @@ cfg_semantics(void)
          {0x100004, 0x100000, 0x100004, 0x100008},
       };
       const uint32_t values[2][4] = {{1, 102, 3, 3}, {101, 2, 103, 3}};
-      check_stores(nir, addresses[tid], values[tid], 4);
+      check_executed_stores(nir, addresses[tid], values[tid], 4);
       ralloc_free(nir);
+   }
+}
+
+static void
+oracle_fixture_evidence(const char *name, const void *data, size_t bytes)
+{
+   const char *directory = getenv("STELA_AIR_ORACLE_EVIDENCE");
+   if (!directory) return;
+   char path[4096];
+   int length = snprintf(path, sizeof(path), "%s/%s", directory, name);
+   CHECK(length > 0 && (size_t)length < sizeof(path));
+   FILE *file = fopen(path, "wb");
+   CHECK(file && fwrite(data, 1, bytes, file) == bytes);
+   CHECK(!fclose(file));
+}
+
+static void
+duplicate_phi_reader_contract(void)
+{
+   /* The bitcode reader reuses a repeated predecessor's first incoming value.
+    * Therefore raw unequal-record rejection and cfg_emit's defensive unequal
+    * guard are NOT covered by these frontend calls. Preserve the original
+    * verifier refusal and explicitly measure this LLVM reader/oracle limit. */
+   const char *bodies[] = {
+      "entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %same, label %same\n"
+      "same:\n%p = phi i32 [31, %entry], [32, %entry]\nret void\n",
+      "entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %same, label %same\n"
+      "same:\n%p = phi i32 [31, %entry], [32, %entry]\n"
+      "store i32 %p, ptr addrspace(1) %out, align 4\nret void\n",
+   };
+   unsigned major, minor, patch;
+   LLVMGetVersion(&major, &minor, &patch);
+   char runtime[128];
+   int length = snprintf(runtime, sizeof(runtime), "{\"runtime_llvm\":\"%u.%u.%u\"}\n", major, minor, patch);
+   CHECK(length > 0 && (size_t)length < sizeof(runtime));
+   oracle_fixture_evidence("duplicate-phi-runtime.json", runtime, (size_t)length);
+   for (unsigned use = 0; use < ARRAY_SIZE(bodies); use++) {
+      size_t bytes = strlen(stela_air_test_prefix) + strlen(bodies[use]) + strlen(stela_air_test_metadata) + 1;
+      char *source = malloc(bytes); CHECK(source);
+      snprintf(source, bytes, "%s%s%s", stela_air_test_prefix, bodies[use], stela_air_test_metadata);
+      LLVMContextRef context = LLVMContextCreate();
+      LLVMMemoryBufferRef assembly = LLVMCreateMemoryBufferWithMemoryRangeCopy(source, bytes - 1, "unequal-phi");
+      LLVMModuleRef module = NULL;
+      char *message = NULL;
+      CHECK(!LLVMParseIRInContext(context, assembly, &module, &message));
+      LLVMDisposeMessage(message); message = NULL;
+      CHECK(LLVMVerifyModule(module, LLVMReturnStatusAction, &message));
+      CHECK(message && strstr(message, "different incoming values"));
+      char name[128];
+      snprintf(name, sizeof(name), "duplicate-phi-%u-original.ll", use);
+      oracle_fixture_evidence(name, source, bytes - 1);
+      snprintf(name, sizeof(name), "duplicate-phi-%u-verifier.txt", use);
+      oracle_fixture_evidence(name, message, strlen(message));
+      LLVMDisposeMessage(message);
+      LLVMDisposeModule(module); LLVMContextDispose(context); free(source);
+
+      LLVMMemoryBufferRef input = stela_air_test_bitcode(bodies[use], "");
+      snprintf(name, sizeof(name), "duplicate-phi-%u-encoded.bc", use);
+      oracle_fixture_evidence(name, LLVMGetBufferStart(input), LLVMGetBufferSize(input));
+      context = LLVMContextCreate(); module = NULL;
+      CHECK(!LLVMParseBitcodeInContext2(context, input, &module));
+      message = NULL;
+      CHECK(!LLVMVerifyModule(module, LLVMReturnStatusAction, &message));
+      LLVMDisposeMessage(message);
+      LLVMValueRef phi = LLVMGetFirstInstruction(LLVMGetNextBasicBlock(LLVMGetFirstBasicBlock(LLVMGetNamedFunction(module, "kernel"))));
+      CHECK(LLVMGetInstructionOpcode(phi) == LLVMPHI && LLVMCountIncoming(phi) == 2);
+      for (unsigned i = 0; i < 2; i++) {
+         CHECK(LLVMIsAConstantInt(LLVMGetIncomingValue(phi, i)));
+         CHECK(LLVMConstIntGetZExtValue(LLVMGetIncomingValue(phi, i)) == 31);
+      }
+      char *decoded = LLVMPrintModuleToString(module);
+      snprintf(name, sizeof(name), "duplicate-phi-%u-decoded.ll", use);
+      oracle_fixture_evidence(name, decoded, strlen(decoded));
+      LLVMDisposeMessage(decoded); LLVMDisposeModule(module); LLVMContextDispose(context);
+      struct stela_air_error error;
+      nir_shader *nir = translate(input, &test_nir_options, 100, &error);
+      CHECK(nir && error.kind == STELA_AIR_OK);
+      specialize_invocation(nir, 0);
+      const uint64_t address = 0x100000;
+      const uint32_t value = 31;
+      check_executed_stores(nir, &address, &value, use);
+      check_stores(nir, &address, &value, use);
+      ralloc_free(nir); LLVMDisposeMemoryBuffer(input);
    }
 }
 
@@ -792,8 +1015,7 @@ cfg_limits_and_refusals(void)
    expect_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %right\n"
       "left:\nbr label %join\nright:\nbr label %join\n"
       "join:\n%p = phi i32 [1, %left], [2, %entry]\nret void\n", "", 100, STELA_AIR_VERIFY);
-   expect_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %same, label %same\n"
-      "same:\n%p = phi i32 [31, %entry], [32, %entry]\nret void\n", "", 100, STELA_AIR_VERIFY);
+   duplicate_phi_reader_contract();
    expect_refusal("entry:\nbr label %header\nheader:\n"
       "%i = phi i32 [0, %entry], [1, %exit]\n"
       "%c = icmp eq i32 %tid, 0\nbr i1 %c, label %latch, label %exit\n"
@@ -1787,6 +2009,7 @@ tests(void)
    LLVMDisposeMemoryBuffer(input);
    constant_semantics();
    binding_prelude_contract();
+   effect_oracle_contract();
    conditional_semantics();
    loop_semantics();
    cfg_semantics();
