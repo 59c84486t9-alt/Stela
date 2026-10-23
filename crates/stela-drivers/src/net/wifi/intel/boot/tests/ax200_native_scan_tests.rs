@@ -919,3 +919,108 @@ fn prepublication_completed_rbs_and_backpressure_never_relabel_old_rx_as_new_sca
         scan.stop().unwrap();
     }
 }
+#[test]
+fn prepublication_second_rb_reserved_events_remain_canonical_and_block_admission() {
+    for mcc in [false, true] {
+        let bytes = bytes();
+        let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
+        let empty = resources::Catalog::from_handoff(vec![]).unwrap();
+        let native = Native::default();
+        let source = Source::default();
+        let policy = Arc::new(PolicyState::default());
+        let (mut scan, _, entry) = ready(&catalog, &empty, &source, &native, &policy, false);
+        let unrelated = command_packet(
+            super::super::super::command::Id {
+                group: 0,
+                opcode: 0x99,
+                version: 0,
+            },
+            0x8000,
+            &[],
+        );
+        let reserved = if mcc {
+            command_packet(
+                super::super::super::command::Id {
+                    group: 0,
+                    opcode: 0xc9,
+                    version: 0,
+                },
+                0x8000,
+                &[],
+            )
+        } else {
+            completion(0, 1, 0)
+        };
+        complete(boot(&scan), &native.domain, entry, entry + 1, &unrelated);
+        complete(boot(&scan), &native.domain, entry + 1, entry + 2, &reserved);
+        let bell = native.state.lock().unwrap().registers[&0x460];
+        let allocations = source.calls.load(Ordering::Relaxed);
+        let expected = if mcc {
+            Ax200ScanError::Regulatory(regulatory::Error::HardwareUnavailable)
+        } else {
+            Ax200ScanError::StaleNotification
+        };
+        assert_eq!(
+            unsafe { scan.start(request(false), 30_000_000, &source) },
+            Err(expected.clone())
+        );
+        assert_eq!(boot(&scan).hcmd.notification_count(), 2);
+        assert_eq!(scan.take_other_notification().unwrap().command, 0x99);
+        assert!(scan.take_other_notification().is_none());
+        assert!(matches!(
+            scan.poll_pre_scan_receive().unwrap(),
+            MpduProgress::Pending
+        ));
+        // Neither diagnostic path can consume the canonical event or reopen
+        // admission, even though all unrelated traffic has actually drained.
+        assert_eq!(boot(&scan).hcmd.notification_count(), 1);
+        assert!(
+            boot(&scan)
+                .hcmd
+                .has_matching(if mcc { 0xc9 } else { 0x0f }, 0)
+        );
+        assert_eq!(
+            unsafe { scan.start(request(false), 30_000_000, &source) },
+            Err(expected)
+        );
+        assert_eq!(scan.phase(), Ax200ScanPhase::NotStarted);
+        assert_eq!(scan.protocol_phase(), scan::Phase::Idle);
+        assert!(scan.request().is_none());
+        assert!(scan.command_ticket().is_none());
+        assert_eq!(policy.acquired.load(Ordering::SeqCst), 0);
+        assert_eq!(source.calls.load(Ordering::Relaxed), allocations);
+        assert_eq!(native.state.lock().unwrap().registers[&0x460], bell);
+        scan.stop().unwrap();
+    }
+}
+#[test]
+fn pre_scan_raw_drain_native_fault_is_sticky_before_any_request_publication() {
+    let bytes = bytes();
+    let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
+    let empty = resources::Catalog::from_handoff(vec![]).unwrap();
+    let native = Native::default();
+    let source = Source::default();
+    let policy = Arc::new(PolicyState::default());
+    let (mut scan, _, _) = ready(&catalog, &empty, &source, &native, &policy, false);
+    let bell = native.state.lock().unwrap().registers[&0x460];
+    let allocations = source.calls.load(Ordering::Relaxed);
+    native.state.lock().unwrap().fail_read = Some(8);
+    let error = Ax200ScanError::Boot(Error::Access(power::AccessError::Unavailable));
+    assert_eq!(scan.poll_pre_scan_receive().err(), Some(error.clone()));
+    assert_eq!(scan.first_error(), Some(&error));
+    assert_eq!(scan.phase(), Ax200ScanPhase::Failed);
+    native.state.lock().unwrap().fail_read = None;
+    assert_eq!(scan.poll_pre_scan_receive().err(), Some(error.clone()));
+    assert_eq!(
+        unsafe { scan.start(request(false), 30_000_000, &source) },
+        Err(error.clone())
+    );
+    assert_eq!(scan.first_error(), Some(&error));
+    assert_eq!(scan.protocol_phase(), scan::Phase::Idle);
+    assert!(scan.request().is_none());
+    assert!(scan.command_ticket().is_none());
+    assert_eq!(policy.acquired.load(Ordering::SeqCst), 0);
+    assert_eq!(source.calls.load(Ordering::Relaxed), allocations);
+    assert_eq!(native.state.lock().unwrap().registers[&0x460], bell);
+    scan.stop().unwrap();
+}
