@@ -1706,9 +1706,10 @@ mod tests {
         let record: Value =
             serde_json::from_str(&std::fs::read_to_string(file.path()).unwrap()).unwrap();
         let initial = record["initial_data_hex"].as_str().unwrap();
-        let initial: Vec<_> = initial
-            .as_bytes()
-            .chunks_exact(2)
+        let (pairs, remainder) = initial.as_bytes().as_chunks::<2>();
+        assert!(remainder.is_empty());
+        let initial: Vec<_> = pairs
+            .iter()
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect();
         assert_eq!(initial.as_slice(), case.data.as_ref());
