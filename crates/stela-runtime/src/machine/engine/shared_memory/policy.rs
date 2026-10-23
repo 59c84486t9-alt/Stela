@@ -121,11 +121,15 @@ impl DataPolicy for Policy {
     }
     fn validate_operation_execution(
         &self,
-        _class: MemoryOperationClass,
+        class: MemoryOperationClass,
     ) -> Result<(), MemoryStatus> {
-        // Cold Device-nGnRnE ordinary RAM is qualified separately. Do not
-        // infer LSE/LLSC/ordered Device behavior from the normal-WB lane.
-        if self.controls.cold_m0() && _class != MemoryOperationClass::Exclusive {
+        // Ordered scalar transfers use the same checked physical RAM path as
+        // ordinary quantities. The cold callback retains the machine's Device
+        // serializer and MFENCE pair; typed ordered staging adds acquire/release
+        // semantics. Arm 2026-06 LDAPRB/LDAR/STLR use Mem with acquire/release
+        // descriptors; aligned Device memory is not an instruction refusal.
+        // This does not qualify LSE or exclusive Device transfers.
+        if self.controls.cold_m0() && class == MemoryOperationClass::Atomic {
             Err(MemoryStatus::Unsupported)
         } else {
             // CLREX has no data-memory type. Exclusive transfers still refuse
@@ -157,7 +161,13 @@ impl DataPolicy for Policy {
         {
             return Err(MemoryStatus::Unsupported);
         }
-        if self.controls.cold_m0() && request.operation != DataOperation::Ordinary {
+        if self.controls.cold_m0()
+            && (!matches!(
+                request.operation,
+                DataOperation::Ordinary | DataOperation::Ordered
+            ) || request.operation == DataOperation::Ordered
+                && !matches!(request.bytes, 1 | 2 | 4 | 8))
+        {
             return Err(MemoryStatus::Unsupported);
         }
         let shape = shape(request);
@@ -262,7 +272,10 @@ impl DataPolicy for Policy {
             return Err((MemoryStatus::Unsupported, part.address));
         }
         let cold_device = self.controls.cold_m0()
-            && request.operation == DataOperation::Ordinary
+            && matches!(
+                request.operation,
+                DataOperation::Ordinary | DataOperation::Ordered
+            )
             && translated.memory == mmu::MemoryType::Device
             && translated.attributes == mmu::attributes::DEVICE_NGNRNE;
         if !cold_device
@@ -493,12 +506,18 @@ pub(super) mod tests {
             assert_eq!(&around[..bytes], &expected[..bytes]);
             assert!(around[bytes..].iter().all(|byte| *byte == 0));
         }
-        for class in [MemoryOperationClass::Atomic, MemoryOperationClass::Ordered] {
-            assert_eq!(
-                thread.policy_mut().validate_operation_execution(class),
-                Err(MemoryStatus::Unsupported)
-            );
-        }
+        assert_eq!(
+            thread
+                .policy_mut()
+                .validate_operation_execution(MemoryOperationClass::Atomic),
+            Err(MemoryStatus::Unsupported)
+        );
+        assert_eq!(
+            thread
+                .policy_mut()
+                .validate_operation_execution(MemoryOperationClass::Ordered),
+            Ok(())
+        );
         let unaligned = request(DATA + 1, 0);
         assert_eq!(
             thread.policy_mut().validate_data_request(unaligned),
@@ -511,6 +530,147 @@ pub(super) mod tests {
             Err((MemoryStatus::Alignment, _))
         ));
     }
+    #[test]
+    fn cold_ordered_ram_uses_typed_acquire_release_and_preserves_exact_widths() {
+        use stela_compiler::context::memory::{
+            MemoryOrder, MemoryRequest, MemoryRequirements,
+            ordered::{OrderedData, OrderedFeature, OrderedOperation},
+        };
+        let policy = cold_policy();
+        let ram = Arc::clone(&policy.ram);
+        let mut thread = ram.domain().thread(policy);
+        let requirements = MemoryRequirements {
+            required_flags: flags::ORDERED,
+            ..Default::default()
+        };
+        for (index, bytes) in [1u32, 2, 4, 8].into_iter().enumerate() {
+            let address = DATA + index as u64 * 16;
+            let value = 0x8967452301efcdabu64 & (u64::MAX >> ((8 - bytes) * 8));
+            let mut data = OrderedData {
+                operation: OrderedOperation::Store as u32,
+                order: MemoryOrder::Release as u32,
+                value: [value, 0],
+                ..Default::default()
+            };
+            let request = MemoryRequest {
+                address,
+                data: core::ptr::from_mut(&mut data).cast(),
+                bytes,
+                flags: flags::ORDERED | flags::WRITE,
+                pc: 0x18000,
+            };
+            let entry = thread.prepare(requirements).unwrap();
+            let (status, completed) = unsafe {
+                entry.with_checked_view(|view| {
+                    let status = (view.callback)(view, &request);
+                    (status, view.completed_bytes)
+                })
+            }
+            .unwrap();
+            assert_eq!(
+                (status, completed),
+                (MemoryStatus::Success as u32, u64::from(bytes))
+            );
+            // Both the RCsc and RCpc load categories must return actual bytes;
+            // RCpc retains its real captured source-feature admission.
+            for (order, feature) in [
+                (MemoryOrder::AcquireRcsc, OrderedFeature::Base),
+                (MemoryOrder::AcquireRcpc, OrderedFeature::Rcpc),
+            ] {
+                data = OrderedData {
+                    order: order as u32,
+                    feature: feature as u32,
+                    ..Default::default()
+                };
+                let request = MemoryRequest {
+                    data: core::ptr::from_mut(&mut data).cast(),
+                    flags: flags::ORDERED,
+                    ..request
+                };
+                let entry = thread.prepare(requirements).unwrap();
+                let (status, completed) = unsafe {
+                    entry.with_checked_view(|view| {
+                        let status = (view.callback)(view, &request);
+                        (status, view.completed_bytes)
+                    })
+                }
+                .unwrap();
+                assert_eq!(
+                    (status, completed),
+                    (MemoryStatus::Success as u32, u64::from(bytes))
+                );
+                assert_eq!(data.value, [value, 0]);
+            }
+            let mut actual = [0; 16];
+            unsafe { ram.read_physical(address, &mut actual) }.unwrap();
+            assert_eq!(
+                &actual[..bytes as usize],
+                &value.to_le_bytes()[..bytes as usize]
+            );
+            assert!(actual[bytes as usize..].iter().all(|byte| *byte == 0));
+        }
+    }
+
+    #[test]
+    fn cold_ordered_requests_cannot_acquire_device_or_unaligned_ram_authority() {
+        use stela_compiler::context::memory::{
+            MemoryOrder, MemoryRequest, MemoryRequirements, ordered::OrderedData,
+        };
+        let policy = cold_policy();
+        let ram = Arc::clone(&policy.ram);
+        let mut thread = ram.domain().thread(policy);
+        for address in [0x90000, DATA + 1] {
+            let mut data = OrderedData {
+                order: MemoryOrder::AcquireRcsc as u32,
+                ..Default::default()
+            };
+            let request = MemoryRequest {
+                address,
+                data: core::ptr::from_mut(&mut data).cast(),
+                bytes: 8,
+                flags: flags::ORDERED,
+                pc: 0x18000,
+            };
+            let entry = thread
+                .prepare(MemoryRequirements {
+                    required_flags: flags::ORDERED,
+                    ..Default::default()
+                })
+                .unwrap();
+            let (status, completed) = unsafe {
+                entry.with_checked_view(|view| {
+                    let status = (view.callback)(view, &request);
+                    (status, view.completed_bytes)
+                })
+            }
+            .unwrap();
+            assert_eq!((status, completed), (MemoryStatus::Unsupported as u32, 0));
+            assert_eq!(data.value, [0; 2]);
+            assert!(matches!(
+                thread.policy_mut().failure,
+                Some(Failure::Unsupported { .. })
+            ));
+            thread.policy_mut().failure = None;
+        }
+        assert_eq!(
+            thread.policy_mut().validate_data_request(DataRequest {
+                operation: DataOperation::Ordered,
+                bytes: 16,
+                ..request(DATA, 0)
+            }),
+            Err(MemoryStatus::Unsupported)
+        );
+        for operation in [DataOperation::Atomic, DataOperation::Exclusive] {
+            assert_eq!(
+                thread.policy_mut().validate_data_request(DataRequest {
+                    operation,
+                    ..request(DATA, 0)
+                }),
+                Err(MemoryStatus::Unsupported)
+            );
+        }
+    }
+
     #[test]
     fn cold_device_window_records_unexecuted_read_without_staging_or_ram_effect() {
         use stela_compiler::context::memory::{MemoryRequest, MemoryRequirements};
