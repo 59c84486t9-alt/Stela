@@ -1974,13 +1974,17 @@ mod artifact_tests {
         let mut cache = ArtifactCache::default();
         cache.remember_controls(&original_controls);
         for (index, artifact) in artifacts.iter().enumerate() {
+            // Vec::clone may discard spare capacity. Grow beyond the real
+            // original charge so replacing this entry cannot require eviction.
             let mut code = artifact.code.as_ref().clone();
-            code.reserve_exact((index + 1) * 37);
+            code.reserve_exact(artifact.code.capacity() + (index + 1) * 37 - code.len());
             let mut source = artifact.source.clone();
-            source.reserve_exact((index + 1) * 11);
+            source.reserve_exact(artifact.source.capacity() + (index + 1) * 11 - source.len());
             let mut source_map = artifact.source_map.clone();
-            source_map.reserve_exact((index + 1) * 3);
-            cache.insert(Arc::new(Artifact {
+            source_map.reserve_exact(
+                artifact.source_map.capacity() + (index + 1) * 3 - source_map.len(),
+            );
+            let enlarged = Arc::new(Artifact {
                 key: artifact.key.clone(),
                 identity: Arc::clone(&artifact.identity),
                 code: Arc::new(code),
@@ -1988,7 +1992,9 @@ mod artifact_tests {
                 source,
                 requirements: artifact.requirements,
                 branch_type: artifact.branch_type,
-            }));
+            });
+            assert!(enlarged.retained_bytes() > artifact.retained_bytes());
+            cache.insert(enlarged);
             assert_accounting(&cache);
         }
         let initial_count = cache.entries.len();
