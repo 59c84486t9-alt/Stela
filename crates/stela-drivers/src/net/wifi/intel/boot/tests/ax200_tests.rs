@@ -3,17 +3,21 @@
 //! Retained AX200 owner, completed native command DMA and failure models.
 use super::*;
 use crate::net::wifi::intel::radio::{
-    bios::service::{BiosIo, IoError, Object, Request},
+    bios::service::{self, BiosIo, IoError, Object, Request},
     control::Kind,
 };
 pub(super) struct ClockBios {
     inner: RadioBios,
     clock_error: Option<IoError>,
     country_error: Option<IoError>,
+    pub(super) board_case: Option<u8>,
 }
 // SAFETY: the original exact namespace model plus a real modeled EFI ECKV read.
 unsafe impl BiosIo for ClockBios {
     fn evaluate(&mut self, request: Request) -> Result<Object, IoError> {
+        if let Request::PowerTable(_) = request {
+            return Err(IoError::NotFound);
+        }
         self.inner.evaluate(request)
     }
     fn variable(
@@ -21,6 +25,19 @@ unsafe impl BiosIo for ClockBios {
         variable: super::super::super::platform::Variable,
     ) -> Result<Vec<u8>, IoError> {
         use super::super::super::platform::Variable;
+        if let Some(case) = self.board_case
+            && matches!(
+                variable,
+                Variable::Ppag
+                    | Variable::Wrds
+                    | Variable::Ewrd
+                    | Variable::Wgds
+                    | Variable::Sgom
+                    | Variable::Wtas
+            )
+        {
+            return super::ax200_board_tests::power_variable(case, variable);
+        }
         if variable == Variable::Wrdd {
             return self
                 .country_error
@@ -32,6 +49,15 @@ unsafe impl BiosIo for ClockBios {
                 .map_or_else(|| Ok(vec![0, 1, 0, 0, 0]), Err);
         }
         self.inner.variable(variable)
+    }
+    fn dmi_identity(&mut self) -> Result<service::DmiIdentity, IoError> {
+        match self.board_case {
+            Some(3) | None => Err(IoError::Unavailable),
+            case => Ok(service::DmiIdentity {
+                system_vendor: Some(if case == Some(4) { "Example" } else { "HP" }.into()),
+                board_vendor: None,
+            }),
+        }
     }
 }
 pub(super) fn setup_bytes() -> Vec<u8> {
@@ -97,6 +123,7 @@ pub(super) fn finish_lari<'a>(
             },
             clock_error,
             country_error: None,
+            board_case: None,
         })
     }
     .unwrap_or_else(|_| panic!("real cold prefix"));

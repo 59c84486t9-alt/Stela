@@ -11,6 +11,10 @@ use crate::net::wifi::intel::radio::{
     lari::Observation,
 };
 use alloc::boxed::Box;
+mod board_policy;
+pub use board_policy::{
+    Ax200BoardPolicy, Ax200BoardPolicyError, Ax200BoardPolicyPhase, BoardCommand, BoardCommandKind,
+};
 mod mcc;
 mod scan_configuration;
 pub use mcc::{Ax200Mcc, Ax200MccError, Ax200MccPhase};

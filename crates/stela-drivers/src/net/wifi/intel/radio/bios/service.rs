@@ -5,7 +5,8 @@
 //! remains separate from this unsafe platform-service implementation contract.
 use super::{GeneralConfiguration, Scalar, ScalarKind};
 use crate::net::wifi::intel::{platform::Variable, radio::lari};
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
+pub(crate) mod power;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -13,6 +14,9 @@ pub enum Request {
     WideBandwidth,
     ExternalClock,
     Country,
+    /// Exact WRDS/EWRD/WGDS/PPAG/WTAS method at this function's real ACPI
+    /// handle. Other Variable variants are never requested through this case.
+    PowerTable(Variable),
     /// Intel DSM GUID f21202bf-8f78-4dc6-a5b3-1f738e285ade, revision 0,
     /// no fourth-argument payload, at the actual function's ACPI handle.
     Dsm(u8),
@@ -40,6 +44,12 @@ impl IoError {
         matches!(self, Self::Unavailable | Self::BoundExceeded)
     }
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DmiIdentity {
+    /// Genuine SMBIOS system/board vendor strings, or observed absent strings.
+    pub system_vendor: Option<String>,
+    pub board_vendor: Option<String>,
+}
 /// Actual ACPI and EFI reads, owned independently of copied resource bytes.
 /// # Safety
 /// Implementors perform real reads at the device/firmware namespace bound by
@@ -52,20 +62,29 @@ impl IoError {
 /// must return Unavailable/BoundExceeded, never pretend the object is absent.
 /// Returned objects are bounded to 4096 bytes/256 nodes/depth 4; exceeding that
 /// native collection envelope returns BoundExceeded. The provider must remain
-/// valid until independently stopped; uncertain owner Drop retains it.
+/// valid until independently stopped; uncertain owner Drop retains it. SMBIOS
+/// vendor strings come from this same retained native platform, preserve actual
+/// absence and are individually bounded to 4096 bytes.
 pub unsafe trait BiosIo: 'static {
     fn evaluate(&mut self, request: Request) -> Result<Object, IoError>;
     fn variable(&mut self, variable: Variable) -> Result<Vec<u8>, IoError>;
+    /// Real SMBIOS on the same retained platform; no PCI/ACPI-derived guess.
+    /// The default preserves explicitly unavailable native service support.
+    fn dmi_identity(&mut self) -> Result<DmiIdentity, IoError> {
+        Err(IoError::Unavailable)
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Read {
     Acpi(Request, Result<Object, IoError>),
     Uefi(Variable, Result<Vec<u8>, IoError>),
+    Dmi(Result<DmiIdentity, IoError>),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     IncompleteAcpi(Request, IoError),
     IncompleteUefi(Variable, IoError),
+    IncompleteDmi(IoError),
 }
 #[derive(Clone, Copy)]
 struct Cache {
@@ -92,6 +111,24 @@ impl<B: BiosIo> Session<B> {
             external_clock: None,
             country: None,
         }
+    }
+    pub(crate) fn dmi_identity(&mut self) -> Result<DmiIdentity, Error> {
+        let result = self.io.dmi_identity();
+        self.reads.push(Read::Dmi(result.clone()));
+        // Any failure is incomplete identity, not a fabricated unapproved board.
+        let identity = result.map_err(Error::IncompleteDmi)?;
+        if identity
+            .system_vendor
+            .as_ref()
+            .is_some_and(|v| v.len() > 4096)
+            || identity
+                .board_vendor
+                .as_ref()
+                .is_some_and(|v| v.len() > 4096)
+        {
+            return Err(Error::IncompleteDmi(IoError::BoundExceeded));
+        }
+        Ok(identity)
     }
     pub(crate) fn reads(&self) -> &[Read] {
         &self.reads
@@ -343,7 +380,7 @@ mod tests {
         fn evaluate(&mut self, request: Request) -> Result<Object, IoError> {
             let s = self.scenario;
             Ok(match request {
-                Request::ExternalClock | Request::Country => {
+                Request::ExternalClock | Request::Country | Request::PowerTable(_) => {
                     panic!("scalar is outside the historical LARI model")
                 }
                 Request::Glai => {

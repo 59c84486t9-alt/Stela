@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Intel Corporation
 //! Actual post-MCC scan configuration on the original modeled native owner.
 use super::{ax200_tests::*, *};
-fn finish_mcc<'a>(
+pub(super) fn finish_mcc<'a>(
     setup: Ax200Setup<'a, Model, ClockBios>,
     mut sequence: u16,
     mut entry: u16,
