@@ -21,8 +21,6 @@ pub(crate) mod power;
 mod restore;
 mod speculation;
 pub(crate) mod storage;
-// Compile the source adapter while actual RAM/PMGR adoption remains explicit.
-#[allow(dead_code)]
 mod topology;
 pub(crate) mod translations;
 
@@ -1156,12 +1154,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     {
         output::fatal("native bootstrap check needs an explicit physical-core count");
     }
-    if options.native_cores.is_some_and(|cores| cores > 1)
-        && !options.native_bootstrap_check
-        && !options.native_shared_check
-    {
-        output::fatal("parallel SystemMode shared-memory execution is not admitted yet");
-    }
     if options.native_memory_check {
         match crate::native_memory::verify() {
             Ok(()) => output::arguments(format_args!(
@@ -1468,8 +1460,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     )
     .unwrap_or_else(|error| output::fatal(error));
     let native_tsc_base = host::rdtsc();
-    let worker_ram =
-        (options.native_bootstrap_check || options.native_shared_check).then(|| ram.clone());
+    let worker_ram = ram.clone();
     let config = Config {
         ram,
         pool_physical: handoff.pool.physical,
@@ -1489,25 +1480,26 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let mut host_owner =
         unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
     let apic_hz = host::statistics().apic_hz;
+    // SAFETY: the retained physical inventory and loader-owned reservations
+    // were validated before any SIPI; the BSP Host is installed, guest entry
+    // is excluded, and APs remain parked until canonical worker publication.
+    let executors = unsafe {
+        crate::native_smp::executor::start(
+            handoff,
+            native_processors.expect("validated native roster"),
+            &worker_ram,
+            native_tsc_base,
+        )
+    }
+    .unwrap_or_else(|error| {
+        output::arguments(format_args!("native executor refusal: {error:?}\n"));
+        output::fatal("owned native AP bootstrap refused")
+    });
+    let sender = crate::apic::Apic::new(
+        handoff.apic_base,
+        layout::physical(handoff.apic_base & crate::apic::BASE_ADDRESS),
+    );
     if options.native_bootstrap_check || options.native_shared_check {
-        // SAFETY: source-qualified physical roster and loader reservations,
-        // interrupts disabled, BSP Host installed. Guest entry is excluded.
-        let executors = unsafe {
-            crate::native_smp::executor::start(
-                handoff,
-                native_processors.expect("validated native roster"),
-                worker_ram.as_deref().expect("native worker RAM metadata"),
-                native_tsc_base,
-            )
-        }
-        .unwrap_or_else(|error| {
-            output::arguments(format_args!("CHECK native-bootstrap FAIL {error:?}\n"));
-            output::fatal("owned native AP bootstrap refused")
-        });
-        let sender = crate::apic::Apic::new(
-            handoff.apic_base,
-            layout::physical(handoff.apic_base & crate::apic::BASE_ADDRESS),
-        );
         for processor in executors.processors() {
             // SAFETY: BSP owns its ICR, physical AP/private descriptors ready.
             let doorbells = unsafe { processor.check_doorbell(&sender, handoff.tsc_hz) }
@@ -1557,6 +1549,12 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         ));
         output::terminate(0x10);
     }
+    let roster = topology::AssignedRoster::new(
+        native_processors.expect("validated native roster"),
+        &executors,
+        &host_owner,
+    )
+    .unwrap_or_else(|error| output::fatal(&error));
     let mut bare = host_owner.host();
     let target = target();
     let speculation = speculation::probe();
@@ -1564,6 +1562,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let mut core_locks = stela_runtime::machine::ctrr::Handoff::default();
     let mut hidden_devices = Vec::new();
     let mut loaded_tree = None;
+    let mut loaded_source = None;
     let mut bundle_boot_processor = None;
     let mut hidden_clpc = Vec::new();
     // A bundle's kernel gets a framebuffer the size of the firmware's mode.
@@ -1600,6 +1599,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         bundle_boot_processor = loaded.boot_processor;
         hidden_clpc = loaded.hidden_clpc;
         loaded_tree = Some(loaded.live_tree);
+        loaded_source = Some(loaded.source);
         crate::status::done("");
         (loaded.pc, loaded.x0)
     } else {
@@ -1621,11 +1621,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         ));
         (options.entry, options.x0)
     };
-    let tree = loaded_tree.as_ref().map(|tree| tree.bytes());
-    if tree.is_some() {
+    let source_tree = loaded_tree.as_ref().map(|tree| tree.bytes());
+    if source_tree.is_some() {
         crate::status::begin("Setting up the Mac's hardware");
     }
-    let mut board = tree.map(|tree| {
+    let mut board = source_tree.map(|tree| {
         soc::board(tree).unwrap_or_else(|error| {
             output::arguments(format_args!("board refusal: {error}\n"));
             output::fatal("the board could not be modeled")
@@ -1656,6 +1656,100 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             0
         }
     };
+    let full_profile = match &board {
+        Some(board) => board_profile(board, target, speculation),
+        None => test_profile(),
+    };
+    let topology_source = match (loaded_source.as_ref(), loaded_tree.as_ref(), board.as_ref()) {
+        (Some(intake), Some(live), Some(source_board)) => {
+            let boot = source_board
+                .boot_processor
+                .as_ref()
+                .expect("validated source boot PE");
+            let identity = intake
+                .topology_identity(full_profile.chip)
+                .unwrap_or_else(|error| output::fatal(&error));
+            let prepared = match identity.profile.soc {
+                0x8112 => topology::Source::t8112_assigned(
+                    intake.original(),
+                    live,
+                    identity,
+                    boot.affinity,
+                    handoff.native_resources.cores as usize,
+                ),
+                0x6000 if handoff.native_resources.cores == 1 => topology::Source::t6000(
+                    intake.original(),
+                    live.bytes(),
+                    identity,
+                    boot.affinity,
+                ),
+                _ => Err(String::from(
+                    "native assigned topology for this source family is not qualified",
+                )),
+            };
+            Some(prepared.unwrap_or_else(|error| output::fatal(&error)))
+        }
+        (None, None, None) if handoff.native_resources.cores == 1 => None,
+        (None, None, None) => {
+            output::fatal("an authored multi-PE image requires an explicit qualified topology")
+        }
+        _ => output::fatal("selected bundle source, live tree and board must be retained together"),
+    };
+    let assigned = topology_source.as_ref().map(|source| {
+        source
+            .prepare(&roster, full_profile.clone())
+            .unwrap_or_else(|error| output::fatal(&error))
+    });
+    // SAFETY: all raw guest input copies have ended; AP executors are parked,
+    // and no guest/device DMA producer has entered. The same loader bytes are
+    // retained for every subsequent native CPU and synchronous device writer.
+    let canonical_ram = unsafe { crate::native_smp::canonical::reserve(handoff, &worker_ram) }
+        .unwrap_or_else(|error| output::fatal(error));
+    if let Some(assigned) = &assigned {
+        let candidate = assigned.tree.serialize();
+        let parsed = soc::board(&candidate).unwrap_or_else(|error| output::fatal(&error));
+        let boot = parsed
+            .boot_processor
+            .as_ref()
+            .unwrap_or_else(|| output::fatal("assigned topology has no running boot PE"));
+        let join = assigned
+            .join(boot.affinity)
+            .unwrap_or_else(|error| output::fatal(&error));
+        if boot.cpu != join.logical
+            || join.worker != 0
+            || assigned
+                .plan
+                .pes()
+                .iter()
+                .find(|pe| pe.boot)
+                .map(|pe| pe.logical)
+                != Some(join.logical)
+        {
+            output::fatal("prepared boot PE differs from the actual assigned BSP");
+        }
+        if full_profile.processors.get(boot_processor) != assigned.profile.processors.get(boot.cpu)
+        {
+            output::fatal("assigned boot identity differs from the original source handoff");
+        }
+        output::arguments(format_args!(
+            "NATIVE ASSIGNMENT original_boot={} assigned_boot={} physical_cores={} PEs={} boot_path={} removed={}\n",
+            boot_processor,
+            boot.cpu,
+            handoff.native_resources.cores,
+            assigned.joins.len(),
+            assigned.receipt.boot_path,
+            assigned.receipt.removed.len()
+        ));
+        board = Some(parsed);
+    }
+    let projected_bytes = assigned.as_ref().map(|assigned| assigned.tree.serialize());
+    let tree = projected_bytes
+        .as_deref()
+        .or_else(|| loaded_tree.as_ref().map(|tree| tree.bytes()));
+    let boot_processor = board
+        .as_ref()
+        .and_then(|board| board.boot_processor.as_ref())
+        .map_or(0, |boot| boot.cpu);
     mount::clpc_absence(&hidden_clpc, options.strict, &mut |arguments| {
         output::arguments(arguments)
     })
@@ -1693,10 +1787,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             None => output::fatal("--nor was supplied but this DeviceTree exposes no modeled NOR"),
         }
     }
-    let profile = match &board {
-        Some(board) => board_profile(board, target, speculation),
-        None => test_profile(),
-    };
+    let profile = assigned
+        .as_ref()
+        .map_or_else(|| full_profile.clone(), |assigned| assigned.profile.clone());
     // The real kernelcache starts SPTM at EL2: it writes TPIDR_EL2 and keeps
     // its per-CPU pointer in TPIDR_GL2. HCR_EL2.E2H is RES1 on this profile
     // (SPTM installs its vectors through VBAR_EL1 before it ORs TGE and E2H
@@ -1741,7 +1834,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         alloc::boxed::Box::new(display::GopScanout::new(screen))
             as alloc::boxed::Box<dyn stela_runtime::machine::apple::Scanout>
     });
-    let (devices, restore_usb) = match devices(
+    let (mut devices, restore_usb) = match devices(
         board.as_ref(),
         mount::Inputs {
             programmed: mount::memory_locks(read_only_region, &core_locks),
@@ -1772,6 +1865,32 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::arguments(format_args!("device refusal: {error}\n"));
             output::fatal("the board devices could not be placed")
         }
+    };
+    let processor_power = match (&topology_source, &assigned, &loaded_source) {
+        (Some(source), Some(assigned), Some(intake)) => {
+            let original = stela_runtime::machine::adt::Node::root(intake.original())
+                .unwrap_or_else(|| output::fatal("retained original source ADT is malformed"));
+            devices
+                .connect_processor_power(
+                    source.resources.graph(),
+                    &original,
+                    &full_profile,
+                    &assigned.plan,
+                    0,
+                )
+                .unwrap_or_else(|error| output::fatal(&error))
+        }
+        (None, None, None) => Vec::new(),
+        _ => output::fatal("assigned processor power lost its retained source owner"),
+    };
+    let worker_bindings = match &assigned {
+        Some(assigned) => assigned
+            .worker_bindings()
+            .unwrap_or_else(|error| output::fatal(&error)),
+        None => alloc::vec![stela_runtime::machine::engine::publication::WorkerBinding {
+            pe: 0,
+            worker: stela_runtime::machine::engine::publication::WorkerId(0),
+        }],
     };
     if tree.is_some() {
         crate::status::done(profile.name);
@@ -1832,8 +1951,46 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::fatal("restore preparation failed")
         })
     });
-    let mut machine = Machine::new_at(cpu, bare, devices, profile, target, boot_processor)
-        .unwrap_or_else(|error| output::fatal(error));
+    // All actual source/resource preparation precedes the first publication.
+    // A reached write failure is terminal before any guest entry.
+    let _published_tree = match &assigned {
+        Some(assigned) => {
+            // SAFETY: cold owner, parked APs, no frame loans or device DMA;
+            // every earlier raw guest copy has completed.
+            let mut memory = unsafe { bundle::live_tree::registered::ColdRam::new(&canonical_ram) };
+            let published = loaded_tree
+                .take()
+                .expect("retained source tree")
+                .publish(&mut memory, &assigned.tree)
+                .unwrap_or_else(|error| output::fatal(&error));
+            if Some(published.bytes()) != projected_bytes.as_deref() {
+                output::fatal("published assigned topology differs from the prepared device graph");
+            }
+            Some(published)
+        }
+        None => None,
+    };
+    // The loader handle's last RAM copy preceded canonical registration; its
+    // borrow has ended. It never executes a guest instruction.
+    // SAFETY: actual started executors, retained source Plan/profile and exact
+    // RAM/device owners remain live for the whole non-returning run below.
+    let mut machine = unsafe {
+        crate::native_smp::canonical::prepare(
+            handoff,
+            native_processors.expect("validated native roster"),
+            &executors,
+            &sender,
+            &mut host_owner,
+            canonical_ram,
+            cpu,
+            devices,
+            profile,
+            boot_processor,
+            &worker_bindings,
+            &processor_power,
+        )
+    }
+    .unwrap_or_else(|error| output::fatal(error));
     machine.hand_off_core_locks(core_locks);
     run_machine(
         machine,
@@ -1846,7 +2003,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             host_nor,
             host_disks,
         },
-        Machine::run,
+        |machine, limit| {
+            // SAFETY: the same fixed workers and canonical producer set stay
+            // retained; an unsupported native service returns without fallback.
+            unsafe { crate::native_smp::canonical::run_slice(machine, limit) }
+        },
     )
 }
 
