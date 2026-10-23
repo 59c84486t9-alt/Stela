@@ -2,6 +2,7 @@
 use crate::block::BlockError;
 use core::ops::Range;
 
+pub mod amd;
 pub mod mapping;
 pub mod memory;
 pub mod pages;
