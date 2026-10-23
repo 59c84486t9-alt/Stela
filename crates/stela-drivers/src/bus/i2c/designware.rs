@@ -268,11 +268,12 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
         mut ready: impl FnMut(&mut R) -> bool,
     ) -> bool {
         loop {
-            if ready(&mut self.registers) {
-                return true;
-            }
+            let observed = ready(&mut self.registers);
             if self.expired(start, timeout) {
                 return false;
+            }
+            if observed {
+                return true;
             }
             self.timer.relax();
         }
@@ -291,13 +292,14 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
             });
         }
         self.registers.write32(ENABLE, 0);
-        let disabled = self.wait_until(start, self.config.recovery_timeout_us, |registers| {
+        let mut disabled = self.wait_until(start, self.config.recovery_timeout_us, |registers| {
             registers.read32(ENABLE_STATUS) & ENABLE_ON == 0
         });
         if disabled {
             self.registers.write32(INTR_MASK, 0);
             self.registers.write32(DMA_CR, 0);
             self.registers.read32(CLR_INTR);
+            disabled = !self.expired(start, self.config.recovery_timeout_us);
         }
         self.ready = disabled;
         disabled
@@ -326,6 +328,14 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
         Ok(interrupts)
     }
 
+    fn transaction_deadline(&self, start: u64, phase: Phase) -> Result<(), ErrorKind> {
+        if self.expired(start, self.config.timeout_us) {
+            Err(ErrorKind::Timeout(phase))
+        } else {
+            Ok(())
+        }
+    }
+
     fn transfer(
         &mut self,
         address: Address,
@@ -344,6 +354,7 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
         };
         self.registers.write32(CON, self.control | address_control);
         self.registers.write32(TAR, target);
+        self.transaction_deadline(start, Phase::Enable)?;
         self.registers.write32(ENABLE, ENABLE_ON);
         if !self.wait_until(start, self.config.timeout_us, |registers| {
             registers.read32(ENABLE_STATUS) & ENABLE_ON != 0
@@ -357,6 +368,7 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
             let count = operation.len();
             loop {
                 let interrupts = self.faults()?;
+                self.transaction_deadline(start, Phase::Transfer)?;
                 if interrupts & INTR_STOP_DET != 0 {
                     // A STOP cannot belong to our final byte while more
                     // commands remain in the hardware's TX FIFO. Merely
@@ -369,6 +381,7 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
                     }
                 }
                 let available = self.registers.read32(RXFLR) as usize;
+                self.transaction_deadline(start, Phase::Transfer)?;
                 if available > self.rx_depth {
                     return Err(ErrorKind::UnexpectedReceive);
                 }
@@ -376,7 +389,9 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
                     match operation {
                         Operation::Read(bytes) if available <= queued - received => {
                             for byte in &mut bytes[received..received + available] {
-                                *byte = self.registers.read32(DATA_CMD) as u8;
+                                let observed = self.registers.read32(DATA_CMD) as u8;
+                                self.transaction_deadline(start, Phase::Transfer)?;
+                                *byte = observed;
                             }
                             received += available;
                         }
@@ -410,6 +425,9 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
                     if message == final_message && queued == count - 1 {
                         command |= CMD_STOP;
                     }
+                    // No target/status/payload observation may spend the
+                    // remaining budget and still permit a later wire command.
+                    self.transaction_deadline(start, Phase::Transfer)?;
                     self.registers.write32(DATA_CMD, command);
                     queued += 1;
                 }
@@ -428,13 +446,17 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
                 return Err(ErrorKind::UnexpectedStop);
             }
             let status = self.registers.read32(STATUS);
+            self.transaction_deadline(start, Phase::Stop)?;
             if interrupts & INTR_STOP_DET != 0
                 && status & (STATUS_TX_EMPTY | STATUS_ACTIVE) == STATUS_TX_EMPTY
             {
-                if self.registers.read32(RXFLR) != 0 {
+                let remaining = self.registers.read32(RXFLR);
+                self.transaction_deadline(start, Phase::Stop)?;
+                if remaining != 0 {
                     return Err(ErrorKind::UnexpectedReceive);
                 }
                 self.registers.read32(CLR_STOP_DET);
+                self.transaction_deadline(start, Phase::Stop)?;
                 return Ok(());
             }
             if self.expired(start, self.config.timeout_us) {
@@ -519,6 +541,9 @@ mod tests {
         fault_after: Option<(usize, u32)>,
         stop_after: Option<usize>,
         aborts: usize,
+        accesses: Vec<(bool, usize, u32)>,
+        delay_after_access: Option<usize>,
+        delay_us: u64,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -573,6 +598,9 @@ mod tests {
                 fault_after: None,
                 stop_after: None,
                 aborts: 0,
+                accesses: Vec::new(),
+                delay_after_access: None,
+                delay_us: 0,
             }
         }
 
@@ -648,9 +676,19 @@ mod tests {
             }
         }
 
+        // Advance time only after the actual register result/effect. This
+        // models a completed slow access, independently of polling relax().
+        fn complete_access(&mut self, write: bool, offset: usize, value: u32) {
+            self.accesses.push((write, offset, value));
+            if self.delay_after_access == Some(self.accesses.len()) {
+                self.time.set(self.time.get().wrapping_add(self.delay_us));
+                self.delay_after_access = None;
+            }
+        }
+
         fn read(&mut self, offset: usize) -> u32 {
             self.step();
-            match offset {
+            let value = match offset {
                 ENABLE_STATUS => u32::from(self.enabled),
                 STATUS => {
                     (u32::from(self.active || self.external_busy) * STATUS_ACTIVE)
@@ -687,7 +725,9 @@ mod tests {
                     0
                 }
                 _ => self.words[offset / 4],
-            }
+            };
+            self.complete_access(false, offset, value);
+            value
         }
 
         fn write(&mut self, offset: usize, value: u32) {
@@ -738,6 +778,7 @@ mod tests {
                 }
                 _ => self.words[offset / 4] = value,
             }
+            self.complete_access(true, offset, value);
         }
     }
 
@@ -794,6 +835,113 @@ mod tests {
         let state = registers.0.clone();
         let controller = DesignWare::new(registers, timer, config()).unwrap();
         (controller, state)
+    }
+
+    #[test]
+    fn completed_access_deadlines_never_report_success_or_publish_later_wire_commands() {
+        // First observe a real successful combined transfer, including its
+        // disable/cleanup accesses. Then delay each actual access in turn.
+        // The existing peer/FIFO model still executes every original effect.
+        let (mut baseline, state) = controller(2, 2);
+        state.borrow_mut().accesses.clear();
+        let mut bytes = [0; 3];
+        baseline
+            .transaction(
+                Address::SevenBit(0x2c),
+                &mut [
+                    Operation::Write(&[0x80, 0x55, 0x33]),
+                    Operation::Read(&mut bytes),
+                ],
+            )
+            .unwrap();
+        let accesses = state.borrow().accesses.clone();
+        assert!(
+            accesses
+                .iter()
+                .any(|&(write, offset, _)| !write && offset == DATA_CMD)
+        );
+        assert!(
+            accesses
+                .iter()
+                .any(|&(write, offset, _)| !write && offset == CLR_STOP_DET)
+        );
+        for delayed in 1..=accesses.len() {
+            let (mut bus, state) = controller(2, 2);
+            {
+                let mut h = state.borrow_mut();
+                h.accesses.clear();
+                h.delay_after_access = Some(delayed);
+                h.delay_us = config().timeout_us;
+            }
+            let mut data = [0xa5; 3];
+            let error = bus
+                .transaction(
+                    Address::SevenBit(0x2c),
+                    &mut [
+                        Operation::Write(&[0x80, 0x55, 0x33]),
+                        Operation::Read(&mut data),
+                    ],
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error.kind, ErrorKind::Timeout(_)),
+                "access {delayed}: {error:?}"
+            );
+            let h = state.borrow();
+            assert_eq!(h.delay_after_access, None);
+            assert_eq!(&h.accesses[..delayed], &accesses[..delayed]);
+            assert!(
+                h.accesses[delayed..]
+                    .iter()
+                    .all(|&(write, offset, value)| !write
+                        || (offset != DATA_CMD && !(offset == ENABLE && value == ENABLE_ON))),
+                "wire publication after slow access {delayed}"
+            );
+            if !accesses[delayed - 1].0 && accesses[delayed - 1].1 == DATA_CMD {
+                let completed_before = accesses[..delayed - 1]
+                    .iter()
+                    .filter(|&&(write, offset, _)| !write && offset == DATA_CMD)
+                    .count();
+                assert!(
+                    data[completed_before..].iter().all(|&byte| byte == 0xa5),
+                    "late RX read must not be copied into the caller's buffer"
+                );
+            }
+            if error.recovery == Recovery::Failed {
+                let writes = h.writes.len();
+                drop(h);
+                assert_eq!(
+                    bus.transaction(Address::SevenBit(0x2c), &mut [Operation::Write(&[9])])
+                        .unwrap_err()
+                        .kind,
+                    ErrorKind::NeedsReset
+                );
+                assert_eq!(state.borrow().writes.len(), writes);
+            }
+        }
+    }
+
+    #[test]
+    fn late_actual_abort_remains_the_original_failure_through_cleanup() {
+        for source in [ABRT_ADDRESS_NACK, ABRT_DATA_NACK, ABRT_ARBITRATION_LOST] {
+            let (mut bus, state) = controller(2, 2);
+            {
+                let mut h = state.borrow_mut();
+                h.raw = INTR_TX_ABRT;
+                h.abort_source = source;
+                // Test the actual common fault reader, whose clear destroys
+                // the hardware source. A late observation cannot turn it into
+                // an unrelated timeout or silently retry a wire operation.
+                h.accesses.clear();
+                h.delay_after_access = Some(2);
+                h.delay_us = config().timeout_us;
+            }
+            let error = bus.faults().unwrap_err();
+            assert!(matches!(error, ErrorKind::Aborted { source: actual, .. } if actual == source));
+            assert_eq!(state.borrow().abort_source, 0);
+            assert!(bus.quiesce());
+            assert!(state.borrow().commands.is_empty());
+        }
     }
 
     #[test]
