@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 /* Compile the real owner below against deliberately narrow service mocks.
  * These check caller ownership/error handling, not IOKit implementation, kernel
- * class layout, ABI, page wiring, task death or hardware quiescence. The normal
- * Makefile targets separately compile against the unmodified Apple SDK.
+ * class layout, ABI, page wiring, task death or hardware quiescence. The
+ * component build separately compiles against the unmodified Apple SDK.
  * No mock is compiled into a driver component.
  */
 #include <cassert>

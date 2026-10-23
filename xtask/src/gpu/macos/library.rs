@@ -1,15 +1,10 @@
 //! Link the actual user-space objects against the SDK's public frameworks.
-use super::{dependencies, tools};
+use super::{dependencies, run, tools};
 use crate::gpu::support::source_binding;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use object::{Architecture, BinaryFormat, Object, ObjectKind, ObjectSymbol};
 use serde_json::json;
-use std::{
-    collections::BTreeSet,
-    fs::{self, File},
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{collections::BTreeSet, ffi::OsString, fs, path::Path};
 
 pub(super) fn build(
     gpu: &Path,
@@ -39,24 +34,52 @@ pub(super) fn build(
         ),
     ] {
         let directory = evidence.join("metal").join(arch);
-        let log_path = evidence.join(format!("metal-library-{arch}.log"));
-        let log = File::create(&log_path)?;
-        let status = Command::new(tools::which("make").context("install make")?)
-            .current_dir(tools::root())
-            .arg("-f")
-            .arg(source.join("Makefile"))
-            .arg(format!("ARCH={arch}"))
-            .arg(format!("BUILD={}", directory.display()))
-            .arg(format!("SDKROOT={}", sdk_root.display()))
-            .stdout(Stdio::from(log.try_clone()?))
-            .stderr(Stdio::from(log))
-            .status()?;
-        ensure!(
-            status.success(),
-            "Metal library build failed: {}",
-            log_path.display()
-        );
+        let log = evidence.join(format!("metal-library-{arch}.log"));
         let path = directory.join("libstela-metal-library.dylib");
+        fs::create_dir_all(&directory)?;
+        let flags: Vec<OsString> = vec![
+            "-target".into(),
+            format!("{arch}-apple-macos26.0").into(),
+            "-isysroot".into(),
+            sdk_root.into(),
+            "-O2".into(),
+            "-fobjc-arc".into(),
+            "-fblocks".into(),
+            "-Wall".into(),
+            "-Wextra".into(),
+            "-Werror".into(),
+        ];
+        let object = directory.join("library.o");
+        let mut compile = flags.clone();
+        compile.extend(["-MD", "-MP", "-c"].map(OsString::from));
+        compile.push(source.join("library.m").into());
+        compile.push("-o".into());
+        compile.push(object.as_os_str().into());
+        run(
+            "clang",
+            &compile.iter().map(OsString::as_os_str).collect::<Vec<_>>(),
+            &log,
+        )?;
+        let mut link = flags;
+        link.push("-dynamiclib".into());
+        link.push(object.into());
+        link.extend(
+            [
+                "-framework",
+                "Foundation",
+                "-framework",
+                "Metal",
+                "-Wl,-install_name,@rpath/libstela-metal-library.dylib",
+                "-o",
+            ]
+            .map(OsString::from),
+        );
+        link.push(path.as_os_str().into());
+        run(
+            "clang",
+            &link.iter().map(OsString::as_os_str).collect::<Vec<_>>(),
+            &log,
+        )?;
         let bytes = fs::read(&path)?;
         let binary = object::File::parse(bytes.as_slice())?;
         let subtype = match &binary {

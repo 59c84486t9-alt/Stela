@@ -1,4 +1,6 @@
 //! Kernel and user-space ABI compilation, without installing or loading a driver.
+//! The SDK's own compiler and linker build each object directly; `-MD` records
+//! the headers each one read, which the receipts bind.
 mod library;
 use super::support::{capture, evidence_directory, source_binding};
 use crate::tools;
@@ -7,6 +9,7 @@ use object::{Architecture, BinaryFormat, Object, ObjectKind, ObjectSymbol};
 use serde_json::json;
 use std::{
     collections::BTreeSet,
+    ffi::{OsStr, OsString},
     fs::{self, File},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -20,7 +23,107 @@ fn sdk(arguments: &[&str]) -> Result<String> {
     )
 }
 
-// Make's dependency files include the headers actually read by each target,
+/// Runs one SDK tool, appending its output to `log`.
+fn run(tool: &str, arguments: &[&OsStr], log: &Path) -> Result<()> {
+    let output = File::options().create(true).append(true).open(log)?;
+    let status = Command::new(sdk(&["--find", tool])?.trim())
+        .args(arguments)
+        .stdout(Stdio::from(output.try_clone()?))
+        .stderr(Stdio::from(output))
+        .status()?;
+    ensure!(status.success(), "{tool} failed: {}", log.display());
+    Ok(())
+}
+
+/// The kernel component's flags for `arch`.
+fn kernel_flags(arch: &str, sdk_root: &Path) -> Vec<OsString> {
+    let headers = sdk_root.join("System/Library/Frameworks/Kernel.framework/Headers");
+    let mut flags: Vec<OsString> = vec![
+        "-target".into(),
+        format!("{arch}-apple-macos26.0").into(),
+        "-isysroot".into(),
+        sdk_root.into(),
+        "-isystem".into(),
+        headers.into(),
+    ];
+    flags.extend(
+        [
+            "-DKERNEL",
+            "-mkernel",
+            "-O2",
+            "-fno-stack-protector",
+            "-fno-stack-check",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Werror=sign-conversion",
+            "-Werror=shorten-64-to-32",
+            "-Werror=conditional-uninitialized",
+            "-Wno-unused-parameter",
+        ]
+        .map(OsString::from),
+    );
+    let arch_flags: &[&str] = if arch == "x86_64" {
+        &["-mno-sse", "-mno-sse2", "-mno-mmx", "-msoft-float"]
+    } else {
+        &["-mgeneral-regs-only"]
+    };
+    flags.extend(arch_flags.iter().map(OsString::from));
+    flags
+}
+
+/// Compiles the kernel component for `arch` into `output`: `gpu-memory.o`, a
+/// relocatable link of `memory.o`, and `task_memory.o`.
+fn kernel_component(
+    source: &Path,
+    sdk_root: &Path,
+    arch: &str,
+    output: &Path,
+    log: &Path,
+) -> Result<()> {
+    fs::create_dir_all(output)?;
+    for unit in ["memory", "task_memory"] {
+        let mut arguments = kernel_flags(arch, sdk_root);
+        arguments.extend(
+            [
+                "-fapple-kext",
+                "-fno-exceptions",
+                "-fno-rtti",
+                "-std=gnu++17",
+                "-MD",
+                "-MP",
+                "-c",
+            ]
+            .map(OsString::from),
+        );
+        arguments.push(source.join(format!("{unit}.cpp")).into());
+        arguments.push("-o".into());
+        arguments.push(output.join(format!("{unit}.o")).into());
+        run(
+            "clang++",
+            &arguments
+                .iter()
+                .map(OsString::as_os_str)
+                .collect::<Vec<_>>(),
+            log,
+        )?;
+    }
+    let link: Vec<OsString> = vec![
+        "-r".into(),
+        "-arch".into(),
+        arch.into(),
+        "-o".into(),
+        output.join("gpu-memory.o").into(),
+        output.join("memory.o").into(),
+    ];
+    run(
+        "ld",
+        &link.iter().map(OsString::as_os_str).collect::<Vec<_>>(),
+        log,
+    )
+}
+
+// Dependency files include the headers actually read by each target,
 // including SDK headers. Hash these inputs rather than just an SDK label.
 fn dependencies(directory: &Path, filename: &str) -> Result<BTreeSet<PathBuf>> {
     let mut paths = BTreeSet::new();
@@ -87,17 +190,47 @@ fn inspect_component(
     )
 }
 
+/// Builds and runs the host-only ownership and error tests. No mock enters the
+/// kernel component.
 fn contract(source: &Path, sdk_root: &Path, output: &Path) -> Result<serde_json::Value> {
     fs::create_dir_all(output)?;
-    let mut command = Command::new(tools::which("make").context("install make")?);
-    command
-        .current_dir(tools::root())
-        .arg("-f")
-        .arg(source.join("Makefile"))
-        .arg(format!("BUILD={}", output.display()))
-        .arg(format!("SDKROOT={}", sdk_root.display()))
-        .arg("contract-tests");
+    let binary = output.join("task-memory-contract");
+    let headers = sdk_root.join("System/Library/Frameworks/Kernel.framework/Headers");
+    let mut arguments: Vec<OsString> = vec![
+        "-std=gnu++17".into(),
+        "-isysroot".into(),
+        sdk_root.into(),
+        "-idirafter".into(),
+        headers.into(),
+    ];
+    arguments.extend(
+        [
+            "-O2",
+            "-g",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Wconversion",
+            "-fsanitize=address,undefined",
+            "-fno-omit-frame-pointer",
+            "-MD",
+            "-MP",
+        ]
+        .map(OsString::from),
+    );
+    arguments.push(source.join("tests/task_memory_contract.cpp").into());
+    arguments.push("-o".into());
+    arguments.push(binary.as_os_str().into());
     let log = output.join("contract.log");
+    run(
+        "clang++",
+        &arguments
+            .iter()
+            .map(OsString::as_os_str)
+            .collect::<Vec<_>>(),
+        &log,
+    )?;
+    let mut command = Command::new(&binary);
     fs::write(&log, capture(&mut command)?)?;
     Ok(
         json!({"scope":"Actual owner C++ with test-only original-service mocks under ASan/UBSan; no kernel page wiring or hardware",
@@ -117,12 +250,12 @@ pub fn build() -> Result<()> {
     let clang = sdk(&["--find", "clang"])?;
     let compiler = capture(Command::new(clang.trim()).arg("--version"))?;
     let gpu = tools::root().join("crates/stela-drivers/src/gpu");
-    let source = gpu.join("macos");
+    let source = gpu.join("iokit");
     let evidence = evidence_directory()?;
     for path in [&gpu, &sdk_root, &evidence] {
         ensure!(
             !path.to_string_lossy().chars().any(char::is_whitespace),
-            "kernel Make/dependency rules require paths without whitespace: {}",
+            "dependency files require paths without whitespace: {}",
             path.display()
         );
     }
@@ -146,23 +279,8 @@ pub fn build() -> Result<()> {
         ),
     ] {
         let directory = evidence.join(arch);
-        let log_path = evidence.join(format!("macos-{arch}.log"));
-        let log = File::create(&log_path)?;
-        let status = Command::new(tools::which("make").context("install make")?)
-            .current_dir(tools::root())
-            .arg("-f")
-            .arg(source.join("Makefile"))
-            .arg(format!("ARCH={arch}"))
-            .arg(format!("BUILD={}", directory.display()))
-            .arg(format!("SDKROOT={}", sdk_root.display()))
-            .stdout(Stdio::from(log.try_clone()?))
-            .stderr(Stdio::from(log))
-            .status()?;
-        ensure!(
-            status.success(),
-            "kernel build failed: {}",
-            log_path.display()
-        );
+        let log = evidence.join(format!("macos-{arch}.log"));
+        kernel_component(&source, &sdk_root, arch, &directory, &log)?;
         let path = directory.join("gpu-memory.o");
         // Apple's x86 kernel headers redirect bzero to __bzero.
         let zero = if arch == "x86_64" {
@@ -235,7 +353,7 @@ fn task_memory_preserves_original_service_ownership_and_failure_contracts() {
     let sdk_root = PathBuf::from(sdk(&["--show-sdk-path"]).unwrap().trim());
     let output = tempfile::tempdir().unwrap();
     contract(
-        &tools::root().join("crates/stela-drivers/src/gpu/macos"),
+        &tools::root().join("crates/stela-drivers/src/gpu/iokit"),
         &sdk_root,
         output.path(),
     )
