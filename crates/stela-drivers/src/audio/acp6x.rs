@@ -1211,22 +1211,46 @@ mod tests {
     // unspecified; its self-clearing fixture behavior is not physical evidence.
     #[test]
     fn atu_cache_command_has_no_sticky_enable_or_completion_readback() {
+        use super::super::acp_pdm::trace_assertions::assert_ring_invalidation;
         for readback in [0, 1, 0x1234_5678, u32::MAX] {
             let (mut controller, device, source) = fixture(0x60);
             device.lock().unwrap().atu_readback = readback;
             controller.initialize().unwrap();
+            let first_program = device.lock().unwrap().writes.len();
             controller
                 .prepare_capture(&source, CAPTURE_FORMAT, 4096)
                 .unwrap();
+            assert_ring_invalidation(
+                &device.lock().unwrap().writes[first_program..],
+                IOVA,
+                0x0380_0000,
+                4096,
+                false,
+            );
             controller.start().unwrap();
+            assert_ring_invalidation(
+                &device.lock().unwrap().writes[first_program..],
+                IOVA,
+                0x0380_0000,
+                4096,
+                true,
+            );
             device.lock().unwrap().advance(512);
             assert!(controller.position().unwrap().period_pending);
             controller.stop().unwrap();
             let old = controller.capture.as_ref().unwrap().dma.address().unwrap();
             let before = device.lock().unwrap().resets;
+            let replacement = device.lock().unwrap().writes.len();
             controller
                 .prepare_capture(&source, CAPTURE_FORMAT, 8192)
                 .unwrap();
+            assert_ring_invalidation(
+                &device.lock().unwrap().writes[replacement..],
+                IOVA,
+                0x0380_0000,
+                8192,
+                false,
+            );
             assert!(
                 device.lock().unwrap().resets > before,
                 "replacement needs an actual reset, not a cache request"
@@ -1237,17 +1261,27 @@ mod tests {
                 old
             );
             controller.start().unwrap();
+            assert_ring_invalidation(
+                &device.lock().unwrap().writes[replacement..],
+                IOVA,
+                0x0380_0000,
+                8192,
+                true,
+            );
             device.lock().unwrap().advance(1024);
             controller.stop().unwrap();
             controller.shutdown().unwrap();
             let model = device.lock().unwrap();
             assert_eq!(model.atu_reads, 0);
-            assert!(
+            assert_eq!(
                 model
                     .writes
                     .iter()
+                    .copied()
                     .filter(|(offset, _)| *offset == 0xc40)
-                    .all(|(_, value)| *value == 1)
+                    .collect::<Vec<_>>(),
+                [(0xc40, 1), (0xc40, 1)],
+                "exactly one request for each of the two successful preparations"
             );
             assert_eq!(model.unmaps, 2);
             assert_eq!(source.drops.load(Ordering::Relaxed), 2);

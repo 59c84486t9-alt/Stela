@@ -1043,6 +1043,7 @@ mod tests {
 
     #[test]
     fn source_suspend_resume_retains_same_real_ring_and_starts_a_fresh_capture_epoch() {
+        use super::super::acp_pdm::trace_assertions::assert_ring_invalidation;
         for power_gate in [false, true] {
             let (mut controller, device, source) = ready(1, 4096);
             let address = controller.capture.as_ref().unwrap().dma.address().unwrap();
@@ -1053,7 +1054,22 @@ mod tests {
                 .cpu
                 .address(0, 4)
                 .unwrap();
+            // ready() performed exactly one original preparation.
+            assert_ring_invalidation(
+                &device.lock().unwrap().writes,
+                IOVA,
+                0x0205_0000,
+                4096,
+                false,
+            );
             controller.start().unwrap();
+            assert_ring_invalidation(
+                &device.lock().unwrap().writes,
+                IOVA,
+                0x0205_0000,
+                4096,
+                true,
+            );
             device.lock().unwrap().advance(512);
             assert!(controller.position().unwrap().period_pending);
             controller.suspend_held_d0(power_gate).unwrap();
@@ -1084,7 +1100,15 @@ mod tests {
                 controller.prepare_capture(&source, CAPTURE_FORMAT, 4096),
                 Err(Error::Suspended)
             );
+            let restored = device.lock().unwrap().writes.len();
             controller.resume_held_d0().unwrap();
+            assert_ring_invalidation(
+                &device.lock().unwrap().writes[restored..],
+                IOVA,
+                0x0205_0000,
+                4096,
+                false,
+            );
             assert_eq!(controller.state(), State::Prepared);
             assert_eq!(
                 controller.capture.as_ref().unwrap().dma.address().unwrap(),
@@ -1109,6 +1133,13 @@ mod tests {
             );
             assert_eq!(controller.capture_period(&mut pcm), Err(Error::NotPrepared));
             controller.start().unwrap();
+            assert_ring_invalidation(
+                &device.lock().unwrap().writes[restored..],
+                IOVA,
+                0x0205_0000,
+                4096,
+                true,
+            );
             assert_eq!(controller.capture_period(&mut pcm).unwrap(), None);
             assert!(pcm.iter().all(|byte| *byte == 0xa5));
             device.lock().unwrap().advance(512);
@@ -1131,6 +1162,18 @@ mod tests {
             controller.shutdown().unwrap();
             assert_eq!(source.drops.load(Ordering::Relaxed), 1);
             assert_eq!(device.lock().unwrap().unmaps, 1);
+            let model = device.lock().unwrap();
+            assert_eq!(model.atu_reads, 0);
+            assert_eq!(
+                model
+                    .writes
+                    .iter()
+                    .copied()
+                    .filter(|(offset, _)| *offset == 0xc40)
+                    .collect::<Vec<_>>(),
+                [(0xc40, 1), (0xc40, 1)],
+                "exactly one request for original preparation and one for retained PM reprogramming"
+            );
         }
     }
 
@@ -2013,22 +2056,46 @@ mod tests {
     // unspecified; its self-clearing fixture behavior is not physical evidence.
     #[test]
     fn atu_cache_command_has_no_sticky_enable_or_completion_readback() {
+        use super::super::acp_pdm::trace_assertions::assert_ring_invalidation;
         for readback in [0, 1, 0x1234_5678, u32::MAX] {
             let (mut controller, device, source) = fixture(1);
             device.lock().unwrap().atu_readback = readback;
             controller.initialize().unwrap();
+            let first_program = device.lock().unwrap().writes.len();
             controller
                 .prepare_capture(&source, CAPTURE_FORMAT, 4096)
                 .unwrap();
+            assert_ring_invalidation(
+                &device.lock().unwrap().writes[first_program..],
+                IOVA,
+                0x0205_0000,
+                4096,
+                false,
+            );
             controller.start().unwrap();
+            assert_ring_invalidation(
+                &device.lock().unwrap().writes[first_program..],
+                IOVA,
+                0x0205_0000,
+                4096,
+                true,
+            );
             device.lock().unwrap().advance(512);
             assert!(controller.position().unwrap().period_pending);
             controller.stop().unwrap();
             let old = controller.capture.as_ref().unwrap().dma.address().unwrap();
             let before = device.lock().unwrap().resets;
+            let replacement = device.lock().unwrap().writes.len();
             controller
                 .prepare_capture(&source, CAPTURE_FORMAT, 8192)
                 .unwrap();
+            assert_ring_invalidation(
+                &device.lock().unwrap().writes[replacement..],
+                IOVA,
+                0x0205_0000,
+                8192,
+                false,
+            );
             assert!(
                 device.lock().unwrap().resets > before,
                 "replacement needs an actual reset, not a cache request"
@@ -2039,17 +2106,27 @@ mod tests {
                 old
             );
             controller.start().unwrap();
+            assert_ring_invalidation(
+                &device.lock().unwrap().writes[replacement..],
+                IOVA,
+                0x0205_0000,
+                8192,
+                true,
+            );
             device.lock().unwrap().advance(1024);
             controller.stop().unwrap();
             controller.shutdown().unwrap();
             let model = device.lock().unwrap();
             assert_eq!(model.atu_reads, 0);
-            assert!(
+            assert_eq!(
                 model
                     .writes
                     .iter()
+                    .copied()
                     .filter(|(offset, _)| *offset == 0xc40)
-                    .all(|(_, value)| *value == 1)
+                    .collect::<Vec<_>>(),
+                [(0xc40, 1), (0xc40, 1)],
+                "exactly one request for each of the two successful preparations"
             );
             assert_eq!(model.unmaps, 2);
             assert_eq!(source.drops.load(Ordering::Relaxed), 2);
