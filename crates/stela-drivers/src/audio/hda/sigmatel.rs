@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! SigmaTel STAC9200/9202/925x/922x and IDT83xxx held-D0 analog backend from Linux
+//! SigmaTel STAC9200/9202/925x/922x and IDT73xx/83xxx held-D0 analog backends from Linux
 //! sound/hda/codecs/sigmatel.c and common/codec.c at
 //! a804c5742bff224d4cb4d25dd383554d598be32b.
 //! Copyright (c) 2005 Embedded Alley Solutions, Inc. Matt Porter.
@@ -13,7 +13,10 @@ use super::{
 };
 use crate::{audio::Error, bus::i2c::Timer};
 use alloc::vec::Vec;
+mod idt73;
 mod idt83;
+mod port_power;
+pub use idt73::Idt73PowerReport;
 pub use idt83::{Idt83PortPower, Idt83PowerReport};
 
 const GET_GPIO_DATA: u16 = 0xf15;
@@ -39,6 +42,7 @@ pub enum SigmatelProfile {
     Stac925x,
     Stac922x,
     Idt92hd83xxx,
+    Idt92hd73xx,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SigmatelGpio {
@@ -54,7 +58,8 @@ pub struct SigmatelReport {
     pub subsystem_id: u32,
     pub function_group: u8,
     pub gpio_capabilities: u32,
-    /// Existing GPIO levels/directions/masks are preserved; no OEM pins are inferred.
+    /// Unclaimed GPIO bits are preserved; IDT73xx owns source-default GPIO0.
+    /// No OEM GPIO or LED mask is inferred.
     pub gpio: SigmatelGpio,
     pub selector_node: Option<u8>,
     pub eapd: Option<(u8, u8)>,
@@ -64,6 +69,7 @@ pub struct SigmatelReport {
     /// Source-qualified effective output amp range; observed graph stays intact.
     pub capture_output_amplifier: Option<(u8, u32)>,
     pub idt83: Option<Idt83PowerReport>,
+    pub idt73: Option<Idt73PowerReport>,
 }
 #[derive(Clone)]
 pub(super) struct State {
@@ -77,6 +83,7 @@ pub(super) struct State {
     authority_lost: bool,
     knob_capabilities: Option<u32>,
     idt83: Option<idt83::State>,
+    idt73: Option<idt73::State>,
 }
 fn profile(id: u32) -> Result<SigmatelProfile, Error> {
     match id {
@@ -95,6 +102,7 @@ fn profile(id: u32) -> Result<SigmatelProfile, Error> {
         | 0x111d_76e3
         | 0x111d_76e5
         | 0x111d_76e7..=0x111d_76f3 => Ok(SigmatelProfile::Idt92hd83xxx),
+        0x111d_7674..=0x111d_7676 | 0x111d_76c0..=0x111d_76ce => Ok(SigmatelProfile::Idt92hd73xx),
         _ => Err(Error::UnsupportedTopology),
     }
 }
@@ -141,12 +149,15 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                         .widget(STAC922X_CAPTURE_MUX)
                         .ok_or(Error::InvalidCodecGraph)?,
                 )?;
-                if self.sigmatel_knob_capabilities(graph.address)? != caps {
+                if self.sigmatel_knob_capabilities(graph.address, STAC922X_VOLUME_KNOB)? != caps {
                     return Err(Error::InvalidCodecGraph);
                 }
             }
             if let Some(idt83) = &state.idt83 {
                 self.validate_idt83(graph, state.group, idt83)?;
+            }
+            if let Some(idt73) = &state.idt73 {
+                self.validate_idt73(graph, state.group, idt73)?;
             }
             Ok(())
         });
@@ -176,11 +187,34 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(value as u8)
     }
+    fn sigmatel_gpio_program(
+        &mut self,
+        address: u8,
+        group: u8,
+        gpio: SigmatelGpio,
+    ) -> Result<(), Error> {
+        if self.verb(Verb::short(address, group, SET_GPIO_CMOS, 0)?)? == u32::MAX {
+            return Err(Error::RouteRejected);
+        }
+        self.route_control(address, group, SET_GPIO_MASK, GET_GPIO_MASK, gpio.mask)?;
+        self.route_control(
+            address,
+            group,
+            SET_GPIO_DIRECTION,
+            GET_GPIO_DIRECTION,
+            gpio.direction,
+        )?;
+        self.delay(1000);
+        self.route_control(address, group, SET_GPIO_DATA, GET_GPIO_DATA, gpio.data)
+    }
     fn sigmatel_startup_preflight(
         graph: &CodecGraph,
         selected: SigmatelProfile,
     ) -> Result<Option<u8>, Error> {
-        if selected == SigmatelProfile::Idt92hd83xxx {
+        if matches!(
+            selected,
+            SigmatelProfile::Idt92hd83xxx | SigmatelProfile::Idt92hd73xx
+        ) {
             return Ok(None);
         }
         let selector = if selected == SigmatelProfile::Stac9200 {
@@ -245,13 +279,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(Some(selector))
     }
-    fn sigmatel_knob_capabilities(&mut self, address: u8) -> Result<u32, Error> {
-        let caps = self.verb(Verb::short(
-            address,
-            STAC922X_VOLUME_KNOB,
-            0xf00,
-            PAR_VOLUME_KNOB,
-        )?)?;
+    fn sigmatel_knob_capabilities(&mut self, address: u8, node: u8) -> Result<u32, Error> {
+        let caps = self.verb(Verb::short(address, node, 0xf00, PAR_VOLUME_KNOB)?)?;
         // The source writes gain127 with direct control. Refuse hardware
         // that cannot express that complete control rather than clipping it.
         if caps & !0xff != 0 || caps & 0x7f != 0x7f {
@@ -259,9 +288,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(caps)
     }
-    /// Cold/link-startup standard analog ownership. No OEM pin, GPIO/EAPD mask,
-    /// LED, beep, SPDIF mux or suspend/resume policy is inferred. IDT83xxx
-    /// retains its verified source port map and explicit polled jack updates.
+    /// Cold/link-startup standard analog ownership. IDT73xx explicitly applies
+    /// source-default GPIO0 EAPD; OEM pin/GPIO/LED masks, beep, SPDIF and PM
+    /// are separate. IDT73xx/83xxx retain source port maps and polled updates.
     pub fn initialize_sigmatel_codec(
         &mut self,
         graph: &CodecGraph,
@@ -301,7 +330,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     .widget(STAC922X_CAPTURE_MUX)
                     .ok_or(Error::InvalidCodecGraph)?,
             )?;
-            Some(self.sigmatel_knob_capabilities(graph.address)?)
+            Some(self.sigmatel_knob_capabilities(graph.address, STAC922X_VOLUME_KNOB)?)
         } else {
             None
         };
@@ -319,6 +348,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(Error::UnsupportedTopology);
         }
         let allowed = ((1u16 << count) - 1) as u8;
+        let mut idt73 = if selected == SigmatelProfile::Idt92hd73xx {
+            Some(self.preflight_idt73(graph, group, gpio_caps)?)
+        } else {
+            None
+        };
         let index = self.sigmatel_codecs.len();
         self.sigmatel_codecs.push(State {
             address: graph.address,
@@ -331,29 +365,28 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             authority_lost: false,
             knob_capabilities,
             idt83: idt83.clone(),
+            idt73: idt73.clone(),
         });
         let result = (|| {
             self.power_d0(graph.address, group)?;
-            // stac_gpio_set preserves every unclaimed GPIO: without an explicit
-            // OEM profile all desired masks are zero. Retain actual readbacks.
-            let data = self.sigmatel_gpio_read(graph.address, group, GET_GPIO_DATA, allowed)?;
-            let mask = self.sigmatel_gpio_read(graph.address, group, GET_GPIO_MASK, allowed)?;
-            let direction =
-                self.sigmatel_gpio_read(graph.address, group, GET_GPIO_DIRECTION, allowed)?;
-            if self.verb(Verb::short(graph.address, group, SET_GPIO_CMOS, 0)?)? == u32::MAX {
-                return Err(Error::RouteRejected);
+            let mut gpio = SigmatelGpio {
+                data: self.sigmatel_gpio_read(graph.address, group, GET_GPIO_DATA, allowed)?,
+                mask: self.sigmatel_gpio_read(graph.address, group, GET_GPIO_MASK, allowed)?,
+                direction: self.sigmatel_gpio_read(
+                    graph.address,
+                    group,
+                    GET_GPIO_DIRECTION,
+                    allowed,
+                )?,
+            };
+            // Source probe_stac92hd73xx explicitly assigns GPIO0 to EAPD/high.
+            // Every other admitted profile's unselected OEM masks remain zero.
+            if selected == SigmatelProfile::Idt92hd73xx {
+                gpio.data |= idt73::EAPD;
+                gpio.mask |= idt73::EAPD;
+                gpio.direction |= idt73::EAPD;
             }
-            self.route_control(graph.address, group, SET_GPIO_MASK, GET_GPIO_MASK, mask)?;
-            self.route_control(
-                graph.address,
-                group,
-                SET_GPIO_DIRECTION,
-                GET_GPIO_DIRECTION,
-                direction,
-            )?;
-            // snd_hda_codec_set_gpio(..., 1) delays only before DATA.
-            self.delay(1000);
-            self.route_control(graph.address, group, SET_GPIO_DATA, GET_GPIO_DATA, data)?;
+            self.sigmatel_gpio_program(graph.address, group, gpio)?;
             if let Some(selector) = selector {
                 self.route_control(graph.address, selector, 0x701, 0xf01, 0)?;
             }
@@ -377,6 +410,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     DIRECT_MAX_VOLUME,
                 )?;
                 (None, None)
+            } else if selected == SigmatelProfile::Idt92hd73xx {
+                self.initialize_idt73(
+                    graph,
+                    group,
+                    idt73.as_mut().ok_or(Error::InvalidCodecGraph)?,
+                    gpio,
+                )?;
+                (None, None)
             } else {
                 self.initialize_idt83(
                     graph,
@@ -392,23 +433,25 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 subsystem_id: live.subsystem,
                 function_group: group,
                 gpio_capabilities: gpio_caps,
-                gpio: SigmatelGpio {
-                    mask,
-                    direction,
-                    data,
-                },
+                gpio,
                 selector_node: selector,
                 eapd,
                 master_amplifier,
-                volume_knob: knob_capabilities.map(|_| (STAC922X_VOLUME_KNOB, DIRECT_MAX_VOLUME)),
+                volume_knob: if selected == SigmatelProfile::Idt92hd73xx {
+                    Some((idt73::VOLUME_KNOB, DIRECT_MAX_VOLUME))
+                } else {
+                    knob_capabilities.map(|_| (STAC922X_VOLUME_KNOB, DIRECT_MAX_VOLUME))
+                },
                 capture_output_amplifier: knob_capabilities
                     .map(|_| (STAC922X_CAPTURE_MUX, STAC922X_CAPTURE_AMP_CAPS)),
                 idt83: idt83.as_ref().map(idt83::State::report).transpose()?,
+                idt73: idt73.as_ref().map(idt73::State::report).transpose()?,
             })
         })();
         if result.is_ok() {
             self.sigmatel_codecs[index].active = true;
             self.sigmatel_codecs[index].idt83 = idt83;
+            self.sigmatel_codecs[index].idt73 = idt73;
         } else {
             self.routing_failed = true;
         }
@@ -438,6 +481,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if let Some(idt83) = state.idt83 {
             idt83.require_route_power(route.pin())?;
         }
+        if let Some(idt73) = state.idt73 {
+            idt73.require_route_power(route.pin())?;
+        }
         self.configure_analog_route_policy(graph, route, id, channel, options, policy)
     }
     /// STAC/IDT's no_trigger_sense applies through the canonical pin API too.
@@ -459,6 +505,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                         .find(|owned| owned.address == graph.address)
                     {
                         owned.idt83 = state.idt83;
+                    }
+                }
+                if let Some(idt73) = &mut state.idt73 {
+                    self.update_idt73_pin(graph.address, state.group, idt73, pin, sense)?;
+                    if let Some(owned) = self
+                        .sigmatel_codecs
+                        .iter_mut()
+                        .find(|owned| owned.address == graph.address)
+                    {
+                        owned.idt73 = state.idt73;
                     }
                 }
                 Ok(sense)
@@ -490,6 +546,26 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .idt83 = state.idt83;
         Ok(report)
     }
+    /// Refresh all eight IDT73xx source ports by explicit no-trigger polling.
+    /// GPIO0 remains at the source startup EAPD level; automute is separate.
+    pub fn refresh_idt73_power_map(
+        &mut self,
+        graph: &CodecGraph,
+    ) -> Result<Idt73PowerReport, Error> {
+        let mut state = self.sigmatel_active(graph)?;
+        let idt73 = state.idt73.as_mut().ok_or(Error::UnsupportedTopology)?;
+        if let Err(error) = self.refresh_idt73(graph, state.group, idt73) {
+            self.routing_failed = true;
+            return Err(error);
+        }
+        let report = idt73.report()?;
+        self.sigmatel_codecs
+            .iter_mut()
+            .find(|owned| owned.address == graph.address)
+            .ok_or(Error::NeedsReset)?
+            .idt73 = state.idt73;
+        Ok(report)
+    }
     pub(super) fn require_sigmatel_route_power(&self, id: StreamId) -> Result<(), Error> {
         for (_, route) in self.routes.iter().filter(|(stream, _)| *stream == id) {
             if let Some(idt83) = self
@@ -499,6 +575,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 .and_then(|state| state.idt83.as_ref())
             {
                 idt83.require_route_power(route.pin())?;
+            }
+            if let Some(idt73) = self
+                .sigmatel_codecs
+                .iter()
+                .find(|state| state.address == route.codec_address())
+                .and_then(|state| state.idt73.as_ref())
+            {
+                idt73.require_route_power(route.pin())?;
             }
         }
         Ok(())
@@ -516,6 +600,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             }
             for (node, _) in state.pins {
                 self.route_control(state.address, node, 0x707, 0xf07, 0)?;
+            }
+            if let Some(idt73) = &state.idt73 {
+                self.quiet_idt73(state.address, state.group, idt73)?;
             }
             self.sigmatel_codecs[index].active = false;
             self.sigmatel_codecs[index].quiet = true;
