@@ -788,7 +788,7 @@ mod tests {
             (19, TargetCpu::Ssse3),
             (9, TargetCpu::Baseline),
         ] {
-            let mut worker = rich.clone();
+            let mut worker = rich;
             worker.records[0].ecx &= !(1 << removed);
             let target = common_native_target(&[&rich, &worker]).unwrap();
             assert!(target.supports(expected));
@@ -800,7 +800,7 @@ mod tests {
                 assert!(!target.supports(TargetCpu::Sse41));
             }
         }
-        let mut missing = rich.clone();
+        let mut missing = rich;
         missing.records[2].leaf = 6;
         assert!(
             !common_native_target(&[&rich, &missing])
@@ -816,7 +816,7 @@ mod tests {
             common_native_target(&[]),
             Err(CapabilityRefusal::InvalidSnapshot)
         );
-        missing = rich.clone();
+        missing = rich;
         missing.records[3].eax = 0;
         assert_eq!(
             common_native_target(&[&missing]),
