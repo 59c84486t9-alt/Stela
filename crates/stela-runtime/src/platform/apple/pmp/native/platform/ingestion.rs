@@ -4,13 +4,13 @@
 //! capture101a780..101ab30, postprocess101ab30..101b074, query101b29c,
 //! delta/scaling101b2c4..101b3d0, extract101b8fc..101ba6c.
 //! Fresh static ledger: pmgr/counter-ingestion-r1. No firmware executes here.
-//! A Copied receipt binds storage, not hardware events, lifecycle or an ACK.
+//! Copied/Retained inputs bind storage, not hardware events, lifecycle or an ACK.
 //! This is the generic base; specialized DCS/AMCC/AGX/ANE surrounding hooks
 //! remain separate owners. Provider and auxiliary operations have no default
 //! success implementation; their actual owners retain any inner partial work.
 mod arithmetic;
 mod model;
-use super::super::counters::{Copied, Frame, Frames};
+use super::super::counters::{Copied, Frame, Frames, Retained};
 use super::owner::{Completion, CounterContext, EffectValue};
 use super::{CounterReference, Descriptor, Ordinal};
 use crate::platform::apple::bus::Access;
@@ -193,15 +193,34 @@ struct Batch {
     ordinal: Ordinal,
     value: Option<Value>,
 }
+enum FrameInput {
+    Copied(Copied),
+    Retained(Retained),
+}
+impl FrameInput {
+    fn layout(&self) -> super::super::counters::Layout {
+        match self {
+            Self::Copied(input) => input.layout(),
+            Self::Retained(input) => input.layout(),
+        }
+    }
+    fn cells<'a>(&self, frames: &'a Frames) -> Result<&'a [Frame], Error> {
+        match self {
+            Self::Copied(input) => frames.cells(input),
+            Self::Retained(input) => frames.retained_cells(input),
+        }
+        .map_err(Error::Contract)
+    }
+}
 /// Retained native software counter buffers; zeros are explicit initializer
-/// state, never observations of hardware. A real frame receipt remains owned
+/// state, never observations of hardware. A real frame storage view remains owned
 /// throughout Capture/Postprocess and is revalidated before every advance.
 pub struct Owner<B: Backend> {
     identity: Rc<()>,
     serial: u64,
     backend: B,
     config: Configuration,
-    receipt: Option<Copied>,
+    receipt: Option<FrameInput>,
     awaiting_post: bool,
     batch: Option<Batch>,
     fault: Option<&'static str>,
@@ -273,16 +292,13 @@ impl<B: Backend> Owner<B> {
     pub fn backend(&self) -> &B {
         &self.backend
     }
-    /// Read only through the retained actual copy receipt. This grants no
+    /// Read only through the retained actual storage view. This grants no
     /// Capture-completion, arrival or hardware-event authority to a wrapper.
     pub fn cells<'a>(&self, frames: &'a Frames) -> Result<&'a [Frame], Error> {
-        frames
-            .cells(
-                self.receipt
-                    .as_ref()
-                    .ok_or(Error::Contract("generic retained copied receipt absent"))?,
-            )
-            .map_err(Error::Contract)
+        self.receipt
+            .as_ref()
+            .ok_or(Error::Contract("generic retained frame storage absent"))?
+            .cells(frames)
     }
     pub fn metrics(&self) -> [[u32; 3]; 2] {
         self.metrics
@@ -324,13 +340,51 @@ impl<B: Backend> Owner<B> {
         context: CounterContext,
         activation: u32,
     ) -> Result<(), Error> {
+        self.begin_capture_input(frames, FrameInput::Copied(copied), d, context, activation)
+    }
+    /// Source101a7b0/101a7b8 skips bulk for zero counter count or zero P10.
+    /// Read the same retained
+    /// software storage without copying, consuming, or mutating Frames progress.
+    /// Initial software cells remain explicitly distinguishable from samples.
+    pub fn begin_retained_capture(
+        &mut self,
+        frames: &Frames,
+        d: &Descriptor,
+        context: CounterContext,
+        activation: u32,
+    ) -> Result<(), Error> {
+        self.idle()?;
+        if context.activity != 0 && d.counter_slice().is_some() {
+            return Err(Error::Contract(
+                "generic retained input requires source bulk-copy skip",
+            ));
+        }
+        let retained = frames
+            .retain_cells(d.ordinal().index() as u32)
+            .map_err(Error::Contract)?;
+        self.begin_capture_input(
+            frames,
+            FrameInput::Retained(retained),
+            d,
+            context,
+            activation,
+        )
+    }
+    fn begin_capture_input(
+        &mut self,
+        frames: &Frames,
+        input: FrameInput,
+        d: &Descriptor,
+        context: CounterContext,
+        activation: u32,
+    ) -> Result<(), Error> {
         self.idle()?;
         if context.buffer_index != self.products().0 {
             return Err(Error::Contract(
                 "generic Capture buffer index differs from retained owner",
             ));
         }
-        let layout = copied.layout();
+        let layout = input.layout();
         if layout.ordinal != d.ordinal().index() as u32 || d.ordinal() != self.config.ordinal {
             return Err(Error::Contract(
                 "generic ingestion receipt/descriptor ordinal mismatch",
@@ -347,8 +401,8 @@ impl<B: Backend> Owner<B> {
             }
             _ => {}
         }
-        frames.cells(&copied).map_err(Error::Contract)?;
-        self.receipt = Some(copied);
+        input.cells(frames)?;
+        self.receipt = Some(input);
         self.awaiting_post = true;
         self.products = EffectValue::Hook {
             buffer_index: context.buffer_index,
@@ -424,11 +478,7 @@ impl<B: Backend> Owner<B> {
         if d.ordinal() != self.config.ordinal {
             return Err(Error::Contract("generic postprocess descriptor mismatch"));
         }
-        frames
-            .cells(self.receipt.as_ref().ok_or(Error::Contract(
-                "generic postprocess actual copied receipt absent",
-            ))?)
-            .map_err(Error::Contract)?;
+        self.cells(frames)?;
         if self.products
             != (EffectValue::Hook {
                 buffer_index: context.buffer_index,
@@ -554,13 +604,7 @@ impl<B: Backend> Owner<B> {
         frames: &Frames,
         access: &mut Access<'_>,
     ) -> Result<Progress, Error> {
-        let cells = frames
-            .cells(
-                self.receipt
-                    .as_ref()
-                    .ok_or(Error::Contract("generic actual frame receipt absent"))?,
-            )
-            .map_err(Error::Contract)?;
+        let cells = self.cells(frames)?;
         while let Some(op) = b.ops.pop_front() {
             let next = b
                 .cursor
@@ -1314,6 +1358,99 @@ mod tests {
         assert!(o.begin_postprocess(&frames, &d, c, 1).is_err());
     }
     #[test]
+    fn source_zero_activity_reads_retained_storage_without_copying_or_consuming_pending_entries() {
+        let (mut frames, local, mut latch) = setup();
+        let d = descriptor(1);
+        let mut o =
+            Owner::initialized_software(Configuration::t8112(&d).unwrap(), TestBackend::new());
+        let c = CounterContext {
+            activity: 0,
+            ..context()
+        };
+        let before = frames.progress();
+        local
+            .bank()
+            .clone()
+            .write(
+                UPDATE_OFFSET + 16 * 8,
+                Width::Double,
+                123,
+                &mut Access::new(0, 1, &mut latch),
+            )
+            .unwrap();
+        o.begin_retained_capture(&frames, &d, c, 1).unwrap();
+        assert!(matches!(
+            run(&mut o, &frames, &mut latch),
+            Ok(Progress::Complete(_))
+        ));
+        assert_eq!(frames.progress(), before);
+        assert!(
+            o.cells(&frames)
+                .unwrap()
+                .iter()
+                .all(|f| !f.copied && f.value == 0)
+        );
+        assert_eq!(
+            o.base[3][0],
+            Pair {
+                value: 0,
+                tick: c.evaluation_tick
+            }
+        );
+        assert_eq!(
+            local
+                .bank()
+                .clone()
+                .consume_entry(16, &mut Access::new(0, 2, &mut latch))
+                .unwrap()
+                .value,
+            123
+        );
+        let products = o.products();
+        let next = CounterContext {
+            buffer_index: products.0,
+            ..c
+        };
+        copied(&mut frames, &local, 1, 456, &mut latch);
+        assert!(o.cells(&frames).is_err());
+        assert!(o.begin_postprocess(&frames, &d, next, 1).is_err());
+        assert_eq!(o.products(), products);
+    }
+    #[test]
+    fn source_no_counter_slice_skips_bulk_and_invalid_retained_constructors_preserve_state() {
+        let (frames, _, _) = setup();
+        let d = descriptor(2);
+        let mut o =
+            Owner::initialized_software(Configuration::t8112(&d).unwrap(), TestBackend::new());
+        let c = context();
+        o.begin_retained_capture(&frames, &d, c, 1).unwrap();
+        assert!(o.cells(&frames).unwrap().is_empty());
+        assert_eq!(frames.progress().completed_copies, 0);
+        let (frames, _, _) = setup();
+        let d = descriptor(1);
+        let mut o =
+            Owner::initialized_software(Configuration::t8112(&d).unwrap(), TestBackend::new());
+        assert!(o.begin_retained_capture(&frames, &d, context(), 1).is_err());
+        assert!(o.receipt.is_none());
+        assert!(!o.awaiting_post);
+        assert_eq!(o.products().0, 0);
+        o.serial = u64::MAX;
+        assert!(
+            o.begin_retained_capture(
+                &frames,
+                &d,
+                CounterContext {
+                    activity: 0,
+                    ..context()
+                },
+                1
+            )
+            .is_err()
+        );
+        assert!(o.receipt.is_none());
+        assert_eq!(frames.progress().consumed, 0);
+    }
+    #[test]
     fn provider_tuple_sums_and_auxiliary_refusal_retain_exact_prefix() {
         let (mut frames, local, mut latch) = setup();
         let d = descriptor(4);
@@ -1455,7 +1592,7 @@ mod tests {
         );
         assert_eq!(o.products(), products);
         assert!(o.awaiting_post);
-        assert!(frames.cells(o.receipt.as_ref().unwrap()).is_ok());
+        assert!(o.cells(&frames).is_ok());
     }
     #[test]
     fn type4_coefficients_and_actual_output_range_precede_duration_publication() {
@@ -1589,6 +1726,9 @@ mod original_tests {
         let w =
             |a: usize| u32::from_le_bytes(b[a - 0xfff000..a - 0xfff000 + 4].try_into().unwrap());
         for (a, word) in [
+            (0x101a7b0, 0x340000c8),
+            (0x101a7b4, 0xb9401268),
+            (0x101a7b8, 0x34000088),
             (0x101c54c, 0xf9000a7f),
             (0x101a824, 0x29092274),
             (0x101aa94, 0x11000508),

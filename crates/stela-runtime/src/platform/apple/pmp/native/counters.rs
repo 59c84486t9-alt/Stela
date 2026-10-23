@@ -95,6 +95,7 @@ struct Pending {
     remaining: u128,
     consumed: u32,
     at: u64,
+    captured_generation: u64,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Destination {
@@ -111,6 +112,7 @@ pub struct Copied {
     selected: u128,
     copied: u32,
     captured_at: u64,
+    captured_generation: u64,
 }
 /// Completed source NULL-destination consumption. This grants no access to
 /// copied cells and supplies no arrival, hardware event or hook completion.
@@ -331,6 +333,20 @@ impl Frames {
             captured.count,
         )
     }
+    /// A valid old buffer is not proof that this cycle copied it. In particular
+    /// a newer discard preserves old cells while advancing the bulk cursor.
+    pub fn validate_copied_capture(
+        &self,
+        copied: &Copied,
+        captured: &Captured,
+    ) -> Result<(), Error> {
+        self.validate_capture(captured)?;
+        self.cells(copied)?;
+        if copied.captured_generation != captured.generation {
+            return Err("PMP counter copied storage belongs to a different pending capture");
+        }
+        Ok(())
+    }
     fn check_capture(
         &self,
         owner: &Rc<()>,
@@ -506,6 +522,7 @@ impl Frames {
             remaining: selected,
             consumed: 0,
             at: captured.at,
+            captured_generation: captured.generation,
         });
         Ok(())
     }
@@ -574,6 +591,7 @@ impl Frames {
             selected: pending.selected,
             copied: pending.consumed,
             captured_at: pending.at,
+            captured_generation: pending.captured_generation,
         })
     }
     pub fn finish_discard(&mut self) -> Result<Discarded, Error> {
@@ -769,6 +787,31 @@ mod tests {
         drain(&mut frames, &mut latch);
         let view = frames.retain_cells(1).unwrap();
         assert_eq!(frames.retained_cells(&view).unwrap()[1].value, 11);
+    }
+    #[test]
+    fn valid_old_copy_cannot_claim_a_new_equal_timestamp_capture_or_discard() {
+        let local = local();
+        let mut frames = frames(&local, &[0, 14, 0, 0, 1, 1, 1, 1], &[0; 144]);
+        let mut latch = InterruptLatch::new();
+        publish(&local, 16, 7, 1, &mut latch);
+        let first = frames
+            .capture_pending(&Access::new(0, 2, &mut latch))
+            .unwrap();
+        frames.begin_copy(&first, 1, 1).unwrap();
+        let copied = drain(&mut frames, &mut latch);
+        frames.validate_copied_capture(&copied, &first).unwrap();
+        publish(&local, 16, 9, 1, &mut latch);
+        let second = frames
+            .capture_pending(&Access::new(0, 2, &mut latch))
+            .unwrap();
+        assert_eq!(first.captured_at(), second.captured_at());
+        assert!(frames.validate_copied_capture(&copied, &second).is_err());
+        frames.begin_discard(&second, 1, 1).unwrap();
+        while frames.step(&mut Access::new(0, 3, &mut latch)).unwrap() != CopyStep::Complete {}
+        frames.finish_discard().unwrap();
+        assert_eq!(frames.cells(&copied).unwrap()[0].value, 7);
+        assert!(frames.validate_copied_capture(&copied, &second).is_err());
+        assert_eq!(frames.slices[1].last_snapshot, second.generation);
     }
     fn drain(frames: &mut Frames, latch: &mut InterruptLatch) -> Copied {
         while frames.step(&mut Access::new(0, 99, latch)).unwrap() != CopyStep::Complete {}
