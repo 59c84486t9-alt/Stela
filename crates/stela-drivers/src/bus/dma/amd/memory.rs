@@ -43,6 +43,7 @@ pub struct TablePage {
     cpu: CpuMapping,
     physical: PhysicalAddress,
     native_shift: u8,
+    retained_bytes: usize,
 }
 
 impl TablePage {
@@ -85,12 +86,14 @@ impl TablePage {
             return Err(TableError::InvalidProvider);
         }
         let native_shift = pages.page_shift();
+        let retained_bytes = pages.bytes();
         // The producer grants fresh, currently zeroed bytes; do not clear a
         // second time after the real provider's allocation initialization.
         Ok(Self {
             cpu,
             physical,
             native_shift,
+            retained_bytes,
         })
     }
 
@@ -100,6 +103,12 @@ impl TablePage {
 
     pub fn native_shift(&self) -> u8 {
         self.native_shift
+    }
+
+    /// Complete native pin, including every unused allocation tail retained by
+    /// the CPU view. This is distinct from the 4 KiB hardware table extent.
+    pub fn retained_bytes(&self) -> usize {
+        self.retained_bytes
     }
 
     fn pointer(&self, index: usize) -> Result<NonNull<u64>, TableError> {
@@ -309,8 +318,10 @@ mod tests {
 
     #[test]
     fn attested_native_granules_retain_the_complete_original_allocation() {
-        for (base, returned) in [(12, 12), (13, 13), (12, 13)] {
+        for (base, returned, backing_pages) in [(12, 12, 1), (13, 13, 1), (12, 13, 1), (12, 12, 2)]
+        {
             let mut source = Source::new(returned);
+            source.bytes *= backing_pages;
             source.geometry = PageGeometry::contiguous(base, returned);
             let mut table = allocate(&source, 48).unwrap();
             assert_eq!(
@@ -318,26 +329,27 @@ mod tests {
                 Some((1usize << base, 1usize << base, CacheAttribute::WriteBack))
             );
             assert_eq!(table.native_shift(), returned);
+            assert_eq!(table.retained_bytes(), source.bytes);
             assert_eq!(table.physical().value(), PHYSICAL);
             assert_ne!(source.live_cpu().as_ptr() as usize as u64, PHYSICAL);
             for index in 0..TABLE_ENTRIES {
                 assert_eq!(table.read(index), Ok(0));
             }
-            if returned == 13 {
-                // SAFETY: the complete actual 8K backing is retained by table.
+            if source.bytes > TABLE_BYTES {
+                // SAFETY: the complete actual backing is retained by table.
                 // Its unused tail has no table words or asynchronous users.
                 unsafe {
                     source
                         .live_cpu()
                         .as_ptr()
                         .add(TABLE_BYTES)
-                        .write_bytes(0xa7, TABLE_BYTES)
+                        .write_bytes(0xa7, source.bytes - TABLE_BYTES)
                 };
             }
             table.write(TABLE_ENTRIES - 1, entry(511)).unwrap();
             table.clear();
-            if returned == 13 {
-                for offset in TABLE_BYTES..2 * TABLE_BYTES {
+            if source.bytes > TABLE_BYTES {
+                for offset in TABLE_BYTES..source.bytes {
                     // SAFETY: only the unused tail of this live complete pin.
                     assert_eq!(
                         unsafe { source.live_cpu().as_ptr().add(offset).read_volatile() },
