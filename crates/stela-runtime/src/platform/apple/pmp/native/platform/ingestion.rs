@@ -1498,7 +1498,9 @@ mod tests {
             Err(Error::Refused(_))
         ));
         let Call::ControlTail {
-            context, activation, ..
+            context,
+            activation,
+            ..
         } = &o.backend.calls.last().unwrap().1
         else {
             panic!("the actual auxiliary tail was not reached");

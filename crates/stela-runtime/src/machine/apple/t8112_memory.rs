@@ -129,7 +129,10 @@ mod tests {
         assert_ne!(board.memory_controller, board.memory_publication);
         assert_eq!(board.power_devices.len(), 2);
         assert!(
-            board.power_devices.iter().all(|sink| sink.physical == base + 0x100000)
+            board
+                .power_devices
+                .iter()
+                .all(|sink| sink.physical == base + 0x100000)
         );
         assert_ne!(board.power_devices[0].device, board.power_devices[1].device);
         assert_eq!(

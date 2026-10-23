@@ -172,7 +172,10 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     log: &mut dyn FnMut(fmt::Arguments<'_>),
 ) -> Result<(AppleDevices, Option<UsbId>), String> {
     if let Some(memory) = memory.as_ref() {
-        memory.validate(board.memory_controller.as_ref(), board.memory_cache.as_ref())?;
+        memory.validate(
+            board.memory_controller.as_ref(),
+            board.memory_cache.as_ref(),
+        )?;
     }
     let native_memory = memory.is_some();
     pmgr_qualifications(&board.pmgr_refusals, false, log)?;
@@ -617,9 +620,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     }
     let memory_controller = board.memory_controller.as_ref();
     let memory_cache = board.memory_cache.as_ref();
-    if !native_memory
-        && let Some(controller) = memory_controller
-    {
+    if !native_memory && let Some(controller) = memory_controller {
         let mut programmed = programmed;
         for (region, group) in programmed.iter_mut().zip(controller.layout.groups) {
             if group.is_none() {
@@ -640,9 +641,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
             amcc::ctrr_a(programmed[0]),
         )?;
     }
-    if !native_memory
-        && let Some(mcc) = memory_cache
-    {
+    if !native_memory && let Some(mcc) = memory_cache {
         let (physical, bytes, channels) = mcc.channels;
         devices.add_memory_channels(
             Range { physical, bytes },
@@ -724,10 +723,18 @@ mod tests {
 
         let mut changed = descriptor.clone();
         changed.ptd.interrupts[0] ^= 1;
-        assert!(resources.validate(Some(&controller), Some(&changed)).is_err());
+        assert!(
+            resources
+                .validate(Some(&controller), Some(&changed))
+                .is_err()
+        );
         let mut changed = controller.clone();
         changed.apertures[0] += 0x40000;
-        assert!(resources.validate(Some(&changed), Some(&descriptor)).is_err());
+        assert!(
+            resources
+                .validate(Some(&changed), Some(&descriptor))
+                .is_err()
+        );
         assert!(resources.validate(None, Some(&descriptor)).is_err());
         assert!(resources.validate(Some(&controller), None).is_err());
 
