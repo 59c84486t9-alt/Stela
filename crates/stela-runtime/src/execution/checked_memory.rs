@@ -132,8 +132,9 @@ impl CheckedMemoryBlock {
             "source contains unconsumed trailing bytes"
         );
         // The fixed memory authority establishes LSE2/EL0 memory controls, not
-        // arbitrary guest instruction extensions. Reuse the existing baseline
-        // register qualification; optional instructions require a CPU owner.
+        // arbitrary guest instruction extensions. The typed structure-memory
+        // adapter requires the separate low128 FP entry authority at execution;
+        // compiling it does not authorize the ordinary GPR entry.
         for (index, bytes) in source.as_chunks::<4>().0.iter().enumerate() {
             let word = u32::from_le_bytes(*bytes);
             let instruction = Decoder
@@ -149,6 +150,9 @@ impl CheckedMemoryBlock {
                         | Operation::Atomic(_)
                         | Operation::Ordered(_)
                         | Operation::Literal(_)
+                        | Operation::Simd(stela_compiler::aarch64::simd::Operand::StructureMemory(
+                            _
+                        ))
                         | Operation::MemoryRegisterOffset(_)
                         | Operation::MemoryNonTemporal(_)
                         | Operation::MemoryUnprivileged(_)
@@ -651,6 +655,100 @@ mod tests {
             self.memory.read_scalar(DATA, 8, 0, PC.0).unwrap() as u64
         }
     }
+    #[test]
+    fn checked_low128_structure_entry_preserves_ordered_fault_prefix_and_writeback() {
+        use crate::system::{
+            fp_access::{self, NoSme, StreamingState},
+            scalable_controls::fp::FpControlOwner,
+        };
+        let domain = domain();
+        let mut worker = Worker::qualified(&domain, 2, 2, false);
+        let writer = block(&[STR, RET]);
+        for offset in (0..128).step_by(8) {
+            let mut initial = GuestState::default();
+            initial.x[0] = DATA + offset;
+            initial.x[1] =
+                u64::from_le_bytes(core::array::from_fn(|i| (offset + i as u64) as u8 ^ 0xa5));
+            assert!(worker.run(&writer, &mut initial).unwrap().fault.is_none());
+        }
+        let contents = worker.snapshot();
+        let ids = worker
+            .controls
+            .identification_snapshot_owner()
+            .unwrap()
+            .clone();
+        let fp = FpControlOwner::new_declared_el10(&ids, 3 << 20).unwrap();
+        // LD4 v4-v7.16b,[x2], with and without immediate post-index #64.
+        for (word, writeback) in [(0x4c40_0044, false), (0x4cdf_0044, true)] {
+            let body = block(&[word, RET]);
+            for (address, completed) in [(DATA + 1, 64usize), (DATA + 97, 31)] {
+                let mut registers = GuestState {
+                    nzcv: 0xa000_0000,
+                    fpcr: 0x0040_0000,
+                    fpsr: 0x0800_009f,
+                    sp: 0x1235,
+                    ..GuestState::default()
+                };
+                registers.x = core::array::from_fn(|i| i as u64 * 0x0101_0101_0101_0101);
+                registers.x[2] = address;
+                registers.v = core::array::from_fn(|i| [u64::MAX - i as u64, 0xabad_cafe]);
+                let original = registers.clone();
+                assert!(worker.run(&body, &mut registers).is_err());
+                assert_eq!(registers, original);
+                assert_eq!(worker.snapshot(), contents);
+                let mut pc = PC;
+                let observed = fp_access::with_nonstreaming_low128(
+                    &ids,
+                    &fp,
+                    &worker.system,
+                    StreamingState::Absent(NoSme::from_snapshot(&ids).unwrap()),
+                    &mut registers,
+                    pc,
+                    |mut access| {
+                        // SAFETY: immutable authored source, actual same FP bank and
+                        // SystemState, disabled debug/IRQ and one all-writer domain.
+                        unsafe {
+                            body.run_with_low128(
+                                &worker.controls,
+                                &worker.system,
+                                &DebugControls::default(),
+                                &mut worker.memory,
+                                &worker.event,
+                                &mut pc,
+                                &mut access,
+                            )
+                        }
+                    },
+                )
+                .unwrap()
+                .unwrap();
+                let mut expected = original;
+                for index in 0..completed {
+                    let vector = &mut expected.v[4 + index % 4];
+                    let lane = index / 4;
+                    let shift = (lane % 8) * 8;
+                    vector[lane / 8] = (vector[lane / 8] & !(0xff << shift))
+                        | (u64::from(contents[(address - DATA) as usize + index]) << shift);
+                }
+                if completed == 64 {
+                    assert!(observed.fault.is_none());
+                    if writeback {
+                        expected.x[2] += 64;
+                    }
+                    assert_eq!(pc.0, expected.x[30]);
+                } else {
+                    let fault = observed.fault.unwrap();
+                    assert_eq!(fault.pc, PC.0);
+                    assert_eq!(fault.address, DATA + 128);
+                    assert_eq!(fault.completed_bytes, completed as u64);
+                    assert_eq!(pc, PC);
+                }
+                assert_eq!(registers, expected);
+                assert_eq!(worker.snapshot(), contents);
+            }
+        }
+    }
+
     #[test]
     fn checked_low128_literal_entry_requires_actual_context_and_preserves_full_fault_state() {
         use crate::system::{
