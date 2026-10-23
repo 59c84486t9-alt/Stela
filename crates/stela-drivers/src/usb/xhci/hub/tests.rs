@@ -595,11 +595,39 @@ fn failed_later_port_preserves_prior_child_dma_and_does_not_authorize_behind_hub
         Ok(64)
     );
     let commands = model.borrow().commands.len();
-    // SAFETY: this test owns the class endpoint set. The real service must
-    // nevertheless refuse resetting an unsupported non-root topology.
-    assert!(unsafe { controller.reset_and_identify(child, &endpoints, &mut dma) }.is_err());
+    let failed_port_resets = model.borrow().nodes[&0].ports.as_ref().unwrap()[1].reset_count;
+    // A failed sibling port does not authorize resetting this already active
+    // child with only part of its endpoint inventory. Downstream leaf reset
+    // itself is supported, but requires exclusive ownership of every DCI.
+    // SAFETY: this test retains the full actual class endpoint set and DMA.
+    let error =
+        unsafe { controller.reset_and_identify(child, &endpoints[..1], &mut dma) }.unwrap_err();
+    assert!(matches!(
+        error.1,
+        BlockError::Unsupported("USB reset does not exclusively own every configured endpoint")
+    ));
     assert_eq!(model.borrow().commands.len(), commands);
     assert!(controller.live_slot(child.slot).is_ok());
+    assert_eq!(
+        controller.transfer(child.slot, 3, payload.physical(), 64, 1000),
+        Ok(64)
+    );
+    let old_output = controller.slot(child.slot).unwrap()._output.physical();
+    // The complete inventory permits resetting the exclusive healthy leaf;
+    // the unrelated failed port neither grants nor prevents that authority.
+    // SAFETY: all configured DCIs belong exclusively to this retained test.
+    let fresh = unsafe { controller.reset_and_identify(child, &endpoints, &mut dma) }.unwrap();
+    assert_ne!(fresh.id, child.id);
+    assert!(controller.device(child.id).is_err());
+    assert!(controller.device(fresh.id).is_ok());
+    assert_eq!(
+        controller.slot(child.slot).unwrap()._output.physical(),
+        old_output
+    );
+    assert_eq!(
+        model.borrow().nodes[&0].ports.as_ref().unwrap()[1].reset_count,
+        failed_port_resets
+    );
 }
 
 #[test]

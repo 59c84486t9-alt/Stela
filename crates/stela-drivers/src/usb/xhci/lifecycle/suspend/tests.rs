@@ -2,6 +2,7 @@
 //! Authored physical register/TRB model checks; UNRUN in the source-only cut.
 use super::super::super::Registers as RegisterIo;
 use super::*;
+use crate::block::BlockDevice;
 use crate::bus::dma::RegionAllocator;
 use alloc::collections::BTreeMap;
 use hub::model::{Hardware, Node, RegistersModel};
@@ -64,14 +65,29 @@ fn fixture(
     Rc<RefCell<State>>,
     RegionAllocator,
 ) {
+    fixture_with_leaf(memory, speed, hub, Node::leaf(speed))
+}
+
+fn fixture_with_leaf(
+    memory: &mut [u64],
+    speed: u8,
+    hub: bool,
+    leaf: Node,
+) -> (
+    Host,
+    Vec<Device>,
+    Rc<RefCell<Hardware>>,
+    Rc<RefCell<State>>,
+    RegionAllocator,
+) {
     let start = memory.as_mut_ptr() as u64;
     // SAFETY: the caller retains this exclusive backing through every owner.
     let mut dma =
         unsafe { RegionAllocator::new(start..start + core::mem::size_of_val(memory) as u64) };
     let nodes = if hub {
-        BTreeMap::from([(0, Node::hub(speed, 1)), (1, Node::leaf(speed))])
+        BTreeMap::from([(0, Node::hub(speed, 1)), (1, leaf)])
     } else {
-        BTreeMap::from([(0, Node::leaf(speed))])
+        BTreeMap::from([(0, leaf)])
     };
     let hardware = Rc::new(RefCell::new(Hardware::new(64, nodes)));
     hardware.borrow_mut().root_status = Some(PP | CCS | PED | u32::from(speed) << PORT_SPEED_SHIFT);
@@ -218,7 +234,8 @@ impl RawConsumer {
 fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         let mut memory = vec![0u64; 1024 * 1024];
-        let (mut host, old, hardware, state, mut dma) = fixture(&mut memory, speed, true);
+        let (mut host, old, hardware, state, mut dma) =
+            fixture_with_leaf(&mut memory, speed, true, Node::bot_disk(speed));
         let removed = host.suspend();
         assert!(
             removed.added.failures.is_empty(),
@@ -240,7 +257,7 @@ fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() 
                 .devices
                 .is_empty()
         );
-        let added = host.resume(&mut dma, &crate::firmware::HandoffProvider::new(None));
+        let mut added = host.resume(&mut dma, &crate::firmware::HandoffProvider::new(None));
         assert!(
             added.added.failures.is_empty(),
             "{:?}",
@@ -254,6 +271,34 @@ fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() 
         for fresh in &added.added.devices {
             assert!(host.controller.borrow_mut().device(fresh.id).is_ok());
         }
+        assert_eq!(added.added.storage.len(), 1);
+        assert_eq!(added.added.disks.len(), 1);
+        let disk = &mut added.added.disks[0];
+        assert_eq!(
+            (disk.identity().blocks, disk.identity().block_size),
+            (16, 512)
+        );
+        let payload = [0xa7; 512];
+        disk.write(3, &payload).unwrap();
+        let mut received = [0xee; 512];
+        disk.read(3, &mut received).unwrap();
+        assert_eq!(received, payload);
+        let bus = hardware.borrow();
+        assert!(
+            bus.requests
+                .iter()
+                .any(|(_, route, request)| *route == 1 && *request == setup(0xa1, 0xfe, 0, 0, 1))
+        );
+        assert!(
+            !bus.requests
+                .iter()
+                .any(|(_, _, request)| *request == setup(0x21, 0xff, 0, 0, 0))
+        );
+        let commands = bus.nodes[&1].bot_commands();
+        for opcode in [0x12, 0x00, 0x25, 0x28, 0x2a] {
+            assert!(commands.iter().any(|(_, op)| *op == opcode));
+        }
+        assert!(commands.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1));
     }
 }
 

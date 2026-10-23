@@ -2,6 +2,8 @@
 use super::*;
 use alloc::collections::{BTreeMap, VecDeque};
 
+mod bot;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in super::super) enum Fault {
     None,
@@ -74,6 +76,7 @@ pub(in super::super) struct Node {
     pub hub_status: u16,
     pub hub_change: u16,
     pub after_power_status: Option<u16>,
+    bot: Option<bot::Disk>,
 }
 impl Node {
     pub fn hub(speed: u8, ports: usize) -> Self {
@@ -103,6 +106,7 @@ impl Node {
             hub_status: 0,
             hub_change: 0,
             after_power_status: None,
+            bot: None,
         }
     }
     pub fn leaf(speed: u8) -> Self {
@@ -124,7 +128,17 @@ impl Node {
             hub_status: 0,
             hub_change: 0,
             after_power_status: None,
+            bot: None,
         }
+    }
+    pub fn bot_disk(speed: u8) -> Self {
+        Self {
+            bot: Some(bot::Disk::new()),
+            ..Self::leaf(speed)
+        }
+    }
+    pub fn bot_commands(&self) -> &[(u32, u8)] {
+        &self.bot.as_ref().expect("BOT peer required").commands
     }
     fn device(&self) -> Vec<u8> {
         let mut out = vec![
@@ -428,7 +442,10 @@ impl Hardware {
                         if kind == EVALUATE_CONTEXT && dci > 0 {
                             // Evaluate EP0 changes max packet only; unlike
                             // Configure it does not replace a dequeue pointer.
-                            write32(target + 4, read32(input + 4));
+                            write32(
+                                target + 4,
+                                read32(target + 4) & 0xffff | read32(input + 4) & 0xffff_0000,
+                            );
                             continue;
                         }
                         // SAFETY: copied complete retained xHCI contexts are disjoint.
@@ -515,6 +532,15 @@ impl Hardware {
         let value = u16::from_le_bytes([request[2], request[3]]);
         let index = u16::from_le_bytes([request[4], request[5]]);
         match (request[0], request[1]) {
+            (0xa1, 0xfe) if node.bot.is_some() => {
+                assert_eq!(request, setup(0xa1, 0xfe, 0, 0, 1));
+                Ok(vec![0])
+            }
+            (0x21, 0xff) if node.bot.is_some() => {
+                assert_eq!(request, setup(0x21, 0xff, 0, 0, 0));
+                node.bot.as_mut().unwrap().reset();
+                Ok(Vec::new())
+            }
             (0x80, GET_STATUS) => Ok(vec![
                 u8::from(if node.configured {
                     node.self_powered
@@ -820,7 +846,15 @@ impl Hardware {
                 self.complete_interrupts();
                 return;
             }
-            if dci & 1 != 0 {
+            if let Some(disk) = self
+                .nodes
+                .get_mut(&self.routes[&slot])
+                .unwrap()
+                .bot
+                .as_mut()
+            {
+                disk.transfer(dci & 1 != 0, buffer, length as usize);
+            } else if dci & 1 != 0 {
                 // SAFETY: actual published IN payload belongs to this fixture.
                 unsafe {
                     core::ptr::write_bytes(buffer as *mut u8, slot, length as usize);

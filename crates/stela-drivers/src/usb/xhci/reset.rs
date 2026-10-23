@@ -101,7 +101,9 @@ impl Controller {
         // leaf. A failed shared supply cannot authorize private class recovery.
         during(
             "observe reset device physical ancestry",
-            self.observe_current_ancestors(slot, true),
+            // Preflight requires a leaf. Its device status cannot supply a
+            // hub power contract; observe the root and every actual parent.
+            self.observe_current_ancestors(slot, false),
         )?;
         let parent = attachment
             .parent
@@ -1468,7 +1470,7 @@ pub(crate) mod tests {
             .unwrap_err();
             assert!(matches!(
                 error.1,
-                BlockError::Unsupported("USB reset root port has another unretired slot owner")
+                BlockError::Unsupported("USB reset physical port has another unretired slot owner")
             ));
             assert_eq!(hardware.borrow().accesses, before);
         }

@@ -169,6 +169,19 @@ mod tests {
                 assert_ne!(address, u32::from(child.slot));
                 let tt = if multi { 3 } else { 1 };
                 for dci in [1u8, 3, 4] {
+                    let expected = match dci {
+                        1 => CONTROL_TYPE,
+                        3 => BULK_IN_TYPE,
+                        4 => BULK_OUT_TYPE,
+                        _ => unreachable!(),
+                    };
+                    let output = &c.slot(child.slot).unwrap()._output;
+                    assert_eq!(
+                        output.read::<u32>(usize::from(dci) * context + 4) >> ENDPOINT_TYPE_SHIFT
+                            & ENDPOINT_TYPE_MASK,
+                        expected,
+                        "Evaluate/Configure must preserve actual endpoint type"
+                    );
                     c.cancel(child.slot, dci).unwrap();
                     c.clear_hub_tt(child.slot, dci).unwrap();
                 }
