@@ -92,6 +92,7 @@ mod tests {
     };
     fn format() -> Format {
         Format {
+            power_domain: None,
             endpoint_rates: None,
             interface: 1,
             alternate: 1,

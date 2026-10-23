@@ -61,6 +61,7 @@ impl<K> Lane<K> {
 enum StreamClock {
     Entity(ResolvedClock),
     Endpoint,
+    Fixed,
 }
 
 struct Playback {
@@ -107,6 +108,7 @@ pub struct AudioDevice<T: Transport> {
     implicit_frames: VecDeque<usize>,
     progress: Progress,
     poisoned: bool,
+    power_owners: Vec<super::PowerDomain>,
     /// First failure is retained even if cleanup itself fails.
     pub last_fault: Option<Error>,
 }
@@ -126,6 +128,7 @@ impl<T: Transport> AudioDevice<T> {
             implicit_frames: VecDeque::new(),
             progress: Progress::default(),
             poisoned: false,
+            power_owners: Vec::new(),
             last_fault: None,
         })
     }
@@ -145,7 +148,45 @@ impl<T: Transport> AudioDevice<T> {
             Ok(())
         }
     }
+    fn prepare_power(&mut self) -> Result<(), Error> {
+        if self.playback.is_some() || self.capture.is_some() {
+            // This is a polled transport. Sleeping for a cold sibling's 300ms
+            // recovery while an existing 32-packet queue runs would starve it.
+            // Both BADD domains stay awake for the complete duplex session.
+            for domain in &self.power_owners {
+                domain.ensure_awake(&mut self.transport, self.binding.graph.control_interface)?;
+            }
+            return Ok(());
+        }
+        for format in &self.binding.formats {
+            if let Some(domain) = format.power_domain
+                && !self.power_owners.iter().any(|d| d.id == domain.id)
+            {
+                // Initially selected by class attachment; acknowledge zero again
+                // before retaining a power owner, including an unused sibling.
+                self.transport.alternate(format.interface, 0)?;
+                self.power_owners.push(domain);
+                domain.awake(&mut self.transport, self.binding.graph.control_interface)?;
+            }
+        }
+        Ok(())
+    }
+    fn idle_power(&mut self) -> Result<(), Error> {
+        if self.playback.is_none() && self.capture.is_none() {
+            while let Some(domain) = self.power_owners.last().copied() {
+                domain.idle(&mut self.transport, self.binding.graph.control_interface)?;
+                self.power_owners.pop();
+            }
+        }
+        Ok(())
+    }
     fn clock(&mut self, format: &Format, rate: u32) -> Result<StreamClock, Error> {
+        if self.binding.basic_profile.is_some() {
+            if rate != super::badd::RATE {
+                return Err(Error::RateUnsupported);
+            }
+            return Ok(StreamClock::Fixed);
+        }
         if let Some(rates) = &format.endpoint_rates {
             rates.validate_rate(rate)?;
             // UAC1 provides no clock-sharing graph. Do not retune one side of
@@ -281,6 +322,7 @@ impl<T: Transport> AudioDevice<T> {
                     ))?;
                 self.start_capture_inner(capture_index, rate, false, true)?;
             }
+            self.prepare_power()?;
             self.output.endpoint = Some(format.data);
             if let Sync::Explicit(endpoint) = format.sync {
                 self.feedback.endpoint = Some(endpoint);
@@ -351,7 +393,7 @@ impl<T: Transport> AudioDevice<T> {
         }
         let result = self.start_capture_inner(index, rate, true, false);
         if let Err(error) = result {
-            if self.input.endpoint.is_none() {
+            if self.input.endpoint.is_none() && self.power_owners.is_empty() {
                 return Err(error);
             }
             return self.fail(error);
@@ -386,6 +428,7 @@ impl<T: Transport> AudioDevice<T> {
         }
         self.transport.preflight(&[format.data])?;
         let clock = self.clock(&format, rate)?;
+        self.prepare_power()?;
         self.input.endpoint = Some(format.data);
         self.capture = Some(Capture {
             format,
@@ -420,6 +463,35 @@ impl<T: Transport> AudioDevice<T> {
             *byte = self.input_pcm.pop_front().unwrap();
         }
         Ok(bytes)
+    }
+    /// Poll the standardized headset-adapter insertion bitmap. Status delivery
+    /// is explicit polling; no interrupt notification is inferred from this read.
+    pub fn connector_present(&mut self, terminal: u8) -> Result<bool, Error> {
+        self.ready()?;
+        if self.binding.basic_profile != Some(super::BasicProfile::HeadsetAdapter)
+            || !matches!(terminal, 3 | 4)
+        {
+            return Err(Error::Unsupported(
+                "no BADD insertion control for this terminal",
+            ));
+        }
+        let reply = self.transport.control(
+            crate::usb::xhci::setup(
+                0xa1,
+                1,
+                1 << 8,
+                u16::from(terminal) << 8 | u16::from(self.binding.graph.control_interface),
+                2,
+            ),
+            &[],
+        )?;
+        if reply.len() != 2 {
+            return Err(Error::ControlLength);
+        }
+        if reply[0] != 1 || reply[1] & !1 != 0 {
+            return Err(Error::ControlReadback);
+        }
+        Ok(reply[1] != 0)
     }
     pub fn set_mute(&mut self, entity: u8, channel: u8, muted: bool) -> Result<(), Error> {
         self.ready()?;
@@ -714,7 +786,7 @@ impl<T: Transport> AudioDevice<T> {
         self.playback = None;
         self.output_pcm.clear();
         self.implicit_frames.clear();
-        Ok(())
+        self.idle_power()
     }
     fn stop_input(&mut self) -> Result<(), Error> {
         let endpoints = self.input.endpoints();
@@ -727,7 +799,7 @@ impl<T: Transport> AudioDevice<T> {
         self.input.released();
         self.capture = None;
         self.input_pcm.clear();
-        Ok(())
+        self.idle_power()
     }
     pub fn stop_playback(&mut self) -> Result<(), Error> {
         self.ready()?;
@@ -797,6 +869,7 @@ pub(crate) mod tests {
     // SPDX-License-Identifier: GPL-2.0-or-later
     //! Representative standard UAC2 descriptors, not a dump of the physical PC.
     use super::*;
+    mod badd;
     mod mixer;
     mod uac1;
     use crate::usb::audio::*;

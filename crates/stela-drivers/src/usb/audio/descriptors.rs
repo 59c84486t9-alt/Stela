@@ -200,6 +200,8 @@ pub enum Sync {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Format {
+    /// UAC3 power ownership, awakened before alternate selection and DMA.
+    pub power_domain: Option<super::PowerDomain>,
     /// UAC1 endpoint-owned frequencies; UAC2 uses its real clock graph.
     pub endpoint_rates: Option<super::EndpointRates>,
     pub interface: u8,
@@ -232,6 +234,8 @@ impl Format {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Binding {
+    /// BADD declares fixed topology; other protocols discover their graph.
+    pub basic_profile: Option<super::BasicProfile>,
     pub graph: Graph,
     pub formats: Vec<Format>,
     pub speed: u8,
@@ -614,6 +618,7 @@ fn format(
     }
     let fill_max = endpoint[0][3] & 0x80 != 0;
     Ok(Format {
+        power_domain: None,
         endpoint_rates: None,
         interface: interface.number,
         alternate: interface.alternate,
@@ -678,6 +683,13 @@ impl Binding {
             && control.alternate == 0
         {
             return super::uac1::binding(control, all, configuration, speed);
+        }
+        if control.class == CLASS
+            && control.subclass == CONTROL_SUBCLASS
+            && control.protocol == super::UAC3
+            && control.alternate == 0
+        {
+            return super::badd::binding(control, all, configuration, speed);
         }
         if control.class != CLASS
             || control.subclass != CONTROL_SUBCLASS
@@ -750,6 +762,7 @@ impl Binding {
             }
         }
         Ok(Self {
+            basic_profile: None,
             graph,
             formats,
             speed,

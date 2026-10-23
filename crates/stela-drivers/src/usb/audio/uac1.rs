@@ -379,6 +379,7 @@ fn format(
     let max_bytes = super::descriptors::capacity(data, speed)?;
     let service_microframes = super::descriptors::service_interval(data, speed)?;
     Ok(Format {
+        power_domain: None,
         endpoint_rates: Some(EndpointRates {
             ranges,
             frequency_control: controls[3] & 1 != 0,
@@ -506,6 +507,7 @@ pub(super) fn binding(
         }
     }
     Ok(Binding {
+        basic_profile: None,
         graph,
         formats,
         speed,

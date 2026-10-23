@@ -273,8 +273,11 @@ impl Graph {
         if clock.numerator == 0 || clock.denominator == 0 {
             return Err(Error::ClockInvalid);
         }
-        if !matches!(self.entity(clock.source)?, Entity::ClockSource { .. }) {
+        let Entity::ClockSource { controls, .. } = self.entity(clock.source)? else {
             return Err(Error::ClockInvalid);
+        };
+        if !access(u32::from(*controls), 1)?.0 {
+            return Err(Error::Unsupported("clock frequency is unreadable"));
         }
         let raw = u32::from_le_bytes(
             get(io, self.control_interface, clock.source, 1, 0, 1, 4)?
