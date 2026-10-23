@@ -18,6 +18,7 @@ pub(crate) mod interrupts;
 mod network;
 pub(crate) mod nor;
 pub(crate) mod power;
+mod progress;
 mod restore;
 mod speculation;
 pub(crate) mod storage;
@@ -2118,6 +2119,18 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         )
     }
     .unwrap_or_else(|error| output::fatal(error));
+    let boot_progress =
+        loaded_source
+            .as_ref()
+            .map_or_else(progress::BootProgress::default, |source| {
+                progress::BootProgress::new(
+                    source
+                        .manifest()
+                        .regions
+                        .iter()
+                        .map(|region| (region.name.as_str(), region.guest_pa, region.memory_bytes)),
+                )
+            });
     run_machine(
         machine,
         &options,
@@ -2128,6 +2141,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             guest_network,
             host_nor,
             host_disks,
+            boot_progress,
         },
         |machine, limit| {
             // SAFETY: the same fixed workers and canonical producer set stay
@@ -2151,6 +2165,7 @@ struct RunIo {
     guest_network: Option<network::GuestNetwork>,
     host_nor: Option<nor::HostNor>,
     host_disks: storage::HostDisks,
+    boot_progress: progress::BootProgress,
 }
 
 fn run_machine<H: Host>(
@@ -2205,6 +2220,7 @@ fn run_machine<H: Host>(
         mut guest_network,
         mut host_nor,
         host_disks,
+        mut boot_progress,
     } = io;
     let mut host_power = power::HostPowerControl::new(handoff.power, handoff.tsc_hz, host_disks);
     crate::status::begin(match restore {
@@ -2221,6 +2237,7 @@ fn run_machine<H: Host>(
         guest_network.as_mut(),
         host_nor.as_mut(),
         &mut host_power,
+        &mut boot_progress,
         execute,
     );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
@@ -2257,6 +2274,7 @@ fn run<H: Host>(
     mut guest_network: Option<&mut network::GuestNetwork>,
     mut host_nor: Option<&mut nor::HostNor>,
     host_power: &mut power::HostPowerControl,
+    boot_progress: &mut progress::BootProgress,
     mut execute: impl FnMut(&mut Machine<H, AppleDevices>, u64) -> Stop,
 ) -> Stop {
     let mut beat = (
@@ -2292,6 +2310,7 @@ fn run<H: Host>(
     let mut translated = TranslatedSeen::default();
     let mut occupancy = None;
     let mut host_erase = erase::HostErase::default();
+    boot_progress.start(beat.0, machine.statistics.blocks);
     loop {
         let slice = machine.statistics.blocks + SLICE;
         let limit = if budget == 0 {
@@ -2311,6 +2330,22 @@ fn run<H: Host>(
             .unwrap_or_default();
         if let Some(step) = lines.iter().rev().find_map(|line| installer_step(line)) {
             crate::status::progress(&step);
+            boot_progress.installer(step);
+        }
+        if boot_progress.due(service_now, tsc_hz) {
+            let physical = observed_instruction(machine);
+            if let Some(update) =
+                boot_progress.sample(physical, service_now, tsc_hz, machine.statistics.blocks)
+            {
+                if let Some(component) = update.first_component {
+                    output::arguments(format_args!(
+                        "BOOT PROGRESS observed={} blocks={}\n",
+                        component.name(),
+                        machine.statistics.blocks,
+                    ));
+                }
+                crate::status::progress(&update.detail);
+            }
         }
         crate::status::stream(lines.iter().map(String::as_str));
         crate::status::tick();
@@ -2530,6 +2565,36 @@ fn run<H: Host>(
                 suspension_report(machine);
             }
         }
+    }
+}
+
+/// Observe the current instruction's source range after all native owners
+/// have recovered. This walker can read RAM descriptors only: diagnostic
+/// failures neither update guest tables nor raise a guest exception.
+fn observed_instruction<H: Host>(machine: &mut Machine<H, AppleDevices>) -> Option<u64> {
+    use stela_runtime::machine::mmu::{self, Access, Outcome, TableMemory};
+    struct ReadOnlyTables<'a, H>(&'a mut H);
+    impl<H: Host> TableMemory for ReadOnlyTables<'_, H> {
+        fn read_descriptor(&mut self, physical: u64) -> Option<u64> {
+            let mut bytes = [0; size_of::<u64>()];
+            self.0
+                .read_ram(physical, &mut bytes)
+                .then(|| u64::from_le_bytes(bytes))
+        }
+
+        fn update_descriptor(&mut self, _: u64, _: u64, _: u64) -> Option<bool> {
+            None
+        }
+    }
+    match mmu::translate(
+        &machine.cpu.controls(machine.cpu.regime()),
+        machine.cpu.pc,
+        Access::Execute,
+        machine.cpu.requester(),
+        &mut ReadOnlyTables(&mut machine.host),
+    ) {
+        Outcome::Mapped(translation) => Some(translation.physical),
+        _ => None,
     }
 }
 
