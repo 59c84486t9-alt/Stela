@@ -19,7 +19,7 @@ pub struct Identity {
     pub build: [u8; 3],
 }
 impl Identity {
-    pub(super) fn usb(device: &Device) -> Result<(u16, u16, u16)> {
+    pub(crate) fn usb(device: &Device) -> Result<(u16, u16, u16)> {
         let d = &device.descriptor;
         let vendor = u16::from_le_bytes([d[8], d[9]]);
         let product = u16::from_le_bytes([d[10], d[11]]);
@@ -47,8 +47,15 @@ impl Identity {
         }
         Ok((vendor, product, u16::from_le_bytes([d[12], d[13]])))
     }
+    #[cfg(test)]
     pub(super) fn parse(device: &Device, p: &[u8]) -> Result<Self> {
         let (usb_vendor, usb_product, usb_revision) = Self::usb(device)?;
+        Self::parse_usb((usb_vendor, usb_product, usb_revision), p)
+    }
+    pub(super) fn parse_usb(
+        (usb_vendor, usb_product, usb_revision): (u16, u16, u16),
+        p: &[u8],
+    ) -> Result<Self> {
         if p.len() != 10 || p[0] != 0 || p[1] != 0x37 {
             return Err(Error::Unsupported("legacy Intel version required"));
         }

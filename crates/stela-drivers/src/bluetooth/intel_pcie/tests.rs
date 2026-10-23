@@ -63,6 +63,10 @@ struct Model {
     transmitted: Vec<Vec<u8>>,
     ready_at: u64,
     boot_count: usize,
+    hci_script: VecDeque<(Vec<u8>, Vec<Vec<u8>>)>,
+    reset_stages: VecDeque<u32>,
+    deferred_events: Vec<Vec<u8>>,
+    event_cursor: u16,
 }
 impl Model {
     fn new(device: u16) -> Self {
@@ -119,6 +123,10 @@ impl Model {
             transmitted: Vec::new(),
             ready_at: 0,
             boot_count: 0,
+            hci_script: VecDeque::new(),
+            reset_stages: VecDeque::new(),
+            deferred_events: Vec::new(),
+            event_cursor: 0,
         }
     }
     fn reg(&self, o: usize) -> u32 {
@@ -269,6 +277,12 @@ impl Model {
                         self.auto_boot = false;
                         self.receive(0, 4, &[0xff, 7, 2, 0, 1, 0, 0, 0, 0], &[]);
                     }
+                    if self.posted.len() == 61 && !self.deferred_events.is_empty() {
+                        for event in core::mem::take(&mut self.deferred_events) {
+                            self.receive(self.event_cursor, 4, &event, &[0xa5]);
+                            self.event_cursor = (self.event_cursor + 1) % 64;
+                        }
+                    }
                 } else {
                     assert_eq!(v >> 16, 0);
                     assert_eq!(self.index(16, 0), next);
@@ -323,12 +337,26 @@ impl Model {
                             self.regs.insert(
                                 BOOT,
                                 if opcode == 0xfc01 {
-                                    self.auto_reset_stage
+                                    self.reset_stages
+                                        .pop_front()
+                                        .unwrap_or(self.auto_reset_stage)
                                 } else {
                                     OP
                                 },
                             );
                             self.cause(0, 1);
+                        }
+                        if let Some((expected, events)) = self.hci_script.pop_front() {
+                            assert_eq!(&packet[4..], expected);
+                            if opcode == 0xfc01 {
+                                self.event_cursor = 0;
+                                self.deferred_events = events;
+                            } else {
+                                for event in events {
+                                    self.receive(self.event_cursor, 4, &event, &[0xa5]);
+                                    self.event_cursor = (self.event_cursor + 1) % 64;
+                                }
+                            }
                         }
                     }
                 }
@@ -1032,5 +1060,296 @@ fn host_packet_validation_rejects_without_hardware_effect_and_accepts_all_real_t
         (Kind::Iso, vec![1, 0, 1, 0xc0, 0xaa]),
     ] {
         t.send(kind, &bytes).unwrap();
+    }
+}
+
+fn firmware_complete(opcode: u16, payload: &[u8]) -> Vec<u8> {
+    let mut event = vec![0x0e, (3 + payload.len()) as u8, 1];
+    event.extend_from_slice(&opcode.to_le_bytes());
+    event.extend_from_slice(payload);
+    event
+}
+fn firmware_command(opcode: u16, payload: &[u8]) -> Vec<u8> {
+    let mut command = opcode.to_le_bytes().to_vec();
+    command.push(payload.len() as u8);
+    command.extend_from_slice(payload);
+    command
+}
+fn firmware_tlv(engine: u8, stage: u8) -> Vec<u8> {
+    firmware_tlv_variant(engine, stage, 0x1e)
+}
+fn firmware_tlv_variant(engine: u8, stage: u8, variant: u8) -> Vec<u8> {
+    let input = crate::bluetooth::intel::tests::tlv_version_variant(false, engine, variant);
+    let mut output = vec![0];
+    let mut at = 1;
+    while at < input.len() {
+        let n = usize::from(input[at + 1]);
+        match input[at] {
+            0x1c => output.extend_from_slice(&[0x1c, 1, stage]),
+            0x1f if stage != 1 => output.extend_from_slice(&[0x1f, 4, 9, 0, 0, 0]),
+            _ => output.extend_from_slice(&input[at..at + n + 2]),
+        }
+        at += n + 2;
+    }
+    if stage != 1 {
+        output.extend_from_slice(&[0x50, 5, b'p', b'c', b'i', b'e', 0]);
+    }
+    output
+}
+fn append_firmware_upload(m: &mut Model, engine: u8, image: &[u8]) {
+    // Spell source sections independently; expected bytes never come from the
+    // production parser. The synthetic image contains no vendor signatures.
+    let sections: Vec<(u8, &[u8])> = if engine == 0 {
+        vec![
+            (0, &image[..128]),
+            (3, &image[128..380]),
+            (3, &image[380..384]),
+            (2, &image[388..640]),
+            (2, &image[640..644]),
+            (1, &image[964..]),
+        ]
+    } else {
+        vec![
+            (0, &image[644..772]),
+            (3, &image[772..868]),
+            (2, &image[868..964]),
+            (1, &image[964..]),
+        ]
+    };
+    for (kind, data) in sections {
+        let mut params = vec![kind];
+        params.extend_from_slice(data);
+        m.hci_script.push_back((
+            firmware_command(0xfc09, &params),
+            vec![firmware_complete(0xfc09, &[0])],
+        ));
+    }
+    m.hci_script
+        .back_mut()
+        .unwrap()
+        .1
+        .push(vec![0xff, 5, 6, 0, 9, 0xfc, 0]);
+    m.hci_script.push_back((
+        firmware_command(0xfc01, &[0, 1, 0, 1, 0, 0, 0x20, 0]),
+        vec![
+            vec![0xff, 2, 0x97, 0x12],
+            vec![0xff, 7, 2, 0, 1, 0, 0, 0, 0],
+        ],
+    ));
+}
+#[test]
+fn shared_firmware_engine_uses_real_pcie_dma_for_rsa_ecdsa_iml_op_and_d0() {
+    use crate::{
+        bluetooth::intel::{self, TransportIdentity},
+        firmware::{Catalog, Provenance, Resource},
+    };
+    use sha2::{Digest, Sha256};
+    for (variant, engine) in [
+        (0x1e, 0),
+        (0x1e, 1),
+        (0x1f, 0),
+        (0x1f, 1),
+        (0x22, 0),
+        (0x22, 1),
+    ] {
+        let mut backing = vec![0u64; 1024 * 1024];
+        let mut dma = allocator(&mut backing);
+        let (mut t, m) = transport(0xa876, &mut dma);
+        t.start().unwrap();
+        let replies = [
+            firmware_tlv_variant(engine, 1, variant),
+            firmware_tlv_variant(engine, 2, variant),
+            firmware_tlv_variant(engine, 3, variant),
+        ];
+        let bus = TransportIdentity::Pcie(t.identity());
+        let before = intel::TlvIdentity::parse_transport(bus, &replies[0]).unwrap();
+        let iml = intel::TlvIdentity::parse_transport(bus, &replies[1]).unwrap();
+        let hardware = before.hardware_label();
+        let revisions = [before.revision_label(), iml.iml_revision_label(&before)];
+        let names = [
+            before.filename("sfi"),
+            iml.filename("sfi"),
+            iml.filename("ddc"),
+        ];
+        let image = intel::tests::combined_image();
+        let mut resources = Vec::new();
+        for (index, name) in names.iter().enumerate() {
+            let bytes = if index == 2 {
+                vec![3, 1, 2, 0xaa]
+            } else {
+                image.clone()
+            };
+            resources.push(Resource {
+                name,
+                target: before.target(&hardware, &revisions[usize::from(index != 0)]),
+                provenance: Provenance {
+                    source: "Stela synthetic PCIe model",
+                    revision: "1",
+                    member: "synthetic",
+                    license: "MIT",
+                },
+                expected_length: bytes.len(),
+                expected_sha256: Sha256::digest(&bytes).into(),
+                bytes,
+            });
+        }
+        let catalog = Catalog::from_handoff(resources).unwrap();
+        let mut h = m.borrow_mut();
+        h.hci_script.push_back((
+            firmware_command(0xfc05, &[0xff]),
+            vec![firmware_complete(0xfc05, &replies[0])],
+        ));
+        append_firmware_upload(&mut h, engine, &image);
+        h.hci_script.push_back((
+            firmware_command(0xfc05, &[0xff]),
+            vec![firmware_complete(0xfc05, &replies[1])],
+        ));
+        if variant == 0x1f {
+            h.hci_script.push_back((
+                firmware_command(0xfc0a, &[1, 0xb]),
+                vec![firmware_complete(0xfc0a, &[0])],
+            ));
+        }
+        append_firmware_upload(&mut h, engine, &image);
+        h.hci_script.push_back((
+            firmware_command(0xfc05, &[0xff]),
+            vec![firmware_complete(0xfc05, &replies[2])],
+        ));
+        h.hci_script.push_back((
+            firmware_command(0x1009, &[]),
+            vec![firmware_complete(0x1009, &[0, 1, 2, 3, 4, 5, 6])],
+        ));
+        h.hci_script.push_back((
+            firmware_command(0xfc8b, &[3, 1, 2, 0xaa]),
+            vec![firmware_complete(0xfc8b, &[0])],
+        ));
+        h.hci_script.push_back((
+            firmware_command(0xfc05, &[0xff]),
+            vec![firmware_complete(0xfc05, &replies[2])],
+        ));
+        h.reset_stages = VecDeque::from([IML, OP]);
+        drop(h);
+        let report = firmware::initialize(
+            &mut t,
+            &catalog,
+            intel::PlatformInputs {
+                dsbr: intel::DsbrInput::Present {
+                    revision: 7,
+                    raw: 0xb1,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(report.initialization.stages.len(), 2);
+        assert_eq!(
+            report.initialization.dsbr.input,
+            intel::DsbrInput::Present {
+                revision: 7,
+                raw: 0xb1
+            }
+        );
+        assert_eq!(
+            report.initialization.dsbr.applied,
+            (variant == 0x1f).then_some([1, 0xb])
+        );
+        assert_eq!(report.initialization.address, [1, 2, 3, 4, 5, 6]);
+        assert!(
+            report
+                .initialization
+                .stages
+                .iter()
+                .all(|s| s.firmware.target_driver == "intel-bluetooth-pcie-tlv")
+        );
+        assert!(
+            report.received.iter().all(|p| p.padding == [0xa5]
+                && p.receive_header[2] == 1
+                && p.completion >> 31 == 1)
+        );
+        assert!(m.borrow().hci_script.is_empty());
+        assert_eq!(report.received.iter().filter(|p| p.diagnostic).count(), 2);
+        assert!(
+            !report
+                .received
+                .iter()
+                .any(|p| p.bytes.first() == Some(&0x0e) && p.bytes.get(3..5) == Some(&[1, 0xfc]))
+        );
+        assert_eq!(
+            m.borrow()
+                .writes
+                .iter()
+                .filter(|(_, o, _)| *o == SLEEP)
+                .count(),
+            1
+        );
+        assert_eq!(t.state(), State::Operational);
+        let mut h = m.borrow_mut();
+        for (opcode, params, reply) in [
+            (0xfc05, vec![0xff], replies[2].clone()),
+            (0x1009, vec![], vec![0, 1, 2, 3, 4, 5, 6]),
+            (0xfc05, vec![0xff], replies[2].clone()),
+        ] {
+            h.hci_script.push_back((
+                firmware_command(opcode, &params),
+                vec![firmware_complete(opcode, &reply)],
+            ));
+        }
+        drop(h);
+        let empty = Catalog::from_handoff(vec![]).unwrap();
+        let observed =
+            firmware::initialize(&mut t, &empty, intel::PlatformInputs::default()).unwrap();
+        assert!(matches!(
+            observed.initialization.evidence,
+            intel::OwnedFirmwareEvidence::RunningUnknown
+        ));
+        assert!(observed.initialization.stages.is_empty());
+        assert_eq!(observed.received.len(), 3);
+    }
+}
+
+#[test]
+fn pcie_firmware_faults_keep_native_transcript_and_uncertain_cleanup_ownership() {
+    use crate::{bluetooth::intel, firmware::Catalog};
+    for operation in 0..3 {
+        for cleanup_fails in [false, true] {
+            let mut backing = vec![0u64; 1024 * 1024];
+            let mut dma = allocator(&mut backing);
+            let (mut t, m) = transport(0xa876, &mut dma);
+            t.start().unwrap();
+            let reply = match operation {
+                0 => firmware_complete(0xfc05, &[1]),
+                1 => firmware_complete(0xfc05, &firmware_tlv(0, 3)),
+                _ => firmware_complete(0xfc05, &firmware_tlv(0, 1)),
+            };
+            m.borrow_mut()
+                .hci_script
+                .push_back((firmware_command(0xfc05, &[0xff]), vec![reply.clone()]));
+            m.borrow_mut().stop_ack = !cleanup_fails;
+            let empty = Catalog::from_handoff(vec![]).unwrap();
+            let error =
+                firmware::initialize(&mut t, &empty, intel::PlatformInputs::default()).unwrap_err();
+            assert_eq!(error.received.len(), 1);
+            assert_eq!(error.received[0].bytes, reply);
+            assert_eq!(error.received[0].padding, [0xa5]);
+            assert_eq!(error.received[0].completion, 1 << 31);
+            let cause = if let intel::Error::PcieCleanup { cause, .. } = error.cause.as_ref() {
+                cause.as_ref()
+            } else {
+                error.cause.as_ref()
+            };
+            assert!(matches!(
+                (operation, cause),
+                (0, intel::Error::Controller { .. })
+                    | (1, intel::Error::Protocol(_))
+                    | (2, intel::Error::Resource(_))
+            ));
+            assert_eq!(m.borrow().transmitted.len(), 1);
+            assert_eq!(t.retired, !cleanup_fails);
+            let writes = m.borrow().writes.len();
+            assert!(t.send(Kind::Command, &[5, 0xfc, 1, 0xff]).is_err());
+            assert!(t.poll().is_err());
+            assert_eq!(m.borrow().writes.len(), writes);
+            drop(t);
+            assert_eq!(m.borrow().dropped, usize::from(!cleanup_fails));
+        }
     }
 }

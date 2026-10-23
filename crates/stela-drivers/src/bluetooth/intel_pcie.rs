@@ -3,6 +3,7 @@
 //! Intel PCIe Bluetooth DMA/MMIO transport. No USB binding, H4 wrapper or
 //! synthetic HCI completion is used. A ROM transport is not initialized radio
 //! firmware: image selection/authentication and the guest frontend are separate.
+pub mod firmware;
 mod memory;
 mod packet;
 mod registers;

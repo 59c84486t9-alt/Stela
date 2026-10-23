@@ -40,7 +40,7 @@
 pub mod ath3k;
 mod binding;
 pub mod broadcom;
-mod command;
+pub(crate) use crate::bluetooth::hci as command;
 mod firmware;
 mod host;
 mod initialization;
@@ -207,6 +207,18 @@ pub struct Hci<B: Io> {
 pub type UsbHci = Hci<Host>;
 
 impl<B: Io> Hci<B> {
+    #[cfg(test)]
+    pub(crate) fn test_intel_mode(&self) -> bool {
+        self.intel_bootloader
+    }
+    #[cfg(test)]
+    pub(crate) fn test_io(&mut self) -> &mut B {
+        &mut self.io
+    }
+    #[cfg(test)]
+    pub(crate) fn test_device(&mut self) -> &mut crate::usb::xhci::Device {
+        &mut self.binding.device
+    }
     /// The binding validates descriptors, not firmware readiness. `io` must
     /// implement the same device/endpoints as the binding, with exclusive use.
     pub fn from_io(binding: Binding, io: B) -> Self {

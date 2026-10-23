@@ -13,7 +13,7 @@ struct Prepared<'p> {
     intermediate: bool,
     inherited: Vec<InheritedField>,
 }
-impl<B: Io> Engine<'_, B> {
+impl<B: CommandIo> Engine<'_, B> {
     pub(super) fn run<'p>(&mut self, provider: &'p dyn Provider) -> Result<Report<'p>> {
         let before = self.identity(&[0xff])?;
         if before.is_operational() {
@@ -147,6 +147,7 @@ impl<B: Io> Engine<'_, B> {
         // Reset has USB delivery only, never a synthetic HCI Command Complete.
         self.submit(INTEL_RESET, &reset)?;
         self.vendor(true)?;
+        self.hci.finish_boot()?;
         self.allow_boot = false;
         Ok(self.boot.unwrap())
     }

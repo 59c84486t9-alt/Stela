@@ -6,15 +6,15 @@
 //! waits for a later event, such as a NOP completion, before sending more.
 use alloc::vec::Vec;
 
-pub(super) const COMMAND_COMPLETE: u8 = 0x0e;
-pub(super) const COMMAND_STATUS: u8 = 0x0f;
+pub(crate) const COMMAND_COMPLETE: u8 = 0x0e;
+pub(crate) const COMMAND_STATUS: u8 = 0x0f;
 /// The opcode of a completion that only grants credits.
 const NOP: u16 = 0;
 const MAX_PARAMETERS: usize = 255;
 
 /// What an event says to a command in flight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Response<'a> {
+pub(crate) enum Response<'a> {
     /// Its Command Complete: the credits granted, then the return
     /// parameters, starting with the status.
     Complete { credits: u8, returned: &'a [u8] },
@@ -27,7 +27,7 @@ pub(super) enum Response<'a> {
 }
 
 /// The command packet for `opcode` and its parameters.
-pub(super) fn packet(opcode: u16, parameters: &[u8]) -> Result<Vec<u8>, &'static str> {
+pub(crate) fn packet(opcode: u16, parameters: &[u8]) -> Result<Vec<u8>, &'static str> {
     if parameters.len() > MAX_PARAMETERS {
         return Err("command parameters exceed HCI maximum");
     }
@@ -39,7 +39,7 @@ pub(super) fn packet(opcode: u16, parameters: &[u8]) -> Result<Vec<u8>, &'static
 }
 
 /// Read `event` against the command `opcode` in flight.
-pub(super) fn response(event: &[u8], opcode: u16) -> Result<Response<'_>, &'static str> {
+pub(crate) fn response(event: &[u8], opcode: u16) -> Result<Response<'_>, &'static str> {
     let (credits, returned_opcode) = match event {
         [COMMAND_COMPLETE, length, credits, low, high, ..]
             if event.len() == usize::from(*length) + 2 =>

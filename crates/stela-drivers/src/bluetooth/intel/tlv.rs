@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2015 Intel Corporation
 //! TLV identity and CNVI/CNVR naming adapted from pinned btintel.c/btintel.h.
-use super::{
-    Error, Result,
-    identity::{Identity, valid_address},
-};
-use crate::{firmware::Target, usb::xhci::Device};
+use super::{Error, Result, TransportIdentity, identity::valid_address};
+use crate::firmware::Target;
+#[cfg(test)]
+use crate::usb::xhci::Device;
 use alloc::{format, string::String, vec::Vec};
 use core::fmt::Write;
 use sha2::{Digest, Sha256};
@@ -26,9 +25,7 @@ const OTP_ADDRESS: u8 = 0x30;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TlvIdentity {
-    pub usb_vendor: u16,
-    pub usb_product: u16,
-    pub usb_revision: u16,
+    pub transport: TransportIdentity,
     pub cnvi_top: u32,
     pub cnvr_top: u32,
     pub cnvi_bt: u32,
@@ -81,8 +78,11 @@ impl TlvIdentity {
         let variant = ((cnvi >> 16) & 0x3f) as u8;
         Ok(matches!(variant, 0x11..=0x14).then_some(variant))
     }
+    #[cfg(test)]
     pub(super) fn parse(device: &Device, p: &[u8]) -> Result<Self> {
-        let (usb_vendor, usb_product, usb_revision) = Identity::usb(device)?;
+        Self::parse_transport(TransportIdentity::Usb(super::Identity::usb(device)?), p)
+    }
+    pub(crate) fn parse_transport(transport: TransportIdentity, p: &[u8]) -> Result<Self> {
         if p.first() != Some(&0) {
             return Err(Error::Protocol("TLV version status"));
         }
@@ -132,7 +132,13 @@ impl TlvIdentity {
         }
         let variant = ((cnvi_bt >> 16) & 0x3f) as u8;
         // 0x11–14 are parsed only to trigger the legacy-version fallback.
-        if !matches!(variant,0x11..=0x14|0x17..=0x19|0x1b..=0x1f|0x22) {
+        let supported = match transport {
+            TransportIdentity::Usb(_) => {
+                matches!(variant,0x11..=0x14|0x17..=0x19|0x1b..=0x1f|0x22)
+            }
+            TransportIdentity::Pcie(_) => matches!(variant, 0x1e..=0x22),
+        };
+        if !supported {
             return Err(Error::Unsupported(
                 "Intel TLV hardware/hybrid engine unsupported",
             ));
@@ -169,7 +175,11 @@ impl TlvIdentity {
         if matches!(image_type, 2 | 3) && build.is_none() {
             return Err(Error::Protocol("operational TLV build/timestamp missing"));
         }
-        for (kind, observed) in [(0x17, usb_vendor), (0x18, usb_product)] {
+        for (kind, observed) in transport
+            .usb_ids()
+            .into_iter()
+            .flat_map(|(vendor, product)| [(0x17, vendor), (0x18, product)])
+        {
             if get(kind)
                 .is_some_and(|value| u16::from_le_bytes(value.try_into().unwrap()) != observed)
             {
@@ -201,9 +211,7 @@ impl TlvIdentity {
         };
         let device_revision = u16::from_le_bytes(req(DEVICE_REV)?.try_into().unwrap());
         Ok(Self {
-            usb_vendor,
-            usb_product,
-            usb_revision,
+            transport,
             cnvi_top,
             cnvr_top,
             cnvi_bt,
@@ -224,10 +232,7 @@ impl TlvIdentity {
         ((self.cnvi_bt >> 16) & 0x3f) as u8
     }
     pub fn hardware_label(&self) -> String {
-        format!(
-            "usb:{:04x}:{:04x}:{:04x}",
-            self.usb_vendor, self.usb_product, self.usb_revision
-        )
+        self.transport.hardware_label()
     }
     /// Canonical sorted, complete TLV identity. Unknown fields are retained,
     /// duplicates rejected and the versioned schema never masks future bits.
@@ -269,7 +274,10 @@ impl TlvIdentity {
     /// inherited observed security data without rewriting the current response.
     pub fn iml_revision_label(&self, initial: &Self) -> String {
         let mut hash = Sha256::new();
-        hash.update(b"stela.intel-usb.iml-target\0v1\0");
+        hash.update(match self.transport {
+            TransportIdentity::Usb(_) => &b"stela.intel-usb.iml-target\0v1\0"[..],
+            TransportIdentity::Pcie(_) => &b"stela.intel-pcie.iml-target\0v1\0"[..],
+        });
         for bytes in [initial.canonical_tlvs(), self.canonical_tlvs()] {
             hash.update((bytes.len() as u32).to_le_bytes());
             hash.update(bytes);
@@ -368,7 +376,10 @@ impl TlvIdentity {
     }
     pub fn target<'a>(&self, hardware: &'a str, revision: &'a str) -> Target<'a> {
         Target {
-            driver: "intel-bluetooth-usb-tlv",
+            driver: match self.transport {
+                TransportIdentity::Usb(_) => "intel-bluetooth-usb-tlv",
+                TransportIdentity::Pcie(_) => "intel-bluetooth-pcie-tlv",
+            },
             hardware,
             revision,
             board: None,
@@ -376,18 +387,14 @@ impl TlvIdentity {
     }
     pub(super) fn same_hardware(&self, other: &Self) -> bool {
         (
-            self.usb_vendor,
-            self.usb_product,
-            self.usb_revision,
+            self.transport,
             self.cnvi_top,
             self.cnvr_top,
             self.cnvi_bt,
             self.cnvr_bt,
             self.device_revision,
         ) == (
-            other.usb_vendor,
-            other.usb_product,
-            other.usb_revision,
+            other.transport,
             other.cnvi_top,
             other.cnvr_top,
             other.cnvi_bt,
