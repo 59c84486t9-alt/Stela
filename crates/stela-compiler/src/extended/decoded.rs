@@ -184,6 +184,12 @@ impl Decoded {
             Self::MemoryMulti(operand) => x86_64::sve::memory_multi::requirements(operand),
             Self::MemoryStore(operand) => x86_64::sve::memory_store::requirements(operand),
             Self::MemoryStructure(operand) => x86_64::sve::memory_structure::requirements(*operand),
+            Self::Ordinary(instruction) if checked_register_asimd(&instruction.operation) => {
+                crate::context::memory::MemoryRequirements {
+                    required_flags: crate::context::memory::flags::ASIMD,
+                    ..Default::default()
+                }
+            }
             Self::Ordinary(_) => Default::default(),
             Self::Address(_) => Default::default(),
             Self::IntegerDot(_) => Default::default(),
@@ -360,7 +366,9 @@ impl Decoded {
         ) {
             return Ok(Self::MemoryFixed(operand));
         }
-        if !ordinary_permitted(&instruction.operation) {
+        if !ordinary_permitted(&instruction.operation)
+            && !checked_register_asimd(&instruction.operation)
+        {
             return Err(CompileError(format!(
                 "operation outside checked GPR memory profile at {:#x}",
                 instruction.pc.0
@@ -440,6 +448,37 @@ impl Decoded {
     }
 }
 
+/// Existing register-only AdvSIMD recipes can share checked blocks without
+/// borrowing guest RAM. Memory variants must retain their typed adapters;
+/// numerical FP remains on its separately recovered block/service path. Keep
+/// this exhaustive by variant so a future SIMD family needs explicit review.
+fn checked_register_asimd(operation: &Operation) -> bool {
+    use crate::aarch64::simd::Operand;
+    matches!(
+        operation,
+        Operation::Simd(
+            Operand::Aes(_)
+                | Operand::I8mm(_)
+                | Operand::Sha1(_)
+                | Operand::Sha256(_)
+                | Operand::Sha3(_)
+                | Operand::Sha512(_)
+                | Operand::Floating(_)
+                | Operand::Immediate(_)
+                | Operand::Halving(_)
+                | Operand::Product(_)
+                | Operand::Saturate(_)
+                | Operand::Reduce(_)
+                | Operand::Shift(_)
+                | Operand::Rearrange(_)
+                | Operand::Lut(_)
+                | Operand::Compare { .. }
+                | Operand::Integer { .. }
+                | Operand::MoveImmediate { .. }
+        )
+    )
+}
+
 pub(crate) fn ordinary_permitted(operation: &Operation) -> bool {
     matches!(
         operation,
@@ -467,4 +506,98 @@ pub(crate) fn ordinary_permitted(operation: &Operation) -> bool {
             | Operation::Nop
             | Operation::Return
     )
+}
+
+#[cfg(test)]
+mod checked_register_tests {
+    use super::*;
+    use crate::context::memory::flags;
+    use crate::{
+        Lifter,
+        aarch64::Decoder,
+        block::{BlockProfile, CheckedMemoryProfile, CompilationPlan},
+    };
+
+    #[test]
+    fn checked_vector_logic_requires_asimd_for_both_widths_and_all_alias_roles() {
+        let base = GuestAddress(0x4000);
+        for class in [
+            0x0e201c00, 0x0e601c00, 0x0ea01c00, 0x0ee01c00, 0x2e201c00, 0x2e601c00, 0x2ea01c00,
+            0x2ee01c00,
+        ] {
+            for q in [0, 1 << 30] {
+                for (destination, left, right) in [(0, 0, 0), (31, 0, 31), (7, 31, 7), (0, 1, 2)] {
+                    let word: u32 = class | q | destination | (left << 5) | (right << 16);
+                    let instruction = Decoder.lift(base, word).unwrap();
+                    assert!(checked_register_asimd(&instruction.operation));
+                    assert!(!ordinary_permitted(&instruction.operation));
+                    for specialization in [
+                        CheckedMemoryProfile::SpAlignmentEnabled,
+                        CheckedMemoryProfile::SpAlignmentDisabled,
+                    ] {
+                        let decoded =
+                            Decoded::checked_ordinary(instruction.clone(), specialization).unwrap();
+                        assert!(matches!(decoded, Decoded::Ordinary(_)));
+                        assert_eq!(decoded.memory_requirements().required_flags, flags::ASIMD);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn shared_register_simd_prefix_retains_real_branch_extent_and_source_map() {
+        // Generic move/vector-zero/integer-zero/compare/conditional-branch
+        // prefix. A following unallocated word is outside its consumed block.
+        let words: [u32; 7] = [
+            0xaa0103e2, 0x6e201c00, 0xca010021, 0xaa0003e3, 0xf101005f, 0x54000883, 0,
+        ];
+        let source: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        let base = GuestAddress(0x8000);
+        for specialization in [
+            CheckedMemoryProfile::SpAlignmentEnabled,
+            CheckedMemoryProfile::SpAlignmentDisabled,
+        ] {
+            let plan = CompilationPlan::new(
+                &source,
+                base,
+                BlockProfile::SystemModeSharedV1(specialization),
+                TargetCpu::Baseline,
+            )
+            .unwrap();
+            assert_eq!(plan.source_bytes(), 24);
+            assert_eq!(
+                plan.memory_requirements().unwrap().required_flags,
+                flags::ASIMD
+            );
+            let compiled = plan.compile().unwrap();
+            assert_eq!(compiled.source_bytes, 24);
+            assert_eq!(
+                compiled
+                    .native
+                    .source_map
+                    .iter()
+                    .map(|(pc, _)| *pc)
+                    .collect::<Vec<_>>(),
+                (0..6)
+                    .map(|i| GuestAddress(base.0 + i * 4))
+                    .collect::<Vec<_>>()
+            );
+            assert!(compiled.fault_recovery.is_empty());
+        }
+    }
+    #[test]
+    fn simd_guest_memory_never_receives_register_only_authority() {
+        let base = GuestAddress(0x4000);
+        for word in [
+            0x3dc00020, 0x3d800020, 0xad400440, 0xad000440, 0x4c407020, 0x4c007020,
+        ] {
+            let instruction = Decoder.lift(base, word).unwrap();
+            assert!(!checked_register_asimd(&instruction.operation));
+            if let Ok(decoded) =
+                Decoded::checked_ordinary(instruction, CheckedMemoryProfile::SpAlignmentDisabled)
+            {
+                assert!(!matches!(decoded, Decoded::Ordinary(_)));
+            }
+        }
+    }
 }
