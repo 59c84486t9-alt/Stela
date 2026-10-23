@@ -17,6 +17,79 @@ const CODE_SELECTOR: u16 = 0x08;
 const DATA_SELECTOR: u16 = 0x10;
 const TSS_SELECTOR: u16 = 0x18;
 const IST_BYTES: usize = 64 * 1024;
+const LEGACY_FP_BYTES: usize = 512;
+const CR0_EMULATE_FPU: u64 = 1 << 2;
+const CR0_TASK_SWITCHED: u64 = 1 << 3;
+const CR4_OSFXSR: u64 = 1 << 9;
+const CR4_OSXSAVE: u64 = 1 << 18;
+const CPUID_FXSR_SSE_SSE2: u32 = (1 << 24) | (1 << 25) | (1 << 26);
+const LEGACY_XCR0: u64 = 3;
+const EFER: u32 = 0xc000_0080;
+const EFER_FAST_FXSR: u64 = 1 << 14;
+const XSS: u32 = 0xda0;
+const XSAVES: u32 = 1 << 3;
+const ALWAYS_SAVE_ERROR_POINTERS: u32 = 1 << 2;
+
+fn msr(index: u32) -> u64 {
+    let (low, high): (u32, u32);
+    // SAFETY: callers select only architecturally qualified native MSRs.
+    unsafe {
+        asm!("rdmsr", in("ecx") index, out("eax") low, out("edx") high,
+            options(nostack, preserves_flags));
+    }
+    u64::from(low) | u64::from(high) << 32
+}
+
+/// This entry owns x87/MMX/MXCSR and all sixteen XMM registers, not AVX,
+/// AVX-512, AMX or supervisor XSAVE state. Check before loading its IDT on
+/// every BSP/AP/host-check path; never silently truncate an enabled xstate.
+fn qualify_fp_entry() {
+    let vendor = core::arch::x86_64::__cpuid(0);
+    let vendor = [vendor.ebx, vendor.edx, vendor.ecx];
+    let intel = vendor == [0x756e_6547, 0x4965_6e69, 0x6c65_746e];
+    let amd = vendor == [0x6874_7541, 0x6974_6e65, 0x444d_4163];
+    let hygon = vendor == [0x6f67_7948, 0x6e65_476e, 0x656e_6975];
+    let extended = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+    // AMD APM2 and Family17h OSRR CPUID80000008.EBX.XSaveErPtr: older
+    // FXRSTOR can leave FIP/FDP/FOP changed when no unmasked exception exists.
+    // Such a CPU needs a different complete save recipe before admission.
+    if !intel
+        && (!(amd || hygon)
+            || extended < 0x8000_0008
+            || core::arch::x86_64::__cpuid(0x8000_0008).ebx & ALWAYS_SAVE_ERROR_POINTERS == 0)
+    {
+        output::fatal("native IRQ entry cannot preserve this CPU's x87 error pointers");
+    }
+    let features = core::arch::x86_64::__cpuid(1);
+    let (cr0, cr4): (u64, u64);
+    // SAFETY: installation runs at CPL0 with local interrupts disabled.
+    unsafe {
+        asm!("mov {}, cr0", out(reg) cr0, options(nostack, preserves_flags));
+        asm!("mov {}, cr4", out(reg) cr4, options(nostack, preserves_flags));
+    }
+    if features.edx & CPUID_FXSR_SSE_SSE2 != CPUID_FXSR_SSE_SSE2
+        || cr0 & (CR0_EMULATE_FPU | CR0_TASK_SWITCHED) != 0
+        || cr4 & CR4_OSFXSR == 0
+        || msr(EFER) & EFER_FAST_FXSR != 0
+    {
+        output::fatal("native IRQ entry requires usable FXSR/SSE/SSE2 state");
+    }
+    if cr4 & CR4_OSXSAVE != 0 {
+        let (low, high): (u32, u32);
+        // SAFETY: actual CR4.OSXSAVE qualifies XGETBV(0).
+        unsafe {
+            asm!("xgetbv", in("ecx") 0u32, out("eax") low, out("edx") high,
+                options(nostack, preserves_flags));
+        }
+        let enabled = u64::from(low) | u64::from(high) << 32;
+        if enabled & !LEGACY_XCR0 != 0 {
+            output::fatal("native IRQ entry does not preserve enabled extended XSAVE state");
+        }
+        if core::arch::x86_64::__cpuid_count(0xd, 1).eax & XSAVES != 0 && msr(XSS) != 0 {
+            output::fatal("native IRQ entry does not preserve enabled supervisor XSAVE state");
+        }
+    }
+}
 
 /// The registers an interrupt stub saves, then the CPU's frame.
 #[repr(C)]
@@ -130,7 +203,20 @@ global_asm!(
     "push r15",
     "cld",
     "mov rdi, rsp",
+    // RBX's interrupted value is already in Frame; the SysV handler must
+    // preserve this live original Frame pointer. FX storage is private to
+    // this actual IST entry and never changes Frame's layout or mutations.
+    "mov rbx, rsp",
+    "sub rsp, {fp_bytes}",
+    "and rsp, -16",
+    "fxsave64 [rsp]",
+    // Rust handler code must not inherit an interrupted unmasked FP control
+    // state. FNINIT is nonwaiting; both controls are restored before IRET.
+    "fninit",
+    "ldmxcsr [rip + stela_interrupt_mxcsr]",
     "call qword ptr gs:[{handler}]",
+    "fxrstor64 [rsp]",
+    "mov rsp, rbx",
     "pop r15",
     "pop r14",
     "pop r13",
@@ -148,6 +234,12 @@ global_asm!(
     "pop rax",
     "add rsp, 16",
     "iretq",
+    ".section .rdata",
+    ".balign 4",
+    "stela_interrupt_mxcsr:",
+    ".long 0x1f80",
+    ".text",
+    fp_bytes = const LEGACY_FP_BYTES,
     handler = const host::local::HANDLER_OFFSET,
 );
 
@@ -226,6 +318,7 @@ pub(crate) unsafe fn install_on(
     tables: &'static mut Tables,
     handler: extern "sysv64" fn(&mut Frame),
 ) {
+    qualify_fp_entry();
     // SAFETY: all data here is private to this physical processor.
     unsafe {
         let tss = &raw mut tables.tss;

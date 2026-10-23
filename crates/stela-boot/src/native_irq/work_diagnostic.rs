@@ -95,6 +95,9 @@ struct WorkHandler {
 }
 impl Handler for WorkHandler {
     fn handle(&self) -> Disposition {
+        // Actual asynchronous IRQ mutation: the common entry, not a promise
+        // about inspected Rust code avoiding SIMD, must restore the caller.
+        unsafe { poison_irq_fp() };
         // Reuse the existing actual cause/W1C/readback handler. Registry emits
         // EOI after this whole callback and its genuine context scope finish.
         let disposition = self.events.edu.handle();
@@ -432,11 +435,39 @@ pub(crate) fn run(
         ));
     }
     Ok(format!(
-        "EDU vector={vector:#x} actual_cause=0x1 IRQ_depth=real interrupted_SP=owned-foreground ISR_SP=separate-IST current_id=IRQ-refused enqueue=owned/noninline worker=owned-distinct-context async_FXSAVE=unchanged heap=aligned-zeroed-read-write-reclaimed heap_IF=off/on-preserved mask+hardware+IRR/ISR+inflight+work=drained late_delivery=absent stack_leases=4-released BSP_device_owner=!Send interrupted_rsp={:#x} isr_rsp={:#x} worker_rsp={:#x}",
+        "EDU vector={vector:#x} actual_cause=0x1 IRQ_depth=real interrupted_SP=owned-foreground ISR_SP=separate-IST current_id=IRQ-refused enqueue=owned/noninline worker=owned-distinct-context async_FXSAVE=IRQ-poison-restored async_GPR+RSP+DF=restored heap=aligned-zeroed-read-write-reclaimed heap_IF=off/on-preserved mask+hardware+IRR/ISR+inflight+work=drained late_delivery=absent stack_leases=4-released BSP_device_owner=!Send interrupted_rsp={:#x} isr_rsp={:#x} worker_rsp={:#x}",
         events.interrupted_rsp.load(Ordering::Acquire),
         events.isr_rsp.load(Ordering::Acquire),
         events.worker_rsp.load(Ordering::Acquire)
     ))
+}
+
+/// Deliberate caller-saved data mutation in the actual fixture ISR. The
+/// entry's default controls are retained; all XMM lanes and x87 data change.
+/// Only the separate opt-in EDU fixture calls this diagnostic helper.
+#[unsafe(naked)]
+unsafe extern "sysv64" fn poison_irq_fp() {
+    naked_asm!(
+        "fninit",
+        "fldz",
+        "pxor xmm0, xmm0",
+        "pxor xmm1, xmm1",
+        "pxor xmm2, xmm2",
+        "pxor xmm3, xmm3",
+        "pxor xmm4, xmm4",
+        "pxor xmm5, xmm5",
+        "pxor xmm6, xmm6",
+        "pxor xmm7, xmm7",
+        "pxor xmm8, xmm8",
+        "pxor xmm9, xmm9",
+        "pxor xmm10, xmm10",
+        "pxor xmm11, xmm11",
+        "pxor xmm12, xmm12",
+        "pxor xmm13, xmm13",
+        "pxor xmm14, xmm14",
+        "pxor xmm15, xmm15",
+        "ret",
+    );
 }
 
 /// Synchronous actual owned-stack probe; no pointer to this local frame
@@ -552,6 +583,19 @@ unsafe extern "C" fn msi_with_fp_sentinel(_: *mut AsyncCall) {
         "pop rax",
         "test eax, {interrupt_flag}",
         "jz 4f",
+        "mov [rsp+1584], rsp",
+        "mov rbp, 0x1828384858687888",
+        "mov rsi, 0x1929394959697989",
+        "mov rdi, 0x1a2a3a4a5a6a7a8a",
+        "mov r8, 0x1b2b3b4b5b6b7b8b",
+        "mov r9, 0x1c2c3c4c5c6c7c8c",
+        "mov r10, 0x1d2d3d4d5d6d7d8d",
+        "mov r11, 0x1e2e3e4e5e6e7e8e",
+        "mov r12, 0x1f2f3f4f5f6f7f8f",
+        "mov r13, 0x2030405060708090",
+        "mov r14, 0x2131415161718191",
+        "mov r15, 0x2232425262728292",
+        "std",
         "mov rax, [rbx+8]",
         "mov dword ptr [rax], 1",
         "2:",
@@ -566,6 +610,48 @@ unsafe extern "C" fn msi_with_fp_sentinel(_: *mut AsyncCall) {
         "pause",
         "jmp 2b",
         "3:",
+        "pushfq",
+        "pop rax",
+        "test eax, 0x400",
+        "jz 6f",
+        "test eax, {interrupt_flag}",
+        "jz 6f",
+        "cld",
+        "cmp rsp, [rsp+1584]",
+        "jne 6f",
+        "mov rax, 0x1828384858687888",
+        "cmp rbp, rax",
+        "jne 6f",
+        "mov rax, 0x1929394959697989",
+        "cmp rsi, rax",
+        "jne 6f",
+        "mov rax, 0x1a2a3a4a5a6a7a8a",
+        "cmp rdi, rax",
+        "jne 6f",
+        "mov rax, 0x1b2b3b4b5b6b7b8b",
+        "cmp r8, rax",
+        "jne 6f",
+        "mov rax, 0x1c2c3c4c5c6c7c8c",
+        "cmp r9, rax",
+        "jne 6f",
+        "mov rax, 0x1d2d3d4d5d6d7d8d",
+        "cmp r10, rax",
+        "jne 6f",
+        "mov rax, 0x1e2e3e4e5e6e7e8e",
+        "cmp r11, rax",
+        "jne 6f",
+        "mov rax, 0x1f2f3f4f5f6f7f8f",
+        "cmp r12, rax",
+        "jne 6f",
+        "mov rax, 0x2030405060708090",
+        "cmp r13, rax",
+        "jne 6f",
+        "mov rax, 0x2131415161718191",
+        "cmp r14, rax",
+        "jne 6f",
+        "mov rax, 0x2232425262728292",
+        "cmp r15, rax",
+        "jne 6f",
         "fxsave64 [rsp+1056]",
         "lea rdi, [rsp+544]",
         "lea rsi, [rsp+1056]",
@@ -583,6 +669,7 @@ unsafe extern "C" fn msi_with_fp_sentinel(_: *mut AsyncCall) {
         "6:",
         "mov qword ptr [rbx+24], 2",
         "7:",
+        "cld",
         "fxrstor64 [rsp+32]",
         "add rsp, 1592",
         "pop r15",
