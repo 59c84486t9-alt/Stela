@@ -5,11 +5,11 @@
 //! endpoint callbacks and AP-buffer lifecycle. RTBuddyIOReportingEndpoint
 //! consumes the IORb buffer at J473 KC VA fffffe000b66aba0.
 //! No Apple firmware executes. Numeric wire data grants no mapping authority.
-pub mod record;
-pub mod wire;
 pub mod getter;
-pub mod resources;
-mod receive;
 mod owner;
-pub use receive::Receiver;
+mod receive;
+pub mod record;
+pub mod resources;
+pub mod wire;
 pub use owner::{Finished, NO_DATABASE, Owner, Progress, Registration, RegistrationResult};
+pub use receive::Receiver;

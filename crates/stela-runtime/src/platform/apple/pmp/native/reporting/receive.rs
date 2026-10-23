@@ -1,6 +1,9 @@
 //! Independent immediate endpoint4 receive, not queued behind registration.
-use super::{resources::{WaitKey, Wake}, wire};
 use super::super::platform::owner::Completion;
+use super::{
+    resources::{WaitKey, Wake},
+    wire,
+};
 use crate::platform::apple::bus::Access;
 use alloc::rc::Rc;
 use core::cell::RefCell;
@@ -19,31 +22,53 @@ pub struct Receiver(pub(super) Rc<RefCell<Inbox>>);
 impl Receiver {
     /// Transport must preserve this actual endpoint session. The source wire
     /// has no nonce: a stale same-kind ACK cannot be authenticated by geometry.
-    pub fn receive(&self, payload: u64, wake: &mut impl Wake, access: &mut Access<'_>) -> Completion<()> {
-        if !self.0.borrow().alive { return Completion::Refused("IOReporting endpoint session is not live"); }
+    pub fn receive(
+        &self,
+        payload: u64,
+        wake: &mut impl Wake,
+        access: &mut Access<'_>,
+    ) -> Completion<()> {
+        if !self.0.borrow().alive {
+            return Completion::Refused("IOReporting endpoint session is not live");
+        }
         match wire::kind(payload) {
             0 => {
-                let buffer = match wire::buffer(payload) { Ok(b) => b, Err(e) => return Completion::Refused(e) };
+                let buffer = match wire::buffer(payload) {
+                    Ok(b) => b,
+                    Err(e) => return Completion::Refused(e),
+                };
                 let mut inbox = self.0.borrow_mut();
                 if !inbox.buffer_expected || inbox.buffer.is_some() {
                     return Completion::Refused("unsolicited/replacement IOReporting AP buffer");
                 }
-                if buffer.bus == 0 || buffer.bytes < wire::REQUEST_BYTES || buffer.bus.checked_add(buffer.bytes).is_none() {
+                if buffer.bus == 0
+                    || buffer.bytes < wire::REQUEST_BYTES
+                    || buffer.bus.checked_add(buffer.bytes).is_none()
+                {
                     return Completion::Refused("IOReporting AP allocation geometry is incomplete");
                 }
                 inbox.buffer = Some(buffer);
                 inbox.buffer_expected = false;
-                Completion::Retired { value: (), refusal: None }
+                Completion::Retired {
+                    value: (),
+                    refusal: None,
+                }
             }
             1 => {
                 let result = wake.queue_refresh(access);
-                if matches!(&result, Completion::Retired { .. }) { self.0.borrow_mut().refresh = true; }
+                if matches!(&result, Completion::Retired { .. }) {
+                    self.0.borrow_mut().refresh = true;
+                }
                 result
             }
             2 => {
                 let key = match self.0.borrow().waiter.clone() {
                     Some(key) => key,
-                    None => return Completion::Refused("IOReporting publication ACK has no actual armed waiter"),
+                    None => {
+                        return Completion::Refused(
+                            "IOReporting publication ACK has no actual armed waiter",
+                        );
+                    }
                 };
                 let result = wake.publication_ack(&key, access);
                 if matches!(&result, Completion::Retired { .. }) {
