@@ -46,7 +46,7 @@ pub(super) fn firmware_payload(bytes: &[u8]) -> Result<&[u8], Error> {
                 if !(size - 8).is_multiple_of(8) {
                     return Err(Error::FirmwareImage);
                 }
-                for element in bytes[offset + 8..offset + size].chunks_exact(8) {
+                for element in bytes[offset + 8..offset + size].as_chunks::<8>().0 {
                     if word(element, 0)? == 1 && word(element, 4)? != 0 {
                         return Err(Error::FirmwareImage);
                     }
@@ -185,10 +185,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                                     return Err(Error::Mailbox);
                                 }
                             }
-                            1 => {
-                                if dsp.replace((start, bytes)).is_some() || bytes < 384 {
-                                    return Err(Error::Mailbox);
-                                }
+                            1 if dsp.replace((start, bytes)).is_some() || bytes < 384 => {
+                                return Err(Error::Mailbox);
                             }
                             _ => (),
                         }

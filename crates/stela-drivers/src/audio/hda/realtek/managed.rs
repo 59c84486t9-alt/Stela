@@ -415,7 +415,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 let value = self.realtek_hidden_read(graph.address, 0x57, 4)?;
                 state.hidden.push((0x57, 4, value));
             }
-            if matches!(graph.vendor_id, 0x10ec_0255 | 0x10ec_0256 | 0x10ec_0257) {
+            if matches!(graph.vendor_id, 0x10ec_0255..=0x10ec_0257) {
                 let value = self.realtek_hidden_read(graph.address, 0x53, 2)?;
                 state.hidden.push((0x53, 2, value));
             }

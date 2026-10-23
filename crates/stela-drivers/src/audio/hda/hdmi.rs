@@ -719,6 +719,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         for entry in &mut self.hdmi_ports {
             if let Some(mut p) = entry.take() {
+                // SAFETY: all original routes are quiet after acknowledged
+                // stream/codec/GPU stop above. Taking this owned Port removes
+                // its sole stored Arc; release it once and never read it again.
+                // Port's ManuallyDrop field prevents a second automatic drop.
                 unsafe {
                     ManuallyDrop::drop(&mut p.owner);
                 }

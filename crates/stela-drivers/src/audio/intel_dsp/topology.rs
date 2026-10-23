@@ -280,7 +280,7 @@ fn parse(bytes: &[u8], pipeline: u32) -> Result<(Vec<Vec<u8>>, u32, PcmFormat), 
                 if payload.len() != count * 132 {
                     return Err(Error::Topology);
                 }
-                for route in payload.chunks_exact(132) {
+                for route in payload.as_chunks::<132>().0 {
                     routes.push((
                         text(&route[88..132])?,
                         text(&route[..44])?,

@@ -546,6 +546,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })();
         self.finish(result)
     }
+    #[allow(
+        clippy::result_large_err,
+        reason = "Incomplete shutdown must return the entire owned controller for retry without allocating or releasing uncertain register/DMA owners"
+    )]
     pub fn into_stopped_resources(self) -> Result<(R, T), Self> {
         if self.state != State::Shutdown {
             return Err(self);

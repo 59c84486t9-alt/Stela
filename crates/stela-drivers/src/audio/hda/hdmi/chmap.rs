@@ -678,16 +678,15 @@ impl ChannelMap {
         if !matches!(channels, 2 | 4 | 6 | 8) {
             return Err(Error::InvalidFormat);
         }
-        if let Some(order) = custom {
-            if order.len() != usize::from(channels)
+        if let Some(order) = custom
+            && (order.len() != usize::from(channels)
                 || order
                     .iter()
                     .enumerate()
                     .any(|(i, s)| order[..i].contains(s))
-                || (channels == 2 && order != [Fl, Fr])
-            {
-                return Err(Error::InvalidChannelMap);
-            }
+                || (channels == 2 && order != [Fl, Fr]))
+        {
+            return Err(Error::InvalidChannelMap);
         }
         // FL/FR is the actual source's basic stereo configuration. An absent
         // multichannel speaker block is not a grant to invent extra speakers.

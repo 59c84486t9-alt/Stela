@@ -68,7 +68,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 self.clear_coefficient_bits(address, 0x4a, 3 << 10)?;
             }
         } else {
-            if matches!(id, 0x10ec_0255 | 0x10ec_0256 | 0x10ec_0257) {
+            if matches!(id, 0x10ec_0255..=0x10ec_0257) {
                 self.depop_control(address, DepopControl::HeadphonePower, 1)?;
                 // Source en_3kpull_low defaults true; ALC257 explicitly clears
                 // it to retain cold-boot headset microphone detection.

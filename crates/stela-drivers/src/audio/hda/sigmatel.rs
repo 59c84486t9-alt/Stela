@@ -172,15 +172,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     return Err(Error::InvalidCodecGraph);
                 }
             }
-            if let Some((node, caps)) = state.startup_amplifier {
-                if self.validate_live_output_amplifier(
+            if let Some((node, caps)) = state.startup_amplifier
+                && self.validate_live_output_amplifier(
                     graph.address,
                     state.group,
                     graph.widget(node).ok_or(Error::InvalidCodecGraph)?,
                 )? != caps
-                {
-                    return Err(Error::InvalidCodecGraph);
-                }
+            {
+                return Err(Error::InvalidCodecGraph);
             }
             if let Some(idt83) = &state.idt83 {
                 self.validate_idt83(graph, state.group, idt83)?;
