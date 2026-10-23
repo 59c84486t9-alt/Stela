@@ -171,7 +171,8 @@ impl Controls {
     pub(super) fn retained_bytes(&self) -> usize {
         core::mem::size_of::<Option<Self>>()
             + self.identification.retained_bytes()
-            + self.missing.len() * core::mem::size_of::<SystemRegister>()
+            + (self.missing.len() * core::mem::size_of::<SystemRegister>())
+                .next_multiple_of(core::mem::align_of::<usize>())
             + self.identity.len()
             + 4 * core::mem::size_of::<usize>()
     }

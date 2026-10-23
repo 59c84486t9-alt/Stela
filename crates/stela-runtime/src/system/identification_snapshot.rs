@@ -156,7 +156,11 @@ impl Snapshot {
     pub(crate) fn retained_bytes(&self) -> usize {
         core::mem::size_of::<Self>()
             + 2 * core::mem::size_of::<usize>()
-            + self.provenance.input.len()
+            + self
+                .provenance
+                .input
+                .len()
+                .next_multiple_of(core::mem::align_of::<usize>())
             + 2 * core::mem::size_of::<usize>()
             + self.provenance.input_sha256.capacity()
             + self.provenance.captured_fields.capacity() * core::mem::size_of::<(Register, usize)>()
@@ -378,6 +382,28 @@ mod tests {
             first.provenance().input_sha256(),
             changed.provenance().input_sha256()
         );
+    }
+
+    #[test]
+    fn retained_arc_input_accounts_for_tail_padding() {
+        let capture = |bytes| {
+            Snapshot::captured(
+                "snapshot-arc-padding-fixture",
+                alloc::vec![0x5a; bytes].into(),
+                &[(Register::IdAa64Isar1El1, 0)],
+            )
+            .unwrap()
+        };
+        // Arc's counters require the allocation to remain word-aligned even
+        // when the byte slice ends earlier. These pairs share allocation size.
+        let word = core::mem::size_of::<usize>();
+        let first = capture(2 * word - 1);
+        let aligned = capture(2 * word);
+        let next = capture(2 * word + 1);
+        let next_aligned = capture(3 * word);
+        assert_eq!(first.retained_bytes(), aligned.retained_bytes());
+        assert_eq!(next.retained_bytes(), next_aligned.retained_bytes());
+        assert_eq!(next.retained_bytes() - first.retained_bytes(), word);
     }
 
     #[test]
