@@ -37,6 +37,7 @@ struct Model {
     no_nvram_grant: bool,
     reset_pending: bool,
     reset_firmware_ack: bool,
+    ignored_config_write: Option<u16>,
 }
 impl Model {
     fn event(&mut self, event: Event) -> Result<(), Error> {
@@ -76,12 +77,18 @@ unsafe impl Registers for Reg {
     fn config_write32(&mut self, at: u16, value: u32) -> Result<(), Error> {
         let mut m = self.0.borrow_mut();
         m.event(Event::ConfigWrite(at, value))?;
+        if m.ignored_config_write == Some(at) {
+            return Ok(());
+        }
         m.config.insert(at, value);
         Ok(())
     }
     fn config_write16(&mut self, at: u16, value: u16) -> Result<(), Error> {
         let mut m = self.0.borrow_mut();
         m.event(Event::ConfigWrite16(at, value))?;
+        if m.ignored_config_write == Some(at) {
+            return Ok(());
+        }
         let shift = (at & 2) * 8;
         let previous = *m.config.get(&(at & !3)).unwrap_or(&0);
         m.config.insert(
@@ -141,6 +148,9 @@ unsafe impl Registers for Reg {
             m.reset_pending = true;
             let command = m.config.get(&4).copied().unwrap_or(0);
             m.config.insert(4, command & !2);
+            let host = m.config.get(&MISC_HOST_CTRL).copied().unwrap_or(0);
+            m.config.insert(MISC_HOST_CTRL, host & 0xffff_0000);
+            m.config.insert(PCISTATE, 0);
             if m.reset_firmware_ack {
                 m.sram.insert(FIRMWARE_MBOX, !FIRMWARE_MAGIC);
             }
@@ -682,4 +692,25 @@ fn every_core_reset_access_fault_retains_the_actual_epoch() {
         drop(hardware);
         assert_eq!(m.borrow().dropped, 0);
     }
+}
+
+#[test]
+fn ignored_mandatory_reset_controls_never_count_as_completion() {
+    for at in [MISC_HOST_CTRL, PCISTATE, 0x48] {
+        let (mut hardware, m) = reset_model(Asic::Bcm5720);
+        m.borrow_mut().ignored_config_write = Some(at);
+        assert_eq!(
+            hardware.reset_unmanaged_core(),
+            Err(Error::ConfigDidNotLatch),
+            "config {at:x}"
+        );
+        assert!(!hardware.core_reset_completed());
+    }
+    let (mut hardware, m) = reset_model(Asic::Bcm5720);
+    m.borrow_mut().stuck_stop = Some(MEMARB_MODE);
+    assert_eq!(
+        hardware.reset_unmanaged_core(),
+        Err(Error::ConfigDidNotLatch)
+    );
+    assert!(!hardware.core_reset_completed());
 }

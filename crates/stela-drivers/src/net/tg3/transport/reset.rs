@@ -171,17 +171,28 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             self.delay.delay_us(120);
             let control = Self::checked(self.regs().config_read32(pcie + 8)?)? as u16;
             self.regs().config_write16(pcie + 8, control & !0x0810)?;
+            if Self::checked(self.regs().config_read32(pcie + 8)?)? & 0x0810 != 0 {
+                return Err(Error::ConfigDidNotLatch);
+            }
             self.regs().config_write16(pcie + 10, 0x000f)?;
             let host = Self::checked(self.regs().config_read32(MISC_HOST_CTRL)?)?;
             self.regs()
                 .config_write32(MISC_HOST_CTRL, (host & 0xffff_0000) | HOST_ACCESS)?;
             self.regs().config_write32(PCISTATE, 0x60 | ALLOW_APE)?;
+            if Self::checked(self.regs().config_read32(MISC_HOST_CTRL)?)? & 0xffff != HOST_ACCESS
+                || Self::checked(self.regs().config_read32(PCISTATE)?)? & ALLOW_APE != ALLOW_APE
+            {
+                return Err(Error::ConfigDidNotLatch);
+            }
             self.regs().config_write16(PCI_COMMAND, command)?;
             if self.regs().config_read32(PCI_COMMAND)? as u16 != command {
                 return Err(Error::ConfigDidNotLatch);
             }
             let arbiter = self.read(MEMARB_MODE)?;
             self.flush(MEMARB_MODE, arbiter | ENABLE)?;
+            if self.read(MEMARB_MODE)? & ENABLE == 0 {
+                return Err(Error::ConfigDidNotLatch);
+            }
             self.firmware_after_reset()?;
             self.write(GRC_MODE, MAC_DATA_SWAP)?;
             self.flush(MAC_MODE, 0)?;

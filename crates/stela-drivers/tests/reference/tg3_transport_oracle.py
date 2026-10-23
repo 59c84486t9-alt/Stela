@@ -53,7 +53,8 @@ def main():
 typedef uint32_t u32;
 #include "donor_constants.h"
 #define PHY_BUSY_LOOPS 5000
-#define TG3_PHYFLG_IS_FET 1
+#define fallthrough __attribute__((fallthrough))
+#define TG3_PHYFLG_IS_FET 0x00000040
 #define MII_CTRL1000 9
 #define tg3_asic_rev(tp) ((tp)->pci_chip_rev_id >> 12)
 #define flag_ENABLE_APE 1
