@@ -154,6 +154,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 data: actual.data & !EAPD,
                 ..actual
             },
+            ((1u16 << (state.gpio_caps & 255)) - 1) as u8,
+            EAPD,
         )
+        .map(|_| ())
     }
 }

@@ -192,20 +192,32 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         address: u8,
         group: u8,
         gpio: SigmatelGpio,
-    ) -> Result<(), Error> {
+        allowed: u8,
+        verify: u8,
+    ) -> Result<SigmatelGpio, Error> {
         if self.verb(Verb::short(address, group, SET_GPIO_CMOS, 0)?)? == u32::MAX {
             return Err(Error::RouteRejected);
         }
-        self.route_control(address, group, SET_GPIO_MASK, GET_GPIO_MASK, gpio.mask)?;
-        self.route_control(
-            address,
-            group,
-            SET_GPIO_DIRECTION,
-            GET_GPIO_DIRECTION,
-            gpio.direction,
-        )?;
+        let control = |owner: &mut Self, set, get, value| {
+            owner.verb(Verb::short(address, group, set, value)?)?;
+            let actual = owner.sigmatel_gpio_read(address, group, get, allowed)?;
+            // GPIO inputs can change between the preserving snapshot and GET.
+            // Verify the caller's owned bits, while rejecting failed/undeclared
+            // readback bits and reporting the actual observed complete value.
+            if (actual ^ value) & verify != 0 {
+                return Err(Error::RouteRejected);
+            }
+            Ok(actual)
+        };
+        let mask = control(self, SET_GPIO_MASK, GET_GPIO_MASK, gpio.mask)?;
+        let direction = control(self, SET_GPIO_DIRECTION, GET_GPIO_DIRECTION, gpio.direction)?;
         self.delay(1000);
-        self.route_control(address, group, SET_GPIO_DATA, GET_GPIO_DATA, gpio.data)
+        let data = control(self, SET_GPIO_DATA, GET_GPIO_DATA, gpio.data)?;
+        Ok(SigmatelGpio {
+            data,
+            mask,
+            direction,
+        })
     }
     fn sigmatel_startup_preflight(
         graph: &CodecGraph,
@@ -386,7 +398,17 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 gpio.mask |= idt73::EAPD;
                 gpio.direction |= idt73::EAPD;
             }
-            self.sigmatel_gpio_program(graph.address, group, gpio)?;
+            let gpio = self.sigmatel_gpio_program(
+                graph.address,
+                group,
+                gpio,
+                allowed,
+                if selected == SigmatelProfile::Idt92hd73xx {
+                    idt73::EAPD
+                } else {
+                    allowed
+                },
+            )?;
             if let Some(selector) = selector {
                 self.route_control(graph.address, selector, 0x701, 0xf01, 0)?;
             }
