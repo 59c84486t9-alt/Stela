@@ -78,17 +78,50 @@ impl RegisteredSystemRam {
         erg_bytes: u64,
         stripes: usize,
     ) -> Result<Self, RegistrationError> {
+        // SAFETY: forwarded unchanged reservation/all-writer contract.
+        unsafe { Self::register_inner(ranges, owner, erg_bytes, stripes, None) }
+    }
+
+    /// Register with a conservative common-worker target ceiling. A limit
+    /// cannot promote the actual BSP's admitted capabilities or enable DIT,
+    /// AVX state or another unknown native recipe. Every destination still
+    /// requires its own live target and exact-control proof before entry.
+    ///
+    /// # Safety
+    /// The complete reservation, mapping and all-writer contract of `register`
+    /// applies. A supplied limit is policy only, never execution authority.
+    pub unsafe fn register_with_target_limit<O: Send + Sync + 'static>(
+        ranges: &[ReservedSystemRamRange],
+        owner: Arc<O>,
+        erg_bytes: u64,
+        stripes: usize,
+        limit: TargetCpu,
+    ) -> Result<Self, RegistrationError> {
+        // SAFETY: forwarded unchanged reservation/all-writer contract.
+        unsafe { Self::register_inner(ranges, owner, erg_bytes, stripes, Some(limit)) }
+    }
+
+    unsafe fn register_inner<O: Send + Sync + 'static>(
+        ranges: &[ReservedSystemRamRange],
+        owner: Arc<O>,
+        erg_bytes: u64,
+        stripes: usize,
+        limit: Option<TargetCpu>,
+    ) -> Result<Self, RegistrationError> {
         validate(ranges)?;
         let authority =
             NativeSystemTarget::capture().map_err(|_| RegistrationError::NativeTarget)?;
+        let target = limit.map_or(authority.target(), |limit| {
+            crate::memory::domain::native_target::restrict(authority.target(), limit)
+        });
         let (regions, views, system) = unsafe { bindings(ranges, owner, erg_bytes, stripes) }?;
-        let domain = MemoryDomain::new_native_system_ram(Arc::clone(&system), views, &authority)
+        let domain = MemoryDomain::new_native_system_ram(Arc::clone(&system), views, &authority, target)
             .map_err(RegistrationError::Domain)?;
         Ok(Self {
             regions,
             domain,
             system,
-            target: authority.target(),
+            target,
             erg_bytes,
         })
     }

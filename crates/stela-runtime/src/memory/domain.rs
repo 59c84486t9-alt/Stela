@@ -31,6 +31,7 @@ pub(crate) mod m0_write;
 pub(crate) mod physical;
 mod read;
 mod shared;
+pub(in crate::memory) mod native_target;
 
 use crate::platform::sync::Mutex;
 use crate::system::events::{EventEndpoint, EventProducer};
@@ -380,7 +381,11 @@ impl MemoryDomain {
         system: Arc<MemorySystem>,
         views: Vec<(Arc<MemoryView>, MappingAttributes)>,
         authority: &crate::platform::cpu::system::NativeSystemTarget,
+        target: TargetCpu,
     ) -> Result<Arc<Self>, MemoryStatus> {
+        if target.data_independent_timing() || !authority.target().supports(target) {
+            return Err(MemoryStatus::Unsupported);
+        }
         authority
             .revalidate()
             .map_err(|_| MemoryStatus::Unsupported)?;
@@ -388,7 +393,7 @@ impl MemoryDomain {
             None,
             system,
             views,
-            authority.target(),
+            target,
             DomainRole::NativeSystemRam,
         )
     }

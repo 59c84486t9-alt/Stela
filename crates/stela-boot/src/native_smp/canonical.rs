@@ -37,6 +37,69 @@ pub(crate) unsafe fn reserve(
     handoff: &'static Handoff,
     ranges: &[host::RamRange],
 ) -> Result<Arc<RegisteredSystemRam>, &'static str> {
+    // SAFETY: forwarded unchanged loader ownership and closed-writer contract.
+    unsafe { reserve_with_limit(handoff, ranges, None) }
+}
+
+/// Production assignment adds a conservative ceiling from actual installed
+/// workers. Authored single-BSP diagnostics retain `reserve` without inventing
+/// AP executors or treating copied firmware observations as owned workers.
+///
+/// # Safety
+/// `reserve`'s complete reservation contract applies. `capture` is the validated
+/// assigned roster; the actual started executors remain parked and retained.
+pub(crate) unsafe fn reserve_for_workers(
+    handoff: &'static Handoff,
+    ranges: &[host::RamRange],
+    capture: &Capture,
+    executors: &Executors,
+) -> Result<Arc<RegisteredSystemRam>, &'static str> {
+    let cores = handoff.native_resources.cores as usize;
+    let count = capture.processor_count as usize;
+    if cores == 0 || cores > capture.core_count as usize
+        || cores > super::topology::MAX_CORES || count > super::topology::MAX_PROCESSORS
+        || executors.processors().len() + 1 != cores
+    {
+        return Err("canonical target has an invalid assigned physical roster");
+    }
+    let selected = |slot: usize| {
+        capture.processors[..count].get(capture.selected[slot] as usize)
+            .copied().ok_or("canonical target selected worker is absent")
+    };
+    // SAFETY: current installed BSP with IF clear, before any guest entry.
+    // The fresh observation is only a capability ceiling; registration below
+    // captures its own actual current-processor authority independently.
+    let bsp = unsafe { super::firmware::observe() }
+        .map_err(|_| "canonical target BSP observation refused")?;
+    if !bsp.matches(selected(0)?) {
+        return Err("canonical target BSP differs from assigned worker");
+    }
+    let five_level = matches!(handoff.placement, stela_runtime::machine::mmu::placement::Placement::FiveLevel);
+    bsp.qualify_native(five_level).map_err(|_| "canonical target BSP floor refused")?;
+    let mut observations = Vec::with_capacity(cores);
+    observations.push(&bsp);
+    for slot in 1..cores {
+        let expected = selected(slot)?;
+        let actual = executors.processors().iter().find(|processor| processor.slot() == slot)
+            .ok_or("canonical target assigned AP is absent")?;
+        let observed = actual.observation();
+        if actual.apic_id() != expected.apic_id || !observed.matches(expected) {
+            return Err("canonical target AP differs from assigned worker");
+        }
+        observed.qualify_native(five_level).map_err(|_| "canonical target AP floor refused")?;
+        observations.push(observed);
+    }
+    let limit = super::topology::common_native_target(&observations)
+        .map_err(|_| "canonical target assigned observations refused")?;
+    // SAFETY: same loader owner and closed writers, with a policy-only limit.
+    unsafe { reserve_with_limit(handoff, ranges, Some(limit)) }
+}
+
+unsafe fn reserve_with_limit(
+    handoff: &'static Handoff,
+    ranges: &[host::RamRange],
+    limit: Option<stela_compiler::TargetCpu>,
+) -> Result<Arc<RegisteredSystemRam>, &'static str> {
     let (cr0, cr3, cr4, flags): (u64, u64, u64, u64);
     let (low, high): (u32, u32);
     // SAFETY: the same cold CPL0 owner required by registration. Read only
@@ -98,12 +161,21 @@ pub(crate) unsafe fn reserve(
     // SAFETY: same exclusively reserved bytes and qualified WB aliases; retained
     // owner survives frames, source fetch/walk, copyout and stopped settlement.
     unsafe {
-        RegisteredSystemRam::register(
-            &registered,
-            owner,
-            stela_runtime::machine::cpu::RESERVATION_GRANULE,
-            64,
-        )
+        match limit {
+            Some(limit) => RegisteredSystemRam::register_with_target_limit(
+                &registered,
+                owner,
+                stela_runtime::machine::cpu::RESERVATION_GRANULE,
+                64,
+                limit,
+            ),
+            None => RegisteredSystemRam::register(
+                &registered,
+                owner,
+                stela_runtime::machine::cpu::RESERVATION_GRANULE,
+                64,
+            ),
+        }
     }
     .map(Arc::new)
     .map_err(|error| {

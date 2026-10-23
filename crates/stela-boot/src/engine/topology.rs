@@ -735,10 +735,15 @@ mod tests {
             };
             capture.selected[index] = index as u32;
             capture.snapshots[index] = native::Snapshot::default();
-            capture.snapshots[index].count = 1;
+            capture.snapshots[index].count = 2;
             capture.snapshots[index].records[0] = native::Cpuid {
                 leaf: 1,
                 ebx: (42 + index as u32 * 2) << 24,
+                ..Default::default()
+            };
+            capture.snapshots[index].records[1] = native::Cpuid {
+                leaf: 0,
+                eax: 1,
                 ..Default::default()
             };
         }

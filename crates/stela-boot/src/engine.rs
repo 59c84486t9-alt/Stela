@@ -1736,7 +1736,14 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // SAFETY: all raw guest input copies have ended; AP executors are parked,
     // and no guest/device DMA producer has entered. The same loader bytes are
     // retained for every subsequent native CPU and synchronous device writer.
-    let canonical_ram = unsafe { crate::native_smp::canonical::reserve(handoff, &worker_ram) }
+    let canonical_ram = unsafe {
+        crate::native_smp::canonical::reserve_for_workers(
+            handoff,
+            &worker_ram,
+            native_processors.expect("validated native roster"),
+            &executors,
+        )
+    }
         .unwrap_or_else(|error| output::fatal(error));
     if let Some(assigned) = &assigned {
         let candidate = assigned.tree.serialize();
