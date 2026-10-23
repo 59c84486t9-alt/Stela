@@ -765,3 +765,5 @@ mod f1a_tests;
 mod f03_tests;
 
 mod f30_tests;
+
+mod f3a_tests;

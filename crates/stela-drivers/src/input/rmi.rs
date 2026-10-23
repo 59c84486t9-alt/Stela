@@ -19,6 +19,8 @@ pub mod f1a;
 mod f1a_device;
 pub mod f30;
 mod f30_device;
+pub mod f3a;
+mod f3a_device;
 mod input_device;
 pub mod transport;
 use transport::{Transport, buffer};
@@ -199,6 +201,7 @@ pub enum FunctionReport {
     F12(f12::Frame),
     F1A(f1a::Frame),
     F30(f30::Frame),
+    F3A(f3a::Frame),
 }
 #[must_use = "inspect errors and all completed function reports"]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -225,6 +228,7 @@ pub struct Device<X, A, T> {
     f1a: Vec<f1a::Engine>,
     f03: Vec<f03::Engine>,
     f30: Vec<f30::Engine>,
+    f3a: Vec<f3a::Engine>,
 }
 impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
     pub fn new(
@@ -253,6 +257,7 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
             f1a: Vec::new(),
             f03: Vec::new(),
             f30: Vec::new(),
+            f3a: Vec::new(),
         })
     }
     pub fn control_state(&self) -> ControlState {
@@ -390,6 +395,7 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
         self.f1a.clear();
         self.f03.clear();
         self.f30.clear();
+        self.f3a.clear();
         self.state = ControlState::Configured;
         Ok(())
     }
@@ -500,6 +506,7 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
             || !self.f1a.is_empty()
             || !self.f03.is_empty()
             || !self.f30.is_empty()
+            || !self.f3a.is_empty()
         {
             return Err(Error::InputConsumerActive);
         }
