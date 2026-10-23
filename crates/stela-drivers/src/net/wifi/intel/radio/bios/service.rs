@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 pub enum Request {
     Glai,
     WideBandwidth,
+    ExternalClock,
     /// Intel DSM GUID f21202bf-8f78-4dc6-a5b3-1f738e285ade, revision 0,
     /// no fourth-argument payload, at the actual function's ACPI handle.
     Dsm(u8),
@@ -77,6 +78,7 @@ pub(crate) struct Session<B: BiosIo> {
     reads: Vec<Read>,
     locked: Option<bool>,
     cache: Option<Cache>,
+    external_clock: Option<lari::Observation>,
 }
 impl<B: BiosIo> Session<B> {
     pub(crate) fn new(io: B) -> Self {
@@ -85,10 +87,44 @@ impl<B: BiosIo> Session<B> {
             reads: Vec::new(),
             locked: None,
             cache: None,
+            external_clock: None,
         }
     }
     pub(crate) fn reads(&self) -> &[Read] {
         &self.reads
+    }
+    /// Actual source ECKV selection in this session's original namespace.
+    /// Missing services are incomplete observations, not an absent clock.
+    pub(crate) fn external_clock(&mut self) -> Result<lari::Observation, Error> {
+        if let Some(observation) = self.external_clock {
+            return Ok(observation);
+        }
+        let mut value = None;
+        if self.locked()?
+            && let Some(raw) = self.uefi(Variable::Eckv)?
+            && let Ok(scalar) = Scalar::parse(ScalarKind::ExternalClock, &raw)
+        {
+            value = Some(lari::Value {
+                value: scalar.value(),
+                source: lari::Source::Uefi,
+                revision: 0,
+            });
+        }
+        if value.is_none()
+            && let Some((0, raw)) = self
+                .acpi(Request::ExternalClock)?
+                .as_ref()
+                .and_then(wifi_value)
+        {
+            value = Some(lari::Value {
+                value: raw as u32,
+                source: lari::Source::Acpi,
+                revision: 0,
+            });
+        }
+        let observation = value.map_or(lari::Observation::Unavailable, lari::Observation::Observed);
+        self.external_clock = Some(observation);
+        Ok(observation)
     }
     fn acpi(&mut self, request: Request) -> Result<Option<Object>, Error> {
         let result = self.io.evaluate(request);
@@ -284,6 +320,7 @@ mod tests {
         fn evaluate(&mut self, request: Request) -> Result<Object, IoError> {
             let s = self.scenario;
             Ok(match request {
+                Request::ExternalClock => panic!("ECKV is outside the historical LARI model"),
                 Request::Glai => {
                     let mode = s % 8;
                     if mode == 0 {
@@ -377,6 +414,7 @@ mod tests {
             .map(|read| match read {
                 Read::Acpi(Request::Glai, _) => 1,
                 Read::Acpi(Request::WideBandwidth, _) => 2,
+                Read::Acpi(Request::ExternalClock, _) => panic!("unexpected historical ECKV read"),
                 Read::Acpi(Request::Dsm(index), _) => 10 + u64::from(*index),
                 Read::Uefi(Variable::GeneralConfiguration, _) => 3,
                 Read::Uefi(Variable::Wbem, _) => 4,
@@ -553,5 +591,84 @@ mod tests {
         }
         assert_eq!(rows, 65536);
         assert_eq!(current, Some(4095));
+    }
+    struct ClockModel(u8);
+    // SAFETY: exact raw modeled ECKV namespaces; no native platform authority.
+    unsafe impl BiosIo for ClockModel {
+        fn evaluate(&mut self, request: Request) -> Result<Object, IoError> {
+            match request {
+                Request::Glai => Ok(package(0, u64::from(self.0 != 4), 7)),
+                Request::ExternalClock if self.0 == 5 => Err(IoError::Unavailable),
+                Request::ExternalClock if self.0 == 6 => Err(IoError::NotFound),
+                Request::ExternalClock => {
+                    Ok(package(if self.0 == 7 { 1 } else { 0 }, 0x1_0000_0001, 7))
+                }
+                _ => panic!("unrequested clock source"),
+            }
+        }
+        fn variable(&mut self, variable: Variable) -> Result<Vec<u8>, IoError> {
+            assert_eq!(variable, Variable::Eckv);
+            match self.0 {
+                0 => Ok(vec![0, 2, 0, 0, 0]),
+                1 => Ok(vec![99, 2, 0, 0, 0]),
+                2 => Err(IoError::Unavailable),
+                3 => Err(IoError::BoundExceeded),
+                _ => Err(IoError::NotFound),
+            }
+        }
+    }
+    #[test]
+    fn clock_selection_requires_actual_source_and_preserves_fallback_and_truncation() {
+        for scenario in 0..8 {
+            let mut session = Session::new(ClockModel(scenario));
+            let result = session.external_clock();
+            if scenario == 2 || scenario == 3 {
+                assert_eq!(
+                    result,
+                    Err(Error::IncompleteUefi(
+                        Variable::Eckv,
+                        if scenario == 2 {
+                            IoError::Unavailable
+                        } else {
+                            IoError::BoundExceeded
+                        }
+                    ))
+                );
+                assert_eq!(session.reads().len(), 2);
+            } else if scenario == 5 {
+                assert_eq!(
+                    result,
+                    Err(Error::IncompleteAcpi(
+                        Request::ExternalClock,
+                        IoError::Unavailable
+                    ))
+                );
+            } else {
+                let expected = match scenario {
+                    0 => lari::Observation::Observed(lari::Value {
+                        value: 2,
+                        source: lari::Source::Uefi,
+                        revision: 0,
+                    }),
+                    6 | 7 => lari::Observation::Unavailable,
+                    _ => lari::Observation::Observed(lari::Value {
+                        value: 1,
+                        source: lari::Source::Acpi,
+                        revision: 0,
+                    }),
+                };
+                assert_eq!(result, Ok(expected));
+                let count = session.reads().len();
+                assert_eq!(session.external_clock(), Ok(expected));
+                assert_eq!(session.reads().len(), count);
+                assert_eq!(count, if scenario == 0 || scenario == 4 { 2 } else { 3 });
+                if scenario == 4 {
+                    assert!(matches!(
+                        session.reads()[1],
+                        Read::Acpi(Request::ExternalClock, _)
+                    ));
+                }
+            }
+        }
     }
 }

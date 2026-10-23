@@ -29,7 +29,7 @@ pub enum LariError {
 /// Neither public pure observations nor a caller-built plan can enter this path.
 pub struct LariRadio<'a, Q: BootIo, B: BiosIo> {
     pub(super) radio: ColdRadio<'a, Q>,
-    bios: ManuallyDrop<Session<B>>,
+    pub(super) bios: ManuallyDrop<Session<B>>,
     phase: LariPhase,
     inputs: lari::Inputs,
     plan: Option<lari::Plan>,
