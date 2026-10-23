@@ -10,7 +10,7 @@ use crate::bus::{
         memory::{CacheAttribute, CpuMapping, PageBacking, PinnedPages},
         pages::DmaPages,
     },
-    pci::{Address, owned::tests::fixture},
+    pci::Address,
 };
 use alloc::{
     alloc::{alloc_zeroed, dealloc},
@@ -25,7 +25,10 @@ use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use std::sync::Mutex;
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::Mutex,
+};
 
 struct Ram {
     pointer: NonNull<u8>,
@@ -93,6 +96,7 @@ impl PageSource for Pages {
 #[derive(Default)]
 struct Domain {
     maps: Mutex<BTreeMap<u64, CpuMapping>>,
+    config: Mutex<Option<Arc<NativePm>>>,
     next: AtomicUsize,
     visibility: Mutex<Vec<(bool, u64, Range<usize>)>>,
     drain_count: AtomicUsize,
@@ -109,6 +113,17 @@ struct Domain {
     incoherent: AtomicBool,
 }
 impl Domain {
+    fn require_bus_master_disabled(&self) {
+        // Retain the very same backing installed beneath OwnedConfig. This is
+        // a device-side observation of the actual native Command word, never a
+        // caller-supplied quiescence flag or a second configuration writer.
+        let config = self.config.lock().unwrap().as_ref().unwrap().clone();
+        assert_eq!(
+            config.command() & 4,
+            0,
+            "PCI bus mastering must be disabled before DMA drain or unmap"
+        );
+    }
     fn raw(&self, address: u64, bytes: usize) -> NonNull<u8> {
         let maps = self.maps.lock().unwrap();
         for (&base, mapping) in maps.iter() {
@@ -199,6 +214,7 @@ unsafe impl DmaDomain for Domain {
         if self.fail_unmap.load(Ordering::Relaxed) {
             return Err(DmaError::InvalidationFailed);
         }
+        self.require_bus_master_disabled();
         assert!(self.drain_count.load(Ordering::Relaxed) > 0);
         assert_eq!(self.engines.load(Ordering::Relaxed), 0);
         assert_eq!(self.pending_dma.load(Ordering::Relaxed), 0);
@@ -265,6 +281,7 @@ unsafe impl DmaDomain for Domain {
             0,
             "drain while engines can still issue DMA"
         );
+        self.require_bus_master_disabled();
         // Pending device writebacks complete at the real modeled drain boundary.
         self.complete_posted();
         self.pending_dma.store(0, Ordering::Relaxed);
@@ -630,11 +647,11 @@ fn setup(device: u16) -> Fixture {
         device: 0,
         function: 0,
     };
-    let (mut config, _) = fixture(addr);
-    config.write32(0, (u32::from(device) << 16) | 0x1d6a);
-    config.write32(8, 0x02000000);
+    let (function, config) = native_config(addr, device);
+    *domain.config.lock().unwrap() = Some(config.clone());
+    *peer.native_pm.borrow_mut() = Some(config);
     let owner = Aqtion {
-        function: Some(Function::new(addr, config).unwrap()),
+        function: Some(function),
         hardware: Some(hardware(&peer)),
         domain: Some(domain.clone()),
         memory: Some(Memory::new(&pages, domain.clone()).unwrap()),
@@ -815,9 +832,10 @@ fn ordinary_suspend_stops_dma_before_d3_and_retains_the_resumable_epoch() {
     assert_eq!(dropped.load(Ordering::Relaxed), 4);
 }
 
-// A native OwnedConfig fixture with a synchronous mapping callback. The callback
-// observes actual volatile PMCSR stores before the next native access. It models
-// refused D0 and a D3 write whose readback disappears, without changing PCI APIs.
+// Native OwnedConfig storage shared with the device/DMA peer. Command checks
+// sample the actual volatile word. Verification hold: check_context runs for
+// mapping operations, not individual OwnedConfig register accesses, so the PM
+// fault modes below do not yet provide deterministic D0/D3 fault injection.
 #[repr(align(4096))]
 struct ConfigPage([u8; 4096]);
 struct NativePm {
@@ -833,6 +851,11 @@ impl NativePm {
     fn pointer(&self) -> NonNull<u8> {
         unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.page.get()).0).cast()) }
     }
+    fn command(&self) -> u16 {
+        // SAFETY: stable aligned native configuration RAM retained by this
+        // model owner; serialized observation, with no write or access callback.
+        unsafe { self.pointer().as_ptr().add(4).cast::<u16>().read_volatile() }
+    }
 }
 struct ConfigResource(owned::PhysicalSpan);
 // SAFETY: symbolic test ECAM span, backed only by the retained fixture RAM.
@@ -845,7 +868,7 @@ unsafe impl owned::ResourceBacking for ConfigResource {
     }
 }
 // SAFETY: isolated registry, stable aligned native RAM, no physical device.
-// check_context is also the fixture's serialized hardware-response callback.
+// check_context is a mapping-context callback, not a register-access callback.
 unsafe impl owned::MappingPlatform for NativePm {
     fn check_context(&self, _: owned::AddressSpace) -> core::result::Result<(), owned::Error> {
         let pm = unsafe { self.pointer().as_ptr().add(0x44).cast::<u16>() };
@@ -892,13 +915,12 @@ unsafe impl owned::MappingPlatform for NativePm {
         Ok(())
     }
 }
-fn native_power(net: &mut Aqtion<Rc<Peer>, Rc<Peer>>, peer: &Peer) -> Arc<NativePm> {
+fn native_config(address: Address, device: u16) -> (Function<OwnedConfig>, Arc<NativePm>) {
     let model = Arc::new(NativePm {
         page: Box::new(UnsafeCell::new(ConfigPage([0; 4096]))),
         mode: AtomicUsize::new(0),
         actual_state: AtomicUsize::new(0),
     });
-    let address = net.function.as_ref().unwrap().address;
     let span = owned::PhysicalSpan::new(0x8010_0000, 4096).unwrap();
     let space = owned::AddressSpace {
         identity: 197,
@@ -926,21 +948,19 @@ fn native_power(net: &mut Aqtion<Rc<Peer>, Rc<Peer>>, peer: &Peer) -> Arc<Native
         Ok(config) => config,
         Err((error, _)) => panic!("native PM fixture: {error:?}"),
     };
-    config.write32(0, (u32::from(net.profile.device) << 16) | 0x1d6a);
+    config.write32(0, (u32::from(device) << 16) | 0x1d6a);
     config.write32(8, 0x02000000);
     config.write16(6, 1 << 4);
     config.write8(0x34, 0x40);
     config.write16(0x40, 1);
     config.write16(0x44, 0);
-    net.function = Some(Function::new(address, config).unwrap());
-    *peer.native_pm.borrow_mut() = Some(model.clone());
-    model
+    (Function::new(address, config).unwrap(), model)
 }
 
 #[test]
 fn native_failed_d0_resume_is_retryable_and_never_uses_powered_off_mmio() {
     let (mut net, peer, domain, _) = setup(0x07b1);
-    let pm = native_power(&mut net, &peer);
+    let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
     net.start().unwrap();
     net.suspend().unwrap();
     let writes = peer.writes.borrow().len();
@@ -971,7 +991,7 @@ fn native_failed_d0_resume_is_retryable_and_never_uses_powered_off_mmio() {
 fn native_d3_readback_loss_keeps_drained_retirement_and_d0_retry_safe() {
     for retire in [false, true] {
         let (mut net, peer, domain, dropped) = setup(0x04c0);
-        let pm = native_power(&mut net, &peer);
+        let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
         net.start().unwrap();
         pm.mode.store(2, Ordering::Relaxed);
         assert_eq!(net.suspend(), Err(Error::Removed));
@@ -1005,7 +1025,7 @@ fn native_d3_readback_loss_keeps_drained_retirement_and_d0_retry_safe() {
 #[test]
 fn initial_native_d0_failure_retains_uninitialized_owner_without_mmio() {
     let (mut net, peer, _, dropped) = setup(0x07b1);
-    let pm = native_power(&mut net, &peer);
+    let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
     // Model attach before Memory allocation, using its actual power helper.
     net.memory = None;
     net.state = State::Faulted;
@@ -1234,6 +1254,83 @@ fn delayed_firmware_ack_is_required_before_link_shutdown_finishes() {
         net.retire().unwrap();
     }
 }
+fn assert_bus_master_rejection(body: impl FnOnce()) {
+    let rejection = catch_unwind(AssertUnwindSafe(body))
+        .expect_err("model accepted DMA teardown with PCI bus mastering enabled");
+    let message = rejection
+        .downcast::<std::string::String>()
+        .expect("expected the model's BusMaster assertion");
+    assert!(message.contains("PCI bus mastering must be disabled before DMA drain or unmap"));
+}
+#[test]
+fn model_rejects_dma_drain_before_native_bus_master_clear_and_retains_pending_writes() {
+    for device in [0x07b1, 0x04c0] {
+        let (mut net, peer, domain, dropped) = setup(device);
+        net.start().unwrap();
+        domain.defer_writebacks.store(true, Ordering::Relaxed);
+        peer.receive(&[19; 60], 0, 3, 60);
+        net.hw().stop_queues().unwrap();
+        assert_eq!(domain.engines.load(Ordering::Relaxed), 0);
+        let mappings = domain.maps.lock().unwrap().len();
+        let pending = domain.pending_dma.load(Ordering::Relaxed);
+        let posted = domain.posted.lock().unwrap().clone();
+        assert_eq!(mappings, 4);
+        assert!(pending > 0);
+        assert!(!posted.is_empty());
+        assert_ne!(peer.native_pm.borrow().as_ref().unwrap().command() & 4, 0);
+
+        // Wrong order: queue shutdown alone must not admit the drain. Catch
+        // rejection so this control also proves all DMA evidence is retained.
+        assert_bus_master_rejection(|| unsafe { domain.drain_posted_writes().unwrap() });
+        assert_eq!(domain.drain_count.load(Ordering::Relaxed), 0);
+        assert_eq!(domain.drained_epoch.load(Ordering::Relaxed), 0);
+        assert_eq!(domain.pending_dma.load(Ordering::Relaxed), pending);
+        assert_eq!(*domain.posted.lock().unwrap(), posted);
+        assert_eq!(domain.maps.lock().unwrap().len(), mappings);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+        // The real production path now clears and reads back Command before
+        // entering this same peer drain. No test flag certifies quiescence.
+        net.retire().unwrap();
+        assert_eq!(peer.native_pm.borrow().as_ref().unwrap().command() & 4, 0);
+        assert_eq!(domain.drained_epoch.load(Ordering::Relaxed), 1);
+        assert_eq!(domain.pending_dma.load(Ordering::Relaxed), 0);
+        assert!(domain.posted.lock().unwrap().is_empty());
+        assert!(domain.maps.lock().unwrap().is_empty());
+        assert_eq!(dropped.load(Ordering::Relaxed), 4);
+    }
+}
+#[test]
+fn model_rejects_unmap_after_native_bus_master_reenable_and_retains_dma() {
+    for device in [0x07b1, 0x04c0] {
+        let (mut net, _, domain, dropped) = setup(device);
+        net.start().unwrap();
+        net.stop().unwrap();
+        assert_eq!(domain.drained_epoch.load(Ordering::Relaxed), 1);
+        let mappings = domain.maps.lock().unwrap().len();
+        assert_eq!(mappings, 4);
+        let config = net.function.as_mut().unwrap().config();
+        let command = config.read16(4);
+        config.write16(4, command | 4);
+        assert_ne!(config.read16(4) & 4, 0);
+
+        // Deliberately violate the stopped owner's configuration invariant,
+        // then try to reclaim through the real Memory/DmaMapping unmap path.
+        assert_bus_master_rejection(|| net.memory.as_mut().unwrap().retire().unwrap());
+        assert!(net.memory.is_some());
+        assert_eq!(domain.maps.lock().unwrap().len(), mappings);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(domain.drain_count.load(Ordering::Relaxed), 1);
+
+        // Force production stop to establish its boundary again rather than
+        // relying on the Stopped state deliberately invalidated above.
+        net.state = State::Faulted;
+        net.retire().unwrap();
+        assert_eq!(domain.drain_count.load(Ordering::Relaxed), 2);
+        assert!(domain.maps.lock().unwrap().is_empty());
+        assert_eq!(dropped.load(Ordering::Relaxed), 4);
+    }
+}
 #[test]
 #[should_panic(expected = "historical drain cannot release a newer engine epoch")]
 fn model_rejects_historical_drain_after_a_new_engine_epoch() {
@@ -1242,7 +1339,12 @@ fn model_rejects_historical_drain_after_a_new_engine_epoch() {
     net.stop().unwrap();
     net.start().unwrap();
     net.hw().stop_queues().unwrap();
-    // Deliberately omit this epoch's domain drain, bypassing the owner.
+    // Satisfy the independent PCI boundary, but deliberately omit this epoch's
+    // domain drain. The historical-drain control must reach that exact check.
+    let config = net.function.as_mut().unwrap().config();
+    let command = config.read16(4);
+    config.write16(4, command & !4);
+    assert_eq!(config.read16(4) & 4, 0);
     net.memory.as_mut().unwrap().retire().unwrap();
 }
 fn omit_visibility_before_tx(payload: bool) {
@@ -1316,7 +1418,7 @@ fn firmware4_first_lock_timeout_does_not_release_another_owner() {
 #[test]
 fn native_refused_d3_requires_fresh_d0_acknowledgement_before_restart() {
     let (mut net, peer, _, _) = setup(0x07b1);
-    let pm = native_power(&mut net, &peer);
+    let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
     net.start().unwrap();
     pm.mode.store(3, Ordering::Relaxed);
     assert_eq!(
