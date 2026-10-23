@@ -51,16 +51,16 @@ pub(super) fn runnable(state: &State, thread: &Thread) -> bool {
         if wait.phase.get() == Phase::Waiting {
             return false;
         }
-        if let Some((queue, _)) = wait.released {
-            if state.queues[queue].lock.is_some_and(|id| id != thread.id) {
-                return false;
-            }
-        }
-    }
-    if let Some(queue) = thread.mutex.get() {
-        if state.queues[queue].lock.is_some_and(|id| id != thread.id) {
+        if let Some((queue, _)) = wait.released
+            && state.queues[queue].lock.is_some_and(|id| id != thread.id)
+        {
             return false;
         }
+    }
+    if let Some(queue) = thread.mutex.get()
+        && state.queues[queue].lock.is_some_and(|id| id != thread.id)
+    {
+        return false;
     }
     true
 }

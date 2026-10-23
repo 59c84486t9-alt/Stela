@@ -299,10 +299,10 @@ impl scheduler::Callback for Worker {
         if !trace.is_initialized() {
             return Completion::Busy { deadline: None };
         }
-        if !trace.dispatch_pending() {
-            if let Err(e) = trace.begin_dispatch() {
-                return Completion::Refused(trace_error(e));
-            }
+        if !trace.dispatch_pending()
+            && let Err(e) = trace.begin_dispatch()
+        {
+            return Completion::Refused(trace_error(e));
         }
         match trace.advance_dispatch(a) {
             Ok(trace::Progress::Dispatched { consumed, .. }) => done(u32::from(consumed)),

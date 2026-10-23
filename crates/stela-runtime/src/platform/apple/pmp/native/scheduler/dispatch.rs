@@ -55,10 +55,10 @@ impl Runtime {
             }
         };
         for queue in &s.queues {
-            if let Some(id) = queue.active {
-                if let Some(frame) = s.works[id].target.frame.as_ref() {
-                    add(frame);
-                }
+            if let Some(id) = queue.active
+                && let Some(frame) = s.works[id].target.frame.as_ref()
+            {
+                add(frame);
             }
         }
         for immediate in &s.immediate {

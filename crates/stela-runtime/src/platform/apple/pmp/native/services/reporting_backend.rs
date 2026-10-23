@@ -360,15 +360,14 @@ impl scheduler::Callback for Input {
         ) {
             Completion::Retired { refusal, .. } => {
                 self.raw = None;
-                if reporting::wire::kind(raw) == 0 {
-                    if let Err(e) = runtime(&self.shared.runtime)
+                if reporting::wire::kind(raw) == 0
+                    && let Err(e) = runtime(&self.shared.runtime)
                         .and_then(|r| r.notify(&self.shared.buffer_key).map_err(schedule_error))
-                    {
-                        return Completion::Retired {
-                            value: 0,
-                            refusal: Some(e),
-                        };
-                    }
+                {
+                    return Completion::Retired {
+                        value: 0,
+                        refusal: Some(e),
+                    };
                 }
                 Completion::Retired { value: 0, refusal }
             }

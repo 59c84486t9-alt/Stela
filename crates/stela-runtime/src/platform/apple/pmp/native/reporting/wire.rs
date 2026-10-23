@@ -51,7 +51,7 @@ pub fn buffer(payload: u64) -> Result<Buffer, &'static str> {
 pub fn advertisement(buffer: Buffer) -> Result<u64, &'static str> {
     let shift = if buffer.bytes < 1 << 20 { 12 } else { 20 };
     let granule = 1u64 << shift;
-    let units = buffer.bytes / granule + u64::from(buffer.bytes % granule != 0);
+    let units = buffer.bytes / granule + u64::from(!buffer.bytes.is_multiple_of(granule));
     if units > 255 {
         return Err("IOReporting buffer exceeds its source size field");
     }

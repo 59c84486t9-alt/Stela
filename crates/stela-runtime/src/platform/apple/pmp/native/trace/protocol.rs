@@ -34,7 +34,7 @@ pub(super) fn encode_body(event: u32, thread: u32, args: [u64; 4]) -> [u8; 24] {
     let mut body = [0; 24];
     body[..4].copy_from_slice(&event.to_le_bytes());
     body[4..8].copy_from_slice(&thread.to_le_bytes());
-    for (out, arg) in body[8..].chunks_exact_mut(4).zip(args) {
+    for (out, arg) in body[8..].as_chunks_mut::<4>().0.iter_mut().zip(args) {
         out.copy_from_slice(&(arg as u32).to_le_bytes());
     }
     body
