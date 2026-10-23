@@ -140,7 +140,7 @@ mod tests {
                 compare(form.value | !group.mask);
                 let mut free = !group.mask;
                 while free != 0 {
-                    let bit = free & free.wrapping_neg();
+                    let bit = free.isolate_lowest_one();
                     compare(form.value | bit);
                     free &= free - 1;
                 }
