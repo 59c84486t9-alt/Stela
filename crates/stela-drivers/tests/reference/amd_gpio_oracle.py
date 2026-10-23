@@ -11,6 +11,7 @@ latter. Those differences are explicit, not hidden by trace equivalence.
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,13 @@ import shutil
 import signal
 import subprocess
 import time
+
+
+# Share the waitid ABI adapter between the two driver oracle runners.
+_WAIT_PATH = Path(__file__).resolve().with_name("child_wait.py")
+_WAIT_SPEC = importlib.util.spec_from_file_location("stela_oracle_child_wait", _WAIT_PATH)
+child_wait = importlib.util.module_from_spec(_WAIT_SPEC)
+_WAIT_SPEC.loader.exec_module(child_wait)
 
 PIN = "a804c5742bff224d4cb4d25dd383554d598be32b"
 DONORS = {'drivers/pinctrl/pinctrl-amd.c': 'b1c35108f7b322ca1f7dbef6dce3de4f4ea4e359a44e2776b70016c96af16848', 'drivers/pinctrl/pinctrl-amd.h': '0c41dad9fc3c43efc67ee97a76cbb56fd268c96f5fad3d7793186d2ca6f6a7f8'}
@@ -38,6 +46,7 @@ class Evidence:
         self.root.mkdir(parents=True, exist_ok=False)
         self.environment = dict(os.environ)
         self.cancellation = None
+        self.waiter = child_wait.ChildWaiter()
         self.environment.update(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0", LC_ALL="C")
         self.record = {
             "schema": 1,
@@ -45,6 +54,8 @@ class Evidence:
             "status": "running",
             "started_utc": datetime.now(timezone.utc).isoformat(),
             "harness_sha256": digest(Path(__file__)),
+            "child_wait_sha256": digest(_WAIT_PATH),
+            "wait_backend": self.waiter.backend,
             "commands": [],
             # Selected effective settings, deliberately not a full environment.
             "environment": {key: self.environment.get(key) for key in (
@@ -63,8 +74,6 @@ class Evidence:
 
     def command(self, name, arguments, timeout):
         self.check_cancelled()
-        if not all(hasattr(os, name) for name in ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT")):
-            raise RuntimeError("reference runner requires POSIX waitid/WNOWAIT process ownership")
         if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
             raise RuntimeError("reference runner requires exclusive child-reaping ownership")
         item = {"name": name, "argv": arguments, "timeout_seconds": timeout}
@@ -77,6 +86,7 @@ class Evidence:
         with stdout.open("xb") as out, stderr.open("xb") as err:
             process = subprocess.Popen(arguments, stdout=out, stderr=err,
                                        env=self.environment, start_new_session=True)
+            group_cleaned = False
             try:
                 deadline = time.monotonic() + timeout
                 while True:
@@ -85,9 +95,7 @@ class Evidence:
                     # before a wait can reap it. No asynchronous exception can
                     # orphan a half-created child or signal a retired PGID.
                     self.check_cancelled()
-                    finished = os.waitid(os.P_PID, process.pid,
-                                         os.WEXITED | os.WNOHANG | os.WNOWAIT)
-                    if finished is not None:
+                    if self.waiter.exited_unreaped(process.pid):
                         # Keep the original leader unreaped until all members
                         # are signaled. Even a leader that exited during a
                         # cancellation cannot orphan descendants or allow its
@@ -96,6 +104,7 @@ class Evidence:
                             os.killpg(process.pid, signal.SIGKILL)
                         except ProcessLookupError:
                             pass
+                        group_cleaned = True
                         item["group_cleanup"] = "before original leader reap"
                         item["returncode"] = process.wait()
                         break
@@ -106,7 +115,13 @@ class Evidence:
             except BaseException as error:
                 item["timed_out"] = isinstance(error, subprocess.TimeoutExpired)
                 item["interruption"] = type(error).__name__
-                if process.returncode is None:
+                if isinstance(error, ChildProcessError):
+                    # An external reaper invalidates the PID/group lease.
+                    # Never signal that now-unowned numeric group ID or
+                    # manufacture an exit status by asking Popen to wait.
+                    item["leader_ownership"] = "lost; refused group signal"
+                    raise
+                if not group_cleaned and process.returncode is None:
                     try:
                         os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:
