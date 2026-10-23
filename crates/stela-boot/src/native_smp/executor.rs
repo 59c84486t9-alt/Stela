@@ -374,6 +374,14 @@ pub(crate) unsafe fn start(
             )
         }
         .map_err(StartupFailure::Bootstrap)?;
+        // Only the BSP writes the shared boot log. Persist the last completed
+        // preparation before any real INIT/SIPI can fault or reset the machine;
+        // a buffered ATTEMPT alone does not localize an early hardware stop.
+        crate::output::arguments(format_args!(
+            "NATIVE PREPARED slot={slot} apic={destination:#x} vector={vector:#x} root={:#x}\n",
+            handoff.root,
+        ));
+        crate::output::flush_log();
         // SAFETY: validated physical AP and pinned complete startup resources.
         unsafe { sender.startup(destination, vector, handoff.tsc_hz) }
             .map_err(StartupFailure::Delivery)?;
@@ -397,7 +405,27 @@ pub(crate) unsafe fn start(
                 _ => core::hint::spin_loop(),
             }
         }
-        processors.push(Processor { slot, argument });
+        let processor = Processor { slot, argument };
+        let installed = processor.observation();
+        let descriptors = processor.descriptors();
+        // This is the actual Acquire READY publication after high entry,
+        // private Host/context qualification and retained observations. Flush
+        // before the next slot can reuse the low page; no new success flag or
+        // runtime stopped-worker authority is inferred from the log record.
+        crate::output::arguments(format_args!(
+            "NATIVE READY slot={slot} apic={destination:#x} cr3={:#x} cr0={:#x} cr4={:#x} efer={:#x} pat={:#x} rsp={:#x} gdt={:#x} idt={:#x} gs={:#x}\n",
+            installed.cr3,
+            installed.cr0,
+            installed.cr4,
+            installed.efer,
+            installed.pat,
+            descriptors.rsp,
+            descriptors.gdt,
+            descriptors.idt,
+            descriptors.gs,
+        ));
+        crate::output::flush_log();
+        processors.push(processor);
     }
     Ok(Executors { processors })
 }
