@@ -150,7 +150,8 @@ impl Device {
             ));
         }
         if recipient == 2
-            && ((kind == 0 && index > 255) || !self.pipes.contains_key(&(index as u8)))
+            && ((kind == 0 && index > 255)
+                || (!matches!(index as u8, 0 | 0x80) && !self.pipes.contains_key(&(index as u8))))
         {
             return Err(BlockError::Unsupported(
                 "control request names inactive USB endpoint",
@@ -356,6 +357,64 @@ mod tests {
         );
         assert!(owner.submit(0x81, 1, 16, &[]).is_err());
         assert!(owner.submit(2, 0, 2, &[1]).is_err());
+    }
+
+    #[test]
+    fn endpoint_status_reaches_native_ep0_before_and_after_configuration() {
+        let mut memory = vec![0u64; 512 * 1024];
+        let start = memory.as_mut_ptr() as u64;
+        // SAFETY: exclusive fixture RAM outlives every controller transfer.
+        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let (mut owner, model) = owner(&mut dma);
+        for configured in [false, true] {
+            if configured {
+                owner.configure(19, &mut dma).unwrap();
+            }
+            // USB 2.0 9.3.4 ignores the direction bit for a control endpoint.
+            // EP0 exists in Address state without a configured data pipe.
+            for endpoint in [0, 0x80] {
+                let request = xhci::setup(0x82, 0, 0, endpoint, 2);
+                model
+                    .borrow_mut()
+                    .control_replies
+                    .push_back((request, vec![0, 0]));
+                let before = model.borrow().setup.len();
+                assert_eq!(owner.control(request, &[]).unwrap(), vec![0, 0]);
+                let hardware = model.borrow();
+                assert_eq!(hardware.setup.len(), before + 1);
+                assert_eq!(hardware.setup[before], (request, vec![0, 0]));
+                assert!(hardware.control_replies.is_empty());
+            }
+            let before = model.borrow().setup.len();
+            for endpoint in [0x10, 0x70, 0x90, 0x100, 0x180, 0x83] {
+                assert!(
+                    owner
+                        .control(xhci::setup(0x82, 0, 0, endpoint, 2), &[])
+                        .is_err()
+                );
+            }
+            if !configured {
+                assert!(
+                    owner
+                        .control(xhci::setup(0x82, 0, 0, 0x81, 2), &[])
+                        .is_err()
+                );
+            }
+            // Admitting EP0 must not open raw standard state changes.
+            assert!(
+                owner
+                    .control(xhci::setup(2, xhci::CLEAR_FEATURE, 0, 0, 0), &[])
+                    .is_err()
+            );
+            assert_eq!(model.borrow().setup.len(), before);
+        }
+        let request = xhci::setup(0x82, 0, 0, 0x81, 2);
+        model
+            .borrow_mut()
+            .control_replies
+            .push_back((request, vec![1, 0]));
+        assert_eq!(owner.control(request, &[]).unwrap(), vec![1, 0]);
+        assert!(model.borrow().control_replies.is_empty());
     }
     #[test]
     fn single_alternate_stall_uses_real_endpoint_clear_requests() {

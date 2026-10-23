@@ -455,7 +455,7 @@ impl CancelModel {
                         core::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer as *mut u8, received);
                     }
                 }
-                if request[0] == 0xa1 && !self.control_replies.is_empty() {
+                if matches!(request[0], 0xa1 | 0x82) && !self.control_replies.is_empty() {
                     let (expected, reply) = self.control_replies.pop_front().unwrap();
                     assert_eq!(request, expected);
                     received = reply.len();
