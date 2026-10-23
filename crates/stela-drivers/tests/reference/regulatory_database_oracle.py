@@ -41,6 +41,16 @@ def main():
     source = (Path(sys.argv[2]) / "net/wireless/reg.c").read_bytes()
     if hashlib.sha256(source).hexdigest() != SOURCE_SHA:
         raise RuntimeError("pinned reg.c hash mismatch")
+    header = (Path(sys.argv[2]) / "include/net/regulatory.h").read_bytes()
+    header_sha = "f79e798657c7c688d851fa96d1fb65d8970ee6f866692f411c317f1d6b2ec179"
+    if hashlib.sha256(header).hexdigest() != header_sha:
+        raise RuntimeError("pinned regulatory.h hash mismatch")
+    def layout(name):
+        text = header.decode()
+        start = text.index("struct " + name + " {")
+        return text[start:text.index("};", start) + 2]
+    target_layouts = [layout(name) for name in ["ieee80211_freq_range", "ieee80211_power_rule",
+        "ieee80211_wmm_ac", "ieee80211_wmm_rule", "ieee80211_reg_rule", "ieee80211_regdomain"]]
     text = source.decode()
     layouts = text[text.index("struct fwdb_country {"):text.index("static int ecw2cw(")]
     signatures = ["static int ecw2cw(", "static bool valid_wmm(", "static bool valid_rule(",
@@ -56,7 +66,7 @@ def main():
 #include <stdio.h>
 #include <string.h>
 #include <arpa/inet.h>
-typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32;
+typedef uint8_t u8; typedef int8_t s8; typedef uint16_t u16; typedef uint32_t u32;
 typedef uint16_t __be16; typedef uint32_t __be32;
 #define __packed __attribute__((packed))
 #define __aligned(n) __attribute__((aligned(n)))
@@ -82,13 +92,9 @@ typedef uint16_t __be16; typedef uint32_t __be32;
 #define NL80211_RRF_NO_320MHZ BIT(18)
 #define pr_err(...) fprintf(stderr,__VA_ARGS__)
 #define kzalloc_flex(t,m,n) calloc(1,sizeof(t)+sizeof((t).m[0])*(n))
-struct ieee80211_freq_range {u32 start_freq_khz,end_freq_khz,max_bandwidth_khz;};
-struct power_rule {u32 max_antenna_gain,max_eirp;};
-struct wmm_ac {u16 cw_min,cw_max;u8 aifsn;u32 cot;};
-struct ieee80211_wmm_rule {struct wmm_ac client[4],ap[4];};
-struct ieee80211_reg_rule {struct ieee80211_freq_range freq_range;struct power_rule power_rule;
- u32 flags,dfs_cac_ms;bool has_wmm;struct ieee80211_wmm_rule wmm_rule;};
-struct ieee80211_regdomain {u32 n_reg_rules;char alpha2[2];u8 dfs_region;struct ieee80211_reg_rule reg_rules[];};
+struct rcu_head {void *next;void *func;};
+enum nl80211_dfs_regions {NL80211_DFS_UNSET,NL80211_DFS_FCC,NL80211_DFS_ETSI,NL80211_DFS_JP};
+''' + "\n".join(target_layouts) + r'''
 static bool regdb_has_valid_signature(const u8 *data,unsigned size){(void)data;(void)size;return true;}
 static int reg_schedule_apply(struct ieee80211_regdomain *rd);
 static void out(u32 v){u8 b[]={v,v>>8,v>>16,v>>24};if(fwrite(b,1,4,stdout)!=4)abort();}
@@ -100,7 +106,7 @@ static int reg_schedule_apply(struct ieee80211_regdomain *rd){
   out(r->power_rule.max_eirp);out(!!(r->flags&NL80211_RRF_NO_OFDM));out(!!(r->flags&NL80211_RRF_NO_OUTDOOR));
   out(!!(r->flags&NL80211_RRF_DFS));out(!!(r->flags&NL80211_RRF_NO_IR));out(!!(r->flags&NL80211_RRF_AUTO_BW));
   out(r->dfs_cac_ms);out(r->has_wmm);out((r->flags&NL80211_RRF_AUTO_BW)?reg_get_max_bandwidth(rd,r):r->freq_range.max_bandwidth_khz);
-  if(r->has_wmm){for(unsigned j=0;j<8;++j){struct wmm_ac *a=j<4?&r->wmm_rule.client[j]:&r->wmm_rule.ap[j-4];
+  if(r->has_wmm){for(unsigned j=0;j<8;++j){struct ieee80211_wmm_ac *a=j<4?&r->wmm_rule.client[j]:&r->wmm_rule.ap[j-4];
    out(a->cw_min);out(a->cw_max);out(a->aifsn);out(a->cot);}}
  }
  free(rd);return 0;
@@ -122,13 +128,19 @@ int main(int argc,char**argv){if(argc!=2)return 2;FILE*f=fopen(argv[1],"rb");if(
         if mode == 4: b[81] = 0
         invalid.append(b)
     cases += b"".join(invalid)
+    for cot in [0,1,65,66,255,1024,65535]:
+        b = fixture(0,20,1)
+        for ac in range(8):
+            b[82+ac*4:84+ac*4] = struct.pack(">H",cot)
+        cases += b
     (root / "cases.bin").write_bytes(cases)
     subprocess.run(["clang","-std=gnu11","-O1","-g","-fsanitize=address,undefined","-fno-sanitize-recover=all",str(root / "oracle.c"),"-o",str(root / "oracle")],check=True)
     with (root / "trace.bin").open("wb") as out_file:
         subprocess.run([str(root / "oracle"),str(root / "cases.bin")],stdout=out_file,check=True)
     manifest = {"pin":PIN,"source_sha256":SOURCE_SHA,"source_blob":"11665e0a7efc8a7b81d82834a0fcc79dffb396bb",
         "helpers":[{"signature":sig,"sha256":hashlib.sha256(body.encode()).hexdigest()} for sig,body in zip(signatures,helpers)],
-        "cases":389,"valid_cases":384,"invalid_cases":5,"cases_sha256":hashlib.sha256(cases).hexdigest(),
+        "header_sha256":header_sha,"target_layouts":[{"body":body,"sha256":hashlib.sha256(body.encode()).hexdigest()} for body in target_layouts],
+        "cases":396,"valid_cases":391,"invalid_cases":5,"cases_sha256":hashlib.sha256(cases).hexdigest(),
         "trace_sha256":hashlib.sha256((root / "trace.bin").read_bytes()).hexdigest(),
         "oracle_limit":["signature trust is an explicit setup manifest input, not crypto execution", "OS apply is replaced only after complete unchanged source query decoding", "mandatory rule truncations and unknown future flags are checked independently in Rust, not source-equivalence cases"]}
     (root / "manifest.json").write_text(json.dumps(manifest,indent=2)+"\n")

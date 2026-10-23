@@ -61,10 +61,14 @@ struct Programmed {
 struct Snapshot {
     context: reg::NativeContext,
     channels: Vec<Programmed>,
+    // All actual source power rows include wide/center-channel indices not
+    // present in the domain's enabled20MHz channel list.
+    powers: Vec<(Channel, i8)>,
 }
 struct Hardware(Shared<Snapshot>, Environment);
 struct Os {
     country: Shared<Country>,
+    snapshot: Shared<Snapshot>,
     environment: Environment,
     context: reg::NativeContext,
 }
@@ -114,13 +118,6 @@ fn copy_bss(b: &scan::result::Bss) -> Result<scan::result::Bss, PolicyError> {
         ssid: b.ssid.as_deref().map(copy).transpose()?,
         elements: copy(&b.elements)?,
     })
-}
-fn band_index(band: Band) -> usize {
-    match band {
-        Band::Ghz2 => 0,
-        Band::Ghz5 => 1,
-        Band::Ghz6 => 2,
-    }
 }
 fn channel(band: Band, n: u16) -> Option<Channel> {
     let mhz = match band {
@@ -174,6 +171,40 @@ impl Snapshot {
         if domain.alpha2() != country.alpha2() || power.alpha2() != country.alpha2() {
             return Err(PolicyError::CountryMismatch);
         }
+        let mut powers = Vec::new();
+        let n = power
+            .requests()
+            .iter()
+            .map(|r| r.body().len().saturating_sub(52) / 450)
+            .sum();
+        powers
+            .try_reserve_exact(n)
+            .map_err(|_| PolicyError::NoMemory)?;
+        for request in power.requests() {
+            let body = request.body();
+            if request.kind() != wifi::mediatek::mcu::power::Kind::RatePower {
+                return Err(PolicyError::IncompleteProgramming);
+            }
+            let band = match body.get(13) {
+                Some(1) => Band::Ghz2,
+                Some(2) => Band::Ghz5,
+                Some(3) => Band::Ghz6,
+                _ => return Err(PolicyError::IncompleteProgramming),
+            };
+            for raw in body
+                .get(52..)
+                .ok_or(PolicyError::IncompleteProgramming)?
+                .as_chunks::<450>()
+                .0
+            {
+                let c = channel(band, u16::from(raw[0])).ok_or(PolicyError::PowerMismatch)?;
+                let max = sku_max(&raw[1..], band).ok_or(PolicyError::PowerMismatch)?;
+                if powers.iter().any(|&(p, _)| p == c) {
+                    return Err(PolicyError::PowerMismatch);
+                }
+                powers.push((c, max));
+            }
+        }
         let counts = domain.counts();
         let mut channels = Vec::new();
         channels
@@ -198,29 +229,11 @@ impl Snapshot {
                 {
                     return Err(PolicyError::RestrictionMismatch);
                 }
-                let mut max = None;
-                for request in power.requests() {
-                    let body = request.body();
-                    if request.kind() != wifi::mediatek::mcu::power::Kind::RatePower
-                        || body.get(13) != Some(&(band_index(band) as u8 + 1))
-                    {
-                        continue;
-                    }
-                    for entry in body
-                        .get(52..)
-                        .ok_or(PolicyError::IncompleteProgramming)?
-                        .as_chunks::<450>()
-                        .0
-                    {
-                        if u16::from(entry[0]) == channel.number {
-                            if max.is_some() {
-                                return Err(PolicyError::PowerMismatch);
-                            }
-                            max = sku_max(&entry[1..], band);
-                        }
-                    }
-                }
-                let max_half_dbm = max.ok_or(PolicyError::PowerMismatch)?;
+                let max_half_dbm = powers
+                    .iter()
+                    .find(|&&(c, _)| c == channel)
+                    .map(|&(_, max)| max)
+                    .ok_or(PolicyError::PowerMismatch)?;
                 if i32::from(max_half_dbm) * 50 > i32::from(rule.max_eirp_mbm) {
                     return Err(PolicyError::PowerMismatch);
                 }
@@ -242,7 +255,37 @@ impl Snapshot {
                 policy_revision: id,
             },
             channels,
+            powers,
         })
+    }
+    fn footprint_power(&self, def: station::operations::ChannelDefinition) -> Option<i8> {
+        let bw = match def.width {
+            Width::Mhz20 => 20,
+            Width::Mhz40 => 40,
+            Width::Mhz80 => 80,
+            Width::Mhz160 => 160,
+            _ => return None,
+        };
+        let start = def.center1_mhz.checked_sub(bw / 2)?;
+        let end = def.center1_mhz.checked_add(bw / 2)?;
+        // Include every actual programmed primary/secondary/center SKU that
+        // firmware can select within this footprint. No guessed mapping of a
+        // firmware wide-rate slot can bypass the most restrictive rule. The
+        // 10MHz center grid excludes overlapping neighboring 2GHz 20MHz channels
+        // that are not part of the negotiated footprint.
+        self.powers
+            .iter()
+            .filter(|&&(ch, _)| {
+                ch.band == def.control.band
+                    && u32::from(ch.frequency_mhz) > start
+                    && u32::from(ch.frequency_mhz) < end
+                    && ch
+                        .frequency_mhz
+                        .abs_diff(def.control.frequency_mhz)
+                        .is_multiple_of(10)
+            })
+            .map(|&(_, max)| max)
+            .max()
     }
     fn get(&self, ch: Channel) -> Option<&Programmed> {
         self.channels.iter().find(|c| c.channel == ch)
@@ -364,12 +407,16 @@ impl Os {
             Width::Mhz160 => 160,
             _ => return false,
         };
+        let Some(max_power) = self.snapshot.footprint_power(def) else {
+            return false;
+        };
         let start = def.center1_mhz - bw / 2;
         for mhz in (start + 10..start + bw).step_by(20) {
             let Some(r) = self.country.rule(mhz * 1000, 20_000) else {
                 return false;
             };
-            if (r.indoor_only && self.environment != Environment::Indoor)
+            if i32::from(max_power) * 50 > i32::from(r.max_eirp_mbm)
+                || (r.indoor_only && self.environment != Environment::Indoor)
                 || self.country.bandwidth(r).is_none_or(|max| max < bw * 1000)
                 || (r.no_ofdm
                     && (n.mode != Mode::Legacy
@@ -388,7 +435,7 @@ impl Os {
                     if ((1u32 << ac.ecw_min) - 1) < u32::from(limit.cw_min)
                         || ((1u32 << ac.ecw_max) - 1) < u32::from(limit.cw_max)
                         || ac.aifsn < limit.aifsn
-                        || u32::from(ac.txop_32us) * 32 > limit.cot_us
+                        || u32::from(ac.txop_32us) * 32 > u32::from(limit.cot_us)
                     {
                         return false;
                     }
@@ -522,6 +569,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             Hardware(snapshot.clone(), environment),
             Os {
                 country: country.clone(),
+                snapshot: snapshot.clone(),
                 environment,
                 context: snapshot.context,
             },
@@ -866,10 +914,13 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     fn setup_modern() -> (Client<Bar, Q, NativeGuard>, Model) {
+        setup_modern_power(false)
+    }
+    fn setup_modern_power(split: bool) -> (Client<Bar, Q, NativeGuard>, Model) {
         let mut f = NativeFixture::new(Chip::Mt7925);
         f.install().unwrap();
         f.boot(Chip::Mt7925);
-        f.policy_channels(
+        f.policy_channel_power(
             Chip::Mt7925,
             [true, true, false],
             [
@@ -885,6 +936,13 @@ mod tests {
                     .to_vec(),
                 vec![],
             ],
+            |band, n| {
+                wifi::mediatek::mcu::power::Limits::uniform(if split && band == Band::Ghz5 {
+                    if [40, 44, 48].contains(&n) { 20 } else { 40 }
+                } else {
+                    -3
+                })
+            },
         );
         // SAFETY: actual modeled completed bootstrap, source policy and owner.
         unsafe { f.controller.initialize_mac() }.unwrap();
@@ -1085,6 +1143,44 @@ mod tests {
             unsafe { driver.retire_peer_after_drain() }.unwrap();
             finish_stop(&mut driver, &model);
         }
+    }
+    #[test]
+    fn unequal_actual_wide_power_rows_refuse_split_eirp_rules_before_configuration() {
+        let (client, model) = setup_modern_power(true);
+        let original = fixture();
+        let mut b = vec![0; 128];
+        b[..24].copy_from_slice(&original[..24]);
+        b[17] = 3;
+        b[20..26].copy_from_slice(&[0, 8, 0, 14, 0, 20]);
+        b[32..48].copy_from_slice(&original[24..40]);
+        for (at, start, end, eirp) in [
+            (56, 5_150_000u32, 5_190_000u32, 3000u16),
+            (80, 5_190_000, 5_350_000, 1000),
+        ] {
+            b[at..at + 16].copy_from_slice(&original[48..64]);
+            b[at + 1] = 16;
+            b[at + 2..at + 4].copy_from_slice(&eirp.to_be_bytes());
+            b[at + 4..at + 8].copy_from_slice(&start.to_be_bytes());
+            b[at + 8..at + 12].copy_from_slice(&end.to_be_bytes());
+            b[at + 12..at + 16].copy_from_slice(&20_000u32.to_be_bytes());
+        }
+        let country = Database::parse(Arc::from(b.clone()), Sha256::digest(&b).into())
+            .unwrap()
+            .select(*b"US")
+            .unwrap();
+        // Actual primary36/center rows20dBm; secondary40/44/48 rows10dBm.
+        // Each enabled20MHz channel fits its own rule. EHT80 must still not
+        // enable those20dBm wide/primary rows across the10dBm secondary rule.
+        let (mut driver, model) = awaiting(client, model, country);
+        let before = model.response.lock().unwrap().client_commands.len();
+        assert!(matches!(
+            driver.configure_modern(105),
+            Err(PolicyError::Regulatory(reg::Error::OsDenied))
+        ));
+        assert_eq!(before, model.response.lock().unwrap().client_commands.len());
+        driver.revoke().unwrap();
+        unsafe { driver.retire_peer_after_drain() }.unwrap();
+        finish_stop(&mut driver, &model);
     }
     #[test]
     fn mismatched_country_returns_original_owner_and_sku_padding_is_not_power() {

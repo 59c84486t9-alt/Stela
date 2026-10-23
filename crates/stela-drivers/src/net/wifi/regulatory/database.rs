@@ -27,8 +27,9 @@ pub struct WmmAc {
     pub cw_min: u16,
     pub cw_max: u16,
     pub aifsn: u8,
-    /// Source db uses milliseconds; cfg80211 stores microseconds.
-    pub cot_us: u32,
+    /// Exact source 1000×db-COT assignment to cfg80211's u16, including
+    /// truncation. The source EDCA clamp subsequently divides this value by 32.
+    pub cot_us: u16,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Wmm {
@@ -89,7 +90,7 @@ fn wmm(data: &[u8], at: usize) -> Result<Wmm, Error> {
             cw_min: (1u16 << (raw[0] >> 4)) - 1,
             cw_max: (1u16 << (raw[0] & 15)) - 1,
             aifsn: raw[1],
-            cot_us: 1000 * u32::from(u16::from_be_bytes([raw[2], raw[3]])),
+            cot_us: (1000 * u32::from(u16::from_be_bytes([raw[2], raw[3]]))) as u16,
         };
         if ac.cw_min >= ac.cw_max || ac.aifsn == 0 {
             return Err(Error::Format);
@@ -430,7 +431,7 @@ mod source_matrix {
                         u32::from(ac.cw_min),
                         u32::from(ac.cw_max),
                         u32::from(ac.aifsn),
-                        ac.cot_us,
+                        u32::from(ac.cot_us),
                     ] {
                         add(out, n);
                     }
@@ -463,14 +464,22 @@ mod source_matrix {
             cases.extend_from_slice(&b);
             record(b, &mut trace);
         }
-        // Complete unchanged C helpers, ASan/UBSan, 384 query +5 invalid cases.
+        for cot in [0u16, 1, 65, 66, 255, 1024, 65535] {
+            let mut b = fixture(0, 20, 1);
+            for ac in 0..8 {
+                b[82 + ac * 4..84 + ac * 4].copy_from_slice(&cot.to_be_bytes());
+            }
+            cases.extend_from_slice(&b);
+            record(b, &mut trace);
+        }
+        // Complete unchanged helpers and target layouts, ASan/UBSan, 396 cases.
         assert_eq!(
             alloc::format!("{:x}", Sha256::digest(&cases)),
-            "4ac87a196e1f493259c5dffc8722b3efdc8200b830895a10a8a862f216093448"
+            "12394dc83371fec18dcb71ed4b2dddf92c87cf1aa5a045ceb3e39e5e901f8ec1"
         );
         assert_eq!(
             alloc::format!("{:x}", Sha256::digest(&trace)),
-            "fead58c703c1b47a60b31209f2c727f32d73517a73290cf1aa269c7407856967"
+            "0ad88d498bc631e974fb23fc5f092513fc3539b28fbb461da92f1f0c477fa794"
         );
     }
 }

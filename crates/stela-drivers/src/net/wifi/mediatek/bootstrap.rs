@@ -1057,6 +1057,15 @@ pub(crate) mod tests {
             enabled: [bool; 3],
             chan: [Vec<domain::Channel>; 3],
         ) {
+            self.policy_channel_power(chip, enabled, chan, |_, _| power::Limits::uniform(-3));
+        }
+        pub(crate) fn policy_channel_power(
+            &mut self,
+            chip: Chip,
+            enabled: [bool; 3],
+            chan: [Vec<domain::Channel>; 3],
+            mut limits: impl FnMut(Band, u8) -> power::Limits,
+        ) {
             let flags = self
                 .controller
                 .capabilities()
@@ -1066,7 +1075,12 @@ pub(crate) mod tests {
             unsafe { self.controller.execute_clc(inputs(flags)) }.unwrap();
             let bands: [Vec<power::Channel>; 3] = core::array::from_fn(|i| {
                 if enabled[i] {
-                    rates(chip, [Band::Ghz2, Band::Ghz5, Band::Ghz6][i])
+                    let band = [Band::Ghz2, Band::Ghz5, Band::Ghz6][i];
+                    let mut rates = rates(chip, band);
+                    for c in &mut rates {
+                        c.limits = limits(band, c.hardware_value);
+                    }
+                    rates
                 } else {
                     vec![]
                 }
