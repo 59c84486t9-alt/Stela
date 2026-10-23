@@ -116,6 +116,12 @@ fn read_bounded(root: &mut Directory, path: &str, limit: u64) -> Result<Region, 
     let buffer = unsafe { core::slice::from_raw_parts_mut(physical as *mut u8, length) };
     // Large files are read in parts, with their progress on the screen.
     let name = path.rsplit('\\').next().unwrap_or(path);
+    if length > PROGRESS_STEP {
+        crate::status::progress_fraction(&format!("{name}  0 of {} MB", length >> 20), 0, bytes);
+    } else {
+        // Do not leave the preceding large file's completed bar on a new file.
+        crate::status::progress(name);
+    }
     let mut done = 0;
     while done < length {
         let end = length.min(done + PROGRESS_STEP);
@@ -127,7 +133,11 @@ fn read_bounded(root: &mut Directory, path: &str, limit: u64) -> Result<Region, 
         }
         done += count;
         if length > PROGRESS_STEP {
-            crate::status::progress(&format!("{name}  {} of {} MB", done >> 20, length >> 20));
+            crate::status::progress_fraction(
+                &format!("{name}  {} of {} MB", done >> 20, length >> 20),
+                done as u64,
+                bytes,
+            );
         }
     }
     Ok(Region {

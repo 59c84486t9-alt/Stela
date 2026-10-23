@@ -16,6 +16,8 @@
 //! the loader hands to the system engine so its screen carries on from them
 //! ([`replay`]). Each step's start and end store the boot logs, so a log
 //! read after a hang ends at the step that hung.
+mod fraction;
+
 use crate::{
     console::{self, Color},
     output,
@@ -29,7 +31,7 @@ use core::{
 
 /// Frames of the running marker: three cells moving across six and back.
 const FRAMES: usize = 14;
-const MARKER: usize = 6;
+const MARKER: usize = fraction::WIDTH;
 /// The finished lines kept for the system engine's screen.
 pub const HISTORY_BYTES: usize = 4096;
 /// The most lines [`stream`] shows under the running step.
@@ -66,6 +68,7 @@ impl fmt::Write for Short {
 struct Running {
     title: String,
     detail: String,
+    fraction: Option<([u8; MARKER], u8)>,
     started: u64,
     frame: usize,
     drawn: u64,
@@ -175,6 +178,11 @@ impl State {
                 *byte = b'*';
             }
         }
+        let mut fraction = Short::default();
+        if let Some((bar, percentage)) = running.fraction {
+            marker = bar;
+            let _ = write!(fraction, " ({percentage}%)");
+        }
         let marker = core::str::from_utf8(&marker).unwrap_or("      ");
         let seconds = self.seconds(running.started);
         let mut elapsed = Short::default();
@@ -190,6 +198,7 @@ impl State {
             (elapsed.as_str(), Color::Dim),
             (gap, Color::Text),
             (&running.detail, Color::Text),
+            (fraction.as_str(), Color::Busy),
         ]);
         if !self.streamed {
             console::below(&self.stream, TEXT_INDENT.len(), Color::Dim);
@@ -262,6 +271,7 @@ pub fn begin(title: &str) {
         state.running = Some(Running {
             title: String::from(title),
             detail: String::new(),
+            fraction: None,
             started: now(),
             frame: 0,
             drawn: now(),
@@ -277,6 +287,22 @@ pub fn progress(detail: &str) {
         if let Some(running) = state.running.as_mut() {
             running.detail.clear();
             running.detail.push_str(detail);
+            running.fraction = None;
+            state.draw_running();
+        }
+    });
+}
+
+/// Show a bar and percentage for the finite operation named by `detail`, such
+/// as reading one file with a known byte length. This measures only that
+/// operation, never an estimate of total boot progress. An unknown/invalid
+/// total keeps the ordinary moving marker and omits the percentage.
+pub fn progress_fraction(detail: &str, completed: u64, total: u64) {
+    with(|state| {
+        if let Some(running) = state.running.as_mut() {
+            running.detail.clear();
+            running.detail.push_str(detail);
+            running.fraction = fraction::marker(completed, total);
             state.draw_running();
         }
     });
