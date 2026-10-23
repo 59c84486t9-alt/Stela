@@ -3,14 +3,14 @@
 //! data extent and stream/type checks precede native ring publication.
 use super::*;
 use core::sync::atomic::{AtomicU64, Ordering, fence};
-const MAX_RETAINED_COMPLETIONS: usize = 256;
-static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+pub(super) const MAX_RETAINED_COMPLETIONS: usize = 256;
+pub(super) static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 impl Device {
     /// Queue one actual control-independent transfer. `out` must be exactly
-    /// `length` for OUT and empty for IN. ISO is one ASAP service interval;
-    /// explicit frame scheduling, SuperSpeed ISO and TT ISO remain unsupported
-    /// by the existing native backend and return its explicit refusal.
+    /// `length` for OUT and empty for IN. ISO is one native ASAP service interval;
+    /// use submit_isochronous for a queued packet list. Native admission checks
+    /// actual speed, route and service payload before publication.
     /// Stream zero selects an ordinary ring; nonzero selects allocated streams.
     pub fn submit(
         &mut self,
@@ -20,9 +20,26 @@ impl Device {
         out: &[u8],
     ) -> Result<Request, BlockError> {
         self.ready()?;
-        if self.completed.len() >= MAX_RETAINED_COMPLETIONS {
+        if self.completed.len()
+            + self.iso_requests.len()
+            + self
+                .pipes
+                .values()
+                .filter(|pipe| pipe.pending.is_some())
+                .count()
+            >= MAX_RETAINED_COMPLETIONS
+        {
             return Err(BlockError::Unsupported(
                 "forwarded USB completion queue full",
+            ));
+        }
+        if self
+            .iso_requests
+            .values()
+            .any(|request| request.address == address)
+        {
+            return Err(BlockError::Unsupported(
+                "forwarded ISO endpoint has queued requests",
             ));
         }
         let pipe = self
@@ -101,6 +118,9 @@ impl Device {
             return Ok(Some(self.completed.remove(index)));
         }
         self.ready()?;
+        if self.iso_requests.contains_key(&request) {
+            return self.poll_isochronous(request);
+        }
         let (&address, pipe) = self
             .pipes
             .iter_mut()
@@ -154,41 +174,66 @@ impl Device {
             status,
             actual,
             data,
+            packets: Vec::new(),
         }))
     }
 
-    /// Cancellation is endpoint-wide in xHCI. This owner permits one pending TD
-    /// per endpoint, so exactly one identity is completed after the native ACK.
-    /// The cancellation completion is retained until poll/take_completions.
+    /// Cancellation is endpoint-wide in xHCI. All requests and packet buffers
+    /// remain owned until Stop/Set Dequeue acknowledges that complete endpoint.
+    /// Packet results already collected remain visible in the final completion.
     pub fn cancel(&mut self, address: u8) -> Result<(), BlockError> {
-        self.ready()?;
-        let pipe = self.pipes.get_mut(&address).ok_or(BlockError::Unsupported(
+        if let Err(error) = self.ready() {
+            self.fenced = true;
+            return Err(error);
+        }
+        let pipe = self.pipes.get(&address).ok_or(BlockError::Unsupported(
             "inactive USB cancellation endpoint",
         ))?;
-        if pipe.pending.is_none() {
+        let count = self
+            .iso_requests
+            .values()
+            .filter(|r| r.address == address)
+            .count();
+        if pipe.pending.is_none() && count == 0 {
             return Ok(());
         }
-        // Reserve completion storage before mutating hardware ownership.
         self.completed
-            .try_reserve(1)
+            .try_reserve(count + usize::from(pipe.pending.is_some()))
             .map_err(|_| BlockError::NoDmaMemory)?;
+        let dci = pipe.endpoint.dci();
+        let requests: Vec<_> = self
+            .iso_requests
+            .iter()
+            .filter_map(|(id, r)| (r.address == address).then_some(*id))
+            .collect();
+        // Preserve terminal events already available at cancellation, including
+        // their individual residuals. A transport error cannot release a
+        // buffer; native cancellation below still has to acknowledge retirement.
+        for request in &requests {
+            let _ = self.collect_isochronous(*request);
+        }
         if let Err(error) = self
             .controller
             .borrow_mut()
             .device(self.physical.id)?
-            .cancel(pipe.endpoint.dci())
+            .cancel(dci)
         {
             self.fenced = true;
             return Err(error);
         }
-        let pending = pipe.pending.take().unwrap();
-        self.completed.push(Completion {
-            request: pending.request,
-            endpoint: address,
-            status: Status::Cancelled,
-            actual: None,
-            data: Vec::new(),
-        });
+        if let Some(pending) = self.pipes.get_mut(&address).unwrap().pending.take() {
+            self.completed.push(Completion {
+                request: pending.request,
+                endpoint: address,
+                status: Status::Cancelled,
+                actual: None,
+                data: Vec::new(),
+                packets: Vec::new(),
+            });
+        }
+        for request in requests {
+            self.finish_isochronous(request, Status::Cancelled);
+        }
         Ok(())
     }
 

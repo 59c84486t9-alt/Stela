@@ -4,7 +4,8 @@
 //! The topology owner alone constructs this owner after exclusive physical
 //! claim. Descriptors remain the device's original bytes. No guest addresses,
 //! USB/IP socket, application identity or synthetic class driver is involved.
-//! One bounded TD per endpoint is supported; USB2 root-direct isochronous and
+//! Ordinary transfers use one bounded TD per endpoint. ISO requests queue bounded
+//! packet lists on the native controller's actual service-interval scheduler;
 //! primary streams inherit the native controller's explicit admission limits.
 use super::xhci::{self, Endpoint, Interface, Shared};
 use crate::{
@@ -15,10 +16,13 @@ use alloc::{collections::BTreeMap, vec::Vec};
 
 mod configuration;
 mod descriptors;
+mod isochronous;
+#[cfg(test)]
+mod native_tests;
 mod transfer;
 
 /// A request identity belongs to one owner and is never reused in its lifetime.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Request(u64);
 
 /// Actual hardware transfer result. Packet-level ISO faults are retained.
@@ -38,6 +42,19 @@ pub struct Completion {
     /// None when the controller did not report a reliable byte count.
     pub actual: Option<usize>,
     /// IN data only, copied after hardware relinquishes the complete buffer.
+    pub data: Vec<u8>,
+    /// Empty for a single TD. A packet-list request retains every packet,
+    /// including short, missed-service, failed and cancelled intervals. Its IN
+    /// payloads are in these records; `data` stays empty to preserve holes.
+    pub packets: Vec<IsoPacketCompletion>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IsoPacketCompletion {
+    pub offset: usize,
+    pub requested: usize,
+    pub actual: Option<usize>,
+    pub status: Status,
     pub data: Vec<u8>,
 }
 
@@ -71,6 +88,8 @@ pub struct Device {
     pipes: BTreeMap<u8, Pipe>,
     spare: BTreeMap<u8, DmaBuffer>,
     completed: Vec<Completion>,
+    iso_requests: BTreeMap<Request, isochronous::IsoRequest>,
+    iso_spare: Vec<DmaBuffer>,
     fenced: bool,
 }
 
@@ -95,6 +114,8 @@ impl Device {
             pipes: BTreeMap::new(),
             spare: BTreeMap::new(),
             completed: Vec::new(),
+            iso_requests: BTreeMap::new(),
+            iso_spare: Vec::new(),
             fenced: false,
         })
     }

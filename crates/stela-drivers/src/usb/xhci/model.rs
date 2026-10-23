@@ -35,6 +35,7 @@ impl Controller {
 /// A command/event DMA model with a device that needs the full
 /// SET_ADDRESS recovery interval before accepting its first Setup.
 pub(crate) struct AddressModel {
+    pub(crate) port_speed: u8,
     pub(crate) commands: u64,
     pub(crate) command_index: usize,
     pub(crate) events: u64,
@@ -70,7 +71,7 @@ pub(crate) struct AddressRegisters(Rc<RefCell<AddressModel>>);
 impl Registers for AddressRegisters {
     fn read32(&mut self, offset: usize) -> u32 {
         if offset == 0x440 {
-            PP | CCS | PED | u32::from(HIGH_SPEED) << 10
+            PP | CCS | PED | u32::from(self.0.borrow().port_speed) << 10
         } else {
             0
         }
@@ -145,6 +146,7 @@ pub(crate) fn address_controller(
         ticks_per_microsecond: 1_000,
     };
     let model = Rc::new(RefCell::new(AddressModel {
+        port_speed: HIGH_SPEED,
         commands: commands.buffer.physical(),
         command_index: 0,
         events: events.physical(),
@@ -198,6 +200,7 @@ pub(crate) fn address_controller(
 /// old address model: Stop accepts Running, Reset accepts Halted, Set Dequeue
 /// accepts Stopped. It can leave DMA active on command failure.
 pub(crate) struct CancelModel {
+    pub(crate) port_speed: u8,
     pub(crate) context_bytes: usize,
     pub(crate) commands: u64,
     pub(crate) command_index: usize,
@@ -583,7 +586,7 @@ impl Registers for CancelRegisters {
         let mut model = self.0.borrow_mut();
         if offset == 0x40 + PORTSC {
             return PP
-                | u32::from(FULL_SPEED) << PORT_SPEED_SHIFT
+                | u32::from(model.port_speed) << PORT_SPEED_SHIFT
                 | if model.connected { CCS | PED } else { 0 };
         }
         if offset == 0x40 + USBSTS {
@@ -621,12 +624,24 @@ pub(crate) fn unconfigured_cancellation_controller_with_configurations(
     dma: &mut dyn DmaAllocator,
     configurations: &[Vec<u8>],
 ) -> (Controller, Rc<RefCell<CancelModel>>) {
-    let (mut controller, _) = address_controller(dma, SUCCESS);
+    cancellation_controller_at_speed(dma, configurations, FULL_SPEED)
+}
+
+fn cancellation_controller_at_speed(
+    dma: &mut dyn DmaAllocator,
+    configurations: &[Vec<u8>],
+    speed: u8,
+) -> (Controller, Rc<RefCell<CancelModel>>) {
+    let (mut controller, address_peer) = address_controller(dma, SUCCESS);
+    if speed >= SUPER_SPEED {
+        controller.port_major[0] = 3;
+        address_peer.borrow_mut().port_speed = speed;
+    }
     let slot = controller
         .address(
             Attachment {
                 root_port: 1,
-                speed: FULL_SPEED,
+                speed,
                 route: 0,
                 tier: 0,
                 translator: None,
@@ -640,6 +655,7 @@ pub(crate) fn unconfigured_cancellation_controller_with_configurations(
     let mut rings = [0; 32];
     rings[1] = state.endpoints[1].as_ref().unwrap().ring.buffer.physical();
     let model = Rc::new(RefCell::new(CancelModel {
+        port_speed: speed,
         context_bytes: 32,
         commands: controller.commands.buffer.physical(),
         command_index: controller.commands.index,
@@ -800,5 +816,23 @@ pub(crate) fn failed_stall_recovery(
     );
     assert!(model.borrow().dequeues.is_empty());
     assert!(!controller.command_poisoned);
+    (controller, model)
+}
+
+/// Compose a forwarding peer around the existing real EP0/command DMA model.
+/// The caller supplies original descriptor bytes and a separately modeled PCI
+/// function; stream admission uses the same observed ConfigSpace policy as a
+/// native attachment. The wrapper observes the original rings, not fake tickets.
+/// Existing fixture construction and defaults remain unchanged.
+pub(crate) fn forwarding_fixture<C: crate::bus::pci::ConfigSpace>(
+    dma: &mut dyn DmaAllocator,
+    configurations: &[Vec<u8>],
+    speed: u8,
+    function: &mut Function<C>,
+    wrap: impl FnOnce(Box<dyn Registers>, Rc<RefCell<CancelModel>>) -> Box<dyn Registers>,
+) -> (Controller, Rc<RefCell<CancelModel>>) {
+    let (mut controller, model) = cancellation_controller_at_speed(dma, configurations, speed);
+    controller.stream_policy = streams::pci_policy(function).unwrap();
+    controller.registers = wrap(controller.registers, model.clone());
     (controller, model)
 }
