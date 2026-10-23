@@ -143,6 +143,22 @@ pub struct Status {
     pub quarantined: u64,
 }
 impl Authority {
+    /// Build an isolated hosted fixture through the real registry. This is not
+    /// a production authority and never changes the native activation latch.
+    ///
+    /// # Safety
+    /// The platform, resources and aliases belong exclusively to this isolated
+    /// model. They do not share mappings or native ownership with production or
+    /// another authority. The ordinary platform and alias contracts still apply.
+    #[cfg(test)]
+    pub(crate) unsafe fn isolated_model(
+        platform: Arc<dyn MappingPlatform>,
+        address_space: AddressSpace,
+        aliases: Vec<ExistingAlias>,
+    ) -> Result<Self, Error> {
+        Self::prepare(platform, address_space, aliases)
+    }
+
     /// Import the actual participating native roots and all preexisting aliases.
     /// Successful activation is permanent; clone this handle for other users.
     ///

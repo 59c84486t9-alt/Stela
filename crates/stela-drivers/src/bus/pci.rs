@@ -11,6 +11,8 @@ use core::{fmt, ops::Range};
 mod aspm;
 pub mod msi;
 pub mod msix;
+pub mod owned;
+pub mod requester;
 pub use aspm::{disable_aspm_l1_2_link, disable_aspm_link};
 
 const VENDOR: u16 = 0x00;
@@ -232,6 +234,12 @@ impl<C: ConfigSpace> Function<C> {
 
     pub fn config(&mut self) -> &mut C {
         &mut self.config
+    }
+
+    /// Transfer the original configuration owner without creating another
+    /// access path or ending its mapping/resource lifetime.
+    pub fn into_config(self) -> C {
+        self.config
     }
 
     fn header_type(&self) -> u8 {
