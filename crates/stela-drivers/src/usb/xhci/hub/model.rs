@@ -78,7 +78,15 @@ impl Node {
     pub fn hub(speed: u8, ports: usize) -> Self {
         Self {
             speed,
-            ports: Some(vec![PortModel::connected(); ports]),
+            ports: Some(
+                (0..ports)
+                    .map(|_| {
+                        let mut port = PortModel::connected();
+                        port.child_speed = speed;
+                        port
+                    })
+                    .collect(),
+            ),
             bos: None,
             descriptor: None,
             configured: false,
