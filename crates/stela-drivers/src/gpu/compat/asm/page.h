@@ -50,7 +50,8 @@ unsigned long page_to_pfn(const struct page *page);
 #define __phys_to_pfn(paddr)	PHYS_PFN(paddr)
 #define phys_to_page(phys)	pfn_to_page(PHYS_PFN(phys))
 
-/* Copyright Linux kernel contributors; from asm-generic/page.h. */
+/* Pages are ordinary memory to Linux code, which clears and copies them
+ * with the compiler's memset and memcpy. */
 #define clear_page(page)	__builtin_memset((page), 0, PAGE_SIZE)
 #define copy_page(to,from)	__builtin_memcpy((to), (from), PAGE_SIZE)
 #define clear_user_page(page, vaddr, pg)	clear_page(page)

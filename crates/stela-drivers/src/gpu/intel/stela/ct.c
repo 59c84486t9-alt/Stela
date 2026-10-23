@@ -1,9 +1,7 @@
 /* SPDX-License-Identifier: MIT */
-/* Copyright © 2022 Intel Corporation */
-/* Native mapping adaptation of h2g_write()/g2h_read() in xe_guc_ct.c, over
- * Linux's unchanged firmware ABI and register definitions. OS BO/PM/fence/
- * reset policy stays with the real owner rather than emulated Linux objects.
- */
+/* Stela's GuC CT rings over Linux's unchanged CTB ABI and register
+ * definitions, following the protocol of xe_guc_ct.c's h2g_write() and
+ * g2h_read(). BO, PM, fence and reset policy stay with the real owner. */
 #include "ct.h"
 #include <linux/bitfield.h>
 #include "abi/guc_communication_ctb_abi.h"
