@@ -5,6 +5,7 @@
 //! firmware: image selection/authentication and the guest frontend are separate.
 pub mod firmware;
 mod memory;
+pub mod native;
 mod packet;
 mod registers;
 #[cfg(test)]
@@ -55,6 +56,17 @@ pub unsafe trait Platform: 'static {
     fn now_us(&self) -> u64;
     fn arm_vector_zero(&mut self) -> Result<()>;
     fn retire_vector_zero(&mut self) -> Result<()>;
+    /// Consume the work flag before reading causes. A callback during service
+    /// must remain pending for the next serialized service pass.
+    fn service_begin(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// Restore a source actually masked by the hard-IRQ callback after this
+    /// serialized completion/cause service. Pure polling/model owners need no
+    /// extra operation beyond the device's automask acknowledgment.
+    fn service_complete(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -81,6 +93,7 @@ pub enum Error {
     State(State),
     Dma(BlockError),
     Mmio(&'static str),
+    Native(native::Error),
     Timeout(&'static str),
     Protocol {
         requirement: &'static str,
@@ -422,6 +435,7 @@ impl<P: Platform> Transport<P> {
         Ok(())
     }
     fn service(&mut self) -> Result<()> {
+        self.platform.service_begin()?;
         let fh = self.read(FH_CAUSE)?;
         let hw = self.read(HW_CAUSE)?;
         self.snapshot.fh_cause = fh;
@@ -433,7 +447,7 @@ impl<P: Platform> Transport<P> {
         self.write(HW_CAUSE, hw)?;
         if fh | hw == 0 {
             self.write(AUTOMASK, 1)?;
-            return Ok(());
+            return self.platform.service_complete();
         }
         if hw & ((1 << 3) | (1 << 5)) != 0 {
             self.read_snapshot()?;
@@ -480,7 +494,8 @@ impl<P: Platform> Transport<P> {
                 }
             }
         }
-        self.write(AUTOMASK, 1)
+        self.write(AUTOMASK, 1)?;
+        self.platform.service_complete()
     }
     fn active(&self) -> Result<()> {
         if matches!(self.state, State::Rom | State::Iml | State::Operational) {
@@ -650,9 +665,21 @@ impl<P: Platform> Transport<P> {
         let result: Result<()> = (|| {
             self.write(FH_MASK, u32::MAX)?;
             self.write(HW_MASK, u32::MAX)?;
-            self.platform.retire_vector_zero()?;
-            self.reset_device()?;
-            Ok(())
+            // The IRQ registry's source quiescence requires actual device DMA
+            // stop, not just masked MSI-X. Stop/reset first; its source rereads
+            // those acknowledgments before callback/CPU/work retirement. Even
+            // a failed stop still attempts the real route mask/drain, whose
+            // source must refuse quiescence if the acknowledgments are absent.
+            let stopped = self.reset_device();
+            let interrupts = self.platform.retire_vector_zero();
+            match (stopped, interrupts) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+                (Err(cause), Err(cleanup)) => Err(Error::Cleanup {
+                    cause: Box::new(cause),
+                    cleanup: Box::new(cleanup),
+                }),
+            }
         })();
         match result {
             Ok(()) => {
