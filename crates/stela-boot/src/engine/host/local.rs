@@ -269,5 +269,9 @@ pub(super) fn native_worker() -> Option<stela_runtime::machine::engine::publicat
 pub(super) fn native_cpu_lease() -> Option<stela_runtime::NativeCpuLease> {
     // SAFETY: callers retain this actual processor's live exclusive HostOwner;
     // retirement revokes before destroying state, and handlers never lend it.
-    unsafe { (&*(*current()).declarations.get()).as_ref().map(|owner| owner.lease()) }
+    unsafe {
+        (&*(*current()).declarations.get())
+            .as_ref()
+            .map(|owner| owner.lease())
+    }
 }

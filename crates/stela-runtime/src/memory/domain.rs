@@ -28,10 +28,10 @@ mod exclusive;
 pub(crate) mod m0_read;
 mod m0_scalar;
 pub(crate) mod m0_write;
+pub(in crate::memory) mod native_target;
 pub(crate) mod physical;
 mod read;
 mod shared;
-pub(in crate::memory) mod native_target;
 
 use crate::platform::sync::Mutex;
 use crate::system::events::{EventEndpoint, EventProducer};
@@ -389,13 +389,7 @@ impl MemoryDomain {
         authority
             .revalidate()
             .map_err(|_| MemoryStatus::Unsupported)?;
-        Self::construct_admitted(
-            None,
-            system,
-            views,
-            target,
-            DomainRole::NativeSystemRam,
-        )
+        Self::construct_admitted(None, system, views, target, DomainRole::NativeSystemRam)
     }
 
     fn construct_admitted(

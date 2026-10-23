@@ -56,15 +56,19 @@ pub(crate) unsafe fn reserve_for_workers(
 ) -> Result<Arc<RegisteredSystemRam>, &'static str> {
     let cores = handoff.native_resources.cores as usize;
     let count = capture.processor_count as usize;
-    if cores == 0 || cores > capture.core_count as usize
-        || cores > super::topology::MAX_CORES || count > super::topology::MAX_PROCESSORS
+    if cores == 0
+        || cores > capture.core_count as usize
+        || cores > super::topology::MAX_CORES
+        || count > super::topology::MAX_PROCESSORS
         || executors.processors().len() + 1 != cores
     {
         return Err("canonical target has an invalid assigned physical roster");
     }
     let selected = |slot: usize| {
-        capture.processors[..count].get(capture.selected[slot] as usize)
-            .copied().ok_or("canonical target selected worker is absent")
+        capture.processors[..count]
+            .get(capture.selected[slot] as usize)
+            .copied()
+            .ok_or("canonical target selected worker is absent")
     };
     // SAFETY: current installed BSP with IF clear, before any guest entry.
     // The fresh observation is only a capability ceiling; registration below
@@ -74,19 +78,28 @@ pub(crate) unsafe fn reserve_for_workers(
     if !bsp.matches(selected(0)?) {
         return Err("canonical target BSP differs from assigned worker");
     }
-    let five_level = matches!(handoff.placement, stela_runtime::machine::mmu::placement::Placement::FiveLevel);
-    bsp.qualify_native(five_level).map_err(|_| "canonical target BSP floor refused")?;
+    let five_level = matches!(
+        handoff.placement,
+        stela_runtime::machine::mmu::placement::Placement::FiveLevel
+    );
+    bsp.qualify_native(five_level)
+        .map_err(|_| "canonical target BSP floor refused")?;
     let mut observations = Vec::with_capacity(cores);
     observations.push(&bsp);
     for slot in 1..cores {
         let expected = selected(slot)?;
-        let actual = executors.processors().iter().find(|processor| processor.slot() == slot)
+        let actual = executors
+            .processors()
+            .iter()
+            .find(|processor| processor.slot() == slot)
             .ok_or("canonical target assigned AP is absent")?;
         let observed = actual.observation();
         if actual.apic_id() != expected.apic_id || !observed.matches(expected) {
             return Err("canonical target AP differs from assigned worker");
         }
-        observed.qualify_native(five_level).map_err(|_| "canonical target AP floor refused")?;
+        observed
+            .qualify_native(five_level)
+            .map_err(|_| "canonical target AP floor refused")?;
         observations.push(observed);
     }
     let limit = super::topology::common_native_target(&observations)

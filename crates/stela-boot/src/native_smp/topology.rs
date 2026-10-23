@@ -132,7 +132,9 @@ impl Snapshot {
     pub fn apic_id(&self) -> Option<u32> {
         let identity = self.get(0, 0)?;
         let maximum = identity.eax;
-        if maximum < 1 { return None; }
+        if maximum < 1 {
+            return None;
+        }
         let basic = self.get(1, 0)?;
         for leaf in [0x1f, 0xb] {
             if maximum >= leaf {
@@ -161,7 +163,9 @@ impl Snapshot {
 /// Conservative compiler policy from the assigned workers' actual installed
 /// observations. This cannot grant execution: registration and each native
 /// entry must still validate the destination's current hardware and controls.
-pub(crate) fn common_native_target(observations: &[&Snapshot]) -> Result<stela_compiler::TargetCpu, CapabilityRefusal> {
+pub(crate) fn common_native_target(
+    observations: &[&Snapshot],
+) -> Result<stela_compiler::TargetCpu, CapabilityRefusal> {
     use stela_compiler::TargetCpu;
     const SSSE3: u32 = 1 << 9;
     const SSE41: u32 = 1 << 19;
@@ -178,15 +182,22 @@ pub(crate) fn common_native_target(observations: &[&Snapshot]) -> Result<stela_c
     let (mut ecx, mut edx, mut structured) = (u32::MAX, u32::MAX, u32::MAX);
     let mut atomic16 = true;
     for snapshot in observations {
-        let vendor = snapshot.get(0, 0).filter(|record| record.eax >= 1)
+        let vendor = snapshot
+            .get(0, 0)
+            .filter(|record| record.eax >= 1)
             .ok_or(CapabilityRefusal::InvalidSnapshot)?;
-        let basic = snapshot.get(1, 0).ok_or(CapabilityRefusal::InvalidSnapshot)?;
+        let basic = snapshot
+            .get(1, 0)
+            .ok_or(CapabilityRefusal::InvalidSnapshot)?;
         ecx &= basic.ecx;
         edx &= basic.edx;
         structured &= if vendor.eax >= 7 {
             snapshot.get(7, 0).map_or(0, |record| record.ebx)
-        } else { 0 };
-        atomic16 &= TargetCpu::atomic_load16_guaranteed([vendor.ebx, vendor.edx, vendor.ecx], basic.ecx);
+        } else {
+            0
+        };
+        atomic16 &=
+            TargetCpu::atomic_load16_guaranteed([vendor.ebx, vendor.edx, vendor.ecx], basic.ecx);
     }
     let mut target = match (ecx & SSSE3 != 0, ecx & SSE41 != 0, ecx & SSE42 != 0) {
         (true, true, true) => TargetCpu::Sse42,
@@ -195,7 +206,10 @@ pub(crate) fn common_native_target(observations: &[&Snapshot]) -> Result<stela_c
         _ => TargetCpu::Baseline,
     };
     for (present, with) in [
-        (ecx & PCLMULQDQ != 0, TargetCpu::with_pclmulqdq as fn(_) -> _),
+        (
+            ecx & PCLMULQDQ != 0,
+            TargetCpu::with_pclmulqdq as fn(_) -> _,
+        ),
         (ecx & POPCNT != 0, TargetCpu::with_popcnt),
         (ecx & AES != 0, TargetCpu::with_aes),
         (structured & SHA != 0, TargetCpu::with_sha),
@@ -203,7 +217,9 @@ pub(crate) fn common_native_target(observations: &[&Snapshot]) -> Result<stela_c
         (ecx & CX16 != 0, TargetCpu::with_cx16),
         (atomic16, TargetCpu::with_atomic_load16),
     ] {
-        if present { target = with(target); }
+        if present {
+            target = with(target);
+        }
     }
     Ok(target)
 }
@@ -566,8 +582,15 @@ mod tests {
             edx: 0x1234,
             ..Cpuid::default()
         };
-        snapshot.records[2] = Cpuid { leaf: 0x1f, ..Cpuid::default() };
-        snapshot.records[3] = Cpuid { leaf: 0, eax: 0xb, ..Cpuid::default() };
+        snapshot.records[2] = Cpuid {
+            leaf: 0x1f,
+            ..Cpuid::default()
+        };
+        snapshot.records[3] = Cpuid {
+            leaf: 0,
+            eax: 0xb,
+            ..Cpuid::default()
+        };
         snapshot.count = 4;
         let mut core = processor(0, 0, 0, 0);
         core.apic_id = 0x1234;
@@ -646,25 +669,58 @@ mod tests {
             snapshot.records[0].ebx = 7 << 24;
             snapshot.records[1].ecx |= 1 << 22;
             snapshot.records[3].eax = 0x1f;
-            snapshot.records[4] = Cpuid { leaf: 0x1f, ..Cpuid::default() };
-            snapshot.records[5] = Cpuid { leaf: 0xb, ..Cpuid::default() };
-            snapshot.records[6] = Cpuid { leaf: 0x8000_0000, eax: 0x8000_001e, ..Cpuid::default() };
-            snapshot.records[7] = Cpuid { leaf: 0x8000_001e, eax: 0x1234, ..Cpuid::default() };
+            snapshot.records[4] = Cpuid {
+                leaf: 0x1f,
+                ..Cpuid::default()
+            };
+            snapshot.records[5] = Cpuid {
+                leaf: 0xb,
+                ..Cpuid::default()
+            };
+            snapshot.records[6] = Cpuid {
+                leaf: 0x8000_0000,
+                eax: 0x8000_001e,
+                ..Cpuid::default()
+            };
+            snapshot.records[7] = Cpuid {
+                leaf: 0x8000_001e,
+                eax: 0x1234,
+                ..Cpuid::default()
+            };
             snapshot.count = 8;
             snapshot
         };
         for vendor in [TargetCpu::AMD_VENDOR, TargetCpu::INTEL_VENDOR, [0; 3]] {
             let mut snapshot = source(vendor);
-            assert_eq!(snapshot.apic_id(), Some(if vendor == TargetCpu::AMD_VENDOR { 0x1234 } else { 7 }));
+            assert_eq!(
+                snapshot.apic_id(),
+                Some(if vendor == TargetCpu::AMD_VENDOR {
+                    0x1234
+                } else {
+                    7
+                })
+            );
             snapshot.records[6].eax = 0x8000_001d;
             assert_eq!(snapshot.apic_id(), Some(7));
         }
         let mut snapshot = source(TargetCpu::INTEL_VENDOR);
-        snapshot.records[4] = Cpuid { leaf: 0x1f, ebx: 1 << 16, ecx: 1 << 8, edx: 0x5678, ..Cpuid::default() };
+        snapshot.records[4] = Cpuid {
+            leaf: 0x1f,
+            ebx: 1 << 16,
+            ecx: 1 << 8,
+            edx: 0x5678,
+            ..Cpuid::default()
+        };
         // Only the architectural low16 count matters; high garbage is not a
         // valid topology source and cannot replace the real legacy identity.
         assert_eq!(snapshot.apic_id(), Some(7));
-        snapshot.records[5] = Cpuid { leaf: 0xb, ebx: 2, ecx: 1 << 8, edx: 0x1234, ..Cpuid::default() };
+        snapshot.records[5] = Cpuid {
+            leaf: 0xb,
+            ebx: 2,
+            ecx: 1 << 8,
+            edx: 0x1234,
+            ..Cpuid::default()
+        };
         assert_eq!(snapshot.apic_id(), Some(0x1234));
         snapshot.records[4].ebx = 2;
         assert_eq!(snapshot.apic_id(), Some(0x5678));
@@ -703,7 +759,15 @@ mod tests {
         assert!(solo.supports(TargetCpu::Sha));
         assert!(solo.supports(TargetCpu::Pclmulqdq));
         assert!(solo.supports(TargetCpu::AtomicLoad16));
-        for excluded in [TargetCpu::Bmi1, TargetCpu::Fma, TargetCpu::F16c, TargetCpu::Avx2, TargetCpu::Avx512f, TargetCpu::Doit, TargetCpu::LineAtomic] {
+        for excluded in [
+            TargetCpu::Bmi1,
+            TargetCpu::Fma,
+            TargetCpu::F16c,
+            TargetCpu::Avx2,
+            TargetCpu::Avx512f,
+            TargetCpu::Doit,
+            TargetCpu::LineAtomic,
+        ] {
             assert!(!solo.supports(excluded));
         }
     }
@@ -719,24 +783,45 @@ mod tests {
         assert!(!target.supports(TargetCpu::Sha));
         assert!(!target.supports(TargetCpu::AtomicLoad16));
         assert!(target.supports(TargetCpu::Aes));
-        for (removed, expected) in [(20, TargetCpu::Sse41), (19, TargetCpu::Ssse3), (9, TargetCpu::Baseline)] {
+        for (removed, expected) in [
+            (20, TargetCpu::Sse41),
+            (19, TargetCpu::Ssse3),
+            (9, TargetCpu::Baseline),
+        ] {
             let mut worker = rich.clone();
             worker.records[0].ecx &= !(1 << removed);
             let target = common_native_target(&[&rich, &worker]).unwrap();
             assert!(target.supports(expected));
             assert!(!target.supports(TargetCpu::Sse42));
-            if removed == 9 { assert!(!target.supports(TargetCpu::Ssse3)); }
-            if removed == 19 { assert!(!target.supports(TargetCpu::Sse41)); }
+            if removed == 9 {
+                assert!(!target.supports(TargetCpu::Ssse3));
+            }
+            if removed == 19 {
+                assert!(!target.supports(TargetCpu::Sse41));
+            }
         }
         let mut missing = rich.clone();
         missing.records[2].leaf = 6;
-        assert!(!common_native_target(&[&rich, &missing]).unwrap().supports(TargetCpu::Sha));
+        assert!(
+            !common_native_target(&[&rich, &missing])
+                .unwrap()
+                .supports(TargetCpu::Sha)
+        );
         missing.count = MAX_CPUID as u32 + 1;
-        assert_eq!(common_native_target(&[&missing]), Err(CapabilityRefusal::InvalidSnapshot));
-        assert_eq!(common_native_target(&[]), Err(CapabilityRefusal::InvalidSnapshot));
+        assert_eq!(
+            common_native_target(&[&missing]),
+            Err(CapabilityRefusal::InvalidSnapshot)
+        );
+        assert_eq!(
+            common_native_target(&[]),
+            Err(CapabilityRefusal::InvalidSnapshot)
+        );
         missing = rich.clone();
         missing.records[3].eax = 0;
-        assert_eq!(common_native_target(&[&missing]), Err(CapabilityRefusal::InvalidSnapshot));
+        assert_eq!(
+            common_native_target(&[&missing]),
+            Err(CapabilityRefusal::InvalidSnapshot)
+        );
     }
 
     #[test]

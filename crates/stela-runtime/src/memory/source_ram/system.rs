@@ -115,8 +115,9 @@ impl RegisteredSystemRam {
             crate::memory::domain::native_target::restrict(authority.target(), limit)
         });
         let (regions, views, system) = unsafe { bindings(ranges, owner, erg_bytes, stripes) }?;
-        let domain = MemoryDomain::new_native_system_ram(Arc::clone(&system), views, &authority, target)
-            .map_err(RegistrationError::Domain)?;
+        let domain =
+            MemoryDomain::new_native_system_ram(Arc::clone(&system), views, &authority, target)
+                .map_err(RegistrationError::Domain)?;
         Ok(Self {
             regions,
             domain,

@@ -102,9 +102,8 @@ impl Descriptor {
         for id in 0..t6000::BRIDGE_COUNT {
             let view = layout.bridge(id).map_err(String::from)?;
             let record = records.record(id).expect("validated T6000 bridge ordinal");
-            let model =
-                Bridge::t6000(tuning, id, record.header, &record.configs, record.axi, &[])
-                    .map_err(String::from)?;
+            let model = Bridge::t6000(tuning, id, record.header, &record.configs, record.axi, &[])
+                .map_err(String::from)?;
             for (offset, bytes) in model.spans() {
                 if offset.checked_add(bytes).is_none_or(|end| end > view.bytes)
                     || view.physical.checked_add(offset + bytes).is_none()

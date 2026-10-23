@@ -1744,7 +1744,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             &executors,
         )
     }
-        .unwrap_or_else(|error| output::fatal(error));
+    .unwrap_or_else(|error| output::fatal(error));
     if let Some(assigned) = &assigned {
         let candidate = assigned.tree.serialize();
         let parsed = soc::board(&candidate).unwrap_or_else(|error| output::fatal(&error));

@@ -213,7 +213,11 @@ mod tests {
         assert_eq!(cache.entries(), 0);
     }
 
-    #[cfg(all(feature = "std", target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        feature = "std",
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux")
+    ))]
     #[test]
     fn actual_native_selection_tracks_allocation_replacement_and_arena_reset() {
         use crate::execution::platform::Mapping;
@@ -237,7 +241,11 @@ mod tests {
                         code
                     }
                 };
-                let mapping = self.mappings.iter().find(|mapping| mapping.entry() == installed.0).unwrap();
+                let mapping = self
+                    .mappings
+                    .iter()
+                    .find(|mapping| mapping.entry() == installed.0)
+                    .unwrap();
                 let mut state = GuestState::default();
                 // SAFETY: only compiler-produced baseline leaf code is
                 // recorded; this exact RX mapping retains it through return.
@@ -253,10 +261,18 @@ mod tests {
             // MOVZ X0, #imm16; RET X30. This fixture uses the real compiler
             // and leaf ABI, with no hand-authored native execution shortcut.
             let source: Vec<_> = [0xd2800000 | (value << 5), 0xd65f03c0]
-                .into_iter().flat_map(u32::to_le_bytes).collect();
-            stela_compiler::compile(&source, GuestAddress(0x1000)).unwrap().x86_64_code
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            stela_compiler::compile(&source, GuestAddress(0x1000))
+                .unwrap()
+                .x86_64_code
         };
-        let mut arena = ExecutableArena { cache: InstalledCodeCache::default(), mappings: Vec::new(), installs: 0 };
+        let mut arena = ExecutableArena {
+            cache: InstalledCodeCache::default(),
+            mappings: Vec::new(),
+            installs: 0,
+        };
         let original = Arc::new(compile(7));
         assert_eq!(arena.run(&original), 7);
         for _ in 0..16 {

@@ -40,7 +40,10 @@ use NativeCpuError as Refusal;
 
 #[cfg_attr(
     not(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))),
-    allow(dead_code, reason = "identity probes are selected on freestanding hardware")
+    allow(
+        dead_code,
+        reason = "identity probes are selected on freestanding hardware"
+    )
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdentityProbe {
@@ -263,7 +266,11 @@ impl NativeSystemTarget {
         worker: WorkerId,
         lease: Option<NativeCpuLease>,
     ) -> Result<Self, Refusal> {
-        Self::capture_with(lease.map(|lease| (worker, lease)), observe, observe_controls)
+        Self::capture_with(
+            lease.map(|lease| (worker, lease)),
+            observe,
+            observe_controls,
+        )
     }
 
     fn capture_with(
@@ -329,7 +336,10 @@ impl NativeSystemTarget {
     }
 }
 
-#[cfg(any(test, all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))))]
+#[cfg(any(
+    test,
+    all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))
+))]
 #[derive(Debug, Default, Clone, Copy)]
 struct Cpuid {
     eax: u32,
@@ -338,7 +348,10 @@ struct Cpuid {
     edx: u32,
 }
 
-#[cfg(any(test, all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))))]
+#[cfg(any(
+    test,
+    all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))
+))]
 impl IdentityProbe {
     fn read(self, mut cpuid: impl FnMut(u32, u32) -> Cpuid) -> Result<u32, Refusal> {
         match self {
@@ -355,7 +368,10 @@ impl IdentityProbe {
     }
 }
 
-#[cfg(any(test, all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))))]
+#[cfg(any(
+    test,
+    all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))
+))]
 fn enumerate(mut cpuid: impl FnMut(u32, u32) -> Cpuid) -> Result<(CpuDeclarations, u32), Refusal> {
     let identity = cpuid(0, 0);
     let maximum = identity.eax;
@@ -380,26 +396,40 @@ fn enumerate(mut cpuid: impl FnMut(u32, u32) -> Cpuid) -> Result<(CpuDeclaration
             break;
         }
     }
-    if probe == IdentityProbe::Legacy && vendor == TargetCpu::AMD_VENDOR
-        && extended >= 0x8000_001e && ext.ecx & (1 << 22) != 0
+    if probe == IdentityProbe::Legacy
+        && vendor == TargetCpu::AMD_VENDOR
+        && extended >= 0x8000_001e
+        && ext.ecx & (1 << 22) != 0
     {
         probe = IdentityProbe::Amd;
         apic_id = probe.read(&mut cpuid)?;
     }
-    Ok((CpuDeclarations {
-        vendor,
-        cpuid1_ecx: basic.ecx & ((1 << 13) | (1 << 28)),
-        cpuid1_edx: basic.edx & (CPUID_FLOOR_EDX | (1 << 8)),
-        extended_edx: ext.edx & CPUID_LONG_NX,
-        cpuid7_ecx: if maximum >= 7 { cpuid(7, 0).ecx & (1 << 16) } else { 0 },
-        identity: probe,
-    }, apic_id))
+    Ok((
+        CpuDeclarations {
+            vendor,
+            cpuid1_ecx: basic.ecx & ((1 << 13) | (1 << 28)),
+            cpuid1_edx: basic.edx & (CPUID_FLOOR_EDX | (1 << 8)),
+            extended_edx: ext.edx & CPUID_LONG_NX,
+            cpuid7_ecx: if maximum >= 7 {
+                cpuid(7, 0).ecx & (1 << 16)
+            } else {
+                0
+            },
+            identity: probe,
+        },
+        apic_id,
+    ))
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
 fn cpuid(leaf: u32, subleaf: u32) -> Cpuid {
     let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
-    Cpuid { eax: r.eax, ebx: r.ebx, ecx: r.ecx, edx: r.edx }
+    Cpuid {
+        eax: r.eax,
+        ebx: r.ebx,
+        ecx: r.ecx,
+        edx: r.edx,
+    }
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
@@ -428,14 +458,24 @@ fn controls(cs: u16, flags: u64, apic_id: u32) -> NativeControls {
         asm!("rdmsr", in("ecx") 0xc000_0080u32, out("eax") low, out("edx") high,
             options(nostack, preserves_flags));
     }
-    NativeControls { apic_id, cs, cr0, cr4, flags, efer: u64::from(low) | u64::from(high) << 32 }
+    NativeControls {
+        apic_id,
+        cs,
+        cr0,
+        cr4,
+        flags,
+        efer: u64::from(low) | u64::from(high) << 32,
+    }
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
 fn observe() -> Result<Observation, Refusal> {
     let (cs, flags) = preamble()?;
     let (declarations, apic_id) = enumerate(cpuid)?;
-    Ok(Observation { declarations, controls: controls(cs, flags, apic_id) })
+    Ok(Observation {
+        declarations,
+        controls: controls(cs, flags, apic_id),
+    })
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
@@ -446,10 +486,14 @@ fn observe_controls(probe: IdentityProbe) -> Result<NativeControls, Refusal> {
 }
 
 #[cfg(not(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))))]
-fn observe() -> Result<Observation, Refusal> { Err(Refusal::UnsupportedHost) }
+fn observe() -> Result<Observation, Refusal> {
+    Err(Refusal::UnsupportedHost)
+}
 
 #[cfg(not(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))))]
-fn observe_controls(_: IdentityProbe) -> Result<NativeControls, Refusal> { Err(Refusal::UnsupportedHost) }
+fn observe_controls(_: IdentityProbe) -> Result<NativeControls, Refusal> {
+    Err(Refusal::UnsupportedHost)
+}
 
 #[cfg(test)]
 mod tests {
@@ -604,7 +648,8 @@ mod tests {
                 let mut changed = actual;
                 changed.declarations.cpuid1_edx &= !(1 << bit);
                 assert_eq!(
-                    NativeCpuOwner::admit(WorkerId(17), actual.controls.apic_id, changed).unwrap_err(),
+                    NativeCpuOwner::admit(WorkerId(17), actual.controls.apic_id, changed)
+                        .unwrap_err(),
                     Refusal::MissingCpuFeatures
                 );
             }
@@ -635,25 +680,70 @@ mod tests {
         for cs in [3, 0x1b] {
             cases.push((NativeControls { cs, ..base }, Refusal::Privilege));
         }
-        cases.push((NativeControls { flags: IF, ..base }, Refusal::InterruptsEnabled));
-        cases.push((NativeControls { apic_id: 0x34, ..base }, Refusal::ProcessorChanged));
+        cases.push((
+            NativeControls { flags: IF, ..base },
+            Refusal::InterruptsEnabled,
+        ));
+        cases.push((
+            NativeControls {
+                apic_id: 0x34,
+                ..base
+            },
+            Refusal::ProcessorChanged,
+        ));
         for bit in [0, 1, 5, 16, 31] {
-            cases.push((NativeControls { cr0: base.cr0 & !(1 << bit), ..base }, Refusal::Controls));
+            cases.push((
+                NativeControls {
+                    cr0: base.cr0 & !(1 << bit),
+                    ..base
+                },
+                Refusal::Controls,
+            ));
         }
         for bit in [2, 3, 29, 30] {
-            cases.push((NativeControls { cr0: base.cr0 | (1 << bit), ..base }, Refusal::Controls));
+            cases.push((
+                NativeControls {
+                    cr0: base.cr0 | (1 << bit),
+                    ..base
+                },
+                Refusal::Controls,
+            ));
         }
         for bit in [5, 9, 10] {
-            cases.push((NativeControls { cr4: base.cr4 & !(1 << bit), ..base }, Refusal::Controls));
+            cases.push((
+                NativeControls {
+                    cr4: base.cr4 & !(1 << bit),
+                    ..base
+                },
+                Refusal::Controls,
+            ));
         }
         for bit in [7, 17, 23] {
-            cases.push((NativeControls { cr4: base.cr4 | (1 << bit), ..base }, Refusal::Controls));
+            cases.push((
+                NativeControls {
+                    cr4: base.cr4 | (1 << bit),
+                    ..base
+                },
+                Refusal::Controls,
+            ));
         }
         for bit in [10, 11] {
-            cases.push((NativeControls { efer: base.efer & !(1 << bit), ..base }, Refusal::Controls));
+            cases.push((
+                NativeControls {
+                    efer: base.efer & !(1 << bit),
+                    ..base
+                },
+                Refusal::Controls,
+            ));
         }
         // LA57 without an immutable hardware declaration refuses at capture.
-        cases.push((NativeControls { cr4: base.cr4 | (1 << 12), ..base }, Refusal::Controls));
+        cases.push((
+            NativeControls {
+                cr4: base.cr4 | (1 << 12),
+                ..base
+            },
+            Refusal::Controls,
+        ));
         cases
     }
 
@@ -661,11 +751,20 @@ mod tests {
     fn leased_capture_and_all_three_rechecks_validate_actual_live_controls() {
         let actual = baseline();
         for (changed, expected) in invalid_controls() {
-            let candidate = Observation { controls: changed, ..actual };
-            assert!(NativeCpuOwner::admit(WorkerId(17), actual.controls.apic_id, candidate).is_err());
+            let candidate = Observation {
+                controls: changed,
+                ..actual
+            };
+            assert!(
+                NativeCpuOwner::admit(WorkerId(17), actual.controls.apic_id, candidate).is_err()
+            );
             for boundary in 0..4 {
                 let owner = modeled_owner(actual);
-                let initial = if boundary == 0 { changed } else { actual.controls };
+                let initial = if boundary == 0 {
+                    changed
+                } else {
+                    actual.controls
+                };
                 let proof = modeled_capture(&owner, initial);
                 if boundary == 0 {
                     assert_eq!(proof.unwrap_err(), expected);
@@ -673,12 +772,23 @@ mod tests {
                 }
                 let proof = proof.unwrap();
                 for recheck in 1..=boundary {
-                    let live = if recheck == boundary { changed } else { actual.controls };
+                    let live = if recheck == boundary {
+                        changed
+                    } else {
+                        actual.controls
+                    };
                     let result = proof.revalidate_with(
                         || panic!("leased recheck cannot enumerate declarations"),
                         |_| Ok(live),
                     );
-                    assert_eq!(result, if recheck == boundary { Err(expected) } else { Ok(()) });
+                    assert_eq!(
+                        result,
+                        if recheck == boundary {
+                            Err(expected)
+                        } else {
+                            Ok(())
+                        }
+                    );
                 }
             }
         }
@@ -690,10 +800,22 @@ mod tests {
         let owner = modeled_owner(actual);
         let proof = modeled_capture(&owner, actual.controls).unwrap();
         for changed in [
-            NativeControls { cs: 16, ..actual.controls },
-            NativeControls { cr0: actual.controls.cr0 | (1 << 18), ..actual.controls },
-            NativeControls { cr4: actual.controls.cr4 | (1 << 18), ..actual.controls },
-            NativeControls { efer: actual.controls.efer | 1, ..actual.controls },
+            NativeControls {
+                cs: 16,
+                ..actual.controls
+            },
+            NativeControls {
+                cr0: actual.controls.cr0 | (1 << 18),
+                ..actual.controls
+            },
+            NativeControls {
+                cr4: actual.controls.cr4 | (1 << 18),
+                ..actual.controls
+            },
+            NativeControls {
+                efer: actual.controls.efer | 1,
+                ..actual.controls
+            },
         ] {
             assert!(modeled_capture(&owner, changed).is_ok());
             for _boundary in 1..4 {
@@ -715,7 +837,8 @@ mod tests {
                 Some((WorkerId(18), lease.clone())),
                 || panic!("wrong worker must not enumerate"),
                 |_| panic!("wrong worker must not probe"),
-            ).unwrap_err(),
+            )
+            .unwrap_err(),
             Refusal::WorkerChanged
         );
         let proof = modeled_capture(&owner, actual.controls).unwrap();
@@ -734,7 +857,10 @@ mod tests {
         assert_eq!(lease.check(WorkerId(17)), Err(Refusal::OwnerRevoked));
         let replacement_lease = replacement.lease();
         drop(replacement);
-        assert_eq!(replacement_lease.check(WorkerId(17)), Err(Refusal::OwnerRevoked));
+        assert_eq!(
+            replacement_lease.check(WorkerId(17)),
+            Err(Refusal::OwnerRevoked)
+        );
     }
 
     #[test]
@@ -745,15 +871,21 @@ mod tests {
             NativeSystemTarget::capture_with(
                 Some((WorkerId(17), owner.lease())),
                 || panic!("no fallback"),
-                |_| { owner.revoke(); Ok(actual.controls) },
-            ).unwrap_err(),
+                |_| {
+                    owner.revoke();
+                    Ok(actual.controls)
+                },
+            )
+            .unwrap_err(),
             Refusal::OwnerRevoked
         );
         for boundary in 1..4 {
             let mut owner = modeled_owner(actual);
             let proof = modeled_capture(&owner, actual.controls).unwrap();
             for _ in 1..boundary {
-                proof.revalidate_with(|| panic!("no fallback"), |_| Ok(actual.controls)).unwrap();
+                proof
+                    .revalidate_with(|| panic!("no fallback"), |_| Ok(actual.controls))
+                    .unwrap();
             }
             // At boundary 3 this models retirement during callback/finalization;
             // the post-check rejects before the caller may settle success.
@@ -769,15 +901,25 @@ mod tests {
     fn default_selection_keeps_complete_capture_and_revalidation() {
         let actual = baseline();
         let full = Cell::new(0);
-        let proof = NativeSystemTarget::capture_with(None, || {
-            full.set(full.get() + 1);
-            Ok(actual)
-        }, |_| panic!("no owner means full observation")).unwrap();
-        for _ in 1..4 {
-            proof.revalidate_with(|| {
+        let proof = NativeSystemTarget::capture_with(
+            None,
+            || {
                 full.set(full.get() + 1);
                 Ok(actual)
-            }, |_| panic!("no owner means full revalidation")).unwrap();
+            },
+            |_| panic!("no owner means full observation"),
+        )
+        .unwrap();
+        for _ in 1..4 {
+            proof
+                .revalidate_with(
+                    || {
+                        full.set(full.get() + 1);
+                        Ok(actual)
+                    },
+                    |_| panic!("no owner means full revalidation"),
+                )
+                .unwrap();
         }
         assert_eq!(full.get(), 4);
         assert!(proof.lease.is_none());
@@ -801,36 +943,83 @@ mod tests {
         assert!(proof.target().supports(TargetCpu::AtomicLoad16));
         assert!(!proof.target().supports(TargetCpu::Avx2));
         let other = modeled_owner(baseline());
-        assert_eq!(modeled_capture(&other, baseline().controls).unwrap().target(), TargetCpu::Baseline);
+        assert_eq!(
+            modeled_capture(&other, baseline().controls)
+                .unwrap()
+                .target(),
+            TargetCpu::Baseline
+        );
         owner.revoke();
         let replacement = modeled_owner(baseline());
-        assert_eq!(proof.revalidate_with(|| panic!("no fallback"), |_| Ok(rich.controls)), Err(Refusal::OwnerRevoked));
-        assert_eq!(modeled_capture(&replacement, baseline().controls).unwrap().target(), TargetCpu::Baseline);
+        assert_eq!(
+            proof.revalidate_with(|| panic!("no fallback"), |_| Ok(rich.controls)),
+            Err(Refusal::OwnerRevoked)
+        );
+        assert_eq!(
+            modeled_capture(&replacement, baseline().controls)
+                .unwrap()
+                .target(),
+            TargetCpu::Baseline
+        );
         rich.declarations.vendor = [0; 3];
         let unknown = modeled_owner(rich);
-        assert!(!modeled_capture(&unknown, rich.controls).unwrap().target().supports(TargetCpu::AtomicLoad16));
+        assert!(
+            !modeled_capture(&unknown, rich.controls)
+                .unwrap()
+                .target()
+                .supports(TargetCpu::AtomicLoad16)
+        );
     }
 
     fn declarations(
-        vendor: [u32; 3], maximum: u32, extended: u32, topology: bool,
-        leaf1f: Cpuid, leafb: Cpuid,
+        vendor: [u32; 3],
+        maximum: u32,
+        extended: u32,
+        topology: bool,
+        leaf1f: Cpuid,
+        leafb: Cpuid,
     ) -> (CpuDeclarations, u32) {
         enumerate(|leaf, _| match leaf {
-            0 => Cpuid { eax: maximum, ebx: vendor[0], edx: vendor[1], ecx: vendor[2] },
-            1 => Cpuid { ebx: 0x34 << 24, edx: CPUID_FLOOR_EDX, ..Cpuid::default() },
-            0x8000_0000 => Cpuid { eax: extended, ..Cpuid::default() },
-            0x8000_0001 => Cpuid { ecx: if topology { 1 << 22 } else { 0 }, edx: CPUID_LONG_NX, ..Cpuid::default() },
+            0 => Cpuid {
+                eax: maximum,
+                ebx: vendor[0],
+                edx: vendor[1],
+                ecx: vendor[2],
+            },
+            1 => Cpuid {
+                ebx: 0x34 << 24,
+                edx: CPUID_FLOOR_EDX,
+                ..Cpuid::default()
+            },
+            0x8000_0000 => Cpuid {
+                eax: extended,
+                ..Cpuid::default()
+            },
+            0x8000_0001 => Cpuid {
+                ecx: if topology { 1 << 22 } else { 0 },
+                edx: CPUID_LONG_NX,
+                ..Cpuid::default()
+            },
             0x1f => leaf1f,
             0xb => leafb,
-            0x8000_001e => Cpuid { eax: 0x1234, ..Cpuid::default() },
+            0x8000_001e => Cpuid {
+                eax: 0x1234,
+                ..Cpuid::default()
+            },
             7 => Cpuid::default(),
             _ => panic!("unexpected leaf"),
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     #[test]
     fn identity_probe_selection_obeys_maxima_amd_gate_and_full_width_topology() {
-        let valid = Cpuid { ebx: 2, ecx: 1 << 8, edx: 0x1234, ..Cpuid::default() };
+        let valid = Cpuid {
+            ebx: 2,
+            ecx: 1 << 8,
+            edx: 0x1234,
+            ..Cpuid::default()
+        };
         let invalid = Cpuid::default();
         for (maximum, first, second, expected) in [
             (1, valid, valid, IdentityProbe::Legacy),
@@ -839,32 +1028,84 @@ mod tests {
             (0x1f, invalid, valid, IdentityProbe::Topology(0xb)),
             (0x1f, invalid, invalid, IdentityProbe::Legacy),
         ] {
-            let (d, id) = declarations(TargetCpu::INTEL_VENDOR, maximum, 0x8000_0001, false, first, second);
+            let (d, id) = declarations(
+                TargetCpu::INTEL_VENDOR,
+                maximum,
+                0x8000_0001,
+                false,
+                first,
+                second,
+            );
             assert_eq!(d.identity, expected);
-            assert_eq!(id, if expected == IdentityProbe::Legacy { 0x34 } else { 0x1234 });
+            assert_eq!(
+                id,
+                if expected == IdentityProbe::Legacy {
+                    0x34
+                } else {
+                    0x1234
+                }
+            );
         }
         for vendor in [TargetCpu::AMD_VENDOR, TargetCpu::INTEL_VENDOR, [0; 3]] {
             for maximum in [0x8000_0001, 0x8000_001d, 0x8000_001e] {
                 for topology in [false, true] {
                     let (d, id) = declarations(vendor, 1, maximum, topology, invalid, invalid);
                     let amd = vendor == TargetCpu::AMD_VENDOR && maximum >= 0x8000_001e && topology;
-                    assert_eq!(d.identity, if amd { IdentityProbe::Amd } else { IdentityProbe::Legacy });
+                    assert_eq!(
+                        d.identity,
+                        if amd {
+                            IdentityProbe::Amd
+                        } else {
+                            IdentityProbe::Legacy
+                        }
+                    );
                     assert_eq!(id, if amd { 0x1234 } else { 0x34 });
                 }
             }
         }
         // A selected topology route never silently falls back or truncates
         // after a now-invalid record. Count uses the architectural low 16 bits.
-        for invalid in [Cpuid { ebx: 1 << 16, ..valid }, Cpuid { ecx: 0, ..valid }] {
-            assert_eq!(IdentityProbe::Topology(0x1f).read(|leaf, _| {
-                assert_eq!(leaf, 0x1f);
-                invalid
-            }), Err(Refusal::ProcessorChanged));
+        for invalid in [
+            Cpuid {
+                ebx: 1 << 16,
+                ..valid
+            },
+            Cpuid { ecx: 0, ..valid },
+        ] {
+            assert_eq!(
+                IdentityProbe::Topology(0x1f).read(|leaf, _| {
+                    assert_eq!(leaf, 0x1f);
+                    invalid
+                }),
+                Err(Refusal::ProcessorChanged)
+            );
         }
-        assert_eq!(IdentityProbe::Amd.read(|leaf, _| { assert_eq!(leaf, 0x8000_001e); valid }), Ok(valid.eax));
-        assert_eq!(IdentityProbe::Legacy.read(|leaf, _| { assert_eq!(leaf, 1); Cpuid { ebx: 0xfe << 24, ..valid } }), Ok(0xfe));
+        assert_eq!(
+            IdentityProbe::Amd.read(|leaf, _| {
+                assert_eq!(leaf, 0x8000_001e);
+                valid
+            }),
+            Ok(valid.eax)
+        );
+        assert_eq!(
+            IdentityProbe::Legacy.read(|leaf, _| {
+                assert_eq!(leaf, 1);
+                Cpuid {
+                    ebx: 0xfe << 24,
+                    ..valid
+                }
+            }),
+            Ok(0xfe)
+        );
         for (maximum, extended) in [(0, 0x8000_0001), (1, 0x8000_0000)] {
-            assert_eq!(enumerate(|leaf, _| Cpuid { eax: if leaf == 0 { maximum } else { extended }, ..Cpuid::default() }).unwrap_err(), Refusal::MissingCpuFeatures);
+            assert_eq!(
+                enumerate(|leaf, _| Cpuid {
+                    eax: if leaf == 0 { maximum } else { extended },
+                    ..Cpuid::default()
+                })
+                .unwrap_err(),
+                Refusal::MissingCpuFeatures
+            );
         }
     }
 
@@ -875,29 +1116,70 @@ mod tests {
         let (d, id) = enumerate(|leaf, _| {
             enumerations.set(enumerations.get() + 1);
             match leaf {
-                0 => Cpuid { eax: 0x1f, ebx: TargetCpu::INTEL_VENDOR[0], edx: TargetCpu::INTEL_VENDOR[1], ecx: TargetCpu::INTEL_VENDOR[2] },
-                1 => Cpuid { edx: CPUID_FLOOR_EDX, ..Cpuid::default() },
-                0x8000_0000 => Cpuid { eax: 0x8000_0001, ..Cpuid::default() },
-                0x8000_0001 => Cpuid { edx: CPUID_LONG_NX, ..Cpuid::default() },
-                0x1f => Cpuid { ebx: 2, ecx: 1 << 8, edx: actual.controls.apic_id, ..Cpuid::default() },
+                0 => Cpuid {
+                    eax: 0x1f,
+                    ebx: TargetCpu::INTEL_VENDOR[0],
+                    edx: TargetCpu::INTEL_VENDOR[1],
+                    ecx: TargetCpu::INTEL_VENDOR[2],
+                },
+                1 => Cpuid {
+                    edx: CPUID_FLOOR_EDX,
+                    ..Cpuid::default()
+                },
+                0x8000_0000 => Cpuid {
+                    eax: 0x8000_0001,
+                    ..Cpuid::default()
+                },
+                0x8000_0001 => Cpuid {
+                    edx: CPUID_LONG_NX,
+                    ..Cpuid::default()
+                },
+                0x1f => Cpuid {
+                    ebx: 2,
+                    ecx: 1 << 8,
+                    edx: actual.controls.apic_id,
+                    ..Cpuid::default()
+                },
                 7 => Cpuid::default(),
                 _ => panic!("unexpected leaf"),
             }
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(enumerations.get(), 6);
-        let owner = modeled_owner(Observation { declarations: d, controls: NativeControls { apic_id: id, ..actual.controls } });
+        let owner = modeled_owner(Observation {
+            declarations: d,
+            controls: NativeControls {
+                apic_id: id,
+                ..actual.controls
+            },
+        });
         let probes = Cell::new(0);
         let live = |probe: IdentityProbe| {
             let apic_id = probe.read(|leaf, _| {
                 assert_eq!(leaf, 0x1f);
                 probes.set(probes.get() + 1);
-                Cpuid { ebx: 2, ecx: 1 << 8, edx: id, ..Cpuid::default() }
+                Cpuid {
+                    ebx: 2,
+                    ecx: 1 << 8,
+                    edx: id,
+                    ..Cpuid::default()
+                }
             })?;
-            Ok(NativeControls { apic_id, ..actual.controls })
+            Ok(NativeControls {
+                apic_id,
+                ..actual.controls
+            })
         };
-        let proof = NativeSystemTarget::capture_with(Some((WorkerId(17), owner.lease())), || panic!("no reenumeration"), live).unwrap();
+        let proof = NativeSystemTarget::capture_with(
+            Some((WorkerId(17), owner.lease())),
+            || panic!("no reenumeration"),
+            live,
+        )
+        .unwrap();
         for _ in 1..4 {
-            proof.revalidate_with(|| panic!("no reenumeration"), live).unwrap();
+            proof
+                .revalidate_with(|| panic!("no reenumeration"), live)
+                .unwrap();
         }
         assert_eq!(probes.get(), 4);
         assert_eq!(enumerations.get(), 6);
