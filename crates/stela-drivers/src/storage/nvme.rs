@@ -123,8 +123,7 @@ struct Controller {
     /// No buffer or queue may be reused until a new, acknowledged reset.
     fault: Option<BlockError>,
     owned: Option<owned::Owner>,
-    retired: bool,
-    prepared: bool,
+    teardown: owned::Teardown,
     ready_timeout_us: u64,
 }
 
@@ -171,9 +170,11 @@ impl Controller {
 
     fn initialize(&mut self) -> Result<(), BlockError> {
         if let Some(owner) = self.owned.as_mut() {
-            // Retain a possibly changed owner even if prepare reports failure.
-            self.prepared = true;
+            // An attempted prepare may have effects without establishing D0.
+            // Only success authorizes NVMe MMIO; uncertain failure quarantines.
+            self.teardown = owned::Teardown::Preparing;
             owner.lifecycle.prepare()?;
+            self.teardown = owned::Teardown::Active;
         }
         let capabilities = self.registers.read64(CAPABILITIES)?;
         self.doorbell_stride = 4usize << (capabilities >> 32 & 0xf);
@@ -425,8 +426,7 @@ pub fn attach(
         clock: handoff.clock,
         fault: None,
         owned: None,
-        retired: false,
-        prepared: false,
+        teardown: owned::Teardown::Unprepared,
         ready_timeout_us: 500_000,
     };
     controller.initialize()?;
@@ -681,8 +681,7 @@ mod tests {
                 },
                 fault: None,
                 owned: None,
-                retired: false,
-                prepared: false,
+                teardown: owned::Teardown::Unprepared,
                 ready_timeout_us: 500_000,
             };
             Self {

@@ -56,6 +56,8 @@ pub unsafe trait Registers {
 /// `enable_dma` establishes actual memory decode/BME for this exact domain-bound requester; errors after any
 /// possible effect retain that authority. `disable_dma` acknowledges actual
 /// BME-clear and excludes new requester DMA. It is not a payload-write drain.
+/// Failed `prepare` does not authorize any NVMe MMIO: the caller quarantines
+/// the complete owner because no generic recovery can establish D0.
 /// `release` returns owners only after its caller's completed teardown; failed
 /// operations retain the same hardware epoch and are retryable or quarantined.
 pub unsafe trait Lifecycle {
@@ -73,7 +75,9 @@ impl MappingRegisters {
     pub fn new(mapping: Mapping) -> Result<Self, (BlockError, Mapping)> {
         if mapping.attribute() != Ok(CacheAttribute::Uncached)
             || mapping.protection() != Ok(Protection::ReadWrite)
-            || !mapping.bytes().is_ok_and(|bytes| bytes >= 0x2000)
+            || !mapping
+                .address(0, 0x2000)
+                .is_ok_and(|p| (p.as_ptr() as usize).is_multiple_of(align_of::<u32>()))
         {
             return Err((register_error(), mapping));
         }
@@ -83,10 +87,14 @@ impl MappingRegisters {
         if !offset.is_multiple_of(4) {
             return Err(register_error());
         }
-        self.mapping
-            .address(offset, 4)
-            .map(|p| p.as_ptr().cast())
-            .map_err(|_| register_error())
+        let pointer = self
+            .mapping
+            .address(offset, size_of::<u32>())
+            .map_err(|_| register_error())?;
+        if !(pointer.as_ptr() as usize).is_multiple_of(align_of::<u32>()) {
+            return Err(register_error());
+        }
+        Ok(pointer.as_ptr().cast())
     }
 }
 // SAFETY: the owned Mapping retains the actual exclusive resource, UC policy,
@@ -330,6 +338,21 @@ impl Drop for Memory {
         // controller additionally retains the CPU/config/root owners on failure.
     }
 }
+/// Monotonic observations, not inferred hardware state. A failed step leaves
+/// its phase unchanged; completed hardware steps are never replayed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Teardown {
+    Unprepared,
+    Preparing,
+    Active,
+    Stopped,
+    Contained,
+    Drained,
+    RamUnmapped,
+    RegistersRetired,
+    Released,
+}
+
 pub(super) struct Owner {
     pub(super) lifecycle: Box<dyn Lifecycle>,
     pub(super) domain: Arc<dyn DmaDomain>,
@@ -384,8 +407,7 @@ pub unsafe fn attach(
             lifecycle,
             domain: domain.clone(),
         }),
-        retired: false,
-        prepared: false,
+        teardown: Teardown::Unprepared,
         ready_timeout_us: 500_000,
     };
     controller.admin.submissions =
@@ -415,34 +437,65 @@ impl Controller {
     /// Stop once for all sibling namespaces. A failed step retains every
     /// remaining owner, and a retry continues against the same exact epoch.
     fn retire_owned(&mut self) -> Result<(), BlockError> {
-        if self.retired || self.owned.is_none() {
+        if self.teardown == Teardown::Released || self.owned.is_none() {
             return Ok(());
         }
         self.shut_down = true;
-        if self.prepared {
-            self.registers.write32(CONFIGURATION, 0)?;
-            self.wait_status(self.ready_timeout_us, |status| status & READY == 0)?;
+        match self.teardown {
+            Teardown::Preparing => {
+                // The hierarchy may still be in D3. Neither reset nor any
+                // register read is authorized. Drop retains the complete epoch.
+                return Err(BlockError::Unsupported(
+                    "NVMe uncertain preparation quarantined",
+                ));
+            }
+            Teardown::Unprepared => {
+                // No prepare/engine/register effect was attempted; attachment
+                // required an already contained hierarchy with no DMA engine.
+                self.teardown = Teardown::Stopped;
+            }
+            Teardown::Active => {
+                self.registers.write32(CONFIGURATION, 0)?;
+                self.wait_status(self.ready_timeout_us, |status| status & READY == 0)?;
+                self.teardown = Teardown::Stopped;
+            }
+            _ => {}
         }
         let owner = self.owned.as_mut().expect("owned");
-        owner.lifecycle.disable_dma()?;
-        // SAFETY: controller disabled/RDY0 and actual requester BME contained.
-        unsafe { owner.domain.drain_posted_writes() }.map_err(map_dma_error)?;
-        for buffer in [
-            &mut self.admin.submissions,
-            &mut self.admin.completions,
-            &mut self.io.submissions,
-            &mut self.io.completions,
-            &mut self.bounce,
-            &mut self.prp_list,
-        ] {
-            // SAFETY: stopped submissions/requester, original-domain payload
-            // drain completed, synchronous engine has no callbacks/workers.
-            unsafe { buffer.unmap()? };
+        if self.teardown == Teardown::Stopped {
+            owner.lifecycle.disable_dma()?;
+            self.teardown = Teardown::Contained;
         }
-        // SAFETY: no device/CPU DMA access or external register view survives.
-        unsafe { self.registers.retire()? };
-        owner.lifecycle.release()?;
-        self.retired = true;
+        if self.teardown == Teardown::Contained {
+            // SAFETY: acknowledged stopped engine and actual BME containment.
+            unsafe { owner.domain.drain_posted_writes() }.map_err(map_dma_error)?;
+            self.teardown = Teardown::Drained;
+        }
+        if self.teardown == Teardown::Drained {
+            for buffer in [
+                &mut self.admin.submissions,
+                &mut self.admin.completions,
+                &mut self.io.submissions,
+                &mut self.io.completions,
+                &mut self.bounce,
+                &mut self.prp_list,
+            ] {
+                // SAFETY: actual stop/containment/drain remain acknowledged;
+                // each successful unmap becomes Empty before the next step.
+                // Retry therefore only visits still-retained RAM mappings.
+                unsafe { buffer.unmap()? };
+            }
+            self.teardown = Teardown::RamUnmapped;
+        }
+        if self.teardown == Teardown::RamUnmapped {
+            // SAFETY: all RAM removed, no CPU/device access survives.
+            unsafe { self.registers.retire()? };
+            self.teardown = Teardown::RegistersRetired;
+        }
+        if self.teardown == Teardown::RegistersRetired {
+            owner.lifecycle.release()?;
+            self.teardown = Teardown::Released;
+        }
         Ok(())
     }
 }
@@ -612,6 +665,14 @@ mod tests {
         fail_cpu_sync: bool,
         fail_drain: bool,
         fail_unmap: bool,
+        fail_unmap_at: Option<usize>,
+        unmap_attempts: usize,
+        fail_prepare: bool,
+        fail_retire: bool,
+        fail_release: bool,
+        mmio_accesses: usize,
+        register_owner_drops: usize,
+        lifecycle_owner_drops: usize,
         fail_disable: bool,
         stuck_ready: bool,
         coherent: bool,
@@ -650,6 +711,14 @@ mod tests {
                 fail_cpu_sync: false,
                 fail_drain: false,
                 fail_unmap: false,
+                fail_unmap_at: None,
+                unmap_attempts: 0,
+                fail_prepare: false,
+                fail_retire: false,
+                fail_release: false,
+                mmio_accesses: 0,
+                register_owner_drops: 0,
+                lifecycle_owner_drops: 0,
                 fail_disable: false,
                 stuck_ready: false,
                 coherent: true,
@@ -847,7 +916,8 @@ mod tests {
             let mut m = self.0.lock().unwrap();
             let unpublished = !m.maps[&token.id].visible;
             assert!(unpublished || (!m.enabled && !m.bme && m.drained && !m.outstanding));
-            if m.fail_unmap {
+            m.unmap_attempts += 1;
+            if m.fail_unmap || m.fail_unmap_at == Some(m.unmap_attempts) {
                 return Err(DmaError::InvalidationFailed);
             }
             m.maps.remove(&token.id).expect("live exact map");
@@ -932,7 +1002,8 @@ mod tests {
     unsafe impl Registers for Regs {
         fn read32(&self, offset: usize) -> Result<u32, BlockError> {
             assert!(offset < 0x2000 && offset.is_multiple_of(4));
-            let m = self.0.lock().unwrap();
+            let mut m = self.0.lock().unwrap();
+            m.mmio_accesses += 1;
             assert!(m.prepared && !m.retired);
             if m.fail_read {
                 return Err(register_error());
@@ -945,6 +1016,7 @@ mod tests {
         fn write32(&self, offset: usize, value: u32) -> Result<(), BlockError> {
             assert!(offset < 0x2000 && offset.is_multiple_of(4));
             let mut m = self.0.lock().unwrap();
+            m.mmio_accesses += 1;
             assert!(m.prepared && !m.retired);
             m.registers.insert(offset, value);
             match offset {
@@ -991,18 +1063,37 @@ mod tests {
         unsafe fn retire(&mut self) -> Result<(), BlockError> {
             let mut m = self.0.lock().unwrap();
             assert!(m.maps.is_empty() && m.drained && !m.bme && !m.enabled);
+            m.events.push("retire_regs_attempt");
+            if m.fail_retire {
+                return Err(register_error());
+            }
             m.retired = true;
             m.events.push("retire_regs");
             Ok(())
         }
     }
+    impl Drop for Regs {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().register_owner_drops += 1;
+        }
+    }
     struct Life(Arc<Mutex<Model>>);
+    impl Drop for Life {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().lifecycle_owner_drops += 1;
+        }
+    }
     // SAFETY: models exclusive hierarchy ownership, actual separate preparation
     // and BME effects, and refuses release before full native-owner teardown.
     unsafe impl Lifecycle for Life {
         fn prepare(&mut self) -> Result<(), BlockError> {
             let mut m = self.0.lock().unwrap();
             assert!(!m.bme);
+            m.events.push("prepare_attempt");
+            if m.fail_prepare {
+                // Actual power remains D3; no BAR access is possible.
+                return Err(register_error());
+            }
             m.prepared = true;
             m.events.push("prepare");
             Ok(())
@@ -1027,6 +1118,10 @@ mod tests {
         fn release(&mut self) -> Result<(), BlockError> {
             let mut m = self.0.lock().unwrap();
             assert!(m.retired && m.maps.is_empty() && !m.bme && m.drained);
+            m.events.push("release_attempt");
+            if m.fail_release {
+                return Err(register_error());
+            }
             m.released = true;
             m.events.push("release");
             Ok(())
@@ -1259,5 +1354,239 @@ mod tests {
         assert!(a.namespaces[0].write(0, &[1; 512]).is_err());
         f.model.lock().unwrap().fail_read = false;
         a.namespaces[0].retire_owned().unwrap();
+    }
+    #[test]
+    fn owned_failed_prepare_in_d3_quarantines_without_any_nvme_mmio() {
+        let f = Fixture::new();
+        f.model.lock().unwrap().fail_prepare = true;
+        assert!(f.attach().is_err());
+        let m = f.model.lock().unwrap();
+        assert!(!m.prepared && !m.enabled && !m.bme);
+        assert_eq!(m.mmio_accesses, 0);
+        assert_eq!(
+            m.events.iter().filter(|e| **e == "prepare_attempt").count(),
+            1
+        );
+        assert_eq!(m.maps.len(), 6);
+        assert_eq!(m.unmap_attempts, 0);
+        assert!(!m.retired && !m.released);
+        assert_eq!((m.register_owner_drops, m.lifecycle_owner_drops), (0, 0));
+        assert_eq!(f.source.released.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn owned_register_retirement_failure_retries_only_that_step_and_release() {
+        let f = Fixture::new();
+        let mut a = f.attach().unwrap();
+        f.model.lock().unwrap().fail_retire = true;
+        assert!(a.namespaces[0].retire_owned().is_err());
+        let accesses = {
+            let m = f.model.lock().unwrap();
+            assert!(m.maps.is_empty() && m.drained && !m.bme && !m.enabled);
+            assert!(!m.retired && !m.released);
+            assert_eq!(m.unmap_attempts, 6);
+            assert_eq!((m.register_owner_drops, m.lifecycle_owner_drops), (0, 0));
+            assert_eq!(f.source.released.load(Ordering::SeqCst), 6);
+            m.mmio_accesses
+        };
+        f.model.lock().unwrap().fail_retire = false;
+        a.namespaces[0].retire_owned().unwrap();
+        let m = f.model.lock().unwrap();
+        assert_eq!(m.mmio_accesses, accesses);
+        assert_eq!(m.unmap_attempts, 6);
+        assert_eq!(
+            m.events
+                .iter()
+                .filter(|e| **e == "retire_regs_attempt")
+                .count(),
+            2
+        );
+        assert_eq!(m.events.iter().filter(|e| **e == "bme_off").count(), 1);
+        assert_eq!(m.events.iter().filter(|e| **e == "drain").count(), 1);
+        assert!(m.retired && m.released);
+    }
+
+    #[test]
+    fn owned_hierarchy_release_failure_never_accesses_retired_registers_on_retry() {
+        let f = Fixture::new();
+        let mut a = f.attach().unwrap();
+        f.model.lock().unwrap().fail_release = true;
+        assert!(a.namespaces[0].retire_owned().is_err());
+        let accesses = {
+            let m = f.model.lock().unwrap();
+            assert!(m.retired && !m.released && m.maps.is_empty());
+            assert_eq!((m.register_owner_drops, m.lifecycle_owner_drops), (0, 0));
+            m.mmio_accesses
+        };
+        f.model.lock().unwrap().fail_release = false;
+        a.namespaces[0].retire_owned().unwrap();
+        a.namespaces[0].retire_owned().unwrap();
+        let m = f.model.lock().unwrap();
+        assert_eq!(m.mmio_accesses, accesses);
+        assert_eq!(m.unmap_attempts, 6);
+        assert_eq!(
+            m.events
+                .iter()
+                .filter(|e| **e == "retire_regs_attempt")
+                .count(),
+            1
+        );
+        assert_eq!(
+            m.events.iter().filter(|e| **e == "release_attempt").count(),
+            2
+        );
+        assert!(m.released);
+    }
+
+    #[test]
+    fn owned_partial_ram_unmap_retries_only_remaining_original_leases() {
+        for nth in 2..=6 {
+            let f = Fixture::new();
+            let mut a = f.attach().unwrap();
+            let ids: Vec<_> = f.model.lock().unwrap().maps.keys().copied().collect();
+            f.model.lock().unwrap().fail_unmap_at = Some(nth);
+            assert!(a.namespaces[0].retire_owned().is_err());
+            let accesses = {
+                let m = f.model.lock().unwrap();
+                assert_eq!(m.maps.keys().copied().collect::<Vec<_>>(), ids[nth - 1..]);
+                assert_eq!(m.unmap_attempts, nth);
+                assert!(m.drained && !m.bme && !m.enabled && !m.retired && !m.released);
+                assert_eq!(f.source.released.load(Ordering::SeqCst), nth - 1);
+                m.mmio_accesses
+            };
+            f.model.lock().unwrap().fail_unmap_at = None;
+            a.namespaces[0].retire_owned().unwrap();
+            let m = f.model.lock().unwrap();
+            assert_eq!(m.mmio_accesses, accesses);
+            assert_eq!(m.unmap_attempts, 7);
+            assert_eq!(m.events.iter().filter(|e| **e == "drain").count(), 1);
+            assert_eq!(m.events.iter().filter(|e| **e == "bme_off").count(), 1);
+            assert!(m.released && m.retired && m.maps.is_empty());
+            assert_eq!(f.source.released.load(Ordering::SeqCst), 6);
+        }
+    }
+
+    #[repr(align(4096))]
+    struct RegisterPages([u8; 0x4000]);
+    struct RegisterPlatform {
+        pages: Mutex<Box<RegisterPages>>,
+        unmaps: AtomicUsize,
+    }
+    struct RegisterResource(Arc<AtomicUsize>);
+    impl Drop for RegisterResource {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    // SAFETY: isolated model reservation, retained through the real Authority;
+    // this physical interval is metadata, not a CPU or DMA pointer.
+    unsafe impl crate::bus::mmio::owned::ResourceBacking for RegisterResource {
+        fn physical_span(&self) -> crate::bus::mmio::owned::PhysicalSpan {
+            crate::bus::mmio::owned::PhysicalSpan::new(0x2000_0000, 0x4000).unwrap()
+        }
+        fn kind(&self) -> crate::bus::mmio::owned::ResourceKind {
+            crate::bus::mmio::owned::ResourceKind::Registers
+        }
+    }
+    // SAFETY: isolated aligned RAM models UC register storage, retained by this
+    // actual platform owner. Real registry reservations/retirement are used;
+    // only a legitimate sub-page Mapping offset creates an unaligned accessor.
+    unsafe impl crate::bus::mmio::owned::MappingPlatform for RegisterPlatform {
+        fn check_context(
+            &self,
+            _: crate::bus::mmio::owned::AddressSpace,
+        ) -> Result<(), crate::bus::mmio::owned::Error> {
+            Ok(())
+        }
+        unsafe fn map(
+            &self,
+            resource: &crate::bus::mmio::owned::Resource,
+            request: crate::bus::mmio::owned::MapRequest,
+        ) -> Result<crate::bus::mmio::owned::InstalledMapping, crate::bus::mmio::owned::MapFailure>
+        {
+            assert!(resource.backing().is::<RegisterResource>());
+            assert_eq!(request.physical.start(), 0x2000_0000);
+            assert!(request.physical.bytes() <= 0x4000);
+            let pointer = NonNull::new(self.pages.lock().unwrap().0.as_mut_ptr()).unwrap();
+            Ok(crate::bus::mmio::owned::InstalledMapping {
+                token: request.id,
+                cpu_base: pointer,
+                physical: request.physical,
+                attribute: request.attribute,
+                protection: request.protection,
+            })
+        }
+        unsafe fn unmap(
+            &self,
+            request: crate::bus::mmio::owned::MapRequest,
+            installed: crate::bus::mmio::owned::InstalledMapping,
+        ) -> Result<(), crate::bus::mmio::owned::Error> {
+            assert_eq!(request.id, installed.token);
+            assert_eq!(request.physical, installed.physical);
+            self.unmaps.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn owned_mapping_registers_reject_actual_unaligned_mapping_and_return_its_owner() {
+        use crate::bus::mmio::owned::{AddressSpace, Authority, Resource};
+        for offset in [1, 2, 3, 0] {
+            let platform = Arc::new(RegisterPlatform {
+                pages: Mutex::new(Box::new(RegisterPages([0; 0x4000]))),
+                unmaps: AtomicUsize::new(0),
+            });
+            let released = Arc::new(AtomicUsize::new(0));
+            // SAFETY: exclusive isolated model resource/root, no other aliases.
+            let authority = unsafe {
+                Authority::isolated_model(
+                    platform.clone(),
+                    AddressSpace {
+                        identity: 1,
+                        physical_bits: 48,
+                        virtual_bits: 48,
+                    },
+                    vec![],
+                )
+            }
+            .unwrap();
+            let mapping = authority
+                .map(
+                    Resource::new(Box::new(RegisterResource(released.clone()))),
+                    offset,
+                    0x2000,
+                    CacheAttribute::Uncached,
+                    Protection::ReadWrite,
+                )
+                .unwrap();
+            let original = mapping.address(0, 0x2000).unwrap();
+            assert_eq!((original.as_ptr() as usize) % 4, offset);
+            if offset == 0 {
+                let mut registers = MappingRegisters::new(mapping).ok().unwrap();
+                assert!(registers.read32(1).is_err());
+                assert!(registers.write32(0x1ffe, 1).is_err());
+                assert!(registers.read32(0x2000).is_err());
+                registers.write32(0x1ffc, 0x1234_abcd).unwrap();
+                assert_eq!(registers.read32(0x1ffc).unwrap(), 0x1234_abcd);
+                // SAFETY: only these synchronous CPU accesses existed.
+                unsafe { registers.retire() }.unwrap();
+                assert!(registers.read32(0).is_err());
+            } else {
+                let (_, mut returned) = MappingRegisters::new(mapping).err().unwrap();
+                assert_eq!(returned.address(0, 0x2000).unwrap(), original);
+                assert_eq!(
+                    returned.physical_span().unwrap().start(),
+                    0x2000_0000 + offset as u64
+                );
+                assert_eq!(authority.status().unwrap().live, 1);
+                assert_eq!(released.load(Ordering::SeqCst), 0);
+                assert_eq!(platform.unmaps.load(Ordering::SeqCst), 0);
+                // SAFETY: constructor refused before any register access.
+                unsafe { returned.retire() }.unwrap();
+            }
+            assert_eq!(platform.unmaps.load(Ordering::SeqCst), 1);
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+            assert_eq!(authority.status().unwrap().live, 0);
+        }
     }
 }
