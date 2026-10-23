@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Native Cypress APA Gen3 and Gen5/6 PIP I2C touchpad engines.
-//! The platform provides powered exclusive I2C ownership and a physical IRQ pin.
+//! Native Cypress APA Gen3 I2C/SMBus and Gen5/6 PIP I2C touchpad engines.
+//! The platform provides powered exclusive peripheral bus ownership and a physical IRQ pin.
 //! CPU IRQ delivery stays masked while the pin is polled. Firmware flashing,
-//! SMBus, platform rails and guest routing remain separate requirements.
+//! platform rails and guest routing remain separate requirements.
 pub use super::hid_i2c::{Interrupt, InterruptError};
 use crate::bus::i2c::{self, Address, Bus, Operation, Timer};
 mod device;
 pub mod pip;
+mod register;
 mod report;
+pub mod smbus;
 
 pub use report::{Contact, Frame};
 
@@ -37,11 +39,29 @@ pub enum ErrorKind {
     AlreadyActive,
     NeedsReset,
     Bus(i2c::Error),
+    Smbus(crate::bus::smbus::Error),
+    UnsupportedSmbusAddress(u8),
+    RegisterTransfer {
+        register: u8,
+        length: usize,
+        write: bool,
+    },
+    BlockLength {
+        command: u8,
+        expected: usize,
+        actual: usize,
+    },
     Interrupt(InterruptError),
-    HardwareState { state: HardwareState, raw: [u8; 3] },
+    HardwareState {
+        state: HardwareState,
+        raw: [u8; 3],
+    },
     InvalidFirmware([u8; 3]),
     Timeout(HardwareState),
-    PowerReadback { expected: u8, actual: u8 },
+    PowerReadback {
+        expected: u8,
+        actual: u8,
+    },
     UnsupportedGeneration(u8),
     UnsupportedProduct,
     InvalidGeometry,
@@ -49,7 +69,11 @@ pub enum ErrorKind {
     ContactCount(u8),
     ContactId(u8),
     DuplicateId(u8),
-    Coordinate { id: u8, x: u16, y: u16 },
+    Coordinate {
+        id: u8,
+        x: u16,
+        y: u16,
+    },
     IdentityChanged,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +110,25 @@ pub struct Capabilities {
     pub maximum: (u16, u16),
     pub physical_size: (u16, u16),
 }
+/// Complete, owned Gen3 register operations. Implementations must retain the
+/// original transport error, perform the actual bus framing and never replay a
+/// mutable transfer. An alternate read probe requires `allow_fallback` to remain
+/// true after the first error. The built-in providers share the same engine.
+pub trait RegisterAccess {
+    fn read_register(
+        &mut self,
+        address: Address,
+        register: u8,
+        bytes: &mut [u8],
+        allow_fallback: impl Fn() -> bool,
+    ) -> Result<(), ErrorKind>;
+    fn write_register(
+        &mut self,
+        address: Address,
+        register: u8,
+        bytes: &[u8],
+    ) -> Result<(), ErrorKind>;
+}
 pub struct Device<B, I, T> {
     bus: B,
     interrupt: I,
@@ -93,6 +136,7 @@ pub struct Device<B, I, T> {
     address: Address,
     state: State,
     capabilities: Option<Capabilities>,
+    last_status: Option<[u8; 3]>,
 }
 impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     pub fn new(bus: B, interrupt: I, timer: T, address: Address) -> Result<Self, Error> {
@@ -106,7 +150,14 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             address,
             state: State::Fresh,
             capabilities: None,
+            last_status: None,
         })
+    }
+}
+impl<B: RegisterAccess, I: Interrupt, T: Timer> Device<B, I, T> {
+    /// Most recent complete dedicated status read, including one that finished late.
+    pub fn last_status(&self) -> Option<[u8; 3]> {
+        self.last_status
     }
     pub fn state(&self) -> State {
         self.state
@@ -135,6 +186,7 @@ mod tests {
         masked: bool,
         effects: Vec<(Vec<u8>, usize, u64)>,
         fail: Option<usize>,
+        jump: Option<(usize, u64)>,
         fail_irq: bool,
         reject_power: bool,
         never_launch: bool,
@@ -159,6 +211,7 @@ mod tests {
             masked: false,
             effects: Vec::new(),
             fail: None,
+            jump: None,
             fail_irq: false,
             reject_power: false,
             never_launch: false,
@@ -250,6 +303,12 @@ mod tests {
                     }
                 }
                 _ => panic!("incorrect transaction shape"),
+            }
+            if let Some((index, elapsed)) = h.jump
+                && index == h.effects.len()
+            {
+                h.time.set(h.time.get().wrapping_add(elapsed));
+                h.jump = None;
             }
             if h.fail == Some(h.effects.len()) {
                 return Err(failure());
@@ -664,6 +723,24 @@ mod tests {
             if offset >= 3 {
                 assert_eq!(h.borrow().power, 0xff);
             }
+        }
+    }
+
+    #[test]
+    fn cyapa_i2c_complete_late_status_retains_actual_header_without_power_or_launch() {
+        for raw in [[0x8f, 8, 0], [0, 0x11, 0]] {
+            let h = hardware(raw, 0x17);
+            h.borrow_mut().jump = Some((1, 4_000_000));
+            let mut d = device(&h);
+            assert_eq!(
+                d.initialize().unwrap_err().kind,
+                ErrorKind::Timeout(device::classify(raw))
+            );
+            assert_eq!(d.last_status(), Some(raw));
+            assert_eq!(d.state(), State::Uncertain);
+            assert_eq!(h.borrow().effects.len(), 1);
+            assert_eq!(h.borrow().power, 0x17);
+            assert!(d.capabilities().is_none());
         }
     }
 }

@@ -46,7 +46,7 @@ pub(super) fn power_wait_ms(raw: u8) -> u64 {
         _ => u64::from(encoded - 5) * 20 + 50,
     }
 }
-impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
+impl<B: RegisterAccess, I: Interrupt, T: Timer> Device<B, I, T> {
     fn wait(&self, micros: u64) {
         let start = self.timer.now_us();
         while self.timer.now_us().wrapping_sub(start) < micros {
@@ -55,23 +55,13 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     }
     fn read(&mut self, register: u8, bytes: &mut [u8]) -> Result<(), ErrorKind> {
         self.bus
-            .transaction(
-                self.address,
-                &mut [Operation::Write(&[register]), Operation::Read(bytes)],
-            )
-            .map_err(ErrorKind::Bus)
+            .read_register(self.address, register, bytes, || true)
     }
     fn write_byte(&mut self, register: u8, value: u8) -> Result<(), ErrorKind> {
-        self.bus
-            .transaction(self.address, &mut [Operation::Write(&[register, value])])
-            .map_err(ErrorKind::Bus)
+        self.bus.write_register(self.address, register, &[value])
     }
     fn boot_command(&mut self, command: &[u8; 11]) -> Result<(), ErrorKind> {
-        let mut wire = [0; 12];
-        wire[1..].copy_from_slice(command);
-        self.bus
-            .transaction(self.address, &mut [Operation::Write(&wire)])
-            .map_err(ErrorKind::Bus)
+        self.bus.write_register(self.address, DATA, command)
     }
     fn quarantine<V>(&mut self, result: Result<V, ErrorKind>) -> Result<V, Error> {
         result.map_err(|kind| {
@@ -91,23 +81,29 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             _ => Err(ErrorKind::NotReady.into()),
         }
     }
-    fn hardware_state(&mut self) -> Result<(HardwareState, [u8; 3]), ErrorKind> {
-        let mut raw = [0; 3];
-        self.read(DATA, &mut raw)?;
-        Ok((classify(raw), raw))
-    }
     fn poll_state(&mut self, timeout_us: u64) -> Result<(HardwareState, [u8; 3]), ErrorKind> {
         let start = self.timer.now_us();
         loop {
-            let (state, raw) = self.hardware_state()?;
+            if self.timer.now_us().wrapping_sub(start) >= timeout_us {
+                return Err(ErrorKind::Timeout(
+                    self.last_status.map_or(HardwareState::Unknown, classify),
+                ));
+            }
+            let mut raw = [0; 3];
+            let timer = &self.timer;
+            self.bus.read_register(self.address, DATA, &mut raw, || {
+                timer.now_us().wrapping_sub(start) < timeout_us
+            })?;
+            self.last_status = Some(raw);
+            let state = classify(raw);
+            if self.timer.now_us().wrapping_sub(start) >= timeout_us {
+                return Err(ErrorKind::Timeout(state));
+            }
             if !matches!(
                 state,
                 HardwareState::BootloaderBusy | HardwareState::Unknown
             ) {
                 return Ok((state, raw));
-            }
-            if self.timer.now_us().wrapping_sub(start) >= timeout_us {
-                return Err(ErrorKind::Timeout(state));
             }
             self.wait(POLL_INTERVAL_US);
         }
