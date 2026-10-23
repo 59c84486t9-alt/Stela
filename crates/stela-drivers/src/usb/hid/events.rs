@@ -196,21 +196,21 @@ impl Decoder {
                 continue;
             };
             let app_usage = descriptor.collections[app].usage;
-            if matches!(app_usage, 0x0001_0004 | 0x0001_0005 | 0x0001_0008) {
-                if let Value::Scalar(value) = sample.value {
-                    gamepads.push(Control {
-                        report: frame.id,
-                        collection: app,
-                        field: sample.field,
-                        element: sample.element,
-                        usage,
-                        value,
-                        minimum: field.minimum,
-                        maximum: field.maximum,
-                        relative: sample.relative,
-                        null: sample.null,
-                    });
-                }
+            if matches!(app_usage, 0x0001_0004 | 0x0001_0005 | 0x0001_0008)
+                && let Value::Scalar(value) = sample.value
+            {
+                gamepads.push(Control {
+                    report: frame.id,
+                    collection: app,
+                    field: sample.field,
+                    element: sample.element,
+                    usage,
+                    value,
+                    minimum: field.minimum,
+                    maximum: field.maximum,
+                    relative: sample.relative,
+                    null: sample.null,
+                });
             }
             if !matches!(app_usage, 0x000d_0002 | 0x000d_0004 | 0x000d_0005) {
                 continue;

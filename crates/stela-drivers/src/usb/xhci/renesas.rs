@@ -128,12 +128,12 @@ fn upload<C: ConfigSpace>(config: &mut C, clock: Clock, bytes: &[u8]) -> Result<
             "Renesas firmware download enable not acknowledged",
         ));
     }
-    for (step, word) in bytes.chunks_exact(4).enumerate() {
+    for (step, word) in bytes.as_chunks::<4>().0.iter().enumerate() {
         let bank = (step & 1) as u8;
         wait_bank(config, clock, 1 << bank)?;
         config.write32(
             if bank == 0 { DATA0 } else { DATA1 },
-            u32::from_le_bytes(word.try_into().unwrap()),
+            u32::from_le_bytes(*word),
         );
         clock.delay(100);
         config.write8(FW_MSB, 1 << bank);

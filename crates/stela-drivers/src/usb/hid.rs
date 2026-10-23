@@ -105,7 +105,9 @@ fn descriptor_length(interface: &Interface) -> Result<u16, &'static str> {
         return Err("malformed USB HID descriptor");
     }
     let mut reports = descriptor[6..]
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .filter(|entry| entry[0] == REPORT_DESCRIPTOR);
     let entry = reports
         .next()

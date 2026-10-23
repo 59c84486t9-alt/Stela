@@ -250,16 +250,15 @@ impl Device {
             self.cancel(*address)?;
         }
         let endpoints: Vec<_> = addresses.iter().map(|a| self.pipes[a].endpoint).collect();
-        if !endpoints.is_empty() {
-            if let Err(error) = self
+        if !endpoints.is_empty()
+            && let Err(error) = self
                 .controller
                 .borrow_mut()
                 .device(self.physical.id)?
                 .deconfigure(&endpoints)
-            {
-                self.fenced = true;
-                return Err(error);
-            }
+        {
+            self.fenced = true;
+            return Err(error);
         }
         for address in addresses {
             let pipe = self.pipes.remove(address).unwrap();

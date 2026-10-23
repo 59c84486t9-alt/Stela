@@ -49,6 +49,7 @@ pub(super) enum State {
     #[default]
     Running,
     Suspended(Snapshot),
+    #[cfg(test)]
     Stopped,
     Failed,
 }
@@ -57,6 +58,7 @@ impl State {
         match self {
             Self::Running => Ok(()),
             Self::Suspended(_) => Err(BlockError::Unsupported("xHCI controller is suspended")),
+            #[cfg(test)]
             Self::Stopped => Err(BlockError::Unsupported("xHCI controller is stopped")),
             Self::Failed => Err(BlockError::Unsupported(
                 "xHCI hardware transition unresolved",
@@ -330,6 +332,7 @@ impl Controller {
 
     /// Terminal stop retains all allocations and permanently blocks old traffic.
     /// HCH alone is not a per-endpoint completion or permission to reuse a slot.
+    #[cfg(test)]
     pub(super) fn stop_controller(&mut self) -> Result<(), BlockError> {
         self.hardware = State::Failed;
         halt(&mut *self.registers, self.clock, self.operational, HALT_US)?;

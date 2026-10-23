@@ -68,11 +68,7 @@ pub(super) fn inventory(device: &xhci::Device) -> Result<Vec<Configuration>, Blo
                     endpoints |= 1 << dci;
                     setting.3 = setting.3.checked_add(1).ok_or_else(invalid)?;
                 }
-                0x30 => {
-                    if length != 6 || !preceding_endpoint {
-                        return Err(invalid());
-                    }
-                }
+                0x30 if length != 6 || !preceding_endpoint => return Err(invalid()),
                 _ => {}
             }
             preceding_endpoint = d[1] == xhci::ENDPOINT_DESCRIPTOR;
