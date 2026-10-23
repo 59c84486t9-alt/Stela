@@ -9,10 +9,7 @@ use crate::{
 };
 use stela_compiler::{
     block::CheckedMemoryProfile,
-    context::memory::{
-        InstructionRequirements,
-        address::{AddressAddChecks, EffectiveAddressChecks},
-    },
+    context::memory::{InstructionRequirements, address::EffectiveAddressChecks},
 };
 
 const SCTLR_M: u64 = 1;
@@ -108,14 +105,6 @@ impl Controls {
             CheckedMemoryProfile::SpAlignmentDisabled
         };
         let asimd = cpu.floating_point_trap().is_none() && cpu.svcr() & 1 == 0;
-        let address_checks = (cpu
-            .registers
-            .implemented(crate::machine::system::Feature::FEAT_CPA2)
-            == Ok(false))
-        .then_some(EffectiveAddressChecks::new(
-            AddressAddChecks::Disabled,
-            AddressAddChecks::Disabled,
-        ));
         // All effective fields above come from this actual stopped Cpu anew.
         // Only immutable declarations and their digest may be reused, after
         // exact equality; no source, access or physical-target proof is cached.
@@ -131,7 +120,6 @@ impl Controls {
                     && cached.requester == requester
                     && cached.sp == sp
                     && cached.asimd == asimd
-                    && cached.address_checks == address_checks
             })
         {
             return Ok(cached.clone());
@@ -140,8 +128,9 @@ impl Controls {
             core::array::from_fn(|index| (IDENTIFICATION_PAIRS[index].0, ids[index]));
         let identification =
             Arc::new(Snapshot::declared(name, &values).map_err(|_| MemoryStatus::Unsupported)?);
-        ProcessMemoryFeatures::from_snapshot(&identification)
-            .map_err(|_| MemoryStatus::Unsupported)?;
+        let address_checks = ProcessMemoryFeatures::from_snapshot(&identification)
+            .map_err(|_| MemoryStatus::Unsupported)?
+            .unchecked_address_checks();
         let identity = crate::sha256(
             alloc::format!(
                 "{:?} {:?} {:?} {} {:?} {}",

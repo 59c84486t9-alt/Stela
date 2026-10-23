@@ -123,6 +123,20 @@ pub struct ProcessMemoryFeatures {
 }
 
 impl ProcessMemoryFeatures {
+    /// Only source CPA0/CPA1 facts resolve both AddressAdd levels without
+    /// extended controls. CPA2 never inherits that unchecked specialization.
+    pub(crate) fn unchecked_address_checks(
+        &self,
+    ) -> Option<stela_compiler::context::memory::address::EffectiveAddressChecks> {
+        use stela_compiler::context::memory::address::{AddressAddChecks, EffectiveAddressChecks};
+        match self.cpa {
+            pointer_checks::CpaFeature::Absent | pointer_checks::CpaFeature::Arithmetic => Some(
+                EffectiveAddressChecks::new(AddressAddChecks::Disabled, AddressAddChecks::Disabled),
+            ),
+            pointer_checks::CpaFeature::Checked => None,
+        }
+    }
+
     /// Derive these facts from the snapshot. Missing IDs are unsupported.
     pub fn from_snapshot(identification: &Snapshot) -> Result<Self, ProcessMemoryError> {
         let read = |register| {
