@@ -8,6 +8,9 @@ publish = false
 [[bin]]
 name = "stela"
 path = "src/main.rs"
+# Inline tests run through xtask's hosted modules; this freestanding entry
+# supplies its own allocator and panic handler, not a libtest executable.
+test = false
 
 [workspace]
 
