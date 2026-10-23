@@ -114,12 +114,19 @@ impl ArtifactCache {
         }
         self.controls = Some(controls.clone());
     }
-    fn candidate(&self, key: &ArtifactKey) -> Option<Arc<Artifact>> {
+    fn candidate(&self, key: &ArtifactKey) -> Option<(usize, Arc<Artifact>)> {
         self.entries
             .iter()
+            .enumerate()
             .rev()
-            .find(|entry| entry.key == *key)
-            .map(Arc::clone)
+            .find(|(_, entry)| entry.key == *key)
+            .map(|(index, entry)| (index, Arc::clone(entry)))
+    }
+    /// Only an exact, freshly fetched executable source hit is reusable.
+    /// Keep it newest without allocating or changing retained-byte accounting.
+    fn reuse(&mut self, index: usize) {
+        self.entries[index..].rotate_left(1);
+        self.reused = self.reused.saturating_add(1);
     }
     pub(super) fn stats(&self) -> ArtifactCacheStats {
         ArtifactCacheStats {
@@ -610,8 +617,8 @@ fn prepare<'a>(
     let candidate = memory
         .artifacts
         .candidate(&key)
-        .filter(|artifact| artifact.source.len() <= source_bytes);
-    let artifact = if let Some(artifact) = candidate {
+        .filter(|(_, artifact)| artifact.source.len() <= source_bytes);
+    let artifact = if let Some((index, artifact)) = candidate {
         // A hit is merely immutable compilation reuse. Rewalk executable source
         // and read actual canonical bytes for its exact retained prefix every
         // time. A shorter compiled prefix remains a valid scheduling boundary;
@@ -635,14 +642,14 @@ fn prepare<'a>(
         // both actual chips, withheld features and effective ASIMD permission.
         // Reuse only that decoder result; the source walk, BTYPE entry check,
         // current controls and physical execution authority remain separate.
-        (input == artifact.source.as_slice()).then_some(artifact)
+        (input == artifact.source.as_slice()).then_some((index, artifact))
     } else {
         None
     };
     let artifact =
         match artifact {
-            Some(artifact) => {
-                memory.artifacts.reused = memory.artifacts.reused.saturating_add(1);
+            Some((index, artifact)) => {
+                memory.artifacts.reuse(index);
                 artifact
             }
             None => {
@@ -1600,6 +1607,168 @@ mod artifact_tests {
             ),
             (0, 0)
         );
+    }
+
+    fn branch_artifacts(
+        count: usize,
+    ) -> (
+        Machine<FakeHost, NoDevices>,
+        Arc<RegisteredSystemRam>,
+        Vec<Arc<Artifact>>,
+    ) {
+        let (mut machine, ram) = fixture();
+        let source: Vec<_> = core::iter::repeat_n(0x14000000u32, count + 1)
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        unsafe { ram.publish_physical(DATA, &source) }.unwrap();
+        let artifacts = (0..count)
+            .map(|index| {
+                machine.cpu.pc = PC + index as u64 * 4;
+                prepare_artifact(&mut machine, BINDING).unwrap()
+            })
+            .collect();
+        (machine, ram, artifacts)
+    }
+
+    #[test]
+    fn validated_hot_source_survives_entry_and_byte_budget_eviction() {
+        for count in [3, ARTIFACT_CACHE_ENTRIES] {
+            let (mut machine, _, artifacts) = branch_artifacts(count);
+            let initial = machine
+                .cpu
+                .canonical_memory
+                .as_ref()
+                .unwrap()
+                .native_artifact_stats();
+            if count < ARTIFACT_CACHE_ENTRIES {
+                machine
+                    .tighten_native_artifact_cache_budget(initial.retained_bytes)
+                    .unwrap();
+            }
+            machine.cpu.pc = PC;
+            assert!(Arc::ptr_eq(
+                &artifacts[0],
+                &prepare_artifact(&mut machine, BINDING).unwrap()
+            ));
+            let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
+            assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &artifacts[0]));
+            assert_eq!(cache.stats().retained_bytes, initial.retained_bytes);
+            assert_eq!(cache.stats().reused, initial.reused + 1);
+            assert_eq!(cache.stats().compiled, initial.compiled);
+
+            machine.cpu.pc = PC + count as u64 * 4;
+            let cold = prepare_artifact(&mut machine, BINDING).unwrap();
+            let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
+            assert_eq!(cache.entries.len(), count);
+            assert!(cache.candidate(&artifacts[1].key).is_none());
+            let (_, hot) = cache.candidate(&artifacts[0].key).unwrap();
+            assert!(Arc::ptr_eq(&hot, &artifacts[0]));
+            assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &cold));
+            assert!(cache.stats().retained_bytes <= cache.byte_budget);
+        }
+    }
+
+    #[test]
+    fn cache_lookup_and_refused_source_do_not_refresh_recency() {
+        let (mut machine, ram, artifacts) = branch_artifacts(3);
+        let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
+        let initial = cache.stats();
+        assert!(cache.candidate(&artifacts[0].key).is_some());
+        assert!(Arc::ptr_eq(&cache.entries[0], &artifacts[0]));
+        machine.cpu.pc = PC;
+        let mut descriptor = [0; 8];
+        unsafe { ram.read_physical(LEAF, &mut descriptor) }.unwrap();
+        unsafe { ram.publish_physical(LEAF, &0u64.to_le_bytes()) }.unwrap();
+        assert_eq!(
+            prepare_artifact(&mut machine, BINDING).err(),
+            Some(MemoryStatus::Unsupported)
+        );
+        let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
+        assert_eq!(cache.stats(), initial);
+        for (entry, artifact) in cache.entries.iter().zip(&artifacts) {
+            assert!(Arc::ptr_eq(entry, artifact));
+        }
+        // The first fetch now succeeds and finds the old key, but exact bytes
+        // differ and the newly fetched instruction cannot pass admission.
+        unsafe { ram.publish_physical(LEAF, &descriptor) }.unwrap();
+        unsafe { ram.publish_physical(DATA, &0x02000000u32.to_le_bytes()) }.unwrap();
+        assert_eq!(
+            prepare_artifact(&mut machine, BINDING).err(),
+            Some(MemoryStatus::Unsupported)
+        );
+        let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
+        assert_eq!(cache.stats(), initial);
+        for (entry, artifact) in cache.entries.iter().zip(&artifacts) {
+            assert!(Arc::ptr_eq(entry, artifact));
+        }
+    }
+
+    #[test]
+    fn changed_source_replaces_without_crediting_or_promoting_a_hit() {
+        let (mut machine, ram, artifacts) = branch_artifacts(3);
+        let initial = machine
+            .cpu
+            .canonical_memory
+            .as_ref()
+            .unwrap()
+            .native_artifact_stats();
+        machine.cpu.pc = PC;
+        unsafe { ram.publish_physical(DATA, &0x91000400u32.to_le_bytes()) }.unwrap();
+        let changed = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(!Arc::ptr_eq(&changed, &artifacts[0]));
+        assert_eq!(&changed.source[..4], &0x91000400u32.to_le_bytes());
+        let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
+        assert_eq!(cache.stats().compiled, initial.compiled + 1);
+        assert_eq!(cache.stats().reused, initial.reused);
+        assert!(Arc::ptr_eq(&cache.entries[0], &artifacts[1]));
+        assert!(Arc::ptr_eq(&cache.entries[1], &artifacts[2]));
+        assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &changed));
+    }
+
+    #[test]
+    fn changed_admission_key_does_not_refresh_an_older_artifact() {
+        let (mut machine, _, artifacts) = branch_artifacts(3);
+        let initial = machine
+            .cpu
+            .canonical_memory
+            .as_ref()
+            .unwrap()
+            .native_artifact_stats();
+        machine.cpu.pc = PC;
+        machine.profile.chip = crate::machine::Chip::AppleM2;
+        let changed = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(!Arc::ptr_eq(&changed, &artifacts[0]));
+        let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
+        assert_eq!(cache.stats().compiled, initial.compiled + 1);
+        assert_eq!(cache.stats().reused, initial.reused);
+        for (entry, artifact) in cache.entries.iter().zip(&artifacts) {
+            assert!(Arc::ptr_eq(entry, artifact));
+        }
+        assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &changed));
+    }
+
+    #[test]
+    fn shortened_observation_window_replaces_without_crediting_a_hit() {
+        let (mut machine, _) = fixture();
+        let full = prepare_artifact(&mut machine, BINDING).unwrap();
+        machine.cpu.pc = PC + 4;
+        let following = prepare_artifact(&mut machine, BINDING).unwrap();
+        let initial = machine
+            .cpu
+            .canonical_memory
+            .as_ref()
+            .unwrap()
+            .native_artifact_stats();
+        machine.set_breakpoints(&[PC + 4]);
+        machine.cpu.pc = PC;
+        let prefix = prepare_artifact(&mut machine, BINDING).unwrap();
+        assert!(!Arc::ptr_eq(&prefix, &full));
+        assert_eq!(prefix.source, full.source[..4]);
+        let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
+        assert_eq!(cache.stats().compiled, initial.compiled + 1);
+        assert_eq!(cache.stats().reused, initial.reused);
+        assert!(Arc::ptr_eq(&cache.entries[0], &following));
+        assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &prefix));
     }
 
     #[test]
