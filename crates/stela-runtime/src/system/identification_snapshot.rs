@@ -151,6 +151,17 @@ fn insert(
 }
 
 impl Snapshot {
+    /// Retained allocation capacities, including the containing Arc's two
+    /// counters. Shared input is conservatively charged to each owner.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        core::mem::size_of::<Self>()
+            + 2 * core::mem::size_of::<usize>()
+            + self.provenance.input.len()
+            + 2 * core::mem::size_of::<usize>()
+            + self.provenance.input_sha256.capacity()
+            + self.provenance.captured_fields.capacity() * core::mem::size_of::<(Register, usize)>()
+    }
+
     /// A software-machine declaration. Every value is kept and missing IDs stay
     /// missing; the declaration bytes bind the machine name and the values.
     pub fn declared(
@@ -367,6 +378,25 @@ mod tests {
             first.provenance().input_sha256(),
             changed.provenance().input_sha256()
         );
+    }
+
+    #[test]
+    fn retained_snapshot_accounting_includes_arc_payload_and_all_allocation_capacities() {
+        let input: Arc<[u8]> = alloc::vec![0x5a; 256].into();
+        let snapshot = Snapshot::captured(
+            "snapshot-retained-accounting-fixture",
+            Arc::clone(&input),
+            &[(Register::IdAa64Isar1El1, 0)],
+        )
+        .unwrap();
+        let expected = core::mem::size_of::<Snapshot>()
+            + 4 * core::mem::size_of::<usize>()
+            + input.len()
+            + snapshot.provenance.input_sha256.capacity()
+            + snapshot.provenance.captured_fields.capacity()
+                * core::mem::size_of::<(Register, usize)>();
+        assert_eq!(snapshot.retained_bytes(), expected);
+        assert!(snapshot.retained_bytes() > input.len());
     }
 
     #[test]

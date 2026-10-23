@@ -18,7 +18,19 @@ const SCTLR_E0E: u64 = 1 << 24;
 const SCTLR_EE: u64 = 1 << 25;
 const FEATURE_SHIFT: u32 = 20;
 const FIELD_MASK: u64 = 15;
+const IDENTIFICATION_PAIRS: [(Register, SystemRegister); 9] = [
+    (Register::IdAa64Dfr0El1, SystemRegister::ID_AA64DFR0_EL1),
+    (Register::IdAa64Dfr1El1, SystemRegister::ID_AA64DFR1_EL1),
+    (Register::IdAa64Dfr2El1, SystemRegister::ID_AA64DFR2_EL1),
+    (Register::IdAa64Isar0El1, SystemRegister::ID_AA64ISAR0_EL1),
+    (Register::IdAa64Isar1El1, SystemRegister::ID_AA64ISAR1_EL1),
+    (Register::IdAa64Isar3El1, SystemRegister::ID_AA64ISAR3_EL1),
+    (Register::IdAa64Mmfr0El1, SystemRegister::ID_AA64MMFR0_EL1),
+    (Register::IdAa64Mmfr2El1, SystemRegister::ID_AA64MMFR2_EL1),
+    (Register::IdAa64Pfr1El1, SystemRegister::ID_AA64PFR1_EL1),
+];
 
+#[derive(Clone)]
 pub(super) struct Controls {
     pub(super) translation: mmu::Controls,
     pub(super) requester: mmu::Requester,
@@ -26,6 +38,10 @@ pub(super) struct Controls {
     /// Real source FP access permission and nonstreaming AdvSIMD mode.
     pub(super) asimd: bool,
     identification: Arc<Snapshot>,
+    name: &'static str,
+    ids: [u64; IDENTIFICATION_PAIRS.len()],
+    missing: Arc<[SystemRegister]>,
+    identity: Arc<str>,
 }
 impl Controls {
     pub(super) fn capture(
@@ -45,28 +61,13 @@ impl Controls {
         {
             return Err(MemoryStatus::Unsupported);
         }
-        let pairs = [
-            (Register::IdAa64Dfr0El1, SystemRegister::ID_AA64DFR0_EL1),
-            (Register::IdAa64Dfr1El1, SystemRegister::ID_AA64DFR1_EL1),
-            (Register::IdAa64Dfr2El1, SystemRegister::ID_AA64DFR2_EL1),
-            (Register::IdAa64Isar0El1, SystemRegister::ID_AA64ISAR0_EL1),
-            (Register::IdAa64Isar1El1, SystemRegister::ID_AA64ISAR1_EL1),
-            (Register::IdAa64Isar3El1, SystemRegister::ID_AA64ISAR3_EL1),
-            (Register::IdAa64Mmfr0El1, SystemRegister::ID_AA64MMFR0_EL1),
-            (Register::IdAa64Mmfr2El1, SystemRegister::ID_AA64MMFR2_EL1),
-            (Register::IdAa64Pfr1El1, SystemRegister::ID_AA64PFR1_EL1),
-        ];
-        if pairs.iter().any(|(_, register)| missing.contains(register)) {
+        if IDENTIFICATION_PAIRS
+            .iter()
+            .any(|(_, register)| missing.contains(register))
+        {
             return Err(MemoryStatus::Unsupported);
         }
-        let values: Vec<_> = pairs
-            .iter()
-            .map(|&(id, register)| (id, cpu.read(register)))
-            .collect();
-        let identification =
-            Arc::new(Snapshot::declared(name, &values).map_err(|_| MemoryStatus::Unsupported)?);
-        ProcessMemoryFeatures::from_snapshot(&identification)
-            .map_err(|_| MemoryStatus::Unsupported)?;
+        let ids = IDENTIFICATION_PAIRS.map(|(_, register)| cpu.read(register));
         let translation = cpu.controls(cpu.regime());
         let requester = cpu.requester();
         let cold_m0 = requester.el == 2
@@ -92,16 +93,59 @@ impl Controls {
                 SCTLR_SA
             }
             != 0;
+        let sp = if check_sp {
+            CheckedMemoryProfile::SpAlignmentEnabled
+        } else {
+            CheckedMemoryProfile::SpAlignmentDisabled
+        };
+        let asimd = cpu.floating_point_trap().is_none() && cpu.svcr() & 1 == 0;
+        // All effective fields above come from this actual stopped Cpu anew.
+        // Only immutable declarations and their digest may be reused, after
+        // exact equality; no source, access or physical-target proof is cached.
+        if let Some(cached) = cpu
+            .canonical_memory
+            .as_ref()
+            .and_then(|memory| memory.artifacts.controls())
+            .filter(|cached| {
+                cached.name == name
+                    && cached.ids == ids
+                    && cached.missing.as_ref() == missing
+                    && cached.translation == translation
+                    && cached.requester == requester
+                    && cached.sp == sp
+                    && cached.asimd == asimd
+            })
+        {
+            return Ok(cached.clone());
+        }
+        let values: [(Register, u64); IDENTIFICATION_PAIRS.len()] =
+            core::array::from_fn(|index| (IDENTIFICATION_PAIRS[index].0, ids[index]));
+        let identification =
+            Arc::new(Snapshot::declared(name, &values).map_err(|_| MemoryStatus::Unsupported)?);
+        ProcessMemoryFeatures::from_snapshot(&identification)
+            .map_err(|_| MemoryStatus::Unsupported)?;
+        let identity = crate::sha256(
+            alloc::format!(
+                "{:?} {:?} {:?} {} {}",
+                translation,
+                requester,
+                sp,
+                asimd,
+                identification.provenance().input_sha256()
+            )
+            .as_bytes(),
+        )
+        .into();
         Ok(Self {
-            asimd: cpu.floating_point_trap().is_none() && cpu.svcr() & 1 == 0,
+            asimd,
             translation,
             requester,
-            sp: if check_sp {
-                CheckedMemoryProfile::SpAlignmentEnabled
-            } else {
-                CheckedMemoryProfile::SpAlignmentDisabled
-            },
+            sp,
             identification,
+            name,
+            ids,
+            missing: missing.into(),
+            identity,
         })
     }
 
@@ -114,18 +158,22 @@ impl Controls {
             && self.translation.sctlr & SCTLR_M == 0
     }
 
-    pub(super) fn identity(&self) -> alloc::string::String {
-        crate::sha256(
-            alloc::format!(
-                "{:?} {:?} {:?} {} {}",
-                self.translation,
-                self.requester,
-                self.sp,
-                self.asimd,
-                self.identification.provenance().input_sha256()
-            )
-            .as_bytes(),
-        )
+    pub(super) fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    pub(super) fn shared_identity(&self) -> Arc<str> {
+        Arc::clone(&self.identity)
+    }
+
+    /// Full conservative charge for the sole cached declaration, even when
+    /// its immutable payload is also retained by the actual memory policy.
+    pub(super) fn retained_bytes(&self) -> usize {
+        core::mem::size_of::<Option<Self>>()
+            + self.identification.retained_bytes()
+            + self.missing.len() * core::mem::size_of::<SystemRegister>()
+            + self.identity.len()
+            + 4 * core::mem::size_of::<usize>()
     }
 
     pub(super) fn instructions(
@@ -240,6 +288,24 @@ pub(super) mod tests {
                 "SCTLR={value:x}"
             );
         }
+    }
+
+    #[test]
+    fn cached_digest_keeps_the_original_effective_control_identity_format() {
+        let (cpu, profile, missing) = captured();
+        let controls = Controls::capture(&cpu, profile.name, &missing).unwrap();
+        let original = crate::sha256(
+            alloc::format!(
+                "{:?} {:?} {:?} {} {}",
+                controls.translation,
+                controls.requester,
+                controls.sp,
+                controls.asimd,
+                controls.identification.provenance().input_sha256()
+            )
+            .as_bytes(),
+        );
+        assert_eq!(controls.identity(), original);
     }
     #[test]
     fn source_feature_changes_and_current_el_sp_selection_are_not_assumed() {

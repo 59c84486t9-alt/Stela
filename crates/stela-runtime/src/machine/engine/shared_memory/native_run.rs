@@ -40,7 +40,8 @@ pub struct ArtifactCacheStats {
     pub compiled: u64,
     pub reused: u64,
     /// Retained Rust allocation capacities and metadata; allocator headers are
-    /// outside this accounting, with at most 64 bounded allocation groups.
+    /// outside this accounting. At most 64 artifacts and one effective-control
+    /// declaration share the same per-PE byte limit.
     pub retained_bytes: usize,
     pub entries: usize,
 }
@@ -53,7 +54,7 @@ struct ArtifactKey {
     pc: u64,
     worker: publication::WorkerId,
     profile: &'static str,
-    controls_sha256: alloc::string::String,
+    controls_sha256: Arc<str>,
     compiler_source_sha256: &'static str,
     abi: &'static str,
     target: stela_compiler::TargetCpu,
@@ -61,6 +62,9 @@ struct ArtifactKey {
 }
 pub(super) struct ArtifactCache {
     entries: Vec<Arc<Artifact>>,
+    // One exact effective declaration, charged against the same byte budget.
+    // Reset owners start empty and tightening can discard it independently.
+    controls: Option<Controls>,
     retained_payload: usize,
     compiled: u64,
     reused: u64,
@@ -70,6 +74,7 @@ impl Default for ArtifactCache {
     fn default() -> Self {
         Self {
             entries: Vec::with_capacity(ARTIFACT_CACHE_ENTRIES),
+            controls: None,
             retained_payload: 0,
             compiled: 0,
             reused: 0,
@@ -78,6 +83,23 @@ impl Default for ArtifactCache {
     }
 }
 impl ArtifactCache {
+    pub(super) fn controls(&self) -> Option<&Controls> {
+        self.controls.as_ref()
+    }
+    fn controls_bytes(&self) -> usize {
+        self.controls.as_ref().map_or(0, Controls::retained_bytes)
+    }
+    fn remember_controls(&mut self, controls: &Controls) {
+        self.controls = None;
+        let bytes = controls.retained_bytes();
+        if bytes > self.byte_budget.saturating_sub(self.slot_bytes()) {
+            return;
+        }
+        while self.retained_payload + self.slot_bytes() + bytes > self.byte_budget {
+            self.remove(0);
+        }
+        self.controls = Some(controls.clone());
+    }
     fn candidate(&self, key: &ArtifactKey) -> Option<Arc<Artifact>> {
         self.entries
             .iter()
@@ -89,7 +111,7 @@ impl ArtifactCache {
         ArtifactCacheStats {
             compiled: self.compiled,
             reused: self.reused,
-            retained_bytes: self.retained_payload + self.slot_bytes(),
+            retained_bytes: self.retained_payload + self.slot_bytes() + self.controls_bytes(),
             entries: self.entries.len(),
         }
     }
@@ -98,6 +120,9 @@ impl ArtifactCache {
     }
     pub(super) fn tighten(&mut self, bytes: usize) {
         self.byte_budget = self.byte_budget.min(bytes);
+        if self.stats().retained_bytes > self.byte_budget {
+            self.controls = None;
+        }
         while !self.entries.is_empty() && self.stats().retained_bytes > self.byte_budget {
             self.remove(0);
         }
@@ -118,12 +143,21 @@ impl ArtifactCache {
         let bytes = artifact.retained_bytes();
         if self.entries.capacity() == 0 {
             let slots = ARTIFACT_CACHE_ENTRIES * core::mem::size_of::<Arc<Artifact>>();
-            if bytes > self.byte_budget.saturating_sub(slots) || slots > self.byte_budget {
+            if bytes
+                > self
+                    .byte_budget
+                    .saturating_sub(slots + self.controls_bytes())
+                || slots > self.byte_budget
+            {
                 return;
             }
             self.entries.reserve_exact(ARTIFACT_CACHE_ENTRIES);
         }
-        if bytes > self.byte_budget.saturating_sub(self.slot_bytes()) {
+        if bytes
+            > self
+                .byte_budget
+                .saturating_sub(self.slot_bytes() + self.controls_bytes())
+        {
             return; // Valid one-shot compilation, without retaining oversize code.
         }
         if let Some(index) = self
@@ -134,7 +168,8 @@ impl ArtifactCache {
             self.remove(index);
         }
         while self.entries.len() >= ARTIFACT_CACHE_ENTRIES
-            || self.retained_payload + self.slot_bytes() + bytes > self.byte_budget
+            || self.retained_payload + self.slot_bytes() + self.controls_bytes() + bytes
+                > self.byte_budget
         {
             self.remove(0);
         }
@@ -162,7 +197,8 @@ impl Artifact {
             + self.source.capacity()
             + self.source_map.capacity()
                 * core::mem::size_of::<(stela_compiler::GuestAddress, usize)>()
-            + self.key.controls_sha256.capacity()
+            + self.key.controls_sha256.len()
+            + 2 * core::mem::size_of::<usize>()
             + self.identity.source_sha256.capacity()
             + self.identity.native_sha256.capacity()
             + self.identity.controls_sha256.capacity()
@@ -523,7 +559,7 @@ fn prepare<'a>(
         pc,
         worker: binding.worker,
         profile: cpu_profile.name,
-        controls_sha256: controls.identity(),
+        controls_sha256: controls.shared_identity(),
         compiler_source_sha256: stela_compiler::SOURCE_SHA256,
         abi: profile.abi(),
         target,
@@ -616,7 +652,7 @@ fn prepare<'a>(
                 pc,
                 source_sha256: crate::sha256(&input),
                 native_sha256: crate::sha256(&compiled.native.x86_64_code),
-                controls_sha256: key.controls_sha256.clone(),
+                controls_sha256: key.controls_sha256.as_ref().into(),
                 compiler_source_sha256: stela_compiler::SOURCE_SHA256,
                 abi: profile.abi(),
                 target,
@@ -638,6 +674,7 @@ fn prepare<'a>(
             artifact
         }
     };
+    memory.artifacts.remember_controls(&controls);
     memory.memory.policy_mut().controls = controls;
     memory.memory.policy_mut().failure = None;
     Ok(NativeRun {
@@ -973,6 +1010,141 @@ mod artifact_tests {
         )?;
         Ok(Arc::clone(&run.artifact))
     }
+    fn capture_controls(machine: &Machine<FakeHost, NoDevices>) -> Result<Controls, MemoryStatus> {
+        Controls::capture(&machine.cpu, machine.profile.name, &machine.profile_missing)
+    }
+
+    #[test]
+    fn warm_controls_reuse_digest_but_observe_every_actual_id_profile_and_missing_input() {
+        let (mut machine, _) = fixture();
+        prepare_artifact(&mut machine, BINDING).unwrap();
+        let original = capture_controls(&machine).unwrap();
+        let repeated = capture_controls(&machine).unwrap();
+        assert!(Arc::ptr_eq(
+            &original.shared_identity(),
+            &repeated.shared_identity()
+        ));
+        for register in [
+            Register::ID_AA64DFR0_EL1,
+            Register::ID_AA64DFR1_EL1,
+            Register::ID_AA64DFR2_EL1,
+            Register::ID_AA64ISAR0_EL1,
+            Register::ID_AA64ISAR1_EL1,
+            Register::ID_AA64ISAR3_EL1,
+            Register::ID_AA64MMFR0_EL1,
+            Register::ID_AA64MMFR2_EL1,
+            Register::ID_AA64PFR1_EL1,
+        ] {
+            let value = machine.cpu.read(register);
+            machine.cpu.registers.set_raw(register, 0, value ^ 1);
+            if let Ok(changed) = capture_controls(&machine) {
+                assert_ne!(original.identity(), changed.identity(), "{register:?}");
+                assert!(!Arc::ptr_eq(
+                    &original.shared_identity(),
+                    &changed.shared_identity()
+                ));
+            }
+            machine.cpu.registers.set_raw(register, 0, value);
+            machine.profile_missing.push(register);
+            assert!(capture_controls(&machine).is_err(), "{register:?}");
+            machine.profile_missing.pop();
+        }
+        let changed = Controls::capture(
+            &machine.cpu,
+            "another-declared-machine",
+            &machine.profile_missing,
+        )
+        .unwrap();
+        assert_ne!(original.identity(), changed.identity());
+        // Even an unrelated missing declaration changes the exact reuse key,
+        // although it does not alter the established effective-control digest.
+        machine.profile_missing.push(Register::TTBR0_EL1);
+        let changed = capture_controls(&machine).unwrap();
+        assert_eq!(original.identity(), changed.identity());
+        assert!(!Arc::ptr_eq(
+            &original.shared_identity(),
+            &changed.shared_identity()
+        ));
+        machine.profile_missing.pop();
+        assert!(Arc::ptr_eq(
+            &original.shared_identity(),
+            &capture_controls(&machine).unwrap().shared_identity()
+        ));
+    }
+
+    #[test]
+    fn warm_controls_recheck_translation_requester_sp_permissions_and_debug_state() {
+        let (mut machine, _) = fixture();
+        prepare_artifact(&mut machine, BINDING).unwrap();
+        let original = capture_controls(&machine).unwrap();
+        for register in [Register::TTBR0_EL1, Register::TCR_EL1, Register::MAIR_EL1] {
+            let value = machine.cpu.read(register);
+            machine.cpu.registers.set_raw(register, 0, value ^ 0x1000);
+            let changed = capture_controls(&machine).unwrap();
+            assert_ne!(original.identity(), changed.identity(), "{register:?}");
+            machine.cpu.registers.set_raw(register, 0, value);
+        }
+        let sctlr = machine.cpu.read(Register::SCTLR_EL1);
+        machine
+            .cpu
+            .registers
+            .set_raw(Register::SCTLR_EL1, 0, sctlr ^ (1 << 3));
+        let changed = capture_controls(&machine).unwrap();
+        assert_ne!(original.sp, changed.sp);
+        assert_ne!(original.identity(), changed.identity());
+        machine.cpu.registers.set_raw(Register::SCTLR_EL1, 0, sctlr);
+        machine.cpu.pstate.pan = !machine.cpu.pstate.pan;
+        let changed = capture_controls(&machine).unwrap();
+        assert_ne!(original.requester, changed.requester);
+        assert_ne!(original.identity(), changed.identity());
+        machine.cpu.pstate.pan = !machine.cpu.pstate.pan;
+        machine
+            .cpu
+            .registers
+            .set_raw(Register::CPACR_EL1, 0, 3 << 20);
+        machine
+            .cpu
+            .registers
+            .set_raw(Register::CPTR_EL2, 0, 3 << 20);
+        let enabled = capture_controls(&machine).unwrap();
+        assert!(enabled.asimd);
+        machine.cpu.registers.set_raw(Register::CPTR_EL2, 0, 0);
+        let disabled = capture_controls(&machine).unwrap();
+        assert!(!disabled.asimd);
+        assert_ne!(enabled.identity(), disabled.identity());
+        machine.cpu.pstate.ss = true;
+        assert!(capture_controls(&machine).is_err());
+    }
+
+    #[test]
+    fn cached_controls_are_charged_at_exact_budget_and_tightening_or_reset_clears_them() {
+        let (mut machine, _) = fixture();
+        prepare_artifact(&mut machine, BINDING).unwrap();
+        let controls = capture_controls(&machine).unwrap();
+        let mut exact = ArtifactCache::default();
+        let bytes = controls.retained_bytes() + exact.slot_bytes();
+        exact.tighten(bytes);
+        exact.remember_controls(&controls);
+        assert_eq!(exact.stats().retained_bytes, bytes);
+        assert!(exact.controls().is_some());
+        assert!(exact.empty_like().controls().is_none());
+        let mut denied = ArtifactCache::default();
+        denied.tighten(bytes - 1);
+        denied.remember_controls(&controls);
+        assert!(denied.controls().is_none());
+        exact.tighten(0);
+        assert_eq!(exact.stats().retained_bytes, 0);
+        assert!(exact.controls().is_none());
+        exact.remember_controls(&controls);
+        assert!(exact.controls().is_none());
+        machine.tighten_native_artifact_cache_budget(0).unwrap();
+        let uncached = capture_controls(&machine).unwrap();
+        assert!(!Arc::ptr_eq(
+            &controls.shared_identity(),
+            &uncached.shared_identity()
+        ));
+    }
+
     #[test]
     fn repeated_preparation_reuses_only_immutable_artifact_and_refetches_changed_source() {
         let (mut machine, ram) = fixture();
@@ -1193,7 +1365,8 @@ mod artifact_tests {
             + artifact.source.capacity()
             + artifact.source_map.capacity()
                 * core::mem::size_of::<(stela_compiler::GuestAddress, usize)>()
-            + artifact.key.controls_sha256.capacity()
+            + artifact.key.controls_sha256.len()
+            + 2 * core::mem::size_of::<usize>()
             + artifact.identity.source_sha256.capacity()
             + artifact.identity.native_sha256.capacity()
             + artifact.identity.controls_sha256.capacity();
