@@ -620,11 +620,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if !matches!(self.state, State::Running | State::Stopped) {
             return Err(Error::NotPrepared);
         }
-        let result = self.position_inner().map(|position| {
+        let result = self.position_inner().inspect(|position| {
             if position.period_pending {
                 self.registers.write32(IRQ_STATUS, PERIOD_IRQ);
             }
-            position
         });
         self.finish(result)
     }
@@ -744,6 +743,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     /// Transfer the retained register provider only after acknowledged shutdown.
     /// A non-shutdown owner is returned intact, including every DMA lease.
+    // Returning ownership must neither allocate nor drop a retained DMA lease.
+    #[allow(clippy::result_large_err)]
     pub fn into_stopped(self) -> Result<(R, T), Self> {
         if self.state != State::Shutdown {
             return Err(self);
