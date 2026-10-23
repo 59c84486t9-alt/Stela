@@ -105,6 +105,43 @@ pub(super) struct Queue {
     notifications: VecDeque<CapturedNotification>,
 }
 impl Queue {
+    pub(super) fn pending_is_present(&self) -> bool {
+        self.pending.is_some()
+    }
+    pub(super) fn has_matching(&self, command: u8, group: u8) -> bool {
+        self.notifications
+            .iter()
+            .any(|packet| packet.bytes[4..6] == [command, group] && packet.bytes[7] & 0x80 != 0)
+    }
+    pub(super) fn matching_precedes(&self, first: (u8, u8), second: (u8, u8)) -> bool {
+        self.notifications
+            .iter()
+            .find_map(|packet| {
+                let id = (packet.bytes[4], packet.bytes[5]);
+                if packet.bytes[7] & 0x80 == 0 {
+                    None
+                } else if id == first {
+                    Some(true)
+                } else if id == second {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(false)
+    }
+    pub(super) fn take_unreserved(
+        &mut self,
+        reserved: &[(u8, u8)],
+    ) -> Option<FirmwareNotification> {
+        let index = self
+            .notifications
+            .iter()
+            .position(|packet| !reserved.contains(&(packet.bytes[4], packet.bytes[5])))?;
+        self.notifications
+            .remove(index)
+            .map(CapturedNotification::into_diagnostics)
+    }
     pub(super) unsafe fn prepare(
         command: &Chunk,
         profile: &Profile,
@@ -461,6 +498,15 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
     /// that complete capacity before taking DMA ownership of another RB.
     /// Backpressure performs no MMIO, completion read or ownership transfer.
     pub(super) fn poll_one_notification_buffer(&mut self) -> Result<NotificationPoll, Error> {
+        self.poll_one_notification_buffer_with_policy(false)
+    }
+    // Only source-backed control owners may process RX during RF-kill. This
+    // does not authorize transmission; actual command publication still checks
+    // its independent source-specific CMD_SEND_IN_RFKILL qualification.
+    pub(super) fn poll_one_notification_buffer_with_policy(
+        &mut self,
+        allow_rfkill: bool,
+    ) -> Result<NotificationPoll, Error> {
         if self.state != State::PnvmObserved || self.hcmd.pending.is_some() {
             return Err(Error::State);
         }
@@ -476,7 +522,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             return Ok(NotificationPoll::Backpressure);
         }
         let result = (|| {
-            self.check_command_causes(false)?;
+            self.check_command_causes(allow_rfkill)?;
             if let Some(bytes) = self.completed_buffer()? {
                 self.dispatch_command_packets(&bytes)?;
                 Ok(NotificationPoll::Processed)

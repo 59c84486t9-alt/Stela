@@ -428,6 +428,7 @@ pub(in crate::net::wifi::intel) mod tests {
     }
     #[derive(Default)]
     pub(in crate::net::wifi::intel) struct Records {
+        pub(in crate::net::wifi::intel) device_sync_hook: Option<Arc<dyn Fn() + Send + Sync>>,
         pub(in crate::net::wifi::intel) maps: usize,
         pub(in crate::net::wifi::intel) syncs: usize,
         pub(in crate::net::wifi::intel) unmaps: usize,
@@ -502,6 +503,9 @@ pub(in crate::net::wifi::intel) mod tests {
             direction: Direction,
         ) -> Result<(), DmaError> {
             let mut r = self.records.lock().unwrap();
+            if let Some(hook) = r.device_sync_hook.as_ref() {
+                hook();
+            }
             let index = r.syncs;
             r.syncs += 1;
             if r.sync_fail == Some(index) {

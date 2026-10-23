@@ -79,6 +79,26 @@ pub struct Ax200Country<'a, Q: BootIo, B: BiosIo, O: CountryIo> {
     channels: Vec<ChannelObservation>,
     first_error: Option<Ax200CountryError>,
 }
+/// Internal split of the original owner; no diagnostic can construct it.
+pub(super) struct ScanPolicyParts<'s, 'a, Q: BootIo, B: BiosIo, O: CountryIo> {
+    pub(super) board: &'s mut Ax200BoardPolicy<'a, Q, B>,
+    pub(super) os: &'s mut O,
+    pub(super) selection: &'s SelectedCountry,
+    pub(super) channels: &'s [ChannelObservation],
+}
+impl<'a, Q: BootIo, B: BiosIo, O: CountryIo> Ax200Country<'a, Q, B, O> {
+    pub(super) fn scan_policy_parts(&mut self) -> Option<ScanPolicyParts<'_, 'a, Q, B, O>> {
+        if self.phase != Ax200CountryPhase::MacContextRequired || self.first_error.is_some() {
+            return None;
+        }
+        Some(ScanPolicyParts {
+            board: &mut self.board,
+            os: &mut self.os,
+            selection: self.selection.as_ref()?,
+            channels: &self.channels,
+        })
+    }
+}
 impl<'a, Q: BootIo, B: BiosIo> Ax200BoardPolicy<'a, Q, B> {
     /// Consume the completed native board owner and retain its genuine OS source.
     /// # Safety

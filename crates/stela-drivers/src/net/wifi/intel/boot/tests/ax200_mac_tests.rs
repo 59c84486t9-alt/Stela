@@ -3,13 +3,13 @@
 //! Actual unbound MAC object and owned command DMA; no PHY/scan substitution.
 use super::{ax200_country_tests::Os, ax200_scan_tests::finish_mcc, ax200_tests::*, *};
 use core::sync::atomic::AtomicBool;
-struct Native {
-    domain: Arc<Domain>,
-    state: Arc<Mutex<ModelState>>,
-    drops: Arc<AtomicUsize>,
-    bios_drops: Arc<AtomicUsize>,
-    os_drops: Arc<AtomicUsize>,
-    revoked: Arc<AtomicBool>,
+pub(super) struct Native {
+    pub(super) domain: Arc<Domain>,
+    pub(super) state: Arc<Mutex<ModelState>>,
+    pub(super) drops: Arc<AtomicUsize>,
+    pub(super) bios_drops: Arc<AtomicUsize>,
+    pub(super) os_drops: Arc<AtomicUsize>,
+    pub(super) revoked: Arc<AtomicBool>,
 }
 impl Default for Native {
     fn default() -> Self {
@@ -23,7 +23,7 @@ impl Default for Native {
         }
     }
 }
-fn firmware_bytes(case: u8) -> Vec<u8> {
+pub(super) fn firmware_bytes(case: u8) -> Vec<u8> {
     let mut bytes = setup_bytes();
     let mut at = 88;
     while at < bytes.len() {
@@ -63,6 +63,22 @@ fn country_ready<'a>(
     native: &Native,
     options: Ax200SetupOptions,
 ) -> (Ax200Country<'a, Model, ClockBios, Os>, u16, u16) {
+    let os = Os {
+        drops: native.os_drops.clone(),
+        revoked: native.revoked.clone(),
+        unavailable: false,
+    };
+    country_ready_with_os(catalog, empty, source, native, options, os, false)
+}
+pub(super) fn country_ready_with_os<'a, O: CountryIo>(
+    catalog: &'a resources::Catalog,
+    empty: &'a resources::Catalog,
+    source: &Source,
+    native: &Native,
+    options: Ax200SetupOptions,
+    os: O,
+    second_channel: bool,
+) -> (Ax200Country<'a, Model, ClockBios, O>, u16, u16) {
     let domain = &native.domain;
     let state = &native.state;
     let boot = start(catalog, source, domain, state, &native.drops);
@@ -99,13 +115,12 @@ fn country_ready<'a>(
         .begin_board_policy()
         .unwrap_or_else(|_| panic!("board"));
     unsafe { board.advance(source) }.unwrap();
-    let os = Os {
-        drops: native.os_drops.clone(),
-        revoked: native.revoked.clone(),
-        unavailable: false,
-    };
     let mut country = unsafe { board.begin_country(os) }.unwrap_or_else(|_| panic!("country"));
     unsafe { country.advance(source) }.unwrap();
+    let mut payload = mcc_payload(*b"US", 9, 51);
+    if second_channel {
+        payload[24..28].copy_from_slice(&0x0f09u32.to_le_bytes());
+    }
     complete(
         &country.board.scan.mcc.setup.lari.radio.initialized.boot,
         domain,
@@ -114,7 +129,7 @@ fn country_ready<'a>(
         &command_packet(
             super::super::super::mcc::Request::id().wire(),
             sequence,
-            &mcc_payload(*b"US", 9, 51),
+            &payload,
         ),
     );
     unsafe { country.advance(source) }.unwrap();

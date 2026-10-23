@@ -22,8 +22,12 @@ pub use country::{
 mod mac_context;
 pub use mac_context::{Ax200Mac, Ax200MacError, Ax200MacPhase, MacCommand, MacCommandKind};
 mod mcc;
+mod scan;
 mod scan_configuration;
 pub use mcc::{Ax200Mcc, Ax200MccError, Ax200MccPhase};
+pub use scan::{
+    Ax200Scan, Ax200ScanError, Ax200ScanPhase, ScanCompletion, ScanResult, ScanResultProgress,
+};
 pub use scan_configuration::{
     Ax200ScanConfiguration, Ax200ScanConfigurationError, Ax200ScanConfigurationPhase,
 };

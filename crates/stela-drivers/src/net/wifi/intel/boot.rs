@@ -39,10 +39,11 @@ mod hcmd;
 pub use ax200::{
     Ax200BoardPolicy, Ax200BoardPolicyError, Ax200BoardPolicyPhase, Ax200Country,
     Ax200CountryError, Ax200CountryPhase, Ax200Mac, Ax200MacError, Ax200MacPhase, Ax200Mcc,
-    Ax200MccError, Ax200MccPhase, Ax200ScanConfiguration, Ax200ScanConfigurationError,
-    Ax200ScanConfigurationPhase, Ax200Setup, Ax200SetupError, Ax200SetupOptions, Ax200SetupPhase,
-    BoardCommand, BoardCommandKind, CountryIo, CountryIoError, MacCommand, MacCommandKind,
-    SelectedCountry, SetupDecisions,
+    Ax200MccError, Ax200MccPhase, Ax200Scan, Ax200ScanConfiguration, Ax200ScanConfigurationError,
+    Ax200ScanConfigurationPhase, Ax200ScanError, Ax200ScanPhase, Ax200Setup, Ax200SetupError,
+    Ax200SetupOptions, Ax200SetupPhase, BoardCommand, BoardCommandKind, CountryIo, CountryIoError,
+    MacCommand, MacCommandKind, ScanCompletion, ScanResult, ScanResultProgress, SelectedCountry,
+    SetupDecisions,
 };
 mod lari;
 pub use lari::{LariError, LariPhase, LariRadio};
@@ -5534,6 +5535,7 @@ mod tests {
     mod ax200_board_tests;
     mod ax200_country_tests;
     mod ax200_mac_tests;
+    mod ax200_native_scan_tests;
     mod ax200_scan_tests;
     mod ax200_tests;
 }
