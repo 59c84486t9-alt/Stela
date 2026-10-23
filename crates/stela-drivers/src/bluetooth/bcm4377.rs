@@ -2564,4 +2564,84 @@ mod tests {
             Some(vec![0])
         );
     }
+    #[test]
+    fn every_native_setup_visibility_error_keeps_command_and_packet_evidence() {
+        let first = {
+            let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", true, HciFault::None);
+            transport.start(&provider).unwrap();
+            d.lock().unwrap().domain.0.lock().unwrap().syncs + 1
+        };
+        let last = {
+            let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", true, HciFault::None);
+            transport.initialize(&provider).unwrap();
+            d.lock().unwrap().domain.0.lock().unwrap().syncs
+        };
+        for fail in first..=last {
+            for fail_retire in [false, true] {
+                let (mut transport, d, provider, _) =
+                    setup_fixture(0x5f69, "b1", true, HciFault::None);
+                {
+                    let mut d = d.lock().unwrap();
+                    d.domain.0.lock().unwrap().fail_sync = Some(fail);
+                    d.fail_retire = fail_retire;
+                }
+                let error = transport.initialize(&provider).unwrap_err();
+                assert!(
+                    transport
+                        .snapshot()
+                        .initialization
+                        .as_ref()
+                        .unwrap()
+                        .report
+                        .is_none()
+                );
+                let evidence = transport
+                    .snapshot()
+                    .initialization
+                    .as_ref()
+                    .unwrap()
+                    .clone();
+                let observed = transport.take_observations();
+                assert!(observed.packets.iter().all(|p| p.footer.len() == 264));
+                let writes = d.lock().unwrap().writes;
+                assert_eq!(transport.close(), Err(error));
+                assert_eq!(
+                    transport.snapshot().initialization.as_ref(),
+                    Some(&evidence)
+                );
+                drop(transport);
+                let d = d.lock().unwrap();
+                assert_eq!(d.retire, 1);
+                assert_eq!(d.writes, writes);
+                assert!(!d.dropped);
+                assert_eq!(d.domain.0.lock().unwrap().unmaps, 0);
+            }
+        }
+    }
+    #[test]
+    fn successful_setup_report_and_original_properties_survive_later_unmap_failure() {
+        let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", true, HciFault::None);
+        let report = transport.initialize(&provider).unwrap();
+        let evidence = transport
+            .snapshot()
+            .initialization
+            .as_ref()
+            .unwrap()
+            .clone();
+        d.lock().unwrap().domain.0.lock().unwrap().fail_unmap = true;
+        assert_eq!(
+            transport.close(),
+            Err(Error::Dma(DmaError::InvalidationFailed))
+        );
+        assert_eq!(
+            transport.snapshot().initialization.as_ref(),
+            Some(&evidence)
+        );
+        assert_eq!(evidence.report, Some(report));
+        drop(transport);
+        let d = d.lock().unwrap();
+        assert_eq!(d.retire, 1);
+        assert_eq!(d.domain.0.lock().unwrap().unmaps, 1);
+        assert!(!d.dropped);
+    }
 }
