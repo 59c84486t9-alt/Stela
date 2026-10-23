@@ -1,5 +1,5 @@
 //! Host GPU discovery. An entry is a PCI inventory item, not an initialized
-//! accelerator or a Metal device. Native vendor ports will live under this
+//! accelerator or a Metal device. The native vendor ports live under this
 //! module; see `docs/design/gpu.md` for their platform and language boundary.
 use crate::bus::pci::{Address, ConfigSpace, Function};
 
