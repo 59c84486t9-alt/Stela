@@ -147,30 +147,23 @@ impl<'a> Ivrs<'a> {
             }),
         );
         // The complete table is validated. Sorting needs no further allocation;
-        // adjacent checks cover every version within each full requester ID.
-        units.sort_unstable_by_key(|unit| {
-            (
-                unit.id().segment,
-                unit.id().device_id,
-                Reverse(unit.version()),
-                unit.offset,
-            )
-        });
+        // adjacent checks cover every version of each capability instance.
+        units.sort_unstable_by_key(|unit| (unit.instance(), Reverse(unit.version()), unit.offset));
         for pair in units.windows(2) {
             let [first, second] = [pair[0], pair[1]];
-            if first.id() == second.id() {
+            if first.instance() == second.instance() {
                 let offending = first.offset.max(second.offset);
                 if first.version() == second.version() {
                     return Err(error(offending, ErrorKind::DuplicateVersion));
                 }
-                if !first.same_identity(second) {
+                if first.mmio_address() != second.mmio_address() {
                     return Err(error(offending, ErrorKind::UnitIdentity));
                 }
             }
         }
         let mut previous = None;
         units.retain(|unit| {
-            let id = unit.id();
+            let id = unit.instance();
             let selected = previous != Some(id);
             previous = Some(id);
             selected
@@ -205,8 +198,10 @@ impl<'a> Ivrs<'a> {
         })
     }
 
-    /// One highest-version description per (segment, IOMMU device ID), in
-    /// table order. All lower versions were still validated by `parse`.
+    /// One highest-version description per (segment, IOMMU device ID,
+    /// capability offset), in table order. All lower versions were validated.
+    /// Descriptions do not grant independent ownership of their PCI function
+    /// or MMIO aperture; live admission must exclude resource overlap.
     pub fn units(&self) -> impl ExactSizeIterator<Item = Ivhd<'a>> + '_ {
         self.units.iter().copied()
     }
@@ -261,6 +256,8 @@ impl<'a> Ivhd<'a> {
         self.raw[1]
     }
 
+    /// PCI function containing the IOMMU capability. Multiple instances may
+    /// share this function; the capability offset distinguishes them.
     pub fn id(self) -> RequesterId {
         RequesterId {
             segment: read16(self.raw, 16),
@@ -304,11 +301,11 @@ impl<'a> Ivhd<'a> {
         }
     }
 
-    fn same_identity(self, other: Self) -> bool {
-        // Flags, info, feature reporting and EFR attributes may describe
-        // different capabilities in different versions; they are not identity.
-        self.capability_offset() == other.capability_offset()
-            && self.mmio_address() == other.mmio_address()
+    fn instance(self) -> (u16, u16, u16) {
+        // AMD 48882 rev 3.11 section 5.2.2.1: a function may contain multiple
+        // capabilities. HT UnitID may be shared and is not an instance key.
+        let id = self.id();
+        (id.segment, id.device_id, self.capability_offset())
     }
 }
 
@@ -854,17 +851,99 @@ mod tests {
             .unwrap();
         assert_eq!((preserved.flags(), preserved.info()), (0x36, 0x2345));
         fail(&table(&[&first, &first]), ErrorKind::DuplicateVersion);
-        for offset in [6, 8] {
-            let mut inconsistent = middle.clone();
-            inconsistent[offset] ^= 1;
-            fail(&table(&[&first, &inconsistent]), ErrorKind::UnitIdentity);
-        }
+        let mut inconsistent = middle.clone();
+        inconsistent[8] ^= 1;
+        fail(&table(&[&first, &inconsistent]), ErrorKind::UnitIdentity);
         // Even a lower, unselected version must have valid entry grammar.
         let broken_low = hardware(0x10, 0x1234, 0xabcd, &[0x80]);
         fail(
             &table(&[&high, &broken_low]),
             ErrorKind::UnsupportedEntry(0x80),
         );
+    }
+
+    #[test]
+    fn multiple_capabilities_on_one_function_select_versions_independently() {
+        let mut blocks = Vec::new();
+        for (capability, base, versions) in [
+            (0x40, 0xfed80000, &[0x10, 0x11, 0x40][..]),
+            (0x80, 0xfedc0000, &[0x10, 0x11][..]),
+        ] {
+            for &version in versions {
+                let mut block = hardware(version, 7, 0x8123, &[]);
+                put16(&mut block, 6, capability);
+                put64(&mut block, 8, base);
+                // Both units may have the same deprecated HT UnitID (zero).
+                put16(&mut block, 18, 0);
+                blocks.push(block);
+            }
+        }
+        // Every permutation of the five descriptions, with different maximum
+        // versions per capability. Expected selection follows original bytes.
+        for mut permutation in 0..120 {
+            let mut remaining = vec![0, 1, 2, 3, 4];
+            let mut order = Vec::new();
+            while !remaining.is_empty() {
+                let index = permutation % remaining.len();
+                permutation /= remaining.len();
+                order.push(remaining.remove(index));
+            }
+            let ordered: Vec<_> = order
+                .iter()
+                .map(|&index| blocks[index].as_slice())
+                .collect();
+            let raw = table(&ordered);
+            let original = raw.clone();
+            let parsed = Ivrs::parse(&raw, 5).unwrap();
+            let selected: Vec<_> = parsed.units().collect();
+            assert_eq!(selected.len(), 2);
+            let expected: Vec<_> = order
+                .iter()
+                .copied()
+                .filter(|&index| index == 2 || index == 4)
+                .collect();
+            for (unit, index) in selected.iter().zip(expected) {
+                assert_eq!(unit.raw(), blocks[index]);
+                assert_eq!(unit.raw().as_ptr(), raw[unit.offset()..].as_ptr());
+            }
+            assert_eq!(selected[0].id(), selected[1].id());
+            assert_ne!(
+                selected[0].capability_offset(),
+                selected[1].capability_offset()
+            );
+            for (unit, block) in parsed.hardware_blocks().zip(&ordered) {
+                assert_eq!(unit.raw(), *block);
+            }
+            assert_eq!(raw, original);
+            // The instance key does not hide duplicate or inconsistent lower
+            // descriptions behind a different capability's higher version.
+            for block in &blocks {
+                let mut duplicate = ordered.clone();
+                duplicate.push(block);
+                fail(&table(&duplicate), ErrorKind::DuplicateVersion);
+            }
+            for index in 0..blocks.len() {
+                let mut changed = blocks[index].clone();
+                changed[8] ^= 0x10;
+                let inconsistent: Vec<_> = order
+                    .iter()
+                    .map(|&current| {
+                        if current == index {
+                            changed.as_slice()
+                        } else {
+                            blocks[current].as_slice()
+                        }
+                    })
+                    .collect();
+                fail(&table(&inconsistent), ErrorKind::UnitIdentity);
+            }
+        }
+        // Shared nonzero HT UnitID is also metadata, not an instance key.
+        for block in &mut blocks {
+            put16(block, 18, 0x1f00);
+        }
+        let raw = table(&blocks.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        assert_eq!(Ivrs::parse(&raw, 5).unwrap().units().len(), 2);
     }
 
     #[test]
