@@ -80,6 +80,7 @@ struct Events {
     interrupted_rsp: AtomicUsize,
     isr_rsp: AtomicUsize,
     errors: AtomicU64,
+    async_observation: [AtomicU64; 4],
 }
 impl Events {
     unsafe fn queue(&self) -> &Queue<16> {
@@ -281,12 +282,14 @@ struct AsyncCall {
     trigger: *mut u32,
     deadline: u64,
     result: u64,
+    preflight: [u64; 3],
 }
 const _: () = {
-    assert!(size_of::<AsyncCall>() == 32);
+    assert!(size_of::<AsyncCall>() == 56);
     assert!(core::mem::offset_of!(AsyncCall, trigger) == 8);
     assert!(core::mem::offset_of!(AsyncCall, deadline) == 16);
     assert!(core::mem::offset_of!(AsyncCall, result) == 24);
+    assert!(core::mem::offset_of!(AsyncCall, preflight) == 32);
 };
 unsafe extern "C" fn foreground(ctx: *mut c_void) {
     let state = unsafe { events(ctx) };
@@ -307,8 +310,17 @@ unsafe extern "C" fn foreground(ctx: *mut c_void) {
         trigger: state.edu.interrupt_trigger(),
         deadline: state.deadline.load(Ordering::Acquire),
         result: u64::MAX,
+        preflight: [0; 3],
     };
     unsafe { msi_with_fp_sentinel(&mut call) };
+    for (destination, value) in state.async_observation.iter().zip([
+        call.result,
+        call.preflight[0],
+        call.preflight[1],
+        call.preflight[2],
+    ]) {
+        destination.store(value, Ordering::Release);
+    }
     if call.result != 0 {
         state.bad(BAD_ASYNC_STATE);
     }
@@ -340,6 +352,7 @@ pub(crate) fn run(
         interrupted_rsp: AtomicUsize::new(0),
         isr_rsp: AtomicUsize::new(0),
         errors: AtomicU64::new(0),
+        async_observation: [const { AtomicU64::new(0) }; 4],
     });
     // SAFETY: actual retained provider/code/root/event owner; only the owned
     // native handler and actual BSP callbacks can submit or execute this work.
@@ -393,13 +406,17 @@ pub(crate) fn run(
         // source/work/metadata failure keeps Source+Rc<Executor> in its slot.
         drop(registration);
         return Err(format!(
-            "IRQ work observation failed result={result:?} errors={:#x} delivered={} worker={} quarantine={} retained_BSP_owner={} released_stack_leases={}",
+            "IRQ work observation failed result={result:?} errors={:#x} delivered={} worker={} quarantine={} retained_BSP_owner={} released_stack_leases={} async_result={} fcw_fsw_ftw_fop={:#x} fip={:#x} fdp={:#x}",
             events.errors.load(Ordering::Acquire),
             events.delivered.load(Ordering::Acquire),
             events.worker.load(Ordering::Acquire),
             super::CONTROLLER.quarantine_count(),
             Rc::strong_count(&executor) >= 2,
-            batch.releases.released()
+            batch.releases.released(),
+            events.async_observation[0].load(Ordering::Acquire),
+            events.async_observation[1].load(Ordering::Acquire),
+            events.async_observation[2].load(Ordering::Acquire),
+            events.async_observation[3].load(Ordering::Acquire)
         ));
     }
     // This exercises the source's two real quiescence/drain phases. The queued
@@ -588,6 +605,14 @@ unsafe extern "C" fn msi_with_fp_sentinel(_: *mut AsyncCall) {
         "mov word ptr [rsp+1568], 0x0b7f",
         "fldcw [rsp+1568]",
         "fxsave64 [rsp+544]",
+        // Preserve actual preflight bytes for a failed diagnostic, including
+        // an oracle that cannot produce meaningful x87 pointer/opcode state.
+        "mov rax, [rsp+544]",
+        "mov [rbx+32], rax",
+        "mov rax, [rsp+552]",
+        "mov [rbx+40], rax",
+        "mov rax, [rsp+560]",
+        "mov [rbx+48], rax",
         "test word ptr [rsp+546], 1",
         "jz 4f",
         "test word ptr [rsp+546], 0x80",
