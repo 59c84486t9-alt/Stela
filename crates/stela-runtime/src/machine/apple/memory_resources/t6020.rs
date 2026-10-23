@@ -16,6 +16,8 @@ use crate::{
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 
+pub mod cold;
+
 const NAME: &str = "t6020-mcc-amcc";
 const PTD_OFFSET: u64 = t6020::MAX_APERTURES as u64 * t6020::APERTURE_BYTES;
 const AUXILIARY_OFFSET: u64 = PTD_OFFSET + ptd::PTD_BYTES;
