@@ -8,6 +8,8 @@ mod ba;
 mod local;
 mod modern;
 mod packet;
+mod policy;
+pub use policy::{AttachError, BssHandle, Environment, ManagedClient, PolicyError};
 mod radio;
 mod receive;
 use crate::{

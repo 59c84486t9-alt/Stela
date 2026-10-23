@@ -6,13 +6,15 @@
 //!
 //! The distinction between disabled channels, no-IR, DFS and indoor constraints
 //! follows pinned Linux cfg80211/mac80211 semantics; see THIRD_PARTY.md.
-//! This module supplies no regulatory database, country, DFS exception, default
-//! rate or power. Parsed vendor receipts and channel flags are observations.
-//! Only qualified providers holding genuine authority leases may admit work.
+//! Database inputs are explicitly content-pinned and country-selected by the
+//! normal OS/setup source. No country, DFS exception, default rate or power is
+//! inferred. Parsed vendor receipts and channel flags alone are observations;
+//! native providers must retain the actual programmed controller and policy.
 
 use super::{Band, Channel, scan, station};
 
 mod association;
+pub mod database;
 pub use association::{AssociationAdmission, AssociationOperation, AssociationUse};
 
 static NEXT_OWNER: super::Identities = super::Identities::new();

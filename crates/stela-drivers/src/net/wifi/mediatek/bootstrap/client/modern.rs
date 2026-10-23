@@ -454,7 +454,7 @@ fn mbssid(mut elements: &[u8]) -> Result<(u8, u8), Error> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     extern crate std;
     use crate::net::wifi::Band;
     use crate::net::wifi::mediatek::bootstrap::{
@@ -492,7 +492,9 @@ mod tests {
         data.extend_from_slice(bytes);
         append_ie(out, 255, &data);
     }
-    fn modern_inputs(driver: &Client<Bar, Q, NativeGuard>) -> (Join, scan::result::Bss) {
+    pub(in super::super) fn modern_inputs(
+        driver: &Client<Bar, Q, NativeGuard>,
+    ) -> (Join, scan::result::Bss) {
         modern_inputs_cipher(driver, 4)
     }
     fn modern_inputs_cipher(

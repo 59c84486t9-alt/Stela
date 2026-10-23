@@ -387,6 +387,20 @@ impl<C: 'static> Execution<C> {
 }
 
 impl<C: 'static> Execution<C> {
+    /// Private view of this retained owner's actual completed MT7925 chain.
+    /// No public copied receipt can manufacture a programmed policy.
+    pub(in crate::net::wifi::mediatek) fn programmed_mt7925(
+        &self,
+    ) -> Option<(&domain::Request, &power::Plan)> {
+        let state = self.owned();
+        let chain = state.remaining.as_ref()?;
+        (state.phase == Phase::StartDomainFacts
+            && chain.domain.chip() == Chip::Mt7925
+            && chain.facts.len() == 1 + chain.power.requests().len()
+            && chain.start_facts.len() == 1
+            && chain.interrupted.is_none())
+        .then_some((&chain.domain, &chain.power))
+    }
     pub(in crate::net::wifi::mediatek) fn initial_channel_present(
         &self,
         band: crate::net::wifi::Band,

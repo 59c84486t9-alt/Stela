@@ -1042,13 +1042,6 @@ pub(crate) mod tests {
             self.policy_bands(chip, [true, true, false]);
         }
         pub(crate) fn policy_bands(&mut self, chip: Chip, enabled: [bool; 3]) {
-            let flags = self
-                .controller
-                .capabilities()
-                .unwrap()
-                .observed()
-                .chip_flags();
-            unsafe { self.controller.execute_clc(inputs(flags)) }.unwrap();
             let chan: [Vec<domain::Channel>; 3] = core::array::from_fn(|i| {
                 if enabled[i] {
                     domain_channels([Band::Ghz2, Band::Ghz5, Band::Ghz6][i])
@@ -1056,6 +1049,21 @@ pub(crate) mod tests {
                     vec![]
                 }
             });
+            self.policy_channels(chip, enabled, chan);
+        }
+        pub(crate) fn policy_channels(
+            &mut self,
+            chip: Chip,
+            enabled: [bool; 3],
+            chan: [Vec<domain::Channel>; 3],
+        ) {
+            let flags = self
+                .controller
+                .capabilities()
+                .unwrap()
+                .observed()
+                .chip_flags();
+            unsafe { self.controller.execute_clc(inputs(flags)) }.unwrap();
             let bands: [Vec<power::Channel>; 3] = core::array::from_fn(|i| {
                 if enabled[i] {
                     rates(chip, [Band::Ghz2, Band::Ghz5, Band::Ghz6][i])
