@@ -1,4 +1,5 @@
-//! Host keyboards and pointers, read as [`Input`] changes for the native
+//! Host keyboards and pointers, plus SFH sensors ([`sfh`]). Pointer/keyboard
+//! changes are read as [`Input`] changes for the native
 //! USB peripheral: virtio-input ([`virtio`]) and i8042 PS/2 ([`ps2`]). USB HID devices are in
 //! [`usb::hid`](crate::usb::hid).
 pub mod cyapa;
@@ -6,6 +7,7 @@ pub mod elan;
 pub mod hid_i2c;
 pub mod ps2;
 pub mod rmi;
+pub mod sfh;
 pub mod virtio;
 
 /// The largest absolute pointer coordinate on either axis.
