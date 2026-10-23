@@ -1039,7 +1039,26 @@ mod tests {
         }
         let state = state.borrow();
         assert!(state.history.windows(2).all(|w| w[1].1 == w[0].1 + 1));
-        assert_eq!(state.history.len(), 112);
+        // Probe reads block zero before MODE SENSE. Check every actual CDB,
+        // rather than only a total that could hide a missing read or a command
+        // sent to the wrong LUN after the shared transport's tags advance.
+        let expected: [&[u8]; 8] = [
+            &[0x12, 0, 0, 0, 36, 0],
+            &[0x00, 0, 0, 0, 0, 0],
+            &[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            &[0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+            &[0x1a, 0, 0x3f, 0, 192, 0],
+            &[0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+            &[0x2a, 0, 0, 0, 0, 1, 0, 0, 1, 0],
+            &[0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ];
+        assert_eq!(state.history.len(), 16 * expected.len());
+        for (lun, commands) in state.history.chunks_exact(expected.len()).enumerate() {
+            for ((actual_lun, _, cdb), expected_cdb) in commands.iter().zip(expected) {
+                assert_eq!(usize::from(*actual_lun), lun);
+                assert_eq!(cdb.as_slice(), expected_cdb);
+            }
+        }
     }
     #[test]
     fn empty_slot_does_not_hide_later_ready_media_and_auto_sense_keeps_lun() {
