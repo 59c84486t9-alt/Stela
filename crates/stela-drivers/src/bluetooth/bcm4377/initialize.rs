@@ -188,15 +188,21 @@ impl<P: Platform> Engine<'_, P> {
     }
     fn command(&mut self, opcode: u16, parameters: &[u8]) -> Result<Vec<u8>> {
         self.bounded(self.deadline)?;
-        let packet = hci::packet(opcode, parameters).map_err(|requirement| Error::Hci {
-            requirement,
-            bytes: parameters.into(),
-        })?;
         let deadline = self
             .transport
             .platform()
             .now_us()
             .saturating_add(COMMAND_US);
+        self.transport.request_deadline = Some(RequestDeadline::Hci(deadline));
+        let result = self.command_inner(opcode, parameters, deadline);
+        self.transport.request_deadline = None;
+        result
+    }
+    fn command_inner(&mut self, opcode: u16, parameters: &[u8], deadline: u64) -> Result<Vec<u8>> {
+        let packet = hci::packet(opcode, parameters).map_err(|requirement| Error::Hci {
+            requirement,
+            bytes: parameters.into(),
+        })?;
         self.attempt().commands.push(CommandReceipt {
             opcode,
             packet_bytes: packet.len(),

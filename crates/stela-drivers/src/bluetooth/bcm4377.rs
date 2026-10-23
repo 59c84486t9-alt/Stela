@@ -33,6 +33,12 @@ const OBSERVATION_BYTES: usize = 16 * 1024 * 1024;
 const STATE_OFFSET: usize = 128;
 const PERIPHERAL_OFFSET: usize = 256;
 
+#[derive(Clone, Copy)]
+enum RequestDeadline {
+    Hci(u64),
+    Control(u64),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Space {
     Configuration,
@@ -212,6 +218,7 @@ pub struct Transport<P: Platform> {
     retirement_attempted: bool,
     retirement_error: Option<Error>,
     initialization_deadline: Option<u64>,
+    request_deadline: Option<RequestDeadline>,
 }
 impl<P: Platform> Transport<P> {
     pub fn new(mut platform: P, dma: &mut dyn CoherentAllocator) -> Result<Self> {
@@ -251,6 +258,7 @@ impl<P: Platform> Transport<P> {
             retirement_attempted: false,
             retirement_error: None,
             initialization_deadline: None,
+            request_deadline: None,
         };
         result.initialize_context();
         Ok(result)
@@ -297,6 +305,7 @@ impl<P: Platform> Transport<P> {
         // Necessary independent retirement and later ordinary transport close
         // are outside the setup budget; expiry never suppresses cleanup.
         self.initialization_deadline = None;
+        self.request_deadline = None;
         match result {
             Ok(report) => Ok(report),
             Err(error) => Err(self.fail(error)),
@@ -312,14 +321,27 @@ impl<P: Platform> Transport<P> {
         self.core.as_mut().unwrap()
     }
     fn check_budget(&self) -> Result<()> {
-        if let Some(deadline) = self.initialization_deadline
-            && self.platform.as_ref().unwrap().now_us() >= deadline
+        if self.initialization_deadline.is_none() && self.request_deadline.is_none() {
+            return Ok(());
+        }
+        let now = self.platform.as_ref().unwrap().now_us();
+        if self
+            .initialization_deadline
+            .is_some_and(|deadline| now >= deadline)
         {
             return Err(Error::Timeout(
                 "complete Broadcom controller initialization",
             ));
         }
-        Ok(())
+        match self.request_deadline {
+            Some(RequestDeadline::Hci(deadline)) if now >= deadline => {
+                Err(Error::Timeout("actual Broadcom HCI response or credits"))
+            }
+            Some(RequestDeadline::Control(deadline)) if now >= deadline => Err(Error::Timeout(
+                "actual Broadcom control-ring acknowledgment",
+            )),
+            _ => Ok(()),
+        }
     }
     fn publish(&self, buffer: &CoherentBuffer) -> Result<()> {
         self.check_budget()?;
@@ -511,6 +533,7 @@ mod tests {
         fail_sync: Option<usize>,
         fail_unmap: bool,
         delay_sync: Option<usize>,
+        sync_delay_us: u64,
         elapsed_us: u64,
     }
     struct Domain(Mutex<DomainState>);
@@ -525,6 +548,7 @@ mod tests {
                 fail_sync: None,
                 fail_unmap: false,
                 delay_sync: None,
+                sync_delay_us: 121_000_000,
                 elapsed_us: 0,
             }))
         }
@@ -649,7 +673,8 @@ mod tests {
             assert!(range.end <= state.leases[&mapping.id].token.bytes);
             state.syncs += 1;
             if state.delay_sync == Some(state.syncs) {
-                state.elapsed_us += 121_000_000;
+                let delay = state.sync_delay_us;
+                state.elapsed_us += delay;
             }
             if state.fail_sync == Some(state.syncs) {
                 return Err(DmaError::VisibilityFailed);
@@ -763,6 +788,7 @@ mod tests {
     enum HciFault {
         None,
         Preexisting,
+        LateSleep,
         StatusThenComplete(usize),
         AckOnly(usize),
         StatusOnly(usize),
@@ -1201,6 +1227,19 @@ mod tests {
                 d.ticks += delay;
             }
             match (space, offset) {
+                (Space::Bar0, 0x150)
+                    if d.setup
+                        .as_ref()
+                        .is_some_and(|s| s.fault == HciFault::LateSleep)
+                        && d.tx[1].enabled =>
+                {
+                    // Observe the actual newly written descriptor. Startup's
+                    // control-ring wakeups leave the HCI descriptor empty.
+                    let descriptor = d.domain.read(d.tx[1].address, 3);
+                    if u16at(&descriptor, 1) != 0 {
+                        d.ticks += 11_000_000;
+                    }
+                }
                 (Space::Bar0, 0x140) => {
                     assert!(d.armed);
                     assert_eq!(value, 0);
@@ -1271,7 +1310,8 @@ mod tests {
         fn arm_msi(&mut self) -> Result<()> {
             let mut d = self.0.lock().unwrap();
             d.armed = true;
-            d.ticks += d.arm_delay;
+            let delay = d.arm_delay;
+            d.ticks += delay;
             d.operation(Space::Configuration, 0xeeee)
         }
         fn retire(&mut self) -> Result<()> {
@@ -2990,5 +3030,165 @@ mod tests {
         assert_eq!(d.retire, 1);
         assert!(!d.armed);
         assert_eq!(d.domain.0.lock().unwrap().unmaps, 0);
+    }
+    fn first_hci_visibility() -> usize {
+        let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
+        transport.start(&provider).unwrap();
+        d.lock().unwrap().domain.0.lock().unwrap().syncs + 1
+    }
+    #[test]
+    fn active_hci_budget_stops_after_11s_visibility_or_sleep_before_head_and_doorbell() {
+        let first = first_hci_visibility();
+        for sleep in [false, true] {
+            for fail_retire in [false, true] {
+                let (mut transport, d, provider, _) = setup_fixture(
+                    0x5f69,
+                    "b1",
+                    false,
+                    if sleep {
+                        HciFault::LateSleep
+                    } else {
+                        HciFault::None
+                    },
+                );
+                {
+                    let mut d = d.lock().unwrap();
+                    d.fail_retire = fail_retire;
+                    if !sleep {
+                        let mut domain = d.domain.0.lock().unwrap();
+                        domain.delay_sync = Some(first);
+                        domain.sync_delay_us = 11_000_000;
+                    }
+                }
+                let error = transport.initialize(&provider).unwrap_err();
+                let cause = match &error {
+                    Error::Cleanup { cause, .. } => cause.as_ref(),
+                    other => other,
+                };
+                assert_eq!(
+                    cause,
+                    &Error::Timeout("actual Broadcom HCI response or credits")
+                );
+                assert_eq!(transport.core().read16(128 + 24 + 2), 0);
+                let attempt = transport.snapshot().initialization.as_ref().unwrap();
+                assert_eq!(attempt.commands.len(), 1);
+                assert!(attempt.commands[0].submission.is_none());
+                assert!(attempt.commands[0].returned.is_none());
+                assert!(attempt.report.is_none());
+                assert!(transport.request_deadline.is_none());
+                assert!(transport.initialization_deadline.is_none());
+                if sleep {
+                    assert_eq!(
+                        transport.snapshot().native_access,
+                        Some(RegisterAccess::Write {
+                            space: Space::Bar0,
+                            offset: 0x150,
+                            value: 2,
+                            returned: true
+                        })
+                    );
+                }
+                let writes = d.lock().unwrap().writes;
+                assert_eq!(transport.close(), Err(error));
+                drop(transport);
+                let d = d.lock().unwrap();
+                assert!(d.sent.is_empty());
+                assert_eq!(d.setup.as_ref().unwrap().index, 0);
+                assert!(!d.doorbells.iter().any(|value| (value >> 8) & 0xff == 1));
+                assert_eq!(d.writes, writes);
+                assert_eq!(d.retire, 1);
+                assert!(!d.dropped);
+                assert_eq!(d.domain.0.lock().unwrap().unmaps, 0);
+            }
+        }
+    }
+    #[test]
+    fn active_request_guards_keep_global_priority_and_first_native_visibility_failure() {
+        let first = first_hci_visibility();
+        let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
+        {
+            let d = d.lock().unwrap();
+            let mut domain = d.domain.0.lock().unwrap();
+            domain.delay_sync = Some(first);
+            domain.sync_delay_us = 121_000_000;
+        }
+        assert_eq!(
+            transport.initialize(&provider),
+            Err(Error::Timeout(
+                "complete Broadcom controller initialization"
+            ))
+        );
+        assert_eq!(transport.core().read16(128 + 24 + 2), 0);
+        let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
+        {
+            let mut d = d.lock().unwrap();
+            d.fail_retire = true;
+            let mut domain = d.domain.0.lock().unwrap();
+            domain.delay_sync = Some(first);
+            domain.sync_delay_us = 11_000_000;
+            domain.fail_sync = Some(first);
+        }
+        let error = transport.initialize(&provider).unwrap_err();
+        assert!(
+            matches!(&error,Error::Cleanup{cause,..} if **cause==Error::Dma(DmaError::VisibilityFailed))
+        );
+        assert_eq!(transport.core().read16(128 + 24 + 2), 0);
+        assert_eq!(transport.close(), Err(error));
+        assert_eq!(d.lock().unwrap().retire, 1);
+    }
+    #[test]
+    fn ordinary_control_budget_blocks_late_visibility_before_its_head_or_doorbell() {
+        let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
+        {
+            let d = d.lock().unwrap();
+            let mut domain = d.domain.0.lock().unwrap();
+            domain.delay_sync = Some(3);
+            domain.sync_delay_us = 2_000_000;
+        }
+        assert_eq!(
+            transport.start(&provider),
+            Err(Error::Timeout(
+                "actual Broadcom control-ring acknowledgment"
+            ))
+        );
+        assert_eq!(transport.core().read16(128 + 24), 0);
+        assert!(transport.snapshot().initialization.is_none());
+        let d = d.lock().unwrap();
+        assert_eq!((d.boot, d.rti), (2, 2));
+        assert!(d.controls.is_empty());
+        assert!(d.doorbells.is_empty());
+        assert_eq!(d.retire, 1);
+    }
+    struct SlowPtb {
+        catalog: Catalog,
+        device: Arc<Mutex<Device>>,
+    }
+    impl Provider for SlowPtb {
+        fn load(
+            &self,
+            requirement: crate::firmware::Requirement<'_>,
+        ) -> core::result::Result<crate::firmware::Image<'_>, crate::firmware::Error> {
+            if requirement.name.ends_with(".ptb") {
+                self.device.lock().unwrap().ticks += 11_000_000;
+            }
+            self.catalog.load(requirement)
+        }
+    }
+    #[test]
+    fn command_deadline_ends_before_intercommand_resource_lookup_and_normal_close() {
+        let (mut transport, d, catalog, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
+        let provider = SlowPtb {
+            catalog,
+            device: d.clone(),
+        };
+        let report = transport.initialize(&provider).unwrap();
+        assert_eq!(report.ptb, PtbDisposition::Accepted);
+        assert!(transport.request_deadline.is_none());
+        assert!(transport.initialization_deadline.is_none());
+        d.lock().unwrap().ticks += 11_000_000;
+        transport.close().unwrap();
+        let d = d.lock().unwrap();
+        assert_eq!(d.retire, 1);
+        assert!(d.domain.0.lock().unwrap().leases.is_empty());
     }
 }

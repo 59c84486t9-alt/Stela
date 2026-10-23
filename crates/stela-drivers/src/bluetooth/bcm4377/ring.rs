@@ -266,6 +266,12 @@ impl<P: Platform> Transport<P> {
     }
     fn control(&mut self, bytes: &[u8; CONTROL_BYTES]) -> Result<()> {
         let deadline = self.platform().now_us().saturating_add(1_000_000);
+        self.request_deadline = Some(RequestDeadline::Control(deadline));
+        let result = self.control_inner(bytes, deadline);
+        self.request_deadline = None;
+        result
+    }
+    fn control_inner(&mut self, bytes: &[u8; CONTROL_BYTES], deadline: u64) -> Result<()> {
         let submitted = self.enqueue_ring(0, bytes)?;
         loop {
             if self.platform().now_us() >= deadline {
