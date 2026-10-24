@@ -288,6 +288,15 @@ impl StatusNotifications {
     pub fn stop(&mut self) -> Result<(), Error> {
         let mut controller = self.shared.borrow_mut();
         let mut device = controller.device(self.id)?;
+        // A terminal transfer error may require actual Reset Endpoint and Set
+        // Dequeue before ordinary submission-readiness permits Drop. The exact
+        // retained ticket authorizes cancellation without weakening that fence.
+        if let Some(ticket) = &self.ticket
+            && let Err(error) = device.cancel_ticket(ticket)
+        {
+            self.poisoned = true;
+            return Err(error.into());
+        }
         if self.configured
             && let Err(error) = device.deconfigure(&[self.plan.endpoint])
         {

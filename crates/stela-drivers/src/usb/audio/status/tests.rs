@@ -447,7 +447,7 @@ fn dropping_pending_owner_retains_boot_dma_and_cannot_mint_replacement_authority
 }
 
 #[test]
-fn actual_transfer_error_retains_original_ticket_and_packet_without_notice() {
+fn actual_transfer_error_retains_ticket_until_reset_dequeue_and_drop_ack() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer(&mut dma);
@@ -467,9 +467,14 @@ fn actual_transfer_error_retains_original_ticket_and_packet_without_notice() {
     assert_eq!(owner.packet.bytes(), packet);
     assert!(owner.notices.is_empty());
     assert_eq!(owner.next_notice(), Err(Error::Poisoned));
-    // No class-local clearing of the native halt/uncertainty fence is allowed.
-    assert!(owner.stop().is_err());
-    assert!(owner.ticket.is_some());
+    // Recovery requires actual native Reset Endpoint, Set Dequeue and Drop;
+    // no class-local clearing of the native halt/submission fence is allowed.
+    owner.stop().unwrap();
+    assert!(!owner.configured && !owner.poisoned && owner.ticket.is_none());
+    assert!(model.borrow().seen.contains(&14));
+    assert!(model.borrow().seen.contains(&16));
+    assert!(model.borrow().seen.contains(&12));
+    assert_eq!(owner.packet.bytes(), packet);
 }
 
 #[test]
