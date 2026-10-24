@@ -17,6 +17,76 @@ pub(super) const FORM: &str = "region_sequence";
 /// pointer register at [`super::FAULT_POINTER`], so an access through it
 /// takes a translation fault and the exception's registers compare.
 pub(super) const SYSTEM_FORM: &str = "region_sequence_system";
+/// Checked callback boundaries in the production shared-system compiler lane.
+pub(super) const SHARED_FORM: &str = "region_sequence_shared";
+pub(super) const SHARED_POINTERS: u32 = (1 << 28) | (1 << 29);
+
+pub(super) fn shared_authored_sequences() -> Vec<Vec<u32>> {
+    let mut pressure = Vec::new();
+    for _ in 0..8 {
+        for register in 0..12 {
+            pressure.push(0x9100_0400 | register << 5 | register);
+        }
+    }
+    pressure.push(0x3940_03a1); // LDRB W1,[X29] after R15 restoration.
+    vec![
+        pressure,
+        vec![
+            0xb100_0400,
+            0x9100_04a5,
+            0x9100_04a5,
+            0x9100_04a5,
+            0x9100_04a5,
+            0x9a84_0067,
+            0x3940_0381,
+            0x9a84_0062,
+            0x9100_0400,
+        ],
+        vec![
+            0x9100_0400,
+            0x9100_0400,
+            0x9100_0400,
+            0x3900_0380,
+            0x9100_0400,
+            0x9100_0400,
+            0x9100_0400,
+            0x3900_03a0,
+            0x9100_0400,
+        ],
+    ]
+}
+
+pub(super) fn shared_sequence(random: &mut Random) -> (Vec<u32>, u32) {
+    let mut generator = Generator {
+        random,
+        pointers: SHARED_POINTERS,
+        loaded: 0,
+    };
+    let mut code = Vec::new();
+    let length = 8 + generator.below(MAX_LENGTH);
+    for index in 0..length {
+        let mut word = generator.arithmetic();
+        if SHARED_POINTERS & (1 << (word & 31)) != 0 {
+            // Legacy sequences deliberately update pointer bases. Here their
+            // values must stay inside the one declared missing-page fixture.
+            word = (word & !31) | generator.destination();
+        }
+        code.push(word);
+        if index % 5 == 0 || index + 1 == length {
+            let load = generator.below(2) != 0;
+            // The final callback always reaches X29, which fault twins leave
+            // unmapped. Earlier X28 writes must survive that precise failure.
+            let base = if index + 1 == length { 29 } else { 28 };
+            let data = generator.data();
+            let offset = generator.below(32);
+            let opcode = if load { 0x3940_0000 } else { 0x3900_0000 };
+            code.push(opcode | offset << 10 | base << 5 | data);
+        }
+    }
+    code.push(0x9100_0400); // ADD X0,X0,#1: sentinel after the final callback.
+    (code, SHARED_POINTERS)
+}
+
 const MAX_LENGTH: u64 = 24;
 const SP: u32 = 31;
 const ZR: u32 = 31;
@@ -288,6 +358,22 @@ impl Generator<'_> {
             magnitude
         } else {
             -magnitude
+        }
+    }
+}
+
+#[cfg(test)]
+mod shared_tests {
+    use super::*;
+    #[test]
+    fn checked_region_sequences_never_overwrite_their_fixture_pointers() {
+        let mut random = Random(1);
+        let mut sequences = shared_authored_sequences();
+        sequences.extend((0..1024).map(|_| shared_sequence(&mut random).0));
+        for code in sequences {
+            for word in code {
+                assert_eq!(SHARED_POINTERS & (1 << (word & 31)), 0);
+            }
         }
     }
 }

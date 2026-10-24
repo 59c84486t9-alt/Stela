@@ -17,6 +17,15 @@ pub(crate) enum CheckedOperation {
 }
 
 impl CheckedOperation {
+    /// Only already-admitted register operations may enter a nonfaulting
+    /// region. Typed checked accesses and CPA operations remain boundaries.
+    pub(crate) fn ordinary_instruction(&self) -> Option<&Instruction> {
+        match self {
+            Self::Ordinary(Decoded::Ordinary(instruction)) => Some(instruction),
+            _ => None,
+        }
+    }
+
     pub(super) fn new(
         instruction: Instruction,
         profile: super::CheckedMemoryProfile,

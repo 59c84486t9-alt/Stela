@@ -170,6 +170,7 @@ impl CheckedMemoryProfile {
 pub(super) struct CheckedPlan {
     decoded: Vec<(GuestAddress, CheckedOperation)>,
     requirements: MemoryRequirements,
+    register_regions: bool,
 }
 impl CheckedPlan {
     pub(super) fn new(
@@ -246,6 +247,7 @@ impl CheckedPlan {
         Ok(Self {
             decoded,
             requirements,
+            register_regions: system_helpers,
         })
     }
     pub(super) fn requirements(&self) -> MemoryRequirements {
@@ -257,7 +259,13 @@ impl CheckedPlan {
         fallthrough: GuestAddress,
         target: TargetCpu,
     ) -> Result<NativeBlock, CompileError> {
-        crate::x86_64::block::checked_memory::emit(&self.decoded, terminal, fallthrough, target)
+        crate::x86_64::block::checked_memory::emit(
+            &self.decoded,
+            terminal,
+            fallthrough,
+            target,
+            self.register_regions,
+        )
     }
 }
 

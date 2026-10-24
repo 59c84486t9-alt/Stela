@@ -99,12 +99,13 @@ pub struct Differential {
     #[arg(long, default_value_t = 20)]
     show: usize,
     /// Run LSE/ordered, integer/SIMD literals and AdvSIMD structures through
-    /// checked memory. Structures also compare every reachable boundary fault
-    /// prefix. LOR and unavailable host tiers refuse.
+    /// checked memory, plus shared-system integer regions with byte callbacks.
+    /// Structures compare reachable boundary fault prefixes. LOR and
+    /// unavailable host tiers refuse.
     #[arg(long, conflicts_with_all = ["system_matrix", "el2", "data_independent_timing"])]
     checked_memory: bool,
-    /// Fresh JSONL evidence for checked structure faults. Defaults to a unique
-    /// file in .stela/differential; existing evidence is never overwritten.
+    /// Fresh JSONL evidence for checked structure faults and shared-region
+    /// emitted artifacts. Defaults to a unique file in .stela/differential.
     #[arg(long, requires = "checked_memory")]
     checked_memory_report: Option<PathBuf>,
     /// Run the System form and accessor rows of the system requirement
@@ -771,7 +772,7 @@ impl Differential {
                     "states": self.states, "fields": self.fields, "form": self.form,
                     "profile": self.profile, "target": crate::oracle::native::target().id(),
                     "compiler_source_sha256": stela_compiler::SOURCE_SHA256,
-                    "scope": "EL0 LE nonstreaming ASIMD A=0 untagged Normal WB; structure fault assigned lanes/store-prefix are oracle-limited; all other state compares"
+                    "scope": "EL0 LE nonstreaming ASIMD A=0 untagged Normal WB; structure fault assigned lanes/store-prefix are oracle-limited; checked-system register regions and scalar byte faults compare full state"
                 })
             )?;
             println!("checked fault evidence: {}", path.display());
@@ -919,6 +920,15 @@ impl Differential {
             }
         }
         let originals = oracle.run(&cases)?;
+        if let Some(evidence) = &mut report.checked_faults {
+            for subject in batch.iter() {
+                if let Some(artifact) =
+                    subject.translation.checked_region_artifact(&subject.code)?
+                {
+                    writeln!(evidence, "{artifact}")?;
+                }
+            }
+        }
         for (index, (case, original)) in cases.iter().zip(&originals).enumerate() {
             let subject = &mut batch[case_subjects[index]];
             if let Some(exception) = original.exception
@@ -927,6 +937,7 @@ impl Differential {
                     .translation
                     .checked_structure(&subject.code)
                     .is_none()
+                && !subject.translation.compares_checked_region_faults()
             {
                 *report
                     .uncovered
@@ -936,7 +947,10 @@ impl Differential {
                     .or_default() += 1;
                 continue;
             }
-            if original.exception.is_none() || subject.system {
+            if original.exception.is_none()
+                || subject.system
+                || subject.translation.compares_checked_region_faults()
+            {
                 report.covered.insert(subject.form.clone());
             } else if let Some(exception) = original.exception {
                 *report
@@ -1139,7 +1153,48 @@ impl Differential {
                 }
             }
         }
-        self.region_subjects(random, skipped, each)
+        self.region_subjects(random, skipped, &mut each)?;
+        self.shared_region_subjects(random, each)
+    }
+
+    fn shared_region_subjects(
+        &self,
+        random: &mut Random,
+        mut each: impl FnMut(&mut Random, Subject) -> Result<()>,
+    ) -> Result<()> {
+        if self.el2
+            || self.profile.is_some()
+            || self
+                .form
+                .as_ref()
+                .is_some_and(|filter| !regions::SHARED_FORM.contains(filter.as_str()))
+        {
+            return Ok(());
+        }
+        let authored = regions::shared_authored_sequences();
+        for index in 0..self.regions + authored.len() {
+            let (code, pointers) = match authored.get(index) {
+                Some(code) => (code.clone(), regions::SHARED_POINTERS),
+                None => regions::shared_sequence(random),
+            };
+            for faulting in [0, 1 << 29] {
+                each(
+                    random,
+                    Subject {
+                        form: regions::SHARED_FORM.into(),
+                        translation: Translation::checked_system_region(&code)?,
+                        code: code.clone(),
+                        scalable: None,
+                        system: false,
+                        draft: false,
+                        el: 0,
+                        pointers,
+                        faulting,
+                    },
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Random region sequences ([`regions`]), translated as ordinary blocks.

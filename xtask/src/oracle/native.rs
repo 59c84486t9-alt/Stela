@@ -31,6 +31,7 @@ use stela_runtime::{
     },
 };
 
+mod checked_region;
 mod shared_memory;
 
 const PAGE_BYTES: usize = 0x1000;
@@ -206,6 +207,8 @@ pub(super) fn set_mxcsr(value: u32) {
 
 /// Stela's native translation of one case's code at [`CODE_PAGE`].
 pub enum Translation {
+    /// Exact shared-system compiler output in the fixed EL0 memory fixture.
+    CheckedSystemRegion(checked_region::CheckedSystemRegion),
     /// Original LSE/ordered source through the typed all-writer service.
     CheckedShared(stela_runtime::execution::checked_memory::CheckedMemoryBlock),
     /// A leaf ending in RET X30; execution falls through past the case.
@@ -225,6 +228,20 @@ pub enum Translation {
 }
 
 impl Translation {
+    pub fn checked_system_region(words: &[u32]) -> Result<Self> {
+        checked_region::CheckedSystemRegion::prepare(words).map(Self::CheckedSystemRegion)
+    }
+
+    pub fn compares_checked_region_faults(&self) -> bool {
+        matches!(self, Self::CheckedSystemRegion(_))
+    }
+
+    pub fn checked_region_artifact(&self, words: &[u32]) -> Result<Option<serde_json::Value>> {
+        match self {
+            Self::CheckedSystemRegion(body) => body.artifact(words).map(Some),
+            _ => Ok(None),
+        }
+    }
     /// The one checked structured source operation, if present. Its typed
     /// address/footprint drives mapped and boundary-fault oracle cases.
     pub fn checked_structure(
@@ -354,6 +371,12 @@ impl Translation {
         let mut scalable_result = None;
         let mut exception = None;
         let result = match self {
+            Self::CheckedSystemRegion(body) => {
+                body.run(&windows, case).map(|(state, pc, fault)| {
+                    exception = fault;
+                    (state, pc)
+                })
+            }
             Self::CheckedShared(body) => {
                 shared_memory::run(body, &windows, case).map(|(state, pc, fault)| {
                     exception = fault;

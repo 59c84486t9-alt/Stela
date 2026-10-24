@@ -1099,6 +1099,20 @@ pub fn emit_allocated_prefix(
     allocation::prefix(instructions)
 }
 
+/// Register retention without direct guest memory or recovery-table emission.
+/// Checked callers settle this complete span before any service boundary.
+pub(crate) fn emit_register_prefix(
+    instructions: &[Instruction],
+) -> Result<OptimizedRegion, RegionError> {
+    emit_prefix_selected(
+        instructions,
+        false,
+        super::MemoryChecks::DEFAULT,
+        false,
+        None,
+    )
+}
+
 /// Ordinary direct-RAM load retention; pure ALU allocation keeps six slots.
 /// Loads through SP check its alignment if `stack_alignment` (the block's
 /// [`super::MemoryChecks::stack_alignment`]). With `range_checks`, the loads

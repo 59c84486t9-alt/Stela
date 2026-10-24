@@ -1,6 +1,7 @@
 //! Blocks whose memory accesses go through the checked memory service.
 use crate::{
     CompileError, GuestAddress, NativeBlock, TargetCpu,
+    aarch64::Instruction,
     block::{Terminator, memory::CheckedOperation},
     extended,
 };
@@ -11,15 +12,41 @@ pub(crate) fn emit(
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
     target: TargetCpu,
+    register_regions: bool,
 ) -> Result<NativeBlock, CompileError> {
     let mut block = NativeBlock {
         x86_64_code: extended::context_wrapper(),
         source_map: Vec::new(),
     };
     let mut fixups = Vec::new();
-    for (pc, instruction) in instructions {
+    // DIT qualification covers the individual recipes, not region allocation.
+    let register_regions = register_regions && !target.data_independent_timing();
+    let mut cursor = 0;
+    while cursor < instructions.len() {
+        if register_regions && instructions[cursor].1.ordinary_instruction().is_some() {
+            // Decode once in CheckedPlan; clone each bounded typed span once,
+            // rather than reconsidering an unselected suffix at every word.
+            let mut span = Vec::new();
+            for (pc, operation) in &instructions[cursor..] {
+                let Some(instruction) = operation.ordinary_instruction() else {
+                    break;
+                };
+                if instruction.pc != *pc {
+                    return Err(CompileError("checked instruction PC differs".into()));
+                }
+                span.push(instruction.clone());
+                if span.len() == crate::x86_64::region::MAX_INSTRUCTIONS {
+                    break;
+                }
+            }
+            emit_register_span(&mut block, &span, target)?;
+            cursor += span.len();
+            continue;
+        }
+        let (pc, instruction) = &instructions[cursor];
         block.source_map.push((*pc, block.x86_64_code.len()));
         instruction.emit(&mut block.x86_64_code, *pc, target, &mut fixups)?;
+        cursor += 1;
     }
     if !fixups.is_empty() {
         return Err(CompileError(
@@ -37,4 +64,172 @@ pub(crate) fn emit(
         crate::x86_64::Rax::Unknown,
     );
     Ok(block)
+}
+
+fn emit_register_span(
+    block: &mut NativeBlock,
+    instructions: &[Instruction],
+    target: TargetCpu,
+) -> Result<(), CompileError> {
+    use crate::x86_64::{MemoryChecks, emit_instruction, region};
+    let mut cursor = 0;
+    while cursor < instructions.len() {
+        let remaining = &instructions[cursor..];
+        let (candidate, allocated) = match region::emit_allocated_prefix(remaining) {
+            Ok(Some(region)) => (Some(region), true),
+            _ => (region::emit_register_prefix(remaining).ok(), false),
+        };
+        let count = candidate
+            .as_ref()
+            .map_or(1, |region| region.consumed_instructions.max(1));
+        let mut baseline = NativeBlock {
+            x86_64_code: Vec::new(),
+            source_map: Vec::new(),
+        };
+        let mut fixups = Vec::new();
+        for instruction in &remaining[..count] {
+            baseline
+                .source_map
+                .push((instruction.pc, baseline.x86_64_code.len()));
+            emit_instruction(
+                &mut baseline.x86_64_code,
+                instruction,
+                &mut fixups,
+                target,
+                MemoryChecks::DEFAULT,
+            );
+        }
+        if !fixups.is_empty() {
+            return Err(CompileError(
+                "checked register span unexpectedly branches".into(),
+            ));
+        }
+        let offset = block.x86_64_code.len();
+        if let Some(region) = candidate
+            && region.fault_recovery.is_empty()
+            && if allocated {
+                region::admits_allocated(&region, &baseline.x86_64_code)
+            } else {
+                region::admits_ordinary(&region, &baseline.x86_64_code)
+            }
+        {
+            block.source_map.extend(
+                region
+                    .source_map
+                    .into_iter()
+                    .map(|(pc, at)| (pc, offset + at)),
+            );
+            block.x86_64_code.extend(region.code);
+        } else {
+            // A rejected candidate consumes its exact original span. Trying
+            // shorter suffixes could evade the candidate's measured cost gate.
+            block.source_map.extend(
+                baseline
+                    .source_map
+                    .into_iter()
+                    .map(|(pc, at)| (pc, offset + at)),
+            );
+            block.x86_64_code.extend(baseline.x86_64_code);
+        }
+        cursor += count;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::{BlockProfile, CheckedMemoryProfile, CompilationPlan};
+    use alloc::vec;
+
+    const PC: GuestAddress = GuestAddress(0x4000);
+    const ADD_X0: u32 = 0x9100_0400;
+    const LOAD_BYTE: u32 = 0x3940_0121; // LDRB W1,[X9].
+    const RET: u32 = 0xd65f_03c0;
+
+    #[test]
+    fn shared_register_regions_settle_before_exact_checked_callbacks_and_terminal() {
+        for recipe in [
+            CheckedMemoryProfile::SpAlignmentEnabled,
+            CheckedMemoryProfile::SpAlignmentDisabled,
+        ] {
+            let words = [
+                ADD_X0, ADD_X0, ADD_X0, ADD_X0, LOAD_BYTE, ADD_X0, ADD_X0, ADD_X0, ADD_X0, RET,
+            ];
+            let source: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+            let baseline = CompilationPlan::new(
+                &source,
+                PC,
+                BlockProfile::CheckedMemory(recipe),
+                TargetCpu::Baseline,
+            )
+            .unwrap();
+            let selected = CompilationPlan::new(
+                &source,
+                PC,
+                BlockProfile::SystemModeSharedV1(recipe),
+                TargetCpu::Baseline,
+            )
+            .unwrap();
+            assert_eq!(
+                baseline.memory_requirements(),
+                selected.memory_requirements()
+            );
+            let baseline = baseline.compile().unwrap();
+            let selected = selected.compile().unwrap();
+            assert!(selected.native.x86_64_code.len() < baseline.native.x86_64_code.len());
+            assert_eq!(selected.source_bytes, source.len());
+            assert!(selected.fault_recovery.is_empty());
+            assert_eq!(
+                selected
+                    .native
+                    .source_map
+                    .iter()
+                    .map(|(pc, _)| *pc)
+                    .collect::<Vec<_>>(),
+                baseline
+                    .native
+                    .source_map
+                    .iter()
+                    .map(|(pc, _)| *pc)
+                    .collect::<Vec<_>>()
+            );
+            for index in [4, 9] {
+                let interval = |block: &crate::block::CompiledBlock| {
+                    let begin = block.native.source_map[index].1;
+                    let end = block
+                        .native
+                        .source_map
+                        .get(index + 1)
+                        .map_or(block.native.x86_64_code.len(), |(_, at)| *at);
+                    block.native.x86_64_code[begin..end].to_vec()
+                };
+                assert_eq!(interval(&selected), interval(&baseline));
+            }
+        }
+    }
+
+    #[test]
+    fn shared_dit_and_single_word_paths_keep_the_individual_recipes() {
+        for (words, target) in [
+            (vec![ADD_X0, RET], TargetCpu::Baseline),
+            (
+                vec![ADD_X0, ADD_X0, LOAD_BYTE, ADD_X0, ADD_X0, RET],
+                TargetCpu::DataIndependentTiming,
+            ),
+        ] {
+            let source: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+            let compile = |profile| {
+                CompilationPlan::new(&source, PC, profile, target)
+                    .unwrap()
+                    .compile()
+                    .unwrap()
+            };
+            let recipe = CheckedMemoryProfile::SpAlignmentEnabled;
+            let baseline = compile(BlockProfile::CheckedMemory(recipe));
+            let selected = compile(BlockProfile::SystemModeSharedV1(recipe));
+            assert_eq!(baseline.native.x86_64_code, selected.native.x86_64_code);
+            assert_eq!(baseline.native.source_map, selected.native.source_map);
+        }
+    }
 }

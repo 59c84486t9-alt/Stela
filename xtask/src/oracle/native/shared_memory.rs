@@ -254,9 +254,10 @@ pub(super) fn run(
 
 /// This fixture maps the complete data window through valid level-3 pages and
 /// leaves the next page absent. Only that exact EL0/LE/A=0 fault is synthesized;
-/// it supplies no general architectural exception adapter. AdvSIMD accesses
-/// have ISV=0, and a failed checked entry retains its exact source PC and FAR.
-fn translation_fault(
+/// it supplies no general architectural exception adapter. The checked-region
+/// lane also permits byte accesses in the declared absent level-3 page. Failed
+/// entries retain exact source PC, FAR and direction; byte faults have no prefix.
+pub(super) fn translation_fault(
     fault: stela_runtime::memory::domain::MemoryFault,
     case: &Case,
 ) -> Result<super::super::Exception> {
@@ -266,7 +267,8 @@ fn translation_fault(
         "unqualified checked oracle fault: {fault:?}"
     );
     ensure!(
-        fault.address == DATA_WINDOW + DATA_BYTES as u64,
+        fault.address == DATA_WINDOW + DATA_BYTES as u64
+            || (DATA_WINDOW + 0x10_0000..DATA_WINDOW + 0x10_1000).contains(&fault.address),
         "checked oracle fault outside qualified window boundary: {fault:?}"
     );
     let word = fault
@@ -277,14 +279,25 @@ fn translation_fault(
         .filter(|index| *index < case.steps)
         .and_then(|index| case.code.get(index))
         .context("checked fault PC outside original source")?;
-    let operand = match Decoder
+    let write = match Decoder
         .lift(GuestAddress(fault.pc), *word)
         .map(|instruction| instruction.operation)
     {
-        Ok(Operation::Simd(simd::Operand::StructureMemory(operand))) => operand,
-        _ => anyhow::bail!("checked fault has no qualified structured source: {word:08x}"),
+        Ok(Operation::Simd(simd::Operand::StructureMemory(operand))) => {
+            ensure!(
+                fault.address == DATA_WINDOW + DATA_BYTES as u64,
+                "structured fault outside qualified boundary"
+            );
+            operand.direction == simd::structure_memory::Direction::Store
+        }
+        Ok(Operation::Memory {
+            bytes: 1, transfer, ..
+        }) => {
+            ensure!(fault.completed_bytes == 0, "byte fault committed a prefix");
+            matches!(transfer, stela_compiler::aarch64::MemoryTransfer::Store)
+        }
+        _ => anyhow::bail!("checked fault has no qualified source: {word:08x}"),
     };
-    let write = operand.direction == simd::structure_memory::Direction::Store;
     let expected_access = if write {
         FaultAccess::Write
     } else {
@@ -310,6 +323,69 @@ fn translation_fault(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn checked_byte_faults_require_exact_direction_zero_prefix_and_fixture_address() {
+        use stela_compiler::context::memory::{FaultAccess, MemoryStatus};
+        let mut case = Case {
+            code: vec![0x3940_03a1],
+            steps: 1,
+            state: GuestState::default(),
+            data: vec![0; DATA_BYTES].into(),
+            scalable: None,
+            el: 0,
+            hypervisor: None,
+            pauth: false,
+        };
+        let fault = stela_runtime::memory::domain::MemoryFault {
+            status: MemoryStatus::Translation,
+            access: FaultAccess::Read,
+            address: DATA_WINDOW + 0x10_0000,
+            pc: CODE_PAGE,
+            completed_bytes: 0,
+        };
+        assert_eq!(
+            translation_fault(fault, &case).unwrap().syndrome,
+            0x9200_0007
+        );
+        for changed in [
+            stela_runtime::memory::domain::MemoryFault {
+                access: FaultAccess::Write,
+                ..fault
+            },
+            stela_runtime::memory::domain::MemoryFault {
+                completed_bytes: 1,
+                ..fault
+            },
+            stela_runtime::memory::domain::MemoryFault {
+                pc: CODE_PAGE + 4,
+                ..fault
+            },
+            stela_runtime::memory::domain::MemoryFault {
+                address: fault.address - 1,
+                ..fault
+            },
+            stela_runtime::memory::domain::MemoryFault {
+                status: MemoryStatus::Permission,
+                ..fault
+            },
+        ] {
+            assert!(translation_fault(changed, &case).is_err());
+        }
+        case.code[0] = 0x3900_03a1;
+        assert!(translation_fault(fault, &case).is_err());
+        assert_eq!(
+            translation_fault(
+                stela_runtime::memory::domain::MemoryFault {
+                    access: FaultAccess::Write,
+                    ..fault
+                },
+                &case
+            )
+            .unwrap()
+            .syndrome,
+            0x9200_0047
+        );
+    }
     #[test]
     fn checked_oracle_admits_all_canonical_structure_samples_and_no_other_simd() {
         // Load the source inventory directly: no compile success substitutes for
