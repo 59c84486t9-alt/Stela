@@ -1,18 +1,23 @@
 //! Bitsliced AES S-box circuit over 16-byte planes on the stack.
 //!
-//! The SysV entry has RSP%16 == 8, so the frame is padded by eight bytes to align
-//! each plane for PAND/PXOR memory operands. The frame is restored before the
-//! destination is written.
+//! The frame aligns RSP down to 16 bytes itself, whatever the caller's
+//! alignment, for the planes' PAND/PXOR memory operands; RCX (already scratch
+//! for the AES constants) carries the caller's RSP into the frame's last slot.
+//! The frame is restored before the destination is written.
 use super::{BYTE_BITS, Host, LEFT, MASK, RESULT, Shift, TargetCpu, byte_constant, packed};
 use alloc::vec::Vec;
 
 const VECTOR_BYTES: u32 = 16;
 const INPUT_PLANES: usize = 8;
-const SYSV_ENTRY_STACK_MISALIGNMENT: u32 = 8;
+const RCX: u8 = 1;
+const RSP: u8 = 4;
 const STACK_MODRM_DISP32: u8 = 0x84;
 const STACK_SIB: u8 = 0x24;
+const MOV_RCX_RSP: [u8; 3] = [0x48, 0x89, 0xe1];
 const SUB_RSP_IMMEDIATE: [u8; 3] = [0x48, 0x81, 0xec];
-const ADD_RSP_IMMEDIATE: [u8; 3] = [0x48, 0x81, 0xc4];
+const AND_RSP_ALIGN_16: [u8; 4] = [0x48, 0x83, 0xe4, 0xf0];
+const MOV_STORE_QWORD: [u8; 2] = [0x48, 0x89];
+const MOV_LOAD_QWORD: [u8; 2] = [0x48, 0x8b];
 
 // Boyar-Peralta 113-gate forward and Calik 121-gate inverse S-box circuits
 // (https://www.cs.yale.edu/homes/peralta/CircuitStuff/{SLP_AES_113.txt,Sinv.txt}),
@@ -270,6 +275,11 @@ const INVERSE_OUTPUTS: [u8; 8] = [118, 123, 125, 116, 128, 120, 117, 113];
 
 fn stack_plane(code: &mut Vec<u8>, register: u8, plane: usize, opcode: Host) {
     opcode.append(code, TargetCpu::Baseline);
+    stack_slot(code, register, plane);
+}
+
+/// The `[rsp + plane * 16]` operand of `register`, after its opcode.
+fn stack_slot(code: &mut Vec<u8>, register: u8, plane: usize) {
     code.extend([STACK_MODRM_DISP32 | (register << 3), STACK_SIB]);
     code.extend((plane as u32 * VECTOR_BYTES).to_le_bytes());
 }
@@ -280,9 +290,14 @@ pub(super) fn emit(code: &mut Vec<u8>, inverse: bool) {
     } else {
         (&FORWARD_GATES, FORWARD_OUTPUTS)
     };
-    let frame = (INPUT_PLANES + gates.len()) as u32 * VECTOR_BYTES + SYSV_ENTRY_STACK_MISALIGNMENT;
+    let planes = INPUT_PLANES + gates.len();
+    // The planes, then one aligned slot for the caller's RSP.
+    code.extend(MOV_RCX_RSP);
     code.extend(SUB_RSP_IMMEDIATE);
-    code.extend(frame.to_le_bytes());
+    code.extend((planes as u32 * VECTOR_BYTES + VECTOR_BYTES).to_le_bytes());
+    code.extend(AND_RSP_ALIGN_16);
+    code.extend(MOV_STORE_QWORD);
+    stack_slot(code, RCX, planes);
     byte_constant(code, MASK, 1);
     for input in 0..INPUT_PLANES {
         packed(code, Host::MoveAligned, LEFT, RESULT);
@@ -315,6 +330,6 @@ pub(super) fn emit(code: &mut Vec<u8>, inverse: bool) {
         }
         packed(code, Host::Or, RESULT, LEFT);
     }
-    code.extend(ADD_RSP_IMMEDIATE);
-    code.extend(frame.to_le_bytes());
+    code.extend(MOV_LOAD_QWORD);
+    stack_slot(code, RSP, planes);
 }

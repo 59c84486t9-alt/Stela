@@ -239,4 +239,115 @@ mod tests {
             }
         }
     }
+
+    /// The software rounds run on the host under both block entry alignments,
+    /// so the S-box frame's aligned stack planes never fault, and they match
+    /// SubBytes(ShiftRows(Vd ^ Vn)) and its inverse.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn software_rounds_execute_at_either_stack_alignment() {
+        use crate::GuestState;
+        use core::ffi::c_void;
+        unsafe extern "C" {
+            fn mmap(
+                address: *mut c_void,
+                bytes: usize,
+                protection: i32,
+                flags: i32,
+                fd: i32,
+                offset: i64,
+            ) -> *mut c_void;
+            fn mprotect(address: *mut c_void, bytes: usize, protection: i32) -> i32;
+            fn munmap(address: *mut c_void, bytes: usize) -> i32;
+        }
+        #[cfg(target_os = "macos")]
+        const MAP_ANONYMOUS: i32 = 0x1000;
+        #[cfg(target_os = "linux")]
+        const MAP_ANONYMOUS: i32 = 0x20;
+        const PAGE: usize = 4096;
+        // `call body; ret`: the body is entered with RSP 16-byte aligned, as
+        // chained blocks are, rather than SysV's RSP % 16 == 8.
+        const WRAPPER: [u8; 6] = [0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3];
+        fn multiply(mut left: u8, mut right: u8) -> u8 {
+            let mut product = 0;
+            while right != 0 {
+                if right & 1 != 0 {
+                    product ^= left;
+                }
+                left = (left << 1) ^ if left & 0x80 != 0 { FIELD_REDUCTION } else { 0 };
+                right >>= 1;
+            }
+            product
+        }
+        let mut forward = [0u8; 256];
+        let mut inverse = [0u8; 256];
+        for value in 0..=255u8 {
+            let reciprocal = (1..=255u8)
+                .find(|&candidate| multiply(value, candidate) == 1)
+                .unwrap_or(0);
+            let substituted = reciprocal
+                ^ reciprocal.rotate_left(1)
+                ^ reciprocal.rotate_left(2)
+                ^ reciprocal.rotate_left(3)
+                ^ reciprocal.rotate_left(4)
+                ^ 0x63;
+            forward[usize::from(value)] = substituted;
+            inverse[usize::from(substituted)] = value;
+        }
+        assert_eq!((forward[0], forward[0x53]), (0x63, 0xed));
+        let bytes = |vector: [u64; 2]| -> [u8; 16] {
+            let mut out = [0; 16];
+            out[..8].copy_from_slice(&vector[0].to_le_bytes());
+            out[8..].copy_from_slice(&vector[1].to_le_bytes());
+            out
+        };
+        let destination = [0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210];
+        let source = [0x0f1e_2d3c_4b5a_6978, 0x8796_a5b4_c3d2_e1f0];
+        let state_bytes: Vec<u8> = bytes(destination)
+            .iter()
+            .zip(bytes(source))
+            .map(|(left, right)| left ^ right)
+            .collect();
+        for (kind, rows, table) in [
+            (Kind::Encrypt, SHIFT_ROWS, &forward),
+            (Kind::Decrypt, INVERSE_SHIFT_ROWS, &inverse),
+        ] {
+            let expected: Vec<u8> = rows
+                .iter()
+                .map(|&row| table[usize::from(state_bytes[usize::from(row)])])
+                .collect();
+            let mut code = WRAPPER.to_vec();
+            emit(
+                &mut code,
+                &Operand {
+                    kind,
+                    destination: 2,
+                    source: 7,
+                },
+                TargetCpu::Baseline,
+            );
+            code.push(0xc3); // ret
+            assert!(code.len() <= PAGE);
+            for offset in [0, WRAPPER.len()] {
+                let mut state = GuestState::default();
+                state.v[2] = destination;
+                state.v[7] = source;
+                // SAFETY: private anonymous memory, RX after the copy and
+                // unmapped after the call; the code writes only `state` and
+                // its own stack frame.
+                unsafe {
+                    let page = mmap(core::ptr::null_mut(), PAGE, 3, 2 | MAP_ANONYMOUS, -1, 0);
+                    assert_ne!(page as usize, usize::MAX);
+                    core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
+                    assert_eq!(mprotect(page, PAGE, 5), 0);
+                    let entry: unsafe extern "sysv64" fn(*mut GuestState) =
+                        core::mem::transmute(page.cast::<u8>().add(offset));
+                    entry(&mut state);
+                    assert_eq!(munmap(page, PAGE), 0);
+                }
+                assert_eq!(bytes(state.v[2]).to_vec(), expected, "{kind:?} at {offset}");
+                assert_eq!(state.v[7], source, "{kind:?} at {offset}");
+            }
+        }
+    }
 }
