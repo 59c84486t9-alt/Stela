@@ -476,7 +476,12 @@ static void preload_lifetime_and_retirement(const struct stela_linux_owner *owne
 	assert(!stela_linux_page_catalog_unregister(1));
 }
 
+#ifdef STELA_LINUX_TREES_CALLABLE
+int stela_linux_trees_fixture(void);
+int stela_linux_trees_fixture(void)
+#else
 int main(void)
+#endif
 {
 	model.cpu = aligned_alloc(TEST_BYTES, TEST_BYTES);
 	assert(model.cpu);

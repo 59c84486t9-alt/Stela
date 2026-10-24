@@ -224,6 +224,33 @@ impl Linux {
         let crc_objects = linux_crc::objects(&build, &crc_tables);
         build.objects(crc_objects);
         linux_archive(&build, "stela-linux", &kernel, &upstream);
+        // A callable target-ABI fixture plus host helpers only. It links the
+        // SAME production common archive/Rust heap as the actual unit binary;
+        // never mix duplicate native/hosted common archives. The standalone
+        // C suites below retain their separate sanitizer-linked programs.
+        if env::var("TARGET").ok() == env::var("HOST").ok()
+            && matches!(
+                env::var("CARGO_CFG_TARGET_OS").as_deref(),
+                Ok("linux" | "macos")
+            )
+        {
+            let mut helper = cc::Build::new();
+            common(&mut helper);
+            helper.define("STELA_TEST_CANONICAL_RUST_HEAP", None);
+            helper.file(format!("{COMPAT}/stela/test.c"));
+            let helper_objects = helper.compile_intermediates();
+            let mut fixture = configure();
+            linux.apply(&mut fixture, None, &[], None);
+            fixture
+                .define("STELA_LINUX_TREES_TEST", None)
+                .define("STELA_LINUX_TREES_CALLABLE", None)
+                .files([
+                    format!("{COMPAT}/kernel/trees.c"),
+                    format!("{COMPAT}/stela/task_test.c"),
+                ])
+                .objects(helper_objects)
+                .compile("linux-task-fixture");
+        }
         if let Some(host) = hosted() {
             let services = [PathBuf::from(format!("{COMPAT}/stela/test.c"))];
             let services = archive(&host, "linux-host", &services);
@@ -241,6 +268,17 @@ impl Linux {
 
     pub fn tests(&self, tests: &mut Tests) {
         super::nouveau_firmware::tests(self, tests);
+        if env::var("TARGET").ok() == env::var("HOST").ok()
+            && matches!(
+                env::var("CARGO_CFG_TARGET_OS").as_deref(),
+                Ok("linux" | "macos")
+            )
+        {
+            tests.add_rust(
+                "linux_trees",
+                "crate::gpu::linux::task::tests::run_trees_child()",
+            );
+        }
         let Some(mut build) = hosted() else {
             return;
         };
@@ -265,7 +303,6 @@ impl Linux {
             ("linux_crc", "crc.c", "STELA_LINUX_CRC_TEST"),
             ("linux_find_bit", "find_bit.c", "STELA_LINUX_FIND_BIT_TEST"),
             ("linux_cpuhotplug", "cpuhotplug.c", "STELA_LINUX_CPUHP_TEST"),
-            ("linux_trees", "trees.c", "STELA_LINUX_TREES_TEST"),
             (
                 "linux_string_helpers",
                 "string_helpers.c",
@@ -451,7 +488,10 @@ pub fn sources(directory: &str) -> Vec<PathBuf> {
 /// Hosted C test programs, each run by its own Rust test.
 #[cfg(feature = "linux-kernel")]
 #[derive(Default)]
-pub struct Tests(Vec<(String, PathBuf)>);
+pub struct Tests {
+    programs: Vec<(String, PathBuf)>,
+    rust: Vec<(&'static str, &'static str)>,
+}
 
 #[cfg(feature = "linux-kernel")]
 impl Tests {
@@ -463,18 +503,26 @@ impl Tests {
         command.arg(source).args(archives).arg("-o").arg(&program);
         run(command.args(["-lpthread", "-lm"]));
         println!("cargo:rerun-if-changed={source}");
-        self.0.push((name.replace('-', "_"), program));
+        self.programs.push((name.replace('-', "_"), program));
     }
 
-    /// The Rust tests `src/gpu.rs` includes, one per program.
+    /// An actual Rust-hosted fixture with its own exact child selector.
+    pub fn add_rust(&mut self, name: &'static str, body: &'static str) {
+        self.rust.push((name, body));
+    }
+
+    /// The Rust tests `src/gpu.rs` includes, one per program/child wrapper.
     pub fn write(&self) {
-        let tests = self
-            .0
+        let mut tests = self
+            .programs
             .iter()
             .map(|(name, program)| {
                 format!("#[test]\nfn {name}() {{\n    run({:?});\n}}\n", program)
             })
             .collect::<String>();
+        for (name, body) in &self.rust {
+            tests.push_str(&format!("#[test]\nfn {name}() {{\n    {body};\n}}\n"));
+        }
         fs::write(out_dir().join("c_tests.rs"), tests).expect("write the C test list");
     }
 }

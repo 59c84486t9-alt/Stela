@@ -8,6 +8,7 @@
 #include <linux/thread_info.h>
 #include <stela/linux.h>
 #include <stela/page.h>
+#include <stela/task.h>
 
 static const struct stela_linux_services no_services;
 const struct stela_linux_owner stela_linux_bare = {.services = &no_services};
@@ -18,6 +19,47 @@ static const struct stela_linux_owner *owner;
 static unsigned long irq_flags = ARCH_IRQ_ENABLED;
 /* Linux headers keep actual nested atomic/read-side state here. */
 struct thread_info stela_thread_info;
+
+/* Only the task adapter calls these under the real same-CPU switch exclusion.
+ * A suspended task retains its borrowed owner/context and critical metadata. */
+void stela_linux_lease_snapshot(struct stela_linux_lease *lease)
+{
+	bool entered = __atomic_load_n(&running, __ATOMIC_ACQUIRE);
+	if (entered != (owner != NULL))
+		__builtin_trap();
+	*lease = (struct stela_linux_lease){.owner = owner, .irq_flags = irq_flags};
+}
+
+bool stela_linux_lease_matches(const struct stela_linux_lease *lease)
+{
+	return __atomic_load_n(&running, __ATOMIC_ACQUIRE) == (lease->owner != NULL) &&
+	       owner == lease->owner && irq_flags == lease->irq_flags;
+}
+
+void stela_linux_lease_suspend(const struct stela_linux_lease *lease)
+{
+	if (!stela_linux_lease_matches(lease))
+		__builtin_trap();
+	owner = NULL;
+	irq_flags = ARCH_IRQ_ENABLED;
+	if (lease->owner)
+		__atomic_store_n(&running, false, __ATOMIC_RELEASE);
+}
+
+bool stela_linux_lease_resume(const struct stela_linux_lease *lease)
+{
+	if (owner || irq_flags != ARCH_IRQ_ENABLED)
+		return false;
+	if (!lease->owner)
+		return !__atomic_load_n(&running, __ATOMIC_ACQUIRE);
+	bool expected = false;
+	if (!__atomic_compare_exchange_n(&running, &expected, true, false,
+					__ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+		return false;
+	owner = lease->owner;
+	irq_flags = lease->irq_flags;
+	return true;
+}
 
 bool stela_linux_try_enter(const struct stela_linux_owner *next)
 {

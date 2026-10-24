@@ -7,6 +7,8 @@ use core::{alloc::Layout, ffi::c_void, ptr};
 pub mod heap;
 pub mod image;
 pub mod pages;
+#[cfg(target_arch = "x86_64")]
+pub mod task;
 
 #[unsafe(no_mangle)]
 extern "C" fn stela_linux_heap_alloc(size: usize, align: usize) -> *mut c_void {

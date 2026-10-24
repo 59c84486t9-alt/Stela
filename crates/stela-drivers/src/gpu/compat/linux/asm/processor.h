@@ -4,8 +4,8 @@
 /* The processor services Linux code uses, from x86's asm/processor.h. */
 #include <linux/compiler.h>
 
-/* Linux code never switches threads under Stela, so a thread keeps no CPU
- * state of its own. */
+/* Runtime owns the actual saved CPU frame and retained stack. This Linux
+ * task metadata contains no duplicate architecture context switch state. */
 struct thread_struct {
 };
 

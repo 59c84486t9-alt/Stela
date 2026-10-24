@@ -25,6 +25,7 @@ void stela_test_sleep_us(uint64_t usecs);
 _Noreturn void stela_test_fail(const char *file, int line, const char *condition);
 int stela_test_traps(void (*operation)(void));
 
+#ifndef STELA_TEST_CANONICAL_RUST_HEAP
 /* Actual preallocated storage, not a libc allocator called under NOWAIT.
  * One span makes contention/exhaustion and same-backend free observable. */
 static _Alignas(4096) unsigned char try_storage[64 * 1024];
@@ -95,6 +96,8 @@ void stela_linux_heap_free(void *object, size_t size, size_t align)
 	(void)align;
 	free(object);
 }
+
+#endif /* !STELA_TEST_CANONICAL_RUST_HEAP */
 
 int64_t stela_test_now_ns(void)
 {
