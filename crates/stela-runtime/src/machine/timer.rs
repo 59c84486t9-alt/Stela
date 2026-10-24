@@ -193,6 +193,24 @@ pub fn deadline(cpu: &Cpu) -> Option<u64> {
         .min()
 }
 
+/// Timer observation cutoff for a bounded native epoch. The caller polls and
+/// delivers pending interrupts before entry, and the epoch cannot change timer
+/// controls or interrupt masks/routing. An unscaled, zero-offset asserted channel
+/// stays asserted
+/// as the machine's monotonic system count advances, so it has no new edge to
+/// observe. Keep scaled/offset channels conservative because their count can
+/// wrap. This does not change FIQ levels, waiting or ordinary timer deadlines.
+pub(crate) fn epoch_deadline(cpu: &Cpu, physical: u64) -> Option<u64> {
+    timers(cpu)
+        .filter(|(bank, channel)| {
+            scaled(cpu, *bank)
+                || channel.offset_of(cpu, *bank) != 0
+                || !channel.asserted(cpu, *bank, physical)
+        })
+        .filter_map(|(bank, channel)| channel.deadline(cpu, bank))
+        .min()
+}
+
 /// CNTKCTL_EL1 and CNTHCTL_EL2 share the event stream fields.
 const EVNTEN: u64 = 1 << 2;
 const EVNTDIR: u64 = 1 << 3;
@@ -289,6 +307,58 @@ pub fn next_event(cpu: &Cpu, now: u64) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::machine::{Chip, exception::Pstate};
+
+    #[test]
+    fn native_epoch_omits_stable_assertions_but_keeps_every_future_channel() {
+        let mut cpu = Cpu::of(Chip::AppleM2, 0, Pstate::reset(2));
+        cpu.registers.set(Register::CNTHV_CVAL_EL2, 0, 100);
+        cpu.registers.set(Register::CNTHV_CTL_EL2, 0, ENABLE);
+        cpu.registers.set(Register::CNTHP_CVAL_EL2, 0, 200);
+        cpu.registers.set(Register::CNTHP_CTL_EL2, 0, ENABLE);
+        assert_eq!(epoch_deadline(&cpu, 99), Some(100));
+        for now in [100, 101, 199] {
+            assert!(asserted(&cpu, now));
+            assert_eq!(deadline(&cpu), Some(100));
+            assert_eq!(epoch_deadline(&cpu, now), Some(200));
+        }
+        assert_eq!(epoch_deadline(&cpu, 200), None);
+        assert!(asserted(&cpu, u64::MAX));
+        assert_eq!(epoch_deadline(&cpu, u64::MAX), None);
+        // Reprogramming is a source service boundary, and immediately restores
+        // a future cutoff. Masking/disable do not create an asserted level.
+        cpu.registers.set(Register::CNTHV_CVAL_EL2, 0, 300);
+        assert_eq!(epoch_deadline(&cpu, 200), Some(300));
+        cpu.registers
+            .set(Register::CNTHV_CTL_EL2, 0, ENABLE | IMASK);
+        assert_eq!(epoch_deadline(&cpu, 200), None);
+        cpu.registers.set(Register::CNTHP_CTL_EL2, 0, 0);
+        assert!(!asserted(&cpu, 200));
+    }
+
+    #[test]
+    fn native_epoch_retains_scaled_offset_and_gated_timer_rules() {
+        let mut cpu = Cpu::of(Chip::AppleM2, 0, Pstate::reset(2));
+        cpu.registers.set(Register::CNTVOFF_EL2, 0, 100);
+        cpu.registers.set(Register::CNTV_CVAL_EL0, 0, 50);
+        cpu.registers.set(Register::CNTV_CTL_EL0, 0, ENABLE);
+        assert!(asserted(&cpu, 150));
+        assert_eq!(epoch_deadline(&cpu, 150), Some(150));
+        cpu.apple.vm_timer_fiq = 0;
+        assert!(!asserted(&cpu, 150));
+        assert_eq!(epoch_deadline(&cpu, 150), None);
+
+        let mut cpu = Cpu::of(Chip::AppleM3, 0, Pstate::reset(2));
+        cpu.registers.set(Register::CNTHV_CVAL_EL2, 0, 125);
+        cpu.registers.set(Register::CNTHV_CTL_EL2, 0, ENABLE);
+        assert!(asserted(&cpu, 3));
+        assert_eq!(epoch_deadline(&cpu, 3), Some(3));
+        cpu.registers.set(Register::CNTHV_CTL_EL2, 0, 0);
+        assert!(cpu.apple.generic_timer.set(Register::CNTHV_CVAL_EL2, 2));
+        assert!(cpu.apple.generic_timer.set(Register::CNTHV_CTL_EL2, ENABLE));
+        assert!(asserted(&cpu, 3));
+        assert_eq!(deadline(&cpu), Some(2));
+        assert_eq!(epoch_deadline(&cpu, 3), None);
+    }
 
     /// The one bank of a chip without the Apple generic timer.
     #[test]

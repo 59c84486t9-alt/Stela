@@ -350,8 +350,9 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             // Final line refresh/exception entry may change timer bank, PMU
             // context or board/DMA deadlines. Tighten using fresh/cached facts
             // without invoking another effectful board advance after checks.
+            let now = self.now();
             let due = [
-                self.timer_deadline(),
+                crate::machine::timer::epoch_deadline(&self.cpu, now),
                 self.cpu.pmu.as_ref().and_then(|pmu| pmu.deadline()),
                 self.devices.dma_deadline(),
                 self.device_lines.map(|(_, until)| until),
@@ -474,11 +475,18 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         // advance returns None. None never certifies an idle board.
         const OBSERVATIONS_PER_SECOND: u64 = 10_000; // 100 microseconds
         let now = self.now();
-        let due = self
-            .next_deadline(now)
-            .into_iter()
-            .chain(self.devices.dma_deadline())
-            .min();
+        // Eligibility leaves one online, nonwaiting PE: no peer timeout or
+        // WFE stream contributes here. Already asserted stable timer levels
+        // are polled below, rather than becoming a permanently past cutoff.
+        let due = [
+            crate::machine::timer::epoch_deadline(&self.cpu, now),
+            self.cpu.pmu.as_ref().and_then(|pmu| pmu.deadline()),
+            self.devices.deadline(now),
+            self.devices.dma_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         // deadline() can itself advance devices. Publish any newly produced
         // starts/reset/interrupts before constructing or lending actual frames.
         self.take_starts()?;
