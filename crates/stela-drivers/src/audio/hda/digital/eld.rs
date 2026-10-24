@@ -113,7 +113,9 @@ pub(super) fn parse(raw: Vec<u8>, pin_caps: u32) -> Result<DigitalSink, DigitalE
         return Err(DigitalError::InvalidEld);
     }
     let descriptors = raw[descriptor_start..descriptor_end]
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|sad| ShortAudioDescriptor {
             raw: [sad[0], sad[1], sad[2]],
         })
