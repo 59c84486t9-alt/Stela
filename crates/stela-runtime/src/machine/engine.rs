@@ -6152,6 +6152,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.derived_changed();
                 if changes.translation {
                     self.translations_changed();
+                } else if changes.controls {
+                    self.controls_changed();
                 } else if changes.regime {
                     self.sync_regime();
                 }
@@ -8533,6 +8535,18 @@ mod tests {
         let attributes = machine.contexts(2, variant);
         assert!(attributes[0] != first[0] && attributes[1] != first[1]);
         msr(&mut machine, MSR_MAIR_EL1_X0, mair);
+        assert_eq!(machine.contexts(2, variant), first);
+        // So does SPRR_PERM_EL0, which a JIT's write toggle flips.
+        const MSR_SPRR_CONFIG_EL1_X0: u32 = 0xd51e_f100;
+        const MSR_SPRR_PERM_EL0_X0: u32 = 0xd51e_f1a0;
+        msr(&mut machine, MSR_SPRR_CONFIG_EL1_X0, 1);
+        let enabled = machine.contexts(2, variant);
+        msr(&mut machine, MSR_SPRR_PERM_EL0_X0, 0x10);
+        let toggled = machine.contexts(2, variant);
+        assert!(toggled[0] != enabled[0] && toggled[1] != enabled[1]);
+        msr(&mut machine, MSR_SPRR_PERM_EL0_X0, 0);
+        assert_eq!(machine.contexts(2, variant), enabled);
+        msr(&mut machine, MSR_SPRR_CONFIG_EL1_X0, 0);
         assert_eq!(machine.contexts(2, variant), first);
         // An ASIDE1 forgets the lower half's contexts, while no fetch of the
         // upper half was non-global.

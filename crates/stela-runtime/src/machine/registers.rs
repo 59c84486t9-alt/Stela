@@ -185,8 +185,12 @@ use encodings::*;
 /// Which engine state a write changed, so the engine can resynchronize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Changes {
-    /// Translation controls or SPRR: shadow roots and fetch translations.
+    /// Translation controls without a value in [`super::mmu::Controls`]
+    /// (CTRR): shadow roots, fetch translations and lookup contexts.
     pub translation: bool,
+    /// SPRR, whose values [`super::mmu::Controls`] carries: shadow roots
+    /// and fetch translations, while lookup contexts follow the values.
+    pub controls: bool,
     /// EL, PAN or SPSel: which shadow root and stack apply.
     pub regime: bool,
     /// DAIF or a timer: interrupt delivery must be re-evaluated.
@@ -1163,7 +1167,7 @@ impl Apple {
                     return refuse("SPRR_CONFIG_EL1 bit without documented meaning");
                 }
                 apple.sprr_config = value;
-                changes.translation = true;
+                changes.controls = true;
             }
             Self::SprrPerm(_) if config & SPRR_CONFIG_EN == 0 => return Outcome::Undefined,
             Self::SprrPerm(index) => {
@@ -1182,7 +1186,7 @@ impl Apple {
                     );
                 }
                 apple.sprr_perm[index] = value;
-                changes.translation = true;
+                changes.controls = true;
             }
             Self::SprrFields(which) => apple.sprr_fields[which] = value,
             Self::GxfConfig(level) => {
