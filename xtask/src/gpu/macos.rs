@@ -2,6 +2,7 @@
 //! The SDK's own compiler and linker build each object directly; `-MD` records
 //! the headers each one read, which the receipts bind.
 mod library;
+mod library_test;
 use super::support::{capture, evidence_directory, gpu, source_binding};
 use crate::tools;
 use anyhow::{Context, Result, ensure};
@@ -14,6 +15,17 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+
+/// Explicit host runtime qualification, separate from the three-ABI build.
+pub(super) struct LibraryTestOptions<'a> {
+    pub metallib: &'a Path,
+    pub entry: &'a str,
+    pub llvm_library: &'a Path,
+}
+
+pub(super) fn test_library(options: LibraryTestOptions<'_>) -> Result<()> {
+    library_test::run(options)
+}
 
 /// Each component's ABIs: the architecture name, its object architecture and
 /// its Mach-O CPU subtype.

@@ -51,6 +51,18 @@ pub enum Command {
     /// Build the IOKit kernel helper and separate user-space Metal library
     /// objects for arm64e, arm64 and x86-64. No driver is installed or loaded.
     Macos,
+    /// Run the finite library/function object contract on this macOS host,
+    /// using a real host Metal device and caller-supplied admitted archive.
+    /// This creates no Stela device/pipeline and submits no GPU work.
+    MetalLibraryTest {
+        #[arg(long)]
+        metallib: PathBuf,
+        #[arg(long)]
+        entry: String,
+        /// Matching host LLVM 23 shared library; no compiler is downloaded.
+        #[arg(long)]
+        llvm_library: PathBuf,
+    },
     /// Build NVIDIA, AMD and Intel shader compiler libraries for this host
     /// without Vulkan/OpenGL frontends, with Stela's compiler targets, and run
     /// their Meson tests.
@@ -109,6 +121,15 @@ pub fn run(command: Command) -> Result<()> {
         Command::Fetch { force } => fetch::fetch(force),
         Command::Export => fetch::export(),
         Command::Macos => macos::build(),
+        Command::MetalLibraryTest {
+            metallib,
+            entry,
+            llvm_library,
+        } => macos::test_library(macos::LibraryTestOptions {
+            metallib: &metallib,
+            entry: &entry,
+            llvm_library: &llvm_library,
+        }),
         Command::Compilers {
             jobs,
             require_all_targets,

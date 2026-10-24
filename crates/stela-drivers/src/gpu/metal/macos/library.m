@@ -311,7 +311,11 @@ static MTLFunctionReflection *CreateReflection(const struct stela_metal_function
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name { return [self function:name error:NULL]; }
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values error:(NSError **)error
 {
-   if (values) { LibraryError(error,MTLLibraryErrorUnsupported,@"Function constant specialization is not implemented"); return nil; }
+   /* Every constructed function has manifest-proven NO_CONSTANTS. All supplied
+    * values are therefore unmatched and must be ignored without diagnostics.
+    * Constant-bearing inputs remain refused by the assembler/constructor; a
+    * future admission extension needs real specialization before using this. */
+   (void)values;
    return [self function:name error:error];
 }
 - (void)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values
