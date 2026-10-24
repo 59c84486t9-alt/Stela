@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Independent native-width CORB/RIRB DMA peer. Commands are consumed from the
 //! actual published coherent allocation, never by bypassing Controller::verb.
+extern crate std;
+
 use super::*;
 use crate::bus::dma::RegionAllocator;
 use alloc::{
