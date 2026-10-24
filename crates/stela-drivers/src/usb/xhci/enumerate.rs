@@ -82,7 +82,10 @@ impl Controller {
             mut input,
             control,
             ring,
-        } = during(allocation, self.address_resources(slot, dma))?;
+        } = during(
+            allocation,
+            self.address_resources(slot, attachment, parent_id, dma),
+        )?;
         let max_packet: u32 = match attachment.speed {
             LOW_SPEED | FULL_SPEED => 8,
             HIGH_SPEED => 64,

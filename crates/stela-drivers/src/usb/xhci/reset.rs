@@ -1,4 +1,6 @@
-//! Exclusive root-device reset and fresh identification, with no slot-ID reuse.
+//! Exclusive leaf reset and fresh identification. Generic resets retain old
+//! hardware IDs; the root-leaf service reuses proved-retired storage with a fresh
+//! generation while the old raw hardware-slot fence remains permanent.
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux a804c574 usb/core/hub.c and usb/host/xhci.c/xhci-hub.c;
 // Intel xHCI1.2b4.5.3.3,4.6.4,4.19.5,5.4.8. See THIRD_PARTY.md.
@@ -188,6 +190,75 @@ impl Controller {
         }
         result
     }
+    /// Reset one exclusively owned leaf, reusing complete native storage when
+    /// it is directly attached to a root port. Downstream topology retains the
+    /// original nonrecycling service until a parent/subtree reuse proof exists.
+    ///
+    /// # Safety
+    /// Same complete device/interface and alias-retirement contract as
+    /// reset_and_identify. Caller-owned payload buffers remain owned by caller;
+    /// success retires every old endpoint before it may transfer those buffers.
+    pub(crate) unsafe fn reset_and_reuse_root(
+        &mut self,
+        device: &Device,
+        endpoints: &[Endpoint],
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<Device, (String, BlockError)> {
+        during(
+            "preflight exclusive reusable device",
+            self.reset_preflight(device, endpoints),
+        )?;
+        let attachment = self.slots[usize::from(device.slot)]
+            .as_ref()
+            .unwrap()
+            .attachment;
+        if attachment.parent.is_some() {
+            // SAFETY: the identical exclusive contract was just checked.
+            return unsafe { self.reset_and_identify(device, endpoints, dma) };
+        }
+        during(
+            "observe reusable root ancestry",
+            self.observe_current_ancestors_for(device.id, false),
+        )?;
+        let consumer = self.slots[usize::from(device.slot)]
+            .as_ref()
+            .unwrap()
+            .consumer;
+        let resources = self
+            .retire_reset_root(device.id)
+            .map_err(|(operation, error)| (operation.into(), error))?;
+        self.retry_resources.offer(resources);
+        let result = self.identify_parent(attachment, None, device.location.clone(), dma);
+        match result {
+            Ok(fresh) => {
+                if fresh.descriptor != device.descriptor
+                    || fresh.configurations != device.configurations
+                    || fresh.serial != device.serial
+                    || fresh.speed != device.speed
+                {
+                    self.quarantine_slot_owned(fresh.slot);
+                    return Err((
+                        "verify reusable device descriptors".into(),
+                        BlockError::Unsupported("USB device changed across reusable reset"),
+                    ));
+                }
+                self.slots[usize::from(fresh.slot)]
+                    .as_mut()
+                    .unwrap()
+                    .consumer = consumer;
+                Ok(fresh)
+            }
+            Err(error) => {
+                for state in self.slots.iter_mut().flatten() {
+                    if state.attachment == attachment {
+                        state.retiring = true;
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
     fn reset_preflight(&self, device: &Device, endpoints: &[Endpoint]) -> Result<(), BlockError> {
         if self.validate_id(device.id)? != device.slot {
             return Err(BlockError::Unsupported(
@@ -362,6 +433,11 @@ pub(crate) mod tests {
         Reserve,
         SilentReserve,
         Identity,
+        FatalAfterReset,
+        ChangeAfterReset,
+        ConfigureAfterReset,
+        AddressAfterReset,
+        EnableAfterReset,
     }
     #[derive(Clone, Copy)]
     struct Cursor {
@@ -413,6 +489,11 @@ pub(crate) mod tests {
         task: Option<Task>,
         pub scsi: Vec<(usize, u8)>,
         writes: Vec<(u64, Vec<u8>)>,
+        bot: Option<bot_peer::Peer>,
+        preferred_slot: Option<usize>,
+        iso: bool,
+        force_idle_stop: bool,
+        forced_idle_events: usize,
     }
     fn read<T: Copy>(address: u64) -> T {
         unsafe { (address as *const T).read_volatile() }
@@ -481,7 +562,9 @@ pub(crate) mod tests {
             let mut code = SUCCESS;
             match kind {
                 ENABLE_SLOT => {
-                    if self.fault == Fault::Reserve && self.resets > 0 && self.enables.len() > 1 {
+                    if self.fault == Fault::EnableAfterReset && self.resets > 0
+                        || self.fault == Fault::Reserve && self.resets > 0 && self.enables.len() > 1
+                    {
                         code = 9;
                     } else {
                         let id = self
@@ -491,7 +574,9 @@ pub(crate) mod tests {
                             .skip(1)
                             .find(|(_, used)| !**used)
                             .map(|(id, _)| id);
+                        let id = self.preferred_slot.take().or(id);
                         if let Some(id) = id {
+                            assert!(!self.enabled[id]);
                             self.enabled[id] = true;
                             returned = id as u8;
                             self.enables.push(returned);
@@ -504,6 +589,10 @@ pub(crate) mod tests {
                     }
                 }
                 ADDRESS_DEVICE => {
+                    if self.fault == Fault::AddressAfterReset && self.resets > 0 {
+                        self.event(at, 4 << 24, COMMAND_COMPLETION, slot, 0);
+                        return;
+                    }
                     assert!(
                         !self.device_task,
                         "Address Device before actual firmware reset/retirement"
@@ -533,8 +622,18 @@ pub(crate) mod tests {
                     );
                 }
                 CONFIGURE_ENDPOINT => {
+                    if self.fault == Fault::ConfigureAfterReset && self.resets > 0 {
+                        self.event(at, 5 << 24, COMMAND_COMPLETION, slot, 0);
+                        return;
+                    }
                     let add = read::<u32>(parameter + 4);
+                    let drop = read::<u32>(parameter);
                     for dci in 2..32u8 {
+                        if drop & (1 << dci) != 0 {
+                            let out = self.output(slot, dci);
+                            put(out, read::<u32>(out) & !7);
+                            self.cursors.retain(|(s, e, _), _| *s != slot || *e != dci);
+                        }
                         if add & (1 << dci) != 0 {
                             let out = self.output(slot, dci);
                             copy(
@@ -586,6 +685,23 @@ pub(crate) mod tests {
                                 .filter(|(s, e, _)| *s == slot && *e == dci)
                                 .copied()
                                 .collect();
+                            if keys.is_empty() && self.force_idle_stop {
+                                let pointer = self
+                                    .cursors
+                                    .iter()
+                                    .find(|((s, e, _), _)| *s == slot && *e == dci)
+                                    .map(|(_, cursor)| cursor.next)
+                                    .unwrap();
+                                const STOPPED_LENGTH_INVALID: u32 = 27;
+                                self.deferred.push((
+                                    pointer,
+                                    STOPPED_LENGTH_INVALID << 24,
+                                    TRANSFER_EVENT,
+                                    slot,
+                                    dci,
+                                ));
+                                self.forced_idle_events += 1;
+                            }
                             for key in keys {
                                 let td = self.pending.remove(&key).unwrap();
                                 self.deferred
@@ -683,11 +799,23 @@ pub(crate) mod tests {
             if request[1] == GET_DESCRIPTOR {
                 let reply = match request[3] {
                     DEVICE_DESCRIPTOR => self.descriptor(),
-                    CONFIGURATION_DESCRIPTOR => configuration(self.speed),
+                    CONFIGURATION_DESCRIPTOR => {
+                        if self.iso {
+                            published_resource_tests::iso_configuration(self.speed)
+                        } else if self.bot.is_some() {
+                            bot_peer::configuration(self.speed)
+                        } else {
+                            configuration(self.speed)
+                        }
+                    }
                     other => panic!("descriptor {other}"),
                 };
                 let (address, length) = data.unwrap();
                 copy(address, &reply[..length.min(reply.len())]);
+            } else if self.bot.is_some() && request[0] == 0xa1 && request[1] == 0xfe {
+                let (address, length) = data.unwrap();
+                assert_eq!(length, 1);
+                copy(address, &[0]);
             } else {
                 assert!(matches!(request[1], SET_CONFIGURATION | SET_INTERFACE));
             }
@@ -720,6 +848,11 @@ pub(crate) mod tests {
             ]
         }
         fn bulk(&mut self, slot: u8, dci: u8, stream: u16) {
+            if let Some(mut peer) = self.bot.take() {
+                peer.bulk(self, slot, dci, stream);
+                self.bot = Some(peer);
+                return;
+            }
             let cursor = self.cursors.get_mut(&(slot, dci, stream)).unwrap();
             let (trb, buffer, length, control) = Self::take(cursor);
             assert_eq!(control >> 10 & 63, NORMAL);
@@ -920,9 +1053,23 @@ pub(crate) mod tests {
                 for (parameter, status, kind, slot, dci) in deferred {
                     s.event(parameter, status, kind, slot, dci);
                 }
-                0
+                if s.fault == Fault::FatalAfterReset
+                    && s.resets > 0
+                    && Clock::ticks() >= s.reset_ready
+                {
+                    HCE
+                } else {
+                    0
+                }
             } else if offset == 0x40 + PORTSC {
-                s.port
+                if s.fault == Fault::ChangeAfterReset
+                    && s.resets > 0
+                    && Clock::ticks() >= s.reset_ready
+                {
+                    s.port | CSC
+                } else {
+                    s.port
+                }
             } else {
                 0
             }
@@ -938,6 +1085,9 @@ pub(crate) mod tests {
                 let stream = (value >> 16) as u16;
                 if dci == 1 {
                     s.control(slot);
+                } else if s.iso {
+                    assert_eq!(stream, 0);
+                    s.queue_iso_service(slot, dci);
                 } else {
                     s.bulk(slot, dci, stream);
                 }
@@ -959,6 +1109,9 @@ pub(crate) mod tests {
                         s.resets += 1;
                         s.device_task = false;
                         s.task = None;
+                        if let Some(peer) = &mut s.bot {
+                            peer.reset();
+                        }
                         s.reset_ready = Clock::ticks() + POST_RESET_US;
                         if s.fault != Fault::NoPortEvent {
                             s.event(1 << 24, SUCCESS << 24, PORT_STATUS_CHANGE, 0, 0);
@@ -999,10 +1152,40 @@ pub(crate) mod tests {
         context: usize,
         max_slots: usize,
     ) -> (Shared, Device, Rc<RefCell<Hardware>>, RegionAllocator) {
+        fixture_profile(
+            memory,
+            speed,
+            context,
+            max_slots,
+            (false, false, dma::Profile::SPEC),
+        )
+    }
+    pub(crate) fn fixture_bot(
+        memory: &mut [u64],
+        speed: u8,
+        context: usize,
+        max_slots: usize,
+    ) -> (Shared, Device, Rc<RefCell<Hardware>>, RegionAllocator) {
+        fixture_profile(
+            memory,
+            speed,
+            context,
+            max_slots,
+            (true, false, dma::Profile::SPEC),
+        )
+    }
+    fn fixture_profile(
+        memory: &mut [u64],
+        speed: u8,
+        context: usize,
+        max_slots: usize,
+        profile: (bool, bool, dma::Profile),
+    ) -> (Shared, Device, Rc<RefCell<Hardware>>, RegionAllocator) {
+        let (bot, iso, profile) = profile;
         let range = memory.as_mut_ptr() as u64
             ..memory.as_mut_ptr() as u64 + core::mem::size_of_val(memory) as u64;
         let mut dma = unsafe { RegionAllocator::new(range) };
-        let commands = Ring::new(&mut dma).unwrap();
+        let commands = Ring::with_profile(&mut dma, profile).unwrap();
         let events = dma.allocate(RING_TRBS * 16, 64).unwrap();
         let dcbaa = dma.allocate((max_slots + 1) * 8, 64).unwrap();
         let hardware = Rc::new(RefCell::new(Hardware {
@@ -1036,6 +1219,11 @@ pub(crate) mod tests {
             task: None,
             scsi: Vec::new(),
             writes: Vec::new(),
+            bot: bot.then(bot_peer::Peer::default),
+            preferred_slot: None,
+            iso,
+            force_idle_stop: false,
+            forced_idle_events: 0,
         }));
         let mut controller = Controller {
             registers: Box::new(Model(hardware.clone())),
@@ -1046,7 +1234,7 @@ pub(crate) mod tests {
             runtime: 0x800,
             doorbells: 0x1000,
             context_bytes: context,
-            dma_profile: super::super::dma::Profile::SPEC,
+            dma_profile: profile,
             hardware: hardware::State::Running,
             quirks: quirks::Profile::default(),
             max_primary_streams: 4,
@@ -1506,6 +1694,10 @@ pub(crate) mod tests {
             put(at + 8, STALL << 24);
         }
     }
+    #[path = "bot_peer.rs"]
+    mod bot_peer;
+    #[path = "published_resource_tests.rs"]
+    mod published_resource_tests;
     #[path = "raw_boundary_tests.rs"]
     mod raw_boundary_tests;
 }

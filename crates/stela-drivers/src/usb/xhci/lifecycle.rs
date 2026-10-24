@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Explicitly polled topology ownership, adapting pinned Linux hub_irq,
-//! port_event, hub_port_connect and usb_disconnect. No published ID is recycled.
+//! port_event, hub_port_connect and usb_disconnect. Automatic topology changes
+//! do not recycle published hardware IDs.
 use super::*;
 
 #[cfg(test)]
@@ -49,8 +50,10 @@ struct Hub {
 
 /// Retains the controller even when no leaf class currently owns it. Call
 /// `poll` from the native service loop, and deliver its changes to consumers.
-/// Reconnection uses fresh, never-recycled hardware IDs: exhausted boot-lifetime
-/// slot capacity is an explicit failure until generation-bound handles exist.
+/// Automatic reconnection uses fresh hardware IDs and explicitly refuses when
+/// its boot-lifetime slot capacity is exhausted. The separate exclusive root-leaf
+/// class reset service can reuse storage only after its typed retirement and
+/// physical-reset proof; this Host path does not mint that authority.
 /// The explicit topology suspend/resume service does not enter platform sleep
 /// or authorize a guest-directed controller reset.
 pub struct Host {

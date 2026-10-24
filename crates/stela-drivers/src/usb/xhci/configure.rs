@@ -178,12 +178,26 @@ impl Controller {
                 requested_streams,
             )?)
         };
+        self.retry_resources.preflight_endpoints(
+            slot,
+            endpoints,
+            stream_endpoints,
+            layout,
+            self.stream_policy == streams::Policy::Cadence,
+            &self.slots[usize::from(slot)]
+                .as_ref()
+                .unwrap()
+                .retired_rings,
+        )?;
         let mut rings = Vec::new();
         rings
             .try_reserve_exact(endpoints.len())
             .map_err(|_| BlockError::NoDmaMemory)?;
         for endpoint in endpoints {
             let allocation = (|| {
+                if let Some(pair) = self.retry_resources.endpoint(slot, endpoint.dci()) {
+                    return Ok(pair);
+                }
                 let streamed = stream_endpoints.contains(&endpoint.address);
                 let stream = if streamed {
                     Some(streams::Streams::new(
@@ -214,15 +228,28 @@ impl Controller {
                     // subsequent allocation fails; a retry must not consume
                     // another slice of the boot-lived DMA reservation.
                     for (prior, (ring, stream)) in endpoints.iter().zip(rings) {
-                        if stream.is_none() {
+                        if stream.is_none() && !self.retry_resources.sealed(slot) {
                             self.slot(slot)?.retired_rings[usize::from(prior.dci())] = Some(ring);
+                        } else {
+                            self.retry_resources
+                                .return_endpoint(slot, prior, ring, stream, speed);
                         }
                     }
                     return Err(error);
                 }
             };
         }
-        self.clear_input(slot)?;
+        if let Err(error) = self.clear_input(slot) {
+            for (endpoint, (ring, stream)) in endpoints.iter().zip(rings) {
+                if stream.is_none() && !self.retry_resources.sealed(slot) {
+                    self.slot(slot)?.retired_rings[usize::from(endpoint.dci())] = Some(ring);
+                } else {
+                    self.retry_resources
+                        .return_endpoint(slot, endpoint, ring, stream, speed);
+                }
+            }
+            return Err(error);
+        }
         let context = self.context();
         let mut add = 1u32;
         let mut last = 1u8;

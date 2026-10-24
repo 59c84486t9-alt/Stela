@@ -11,7 +11,9 @@
 //! Public raw operations check one monotonic retirement fence. Exact access
 //! validates its genuine SlotId before entering private implementations; no
 //! public bypass flag or raw-to-current identity conversion is exposed.
-//! This boundary does not authorize recycling published hardware slots.
+//! This identity boundary alone does not authorize recycling published slots.
+//! Exclusive root-leaf reset also requires retirement's actual physical-reset
+//! witness; a new generation never clears the permanent raw-slot fence.
 use super::*;
 use core::sync::atomic::AtomicU64;
 

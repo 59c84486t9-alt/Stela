@@ -61,6 +61,16 @@ impl Ring {
         })
     }
 
+    /// Only called for storage returned by the complete Disable Slot boundary.
+    pub(super) fn reinitialize(&mut self) {
+        self.buffer.bytes_mut().fill(0);
+        self.buffer
+            .write((RING_TRBS - 1) * TRB, self.buffer.physical());
+        self.index = 0;
+        self.cycle = true;
+        self.normal = transfer::Queue::default();
+    }
+
     pub(super) fn address(&self) -> u64 {
         self.buffer.physical() + (self.index * TRB) as u64
     }

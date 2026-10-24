@@ -68,6 +68,11 @@ fn unpublished_profile(
         task: None,
         scsi: Vec::new(),
         writes: Vec::new(),
+        bot: None,
+        preferred_slot: None,
+        iso: false,
+        force_idle_stop: false,
+        forced_idle_events: 0,
     }));
     let mut controller = Controller {
         registers: Box::new(Model(hardware.clone())),

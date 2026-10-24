@@ -87,6 +87,11 @@ pub struct StreamTransfer {
 }
 
 impl StreamTransfer {
+    #[cfg(test)]
+    pub(super) fn submitted_pointer(&self) -> u64 {
+        self.trb
+    }
+
     pub(super) fn hardware_slot(&self) -> u8 {
         self.device.hardware_slot()
     }
@@ -208,6 +213,37 @@ impl Streams {
             recovery: false,
             cadence,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn allocation_geometry(&self) -> Vec<(u64, usize)> {
+        core::iter::once((self.array.physical(), self.array.len()))
+            .chain(
+                self.rings
+                    .iter()
+                    .map(|s| (s.ring.buffer.physical(), s.ring.buffer.len())),
+            )
+            .collect()
+    }
+
+    pub(super) fn matches(&self, layout: Layout, cadence: bool) -> bool {
+        self.layout.usable == layout.usable
+            && self.layout.contexts == layout.contexts
+            && self.cadence == cadence
+    }
+
+    /// All stream fetches and events were retired before Disable Slot.
+    pub(super) fn reinitialize(&mut self) {
+        self.array.bytes_mut().fill(0);
+        for (index, stream) in self.rings.iter_mut().enumerate() {
+            stream.ring.reinitialize();
+            stream.active = None;
+            self.array.write(
+                (index + 1) * STREAM_CONTEXT_BYTES,
+                stream.ring.dequeue_pointer() | PRIMARY_TRANSFER_RING,
+            );
+        }
+        self.recovery = false;
     }
 
     pub fn context(&self) -> (u32, u64) {

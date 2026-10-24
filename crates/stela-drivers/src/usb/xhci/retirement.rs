@@ -23,6 +23,24 @@ impl Unpublished {
     }
 }
 
+/// Actual retired root-leaf owner, never reconstructed from a current ledger.
+/// The original Slot stays in Controller until physical reset and final health.
+struct RetiredRoot {
+    id: SlotId,
+    attachment: Attachment,
+}
+
+/// Complete published storage returned only by RetiredRoot::reset.
+pub(super) struct Published {
+    slot: u8,
+    state: Slot,
+}
+impl Published {
+    pub(super) fn into_slot(self) -> (u8, Slot) {
+        (self.slot, self.state)
+    }
+}
+
 /// The mutable controller borrow is retained from the last acknowledged
 /// endpoint retirement through Disable Slot. No caller can publish another TD,
 /// run private recovery control, or substitute a different device generation
@@ -34,14 +52,93 @@ struct Quiesced<'a> {
 }
 
 impl Controller {
-    /// Fence the complete generation, retire every actual endpoint and receive
-    /// its ordered events, then acknowledge Disable Slot before clearing DCBAA.
-    /// A failure retains the original slot, contexts, rings and physical-current
-    /// grant. Only a never-published device can return to `Vacant`; published
-    /// generations keep all allocations and permanently refuse old aliases.
-    /// Only unpublished EP0-only resources enter the private retry cache.
+    /// Exclusive root-leaf reset is the only published storage return producer.
+    /// Its private witness retains the original generation/current/attachment
+    /// through actual whole-slot retirement and postsettle physical reset.
+    pub(super) fn retire_reset_root(&mut self, id: SlotId) -> Result<Published, Failure> {
+        let slot = self
+            .validate_id(id)
+            .map_err(|e| ("validate reusable generation", e))?;
+        let state = self.slots[usize::from(slot)].as_ref().unwrap();
+        let attachment = state.attachment;
+        if attachment.parent.is_some()
+            || state.parent_id.is_some()
+            || attachment.tier != 0
+            || attachment.route != 0
+            || attachment.translator.is_some()
+            || !self.retry_resources.can_offer(slot, state)
+        {
+            return Err((
+                "preflight reusable root storage",
+                BlockError::Unsupported(
+                    "USB reusable reset requires one complete root-leaf resource pool",
+                ),
+            ));
+        }
+        self.disable_slot(slot, Ownership::Retired)?;
+        RetiredRoot { id, attachment }.reset(self)
+    }
+
+    /// Retire every actual endpoint and its ordered events, then acknowledge
+    /// Disable before clearing DCBAA. Generic Disable retains published owners
+    /// permanently; only unpublished EP0-only owners enter the retry cache.
+    /// The separate RetiredRoot witness additionally requires physical reset
+    /// and final health before Published can return complete root-leaf storage.
     pub(super) fn disable_slot(&mut self, slot: u8, ownership: Ownership) -> Result<(), Failure> {
         Quiesced::acquire(self, slot, ownership)?.disable()
+    }
+}
+
+impl RetiredRoot {
+    fn reset(self, controller: &mut Controller) -> Result<Published, Failure> {
+        let slot = self.id.hardware_slot();
+        let index = usize::from(slot);
+        // The typed witness binds the actual Disable to these original owners;
+        // the current grant is still present before the physical reset.
+        if !controller.known_id(self.id)
+            || controller.slot_ownership[index] != Ownership::Retired
+            || controller.dcbaa.read::<u64>(index * 8) != 0
+            || controller
+                .current_port_owner(None, self.attachment.root_port)
+                .map_err(|e| ("retain reusable physical owner", e))?
+                != Some(self.id)
+        {
+            return Err((
+                "retain reusable physical owner",
+                BlockError::Unsupported("USB reusable reset lost the original retired attachment"),
+            ));
+        }
+        controller
+            .reset_root_device(self.attachment)
+            .map_err(|e| ("acknowledge reusable root reset", e))?;
+        // reset_root_device includes its settling delay. Recheck actual health
+        // and link after that delay, before erasing a single retired DMA byte.
+        controller
+            .ready()
+            .map_err(|e| ("post-reset reusable controller health", e))?;
+        let at = controller.port_offset(self.attachment.root_port);
+        let status = controller.registers.read32(at);
+        if status & (CCS | PED | PP) != CCS | PED | PP
+            || status & (PR | PORT_CHANGES | (1 << 3)) != 0
+            || (status >> PORT_SPEED_SHIFT & PORT_SPEED_FIELD) as u8 != self.attachment.speed
+            || status & PLS != 0
+            || controller
+                .power
+                .port_owner(None, self.attachment.root_port)
+                .is_some()
+            || controller
+                .pending
+                .iter()
+                .any(|e| e.kind() == TRANSFER_EVENT && e.slot() == slot)
+        {
+            return Err((
+                "verify reusable root reset settlement",
+                BlockError::Unsupported("USB reusable reset lacks a stable original physical link"),
+            ));
+        }
+        let state = controller.slots[index].take().unwrap();
+        controller.slot_ownership[index] = Ownership::Vacant;
+        Ok(Published { slot, state })
     }
 }
 
