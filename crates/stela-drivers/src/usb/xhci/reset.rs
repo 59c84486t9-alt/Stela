@@ -590,6 +590,8 @@ pub(crate) mod tests {
                 }
                 ADDRESS_DEVICE => {
                     if self.fault == Fault::AddressAfterReset && self.resets > 0 {
+                        self.outputs
+                            .insert(slot, read::<u64>(self.dcbaa + u64::from(slot) * 8));
                         self.event(at, 4 << 24, COMMAND_COMPLETION, slot, 0);
                         return;
                     }
@@ -770,6 +772,10 @@ pub(crate) mod tests {
                         code = 5;
                     } else {
                         self.enabled[usize::from(slot)] = false;
+                        // Successful Disable invalidates the peer's endpoint
+                        // fetch/dequeue state. A later rejected Address must not
+                        // inherit old DCIs merely because the numeric ID recurs.
+                        self.cursors.retain(|(s, _, _), _| *s != slot);
                         if self.fault == Fault::WrongDisableSlot {
                             returned = slot + 1;
                         }
