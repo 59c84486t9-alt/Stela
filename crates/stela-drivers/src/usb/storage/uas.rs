@@ -13,8 +13,10 @@ use crate::{
 };
 use alloc::vec::Vec;
 
+mod abort;
 mod binding;
 mod quirks;
+pub use abort::{AbortCommandResult, AbortTaskOutcome};
 pub use binding::Binding;
 
 /// Shared with alternate selection; readiness still requires actual allocation.
@@ -563,6 +565,16 @@ impl<I: Io> Engine<I> {
         Err(error)
     }
     fn command(&mut self, lun: [u8; 8], cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
+        self.command_inner(lun, cdb, data, None, &mut None)
+    }
+    fn command_inner(
+        &mut self,
+        lun: [u8; 8],
+        cdb: &[u8],
+        data: Data<'_>,
+        abort_timeout: Option<u64>,
+        abort: &mut Option<AbortTaskOutcome>,
+    ) -> Result<Vec<u8>, BlockError> {
         if self.poisoned || !self.buffers_present() {
             return Err(BlockError::Unsupported("UAS interface requires rebind"));
         }
@@ -713,7 +725,20 @@ impl<I: Io> Engine<I> {
                     });
                 }
             }
-            if self.io.now().wrapping_sub(started) >= TIMEOUT_US {
+            if self.io.now().wrapping_sub(started) >= abort_timeout.unwrap_or(TIMEOUT_US) {
+                if abort_timeout.is_some() {
+                    // This task and both IU buffers remain owned throughout
+                    // recovery. No later command may reuse this attachment.
+                    self.poisoned = true;
+                    *abort = Some(if terminal.is_some() {
+                        AbortTaskOutcome::NotAcknowledged(BlockError::Unsupported(
+                            "UAS task already returned terminal status",
+                        ))
+                    } else {
+                        self.abort_task(lun)
+                    });
+                    return Err(BlockError::Timeout);
+                }
                 return self.failure(BlockError::Timeout);
             }
             self.io.pause();

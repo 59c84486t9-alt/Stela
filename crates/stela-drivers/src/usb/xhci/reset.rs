@@ -450,7 +450,10 @@ pub(crate) mod tests {
         buffer: u64,
         length: usize,
     }
+    pub(crate) mod abort_peer;
+
     struct Task {
+        lun: [u8; 8],
         tag: u16,
         requested: usize,
         input: bool,
@@ -497,6 +500,7 @@ pub(crate) mod tests {
         force_idle_stop: bool,
         forced_idle_events: usize,
         class_peer: Option<class_peers::Kind>,
+        uas_abort: abort_peer::State,
     }
     fn read<T: Copy>(address: u64) -> T {
         unsafe { (address as *const T).read_volatile() }
@@ -882,6 +886,10 @@ pub(crate) mod tests {
             self.pending.insert((slot, dci, stream), td.clone());
             if dci == 2 {
                 let iu = bytes(buffer, td.length);
+                if iu[0] == 5 {
+                    self.abort_task_iu(slot, stream, &td, &iu);
+                    return;
+                }
                 assert_eq!(iu[0], 1);
                 assert!(
                     !self.device_task,
@@ -889,6 +897,7 @@ pub(crate) mod tests {
                 );
                 let cdb = &iu[16..];
                 let mut task = Task {
+                    lun: iu[8..16].try_into().unwrap(),
                     tag: u16::from_be_bytes([iu[2], iu[3]]),
                     requested: 0,
                     input: true,
@@ -965,7 +974,9 @@ pub(crate) mod tests {
                 self.device_task = task.hang;
                 self.task = Some(task);
                 self.pending.remove(&(slot, dci, stream));
-                self.event(trb, SUCCESS << 24, TRANSFER_EVENT, slot, dci);
+                if !self.uas_abort.hold_command_event {
+                    self.event(trb, SUCCESS << 24, TRANSFER_EVENT, slot, dci);
+                }
             }
             self.progress(slot);
         }
@@ -1287,6 +1298,7 @@ pub(crate) mod tests {
             force_idle_stop: false,
             forced_idle_events: 0,
             class_peer,
+            uas_abort: abort_peer::State::default(),
         }));
         let mut controller = Controller {
             registers: Box::new(Model(hardware.clone())),
