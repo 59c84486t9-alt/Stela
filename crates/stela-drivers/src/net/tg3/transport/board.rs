@@ -14,16 +14,27 @@ pub(in crate::net::tg3) struct Board {
     pub led: u32,
     pub apd: bool,
     pub capacitive: bool,
+    pub profile_5762: Option<super::bcm5762::Profile>,
 }
 impl<R: Registers, D: Delay> Hardware<R, D> {
-    /// Only actual matching copper BCM5720 silicon is a packet candidate.
+    /// Only actual matching copper BCM5720/5762 A0 is a packet candidate.
     pub(super) fn packet_identity(&mut self) -> Result<Identity, Error> {
+        // Read static PCI/subsystem denials before identify changes host/MMIO
+        // access controls. PCI table membership alone never authorizes packets.
+        let pci = Self::checked(self.regs().config_read32(0)?)?;
+        if pci == 0x1687_14e4 {
+            let revision = Self::checked(self.regs().config_read32(GEN2_PRODID)?)?;
+            if revision != 0x0576_2000 {
+                return Err(Error::UnsupportedRevision);
+            }
+            self.bcm5762_subsystem()?;
+        }
         let id = self.identify()?;
-        if id.asic != Asic::Bcm5720 {
+        if !matches!(id.asic, Asic::Bcm5720 | Asic::Bcm5762) {
             return Err(Error::UnsupportedRevision);
         }
-        // Upper bits identify the ASIC, lower 12 retain revision/metal. The
-        // 5720 donor has only A0-specific init deltas; no extrapolated IDs.
+        // Upper bits identify the ASIC, lower 12 retain revision/metal. This
+        // packet backend implements exact A0 deltas; no extrapolated IDs.
         if id.chip_revision & 0xfff != 0 {
             return Err(Error::UnsupportedRevision);
         }
@@ -32,6 +43,9 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         Ok(id)
     }
     pub(super) fn board(&mut self) -> Result<Board, Error> {
+        if self.identity.ok_or(Error::NotIdentified)?.asic == Asic::Bcm5762 {
+            return self.bcm5762_board();
+        }
         self.unmanaged()?;
         let config = self.sram(NIC_SRAM_DATA_CFG, None)?;
         if config & NIC_SRAM_DATA_CFG_PHY_TYPE_MASK == NIC_SRAM_DATA_CFG_PHY_TYPE_FIBER {
@@ -170,19 +184,28 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             led,
             apd: cfg2 & NIC_SRAM_DATA_CFG_2_APD_EN != 0,
             capacitive: cfg2 & (1 << 17) != 0,
+            profile_5762: None,
         })
     }
-    fn nvram_configuration(&mut self) -> Result<u32, Error> {
+    pub(super) fn nvram_configuration(&mut self) -> Result<u32, Error> {
         self.nvram_lock()?;
         let result = (|| {
             let access = self.read(NVRAM_ACCESS)?;
             self.flush(NVRAM_ACCESS, access | ACCESS_ENABLE)?;
             let config = self.read(NVRAM_CFG1)?;
-            if matches!(
-                config & NVRAM_CFG1_5752VENDOR_MASK,
-                FLASH_5720_EEPROM_HD | FLASH_5720_EEPROM_LD
-            ) {
+            let vendor = config & NVRAM_CFG1_5752VENDOR_MASK;
+            let eeprom = if self.identity.ok_or(Error::NotIdentified)?.asic == Asic::Bcm5762 {
+                matches!(vendor, FLASH_5762_EEPROM_HD | FLASH_5762_EEPROM_LD)
+            } else {
+                matches!(vendor, FLASH_5720_EEPROM_HD | FLASH_5720_EEPROM_LD)
+            };
+            if eeprom {
                 self.flush(NVRAM_CFG1, config & !NVRAM_CFG1_COMPAT_BYPASS)?;
+                if self.identity.unwrap().asic == Asic::Bcm5762
+                    && self.read(NVRAM_CFG1)? != config & !NVRAM_CFG1_COMPAT_BYPASS
+                {
+                    return Err(Error::ConfigDidNotLatch);
+                }
             }
             Ok(config)
         })();
@@ -194,7 +217,12 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         let release = self.flush(NVRAM_SWARB, SWARB_REQ_CLR1);
         self.combine(result, release)
     }
-    fn nvram_word(&mut self, offset: u32, translate: bool, page: u32) -> Result<u32, Error> {
+    pub(super) fn nvram_word(
+        &mut self,
+        offset: u32,
+        translate: bool,
+        page: u32,
+    ) -> Result<u32, Error> {
         let address = if translate {
             ((offset / page) << 9) + offset % page
         } else {
@@ -231,7 +259,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.combine(result, release)
     }
 }
-fn decode_mac(high: u32, low: u32) -> Mac {
+pub(super) fn decode_mac(high: u32, low: u32) -> Mac {
     Mac([
         (high >> 8) as u8,
         high as u8,
@@ -241,6 +269,6 @@ fn decode_mac(high: u32, low: u32) -> Mac {
         low as u8,
     ])
 }
-fn valid_mac(mac: Mac) -> bool {
+pub(super) fn valid_mac(mac: Mac) -> bool {
     mac.0 != [0; 6] && !mac.is_multicast()
 }

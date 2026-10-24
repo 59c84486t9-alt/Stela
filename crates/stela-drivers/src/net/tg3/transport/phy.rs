@@ -3,7 +3,7 @@
 // Copyright (C) 2001-2003 Jeff Garzik
 // Copyright (C) 2004 Sun Microsystems Inc.
 // Copyright (C) 2005-2018 Broadcom
-//! BCM5720 copper setup. EEE and pause are explicitly not advertised.
+//! BCM5720/5762 A0 copper setup. EEE and pause are explicitly not advertised.
 use super::{board::Board, regs::*, *};
 const BMCR: u32 = 0;
 const BMSR: u32 = 1;
@@ -103,6 +103,11 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         )?;
         let ext = u32::from(self.pr(MII_TG3_EXT_CTRL)?);
         self.pw(MII_TG3_EXT_CTRL, ext | MII_TG3_EXT_CTRL_FIFO_ELASTIC)?;
+        if self.identity.ok_or(Error::NotIdentified)?.asic == Asic::Bcm5762 {
+            // tg3_phy_reset: this DSP calibration is exact 5762 A0 only.
+            self.pw(MII_TG3_DSP_ADDRESS, 0x0ffb)?;
+            self.pw(MII_TG3_DSP_RW_PORT, 0x4000)?;
+        }
         let misc = self.aux_read(MII_TG3_AUXCTL_SHDWSEL_MISC)?;
         self.aux_write(
             MII_TG3_AUXCTL_SHDWSEL_MISC,

@@ -551,6 +551,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
 #[cfg(test)]
 mod tests;
 
+mod bcm5762;
 pub(super) mod board;
 mod packet_hw;
 mod phy;

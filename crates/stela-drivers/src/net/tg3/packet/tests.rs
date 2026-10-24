@@ -340,9 +340,12 @@ struct Device {
     drops: usize,
     ignore_master_clear: bool,
     ignore_reserve_fix: bool,
+    ignore_write: Option<u32>,
+    reset_nvram: Option<u32>,
     fail_read_on: Option<(u32, usize)>,
     read_counts: BTreeMap<u32, usize>,
     fail_write: Option<u32>,
+    removed_read: Option<u32>,
     attention_reassert: u32,
     dma_effects: usize,
 }
@@ -420,6 +423,9 @@ impl Device {
         if self.fail_read_on == Some((at, *count)) {
             return Err(Error::Access);
         }
+        if self.removed_read == Some(at) {
+            return Ok(u32::MAX);
+        }
         if self.config[&4] & 2 == 0 {
             return Err(Error::Access);
         }
@@ -476,6 +482,9 @@ impl Device {
         );
         self.require_bits(0x4000, 3, 2); // MEMARB enabled, not reset.
         self.require_bits(0x6800, 0x34, 0x34); // data/nonframe word and byte swap.
+        if self.config[&0] == 0x1687_14e4 {
+            self.require_5762_dma();
+        }
         match path {
             DmaPath::Status => {
                 self.require_bits(0x3c00, 0x187, 0x106); // 32-byte, attention, enabled.
@@ -487,8 +496,10 @@ impl Device {
                 self.require_bits(0x45c, 0x103, 0x102); // TX, A0 MBUF lockup fix.
                 self.require_bits(0x6800, 0x20000, 0x20000); // host send BDs.
                 self.require_bits(0x4800, 3, 2); // read DMA.
-                self.require_bits(0x4900, 4, 4); // BCM5720 RDMA FIFO overflow fix.
-                self.require_bits(0x4910, 0xf0000, 0xf0000); // 4K BD/LSO boundaries.
+                if self.config[&0] != 0x1687_14e4 {
+                    self.require_bits(0x4900, 4, 4); // BCM5720 RDMA FIFO overflow fix.
+                    self.require_bits(0x4910, 0xf0000, 0xf0000); // 4K BD/LSO boundaries.
+                }
                 for at in [0x1400, 0x1800, 0xc00, 0x1000, 0x1c00] {
                     self.require_bits(at, 3, 2);
                 }
@@ -674,6 +685,9 @@ unsafe impl Registers for Reg {
             return Err(Error::Access);
         }
         p.access.push((true, at, value));
+        if p.ignore_write == Some(at) {
+            return Ok(());
+        }
         match at {
             0x84 => {
                 let at = p.mac.get(&0x7c).copied().unwrap_or(0);
@@ -697,7 +711,11 @@ unsafe impl Registers for Reg {
                 p.publish_attention(&self.domain);
             }
             0x44c => {
-                let expected_phy = ((p.sram[&0xe00] >> 30) + 1) & 31;
+                let expected_phy = if p.config[&0] == 0x1687_14e4 {
+                    1
+                } else {
+                    ((p.sram[&0xe00] >> 30) + 1) & 31
+                };
                 assert_eq!(
                     (value >> 21) & 31,
                     expected_phy,
@@ -719,6 +737,9 @@ unsafe impl Registers for Reg {
             0x6804 if value & 1 != 0 => {
                 if p.reset_ack {
                     p.sram.insert(0xb50, !0x4b65_7654u32);
+                }
+                if let Some(config) = p.reset_nvram {
+                    p.mac.insert(0x7014, config);
                 }
                 p.tx = 0;
                 p.rx = 0;
@@ -1430,3 +1451,5 @@ fn fatal_flow_observed_during_low_water_ack_is_never_discarded() {
     assert_eq!(domain.maps.lock().unwrap().len(), 6);
     assert!(packet.retire().is_ok());
 }
+
+mod bcm5762;

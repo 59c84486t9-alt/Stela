@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Retained single-queue BCM5720 copper Ethernet backend.
+//! Retained single-queue BCM5720/5762 A0 copper Ethernet backend.
 use super::{Delay, Error, Hardware, Registers};
 use crate::{
     bus::dma::{
@@ -47,7 +47,7 @@ impl<R: Registers, D: Delay> Packet<R, D> {
     /// bootcode already present. Errors return the whole retained epoch.
     ///
     /// # Safety
-    /// `hardware` owns the actual BCM5720 function/config/UC MAC/APE resources
+    /// `hardware` owns the actual BCM5720/5762 function/config/UC MAC/APE resources
     /// described by `Registers`, powered in PCI D0. `domain` is the actual
     /// isolated requester domain for that function/aliases; it retains its root
     /// and performs real invalidation, coherence and payload write drain.
@@ -114,7 +114,7 @@ impl<R: Registers, D: Delay> Packet<R, D> {
     pub fn failure(&self) -> Option<Error> {
         self.failure
     }
-    /// Successfully handled BCM5720 A0 MBUF low-water discard indications,
+    /// Successfully handled BCM5720/5762 A0 MBUF low-water discard indications,
     /// acknowledged through the real W1C register. Multiple drops can coalesce
     /// into one event; this is not an exact packet-loss counter. Faulted cause
     /// or acknowledgement observations remain in `failure`. Saturates at u64::MAX.

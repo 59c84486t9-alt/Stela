@@ -3,7 +3,7 @@
 // Copyright (C) 2001-2003 Jeff Garzik
 // Copyright (C) 2004 Sun Microsystems Inc.
 // Copyright (C) 2005-2018 Broadcom
-//! One BCM5720 A0 host-send/standard-receive/return queue, polled status DMA.
+//! One BCM5720/5762 A0 host-send/standard-receive/return queue, polled status DMA.
 use super::{board::Board, phy::Speed, regs::*, *};
 
 impl<R: Registers, D: Delay> Hardware<R, D> {
@@ -29,6 +29,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             || observed.capacitive != board.capacitive
             || observed.local != board.local
             || observed.led != board.led
+            || observed.profile_5762 != board.profile_5762
         {
             return Err(Error::UnsupportedBoard);
         }
@@ -47,6 +48,10 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
     ) -> Result<(), Error> {
         if !self.core_reset_completed() {
             return Err(Error::Poisoned);
+        }
+        let bcm5762 = self.identity.ok_or(Error::NotIdentified)?.asic == Asic::Bcm5762;
+        if bcm5762 && self.read(TG3_CPMU_CLCK_ORIDE_ENABLE)? & TG3_CPMU_MAC_ORIDE_ENABLE == 0 {
+            return Err(Error::ConfigDidNotLatch);
         }
         let [tx, rx, returns, status] = addresses;
         let dma = self.read(TG3PCI_DMA_RW_CTRL)? & !DMA_RWCTRL_DIS_CACHE_ALIGNMENT;
@@ -98,16 +103,19 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.write(RCVDBDI_STD_BD, (rx >> 32) as u32)?;
         self.write(RCVDBDI_STD_BD + 4, rx as u32)?;
         self.write(RCVDBDI_STD_BD + 8, (2048 << 16) | (1536 << 2))?;
+        if bcm5762 {
+            self.bcm5762_write(RCVDBDI_STD_BD + 12, NIC_SRAM_RX_BUFFER_DESC)?;
+        }
         self.write(RCVDBDI_JUMBO_BD + 8, BDINFO_FLAGS_DISABLED)?;
         self.rx_producer(2047)?;
         self.flush(TG3_RX_JMB_PROD_IDX_REG, 0)?;
-        for index in 1..4 {
+        for index in 1..if bcm5762 { 2 } else { 4 } {
             self.sram(
                 NIC_SRAM_SEND_RCB + index * 16 + 8,
                 Some(BDINFO_FLAGS_DISABLED),
             )?;
         }
-        for index in 1..17 {
+        for index in 1..if bcm5762 { 4 } else { 17 } {
             self.sram(
                 NIC_SRAM_RCV_RET_RCB + index * 16 + 8,
                 Some(BDINFO_FLAGS_DISABLED),
@@ -120,6 +128,10 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.write(HOSTCC_STATUS_BLK_HOST_ADDR + 4, status as u32)?;
         self.ring_info(NIC_SRAM_SEND_RCB, tx, 512)?;
         self.ring_info(NIC_SRAM_RCV_RET_RCB, returns, 4096)?;
+        if bcm5762 {
+            self.sram(NIC_SRAM_SEND_RCB + 12, Some(NIC_SRAM_TX_BUFFER_DESC))?;
+            self.sram(NIC_SRAM_RCV_RET_RCB + 12, Some(0))?;
+        }
         let mac = board.mac.0;
         let high = u32::from(mac[0]) << 8 | u32::from(mac[1]);
         let low = u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
@@ -143,13 +155,19 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         )?;
         self.write(MAC_RCV_RULE_CFG, RCV_RULE_CFG_DEFAULT_CLASS)?;
         self.write(RCVLPC_CONFIG, 0x0181)?;
-        let corruption = self.read(TG3_LSO_RD_DMA_CRPTEN_CTRL)?;
-        self.write(
-            TG3_LSO_RD_DMA_CRPTEN_CTRL,
-            corruption
-                | TG3_LSO_RD_DMA_CRPTEN_CTRL_BLEN_BD_4K
-                | TG3_LSO_RD_DMA_CRPTEN_CTRL_BLEN_LSO_4K,
-        )?;
+        let corruption_register = if bcm5762 {
+            TG3_LSO_RD_DMA_CRPTEN_CTRL2
+        } else {
+            TG3_LSO_RD_DMA_CRPTEN_CTRL
+        };
+        let corruption = self.read(corruption_register)?
+            | TG3_LSO_RD_DMA_CRPTEN_CTRL_BLEN_BD_4K
+            | TG3_LSO_RD_DMA_CRPTEN_CTRL_BLEN_LSO_4K;
+        if bcm5762 {
+            self.bcm5762_write(corruption_register, corruption)?;
+        } else {
+            self.write(corruption_register, corruption)?;
+        }
         let statistics = self.read(RCVLPC_STATS_ENABLE)?;
         self.write(RCVLPC_STATS_ENABLE, statistics & !RCVLPC_STATSENAB_DACK_FIX)?;
         self.write(RCVLPC_STATSCTRL, RCVLPC_STATSCTRL_ENABLE)?;
@@ -210,15 +228,28 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 | WDMAC_MODE_STATUS_TAG_FIX,
         )?;
         self.delay.delay_us(40);
-        // BCM5720 belongs to 57765_PLUS. tg3_reset_hw applies this
-        // reserve-control fix before enabling RDMA, without the 5719_A0/5762
-        // threshold/margin rewrite. Preserve every unrelated observed bit.
-        let reserve = self.read(TG3_RDMA_RSRVCTRL_REG)?;
-        self.write(
-            TG3_RDMA_RSRVCTRL_REG,
-            reserve | TG3_RDMA_RSRVCTRL_FIFO_OFLW_FIX,
-        )?;
-        if self.read(TG3_RDMA_RSRVCTRL_REG)? != reserve | TG3_RDMA_RSRVCTRL_FIFO_OFLW_FIX {
+        // Both profiles are 57765_PLUS. BCM5762 uses a different register
+        // and rewrites only the source margin/watermark fields; BCM5720 only
+        // adds FIFO_OFLW_FIX. Preserve every unrelated observed bit.
+        let reserve_register = if bcm5762 {
+            TG3_RDMA_RSRVCTRL_REG2
+        } else {
+            TG3_RDMA_RSRVCTRL_REG
+        };
+        let reserve = self.read(reserve_register)?;
+        let reserve = if bcm5762 {
+            (reserve
+                & !(TG3_RDMA_RSRVCTRL_TXMRGN_MASK
+                    | TG3_RDMA_RSRVCTRL_FIFO_LWM_MASK
+                    | TG3_RDMA_RSRVCTRL_FIFO_HWM_MASK))
+                | TG3_RDMA_RSRVCTRL_TXMRGN_320B
+                | TG3_RDMA_RSRVCTRL_FIFO_LWM_1_5K
+                | TG3_RDMA_RSRVCTRL_FIFO_HWM_1_5K
+        } else {
+            reserve
+        } | TG3_RDMA_RSRVCTRL_FIFO_OFLW_FIX;
+        self.write(reserve_register, reserve)?;
+        if self.read(reserve_register)? != reserve {
             return Err(Error::ConfigDidNotLatch);
         }
         let rdma = self.read(RDMAC_MODE)? & RDMAC_MODE_H2BNC_VLAN_DET;
@@ -239,7 +270,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.delay.delay_us(40);
         // Observe the actual residual channel lengths before applying 5720's
         // documented workaround; no synthetic normal-channel assumption.
-        for index in 0..TG3_NUM_RDMA_CHANNELS {
+        for index in 0..if bcm5762 { 0 } else { TG3_NUM_RDMA_CHANNELS } {
             if self.read(TG3_RDMA_LENGTH + index * 4)? > 9000 {
                 let value = self.read(TG3_LSO_RD_DMA_CRPTEN_CTRL)?;
                 self.write(
@@ -270,10 +301,15 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             tx_mode | TX_MODE_ENABLE | TX_MODE_MBUF_LOCKUP_FIX,
         )?;
         self.delay.delay_us(100);
-        self.flush(
-            MAC_RX_MODE,
-            RX_MODE_ENABLE | RX_MODE_IPV6_CSUM_ENABLE | RX_MODE_KEEP_VLAN_TAG,
-        )?;
+        let rx_mode = RX_MODE_ENABLE
+            | RX_MODE_IPV6_CSUM_ENABLE
+            | RX_MODE_KEEP_VLAN_TAG
+            | if bcm5762 { RX_MODE_IPV4_FRAG_FIX } else { 0 };
+        if bcm5762 {
+            self.bcm5762_write(MAC_RX_MODE, rx_mode)?;
+        } else {
+            self.flush(MAC_RX_MODE, rx_mode)?;
+        }
         self.delay.delay_us(10);
         self.write(MAC_LED_CTRL, board.led)?;
         self.write(MAC_MI_STAT, MAC_MI_STAT_LNKSTAT_ATTN_ENAB)?;

@@ -5,9 +5,9 @@
 // Copyright (C) 2005-2018 Broadcom
 //! Broadcom Tigon3 hardware transport for the named BCM5720/5761/5762 cohort.
 //!
-//! `Packet::attach` composes one polled BCM5720 A0 unmanaged copper queue
+//! `Packet::attach` composes one polled BCM5720/5762 A0 unmanaged copper queue
 //! with requester-domain DMA and explicit retirement. It is source-only until
-//! the model/oracle and Rust gates run. BCM5761/5762 remain transport-only;
+//! the model/oracle and Rust gates run. BCM5761 remains transport-only;
 //! managed/SerDes and all other ASIC/revision profiles explicitly refuse.
 //!
 //! All named chips have an APE window. MDIO takes the actual per-function APE
