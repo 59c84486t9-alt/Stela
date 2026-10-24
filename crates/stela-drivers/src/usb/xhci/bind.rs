@@ -100,6 +100,7 @@ pub(crate) fn bind_with_provider(
         ));
         return;
     }
+    let mut hid_inputs = Vec::new();
     for (interface, plan) in plans {
         let location = format!("{} interface {}", device.location, interface.number);
         crate::working(&location);
@@ -118,7 +119,7 @@ pub(crate) fn bind_with_provider(
             Plan::Hid(endpoint) => {
                 hid::UsbInput::new(shared.clone(), &device, &interface, endpoint, dma).map(
                     |input| match input {
-                        Some(input) => found.inputs.push(input),
+                        Some(input) => hid_inputs.push(input),
                         None => found.unused.push((location.clone(), hid::NO_REPORTS)),
                     },
                 )
@@ -151,6 +152,12 @@ pub(crate) fn bind_with_provider(
             found.failures.push((location, error));
         }
     }
+    if let Err(error) = hid::receiver::transport::attach_group(shared, &device, &mut hid_inputs) {
+        found
+            .failures
+            .push((format!("{} HID++ receiver", device.location), error));
+    }
+    found.inputs.extend(hid_inputs);
 }
 
 /// What a class driver will use of an interface.

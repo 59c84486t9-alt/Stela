@@ -20,6 +20,7 @@ mod delimiter_tests;
 pub mod descriptor;
 pub mod events;
 mod lifecycle;
+pub mod receiver;
 mod report;
 #[cfg(test)]
 mod sparse_tests;
@@ -238,6 +239,7 @@ pub struct UsbInput {
     reports: Reports,
     events: events::Decoder,
     touch: Option<touch::Assembler>,
+    receiver: Option<receiver::Link>,
     /// The keyboard usages the last keyboard report held.
     held: Vec<u32>,
     buttons: u8,
@@ -372,6 +374,7 @@ impl UsbInput {
             reports,
             events: events::Decoder::default(),
             touch: None,
+            receiver: None,
             held: Vec::new(),
             buttons: 0,
             position: None,
@@ -459,10 +462,12 @@ impl UsbInput {
                                         }
                                     }
                                 }
+                                self.receiver_observe(&frame.bytes);
                                 ReceivedReport::Data(frame)
                             }
                             Err(error) => {
                                 self.invalidate_touch();
+                                self.invalidate_receiver(receiver::Error::RejectedReport);
                                 ReceivedReport::Rejected {
                                     bytes: bytes.clone(),
                                     error,
@@ -508,6 +513,7 @@ impl UsbInput {
                 }
                 Err(error) => {
                     self.invalidate_touch();
+                    self.invalidate_receiver(receiver::Error::Transport);
                     self.error.get_or_insert_with(|| error.clone());
                     let recovered =
                         self.controller
@@ -536,12 +542,14 @@ impl UsbInput {
                 }
             }
         }
+        self.receiver_progress();
         touch.hid = polled;
         touch
     }
 
     fn fault(&mut self, error: BlockError) {
         self.invalidate_touch();
+        self.invalidate_receiver(receiver::Error::Transport);
         self.error.get_or_insert(error);
         self.failed = true;
         self.state = State::Faulted;

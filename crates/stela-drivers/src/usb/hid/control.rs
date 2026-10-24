@@ -77,6 +77,7 @@ impl UsbInput {
         // Arbitrary feature/output writes may change digitizer mode/capacity.
         // Re-enable through a fresh acknowledged maximum query afterward.
         self.touch = None;
+        self.invalidate_receiver(receiver::Error::ExternalControl);
         self.controller
             .borrow_mut()
             .device(self.id)?

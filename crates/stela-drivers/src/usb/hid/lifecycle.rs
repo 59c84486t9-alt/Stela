@@ -30,6 +30,7 @@ impl UsbInput {
     /// emitted only after hardware acknowledges abandonment of its old TD.
     pub fn stop_hid(&mut self) -> Result<Poll, BlockError> {
         self.invalidate_touch();
+        self.invalidate_receiver(receiver::Error::Stopped);
         self.controller.borrow().validate_device_id(self.id)?;
         if self.state == State::Stopped {
             return Ok(Poll::default());
@@ -87,6 +88,7 @@ impl UsbInput {
                 "HID restart requires acknowledged stop",
             ));
         }
+        self.invalidate_receiver(receiver::Error::Stopped);
         let result = self
             .controller
             .borrow_mut()
@@ -98,6 +100,7 @@ impl UsbInput {
         }
         self.failed = false;
         self.state = State::Running;
+        self.restart_receiver();
         Ok(())
     }
 }
