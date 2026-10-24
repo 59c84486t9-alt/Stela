@@ -165,7 +165,8 @@ fn published_root_pool_reuses_all_ordinary_and_stream_dma_across_96_real_lifetim
 fn published_pool_follows_actual_different_enable_slot_without_allocating_another_set() {
     for context in [32, 64] {
         let mut memory = vec![0u64; 512 * 1024];
-        let (shared, mut old, hardware, mut dma) = prepared(&mut memory, SUPER_SPEED, context, 3);
+        let (shared, mut old, _, hardware, mut dma) =
+            prepared(&mut memory, SUPER_SPEED, context, 3);
         let endpoints = interfaces(&old.configuration)[0].endpoints.clone();
         let original = geometry(&shared.borrow(), old.slot);
         let remaining = dma.remaining();
@@ -296,7 +297,7 @@ fn uncertain_published_retirement_or_settled_reset_keeps_original_storage_quaran
         Fault::ChangeAfterReset,
     ] {
         let mut memory = vec![0u64; 512 * 1024];
-        let (shared, old, hardware, mut dma) = prepared(&mut memory, SUPER_SPEED, 64, 1);
+        let (shared, old, _, hardware, mut dma) = prepared(&mut memory, SUPER_SPEED, 64, 1);
         let endpoints = interfaces(&old.configuration)[0].endpoints.clone();
         let original = geometry(&shared.borrow(), old.slot);
         let output = shared.borrow().slots[usize::from(old.slot)]
@@ -334,7 +335,7 @@ fn uncertain_published_retirement_or_settled_reset_keeps_original_storage_quaran
 #[test]
 fn changed_published_stream_geometry_refuses_before_allocation_or_context_publication() {
     let mut memory = vec![0u64; 512 * 1024];
-    let (shared, old, hardware, mut dma) = prepared(&mut memory, SUPER_SPEED, 32, 1);
+    let (shared, old, _, hardware, mut dma) = prepared(&mut memory, SUPER_SPEED, 32, 1);
     let endpoints = interfaces(&old.configuration)[0].endpoints.clone();
     let mut c = shared.borrow_mut();
     let fresh = selected(
@@ -378,7 +379,7 @@ fn changed_published_stream_geometry_refuses_before_allocation_or_context_public
 fn published_pool_keeps_unused_dropped_rings_through_96_resets_and_real_reconfigure() {
     for context in [32, 64] {
         let mut memory = vec![0u64; 512 * 1024];
-        let (shared, mut old, hardware, mut dma) = prepared(&mut memory, HIGH_SPEED, context, 1);
+        let (shared, mut old, _, hardware, mut dma) = prepared(&mut memory, HIGH_SPEED, context, 1);
         let all = interfaces(&old.configuration)[0].endpoints.clone();
         let active: Vec<_> = all.iter().copied().filter(|e| e.dci() != 8).collect();
         let dropped = *all.iter().find(|e| e.dci() == 8).unwrap();
@@ -460,7 +461,7 @@ impl Registers for NoRegisters {
 #[test]
 fn fatal_health_after_taking_published_endpoint_storage_keeps_every_owner() {
     let mut memory = vec![0u64; 512 * 1024];
-    let (shared, old, hardware, mut dma) = prepared(&mut memory, SUPER_SPEED, 64, 1);
+    let (shared, old, _, hardware, mut dma) = prepared(&mut memory, SUPER_SPEED, 64, 1);
     let endpoints = interfaces(&old.configuration)[0].endpoints.clone();
     let mut c = shared.borrow_mut();
     let fresh = selected(
@@ -507,7 +508,7 @@ fn failed_fresh_enable_address_or_identity_keeps_the_entire_published_pool() {
         Fault::Identity,
     ] {
         let mut memory = vec![0u64; 512 * 1024];
-        let (shared, old, hardware, mut dma) = prepared(&mut memory, SUPER_SPEED, 32, 1);
+        let (shared, old, _, hardware, mut dma) = prepared(&mut memory, SUPER_SPEED, 32, 1);
         let endpoints = interfaces(&old.configuration)[0].endpoints.clone();
         let original = geometry(&shared.borrow(), old.slot);
         let remaining = dma.remaining();
@@ -560,7 +561,7 @@ fn unread_stream_read(
 fn old_stream_ticket_cannot_consume_actual_unread_completion_at_identical_reused_pointer() {
     for context in [32, 64] {
         let mut memory = vec![0u64; 512 * 1024];
-        let (shared, old, hardware, mut dma) = prepared(&mut memory, SUPER_SPEED, context, 1);
+        let (shared, old, _, hardware, mut dma) = prepared(&mut memory, SUPER_SPEED, context, 1);
         let endpoints = interfaces(&old.configuration)[0].endpoints.clone();
         let mut command = dma.allocate(512, 512).unwrap();
         let data = dma.allocate(512, 65536).unwrap();
