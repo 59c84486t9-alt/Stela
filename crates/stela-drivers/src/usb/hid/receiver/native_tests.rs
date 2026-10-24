@@ -146,7 +146,7 @@ fn fixture_profiles(
     let trap = Rc::new(Cell::new(false));
     let (mut controller, peer) = model::forwarding_fixture(
         dma,
-        &[config.clone()],
+        core::slice::from_ref(&config),
         xhci::FULL_SPEED,
         &mut function,
         |original, peer| {
