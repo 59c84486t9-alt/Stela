@@ -2092,6 +2092,26 @@ impl AppleDevices {
         })
     }
 
+    /// Each USB controller's connector, whether a host session is attached
+    /// and, while one cannot be, why: for the boot log.
+    pub fn usb_diagnostics(&self) -> Vec<String> {
+        self.usb_masters
+            .iter()
+            .map(|master| {
+                let controller = self.bus.device::<Dwc3>(master.device).expect("USB core");
+                let phy = self.bus.device::<AtcPhy>(master.phy).expect("USB PHY");
+                let why = match controller.unavailable() {
+                    Some(why) if !controller.phy_ready() => {
+                        format!(" unavailable={why}: {}", phy.usb2_unready().unwrap_or("?"))
+                    }
+                    Some(why) => format!(" unavailable={why}"),
+                    None => String::new(),
+                };
+                format!("port={} attached={}{why}", master.number, master.attached)
+            })
+            .collect()
+    }
+
     pub fn take_usb_log(&mut self) -> Option<UsbLog> {
         self.usb_masters
             .iter_mut()

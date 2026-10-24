@@ -721,13 +721,30 @@ impl Dwc3 {
     }
 
     pub fn available(&self) -> bool {
-        self.lifecycle_active()
-            && self.phy_ready
-            && !self.pending_phy_disconnect
-            && self.port_ready
-            && self.dctl & RUN != 0
-            && self.gctl & (CORE_RESET | PRTCAP) == PRTCAP_DEVICE
-            && self.usb2 & (1 << 31) == 0
+        self.unavailable().is_none()
+    }
+
+    /// Why a host cannot reach the device personality now, if it cannot:
+    /// the first unmet condition of [`Self::available`].
+    pub fn unavailable(&self) -> Option<&'static str> {
+        if let Err(why) = self.activity_ready() {
+            return Some(why);
+        }
+        Some(if !self.phy_ready {
+            "ATC PHY USB2 is not ready"
+        } else if self.pending_phy_disconnect {
+            "a PHY disconnect is pending service"
+        } else if !self.port_ready {
+            "the Type-C port is not ready"
+        } else if self.dctl & RUN == 0 {
+            "DCTL.RUN is clear"
+        } else if self.gctl & (CORE_RESET | PRTCAP) != PRTCAP_DEVICE {
+            "GCTL is not device mode out of core reset"
+        } else if self.usb2 & (1 << 31) != 0 {
+            "GUSB2PHYCFG.PHYSOFTRST is set"
+        } else {
+            return None;
+        })
     }
 
     /// A transaction adapter whose borrow retains the actual DMA stream.
@@ -1533,7 +1550,11 @@ mod tests {
         dwc.devten = 1; // Disconnect event enabled.
         dwc.set_phy_state(false, false, true, false, port.access);
         dwc.set_phy_state(false, true, true, false, port.access);
-        assert!(!dwc.available()); // Final-ready must not swallow the edge.
+        // Final-ready must not swallow the edge.
+        assert_eq!(
+            dwc.unavailable(),
+            Some("a PHY disconnect is pending service")
+        );
         assert!(dwc.take_session_reset());
         // Backpressure preserves both the connection and its pending edge.
         for _ in 0..MAX_PENDING_EVENTS {

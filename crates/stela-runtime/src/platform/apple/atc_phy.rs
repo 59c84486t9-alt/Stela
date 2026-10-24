@@ -188,6 +188,25 @@ impl AtcPhy {
         }
     }
 
+    /// The first unmet condition of [`Usb2State::ready`], if one is.
+    pub fn usb2_unready(&self) -> Option<&'static str> {
+        Some(if self.word(USBCTL) & (RUN | ISOLATE) != RUN {
+            "USB2 USBCTL is not running out of isolation"
+        } else if self.word(CTL) & (RESET | PORT_RESET | APB_RESET_N | SIDDQ) != APB_RESET_N {
+            "USB2 CTL holds a reset or SIDDQ"
+        } else if self.word(MISCTUNE) & REFCLK_GATE_OFF != 0 {
+            "USB2 reference clock is gated"
+        } else if !self.core_ready() {
+            "core power or its resets are not released"
+        } else if self.word(POWER_CTRL) & (CLAMP | CORE_PHY_N) != CORE_PHY_N {
+            "core PHY is clamped or in reset"
+        } else if !self.controller_released() {
+            "the pipehandler holds the controller reset"
+        } else {
+            return None;
+        })
+    }
+
     fn sample_utmi_clock(&mut self) {
         let active =
             self.word(CTL) & (RESET | SIDDQ) == 0 && self.word(MISCTUNE) & REFCLK_GATE_OFF == 0;
@@ -381,15 +400,30 @@ mod tests {
         let mut p = AtcPhy::new();
         let mut latch = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut latch);
-        for (offset, value) in [
-            (USBCTL, RUN),
-            (CTL, APB_RESET_N),
-            (POWER_CTRL, SMALL | BIG | CORE_APB_N | CORE_PHY_N),
-            (MISC, MISC_RESET_N),
-            (AON, RESET_N),
+        // Each release names the next unmet condition until none is left.
+        for (offset, value, unready) in [
+            (USBCTL, RUN, "USB2 CTL holds a reset or SIDDQ"),
+            (
+                CTL,
+                APB_RESET_N,
+                "core power or its resets are not released",
+            ),
+            (
+                POWER_CTRL,
+                SMALL | BIG | CORE_APB_N | CORE_PHY_N,
+                "core power or its resets are not released",
+            ),
+            (
+                MISC,
+                MISC_RESET_N,
+                "the pipehandler holds the controller reset",
+            ),
         ] {
             wr(&mut p, &mut a, offset, value);
+            assert_eq!(p.usb2_unready(), Some(unready));
         }
+        wr(&mut p, &mut a, AON, RESET_N);
+        assert_eq!(p.usb2_unready(), None);
         let released = p.usb2_state();
         assert_eq!(
             released,

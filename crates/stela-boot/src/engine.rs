@@ -2632,6 +2632,9 @@ fn run<H: Host>(
             for state in machine.devices.coprocessor_diagnostics() {
                 output::arguments(format_args!("ASC {state}\n"));
             }
+            for state in machine.devices.usb_diagnostics() {
+                output::arguments(format_args!("USB {state}\n"));
+            }
             survey_report(machine);
             occupancy_report(machine, &mut occupancy);
             user = 0;
