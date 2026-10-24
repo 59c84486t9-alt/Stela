@@ -8,6 +8,7 @@
 pub mod audio;
 pub mod bluetooth;
 pub mod cdc;
+pub mod ehci;
 pub mod ethernet;
 pub mod forwarding;
 pub mod hid;
