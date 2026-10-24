@@ -2833,8 +2833,9 @@ struct ExitsSeen {
     /// IC IVAU.
     lookups: [u64; 2],
     drops: [u64; 4],
-    /// `Statistics::lookup_misses`.
+    /// `Statistics::lookup_misses` and `lookup_forgets`.
     misses: [u64; 5],
+    forgets: [u64; 4],
 }
 
 /// The `ExitKind`s `Statistics::exit_kinds` counts.
@@ -2852,6 +2853,7 @@ impl ExitsSeen {
         let kinds = statistics.exit_kinds;
         let lookups = [statistics.lookups, statistics.lookup_hits];
         let misses = statistics.lookup_misses;
+        let forgets = statistics.lookup_forgets;
         let drops = [
             statistics.translation_changes,
             statistics.tlb_maintenance,
@@ -2896,6 +2898,12 @@ impl ExitsSeen {
             let separator = if index == 0 { " misses=" } else { "," };
             output::arguments(format_args!("{separator}{}", now - last));
         }
+        // Halves forgotten by an ASIDE1, a TLBI of everything, a TLBI by VA
+        // through a large leaf, anything else.
+        for (index, (now, last)) in forgets.iter().zip(&self.forgets).enumerate() {
+            let separator = if index == 0 { " forgets=" } else { "," };
+            output::arguments(format_args!("{separator}{}", now - last));
+        }
         for (count, word) in top.into_iter().take(SHOWN) {
             output::arguments(format_args!(" {word:#010x}:{count}"));
         }
@@ -2907,6 +2915,7 @@ impl ExitsSeen {
             lookups,
             drops,
             misses,
+            forgets,
         };
     }
 }

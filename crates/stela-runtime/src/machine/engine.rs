@@ -1142,6 +1142,11 @@ pub struct Statistics {
     /// installed yet, the target's table slot named another PC, or another
     /// context, the chain budget was spent, or the entry refused the BTYPE.
     pub lookup_misses: [u64; 5],
+    /// Halves whose lookup contexts were forgotten, by cause: an ASIDE1, a
+    /// TLBI of everything, a TLBI by VA through a leaf too large to clear
+    /// entry by entry, and any other change (an unscoped translation
+    /// change, the host's fetch permissions).
+    pub lookup_forgets: [u64; 4],
     pub compiled: u64,
     /// Counter ticks spent analyzing and compiling `compiled`.
     pub compile_ticks: u64,
@@ -1198,6 +1203,7 @@ impl core::ops::AddAssign for Statistics {
             lookup_hits,
             exit_kinds,
             lookup_misses,
+            lookup_forgets,
             compiled,
             compile_ticks,
             stored,
@@ -1226,6 +1232,9 @@ impl core::ops::AddAssign for Statistics {
             *total += count;
         }
         for (total, count) in self.lookup_misses.iter_mut().zip(lookup_misses) {
+            *total += count;
+        }
+        for (total, count) in self.lookup_forgets.iter_mut().zip(lookup_forgets) {
             *total += count;
         }
         for (total, count) in [
@@ -2336,8 +2345,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The translations of the halves `halves` may have changed with no
     /// control value showing it: their lookup contexts go, so no lookup
     /// enters a block their entries name.
-    fn forget_spaces(&mut self, halves: core::ops::RangeInclusive<usize>) {
+    fn forget_spaces(&mut self, halves: core::ops::RangeInclusive<usize>, cause: usize) {
         for half in halves {
+            self.statistics.lookup_forgets[cause] += 1;
             self.spaces[half].clear();
             self.fetch_leaves[half] = 0;
             self.private_fetches[half] = false;
@@ -2351,7 +2361,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn forget_lookups(&mut self, reach: mmu::tlbi::Reach) {
         let (first, last) = match reach {
             mmu::tlbi::Reach::Nothing => return,
-            mmu::tlbi::Reach::All => return self.forget_spaces(0..=1),
+            mmu::tlbi::Reach::All => return self.forget_spaces(0..=1, 1),
             mmu::tlbi::Reach::Containing(address) => (address, address),
             mmu::tlbi::Reach::Overlapping { first, last } => (first, last),
         };
@@ -2364,7 +2374,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let mask = leaf.next_power_of_two() - 1;
             let (first, last) = (first.max(low) & !mask, last.min(high) | mask);
             if (last - first) / INSTRUCTION >= chain::LOOKUP_ENTRIES as u64 {
-                self.forget_spaces(half..=half);
+                self.forget_spaces(half..=half, 2);
                 continue;
             }
             for pc in (first..=last).step_by(INSTRUCTION as usize) {
@@ -2389,7 +2399,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Anything about translation may have changed: every lookup context
     /// goes too.
     fn translations_changed(&mut self) {
-        self.forget_spaces(0..=1);
+        self.forget_spaces(0..=1, 3);
         self.controls_changed();
     }
 
@@ -2397,7 +2407,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// fetch translates and asks again, and no cached, looked-up or chained
     /// transfer enters a block of another page before it has.
     pub fn fetch_permissions_changed(&mut self) {
-        self.forget_spaces(0..=1);
+        self.forget_spaces(0..=1, 3);
         self.advance_translation_generation();
     }
 
@@ -2411,11 +2421,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         match everywhere {
             mmu::tlbi::Everywhere::Addresses(addresses) => self.forget_lookups(addresses),
             mmu::tlbi::Everywhere::NonGlobal if !self.private_fetches[1] => {
-                self.forget_spaces(0..=0)
+                self.forget_spaces(0..=0, 0)
             }
-            mmu::tlbi::Everywhere::NonGlobal | mmu::tlbi::Everywhere::All => {
-                self.forget_spaces(0..=1)
-            }
+            mmu::tlbi::Everywhere::NonGlobal => self.forget_spaces(0..=1, 0),
+            mmu::tlbi::Everywhere::All => self.forget_spaces(0..=1, 1),
         }
         self.advance_translation_generation();
         self.statistics.tlb_maintenance += 1;
