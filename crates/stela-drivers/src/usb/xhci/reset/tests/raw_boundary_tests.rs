@@ -73,6 +73,7 @@ fn unpublished_profile(
         iso: false,
         force_idle_stop: false,
         forced_idle_events: 0,
+        class_peer: None,
     }));
     let mut controller = Controller {
         registers: Box::new(Model(hardware.clone())),

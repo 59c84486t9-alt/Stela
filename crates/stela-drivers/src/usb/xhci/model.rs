@@ -5,7 +5,8 @@ pub(crate) use super::configuration::{sanitize, select};
 pub(crate) use super::iso::tests::class_fixture as iso_class_fixture;
 pub(crate) use super::reset::tests::{
     Fault as ResetFault, Hardware as ResetHardware, fixture as reset_fixture,
-    fixture_bot as reset_bot_fixture,
+    fixture_bot as reset_bot_fixture, fixture_forwarding as reset_forwarding_fixture,
+    fixture_hid as reset_hid_fixture,
 };
 use super::*;
 pub(crate) use crate::bus::dma::RegionAllocator;

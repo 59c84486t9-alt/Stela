@@ -494,6 +494,7 @@ pub(crate) mod tests {
         iso: bool,
         force_idle_stop: bool,
         forced_idle_events: usize,
+        class_peer: Option<class_peers::Kind>,
     }
     fn read<T: Copy>(address: u64) -> T {
         unsafe { (address as *const T).read_volatile() }
@@ -806,13 +807,18 @@ pub(crate) mod tests {
                 let reply = match request[3] {
                     DEVICE_DESCRIPTOR => self.descriptor(),
                     CONFIGURATION_DESCRIPTOR => {
-                        if self.iso {
+                        if let Some(kind) = self.class_peer {
+                            class_peers::configuration(kind, self.speed)
+                        } else if self.iso {
                             published_resource_tests::iso_configuration(self.speed)
                         } else if self.bot.is_some() {
                             bot_peer::configuration(self.speed)
                         } else {
                             configuration(self.speed)
                         }
+                    }
+                    0x22 if self.class_peer == Some(class_peers::Kind::Hid) => {
+                        class_peers::HID_REPORT.to_vec()
                     }
                     other => panic!("descriptor {other}"),
                 };
@@ -822,6 +828,11 @@ pub(crate) mod tests {
                 let (address, length) = data.unwrap();
                 assert_eq!(length, 1);
                 copy(address, &[0]);
+            } else if self.class_peer == Some(class_peers::Kind::Hid)
+                && request[0] == 0x21
+                && matches!(request[1], 0x0a | 0x0b)
+            {
+                assert!(data.is_none());
             } else {
                 assert!(matches!(request[1], SET_CONFIGURATION | SET_INTERFACE));
             }
@@ -1091,6 +1102,8 @@ pub(crate) mod tests {
                 let stream = (value >> 16) as u16;
                 if dci == 1 {
                     s.control(slot);
+                } else if s.class_peer.is_some() {
+                    s.queue_class_transfer(slot, dci, stream);
                 } else if s.iso {
                     assert_eq!(stream, 0);
                     s.queue_iso_service(slot, dci);
@@ -1187,6 +1200,17 @@ pub(crate) mod tests {
         max_slots: usize,
         profile: (bool, bool, dma::Profile),
     ) -> (Shared, Device, Rc<RefCell<Hardware>>, RegionAllocator) {
+        fixture_profile_class(memory, speed, context, max_slots, profile, None, true)
+    }
+    fn fixture_profile_class(
+        memory: &mut [u64],
+        speed: u8,
+        context: usize,
+        max_slots: usize,
+        profile: (bool, bool, dma::Profile),
+        class_peer: Option<class_peers::Kind>,
+        configured: bool,
+    ) -> (Shared, Device, Rc<RefCell<Hardware>>, RegionAllocator) {
         let (bot, iso, profile) = profile;
         let range = memory.as_mut_ptr() as u64
             ..memory.as_mut_ptr() as u64 + core::mem::size_of_val(memory) as u64;
@@ -1230,6 +1254,7 @@ pub(crate) mod tests {
             iso,
             force_idle_stop: false,
             forced_idle_events: 0,
+            class_peer,
         }));
         let mut controller = Controller {
             registers: Box::new(Model(hardware.clone())),
@@ -1283,7 +1308,12 @@ pub(crate) mod tests {
             )
             .unwrap();
         device.configuration = device.configurations[0].clone();
-        controller.set_configuration(device.slot, 1).unwrap();
+        if class_peer == Some(class_peers::Kind::Hid) {
+            controller.claim_native(device.id).unwrap();
+        }
+        if configured {
+            controller.set_configuration(device.slot, 1).unwrap();
+        }
         (Rc::new(RefCell::new(controller)), device, hardware, dma)
     }
     fn prepared(
@@ -1702,6 +1732,9 @@ pub(crate) mod tests {
     }
     #[path = "bot_peer.rs"]
     mod bot_peer;
+    #[path = "class_peers.rs"]
+    mod class_peers;
+    pub(crate) use class_peers::{fixture_forwarding, fixture_hid};
     #[path = "published_resource_tests.rs"]
     mod published_resource_tests;
     #[path = "raw_boundary_tests.rs"]
