@@ -1968,12 +1968,25 @@ impl AppleDevices {
         }
         Ok(())
     }
+    /// The RTC's last backwards counter, for a stop's reason.
+    fn rtc_regression(&self) -> String {
+        self.rtc_clock
+            .as_ref()
+            .and_then(pmu::RtcClock::regression)
+            .map_or_else(String::new, |(now, published)| {
+                format!(" (RTC counter {now:#x} after publication {published:#x})")
+            })
+    }
+
     fn publish_rtc_time_or_halt(&mut self, now: u64) -> bool {
         if let Err(error) = self.publish_rtc_time(now) {
             if self.reset.is_none() {
                 self.reset = Some(Reset {
                     transition: Transition::Halt,
-                    reason: format!("RTC service time refused: {error:?}"),
+                    reason: format!(
+                        "RTC service time refused: {error:?}{}",
+                        self.rtc_regression()
+                    ),
                 });
             }
             false
@@ -3091,7 +3104,7 @@ impl Devices for AppleDevices {
             // would, with the model's own reason.
             self.reset = Some(Reset {
                 transition: Transition::Halt,
-                reason: format!("device advance refused: {error:?}"),
+                reason: format!("device advance refused: {error:?}{}", self.rtc_regression()),
             });
         }
         self.watch_pmu();
@@ -3126,7 +3139,7 @@ impl Devices for AppleDevices {
             if self.reset.is_none() {
                 self.reset = Some(Reset {
                     transition: Transition::Halt,
-                    reason: format!("device advance refused: {error:?}"),
+                    reason: format!("device advance refused: {error:?}{}", self.rtc_regression()),
                 });
             }
             return None;

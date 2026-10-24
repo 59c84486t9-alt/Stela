@@ -22,6 +22,8 @@ struct Sample {
 struct Clock {
     epoch: RtcEpoch,
     sample: Cell<Option<Sample>>,
+    /// The last counter refused for preceding the publication, with it.
+    regression: Cell<Option<(u64, u64)>>,
 }
 
 /// Retained ownership of one PMIC oscillator/epoch. Clones refer to the same
@@ -40,17 +42,16 @@ impl RtcClock {
         Ok(Self(Rc::new(Clock {
             epoch,
             sample: Cell::new(None),
+            regression: Cell::new(None),
         })))
     }
 
     /// Check an actual Access.now without publishing or changing any owner.
     pub fn check(&self, now: u64) -> Result<u64, &'static str> {
-        if self
-            .0
-            .sample
-            .get()
-            .is_some_and(|sample| now < sample.counter)
+        if let Some(sample) = self.0.sample.get()
+            && now < sample.counter
         {
+            self.0.regression.set(Some((now, sample.counter)));
             return Err("PMU RTC counter publication moved backwards");
         }
         let elapsed = now
@@ -74,6 +75,12 @@ impl RtcClock {
             ticks,
         }));
         Ok(())
+    }
+
+    /// The last counter [`Self::check`] refused for moving backwards, and
+    /// the publication it preceded: a diagnostic of the stop it causes.
+    pub fn regression(&self) -> Option<(u64, u64)> {
+        self.0.regression.get()
     }
 
     /// SMC reads the same published upcount. Missing publication must stop the
@@ -117,6 +124,7 @@ mod tests {
         assert_eq!(smc.published_ticks(), Ok(1234 + RTC_HZ));
         assert!(clock.publish(239).is_err());
         assert!(clock.publish(240).is_err());
+        assert_eq!(clock.regression(), Some((240, 240 + FREQUENCY_HZ)));
         assert_eq!(smc.published_ticks(), Ok(1234 + RTC_HZ));
         smc.publish(240 + FREQUENCY_HZ).unwrap();
         assert_eq!(clock.published_ticks(), Ok(1234 + RTC_HZ));
