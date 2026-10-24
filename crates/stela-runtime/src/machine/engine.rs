@@ -2484,6 +2484,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .as_ref()
                 .is_some_and(|monitor| monitor.deadline().is_some());
         let now = if timed { self.now() } else { 0 };
+        self.lines_at(now)
+    }
+
+    /// The running PE's interrupt lines at count `now`, which no count the
+    /// devices were already given exceeds: a caller that holds a count
+    /// asks at it, so the devices never see time run backwards.
+    fn lines_at(&mut self, now: u64) -> Lines {
         let device = match self.device_lines {
             Some((lines, until)) if now < until => lines,
             _ => {
@@ -6237,6 +6244,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         interrupt_pending(&self.cpu, lines)
     }
 
+    /// [`Self::interrupt_pending`] at count `now` ([`Self::lines_at`]).
+    fn interrupt_pending_at(&mut self, now: u64) -> bool {
+        let lines = self.lines_at(now);
+        interrupt_pending(&self.cpu, lines)
+    }
+
     /// SYS and SYSL: the generated accessor of an architectural System
     /// instruction; every other encoding is UNDEFINED. In the
     /// IMPLEMENTATION DEFINED space (CRn 11 and 15) HCR_EL2.TIDCP first
@@ -6409,6 +6422,8 @@ mod tests {
         refused: Vec<u64>,
         fetch_checks: usize,
         pub(super) counter_reads: usize,
+        /// Counts the counter moves on after each read.
+        pub(super) counter_step: u64,
         placement: mmu::placement::Placement,
         translation_helper: Option<u64>,
         /// What [`Host::memory_low`] answers.
@@ -6533,7 +6548,9 @@ mod tests {
         }
         fn counter(&mut self) -> u64 {
             self.counter_reads += 1;
-            self.now
+            let now = self.now;
+            self.now += self.counter_step;
+            now
         }
         fn arm_timer(&mut self, _: Option<u64>) {}
         fn wait_for_interrupt(&mut self) {
@@ -6651,6 +6668,7 @@ mod tests {
             refused: Vec::new(),
             fetch_checks: 0,
             counter_reads: 0,
+            counter_step: 0,
             placement: mmu::placement::Placement::FiveLevel,
             translation_helper: None,
             memory_low: false,

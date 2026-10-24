@@ -280,8 +280,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.observe_writes();
             let now = self.now();
             self.poll_devices(now)?;
-            // A device can start a PE while every PE waits.
+            // A device can start a PE while every PE waits; the start reads
+            // the count, so the rest of the pass reads it after.
             self.take_starts()?;
+            let now = self.now();
             let (current, count) = (self.current, self.peers.len());
             if let Some(next) = (1..=count)
                 .map(|offset| (current + offset) % count)
@@ -375,7 +377,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     }
                     (kind == WaitKind::Event && self.cpu.event_is_set())
                         || timeout.is_some_and(|timeout| timeout.expired(now))
-                        || self.interrupt_pending()
+                        || self.interrupt_pending_at(now)
                 }
             };
         }
@@ -811,6 +813,8 @@ mod tests {
         power: Vec<(usize, bool)>,
         /// Something outside the board can still wake a PE.
         host_wake: bool,
+        /// The counts its lines and deadlines were asked at, in order.
+        counts: Vec<u64>,
     }
 
     impl Board {
@@ -860,8 +864,9 @@ mod tests {
         fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
             Err(DeviceError::NoDevice)
         }
-        fn lines(&mut self, cpu: usize, _: u64) -> Lines {
+        fn lines(&mut self, cpu: usize, now: u64) -> Lines {
             self.lines_asked.push(cpu);
+            self.counts.push(now);
             Lines {
                 irq: self.irq[cpu],
                 fiq: false,
@@ -870,7 +875,8 @@ mod tests {
         fn dma_deadline(&self) -> Option<u64> {
             self.dma
         }
-        fn deadline(&mut self, _: u64) -> Option<u64> {
+        fn deadline(&mut self, now: u64) -> Option<u64> {
+            self.counts.push(now);
             self.dma
         }
         fn transfer(
@@ -2231,6 +2237,27 @@ mod tests {
         assert_eq!(&bytes, b"USB");
         assert!(machine.devices.irq[0]);
         assert_eq!(machine.devices.dma_deadline(), None);
+    }
+
+    #[test]
+    fn a_wait_pass_never_gives_the_devices_an_earlier_count() {
+        let devices = Board {
+            dma: Some(1000),
+            ..Board::default()
+        };
+        let mut machine = board(&[WFI], devices, Vec::new());
+        // The host counter moves on at every read, as a real one does.
+        machine.host.counter_step = 7;
+        machine.waiting = Some(Wait {
+            kind: WaitKind::Interrupt,
+            timeout: None,
+            down: false,
+        });
+        machine.schedule().unwrap();
+        assert!(machine.waiting.is_none());
+        let counts = &machine.devices.counts;
+        assert!(counts.len() > 2, "{counts:?}");
+        assert!(counts.is_sorted(), "{counts:?}");
     }
 
     /// Switch to the next PE that can run, which must be `pe`.
