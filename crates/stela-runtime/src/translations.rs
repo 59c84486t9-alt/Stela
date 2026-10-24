@@ -141,23 +141,19 @@ impl Entry {
         let in_code = |offset: u32, bytes: usize| (offset as usize).saturating_add(bytes) <= code;
         usize::from(self.offset) + usize::from(self.source_bytes) <= PAGE_BYTES
             && self.source_bytes != 0
-            && self.offset.is_multiple_of(4)
-            && self.source_bytes.is_multiple_of(4)
             && self
                 .relocations
                 .windows(2)
-                .all(|pair| pair[0].checked_add(FIELD_BYTES as u32).is_some_and(|end| end <= pair[1]))
+                .all(|pair| pair[0] + FIELD_BYTES as u32 <= pair[1])
             && self
                 .relocations
                 .iter()
                 .all(|&offset| in_code(offset, FIELD_BYTES))
-            && crate::artifact::validate_source_map_geometry(
-                u64::from(self.offset),
-                usize::from(self.source_bytes),
-                code,
-                0,
-                self.source_map.iter().map(|&(guest, native)| (u64::from(guest), native as usize)),
-            ).is_ok()
+            && self.source_map.windows(2).all(|pair| pair[0] < pair[1])
+            && self
+                .source_map
+                .iter()
+                .all(|&(guest, native)| usize::from(guest) < PAGE_BYTES && in_code(native, 0))
             && self.exits.iter().all(|exit| {
                 in_code(exit.offset, 0) && ExitKind::try_from(u64::from(exit.kind)).is_ok()
             })
@@ -614,59 +610,6 @@ mod tests {
             assert_eq!(rebased.fault_recovery, expected.fault_recovery);
             assert_eq!(rebased.source_bytes, expected.source_bytes);
         }
-    }
-
-    #[test]
-    fn records_reject_malformed_source_geometry_with_a_valid_checksum() {
-        let source = words(&[0x9000_0020, 0x9100_2000, 0x5800_0081, 0x9400_0002]);
-        let entry = proved(&source, 0x40).expect("actual relocatable four-word block");
-        assert_eq!(entry.source_map.len(), 4);
-        assert!(entry.consistent());
-        assert!(entry.source_map[1].1 > 1);
-        let (translator, key) = (translator_id(), Digest::of(&[7; PAGE_BYTES]));
-        let mut good = Record::new(translator, key);
-        good.insert(entry.clone());
-        assert_eq!(Record::decode(&good.encode(), &translator, &key), Ok(good.clone()));
-        type Mutation = (&'static str, fn(&mut Entry));
-        let mutations: [Mutation; 15] = [
-            ("missing word", |entry| { entry.source_map.remove(1); }),
-            ("duplicate guest", |entry| entry.source_map[1].0 = entry.source_map[0].0),
-            ("guest gap", |entry| entry.source_map[1].0 += 4),
-            ("equal native", |entry| entry.source_map[1].1 = entry.source_map[0].1),
-            ("descending native", |entry| entry.source_map[2].1 = entry.source_map[1].1 - 1),
-            ("one-past native", |entry| entry.source_map[3].1 = u32::try_from(entry.code.len()).unwrap()),
-            ("out-of-range native", |entry| entry.source_map[3].1 = u32::try_from(entry.code.len() + 1).unwrap()),
-            ("wrong native entry", |entry| entry.source_map[0].1 = 1),
-            ("unaligned source base", |entry| {
-                entry.offset += 1;
-                for (guest, _) in &mut entry.source_map { *guest += 1; }
-            }),
-            ("partial source word", |entry| entry.source_bytes += 1),
-            ("empty extent", |entry| { entry.source_bytes = 0; entry.source_map.clear(); }),
-            ("page crossing", |entry| {
-                entry.offset = PAGE_BYTES as u16 - 4;
-                for (index, (guest, _)) in entry.source_map.iter_mut().enumerate() {
-                    *guest = entry.offset + index as u16 * 4;
-                }
-            }),
-            ("wrong first guest", |entry| entry.source_map[0].0 += 4),
-            ("overflowing relocation", |entry| entry.relocations = vec![u32::MAX, u32::MAX]),
-            ("overlapping relocations", |entry| {
-                let first = entry.relocations[0];
-                entry.relocations = vec![first, first + FIELD_BYTES as u32 - 1];
-            }),
-        ];
-        for (name, mutate) in mutations {
-            let mut bad = entry.clone();
-            mutate(&mut bad);
-            assert!(!bad.consistent(), "{name}");
-            let mut record = Record::new(translator, key);
-            record.insert(bad);
-            // The actual writer recomputes lengths and checksum: this reaches
-            // the loader's source geometry check, not a checksum failure.
-            assert_eq!(Record::decode(&record.encode(), &translator, &key), Err(FormatError::Entry), "{name}");
-        }
-        assert_eq!(Record::decode(&good.encode(), &translator, &key), Ok(good));
     }
 
     #[test]

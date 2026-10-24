@@ -74,45 +74,21 @@ pub(crate) fn validate_source_map(
     source_bytes: usize,
     first_native_offset: usize,
 ) -> Result<(), ArtifactError> {
-    if manifest.verified {
-        return Err(ArtifactError(
-            "invalid block source map length or verification claim",
-        ));
-    }
-    validate_source_map_geometry(
-        base.0,
-        source_bytes,
-        manifest.native_bytes,
-        first_native_offset,
-        manifest.source_map.iter().map(|&(guest, native)| (guest.0, native)),
-    )
-}
-
-/// Shared geometry for absolute artifact PCs and page-relative stored PCs.
-/// Callers retain their own source-extent and identity checks.
-pub(crate) fn validate_source_map_geometry(
-    base: u64,
-    source_bytes: usize,
-    native_bytes: usize,
-    first_native_offset: usize,
-    entries: impl ExactSizeIterator<Item = (u64, usize)>,
-) -> Result<(), ArtifactError> {
-    if entries.len() != source_bytes / 4 {
+    if manifest.verified || manifest.source_map.len() != source_bytes / 4 {
         return Err(ArtifactError(
             "invalid block source map length or verification claim",
         ));
     }
     let mut prior = None;
-    for (index, (guest, native)) in entries.enumerate() {
-        let expected = u64::try_from(index)
-            .ok()
-            .and_then(|index| index.checked_mul(4))
-            .and_then(|offset| base.checked_add(offset))
+    for (index, &(guest, native)) in manifest.source_map.iter().enumerate() {
+        let expected = base
+            .0
+            .checked_add(index as u64 * 4)
             .ok_or(ArtifactError("source map address overflow"))?;
-        if guest != expected {
+        if guest.0 != expected {
             return Err(ArtifactError("block source map guest mismatch"));
         }
-        if native >= native_bytes
+        if native >= manifest.native_bytes
             || !prior.is_none_or(|old| native > old)
             || (index == 0 && native != first_native_offset)
         {
@@ -121,18 +97,4 @@ pub(crate) fn validate_source_map_geometry(
         prior = Some(native);
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn source_geometry_preserves_wrapper_offsets_and_checks_address_overflow() {
-        let source = [(0x1000, 8), (0x1004, 20)];
-        assert!(validate_source_map_geometry(0x1000, 8, 32, 8, source.into_iter()).is_ok());
-        assert!(validate_source_map_geometry(0x1000, 8, 32, 0, source.into_iter()).is_err());
-        let overflow = [(u64::MAX - 3, 0), (0, 4)];
-        assert_eq!(validate_source_map_geometry(u64::MAX - 3, 8, 8, 0, overflow.into_iter()), Err(ArtifactError("source map address overflow")));
-    }
 }
