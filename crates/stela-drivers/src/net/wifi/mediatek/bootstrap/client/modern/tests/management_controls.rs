@@ -3,6 +3,7 @@
 // simulated requester, never a physical device or a real OS management service.
 use super::*;
 use crate::net::wifi::mediatek::bootstrap::client::management::{Received, Session, Transmit};
+use crate::net::wifi::{mediatek::mailbox, security::PacketNumber};
 
 type Native = Client<Bar, Q, NativeGuard>;
 const NOW: u64 = 1_000_200;
@@ -354,7 +355,7 @@ fn deferred_modern_envelopes_require_current_policy_and_cannot_use_unguarded_con
     state.allowed.set(false);
     assert!(
         unsafe {
-            driver.with_management_modern(&mut owner, permit, second, |_, _, _| {
+            driver.with_management_modern::<_, _, ()>(&mut owner, permit, second, |_, _, _| {
                 panic!("revoked OS effect")
             })
         }
@@ -367,7 +368,7 @@ fn deferred_modern_envelopes_require_current_policy_and_cannot_use_unguarded_con
     let log = model.bar.0.lock().unwrap().log.len();
     assert!(
         unsafe {
-            driver.with_management_modern(&mut owner, permit, third, |_, _, _| {
+            driver.with_management_modern::<_, _, ()>(&mut owner, permit, third, |_, _, _| {
                 panic!("removed association effect")
             })
         }
@@ -427,9 +428,12 @@ fn uncertain_modern_initial_key_batch_and_failed_tx_unmap_retain_complete_owners
             let permit = admit(&mut owner, &driver, AssociationUse::Management);
             assert!(
                 unsafe {
-                    driver.with_management_modern(&mut owner, permit, proof, |_, _, _| {
-                        panic!("poisoned DMA")
-                    })
+                    driver.with_management_modern::<_, _, ()>(
+                        &mut owner,
+                        permit,
+                        proof,
+                        |_, _, _| panic!("poisoned DMA"),
+                    )
                 }
                 .is_err()
             );
@@ -622,9 +626,12 @@ fn actual_modern_reconnect_rejects_original_received_and_tx_session_under_fresh_
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     assert!(
         unsafe {
-            driver.with_management_modern(&mut owner, permit, old_received, |_, _, _| {
-                panic!("old envelope cannot inherit current context/keys")
-            })
+            driver.with_management_modern::<_, _, ()>(
+                &mut owner,
+                permit,
+                old_received,
+                |_, _, _| panic!("old envelope cannot inherit current context/keys"),
+            )
         }
         .is_err()
     );
