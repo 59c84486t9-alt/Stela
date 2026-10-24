@@ -291,10 +291,18 @@ fn observe(
     model: &Model,
     bss: &scan::result::Bss,
 ) -> Arc<station::NativeBssObservation> {
+    observe_at(driver, model, bss, 0)
+}
+fn observe_at(
+    driver: &mut Native,
+    model: &Model,
+    bss: &scan::result::Bss,
+    start: u64,
+) -> Arc<station::NativeBssObservation> {
     driver
         .begin_scan(
             scan::Request::new(vec![CHANNEL], vec![], vec![]).unwrap(),
-            0,
+            start,
             1_000_000,
             &mut Policy(true),
         )
@@ -306,7 +314,7 @@ fn observe(
     let mut beacon = response(0x80, &body);
     beacon[4..10].fill(255);
     incoming(model, &beacon, None, false);
-    let events = driver.poll(1, &Source, &mut Policy(true)).unwrap();
+    let events = driver.poll(start + 1, &Source, &mut Policy(true)).unwrap();
     assert!(matches!(events.as_slice(), [Event::Bss(_)]));
     let observed = driver.pmf_bss_observations().next().unwrap().clone();
     let mut done = vec![0; 52];
@@ -315,7 +323,7 @@ fn observe(
     done[38] = 6;
     done[50] = 4;
     device_receive(&model.queues[&0xd4500], &done, true, 0);
-    driver.poll(2, &Source, &mut Policy(true)).unwrap();
+    driver.poll(start + 2, &Source, &mut Policy(true)).unwrap();
     // SAFETY: actual modeled scan terminal event and all model RX/IRQ users drained.
     unsafe { driver.retire_scan_after_drain() }.unwrap();
     observed
@@ -551,7 +559,27 @@ fn actual_prekey_eapol_has_distinct_guarded_transport_and_no_robust_fallback() {
     poll(&mut driver, &mut owner, &state, 106).unwrap();
     driver.poll_released().unwrap();
     let eapol = response(0x0208, &[0xaa, 0xaa, 3, 0, 0, 0, 0x88, 0x8e, 1, 2, 3]);
-    incoming(&model, &eapol, None, false);
+    // A plaintext data descriptor still needs the actual configured peer WCID.
+    // Retain the original WCID0 input as a hostile profile mismatch first.
+    let mut raw = incoming_bytes(&eapol, None, false);
+    device_receive(&model.queues[&0xd4520], &raw, true, 0);
+    assert!(matches!(
+        poll(&mut driver, &mut owner, &state, 107),
+        Err(ClientError::WrongProfile)
+    ));
+    assert!(!protection.authenticated.get());
+    assert!(!driver.station().port_open(None, None));
+    let peer = driver.state().profile.unwrap().wcid;
+    let original = raw.clone();
+    let descriptor = u32::from_le_bytes(raw[4..8].try_into().unwrap());
+    raw[4..8].copy_from_slice(&((descriptor & !0xfff) | u32::from(peer)).to_le_bytes());
+    assert_eq!(&raw[..4], &original[..4]);
+    assert_eq!(&raw[8..], &original[8..]);
+    assert_eq!(
+        u32::from_le_bytes(raw[4..8].try_into().unwrap()) & !0xfff,
+        descriptor & !0xfff
+    );
+    device_receive(&model.queues[&0xd4520], &raw, true, 0);
     let events = poll(&mut driver, &mut owner, &state, 107).unwrap();
     assert!(events.iter().any(|event| matches!(
         event,
@@ -897,7 +925,7 @@ fn actual_pmf_protected_block_ack_uses_current_session_and_real_firmware_ack() {
     let (mut driver, model, mut owner, state, protection) = configured();
     protection.authenticated.set(true);
     let session = attach(&mut driver, &mut owner);
-    assert!(driver.begin_tx_block_ack(6, 0, 110).is_err());
+    assert!(driver.begin_tx_block_ack(6, 0, frontend_tick(110)).is_err());
     let mut request = vec![3, 0, 7];
     request.extend_from_slice(&(3u16 | (6 << 2) | (8 << 6)).to_le_bytes());
     request.extend_from_slice(&0u16.to_le_bytes());
@@ -908,17 +936,24 @@ fn actual_pmf_protected_block_ack_uses_current_session_and_real_firmware_ack() {
         Some((1, 0, 101)),
         false,
     );
-    let mut events = poll(&mut driver, &mut owner, &state, 111).unwrap();
+    let mut events = poll(&mut driver, &mut owner, &state, frontend_tick(111)).unwrap();
     let Event::ProtectedManagement(original) = events.pop().unwrap() else {
         panic!("protected BA observation")
     };
     let mut received = Some(original);
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
-    unsafe { driver.receive_management_block_ack(&mut owner, admission, &mut received, 112) }
-        .unwrap();
+    unsafe {
+        driver.receive_management_block_ack(
+            &mut owner,
+            admission,
+            &mut received,
+            frontend_tick(112),
+        )
+    }
+    .unwrap();
     assert!(received.is_none());
     assert!(driver.station().active_rx_block_ack(6).is_none());
-    for now in [113, 114] {
+    for now in [frontend_tick(113), frontend_tick(114)] {
         let admission = permit(&mut owner, &driver, AssociationUse::Management);
         unsafe { driver.progress_block_ack(&mut owner, admission, &PmfSource(state.clone()), now) }
             .unwrap();
@@ -939,7 +974,7 @@ fn actual_pmf_protected_block_ack_uses_current_session_and_real_firmware_ack() {
         0x40d0
     );
     assert_eq!(&sent[0][24..29], &[3, 1, 7, 0, 0]);
-    poll(&mut driver, &mut owner, &state, 115).unwrap();
+    poll(&mut driver, &mut owner, &state, frontend_tick(115)).unwrap();
     let released = driver.poll_released().unwrap();
     assert_eq!(released.len(), 1);
     assert!(Arc::ptr_eq(
@@ -1049,7 +1084,7 @@ fn actual_pmf_foreign_and_old_scan_observations_cannot_mint_authentication_autho
     assert_eq!(model.bar.0.lock().unwrap().log.len(), before);
     assert!(state.tickets.borrow().is_empty());
     let (_, bss) = inputs(&driver);
-    let fresh = observe(&mut driver, &model, &bss);
+    let fresh = observe_at(&mut driver, &model, &bss, 10);
     assert!(!Arc::ptr_eq(&old, &fresh));
     let (mut owner, state, _) = authority_pmf(fresh.clone(), &join, &model);
     let before = model.bar.0.lock().unwrap().log.len();
