@@ -322,3 +322,35 @@ fn two_and_five_ghz_custom_probe_metadata_needs_no_six_ghz_capability() {
     terminal(&mut link, &model, scan::Outcome::Completed);
     stop(link, &model);
 }
+
+#[test]
+fn fragment_after_short_final_fragment_is_refused_before_native_publication() {
+    let (mut link, model) = setup(true, true, 0);
+    let before = model.response.lock().unwrap().client_commands.len();
+    let heads = queue_heads(&model);
+    let syncs = model.memory.lock().unwrap().syncs.len();
+    let mut extra = vec![221, 255];
+    extra.extend_from_slice(&[0x42; 255]);
+    extra.extend_from_slice(&[242, 1, 0x24, 242, 1, 0x18]);
+    assert_eq!(extra.len(), 263);
+    assert!(matches!(
+        link.begin_scan(request(extra, false), SCAN_BUDGET_US),
+        Err(LinkControlError::Policy(PolicyError::Client(Error::Local(
+            LocalError::UnsupportedProbeElements
+        ))))
+    ));
+    assert_eq!(link.phase(), Phase::Idle);
+    assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
+    assert_eq!(queue_heads(&model), heads);
+    assert_eq!(model.memory.lock().unwrap().syncs.len(), syncs);
+    assert_eq!(
+        link.state().client.client.state().scanner.phase(),
+        scan::Phase::Idle
+    );
+    assert!(link.state().client.client.state().scan_ticket.is_none());
+    link.begin_scan(request(EXTRA.to_vec(), false), SCAN_BUDGET_US)
+        .unwrap();
+    assert_generic_ack(&link, crate::net::wifi::mediatek::mcu::init::Kind::Scan);
+    terminal(&mut link, &model, scan::Outcome::Completed);
+    stop(link, &model);
+}

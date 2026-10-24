@@ -191,7 +191,10 @@ fn validate_extra(mut extra: &[u8]) -> Result<(), LocalError> {
         if id == 255 && data.is_empty() {
             return Err(LocalError::WrongAdvertisement);
         }
-        fragments = length == 255 || (id == 242 && fragments);
+        // cfg80211_defragment_element ends a chain at its first short
+        // fragment. A following Fragment would be orphaned even though the
+        // ordering-only skip_ie helper assumes an already valid chain.
+        fragments = length == 255;
         extra = &extra[2 + length..];
     }
     Ok(())
@@ -273,6 +276,27 @@ mod tests {
         assert_eq!(&composed[composed.len() - 5..], &[200, 0, 127, 1, 0]);
         let original = elements(&actual, selected()).unwrap();
         assert_eq!(composed.len(), original.len() + extra.len());
+    }
+
+    #[test]
+    fn custom_fragment_validity_requires_a_full_immediate_predecessor() {
+        let mut valid = vec![10, 255];
+        valid.extend_from_slice(&[0xab; 255]);
+        valid.extend_from_slice(&[242, 255]);
+        valid.extend_from_slice(&[0xcd; 255]);
+        valid.extend_from_slice(&[242, 2, 0xef, 0x42]);
+        // Pure codec validity only: the generic scan request's separate
+        // 384-byte limit cannot admit this full three-part chain.
+        assert_eq!(validate_extra(&valid), Ok(()));
+        valid.extend_from_slice(&[242, 1, 0x24]);
+        assert_eq!(
+            validate_extra(&valid),
+            Err(LocalError::UnsupportedProbeElements)
+        );
+        assert_eq!(
+            validate_extra(&[10, 1, 0xab, 242, 1, 0xcd]),
+            Err(LocalError::UnsupportedProbeElements)
+        );
     }
 
     #[test]
