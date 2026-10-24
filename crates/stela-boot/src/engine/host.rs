@@ -9,9 +9,11 @@
 //! permission view (EL0, EL1, EL1 with PAN, GL1), and a second set for the
 //! same views while tag checks keep Tagged memory out (`Regime::tag_checks`),
 //! filled on demand by the #PF handler from the software walk of the
-//! guest's tables, a window of the guest leaf per fault. Each half takes its tables from its own part of the
-//! pool, so a change of TTBR0 alone (a context switch) drops the lower half
-//! and keeps the upper half's, and records the leaves it was filled from
+//! guest's tables, a window of the guest leaf per fault. The views but
+//! EL0's keep their roots of a few SPRR_PERM_EL1 values (`Bank`). Each half
+//! takes its tables from its own part of the pool, so a change of TTBR0
+//! alone (a context switch) drops the lower half and keeps the upper
+//! half's, and records the leaves it was filled from
 //! (`mmu::shadow::Extents`), so a TLBI unmaps only the ranges it reaches.
 use super::interrupts::{Frame, SPURIOUS_VECTOR, TIMER_VECTOR};
 use crate::{
@@ -144,6 +146,34 @@ const CAUSES: usize = 7;
 /// PAN, which loses data access where EL0 has any
 /// (`mmu::sprr::permissions`).
 const USER_VIEWS: [usize; 2] = [EL0_VIEW, PAN_VIEW];
+/// The views whose rights SPRR_PERM_EL1 decides: all but EL0's.
+const KERNEL_VIEWS: [usize; 3] = [EL1_VIEW, PAN_VIEW, GUARDED_VIEW];
+/// The roots of the [`KERNEL_VIEWS`], tag-checked ones after the others.
+const KERNEL_ROOTS: [usize; 6] = [
+    EL1_VIEW,
+    PAN_VIEW,
+    GUARDED_VIEW,
+    VIEWS + EL1_VIEW,
+    VIEWS + PAN_VIEW,
+    VIEWS + GUARDED_VIEW,
+];
+/// The SPRR_PERM_EL1 values whose kernel roots the shadow keeps besides
+/// the current one ([`Bank`]).
+const BANKS: usize = 3;
+
+/// The [`KERNEL_ROOTS`] the shadow filled under another SPRR_PERM_EL1
+/// value, everything else as it is now: a kernel that makes one
+/// permission index writable and back, as XNU does around its writes to
+/// protected data, finds each value's tables again. Every reset and unmap
+/// reaches them as it does the current roots.
+#[derive(Clone, Copy)]
+struct Bank {
+    /// The SPRR_PERM_EL1 value, `None` while the roots are empty.
+    el1: Option<u64>,
+    roots: [u64; KERNEL_ROOTS.len()],
+    /// When it was last the current bank, for replacement.
+    used: u64,
+}
 const ROOTS: usize = 2 * VIEWS;
 /// Frames reserved for roots and other permanent tables.
 const PERMANENT_FRAMES: u64 = 64;
@@ -198,6 +228,11 @@ pub struct State {
     /// Engine root without any guest mapping.
     host_root: u64,
     roots: [u64; ROOTS],
+    /// The kernel roots of other SPRR_PERM_EL1 values.
+    banks: [Bank; BANKS],
+    /// Switches to a bank's roots, and those that found the bank empty.
+    bank_switches: u64,
+    bank_misses: u64,
     /// A shadow-map attempt or software-TLB fill may have published guest
     /// translations. Only a complete reset can prove both halves clean again.
     legacy_translations_dirty: bool,
@@ -336,6 +371,14 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
     for slot in &mut roots {
         *slot = root()?;
     }
+    let mut banks = [Bank {
+        el1: None,
+        roots: [0; KERNEL_ROOTS.len()],
+        used: 0,
+    }; BANKS];
+    for slot in banks.iter_mut().flat_map(|bank| &mut bank.roots) {
+        *slot = root()?;
+    }
     load_root(host_root);
     let apic = Apic::new(
         config.apic_base,
@@ -349,6 +392,9 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             pool,
             host_root,
             roots,
+            banks,
+            bank_switches: 0,
+            bank_misses: 0,
             legacy_translations_dirty: false,
             current: usize::MAX,
             regime: None,
@@ -415,6 +461,10 @@ pub struct Statistics {
     /// Whole resets by cause: exhausted frames, SPRR, TTBR0 and other
     /// controls, tag checks, invalidations and TLBIs of everything.
     pub reset_causes: [u64; CAUSES],
+    /// Switches to another SPRR_PERM_EL1 value's kernel roots, and those
+    /// that found none kept.
+    pub bank_switches: u64,
+    pub bank_misses: u64,
     pub scoped: u64,
     pub stray: u64,
     /// The APIC timer frequency.
@@ -440,6 +490,8 @@ pub fn statistics() -> Statistics {
         lower_resets: state.lower_resets,
         user_resets: state.user_resets,
         reset_causes: state.reset_causes,
+        bank_switches: state.bank_switches,
+        bank_misses: state.bank_misses,
         scoped: state.scoped,
         stray: state.stray,
         apic_hz: state.apic_hz,
@@ -572,6 +624,15 @@ impl State {
                 self.detach(root, UPPER);
             }
         }
+        // The banks' PAN roots too.
+        for index in 0..BANKS {
+            for (slot, &view) in KERNEL_ROOTS.iter().enumerate() {
+                if USER_VIEWS.contains(&(view % VIEWS)) {
+                    self.detach(self.banks[index].roots[slot], LOWER);
+                    self.detach(self.banks[index].roots[slot], UPPER);
+                }
+            }
+        }
         self.tlb.clear();
         self.user_resets += 1;
         if USER_VIEWS.contains(&(self.current % VIEWS)) {
@@ -579,11 +640,52 @@ impl State {
         }
     }
 
+    /// Take the [`KERNEL_ROOTS`] of SPRR_PERM_EL1 value `to` from its bank,
+    /// leaving those of `from` there: a bank of `to`, or else the least
+    /// recently used, emptied.
+    fn switch_bank(&mut self, from: u64, to: u64) {
+        self.bank_switches += 1;
+        let index = match self.banks.iter().position(|bank| bank.el1 == Some(to)) {
+            Some(index) => index,
+            None => {
+                self.bank_misses += 1;
+                let (index, _) = self
+                    .banks
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, bank)| bank.used)
+                    .expect("banks");
+                for root in self.banks[index].roots {
+                    self.detach(root, LOWER);
+                    self.detach(root, UPPER);
+                }
+                index
+            }
+        };
+        let bank = &mut self.banks[index];
+        for (slot, &view) in KERNEL_ROOTS.iter().enumerate() {
+            core::mem::swap(&mut bank.roots[slot], &mut self.roots[view]);
+        }
+        bank.el1 = Some(from);
+        bank.used = self.bank_switches;
+        // The software TLB is tagged by view, not root.
+        self.tlb.clear();
+        if KERNEL_VIEWS.contains(&(self.current % VIEWS)) {
+            self.reload();
+        }
+    }
+
+    /// Every root the shadow fills: the current ones and the banks'.
+    fn all_roots(&self) -> impl Iterator<Item = u64> + use<> {
+        let banked = self.banks.map(|bank| bank.roots);
+        self.roots.into_iter().chain(banked.into_iter().flatten())
+    }
+
     /// Unmap `half` from every root and free its frames.
     fn clear(&mut self, half: usize) {
         self.pool.reset_half(half);
         self.extents[half].clear();
-        for root in self.roots {
+        for root in self.all_roots() {
             self.detach(root, half);
         }
     }
@@ -1283,22 +1385,32 @@ impl Host for BareHost<'_> {
                 },
                 ..current.controls
             };
+            let kernel = mmu::Controls {
+                sprr: mmu::Sprr {
+                    el1: regime.controls.sprr.el1,
+                    ..current.controls.sprr
+                },
+                ..current.controls
+            };
             if ttbr0 == regime.controls && (asid || !state.extents[UPPER].private()) {
                 state.reset_lower();
             } else if user == regime.controls {
                 state.reset_user_views();
+            } else if kernel == regime.controls {
+                state.switch_bank(current.controls.sprr.el1, regime.controls.sprr.el1);
             } else {
                 let sprr = mmu::Controls {
                     sprr: regime.controls.sprr,
                     ..current.controls
                 };
-                state.reset_shadow(if sprr == regime.controls {
+                let cause = if sprr == regime.controls {
                     Cause::Sprr
                 } else if ttbr0 == regime.controls {
                     Cause::Table
                 } else {
                     Cause::Controls
-                });
+                };
+                state.reset_shadow(cause);
             }
         }
         // The tag-checked roots hold one pattern of checked halves.
@@ -1357,7 +1469,7 @@ impl Host for BareHost<'_> {
         }
         let mut pages = 0u64;
         for &(first, last) in &unmapped {
-            for root in state.roots {
+            for root in state.all_roots() {
                 tables::unmap(&state.pool, root, first, last);
             }
             pages = pages.saturating_add(((last - first) >> 12) + 1);

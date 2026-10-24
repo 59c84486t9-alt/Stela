@@ -2852,17 +2852,18 @@ impl TranslatedSeen {
 /// The host's shadow counters at the last heartbeat.
 #[derive(Default)]
 struct ShadowSeen {
-    counts: [u64; 7],
+    counts: [u64; 9],
     causes: [u64; 7],
 }
 
 impl ShadowSeen {
-    /// The shadow faults filled, the pages mapped beside them, and the
-    /// resets of the whole shadow (and of those, the ones each cause led
-    /// to: a half running out of frames, SPRR, TTBR0 or other controls,
-    /// tag checks, invalidations and TLBIs of everything), of the lower half, of the views SPRR_PERM_EL0
-    /// decides, and the TLBIs that unmapped ranges instead, since the last
-    /// heartbeat.
+    /// Since the last heartbeat: the shadow faults filled and the pages
+    /// mapped beside them; the resets of the whole shadow, and of those
+    /// the ones each cause led to (a half running out of frames, SPRR,
+    /// TTBR0 or other controls, tag checks, invalidations and TLBIs of
+    /// everything); the resets of the lower half and of the views
+    /// SPRR_PERM_EL0 decides; the switches between SPRR_PERM_EL1 values' kernel roots and those that
+    /// found none kept; and the TLBIs that unmapped ranges instead.
     fn report(&mut self) {
         let host = host::statistics();
         let counts = [
@@ -2872,6 +2873,8 @@ impl ShadowSeen {
             host.exhausted,
             host.lower_resets,
             host.user_resets,
+            host.bank_switches,
+            host.bank_misses,
             host.scoped,
         ];
         let [
@@ -2881,6 +2884,8 @@ impl ShadowSeen {
             exhausted,
             lower_resets,
             user_resets,
+            bank_switches,
+            bank_misses,
             scoped,
         ] = core::array::from_fn(|index| counts[index] - self.counts[index]);
         self.counts = counts;
@@ -2891,7 +2896,8 @@ impl ShadowSeen {
             "SHADOW fills={fills} prefills={prefills} resets={resets} exhausted={exhausted} \
              sprr={sprr} table={table} controls={controls} tags={tags} \
              invalidated={invalidated} maintained={maintained} \
-             lower_resets={lower_resets} user_resets={user_resets} scoped={scoped}\n"
+             lower_resets={lower_resets} user_resets={user_resets} \
+             bank_switches={bank_switches} bank_misses={bank_misses} scoped={scoped}\n"
         ));
     }
 }
