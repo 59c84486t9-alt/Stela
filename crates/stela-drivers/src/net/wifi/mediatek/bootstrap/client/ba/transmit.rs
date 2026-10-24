@@ -29,6 +29,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.management.is_some() {
             return Err(Error::Unsupported);
         }
+        if s.transmit_ba
+            .get(usize::from(tid))
+            .is_some_and(Option::is_some)
+        {
+            return Err(Error::Busy);
+        }
         s.ba_actions.try_reserve(1).map_err(|_| Error::NoMemory)?;
         let action = s
             .station
@@ -65,15 +71,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 let native = s.transmit_ba[usize::from(session.tid())]
                     .as_ref()
                     .ok_or(Error::WrongPhase)?;
-                if !Arc::ptr_eq(&native.session, &session)
-                    || s.controller
-                        .state()
-                        .data_tx
-                        .as_ref()
-                        .unwrap()
-                        .has_pending_context(|p| p.tid == Some(session.tid()))
-                {
-                    return Err(Error::NeedsDrain);
+                if !Arc::ptr_eq(&native.session, &session) {
+                    return Err(Error::WrongPhase);
+                }
+                if Self::tx_ba_pending(s, &session) {
+                    // A local DELBA was actually published; canonical state is
+                    // retired, but its real packet still owns this native TID.
+                    // Preserve the successor until actual TX-free and unmap.
+                    s.ba_actions.try_reserve(1).map_err(|_| Error::NoMemory)?;
+                    s.ba_actions
+                        .push_front(BaAction::Tx(Action::ResumeLegacy { session }));
+                    return Ok(());
                 }
                 s.transmit_ba[usize::from(session.tid())] = None;
                 Ok(())
@@ -131,6 +139,24 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let Some(BaAction::Tx(action)) = s.ba_actions.front() else {
             return Ok(false);
         };
+        if let Action::ResumeLegacy { session } = action {
+            let native = s.transmit_ba[usize::from(session.tid())]
+                .as_ref()
+                .ok_or(Error::WrongPhase)?;
+            if !Arc::ptr_eq(&native.session, session) || !native.blocked {
+                return Err(Error::WrongPhase);
+            }
+            if Self::tx_ba_pending(s, session) {
+                return Err(Error::NeedsDrain);
+            }
+            // The original canonical record already retired at actual DELBA
+            // publication. Only this private retained native successor and the
+            // real completed packet lifecycle authorize releasing its TID.
+            let index = usize::from(session.tid());
+            s.transmit_ba[index] = None;
+            s.ba_actions.pop_front();
+            return Ok(true);
+        }
         if s.station
             .validate_tx_block_ack_cancellation(action)
             .is_err()
@@ -247,7 +273,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 s.station
                     .validate_tx_block_ack_transmit(ticket, &session, bytes)
                     .map_err(Error::BlockAck)?;
-                let mut prepared = Self::prepare_submission(s, bytes, None, true, true)?;
+                let (bytes, mut prepared) = Self::prepare_ba_submission(s, bytes)?;
                 prepared.1.tx_ba = Some(session.clone());
                 // SAFETY: covered by this function's own safety contract.
                 let result = unsafe {
@@ -255,7 +281,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         admission,
                         &s.station,
                         wifi::regulatory::AssociationUse::Management,
-                        |_, _| Self::publish_submission(&mut s.controller, source, bytes, prepared),
+                        |_, _| {
+                            Self::publish_submission(&mut s.controller, source, &bytes, prepared)
+                        },
                     )
                 }
                 .map_err(Error::Regulatory)?;

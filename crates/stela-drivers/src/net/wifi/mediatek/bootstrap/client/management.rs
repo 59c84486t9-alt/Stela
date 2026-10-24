@@ -11,6 +11,7 @@ use core::any::Any;
 use mailbox::key::bip;
 use wifi::security::NonceOwner;
 
+mod block_ack;
 mod modern;
 mod rotation;
 
@@ -150,7 +151,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok((ptk, gtk))
     }
 
-    fn validate_management(s: &Owned<I, Q, C>, session: &Session) -> Result<(), Error> {
+    pub(super) fn validate_management(s: &Owned<I, Q, C>, session: &Session) -> Result<(), Error> {
         // Exact retained object first: copied numbers or an equal peer/profile
         // from another Client cannot create authority or trigger MMIO.
         if s.management
@@ -248,6 +249,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             Self::validate_management(s, session)?;
             return Ok(session.clone());
         }
+        // Initial attachment and rotation require all old BA users drained.
+        s.ba_management = None;
+        s.ba_management_pn = None;
         let session = Arc::new(Session {
             _resource: s.controller.state().resource.clone(),
             association: epoch,

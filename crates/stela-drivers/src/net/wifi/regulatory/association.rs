@@ -197,6 +197,45 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
         Ok(result)
     }
 
+    /// Apply a native management consumer while both current providers remain
+    /// held. The mutable Station is the same object validated before the effect;
+    /// no copied permit outlives the guards. Subsequent native publication must
+    /// separately revalidate its original context, keys and deferred owner.
+    ///
+    /// # Safety
+    /// The consumer must belong to this exact retained requester and original
+    /// authenticated association. The OS supplies negotiated management policy;
+    /// these regulatory guards do not authenticate input or grant PMF/MLME.
+    pub(crate) unsafe fn consume_association<T>(
+        &mut self,
+        admission: AssociationAdmission,
+        station: &mut Station,
+        consume: impl FnOnce(&mut Station, &AssociationOperation<'_>) -> T,
+    ) -> Result<T, Error> {
+        if admission.owner != self.identity {
+            return Err(Error::Stale);
+        }
+        if admission.purpose != AssociationUse::Management {
+            return Err(Error::Mismatch);
+        }
+        let operation = admission.operation();
+        current(station, &operation)?;
+        let mut hardware = self.hardware.acquire().ok_or(Error::HardwareUnavailable)?;
+        let native = hardware.context();
+        if admission.native != native {
+            return Err(Error::Stale);
+        }
+        let mut os = self.os.acquire(native).ok_or(Error::OsUnavailable)?;
+        if admission.os_revision != os.revision() {
+            return Err(Error::Stale);
+        }
+        check(&mut hardware, &mut os, &operation)?;
+        let result = consume(station, &operation);
+        drop(os);
+        drop(hardware);
+        Ok(result)
+    }
+
     /// Recheck the exact context and purpose at native publication, holding the
     /// immutable station plus hardware then OS guards through `submit`.
     /// Closure return is not command ACK, association success, air completion or
@@ -684,5 +723,78 @@ mod tests {
             owner.admit_association(&s, c, Use::Configure).unwrap_err(),
             reg::Error::OsDenied
         );
+    }
+
+    #[test]
+    fn mutable_management_consumer_holds_both_original_guards_through_transition() {
+        let (mut station, context, mut owner, model) = fixture();
+        associated(&mut station, &context);
+        let permit = owner
+            .admit_association(&station, context.clone(), Use::Management)
+            .unwrap();
+        // SAFETY: the actual pure provider fixture owns this Station exclusively.
+        unsafe {
+            owner.consume_association(permit, &mut station, |station, operation| {
+                assert!(model.hw_held.get() && model.os_held.get());
+                assert!(!model.revoke());
+                assert!(core::ptr::eq(operation.context(), context.as_ref()));
+                station.disconnect().unwrap();
+                assert!(model.hw_held.get() && model.os_held.get());
+            })
+        }
+        .unwrap();
+        assert!(!model.hw_held.get() && !model.os_held.get());
+        assert_ne!(station.phase(), Phase::Associated);
+        assert!(model.revoke());
+    }
+
+    #[test]
+    fn mutable_management_consumer_denies_foreign_purpose_epochs_and_revoked_guards() {
+        for fault in 0..10 {
+            let (mut station, context, mut owner, model) = fixture();
+            associated(&mut station, &context);
+            let permit = owner
+                .admit_association(
+                    &station,
+                    context.clone(),
+                    if fault == 0 {
+                        Use::Data
+                    } else {
+                        Use::Management
+                    },
+                )
+                .unwrap();
+            match fault {
+                0 => {}
+                1 => model.hw_available.set(false),
+                2 => model.os_available.set(false),
+                3 => model.hw_mask.set(0),
+                4 => model.os_mask.set(0),
+                5 => model.revision.set(2),
+                6 => {
+                    let mut native = model.native.get();
+                    native.reset_epoch += 1;
+                    model.native.set(native);
+                }
+                7 => owner = reg::Owner::new(Hardware(model.clone()), Os(model.clone())).unwrap(),
+                8 => {
+                    station.disconnect().unwrap();
+                }
+                _ => model.applied_power.set(false),
+            }
+            let phase = station.phase();
+            // SAFETY: each rejected actual provider boundary must avoid the effect.
+            assert!(
+                unsafe {
+                    owner.consume_association::<()>(permit, &mut station, |_, _| {
+                        panic!("denied management consumer reached canonical state")
+                    })
+                }
+                .is_err(),
+                "fault {fault}"
+            );
+            assert_eq!(station.phase(), phase);
+            assert!(!model.hw_held.get() && !model.os_held.get());
+        }
     }
 }

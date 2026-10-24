@@ -32,6 +32,26 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     pub fn pending_block_ack(&self) -> bool {
         !self.state().ba_actions.is_empty()
     }
+    /// Earliest canonical TX negotiation/idle timeout. The serialized deferred
+    /// owner must call poll_block_ack_timers at this deadline and continue while
+    /// another TID is due. This does not install a platform timer/scheduler.
+    pub fn next_transmit_deadline(&self) -> Option<u64> {
+        self.state().station.next_tx_block_ack_deadline()
+    }
+
+    /// Apply only restrictive canonical timeout/cancellation, retaining its
+    /// native owner. Firmware disable and any resulting protected local DELBA
+    /// still require actual drain/ACK and separately guarded publication.
+    pub fn poll_block_ack_timers(&mut self, now: u64) -> Result<(), Error> {
+        let s = self.state_mut();
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        s.ba_actions.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let action = s.station.poll_tx_block_ack(now).map_err(Error::BlockAck)?;
+        Self::queue_tx_ba(s, action, now)
+    }
+
     /// Serialized deferred owner must call `poll` no later than this absolute
     /// microsecond deadline while active. Source 32-bit ticks use1MHz here;
     /// successive polls/RX must never skip its signed half-range. This is a
@@ -166,6 +186,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.phase != Phase::Associated {
             return Err(Error::WrongPhase);
         }
+        Self::validate_ba_management(s)?;
         let reconciled = Self::reconcile_tx_ba(s, now)?;
         if reconciled && s.ba_actions.is_empty() {
             return Ok(());
@@ -274,7 +295,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         .validate_rx_block_ack(session)
                         .map_err(Error::BlockAck)?;
                 }
-                let prepared = Self::prepare_submission(s, bytes, None, true, true)?;
+                let (bytes, prepared) = Self::prepare_ba_submission(s, bytes)?;
                 let mut started = false;
                 // SAFETY: covered by this function's own safety contract.
                 let result = unsafe {
@@ -284,7 +305,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         wifi::regulatory::AssociationUse::Management,
                         |_, _| {
                             started = true;
-                            Self::publish_submission(&mut s.controller, source, bytes, prepared)
+                            Self::publish_submission(&mut s.controller, source, &bytes, prepared)
                         },
                     )
                 }
@@ -353,6 +374,25 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         };
         if !Arc::ptr_eq(&native.session, &session) {
             return Err(Error::WrongPhase);
+        }
+        if s.ba_management.as_ref().is_some_and(|session| {
+            s.controller
+                .state()
+                .data_tx
+                .as_ref()
+                .unwrap()
+                .has_pending_context(|packet| {
+                    packet
+                        .management
+                        .as_ref()
+                        .is_some_and(|original| Arc::ptr_eq(original, session))
+                })
+        }) {
+            // A published protected positive response may still be in real TX.
+            // Keep this original native agreement until descriptor consumption,
+            // firmware TX-free and successful unmap retire that Session's users.
+            // Canonical invalidation already denies every new agreement use.
+            return Err(Error::NeedsDrain);
         }
         native.stop(); // terminal software queue plus serialized timer/callback cancellation
         let body = wire::modern::ba_request(

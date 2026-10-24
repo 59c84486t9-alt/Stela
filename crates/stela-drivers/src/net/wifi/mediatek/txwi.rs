@@ -80,8 +80,9 @@ pub struct Frame {
     pub multicast: bool,
     pub fragment: Fragment,
     pub sequence: Sequence,
-    /// Ordinary management or data only. BIP/MMIE/ADDBA/translated 802.3 and
-    /// monitor radiotap policy remain outside this explicitly bounded profile.
+    /// Ordinary management or data only. Action frames require actual body
+    /// qualification below; BIP/MMIE/translated 802.3 and monitor radiotap
+    /// policy remain outside this explicitly bounded profile.
     pub minimum_rate: bool,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,20 +136,24 @@ pub(in crate::net::wifi::mediatek) fn encode_mpdu(
         return Err(Error::UnsupportedFrame);
     }
     let body = bytes.get(h.length..).ok_or(Error::InvalidHeader)?;
-    if c.protect && h.protected() {
-        if body.len() != 4
-            || body[0] != 8
-            || body[1] > 1
-            || h.receiver.is_multicast()
+    if c.protect != h.protected() {
+        return Err(Error::UnsupportedFrame);
+    }
+    if c.protect
+        && (h.receiver.is_multicast()
             || h.control & 0x0300 != 0
             || c.frame.multicast
-            || c.queue != Queue::Management
-        {
+            || c.queue != Queue::Management)
+    {
+        return Err(Error::UnsupportedFrame);
+    }
+    if c.protect && body.first() == Some(&8) {
+        if body.len() != 4 || body[1] > 1 {
             return Err(Error::UnsupportedFrame);
         }
         return encode_inner(c, Some(QualifiedAction::SaQuery));
     }
-    if c.protect || h.protected() || body.first() != Some(&3) {
+    if body.first() != Some(&3) {
         return Err(Error::UnsupportedFrame);
     }
     let action = *body.get(1).ok_or(Error::InvalidHeader)?;
@@ -676,6 +681,69 @@ mod tests {
             let mut trailing = bytes.to_vec();
             trailing.push(0);
             assert!(encode_mpdu(long, &trailing).is_err());
+        }
+    }
+
+    #[test]
+    fn protected_block_ack_uses_source_tid_and_cipher_with_exact_body_qualification() {
+        for action in 0..=2u8 {
+            let len = if action == 2 { 30 } else { 33 };
+            let mut bytes = vec![0; len];
+            bytes[..2].copy_from_slice(&0x00d0u16.to_le_bytes());
+            bytes[4] = 2;
+            bytes[24] = 3;
+            bytes[25] = action;
+            let mut config = base(Chip::Mt7925);
+            config.frame = Frame {
+                bytes: len,
+                header_bytes: 24,
+                kind: Kind::Management,
+                subtype: 13,
+                tid: 7,
+                multicast: false,
+                fragment: Fragment::None,
+                sequence: Sequence::Hardware,
+                minimum_rate: true,
+            };
+            config.queue = Queue::Management;
+            config.hardware_amsdu = false;
+            config.fixed_rate = Some(FixedRate::Connac3(18));
+            config.protect = false;
+            let plain = words(encode_mpdu(config, &bytes).unwrap());
+            bytes[1] |= 0x40;
+            config.protect = true;
+            let protected = words(encode_mpdu(config, &bytes).unwrap());
+            assert_eq!((protected[1] >> 21) & 15, if action == 0 { 2 } else { 0 });
+            for index in 0..8 {
+                assert_eq!(
+                    protected[index],
+                    plain[index] | if index == 3 { 2 } else { 0 }
+                );
+            }
+            for fault in 0..11 {
+                let mut bad = bytes.clone();
+                let mut selected = config;
+                match fault {
+                    0 => bad[1] &= !0x40,
+                    1 => selected.protect = false,
+                    2 => bad[4] |= 1,
+                    3 => bad[1] |= 1,
+                    4 => bad[22] |= 1,
+                    5 => selected.frame.multicast = true,
+                    6 => selected.queue = Queue::Data { access_category: 0 },
+                    7 => bad[24] = 4,
+                    8 => bad[25] = 3,
+                    9 => selected.chip = Chip::Mt7922,
+                    _ => {
+                        bad.pop();
+                        selected.frame.bytes -= 1;
+                    }
+                }
+                assert!(
+                    encode_mpdu(selected, &bad).is_err(),
+                    "action {action}, fault {fault}"
+                );
+            }
         }
     }
 

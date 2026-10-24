@@ -103,3 +103,84 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Ok(result?)
     }
 }
+
+impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q, C, S> {
+    /// Consume the original OS-selected protected BA notice.
+    ///
+    /// # Safety
+    /// Inherit ManagedClient::receive_management_block_ack's actual negotiated
+    /// OS policy contract through all deferred responses, timers and teardown.
+    pub unsafe fn receive_management_block_ack(
+        &mut self,
+        received: &mut Option<Received>,
+        now: u64,
+    ) -> Result<(), LinkControlError> {
+        let s = self.state_mut();
+        // SAFETY: inherited OS policy; private attachment retains authority.
+        let result = unsafe { s.client.receive_management_block_ack(received, now) };
+        Self::reconcile(s);
+        Ok(result?)
+    }
+
+    /// Begin the real OS's explicitly selected protected BA exchange.
+    ///
+    /// # Safety
+    /// Same negotiated OS policy as receive_management_block_ack; installing
+    /// keys does not authorize this or its deferred management effects.
+    pub unsafe fn begin_management_block_ack(
+        &mut self,
+        session: &Arc<Session>,
+        tid: u8,
+        timeout_tu: u16,
+        now: u64,
+    ) -> Result<(), LinkControlError> {
+        let s = self.state_mut();
+        if Self::progress(s).backpressured {
+            return Err(LinkControlError::Backpressure);
+        }
+        // SAFETY: inherited OS policy and sole private native attachment.
+        let result = unsafe {
+            s.client
+                .begin_management_block_ack(session, tid, timeout_tu, now)
+        };
+        Self::reconcile(s);
+        Ok(result?)
+    }
+}
+
+impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q, C, S> {
+    /// Progress one separately admitted native BA operation, retaining notices
+    /// and packet retirement backpressure before allocating or publishing DMA.
+    pub fn progress_block_ack(&mut self, now: u64) -> Result<(), LinkControlError> {
+        let s = self.state_mut();
+        if Self::progress(s).backpressured {
+            return Err(LinkControlError::Backpressure);
+        }
+        let result = s.client.progress_block_ack(&s.source, now);
+        Self::reconcile(s);
+        Ok(result?)
+    }
+
+    /// Stop actual BA users while restrictions deny new transmissions.
+    pub fn progress_block_ack_stop(&mut self) -> Result<(), LinkControlError> {
+        let s = self.state_mut();
+        let result = s.client.progress_block_ack_stop();
+        Self::reconcile(s);
+        Ok(result?)
+    }
+}
+
+impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q, C, S> {
+    /// Requested canonical BA timer deadline for the serialized deferred owner.
+    pub fn next_transmit_deadline(&self) -> Option<u64> {
+        self.state().client.next_transmit_deadline()
+    }
+
+    /// Queue restrictive BA timeout handling without publishing a transmission.
+    pub fn poll_block_ack_timers(&mut self, now: u64) -> Result<(), LinkControlError> {
+        let s = self.state_mut();
+        let result = s.client.poll_block_ack_timers(now);
+        Self::reconcile(s);
+        Ok(result?)
+    }
+}

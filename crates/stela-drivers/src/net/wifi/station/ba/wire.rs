@@ -44,7 +44,12 @@ pub(super) fn action(frame: &Mpdu, he: bool, eht: bool) -> Result<Management, Er
     if frame.header().control & TYPE_SUBTYPE != ACTION {
         return Err(Error::InvalidFrame);
     }
-    let body = frame.bytes().get(24..).ok_or(Error::Truncated)?;
+    action_body(frame.bytes().get(24..).ok_or(Error::Truncated)?, he, eht)
+}
+
+// Only the native authenticated consumer supplies a separate plaintext body.
+// Ordinary RX continues to parse its original unprotected MPDU above.
+pub(super) fn action_body(body: &[u8], he: bool, eht: bool) -> Result<Management, Error> {
     if body.first() != Some(&3) {
         return Err(Error::Unsupported);
     }

@@ -131,3 +131,96 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         .map_err(PolicyError::Client)
     }
 }
+
+impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
+    /// Apply the OS service's selected original authenticated BA action.
+    ///
+    /// # Safety
+    /// The real OS authorizes this original unicast action and deferred native
+    /// BA responses/timers/DELBA under its actual negotiated protection policy.
+    /// Session/key transport and regulatory admission alone do not establish it.
+    pub unsafe fn receive_management_block_ack(
+        &mut self,
+        received: &mut Option<Received>,
+        now: u64,
+    ) -> Result<(), PolicyError> {
+        let admission = self.management_admission()?;
+        // SAFETY: private same-requester authority; caller supplies actual OS
+        // negotiated policy, while Client revalidates original RX/session/keys.
+        unsafe {
+            self.client
+                .receive_management_block_ack(&mut self.authority, admission, received, now)
+        }
+        .map_err(PolicyError::Client)
+    }
+
+    /// Request an explicitly OS-selected protected BA exchange.
+    ///
+    /// # Safety
+    /// Same negotiated OS policy, including deferred responses and teardown,
+    /// as receive_management_block_ack. This does not negotiate PMF itself.
+    pub unsafe fn begin_management_block_ack(
+        &mut self,
+        session: &Arc<Session>,
+        tid: u8,
+        timeout_tu: u16,
+        now: u64,
+    ) -> Result<(), PolicyError> {
+        let admission = self.management_admission()?;
+        // SAFETY: sole private native authority plus inherited OS policy.
+        unsafe {
+            self.client.begin_management_block_ack(
+                &mut self.authority,
+                admission,
+                session,
+                tid,
+                timeout_tu,
+                now,
+            )
+        }
+        .map_err(PolicyError::Client)
+    }
+}
+
+impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
+    /// Publish one actual pending BA operation under freshly acquired guards.
+    /// The original OS-selected protected exchange retains its own Session.
+    pub fn progress_block_ack(
+        &mut self,
+        source: &dyn PageSource,
+        now: u64,
+    ) -> Result<(), PolicyError> {
+        let admission = self.management_admission()?;
+        // SAFETY: this sole private attachment retains both real authorities;
+        // pending protected work was explicitly selected through the unsafe OS
+        // negotiated-policy boundaries and Client revalidates its exact owner.
+        unsafe {
+            self.client
+                .progress_block_ack(&mut self.authority, admission, source, now)
+        }
+        .map_err(PolicyError::Client)
+    }
+
+    /// Restriction-compatible disable; no new transmit permission or fallback
+    /// unprotected DELBA is introduced when current policy has been revoked.
+    pub fn progress_block_ack_stop(&mut self) -> Result<(), PolicyError> {
+        self.client
+            .progress_block_ack_stop()
+            .map_err(PolicyError::Client)
+    }
+}
+
+impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
+    /// Requested canonical BA timer deadline; no platform scheduler is installed.
+    pub fn next_transmit_deadline(&self) -> Option<u64> {
+        self.client.next_transmit_deadline()
+    }
+
+    /// Queue a restrictive timeout/stop. Actual disable and optional local
+    /// protected DELBA remain separate drain/ACK/guarded progress operations.
+    pub fn poll_block_ack_timers(&mut self, now: u64) -> Result<(), PolicyError> {
+        self.client
+            .poll_block_ack_timers(now)
+            .map_err(PolicyError::Client)
+    }
+}

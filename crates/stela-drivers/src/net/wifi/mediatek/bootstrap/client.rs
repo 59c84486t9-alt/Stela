@@ -171,6 +171,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     receive_ba: [Option<ba::Receive<C>>; 8],
     transmit_ba: [Option<ba::Transmit<C>>; 8],
     ba_actions: VecDeque<station::ba::Action>,
+    ba_management: Option<Arc<management::Session>>,
+    ba_management_pn: Option<PacketNumber>,
     roc_token: u8,
     roc_deadline: Option<u64>,
     modern: Option<modern::Configuration>,
@@ -246,6 +248,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 receive_ba: core::array::from_fn(|_| None),
                 transmit_ba: core::array::from_fn(|_| None),
                 ba_actions: VecDeque::new(),
+                ba_management: None,
+                ba_management_pn: None,
                 roc_token: 0,
                 roc_deadline: None,
                 modern: None,
@@ -983,6 +987,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.receive_ba = core::array::from_fn(|_| None);
         s.transmit_ba = core::array::from_fn(|_| None);
         s.ba_actions.clear();
+        s.ba_management = None;
+        s.ba_management_pn = None;
         s.profile = None;
         s.modern = None;
         s.edca = None;

@@ -3,8 +3,9 @@
 //! Attaching this transport sends robust management (including Block Ack
 //! actions) to the OS as authenticated observations. It does not automatically
 //! run native non-PMF BA MLME under an inferred protection policy. Initial
-//! attachment therefore requires all old BA state drained; a future negotiated
-//! PMF/OS BA consumer is required to reopen aggregation on this transport.
+//! attachment therefore requires all old BA state drained. Explicit OS-selected
+//! protected BA consumers are separate unsafe negotiated-policy boundaries;
+//! receiving a notice or installing this transport never runs them implicitly.
 use super::*;
 use wifi::regulatory::{AssociationAdmission, AssociationUse, HardwarePolicy, OsPolicy, Owner};
 

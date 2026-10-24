@@ -417,11 +417,64 @@ impl Station {
             });
         }
         super::wire::check_peer(frame, self.local, context.bssid()).map_err(super::Error::Wire)?;
-        match wire::action(
+        let action = wire::action(
             frame,
             context.negotiated().he.is_some(),
             context.negotiated().eht.is_some(),
-        )? {
+        )?;
+        self.receive_ba_action(action)
+    }
+
+    /// Internal native boundary, never an authentication constructor. The caller
+    /// must own the original authenticated plaintext and current retained key
+    /// session, and hold both real OS/hardware guards while applying this action.
+    /// The original protected header and body are kept separate and unchanged.
+    pub(in crate::net::wifi) fn receive_authenticated_block_ack(
+        &mut self,
+        original: &AssociationContext,
+        frame: &Mpdu,
+        body: &[u8],
+        now_us: u64,
+    ) -> Result<Action, Error> {
+        self.validate_association_context(original)?;
+        let context = self.ba_context()?;
+        let h = frame.header();
+        if h.control & TYPE_SUBTYPE != crate::net::wifi::frame::ACTION
+            || !h.protected()
+            || h.control & 0x830c != 0
+            || h.length != 24
+            || h.fragmented()
+            || h.receiver != self.local
+            || h.transmitter != Some(context.bssid())
+            || frame.bytes()[16..22] != context.bssid().0
+            || frame.fcs_error
+            || frame.monitor_only
+            || frame.aggregation != crate::net::wifi::Aggregation::default()
+        {
+            return Err(Error::InvalidFrame);
+        }
+        if (
+            frame.radio.band,
+            frame.radio.channel,
+            frame.radio.frequency_mhz,
+        ) != (
+            context.channel().band,
+            context.channel().number,
+            context.channel().frequency_mhz,
+        ) {
+            return Err(Error::Station(super::Error::WrongChannel));
+        }
+        let action = wire::action_body(
+            body,
+            context.negotiated().he.is_some(),
+            context.negotiated().eht.is_some(),
+        )?;
+        self.clock(now_us)?;
+        self.receive_ba_action(action)
+    }
+
+    fn receive_ba_action(&mut self, action: wire::Management) -> Result<Action, Error> {
+        match action {
             wire::Management::Request(request) => self.ba_receive_request(request),
             wire::Management::Delete {
                 tid,
