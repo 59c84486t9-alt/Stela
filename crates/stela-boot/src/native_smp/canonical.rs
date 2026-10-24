@@ -343,7 +343,7 @@ pub(crate) unsafe fn run_slice<D: Devices>(
     limit: u64,
 ) -> Stop {
     // SAFETY: same complete mount/producer contract as this entry point.
-    unsafe { run_slice_while(machine, limit, || true) }
+    unsafe { run_slice_while(machine, limit, None, || true) }
 }
 
 /// Return to the outer host-service loop after `service_ticks` of the qualified
@@ -362,9 +362,14 @@ pub(crate) unsafe fn run_slice_for<D: Devices>(
     let started = host::rdtsc();
     // SAFETY: same complete mount/producer contract as this entry point.
     unsafe {
-        run_slice_while(machine, limit, || {
-            host::rdtsc().wrapping_sub(started) < service_ticks.max(1)
-        })
+        run_slice_while(
+            machine,
+            limit,
+            Some(host::counter_deadline(
+                started.saturating_add(service_ticks.max(1)),
+            )),
+            || host::rdtsc().wrapping_sub(started) < service_ticks.max(1),
+        )
     }
 }
 
@@ -374,6 +379,7 @@ pub(crate) unsafe fn run_slice_for<D: Devices>(
 unsafe fn run_slice_while<D: Devices>(
     machine: &mut CanonicalMachine<'_, D>,
     limit: u64,
+    deadline: Option<stela_runtime::machine::engine::NativeEpochDeadline>,
     mut continue_running: impl FnMut() -> bool,
 ) -> Stop {
     loop {
@@ -388,7 +394,7 @@ unsafe fn run_slice_while<D: Devices>(
             return Stop::Budget;
         }
         // SAFETY: same registered owner/fixed executor and closed providers.
-        match unsafe { machine.native_round() } {
+        match unsafe { machine.native_round_bounded(limit - machine.statistics.blocks, deadline) } {
             Ok(_) | Err(Stop::DeviceRead(_) | Stop::DeviceWrite(_)) => {}
             Err(stop) => return stop,
         }

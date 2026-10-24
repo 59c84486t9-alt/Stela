@@ -490,6 +490,12 @@ impl Pmu {
         })
     }
 
+    /// Instruction PMI needs a scheduler observation after each native body.
+    /// A disabled/reset monitor imposes no instruction deadline.
+    pub(crate) fn has_instruction_deadline(&self) -> bool {
+        self.asserted || self.instruction_deadline.is_some()
+    }
+
     /// The earliest system count at which the PMI can assert without
     /// another instruction retiring.
     pub fn deadline(&self) -> Option<u64> {

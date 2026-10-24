@@ -140,8 +140,18 @@ pub(crate) const COUNTER_HZ: u64 = 24_000_000;
 /// same source, rather than reusing an Access timestamp or a copied sample.
 pub(crate) fn fresh_counter() -> u64 {
     let state = state();
-    let ticks = rdtsc() - state.tsc_base;
+    counter_at_tsc(state, rdtsc())
+}
+
+fn counter_at_tsc(state: &State, tsc: u64) -> u64 {
+    let ticks = tsc.saturating_sub(state.tsc_base);
     ((u128::from(ticks) * u128::from(state.counter_per_tsc)) >> 64) as u64
+}
+
+/// Convert an absolute BSP TSC deadline using the very same installed fixed
+/// point ratio/base as fresh_counter; no guest-clock or nominal-Hz conversion.
+pub(crate) fn counter_deadline(tsc: u64) -> stela_runtime::machine::engine::NativeEpochDeadline {
+    stela_runtime::machine::engine::NativeEpochDeadline(counter_at_tsc(state(), tsc))
 }
 
 #[derive(Clone, Copy)]

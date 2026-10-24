@@ -2,7 +2,9 @@
 
 /// Disjoint checkpoints in a recovered native round on its actual local Host.
 /// Whole-round time includes the intervals between these points. BodyReturned
-/// includes native entry/return, checked memory callbacks and finalization.
+/// includes native entry/return, checked memory callbacks and finalization,
+/// plus successor source validation, installation and preparation within a warm
+/// epoch. CPU/install/prepare checkpoints occur once, before its first body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum NativeTimingPhase {

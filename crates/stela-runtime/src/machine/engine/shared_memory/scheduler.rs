@@ -181,6 +181,37 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// refusals until their actual platform owners join this candidate. Calling
     /// this method does not enable production SMP or qualify original macOS.
     pub unsafe fn native_round(&mut self) -> Result<usize, Stop> {
+        // SAFETY: identical caller contract. One body PER runnable PE, with
+        // the complete cohort preserved; a total budget of1 would starve peers.
+        unsafe { self.native_round_with_policy(u64::MAX, None, false) }
+    }
+
+    /// Execute at most `body_budget` bodies, allowing warm epochs only for one
+    /// instantiated online PE. Other online PEs retain one-body publications.
+    /// `deadline` uses Host::counter, not the adjusted guest clock or raw TSC.
+    /// A body/service already entered may overrun this soft observation bound.
+    ///
+    /// # Safety
+    /// The complete native_round ownership/producer/physical-worker contract
+    /// applies for the whole epoch, including between its checked bodies.
+    pub unsafe fn native_round_bounded(
+        &mut self,
+        body_budget: u64,
+        deadline: Option<NativeEpochDeadline>,
+    ) -> Result<usize, Stop> {
+        // SAFETY: identical complete epoch contract.
+        unsafe { self.native_round_with_policy(body_budget, deadline, true) }
+    }
+
+    unsafe fn native_round_with_policy(
+        &mut self,
+        body_budget: u64,
+        deadline: Option<NativeEpochDeadline>,
+        allow_epochs: bool,
+    ) -> Result<usize, Stop> {
+        if body_budget == 0 {
+            return Ok(0);
+        }
         #[cfg(feature = "native-profile")]
         self.host
             .native_timing(super::super::NativeTimingPhase::Begin);
@@ -188,7 +219,9 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         // SAFETY: this wrapper forwards the caller's full native-round contract.
         // Restore only cleared plain metadata on every ordinary Result return;
         // actual loans, receipts and holds keep their existing linear protocol.
-        let result = unsafe { self.native_round_with_scratch(&mut scratch) };
+        let result = unsafe {
+            self.native_round_with_scratch(&mut scratch, body_budget, deadline, allow_epochs)
+        };
         scratch.clear();
         self.host.round_scratch = scratch;
         #[cfg(feature = "native-profile")]
@@ -200,6 +233,9 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     unsafe fn native_round_with_scratch(
         &mut self,
         scratch: &mut super::host::RoundScratch,
+        body_budget: u64,
+        caller_deadline: Option<NativeEpochDeadline>,
+        allow_epochs: bool,
     ) -> Result<usize, Stop> {
         // A recovered bus continuation has already entered its instruction.
         // Newly installed host points apply to future entries; they cannot
@@ -242,6 +278,11 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             })?;
         self.native_source_pe(current)?;
         self.take_starts()?;
+        let mut limits = if allow_epochs {
+            self.native_epoch_limits(body_budget, caller_deadline)?
+        } else {
+            native_run::Limits::single()
+        };
         for binding in bindings.iter() {
             if matches!(self.peers[binding.pe], Peer::Off) {
                 continue;
@@ -258,6 +299,9 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             }
             self.wake()?;
             self.deliver_interrupts();
+            if let Some(reset) = self.devices.take_reset() {
+                return Err(Stop::Reset(reset));
+            }
             self.sync_monitor();
             let debug = self.debug_mode();
             if debug.breakpoints || debug.step || self.cpu.pstate.pacm {
@@ -297,6 +341,33 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 }
             }
         }
+        // Preflight/source services may have started another PE or changed PMU
+        // eligibility. Never infer permission merely from one runnable frame.
+        if !self.epoch_eligible() {
+            limits = native_run::Limits::single();
+        }
+        if limits.max_bodies > 1 {
+            // Final line refresh/exception entry may change timer bank, PMU
+            // context or board/DMA deadlines. Tighten using fresh/cached facts
+            // without invoking another effectful board advance after checks.
+            let due = [
+                self.timer_deadline(),
+                self.cpu.pmu.as_ref().and_then(|pmu| pmu.deadline()),
+                self.devices.dma_deadline(),
+                self.device_lines.map(|(_, until)| until),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            if let Some(due) = due {
+                let deadline = self.clock.host_deadline(due);
+                limits.deadline = Some(NativeEpochDeadline(
+                    limits
+                        .deadline
+                        .map_or(deadline, |existing| existing.0.min(deadline)),
+                ));
+            }
+        }
         // Preparation can borrow canonical state while physical owners remain
         // held; close only the software Host sessions before constructing loans.
         #[cfg(feature = "native-profile")]
@@ -305,9 +376,16 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         self.close_native_services();
         let preparation_pc = self.cpu.pc;
         let preparation_el = self.cpu.pstate.el;
-        let cohort = self
+        let mut cohort = self
             .native_cohort(bindings, true)
             .map_err(|failure| failure.into_stop(preparation_pc, preparation_el))?;
+        // A short caller budget must not credit or execute extra PE frames.
+        cohort
+            .frames
+            .truncate(usize::try_from(body_budget).unwrap_or(usize::MAX));
+        for frame in &mut cohort.frames {
+            frame.limits = limits;
+        }
         #[cfg(feature = "native-profile")]
         cohort
             .host
@@ -328,6 +406,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 .transport
                 .fail_stopped("native transport returned an incomplete actual cohort");
         }
+        let mut executed_bodies = 0usize;
         let mut pending_accesses = Vec::new();
         let seen = &mut scratch.seen;
         seen.reserve(reports.len());
@@ -343,6 +422,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                     .fail_stopped("native source report has duplicate/wrong PE authority");
             }
             seen.push(settlement.binding.pe);
+            executed_bodies += settlement.executed_bodies as usize;
             match settlement.source_failure {
                 Some(policy::Failure::DeviceRead { .. }) => {
                     self.validate_native_source(&settlement)?;
@@ -361,7 +441,75 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             return Err(self.queue_device_accesses(pending_accesses, held));
         }
         self.retain_native_services(held);
-        Ok(expected.len())
+        Ok(executed_bodies)
+    }
+
+    /// All online owners, rather than just runnable frames, participate in
+    /// eligibility: even a waiting peer can wake on a store/reservation event.
+    fn epoch_eligible(&self) -> bool {
+        self.peers
+            .iter()
+            .filter(|peer| !matches!(peer, Peer::Off))
+            .count()
+            == 1
+            && self.waiting.is_none()
+            && self.breakpoints.is_empty()
+            && self.traces.is_empty()
+            && !self
+                .cpu
+                .pmu
+                .as_ref()
+                .is_some_and(|pmu| pmu.has_instruction_deadline())
+    }
+
+    fn native_epoch_limits(
+        &mut self,
+        budget: u64,
+        caller: Option<NativeEpochDeadline>,
+    ) -> Result<native_run::Limits, Stop> {
+        if budget <= 1 || !self.epoch_eligible() {
+            return Ok(native_run::Limits::single());
+        }
+        // A named periodic observation policy still polls devices whose
+        // advance returns None. None never certifies an idle board.
+        const OBSERVATIONS_PER_SECOND: u64 = 10_000; // 100 microseconds
+        let now = self.now();
+        let due = self
+            .next_deadline(now)
+            .into_iter()
+            .chain(self.devices.dma_deadline())
+            .min();
+        // deadline() can itself advance devices. Publish any newly produced
+        // starts/reset/interrupts before constructing or lending actual frames.
+        self.take_starts()?;
+        if let Some(reset) = self.devices.take_reset() {
+            return Err(Stop::Reset(reset));
+        }
+        // The ordinary per-PE poll/wake/interrupt/source-check loop follows
+        // this effectful preflight, before any frame is prepared.
+        if !self.epoch_eligible() {
+            return Ok(native_run::Limits::single());
+        }
+        let host_now = self.host.counter();
+        let quantum = crate::machine::timer::system_frequency(&self.cpu)
+            .div_ceil(OBSERVATIONS_PER_SECOND)
+            .max(1);
+        let deadline = due
+            .map(|count| self.clock.host_deadline(count))
+            .into_iter()
+            .chain(caller.map(|deadline| deadline.0))
+            .chain(core::iter::once(host_now.saturating_add(quantum)))
+            .min()
+            .expect("finite observation quantum");
+        if deadline <= host_now {
+            return Ok(native_run::Limits::single());
+        }
+        Ok(native_run::Limits {
+            max_bodies: usize::try_from(budget)
+                .unwrap_or(usize::MAX)
+                .min(MAX_NATIVE_EPOCH_BODIES),
+            deadline: Some(NativeEpochDeadline(deadline)),
+        })
     }
 
     /// Check the real fetched word before a frame may cross a physical core.
@@ -503,7 +651,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 "native target/context/return finalization refused",
             )));
         }
-        self.statistics.blocks += 1;
+        self.statistics.blocks += settlement.executed_bodies;
         self.sync_monitor();
         Ok(())
     }

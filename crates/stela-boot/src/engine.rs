@@ -2583,6 +2583,10 @@ fn run<H: Host>(
                     "NATIVE DATA TLB pe={pe} {:?}\n",
                     machine.native_data_tlb_statistics()
                 ));
+                output::arguments(format_args!(
+                    "NATIVE EPOCH pe={pe} {:?}\n",
+                    machine.native_epoch_statistics()
+                ));
             }
             service_gap = 0;
             beat = (now, native, blocks, compiled, chained, events);

@@ -1,4 +1,7 @@
-//! Sparse, jittered, owner-local timing. No allocation or execution authority.
+//! Sparse, jittered, owner-local timing. Staging is allocated before sampled
+//! Begin timestamps; no sample buffer grows during actual epoch execution.
+use alloc::vec::Vec;
+use stela_runtime::machine::engine::MAX_NATIVE_EPOCH_BODIES;
 use stela_runtime::machine::engine::NativeTimingPhase as Phase;
 #[path = "profile/words.rs"]
 pub(crate) mod words;
@@ -27,6 +30,7 @@ pub(crate) struct Snapshot {
     /// Inclusive across ALL sampled rounds, including partial rounds.
     pub sampled_board_ticks: u64,
     pub words: words::Summary,
+    pub capture_bytes: usize,
 }
 
 pub(crate) struct Profile {
@@ -40,7 +44,7 @@ pub(crate) struct Profile {
     last: u64,
     pending: [u64; Phase::COUNT],
     words: words::Histogram,
-    pending_words: Option<words::Captured>,
+    pending_words: Vec<words::Captured>,
 }
 
 impl Default for Profile {
@@ -56,7 +60,7 @@ impl Default for Profile {
             last: 0,
             pending: [0; Phase::COUNT],
             words: words::Histogram::default(),
-            pending_words: None,
+            pending_words: Vec::new(),
         }
     }
 }
@@ -98,12 +102,15 @@ impl Profile {
         if !self.active {
             return;
         }
-        if self.pending_words.is_some() {
+        if self.pending_words.len() >= MAX_NATIVE_EPOCH_BODIES
+            || self.pending_words.len() == self.pending_words.capacity()
+        {
             self.words.summary.dropped_bodies = self.words.summary.dropped_bodies.saturating_add(1);
             return;
         }
-        self.pending_words = words::Captured::new(sample);
-        if self.pending_words.is_none() {
+        if let Some(captured) = words::Captured::new(sample) {
+            self.pending_words.push(captured);
+        } else {
             self.words.summary.invalid_samples =
                 self.words.summary.invalid_samples.saturating_add(1);
         }
@@ -126,10 +133,12 @@ impl Profile {
     /// whole-round time separately and cannot pollute complete phase totals.
     pub(crate) fn event(&mut self, phase: Phase, clock: impl FnOnce() -> u64) {
         if phase == Phase::Begin {
-            if self.pending_words.take().is_some() {
-                self.words.summary.dropped_bodies =
-                    self.words.summary.dropped_bodies.saturating_add(1);
-            }
+            self.words.summary.dropped_bodies = self
+                .words
+                .summary
+                .dropped_bodies
+                .saturating_add(self.pending_words.len() as u64);
+            self.pending_words.clear();
             self.snapshot.rounds = self.snapshot.rounds.saturating_add(1);
             if self.remaining != 0 {
                 self.remaining -= 1;
@@ -140,6 +149,15 @@ impl Profile {
             self.jitter ^= self.jitter >> 7;
             self.jitter ^= self.jitter << 17;
             self.remaining = MIN_INTERVAL + (self.jitter & INTERVAL_MASK);
+            // Allocate only for an actual sampled owner, before clock(). A
+            // failed reservation remains explicit drops; it cannot grow later.
+            if self.pending_words.capacity() < MAX_NATIVE_EPOCH_BODIES {
+                let _ = self
+                    .pending_words
+                    .try_reserve_exact(MAX_NATIVE_EPOCH_BODIES);
+            }
+            self.snapshot.capture_bytes =
+                self.pending_words.capacity() * core::mem::size_of::<words::Captured>();
             self.active = true;
             self.valid = true;
             self.pending = [0; Phase::COUNT];
@@ -172,7 +190,7 @@ impl Profile {
             } else {
                 snapshot.partial = snapshot.partial.saturating_add(1);
             }
-            if let Some(captured) = self.pending_words.take() {
+            for captured in self.pending_words.drain(..) {
                 self.words.merge(captured);
             }
         }
@@ -238,7 +256,7 @@ mod tests {
                 .all(Option::is_none)
         );
         profile.instructions(instruction());
-        assert_eq!(profile.snapshot().words.dropped_bodies, 1);
+        assert_eq!(profile.snapshot().words.dropped_bodies, 0);
         for (index, phase) in PHASES.into_iter().enumerate().skip(1) {
             profile.event(phase, || 100 + index as u64 * 10);
         }
@@ -250,14 +268,14 @@ mod tests {
                 result.words.retired_words,
                 result.words.wrapper_bytes
             ),
-            (1, 1, 3)
+            (2, 2, 6)
         );
         profile.event(Phase::Begin, || panic!("unsampled clock"));
         let mut invalid = instruction();
         invalid.source_map = &[];
         profile.instructions(invalid);
         assert_eq!(profile.snapshot().words.invalid_samples, 0);
-        assert!(profile.pending_words.is_none());
+        assert!(profile.pending_words.is_empty());
     }
 
     #[test]
@@ -359,5 +377,34 @@ mod tests {
         assert_eq!(result.board_refreshes, 2);
         assert_eq!(result.sampled_board_refreshes, 1);
         assert_eq!(result.sampled_board_ticks, 20);
+    }
+    #[test]
+    fn entire_bounded_epoch_is_captured_and_overflow_is_explicit() {
+        let mut profile = Profile::default();
+        profile.event(Phase::Begin, || 100);
+        let allocation = profile.pending_words.as_ptr();
+        for _ in 0..MAX_NATIVE_EPOCH_BODIES {
+            profile.instructions(instruction());
+        }
+        profile.instructions(instruction());
+        assert_eq!(profile.pending_words.as_ptr(), allocation);
+        assert_eq!(profile.snapshot().words.dropped_bodies, 1);
+        for (index, phase) in PHASES.into_iter().enumerate().skip(1) {
+            profile.event(phase, || 100 + index as u64 * 10);
+        }
+        assert_eq!(
+            profile.snapshot().words.bodies,
+            MAX_NATIVE_EPOCH_BODIES as u64
+        );
+        assert_eq!(
+            profile.snapshot().words.retired_words,
+            MAX_NATIVE_EPOCH_BODIES as u64
+        );
+        assert_eq!(profile.snapshot().complete_ticks, 80);
+        assert_eq!(profile.pending_words.as_ptr(), allocation);
+        assert_eq!(
+            profile.snapshot().capture_bytes,
+            profile.pending_words.capacity() * core::mem::size_of::<words::Captured>()
+        );
     }
 }

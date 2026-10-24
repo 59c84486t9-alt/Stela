@@ -1,5 +1,10 @@
 //! An actual borrowed architectural frame; no Cpu or Host crosses a core.
 mod access;
+mod epoch;
+pub(super) use epoch::Limits;
+pub use epoch::{
+    MAX_NATIVE_EPOCH_BODIES, NativeEpochDeadline, NativeEpochEnd, NativeEpochStatistics,
+};
 mod preparation;
 use preparation::PreparationFailure;
 pub(super) mod source;
@@ -307,6 +312,9 @@ pub struct NativeRun<'a> {
     btype: &'a mut u8,
     worker: publication::WorkerId,
     artifact: Arc<Artifact>,
+    pub(super) limits: Limits,
+    executed_bodies: u64,
+    epoch_retired: u64,
 }
 impl NativeRun<'_> {
     pub fn identity(&self) -> &Identity {
@@ -331,7 +339,11 @@ pub struct Observation {
     pub source_failure: Option<policy::Failure>,
     pub status: Result<(), MemoryStatus>,
     pub settled_pc: u64,
+    /// Retired source prefix in the final executed body (fault indexing).
     pub retired: u64,
+    pub epoch_retired: u64,
+    pub executed_bodies: u64,
+    pub epoch_end: NativeEpochEnd,
     pub physical_processor: Option<u32>,
     pub(super) settlement: Option<Settlement>,
 }
@@ -344,6 +356,7 @@ pub(super) struct Settlement {
     pub(super) generation: u64,
     pub(super) pc: u64,
     pub(super) retired: u64,
+    pub(super) executed_bodies: u64,
     pub(super) terminal: u32,
     pub(super) fault_word: Option<u32>,
     pub(super) native: Option<NativeExit>,
@@ -366,11 +379,19 @@ impl<'a> publication::NativeFrame for NativeRun<'a> {
             status: Err(MemoryStatus::Unsupported),
             settled_pc: *self.pc,
             retired: 0,
+            epoch_retired: 0,
+            executed_bodies: 0,
+            epoch_end: NativeEpochEnd::Failure,
             physical_processor: None,
             settlement: None,
         };
         observation.status = self.enter(host, &mut observation);
         observation.source_failure = self.memory.memory.policy_mut().failure;
+        observation.executed_bodies = self.executed_bodies;
+        observation.epoch_retired = self.epoch_retired;
+        observation.artifact_cache = self.memory.artifacts.stats();
+        #[cfg(feature = "native-profile")]
+        self.memory.epochs.record(self.limits, &observation);
         ReturnedRun {
             run: self,
             observation: Some(observation),
@@ -397,7 +418,20 @@ impl NativeRun<'_> {
         // A service/publication loan outlives both callback finalization and PC
         // settlement. This Host borrow pins the installed arena throughout them.
         let _publication = self.memory.memory.execution_loan()?;
-        let code = match host.install_immutable(&self.artifact.code) {
+        let result = self.enter_epoch(host, &authority, observation);
+        #[cfg(feature = "native-profile")]
+        host.native_timing(super::super::NativeTimingPhase::BodyReturned);
+        result
+    }
+
+    fn enter_body(
+        &mut self,
+        host: &mut dyn Host,
+        authority: &NativeSystemTarget,
+        artifact: Arc<Artifact>,
+        observation: &mut Observation,
+    ) -> Result<bool, MemoryStatus> {
+        let code = match host.install_immutable(&artifact.code) {
             Ok(code) => code,
             Err(crate::machine::InstallError::Full) => {
                 // This fixed owner has returned/recovered its preceding frame.
@@ -405,18 +439,30 @@ impl NativeRun<'_> {
                 // discard invalidates its reuse metadata before the retry. The
                 // shared lane never uses legacy cached block addresses.
                 host.discard_code();
-                host.install_immutable(&self.artifact.code)
+                host.install_immutable(&artifact.code)
                     .map_err(|_| MemoryStatus::Unsupported)?
             }
         };
         #[cfg(feature = "native-profile")]
-        host.native_timing(super::super::NativeTimingPhase::CodeInstalled);
+        if self.executed_bodies == 0 {
+            host.native_timing(super::super::NativeTimingPhase::CodeInstalled);
+        }
         let entry = self
             .memory
             .memory
-            .prepare_native_system(self.artifact.requirements, &authority)?;
+            .prepare_native_system(artifact.requirements, authority)?;
         #[cfg(feature = "native-profile")]
-        host.native_timing(super::super::NativeTimingPhase::MemoryPrepared);
+        if self.executed_bodies == 0 {
+            host.native_timing(super::super::NativeTimingPhase::MemoryPrepared);
+        }
+        // Installation and checked preparation are synchronous and can consume
+        // the remaining quantum. Do not begin another body after they do.
+        if self.executed_bodies != 0 && self.limits.expired(host) {
+            observation.epoch_end = NativeEpochEnd::Deadline;
+            return Ok(false);
+        }
+        let artifact_slot = &mut self.artifact;
+        let executed_bodies = &mut self.executed_bodies;
         let mut context = ExecutionContext::default();
         let mut raw = None;
         let mut malformed = false;
@@ -427,7 +473,17 @@ impl NativeRun<'_> {
             entry.with_checked_view(|view| {
                 let mut context_loan = ContextLoan::memory(&mut context, view);
                 let result = host.execute_context(code, self.state, context_loan.context());
-                observation.native = result;
+                // Authority/domain admission can fail before the callback, and
+                // Host None explicitly refuses before native effects. Only an
+                // actual Some exit/fault replaces the preceding body's identity.
+                if result.is_some() {
+                    *artifact_slot = artifact;
+                    observation.identity = Arc::clone(&artifact_slot.identity);
+                    observation.retired = 0;
+                    observation.native = result;
+                    observation.memory_fault = None;
+                    *executed_bodies += 1;
+                }
                 malformed = !context_loan.context().has_supported_header()
                     || context_loan.context().memory != core::ptr::from_mut(view).cast();
                 raw = Some((
@@ -440,8 +496,6 @@ impl NativeRun<'_> {
                 result
             })
         };
-        #[cfg(feature = "native-profile")]
-        host.native_timing(super::super::NativeTimingPhase::BodyReturned);
         if malformed {
             return Err(MemoryStatus::Domain);
         }
@@ -497,6 +551,7 @@ impl NativeRun<'_> {
                     }
                     observation.settled_pc = source_pc;
                     observation.retired = index as u64;
+                    self.epoch_retired = self.epoch_retired.wrapping_add(index as u64);
                     return Err(MemoryStatus::Domain);
                 }
                 NativeExit::Exit { next_pc, kind } => {
@@ -546,6 +601,7 @@ impl NativeRun<'_> {
         *self.retired = self.retired.wrapping_add(retired);
         observation.settled_pc = settled_pc;
         observation.retired = retired;
+        self.epoch_retired = self.epoch_retired.wrapping_add(retired);
         #[cfg(feature = "native-profile")]
         host.native_instruction_sample(super::super::NativeInstructionSample {
             source: &self.artifact.source,
@@ -559,7 +615,7 @@ impl NativeRun<'_> {
         });
         // This happens while the actual owner-local Host/code arena, RAM and
         // current target proof are still borrowed, before Release publication.
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -857,6 +913,9 @@ fn prepare<'a>(
         btype,
         worker: binding.worker,
         artifact,
+        limits: Limits::single(),
+        executed_bodies: 0,
+        epoch_retired: 0,
     })
 }
 
@@ -1123,6 +1182,7 @@ pub fn recover<'a>(
                 generation,
                 pc: *actual.run.pc,
                 retired: *actual.run.retired,
+                executed_bodies: actual.run.executed_bodies,
                 terminal,
                 fault_word,
                 native: observed.native,
@@ -2164,5 +2224,59 @@ mod artifact_tests {
         exact.insert(artifact);
         assert_eq!(exact.stats().entries, 1);
         assert_eq!(exact.stats().retained_bytes, expected + slots);
+    }
+    #[test]
+    fn warm_epoch_probe_checks_reached_source_without_compiling_or_changing_identity() {
+        let (mut machine, ram, artifacts) = branch_artifacts(3);
+        machine.cpu.pc = PC;
+        let run = unsafe { machine.shared_native_run(BINDING) }.unwrap();
+        let before = run.memory.artifacts.stats();
+        *run.pc = PC + 4;
+        let (_, candidate) = run.warm_successor().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&candidate, &artifacts[1]));
+        assert!(Arc::ptr_eq(&run.artifact, &artifacts[0]));
+        // A valid but cold reached target yields; it never compiles on worker.
+        *run.pc = PC + 12;
+        assert!(matches!(
+            run.warm_successor(),
+            Ok(Err(NativeEpochEnd::Cold))
+        ));
+        assert_eq!(run.memory.artifacts.stats(), before);
+        // Source bytes can change through the real shared publication owner.
+        unsafe { ram.publish_physical(DATA + 4, &0x14000001u32.to_le_bytes()) }.unwrap();
+        *run.pc = PC + 4;
+        assert!(matches!(
+            run.warm_successor(),
+            Ok(Err(NativeEpochEnd::Source))
+        ));
+        assert_eq!(run.memory.artifacts.stats(), before);
+        assert!(Arc::ptr_eq(&run.artifact, &artifacts[0]));
+        assert_eq!(run.executed_bodies, 0);
+    }
+
+    #[test]
+    fn warm_epoch_probe_rewalks_permissions_mapping_and_guarded_entry() {
+        let (mut machine, ram, _) = branch_artifacts(2);
+        machine.cpu.pc = PC;
+        let run = unsafe { machine.shared_native_run(BINDING) }.unwrap();
+        let mut descriptor = [0; 8];
+        unsafe { ram.read_physical(LEAF, &mut descriptor) }.unwrap();
+        let descriptor = u64::from_le_bytes(descriptor);
+        // Guarded BR target requires a compatible actual landing instruction.
+        *run.btype = 3;
+        unsafe { ram.publish_physical(LEAF, &(descriptor | (1 << 50)).to_le_bytes()) }.unwrap();
+        assert!(matches!(
+            run.warm_successor(),
+            Ok(Err(NativeEpochEnd::Source))
+        ));
+        *run.btype = 0;
+        // Same virtual PC and old cached bytes cannot confer execute rights.
+        unsafe { ram.publish_physical(LEAF, &0u64.to_le_bytes()) }.unwrap();
+        assert!(matches!(
+            run.warm_successor(),
+            Ok(Err(NativeEpochEnd::Source))
+        ));
+        unsafe { ram.publish_physical(LEAF, &descriptor.to_le_bytes()) }.unwrap();
+        assert!(matches!(run.warm_successor(), Ok(Ok(_))));
     }
 }

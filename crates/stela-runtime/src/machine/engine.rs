@@ -73,8 +73,9 @@ pub use processors::{
 #[cfg(feature = "native-profile")]
 pub use shared_memory::NativeDataTlbStatistics;
 pub use shared_memory::{
-    HeldRamService, NativeCohort, NativeRun, NativeRunIdentity, NativeRunObservation,
-    NativeTransport, ReturnedRun, ServiceHost, ServiceTransport, SharedMemory, SharedMemoryFailure,
+    HeldRamService, MAX_NATIVE_EPOCH_BODIES, NativeCohort, NativeEpochDeadline, NativeEpochEnd,
+    NativeEpochStatistics, NativeRun, NativeRunIdentity, NativeRunObservation, NativeTransport,
+    ReturnedRun, ServiceHost, ServiceTransport, SharedMemory, SharedMemoryFailure,
     SharedMemoryRefusal, dispatch_native_run, recover_native_run,
 };
 use stela_compiler::{

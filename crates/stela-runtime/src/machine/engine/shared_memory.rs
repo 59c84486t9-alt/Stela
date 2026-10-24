@@ -14,7 +14,8 @@ use crate::memory::{RegisteredSystemRam, domain::MemoryThread};
 use alloc::{sync::Arc, vec::Vec};
 use controls::Controls;
 pub use native_run::{
-    ArtifactCacheStats, Cohort as NativeCohort, Identity as NativeRunIdentity, NativeRun,
+    ArtifactCacheStats, Cohort as NativeCohort, Identity as NativeRunIdentity,
+    MAX_NATIVE_EPOCH_BODIES, NativeEpochDeadline, NativeEpochEnd, NativeEpochStatistics, NativeRun,
     Observation as NativeRunObservation, ReturnedRun, dispatch as dispatch_native_run,
     recover as recover_native_run,
 };
@@ -37,6 +38,8 @@ pub struct SharedMemory {
     machine: Arc<()>,
     event: crate::system::events::EventEndpoint,
     artifacts: native_run::ArtifactCache,
+    #[cfg(feature = "native-profile")]
+    epochs: NativeEpochStatistics,
 }
 impl core::fmt::Debug for SharedMemory {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -94,6 +97,8 @@ impl SharedMemory {
             machine: Arc::clone(&self.machine),
             event,
             artifacts: self.artifacts.empty_like(),
+            #[cfg(feature = "native-profile")]
+            epochs: NativeEpochStatistics::default(),
         })
     }
     pub fn event_endpoint(&self) -> &crate::system::events::EventEndpoint {
@@ -208,6 +213,15 @@ impl SharedMemory {
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
+    /// Cumulative actual epoch entries for the current canonical PE.
+    #[cfg(feature = "native-profile")]
+    pub fn native_epoch_statistics(&self) -> Option<NativeEpochStatistics> {
+        self.cpu
+            .canonical_memory
+            .as_ref()
+            .map(|memory| memory.epochs)
+    }
+
     /// Cumulative observations for this actual current PE, not the full cohort.
     #[cfg(feature = "native-profile")]
     pub fn native_data_tlb_statistics(&mut self) -> Option<NativeDataTlbStatistics> {
@@ -342,6 +356,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     event,
                     machine: Arc::clone(&self.native_memory_identity),
                     artifacts: native_run::ArtifactCache::default(),
+                    #[cfg(feature = "native-profile")]
+                    epochs: NativeEpochStatistics::default(),
                 },
             ));
         }
