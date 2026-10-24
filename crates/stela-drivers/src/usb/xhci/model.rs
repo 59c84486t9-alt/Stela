@@ -294,10 +294,12 @@ impl CancelModel {
         }
     }
     pub(crate) fn set_state(&mut self, dci: usize, state: u32) {
+        // EP State occupies bits 2:0; hardware transitions retain the configured
+        // Interval, Mult and stream-array fields in the rest of this word.
         // SAFETY: same live context as state().
         unsafe {
-            ((self.output + dci as u64 * self.context_bytes as u64) as *mut u32)
-                .write_volatile(state);
+            let info = (self.output + dci as u64 * self.context_bytes as u64) as *mut u32;
+            info.write_volatile(info.read_volatile() & !7 | state & 7);
         }
     }
     pub(crate) fn event(&mut self, parameter: u64, code: u32, kind: u32, dci: u8, residual: usize) {

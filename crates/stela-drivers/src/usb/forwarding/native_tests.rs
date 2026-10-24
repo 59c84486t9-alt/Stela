@@ -1081,3 +1081,74 @@ fn explicit_partial_publication_or_failed_stop_retains_every_original_packet_buf
         assert_eq!(peer.borrow().published.len(), published);
     }
 }
+
+#[test]
+fn modeled_state_transitions_preserve_actual_configured_endpoint_context_fields() {
+    let mut ram = vec![0u64; 512 * 1024];
+    let start = ram.as_mut_ptr() as u64;
+    // SAFETY: configured endpoint contexts and every retained ring remain in
+    // this exclusive fixture allocation until their original owners drop.
+    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let check = |peer: &Rc<RefCell<Peer>>, dci: u8, mask: u32, expected: u32| {
+        let base = peer.borrow().base.clone();
+        let model = base.borrow();
+        let at = model.output + u64::from(dci) * model.context_bytes as u64;
+        let original: Vec<_> = (0..model.context_bytes / 4)
+            .map(|word| Peer::word(at + word as u64 * 4))
+            .collect();
+        assert_eq!(original[0] & mask, expected);
+        assert_eq!(original[0] & 7, 1);
+        drop(model);
+        // Running -> Halted -> Stopped -> Error -> Disabled -> Running covers
+        // every architected state value without changing the configured fields.
+        for state in [2, 3, 4, 0, 1] {
+            base.borrow_mut().set_state(usize::from(dci), state);
+            assert_eq!(base.borrow().state(usize::from(dci)), state);
+            for (word, expected) in original.iter().enumerate() {
+                let actual = Peer::word(at + word as u64 * 4);
+                assert_eq!(
+                    actual,
+                    if word == 0 {
+                        *expected & !7 | state
+                    } else {
+                        *expected
+                    }
+                );
+            }
+        }
+    };
+    let (_full, full_peer) = fixture_with_schedule(
+        &mut dma,
+        false,
+        xhci::FULL_SPEED,
+        2,
+        Some((0x110, 0, 1 << 11)),
+    );
+    // Original FS bInterval2 is actually configured as Interval4 (16 microframes).
+    check(&full_peer, 3, 0xff << 16, 4 << 16);
+
+    let (mut superspeed, superspeed_peer) = fixture(&mut dma, true);
+    assert!(superspeed.enable_streams(&[0x81, 2], 3, &mut dma).unwrap() >= 3);
+    // The real primary-stream layout has LSA=1 and MaxPStreams=1 for four entries.
+    check(&superspeed_peer, 3, 1 << 15 | 31 << 10, 1 << 15 | 1 << 10);
+    let endpoint = Endpoint {
+        address: 0x83,
+        attributes: 1,
+        max_packet: 256,
+        interval: 5,
+        companion: Some(xhci::SuperSpeedCompanion {
+            max_burst: 1,
+            attributes: 2,
+            bytes_per_interval: 1536,
+        }),
+    };
+    superspeed
+        .controller
+        .borrow_mut()
+        .device(superspeed.physical.id)
+        .unwrap()
+        .configure(&[endpoint], None, &mut dma)
+        .unwrap();
+    // A second actual native Configure command retains nonzero Interval and Mult.
+    check(&superspeed_peer, 7, 0xff << 16 | 3 << 8, 4 << 16 | 2 << 8);
+}
