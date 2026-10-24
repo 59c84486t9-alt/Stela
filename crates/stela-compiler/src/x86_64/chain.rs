@@ -39,7 +39,7 @@ pub const THUNK_BYTES: usize = 37 + DIRECT_EXIT_BYTES;
 /// Bytes in an exit to a dynamic target in RAX: `mov edx, kind; ret`.
 pub const DYNAMIC_EXIT_BYTES: usize = 6;
 /// Entries in the engine's lookup table, a power of two.
-pub const LOOKUP_ENTRIES: usize = 4096;
+pub const LOOKUP_ENTRIES: usize = 1 << 16;
 /// Bytes in a [`lookup_thunk`], without and with its static target.
 pub const LOOKUP_THUNK_BYTES: usize = 91;
 pub const STATIC_LOOKUP_THUNK_BYTES: usize = LOOKUP_THUNK_BYTES + 10;
@@ -304,8 +304,9 @@ mod tests {
         let mut emitted = Vec::new();
         super::super::block::exit_kind(&mut emitted, ExitKind::Return);
         assert_eq!(emitted, dynamic_exit(ExitKind::Return));
-        assert_eq!(lookup_slot(0x4004), 1);
-        assert_eq!(lookup_slot(0x4000 + 4 * LOOKUP_ENTRIES as u64), 0);
+        let span = 4 * LOOKUP_ENTRIES as u64;
+        assert_eq!(lookup_slot(span + 4), 1);
+        assert_eq!(lookup_slot(2 * span), 0);
     }
 
     /// Lookup thunks run on the host: a hit in the current context with
