@@ -1,4 +1,4 @@
-//! Half-precision arithmetic through exact single-precision intermediates.
+//! Half-precision arithmetic through exact widened intermediates.
 use alloc::vec::Vec;
 mod product;
 

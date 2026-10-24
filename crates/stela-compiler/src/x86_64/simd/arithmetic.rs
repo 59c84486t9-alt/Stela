@@ -461,15 +461,7 @@ fn emit_vector(
 }
 
 pub(super) fn always_exits(operand: &Operand) -> bool {
-    operand.format == Format::Half
-        && matches!(operand.inputs, Inputs::Elementwise { .. })
-        && matches!(
-            operand.operation,
-            BinaryOperation::Add
-                | BinaryOperation::Subtract
-                | BinaryOperation::Multiply
-                | BinaryOperation::Divide
-        )
+    operand.format == Format::Half && operand.operation == BinaryOperation::Divide
 }
 
 /// The S/D forms return their [`ColdSplit`].
@@ -501,11 +493,21 @@ mod tests {
     #[test]
     fn numerical_instructions_require_the_block_exit_protocol() {
         const FADD_S: u32 = 0x1e222820;
-        const FADD_H: u32 = 0x1ee22820;
         const FADD_2S: u32 = 0x0e22d420;
-        const FADD_4H: u32 = 0x0e421420;
         const RET: u32 = 0xd65f03c0;
-        for word in [FADD_S, FADD_H, FADD_2S, FADD_4H] {
+        for word in [
+            FADD_S,
+            FADD_2S,
+            0x1ee2_2820, // fadd h0, h1, h2
+            0x1ee2_3820, // fsub h0, h1, h2
+            0x1ee2_0820, // fmul h0, h1, h2
+            0x0e42_1420, // fadd v0.4h, v1.4h, v2.4h
+            0x0ec2_1420, // fsub v0.4h, v1.4h, v2.4h
+            0x2e42_1c20, // fmul v0.4h, v1.4h, v2.4h
+            0x4e42_1420, // fadd v0.8h, v1.8h, v2.8h
+            0x4ec2_1420, // fsub v0.8h, v1.8h, v2.8h
+            0x6e42_1c20, // fmul v0.8h, v1.8h, v2.8h
+        ] {
             let bytes: Vec<u8> = [word, RET]
                 .iter()
                 .flat_map(|value| value.to_le_bytes())
@@ -517,13 +519,18 @@ mod tests {
                     .contains("NumericalRuntimeRequired")
             );
             let block = crate::block::compile(&bytes, GuestAddress(0x1000)).unwrap();
-            if [FADD_H, FADD_4H].contains(&word) {
-                assert_eq!(block.source_bytes, size_of::<u32>());
-                assert_eq!(block.native.source_map, [(GuestAddress(0x1000), 0)]);
-            } else {
-                assert_eq!(block.native.source_map.len(), 2);
-                assert_eq!(block.native.source_map[1].0, GuestAddress(0x1004));
-            }
+            assert_eq!(block.source_bytes, bytes.len());
+            assert_eq!(block.native.source_map.len(), 2);
+            assert_eq!(block.native.source_map[1].0, GuestAddress(0x1004));
+        }
+        for word in [0x1ee2_1820u32, 0x2e42_3c20, 0x6e42_3c20] {
+            let bytes: Vec<u8> = [word, RET]
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+            let block = crate::block::compile(&bytes, GuestAddress(0x1000)).unwrap();
+            assert_eq!(block.source_bytes, size_of::<u32>());
+            assert_eq!(block.native.source_map, [(GuestAddress(0x1000), 0)]);
         }
     }
 }

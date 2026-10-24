@@ -1820,21 +1820,12 @@ mod tests {
     }
 
     #[test]
-    fn unconditional_half_helpers_share_exact_consumption_analysis_and_emission() {
+    fn terminal_half_division_shares_exact_consumption_analysis_and_emission() {
         const NOP: u32 = 0xd503201f;
         const UNSUPPORTED: u32 = 0xffffffff;
-        const HALF_OPERATIONS: [u32; 12] = [
-            0x1ee02800, // FADD H0,H0,H0
-            0x1ee03800, // FSUB H0,H0,H0
-            0x1ee00800, // FMUL H0,H0,H0
+        const HALF_OPERATIONS: [u32; 3] = [
             0x1ee01800, // FDIV H0,H0,H0
-            0x0e401400, // FADD V0.4H,V0.4H,V0.4H
-            0x0ec01400, // FSUB V0.4H,V0.4H,V0.4H
-            0x2e401c00, // FMUL V0.4H,V0.4H,V0.4H
             0x2e403c00, // FDIV V0.4H,V0.4H,V0.4H
-            0x4e401400, // FADD V0.8H,V0.8H,V0.8H
-            0x4ec01400, // FSUB V0.8H,V0.8H,V0.8H
-            0x6e401c00, // FMUL V0.8H,V0.8H,V0.8H
             0x6e403c00, // FDIV V0.8H,V0.8H,V0.8H
         ];
         let base = GuestAddress(0x1000);
@@ -1883,6 +1874,49 @@ mod tests {
                         .pc,
                     continuation
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn guarded_half_arithmetic_validates_its_inline_suffix_in_every_profile() {
+        const NOP: u32 = 0xd503201f;
+        const UNSUPPORTED: u32 = 0xffffffff;
+        let base = GuestAddress(0x1000);
+        for operation in [
+            0x1ee02800, 0x1ee03800, 0x1ee00800, // scalar ADD/SUB/MUL
+            0x0e401400, 0x0ec01400, 0x2e401c00, // four lanes
+            0x4e401400, 0x4ec01400, 0x6e401c00, // eight lanes
+        ] {
+            for profile in [
+                BlockProfile::Ordinary,
+                BlockProfile::AppleArm64eSoftwarePauthV1,
+                BlockProfile::AppleArm64eSoftwarePauthClockV1,
+                BlockProfile::DarwinArm64ThreadV1,
+                BlockProfile::AppleArm64eSoftwarePauthThreadV1,
+                BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+                BlockProfile::SystemModeV1,
+            ] {
+                let source = bytes(&[NOP, operation, NOP]);
+                let analysis = analyze_with_profile(&source, base, profile).unwrap();
+                let compiled = compile_with_profile(&source, base, profile).unwrap();
+                assert_eq!(analysis.source_bytes, source.len());
+                assert_eq!(compiled.source_bytes, analysis.source_bytes);
+                assert_eq!(
+                    source_bytes_with_profile(&source, base, profile).unwrap(),
+                    source.len()
+                );
+                assert_eq!(compiled.native.source_map.len(), 3);
+                let invalid = bytes(&[NOP, operation, UNSUPPORTED]);
+                let suffix_pc = GuestAddress(base.0 + 2 * size_of::<u32>() as u64);
+                assert_eq!(
+                    analyze_with_profile(&invalid, base, profile)
+                        .unwrap_err()
+                        .pc,
+                    suffix_pc
+                );
+                assert!(compile_with_profile(&invalid, base, profile).is_err());
+                assert!(source_bytes_with_profile(&invalid, base, profile).is_err());
             }
         }
     }

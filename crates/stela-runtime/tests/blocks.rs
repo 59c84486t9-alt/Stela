@@ -91,10 +91,14 @@ mod numerical {
                     );
                     runtime.register_code(GuestAddress(BASE), source.clone())?;
                     let mut thread = input(nep);
+                    // Zero is outside the guarded native Half domain, so this
+                    // instruction takes its interior helper without replaying
+                    // the completed prefix or prematurely executing the suffix.
+                    thread.registers.v[5][0] &= !0xffff;
                     let mut prefix = thread.registers.clone();
                     prefix.x[0] += 1;
                     publish(&mut prefix, 0, 1, 0x40400000, 32);
-                    publish(&mut prefix, 3, 4, 0x4200, 16);
+                    publish(&mut prefix, 3, 4, 0x3c00, 16);
                     let first = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
                     assert_eq!(first.reason, StopReason::BudgetExhausted);
                     assert_eq!(first.floating_point_helpers, 1);
@@ -109,6 +113,40 @@ mod numerical {
                     assert_eq!(thread.registers, expected);
                     if reused {
                         assert!(first.disk_cache_hits > 0 && rest.disk_cache_hits > 0);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_half_arithmetic_keeps_the_suffix_in_one_cached_block() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let source = words(&[ADD_ONE, FADD_S0_S1_S2, FADD_H3_H4_H5, FMUL_D6_D7_D8, RET]);
+        for target in [TargetCpu::Baseline, TargetCpu::detect()] {
+            for nep in [false, true] {
+                for reused in [false, true] {
+                    let mut runtime = BlockRuntime::new_for_target(
+                        72,
+                        cache.path().into(),
+                        BlockProfile::Ordinary,
+                        target,
+                    );
+                    runtime.register_code(GuestAddress(BASE), source.clone())?;
+                    let mut thread = input(nep);
+                    let mut expected = thread.registers.clone();
+                    expected.x[0] += 1;
+                    publish(&mut expected, 0, 1, 0x40400000, 32);
+                    publish(&mut expected, 3, 4, 0x4200, 16);
+                    publish(&mut expected, 6, 7, 0x4018000000000000, 64);
+                    let report = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
+                    assert_eq!(report.reason, StopReason::StopAddress);
+                    assert_eq!(report.blocks_executed, 1);
+                    assert_eq!(report.floating_point_helpers, 0);
+                    assert_eq!(thread.registers, expected);
+                    if reused {
+                        assert!(report.disk_cache_hits > 0);
                     }
                 }
             }
