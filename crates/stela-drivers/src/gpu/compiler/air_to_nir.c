@@ -1129,6 +1129,77 @@ integer_minmax(struct translator *t, LLVMValueRef inst, LLVMValueRef callee,
    return put_value(t, inst, result, 0);
 }
 
+enum integer_funnel_operation {
+   INTEGER_FUNNEL_LEFT,
+   INTEGER_FUNNEL_RIGHT,
+};
+
+static bool
+integer_funnel(struct translator *t, LLVMValueRef inst, LLVMValueRef callee,
+               unsigned intrinsic, enum integer_funnel_operation operation)
+{
+   unsigned components, bits;
+   LLVMTypeRef type = LLVMTypeOf(inst);
+   LLVMTypeRef element = LLVMGetTypeKind(type) == LLVMVectorTypeKind ? LLVMGetElementType(type) : type;
+   if (LLVMGetTypeKind(element) != LLVMIntegerTypeKind ||
+       !shape(type, &components, &bits) || bits == 1)
+      return fail(t, STELA_AIR_TYPE, "unsupported LLVM integer-funnel result shape");
+   LLVMTypeRef expected = LLVMIntrinsicGetType(t->context, intrinsic, &type, 1);
+   if (!LLVMIsDeclaration(callee) || LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
+       LLVMGetInstructionCallConv(inst) != LLVMCCallConv ||
+       LLVMGlobalGetValueType(callee) != expected || LLVMGetCalledFunctionType(inst) != expected ||
+       LLVMGetNumArgOperands(inst) != 3 || LLVMCountParams(callee) != 3 ||
+       LLVMIsFunctionVarArg(expected) || LLVMGetNumOperandBundles(inst) ||
+       LLVMTypeOf(LLVMGetOperand(inst, 0)) != type ||
+       LLVMTypeOf(LLVMGetOperand(inst, 1)) != type ||
+       LLVMTypeOf(LLVMGetOperand(inst, 2)) != type)
+      return fail(t, STELA_AIR_TYPE, "unsupported LLVM integer-funnel call signature");
+   size_t canonical_length = 0, name_length = 0;
+   char *canonical = LLVMIntrinsicCopyOverloadedName2(t->module, intrinsic, &type, 1,
+                                                     &canonical_length);
+   if (!canonical)
+      return fail(t, STELA_AIR_ALLOCATION, "LLVM integer-funnel overload name unavailable");
+   const char *name = LLVMGetValueName2(callee, &name_length);
+   bool canonical_name = name_length == canonical_length && !memcmp(name, canonical, name_length);
+   LLVMDisposeMessage(canonical);
+   if (!canonical_name)
+      return fail(t, STELA_AIR_INSTRUCTION, "noncanonical LLVM integer-funnel overload name");
+   nir_def *a = get_value(t, LLVMGetOperand(inst, 0));
+   nir_def *b = get_value(t, LLVMGetOperand(inst, 1));
+   nir_def *amount = get_value(t, LLVMGetOperand(inst, 2));
+   if (!a || !b || !amount)
+      return false;
+   if (a->num_components != components || b->num_components != components ||
+       amount->num_components != components || a->bit_size != bits ||
+       b->bit_size != bits || amount->bit_size != bits)
+      return fail(t, STELA_AIR_TYPE, "LLVM integer-funnel operand shape mismatch");
+   /* NIR shift amounts are uint32 and masked by the data width. Truncating
+    * i64 first preserves every bit relevant to modulo 64. Keep data native. */
+   nir_def *k = nir_iand_imm(&t->b, nir_u2u32(&t->b, amount), bits - 1);
+   bool left = operation == INTEGER_FUNNEL_LEFT;
+   bool same_input = LLVMGetOperand(inst, 0) == LLVMGetOperand(inst, 1);
+   const nir_shader_compiler_options *options = t->b.shader->options;
+   bool rotate = (bits == 8 && options->has_rotate8) ||
+                 (bits == 16 && options->has_rotate16) ||
+                 (bits == 32 && options->has_rotate32);
+   nir_def *result;
+   if (same_input && rotate) {
+      result = left ? nir_urol(&t->b, a, k) : nir_uror(&t->b, a, k);
+   } else if (bits == 32 && options->has_shfr32) {
+      result = nir_shfr(&t->b, a, b, left ? nir_ineg(&t->b, k) : k);
+      if (left && !same_input)
+         result = nir_bcsel(&t->b, nir_ieq_imm(&t->b, k, 0), a, result);
+   } else {
+      nir_def *negative = nir_ineg(&t->b, k);
+      nir_def *shifted = left ? nir_ior(&t->b, nir_ishl(&t->b, a, k), nir_ushr(&t->b, b, negative)) :
+                                nir_ior(&t->b, nir_ishl(&t->b, a, negative), nir_ushr(&t->b, b, k));
+      /* At zero, the masked complementary shift is also zero. OR would be
+       * wrong for unequal a/b; LLVM selects a for left and b for right. */
+      result = nir_bcsel(&t->b, nir_ieq_imm(&t->b, k, 0), left ? a : b, shifted);
+   }
+   return put_value(t, inst, result, 0);
+}
+
 static bool same_pointer_resource(const struct value *a, const struct value *b);
 
 static bool
@@ -1228,6 +1299,18 @@ instruction(struct translator *t, LLVMValueRef inst)
             unsigned expected = LLVMLookupIntrinsicID(minmax[operation], strlen(minmax[operation]));
             if (expected && intrinsic == expected)
                return integer_minmax(t, inst, callee, intrinsic, (enum integer_minmax_operation)operation);
+         }
+      }
+      if (LLVMIsAFunction(callee)) {
+         unsigned intrinsic = LLVMGetIntrinsicID(callee);
+         static const char *const funnels[] = {
+            [INTEGER_FUNNEL_LEFT] = "llvm.fshl",
+            [INTEGER_FUNNEL_RIGHT] = "llvm.fshr",
+         };
+         for (unsigned operation = 0; intrinsic && operation < ARRAY_SIZE(funnels); operation++) {
+            unsigned expected = LLVMLookupIntrinsicID(funnels[operation], strlen(funnels[operation]));
+            if (expected && intrinsic == expected)
+               return integer_funnel(t, inst, callee, intrinsic, (enum integer_funnel_operation)operation);
          }
       }
       size_t name_length = 0;

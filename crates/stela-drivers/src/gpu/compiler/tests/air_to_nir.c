@@ -2301,6 +2301,7 @@ module_flag_test(const char *extra, enum stela_air_error_kind expected)
 #include "air_count_tests.h"
 #include "air_permutation_tests.h"
 #include "air_minmax_tests.h"
+#include "air_funnel_tests.h"
 
 static void
 tests(void)
@@ -2322,6 +2323,7 @@ tests(void)
    integer_count_tests();
    integer_permutation_tests();
    integer_minmax_tests();
+   integer_funnel_tests();
    conditional_semantics();
    loop_semantics();
    cfg_semantics();

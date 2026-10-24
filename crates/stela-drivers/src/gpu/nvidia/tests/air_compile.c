@@ -7,6 +7,7 @@
 #include "compiler/tests/air_count_fixture.h"
 #include "compiler/tests/air_permutation_fixture.h"
 #include "compiler/tests/air_minmax_fixture.h"
+#include "compiler/tests/air_funnel_fixture.h"
 #include "compiler/tests/targets/nvidia.h"
 #include "compiler/tests/threadgroup_record.h"
 #include "nouveau/compiler/nak_private.h"
@@ -536,6 +537,17 @@ static void integer_permutation_tests(void)
         stela_metal_assembly_destroy(&library);
     }
 }
+static void integer_funnel_tests(void)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(stela_air_funnel_fixtures); i++) {
+        LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_funnel_fixtures[i].body,
+                                                       stela_air_funnel_fixtures[i].declarations);
+        struct stela_metal_assembly *library = fixture(air);
+        LLVMDisposeMemoryBuffer(air);
+        targets(library, STELA_AIR_FP_IEEE_DEFAULT, stela_air_funnel_fixtures[i].name, false);
+        stela_metal_assembly_destroy(&library);
+    }
+}
 static void integer_minmax_tests(void)
 {
     for (unsigned i = 0; i < ARRAY_SIZE(stela_air_minmax_fixtures); i++) {
@@ -549,6 +561,7 @@ static void integer_minmax_tests(void)
 }
 static void original_tests(void)
 {
+    integer_funnel_tests();
     integer_minmax_tests();
     integer_permutation_tests();
     integer_count_tests();

@@ -2,6 +2,7 @@
 #include "air_to_nir.h"
 #include "llvm-c/BitReader.h"
 #include "air_test_fixture.h"
+#include "air_funnel_stage_fixture.h"
 #include "util/ralloc.h"
 #include "util/mesa-blake3.h"
 #define CHECK(x) do { if (!(x)) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x); exit(1); } } while (0)
@@ -1061,6 +1062,8 @@ static LLVMMemoryBufferRef file(const char *path)
    for(unsigned i=0;i<32;i++)printf("%02x",hash[i]);puts("");
    LLVMMemoryBufferRef result=LLVMCreateMemoryBufferWithMemoryRangeCopy(b,(size_t)n,"unchanged-stage-input");free(b);return result;
 }
+#include "air_funnel_stage_tests.h"
+
 int main(int argc,char **argv)
 {
    glsl_type_singleton_init_or_ref();
@@ -1074,6 +1077,7 @@ int main(int argc,char **argv)
    aggregate_phi_semantics();
    pointer_phi_stage_semantics();
    pointer_equality_stage_semantics();
+   integer_funnel_stage_semantics();
    if(argc==5 && !strcmp(argv[1],"--input") && !strcmp(argv[3],"--texture")) {
       b=file(argv[2]);run(b,"vertexShader","fragmentShader",true);LLVMDisposeMemoryBuffer(b);
       b=file(argv[4]);struct stela_air_error e;
