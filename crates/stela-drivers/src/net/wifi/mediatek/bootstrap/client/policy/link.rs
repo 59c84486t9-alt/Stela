@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! An owning Ethernet link over the already constructed native policy client.
-//! The initial profile is ordinary single-link 2.4/5GHz WPA2-CCMP128. This creates
-//! no PCI/requester/coherency, supplicant, regulatory or physical-radio grant.
+//! Discovery uses the retained policy client's programmed bands, including
+//! active/passive 6GHz scans. The data profile remains ordinary single-link
+//! 2.4/5GHz WPA2-CCMP128. This creates no PCI/requester/coherency, supplicant,
+//! regulatory or physical-radio grant.
 //! The actual platform still supplies the controller and independent drain fences.
 
 use super::*;
@@ -11,6 +13,9 @@ use alloc::{collections::VecDeque, format, vec::IntoIter};
 
 const DATA_FRAMES: usize = 64;
 const NOTICES: usize = 64;
+
+#[cfg(test)]
+mod discovery_tests;
 
 #[derive(Debug)]
 pub enum LinkControlError {
@@ -260,9 +265,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         self.state().client.country()
     }
     pub fn local_advertisement(&self, band: Band) -> Result<Advertisement, LinkControlError> {
-        if band == Band::Ghz6 {
-            return Err(LinkControlError::UnsupportedProfile);
-        }
         self.state()
             .client
             .local_advertisement(band)
@@ -389,9 +391,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         request: scan::Request,
         budget_us: u64,
     ) -> Result<scan::Ticket, LinkControlError> {
-        if request.channels().iter().any(|c| c.band == Band::Ghz6) {
-            return Err(LinkControlError::UnsupportedProfile);
-        }
         let now = self.now();
         Ok(self
             .state_mut()
