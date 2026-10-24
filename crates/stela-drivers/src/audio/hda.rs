@@ -22,6 +22,7 @@ use crate::bus::{
 
 mod cirrus;
 mod codec;
+pub mod digital;
 pub use cirrus::{
     CirrusCoefficient, CirrusInputAmplifier, CirrusOutputAmplifier, CirrusProfile, CirrusReport,
     CirrusSpeakerBoost,
