@@ -85,7 +85,7 @@ impl Controller {
         self.submit_owned(slot, dci, buffer, length)
     }
 
-    pub(super) fn submit_owned(
+    pub(in crate::usb::xhci) fn submit_owned(
         &mut self,
         slot: u8,
         dci: u8,
@@ -109,7 +109,7 @@ impl Controller {
         self.submit_ticket_owned(slot, dci, buffer, length)
     }
 
-    pub(super) fn submit_ticket_owned(
+    pub(in crate::usb::xhci) fn submit_ticket_owned(
         &mut self,
         slot: u8,
         dci: u8,
@@ -172,7 +172,7 @@ impl Controller {
         self.completed_owned(slot, dci, trb, length)
     }
 
-    pub(super) fn completed_owned(
+    pub(in crate::usb::xhci) fn completed_owned(
         &mut self,
         slot: u8,
         dci: u8,
@@ -307,7 +307,7 @@ impl Controller {
         self.transfer_owned(slot, dci, buffer, length, microseconds)
     }
 
-    pub(super) fn transfer_owned(
+    pub(in crate::usb::xhci) fn transfer_owned(
         &mut self,
         slot: u8,
         dci: u8,
