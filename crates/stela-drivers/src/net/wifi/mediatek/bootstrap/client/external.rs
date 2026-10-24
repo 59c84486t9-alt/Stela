@@ -76,7 +76,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .state_mut()
             .control
             .clear_peer_admission(profile.wcid)
-            .map_err(|e| Error::Bootstrap(super::Error::Control(e)))?;
+            .map_err(|e| Error::Bootstrap(super::super::Error::Control(e)))?;
         Self::command(s, Command::BssInfo, &bss)?;
         Self::command(s, Command::StationRecord, &peer)?;
         s.format_generation = Some(generation);
