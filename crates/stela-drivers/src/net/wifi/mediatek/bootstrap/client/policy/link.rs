@@ -276,6 +276,20 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     pub fn bss(&self) -> impl Iterator<Item = (BssHandle, &scan::result::Bss)> {
         self.state().client.bss()
     }
+    pub fn pending_edca(&self) -> bool {
+        self.state().client.pending_edca()
+    }
+    pub fn applied_edca(&self) -> Option<&AppliedEdca> {
+        self.state().client.applied_edca()
+    }
+    /// Apply only a retained native observation. Frontend notice batches remain
+    /// owned and normal service backpressure is unchanged.
+    pub fn update_edca(&mut self) -> Result<(), LinkControlError> {
+        let s = self.state_mut();
+        let result = s.client.update_edca();
+        Self::reconcile(s);
+        Ok(result?)
+    }
     pub fn take_notice(&mut self) -> Option<LinkNotice<C>> {
         self.state_mut().notices.pop_front()
     }
@@ -1447,5 +1461,6 @@ mod tests {
         }
     }
 
+    mod edca_controls;
     mod management_controls;
 }

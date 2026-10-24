@@ -378,6 +378,15 @@ impl reg::HardwareLease for HardwareGuard<'_> {
     fn allows_association(&mut self, op: &reg::AssociationOperation<'_>) -> bool {
         self.0.association(op, self.1)
     }
+    fn allows_edca(&mut self, op: &reg::EdcaOperation<'_>) -> bool {
+        self.0.association(op.association(), self.1)
+            && op
+                .observed()
+                .iter()
+                .all(|ac| ac.aifsn >= 2 && ac.ecw_min != 0)
+            && reg::wmm::station(op.observed(), None).is_ok()
+            && reg::wmm::station(op.effective(), None).is_ok()
+    }
 }
 // SAFETY: private provider exists only inside the exclusive ManagedClient. Its
 // immutable snapshot comes from that exact retained completed Execution. No raw
@@ -470,6 +479,18 @@ impl reg::OsLease for OsGuard<'_> {
     }
     fn allows_association(&mut self, op: &reg::AssociationOperation<'_>) -> bool {
         self.0.association(op)
+    }
+    fn allows_edca(&mut self, op: &reg::EdcaOperation<'_>) -> bool {
+        let channel = op.association().context().channel();
+        self.0.association(op.association())
+            && self
+                .0
+                .country
+                .rule(u32::from(channel.frequency_mhz) * 1000, 20_000)
+                .is_some_and(|rule| {
+                    reg::wmm::station(op.observed(), rule.wmm.as_ref())
+                        .is_ok_and(|effective| &effective == op.effective())
+                })
     }
 }
 // SAFETY: selected source bytes/country/environment are immutable and retained
@@ -756,6 +777,41 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                 .configure_modern(&mut self.authority, admission, now)
         }
         .map_err(PolicyError::Client)
+    }
+    /// Consume the latest native current-peer observation using this owner's
+    /// actual immutable country rule and same association publication authority.
+    pub fn update_edca(&mut self) -> Result<(), PolicyError> {
+        self.live()?;
+        let context = self
+            .client
+            .modern_context()
+            .ok_or(PolicyError::Bss)?
+            .clone();
+        let rule = self
+            .country
+            .rule(u32::from(context.channel().frequency_mhz) * 1000, 20_000)
+            .ok_or(PolicyError::RestrictionMismatch)?;
+        let admission = self
+            .authority
+            .admit_association(
+                self.client.station(),
+                context,
+                reg::AssociationUse::Management,
+            )
+            .map_err(PolicyError::Regulatory)?;
+        // SAFETY: private client, programmed country and authority belong to
+        // this same exclusive attachment and serialize all native publication.
+        unsafe {
+            self.client
+                .update_edca_modern(&mut self.authority, admission, rule.wmm.as_ref())
+        }
+        .map_err(PolicyError::Client)
+    }
+    pub fn pending_edca(&self) -> bool {
+        self.client.pending_edca()
+    }
+    pub fn applied_edca(&self) -> Option<&AppliedEdca> {
+        self.client.applied_edca()
     }
     pub fn install_key(
         &mut self,

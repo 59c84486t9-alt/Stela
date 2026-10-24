@@ -11,6 +11,8 @@ pub(super) struct Configuration {
     commands: Vec<(Command, Vec<u8>)>,
     filter: crate::net::wifi::mediatek::mcu::init::Request,
     completed: usize,
+    pub(super) prepared_edca: [station::phy::AccessCategory; 4],
+    pub(super) applied_edca: Option<super::edca::AppliedEdca>,
 }
 impl Configuration {
     pub(super) fn context(&self) -> &Arc<AssociationContext> {
@@ -181,6 +183,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .find(|(command, _)| *command == Command::Edca)
             .ok_or(Error::WrongPhase)?;
         pending.1 = body;
+        m.prepared_edca = *effective;
         Ok(())
     }
     pub fn completed_modern_requests(&self) -> usize {
@@ -318,6 +321,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.station
             .configure_tx_block_ack(window)
             .map_err(Error::BlockAck)?;
+        let m = s.modern.as_mut().unwrap();
+        m.applied_edca = Some(super::edca::AppliedEdca {
+            parameter_set_count: m
+                .context
+                .negotiated()
+                .wmm
+                .as_ref()
+                .unwrap()
+                .parameter_set_count,
+            access_categories: m.prepared_edca,
+        });
         s.phase = Phase::Associated;
         Ok(())
     }
@@ -426,12 +440,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         commands.push((Command::BssInfo, p.awake().map_err(Error::Codec)?));
         s.profile = Some(p);
         let filter = p.filter_request(true).map_err(Error::Codec)?;
+        let prepared_edca = context.negotiated().wmm.as_ref().unwrap().access_categories;
         s.modern = Some(Configuration {
             context,
             wire,
             commands,
             filter,
             completed: 0,
+            prepared_edca,
+            applied_edca: None,
         });
         // Preparation never acknowledges or publishes modern BSS/peer effects.
         // configure_modern consumes the canonical context-bound admission.
@@ -1414,6 +1431,12 @@ pub(super) mod tests {
     // Authority for the same stateful simulated PCI requester, never physical
     // permission. The model's revocation and source allocations obey held guards.
 
+    struct EdcaInspection {
+        hardware: bool,
+        count: u8,
+        observed: [station::phy::AccessCategory; 4],
+        effective: [station::phy::AccessCategory; 4],
+    }
     struct AuthorityState {
         hardware: Cell<bool>,
         os: Cell<bool>,
@@ -1426,6 +1449,9 @@ pub(super) mod tests {
         _memory: Arc<Mutex<Memory>>,
         windows: RefCell<Vec<(usize, usize)>>,
         allocations: Cell<usize>,
+        edca_hardware: Cell<bool>,
+        edca_os: Cell<bool>,
+        edca_inspections: RefCell<Vec<EdcaInspection>>,
     }
     struct Hardware(Rc<AuthorityState>);
     struct Os(Rc<AuthorityState>);
@@ -1476,6 +1502,26 @@ pub(super) mod tests {
                     Width::Mhz20 | Width::Mhz40 | Width::Mhz80 | Width::Mhz160
                 )
         }
+        fn allows_edca(&mut self, operation: &reg::EdcaOperation<'_>) -> bool {
+            assert!(self.state.hardware.get() && self.state.os.get());
+            self.state
+                .edca_inspections
+                .borrow_mut()
+                .push(EdcaInspection {
+                    hardware: true,
+                    count: operation.parameter_set_count(),
+                    observed: *operation.observed(),
+                    effective: *operation.effective(),
+                });
+            self.state.edca_hardware.get()
+                && self.allows_association(operation.association())
+                && operation
+                    .observed()
+                    .iter()
+                    .all(|ac| ac.aifsn >= 2 && ac.ecw_min != 0)
+                && reg::wmm::station(operation.observed(), None).is_ok()
+                && reg::wmm::station(operation.effective(), None).is_ok()
+        }
     }
     impl reg::OsLease for OsGuard {
         fn revision(&self) -> u64 {
@@ -1487,6 +1533,18 @@ pub(super) mod tests {
         fn allows_association(&mut self, operation: &reg::AssociationOperation<'_>) -> bool {
             assert!(self.0.hardware.get() && self.0.os.get());
             self.0.allowed.get() && core::ptr::eq(operation.context(), self.0.context.as_ref())
+        }
+        fn allows_edca(&mut self, operation: &reg::EdcaOperation<'_>) -> bool {
+            assert!(self.0.hardware.get() && self.0.os.get());
+            self.0.edca_inspections.borrow_mut().push(EdcaInspection {
+                hardware: false,
+                count: operation.parameter_set_count(),
+                observed: *operation.observed(),
+                effective: *operation.effective(),
+            });
+            self.0.edca_os.get()
+                && self.allows_association(operation.association())
+                && reg::wmm::station(operation.effective(), None).is_ok()
         }
     }
     // SAFETY: only this single-threaded model's requester is qualified. Revocation
@@ -1538,6 +1596,9 @@ pub(super) mod tests {
             _memory: model.memory.clone(),
             windows: RefCell::new(Vec::new()),
             allocations: Cell::new(0),
+            edca_hardware: Cell::new(true),
+            edca_os: Cell::new(true),
+            edca_inspections: RefCell::new(Vec::new()),
         });
         let owner = reg::Owner::new(Hardware(state.clone()), Os(state.clone())).unwrap();
         (owner, state)
@@ -1570,5 +1631,6 @@ pub(super) mod tests {
         }
     }
 
+    mod edca_controls;
     mod management_controls;
 }

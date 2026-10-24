@@ -5,7 +5,7 @@
 //! independently retain and validate those exact existing capabilities.
 
 use super::{Error, HardwareLease, HardwarePolicy, OsLease, OsPolicy, Owner};
-use crate::net::wifi::station::{AssociationContext, Phase, Station};
+use crate::net::wifi::station::{AssociationContext, Phase, Station, phy::AccessCategory};
 use alloc::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +30,31 @@ impl AssociationOperation<'_> {
     }
     pub const fn purpose(&self) -> AssociationUse {
         self.purpose
+    }
+}
+
+/// Exact current AP queue observation and derived local queues, borrowed only
+/// inside both held providers. Values are inspection inputs, never RX provenance
+/// or completion evidence; the native owner must independently retain those.
+#[derive(Debug)]
+pub struct EdcaOperation<'a> {
+    association: AssociationOperation<'a>,
+    parameter_set_count: u8,
+    observed: [AccessCategory; 4],
+    effective: [AccessCategory; 4],
+}
+impl EdcaOperation<'_> {
+    pub fn association(&self) -> &AssociationOperation<'_> {
+        &self.association
+    }
+    pub const fn parameter_set_count(&self) -> u8 {
+        self.parameter_set_count
+    }
+    pub fn observed(&self) -> &[AccessCategory; 4] {
+        &self.observed
+    }
+    pub fn effective(&self) -> &[AccessCategory; 4] {
+        &self.effective
     }
 }
 
@@ -113,6 +138,63 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
             context,
             purpose,
         })
+    }
+
+    /// Reacquire the original current association and independently qualify the
+    /// exact new AP/local queues with both providers before actual publication.
+    /// The country clamp is derived while both policy guards are held.
+    ///
+    /// # Safety
+    /// Submit must program only this exact operation on the same retained native
+    /// controller and retain its private current completed-RX provenance, peer,
+    /// keys and DMA owner through actual ACK/retirement and uncertain outcomes.
+    /// Neither public queue arrays nor the returned closure value prove native
+    /// observation or completion. `limit` is the current control-channel rule;
+    /// both providers must inspect the complete dynamic queue operation.
+    pub unsafe fn publish_edca<'a, T>(
+        &'a mut self,
+        admission: AssociationAdmission,
+        station: &Station,
+        parameter_set_count: u8,
+        observed: &[AccessCategory; 4],
+        limit: Option<&super::database::Wmm>,
+        submit: impl FnOnce(&EdcaOperation<'_>) -> T,
+    ) -> Result<T, Error> {
+        if admission.owner != self.identity {
+            return Err(Error::Stale);
+        }
+        if admission.purpose != AssociationUse::Management || parameter_set_count > 15 {
+            return Err(Error::Mismatch);
+        }
+        let association = admission.operation();
+        current(station, &association)?;
+        let mut hardware = self.hardware.acquire().ok_or(Error::HardwareUnavailable)?;
+        let native = hardware.context();
+        if admission.native != native {
+            return Err(Error::Stale);
+        }
+        let mut os = self.os.acquire(native).ok_or(Error::OsUnavailable)?;
+        if admission.os_revision != os.revision() {
+            return Err(Error::Stale);
+        }
+        check(&mut hardware, &mut os, &association)?;
+        let effective = super::wmm::station(observed, limit).map_err(|_| Error::Mismatch)?;
+        let operation = EdcaOperation {
+            association,
+            parameter_set_count,
+            observed: *observed,
+            effective,
+        };
+        if !hardware.allows_edca(&operation) {
+            return Err(Error::HardwareDenied);
+        }
+        if !os.allows_edca(&operation) {
+            return Err(Error::OsDenied);
+        }
+        let result = submit(&operation);
+        drop(os);
+        drop(hardware);
+        Ok(result)
     }
 
     /// Recheck the exact context and purpose at native publication, holding the

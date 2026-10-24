@@ -18,7 +18,7 @@ mod scan;
 pub use scan::{ScanAdmission, ScanOperation};
 pub mod database;
 pub mod wmm;
-pub use association::{AssociationAdmission, AssociationOperation, AssociationUse};
+pub use association::{AssociationAdmission, AssociationOperation, AssociationUse, EdcaOperation};
 
 static NEXT_OWNER: super::Identities = super::Identities::new();
 
@@ -136,6 +136,11 @@ pub trait HardwareLease {
     fn allows_association(&mut self, _operation: &AssociationOperation<'_>) -> bool {
         false
     }
+    /// Qualify these exact current observed/effective queues separately from
+    /// the immutable original association. Existing providers fail closed.
+    fn allows_edca(&mut self, _operation: &EdcaOperation<'_>) -> bool {
+        false
+    }
 }
 
 /// Actual physical radio owner, not an adapter around caller-copied flags.
@@ -159,6 +164,9 @@ pub trait HardwareLease {
 /// native capability issuer; parsed/copied facts cannot establish authority.
 /// Do not approve a context using one legacy rate or an unqualified firmware
 /// fallback. Missing any necessary qualification must refuse the operation.
+/// `allows_edca` must independently qualify the exact newly observed/effective
+/// queues without widening that immutable association envelope. A previously
+/// allowed Management operation does not approve different queue parameters.
 /// No source default, parsed receipt, country guess or receive observation can
 /// establish these permissions. Missing TX qualification must deny TX while
 /// separately qualified receive may remain possible.
@@ -192,6 +200,11 @@ pub trait OsLease {
     fn allows_association(&mut self, _operation: &AssociationOperation<'_>) -> bool {
         false
     }
+    /// Qualify these exact current observed/effective queues separately from
+    /// the immutable original association. Existing providers fail closed.
+    fn allows_edca(&mut self, _operation: &EdcaOperation<'_>) -> bool {
+        false
+    }
 }
 
 /// Trusted OS policy boundary. A frontend message or copied country is not it.
@@ -206,6 +219,9 @@ pub trait OsLease {
 /// `allows_association` must qualify that same complete enabled context profile,
 /// not one selected rate or metadata observation, for all current location,
 /// full channel footprint, DFS/no-IR/indoor and per-rate power constraints.
+/// `allows_edca` must independently inspect the new AP/effective queue arrays
+/// and enforce this exact current country/control-channel rule; the original
+/// context admission does not qualify a later contention/TXOP relaxation.
 /// Shared operations acquire hardware then OS authority. OS provider/revocation
 /// callbacks must not hold OS authority while synchronously waiting for hardware
 /// authority in reverse order. Use compatible ordered acquisition or release,

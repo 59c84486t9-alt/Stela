@@ -182,7 +182,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     // Check every retained native user, including canonical pending/quarantined
     // BA records whose native queue may not yet exist. The independent unsafe
     // hardware/RX/IRQ/external-deferred-user fence remains required as well.
-    fn management_drained(s: &Owned<I, Q, C>) -> Result<(), Error> {
+    pub(super) fn management_drained(s: &Owned<I, Q, C>) -> Result<(), Error> {
         let controller = s.controller.state();
         let queue = controller.data_tx.as_ref().ok_or(Error::WrongPhase)?;
         if queue.outstanding_tokens() != 0

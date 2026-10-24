@@ -122,7 +122,7 @@ pub struct Wmm {
 }
 
 impl Wmm {
-    fn parse(bytes: &[u8], role: Role) -> Result<Self, Error> {
+    pub(in crate::net::wifi) fn parse(bytes: &[u8], role: Role) -> Result<Self, Error> {
         if bytes.get(..4) != Some(&[0, 0x50, 0xf2, 2]) || bytes.get(5) != Some(&1) {
             return Err(Error::Invalid("WMM OUI/type/version"));
         }

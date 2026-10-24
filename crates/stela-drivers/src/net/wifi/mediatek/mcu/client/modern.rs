@@ -298,6 +298,16 @@ impl Configuration {
             .as_ref()
             .ok_or(Error::InvalidNegotiation)?
             .access_categories;
+        Self::observed_edca_request(p, original, effective)
+    }
+    /// Current native RX supplies the new AP baseline; it is not a replacement
+    /// association or a mutation of the immutable negotiated capability object.
+    pub(in crate::net::wifi::mediatek) fn observed_edca_request(
+        p: Profile,
+        original: &[AccessCategory; 4],
+        effective: &[AccessCategory; 4],
+    ) -> Result<Vec<u8>, Error> {
+        p.validate_inner(true)?;
         let mut seen = 0u8;
         for ac in effective {
             let old = original

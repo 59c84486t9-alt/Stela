@@ -5,7 +5,9 @@
 use super::{Controller, Phase as ControllerPhase};
 
 mod ba;
+mod edca;
 mod external;
+pub use edca::AppliedEdca;
 mod local;
 pub mod management;
 mod modern;
@@ -173,6 +175,7 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     roc_deadline: Option<u64>,
     modern: Option<modern::Configuration>,
     management: Option<Arc<management::Session>>,
+    edca: Option<edca::Observed<C>>,
     authentication_deadline: Option<u64>,
     authentication_end: Option<(Arc<station::external::Session>, Option<station::Failure>)>,
 }
@@ -247,6 +250,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 roc_deadline: None,
                 modern: None,
                 management: None,
+                edca: None,
                 authentication_deadline: None,
                 authentication_end: None,
             })),
@@ -734,7 +738,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 continue;
             }
             let modern_data = s.modern.is_some() && s.phase == Phase::Associated;
-            let frame = Self::normalized(s, &f.bytes, modern_data, policy)?;
+            let frame = match Self::normalized(s, &f.bytes, modern_data, policy) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    // An invalid native receive cannot leave an older pending
+                    // queue relaxation eligible after uncertain current input.
+                    if modern_data {
+                        s.edca = None;
+                    }
+                    return Err(error);
+                }
+            };
             if s.phase == Phase::Scanning {
                 events.push(Event::Bss(
                     s.scanner
@@ -767,6 +781,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .receive_external_authentication(&session, frame, now)
                     .map_err(Error::Station)?;
                 events.push(Event::ExternalAuthentication(received));
+                continue;
+            }
+            if modern_data && matches!(frame.header().control & 0x00fc, 0x0080 | 0x0050) {
+                Self::observe_edca(s, frame)?;
+                events.push(Event::Raw(f));
                 continue;
             }
             if s.management.is_some() && wifi::security::management::robust(&frame) {
@@ -966,6 +985,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.ba_actions.clear();
         s.profile = None;
         s.modern = None;
+        s.edca = None;
         s.management = None;
         s.authentication_deadline = None;
         Ok(())
