@@ -141,6 +141,24 @@ enum Cause {
     Maintained,
 }
 const CAUSES: usize = 7;
+/// The [`mmu::Controls`] fields a [`Cause::Controls`] reset counts as
+/// differing: SCTLR, TCR, TTBR0, TTBR1, MAIR, SPRR, CTRR, the regime and
+/// stage 2 (its requirement or controls).
+const FIELDS: usize = 9;
+
+fn differing(from: &mmu::Controls, to: &mmu::Controls) -> [bool; FIELDS] {
+    [
+        from.sctlr != to.sctlr,
+        from.tcr != to.tcr,
+        from.ttbr0 != to.ttbr0,
+        from.ttbr1 != to.ttbr1,
+        from.mair != to.mair || from.xs != to.xs || from.tagged != to.tagged,
+        from.sprr != to.sprr,
+        from.ctrr != to.ctrr,
+        from.regime != to.regime,
+        from.stage2 != to.stage2 || from.second_stage != to.second_stage,
+    ]
+}
 
 /// The views whose rights SPRR_PERM_EL0 decides: EL0's, and EL1's with
 /// PAN, which loses data access where EL0 has any
@@ -269,6 +287,8 @@ pub struct State {
     pub user_resets: u64,
     /// Whole resets by [`Cause`].
     reset_causes: [u64; CAUSES],
+    /// The [`Cause::Controls`] resets each field differed in ([`differing`]).
+    control_fields: [u64; FIELDS],
     /// The leaves each half was filled from.
     extents: [Extents; 2],
     /// TLBIs that unmapped ranges rather than whole halves.
@@ -424,6 +444,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             lower_resets: 0,
             user_resets: 0,
             reset_causes: [0; CAUSES],
+            control_fields: [0; FIELDS],
             extents: [Extents::new(), Extents::new()],
             scoped: 0,
             prefills: 0,
@@ -461,6 +482,9 @@ pub struct Statistics {
     /// Whole resets by cause: exhausted frames, SPRR, TTBR0 and other
     /// controls, tag checks, invalidations and TLBIs of everything.
     pub reset_causes: [u64; CAUSES],
+    /// The other-controls resets each field differed in: SCTLR, TCR, TTBR0,
+    /// TTBR1, MAIR, SPRR, CTRR, the regime and stage 2.
+    pub control_fields: [u64; FIELDS],
     /// Switches to another SPRR_PERM_EL1 value's kernel roots, and those
     /// that found none kept.
     pub bank_switches: u64,
@@ -490,6 +514,7 @@ pub fn statistics() -> Statistics {
         lower_resets: state.lower_resets,
         user_resets: state.user_resets,
         reset_causes: state.reset_causes,
+        control_fields: state.control_fields,
         bank_switches: state.bank_switches,
         bank_misses: state.bank_misses,
         scoped: state.scoped,
@@ -1410,6 +1435,12 @@ impl Host for BareHost<'_> {
                 } else {
                     Cause::Controls
                 };
+                if matches!(cause, Cause::Controls) && state.legacy_translations_dirty {
+                    let fields = differing(&current.controls, &regime.controls);
+                    for (count, differs) in state.control_fields.iter_mut().zip(fields) {
+                        *count += u64::from(differs);
+                    }
+                }
                 state.reset_shadow(cause);
             }
         }

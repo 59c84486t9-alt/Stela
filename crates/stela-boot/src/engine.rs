@@ -2854,6 +2854,7 @@ impl TranslatedSeen {
 struct ShadowSeen {
     counts: [u64; 9],
     causes: [u64; 7],
+    fields: [u64; 9],
 }
 
 impl ShadowSeen {
@@ -2861,8 +2862,9 @@ impl ShadowSeen {
     /// mapped beside them; the resets of the whole shadow, and of those
     /// the ones each cause led to (a half running out of frames, SPRR,
     /// TTBR0 or other controls, tag checks, invalidations and TLBIs of
-    /// everything); the resets of the lower half and of the views
-    /// SPRR_PERM_EL0 decides; the switches between SPRR_PERM_EL1 values' kernel roots and those that
+    /// everything, and for other controls the fields that differed); the
+    /// resets of the lower half and of the views SPRR_PERM_EL0 decides; the
+    /// switches between SPRR_PERM_EL1 values' kernel roots and those that
     /// found none kept; and the TLBIs that unmapped ranges instead.
     fn report(&mut self) {
         let host = host::statistics();
@@ -2892,9 +2894,23 @@ impl ShadowSeen {
         let [_, sprr, table, controls, tags, invalidated, maintained] =
             core::array::from_fn(|index| host.reset_causes[index] - self.causes[index]);
         self.causes = host.reset_causes;
+        let [
+            sctlr,
+            tcr,
+            ttbr0,
+            ttbr1,
+            mair,
+            sprr_field,
+            ctrr,
+            regime,
+            stage2,
+        ] = core::array::from_fn(|index| host.control_fields[index] - self.fields[index]);
+        self.fields = host.control_fields;
         output::arguments(format_args!(
             "SHADOW fills={fills} prefills={prefills} resets={resets} exhausted={exhausted} \
-             sprr={sprr} table={table} controls={controls} tags={tags} \
+             sprr={sprr} table={table} controls={controls} (sctlr={sctlr} tcr={tcr} \
+             ttbr0={ttbr0} ttbr1={ttbr1} mair={mair} sprr={sprr_field} ctrr={ctrr} \
+             regime={regime} stage2={stage2}) tags={tags} \
              invalidated={invalidated} maintained={maintained} \
              lower_resets={lower_resets} user_resets={user_resets} \
              bank_switches={bank_switches} bank_misses={bank_misses} scoped={scoped}\n"
