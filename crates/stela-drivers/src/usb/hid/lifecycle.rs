@@ -29,6 +29,7 @@ impl UsbInput {
     /// Complete lifecycle result for richer HID consumers. Stop events are
     /// emitted only after hardware acknowledges abandonment of its old TD.
     pub fn stop_hid(&mut self) -> Result<Poll, BlockError> {
+        self.invalidate_touch();
         self.controller.borrow().validate_device_id(self.id)?;
         if self.state == State::Stopped {
             return Ok(Poll::default());
@@ -79,6 +80,7 @@ impl UsbInput {
     /// Resume polling this same retained device after an acknowledged stop.
     /// Retired slot aliases and poisoned endpoints are rejected by the controller.
     pub fn restart(&mut self) -> Result<(), BlockError> {
+        self.invalidate_touch();
         self.controller.borrow().validate_device_id(self.id)?;
         if self.state != State::Stopped {
             return Err(BlockError::Unsupported(

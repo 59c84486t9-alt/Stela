@@ -21,9 +21,13 @@ pub mod descriptor;
 pub mod events;
 mod lifecycle;
 mod report;
+mod touch;
+#[cfg(test)]
+mod touch_tests;
 mod usages;
 
 pub use descriptor::{DecodeError, Descriptor, Frame, ReportType};
+pub use touch::{TouchDiscard, TouchFrame, TouchPoll};
 
 use super::xhci::{
     Controller, DEVICE_TO_HOST, Device, Endpoint, GET_DESCRIPTOR, Interface, Plan,
@@ -231,6 +235,7 @@ pub struct UsbInput {
     retry: Option<Retry>,
     reports: Reports,
     events: events::Decoder,
+    touch: Option<touch::Assembler>,
     /// The keyboard usages the last keyboard report held.
     held: Vec<u32>,
     buttons: u8,
@@ -364,6 +369,7 @@ impl UsbInput {
             retry: None,
             reports,
             events: events::Decoder::default(),
+            touch: None,
             held: Vec::new(),
             buttons: 0,
             position: None,
@@ -382,10 +388,26 @@ impl UsbInput {
 
     /// Service the actual owned interrupt-IN endpoint, bounded to 16 reports.
     pub fn poll_hid(&mut self) -> Poll {
+        self.poll_touch_hid().hid
+    }
+
+    /// Same actual HID service pass, with opt-in complete hybrid frames. Use
+    /// this method to consume assembled output; `poll_hid` retains raw output.
+    pub fn poll_touch_hid(&mut self) -> TouchPoll {
+        let mut touch = TouchPoll::default();
         let mut polled = Poll::default();
+        if self
+            .controller
+            .borrow()
+            .validate_device_id(self.id)
+            .is_err()
+        {
+            self.invalidate_touch();
+        }
         let now = self.controller.borrow().clock.now_us();
         if self.state != State::Running || self.retry.is_some_and(|retry| now < retry.at_us) {
-            return polled;
+            touch.hid = polled;
+            return touch;
         }
         for _ in 0..16 {
             let length = self.length;
@@ -428,12 +450,22 @@ impl UsbInput {
                         Some(descriptor) => match descriptor.decode(&bytes) {
                             Ok(frame) => {
                                 polled.events.extend(self.events.update(descriptor, &frame));
+                                if let Some(assembly) = &mut self.touch {
+                                    for event in &polled.events[events_at..] {
+                                        if let events::Event::Touch(packet) = event {
+                                            assembly.update(&frame, packet, &mut touch);
+                                        }
+                                    }
+                                }
                                 ReceivedReport::Data(frame)
                             }
-                            Err(error) => ReceivedReport::Rejected {
-                                bytes: bytes.clone(),
-                                error,
-                            },
+                            Err(error) => {
+                                self.invalidate_touch();
+                                ReceivedReport::Rejected {
+                                    bytes: bytes.clone(),
+                                    error,
+                                }
+                            }
                         },
                         None => ReceivedReport::Boot(bytes.clone()),
                     };
@@ -473,6 +505,7 @@ impl UsbInput {
                     continue;
                 }
                 Err(error) => {
+                    self.invalidate_touch();
                     self.error.get_or_insert_with(|| error.clone());
                     let recovered =
                         self.controller
@@ -501,10 +534,12 @@ impl UsbInput {
                 }
             }
         }
-        polled
+        touch.hid = polled;
+        touch
     }
 
     fn fault(&mut self, error: BlockError) {
+        self.invalidate_touch();
         self.error.get_or_insert(error);
         self.failed = true;
         self.state = State::Faulted;

@@ -74,6 +74,9 @@ impl UsbInput {
             u16::from(self.interface),
             length as u16,
         );
+        // Arbitrary feature/output writes may change digitizer mode/capacity.
+        // Re-enable through a fresh acknowledged maximum query afterward.
+        self.touch = None;
         self.controller
             .borrow_mut()
             .device(self.id)?
