@@ -9,6 +9,7 @@
 #include "compiler/tests/air_test_fixture.h"
 #include "compiler/tests/air_division_fixture.h"
 #include "compiler/tests/air_count_fixture.h"
+#include "compiler/tests/air_permutation_fixture.h"
 #include "compiler/tests/targets/intel.h"
 #include "compiler/tests/threadgroup_record.h"
 #include "intel/compiler/brw/brw_nir.h"
@@ -679,8 +680,49 @@ static void integer_count_tests(void)
         stela_metal_assembly_destroy(&library);
     }
 }
+static void permutation_options_tests(void)
+{
+    const char *platforms[] = {"bdw", "skl"};
+    for (unsigned i = 0; i < ARRAY_SIZE(platforms); i++) {
+        struct context c;
+        context(&c, platforms[i]);
+        const nir_shader_compiler_options *original = c.brw ?
+            &c.brw->nir_options[MESA_SHADER_COMPUTE] : c.elk->nir_options[MESA_SHADER_COMPUTE];
+        uint64_t original_mask = original->lower_int64_options;
+        LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_permutation_fixtures[3].body,
+                                                       stela_air_permutation_fixtures[3].declarations);
+        struct stela_metal_assembly *library = fixture(air);
+        LLVMDisposeMemoryBuffer(air);
+        struct stela_intel_air_options opts = options();
+        struct stela_intel_air_compilation *owner = compile(&c, library, 0, &opts, STELA_INTEL_AIR_OK);
+        const nir_shader *actual = stela_intel_air_nir(owner);
+        CHECK(actual && actual->options != original &&
+            actual->options->lower_int64_options == (original_mask |
+                (c.elk ? nir_lower_bitfield_reverse64 : 0)));
+        CHECK(original->lower_int64_options == original_mask);
+        expect_owned("integer-permutation-policy", c.name);
+        validate(&c, library, owner, "integer-permutation-policy");
+        CHECK(original->lower_int64_options == original_mask);
+        destroy(&owner);
+        stela_metal_assembly_destroy(&library);
+        ralloc_free(c.memory);
+    }
+}
+static void integer_permutation_tests(void)
+{
+    permutation_options_tests();
+    for (unsigned i = 0; i < ARRAY_SIZE(stela_air_permutation_fixtures); i++) {
+        LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_permutation_fixtures[i].body,
+                                                       stela_air_permutation_fixtures[i].declarations);
+        struct stela_metal_assembly *library = fixture(air);
+        LLVMDisposeMemoryBuffer(air);
+        targets(library, STELA_AIR_FP_IEEE_DEFAULT, stela_air_permutation_fixtures[i].name, 0);
+        stela_metal_assembly_destroy(&library);
+    }
+}
 static void original_tests(void)
 {
+    integer_permutation_tests();
     integer_count_tests();
     integer_division_tests();
     selected_tests();

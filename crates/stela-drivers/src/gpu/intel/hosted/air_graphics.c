@@ -453,6 +453,9 @@ enum stela_intel_graphics_status stela_intel_graphics_compile(const struct brw_c
     snapshot_policy(owner, brw, elk);
     for (unsigned i = 0; i < 2 && !status; i++) {
         owner->nir_options[i] = *nir_options[i];
+        /* Keep native 64-bit NIR for other backends; ELK's existing postprocess
+         * needs this missing reversal bit in each private stage option copy. */
+        if (elk) owner->nir_options[i].lower_int64_options |= nir_lower_bitfield_reverse64;
         status = reflect_bindings(owner, i, views[i]->reflection, error);
     }
     if (!status) {

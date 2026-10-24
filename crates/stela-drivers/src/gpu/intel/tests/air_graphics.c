@@ -7,6 +7,8 @@
 #include "../hosted/air_graphics.h"
 #include "compiler/tests/probe_report.h"
 #include "compiler/tests/targets/intel.h"
+#include "compiler/tests/air_test_fixture.h"
+#include "compiler/tests/air_permutation_stage_fixture.h"
 #include "util/ralloc.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <stdarg.h>
@@ -350,8 +352,106 @@ static void target(const struct bytes *raw, const char *vs, const char *fs, cons
     stela_intel_graphics_destroy(&output); CHECK(!output && !live_allocations && !live_contexts);
     stela_intel_graphics_destroy(&output);
 }
+static void permutation_stage_options_tests(void)
+{
+    LLVMMemoryBufferRef bitcode = stela_air_test_custom_bitcode("",
+        stela_air_permutation_stage_fixture, "", "");
+    struct bytes raw = {.data = (uint8_t *)LLVMGetBufferStart(bitcode),
+                        .size = LLVMGetBufferSize(bitcode)};
+    const char *platforms[] = {"bdw", "skl"};
+    for (unsigned target_index = 0; target_index < ARRAY_SIZE(platforms); target_index++) {
+        const char *platform = platforms[target_index];
+        struct intel_device_info device;
+        int pci = intel_device_name_to_pci_device_id(platform);
+        CHECK(pci >= 0 && intel_get_device_info_for_build(pci, &device));
+        bool legacy = stela_intel_elk(&device);
+        void *context = ralloc_context(NULL); CHECK(context);
+        struct brw_compiler *brw = legacy ? NULL : brw_compiler_create(context, &device);
+        struct elk_compiler *elk = legacy ? elk_compiler_create(context, &device) : NULL;
+        CHECK(brw || elk);
+        if (brw) brw->shader_debug_log = brw->shader_perf_log = compiler_log;
+        else elk->shader_debug_log = elk->shader_perf_log = compiler_log;
+        const nir_shader_compiler_options *original[2];
+        uint64_t original_mask[2];
+        for (unsigned i = 0; i < 2; i++) {
+            mesa_shader_stage role = i ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX;
+            original[i] = brw ? &brw->nir_options[role] : elk->nir_options[role];
+            original_mask[i] = original[i]->lower_int64_options;
+        }
+        struct stela_metal_assembly *vertex = stage(&raw, "permutation_vertex", STELA_AIR_VERTEX);
+        struct stela_metal_assembly *fragment = stage(&raw, "permutation_fragment", STELA_AIR_FRAGMENT);
+        struct stela_intel_graphics_compilation *output = NULL;
+        struct stela_intel_graphics_options opts = options();
+        opts.vertex_fp_profile = opts.fragment_fp_profile = STELA_AIR_FP_IEEE_DEFAULT;
+        struct stela_intel_graphics_error error;
+#ifdef STELA_INTEL_GRAPHICS_ALLOCATION_TEST
+        bool success = false;
+        for (unsigned n = 1; n <= 32; n++) {
+            allocations = 0; fail_allocation = n;
+            enum stela_intel_graphics_status status = stela_intel_graphics_compile(brw, elk, NULL,
+                &vertex, &fragment, &opts, &output, &error);
+            if (!status) { success = true; break; }
+            CHECK(vertex && fragment && !output && !live_allocations && !live_contexts);
+        }
+        fail_allocation = 0; CHECK(success);
+#else
+        enum stela_intel_graphics_status status = stela_intel_graphics_compile(brw, elk, NULL,
+            &vertex, &fragment, &opts, &output, &error);
+        if (status) fprintf(stderr, "permutation stages %s status%u: %s AIR%u %s\n",
+            platform, status, error.detail, error.air.kind, error.air.detail);
+        CHECK(status == STELA_INTEL_GRAPHICS_OK);
+#endif
+        CHECK(output && !vertex && !fragment);
+        for (unsigned i = 0; i < 2; i++) {
+            const nir_shader *actual = stela_intel_graphics_nir(output,
+                i ? STELA_AIR_FRAGMENT : STELA_AIR_VERTEX);
+            CHECK(actual && actual->options != original[i] &&
+                actual->options->lower_int64_options == (original_mask[i] |
+                    (elk ? nir_lower_bitfield_reverse64 : 0)));
+            CHECK(original[i]->lower_int64_options == original_mask[i]);
+            if (elk) {
+                unsigned reversals = 0;
+                nir_foreach_function_impl(impl, (nir_shader *)actual) {
+                    nir_foreach_block(block, impl) {
+                        nir_foreach_instr(instr, block) {
+                            if (instr->type == nir_instr_type_alu &&
+                                nir_instr_as_alu(instr)->op == nir_op_bitfield_reverse) {
+                                CHECK(nir_instr_as_alu(instr)->def.bit_size == 32);
+                                reversals++;
+                            }
+                        }
+                    }
+                }
+                CHECK(reversals); /* Actual owner after the real ELK postprocess. */
+            }
+        }
+        whole_span(brw, elk, output); /* Actual complete compiled ISA. */
+        const struct stela_intel_graphics_stage_binary *vs = stela_intel_graphics_binary(output, STELA_AIR_VERTEX);
+        const struct stela_intel_graphics_stage_binary *fs = stela_intel_graphics_binary(output, STELA_AIR_FRAGMENT);
+        CHECK(vs && fs && vs->code_bytes && fs->code_bytes);
+        char target[64]; snprintf(target, sizeof(target), "integer-permutation-graphics/%s", platform);
+        record_expect(target, NULL);
+        record_compiled(target, (uint64_t)vs->code_bytes + fs->code_bytes);
+        ralloc_free(context);
+        for (unsigned i = 0; i < 2; i++) {
+            const nir_shader *actual = stela_intel_graphics_nir(output,
+                i ? STELA_AIR_FRAGMENT : STELA_AIR_VERTEX);
+            CHECK(actual->options->lower_int64_options == (original_mask[i] |
+                (legacy ? nir_lower_bitfield_reverse64 : 0)));
+        }
+        stela_intel_graphics_destroy(&output);
+        CHECK(!output && !live_allocations && !live_contexts);
+    }
+    LLVMDisposeMemoryBuffer(bitcode);
+}
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--permutation")) {
+        process_intel_debug_variable(); glsl_type_singleton_init_or_ref();
+        permutation_stage_options_tests();
+        glsl_type_singleton_decref();
+        return 0;
+    }
     CHECK(argc == 5); /* Actual rawAIR,VSentry,FSentry, immutable original05c output directory. */
     FILE *file = fopen(argv[1],"rb"); CHECK(file && !fseek(file,0,SEEK_END));
     long size = ftell(file);

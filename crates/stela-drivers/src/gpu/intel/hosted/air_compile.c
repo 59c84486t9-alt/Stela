@@ -303,6 +303,9 @@ enum stela_intel_air_status stela_intel_air_compile_specialized(const struct brw
         policy->scalar_stage = elk->scalar_stage[MESA_SHADER_COMPUTE]; policy->constant_buffer_0_is_relative = elk->constant_buffer_0_is_relative;
         policy->supports_shader_constants = elk->supports_shader_constants; policy->has_negative_rhw_bug = elk->has_negative_rhw_bug;
         owner->nir_options = *elk->nir_options[MESA_SHADER_COMPUTE];
+        /* ELK selects 32-bit reversal; its existing postprocess must lower 64-bit reversal.
+         * Only this retained owner's copy changes, never the compiler policy. */
+        owner->nir_options.lower_int64_options |= nir_lower_bitfield_reverse64;
     }
     memcpy(policy->debug, intel_debug, sizeof(policy->debug)); policy->simd = intel_simd; policy->simd_overridden = intel_simd_overridden;
     enum stela_intel_air_status status = copy_provenance(owner, manifest, record, selected, error);

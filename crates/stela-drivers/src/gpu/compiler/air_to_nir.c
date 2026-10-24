@@ -1006,6 +1006,78 @@ integer_count(struct translator *t, LLVMValueRef inst, LLVMValueRef callee,
    return put_value(t, inst, nir_u2uN(&t->b, count, bits), 0);
 }
 
+enum integer_permutation_operation {
+   INTEGER_REVERSE_BITS,
+   INTEGER_SWAP_BYTES,
+};
+
+enum { AIR_BYTE_BITS = 8, AIR_HALFWORD_BITS = 16, AIR_WORD_BITS = 32 };
+
+static nir_def *
+byte_swap32(nir_builder *b, nir_def *value)
+{
+   const uint32_t low_bytes_of_halfwords = UINT32_C(0x00ff00ff);
+   nir_def *adjacent = nir_ior(b,
+      nir_ishl_imm(b, nir_iand_imm(b, value, low_bytes_of_halfwords), AIR_BYTE_BITS),
+      nir_iand_imm(b, nir_ushr_imm(b, value, AIR_BYTE_BITS), low_bytes_of_halfwords));
+   return nir_ior(b, nir_ishl_imm(b, adjacent, AIR_HALFWORD_BITS),
+                     nir_ushr_imm(b, adjacent, AIR_HALFWORD_BITS));
+}
+
+static bool
+integer_permutation(struct translator *t, LLVMValueRef inst, LLVMValueRef callee,
+                    unsigned intrinsic, enum integer_permutation_operation operation)
+{
+   unsigned components, bits;
+   LLVMTypeRef type = LLVMTypeOf(inst);
+   if (!shape(type, &components, &bits) || bits == 1 ||
+       (operation == INTEGER_SWAP_BYTES && bits % AIR_HALFWORD_BITS))
+      return fail(t, STELA_AIR_TYPE, "unsupported LLVM integer-permutation result shape");
+   LLVMTypeRef expected = LLVMIntrinsicGetType(t->context, intrinsic, &type, 1);
+   if (!LLVMIsDeclaration(callee) || LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
+       LLVMGetInstructionCallConv(inst) != LLVMCCallConv ||
+       LLVMGlobalGetValueType(callee) != expected || LLVMGetCalledFunctionType(inst) != expected ||
+       LLVMGetNumArgOperands(inst) != 1 || LLVMCountParams(callee) != 1 ||
+       LLVMIsFunctionVarArg(expected) || LLVMGetNumOperandBundles(inst) ||
+       LLVMTypeOf(LLVMGetOperand(inst, 0)) != type)
+      return fail(t, STELA_AIR_TYPE, "unsupported LLVM integer-permutation call signature");
+   size_t canonical_length = 0, name_length = 0;
+   char *canonical = LLVMIntrinsicCopyOverloadedName2(t->module, intrinsic, &type, 1,
+                                                     &canonical_length);
+   if (!canonical)
+      return fail(t, STELA_AIR_ALLOCATION, "LLVM integer-permutation overload name unavailable");
+   const char *name = LLVMGetValueName2(callee, &name_length);
+   bool canonical_name = name_length == canonical_length && !memcmp(name, canonical, name_length);
+   LLVMDisposeMessage(canonical);
+   if (!canonical_name)
+      return fail(t, STELA_AIR_INSTRUCTION, "noncanonical LLVM integer-permutation overload name");
+   nir_def *input = get_value(t, LLVMGetOperand(inst, 0));
+   if (!input)
+      return false;
+   if (input->num_components != components || input->bit_size != bits)
+      return fail(t, STELA_AIR_TYPE, "LLVM integer-permutation operand shape mismatch");
+   if (bits < AIR_WORD_BITS)
+      input = nir_u2u32(&t->b, input);
+   nir_def *result;
+   if (operation == INTEGER_REVERSE_BITS) {
+      /* Keep native64 available to ACO's uniform scalar selector. Each actual
+       * compiler owns its existing lowering; ELK intake adds its missing bit. */
+      result = nir_bitfield_reverse(&t->b, input);
+      if (bits < AIR_WORD_BITS)
+         result = nir_ushr_imm(&t->b, result, AIR_WORD_BITS - bits);
+   } else if (bits == AIR_HALFWORD_BITS) {
+      result = nir_ior(&t->b, nir_ishl_imm(&t->b, input, AIR_BYTE_BITS),
+                             nir_ushr_imm(&t->b, input, AIR_BYTE_BITS));
+   } else if (bits == AIR_WORD_BITS) {
+      result = byte_swap32(&t->b, input);
+   } else {
+      nir_def *low = byte_swap32(&t->b, nir_unpack_64_2x32_split_x(&t->b, input));
+      nir_def *high = byte_swap32(&t->b, nir_unpack_64_2x32_split_y(&t->b, input));
+      result = nir_pack_64_2x32_split(&t->b, high, low);
+   }
+   return put_value(t, inst, nir_u2uN(&t->b, result, bits), 0);
+}
+
 static bool same_pointer_resource(const struct value *a, const struct value *b);
 
 static bool
@@ -1079,6 +1151,18 @@ instruction(struct translator *t, LLVMValueRef inst)
             unsigned expected = LLVMLookupIntrinsicID(counts[operation], strlen(counts[operation]));
             if (expected && intrinsic == expected)
                return integer_count(t, inst, callee, intrinsic, (enum integer_count_operation)operation);
+         }
+      }
+      if (LLVMIsAFunction(callee)) {
+         unsigned intrinsic = LLVMGetIntrinsicID(callee);
+         static const char *const permutations[] = {
+            [INTEGER_REVERSE_BITS] = "llvm.bitreverse",
+            [INTEGER_SWAP_BYTES] = "llvm.bswap",
+         };
+         for (unsigned operation = 0; intrinsic && operation < ARRAY_SIZE(permutations); operation++) {
+            unsigned expected = LLVMLookupIntrinsicID(permutations[operation], strlen(permutations[operation]));
+            if (expected && intrinsic == expected)
+               return integer_permutation(t, inst, callee, intrinsic, (enum integer_permutation_operation)operation);
          }
       }
       size_t name_length = 0;

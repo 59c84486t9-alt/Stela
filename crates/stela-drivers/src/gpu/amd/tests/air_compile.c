@@ -9,6 +9,7 @@
 #include "compiler/tests/air_test_fixture.h"
 #include "compiler/tests/air_division_fixture.h"
 #include "compiler/tests/air_count_fixture.h"
+#include "compiler/tests/air_permutation_fixture.h"
 #include "compiler/tests/targets/amd.h"
 #include "compiler/tests/threadgroup_record.h"
 #include "util/ralloc.h"
@@ -480,8 +481,20 @@ static void integer_count_tests(void)
         stela_metal_assembly_destroy(&library);
     }
 }
+static void integer_permutation_tests(void)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(stela_air_permutation_fixtures); i++) {
+        LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_permutation_fixtures[i].body,
+                                                       stela_air_permutation_fixtures[i].declarations);
+        struct stela_metal_assembly *library = fixture(air);
+        LLVMDisposeMemoryBuffer(air);
+        targets(library, STELA_AIR_FP_IEEE_DEFAULT, stela_air_permutation_fixtures[i].name);
+        stela_metal_assembly_destroy(&library);
+    }
+}
 static void original_tests(void)
 {
+    integer_permutation_tests();
     integer_count_tests();
     integer_division_tests();
    LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_test_store_body, "");

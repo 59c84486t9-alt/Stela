@@ -672,7 +672,7 @@ if with_intel
     # The test includes air_graphics.c itself; the second variant denies its
     # allocations.
     foreach variant : [['', []], ['_alloc', ['-DSTELA_INTEL_GRAPHICS_ALLOCATION_TEST']]]
-      executable(
+      stela_intel_air_graphics_test = executable(
         'stela_intel_air_graphics_test' + variant[0],
         '../intel/tests/air_graphics.c',
         include_directories : [inc_include, inc_src, inc_gpu, inc_intel],
@@ -688,6 +688,8 @@ if with_intel
         c_args : variant[1],
         build_rpath : fs.parent(stela_air_llvm),
       )
+      test('stela_intel_air_graphics_permutation' + variant[0], stela_intel_air_graphics_test,
+           args : ['--permutation'], suite : 'stela')
     endforeach
   endif
   if stela_air_llvm != ''
