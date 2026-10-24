@@ -102,6 +102,15 @@ impl Request {
         unsafe { stela_linux_page_request_basic(self.gfp) }
     }
 
+    /// Reclaimable-class RAM with the otherwise ordinary flag policy.
+    /// A provider must explicitly supply Linux's permitted unmovable fallback
+    /// from its actual retained RAM. This grants no migration, background
+    /// reclaim, atomic context or physical/DMA authority by itself.
+    pub fn reclaimable_ram(self) -> bool {
+        // SAFETY: pure classification using the pinned Linux GFP constants.
+        unsafe { stela_linux_page_request_reclaimable(self.gfp) }
+    }
+
     pub fn may_block(self) -> bool {
         // SAFETY: pure GFP classification; no platform or owner is accessed.
         unsafe { stela_linux_page_request_blocking(self.gfp) }
@@ -165,6 +174,7 @@ unsafe extern "C" {
     fn stela_linux_page_catalog_unregister(generation: u64) -> c_int;
     fn stela_linux_page_catalog_verify(generation: u64) -> c_int;
     fn stela_linux_page_request_basic(gfp: u32) -> bool;
+    fn stela_linux_page_request_reclaimable(gfp: u32) -> bool;
     fn stela_linux_page_request_blocking(gfp: u32) -> bool;
 }
 

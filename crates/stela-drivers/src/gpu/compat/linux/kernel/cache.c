@@ -13,6 +13,7 @@
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <stela/cache.h>
 #include <stela/linux.h>
 #include <stela/page.h>
 
@@ -60,6 +61,29 @@ struct kmem_cache {
 };
 
 static struct kmem_cache *caches;
+static struct stela_linux_slab_pages slab_pages;
+
+struct stela_linux_slab_pages stela_linux_slab_owned_pages(void)
+{
+	(void)stela_linux_owner();
+	return slab_pages;
+}
+
+static size_t *slab_page_counter(const struct kmem_cache *cache)
+{
+	return cache->flags & SLAB_RECLAIM_ACCOUNT ?
+		&slab_pages.reclaimable : &slab_pages.unreclaimable;
+}
+
+static bool charge_slab_pages(const struct kmem_cache *cache)
+{
+	size_t pages = (size_t)1 << cache->order;
+	size_t *total = slab_page_counter(cache);
+	if (pages > SIZE_MAX - *total)
+		return false;
+	*total += pages;
+	return true;
+}
 
 #ifdef STELA_LINUX_CACHE_TEST
 /* Acquisition failure injection is confined to the inline hosted harness. */
@@ -128,11 +152,11 @@ struct kmem_cache *__kmem_cache_create_args(const char *name, unsigned int objec
 	const struct kmem_cache_args defaults = {0};
 	const struct kmem_cache_args *options = args ? args : &defaults;
 	slab_flags_t allowed = SLAB_HWCACHE_ALIGN | SLAB_TYPESAFE_BY_RCU | SLAB_PANIC |
-		SLAB_NO_MERGE | SLAB_NO_SHEAVES;
+		SLAB_NO_MERGE | SLAB_NO_SHEAVES | SLAB_RECLAIM_ACCOUNT;
 	if (!stela_linux_quiescent())
 		return creation_failure(flags, "cache creation context", true);
 	if (flags & ~allowed)
-		return creation_failure(flags, "cache creation flags (including reclaim accounting)", true);
+		return creation_failure(flags, "cache creation flags", true);
 	if (options->use_freeptr_offset || options->sheaf_capacity ||
 	    (IS_ENABLED(CONFIG_HARDENED_USERCOPY) && (options->usersize || options->useroffset)))
 		return creation_failure(flags, "cache custom freelist, sheaves or hardened usercopy", true);
@@ -207,13 +231,20 @@ static struct cache_slab *grow_cache(struct kmem_cache *cache, gfp_t flags)
 	/* Canonical policy/provider validation precedes slab metadata acquisition.
 	 * Compound ownership retains the entire extent if any tail is pinned.
 	 * This internal bookkeeping adds COMP without dropping any caller bit. */
-	struct page *pages = alloc_pages_noprof(flags | __GFP_COMP, cache->order);
+	gfp_t backing_flags = flags | __GFP_COMP;
+	if (cache->flags & SLAB_RECLAIM_ACCOUNT)
+		backing_flags |= __GFP_RECLAIMABLE;
+	struct page *pages = alloc_pages_noprof(backing_flags, cache->order);
 	if (!pages) {
 		cache->growing--;
 		return NULL;
 	}
 	struct cache_slab *slab = allocate_metadata(metadata_size, __alignof__(*slab));
-	if (!slab) {
+	/* Whole backing, not occupied object bytes, becomes slab-owned only once
+	 * both acquisitions succeed. Constructors can observe this charge. */
+	if (!slab || !charge_slab_pages(cache)) {
+		if (slab)
+			free_metadata(slab, metadata_size, __alignof__(*slab));
 		__free_pages(pages, cache->order);
 		cache->growing--;
 		stela_linux_pages_finish();
@@ -334,11 +365,17 @@ unsigned int kmem_cache_size(struct kmem_cache *cache)
 static void release_slab(struct cache_slab *slab)
 {
 	struct kmem_cache *cache = slab->cache;
-	if (slab->free_count != slab->count || page_ref_count(slab->pages) != 1)
+	size_t pages = (size_t)1 << cache->order;
+	size_t *total = slab_page_counter(cache);
+	if (slab->free_count != slab->count || page_ref_count(slab->pages) != 1 ||
+	    *total < pages)
 		__builtin_trap();
 	/* In an RCU callback this only queues the native pin. The existing owner
 	 * exit drains callbacks before process-context page-provider release. */
 	__free_pages(slab->pages, cache->order);
+	/* The slab relinquished its last whole page grant. The page catalog may
+	 * still queue native pin release; that is no longer slab-owned storage. */
+	*total -= pages;
 	free_metadata(slab, slab->metadata_size, __alignof__(*slab));
 }
 
@@ -462,6 +499,9 @@ static struct {
 	unsigned int allocations;
 	unsigned int releases;
 	unsigned int refusals;
+	u32 seen_gfp;
+	unsigned int seen_order;
+	bool reclaimable_fallback;
 	bool exhausted;
 	bool refuse_policy;
 	bool malformed;
@@ -471,9 +511,13 @@ static int test_validate(void *context, u32 gfp, unsigned int order, bool atomic
 {
 	assert(context == &fixture && !stela_linux_try_enter(&stela_linux_bare));
 	fixture.validations++;
+	fixture.seen_gfp = gfp;
+	fixture.seen_order = order;
 	assert(order <= MAX_PAGE_ORDER);
 	assert(gfp & (__force u32)__GFP_COMP);
-	if (fixture.refuse_policy || atomic || !stela_linux_page_request_basic(gfp) ||
+	bool policy = stela_linux_page_request_basic(gfp) ||
+		(fixture.reclaimable_fallback && stela_linux_page_request_reclaimable(gfp));
+	if (fixture.refuse_policy || atomic || !policy ||
 	    !stela_linux_page_request_blocking(gfp))
 		return -EOPNOTSUPP;
 	return 0;
@@ -482,7 +526,10 @@ static int test_validate(void *context, u32 gfp, unsigned int order, bool atomic
 static int test_allocate(void *context, u32 gfp, unsigned int order, bool atomic,
 			 struct stela_linux_page_allocation *allocation)
 {
-	assert(context == &fixture && !atomic && stela_linux_page_request_basic(gfp));
+	assert(context == &fixture && !atomic);
+	assert(gfp == fixture.seen_gfp && order == fixture.seen_order);
+	assert(stela_linux_page_request_basic(gfp) ||
+	       (fixture.reclaimable_fallback && stela_linux_page_request_reclaimable(gfp)));
 	fixture.attempts++;
 	if (fixture.exhausted || order > 5)
 		return -ENOMEM;
@@ -546,8 +593,15 @@ static const struct stela_linux_page_ops test_ops = {
 	.validate = test_validate, .allocate = test_allocate, .release = test_release,
 };
 
+static void check_totals(size_t reclaimable, size_t unreclaimable)
+{
+	struct stela_linux_slab_pages totals = stela_linux_slab_owned_pages();
+	assert(totals.reclaimable == reclaimable && totals.unreclaimable == unreclaimable);
+}
+
 static void check_clean(void)
 {
+	check_totals(0, 0);
 	assert(!caches && !metadata_live && metadata_fail_after == SIZE_MAX);
 	stela_linux_rcu_finish();
 	stela_linux_pages_finish();
@@ -879,7 +933,7 @@ static void capacity_and_failures(void)
 static void policy_and_creation(void)
 {
 	const slab_flags_t unsupported_flags[] = {
-		SLAB_RECLAIM_ACCOUNT, SLAB_CACHE_DMA, SLAB_CACHE_DMA32,
+		SLAB_CACHE_DMA, SLAB_CACHE_DMA32,
 		SLAB_POISON, (__force slab_flags_t)(1U << 31),
 	};
 	for (size_t i = 0; i < ARRAY_SIZE(unsupported_flags); i++) {
@@ -961,6 +1015,165 @@ static void policy_and_creation(void)
 	check_clean();
 }
 
+static size_t accounting_constructors;
+
+static void accounting_ctor(void *pointer)
+{
+	/* Backing is charged before any constructor, including unused slots. */
+	check_totals(3, 1);
+	memset(pointer, 0x34, 96);
+	accounting_constructors++;
+}
+
+static void reclaim_accounting(void)
+{
+	struct kmem_cache *plain = __kmem_cache_create_args("plain-account", 96, NULL, 0);
+	struct kmem_cache_args aligned = {.align = 2 * PAGE_SIZE};
+	struct kmem_cache *reclaim = __kmem_cache_create_args("reclaim-account", PAGE_SIZE + 573,
+							  &aligned, SLAB_RECLAIM_ACCOUNT);
+	assert(plain && reclaim && reclaim->order == 1 && reclaim->stride == 2 * PAGE_SIZE);
+	check_totals(0, 0);
+	const gfp_t flags = GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_NOWARN | __GFP_NOMEMALLOC;
+	void *ordinary = kmem_cache_alloc(plain, flags);
+	assert(ordinary && fixture.seen_gfp == (__force u32)(flags | __GFP_COMP));
+	check_totals(0, 1);
+	void *object = kmem_cache_alloc(reclaim, flags);
+	assert(object && fixture.seen_order == 1);
+	assert(fixture.seen_gfp == (__force u32)(flags | __GFP_COMP | __GFP_RECLAIMABLE));
+	check_totals(2, 1);
+	for (size_t i = 0; i < PAGE_SIZE + 573; i++)
+		assert(!((u8 *)object)[i]);
+	struct kmem_cache_args args = {.ctor = accounting_ctor};
+	struct kmem_cache *constructed = __kmem_cache_create_args("reclaim-constructor", 96,
+							       &args, SLAB_RECLAIM_ACCOUNT);
+	assert(constructed);
+	void *with_ctor = kmem_cache_alloc(constructed, GFP_KERNEL);
+	assert(with_ctor && accounting_constructors == PAGE_SIZE / constructed->stride);
+	check_totals(3, 1);
+	kmem_cache_free(plain, ordinary);
+	kmem_cache_free(reclaim, object);
+	kmem_cache_free(constructed, with_ctor);
+	check_totals(3, 1);
+	/* Cache backing and its accounting outlive each borrowed owner entry. */
+	const struct stela_linux_owner *original_owner = stela_linux_owner();
+	const struct stela_linux_owner next_owner = *original_owner;
+	stela_linux_exit();
+	stela_linux_enter(&next_owner);
+	check_totals(3, 1);
+	stela_linux_exit();
+	stela_linux_enter(original_owner);
+	check_totals(3, 1);
+	unsigned int validations = fixture.validations;
+	rcu_read_lock();
+	void *ready = kmem_cache_alloc(reclaim, GFP_NOWAIT);
+	assert(ready == object && fixture.validations == validations);
+	kmem_cache_free(reclaim, ready);
+	check_totals(3, 1);
+	rcu_read_unlock();
+	assert(!kmem_cache_shrink(reclaim));
+	check_totals(1, 1);
+	kmem_cache_destroy(reclaim);
+	kmem_cache_destroy(plain);
+	check_totals(1, 0);
+	kmem_cache_destroy(constructed);
+	check_clean();
+}
+
+static void reclaim_failure_rollback(void)
+{
+	for (unsigned int class = 0; class < 2; class++) {
+		slab_flags_t flags = class ? SLAB_RECLAIM_ACCOUNT : 0;
+		struct kmem_cache *cache = __kmem_cache_create_args("account-rollback", PAGE_SIZE + 1,
+								 NULL, flags);
+		assert(cache && cache->order == 1 && metadata_live == 1);
+		unsigned int releases = fixture.releases;
+		metadata_fail_after = 0;
+		assert(!kmem_cache_alloc(cache, GFP_KERNEL));
+		assert(fixture.releases == releases + 1 && metadata_live == 1 && !cache->slabs);
+		metadata_fail_after = SIZE_MAX;
+		check_totals(0, 0);
+		fixture.exhausted = true;
+		assert(!kmem_cache_alloc(cache, GFP_KERNEL));
+		fixture.exhausted = false;
+		check_totals(0, 0);
+		fixture.malformed = true;
+		assert(!kmem_cache_alloc(cache, GFP_KERNEL));
+		fixture.malformed = false;
+		check_totals(0, 0);
+		/* Test-only exhausted counter injection: exercise the otherwise
+		 * unreachable arithmetic edge after real page+metadata acquisition. */
+		size_t *counter = slab_page_counter(cache);
+		*counter = SIZE_MAX - 1;
+		releases = fixture.releases;
+		assert(!kmem_cache_alloc(cache, GFP_KERNEL));
+		assert(*counter == SIZE_MAX - 1 && fixture.releases == releases + 1);
+		assert(metadata_live == 1 && !cache->slabs && !cache->growing);
+		*counter = 0;
+		if (class) {
+			fixture.reclaimable_fallback = false;
+			unsigned int attempts = fixture.attempts;
+			unsigned int refusals = fixture.refusals;
+			assert(!kmem_cache_alloc(cache, GFP_KERNEL));
+			assert(fixture.attempts == attempts && fixture.refusals == refusals + 1);
+			assert(!cache->slabs && metadata_live == 1);
+			check_totals(0, 0);
+			fixture.reclaimable_fallback = true;
+		}
+		void *object = kmem_cache_alloc(cache, GFP_KERNEL);
+		assert(object);
+		check_totals(class ? 2 : 0, class ? 0 : 2);
+		kmem_cache_free(cache, object);
+		kmem_cache_destroy(cache);
+		check_clean();
+	}
+}
+
+static void reclaim_rcu_and_external_pins(void)
+{
+	for (unsigned int class = 0; class < 2; class++) {
+		struct kmem_cache *cache = __kmem_cache_create_args("account-rcu", PAGE_SIZE + 1,
+			NULL, SLAB_TYPESAFE_BY_RCU | (class ? SLAB_RECLAIM_ACCOUNT : 0));
+		void *object = kmem_cache_alloc(cache, GFP_KERNEL);
+		assert(object && cache->order == 1);
+		struct page *head = virt_to_page(object);
+		struct page *tail = head + 1;
+		kmem_cache_free(cache, object);
+		get_page(tail);
+		assert(kmem_cache_shrink(cache) == 1);
+		check_totals(class ? 2 : 0, class ? 0 : 2);
+		put_page(tail);
+		assert(!kmem_cache_shrink(cache) && cache->pending == 1 && !cache->slabs);
+		check_totals(class ? 2 : 0, class ? 0 : 2);
+		/* A reader pins the detached slab before its real grace period. */
+		rcu_read_lock();
+		get_page(tail);
+		rcu_read_unlock();
+		unsigned int releases = fixture.releases;
+		stela_linux_rcu_finish();
+		assert(cache->slabs && !cache->pending && fixture.releases == releases);
+		check_totals(class ? 2 : 0, class ? 0 : 2);
+		unsigned int refusals = fixture.refusals;
+		kmem_cache_destroy(cache);
+		assert(fixture.refusals == refusals + 1 && !cache->destroying);
+		check_totals(class ? 2 : 0, class ? 0 : 2);
+		put_page(tail);
+		assert(!kmem_cache_shrink(cache) && cache->pending == 1);
+		check_totals(class ? 2 : 0, class ? 0 : 2);
+		stela_linux_rcu_finish();
+		assert(!cache->pending && !cache->slabs && fixture.releases == releases);
+		check_totals(0, 0);
+		stela_linux_pages_finish();
+		assert(fixture.releases == releases + 1);
+		kmem_cache_destroy(cache);
+		check_clean();
+	}
+}
+
+static void accounting_outside_owner(void)
+{
+	(void)stela_linux_slab_owned_pages();
+}
+
 static void panic_failure(void)
 {
 	metadata_fail_after = 0;
@@ -970,7 +1183,7 @@ static void panic_failure(void)
 static void strict_refusal(void)
 {
 	stela_linux_enter(&stela_linux_bare);
-	(void)__kmem_cache_create_args("strict", 96, NULL, SLAB_RECLAIM_ACCOUNT);
+	(void)__kmem_cache_create_args("strict", 96, NULL, SLAB_CACHE_DMA);
 }
 
 static void outside_owner(void)
@@ -988,6 +1201,7 @@ int main(void)
 		.generation = 1, .physical_base = TEST_PHYSICAL,
 		.cpu_base = fixture.cpu, .page_count = TEST_PAGES,
 	};
+	fixture.reclaimable_fallback = true;
 	stela_linux_enter(&owner);
 	assert(!stela_linux_page_catalog_register(&reservation, &test_ops, &fixture));
 	constructor_and_rcu_reuse();
@@ -997,14 +1211,18 @@ int main(void)
 	destroy_and_misuse();
 	capacity_and_failures();
 	policy_and_creation();
+	reclaim_accounting();
+	reclaim_failure_rollback();
+	reclaim_rcu_and_external_pins();
 	assert(stela_test_traps(panic_failure));
 	check_clean();
 	assert(!stela_linux_page_catalog_unregister(1));
 	stela_linux_exit();
 	assert(stela_test_traps(strict_refusal));
 	assert(stela_test_traps(outside_owner));
+	assert(stela_test_traps(accounting_outside_owner));
 	free(fixture.cpu);
-	printf("Linux caches: page backing, constructor reuse, RCU/reference lifetime and policy passed\n");
+	printf("Linux caches: page backing, reclaim accounting, constructors, RCU/reference lifetime and policy passed\n");
 	return 0;
 }
 #endif

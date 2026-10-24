@@ -66,5 +66,9 @@ int stela_linux_page_catalog_verify(u64 generation);
  * explicitly unsupported by this fallible service: graceful mode reports it
  * and returns NULL; the strict owner's reporting callback stops execution. */
 bool stela_linux_page_request_basic(u32 gfp);
+/* Separate policy: requires RECLAIMABLE and otherwise the same basic flags.
+ * A real provider may explicitly opt in to Linux's permitted unmovable RAM
+ * fallback. No placement, migration, reclaim-progress or atomic grant follows. */
+bool stela_linux_page_request_reclaimable(u32 gfp);
 bool stela_linux_page_request_blocking(u32 gfp);
 #endif

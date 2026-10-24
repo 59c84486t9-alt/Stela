@@ -117,6 +117,15 @@ bool stela_linux_page_request_basic(u32 gfp)
 	return !(gfp & ~(__force u32)allowed);
 }
 
+bool stela_linux_page_request_reclaimable(u32 gfp)
+{
+	/* Explicit mobility-class fallback, separate from the basic policy. A
+	 * provider must opt in to actual permitted unmovable RAM backing; this
+	 * classifier alone grants neither allocation nor migration authority. */
+	u32 reclaimable = (__force u32)__GFP_RECLAIMABLE;
+	return (gfp & reclaimable) && stela_linux_page_request_basic(gfp & ~reclaimable);
+}
+
 bool stela_linux_page_request_blocking(u32 gfp)
 {
 	return gfpflags_allow_blocking((__force gfp_t)gfp);
@@ -1387,8 +1396,38 @@ static void sg_page_segments(void)
 	assert(!catalog.live_pages);
 }
 
+static void reclaimable_policy(void)
+{
+	const gfp_t ordinary[] = {
+		0, GFP_KERNEL, GFP_NOWAIT, GFP_KERNEL_ACCOUNT,
+		GFP_KERNEL | __GFP_ZERO | __GFP_COMP | __GFP_NOWARN | __GFP_NOMEMALLOC,
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(ordinary); i++) {
+		u32 gfp = (__force u32)ordinary[i];
+		u32 reclaimable = gfp | (__force u32)__GFP_RECLAIMABLE;
+		assert(stela_linux_page_request_basic(gfp));
+		assert(!stela_linux_page_request_reclaimable(gfp));
+		assert(!stela_linux_page_request_basic(reclaimable));
+		assert(stela_linux_page_request_reclaimable(reclaimable));
+		assert(stela_linux_page_request_blocking(gfp) ==
+		       stela_linux_page_request_blocking(reclaimable));
+	}
+	const gfp_t unsupported[] = {
+		__GFP_MOVABLE, __GFP_DMA, __GFP_DMA32, __GFP_HIGHMEM, __GFP_HIGH,
+		__GFP_MEMALLOC, GFP_ATOMIC, __GFP_NOFAIL, __GFP_RETRY_MAYFAIL,
+		__GFP_NORETRY, __GFP_THISNODE, __GFP_WRITE, __GFP_HARDWALL,
+		(__force gfp_t)(1U << 31),
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(unsupported); i++) {
+		u32 gfp = (__force u32)(GFP_KERNEL | __GFP_RECLAIMABLE | unsupported[i]);
+		assert(!stela_linux_page_request_basic(gfp));
+		assert(!stela_linux_page_request_reclaimable(gfp));
+	}
+}
+
 int main(void)
 {
+	reclaimable_policy();
 	assert(stela_linux_page_request_basic((__force u32)(GFP_KERNEL | __GFP_ZERO | __GFP_COMP)));
 	assert(stela_linux_page_request_basic((__force u32)GFP_KERNEL_ACCOUNT));
 	assert(!stela_linux_page_request_basic((__force u32)(GFP_KERNEL | __GFP_MOVABLE)));
