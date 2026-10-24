@@ -1,4 +1,4 @@
-//! FP binary arithmetic: SSE2 for normal values, software fallback otherwise.
+//! FP binary arithmetic: guarded SSE2 values and precise software fallback.
 use alloc::vec;
 use alloc::vec::Vec;
 mod half;
@@ -9,8 +9,8 @@ use super::numerical::{
     SINGLE_EXPONENT_BIAS_BITS, ZeroProduct, branch, clear_scalar, commit_inexact, emit_opcode,
     environment, exponent_range, jump, prepare_vector_input_range, prepare_vector_result_range,
     read_inputs, read_numerical_right, read_numerical_vector, reject_other_status, resolve,
-    restore_environment, sticky_inexact, sticky_result_check, test_control, vector_exponent_range,
-    zero_product_check,
+    restore_environment, scalar_range_or_zero, sticky_inexact, sticky_result_check, test_control,
+    vector_exponent_range, vector_normal_or_zero_range, zero_product_check,
 };
 use super::{Host, commit, packed, read_vector, shuffle};
 use crate::{
@@ -23,6 +23,7 @@ use crate::{
 };
 
 const PAIRED_RIGHT: u8 = 6;
+const ZERO_RANGE_SCRATCH: u8 = 7;
 const SIGN_MASK_VECTOR: u8 = 2;
 const SSE_ESCAPE: u8 = 0x0f;
 const REGISTER_DIRECT: u8 = 0xc0;
@@ -145,7 +146,7 @@ fn prepare_inputs(code: &mut Vec<u8>, operand: &Operand) -> u8 {
     }
 }
 
-/// FNMUL/FABD transform the rounded result. Only finite normal results reach
+/// FNMUL/FABD transform the rounded result. Only finite normal or zero results reach
 /// this point, so AH's NaN sign policy stays on the exact helper path.
 fn result_sign(code: &mut Vec<u8>, operand: &Operand) {
     let negate = match operand.operation {
@@ -218,6 +219,20 @@ fn zero_product(operation: BinaryOperation) -> bool {
             | BinaryOperation::NegatedMultiply
             | BinaryOperation::MultiplyExtended
     )
+}
+
+/// The full path's status checks distinguish exact zeros from underflowed
+/// nonzero results. Division retains its existing conservative domain.
+fn accepts_zero(operation: BinaryOperation) -> bool {
+    match operation {
+        BinaryOperation::Add
+        | BinaryOperation::Subtract
+        | BinaryOperation::Multiply
+        | BinaryOperation::NegatedMultiply
+        | BinaryOperation::MultiplyExtended
+        | BinaryOperation::AbsoluteDifference => true,
+        BinaryOperation::Divide => false,
+    }
 }
 
 /// The left source, whose register the operation overwrote, for the
@@ -350,8 +365,17 @@ fn emit_scalar(
     helper.push(branch(code, Condition::NotZero));
     let right = prepare_inputs(code, operand);
     for right in [LEFT_VECTOR, right] {
-        exponent_range(code, operand.format, right, INPUT_MINIMUM_EXPONENT);
-        helper.push(branch(code, Condition::AboveOrEqual));
+        if accepts_zero(operand.operation) {
+            helper.push(scalar_range_or_zero(
+                code,
+                operand.format,
+                right,
+                INPUT_MINIMUM_EXPONENT,
+            ));
+        } else {
+            exponent_range(code, operand.format, right, INPUT_MINIMUM_EXPONENT);
+            helper.push(branch(code, Condition::AboveOrEqual));
+        }
     }
     environment(code);
     emit_opcode(
@@ -364,8 +388,18 @@ fn emit_scalar(
     restore_environment(code);
     // Caller environment and stack are restored before every branch from here.
     helper.push(reject_other_status(code));
-    exponent_range(code, operand.format, LEFT_VECTOR, RESULT_MINIMUM_EXPONENT);
-    let success = branch(code, Condition::Below);
+    let success = if accepts_zero(operand.operation) {
+        helper.push(scalar_range_or_zero(
+            code,
+            operand.format,
+            LEFT_VECTOR,
+            RESULT_MINIMUM_EXPONENT,
+        ));
+        jump(code)
+    } else {
+        exponent_range(code, operand.format, LEFT_VECTOR, RESULT_MINIMUM_EXPONENT);
+        branch(code, Condition::Below)
+    };
     let helper_start = code.len();
     super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
     let success_start = code.len();
@@ -416,7 +450,17 @@ fn emit_vector(
     let right = prepare_inputs(code, operand);
     prepare_vector_input_range(code, operand.format);
     for source in [LEFT_VECTOR, right] {
-        vector_exponent_range(code, operand.format, operand.shape, source);
+        if accepts_zero(operand.operation) {
+            vector_normal_or_zero_range(
+                code,
+                operand.format,
+                operand.shape,
+                source,
+                ZERO_RANGE_SCRATCH,
+            );
+        } else {
+            vector_exponent_range(code, operand.format, operand.shape, source);
+        }
         helper.push(branch(code, Condition::NotZero));
     }
     if operand.shape == Shape::Vector64 && operand.operation == BinaryOperation::Divide {
@@ -442,7 +486,17 @@ fn emit_vector(
     restore_environment(code);
     helper.push(reject_other_status(code));
     prepare_vector_result_range(code);
-    vector_exponent_range(code, operand.format, operand.shape, LEFT_VECTOR);
+    if accepts_zero(operand.operation) {
+        vector_normal_or_zero_range(
+            code,
+            operand.format,
+            operand.shape,
+            LEFT_VECTOR,
+            ZERO_RANGE_SCRATCH,
+        );
+    } else {
+        vector_exponent_range(code, operand.format, operand.shape, LEFT_VECTOR);
+    }
     let success = branch(code, Condition::Zero);
     let helper_start = code.len();
     super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);

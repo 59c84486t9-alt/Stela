@@ -519,6 +519,40 @@ pub(super) fn zero_scalar(code: &mut Vec<u8>, format: Format, xmm: u8) {
     }
 }
 
+/// Return the failure branch for a finite S/D exponent range or an actual
+/// signed zero. Preserve ECX, which may hold the pending fresh host status.
+pub(super) fn scalar_range_or_zero(
+    code: &mut Vec<u8>,
+    format: Format,
+    source: u8,
+    minimum: u8,
+) -> usize {
+    assert!(format != Format::Half);
+    zero_scalar(code, format, source);
+    let zero = branch(code, Condition::Zero);
+    let maximum = (format.exponent_mask() >> format.fraction_bits()) as u32;
+    if format == Format::Single {
+        // Doubling discarded the sign and moved the exponent above the fraction.
+        const SUB_EAX_IMM32: u8 = 0x2d;
+        let shift = format.fraction_bits() + u32::from(SIGN_BITS);
+        code.push(SUB_EAX_IMM32);
+        code.extend((u32::from(minimum) << shift).to_le_bytes());
+        code.push(CMP_EAX_IMM32);
+        code.extend(((maximum - u32::from(minimum)) << shift).to_le_bytes());
+    } else {
+        code.extend(SHR_RAX_IMM8);
+        code.push((format.fraction_bits() + u32::from(SIGN_BITS)) as u8);
+        code.extend(SUB_EAX_IMM8);
+        code.push(minimum);
+        code.push(CMP_EAX_IMM32);
+        code.extend((maximum - u32::from(minimum)).to_le_bytes());
+    }
+    let failed = branch(code, Condition::AboveOrEqual);
+    let end = code.len();
+    resolve(code, zero, end);
+    failed
+}
+
 /// Set every S lane, or both dwords of every D lane, of `destination` to
 /// all ones where `source` holds a zero of either sign, using ZERO_VECTOR
 /// and, for D, ZERO_PAIR.
@@ -766,16 +800,26 @@ fn vector_exponent_range_impl(
 }
 
 /// Accept only normal S/D values and actual signed zeros. The range constants
-/// remain live in XMM4/5; XMM3 and XMM6 are classifier scratch. Unlike a zero
+/// remain live in XMM4/5; XMM3 and `scratch` are classifier scratch. Unlike a zero
 /// fraction test, clearing just the sign rejects infinities and subnormals.
 pub(super) fn vector_normal_or_zero_range(
     code: &mut Vec<u8>,
     format: Format,
     shape: Shape,
     source: u8,
+    scratch: u8,
 ) {
-    const ZERO_PAIR_SCRATCH: u8 = 6;
     assert!(format != Format::Half);
+    assert!(
+        ![
+            source,
+            EXPONENT_VECTOR,
+            VALIDITY_VECTOR,
+            MAXIMUM_EXPONENT_VECTOR,
+            MINIMUM_EXPONENT_VECTOR
+        ]
+        .contains(&scratch)
+    );
     vector_exponent_validity(code, format, source, false);
     packed(code, Host::MoveAligned, VALIDITY_VECTOR, source);
     let left = if format == Format::Double {
@@ -784,16 +828,14 @@ pub(super) fn vector_normal_or_zero_range(
         ShiftOpcode::LeftDword
     };
     left.emit(code, VALIDITY_VECTOR, SIGN_BITS);
-    packed(
-        code,
-        Host::EqualDword,
-        VALIDITY_VECTOR,
-        MINIMUM_EXPONENT_VECTOR,
-    );
+    // The result-range lower bound is one rather than zero. Use an independent
+    // zero so output classification still recognizes both signed zeros.
+    packed(code, Host::Xor, scratch, scratch);
+    packed(code, Host::EqualDword, VALIDITY_VECTOR, scratch);
     if format == Format::Double {
-        packed(code, Host::ShuffleDword, ZERO_PAIR_SCRATCH, VALIDITY_VECTOR);
+        packed(code, Host::ShuffleDword, scratch, VALIDITY_VECTOR);
         code.push(SWAP_DWORD_PAIRS);
-        packed(code, Host::And, VALIDITY_VECTOR, ZERO_PAIR_SCRATCH);
+        packed(code, Host::And, VALIDITY_VECTOR, scratch);
     }
     packed(code, Host::Or, EXPONENT_VECTOR, VALIDITY_VECTOR);
     vector_validity_mask(code, format, shape);

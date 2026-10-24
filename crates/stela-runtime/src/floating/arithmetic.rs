@@ -1,4 +1,7 @@
 //! Completion of elementwise, indexed and pairwise arithmetic.
+#[cfg(all(test, target_arch = "x86_64"))]
+mod native_tests;
+
 use stela_compiler::{
     GuestState,
     aarch64::{

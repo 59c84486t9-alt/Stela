@@ -212,7 +212,7 @@ fn input_guard(
         if format == Format::Half {
             vector_exponent_range(code, format, shape, source);
         } else {
-            vector_normal_or_zero_range(code, format, shape, source);
+            vector_normal_or_zero_range(code, format, shape, source, PAIR_VECTOR);
         }
         helper.push(branch(code, Condition::NotZero));
     }
