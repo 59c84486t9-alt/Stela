@@ -735,10 +735,10 @@ fn cancellation_controller_with_context(
     {
         let mut peer = address_peer.borrow_mut();
         peer.context_bytes = context_bytes;
+        peer.port_speed = speed;
     }
     if speed >= SUPER_SPEED {
         controller.port_major[0] = 3;
-        address_peer.borrow_mut().port_speed = speed;
     }
     let slot = controller
         .address(
