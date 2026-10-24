@@ -97,6 +97,19 @@ stela_apple_source_test = executable(
 )
 test('stela_apple_source', stela_apple_source_test, suite : 'stela')
 
+# Buffer view/value planning owns no LLVM, NIR, Vulkan handles or driver state.
+stela_vulkan_buffer_values = static_library(
+  'stela_vulkan_buffer_values',
+  'vulkan_buffers.c',
+  c_args : stela_strict_args,
+)
+stela_vulkan_buffer_values_test = executable(
+  'stela_vulkan_buffer_values_test',
+  'vulkan_buffers.c',
+  c_args : stela_strict_args + ['-DSTELA_VULKAN_BUFFER_TEST'],
+)
+test('stela_vulkan_buffer_values', stela_vulkan_buffer_values_test, suite : 'stela')
+
 # Value normalization owns no LLVM, NIR or driver state.
 stela_metal_threadgroup = static_library(
   'stela_metal_threadgroup',
