@@ -12,6 +12,14 @@ use stela_compiler::{
 
 use super::{VECTOR_LIMBS, read_lane, write_lane};
 
+#[cfg(all(
+    test,
+    feature = "std",
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod native_tests;
+
 const PAIR_LANES: u32 = 2;
 const MAX_REDUCTION_LANES: usize = VECTOR_LIMBS * u64::BITS as usize / Format::Half.bits() as usize;
 

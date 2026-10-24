@@ -505,7 +505,7 @@ pub(super) fn zero_product_check(
 }
 
 /// Leave ZF set when the low S/D lane of `xmm` is a zero of either sign.
-fn zero_scalar(code: &mut Vec<u8>, format: Format, xmm: u8) {
+pub(super) fn zero_scalar(code: &mut Vec<u8>, format: Format, xmm: u8) {
     const REGISTER_DIRECT: u8 = 0xc0;
     const MODRM_REGISTER_SHIFT: u8 = 3;
     if format == Format::Double {
@@ -762,6 +762,44 @@ fn vector_exponent_range_impl(
     positive_only: bool,
 ) {
     vector_exponent_validity(code, format, source, positive_only);
+    vector_validity_mask(code, format, shape);
+}
+
+/// Accept only normal S/D values and actual signed zeros. The range constants
+/// remain live in XMM4/5; XMM3 and XMM6 are classifier scratch. Unlike a zero
+/// fraction test, clearing just the sign rejects infinities and subnormals.
+pub(super) fn vector_normal_or_zero_range(
+    code: &mut Vec<u8>,
+    format: Format,
+    shape: Shape,
+    source: u8,
+) {
+    const ZERO_PAIR_SCRATCH: u8 = 6;
+    assert!(format != Format::Half);
+    vector_exponent_validity(code, format, source, false);
+    packed(code, Host::MoveAligned, VALIDITY_VECTOR, source);
+    let left = if format == Format::Double {
+        ShiftOpcode::LeftQword
+    } else {
+        ShiftOpcode::LeftDword
+    };
+    left.emit(code, VALIDITY_VECTOR, SIGN_BITS);
+    packed(
+        code,
+        Host::EqualDword,
+        VALIDITY_VECTOR,
+        MINIMUM_EXPONENT_VECTOR,
+    );
+    if format == Format::Double {
+        packed(code, Host::ShuffleDword, ZERO_PAIR_SCRATCH, VALIDITY_VECTOR);
+        code.push(SWAP_DWORD_PAIRS);
+        packed(code, Host::And, VALIDITY_VECTOR, ZERO_PAIR_SCRATCH);
+    }
+    packed(code, Host::Or, EXPONENT_VECTOR, VALIDITY_VECTOR);
+    vector_validity_mask(code, format, shape);
+}
+
+fn vector_validity_mask(code: &mut Vec<u8>, format: Format, shape: Shape) {
     if format == Format::Half {
         let mask = match shape {
             Shape::Scalar => HALF_SCALAR_BYTE_MASK,
@@ -784,7 +822,13 @@ fn vector_exponent_range_impl(
             SINGLE_LOW_VECTOR_MASK
         }
         (Shape::Vector128, Format::Single) => SINGLE_VECTOR_MASK,
-        (Shape::Vector128, Format::Double) => DOUBLE_VECTOR_MASK,
+        (Shape::Vector128, Format::Double) => {
+            // Normal exponent validity occupies the low dword; exact-zero
+            // validity fills both. Reduce one bit per architectural D lane.
+            code.extend(AND_EAX_IMM8);
+            code.push(DOUBLE_VECTOR_MASK);
+            DOUBLE_VECTOR_MASK
+        }
         _ => unreachable!("allocated vector shape"),
     };
     code.extend(CMP_EAX_IMM8);

@@ -1,15 +1,17 @@
-//! FP min/max on normal values: direct selection for S/D, integer ordering for H.
+//! FP min/max: normal-or-zero S/D selection and normal H integer ordering.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    Condition, INPUT_MINIMUM_EXPONENT, MOVQ_XMM0_XMM0, branch, clear_scalar, exponent_range,
+    Condition, INPUT_MINIMUM_EXPONENT, MOVQ_XMM0_XMM0, branch, clear_scalar, exponent_range, jump,
     prepare_vector_input_range, read_numerical_vector, resolve, test_control,
-    vector_exponent_range,
+    vector_exponent_range, vector_normal_or_zero_range, zero_scalar,
 };
 use super::{Host, commit, packed, read_vector};
 use crate::{
     GuestAddress,
     aarch64::{
-        floating::{FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format, minmax::MinMaxOperation},
+        floating::{
+            FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format, minmax::MinMaxOperation,
+        },
         simd::{
             arithmetic::Shape,
             minmax::{BinaryMode, Operand},
@@ -24,6 +26,9 @@ const RIGHT_VECTOR: u8 = 1;
 const SIGN_VECTOR: u8 = 2;
 const PAIR_VECTOR: u8 = 6;
 const ORIGINAL_LEFT_VECTOR: u8 = 7;
+// XMM3's input validity is dead after the guards. The right operand is consumed
+// by selection; XMM6 may itself be that operand after pairwise staging.
+const SELECTION_SCRATCH: u8 = 3;
 const HALF_SIGN_SHIFT: u8 = u16::BITS as u8 - 1;
 const SIGN_MASK_TO_MAGNITUDE_SHIFT: u8 = 1;
 const BITS_PER_BYTE: u32 = u8::BITS;
@@ -60,7 +65,7 @@ fn is_minimum(operation: MinMaxOperation) -> bool {
     )
 }
 
-fn selection(
+fn raw_selection(
     code: &mut Vec<u8>,
     operation: MinMaxOperation,
     format: Format,
@@ -100,6 +105,75 @@ fn selection(
     ]);
 }
 
+/// Legacy SSE selects operand2 on a zero tie. Symmetric selection followed by
+/// sign AND (maximum) or OR (minimum) gives Arm's standard zero sign. Plain
+/// AH=1 retains operand2 instead. No inactive scalar lane undergoes FP work.
+fn selection(
+    code: &mut Vec<u8>,
+    operation: MinMaxOperation,
+    format: Format,
+    shape: Shape,
+    destination: u8,
+    right: u8,
+) {
+    if format == Format::Half {
+        raw_selection(code, operation, format, shape, destination, right);
+        return;
+    }
+    debug_assert!(destination != right);
+    debug_assert!(destination != SELECTION_SCRATCH && right != SELECTION_SCRATCH);
+    let alternative = if matches!(
+        operation,
+        MinMaxOperation::Minimum | MinMaxOperation::Maximum
+    ) {
+        test_control(code, FPCR_AH);
+        Some(branch(code, Condition::NotZero))
+    } else {
+        None
+    };
+    let combine = if is_minimum(operation) {
+        Host::Or
+    } else {
+        Host::And
+    };
+    if shape == Shape::Scalar {
+        packed(code, Host::MoveAligned, SELECTION_SCRATCH, destination);
+        raw_selection(code, operation, format, shape, SELECTION_SCRATCH, right);
+        raw_selection(code, operation, format, shape, right, destination);
+        packed(code, combine, SELECTION_SCRATCH, right);
+        packed(
+            code,
+            if format == Format::Double {
+                Host::MoveScalarDouble
+            } else {
+                Host::MoveScalarSingle
+            },
+            destination,
+            SELECTION_SCRATCH,
+        );
+    } else {
+        packed(code, Host::MoveAligned, SELECTION_SCRATCH, right);
+        raw_selection(code, operation, format, shape, right, destination);
+        raw_selection(
+            code,
+            operation,
+            format,
+            shape,
+            destination,
+            SELECTION_SCRATCH,
+        );
+        packed(code, combine, destination, right);
+    }
+    if let Some(alternative) = alternative {
+        let done = jump(code);
+        let alternative_start = code.len();
+        resolve(code, alternative, alternative_start);
+        raw_selection(code, operation, format, shape, destination, right);
+        let end = code.len();
+        resolve(code, done, end);
+    }
+}
+
 /// Normal half-precision values map to a signed-word order key, and the same
 /// transform restores the bit pattern after integer min/max.
 fn half_order(code: &mut Vec<u8>, vector: u8) {
@@ -114,37 +188,40 @@ fn exception_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
     helper.push(branch(code, Condition::NotZero));
 }
 
-/// Return the success condition without branching, so the last classifier can
-/// jump over the cold helper directly into selection without an extra jump.
-fn normal_guard(code: &mut Vec<u8>, format: Format, shape: Shape, source: u8) -> Condition {
+fn input_guard(
+    code: &mut Vec<u8>,
+    format: Format,
+    shape: Shape,
+    source: u8,
+    helper: &mut Vec<usize>,
+) {
     if shape == Shape::Scalar {
+        let zero = if format != Format::Half {
+            zero_scalar(code, format, source);
+            Some(branch(code, Condition::Zero))
+        } else {
+            None
+        };
         exponent_range(code, format, source, INPUT_MINIMUM_EXPONENT);
-        Condition::Below
+        helper.push(branch(code, Condition::AboveOrEqual));
+        if let Some(zero) = zero {
+            let end = code.len();
+            resolve(code, zero, end);
+        }
     } else {
-        vector_exponent_range(code, format, shape, source);
-        Condition::Zero
+        if format == Format::Half {
+            vector_exponent_range(code, format, shape, source);
+        } else {
+            vector_normal_or_zero_range(code, format, shape, source);
+        }
+        helper.push(branch(code, Condition::NotZero));
     }
 }
 
-fn failed_guard(code: &mut Vec<u8>, format: Format, shape: Shape, source: u8) -> usize {
-    let success = normal_guard(code, format, shape, source);
-    branch(
-        code,
-        match success {
-            Condition::Below => Condition::AboveOrEqual,
-            Condition::Zero => Condition::NotZero,
-            _ => unreachable!("normal classifier condition"),
-        },
-    )
-}
-
-fn helper_section(
-    code: &mut Vec<u8>,
-    helper: &[usize],
-    success_condition: Condition,
-    pc: GuestAddress,
-) {
-    let success = branch(code, success_condition);
+fn helper_section(code: &mut Vec<u8>, helper: &[usize], pc: GuestAddress) {
+    // Scalar zero and normal success have different flags. Every failed guard
+    // has its own helper patch, so success must not depend on stale flags.
+    let success = jump(code);
     let helper_start = code.len();
     super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
     let success_start = code.len();
@@ -306,9 +383,9 @@ fn binary(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
     if shape != Shape::Scalar {
         prepare_vector_input_range(code, format);
     }
-    helper.push(failed_guard(code, format, shape, RESULT_VECTOR));
-    let success = normal_guard(code, format, shape, RIGHT_VECTOR);
-    helper_section(code, &helper, success, pc);
+    input_guard(code, format, shape, RESULT_VECTOR, &mut helper);
+    input_guard(code, format, shape, RIGHT_VECTOR, &mut helper);
+    helper_section(code, &helper, pc);
     if format == Format::Half {
         if shape == Shape::Scalar {
             packed(code, Host::MoveAligned, ORIGINAL_LEFT_VECTOR, RESULT_VECTOR);
@@ -340,9 +417,9 @@ fn pairwise_scalar(
     read_vector(code, source, RESULT_VECTOR);
     packed(code, Host::MoveAligned, RIGHT_VECTOR, RESULT_VECTOR);
     ShiftOpcode::RightBytes.emit(code, RIGHT_VECTOR, (format.bits() / BITS_PER_BYTE) as u8);
-    helper.push(failed_guard(code, format, Shape::Scalar, RESULT_VECTOR));
-    let success = normal_guard(code, format, Shape::Scalar, RIGHT_VECTOR);
-    helper_section(code, &helper, success, pc);
+    input_guard(code, format, Shape::Scalar, RESULT_VECTOR, &mut helper);
+    input_guard(code, format, Shape::Scalar, RIGHT_VECTOR, &mut helper);
+    helper_section(code, &helper, pc);
     if format == Format::Half {
         half_order(code, RESULT_VECTOR);
         half_order(code, RIGHT_VECTOR);
@@ -375,8 +452,8 @@ fn reduction(
     exception_guard(code, &mut helper);
     read_numerical_vector(code, shape, source, RESULT_VECTOR);
     prepare_vector_input_range(code, format);
-    let success = normal_guard(code, format, shape, RESULT_VECTOR);
-    helper_section(code, &helper, success, pc);
+    input_guard(code, format, shape, RESULT_VECTOR, &mut helper);
+    helper_section(code, &helper, pc);
     if format == Format::Half {
         half_order(code, RESULT_VECTOR);
         half_pairs(code, operation, RESULT_VECTOR);
