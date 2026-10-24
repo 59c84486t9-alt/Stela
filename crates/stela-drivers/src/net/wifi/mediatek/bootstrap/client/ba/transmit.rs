@@ -15,6 +15,16 @@ pub(crate) struct Transmit<C: 'static> {
 }
 
 impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
+    pub(in crate::net::wifi::mediatek::bootstrap::client) fn tx_ba_blocks_data(
+        s: &Owned<I, Q, C>,
+        tid: u8,
+    ) -> bool {
+        s.transmit_ba
+            .get(usize::from(tid))
+            .and_then(Option::as_ref)
+            .is_some_and(|native| native.blocked)
+    }
+
     /// Request the same actual source TID's aggregation exchange. New borrowed
     /// Ethernet submissions return Busy while blocked; their caller retains
     /// those bytes. Already-published packets stay in the original DataRing.
@@ -23,9 +33,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.phase != Phase::Associated || s.modern.is_none() {
             return Err(Error::WrongPhase);
         }
-        // The management transport delivers all robust BA actions to the OS;
-        // negotiated protected BA MLME is not yet connected. Do not begin an
-        // unusable unprotected exchange or silently bypass that OS consumer.
+        // Management RX stays an OS observation until explicitly consumed.
+        // Legacy initiation cannot select negotiated protected BA policy or
+        // bypass the separate OS-selected management entry point.
         if s.management.is_some() {
             return Err(Error::Unsupported);
         }
@@ -43,7 +53,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Self::queue_tx_ba(s, action, now)
     }
 
-    pub(super) fn queue_tx_ba(
+    pub(in crate::net::wifi::mediatek::bootstrap::client) fn queue_tx_ba(
         s: &mut Owned<I, Q, C>,
         action: Action,
         now: u64,
@@ -273,8 +283,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 s.station
                     .validate_tx_block_ack_transmit(ticket, &session, bytes)
                     .map_err(Error::BlockAck)?;
-                let (bytes, mut prepared) = Self::prepare_ba_submission(s, bytes)?;
-                prepared.1.tx_ba = Some(session.clone());
+                let mut submission = Self::prepare_ba_submission(s, bytes)?;
+                submission.owner.tx_ba = Some(session.clone());
+                let bytes = submission.bytes;
+                let prepared = (submission.config, submission.owner, submission.grant);
                 // SAFETY: covered by this function's own safety contract.
                 let result = unsafe {
                     authority.publish_association(

@@ -215,6 +215,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.phase != Phase::Associated {
             return Err(Error::WrongPhase);
         }
+        if tid.is_some_and(|tid| Self::tx_ba_blocks_data(s, tid)) {
+            return Err(Error::Busy);
+        }
         let context = s
             .modern
             .as_ref()

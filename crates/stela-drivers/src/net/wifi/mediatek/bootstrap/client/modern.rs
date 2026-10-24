@@ -875,6 +875,25 @@ pub(super) mod tests {
                 )
             }
         }
+        pub(in crate::net::wifi::mediatek::bootstrap::client) fn try_transmit(
+            &mut self,
+        ) -> Result<Receipt, ClientError> {
+            let permit = admit(&mut self.authority, &self.driver, AssociationUse::Data);
+            let epoch = self.driver.station().association_epoch().unwrap();
+            // SAFETY: actual same-requester model guards and retained native policy.
+            unsafe {
+                self.driver.transmit_modern(
+                    &mut self.authority,
+                    permit,
+                    epoch,
+                    &eth(0x0800),
+                    TxClass::Data,
+                    Some(6),
+                    &GuardedSource(self.state.clone()),
+                    &mut Policy(true),
+                )
+            }
+        }
         pub(in crate::net::wifi::mediatek::bootstrap::client) fn transmit(&mut self) {
             let permit = admit(&mut self.authority, &self.driver, AssociationUse::Data);
             let epoch = self.driver.station().association_epoch().unwrap();

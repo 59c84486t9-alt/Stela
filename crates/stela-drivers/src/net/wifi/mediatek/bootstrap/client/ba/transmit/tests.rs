@@ -267,3 +267,56 @@ fn queued_operational_cancel_also_drains_original_session_management_packet() {
     f.driver.progress_block_ack_stop().unwrap();
     assert_disabled(&f, commands);
 }
+
+#[test]
+fn ordinary_local_delba_retains_resume_and_data_block_until_real_packet_retirement() {
+    let mut f = TxFixture::new();
+    f.driver.begin_tx_block_ack(TID, 0, NOW).unwrap();
+    f.progress(NOW + 1).unwrap();
+    f.progress(NOW + 2).unwrap();
+    let deadline = f.driver.next_transmit_deadline().unwrap();
+    f.driver.poll_block_ack_timers(deadline).unwrap();
+    assert!(matches!(
+        f.driver.progress_block_ack_stop(),
+        Err(Error::NeedsDrain)
+    ));
+    assert_eq!(finish_tx(&f.model)[0][1] & 0x40, 0);
+    f.driver
+        .poll(deadline + 1, &Source, &mut Policy(true))
+        .unwrap();
+    assert_eq!(f.driver.poll_released().unwrap().len(), 1);
+    f.driver.progress_block_ack_stop().unwrap();
+    f.progress(deadline + 2).unwrap();
+    assert!(f.driver.station().block_ack_idle());
+    assert!(Client::<_, _, _>::tx_ba_blocks_data(f.driver.state(), TID));
+    assert!(matches!(f.try_transmit(), Err(Error::Busy)));
+    assert!(matches!(
+        f.driver.begin_tx_block_ack(TID, 0, deadline + 2),
+        Err(Error::Busy)
+    ));
+    assert!(matches!(
+        f.driver.progress_block_ack_stop(),
+        Err(Error::NeedsDrain)
+    ));
+    let sent = finish_tx(&f.model);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0][1] & 0x40, 0);
+    assert_eq!(&sent[0][24..26], &[3, 2]);
+    f.driver
+        .poll(deadline + 3, &Source, &mut Policy(true))
+        .unwrap();
+    assert!(matches!(
+        f.driver.progress_block_ack_stop(),
+        Err(Error::NeedsDrain)
+    ));
+    assert_eq!(f.driver.poll_released().unwrap().len(), 1);
+    f.driver.progress_block_ack_stop().unwrap();
+    assert!(!Client::<_, _, _>::tx_ba_blocks_data(f.driver.state(), TID));
+    assert!(!f.driver.pending_block_ack());
+    f.try_transmit().unwrap();
+    assert_eq!(finish_tx(&f.model).len(), 1);
+    f.driver
+        .poll(deadline + 4, &Source, &mut Policy(true))
+        .unwrap();
+    assert_eq!(f.driver.poll_released().unwrap().len(), 1);
+}

@@ -295,7 +295,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         .validate_rx_block_ack(session)
                         .map_err(Error::BlockAck)?;
                 }
-                let (bytes, prepared) = Self::prepare_ba_submission(s, bytes)?;
+                let submission = Self::prepare_ba_submission(s, bytes)?;
+                let bytes = submission.bytes;
+                let prepared = (submission.config, submission.owner, submission.grant);
                 let mut started = false;
                 // SAFETY: covered by this function's own safety contract.
                 let result = unsafe {

@@ -7,7 +7,12 @@ use wifi::regulatory::{AssociationAdmission, HardwarePolicy, OsPolicy, Owner};
 // Bound authenticated deferred actions independently of firmware TX-ring capacity.
 const MAX_PENDING_ACTIONS: usize = 32;
 
-type BaSubmission<C> = (Vec<u8>, (txwi::Config, PacketOwner<C>, Option<u64>));
+pub(in crate::net::wifi::mediatek::bootstrap::client) struct BaSubmission<C: 'static> {
+    pub(in crate::net::wifi::mediatek::bootstrap::client) bytes: Vec<u8>,
+    pub(in crate::net::wifi::mediatek::bootstrap::client) config: txwi::Config,
+    pub(in crate::net::wifi::mediatek::bootstrap::client) owner: PacketOwner<C>,
+    pub(in crate::net::wifi::mediatek::bootstrap::client) grant: Option<u64>,
+}
 
 impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// Consume this original authenticated unicast BA action for the real OS's
@@ -116,7 +121,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
 
     // A binding exists for the complete canonical/native BA lifetime. Rotation
     // can replace it only after management_drained proves every BA user idle.
-    pub(super) fn validate_ba_management(s: &Owned<I, Q, C>) -> Result<(), Error> {
+    pub(in crate::net::wifi::mediatek::bootstrap::client) fn validate_ba_management(
+        s: &Owned<I, Q, C>,
+    ) -> Result<(), Error> {
         if let Some(session) = &s.ba_management {
             Self::validate_management(s, session)?;
         } else if !s.station.block_ack_idle() && s.management.is_some() {
@@ -125,7 +132,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
 
-    pub(super) fn prepare_ba_submission(
+    pub(in crate::net::wifi::mediatek::bootstrap::client) fn prepare_ba_submission(
         s: &Owned<I, Q, C>,
         original: &[u8],
     ) -> Result<BaSubmission<C>, Error> {
@@ -147,6 +154,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let mut prepared =
             Self::prepare_submission(s, &bytes, session.map(|session| session.ptk), true, true)?;
         prepared.1.management = session.cloned();
-        Ok((bytes, prepared))
+        Ok(BaSubmission {
+            bytes,
+            config: prepared.0,
+            owner: prepared.1,
+            grant: prepared.2,
+        })
     }
 }

@@ -625,6 +625,8 @@ fn protected_recipient_delba_drains_published_positive_response_before_native_di
 fn real_native_negotiation_timeout_disables_before_guarded_protected_local_delba() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
+    let epoch = driver.station().association_epoch().unwrap();
+    driver.authorize_port(epoch).unwrap();
     begin(&mut driver, &mut owner, &session, NOW);
     progress(&mut driver, &mut owner, &state, NOW + 1);
     progress(&mut driver, &mut owner, &state, NOW + 2);
@@ -675,12 +677,7 @@ fn real_native_negotiation_timeout_disables_before_guarded_protected_local_delba
         driver.progress_block_ack_stop(),
         Err(ClientError::NeedsDrain)
     ));
-    assert!(
-        driver.state().transmit_ba[usize::from(TID)]
-            .as_ref()
-            .unwrap()
-            .blocked
-    );
+    assert!(Native::tx_ba_blocks_data(driver.state(), TID));
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     let pending = driver.state().ba_actions.len();
     assert!(
@@ -691,6 +688,26 @@ fn real_native_negotiation_timeout_disables_before_guarded_protected_local_delba
     );
     assert!(driver.station().block_ack_idle());
     assert_eq!(driver.state().ba_actions.len(), pending);
+    let permit = admit(&mut owner, &driver, AssociationUse::Data);
+    let allocations = state.allocations.get();
+    let head = model.queues[&0xd4300].lock().unwrap().head;
+    assert!(matches!(
+        unsafe {
+            driver.transmit_modern(
+                &mut owner,
+                permit,
+                epoch,
+                &eth(0x0800),
+                TxClass::Data,
+                Some(TID),
+                &GuardedSource(state.clone()),
+                &mut Policy(true),
+            )
+        },
+        Err(ClientError::Busy)
+    ));
+    assert_eq!(state.allocations.get(), allocations);
+    assert_eq!(model.queues[&0xd4300].lock().unwrap().head, head);
     assert_cipher_descriptor(&model, &session, false);
     let sent = finish_tx(&model);
     assert_eq!(sent.len(), 1);
@@ -713,6 +730,26 @@ fn real_native_negotiation_timeout_disables_before_guarded_protected_local_delba
     assert!(driver.state().transmit_ba[usize::from(TID)].is_none());
     assert!(driver.station().block_ack_idle());
     assert!(!driver.pending_block_ack());
+    assert!(!Native::tx_ba_blocks_data(driver.state(), TID));
+    let permit = admit(&mut owner, &driver, AssociationUse::Data);
+    unsafe {
+        driver.transmit_modern(
+            &mut owner,
+            permit,
+            epoch,
+            &eth(0x0800),
+            TxClass::Data,
+            Some(TID),
+            &GuardedSource(state.clone()),
+            &mut Policy(true),
+        )
+    }
+    .unwrap();
+    assert_eq!(finish_tx(&model).len(), 1);
+    driver
+        .poll(deadline + 5, &Source, &mut Policy(true))
+        .unwrap();
+    assert_eq!(driver.poll_released().unwrap().len(), 1);
     begin(&mut driver, &mut owner, &session, deadline + 5);
     assert!(!driver.station().block_ack_idle());
     stop(&mut driver, &model);
