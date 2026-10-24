@@ -1280,3 +1280,119 @@ fn current_shutdown_fenced_forwarding_owner_can_drain_real_cancellation_receipts
         assert_eq!(ram, before);
     }
 }
+
+#[test]
+fn actual_same_controller_root_reuse_preserves_stale_forwarding_cache_and_current_completion() {
+    for speed in [xhci::HIGH_SPEED, xhci::SUPER_SPEED] {
+        for context in [32, 64] {
+            for iso in [false, true] {
+                let mut memory = vec![0u64; 512 * 1024];
+                let (mut host, shared, physical, hardware, mut dma) =
+                    model::reset_forwarding_fixture(&mut memory, speed, context, iso);
+                let mut previous = host.forward_device(physical.id).unwrap();
+                previous
+                    .configure(physical.configuration_value(), &mut dma)
+                    .unwrap();
+                let original = previous.physical.clone();
+                let endpoints = xhci::interfaces(&original.configuration)
+                    .remove(0)
+                    .endpoints;
+                let endpoint = endpoints[0];
+                assert!(endpoint.is_in());
+                let retired_request = if iso {
+                    previous
+                        .submit_isochronous(endpoint.address, &[4], &[], &mut dma)
+                        .unwrap()
+                } else {
+                    previous.submit(endpoint.address, 0, 4, &[]).unwrap()
+                };
+                if iso {
+                    hardware.borrow_mut().complete_forwarded(
+                        original.slot,
+                        endpoint.dci(),
+                        &[0xa1, 0xb2, 0xc3, 0xd4],
+                    );
+                }
+                previous.cancel(endpoint.address).unwrap();
+                assert_eq!(previous.completed.len(), 1);
+                assert_eq!(previous.completed[0].status, Status::Cancelled);
+                if iso {
+                    assert_eq!(
+                        previous.completed[0].packets[0].data,
+                        [0xa1, 0xb2, 0xc3, 0xd4]
+                    );
+                }
+                // SAFETY: the topology owner exclusively transfers this complete
+                // original leaf inventory; old aliases remain only as refusal controls.
+                let mut fresh = unsafe {
+                    shared
+                        .borrow_mut()
+                        .reset_and_reuse_root(&original, &endpoints, &mut dma)
+                }
+                .unwrap();
+                fresh.configuration = fresh.configurations[0].clone();
+                assert_eq!(fresh.slot, original.slot);
+                assert_ne!(fresh.id, original.id);
+                assert_eq!(hardware.borrow().resets, 1);
+                assert_eq!(hardware.borrow().enables, [original.slot, fresh.slot]);
+                assert!(
+                    hardware
+                        .borrow()
+                        .commands_seen
+                        .iter()
+                        .any(|(kind, slot, _)| *kind == 10 && *slot == original.slot)
+                );
+                // The reset service preserved the genuine original Forwarded
+                // consumer claim and transferred it to this returned generation.
+                let mut current = Device::claimed(shared.clone(), fresh).unwrap();
+                current.configure(1, &mut dma).unwrap();
+                assert!(Rc::ptr_eq(&previous.controller, &current.controller));
+                let cached = current.submit(endpoint.address, 0, 4, &[]).unwrap();
+                current.cancel(endpoint.address).unwrap();
+                let unread = if iso {
+                    current
+                        .submit_isochronous(endpoint.address, &[4], &[], &mut dma)
+                        .unwrap()
+                } else {
+                    current.submit(endpoint.address, 0, 4, &[]).unwrap()
+                };
+                hardware.borrow_mut().complete_forwarded(
+                    current.physical.slot,
+                    endpoint.dci(),
+                    &[0x12, 0x23, 0x34, 0x45],
+                );
+                let old_cache = previous.completed.clone();
+                let current_cache = current.completed.clone();
+                let accesses = hardware.borrow().accesses;
+                let remaining = dma.remaining();
+                let before = memory.clone();
+                hardware.borrow_mut().trap_mmio = true;
+                assert!(previous.poll(retired_request).is_err());
+                assert!(previous.take_completions().is_err());
+                assert!(previous.cancel(endpoint.address).is_err());
+                assert!(previous.shutdown().is_err());
+                assert_eq!(previous.completed, old_cache);
+                assert_eq!(current.completed, current_cache);
+                assert!(!previous.fenced);
+                assert_eq!(hardware.borrow().accesses, accesses);
+                assert_eq!(dma.remaining(), remaining);
+                assert_eq!(memory, before);
+                assert_eq!(
+                    current.poll(cached).unwrap().unwrap().status,
+                    Status::Cancelled
+                );
+                assert_eq!(hardware.borrow().accesses, accesses);
+                assert_eq!(memory, before);
+                hardware.borrow_mut().trap_mmio = false;
+                let done = current.poll(unread).unwrap().unwrap();
+                assert_eq!(done.actual, Some(4));
+                if iso {
+                    assert_eq!(done.packets[0].data, [0x12, 0x23, 0x34, 0x45]);
+                } else {
+                    assert_eq!(done.data, [0x12, 0x23, 0x34, 0x45]);
+                }
+                assert_eq!(hardware.borrow().resets, 1);
+            }
+        }
+    }
+}

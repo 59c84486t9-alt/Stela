@@ -313,4 +313,144 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn actual_same_controller_root_reuse_refuses_retained_hid_stop_without_touching_current_dma() {
+        for speed in [xhci::HIGH_SPEED, xhci::SUPER_SPEED] {
+            for context in [32, 64] {
+                for stopped in [false, true] {
+                    let mut memory = vec![0u64; 512 * 1024];
+                    let (shared, original, hardware, mut dma) =
+                        model::reset_hid_fixture(&mut memory, speed, context, 1);
+                    let interface = xhci::interfaces(&original.configuration).remove(0);
+                    let endpoint = interface.endpoints[0];
+                    shared
+                        .borrow_mut()
+                        .device(original.id)
+                        .unwrap()
+                        .configure(&interface.endpoints, None, &mut dma)
+                        .unwrap();
+                    let mut previous =
+                        UsbInput::new(shared.clone(), &original, &interface, endpoint, &mut dma)
+                            .unwrap()
+                            .unwrap();
+                    let key_report = vec![0, 0, 4, 0, 0, 0, 0, 0];
+                    assert!(previous.poll_hid().reports.is_empty());
+                    hardware
+                        .borrow_mut()
+                        .feed_hid_report(original.slot, &key_report);
+                    assert_eq!(
+                        previous.poll_hid().inputs,
+                        [Input::Key {
+                            usage: 4,
+                            pressed: true
+                        }]
+                    );
+                    if stopped {
+                        assert_eq!(
+                            previous.stop_hid().unwrap().inputs,
+                            [Input::Key {
+                                usage: 4,
+                                pressed: false
+                            }]
+                        );
+                        assert_eq!(previous.state(), State::Stopped);
+                    }
+                    // SAFETY: the fixture exclusively owns the original complete
+                    // leaf inventory; retained old consumers are exercised only
+                    // for pure rejection after this acknowledged retirement.
+                    let mut fresh = unsafe {
+                        shared.borrow_mut().reset_and_reuse_root(
+                            &original,
+                            &interface.endpoints,
+                            &mut dma,
+                        )
+                    }
+                    .unwrap();
+                    fresh.configuration = fresh.configurations[0].clone();
+                    assert_eq!(fresh.slot, original.slot);
+                    assert_ne!(fresh.id, original.id);
+                    assert_eq!(hardware.borrow().resets, 1);
+                    assert_eq!(hardware.borrow().enables, [original.slot, fresh.slot]);
+                    assert!(
+                        hardware
+                            .borrow()
+                            .commands_seen
+                            .iter()
+                            .any(|(kind, slot, _)| *kind == 10 && *slot == original.slot)
+                    );
+                    let interface = xhci::interfaces(&fresh.configuration).remove(0);
+                    {
+                        let mut c = shared.borrow_mut();
+                        let mut access = c.device(fresh.id).unwrap();
+                        access
+                            .set_configuration(fresh.configuration_value())
+                            .unwrap();
+                        access
+                            .configure(&interface.endpoints, None, &mut dma)
+                            .unwrap();
+                    }
+                    let mut current = UsbInput::new(
+                        shared.clone(),
+                        &fresh,
+                        &interface,
+                        interface.endpoints[0],
+                        &mut dma,
+                    )
+                    .unwrap()
+                    .unwrap();
+                    assert!(Rc::ptr_eq(&previous.controller, &current.controller));
+                    assert!(current.poll_hid().reports.is_empty());
+                    hardware
+                        .borrow_mut()
+                        .feed_hid_report(fresh.slot, &key_report);
+                    let previous_state = (
+                        previous.state,
+                        previous.error.clone(),
+                        previous.queued,
+                        previous.retry,
+                        previous.held.clone(),
+                        previous.buttons,
+                        previous.position,
+                        previous.failed,
+                        previous.dropped,
+                        previous.last_report.clone(),
+                    );
+                    let current_ticket = current.queued;
+                    let accesses = hardware.borrow().accesses;
+                    let before = memory.clone();
+                    hardware.borrow_mut().trap_mmio = true;
+                    assert!(previous.stop_hid().is_err());
+                    assert!(previous.stop().is_err());
+                    assert!(previous.restart().is_err());
+                    assert_eq!(hardware.borrow().accesses, accesses);
+                    assert_eq!(memory, before);
+                    assert_eq!(current.queued, current_ticket);
+                    assert_eq!(
+                        (
+                            previous.state,
+                            previous.error.clone(),
+                            previous.queued,
+                            previous.retry,
+                            previous.held.clone(),
+                            previous.buttons,
+                            previous.position,
+                            previous.failed,
+                            previous.dropped,
+                            previous.last_report.clone()
+                        ),
+                        previous_state
+                    );
+                    hardware.borrow_mut().trap_mmio = false;
+                    assert_eq!(
+                        current.poll_hid().inputs,
+                        [Input::Key {
+                            usage: 4,
+                            pressed: true
+                        }]
+                    );
+                    assert_eq!(hardware.borrow().resets, 1);
+                }
+            }
+        }
+    }
 }
