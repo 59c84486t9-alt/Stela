@@ -10,6 +10,8 @@ use super::interrupt::{CpuIndex, InterruptSink};
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
 
+#[cfg(test)]
+mod advance_tests;
 mod container;
 pub(crate) use container::SharedView;
 
@@ -162,6 +164,12 @@ pub trait Lifecycle {
 /// device's address space as placed by [`Bus::map`]. Values occupy the low
 /// `width` bytes; implementations refuse widths their registers do not have.
 pub trait MmioDevice: Any {
+    /// Immutable lifetime contract, queried only when this owner is installed.
+    /// Passive promises that `advance` is always the default no-op, including
+    /// after MMIO, lifecycle and peer mutations. An idle poller must use Always.
+    fn advance_policy(&self) -> AdvancePolicy {
+        AdvancePolicy::Always
+    }
     /// Type-erased capability: e.g. a UART keeps a generic console sink, so
     /// lifecycle dispatch must not require downcasting to its concrete type.
     /// Returning None keeps missing lifecycle support explicit.
@@ -187,6 +195,13 @@ pub trait MmioDevice: Any {
     fn advance(&mut self, _access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
         Ok(None)
     }
+}
+
+/// Whether an owner can have time-driven effects in any reachable state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvancePolicy {
+    Always,
+    Passive,
 }
 
 /// Builds the refusal for one device register.
@@ -240,16 +255,44 @@ struct Region {
 #[derive(Default)]
 pub struct Bus {
     devices: Vec<Box<dyn MmioDevice>>,
+    /// Stable owner IDs in registration order; routes and aliases add no polls.
+    advancing: Vec<DeviceId>,
     /// Sorted by `start`, nonoverlapping.
     regions: Vec<Region>,
+    #[cfg(feature = "native-profile")]
+    advance_statistics: AdvanceStatistics,
 }
+
+/// Actual owner inventory and time-advance work; aliases are not owners.
+#[cfg(feature = "native-profile")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AdvanceStatistics {
+    pub owners: usize,
+    pub active_owners: usize,
+    pub passes: u64,
+    pub completed_passes: u64,
+    pub invocations: u64,
+}
+
 impl Bus {
+    #[cfg(feature = "native-profile")]
+    pub fn advance_statistics(&self) -> AdvanceStatistics {
+        AdvanceStatistics {
+            owners: self.devices.len(),
+            active_owners: self.advancing.len(),
+            ..self.advance_statistics
+        }
+    }
     pub fn new() -> Self {
         Self::default()
     }
     pub fn add(&mut self, device: Box<dyn MmioDevice>) -> DeviceId {
+        let id = DeviceId(self.devices.len());
+        if device.advance_policy() == AdvancePolicy::Always {
+            self.advancing.push(id);
+        }
         self.devices.push(device);
-        DeviceId(self.devices.len() - 1)
+        id
     }
     /// Install one actual device and all its ranges atomically. Validate both
     /// existing and proposed ownership before publishing any route or device.
@@ -308,7 +351,7 @@ impl Bus {
                 });
             }
         }
-        // Both allocations precede publication. Capacity changes on failure do
+        // All allocations precede publication. Capacity changes on failure do
         // not add observable routes or a device with partially mapped state.
         self.devices
             .try_reserve(N)
@@ -316,6 +359,14 @@ impl Bus {
         self.regions
             .try_reserve(proposed.len())
             .map_err(|_| MapError::Allocation)?;
+        self.advancing
+            .try_reserve(N)
+            .map_err(|_| MapError::Allocation)?;
+        for (&id, device) in ids.iter().zip(&devices) {
+            if device.advance_policy() == AdvancePolicy::Always {
+                self.advancing.push(id);
+            }
+        }
         self.devices.extend(devices);
         self.regions.extend(proposed);
         self.regions.sort_unstable_by_key(|region| region.start);
@@ -461,13 +512,37 @@ impl Bus {
         let (device, offset) = self.route(address, width)?;
         self.devices[device.0].write(offset, width, value & width.mask(), access)
     }
-    /// Advances every device and returns the earliest next deadline.
+    /// Advances every time-driven owner once and returns the earliest deadline.
+    /// Permanently passive owners have no time effects or deadlines to observe.
     pub fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
+        #[cfg(feature = "native-profile")]
+        {
+            self.advance_statistics.passes = self.advance_statistics.passes.saturating_add(1);
+        }
         let mut next: Option<u64> = None;
-        for device in &mut self.devices {
-            if let Some(deadline) = device.advance(access)? {
+        for index in 0..self.advancing.len() {
+            let id = self.advancing[index];
+            let device = &mut self.devices[id.0];
+            let advanced = device.advance(access);
+            #[cfg(feature = "native-profile")]
+            if advanced.is_err() {
+                self.advance_statistics.invocations = self
+                    .advance_statistics
+                    .invocations
+                    .saturating_add((index + 1) as u64);
+            }
+            if let Some(deadline) = advanced? {
                 next = Some(next.map_or(deadline, |next| next.min(deadline)));
             }
+        }
+        #[cfg(feature = "native-profile")]
+        {
+            self.advance_statistics.completed_passes =
+                self.advance_statistics.completed_passes.saturating_add(1);
+            self.advance_statistics.invocations = self
+                .advance_statistics
+                .invocations
+                .saturating_add(self.advancing.len() as u64);
         }
         Ok(next)
     }

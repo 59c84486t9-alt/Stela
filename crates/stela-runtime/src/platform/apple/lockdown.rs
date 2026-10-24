@@ -175,6 +175,9 @@ impl Lockdown {
 }
 
 impl MmioDevice for Lockdown {
+    fn advance_policy(&self) -> super::bus::AdvancePolicy {
+        super::bus::AdvancePolicy::Passive
+    }
     fn name(&self) -> &'static str {
         self.name
     }

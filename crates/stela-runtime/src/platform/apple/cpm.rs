@@ -51,6 +51,9 @@ impl Cpm {
     }
 }
 impl MmioDevice for Cpm {
+    fn advance_policy(&self) -> super::bus::AdvancePolicy {
+        super::bus::AdvancePolicy::Passive
+    }
     fn name(&self) -> &'static str {
         NAME
     }

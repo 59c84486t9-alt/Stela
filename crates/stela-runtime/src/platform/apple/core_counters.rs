@@ -196,6 +196,9 @@ impl CoreCounters {
 }
 
 impl MmioDevice for CoreCounters {
+    fn advance_policy(&self) -> super::bus::AdvancePolicy {
+        super::bus::AdvancePolicy::Passive
+    }
     fn name(&self) -> &'static str {
         NAME
     }

@@ -45,6 +45,9 @@ impl Default for SoftwareLock {
 }
 
 impl MmioDevice for SoftwareLock {
+    fn advance_policy(&self) -> super::bus::AdvancePolicy {
+        super::bus::AdvancePolicy::Passive
+    }
     fn name(&self) -> &'static str {
         NAME
     }
@@ -115,6 +118,9 @@ impl PcSampler {
 }
 
 impl MmioDevice for PcSampler {
+    fn advance_policy(&self) -> super::bus::AdvancePolicy {
+        super::bus::AdvancePolicy::Passive
+    }
     fn name(&self) -> &'static str {
         "utt-pc-sampler"
     }

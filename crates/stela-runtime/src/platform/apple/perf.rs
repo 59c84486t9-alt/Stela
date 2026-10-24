@@ -116,6 +116,9 @@ impl PerfCounters {
 }
 
 impl MmioDevice for PerfCounters {
+    fn advance_policy(&self) -> super::bus::AdvancePolicy {
+        super::bus::AdvancePolicy::Passive
+    }
     fn name(&self) -> &'static str {
         NAME
     }

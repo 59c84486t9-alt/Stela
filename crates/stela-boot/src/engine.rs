@@ -2571,6 +2571,11 @@ fn run<H: Host>(
             ));
             #[cfg(feature = "native-profile")]
             host::profile_word_report();
+            #[cfg(feature = "native-profile")]
+            output::arguments(format_args!(
+                "NATIVE BOARD {:?}\n",
+                machine.devices.advance_statistics()
+            ));
             service_gap = 0;
             beat = (now, native, blocks, compiled, chained, events);
             translation = translation_report(machine, translation, compiled - beat_compiled);

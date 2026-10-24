@@ -256,6 +256,9 @@ impl Role {
     }
 }
 impl MmioDevice for Bridge {
+    fn advance_policy(&self) -> super::bus::AdvancePolicy {
+        super::bus::AdvancePolicy::Passive
+    }
     fn name(&self) -> &'static str {
         NAME
     }

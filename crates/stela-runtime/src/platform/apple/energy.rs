@@ -57,6 +57,9 @@ impl Energy {
 }
 
 impl MmioDevice for Energy {
+    fn advance_policy(&self) -> super::bus::AdvancePolicy {
+        super::bus::AdvancePolicy::Passive
+    }
     fn name(&self) -> &'static str {
         NAME
     }

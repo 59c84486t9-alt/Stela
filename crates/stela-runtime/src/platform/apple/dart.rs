@@ -395,6 +395,9 @@ impl Iommu for Dart {
 }
 
 impl MmioDevice for Dart {
+    fn advance_policy(&self) -> super::bus::AdvancePolicy {
+        super::bus::AdvancePolicy::Passive
+    }
     fn name(&self) -> &'static str {
         match &self.model {
             Model::T8110(model) => model.name(),

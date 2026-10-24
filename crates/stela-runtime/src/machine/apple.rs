@@ -467,6 +467,11 @@ impl Default for AppleDevices {
 }
 
 impl AppleDevices {
+    #[cfg(feature = "native-profile")]
+    pub fn advance_statistics(&self) -> crate::platform::apple::bus::AdvanceStatistics {
+        self.bus.advance_statistics()
+    }
+
     /// The board's devices with PE zero receiving the boot handoff.
     pub fn new() -> Self {
         Self::for_boot_processor(0)
