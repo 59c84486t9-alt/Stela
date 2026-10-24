@@ -239,25 +239,33 @@ static MTLFunctionReflection *CreateReflection(const struct stela_metal_function
 @property (readonly, nullable) NSString *installName;
 - (instancetype)initWithDevice:(id<MTLDevice>)device entries:(NSDictionary *)entries
    reflectionAvailable:(BOOL)reflectionAvailable;
-- (id<MTLFunction>)function:(NSString *)name error:(NSError **)error;
+- (id<MTLFunction>)function:(NSString *)name constantValues:(MTLFunctionConstantValues *)values
+   publicName:(NSString *)publicName error:(NSError **)error;
 @end
 @interface STELAMetalFunction : NSObject <MTLFunction>
 @property (nullable, copy, atomic) NSString *label;
 @property (readonly) STELAMetalFunctionSnapshot *snapshot;
-- (instancetype)initWithLibrary:(STELAMetalLibrary *)library snapshot:(STELAMetalFunctionSnapshot *)snapshot;
+@property (readonly, copy) NSString *name;
+- (instancetype)initWithLibrary:(STELAMetalLibrary *)library snapshot:(STELAMetalFunctionSnapshot *)snapshot
+   publicName:(NSString *)publicName;
 @end
 
 @implementation STELAMetalFunction {
    STELAMetalLibrary *_library;
 }
 - (instancetype)initWithLibrary:(STELAMetalLibrary *)library snapshot:(STELAMetalFunctionSnapshot *)snapshot
+   publicName:(NSString *)publicName
 {
    self = [super init];
-   if (self) { _library = library; _snapshot = snapshot; }
+   if (self) {
+      _library = library; _snapshot = snapshot;
+      /* Public naming does not rename the immutable AIR compiler entry. Nil
+       * keeps its original name; a supplied empty NSString remains distinct. */
+      _name = publicName ? [publicName copy] : snapshot.entryName;
+   }
    return self;
 }
 - (id<MTLDevice>)device { return _library.device; }
-- (NSString *)name { return _snapshot.entryName; }
 - (MTLFunctionType)functionType { return MTLFunctionTypeKernel; }
 - (MTLPatchType)patchType { return MTLPatchTypeNone; }
 - (NSInteger)patchControlPointCount { return -1; }
@@ -301,22 +309,23 @@ static MTLFunctionReflection *CreateReflection(const struct stela_metal_function
 }
 - (MTLLibraryType)type { return MTLLibraryTypeExecutable; }
 - (NSString *)installName { return nil; } /* Executable libraries have none. */
-- (id<MTLFunction>)function:(NSString *)name error:(NSError **)error
-{
-   if (error) *error = nil;
-   STELAMetalFunctionSnapshot *snapshot = [name isKindOfClass:NSString.class] ? _entries[name] : nil;
-   if (!snapshot) { LibraryError(error,MTLLibraryErrorFunctionNotFound,@"Function not found in this library"); return nil; }
-   return [[STELAMetalFunction alloc] initWithLibrary:self snapshot:snapshot];
-}
-- (id<MTLFunction>)newFunctionWithName:(NSString *)name { return [self function:name error:NULL]; }
-- (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values error:(NSError **)error
+- (id<MTLFunction>)function:(NSString *)name constantValues:(MTLFunctionConstantValues *)values
+   publicName:(NSString *)publicName error:(NSError **)error
 {
    /* Every constructed function has manifest-proven NO_CONSTANTS. All supplied
     * values are therefore unmatched and must be ignored without diagnostics.
     * Constant-bearing inputs remain refused by the assembler/constructor; a
     * future admission extension needs real specialization before using this. */
    (void)values;
-   return [self function:name error:error];
+   if (error) *error = nil;
+   STELAMetalFunctionSnapshot *snapshot = [name isKindOfClass:NSString.class] ? _entries[name] : nil;
+   if (!snapshot) { LibraryError(error,MTLLibraryErrorFunctionNotFound,@"Function not found in this library"); return nil; }
+   return [[STELAMetalFunction alloc] initWithLibrary:self snapshot:snapshot publicName:publicName];
+}
+- (id<MTLFunction>)newFunctionWithName:(NSString *)name { return [self function:name constantValues:nil publicName:nil error:NULL]; }
+- (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values error:(NSError **)error
+{
+   return [self function:name constantValues:values publicName:nil error:error];
 }
 - (void)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values
    completionHandler:(void (^)(id<MTLFunction>,NSError *))handler
@@ -334,11 +343,12 @@ static MTLFunctionReflection *CreateReflection(const struct stela_metal_function
 {
    if (![descriptor isKindOfClass:MTLFunctionDescriptor.class] ||
        [descriptor isKindOfClass:MTLIntersectionFunctionDescriptor.class] ||
-       descriptor.options != MTLFunctionOptionNone || descriptor.specializedName || descriptor.binaryArchives.count) {
+       descriptor.options != MTLFunctionOptionNone || descriptor.binaryArchives.count) {
       LibraryError(error,MTLLibraryErrorUnsupported,@"Unsupported function descriptor, options or archive lookup");
       return nil;
    }
-   return [self newFunctionWithName:descriptor.name constantValues:descriptor.constantValues error:error];
+   return [self function:descriptor.name constantValues:descriptor.constantValues
+      publicName:descriptor.specializedName error:error];
 }
 - (void)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor
    completionHandler:(void (^)(id<MTLFunction>,NSError *))handler

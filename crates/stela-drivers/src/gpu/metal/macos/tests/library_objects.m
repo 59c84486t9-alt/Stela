@@ -226,7 +226,7 @@ static BOOL Wait(dispatch_semaphore_t semaphore)
    return dispatch_semaphore_wait(semaphore,dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5*NSEC_PER_SEC))) == 0;
 }
 
-enum AsyncMode { AsyncValues, AsyncMissing, AsyncDescriptor, AsyncUnsupported, AsyncArchive, AsyncIntersection };
+enum AsyncMode { AsyncValues, AsyncMissing, AsyncDescriptor, AsyncUnsupported, AsyncArchive, AsyncIntersection, AsyncRename };
 static void AsyncCheck(enum AsyncMode mode, id<MTLDevice> device, NSData *input,
    const struct stela_metal_library_manifest *manifest, NSString *entry,
    NSDictionary *identity, NSDictionary *reflection, id<MTLBinaryArchive> archive)
@@ -249,6 +249,8 @@ static void AsyncCheck(enum AsyncMode mode, id<MTLDevice> device, NSData *input,
       MTLFunctionConstantValues *values = Values();
       MTLFunctionDescriptor *descriptor = [MTLFunctionDescriptor functionDescriptor];
       descriptor.name = name; descriptor.constantValues = values;
+      NSMutableString *publicName = [@"stela_async_public_name" mutableCopy];
+      if (mode == AsyncRename) descriptor.specializedName = publicName;
       if (mode == AsyncArchive) descriptor.binaryArchives = @[archive];
       if (mode == AsyncUnsupported) descriptor.options = MTLFunctionOptionCompileToBinary;
       void (^completion)(id<MTLFunction>,NSError *) = ^(id<MTLFunction> function, NSError *error) {
@@ -264,14 +266,14 @@ static void AsyncCheck(enum AsyncMode mode, id<MTLDevice> device, NSData *input,
                CheckError(error,MTLLibraryErrorUnsupported);
             } else {
                CHECK(!error,@"Unmatched values produced async diagnostics");
-               CheckFunction(function,device,entry,identity,reflection);
+               CheckFunction(function,device,mode == AsyncRename ? @"stela_async_public_name" : entry,identity,reflection);
             }
          } @catch (NSException *exception) {
             @synchronized(lock) { failure = [exception.reason copy] ?: @"Async exception"; }
          }
          dispatch_semaphore_signal(done);
       };
-      if (mode == AsyncDescriptor || mode == AsyncUnsupported || mode == AsyncArchive)
+      if (mode == AsyncDescriptor || mode == AsyncUnsupported || mode == AsyncArchive || mode == AsyncRename)
          [library newFunctionWithDescriptor:descriptor completionHandler:completion];
       else if (mode == AsyncIntersection) {
          MTLIntersectionFunctionDescriptor *intersection = [MTLIntersectionFunctionDescriptor new];
@@ -280,14 +282,15 @@ static void AsyncCheck(enum AsyncMode mode, id<MTLDevice> device, NSData *input,
       } else [library newFunctionWithName:name constantValues:values completionHandler:completion];
       /* Mutation occurs after the API returned, never racing its sync copy. */
       [name appendString:@"__caller_mutated"];
-      [values reset]; descriptor.name = @"stela_missing_after_submit"; descriptor.constantValues = nil; descriptor.binaryArchives = nil;
-      library = nil; name = nil; values = nil; descriptor = nil; completion = nil;
+      [values reset]; [publicName appendString:@"__caller_mutated"];
+      descriptor.name = @"stela_missing_after_submit"; descriptor.constantValues = nil; descriptor.binaryArchives = nil; descriptor.specializedName = nil;
+      library = nil; name = nil; values = nil; descriptor = nil; publicName = nil; completion = nil;
    }
    CHECK(Wait(entered),@"Async completion did not enter");
    /* This pending-callback assertion checks live callback state only: the
     * production dispatch block may still own the library. FunctionOwnerCheck
     * independently checks the returned function's library ownership. */
-   if (mode == AsyncValues || mode == AsyncDescriptor)
+   if (mode == AsyncValues || mode == AsyncDescriptor || mode == AsyncRename)
       CHECK(weakLibrary != nil,@"Async function lost its library owner");
    dispatch_semaphore_signal(release);
    CHECK(Wait(done),@"Async completion did not finish");
@@ -359,6 +362,142 @@ static NSString *OSBuild(void)
    if (!build.length) [NSException raise:@"STELATestInconclusive" format:@"Actual host OS build is empty"];
    return build;
 }
+/* The SDK27.2 descriptor comments say visible functions; retained DocC is
+ * generic. Neither proves compute admission. Observe real native behavior
+ * on the identical archive and host device, without private native snapshots. */
+static id ErrorObservation(NSError *error)
+{
+   if (!error) return [NSNull null];
+   NSString *detail = error.localizedDescription;
+   if ([detail lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 8192)
+      [NSException raise:@"STELATestInconclusive" format:@"Native diagnostic exceeds observation bound"];
+   return @{@"domain":error.domain,@"code":@(error.code),@"description":detail ?: [NSNull null]};
+}
+static id ExceptionObservation(NSException *exception)
+{
+   if (!exception) return [NSNull null];
+   NSString *detail = exception.reason;
+   if ([detail lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 8192)
+      [NSException raise:@"STELATestInconclusive" format:@"Native exception exceeds observation bound"];
+   return @{@"name":exception.name,@"reason":detail ?: [NSNull null]};
+}
+static NSDictionary *FunctionObservation(id<MTLFunction> function, NSError *error, NSException *exception)
+{
+   NSMutableDictionary *result = [@{@"returned":@(function != nil),@"name":[NSNull null],
+      @"function_type":[NSNull null],@"options":[NSNull null],
+      @"error":ErrorObservation(error),@"exception":ExceptionObservation(exception)} mutableCopy];
+   if (function && !exception) {
+      @try {
+         result[@"name"] = function.name ?: [NSNull null];
+         result[@"function_type"] = @(function.functionType);
+         result[@"options"] = @(function.options);
+      } @catch (NSException *caught) { result[@"exception"] = ExceptionObservation(caught); }
+   }
+   return result;
+}
+static NSDictionary *ObserveDescriptor(id<MTLLibrary> library, MTLFunctionDescriptor *descriptor, BOOL async)
+{
+   if (!async) {
+      NSError *error = nil;
+      @try {
+         id<MTLFunction> function = [library newFunctionWithDescriptor:descriptor error:&error];
+         return FunctionObservation(function,error,nil);
+      } @catch (NSException *exception) { return FunctionObservation(nil,error,exception); }
+   }
+   dispatch_semaphore_t done = dispatch_semaphore_create(0);
+   NSObject *lock = [NSObject new];
+   __block NSDictionary *observed = nil;
+   __block NSUInteger calls = 0;
+   @try {
+      [library newFunctionWithDescriptor:descriptor completionHandler:^(id<MTLFunction> function, NSError *error) {
+         @synchronized(lock) {
+            calls++;
+            @try { observed = FunctionObservation(function,error,nil); }
+            @catch (NSException *exception) { observed = FunctionObservation(nil,nil,exception); }
+         }
+         dispatch_semaphore_signal(done);
+      }];
+   } @catch (NSException *exception) { return FunctionObservation(nil,nil,exception); }
+   if (!Wait(done)) [NSException raise:@"STELATestInconclusive" format:@"Required descriptor reference callback unavailable"];
+   @synchronized(lock) {
+      if (calls != 1 || !observed)
+         [NSException raise:@"STELATestInconclusive" format:@"Ambiguous descriptor reference callback"];
+      return observed;
+   }
+}
+static void CompareObservation(NSMutableDictionary *reference, NSString *name,
+   NSDictionary *native, NSDictionary *stela)
+{
+   [reference[@"observations"] addObject:@{@"id":name,@"native":native,@"stela":stela}];
+   if (native[@"exception"] != [NSNull null])
+      [NSException raise:@"STELATestInconclusive" format:@"Native descriptor reference raised an exception"];
+   /* Errors are preserved exactly, not equated across compiler diagnostics.
+    * This finite comparison covers only these public function result fields. */
+   for (NSString *key in @[@"returned",@"name",@"function_type",@"options"])
+      CHECK([native[key] isEqual:stela[key]],@"Native/Stela public descriptor result mismatch");
+   CHECK(stela[@"exception"] == [NSNull null],@"Stela descriptor raised an exception");
+}
+static void NativeDescriptorReference(NSMutableDictionary *record, id<MTLDevice> device,
+   id<MTLLibrary> stela, NSData *input, NSString *entry)
+{
+   NSMutableDictionary *reference = [@{@"outcome":@"NOT_RUN",@"reason":@"",
+      @"input_sha256":Digest(input),@"dispatch_sha256":@"",@"input_bytes":@(input.length),@"entry":entry,
+      @"library_loaded":@NO,@"load_error":[NSNull null],@"reference_exception":[NSNull null],
+      @"observations":[NSMutableArray array],
+      @"comparison_scope":@"public_function_presence_name_type_options;errors_observed_only"} mutableCopy];
+   record[@"native_descriptor_reference"] = reference;
+   @try {
+      /* Actual public dispatch declaration: DEFAULT copies into immutable
+       * internal storage. No NSData/dispatch-data cast or borrowed destructor. */
+      dispatch_data_t bytes = dispatch_data_create(input.bytes,input.length,NULL,DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+      if (!bytes || dispatch_data_get_size(bytes) != input.length)
+         [NSException raise:@"STELATestInconclusive" format:@"Native immutable input allocation unavailable"];
+      const void *mappedBytes = NULL; size_t mappedSize = 0;
+      __attribute__((objc_precise_lifetime)) dispatch_data_t map = dispatch_data_create_map(bytes,&mappedBytes,&mappedSize);
+      if (!map || !mappedBytes || mappedSize != input.length)
+         [NSException raise:@"STELATestInconclusive" format:@"Native immutable input mapping unavailable"];
+      reference[@"dispatch_sha256"] = Digest([NSData dataWithBytes:mappedBytes length:mappedSize]);
+      CHECK([reference[@"dispatch_sha256"] isEqual:reference[@"input_sha256"]],@"Native reference input differs");
+      NSError *loadError = nil;
+      id<MTLLibrary> native = nil;
+      @try { native = [device newLibraryWithData:bytes error:&loadError]; }
+      @catch (NSException *exception) {
+         reference[@"reference_exception"] = ExceptionObservation(exception);
+         [NSException raise:@"STELATestInconclusive" format:@"Native library reference raised an exception"];
+      }
+      reference[@"load_error"] = ErrorObservation(loadError);
+      reference[@"library_loaded"] = @(native != nil);
+      if (!native) [NSException raise:@"STELATestInconclusive" format:@"Native same-input library reference unavailable"];
+      CHECK(native.device == device,@"Native reference uses a different host device");
+      NSDictionary *lookup = nil;
+      @try { lookup = FunctionObservation([native newFunctionWithName:entry],nil,nil); }
+      @catch (NSException *exception) { lookup = FunctionObservation(nil,nil,exception); }
+      NSDictionary *oursLookup = FunctionObservation([stela newFunctionWithName:entry],nil,nil);
+      [reference[@"observations"] addObject:@{@"id":@"named_lookup",@"native":lookup,@"stela":oursLookup}];
+      if (lookup[@"exception"] != [NSNull null] || ![lookup[@"returned"] boolValue] ||
+          [lookup[@"function_type"] unsignedIntegerValue] != MTLFunctionTypeKernel)
+         [NSException raise:@"STELATestInconclusive" format:@"Native selected kernel reference unavailable"];
+      for (NSString *key in @[@"returned",@"name",@"function_type",@"options"])
+         CHECK([lookup[key] isEqual:oursLookup[key]],@"Native/Stela selected public kernel differs");
+      for (NSString *name in @[@"descriptor",@"descriptor_values",@"rename",@"rename_empty",@"async_descriptor",@"async_rename"]) {
+         MTLFunctionDescriptor *descriptor = [MTLFunctionDescriptor functionDescriptor];
+         descriptor.name = entry;
+         if (![name isEqualToString:@"descriptor"]) descriptor.constantValues = Values();
+         if ([name isEqualToString:@"rename"] || [name isEqualToString:@"async_rename"])
+            descriptor.specializedName = @"stela_native_compared_public_name";
+         if ([name isEqualToString:@"rename_empty"]) descriptor.specializedName = @"";
+         BOOL async = [name hasPrefix:@"async_"];
+         NSDictionary *apple = ObserveDescriptor(native,descriptor,async);
+         NSDictionary *ours = ObserveDescriptor(stela,descriptor,async);
+         CompareObservation(reference,name,apple,ours);
+      }
+      reference[@"outcome"] = @"PASS";
+   } @catch (NSException *exception) {
+      reference[@"outcome"] = [exception.name isEqualToString:@"STELATestInconclusive"] ? @"INCONCLUSIVE" : @"FAIL";
+      reference[@"reason"] = exception.reason ?: @"Exception";
+      @throw;
+   }
+}
 int main(int argc, const char **argv)
 {
    @autoreleasepool {
@@ -374,12 +513,13 @@ int main(int argc, const char **argv)
       NSString *entry = [NSString stringWithUTF8String:argv[2]];
       NSString *expected = [NSString stringWithUTF8String:argv[3]];
       Cases = [NSMutableArray array];
-      NSMutableDictionary *record = [@{@"schema":@1,@"suite":@"stela-metal-library-objects-v1",
+      NSMutableDictionary *record = [@{@"schema":@2,@"suite":@"stela-metal-library-objects-v2",
          @"outcome":@"FAIL",@"reason":@"",@"cases":Cases,@"input_sha256":expected ?: @"",
          @"input_bytes":@0,@"entry":entry ?: @"",
          @"host":@{@"architecture":architecture,@"os_major":@(process.operatingSystemVersion.majorVersion),
             @"os_version":process.operatingSystemVersionString,@"os_build":@""},
          @"device":[NSNull null],@"llvm":LlvmIdentity(),@"frameworks":[NSNull null],@"provenance":[NSNull null],
+         @"first_party_outcome":@"NOT_RUN",@"native_descriptor_reference":[NSNull null],
          @"gpu_work_submitted":@NO,@"guest_device_qualified":@NO,@"full_api_completion":@NO} mutableCopy];
       __block struct stela_metal_assembly *owner = NULL;
       int result = 1;
@@ -472,6 +612,40 @@ int main(int argc, const char **argv)
             CheckFunction(function,device,entry,identity,reflection);
          });
          Test(@"async_descriptor", ^{ AsyncCheck(AsyncDescriptor,device,input,manifest,entry,identity,reflection,nil); });
+         Test(@"rename_variants", ^{
+            NSString *first = @"stela_public_variant_a", *second = @"stela_public_variant_b";
+            while ([exports containsObject:first]) first = [first stringByAppendingString:@"_"];
+            while ([exports containsObject:second]) second = [second stringByAppendingString:@"_"];
+            MTLFunctionDescriptor *descriptor = [MTLFunctionDescriptor functionDescriptor];
+            descriptor.name = entry; descriptor.constantValues = Values(); descriptor.specializedName = first;
+            NSError *diagnostic = Sentinel();
+            id<MTLFunction> a = [library newFunctionWithDescriptor:descriptor error:&diagnostic];
+            CHECK(!diagnostic,@"Rename produced diagnostics");
+            descriptor.specializedName = second; diagnostic = Sentinel();
+            id<MTLFunction> b = [library newFunctionWithDescriptor:descriptor error:&diagnostic];
+            CHECK(!diagnostic,@"Second rename produced diagnostics");
+            CheckFunction(a,device,first,identity,reflection);
+            CheckFunction(b,device,second,identity,reflection);
+            CheckFunction([library newFunctionWithName:entry],device,entry,identity,reflection);
+            CHECK([library.functionNames isEqual:exports] && [library newFunctionWithName:first] == nil &&
+               [library newFunctionWithName:second] == nil,@"Public rename changed actual exports/lookup");
+         });
+         Test(@"rename_copy_and_empty", ^{
+            NSMutableString *name = [@"stela_copied_public_name" mutableCopy];
+            MTLFunctionDescriptor *descriptor = [MTLFunctionDescriptor functionDescriptor];
+            descriptor.name = entry; descriptor.specializedName = name;
+            NSError *diagnostic = Sentinel();
+            id<MTLFunction> function = [library newFunctionWithDescriptor:descriptor error:&diagnostic];
+            CHECK(!diagnostic,@"Copied rename produced diagnostics");
+            [name appendString:@"__changed"]; descriptor.specializedName = @"replacement";
+            descriptor = nil; name = nil;
+            CheckFunction(function,device,@"stela_copied_public_name",identity,reflection);
+            descriptor = [MTLFunctionDescriptor functionDescriptor]; descriptor.name = entry; descriptor.specializedName = @"";
+            CheckFunction([library newFunctionWithDescriptor:descriptor error:NULL],device,@"",identity,reflection);
+            descriptor.specializedName = nil;
+            CheckFunction([library newFunctionWithDescriptor:descriptor error:NULL],device,entry,identity,reflection);
+         });
+         Test(@"async_rename", ^{ AsyncCheck(AsyncRename,device,input,manifest,entry,identity,reflection,nil); });
          Test(@"constructor_refusals", ^{
             struct stela_metal_library_manifest copy = *manifest;
             struct stela_metal_function_record *entries = malloc(copy.entry_count*sizeof(*entries));
@@ -529,8 +703,14 @@ int main(int argc, const char **argv)
             CheckFunction(baseline,device,entry,identity,reflection);
             CHECK([library.functionNames isEqual:exports],@"Export table changed after caller retirement");
          });
+         record[@"first_party_outcome"] = @"PASS";
+         Test(@"native_descriptor_reference", ^{
+            NativeDescriptorReference(record,device,library,snapshot.originalInput,entry);
+         });
          record[@"outcome"] = @"PASS"; result = 0;
       } @catch (NSException *exception) {
+         if ([record[@"first_party_outcome"] isEqual:@"NOT_RUN"] && Cases.count)
+            record[@"first_party_outcome"] = [exception.name isEqualToString:@"STELATestInconclusive"] ? @"INCONCLUSIVE" : @"FAIL";
          BOOL inconclusive = [exception.name isEqualToString:@"STELATestInconclusive"];
          record[@"outcome"] = inconclusive ? @"INCONCLUSIVE" : @"FAIL";
          record[@"reason"] = exception.reason ?: @"Exception";

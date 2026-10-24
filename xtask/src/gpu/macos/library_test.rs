@@ -41,6 +41,7 @@ const CASES: &[&str] = &[
     "async_values", "async_missing", "descriptor_values", "async_descriptor",
     "constructor_refusals", "descriptor_refusals", "archive_refusal",
     "function_library_ownership", "snapshot_ownership",
+    "rename_variants", "rename_copy_and_empty", "async_rename", "native_descriptor_reference",
 ];
 
 #[derive(Deserialize, Serialize)]
@@ -110,6 +111,65 @@ struct Provenance {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct ErrorObservation {
+    domain: String,
+    code: i64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    description: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExceptionObservation {
+    name: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    reason: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FunctionObservation {
+    returned: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
+    name: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    function_type: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    options: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    error: Option<ErrorObservation>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    exception: Option<ExceptionObservation>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ComparisonObservation {
+    id: String,
+    native: FunctionObservation,
+    stela: FunctionObservation,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct NativeReference {
+    outcome: String,
+    reason: String,
+    input_sha256: String,
+    dispatch_sha256: String,
+    input_bytes: u64,
+    entry: String,
+    library_loaded: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
+    load_error: Option<ErrorObservation>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    reference_exception: Option<ExceptionObservation>,
+    observations: Vec<ComparisonObservation>,
+    comparison_scope: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Record {
     schema: u32,
     suite: String,
@@ -130,6 +190,9 @@ struct Record {
     gpu_work_submitted: bool,
     guest_device_qualified: bool,
     full_api_completion: bool,
+    first_party_outcome: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    native_descriptor_reference: Option<NativeReference>,
 }
 
 fn bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
@@ -174,6 +237,60 @@ fn validate_cases(cases: &[Case], outcome: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_public_observation(value: &FunctionObservation) -> Result<()> {
+    ensure!(value.name.as_ref().is_none_or(|name| name.len() <= 8192), "unbounded public function name");
+    if !value.returned {
+        ensure!(value.name.is_none() && value.function_type.is_none() && value.options.is_none(), "absent function has invented metadata");
+    }
+    // Keep an anomalous native nil/partial getter observation representable on
+    // nonpass. A PASS below requires complete, matching genuine functions.
+    if let Some(error) = &value.error {
+        ensure!(error.domain.len() <= 8192 && error.description.as_ref().is_none_or(|value| value.len() <= 8192), "unbounded native error");
+    }
+    if let Some(exception) = &value.exception {
+        ensure!(exception.name.len() <= 8192 && exception.reason.as_ref().is_none_or(|value| value.len() <= 8192), "unbounded native exception");
+    }
+    Ok(())
+}
+
+fn validate_reference(record: &Record) -> Result<()> {
+    ensure!(["NOT_RUN", "PASS", "FAIL", "INCONCLUSIVE"].contains(&record.first_party_outcome.as_str()), "unknown first-party outcome");
+    let Some(reference) = &record.native_descriptor_reference else {
+        ensure!(record.outcome != "PASS", "v2 pass lacks mandatory native reference");
+        return Ok(());
+    };
+    ensure!(record.first_party_outcome == "PASS", "native comparison hides incomplete first-party cases");
+    ensure!(reference.input_sha256 == record.input_sha256 && reference.input_bytes == record.input_bytes && reference.entry == record.entry, "native reference input differs");
+    ensure!(reference.comparison_scope == "public_function_presence_name_type_options;errors_observed_only", "unknown native comparison scope");
+    ensure!(["PASS", "FAIL", "INCONCLUSIVE"].contains(&reference.outcome.as_str()), "unknown native reference outcome");
+    if reference.library_loaded {
+        ensure!(reference.dispatch_sha256 == record.input_sha256, "native dispatch input differs");
+    }
+    let expected = ["named_lookup", "descriptor", "descriptor_values", "rename", "rename_empty", "async_descriptor", "async_rename"];
+    let mut ids = BTreeSet::new();
+    for observation in &reference.observations {
+        ensure!(expected.contains(&observation.id.as_str()) && ids.insert(observation.id.as_str()), "unknown/duplicate native observation");
+        validate_public_observation(&observation.native)?;
+        validate_public_observation(&observation.stela)?;
+        if reference.outcome == "PASS" {
+            let native = &observation.native;
+            let stela = &observation.stela;
+            ensure!(native.exception.is_none() && stela.exception.is_none() && native.returned && stela.returned && native.name.is_some() && native.name == stela.name && native.function_type == Some(3) && native.function_type == stela.function_type && native.options == Some(0) && native.options == stela.options, "native/Stela public observation differs");
+            if observation.id == "named_lookup" {
+                // Public MTLFunctionTypeKernel is 3; MTLB's compute TYPE is 2.
+                ensure!(native.returned && native.function_type == Some(3), "native selected kernel prerequisite is absent");
+            }
+        }
+    }
+    match reference.outcome.as_str() {
+        "PASS" => ensure!(record.outcome == "PASS" && reference.reason.is_empty() && reference.library_loaded && reference.reference_exception.is_none() && ids == expected.into_iter().collect(), "incomplete/contradictory native comparison pass"),
+        "INCONCLUSIVE" => ensure!(record.outcome == "INCONCLUSIVE" && !reference.reason.is_empty(), "inconclusive comparison was misclassified"),
+        "FAIL" => ensure!(record.outcome == "FAIL" && !reference.reason.is_empty(), "failed comparison was misclassified"),
+        _ => bail!("unknown native reference outcome"),
+    }
+    Ok(())
+}
+
 fn validate(
     record: &Record,
     status: Option<i32>,
@@ -182,7 +299,7 @@ fn validate(
     entry: &str,
     llvm: &Value,
 ) -> Result<()> {
-    ensure!(record.schema == 1 && record.suite == "stela-metal-library-objects-v1", "wrong runtime schema/suite");
+    ensure!(record.schema == 2 && record.suite == "stela-metal-library-objects-v2", "wrong runtime schema/suite");
     ensure!(record.input_sha256 == sha256(input) && record.input_bytes == input.len() as u64 && record.entry == entry, "runtime input identity differs");
     ensure!(record.host.architecture == architecture && !record.host.os_version.is_empty(), "runtime process ABI/OS identity differs");
     ensure!(!record.gpu_work_submitted && !record.guest_device_qualified && !record.full_api_completion, "runtime claims unqualified work");
@@ -190,6 +307,7 @@ fn validate(
     let (_, loaded) = bounded_binding(&fs::canonicalize(&record.llvm.loaded_path)?, LLVM_LIMIT)?;
     ensure!(loaded["sha256"] == llvm["sha256"] && loaded["bytes"] == llvm["bytes"], "runtime loaded a different LLVM library");
     validate_cases(&record.cases, &record.outcome)?;
+    validate_reference(record)?;
     if let Some(frameworks) = &record.frameworks {
         let mut symbols = BTreeSet::new();
         for framework in frameworks {
@@ -381,7 +499,7 @@ fn exercise(options: LibraryTestOptions<'_>, evidence: &Path, receipt: &mut Valu
 
 pub(super) fn run(options: LibraryTestOptions<'_>) -> Result<()> {
     let evidence = evidence_directory()?;
-    let mut receipt = json!({"schema":1,"suite":"stela-metal-library-objects-v1","scope":"Finite real host Objective-C library/function object semantics only","outcome":"FAIL","gpu_work_submitted":false,"guest_device_qualified":false,"full_api_completion":false});
+    let mut receipt = json!({"schema":2,"suite":"stela-metal-library-objects-v2","scope":"Finite real host Objective-C library/function object semantics only","outcome":"FAIL","gpu_work_submitted":false,"guest_device_qualified":false,"full_api_completion":false});
     let result = exercise(options, &evidence, &mut receipt);
     if result.is_ok() { receipt["outcome"] = json!("PASS"); }
     else if result.as_ref().err().is_some_and(|e| e.downcast_ref::<Inconclusive>().is_some()) { receipt["outcome"] = json!("INCONCLUSIVE"); }
@@ -400,11 +518,11 @@ mod tests {
     // Protocol data only: no LLVM, device, library or execution evidence.
     fn record_json() -> String {
         json!({
-            "schema":1,"suite":"stela-metal-library-objects-v1","outcome":"INCONCLUSIVE",
+            "schema":2,"suite":"stela-metal-library-objects-v2","outcome":"INCONCLUSIVE",
             "reason":"protocol fixture only","cases":[],"input_sha256":"0".repeat(64),
             "input_bytes":4,"entry":"fixture","host":{"architecture":"x86_64","os_major":26,"os_version":"fixture","os_build":"fixture"},
             "device":null,"frameworks":null,"llvm":{"major":23,"minor":0,"patch":0,"loaded_path":"unused-protocol-fixture"},
-            "provenance":null,"gpu_work_submitted":false,"guest_device_qualified":false,"full_api_completion":false
+            "provenance":null,"first_party_outcome":"NOT_RUN","native_descriptor_reference":null,"gpu_work_submitted":false,"guest_device_qualified":false,"full_api_completion":false
         }).to_string()
     }
 
@@ -412,12 +530,12 @@ mod tests {
     fn rejects_duplicate_and_unknown_fields_before_status_interpretation() {
         let original = record_json();
         assert!(serde_json::from_str::<Record>(&original).is_ok());
-        for field in ["device", "frameworks", "provenance"] {
+        for field in ["device", "frameworks", "provenance", "native_descriptor_reference"] {
             let missing = original.replace(&format!("\"{field}\":null,"), "");
             assert_ne!(original, missing);
             assert!(serde_json::from_str::<Record>(&missing).is_err());
         }
-        let duplicate = format!("{{\"schema\":1,{}", &original[1..]);
+        let duplicate = format!("{{\"schema\":2,{}", &original[1..]);
         assert!(serde_json::from_str::<Record>(&duplicate).is_err());
         let duplicate_nullable = original.replace("\"device\":null", "\"device\":null,\"device\":null");
         assert_ne!(original, duplicate_nullable);
@@ -470,6 +588,23 @@ mod tests {
         // the fixture creates only this user-owned FIFO and retains no pointer.
         assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
         assert!(bounded(&fifo, 4).is_err());
+    }
+
+    #[test]
+    fn v1_records_and_missing_native_reference_cannot_qualify_v2() {
+        let mut value: Value = serde_json::from_str(&record_json()).unwrap();
+        value["schema"] = json!(1);
+        value["suite"] = json!("stela-metal-library-objects-v1");
+        value.as_object_mut().unwrap().remove("first_party_outcome");
+        value.as_object_mut().unwrap().remove("native_descriptor_reference");
+        assert!(serde_json::from_value::<Record>(value).is_err());
+        let mut record: Record = serde_json::from_str(&record_json()).unwrap();
+        record.outcome = "PASS".to_owned(); record.first_party_outcome = "PASS".to_owned();
+        assert!(validate_reference(&record).is_err());
+        record.schema = 1; record.suite = "stela-metal-library-objects-v1".to_owned();
+        // Version refusal precedes any attempt to open the unused LLVM path.
+        let error = validate(&record, Some(0), "x86_64", &[0; 4], "fixture", &Value::Null).unwrap_err();
+        assert_eq!(error.to_string(), "wrong runtime schema/suite");
     }
 
     #[cfg(unix)]
