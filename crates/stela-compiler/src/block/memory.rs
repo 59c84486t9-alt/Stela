@@ -258,6 +258,7 @@ impl CheckedPlan {
         terminal: Option<&(GuestAddress, super::Terminator)>,
         fallthrough: GuestAddress,
         target: TargetCpu,
+        profile: Option<&mut super::profile::CompileProfile>,
     ) -> Result<NativeBlock, CompileError> {
         crate::x86_64::block::checked_memory::emit(
             &self.decoded,
@@ -265,6 +266,7 @@ impl CheckedPlan {
             fallthrough,
             target,
             self.register_regions,
+            profile,
         )
     }
 }

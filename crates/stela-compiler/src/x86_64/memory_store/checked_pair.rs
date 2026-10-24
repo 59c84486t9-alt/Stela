@@ -65,6 +65,27 @@ enum Profile {
 }
 
 impl Operand {
+    pub(crate) fn profile_success_traffic(&self) -> crate::block::profile::RegisterTraffic {
+        let real_data = self
+            .data
+            .iter()
+            .filter(|register| **register != Register::Zero)
+            .count() as u64;
+        crate::block::profile::RegisterTraffic {
+            gpr_frame_loads: 1
+                + u64::from(self.transfer == MemoryTransfer::Store) * real_data
+                + u64::from(
+                    self.base == Register::Sp
+                        && matches!(self.profile,
+                    Profile::NormalWb(profile) if profile.sp_requirement() == SpAlignmentRequirement::Enabled),
+                ),
+            gpr_direct_stores: u64::from(matches!(self.transfer, MemoryTransfer::Load { .. }))
+                * real_data
+                + u64::from(self.mode != AddressMode::Offset),
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn from_operation(
         operation: &Operation,
         profile: CheckedMemoryProfile,

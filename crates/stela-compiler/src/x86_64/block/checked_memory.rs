@@ -13,6 +13,7 @@ pub(crate) fn emit(
     fallthrough: GuestAddress,
     target: TargetCpu,
     register_regions: bool,
+    mut profile: Option<&mut crate::block::profile::CompileProfile>,
 ) -> Result<NativeBlock, CompileError> {
     let mut block = NativeBlock {
         x86_64_code: extended::context_wrapper(),
@@ -39,13 +40,25 @@ pub(crate) fn emit(
                     break;
                 }
             }
-            emit_register_span(&mut block, &span, target)?;
+            emit_register_span(&mut block, &span, target, cursor, profile.as_deref_mut())?;
             cursor += span.len();
             continue;
         }
         let (pc, instruction) = &instructions[cursor];
         block.source_map.push((*pc, block.x86_64_code.len()));
         instruction.emit(&mut block.x86_64_code, *pc, target, &mut fixups)?;
+        if let Some(profile) = profile.as_deref_mut()
+            && let Some((recipe, traffic)) = instruction.profile_success_traffic()
+        {
+            profile
+                .register_spans
+                .push(crate::block::profile::RegisterSpan {
+                    source_start: cursor,
+                    source_end: cursor + 1,
+                    recipe,
+                    traffic,
+                });
+        }
         cursor += 1;
     }
     if !fixups.is_empty() {
@@ -63,6 +76,19 @@ pub(crate) fn emit(
         crate::x86_64::MemoryChecks::DEFAULT,
         crate::x86_64::Rax::Unknown,
     );
+    if let Some(profile) = profile
+        && let Some((_, terminal)) = terminal
+        && let Some(traffic) = crate::block::profile::terminal_traffic(terminal)
+    {
+        profile
+            .register_spans
+            .push(crate::block::profile::RegisterSpan {
+                source_start: instructions.len(),
+                source_end: instructions.len() + 1,
+                recipe: crate::block::profile::RegisterRecipe::Terminal,
+                traffic,
+            });
+    }
     Ok(block)
 }
 
@@ -70,6 +96,8 @@ fn emit_register_span(
     block: &mut NativeBlock,
     instructions: &[Instruction],
     target: TargetCpu,
+    source_start: usize,
+    mut profile: Option<&mut crate::block::profile::CompileProfile>,
 ) -> Result<(), CompileError> {
     use crate::x86_64::{MemoryChecks, emit_instruction, region};
     let mut cursor = 0;
@@ -113,6 +141,19 @@ fn emit_register_span(
                 region::admits_ordinary(&region, &baseline.x86_64_code)
             }
         {
+            if let Some(profile) = profile.as_deref_mut() {
+                use crate::block::profile::{RegisterRecipe, RegisterSpan, RegisterTraffic};
+                profile.register_spans.push(RegisterSpan {
+                    source_start: source_start + cursor,
+                    source_end: source_start + cursor + count,
+                    recipe: if allocated {
+                        RegisterRecipe::Allocated
+                    } else {
+                        RegisterRecipe::Retained
+                    },
+                    traffic: RegisterTraffic::region(&region.stats),
+                });
+            }
             block.source_map.extend(
                 region
                     .source_map

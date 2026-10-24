@@ -66,6 +66,26 @@ fn base_register(register: Register) -> bool {
     matches!(register, Register::X(index) if index < 31) || register == Register::Sp
 }
 impl Operand {
+    pub(crate) fn profile_success_traffic(&self) -> crate::block::profile::RegisterTraffic {
+        let real = |register| u64::from(register != Register::Zero);
+        crate::block::profile::RegisterTraffic {
+            gpr_frame_loads: u64::from(self.transfer == MemoryTransfer::Store) * real(self.data)
+                + u64::from(!matches!(self.address, Address::Literal { .. }))
+                + match self.address {
+                    Address::RegisterOffset { index, .. } => real(index),
+                    _ => 0,
+                }
+                + u64::from(
+                    self.base == Register::Sp
+                        && self.profile.sp_requirement() == SpAlignmentRequirement::Enabled,
+                ),
+            gpr_direct_stores: u64::from(matches!(self.transfer, MemoryTransfer::Load { .. }))
+                * real(self.data)
+                + u64::from(self.writeback()),
+            ..Default::default()
+        }
+    }
+
     /// This is a typed adapter, not a decoder. Allocated memory families that
     /// return None must decline; dispatch must never fall back to direct memory.
     pub(crate) fn from_operation(
@@ -438,6 +458,45 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
 mod tests {
     use super::*;
     use crate::{GuestAddress, Lifter, aarch64::Decoder};
+
+    #[test]
+    fn profiled_register_offset_counts_actual_aliased_frame_loads_and_sp_check() {
+        let operand = Operand::from_operation(
+            &Operation::MemoryRegisterOffset(crate::aarch64::register_offset::Operand {
+                transfer: MemoryTransfer::Store,
+                bytes: 8,
+                data: Register::X(0),
+                base: Register::Sp,
+                index: Register::X(0),
+                extend: IndexExtend::Lsl,
+                shift: 0,
+            }),
+            CheckedMemoryProfile::SpAlignmentEnabled,
+        )
+        .unwrap();
+        let traffic = operand.profile_success_traffic();
+        assert_eq!((traffic.gpr_frame_loads, traffic.gpr_direct_stores), (4, 0));
+        let mut code = Vec::new();
+        emit_context(&mut code, &operand, 0x4000);
+        for (register, count) in [(Register::X(0), 1), (Register::Sp, 2)] {
+            let mut expected = Vec::new();
+            load(&mut expected, register);
+            assert_eq!(
+                code.windows(expected.len())
+                    .filter(|window| *window == expected)
+                    .count(),
+                count
+            );
+        }
+        // The aliased index is a read memory operand of ADD, not another MOV.
+        let index_read = [0x48, 0x03, 0x87, 0, 0, 0, 0];
+        assert_eq!(
+            code.windows(index_read.len())
+                .filter(|window| *window == index_read)
+                .count(),
+            1
+        );
+    }
     const IMM19_MASK: u32 = (1 << 19) - 1;
     fn source(form: u32, immediate: i32, destination: u32) -> u32 {
         form | ((immediate as u32 & IMM19_MASK) << 5) | destination

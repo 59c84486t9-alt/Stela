@@ -42,6 +42,72 @@ pub(crate) struct Summary {
     pub dropped_bodies: u64,
     pub wrapper_bytes: u64,
     pub saturated: bool,
+    pub registers: RegisterSummary,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct RegisterSummary {
+    pub covered_retired_words: u64,
+    pub uncovered_retired_words: u64,
+    /// Included in uncovered_retired_words, not an additional population.
+    pub partial_span_words: u64,
+    pub traffic: stela_compiler::block::profile::RegisterTraffic,
+}
+
+impl RegisterSummary {
+    fn capture(
+        spans: &[stela_compiler::block::profile::RegisterSpan],
+        retired: usize,
+        count: usize,
+    ) -> Option<Self> {
+        let mut summary = Self::default();
+        let mut previous_end = 0;
+        for span in spans {
+            if span.source_start < previous_end
+                || span.source_start >= span.source_end
+                || span.source_end > count
+            {
+                return None;
+            }
+            previous_end = span.source_end;
+            if span.source_end <= retired {
+                summary.covered_retired_words += (span.source_end - span.source_start) as u64;
+                if summary.traffic.accumulate(span.traffic) {
+                    return None;
+                }
+            } else if span.source_start < retired {
+                summary.partial_span_words += (retired - span.source_start) as u64;
+            }
+        }
+        summary.uncovered_retired_words = retired as u64 - summary.covered_retired_words;
+        Some(summary)
+    }
+
+    fn accumulate(&mut self, other: Self) -> bool {
+        let mut saturated = self
+            .covered_retired_words
+            .checked_add(other.covered_retired_words)
+            .is_none()
+            || self
+                .uncovered_retired_words
+                .checked_add(other.uncovered_retired_words)
+                .is_none()
+            || self
+                .partial_span_words
+                .checked_add(other.partial_span_words)
+                .is_none();
+        self.covered_retired_words = self
+            .covered_retired_words
+            .saturating_add(other.covered_retired_words);
+        self.uncovered_retired_words = self
+            .uncovered_retired_words
+            .saturating_add(other.uncovered_retired_words);
+        self.partial_span_words = self
+            .partial_span_words
+            .saturating_add(other.partial_span_words);
+        saturated |= self.traffic.accumulate(other.traffic);
+        saturated
+    }
 }
 
 const MAX_WORDS: usize = stela_compiler::block::MAX_BLOCK_INSTRUCTIONS;
@@ -56,6 +122,7 @@ pub(crate) struct Captured {
     faulting: bool,
     deferred: bool,
     wrapper_bytes: u64,
+    registers: RegisterSummary,
 }
 
 impl Captured {
@@ -96,6 +163,7 @@ impl Captured {
             faulting: sample.faulting,
             deferred: sample.deferred_terminal,
             wrapper_bytes: sample.source_map[0].1 as u64,
+            registers: RegisterSummary::capture(sample.register_spans, retired, count)?,
         };
         for index in 0..end {
             captured.words[index] =
@@ -164,6 +232,7 @@ impl Histogram {
     }
 
     pub fn merge(&mut self, captured: Captured) {
+        self.summary.saturated |= self.summary.registers.accumulate(captured.registers);
         self.summary.bodies = self.summary.bodies.saturating_add(1);
         self.summary.retired_words = self
             .summary
@@ -231,6 +300,77 @@ mod tests {
     use stela_compiler::GuestAddress;
 
     #[test]
+    fn register_coverage_never_credits_unretired_callbacks_or_partial_integer_spans() {
+        use stela_compiler::block::profile::{RegisterRecipe, RegisterSpan, RegisterTraffic};
+        let spans = [
+            RegisterSpan {
+                source_start: 0,
+                source_end: 4,
+                recipe: RegisterRecipe::Allocated,
+                traffic: RegisterTraffic {
+                    gpr_frame_loads: 1,
+                    gpr_boundary_stores: 1,
+                    resident_source_uses: 3,
+                    ..Default::default()
+                },
+            },
+            RegisterSpan {
+                source_start: 4,
+                source_end: 5,
+                recipe: RegisterRecipe::ScalarCallback,
+                traffic: RegisterTraffic {
+                    gpr_frame_loads: 1,
+                    gpr_direct_stores: 1,
+                    ..Default::default()
+                },
+            },
+        ];
+        let partial = RegisterSummary::capture(&spans, 2, 6).unwrap();
+        assert_eq!(
+            (
+                partial.covered_retired_words,
+                partial.uncovered_retired_words,
+                partial.partial_span_words
+            ),
+            (0, 2, 2)
+        );
+        assert_eq!(partial.traffic.gpr_frame_loads, 0);
+        let before_callback = RegisterSummary::capture(&spans, 4, 6).unwrap();
+        assert_eq!(
+            (
+                before_callback.covered_retired_words,
+                before_callback.uncovered_retired_words
+            ),
+            (4, 0)
+        );
+        assert_eq!(before_callback.traffic.gpr_direct_stores, 0);
+        let complete = RegisterSummary::capture(&spans, 6, 6).unwrap();
+        assert_eq!(
+            (
+                complete.covered_retired_words,
+                complete.uncovered_retired_words
+            ),
+            (5, 1)
+        );
+        assert_eq!(
+            (
+                complete.traffic.gpr_frame_loads,
+                complete.traffic.gpr_direct_stores
+            ),
+            (2, 1)
+        );
+        let overlap = [
+            spans[0],
+            RegisterSpan {
+                source_start: 3,
+                ..spans[1]
+            },
+        ];
+        assert!(RegisterSummary::capture(&overlap, 6, 6).is_none());
+        assert!(RegisterSummary::capture(&spans, 6, 4).is_none());
+    }
+
+    #[test]
     fn retired_prefix_fault_attempt_and_deferred_service_never_share_retirement_credit() {
         let source = [1u32, 2, 3].map(u32::to_le_bytes).concat();
         let map = [
@@ -242,6 +382,7 @@ mod tests {
         histogram.sample(NativeInstructionSample {
             source: &source,
             source_map: &map,
+            register_spans: &[],
             native_bytes: 40,
             retired: 1,
             faulting: true,
@@ -250,6 +391,7 @@ mod tests {
         histogram.sample(NativeInstructionSample {
             source: &source,
             source_map: &map,
+            register_spans: &[],
             native_bytes: 40,
             retired: 2,
             faulting: false,
@@ -342,6 +484,7 @@ mod tests {
         let base = NativeInstructionSample {
             source: &source,
             source_map: &map,
+            register_spans: &[],
             native_bytes: 12,
             retired: 2,
             faulting: false,
@@ -390,6 +533,7 @@ mod tests {
         );
         assert!(
             Captured::new(NativeInstructionSample {
+                register_spans: &[],
                 native_bytes: 6,
                 ..base
             })
@@ -403,6 +547,7 @@ mod tests {
         histogram.sample(NativeInstructionSample {
             source: &[0; 4],
             source_map: &[],
+            register_spans: &[],
             native_bytes: 10,
             retired: 1,
             faulting: false,

@@ -218,6 +218,11 @@ impl Emitter<'_> {
             if value.is_nzcv() {
                 self.emit(|code| encoding::store_nzcv(code, host));
                 self.output.stats.flag_stores += 1;
+                if at_exit {
+                    self.output.stats.nzcv_boundary_stores += 1;
+                } else {
+                    self.output.stats.nzcv_pressure_stores += 1;
+                }
             } else {
                 self.emit(|code| encoding::store(code, host, value.slot()));
             }
@@ -342,6 +347,7 @@ impl Emitter<'_> {
     }
 
     pub(super) fn commit_coalesced(&mut self, destination: Register) {
+        self.output.stats.in_place_source_uses += 1;
         let value = super::slot(destination).and_then(Value::gpr).unwrap();
         let index = self.coalesced.take().expect("selected source host");
         let previous = self.resident[index].unwrap();

@@ -260,6 +260,8 @@ struct Artifact {
     source: Vec<u8>,
     requirements: MemoryRequirements,
     branch_type: u8,
+    #[cfg(feature = "native-profile")]
+    profile: stela_compiler::block::profile::CompileProfile,
 }
 
 impl Artifact {
@@ -269,7 +271,7 @@ impl Artifact {
             .expect("retained artifact charge")
     }
     fn checked_retained_bytes(&self) -> Option<usize> {
-        [
+        let bytes = [
             core::mem::size_of::<Self>(),
             2 * core::mem::size_of::<usize>(),
             core::mem::size_of::<Identity>(),
@@ -287,7 +289,10 @@ impl Artifact {
             self.identity.controls_sha256.capacity(),
         ]
         .into_iter()
-        .try_fold(0usize, usize::checked_add)
+        .try_fold(0usize, usize::checked_add);
+        #[cfg(feature = "native-profile")]
+        let bytes = bytes?.checked_add(self.profile.retained_bytes()?);
+        bytes
     }
 }
 
@@ -546,6 +551,7 @@ impl NativeRun<'_> {
             source: &self.artifact.source,
             source_map: &self.artifact.source_map,
             native_bytes: self.artifact.code.len(),
+            register_spans: &self.artifact.profile.register_spans,
             retired,
             faulting: status != MemoryStatus::Success,
             deferred_terminal: status == MemoryStatus::Success
@@ -728,93 +734,104 @@ fn prepare<'a>(
     } else {
         None
     };
-    let artifact =
-        match artifact {
-            Some((index, artifact)) => {
-                memory.artifacts.reuse(index);
-                artifact
+    let artifact = match artifact {
+        Some((index, artifact)) => {
+            memory.artifacts.reuse(index);
+            artifact
+        }
+        None => {
+            let mut input = alloc::vec![0; source_bytes];
+            // Instruction walks use the same source controls, canonical descriptor
+            // owner and original physical bytes. No direct identity-frame shortcut.
+            memory
+                .fetch(&controls, pc, &mut input)
+                .map_err(|status| at("cold executable source fetch", status))?;
+            // A denied later access check must not erase an already reached GPR
+            // prefix. End before it; the held scheduler checks that exact next word.
+            if let Some(boundary) = input
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .position(|raw| !admitted(u32::from_le_bytes(*raw)))
+            {
+                if boundary == 0 {
+                    return Err(at("instruction admission", MemoryStatus::Unsupported));
+                }
+                input.truncate(boundary * 4);
             }
-            None => {
-                let mut input = alloc::vec![0; source_bytes];
-                // Instruction walks use the same source controls, canonical descriptor
-                // owner and original physical bytes. No direct identity-frame shortcut.
-                memory
-                    .fetch(&controls, pc, &mut input)
-                    .map_err(|status| at("cold executable source fetch", status))?;
-                // A denied later access check must not erase an already reached GPR
-                // prefix. End before it; the held scheduler checks that exact next word.
-                if let Some(boundary) = input
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .position(|raw| !admitted(u32::from_le_bytes(*raw)))
-                {
-                    if boundary == 0 {
-                        return Err(at("instruction admission", MemoryStatus::Unsupported));
-                    }
-                    input.truncate(boundary * 4);
-                }
-                let plan = stela_compiler::block::CompilationPlan::new(
-                    &input,
-                    stela_compiler::GuestAddress(pc),
-                    profile,
-                    target,
-                )
-                .map_err(|error| {
-                    at("compilation planning", MemoryStatus::Unsupported).detail(error.0)
-                })?;
-                let bytes = plan.source_bytes();
-                input.truncate(bytes);
-                if !input
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .all(|raw| admitted(u32::from_le_bytes(*raw)))
-                {
-                    return Err(at("compiled prefix admission", MemoryStatus::Unsupported));
-                }
-                let requirements = plan
-                    .memory_requirements()
-                    .ok_or_else(|| at("checked memory requirements", MemoryStatus::Unsupported))?;
-                let compiled = plan.compile().map_err(|error| {
-                    at("native emission", MemoryStatus::Unsupported).detail(error.0)
-                })?;
-                if !compiled.fault_recovery.is_empty() {
-                    return Err(at(
-                        "checked fault recovery contract",
-                        MemoryStatus::Unsupported,
-                    ));
-                }
-                let identity = Identity {
-                    pe,
-                    pc,
-                    source_sha256: crate::sha256(&input),
-                    native_sha256: crate::sha256(&compiled.native.x86_64_code),
-                    controls_sha256: key.controls_sha256.as_ref().into(),
-                    compiler_source_sha256: stela_compiler::SOURCE_SHA256,
-                    abi: profile.abi(),
-                    target,
-                    requirements,
-                };
-                let artifact =
-                    Arc::new(Artifact {
-                        key,
-                        identity: Arc::new(identity),
-                        code: Arc::new(compiled.native.x86_64_code),
-                        source_map: compiled.native.source_map,
-                        branch_type: source::branch_type(
-                            u32::from_le_bytes(input.last_chunk().copied().ok_or_else(|| {
-                                at("compiled source extent", MemoryStatus::Domain)
-                            })?),
-                            guarded,
-                        ),
-                        source: input,
-                        requirements,
-                    });
-                memory.artifacts.insert(Arc::clone(&artifact));
-                artifact
+            let plan = stela_compiler::block::CompilationPlan::new(
+                &input,
+                stela_compiler::GuestAddress(pc),
+                profile,
+                target,
+            )
+            .map_err(|error| {
+                at("compilation planning", MemoryStatus::Unsupported).detail(error.0)
+            })?;
+            let bytes = plan.source_bytes();
+            input.truncate(bytes);
+            if !input
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|raw| admitted(u32::from_le_bytes(*raw)))
+            {
+                return Err(at("compiled prefix admission", MemoryStatus::Unsupported));
             }
-        };
+            let requirements = plan
+                .memory_requirements()
+                .ok_or_else(|| at("checked memory requirements", MemoryStatus::Unsupported))?;
+            let (compiled, _profile) = {
+                #[cfg(feature = "native-profile")]
+                {
+                    plan.compile_profiled()
+                }
+                #[cfg(not(feature = "native-profile"))]
+                {
+                    plan.compile().map(|block| (block, ()))
+                }
+            }
+            .map_err(|error| at("native emission", MemoryStatus::Unsupported).detail(error.0))?;
+            if !compiled.fault_recovery.is_empty() {
+                return Err(at(
+                    "checked fault recovery contract",
+                    MemoryStatus::Unsupported,
+                ));
+            }
+            let identity = Identity {
+                pe,
+                pc,
+                source_sha256: crate::sha256(&input),
+                native_sha256: crate::sha256(&compiled.native.x86_64_code),
+                controls_sha256: key.controls_sha256.as_ref().into(),
+                compiler_source_sha256: stela_compiler::SOURCE_SHA256,
+                abi: profile.abi(),
+                target,
+                requirements,
+            };
+            let artifact = Arc::new(Artifact {
+                key,
+                identity: Arc::new(identity),
+                code: Arc::new(compiled.native.x86_64_code),
+                source_map: compiled.native.source_map,
+                branch_type: source::branch_type(
+                    u32::from_le_bytes(
+                        input
+                            .last_chunk()
+                            .copied()
+                            .ok_or_else(|| at("compiled source extent", MemoryStatus::Domain))?,
+                    ),
+                    guarded,
+                ),
+                source: input,
+                requirements,
+                #[cfg(feature = "native-profile")]
+                profile: _profile,
+            });
+            memory.artifacts.insert(Arc::clone(&artifact));
+            artifact
+        }
+    };
     memory.artifacts.remember_controls(&controls);
     memory.memory.policy_mut().controls = controls;
     memory.memory.policy_mut().failure = None;
@@ -1645,6 +1662,8 @@ mod artifact_tests {
                 code: Arc::new(alloc::vec![0; if index == 3 { ARTIFACT_CACHE_BYTES } else { ARTIFACT_CACHE_BYTES / 2 }]),
                 source_map: Vec::new(), source: first.source.clone(),
                 requirements: first.requirements, branch_type: first.branch_type,
+                #[cfg(feature = "native-profile")]
+                profile: first.profile.clone(),
             }));
             assert!(cache.stats().retained_bytes <= ARTIFACT_CACHE_BYTES);
             assert_eq!(cache.stats().entries, 1);
@@ -2002,6 +2021,17 @@ mod artifact_tests {
             let mut source_map = artifact.source_map.clone();
             source_map
                 .reserve_exact(artifact.source_map.capacity() + (index + 1) * 3 - source_map.len());
+            #[cfg(feature = "native-profile")]
+            let profile = {
+                let mut profile = artifact.profile.clone();
+                // Metadata is another retained Vec: cloning can shrink its
+                // spare capacity, so grow beyond its actual original charge too.
+                profile.register_spans.reserve_exact(
+                    artifact.profile.register_spans.capacity() + index + 1
+                        - profile.register_spans.len(),
+                );
+                profile
+            };
             let enlarged = Arc::new(Artifact {
                 key: artifact.key.clone(),
                 identity: Arc::clone(&artifact.identity),
@@ -2010,6 +2040,8 @@ mod artifact_tests {
                 source,
                 requirements: artifact.requirements,
                 branch_type: artifact.branch_type,
+                #[cfg(feature = "native-profile")]
+                profile,
             });
             assert!(enlarged.retained_bytes() > artifact.retained_bytes());
             cache.insert(enlarged);
@@ -2093,6 +2125,8 @@ mod artifact_tests {
             + artifact.identity.source_sha256.capacity()
             + artifact.identity.native_sha256.capacity()
             + artifact.identity.controls_sha256.capacity();
+        #[cfg(feature = "native-profile")]
+        let expected = expected + artifact.profile.retained_bytes().unwrap();
         assert_eq!(artifact.retained_bytes(), expected);
         let mut denied = ArtifactCache::default();
         let slots = core::mem::size_of::<Arc<Artifact>>();

@@ -17,6 +17,29 @@ pub(crate) enum CheckedOperation {
 }
 
 impl CheckedOperation {
+    pub(crate) fn profile_success_traffic(
+        &self,
+    ) -> Option<(
+        crate::block::profile::RegisterRecipe,
+        crate::block::profile::RegisterTraffic,
+    )> {
+        use crate::block::profile::{RegisterRecipe, RegisterTraffic};
+        match self {
+            Self::Ordinary(Decoded::MemoryScalar(operand)) => Some((
+                RegisterRecipe::ScalarCallback,
+                operand.profile_success_traffic(),
+            )),
+            Self::Ordinary(Decoded::MemoryPair(operand)) => Some((
+                RegisterRecipe::PairCallback,
+                operand.profile_success_traffic(),
+            )),
+            Self::Ordinary(Decoded::PrefetchHint) => {
+                Some((RegisterRecipe::Prefetch, RegisterTraffic::default()))
+            }
+            _ => None,
+        }
+    }
+
     /// Only already-admitted register operations may enter a nonfaulting
     /// region. Typed checked accesses and CPA operations remain boundaries.
     pub(crate) fn ordinary_instruction(&self) -> Option<&Instruction> {

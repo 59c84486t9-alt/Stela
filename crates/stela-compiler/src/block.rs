@@ -13,6 +13,7 @@ pub mod memory;
 pub mod pauth_lr;
 pub mod pauth_memory;
 mod pointer_authentication;
+pub mod profile;
 pub mod scalable;
 pub mod system;
 mod thread;
@@ -717,6 +718,21 @@ impl CompilationPlan {
         self.el1_platform.as_ref().map(el1_platform::Plan::intent)
     }
     pub fn compile(self) -> Result<CompiledBlock, CompileError> {
+        self.compile_impl(None)
+    }
+    /// Emit identical code while retaining optional selected-recipe observations.
+    /// Unsupported profiling coverage stays absent, rather than implying zero work.
+    pub fn compile_profiled(
+        self,
+    ) -> Result<(CompiledBlock, profile::CompileProfile), CompileError> {
+        let mut profile = profile::CompileProfile::default();
+        let block = self.compile_impl(Some(&mut profile))?;
+        Ok((block, profile))
+    }
+    fn compile_impl(
+        self,
+        profile: Option<&mut profile::CompileProfile>,
+    ) -> Result<CompiledBlock, CompileError> {
         let native = if let Some(plan) = self.el1_platform {
             plan.emit(self.target)?
         } else if let Some(plan) = self.el1_m0 {
@@ -726,6 +742,7 @@ impl CompilationPlan {
                 self.parsed.terminal.as_ref(),
                 self.parsed.next_pc,
                 self.target,
+                profile,
             )?
         } else if let Some(resident) = self.resident {
             resident

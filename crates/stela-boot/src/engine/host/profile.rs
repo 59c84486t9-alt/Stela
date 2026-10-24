@@ -218,6 +218,7 @@ mod tests {
             source: &[1, 0, 0, 0],
             source_map: &[(stela_compiler::GuestAddress(0x4000), 3)],
             native_bytes: 12,
+            register_spans: &[],
             retired: 1,
             faulting: false,
             deferred_terminal: false,

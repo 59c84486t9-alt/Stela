@@ -35,6 +35,7 @@ pub struct NativeInstructionSample<'a> {
     pub source: &'a [u8],
     pub source_map: &'a [(stela_compiler::GuestAddress, usize)],
     pub native_bytes: usize,
+    pub register_spans: &'a [stela_compiler::block::profile::RegisterSpan],
     pub retired: u64,
     pub faulting: bool,
     pub deferred_terminal: bool,

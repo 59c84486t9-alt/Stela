@@ -40,6 +40,9 @@ pub enum RegionError {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AllocationStats {
     pub state_loads: usize,
+    pub in_place_source_uses: usize,
+    pub nzcv_pressure_stores: usize,
+    pub nzcv_boundary_stores: usize,
     pub pressure_stores: usize,
     pub exit_stores: usize,
     pub lifetime_stores: usize,
@@ -241,6 +244,7 @@ impl Emitter<'_> {
             self.commit_coalesced(destination);
             return;
         }
+        self.output.stats.in_place_source_uses += 1;
         let guest = slot(destination).unwrap();
         let index = self
             .resident
@@ -2747,6 +2751,62 @@ mod tests {
             source,
             immediate: 1,
         }
+    }
+
+    #[test]
+    fn profiled_region_counts_actual_cross_register_renaming_and_flag_pressure() {
+        let renamed = [
+            instruction(0, define_flags(Register::X(0), Register::X(0))),
+            instruction(1, add(Register::X(1), Register::X(0))),
+            instruction(
+                2,
+                Operation::MoveWide {
+                    width: Width::X64,
+                    kind: WideMove::Zero,
+                    destination: Register::X(0),
+                    immediate: 0,
+                    shift: 0,
+                },
+            ),
+            instruction(3, add(Register::X(1), Register::X(1))),
+        ];
+        let renamed = emit_allocated_prefix(&renamed).unwrap().unwrap();
+        assert_eq!(renamed.stats.coalesced_writes, 1);
+        assert_eq!(renamed.stats.in_place_source_uses, 2);
+        let mut pressure = vec![instruction(0, define_flags(Register::X(0), Register::X(0)))];
+        for _ in 0..2 {
+            for register in 1..25 {
+                pressure.push(instruction(
+                    pressure.len() as u64,
+                    add(Register::X(register), Register::X(register)),
+                ));
+            }
+        }
+        pressure.push(instruction(
+            pressure.len() as u64,
+            select_flags(Register::X(25), Register::X(26), Register::X(27), 0),
+        ));
+        let pressure = emit_allocated_prefix(&pressure).unwrap().unwrap();
+        assert!(
+            pressure.stats.nzcv_pressure_stores > 0,
+            "{:?}",
+            pressure.stats
+        );
+        let traffic = crate::block::profile::RegisterTraffic::region(&pressure.stats);
+        assert_eq!(
+            traffic.gpr_pressure_stores + traffic.nzcv_pressure_stores,
+            pressure.stats.pressure_stores as u64
+        );
+        assert_eq!(
+            traffic.gpr_boundary_stores + traffic.nzcv_boundary_stores,
+            pressure.stats.exit_stores as u64
+        );
+        assert_eq!(
+            traffic.nzcv_direct_stores
+                + traffic.nzcv_pressure_stores
+                + traffic.nzcv_boundary_stores,
+            pressure.stats.flag_stores as u64
+        );
     }
 
     fn select_flags(

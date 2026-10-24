@@ -93,6 +93,7 @@ pub mod pointer;
 mod pointer_checks;
 mod prefetch;
 mod region;
+pub(crate) use region::AllocationStats;
 mod register_offset;
 pub mod register_read;
 mod scalable;
