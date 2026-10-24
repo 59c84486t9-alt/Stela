@@ -173,15 +173,17 @@ impl AtcPhy {
         self.reset = reset;
     }
 
-    /// Power and digital resets must all release before USB bus activity.
-    /// The separate pipehandler reset/clamp output holds the controller's
-    /// ordinary bank in reset; clock/quiesce pauses do not assert that line.
+    /// The USB2 PHY's resets, SIDDQ and isolation must release before USB
+    /// bus activity; the core's power, which the SuperSpeed, DP and USB4
+    /// lanes use, need not. 26A434's USB2-only bring-ups (the xHCI's start,
+    /// and the XDCI's "powering on USB2 only") release the USB2 PHY without
+    /// writing the core's POWER_CTRL or MISC (restore run phywatch-r1,
+    /// 2026-10-24); Linux powers the core for every mode. The separate
+    /// pipehandler reset/clamp output holds the controller's ordinary bank
+    /// in reset; clock/quiesce pauses do not assert that line.
     pub fn usb2_state(&self) -> Usb2State {
         Usb2State {
-            ready: self.electrical_usb2_ready()
-                && self.core_ready()
-                && self.word(POWER_CTRL) & (CLAMP | CORE_PHY_N) == CORE_PHY_N
-                && self.controller_released(),
+            ready: self.electrical_usb2_ready() && self.controller_released(),
             clocked: self.powered && self.clocked && !self.reset,
             quiesced: self.quiesced,
             controller_reset: self.reset || !self.controller_released(),
@@ -196,10 +198,6 @@ impl AtcPhy {
             "USB2 CTL holds a reset or SIDDQ"
         } else if self.word(MISCTUNE) & REFCLK_GATE_OFF != 0 {
             "USB2 reference clock is gated"
-        } else if !self.core_ready() {
-            "core power or its resets are not released"
-        } else if self.word(POWER_CTRL) & (CLAMP | CORE_PHY_N) != CORE_PHY_N {
-            "core PHY is clamped or in reset"
         } else if !self.controller_released() {
             "the pipehandler holds the controller reset"
         } else {
@@ -401,21 +399,12 @@ mod tests {
         let mut latch = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut latch);
         // Each release names the next unmet condition until none is left.
+        // The core's power is not among them.
         for (offset, value, unready) in [
             (USBCTL, RUN, "USB2 CTL holds a reset or SIDDQ"),
             (
                 CTL,
                 APB_RESET_N,
-                "core power or its resets are not released",
-            ),
-            (
-                POWER_CTRL,
-                SMALL | BIG | CORE_APB_N | CORE_PHY_N,
-                "core power or its resets are not released",
-            ),
-            (
-                MISC,
-                MISC_RESET_N,
                 "the pipehandler holds the controller reset",
             ),
         ] {
