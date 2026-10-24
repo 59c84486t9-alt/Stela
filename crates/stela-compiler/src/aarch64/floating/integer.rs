@@ -1,8 +1,9 @@
 //! Conversions between floating-point and integer or fixed-point values.
 use super::{
     Class, Control, EXCEPTIONS, FPCR_AHP, FPCR_EXCEPTION_ENABLE_SHIFT, Format, INEXACT, INVALID,
-    Outcome, UnsupportedControl, unpack, widen,
+    Operand, Outcome, UnsupportedControl, unpack, widen,
 };
+mod half;
 use rustc_apfloat::{
     Float, Round, Status,
     ieee::{Double, Half, Quad, Single},
@@ -135,7 +136,31 @@ pub fn to_integer(
             exceptions: exceptions | INVALID,
         });
     }
-    let value = source_value(source, operand.bits).scalbn(i32::from(frac_bits));
+    if source == Format::Half {
+        return Ok(half::to_integer(
+            operand, integer, frac_bits, rounding, exceptions,
+        ));
+    }
+    Ok(to_integer_ieee(
+        source,
+        integer,
+        frac_bits,
+        rounding,
+        operand.bits,
+        exceptions,
+    ))
+}
+
+/// Shared wider-format conversion, also retained as the Half test reference.
+fn to_integer_ieee(
+    source: Format,
+    integer: IntegerFormat,
+    frac_bits: u8,
+    rounding: IntegerRounding,
+    bits: u64,
+    mut exceptions: u32,
+) -> Outcome {
+    let value = source_value(source, bits).scalbn(i32::from(frac_bits));
     let mut exact = false;
     let converted = if integer.signed {
         value
@@ -151,10 +176,10 @@ pub fn to_integer(
     } else if converted.status.contains(Status::INEXACT) {
         exceptions |= INEXACT;
     }
-    Ok(Outcome {
+    Outcome {
         bits: converted.value & integer.width.mask(),
         exceptions,
-    })
+    }
 }
 
 /// FJCVTZS truncates Double and returns its low 32 integer bits, rather than
