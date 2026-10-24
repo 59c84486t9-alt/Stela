@@ -360,6 +360,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         u64::from(!self.processor_paused(self.current)) + parked.count() as u64
     }
 
+    /// Parked PE `pe`.
+    fn parked(&self, pe: usize) -> &Parked {
+        let Peer::Parked(parked) = &self.peers[pe] else {
+            unreachable!("PE {pe} is parked");
+        };
+        parked
+    }
+
     /// Whether PE `pe` can run: it is running or preempted, or a WFI it waits
     /// in sees an interrupt pending (Arm `AArch64_InterruptPending`, masked or
     /// not), or a WFE sees that or its event register set, including by an
@@ -374,7 +382,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return match self.waiting {
                 None => true,
                 Some(Wait { down: true, .. }) => {
-                    let device = self.devices.lines(pe, now);
+                    let device = self.device_lines_of(pe, now);
                     self.cpu.wakes_for(device)
                 }
                 Some(Wait { kind, timeout, .. }) => {
@@ -399,8 +407,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return true;
         };
         if down {
-            let device = self.devices.lines(pe, now);
-            return parked.cpu.wakes_for(device);
+            let device = self.device_lines_of(pe, now);
+            return self.parked(pe).cpu.wakes_for(device);
         }
         if timeout.is_some_and(|timeout| timeout.expired(now)) {
             return true;
@@ -416,7 +424,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return true;
             }
         }
-        let device = self.devices.lines(pe, now);
+        let device = self.device_lines_of(pe, now);
+        let parked = self.parked(pe);
         let timer = timer::deadline(&parked.cpu).is_some_and(|deadline| now >= deadline)
             || super::monitor_asserted(&parked.cpu, now);
         let lines = parked.cpu.core_lines(Lines {
@@ -2199,8 +2208,10 @@ mod tests {
         machine.system_instruction(WFI).unwrap();
         machine.schedule().unwrap();
         assert_eq!(machine.processor(), 1);
-        // PE 1's IRQ does not wake PE 0.
+        // PE 1's IRQ does not wake PE 0. The board's lines change as a
+        // device access the engine is told of would change them.
         machine.devices.irq = [false, true];
+        machine.device_lines = None;
         end_slice(&mut machine);
         machine.devices.lines_asked.clear();
         machine.schedule().unwrap();
@@ -2208,6 +2219,7 @@ mod tests {
         assert_eq!(machine.devices.lines_asked, [0]);
         // Its own line does, masked or not, and WFI completes.
         machine.devices.irq = [true, false];
+        machine.device_lines = None;
         end_slice(&mut machine);
         machine.schedule().unwrap();
         assert_eq!((machine.processor(), machine.cpu.pc), (0, BASE + 4));
@@ -2215,6 +2227,7 @@ mod tests {
         // With both PEs in WFI and no timer, stream or device deadline, the
         // machine is idle.
         machine.devices.irq = [false, false];
+        machine.device_lines = None;
         machine.system_instruction(WFI).unwrap();
         machine.schedule().unwrap();
         assert_eq!(machine.processor(), 1);

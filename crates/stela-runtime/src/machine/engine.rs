@@ -1626,9 +1626,10 @@ pub struct Machine<H: Host, D: Devices> {
     debug: Option<DebugMode>,
     /// The device lines of a PE, the count before which no device changes
     /// state by itself (`Devices::deadline`) and that PE, while valid: a
-    /// device or board register access, a System register write and an
-    /// exception can change them, and clear it. A PE switch keeps it, as it
-    /// changes no device: another PE's lines are then its latched pins
+    /// device or board register access, a System register write, an
+    /// exception and the host between runs can change them, and clear it.
+    /// A PE switch keeps it, as it changes no device: another PE's lines,
+    /// the running one's or a waiting one's, are then its latched pins
     /// (`Devices::pins`).
     device_lines: Option<(Lines, u64, usize)>,
     /// The PAC context, the memo of results and the key tag words, which
@@ -2602,17 +2603,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.lines_at(now)
     }
 
-    /// The running PE's interrupt lines at count `now`, which no count the
-    /// devices were already given exceeds: a caller that holds a count
-    /// asks at it, so the devices never see time run backwards.
-    fn lines_at(&mut self, now: u64) -> Lines {
-        let device = match self.device_lines {
-            Some((lines, until, pe)) if now < until && pe == self.current => lines,
+    /// The lines the devices drive into PE `pe` at count `now`: the cached
+    /// ones, or the latched pins of another PE, until a device changes or
+    /// the devices' deadline passes; else the devices are brought up to
+    /// `now` and asked.
+    pub(super) fn device_lines_of(&mut self, pe: usize, now: u64) -> Lines {
+        match self.device_lines {
+            Some((lines, until, cached)) if now < until && cached == pe => lines,
             Some((_, until, _))
                 if now < until
-                    && let Some(lines) = self.devices.pins(self.current) =>
+                    && let Some(lines) = self.devices.pins(pe) =>
             {
-                self.device_lines = Some((lines, until, self.current));
+                self.device_lines = Some((lines, until, pe));
                 lines
             }
             _ => {
@@ -2620,17 +2622,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 let profile_started = self
                     .host
                     .native_timing_work_start(NativeTimingWork::DeviceLines);
-                let lines = self.devices.lines(self.current, now);
+                let lines = self.devices.lines(pe, now);
                 let until = self.devices.deadline(now).unwrap_or(u64::MAX);
                 #[cfg(feature = "native-profile")]
                 if let Some(started) = profile_started {
                     self.host
                         .native_timing_work_end(NativeTimingWork::DeviceLines, started);
                 }
-                self.device_lines = Some((lines, until, self.current));
+                self.device_lines = Some((lines, until, pe));
                 lines
             }
-        };
+        }
+    }
+
+    /// The running PE's interrupt lines at count `now`, which no count the
+    /// devices were already given exceeds: a caller that holds a count
+    /// asks at it, so the devices never see time run backwards.
+    fn lines_at(&mut self, now: u64) -> Lines {
+        let device = self.device_lines_of(self.current, now);
         // A timer signals exactly when the count reaches its deadline, which
         // only System register writes change.
         let deadline = self.timer_deadline();
@@ -3020,6 +3029,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The serial scheduler and chained native blocks, until a stop.
     pub(super) fn run_blocks(&mut self, budget: u64) -> Stop {
         self.block_limit = if budget == 0 { u64::MAX } else { budget };
+        // The host may have changed the devices between runs (`devices` is
+        // theirs too): their lines are asked again.
+        self.device_lines = None;
         loop {
             if self.statistics.blocks >= self.block_limit {
                 return Stop::Budget;
