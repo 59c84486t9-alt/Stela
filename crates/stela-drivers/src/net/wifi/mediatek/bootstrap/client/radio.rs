@@ -33,16 +33,18 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         // Complete fallible codec/capacity checks before Scanner owns the
         // request. A refused RNR list must leave this same owner reusable.
         let mut elements = [Vec::new(), Vec::new(), Vec::new()];
-        let prepared = request.active() && !request.six_ghz().is_empty();
+        let prepared = !request.extra_elements().is_empty()
+            || (request.active() && !request.six_ghz().is_empty());
         if prepared {
-            let six = local::current(s, wifi::Band::Ghz6).map_err(Error::Local)?;
-            let he6 = six.capabilities().he_6ghz().ok_or(Error::WrongProfile)?;
-            // Full custom-IE placement/splitting is a separate frontend
-            // contract. Refuse it before ownership rather than lose or reorder
-            // a requested element behind the source band writer.
-            if !request.extra_elements().is_empty() {
-                return Err(Error::Unsupported);
-            }
+            let he6 = if actual_policy.capabilities().observed().six_ghz() == Some(true) {
+                local::current(s, wifi::Band::Ghz6)
+                    .map_err(Error::Local)?
+                    .capabilities()
+                    .he_6ghz()
+                    .ok_or(Error::WrongProfile)?
+            } else {
+                0
+            };
             for (index, band) in [wifi::Band::Ghz2, wifi::Band::Ghz5, wifi::Band::Ghz6]
                 .into_iter()
                 .enumerate()
@@ -55,7 +57,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         .0;
                     let selection = local::scan::Selection::programmed(domain, band, he6);
                     elements[index] =
-                        local::scan::elements(&actual, selection).map_err(Error::Local)?;
+                        local::scan::with_extra(&actual, selection, request.extra_elements())
+                            .map_err(Error::Local)?;
                 }
             }
         }

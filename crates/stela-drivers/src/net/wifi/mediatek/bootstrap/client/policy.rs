@@ -1451,11 +1451,13 @@ mod tests {
         };
         let before = model.response.lock().unwrap().client_commands.len();
         let custom =
-            scan::Request::with_six_ghz(vec![six], vec![vec![]], vec![221, 2, 1, 2], vec![target])
+            scan::Request::with_six_ghz(vec![six], vec![vec![]], vec![1, 1, 0xff], vec![target])
                 .unwrap();
         assert!(matches!(
             driver.begin_scan(custom, 0, 1000),
-            Err(PolicyError::Client(Error::Unsupported))
+            Err(PolicyError::Client(Error::Local(
+                LocalError::UnsupportedProbeElements
+            )))
         ));
         assert_eq!(driver.phase(), Phase::Idle);
         let excessive = (0..11)

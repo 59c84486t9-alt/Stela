@@ -25,6 +25,7 @@ pub enum LocalError {
     UnsupportedWidth,
     MalformedBeControl,
     WrongAdvertisement,
+    UnsupportedProbeElements,
     Selection(crate::net::wifi::mediatek::firmware::auxiliary::Error),
     Capabilities(phy::Error),
 }

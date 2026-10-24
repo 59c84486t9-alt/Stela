@@ -13,6 +13,8 @@ use core::sync::atomic::Ordering;
 use reg::database::{Database, tests::fixture};
 use sha2::{Digest, Sha256};
 
+mod custom_probe;
+
 type TestLink = ManagedLink<Bar, Q, NativeGuard, Source>;
 const SIX: Channel = Channel {
     band: Band::Ghz6,

@@ -102,6 +102,101 @@ pub(in crate::net::wifi::mediatek::bootstrap::client) fn elements(
     Ok(out)
 }
 
+/// Compose OS probe metadata around this device's generated PHY elements.
+/// Prefix splitting follows mac80211's contiguous groups, never sorting an IE
+/// across an earlier unknown element. MT7925's source MCU helper omits the
+/// separate `common_ies` tail; explicitly retain it in EACH native band TLV.
+/// The caller checks the firmware's shared budget before scan ownership.
+pub(in crate::net::wifi::mediatek::bootstrap::client) fn with_extra(
+    advertisement: &Advertisement,
+    selection: Selection,
+    extra: &[u8],
+) -> Result<Vec<u8>, LocalError> {
+    validate_extra(extra)?;
+    let generated = elements(advertisement, selection)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(generated.len() + extra.len())
+        .map_err(|_| LocalError::NoMemory)?;
+    let mut offset = 0;
+    for stage in 0..5 {
+        let mut rest = generated.as_slice();
+        while !rest.is_empty() {
+            let length = 2 + usize::from(rest[1]);
+            let family = match rest[0] {
+                1 => 0,
+                50 => 1,
+                45 => 2,
+                191 => 3,
+                _ => 4,
+            };
+            if family == stage {
+                out.extend_from_slice(&rest[..length]);
+            }
+            rest = &rest[length..];
+        }
+        if stage < 4 {
+            let start = offset;
+            while offset < extra.len() {
+                let id = extra[offset];
+                let data = &extra[offset + 2..offset + 2 + usize::from(extra[offset + 1])];
+                let eligible = match stage {
+                    0 => id == 10, // Request information; SSID/rates are owned.
+                    1 => id == 59, // Supported regulatory classes; DS is owned.
+                    2 => matches!(id, 72 | 127 | 84 | 97 | 107 | 114),
+                    3 => id == 239 || (id == 255 && data.first() == Some(&2)),
+                    _ => false,
+                };
+                if !eligible {
+                    break;
+                }
+                let payload_length = usize::from(extra[offset + 1]);
+                offset += 2 + payload_length;
+                // mac80211 skip_ie keeps fragments attached to their parent.
+                if payload_length == 255 {
+                    while offset < extra.len() && extra[offset] == 242 {
+                        offset += 2 + usize::from(extra[offset + 1]);
+                    }
+                }
+            }
+            out.extend_from_slice(&extra[start..offset]);
+        }
+    }
+    out.extend_from_slice(&extra[offset..]);
+    Ok(out)
+}
+
+fn validate_extra(mut extra: &[u8]) -> Result<(), LocalError> {
+    let mut fragments = false;
+    while !extra.is_empty() {
+        let length = usize::from(*extra.get(1).ok_or(LocalError::WrongAdvertisement)?);
+        let data = extra
+            .get(2..2 + length)
+            .ok_or(LocalError::WrongAdvertisement)?;
+        let id = extra[0];
+        // Caller metadata cannot replace generated rates, channel or PHY/MLO
+        // facts, including unsupported other-band and UHR families. Opaque
+        // vendor metadata is not consumed as a local capability/permission.
+        // Only FILS request extensions are implemented. Other selectors
+        // include PHY/MU power, MLO mapping, identity/regulatory and UHR.
+        if matches!(
+            id,
+            0 | 1 | 3 | 45 | 50 | 61 | 148 | 151 | 158 | 191 | 192 | 217 | 232
+        ) || (id == 255 && data.first().is_some_and(|id| *id != 2))
+            || (id == 221
+                && (data.starts_with(&[0, 0x90, 0x4c]) || data.starts_with(&[0, 0x50, 0xf2, 2])))
+            || (id == 242 && !fragments)
+        {
+            return Err(LocalError::UnsupportedProbeElements);
+        }
+        if id == 255 && data.is_empty() {
+            return Err(LocalError::WrongAdvertisement);
+        }
+        fragments = length == 255 || (id == 242 && fragments);
+        extra = &extra[2 + length..];
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -116,6 +211,69 @@ mod tests {
             station::phy::Width,
         },
     };
+
+    #[test]
+    fn empty_custom_composition_preserves_all_source_owned_probe_bytes() {
+        for band in [Band::Ghz2, Band::Ghz5, Band::Ghz6] {
+            let actual = make(
+                band,
+                3,
+                3,
+                Width::Mhz20,
+                true,
+                *b"US",
+                MloObservations {
+                    flags: None,
+                    eml: None,
+                },
+            )
+            .unwrap();
+            let selected = || Selection {
+                vht: true,
+                he: true,
+                eht: true,
+                he6: Some(0x30b8),
+            };
+            assert_eq!(
+                with_extra(&actual, selected(), &[]).unwrap(),
+                elements(&actual, selected()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn source_custom_split_keeps_fragment_chain_and_unknown_tail_in_input_order() {
+        let actual = make(
+            Band::Ghz2,
+            3,
+            3,
+            Width::Mhz20,
+            true,
+            *b"US",
+            MloObservations {
+                flags: None,
+                eml: None,
+            },
+        )
+        .unwrap();
+        let selected = || Selection {
+            vht: true,
+            he: true,
+            eht: true,
+            he6: None,
+        };
+        let mut extra = vec![10, 255];
+        extra.extend_from_slice(&[0xab; 255]);
+        extra.extend_from_slice(&[242, 2, 0xcd, 0xef, 59, 1, 81, 200, 0, 127, 1, 0]);
+        let composed = with_extra(&actual, selected(), &extra).unwrap();
+        let rates_end = 2 + usize::from(composed[1]);
+        assert_eq!(&composed[rates_end..rates_end + 261], &extra[..261]);
+        assert_eq!(composed[rates_end + 261], 50);
+        // Extcaps after unknown200 must stay in the common tail.
+        assert_eq!(&composed[composed.len() - 5..], &[200, 0, 127, 1, 0]);
+        let original = elements(&actual, selected()).unwrap();
+        assert_eq!(composed.len(), original.len() + extra.len());
+    }
 
     #[test]
     fn source_usable_band_union_never_turns_flags_into_probe_authority() {
