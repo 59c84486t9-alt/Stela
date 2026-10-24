@@ -6,7 +6,8 @@
 //! t8112pmp SHA256 b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //! files 0x355f8/0x457f8 qualify 256 implemented PTD entries and 16 local routes.
 //! Construction initializes declared software backing, never hardware readiness,
-//! native PMP services, DVFS completion or an AP AIC wire.
+//! native PMP services, DVFS completion or an AP AIC wire. The PMP's PTD duties
+//! the drivers wait for are modeled behaviorally (`pmp::duties`).
 use super::dcs::NativeDcs;
 pub use crate::platform::apple::dcs::native::{CHANNEL_STRIDE, CHANNELS, ChannelConfiguration};
 use crate::{
@@ -15,6 +16,7 @@ use crate::{
     platform::apple::{
         bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
         dcs::native::ChannelProgress,
+        pmp::duties::Duties,
         ptd::{
             self, Geometry, Ptd,
             transport::{
@@ -44,6 +46,7 @@ pub struct Prepared {
     dcs: NativeDcs,
     ptd: Ptd,
     local: LocalNotifications,
+    duties: Option<Duties>,
 }
 impl Prepared {
     /// Explicit software initialization before admitting any guest publisher.
@@ -96,12 +99,14 @@ impl Prepared {
         // Validate every range against native 256 as well as physical 2048.
         let (ptd, local) =
             Ptd::initialized_local_profile(PROFILE, geometry, &descriptor.ptd.ranges, lifecycle)?;
+        let duties = Duties::new(&descriptor.ptd.ranges)?;
         Ok(Self {
             descriptor,
             ram,
             dcs,
             ptd,
             local,
+            duties,
         })
     }
     pub fn descriptor(&self) -> &MemoryCache {
@@ -225,6 +230,8 @@ impl Prepared {
         access: &mut Access<'_>,
     ) -> Result<[u64; 2], &'static str> {
         if let Some(entry) = self.paired_entry(offset, bytes) {
+            self.start_duties(access)
+                .map_err(|_| "the PMP's PTD duties could not start")?;
             let entry = self.ptd.consume_entry(entry, access)?;
             return Ok([entry.value, entry.metadata]);
         }
@@ -237,6 +244,12 @@ impl Prepared {
         } else {
             [value.low & u64::from(u32::MAX), value.low >> 32]
         })
+    }
+    fn start_duties(&self, access: &mut Access<'_>) -> Result<(), MmioError> {
+        match &self.duties {
+            Some(duties) => duties.start(&self.ptd, access),
+            None => Ok(()),
+        }
     }
     fn in_bank(&self, offset: u64, width: Width, direction: Direction) -> Result<(), MmioError> {
         if offset
@@ -283,6 +296,7 @@ impl MmioDevice for Prepared {
         if offset < PTD_OFFSET {
             self.dcs.read(offset, width, access)
         } else {
+            self.start_duties(access)?;
             self.ptd.read(offset - PTD_OFFSET, width, access)
         }
     }
@@ -295,9 +309,13 @@ impl MmioDevice for Prepared {
     ) -> Result<(), MmioError> {
         self.in_bank(offset, width, Direction::Write)?;
         if offset < PTD_OFFSET {
-            self.dcs.write(offset, width, value, access)
-        } else {
-            self.ptd.write(offset - PTD_OFFSET, width, value, access)
+            return self.dcs.write(offset, width, value, access);
+        }
+        self.start_duties(access)?;
+        self.ptd.write(offset - PTD_OFFSET, width, value, access)?;
+        match &self.duties {
+            Some(duties) => duties.written(&self.ptd, offset - PTD_OFFSET, width, value, access),
+            None => Ok(()),
         }
     }
     fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {

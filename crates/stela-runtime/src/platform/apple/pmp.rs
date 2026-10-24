@@ -39,10 +39,12 @@
 //!
 //! [`native`] separately retains T6000 startup/exit resources and the actual
 //! local PTD recipient. This ping endpoint supplies none of that backend's
-//! memory, callback, power or readiness authority.
+//! memory, callback, power or readiness authority; [`duties`] models the PTD
+//! duties the drivers wait for.
 use super::rtkit::Endpoint;
 use alloc::vec::Vec;
 
+pub mod duties;
 pub mod native;
 
 pub const ENDPOINT: u8 = 0x20;
