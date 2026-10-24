@@ -1644,32 +1644,45 @@ mod artifact_tests {
 
     #[test]
     fn unchanged_fp_source_cannot_reuse_admission_after_permission_is_revoked() {
-        let (mut machine, ram) = fixture();
-        machine
-            .cpu
-            .registers
-            .set_raw(Register::CPACR_EL1, 0, 3 << 20);
-        machine
-            .cpu
-            .registers
-            .set_raw(Register::CPTR_EL2, 0, 3 << 20);
-        let words = [0x91000400u32, 0x9e670000, 0x14000000]; // ADD; FMOV D0,X0; B .
-        let source: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
-        unsafe { ram.publish_physical(DATA, &source) }.unwrap();
-        let enabled = prepare_artifact(&mut machine, BINDING).unwrap();
-        assert!(enabled.key.admission.asimd);
-        assert_eq!(enabled.source, source);
-        assert!(Arc::ptr_eq(
-            &enabled,
-            &prepare_artifact(&mut machine, BINDING).unwrap()
-        ));
-        machine.cpu.registers.set_raw(Register::CPTR_EL2, 0, 0);
-        let denied = prepare_artifact(&mut machine, BINDING).unwrap();
-        assert!(!denied.key.admission.asimd);
-        assert!(!Arc::ptr_eq(&enabled, &denied));
-        // The changed policy stops before the unadmitted later FP instruction,
-        // retaining only the real GPR prefix despite unchanged canonical bytes.
-        assert_eq!(denied.source, source[..4]);
+        for word in [0x9e670000, 0x9e630100] {
+            // FMOV D0,X0; UCVTF D0,X8
+            let (mut machine, ram) = fixture();
+            machine
+                .cpu
+                .registers
+                .set_raw(Register::CPACR_EL1, 0, 3 << 20);
+            machine
+                .cpu
+                .registers
+                .set_raw(Register::CPTR_EL2, 0, 3 << 20);
+            let source: Vec<_> = [0x91000400u32, word, 0x14000000]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            unsafe { ram.publish_physical(DATA, &source) }.unwrap();
+            let enabled = prepare_artifact(&mut machine, BINDING).unwrap();
+            assert!(enabled.key.admission.asimd);
+            let expected_bytes = if word == 0x9e630100 { 8 } else { 12 };
+            assert_eq!(enabled.source, source[..expected_bytes]);
+            assert!(Arc::ptr_eq(
+                &enabled,
+                &prepare_artifact(&mut machine, BINDING).unwrap()
+            ));
+            machine.cpu.registers.set_raw(Register::CPTR_EL2, 0, 0);
+            let denied = prepare_artifact(&mut machine, BINDING).unwrap();
+            assert!(!denied.key.admission.asimd);
+            assert!(!Arc::ptr_eq(&enabled, &denied));
+            // Current access controls cut the real GPR prefix before FP,
+            // even when the exact canonical source was previously admitted.
+            assert_eq!(denied.source, source[..4]);
+            machine.cpu.pc = PC + 4;
+            let state = machine.cpu.state.clone();
+            assert_eq!(
+                prepare_artifact(&mut machine, BINDING).err(),
+                Some(MemoryStatus::Unsupported)
+            );
+            assert_eq!(machine.cpu.state, state);
+        }
     }
 
     #[test]

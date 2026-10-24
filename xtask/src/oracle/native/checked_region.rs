@@ -163,8 +163,95 @@ impl CheckedSystemRegion {
 mod tests {
     use super::*;
     const ADD_X0: u32 = 0x9100_0400;
+    const SUB_X8_X21_X23: u32 = 0xcb17_02a8;
     const STORE_X0_BYTE: u32 = 0x3900_0380; // STRB W0,[X28].
     const LOAD_W1_BYTE: u32 = 0x3940_03a1; // LDRB W1,[X29].
+
+    #[test]
+    fn shared_numerical_terminal_returns_before_any_fp_effect() {
+        let windows = windows().unwrap().lock().unwrap();
+        for specialization in [
+            CheckedMemoryProfile::SpAlignmentEnabled,
+            CheckedMemoryProfile::SpAlignmentDisabled,
+        ] {
+            for word in [
+                0x9e63_0100u32, // UCVTF D0,X8
+                0x1e22_2820,    // FADD S0,S1,S2
+                0x1e62_0820,    // FMUL D0,D1,D2
+                0x4e22_d420,    // FADD V0.4S,V1.4S,V2.4S
+                0x1e61_c020,    // FSQRT D0,D1
+                0x1e62_2020,    // FCMP D1,D2
+                0x1e62_4820,    // FMAX D0,D1,D2
+                0x1f42_0c20,    // FMADD D0,D1,D2,D3
+            ] {
+                for (prefix, fault) in [(false, false), (true, false), (true, true)] {
+                    let mut words = Vec::new();
+                    if prefix {
+                        words.push(if fault { LOAD_W1_BYTE } else { SUB_X8_X21_X23 });
+                    }
+                    words.extend([word, u32::MAX]);
+                    let source: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+                    let plan = CompilationPlan::new(
+                        &source,
+                        GuestAddress(CODE_PAGE),
+                        BlockProfile::SystemModeSharedV1(specialization),
+                        target(),
+                    )
+                    .unwrap();
+                    assert_eq!(plan.source_bytes(), (usize::from(prefix) + 1) * 4);
+                    let requirements = plan.memory_requirements().unwrap();
+                    let compiled = plan.compile().unwrap();
+                    let executable = Executable::new(&compiled.native.x86_64_code).unwrap();
+                    let mut memory = memory_thread(&windows, requirements).unwrap();
+                    let entry = memory.prepare(requirements).unwrap();
+                    let mut state = GuestState::default();
+                    state.x[8] = 123;
+                    state.x[21] = 1000;
+                    state.x[23] = 100;
+                    state.x[29] = DATA_WINDOW + 0x10_0000; // deliberately unmapped
+                    state.sp = DATA_WINDOW + 0x100;
+                    state.nzcv = 0xa000_0000;
+                    state.fpsr = 0x0800_009f;
+                    state.v.fill([0x7ff0_0000_0000_0001, u64::MAX]);
+                    let mut expected = state.clone();
+                    if prefix && !fault {
+                        expected.x[8] = 900;
+                    }
+                    // SAFETY: this exact body has a GPR or checked-load prefix
+                    // and an unexecuted numerical terminal. The fixed oracle
+                    // windows and prepared checked view outlive the call.
+                    let (exit, status, fault_pc, fault_address) = unsafe {
+                        entry.with_checked_view(|view| {
+                            let mut context = ExecutionContext {
+                                memory: std::ptr::from_mut(view).cast(),
+                                ..Default::default()
+                            };
+                            let call: unsafe extern "sysv64" fn(
+                                *mut GuestState,
+                                *mut ExecutionContext,
+                            )
+                                -> BlockExit = std::mem::transmute(executable.pointer.as_ptr());
+                            let exit = call(&mut state, &mut context);
+                            (exit, view.fault_kind, view.fault_pc, view.fault_address)
+                        })
+                    }
+                    .unwrap();
+                    if fault {
+                        // A failed callback returns a status carrier, not a
+                        // BlockExit. The retained view owns the precise fault.
+                        assert_eq!(status, MemoryStatus::Translation as u32);
+                        assert_eq!(fault_pc, CODE_PAGE);
+                        assert_eq!(fault_address, expected.x[29]);
+                    } else {
+                        assert_eq!(status, MemoryStatus::Success as u32);
+                        assert_eq!(ExitKind::try_from(exit.kind), Ok(ExitKind::FloatingPoint));
+                        assert_eq!(exit.next_pc, CODE_PAGE + u64::from(prefix) * 4);
+                    }
+                    assert_eq!(state, expected, "word={word:#010x}, prefix={prefix}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn shared_regions_match_unoptimized_callbacks_full_state_and_fault_prefix() {

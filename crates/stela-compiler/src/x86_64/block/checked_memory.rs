@@ -71,7 +71,6 @@ pub(crate) fn emit(
         &mut block.source_map,
         terminal,
         fallthrough,
-        target,
         crate::x86_64::NativeSystem::NONE,
         crate::x86_64::MemoryChecks::DEFAULT,
         crate::x86_64::Rax::Unknown,

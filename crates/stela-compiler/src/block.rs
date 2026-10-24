@@ -422,8 +422,8 @@ pub(crate) enum Terminator {
     PointerAuthentication(PointerAuthentication),
     Clock(ClockInstruction),
     ThreadRegister(ThreadRegisterInstruction),
-    /// Scalar mapping that unconditionally returns to numerical completion.
-    FloatingPoint(crate::aarch64::FloatingPointOperation),
+    /// Unexecuted scalar or vector operation delegated to numerical completion.
+    FloatingPoint,
     Amx(crate::amx::AmxInstruction),
 }
 
@@ -940,6 +940,58 @@ mod tests {
                 GuestAddress(base.0 + 4)
             );
             assert_eq!(body.source_bytes, 8);
+        }
+    }
+
+    #[test]
+    fn shared_system_numerical_forms_recover_the_exact_unexecuted_terminal() {
+        let base = GuestAddress(0x4000);
+        const SUB_X8_X21_X23: u32 = 0xcb17_02a8;
+        for specialization in [
+            CheckedMemoryProfile::SpAlignmentEnabled,
+            CheckedMemoryProfile::SpAlignmentDisabled,
+        ] {
+            let shared = BlockProfile::SystemModeSharedV1(specialization);
+            for word in [
+                0x9e63_0100, // UCVTF D0,X8, reached by the original kernel
+                0x1e22_2820, // FADD S0,S1,S2
+                0x1e62_0820, // FMUL D0,D1,D2
+                0x4e22_d420, // FADD V0.4S,V1.4S,V2.4S
+                0x1e61_c020, // FSQRT D0,D1
+                0x1e62_2020, // FCMP D1,D2
+                0x1e62_4820, // FMAX D0,D1,D2
+                0x1f42_0c20, // FMADD D0,D1,D2,D3
+            ] {
+                for prefix in [false, true] {
+                    let mut words = Vec::new();
+                    if prefix {
+                        words.push(SUB_X8_X21_X23);
+                    }
+                    words.extend([word, u32::MAX]);
+                    let source: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+                    let plan =
+                        CompilationPlan::new(&source, base, shared, crate::TargetCpu::Baseline)
+                            .unwrap();
+                    let terminal_pc = GuestAddress(base.0 + u64::from(prefix) * 4);
+                    assert!(matches!(plan.parsed.terminal,
+                        Some((pc, Terminator::FloatingPoint)) if pc == terminal_pc));
+                    assert_eq!(plan.source_bytes(), (usize::from(prefix) + 1) * 4);
+                    let analysis = analyze_with_profile(&source, base, shared).unwrap();
+                    assert_eq!(analysis.terminator_pc, Some(terminal_pc));
+                    assert_eq!(
+                        analysis.static_successors,
+                        [StaticSuccessor {
+                            kind: SuccessorKind::Fallthrough,
+                            target: GuestAddress(terminal_pc.0 + 4),
+                        }]
+                    );
+                    let compiled = plan.compile().unwrap();
+                    assert_eq!(compiled.source_bytes, analysis.source_bytes);
+                    assert_eq!(compiled.native.source_map.len(), usize::from(prefix) + 1);
+                    assert_eq!(compiled.native.source_map.last().unwrap().0, terminal_pc);
+                    assert!(compiled.fault_recovery.is_empty());
+                }
+            }
         }
     }
 

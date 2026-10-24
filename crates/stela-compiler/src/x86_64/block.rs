@@ -305,7 +305,6 @@ fn emit_selected(
         &mut block.source_map,
         terminal,
         fallthrough,
-        target,
         native,
         checks,
         after.rax,
@@ -578,7 +577,6 @@ fn emit_terminal(
     source_map: &mut Vec<(GuestAddress, usize)>,
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
-    target: crate::TargetCpu,
     native: super::NativeSystem,
     checks: super::MemoryChecks,
     rax: super::Rax,
@@ -592,8 +590,11 @@ fn emit_terminal(
     if let Some((pc, terminal)) = terminal {
         source_map.push((*pc, code.len()));
         match terminal {
-            Terminator::FloatingPoint(operand) => {
-                super::simd::emit_numerical(code, operand, *pc, target);
+            Terminator::FloatingPoint => {
+                // A numerical terminal is unexecuted. Ordinary profiles put
+                // inline-capable forms in the body; the checked system profile
+                // delegates every numerical form to the runtime service.
+                direct_exit(code, *pc, ExitKind::FloatingPoint);
             }
             Terminator::Clock(request) => {
                 // MRS results and ISB come from the runtime clock service.

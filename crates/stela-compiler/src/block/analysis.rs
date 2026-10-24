@@ -189,7 +189,7 @@ pub(super) fn analyze_parsed(parsed: &ParsedBlock) -> BlockAnalysis {
             thread_register_instruction = Some(*value);
             add(SuccessorKind::Fallthrough, value.next_pc);
         }
-        Some(Terminator::FloatingPoint(_)) => {
+        Some(Terminator::FloatingPoint) => {
             add(SuccessorKind::Fallthrough, parsed.next_pc);
         }
         Some(Terminator::Amx(value)) => {
@@ -462,9 +462,13 @@ pub(super) fn parse(
             });
         }
         if let Operation::FloatingPoint(operand) = &instruction.operation
-            && crate::x86_64::numerical_always_exits(operand)
+            && (matches!(profile, BlockProfile::SystemModeSharedV1(_))
+                || crate::x86_64::numerical_always_exits(operand))
         {
-            terminal = Some((pc, Terminator::FloatingPoint(*operand)));
+            // The checked full-system prefix has no inline numerical recipe.
+            // Recover its exact prefix and complete through the existing FP
+            // service, including forms other profiles can execute inline.
+            terminal = Some((pc, Terminator::FloatingPoint));
             break;
         }
         if matches!(

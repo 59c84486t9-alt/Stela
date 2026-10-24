@@ -83,7 +83,6 @@ pub(crate) fn emit(
         &mut block.source_map,
         terminal,
         fallthrough,
-        target,
         crate::x86_64::NativeSystem::NONE,
         crate::x86_64::MemoryChecks::DEFAULT,
         crate::x86_64::Rax::Unknown,
@@ -118,7 +117,7 @@ pub(crate) fn emit_scalar_store(
 fn emit_scalar(
     instruction: &Instruction,
     operand: x86_64::memory_store::checked_scalar::Operand,
-    target: TargetCpu,
+    _target: TargetCpu,
 ) -> Result<NativeBlock, CompileError> {
     let mut block = NativeBlock {
         x86_64_code: crate::extended::context_wrapper(),
@@ -142,7 +141,6 @@ fn emit_scalar(
         &mut block.source_map,
         None,
         GuestAddress(next),
-        target,
         crate::x86_64::NativeSystem::NONE,
         crate::x86_64::MemoryChecks::DEFAULT,
         crate::x86_64::Rax::Unknown,
@@ -176,7 +174,7 @@ pub(crate) fn emit_read_pair(
 fn emit_pair(
     instruction: &Instruction,
     operand: x86_64::memory_store::checked_pair::Operand,
-    target: TargetCpu,
+    _target: TargetCpu,
 ) -> Result<NativeBlock, CompileError> {
     let mut block = NativeBlock {
         x86_64_code: crate::extended::context_wrapper(),
@@ -200,7 +198,6 @@ fn emit_pair(
         &mut block.source_map,
         None,
         GuestAddress(next),
-        target,
         crate::x86_64::NativeSystem::NONE,
         crate::x86_64::MemoryChecks::DEFAULT,
         crate::x86_64::Rax::Unknown,
