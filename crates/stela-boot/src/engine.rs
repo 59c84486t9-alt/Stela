@@ -2850,7 +2850,7 @@ impl ExitsSeen {
     /// the exits by `ExitKind`, and the instruction words that most often
     /// left compiled code, so the engine's exit causes can be ranked.
     fn report<H: Host>(&mut self, machine: &Machine<H, AppleDevices>) {
-        const SHOWN: usize = 12;
+        const SHOWN: usize = 24;
         let statistics = &machine.statistics;
         let entries = statistics.blocks - statistics.chained;
         let kinds = statistics.exit_kinds;
@@ -2907,6 +2907,13 @@ impl ExitsSeen {
             let separator = if index == 0 { " forgets=" } else { "," };
             output::arguments(format_args!("{separator}{}", now - last));
         }
+        // The share of the exits by word the shown words make up.
+        let counted: u64 = top.iter().map(|&(count, _)| count).sum();
+        let shown: u64 = top.iter().take(SHOWN).map(|&(count, _)| count).sum();
+        output::arguments(format_args!(
+            " shown={}%",
+            (shown * 100).checked_div(counted).unwrap_or(100)
+        ));
         for (count, word) in top.into_iter().take(SHOWN) {
             output::arguments(format_args!(" {word:#010x}:{count}"));
         }
