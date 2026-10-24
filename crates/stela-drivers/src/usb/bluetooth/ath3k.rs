@@ -183,3 +183,6 @@ impl<B: Io> Bootloader<B> {
         self.initialization().unwrap()
     }
 }
+
+#[cfg(test)]
+pub(crate) use host::generation_tests;

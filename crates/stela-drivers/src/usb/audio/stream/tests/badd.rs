@@ -206,6 +206,10 @@ impl Control for BasicDevice {
     }
 }
 impl Transport for BasicDevice {
+    // Independent in-memory device peer; it owns no native attachment.
+    fn validate(&self) -> Result<(), BlockError> {
+        Ok(())
+    }
     type Ticket = u64;
     fn preflight(&mut self, e: &[Endpoint]) -> Result<(), BlockError> {
         self.inner.preflight(e)

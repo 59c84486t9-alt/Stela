@@ -7,14 +7,14 @@ use crate::{
     bus::dma::{DmaAllocator, DmaBuffer},
     usb::{
         bluetooth::{Io, Pipe},
-        xhci::Shared,
+        xhci::{Shared, SlotId},
     },
 };
 use alloc::vec::Vec;
 use core::sync::atomic::{Ordering, fence};
 pub struct Host {
     controller: Shared,
-    slot: u8,
+    id: SlotId,
     clock: Clock,
     output: u8,
     buffer: DmaBuffer,
@@ -28,9 +28,10 @@ impl Bootloader<Host> {
         binding: Binding,
         dma: &mut dyn DmaAllocator,
     ) -> core::result::Result<Self, BlockError> {
+        controller.borrow_mut().device(binding.device.id)?;
         let io = Host {
             clock: controller.borrow().clock,
-            slot: binding.device.slot,
+            id: binding.device.id,
             output: binding.output.dci(),
             controller: controller.clone(),
             buffer: dma.allocate(4096, 4096)?,
@@ -43,10 +44,11 @@ impl Bootloader<Host> {
 }
 impl Host {
     fn open(&mut self) -> core::result::Result<(), BlockError> {
+        self.controller.borrow_mut().device(self.id)?;
         if self.closed {
             return Err(BlockError::Unsupported("ATH3K raw transport is terminal"));
         }
-        if !self.controller.borrow_mut().connected(self.slot)? {
+        if !self.controller.borrow_mut().device(self.id)?.connected()? {
             return Err(BlockError::Unsupported("ATH3K raw USB disconnected"));
         }
         Ok(())
@@ -58,7 +60,8 @@ impl Io for Host {
         self.control_pending = true;
         self.controller
             .borrow_mut()
-            .control(self.slot, setup, data)?;
+            .device(self.id)?
+            .control(setup, data)?;
         self.control_pending = false;
         Ok(())
     }
@@ -71,14 +74,17 @@ impl Io for Host {
         let bytes = self
             .controller
             .borrow_mut()
-            .control(self.slot, setup, &[])?;
+            .device(self.id)?
+            .control(setup, &[])?;
         self.control_pending = false;
         Ok(bytes)
     }
     fn write_acl(&mut self, _: &[u8]) -> core::result::Result<(), BlockError> {
+        self.controller.borrow_mut().device(self.id)?;
         Err(BlockError::Unsupported("ATH3K bootloader is not HCI"))
     }
     fn receive(&mut self, _: Pipe) -> core::result::Result<Option<Vec<u8>>, BlockError> {
+        self.controller.borrow_mut().device(self.id)?;
         Err(BlockError::Unsupported(
             "ATH3K bootloader has no HCI receive transport",
         ))
@@ -91,6 +97,7 @@ impl Io for Host {
         bytes: &[u8],
         timeout: u64,
     ) -> core::result::Result<(), BlockError> {
+        self.controller.borrow_mut().device(self.id)?;
         if timeout == 0 || bytes.is_empty() || bytes.len() > self.buffer.len() {
             return Err(BlockError::Unsupported("ATH3K firmware transfer bounds"));
         }
@@ -101,7 +108,8 @@ impl Io for Host {
         self.open()?;
         self.controller
             .borrow_mut()
-            .endpoint_ready(self.slot, self.output)?;
+            .device(self.id)?
+            .endpoint_ready(self.output)?;
         if deadline.passed() {
             return Err(BlockError::Timeout);
         }
@@ -110,21 +118,21 @@ impl Io for Host {
         if deadline.passed() {
             return Err(BlockError::Timeout);
         }
-        let trb = self.controller.borrow_mut().submit(
-            self.slot,
-            self.output,
-            self.buffer.physical(),
-            bytes.len(),
-        )?;
+        let ticket = self
+            .controller
+            .borrow_mut()
+            .device(self.id)?
+            .submit_ticket(self.output, self.buffer.physical(), bytes.len())?;
         self.pending = true;
         loop {
             if deadline.passed() {
                 return Err(BlockError::Timeout);
             }
-            let completed =
-                self.controller
-                    .borrow_mut()
-                    .completed(self.slot, self.output, trb, bytes.len());
+            let completed = self
+                .controller
+                .borrow_mut()
+                .device(self.id)?
+                .completed_ticket(&ticket);
             if let Some(result) = completed {
                 if deadline.passed() {
                     return Err(BlockError::Timeout);
@@ -140,13 +148,15 @@ impl Io for Host {
         }
     }
     fn close(&mut self) -> core::result::Result<(), BlockError> {
+        self.controller.borrow_mut().device(self.id)?;
         if self.closed {
             return Ok(());
         }
         self.closed = true;
         let mut failure = None;
         for (active, dci) in [(self.pending, self.output), (self.control_pending, 1)] {
-            if active && let Err(error) = self.controller.borrow_mut().cancel(self.slot, dci) {
+            if active && let Err(error) = self.controller.borrow_mut().device(self.id)?.cancel(dci)
+            {
                 failure.get_or_insert(error);
             }
         }
@@ -161,3 +171,6 @@ impl Drop for Host {
         let _ = self.close();
     }
 }
+
+#[cfg(test)]
+pub(crate) mod generation_tests;

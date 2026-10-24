@@ -122,6 +122,10 @@ impl Control for LegacyModel {
     }
 }
 impl Transport for LegacyModel {
+    // Independent in-memory device peer; it owns no native attachment.
+    fn validate(&self) -> Result<(), BlockError> {
+        Ok(())
+    }
     type Ticket = u64;
     fn preflight(&mut self, endpoints: &[Endpoint]) -> Result<(), BlockError> {
         self.inner.preflight(endpoints)

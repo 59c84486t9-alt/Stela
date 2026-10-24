@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! xHCI-backed physical HCI I/O. DMA storage lives for the rest of the boot,
 //! including when an unplugged/faulted controller cannot acknowledge a stop.
-use super::super::xhci::{Device, Endpoint, Shared};
+use super::super::xhci::{Device, Endpoint, Shared, SlotId, TransferTicket};
 use super::{ACL_READ, Binding, EVENT_READ, Hci, Io, Pipe};
 use crate::{
     Clock,
@@ -18,14 +18,14 @@ const SEND_US: u64 = 5_000_000;
 struct Receive {
     endpoint: Endpoint,
     buffer: DmaBuffer,
-    queued: Option<u64>,
+    queued: Option<TransferTicket>,
 }
 
 /// Physical backend, constructed only by the xHCI attachment path. Endpoint/DMA
 /// details stay private so an initializer cannot detach an active DMA buffer.
 pub struct Host {
     controller: Shared,
-    slot: u8,
+    id: SlotId,
     clock: Clock,
     events: Receive,
     input: Receive,
@@ -44,6 +44,7 @@ impl Hci<Host> {
         binding: Binding,
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, BlockError> {
+        controller.borrow_mut().device(device.id)?;
         let clock = controller.borrow().clock;
         // Power-of-two size/alignment keeps each single-TRB buffer within a
         // 64 KiB boundary, including the largest supported ACL packet.
@@ -61,7 +62,7 @@ impl Hci<Host> {
         let output = binding.output;
         let host = Host {
             controller,
-            slot: device.slot,
+            id: device.id,
             clock,
             events,
             input,
@@ -77,16 +78,22 @@ impl Hci<Host> {
 }
 
 impl Host {
+    fn validate(&self) -> Result<(), BlockError> {
+        self.controller.borrow_mut().device(self.id)?;
+        Ok(())
+    }
     fn open(&self) -> Result<(), BlockError> {
+        self.validate()?;
         if self.closed {
             return Err(BlockError::Unsupported("USB Bluetooth transport closed"));
         }
-        if !self.controller.borrow_mut().connected(self.slot)? {
+        if !self.controller.borrow_mut().device(self.id)?.connected()? {
             return Err(BlockError::Unsupported("USB Bluetooth device disconnected"));
         }
         Ok(())
     }
     fn write_bulk(&mut self, packet: &[u8], timeout_us: u64) -> Result<(), BlockError> {
+        self.validate()?;
         if self.transmit_pending {
             return Err(BlockError::Unsupported(
                 "unretired USB Bluetooth bulk output",
@@ -99,7 +106,8 @@ impl Host {
         }
         self.controller
             .borrow_mut()
-            .endpoint_ready(self.slot, self.output.dci())?;
+            .device(self.id)?
+            .endpoint_ready(self.output.dci())?;
         if deadline.passed() {
             return Err(BlockError::Timeout);
         }
@@ -109,21 +117,21 @@ impl Host {
         if deadline.passed() {
             return Err(BlockError::Timeout);
         }
-        let trb = self.controller.borrow_mut().submit(
-            self.slot,
-            dci,
-            self.transmit.physical(),
-            packet.len(),
-        )?;
+        let ticket = self
+            .controller
+            .borrow_mut()
+            .device(self.id)?
+            .submit_ticket(dci, self.transmit.physical(), packet.len())?;
         self.transmit_pending = true;
         loop {
             if deadline.passed() {
                 return Err(BlockError::Timeout);
             }
-            let completed =
-                self.controller
-                    .borrow_mut()
-                    .completed(self.slot, dci, trb, packet.len());
+            let completed = self
+                .controller
+                .borrow_mut()
+                .device(self.id)?
+                .completed_ticket(&ticket);
             if let Some(result) = completed {
                 if deadline.passed() {
                     return Err(BlockError::Timeout);
@@ -150,7 +158,8 @@ impl Io for Host {
         self.control_pending = true;
         self.controller
             .borrow_mut()
-            .control(self.slot, setup, packet)?;
+            .device(self.id)?
+            .control(setup, packet)?;
         self.control_pending = false;
         Ok(())
     }
@@ -166,7 +175,8 @@ impl Io for Host {
         let bytes = self
             .controller
             .borrow_mut()
-            .control(self.slot, setup, &[])?;
+            .device(self.id)?
+            .control(setup, &[])?;
         self.control_pending = false;
         Ok(bytes)
     }
@@ -179,20 +189,15 @@ impl Io for Host {
         };
         let mut controller = self.controller.borrow_mut();
         let length = receive.buffer.len();
-        let trb = match receive.queued {
-            Some(trb) => trb,
-            None => {
-                let trb = controller.submit(
-                    self.slot,
-                    receive.endpoint.dci(),
-                    receive.buffer.physical(),
-                    length,
-                )?;
-                receive.queued = Some(trb);
-                trb
-            }
-        };
-        match controller.completed(self.slot, receive.endpoint.dci(), trb, length) {
+        let mut device = controller.device(self.id)?;
+        if receive.queued.is_none() {
+            receive.queued = Some(device.submit_ticket(
+                receive.endpoint.dci(),
+                receive.buffer.physical(),
+                length,
+            )?);
+        }
+        match device.completed_ticket(receive.queued.as_ref().unwrap()) {
             Some(Ok(length)) => {
                 receive.queued = None;
                 fence(Ordering::Acquire);
@@ -210,6 +215,7 @@ impl Io for Host {
     }
 
     fn write_firmware(&mut self, bytes: &[u8], timeout_us: u64) -> Result<(), BlockError> {
+        self.validate()?;
         if timeout_us == 0 {
             return Err(BlockError::Unsupported("zero firmware bulk deadline"));
         }
@@ -221,13 +227,15 @@ impl Io for Host {
         if self.input.queued.is_some() {
             self.controller
                 .borrow_mut()
-                .cancel(self.slot, self.input.endpoint.dci())?;
+                .device(self.id)?
+                .cancel_ticket(self.input.queued.as_ref().unwrap())?;
             self.input.queued = None;
         }
         Ok(())
     }
 
     fn close(&mut self) -> Result<(), BlockError> {
+        self.validate()?;
         if self.closed {
             return Ok(());
         }
@@ -240,13 +248,19 @@ impl Io for Host {
         };
         self.closed = true;
         let mut controller = self.controller.borrow_mut();
+        let mut device = controller.device(self.id)?;
+        for receive in [&self.events, &self.input] {
+            if let Some(ticket) = &receive.queued
+                && let Err(error) = device.cancel_ticket(ticket)
+            {
+                failure.get_or_insert(error);
+            }
+        }
         for (active, dci) in [
-            (self.events.queued.is_some(), self.events.endpoint.dci()),
-            (self.input.queued.is_some(), self.input.endpoint.dci()),
             (self.transmit_pending, self.output.dci()),
             (self.control_pending, 1),
         ] {
-            if active && let Err(error) = controller.cancel(self.slot, dci) {
+            if active && let Err(error) = device.cancel(dci) {
                 failure.get_or_insert(error);
             }
         }
@@ -417,3 +431,6 @@ mod tests {
         assert_eq!(backing, after);
     }
 }
+
+#[cfg(test)]
+pub(crate) mod generation_tests;

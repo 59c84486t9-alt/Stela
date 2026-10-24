@@ -996,3 +996,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) use host::generation_tests;

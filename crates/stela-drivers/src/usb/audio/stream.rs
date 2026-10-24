@@ -115,6 +115,7 @@ pub struct AudioDevice<T: Transport> {
 
 impl<T: Transport> AudioDevice<T> {
     pub fn new(transport: T, binding: Binding, dma: &mut dyn DmaAllocator) -> Result<Self, Error> {
+        transport.validate()?;
         Ok(Self {
             transport,
             binding,
@@ -132,9 +133,46 @@ impl<T: Transport> AudioDevice<T> {
             last_fault: None,
         })
     }
+    #[cfg(test)]
+    pub(crate) fn generation_transport(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generation_snapshot(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend(self.output_pcm.iter().copied());
+        bytes.extend(self.input_pcm.iter().copied());
+        for count in [
+            self.output_pcm.len(),
+            self.input_pcm.len(),
+            self.implicit_frames.len(),
+        ] {
+            bytes.extend_from_slice(&count.to_le_bytes());
+        }
+        bytes.extend([
+            u8::from(self.playback.is_some()),
+            u8::from(self.capture.is_some()),
+            u8::from(self.poisoned),
+            u8::from(self.last_fault.is_some()),
+        ]);
+        for lane in [&self.output, &self.input, &self.feedback] {
+            bytes.extend_from_slice(&lane.order.len().to_le_bytes());
+            bytes.push(u8::from(lane.endpoint.is_some()));
+            for packet in &lane.packets {
+                bytes.extend_from_slice(packet.buffer.bytes());
+                bytes.extend_from_slice(&packet.bytes.to_le_bytes());
+                bytes.push(u8::from(packet.ticket.is_some()));
+            }
+        }
+        bytes
+    }
+
+    /// Immutable descriptor snapshot; this does not establish current attachment.
     pub fn binding(&self) -> &Binding {
         &self.binding
     }
+    /// Historical software accounting; poll validates the actual native owner.
     pub fn progress(&self) -> Progress {
         let mut p = self.progress;
         p.queued_playback = self.output.queued();
@@ -142,6 +180,7 @@ impl<T: Transport> AudioDevice<T> {
         p
     }
     fn ready(&self) -> Result<(), Error> {
+        self.transport.validate()?;
         if self.poisoned {
             Err(Error::Poisoned)
         } else {
@@ -570,6 +609,7 @@ impl<T: Transport> AudioDevice<T> {
             .signal_selection(&mut self.transport, entity, pin)
     }
     fn queue_inputs(&mut self) -> Result<(), Error> {
+        self.transport.validate()?;
         for lane in [&mut self.input, &mut self.feedback] {
             let Some(endpoint) = lane.endpoint else {
                 continue;
@@ -599,6 +639,7 @@ impl<T: Transport> AudioDevice<T> {
         Ok(())
     }
     fn queue_output(&mut self) -> Result<(), Error> {
+        self.transport.validate()?;
         let Some(p) = self.playback.as_mut() else {
             return Ok(());
         };
@@ -865,6 +906,7 @@ impl<T: Transport> AudioDevice<T> {
         Ok(())
     }
     pub fn shutdown(&mut self) -> Result<(), Error> {
+        self.transport.validate()?;
         let output = self.stop_output();
         let input = self.stop_input();
         if output.is_err() || input.is_err() {
@@ -1063,6 +1105,10 @@ pub(crate) mod tests {
         }
     }
     impl Transport for Model {
+        // Independent in-memory device peer; it owns no native attachment.
+        fn validate(&self) -> Result<(), BlockError> {
+            Ok(())
+        }
         type Ticket = u64;
         fn preflight(&mut self, eps: &[Endpoint]) -> Result<(), BlockError> {
             if eps.iter().any(|e| self.active.contains(&e.address)) {

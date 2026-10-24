@@ -917,3 +917,55 @@ pub(crate) fn forwarding_scheduled_fixture<C: crate::bus::pci::ConfigSpace>(
     controller.registers = wrap(controller.registers, model.clone());
     (controller, model)
 }
+
+/// Same actual failed ordinary-TD fixture with its unique submitted ticket
+/// retained by asynchronous class owners instead of a fabricated ring address.
+pub(crate) fn controller_with_unresolved_ticket(
+    dma: &mut dyn DmaAllocator,
+    buffer: u64,
+    length: usize,
+    dci: u8,
+    halted: bool,
+) -> (Shared, TransferTicket) {
+    let (mut controller, model) = cancellation_controller(dma);
+    if halted {
+        model.borrow_mut().halt_transfer = Some(usize::from(dci));
+        model.borrow_mut().fail = Some((SET_DEQUEUE, CONTEXT_STATE_ERROR));
+    } else {
+        model.borrow_mut().silence_transfer = Some(usize::from(dci));
+        model.borrow_mut().fail = Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));
+    }
+    let id = controller.device_id(1).unwrap();
+    let ticket = controller
+        .device(id)
+        .unwrap()
+        .submit_ticket(dci, buffer, length)
+        .unwrap();
+    if halted {
+        assert_eq!(
+            controller.completed_ticket(&ticket),
+            Some(Err(BlockError::Device { status: STALL }))
+        );
+        assert_eq!(
+            controller.device(id).unwrap().clear(&fixture_endpoint(dci)),
+            Err(BlockError::Device {
+                status: CONTEXT_STATE_ERROR
+            })
+        );
+        assert_eq!(model.borrow().seen, vec![RESET_ENDPOINT, SET_DEQUEUE]);
+        assert_eq!(model.borrow().state(usize::from(dci)), ENDPOINT_STOPPED);
+    } else {
+        assert!(controller.cancel_ticket(&ticket).is_err());
+        assert!(model.borrow().active[usize::from(dci)].is_some());
+    }
+    assert!(controller.endpoint_poisoned(1, usize::from(dci)));
+    (Rc::new(RefCell::new(controller)), ticket)
+}
+
+/// Actual high-speed class profile, with the retained original configuration.
+pub(crate) fn high_speed_media_controller(
+    dma: &mut dyn DmaAllocator,
+    configuration: &[u8],
+) -> (Controller, Rc<RefCell<CancelModel>>) {
+    cancellation_controller_at_speed(dma, &[configuration.to_vec()], HIGH_SPEED)
+}

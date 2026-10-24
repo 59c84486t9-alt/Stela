@@ -11,7 +11,7 @@ use crate::{
             Hci, Io,
             mediatek::media::{self, Bindings, Kind, Loss, MediaIo, Pair, Read, Session},
         },
-        xhci::{self, IsoStatus, IsoTransfer},
+        xhci::{self, IsoStatus, IsoTransfer, TransferTicket},
     },
 };
 use alloc::vec::Vec;
@@ -31,7 +31,7 @@ pub(super) struct Native {
     sco: Option<Pair>,
     iso_input: DmaBuffer,
     iso_output: DmaBuffer,
-    iso_receive: Option<u64>,
+    iso_receive: Option<TransferTicket>,
     iso_send: bool,
     input: Vec<Buffer>,
     output: Vec<Buffer>,
@@ -50,6 +50,7 @@ impl Hci<Host> {
         dma: &mut dyn DmaAllocator,
         command_credits: u8,
     ) -> media::Result<Session<Host>> {
+        self.io.validate()?;
         let bindings = Bindings::new(self.binding())?;
         self.io.media = Some(Native::new(bindings, dma)?);
         Session::start(self, dma, command_credits)
@@ -108,6 +109,7 @@ impl Native {
         pair: Pair,
         dma: &mut dyn DmaAllocator,
     ) -> Result<(), BlockError> {
+        host.validate()?;
         if self.iso.is_some() || self.retired || self.poisoned || pair != self.bindings.iso() {
             return Err(BlockError::Unsupported(
                 "MT7925 exact fresh interrupt interface plan",
@@ -115,46 +117,51 @@ impl Native {
         }
         host.controller
             .borrow_mut()
-            .preflight_endpoints(host.slot, &pair.endpoints())?;
+            .device(host.id)?
+            .preflight_endpoints(&pair.endpoints())?;
         Self::select(host, pair.interface, pair.alternate)?;
         // Record before Configure Endpoint: a failing command can leave hardware
         // ownership unresolved; cleanup must still attempt the exact contexts.
         self.iso = Some(pair);
         host.controller
             .borrow_mut()
-            .configure(host.slot, &pair.endpoints(), None, dma)?;
+            .device(host.id)?
+            .configure(&pair.endpoints(), None, dma)?;
         self.running = true;
         self.post_interrupt(host)?;
         Ok(())
     }
     fn post_interrupt(&mut self, host: &mut Host) -> Result<(), BlockError> {
+        host.validate()?;
         let pair = self
             .iso
             .ok_or(BlockError::Unsupported("MT7925 interrupt interface absent"))?;
         if self.iso_receive.is_none() {
-            self.iso_receive = Some(host.controller.borrow_mut().submit(
-                host.slot,
-                pair.input.dci(),
-                self.iso_input.physical(),
-                media::service_bytes(pair.input),
-            )?);
+            self.iso_receive = Some(
+                host.controller
+                    .borrow_mut()
+                    .device(host.id)?
+                    .submit_ticket(
+                        pair.input.dci(),
+                        self.iso_input.physical(),
+                        media::service_bytes(pair.input),
+                    )?,
+            );
         }
         Ok(())
     }
     fn post_sco(&mut self, host: &mut Host) -> Result<(), BlockError> {
+        host.validate()?;
         let Some(pair) = self.sco else {
             return Ok(());
         };
         let len = media::service_bytes(pair.input);
-        let mut controller = host.controller.borrow_mut();
+        let mut controller_owner = host.controller.borrow_mut();
+        let mut controller = controller_owner.device(host.id)?;
         for entry in &mut self.input {
             if entry.queued.is_none() {
-                entry.queued = Some(controller.submit_iso(
-                    host.slot,
-                    pair.input.dci(),
-                    entry.dma.physical(),
-                    len,
-                )?);
+                entry.queued =
+                    Some(controller.submit_iso(pair.input.dci(), entry.dma.physical(), len)?);
             }
         }
         Ok(())
@@ -166,6 +173,7 @@ impl Native {
         next: Option<Pair>,
         dma: &mut dyn DmaAllocator,
     ) -> Result<(), BlockError> {
+        host.validate()?;
         self.active()?;
         if self.sco != previous || next.is_some_and(|p| !self.bindings.accepts_sco(p)) {
             return Err(BlockError::Unsupported(
@@ -175,7 +183,8 @@ impl Native {
         if let Some(old) = previous {
             host.controller
                 .borrow_mut()
-                .deconfigure(host.slot, &old.endpoints())?;
+                .device(host.id)?
+                .deconfigure(&old.endpoints())?;
             for buffer in self.input.iter_mut().chain(&mut self.output) {
                 buffer.queued = None;
             }
@@ -184,32 +193,35 @@ impl Native {
         if let Some(pair) = next {
             host.controller
                 .borrow_mut()
-                .preflight_endpoints(host.slot, &pair.endpoints())?;
+                .device(host.id)?
+                .preflight_endpoints(&pair.endpoints())?;
         }
         Self::select(host, 1, next.map_or(0, |p| p.alternate))?;
         self.next_input = 0;
         if let Some(pair) = next {
             self.sco = Some(pair);
-            host.controller
-                .borrow_mut()
-                .configure(host.slot, &pair.endpoints(), None, dma)?;
+            host.controller.borrow_mut().device(host.id)?.configure(
+                &pair.endpoints(),
+                None,
+                dma,
+            )?;
             self.post_sco(host)?;
         }
         Ok(())
     }
     fn read(&mut self, host: &mut Host, kind: Kind) -> Result<Option<Read>, BlockError> {
+        host.validate()?;
         self.active()?;
         match kind {
             Kind::Iso => {
                 self.post_interrupt(host)?;
                 let pair = self.iso.unwrap();
                 let length = media::service_bytes(pair.input);
-                let result = host.controller.borrow_mut().completed(
-                    host.slot,
-                    pair.input.dci(),
-                    self.iso_receive.unwrap(),
-                    length,
-                );
+                let result = host
+                    .controller
+                    .borrow_mut()
+                    .device(host.id)?
+                    .completed_ticket(self.iso_receive.as_ref().unwrap());
                 match result {
                     Some(Ok(bytes)) if bytes <= length => {
                         self.iso_receive = None;
@@ -234,6 +246,7 @@ impl Native {
                 let result = host
                     .controller
                     .borrow_mut()
+                    .device(host.id)?
                     .completed_iso(self.input[index].queued.as_ref().unwrap());
                 let Some(result) = result else {
                     return Ok(None);
@@ -248,7 +261,8 @@ impl Native {
                     // after this terminal status before restarting the schedule.
                     host.controller
                         .borrow_mut()
-                        .cancel(host.slot, pair.input.dci())?;
+                        .device(host.id)?
+                        .cancel(pair.input.dci())?;
                     for b in &mut self.input {
                         b.queued = None;
                     }
@@ -269,6 +283,7 @@ impl Native {
         }
     }
     fn write(&mut self, host: &mut Host, kind: Kind, bytes: &[u8]) -> media::Result<()> {
+        host.validate()?;
         self.active()?;
         match kind {
             Kind::Iso => {
@@ -280,24 +295,24 @@ impl Native {
                 }
                 host.controller
                     .borrow_mut()
-                    .endpoint_ready(host.slot, pair.output.dci())?;
+                    .device(host.id)?
+                    .endpoint_ready(pair.output.dci())?;
                 self.iso_output.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
                 fence(Ordering::Release);
-                let trb = host.controller.borrow_mut().submit(
-                    host.slot,
-                    pair.output.dci(),
-                    self.iso_output.physical(),
-                    bytes.len(),
-                )?;
+                let trb = host
+                    .controller
+                    .borrow_mut()
+                    .device(host.id)?
+                    .submit_ticket(pair.output.dci(), self.iso_output.physical(), bytes.len())?;
                 self.iso_send = true;
                 let deadline = host.clock.deadline(SEND_US);
                 loop {
-                    if let Some(result) = host.controller.borrow_mut().completed(
-                        host.slot,
-                        pair.output.dci(),
-                        trb,
-                        bytes.len(),
-                    ) {
+                    if let Some(result) = host
+                        .controller
+                        .borrow_mut()
+                        .device(host.id)?
+                        .completed_ticket(&trb)
+                    {
                         let done = result?;
                         if done != bytes.len() {
                             return Err(media::Error::OutputCompletion {
@@ -333,8 +348,7 @@ impl Native {
                 for (b, chunk) in self.output.iter_mut().zip(bytes.chunks(service)) {
                     b.dma.bytes_mut()[..chunk.len()].copy_from_slice(chunk);
                     fence(Ordering::Release);
-                    b.queued = Some(host.controller.borrow_mut().submit_iso(
-                        host.slot,
+                    b.queued = Some(host.controller.borrow_mut().device(host.id)?.submit_iso(
                         pair.output.dci(),
                         b.dma.physical(),
                         chunk.len(),
@@ -346,6 +360,7 @@ impl Native {
                         if let Some(result) = host
                             .controller
                             .borrow_mut()
+                            .device(host.id)?
                             .completed_iso(b.queued.as_ref().unwrap())
                         {
                             let done = result?;
@@ -374,25 +389,29 @@ impl Native {
         }
     }
     fn quiesce(&mut self, host: &mut Host) -> Result<(), BlockError> {
+        host.validate()?;
         self.active()?;
         self.running = false;
         let mut failure = None;
-        let mut controller = host.controller.borrow_mut();
+        let mut controller_owner = host.controller.borrow_mut();
+        let mut controller = controller_owner.device(host.id)?;
         if let Some(pair) = self.iso {
-            for (pending, ep) in [
-                (self.iso_receive.is_some(), pair.input),
-                (self.iso_send, pair.output),
-            ] {
-                if pending && let Err(e) = controller.cancel(host.slot, ep.dci()) {
-                    failure.get_or_insert(e);
-                }
+            if let Some(ticket) = &self.iso_receive
+                && let Err(e) = controller.cancel_ticket(ticket)
+            {
+                failure.get_or_insert(e);
+            }
+            if self.iso_send
+                && let Err(e) = controller.cancel(pair.output.dci())
+            {
+                failure.get_or_insert(e);
             }
         }
         if let Some(pair) = self.sco {
             // An idle completed ISO output still owns Queue.next. Always
             // acknowledge retirement of both schedules, not just live payloads.
             for ep in pair.endpoints() {
-                if let Err(e) = controller.cancel(host.slot, ep.dci()) {
+                if let Err(e) = controller.cancel(ep.dci()) {
                     failure.get_or_insert(e);
                 }
             }
@@ -410,17 +429,20 @@ impl Native {
         Ok(())
     }
     fn reset_epoch(&mut self, host: &mut Host) -> Result<(), BlockError> {
+        host.validate()?;
         self.quiesce(host)?;
         if let Some(pair) = self.sco {
             host.controller
                 .borrow_mut()
-                .deconfigure(host.slot, &pair.endpoints())?;
+                .device(host.id)?
+                .deconfigure(&pair.endpoints())?;
             self.sco = None;
             Self::select(host, pair.interface, 0)?;
         }
         Ok(())
     }
     fn resume(&mut self, host: &mut Host) -> Result<(), BlockError> {
+        host.validate()?;
         if self.running || self.retired || self.poisoned || self.iso.is_none() {
             return Err(BlockError::Unsupported(
                 "MT7925 media resume requires known stopped streams",
@@ -431,6 +453,7 @@ impl Native {
         self.post_sco(host)
     }
     pub(super) fn close(&mut self, host: &mut Host) -> Result<(), BlockError> {
+        host.validate()?;
         if self.retired {
             return if self.poisoned {
                 Err(BlockError::Unsupported(
@@ -448,13 +471,16 @@ impl Native {
         self.retired = true;
         // Deconfigure also cancels/drains every queued TD; it refuses poisoned
         // endpoint states. Do not select a new alternate after any uncertainty.
-        let mut controller = host.controller.borrow_mut();
-        for pair in [self.sco, self.iso].into_iter().flatten() {
-            if let Err(e) = controller.deconfigure(host.slot, &pair.endpoints()) {
-                failure.get_or_insert(e);
+        let mut controller_owner = host.controller.borrow_mut();
+        {
+            let mut controller = controller_owner.device(host.id)?;
+            for pair in [self.sco, self.iso].into_iter().flatten() {
+                if let Err(e) = controller.deconfigure(&pair.endpoints()) {
+                    failure.get_or_insert(e);
+                }
             }
         }
-        drop(controller);
+        drop(controller_owner);
         if failure.is_none() {
             if let Some(pair) = self.sco
                 && let Err(e) = Self::select(host, pair.interface, 0)
@@ -531,6 +557,7 @@ impl MediaIo for Host {
         self.with_media(|m, h| m.resume(h))
     }
     fn close_media(&mut self) -> Result<(), BlockError> {
+        self.validate()?;
         let Some(mut media) = self.media.take() else {
             return Ok(());
         };
@@ -556,14 +583,20 @@ mod tests {
             let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
             let binding = binding();
             let mut native = Native::new(Bindings::new(&binding).unwrap(), &mut dma).unwrap();
-            let controller = xhci::model::controller_with_unresolved_td(
+            let (controller, ticket) = xhci::model::controller_with_unresolved_ticket(
                 &mut dma,
                 native.iso_input.physical(),
                 512,
                 5,
                 halted,
             );
-            let device = binding.device().clone();
+            let mut device = binding.device().clone();
+            device.id = controller.borrow().test_device_id(device.slot).unwrap();
+            let binding = crate::usb::bluetooth::Binding::new(
+                &device,
+                &xhci::interfaces(&device.configuration)[0],
+            )
+            .unwrap();
             let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
             // This is the shared fixture's real submitted interrupt/bulk TD,
             // not a fabricated completion. The endpoint plan is local test data.
@@ -571,7 +604,7 @@ mod tests {
             pair.input.address = 0x82;
             pair.output.address = 2;
             native.iso = Some(pair);
-            native.iso_receive = Some(1);
+            native.iso_receive = Some(ticket);
             native.running = true;
             native.iso_input.bytes_mut()[..512].fill(0xa5);
             hci.io.media = Some(native);
@@ -598,7 +631,13 @@ mod tests {
         let fixture = xhci::model::iso_class_fixture(&mut dma, xhci::HIGH_SPEED);
         let controller = fixture.controller();
         let binding = binding();
-        let device = binding.device().clone();
+        let mut device = binding.device().clone();
+        device.id = controller.borrow().test_device_id(device.slot).unwrap();
+        let binding = crate::usb::bluetooth::Binding::new(
+            &device,
+            &xhci::interfaces(&device.configuration)[0],
+        )
+        .unwrap();
         let mut native = Native::new(Bindings::new(&binding).unwrap(), &mut dma).unwrap();
         let pair = native
             .bindings
@@ -654,4 +693,64 @@ mod tests {
         );
         controller.borrow_mut().cancel(1, pair.input.dci()).unwrap();
     }
+}
+
+#[cfg(test)]
+pub(super) fn generation_prepare(
+    host: &mut Host,
+    binding: &crate::usb::bluetooth::Binding,
+    dma: &mut dyn DmaAllocator,
+) {
+    let mut native = Native::new(Bindings::new(binding).unwrap(), dma).unwrap();
+    let pair = native.bindings.iso();
+    native.start(host, pair, dma).unwrap();
+    let sco = native
+        .bindings
+        .sco(media::Voice {
+            connections: 1,
+            air_mode: media::AirMode::Cvsd,
+            voice_setting: 0,
+        })
+        .unwrap();
+    native.replace(host, None, sco, dma).unwrap();
+    assert!(native.iso_receive.is_some());
+    assert!(native.input.iter().all(|b| b.queued.is_some()));
+    host.media = Some(native);
+}
+
+#[cfg(test)]
+pub(super) fn generation_refuse(host: &mut Host, dma: &mut dyn DmaAllocator) {
+    let native = host.media.as_ref().unwrap();
+    let iso = native.iso.unwrap();
+    let sco = native.sco;
+    let before = (
+        native.running,
+        native.retired,
+        native.poisoned,
+        native.next_input,
+        native.iso_receive.is_some(),
+        native.input.iter().filter(|b| b.queued.is_some()).count(),
+    );
+    assert!(host.start_iso(iso, dma).is_err());
+    assert!(host.replace_sco(sco, None, dma).is_err());
+    assert!(host.read_media(Kind::Iso).is_err());
+    assert!(host.read_media(Kind::Sco).is_err());
+    assert!(host.write_media(Kind::Iso, &[0x7a; 264]).is_err());
+    assert!(host.write_media(Kind::Sco, &[0x7a; 48]).is_err());
+    assert!(host.quiesce_media().is_err());
+    assert!(host.reset_media_epoch().is_err());
+    assert!(host.resume_media().is_err());
+    assert!(host.close_media().is_err());
+    let native = host.media.as_ref().unwrap();
+    assert_eq!(
+        (
+            native.running,
+            native.retired,
+            native.poisoned,
+            native.next_input,
+            native.iso_receive.is_some(),
+            native.input.iter().filter(|b| b.queued.is_some()).count()
+        ),
+        before
+    );
 }

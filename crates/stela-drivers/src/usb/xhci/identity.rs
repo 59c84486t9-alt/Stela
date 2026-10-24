@@ -647,6 +647,130 @@ mod tests {
     fn retained_vendor_ethernet_generation_refuses_before_mmio_and_preserves_current_completion() {
         network_generation_peer(true);
     }
+
+    fn media_generation_peer(kind: u8) {
+        use crate::bus::dma::RegionAllocator;
+        use crate::usb::{
+            audio::generation_tests as audio_peer,
+            bluetooth::{
+                ath3k::generation_tests as ath3k_peer, generation_tests as bluetooth_peer,
+            },
+        };
+        for already_pending in [false, true] {
+            let mut backing = vec![0u64; 512 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: all native owners/DMAs remain inside this live allocation.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let configuration = match kind {
+                0 => audio_peer::configuration(),
+                1 => bluetooth_peer::configuration(),
+                _ => ath3k_peer::configuration(),
+            };
+            let (previous, hardware) = model::high_speed_media_controller(&mut dma, &configuration);
+            let previous = Rc::new(RefCell::new(previous));
+            let old_id = previous.borrow().device_id(1).unwrap();
+            let mut audio = (kind == 0).then(|| audio_peer::peer(previous.clone(), &mut dma));
+            let mut bluetooth =
+                (kind == 1).then(|| bluetooth_peer::peer(previous.clone(), &mut dma));
+            let mut ath3k = (kind == 2).then(|| ath3k_peer::peer(previous.clone(), &mut dma));
+            if kind != 2 {
+                assert!(hardware.borrow().active.iter().any(Option::is_some));
+            }
+            previous
+                .borrow_mut()
+                .disable_slot(1, reset::Ownership::Retired)
+                .unwrap();
+            assert!(hardware.borrow().active.iter().all(Option::is_none));
+            assert_eq!(hardware.borrow().seen.last(), Some(&reset::DISABLE_SLOT));
+            assert_eq!(
+                previous.borrow().slot_ownership[1],
+                reset::Ownership::Retired
+            );
+            assert_eq!(previous.borrow().dcbaa.read::<u64>(8), 0);
+            let before = backing.clone();
+            let before_remaining = dma.remaining();
+            trapped(&previous, || {
+                if let Some(peer) = &mut audio {
+                    audio_peer::refuse(peer, &previous);
+                }
+                if let Some(peer) = &mut bluetooth {
+                    bluetooth_peer::refuse(peer, &previous);
+                }
+                if let Some(peer) = &mut ath3k {
+                    ath3k_peer::refuse(peer, &previous);
+                }
+            });
+            assert_eq!(dma.remaining(), before_remaining);
+            assert_eq!(backing, before);
+
+            // A second actual addressed controller independently mints the same
+            // hardware slot number; no old identity or publication fence is reset.
+            let (current, current_hardware) = model::cancellation_controller(&mut dma);
+            let current = Rc::new(RefCell::new(current));
+            let current_id = current.borrow().device_id(1).unwrap();
+            assert_eq!(current_id.hardware_slot(), old_id.hardware_slot());
+            assert_ne!(current_id, old_id);
+            let mut data = dma.allocate(128, 64).unwrap();
+            data.bytes_mut().fill(0xa5);
+            let ticket = current
+                .borrow_mut()
+                .device(current_id)
+                .unwrap()
+                .submit_ticket(5, data.physical(), 64)
+                .unwrap();
+            current_hardware
+                .borrow_mut()
+                .incoming_acl
+                .push_back(vec![0x6a; 64]);
+            current_hardware.borrow_mut().receive(5);
+            if already_pending {
+                current.borrow_mut().drain();
+            }
+            assert_eq!(current.borrow().pending.len(), usize::from(already_pending));
+            let before = backing.clone();
+            let before_remaining = dma.remaining();
+            trapped(&current, || {
+                if let Some(peer) = &mut audio {
+                    audio_peer::refuse(peer, &current);
+                }
+                if let Some(peer) = &mut bluetooth {
+                    bluetooth_peer::refuse(peer, &current);
+                }
+                if let Some(peer) = &mut ath3k {
+                    ath3k_peer::refuse(peer, &current);
+                }
+            });
+            assert_eq!(dma.remaining(), before_remaining);
+            assert_eq!(backing, before);
+            assert_eq!(
+                current
+                    .borrow_mut()
+                    .device(current_id)
+                    .unwrap()
+                    .completed_ticket(&ticket),
+                Some(Ok(64))
+            );
+            assert_eq!(&data.bytes()[..64], &[0x6a; 64]);
+            assert_eq!(&data.bytes()[64..], &[0xa5; 64]);
+            // This verifies native admission across retirement and distinct
+            // addressed generations. Published hardware-slot reuse stays closed.
+        }
+    }
+
+    #[test]
+    fn retained_uac2_generation_refuses_before_mmio_and_preserves_current_completion() {
+        media_generation_peer(0);
+    }
+
+    #[test]
+    fn retained_mt7925_media_generation_refuses_before_mmio_and_preserves_current_completion() {
+        media_generation_peer(1);
+    }
+    #[test]
+    fn retained_ath3k_initializer_generation_refuses_before_mmio_and_preserves_current_completion()
+    {
+        media_generation_peer(2);
+    }
 }
 
 #[cfg(test)]

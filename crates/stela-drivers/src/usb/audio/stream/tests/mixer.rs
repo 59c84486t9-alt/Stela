@@ -37,6 +37,10 @@ impl Control for MixerDevice {
     }
 }
 impl Transport for MixerDevice {
+    // Independent in-memory device peer; it owns no native attachment.
+    fn validate(&self) -> Result<(), BlockError> {
+        Ok(())
+    }
     type Ticket = u64;
     fn preflight(&mut self, e: &[Endpoint]) -> Result<(), BlockError> {
         self.transport.preflight(e)

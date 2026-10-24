@@ -88,6 +88,9 @@ pub struct Completion {
 /// before returning success. Implementations retain all DMA on any uncertainty.
 pub trait Transport: Control {
     type Ticket;
+    /// Validate retained device identity without MMIO or DMA mutation. Native
+    /// transports must reject retired generations before caller-owned PCM writes.
+    fn validate(&self) -> Result<(), BlockError>;
     /// Observe that every proposed DCI is unowned, before SET_INTERFACE or any
     /// cleanup plan is staged. Callers serialize this observation with mutation.
     fn preflight(&mut self, endpoints: &[Endpoint]) -> Result<(), BlockError>;
@@ -115,3 +118,6 @@ pub use stream::{AudioDevice, Progress};
 
 #[cfg(test)]
 pub(crate) use stream::tests::configuration as test_configuration;
+
+#[cfg(test)]
+pub(crate) use native::generation_tests;
