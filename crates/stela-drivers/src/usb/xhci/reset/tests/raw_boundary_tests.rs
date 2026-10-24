@@ -19,12 +19,22 @@ fn unpublished(
     context: usize,
     max_slots: usize,
 ) -> (Controller, SlotId, Rc<RefCell<Hardware>>, RegionAllocator) {
+    unpublished_profile(memory, speed, context, max_slots, dma::Profile::SPEC)
+}
+
+fn unpublished_profile(
+    memory: &mut [u64],
+    speed: u8,
+    context: usize,
+    max_slots: usize,
+    profile: dma::Profile,
+) -> (Controller, SlotId, Rc<RefCell<Hardware>>, RegionAllocator) {
     let range = memory.as_mut_ptr() as u64
         ..memory.as_mut_ptr() as u64 + core::mem::size_of_val(memory) as u64;
     // SAFETY: memory is the live, aligned backing allocation for every modeled
     // DMA owner; callers retain it until both controller and peer are dropped.
     let mut dma = unsafe { RegionAllocator::new(range) };
-    let commands = Ring::new(&mut dma).unwrap();
+    let commands = Ring::with_profile(&mut dma, profile).unwrap();
     let events = dma.allocate(RING_TRBS * 16, 64).unwrap();
     let dcbaa = dma.allocate((max_slots + 1) * 8, 64).unwrap();
     let hardware = Rc::new(RefCell::new(Hardware {
@@ -68,7 +78,7 @@ fn unpublished(
         runtime: 0x800,
         doorbells: 0x1000,
         context_bytes: context,
-        dma_profile: super::super::dma::Profile::SPEC,
+        dma_profile: profile,
         hardware: hardware::State::Running,
         quirks: quirks::Profile::default(),
         max_primary_streams: 4,
@@ -88,6 +98,7 @@ fn unpublished(
             .take(max_slots + 1)
             .collect(),
         legacy_slot_fenced: vec![false; max_slots + 1],
+        retry_resources: slot_resources::Cache::new(max_slots + 1),
         slot_ownership: vec![Ownership::Vacant; max_slots + 1],
         power: power::Ledger::new(max_slots + 1),
         pending: Vec::new(),
@@ -464,3 +475,6 @@ fn matching_disable_ack_permanently_fences_raw_access_before_fatal_health_failur
         assert_eq!(backing, before);
     }
 }
+
+#[path = "slot_resource_tests.rs"]
+mod slot_resource_tests;

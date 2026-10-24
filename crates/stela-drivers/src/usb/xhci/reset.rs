@@ -1065,6 +1065,7 @@ pub(crate) mod tests {
                 .take(max_slots + 1)
                 .collect(),
             legacy_slot_fenced: vec![false; max_slots + 1],
+            retry_resources: slot_resources::Cache::new(max_slots + 1),
             slot_ownership: vec![Ownership::Vacant; max_slots + 1],
             power: power::Ledger::new(max_slots + 1),
             pending: Vec::new(),

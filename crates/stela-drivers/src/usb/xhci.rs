@@ -84,6 +84,7 @@ pub mod renesas;
 mod reset;
 mod retirement;
 mod ring;
+mod slot_resources;
 mod streams;
 mod teardown;
 mod transfer;
@@ -429,6 +430,7 @@ pub struct Controller {
     event_cycle: bool,
     slots: Vec<Option<Slot>>,
     slot_ownership: Vec<reset::Ownership>,
+    retry_resources: slot_resources::Cache,
     /// A raw slot number never regains authority after its first retirement.
     /// Only the retirement owner can set this monotonic fence.
     legacy_slot_fenced: Vec<bool>,
@@ -636,6 +638,7 @@ impl Controller {
             event_cycle: true,
             slot_ownership: vec![reset::Ownership::Vacant; slots.len()],
             legacy_slot_fenced: vec![false; slots.len()],
+            retry_resources: slot_resources::Cache::new(slots.len()),
             power: power::Ledger::new(slots.len()),
             slots,
             pending: Vec::new(),

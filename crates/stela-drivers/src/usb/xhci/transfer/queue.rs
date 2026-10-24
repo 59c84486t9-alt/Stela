@@ -23,6 +23,10 @@ pub(in crate::usb::xhci) struct Queue {
 }
 
 impl Queue {
+    pub(in crate::usb::xhci) fn idle(&self) -> bool {
+        self.active.is_empty() && self.readiness().is_ok() && !self.clear_tt
+    }
+
     pub(in crate::usb::xhci) fn readiness(&self) -> Result<(), BlockError> {
         if let Some(error) = &self.failure {
             return Err(error.clone());

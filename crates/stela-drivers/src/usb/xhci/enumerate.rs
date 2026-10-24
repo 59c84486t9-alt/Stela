@@ -77,19 +77,12 @@ impl Controller {
         }
         let context = self.context();
         let allocation = format!("slot {slot} allocate contexts and EP0 ring");
-        let output = during(
-            allocation.clone(),
-            self.dma_profile.allocate(dma, 32 * context, 64),
-        )?;
-        let mut input = during(
-            allocation.clone(),
-            self.dma_profile.allocate(dma, 33 * context, 64),
-        )?;
-        let control = during(
-            allocation.clone(),
-            self.dma_profile.allocate(dma, CONTROL_BYTES, CONTROL_BYTES),
-        )?;
-        let ring = during(allocation, Ring::with_profile(dma, self.dma_profile))?;
+        let slot_resources::Resources {
+            output,
+            mut input,
+            control,
+            ring,
+        } = during(allocation, self.address_resources(slot, dma))?;
         let max_packet: u32 = match attachment.speed {
             LOW_SPEED | FULL_SPEED => 8,
             HIGH_SPEED => 64,

@@ -1073,6 +1073,7 @@ pub(super) mod tests {
                 event_index: 0,
                 event_cycle: true,
                 legacy_slot_fenced: vec![false; slots.len()],
+                retry_resources: slot_resources::Cache::new(slots.len()),
                 slots,
                 slot_ownership: vec![reset::Ownership::Vacant, reset::Ownership::Enabled],
                 power: power::Ledger::new(2),

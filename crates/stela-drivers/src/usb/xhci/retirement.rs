@@ -10,6 +10,19 @@ use reset::Ownership;
 type Failure = (&'static str, BlockError);
 const ENDPOINT_DISABLED: u32 = 0;
 
+/// Minted only after the actual whole-slot retirement boundary. Its fields are
+/// private to this module, so a software status or slot number cannot return DMA.
+pub(super) struct Unpublished {
+    slot: u8,
+    state: Slot,
+}
+
+impl Unpublished {
+    pub(super) fn into_slot(self) -> (u8, Slot) {
+        (self.slot, self.state)
+    }
+}
+
 /// The mutable controller borrow is retained from the last acknowledged
 /// endpoint retirement through Disable Slot. No caller can publish another TD,
 /// run private recovery control, or substitute a different device generation
@@ -26,7 +39,7 @@ impl Controller {
     /// A failure retains the original slot, contexts, rings and physical-current
     /// grant. Only a never-published device can return to `Vacant`; published
     /// generations keep all allocations and permanently refuse old aliases.
-    /// This does not authorize hardware-slot or backing-allocation recycling.
+    /// Only unpublished EP0-only resources enter the private retry cache.
     pub(super) fn disable_slot(&mut self, slot: u8, ownership: Ownership) -> Result<(), Failure> {
         Quiesced::acquire(self, slot, ownership)?.disable()
     }
@@ -52,7 +65,17 @@ impl<'a> Quiesced<'a> {
         let state = controller.slots.get_mut(index).and_then(Option::as_mut);
         let unaddressed = if let Some(state) = state {
             if ownership == Ownership::Vacant
-                && (state.inventory.is_some() || state.consumer != identity::Consumer::Unclaimed)
+                && (state.inventory.is_some()
+                    || state.consumer != identity::Consumer::Unclaimed
+                    || state
+                        .endpoints
+                        .iter()
+                        .enumerate()
+                        .any(|(dci, endpoint)| dci != 1 && endpoint.is_some())
+                    || state.retired_rings.iter().any(Option::is_some)
+                    || state.endpoints[1]
+                        .as_ref()
+                        .is_none_or(|ep0| ep0.streams.is_some() || ep0.iso.is_some()))
             {
                 return Err((
                     "preflight unpublished Disable Slot",
@@ -127,6 +150,8 @@ impl<'a> Quiesced<'a> {
                 if let Some(endpoint) = endpoint {
                     let actual = state._output.read::<u32>(dci * context) & 7;
                     if endpoint.poisoned
+                        || ownership == Ownership::Vacant
+                            && (endpoint.in_flight != 0 || !endpoint.ring.normal.idle())
                         || !(actual == ENDPOINT_STOPPED
                             || unaddressed && dci == 1 && actual == ENDPOINT_DISABLED)
                     {
@@ -173,8 +198,12 @@ impl<'a> Quiesced<'a> {
             .retain(|event| !(event.kind() == TRANSFER_EVENT && event.slot() == slot));
         controller.slot_ownership[usize::from(slot)] = ownership;
         controller.dcbaa.write(usize::from(slot) * 8, 0u64);
-        if ownership == Ownership::Vacant {
-            controller.slots[usize::from(slot)] = None;
+        if ownership == Ownership::Vacant
+            && let Some(state) = controller.slots[usize::from(slot)].take()
+        {
+            controller
+                .retry_resources
+                .retain(Unpublished { slot, state });
         }
         Ok(())
     }
