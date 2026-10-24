@@ -56,6 +56,12 @@ const DISABLE_TIMEOUT: u32 = 1 << 31;
 const CAPACITY: usize = 128;
 const CONFIGURATION: u8 = 0x3f;
 const TRANSFER_CONFIGURATION: u8 = 0xb; // CONTROL, TIMEOUT and RX_CONFIG.
+/// RX_CONFIG, TIMING and FILTER: a power cycle or reset restores the handoff's
+/// zero tunables. `_initRegs` rewrites them only from tunables
+/// (0x2cc0718..0x2cc0780) and `executeIICCommand` read-modify-writes
+/// RX_CONFIG (0x2cc1080), so the driver relies on that reset image; it always
+/// writes CONTROL, TIMEOUT and MASK, which stay unqualified until written.
+const RESET_CONFIGURATION: u8 = 0x38;
 
 fn configuration_bit(offset: u64) -> u8 {
     match offset {
@@ -310,7 +316,9 @@ impl Lifecycle for I2c {
             self.status = 0;
             self.mask = 0;
             self.rx_config = 0;
-            self.configuration = 0;
+            self.timing = 0;
+            self.filter = 0;
+            self.configuration = RESET_CONFIGURATION;
         }
         self.lifecycle = proposed;
         self.interrupt(access);
@@ -572,7 +580,6 @@ mod tests {
                 TIMEOUT,
                 DISABLE_TIMEOUT,
             );
-            wr(&mut c, &mut Access::new(0, 0, &mut latch), RX_CONFIG, 0);
             wr(&mut c, &mut Access::new(0, 0, &mut latch), TX, START | 0x71);
             wr(
                 &mut c,
@@ -582,8 +589,9 @@ mod tests {
             );
             assert_eq!(rd(&mut c, &mut Access::new(0, 0, &mut latch), RX), 0x42);
             assert_eq!(rd(&mut c, &mut Access::new(0, 0, &mut latch), CONTROL), 4);
+            assert_eq!(rd(&mut c, &mut Access::new(0, 0, &mut latch), TIMING), 0);
             assert!(
-                c.read(TIMING, Width::Word, &mut Access::new(0, 0, &mut latch))
+                c.read(MASK, Width::Word, &mut Access::new(0, 0, &mut latch))
                     .is_err()
             );
         }
