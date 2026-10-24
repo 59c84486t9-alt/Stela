@@ -287,6 +287,25 @@ pub(super) fn parse(
                 });
                 continue;
             }
+            // ISB executes as NOP in the serialized engine (Arm `ISB`): what
+            // it synchronizes, a System register write, TLB or cache
+            // maintenance, exception entry and return, ends its block and
+            // completes in the engine, which recomputes what derives from
+            // it before the next fetch. The shared lane's PEs keep it.
+            if profile == BlockProfile::SystemModeV1
+                && matches!(
+                    crate::aarch64::system::synchronization::decode(word),
+                    Some(
+                        crate::aarch64::system::synchronization::Operation::InstructionSynchronization { .. }
+                    )
+                )
+            {
+                instructions.push(Instruction {
+                    pc,
+                    operation: Operation::Nop,
+                });
+                continue;
+            }
             if let Some(decoded) =
                 system::decode_system_mode_instruction(pc, word).map_err(|error| {
                     BlockAnalysisError {

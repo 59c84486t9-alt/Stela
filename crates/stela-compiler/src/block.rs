@@ -1596,12 +1596,14 @@ mod tests {
         const YIELD: u32 = 0xd503_203f;
         const NOP: u32 = 0xd503_201f;
         const BTI_C: u32 = 0xd503_245f;
+        // ISB retires as NOP: what it synchronizes exits on its own.
+        const ISB: u32 = 0xd503_3fdf;
         let profile = BlockProfile::SystemModeV1;
         assert_eq!(profile.abi(), SYSTEM_MODE_BLOCK_ABI);
         assert!(profile.supports_system() && profile.supports_system_registers());
         assert!(profile.supports_pointer_authentication());
         assert!(profile.checked_memory().is_none() && !profile.supports_clock());
-        let prefix = [ADD, LDR, STP, DMB, YIELD, NOP, BTI_C];
+        let prefix = [ADD, LDR, STP, DMB, YIELD, NOP, BTI_C, ISB];
         for (word, kind) in [
             (0xd518_1000_u32, ExitKind::System), // msr sctlr_el1, x0
             (0xd538_d080, ExitKind::System),     // mrs x0, tpidr_el1
@@ -1610,7 +1612,6 @@ mod tests {
             (0xd50b_7420, ExitKind::System),     // dc zva, x0
             (0xd50b_7520, ExitKind::System),     // ic ivau, x0
             (0xd503_3f9f, ExitKind::System),     // dsb sy
-            (0xd503_3fdf, ExitKind::System),     // isb
             (0xd503_207f, ExitKind::System),     // wfi
             (0xd400_0001, ExitKind::System),     // svc #0
             (0xd400_0002, ExitKind::System),     // hvc #0
@@ -1658,6 +1659,14 @@ mod tests {
             expected.push(0xc3);
             assert_eq!(&compiled.native.x86_64_code[at..], expected, "{word:#x}");
         }
+        // The shared lane's PEs still end a block at ISB.
+        let shared = BlockProfile::SystemModeSharedV1(CheckedMemoryProfile::SpAlignmentEnabled);
+        let source: Vec<u8> = [ADD, ISB, ADD]
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        let analysis = analyze_with_profile(&source, BASE, shared).unwrap();
+        assert_eq!(analysis.terminator_pc, Some(GuestAddress(BASE.0 + 4)));
         // Ordinary-only prefixes use the ordinary emitter and its regions,
         // which settle the frame before every access and exit, except under
         // SCTLR_ELx.A, whose checks their loads lack, with each access's
