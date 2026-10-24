@@ -11,6 +11,13 @@
 //! b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c,
 //! file0x45e0..0x4664 reads low9 seeds; 0x4e20..0x4e8c writes low9 and
 //! optional bits23:16/30. AP file0x2eff890 masks low7 after a full32 read.
+//!
+//! `_writePerfCtrl` and `_enablePerfCtrl` (file 0x2efe90c, 0x2efeb60) program
+//! each window's AMC performance counter configuration at +18000..+18800
+//! through `_mccWriteReg64` (0x2efe870), with addresses from the driver's
+//! `AMCPerfCounterConfig` table; the words hold their 64-bit writes from a
+//! zero handoff. The counters they select count memory events, which no
+//! producer supplies, so `_mccReadReg64` reads beyond that block refuse.
 use super::amcc::{BROADCAST, LOCK_REGISTERS, LockResource, MMIO_BYTES, Placement, STRIDE};
 use crate::platform::apple::pmp::native::cache::publisher;
 mod native;
@@ -22,7 +29,7 @@ use crate::{
         bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
     },
 };
-use alloc::sync::Arc;
+use alloc::{collections::BTreeMap, sync::Arc};
 pub use native::QuotaView;
 
 const PLANES: usize = 4;
@@ -34,6 +41,7 @@ const QUOTAS: u64 = 0xa000;
 const OCCUPANCY: u64 = 0xc000;
 const WAY_COUNTS: u32 = (0x1f << 10) | (0x1f << 5);
 const QUOTA_FIELDS: u32 = 0x1ff | (0xff << 16) | (1 << 30);
+const PERF_CONFIG: core::ops::Range<u64> = 0x18000..0x18800;
 
 /// Declared original driver configuration, not a readiness or mount token.
 /// The caller must coordinate this selection with the actual live original
@@ -98,6 +106,7 @@ pub struct EmptyResource {
     progress: Progress,
     quota_identity: publisher::Identity,
     quota_claimed: bool,
+    perf_config: BTreeMap<u64, u64>,
 }
 impl EmptyResource {
     /// Construct before admitting cache clients, with an actually selected
@@ -128,6 +137,7 @@ impl EmptyResource {
             progress: Progress::default(),
             quota_identity: publisher::Identity::new(),
             quota_claimed: false,
+            perf_config: BTreeMap::new(),
         })
     }
     pub fn source(&self) -> &MemoryController {
@@ -298,6 +308,12 @@ fn table(offset: u64, base: u64, count: u64) -> Option<usize> {
     let within = offset.checked_sub(base)?;
     (within < count * 4 && within.is_multiple_of(4)).then_some((within / 4) as usize)
 }
+fn perf_config(offset: u64, width: Width) -> bool {
+    width == Width::Double
+        && offset.is_multiple_of(8)
+        && offset < MMIO_BYTES
+        && PERF_CONFIG.contains(&(offset % STRIDE))
+}
 fn lock_word(offset: u64) -> bool {
     plane(offset).is_some_and(|(_, register)| LOCK_REGISTERS.contains(&register))
 }
@@ -323,6 +339,10 @@ impl MmioDevice for EmptyResource {
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
         let fail = |reason| refuse("t8112-empty-cache", offset, width, Direction::Read, reason);
+        if perf_config(offset, width) {
+            self.locks.accessible().map_err(fail)?;
+            return Ok(self.perf_config.get(&offset).copied().unwrap_or(0));
+        }
         self.checked(offset, width).map_err(fail)?;
         if lock_word(offset) {
             return self.locks.read(offset, width, access);
@@ -337,6 +357,11 @@ impl MmioDevice for EmptyResource {
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
         let fail = |reason| refuse("t8112-empty-cache", offset, width, Direction::Write, reason);
+        if perf_config(offset, width) {
+            self.locks.accessible().map_err(fail)?;
+            self.perf_config.insert(offset, value);
+            return Ok(());
+        }
         self.checked(offset, width).map_err(fail)?;
         if value > u64::from(u32::MAX) {
             return Err(fail(
@@ -385,6 +410,26 @@ mod tests {
         resource
             .write(offset, Width::Word, value, &mut access(&mut latch))
             .unwrap();
+    }
+    #[test]
+    fn perf_counter_configuration_holds_64_bit_words_and_counters_refuse() {
+        let mut cache = resource(SoftwareImage::zeroed_control_image());
+        let mut latch = InterruptLatch::new();
+        let mut a = access(&mut latch);
+        let word = 5 * STRIDE + 0x18288;
+        assert_eq!(cache.read(word, Width::Double, &mut a), Ok(0));
+        cache
+            .write(word, Width::Double, 0x1100_0000_0000_0021, &mut a)
+            .unwrap();
+        assert_eq!(
+            cache.read(word, Width::Double, &mut a),
+            Ok(0x1100_0000_0000_0021)
+        );
+        assert_eq!(cache.read(0x18288, Width::Double, &mut a), Ok(0));
+        for counter in [0x19000, 0x25000] {
+            assert!(cache.read(counter, Width::Double, &mut a).is_err());
+        }
+        assert!(cache.read(0x18004, Width::Double, &mut a).is_err());
     }
     #[test]
     fn empty_composite_consumes_reached_lock_state_and_installs_one_source_union() {
