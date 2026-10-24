@@ -12,6 +12,22 @@
 #include <string.h>
 #include <time.h>
 
+// Every fixture initializes its inputs on entry; the warm pass runs the same
+// complete work once, suppressing only reports. Native and guest use this
+// identical wrapper. The second pass resets those inputs and is reported.
+#ifdef STELA_BENCH_WARMUP
+static __attribute__((noinline)) int stela_bench_run(int argc, char **argv);
+static volatile int stela_bench_warming = 1;
+static volatile uint64_t stela_bench_warmup_digest;
+int main(int argc, char **argv) {
+  int status = stela_bench_run(argc, argv);
+  if (status) return status;
+  stela_bench_warming = 0;
+  return stela_bench_run(argc, argv);
+}
+#define main stela_bench_run
+#endif
+
 static double bench_now(void) {
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
@@ -26,6 +42,12 @@ static uint64_t bench_scaled(int argc, char **argv, uint64_t work) {
 
 static void bench_report(const char *kernel, double seconds, uint64_t checksum,
                          const char *note) {
+#ifdef STELA_BENCH_WARMUP
+  if (stela_bench_warming) {
+    stela_bench_warmup_digest ^= checksum; // Consume every warm result.
+    return;
+  }
+#endif
   printf("stela-bench %s %.6f %016llx%s%s\n", kernel, seconds,
          (unsigned long long)checksum, note ? " " : "", note ? note : "");
   fflush(stdout);

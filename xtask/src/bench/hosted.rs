@@ -13,7 +13,9 @@
 //! and their range as the noise.
 use crate::tools::{root, wait};
 use anyhow::{Context, Result, bail, ensure};
-use clap::Args;
+use clap::{Args, ValueEnum};
+
+mod measurement;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -86,8 +88,27 @@ const PROGRAMS: [Program; 8] = [
     },
 ];
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum NativeTune {
+    Generic,
+    Host,
+}
+
 #[derive(Args)]
 pub struct HostedBench {
+    /// Fresh owned directory for binaries and immutable per-trial evidence.
+    #[arg(long)]
+    work_dir: Option<PathBuf>,
+    /// Native denominator: reproducible generic or this physical host's ISA.
+    #[arg(long, value_enum, default_value = "generic")]
+    native_tune: NativeTune,
+    /// Run the same program once untimed before resetting inputs and timing.
+    #[arg(long)]
+    warmup: bool,
+    /// Explicit supported guest model; never inherit mutable process settings.
+    #[arg(long, default_value = "Mac14,3")]
+    model: String,
+
     /// Rounds; each runs every variant of every program once.
     #[arg(long, default_value_t = 5)]
     rounds: usize,
@@ -137,7 +158,22 @@ struct Run {
 
 impl HostedBench {
     pub fn run(self) -> Result<()> {
-        ensure!(self.rounds > 0, "at least one round");
+        ensure!(
+            self.rounds > 0 && self.scale > 0,
+            "positive rounds and work scale required"
+        );
+        measurement::unique_names(
+            &self.only,
+            &PROGRAMS.iter().map(|p| p.name).collect::<Vec<_>>(),
+        )?;
+        measurement::unique_names(&self.arch, &["arm64", "arm64e"])?;
+        ensure!(
+            !self.arch.is_empty(),
+            "at least one guest architecture required"
+        );
+        if let Some(path) = &self.report {
+            ensure!(!path.exists(), "report already exists: {}", path.display());
+        }
         let programs: Vec<&Program> = PROGRAMS
             .iter()
             .filter(|program| self.only.is_empty() || self.only.iter().any(|n| n == program.name))
@@ -166,8 +202,33 @@ impl HostedBench {
                     .with_context(|| format!("guest root {}", path.display()))
             })
             .collect::<Result<_>>()?;
-        let work = root().join(WORK);
-        std::fs::create_dir_all(&work)?;
+        let work = self.work_dir.clone().unwrap_or_else(|| {
+            root().join(WORK).join(format!(
+                "run-{}-{}",
+                measurement::unix_nanos(),
+                std::process::id()
+            ))
+        });
+        ensure!(
+            !work.exists(),
+            "benchmark work directory must be fresh: {}",
+            work.display()
+        );
+        if let Some(parent) = work.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::create_dir(&work)?;
+        eprintln!("immutable benchmark evidence: {}", work.display());
+        measurement::write_new(
+            &work.join("configuration.json"),
+            &json!({
+                "created_unix_nanos": measurement::unix_nanos().to_string(),
+                "model": self.model, "native_tune": format!("{:?}", self.native_tune),
+                "warmup": self.warmup, "cache": "off", "ahead": "off",
+                "rounds": self.rounds, "scale": self.scale, "roots": roots,
+                "scope": "physical hosted process; not NativeSystemSharedV1 boot",
+            }),
+        )?;
         let compiler = compiler_version()?;
         let mut variants = vec![Variant {
             label: "native".into(),
@@ -194,7 +255,13 @@ impl HostedBench {
         }
         let mut builds = vec![];
         for program in &programs {
-            builds.push(build_program(&work, program, &variants)?);
+            builds.push(build_program(
+                &work,
+                program,
+                &variants,
+                self.native_tune,
+                self.warmup,
+            )?);
         }
         let started = Instant::now();
         // (kernel, variant) -> per-round seconds; (program, variant) -> wall.
@@ -208,8 +275,12 @@ impl HostedBench {
                 order.rotate_left(round % variants.len());
                 for index in order {
                     let variant = &variants[index];
+                    let trial = work
+                        .join("trials")
+                        .join(format!("{round:03}-{}-{}", program.name, variant.label));
+                    std::fs::create_dir_all(&trial)?;
                     let run = self
-                        .execute(&work, variant, &binaries[index], &roots)
+                        .execute(&trial, variant, &binaries[index], &roots, program.kernels)
                         .with_context(|| format!("{} {}", program.name, variant.label))?;
                     for &kernel in program.kernels {
                         let (_, time, checksum, note) = run
@@ -263,6 +334,15 @@ impl HostedBench {
             let report = json!({
                 "rounds": self.rounds,
                 "scale": self.scale,
+                "work_dir": work,
+                "model": self.model,
+                "native_tune": format!("{:?}", self.native_tune),
+                "warmup": self.warmup,
+                "cache_policy": "persistent off; ahead off; process-owned JIT retained",
+                "process_wall_polling_ms": 20,
+                "process_wall_limit": "short runs have polling quantization; use kernel self-times for primary score",
+                "timing_scope": if self.warmup { "same-process second pass; full program resets inputs; process wall includes warmup" } else { "fresh-process first-use; kernel times include reached lazy JIT" },
+                "native_efficiency": measurement::score(&programs, &variants, &seconds, &walls, self.rounds),
                 "compiler": compiler,
                 "cflags": CFLAGS,
                 "host": host_identity(),
@@ -280,7 +360,7 @@ impl HostedBench {
                 "raw": raw,
                 "process_wall": wall,
             });
-            std::fs::write(path, serde_json::to_vec_pretty(&report)?)?;
+            measurement::write_new(path, &report)?;
         }
         Ok(())
     }
@@ -292,6 +372,7 @@ impl HostedBench {
         variant: &Variant,
         binary: &Path,
         roots: &[PathBuf],
+        expected: &[&str],
     ) -> Result<Run> {
         let mut command = match &variant.stela {
             None => Command::new(binary),
@@ -305,7 +386,11 @@ impl HostedBench {
                 command
             }
         };
-        command.arg(self.scale.to_string());
+        command
+            .arg(self.scale.to_string())
+            .env("STELA_TRANSLATION_CACHE", "off")
+            .env("STELA_AHEAD_TRANSLATION", "off")
+            .env("STELA_MODEL", &self.model);
         // Files, not pipes: a chatty failure cannot fill a pipe and stall.
         let stdout = work.join("run.stdout");
         let stderr = work.join("run.stderr");
@@ -313,6 +398,14 @@ impl HostedBench {
             .stdin(Stdio::null())
             .stdout(std::fs::File::create(&stdout)?)
             .stderr(std::fs::File::create(&stderr)?);
+        measurement::write_new(
+            &work.join("command.json"),
+            &json!({
+                "command": format!("{command:?}"), "binary": binary,
+                "binary_sha256": stela_runtime::sha256(&std::fs::read(binary)?),
+                "stela_sha256": variant.stela.as_ref().map(std::fs::read).transpose()?.map(|bytes| stela_runtime::sha256(&bytes)),
+            }),
+        )?;
         let start = Instant::now();
         let mut child = command
             .spawn()
@@ -320,6 +413,16 @@ impl HostedBench {
         let status = wait(&mut child, Duration::from_secs(self.timeout))?;
         let wall = start.elapsed().as_secs_f64();
         let output = std::fs::read_to_string(&stdout)?;
+        measurement::write_new(
+            &work.join("process.json"),
+            &json!({
+                "status": status.as_ref().map(ToString::to_string),
+                "success": status.as_ref().is_some_and(std::process::ExitStatus::success),
+                "timeout": status.is_none(), "wall_seconds": wall,
+                "stdout_sha256": stela_runtime::sha256(output.as_bytes()),
+                "stderr_sha256": stela_runtime::sha256(&std::fs::read(&stderr)?),
+            }),
+        )?;
         let Some(status) = status else {
             bail!("stopped after {} s", self.timeout);
         };
@@ -331,18 +434,16 @@ impl HostedBench {
                 tail.into_iter().rev().collect::<Vec<_>>().join("\n")
             );
         }
-        let mut kernels = vec![];
-        for line in output.lines() {
-            let mut fields = line.split_whitespace();
-            if fields.next() != Some("stela-bench") {
-                continue;
-            }
-            let kernel = fields.next().context("kernel name")?.to_owned();
-            let time: f64 = fields.next().context("seconds")?.parse()?;
-            let checksum = fields.next().context("checksum")?.to_owned();
-            let note = fields.collect::<Vec<_>>().join(" ");
-            kernels.push((kernel, time, checksum, note));
-        }
+        let kernels = measurement::parse(&output, expected)?;
+        let kernel_seconds = kernels.iter().map(|kernel| kernel.1).sum::<f64>();
+        ensure!(
+            kernel_seconds.is_finite() && kernel_seconds <= wall + 0.05,
+            "reported kernel times exceed real process wall time"
+        );
+        measurement::write_new(
+            &work.join("sample.json"),
+            &json!({"kernels": kernels, "wall_seconds": wall}),
+        )?;
         Ok(Run { kernels, wall })
     }
 }
@@ -401,7 +502,13 @@ fn host_identity() -> Value {
 
 /// Compile `program` once per architecture its variants need; the binary of
 /// each variant, in their order.
-fn build_program(work: &Path, program: &Program, variants: &[Variant]) -> Result<Vec<PathBuf>> {
+fn build_program(
+    work: &Path,
+    program: &Program,
+    variants: &[Variant],
+    tune: NativeTune,
+    warmup: bool,
+) -> Result<Vec<PathBuf>> {
     let directory = work.join(program.name);
     std::fs::create_dir_all(&directory)?;
     std::fs::write(directory.join(HEADER.0), HEADER.1)?;
@@ -412,15 +519,32 @@ fn build_program(work: &Path, program: &Program, variants: &[Variant]) -> Result
     for variant in variants {
         let binary = directory.join(format!("{}-{}", program.name, variant.arch));
         if built.insert(variant.arch, ()).is_none() {
-            let status = Command::new("xcrun")
+            let mut command = Command::new("xcrun");
+            command
                 .arg("clang")
                 .args(CFLAGS)
-                .args(["-arch", variant.arch])
+                .args(["-arch", variant.arch]);
+            if variant.arch == "x86_64" && matches!(tune, NativeTune::Host) {
+                command.arg("-march=native");
+            }
+            if warmup {
+                command.arg("-DSTELA_BENCH_WARMUP=1");
+            }
+            command
                 .arg(&source)
                 .args(program.libraries)
                 .arg("-o")
-                .arg(&binary)
-                .status()?;
+                .arg(&binary);
+            let status = command.status()?;
+            measurement::write_new(
+                &directory.join(format!("build-{}.json", variant.arch)),
+                &json!({
+                    "command": format!("{command:?}"), "status": status.to_string(),
+                    "source_sha256": stela_runtime::sha256(program.source.as_bytes()),
+                    "header_sha256": stela_runtime::sha256(HEADER.1.as_bytes()),
+                    "binary_sha256": if status.success() { Some(stela_runtime::sha256(&std::fs::read(&binary)?)) } else { None },
+                }),
+            )?;
             ensure!(
                 status.success(),
                 "xcrun clang failed on {} for {}",
