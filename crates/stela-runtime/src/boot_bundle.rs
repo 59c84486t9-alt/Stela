@@ -155,6 +155,9 @@ pub struct Source {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BootCpuSelection {
+    /// The original first CPU, the automatic policy.
+    First,
+    /// The first original P-core, the automatic policy of earlier bundles.
     FirstPerformance,
     Explicit,
 }
@@ -798,6 +801,15 @@ mod tests {
         assert_eq!(selected.cluster_type, b'P');
         assert_eq!(selected.original_index, 4);
         assert_eq!(selected.selection, BootCpuSelection::FirstPerformance);
+        let first = with_cpu.replace("first-performance", "first");
+        assert_eq!(
+            Manifest::parse(first.as_bytes())
+                .unwrap()
+                .boot_cpu
+                .unwrap()
+                .selection,
+            BootCpuSelection::First
+        );
         let explicit = with_cpu.replace("first-performance", "explicit");
         assert_eq!(
             Manifest::parse(explicit.as_bytes())

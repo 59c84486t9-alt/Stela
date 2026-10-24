@@ -406,7 +406,9 @@ pub struct PlaceholderDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BootCpuSelection {
-    FirstPerformance,
+    /// The original first `/cpus` child, the PE whose position the kernel's
+    /// per-CPU tables assume for the boot processor.
+    First,
     Explicit,
 }
 
@@ -1746,10 +1748,9 @@ fn select_boot_cpu(
             )
         }
         None => (
-            cpus.iter()
-                .find(|cpu| cpu.cluster_type == b'P')
-                .context("DeviceTree has no performance CPU for automatic boot selection")?,
-            BootCpuSelection::FirstPerformance,
+            cpus.first()
+                .context("DeviceTree has no CPU for automatic boot selection")?,
+            BootCpuSelection::First,
         ),
     };
     let original_index = source
@@ -1770,8 +1771,10 @@ fn select_boot_cpu(
 }
 
 /// Preflight every state before publishing exactly one running node. The
-/// original iBoot publishes running at 26A434 J314s 0x3abd4..0x3abf8; choosing
-/// the first P core is Stela's explicit policy, not a claim about iBoot's BSP.
+/// original iBoot publishes running at 26A434 J314s 0x3abd4..0x3abf8. The
+/// first CPU is required by the kernel's own CPU numbering: 26A434 T8112 PMGR
+/// indexes its per-core register table by the topology's (cluster, core) and
+/// panics for an E-core once a P-core boots first (docs/research/cpu-topology.md).
 fn mark_boot_cpu(tree: &mut DeviceTree, selected: &BootCpu) -> Result<()> {
     let cpus = cpu_identities(tree)?;
     ensure!(
@@ -1831,12 +1834,10 @@ fn verify_boot_cpu(tree: &DeviceTree, original: &DeviceTree, selected: &BootCpu)
         running.len() == 1 && running[0].path == selected.path,
         "prepared DeviceTree must have exactly the selected boot CPU running"
     );
-    if selected.selection == BootCpuSelection::FirstPerformance {
+    if selected.selection == BootCpuSelection::First {
         ensure!(
-            cpus.iter()
-                .find(|cpu| cpu.cluster_type == b'P')
-                .is_some_and(|cpu| cpu.path == selected.path),
-            "automatic boot CPU is not the first original performance CPU"
+            cpus.first().is_some_and(|cpu| cpu.path == selected.path),
+            "automatic boot CPU is not the first original CPU"
         );
     }
     Ok(())
@@ -2639,30 +2640,30 @@ mod tests {
     -> Result<()> {
         // Names and numeric affinities deliberately disagree with DT order.
         let original = cpu_tree(&[
-            ("cpu9", 0, b'E'),
-            ("cpu88", 0x902, b'P'),
+            ("cpu9", 0x902, b'P'),
+            ("cpu88", 0, b'E'),
             ("cpu1", 0x100, b'P'),
         ]);
         let mut tree = original.clone();
-        tree.set_property("/cpus/cpu9", "state", CPU_RUNNING.to_vec())?;
+        tree.set_property("/cpus/cpu88", "state", CPU_RUNNING.to_vec())?;
         tree.set_property("/cpus/cpu1", "state", CPU_RUNNING.to_vec())?;
         let selected = select_boot_cpu(&tree, &original, None)?;
         assert_eq!(
             selected,
             BootCpu {
-                path: "/cpus/cpu88".into(),
+                path: "/cpus/cpu9".into(),
                 affinity: 0x902,
                 cluster_type: b'P',
-                original_index: 1,
-                selection: BootCpuSelection::FirstPerformance,
+                original_index: 0,
+                selection: BootCpuSelection::First,
             }
         );
         mark_boot_cpu(&mut tree, &selected)?;
         verify_boot_cpu(&tree, &original, &selected)?;
         assert_eq!(cpu_identities(&tree)?, cpu_identities(&original)?);
         for (name, state) in [
-            ("cpu9", CPU_WAITING),
-            ("cpu88", CPU_RUNNING),
+            ("cpu9", CPU_RUNNING),
+            ("cpu88", CPU_WAITING),
             ("cpu1", CPU_WAITING),
         ] {
             assert_eq!(
@@ -2675,8 +2676,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&selected)?,
             serde_json::json!({
-                "path": "/cpus/cpu88", "affinity": 0x902, "cluster_type": b'P',
-                "original_index": 1, "selection": "first-performance",
+                "path": "/cpus/cpu9", "affinity": 0x902, "cluster_type": b'P',
+                "original_index": 0, "selection": "first",
             })
         );
         Ok(())
@@ -2709,8 +2710,13 @@ mod tests {
             );
         }
         let e_only = cpu_tree(&[("cpu0", 0, b'E')]);
-        assert!(select_boot_cpu(&e_only, &e_only, None).is_err());
+        assert_eq!(
+            select_boot_cpu(&e_only, &e_only, None)?.selection,
+            BootCpuSelection::First
+        );
         assert!(select_boot_cpu(&e_only, &e_only, Some("cpu0")).is_ok());
+        let empty = cpu_tree(&[]);
+        assert!(select_boot_cpu(&empty, &empty, None).is_err());
         Ok(())
     }
 
@@ -2811,11 +2817,11 @@ mod tests {
         let mut prepared = original.clone();
         mark_boot_cpu(&mut prepared, &selected)?;
         for (path, property, value) in [
-            ("/cpus/cpu0", "state", CPU_RUNNING.to_vec()),
-            ("/cpus/cpu4", "state", CPU_WAITING.to_vec()),
-            ("/cpus/cpu4", "reg", 0x999u32.to_le_bytes().to_vec()),
-            ("/cpus/cpu4", "name", b"renamed\0".to_vec()),
-            ("/cpus/cpu4", "cluster-type", b"E\0".to_vec()),
+            ("/cpus/cpu4", "state", CPU_RUNNING.to_vec()),
+            ("/cpus/cpu0", "state", CPU_WAITING.to_vec()),
+            ("/cpus/cpu0", "reg", 0x999u32.to_le_bytes().to_vec()),
+            ("/cpus/cpu0", "name", b"renamed\0".to_vec()),
+            ("/cpus/cpu0", "cluster-type", b"P\0".to_vec()),
         ] {
             let mut tree = prepared.clone();
             apply_overlay(
@@ -2839,8 +2845,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires pinned original 26A434 ADTs through STELA_TEST_CPU_DT_DIR"]
-    fn boot_cpu_first_performance_selection_preserves_every_original_board_identity() -> Result<()>
-    {
+    fn boot_cpu_first_selection_preserves_every_original_board_identity() -> Result<()> {
         let directory = std::env::var("STELA_TEST_CPU_DT_DIR")?;
         let facts: serde_json::Value =
             serde_json::from_str(include_str!("../../../isa/apple-soc-facts.json"))?;
@@ -2855,15 +2860,12 @@ mod tests {
             let original = DeviceTree::parse(&input)?;
             let mut tree = original.clone();
             let cpus = original.node("/cpus").unwrap();
-            let (index, cpu) = cpus
-                .children
-                .iter()
-                .enumerate()
-                .find(|(_, cpu)| {
-                    cpu.property("cluster-type")
-                        .is_some_and(|p| p.value == b"P\0")
-                })
-                .with_context(|| format!("{name} has no original performance CPU"))?;
+            let (index, cpu) = (
+                0,
+                cpus.children
+                    .first()
+                    .with_context(|| format!("{name} has no CPU"))?,
+            );
             let selected = select_boot_cpu(&tree, &original, None)?;
             assert_eq!(selected.original_index, index, "{name}");
             assert_eq!(
@@ -2899,7 +2901,7 @@ mod tests {
             );
         }
         println!(
-            "qualified first-performance boot selection on {} pinned original board trees",
+            "qualified first-CPU boot selection on {} pinned original board trees",
             boards.len()
         );
         Ok(())

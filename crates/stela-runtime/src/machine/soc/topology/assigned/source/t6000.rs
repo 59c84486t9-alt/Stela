@@ -9,8 +9,8 @@ const EVIDENCE: &str = "26A434 mac13j mode1 source-prefix membership; complex fi
 
 impl<'a> BspSource<'a> {
     /// Selects an original-order prefix of actual source PEs. Every original
-    /// complex must remain represented and the original first P PE must be
-    /// the sole prepared running CPU. Later records in the last complex are
+    /// complex must remain represented and the selected boot PE must be the
+    /// sole prepared running CPU. Later records in the last complex are
     /// retained in the full graph, but acquire no assigned owner here.
     pub fn t6000_assigned(
         original: &'a [u8],
@@ -68,10 +68,10 @@ impl<'a> BspSource<'a> {
         )?;
         let boot = processors
             .iter()
-            .position(|cpu| cpu.cluster_type == b'P')
-            .ok_or("assigned T6000 source lacks a first P PE")?;
-        if count == 0 || count > all.len() || boot >= count || processors[boot].reg != boot_reg {
-            return Err("assigned T6000 prefix must retain the original first P BSP".into());
+            .position(|cpu| cpu.reg == boot_reg)
+            .ok_or("assigned T6000 source lacks the selected boot PE")?;
+        if count == 0 || count > all.len() || boot >= count {
+            return Err("assigned T6000 prefix must retain the selected boot PE".into());
         }
         let full_clusters = processors
             .iter()
@@ -97,7 +97,7 @@ impl<'a> BspSource<'a> {
                     .contains(&cpu.property("state"))
             })
         {
-            return Err("assigned T6000 first P is not the sole prepared running CPU".into());
+            return Err("assigned T6000 boot PE is not the sole prepared running CPU".into());
         }
         let io = root.child("arm-io").ok_or("assigned source lacks arm-io")?;
         let aic = io.child("aic").ok_or("assigned source lacks AIC")?;

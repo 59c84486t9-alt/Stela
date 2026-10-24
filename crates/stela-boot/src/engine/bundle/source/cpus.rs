@@ -130,10 +130,17 @@ impl Prepared {
         if cpus.iter().filter(|cpu| cpu.running).count() != 1 || !cpus[processor].running {
             return Err("prepared topology must have exactly one running selected CPU".into());
         }
-        if selected.selection == BootCpuSelection::FirstPerformance
-            && cpus.iter().position(|cpu| cpu.cluster_type == b'P') != Some(processor)
-        {
-            return Err("automatic boot CPU is not the first retained original P-core".into());
+        let automatic = match selected.selection {
+            BootCpuSelection::First => Some(0),
+            BootCpuSelection::FirstPerformance => {
+                cpus.iter().position(|cpu| cpu.cluster_type == b'P')
+            }
+            BootCpuSelection::Explicit => Some(processor),
+        };
+        if automatic != Some(processor) {
+            return Err(
+                "automatic boot CPU is not the first retained original CPU of its policy".into(),
+            );
         }
         Ok(Self { cpus, processor })
     }
@@ -227,6 +234,25 @@ mod tests {
                 .processor(),
             1
         );
+    }
+
+    #[test]
+    fn first_cpu_policy_selects_the_first_retained_original_cpu() {
+        let original = tree(None);
+        let first = BootCpu {
+            path: "/cpus/cpu9".into(),
+            affinity: 1,
+            cluster_type: b'E',
+            original_index: 0,
+            selection: BootCpuSelection::First,
+        };
+        let contract = Prepared::verify(&original, &tree(Some("cpu9")), &first).unwrap();
+        assert_eq!(contract.processor(), 0);
+        let later = BootCpu {
+            selection: BootCpuSelection::First,
+            ..selected()
+        };
+        assert!(Prepared::verify(&original, &tree(Some("cpu4")), &later).is_err());
     }
 
     #[test]

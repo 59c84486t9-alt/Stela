@@ -310,7 +310,7 @@ impl<'a> Source<'a> {
         })
     }
     /// Normal T6000 mode1 preserves original cluster-discovery order. The
-    /// selected first P-core remains the BSP independently of its logical PE.
+    /// selected boot PE remains the BSP independently of its logical PE.
     pub(crate) fn t6000_assigned(
         original: &'a [u8],
         live: &LiveTree,
