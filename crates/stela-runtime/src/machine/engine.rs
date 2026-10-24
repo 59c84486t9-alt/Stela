@@ -1468,7 +1468,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(profile) = &mut self.floating_profile
             && profile.tick()
         {
-            return profile.complete(&mut self.cpu.state, word, operation);
+            return profile.complete_at(&mut self.cpu, word, operation);
         }
         #[cfg(not(all(feature = "std", feature = "native-profile")))]
         let _ = word;
