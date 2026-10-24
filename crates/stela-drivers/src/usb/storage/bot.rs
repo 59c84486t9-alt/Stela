@@ -1085,9 +1085,27 @@ mod tests {
         hardware: Rc<RefCell<crate::usb::xhci::model::ResetHardware>>,
         dma: RegionAllocator,
     }
-    fn native_fixture(memory: &mut [u64], speed: u8, context: usize) -> NativeFixture {
+    fn native_fixture(
+        memory: &mut [u64],
+        speed: u8,
+        context: usize,
+        write_cache: bool,
+    ) -> NativeFixture {
         let (controller, device, hardware, mut dma) =
-            crate::usb::xhci::model::reset_bot_fixture(memory, speed, context, 3);
+            crate::usb::xhci::model::reset_bot_fixture(memory, speed, context, 3, write_cache);
+        let identity = &device.descriptor[8..12];
+        assert_eq!(
+            identity,
+            if write_cache {
+                &[0xc2, 0x0b, 0x00, 0x23]
+            } else {
+                &[0xf4, 0x46, 0x03, 0x00]
+            },
+        );
+        assert_eq!(
+            quirks::Flags::from_device(&device).unwrap().write_cache(),
+            write_cache
+        );
         let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
         let endpoints = [true, false].map(|input| {
             *interface
@@ -1114,6 +1132,10 @@ mod tests {
         .unwrap();
         assert!(failures.is_empty());
         assert_eq!(disks.len(), 1);
+        let super::super::UsbTransport::Bot(disk) = &disks[0].disk else {
+            panic!("native BOT fixture published another transport")
+        };
+        assert_eq!(disk.write_cache, write_cache);
         NativeFixture {
             storage,
             disk: disks.remove(0),
@@ -1125,107 +1147,126 @@ mod tests {
     fn native_root_bot_reuses_original_transport_buffers_across_96_resets_and_real_io() {
         use crate::block::BlockDevice;
         use crate::usb::xhci::{HIGH_SPEED, SUPER_SPEED};
-        for speed in [HIGH_SPEED, SUPER_SPEED] {
-            for context in [32, 64] {
-                let mut memory = vec![0u64; 512 * 1024];
-                let NativeFixture {
-                    mut storage,
-                    mut disk,
-                    hardware,
-                    mut dma,
-                } = native_fixture(&mut memory, speed, context);
-                let super::super::media::TransportOwner::Bot(owner) = &storage.owner else {
-                    panic!("native BOT fixture published another transport")
-                };
-                let original = {
-                    let owner = owner.borrow();
-                    (
-                        owner.transport.buffer.physical(),
-                        owner.transport.buffer.len(),
-                        owner.transport.wrapper.physical(),
-                        owner.transport.wrapper.len(),
-                    )
-                };
-                assert_eq!(original.1, MAX_TD);
-                assert_eq!(original.3, 64);
-                let remaining = dma.remaining();
-                let mut retired = Vec::new();
-                for epoch in 1..=96 {
-                    let old_owner = match &storage.owner {
-                        super::super::media::TransportOwner::Bot(owner) => owner.clone(),
-                        _ => panic!("native BOT recovery changed transport"),
-                    };
-                    let mut failures = Vec::new();
-                    let mut fresh = storage.reset_and_rebind(&mut dma, &mut failures).unwrap();
-                    assert!(failures.is_empty());
-                    assert_eq!(fresh.len(), 1);
-                    assert_eq!(dma.remaining(), remaining, "reset allocated new DMA");
-                    assert_eq!(hardware.borrow().resets, epoch);
-                    {
-                        let old = old_owner.borrow();
-                        assert!(old.transport.poisoned());
-                        assert!(!old.transport.buffer.present());
-                        assert!(!old.transport.wrapper.present());
-                    }
+        // The unquirked profile intentionally has no flush command. The pinned
+        // WRITE_CACHE identity requires a real acknowledged 0x35 every epoch.
+        for write_cache in [false, true] {
+            for speed in [HIGH_SPEED, SUPER_SPEED] {
+                for context in [32, 64] {
+                    let mut memory = vec![0u64; 512 * 1024];
+                    let NativeFixture {
+                        mut storage,
+                        mut disk,
+                        hardware,
+                        mut dma,
+                    } = native_fixture(&mut memory, speed, context, write_cache);
                     let super::super::media::TransportOwner::Bot(owner) = &storage.owner else {
-                        panic!("native BOT recovery changed transport")
+                        panic!("native BOT fixture published another transport")
                     };
-                    {
-                        let owner = owner.borrow();
-                        assert_eq!(
-                            (
-                                owner.transport.buffer.physical(),
-                                owner.transport.buffer.len(),
-                                owner.transport.wrapper.physical(),
-                                owner.transport.wrapper.len(),
-                            ),
-                            original,
-                        );
-                    }
-                    let current_bytes = {
+                    let original = {
                         let owner = owner.borrow();
                         (
-                            owner.transport.buffer.bytes().to_vec(),
-                            owner.transport.wrapper.bytes().to_vec(),
+                            owner.transport.buffer.physical(),
+                            owner.transport.buffer.len(),
+                            owner.transport.wrapper.physical(),
+                            owner.transport.wrapper.len(),
                         )
                     };
-                    retired.push((disk, old_owner));
-                    let accesses = hardware.borrow().accesses;
-                    for (old_disk, old_owner) in &mut retired {
-                        let mut poison = [0xb7; 512];
-                        assert!(old_disk.read(7, &mut poison).is_err());
-                        assert_eq!(poison, [0xb7; 512]);
-                        assert!(old_disk.write(7, &[0xee; 512]).is_err());
-                        assert!(old_disk.flush().is_err());
-                        let mut old = old_owner.borrow_mut();
-                        assert!(old.transport.io.ready().is_err());
-                        assert!(
-                            old.transport
-                                .command(0, &scsi::inquiry(), Data::In(36))
-                                .is_err()
+                    assert_eq!(original.1, MAX_TD);
+                    assert_eq!(original.3, 64);
+                    let remaining = dma.remaining();
+                    let mut retired = Vec::new();
+                    for epoch in 1..=96 {
+                        let old_owner = match &storage.owner {
+                            super::super::media::TransportOwner::Bot(owner) => owner.clone(),
+                            _ => panic!("native BOT recovery changed transport"),
+                        };
+                        let mut failures = Vec::new();
+                        let mut fresh = storage.reset_and_rebind(&mut dma, &mut failures).unwrap();
+                        assert!(failures.is_empty());
+                        assert_eq!(fresh.len(), 1);
+                        assert_eq!(dma.remaining(), remaining, "reset allocated new DMA");
+                        assert_eq!(hardware.borrow().resets, epoch);
+                        {
+                            let old = old_owner.borrow();
+                            assert!(old.transport.poisoned());
+                            assert!(!old.transport.buffer.present());
+                            assert!(!old.transport.wrapper.present());
+                        }
+                        let super::super::media::TransportOwner::Bot(owner) = &storage.owner else {
+                            panic!("native BOT recovery changed transport")
+                        };
+                        {
+                            let owner = owner.borrow();
+                            assert_eq!(
+                                (
+                                    owner.transport.buffer.physical(),
+                                    owner.transport.buffer.len(),
+                                    owner.transport.wrapper.physical(),
+                                    owner.transport.wrapper.len(),
+                                ),
+                                original,
+                            );
+                        }
+                        let current_bytes = {
+                            let owner = owner.borrow();
+                            (
+                                owner.transport.buffer.bytes().to_vec(),
+                                owner.transport.wrapper.bytes().to_vec(),
+                            )
+                        };
+                        retired.push((disk, old_owner));
+                        let accesses = hardware.borrow().accesses;
+                        for (old_disk, old_owner) in &mut retired {
+                            let mut poison = [0xb7; 512];
+                            assert!(old_disk.read(7, &mut poison).is_err());
+                            assert_eq!(poison, [0xb7; 512]);
+                            assert!(old_disk.write(7, &[0xee; 512]).is_err());
+                            assert!(old_disk.flush().is_err());
+                            let mut old = old_owner.borrow_mut();
+                            assert!(old.transport.io.ready().is_err());
+                            assert!(
+                                old.transport
+                                    .command(0, &scsi::inquiry(), Data::In(36))
+                                    .is_err()
+                            );
+                            assert!(old.transport.reset_and_rebind(&mut dma).is_err());
+                        }
+                        assert_eq!(hardware.borrow().accesses, accesses);
+                        assert_eq!(dma.remaining(), remaining);
+                        {
+                            let owner = owner.borrow();
+                            assert_eq!(owner.transport.buffer.bytes(), current_bytes.0);
+                            assert_eq!(owner.transport.wrapper.bytes(), current_bytes.1);
+                        }
+                        disk = fresh.remove(0);
+                        let byte = epoch as u8;
+                        disk.write(7, &[byte; 512]).unwrap();
+                        disk.flush().unwrap();
+                        let mut actual = [0; 512];
+                        disk.read(7, &mut actual).unwrap();
+                        assert_eq!(actual, [byte; 512]);
+                        for opcode in [scsi::READ_10, scsi::WRITE_10] {
+                            assert!(
+                                hardware.borrow().scsi.contains(&(epoch, opcode)),
+                                "missing CDB {opcode:#x}: cache={write_cache}, speed={speed}, context={context}, epoch={epoch}",
+                            );
+                        }
+                        assert_eq!(
+                            hardware
+                                .borrow()
+                                .scsi
+                                .iter()
+                                .filter(|&&(seen_epoch, opcode)| {
+                                    seen_epoch == epoch && opcode == scsi::SYNCHRONIZE_CACHE_10
+                                })
+                                .count(),
+                            usize::from(write_cache),
+                            "flush CDB: cache={write_cache}, speed={speed}, context={context}, epoch={epoch}",
                         );
-                        assert!(old.transport.reset_and_rebind(&mut dma).is_err());
+                        assert_eq!(dma.remaining(), remaining);
                     }
-                    assert_eq!(hardware.borrow().accesses, accesses);
-                    assert_eq!(dma.remaining(), remaining);
-                    {
-                        let owner = owner.borrow();
-                        assert_eq!(owner.transport.buffer.bytes(), current_bytes.0);
-                        assert_eq!(owner.transport.wrapper.bytes(), current_bytes.1);
-                    }
-                    disk = fresh.remove(0);
-                    let byte = epoch as u8;
-                    disk.write(7, &[byte; 512]).unwrap();
-                    disk.flush().unwrap();
-                    let mut actual = [0; 512];
-                    disk.read(7, &mut actual).unwrap();
-                    assert_eq!(actual, [byte; 512]);
-                    for opcode in [scsi::READ_10, scsi::WRITE_10, scsi::SYNCHRONIZE_CACHE_10] {
-                        assert!(hardware.borrow().scsi.contains(&(epoch, opcode)));
-                    }
-                    assert_eq!(dma.remaining(), remaining);
+                    assert_eq!(retired.len(), 96);
                 }
-                assert_eq!(retired.len(), 96);
             }
         }
     }
@@ -1250,7 +1291,7 @@ mod tests {
                         mut disk,
                         hardware,
                         mut dma,
-                    } = native_fixture(&mut memory, speed, context);
+                    } = native_fixture(&mut memory, speed, context, false);
                     let owner = match &storage.owner {
                         super::super::media::TransportOwner::Bot(owner) => owner.clone(),
                         _ => panic!("native BOT fixture published another transport"),

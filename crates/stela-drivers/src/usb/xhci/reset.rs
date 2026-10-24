@@ -841,7 +841,7 @@ pub(crate) mod tests {
             self.event(last, SUCCESS << 24, TRANSFER_EVENT, slot, 1);
         }
         fn descriptor(&self) -> Vec<u8> {
-            vec![
+            let mut descriptor = vec![
                 18,
                 1,
                 0,
@@ -864,7 +864,11 @@ pub(crate) mod tests {
                 0,
                 0,
                 1,
-            ]
+            ];
+            if let Some(peer) = &self.bot {
+                peer.descriptor(&mut descriptor);
+            }
+            descriptor
         }
         fn bulk(&mut self, slot: u8, dci: u8, stream: u16) {
             if let Some(mut peer) = self.bot.take() {
@@ -1193,13 +1197,16 @@ pub(crate) mod tests {
         speed: u8,
         context: usize,
         max_slots: usize,
+        write_cache: bool,
     ) -> (Shared, Device, Rc<RefCell<Hardware>>, RegionAllocator) {
-        fixture_profile(
+        fixture_profile_peer(
             memory,
             speed,
             context,
             max_slots,
             (true, false, dma::Profile::SPEC),
+            (None, true),
+            Some(bot_peer::Peer::new(write_cache)),
         )
     }
     fn fixture_profile(
@@ -1220,6 +1227,26 @@ pub(crate) mod tests {
         class_peer: Option<class_peers::Kind>,
         configured: bool,
     ) -> (Shared, Device, Rc<RefCell<Hardware>>, RegionAllocator) {
+        fixture_profile_peer(
+            memory,
+            speed,
+            context,
+            max_slots,
+            profile,
+            (class_peer, configured),
+            None,
+        )
+    }
+    fn fixture_profile_peer(
+        memory: &mut [u64],
+        speed: u8,
+        context: usize,
+        max_slots: usize,
+        profile: (bool, bool, dma::Profile),
+        class: (Option<class_peers::Kind>, bool),
+        peer: Option<bot_peer::Peer>,
+    ) -> (Shared, Device, Rc<RefCell<Hardware>>, RegionAllocator) {
+        let (class_peer, configured) = class;
         let (bot, iso, profile) = profile;
         let range = memory.as_mut_ptr() as u64
             ..memory.as_mut_ptr() as u64 + core::mem::size_of_val(memory) as u64;
@@ -1259,7 +1286,7 @@ pub(crate) mod tests {
             task: None,
             scsi: Vec::new(),
             writes: Vec::new(),
-            bot: bot.then(bot_peer::Peer::default),
+            bot: bot.then(|| peer.unwrap_or_default()),
             preferred_slot: None,
             iso,
             force_idle_stop: false,

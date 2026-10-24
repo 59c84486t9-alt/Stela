@@ -15,8 +15,23 @@ struct Command {
 #[derive(Default)]
 pub(super) struct Peer {
     command: Option<Command>,
+    write_cache: bool,
 }
 impl Peer {
+    pub(super) fn new(write_cache: bool) -> Self {
+        Self {
+            write_cache,
+            ..Self::default()
+        }
+    }
+    pub(super) fn descriptor(&self, descriptor: &mut [u8]) {
+        if self.write_cache {
+            // Pinned unusual_devs.h's 0bc2:2300 WRITE_CACHE wire profile.
+            // Generic BOT skips the Caching page and assumes write-through;
+            // advertising WCE alone cannot require SYNCHRONIZE CACHE.
+            descriptor[8..12].copy_from_slice(&[0xc2, 0x0b, 0x00, 0x23]);
+        }
+    }
     pub(super) fn reset(&mut self) {
         self.command = None;
     }
@@ -49,7 +64,13 @@ impl Peer {
             };
             h.scsi.push((h.resets, cdb[0]));
             match cdb[0] {
-                0 | 0x35 => assert_eq!(requested, 0),
+                0 => assert_eq!(requested, 0),
+                0x35 => {
+                    assert!(self.write_cache);
+                    assert!(!command.input);
+                    assert_eq!(requested, 0);
+                    assert_eq!(&cdb[..10], &[0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+                }
                 0x12 => {
                     command.data = vec![0; 36];
                     command.data[2] = 6;
@@ -66,7 +87,7 @@ impl Peer {
                     command.data[0] = 23;
                     command.data[4] = 8;
                     command.data[5] = 18;
-                    command.data[6] = 4; // genuine caching mode page, WCE.
+                    command.data[6] = if self.write_cache { 4 } else { 0 }; // WCE.
                 }
                 0x28 | 0x2a => {
                     command.lba = u32::from_be_bytes(cdb[2..6].try_into().unwrap());
