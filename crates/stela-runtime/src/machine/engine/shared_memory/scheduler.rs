@@ -186,6 +186,35 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         unsafe { self.native_round_with_policy(u64::MAX, None, false) }
     }
 
+    /// Execute every online PE in turn on this BSP, through the serial
+    /// scheduler and chained native blocks, until `limit` blocks or a stop.
+    /// Every assigned physical worker stays held from the first call on, so
+    /// no worker executes; Host effects apply to this BSP alone. The PEs keep
+    /// their canonical RAM, memory/event and processor owners, and device
+    /// accesses consume through them synchronously. Exclusives use the
+    /// snapshot monitor, which observes other PEs' writes between slices.
+    ///
+    /// # Safety
+    /// The native_round RAM/control/publication and closed producer contract
+    /// applies for the whole serialized run.
+    pub unsafe fn run_serialized(&mut self, limit: u64) -> Stop {
+        if let Some(pending) = self.pending_native_device_access() {
+            return pending;
+        }
+        if self.serial_hold.is_none() {
+            let held = match self.hold_native_services() {
+                Ok(held) => held,
+                Err(stop) => return stop,
+            };
+            self.close_native_services();
+            self.serial_hold = Some(held);
+            // The fetch and jump caches and the host's shadow tables start
+            // from the running PE's regime.
+            self.translations_changed();
+        }
+        self.run_blocks(limit)
+    }
+
     /// Execute at most `body_budget` bodies, allowing warm epochs only for one
     /// instantiated online PE. Other online PEs retain one-body publications.
     /// `deadline` uses Host::counter, not the adjusted guest clock or raw TSC.

@@ -133,6 +133,54 @@ impl<H: Host, D: Devices> Machine<H, D> {
         })
     }
 }
+impl<H: Host, D: Devices> Machine<H, D> {
+    /// A device write by a serialized PE, consumed through the same canonical
+    /// RAM and processor owners as a recovered native write. The held
+    /// workers stay held; a retained prefix or unknown effect is an error.
+    pub(super) fn serial_write_canonical(
+        &mut self,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+    ) -> Result<(), DeviceError> {
+        let Some(held) = self.serial_hold.take() else {
+            return Err(DeviceError::TransferRefused(
+                "canonical device write requires the serialized worker hold".into(),
+            ));
+        };
+        let consumed = self.serial_write_held(&held, physical, bytes, value, now);
+        self.serial_hold = Some(held);
+        match consumed? {
+            ConsumedWrite::Complete { settlement } => settlement,
+            ConsumedWrite::Prefix { error, .. } | ConsumedWrite::Unknown { error } => Err(error),
+        }
+    }
+
+    fn serial_write_held(
+        &mut self,
+        held: &publication::StoppedWorkers,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+    ) -> Result<ConsumedWrite, DeviceError> {
+        self.device_transfer(now)?;
+        let ram = Arc::clone(
+            self.cpu
+                .canonical_memory
+                .as_ref()
+                .ok_or_else(|| {
+                    DeviceError::TransferRefused("serialized PE has no canonical RAM owner".into())
+                })?
+                .ram_owner(),
+        );
+        let current = self.current;
+        let (devices, processors) = self.processor_write_parts();
+        let mut owners = WriteOwners::new(&ram, held, processors);
+        devices.write_canonical(current, physical, bytes, value, now, &mut owners)
+    }
+}
 impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     pub(super) fn queue_device_write(
         &mut self,

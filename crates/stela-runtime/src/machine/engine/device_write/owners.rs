@@ -19,6 +19,16 @@ pub struct CanonicalWriteMemory<'a> {
     memory: CanonicalRamService<'a>,
     host: &'a mut dyn Host,
 }
+impl<'a> CanonicalWriteMemory<'a> {
+    /// A serialized PE's borrow: every assigned worker is held, so only this
+    /// BSP's own stores need the fence.
+    pub(in crate::machine::engine) fn serial(
+        memory: CanonicalRamService<'a>,
+        host: &'a mut dyn Host,
+    ) -> Self {
+        Self { memory, host }
+    }
+}
 impl super::super::device_read::sealed::Sealed for CanonicalWriteMemory<'_> {}
 impl CanonicalDeviceMemory for CanonicalWriteMemory<'_> {
     fn memory(&self) -> &CanonicalRamService<'_> {

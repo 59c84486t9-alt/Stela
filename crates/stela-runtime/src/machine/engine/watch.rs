@@ -329,10 +329,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// `AArch64_UnalignedAccessFaults`, which comes before translation), or
     /// the fault its translation gives an address outside the guest's two
     /// ranges (`x86_64::RangeCheck`), which the shadow never maps.
-    pub(super) fn native_check_fault(&mut self, index: usize, pc: u64, word: u32) -> Step {
-        let accesses = self
-            .data_accesses(pc, word)
-            .map_err(|detail| self.refuse_word(word, detail))?;
+    pub(super) fn native_check_fault(
+        &mut self,
+        index: usize,
+        pc: u64,
+        word: u32,
+        fault: &super::NativeFault,
+    ) -> Step {
+        let accesses = self.data_accesses(pc, word).map_err(|detail| {
+            self.unsupported(RequirementKind::Instruction {
+                word,
+                detail: alloc::format!(
+                    "{detail} ({:?} at native offset {:#x} of the block at {:#x}, address {:#x})",
+                    fault.cause,
+                    fault.offset,
+                    self.blocks[index].pc,
+                    fault.address,
+                ),
+            })
+        })?;
         let sctlr = self.cpu.regime_sctlr();
         let placement = self.host.placement();
         let in_guest_range = |address| placement.native(address);

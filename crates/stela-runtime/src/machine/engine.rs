@@ -1578,6 +1578,9 @@ pub struct Machine<H: Host, D: Devices> {
     native_publication: Option<processors::publication::WorkerPublications>,
     /// Identity of this Machine's persistent checked PE memory/event owners.
     native_memory_identity: Arc<()>,
+    /// Every assigned worker, held while the BSP executes all canonical PEs
+    /// in turn through chained native blocks (`run_serialized`).
+    serial_hold: Option<processors::publication::StoppedWorkers>,
     pending_device_read: Option<device_read::Pending>,
     pending_device_write: Option<device_write::Pending>,
     pending_device_tail: alloc::collections::VecDeque<shared_memory::RecoveredDeviceAccess>,
@@ -1750,6 +1753,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             processor_power,
             native_publication: None,
             native_memory_identity: Arc::new(()),
+            serial_hold: None,
             pending_device_read: None,
             pending_device_write: None,
             pending_device_tail: alloc::collections::VecDeque::new(),
@@ -2082,7 +2086,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             || !instruction
             || requirement.pc != self.cpu.pc
             || requirement.el != self.cpu.pstate.el
-            || self.cpu.has_canonical_memory()
+            || self.cpu.has_canonical_memory() && self.serial_hold.is_none()
             || self.pending_native_device_access().is_some()
         {
             return Err(Stop::Unsupported(requirement));
@@ -2124,10 +2128,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             physical,
             DeviceReadShape::Scalar { bytes },
         ) {
-            return Err(DeviceError::TransferRefused(
-                "canonical device read requires its actual recovered-frame memory continuation"
-                    .into(),
-            ));
+            self.host.speculation_barrier();
+            let consumed =
+                self.serial_read_canonical(physical, DeviceReadShape::Scalar { bytes }, now);
+            let result = consumed.and_then(|consumed| {
+                consumed.settlement?;
+                Ok(consumed.values[0])
+            });
+            self.watch(physical, bytes, result.as_ref().ok().copied(), false);
+            return result;
         }
         self.host.speculation_barrier();
         if let Some(cpu) = self.devices.pc_sample_target(physical, bytes) {
@@ -2151,10 +2160,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         value: u64,
         now: u64,
     ) -> Result<(), DeviceError> {
-        let current = self.current;
-        let (devices, processors) = self.processor_write_parts();
-        let result =
-            devices.write_with_processors(current, physical, bytes, value, now, processors);
+        let result = if self.serial_hold.is_some() {
+            self.serial_write_canonical(physical, bytes, value, now)
+        } else {
+            let current = self.current;
+            let (devices, processors) = self.processor_write_parts();
+            devices.write_with_processors(current, physical, bytes, value, now, processors)
+        };
         self.watch(physical, bytes, result.is_ok().then_some(value), true);
         result
     }
@@ -2780,9 +2792,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if self.cpu.has_canonical_memory() || self.peers.iter().any(|peer|
             matches!(peer, processors::Peer::Parked(parked) if parked.cpu().has_canonical_memory())) {
             return self.unsupported(RequirementKind::Native(
-                "converted shared-memory PEs require the qualified native scheduler; serialized direct-RAM fallback is forbidden",
+                "converted shared-memory PEs run only through run_serialized or the native scheduler",
             ));
         }
+        self.run_blocks(budget)
+    }
+
+    /// The serial scheduler and chained native blocks, until a stop.
+    pub(super) fn run_blocks(&mut self, budget: u64) -> Stop {
         self.block_limit = if budget == 0 { u64::MAX } else { budget };
         loop {
             if self.statistics.blocks >= self.block_limit {
@@ -4795,7 +4812,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             // one through its base stood for: its own check finds which.
             FaultCause::NonCanonical => {
                 let word = self.word(index, pc)?;
-                self.native_check_fault(index, pc, word)
+                self.native_check_fault(index, pc, word, &fault)
             }
             // Native blocks raise #UD for a misaligned SP base when compiled
             // with the check (SCTLR_ELx.SA or SA0 set), which comes first,
@@ -4813,7 +4830,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     self.take(Exception::synchronous(Class::SpAlignment, 0, pc));
                     Ok(())
                 } else {
-                    self.native_check_fault(index, pc, word)
+                    self.native_check_fault(index, pc, word, &fault)
                 }
             }
         }
@@ -5081,9 +5098,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         physical,
                         DeviceReadShape::Pair { bytes },
                     ) {
-                        Err(DeviceError::TransferRefused(
-                            "canonical device pair requires its actual recovered-frame memory continuation".into(),
-                        ))
+                        self.host.speculation_barrier();
+                        self.serial_read_canonical(physical, DeviceReadShape::Pair { bytes }, now)
+                            .map(Some)
                     } else {
                         self.host.speculation_barrier();
                         self.devices.read_pair(self.current, physical, bytes, now)

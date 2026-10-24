@@ -154,6 +154,50 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .then_some(plan)
     }
 }
+impl<H: Host, D: Devices> Machine<H, D> {
+    /// A RAM-consuming device read by a serialized PE, through the same
+    /// canonical owner as a recovered native read. Synchronous copyout
+    /// completes before the RAM service is borrowed.
+    pub(super) fn serial_read_canonical(
+        &mut self,
+        physical: u64,
+        shape: DeviceReadShape,
+        now: u64,
+    ) -> Result<ConsumedPair, DeviceError> {
+        let refused = |reason: &str| DeviceError::TransferRefused(reason.into());
+        if self.serial_hold.is_none() {
+            return Err(refused(
+                "canonical device read requires its actual recovered-frame memory continuation",
+            ));
+        }
+        self.device_transfer(now)?;
+        let ram = Arc::clone(
+            self.cpu
+                .canonical_memory
+                .as_ref()
+                .ok_or_else(|| refused("serialized PE has no canonical RAM owner"))?
+                .ram_owner(),
+        );
+        let memory = ram
+            .try_service()
+            .map_err(|_| refused("canonical read RAM owner failed"))?
+            .ok_or_else(|| refused("canonical read RAM gates unavailable"))?;
+        let mut memory = device_write::CanonicalWriteMemory::serial(memory, &mut self.host);
+        match shape {
+            DeviceReadShape::Scalar { bytes } => self
+                .devices
+                .read_canonical(self.current, physical, bytes, now, &mut memory)
+                .map(|scalar| ConsumedPair {
+                    values: [scalar.value, 0],
+                    settlement: scalar.settlement,
+                }),
+            DeviceReadShape::Pair { bytes } => {
+                self.devices
+                    .read_pair_canonical(self.current, physical, bytes, now, &mut memory)
+            }
+        }
+    }
+}
 impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     pub(super) fn queue_device_read(
         &mut self,

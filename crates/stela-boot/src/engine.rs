@@ -171,6 +171,9 @@ struct Options {
     /// Emit full artifact identities (`--native-artifacts`); cold/warm dispatch
     /// otherwise retains provenance without serial formatting or ring scans.
     native_artifacts: bool,
+    /// Execute PEs in checked native rounds on their assigned workers
+    /// (`--native-rounds`) instead of serialized chained blocks on the BSP.
+    native_rounds: bool,
     /// The user opted in to Apple's signing server (`--tss`, `stela setup
     /// --tss`): the restore host may send this machine's ECID and component
     /// hashes to gs.apple.com for the recoveryOS LocalPolicy, over the host
@@ -307,6 +310,7 @@ impl Options {
             native_bootstrap_check: false,
             native_shared_check: false,
             native_artifacts: false,
+            native_rounds: false,
             tss: false,
             ecid: None,
             network_check: None,
@@ -330,6 +334,10 @@ impl Options {
         while let Some(name) = words.next() {
             if name == "--native-artifacts" {
                 options.native_artifacts = true;
+                continue;
+            }
+            if name == "--native-rounds" {
+                options.native_rounds = true;
                 continue;
             }
             if name == "--monitor-trace" {
@@ -2160,11 +2168,15 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             // SAFETY: the same fixed workers and canonical producer set stay
             // retained; an unsupported native service returns without fallback.
             unsafe {
-                crate::native_smp::canonical::run_slice_for(
-                    machine,
-                    limit,
-                    handoff.tsc_hz / WAIT_POLLS_PER_SECOND,
-                )
+                if options.native_rounds {
+                    crate::native_smp::canonical::run_slice_for(
+                        machine,
+                        limit,
+                        handoff.tsc_hz / WAIT_POLLS_PER_SECOND,
+                    )
+                } else {
+                    machine.run_serialized(limit)
+                }
             }
         },
     )

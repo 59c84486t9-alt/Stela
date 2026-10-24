@@ -346,15 +346,23 @@ fn bank(el: u8) -> Bank {
 
 /// A consuming borrow of this exact local monitor. Preparation can fail before
 /// CPU/controller effects; dropping it leaves the reservation unchanged.
+/// A canonical PE executed serially keeps its snapshot monitor too, which
+/// clears with the canonical reservation.
 pub(crate) enum PreparedExclusiveClear<'a> {
     Legacy(&'a mut Option<Reservation>),
-    Canonical(crate::memory::domain::PreparedLocalClear<'a>),
+    Canonical(
+        crate::memory::domain::PreparedLocalClear<'a>,
+        &'a mut Option<Reservation>,
+    ),
 }
 impl PreparedExclusiveClear<'_> {
     pub(crate) fn commit(self) {
         match self {
             Self::Legacy(monitor) => *monitor = None,
-            Self::Canonical(clear) => clear.commit(),
+            Self::Canonical(clear, monitor) => {
+                clear.commit();
+                *monitor = None;
+            }
         }
     }
 }
@@ -445,6 +453,7 @@ impl Cpu {
         if let Some(memory) = &mut self.canonical_memory {
             Ok(PreparedExclusiveClear::Canonical(
                 memory.prepare_clear_reservation()?,
+                &mut self.monitor,
             ))
         } else {
             Ok(PreparedExclusiveClear::Legacy(&mut self.monitor))

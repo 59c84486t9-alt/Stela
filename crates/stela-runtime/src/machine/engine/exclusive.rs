@@ -21,7 +21,9 @@ use stela_compiler::aarch64::{
 
 impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn exclusive(&mut self, operand: Operand) -> Step {
-        if self.cpu.has_canonical_memory() {
+        // Serialized PEs share one host core: the snapshot monitor below
+        // observes every other PE's write between slices (`observe_writes`).
+        if self.cpu.has_canonical_memory() && self.serial_hold.is_none() {
             return self.shared_exclusive(operand);
         }
         let Operand::Transfer {
