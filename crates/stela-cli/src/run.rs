@@ -68,8 +68,12 @@ pub(crate) struct Run {
     statistics: bool,
     /// Save sampled FP helper controls/status in fresh engine directories under this container.
     /// Requires a build with stela-runtime/native-profile.
-    #[arg(long, help_heading = ADVANCED)]
+    #[arg(long, help_heading = ADVANCED, conflicts_with = "engine_profile_output")]
     fp_profile_output: Option<PathBuf>,
+    /// Save live compilation, dispatch and code-arena metrics without FP sampling.
+    /// Requires a build with stela-runtime/native-profile.
+    #[arg(long, help_heading = ADVANCED)]
+    engine_profile_output: Option<PathBuf>,
     /// Stop at the first operation Stela does not support instead of
     /// failing it as macOS fails an operation it lacks (also
     /// STELA_STRICT=1).
@@ -261,6 +265,7 @@ impl Run {
             trace: false,
             statistics: false,
             fp_profile_output: None,
+            engine_profile_output: None,
             strict: false,
             model: None,
         })
@@ -285,9 +290,14 @@ impl Run {
         if self.statistics {
             command.push("--statistics".into());
         }
-        if let Some(output) = &self.fp_profile_output {
-            command.push("--fp-profile-output".into());
-            command.push(std::path::absolute(output)?.into_os_string());
+        for (flag, output) in [
+            ("--fp-profile-output", &self.fp_profile_output),
+            ("--engine-profile-output", &self.engine_profile_output),
+        ] {
+            if let Some(output) = output {
+                command.push(flag.into());
+                command.push(std::path::absolute(output)?.into_os_string());
+            }
         }
         if self.strict {
             command.push("--strict".into());
@@ -393,6 +403,7 @@ impl Run {
             trace: self.trace,
             statistics: self.statistics,
             fp_profile_output: self.fp_profile_output.clone(),
+            engine_profile_output: self.engine_profile_output.clone(),
             strict: self.strict,
         };
         let report = hosted::run(launch).map_err(|error| stopped(&target.program, error))?;
@@ -466,6 +477,33 @@ mod tests {
         assert_eq!(command[2], "--fp-profile-output");
         assert_eq!(command[3], std::path::absolute("profiles")?.as_os_str());
         Ok(())
+    }
+
+    #[test]
+    fn engine_profile_exec_binds_a_relative_container_to_the_launch_directory() -> Result<()> {
+        let mut run = Run::shorthand(vec!["hello".into()])?;
+        run.engine_profile_output = Some(PathBuf::from("metrics"));
+        let command = run.reexec(&[])?;
+        assert_eq!(command[2], "--engine-profile-output");
+        assert_eq!(command[3], std::path::absolute("metrics")?.as_os_str());
+        Ok(())
+    }
+
+    #[test]
+    fn engine_and_fp_output_modes_are_exclusive() {
+        use clap::Parser as _;
+        assert!(
+            crate::Cli::try_parse_from([
+                "stela",
+                "run",
+                "--engine-profile-output",
+                "metrics",
+                "--fp-profile-output",
+                "fp",
+                "hello",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

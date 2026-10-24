@@ -447,7 +447,28 @@ pub struct ProcessHost {
     writable_jit: Option<std::sync::Arc<std::sync::Mutex<super::jit::Jit>>>,
 }
 
+#[cfg(feature = "native-profile")]
+#[derive(serde::Serialize)]
+pub(crate) struct CodeUsage {
+    arena_mapped_bytes: usize,
+    arena_used_bytes: usize,
+    immutable_install_entries: usize,
+    immutable_install_metadata_bytes: usize,
+    scope: &'static str,
+}
+
 impl ProcessHost {
+    #[cfg(feature = "native-profile")]
+    pub(crate) fn code_usage(&self) -> CodeUsage {
+        CodeUsage {
+            arena_mapped_bytes: ARENA_BYTES,
+            arena_used_bytes: self.used,
+            immutable_install_entries: self.installed_immutable.entries(),
+            immutable_install_metadata_bytes: self.installed_immutable.retained_metadata_bytes(),
+            scope: "owned thread arena; mapped is virtual reservation, used includes alignment and helpers; neither is RSS; fork can inherit COW mappings",
+        }
+    }
+
     pub fn new(tables: std::sync::Arc<Tables>) -> anyhow::Result<Self> {
         // SAFETY: a fresh private anonymous mapping the host never shares.
         let arena = unsafe {
@@ -647,6 +668,20 @@ impl Host for ProcessHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "native-profile")]
+    #[test]
+    fn code_usage_tracks_alignment_and_discard_without_claiming_physical_residency() {
+        let mut host = ProcessHost::new(Arc::new(Tables::new().unwrap())).unwrap();
+        assert_eq!(host.code_usage().arena_used_bytes, 0);
+        assert_eq!(host.code_usage().arena_mapped_bytes, 512 << 20);
+        host.install(&[0xc3; 3]).unwrap();
+        host.install(&[0xc3; 5]).unwrap();
+        assert_eq!(host.code_usage().arena_used_bytes, 21);
+        host.discard_code();
+        assert_eq!(host.code_usage().arena_used_bytes, 0);
+        assert_eq!(host.code_usage().arena_mapped_bytes, 512 << 20);
+    }
 
     #[test]
     fn counter_conversion_is_the_24_mhz_timebase() {

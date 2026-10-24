@@ -133,6 +133,8 @@ pub struct Launch {
     pub statistics: bool,
     /// Container for fresh per-engine FP diagnostic directories; requires native-profile.
     pub fp_profile_output: Option<std::path::PathBuf>,
+    /// Live engine metrics without FP sampling; exclusive with FP profiling.
+    pub engine_profile_output: Option<std::path::PathBuf>,
     /// Stop at the first unsupported operation instead of failing it as
     /// the guest's platform does ([`unsupported`]).
     pub strict: bool,
@@ -217,10 +219,14 @@ pub fn preparation(model: &str) -> Result<std::sync::Arc<crate::machine::Prepara
 
 /// Run the process to its exit.
 pub fn run(launch: Launch) -> Result<Report> {
+    ensure!(
+        launch.fp_profile_output.is_none() || launch.engine_profile_output.is_none(),
+        "choose either FP profiling (including engine metrics) or engine metrics alone"
+    );
     #[cfg(not(feature = "native-profile"))]
     ensure!(
-        launch.fp_profile_output.is_none(),
-        "FP profiling requires a native-profile build"
+        launch.fp_profile_output.is_none() && launch.engine_profile_output.is_none(),
+        "engine/FP profiling requires a native-profile build"
     );
     check_host_timebase()?;
     translations::configure(translations::Config::from_environment());
@@ -326,12 +332,14 @@ pub fn run(launch: Launch) -> Result<Report> {
     #[cfg(feature = "native-profile")]
     let engine = {
         let mut engine = engine;
-        engine.fp_profile_output = launch
+        engine.sample_floating_point = launch.fp_profile_output.is_some();
+        engine.profile_output = launch
             .fp_profile_output
             .as_deref()
+            .or(launch.engine_profile_output.as_deref())
             .map(|path| {
-                std::fs::create_dir_all(path).context("create the FP profile container")?;
-                std::fs::canonicalize(path).context("resolve the FP profile container")
+                std::fs::create_dir_all(path).context("create the engine profile container")?;
+                std::fs::canonicalize(path).context("resolve the engine profile container")
             })
             .transpose()?;
         engine

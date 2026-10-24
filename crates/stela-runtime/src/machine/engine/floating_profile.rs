@@ -90,6 +90,33 @@ pub(crate) struct Snapshot {
     rows: Vec<Row>,
 }
 
+#[cfg(test)]
+impl Snapshot {
+    pub(crate) fn maximum_test_fixture() -> Self {
+        let mut sampler = Sampler::new(u64::MAX);
+        sampler.scheduled = u64::MAX;
+        sampler.samples = u64::MAX;
+        sampler.families.fill(u64::MAX);
+        sampler.dropped = u64::MAX;
+        sampler.saturated = true;
+        for word in (u32::MAX - ROW_LIMIT as u32)..u32::MAX {
+            sampler.rows.insert(
+                Key {
+                    word,
+                    family: Family::ExtremaScale,
+                    fpcr_before: u32::MAX,
+                    fpcr_after: u32::MAX,
+                    fpsr_before: u32::MAX,
+                    fpsr_after: u32::MAX,
+                    refused_enabled_exceptions: Some(u32::MAX),
+                },
+                u64::MAX,
+            );
+        }
+        sampler.snapshot()
+    }
+}
+
 pub(super) struct Sampler {
     seed: u64,
     random: u64,

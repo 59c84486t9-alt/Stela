@@ -1,5 +1,5 @@
 //! One cumulative, atomically replaced file per owned engine epoch.
-//! Files are the sole FP profile dataset; completed-thread reports overlap them.
+//! Engine metrics and optional FP samples; completed-thread reports overlap them.
 use super::{Kernel, Member, Pe};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
@@ -30,10 +30,12 @@ pub(super) struct ThreadOutput {
     next_block: u64,
     initial_blocks: u64,
     initial_retired: u64,
+    initial_statistics: crate::machine::Statistics,
     returns: u32,
     failed_publications: u64,
     reported_failure: bool,
     active: bool,
+    sample_floating_point: bool,
 }
 
 #[derive(Serialize)]
@@ -49,12 +51,15 @@ struct Envelope {
     retired: u64,
     initial_blocks: u64,
     initial_retired: u64,
+    initial_statistics: crate::machine::Statistics,
+    engine_metrics: crate::machine::engine::metrics::Snapshot,
+    code_usage: crate::hosted::host::CodeUsage,
     retired_scope: &'static str,
     compiler_source_sha256: &'static str,
     engine_source_sha256: &'static str,
     failed_publications: u64,
     population_scope: &'static str,
-    profile: crate::machine::engine::floating_profile::Snapshot,
+    profile: Option<crate::machine::engine::floating_profile::Snapshot>,
 }
 
 fn write_atomic(directory: &Path, sequence: u64, bytes: &[u8]) -> Result<()> {
@@ -74,16 +79,19 @@ fn write_atomic(directory: &Path, sequence: u64, bytes: &[u8]) -> Result<()> {
 }
 
 impl ThreadOutput {
-    fn new(parent: &Path, thread: u64, pe: &mut Pe) -> Result<Self> {
-        fs::create_dir_all(parent).context("create the explicit FP profile container")?;
+    fn new(parent: &Path, thread: u64, pe: &mut Pe, sample_floating_point: bool) -> Result<Self> {
+        fs::create_dir_all(parent).context("create the explicit engine profile container")?;
         let directory = tempfile::Builder::new()
             .prefix("engine-")
             .tempdir_in(parent)
-            .context("own a fresh FP profile engine directory")?
+            .context("own a fresh profile engine directory")?
             .keep();
         // Dedicated diagnostic entropy; never PAC, guest guards or other secrets.
-        let [seed] = crate::hosted::random_words::<1>()?;
-        pe.enable_floating_profile(seed);
+        if sample_floating_point {
+            let [seed] = crate::hosted::random_words::<1>()?;
+            pe.enable_floating_profile(seed);
+        }
+        pe.enable_engine_metrics();
         let now = Instant::now();
         let mut output = Self {
             parent: parent.to_owned(),
@@ -96,14 +104,16 @@ impl ThreadOutput {
             next_block: pe.statistics.blocks.saturating_add(super::SLICE_BLOCKS),
             initial_blocks: pe.statistics.blocks,
             initial_retired: pe.cpu.retired,
+            initial_statistics: pe.statistics,
             returns: 0,
             failed_publications: 0,
             reported_failure: false,
             active: true,
+            sample_floating_point,
         };
         output.publish(pe, false)?;
         diagnostic(format_args!(
-            "FP service profile {}",
+            "engine profile {} (FP sampling: {sample_floating_point})",
             output.directory.display()
         ));
         Ok(output)
@@ -119,11 +129,13 @@ impl ThreadOutput {
         }
         self.active = false;
         pe.disable_floating_profile();
-        match Self::new(&self.parent, self.thread, pe) {
+        pe.disable_engine_metrics();
+        match Self::new(&self.parent, self.thread, pe, self.sample_floating_point) {
             Ok(fresh) => *self = fresh,
             Err(error) => {
                 pe.disable_floating_profile();
-                diagnostic(format_args!("child FP profiling disabled: {error:#}"));
+                pe.disable_engine_metrics();
+                diagnostic(format_args!("child engine profiling disabled: {error:#}"));
             }
         }
     }
@@ -131,17 +143,22 @@ impl ThreadOutput {
     fn publish(&mut self, pe: &Pe, final_snapshot: bool) -> Result<()> {
         ensure!(
             self.pid == std::process::id(),
-            "inherited FP writer cannot publish"
+            "inherited engine writer cannot publish"
         );
         self.sequence = self
             .sequence
             .checked_add(1)
             .context("FP snapshot sequence exhausted")?;
-        let profile = pe
-            .floating_profile_snapshot()
-            .context("FP sampler is absent")?;
+        let profile = if self.sample_floating_point {
+            Some(
+                pe.floating_profile_snapshot()
+                    .context("FP sampler is absent")?,
+            )
+        } else {
+            None
+        };
         let envelope = Envelope {
-            schema: 1,
+            schema: 2,
             identity: self
                 .directory
                 .file_name()
@@ -157,11 +174,18 @@ impl ThreadOutput {
             retired: pe.cpu.retired,
             initial_blocks: self.initial_blocks,
             initial_retired: self.initial_retired,
+            initial_statistics: self.initial_statistics,
+            engine_metrics: pe.metrics_snapshot(),
+            code_usage: pe.host.code_usage(),
             retired_scope: "current engine cumulative cpu.retired; subtract initial_retired for this epoch; inherited fork counts remain only in baseline",
             compiler_source_sha256: stela_compiler::SOURCE_SHA256,
             engine_source_sha256: crate::translations::ENGINE_SOURCE_SHA256,
             failed_publications: self.failed_publications,
-            population_scope: "serviced scalar/AdvSIMD FP exits; native-success, scalable and AMX excluded; cumulative replace, never sum sequences; live/abruptly ended engines can be stale/partial; FPSR differences are newly observable sticky transitions only",
+            population_scope: if self.sample_floating_point {
+                "serviced scalar/AdvSIMD FP exits; native-success, scalable and AMX excluded; cumulative replace, never sum sequences; live/abruptly ended engines can be stale/partial; FPSR differences are newly observable sticky transitions only"
+            } else {
+                "engine metrics only; FP sampling disabled; cumulative replace, never sum sequences; live/abruptly ended engines can be stale/partial"
+            },
             profile,
         };
         write_atomic(
@@ -194,7 +218,7 @@ impl ThreadOutput {
             self.failed_publications = self.failed_publications.saturating_add(1);
             if !self.reported_failure {
                 diagnostic(format_args!(
-                    "FP profile publication failed (last complete snapshot retained): {error:#}"
+                    "engine profile publication failed (last complete snapshot retained): {error:#}"
                 ));
                 self.reported_failure = true;
             }
@@ -210,15 +234,23 @@ pub(super) fn execute(
     let output = kernel
         .process
         .engine
-        .fp_profile_output
+        .profile_output
         .as_deref()
-        .map(|parent| ThreadOutput::new(parent, kernel.thread, pe))
+        .map(|parent| {
+            ThreadOutput::new(
+                parent,
+                kernel.thread,
+                pe,
+                kernel.process.engine.sample_floating_point,
+            )
+        })
         .transpose();
     let mut output = match output {
         Ok(output) => output,
         Err(error) => {
             pe.disable_floating_profile();
-            diagnostic(format_args!("engine FP profiling disabled: {error:#}"));
+            pe.disable_engine_metrics();
+            diagnostic(format_args!("engine profiling disabled: {error:#}"));
             None
         }
     };
@@ -232,6 +264,80 @@ pub(super) fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_pe() -> Result<Box<Pe>> {
+        use crate::hosted::{hardware::Hardware, pe};
+        use stela_compiler::TargetCpu;
+        let hardware = Hardware::of_soc(0x8112, 1 << 34)?;
+        let profile = pe::profile(&hardware, TargetCpu::Baseline)?;
+        let (engine, _) = super::super::engine(
+            hardware.chip,
+            profile,
+            TargetCpu::Baseline,
+            pe::Keys {
+                ia: [0; 2],
+                ib: [0; 2],
+                da: [0; 2],
+                db: [0; 2],
+                ga: [0; 2],
+            },
+            pe::UserJop::Disabled,
+        )?;
+        engine.machine(0)
+    }
+
+    #[test]
+    fn metrics_only_publication_has_no_sampler_and_preserves_epoch_baselines() -> Result<()> {
+        let parent = tempfile::tempdir()?;
+        let mut pe = test_pe()?;
+        pe.statistics.compiled = 17;
+        let mut output = ThreadOutput::new(parent.path(), 7, &mut pe, false)?;
+        assert!(pe.floating_profile_snapshot().is_none());
+        pe.statistics.compiled = 20;
+        output.checkpoint(&mut pe, true);
+        let read = |output: &ThreadOutput| -> Result<serde_json::Value> {
+            Ok(serde_json::from_slice(&fs::read(
+                output.directory.join("snapshot.json"),
+            )?)?)
+        };
+        let json = read(&output)?;
+        assert_eq!(json["schema"], 2);
+        assert!(json["profile"].is_null());
+        assert_eq!(json["initial_statistics"]["compiled"], 17);
+        assert_eq!(json["engine_metrics"]["statistics"]["compiled"], 20);
+        assert_eq!(json["code_usage"]["arena_mapped_bytes"], 512 << 20);
+        assert_eq!(json["final_snapshot"], true);
+        let previous = output.directory.clone();
+        // Exercise the PID-change reset branch; this is not an actual OS fork.
+        output.pid = 0;
+        output.resume(&mut pe);
+        assert_ne!(output.directory, previous);
+        assert_eq!(read(&output)?["initial_statistics"]["compiled"], 20);
+        assert!(pe.floating_profile_snapshot().is_none());
+        assert_eq!(read(&output)?["profile"], serde_json::Value::Null);
+        assert!(previous.join("snapshot.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn fp_publication_includes_sampler_and_live_engine_metrics() -> Result<()> {
+        let parent = tempfile::tempdir()?;
+        let mut pe = test_pe()?;
+        let output = ThreadOutput::new(parent.path(), 8, &mut pe, true)?;
+        let json: serde_json::Value =
+            serde_json::from_slice(&fs::read(output.directory.join("snapshot.json"))?)?;
+        assert!(json["profile"].is_object());
+        assert_eq!(json["profile"]["serviced_population"], 0);
+        assert!(json["engine_metrics"].is_object());
+        let mut maximum = json;
+        maximum["profile"] = serde_json::to_value(
+            crate::machine::engine::floating_profile::Snapshot::maximum_test_fixture(),
+        )?;
+        maximum["initial_statistics"] = serde_json::to_value(pe.statistics)?;
+        let bytes = serde_json::to_vec(&maximum)?;
+        assert!(bytes.len() < MAX_SNAPSHOT_BYTES - 8192);
+        Ok(())
+    }
 
     #[test]
     fn atomic_cumulative_replacement_preserves_last_good_after_interrupted_write() -> Result<()> {

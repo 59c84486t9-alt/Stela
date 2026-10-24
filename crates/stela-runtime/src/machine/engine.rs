@@ -13,6 +13,8 @@ pub(crate) mod floating_profile;
 mod guarded;
 mod hosted;
 pub mod installed_code;
+#[cfg(all(feature = "std", feature = "native-profile"))]
+pub(crate) mod metrics;
 mod monitor;
 mod native_timing;
 pub use crate::platform::dma::{DmaError, TransferFault};
@@ -1108,6 +1110,10 @@ struct Survey {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(
+    all(feature = "std", feature = "native-profile"),
+    derive(serde::Serialize)
+)]
 pub struct Statistics {
     pub blocks: u64,
     /// Retirements from CPU incarnations replaced by a real PE restart.
@@ -1483,6 +1489,8 @@ pub struct Machine<H: Host, D: Devices> {
     exit_words: BTreeMap<u32, u64>,
     #[cfg(all(feature = "std", feature = "native-profile"))]
     floating_profile: Option<alloc::boxed::Box<floating_profile::Sampler>>,
+    #[cfg(all(feature = "std", feature = "native-profile"))]
+    preparation_metrics: Option<metrics::PreparationMetrics>,
     target: TargetCpu,
     blocks: Vec<Block>,
     /// Slots of `blocks` whose code was reclaimed, for new blocks.
@@ -1702,6 +1710,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             exit_words: BTreeMap::new(),
             #[cfg(all(feature = "std", feature = "native-profile"))]
             floating_profile: None,
+            #[cfg(all(feature = "std", feature = "native-profile"))]
+            preparation_metrics: None,
             target,
             blocks: Vec::new(),
             free_blocks: Vec::new(),
@@ -3577,6 +3587,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(Prepared::Checked(_) | Prepared::FloatingPointTrap) => false,
             Err(_) => true,
         };
+        #[cfg(all(feature = "std", feature = "native-profile"))]
+        if let Some(metrics) = &mut self.preparation_metrics {
+            let ticks = self.host.counter().wrapping_sub(started);
+            metrics.record(&prepared, ticks, past && !whole);
+        }
         if past && !whole {
             return Ok(None);
         }

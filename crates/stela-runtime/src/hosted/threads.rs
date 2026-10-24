@@ -82,7 +82,9 @@ pub(super) struct Engine {
     pub(super) keys: pe::Keys,
     pub(super) jop: pe::UserJop,
     #[cfg(feature = "native-profile")]
-    pub(super) fp_profile_output: Option<std::path::PathBuf>,
+    pub(super) profile_output: Option<std::path::PathBuf>,
+    #[cfg(feature = "native-profile")]
+    pub(super) sample_floating_point: bool,
 }
 
 impl Engine {
@@ -926,7 +928,9 @@ pub(super) fn engine(
         keys,
         jop,
         #[cfg(feature = "native-profile")]
-        fp_profile_output: None,
+        profile_output: None,
+        #[cfg(feature = "native-profile")]
+        sample_floating_point: false,
     };
     if jop == pe::UserJop::Disabled {
         return Ok((engine, None));
