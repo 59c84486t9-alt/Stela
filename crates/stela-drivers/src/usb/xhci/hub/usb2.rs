@@ -22,6 +22,7 @@ impl Controller {
     /// Only a stable, powered, enabled post-reset observation establishes the
     /// child speed and releases an old current subtree. The reset notification
     /// by itself cannot authorize a replacement child.
+    #[cfg(test)]
     pub(in super::super) fn hub_port(
         &mut self,
         slot: u8,

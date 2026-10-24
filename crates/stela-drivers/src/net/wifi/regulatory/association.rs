@@ -151,8 +151,8 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
     /// Neither public queue arrays nor the returned closure value prove native
     /// observation or completion. `limit` is the current control-channel rule;
     /// both providers must inspect the complete dynamic queue operation.
-    pub unsafe fn publish_edca<'a, T>(
-        &'a mut self,
+    pub unsafe fn publish_edca<T>(
+        &mut self,
         admission: AssociationAdmission,
         station: &Station,
         parameter_set_count: u8,

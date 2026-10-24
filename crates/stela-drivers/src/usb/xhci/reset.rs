@@ -37,6 +37,7 @@ impl Controller {
     }
     /// Permanently block class reconstruction failure; this is not a claim
     /// that hardware/DMA has stopped. All original allocations remain retained.
+    #[cfg(test)]
     pub(crate) fn quarantine_slot(&mut self, slot: u8) {
         // This legacy notification has no result channel. A retired raw
         // number cannot quarantine a later addressed generation.
