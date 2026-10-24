@@ -420,10 +420,11 @@ impl Hardware {
         self.shared.as_ref().map(|plan| &plan.observed)
     }
 
-    /// Whether service cache-capacity/sharing values are qualified. The
-    /// unallocated source profiles retain original board geometry;
-    /// shared execution has no native cache binding.
-    pub fn has_cache_geometry(&self) -> bool {
+    /// Whether the declared clusters also qualify service cache-sharing
+    /// counts. Shared execution retains CPU0's virtual architectural cache
+    /// capacities, but its physical CPU budget supplies no L2 sharing map.
+    /// Neither profile capacities nor these counts measure native caches.
+    pub fn has_cache_sharing(&self) -> bool {
         self.shared.is_none()
     }
 
@@ -578,8 +579,11 @@ mod tests {
                 "{model}"
             );
             assert_eq!(shared.native_availability(), Some(&observed));
-            assert!(!shared.has_cache_geometry());
-            assert!(source.has_cache_geometry());
+            assert!(!shared.has_cache_sharing());
+            assert!(source.has_cache_sharing());
+            assert_eq!(shared.clusters[0].l1i_bytes, source.clusters[0].l1i_bytes);
+            assert_eq!(shared.clusters[0].l1d_bytes, source.clusters[0].l1d_bytes);
+            assert_eq!(shared.clusters[0].l2_bytes, source.clusters[0].l2_bytes);
             assert_eq!(
                 (shared.chip_id, shared.model, shared.cpu_family),
                 (source.chip_id, source.model, source.cpu_family)

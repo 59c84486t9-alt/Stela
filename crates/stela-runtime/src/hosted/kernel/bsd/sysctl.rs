@@ -265,18 +265,21 @@ impl Model {
         add("hw.cpu64bit_capable", Value::Int(1));
         add("hw.cpufamily", Value::Int(hardware.cpu_family as i32));
         add("hw.cpusubfamily", Value::Int(hardware.cpu_subfamily as i32));
-        if hardware.has_cache_geometry() {
+        if hardware.has_cache_sharing() {
             let mut config = [0u64; CACHE_ENTRIES];
             config[0] = u64::from(hardware.cpus());
             config[1] = 1;
             config[2] = lowest.cores_per_l2 as u64;
             add("hw.cacheconfig", Value::Opaque(words(&config)));
-            let mut sizes = [0u64; CACHE_ENTRIES];
-            sizes[0] = hardware.memory_bytes;
-            sizes[1] = lowest.l1d as u64;
-            sizes[2] = lowest.l2 as u64;
-            add("hw.cachesize", Value::Opaque(words(&sizes)));
         }
+        // XNU's sizes array is independent of cacheconfig's sharing map.
+        // These are the virtual ARM cache-identification capacities, also
+        // retained by uniform CPU0 execution, never measured host caches.
+        let mut sizes = [0u64; CACHE_ENTRIES];
+        sizes[0] = hardware.memory_bytes;
+        sizes[1] = lowest.l1d as u64;
+        sizes[2] = lowest.l2 as u64;
+        add("hw.cachesize", Value::Opaque(words(&sizes)));
         add("hw.pagesize", Value::Number(page));
         add("hw.pagesize32", Value::Number(page));
         add("hw.pagesize_compat", Value::Int(page as i32));
@@ -303,17 +306,16 @@ impl Model {
         let line = i64::from(hardware.cache_line);
         add("hw.cachelinesize", Value::Quad(line));
         add("hw.cachelinesize_compat", Value::Int(line as i32));
-        if hardware.has_cache_geometry() {
-            add("hw.l1icachesize", Value::Quad(lowest.l1i));
-            add("hw.l1icachesize_compat", Value::Int(lowest.l1i as i32));
-            add("hw.l1dcachesize", Value::Quad(lowest.l1d));
-            add("hw.l1dcachesize_compat", Value::Int(lowest.l1d as i32));
-            add("hw.l2cachesize", Value::Quad(lowest.l2));
-            add("hw.l2cachesize_compat", Value::Int(lowest.l2 as i32));
-            // Apple SoCs report no L3 (`l3_cache_size == UINT32_MAX`).
-            add("hw.l3cachesize", Value::FailsQuad(EINVAL));
-            add("hw.l3cachesize_compat", Value::Fails(EINVAL));
-        }
+        add("hw.l1icachesize", Value::Quad(lowest.l1i));
+        add("hw.l1icachesize_compat", Value::Int(lowest.l1i as i32));
+        add("hw.l1dcachesize", Value::Quad(lowest.l1d));
+        add("hw.l1dcachesize_compat", Value::Int(lowest.l1d as i32));
+        add("hw.l2cachesize", Value::Quad(lowest.l2));
+        add("hw.l2cachesize_compat", Value::Int(lowest.l2 as i32));
+        // Declared Apple profiles have no virtual L3. A native host's L3
+        // capacity cannot replace this architectural absence.
+        add("hw.l3cachesize", Value::FailsQuad(EINVAL));
+        add("hw.l3cachesize_compat", Value::Fails(EINVAL));
         let timebase = crate::hosted::host::COUNTER_HZ as i64;
         add("hw.tbfrequency", Value::Number(timebase));
         add("hw.tbfrequency_compat", Value::Int(timebase as i32));
@@ -333,23 +335,23 @@ impl Model {
             for field in ["physicalcpu_max", "logicalcpu_max"] {
                 add(&format!("{prefix}{field}"), Value::Int(level.maximum));
             }
-            if hardware.has_cache_geometry() {
+            if hardware.has_cache_sharing() {
                 add(
                     &format!("{prefix}cpusperl2"),
                     Value::Int(level.cores_per_l2),
                 );
-                add(
-                    &format!("{prefix}l1icachesize"),
-                    Value::Int(level.l1i as i32),
-                );
-                add(
-                    &format!("{prefix}l1dcachesize"),
-                    Value::Int(level.l1d as i32),
-                );
-                add(&format!("{prefix}l2cachesize"), Value::Int(level.l2 as i32));
-                add(&format!("{prefix}l3cachesize"), Value::Fails(EINVAL));
-                add(&format!("{prefix}cpusperl3"), Value::Fails(EINVAL));
             }
+            add(
+                &format!("{prefix}l1icachesize"),
+                Value::Int(level.l1i as i32),
+            );
+            add(
+                &format!("{prefix}l1dcachesize"),
+                Value::Int(level.l1d as i32),
+            );
+            add(&format!("{prefix}l2cachesize"), Value::Int(level.l2 as i32));
+            add(&format!("{prefix}l3cachesize"), Value::Fails(EINVAL));
+            add(&format!("{prefix}cpusperl3"), Value::Fails(EINVAL));
             add(&format!("{prefix}name"), Value::String(level.name.into()));
         }
         add("hw.optional.floatingpoint", Value::Int(1));
@@ -754,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_execution_publication_has_physical_budgets_and_unqualified_cache_contents() {
+    fn shared_execution_retains_architectural_capacities_without_inventing_sharing() {
         let observed = hardware::DarwinAvailability {
             maximum_slots: 16,
             available_slots: 12,
@@ -797,23 +799,96 @@ mod tests {
             Value::String("Efficiency".into())
         );
         assert_eq!(value("hw.cachelinesize"), Value::Quad(128));
-        for name in [
-            "hw.cacheconfig",
-            "hw.cachesize",
-            "hw.l1icachesize",
-            "hw.l1dcachesize",
-            "hw.l2cachesize",
-            "hw.l3cachesize",
-            "hw.perflevel0.cpusperl2",
-            "hw.perflevel0.l1icachesize",
-            "hw.perflevel0.l1dcachesize",
-            "hw.perflevel0.l2cachesize",
-            "hw.perflevel0.cpusperl3",
-            "hw.perflevel0.l3cachesize",
+        assert_eq!(value("hw.l1icachesize"), Value::Quad(128 << 10));
+        assert_eq!(value("hw.l1dcachesize"), Value::Quad(64 << 10));
+        assert_eq!(value("hw.l2cachesize"), Value::Quad(4 << 20));
+        assert_eq!(value("hw.l1icachesize_compat"), Value::Int(128 << 10));
+        assert_eq!(value("hw.l1dcachesize_compat"), Value::Int(64 << 10));
+        assert_eq!(value("hw.l2cachesize_compat"), Value::Int(4 << 20));
+        assert_eq!(value("hw.l3cachesize"), Value::FailsQuad(EINVAL));
+        assert_eq!(value("hw.l3cachesize_compat"), Value::Fails(EINVAL));
+        let mut sizes = [0; CACHE_ENTRIES];
+        sizes[0] = 1 << 34;
+        sizes[1] = 64 << 10;
+        sizes[2] = 4 << 20;
+        assert_eq!(value("hw.cachesize"), Value::Opaque(words(&sizes)));
+        for (name, capacity) in [
+            ("l1icachesize", 128 << 10),
+            ("l1dcachesize", 64 << 10),
+            ("l2cachesize", 4 << 20),
         ] {
+            let full = value(&format!("hw.{name}"));
+            assert_eq!(full.kind(), CTLTYPE_QUAD);
+            assert_eq!(full.bytes(Some(4)).unwrap().len(), 8);
+            let compat = value(&format!("hw.{name}_compat"));
+            assert_eq!(compat.kind(), CTLTYPE_INT);
+            assert_eq!(compat.bytes(None).unwrap().len(), 4);
+            let level = value(&format!("hw.perflevel0.{name}"));
+            assert_eq!(level, Value::Int(capacity));
+            assert_eq!(level.bytes(None).unwrap().len(), 4);
+        }
+        assert_eq!(value("hw.perflevel0.l3cachesize"), Value::Fails(EINVAL));
+        assert_eq!(value("hw.perflevel0.cpusperl3"), Value::Fails(EINVAL));
+        for name in ["hw.cacheconfig", "hw.perflevel0.cpusperl2"] {
             assert!(model.index(name).is_none(), "{name}");
             assert!(metadata::info(name).is_some(), "{name}");
             assert!(lookup(&model, name).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn shared_cache_capacities_follow_each_presented_cpu0_not_the_host_budget() {
+        for name in hardware::models() {
+            let source = Hardware::of_model(name, 1 << 34).unwrap();
+            let cpu0 = source.clusters[0];
+            for (active, maximum) in [(1, 1), (3, 8), (16, 32)] {
+                let shared = source
+                    .clone()
+                    .with_availability(hardware::DarwinAvailability {
+                        maximum_slots: maximum * 2,
+                        available_slots: active * 2,
+                        physical_active: Some(active),
+                        physical_maximum: Some(maximum),
+                        logical_active: Some(active * 2),
+                        logical_maximum: Some(maximum * 2),
+                    })
+                    .unwrap();
+                let model = Model::new(&shared, &[], &release());
+                let profile =
+                    crate::hosted::pe::profile(&shared, stela_compiler::TargetCpu::detect())
+                        .unwrap();
+                let caches = profile.processors[0].caches.unwrap();
+                assert_eq!(caches.clidr(), 0b100_011, "{name}");
+                let decode = |selector| {
+                    // Arm CCSIDR_EL1 without CCIDX: LineSize, NumSets,
+                    // Associativity. Decode the real hosted CPU0 identity,
+                    // independently of the service's capacity fields.
+                    let id = caches.ccsidr(selector);
+                    let line = 16u64 << (id & 7);
+                    assert_eq!(line, u64::from(shared.cache_line), "{name}");
+                    line * ((id >> 13 & 0x7fff) + 1) * ((id >> 3 & 0x3ff) + 1)
+                };
+                for (field, capacity, selector) in [
+                    ("l1icachesize", cpu0.l1i_bytes, 1),
+                    ("l1dcachesize", cpu0.l1d_bytes, 0),
+                    ("l2cachesize", cpu0.l2_bytes, 2),
+                ] {
+                    assert_eq!(u64::from(capacity), decode(selector), "{name}");
+                    let value = |name: &str| &model.entries[model.index(name).unwrap()].1;
+                    assert_eq!(
+                        value(&format!("hw.{field}")),
+                        &Value::Quad(capacity.into()),
+                        "{name}"
+                    );
+                    assert_eq!(
+                        value(&format!("hw.perflevel0.{field}")),
+                        &Value::Int(capacity as i32),
+                        "{name}"
+                    );
+                }
+                assert!(model.index("hw.cacheconfig").is_none(), "{name}");
+                assert!(model.index("hw.perflevel0.cpusperl2").is_none(), "{name}");
+            }
         }
     }
 
