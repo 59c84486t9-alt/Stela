@@ -177,9 +177,10 @@ fn actual_descriptor_feature_ack_and_dma_reports_assemble_without_changing_raw_e
             0
         ]));
     enable(&mut input, &peer, 3).unwrap();
+    // The control log records the device's feature reply: ID 2, maximum 3.
     assert_eq!(
         peer.borrow().setup.last().unwrap(),
-        &([0xa1, GET_REPORT, 2, 3, 4, 0, 2, 0], vec![])
+        &([0xa1, GET_REPORT, 2, 3, 4, 0, 2, 0], vec![2, 3])
     );
     assert!(input.poll_touch_hid().hid.reports.is_empty());
     let original = input.queued.unwrap();
