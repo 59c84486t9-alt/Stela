@@ -22,6 +22,7 @@ use alloc::{sync::Arc, vec::Vec};
 
 mod aggregate;
 mod context;
+pub mod external;
 mod sequence;
 pub use context::{AssociationContext, AssociationIntent};
 pub mod ba;
@@ -81,6 +82,7 @@ pub enum Phase {
     Associated,
     Disconnecting,
     Quarantined,
+    ExternalAuthenticating,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,6 +164,7 @@ pub struct Station {
     local: Mac,
     phase: Phase,
     join: Option<Join>,
+    external: Option<Arc<external::Session>>,
     selected_beacon: Option<super::scan::result::Bss>,
     context: Option<Arc<AssociationContext>>,
     epoch: u64,
@@ -184,6 +187,7 @@ impl Station {
             local,
             phase: Phase::Idle,
             join: None,
+            external: None,
             selected_beacon: None,
             context: None,
             epoch: 0,
@@ -487,6 +491,14 @@ impl Station {
         policy: &mut impl RegulatoryPolicy,
     ) -> Result<Option<Action>, Error> {
         self.clock(now_us)?;
+        if self.phase == Phase::ExternalAuthenticating
+            && self
+                .external
+                .as_ref()
+                .is_some_and(|session| self.now >= session.deadline())
+        {
+            return self.remove(Some(Failure::Timeout)).map(Some);
+        }
         let Some(pending) = self.pending else {
             return Ok(None);
         };
@@ -639,6 +651,7 @@ impl Station {
             self.tx_ba = ba::tx::Sessions::new();
             self.qos_sequence = [0; 16];
             self.join = None;
+            self.external = None;
             self.selected_beacon = None;
             self.context = None;
             Phase::Idle

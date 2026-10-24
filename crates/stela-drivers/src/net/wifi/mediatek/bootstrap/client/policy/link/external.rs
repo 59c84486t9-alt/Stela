@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
+//! OS-facing SAE transport over the sole owning link and its bounded notices.
+use super::*;
+use station::external::Session;
+
+impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q, C, S> {
+    /// Begin against a retained actual scan BSS. Authentication observations and
+    /// terminal notices are delivered through take_notice with their session.
+    /// The link stays down; no OS credential provider is fabricated here.
+    pub fn begin_external_authentication(
+        &mut self,
+        bss: BssHandle,
+        profile: Profile,
+        budget: u64,
+    ) -> Result<Arc<Session>, LinkControlError> {
+        let now = self.now();
+        let state = self.state_mut();
+        let result = state
+            .client
+            .begin_external_authentication(bss, profile, now, budget);
+        Self::reconcile(state);
+        Ok(result?)
+    }
+    pub fn transmit_external_authentication(
+        &mut self,
+        session: &Session,
+        transaction: u16,
+        status: u16,
+        data: &[u8],
+    ) -> Result<Receipt, LinkControlError> {
+        let now = self.now();
+        let state = self.state_mut();
+        let result = state.client.transmit_external_authentication(
+            session,
+            transaction,
+            status,
+            data,
+            now,
+            &state.source,
+        );
+        Self::reconcile(state);
+        Ok(result?)
+    }
+    pub fn cancel_external_authentication(
+        &mut self,
+        session: &Session,
+    ) -> Result<(), LinkControlError> {
+        let state = self.state_mut();
+        let result = state.client.cancel_external_authentication(session);
+        Self::reconcile(state);
+        Ok(result?)
+    }
+}
+
+#[cfg(test)]
+mod tests;

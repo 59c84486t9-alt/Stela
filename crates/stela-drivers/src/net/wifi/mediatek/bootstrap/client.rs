@@ -5,6 +5,7 @@
 use super::{Controller, Phase as ControllerPhase};
 
 mod ba;
+mod external;
 mod local;
 mod modern;
 mod packet;
@@ -111,6 +112,7 @@ pub struct PacketOwner<C: 'static> {
     context: Option<Arc<station::AssociationContext>>,
     tid: Option<u8>,
     tx_ba: Option<Arc<station::ba::tx::Session>>,
+    authentication: Option<Arc<station::external::Session>>,
 }
 impl<C> PacketOwner<C> {
     pub fn association_epoch(&self) -> u64 {
@@ -121,6 +123,9 @@ impl<C> PacketOwner<C> {
     }
     pub fn tx_block_ack(&self) -> Option<&station::ba::tx::Session> {
         self.tx_ba.as_deref()
+    }
+    pub fn authentication_session(&self) -> Option<&Arc<station::external::Session>> {
+        self.authentication.as_ref()
     }
     pub fn key(&self) -> Option<KeyIdentity> {
         self.key
@@ -162,6 +167,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     roc_token: u8,
     roc_deadline: Option<u64>,
     modern: Option<modern::Configuration>,
+    authentication_deadline: Option<u64>,
+    authentication_end: Option<(Arc<station::external::Session>, Option<station::Failure>)>,
 }
 /// On uncertain/live Drop retain the entire controller, station, real key
 /// material history and actual resources. No new owner may reset their PN.
@@ -233,6 +240,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 roc_token: 0,
                 roc_deadline: None,
                 modern: None,
+                authentication_deadline: None,
+                authentication_end: None,
             })),
         })
     }
@@ -313,7 +322,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         policy: &mut impl station::RegulatoryPolicy,
     ) -> Result<(), Error> {
         let s = self.state_mut();
-        if s.phase != Phase::Idle {
+        if s.phase != Phase::Idle || s.authentication_end.is_some() {
             return Err(Error::Busy);
         }
         if Some(profile.interface) != s.interface.registered_context()
@@ -524,7 +533,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .map_err(Error::Station)?;
                 s.phase = Phase::Associated;
             }
-            Action::Remove { ticket, .. } => {
+            Action::Remove { ticket, failure } => {
+                Self::authentication_ended(s, failure);
                 Self::remove(s, ticket)?;
             }
         }
@@ -540,6 +550,19 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if !matches!(s.phase, Phase::Joining | Phase::Associated) {
             return Err(Error::WrongPhase);
         }
+        let now = if s.station.phase() == station::Phase::ExternalAuthenticating
+            && s.authentication_deadline
+                .is_some_and(|deadline| s.controller.state().control.clock.now_us() >= deadline)
+        {
+            now.max(
+                s.station
+                    .external_authentication()
+                    .ok_or(Error::WrongPhase)?
+                    .deadline(),
+            )
+        } else {
+            now
+        };
         if let Some(a) = s.station.poll(now, policy).map_err(Error::Station)? {
             Self::action(s, a, now, source, policy)?;
         }
@@ -606,6 +629,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         source: &dyn PageSource,
         policy: &mut (impl station::RegulatoryPolicy + scan::Policy),
     ) -> Result<Vec<Event>, Error> {
+        if self.station().phase() == station::Phase::ExternalAuthenticating {
+            self.poll_station(now, source, policy)?;
+        }
         if self.phase() == Phase::Scanning {
             let s = self.state_mut();
             let ticket = s.scan_ticket.ok_or(Error::WrongPhase)?;
@@ -692,6 +718,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 s.asynchronous.push(f);
                 continue;
             }
+            // Cancelled external sessions retain old RX until the independent
+            // drain fence; do not reinterpret it as a new association.
+            if s.station.external_authentication().is_some()
+                && matches!(s.phase, Phase::Removing | Phase::NeedsDrain)
+            {
+                s.asynchronous.push(f);
+                continue;
+            }
             let modern_data = s.modern.is_some() && s.phase == Phase::Associated;
             let frame = Self::normalized(s, &f.bytes, modern_data, policy)?;
             if s.phase == Phase::Scanning {
@@ -700,6 +734,32 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         .observe(s.scan_ticket.unwrap(), &frame, policy)
                         .map_err(Error::Scan)?,
                 ));
+                continue;
+            }
+            if s.station.phase() == station::Phase::ExternalAuthenticating {
+                let session = s
+                    .station
+                    .external_authentication()
+                    .ok_or(Error::WrongPhase)?
+                    .clone();
+                if s.authentication_deadline
+                    .is_some_and(|deadline| s.controller.state().control.clock.now_us() >= deadline)
+                {
+                    if let Some(action) = s
+                        .station
+                        .poll(now.max(session.deadline()), policy)
+                        .map_err(Error::Station)?
+                    {
+                        Self::action(s, action, now, source, policy)?;
+                    }
+                    s.asynchronous.push(f);
+                    continue;
+                }
+                let received = s
+                    .station
+                    .receive_external_authentication(&session, frame, now)
+                    .map_err(Error::Station)?;
+                events.push(Event::ExternalAuthentication(received));
                 continue;
             }
             let epoch = s.station.association_epoch().ok_or(Error::WrongPhase)?;
@@ -754,6 +814,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 .into_iter()
                 .map(Event::Raw),
         );
+        if let Some((session, failure)) = s.authentication_end.take() {
+            events.push(Event::ExternalAuthenticationEnded { session, failure });
+        }
         Ok(events)
     }
     fn remove(s: &mut Owned<I, Q, C>, ticket: Ticket) -> Result<(), Error> {
@@ -830,7 +893,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::WrongPhase);
         }
         let a = s.station.disconnect().map_err(Error::Station)?;
-        if let Action::Remove { ticket, .. } = a {
+        if let Action::Remove { ticket, failure } = a {
+            Self::authentication_ended(s, failure);
             Self::remove(s, ticket)
         } else {
             Err(Error::WrongPhase)
@@ -889,6 +953,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.ba_actions.clear();
         s.profile = None;
         s.modern = None;
+        s.authentication_deadline = None;
         Ok(())
     }
     /// Actual interface disable ACKs then WFDMA disable/idle observation. This
@@ -934,6 +999,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     }
 }
 pub enum Event {
+    ExternalAuthentication(station::external::Received),
+    ExternalAuthenticationEnded {
+        session: Arc<station::external::Session>,
+        failure: Option<station::Failure>,
+    },
     ConnectionLost(crate::net::wifi::mediatek::ring::rx::Frame),
     Bss(scan::result::Bss),
     Ingress(Ingress),

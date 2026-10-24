@@ -104,9 +104,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             context: s.modern.as_ref().map(|m| m.context().clone()),
             tid: h.tid,
             tx_ba: None,
+            authentication: s.station.external_authentication().cloned(),
         };
         let grant = if management && s.phase == Phase::Joining {
-            Some(s.roc_deadline.ok_or(Error::GrantTimeout)?)
+            let roc = s.roc_deadline.ok_or(Error::GrantTimeout)?;
+            Some(
+                s.authentication_deadline
+                    .map_or(roc, |deadline| roc.min(deadline)),
+            )
         } else {
             None
         };

@@ -1,0 +1,231 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// SAE authentication transport follows Linux net/mac80211/{mlme,util}.c;
+// source notices and pin are retained in wifi/THIRD_PARTY.md.
+//! Bounded OS-supplicant SAE transport. Commit/confirm/token/group/H2E bytes
+//! and status codes remain opaque to this layer. Receiving a successful-looking
+//! frame never authenticates a peer, authorizes a key or permits association.
+//! Session identity binds the complete exchange, including delayed OS replies.
+
+use super::*;
+
+const SAE: u16 = 3;
+const MAX_EXCHANGE_US: u64 = 2_000_000;
+const AUTHENTICATION: u16 = 0x00b0;
+const FIXED_BYTES: usize = 30;
+// IEEE80211_MAX_DATA_LEN (2304), less the six fixed authentication bytes.
+const MAX_AUTHENTICATION_DATA: usize = 2304 - 6;
+
+/// Retained identity of one selected single-link authentication attempt.
+/// No public constructor, mutation or conversion into association authority.
+#[derive(Debug)]
+pub struct Session {
+    epoch: u64,
+    local: Mac,
+    peer: Mac,
+    channel: Channel,
+    ssid: Vec<u8>,
+    deadline: u64,
+}
+impl Session {
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub const fn local(&self) -> Mac {
+        self.local
+    }
+    pub const fn peer(&self) -> Mac {
+        self.peer
+    }
+    pub const fn channel(&self) -> Channel {
+        self.channel
+    }
+    pub fn ssid(&self) -> &[u8] {
+        &self.ssid
+    }
+    pub const fn deadline(&self) -> u64 {
+        self.deadline
+    }
+}
+
+/// Original RX bytes for the real OS supplicant. The native implementation
+/// creates these only from its completed owned RX queue. This observation is
+/// deliberately not a successful SAE result or a credential/key capability.
+pub struct Received {
+    session: Arc<Session>,
+    frame: Mpdu,
+}
+impl Received {
+    pub fn session(&self) -> &Arc<Session> {
+        &self.session
+    }
+    pub fn frame(&self) -> &Mpdu {
+        &self.frame
+    }
+    pub fn transaction(&self) -> u16 {
+        u16::from_le_bytes(self.frame.bytes()[26..28].try_into().unwrap())
+    }
+    pub fn status(&self) -> u16 {
+        u16::from_le_bytes(self.frame.bytes()[28..30].try_into().unwrap())
+    }
+    pub fn data(&self) -> &[u8] {
+        &self.frame.bytes()[FIXED_BYTES..]
+    }
+}
+
+impl Station {
+    /// Reserve an exchange for an actual OS-selected BSS. Native publication
+    /// must additionally bind this to actual hardware/source/regulatory owners.
+    /// The deadline covers OS computation as well as transport; repeated commits
+    /// do not extend it. There is no implicit retry of credential-bearing bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_external_authentication(
+        &mut self,
+        peer: Mac,
+        channel: Channel,
+        ssid: Vec<u8>,
+        now: u64,
+        budget: u64,
+        policy: &mut impl RegulatoryPolicy,
+    ) -> Result<Arc<Session>, Error> {
+        if self.phase != Phase::Idle {
+            return Err(Error::Busy);
+        }
+        self.clock(now)?;
+        if peer.is_multicast() || peer.0 == [0; 6] || peer == self.local {
+            return Err(Error::InvalidAddress);
+        }
+        if channel.band == super::super::Band::Ghz6 {
+            return Err(Error::Unsupported(
+                "6GHz native authentication channel ownership",
+            ));
+        }
+        if ssid.len() > 32 || budget == 0 || budget > MAX_EXCHANGE_US {
+            return Err(Error::Wire(wire::Error::Invalid(
+                "external authentication bounds",
+            )));
+        }
+        if !policy.allow_management_tx(channel) {
+            return Err(Error::Regulatory);
+        }
+        let deadline = now.checked_add(budget).ok_or(Error::Overflow)?;
+        let epoch = NEXT_ASSOCIATION.next().ok_or(Error::Overflow)?;
+        let session = Arc::new(Session {
+            epoch,
+            local: self.local,
+            peer,
+            channel,
+            ssid,
+            deadline,
+        });
+        self.epoch = epoch;
+        self.serial = 0;
+        self.external = Some(session.clone());
+        self.phase = Phase::ExternalAuthenticating;
+        Ok(session)
+    }
+
+    /// Identity observation only; a retained old handle stays inspectable but
+    /// every operation must pass validate_external_authentication again.
+    pub fn external_authentication(&self) -> Option<&Arc<Session>> {
+        self.external.as_ref()
+    }
+    pub fn validate_external_authentication(&self, session: &Session) -> Result<(), Error> {
+        if self.phase != Phase::ExternalAuthenticating
+            || self
+                .external
+                .as_ref()
+                .is_none_or(|current| !core::ptr::eq(current.as_ref(), session))
+        {
+            return Err(Error::Stale);
+        }
+        Ok(())
+    }
+
+    /// Build only the ordinary authentication header and fixed SAE fields.
+    /// The OS supplies complete transaction/status/data, including anti-clogging
+    /// retries. This does not parse or fabricate secret SAE arithmetic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn external_authentication_transmit(
+        &mut self,
+        session: &Session,
+        transaction: u16,
+        status: u16,
+        data: &[u8],
+        now: u64,
+        policy: &mut impl RegulatoryPolicy,
+    ) -> Result<Vec<u8>, Error> {
+        self.validate_external_authentication(session)?;
+        self.clock(now)?;
+        if now >= session.deadline {
+            return Err(Error::Timeout);
+        }
+        if !matches!(transaction, 1 | 2) || data.len() > MAX_AUTHENTICATION_DATA {
+            return Err(Error::Wire(wire::Error::Invalid(
+                "SAE authentication transaction/length",
+            )));
+        }
+        if !policy.allow_management_tx(session.channel) {
+            return Err(Error::Regulatory);
+        }
+        let mut bytes = wire::authentication(self.local, session.peer, self.sequence)?;
+        bytes[24..26].copy_from_slice(&SAE.to_le_bytes());
+        bytes[26..28].copy_from_slice(&transaction.to_le_bytes());
+        bytes[28..30].copy_from_slice(&status.to_le_bytes());
+        bytes.extend_from_slice(data);
+        self.sequence = next_sequence(self.sequence);
+        Ok(bytes)
+    }
+
+    /// Transport observation, never successful authentication. The caller must
+    /// retain the actual RX/peer owner; copied security bits supply no authority.
+    pub fn receive_external_authentication(
+        &mut self,
+        session: &Arc<Session>,
+        frame: Mpdu,
+        now: u64,
+    ) -> Result<Received, Error> {
+        self.validate_external_authentication(session)?;
+        self.clock(now)?;
+        if now >= session.deadline {
+            return Err(Error::Timeout);
+        }
+        if (
+            frame.radio.band,
+            frame.radio.channel,
+            frame.radio.frequency_mhz,
+        ) != (
+            session.channel.band,
+            session.channel.number,
+            session.channel.frequency_mhz,
+        ) {
+            return Err(Error::WrongChannel);
+        }
+        if frame.bytes().len() > FIXED_BYTES + MAX_AUTHENTICATION_DATA {
+            return Err(Error::Wire(wire::Error::Invalid(
+                "authentication frame length",
+            )));
+        }
+        if frame.fcs_error || frame.monitor_only {
+            return Err(Error::Wire(wire::Error::Integrity));
+        }
+        wire::check_peer(&frame, self.local, session.peer)?;
+        if frame.header().control & TYPE_SUBTYPE != AUTHENTICATION {
+            return Err(Error::Wire(wire::Error::Invalid("authentication subtype")));
+        }
+        let fixed = frame
+            .bytes()
+            .get(24..FIXED_BYTES)
+            .ok_or(Error::Wire(wire::Error::Truncated))?;
+        if u16::from_le_bytes(fixed[..2].try_into().unwrap()) != SAE
+            || !matches!(u16::from_le_bytes(fixed[2..4].try_into().unwrap()), 1 | 2)
+        {
+            return Err(Error::Wire(wire::Error::Invalid(
+                "SAE authentication transaction/algorithm",
+            )));
+        }
+        Ok(Received {
+            session: session.clone(),
+            frame,
+        })
+    }
+}

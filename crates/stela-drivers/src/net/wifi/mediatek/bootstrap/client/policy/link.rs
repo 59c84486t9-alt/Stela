@@ -12,6 +12,8 @@ use crate::net::{Link, LinkError, Mac};
 use alloc::{collections::VecDeque, format, vec::IntoIter};
 
 const DATA_FRAMES: usize = 64;
+mod external;
+
 const NOTICES: usize = 64;
 
 #[cfg(test)]

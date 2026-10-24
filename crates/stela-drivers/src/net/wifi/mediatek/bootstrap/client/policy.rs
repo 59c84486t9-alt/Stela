@@ -13,6 +13,7 @@ use station::phy::{Mode, Width};
 use triomphe::Arc as Shared;
 use wifi::{Band, Channel, regulatory as reg};
 
+mod external;
 mod link;
 pub use link::{
     LinkAttachError, LinkControlError, LinkEvent, LinkNotice, LinkProgress, ManagedLink,
