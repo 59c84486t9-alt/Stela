@@ -473,6 +473,11 @@ pub(crate) mod tests {
             self.storage.get().cast::<u8>()
         }
         unsafe fn allocate(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: sole test-only C counter owner; fixed atomics and a
+            // refusal flag, with no allocator/lock/drop/spin or replacement.
+            if !unsafe { stela_test_allocation_attempt(1) } {
+                return ptr::null_mut();
+            }
             if !self.enabled.load(Ordering::Acquire)
                 || layout.size() == 0
                 || layout.size() > 64 * 1024
@@ -517,10 +522,20 @@ pub(crate) mod tests {
     // Raw free does not allocate/drop/spin. Other unit tests keep System behavior.
     unsafe impl GlobalAlloc for CanonicalHeap {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: observe this actual ordinary backend attempt once;
+            // refusal returns NULL before the SAME canonical System call.
+            if !unsafe { stela_test_allocation_attempt(0) } {
+                return ptr::null_mut();
+            }
             // SAFETY: ordinary valid GlobalAlloc layout, delegated unchanged.
             unsafe { System.alloc(layout) }
         }
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: observe this actual ordinary backend attempt once;
+            // refusal returns NULL before the SAME canonical System call.
+            if !unsafe { stela_test_allocation_attempt(0) } {
+                return ptr::null_mut();
+            }
             // SAFETY: same ordinary System owner and exact layout.
             unsafe { System.alloc_zeroed(layout) }
         }
@@ -558,6 +573,7 @@ pub(crate) mod tests {
     }
 
     unsafe extern "C" {
+        fn stela_test_allocation_attempt(route: u32) -> bool;
         fn stela_linux_trees_fixture() -> i32;
         fn stela_linux_task_test_taskless();
         fn stela_linux_task_test_unprepared_begin();

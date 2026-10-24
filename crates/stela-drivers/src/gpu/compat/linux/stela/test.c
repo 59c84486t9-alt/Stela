@@ -24,6 +24,50 @@ int64_t stela_test_now_ns(void);
 void stela_test_sleep_us(uint64_t usecs);
 _Noreturn void stela_test_fail(const char *file, int line, const char *condition);
 int stela_test_traps(void (*operation)(void));
+int stela_test_witnessed(void (*operation)(void));
+_Noreturn void stela_test_witness_passed(void);
+
+/* Same test-only ABI as stela/test.h; this TU deliberately uses libc types
+ * rather than mixing incompatible Linux/POSIX header definitions. */
+struct stela_test_allocations { uint64_t heap, heap_try, pages; };
+void stela_test_allocations_begin(bool refuse);
+struct stela_test_allocations stela_test_allocations_snapshot(void);
+struct stela_test_allocations stela_test_allocations_end(void);
+bool stela_test_allocation_attempt(unsigned int route);
+static _Atomic uint64_t allocation_attempts[3];
+static _Atomic bool refuse_allocations;
+
+void stela_test_allocations_begin(bool refuse)
+{
+ /* The fixture excludes all concurrent calls, including another controller. */
+ atomic_store_explicit(&refuse_allocations, false, memory_order_relaxed);
+ for (unsigned int i = 0; i < 3; i++)
+  atomic_store_explicit(&allocation_attempts[i], 0, memory_order_relaxed);
+ atomic_store_explicit(&refuse_allocations, refuse, memory_order_release);
+}
+
+struct stela_test_allocations stela_test_allocations_snapshot(void)
+{
+ return (struct stela_test_allocations){
+  .heap = atomic_load_explicit(&allocation_attempts[0], memory_order_relaxed),
+  .heap_try = atomic_load_explicit(&allocation_attempts[1], memory_order_relaxed),
+  .pages = atomic_load_explicit(&allocation_attempts[2], memory_order_relaxed),
+ };
+}
+
+struct stela_test_allocations stela_test_allocations_end(void)
+{
+ atomic_store_explicit(&refuse_allocations, false, memory_order_release);
+ return stela_test_allocations_snapshot();
+}
+
+bool stela_test_allocation_attempt(unsigned int route)
+{
+ if (route >= 3 || atomic_fetch_add_explicit(&allocation_attempts[route], 1,
+       memory_order_relaxed) == UINT64_MAX)
+  abort();
+ return !atomic_load_explicit(&refuse_allocations, memory_order_acquire);
+}
 
 #ifndef STELA_TEST_CANONICAL_RUST_HEAP
 /* Actual preallocated storage, not a libc allocator called under NOWAIT.
@@ -47,6 +91,8 @@ bool stela_linux_heap_try_available(void)
 
 void *stela_linux_heap_try_alloc(size_t size, size_t align)
 {
+ if (!stela_test_allocation_attempt(1))
+  return NULL;
 	if (!stela_linux_heap_try_available())
 		abort();
 	if (!size || !align || (align & (align - 1)) ||
@@ -74,6 +120,8 @@ bool stela_test_heap_try_contains(const void *object)
 
 void *stela_linux_heap_alloc(size_t size, size_t align)
 {
+ if (!stela_test_allocation_attempt(0))
+  return NULL;
 	if (align < sizeof(void *))
 		align = sizeof(void *);
 	void *object = aligned_alloc(align, (size + align - 1) / align * align);
@@ -143,4 +191,31 @@ int stela_test_traps(void (*operation)(void))
 			abort();
 	}
 	return WIFEXITED(status) && WEXITSTATUS(status) == 86;
+}
+
+/* The observer reaches this only in ordinary C context, after its assertions.
+ * This distinct status cannot be confused with the expected SIGILL handler,
+ * normal operation return, setup failure or an arbitrary crashing child. */
+_Noreturn void stela_test_witness_passed(void)
+{
+ _Exit(89);
+}
+
+int stela_test_witnessed(void (*operation)(void))
+{
+ pid_t child = fork();
+ if (child < 0)
+  abort();
+ if (!child) {
+  if (signal(SIGILL, expected_trap) == SIG_ERR)
+   _Exit(87);
+  operation();
+  _Exit(88);
+ }
+ int status;
+ while (waitpid(child, &status, 0) < 0) {
+  if (errno != EINTR)
+   abort();
+ }
+ return WIFEXITED(status) && WEXITSTATUS(status) == 89;
 }
