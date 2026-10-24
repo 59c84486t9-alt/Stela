@@ -1528,17 +1528,21 @@ pub struct Machine<H: Host, D: Devices> {
     jump: Vec<Option<JumpEntry>>,
     /// Advances when cached fetch translations become stale.
     translation_generation: u64,
+    /// The upper half's translation epoch, and the `translation_generation`
+    /// it was last confirmed at: every advance since was of the lower half
+    /// alone ([`Machine::upper_generation`]).
+    upper_epoch: (u64, u64),
     /// Advances when installed code is discarded.
     code_generation: u64,
     /// The blocks fetches ran, by PC and context, for lookup thunks
     /// (`x86_64::chain`): the table `ChainControl::table` names.
     targets: alloc::boxed::Box<[chain::LookupEntry]>,
     /// The context numbers of the current generations, by EL (with the
-    /// guarded level) and variant; numbers are never reused.
-    contexts: Vec<(u8, Variant, u64)>,
-    /// The translation and code generations `contexts` are for, and the
-    /// next number.
-    context_generations: (u64, u64),
+    /// guarded level), variant and half; numbers are never reused.
+    contexts: Vec<(u8, Variant, usize, u64)>,
+    /// The translation and code generations each half's `contexts` are
+    /// for, and the next number.
+    context_generations: [(u64, u64); 2],
     next_context: u64,
     /// Identification registers the CPU profile has no value for.
     profile_missing: Vec<SystemRegister>,
@@ -1739,10 +1743,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             fetch: vec![None; FETCH_CACHE],
             jump: vec![None; JUMP_CACHE],
             translation_generation: 1,
+            upper_epoch: (1, 1),
             code_generation: 1,
             targets: vec![chain::LookupEntry::default(); chain::LOOKUP_ENTRIES].into_boxed_slice(),
             contexts: Vec::new(),
-            context_generations: (0, 0),
+            context_generations: [(0, 0); 2],
             next_context: 1,
             profile_missing: Vec::new(),
             lookup: super::system::Lookup::new(),
@@ -2281,6 +2286,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .expect("architectural translation generation exhausted");
     }
 
+    /// Advance the generation for a change of the lower half's translations
+    /// alone, which leaves the upper half's epoch as current as it was.
+    fn advance_lower_translation_generation(&mut self) {
+        let upper_current = self.upper_epoch.1 == self.translation_generation;
+        self.advance_translation_generation();
+        if upper_current {
+            self.upper_epoch.1 = self.translation_generation;
+        }
+    }
+
     fn translations_changed(&mut self) {
         self.advance_translation_generation();
         self.statistics.translation_changes += 1;
@@ -2299,7 +2314,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// drops what `reach` names of its shadow. No control changed, so the
     /// regime and what derives from System registers stay.
     fn tlb_maintained(&mut self, reach: mmu::tlbi::Reach) {
-        self.advance_translation_generation();
+        if reach.lower_only() {
+            self.advance_lower_translation_generation();
+        } else {
+            self.advance_translation_generation();
+        }
         self.statistics.tlb_maintenance += 1;
         if reach != mmu::tlbi::Reach::All {
             self.statistics.scoped_maintenance += 1;
@@ -2311,7 +2330,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// alone: the regime's new controls tell the host so
     /// ([`Host::set_regime`]), which keeps the upper half's shadow.
     fn table_base_changed(&mut self) {
-        self.advance_translation_generation();
+        self.advance_lower_translation_generation();
         self.statistics.table_base_changes += 1;
         self.sync_regime();
     }
@@ -3252,23 +3271,45 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// The number of the context a fetch runs in now: the generations, the
     /// EL with the guarded level, and the variant. Lookup entries name it.
-    fn context(&mut self, el: u8, variant: Variant) -> u64 {
-        let generations = (self.translation_generation, self.code_generation);
-        if self.context_generations != generations {
-            self.context_generations = generations;
-            self.contexts.clear();
+    fn context(&mut self, el: u8, variant: Variant, half: usize) -> u64 {
+        let translation = if half == 0 {
+            self.translation_generation
+        } else {
+            self.upper_generation()
+        };
+        let generations = (translation, self.code_generation);
+        if self.context_generations[half] != generations {
+            self.context_generations[half] = generations;
+            self.contexts.retain(|&(_, _, other, _)| other != half);
         }
-        if let Some(&(_, _, number)) = self
+        if let Some(&(.., number)) = self
             .contexts
             .iter()
-            .find(|(other, kind, _)| *other == el && *kind == variant)
+            .find(|&&(other, kind, of, _)| other == el && kind == variant && of == half)
         {
             return number;
         }
         let number = self.next_context;
         self.next_context += 1;
-        self.contexts.push((el, variant, number));
+        self.contexts.push((el, variant, half, number));
         number
+    }
+
+    /// Both halves' contexts at `el` in `variant`.
+    fn contexts(&mut self, el: u8, variant: Variant) -> [u64; 2] {
+        [0, 1].map(|half| self.context(el, variant, half))
+    }
+
+    /// The upper half's translation epoch: it advances with
+    /// `translation_generation` unless every advance since it was last
+    /// confirmed was of the lower half alone, so a change made any other
+    /// way reaches the upper half too.
+    fn upper_generation(&mut self) -> u64 {
+        let (epoch, at) = self.upper_epoch;
+        if at != self.translation_generation {
+            self.upper_epoch = (epoch + 1, self.translation_generation);
+        }
+        self.upper_epoch.0
     }
 
     /// The checks before an instruction executes, in Arm's priority after PC
@@ -3496,7 +3537,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             guarded_page: false,
             ..current
         };
-        self.chain.context = self.context(el, context);
+        self.chain.contexts = self.contexts(el, context);
         let slot = (pc / INSTRUCTION) as usize % JUMP_CACHE;
         if let Some(entry) = self.jump[slot]
             && entry.pc == pc
@@ -3516,7 +3557,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 // the old context still names: the thunks look up in a new
                 // one.
                 if self.code_generation != generation {
-                    self.chain.context = self.context(el, context);
+                    self.chain.contexts = self.contexts(el, context);
                 }
                 match compiled {
                     Fetched::Block(index) => index,
@@ -3553,7 +3594,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .fold(0, |targets, btype| targets | 1 << btype);
         self.targets[chain::lookup_slot(pc)] = chain::LookupEntry {
             pc,
-            context: self.chain.context,
+            context: self.chain.contexts[chain::half(pc)],
             entry,
             block: index as u32,
             targets,
@@ -7972,18 +8013,18 @@ mod tests {
         machine.host.ring = Some(1);
         let base = machine.cpu.pc;
         assert!(machine.fetch_block(base, false).is_ok());
-        let first = machine.chain.context;
+        let first = machine.chain.contexts;
         assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
-        assert_eq!(machine.chain.context, first);
+        assert_eq!(machine.chain.contexts, first);
         // The third part reclaims the first, whose block a lookup entry of
         // the first context names.
         let pc = base + 2 * FETCH_PAGE;
         assert!(machine.fetch_block(pc, false).is_ok());
         assert_eq!(machine.statistics.code_evictions, 1);
-        assert_ne!(machine.chain.context, first);
+        assert_ne!(machine.chain.contexts, first);
         assert_eq!(
             machine.targets[chain::lookup_slot(pc)].context,
-            machine.chain.context
+            machine.chain.contexts[chain::half(pc)]
         );
     }
 
@@ -8199,7 +8240,8 @@ mod tests {
             let jump = chain::jump(site as u64, at as u64).unwrap().to_vec();
             assert_eq!(machine.host.patches[index], (site, jump));
         }
-        let context = machine.chain.context;
+        let half = chain::half(base);
+        let context = machine.chain.contexts[half];
         assert_ne!(context, 0);
         for (pc, block) in [(base, 0), (far, 1)] {
             let entry = machine.targets[chain::lookup_slot(pc)];
@@ -8217,13 +8259,42 @@ mod tests {
         machine.translations_changed();
         machine.host.exits = vec![exit(far, ExitKind::Direct)];
         machine.step().unwrap();
-        let renewed = machine.chain.context;
+        let renewed = machine.chain.contexts[half];
         assert!(renewed > context);
         let variant = machine.blocks[0].variant;
         let el = machine.cpu.pstate.el;
-        assert_eq!(machine.context(el, variant), renewed);
-        assert_ne!(machine.context(el ^ 1, variant), renewed);
-        assert_eq!(machine.context(el, variant), renewed);
+        assert_eq!(machine.context(el, variant, half), renewed);
+        assert_ne!(machine.context(el ^ 1, variant, half), renewed);
+        assert_ne!(machine.context(el, variant, half ^ 1), renewed);
+        assert_eq!(machine.context(el, variant, half), renewed);
+    }
+
+    #[test]
+    fn the_upper_half_keeps_its_contexts_over_lower_half_changes_alone() {
+        let mut machine = board_on(crate::machine::Chip::AppleM1, &[], NoDevices, Vec::new());
+        let variant = machine.current_variant(false, false);
+        let before = machine.contexts(2, variant);
+        // A TTBR0 write and a TLBI of lower-half addresses renew the lower
+        // half's context only.
+        machine.table_base_changed();
+        machine.tlb_maintained(mmu::tlbi::Reach::Containing(0x4000));
+        let after = machine.contexts(2, variant);
+        assert_ne!(after[0], before[0]);
+        assert_eq!(after[1], before[1]);
+        // Any other change, however it was made, renews both.
+        for change in [
+            |machine: &mut Machine<FakeHost, NoDevices>| {
+                machine.tlb_maintained(mmu::tlbi::Reach::Containing(0xffff_fe00_0000_0000))
+            },
+            Machine::advance_translation_generation,
+            |machine: &mut Machine<FakeHost, NoDevices>| machine.translation_generation += 1,
+        ] {
+            let before = machine.contexts(2, variant);
+            change(&mut machine);
+            machine.table_base_changed();
+            let after = machine.contexts(2, variant);
+            assert!(after[0] != before[0] && after[1] != before[1]);
+        }
     }
 
     #[test]

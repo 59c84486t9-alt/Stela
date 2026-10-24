@@ -17,9 +17,11 @@
 //! A [`lookup_thunk`] serves an exit whose successor is not in the block's
 //! page, or not static (a return): it finds the target in the engine's
 //! [`LookupEntry`] table, which the engine fills from its own dispatches
-//! and tags with the context they were valid in (`ChainControl::context`,
+//! and tags with the context they were valid in (`ChainControl::contexts`,
 //! everything that decides which block a fetch runs: the translation and
-//! code generations, the exception level and the block variant). A hit
+//! code generations, the exception level and the block variant), one per
+//! half of the address space ([`half`]): a TTBR0 write changes only the
+//! lower half's translations, so the upper half's entries outlive it. A hit
 //! transfers like a thunk; a miss, another context or no budget exits
 //! exactly as the redirected exit would. It also clobbers R8, which no exit
 //! keeps live. The thunk of an exit that sets a nonzero BTYPE (BR or BLR)
@@ -39,7 +41,7 @@ pub const DYNAMIC_EXIT_BYTES: usize = 6;
 /// Entries in the engine's lookup table, a power of two.
 pub const LOOKUP_ENTRIES: usize = 4096;
 /// Bytes in a [`lookup_thunk`], without and with its static target.
-pub const LOOKUP_THUNK_BYTES: usize = 79;
+pub const LOOKUP_THUNK_BYTES: usize = 91;
 pub const STATIC_LOOKUP_THUNK_BYTES: usize = LOOKUP_THUNK_BYTES + 10;
 
 /// A direct exit to a static successor in a block's code.
@@ -63,9 +65,10 @@ pub struct ChainControl {
     /// The index of the block running, and above it the BTYPE it was
     /// entered with.
     pub block: u64,
-    /// The context the engine runs in now; lookup entries of another miss.
-    /// The engine never names a context 0.
-    pub context: u64,
+    /// The contexts the engine runs in now, for the lower and the upper
+    /// half ([`half`]); lookup entries of another miss. The engine never
+    /// names a context 0.
+    pub contexts: [u64; 2],
     /// The host address of the [`LookupEntry`] table.
     pub table: u64,
     /// Transfers lookup thunks made.
@@ -92,6 +95,12 @@ pub struct LookupEntry {
 /// BTYPE it was entered with.
 pub const BLOCK_BTYPE_SHIFT: u32 = 32;
 
+/// The half of the address space `pc` is in, by VA bit 55: 0 for TTBR0's,
+/// 1 for TTBR1's.
+pub const fn half(pc: u64) -> usize {
+    (pc >> 55 & 1) as usize
+}
+
 /// The table slot of `pc`.
 pub const fn lookup_slot(pc: u64) -> usize {
     (pc as usize >> 2) & (LOOKUP_ENTRIES - 1)
@@ -101,7 +110,7 @@ pub const fn lookup_slot(pc: u64) -> usize {
 const _: () = assert!(core::mem::offset_of!(ChainControl, budget) == 0);
 const RETIRED: u8 = core::mem::offset_of!(ChainControl, retired) as u8;
 const BLOCK: u8 = core::mem::offset_of!(ChainControl, block) as u8;
-const CONTEXT: u8 = core::mem::offset_of!(ChainControl, context) as u8;
+const CONTEXTS: u8 = core::mem::offset_of!(ChainControl, contexts) as u8;
 const TABLE: u8 = core::mem::offset_of!(ChainControl, table) as u8;
 const HITS: u8 = core::mem::offset_of!(ChainControl, hits) as u8;
 const _: () = assert!(core::mem::size_of::<LookupEntry>() == 32);
@@ -187,7 +196,10 @@ pub fn lookup_thunk(
     code.extend([0x48, 0x3b, 0x02]); // cmp rax,[rdx]
     code.extend([0x75, 0]); // jne miss
     misses.push(code.len());
-    code.extend([0x4c, 0x8b, 0x41, CONTEXT]); // mov r8,[rcx+context]
+    code.extend([0x49, 0x89, 0xc0]); // mov r8,rax
+    code.extend([0x49, 0xc1, 0xe8, 55]); // shr r8,55
+    code.extend([0x41, 0x83, 0xe0, 0x01]); // and r8d,1: the target's half
+    code.extend([0x4e, 0x8b, 0x44, 0xc1, CONTEXTS]); // mov r8,[rcx+r8*8+contexts]
     code.extend([0x4c, 0x3b, 0x42, ENTRY_CONTEXT]); // cmp r8,[rdx+context]
     code.extend([0x75, 0]); // jne miss
     misses.push(code.len());
@@ -325,7 +337,7 @@ mod tests {
         let mut table = vec![LookupEntry::default(); LOOKUP_ENTRIES];
         let mut control = ChainControl {
             table: table.as_ptr() as u64,
-            context: 7,
+            contexts: [5, 7],
             ..ChainControl::default()
         };
         let control_at = &mut control as *mut ChainControl as u64;
@@ -393,6 +405,14 @@ mod tests {
             assert_eq!(exit(dynamic(0, TARGET)), (TARGET, ExitKind::Return as u64));
             assert_eq!(exit(fixed(0, 0)), (TARGET, ExitKind::Call as u64));
             assert_eq!((control.budget, control.hits, control.block), (5, 2, 42));
+            // The lower half's context names a lower-half target's entries.
+            let lower = TARGET & !(1 << 55);
+            table[lookup_slot(lower)] = LookupEntry { pc: lower, ..entry };
+            assert_eq!(exit(dynamic(0, lower)), (lower, ExitKind::Return as u64));
+            table[lookup_slot(lower)].context = 5;
+            assert_eq!(exit(dynamic(0, lower)), (0x5151, 99));
+            assert_eq!((control.budget, control.hits), (4, 3));
+            table[lookup_slot(TARGET)] = entry;
             // A BR with BTYPE 0b11 needs the entry to accept it, and names
             // the BTYPE beside the block.
             table[lookup_slot(TARGET)].context = 7;
@@ -401,7 +421,7 @@ mod tests {
             assert_eq!(exit(branch(0, TARGET)), (0x5151, 99));
             assert_eq!(
                 (control.budget, control.retired, control.hits, control.block),
-                (4, 17, 3, 3 << BLOCK_BTYPE_SHIFT | 42)
+                (3, 26, 4, 3 << BLOCK_BTYPE_SHIFT | 42)
             );
             assert_eq!(munmap(page, PAGE), 0);
         }

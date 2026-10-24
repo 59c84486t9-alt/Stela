@@ -42,6 +42,7 @@ use crate::machine::{
     cpu::{Cpu, RESERVATION_GRANULE},
     ctrr,
     exception::Pstate,
+    mmu,
     registers::CpuProfile,
     registers::Lines,
 };
@@ -495,7 +496,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             unreachable!("only a parked PE is ready to run");
         };
         let incoming = *incoming;
-        let translates_alike = incoming.cpu.translation_inputs() == self.cpu.translation_inputs();
+        let inputs = [&incoming.cpu, &self.cpu].map(Cpu::translation_inputs);
+        let upper = inputs.map(|(controls, hcr)| {
+            let controls = controls.map(|controls| mmu::Controls {
+                ttbr0: 0,
+                ..controls
+            });
+            (controls, hcr)
+        });
         let outgoing = Parked {
             cpu: core::mem::replace(&mut self.cpu, incoming.cpu),
             event_sample: core::mem::replace(&mut self.event_sample, incoming.event_sample),
@@ -511,9 +519,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // The fetch and jump caches and the host's shadow tables follow the
         // incoming PE's translation regime. One that translates alike keeps
         // them: the tables and TLBIs are shared, and what derives from its
-        // other System registers is recomputed.
-        if translates_alike {
+        // other System registers is recomputed. One whose TTBR0s alone
+        // differ changes the lower half's translations, as a TTBR0 write.
+        if inputs[0] == inputs[1] {
             self.sync_regime();
+        } else if upper[0] == upper[1] {
+            self.table_base_changed();
         } else {
             self.translations_changed();
         }
@@ -1031,6 +1042,13 @@ mod tests {
         parked.cpu.registers.set(Register::TTBR0_EL1, 0, 0x4000);
         machine.switch_to(first);
         assert!(machine.translation_generation > generation);
+        assert_eq!(machine.statistics.table_base_changes, 1);
+        assert_eq!(machine.statistics.translation_changes, 0);
+        let Peer::Parked(parked) = &mut machine.peers[other] else {
+            panic!("parked peer")
+        };
+        parked.cpu.registers.set(Register::TTBR1_EL1, 0, 0x8000);
+        machine.switch_to(other);
         assert_eq!(machine.statistics.translation_changes, 1);
     }
 

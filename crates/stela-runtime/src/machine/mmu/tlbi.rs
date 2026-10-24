@@ -302,6 +302,20 @@ pub enum Reach {
     All,
 }
 
+impl Reach {
+    /// Whether it removes nothing of the upper half (VA bit 55 set, TTBR1's
+    /// range): it names no entry or only lower-half addresses.
+    pub fn lower_only(self) -> bool {
+        const UPPER: u64 = 1 << 55;
+        match self {
+            Self::Nothing => true,
+            Self::Containing(address) => address & UPPER == 0,
+            Self::Overlapping { first, last } => (first | last) & UPPER == 0,
+            Self::All => false,
+        }
+    }
+}
+
 /// VA[55:0] with bit 55 copied above: the address of either half.
 fn canonical(address: u64) -> u64 {
     (((address << 8) as i64) >> 8) as u64
@@ -776,6 +790,17 @@ mod tests {
         }
         assert!(covered.iter().all(|count| *count > 1000), "{covered:?}");
         assert!(reaches.iter().all(|count| *count > 1000), "{reaches:?}");
+    }
+
+    #[test]
+    fn lower_only_reaches_name_no_upper_half_address() {
+        assert!(Reach::Nothing.lower_only());
+        assert!(Reach::Containing(0x1_0000).lower_only());
+        assert!(!Reach::Containing(0xffff_fe00_0000_0000).lower_only());
+        let range = |first, last| Reach::Overlapping { first, last };
+        assert!(range(0x1000, 0x7f_ffff_ffff_ffff).lower_only());
+        assert!(!range(0x1000, 0xff80_0000_0000_0000).lower_only());
+        assert!(!Reach::All.lower_only());
     }
 
     #[test]
