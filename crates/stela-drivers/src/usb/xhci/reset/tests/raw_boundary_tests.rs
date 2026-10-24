@@ -60,6 +60,7 @@ fn unpublished_profile(
         reset_ready: 0,
         reset_writes: 0,
         accesses: 0,
+        trap_mmio: false,
         fault: Fault::None,
         hang_next: false,
         device_task: false,

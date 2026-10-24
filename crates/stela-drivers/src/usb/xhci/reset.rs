@@ -481,6 +481,7 @@ pub(crate) mod tests {
         reset_ready: u64,
         pub reset_writes: usize,
         pub accesses: usize,
+        pub trap_mmio: bool,
         pub fault: Fault,
         pub hang_next: bool,
         pub device_task: bool,
@@ -1064,6 +1065,7 @@ pub(crate) mod tests {
     impl Registers for Model {
         fn read32(&mut self, offset: usize) -> u32 {
             let mut s = self.0.borrow_mut();
+            assert!(!s.trap_mmio, "retained stale consumer reached native MMIO");
             s.accesses += 1;
             if offset == 0x40 + USBSTS {
                 let deferred = core::mem::take(&mut s.deferred);
@@ -1093,6 +1095,7 @@ pub(crate) mod tests {
         }
         fn write32(&mut self, offset: usize, value: u32) {
             let mut s = self.0.borrow_mut();
+            assert!(!s.trap_mmio, "retained stale consumer reached native MMIO");
             s.accesses += 1;
             if offset == 0x1000 {
                 s.command();
@@ -1141,6 +1144,7 @@ pub(crate) mod tests {
         }
         fn write64(&mut self, offset: usize, value: u64) {
             let mut s = self.0.borrow_mut();
+            assert!(!s.trap_mmio, "retained stale consumer reached native MMIO");
             s.accesses += 1;
             if offset == 0x800 + ERDP {
                 let index = ((value & !15) - s.events) as usize / 16;
@@ -1241,6 +1245,7 @@ pub(crate) mod tests {
             reset_ready: 0,
             reset_writes: 0,
             accesses: 0,
+            trap_mmio: false,
             fault: Fault::None,
             hang_next: false,
             device_task: false,
