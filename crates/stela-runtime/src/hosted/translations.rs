@@ -147,6 +147,26 @@ struct State {
     closed: bool,
 }
 
+impl State {
+    /// Charge only the payload retained after a replacement. A refused offer
+    /// leaves the previous translation and its charge intact.
+    fn keep_prepared(&mut self, offer: &Offer, bound: usize) {
+        let key = (offer.key, offer.pc, offer.context);
+        let old = self
+            .prepared
+            .get(&key)
+            .map_or(0, |block| block.native.x86_64_code.len());
+        let total = self
+            .prepared_bytes
+            .checked_sub(old)
+            .and_then(|bytes| bytes.checked_add(offer.block.native.x86_64_code.len()));
+        if let Some(total) = total.filter(|&bytes| bytes <= bound) {
+            self.prepared.insert(key, offer.block.clone());
+            self.prepared_bytes = total;
+        }
+    }
+}
+
 /// The store's directory, when the process has one.
 struct Disk {
     config: Config,
@@ -317,13 +337,9 @@ impl Shared {
     /// workers to prove and write.
     fn prepare(&'static self, offer: Offer) {
         let mut state = lock(&self.state);
-        let bytes = offer.block.native.x86_64_code.len();
         let shares = !matches!(self.role, Role::Service { .. });
-        if shares && state.prepared_bytes + bytes <= MAX_PREPARED_BYTES {
-            state.prepared_bytes += bytes;
-            state
-                .prepared
-                .insert((offer.key, offer.pc, offer.context), offer.block.clone());
+        if shares {
+            state.keep_prepared(&offer, MAX_PREPARED_BYTES);
         }
         if state.closed || self.disk.is_none() {
             return;
@@ -753,6 +769,112 @@ fn read_directory(path: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prepared_offer(pc: u64) -> Offer {
+        let preparation = Arc::new(crate::machine::test_preparation());
+        let mut input: Vec<_> = [0x9100_0400u32, 0xd65f_03c0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        preparation.admit(&mut input);
+        let page = pc & !(translations::PAGE_BYTES as u64 - 1);
+        Offer {
+            key: Digest::of(&pc.to_le_bytes()),
+            page,
+            pc,
+            context: preparation.context(page),
+            block: preparation.compile_input(&input, pc).unwrap(),
+            input,
+            preparation,
+            successors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn prepared_replacements_charge_only_retained_payload_and_preserve_declined_entries() {
+        let shared = Shared::leaked(None, Role::Process);
+        let mut offer = prepared_offer(0x1000);
+        let key = (offer.key, offer.pc, offer.context);
+        // Small accounting limits exercise actual map replacement without
+        // requiring a production-size arena allocation.
+        offer.block.native.x86_64_code = vec![1; 10];
+        let mut state = lock(&shared.state);
+        for _ in 0..100 {
+            state.keep_prepared(&offer, 10);
+            assert_eq!((state.prepared.len(), state.prepared_bytes), (1, 10));
+        }
+        offer.block.native.x86_64_code = vec![2; 7];
+        state.keep_prepared(&offer, 10);
+        assert_eq!(state.prepared_bytes, 7);
+        offer.block.native.x86_64_code = vec![3; 10];
+        state.keep_prepared(&offer, 10);
+        assert_eq!(state.prepared_bytes, 10);
+        offer.block.native.x86_64_code = vec![4; 11];
+        state.keep_prepared(&offer, 10);
+        assert_eq!(state.prepared_bytes, 10);
+        assert_eq!(state.prepared[&key].native.x86_64_code, vec![3; 10]);
+        let other = prepared_offer(0x2000);
+        state.keep_prepared(&other, 10);
+        assert_eq!((state.prepared.len(), state.prepared_bytes), (1, 10));
+        offer.block.native.x86_64_code = vec![5; 3];
+        state.keep_prepared(&offer, 10);
+        assert_eq!(state.prepared_bytes, 3);
+        assert_eq!(state.prepared[&key].native.x86_64_code, vec![5; 3]);
+        // Corrupt accounting cannot wrap into accepting/replacing a payload.
+        state.prepared_bytes = 2;
+        state.keep_prepared(&offer, 10);
+        assert_eq!(state.prepared_bytes, 2);
+        assert_eq!(state.prepared[&key].native.x86_64_code, vec![5; 3]);
+        state.prepared_bytes = usize::MAX;
+        state.keep_prepared(&other, usize::MAX);
+        assert_eq!(state.prepared.len(), 1);
+        assert_eq!(state.prepared_bytes, usize::MAX);
+    }
+
+    #[test]
+    fn prepared_replacement_keeps_other_entries_in_the_total() {
+        let shared = Shared::leaked(None, Role::Process);
+        let mut first = prepared_offer(0x1000);
+        let mut second = prepared_offer(0x2000);
+        first.block.native.x86_64_code = vec![1; 7];
+        second.block.native.x86_64_code = vec![2; 3];
+        let mut state = lock(&shared.state);
+        state.keep_prepared(&first, 10);
+        state.keep_prepared(&second, 10);
+        for (size, expected) in [(5, 8), (7, 10), (8, 10)] {
+            first.block.native.x86_64_code = vec![1; size];
+            state.keep_prepared(&first, 10);
+            assert_eq!((state.prepared.len(), state.prepared_bytes), (2, expected));
+            assert_eq!(
+                state.prepared[&(second.key, second.pc, second.context)]
+                    .native
+                    .x86_64_code,
+                vec![2; 3]
+            );
+        }
+        assert_eq!(
+            state.prepared[&(first.key, first.pc, first.context)]
+                .native
+                .x86_64_code,
+            vec![1; 7]
+        );
+    }
+
+    #[test]
+    fn diskless_process_shares_prepared_blocks_but_service_does_not() {
+        for role in [Role::Process, Role::Service { workers: 1 }] {
+            let shared = Shared::leaked(None, role);
+            let offer = prepared_offer(0x1000);
+            let bytes = offer.block.native.x86_64_code.len();
+            shared.prepare(offer.clone());
+            shared.prepare(offer);
+            let state = lock(&shared.state);
+            let retained = usize::from(role == Role::Process);
+            assert_eq!(state.prepared.len(), retained);
+            assert_eq!(state.prepared_bytes, retained * bytes);
+            assert!(state.queue.is_empty());
+        }
+    }
 
     #[test]
     fn records_replace_through_a_sibling_and_eviction_removes_the_oldest_first() {
