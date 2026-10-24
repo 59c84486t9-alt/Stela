@@ -1145,7 +1145,8 @@ pub struct Statistics {
     /// Halves whose lookup contexts were forgotten, by cause: an ASIDE1, a
     /// TLBI of everything, a TLBI by VA through a leaf too large to clear
     /// entry by entry, and any other change (an unscoped translation
-    /// change, the host's fetch permissions).
+    /// change, the host's fetch permissions, the upper half's first
+    /// non-global fetch).
     pub lookup_forgets: [u64; 4],
     pub compiled: u64,
     /// Counter ticks spent analyzing and compiling `compiled`.
@@ -2349,9 +2350,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
         for half in halves {
             self.statistics.lookup_forgets[cause] += 1;
             self.spaces[half].clear();
+            self.recent[half] = None;
             self.fetch_leaves[half] = 0;
             self.private_fetches[half] = false;
         }
+    }
+
+    /// A fetch in `half` translated through a leaf of `size` bytes. The
+    /// upper half's contexts leave out the ASID until a fetch of it is
+    /// non-global ([`Self::half_inputs`]): the first such fetch forgets
+    /// them, as their entries may name blocks of another ASID's page.
+    fn fetched_through(&mut self, half: usize, size: u64, global: bool) {
+        if half == 1 && !global && !self.private_fetches[1] {
+            self.forget_spaces(1..=1, 3);
+        }
+        self.fetch_leaves[half] = self.fetch_leaves[half].max(size);
+        self.private_fetches[half] |= !global;
     }
 
     /// Drop the lookup entries, of every context, of the PCs a TLBI by VA
@@ -3476,16 +3490,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// What decides `half`'s translations besides the tables' contents:
     /// both regimes' controls and HCR_EL2. The upper half's leave out
-    /// TTBR0's table address, which it never walks, but keep TTBR0's ASID
-    /// field while TCR.A1 selects it, as it selects the upper half's
-    /// non-global entries.
+    /// TTBR0's table address, which it never walks, and keep TTBR0's ASID
+    /// field only while TCR.A1 selects it and a fetch of the upper half
+    /// since its contexts were last forgotten was non-global: the ASID
+    /// selects nothing else of it, so a kernel's global text keeps one
+    /// context across every process's ASID.
     fn half_inputs(&self, half: usize) -> ([mmu::Controls; 2], u64) {
         const TCR_A1: u64 = 1 << 22;
         const TTBR_ASID: u64 = 0xffff << 48;
         let (mut controls, hcr) = self.cpu.translation_inputs();
         if half == 1 {
+            let private = self.private_fetches[1];
             for controls in &mut controls {
-                controls.ttbr0 &= if controls.tcr & TCR_A1 == 0 {
+                controls.ttbr0 &= if private && controls.tcr & TCR_A1 == 0 {
                     TTBR_ASID
                 } else {
                     0
@@ -3555,8 +3572,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             Translated::Mapped(translation) => {
                 let half = chain::half(pc);
-                self.fetch_leaves[half] = self.fetch_leaves[half].max(translation.size);
-                self.private_fetches[half] |= !translation.global;
+                self.fetched_through(half, translation.size, translation.global);
                 let physical = translation.physical & !(FETCH_PAGE - 1);
                 self.fetch[slot] = Some(FetchEntry {
                     page,
@@ -8506,10 +8522,11 @@ mod tests {
         assert!(other[0] != first[0] && other[1] == first[1]);
         msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0);
         assert_eq!(machine.contexts(2, variant), first);
-        // Another ASID selects other non-global entries of both halves.
+        // Another ASID is another lower-half context alone while every
+        // upper-half fetch was global.
         msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0 ^ 1 << 48);
         let asid = machine.contexts(2, variant);
-        assert!(asid[0] != first[0] && asid[1] != first[1]);
+        assert!(asid[0] != first[0] && asid[1] == first[1]);
         msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0);
         // Any other control, too, and back.
         msr(&mut machine, MSR_MAIR_EL1_X0, mair ^ 0xff);
@@ -8525,6 +8542,20 @@ mod tests {
         aside1(&mut machine);
         let maintained = machine.contexts(2, variant);
         assert!(maintained[0] != first[0] && maintained[1] == first[1]);
+        // A global upper fetch keeps it; the first non-global one forgets
+        // the upper half's contexts, whose ASID then selects among them.
+        machine.fetched_through(1, 0x4000, true);
+        assert_eq!(machine.contexts(2, variant), maintained);
+        machine.fetched_through(1, 0x4000, false);
+        let private = machine.contexts(2, variant);
+        assert!(private[0] == maintained[0] && private[1] != maintained[1]);
+        machine.fetched_through(1, 0x4000, false);
+        assert_eq!(machine.contexts(2, variant), private);
+        msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0 ^ 1 << 48);
+        let asid = machine.contexts(2, variant);
+        assert!(asid[0] != private[0] && asid[1] != private[1]);
+        msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0);
+        assert_eq!(machine.contexts(2, variant), private);
         // Then both, as do a TLBI of everything, a host permission change
         // and any other change to translation.
         for change in [
