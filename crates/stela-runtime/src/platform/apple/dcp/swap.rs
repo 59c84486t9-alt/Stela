@@ -64,7 +64,11 @@
 //! address-format and compression-info encodings are IOSurface-private and
 //! unrecorded. Multi-planar YCbCr surfaces refuse: the `getYCbCrMatrix`
 //! enumeration is unrecorded. The DVAs are I/O addresses in the display
-//! pipe's DART (`dart-dispext0` stream 0 on J473AP), not the DCP's.
+//! pipe's DART (`dart-dispext0` stream 0 on J473AP), not the DCP's. Zero is
+//! one of them: that DART's `vm-base` is 0, and `surface_map` (0x3d66a00)
+//! stores the first `IODMACommand` segment's address, so the first surface
+//! the restore UI maps is at DVA 0. Only the null flags say a layer is
+//! absent.
 pub use super::super::scanout::Rect;
 use super::super::scanout::{PixelFormat, Surface};
 
@@ -229,7 +233,7 @@ pub struct Submission {
 impl Submission {
     /// Parse `input`, refusing a shape the model does not present: a missing
     /// record, a secondary surface, enable bits outside layers 0..3 and
-    /// `DCP_REMOVE_LAYERS`, or a supplied surface without a DVA.
+    /// `DCP_REMOVE_LAYERS`.
     pub fn parse(input: &[u8]) -> Result<Self, &'static str> {
         if input.len() != SUBMIT_BYTES {
             return Err("DCP swap_submit_dcp input is not 0x1d30 bytes");
@@ -250,9 +254,6 @@ impl Submission {
                 continue;
             }
             let dva = u64_at(input, DVAS + index * 8);
-            if dva == 0 {
-                return Err("DCP swap surface has no DVA");
-            }
             let at = SURFACES + index * SURFACE_BYTES;
             *slot = Some(Layer {
                 record: Record::parse(&input[at..at + SURFACE_BYTES])?,
@@ -414,9 +415,10 @@ pub mod tests {
         let mut mask = good.clone();
         mask[ENABLED] = 0x10;
         assert!(Submission::parse(&mask).is_err());
-        let mut no_dva = good;
-        no_dva[DVAS..DVAS + 8].fill(0);
-        assert!(Submission::parse(&no_dva).is_err());
+        // DVA 0 is the first address of a DART whose vm-base is 0.
+        let mut first = good;
+        first[DVAS..DVAS + 8].fill(0);
+        assert_eq!(Submission::parse(&first).unwrap().layers[0].unwrap().dva, 0);
     }
 
     #[test]
