@@ -21,6 +21,12 @@
 /lib/bitrev.c
 /lib/find_bit.c
 /lib/find_random_bit.c
+/lib/bitmap.c
+/lib/bitmap-alloc.c
+/lib/idr.c
+/lib/radix-tree.c
+/lib/radix-tree.h
+/lib/xarray.c
 /lib/crc/crc32-main.c
 /lib/crc/gen_crc32table.c
 /lib/crc/Makefile

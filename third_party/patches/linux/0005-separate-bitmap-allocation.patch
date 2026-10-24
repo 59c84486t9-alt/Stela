@@ -1,0 +1,180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 23:33:51 -0400
+Subject: [PATCH] refactor(lib): separate bitmap allocation helpers
+
+---
+ lib/Makefile       |  2 +-
+ lib/bitmap-alloc.c | 74 ++++++++++++++++++++++++++++++++++++++++++++++
+ lib/bitmap.c       | 64 ---------------------------------------
+ 3 files changed, 75 insertions(+), 65 deletions(-)
+ create mode 100644 lib/bitmap-alloc.c
+
+diff --git a/lib/Makefile b/lib/Makefile
+index 6d30dd4666661c3167cb442c1f6df26d828f1f38..fdcce33353b6cb81f535ac1219fd815655bf553a 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -54,7 +54,7 @@ obj-y	+= lockref.o
+ CONTEXT_ANALYSIS_rhashtable.o := y
+ 
+ obj-y += bcd.o sort.o parser.o debug_locks.o random32.o \
+-	 bust_spinlocks.o kasprintf.o bitmap.o scatterlist.o \
++	 bust_spinlocks.o kasprintf.o bitmap.o bitmap-alloc.o scatterlist.o \
+ 	 scatterlist-mapping.o scatterlist-iov.o \
+ 	 list_sort.o uuid.o iov_iter.o clz_ctz.o \
+ 	 bsearch.o find_bit.o find_random_bit.o llist.o lwq.o \
+diff --git a/lib/bitmap-alloc.c b/lib/bitmap-alloc.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..fdb336ff2e2f8b3c2f9cb2952b94651c2ea41574
+--- /dev/null
++++ b/lib/bitmap-alloc.c
+@@ -0,0 +1,74 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * lib/bitmap.c
++ * Helper functions for bitmap.h.
++ */
++
++#include <linux/bitmap.h>
++#include <linux/device.h>
++#include <linux/export.h>
++#include <linux/slab.h>
++
++unsigned long *bitmap_alloc(unsigned int nbits, gfp_t flags)
++{
++	return kmalloc_array(BITS_TO_LONGS(nbits), sizeof(unsigned long),
++			     flags);
++}
++EXPORT_SYMBOL(bitmap_alloc);
++
++unsigned long *bitmap_zalloc(unsigned int nbits, gfp_t flags)
++{
++	return bitmap_alloc(nbits, flags | __GFP_ZERO);
++}
++EXPORT_SYMBOL(bitmap_zalloc);
++
++unsigned long *bitmap_alloc_node(unsigned int nbits, gfp_t flags, int node)
++{
++	return kmalloc_array_node(BITS_TO_LONGS(nbits), sizeof(unsigned long),
++				  flags, node);
++}
++EXPORT_SYMBOL(bitmap_alloc_node);
++
++unsigned long *bitmap_zalloc_node(unsigned int nbits, gfp_t flags, int node)
++{
++	return bitmap_alloc_node(nbits, flags | __GFP_ZERO, node);
++}
++EXPORT_SYMBOL(bitmap_zalloc_node);
++
++void bitmap_free(const unsigned long *bitmap)
++{
++	kfree(bitmap);
++}
++EXPORT_SYMBOL(bitmap_free);
++
++static void devm_bitmap_free(void *data)
++{
++	unsigned long *bitmap = data;
++
++	bitmap_free(bitmap);
++}
++
++unsigned long *devm_bitmap_alloc(struct device *dev,
++				 unsigned int nbits, gfp_t flags)
++{
++	unsigned long *bitmap;
++	int ret;
++
++	bitmap = bitmap_alloc(nbits, flags);
++	if (!bitmap)
++		return NULL;
++
++	ret = devm_add_action_or_reset(dev, devm_bitmap_free, bitmap);
++	if (ret)
++		return NULL;
++
++	return bitmap;
++}
++EXPORT_SYMBOL_GPL(devm_bitmap_alloc);
++
++unsigned long *devm_bitmap_zalloc(struct device *dev,
++				  unsigned int nbits, gfp_t flags)
++{
++	return devm_bitmap_alloc(dev, nbits, flags | __GFP_ZERO);
++}
++EXPORT_SYMBOL_GPL(devm_bitmap_zalloc);
+diff --git a/lib/bitmap.c b/lib/bitmap.c
+index b9bfa157e0950dc6113375a50665dcfbdaaba2f1..9592bc527d025eee1d3afca15850434a8dd334fa 100644
+--- a/lib/bitmap.c
++++ b/lib/bitmap.c
+@@ -729,70 +729,6 @@ void bitmap_fold(unsigned long *dst, const unsigned long *orig,
+ }
+ #endif /* CONFIG_NUMA */
+ 
+-unsigned long *bitmap_alloc(unsigned int nbits, gfp_t flags)
+-{
+-	return kmalloc_array(BITS_TO_LONGS(nbits), sizeof(unsigned long),
+-			     flags);
+-}
+-EXPORT_SYMBOL(bitmap_alloc);
+-
+-unsigned long *bitmap_zalloc(unsigned int nbits, gfp_t flags)
+-{
+-	return bitmap_alloc(nbits, flags | __GFP_ZERO);
+-}
+-EXPORT_SYMBOL(bitmap_zalloc);
+-
+-unsigned long *bitmap_alloc_node(unsigned int nbits, gfp_t flags, int node)
+-{
+-	return kmalloc_array_node(BITS_TO_LONGS(nbits), sizeof(unsigned long),
+-				  flags, node);
+-}
+-EXPORT_SYMBOL(bitmap_alloc_node);
+-
+-unsigned long *bitmap_zalloc_node(unsigned int nbits, gfp_t flags, int node)
+-{
+-	return bitmap_alloc_node(nbits, flags | __GFP_ZERO, node);
+-}
+-EXPORT_SYMBOL(bitmap_zalloc_node);
+-
+-void bitmap_free(const unsigned long *bitmap)
+-{
+-	kfree(bitmap);
+-}
+-EXPORT_SYMBOL(bitmap_free);
+-
+-static void devm_bitmap_free(void *data)
+-{
+-	unsigned long *bitmap = data;
+-
+-	bitmap_free(bitmap);
+-}
+-
+-unsigned long *devm_bitmap_alloc(struct device *dev,
+-				 unsigned int nbits, gfp_t flags)
+-{
+-	unsigned long *bitmap;
+-	int ret;
+-
+-	bitmap = bitmap_alloc(nbits, flags);
+-	if (!bitmap)
+-		return NULL;
+-
+-	ret = devm_add_action_or_reset(dev, devm_bitmap_free, bitmap);
+-	if (ret)
+-		return NULL;
+-
+-	return bitmap;
+-}
+-EXPORT_SYMBOL_GPL(devm_bitmap_alloc);
+-
+-unsigned long *devm_bitmap_zalloc(struct device *dev,
+-				  unsigned int nbits, gfp_t flags)
+-{
+-	return devm_bitmap_alloc(dev, nbits, flags | __GFP_ZERO);
+-}
+-EXPORT_SYMBOL_GPL(devm_bitmap_zalloc);
+-
+ #if BITS_PER_LONG == 64
+ /**
+  * bitmap_from_arr32 - copy the contents of u32 array of bits to bitmap

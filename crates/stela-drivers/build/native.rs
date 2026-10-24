@@ -208,6 +208,10 @@ impl Linux {
             PathBuf::from(format!("{DRM}/drm_fourcc.c")),
             PathBuf::from(format!("{LINUX}/lib/scatterlist.c")),
             PathBuf::from(format!("{LINUX}/lib/find_bit.c")),
+            PathBuf::from(format!("{LINUX}/lib/bitmap.c")),
+            PathBuf::from(format!("{LINUX}/lib/idr.c")),
+            PathBuf::from(format!("{LINUX}/lib/radix-tree.c")),
+            PathBuf::from(format!("{LINUX}/lib/xarray.c")),
         ];
         for source in &upstream {
             println!("cargo:rerun-if-changed={}", source.display());
@@ -251,6 +255,7 @@ impl Linux {
             ("linux_crc", "crc.c", "STELA_LINUX_CRC_TEST"),
             ("linux_find_bit", "find_bit.c", "STELA_LINUX_FIND_BIT_TEST"),
             ("linux_cpuhotplug", "cpuhotplug.c", "STELA_LINUX_CPUHP_TEST"),
+            ("linux_trees", "trees.c", "STELA_LINUX_TREES_TEST"),
             (
                 "linux_string_helpers",
                 "string_helpers.c",
