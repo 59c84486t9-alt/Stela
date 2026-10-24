@@ -447,6 +447,9 @@ fn linux_archive(
         // helpers compare signed counts and retain unused public parameters.
         .flag("-Wno-sign-compare")
         .flag("-Wno-unused-parameter")
+        // Linux's top-level Makefile builds every file with -Wno-pointer-sign:
+        // mutex.c passes its unsigned owner word to the long atomic helpers.
+        .flag("-Wno-pointer-sign")
         .files(upstream);
     let objects = upstream_build.compile_intermediates();
     let mut combined = build.clone();
