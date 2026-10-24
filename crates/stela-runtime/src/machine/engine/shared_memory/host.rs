@@ -212,6 +212,10 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         self.local.native_timing(phase);
     }
     #[cfg(feature = "native-profile")]
+    fn native_instruction_sample(&mut self, sample: super::super::NativeInstructionSample<'_>) {
+        self.local.native_instruction_sample(sample);
+    }
+    #[cfg(feature = "native-profile")]
     fn native_timing_work_start(&mut self, work: super::super::NativeTimingWork) -> Option<u64> {
         self.local.native_timing_work_start(work)
     }

@@ -2569,6 +2569,8 @@ fn run<H: Host>(
                 "NATIVE PROFILE bsp_reference_ticks {:?}\n",
                 host::profile_snapshot()
             ));
+            #[cfg(feature = "native-profile")]
+            host::profile_word_report();
             service_gap = 0;
             beat = (now, native, blocks, compiled, chained, events);
             translation = translation_report(machine, translation, compiled - beat_compiled);

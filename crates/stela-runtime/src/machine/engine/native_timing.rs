@@ -26,3 +26,16 @@ impl NativeTimingPhase {
 pub enum NativeTimingWork {
     DeviceLines,
 }
+
+/// Immutable attribution for an actually recovered native body. Deferred
+/// service terminals have not retired; a failed access is a separate attempt.
+/// Native byte intervals are static source attribution, not executed x86 counts.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeInstructionSample<'a> {
+    pub source: &'a [u8],
+    pub source_map: &'a [(stela_compiler::GuestAddress, usize)],
+    pub native_bytes: usize,
+    pub retired: u64,
+    pub faulting: bool,
+    pub deferred_terminal: bool,
+}

@@ -15,7 +15,7 @@ mod monitor;
 mod native_timing;
 pub use crate::platform::dma::{DmaError, TransferFault};
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
-pub use native_timing::{NativeTimingPhase, NativeTimingWork};
+pub use native_timing::{NativeInstructionSample, NativeTimingPhase, NativeTimingWork};
 mod pointer;
 mod prepare;
 pub use device_read::{CanonicalDeviceMemory, ConsumedScalar, DeviceReadRequest, DeviceReadShape};
@@ -337,6 +337,8 @@ pub trait Host {
     /// contain neither checkpoints nor their counters.
     #[cfg(feature = "native-profile")]
     fn native_timing(&mut self, _phase: NativeTimingPhase) {}
+    #[cfg(feature = "native-profile")]
+    fn native_instruction_sample(&mut self, _sample: NativeInstructionSample<'_>) {}
     #[cfg(feature = "native-profile")]
     fn native_timing_work_start(&mut self, _work: NativeTimingWork) -> Option<u64> {
         None

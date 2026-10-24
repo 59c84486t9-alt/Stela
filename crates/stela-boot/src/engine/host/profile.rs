@@ -1,5 +1,7 @@
 //! Sparse, jittered, owner-local timing. No allocation or execution authority.
 use stela_runtime::machine::engine::NativeTimingPhase as Phase;
+#[path = "profile/words.rs"]
+pub(crate) mod words;
 
 const INITIAL_JITTER: u64 = 0x19d5_65c8_d843_ba71;
 const MIN_INTERVAL: u64 = 2048;
@@ -24,6 +26,7 @@ pub(crate) struct Snapshot {
     pub sampled_board_refreshes: u64,
     /// Inclusive across ALL sampled rounds, including partial rounds.
     pub sampled_board_ticks: u64,
+    pub words: words::Summary,
 }
 
 pub(crate) struct Profile {
@@ -36,6 +39,8 @@ pub(crate) struct Profile {
     started: u64,
     last: u64,
     pending: [u64; Phase::COUNT],
+    words: words::Histogram,
+    pending_words: Option<words::Captured>,
 }
 
 impl Default for Profile {
@@ -50,6 +55,8 @@ impl Default for Profile {
             started: 0,
             last: 0,
             pending: [0; Phase::COUNT],
+            words: words::Histogram::default(),
+            pending_words: None,
         }
     }
 }
@@ -78,7 +85,32 @@ impl Profile {
     }
 
     pub(crate) fn snapshot(&self) -> Snapshot {
-        self.snapshot
+        Snapshot {
+            words: self.words.summary,
+            ..self.snapshot
+        }
+    }
+
+    pub(crate) fn instructions(
+        &mut self,
+        sample: stela_runtime::machine::engine::NativeInstructionSample<'_>,
+    ) {
+        if !self.active {
+            return;
+        }
+        if self.pending_words.is_some() {
+            self.words.summary.dropped_bodies = self.words.summary.dropped_bodies.saturating_add(1);
+            return;
+        }
+        self.pending_words = words::Captured::new(sample);
+        if self.pending_words.is_none() {
+            self.words.summary.invalid_samples =
+                self.words.summary.invalid_samples.saturating_add(1);
+        }
+    }
+
+    pub(crate) fn top_words(&self, ranking: words::Ranking) -> [Option<words::Weight>; words::TOP] {
+        self.words.top_by(ranking)
     }
 
     pub(crate) fn calibrate(&mut self, mut clock: impl FnMut() -> u64) {
@@ -94,6 +126,10 @@ impl Profile {
     /// whole-round time separately and cannot pollute complete phase totals.
     pub(crate) fn event(&mut self, phase: Phase, clock: impl FnOnce() -> u64) {
         if phase == Phase::Begin {
+            if self.pending_words.take().is_some() {
+                self.words.summary.dropped_bodies =
+                    self.words.summary.dropped_bodies.saturating_add(1);
+            }
             self.snapshot.rounds = self.snapshot.rounds.saturating_add(1);
             if self.remaining != 0 {
                 self.remaining -= 1;
@@ -136,6 +172,9 @@ impl Profile {
             } else {
                 snapshot.partial = snapshot.partial.saturating_add(1);
             }
+            if let Some(captured) = self.pending_words.take() {
+                self.words.merge(captured);
+            }
         }
     }
 
@@ -173,6 +212,68 @@ mod tests {
         Phase::Recovered,
         Phase::End,
     ];
+
+    fn instruction() -> stela_runtime::machine::engine::NativeInstructionSample<'static> {
+        stela_runtime::machine::engine::NativeInstructionSample {
+            source: &[1, 0, 0, 0],
+            source_map: &[(stela_compiler::GuestAddress(0x4000), 3)],
+            native_bytes: 12,
+            retired: 1,
+            faulting: false,
+            deferred_terminal: false,
+        }
+    }
+
+    #[test]
+    fn instruction_aggregation_follows_end_and_unsampled_rounds_ignore_metadata() {
+        let mut profile = Profile::default();
+        profile.event(Phase::Begin, || 100);
+        profile.instructions(instruction());
+        assert_eq!(profile.snapshot().words.bodies, 0);
+        assert!(
+            profile
+                .top_words(words::Ranking::Frequency)
+                .iter()
+                .all(Option::is_none)
+        );
+        profile.instructions(instruction());
+        assert_eq!(profile.snapshot().words.dropped_bodies, 1);
+        for (index, phase) in PHASES.into_iter().enumerate().skip(1) {
+            profile.event(phase, || 100 + index as u64 * 10);
+        }
+        let result = profile.snapshot();
+        assert_eq!(result.complete_ticks, 80);
+        assert_eq!(
+            (
+                result.words.bodies,
+                result.words.retired_words,
+                result.words.wrapper_bytes
+            ),
+            (1, 1, 3)
+        );
+        profile.event(Phase::Begin, || panic!("unsampled clock"));
+        let mut invalid = instruction();
+        invalid.source_map = &[];
+        profile.instructions(invalid);
+        assert_eq!(profile.snapshot().words.invalid_samples, 0);
+        assert!(profile.pending_words.is_none());
+    }
+
+    #[test]
+    fn abandoned_sample_is_counted_and_does_not_leak_into_the_next_round() {
+        let mut profile = Profile::default();
+        profile.event(Phase::Begin, || 100);
+        profile.instructions(instruction());
+        profile.event(Phase::Begin, || panic!("unsampled clock"));
+        assert_eq!(profile.snapshot().words.dropped_bodies, 1);
+        assert_eq!(profile.snapshot().words.bodies, 0);
+        profile.remaining = 0;
+        for (index, phase) in PHASES.into_iter().enumerate() {
+            profile.event(phase, || 1000 + index as u64 * 10);
+        }
+        assert_eq!(profile.snapshot().words.bodies, 0);
+        assert_eq!(profile.snapshot().complete_ticks, 80);
+    }
 
     #[test]
     fn complete_phases_partition_the_sample_and_unsampled_rounds_read_no_clock() {

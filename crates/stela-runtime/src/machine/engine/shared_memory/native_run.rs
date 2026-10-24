@@ -541,6 +541,16 @@ impl NativeRun<'_> {
         *self.retired = self.retired.wrapping_add(retired);
         observation.settled_pc = settled_pc;
         observation.retired = retired;
+        #[cfg(feature = "native-profile")]
+        host.native_instruction_sample(super::super::NativeInstructionSample {
+            source: &self.artifact.source,
+            source_map: &self.artifact.source_map,
+            native_bytes: self.artifact.code.len(),
+            retired,
+            faulting: status != MemoryStatus::Success,
+            deferred_terminal: status == MemoryStatus::Success
+                && retired < self.artifact.source.len() as u64 / 4,
+        });
         // This happens while the actual owner-local Host/code arena, RAM and
         // current target proof are still borrowed, before Release publication.
         Ok(())

@@ -430,6 +430,37 @@ pub(crate) fn profile_snapshot() -> profile::Snapshot {
     state().native_profile.snapshot()
 }
 
+#[cfg(feature = "native-profile")]
+pub(crate) fn profile_word_report() {
+    use profile::words::Ranking;
+    crate::output::arguments(format_args!(
+        "NATIVE WORD coverage_sampled_bsp {:?}\n",
+        state().native_profile.snapshot().words,
+    ));
+    for ranking in [
+        Ranking::Frequency,
+        Ranking::ObservedBytes,
+        Ranking::MaximumBytes,
+    ] {
+        for row in state()
+            .native_profile
+            .top_words(ranking)
+            .into_iter()
+            .flatten()
+        {
+            crate::output::arguments(format_args!(
+                "NATIVE WORD sampled_bsp rank={ranking:?} word={:#010x} event={:?} count_lower={} count_upper={} observed_attributed_bytes={} max_attributed_bytes={}\n",
+                row.word,
+                row.event,
+                row.upper.saturating_sub(row.error),
+                row.upper,
+                row.observed_bytes,
+                row.max_bytes,
+            ));
+        }
+    }
+}
+
 impl State {
     fn host_physical(&self, guest: u64) -> Option<u64> {
         self.run(guest).map(|(host, _)| host)
@@ -925,6 +956,13 @@ impl Host for BareHost<'_> {
             profile.calibrate(profile_timestamp);
         }
         profile.event(phase, profile_timestamp);
+    }
+    #[cfg(feature = "native-profile")]
+    fn native_instruction_sample(
+        &mut self,
+        sample: stela_runtime::machine::engine::NativeInstructionSample<'_>,
+    ) {
+        state().native_profile.instructions(sample);
     }
     fn native_worker(&self) -> Option<stela_runtime::machine::engine::publication::WorkerId> {
         local::native_worker()
