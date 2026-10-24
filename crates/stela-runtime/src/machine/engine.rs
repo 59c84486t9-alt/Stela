@@ -4215,10 +4215,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Err(stop) => return Some(Err(stop)),
         };
         let pc = self.cpu.pc;
-        self.cpu.pstate.btype = 0;
         match result {
-            Ok((target, _)) if form == Form::Return => self.cpu.pc = target,
+            Ok((target, _)) if form == Form::Return => {
+                self.cpu.pstate.btype = 0;
+                self.cpu.pc = target;
+            }
             Ok((value, _)) => {
+                self.cpu.pstate.btype = 0;
                 self.cpu.state.x[register] = value;
                 self.cpu.pc = pc + INSTRUCTION;
             }
@@ -9892,6 +9895,55 @@ mod tests {
         machine.cpu.registers.set(SystemRegister::SCTLR_EL1, 0, 0);
         machine.system_instruction_for_test(PACIBSP);
         assert_eq!(machine.cpu.pstate.el, 1);
+    }
+
+    #[test]
+    fn implicit_authentication_fault_saves_incoming_btype_before_completion() {
+        let pointer = 0xffff_ff80_0000_4000u64;
+        for (sign, authenticate, ret, key) in [
+            (0xd503_233f, 0xd503_23bf, 0xd65f_0bff, 0),
+            (0xd503_237f, 0xd503_23ff, 0xd65f_0fff, 1),
+        ] {
+            for chip in [crate::machine::Chip::AppleM2, crate::machine::Chip::AppleM6] {
+                for (word, combined) in [(authenticate, false), (ret, true)] {
+                    for btype in 1..=3 {
+                        let mut machine = pac_machine_for(chip, &[]);
+                        machine.cpu.state.x[30] = pointer;
+                        machine.cpu.state.sp = 0xffff_ff80_0001_0000;
+                        machine.system_instruction_for_test(sign);
+                        let signed = machine.cpu.state.x[30];
+                        machine.cpu.state.sp += 16;
+                        let sp = machine.cpu.state.sp;
+                        machine.cpu.state.nzcv = 0xa000_0000;
+                        machine.cpu.pstate.btype = btype;
+                        let saved = machine.cpu.pstate.to_spsr(machine.cpu.state.nzcv);
+                        let pc = machine.cpu.pc;
+                        let retired = machine.cpu.retired;
+                        // Invoke the actual implicit path after its source-entry
+                        // boundary; this fixture does not model a guarded leaf.
+                        machine.system_instruction_for_test(word);
+                        let faults = !combined || chip == crate::machine::Chip::AppleM6;
+                        if faults {
+                            assert_eq!(machine.cpu.read(SystemRegister::SPSR_EL1), saved);
+                            assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), pc);
+                            assert_eq!(
+                                machine.cpu.read(SystemRegister::ESR_EL1),
+                                0x7200_0000 | key
+                            );
+                            assert_eq!(machine.cpu.state.x[30], signed);
+                        } else {
+                            assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0);
+                            assert_ne!(machine.cpu.pc, pointer);
+                        }
+                        assert_eq!(machine.cpu.pstate.btype, 0);
+                        assert_eq!(machine.cpu.state.sp, sp);
+                        assert_eq!(machine.cpu.state.nzcv, 0xa000_0000);
+                        // This service entry leaves retirement to its scheduler.
+                        assert_eq!(machine.cpu.retired, retired);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
