@@ -9,6 +9,7 @@ workspace = true
 
 [features]
 default = ["std"]
+native-profile = []
 std = ["anyhow/std", "serde/std", "serde_json/std", "stela-compiler/std", "dep:tempfile", "dep:libc"]
 
 [dependencies]

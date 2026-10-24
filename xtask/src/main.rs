@@ -43,6 +43,9 @@ mod boot_native_early;
 #[path = "../../crates/stela-boot/src/native_memory.rs"]
 mod boot_native_memory;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/engine/host/profile.rs"]
+mod boot_native_profile;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_smp/topology.rs"]
 #[allow(dead_code)] // Includes UEFI capability checks unused by hosted topology tests.
 mod boot_native_topology;

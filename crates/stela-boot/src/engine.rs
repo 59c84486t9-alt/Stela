@@ -2302,6 +2302,7 @@ fn run<H: Host>(
             machine.statistics.waits,
         ),
     );
+    let mut retired_at_beat = machine.retired_instructions();
     // Counter ticks spent compiling, the guest instructions compiled and
     // the blocks taken from the translation store, at the last beat.
     let mut translation = (
@@ -2554,6 +2555,19 @@ fn run<H: Host>(
             output::arguments(format_args!(
                 "HOST SERVICE boundaries={service_boundaries} maximum_gap_us={}\n",
                 u128::from(service_gap) * 1_000_000 / u128::from(tsc_hz),
+            ));
+            let retired = machine.retired_instructions();
+            let instructions = retired.saturating_sub(retired_at_beat);
+            output::arguments(format_args!(
+                "GUEST PERFORMANCE retired={retired} interval_retired={instructions} instructions_per_second={} instructions_per_block_milli={}\n",
+                instructions.saturating_mul(u128::from(tsc_hz)) / u128::from(elapsed.max(1)),
+                instructions.saturating_mul(1000) / u128::from((blocks - beat.2).max(1)),
+            ));
+            retired_at_beat = retired;
+            #[cfg(feature = "native-profile")]
+            output::arguments(format_args!(
+                "NATIVE PROFILE bsp_reference_ticks {:?}\n",
+                host::profile_snapshot()
             ));
             service_gap = 0;
             beat = (now, native, blocks, compiled, chained, events);

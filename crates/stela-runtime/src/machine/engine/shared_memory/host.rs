@@ -207,6 +207,18 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
     fn native_cpu_lease(&self) -> Option<crate::NativeCpuLease> {
         self.local.native_cpu_lease()
     }
+    #[cfg(feature = "native-profile")]
+    fn native_timing(&mut self, phase: super::super::NativeTimingPhase) {
+        self.local.native_timing(phase);
+    }
+    #[cfg(feature = "native-profile")]
+    fn native_timing_work_start(&mut self, work: super::super::NativeTimingWork) -> Option<u64> {
+        self.local.native_timing_work_start(work)
+    }
+    #[cfg(feature = "native-profile")]
+    fn native_timing_work_end(&mut self, work: super::super::NativeTimingWork, started: u64) {
+        self.local.native_timing_work_end(work, started);
+    }
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
         // SAFETY: the retained canonical owner supplies mapping and all-reader
         // exclusion. No identity/raw-RAM fallback is admitted by this adapter.

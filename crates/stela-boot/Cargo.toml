@@ -14,6 +14,9 @@ test = false
 
 [workspace]
 
+[features]
+native-profile = ["stela-runtime/native-profile"]
+
 [dependencies]
 uefi = { version = "0.41", default-features = false, features = ["alloc"] }
 stela-drivers = { path = "../stela-drivers", features = ["linux-kernel"] }

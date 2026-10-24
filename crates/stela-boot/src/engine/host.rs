@@ -36,6 +36,8 @@ use stela_runtime::machine::{
 
 pub(crate) mod fp_diagnostic;
 pub(super) mod local;
+#[cfg(feature = "native-profile")]
+mod profile;
 mod ram;
 mod translated;
 pub(crate) use local::Owner as HostOwner;
@@ -200,6 +202,8 @@ pub struct State {
     pub stray: u64,
     /// TSC ticks spent in compiled guest code, its exits and faults.
     pub native_ticks: u64,
+    #[cfg(feature = "native-profile")]
+    native_profile: profile::Profile,
     /// Where the guest's address space lies beside the window.
     placement: Placement,
     /// The translated variant's software TLB, tagged by root, and the
@@ -326,6 +330,8 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             apic_hz: 0,
             fills: 0,
             native_ticks: 0,
+            #[cfg(feature = "native-profile")]
+            native_profile: profile::Profile::default(),
             resets: 0,
             exhausted: 0,
             lower_resets: 0,
@@ -403,6 +409,25 @@ pub fn statistics() -> Statistics {
 /// TSC ticks spent in compiled guest code so far.
 pub fn native_ticks() -> u64 {
     state().native_ticks
+}
+
+/// Serialize both sides of the reference-counter observation. Compiler fences
+/// also prevent moving memory work across these opt-in profiling boundaries.
+#[cfg(feature = "native-profile")]
+fn profile_timestamp() -> u64 {
+    use core::sync::atomic::{Ordering, compiler_fence};
+    compiler_fence(Ordering::SeqCst);
+    core::arch::x86_64::__cpuid(0);
+    // SAFETY: the installed native Host runs at CPL0 with its live CPU owner.
+    let value = unsafe { core::arch::x86_64::_rdtsc() };
+    core::arch::x86_64::__cpuid(0);
+    compiler_fence(Ordering::SeqCst);
+    value
+}
+
+#[cfg(feature = "native-profile")]
+pub(crate) fn profile_snapshot() -> profile::Snapshot {
+    state().native_profile.snapshot()
 }
 
 impl State {
@@ -832,6 +857,8 @@ fn native_return(code: NativeCode, exit: BlockExit, entered: u64) -> NativeExit 
     let state = state();
     state.native = false;
     state.native_ticks += rdtsc() - entered;
+    #[cfg(feature = "native-profile")]
+    state.native_profile.exit(exit.kind);
     if exit.kind == FAULT_KIND
         && let Some(recorded) = state.recorded.take()
     {
@@ -866,6 +893,39 @@ fn code_unit_bytes(state: &State) -> u64 {
 }
 
 impl Host for BareHost<'_> {
+    #[cfg(feature = "native-profile")]
+    fn native_timing_work_start(
+        &mut self,
+        work: stela_runtime::machine::engine::NativeTimingWork,
+    ) -> Option<u64> {
+        match work {
+            stela_runtime::machine::engine::NativeTimingWork::DeviceLines => {
+                state().native_profile.board_start(profile_timestamp)
+            }
+        }
+    }
+    #[cfg(feature = "native-profile")]
+    fn native_timing_work_end(
+        &mut self,
+        work: stela_runtime::machine::engine::NativeTimingWork,
+        started: u64,
+    ) {
+        match work {
+            stela_runtime::machine::engine::NativeTimingWork::DeviceLines => state()
+                .native_profile
+                .board_end(started, profile_timestamp()),
+        }
+    }
+    #[cfg(feature = "native-profile")]
+    fn native_timing(&mut self, phase: stela_runtime::machine::engine::NativeTimingPhase) {
+        let profile = &mut state().native_profile;
+        if phase == stela_runtime::machine::engine::NativeTimingPhase::Begin
+            && profile.needs_calibration()
+        {
+            profile.calibrate(profile_timestamp);
+        }
+        profile.event(phase, profile_timestamp);
+    }
     fn native_worker(&self) -> Option<stela_runtime::machine::engine::publication::WorkerId> {
         local::native_worker()
     }
@@ -983,13 +1043,19 @@ impl Host for BareHost<'_> {
         // Serialize before the executable alias runs the new bytes.
         core::arch::x86_64::__cpuid(0);
         state.code_used = end;
+        #[cfg(feature = "native-profile")]
+        state.native_profile.copied(code.len());
         Ok(NativeCode((state.code_virtual + offset) as usize))
     }
 
     fn install_immutable(&mut self, code: &Arc<Vec<u8>>) -> Result<NativeCode, InstallError> {
         if let Some(installed) = state().installed_immutable.lookup(code) {
+            #[cfg(feature = "native-profile")]
+            state().native_profile.installed(true);
             return Ok(installed);
         }
+        #[cfg(feature = "native-profile")]
+        state().native_profile.installed(false);
         let installed = self.install(code.as_slice())?;
         state().installed_immutable.record(code, installed);
         Ok(installed)

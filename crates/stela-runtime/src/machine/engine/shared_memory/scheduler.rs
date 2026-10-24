@@ -181,6 +181,9 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// refusals until their actual platform owners join this candidate. Calling
     /// this method does not enable production SMP or qualify original macOS.
     pub unsafe fn native_round(&mut self) -> Result<usize, Stop> {
+        #[cfg(feature = "native-profile")]
+        self.host
+            .native_timing(super::super::NativeTimingPhase::Begin);
         let mut scratch = core::mem::take(&mut self.host.round_scratch);
         // SAFETY: this wrapper forwards the caller's full native-round contract.
         // Restore only cleared plain metadata on every ordinary Result return;
@@ -188,6 +191,9 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         let result = unsafe { self.native_round_with_scratch(&mut scratch) };
         scratch.clear();
         self.host.round_scratch = scratch;
+        #[cfg(feature = "native-profile")]
+        self.host
+            .native_timing(super::super::NativeTimingPhase::End);
         result
     }
 
@@ -293,12 +299,19 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         }
         // Preparation can borrow canonical state while physical owners remain
         // held; close only the software Host sessions before constructing loans.
+        #[cfg(feature = "native-profile")]
+        self.host
+            .native_timing(super::super::NativeTimingPhase::SchedulerReady);
         self.close_native_services();
         let preparation_pc = self.cpu.pc;
         let preparation_el = self.cpu.pstate.el;
         let cohort = self
             .native_cohort(bindings, true)
             .map_err(|failure| failure.into_stop(preparation_pc, preparation_el))?;
+        #[cfg(feature = "native-profile")]
+        cohort
+            .host
+            .native_timing(super::super::NativeTimingPhase::Prepared);
         let expected = &mut scratch.expected;
         expected.extend(cohort.frames.iter().map(|frame| frame.identity().pe));
         let (reports, held) = {
@@ -306,6 +319,9 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             host.transport
                 .execute_held(&mut host.local, cohort.inventory, cohort.frames, held)
         };
+        #[cfg(feature = "native-profile")]
+        self.host
+            .native_timing(super::super::NativeTimingPhase::Recovered);
         let held = self.begin_native_services(held);
         if reports.len() != expected.len() {
             self.host

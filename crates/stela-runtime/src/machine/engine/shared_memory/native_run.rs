@@ -383,6 +383,8 @@ impl NativeRun<'_> {
         }
         let authority = NativeSystemTarget::capture_for(self.worker, host.native_cpu_lease())
             .map_err(|_| MemoryStatus::Unsupported)?;
+        #[cfg(feature = "native-profile")]
+        host.native_timing(super::super::NativeTimingPhase::CpuVerified);
         observation.physical_processor = Some(authority.physical_processor());
         if !authority.target().supports(self.artifact.identity.target) {
             return Err(MemoryStatus::Unsupported);
@@ -402,10 +404,14 @@ impl NativeRun<'_> {
                     .map_err(|_| MemoryStatus::Unsupported)?
             }
         };
+        #[cfg(feature = "native-profile")]
+        host.native_timing(super::super::NativeTimingPhase::CodeInstalled);
         let entry = self
             .memory
             .memory
             .prepare_native_system(self.artifact.requirements, &authority)?;
+        #[cfg(feature = "native-profile")]
+        host.native_timing(super::super::NativeTimingPhase::MemoryPrepared);
         let mut context = ExecutionContext::default();
         let mut raw = None;
         let mut malformed = false;
@@ -429,6 +435,8 @@ impl NativeRun<'_> {
                 result
             })
         };
+        #[cfg(feature = "native-profile")]
+        host.native_timing(super::super::NativeTimingPhase::BodyReturned);
         if malformed {
             return Err(MemoryStatus::Domain);
         }

@@ -12,8 +12,10 @@ mod guarded;
 mod hosted;
 pub mod installed_code;
 mod monitor;
+mod native_timing;
 pub use crate::platform::dma::{DmaError, TransferFault};
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
+pub use native_timing::{NativeTimingPhase, NativeTimingWork};
 mod pointer;
 mod prepare;
 pub use device_read::{CanonicalDeviceMemory, ConsumedScalar, DeviceReadRequest, DeviceReadShape};
@@ -331,6 +333,17 @@ pub enum InstallError {
 /// The x86 machine beneath the engine: guest RAM, native code, shadow
 /// translation, time and waiting.
 pub trait Host {
+    /// Optional observational timing on the real local owner. Regular builds
+    /// contain neither checkpoints nor their counters.
+    #[cfg(feature = "native-profile")]
+    fn native_timing(&mut self, _phase: NativeTimingPhase) {}
+    #[cfg(feature = "native-profile")]
+    fn native_timing_work_start(&mut self, _work: NativeTimingWork) -> Option<u64> {
+        None
+    }
+    #[cfg(feature = "native-profile")]
+    fn native_timing_work_end(&mut self, _work: NativeTimingWork, _started: u64) {}
+
     /// Select the source PE whose stopped services this Host can settle through
     /// its actual physical owner. Ordinary serial Hosts do not admit this path.
     fn select_native_service(&mut self, _worker: publication::WorkerId) -> bool {
@@ -1090,6 +1103,9 @@ struct Survey {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Statistics {
     pub blocks: u64,
+    /// Retirements from CPU incarnations replaced by a real PE restart.
+    /// Add live/parked CPU counters through `retired_instructions`.
+    pub replaced_retired: u128,
     /// Blocks entered through a chain from another, without the engine.
     pub chained: u64,
     /// Direct exits redirected into their successors.
@@ -1151,6 +1167,7 @@ impl core::ops::AddAssign for Statistics {
     fn add_assign(&mut self, other: Self) {
         let Self {
             blocks,
+            replaced_retired,
             chained,
             links,
             lookups,
@@ -1179,6 +1196,7 @@ impl core::ops::AddAssign for Statistics {
             translated_pages,
             degraded,
         } = other;
+        self.replaced_retired = self.replaced_retired.saturating_add(replaced_retired);
         for (total, count) in self.exit_kinds.iter_mut().zip(exit_kinds) {
             *total += count;
         }
@@ -2318,8 +2336,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let device = match self.device_lines {
             Some((lines, until)) if now < until => lines,
             _ => {
+                #[cfg(feature = "native-profile")]
+                let profile_started = self
+                    .host
+                    .native_timing_work_start(NativeTimingWork::DeviceLines);
                 let lines = self.devices.lines(self.current, now);
                 let until = self.devices.deadline(now).unwrap_or(u64::MAX);
+                #[cfg(feature = "native-profile")]
+                if let Some(started) = profile_started {
+                    self.host
+                        .native_timing_work_end(NativeTimingWork::DeviceLines, started);
+                }
                 self.device_lines = Some((lines, until));
                 lines
             }

@@ -209,6 +209,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.current
     }
 
+    /// Completed guest instructions across retained PE incarnations, including
+    /// stopped-service terminals and powered-down CPUs. No allocation or PE
+    /// switching occurs. Each CPU's internal u64 retirement counter must not
+    /// wrap within one incarnation; this is a performance counter, not PMU.
+    pub fn retired_instructions(&self) -> u128 {
+        self.peers
+            .iter()
+            .fold(self.statistics.replaced_retired, |total, peer| {
+                let retired = match peer {
+                    Peer::Running => self.cpu.retired,
+                    Peer::Parked(parked) => parked.cpu.retired,
+                    Peer::Off => 0,
+                };
+                total.saturating_add(u128::from(retired))
+            })
+    }
+
     /// Every PE's state, in PE order.
     pub fn peer_states(&self) -> Vec<PeerState<'_>> {
         self.peers
@@ -680,6 +697,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         pause_cpu(&mut cpu, None, now, self.processor_paused(pe));
         // Its SIQ_CFG_EL1 restarts at 0, which accepts IRQs.
         self.devices.irq_steering(pe, false, now);
+        let replaced = match &self.peers[pe] {
+            Peer::Running => self.cpu.retired,
+            Peer::Parked(parked) => parked.cpu.retired,
+            Peer::Off => 0,
+        };
+        self.statistics.replaced_retired = self
+            .statistics
+            .replaced_retired
+            .saturating_add(u128::from(replaced));
         if pe == self.current {
             self.cpu = cpu;
             self.waiting = None;
@@ -941,6 +967,47 @@ mod tests {
         let mut machine = board(&[], devices, alloc::vec![identity(0), identity(1)]);
         machine.schedule().unwrap();
         machine
+    }
+
+    #[test]
+    fn retirement_totals_count_live_parked_and_replaced_cpus_once() {
+        let mut machine = pair();
+        let other = 1 - machine.current;
+        machine.cpu.retired = 11;
+        let Peer::Parked(parked) = &mut machine.peers[other] else {
+            panic!("parked peer")
+        };
+        parked.cpu.retired = 7;
+        parked.waiting = Some(Wait {
+            kind: WaitKind::Interrupt,
+            timeout: None,
+            down: true,
+        });
+        assert_eq!(machine.retired_instructions(), 18);
+        assert!(
+            machine
+                .start(Start {
+                    cpu: machine.current,
+                    address: START
+                })
+                .is_err()
+        );
+        assert_eq!(machine.retired_instructions(), 18);
+        machine.restart(other, START).unwrap();
+        assert_eq!(machine.retired_instructions(), 18);
+        let Peer::Parked(parked) = &mut machine.peers[other] else {
+            panic!("parked peer")
+        };
+        parked.cpu.retired = 5;
+        assert_eq!(machine.retired_instructions(), 23);
+        machine.switch_to(other);
+        assert_eq!(machine.retired_instructions(), 23);
+        machine.restart(other, START).unwrap();
+        assert_eq!(machine.retired_instructions(), 23);
+        machine.cpu.retired = 3;
+        machine.devices.reset = Some(START);
+        machine.warm_reset().unwrap();
+        assert_eq!(machine.retired_instructions(), 26);
     }
 
     fn end_slice(machine: &mut Machine<FakeHost, Board>) {
