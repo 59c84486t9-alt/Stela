@@ -53,7 +53,7 @@ pub(super) struct NativeProcessorState<'a> {
     pub debug: &'a mut Option<DebugMode>,
     pub pointer: &'a mut PointerService,
     pub mirrors: &'a mut Mirrors,
-    pub device_lines: &'a mut Option<(Lines, u64)>,
+    pub device_lines: &'a mut Option<(Lines, u64, usize)>,
     pub watch: &'a mut Watch,
     pub tag_checks: &'a mut [bool; 2],
     pub prediction_context: &'a mut Option<PredictionContext>,

@@ -384,7 +384,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 crate::machine::timer::epoch_deadline(&self.cpu, now),
                 self.cpu.pmu.as_ref().and_then(|pmu| pmu.deadline()),
                 self.devices.dma_deadline(),
-                self.device_lines.map(|(_, until)| until),
+                self.device_lines.map(|(_, until, _)| until),
             ]
             .into_iter()
             .flatten()

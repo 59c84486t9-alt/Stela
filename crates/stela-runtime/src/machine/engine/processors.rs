@@ -514,6 +514,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.peers[self.current] = Peer::Parked(Box::new(outgoing));
         self.current = next;
         self.statistics.switches += 1;
+        // The switch changes no device: what derives from the PE goes, the
+        // devices' lines and deadline stay.
+        let device_lines = self.device_lines;
         // Another PE ran since the incoming one's exclusive load and may
         // have written its granule, even back to the same bytes: its
         // store-exclusive fails, as Arm permits of any (`observe_writes`).
@@ -530,6 +533,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         } else {
             self.controls_changed();
         }
+        self.device_lines = device_lines;
     }
 
     /// Clear the Exclusives monitor of every PE whose reserved granule
@@ -815,6 +819,9 @@ mod tests {
         host_wake: bool,
         /// The counts its lines and deadlines were asked at, in order.
         counts: Vec<u64>,
+        /// It answers `Devices::pins`, and the PEs that asked.
+        pins: bool,
+        pins_asked: Vec<usize>,
     }
 
     impl Board {
@@ -871,6 +878,13 @@ mod tests {
                 irq: self.irq[cpu],
                 fiq: false,
             }
+        }
+        fn pins(&mut self, cpu: usize) -> Option<Lines> {
+            self.pins_asked.push(cpu);
+            self.pins.then(|| Lines {
+                irq: self.irq[cpu],
+                fiq: false,
+            })
         }
         fn dma_deadline(&self) -> Option<u64> {
             self.dma
@@ -1300,6 +1314,7 @@ mod tests {
                 fiq: false,
             },
             100,
+            0,
         ));
         machine.mirrors[0] = stela_compiler::x86_64::register_read::Cell {
             readable: 1,
@@ -1456,6 +1471,7 @@ mod tests {
                     fiq: true,
                 },
                 100,
+                0,
             ));
             machine.watch.ranges[0] = (0x1000, 0x1fff);
             machine.watch.pass = [Some(0x1000), None];
@@ -2258,6 +2274,31 @@ mod tests {
         let counts = &machine.devices.counts;
         assert!(counts.len() > 2, "{counts:?}");
         assert!(counts.is_sorted(), "{counts:?}");
+    }
+
+    #[test]
+    fn a_switch_keeps_the_device_lines_and_reads_the_incoming_pes_pins() {
+        let mut machine = pair();
+        machine.devices.pins = true;
+        machine.devices.dma = Some(u64::MAX - 1);
+        machine.devices.irq = [false, true];
+        machine.device_lines = None;
+        let current = machine.processor();
+        let other = current ^ 1;
+        assert_eq!(machine.lines().irq, machine.devices.irq[current]);
+        let asked = machine.devices.lines_asked.len();
+        machine.switch_to(other);
+        // No device advances for the incoming PE: its latched pins answer.
+        assert_eq!(machine.lines().irq, machine.devices.irq[other]);
+        assert_eq!(machine.devices.lines_asked.len(), asked);
+        assert_eq!(machine.devices.pins_asked, [other]);
+        assert_eq!(machine.lines().irq, machine.devices.irq[other]);
+        assert_eq!(machine.devices.pins_asked, [other]);
+        // A board without latched pins is asked to advance again.
+        machine.devices.pins = false;
+        machine.switch_to(current);
+        assert_eq!(machine.lines().irq, machine.devices.irq[current]);
+        assert_eq!(machine.devices.lines_asked.len(), asked + 1);
     }
 
     /// Switch to the next PE that can run, which must be `pe`.

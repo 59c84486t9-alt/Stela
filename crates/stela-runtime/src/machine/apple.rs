@@ -3178,6 +3178,20 @@ impl Devices for AppleDevices {
         }
     }
 
+    /// The latched pins: [`Self::lines`] advances every device and settles
+    /// every PE's pins at once, so another PE's need no advance until a
+    /// device changes or its deadline passes.
+    fn pins(&mut self, cpu: usize) -> Option<Lines> {
+        if self.sleep.asleep {
+            return Some(Lines::default());
+        }
+        let pins = self.latch.pins(cpu);
+        Some(Lines {
+            irq: pins.irq,
+            fiq: pins.fiq,
+        })
+    }
+
     fn deadline(&mut self, now: u64) -> Option<u64> {
         self.observe_time(now, "deadline");
         if !self.publish_rtc_time_or_halt(now) {

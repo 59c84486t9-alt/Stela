@@ -690,6 +690,12 @@ pub trait Devices {
     /// Bring time-driven state up to `now` and report the interrupt lines
     /// the devices drive into PE `cpu`.
     fn lines(&mut self, cpu: usize, now: u64) -> Lines;
+    /// The lines the devices drive into PE `cpu` as the last [`Self::lines`]
+    /// left them, with no time brought forward: `None` when only `lines`
+    /// can tell. The engine asks after a PE switch, before the deadline.
+    fn pins(&mut self, _cpu: usize) -> Option<Lines> {
+        None
+    }
     /// The next counter value at which a device changes state by itself.
     fn deadline(&mut self, _now: u64) -> Option<u64> {
         None
@@ -1618,11 +1624,13 @@ pub struct Machine<H: Host, D: Devices> {
     event_sample: Option<u64>,
     /// What self-hosted debug needs of each instruction, while valid.
     debug: Option<DebugMode>,
-    /// The running PE's device lines and the count before which no device
-    /// changes state by itself (`Devices::deadline`), while valid: a device
-    /// or board register access, a System register write, an exception and
-    /// a PE switch can change them, and clear it.
-    device_lines: Option<(Lines, u64)>,
+    /// The device lines of a PE, the count before which no device changes
+    /// state by itself (`Devices::deadline`) and that PE, while valid: a
+    /// device or board register access, a System register write and an
+    /// exception can change them, and clear it. A PE switch keeps it, as it
+    /// changes no device: another PE's lines are then its latched pins
+    /// (`Devices::pins`).
+    device_lines: Option<(Lines, u64, usize)>,
     /// The PAC context, the memo of results and the key tag words, which
     /// native code reads and completes misses through (`pointer`).
     pointer: alloc::boxed::Box<pointer::PointerService>,
@@ -2583,7 +2591,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // The count is read only when an answer can change with it alone: a
         // device answer with a deadline, a timer's or a PMI's. Every exit
         // asks, and a hosted process's PE has none of them.
-        let timed = !matches!(self.device_lines, Some((_, u64::MAX)))
+        let timed = !matches!(self.device_lines, Some((_, u64::MAX, _)))
             || self.timer_deadline().is_some()
             || self
                 .cpu
@@ -2599,7 +2607,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// asks at it, so the devices never see time run backwards.
     fn lines_at(&mut self, now: u64) -> Lines {
         let device = match self.device_lines {
-            Some((lines, until)) if now < until => lines,
+            Some((lines, until, pe)) if now < until && pe == self.current => lines,
+            Some((_, until, _))
+                if now < until
+                    && let Some(lines) = self.devices.pins(self.current) =>
+            {
+                self.device_lines = Some((lines, until, self.current));
+                lines
+            }
             _ => {
                 #[cfg(feature = "native-profile")]
                 let profile_started = self
@@ -2612,7 +2627,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     self.host
                         .native_timing_work_end(NativeTimingWork::DeviceLines, started);
                 }
-                self.device_lines = Some((lines, until));
+                self.device_lines = Some((lines, until, self.current));
                 lines
             }
         };
