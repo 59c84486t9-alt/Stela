@@ -1311,14 +1311,16 @@ fn root_power_loss_quarantines_old_handles_and_unknown_power_never_grants_curren
         controller
             .reserve_current(
                 1,
+                identity::next_generation().unwrap(),
                 Attachment {
                     root_port: 1,
                     route: 0,
                     tier: 0,
                     speed: SUPER_SPEED,
                     translator: None,
-                    parent: None
-                }
+                    parent: None,
+                },
+                None,
             )
             .is_err()
     );

@@ -58,7 +58,7 @@ fn modern_live_igtk_update_guards_real_command_and_revokes_deferred_namespace() 
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     assert!(
         unsafe {
-            driver.with_management_modern(&mut owner, permit, delayed, |_, _, _| {
+            driver.with_management_modern::<_, _, ()>(&mut owner, permit, delayed, |_, _, _| {
                 panic!("old protected observation inherited new keys")
             })
         }
@@ -69,7 +69,7 @@ fn modern_live_igtk_update_guards_real_command_and_revokes_deferred_namespace() 
     state.allowed.set(false);
     assert!(
         unsafe {
-            driver.with_management_modern(&mut owner, permit, current, |_, _, _| {
+            driver.with_management_modern::<_, _, ()>(&mut owner, permit, current, |_, _, _| {
                 panic!("revoked current OS policy")
             })
         }
