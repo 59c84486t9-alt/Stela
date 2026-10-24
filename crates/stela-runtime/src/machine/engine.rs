@@ -1582,6 +1582,11 @@ pub struct Machine<H: Host, D: Devices> {
     spaces: [Vec<Space>; 2],
     /// Each half's last context.
     recent: [Option<Recent>; 2],
+    /// The largest leaf a fetch of each half translated through since its
+    /// contexts were last forgotten, 0 for none, and whether one was
+    /// non-global: what a TLBI by VA or ASID reaches of its lookup entries.
+    fetch_leaves: [u64; 2],
+    private_fetches: [bool; 2],
     /// The next context number; numbers are never reused.
     next_context: u64,
     /// Identification registers the CPU profile has no value for.
@@ -1787,6 +1792,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             targets: vec![chain::LookupEntry::default(); chain::LOOKUP_ENTRIES].into_boxed_slice(),
             spaces: [Vec::new(), Vec::new()],
             recent: [None; 2],
+            fetch_leaves: [0; 2],
+            private_fetches: [false; 2],
             next_context: 1,
             profile_missing: Vec::new(),
             lookup: super::system::Lookup::new(),
@@ -2332,6 +2339,40 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn forget_spaces(&mut self, halves: core::ops::RangeInclusive<usize>) {
         for half in halves {
             self.spaces[half].clear();
+            self.fetch_leaves[half] = 0;
+            self.private_fetches[half] = false;
+        }
+    }
+
+    /// Drop the lookup entries, of every context, of the PCs a TLBI by VA
+    /// reaches: those in the leaf around each address it names, as large
+    /// as the largest one a fetch of that half translated through. A half
+    /// whose span would cover the table forgets its contexts instead.
+    fn forget_lookups(&mut self, reach: mmu::tlbi::Reach) {
+        let (first, last) = match reach {
+            mmu::tlbi::Reach::Nothing => return,
+            mmu::tlbi::Reach::All => return self.forget_spaces(0..=1),
+            mmu::tlbi::Reach::Containing(address) => (address, address),
+            mmu::tlbi::Reach::Overlapping { first, last } => (first, last),
+        };
+        const UPPER: u64 = !0 << 55;
+        for (half, (low, high)) in [(0, !UPPER), (UPPER, u64::MAX)].into_iter().enumerate() {
+            let leaf = self.fetch_leaves[half];
+            if leaf == 0 || last < low || first > high {
+                continue;
+            }
+            let mask = leaf.next_power_of_two() - 1;
+            let (first, last) = (first.max(low) & !mask, last.min(high) | mask);
+            if (last - first) / INSTRUCTION >= chain::LOOKUP_ENTRIES as u64 {
+                self.forget_spaces(half..=half);
+                continue;
+            }
+            for pc in (first..=last).step_by(INSTRUCTION as usize) {
+                let entry = &mut self.targets[chain::lookup_slot(pc)];
+                if (first..=last).contains(&entry.pc) {
+                    *entry = chain::LookupEntry::default();
+                }
+            }
         }
     }
 
@@ -2361,14 +2402,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// A TLBI: the fetch translations of every regime go, and the host
-    /// drops what `reach` names of its shadow, and the lookup contexts of
-    /// the halves it may reach. No control changed, so the regime and what
-    /// derives from System registers stay.
-    fn tlb_maintained(&mut self, reach: mmu::tlbi::Reach) {
-        if reach.lower_only() {
-            self.forget_spaces(0..=0);
-        } else {
-            self.forget_spaces(0..=1);
+    /// drops what `reach` names of its shadow. Of the lookup table, which
+    /// holds every context's entries, it drops what `everywhere` names: the
+    /// entries at its VAs, or the contexts of the halves non-global entries
+    /// were fetched through, or every context. No control changed, so the
+    /// regime and what derives from System registers stay.
+    fn tlb_maintained(&mut self, reach: mmu::tlbi::Reach, everywhere: mmu::tlbi::Everywhere) {
+        match everywhere {
+            mmu::tlbi::Everywhere::Addresses(addresses) => self.forget_lookups(addresses),
+            mmu::tlbi::Everywhere::NonGlobal if !self.private_fetches[1] => {
+                self.forget_spaces(0..=0)
+            }
+            mmu::tlbi::Everywhere::NonGlobal | mmu::tlbi::Everywhere::All => {
+                self.forget_spaces(0..=1)
+            }
         }
         self.advance_translation_generation();
         self.statistics.tlb_maintenance += 1;
@@ -3498,6 +3545,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 )))
             }
             Translated::Mapped(translation) => {
+                let half = chain::half(pc);
+                self.fetch_leaves[half] = self.fetch_leaves[half].max(translation.size);
+                self.private_fetches[half] |= !translation.global;
                 let physical = translation.physical & !(FETCH_PAGE - 1);
                 self.fetch[slot] = Some(FetchEntry {
                     page,
@@ -6444,7 +6494,7 @@ mod tests {
             Machine::advance_translation_generation,
             Machine::translations_changed,
             Machine::fetch_permissions_changed,
-            |machine| machine.tlb_maintained(mmu::tlbi::Reach::All),
+            |machine| machine.tlb_maintained(mmu::tlbi::Reach::All, mmu::tlbi::Everywhere::All),
             Machine::table_base_changed,
         ];
         for operation in operations {
@@ -8458,15 +8508,23 @@ mod tests {
         assert!(attributes[0] != first[0] && attributes[1] != first[1]);
         msr(&mut machine, MSR_MAIR_EL1_X0, mair);
         assert_eq!(machine.contexts(2, variant), first);
-        // A TLBI of lower-half addresses forgets the lower half's contexts.
-        machine.tlb_maintained(mmu::tlbi::Reach::Containing(0x4000));
+        // An ASIDE1 forgets the lower half's contexts, while no fetch of the
+        // upper half was non-global.
+        let aside1 = |machine: &mut Machine<FakeHost, NoDevices>| {
+            machine.tlb_maintained(mmu::tlbi::Reach::Nothing, mmu::tlbi::Everywhere::NonGlobal)
+        };
+        aside1(&mut machine);
         let maintained = machine.contexts(2, variant);
         assert!(maintained[0] != first[0] && maintained[1] == first[1]);
-        // One of the upper half, a host permission change or any other
-        // change to translation forgets both.
+        // Then both, as do a TLBI of everything, a host permission change
+        // and any other change to translation.
         for change in [
             |machine: &mut Machine<FakeHost, NoDevices>| {
-                machine.tlb_maintained(mmu::tlbi::Reach::Containing(0xffff_fe00_0000_0000))
+                machine.private_fetches[1] = true;
+                machine.tlb_maintained(mmu::tlbi::Reach::Nothing, mmu::tlbi::Everywhere::NonGlobal)
+            },
+            |machine: &mut Machine<FakeHost, NoDevices>| {
+                machine.tlb_maintained(mmu::tlbi::Reach::All, mmu::tlbi::Everywhere::All)
             },
             Machine::fetch_permissions_changed,
             Machine::translations_changed,
@@ -8476,6 +8534,39 @@ mod tests {
             let after = machine.contexts(2, variant);
             assert!(after[0] != before[0] && after[1] != before[1]);
         }
+    }
+
+    #[test]
+    fn a_tlbi_by_va_drops_the_lookup_entries_of_its_leaf_in_every_context() {
+        use mmu::tlbi::{Everywhere, Reach};
+        let mut machine = machine(&[]);
+        let variant = machine.current_variant(false, false);
+        let contexts = machine.contexts(2, variant);
+        const PAGE: u64 = 0x8000;
+        machine.fetch_leaves[0] = 0x4000;
+        let pcs = [PAGE - 4, PAGE, PAGE + 0x3ffc, PAGE + 0x4000];
+        for (context, pc) in pcs.into_iter().enumerate() {
+            machine.targets[chain::lookup_slot(pc)] = chain::LookupEntry {
+                pc,
+                context: context as u64 + 1,
+                entry: 1,
+                block: 0,
+                targets: 1,
+            };
+        }
+        let tlbi = |machine: &mut Machine<FakeHost, NoDevices>, reach| {
+            machine.tlb_maintained(reach, Everywhere::Addresses(reach))
+        };
+        tlbi(&mut machine, Reach::Containing(PAGE + 0x10));
+        let kept = pcs.map(|pc| machine.targets[chain::lookup_slot(pc)].pc == pc);
+        assert_eq!(kept, [true, false, false, true]);
+        assert_eq!(machine.contexts(2, variant), contexts);
+        // A leaf the table could not be scanned for forgets the half's
+        // contexts instead; the other half's stay.
+        machine.fetch_leaves[0] = 1 << 30;
+        tlbi(&mut machine, Reach::Containing(PAGE));
+        let forgotten = machine.contexts(2, variant);
+        assert!(forgotten[0] != contexts[0] && forgotten[1] == contexts[1]);
     }
 
     #[test]

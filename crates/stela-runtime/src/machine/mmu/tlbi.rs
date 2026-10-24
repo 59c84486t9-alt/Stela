@@ -316,12 +316,57 @@ impl Reach {
     }
 }
 
+/// What a TLBI removes from a cache that keeps translations of many
+/// contexts (regimes, ASIDs) without telling them apart, as a superset of
+/// its scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Everywhere {
+    /// The entries whose input range holds these VAs, whatever their
+    /// context: the VA forms ([`Reach::Containing`] or
+    /// [`Reach::Overlapping`]), or [`Reach::Nothing`].
+    Addresses(Reach),
+    /// The non-global entries of one ASID.
+    NonGlobal,
+    /// Every entry.
+    All,
+}
+
 /// VA[55:0] with bit 55 copied above: the address of either half.
 fn canonical(address: u64) -> u64 {
     (((address << 8) as i64) >> 8) as u64
 }
 
 impl Scope {
+    /// What this TLBI removes from a cache that keeps every context's
+    /// translations ([`Everywhere`]): for the VA forms, of any regime or
+    /// ASID, the entries at their address or range; for ASIDE1, the
+    /// non-global entries; for the other forms, everything.
+    pub fn everywhere(self) -> Everywhere {
+        if !self.valid {
+            return Everywhere::Addresses(Reach::Nothing);
+        }
+        match self.kind {
+            TlbiKind::VA | TlbiKind::VAA => {
+                Everywhere::Addresses(Reach::Containing(canonical(self.address)))
+            }
+            TlbiKind::RVA | TlbiKind::RVAA => Everywhere::Addresses(self.overlapping()),
+            TlbiKind::ASID => Everywhere::NonGlobal,
+            _ => Everywhere::All,
+        }
+    }
+
+    /// The canonical VAs a range form names.
+    fn overlapping(self) -> Reach {
+        Reach::Overlapping {
+            first: canonical(self.address),
+            last: if self.end == u64::MAX {
+                u64::MAX
+            } else {
+                canonical(self.end.wrapping_sub(1))
+            },
+        }
+    }
+
     /// What this TLBI removes from a cache of `current`'s translations: no
     /// entry of another regime, nothing of ASID forms for another ASID, all
     /// for the forms without an address, and for the address forms the
@@ -348,14 +393,7 @@ impl Scope {
             TlbiKind::VA | TlbiKind::VAA if same_regime => {
                 Reach::Containing(canonical(self.address))
             }
-            TlbiKind::RVA | TlbiKind::RVAA if same_regime => Reach::Overlapping {
-                first: canonical(self.address),
-                last: if self.end == u64::MAX {
-                    u64::MAX
-                } else {
-                    canonical(self.end.wrapping_sub(1))
-                },
-            },
+            TlbiKind::RVA | TlbiKind::RVAA if same_regime => self.overlapping(),
             TlbiKind::VA | TlbiKind::VAA | TlbiKind::RVA | TlbiKind::RVAA => Reach::Nothing,
         }
     }
@@ -419,6 +457,37 @@ mod tests {
 
     fn covers(tlbi: Tlbi, context: Context, entry: Entry) -> bool {
         Scope::new(&tlbi, context).covers(&entry)
+    }
+
+    #[test]
+    fn everywhere_names_va_forms_by_address_of_any_regime_or_asid() {
+        let everywhere = |kind, regime, operand| {
+            Scope::new(&tlbi(kind, regime, TlbiLevel::Any, operand), HOST).everywhere()
+        };
+        // VAE1 of ASID 9 at a kernel VA: the address alone, canonical.
+        assert_eq!(
+            everywhere(
+                TlbiKind::VA,
+                Named::EL10,
+                9 << 48 | 0xffff_fe00_0000_4000 >> 12
+            ),
+            Everywhere::Addresses(Reach::Containing(0xffff_fe00_0000_4000))
+        );
+        assert_eq!(
+            everywhere(TlbiKind::VAA, Named::EL2, 0x4000 >> 12),
+            Everywhere::Addresses(Reach::Containing(0x4000))
+        );
+        assert_eq!(
+            everywhere(TlbiKind::ASID, Named::EL10, 9 << 48),
+            Everywhere::NonGlobal
+        );
+        assert_eq!(everywhere(TlbiKind::VMALL, Named::EL10, 0), Everywhere::All);
+        assert_eq!(everywhere(TlbiKind::ALL, Named::EL2, 0), Everywhere::All);
+        // A range form with TG 0b00 names nothing.
+        assert_eq!(
+            everywhere(TlbiKind::RVA, Named::EL10, 0),
+            Everywhere::Addresses(Reach::Nothing)
+        );
     }
 
     #[test]

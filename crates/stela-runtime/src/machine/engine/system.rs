@@ -410,17 +410,18 @@ enum Translation {
     TableBase,
     /// Another translation control: all.
     All,
-    /// TLB maintenance: every fetch translation, and of the shadow what
-    /// the TLBI reaches.
-    Maintenance(Reach),
+    /// TLB maintenance: every fetch translation, of the shadow what the
+    /// TLBI reaches, and of the lookup table what it reaches everywhere.
+    Maintenance(Reach, tlbi::Everywhere),
 }
 
 /// HCR_EL2.FB: EL1 TLBIs broadcast Inner Shareable.
 const HCR_FB: u32 = 9;
 
-/// What `tlbi` removes from the shadow of `cpu`'s current context. EL2 is
-/// enabled and HCR_EL2.E2H is RES1 (`cpu`).
-fn reach(cpu: &Cpu, tlbi: &Tlbi) -> Reach {
+/// What `tlbi` removes from the shadow of `cpu`'s current context, and
+/// from a cache of every context's translations. EL2 is enabled and
+/// HCR_EL2.E2H is RES1 (`cpu`).
+fn reach(cpu: &Cpu, tlbi: &Tlbi) -> (Reach, tlbi::Everywhere) {
     let controls = cpu.controls(cpu.regime());
     let context = tlbi::Context {
         el: cpu.pstate.el,
@@ -433,7 +434,8 @@ fn reach(cpu: &Cpu, tlbi: &Tlbi) -> Reach {
         regime: controls.regime,
         asid: (controls.regime != mmu::Regime::El2).then(|| mmu::current_asid(&controls)),
     };
-    Scope::new(tlbi, context).reach(&current)
+    let scope = Scope::new(tlbi, context);
+    (scope.reach(&current), scope.everywhere())
 }
 
 /// The compiled code an instruction-cache invalidation makes stale.
@@ -883,7 +885,8 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             // current context alone, loses what the TLBI reaches of it, a
             // superset of its scope and level.
             Operation::Tlbi(tlbi) => {
-                self.translation = Translation::Maintenance(reach(&self.machine.cpu, &tlbi));
+                let (reach, everywhere) = reach(&self.machine.cpu, &tlbi);
+                self.translation = Translation::Maintenance(reach, everywhere);
                 Ok(())
             }
             Operation::At {
@@ -1322,7 +1325,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         match translation {
             Translation::All => self.controls_changed(),
             Translation::TableBase => self.table_base_changed(),
-            Translation::Maintenance(reach) => self.tlb_maintained(reach),
+            Translation::Maintenance(reach, everywhere) => self.tlb_maintained(reach, everywhere),
             Translation::Unchanged if regime => self.sync_regime(),
             Translation::Unchanged => {}
         }

@@ -3,7 +3,10 @@
 //! SPTMs execute. The contracts and their evidence are in
 //! `docs/design/system.md` (GXF).
 use super::{Devices, Host, Machine, RequirementKind, Step};
-use crate::machine::{Chip, hacr, mmu::tlbi::Reach};
+use crate::machine::{
+    Chip, hacr,
+    mmu::tlbi::{Everywhere, Reach},
+};
 use stela_compiler::block::system::AppleMaintenance;
 
 /// The first chip with DC INCPA4K, operation 25 and `0x00201401`: XNU gives
@@ -67,7 +70,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // translation this machine caches (the fetch translations of every PE
         // and the host's whole shadow) covers any translation scope.
         if !matches!(operation, AppleMaintenance::CoprocessorCacheFlush { .. }) {
-            self.tlb_maintained(Reach::All);
+            self.tlb_maintained(Reach::All, Everywhere::All);
         }
         self.next()
     }
