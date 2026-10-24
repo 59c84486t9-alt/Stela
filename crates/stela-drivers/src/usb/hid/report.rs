@@ -9,7 +9,7 @@
 //! Each Input main item lays out Report Count fields of Report Size bits,
 //! at offsets counted per report ID. A variable item's fields each carry
 //! one usage (6.2.2.4, Usage or a Usage Minimum..Maximum range); an array
-//! item's fields each hold an index into its usage range (6.2.2.5), where a
+//! item's fields each hold an index into its ordered usage list (6.2.2.5), where a
 //! value outside the logical range names no usage. Constant items pad.
 //! Output and Feature items have offsets of their own and are not read.
 //! Long items are refused. Push and Pop keep a four-deep global stack, and
@@ -23,7 +23,10 @@
 //! ErrorUndefined (usages 01h-03h, HID Usage Tables 10) say the report
 //! holds no key state, so such a report changes nothing.
 use super::usages::Local;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
+
+#[cfg(test)]
+mod sparse_tests;
 
 const GENERIC_DESKTOP_X: u32 = 0x0001_0030;
 const GENERIC_DESKTOP_Y: u32 = 0x0001_0031;
@@ -107,15 +110,39 @@ impl Field {
     }
 }
 
-/// What one input field reports: a usage of its own, or an index into a
-/// usage range.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What one input field reports: a usage of its own, or an index into
+/// the Main item's exact ordered usage table.
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Usage {
     Variable(u32),
-    Array { first: u32, last: u32 },
+    Array(Array),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Selector bounds stay private and wide; public pointer Field retains its API.
+/// Every field of one Array Main item shares one immutable qualified table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Array {
+    usages: Arc<[u32]>,
+    has_keyboard: bool,
+    minimum: i64,
+    maximum: i64,
+}
+impl Array {
+    fn select(&self, raw: i32, size: usize) -> Option<u32> {
+        let value = if self.minimum >= 0 && size == 32 {
+            i64::from(raw as u32)
+        } else {
+            i64::from(raw)
+        };
+        if !(self.minimum..=self.maximum).contains(&value) {
+            return None;
+        }
+        let index = usize::try_from(value.checked_sub(self.minimum)?).ok()?;
+        self.usages.get(index).copied()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Item {
     report: Option<u8>,
     field: Field,
@@ -167,8 +194,8 @@ pub struct Keys {
     pub report: Option<u8>,
     /// Bitmap fields and the usage each one reports.
     variables: Vec<(Field, u32)>,
-    /// Array fields and the usage range their values index.
-    arrays: Vec<(Field, u32, u32)>,
+    /// Array fields and shared exact qualified usage tables.
+    arrays: Vec<(Field, Array)>,
 }
 
 impl Keys {
@@ -182,13 +209,27 @@ impl Keys {
             maximum,
             relative: false,
         };
+        let usages: Arc<[u32]> = (0..=0xff)
+            .map(|usage| KEYBOARD_PAGE << 16 | usage)
+            .collect::<Vec<_>>()
+            .into();
         Self {
             report: None,
             variables: (0..8)
                 .map(|bit| (field(bit, 1, 1), 0xe0 + bit as u32))
                 .collect(),
             arrays: (0..6)
-                .map(|n| (field(16 + 8 * n, 8, 0xff), 0, 0xff))
+                .map(|n| {
+                    (
+                        field(16 + 8 * n, 8, 0xff),
+                        Array {
+                            usages: Arc::clone(&usages),
+                            has_keyboard: true,
+                            minimum: 0,
+                            maximum: 0xff,
+                        },
+                    )
+                })
                 .collect(),
         }
     }
@@ -202,16 +243,16 @@ impl Keys {
                 held.push(*usage);
             }
         }
-        for (field, first, last) in &self.arrays {
-            let value = field.read(body)?;
-            if !(field.minimum..=field.maximum).contains(&value) {
-                continue;
-            }
-            let usage = i64::from(*first) + i64::from(value) - i64::from(field.minimum);
-            let Ok(usage) = u32::try_from(usage) else {
+        for (field, array) in &self.arrays {
+            let raw = field.read(body)?;
+            let Some(qualified) = array.select(raw, field.size) else {
                 continue;
             };
-            if usage > *last || usage == 0 {
+            if qualified >> 16 != KEYBOARD_PAGE {
+                continue;
+            }
+            let usage = qualified & 0xffff;
+            if usage == 0 {
                 continue;
             }
             if KEY_ERRORS.contains(&usage) {
@@ -251,7 +292,7 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
     struct Global {
         page: u32,
         minimum: i32,
-        maximum: i32,
+        maximum: i64,
         size: usize,
         count: usize,
         report: Option<u8>,
@@ -259,9 +300,6 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
     let mut global = Global::default();
     let mut stack: Vec<Global> = Vec::new();
     let mut local = Local::default();
-    // Preserve the legacy array reader's range representation; delimiter
-    // sets are prohibited on Arrays, so this cut does not redefine it.
-    let mut array_range: Option<(u32, u32)> = None;
     let mut offsets: Vec<(Option<u8>, usize)> = Vec::new();
     let mut items = Vec::new();
     let mut collections: Vec<(u32, bool)> = Vec::new();
@@ -290,7 +328,7 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
             _ => 0,
         };
         let tag = prefix & TAG_MASK;
-        let usages = if matches!(tag, INPUT | OUTPUT | COLLECTION | FEATURE | END_COLLECTION) {
+        let mut usages = if matches!(tag, INPUT | OUTPUT | COLLECTION | FEATURE | END_COLLECTION) {
             local.main(tag, unsigned, global.page)?
         } else {
             Vec::new()
@@ -312,6 +350,20 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
                 }
                 let constant = flags & CONSTANT != 0;
                 let variable = flags & VARIABLE != 0;
+                let array = if !constant && !variable && global.count != 0 && !usages.is_empty() {
+                    if i64::from(global.minimum) > global.maximum {
+                        return Err("HID array logical minimum exceeds maximum");
+                    }
+                    let has_keyboard = usages.iter().any(|usage| usage >> 16 == KEYBOARD_PAGE);
+                    Some(Array {
+                        usages: core::mem::take(&mut usages).into(),
+                        has_keyboard,
+                        minimum: i64::from(global.minimum),
+                        maximum: global.maximum,
+                    })
+                } else {
+                    None
+                };
                 for n in 0..global.count {
                     if constant {
                         break;
@@ -322,13 +374,9 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
                             None => continue,
                         }
                     } else {
-                        match (array_range, usages.first(), usages.last()) {
-                            (Some((first, last)), _, _) => Usage::Array { first, last },
-                            (None, Some(first), Some(last)) => Usage::Array {
-                                first: *first,
-                                last: *last,
-                            },
-                            _ => continue,
+                        match &array {
+                            Some(array) => Usage::Array(array.clone()),
+                            None => continue,
                         }
                     };
                     items.push(Item {
@@ -342,7 +390,7 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
                             offset: start + n * global.size,
                             size: global.size,
                             minimum: global.minimum,
-                            maximum: global.maximum,
+                            maximum: global.maximum as i32,
                             relative: flags & RELATIVE != 0,
                         },
                         usage,
@@ -368,9 +416,9 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
             LOGICAL_MAXIMUM => {
                 // A maximum that only fits unsigned (8-bit 0xff) stays positive.
                 global.maximum = if global.minimum >= 0 {
-                    unsigned as i32
+                    i64::from(unsigned)
                 } else {
-                    signed
+                    i64::from(signed)
                 };
             }
             REPORT_SIZE if unsigned > MAX_REPORT_SIZE => {
@@ -391,31 +439,12 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
             // Physical extents and units do not change a field's value.
             PHYSICAL_MINIMUM | PHYSICAL_MAXIMUM | UNIT_EXPONENT | UNIT => {}
             USAGE => local.usage(unsigned, size, global.page)?,
-            USAGE_MINIMUM => {
-                local.minimum(unsigned, size, global.page)?;
-                let first = if size == 4 {
-                    unsigned
-                } else {
-                    global.page << 16 | unsigned
-                };
-                array_range = Some((first, array_range.map_or(0, |r| r.1)));
-            }
-            USAGE_MAXIMUM => {
-                local.maximum(unsigned, size, global.page)?;
-                let last = if size == 4 {
-                    unsigned
-                } else {
-                    global.page << 16 | unsigned
-                };
-                array_range = Some((array_range.map_or(0, |r| r.0), last));
-            }
+            USAGE_MINIMUM => local.minimum(unsigned, size, global.page)?,
+            USAGE_MAXIMUM => local.maximum(unsigned, size, global.page)?,
             0xa8 => local.delimiter(unsigned, size)?,
             // Designators and strings do not change this reader's fields.
             _ if prefix & 0x0c == 0 => return Err("unknown or reserved HID Main item"),
             _ => {}
-        }
-        if matches!(tag, INPUT | OUTPUT | COLLECTION | FEATURE | END_COLLECTION) {
-            array_range = None;
         }
     }
     local.complete()?;
@@ -438,7 +467,7 @@ fn pointer(items: &[Item]) -> Option<Pointer> {
         ) {
             continue;
         }
-        let Usage::Variable(usage) = item.usage else {
+        let Usage::Variable(usage) = &item.usage else {
             continue;
         };
         let layout = match layouts.iter_mut().position(|l| l.report == item.report) {
@@ -452,12 +481,12 @@ fn pointer(items: &[Item]) -> Option<Pointer> {
             }
         };
         let field = Some(item.field);
-        match usage {
+        match *usage {
             GENERIC_DESKTOP_X => layout.x = layout.x.or(field),
             GENERIC_DESKTOP_Y => layout.y = layout.y.or(field),
             GENERIC_DESKTOP_WHEEL => layout.wheel = layout.wheel.or(field),
             BUTTON_1..=BUTTON_5 => {
-                let button = &mut layout.buttons[(usage - BUTTON_1) as usize];
+                let button = &mut layout.buttons[(*usage - BUTTON_1) as usize];
                 *button = button.or(field);
             }
             _ => {}
@@ -471,11 +500,9 @@ fn pointer(items: &[Item]) -> Option<Pointer> {
 fn keys(items: &[Item]) -> Option<Keys> {
     let report = items
         .iter()
-        .find(|item| match item.usage {
+        .find(|item| match &item.usage {
             Usage::Variable(usage) => usage >> 16 == KEYBOARD_PAGE,
-            Usage::Array { first, last } => {
-                first >> 16 == KEYBOARD_PAGE && last >> 16 == first >> 16
-            }
+            Usage::Array(array) => array.has_keyboard,
         })?
         .report;
     let mut keys = Keys {
@@ -483,13 +510,12 @@ fn keys(items: &[Item]) -> Option<Keys> {
         ..Keys::default()
     };
     for item in items.iter().filter(|item| item.report == report) {
-        match item.usage {
+        match &item.usage {
             Usage::Variable(usage) if usage >> 16 == KEYBOARD_PAGE => {
                 keys.variables.push((item.field, usage & 0xffff));
             }
-            Usage::Array { first, last } if first >> 16 == KEYBOARD_PAGE => {
-                keys.arrays
-                    .push((item.field, first & 0xffff, last & 0xffff));
+            Usage::Array(array) if array.has_keyboard => {
+                keys.arrays.push((item.field, array.clone()));
             }
             _ => {}
         }

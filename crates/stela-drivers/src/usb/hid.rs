@@ -21,6 +21,8 @@ pub mod descriptor;
 pub mod events;
 mod lifecycle;
 mod report;
+#[cfg(test)]
+mod sparse_tests;
 mod touch;
 #[cfg(test)]
 mod touch_tests;
