@@ -191,9 +191,9 @@ impl HostPowerControl {
 
     /// Restart the host machine.
     pub fn restart(&self) -> ! {
-        self.disks.shutdown(false);
         output::arguments(format_args!("STELA RESTART code={RESTART_CODE:#x}\n"));
-        output::flush_log();
+        output::close_logs();
+        self.disks.shutdown(false);
         output::debug_exit(RESTART_CODE);
         match self.power.and_then(|power| power.reset) {
             Some((register, value)) => {
@@ -228,9 +228,9 @@ impl HostPowerControl {
 
     /// Power the host machine off.
     pub fn power_off(&self) -> ! {
-        self.disks.shutdown(true);
         output::arguments(format_args!("STELA POWER-OFF code={POWER_OFF_CODE:#x}\n"));
-        output::flush_log();
+        output::close_logs();
+        self.disks.shutdown(true);
         output::debug_exit(POWER_OFF_CODE);
         let soft_off = self.power.and_then(|power| Some((power, power.soft_off?)));
         let Some((power, (a, b))) = soft_off else {

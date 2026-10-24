@@ -217,6 +217,15 @@ pub fn add_log(
     Ok(())
 }
 
+/// Store what every open log lacks and close them all, before the disks
+/// they live on are shut down; later output reaches the serial port only.
+pub fn close_logs() {
+    flush_log();
+    if let Ok(mut sinks) = SINKS.0.try_borrow_mut() {
+        sinks.clear();
+    }
+}
+
 /// Store in every open log the output it does not hold yet. A USB log that
 /// fails is reported and closed; a failed machine-state store stops the
 /// machine. Output printed during the flush is not recorded.
