@@ -2239,10 +2239,9 @@ mod tests {
                 let binding = &f.bindings[0];
                 binding.enter(3, 0);
                 f.event(10);
-                unsafe { f.runtime() }
-                    .queue
-                    .execute(Kind::General, peer_waiter, p)
-                    .unwrap();
+                // SAFETY: the retained fixture owns p and its guarded-stack
+                // Runtime until this queued peer completes on the same CPU.
+                unsafe { f.runtime().queue.execute(Kind::General, peer_waiter, p) }.unwrap();
                 binding.prepared.store(true, Ordering::Release);
                 unsafe { f.runtime() }.yield_now().unwrap();
                 assert_eq!(f.globals.preempt.load(Ordering::Acquire), 3);
