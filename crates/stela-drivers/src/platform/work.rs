@@ -582,6 +582,7 @@ impl<const N: usize> WakeHandle<N> {
     /// Qualify process-context owner release on this retained queue's actual
     /// CPU, including after job close. This grants no current task/RSP, live
     /// sequence, Linux entry or native producer authority and signals nothing.
+    #[cfg(feature = "linux-kernel")]
     pub(crate) fn check_process(&self) -> Result<(), WorkError> {
         self.queue.process()
     }
