@@ -2469,19 +2469,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// A translation control changed: cached fetch translations go, and
-    /// the host's shadow. Lookup contexts are keyed by the controls'
+    /// of the host's shadow what the new controls translate differently
+    /// ([`Host::set_regime`]). Lookup contexts are keyed by the controls'
     /// values ([`Space`]), so a return to earlier ones finds theirs again.
     fn controls_changed(&mut self) {
         self.advance_translation_generation();
         self.statistics.translation_changes += 1;
-        self.host.invalidate_translations();
         self.sync_regime();
     }
 
     /// Anything about translation may have changed: every lookup context
-    /// goes too.
+    /// goes too, and the whole shadow.
     fn translations_changed(&mut self) {
         self.forget_spaces(0..=1, 3);
+        self.host.invalidate_translations();
         self.controls_changed();
     }
 
@@ -8629,9 +8630,15 @@ mod tests {
         const MSR_SPRR_PERM_EL0_X0: u32 = 0xd51e_f1a0;
         msr(&mut machine, MSR_SPRR_CONFIG_EL1_X0, 1);
         let enabled = machine.contexts(2, variant);
+        let invalidations = machine.host.invalidations;
         msr(&mut machine, MSR_SPRR_PERM_EL0_X0, 0x10);
         let toggled = machine.contexts(2, variant);
         assert!(toggled[0] != enabled[0] && toggled[1] != enabled[1]);
+        // The host's shadow learns of it from the regime alone, which
+        // drops what the new permissions change.
+        assert_eq!(machine.host.invalidations, invalidations);
+        let regime = machine.host.regimes.last().expect("a regime");
+        assert_eq!(regime.controls.sprr.el0, 0x10);
         msr(&mut machine, MSR_SPRR_PERM_EL0_X0, 0);
         assert_eq!(machine.contexts(2, variant), enabled);
         msr(&mut machine, MSR_SPRR_CONFIG_EL1_X0, 0);

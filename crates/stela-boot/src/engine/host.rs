@@ -117,6 +117,16 @@ impl Pool {
 
 /// Permission views; the tag-checked roots follow the unchecked ones.
 const VIEWS: usize = 4;
+/// EL0's view (GL0's too), EL1's, EL1's with PAN, and the GXF guarded
+/// level's (GL1).
+const EL0_VIEW: usize = 0;
+const EL1_VIEW: usize = 1;
+const PAN_VIEW: usize = 2;
+const GUARDED_VIEW: usize = 3;
+/// The views whose rights SPRR_PERM_EL0 decides: EL0's, and EL1's with
+/// PAN, which loses data access where EL0 has any
+/// (`mmu::sprr::permissions`).
+const USER_VIEWS: [usize; 2] = [EL0_VIEW, PAN_VIEW];
 const ROOTS: usize = 2 * VIEWS;
 /// Frames reserved for roots and other permanent tables.
 const PERMANENT_FRAMES: u64 = 64;
@@ -203,6 +213,8 @@ pub struct State {
     pub exhausted: u64,
     /// Resets of the lower half alone.
     pub lower_resets: u64,
+    /// Resets of the [`USER_VIEWS`] alone.
+    pub user_resets: u64,
     /// The leaves each half was filled from.
     extents: [Extents; 2],
     /// TLBIs that unmapped ranges rather than whole halves.
@@ -345,6 +357,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             resets: 0,
             exhausted: 0,
             lower_resets: 0,
+            user_resets: 0,
             extents: [Extents::new(), Extents::new()],
             scoped: 0,
             prefills: 0,
@@ -378,6 +391,7 @@ pub struct Statistics {
     pub resets: u64,
     pub exhausted: u64,
     pub lower_resets: u64,
+    pub user_resets: u64,
     pub scoped: u64,
     pub stray: u64,
     /// The APIC timer frequency.
@@ -401,6 +415,7 @@ pub fn statistics() -> Statistics {
         resets: state.resets,
         exhausted: state.exhausted,
         lower_resets: state.lower_resets,
+        user_resets: state.user_resets,
         scoped: state.scoped,
         stray: state.stray,
         apic_hz: state.apic_hz,
@@ -521,16 +536,39 @@ impl State {
         self.reload();
     }
 
+    /// Drop the [`USER_VIEWS`] alone: what an SPRR_PERM_EL0 write changes.
+    /// Their tables' frames stay taken until the next whole reset, as each
+    /// half's frames are freed only together; a half that runs out of
+    /// frames resets as it would otherwise.
+    fn reset_user_views(&mut self) {
+        for view in USER_VIEWS {
+            for root in [self.roots[view], self.roots[VIEWS + view]] {
+                self.detach(root, LOWER);
+                self.detach(root, UPPER);
+            }
+        }
+        self.tlb.clear();
+        self.user_resets += 1;
+        if USER_VIEWS.contains(&(self.current % VIEWS)) {
+            self.reload();
+        }
+    }
+
     /// Unmap `half` from every root and free its frames.
     fn clear(&mut self, half: usize) {
         self.pool.reset_half(half);
         self.extents[half].clear();
-        let (first, last) = self.half_entries(half);
         for root in self.roots {
-            for entry in first..=last {
-                // SAFETY: permanent root frames through the physmap.
-                unsafe { (layout::physical(root) as *mut u64).add(entry).write(0) };
-            }
+            self.detach(root, half);
+        }
+    }
+
+    /// Unmap `half` from `root`, leaving its tables' frames taken.
+    fn detach(&self, root: u64, half: usize) {
+        let (first, last) = self.half_entries(half);
+        for entry in first..=last {
+            // SAFETY: permanent root frames through the physmap.
+            unsafe { (layout::physical(root) as *mut u64).add(entry).write(0) };
         }
     }
 
@@ -1213,8 +1251,17 @@ impl Host for BareHost<'_> {
                 ..current.controls
             };
             let asid = mmu::current_asid(&current.controls) == mmu::current_asid(&regime.controls);
+            let user = mmu::Controls {
+                sprr: mmu::Sprr {
+                    el0: regime.controls.sprr.el0,
+                    ..current.controls.sprr
+                },
+                ..current.controls
+            };
             if ttbr0 == regime.controls && (asid || !state.extents[UPPER].private()) {
                 state.reset_lower();
+            } else if user == regime.controls {
+                state.reset_user_views();
             } else {
                 state.reset_shadow();
             }
@@ -1233,10 +1280,10 @@ impl Host for BareHost<'_> {
             regime.requester.pan,
             regime.requester.guarded,
         ) {
-            (0, _, _) => 0,
-            (_, _, true) => 3,
-            (_, false, false) => 1,
-            (_, true, false) => 2,
+            (0, _, _) => EL0_VIEW,
+            (_, _, true) => GUARDED_VIEW,
+            (_, false, false) => EL1_VIEW,
+            (_, true, false) => PAN_VIEW,
         } + if regime.tag_checked() { VIEWS } else { 0 };
         if state.current != view {
             state.current = view;
