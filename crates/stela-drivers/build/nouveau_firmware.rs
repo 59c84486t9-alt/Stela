@@ -78,10 +78,9 @@ pub fn tests(linux: &Linux, tests: &mut Tests) {
         .expect("host clock precedes epoch")
         .as_nanos();
     let mode = if retained { "retained" } else { "authored" };
-    let generated = repository.join(".stela/gpu/evidence").join(format!(
-        "{stamp}-nouveau-firmware-{mode}-{}",
-        process::id()
-    ));
+    let generated = repository
+        .join(".stela/gpu/evidence")
+        .join(format!("{stamp}-nouveau-firmware-{mode}-{}", process::id()));
     println!("cargo:rerun-if-env-changed=STELA_GPU_PYTHON");
     let python = env::var_os("STELA_GPU_PYTHON").unwrap_or_else(|| "python3".into());
     let mut prepare = Command::new(python);
@@ -125,7 +124,11 @@ pub fn tests(linux: &Linux, tests: &mut Tests) {
             file: "drivers/gpu/drm/nouveau/nouveau",
         }),
     );
-    let archives = linux.hosted.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let archives = linux
+        .hosted
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
     let authored = "src/gpu/nouveau/tests/firmware.c";
     check_declarations(&build, &[PathBuf::from(authored)]);
     tests.add(&build, "nouveau_firmware_authored", authored, &archives);
