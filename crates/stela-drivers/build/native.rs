@@ -212,6 +212,9 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/idr.c")),
             PathBuf::from(format!("{LINUX}/lib/radix-tree.c")),
             PathBuf::from(format!("{LINUX}/lib/xarray.c")),
+            PathBuf::from(format!("{LINUX}/lib/kobject.c")),
+            PathBuf::from(format!("{LINUX}/lib/kobject_uevent.c")),
+            PathBuf::from(format!("{LINUX}/lib/ctype.c")),
         ];
         for source in &upstream {
             println!("cargo:rerun-if-changed={}", source.display());
@@ -243,6 +246,13 @@ impl Linux {
         };
         self.apply(&mut build, None, &[], None);
         let archives = self.hosted.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        // Dedicated lifecycle fixture: unchanged original kobject/uevent APIs.
+        tests.add(
+            &build,
+            "linux_kobjects",
+            &format!("{COMPAT}/stela/kobject_test.c"),
+            &archives,
+        );
         for (name, source, define) in [
             ("linux_printk", "printk.c", "STELA_LINUX_PRINTK_TEST"),
             ("linux_drm_formats", "drm.c", "STELA_LINUX_DRM_FORMAT_TEST"),
@@ -325,6 +335,8 @@ impl Linux {
             build
                 .define("KBUILD_MODNAME", format!("\"{}\"", module.name).as_str())
                 .define("KBUILD_MODFILE", format!("\"{}\"", module.file).as_str());
+        } else {
+            build.define("KBUILD_MODNAME", "\"stela-linux\"");
         }
         let drivers = drivers
             .iter()

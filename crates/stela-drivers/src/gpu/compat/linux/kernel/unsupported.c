@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 /* Kernel services Stela does not provide yet. */
 #include <linux/io.h>
-#include <linux/kobject.h>
 #include <linux/rcupdate.h>
 #include <linux/workqueue.h>
 #include <stela/linux.h>
@@ -31,16 +30,6 @@ void __iomem *ioremap(phys_addr_t offset, size_t size)
 }
 /* Nothing ioremap returned can reach it. */
 STELA_UNSUPPORTED(void, iounmap, volatile void __iomem *)
-
-/* Stela publishes no sysfs, so drivers never create its objects. */
-STELA_UNSUPPORTED(void, kobject_init, struct kobject *, const struct kobj_type *)
-STELA_UNSUPPORTED(int, kobject_set_name, struct kobject *, const char *, ...)
-STELA_UNSUPPORTED(int, kobject_add, struct kobject *, struct kobject *, const char *, ...)
-STELA_UNSUPPORTED(int, kobject_init_and_add, struct kobject *, const struct kobj_type *,
-		  struct kobject *, const char *, ...)
-STELA_UNSUPPORTED(void, kobject_put, struct kobject *)
-STELA_UNSUPPORTED(int, kset_register, struct kset *)
-STELA_UNSUPPORTED_OBJECT(const struct sysfs_ops, kobj_sysfs_ops);
 
 /* Stela runs no kernel threads, so Linux code has no workers to queue
  * work for. */
