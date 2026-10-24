@@ -13,6 +13,7 @@ use crate::{
     bus::dma::{DmaAllocator, DmaBuffer},
 };
 use alloc::vec::Vec;
+use core::ops::{Deref, DerefMut};
 
 const RESET: u8 = 0xff;
 const GET_MAX_LUN: u8 = 0xfe;
@@ -87,12 +88,40 @@ impl Io for Native {
     }
 }
 
+/// The unique owner can move to a fresh transport only after actual whole-device
+/// retirement and successful native reconstruction. Retained old media aliases
+/// keep their poisoned Bot, whose buffer slots are then permanently empty.
+/// This never manufactures another DmaBuffer or rewinds its allocator.
+struct TransportBuffer(Option<DmaBuffer>);
+impl TransportBuffer {
+    fn new(buffer: DmaBuffer) -> Self {
+        Self(Some(buffer))
+    }
+    fn present(&self) -> bool {
+        self.0.is_some()
+    }
+    fn transfer(&mut self) -> Self {
+        Self(Some(self.0.take().expect("retained BOT DMA owner")))
+    }
+}
+impl Deref for TransportBuffer {
+    type Target = DmaBuffer;
+    fn deref(&self) -> &DmaBuffer {
+        self.0.as_ref().expect("retained BOT DMA owner")
+    }
+}
+impl DerefMut for TransportBuffer {
+    fn deref_mut(&mut self) -> &mut DmaBuffer {
+        self.0.as_mut().expect("retained BOT DMA owner")
+    }
+}
+
 pub(super) struct Bot<I: Io> {
     pub io: I,
     interface: u8,
     endpoints: [Endpoint; 2],
-    buffer: DmaBuffer,
-    wrapper: DmaBuffer,
+    buffer: TransportBuffer,
+    wrapper: TransportBuffer,
     tag: u32,
     max_lun: u8,
     poisoned: bool,
@@ -118,6 +147,19 @@ impl<I: Io> Bot<I> {
         dma: &mut dyn DmaAllocator,
         flags: quirks::Flags,
     ) -> Result<Self, BlockError> {
+        let max_lun = Self::startup(&mut io, interface, flags)?;
+        Ok(Self::with_buffers(
+            io,
+            interface,
+            endpoints,
+            TransportBuffer::new(dma.allocate(MAX_TD, MAX_TD)?),
+            TransportBuffer::new(dma.allocate(64, 64)?),
+            flags,
+            max_lun,
+        ))
+    }
+    /// Perform actual transport admission before committing any moved buffers.
+    fn startup(io: &mut I, interface: u8, flags: quirks::Flags) -> Result<u8, BlockError> {
         io.ready()?;
         let request = setup(
             DEVICE_TO_HOST | TYPE_CLASS | RECIPIENT_INTERFACE,
@@ -126,7 +168,7 @@ impl<I: Io> Bot<I> {
             u16::from(interface),
             1,
         );
-        let max_lun = if flags.single_lun() {
+        Ok(if flags.single_lun() {
             0
         } else {
             match io.control(request) {
@@ -139,13 +181,23 @@ impl<I: Io> Bot<I> {
                     0
                 }
             }
-        };
-        Ok(Self {
+        })
+    }
+    fn with_buffers(
+        io: I,
+        interface: u8,
+        endpoints: [Endpoint; 2],
+        buffer: TransportBuffer,
+        wrapper: TransportBuffer,
+        flags: quirks::Flags,
+        max_lun: u8,
+    ) -> Self {
+        Self {
             io,
             interface,
             endpoints,
-            buffer: dma.allocate(MAX_TD, MAX_TD)?,
-            wrapper: dma.allocate(64, 64)?,
+            buffer,
+            wrapper,
             tag: 0,
             max_lun,
             poisoned: false,
@@ -153,7 +205,7 @@ impl<I: Io> Bot<I> {
             initial_read: flags.initial_read(),
             attachment: None,
             reset_generation: 0,
-        })
+        }
     }
     pub fn max_lun(&self) -> u8 {
         self.max_lun
@@ -208,7 +260,7 @@ impl<I: Io> Bot<I> {
     }
 
     fn ready(&mut self) -> Result<(), BlockError> {
-        if self.poisoned {
+        if self.poisoned || !self.buffer.present() || !self.wrapper.present() {
             return Err(BlockError::Unsupported(
                 "USB storage interface requires rebind",
             ));
@@ -440,6 +492,10 @@ impl Bot<Native> {
             device.quarantine();
         }
     }
+    /// Reconstruct the genuine attachment while retaining its two transport
+    /// allocations. Root-leaf reset also reuses the controller's retired
+    /// resources; downstream reset retains the existing allocation behavior.
+    /// Every fallible reconstruction step precedes moving either buffer owner.
     pub fn reset_and_rebind(
         &mut self,
         dma: &mut dyn DmaAllocator,
@@ -451,6 +507,9 @@ impl Bot<Native> {
                 BlockError::Unsupported(why),
             )
         };
+        if !self.buffer.present() || !self.wrapper.present() {
+            return Err(fail("BOT transport DMA owners already transferred"));
+        }
         let (old, old_setting) = self
             .attachment
             .as_ref()
@@ -470,7 +529,7 @@ impl Bot<Native> {
         let mut fresh = unsafe {
             controller
                 .borrow_mut()
-                .reset_and_identify(old, &self.endpoints, dma)?
+                .reset_and_reuse_root(old, &self.endpoints, dma)?
         };
         let id = fresh.id;
         let result = (|| {
@@ -540,22 +599,45 @@ impl Bot<Native> {
                         e,
                     )
                 })?;
-            Self::native(
-                Native {
-                    controller: controller.clone(),
-                    id,
-                    endpoints: self.endpoints,
-                },
-                &fresh,
-                &setting,
-                dma,
-            )
-            .map_err(|e| {
+            let flags = quirks::Flags::from_device(&fresh).map_err(fail)?;
+            let mut io = Native {
+                controller: controller.clone(),
+                id,
+                endpoints: self.endpoints,
+            };
+            let max_lun = Self::startup(&mut io, setting.number, flags).map_err(|e| {
                 (
                     alloc::string::String::from("BOT reset reconstruct transport"),
                     e,
                 )
-            })
+            })?;
+            io.ready().map_err(|e| {
+                (
+                    alloc::string::String::from("BOT reset final transport readiness"),
+                    e,
+                )
+            })?;
+            // Every fallible operation has completed. Whole-device retirement
+            // acknowledged all old endpoint DMA, and fresh configuration and
+            // endpoint commands have acknowledged the replacement. No request
+            // in the new transport refers to either application buffer yet.
+            // Move the actual unique owners; old aliases stay poisoned and
+            // cannot inspect or submit these addresses again.
+            let mut buffer = self.buffer.transfer();
+            let mut wrapper = self.wrapper.transfer();
+            buffer.bytes_mut().fill(0);
+            wrapper.bytes_mut().fill(0);
+            let mut bot = Self::with_buffers(
+                io,
+                setting.number,
+                self.endpoints,
+                buffer,
+                wrapper,
+                flags,
+                max_lun,
+            );
+            bot.attachment = Some((fresh, setting));
+            Ok(bot)
         })();
         if result.is_err()
             && let Ok(mut device) = controller.borrow_mut().device(id)
@@ -997,6 +1079,228 @@ mod tests {
         // owners and the synchronous private model are dropped.
         unsafe { RegionAllocator::new(start..start + core::mem::size_of_val(backing) as u64) }
     }
+    struct NativeFixture {
+        storage: super::super::UsbStorage,
+        disk: super::super::UsbDisk,
+        hardware: Rc<RefCell<crate::usb::xhci::model::ResetHardware>>,
+        dma: RegionAllocator,
+    }
+    fn native_fixture(memory: &mut [u64], speed: u8, context: usize) -> NativeFixture {
+        let (controller, device, hardware, mut dma) =
+            crate::usb::xhci::model::reset_bot_fixture(memory, speed, context, 3);
+        let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
+        let endpoints = [true, false].map(|input| {
+            *interface
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.is_in() == input)
+                .unwrap()
+        });
+        controller
+            .borrow_mut()
+            .device(device.id)
+            .unwrap()
+            .configure(&endpoints, None, &mut dma)
+            .unwrap();
+        let mut failures = Vec::new();
+        let (storage, mut disks) = super::super::discover_retained(
+            controller,
+            &device,
+            &interface,
+            endpoints,
+            &mut dma,
+            &mut failures,
+        )
+        .unwrap();
+        assert!(failures.is_empty());
+        assert_eq!(disks.len(), 1);
+        NativeFixture {
+            storage,
+            disk: disks.remove(0),
+            hardware,
+            dma,
+        }
+    }
+    #[test]
+    fn native_root_bot_reuses_original_transport_buffers_across_96_resets_and_real_io() {
+        use crate::block::BlockDevice;
+        use crate::usb::xhci::{HIGH_SPEED, SUPER_SPEED};
+        for speed in [HIGH_SPEED, SUPER_SPEED] {
+            for context in [32, 64] {
+                let mut memory = vec![0u64; 512 * 1024];
+                let NativeFixture {
+                    mut storage,
+                    mut disk,
+                    hardware,
+                    mut dma,
+                } = native_fixture(&mut memory, speed, context);
+                let super::super::media::TransportOwner::Bot(owner) = &storage.owner else {
+                    panic!("native BOT fixture published another transport")
+                };
+                let original = {
+                    let owner = owner.borrow();
+                    (
+                        owner.transport.buffer.physical(),
+                        owner.transport.buffer.len(),
+                        owner.transport.wrapper.physical(),
+                        owner.transport.wrapper.len(),
+                    )
+                };
+                assert_eq!(original.1, MAX_TD);
+                assert_eq!(original.3, 64);
+                let remaining = dma.remaining();
+                let mut retired = Vec::new();
+                for epoch in 1..=96 {
+                    let old_owner = match &storage.owner {
+                        super::super::media::TransportOwner::Bot(owner) => owner.clone(),
+                        _ => panic!("native BOT recovery changed transport"),
+                    };
+                    let mut failures = Vec::new();
+                    let mut fresh = storage.reset_and_rebind(&mut dma, &mut failures).unwrap();
+                    assert!(failures.is_empty());
+                    assert_eq!(fresh.len(), 1);
+                    assert_eq!(dma.remaining(), remaining, "reset allocated new DMA");
+                    assert_eq!(hardware.borrow().resets, epoch);
+                    {
+                        let old = old_owner.borrow();
+                        assert!(old.transport.poisoned());
+                        assert!(!old.transport.buffer.present());
+                        assert!(!old.transport.wrapper.present());
+                    }
+                    let super::super::media::TransportOwner::Bot(owner) = &storage.owner else {
+                        panic!("native BOT recovery changed transport")
+                    };
+                    {
+                        let owner = owner.borrow();
+                        assert_eq!(
+                            (
+                                owner.transport.buffer.physical(),
+                                owner.transport.buffer.len(),
+                                owner.transport.wrapper.physical(),
+                                owner.transport.wrapper.len(),
+                            ),
+                            original,
+                        );
+                    }
+                    let current_bytes = {
+                        let owner = owner.borrow();
+                        (
+                            owner.transport.buffer.bytes().to_vec(),
+                            owner.transport.wrapper.bytes().to_vec(),
+                        )
+                    };
+                    retired.push((disk, old_owner));
+                    let accesses = hardware.borrow().accesses;
+                    for (old_disk, old_owner) in &mut retired {
+                        let mut poison = [0xb7; 512];
+                        assert!(old_disk.read(7, &mut poison).is_err());
+                        assert_eq!(poison, [0xb7; 512]);
+                        assert!(old_disk.write(7, &[0xee; 512]).is_err());
+                        assert!(old_disk.flush().is_err());
+                        let mut old = old_owner.borrow_mut();
+                        assert!(old.transport.io.ready().is_err());
+                        assert!(
+                            old.transport
+                                .command(0, &scsi::inquiry(), Data::In(36))
+                                .is_err()
+                        );
+                        assert!(old.transport.reset_and_rebind(&mut dma).is_err());
+                    }
+                    assert_eq!(hardware.borrow().accesses, accesses);
+                    assert_eq!(dma.remaining(), remaining);
+                    {
+                        let owner = owner.borrow();
+                        assert_eq!(owner.transport.buffer.bytes(), current_bytes.0);
+                        assert_eq!(owner.transport.wrapper.bytes(), current_bytes.1);
+                    }
+                    disk = fresh.remove(0);
+                    let byte = epoch as u8;
+                    disk.write(7, &[byte; 512]).unwrap();
+                    disk.flush().unwrap();
+                    let mut actual = [0; 512];
+                    disk.read(7, &mut actual).unwrap();
+                    assert_eq!(actual, [byte; 512]);
+                    for opcode in [scsi::READ_10, scsi::WRITE_10, scsi::SYNCHRONIZE_CACHE_10] {
+                        assert!(hardware.borrow().scsi.contains(&(epoch, opcode)));
+                    }
+                    assert_eq!(dma.remaining(), remaining);
+                }
+                assert_eq!(retired.len(), 96);
+            }
+        }
+    }
+    #[test]
+    fn native_bot_failed_reset_keeps_both_original_buffer_owners_and_bytes() {
+        use crate::block::BlockDevice;
+        use crate::usb::xhci::{HIGH_SPEED, SUPER_SPEED, model::ResetFault};
+        for speed in [HIGH_SPEED, SUPER_SPEED] {
+            for context in [32, 64] {
+                for fault in [
+                    ResetFault::Stop(2),
+                    ResetFault::Disable,
+                    ResetFault::NoResetChange,
+                    ResetFault::Identity,
+                    ResetFault::ConfigureAfterReset,
+                    ResetFault::FatalAfterReset,
+                    ResetFault::ChangeAfterReset,
+                ] {
+                    let mut memory = vec![0u64; 512 * 1024];
+                    let NativeFixture {
+                        mut storage,
+                        mut disk,
+                        hardware,
+                        mut dma,
+                    } = native_fixture(&mut memory, speed, context);
+                    let owner = match &storage.owner {
+                        super::super::media::TransportOwner::Bot(owner) => owner.clone(),
+                        _ => panic!("native BOT fixture published another transport"),
+                    };
+                    let before = {
+                        let mut owner = owner.borrow_mut();
+                        owner.transport.buffer.bytes_mut().fill(0xa5);
+                        owner.transport.wrapper.bytes_mut().fill(0x5a);
+                        (
+                            owner.transport.buffer.physical(),
+                            owner.transport.buffer.bytes().to_vec(),
+                            owner.transport.wrapper.physical(),
+                            owner.transport.wrapper.bytes().to_vec(),
+                        )
+                    };
+                    hardware.borrow_mut().fault = fault;
+                    let mut failures = Vec::new();
+                    assert!(storage.reset_and_rebind(&mut dma, &mut failures).is_err());
+                    assert!(!failures.is_empty());
+                    {
+                        let owner = owner.borrow();
+                        assert!(owner.transport.poisoned());
+                        assert!(owner.transport.buffer.present());
+                        assert!(owner.transport.wrapper.present());
+                        assert_eq!(owner.transport.buffer.physical(), before.0);
+                        assert_eq!(owner.transport.buffer.bytes(), before.1);
+                        assert_eq!(owner.transport.wrapper.physical(), before.2);
+                        assert_eq!(owner.transport.wrapper.bytes(), before.3);
+                    }
+                    let accesses = hardware.borrow().accesses;
+                    let mut poison = [0xc3; 512];
+                    assert!(disk.read(0, &mut poison).is_err());
+                    assert_eq!(poison, [0xc3; 512]);
+                    assert!(disk.write(0, &[0x11; 512]).is_err());
+                    assert!(disk.flush().is_err());
+                    assert!(
+                        owner
+                            .borrow_mut()
+                            .transport
+                            .command(0, &scsi::inquiry(), Data::In(36))
+                            .is_err()
+                    );
+                    assert_eq!(hardware.borrow().accesses, accesses);
+                    let owner = owner.borrow();
+                    assert_eq!(owner.transport.buffer.bytes(), before.1);
+                    assert_eq!(owner.transport.wrapper.bytes(), before.3);
+                }
+            }
+        }
+    }
     #[test]
     fn all_sixteen_luns_have_independent_media_sense_and_shared_tags() {
         let mut memory = vec![0u64; 32 * 1024];
@@ -1292,8 +1596,8 @@ mod tests {
                 },
                 interface: 3,
                 endpoints: endpoints(),
-                buffer,
-                wrapper,
+                buffer: TransportBuffer::new(buffer),
+                wrapper: TransportBuffer::new(wrapper),
                 tag: 7,
                 max_lun: 1,
                 poisoned: false,
