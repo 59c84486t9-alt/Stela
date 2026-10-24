@@ -819,6 +819,65 @@ pub(super) mod tests {
         (driver, model, authority, state)
     }
 
+    /// Shared actual native setup for the TX cancellation peer controls.
+    pub(in crate::net::wifi::mediatek::bootstrap::client) struct TxFixture {
+        pub(in crate::net::wifi::mediatek::bootstrap::client) driver: Client<Bar, Q, NativeGuard>,
+        pub(in crate::net::wifi::mediatek::bootstrap::client) model: Model,
+        authority: Owner,
+        state: Rc<AuthorityState>,
+    }
+    impl TxFixture {
+        pub(in crate::net::wifi::mediatek::bootstrap::client) fn new() -> Self {
+            let (driver, model, authority, state) = secure_modern();
+            Self {
+                driver,
+                model,
+                authority,
+                state,
+            }
+        }
+        pub(in crate::net::wifi::mediatek::bootstrap::client) fn revoke(&self) {
+            self.state.allowed.set(false);
+        }
+        pub(in crate::net::wifi::mediatek::bootstrap::client) fn progress(
+            &mut self,
+            now: u64,
+        ) -> Result<(), ClientError> {
+            let permit = admit(
+                &mut self.authority,
+                &self.driver,
+                AssociationUse::Management,
+            );
+            // SAFETY: these retained guards qualify only this stateful simulated requester.
+            unsafe {
+                self.driver.progress_block_ack(
+                    &mut self.authority,
+                    permit,
+                    &GuardedSource(self.state.clone()),
+                    now,
+                )
+            }
+        }
+        pub(in crate::net::wifi::mediatek::bootstrap::client) fn transmit(&mut self) {
+            let permit = admit(&mut self.authority, &self.driver, AssociationUse::Data);
+            let epoch = self.driver.station().association_epoch().unwrap();
+            // SAFETY: the model's genuine same-requester guards enclose this publication.
+            unsafe {
+                self.driver.transmit_modern(
+                    &mut self.authority,
+                    permit,
+                    epoch,
+                    &eth(0x0800),
+                    TxClass::Data,
+                    Some(6),
+                    &GuardedSource(self.state.clone()),
+                    &mut Policy(true),
+                )
+            }
+            .unwrap();
+        }
+    }
+
     fn modern_keys(driver: &mut Client<Bar, Q, NativeGuard>, authority: &mut Owner) {
         for (pairwise, index, material) in [(true, 0, 1), (false, 2, 2)] {
             let permit = admit(

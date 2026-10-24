@@ -4,6 +4,8 @@
 //! the management exchange/counters; firmware owns actual air sequence/PN.
 use super::*;
 use station::ba::tx::{Action, Agreement, Session};
+#[cfg(test)]
+mod tests;
 
 pub(crate) struct Transmit<C: 'static> {
     _resource: Arc<C>,
@@ -32,10 +34,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     pub(super) fn queue_tx_ba(
         s: &mut Owned<I, Q, C>,
         action: Action,
-        _now: u64,
+        now: u64,
     ) -> Result<(), Error> {
         match action {
-            Action::None => Ok(()),
+            Action::None => match Self::reconcile_tx_ba(s, now) {
+                Ok(_) | Err(Error::NeedsDrain) => Ok(()),
+                Err(error) => Err(error),
+            },
             Action::Operational { session, agreement } => {
                 let native = s.transmit_ba[usize::from(session.tid())]
                     .as_mut()
@@ -97,6 +102,86 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 Ok(())
             }
         }
+    }
+
+    fn tx_ba_pending(s: &Owned<I, Q, C>, session: &Arc<Session>) -> bool {
+        s.controller
+            .state()
+            .data_tx
+            .as_ref()
+            .unwrap()
+            .has_pending_context(|p| {
+                p.tid == Some(session.tid())
+                    || p.tx_ba
+                        .as_ref()
+                        .is_some_and(|old| Arc::ptr_eq(old, session))
+            })
+    }
+
+    /// The front action is still privately queued: successful publication
+    /// removes it immediately, and uncertain publication quarantines Client.
+    /// Canonical cancellation alone never proves this native fact or idle TX.
+    pub(super) fn reconcile_tx_ba(s: &mut Owned<I, Q, C>, now: u64) -> Result<bool, Error> {
+        let Some(BaAction::Tx(action)) = s.ba_actions.front() else {
+            return Ok(false);
+        };
+        if s.station
+            .validate_tx_block_ack_cancellation(action)
+            .is_err()
+        {
+            return Ok(false);
+        }
+        let (ticket, session) = match action {
+            Action::Prepare { ticket, session }
+            | Action::Transmit {
+                ticket, session, ..
+            }
+            | Action::Program {
+                ticket, session, ..
+            } => (*ticket, session.clone()),
+            _ => return Err(Error::WrongPhase),
+        };
+        let native = s.transmit_ba[usize::from(session.tid())]
+            .as_ref()
+            .ok_or(Error::WrongPhase)?;
+        if !Arc::ptr_eq(&native.session, &session) || !native.blocked {
+            return Err(Error::WrongPhase);
+        }
+        if Self::tx_ba_pending(s, &session) {
+            return Err(Error::NeedsDrain);
+        }
+        // SAFETY: the exact canceled action remains unpublished at the private
+        // front; real descriptor consumption, TX-free and unmap have retired
+        // this TID's preceding packets, and the same native owner stays held.
+        let next = unsafe {
+            match action {
+                Action::Prepare { .. } => s.station.complete_tx_block_ack_prepare(
+                    ticket,
+                    Completion::RejectedAndIdle,
+                    None,
+                    now,
+                ),
+                Action::Transmit { .. } => s.station.complete_tx_block_ack_transmit(
+                    ticket,
+                    Completion::RejectedAndIdle,
+                    now,
+                ),
+                Action::Program { .. } => s
+                    .station
+                    .complete_tx_block_ack_program(ticket, Completion::RejectedAndIdle),
+                _ => unreachable!(),
+            }
+        }
+        .map_err(Error::BlockAck)?;
+        // Keep the successor in the already allocated queue slot. In particular
+        // an allocation failure must not lose a required disable/resume owner.
+        *s.ba_actions.front_mut().unwrap() = BaAction::Tx(next);
+        if let Some(BaAction::Tx(Action::ResumeLegacy { session })) = s.ba_actions.front() {
+            let session = session.clone();
+            Self::queue_tx_ba(s, Action::ResumeLegacy { session }, now)?;
+            s.ba_actions.pop_front();
+        }
+        Ok(true)
     }
 
     pub(super) unsafe fn progress_tx_ba<
@@ -283,13 +368,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.station
             .validate_tx_block_ack_program(ticket, &session, None)
             .map_err(Error::BlockAck)?;
-        if s.controller
-            .state()
-            .data_tx
-            .as_ref()
-            .unwrap()
-            .has_pending_context(|p| p.tid == Some(session.tid()))
-        {
+        if Self::tx_ba_pending(s, &session) {
             return Err(Error::NeedsDrain);
         }
         let body = wire::modern::ba_request(
@@ -308,6 +387,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 s.station
                     .complete_tx_block_ack_program(ticket, Completion::Uncertain)
             };
+            s.phase = Phase::Quarantined;
             return Err(error);
         }
         s.ba_actions.pop_front();

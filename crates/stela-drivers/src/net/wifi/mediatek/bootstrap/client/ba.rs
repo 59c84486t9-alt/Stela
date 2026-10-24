@@ -56,6 +56,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 Ok(Vec::new())
             }
             BaAction::None => {
+                if let Err(error) = Self::reconcile_tx_ba(s, now)
+                    && !matches!(error, Error::NeedsDrain)
+                {
+                    return Err(error);
+                }
                 // DELBA can cancel a canonical installation before this native
                 // owner ever publishes its queued start. Retire only that
                 // proven-unused action; never turn a late ACK into success.
@@ -160,6 +165,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let s = self.state_mut();
         if s.phase != Phase::Associated {
             return Err(Error::WrongPhase);
+        }
+        let reconciled = Self::reconcile_tx_ba(s, now)?;
+        if reconciled && s.ba_actions.is_empty() {
+            return Ok(());
         }
         if matches!(s.ba_actions.front(), Some(BaAction::Tx(_))) {
             // SAFETY: covered by this function's own safety contract.
@@ -301,7 +310,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.phase != Phase::Associated {
             return Err(Error::WrongPhase);
         }
-        Self::stop_ba_action(s)
+        let now = s.controller.state().control.clock.now_us();
+        let reconciled = Self::reconcile_tx_ba(s, now)?;
+        if reconciled && s.ba_actions.is_empty() {
+            return Ok(());
+        }
+        if matches!(s.ba_actions.front(), Some(BaAction::Tx(_))) {
+            Self::stop_tx_ba_action(s, now)
+        } else {
+            Self::stop_ba_action(s)
+        }
     }
     fn stop_ba_action(s: &mut Owned<I, Q, C>) -> Result<(), Error> {
         let Some(BaAction::Program {

@@ -263,6 +263,33 @@ impl Station {
         Ok(record)
     }
 
+    /// Recognize only the exact original operation canceled in the canonical
+    /// record. This does not prove native nonpublication or TX retirement.
+    pub(crate) fn validate_tx_block_ack_cancellation(&self, action: &Action) -> Result<(), Error> {
+        let (ticket, session) = match action {
+            Action::Prepare { ticket, session }
+            | Action::Transmit {
+                ticket, session, ..
+            }
+            | Action::Program {
+                ticket, session, ..
+            } => (*ticket, session),
+            _ => return Err(Error::Stale),
+        };
+        let record = self.tx_ba_identity(session)?;
+        let valid = match (action, record.state) {
+            (Action::Prepare { .. }, State::CancelingPrepare { .. }) => session.ticket == ticket,
+            (Action::Transmit { bytes, .. }, State::CancelingPublish { ticket: t, .. }) => {
+                ticket == t && record.wire.as_deref() == Some(bytes.as_slice())
+            }
+            (Action::Program { agreement, .. }, State::CancelingProgram { ticket: t, .. }) => {
+                ticket == t && agreement.is_some() && *agreement == record.agreement
+            }
+            _ => false,
+        };
+        if valid { Ok(()) } else { Err(Error::Stale) }
+    }
+
     pub fn validate_tx_block_ack_prepare(
         &self,
         ticket: Ticket,
@@ -1342,5 +1369,106 @@ mod tests {
         s.complete_removal(ticket(&removal), Completion::Accepted)
             .unwrap();
         assert!(s.active_tx_block_ack(3).is_none());
+    }
+    #[test]
+    fn cancellation_validator_requires_exact_pending_ticket_session_and_payload() {
+        for stage in 0..3 {
+            let mut s = station(1024);
+            let (ticket, session) = prepare(&mut s, 3, 0);
+            let mut action = TxAction::Prepare {
+                ticket,
+                session: session.clone(),
+            };
+            if stage >= 1 {
+                // SAFETY: this canonical peer model has synchronized actual TID preparation.
+                action = unsafe {
+                    s.complete_tx_block_ack_prepare(
+                        ticket,
+                        Completion::Accepted,
+                        Some(3),
+                        s.now + 1,
+                    )
+                }
+                .unwrap();
+            }
+            if stage == 2 {
+                let TxAction::Transmit { ticket, .. } = action else {
+                    unreachable!()
+                };
+                // SAFETY: actual modeled publication completed before the peer response.
+                unsafe {
+                    s.complete_tx_block_ack_transmit(ticket, Completion::Accepted, s.now + 1)
+                }
+                .unwrap();
+                let frame = peer_response(&session, session.dialog(), 0, 64, 0, true);
+                action = receive_tx(&mut s, &frame);
+            }
+            assert!(s.validate_tx_block_ack_cancellation(&action).is_err());
+            let delba = response(0xd0, &[3, 2, 0, 0x30, 37, 0]);
+            assert!(matches!(receive_tx(&mut s, &delba), TxAction::None));
+            s.validate_tx_block_ack_cancellation(&action).unwrap();
+            let clone = |replacement: Arc<Session>, bad_ticket: bool, bad_payload: bool| {
+                let change = |mut ticket: Ticket| {
+                    if bad_ticket {
+                        ticket.serial += 1;
+                    }
+                    ticket
+                };
+                match &action {
+                    TxAction::Prepare { ticket, .. } => TxAction::Prepare {
+                        ticket: change(*ticket),
+                        session: replacement,
+                    },
+                    TxAction::Transmit { ticket, bytes, .. } => {
+                        let mut bytes = bytes.clone();
+                        if bad_payload {
+                            bytes.push(0);
+                        }
+                        TxAction::Transmit {
+                            ticket: change(*ticket),
+                            session: replacement,
+                            bytes,
+                        }
+                    }
+                    TxAction::Program {
+                        ticket, agreement, ..
+                    } => {
+                        let agreement = agreement.map(|mut a| {
+                            if bad_payload {
+                                a.window += 1;
+                            }
+                            a
+                        });
+                        TxAction::Program {
+                            ticket: change(*ticket),
+                            session: replacement,
+                            agreement,
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            };
+            let copied = Arc::new(Session {
+                ticket: session.ticket,
+                context: session.context.clone(),
+                tid: session.tid,
+                dialog: session.dialog,
+            });
+            assert!(
+                s.validate_tx_block_ack_cancellation(&clone(copied, false, false))
+                    .is_err()
+            );
+            assert!(
+                s.validate_tx_block_ack_cancellation(&clone(session.clone(), true, false))
+                    .is_err()
+            );
+            if stage != 0 {
+                assert!(
+                    s.validate_tx_block_ack_cancellation(&clone(session.clone(), false, true))
+                        .is_err()
+                );
+            }
+            s.validate_tx_block_ack_cancellation(&action).unwrap();
+        }
     }
 }

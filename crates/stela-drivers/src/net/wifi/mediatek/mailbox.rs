@@ -825,6 +825,7 @@ pub(crate) mod tests {
         pub(crate) client_commands: Vec<Vec<u8>>,
         pub(crate) peers: alloc::collections::BTreeMap<u16, Vec<u8>>,
         pub(crate) receive_ba: alloc::collections::BTreeMap<(u16, u8), Vec<u8>>,
+        pub(crate) transmit_ba: alloc::collections::BTreeMap<(u16, u8), Vec<u8>>,
         pub(crate) initial_commands: Vec<Vec<u8>>,
         pub(crate) initial_fail_at: Option<usize>,
         pub(crate) raw_disabled: alloc::collections::BTreeSet<u16>,
@@ -878,6 +879,7 @@ pub(crate) mod tests {
                 client_commands: Vec::new(),
                 peers: alloc::collections::BTreeMap::new(),
                 receive_ba: alloc::collections::BTreeMap::new(),
+                transmit_ba: alloc::collections::BTreeMap::new(),
                 initial_commands: Vec::new(),
                 initial_fail_at: None,
                 raw_disabled: alloc::collections::BTreeSet::new(),
@@ -1332,14 +1334,29 @@ pub(crate) mod tests {
                             if body[8] == 6 {
                                 assert_eq!(body.len(), 24);
                                 assert_eq!(&body[8..12], &[6, 0, 16, 0]);
-                                assert_eq!(body[13], 2); // actual recipient direction
-                                assert_eq!(body[14], 0); // source RX_START params.amsdu
                                 let tid = body[12];
-                                if body[15] == 0 {
-                                    model.receive_ba.remove(&(slot, tid));
+                                if body[13] == 1 {
+                                    assert!(tid < 8);
+                                    assert_eq!(body[16..18], [0, 0]); // source TX_OPERATIONAL SSN
+                                    assert!(body[14] <= 1);
+                                    if body[15] == 0 {
+                                        assert_eq!(body[14], 0);
+                                        assert_eq!(body[18..20], [1, 0]);
+                                        model.transmit_ba.remove(&(slot, tid));
+                                    } else {
+                                        assert_eq!(body[15], 1 << tid);
+                                        assert_ne!(body[18..20], [0, 0]);
+                                        model.transmit_ba.insert((slot, tid), body.to_vec());
+                                    }
                                 } else {
-                                    assert_eq!(body[15], 1 << tid);
-                                    model.receive_ba.insert((slot, tid), body.to_vec());
+                                    assert_eq!(body[13], 2); // actual recipient direction
+                                    assert_eq!(body[14], 0); // source RX_START params.amsdu
+                                    if body[15] == 0 {
+                                        model.receive_ba.remove(&(slot, tid));
+                                    } else {
+                                        assert_eq!(body[15], 1 << tid);
+                                        model.receive_ba.insert((slot, tid), body.to_vec());
+                                    }
                                 }
                             } else if body[8] == 0x25 {
                                 model.peers.remove(&slot);
