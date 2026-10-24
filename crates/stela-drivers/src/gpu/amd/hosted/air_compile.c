@@ -25,6 +25,25 @@ struct stela_amd_air_compilation {
    enum stela_amd_air_status capture_status;
 };
 
+/* Preserve native/packed 16-bit min/max where ACO supports it. Uniform
+ * subword scalar operands need the original signed/unsigned legalization. */
+static bool
+narrow_scalar_minmax(const nir_instr *instr)
+{
+   if (instr->type != nir_instr_type_alu)
+      return false;
+   const nir_alu_instr *alu = nir_instr_as_alu(instr);
+   return alu->def.num_components == 1 && (alu->def.bit_size == 8 || alu->def.bit_size == 16) &&
+      (alu->op == nir_op_imin || alu->op == nir_op_imax ||
+       alu->op == nir_op_umin || alu->op == nir_op_umax);
+}
+
+static unsigned
+lower_minmax_bit_size(const nir_instr *instr, void *data)
+{
+   return narrow_scalar_minmax(instr) ? ac_nir_lower_bit_size_callback(instr, data) : 0;
+}
+
 static enum stela_amd_air_status
 report(struct stela_amd_air_error *error, enum stela_amd_air_status status,
        const char *detail)
@@ -368,6 +387,17 @@ stela_amd_air_compile_specialized(const struct radeon_info *info, const struct s
       progress |= nir_opt_dce(shader);
    } while (progress);
    nir_lower_alu_width(shader, ac_nir_opt_vectorize_cb, &owner->binary.gfx_level);
+   bool narrow_minmax = false;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block)
+            narrow_minmax |= narrow_scalar_minmax(instr);
+      }
+   }
+   if (narrow_minmax) {
+      nir_divergence_analysis(shader);
+      nir_lower_bit_size(shader, lower_minmax_bit_size, &owner->binary.gfx_level);
+   }
    nir_lower_load_const_to_scalar(shader);
    nir_opt_copy_prop(shader);
    nir_opt_dce(shader);

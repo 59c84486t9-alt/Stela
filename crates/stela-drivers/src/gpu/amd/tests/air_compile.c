@@ -10,6 +10,7 @@
 #include "compiler/tests/air_division_fixture.h"
 #include "compiler/tests/air_count_fixture.h"
 #include "compiler/tests/air_permutation_fixture.h"
+#include "compiler/tests/air_minmax_fixture.h"
 #include "compiler/tests/targets/amd.h"
 #include "compiler/tests/threadgroup_record.h"
 #include "util/ralloc.h"
@@ -492,8 +493,66 @@ static void integer_permutation_tests(void)
         stela_metal_assembly_destroy(&library);
     }
 }
+/* Assert the final actual owner intake, not a separately legalized probe. */
+static void minmax_options_tests(void)
+{
+    const enum radeon_family families[] = {CHIP_CARRIZO, CHIP_RAVEN, CHIP_NAVI31};
+    const unsigned fixtures[] = {1, ARRAY_SIZE(stela_air_minmax_fixtures) - 1};
+    for (unsigned family = 0; family < ARRAY_SIZE(families); family++) {
+        struct radeon_info info = model(families[family], true);
+        struct stela_amd_air_options opts = options(stela_amd_min_wave(info.family));
+        for (unsigned variant = 0; variant < ARRAY_SIZE(fixtures); variant++) {
+            unsigned index = fixtures[variant];
+            LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_minmax_fixtures[index].body,
+                                                           stela_air_minmax_fixtures[index].declarations);
+            struct stela_metal_assembly *library = fixture(air);
+            LLVMDisposeMemoryBuffer(air);
+            const char *name = variant ? "integer-minmax16-native-policy" : "integer-minmax16-uniform-policy";
+            expect_owned(name, info.family, opts.wave_size);
+            struct stela_amd_air_compilation *owner = compile(&info, library, &opts, STELA_AMD_AIR_OK);
+            const nir_shader *actual = stela_amd_air_binary(owner)->shader;
+            unsigned seen = 0;
+            nir_foreach_function_impl(impl, (nir_shader *)actual) {
+                nir_foreach_block(block, impl) {
+                    nir_foreach_instr(instr, block) {
+                        if (instr->type != nir_instr_type_alu) continue;
+                        const nir_alu_instr *alu = nir_instr_as_alu(instr);
+                        unsigned operation;
+                        switch (alu->op) {
+                        case nir_op_imin: operation = 0; break;
+                        case nir_op_imax: operation = 1; break;
+                        case nir_op_umin: operation = 2; break;
+                        case nir_op_umax: operation = 3; break;
+                        default: continue;
+                        }
+                        CHECK(alu->def.num_components == 1 && alu->def.bit_size == (variant ? 16 : 32));
+                        CHECK(alu->def.divergent == (variant != 0));
+                        seen |= 1u << operation;
+                    }
+                }
+            }
+            CHECK(seen == 15);
+            validate_result(&info, owner, name);
+            destroy(&owner);
+            stela_metal_assembly_destroy(&library);
+        }
+    }
+}
+static void integer_minmax_tests(void)
+{
+    minmax_options_tests();
+    for (unsigned i = 0; i < ARRAY_SIZE(stela_air_minmax_fixtures); i++) {
+        LLVMMemoryBufferRef air = stela_air_test_bitcode(stela_air_minmax_fixtures[i].body,
+                                                       stela_air_minmax_fixtures[i].declarations);
+        struct stela_metal_assembly *library = fixture(air);
+        LLVMDisposeMemoryBuffer(air);
+        targets(library, STELA_AIR_FP_IEEE_DEFAULT, stela_air_minmax_fixtures[i].name);
+        stela_metal_assembly_destroy(&library);
+    }
+}
 static void original_tests(void)
 {
+    integer_minmax_tests();
     integer_permutation_tests();
     integer_count_tests();
     integer_division_tests();

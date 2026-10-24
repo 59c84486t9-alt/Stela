@@ -1078,6 +1078,57 @@ integer_permutation(struct translator *t, LLVMValueRef inst, LLVMValueRef callee
    return put_value(t, inst, nir_u2uN(&t->b, result, bits), 0);
 }
 
+enum integer_minmax_operation {
+   INTEGER_SIGNED_MINIMUM,
+   INTEGER_SIGNED_MAXIMUM,
+   INTEGER_UNSIGNED_MINIMUM,
+   INTEGER_UNSIGNED_MAXIMUM,
+};
+
+static bool
+integer_minmax(struct translator *t, LLVMValueRef inst, LLVMValueRef callee,
+               unsigned intrinsic, enum integer_minmax_operation operation)
+{
+   unsigned components, bits;
+   LLVMTypeRef type = LLVMTypeOf(inst);
+   if (!shape(type, &components, &bits) || bits == 1)
+      return fail(t, STELA_AIR_TYPE, "unsupported LLVM integer-minmax result shape");
+   LLVMTypeRef expected = LLVMIntrinsicGetType(t->context, intrinsic, &type, 1);
+   if (!LLVMIsDeclaration(callee) || LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
+       LLVMGetInstructionCallConv(inst) != LLVMCCallConv ||
+       LLVMGlobalGetValueType(callee) != expected || LLVMGetCalledFunctionType(inst) != expected ||
+       LLVMGetNumArgOperands(inst) != 2 || LLVMCountParams(callee) != 2 ||
+       LLVMIsFunctionVarArg(expected) || LLVMGetNumOperandBundles(inst) ||
+       LLVMTypeOf(LLVMGetOperand(inst, 0)) != type || LLVMTypeOf(LLVMGetOperand(inst, 1)) != type)
+      return fail(t, STELA_AIR_TYPE, "unsupported LLVM integer-minmax call signature");
+   size_t canonical_length = 0, name_length = 0;
+   char *canonical = LLVMIntrinsicCopyOverloadedName2(t->module, intrinsic, &type, 1,
+                                                     &canonical_length);
+   if (!canonical)
+      return fail(t, STELA_AIR_ALLOCATION, "LLVM integer-minmax overload name unavailable");
+   const char *name = LLVMGetValueName2(callee, &name_length);
+   bool canonical_name = name_length == canonical_length && !memcmp(name, canonical, name_length);
+   LLVMDisposeMessage(canonical);
+   if (!canonical_name)
+      return fail(t, STELA_AIR_INSTRUCTION, "noncanonical LLVM integer-minmax overload name");
+   nir_def *a = get_value(t, LLVMGetOperand(inst, 0));
+   nir_def *b = get_value(t, LLVMGetOperand(inst, 1));
+   if (!a || !b)
+      return false;
+   if (a->num_components != components || b->num_components != components ||
+       a->bit_size != bits || b->bit_size != bits)
+      return fail(t, STELA_AIR_TYPE, "LLVM integer-minmax operand shape mismatch");
+   nir_def *result;
+   switch (operation) {
+   case INTEGER_SIGNED_MINIMUM: result = nir_imin(&t->b, a, b); break;
+   case INTEGER_SIGNED_MAXIMUM: result = nir_imax(&t->b, a, b); break;
+   case INTEGER_UNSIGNED_MINIMUM: result = nir_umin(&t->b, a, b); break;
+   case INTEGER_UNSIGNED_MAXIMUM: result = nir_umax(&t->b, a, b); break;
+   default: return fail(t, STELA_AIR_INSTRUCTION, "unknown LLVM integer-minmax operation");
+   }
+   return put_value(t, inst, result, 0);
+}
+
 static bool same_pointer_resource(const struct value *a, const struct value *b);
 
 static bool
@@ -1163,6 +1214,20 @@ instruction(struct translator *t, LLVMValueRef inst)
             unsigned expected = LLVMLookupIntrinsicID(permutations[operation], strlen(permutations[operation]));
             if (expected && intrinsic == expected)
                return integer_permutation(t, inst, callee, intrinsic, (enum integer_permutation_operation)operation);
+         }
+      }
+      if (LLVMIsAFunction(callee)) {
+         unsigned intrinsic = LLVMGetIntrinsicID(callee);
+         static const char *const minmax[] = {
+            [INTEGER_SIGNED_MINIMUM] = "llvm.smin",
+            [INTEGER_SIGNED_MAXIMUM] = "llvm.smax",
+            [INTEGER_UNSIGNED_MINIMUM] = "llvm.umin",
+            [INTEGER_UNSIGNED_MAXIMUM] = "llvm.umax",
+         };
+         for (unsigned operation = 0; intrinsic && operation < ARRAY_SIZE(minmax); operation++) {
+            unsigned expected = LLVMLookupIntrinsicID(minmax[operation], strlen(minmax[operation]));
+            if (expected && intrinsic == expected)
+               return integer_minmax(t, inst, callee, intrinsic, (enum integer_minmax_operation)operation);
          }
       }
       size_t name_length = 0;
