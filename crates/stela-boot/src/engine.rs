@@ -99,6 +99,8 @@ const REPORTED_INTERRUPTS: u64 = 64;
 const ESR_EC_SHIFT: u32 = 26;
 /// ESR EC of an SVC from AArch64 state.
 const EC_SVC64: u64 = 0x15;
+/// Instruction and data aborts taken from a lower EL.
+const EC_LOWER_ABORTS: [u64; 2] = [0x20, 0x24];
 
 struct Options {
     dram_base: u64,
@@ -978,7 +980,16 @@ pub(crate) fn report(event: &Event) {
             if *vector == stela_runtime::machine::exception::Vector::Synchronous
                 && syndrome >> ESR_EC_SHIFT != EC_SVC64
     );
-    let quiet = if guarded_fault {
+    // An abort on an address no translation regime can hold, such as a
+    // pointer whose PAC was never stripped, is always worth its line.
+    let noncanonical_fault = matches!(
+        event,
+        Event::Exception { vector, syndrome, fault_address: Some(address), .. }
+            if *vector == stela_runtime::machine::exception::Vector::Synchronous
+                && EC_LOWER_ABORTS.contains(&(syndrome >> ESR_EC_SHIFT))
+                && !matches!((address >> 48) as u8, 0 | 0xff)
+    );
+    let quiet = if guarded_fault || noncanonical_fault {
         false
     } else if interrupt {
         INTERRUPTS.fetch_add(1, Ordering::Relaxed) >= REPORTED_INTERRUPTS
