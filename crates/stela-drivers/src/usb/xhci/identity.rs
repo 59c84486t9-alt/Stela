@@ -510,6 +510,16 @@ mod tests {
             let mut cdc = (!vendor).then(|| cdc_peer::peer(previous.clone(), &mut dma));
             let mut ethernet = vendor.then(|| vendor_peer::peer(previous.clone(), &mut dma));
             if let Some(peer) = &mut cdc {
+                old_hardware.borrow_mut().incoming_events.push_back(vec![
+                    DEVICE_TO_HOST | TYPE_CLASS | RECIPIENT_INTERFACE,
+                    0,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
                 cdc_peer::queue(peer);
             }
             if let Some(peer) = &mut ethernet {

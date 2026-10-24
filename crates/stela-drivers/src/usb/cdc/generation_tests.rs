@@ -14,6 +14,7 @@ pub(crate) fn peer(controller: Shared, dma: &mut dyn DmaAllocator) -> UsbNet {
 
 pub(crate) fn queue(peer: &mut UsbNet) {
     assert!(peer.carrier());
+    assert_eq!(peer.connected, Some(true));
     assert_eq!(peer.receive().unwrap(), None);
     assert!(peer.queued.is_some());
     assert!(peer.notify_queued.is_some());
