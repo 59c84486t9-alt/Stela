@@ -7,11 +7,13 @@
 mod asix;
 pub mod firmware;
 mod framing;
+#[cfg(test)]
+pub(crate) mod generation_tests;
 mod identity;
 mod registers;
 pub mod rtl815x;
 
-use super::xhci::{Device, Endpoint, Interface, Shared};
+use super::xhci::{Device, Endpoint, Interface, Shared, SlotId, TransferTicket};
 use crate::{
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer},
@@ -136,16 +138,17 @@ impl Binding {
 
 pub(super) struct HostControl {
     pub(super) controller: Shared,
-    pub(super) slot: u8,
+    pub(super) id: SlotId,
 }
 
 impl Control for HostControl {
     fn control(&mut self, request: [u8; 8], output: &[u8]) -> Result<Vec<u8>, BlockError> {
-        let mut c = self.controller.borrow_mut();
-        if !c.connected(self.slot)? {
+        let mut controller = self.controller.borrow_mut();
+        let mut c = controller.device(self.id)?;
+        if !c.connected()? {
             return Err(BlockError::Unsupported("USB Ethernet disconnected"));
         }
-        c.control(self.slot, request, output)
+        c.control(request, output)
     }
     fn delay_us(&mut self, microseconds: u64) {
         self.controller.borrow().clock.delay(microseconds);
@@ -199,13 +202,13 @@ impl Backend {
 /// for the boot even after failed cancellation, as required by xHCI ownership.
 pub struct UsbEthernet {
     controller: Shared,
-    slot: u8,
+    id: SlotId,
     binding: Binding,
     chip: Backend,
     mac: Mac,
     receive: DmaBuffer,
     send: DmaBuffer,
-    queued: Option<u64>,
+    queued: Option<TransferTicket>,
     pending: VecDeque<Vec<u8>>,
     carrier: bool,
     closed: bool,
@@ -229,9 +232,9 @@ impl UsbEthernet {
         dma: &mut dyn DmaAllocator,
         provider: &dyn crate::firmware::Provider,
     ) -> Result<Self, Error> {
+        controller.borrow_mut().device(device.id)?;
         if binding.setting.1 != 0 {
-            controller.borrow_mut().control(
-                device.slot,
+            controller.borrow_mut().device(device.id)?.control(
                 super::xhci::setup(
                     1,
                     super::xhci::SET_INTERFACE,
@@ -244,7 +247,7 @@ impl UsbEthernet {
         }
         let io = HostControl {
             controller: controller.clone(),
-            slot: device.slot,
+            id: device.id,
         };
         let (chip, mac, firmware, family) = match binding.kind {
             Kind::Realtek(revision) => {
@@ -297,7 +300,7 @@ impl UsbEthernet {
         let receive_bytes = chip.receive_bytes();
         Ok(Self {
             controller,
-            slot: device.slot,
+            id: device.id,
             binding,
             chip,
             mac,
@@ -317,7 +320,7 @@ impl UsbEthernet {
         if self.closed {
             return Err(BlockError::Unsupported("USB Ethernet closed"));
         }
-        if !self.controller.borrow_mut().connected(self.slot)? {
+        if !self.controller.borrow_mut().device(self.id)?.connected()? {
             self.closed = true;
             return Err(BlockError::Unsupported("USB Ethernet disconnected"));
         }
@@ -325,10 +328,11 @@ impl UsbEthernet {
     }
 
     fn quiesce(&mut self) -> Result<(), BlockError> {
-        let mut c = self.controller.borrow_mut();
-        c.cancel(self.slot, self.binding.input.dci())?;
+        let mut controller = self.controller.borrow_mut();
+        let mut c = controller.device(self.id)?;
+        c.cancel(self.binding.input.dci())?;
         self.queued = None;
-        c.cancel(self.slot, self.binding.output.dci())?;
+        c.cancel(self.binding.output.dci())?;
         self.pending.clear();
         Ok(())
     }
@@ -351,6 +355,7 @@ impl UsbEthernet {
     /// Stop requires acknowledged cancellation of both bulk endpoints before
     /// the device reset; failed stops remain closed and never reuse DMA.
     pub fn stop(&mut self) -> Result<(), BlockError> {
+        self.controller.borrow_mut().device(self.id)?;
         if self.stopped {
             return Ok(());
         }
@@ -385,8 +390,9 @@ impl Link for UsbEthernet {
         if !self.update_carrier().map_err(link_error)? {
             return Err(LinkError::Adapter("USB Ethernet carrier down".into()));
         }
-        let mut c = self.controller.borrow_mut();
-        c.endpoint_ready(self.slot, self.binding.output.dci())
+        let mut controller = self.controller.borrow_mut();
+        let mut c = controller.device(self.id).map_err(link_error)?;
+        c.endpoint_ready(self.binding.output.dci())
             .map_err(link_error)?;
         let bytes = self
             .chip
@@ -394,7 +400,6 @@ impl Link for UsbEthernet {
             .map_err(|why| LinkError::Adapter(why.into()))?;
         fence(Ordering::Release);
         let actual = match c.transfer(
-            self.slot,
             self.binding.output.dci(),
             self.send.physical(),
             bytes,
@@ -404,8 +409,7 @@ impl Link for UsbEthernet {
             Err(error) => {
                 // A STALL completes the request but the halted hardware can
                 // still reference its old TD until Reset/Set Dequeue succeeds.
-                c.clear(self.slot, &self.binding.output)
-                    .map_err(link_error)?;
+                c.clear(&self.binding.output).map_err(link_error)?;
                 return Err(link_error(error));
             }
         };
@@ -422,31 +426,23 @@ impl Link for UsbEthernet {
         if let Some(frame) = self.pending.pop_front() {
             return Ok(Some(frame));
         }
-        let mut c = self.controller.borrow_mut();
+        let mut controller = self.controller.borrow_mut();
+        let mut c = controller.device(self.id).map_err(link_error)?;
         let endpoint = self.binding.input;
-        let token = match self.queued {
-            Some(token) => token,
-            None => {
-                let token = c
-                    .submit(
-                        self.slot,
-                        endpoint.dci(),
-                        self.receive.physical(),
-                        self.receive.len(),
-                    )
-                    .map_err(link_error)?;
-                self.queued = Some(token);
-                token
-            }
-        };
-        let Some(result) = c.completed(self.slot, endpoint.dci(), token, self.receive.len()) else {
+        if self.queued.is_none() {
+            let token = c
+                .submit_ticket(endpoint.dci(), self.receive.physical(), self.receive.len())
+                .map_err(link_error)?;
+            self.queued = Some(token);
+        }
+        let Some(result) = c.completed_ticket(self.queued.as_ref().unwrap()) else {
             return Ok(None);
         };
         self.queued = None;
         let actual = match result {
             Ok(bytes) => bytes,
             Err(error) => {
-                c.clear(self.slot, &endpoint).map_err(link_error)?;
+                c.clear(&endpoint).map_err(link_error)?;
                 return Err(link_error(error));
             }
         };

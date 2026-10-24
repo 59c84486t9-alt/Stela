@@ -162,6 +162,12 @@ impl DeviceAccess<'_> {
         self.controller.control(slot, request, out)
     }
 
+    /// Read a standard string descriptor for this exact addressed generation.
+    pub(crate) fn string(&mut self, language: u16, index: u8) -> Option<String> {
+        let slot = self.slot().ok()?;
+        self.controller.string(slot, language, index)
+    }
+
     pub fn connected(&mut self) -> Result<bool, BlockError> {
         let slot = self.slot()?;
         self.controller.connected(slot)
@@ -427,5 +433,189 @@ mod tests {
         let accesses = hardware.borrow().accesses;
         assert!(controller.borrow_mut().device(device.id).is_err());
         assert_eq!(hardware.borrow().accesses, accesses);
+    }
+
+    fn trapped(controller: &Shared, operation: impl FnOnce()) {
+        struct NoAccess;
+        impl Registers for NoAccess {
+            fn read32(&mut self, _: usize) -> u32 {
+                panic!("retired USB Ethernet consumer reached MMIO read")
+            }
+            fn write32(&mut self, _: usize, _: u32) {
+                panic!("retired USB Ethernet consumer reached MMIO write")
+            }
+        }
+        let pending = |c: &Controller| {
+            c.pending
+                .iter()
+                .map(|e| (e.parameter, e.status, e.control))
+                .collect::<Vec<_>>()
+        };
+        let queues = |c: &Controller| {
+            c.slots
+                .iter()
+                .flat_map(|slot| slot.iter())
+                .flat_map(|slot| {
+                    slot.endpoints
+                        .iter()
+                        .flatten()
+                        .map(|ep| (ep.ring.index, ep.ring.cycle, ep.in_flight))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut c = controller.borrow_mut();
+        let before_pending = pending(&c);
+        let before_cursor = (c.event_index, c.event_cycle);
+        let before_queues = queues(&c);
+        let registers = core::mem::replace(&mut c.registers, Box::new(NoAccess));
+        drop(c);
+        operation();
+        let mut c = controller.borrow_mut();
+        assert_eq!(pending(&c), before_pending);
+        assert_eq!((c.event_index, c.event_cycle), before_cursor);
+        assert_eq!(queues(&c), before_queues);
+        c.registers = registers;
+    }
+
+    fn network_generation_peer(vendor: bool) {
+        use crate::bus::dma::RegionAllocator;
+        use crate::usb::{
+            cdc::generation_tests as cdc_peer, ethernet::generation_tests as vendor_peer,
+        };
+        for already_pending in [false, true] {
+            let mut backing = vec![0u64; 512 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: every modeled DMA buffer remains inside this live allocation.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let configuration = if vendor { 7 } else { 42 };
+            let (previous, old_hardware) =
+                model::unconfigured_cancellation_controller_with_configurations(
+                    &mut dma,
+                    &[vec![9, 2, 9, 0, 0, configuration, 0, 0x80, 50]],
+                );
+            let (current, new_hardware) = model::cancellation_controller(&mut dma);
+            let previous = Rc::new(RefCell::new(previous));
+            let current = Rc::new(RefCell::new(current));
+            let old_id = previous.borrow().device_id(1).unwrap();
+            let fresh_id = current.borrow().device_id(1).unwrap();
+            assert_eq!(old_id.hardware_slot(), fresh_id.hardware_slot());
+            assert_ne!(old_id, fresh_id);
+            let mut mac = vec![26, STRING_DESCRIPTOR];
+            for unit in "025354000001".encode_utf16() {
+                mac.extend_from_slice(&unit.to_le_bytes());
+            }
+            old_hardware.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, mac)];
+            old_hardware.borrow_mut().ethernet =
+                vendor.then(|| ethernet::rtl815x::tests::Model::new(0x4c00));
+            let mut cdc = (!vendor).then(|| cdc_peer::peer(previous.clone(), &mut dma));
+            let mut ethernet = vendor.then(|| vendor_peer::peer(previous.clone(), &mut dma));
+            if let Some(peer) = &mut cdc {
+                cdc_peer::queue(peer);
+            }
+            if let Some(peer) = &mut ethernet {
+                vendor_peer::queue(peer);
+            }
+            assert!(old_hardware.borrow().active[3].is_some());
+            if !vendor {
+                assert!(old_hardware.borrow().active[5].is_some());
+            }
+            // Execute actual Stop/Set Dequeue and matching Disable Slot completion;
+            // no fabricated software retirement or new-generation ID is installed.
+            previous
+                .borrow_mut()
+                .disable_slot(1, reset::Ownership::Retired)
+                .unwrap();
+            assert!(old_hardware.borrow().active.iter().all(Option::is_none));
+            assert_eq!(
+                old_hardware.borrow().seen.last(),
+                Some(&reset::DISABLE_SLOT)
+            );
+            assert_eq!(
+                previous.borrow().slot_ownership[1],
+                reset::Ownership::Retired
+            );
+            assert_eq!(previous.borrow().dcbaa.read::<u64>(8), 0);
+            for dci in [1, 3, 4] {
+                assert!(old_hardware.borrow().seen.contains(&STOP_ENDPOINT));
+                assert_eq!(old_hardware.borrow().state(dci), ENDPOINT_STOPPED);
+            }
+            if !vendor {
+                assert_eq!(old_hardware.borrow().state(5), ENDPOINT_STOPPED);
+            }
+            let before = backing.clone();
+            trapped(&previous, || {
+                if let Some(peer) = &mut cdc {
+                    cdc_peer::refuse(peer, &previous);
+                }
+                if let Some(peer) = &mut ethernet {
+                    vendor_peer::refuse(peer, &previous);
+                }
+                let mut host = previous.borrow_mut();
+                let mut access = DeviceAccess {
+                    controller: &mut host,
+                    id: old_id,
+                };
+                assert_eq!(access.string(LANGUAGE_EN_US, 1), None);
+            });
+            assert!(backing == before);
+
+            let mut data = dma.allocate(128, 64).unwrap();
+            data.bytes_mut().fill(0xa5);
+            let fresh = current
+                .borrow_mut()
+                .device(fresh_id)
+                .unwrap()
+                .submit_ticket(5, data.physical(), 64)
+                .unwrap();
+            new_hardware
+                .borrow_mut()
+                .incoming_acl
+                .push_back(vec![0x6a; 64]);
+            new_hardware.borrow_mut().receive(5);
+            if already_pending {
+                current.borrow_mut().drain();
+            }
+            assert_eq!(current.borrow().pending.len(), usize::from(already_pending));
+            let before = backing.clone();
+            trapped(&current, || {
+                if let Some(peer) = &mut cdc {
+                    cdc_peer::refuse(peer, &current);
+                }
+                if let Some(peer) = &mut ethernet {
+                    vendor_peer::refuse(peer, &current);
+                }
+                let mut host = current.borrow_mut();
+                assert!(host.device(old_id).is_err());
+                let mut access = DeviceAccess {
+                    controller: &mut host,
+                    id: old_id,
+                };
+                assert_eq!(access.string(LANGUAGE_EN_US, 1), None);
+            });
+            assert!(backing == before);
+            assert_eq!(
+                current
+                    .borrow_mut()
+                    .device(fresh_id)
+                    .unwrap()
+                    .completed_ticket(&fresh),
+                Some(Ok(64))
+            );
+            assert_eq!(&data.bytes()[..64], &[0x6a; 64]);
+            assert_eq!(&data.bytes()[64..], &[0xa5; 64]);
+            // This exercises retained consumer admission across real retirement
+            // and distinct controller generations. Hardware-slot reuse stays
+            // disabled and is deliberately not established by this fixture.
+        }
+    }
+
+    #[test]
+    fn retained_cdc_generation_refuses_before_mmio_and_preserves_current_completion() {
+        network_generation_peer(false);
+    }
+
+    #[test]
+    fn retained_vendor_ethernet_generation_refuses_before_mmio_and_preserves_current_completion() {
+        network_generation_peer(true);
     }
 }

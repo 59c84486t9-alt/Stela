@@ -27,11 +27,13 @@
 //! NetworkConnection notifications on the interrupt endpoint set the
 //! carrier (ECM 6.3.1, and alike in NCM); until one arrives the link is
 //! taken to be up. Frames above the 1514-byte Ethernet maximum are refused.
+#[cfg(test)]
+pub(crate) mod generation_tests;
 mod ntb;
 
 use super::xhci::{
     DEVICE_TO_HOST, Device, Endpoint, Interface, Plan, RECIPIENT_INTERFACE, SET_INTERFACE, Shared,
-    TYPE_CLASS, setup,
+    SlotId, TYPE_CLASS, TransferTicket, setup,
 };
 use crate::{
     block::BlockError,
@@ -180,7 +182,7 @@ fn parse_mac(text: &str) -> Option<Mac> {
 
 pub struct UsbNet {
     controller: Shared,
-    slot: u8,
+    id: SlotId,
     binding: Binding,
     framing: Framing,
     mac: Mac,
@@ -189,8 +191,8 @@ pub struct UsbNet {
     pending: VecDeque<Vec<u8>>,
     send: DmaBuffer,
     status: DmaBuffer,
-    queued: Option<u64>,
-    notify_queued: Option<u64>,
+    queued: Option<TransferTicket>,
+    notify_queued: Option<TransferTicket>,
     connected: Option<bool>,
     pub location: String,
 }
@@ -203,10 +205,11 @@ impl UsbNet {
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, BlockError> {
         let (mac, framing) = {
-            let mut c = controller.borrow_mut();
+            let mut host = controller.borrow_mut();
+            let mut c = host.device(device.id)?;
             let text = device
                 .language
-                .and_then(|language| c.string(device.slot, language, binding.mac_string))
+                .and_then(|language| c.string(language, binding.mac_string))
                 .ok_or(BlockError::Unsupported(
                     "CDC Ethernet adapter without a MAC address string",
                 ))?;
@@ -224,20 +227,20 @@ impl UsbNet {
                         control,
                         ntb::PARAMETER_BYTES as u16,
                     );
-                    let reply = c.control(device.slot, request, &[])?;
+                    let reply = c.control(request, &[])?;
                     let mut parameters =
                         ntb::Parameters::parse(&reply).map_err(BlockError::Unsupported)?;
                     if capabilities & NCM_CRC_MODE != 0 {
                         let request =
                             setup(CLASS_INTERFACE, SET_CRC_MODE, CRC_NOT_APPENDED, control, 0);
-                        c.control(device.slot, request, &[])?;
+                        c.control(request, &[])?;
                     }
                     // NTB16 is the reset default. Like Linux cdc_ncm_init,
                     // explicitly select it when both formats are offered.
                     if parameters.supports_ntb32 {
                         let request =
                             setup(CLASS_INTERFACE, SET_NTB_FORMAT, NTB16_FORMAT, control, 0);
-                        c.control(device.slot, request, &[])?;
+                        c.control(request, &[])?;
                     }
                     if parameters.in_max > NCM_IN_BLOCK {
                         parameters.in_max = NCM_IN_BLOCK;
@@ -253,7 +256,7 @@ impl UsbNet {
                             control,
                             size.len() as u16,
                         );
-                        c.control(device.slot, request, &size)?;
+                        c.control(request, &size)?;
                     }
                     Framing::Ncm(parameters, 0)
                 }
@@ -285,7 +288,8 @@ impl UsbNet {
         let status = dma.allocate(64, 64)?;
         // Do not activate the data setting if any bounded DMA allocation failed.
         {
-            let mut c = controller.borrow_mut();
+            let mut host = controller.borrow_mut();
+            let mut c = host.device(device.id)?;
             let control = u16::from(binding.control);
             if binding.alternate != 0 {
                 let request = setup(
@@ -295,7 +299,7 @@ impl UsbNet {
                     u16::from(binding.data),
                     0,
                 );
-                c.control(device.slot, request, &[])?;
+                c.control(request, &[])?;
             }
             let filter = match binding.model {
                 Model::Ecm => true,
@@ -309,12 +313,12 @@ impl UsbNet {
                     control,
                     0,
                 );
-                c.control(device.slot, request, &[])?;
+                c.control(request, &[])?;
             }
         }
         Ok(Self {
             controller,
-            slot: device.slot,
+            id: device.id,
             binding,
             framing,
             mac,
@@ -330,25 +334,20 @@ impl UsbNet {
     }
 
     /// Takes any NetworkConnection notifications that arrived.
-    fn notifications(&mut self) {
+    fn notifications(&mut self) -> Result<(), BlockError> {
+        let mut host = self.controller.borrow_mut();
+        let mut c = host.device(self.id)?;
         let Some(notify) = self.binding.notify else {
-            return;
+            return Ok(());
         };
         let length = usize::from(notify.max_packet & 0x7ff).min(64);
         for _ in 0..4 {
-            let mut c = self.controller.borrow_mut();
-            let trb = match self.notify_queued {
-                Some(trb) => trb,
-                None => match c.submit(self.slot, notify.dci(), self.status.physical(), length) {
-                    Ok(trb) => {
-                        self.notify_queued = Some(trb);
-                        trb
-                    }
-                    Err(_) => return,
-                },
-            };
-            let Some(result) = c.completed(self.slot, notify.dci(), trb, length) else {
-                return;
+            if self.notify_queued.is_none() {
+                self.notify_queued =
+                    Some(c.submit_ticket(notify.dci(), self.status.physical(), length)?);
+            }
+            let Some(result) = c.completed_ticket(self.notify_queued.as_ref().unwrap()) else {
+                return Ok(());
             };
             self.notify_queued = None;
             if let Ok(bytes) = result
@@ -361,6 +360,7 @@ impl UsbNet {
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -374,15 +374,14 @@ impl Link for UsbNet {
     }
 
     fn carrier(&mut self) -> bool {
-        self.notifications();
-        self.connected.unwrap_or(true)
+        self.notifications().is_ok() && self.connected.unwrap_or(true)
     }
 
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         // A previous failed cancellation may still own this OUT buffer.
-        self.controller
-            .borrow_mut()
-            .endpoint_ready(self.slot, self.binding.output.dci())
+        let mut host = self.controller.borrow_mut();
+        let mut c = host.device(self.id).map_err(link_error)?;
+        c.endpoint_ready(self.binding.output.dci())
             .map_err(link_error)?;
         if frame.len() > MAX_FRAME {
             return Err(LinkError::Adapter(String::from(
@@ -409,10 +408,9 @@ impl Link for UsbNet {
             }
         };
         let output = self.binding.output;
-        let mut c = self.controller.borrow_mut();
         let physical = self.send.physical();
         let sent = c
-            .transfer(self.slot, output.dci(), physical, length, SEND_US)
+            .transfer(output.dci(), physical, length, SEND_US)
             .map_err(link_error)?;
         if sent != length {
             return Err(LinkError::Adapter(String::from(
@@ -421,37 +419,34 @@ impl Link for UsbNet {
         }
         let packet = usize::from(output.max_packet & 0x7ff).max(1);
         if length.is_multiple_of(packet) && whole != Some(length) {
-            c.transfer(self.slot, output.dci(), physical, 0, SEND_US)
+            c.transfer(output.dci(), physical, 0, SEND_US)
                 .map_err(link_error)?;
         }
         Ok(())
     }
 
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
+        let mut host = self.controller.borrow_mut();
+        let mut c = host.device(self.id).map_err(link_error)?;
         if let Some(frame) = self.pending.pop_front() {
             return Ok(Some(frame));
         }
         let input = self.binding.input;
         let capacity = self.receive.bytes().len();
-        let mut c = self.controller.borrow_mut();
-        let trb = match self.queued {
-            Some(trb) => trb,
-            None => {
-                let trb = c
-                    .submit(self.slot, input.dci(), self.receive.physical(), capacity)
-                    .map_err(link_error)?;
-                self.queued = Some(trb);
-                trb
-            }
-        };
-        let Some(result) = c.completed(self.slot, input.dci(), trb, capacity) else {
+        if self.queued.is_none() {
+            self.queued = Some(
+                c.submit_ticket(input.dci(), self.receive.physical(), capacity)
+                    .map_err(link_error)?,
+            );
+        }
+        let Some(result) = c.completed_ticket(self.queued.as_ref().unwrap()) else {
             return Ok(None);
         };
         self.queued = None;
         let bytes = match result {
             Ok(bytes) => &self.receive.bytes()[..bytes],
             Err(error) => {
-                let _ = c.clear(self.slot, &input);
+                let _ = c.clear(&input);
                 return Err(link_error(error));
             }
         };
@@ -520,9 +515,10 @@ mod tests {
                 interval: 0,
                 companion: None,
             };
+            let id = controller.borrow().test_device_id(1).unwrap();
             let mut net = UsbNet {
                 controller,
-                slot: 1,
+                id,
                 binding: Binding {
                     model: Model::Ecm,
                     control: 0,
@@ -551,7 +547,7 @@ mod tests {
         }
     }
 
-    fn cdc_device(controller: &Shared, ncm: Option<u8>) -> Device {
+    pub(super) fn cdc_device(controller: &Shared, ncm: Option<u8>) -> Device {
         let mut bytes = model::ecm(42);
         if let Some(capabilities) = ncm {
             bytes[15] = cdc::NCM;

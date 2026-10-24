@@ -1163,7 +1163,7 @@ pub(crate) mod tests {
                 let shared = Rc::new(RefCell::new(controller));
                 let io = ethernet::HostControl {
                     controller: shared.clone(),
-                    slot: 1,
+                    id: shared.borrow().test_device_id(1).unwrap(),
                 };
                 let mut chip = Chip::probe(io, Revision(revision)).unwrap();
                 if fail {
