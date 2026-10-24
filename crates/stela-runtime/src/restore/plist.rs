@@ -40,6 +40,15 @@ impl Value {
             _ => Err(Error::Invalid("expected plist unsigned integer")),
         }
     }
+    /// A 64-bit field read as its bits, such as the ECID: CFBinaryPList's
+    /// 8-byte integers are signed, so one with bit 63 set arrives Signed.
+    pub fn bits(&self) -> Result<u64> {
+        match self {
+            Self::Integer(n) => Ok(*n),
+            Self::Signed(n) => Ok(*n as u64),
+            _ => Err(Error::Invalid("expected plist 64-bit integer")),
+        }
+    }
     pub fn boolean(&self) -> Result<bool> {
         match self {
             Self::Boolean(b) => Ok(*b),
@@ -821,6 +830,15 @@ mod tests {
             sink: &mut refuse,
         };
         assert!(decode_streaming(xml, Limits::default(), stream).is_err());
+    }
+    #[test]
+    fn a_64_bit_field_reads_as_its_bits_from_either_integer_kind() {
+        // restored's ECID with bit 63 set, as CFBinaryPList encodes it.
+        let ecid = Value::Signed(-111_111_111_111_111_111);
+        assert_eq!(ecid.bits(), Ok(0xfe75_4108_7b9f_8e39));
+        assert!(ecid.uint().is_err());
+        assert_eq!(Value::Integer(1234).bits(), Ok(1234));
+        assert!(Value::Boolean(true).bits().is_err());
     }
     #[test]
     fn both_encodings_preserve_restore_dictionary() {

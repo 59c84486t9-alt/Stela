@@ -140,7 +140,7 @@ impl Session {
                 return Err(super::refuse("hardware/BuildManifest mismatch", hw));
             }
         }
-        hw.required("UniqueChipID")?.uint()?;
+        hw.required("UniqueChipID")?.bits()?;
         let info = identity.info()?;
         let behavior = info.required("RestoreBehavior")?;
         let mut opts = BTreeMap::new();
@@ -627,7 +627,8 @@ mod tests {
                 Value::dict([
                     ("ChipID", Value::Integer(0x8112)),
                     ("BoardID", Value::Integer(0x24)),
-                    ("UniqueChipID", Value::Integer(1234)),
+                    // An ECID with bit 63 set arrives Signed.
+                    ("UniqueChipID", Value::Signed(-111_111_111_111_111_111)),
                     ("ApNonce", Value::Data(vec![1, 2, 3])),
                 ]),
             )]),
