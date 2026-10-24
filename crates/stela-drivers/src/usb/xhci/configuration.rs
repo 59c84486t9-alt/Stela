@@ -1084,7 +1084,10 @@ pub(super) mod tests {
         let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
         controller.max_primary_streams = 16;
         controller.slots[1].as_mut().unwrap().speed = SUPER_SPEED;
-        let mut dev = configuration::tests::device(vec![storage_modes(7, true, true, true)]);
+        let mut dev = configuration::tests::addressed_device(
+            &controller,
+            vec![storage_modes(7, true, true, true)],
+        );
         dev.speed = SUPER_SPEED;
         for (policy, expected) in [
             (streams::Policy::Unknown, (0, 0)),
@@ -1143,7 +1146,7 @@ pub(super) mod tests {
                 if reverse {
                     configs.reverse();
                 }
-                let mut dev = configuration::tests::device(configs);
+                let mut dev = configuration::tests::addressed_device(&controller, configs);
                 dev.speed = speed;
                 configuration::select_with_controller(&mut dev, Some(&controller)).unwrap();
                 assert_eq!(dev.configuration_value(), 9);
