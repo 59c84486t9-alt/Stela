@@ -250,6 +250,7 @@ impl Linux {
             ("linux_firmware", "firmware.c", "STELA_LINUX_FIRMWARE_TEST"),
             ("linux_crc", "crc.c", "STELA_LINUX_CRC_TEST"),
             ("linux_find_bit", "find_bit.c", "STELA_LINUX_FIND_BIT_TEST"),
+            ("linux_cpuhotplug", "cpuhotplug.c", "STELA_LINUX_CPUHP_TEST"),
             (
                 "linux_string_helpers",
                 "string_helpers.c",
