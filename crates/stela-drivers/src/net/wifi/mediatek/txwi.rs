@@ -829,4 +829,184 @@ mod tests {
             }
         }
     }
+
+    // Plaintext pre-encryption bodies with canonical fields; no CCMP header,
+    // MIC or host PN is inserted by this descriptor-only fixture.
+    fn protected_action_reference_frame(action: u8, tid: u8, sequence: u16) -> alloc::vec::Vec<u8> {
+        let mut bytes = vec![
+            0;
+            if action < 2 {
+                33
+            } else if action == 2 {
+                30
+            } else {
+                28
+            }
+        ];
+        bytes[..2].copy_from_slice(&0x40d0u16.to_le_bytes());
+        bytes[4] = 2;
+        bytes[10] = 4;
+        bytes[16] = 6;
+        bytes[22..24].copy_from_slice(&(sequence << 4).to_le_bytes());
+        if action < 3 {
+            bytes[24] = 3;
+            bytes[25] = action;
+            let cap = 2 | (u16::from(tid) << 2) | (16 << 6);
+            match action {
+                0 => {
+                    bytes[26] = 1;
+                    bytes[27..29].copy_from_slice(&cap.to_le_bytes());
+                    bytes[31..33].copy_from_slice(&0x1230u16.to_le_bytes());
+                }
+                1 => {
+                    bytes[26] = 1;
+                    bytes[29..31].copy_from_slice(&cap.to_le_bytes());
+                }
+                _ => {
+                    bytes[26..28]
+                        .copy_from_slice(&((u16::from(tid) << 12) | (1 << 11)).to_le_bytes());
+                    bytes[28..30].copy_from_slice(&37u16.to_le_bytes());
+                }
+            }
+        } else {
+            bytes[24..28].copy_from_slice(&[8, action - 3, 0xa5, 0x5a]);
+        }
+        bytes
+    }
+
+    #[test]
+    fn protected_action_reference_inputs_keep_refusals_separate_from_linux_descriptor_trace() {
+        for action in 0..5 {
+            let bytes = protected_action_reference_frame(action, 7, 0);
+            let mut c = base(Chip::Mt7925);
+            c.frame = Frame {
+                bytes: bytes.len(),
+                header_bytes: 24,
+                kind: Kind::Management,
+                subtype: 13,
+                tid: 0,
+                multicast: false,
+                fragment: Fragment::None,
+                sequence: Sequence::Hardware,
+                minimum_rate: true,
+            };
+            c.queue = Queue::Management;
+            c.hardware_amsdu = false;
+            c.fixed_rate = Some(FixedRate::Connac3(18));
+            assert!(encode_mpdu(c, &bytes).is_ok());
+            assert_eq!(encode(c), Err(Error::UnsupportedFrame));
+            for fault in 0..13 {
+                let mut bad = bytes.clone();
+                let mut selected = c;
+                match fault {
+                    0 => bad[1] &= !0x40,
+                    1 => selected.protect = false,
+                    2 => bad[4] |= 1,
+                    3 => selected.frame.multicast = true,
+                    4 => selected.queue = Queue::Data { access_category: 0 },
+                    5 => bad[22] |= 1,
+                    6 => bad[1] |= 1,
+                    7 => bad[24] = 4,
+                    8 => bad[25] = 255,
+                    9 => selected.chip = Chip::Mt7922,
+                    10 => selected.fixed_rate = None,
+                    11 => selected.frame.bytes += 1,
+                    _ => {
+                        bad.pop();
+                        selected.frame.bytes -= 1;
+                    }
+                }
+                assert!(
+                    encode_mpdu(selected, &bad).is_err(),
+                    "action {action}, fault {fault}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires STELA_MT7925_PROTECTED_ACTION_TXWI_ORACLE from unchanged pinned Linux writers"]
+    fn unchanged_pinned_mt7925_writers_match_protected_block_ack_and_sa_query_words() {
+        extern crate std;
+        let root = std::env::var_os("STELA_MT7925_PROTECTED_ACTION_TXWI_ORACLE")
+            .expect("protected Action reference trace directory");
+        let bytes = std::fs::read(std::path::Path::new(&root).join("mt7925-protected-actions.bin"))
+            .unwrap();
+        assert_eq!(bytes.len(), 480 * 132);
+        let mut counts = [0; 5];
+        for (case, record) in bytes.as_chunks::<132>().0.iter().enumerate() {
+            let v: [u32; 16] = core::array::from_fn(|i| {
+                u32::from_le_bytes(record[i * 4..i * 4 + 4].try_into().unwrap())
+            });
+            let action = case / 96;
+            let profile = case % 96;
+            let expected = [
+                case as u32,
+                action as u32,
+                [7, 0, 19][profile % 3],
+                [0, 2, 63][(profile / 3) % 3],
+                [0, 3][(profile / 9) % 2],
+                [0, 1, 2, 3, 255][profile % 5],
+                [0, 2, 3, 255][profile % 4],
+                [0, 7, 15][(profile / 4) % 3],
+                ((profile / 12) % 2) as u32,
+                if (profile / 24) % 2 != 0 { 4095 } else { 0 },
+                ((profile / 2) % 2) as u32,
+                ((profile / 6) % 2) as u32,
+                u32::from(profile % 2 == 0),
+                [18, 14, 31, 63][profile % 4],
+                if action < 2 {
+                    33
+                } else if action == 2 {
+                    30
+                } else {
+                    28
+                },
+                [0, 7, 15][(profile / 8) % 3],
+            ];
+            assert_eq!(v, expected, "reference fixture case {case}");
+            let frame = protected_action_reference_frame(action as u8, v[15] as u8, v[9] as u16);
+            assert_eq!(&record[64..64 + frame.len()], frame);
+            assert!(record[64 + frame.len()..100].iter().all(|byte| *byte == 0));
+            let config = Config {
+                chip: Chip::Mt7925,
+                wcid: v[2] as u16,
+                vif: Some(Vif {
+                    omac: v[3] as u8,
+                    wmm: v[4] as u8,
+                    band: v[5] as u8,
+                    mld: false,
+                }),
+                phy_band_one: false,
+                queue: Queue::Management,
+                pid: v[6] as u8,
+                frame: Frame {
+                    bytes: v[14] as usize,
+                    header_bytes: 24,
+                    kind: Kind::Management,
+                    subtype: 13,
+                    tid: v[7] as u8,
+                    multicast: false,
+                    fragment: Fragment::None,
+                    sequence: if v[8] == 0 {
+                        Sequence::Hardware
+                    } else {
+                        Sequence::Explicit(v[9] as u16)
+                    },
+                    minimum_rate: v[12] != 0,
+                },
+                protect: true,
+                no_ack: v[10] != 0,
+                hardware_amsdu: v[11] != 0,
+                fixed_rate: Some(FixedRate::Connac3(v[13] as u8)),
+            };
+            assert_eq!(
+                encode_mpdu(config, &frame).unwrap(),
+                &record[100..132],
+                "case {case} {config:?}"
+            );
+            counts[action] += 1;
+        }
+        assert_eq!(counts, [96; 5]);
+    }
 }
