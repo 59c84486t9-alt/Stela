@@ -119,6 +119,61 @@ impl PointerService {
         self.strips.iter_mut().for_each(|cell| cell.enabled = 0);
     }
 
+    /// Derived state changed, now with `inputs`: every tag word and
+    /// stripping cell closes, and the context stays when it was made for
+    /// these inputs (else it is made anew, with their memo generation).
+    /// Returns which stripping cells were open, for the engine to reopen
+    /// with [`Self::reopen`].
+    pub(super) fn revalidate(&mut self, inputs: PointerInputs) -> [bool; 2] {
+        let stripping = self.strips.map(|cell| cell.enabled != 0);
+        let kept = self.context.take().filter(|_| self.inputs == Some(inputs));
+        self.close();
+        match kept {
+            Some(context) => self.context = Some(context),
+            None => self.open(inputs),
+        }
+        stripping
+    }
+
+    /// Whether native code had anything open: a tag word or a stripping cell.
+    pub(super) fn any_open(&self) -> bool {
+        self.tags.iter().any(|&tag| tag != 0) || self.strips.iter().any(|cell| cell.enabled != 0)
+    }
+
+    /// After [`Self::revalidate`], open `key`'s tag word as a PAC exit
+    /// would: [`pointer::DISABLED`] while its SCTLR enable is clear, else,
+    /// untrapped and present in the context, the memo's current tag.
+    pub(super) fn reopen(&mut self, key: pauth::Key, enabled: bool, trapped: bool) {
+        let index = memo_key(key);
+        self.tags[usize::from(index)] = if !enabled {
+            pointer::DISABLED
+        } else if !trapped
+            && self
+                .context
+                .as_ref()
+                .is_some_and(|context| context.has_key(key))
+        {
+            pointer::tag(self.generation, index, 0)
+        } else {
+            0
+        };
+    }
+
+    /// After [`Self::revalidate`], reopen the stripping cell of `data`.
+    pub(super) fn reopen_stripping(&mut self, data: bool) {
+        if let Some(keep) = self
+            .context
+            .as_ref()
+            .map(|context| context.stripping_masks(data))
+        {
+            self.strips[usize::from(data)] = pointer::strip::Cell {
+                enabled: 1,
+                keep,
+                upper_extension: !keep[1],
+            };
+        }
+    }
+
     pub(super) fn strip_address(&self, data: bool) -> u64 {
         &self.strips[usize::from(data)] as *const pointer::strip::Cell as u64
     }

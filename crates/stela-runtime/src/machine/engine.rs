@@ -43,8 +43,8 @@ use super::{
     },
     ctrr, debug,
     exception::{
-        Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, SYNCHRONOUS_EXTERNAL_ABORT, Vector,
-        data_abort_iss,
+        Class, DAIF_A, DAIF_D, DAIF_F, DAIF_I, IllegalReturn, Pstate, SYNCHRONOUS_EXTERNAL_ABORT,
+        Vector, data_abort_iss,
     },
     hacr, identification,
     mmu::{self, Access, Controls, Outcome as Translated},
@@ -1411,6 +1411,17 @@ const ZERO_REGISTER: u8 = 31;
 /// The cells of the [`MIRRORED`] registers, in its order.
 type Mirrors = [register_read::Cell; MIRRORED.len()];
 
+/// The [`MIRRORED`] index of DAIF.
+const DAIF_MIRROR: usize = MIRRORED.len() - 1;
+const _: () = assert!(matches!(MIRRORED[DAIF_MIRROR], registers::encodings::DAIF));
+
+/// MRS DAIF's value for PSTATE's D, A, I and F masks: bits 9:6.
+fn daif_register(daif: u8) -> u64 {
+    u64::from(daif) << DAIF_REGISTER_SHIFT
+}
+
+const DAIF_REGISTER_SHIFT: u32 = 6;
+
 /// The [`MIRRORED`] index of a read of `access`, other than to XZR.
 fn mirrored(access: RegisterAccess) -> Option<usize> {
     if access.direction() != Direction::Read || access.rt() == ZERO_REGISTER {
@@ -1813,11 +1824,48 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.memory_checks = None;
         self.native_system = None;
         self.debug = None;
-        self.pointer.close();
+        self.reopen_pointers();
         // A closed cell keeps no value a mispredicted native read could use
         // (FEAT_CSV3's System register rule).
         *self.mirrors = Mirrors::default();
         self.device_lines = None;
+    }
+
+    /// The PAC service after a derived-state change: what native code had
+    /// open reopens under the new keys, version, layout, enables and traps,
+    /// exactly as the PAC exits that opened it would now decide, so the
+    /// change costs no exit of its own. PACM changes the next instruction's
+    /// operands, which no thunk applies: everything stays closed.
+    fn reopen_pointers(&mut self) {
+        if !self.pointer.any_open() || self.cpu.pstate.pacm {
+            self.pointer.close();
+            return;
+        }
+        let Ok(version) = self.pointer_version() else {
+            self.pointer.close();
+            return;
+        };
+        let inputs = PointerInputs {
+            keys: self.pointer_keys(),
+            version,
+            tcr: self.cpu.regime_tcr(),
+        };
+        let stripping = self.pointer.revalidate(inputs);
+        let trapped = self.pointer_authentication_trapped();
+        for (key, block) in [
+            (pauth::Key::Ia, PointerAuthenticationKey::Ia),
+            (pauth::Key::Ib, PointerAuthenticationKey::Ib),
+            (pauth::Key::Da, PointerAuthenticationKey::Da),
+            (pauth::Key::Db, PointerAuthenticationKey::Db),
+        ] {
+            let enabled = self.key_enabled(block);
+            self.pointer.reopen(key, enabled, trapped);
+        }
+        for (data, open) in [false, true].into_iter().zip(stripping) {
+            if open {
+                self.pointer.reopen_stripping(data);
+            }
+        }
     }
 
     fn debug_mode(&mut self) -> DebugMode {
@@ -1889,6 +1937,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     fn sync_regime(&mut self) {
         self.derived_changed();
+        self.sync_host_regime();
+    }
+
+    /// The host's view of the regime (shadow root, requester, watchpoints and
+    /// tag checks) and the PMU's and prediction contexts follow the PE, with
+    /// state derived from System registers left as it is.
+    fn sync_host_regime(&mut self) {
         self.sync_monitor();
         let watch = Watch {
             pass: self.watch.pass,
@@ -5366,8 +5421,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             SystemOperation::Exception(operation) => self.exception_instruction(operation),
             SystemOperation::Register(access) => self.register_instruction(word, access),
             SystemOperation::PstateImmediate(encoding) => {
+                let before = self.cpu.pstate;
                 let outcome = self.cpu.write_pstate_field(encoding);
-                self.register_outcome(word, None, outcome)
+                self.pstate_immediate(word, before, outcome)
             }
             SystemOperation::Maintenance(access) => self.maintenance(word, access),
             SystemOperation::InstructionSynchronization { .. } => self.next(),
@@ -5775,6 +5831,47 @@ impl<H: Host, D: Devices> Machine<H, D> {
             (Ok(_), Some(_)) => RegisterOutcome::Written(registers::Changes::default()),
             (Err(reason), _) => RegisterOutcome::Refused(Refusal::UnsupportedSetting(reason)),
         })
+    }
+
+    /// MSR (immediate) after `write_pstate_field` from `before`. A write
+    /// that changes only the A, I or F masks, only SPSel or only PAN leaves
+    /// System registers and the other PSTATE fields as they were, so state
+    /// derived from them stays: the DAIF mirror takes the new masks, PAN
+    /// changes the host's requester, and SPSel only which SP `GuestState`
+    /// holds. The step re-evaluates interrupt delivery after any of them.
+    /// Every other change forgets derived state as an MSR does.
+    fn pstate_immediate(&mut self, word: u32, before: Pstate, outcome: RegisterOutcome) -> Step {
+        let after = self.cpu.pstate;
+        let RegisterOutcome::Written(changes) = outcome else {
+            return self.register_outcome(word, None, outcome);
+        };
+        if changes.unmodeled.is_some() || changes.irq_steering.is_some() {
+            return self.register_outcome(word, None, RegisterOutcome::Written(changes));
+        }
+        let only = |field: Pstate| field == after;
+        if only(Pstate {
+            daif: after.daif,
+            ..before
+        }) && (before.daif ^ after.daif) & DAIF_D == 0
+        {
+            let cell = &mut self.mirrors[DAIF_MIRROR];
+            if cell.readable != 0 {
+                cell.value = daif_register(after.daif);
+            }
+        } else if only(Pstate {
+            pan: after.pan,
+            ..before
+        }) {
+            if before.pan != after.pan {
+                self.sync_host_regime();
+            }
+        } else if !only(Pstate {
+            sp: after.sp,
+            ..before
+        }) {
+            return self.register_outcome(word, None, RegisterOutcome::Written(changes));
+        }
+        self.next()
     }
 
     fn register_outcome(
@@ -9435,7 +9532,11 @@ mod tests {
             Err(Stop::Unsupported(_))
         ));
         assert_eq!((machine.cpu.pc, machine.cpu.state.x[30]), (before, 0x4000));
-        assert_eq!(machine.pointer.tags, [0; 4]);
+        // The unknown IA pair never opens; disabled IB completes unchanged.
+        let ia = usize::from(x86_64_pointer::key_index(PointerAuthenticationKey::Ia));
+        let ib = usize::from(x86_64_pointer::key_index(PointerAuthenticationKey::Ib));
+        assert_eq!(machine.pointer.tags[ia], 0);
+        assert_eq!(machine.pointer.tags[ib], x86_64_pointer::DISABLED);
         // Actual first LLB MSR encoding; the other half must stay unknown.
         machine.cpu.state.x[1] = 11;
         machine.system_instruction(0xd51e_fd01).unwrap();
@@ -9460,8 +9561,9 @@ mod tests {
         let first_generation = machine.pointer.generation;
         assert_ne!(machine.pointer.tags[0], 0);
 
-        // Every source-written pair owns separate halves; a real MSR closes
-        // native PAC tags before any further code can consume cached inputs.
+        // Every source-written pair owns separate halves; a real MSR moves
+        // native PAC tags off the cached inputs' generation before any
+        // further code can consume them.
         for pair in 0..5 {
             for half in 0..2 {
                 let index = pair * 2 + half;
@@ -9470,7 +9572,9 @@ mod tests {
                 machine
                     .system_instruction(0xd500_0000 | u32::from(key(encoding)) << 5)
                     .unwrap();
-                assert_eq!(machine.pointer.tags, [0; 4]);
+                assert!(machine.pointer.tags.iter().all(|&tag| tag == 0
+                    || tag == x86_64_pointer::DISABLED
+                    || tag >> 8 != first_generation));
             }
         }
         assert_eq!(
@@ -9804,6 +9908,8 @@ mod tests {
                         .cpu
                         .registers
                         .set(register, 0, base & !(1 << enable) | bit);
+                    // As an MSR of the register does.
+                    machine.derived_changed();
                     machine.cpu.state.x[1] = pointer;
                     machine.cpu.state.x[2] = 0x55;
                     machine.system_instruction_for_test(word);
@@ -9819,8 +9925,10 @@ mod tests {
                         !enabled,
                         "EL{el} {word:#x}"
                     );
+                    // Unchanged state reopens the same tag words.
+                    let tags = machine.pointer.tags;
                     machine.derived_changed();
-                    assert_eq!(machine.pointer.tags[key], 0);
+                    assert_eq!(machine.pointer.tags, tags, "EL{el} {word:#x}");
                 }
             }
         }
@@ -10152,8 +10260,22 @@ mod tests {
         let ib = x86_64_pointer::key_index(PointerAuthenticationKey::Ib);
         let open = x86_64_pointer::tag(machine.pointer.generation, ib, 0);
         assert_eq!(machine.pointer.tags[usize::from(ib)], open);
+        // A derived change that keeps the inputs, enable and trap reopens
+        // the tag; clearing the key's enable makes it DISABLED.
         machine.derived_changed();
-        assert_eq!(machine.pointer.tags, [0; 4]);
+        assert_eq!(machine.pointer.tags[usize::from(ib)], open);
+        let sctlr = machine.cpu.regime_sctlr();
+        let register = if machine.cpu.pstate.el == 2 {
+            SystemRegister::SCTLR_EL2
+        } else {
+            SystemRegister::SCTLR_EL1
+        };
+        machine.cpu.registers.set(register, 0, sctlr & !(1 << 30));
+        machine.derived_changed();
+        assert_eq!(
+            machine.pointer.tags[usize::from(ib)],
+            x86_64_pointer::DISABLED
+        );
     }
 
     #[test]
@@ -10208,11 +10330,20 @@ mod tests {
                     );
                     assert_eq!(machine.cpu.state.x[17], expected);
                     assert_eq!(machine.pointer.strips[usize::from(data)].enabled, 1);
-                    assert_eq!(machine.pointer.tags, [0; 4]);
+                    // XPAC opens no key's memo tag; disabled keys stay so.
+                    assert!(
+                        machine
+                            .pointer
+                            .tags
+                            .iter()
+                            .all(|&tag| tag == 0 || tag == x86_64_pointer::DISABLED)
+                    );
                 }
             }
+            // Unchanged state reopens the same masks.
+            let strips = machine.pointer.strips;
             machine.derived_changed();
-            assert!(machine.pointer.strips.iter().all(|cell| cell.enabled == 0));
+            assert_eq!(machine.pointer.strips, strips);
         }
     }
 
@@ -10258,7 +10389,8 @@ mod tests {
 
     /// MRS TPIDR_EL1 ends its block in a System exit that a thunk reading
     /// the engine's cell takes over, chaining on to the next instruction;
-    /// the cell opens on a plain read and closes on any derived change.
+    /// the cell opens on a plain read and closes on any derived change
+    /// other than a PSTATE mask or SPSel write.
     #[test]
     fn mirrored_reads_complete_natively_from_the_open_cell() {
         const ADD: u32 = 0x9100_0400; // add x0, x0, #1
@@ -10267,6 +10399,8 @@ mod tests {
         const MRS_DAIF: u32 = 0xd53b_4228; // mrs x8, daif
         const DAIFCLR_I: u32 = 0xd503_42ff; // msr daifclr, #2
         const MRS_GXF_STATUS: u32 = 0xd53e_f808; // mrs x8, gxf_status_el1
+        const SPSEL_1: u32 = 0xd500_41bf; // msr spsel, #1
+        const DAIFCLR_D: u32 = 0xd503_48ff; // msr daifclr, #8
         let index = |encoding| MIRRORED.iter().position(|&e| e == encoding).unwrap();
         let thread = index(registers::encodings::TPIDR_EL1);
         let daif = index(registers::encodings::DAIF);
@@ -10337,10 +10471,24 @@ mod tests {
         assert_eq!(*machine.mirrors, Mirrors::default());
         machine.system_instruction(MRS_DAIF).unwrap();
         let masks = machine.cpu.state.x[8];
+        // A mask write keeps the cells, the DAIF one with the new masks.
+        machine.system_instruction(MRS).unwrap();
         machine.system_instruction(DAIFCLR_I).unwrap();
-        assert_eq!(*machine.mirrors, Mirrors::default());
+        assert_eq!(machine.mirrors[thread].readable, 1);
+        let cell = machine.mirrors[daif];
+        assert_eq!(cell.readable, 1);
+        assert_ne!(cell.value, masks);
         machine.system_instruction(MRS_DAIF).unwrap();
-        assert_ne!(machine.mirrors[daif].value, masks);
+        assert_eq!(
+            (machine.mirrors[daif], machine.cpu.state.x[8]),
+            (cell, cell.value)
+        );
+        // So does SPSel; D, like the other fields, forgets them.
+        machine.system_instruction(SPSEL_1).unwrap();
+        assert_eq!(machine.mirrors[daif], cell);
+        assert_eq!(machine.mirrors[thread].readable, 1);
+        machine.system_instruction(DAIFCLR_D).unwrap();
+        assert_eq!(*machine.mirrors, Mirrors::default());
         // A read to XZR has no cell to open, nor a thunk.
         assert_eq!(mirrored_read(base, 0xd538_d09f), None); // mrs xzr, tpidr_el1
     }
