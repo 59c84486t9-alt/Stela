@@ -114,6 +114,9 @@ impl Device {
     /// acknowledged cancellation; failed cancellation fences the whole owner,
     /// retains the pending identity and never reads its buffer.
     pub fn poll(&mut self, request: Request) -> Result<Option<Completion>, BlockError> {
+        // A current owner may consume acknowledged shutdown receipts even when
+        // fenced. Identity admission must still precede cache lookup/removal.
+        self.validate_identity()?;
         if let Some(index) = self.completed.iter().position(|c| c.request == request) {
             return Ok(Some(self.completed.remove(index)));
         }
@@ -182,6 +185,7 @@ impl Device {
     /// remain owned until Stop/Set Dequeue acknowledges that complete endpoint.
     /// Packet results already collected remain visible in the final completion.
     pub fn cancel(&mut self, address: u8) -> Result<(), BlockError> {
+        self.validate_identity()?;
         if let Err(error) = self.ready() {
             self.fenced = true;
             return Err(error);
@@ -238,8 +242,11 @@ impl Device {
     }
 
     /// Drain acknowledged cancellation completions, including those generated
-    /// by configuration, alternate-setting or shutdown operations.
-    pub fn take_completions(&mut self) -> Vec<Completion> {
-        core::mem::take(&mut self.completed)
+    /// by configuration, alternate-setting or shutdown operations. A stale
+    /// physical generation returns an error and retains every receipt. A still
+    /// current shutdown-fenced owner may drain its acknowledged receipts.
+    pub fn take_completions(&mut self) -> Result<Vec<Completion>, BlockError> {
+        self.validate_identity()?;
+        Ok(core::mem::take(&mut self.completed))
     }
 }

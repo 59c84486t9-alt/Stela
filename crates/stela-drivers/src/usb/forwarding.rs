@@ -131,7 +131,13 @@ impl Device {
     pub fn fenced(&self) -> bool {
         self.fenced
     }
+    fn validate_identity(&self) -> Result<(), BlockError> {
+        self.controller
+            .borrow()
+            .validate_device_id(self.physical.id)
+    }
     fn ready(&mut self) -> Result<(), BlockError> {
+        self.validate_identity()?;
         if self.fenced {
             return Err(BlockError::Unsupported("forwarded USB owner is fenced"));
         }
@@ -321,7 +327,7 @@ mod tests {
         owner.configure(19, &mut dma).unwrap();
         let done = owner.poll(retained).unwrap().unwrap();
         assert_eq!(done.status, Status::Cancelled);
-        assert!(owner.take_completions().is_empty());
+        assert!(owner.take_completions().unwrap().is_empty());
     }
 
     #[test]
@@ -344,7 +350,7 @@ mod tests {
                 .as_ref()
                 .is_some_and(|p| p.request == pending)
         );
-        assert!(owner.take_completions().is_empty());
+        assert!(owner.take_completions().unwrap().is_empty());
         assert!(owner.submit(0x81, 0, 16, &[]).is_err());
         assert!(owner.configuration().is_none());
     }

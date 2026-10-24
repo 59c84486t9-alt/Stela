@@ -50,6 +50,7 @@ struct Peer {
     fatal_after: Option<usize>,
     advance_after: Option<(usize, u32)>,
     explicit_next: BTreeMap<u8, u32>,
+    trap_mmio: bool,
 }
 impl Peer {
     fn word(at: u64) -> u32 {
@@ -151,7 +152,8 @@ impl Peer {
         let control = Self::word(at + 12);
         assert_eq!(control & 1, cursor.2);
         let kind = control >> 10 & 63;
-        assert_eq!(kind, if stream == 0 { 5 } else { 1 });
+        let endpoint_type = Self::word(ep + 4) >> 3 & 7;
+        assert_eq!(kind, if matches!(endpoint_type, 1 | 5) { 5 } else { 1 });
         assert_ne!(control & (1 << 5), 0); // IOC
         let length = (Self::word(at + 8) & 0x1ffff) as usize;
         let buffer = Self::long(at);
@@ -254,6 +256,10 @@ struct RegisterPeer {
 }
 impl Registers for RegisterPeer {
     fn read32(&mut self, at: usize) -> u32 {
+        assert!(
+            !self.peer.borrow().trap_mmio,
+            "stale owner reached MMIO read"
+        );
         if at == 0x800 {
             self.peer.borrow().mfindex
         } else {
@@ -261,6 +267,10 @@ impl Registers for RegisterPeer {
         }
     }
     fn write32(&mut self, at: usize, value: u32) {
+        assert!(
+            !self.peer.borrow().trap_mmio,
+            "stale owner reached MMIO write"
+        );
         if at == 0x1004 && value & 0xff != 1 {
             self.peer.borrow_mut().doorbell(value);
             return;
@@ -349,6 +359,7 @@ fn fixture_with_schedule(
             fatal_after: None,
             advance_after: None,
             explicit_next: BTreeMap::new(),
+            trap_mmio: false,
         }));
         peer = Some(shared.clone());
         Box::new(RegisterPeer {
@@ -513,7 +524,7 @@ fn packet_extent_limits_and_foreign_requests_cannot_publish_or_consume_dma() {
     assert!(owner.submit_isochronous(0x81, &[1], &[], &mut dma).is_err());
     assert_eq!(peer.borrow().published.len(), before);
     owner.cancel(0x81).unwrap();
-    assert_eq!(owner.take_completions().len(), 4);
+    assert_eq!(owner.take_completions().unwrap().len(), 4);
 }
 
 #[test]
@@ -544,7 +555,7 @@ fn failed_stop_or_post_publication_controller_failure_retains_all_original_buffe
         assert!(owner.iso_spare.is_empty());
         let pending = owner.iso_requests.values().next().unwrap();
         assert_eq!(pending.buffer.len(), 65536);
-        assert!(owner.take_completions().is_empty());
+        assert!(owner.take_completions().unwrap().is_empty());
         assert!(!peer.borrow().active.is_empty());
         assert!(owner.submit_isochronous(0x81, &[1], &[], &mut dma).is_err());
     }
@@ -1013,7 +1024,7 @@ fn explicit_clock_advance_during_publication_requires_real_endpoint_cancellation
     assert_eq!(done.status, Status::Cancelled);
     assert_eq!(done.packets[0].actual, None);
     assert!(done.packets[0].data.is_empty());
-    assert!(owner.take_completions().is_empty()); // failed call exposes no phantom ID.
+    assert!(owner.take_completions().unwrap().is_empty()); // failed call exposes no phantom ID.
     assert_eq!(owner.iso_spare.len(), 2);
 }
 
@@ -1062,7 +1073,7 @@ fn explicit_partial_publication_or_failed_stop_retains_every_original_packet_buf
         assert!(owner.fenced());
         assert_eq!(owner.iso_requests.len(), 1);
         assert!(owner.iso_spare.is_empty());
-        assert!(owner.take_completions().is_empty());
+        assert!(owner.take_completions().unwrap().is_empty());
         let pending = owner.iso_requests.values().next().unwrap();
         assert_eq!(pending.buffer.len(), 65536);
         assert_eq!(peer.borrow().active[0].buffer, pending.buffer.physical());
@@ -1151,4 +1162,121 @@ fn modeled_state_transitions_preserve_actual_configured_endpoint_context_fields(
         .unwrap();
     // A second actual native Configure command retains nonzero Interval and Mult.
     check(&superspeed_peer, 7, 0xff << 16 | 3 << 8, 4 << 16 | 2 << 8);
+}
+
+/// These independent controllers both reached real Address Device ACK for slot
+/// one. Substituting only the retained controller reference models a hostile
+/// old consumer alias; no SlotId or generation is manufactured. Same-controller
+/// published-slot reuse is qualified separately by the topology owner.
+#[test]
+fn stale_forwarding_cached_receipts_refuse_before_mmio_and_preserve_current_dma() {
+    for iso in [false, true] {
+        let mut ram = vec![0u64; 1024 * 1024];
+        let start = ram.as_mut_ptr() as u64;
+        // SAFETY: exclusive backing remains live until both controllers drop.
+        let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+        let (mut previous, old_peer) = fixture(&mut dma, !iso);
+        let (mut current, peer) = fixture(&mut dma, !iso);
+        let old_id = previous.physical.id;
+        let fresh_id = current.physical.id;
+        assert_eq!(old_id.hardware_slot(), fresh_id.hardware_slot());
+        assert_ne!(old_id, fresh_id);
+        let old = if iso {
+            previous
+                .submit_isochronous(0x81, &[2, 2], &[], &mut dma)
+                .unwrap()
+        } else {
+            previous.submit(0x81, 0, 4, &[]).unwrap()
+        };
+        if iso {
+            old_peer.borrow_mut().complete(3, 0, 1, 0, &[0xa1, 0xb2]);
+        }
+        previous.cancel(0x81).unwrap();
+        assert_eq!(previous.completed.len(), 1);
+        assert_eq!(previous.completed[0].status, Status::Cancelled);
+        assert_eq!(previous.completed[0].packets.len(), if iso { 2 } else { 0 });
+        if iso {
+            assert_eq!(previous.completed[0].packets[0].data, [0xa1, 0xb2]);
+            assert_eq!(previous.completed[0].packets[1].status, Status::Cancelled);
+        }
+        let cached = current.submit(2, 0, 2, &[0x34, 0x56]).unwrap();
+        current.cancel(2).unwrap();
+        let unread = if iso {
+            current
+                .submit_isochronous(0x81, &[4], &[], &mut dma)
+                .unwrap()
+        } else {
+            current.submit(0x81, 0, 4, &[]).unwrap()
+        };
+        peer.borrow_mut()
+            .complete(3, 0, 1, 0, &[0x12, 0x23, 0x34, 0x45]);
+        previous.controller = current.controller.clone();
+        let receipts = previous.completed.clone();
+        let current_receipts = current.completed.clone();
+        let before = ram.clone();
+        let remaining = dma.remaining();
+        peer.borrow_mut().trap_mmio = true;
+        assert!(previous.poll(old).is_err());
+        assert!(previous.take_completions().is_err());
+        assert!(previous.cancel(0x81).is_err());
+        assert!(previous.shutdown().is_err());
+        assert!(previous.configure(0, &mut dma).is_err());
+        assert!(previous.submit(0x81, 0, 1, &[]).is_err());
+        assert_eq!(previous.completed, receipts);
+        assert_eq!(current.completed, current_receipts);
+        assert!(!previous.fenced);
+        assert_eq!(previous.configuration, 19);
+        assert_eq!(dma.remaining(), remaining);
+        assert_eq!(ram, before);
+        // Genuine current cached cancellation ACKs need no hardware access.
+        assert_eq!(
+            current.poll(cached).unwrap().unwrap().status,
+            Status::Cancelled
+        );
+        assert!(current.take_completions().unwrap().is_empty());
+        assert_eq!(ram, before);
+        peer.borrow_mut().trap_mmio = false;
+        let done = current.poll(unread).unwrap().unwrap();
+        assert_eq!(done.actual, Some(4));
+        if iso {
+            assert_eq!(done.packets[0].data, [0x12, 0x23, 0x34, 0x45]);
+        } else {
+            assert_eq!(done.data, [0x12, 0x23, 0x34, 0x45]);
+        }
+    }
+}
+
+#[test]
+fn current_shutdown_fenced_forwarding_owner_can_drain_real_cancellation_receipts() {
+    for iso in [false, true] {
+        let mut ram = vec![0u64; 512 * 1024];
+        let start = ram.as_mut_ptr() as u64;
+        // SAFETY: original DMA allocations outlive this real shutdown exchange.
+        let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+        let (mut owner, peer) = fixture(&mut dma, !iso);
+        let incoming = if iso {
+            owner.submit_isochronous(0x81, &[4], &[], &mut dma).unwrap()
+        } else {
+            owner.submit(0x81, 0, 4, &[]).unwrap()
+        };
+        let outgoing = owner.submit(2, 0, 2, &[0x67, 0x89]).unwrap();
+        owner.shutdown().unwrap();
+        assert!(owner.fenced());
+        assert!(peer.borrow().active.is_empty());
+        assert_eq!(peer.borrow().base.borrow().configuration_value, 0);
+        assert_eq!(owner.completed.len(), 2);
+        let before = ram.clone();
+        peer.borrow_mut().trap_mmio = true;
+        assert_eq!(
+            owner.poll(incoming).unwrap().unwrap().status,
+            Status::Cancelled
+        );
+        let drained = owner.take_completions().unwrap();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].request, outgoing);
+        assert_eq!(drained[0].status, Status::Cancelled);
+        assert!(owner.take_completions().unwrap().is_empty());
+        assert!(owner.poll(incoming).is_err());
+        assert_eq!(ram, before);
+    }
 }
