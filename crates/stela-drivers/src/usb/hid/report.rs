@@ -22,6 +22,7 @@
 //! items) and key arrays. The arrays' ErrorRollOver, POSTFail and
 //! ErrorUndefined (usages 01h-03h, HID Usage Tables 10) say the report
 //! holds no key state, so such a report changes nothing.
+use super::usages::Local;
 use alloc::vec::Vec;
 
 const GENERIC_DESKTOP_X: u32 = 0x0001_0030;
@@ -257,8 +258,10 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
     }
     let mut global = Global::default();
     let mut stack: Vec<Global> = Vec::new();
-    let mut usages: Vec<u32> = Vec::new();
-    let mut range: Option<(u32, u32)> = None;
+    let mut local = Local::default();
+    // Preserve the legacy array reader's range representation; delimiter
+    // sets are prohibited on Arrays, so this cut does not redefine it.
+    let mut array_range: Option<(u32, u32)> = None;
     let mut offsets: Vec<(Option<u8>, usize)> = Vec::new();
     let mut items = Vec::new();
     let mut collections: Vec<(u32, bool)> = Vec::new();
@@ -286,12 +289,11 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
             4 => unsigned as i32,
             _ => 0,
         };
-        let full_usage = |usage: u32| {
-            if size == 4 {
-                usage
-            } else {
-                global.page << 16 | usage
-            }
+        let tag = prefix & TAG_MASK;
+        let usages = if matches!(tag, INPUT | OUTPUT | COLLECTION | FEATURE | END_COLLECTION) {
+            local.main(tag, unsigned, global.page)?
+        } else {
+            Vec::new()
         };
         match prefix & TAG_MASK {
             INPUT => {
@@ -315,15 +317,12 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
                         break;
                     }
                     let usage = if variable {
-                        match range {
-                            Some((first, last)) => Usage::Variable((first + n as u32).min(last)),
-                            None => match usages.get(n).or(usages.last()) {
-                                Some(usage) => Usage::Variable(*usage),
-                                None => continue,
-                            },
+                        match usages.get(n).or(usages.last()) {
+                            Some(usage) => Usage::Variable(*usage),
+                            None => continue,
                         }
                     } else {
-                        match (range, usages.first(), usages.last()) {
+                        match (array_range, usages.first(), usages.last()) {
                             (Some((first, last)), _, _) => Usage::Array { first, last },
                             (None, Some(first), Some(last)) => Usage::Array {
                                 first: *first,
@@ -349,31 +348,22 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
                         usage,
                     });
                 }
-                usages.clear();
-                range = None;
             }
             COLLECTION => {
-                collections.push((
-                    usages
-                        .first()
-                        .copied()
-                        .or_else(|| range.map(|r| r.0))
-                        .unwrap_or(0),
-                    unsigned == 1,
-                ));
-                usages.clear();
-                range = None;
+                collections.push((usages.first().copied().unwrap_or(0), unsigned == 1));
             }
             END_COLLECTION => {
-                collections.pop();
-                usages.clear();
-                range = None;
+                collections
+                    .pop()
+                    .ok_or("HID End Collection without Collection")?;
             }
-            OUTPUT | FEATURE => {
-                usages.clear();
-                range = None;
+            OUTPUT | FEATURE => {}
+            USAGE_PAGE => {
+                if unsigned > 0xffff {
+                    return Err("HID usage page exceeds 16 bits");
+                }
+                global.page = unsigned;
             }
-            USAGE_PAGE => global.page = unsigned,
             LOGICAL_MINIMUM => global.minimum = signed,
             LOGICAL_MAXIMUM => {
                 // A maximum that only fits unsigned (8-bit 0xff) stays positive.
@@ -400,13 +390,37 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
             POP => global = stack.pop().ok_or("Pop without Push")?,
             // Physical extents and units do not change a field's value.
             PHYSICAL_MINIMUM | PHYSICAL_MAXIMUM | UNIT_EXPONENT | UNIT => {}
-            USAGE => usages.push(full_usage(unsigned)),
-            USAGE_MINIMUM => range = Some((full_usage(unsigned), range.map_or(0, |r| r.1))),
-            USAGE_MAXIMUM => range = Some((range.map_or(0, |r| r.0), full_usage(unsigned))),
-            // Designators, strings and delimiters name no usage this
-            // reader takes.
+            USAGE => local.usage(unsigned, size, global.page)?,
+            USAGE_MINIMUM => {
+                local.minimum(unsigned, size, global.page)?;
+                let first = if size == 4 {
+                    unsigned
+                } else {
+                    global.page << 16 | unsigned
+                };
+                array_range = Some((first, array_range.map_or(0, |r| r.1)));
+            }
+            USAGE_MAXIMUM => {
+                local.maximum(unsigned, size, global.page)?;
+                let last = if size == 4 {
+                    unsigned
+                } else {
+                    global.page << 16 | unsigned
+                };
+                array_range = Some((array_range.map_or(0, |r| r.0), last));
+            }
+            0xa8 => local.delimiter(unsigned, size)?,
+            // Designators and strings do not change this reader's fields.
+            _ if prefix & 0x0c == 0 => return Err("unknown or reserved HID Main item"),
             _ => {}
         }
+        if matches!(tag, INPUT | OUTPUT | COLLECTION | FEATURE | END_COLLECTION) {
+            array_range = None;
+        }
+    }
+    local.complete()?;
+    if !collections.is_empty() {
+        return Err("unfinished HID descriptor");
     }
     let numbered = offsets.iter().any(|(id, _)| id.is_some());
     let longest = offsets.iter().map(|(_, bits)| bits.div_ceil(8)).max();

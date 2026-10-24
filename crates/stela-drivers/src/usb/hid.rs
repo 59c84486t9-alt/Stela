@@ -8,16 +8,20 @@
 //! The original report descriptor and every received report retain IDs,
 //! collections, usages and values through `poll_hid`, including consumer keys,
 //! gamepads, extra buttons and multitouch. No contact/axis semantics or receiver
-//! identity is synthesized. Vendor protocols and delimiter sets require explicit
-//! additional support. Existing `poll` exposes the legacy keyboard/pointer input
-//! vocabulary and standard boot fallback for actual boot-subclass interfaces.
+//! identity is synthesized. Delimiter sets select their primary usage branch;
+//! vendor protocols require explicit additional support. Existing `poll` exposes
+//! the legacy keyboard/pointer input vocabulary and standard boot fallback for
+//! actual boot-subclass interfaces.
 //! EP0 controls use actual descriptor lengths and status-stage acknowledgements;
 //! endpoint stop/restart shares the controller's DMA retirement authority.
 mod control;
+#[cfg(test)]
+mod delimiter_tests;
 pub mod descriptor;
 pub mod events;
 mod lifecycle;
 mod report;
+mod usages;
 
 pub use descriptor::{DecodeError, Descriptor, Frame, ReportType};
 

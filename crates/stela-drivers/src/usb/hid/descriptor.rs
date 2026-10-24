@@ -6,6 +6,7 @@
 //! Descriptor-qualified HID reports, including consumer, gamepad and digitizer
 //! collections. Values retain their wire field and collection identity: contact
 //! IDs, tip/in-range/confidence, scan time and contact count are never guessed.
+use super::usages::Local;
 use alloc::vec::Vec;
 
 const MAX_BITS: usize = (16_384 - 1) * 8;
@@ -47,7 +48,8 @@ pub struct ReportField {
     pub unit: u32,
     pub unit_exponent: i8,
     pub collection: Option<usize>,
-    /// Complete, ordered Usage list. Arrays index this list from logical min;
+    /// Ordered primary Usage list (common and first delimiter branch).
+    /// Arrays index this list from logical min;
     /// variables repeat its final usage when Report Count is greater.
     pub usages: Vec<u32>,
 }
@@ -132,8 +134,7 @@ impl Descriptor {
         let mut global = Global::default();
         let mut globals = Vec::new();
         let mut collections = Vec::new();
-        let mut usages = Vec::new();
-        let mut range_start = None;
+        let mut local = Local::default();
         let mut fields = 0usize;
         let mut at = 0;
         while at < bytes.len() {
@@ -159,10 +160,11 @@ impl Descriptor {
                 4 => i64::from(unsigned as i32),
                 _ => 0,
             };
-            let usage = if size == 4 {
-                unsigned
+            let tag = prefix & 0xfc;
+            let usages = if matches!(tag, 0x80 | 0x90 | 0xa0 | 0xb0 | 0xc0) {
+                local.main(tag, unsigned, global.page)?
             } else {
-                global.page << 16 | unsigned
+                Vec::new()
             };
             match prefix & 0xfc {
                 0x04 => {
@@ -219,36 +221,12 @@ impl Descriptor {
                     globals.push(global.clone());
                 }
                 0xb4 => global = globals.pop().ok_or("HID Pop without Push")?,
-                0x08 => {
-                    if usages.len() == MAX_USAGES {
-                        return Err("too many HID usages");
-                    }
-                    usages.push(usage);
-                }
-                0x18 => {
-                    if range_start.replace(usage).is_some() {
-                        return Err("HID nested usage minimum");
-                    }
-                }
-                0x28 => {
-                    let first = range_start
-                        .take()
-                        .ok_or("HID usage maximum without minimum")?;
-                    if first >> 16 != usage >> 16 || first > usage {
-                        return Err("invalid HID usage range");
-                    }
-                    let count = (usage - first) as usize + 1;
-                    if count > MAX_USAGES - usages.len() {
-                        return Err("too many HID usages");
-                    }
-                    usages.extend(first..=usage);
-                }
+                0x08 => local.usage(unsigned, size, global.page)?,
+                0x18 => local.minimum(unsigned, size, global.page)?,
+                0x28 => local.maximum(unsigned, size, global.page)?,
                 0xa0 => {
                     if descriptor.collections.len() == MAX_COLLECTIONS {
                         return Err("too many HID collections");
-                    }
-                    if range_start.is_some() {
-                        return Err("unfinished HID usage range");
                     }
                     let index = descriptor.collections.len();
                     descriptor.collections.push(Collection {
@@ -257,19 +235,13 @@ impl Descriptor {
                         kind: u8::try_from(unsigned).map_err(|_| "invalid HID collection type")?,
                     });
                     collections.push(index);
-                    usages.clear();
                 }
                 0xc0 => {
                     collections
                         .pop()
                         .ok_or("HID End Collection without Collection")?;
-                    usages.clear();
-                    range_start = None;
                 }
                 tag @ (0x80 | 0x90 | 0xb0) => {
-                    if range_start.is_some() {
-                        return Err("unfinished HID usage range");
-                    }
                     if global.count != 0 && global.size == 0 {
                         return Err("zero-size HID field");
                     }
@@ -318,20 +290,18 @@ impl Descriptor {
                             unit: global.unit,
                             unit_exponent: global.unit_exponent,
                             collection: collections.last().copied(),
-                            usages: core::mem::take(&mut usages),
+                            usages,
                         });
                     }
-                    usages.clear();
                 }
-                // Alternative delimiter sets require explicit interpretation;
-                // never silently select a different control's usage.
-                0xa8 => return Err("HID delimiter usage sets are unsupported"),
+                0xa8 => local.delimiter(unsigned, size)?,
                 // Designators and string indices carry no field semantics.
                 0x38 | 0x48 | 0x58 | 0x78 | 0x88 | 0x98 => {}
                 _ => return Err("unknown or reserved HID item"),
             }
         }
-        if !collections.is_empty() || range_start.is_some() {
+        local.complete()?;
+        if !collections.is_empty() {
             return Err("unfinished HID descriptor");
         }
         if descriptor.numbered && descriptor.reports.iter().any(|r| r.id == 0 && r.bits != 0) {
