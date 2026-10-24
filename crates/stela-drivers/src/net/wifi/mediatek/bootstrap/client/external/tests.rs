@@ -391,11 +391,32 @@ fn actual_rx_rejects_wrong_peer_channel_algorithm_transaction_and_short_fixed_fi
         let raw = incoming_bytes(&response(0xb0, &body), None, false);
         // Preserve the oversized authentication body, using the real native
         // multi-descriptor path instead of overfilling one 2-KiB DMA buffer.
-        crate::net::wifi::mediatek::ring::rx::tests::device_receive_frame(
+        let fragments = crate::net::wifi::mediatek::ring::rx::tests::device_receive_frame(
             &model.queues[&0xd4520],
             &raw,
             0,
         );
+        // Native polling consumes one descriptor per turn. A non-LAST
+        // fragment retains assembly ownership and cannot emit authentication.
+        for _ in 1..fragments {
+            assert!(
+                client
+                    .poll(1, &Source, &mut Policy(true))
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(!client.state().controller.state().data_assembly.is_idle());
+            assert_eq!(
+                client.station().phase(),
+                station::Phase::ExternalAuthenticating
+            );
+            assert!(Arc::ptr_eq(
+                client.station().external_authentication().unwrap(),
+                &session
+            ));
+            assert!(!client.station().port_open(None, None));
+            assert!(client.station().association_context().is_none());
+        }
         assert!(matches!(
             client.poll(1, &Source, &mut Policy(true)),
             Err(Error::Station(station::Error::Wire(_)))
