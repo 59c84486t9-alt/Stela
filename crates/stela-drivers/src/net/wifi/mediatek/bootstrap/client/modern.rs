@@ -509,6 +509,7 @@ pub(super) mod tests {
     use crate::net::wifi::mediatek::{
         mailbox::tests::*,
         ring::{
+            data::Receipt,
             rx::tests::device_receive,
             tests::{Memory, Source},
         },
