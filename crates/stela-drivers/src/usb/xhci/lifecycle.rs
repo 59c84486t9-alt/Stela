@@ -613,7 +613,23 @@ impl Host {
             let inventory = state.inventory.as_ref().ok_or(BlockError::Unsupported(
                 "USB retirement original inventory absent",
             ))?;
-            c.validate_ancestry(inventory.id)?;
+            if state.retiring && c.slot_ownership[usize::from(slot)] == reset::Ownership::Retired {
+                // Disable Slot already acknowledged this exact descendant. Its
+                // original parent may also be disabled while physical current
+                // remains reserved until port reset. Check the retained seals,
+                // rather than demanding live parent hardware for an idle owner.
+                if inventory.id.hardware_slot() != slot || !c.known_id(inventory.id) {
+                    return Err(BlockError::Unsupported(
+                        "USB retired inventory generation changed",
+                    ));
+                }
+                c.power
+                    .validate_generation(inventory.id, state.parent_id, state.attachment)?;
+            } else {
+                // Uncertain Stop/Disable still owns an Enabled slot and must
+                // pass the complete live ancestry check before any more work.
+                c.validate_ancestry(inventory.id)?;
+            }
         }
         // Fence every generation before the first Stop, but keep physical
         // parents internally live for descendant TT-buffer retirement.

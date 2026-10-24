@@ -378,3 +378,101 @@ fn public_resume_rejects_stale_snapshot_before_controller_restore_and_keeps_curr
     );
     assert!(matches!(current.sleep, suspend::Sleep::Suspended(_)));
 }
+
+#[test]
+fn acknowledged_nested_retirement_preserves_seals_and_current_until_physical_reset() {
+    for speed in [HIGH_SPEED, SUPER_SPEED] {
+        for context in [32, 64] {
+            let mut leaf = hub::model::Node::leaf(speed);
+            leaf.interface_class = Some(0xff);
+            let nodes = BTreeMap::from([
+                (0, hub::model::Node::hub(speed, 1)),
+                (1, hub::model::Node::hub(speed, 1)),
+                (0x11, leaf),
+            ]);
+            let mut memory = vec![0u64; 1024 * 1024];
+            let start = memory.as_mut_ptr() as u64;
+            // SAFETY: every original context, ring and status buffer retains RAM.
+            let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+            let (mut controller, hardware) = hub::tests::controller(&mut dma, context, nodes);
+            let mut failures = Vec::new();
+            let devices = controller.enumerate(&mut dma, &mut failures);
+            assert!(failures.is_empty(), "{failures:?}");
+            assert_eq!(devices.len(), 3);
+            let middle = devices
+                .iter()
+                .find(|d| d.location.ends_with("port 1.1"))
+                .unwrap()
+                .id;
+            let child = devices
+                .iter()
+                .find(|d| d.location.ends_with(".1.1"))
+                .unwrap()
+                .id;
+            let shared = Rc::new(RefCell::new(controller));
+            let mut host = Host::new(shared.clone(), &devices, &mut dma, &mut failures);
+            assert!(failures.is_empty(), "{failures:?}");
+            let mut removed = Changes::default();
+            host.retire(middle, &mut removed).unwrap();
+            assert_eq!(removed.removed.len(), 2);
+            let disabled: Vec<_> = hardware
+                .borrow()
+                .commands
+                .iter()
+                .filter(|(kind, _)| *kind == reset::DISABLE_SLOT)
+                .map(|(_, slot)| *slot)
+                .collect();
+            assert_eq!(disabled, [child.hardware_slot(), middle.hardware_slot()]);
+            for id in [middle, child] {
+                assert!(shared.borrow().power.retained(id.hardware_slot()));
+                assert_eq!(
+                    shared.borrow().slot_ownership[usize::from(id.hardware_slot())],
+                    reset::Ownership::Retired
+                );
+            }
+            trapped(&shared, || {
+                let mut repeated = Changes::default();
+                host.retire(middle, &mut repeated).unwrap();
+                assert!(repeated.removed.is_empty());
+                assert!(shared.borrow_mut().device(child).is_err());
+            });
+            // A retained real identity from another original slot cannot stand
+            // in for this disabled child's inventory, even without new DMA.
+            shared.borrow_mut().slots[usize::from(child.hardware_slot())]
+                .as_mut()
+                .unwrap()
+                .inventory
+                .as_mut()
+                .unwrap()
+                .id = middle;
+            trapped(&shared, || {
+                assert!(host.retire(middle, &mut Changes::default()).is_err());
+            });
+            shared.borrow_mut().slots[usize::from(child.hardware_slot())]
+                .as_mut()
+                .unwrap()
+                .inventory
+                .as_mut()
+                .unwrap()
+                .id = child;
+            // A software retiring flag is not a Disable acknowledgment. An
+            // Enabled child beneath the disabled parent must still refuse.
+            shared.borrow_mut().slot_ownership[usize::from(child.hardware_slot())] =
+                reset::Ownership::Enabled;
+            trapped(&shared, || {
+                assert!(host.retire(middle, &mut Changes::default()).is_err());
+            });
+            shared.borrow_mut().slot_ownership[usize::from(child.hardware_slot())] =
+                reset::Ownership::Retired;
+            assert_eq!(
+                hardware
+                    .borrow()
+                    .commands
+                    .iter()
+                    .filter(|(kind, _)| *kind == reset::DISABLE_SLOT)
+                    .count(),
+                2
+            );
+        }
+    }
+}
