@@ -311,6 +311,16 @@ pub(crate) mod tests {
         }
         s.index = (s.index + 1) % s.count;
     }
+
+    /// Publish a complete packet through actual buffer-sized DDONE fragments.
+    /// The final descriptor alone terminates the native receive chain.
+    pub(crate) fn device_receive_frame(state: &Arc<Mutex<State>>, bytes: &[u8], flags: u32) {
+        assert!(!bytes.is_empty());
+        let mut fragments = bytes.chunks(BUFFER_BYTES).peekable();
+        while let Some(fragment) = fragments.next() {
+            device_receive(state, fragment, fragments.peek().is_none(), flags);
+        }
+    }
     #[test]
     fn actual_receive_ddone_payload_and_gap_refill_wrap_non_power_of_two_rings() {
         let (mut ring, state) = setup(7);

@@ -388,7 +388,14 @@ fn actual_rx_rejects_wrong_peer_channel_algorithm_transaction_and_short_fixed_fi
         vec![0, 0, 2, 0, 0, 0],
         vec![3, 0, 3, 0, 0, 0],
     ] {
-        incoming(&model, &response(0xb0, &body), None, false);
+        let raw = incoming_bytes(&response(0xb0, &body), None, false);
+        // Preserve the oversized authentication body, using the real native
+        // multi-descriptor path instead of overfilling one 2-KiB DMA buffer.
+        crate::net::wifi::mediatek::ring::rx::tests::device_receive_frame(
+            &model.queues[&0xd4520],
+            &raw,
+            0,
+        );
         assert!(matches!(
             client.poll(1, &Source, &mut Policy(true)),
             Err(Error::Station(station::Error::Wire(_)))
