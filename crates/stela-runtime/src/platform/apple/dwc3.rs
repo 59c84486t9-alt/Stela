@@ -240,6 +240,20 @@ impl Dwc3 {
     }
 
     fn mmio_ready(&self) -> Result<(), &'static str> {
+        self.mmio_ready_at(None)
+    }
+
+    /// Whether the AP register at `offset` (any, for `None`) is accessible.
+    /// `AppleT8112USBXDCI::powerOn` (26A434 KC 0x43096e8) read-modify-writes
+    /// GUSB2PHYCFG and GUSB3PIPECTL, clearing SUSPHY, at 0x430a380 and
+    /// 0x430a5a4, before it clears the pipehandler's FORCE_CLAMP (0x430a774)
+    /// and sets its RESET_N (0x430a91c): those two PHY configuration words
+    /// complete, and keep what is written, while the physical ATC PHY reset
+    /// is held. The drivers release that reset before core initialization
+    /// and establish no other register's access while it is held, which
+    /// stays unqualified, not a claim that physical reset makes the rest
+    /// of MMIO inaccessible.
+    fn mmio_ready_at(&self, offset: Option<u64>) -> Result<(), &'static str> {
         if !self.lifecycle.powered {
             return Err("DWC3 power domain is off");
         }
@@ -249,11 +263,7 @@ impl Dwc3 {
         if self.lifecycle.reset {
             return Err("DWC3 reset is asserted");
         }
-        // The recovered drivers release the physical PIPE reset before core
-        // initialization. They do not establish which AP registers remain
-        // accessible while it is held. This is an unsupported capability,
-        // not a claim that physical reset makes all MMIO inaccessible.
-        if self.phy_reset {
+        if self.phy_reset && !matches!(offset, Some(GUSB2PHYCFG | GUSB3PIPECTL)) {
             return Err("DWC3 MMIO while physical ATC PHY reset is held is unqualified");
         }
         Ok(())
@@ -953,7 +963,7 @@ impl MmioDevice for Dwc3 {
         width: Width,
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
-        self.mmio_ready()
+        self.mmio_ready_at(Some(offset))
             .map_err(|why| refuse(NAME, offset, width, Direction::Read, why))?;
         if offset < xhci::BYTES {
             return self
@@ -1036,7 +1046,7 @@ impl MmioDevice for Dwc3 {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        self.mmio_ready()
+        self.mmio_ready_at(Some(offset))
             .map_err(|why| refuse(NAME, offset, width, Direction::Write, why))?;
         if offset < xhci::BYTES {
             let result = self.host.write(offset, width.bytes(), value, access.now);
@@ -1466,7 +1476,7 @@ mod tests {
     }
 
     #[test]
-    fn software_core_reset_keeps_globals_readable_but_physical_reset_access_is_unqualified() {
+    fn software_core_reset_keeps_globals_readable_and_physical_reset_keeps_phy_configuration() {
         let (mut dwc, _, _, mut latch) = setup();
         let mut access = Access::new(0, 0, &mut latch);
         let gctl = dwc.gctl;
@@ -1480,6 +1490,13 @@ mod tests {
         assert_eq!(dwc.read(GUID, Width::Word, &mut access), Ok(0x1234));
         write(&mut dwc, GCTL, gctl, &mut access);
         dwc.set_phy_state(true, false, true, false, &mut access);
+        // XDCI power-on clears SUSPHY in both PHY configuration words while
+        // the PHY holds the reset; they keep it past the release.
+        for offset in [GUSB2PHYCFG, GUSB3PIPECTL] {
+            write(&mut dwc, offset, 0, &mut access);
+            assert_eq!(dwc.read(offset, Width::Word, &mut access), Ok(0));
+        }
+        write(&mut dwc, GUSB2PHYCFG, 1 << 3, &mut access);
         for offset in [GSNPSID, GCTL, DCTL] {
             assert!(matches!(dwc.read(offset, Width::Word, &mut access),
                 Err(MmioError::Unsupported { reason, .. }) if reason.contains("unqualified")));
@@ -1490,6 +1507,7 @@ mod tests {
         );
         dwc.set_phy_state(false, true, true, false, &mut access);
         assert_eq!(dwc.read(GSNPSID, Width::Word, &mut access), Ok(0x5533_300a));
+        assert_eq!(dwc.read(GUSB2PHYCFG, Width::Word, &mut access), Ok(1 << 3));
     }
 
     #[test]
