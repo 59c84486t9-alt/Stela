@@ -2833,6 +2833,8 @@ struct ExitsSeen {
     /// IC IVAU.
     lookups: [u64; 2],
     drops: [u64; 4],
+    /// `Statistics::lookup_misses`.
+    misses: [u64; 5],
 }
 
 /// The `ExitKind`s `Statistics::exit_kinds` counts.
@@ -2849,6 +2851,7 @@ impl ExitsSeen {
         let entries = statistics.blocks - statistics.chained;
         let kinds = statistics.exit_kinds;
         let lookups = [statistics.lookups, statistics.lookup_hits];
+        let misses = statistics.lookup_misses;
         let drops = [
             statistics.translation_changes,
             statistics.tlb_maintenance,
@@ -2887,6 +2890,12 @@ impl ExitsSeen {
             drops[2] - self.drops[2],
             drops[3] - self.drops[3],
         ));
+        // Unlinked, another PC in the slot, another context, no budget,
+        // a refused BTYPE.
+        for (index, (now, last)) in misses.iter().zip(&self.misses).enumerate() {
+            let separator = if index == 0 { " misses=" } else { "," };
+            output::arguments(format_args!("{separator}{}", now - last));
+        }
         for (count, word) in top.into_iter().take(SHOWN) {
             output::arguments(format_args!(" {word:#010x}:{count}"));
         }
@@ -2897,6 +2906,7 @@ impl ExitsSeen {
             words,
             lookups,
             drops,
+            misses,
         };
     }
 }

@@ -1131,6 +1131,11 @@ pub struct Statistics {
     /// (Fallthrough, Direct, Indirect, Call, Return, Trap, PAC, Clock,
     /// ThreadRegister, FloatingPoint, ScalableNumerical, System, AMX).
     pub exit_kinds: [u64; 13],
+    /// Exits of returns, indirect branches, calls and direct exits out of
+    /// their page, by why no lookup thunk transferred them: none was
+    /// installed yet, the target's table slot named another PC, or another
+    /// context, the chain budget was spent, or the entry refused the BTYPE.
+    pub lookup_misses: [u64; 5],
     pub compiled: u64,
     /// Counter ticks spent analyzing and compiling `compiled`.
     pub compile_ticks: u64,
@@ -1186,6 +1191,7 @@ impl core::ops::AddAssign for Statistics {
             lookups,
             lookup_hits,
             exit_kinds,
+            lookup_misses,
             compiled,
             compile_ticks,
             stored,
@@ -1211,6 +1217,9 @@ impl core::ops::AddAssign for Statistics {
         } = other;
         self.replaced_retired = self.replaced_retired.saturating_add(replaced_retired);
         for (total, count) in self.exit_kinds.iter_mut().zip(exit_kinds) {
+            *total += count;
+        }
+        for (total, count) in self.lookup_misses.iter_mut().zip(lookup_misses) {
             *total += count;
         }
         for (total, count) in [
@@ -3131,6 +3140,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 if let Some(count) = self.statistics.exit_kinds.get_mut(kind as usize) {
                     *count += 1;
                 }
+                if let Some(miss) = self.lookup_miss(last, next_pc, kind, control.budget > budget) {
+                    self.statistics.lookup_misses[miss] += 1;
+                }
                 self.exit(last, next_pc, kind)?;
                 let btype = self.cpu.pstate.btype;
                 match ExitKind::try_from(kind) {
@@ -3152,6 +3164,44 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.native_fault(last, fault)
             }
         }
+    }
+
+    /// Why block `index`'s exit of `kind` to `next_pc` took no lookup
+    /// transfer, as an index of `Statistics::lookup_misses`, when it is one
+    /// a lookup thunk serves; `spent` when a thunk found no budget left.
+    fn lookup_miss(&self, index: usize, next_pc: u64, kind: u64, spent: bool) -> Option<usize> {
+        let block = &self.blocks[index];
+        let kind = ExitKind::try_from(kind).ok()?;
+        let unlinked = if dynamic_branch(block.terminal.1).is_some() {
+            block.dynamic_site.is_some()
+        } else if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0
+            && matches!(
+                kind,
+                ExitKind::Fallthrough | ExitKind::Direct | ExitKind::Call
+            )
+        {
+            block
+                .successors
+                .iter()
+                .any(|exit| exit.target.0 == next_pc && exit.kind == kind)
+        } else {
+            return None;
+        };
+        if block.variant.single {
+            return None;
+        }
+        let entry = &self.targets[chain::lookup_slot(next_pc)];
+        Some(if unlinked {
+            0
+        } else if entry.pc != next_pc {
+            1
+        } else if entry.context != self.chain.contexts[chain::half(next_pc)] {
+            2
+        } else if spent {
+            3
+        } else {
+            4
+        })
     }
 
     /// Redirect block `index`'s direct exit to `next_pc` into the block a
@@ -8214,6 +8264,8 @@ mod tests {
         kinds[ExitKind::Direct as usize] = 1;
         kinds[ExitKind::Return as usize] = 1;
         assert_eq!(machine.statistics.exit_kinds, kinds);
+        // Neither exit had a thunk yet.
+        assert_eq!(machine.statistics.lookup_misses, [2, 0, 0, 0, 0]);
         let control = &*machine.chain as *const ChainControl as u64;
         let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
         assert!(first.successors.is_empty() && first.dynamic_site.is_none());
@@ -8261,6 +8313,8 @@ mod tests {
         machine.step().unwrap();
         let renewed = machine.chain.contexts[half];
         assert!(renewed > context);
+        // The thunk's entry for `far` names the old context.
+        assert_eq!(machine.statistics.lookup_misses, [2, 0, 1, 0, 0]);
         let variant = machine.blocks[0].variant;
         let el = machine.cpu.pstate.el;
         assert_eq!(machine.context(el, variant, half), renewed);
