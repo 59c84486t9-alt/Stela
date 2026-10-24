@@ -80,8 +80,15 @@ struct ArtifactKey {
     target: stela_compiler::TargetCpu,
     guarded: bool,
 }
+struct CacheEntry {
+    artifact: Arc<Artifact>,
+    recency: u64,
+}
 pub(super) struct ArtifactCache {
-    entries: Vec<Arc<Artifact>>,
+    // PC is only an index hint; every candidate still needs the complete key
+    // and a fresh executable-source check before it can be promoted or entered.
+    entries: Vec<CacheEntry>,
+    recency_clock: u64,
     // One exact effective declaration, charged against the same byte budget.
     // Reset owners start empty and tightening can discard it independently.
     controls: Option<Controls>,
@@ -96,6 +103,7 @@ impl Default for ArtifactCache {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            recency_clock: 0,
             controls: None,
             retained_payload: 0,
             compiled: 0,
@@ -120,7 +128,7 @@ impl ArtifactCache {
             return;
         }
         while !self.entries.is_empty() && !self.fits(bytes) {
-            self.remove(0);
+            self.evict_oldest();
         }
         if !self.fits(bytes) {
             // An empty high-water slot allocation must not prevent a smaller
@@ -129,19 +137,66 @@ impl ArtifactCache {
         }
         self.controls = Some(controls.clone());
     }
+    fn find(&self, key: &ArtifactKey) -> Option<usize> {
+        let first = self
+            .entries
+            .partition_point(|entry| entry.artifact.key.pc < key.pc);
+        self.entries[first..]
+            .iter()
+            .take_while(|entry| entry.artifact.key.pc == key.pc)
+            .position(|entry| entry.artifact.key == *key)
+            .map(|offset| first + offset)
+    }
     fn candidate(&self, key: &ArtifactKey) -> Option<(usize, Arc<Artifact>)> {
-        self.entries
+        self.find(key)
+            .map(|index| (index, Arc::clone(&self.entries[index].artifact)))
+    }
+    fn next_recency(&mut self) -> u64 {
+        if self.recency_clock == u64::MAX {
+            // Unique positive tickets can be ranked in place without moving
+            // entries or allocating. Each assigned rank is <= its old ticket,
+            // so rewritten entries cannot pass the next >last_old filter.
+            let mut last_old = 0;
+            for rank in 1..=self.entries.len() {
+                let index = self
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| entry.recency > last_old)
+                    .min_by_key(|(_, entry)| entry.recency)
+                    .map(|(index, _)| index)
+                    .expect("unique positive cache recency");
+                last_old = self.entries[index].recency;
+                self.entries[index].recency = rank as u64;
+            }
+            self.recency_clock = self.entries.len() as u64;
+        }
+        self.recency_clock += 1;
+        self.recency_clock
+    }
+    /// Promote only after exact, freshly fetched executable source validation.
+    /// Ordinary hits allocate nothing and move no entries. Only ticket wrap
+    /// requires the allocation-free recency renumbering above.
+    fn reuse(&mut self, index: usize) {
+        let ticket = self.next_recency();
+        self.entries[index].recency = ticket;
+        self.reused = self.reused.saturating_add(1);
+    }
+    fn evict_oldest(&mut self) {
+        let index = self
+            .entries
             .iter()
             .enumerate()
-            .rev()
-            .find(|(_, entry)| entry.key == *key)
-            .map(|(index, entry)| (index, Arc::clone(entry)))
+            .min_by_key(|(_, entry)| entry.recency)
+            .map(|(index, _)| index)
+            .expect("nonempty cache eviction");
+        self.remove(index);
     }
-    /// Only an exact, freshly fetched executable source hit is reusable.
-    /// Keep it newest without allocating or changing retained-byte accounting.
-    fn reuse(&mut self, index: usize) {
-        self.entries[index..].rotate_left(1);
-        self.reused = self.reused.saturating_add(1);
+    #[cfg(test)]
+    fn recency_order(&self) -> Vec<&Arc<Artifact>> {
+        let mut ordered: Vec<_> = self.entries.iter().collect();
+        ordered.sort_by_key(|entry| entry.recency);
+        ordered.into_iter().map(|entry| &entry.artifact).collect()
     }
     pub(super) fn stats(&self) -> ArtifactCacheStats {
         ArtifactCacheStats {
@@ -152,7 +207,7 @@ impl ArtifactCache {
         }
     }
     fn slot_bytes(&self) -> usize {
-        self.entries.capacity() * core::mem::size_of::<Arc<Artifact>>()
+        self.entries.capacity() * core::mem::size_of::<CacheEntry>()
     }
     pub(super) fn tighten(&mut self, bytes: usize) {
         self.byte_budget = self.byte_budget.min(bytes);
@@ -160,7 +215,7 @@ impl ArtifactCache {
             self.controls = None;
         }
         while !self.entries.is_empty() && self.stats().retained_bytes > self.byte_budget {
-            self.remove(0);
+            self.evict_oldest();
         }
         if self.slot_bytes() > self.byte_budget {
             self.entries = Vec::new();
@@ -172,7 +227,7 @@ impl ArtifactCache {
         empty
     }
     fn remove(&mut self, index: usize) {
-        self.retained_payload -= self.entries.remove(index).retained_bytes();
+        self.retained_payload -= self.entries.remove(index).artifact.retained_bytes();
     }
     /// Whether the actual retained allocation plus additional payload fits.
     fn fits(&self, additional: usize) -> bool {
@@ -191,7 +246,7 @@ impl ArtifactCache {
             .checked_sub(self.controls_bytes())?
             .checked_sub(self.retained_payload)?
             .checked_sub(incoming)?
-            / core::mem::size_of::<Arc<Artifact>>();
+            / core::mem::size_of::<CacheEntry>();
         if required > available {
             return None;
         }
@@ -213,16 +268,12 @@ impl ArtifactCache {
             return;
         };
         let minimum = bytes
-            .checked_add(core::mem::size_of::<Arc<Artifact>>())
+            .checked_add(core::mem::size_of::<CacheEntry>())
             .and_then(|bytes| bytes.checked_add(self.controls_bytes()));
         if minimum.is_none_or(|bytes| bytes > self.byte_budget) {
             return; // Valid one-shot compilation; never raises the owner bound.
         }
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.key == artifact.key)
-        {
+        if let Some(index) = self.find(&artifact.key) {
             self.remove(index);
         }
         loop {
@@ -243,7 +294,7 @@ impl ArtifactCache {
                 // Allocators may supply more capacity than requested. The
                 // observed allocation, rather than the growth target, rules.
                 while !self.entries.is_empty() && !self.fits(bytes) {
-                    self.remove(0);
+                    self.evict_oldest();
                 }
                 if !self.fits(bytes) {
                     self.entries = Vec::new();
@@ -251,11 +302,15 @@ impl ArtifactCache {
                 }
                 break;
             }
-            self.remove(0);
+            self.evict_oldest();
         }
         // fits() checked this addition as well as the full retained charge.
         self.retained_payload += bytes;
-        self.entries.push(artifact);
+        let index = self
+            .entries
+            .partition_point(|entry| entry.artifact.key.pc <= artifact.key.pc);
+        let recency = self.next_recency();
+        self.entries.insert(index, CacheEntry { artifact, recency });
     }
 }
 
@@ -1897,7 +1952,10 @@ mod artifact_tests {
                 &prepare_artifact(&mut machine, BINDING).unwrap()
             ));
             let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
-            assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &artifacts[0]));
+            assert!(Arc::ptr_eq(
+                cache.recency_order().last().unwrap(),
+                &artifacts[0]
+            ));
             assert_eq!(cache.stats().retained_bytes, initial.retained_bytes);
             assert_eq!(cache.stats().reused, initial.reused + 1);
             assert_eq!(cache.stats().compiled, initial.compiled);
@@ -1909,7 +1967,7 @@ mod artifact_tests {
             assert!(cache.candidate(&artifacts[1].key).is_none());
             let (_, hot) = cache.candidate(&artifacts[0].key).unwrap();
             assert!(Arc::ptr_eq(&hot, &artifacts[0]));
-            assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &cold));
+            assert!(Arc::ptr_eq(cache.recency_order().last().unwrap(), &cold));
             assert!(cache.stats().retained_bytes <= cache.byte_budget);
         }
     }
@@ -1920,7 +1978,7 @@ mod artifact_tests {
         let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
         let initial = cache.stats();
         assert!(cache.candidate(&artifacts[0].key).is_some());
-        assert!(Arc::ptr_eq(&cache.entries[0], &artifacts[0]));
+        assert!(Arc::ptr_eq(cache.recency_order()[0], &artifacts[0]));
         machine.cpu.pc = PC;
         let mut descriptor = [0; 8];
         unsafe { ram.read_physical(LEAF, &mut descriptor) }.unwrap();
@@ -1931,7 +1989,7 @@ mod artifact_tests {
         );
         let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
         assert_eq!(cache.stats(), initial);
-        for (entry, artifact) in cache.entries.iter().zip(&artifacts) {
+        for (entry, artifact) in cache.recency_order().into_iter().zip(&artifacts) {
             assert!(Arc::ptr_eq(entry, artifact));
         }
         // The first fetch now succeeds and finds the old key, but exact bytes
@@ -1944,7 +2002,7 @@ mod artifact_tests {
         );
         let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
         assert_eq!(cache.stats(), initial);
-        for (entry, artifact) in cache.entries.iter().zip(&artifacts) {
+        for (entry, artifact) in cache.recency_order().into_iter().zip(&artifacts) {
             assert!(Arc::ptr_eq(entry, artifact));
         }
     }
@@ -1966,9 +2024,9 @@ mod artifact_tests {
         let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
         assert_eq!(cache.stats().compiled, initial.compiled + 1);
         assert_eq!(cache.stats().reused, initial.reused);
-        assert!(Arc::ptr_eq(&cache.entries[0], &artifacts[1]));
-        assert!(Arc::ptr_eq(&cache.entries[1], &artifacts[2]));
-        assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &changed));
+        assert!(Arc::ptr_eq(cache.recency_order()[0], &artifacts[1]));
+        assert!(Arc::ptr_eq(cache.recency_order()[1], &artifacts[2]));
+        assert!(Arc::ptr_eq(cache.recency_order().last().unwrap(), &changed));
     }
 
     #[test]
@@ -1987,10 +2045,32 @@ mod artifact_tests {
         let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
         assert_eq!(cache.stats().compiled, initial.compiled + 1);
         assert_eq!(cache.stats().reused, initial.reused);
-        for (entry, artifact) in cache.entries.iter().zip(&artifacts) {
+        for (entry, artifact) in cache.recency_order().into_iter().zip(&artifacts) {
             assert!(Arc::ptr_eq(entry, artifact));
         }
-        assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &changed));
+        assert!(Arc::ptr_eq(cache.recency_order().last().unwrap(), &changed));
+        // Equal-PC entries retain independent full keys. Revisit both variants
+        // and a missing variant after insertion, without refreshing recency.
+        let tickets: Vec<_> = cache.entries.iter().map(|entry| entry.recency).collect();
+        assert!(Arc::ptr_eq(
+            &cache.candidate(&artifacts[0].key).unwrap().1,
+            &artifacts[0]
+        ));
+        assert!(Arc::ptr_eq(
+            &cache.candidate(&changed.key).unwrap().1,
+            &changed
+        ));
+        let mut missing = changed.key.clone();
+        missing.worker = publication::WorkerId(1);
+        assert!(cache.candidate(&missing).is_none());
+        assert_eq!(
+            cache
+                .entries
+                .iter()
+                .map(|entry| entry.recency)
+                .collect::<Vec<_>>(),
+            tickets
+        );
     }
 
     #[test]
@@ -2013,24 +2093,96 @@ mod artifact_tests {
         let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
         assert_eq!(cache.stats().compiled, initial.compiled + 1);
         assert_eq!(cache.stats().reused, initial.reused);
-        assert!(Arc::ptr_eq(&cache.entries[0], &following));
-        assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &prefix));
+        assert!(Arc::ptr_eq(cache.recency_order()[0], &following));
+        assert!(Arc::ptr_eq(cache.recency_order().last().unwrap(), &prefix));
     }
 
     fn assert_accounting(cache: &ArtifactCache) {
         let payload: usize = cache
             .entries
             .iter()
-            .map(|entry| entry.retained_bytes())
+            .map(|entry| entry.artifact.retained_bytes())
             .sum();
         assert_eq!(cache.retained_payload, payload);
         assert_eq!(
             cache.stats().retained_bytes,
             payload
-                + cache.entries.capacity() * core::mem::size_of::<Arc<Artifact>>()
+                + cache.entries.capacity() * core::mem::size_of::<CacheEntry>()
                 + cache.controls_bytes()
         );
         assert!(cache.stats().retained_bytes <= cache.byte_budget);
+        assert!(
+            cache
+                .entries
+                .windows(2)
+                .all(|pair| pair[0].artifact.key.pc <= pair[1].artifact.key.pc)
+        );
+    }
+
+    #[test]
+    fn indexed_cache_matches_reference_lru_without_moving_hits() {
+        let (_, _, artifacts) = branch_artifacts(8);
+        let mut cache = ArtifactCache::default();
+        let mut reference: Vec<Arc<Artifact>> = Vec::new();
+        for step in 0..200 {
+            let artifact = &artifacts[(step * 5 + step / 7) % artifacts.len()];
+            if let Some((index, candidate)) = cache.candidate(&artifact.key) {
+                let positions: Vec<_> = cache
+                    .entries
+                    .iter()
+                    .map(|entry| entry.artifact.key.pc)
+                    .collect();
+                let bytes = cache.stats().retained_bytes;
+                assert!(Arc::ptr_eq(&candidate, artifact));
+                cache.reuse(index);
+                assert_eq!(
+                    cache
+                        .entries
+                        .iter()
+                        .map(|entry| entry.artifact.key.pc)
+                        .collect::<Vec<_>>(),
+                    positions
+                );
+                assert_eq!(cache.stats().retained_bytes, bytes);
+                reference.retain(|entry| !Arc::ptr_eq(entry, artifact));
+            } else {
+                cache.insert(Arc::clone(artifact));
+            }
+            reference.push(Arc::clone(artifact));
+            if step % 11 == 10 {
+                cache.evict_oldest();
+                reference.remove(0);
+            }
+            assert_eq!(cache.entries.len(), reference.len());
+            for (actual, expected) in cache.recency_order().into_iter().zip(&reference) {
+                assert!(Arc::ptr_eq(actual, expected));
+            }
+            assert_accounting(&cache);
+        }
+    }
+
+    #[test]
+    fn recency_wrap_preserves_indices_order_and_eviction_after_counter_saturation() {
+        let (_, _, artifacts) = branch_artifacts(4);
+        let mut cache = ArtifactCache::default();
+        for index in [2, 0, 3, 1] {
+            cache.insert(Arc::clone(&artifacts[index]));
+        }
+        let (index, _) = cache.candidate(&artifacts[0].key).unwrap();
+        let bytes = cache.stats().retained_bytes;
+        cache.recency_clock = u64::MAX;
+        cache.reused = u64::MAX;
+        cache.reuse(index);
+        assert_eq!(cache.reused, u64::MAX);
+        assert_eq!(cache.candidate(&artifacts[0].key).unwrap().0, index);
+        assert_eq!(cache.stats().retained_bytes, bytes);
+        for (actual, expected) in cache.recency_order().into_iter().zip([2, 3, 1, 0]) {
+            assert!(Arc::ptr_eq(actual, &artifacts[expected]));
+        }
+        cache.evict_oldest();
+        assert!(cache.candidate(&artifacts[2].key).is_none());
+        assert!(cache.candidate(&artifacts[0].key).is_some());
+        assert_accounting(&cache);
     }
 
     #[test]
@@ -2074,7 +2226,7 @@ mod artifact_tests {
             cache.insert(Arc::clone(artifact));
             assert_accounting(&cache);
         }
-        let slots = core::mem::size_of::<Arc<Artifact>>();
+        let slots = core::mem::size_of::<CacheEntry>();
         assert_eq!(cache.entries.capacity(), 4);
         let budget = cache.retained_payload
             + controls.retained_bytes()
@@ -2086,7 +2238,7 @@ mod artifact_tests {
         assert_eq!(cache.entries.len(), 5);
         assert_eq!(cache.stats().retained_bytes, budget);
         assert_accounting(&cache);
-        for (entry, artifact) in cache.entries.iter().zip(&artifacts) {
+        for (entry, artifact) in cache.recency_order().into_iter().zip(&artifacts) {
             assert!(Arc::ptr_eq(entry, artifact));
         }
     }
@@ -2095,7 +2247,7 @@ mod artifact_tests {
     fn high_water_slots_release_for_tiny_artifact_and_zero_budget() {
         let (machine, _, artifacts) = branch_artifacts(129);
         let controls = capture_controls(&machine).unwrap();
-        let slots = core::mem::size_of::<Arc<Artifact>>();
+        let slots = core::mem::size_of::<CacheEntry>();
         let mut cache = ArtifactCache::default();
         for artifact in &artifacts {
             cache.insert(Arc::clone(artifact));
@@ -2139,7 +2291,7 @@ mod artifact_tests {
         let mut cache = ArtifactCache::default();
         let slots = controls
             .retained_bytes()
-            .div_ceil(core::mem::size_of::<Arc<Artifact>>());
+            .div_ceil(core::mem::size_of::<CacheEntry>());
         cache.reserve_slots(slots).unwrap();
         let budget = cache.slot_bytes();
         cache.tighten(budget);
@@ -2199,7 +2351,10 @@ mod artifact_tests {
         // Same-key replacement removes the old capacity charge exactly once.
         cache.insert(Arc::clone(&artifacts[1]));
         assert_eq!(cache.entries.len(), initial_count);
-        assert!(Arc::ptr_eq(cache.entries.last().unwrap(), &artifacts[1]));
+        assert!(Arc::ptr_eq(
+            cache.recency_order().last().unwrap(),
+            &artifacts[1]
+        ));
         assert_accounting(&cache);
         cache.tighten(cache.stats().retained_bytes);
         // The retained missing-register slice is charged at host-word
@@ -2234,7 +2389,7 @@ mod artifact_tests {
         assert_eq!(cache.stats().retained_bytes, initial.retained_bytes);
         assert_eq!(cache.stats().entries, initial.entries);
         assert!(cache.candidate(&uncached.key).is_none());
-        for (entry, artifact) in cache.entries.iter().zip(&artifacts) {
+        for (entry, artifact) in cache.recency_order().into_iter().zip(&artifacts) {
             assert!(Arc::ptr_eq(entry, artifact));
         }
         assert_accounting(cache);
@@ -2276,7 +2431,7 @@ mod artifact_tests {
         let expected = expected + artifact.profile.retained_bytes().unwrap();
         assert_eq!(artifact.retained_bytes(), expected);
         let mut denied = ArtifactCache::default();
-        let slots = core::mem::size_of::<Arc<Artifact>>();
+        let slots = core::mem::size_of::<CacheEntry>();
         denied.tighten(expected + slots - 1);
         denied.insert(Arc::clone(&artifact));
         assert!(denied.entries.is_empty());
