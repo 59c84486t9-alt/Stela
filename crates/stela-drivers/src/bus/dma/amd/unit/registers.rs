@@ -134,13 +134,45 @@ pub struct Snapshot {
 
 /// Retains one original PCI function and every unit mapping. No independent
 /// per-capability owner can invalidate another unit's configuration/IRQ epoch.
+/// The complete checksum-validated original IVRS bytes remain attached too.
 pub struct FunctionInspection {
     inputs: Inputs,
     address: Address,
     profiles: Vec<Profile>,
+    firmware: Vec<u8>,
     _process_context: PhantomData<*mut ()>,
 }
 impl FunctionInspection {
+    pub(super) fn native_firmware(&self) -> &[u8] {
+        &self.firmware
+    }
+    // Native ownership remains in this inspection. Only the cold backend may
+    // select registers; neither a public pointer nor a writable view escapes.
+    pub(super) fn native_read(&self, offset: usize) -> Result<u64, Error> {
+        if self.profiles.len() != 1 {
+            return Err(Error::MappingCount);
+        }
+        read_register(&self.inputs.mappings[self.profiles[0].mapping], offset)
+    }
+
+    pub(super) fn native_write(&self, offset: usize, value: u64) -> Result<(), Error> {
+        if self.profiles.len() != 1 {
+            return Err(Error::MappingCount);
+        }
+        let mapping = &self.inputs.mappings[self.profiles[0].mapping];
+        let pointer = mapping
+            .address(offset, size_of::<u64>())
+            .map_err(Error::Mapping)?;
+        if !(pointer.as_ptr() as usize).is_multiple_of(size_of::<u64>()) {
+            return Err(Error::MappingGeometry);
+        }
+        // SAFETY: the native backend's unsafe cold grant retains this exact
+        // exclusive UC/RW unit and qualifies aligned native write64 accesses.
+        // Its closed register selection contains no status W1C writes.
+        unsafe { pointer.cast::<u64>().as_ptr().write_volatile(value.to_le()) };
+        Ok(())
+    }
+
     /// # Safety
     /// Inputs are the actual IOMMU function and all its selected physical unit
     /// resources, under their original exclusive configuration/reset/root and
@@ -154,11 +186,17 @@ impl FunctionInspection {
     /// takeover, engine stop, DMA coherency, IRQ or requester/alias authority.
     /// No hardware state is changed, including on refusal or allocation failure.
     pub unsafe fn inspect(mut inputs: Inputs, ivrs: &Ivrs<'_>) -> Result<Self, (Error, Inputs)> {
+        let mut firmware = Vec::new();
+        if firmware.try_reserve_exact(ivrs.raw().len()).is_err() {
+            return Err((Error::OutOfMemory, inputs));
+        }
+        firmware.extend_from_slice(ivrs.raw());
         match prepare(&mut inputs, ivrs) {
             Ok(profiles) => Ok(Self {
                 address: inputs.function.address,
                 inputs,
                 profiles,
+                firmware,
                 _process_context: PhantomData,
             }),
             Err(error) => Err((error, inputs)),
