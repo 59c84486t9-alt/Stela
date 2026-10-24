@@ -440,6 +440,20 @@ pub(crate) fn profile_snapshot() -> profile::Snapshot {
     state().native_profile.snapshot()
 }
 
+/// Inclusive work counters retain the outer phase, so native helper calls in
+/// stopped services do not masquerade as checked-body execution time.
+#[cfg(feature = "native-profile")]
+pub(crate) fn profile_work_report() {
+    let snapshot = profile_snapshot();
+    for work in stela_runtime::machine::engine::NativeTimingWork::ALL {
+        let count = snapshot.work[work as usize];
+        crate::output::arguments(format_args!(
+            "NATIVE WORK sampled_bsp category={work:?} calls={} sampled_calls={} ticks={} phase_ticks={:?}\n",
+            count.calls, count.sampled_calls, count.sampled_ticks, count.phase_ticks
+        ));
+    }
+}
+
 #[cfg(feature = "native-profile")]
 pub(crate) fn profile_word_report() {
     use profile::words::Ranking;
@@ -939,11 +953,7 @@ impl Host for BareHost<'_> {
         &mut self,
         work: stela_runtime::machine::engine::NativeTimingWork,
     ) -> Option<u64> {
-        match work {
-            stela_runtime::machine::engine::NativeTimingWork::DeviceLines => {
-                state().native_profile.board_start(profile_timestamp)
-            }
-        }
+        state().native_profile.work_start(work, profile_timestamp)
     }
     #[cfg(feature = "native-profile")]
     fn native_timing_work_end(
@@ -951,11 +961,9 @@ impl Host for BareHost<'_> {
         work: stela_runtime::machine::engine::NativeTimingWork,
         started: u64,
     ) {
-        match work {
-            stela_runtime::machine::engine::NativeTimingWork::DeviceLines => state()
-                .native_profile
-                .board_end(started, profile_timestamp()),
-        }
+        state()
+            .native_profile
+            .work_end(work, started, profile_timestamp());
     }
     #[cfg(feature = "native-profile")]
     fn native_timing(&mut self, phase: stela_runtime::machine::engine::NativeTimingPhase) {
@@ -1166,12 +1174,26 @@ impl Host for BareHost<'_> {
         context: &mut stela_compiler::context::ExecutionContext,
     ) -> Option<NativeExit> {
         assert!(!state().native, "nested native context entry");
+        #[cfg(feature = "native-profile")]
+        let measured = state().native_profile.work_start(
+            stela_runtime::machine::engine::NativeTimingWork::NativeCall,
+            profile_timestamp,
+        );
         state().native = true;
         let entered = rdtsc();
         // SAFETY: caller holds the installed context block, exact live frame
         // and service owners. The current GS HostOwner retains recovery state.
         let exit = unsafe { stela_enter_context_block(guest, context, code.0) };
-        Some(native_return(code, exit, entered))
+        let returned = native_return(code, exit, entered);
+        #[cfg(feature = "native-profile")]
+        if let Some(started) = measured {
+            state().native_profile.work_end(
+                stela_runtime::machine::engine::NativeTimingWork::NativeCall,
+                started,
+                profile_timestamp(),
+            );
+        }
+        Some(returned)
     }
 
     fn context_entry(&mut self, code: NativeCode) -> Option<usize> {

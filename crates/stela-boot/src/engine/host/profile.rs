@@ -2,13 +2,26 @@
 //! Begin timestamps; no sample buffer grows during actual epoch execution.
 use alloc::vec::Vec;
 use stela_runtime::machine::engine::MAX_NATIVE_EPOCH_BODIES;
-use stela_runtime::machine::engine::NativeTimingPhase as Phase;
+use stela_runtime::machine::engine::{NativeTimingPhase as Phase, NativeTimingWork as Work};
 #[path = "profile/words.rs"]
 pub(crate) mod words;
 
 const INITIAL_JITTER: u64 = 0x19d5_65c8_d843_ba71;
 const MIN_INTERVAL: u64 = 2048;
 const INTERVAL_MASK: u64 = 4095;
+
+/// Inclusive intervals; NativeCall is nested in CheckedBody, and every
+/// interval lies inside one of the outer disjoint phases. Never sum these.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WorkSnapshot {
+    pub calls: u64,
+    pub sampled_calls: u64,
+    pub sampled_ticks: u64,
+    /// By the outer interval ending at each NativeTimingPhase. Work spans
+    /// close before any phase checkpoint, so helper calls remain separable
+    /// from native calls inside BodyReturned. Includes partial sampled rounds.
+    pub phase_ticks: [u64; Phase::COUNT],
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Snapshot {
@@ -31,6 +44,8 @@ pub(crate) struct Snapshot {
     pub sampled_board_ticks: u64,
     pub words: words::Summary,
     pub capture_bytes: usize,
+    /// Indexed by NativeTimingWork in its declared order.
+    pub work: [WorkSnapshot; Work::COUNT],
 }
 
 pub(crate) struct Profile {
@@ -66,6 +81,29 @@ impl Default for Profile {
 }
 
 impl Profile {
+    pub(crate) fn work_start(&mut self, work: Work, clock: impl FnOnce() -> u64) -> Option<u64> {
+        let count = &mut self.snapshot.work[work as usize];
+        count.calls = count.calls.saturating_add(1);
+        if self.active {
+            count.sampled_calls = count.sampled_calls.saturating_add(1);
+        }
+        if work == Work::DeviceLines {
+            return self.board_start(clock);
+        }
+        self.active.then(clock)
+    }
+
+    pub(crate) fn work_end(&mut self, work: Work, started: u64, now: u64) {
+        let count = &mut self.snapshot.work[work as usize];
+        let elapsed = now.wrapping_sub(started);
+        count.sampled_ticks = count.sampled_ticks.saturating_add(elapsed);
+        let phase = (self.last_phase + 1).min(Phase::COUNT - 1);
+        count.phase_ticks[phase] = count.phase_ticks[phase].saturating_add(elapsed);
+        if work == Work::DeviceLines {
+            self.board_end(started, now);
+        }
+    }
+
     pub(crate) fn board_start(&mut self, clock: impl FnOnce() -> u64) -> Option<u64> {
         self.snapshot.board_refreshes = self.snapshot.board_refreshes.saturating_add(1);
         if self.active {
@@ -405,6 +443,45 @@ mod tests {
         assert_eq!(
             profile.snapshot().capture_bytes,
             profile.pending_words.capacity() * core::mem::size_of::<words::Captured>()
+        );
+    }
+    #[test]
+    fn inclusive_work_separates_body_native_calls_from_stopped_helpers() {
+        let mut profile = Profile::default();
+        assert_eq!(
+            profile.work_start(Work::WarmSource, || panic!("inactive clock")),
+            None
+        );
+        for (index, phase) in PHASES.into_iter().enumerate().take(6) {
+            profile.event(phase, || 100 + index as u64 * 10);
+        }
+        let checked = profile.work_start(Work::CheckedBody, || 160).unwrap();
+        let native = profile.work_start(Work::NativeCall, || 170).unwrap();
+        profile.work_end(Work::NativeCall, native, 190);
+        profile.work_end(Work::CheckedBody, checked, 200);
+        profile.event(Phase::BodyReturned, || 210);
+        profile.event(Phase::Recovered, || 220);
+        let helper = profile.work_start(Work::NativeCall, || 225).unwrap();
+        profile.work_end(Work::NativeCall, helper, 235);
+        profile.event(Phase::End, || 240);
+        let snapshot = profile.snapshot();
+        assert_eq!(snapshot.complete, 1);
+        assert_eq!(snapshot.partial, 0);
+        let native = snapshot.work[Work::NativeCall as usize];
+        assert_eq!(
+            (native.calls, native.sampled_calls, native.sampled_ticks),
+            (2, 2, 30)
+        );
+        assert_eq!(native.phase_ticks[Phase::BodyReturned as usize], 20);
+        assert_eq!(native.phase_ticks[Phase::End as usize], 10);
+        assert_eq!(native.phase_ticks.iter().sum::<u64>(), native.sampled_ticks);
+        let checked = snapshot.work[Work::CheckedBody as usize];
+        assert_eq!(checked.sampled_ticks, 40);
+        assert_eq!(checked.phase_ticks[Phase::BodyReturned as usize], 40);
+        let source = snapshot.work[Work::WarmSource as usize];
+        assert_eq!(
+            (source.calls, source.sampled_calls, source.sampled_ticks),
+            (1, 0, 0)
         );
     }
 }

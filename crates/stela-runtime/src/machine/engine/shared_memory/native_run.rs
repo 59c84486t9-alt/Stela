@@ -8,6 +8,8 @@ pub use epoch::{
 mod preparation;
 use preparation::PreparationFailure;
 pub(super) mod source;
+#[cfg(feature = "native-profile")]
+use super::super::NativeTimingWork as Work;
 use super::super::{NativeExit, publication};
 use super::*;
 use crate::{execution::context::ContextLoan, platform::cpu::system::NativeSystemTarget};
@@ -417,8 +419,15 @@ impl NativeRun<'_> {
         }
         // A service/publication loan outlives both callback finalization and PC
         // settlement. This Host borrow pins the installed arena throughout them.
-        let _publication = self.memory.memory.execution_loan()?;
-        let result = self.enter_epoch(host, &authority, observation);
+        #[cfg(feature = "native-profile")]
+        let measured = host.native_timing_work_start(Work::PinnedStorage);
+        let execution = self.memory.memory.execution_session();
+        #[cfg(feature = "native-profile")]
+        if let Some(started) = measured {
+            host.native_timing_work_end(Work::PinnedStorage, started);
+        }
+        let execution = execution?;
+        let result = self.enter_epoch(host, &authority, &execution, observation);
         #[cfg(feature = "native-profile")]
         host.native_timing(super::super::NativeTimingPhase::BodyReturned);
         result
@@ -428,11 +437,14 @@ impl NativeRun<'_> {
         &mut self,
         host: &mut dyn Host,
         authority: &NativeSystemTarget,
+        execution: &crate::memory::domain::MemoryExecutionSession,
         artifact: Arc<Artifact>,
         observation: &mut Observation,
     ) -> Result<bool, MemoryStatus> {
-        let code = match host.install_immutable(&artifact.code) {
-            Ok(code) => code,
+        #[cfg(feature = "native-profile")]
+        let measured = host.native_timing_work_start(Work::CodeInstallation);
+        let installed = match host.install_immutable(&artifact.code) {
+            Ok(code) => Ok(code),
             Err(crate::machine::InstallError::Full) => {
                 // This fixed owner has returned/recovered its preceding frame.
                 // Installed reuse pointers remain inside this actual Host;
@@ -440,17 +452,30 @@ impl NativeRun<'_> {
                 // shared lane never uses legacy cached block addresses.
                 host.discard_code();
                 host.install_immutable(&artifact.code)
-                    .map_err(|_| MemoryStatus::Unsupported)?
+                    .map_err(|_| MemoryStatus::Unsupported)
             }
         };
+        #[cfg(feature = "native-profile")]
+        if let Some(started) = measured {
+            host.native_timing_work_end(Work::CodeInstallation, started);
+        }
+        let code = installed?;
         #[cfg(feature = "native-profile")]
         if self.executed_bodies == 0 {
             host.native_timing(super::super::NativeTimingPhase::CodeInstalled);
         }
-        let entry = self
-            .memory
-            .memory
-            .prepare_native_system(artifact.requirements, authority)?;
+        #[cfg(feature = "native-profile")]
+        let measured = host.native_timing_work_start(Work::MemoryPreparation);
+        let entry = self.memory.memory.prepare_native_system_in(
+            artifact.requirements,
+            authority,
+            execution,
+        );
+        #[cfg(feature = "native-profile")]
+        if let Some(started) = measured {
+            host.native_timing_work_end(Work::MemoryPreparation, started);
+        }
+        let entry = entry?;
         #[cfg(feature = "native-profile")]
         if self.executed_bodies == 0 {
             host.native_timing(super::super::NativeTimingPhase::MemoryPrepared);
@@ -469,6 +494,8 @@ impl NativeRun<'_> {
         // SAFETY: the source-bound artifact, exact real frame, effective policy,
         // canonical RAM, current physical target and local installed arena all
         // stay exclusively borrowed through native return, fault and settlement.
+        #[cfg(feature = "native-profile")]
+        let measured = host.native_timing_work_start(Work::CheckedBody);
         let entered = unsafe {
             entry.with_checked_view(|view| {
                 let mut context_loan = ContextLoan::memory(&mut context, view);
@@ -496,6 +523,10 @@ impl NativeRun<'_> {
                 result
             })
         };
+        #[cfg(feature = "native-profile")]
+        if let Some(started) = measured {
+            host.native_timing_work_end(Work::CheckedBody, started);
+        }
         if malformed {
             return Err(MemoryStatus::Domain);
         }

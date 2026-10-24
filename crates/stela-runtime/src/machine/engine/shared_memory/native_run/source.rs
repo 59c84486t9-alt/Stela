@@ -14,12 +14,40 @@ pub(in crate::machine::engine::shared_memory) fn instruction(
     pc: u64,
 ) -> Result<(u32, bool), FetchFailure> {
     let mut tables = policy::Tables::new(&memory.ram);
+    #[cfg(feature = "native-profile")]
+    let mut resolutions = 1;
+    let result = instruction_with_tables(
+        memory,
+        controls,
+        pc,
+        &mut tables,
+        #[cfg(feature = "native-profile")]
+        &mut resolutions,
+    );
+    #[cfg(feature = "native-profile")]
+    memory.source.record(
+        super::super::source_profile::Fetch::FirstWord,
+        resolutions,
+        tables.reads,
+        4,
+        result.is_ok(),
+    );
+    result
+}
+
+fn instruction_with_tables(
+    memory: &SharedMemory,
+    controls: &Controls,
+    pc: u64,
+    tables: &mut policy::Tables<'_>,
+    #[cfg(feature = "native-profile")] resolutions: &mut u64,
+) -> Result<(u32, bool), FetchFailure> {
     let outcome = mmu::translate(
         &controls.translation,
         pc,
         mmu::Access::Execute,
         controls.requester,
-        &mut tables,
+        tables,
     );
     if let Some(status) = tables.failure {
         return Err(FetchFailure::Refused(status));
@@ -34,6 +62,10 @@ pub(in crate::machine::engine::shared_memory) fn instruction(
                 && !controls.requester.guarded
                 && controls.translation.sprr.enabled()
             {
+                #[cfg(feature = "native-profile")]
+                {
+                    *resolutions += 1;
+                }
                 let guarded = mmu::translate(
                     &controls.translation,
                     pc,
@@ -42,7 +74,7 @@ pub(in crate::machine::engine::shared_memory) fn instruction(
                         guarded: true,
                         ..controls.requester
                     },
-                    &mut tables,
+                    tables,
                 );
                 if let Some(status) = tables.failure {
                     return Err(FetchFailure::Refused(status));
@@ -217,5 +249,78 @@ mod tests {
             assert!(target_accepts(0xd503_233f, btype, 0, 1));
             assert_eq!(target_accepts(0xd503_233f, btype, 1 << 36, 1), btype != 3);
         }
+    }
+    #[cfg(feature = "native-profile")]
+    #[test]
+    fn execute_profile_counts_real_descriptor_attempts_and_declined_staging() {
+        let (mut machine, ram, events) = super::super::super::tests::machine();
+        machine
+            .install_shared_memory_for_processors(alloc::sync::Arc::clone(&ram), &events)
+            .unwrap();
+        let controls =
+            Controls::capture(&machine.cpu, machine.profile.name, &machine.profile_missing)
+                .unwrap();
+        let memory = machine.cpu.canonical_memory.as_ref().unwrap();
+        const LEAF: u64 = 0x13020;
+        const DATA: u64 = 0x14000;
+        unsafe { ram.publish_physical(DATA, &0xd503201fu32.to_le_bytes()) }.unwrap();
+        assert_eq!(
+            instruction(memory, &controls, 0x4000),
+            Ok((0xd503201f, false))
+        );
+        let mut bytes = [0; 4];
+        assert_eq!(memory.fetch(&controls, 0x4000, &mut bytes), Ok(()));
+        let first = memory.source.statistics();
+        assert_eq!(
+            (
+                first.first_word_fetches,
+                first.full_source_fetches,
+                first.resolutions
+            ),
+            (1, 1, 2)
+        );
+        assert_eq!(
+            (
+                first.requested_bytes,
+                first.successful_bytes,
+                first.declined_fetches
+            ),
+            (8, 8, 0)
+        );
+        assert!(first.descriptor_reads > 0);
+        unsafe { ram.publish_physical(LEAF, &0u64.to_le_bytes()) }.unwrap();
+        assert!(matches!(
+            instruction(memory, &controls, 0x4000),
+            Err(FetchFailure::Fault(_))
+        ));
+        assert_eq!(
+            memory.fetch(&controls, 0x4000, &mut bytes),
+            Err(MemoryStatus::Unsupported)
+        );
+        let failed = memory.source.statistics();
+        assert_eq!(
+            (
+                failed.first_word_fetches,
+                failed.full_source_fetches,
+                failed.resolutions
+            ),
+            (2, 2, 4)
+        );
+        assert_eq!(
+            (
+                failed.requested_bytes,
+                failed.successful_bytes,
+                failed.declined_fetches
+            ),
+            (16, 8, 2)
+        );
+        assert!(failed.descriptor_reads > first.descriptor_reads);
+        let mut cold = controls.clone();
+        cold.translation.sctlr &= !1;
+        // M=0 is still an actual resolution, but performs no descriptor read.
+        let _ = instruction(memory, &cold, 0x4000);
+        let last = memory.source.statistics();
+        assert_eq!(last.resolutions, failed.resolutions + 1);
+        assert_eq!(last.descriptor_reads, failed.descriptor_reads);
     }
 }

@@ -70,14 +70,14 @@ pub use processors::{
     PeerState, PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError,
     ProcessorTarget, ProcessorWrite, Processors, SettledProcessorWrite,
 };
-#[cfg(feature = "native-profile")]
-pub use shared_memory::NativeDataTlbStatistics;
 pub use shared_memory::{
     HeldRamService, MAX_NATIVE_EPOCH_BODIES, NativeCohort, NativeEpochDeadline, NativeEpochEnd,
     NativeEpochStatistics, NativeRun, NativeRunIdentity, NativeRunObservation, NativeTransport,
     ReturnedRun, ServiceHost, ServiceTransport, SharedMemory, SharedMemoryFailure,
     SharedMemoryRefusal, dispatch_native_run, recover_native_run,
 };
+#[cfg(feature = "native-profile")]
+pub use shared_memory::{NativeDataTlbStatistics, NativeSourceStatistics};
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
     aarch64::{

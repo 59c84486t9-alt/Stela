@@ -76,11 +76,12 @@ impl NativeRun<'_> {
         &mut self,
         host: &mut dyn Host,
         authority: &NativeSystemTarget,
+        execution: &crate::memory::domain::MemoryExecutionSession,
         observation: &mut Observation,
     ) -> Result<(), MemoryStatus> {
         let mut next = Arc::clone(&self.artifact);
         loop {
-            if !self.enter_body(host, authority, next, observation)? {
+            if !self.enter_body(host, authority, execution, next, observation)? {
                 break;
             }
             if observation.memory_fault.is_some() {
@@ -104,7 +105,14 @@ impl NativeRun<'_> {
                 observation.epoch_end = NativeEpochEnd::Deadline;
                 break;
             }
-            let (index, candidate) = match self.warm_successor()? {
+            #[cfg(feature = "native-profile")]
+            let measured = host.native_timing_work_start(Work::WarmSource);
+            let successor = self.warm_successor();
+            #[cfg(feature = "native-profile")]
+            if let Some(started) = measured {
+                host.native_timing_work_end(Work::WarmSource, started);
+            }
+            let (index, candidate) = match successor? {
                 Ok(candidate) => candidate,
                 Err(reason) => {
                     observation.epoch_end = reason;

@@ -24,9 +24,28 @@ impl NativeTimingPhase {
 }
 
 /// Inclusive subcomponents of sampled rounds, not additional disjoint phases.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
 pub enum NativeTimingWork {
     DeviceLines,
+    PinnedStorage,
+    WarmSource,
+    CodeInstallation,
+    MemoryPreparation,
+    CheckedBody,
+    NativeCall,
+}
+impl NativeTimingWork {
+    pub const COUNT: usize = Self::NativeCall as usize + 1;
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::DeviceLines,
+        Self::PinnedStorage,
+        Self::WarmSource,
+        Self::CodeInstallation,
+        Self::MemoryPreparation,
+        Self::CheckedBody,
+        Self::NativeCall,
+    ];
 }
 
 /// Immutable attribution for an actually recovered native body. Deferred

@@ -2572,6 +2572,8 @@ fn run<H: Host>(
             #[cfg(feature = "native-profile")]
             host::profile_word_report();
             #[cfg(feature = "native-profile")]
+            host::profile_work_report();
+            #[cfg(feature = "native-profile")]
             output::arguments(format_args!(
                 "NATIVE BOARD {:?}\n",
                 machine.devices.advance_statistics()
@@ -2586,6 +2588,10 @@ fn run<H: Host>(
                 output::arguments(format_args!(
                     "NATIVE EPOCH pe={pe} {:?}\n",
                     machine.native_epoch_statistics()
+                ));
+                output::arguments(format_args!(
+                    "NATIVE SOURCE pe={pe} {:?}\n",
+                    machine.native_source_statistics()
                 ));
             }
             service_gap = 0;

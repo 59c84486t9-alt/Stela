@@ -401,7 +401,7 @@ pub(super) struct Tables<'a> {
     ram: &'a RegisteredSystemRam,
     pub(super) failure: Option<MemoryStatus>,
     #[cfg(feature = "native-profile")]
-    reads: u64,
+    pub(super) reads: u64,
 }
 impl<'a> Tables<'a> {
     pub(super) fn new(ram: &'a RegisteredSystemRam) -> Self {

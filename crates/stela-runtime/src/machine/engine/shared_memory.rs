@@ -7,7 +7,11 @@ mod lifecycle;
 mod native_run;
 mod policy;
 mod scheduler;
+#[cfg(feature = "native-profile")]
+mod source_profile;
 pub use host::{HeldRamService, NativeTransport, ServiceHost, ServiceTransport};
+#[cfg(feature = "native-profile")]
+pub use source_profile::Statistics as NativeSourceStatistics;
 
 use super::{Devices, Host, Machine, mmu};
 use crate::memory::{RegisteredSystemRam, domain::MemoryThread};
@@ -40,6 +44,8 @@ pub struct SharedMemory {
     artifacts: native_run::ArtifactCache,
     #[cfg(feature = "native-profile")]
     epochs: NativeEpochStatistics,
+    #[cfg(feature = "native-profile")]
+    source: source_profile::Profile,
 }
 impl core::fmt::Debug for SharedMemory {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -99,6 +105,8 @@ impl SharedMemory {
             artifacts: self.artifacts.empty_like(),
             #[cfg(feature = "native-profile")]
             epochs: NativeEpochStatistics::default(),
+            #[cfg(feature = "native-profile")]
+            source: source_profile::Profile::default(),
         })
     }
     pub fn event_endpoint(&self) -> &crate::system::events::EventEndpoint {
@@ -187,12 +195,31 @@ impl SharedMemory {
 
     fn fetch(&self, controls: &Controls, pc: u64, output: &mut [u8]) -> Result<(), MemoryStatus> {
         let mut tables = policy::Tables::new(&self.ram);
+        let result = self.fetch_with_tables(controls, pc, output, &mut tables);
+        #[cfg(feature = "native-profile")]
+        self.source.record(
+            source_profile::Fetch::FullSource,
+            1,
+            tables.reads,
+            output.len(),
+            result.is_ok(),
+        );
+        result
+    }
+
+    fn fetch_with_tables(
+        &self,
+        controls: &Controls,
+        pc: u64,
+        output: &mut [u8],
+        tables: &mut policy::Tables<'_>,
+    ) -> Result<(), MemoryStatus> {
         let outcome = mmu::translate(
             &controls.translation,
             pc,
             mmu::Access::Execute,
             controls.requester,
-            &mut tables,
+            tables,
         );
         if let Some(status) = tables.failure {
             return Err(status);
@@ -213,6 +240,16 @@ impl SharedMemory {
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
+    /// Execute-source observations for the current actual PE. This includes
+    /// entry checks and artifact byte validation; data counters are separate.
+    #[cfg(feature = "native-profile")]
+    pub fn native_source_statistics(&self) -> Option<NativeSourceStatistics> {
+        self.cpu
+            .canonical_memory
+            .as_ref()
+            .map(|memory| memory.source.statistics())
+    }
+
     /// Cumulative actual epoch entries for the current canonical PE.
     #[cfg(feature = "native-profile")]
     pub fn native_epoch_statistics(&self) -> Option<NativeEpochStatistics> {
@@ -358,6 +395,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     artifacts: native_run::ArtifactCache::default(),
                     #[cfg(feature = "native-profile")]
                     epochs: NativeEpochStatistics::default(),
+                    #[cfg(feature = "native-profile")]
+                    source: source_profile::Profile::default(),
                 },
             ));
         }

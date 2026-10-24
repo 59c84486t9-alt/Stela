@@ -17,6 +17,8 @@ mod profile;
 mod tag_transfer;
 pub use profile::{CheckedMemoryEntry, MemoryProfile};
 mod lifecycle;
+mod session;
+pub(crate) use session::MemoryExecutionSession;
 mod service;
 pub(in crate::memory) use lifecycle::MemoryServiceLoan;
 pub(in crate::memory) use lifecycle::ServiceLoanAttempt;
@@ -740,6 +742,14 @@ impl<P: DataPolicy> MemoryThread<P> {
         &mut self,
         requirements: MemoryRequirements,
     ) -> Result<CheckedMemoryEntry<'_, P>, MemoryStatus> {
+        self.prepare_body_with_profile(requirements, None)
+    }
+
+    fn prepare_body_with_profile(
+        &mut self,
+        requirements: MemoryRequirements,
+        pinned: Option<&MemoryProfile>,
+    ) -> Result<CheckedMemoryEntry<'_, P>, MemoryStatus> {
         self.prepare_with(|owner| {
             owner.domain.check_execution()?;
             if requirements.required_profile & profile_requirements::SYSTEM_ATOMIC_READ_WRITEBACK
@@ -748,10 +758,14 @@ impl<P: DataPolicy> MemoryThread<P> {
             {
                 return Err(MemoryStatus::Unsupported);
             }
-            owner
-                .domain
-                .profile()?
-                .validate(requirements, owner.domain.target)?;
+            if let Some(profile) = pinned {
+                profile.validate(requirements, owner.domain.target)?;
+            } else {
+                owner
+                    .domain
+                    .profile()?
+                    .validate(requirements, owner.domain.target)?;
+            }
             owner.validate_execution(requirements.required_flags)?;
             owner
                 .policy
@@ -1706,6 +1720,66 @@ mod tests {
                 ),
                 Ok(monitor::ConditionalWrite::<()>::Failed)
             );
+        }
+
+        #[test]
+        fn retained_session_fault_preserves_prefix_and_clears_actual_reservation() {
+            let (_, domain, mut thread) = fixture();
+            let access = reserve(&mut thread);
+            let session = thread.execution_session().unwrap();
+            // SAFETY: a locally emitted checked fault with copied provenance.
+            let result = unsafe {
+                thread.with_checked_view_in(&session, |context| {
+                    context.record(MemoryStatus::Alignment, GUEST_BASE + 1, TEST_PC, 3);
+                    (
+                        context.fault_kind,
+                        context.fault_address,
+                        context.fault_pc,
+                        context.completed_bytes,
+                    )
+                })
+            };
+            assert_eq!(
+                result,
+                Ok((MemoryStatus::Alignment as u32, GUEST_BASE + 1, TEST_PC, 3))
+            );
+            assert_eq!(domain.state.lock().unwrap().native_loans, 1);
+            assert_eq!(
+                domain.system.reservations.store(
+                    &mut thread.reservation,
+                    &access,
+                    || -> Result<(), MemoryStatus> { panic!("session fault did not clear") }
+                ),
+                Ok(monitor::ConditionalWrite::<()>::Failed)
+            );
+        }
+
+        #[test]
+        fn retained_session_final_failure_keeps_write_and_external_fault_evidence() {
+            let (backing, domain, mut thread) = fixture();
+            let session = thread.execution_session().unwrap();
+            let mut data = [0x6b];
+            let request = MemoryRequest {
+                address: GUEST_BASE,
+                data: data.as_mut_ptr(),
+                bytes: 1,
+                flags: flags::WRITE,
+                pc: TEST_PC,
+            };
+            let mut evidence = None;
+            // SAFETY: exact synchronous request and private disjoint staging.
+            let result = unsafe {
+                thread.with_checked_view_in(&session, |context| {
+                    let status = (context.callback)(context, &request);
+                    evidence = Some((status, context.completed_bytes));
+                    domain.system.failed.store(true, Ordering::Release);
+                    91
+                })
+            };
+            assert_eq!(result, Err(MemoryStatus::Domain));
+            assert_eq!(evidence, Some((MemoryStatus::Success as u32, 1)));
+            assert_eq!(snapshot(&backing, 1), [0x6b]);
+            assert!(session.check_thread(&thread).is_err());
         }
 
         #[test]

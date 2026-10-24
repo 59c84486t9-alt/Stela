@@ -207,6 +207,7 @@ fn fragments_compatible(views: &[(Arc<MemoryView>, MappingAttributes)], quantity
 pub struct CheckedMemoryEntry<'a, P> {
     thread: &'a mut MemoryThread<P>,
     pub(super) native_system: Option<&'a crate::platform::cpu::system::NativeSystemTarget>,
+    pub(super) session: Option<&'a super::MemoryExecutionSession>,
 }
 
 impl<'a, P: DataPolicy> CheckedMemoryEntry<'a, P> {
@@ -214,6 +215,7 @@ impl<'a, P: DataPolicy> CheckedMemoryEntry<'a, P> {
         Self {
             thread,
             native_system: None,
+            session: None,
         }
     }
 
@@ -250,7 +252,12 @@ impl<'a, P: DataPolicy> CheckedMemoryEntry<'a, P> {
         // SAFETY: the caller binds the checked body's exact requirements and
         // inherits the low-level callback's staging and lifetime contract. The
         // actual current-owner proof remains borrowed through finalization.
-        let result = unsafe { self.thread.with_checked_view(callback) };
+        let result = match self.session {
+            // SAFETY: same checked requirements; the matching real session
+            // loan is borrowed through invocation and finalization.
+            Some(session) => unsafe { self.thread.with_checked_view_in(session, callback) },
+            None => unsafe { self.thread.with_checked_view(callback) },
+        };
         if let Some(authority) = self.native_system {
             authority
                 .revalidate()
