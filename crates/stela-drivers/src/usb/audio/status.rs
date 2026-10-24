@@ -161,6 +161,7 @@ pub struct StatusNotifications {
     notices: VecDeque<StatusNotice>,
     configured: bool,
     poisoned: bool,
+    cancelled: bool,
 }
 impl StatusNotifications {
     pub(super) fn new(
@@ -191,6 +192,7 @@ impl StatusNotifications {
             notices: VecDeque::new(),
             configured: false,
             poisoned: false,
+            cancelled: false,
         })
     }
     /// Configure and arm. An uncertain publication leaves this object poisoned,
@@ -212,6 +214,7 @@ impl StatusNotifications {
             return Err(error.into());
         }
         self.notices.clear();
+        self.cancelled = false;
         match device.submit_ticket(
             self.plan.endpoint.dci(),
             self.packet.physical(),
@@ -291,8 +294,21 @@ impl StatusNotifications {
         // A terminal transfer error may require actual Reset Endpoint and Set
         // Dequeue before ordinary submission-readiness permits Drop. The exact
         // retained ticket authorizes cancellation without weakening that fence.
-        if let Some(ticket) = &self.ticket
-            && let Err(error) = device.cancel_ticket(ticket)
+        if !self.cancelled
+            && let Some(ticket) = &self.ticket
+        {
+            if let Err(error) = device.cancel_ticket(ticket) {
+                self.poisoned = true;
+                return Err(error.into());
+            }
+            self.cancelled = true;
+        }
+        // Reset Endpoint retires xHC DMA, but the device's endpoint HALT is a
+        // separate USB feature. An unpolled STALL can race cancellation, so clear
+        // it for every configured endpoint, including already-clear devices.
+        // Require actual EP0 acknowledgement, including a later explicit retry.
+        if self.configured
+            && let Err(error) = device.clear(&self.plan.endpoint)
         {
             self.poisoned = true;
             return Err(error.into());
@@ -307,6 +323,7 @@ impl StatusNotifications {
         self.notices.clear();
         self.configured = false;
         self.poisoned = false;
+        self.cancelled = false;
         Ok(())
     }
 }

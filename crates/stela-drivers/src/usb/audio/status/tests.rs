@@ -50,7 +50,7 @@ fn peer_with_packet(
         .position(|d| d == [7, 5, 0x81, 3, 12, 0, 4])
         .unwrap();
     raw[at + 4..at + 6].copy_from_slice(&packet.to_le_bytes());
-    let (mut controller, model) = xhci::model::high_speed_media_controller(dma, &raw);
+    let (mut controller, model) = xhci::model::status_interrupt_controller(dma, &raw);
     controller.set_configuration(1, 1).unwrap();
     let shared = Rc::new(RefCell::new(controller));
     let device = Device {
@@ -475,6 +475,26 @@ fn actual_transfer_error_retains_ticket_until_reset_dequeue_and_drop_ack() {
     assert!(model.borrow().seen.contains(&16));
     assert!(model.borrow().seen.contains(&12));
     assert_eq!(owner.packet.bytes(), packet);
+    assert!(
+        model
+            .borrow()
+            .setup
+            .iter()
+            .any(|(request, _)| *request == xhci::setup(2, 1, 0, 0x81, 0))
+    );
+    assert_eq!(model.borrow().halt_transfer, None);
+    // Replacement configuration must consume the actual retained dequeue
+    // pointer from the acknowledged native ring, without an allocator rewind.
+    let producer = model.borrow().dequeues.last().copied().unwrap() & !0xf;
+    owner.start().unwrap();
+    assert_eq!(model.borrow().active[3].unwrap().0, producer);
+    model
+        .borrow_mut()
+        .incoming_events
+        .push_back(FREQUENCY.to_vec());
+    assert_eq!(owner.poll().unwrap(), 1);
+    assert_eq!(owner.next_notice().unwrap().unwrap().raw, FREQUENCY);
+    owner.stop().unwrap();
 }
 
 #[test]
@@ -498,4 +518,118 @@ fn unsupported_optional_status_profile_preserves_pcm_and_refuses_before_status_a
     ));
     assert_eq!(model.borrow().seen, before);
     assert!(model.borrow().active[3].is_none());
+}
+
+#[test]
+fn actual_usb_halt_clear_failure_retains_owner_and_never_acknowledges_drop() {
+    let mut backing = memory();
+    let mut dma = allocator(&mut backing);
+    let (audio, model, _) = peer(&mut dma);
+    model.borrow_mut().halt_transfer = Some(3);
+    let mut owner = audio.status_notifications(&mut dma).unwrap().unwrap();
+    owner.start().unwrap();
+    assert!(owner.poll().is_err());
+    let geometry = (
+        owner.packet.physical(),
+        owner._arena.physical(),
+        owner.allocator.remaining(),
+    );
+    let drops = model
+        .borrow()
+        .seen
+        .iter()
+        .filter(|&&command| command == 12)
+        .count();
+    model.borrow_mut().stall_control = Some(1);
+    assert!(owner.stop().is_err());
+    assert!(owner.poisoned && owner.configured && owner.cancelled && owner.ticket.is_some());
+    assert_eq!(model.borrow().halt_transfer, Some(3));
+    assert_eq!(
+        model
+            .borrow()
+            .seen
+            .iter()
+            .filter(|&&command| command == 12)
+            .count(),
+        drops
+    );
+    assert_eq!(
+        (
+            owner.packet.physical(),
+            owner._arena.physical(),
+            owner.allocator.remaining()
+        ),
+        geometry
+    );
+    assert!(
+        model
+            .borrow()
+            .setup
+            .iter()
+            .any(|(request, _)| *request == xhci::setup(2, 1, 0, 0x81, 0))
+    );
+    assert_eq!(owner.start(), Err(Error::Poisoned));
+    assert_eq!(owner.next_notice(), Err(Error::Poisoned));
+    let original_shared = owner.shared.clone();
+    let (_, _, foreign) = peer(&mut dma);
+    foreign.borrow_mut().forbid_mmio();
+    owner.shared = foreign;
+    assert!(owner.stop().is_err()); // cached cancellation ACK is not foreign authority
+    assert!(owner.cancelled && owner.poisoned && owner.configured && owner.ticket.is_some());
+    assert_eq!(
+        (
+            owner.packet.physical(),
+            owner._arena.physical(),
+            owner.allocator.remaining()
+        ),
+        geometry
+    );
+    owner.shared = original_shared;
+    model.borrow_mut().stall_control = None;
+    owner.stop().unwrap(); // retry requires genuine EP0 recovery and new clear ACK
+    assert!(!owner.poisoned && !owner.configured);
+    assert_eq!(model.borrow().halt_transfer, None);
+    assert!(
+        model
+            .borrow()
+            .seen
+            .iter()
+            .filter(|&&command| command == 12)
+            .count()
+            > drops
+    );
+}
+
+#[test]
+fn actual_unpolled_stall_is_cleared_on_device_before_acknowledged_restart() {
+    let mut backing = memory();
+    let mut dma = allocator(&mut backing);
+    let (audio, model, _) = peer(&mut dma);
+    model.borrow_mut().halt_transfer = Some(3);
+    let mut owner = audio.status_notifications(&mut dma).unwrap().unwrap();
+    owner.start().unwrap();
+    assert!(model.borrow().active[3].is_some());
+    assert!(owner.ticket.is_some());
+    // The host deliberately has not consumed the actual STALL event. Device
+    // HALT must still clear through its actual EP0 request, not a cached flag.
+    owner.stop().unwrap();
+    assert_eq!(model.borrow().halt_transfer, None);
+    assert!(
+        model
+            .borrow()
+            .setup
+            .iter()
+            .any(|(request, _)| *request == xhci::setup(2, 1, 0, 0x81, 0))
+    );
+    assert!(owner.ticket.is_none() && owner.notices.is_empty());
+    let producer = model.borrow().dequeues.last().copied().unwrap() & !0xf;
+    owner.start().unwrap();
+    assert_eq!(model.borrow().active[3].unwrap().0, producer);
+    model
+        .borrow_mut()
+        .incoming_events
+        .push_back(FREQUENCY.to_vec());
+    assert_eq!(owner.poll().unwrap(), 1);
+    assert_eq!(owner.next_notice().unwrap().unwrap().raw, FREQUENCY);
+    owner.stop().unwrap();
 }

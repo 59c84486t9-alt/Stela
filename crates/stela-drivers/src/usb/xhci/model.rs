@@ -1032,3 +1032,43 @@ pub(crate) fn high_speed_media_controller(
 ) -> (Controller, Rc<RefCell<CancelModel>>) {
     cancellation_controller_at_speed(dma, &[configuration.to_vec()], HIGH_SPEED)
 }
+
+/// Status fixture: a device-side endpoint halt persists until the actual EP0
+/// CLEAR_FEATURE request is accepted. The underlying peer still consumes real
+/// contexts/TRBs and posts the actual control transfer completion.
+pub(crate) fn status_interrupt_controller(
+    dma: &mut dyn DmaAllocator,
+    configuration: &[u8],
+) -> (Controller, Rc<RefCell<CancelModel>>) {
+    struct StatusRegisters {
+        inner: Box<dyn Registers>,
+        peer: Rc<RefCell<CancelModel>>,
+    }
+    impl Registers for StatusRegisters {
+        fn read32(&mut self, offset: usize) -> u32 {
+            self.inner.read32(offset)
+        }
+        fn write32(&mut self, offset: usize, value: u32) {
+            self.inner.write32(offset, value);
+            if offset == 0x1004 && value == 1 {
+                let mut peer = self.peer.borrow_mut();
+                if peer
+                    .setup
+                    .last()
+                    .is_some_and(|(request, _)| *request == setup(2, CLEAR_FEATURE, 0, 0x81, 0))
+                    && peer.stall_control != Some(CLEAR_FEATURE)
+                    && peer.silence_control != Some(CLEAR_FEATURE)
+                    && peer.silence_transfer != Some(1)
+                {
+                    peer.halt_transfer = None;
+                }
+            }
+        }
+    }
+    let (mut controller, peer) = high_speed_media_controller(dma, configuration);
+    controller.registers = Box::new(StatusRegisters {
+        inner: controller.registers,
+        peer: peer.clone(),
+    });
+    (controller, peer)
+}
