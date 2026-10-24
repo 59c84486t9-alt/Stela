@@ -228,6 +228,7 @@ fn address_controller_with_capabilities(
         event_index: 0,
         event_cycle: true,
         slots: vec![None, None],
+        legacy_slot_fenced: vec![false; 2],
         slot_ownership: vec![reset::Ownership::Vacant; 2],
         power: power::Ledger::new(2),
         pending: Vec::new(),

@@ -81,7 +81,18 @@ impl Controller {
         buffer: u64,
         length: usize,
     ) -> Result<u64, BlockError> {
-        self.submit_ticket(slot, dci, buffer, length)
+        self.legacy_slot(slot)?;
+        self.submit_owned(slot, dci, buffer, length)
+    }
+
+    pub(super) fn submit_owned(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        buffer: u64,
+        length: usize,
+    ) -> Result<u64, BlockError> {
+        self.submit_ticket_owned(slot, dci, buffer, length)
             .map(|ticket| ticket.trb)
     }
 
@@ -94,9 +105,20 @@ impl Controller {
         buffer: u64,
         length: usize,
     ) -> Result<TransferTicket, BlockError> {
+        self.legacy_slot(slot)?;
+        self.submit_ticket_owned(slot, dci, buffer, length)
+    }
+
+    pub(super) fn submit_ticket_owned(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        buffer: u64,
+        length: usize,
+    ) -> Result<TransferTicket, BlockError> {
         let device = self.device_id(slot)?;
         self.validate_id(device)?;
-        self.endpoint_ready(slot, dci)?;
+        self.endpoint_ready_owned(slot, dci)?;
         if dci == 1 {
             return Err(BlockError::Unsupported(
                 "control endpoint requires control transfer",
@@ -138,6 +160,19 @@ impl Controller {
     /// Polls a legacy ring address, checking the original submitted length.
     /// The caller must discard this address after completion or cancellation.
     pub fn completed(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        trb: u64,
+        length: usize,
+    ) -> Option<Result<usize, BlockError>> {
+        if let Err(error) = self.legacy_slot(slot) {
+            return Some(Err(error));
+        }
+        self.completed_owned(slot, dci, trb, length)
+    }
+
+    pub(super) fn completed_owned(
         &mut self,
         slot: u8,
         dci: u8,
@@ -268,7 +303,19 @@ impl Controller {
         length: usize,
         microseconds: u64,
     ) -> Result<usize, BlockError> {
-        let ticket = self.submit_ticket(slot, dci, buffer, length)?;
+        self.legacy_slot(slot)?;
+        self.transfer_owned(slot, dci, buffer, length, microseconds)
+    }
+
+    pub(super) fn transfer_owned(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        buffer: u64,
+        length: usize,
+        microseconds: u64,
+    ) -> Result<usize, BlockError> {
+        let ticket = self.submit_ticket_owned(slot, dci, buffer, length)?;
         let deadline = self.clock.deadline(microseconds);
         loop {
             if let Some(result) = self.completed_ticket(&ticket) {
@@ -284,14 +331,14 @@ impl Controller {
                                 status: INCOMPATIBLE_DEVICE
                             }
                         ) {
-                            self.cancel(slot, dci)?;
+                            self.cancel_owned(slot, dci)?;
                         }
                         Err(error)
                     }
                 };
             }
             if deadline.passed() {
-                self.cancel(slot, dci)?;
+                self.cancel_owned(slot, dci)?;
                 return Err(BlockError::Timeout);
             }
             crate::waiting();

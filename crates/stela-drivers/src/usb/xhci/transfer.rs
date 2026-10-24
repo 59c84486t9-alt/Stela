@@ -17,13 +17,18 @@ impl Controller {
     /// Recovers a halted endpoint: Reset Endpoint, then its dequeue pointer
     /// moved past the failed TD (4.6.8, 4.6.10).
     pub(super) fn recover(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
-        self.cancel(slot, dci)
+        self.cancel_owned(slot, dci)
     }
 
     /// Check controller/endpoint poison before modifying a buffer used by a
     /// previous failed transfer. This does not claim completion of a currently
     /// outstanding TD; its normal completion/cancellation must still be awaited.
     pub fn endpoint_ready(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
+        self.legacy_slot(slot)?;
+        self.endpoint_ready_owned(slot, dci)
+    }
+
+    pub(super) fn endpoint_ready_owned(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
         self.completion_ready(slot, dci)?;
         // Incompatible Device may be transferless; its pointer need not name
         // any ticket. It requires slot retirement before new DMA publication.
@@ -103,6 +108,16 @@ impl Controller {
         request: [u8; 8],
         out: &[u8],
     ) -> Result<Vec<u8>, BlockError> {
+        self.legacy_slot(slot)?;
+        self.control_owned(slot, request, out)
+    }
+
+    pub(super) fn control_owned(
+        &mut self,
+        slot: u8,
+        request: [u8; 8],
+        out: &[u8],
+    ) -> Result<Vec<u8>, BlockError> {
         self.live_slot(slot)?;
         // Any raw class requester must acquire the same physical-port current
         // reservation as enumeration before publishing a PORT_POWER request.
@@ -134,7 +149,7 @@ impl Controller {
         }
         // A timeout may occur after the device accepted the request; do not
         // preserve the old value or infer success from cancellation of EP0.
-        self.endpoint_ready(slot, 1)?;
+        self.endpoint_ready_owned(slot, 1)?;
         let current_demand = if configuration {
             Some(self.prepare_current_configuration(slot, request[2])?)
         } else {
@@ -323,7 +338,7 @@ impl Controller {
         length: u16,
     ) -> Result<Vec<u8>, BlockError> {
         let value = u16::from(kind) << 8 | u16::from(index);
-        self.control(
+        self.control_owned(
             slot,
             setup(DEVICE_TO_HOST, GET_DESCRIPTOR, value, 0, length),
             &[],
@@ -344,13 +359,19 @@ impl Controller {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn string(&mut self, slot: u8, language: u16, index: u8) -> Option<String> {
+        self.legacy_slot(slot).ok()?;
+        self.string_owned(slot, language, index)
+    }
+
+    pub(super) fn string_owned(&mut self, slot: u8, language: u16, index: u8) -> Option<String> {
         if index == 0 {
             return None;
         }
         let value = u16::from(STRING_DESCRIPTOR) << 8 | u16::from(index);
         let request = setup(DEVICE_TO_HOST, GET_DESCRIPTOR, value, language, 255);
-        let bytes = self.control(slot, request, &[]).ok()?;
+        let bytes = self.control_owned(slot, request, &[]).ok()?;
         if bytes.len() < 2 || bytes[1] != STRING_DESCRIPTOR {
             return None;
         }
@@ -369,6 +390,11 @@ impl Controller {
     /// Current connection of the slot's root port. Downstream hub-port loss
     /// is reported by transfer errors; hotplug enumeration is not performed.
     pub fn connected(&mut self, slot: u8) -> Result<bool, BlockError> {
+        self.legacy_slot(slot)?;
+        self.connected_owned(slot)
+    }
+
+    pub(super) fn connected_owned(&mut self, slot: u8) -> Result<bool, BlockError> {
         self.live_slot(slot)?;
         self.ready()?;
         let port = (self.slot(slot)?.context[1] >> 16 & 0xff) as u8;
@@ -387,6 +413,11 @@ impl Controller {
     /// retain the buffers and must not read, rewrite or recycle them. Device
     /// disconnect alone is not proof that controller DMA has stopped.
     pub fn cancel(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
+        self.legacy_slot(slot)?;
+        self.cancel_owned(slot, dci)
+    }
+
+    pub(super) fn cancel_owned(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
         self.live_slot(slot)?;
         self.cancel_inner(slot, dci)
     }
@@ -520,11 +551,25 @@ impl Controller {
     /// Resets the host side of an endpoint a transaction error halted; the
     /// device's endpoint is not halted, so no CLEAR_FEATURE follows.
     pub fn reset_endpoint(&mut self, slot: u8, endpoint: &Endpoint) -> Result<(), BlockError> {
+        self.legacy_slot(slot)?;
+        self.reset_endpoint_owned(slot, endpoint)
+    }
+
+    pub(super) fn reset_endpoint_owned(
+        &mut self,
+        slot: u8,
+        endpoint: &Endpoint,
+    ) -> Result<(), BlockError> {
         self.recover(slot, endpoint.dci())
     }
 
     /// Clears a halted bulk or interrupt endpoint on both sides.
     pub fn clear(&mut self, slot: u8, endpoint: &Endpoint) -> Result<(), BlockError> {
+        self.legacy_slot(slot)?;
+        self.clear_owned(slot, endpoint)
+    }
+
+    pub(super) fn clear_owned(&mut self, slot: u8, endpoint: &Endpoint) -> Result<(), BlockError> {
         if endpoint.kind() == 1 {
             return Err(BlockError::Unsupported(
                 "isochronous endpoints have no USB halt feature",
@@ -538,7 +583,7 @@ impl Controller {
             u16::from(endpoint.address),
             0,
         );
-        self.control(slot, request, &[])?;
+        self.control_owned(slot, request, &[])?;
         Ok(())
     }
 }

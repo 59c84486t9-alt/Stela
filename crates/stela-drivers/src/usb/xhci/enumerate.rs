@@ -333,7 +333,7 @@ impl Controller {
     ) -> Result<(), BlockError> {
         if ethernet::matches(&device.descriptor) {
             use ethernet::rtl815x::Revision;
-            let bytes = self.control(device.slot, Revision::request(), &[])?;
+            let bytes = self.device(device.id)?.control(Revision::request(), &[])?;
             let revision = Revision::from_register(&bytes)?;
             device.vendor_ethernet_revision = Some(revision.0);
             device.vendor_ethernet_tcr = Some(u32::from_le_bytes(bytes.try_into().unwrap()));
@@ -415,7 +415,8 @@ impl Controller {
         } else {
             None
         };
-        let mut string = |index| language.and_then(|language| self.string(slot, language, index));
+        let mut string =
+            |index| language.and_then(|language| self.string_owned(slot, language, index));
         let manufacturer = string(descriptor[14]);
         let product = string(descriptor[15]);
         let serial = string(descriptor[16]);

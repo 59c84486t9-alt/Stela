@@ -5,6 +5,14 @@ use super::*;
 impl Controller {
     /// Cached device state, updated only by acknowledged standard requests.
     pub fn current_configuration(&mut self, slot: u8) -> Result<Option<u8>, BlockError> {
+        self.legacy_slot(slot)?;
+        self.current_configuration_owned(slot)
+    }
+
+    pub(super) fn current_configuration_owned(
+        &mut self,
+        slot: u8,
+    ) -> Result<Option<u8>, BlockError> {
         self.live_slot(slot)?;
         self.ready()?;
         Ok(self.slot(slot)?.current_configuration)
@@ -13,10 +21,19 @@ impl Controller {
     /// Idempotent class-binding request. Repeating SET_CONFIGURATION, even with
     /// the same value, resets alternate settings and endpoint state (USB 9.4.7).
     pub fn set_configuration(&mut self, slot: u8, value: u8) -> Result<(), BlockError> {
-        if self.current_configuration(slot)? == Some(value) {
+        self.legacy_slot(slot)?;
+        self.set_configuration_owned(slot, value)
+    }
+
+    pub(super) fn set_configuration_owned(
+        &mut self,
+        slot: u8,
+        value: u8,
+    ) -> Result<(), BlockError> {
+        if self.current_configuration_owned(slot)? == Some(value) {
             return Ok(());
         }
-        self.control(
+        self.control_owned(
             slot,
             setup(0, SET_CONFIGURATION, u16::from(value), 0, 0),
             &[],
@@ -33,6 +50,17 @@ impl Controller {
         hub: Option<(u8, u8, bool)>,
         dma: &mut dyn DmaAllocator,
     ) -> Result<(), BlockError> {
+        self.legacy_slot(slot)?;
+        self.configure_owned(slot, endpoints, hub, dma)
+    }
+
+    pub(super) fn configure_owned(
+        &mut self,
+        slot: u8,
+        endpoints: &[Endpoint],
+        hub: Option<(u8, u8, bool)>,
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<(), BlockError> {
         self.configure_inner(slot, endpoints, hub, &[], 0, dma)
             .map(|_| ())
     }
@@ -43,6 +71,15 @@ impl Controller {
     /// serialize the complete change and configure rechecks these same rules
     /// before recording or publishing any endpoint ownership.
     pub fn preflight_endpoints(
+        &mut self,
+        slot: u8,
+        endpoints: &[Endpoint],
+    ) -> Result<(), BlockError> {
+        self.legacy_slot(slot)?;
+        self.preflight_endpoints_owned(slot, endpoints)
+    }
+
+    pub(super) fn preflight_endpoints_owned(
         &mut self,
         slot: u8,
         endpoints: &[Endpoint],

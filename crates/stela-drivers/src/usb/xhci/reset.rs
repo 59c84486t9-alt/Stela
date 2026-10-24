@@ -38,6 +38,14 @@ impl Controller {
     /// Permanently block class reconstruction failure; this is not a claim
     /// that hardware/DMA has stopped. All original allocations remain retained.
     pub(crate) fn quarantine_slot(&mut self, slot: u8) {
+        // This legacy notification has no result channel. A retired raw
+        // number cannot quarantine a later addressed generation.
+        if self.legacy_slot(slot).is_ok() {
+            self.quarantine_slot_owned(slot);
+        }
+    }
+
+    pub(super) fn quarantine_slot_owned(&mut self, slot: u8) {
         if let Some(Some(slot)) = self.slots.get_mut(usize::from(slot)) {
             slot.retiring = true;
         }
@@ -1047,6 +1055,7 @@ pub(crate) mod tests {
             slots: core::iter::repeat_with(|| None)
                 .take(max_slots + 1)
                 .collect(),
+            legacy_slot_fenced: vec![false; max_slots + 1],
             slot_ownership: vec![Ownership::Vacant; max_slots + 1],
             power: power::Ledger::new(max_slots + 1),
             pending: Vec::new(),
@@ -1485,4 +1494,6 @@ pub(crate) mod tests {
             put(at + 8, STALL << 24);
         }
     }
+    #[path = "raw_boundary_tests.rs"]
+    mod raw_boundary_tests;
 }

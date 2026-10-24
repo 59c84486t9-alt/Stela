@@ -76,7 +76,9 @@ pub(crate) fn bind_with_provider(
         let value = device.configuration_value();
         during(
             format!("slot {} EP0 SET_CONFIGURATION value={value}", device.slot),
-            controller.set_configuration(device.slot, value),
+            controller
+                .device(device.id)
+                .and_then(|mut access| access.set_configuration(value)),
         )
         .and_then(|()| {
             if endpoints.is_empty() {
@@ -84,7 +86,9 @@ pub(crate) fn bind_with_provider(
             } else {
                 during(
                     format!("slot {} Configure Endpoint", device.slot),
-                    controller.configure(device.slot, &endpoints, None, dma),
+                    controller
+                        .device(device.id)
+                        .and_then(|mut access| access.configure(&endpoints, None, dma)),
                 )
             }
         })

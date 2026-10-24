@@ -265,7 +265,19 @@ impl Controller {
     /// The result is a negotiable limit, not an allocation/configuration ACK.
     /// It intentionally works before SET_CONFIGURATION so a selector can fall
     /// back to BOT without first changing the device's alternate setting.
+    #[cfg(test)]
     pub(crate) fn stream_capacity(
+        &self,
+        slot: u8,
+        endpoints: &[Endpoint],
+        selected: &[u8],
+        requested: u16,
+    ) -> Result<u16, BlockError> {
+        self.legacy_slot(slot)?;
+        self.stream_capacity_owned(slot, endpoints, selected, requested)
+    }
+
+    pub(super) fn stream_capacity_owned(
         &self,
         slot: u8,
         endpoints: &[Endpoint],
@@ -306,7 +318,19 @@ impl Controller {
         requested: u16,
         dma: &mut dyn DmaAllocator,
     ) -> Result<u16, BlockError> {
-        self.stream_capacity(slot, endpoints, stream_endpoints, requested)?;
+        self.legacy_slot(slot)?;
+        self.configure_streams_owned(slot, endpoints, stream_endpoints, requested, dma)
+    }
+
+    pub(super) fn configure_streams_owned(
+        &mut self,
+        slot: u8,
+        endpoints: &[Endpoint],
+        stream_endpoints: &[u8],
+        requested: u16,
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<u16, BlockError> {
+        self.stream_capacity_owned(slot, endpoints, stream_endpoints, requested)?;
         self.configure_inner(slot, endpoints, None, stream_endpoints, requested, dma)
     }
 
@@ -323,9 +347,21 @@ impl Controller {
         buffer: u64,
         length: usize,
     ) -> Result<StreamTransfer, BlockError> {
+        self.legacy_slot(slot)?;
+        self.submit_stream_owned(slot, dci, stream_id, buffer, length)
+    }
+
+    pub(super) fn submit_stream_owned(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        stream_id: u16,
+        buffer: u64,
+        length: usize,
+    ) -> Result<StreamTransfer, BlockError> {
         let device = self.device_id(slot)?;
         self.validate_id(device)?;
-        self.endpoint_ready(slot, dci)?;
+        self.endpoint_ready_owned(slot, dci)?;
         if length > MAX_TD
             || (buffer % MAX_TD as u64) as usize + length > MAX_TD
             || buffer.checked_add(length as u64).is_none()
@@ -800,6 +836,7 @@ mod tests {
                 _event_table: dma.allocate(16, 64).unwrap(),
                 event_index: 0,
                 event_cycle: true,
+                legacy_slot_fenced: vec![false; slots.len()],
                 slot_ownership: vec![reset::Ownership::Vacant, reset::Ownership::Enabled],
                 power: power::Ledger::new(2),
                 slots,

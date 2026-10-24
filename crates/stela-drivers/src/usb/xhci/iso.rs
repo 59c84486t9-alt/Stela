@@ -440,7 +440,18 @@ impl Controller {
         requested: IsoSchedule,
         packet_count: usize,
     ) -> Result<Vec<IsoSchedule>, BlockError> {
-        self.endpoint_ready(slot, dci)?;
+        self.legacy_slot(slot)?;
+        self.iso_schedule_list_owned(slot, dci, requested, packet_count)
+    }
+
+    pub(super) fn iso_schedule_list_owned(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        requested: IsoSchedule,
+        packet_count: usize,
+    ) -> Result<Vec<IsoSchedule>, BlockError> {
+        self.endpoint_ready_owned(slot, dci)?;
         self.iso_caps.admit()?;
         let mfindex = self.registers.read32(self.runtime);
         let caps = self.iso_caps;
@@ -514,7 +525,18 @@ impl Controller {
         buffer: u64,
         length: usize,
     ) -> Result<IsoTransfer, BlockError> {
-        self.submit_iso_scheduled(slot, dci, buffer, length, IsoSchedule::Asap)
+        self.legacy_slot(slot)?;
+        self.submit_iso_owned(slot, dci, buffer, length)
+    }
+
+    pub(super) fn submit_iso_owned(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        buffer: u64,
+        length: usize,
+    ) -> Result<IsoTransfer, BlockError> {
+        self.submit_iso_scheduled_owned(slot, dci, buffer, length, IsoSchedule::Asap)
     }
 
     /// Queue with an optional caller-selected service interval. An explicit
@@ -530,9 +552,21 @@ impl Controller {
         length: usize,
         requested: IsoSchedule,
     ) -> Result<IsoTransfer, BlockError> {
+        self.legacy_slot(slot)?;
+        self.submit_iso_scheduled_owned(slot, dci, buffer, length, requested)
+    }
+
+    pub(super) fn submit_iso_scheduled_owned(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        buffer: u64,
+        length: usize,
+        requested: IsoSchedule,
+    ) -> Result<IsoTransfer, BlockError> {
         let device = self.device_id(slot)?;
         self.validate_id(device)?;
-        self.endpoint_ready(slot, dci)?;
+        self.endpoint_ready_owned(slot, dci)?;
         self.iso_caps.admit()?;
         self.dma_profile.check(buffer, length)?;
         if length > MAX_TD || buffer % MAX_TD as u64 + length as u64 > MAX_TD as u64 {
@@ -626,7 +660,7 @@ impl Controller {
             return Some(Err(error));
         }
         let slot = ticket.hardware_slot();
-        if let Err(error) = self.endpoint_ready(slot, ticket.dci) {
+        if let Err(error) = self.endpoint_ready_owned(slot, ticket.dci) {
             return Some(Err(error));
         }
         let valid = self
@@ -1037,6 +1071,7 @@ pub(super) mod tests {
                 _event_table: dma.allocate(16, 64).unwrap(),
                 event_index: 0,
                 event_cycle: true,
+                legacy_slot_fenced: vec![false; slots.len()],
                 slots,
                 slot_ownership: vec![reset::Ownership::Vacant, reset::Ownership::Enabled],
                 power: power::Ledger::new(2),

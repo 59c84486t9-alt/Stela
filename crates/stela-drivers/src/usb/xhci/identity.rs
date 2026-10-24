@@ -4,7 +4,14 @@
 //! Linux usb_disconnect detaches class consumers before xhci_free_dev disables
 //! the hardware slot. A slot number alone cannot express that lifetime: the
 //! next Enable Slot may return the same number. This boundary preserves old
-//! consumers' permanent refusal across that hardware reuse.
+//! consumers' permanent refusal across that hardware reuse. Linux's pinned
+//! xhci_check_args also compares virt_dev->udev with the actual usb_device;
+//! a bare numerical slot is deliberately insufficient here after retirement.
+//!
+//! Public raw operations check one monotonic retirement fence. Exact access
+//! validates its genuine SlotId before entering private implementations; no
+//! public bypass flag or raw-to-current identity conversion is exposed.
+//! This boundary does not authorize recycling published hardware slots.
 use super::*;
 use core::sync::atomic::AtomicU64;
 
@@ -50,6 +57,17 @@ impl SlotId {
 }
 
 impl Controller {
+    /// Pure permanent legacy boundary. In particular, no readiness read, event
+    /// drain, descriptor access, endpoint index or DMA mutation precedes it.
+    pub(super) fn legacy_slot(&self, slot: u8) -> Result<(), BlockError> {
+        if self.legacy_slot_fenced.get(usize::from(slot)) != Some(&false) {
+            return Err(BlockError::Unsupported(
+                "raw xHCI slot authority is permanently retired",
+            ));
+        }
+        self.live_slot(slot)
+    }
+
     #[cfg(test)]
     pub(crate) fn test_device_id(&self, slot: u8) -> Result<SlotId, BlockError> {
         self.device_id(slot)
@@ -159,33 +177,33 @@ impl DeviceAccess<'_> {
 
     pub fn control(&mut self, request: [u8; 8], out: &[u8]) -> Result<Vec<u8>, BlockError> {
         let slot = self.slot()?;
-        self.controller.control(slot, request, out)
+        self.controller.control_owned(slot, request, out)
     }
 
     /// Read a standard string descriptor for this exact addressed generation.
     pub(crate) fn string(&mut self, language: u16, index: u8) -> Option<String> {
         let slot = self.slot().ok()?;
-        self.controller.string(slot, language, index)
+        self.controller.string_owned(slot, language, index)
     }
 
     pub fn connected(&mut self) -> Result<bool, BlockError> {
         let slot = self.slot()?;
-        self.controller.connected(slot)
+        self.controller.connected_owned(slot)
     }
 
     pub fn endpoint_ready(&mut self, dci: u8) -> Result<(), BlockError> {
         let slot = self.slot()?;
-        self.controller.endpoint_ready(slot, dci)
+        self.controller.endpoint_ready_owned(slot, dci)
     }
 
     pub fn current_configuration(&mut self) -> Result<Option<u8>, BlockError> {
         let slot = self.slot()?;
-        self.controller.current_configuration(slot)
+        self.controller.current_configuration_owned(slot)
     }
 
     pub fn set_configuration(&mut self, value: u8) -> Result<(), BlockError> {
         let slot = self.slot()?;
-        self.controller.set_configuration(slot, value)
+        self.controller.set_configuration_owned(slot, value)
     }
 
     pub fn configure(
@@ -195,17 +213,17 @@ impl DeviceAccess<'_> {
         dma: &mut dyn DmaAllocator,
     ) -> Result<(), BlockError> {
         let slot = self.slot()?;
-        self.controller.configure(slot, endpoints, hub, dma)
+        self.controller.configure_owned(slot, endpoints, hub, dma)
     }
 
     pub fn preflight_endpoints(&mut self, endpoints: &[Endpoint]) -> Result<(), BlockError> {
         let slot = self.slot()?;
-        self.controller.preflight_endpoints(slot, endpoints)
+        self.controller.preflight_endpoints_owned(slot, endpoints)
     }
 
     pub fn deconfigure(&mut self, endpoints: &[Endpoint]) -> Result<(), BlockError> {
         let slot = self.slot()?;
-        self.controller.deconfigure(slot, endpoints)
+        self.controller.deconfigure_owned(slot, endpoints)
     }
 
     pub fn configure_streams(
@@ -217,7 +235,7 @@ impl DeviceAccess<'_> {
     ) -> Result<u16, BlockError> {
         let slot = self.slot()?;
         self.controller
-            .configure_streams(slot, endpoints, stream_endpoints, requested, dma)
+            .configure_streams_owned(slot, endpoints, stream_endpoints, requested, dma)
     }
 
     pub(crate) fn stream_capacity(
@@ -228,12 +246,12 @@ impl DeviceAccess<'_> {
     ) -> Result<u16, BlockError> {
         let slot = self.slot()?;
         self.controller
-            .stream_capacity(slot, endpoints, selected, requested)
+            .stream_capacity_owned(slot, endpoints, selected, requested)
     }
 
     pub fn submit(&mut self, dci: u8, buffer: u64, length: usize) -> Result<u64, BlockError> {
         let slot = self.slot()?;
-        self.controller.submit(slot, dci, buffer, length)
+        self.controller.submit_owned(slot, dci, buffer, length)
     }
 
     pub fn submit_ticket(
@@ -243,7 +261,8 @@ impl DeviceAccess<'_> {
         length: usize,
     ) -> Result<TransferTicket, BlockError> {
         let slot = self.slot()?;
-        self.controller.submit_ticket(slot, dci, buffer, length)
+        self.controller
+            .submit_ticket_owned(slot, dci, buffer, length)
     }
 
     pub fn completed_ticket(
@@ -282,7 +301,7 @@ impl DeviceAccess<'_> {
             Ok(slot) => slot,
             Err(error) => return Some(Err(error)),
         };
-        self.controller.completed(slot, dci, trb, length)
+        self.controller.completed_owned(slot, dci, trb, length)
     }
 
     pub fn transfer(
@@ -294,7 +313,7 @@ impl DeviceAccess<'_> {
     ) -> Result<usize, BlockError> {
         let slot = self.slot()?;
         self.controller
-            .transfer(slot, dci, buffer, length, microseconds)
+            .transfer_owned(slot, dci, buffer, length, microseconds)
     }
 
     pub fn submit_stream(
@@ -306,7 +325,7 @@ impl DeviceAccess<'_> {
     ) -> Result<StreamTransfer, BlockError> {
         let slot = self.slot()?;
         self.controller
-            .submit_stream(slot, dci, stream, buffer, length)
+            .submit_stream_owned(slot, dci, stream, buffer, length)
     }
 
     pub fn completed_stream(
@@ -329,7 +348,7 @@ impl DeviceAccess<'_> {
         length: usize,
     ) -> Result<IsoTransfer, BlockError> {
         let slot = self.slot()?;
-        self.controller.submit_iso(slot, dci, buffer, length)
+        self.controller.submit_iso_owned(slot, dci, buffer, length)
     }
 
     /// Preflight scheduling requests for this exact addressed generation.
@@ -343,7 +362,7 @@ impl DeviceAccess<'_> {
     ) -> Result<Vec<IsoSchedule>, BlockError> {
         let slot = self.slot()?;
         self.controller
-            .iso_schedule_list(slot, dci, schedule, packet_count)
+            .iso_schedule_list_owned(slot, dci, schedule, packet_count)
     }
 
     /// Submit a scheduling request for this exact addressed generation. The
@@ -358,7 +377,7 @@ impl DeviceAccess<'_> {
     ) -> Result<IsoTransfer, BlockError> {
         let slot = self.slot()?;
         self.controller
-            .submit_iso_scheduled(slot, dci, buffer, length, schedule)
+            .submit_iso_scheduled_owned(slot, dci, buffer, length, schedule)
     }
 
     pub fn completed_iso(
@@ -378,23 +397,23 @@ impl DeviceAccess<'_> {
 
     pub fn cancel(&mut self, dci: u8) -> Result<(), BlockError> {
         let slot = self.slot()?;
-        self.controller.cancel(slot, dci)
+        self.controller.cancel_owned(slot, dci)
     }
 
     pub fn reset_endpoint(&mut self, endpoint: &Endpoint) -> Result<(), BlockError> {
         let slot = self.slot()?;
-        self.controller.reset_endpoint(slot, endpoint)
+        self.controller.reset_endpoint_owned(slot, endpoint)
     }
 
     pub fn clear(&mut self, endpoint: &Endpoint) -> Result<(), BlockError> {
         let slot = self.slot()?;
-        self.controller.clear(slot, endpoint)
+        self.controller.clear_owned(slot, endpoint)
     }
 
     /// Quarantine this generation without asserting that DMA has stopped.
     pub(crate) fn quarantine(&mut self) {
         if let Ok(slot) = self.slot() {
-            self.controller.quarantine_slot(slot);
+            self.controller.quarantine_slot_owned(slot);
         }
     }
 }
@@ -629,3 +648,7 @@ mod tests {
         network_generation_peer(true);
     }
 }
+
+#[cfg(test)]
+#[path = "identity/raw_tests.rs"]
+pub(super) mod raw_tests;

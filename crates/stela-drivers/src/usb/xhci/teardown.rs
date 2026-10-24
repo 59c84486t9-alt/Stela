@@ -17,6 +17,15 @@ impl Controller {
     /// resetting the allocator, zeroing a live ring or replaying a ticket.
     /// Streams retain their separate allocation/retirement policy.
     pub fn deconfigure(&mut self, slot: u8, endpoints: &[Endpoint]) -> Result<(), BlockError> {
+        self.legacy_slot(slot)?;
+        self.deconfigure_owned(slot, endpoints)
+    }
+
+    pub(super) fn deconfigure_owned(
+        &mut self,
+        slot: u8,
+        endpoints: &[Endpoint],
+    ) -> Result<(), BlockError> {
         self.live_slot(slot)?;
         self.ready()?;
         if endpoints.is_empty() {
@@ -30,7 +39,7 @@ impl Controller {
                     "invalid or duplicate teardown endpoint",
                 ));
             }
-            self.endpoint_ready(slot, dci)?;
+            self.endpoint_ready_owned(slot, dci)?;
             selected |= 1 << dci;
         }
         let result = self.deconfigure_inner(slot, endpoints, selected);
