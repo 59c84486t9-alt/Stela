@@ -9,7 +9,7 @@ use super::*;
 #[derive(Debug)]
 pub struct TransferTicket {
     id: u64,
-    slot: u8,
+    device: SlotId,
     dci: u8,
     trb: u64,
 }
@@ -61,7 +61,11 @@ impl TransferCancellation {
 
 impl TransferTicket {
     pub(in crate::usb::xhci) fn hardware_slot(&self) -> u8 {
-        self.slot
+        self.device.hardware_slot()
+    }
+
+    pub(in crate::usb::xhci) fn device_id(&self) -> SlotId {
+        self.device
     }
 }
 
@@ -90,6 +94,8 @@ impl Controller {
         buffer: u64,
         length: usize,
     ) -> Result<TransferTicket, BlockError> {
+        let device = self.device_id(slot)?;
+        self.validate_id(device)?;
         self.endpoint_ready(slot, dci)?;
         if dci == 1 {
             return Err(BlockError::Unsupported(
@@ -121,7 +127,12 @@ impl Controller {
             .push(&[(buffer, length as u32, NORMAL << 10 | IOC | direction)]);
         transfer.in_flight += 1;
         self.doorbell(slot, dci);
-        Ok(TransferTicket { id, slot, dci, trb })
+        Ok(TransferTicket {
+            id,
+            device,
+            dci,
+            trb,
+        })
     }
 
     /// Polls a legacy ring address, checking the original submitted length.
@@ -154,7 +165,17 @@ impl Controller {
             Ok(None) => return None,
             Err(error) => return Some(Err(error)),
         };
-        self.completed_ticket(&TransferTicket { id, slot, dci, trb })
+        // A raw address carries only its documented current-generation lifetime.
+        let device = match self.device_id(slot) {
+            Ok(device) => device,
+            Err(error) => return Some(Err(error)),
+        };
+        self.completed_ticket(&TransferTicket {
+            id,
+            device,
+            dci,
+            trb,
+        })
     }
 
     /// Polls an exact submitted TD. Only a valid terminal success/short event
@@ -164,10 +185,15 @@ impl Controller {
         &mut self,
         ticket: &TransferTicket,
     ) -> Option<Result<usize, BlockError>> {
-        if let Err(error) = self.completion_ready(ticket.hardware_slot(), ticket.dci) {
+        // Reject a retired device before readiness can drain a replacement's events.
+        if let Err(error) = self.validate_id(ticket.device_id()) {
             return Some(Err(error));
         }
-        let transfer = self.slot(ticket.slot).unwrap().endpoints[usize::from(ticket.dci)]
+        let slot = ticket.hardware_slot();
+        if let Err(error) = self.completion_ready(slot, ticket.dci) {
+            return Some(Err(error));
+        }
+        let transfer = self.slot(slot).unwrap().endpoints[usize::from(ticket.dci)]
             .as_ref()
             .unwrap();
         if !transfer.ring.normal.contains(ticket.id, ticket.trb) {
@@ -175,10 +201,10 @@ impl Controller {
                 "stale or foreign xHCI transfer ticket",
             )));
         }
-        while let Some(event) = self.take(|e| {
-            e.kind() == TRANSFER_EVENT && e.slot() == ticket.slot && e.endpoint() == ticket.dci
-        }) {
-            let endpoint = self.slot(ticket.slot).unwrap().endpoints[usize::from(ticket.dci)]
+        while let Some(event) = self
+            .take(|e| e.kind() == TRANSFER_EVENT && e.slot() == slot && e.endpoint() == ticket.dci)
+        {
+            let endpoint = self.slot(slot).unwrap().endpoints[usize::from(ticket.dci)]
                 .as_mut()
                 .unwrap();
             if event.code() == INCOMPATIBLE_DEVICE {
@@ -193,7 +219,7 @@ impl Controller {
                 return Some(Err(error));
             }
         }
-        let endpoint = self.slot(ticket.slot).unwrap().endpoints[usize::from(ticket.dci)]
+        let endpoint = self.slot(slot).unwrap().endpoints[usize::from(ticket.dci)]
             .as_mut()
             .unwrap();
         let done = endpoint.ring.normal.completed(ticket.id);
@@ -212,9 +238,12 @@ impl Controller {
         &mut self,
         ticket: &TransferTicket,
     ) -> Result<TransferCancellation, BlockError> {
-        self.live_slot(ticket.hardware_slot())?;
-        let queue = &self.slot(ticket.slot)?.endpoints[usize::from(ticket.dci)]
-            .as_ref()
+        let slot = self.validate_id(ticket.device_id())?;
+        let queue = &self
+            .slot(slot)?
+            .endpoints
+            .get(usize::from(ticket.dci))
+            .and_then(Option::as_ref)
             .ok_or(BlockError::Unsupported("xHCI endpoint not configured"))?
             .ring
             .normal;
@@ -224,7 +253,7 @@ impl Controller {
                 .ok_or(BlockError::Unsupported(
                     "stale or foreign xHCI transfer ticket",
                 ))?;
-        let observed = self.cancel_observed(ticket.slot, ticket.dci)?;
+        let observed = self.cancel_observed(slot, ticket.dci)?;
         Ok(TransferCancellation::observed(
             length, cached, ticket.trb, &observed,
         ))
@@ -276,6 +305,125 @@ mod tests {
     use super::*;
     use crate::bus::dma::RegionAllocator;
     use crate::usb::xhci::model::*;
+    #[test]
+    fn retired_device_ticket_is_pure_before_readiness_and_preserves_current_dma() {
+        struct NoAccess;
+        impl Registers for NoAccess {
+            fn read32(&mut self, _: usize) -> u32 {
+                panic!("retired transfer ticket reached MMIO read")
+            }
+            fn write32(&mut self, _: usize, _: u32) {
+                panic!("retired transfer ticket reached MMIO write")
+            }
+        }
+        for already_pending in [false, true] {
+            let mut backing = vec![0u64; 256 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: all modeled DMA remains in this live, disjoint allocation.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut previous, _) = cancellation_controller(&mut dma);
+            let (mut current, model) = cancellation_controller(&mut dma);
+            let data = dma.allocate(128, 64).unwrap();
+            let mut old = previous.submit_ticket(1, 3, data.physical(), 64).unwrap();
+            let fresh = current
+                .submit_ticket(1, 3, data.physical() + 64, 64)
+                .unwrap();
+            let current_id = current.device_id(1).unwrap();
+            // Distinct modeled generations share hardware slot 1. This tests
+            // ticket admission, not the separate architectural slot-reuse proof.
+            assert_eq!(old.hardware_slot(), fresh.hardware_slot());
+            assert_ne!(old.device_id(), current_id);
+            assert_eq!(fresh.device_id(), current_id);
+            model
+                .borrow_mut()
+                .event(fresh.trb, SUCCESS, TRANSFER_EVENT, 3, 0);
+            if already_pending {
+                current.drain();
+            }
+            let pending = |c: &Controller| {
+                c.pending
+                    .iter()
+                    .map(|event| (event.parameter, event.status, event.control))
+                    .collect::<Vec<_>>()
+            };
+            let pending_before = pending(&current);
+            assert_eq!(pending_before.len(), usize::from(already_pending));
+            let memory_before = backing.clone();
+            let cursor_before = (current.event_index, current.event_cycle);
+            let transfer = current.slots[1].as_ref().unwrap().endpoints[3]
+                .as_ref()
+                .unwrap();
+            let queue_before = transfer
+                .ring
+                .normal
+                .cancellation_snapshot(fresh.id, fresh.trb);
+            let ring_before = (transfer.ring.index, transfer.ring.cycle, transfer.in_flight);
+            let registers = core::mem::replace(&mut current.registers, Box::new(NoAccess));
+            for (dci, unhealthy) in [(3, false), (u8::MAX, false), (3, true), (u8::MAX, true)] {
+                old.dci = dci;
+                current.error = unhealthy.then_some(HSE);
+                current.command_poisoned = unhealthy;
+                let retired =
+                    BlockError::Unsupported("xHCI device generation is permanently retired");
+                assert_eq!(current.completed_ticket(&old), Some(Err(retired.clone())));
+                assert_eq!(current.cancel_ticket(&old), Err(retired));
+                assert_eq!(
+                    current.device(current_id).unwrap().completed_ticket(&old),
+                    Some(Err(BlockError::Unsupported("foreign USB transfer ticket")))
+                );
+                assert_eq!(
+                    current.device(current_id).unwrap().cancel_ticket(&old),
+                    Err(BlockError::Unsupported(
+                        "foreign USB transfer cancellation ticket"
+                    ))
+                );
+                assert_eq!(current.error, unhealthy.then_some(HSE));
+                assert_eq!(current.command_poisoned, unhealthy);
+            }
+            // Even a malformed current ticket must reject before endpoint indexing.
+            let malformed = TransferTicket {
+                dci: u8::MAX,
+                ..fresh
+            };
+            assert_eq!(
+                current.cancel_ticket(&malformed),
+                Err(BlockError::Unsupported("xHCI endpoint not configured"))
+            );
+            current.slots[1].as_mut().unwrap().suspended = true;
+            let retired = BlockError::Unsupported("xHCI device generation is permanently retired");
+            assert_eq!(current.completed_ticket(&old), Some(Err(retired.clone())));
+            assert_eq!(current.cancel_ticket(&old), Err(retired));
+            assert!(matches!(
+                current.submit_ticket(1, 3, data.physical(), 64),
+                Err(BlockError::Unsupported(
+                    "USB consumer is fenced for device lifecycle"
+                ))
+            ));
+            current.slots[1].as_mut().unwrap().suspended = false;
+            assert_eq!(pending(&current), pending_before);
+            assert_eq!((current.event_index, current.event_cycle), cursor_before);
+            assert!(backing == memory_before);
+            let transfer = current.slots[1].as_ref().unwrap().endpoints[3]
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                transfer
+                    .ring
+                    .normal
+                    .cancellation_snapshot(fresh.id, fresh.trb),
+                queue_before
+            );
+            assert_eq!(
+                (transfer.ring.index, transfer.ring.cycle, transfer.in_flight),
+                ring_before
+            );
+            current.registers = registers;
+            current.error = None;
+            current.command_poisoned = false;
+            assert_eq!(current.completed_ticket(&fresh), Some(Ok(64)));
+        }
+    }
+
     #[test]
     fn exact_ticket_rejects_foreign_retired_and_reused_addresses() {
         let mut backing = vec![0u64; 256 * 1024];

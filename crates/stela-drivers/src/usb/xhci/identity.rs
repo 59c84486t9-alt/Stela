@@ -247,7 +247,7 @@ impl DeviceAccess<'_> {
         if let Err(error) = self.slot() {
             return Some(Err(error));
         }
-        if ticket.hardware_slot() != self.id.slot {
+        if ticket.device_id() != self.id {
             return Some(Err(BlockError::Unsupported("foreign USB transfer ticket")));
         }
         self.controller.completed_ticket(ticket)
@@ -258,7 +258,7 @@ impl DeviceAccess<'_> {
         ticket: &TransferTicket,
     ) -> Result<TransferCancellation, BlockError> {
         self.slot()?;
-        if ticket.hardware_slot() != self.id.slot {
+        if ticket.device_id() != self.id {
             return Err(BlockError::Unsupported(
                 "foreign USB transfer cancellation ticket",
             ));
@@ -310,7 +310,7 @@ impl DeviceAccess<'_> {
         if let Err(error) = self.slot() {
             return Some(Err(error));
         }
-        if ticket.hardware_slot() != self.id.slot {
+        if ticket.device_id() != self.id {
             return Some(Err(BlockError::Unsupported("foreign USB stream ticket")));
         }
         self.controller.completed_stream(ticket)
@@ -362,7 +362,7 @@ impl DeviceAccess<'_> {
         if let Err(error) = self.slot() {
             return Some(Err(error));
         }
-        if ticket.hardware_slot() != self.id.slot {
+        if ticket.device_id() != self.id {
             return Some(Err(BlockError::Unsupported(
                 "foreign USB isochronous ticket",
             )));

@@ -72,13 +72,14 @@ pub(super) fn dequeue_status(stream: u16) -> u32 {
     u32::from(stream) << 16
 }
 
-/// An exact submitted TD, including its controller-independent, nonwrapping
-/// identity. Dropping a ticket does not cancel hardware: the endpoint retains
-/// its active record and blocks reuse until acknowledged endpoint cancellation.
+/// An exact submitted TD, including its addressed-device generation and
+/// controller-independent, nonwrapping TD identity. Dropping a ticket does not
+/// cancel hardware: the endpoint retains its active record and blocks reuse
+/// until acknowledged endpoint cancellation.
 #[derive(Debug)]
 pub struct StreamTransfer {
     id: u64,
-    slot: u8,
+    device: SlotId,
     dci: u8,
     stream: u16,
     trb: u64,
@@ -87,7 +88,11 @@ pub struct StreamTransfer {
 
 impl StreamTransfer {
     pub(super) fn hardware_slot(&self) -> u8 {
-        self.slot
+        self.device.hardware_slot()
+    }
+
+    pub(in crate::usb::xhci) fn device_id(&self) -> SlotId {
+        self.device
     }
 }
 
@@ -318,6 +323,8 @@ impl Controller {
         buffer: u64,
         length: usize,
     ) -> Result<StreamTransfer, BlockError> {
+        let device = self.device_id(slot)?;
+        self.validate_id(device)?;
         self.endpoint_ready(slot, dci)?;
         if length > MAX_TD
             || (buffer % MAX_TD as u64) as usize + length > MAX_TD
@@ -364,7 +371,7 @@ impl Controller {
         );
         Ok(StreamTransfer {
             id,
-            slot,
+            device,
             dci,
             stream: stream_id,
             trb,
@@ -379,11 +386,16 @@ impl Controller {
         &mut self,
         ticket: &StreamTransfer,
     ) -> Option<Result<usize, BlockError>> {
-        if let Err(error) = self.completion_ready(ticket.hardware_slot(), ticket.dci) {
+        // Generation validation precedes every readiness read and completion drain.
+        if let Err(error) = self.validate_id(ticket.device_id()) {
+            return Some(Err(error));
+        }
+        let slot = ticket.hardware_slot();
+        if let Err(error) = self.completion_ready(slot, ticket.dci) {
             return Some(Err(error));
         }
         let checked = (|| {
-            let endpoint = self.slot(ticket.slot)?.endpoints[usize::from(ticket.dci)]
+            let endpoint = self.slot(slot)?.endpoints[usize::from(ticket.dci)]
                 .as_mut()
                 .unwrap();
             let streams = endpoint
@@ -406,11 +418,11 @@ impl Controller {
         }
         let event = self.take(|e| {
             e.kind() == TRANSFER_EVENT
-                && e.slot() == ticket.slot
+                && e.slot() == slot
                 && e.endpoint() == ticket.dci
                 && (e.parameter == ticket.trb || e.code() == INCOMPATIBLE_DEVICE)
         })?;
-        let endpoint = self.slot(ticket.slot).unwrap().endpoints[usize::from(ticket.dci)]
+        let endpoint = self.slot(slot).unwrap().endpoints[usize::from(ticket.dci)]
             .as_mut()
             .unwrap();
         let streams = endpoint.streams.as_mut().unwrap();
@@ -798,6 +810,111 @@ mod tests {
             },
             model,
         )
+    }
+
+    #[test]
+    fn retired_device_stream_ticket_is_pure_before_readiness_and_preserves_current_dma() {
+        struct NoAccess;
+        impl Registers for NoAccess {
+            fn read32(&mut self, _: usize) -> u32 {
+                panic!("retired stream ticket reached MMIO read")
+            }
+            fn write32(&mut self, _: usize, _: u32) {
+                panic!("retired stream ticket reached MMIO write")
+            }
+        }
+        for (context_bytes, already_pending) in [(32, false), (64, true)] {
+            let mut backing = vec![0u64; 256 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: all modeled DMA remains in this live, disjoint allocation.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut previous, _) = controller(&mut dma, context_bytes);
+            let (mut current, model) = controller(&mut dma, context_bytes);
+            for c in [&mut previous, &mut current] {
+                c.slots[1].as_mut().unwrap().generation = identity::next_generation().unwrap();
+                c.configure_streams(1, &[endpoint(0x81, 4)], &[0x81], 2, &mut dma)
+                    .unwrap();
+            }
+            let data = dma.allocate(128, 64).unwrap();
+            let mut old = previous
+                .submit_stream(1, 3, 1, data.physical(), 64)
+                .unwrap();
+            let fresh = current
+                .submit_stream(1, 3, 1, data.physical() + 64, 64)
+                .unwrap();
+            let current_id = current.device_id(1).unwrap();
+            // Distinct modeled generations share hardware slot 1. This tests
+            // ticket admission, not the separate architectural slot-reuse proof.
+            assert_eq!(old.hardware_slot(), fresh.hardware_slot());
+            assert_ne!(old.device_id(), current_id);
+            assert_eq!(fresh.device_id(), current_id);
+            model.borrow_mut().complete(3, 1, SUCCESS, 0);
+            if already_pending {
+                current.drain();
+            }
+            let pending = |c: &Controller| {
+                c.pending
+                    .iter()
+                    .map(|event| (event.parameter, event.status, event.control))
+                    .collect::<Vec<_>>()
+            };
+            let pending_before = pending(&current);
+            assert_eq!(pending_before.len(), usize::from(already_pending));
+            let memory_before = backing.clone();
+            let cursor_before = (current.event_index, current.event_cycle);
+            let endpoint = current.slots[1].as_mut().unwrap().endpoints[3]
+                .as_mut()
+                .unwrap();
+            let streams = endpoint.streams.as_mut().unwrap();
+            let active = streams.stream(1).unwrap().active.as_ref().unwrap();
+            let active_before = (active.id, active.trb, active.length, active.error.clone());
+            let registers = core::mem::replace(&mut current.registers, Box::new(NoAccess));
+            for (dci, unhealthy) in [(3, false), (u8::MAX, false), (3, true), (u8::MAX, true)] {
+                old.dci = dci;
+                current.error = unhealthy.then_some(HSE);
+                current.command_poisoned = unhealthy;
+                let retired =
+                    BlockError::Unsupported("xHCI device generation is permanently retired");
+                assert_eq!(current.completed_stream(&old), Some(Err(retired)));
+                assert_eq!(
+                    current.device(current_id).unwrap().completed_stream(&old),
+                    Some(Err(BlockError::Unsupported("foreign USB stream ticket")))
+                );
+                assert_eq!(current.error, unhealthy.then_some(HSE));
+                assert_eq!(current.command_poisoned, unhealthy);
+            }
+            current.slots[1].as_mut().unwrap().suspended = true;
+            assert_eq!(
+                current.completed_stream(&old),
+                Some(Err(BlockError::Unsupported(
+                    "xHCI device generation is permanently retired"
+                )))
+            );
+            assert!(matches!(
+                current.submit_stream(1, 3, 1, data.physical(), 64),
+                Err(BlockError::Unsupported(
+                    "USB consumer is fenced for device lifecycle"
+                ))
+            ));
+            current.slots[1].as_mut().unwrap().suspended = false;
+            assert_eq!(pending(&current), pending_before);
+            assert_eq!((current.event_index, current.event_cycle), cursor_before);
+            assert!(backing == memory_before);
+            let endpoint = current.slots[1].as_mut().unwrap().endpoints[3]
+                .as_mut()
+                .unwrap();
+            let streams = endpoint.streams.as_mut().unwrap();
+            assert!(!streams.recovery);
+            let active = streams.stream(1).unwrap().active.as_ref().unwrap();
+            assert_eq!(
+                (active.id, active.trb, active.length, active.error.clone()),
+                active_before
+            );
+            current.registers = registers;
+            current.error = None;
+            current.command_poisoned = false;
+            assert_eq!(current.completed_stream(&fresh), Some(Ok(64)));
+        }
     }
 
     #[test]

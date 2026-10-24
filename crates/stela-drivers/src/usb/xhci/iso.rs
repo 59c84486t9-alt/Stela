@@ -53,12 +53,13 @@ pub struct IsoCompletion {
     pub bytes: usize,
     pub status: IsoStatus,
 }
-/// An exact controller/endpoint service interval. Dropping this ticket does not
-/// cancel DMA; the endpoint retains it until completion or acknowledged cancel.
+/// An exact addressed-device generation and endpoint service interval.
+/// Dropping this ticket does not cancel DMA; the endpoint retains it until
+/// completion or acknowledged cancel.
 #[derive(Debug)]
 pub struct IsoTransfer {
     id: u64,
-    slot: u8,
+    device: SlotId,
     dci: u8,
     trb: u64,
     schedule: IsoSchedule,
@@ -72,7 +73,11 @@ impl IsoTransfer {
     }
 
     pub(super) fn hardware_slot(&self) -> u8 {
-        self.slot
+        self.device.hardware_slot()
+    }
+
+    pub(in crate::usb::xhci) fn device_id(&self) -> SlotId {
+        self.device
     }
 }
 
@@ -525,6 +530,8 @@ impl Controller {
         length: usize,
         requested: IsoSchedule,
     ) -> Result<IsoTransfer, BlockError> {
+        let device = self.device_id(slot)?;
+        self.validate_id(device)?;
         self.endpoint_ready(slot, dci)?;
         self.iso_caps.admit()?;
         self.dma_profile.check(buffer, length)?;
@@ -595,7 +602,7 @@ impl Controller {
         self.doorbell(slot, dci);
         Ok(IsoTransfer {
             id,
-            slot,
+            device,
             dci,
             trb,
             schedule: if frame & SIA != 0 {
@@ -614,11 +621,16 @@ impl Controller {
         &mut self,
         ticket: &IsoTransfer,
     ) -> Option<Result<IsoCompletion, BlockError>> {
-        if let Err(error) = self.endpoint_ready(ticket.slot, ticket.dci) {
+        // A stale generation cannot drain events or inspect the replacement queue.
+        if let Err(error) = self.validate_id(ticket.device_id()) {
+            return Some(Err(error));
+        }
+        let slot = ticket.hardware_slot();
+        if let Err(error) = self.endpoint_ready(slot, ticket.dci) {
             return Some(Err(error));
         }
         let valid = self
-            .slot(ticket.slot)
+            .slot(slot)
             .ok()
             .and_then(|slot| slot.endpoints[usize::from(ticket.dci)].as_ref())
             .and_then(|transfer| transfer.iso.as_ref())
@@ -637,12 +649,10 @@ impl Controller {
         // Apply this endpoint's events in ring order; any of them may finish
         // this ticket or earlier ones.
         while let Some(index) = self.pending.iter().position(|event| {
-            event.kind() == TRANSFER_EVENT
-                && event.slot() == ticket.slot
-                && event.endpoint() == ticket.dci
+            event.kind() == TRANSFER_EVENT && event.slot() == slot && event.endpoint() == ticket.dci
         }) {
             let event = self.pending.remove(index);
-            let endpoint = self.slot(ticket.slot).unwrap().endpoints[usize::from(ticket.dci)]
+            let endpoint = self.slot(slot).unwrap().endpoints[usize::from(ticket.dci)]
                 .as_mut()
                 .unwrap();
             if event.code() == INCOMPATIBLE_DEVICE {
@@ -665,7 +675,7 @@ impl Controller {
                 return Some(Err(error));
             }
         }
-        let queue = self.slot(ticket.slot).unwrap().endpoints[usize::from(ticket.dci)]
+        let queue = self.slot(slot).unwrap().endpoints[usize::from(ticket.dci)]
             .as_mut()
             .unwrap()
             .iso
@@ -1121,6 +1131,118 @@ pub(super) mod tests {
         assert_eq!(model.borrow().active.len(), device_count);
         assert_eq!(model.borrow().seen, commands);
         assert_eq!(model.borrow().cursors, device_cursors);
+    }
+
+    #[test]
+    fn retired_device_iso_ticket_is_pure_before_readiness_and_preserves_current_dma() {
+        struct NoAccess;
+        impl Registers for NoAccess {
+            fn read32(&mut self, _: usize) -> u32 {
+                panic!("retired isochronous ticket reached MMIO read")
+            }
+            fn write32(&mut self, _: usize, _: u32) {
+                panic!("retired isochronous ticket reached MMIO write")
+            }
+        }
+        for (speed, context_bytes, cfc, already_pending) in
+            [(FULL_SPEED, 32, false, false), (HIGH_SPEED, 64, true, true)]
+        {
+            let mut backing = vec![0u64; 256 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: all modeled DMA remains in this live, disjoint allocation.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut previous, _) = controller(&mut dma, speed, context_bytes, cfc);
+            let (mut current, model) = controller(&mut dma, speed, context_bytes, cfc);
+            for c in [&mut previous, &mut current] {
+                c.slots[1].as_mut().unwrap().generation = identity::next_generation().unwrap();
+                c.configure(1, &[endpoint(0x81, speed)], None, &mut dma)
+                    .unwrap();
+            }
+            let data = dma.allocate(128, 64).unwrap();
+            let mut old = previous.submit_iso(1, 3, data.physical(), 32).unwrap();
+            let fresh = current.submit_iso(1, 3, data.physical() + 64, 32).unwrap();
+            let current_id = current.device_id(1).unwrap();
+            // Distinct modeled generations share hardware slot 1. This tests
+            // ticket admission, not the separate architectural slot-reuse proof.
+            assert_eq!(old.hardware_slot(), fresh.hardware_slot());
+            assert_ne!(old.device_id(), current_id);
+            assert_eq!(fresh.device_id(), current_id);
+            model.borrow_mut().complete(3, 0, SUCCESS, 0);
+            if already_pending {
+                current.drain();
+            }
+            let pending = |c: &Controller| {
+                c.pending
+                    .iter()
+                    .map(|event| (event.parameter, event.status, event.control))
+                    .collect::<Vec<_>>()
+            };
+            let pending_before = pending(&current);
+            assert_eq!(pending_before.len(), usize::from(already_pending));
+            let memory_before = backing.clone();
+            let cursor_before = (current.event_index, current.event_cycle);
+            let queue_state = |c: &Controller| {
+                let endpoint = c.slots[1].as_ref().unwrap().endpoints[3].as_ref().unwrap();
+                let queue = endpoint.iso.as_ref().unwrap();
+                (
+                    queue
+                        .active
+                        .iter()
+                        .map(|active| (active.id, active.trb, active.bytes, active.done))
+                        .collect::<Vec<_>>(),
+                    queue.next,
+                    queue.recovery,
+                    endpoint.ring.index,
+                    endpoint.ring.cycle,
+                )
+            };
+            let queue_before = queue_state(&current);
+            let registers = core::mem::replace(&mut current.registers, Box::new(NoAccess));
+            for (dci, unhealthy) in [(3, false), (u8::MAX, false), (3, true), (u8::MAX, true)] {
+                old.dci = dci;
+                current.error = unhealthy.then_some(HSE);
+                current.command_poisoned = unhealthy;
+                let retired =
+                    BlockError::Unsupported("xHCI device generation is permanently retired");
+                assert_eq!(current.completed_iso(&old), Some(Err(retired)));
+                assert_eq!(
+                    current.device(current_id).unwrap().completed_iso(&old),
+                    Some(Err(BlockError::Unsupported(
+                        "foreign USB isochronous ticket"
+                    )))
+                );
+                assert_eq!(current.error, unhealthy.then_some(HSE));
+                assert_eq!(current.command_poisoned, unhealthy);
+            }
+            current.slots[1].as_mut().unwrap().suspended = true;
+            assert_eq!(
+                current.completed_iso(&old),
+                Some(Err(BlockError::Unsupported(
+                    "xHCI device generation is permanently retired"
+                )))
+            );
+            assert!(matches!(
+                current.submit_iso(1, 3, data.physical(), 32),
+                Err(BlockError::Unsupported(
+                    "USB consumer is fenced for device lifecycle"
+                ))
+            ));
+            current.slots[1].as_mut().unwrap().suspended = false;
+            assert_eq!(pending(&current), pending_before);
+            assert_eq!((current.event_index, current.event_cycle), cursor_before);
+            assert_eq!(queue_state(&current), queue_before);
+            assert!(backing == memory_before);
+            current.registers = registers;
+            current.error = None;
+            current.command_poisoned = false;
+            assert_eq!(
+                current.completed_iso(&fresh),
+                Some(Ok(IsoCompletion {
+                    bytes: 32,
+                    status: IsoStatus::Success
+                }))
+            );
+        }
     }
 
     #[test]
