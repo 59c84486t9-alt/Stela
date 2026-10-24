@@ -105,6 +105,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             tid: h.tid,
             tx_ba: None,
             authentication: s.station.external_authentication().cloned(),
+            management: None,
         };
         let grant = if management && s.phase == Phase::Joining {
             let roc = s.roc_deadline.ok_or(Error::GrantTimeout)?;

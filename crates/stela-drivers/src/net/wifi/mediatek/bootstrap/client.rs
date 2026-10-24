@@ -7,6 +7,7 @@ use super::{Controller, Phase as ControllerPhase};
 mod ba;
 mod external;
 mod local;
+pub mod management;
 mod modern;
 mod packet;
 mod policy;
@@ -113,6 +114,7 @@ pub struct PacketOwner<C: 'static> {
     tid: Option<u8>,
     tx_ba: Option<Arc<station::ba::tx::Session>>,
     authentication: Option<Arc<station::external::Session>>,
+    management: Option<Arc<management::Session>>,
 }
 impl<C> PacketOwner<C> {
     pub fn association_epoch(&self) -> u64 {
@@ -126,6 +128,9 @@ impl<C> PacketOwner<C> {
     }
     pub fn authentication_session(&self) -> Option<&Arc<station::external::Session>> {
         self.authentication.as_ref()
+    }
+    pub fn management_session(&self) -> Option<&Arc<management::Session>> {
+        self.management.as_ref()
     }
     pub fn key(&self) -> Option<KeyIdentity> {
         self.key
@@ -167,6 +172,7 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     roc_token: u8,
     roc_deadline: Option<u64>,
     modern: Option<modern::Configuration>,
+    management: Option<Arc<management::Session>>,
     authentication_deadline: Option<u64>,
     authentication_end: Option<(Arc<station::external::Session>, Option<station::Failure>)>,
 }
@@ -240,6 +246,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 roc_token: 0,
                 roc_deadline: None,
                 modern: None,
+                management: None,
                 authentication_deadline: None,
                 authentication_end: None,
             })),
@@ -762,6 +769,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 events.push(Event::ExternalAuthentication(received));
                 continue;
             }
+            if s.management.is_some() && wifi::security::management::robust(&frame) {
+                events.push(Event::ProtectedManagement(Self::receive_management(
+                    s, frame, &f.bytes,
+                )?));
+                continue;
+            }
             let epoch = s.station.association_epoch().ok_or(Error::WrongPhase)?;
             if modern_data
                 && (frame.header().control & 0x00fc == 0x00d0
@@ -953,6 +966,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.ba_actions.clear();
         s.profile = None;
         s.modern = None;
+        s.management = None;
         s.authentication_deadline = None;
         Ok(())
     }
@@ -999,6 +1013,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     }
 }
 pub enum Event {
+    ProtectedManagement(management::Received),
     ExternalAuthentication(station::external::Received),
     ExternalAuthenticationEnded {
         session: Arc<station::external::Session>,

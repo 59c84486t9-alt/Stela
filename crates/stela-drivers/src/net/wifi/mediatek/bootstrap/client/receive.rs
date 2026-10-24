@@ -90,6 +90,9 @@ impl<C> Groups<C> {
             pending: [None, None],
         }
     }
+    pub(super) fn is_idle(&self) -> bool {
+        self.pending.iter().all(Option::is_none)
+    }
     pub(super) fn clear(&mut self) {
         self.pending = [None, None];
     }

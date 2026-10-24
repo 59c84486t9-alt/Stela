@@ -103,12 +103,18 @@ pub struct Config {
     pub fixed_rate: Option<FixedRate>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum QualifiedAction {
+    BlockAck(u8),
+    SaQuery,
+}
+
 pub fn encode(c: Config) -> Result<[u8; 32], Error> {
     encode_inner(c, None)
 }
 
-/// Body-qualified MT7925 Block Ack management path. Metadata-only Action
-/// encoding remains refused: the real category/action bytes select the donor
+/// Body-qualified MT7925 Block Ack and protected unicast SA Query path.
+/// Metadata-only Action encoding remains refused: the real category/action bytes select the donor
 /// ADDBA-request TID independently of ordinary response/DELBA management.
 /// This constructs no agreement, radio permission, protection or air receipt.
 pub(in crate::net::wifi::mediatek) fn encode_mpdu(
@@ -120,8 +126,6 @@ pub(in crate::net::wifi::mediatek) fn encode_mpdu(
     }
     let h = crate::net::wifi::frame::Header::parse(bytes).map_err(|_| Error::InvalidHeader)?;
     if c.chip != Chip::Mt7925
-        || c.protect
-        || h.protected()
         || h.fragmented()
         || h.control & 0x00fc != 0x00d0
         || h.length != 24
@@ -131,7 +135,20 @@ pub(in crate::net::wifi::mediatek) fn encode_mpdu(
         return Err(Error::UnsupportedFrame);
     }
     let body = bytes.get(h.length..).ok_or(Error::InvalidHeader)?;
-    if body.first() != Some(&3) {
+    if c.protect && h.protected() {
+        if body.len() != 4
+            || body[0] != 8
+            || body[1] > 1
+            || h.receiver.is_multicast()
+            || h.control & 0x0300 != 0
+            || c.frame.multicast
+            || c.queue != Queue::Management
+        {
+            return Err(Error::UnsupportedFrame);
+        }
+        return encode_inner(c, Some(QualifiedAction::SaQuery));
+    }
+    if c.protect || h.protected() || body.first() != Some(&3) {
         return Err(Error::UnsupportedFrame);
     }
     let action = *body.get(1).ok_or(Error::InvalidHeader)?;
@@ -143,16 +160,16 @@ pub(in crate::net::wifi::mediatek) fn encode_mpdu(
     if body.len() < minimum {
         return Err(Error::InvalidHeader);
     }
-    encode_inner(c, Some(action))
+    encode_inner(c, Some(QualifiedAction::BlockAck(action)))
 }
 
-fn encode_inner(c: Config, block_ack_action: Option<u8>) -> Result<[u8; 32], Error> {
+fn encode_inner(c: Config, action: Option<QualifiedAction>) -> Result<[u8; 32], Error> {
     let f = c.frame;
     let connac3 = c.chip == Chip::Mt7925;
     // BAR derives TID/start sequence from its body; Action can select the
     // ADDBA-specific TID/flag path. This bounded metadata has neither body.
     if (f.kind == Kind::Control && f.subtype == 8)
-        || (f.kind == Kind::Management && f.subtype == 13 && block_ack_action.is_none())
+        || (f.kind == Kind::Management && f.subtype == 13 && action.is_none())
     {
         return Err(Error::UnsupportedFrame);
     }
@@ -225,7 +242,7 @@ fn encode_inner(c: Config, block_ack_action: Option<u8>) -> Result<[u8; 32], Err
     let mut amsdu = c.hardware_amsdu && c.pid < 3;
     if connac3 {
         // pinned connac3 tx_mgnt_type::{MT_TX_NORMAL=0,MT_TX_ADDBA=2}.
-        let tid = if block_ack_action == Some(0) {
+        let tid = if action == Some(QualifiedAction::BlockAck(0)) {
             2
         } else if f.kind == Kind::Management {
             0
@@ -608,6 +625,60 @@ mod tests {
             assert_eq!(encode_mpdu(c, &bytes), Err(Error::UnsupportedFrame));
         }
     }
+    #[test]
+    fn protected_sa_query_requires_exact_body_and_both_wire_and_descriptor_protection() {
+        for action in 0..=1u8 {
+            let mut bytes = [0; 28];
+            bytes[..2].copy_from_slice(&0x40d0u16.to_le_bytes());
+            bytes[4] = 2;
+            bytes[24..].copy_from_slice(&[8, action, 0xa5, 0x5a]);
+            let mut config = base(Chip::Mt7925);
+            config.frame = Frame {
+                bytes: bytes.len(),
+                header_bytes: 24,
+                kind: Kind::Management,
+                subtype: 13,
+                tid: 7,
+                multicast: false,
+                fragment: Fragment::None,
+                sequence: Sequence::Hardware,
+                minimum_rate: true,
+            };
+            config.queue = Queue::Management;
+            config.hardware_amsdu = false;
+            config.fixed_rate = Some(FixedRate::Connac3(18));
+            assert_eq!(encode(config), Err(Error::UnsupportedFrame));
+            let encoded = words(encode_mpdu(config, &bytes).unwrap());
+            assert_eq!((encoded[1] >> 21) & 15, 0);
+            assert_eq!(encoded[3] & 2, 2);
+            for fault in 0..10 {
+                let mut bad = bytes;
+                let mut selected = config;
+                match fault {
+                    0 => bad[24] = 4,
+                    1 => bad[25] = 2,
+                    2 => bad[1] &= !0x40,
+                    3 => selected.protect = false,
+                    4 => bad[4] |= 1,
+                    5 => bad[1] |= 1,
+                    6 => bad[22] = 1,
+                    7 => selected.frame.multicast = true,
+                    8 => selected.queue = Queue::Data { access_category: 0 },
+                    _ => selected.chip = Chip::Mt7922,
+                }
+                assert!(encode_mpdu(selected, &bad).is_err(), "fault {fault}");
+            }
+            let mut short = config;
+            short.frame.bytes -= 1;
+            assert!(encode_mpdu(short, &bytes[..27]).is_err());
+            let mut long = config;
+            long.frame.bytes += 1;
+            let mut trailing = bytes.to_vec();
+            trailing.push(0);
+            assert!(encode_mpdu(long, &trailing).is_err());
+        }
+    }
+
     #[test]
     #[ignore = "requires STELA_MT792X_TXWI_ORACLE from unchanged pinned raw80211 descriptor writers"]
     fn unchanged_pinned_raw80211_writers_match_every_descriptor_word() {
