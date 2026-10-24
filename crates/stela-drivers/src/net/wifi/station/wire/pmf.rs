@@ -97,10 +97,7 @@ fn suites(bytes: &mut &[u8]) -> Result<Vec<[u8; 4]>, Error> {
         return Err(Error::Invalid("empty PMF suite list"));
     }
     let bytes = take(bytes, count.checked_mul(4).ok_or(Error::Truncated)?)?;
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|v| v.try_into().unwrap())
-        .collect())
+    Ok(bytes.as_chunks::<4>().0.to_vec())
 }
 impl Profile {
     fn parse(mut bytes: &[u8]) -> Result<Self, Error> {
