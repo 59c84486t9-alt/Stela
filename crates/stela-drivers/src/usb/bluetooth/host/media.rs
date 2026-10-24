@@ -568,6 +568,66 @@ impl MediaIo for Host {
 }
 
 #[cfg(test)]
+pub(super) fn generation_prepare(
+    host: &mut Host,
+    binding: &crate::usb::bluetooth::Binding,
+    dma: &mut dyn DmaAllocator,
+) {
+    let mut native = Native::new(Bindings::new(binding).unwrap(), dma).unwrap();
+    let pair = native.bindings.iso();
+    native.start(host, pair, dma).unwrap();
+    let sco = native
+        .bindings
+        .sco(media::Voice {
+            connections: 1,
+            air_mode: media::AirMode::Cvsd,
+            voice_setting: 0,
+        })
+        .unwrap();
+    native.replace(host, None, sco, dma).unwrap();
+    assert!(native.iso_receive.is_some());
+    assert!(native.input.iter().all(|b| b.queued.is_some()));
+    host.media = Some(native);
+}
+
+#[cfg(test)]
+pub(super) fn generation_refuse(host: &mut Host, dma: &mut dyn DmaAllocator) {
+    let native = host.media.as_ref().unwrap();
+    let iso = native.iso.unwrap();
+    let sco = native.sco;
+    let before = (
+        native.running,
+        native.retired,
+        native.poisoned,
+        native.next_input,
+        native.iso_receive.is_some(),
+        native.input.iter().filter(|b| b.queued.is_some()).count(),
+    );
+    assert!(host.start_iso(iso, dma).is_err());
+    assert!(host.replace_sco(sco, None, dma).is_err());
+    assert!(host.read_media(Kind::Iso).is_err());
+    assert!(host.read_media(Kind::Sco).is_err());
+    assert!(host.write_media(Kind::Iso, &[0x7a; 264]).is_err());
+    assert!(host.write_media(Kind::Sco, &[0x7a; 48]).is_err());
+    assert!(host.quiesce_media().is_err());
+    assert!(host.reset_media_epoch().is_err());
+    assert!(host.resume_media().is_err());
+    assert!(host.close_media().is_err());
+    let native = host.media.as_ref().unwrap();
+    assert_eq!(
+        (
+            native.running,
+            native.retired,
+            native.poisoned,
+            native.next_input,
+            native.iso_receive.is_some(),
+            native.input.iter().filter(|b| b.queued.is_some()).count()
+        ),
+        before
+    );
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -693,64 +753,4 @@ mod tests {
         );
         controller.borrow_mut().cancel(1, pair.input.dci()).unwrap();
     }
-}
-
-#[cfg(test)]
-pub(super) fn generation_prepare(
-    host: &mut Host,
-    binding: &crate::usb::bluetooth::Binding,
-    dma: &mut dyn DmaAllocator,
-) {
-    let mut native = Native::new(Bindings::new(binding).unwrap(), dma).unwrap();
-    let pair = native.bindings.iso();
-    native.start(host, pair, dma).unwrap();
-    let sco = native
-        .bindings
-        .sco(media::Voice {
-            connections: 1,
-            air_mode: media::AirMode::Cvsd,
-            voice_setting: 0,
-        })
-        .unwrap();
-    native.replace(host, None, sco, dma).unwrap();
-    assert!(native.iso_receive.is_some());
-    assert!(native.input.iter().all(|b| b.queued.is_some()));
-    host.media = Some(native);
-}
-
-#[cfg(test)]
-pub(super) fn generation_refuse(host: &mut Host, dma: &mut dyn DmaAllocator) {
-    let native = host.media.as_ref().unwrap();
-    let iso = native.iso.unwrap();
-    let sco = native.sco;
-    let before = (
-        native.running,
-        native.retired,
-        native.poisoned,
-        native.next_input,
-        native.iso_receive.is_some(),
-        native.input.iter().filter(|b| b.queued.is_some()).count(),
-    );
-    assert!(host.start_iso(iso, dma).is_err());
-    assert!(host.replace_sco(sco, None, dma).is_err());
-    assert!(host.read_media(Kind::Iso).is_err());
-    assert!(host.read_media(Kind::Sco).is_err());
-    assert!(host.write_media(Kind::Iso, &[0x7a; 264]).is_err());
-    assert!(host.write_media(Kind::Sco, &[0x7a; 48]).is_err());
-    assert!(host.quiesce_media().is_err());
-    assert!(host.reset_media_epoch().is_err());
-    assert!(host.resume_media().is_err());
-    assert!(host.close_media().is_err());
-    let native = host.media.as_ref().unwrap();
-    assert_eq!(
-        (
-            native.running,
-            native.retired,
-            native.poisoned,
-            native.next_input,
-            native.iso_receive.is_some(),
-            native.input.iter().filter(|b| b.queued.is_some()).count()
-        ),
-        before
-    );
 }

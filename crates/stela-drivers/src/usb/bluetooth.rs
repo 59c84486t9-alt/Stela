@@ -485,6 +485,9 @@ impl Assembler {
 }
 
 #[cfg(test)]
+pub(crate) use host::generation_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::usb::xhci::{self, Device};
@@ -1008,6 +1011,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(test)]
-pub(crate) use host::generation_tests;

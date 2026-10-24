@@ -49,6 +49,9 @@ impl From<BlockError> for Error {
 }
 
 #[cfg(test)]
+pub(in crate::usb::bluetooth) use session::generation_tests;
+
+#[cfg(test)]
 pub(in crate::usb::bluetooth) mod tests {
     use super::*;
     use crate::bus::dma::{DmaAllocator, DmaBuffer};
@@ -644,6 +647,3 @@ pub(in crate::usb::bluetooth) mod tests {
         assert_eq!(s.lifecycle(), Lifecycle::Failed);
     }
 }
-
-#[cfg(test)]
-pub(in crate::usb::bluetooth) use session::generation_tests;
