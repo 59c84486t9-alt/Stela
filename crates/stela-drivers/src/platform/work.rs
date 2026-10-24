@@ -870,11 +870,13 @@ impl<const N: usize> Runtime<N> {
     fn arrive(&self, index: usize, new_job: bool) {
         self.valid();
         let view = self.context_view(index, true);
-        // SAFETY: hook runs on its real destination stack, IF=0, no lock/switch borrow.
-        if let Some(binding) = unsafe { &(*self.task(index)).binding }
-            && let Err(error) = unsafe { binding.arrive(&view, new_job) }
-        {
-            self.queue.cpu.fatal(error);
+        // SAFETY: retained current task on its real destination stack at IF0.
+        if let Some(binding) = unsafe { &(*self.task(index)).binding } {
+            // SAFETY: no lock/switch borrow; the retained hook restores foreign state.
+            let result = unsafe { binding.arrive(&view, new_job) };
+            if let Err(error) = result {
+                self.queue.cpu.fatal(error);
+            }
         }
     }
     /// # Safety
@@ -946,13 +948,10 @@ impl<const N: usize> Runtime<N> {
                     let binding = binding.as_ref().ok_or(WorkError::Unavailable)?;
                     // SAFETY: IF0 pure predicate; process PREPARE is provider-owned.
                     let still_blocked = unsafe { binding.still_blocked(&view)? };
-                    // SAFETY: atomic sidecar is separate from Task; IF excludes same-CPU IRQ.
-                    let pending = unsafe {
-                        (*self.task(index))
-                            .signal
-                            .pending
-                            .swap(false, Ordering::AcqRel)
-                    };
+                    // SAFETY: this retained field is immutable at IF0; the short
+                    // borrow ends here before foreign leave or a context switch.
+                    let signal = unsafe { &(*self.task(index)).signal };
+                    let pending = signal.pending.swap(false, Ordering::AcqRel);
                     if !still_blocked || pending {
                         return Ok(false);
                     }
@@ -1267,19 +1266,20 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
             Err(e) => executor.queue.cpu.fatal(e),
         };
         let view = executor.context_view(index, true);
-        // SAFETY: actual completing stack, IF=0; owner must already have exited.
-        if let Some(binding) = unsafe { &(*executor.task(index)).binding }
-            && let Err(error) = unsafe { binding.complete(&view) }
-        {
-            executor.queue.cpu.fatal(error);
+        // SAFETY: actual retained completing task on its own stack at IF0.
+        if let Some(binding) = unsafe { &(*executor.task(index)).binding } {
+            // SAFETY: owner already exited; no lock/switch borrow spans this hook.
+            let result = unsafe { binding.complete(&view) };
+            if let Err(error) = result {
+                executor.queue.cpu.fatal(error);
+            }
         }
-        // SAFETY: close this exact job before future assignment; old handles stay inert.
-        unsafe {
-            (*executor.task(index))
-                .signal
-                .sequence
-                .store(0, Ordering::Release)
-        };
+        {
+            // SAFETY: retained signal field; this borrow ends before later Task
+            // mutation. Close this exact job so old wake handles remain inert.
+            let signal = unsafe { &(*executor.task(index)).signal };
+            signal.sequence.store(0, Ordering::Release);
+        }
         if let Err(e) = executor.queue.finish(slot, job.sequence) {
             executor.queue.cpu.fatal(e);
         }
