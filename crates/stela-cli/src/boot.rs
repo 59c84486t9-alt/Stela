@@ -30,8 +30,10 @@ const RECOVERY_VOLUME_LIMIT: u64 = 3 * 1024 * 1024 * 1024;
 /// turns off the SEP firmware load and protected data access and selects
 /// ephemeral storage.
 const RESTORE_ENVIRONMENT: OsEnvironment = OsEnvironment::DarwinosRamdisk;
-/// The console boot-args when `--boot-args` gives none.
-const DEFAULT_BOOT_ARGS: &str = "-v";
+/// The console boot-args when `--boot-args` gives none: verbose boot, with
+/// the kernel console and panic text on the modeled `uart0`, so every run's
+/// log retains the guest's own account of its boot.
+const DEFAULT_BOOT_ARGS: &str = "-v serial=3 serial-device-name=uart0";
 /// The boot-args a restore host has iBoot pass to the restore ramdisk
 /// (idevicerestore `restore.c`): the ramdisk root, NAND reformat permission,
 /// the progress UI and restore mode. `-restore` is read by the kernel and
@@ -1203,10 +1205,13 @@ mod tests {
 
     #[test]
     fn boot_modes_add_their_arguments_after_the_console_arguments() {
-        assert_eq!(boot_args(DEFAULT_BOOT_ARGS, &[]), "-v");
+        assert_eq!(
+            boot_args(DEFAULT_BOOT_ARGS, &[]),
+            "-v serial=3 serial-device-name=uart0"
+        );
         assert_eq!(
             boot_args(DEFAULT_BOOT_ARGS, RESTORE_MODE_ARGS),
-            "-v rd=md0 nand-enable-reformat=0x1 -progress -restore"
+            "-v serial=3 serial-device-name=uart0 rd=md0 nand-enable-reformat=0x1 -progress -restore"
         );
         let recovery = boot_args("-v debug=0x8", RECOVERY_MODE_ARGS);
         assert_eq!(
