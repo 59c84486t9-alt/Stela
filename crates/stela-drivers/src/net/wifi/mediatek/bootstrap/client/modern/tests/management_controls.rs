@@ -616,7 +616,46 @@ fn actual_modern_reconnect_rejects_original_received_and_tx_session_under_fresh_
         }
         .unwrap();
     }
-    let session = attach(&mut driver, &mut owner);
+    let epoch = driver.station().association_epoch().unwrap();
+    let before = model.response.lock().unwrap().client_commands.len();
+    let log = model.bar.0.lock().unwrap().log.len();
+    let head = model.queues[&0xd4300].lock().unwrap().head;
+    let permit = admit(&mut owner, &driver, AssociationUse::Management);
+    // SAFETY: actual model old users were drained above. Even this fresh GTK
+    // namespace cannot revive the original IGTK with a reset replay floor.
+    assert!(matches!(
+        unsafe {
+            driver.install_management_key_modern(
+                &mut owner,
+                permit,
+                epoch,
+                4,
+                &[0x55; 16],
+                PacketNumber::new(100).unwrap(),
+            )
+        },
+        Err(ClientError::Key(mailbox::key::Error::Bip(
+            mailbox::key::bip::Error::RetiredMaterial
+        )))
+    ));
+    assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
+    assert_eq!(model.bar.0.lock().unwrap().log.len(), log);
+    assert_eq!(model.queues[&0xd4300].lock().unwrap().head, head);
+    assert!(driver.state().management.is_none());
+    let permit = admit(&mut owner, &driver, AssociationUse::Management);
+    // SAFETY: same actual drained requester and authenticated model OS exchange
+    // as attach(), now supplying fresh temporal material for this association.
+    let session = unsafe {
+        driver.install_management_key_modern(
+            &mut owner,
+            permit,
+            epoch,
+            4,
+            &[0x77; 16],
+            PacketNumber::new(100).unwrap(),
+        )
+    }
+    .unwrap();
     assert_ne!(session.association_epoch(), old_session.association_epoch());
     assert_ne!(session.pairwise_key(), old_session.pairwise_key());
     assert_ne!(session.group_key(), old_session.group_key());
