@@ -1468,8 +1468,46 @@ const MIRRORED: [Encoding; 7] = {
 /// Rt 31 in MRS: XZR, which discards the value.
 const ZERO_REGISTER: u8 = 31;
 
-/// The cells of the [`MIRRORED`] registers, in its order.
-type Mirrors = [register_read::Cell; MIRRORED.len()];
+/// The cells of the [`MIRRORED`] registers, in its order: native code reads
+/// `cells`, the running PE's at its EL and GXF state. A read's value and
+/// plainness follow from System registers and PSTATE, of which an exception
+/// entry or return, GENTER or GEXIT changes the EL, the GXF state and the
+/// masks alone: `banks` keeps the cells each EL and GXF state left, which
+/// it finds again ([`Mirrors::transition`]). Anything else that changes
+/// derived state closes every cell of every bank.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Mirrors {
+    cells: [register_read::Cell; MIRRORED.len()],
+    banks: [[register_read::Cell; MIRRORED.len()]; MIRROR_STATES],
+}
+
+/// The ELs and GXF states, `Mirrors::banks` per [`mirror_state`].
+const MIRROR_STATES: usize = 8;
+
+fn mirror_state(el: u8, guarded: bool) -> usize {
+    usize::from(el) | usize::from(guarded) << 2
+}
+
+impl Mirrors {
+    /// Keep the cells of state `from` and take those of `to`.
+    fn transition(&mut self, from: usize, to: usize) {
+        self.banks[from] = self.cells;
+        self.cells = self.banks[to];
+    }
+}
+
+impl core::ops::Index<usize> for Mirrors {
+    type Output = register_read::Cell;
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.cells[index]
+    }
+}
+
+impl core::ops::IndexMut<usize> for Mirrors {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.cells[index]
+    }
+}
 
 /// The [`MIRRORED`] index of DAIF.
 const DAIF_MIRROR: usize = MIRRORED.len() - 1;
@@ -1890,15 +1928,36 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Forget state derived from System registers and PSTATE.
     fn derived_changed(&mut self) {
+        self.forget_derived();
+        // A closed cell keeps no value a mispredicted native read could use
+        // (FEAT_CSV3's System register rule).
+        *self.mirrors = Mirrors::default();
+    }
+
+    /// An exception entry or return, GENTER or GEXIT moved the PE from EL
+    /// and GXF state `from`: what derives from PSTATE goes, but the mirrored
+    /// reads keep their cells per state ([`Mirrors`]), and an open DAIF
+    /// cell reads the new masks.
+    fn transitioned(&mut self, from: usize) {
+        self.forget_derived();
+        let pstate = self.cpu.pstate;
+        self.mirrors
+            .transition(from, mirror_state(pstate.el, pstate.guarded));
+        let daif = &mut self.mirrors[DAIF_MIRROR];
+        if daif.readable != 0 {
+            daif.value = daif_register(pstate.daif);
+        }
+        self.sync_host_regime();
+    }
+
+    /// What [`Self::derived_changed`] forgets but the mirrored reads.
+    fn forget_derived(&mut self) {
         self.timers = None;
         self.floating_point = None;
         self.memory_checks = None;
         self.native_system = None;
         self.debug = None;
         self.reopen_pointers();
-        // A closed cell keeps no value a mispredicted native read could use
-        // (FEAT_CSV3's System register rule).
-        *self.mirrors = Mirrors::default();
         self.device_lines = None;
     }
 
@@ -2568,6 +2627,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             fault_address: exception.fault_address,
         });
         let (from_el, from_guarded) = (self.cpu.pstate.el, self.cpu.pstate.guarded);
+        let from = mirror_state(from_el, from_guarded);
         self.cpu.take(exception);
         self.statistics.exceptions += 1;
         self.host.report(&Event::Exception {
@@ -2579,7 +2639,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             fault_address: exception.fault_address,
         });
         self.monitor_after(trace);
-        self.sync_regime();
+        self.transitioned(from);
     }
 
     /// The system counter's count (`clock`).
@@ -5862,6 +5922,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// `AuthIB` and `AArch64_ExceptionReturn`).
     fn exception_return(&mut self, key: Option<AuthenticationKey>) -> Step {
         let pc = self.cpu.pc;
+        let from = mirror_state(self.cpu.pstate.el, self.cpu.pstate.guarded);
         if self.cpu.pstate.el == 0 {
             return self.undefined();
         }
@@ -5932,7 +5993,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pc: self.cpu.pc,
         });
         self.monitor_after(trace);
-        self.sync_regime();
+        self.transitioned(from);
         Ok(())
     }
 

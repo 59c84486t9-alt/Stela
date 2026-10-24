@@ -29,6 +29,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.degrade(requirement)?;
         }
         let trace = self.monitor_before(MonitorKind::GuardedEnter { immediate });
+        let from = super::mirror_state(self.cpu.pstate.el, self.cpu.pstate.guarded);
         if self.cpu.guarded_enter(immediate).is_err() {
             return self.undefined();
         }
@@ -39,12 +40,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pc: self.cpu.pc,
         });
         self.monitor_after(trace);
-        self.sync_regime();
+        self.transitioned(from);
         Ok(())
     }
 
     /// GEXIT (`Cpu::guarded_exit`).
     fn guarded_exit(&mut self) -> Step {
+        let from = super::mirror_state(self.cpu.pstate.el, self.cpu.pstate.guarded);
         if self.cpu.pstate.guarded && self.cpu.pstate.el != 0 {
             let bank = &self.cpu.apple.guarded[usize::from(self.cpu.pstate.el) - 1];
             self.guest_entry(bank.spsr, bank.aspsr & ASPSR_GUARDED != 0)?;
@@ -62,7 +64,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     pc: self.cpu.pc,
                 });
                 self.monitor_after(trace);
-                self.sync_regime();
+                self.transitioned(from);
                 Ok(())
             }
         }
@@ -141,6 +143,40 @@ pub(super) mod tests {
         assert!(machine.cpu.pstate.guarded && !machine.cpu.pstate.sp);
         assert_eq!((machine.cpu.pc, machine.cpu.state.sp), (second + 4, 0x6000));
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0);
+    }
+
+    /// GENTER and GEXIT keep each GXF state's open mirrored reads, which
+    /// any System register write closes in every state.
+    #[test]
+    fn guarded_transitions_find_each_states_mirrored_reads_again() {
+        const MRS_TPIDR_EL1: u32 = 0xd538_d088; // mrs x8, tpidr_el1
+        const MRS_GXF_STATUS: u32 = 0xd53e_f808; // mrs x8, gxf_status_el1
+        const MSR_TPIDR_EL1: u32 = 0xd518_d089; // msr tpidr_el1, x9
+        let (thread, status) = (2, 5);
+        let mut machine = gxf(Chip::AppleM2);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::TPIDR_EL1, 0, 0x7000);
+        machine.system_instruction(MRS_TPIDR_EL1).unwrap();
+        machine.system_instruction(MRS_GXF_STATUS).unwrap();
+        let el1 = machine.mirrors.cells;
+        assert_eq!((el1[thread].readable, el1[thread].value), (1, 0x7000));
+        assert_eq!((el1[status].readable, el1[status].value), (1, 0));
+        // GL1's cells are its own: closed until read there.
+        machine.system_instruction(GENTER).unwrap();
+        assert!(machine.mirrors.cells.iter().all(|cell| cell.readable == 0));
+        machine.system_instruction(MRS_GXF_STATUS).unwrap();
+        let gl1 = machine.mirrors.cells;
+        assert_eq!((gl1[status].readable, gl1[status].value), (1, 1));
+        machine.system_instruction(GEXIT).unwrap();
+        assert_eq!(machine.mirrors.cells, el1);
+        machine.system_instruction(GENTER).unwrap();
+        assert_eq!(machine.mirrors.cells, gl1);
+        // A write closes them all.
+        machine.system_instruction(MSR_TPIDR_EL1).unwrap();
+        machine.system_instruction(GEXIT).unwrap();
+        assert!(machine.mirrors.cells.iter().all(|cell| cell.readable == 0));
     }
 
     #[test]
