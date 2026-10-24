@@ -1008,7 +1008,7 @@ pub fn dram_base(chip_id: u32) -> Result<u64, String> {
 /// `/arm-io/mcc` `dram-base`, which most M3 and later boards state, or else
 /// the SoC's base ([`dram_base`]). Where both exist they must agree.
 pub fn board_dram_base(tree: &[u8], chip_id: u32) -> Result<u64, String> {
-    let root = Node::root(tree).ok_or("DeviceTree has no root")?;
+    let root = Node::root_exact(tree).ok_or("DeviceTree has no root or is malformed")?;
     let stated = root
         .child("arm-io")
         .and_then(|io| io.child("mcc"))
@@ -1946,7 +1946,7 @@ fn place_coresight(cpu: usize, pairs: &[(u64, u64)]) -> Result<CoreSight, String
 /// `ranges`; the AIC's inputs and dies are those its vectors name
 /// ([`aic_vectors`], [`aic_inputs`]).
 pub fn board(tree: &[u8]) -> Result<Board, String> {
-    let root = Node::root(tree).ok_or("DeviceTree has no root")?;
+    let root = Node::root_exact(tree).ok_or("DeviceTree has no root or is malformed")?;
     let chip_id = root
         .child("chosen")
         .and_then(|chosen| chosen.first_u32("chip-id"))
@@ -3137,6 +3137,25 @@ mod tests {
         assert_eq!(board_dram_base(&with_base(None), 0x8112), Ok(0x8_0000_0000));
         assert!(board_dram_base(&with_base(Some(&stated)), 0x8112).is_err());
         assert!(board_dram_base(&with_base(Some(&[0; 4])), m3).is_err());
+    }
+
+    #[test]
+    fn board_intake_requires_exact_complete_device_tree_bytes() {
+        let tree = tree(
+            0x8112,
+            "Apple M2",
+            ["uart-1,samsung", "wdt,s5l8960x", "aic,2"],
+        );
+        assert!(board(&tree).is_ok());
+        assert!(board_dram_base(&tree, 0x8112).is_ok());
+        for suffix in [0, 0xa5] {
+            let mut malformed = tree.clone();
+            malformed.push(suffix);
+            assert!(board(&malformed).is_err());
+            assert!(board_dram_base(&malformed, 0x8112).is_err());
+        }
+        assert!(board(&tree[..tree.len() - 1]).is_err());
+        assert!(board_dram_base(&tree[..tree.len() - 1], 0x8112).is_err());
     }
 
     #[test]

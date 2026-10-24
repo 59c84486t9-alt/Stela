@@ -4,6 +4,12 @@
 //! (m1n1 `adt.c`; the format `stela-loader` parses and serializes exactly).
 use alloc::vec::Vec;
 
+const NODE_HEADER_BYTES: usize = 8;
+const PROPERTY_NAME_BYTES: usize = 32;
+const PROPERTY_HEADER_BYTES: usize = PROPERTY_NAME_BYTES + 4;
+// Match the loader's accepted depths, including the root at depth zero.
+const MAX_DEPTH: usize = 64;
+
 #[derive(Clone)]
 pub struct Node<'a> {
     data: &'a [u8],
@@ -11,6 +17,7 @@ pub struct Node<'a> {
     children: usize,
     /// Offset of the first property.
     start: usize,
+    depth: usize,
 }
 
 /// Little-endian u64 cells; a trailing partial cell is ignored.
@@ -28,8 +35,35 @@ type Properties<'a> = Vec<(&'a [u8], &'a [u8])>;
 
 fn u32_at(data: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes(
-        data.get(offset..offset + 4)?.try_into().ok()?,
+        data.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
     ))
+}
+
+struct Property<'a> {
+    name: &'a [u8],
+    value: &'a [u8],
+    encoded_length: u32,
+    next: usize,
+}
+
+fn property_at(data: &[u8], offset: usize) -> Option<Property<'_>> {
+    let name_end = offset.checked_add(PROPERTY_NAME_BYTES)?;
+    let value_start = offset.checked_add(PROPERTY_HEADER_BYTES)?;
+    let name = data.get(offset..name_end)?;
+    let name = &name[..name.iter().position(|&b| b == 0).unwrap_or(name.len())];
+    let encoded_length = u32_at(data, name_end)?;
+    let length = (encoded_length & 0x7fff_ffff) as usize;
+    let value_end = value_start.checked_add(length)?;
+    let padded = length.checked_add(3)? & !3;
+    let next = value_start.checked_add(padded)?;
+    // Padding belongs to the property extent, even when it is nonzero.
+    data.get(value_end..next)?;
+    Some(Property {
+        name,
+        value: data.get(value_start..value_end)?,
+        encoded_length,
+        next,
+    })
 }
 
 impl<'a> Node<'a> {
@@ -90,40 +124,92 @@ impl<'a> Node<'a> {
         None
     }
 
+    /// Open a root prefix; trailing bytes are permitted. Lookups validate the
+    /// extents they consume. Use `root_exact` to validate a complete image.
     pub fn root(data: &'a [u8]) -> Option<Self> {
-        Self::at(data, 0)
+        Self::at(data, 0, 0)
     }
 
-    fn at(data: &'a [u8], offset: usize) -> Option<Self> {
+    /// Validate one complete image, including all descendants and padding,
+    /// without allocating or accepting trailing bytes.
+    pub fn root_exact(data: &'a [u8]) -> Option<Self> {
+        let root = Self::root(data)?;
+        (root.end()? == data.len()).then_some(root)
+    }
+
+    fn at(data: &'a [u8], offset: usize, depth: usize) -> Option<Self> {
+        if depth >= MAX_DEPTH {
+            return None;
+        }
+        let start = offset.checked_add(NODE_HEADER_BYTES)?;
+        let properties = u32_at(data, offset)? as usize;
+        let children = u32_at(data, offset.checked_add(4)?)? as usize;
+        let minimum = properties
+            .checked_mul(PROPERTY_HEADER_BYTES)?
+            .checked_add(children.checked_mul(NODE_HEADER_BYTES)?)?;
+        if minimum > data.len().checked_sub(start)? {
+            return None;
+        }
         Some(Self {
             data,
-            properties: u32_at(data, offset)? as usize,
-            children: u32_at(data, offset + 4)? as usize,
-            start: offset + 8,
+            properties,
+            children,
+            start,
+            depth,
         })
+    }
+
+    fn properties_end(&self) -> Option<usize> {
+        let mut offset = self.start;
+        for _ in 0..self.properties {
+            offset = property_at(self.data, offset)?.next;
+        }
+        Some(offset)
     }
 
     /// Every property as (name, value), and the offset after them.
     fn walk_properties(&self) -> Option<(Properties<'a>, usize)> {
         let mut offset = self.start;
-        let mut properties = Vec::with_capacity(self.properties);
+        let mut properties = Vec::new();
+        properties.try_reserve_exact(self.properties).ok()?;
         for _ in 0..self.properties {
-            let name = self.data.get(offset..offset + 32)?;
-            let name = &name[..name.iter().position(|&b| b == 0).unwrap_or(32)];
-            let length = (u32_at(self.data, offset + 32)? & 0x7fff_ffff) as usize;
-            let value = self.data.get(offset + 36..offset + 36 + length)?;
-            properties.push((name, value));
-            offset += 36 + length.next_multiple_of(4);
+            let property = property_at(self.data, offset)?;
+            properties.push((property.name, property.value));
+            offset = property.next;
         }
         Some((properties, offset))
     }
 
     fn end(&self) -> Option<usize> {
-        let (_, mut offset) = self.walk_properties()?;
-        for _ in 0..self.children {
-            offset = Self::at(self.data, offset)?.end()?;
+        self.scan(&mut |_| {})
+    }
+
+    /// Iterative depth-first traversal. Public visitation prevalidates the
+    /// entire subtree before allowing any callback to observe it.
+    fn scan(&self, visitor: &mut dyn FnMut(&Node<'a>)) -> Option<usize> {
+        let mut pending = [0usize; MAX_DEPTH];
+        let mut depth = self.depth;
+        let mut offset = self.start.checked_sub(NODE_HEADER_BYTES)?;
+        loop {
+            let node = Self::at(self.data, offset, depth)?;
+            offset = node.properties_end()?;
+            visitor(&node);
+            pending[depth] = node.children;
+            loop {
+                if pending[depth] != 0 {
+                    pending[depth] -= 1;
+                    depth = depth.checked_add(1)?;
+                    if depth >= MAX_DEPTH {
+                        return None;
+                    }
+                    break;
+                }
+                if depth == self.depth {
+                    return Some(offset);
+                }
+                depth -= 1;
+            }
         }
-        Some(offset)
     }
 
     /// Every property as (name, value), in tree order.
@@ -132,35 +218,38 @@ impl<'a> Node<'a> {
     }
 
     pub fn property(&self, name: &str) -> Option<&'a [u8]> {
-        let (properties, _) = self.walk_properties()?;
-        properties
-            .into_iter()
-            .find(|(candidate, _)| *candidate == name.as_bytes())
-            .map(|(_, value)| value)
+        self.properties_end()?;
+        let mut offset = self.start;
+        for _ in 0..self.properties {
+            let property = property_at(self.data, offset)?;
+            if property.name == name.as_bytes() {
+                return Some(property.value);
+            }
+            offset = property.next;
+        }
+        None
     }
 
     /// The ADT length's high bit marks an iBoot fill-in recipe. Its bytes are
     /// not a hardware value; the loader may resolve or remove that property.
     pub fn property_is_placeholder(&self, name: &str) -> Option<bool> {
+        self.properties_end()?;
         let mut offset = self.start;
         for _ in 0..self.properties {
-            let key = self.data.get(offset..offset + 32)?;
-            let key = &key[..key.iter().position(|&b| b == 0).unwrap_or(32)];
-            let encoded = u32_at(self.data, offset + 32)?;
-            let length = (encoded & 0x7fff_ffff) as usize;
-            self.data.get(offset + 36..offset + 36 + length)?;
-            if key == name.as_bytes() {
-                return Some(encoded & 0x8000_0000 != 0);
+            let property = property_at(self.data, offset)?;
+            if property.name == name.as_bytes() {
+                return Some(property.encoded_length & 0x8000_0000 != 0);
             }
-            offset += 36 + length.next_multiple_of(4);
+            offset = property.next;
         }
         None
     }
 
     pub fn child(&self, name: &str) -> Option<Self> {
-        let (_, mut offset) = self.walk_properties()?;
+        self.end()?;
+        let mut offset = self.properties_end()?;
         for _ in 0..self.children {
-            let child = Self::at(self.data, offset)?;
+            let child = Self::at(self.data, offset, self.depth + 1)?;
             let own = child.property("name")?;
             if own.strip_suffix(&[0]).unwrap_or(own) == name.as_bytes() {
                 return Some(child);
@@ -200,10 +289,12 @@ impl<'a> Node<'a> {
 
     /// The node's direct children, in tree order.
     pub fn children(&self) -> Option<Vec<Self>> {
-        let (_, mut offset) = self.walk_properties()?;
-        let mut children = Vec::with_capacity(self.children);
+        self.end()?;
+        let mut offset = self.properties_end()?;
+        let mut children = Vec::new();
+        children.try_reserve_exact(self.children).ok()?;
         for _ in 0..self.children {
-            let child = Self::at(self.data, offset)?;
+            let child = Self::at(self.data, offset, self.depth + 1)?;
             offset = child.end()?;
             children.push(child);
         }
@@ -212,13 +303,8 @@ impl<'a> Node<'a> {
 
     /// Visit this node and every descendant, depth first.
     pub fn visit(&self, visitor: &mut dyn FnMut(&Node<'a>)) -> Option<()> {
-        visitor(self);
-        let (_, mut offset) = self.walk_properties()?;
-        for _ in 0..self.children {
-            let child = Self::at(self.data, offset)?;
-            child.visit(visitor)?;
-            offset = child.end()?;
-        }
+        self.end()?;
+        self.scan(visitor)?;
         Some(())
     }
 
@@ -281,6 +367,141 @@ pub(crate) fn encode(properties: &[(&str, &[u8])], children: &[Vec<u8>]) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_images_require_every_header_value_and_padding_byte() {
+        let child = encode(&[("name", b"child\0"), ("value", b"abc")], &[]);
+        let tree = encode(&[("name", b"root\0")], &[child]);
+        assert!(Node::root_exact(&tree).is_some());
+        for length in 0..tree.len() {
+            assert!(Node::root_exact(&tree[..length]).is_none(), "{length}");
+        }
+        let property = encode(&[("value", b"x")], &[]);
+        for missing in 1..=3 {
+            let root = Node::root(&property[..property.len() - missing]).unwrap();
+            assert!(root.properties().is_none());
+            assert!(root.property("value").is_none());
+            assert!(root.property_is_placeholder("value").is_none());
+        }
+    }
+
+    #[test]
+    fn prefix_roots_and_exact_images_have_distinct_suffix_contracts() {
+        for suffix in [0, 0xa5] {
+            let mut tree = encode(&[], &[]);
+            tree.push(suffix);
+            let root = Node::root(&tree).unwrap();
+            assert!(root.children().unwrap().is_empty());
+            assert!(Node::root_exact(&tree).is_none());
+        }
+    }
+
+    #[test]
+    fn impossible_combined_counts_refuse_before_reservation() {
+        for (properties, children) in [(u32::MAX, 0u32), (0, u32::MAX), (1, 1)] {
+            let mut tree = Vec::new();
+            tree.extend(properties.to_le_bytes());
+            tree.extend(children.to_le_bytes());
+            // One empty property can fit, but not its declared sibling child.
+            tree.resize(NODE_HEADER_BYTES + PROPERTY_HEADER_BYTES, 0);
+            assert!(Node::root(&tree).is_none());
+            assert!(Node::root_exact(&tree).is_none());
+        }
+        assert!(u32_at(&[], usize::MAX).is_none());
+        assert!(property_at(&[], usize::MAX).is_none());
+    }
+
+    #[test]
+    fn recipe_flags_and_nonzero_padding_remain_structurally_valid() {
+        let mut tree = encode(&[("value", b"x")], &[]);
+        let length_offset = NODE_HEADER_BYTES + PROPERTY_NAME_BYTES;
+        tree[length_offset..length_offset + 4].copy_from_slice(&0x8000_0001u32.to_le_bytes());
+        let padding = NODE_HEADER_BYTES + PROPERTY_HEADER_BYTES + 1;
+        tree[padding..].fill(0xa5);
+        let root = Node::root_exact(&tree).unwrap();
+        assert_eq!(root.property("value"), Some(b"x".as_slice()));
+        assert_eq!(root.property_is_placeholder("value"), Some(true));
+        assert_eq!(root.properties().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn traversal_bounds_depth_and_preserves_depth_first_order() {
+        let mut tree = encode(&[], &[]);
+        for _ in 1..MAX_DEPTH {
+            tree = encode(&[], &[tree]);
+        }
+        let root = Node::root_exact(&tree).unwrap();
+        let mut visited = 0;
+        root.visit(&mut |_| visited += 1).unwrap();
+        assert_eq!(visited, MAX_DEPTH);
+        let too_deep = encode(&[], &[tree]);
+        assert!(Node::root_exact(&too_deep).is_none());
+        visited = 0;
+        assert!(
+            Node::root(&too_deep)
+                .unwrap()
+                .visit(&mut |_| visited += 1)
+                .is_none()
+        );
+        assert_eq!(visited, 0);
+
+        let grandchild = encode(&[("name", b"grandchild")], &[]);
+        let first = encode(&[("name", b"first")], &[grandchild]);
+        let second = encode(&[("name", b"second")], &[]);
+        let tree = encode(&[("name", b"root")], &[first, second]);
+        let root = Node::root_exact(&tree).unwrap();
+        let mut names = Vec::new();
+        root.visit(&mut |node| names.push(node.property("name").unwrap()))
+            .unwrap();
+        assert_eq!(
+            names,
+            [b"root".as_slice(), b"first", b"grandchild", b"second"]
+        );
+        assert_eq!(root.children().unwrap().len(), 2);
+        assert!(root.child("first").unwrap().child("grandchild").is_some());
+    }
+
+    #[test]
+    fn malformed_later_children_produce_no_partial_visitor_observations() {
+        let first = encode(&[("name", b"first")], &[]);
+        let mut second = encode(&[("name", b"second")], &[]);
+        second.pop();
+        let tree = encode(&[], &[first, second]);
+        let root = Node::root(&tree).unwrap();
+        let mut visited = 0;
+        assert!(root.visit(&mut |_| visited += 1).is_none());
+        assert_eq!(visited, 0);
+        assert!(root.children().is_none());
+        assert!(root.child("first").is_none());
+    }
+
+    #[test]
+    fn early_property_matches_do_not_hide_malformed_later_properties() {
+        let mut tree = encode(&[("first", b"ok"), ("later", b"x")], &[]);
+        tree.pop();
+        let root = Node::root(&tree).unwrap();
+        assert!(root.property("first").is_none());
+        assert!(root.property_is_placeholder("first").is_none());
+        assert!(root.properties().is_none());
+    }
+
+    #[test]
+    fn nonroot_traversal_stays_within_its_own_subtree() {
+        let left = encode(&[("name", b"left")], &[]);
+        let right = encode(&[("name", b"right")], &[]);
+        let branch = encode(&[("name", b"branch")], &[left, right]);
+        let outside = encode(&[("name", b"outside")], &[]);
+        let tree = encode(&[], &[branch, outside]);
+        let branch = Node::root_exact(&tree).unwrap().child("branch").unwrap();
+        let mut names = Vec::new();
+        branch
+            .visit(&mut |node| names.push(node.property("name").unwrap()))
+            .unwrap();
+        assert_eq!(names, [b"branch".as_slice(), b"left", b"right"]);
+        let children = branch.children().unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[1].property("name"), Some(b"right".as_slice()));
+    }
 
     fn translate(ranges: &[(u64, u64, u64)], offset: u64, bytes: u64) -> Option<u64> {
         let raw = ranges
