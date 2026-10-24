@@ -62,8 +62,8 @@ pub(super) fn select(
             SUPER_SPEED | SUPER_SPEED_PLUS => {
                 if let Some(controller) = controller
                     && controller
-                        .stream_capacity(
-                            device.slot,
+                        .stream_capacity_for_device(
+                            device.id,
                             &endpoints,
                             &binding.stream_endpoints(),
                             uas::REQUESTED_STREAMS,

@@ -478,3 +478,101 @@ fn matching_disable_ack_permanently_fences_raw_access_before_fatal_health_failur
 
 #[path = "slot_resource_tests.rs"]
 mod slot_resource_tests;
+
+#[test]
+fn immutable_uas_planner_retains_current_generation_after_actual_slot_reuse() {
+    for context in [32, 64] {
+        let mut backing = vec![0u64; 512 * 1024];
+        let (mut c, previous, hardware, mut dma) =
+            unpublished(&mut backing, SUPER_SPEED, context, 1);
+        let mut foreign_backing = vec![0u64; 512 * 1024];
+        let (_foreign_controller, foreign, foreign_hardware, _foreign_dma) =
+            unpublished(&mut foreign_backing, SUPER_SPEED, context, 1);
+        assert_eq!(previous.hardware_slot(), foreign.hardware_slot());
+        assert_ne!(previous, foreign);
+        let slot = previous.hardware_slot();
+        c.disable_slot(slot, Ownership::Vacant).unwrap();
+        assert!(c.power.retained(slot));
+        c.reset_root_device(attachment(SUPER_SPEED)).unwrap();
+        assert_eq!(hardware.borrow().reset_writes, 1);
+        assert!(!c.power.retained(slot));
+        // Identify reads the real descriptor/configuration bytes through EP0
+        // after an actual fresh Enable/Address; no SlotId is manufactured.
+        let mut device = c
+            .identify(attachment(SUPER_SPEED), "reused UAS peer".into(), &mut dma)
+            .unwrap();
+        assert_eq!(device.slot, slot);
+        assert_ne!(device.id, previous);
+        assert!(c.legacy_slot_fenced[usize::from(slot)]);
+        device.configuration = device.configurations[0].clone();
+        let all = interfaces(&device.configuration);
+        let interface = &all[0];
+        let endpoints = &interface.endpoints;
+        let selected = [0x82, 0x83, 4];
+        struct NoAccess;
+        impl Registers for NoAccess {
+            fn read32(&mut self, _: usize) -> u32 {
+                panic!("pure stream planner read MMIO")
+            }
+            fn write32(&mut self, _: usize, _: u32) {
+                panic!("pure stream planner wrote MMIO")
+            }
+        }
+        let registers = core::mem::replace(&mut c.registers, Box::new(NoAccess));
+        let before = backing.clone();
+        let foreign_before = foreign_backing.clone();
+        let remaining = dma.remaining();
+        let accesses = hardware.borrow().accesses;
+        let foreign_accesses = foreign_hardware.borrow().accesses;
+        assert!(c.stream_capacity(slot, endpoints, &selected, 32).is_err());
+        assert_eq!(
+            c.stream_capacity_for_device(device.id, endpoints, &selected, 32),
+            Ok(2)
+        );
+        assert_eq!(
+            c.device(device.id)
+                .unwrap()
+                .stream_capacity(endpoints, &selected, 32),
+            Ok(2)
+        );
+        assert!(matches!(
+            crate::usb::storage::plan(&device, interface, &all, Some(&c)),
+            Ok(Plan::Storage(crate::usb::storage::Binding::Uas(_)))
+        ));
+        for stale in [previous, foreign] {
+            assert!(
+                c.stream_capacity_for_device(stale, endpoints, &selected, 32)
+                    .is_err()
+            );
+        }
+        c.slots[usize::from(slot)].as_mut().unwrap().suspended = true;
+        assert!(
+            c.stream_capacity_for_device(device.id, endpoints, &selected, 32)
+                .is_err()
+        );
+        assert!(crate::usb::storage::plan(&device, interface, &all, Some(&c)).is_err());
+        c.slots[usize::from(slot)].as_mut().unwrap().suspended = false;
+        assert_eq!(hardware.borrow().accesses, accesses);
+        assert_eq!(foreign_hardware.borrow().accesses, foreign_accesses);
+        assert_eq!(backing, before);
+        assert_eq!(foreign_backing, foreign_before);
+        assert_eq!(dma.remaining(), remaining);
+        assert_eq!(
+            c.slots[usize::from(slot)]
+                .as_ref()
+                .unwrap()
+                .current_configuration,
+            Some(0)
+        );
+        assert!(
+            c.slots[usize::from(slot)]
+                .as_ref()
+                .unwrap()
+                .endpoints
+                .iter()
+                .skip(2)
+                .all(Option::is_none)
+        );
+        c.registers = registers;
+    }
+}

@@ -277,6 +277,20 @@ impl Controller {
         self.stream_capacity_owned(slot, endpoints, selected, requested)
     }
 
+    /// Plan streams for one genuine addressed generation without MMIO or DMA
+    /// publication. A recycled hardware slot retains its permanent raw fence;
+    /// only its current identity may reach the private capacity calculation.
+    pub(crate) fn stream_capacity_for_device(
+        &self,
+        id: SlotId,
+        endpoints: &[Endpoint],
+        selected: &[u8],
+        requested: u16,
+    ) -> Result<u16, BlockError> {
+        let slot = self.validate_id(id)?;
+        self.stream_capacity_owned(slot, endpoints, selected, requested)
+    }
+
     pub(super) fn stream_capacity_owned(
         &self,
         slot: u8,

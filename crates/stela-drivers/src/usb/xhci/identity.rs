@@ -381,9 +381,8 @@ impl DeviceAccess<'_> {
         selected: &[u8],
         requested: u16,
     ) -> Result<u16, BlockError> {
-        let slot = self.slot()?;
         self.controller
-            .stream_capacity_owned(slot, endpoints, selected, requested)
+            .stream_capacity_for_device(self.id, endpoints, selected, requested)
     }
 
     pub fn submit(&mut self, dci: u8, buffer: u64, length: usize) -> Result<u64, BlockError> {
