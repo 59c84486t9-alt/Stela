@@ -2337,6 +2337,9 @@ fn run<H: Host>(
     // interval. Host-service yields can be much more frequent than sampling.
     let mut samples: Vec<[u64; CHAIN]> = Vec::with_capacity(BEAT_SECONDS as usize);
     let mut sampled = beat.0;
+    // The running PE's PC at service boundaries, at most once a millisecond.
+    let mut hot: BTreeMap<u64, u32> = BTreeMap::new();
+    let mut hot_sampled = beat.0;
     let mut log_flushed = beat.0;
     let mut serviced = beat.0;
     let mut service_gap = 0;
@@ -2510,6 +2513,10 @@ fn run<H: Host>(
             ));
             return stop;
         }
+        if now.wrapping_sub(hot_sampled) >= tsc_hz / 1000 {
+            *hot.entry(machine.cpu.pc).or_default() += 1;
+            hot_sampled = now;
+        }
         if now.wrapping_sub(sampled) >= tsc_hz && samples.len() < BEAT_SECONDS as usize {
             let (pc, frame) = (machine.cpu.pc, machine.cpu.state.x[29]);
             samples.push(call_chain(machine, pc, frame));
@@ -2628,6 +2635,7 @@ fn run<H: Host>(
                 output::arguments(format_args!("STALE {stale:?}\n"));
             }
             sample_report(&mut samples, user);
+            hot_report(&mut hot);
             timer_report(machine);
             for state in machine.devices.coprocessor_diagnostics() {
                 output::arguments(format_args!("ASC {state}\n"));
@@ -2772,6 +2780,21 @@ fn sample_report(samples: &mut Vec<[u64; CHAIN]>, user: u32) {
         output::arguments(format_args!("\n"));
     }
     samples.clear();
+}
+
+/// The PCs the running PE was at most often at the heartbeat's service
+/// boundaries, sampled at most once a millisecond: where guest time goes.
+fn hot_report(hot: &mut BTreeMap<u64, u32>) {
+    const SHOWN: usize = 16;
+    let total: u32 = hot.values().sum();
+    let mut counts: Vec<(u32, u64)> = hot.iter().map(|(&pc, &count)| (count, pc)).collect();
+    counts.sort_unstable_by(|a, b| b.cmp(a));
+    output::arguments(format_args!("HOT samples={total}"));
+    for (count, pc) in counts.into_iter().take(SHOWN) {
+        output::arguments(format_args!(" {pc:#x}:{count}"));
+    }
+    output::arguments(format_args!("\n"));
+    hot.clear();
 }
 
 /// The counter, PSTATE.DAIF and each generic timer's CTL and CVAL, which
