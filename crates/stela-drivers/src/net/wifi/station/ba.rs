@@ -156,6 +156,13 @@ impl Sessions {
 }
 
 impl Station {
+    /// Native key-batch preflight only: all canonical pending, active, stopping
+    /// and quarantined RX/TX agreements must be gone. This is not a hardware,
+    /// DMA/IRQ, reordered-buffer or external deferred-user drain proof.
+    pub(in crate::net::wifi) fn block_ack_idle(&self) -> bool {
+        self.rx_ba.records.iter().all(Option::is_none) && self.tx_ba.is_idle()
+    }
+
     fn ba_context(&self) -> Result<Arc<AssociationContext>, Error> {
         if self.phase != Phase::Associated {
             return Err(Error::Stale);

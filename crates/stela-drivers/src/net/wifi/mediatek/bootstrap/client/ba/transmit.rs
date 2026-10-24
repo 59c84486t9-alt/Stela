@@ -23,6 +23,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.phase != Phase::Associated || s.modern.is_none() {
             return Err(Error::WrongPhase);
         }
+        // The management transport delivers all robust BA actions to the OS;
+        // negotiated protected BA MLME is not yet connected. Do not begin an
+        // unusable unprotected exchange or silently bypass that OS consumer.
+        if s.management.is_some() {
+            return Err(Error::Unsupported);
+        }
         s.ba_actions.try_reserve(1).map_err(|_| Error::NoMemory)?;
         let action = s
             .station

@@ -1569,4 +1569,6 @@ pub(super) mod tests {
             crate::bus::dma::memory::PageSource::allocate(&Source, bytes, alignment, attribute)
         }
     }
+
+    mod management_controls;
 }

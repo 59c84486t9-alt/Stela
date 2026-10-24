@@ -15,6 +15,7 @@ use wifi::{Band, Channel, regulatory as reg};
 
 mod external;
 mod link;
+mod management;
 pub use link::{
     LinkAttachError, LinkControlError, LinkEvent, LinkNotice, LinkProgress, ManagedLink,
 };

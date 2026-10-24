@@ -11,6 +11,8 @@ use core::any::Any;
 use mailbox::key::bip;
 use wifi::security::NonceOwner;
 
+mod modern;
+
 /// Actual retained transport namespace. No public constructor, Clone or mutable
 /// fields. Its existence proves key installation, not negotiated PMF policy.
 /// The real OS service must own SA Query transactions, timers and departure/
@@ -45,9 +47,9 @@ impl Session {
 
 /// Original completed RX and authenticated plaintext. Retains the original
 /// requester/association/key namespace, including while queued by the OS. The
-/// current legacy transport retains its original association epoch; modern
-/// AssociationContext admission is refused. Body access is a historical
-/// observation; acting on it requires with_management
+/// transport retains its original association epoch and, for modern links, the
+/// actual AssociationContext. Body access is a historical observation; acting
+/// on it requires with_management or guarded with_management_modern
 /// to recheck the original namespace under the serialized current Client.
 pub struct Received {
     session: Arc<Session>,
@@ -152,6 +154,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         let (ptk, gtk) = Self::management_keys(s)?;
         if s.station.association_epoch() != Some(session.association)
+            || s.profile != Some(session.profile)
             || s.peer_generation != session.peer_generation
             || ptk != session.ptk
             || gtk != session.gtk
@@ -159,12 +162,96 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         {
             return Err(Error::Station(station::Error::Stale));
         }
-        if let Some(context) = &session.context {
-            s.station
-                .validate_association_context(context)
-                .map_err(Error::Station)?;
+        match (&session.context, &s.modern) {
+            (Some(context), Some(modern)) if Arc::ptr_eq(context, modern.context()) => {
+                s.station
+                    .validate_association_context(context)
+                    .map_err(Error::Station)?;
+                if context.bssid() != session.profile.peer
+                    || context.channel() != session.profile.channel
+                {
+                    return Err(Error::WrongProfile);
+                }
+            }
+            (None, None) => {}
+            _ => return Err(Error::Station(station::Error::Stale)),
         }
         Ok(())
+    }
+
+    // Check every retained native user, including canonical pending/quarantined
+    // BA records whose native queue may not yet exist. The independent unsafe
+    // hardware/RX/IRQ/external-deferred-user fence remains required as well.
+    fn management_drained(s: &Owned<I, Q, C>) -> Result<(), Error> {
+        let controller = s.controller.state();
+        let queue = controller.data_tx.as_ref().ok_or(Error::WrongPhase)?;
+        if queue.outstanding_tokens() != 0
+            || queue.pending_descriptors() != 0
+            || !s.pending_rx.is_empty()
+            || !s.asynchronous.is_empty()
+            || !s.receive_groups.is_idle()
+            || s.receive_ba.iter().any(Option::is_some)
+            || s.transmit_ba.iter().any(Option::is_some)
+            || !s.ba_actions.is_empty()
+            || !s.station.block_ack_idle()
+            || !controller.data_assembly.is_idle()
+            || !controller.mailbox.as_ref().unwrap().receive_idle()
+        {
+            return Err(Error::NeedsDrain);
+        }
+        Ok(())
+    }
+
+    unsafe fn install_management_parts(
+        controller: &mut Controller<I, Q, C>,
+        phase: &mut Phase,
+        key: &mut HardwareKey<Arc<C>>,
+        index: u8,
+        material: &[u8],
+        receive: PacketNumber,
+    ) -> Result<bip::Identity, Error> {
+        // SAFETY: caller checked all native users and supplies the independent
+        // actual old hardware/RX/IRQ/deferred-key-user drain and authentic input.
+        let outcome = unsafe {
+            key.install_igtk(
+                controller.state_mut().mailbox.as_mut().unwrap(),
+                index,
+                material,
+                receive,
+            )
+        };
+        if key.is_quarantined() {
+            *phase = Phase::Quarantined;
+        }
+        outcome.map_err(Error::Key)
+    }
+
+    fn management_session(
+        s: &mut Owned<I, Q, C>,
+        epoch: u64,
+        ptk: KeyIdentity,
+        gtk: KeyIdentity,
+        igtk: bip::Identity,
+    ) -> Result<Arc<Session>, Error>
+    where
+        C: Send + Sync,
+    {
+        if let Some(session) = &s.management {
+            Self::validate_management(s, session)?;
+            return Ok(session.clone());
+        }
+        let session = Arc::new(Session {
+            _resource: s.controller.state().resource.clone(),
+            association: epoch,
+            peer_generation: s.peer_generation,
+            profile: s.profile.ok_or(Error::WrongProfile)?,
+            context: s.modern.as_ref().map(|m| m.context().clone()),
+            ptk,
+            gtk,
+            igtk,
+        });
+        s.management = Some(session.clone());
+        Ok(session)
     }
 
     /// Attach an actual initial GTK/IGTK batch and retain a protected-management
@@ -178,9 +265,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// DMA/IRQ/work and delayed key users before the initial combined key batch;
     /// the checked empty CPU/TX queues below alone cannot establish that fence.
     /// Serialize this with every other key/publication/reset/policy operation.
-    /// Modern associations are refused: their actual Owner::publish_association
-    /// Management admission must enclose key/publication work, and the initial
-    /// batch also needs the complete BA/reorder/aggregation/deferred-user drain.
+    /// Modern associations use install_management_key_modern instead, enclosing
+    /// the actual key command in Owner::publish_association Management guards.
     /// This API does not implement live IGTK rekey. The OS management policy must
     /// separately establish negotiated protection before publishing or applying
     /// management effects; a returned Session grants transport only.
@@ -202,47 +288,19 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.modern.is_some() {
             return Err(Error::ModernAdmissionRequired);
         }
-        let controller = s.controller.state();
-        let queue = controller.data_tx.as_ref().unwrap();
-        if queue.outstanding_tokens() != 0
-            || queue.pending_descriptors() != 0
-            || !s.pending_rx.is_empty()
-            || !s.receive_groups.is_idle()
-            || !controller.data_assembly.is_idle()
-            || !controller.mailbox.as_ref().unwrap().receive_idle()
-        {
-            return Err(Error::NeedsDrain);
-        }
-        let key = s.gtk.as_mut().ok_or(Error::NoKey)?;
-        // SAFETY: inherited real initial-batch drain and authenticated-input contract.
-        let outcome = unsafe {
-            key.install_igtk(
-                s.controller.state_mut().mailbox.as_mut().unwrap(),
+        Self::management_drained(s)?;
+        // SAFETY: inherited authenticated-input and independent actual drain contract.
+        let igtk = unsafe {
+            Self::install_management_parts(
+                &mut s.controller,
+                &mut s.phase,
+                s.gtk.as_mut().ok_or(Error::NoKey)?,
                 index,
                 material,
                 receive,
             )
-        };
-        if key.is_quarantined() {
-            s.phase = Phase::Quarantined;
-        }
-        let igtk = outcome.map_err(Error::Key)?;
-        if let Some(session) = &s.management {
-            Self::validate_management(s, session)?;
-            return Ok(session.clone());
-        }
-        let session = Arc::new(Session {
-            _resource: s.controller.state().resource.clone(),
-            association: epoch,
-            peer_generation: s.peer_generation,
-            profile: s.profile.ok_or(Error::WrongProfile)?,
-            context: s.modern.as_ref().map(|m| m.context().clone()),
-            ptk,
-            gtk,
-            igtk,
-        });
-        s.management = Some(session.clone());
-        Ok(session)
+        }?;
+        Self::management_session(s, epoch, ptk, gtk, igtk)
     }
 
     /// Consume one native authenticated observation only while its actual
@@ -255,6 +313,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         consume: impl FnOnce(&Mpdu, &[u8], PacketNumber) -> T,
     ) -> Result<T, Error> {
         Self::validate_management(self.state(), &received.session)?;
+        if self.state().modern.is_some() {
+            return Err(Error::ModernAdmissionRequired);
+        }
         Ok(consume(&received.frame, &received.body, received.pn))
     }
 

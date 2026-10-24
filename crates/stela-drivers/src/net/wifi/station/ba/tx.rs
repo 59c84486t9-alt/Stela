@@ -155,6 +155,9 @@ impl Sessions {
             records: core::array::from_fn(|_| None),
         }
     }
+    pub(super) fn is_idle(&self) -> bool {
+        self.records.iter().all(Option::is_none)
+    }
     pub(super) fn has_session(&self, tid: u8) -> bool {
         self.records
             .get(usize::from(tid))

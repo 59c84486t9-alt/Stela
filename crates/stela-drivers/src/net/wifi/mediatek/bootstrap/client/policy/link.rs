@@ -13,6 +13,7 @@ use alloc::{collections::VecDeque, format, vec::IntoIter};
 
 const DATA_FRAMES: usize = 64;
 mod external;
+mod management;
 
 const NOTICES: usize = 64;
 
@@ -1445,4 +1446,6 @@ mod tests {
             assert_eq!(model.drops.load(Ordering::Relaxed), 0);
         }
     }
+
+    mod management_controls;
 }
