@@ -107,7 +107,22 @@ fn owning_management_notices_preserve_the_65th_actual_ddone_and_consume_original
     ));
     // SAFETY: all actual modeled descriptors/notifications and old users drained.
     unsafe { link.retire_peer_after_drain() }.unwrap();
-    link.stop().unwrap();
+    // Revoked policy retirement already sent the actual interface/DMA stop.
+    // A second stop is refused rather than republishing native commands; this
+    // state still requires the independent whole-controller quiescence below.
+    assert_eq!(link.phase(), Phase::ControllerDrain);
+    let commands = model.response.lock().unwrap().client_commands.len();
+    let log = model.bar.0.lock().unwrap().log.len();
+    assert!(matches!(
+        link.stop(),
+        Err(LinkControlError::Policy(PolicyError::Client(Error::Busy)))
+    ));
+    assert_eq!(link.phase(), Phase::ControllerDrain);
+    assert_eq!(
+        model.response.lock().unwrap().client_commands.len(),
+        commands
+    );
+    assert_eq!(model.bar.0.lock().unwrap().log.len(), log);
     model.response.lock().unwrap().clc_processing = false;
     model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
     // SAFETY: independent whole-model controller/DMA/IRQ quiescence.
