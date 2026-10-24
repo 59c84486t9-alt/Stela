@@ -208,7 +208,7 @@ fn actual_5762_unknown_managed_lom_nvm_and_phy_never_publish_dma() {
                     p.sram.insert(0xb58, 0x0020_0000);
                 }
                 6 => {
-                    p.sram.insert(0xb58, 0x100);
+                    p.sram.insert(0xb58, 0x110);
                 } // EEPROM_WP/LOM.
                 7 => {
                     p.sram.insert(0xb58, 0x20);
@@ -228,10 +228,14 @@ fn actual_5762_unknown_managed_lom_nvm_and_phy_never_publish_dma() {
                 }
             }
         }
-        let (_, mut packet) = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
+        let (error, mut packet) = match unsafe { Packet::attach(hardware, &pages, domain.clone()) }
+        {
             Err(value) => value,
             Ok(_) => panic!("fault {fault} admitted"),
         };
+        if fault == 6 {
+            assert_eq!(error, Error::UnsupportedBoard);
+        }
         assert_eq!(pages.allocated.get(), 0);
         assert_eq!(peer.lock().unwrap().config[&4] & 4, 0);
         assert!(packet.transmit(&[0; 60]).is_err());
