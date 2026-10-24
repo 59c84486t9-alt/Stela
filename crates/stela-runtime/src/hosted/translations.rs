@@ -643,6 +643,21 @@ pub fn summary(engine: &crate::machine::Statistics) -> Vec<String> {
     lines
 }
 
+/// Existing engine service exits ranked by exact source word. Counts are
+/// occurrences, not elapsed time, native calls or retired guest instructions.
+/// Keep every word; an application may weight many different encodings of
+/// the same operation. The caller can decode and group the retained words.
+pub fn serviced_words(words: &BTreeMap<u32, u64>) -> Vec<String> {
+    let mut ranked: Vec<_> = words.iter().collect();
+    ranked.sort_unstable_by(|(left_word, left), (right_word, right)| {
+        right.cmp(left).then_with(|| left_word.cmp(right_word))
+    });
+    ranked
+        .into_iter()
+        .map(|(word, count)| format!("engine: serviced word={word:#010x} exits={count}"))
+        .collect()
+}
+
 fn read_bounded(path: &Path) -> Option<Vec<u8>> {
     read_dated(path).map(|(bytes, _)| bytes)
 }

@@ -400,7 +400,7 @@ const REGION_INFO_BYTES: usize = REGION_PATH + 1024;
 
 /// The file mapped at `pc` and the file offset `pc` lies at; `anonymous`
 /// and the address itself for memory no file backs.
-fn place(pc: u64) -> (String, u64) {
+pub(super) fn place(pc: u64) -> (String, u64) {
     let mut info = [0u8; REGION_INFO_BYTES];
     // SAFETY: a buffer of the length passed, which is
     // `struct proc_regionwithpathinfo`'s.

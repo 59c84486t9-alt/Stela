@@ -128,6 +128,9 @@ pub struct Launch {
     pub argv: Vec<Vec<u8>>,
     pub environment: Vec<Vec<u8>>,
     pub trace: bool,
+    /// Retain serviced instruction frequencies from completed thread engines.
+    /// This diagnoses helper exits, not retired instructions or time shares.
+    pub statistics: bool,
     /// Stop at the first unsupported operation instead of failing it as
     /// the guest's platform does ([`unsupported`]).
     pub strict: bool,
@@ -139,6 +142,8 @@ pub struct Report {
     pub termination: Termination,
     /// The engine statistics of the threads that ended before the report.
     pub engine: crate::machine::Statistics,
+    /// Engine-serviced source words, from the same completed threads as engine.
+    pub serviced_words: BTreeMap<u32, u64>,
     pub calls: BTreeMap<&'static str, u64>,
     pub slid_pages: u64,
 }
@@ -330,6 +335,7 @@ pub fn run(launch: Launch) -> Result<Report> {
         roots: launch.roots.clone(),
         reexec: launch.reexec.clone(),
         trace: launch.trace,
+        statistics: launch.statistics,
         engine,
         user_client_traps: None,
         iokit: None,
@@ -367,9 +373,11 @@ pub fn run(launch: Launch) -> Result<Report> {
         // SAFETY: the process's end no longer needs this thread.
         Ok(None) => unsafe { libc::pthread_exit(core::ptr::null_mut()) },
     };
+    let (engine, serviced_words) = process.runtime.statistics();
     Ok(Report {
         termination,
-        engine: *threads::lock(&process.runtime.statistics),
+        engine,
+        serviced_words,
         calls: threads::lock(&process.counts).clone(),
         slid_pages: process.slid_pages(),
     })

@@ -282,6 +282,7 @@ pub(super) struct Config {
     pub(super) roots: Vec<std::path::PathBuf>,
     pub(super) reexec: Vec<std::ffi::OsString>,
     pub(super) trace: bool,
+    pub(super) statistics: bool,
     pub(super) engine: Engine,
     pub(super) user_client_traps: Option<Arc<dyn UserClientTraps>>,
     /// The device family serving its own IOKit objects, if any.
@@ -326,7 +327,7 @@ impl Process {
             task_port: AtomicU32::new(port(TASK_SELF_TRAP)),
             host_port: AtomicU32::new(port(HOST_SELF_TRAP)),
             engine: config.engine,
-            runtime: Runtime::default(),
+            runtime: Runtime::new(config.statistics),
             shared_region: Mutex::new(config.shared_region),
             executable: Mutex::new(config.executable),
             dyld_info: Mutex::new(mach::task::DyldInfo::of_dylinker(config.dyld_header)),
@@ -727,23 +728,26 @@ impl Kernel {
         } else {
             pe.cpu.read(Register::ELR_EL1)
         };
-        let instruction = super::memory::read(pc, 4).map_or(0, |bytes| {
-            u32::from_le_bytes(bytes[..4].try_into().unwrap())
-        });
+        let instruction = super::memory::read_u32(pc);
         if self.deliver_exception(
             pe,
             super::darwin::EXC_BAD_INSTRUCTION,
-            &[EXC_ARM_UNDEFINED, u64::from(instruction)],
+            &[EXC_ARM_UNDEFINED, u64::from(instruction.unwrap_or(0))],
         )? {
             return Ok(());
         }
         let shared_cache_slide = self.shared_cache_slide();
+        let (image, offset) = super::unsupported::place(pc);
         self.exception_signal(bsd::signal::SIGILL, 0, false, || {
+            let word =
+                instruction.map_or_else(|| "unreadable".to_owned(), |word| format!("{word:#010x}"));
             format!(
-                "{} at pc {pc:#x} (lr {:#x}, frames {:x?}, shared cache slide \
-                 {shared_cache_slide:#x})",
+                "{} at pc {pc:#x} word={word} source={image}+{offset:#x} (lr {:#x}, \
+                 fpcr {:#x}, fpsr {:#x}, frames {:x?}, shared cache slide {shared_cache_slide:#x})",
                 describe(),
                 pe.cpu.state.x[30],
+                pe.cpu.state.fpcr,
+                pe.cpu.state.fpsr,
                 frames(pe.cpu.state.x[29]),
             )
         });

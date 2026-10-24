@@ -43,6 +43,9 @@ use std::{
 };
 use stela_compiler::TargetCpu;
 
+mod statistics;
+use statistics::Statistics;
+
 /// Blocks a thread runs before it yields the execution lock to a waiting
 /// thread: the engine's own PE time slice (`processors::QUANTUM`).
 pub(super) const SLICE_BLOCKS: u64 = 1 << 14;
@@ -363,7 +366,7 @@ pub(super) struct Runtime {
     pub(super) registry: Registry,
     pub(super) lifetime: Lifetime,
     /// The engine statistics of every thread that ended.
-    pub(super) statistics: Mutex<crate::machine::Statistics>,
+    statistics: Mutex<Statistics>,
 }
 
 /// Take `mutex` if no other thread holds it.
@@ -381,15 +384,28 @@ pub(super) struct ForkHeld<'a> {
     execution: MutexGuard<'a, LockState>,
     members: MutexGuard<'a, BTreeMap<u64, Arc<Member>>>,
     end: MutexGuard<'a, Ending>,
+    _statistics: MutexGuard<'a, Statistics>,
 }
 
 impl Runtime {
+    pub(super) fn new(serviced_words: bool) -> Self {
+        Self {
+            statistics: Mutex::new(Statistics::new(serviced_words)),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn statistics(&self) -> (crate::machine::Statistics, BTreeMap<u32, u64>) {
+        lock(&self.statistics).snapshot()
+    }
+
     /// The runtime's locks, or `None` while another thread holds one.
     pub(super) fn hold_for_fork(&self) -> Option<ForkHeld<'_>> {
         Some(ForkHeld {
             execution: try_lock(&self.execution.state)?,
             members: try_lock(&self.registry.members)?,
             end: try_lock(&self.lifetime.end)?,
+            _statistics: try_lock(&self.statistics)?,
         })
     }
 
@@ -401,6 +417,7 @@ impl Runtime {
             mut execution,
             mut members,
             mut end,
+            _statistics,
         } = held;
         let ticket = execution.next_ticket;
         *execution = LockState {
@@ -579,7 +596,7 @@ fn enter<F>(
     let mut pe = pe;
     let ends = EndsControl(&member.control);
     let outcome = run(&mut kernel, &mut pe, &member);
-    *lock(&process.runtime.statistics) += pe.statistics;
+    lock(&process.runtime.statistics).record(pe.statistics, || pe.exit_words());
     process.exception_ports.thread_ended(port);
     // A thread ending the process records the end while it is still a
     // member, so that no thread the end wakes counts itself the last.
@@ -855,6 +872,18 @@ pub(super) fn engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_quiescence_includes_completed_thread_statistics() {
+        let runtime = Runtime::new(true);
+        let statistics = lock(&runtime.statistics);
+        assert!(runtime.hold_for_fork().is_none());
+        drop(statistics);
+        let held = runtime.hold_for_fork().unwrap();
+        assert!(try_lock(&runtime.statistics).is_none());
+        drop(held);
+        assert!(try_lock(&runtime.statistics).is_some());
+    }
 
     #[test]
     fn a_fork_child_keeps_only_the_forking_thread() {

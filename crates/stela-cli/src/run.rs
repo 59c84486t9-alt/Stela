@@ -382,6 +382,7 @@ impl Run {
             argv,
             environment,
             trace: self.trace,
+            statistics: self.statistics,
             strict: self.strict,
         };
         let report = hosted::run(launch).map_err(|error| stopped(&target.program, error))?;
@@ -392,6 +393,9 @@ impl Run {
             eprintln!("stela: {:>8} shared-region pages slid", report.slid_pages);
             hosted::translations::finish();
             for line in hosted::translations::summary(&report.engine) {
+                eprintln!("stela: {line}");
+            }
+            for line in hosted::translations::serviced_words(&report.serviced_words) {
                 eprintln!("stela: {line}");
             }
         }
