@@ -699,6 +699,9 @@ pub(crate) mod tests {
         }
     }
     impl Io for Model {
+        fn validate(&self) -> core::result::Result<(), BlockError> {
+            Ok(()) // This in-memory model has no physical device-generation owner.
+        }
         fn control(&mut self, setup: [u8; 8], p: &[u8]) -> core::result::Result<(), BlockError> {
             assert_eq!(setup[..6], [0x20, 0, 0, 0, 0, 0]);
             self.dispatch(false, p)

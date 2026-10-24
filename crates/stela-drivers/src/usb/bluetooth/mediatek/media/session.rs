@@ -225,6 +225,8 @@ impl<B: MediaIo> Session<B> {
         }
         Ok(completion.unwrap())
     }
+    /// Last observed lifecycle; active operations validate the retained native
+    /// device generation independently before using session-owned state.
     pub fn lifecycle(&self) -> Lifecycle {
         self.lifecycle
     }
@@ -247,6 +249,7 @@ impl<B: MediaIo> Session<B> {
         }
     }
     fn running(&self) -> Result<()> {
+        self.hci.io.validate()?;
         if self.lifecycle != Lifecycle::Running || self.hci.state() != State::Open {
             return Err(Error::Unsupported("media session is not running"));
         }
@@ -400,6 +403,7 @@ impl<B: MediaIo> Session<B> {
         Ok(())
     }
     pub fn resume(&mut self) -> Result<()> {
+        self.hci.io.validate()?;
         if self.lifecycle != Lifecycle::Quiescent {
             return Err(Error::Unsupported(
                 "media resume requires acknowledged quiescence",
@@ -413,6 +417,7 @@ impl<B: MediaIo> Session<B> {
         Ok(())
     }
     pub fn close(&mut self) -> Result<()> {
+        self.hci.io.validate()?;
         if self.lifecycle == Lifecycle::Closed {
             return Ok(());
         }
@@ -443,3 +448,6 @@ impl<B: MediaIo> Drop for Session<B> {
         let _ = self.close();
     }
 }
+
+#[cfg(test)]
+pub(in crate::usb::bluetooth) mod generation_tests;

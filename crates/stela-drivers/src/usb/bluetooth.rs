@@ -101,6 +101,10 @@ impl Pipe {
 /// or until an independently proven controller reset. No method may wait for an
 /// unbounded interval. Idle receive polling returns `None` without canceling.
 pub trait Io {
+    /// Pure retained-owner admission: reject a retired device generation before
+    /// accessing MMIO, DMA, completions or changing transport-owned state.
+    /// This validates ownership only; it does not attest firmware/radio readiness.
+    fn validate(&self) -> Result<(), BlockError>;
     fn control(&mut self, setup: [u8; 8], packet: &[u8]) -> Result<(), BlockError>;
     /// Completed EP0 IN bytes for identified vendor protocols. Empty means the
     /// device returned a real zero-length transfer, never command completion.
@@ -235,6 +239,8 @@ impl<B: Io> Hci<B> {
     pub fn binding(&self) -> &Binding {
         &self.binding
     }
+    /// Last observed lifecycle, not proof that the retained device is current.
+    /// Active operations independently validate the physical owner generation.
     pub fn state(&self) -> State {
         self.state
     }
@@ -243,6 +249,7 @@ impl<B: Io> Hci<B> {
     }
 
     fn open(&self) -> Result<(), Error> {
+        self.io.validate().map_err(|e| error(ErrorKind::Usb(e)))?;
         match self.state {
             State::Open => Ok(()),
             State::Closed => Err(error(ErrorKind::Closed)),
@@ -381,9 +388,11 @@ impl<B: Io> Hci<B> {
         Ok(())
     }
 
-    /// Stop outstanding USB receives. This is idempotent after successful close;
-    /// a failed close is terminal and cannot be used as a reopen/reset shortcut.
+    /// Stop outstanding USB receives. Idempotent success still requires the same
+    /// live device generation; a failed close is terminal and cannot be used as
+    /// a reopen/reset shortcut.
     pub fn close(&mut self) -> Result<(), Error> {
+        self.io.validate().map_err(|e| error(ErrorKind::Usb(e)))?;
         if self.state == State::Closed {
             return Ok(());
         }
@@ -607,6 +616,9 @@ mod tests {
         receive_count: usize,
     }
     impl Io for Model {
+        fn validate(&self) -> core::result::Result<(), BlockError> {
+            Ok(()) // This in-memory model has no physical device-generation owner.
+        }
         fn control(&mut self, setup: [u8; 8], packet: &[u8]) -> Result<(), BlockError> {
             self.control.push((setup, packet.to_vec()));
             match self.control_error.take() {

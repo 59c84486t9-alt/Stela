@@ -59,6 +59,9 @@ impl Model {
     }
 }
 impl Io for Model {
+    fn validate(&self) -> core::result::Result<(), BlockError> {
+        Ok(()) // This in-memory model has no physical device-generation owner.
+    }
     fn control(&mut self, s: [u8; 8], data: &[u8]) -> core::result::Result<(), BlockError> {
         assert_eq!(s[0], 0x40);
         assert_eq!(s[2..6], [0, 0, 0, 0]);

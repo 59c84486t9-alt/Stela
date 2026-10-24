@@ -78,10 +78,6 @@ impl Hci<Host> {
 }
 
 impl Host {
-    fn validate(&self) -> Result<(), BlockError> {
-        self.controller.borrow_mut().device(self.id)?;
-        Ok(())
-    }
     fn open(&self) -> Result<(), BlockError> {
         self.validate()?;
         if self.closed {
@@ -153,6 +149,9 @@ impl Host {
 }
 
 impl Io for Host {
+    fn validate(&self) -> Result<(), BlockError> {
+        self.controller.borrow().validate_device_id(self.id)
+    }
     fn control(&mut self, setup: [u8; 8], packet: &[u8]) -> Result<(), BlockError> {
         self.open()?;
         self.control_pending = true;

@@ -261,6 +261,12 @@ impl Controller {
         Ok(())
     }
 
+    /// Pure admission for a retained native consumer, including its original
+    /// ancestor generations. No register, completion or DMA access occurs.
+    pub(crate) fn validate_device_id(&self, id: SlotId) -> Result<(), BlockError> {
+        self.validate_id(id).map(|_| ())
+    }
+
     /// Borrow operations for this exact device. Validation is pure and occurs
     /// before any MMIO, DMA, completion drain or endpoint mutation. The mutable
     /// controller borrow prevents topology mutation while this access is live.
@@ -799,7 +805,7 @@ mod tests {
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let configuration = match kind {
                 0 => audio_peer::configuration(),
-                1 => bluetooth_peer::configuration(),
+                1 | 3 | 4 => bluetooth_peer::configuration(),
                 _ => ath3k_peer::configuration(),
             };
             let (previous, hardware) = model::high_speed_media_controller(&mut dma, &configuration);
@@ -809,6 +815,10 @@ mod tests {
             let mut bluetooth =
                 (kind == 1).then(|| bluetooth_peer::peer(previous.clone(), &mut dma));
             let mut ath3k = (kind == 2).then(|| ath3k_peer::peer(previous.clone(), &mut dma));
+            let mut session =
+                (kind == 3).then(|| bluetooth_peer::session_peer(previous.clone(), &mut dma));
+            let mut cached_hci =
+                (kind == 4).then(|| bluetooth_peer::cached_peer(previous.clone(), &mut dma));
             if kind != 2 {
                 assert!(hardware.borrow().active.iter().any(Option::is_some));
             }
@@ -834,6 +844,12 @@ mod tests {
                 }
                 if let Some(peer) = &mut ath3k {
                     ath3k_peer::refuse(peer, &previous);
+                }
+                if let Some(peer) = &mut session {
+                    bluetooth_peer::session_refuse(peer, &previous);
+                }
+                if let Some(peer) = &mut cached_hci {
+                    bluetooth_peer::cached_refuse(peer, &previous);
                 }
             });
             assert_eq!(dma.remaining(), before_remaining);
@@ -875,6 +891,12 @@ mod tests {
                 if let Some(peer) = &mut ath3k {
                     ath3k_peer::refuse(peer, &current);
                 }
+                if let Some(peer) = &mut session {
+                    bluetooth_peer::session_refuse(peer, &current);
+                }
+                if let Some(peer) = &mut cached_hci {
+                    bluetooth_peer::cached_refuse(peer, &current);
+                }
             });
             assert_eq!(dma.remaining(), before_remaining);
             assert_eq!(backing, before);
@@ -902,6 +924,18 @@ mod tests {
     fn retained_mt7925_media_generation_refuses_before_mmio_and_preserves_current_completion() {
         media_generation_peer(1);
     }
+    #[test]
+    fn retained_hci_generation_refuses_cached_partial_timeout_and_close_before_mmio_and_preserves_current_completion()
+     {
+        media_generation_peer(4);
+    }
+
+    #[test]
+    fn retained_mt7925_session_generation_refuses_cached_state_before_mmio_and_preserves_current_completion()
+     {
+        media_generation_peer(3);
+    }
+
     #[test]
     fn retained_ath3k_initializer_generation_refuses_before_mmio_and_preserves_current_completion()
     {

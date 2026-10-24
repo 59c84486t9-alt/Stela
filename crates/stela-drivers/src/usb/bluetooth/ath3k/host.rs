@@ -55,6 +55,9 @@ impl Host {
     }
 }
 impl Io for Host {
+    fn validate(&self) -> core::result::Result<(), BlockError> {
+        self.controller.borrow().validate_device_id(self.id)
+    }
     fn control(&mut self, setup: [u8; 8], data: &[u8]) -> core::result::Result<(), BlockError> {
         self.open()?;
         self.control_pending = true;

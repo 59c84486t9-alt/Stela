@@ -223,6 +223,9 @@ mod tests {
         b
     }
     impl Io for Model {
+        fn validate(&self) -> core::result::Result<(), BlockError> {
+            Ok(()) // This in-memory model has no physical device-generation owner.
+        }
         fn control(&mut self, setup: [u8; 8], p: &[u8]) -> core::result::Result<(), BlockError> {
             assert_eq!(self.trace.borrow().closed, 0);
             if setup[0] == 0x5e {

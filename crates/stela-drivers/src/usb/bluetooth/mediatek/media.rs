@@ -138,6 +138,9 @@ pub(in crate::usb::bluetooth) mod tests {
         reset_credits: u8,
     }
     impl Io for Model {
+        fn validate(&self) -> core::result::Result<(), BlockError> {
+            Ok(()) // This in-memory model has no physical device-generation owner.
+        }
         fn control(&mut self, _: [u8; 8], p: &[u8]) -> core::result::Result<(), BlockError> {
             if p == [3, 0x0c, 0] {
                 self.actions.push("hci-reset");
@@ -641,3 +644,6 @@ pub(in crate::usb::bluetooth) mod tests {
         assert_eq!(s.lifecycle(), Lifecycle::Failed);
     }
 }
+
+#[cfg(test)]
+pub(in crate::usb::bluetooth) use session::generation_tests;

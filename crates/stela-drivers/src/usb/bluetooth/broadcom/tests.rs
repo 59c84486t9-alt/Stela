@@ -32,6 +32,9 @@ struct Model {
     fail_close: bool,
 }
 impl Io for Model {
+    fn validate(&self) -> core::result::Result<(), BlockError> {
+        Ok(()) // This in-memory model has no physical device-generation owner.
+    }
     fn control(&mut self, setup: [u8; 8], packet: &[u8]) -> core::result::Result<(), BlockError> {
         assert_eq!(setup[..6], [0x20, 0, 0, 0, 0, 0]);
         assert_eq!(

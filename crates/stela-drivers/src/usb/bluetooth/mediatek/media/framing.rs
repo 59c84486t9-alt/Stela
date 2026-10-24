@@ -61,6 +61,10 @@ impl Framer {
             since: None,
         }
     }
+    #[cfg(test)]
+    pub(super) fn snapshot(&self) -> (Vec<u8>, usize, Option<u64>) {
+        (self.bytes.clone(), self.expected, self.since)
+    }
     pub fn reset(&mut self) {
         self.bytes.clear();
         self.expected = self.kind.header();
