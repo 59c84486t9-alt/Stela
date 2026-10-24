@@ -2348,6 +2348,7 @@ fn run<H: Host>(
     let mut beats = 0u64;
     let mut exits = ExitsSeen::default();
     let mut translated = TranslatedSeen::default();
+    let mut shadows = ShadowSeen::default();
     let mut occupancy = None;
     let mut host_erase = erase::HostErase::default();
     boot_progress.start(beat.0, machine.statistics.blocks);
@@ -2629,6 +2630,7 @@ fn run<H: Host>(
             translation = translation_report(machine, translation, compiled - beat_compiled);
             exits.report(machine);
             translated.report(machine);
+            shadows.report();
             peers_report(machine);
             let stale = machine.stale_code();
             if stale.stale > 0 {
@@ -2843,6 +2845,46 @@ impl TranslatedSeen {
             host.helper_fills,
             host.bounces,
             host.guard_faults,
+        ));
+    }
+}
+
+/// The host's shadow counters at the last heartbeat.
+#[derive(Default)]
+struct ShadowSeen {
+    counts: [u64; 7],
+}
+
+impl ShadowSeen {
+    /// The shadow faults filled, the pages mapped beside them, and the
+    /// resets of the whole shadow (and of those, the ones a half running
+    /// out of frames caused), of the lower half, of the views SPRR_PERM_EL0
+    /// decides, and the TLBIs that unmapped ranges instead, since the last
+    /// heartbeat.
+    fn report(&mut self) {
+        let host = host::statistics();
+        let counts = [
+            host.fills,
+            host.prefills,
+            host.resets,
+            host.exhausted,
+            host.lower_resets,
+            host.user_resets,
+            host.scoped,
+        ];
+        let [
+            fills,
+            prefills,
+            resets,
+            exhausted,
+            lower_resets,
+            user_resets,
+            scoped,
+        ] = core::array::from_fn(|index| counts[index] - self.counts[index]);
+        self.counts = counts;
+        output::arguments(format_args!(
+            "SHADOW fills={fills} prefills={prefills} resets={resets} exhausted={exhausted} \
+             lower_resets={lower_resets} user_resets={user_resets} scoped={scoped}\n"
         ));
     }
 }
