@@ -170,6 +170,7 @@ impl Heap {
     /// lifetime and exclusively owns a successful payload until its one matching
     /// `GlobalAlloc::dealloc` on this same heap with this exact layout. NMI/fault
     /// handlers do not reenter the heap. No physical/page/DMA authority follows.
+    #[cfg_attr(not(test), allow(dead_code))] // Registered once the boot links the Linux GPU heap.
     pub unsafe fn try_allocate(&self, layout: Layout) -> *mut u8 {
         if layout.size() == 0 {
             return ptr::null_mut();
@@ -190,6 +191,7 @@ impl Heap {
     ///
     /// # Safety
     /// The complete `try_allocate` ownership and exclusion contract applies.
+    #[cfg_attr(not(test), allow(dead_code))] // Same pending Linux GPU heap registration.
     pub unsafe fn try_allocate_zeroed(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller retains the same heap, mapping and exact layout.
         let block = unsafe { self.try_allocate(layout) };
