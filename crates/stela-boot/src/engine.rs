@@ -2853,12 +2853,14 @@ impl TranslatedSeen {
 #[derive(Default)]
 struct ShadowSeen {
     counts: [u64; 7],
+    causes: [u64; 7],
 }
 
 impl ShadowSeen {
     /// The shadow faults filled, the pages mapped beside them, and the
-    /// resets of the whole shadow (and of those, the ones a half running
-    /// out of frames caused), of the lower half, of the views SPRR_PERM_EL0
+    /// resets of the whole shadow (and of those, the ones each cause led
+    /// to: a half running out of frames, SPRR, TTBR0 or other controls,
+    /// tag checks, invalidations and TLBIs of everything), of the lower half, of the views SPRR_PERM_EL0
     /// decides, and the TLBIs that unmapped ranges instead, since the last
     /// heartbeat.
     fn report(&mut self) {
@@ -2882,8 +2884,13 @@ impl ShadowSeen {
             scoped,
         ] = core::array::from_fn(|index| counts[index] - self.counts[index]);
         self.counts = counts;
+        let [_, sprr, table, controls, tags, invalidated, maintained] =
+            core::array::from_fn(|index| host.reset_causes[index] - self.causes[index]);
+        self.causes = host.reset_causes;
         output::arguments(format_args!(
             "SHADOW fills={fills} prefills={prefills} resets={resets} exhausted={exhausted} \
+             sprr={sprr} table={table} controls={controls} tags={tags} \
+             invalidated={invalidated} maintained={maintained} \
              lower_resets={lower_resets} user_resets={user_resets} scoped={scoped}\n"
         ));
     }

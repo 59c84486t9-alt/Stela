@@ -135,7 +135,7 @@ impl Drop for GuestScope {
             "helper FP private RAM still has a live frame"
         );
         let state = state();
-        state.reset_shadow();
+        state.reset_shadow(super::super::Cause::Invalidated);
         load_root(state.host_root);
         state.current = usize::MAX;
         state.regime = None;

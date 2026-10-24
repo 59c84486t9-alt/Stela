@@ -123,6 +123,23 @@ const EL0_VIEW: usize = 0;
 const EL1_VIEW: usize = 1;
 const PAN_VIEW: usize = 2;
 const GUARDED_VIEW: usize = 3;
+/// Why the whole shadow was reset: a half ran out of frames; controls
+/// that differ in SPRR state alone, in TTBR0 alone (with an ASID the
+/// upper half's non-global entries were made under), or otherwise; another
+/// pattern of tag-checked halves; [`Host::invalidate_translations`]; or a
+/// TLBI that reaches everything.
+#[derive(Clone, Copy)]
+enum Cause {
+    Exhausted,
+    Sprr,
+    Table,
+    Controls,
+    Tags,
+    Invalidated,
+    Maintained,
+}
+const CAUSES: usize = 7;
+
 /// The views whose rights SPRR_PERM_EL0 decides: EL0's, and EL1's with
 /// PAN, which loses data access where EL0 has any
 /// (`mmu::sprr::permissions`).
@@ -215,6 +232,8 @@ pub struct State {
     pub lower_resets: u64,
     /// Resets of the [`USER_VIEWS`] alone.
     pub user_resets: u64,
+    /// Whole resets by [`Cause`].
+    reset_causes: [u64; CAUSES],
     /// The leaves each half was filled from.
     extents: [Extents; 2],
     /// TLBIs that unmapped ranges rather than whole halves.
@@ -358,6 +377,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             exhausted: 0,
             lower_resets: 0,
             user_resets: 0,
+            reset_causes: [0; CAUSES],
             extents: [Extents::new(), Extents::new()],
             scoped: 0,
             prefills: 0,
@@ -392,6 +412,9 @@ pub struct Statistics {
     pub exhausted: u64,
     pub lower_resets: u64,
     pub user_resets: u64,
+    /// Whole resets by cause: exhausted frames, SPRR, TTBR0 and other
+    /// controls, tag checks, invalidations and TLBIs of everything.
+    pub reset_causes: [u64; CAUSES],
     pub scoped: u64,
     pub stray: u64,
     /// The APIC timer frequency.
@@ -416,6 +439,7 @@ pub fn statistics() -> Statistics {
         exhausted: state.exhausted,
         lower_resets: state.lower_resets,
         user_resets: state.user_resets,
+        reset_causes: state.reset_causes,
         scoped: state.scoped,
         stray: state.stray,
         apic_hz: state.apic_hz,
@@ -516,7 +540,7 @@ impl State {
         })
     }
 
-    fn reset_shadow(&mut self) {
+    fn reset_shadow(&mut self, cause: Cause) {
         if !self.legacy_translations_dirty {
             return;
         }
@@ -524,6 +548,7 @@ impl State {
         self.clear(UPPER);
         self.tlb.clear();
         self.resets += 1;
+        self.reset_causes[cause as usize] += 1;
         self.reload();
         self.legacy_translations_dirty = false;
     }
@@ -865,7 +890,7 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
     if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
         // The shadow pool is exhausted: start over and map again.
         state.exhausted += 1;
-        state.reset_shadow();
+        state.reset_shadow(Cause::Exhausted);
         state.pool.half = half;
         state.legacy_translations_dirty = true;
         if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
@@ -1263,13 +1288,23 @@ impl Host for BareHost<'_> {
             } else if user == regime.controls {
                 state.reset_user_views();
             } else {
-                state.reset_shadow();
+                let sprr = mmu::Controls {
+                    sprr: regime.controls.sprr,
+                    ..current.controls
+                };
+                state.reset_shadow(if sprr == regime.controls {
+                    Cause::Sprr
+                } else if ttbr0 == regime.controls {
+                    Cause::Table
+                } else {
+                    Cause::Controls
+                });
             }
         }
         // The tag-checked roots hold one pattern of checked halves.
         if regime.tag_checked() && regime.tag_checks != state.tag_checks {
             if state.tag_checks.contains(&true) {
-                state.reset_shadow();
+                state.reset_shadow(Cause::Tags);
             }
             state.tag_checks = regime.tag_checks;
         }
@@ -1300,13 +1335,13 @@ impl Host for BareHost<'_> {
     }
 
     fn invalidate_translations(&mut self) {
-        state().reset_shadow();
+        state().reset_shadow(Cause::Invalidated);
     }
 
     fn invalidate_reach(&mut self, reach: Reach) {
         let state = state();
         if reach == Reach::All {
-            return state.reset_shadow();
+            return state.reset_shadow(Cause::Maintained);
         }
         state.tlb.clear();
         let mut unmapped = Vec::new();
