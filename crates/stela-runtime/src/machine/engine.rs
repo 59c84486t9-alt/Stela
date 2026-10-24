@@ -876,6 +876,9 @@ pub enum Event {
 pub struct Requirement {
     pub pc: u64,
     pub el: u8,
+    /// The link register then, which names the caller of an accessor; 0
+    /// where no PE state is at hand.
+    pub link: u64,
     pub kind: RequirementKind,
     /// The ESR_EL1 value the access would report if it were a guest exception.
     pub syndrome: Option<u64>,
@@ -919,6 +922,9 @@ pub enum RequirementKind {
 impl fmt::Display for Requirement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "pc={:#x} el={} ", self.pc, self.el)?;
+        if self.link != 0 {
+            write!(f, "lr={:#x} ", self.link)?;
+        }
         match &self.kind {
             RequirementKind::Instruction { word, detail } => {
                 write!(f, "instruction {word:#010x}: {detail}")?
@@ -1821,6 +1827,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Requirement {
             pc: self.cpu.pc,
             el: self.cpu.pstate.el,
+            link: self.cpu.state.x[30],
             kind,
             syndrome: None,
             address: None,
@@ -4049,6 +4056,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Stop::Unsupported(Requirement {
             pc,
             el: self.cpu.pstate.el,
+            link: self.cpu.state.x[30],
             kind: RequirementKind::Instruction { word, detail },
             syndrome: Some(super::exception::syndrome(Class::Unknown, 0)),
             address: None,
@@ -6730,6 +6738,21 @@ mod tests {
         let limit = machine.unsupported(RequirementKind::Native("an engine limit"));
         assert!(machine.undefined_instead(limit).is_err());
         assert!(machine.undefined_instead(Stop::Idle).is_err());
+    }
+
+    #[test]
+    fn a_requirement_names_the_link_register_when_one_is_at_hand() {
+        let mut requirement = Requirement {
+            pc: 0x10,
+            el: 2,
+            link: 0x20,
+            kind: RequirementKind::Native("absent"),
+            syndrome: None,
+            address: None,
+        };
+        assert!(requirement.to_string().starts_with("pc=0x10 el=2 lr=0x20 "));
+        requirement.link = 0;
+        assert!(!requirement.to_string().contains("lr="));
     }
 
     #[test]

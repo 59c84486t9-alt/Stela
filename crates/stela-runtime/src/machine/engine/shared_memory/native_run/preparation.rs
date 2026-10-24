@@ -71,6 +71,7 @@ impl PreparationFailure {
         Stop::Unsupported(Requirement {
             pc,
             el,
+            link: 0,
             kind: RequirementKind::NativePreparation(detail),
             syndrome: None,
             address: None,
